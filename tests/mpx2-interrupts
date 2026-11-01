@@ -89,9 +89,9 @@ HEX='0x[0-9a-f]{16}'
 ERRV=" 8 10 11 12 13 14 17 21 29 30 "
 
 # The value of symbol $2 in ELF $1, as 0x + 16 hex digits ('' if none).
-sym() { nm "$1" | awk -v s="$2" '$3 == s { print "0x" $1; exit }'; }
+sym() { nm "$1" | awk -v s="$2" '$3 == s && !f { print "0x" $1; f = 1 }'; } # pax#256: nm read to its end
 # Its size in bytes ('' if unsized).
-symsize() { local z; z=$(nm -S "$1" | awk -v s="$2" 'NF == 4 && $4 == s { print $2; exit }'); [ -z "$z" ] || echo $((16#$z)); }
+symsize() { local z; z=$(nm -S "$1" | awk -v s="$2" 'NF == 4 && $4 == s && !f { print $2; f = 1 }'); [ -z "$z" ] || echo $((16#$z)); }
 hx() { printf '0x%016x' "$1"; }
 
 # I0's ELF half: the trampolines' symbols and shapes. Prints the
