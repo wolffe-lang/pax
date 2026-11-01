@@ -1,0 +1,90 @@
+px85 — the flakes: prediction, written 2026-11-01T00:27Z on base 8495bdc0, before the first change.
+
+The cause shared by pax#260 and pax#261 (from the run 41153232393 artifacts, read before this file):
+the guest's clocks disagree about time that passed while its vCPU did not run. The HPET and the
+PM timer are QEMU's virtual clock and keep counting through a host stall; the LAPIC tick is an
+interrupt, and ticks that fall due while the vCPU is stalled coalesce into one. PAX's
+CLOCK_MONOTONIC, poll's timeout and the xHCI software repeat all count ticks (kernel/user
+`now_ns` = ticks x 10000151 ns; kernel/xhci `tick`). Attempt 2's 6 reports over a 1000 ms
+wall-clock hold mean the guest counted about 40 ticks across that second.
+
+1. pax#260 (kernel/clock `hpet_ns_per_10ms`).
+   Change: each end of the measured interval pinned between two PM reads (a bracket: PM, HPET,
+   PM), a bracket wider than 36 PM ticks (10 us, a thousandth of the window) taken again; the
+   HPET's elapsed time compared with the PM interval those brackets bound, not with a nominal
+   10 ms; a window whose HPET time exceeds 2 s (the 24-bit PM timer wraps at 4.69 s) is no verdict
+   and measured again, three windows at most. Test words in kernel/clock (inert unless a test
+   kernel sets them) stall the window (30 ms inside it; 30 ms between the closing PM read and the
+   HPET read; 5 s inside it) and misreport the HPET's period (x1.25, x0.8).
+   R-px85-1 (the bound): recommend +-1% of the measured PM interval. HPET 1.0a §2.4.1 rule 1
+   allows the HPET 0.05% over any interval of 1 ms or more; ACPI 6.5 §4.8.2.1 calls the PM timer
+   accurate and gives no figure; the two brackets add at most 72 PM ticks (0.2% of the 10 ms
+   window). +-1% is five times the bracket error and twenty times the HPET's own allowance, and it
+   still refuses a lying period (x1.25, x0.8, the 14.318-vs-24 MHz confusion, x1.68) that the old
+   5-20 ms band accepted.
+   Rows (tests/mpx6-metal, F1's new legs, kernel/kmain_metal.lu's cmdline words), at base plus the
+   test words, BEFORE the fix:
+     stall-window   RED: `clock: HPET … read ~40000000 ns across 10 ms …; refused`, the leg wants HPET
+     stall-edge     RED: the same refusal (~40 ms)
+     stall-long     RED: refused (~5 s)
+     hpet-fast      RED: accepted (12.5 ms is inside 5-20 ms); the leg wants the refusal and PM
+     hpet-slow      RED: accepted (8 ms); the leg wants the refusal and PM
+     hpet, pm, pitless, pm-pitless, ram8, pitonly: green, unchanged
+   AFTER the fix: every leg green; stall-edge's log shows the closing bracket taken twice;
+   stall-long's shows a second window; hpet-fast and hpet-slow print the refusal with both
+   measured numbers. The issue's own one-line fix (t1-t0 against (b-a) ticks) would leave
+   stall-edge red: that row is why the brackets.
+
+2. pax#261 (tools/usb-session, the repeat row).
+   Change: on a PAX guest the hold is driven by the guest's tick: press, read `pax_tick_count`
+   through QMP memsave until it has advanced 100 ticks (1000 ms of guest time), release; a
+   30 s wall-clock bound fails by name. The Linux guest keeps the 1000 ms wall-clock hold (no
+   symbols to read). The verdict splits into three named failures: `repeat lost` (fewer than 15
+   reports in the guest's hold), `stuck modifier` (0x41, 0x01 or ESC in the row: a Shift, Caps,
+   Ctrl or Alt state survived), `wrong key` (any other byte than 0x61).
+   Rows: tests/usb-session-selftest (synthetic rows: a good row passes; 6 reports in a 100-tick
+   hold is `repeat lost`; 0x41 is `stuck modifier`; 0x62 is `wrong key`), red at base (the named
+   verdict does not exist there). Three QEMU plants, local, never on the branch: xhci's repeat
+   stopped after 5 reports -> `repeat lost`; the repeat sending the next key's code -> `wrong key`;
+   the repeat sent with Shift applied -> `stuck modifier`. Expected reports per 100-tick hold:
+   23-25 (first at tick 25, then every 3.3 ticks); the 15 floor is kept.
+
+3. pax#259 (the 16 single-attempt fetches).
+   Change: tools/fetch-retry, POSIX sh (the census container's stage.sh uses it too): git fetch
+   at most 3 attempts, 10 s then 30 s apart, retrying only a named network class (a reset or a
+   dropped connection, a failed connect or resolve, a timeout or a stalled transfer, an HTTP 5xx
+   or 429), each retry said in the log; anything else stops at once; the fetched commit compared
+   with the pinned sha after every fetch, a mismatch never retried. All 16 sites call it.
+   Rows: tests/fetch-retry-selftest against a local repository and a fake git: a reset on
+   attempt 1 then fetched (2 attempts, the backoff 10); a reset every time stops after 3 attempts
+   by name; an unknown sha stops after 1 attempt (`not retried`); a wrong commit is refused by
+   name; and a scan that no tools/mk*, fetch-wolf or stage.sh fetch is outside the helper. At
+   base: every row red (no helper; the scan lists 16 sites).
+
+4. pax#256 (the nm | awk … exit shape).
+   Change: the sym() helpers (and symsize) of tests/mpx2-{interrupts,paging,sched} and
+   tests/mpx3-{loader,user} read nm to its end, as 44fb33ea did in tools/qemu-halt.
+   Row: tests/pipe-shape-selftest, a scan of tools/ and tests/ for a writer piped into an awk
+   whose action exits before the input ends. At base: red, listing 6 nm lookups in 5 files
+   (and 3 more early-exit awks behind other writers, in tests/mpx3-user and tests/mpx6-ahci: to
+   be decided, R-px85-3). After: green. Each changed lookup's output equals the old one on a real
+   kernel ELF (every symbol those tests ask).
+
+5. The stall harness (hasu block A, localhost/px75-ubuntu:2, QEMU 8.2.2, TCG, no /dev/kvm).
+   The F8 3840x2160 serial-less leg, release tier (both CI reds were release), its session and
+   post-checks exactly as tests/mpx6-firmware runs them, QEMU at nice 19 pinned to one CPU beside
+   one busy process (nice 0) on the same CPU that spins 50 ms and sleeps 50 ms (a 50% duty
+   cycle); five such pairs at once on CPUs 1-5, the harnesses on CPU 0.
+     control, trunk 8495bdc0, no load: 5 of 5 green.
+     trunk 8495bdc0, the load: red in at least 15 of 20; most often `repeat lost …` (6-12 reports),
+       the HPET refused in about half the boots (a 50 ms busy phase inside the 10 ms window).
+     head, the load: 20 of 20 green.
+   Risk named before the run: the unplug and replug rows wait 0.4 s and 1.0 s of wall time for
+   the guest to enumerate the new keyboard; under the load that may not be enough. If the head
+   goes red there, the same stall class, the fix is to wait for the guest's `xhci: keyboard
+   usb1-N` line instead.
+
+6. The plant px85-plant-hpet (the final code head plus the bound narrowed to -1%..-0.5%: a correct
+   HPET is refused unstalled). Predicted red: mpx6-firmware F1 (`the clock is not the HPET`, every
+   HPET leg), mpx6-ahci A13 (`the clock is not the HPET`), mpx3-screen V4 (the refusal line carries
+   measured numbers, so the two boots differ); every other suite green (the PM fallback boots).
