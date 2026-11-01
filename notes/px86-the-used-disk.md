@@ -30,7 +30,8 @@ descriptor at sector 16 of 2048 bytes (byte 32768), `wipefs(8)` and `blkid(8)`'s
 kasumi was not touched (the maintainer's). hasu block A was held under both lock names for each run alone
 (`notes/px86/hasu/ctr.sh`), shared with px85; hasu's `:9364`, `:9308` and the maintainer's data were not touched;
 nothing was installed; no label, dispatch, merge, issue or release; no attribution trailers. On nomad only
-`~/lanes/px86/` and one new file in `~/pax-smoke/` were written.
+`~/lanes/px86/` (the worktrees `pax` and `plant`, registered in the org checkout's git) and one new file in
+`~/pax-smoke/` were written, besides one planner path list written to `/tmp` by mistake and removed at once.
 
 ## 2. Inputs, verified
 
@@ -119,7 +120,7 @@ Linux's Limine on it: the executor now guarantees what the oracle assumed.
 
 | row | red | green |
 |---|---|---|
-| planner I-wipe-plan, I-wipe-span | `59e7eb1b`: E0301, exit 2 | PASS (`logs/chain-green.log` ← `green-units2`) |
+| planner I-wipe-plan, I-wipe-span | `59e7eb1b`: E0301, exit 2 | PASS (`logs/green-units2.log`) |
 | executor I-zero-bios, -esp, -root, -gap, -all, 512 MiB and 1 TB | `59e7eb1b`: E0301, exit 2 | PASS |
 | I-used-fat32, -ext4 (512 MiB virtio, TCG) | `50aa4b15`: Limine's refusal by name | PASS, then verify.py, gap.py (`Limine envelopes [0, 423, 1048576, 1071464]`) and I-used-signatures |
 | I-used-iso | `50aa4b15`: past the install, `iso9660@32769` left on the whole disk | PASS, the descriptor gone |
