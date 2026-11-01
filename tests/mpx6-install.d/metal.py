@@ -407,8 +407,8 @@ class Machine:
                 self.shot('bad')
                 flat = self.unwrapped(text)
                 # px86: the 860's stop, Limine's bios-install refusing partition 3, named first.
-                lim = [l.strip() for l in flat.split('\n') if 'pax-install: limine:' in l or 'recognised filesystem' in l
-                       or 'Install failed' in l]
+                lim = [l.strip() for l in flat.split('\n') if 'pax-install: limine:' in l or 'error: ' in l
+                       or 'recognised filesystem' in l or 'Install failed' in l]
                 if lim:
                     fail(row, 'Limine refused the BIOS boot partition: ' + ' | '.join(lim) + f'; screen:\n{text}')
                 fail(row, f'/{bad}/ on the screen before /{pattern}/; screen:\n{text}')
