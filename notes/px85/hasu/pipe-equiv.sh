@@ -28,10 +28,11 @@ for elf in "$@"; do
     a=$(body pax_isr_common | awk 'seen { print; exit } /^call.*<pax_interrupt>/ { seen = 1 }') # pipe-shape: ok (the old form, compared)
     b=$(body pax_isr_common | awk 'seen && !d { print; d = 1 } /^call.*<pax_interrupt>/ { seen = 1 }'); n=$((n + 1))
     [ "$a" = "$b" ] && [ -n "$a" ] || { echo "DIFF after-call $elf: '$a' vs '$b'"; bad=$((bad + 1)); }
+    after=$b
     a=$(body pax_isr_common | awk 'seen && /^cmpq \$0x100,0x78\(%rsp\)/ { c = 1; next } c { print; exit } /^mov %rax,%rsp/ { seen = 1 }') # pipe-shape: ok (the old form, compared)
     b=$(body pax_isr_common | awk 'seen && /^cmpq \$0x100,0x78\(%rsp\)/ { c = 1; next } c && !d { print; d = 1 } /^mov %rax,%rsp/ { seen = 1 }'); n=$((n + 1))
     [ "$a" = "$b" ] && [ -n "$a" ] || { echo "DIFF cmp $elf: '$a' vs '$b'"; bad=$((bad + 1)); }
-    echo "$elf: $(echo $names $dups | wc -w) names; after-call '$b'; cmp '$a'"
+    echo "$elf: $(echo $names $dups | wc -w) names; after the call '$after'; after the compare '$b'"
     rm -f "$elf.dis"
 done
 log=$(mktemp)
