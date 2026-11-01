@@ -357,7 +357,7 @@ and `--tier native --firmware bios` picks one leg.
 
 | Group | Suites | What they hold |
 |---|---|---|
-| The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
+| The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving |
@@ -384,8 +384,12 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 - A test is seen red before it is trusted: the break is planted in a commit and run of its own, then fixed.
 - One known stall of the Linux reference shell ([#196](https://github.com/wolffe-lang/pax/issues/196),
   [pelt#98](https://github.com/wolffe-lang/pelt/issues/98)) gets one retry of its Linux leg only, with a warning that
-  names the issue and the first log uploaded beside the retry; a second failure stays red, and nothing else is ever
-  retried. The exception lives in `tools/ci-retry` and goes when the upstream fix is pinned.
+  names the issue and the first log uploaded beside the retry; a second failure stays red, and nothing else a test
+  decides is ever retried. The exception lives in `tools/ci-retry` and goes when the upstream fix is pinned.
+- A source fetch is not a test: `tools/fetch-retry` tries a pinned `git fetch` again when the network dropped it (a
+  reset, a failed connect, a timeout or a stalled transfer, an HTTP 5xx or 429), three attempts at most, 10 and then
+  30 seconds apart, the pinned commit checked after the fetch; an unknown revision or a refusal stops at once. Every
+  `tools/mk*` source fetch, `tools/fetch-wolf` and the census go through it (`tests/fetch-retry-selftest`).
 
 ## Hosts
 
@@ -419,7 +423,7 @@ without it `tests/proof` skips that leg loudly, unless `PAX_REQUIRE_UEFI=1` (CI)
 | `kernel/` | the wolf kernel, one module per subsystem (`kernel/README.md`), its `wolf.pkg` and the wolf and lupin pins |
 | `boot/` | the Limine pin and configs, the kernel's entry and requests, port I/O, the control registers, the interrupt trampolines and the descriptor tables' storage (`start.S`, `io.S`, `cpu.S`, `isr.S`, `kernel.ld`), and the harness's assembly proof under `boot/stub/` |
 | `user/` | what the images carry: the pins of every shipped program (`*.pin`), the typed sessions (`console/`), `su`, the probes (`elf/`, `net/`), `play/` and `tunes/`, `disktools/` (paxgpt, paxfat, paxext2), `install/` (the guided installer), the fstabs and the shell's `$ENV` file |
-| `tools/` | the harness: the fetchers by digest (`fetch-limine`, `fetch-wolf`, `fetch-lupin`, `fetch-usb-linux`), the builders (`build-kernel`, `mkimage`, `mkdisk`, `mkdistribution`, `mkinstall`, `mkgames`, `mkfsck`, `mk*` for each program), the QEMU drivers (`qemu-run`, `qemu-halt`, `qemu-fault`, `qemu-gdb`, `expect-serial`), the Linux sides (`linux-run`, `linux-net`, `linux-tree`, `linux-blk`, `linux-part`), the network tools (`net-peer`, `pcap-net`, `gateway-probe`, `paxnet.py`, `paxtcp.py`), the font tools (`mkfont`, `screen-ref`), the USB tools (`check-usb`, `usb-write`, `usb-typing`), the installer tests' used disks (`used-disk`) and CI's planner (`ci-plan`, `ci-tiers.map`, `ci-retry`) |
+| `tools/` | the harness: the fetchers by digest (`fetch-limine`, `fetch-wolf`, `fetch-lupin`, `fetch-usb-linux`) and the source fetches' one retry (`fetch-retry`), the builders (`build-kernel`, `mkimage`, `mkdisk`, `mkdistribution`, `mkinstall`, `mkgames`, `mkfsck`, `mk*` for each program), the QEMU drivers (`qemu-run`, `qemu-halt`, `qemu-fault`, `qemu-gdb`, `expect-serial`), the Linux sides (`linux-run`, `linux-net`, `linux-tree`, `linux-blk`, `linux-part`), the network tools (`net-peer`, `pcap-net`, `gateway-probe`, `paxnet.py`, `paxtcp.py`), the font tools (`mkfont`, `screen-ref`), the USB tools (`check-usb`, `usb-write`, `usb-typing`), the installer tests' used disks (`used-disk`) and CI's planner (`ci-plan`, `ci-tiers.map`, `ci-retry`) |
 | `font/` | the screen's font: Spleen 8×16 (BSD-2-Clause, with its licence), `extent.txt` (the code points drawn above U+00FF), `pax-extra.bdf` (PAX's own rows for the glyphs Spleen lacks) and `games-glyphs.txt` |
 | `tests/` | the suites above, each with its fixtures in `NAME.d/`; `ci-budgets.d/` |
 | `docs/` | `BOOT.md` (the boot protocol, the disks, the installer and rescue, argued), `SOURCES.md` (the consulted-sources log), `CENSUS.md` (every system call PAX serves, by name), `HISTORY.md` (how PAX got here, lane by lane) |
