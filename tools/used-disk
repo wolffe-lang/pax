@@ -23,8 +23,9 @@ check: the whole image and each of PAX's three partitions (read from the
 image's own primary GPT; each partition's allocated extents copied, holes
 kept, to a file of its size) through `wipefs --no-act --json` and `blkid -p`
 (util-linux): the whole disk carries the protective MBR and the two GPT
-headers and no file system; partition 1 one signature, vfat; partition 2 one,
-ext2; partition 3 none (Limine's stage is not a file system). Exit 1 with
+headers and no file system; partition 1 vfat's signatures alone; partition 2
+ext2's alone; partition 3 none (Limine's stage is not a file system); blkid's
+one answer for 1 and 2 PAX's own labels (PAX-ESP, pax-root). Exit 1 with
 `FAIL ROW: ...` naming what survived; exit 0 with one PASS line.
 """
 from pathlib import Path
@@ -184,21 +185,26 @@ def check(img, row):
     if sorted(parts) != [1, 2, 3]:
         print(f'FAIL {row}: the primary GPT names partitions {sorted(parts)}, not PAX\'s 1, 2, 3', flush=True)
         sys.exit(1)
-    want = {'disk': ({'PMBR', 'gpt'}, None), 1: ({'vfat'}, 'vfat'), 2: ({'ext2'}, 'ext2'), 3: (set(), None)}
+    # Each signature kind wipefs may list more than once at its own offsets
+    # (a FAT boot sector reads as vfat at 0, 82 and 510); the kinds are the
+    # test, and blkid's one answer names PAX's own volume by its label.
+    want = {'disk': ({'PMBR', 'gpt'}, None, None), 1: ({'vfat'}, 'vfat', 'PAX-ESP'), 2: ({'ext2'}, 'ext2', 'pax-root'),
+            3: (set(), None, None)}
     said = []
-    for key, (types, fs) in want.items():
+    for key, (types, fs, label) in want.items():
         start, length = (0, size) if key == 'disk' else parts[key]
         found = signatures(img, start, length)
         sigs = [(t, o) for t, o in found if t != 'blkid']
         rc, out, err = [v for t, v in found if t == 'blkid'][0]
         name = 'the whole disk' if key == 'disk' else f'partition {key}'
         kinds = {t for t, _ in sigs}
-        if kinds != types or (key != 'disk' and len(sigs) != len(types)):
+        if kinds != types:
             print(f'FAIL {row}: {name} carries {sigs} (wipefs); want {sorted(types) or "none"}; blkid -p: {out or err}', flush=True)
             sys.exit(1)
         tag = dict(x.split('=', 1) for x in out.split() if '=' in x)
-        if fs and tag.get('TYPE') != fs or not fs and 'TYPE' in tag:
-            print(f'FAIL {row}: {name}: blkid -p says {out or err!r} (exit {rc}); want TYPE={fs or "none"}', flush=True)
+        if fs and (tag.get('TYPE') != fs or tag.get('LABEL') != label) or not fs and 'TYPE' in tag:
+            print(f'FAIL {row}: {name}: blkid -p says {out or err!r} (exit {rc}); want TYPE={fs or "none"}'
+                  + (f' LABEL={label}' if label else ''), flush=True)
             sys.exit(1)
         said.append(f'{name} ' + (', '.join(f'{t}@{o}' for t, o in sigs) or 'none'))
     print(f'PASS {row}: no old signature survives: ' + '; '.join(said), flush=True)
