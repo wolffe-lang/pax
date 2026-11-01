@@ -59,7 +59,7 @@ no attribution trailers.
 | trunk under 50/50 red in at least 15 of 20, mostly `repeat lost`, the HPET in about half | **wrong**: 4 of 20, all the HPET; reports 18-23, none under 15. Under 200/50: 3 of 20, the HPET again. Contention starves the calibration's busy loop, not the idle hold (the stall section); the freeze load, added for that, reddened the repeat row 15 of 20 |
 | head under the load 20 of 20 green | **right**: 20 of 20 under 50/50, 200/50 and the freeze, before the rebase and again in the gauntlet |
 | the unplug and replug rows' wall-clock waits might fail under the load at the head | **wrong**: none did, under any load (60 head runs and the gauntlet's) |
-| the plant red in CI's mpx6-firmware F1, mpx6-ahci A13 and mpx3-screen V4 | PLANT-SCORE |
+| the plant red in CI's mpx6-firmware F1, mpx6-ahci A13 and mpx3-screen V4 | **right for two, wrong for A13**: A13 greps `^clock: HPET ` alone, which the refusal line also matches (seen reading the test before the plant was opened; its PR says so). Run 41269525005, read once in progress (55 of 61 jobs done): failed `mpx3-screen` and `mpx6-firmware`, no other |
 
 ## Evidence index
 
@@ -221,7 +221,7 @@ behind other writers: `tests/mpx3-user`'s two disassembly pipes (behind `tr`) an
 (`notes/px85/hasu/pipe-equiv.sh`): every symbol the five tests ask and every name nm lists twice, through the old and
 the new `sym()` and `symsize()`, on the native and release `kmain_metal` and the release `kmain_console`; the two
 disassembly pipes on `pax_isr_common`; the recording awk on a log holding the session twice: 371 comparisons, 0
-differ (batch 5), and again in the gauntlet.
+differ (batch 5); in the gauntlet 323 comparisons on the native and release `kmain_metal`, 0 differ.
 
 ### The stall harness (the proof)
 
@@ -253,7 +253,10 @@ head's are the same 25 lines (sha256 `72e23ef5…` in every batch's log), so bet
 | head `a08cf2f1` | 50/50 | 20 | **20** | — | 24-25 | 100-101 ticks |
 | head `a08cf2f1` | 200/50 | 20 | **20** | — | 24-26 | 100-102 ticks |
 | head (pre-rebase `53a7b8f4`) | freeze | 20 | **20** | — | 24-25 | 100-101 ticks in 1.32-1.84 s |
-| the gauntlet, the final head | GAUNTLET-ROWS |
+| the gauntlet, the final head `a27e73fb` | none | 5 | **5** | — | 24-25 | 100-101 ticks in 0.98-0.99 s |
+| the gauntlet | 50/50 | 20 | **20** | — | 24-25 | 100-101 ticks in 1.09-1.21 s |
+| the gauntlet | 200/50 | 20 | **20** | — | 24-25 | 100-102 ticks in 1.12-1.41 s |
+| the gauntlet | freeze (146 freezes, 62.8 s frozen) | 20 | **20** | — | 24-25 | 100-101 ticks in 1.32-1.88 s |
 
 `a08cf2f1` carries both fixes; `53a7b8f4` is the final code, before the rebase brought px86's installer files (which
 F8 does not build). Each batch's `runs.tsv`, its F8 block and every run's `leg.log`, `serial.log`, `runner.log` and
@@ -270,11 +273,49 @@ its name).
 
 ### The plant, `px85-plant-hpet`
 
-PLANT
+Draft PR #264 on the px85 branch, head `3ece2a72`: the final head `a27e73fb` and one line of `kernel/clock`'s
+`measure`, the agreement band narrowed from within 1% of the measured PM interval to 1%..0.5% *below* it, so a correct
+HPET is refused unstalled; the fix never contains it. Locally first (`notes/px85/logs/plant-hpet-local.log`, at its
+pre-rebase twin `cfa12f58`, the same one line): `clock: HPET 10000000 fs/tick read 10023030 ns across 10022502 ns of
+the PM timer, more than 1% apart; refused`, then `FAIL METAL firmware bios-hpet: the tick was not calibrated by the
+HPET`; the stall legs refused likewise, the lying-period legs still refused. In CI, run 41269525005 (`tier pr`:
+`kernel/clock` is ALL, every suite on native BIOS), its id and state read once, in progress with 55 of 61 jobs done:
+failed `mpx6-firmware` and `mpx3-screen` (V4: the refusal line carries the window's numbers, so the screen and
+screenless boots differ), no other. The orchestrator closes it at the merge.
 
 ### The gauntlet at the final head
 
-GAUNTLET
+`notes/px85/hasu/gauntlet.sh` at `a27e73fb1154a3fcf5b3026a2d71bedb9a71522c` (the rebased head; every commit after it is
+notes), each step a block-A container of its own, stopping at the first nonzero step; its log, every step's own log
+and every F8 run's transcripts are in `notes/px85/gauntlet/` (exit marker `0`):
+
+```
+END tests/ci-plan exit=0
+END python3 -I tests/ci-retry.py exit=0
+END python3 -I tests/mpx2-heap.d/budget.py exit=0
+END python3 -I tests/ci-budgets.py exit=0
+END tests/fetch-retry-selftest exit=0
+END python3 -I tests/usb-session-selftest exit=0
+END python3 -I tests/pipe-shape-selftest exit=0
+END tests/expect-serial-selftest exit=0
+END selftests exit=0
+END tests/mpx6-metal native exit=0
+END clock-legs native exit=0
+END clock-native exit=0
+END tests/mpx6-metal release exit=0
+END clock-legs release exit=0
+END clock-release exit=0
+END pipe-equiv exit=0
+END pipe-equiv exit=0
+END f8-control exit=0
+END f8-load-50-50 exit=0
+END f8-load-200-50 exit=0
+END f8-freeze exit=0
+gauntlet: every step exit=0 at a27e73fb1154a3fcf5b3026a2d71bedb9a71522c
+```
+
+(`END pipe-equiv` appears twice: the script's own line, then the step's.) The F8 steps' rows are the stall table's
+last four; pipe-equiv compared 323 lookups and pipes on the native and release `kmain_metal`, 0 differ.
 
 ## Done-when
 
@@ -296,7 +337,7 @@ GAUNTLET
 **Issues** (none filed or closed by this lane): pax#260, pax#261, pax#259 and pax#256 are each fixed by this PR and
 are to be closed by hand at the merge. Owed, for the orchestrator to file or drop:
 - `tools/usb-session` still paces the unplug and replug rows (0.4 s and 1.0 s before the next key) and the ring-wrap
-  (20 ms a key) by the host's clock. None failed in 140 loaded head runs, but they are the same class as pax#261:
+  (20 ms a key) by the host's clock. None failed in the 120 loaded head runs (60 before the rebase, 60 in the gauntlet), but they are the same class as pax#261:
   waiting for the guest's `xhci: keyboard usb1-N` line would make them exact.
 - kasumi's `clock:` line is unknown (above): the next metal boot's photograph of its first screen says which clock it
   chose.
