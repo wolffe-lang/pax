@@ -1,0 +1,54 @@
+px86 prediction, written 2026-11-01 00:33Z (date -u), before the first change (base pax trunk 8495bdc0) and
+before any guest ran. The maintainer's disk serial is written <kasumi-serial> in this public tree.
+
+The used targets (a new helper, tests/mpx6-install.d/used.py): an old GPT from tools/mkgpt, then real file
+systems from the container's own mkfs.vfat 4.2 and mke2fs 1.47.0, each with a file in it:
+  fat32  p1 FAT32 at sector 2048 (1 GiB, an old ESP), p2 ext4 from there to the last usable sector;
+  ext4   p1 ext4 at sector 2048, p2 a swap partition (mkswap's own first page);
+  iso    an old hybrid ISO (tools/mkimage's boot.iso) written at byte 0, as `dd` of a live image leaves a disk
+         (the unattended rows only);
+  ntfs   NOT RUN: neither localhost/px78-ubuntu:1 nor localhost/px75-ubuntu:2 has mkntfs (checked 00:27Z), the
+         contract makes NTFS conditional on it, and a lane installs nothing.
+The 860-shaped target of the kasumi leg: ide-hd "Samsung SSD 860 EVO 1TB", 1,000,204,886,016 bytes (the inventory
+said 1 TB), sparse; in the tree its serial is a QEMU one, for the stick the maintainer's.
+
+1. Red at the tests-only head (base code, 8495bdc0's installer):
+   a. The kasumi leg on the 860 target, KVM, fat32 and ext4: M0-M3 PASS; FAIL M4-install by name, the screen
+      showing `pax-install: limine: exit 1; ` with Limine's text "The partition selected to install the BIOS boot
+      code to contains a recognised filesystem." and "Install failed, undoing work...", then `pax-install:
+      stopped: command_failed`. The target's phase log ends `limine failed exit=1`. The other three disks'
+      witnesses unchanged even so: 23e7b466..., e1203a73..., 303fd56e... (px78's, the foreign disks are fixed).
+      The time to the stop: 30-80 s from the yes (gpt, fat, the root's inode tables, then Limine).
+   b. The unattended rows (512 MiB virtio vdb, TCG): I-used-fat32 and I-used-ext4 red by name, Limine's text in
+      the transcript, the phase log's last record limine failed.
+      I-used-iso: Limine does not refuse (the ISO's bytes at 1 MiB are file data, which Limine does not take for
+      a file system), the install completes, and the row is red at its signature oracle instead: `blkid -p` over
+      the whole target still reports TYPE="iso9660" (the old volume descriptor at byte 32768, which no PAX phase
+      writes: the primary GPT ends at 17408 and the log starts at 65536).
+   c. The executor unit's new rows (I-zero-*) red as a compile error, wolf build exit 2 (nothing named the zero
+      phases yet).
+2. Green at the fix:
+   a. Every row above PASS; the 860 legs M0-M11 PASS under KVM: the install 35-70 s from the yes (px78b: 26.3 s
+      for 500 GB; the root's inode tables double), the leg 80-150 s.
+   b. The zero phases together under 1 s under KVM (about 7 MiB of writes, each fsynced and read back).
+   c. The signature oracle (blkid -p, util-linux 2.39.3): the whole target PTTYPE="gpt" and no TYPE; partition 1
+      TYPE="vfat"; partition 2 TYPE="ext2"; partition 3 no TYPE (Limine's stage is not a file system) - on every
+      used case and on the blank target.
+   d. The unit: zero-bios changes exactly [1048576, 2097152) of a pattern-filled image and nothing else but the
+      phase's two log records in [65536, 131072); zero-esp, zero-root and zero-gap exactly their ranges.
+   e. The existing rows unchanged: the blank-target leg M0-M10 (its M6 partition-3 sum the same: zeros before
+      and after a zero phase); mpx6-install's smoke rows, gap.py's oracle among them (it already zeroes [1 MiB,
+      2 MiB) in its candidate before Linux's Limine, so the executor's new guarantee is the one it assumed).
+3. R-px86-1, measured on a pattern-filled image, each formatter alone: paxfat mkfs writes the ESP's first 1,049,600
+   bytes (32 reserved sectors, two FATs of 1,009 sectors) and its root cluster, so the ESP's last MiB keeps old
+   bytes; paxext2 writes the root's block 0 whole and its group 0 metadata, so the root's first MiB is written and
+   its last MiB keeps old bytes; nothing writes [17408, 65536), [131072, 1048576) or the tail before the backup
+   table. Expected recommendation: zero all of those too (the first and last MiB of 1 and 2, the first MiB outside
+   the table and the log, the tail before the backup table), about 7 MiB.
+4. The stick, pax-install-kasumi-<head>.img by px78b's recipe: 794,820,608 bytes (197330ad's; the installer grows
+   by a few KiB inside the slack), a second build byte-identical, check-usb's six files, /pax/install-targets
+   = boot/install-targets plus the 860's line; the kasumi leg on a copy with the 860 target used (fat32, then
+   ext4) M0-M11 PASS, the summary "Erase Samsung SSD 860, serial <kasumi-serial> (1.0 TB, /dev/sdc), and install
+   PAX?".
+5. The plant px86-plant-used (the head with zero-bios skipped): I-used-fat32 and I-used-ext4 red by Limine's text;
+   the executor unit's I-zero-bios red.
