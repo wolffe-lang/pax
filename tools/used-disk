@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""used-disk (px86): a used disk, as the 860 came to the installer, and the signature oracle.
+
+    tools/used-disk make IMAGE CASE [ISO]   lay CASE down on IMAGE (a sparse file of the disk's size)
+    tools/used-disk check IMAGE ROW         the signature oracle over a PAX install on IMAGE
+
+The 860 held two partitions from an older install, the first at sector 2048
+(the usual 1 MiB alignment), so its file system began exactly where PAX's
+BIOS boot partition (3, bytes [1 MiB, 2 MiB)) now lies; Limine's bios-install
+found it there and refused. Each CASE is an old GPT from tools/mkgpt, then
+real file systems from the host's own tools (dosfstools' mkfs.vfat, e2fsprogs'
+mke2fs, util-linux's mkswap, mtools' mcopy), each holding a file:
+
+  fat32  partition 1 a FAT32 at sector 2048 (1 GiB, or a fifth of a small
+         disk: an old ESP), partition 2 an ext4 from there to the last
+         usable sector (an old root)
+  ext4   partition 1 an ext4 at sector 2048 (64 GiB, or half of a small
+         disk: an old root), partition 2 a swap area after it
+  iso    a hybrid ISO image written at byte 0, as `dd` of a live image leaves
+         a disk (ISO: tools/mkimage's, the image the row boots)
+
+check: the whole image and each of PAX's three partitions (read from the
+image's own primary GPT; each partition's allocated extents copied, holes
+kept, to a file of its size) through `wipefs --no-act --json` and `blkid -p`
+(util-linux): the whole disk carries the protective MBR and the two GPT
+headers and no file system; partition 1 one signature, vfat; partition 2 one,
+ext2; partition 3 none (Limine's stage is not a file system). Exit 1 with
+`FAIL ROW: ...` naming what survived; exit 0 with one PASS line.
+"""
+from pathlib import Path
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+REPO = Path(__file__).resolve().parent.parent
+SWAP = '0657fd6d-a4ab-43c4-84e5-0933c84b4f4f'  # Linux swap (the Discoverable Partitions Specification)
+GIB = 1 << 30
+
+
+def run(args, **kw):
+    p = subprocess.run([str(a) for a in args], capture_output=True, **kw)
+    if p.returncode != 0:
+        sys.exit(f'FAIL used-disk: {args[0]} exited {p.returncode}: {p.stdout[-2000:]!r} {p.stderr[-2000:]!r}')
+    return p
+
+
+def old_tree(tmp):
+    t = Path(tmp)/'tree'
+    (t/'EFI/BOOT').mkdir(parents=True)
+    (t/'etc').mkdir()
+    (t/'EFI/BOOT/BOOTX64.EFI').write_bytes(b'an older install\'s loader\n')
+    (t/'etc/os-release').write_text('NAME="an older install"\n')
+    return t
+
+
+def make(img, case, iso=None):
+    size = img.stat().st_size
+    sectors = size // 512
+    last = sectors - 34
+    env = dict(os.environ, SOURCE_DATE_EPOCH=os.environ.get('SOURCE_DATE_EPOCH', '1700000000'))
+    with tempfile.TemporaryDirectory(dir=img.parent, prefix='used-') as tmp:
+        tree = old_tree(tmp)
+        if case == 'fat32':
+            p1 = min(GIB, size // 5) // 512 // 2048 * 2048
+            p2 = 2048 + p1
+            run([REPO/'tools/mkgpt', '--label', 'old-' + case, img, f'1:esp:2048:{p2 - 1}:old-esp',
+                 f'2:linux:{p2}:{last}:old-root'], env=env)
+            run(['mkfs.vfat', '-F', '32', '-n', 'OLD-ESP', '--offset', '2048', img, str(p1 * 512 // 1024)])
+            run(['mmd', '-i', f'{img}@@1048576', '::/EFI', '::/EFI/BOOT'])
+            run(['mcopy', '-i', f'{img}@@1048576', tree/'EFI/BOOT/BOOTX64.EFI', '::/EFI/BOOT/BOOTX64.EFI'])
+            run(['mke2fs', '-q', '-F', '-t', 'ext4', '-L', 'old-root', '-d', tree,
+                 '-E', f'offset={p2 * 512},lazy_itable_init=1,lazy_journal_init=1', img,
+                 f'{(last + 1 - p2) * 512 // 1024}k'])
+        elif case == 'ext4':
+            p1 = min(64 * GIB, size // 2) // 512 // 2048 * 2048
+            p2 = 2048 + p1
+            sw = min(8 * GIB, size // 4) // 512 // 2048 * 2048
+            run([REPO/'tools/mkgpt', '--label', 'old-' + case, img, f'1:linux:2048:{p2 - 1}:old-root',
+                 f'2:{SWAP}:{p2}:{p2 + sw - 1}:old-swap'], env=env)
+            run(['mke2fs', '-q', '-F', '-t', 'ext4', '-L', 'old-root', '-d', tree,
+                 '-E', 'offset=1048576,lazy_itable_init=1,lazy_journal_init=1', img, f'{p1 * 512 // 1024}k'])
+            # mkswap writes the area's first page; it is made in a file of the
+            # partition's size and that page copied to the partition.
+            area = Path(tmp)/'swap.img'
+            with open(area, 'wb') as f:
+                f.truncate(sw * 512)
+            run(['mkswap', '-L', 'old-swap', area])
+            with open(area, 'rb') as a, open(img, 'r+b') as f:
+                try:
+                    past = os.lseek(a.fileno(), 4096, os.SEEK_DATA)
+                except OSError:
+                    past = None
+                assert past is None, f'mkswap wrote past its first page (data at {past})'
+                a.seek(0)
+                page = a.read(4096)
+                f.seek(p2 * 512)
+                f.write(page)
+        elif case == 'iso':
+            assert iso, 'the iso case needs the ISO image'
+            with open(iso, 'rb') as a, open(img, 'r+b') as f:
+                shutil.copyfileobj(a, f, 1 << 20)
+        else:
+            sys.exit(f'FAIL used-disk: no case {case!r}')
+    found = signatures(img, 0, size)
+    print(f'used-disk: {case} laid down on {img.name} ({size} bytes); wipefs over the whole disk: '
+          + ', '.join(f'{t}@{o}' for t, o in found), flush=True)
+
+
+def gpt(img):
+    """Each partition of the primary GPT: slot -> (first byte, length)."""
+    with open(img, 'rb') as f:
+        f.seek(512)
+        h = f.read(92)
+        if h[:8] != b'EFI PART':
+            return {}
+        at, n, esz = struct.unpack_from('<QII', h, 72)
+        f.seek(at * 512)
+        a = f.read(n * esz)
+    out = {}
+    for k in range(n):
+        e = a[k * esz:(k + 1) * esz]
+        if e[:16] == bytes(16):
+            continue
+        first, last = struct.unpack_from('<QQ', e, 32)
+        out[k + 1] = (first * 512, (last - first + 1) * 512)
+    return out
+
+
+def region(img, start, length, out):
+    """img's bytes [start, start+length) to out, allocated extents only."""
+    with open(img, 'rb') as f, open(out, 'wb') as o:
+        o.truncate(length)
+        at, end = start, start + length
+        while at < end:
+            try:
+                data = os.lseek(f.fileno(), at, os.SEEK_DATA)
+            except OSError:
+                break
+            if data >= end:
+                break
+            hole = min(os.lseek(f.fileno(), data, os.SEEK_HOLE), end)
+            f.seek(data)
+            o.seek(data - start)
+            left = hole - data
+            while left:
+                b = f.read(min(left, 1 << 20))
+                o.write(b)
+                left -= len(b)
+            at = hole
+
+
+def signatures(img, start, length):
+    """wipefs's list for [start, start+length) of img: (type, offset) pairs."""
+    if start == 0 and length == img.stat().st_size:
+        target = img
+        tmp = None
+    else:
+        tmp = tempfile.NamedTemporaryFile(dir=img.parent, prefix='used-region-', delete=False)
+        tmp.close()
+        target = Path(tmp.name)
+        region(img, start, length, target)
+    try:
+        p = subprocess.run(['wipefs', '--no-act', '--json', str(target)], capture_output=True, text=True)
+        if p.returncode != 0:
+            sys.exit(f'FAIL used-disk: wipefs exited {p.returncode}: {p.stderr}')
+        rows = json.loads(p.stdout)['signatures'] if p.stdout.strip() else []
+        b = subprocess.run(['blkid', '-p', '-o', 'export', str(target)], capture_output=True, text=True)
+        probe = (b.returncode, b.stdout.strip().replace('\n', ' '), b.stderr.strip())
+    finally:
+        if tmp:
+            os.unlink(target)
+    found = [(r['type'], int(r['offset'], 16)) for r in rows]
+    found.append(('blkid', probe))
+    return found
+
+
+def check(img, row):
+    size = img.stat().st_size
+    parts = gpt(img)
+    if sorted(parts) != [1, 2, 3]:
+        print(f'FAIL {row}: the primary GPT names partitions {sorted(parts)}, not PAX\'s 1, 2, 3', flush=True)
+        sys.exit(1)
+    want = {'disk': ({'PMBR', 'gpt'}, None), 1: ({'vfat'}, 'vfat'), 2: ({'ext2'}, 'ext2'), 3: (set(), None)}
+    said = []
+    for key, (types, fs) in want.items():
+        start, length = (0, size) if key == 'disk' else parts[key]
+        found = signatures(img, start, length)
+        sigs = [(t, o) for t, o in found if t != 'blkid']
+        rc, out, err = [v for t, v in found if t == 'blkid'][0]
+        name = 'the whole disk' if key == 'disk' else f'partition {key}'
+        kinds = {t for t, _ in sigs}
+        if kinds != types or (key != 'disk' and len(sigs) != len(types)):
+            print(f'FAIL {row}: {name} carries {sigs} (wipefs); want {sorted(types) or "none"}; blkid -p: {out or err}', flush=True)
+            sys.exit(1)
+        tag = dict(x.split('=', 1) for x in out.split() if '=' in x)
+        if fs and tag.get('TYPE') != fs or not fs and 'TYPE' in tag:
+            print(f'FAIL {row}: {name}: blkid -p says {out or err!r} (exit {rc}); want TYPE={fs or "none"}', flush=True)
+            sys.exit(1)
+        said.append(f'{name} ' + (', '.join(f'{t}@{o}' for t, o in sigs) or 'none'))
+    print(f'PASS {row}: no old signature survives: ' + '; '.join(said), flush=True)
+
+
+if __name__ == '__main__':
+    what, img = sys.argv[1], Path(sys.argv[2]).resolve()
+    if what == 'make':
+        make(img, sys.argv[3], Path(sys.argv[4]) if len(sys.argv) > 4 else None)
+    elif what == 'check':
+        check(img, sys.argv[3])
+    else:
+        sys.exit('usage: tools/used-disk make IMAGE CASE [ISO] | check IMAGE ROW')
