@@ -13,6 +13,7 @@ import time
 
 repo,lane,work=map(Path,sys.argv[1:4]);games,name=sys.argv[4:6]
 fault=os.environ.get('PAX_INSTALL_FAULT','')
+used=os.environ.get('PAX_INSTALL_USED','') # px86: a used target (tools/used-disk)
 guided=os.environ.get('PAX_INSTALL_GUIDED','')=='1' or fault=='cancel-words'
 full_tree=len(sys.argv)>6 and sys.argv[6]=='full'
 assert games in ['yes','no'] and name in ['vdb','vdc']
@@ -112,6 +113,15 @@ if fault=='cancel-words':
     (work/'keys').write_text(''.join(('2' if name=='vdb' else '3')+'\npax\nn\n'+w+'\n' for w in words))
 if fault=='cancel':script.write_text(f"printf 'q\\n' | /bin/pax-install --seed test {allow}\necho INSTALL-EXIT-$?\n")
 if fault=='missing-tool':script.write_text(script.read_text().replace('--payload /payload','--payload /payload --tool-dir /missing'))
+if used:
+    # px86: a used disk's identity names its old partitions (inventory.lu's
+    # topology), so the scripted path takes the token from --dry-run, as
+    # docs/BOOT.md's scripted invocation does; the host checks it below.
+    common=f'--target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload {allow}'
+    script.write_text(f'/bin/pax-install --dry-run {common} > /tmp/plan.txt\necho DRYRUN-EXIT-$?\ntok=\n'
+                      'while IFS= read -r line; do\n    case $line in\n        "confirmation "*) tok=${line#confirmation } ;;\n    esac\ndone < /tmp/plan.txt\n'
+                      'echo "TOKEN $tok"\n'
+                      f'/bin/pax-install --install --ext2-preview {common} --confirm "$tok"\necho INSTALL-EXIT-$?\n')
 (work/'run').write_text('/bin/sh /install.sh\n')
 args=['/tmp/:1777','/bin/sh='+str(source/'bin/sh')+':755','/bin/pax-install='+str(source/'bin/pax-install')+':755',
       '/etc/pax-run='+str(work/'run')+':644','/install.sh='+str(script)+':644','/etc/pax-install-targets='+str(work/'allow-list')+':644']
@@ -133,7 +143,6 @@ with (work/'source-guard.img').open('wb') as f:f.truncate(8*1024*1024)
 with (work/'target.img').open('wb') as f:f.truncate(capacity)
 # px86: a used target (tools/used-disk): an old GPT and old file systems
 # where PAX's partitions go, the first at sector 2048, as the 860 was.
-used=os.environ.get('PAX_INSTALL_USED','')
 if used:
     assert not fault and not guided,'a used target is the unattended install'
     print(run([repo/'tools/used-disk','make',work/'target.img',used,work/'boot.iso']).stdout.decode(),end='',flush=True)
@@ -190,6 +199,15 @@ if fault:
         if fault in ['gpt','fat','root','limine']:assert 'exit=2' in records[-1]['detail']
     print('PASS I-fault-'+fault+': named refusal, no swallowed exit or bootability claim; source guard unchanged',flush=True)
     sys.exit(0)
+if used:
+    flat=s.replace('\r','')
+    assert 'DRYRUN-EXIT-0' in flat,'FAIL I-used-'+used+': --dry-run\n'+flat[-8000:]
+    tok=[l[6:] for l in flat.splitlines() if l.startswith('TOKEN ')]
+    assert len(tok)==1 and tok[0].startswith(f'ERASE /dev/{name} 254:{minor}-seq{seq}') and tok[0].endswith(f' {capacity} {seed}'),'FAIL I-used-'+used+f': the token {tok}'
+    if used!='iso':
+        # The old partitions, as the kernel listed them at boot, are in the identity.
+        lines=[l for l in flat[:flat.index('TOKEN ')].splitlines() if l.startswith('block: '+name) and ', sectors ' in l]
+        assert len(lines)==2 and all(f';{l.split()[1].rstrip(":")}:' in tok[0] for l in lines),'FAIL I-used-'+used+f': the old partitions are not in the identity: {tok} {lines}'
 if used and 'INSTALL-EXIT-0' not in s:
     # The 860's stop (2026-10-31): Limine's bios-install refused partition 3.
     why=[l.strip() for l in s.replace('\r','').splitlines() if 'pax-install:' in l or 'recognised filesystem' in l or 'Install failed' in l]
