@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""tests/usb-session-selftest — tools/usb-session's repeat row can say no,
+and says why (px85, pax#261). No QEMU: the verdict alone, on rows shaped
+as the probe prints them.
+
+  U1  24 reports of `a` in a 100-tick hold pass (the measured 24-25).
+  U2  6 reports in a 100-tick hold (run 41153232393 attempt 2's row, had
+      its hold been the guest's) are `repeat lost`.
+  U3  no reports at all (`none`) are `repeat lost`.
+  U4  `a` then `A` (0x41) is `stuck modifier`: Shift or Caps Lock.
+  U5  `a` then Ctrl-a (0x01) is `stuck modifier`: Ctrl.
+  U6  `a` then ESC `a` is `stuck modifier`: Alt.
+  U7  `a` then `b` (0x62) is `wrong key`.
+  U8  a fault and too few reports: the byte's name wins (the fault is
+      the cause, the count its symptom).
+  U9  the hold is the guest's: tools/usb-session's row 10 is held for
+      HOLD_TICKS = 100 guest ticks read from pax_tick_count, with a
+      wall-clock bound that fails by name (`repeat hold: …`).
+Exit 0 when every row held; the first failing row is named.
+"""
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+import sys
+
+root = Path(__file__).resolve().parents[1]
+loader = SourceFileLoader('usb_session', str(root / 'tools/usb-session'))
+session = module_from_spec(spec_from_loader('usb_session', loader))
+loader.exec_module(session)
+
+
+def row(*values):
+    return 'USBROW repeat-a ' + ' '.join(values)
+
+
+def refused(name, line, hold, want):
+    try:
+        session.repeat_verdict(line, hold)
+    except RuntimeError as error:
+        if not str(error).startswith(want + ':'):
+            sys.exit(f'FAIL {name}: refused as {str(error)!r}, not as {want!r}')
+        print(f'PASS {name}: {error}')
+        return
+    sys.exit(f'FAIL {name}: {line!r} passed; {want!r} wanted')
+
+
+got = session.repeat_verdict(row(*['61'] * 24), '100 guest ticks')
+if len(got) != 24:
+    sys.exit(f'FAIL U1: {len(got)} reports returned, 24 given')
+print('PASS U1: 24 reports of a in a 100-tick hold')
+refused('U2', row(*['61'] * 6), '100 guest ticks', 'repeat lost')
+refused('U3', 'USBROW repeat-a none', '100 guest ticks', 'repeat lost')
+refused('U4', row('61', *['41'] * 23), '100 guest ticks', 'stuck modifier')
+refused('U5', row('61', *['01'] * 23), '100 guest ticks', 'stuck modifier')
+refused('U6', row('61', *['1b', '61'] * 12), '100 guest ticks', 'stuck modifier')
+refused('U7', row('61', *['62'] * 23), '100 guest ticks', 'wrong key')
+refused('U8', row('61', '62', '62'), '100 guest ticks', 'wrong key')
+source = (root / 'tools/usb-session').read_text()
+for need in ("elif sent == 10 and not args.linux_kernel:", "hold = hold_for_ticks(execute)",
+             "addresses['pax_tick_count']", "raise RuntimeError(f'repeat hold: "):
+    if need not in source:
+        sys.exit(f'FAIL U9: tools/usb-session lacks {need!r}')
+if (session.HOLD_TICKS, session.MIN_REPORTS) != (100, 15):
+    sys.exit(f'FAIL U9: HOLD_TICKS {session.HOLD_TICKS}, MIN_REPORTS {session.MIN_REPORTS}; 100 and 15 wanted')
+print('PASS U9: row 10 held for 100 guest ticks (pax_tick_count), bounded by the wall clock by name')
+print('PASS usb-session-selftest')
