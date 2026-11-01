@@ -5,7 +5,7 @@
 # and pax#261, the two stall-sensitive checks that reddened trunk 8495bdc0).
 #
 #   stall --tree DIR --out DIR [--runs N] [--cpus "1 2 3 4 5"]
-#         [--tier release|native] [--load BUSY/IDLE | --no-load]
+#         [--tier release|native] [--load BUSY/IDLE | --no-load] [--images DIR]
 #
 # The leg is the tree's own. The F8 block of TREE/tests/mpx6-firmware,
 # from its copy of boot/limine-initramfs.conf to its `row "F8 …"`, is cut
@@ -13,7 +13,9 @@
 # and kernel: a run of trunk's tree is trunk's F8, a run of the branch's
 # is the branch's (the high-BAR witness before it is left out: it does not
 # depend on time). The images are built as tests/mpx6-usb builds them
-# (the probe, its initramfs, TREE/kernel/kmain_console.lu at the tier).
+# (the probe, its initramfs, TREE/kernel/kmain_console.lu at the tier),
+# into OUT/images, or into --images DIR, kept there for the next batch
+# of the same tree and tier.
 #
 # The stall. Each run's QEMU, every thread of it, is pinned to one CPU of
 # the list at nice 19 (PAX_QEMU, tools/qemu-run's own hook), beside one
@@ -32,7 +34,7 @@
 # leg's failing line. Exit 0 when every run's leg exited 0.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-tree= out= runs=20 cpus='1 2 3 4 5' tier=release busy=50 idle=50 load=1
+tree= out= runs=20 cpus='1 2 3 4 5' tier=release busy=50 idle=50 load=1 images=
 while [ $# -gt 0 ]; do
     case $1 in
         --tree) tree=$(cd "$2" && pwd); shift 2;;
@@ -42,7 +44,8 @@ while [ $# -gt 0 ]; do
         --tier) tier=$2; shift 2;;
         --load) busy=${2%/*} idle=${2#*/}; shift 2;;
         --no-load) load=0; shift;;
-        *) echo "usage: stall --tree DIR --out DIR [--runs N] [--cpus LIST] [--tier release|native] [--load BUSY/IDLE | --no-load]" >&2; exit 2;;
+        --images) images=$2; shift 2;;
+        *) echo "usage: stall --tree DIR --out DIR [--runs N] [--cpus LIST] [--tier release|native] [--load BUSY/IDLE | --no-load] [--images DIR]" >&2; exit 2;;
     esac
 done
 [ -n "$tree" ] && [ -n "$out" ] || { echo 'stall: --tree and --out are required' >&2; exit 2; }
@@ -51,7 +54,9 @@ case $busy$idle in *[!0-9]*|'') echo 'stall: --load takes BUSY/IDLE in ms' >&2; 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 export PAX_BUILD=$out/build
-images=$out/images
+[ -n "$images" ] || images=$out/images
+mkdir -p "$images"
+images=$(cd "$images" && pwd)
 log() { printf '%s stall: %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
 # The tree's F8 block, cut out by its first and last lines.
