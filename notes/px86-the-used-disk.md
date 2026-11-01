@@ -88,7 +88,7 @@ Commits on `px86` (the prediction first, the failing rows before the fix):
 | the zero phases under 1 s together, about 7 MiB | **wrong on the size, unmeasured on the time**: 6,212,096 bytes (5.9 MiB) on the 1 TB disk and on 512 MiB alike (the tail slack is 3,584 bytes on both); the disk log carries no clock per phase |
 | the oracle: the whole disk PMBR and gpt, p1 vfat, p2 ext2, p3 nothing, on every case | **right on what the disks hold; my oracle's first form was wrong**: wipefs lists a FAT32 boot sector three times (`vfat` at 0, 82, 510), so a check of one row per partition went red on a green install; it now holds the kinds and blkid's label (`adb53141`) |
 | the unit: zero-bios writes exactly [1048576, 2097152) and nothing but its two log records; the other phases their ranges | **right** on 512 MiB and on 1 TB (I-zero-bios, -esp, -root, -gap, -all) |
-| the existing rows unchanged: the blank 870 leg, mpx6-install's smoke rows, gap.py's oracle | see §4.6, the gauntlet |
+| the existing rows unchanged: the blank 870 leg, mpx6-install's smoke rows, gap.py's oracle | **right** (§4.6): every smoke row and the blank leg PASS at the gauntlet's head, gap.py's envelopes `[0, 423, 1048576, 1071464]` on every install |
 | R-px86-1's measurement: paxfat writes the ESP's first 1,049,600 bytes, paxext2 the root's first MiB, both leave their last MiB; nothing writes the gap or the tail slack | **right** to the byte (`logs/chain-after.log`, coverage): 0 of 1,048,576 old bytes left in either first MiB, all of each last MiB, all 48,128 + 917,504 of the gap, all 3,584 of the tail slack, all of partition 3 |
 | the stick: 794,820,608 bytes, a second build byte-identical, six files, the legs green, the summary naming the 860 | **right** on each |
 | the plant: I-used-fat32 and -ext4 red by Limine's text, I-zero-bios red | **right** (§4.5) |
@@ -173,7 +173,30 @@ One wrapper (`notes/px86/hasu/gauntlet.sh`) at the head named below, a fresh clo
 hold of block A by both names; it stops at the first nonzero step and prints each step's `END`. The commits after it
 are this note's and its evidence's only.
 
-GAUNTLET_RESULT
+At `66002ada` (`logs/gauntlet.log`), 01:38:52Z to 01:58:30Z, exit 0:
+
+```
+2026-11-01T01:39:38Z END ci-plan exit=0
+2026-11-01T01:39:38Z END ci-budgets exit=0
+2026-11-01T01:51:43Z END mpx6-install exit=0
+2026-11-01T01:52:19Z END kasumi-build exit=0
+2026-11-01T01:53:29Z END kasumi-870 exit=0
+2026-11-01T01:54:59Z END kasumi-860 exit=0
+2026-11-01T01:56:28Z END kasumi-860-ext4 exit=0
+2026-11-01T01:58:30Z END mpx6-ahci exit=0
+2026-11-01T01:58:30Z GAUNTLET GREEN at 66002adac9ce422b6e7fca6faf992865d805e384
+```
+
+- `tests/mpx6-install --rows smoke`: every existing row PASS unchanged (I-inventory, the no and yes installs and
+  their trees, I-session-bios twice, I-root-nvme, I-cancel-words and every fault row) and the three used rows with
+  their signatures; `mpx6-install: PASS; 0 SKIP`.
+- The kasumi leg as CI now runs it: the blank 870 M0–M11 PASS, the install 28.74 s, the leg 70.0 s (KVM; px78b's
+  26.7 s and 66.8 s); the used 860 (fat32) M0–M11 PASS, 45.07 s, 89.0 s; the used 860 (ext4) 44.42 s, 88.4 s. Every
+  leg's witnesses are px78's: `23e7b466…`, `e1203a73…`, `303fd56e…`.
+- `tests/mpx6-ahci --rows pr`: every row PASS; A11 and A12 skipped loudly, as the pr rows always do
+  (`SKIP A11-throughput A12-root-fstab: --rows pr`).
+- `tests/ci-plan` PASS (`tools/used-disk` derives to mpx6-install and mpx6-kasumi from the scripts that name it);
+  `tests/ci-budgets.py` PASS.
 
 ### 4.7 The stick (the coordinator's first deliverable, handed back at 01:30Z)
 
