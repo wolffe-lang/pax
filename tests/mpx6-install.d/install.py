@@ -210,7 +210,7 @@ if used:
         assert len(lines)==2 and all(f';{l.split()[1].rstrip(":")}:' in tok[0] for l in lines),'FAIL I-used-'+used+f': the old partitions are not in the identity: {tok} {lines}'
 if used and 'INSTALL-EXIT-0' not in s:
     # The 860's stop (2026-10-31): Limine's bios-install refused partition 3.
-    why=[l.strip() for l in s.replace('\r','').splitlines() if 'pax-install:' in l or 'recognised filesystem' in l or 'Install failed' in l]
+    why=[l.strip() for l in s.replace('\r','').splitlines() if 'pax-install:' in l or 'error: ' in l or 'recognised filesystem' in l or 'Install failed' in l]
     print(f'FAIL I-used-{used}: the install onto the used disk stopped: '+' | '.join(why)[-3000:],flush=True)
     sys.exit(1)
 assert 'INSTALL-EXIT-0' in s,('FAIL I-boot-files' if 'phase verify-boot-' in s else 'FAIL I-install')+'\n'+s[-18000:]
