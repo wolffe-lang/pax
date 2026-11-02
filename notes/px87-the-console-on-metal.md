@@ -8,6 +8,12 @@ session (pax#246), adds `poweroff` (pax#243), answers a user's `reboot` and `pax
 pax#266), has the kernel name its own commit and digest (pax#176), and stages a stick with the steps for a metal
 session. Footprint: cross-cutting (`boot/start.S` and `tools/build-kernel` are FULL paths: the PR's run is tier all).
 
+**Commit names.** The lane was rebased onto trunk `5da8daaf` after its runs (R-px87-14, §4.10). Every commit named
+in this note is the rebased one, except where the text says what ran before the rebase (`<old>`, rebased `<new>`)
+and inside quoted log lines and the INSTALL.txt copy, which keep the names they printed. Each pre-rebase commit and
+its rebased commit are the same patch and the same tree but for trunk's `notes/pm00*`, checked commit by commit
+(`notes/px87/rebase/map.sh`, its table `notes/px87/rebase/map.txt`).
+
 ## 1. Forbidden, and what was read
 
 No kernel's, firmware's, bootloader's, emulator's, debugger's or driver's source was read: not Linux's, not QEMU's
@@ -26,7 +32,7 @@ release; no attribution trailers.
 
 ## 2. Inputs, verified
 
-- **Base** pax trunk `3e28a8bc` (px85's notes head, trunk at launch). Branch `px87`, the Mac clone
+- **Base** pax trunk `3e28a8bc` (px85's notes head, trunk at launch); rebased onto `5da8daaf` after the runs (§4.10). Branch `px87`, the Mac clone
   `~/lanes/px87/pax` for git and `gh` only (no build on the Mac), the branch asserted before every commit. On
   kasumi a clone under `/home/mfwolffe/lanes/px87/pax` and a worktree per tested commit (`w/<sha8>`, made by
   `notes/px87/kasumi/wt.sh`, refused if dirty or not at the sha): every build ran from a commit.
@@ -54,7 +60,7 @@ release; no attribution trailers.
 
 ## 3. Prediction, scored
 
-`notes/px87/prediction.txt`, committed first (`bb54f7b9`, 18:05Z), before any change and before any guest ran:
+`notes/px87/prediction.txt`, committed first (`ac0d327f`, 18:05Z), before any change and before any guest ran:
 
 | predicted | found |
 |---|---|
@@ -62,17 +68,17 @@ release; no attribution trailers.
 | V7 red at base by name: at least the cap's reads in the first scroll, the first by `pax_fb_copy` one band above the first scrolled band | **right**: `64+ framebuffer reads in 393 scrolls, the first by pax_fb_copy+0x7 (rsi …fd014008, framebuffer + 0x14008) called from _Wscreen.scroll` (BIOS and UEFI; 0x14000 is one band, 16 rows of 5120 bytes) |
 | at the head 0 reads in every scroll; the `fbread` boot red the way the base was | **right** on all four legs: `0 reads of the framebuffer's 4096000 bytes in 393 scrolls` (394 on UEFI), the control `reads=8+`, the first by `pax_fb_copy` called from `_Wscreen.scroll_readback` |
 | V2, V5, V6 pixel-identical | **right**, every leg (8000 of 8000 cells) |
-| V3's scrolled-line cost lower at the head under TCG | **wrong first, then right**: base 0.98 ms native; the first fix (`c3915560`) 1.56 ms native and 0.24 ms release (TCG copies cheap VRAM fast with REP MOVSQ, while the first diff loop went through volatile state reads and calls per cell); after `4e27eb30` (the grid's words read directly, row by row) 0.63 ms native (§4.1). Metal's cost was the uncached reads, which are gone either way |
+| V3's scrolled-line cost lower at the head under TCG | **wrong first, then right**: base 0.98 ms native; the first fix (`9d6d78b5`) 1.56 ms native and 0.24 ms release (TCG copies cheap VRAM fast with REP MOVSQ, while the first diff loop went through volatile state reads and calls per cell); after `0c4ce54e` (the grid's words read directly, row by row) 0.63 ms native (§4.1). Metal's cost was the uncached reads, which are gone either way |
 | the plant red by V7, V2 green | **right** for V7, locally and in CI's first run; that run also failed `mpx3-console`'s T6 and T7, because the first cut sat below the identity code (my fault, §4.6); the re-cut's run is the orchestrator's |
 | metal: seconds to tens of seconds before, about a second after | **not measured here**: the maintainer's session (§5.5) |
-| U7 red at base (per-exec lines), green with `quiet` | **right**: at `06afa68f` `user: exec pid 1 cr3 …` on both firmwares (12 `user:` lines), at `e9e74308` none (2 left: the boot's own `user: syscall …` setup lines) |
+| U7 red at base (per-exec lines), green with `quiet` | **right**: at `43937c5d` `user: exec pid 1 cr3 …` on both firmwares (12 `user:` lines), at `0c7e1710` none (2 left: the boot's own `user: syscall …` setup lines) |
 | `poweroff` by name; the row red at base by `poweroff: not found` | **right on the fix, wrong on the red's mechanism**: the row's own image carries `/bin/poweroff` (the reboot program), so at base it was found, read no name, and restarted the machine: `reboot: FADT reset register`, red by the last power line |
 | Linux's message for a user's `reboot`, measured: `reboot: Operation not permitted` or close | **right**: busybox's `reboot -f` exactly that, `poweroff -f` `poweroff: Operation not permitted`, each exit 1; the image has no systemd `reboot`, so none was measured |
 | `--check` as a user red at base (`inventory: io`), then the node, the errno and root named | **right**; the wording implemented: `pax-install: inventory: /dev/vda: Permission denied; pax-install opens every disk to measure it, so run it as root` (errno(3)'s text, not the prediction's lower case) |
-| the kernel names its commit (written by `tools/build-kernel`) and the SHA-256 of its loaded file (a new Limine request); T6 red at base | **right**: at `6fce7a12` `no kernel: line`, at `b9e54a31` `kernel: b9e54a31… sha256 07aabe04…, 3283920 bytes`, the ELF's own sha256 and size |
+| the kernel names its commit (written by `tools/build-kernel`) and the SHA-256 of its loaded file (a new Limine request); T6 red at base | **right**: at `c337a03e` `no kernel: line`, at `5c33b1c7` `kernel: b9e54a31… sha256 07aabe04…, 3283920 bytes`, the ELF's own sha256 and size |
 | the hash costs about 1 s under TCG, under 0.1 s on metal | **right under TCG**: 1,444-1,477 ms to the first program with it, 160-164 ms without, three boots each (`hashprobe`): 1.3 s for the native kernel's 3,283,920 bytes. Metal unmeasured (the stick's kernel is the release tier's) |
 | not predicted | the `boot:` line (T7) and the identity line's repeat before it: on metal the banner scrolls off before the prompt (R-px87-9, R-px87-10) |
-| the stick: px86's recipe, its allow-list empty, qualified under OVMF shaped like kasumi | **right** at `0eadf6b4` (stick3, §4.7), after faults of my own in the qualification script, not in PAX: 256 MiB for a 385 MB archive; disks passed to qemu-run beside a stick, which it refuses; three row expectations (escapes, the boot medium's `boot:` line, root's `--check` under a read-only stick); QMP memsave given unsigned higher-half addresses |
+| the stick: px86's recipe, its allow-list empty, qualified under OVMF shaped like kasumi | **right** at `0eadf6b4` (rebased `e9887549`; stick3, §4.7), after faults of my own in the qualification script, not in PAX: 256 MiB for a 385 MB archive; disks passed to qemu-run beside a stick, which it refuses; three row expectations (escapes, the boot medium's `boot:` line, root's `--check` under a read-only stick); QMP memsave given unsigned higher-half addresses |
 | Footprint: cross-cutting | **right** (`boot/start.S`, `tools/build-kernel`: tier all) |
 
 ## 4. Evidence index
@@ -82,7 +88,7 @@ each run's first line names its commit, and each step prints `END <step> exit=N`
 
 ### 4.1 pax#253: the console writes the framebuffer and never reads it
 
-**The change** (`c3915560`, `4e27eb30`, in `kernel/screen` alone). The cell grid already held every cell of the
+**The change** (`9d6d78b5`, `0c4ce54e`, in `kernel/screen` alone). The cell grid already held every cell of the
 screen in RAM; it is the framebuffer's shadow. The framebuffer shows each cell of the active grid as `draw` draws it
 (every writer of a cell draws it; `attach` and `repaint_palette` clear and draw the whole grid), but for the cursor's
 cell while it is shown, and `scroll` hides the cursor first. So `scroll` moves the cells up in RAM and draws only the
@@ -93,14 +99,14 @@ command-line word `fbread`, read once at `attach` (R-px87-3). Pixels right of an
 scroll no longer moves them (they took the scrolled-in rendition's background before; `tools/screen-ref` models cells
 only, and no QEMU mode has such a margin at 1x).
 
-**The witness, V7** (`tests/mpx3-screen.d/readwatch.py`, `26bf7af1`, `7eff6b75`; the row `c5999258`). Under TCG,
+**The witness, V7** (`tests/mpx3-screen.d/readwatch.py`, `c0101798`, `ed5b144c`; the row `d0e243d1`). Under TCG,
 QEMU's gdb stub, driven by the lane's own remote-protocol client (no gdb): a hardware breakpoint on the first
 `pax_fb_fill` (the screen's clear; `%rdi` and `%rdx` give the framebuffer's range), then one read watchpoint (`Z3`)
 over the whole range until `pax_halt`; each stop is a guest instruction that loaded framebuffer memory, counted (to a
 cap of 64, then the watch is removed so the boot ends whole). The emulator is the witness, not the kernel. The control
 boots the same kernel with `fbread` and must be seen reading, so the witness is never vacuous (R-px87-1).
 
-| row | base `3e28a8bc` + V7 (`c5999258`) | head (`c3915560`; `v7-green2.log`) |
+| row | base `3e28a8bc` + V7 (`d0e243d1`) | head (`9d6d78b5`; `v7-green2.log`) |
 |---|---|---|
 | V7 native BIOS | `64+ framebuffer reads in 393 scrolls, the first by pax_fb_copy+0x7 (rsi 0xffff8000fd014008, framebuffer + 0x14008) called from _Wscreen.scroll$917b10a6eb8f6acc+0x19e` | `0 reads of the framebuffer's 4096000 bytes in 393 scrolls`; the control `reads=8+`, the first by `pax_fb_copy` called from `_Wscreen.scroll_readback` |
 | V7 native UEFI | the same, `rsi 0xffff800080014008` | 0 reads in 394 scrolls; the control read |
@@ -115,22 +121,22 @@ shows CPU cost, not metal's uncached reads):
 
 | commit | native BIOS | native UEFI | release BIOS | release UEFI |
 |---|---|---|---|---|
-| base + V7 (`c5999258`) | 0.98 ms | 0.98 ms | not run | not run |
-| `c3915560` (the first diff loop) | 1.56 ms | 1.61 ms | 0.26 ms | 0.24 ms |
-| `4e27eb30` (the grid read directly; `plant-local.log`, the plant's own copy of one band included) | 0.63 ms | | | |
+| base + V7 (`d0e243d1`) | 0.98 ms | 0.98 ms | not run | not run |
+| `9d6d78b5` (the first diff loop) | 1.56 ms | 1.61 ms | 0.26 ms | 0.24 ms |
+| `0c4ce54e` (the grid read directly; `plant-local.log`, the plant's own copy of one band included) | 0.63 ms | | | |
 
 The gauntlet's V3 lines at the head are in `gauntlet3.log` (§4.8).
 
 ### 4.2 pax#246: the live session is quiet
 
-`boot/limine-usb.conf`'s live entry gains `cmdline: quiet` (`1af2da89`), px15's word: kernel/user prints no line
+`boot/limine-usb.conf`'s live entry gains `cmdline: quiet` (`5da10840`), px15's word: kernel/user prints no line
 for a program's ordinary life (its exec, its exit, the first system call it tries that PAX lacks, the frames line);
 refusals, faults and bad buffers still print. kmain_console's `run N:` lines stay, so `tools/qemu-halt`'s typing
 still finds its anchor (`run 1:`, px15) (R-px87-4).
 
-| row | red (`06afa68f`, `u7-red3.log`) | green (`e9e74308`, `u7-green.log`) |
+| row | red (`43937c5d`, `u7-red3.log`) | green (`0c7e1710`, `u7-green.log`) |
 |---|---|---|
-| U7 (`tests/usb-stick`; `91a31125` names the matched line) | BIOS and UEFI: `user: exec pid 1 cr3 0x00000000001c0000 …`, 12 `user:` lines | BIOS and UEFI: no per-program line (2 `user:` lines left: the boot's `user: syscall …` setup report) |
+| U7 (`tests/usb-stick`; `d704c536` names the matched line) | BIOS and UEFI: `user: exec pid 1 cr3 0x00000000001c0000 …`, 12 `user:` lines | BIOS and UEFI: no per-program line (2 `user:` lines left: the boot's `user: syscall …` setup report) |
 
 U7 ran alone (`notes/px87/kasumi/probe-u7.sh`: the suite's own commands, the stick image built by `tools/mkdisk` on
 the host because its disk tools want a container engine, the boots in the container); the whole `tests/usb-stick` is
@@ -138,25 +144,25 @@ CI's (its Linux oracle needs `tools/fetch-usb-linux`'s kernel packages).
 
 ### 4.3 pax#243, #265, #266: poweroff, and what a user is told
 
-- **`poweroff`** (`d65cd1f9`): `user/elf/reboot.S` reads argv[0]'s base name; run as `poweroff` it sends
+- **`poweroff`** (`dc41ead5`): `user/elf/reboot.S` reads argv[0]'s base name; run as `poweroff` it sends
   LINUX_REBOOT_CMD_POWER_OFF whatever its arguments (reboot(8): `reboot`, `halt` and `poweroff` are one program);
   `reboot`, `reboot -h` and `reboot -p` are unchanged. The image carries `/bin/poweroff`, the same bytes
-  (`tools/distribution-root`, `c27c9810`; `tests/distribution`'s `image-poweroff-is-reboot`, `b8ab8c6b`) (R-px87-5).
-- **A refused reboot(2)** (`d65cd1f9`): `<name>: <errno's text>` on standard error and exit 1, as Linux's tools
+  (`tools/distribution-root`, `82d605d7`; `tests/distribution`'s `image-poweroff-is-reboot`, `e52b4393`) (R-px87-5).
+- **A refused reboot(2)** (`dc41ead5`): `<name>: <errno's text>` on standard error and exit 1, as Linux's tools
   answer, measured black-box (`notes/px87/linux/reboot-as-user.log`: Ubuntu 24.04's busybox-static 1.36.1 as uid
   1000: `reboot -f` -> `reboot: Operation not permitted`, `poweroff -f` -> `poweroff: Operation not permitted`,
   `halt -f` -> `halt: Operation not permitted`, each exit 1) (R-px87-6).
-- **`pax-install --check` as a user** (`dbe4caab`, `28c1a535`): the inventory opens every disk's node read-only to
+- **`pax-install --check` as a user** (`55ca3bfc`, `73d188e7`): the inventory opens every disk's node read-only to
   measure it; a disk's node is root's alone (`brw-------`, kernel/files' MODE_BLK, px79), so the open is refused.
   `open_disk` now says `pax-install: inventory: /dev/<name>: Permission denied; pax-install opens every disk to
   measure it, so run it as root` (EPERM's text when the errno is EPERM; any other errno by number) and the inventory
   stops `denied`, main printing nothing more (R-px87-7).
 
-The rows (`tests/mpx6-install.d/asuser.py`, `f8ce61c5`, hooked after I-inventory by `20fdc56e`): one boot of an
+The rows (`tests/mpx6-install.d/asuser.py`, `f694a9b1`, hooked after I-inventory by `5d96b19f`): one boot of an
 initramfs whose run list is `/bin/su pax /check-user.sh` (uid 1000 through su, px46) and then `/bin/poweroff` as root,
 one 64 MiB virtio disk.
 
-| row | red (`20fdc56e`, `asuser-red.serial.log`) | green (`28c1a535`, `asuser-green.log`) |
+| row | red (`5d96b19f`, `asuser-red.serial.log`) | green (`73d188e7`, `asuser-green.log`) |
 |---|---|---|
 | I-user-check | `pax-install: inventory: io`, status 1 | `pax-install: inventory: /dev/vda: Permission denied; pax-install opens every disk to measure it, so run it as root`, status 1 |
 | I-user-reboot | `reboot` and `poweroff` silent, status 1 each | `reboot: Operation not permitted`, `poweroff: Operation not permitted`, status 1 each, the machine still up |
@@ -168,26 +174,26 @@ The probe ran the row alone with its inputs built directly (`probe-asuser.sh`); 
 
 ### 4.4 pax#176: the kernel names itself; the boot times itself
 
-- **The commit** (`a7498021`, `4a827d5b`): `boot/start.S` reserves 48 zeroed bytes, `pax_kernel_commit`, in
+- **The commit** (`d76911ce`, `9ba59ea8`): `boot/start.S` reserves 48 zeroed bytes, `pax_kernel_commit`, in
   `.rodata`; `tools/build-kernel`'s new step 4 writes the tree's `git rev-parse HEAD` there after the link (with
   `-dirty` when a tracked file differs; `PAX_KERNEL_COMMIT` instead when set; nothing outside a checkout, which the
   kernel prints as `unknown`), found through the ELF's symbol table and its PT_LOAD's file offset, refusing a slot
   that is not zero. Two builds of one commit are still byte-identical (the stick's repeat build, §4.7).
-- **The digest** (`a7498021`, `c06fdb18`, `00806a21`): Limine's Executable File response (`boot/start.S`'s
+- **The digest** (`d76911ce`, `e0621eb1`, `b1ea1480`): Limine's Executable File response (`boot/start.S`'s
   eleventh request) gives the file as loaded; `kernel/identity` hashes it with FIPS 180-4's SHA-256 in one frame,
   so the line names exactly what `sha256sum /boot/pax` and `/etc/pax-release`'s kernel row read (R-px87-8).
-- **The lines** (`4571fcf7`, `7beffdd5`, `14d5237b`): `kernel: <commit> sha256 <digest>, <n> bytes` under `PAX: the
+- **The lines** (`348256a8`, `4ee44add`, `db518ae1`): `kernel: <commit> sha256 <digest>, <n> bytes` under `PAX: the
   console`, and the same line again just before the boot line, because on metal the banner scrolls off the screen
   long before the prompt (R-px87-9); then `boot: <n> ms from the kernel's entry to its first program; the console
   drew for <m> ms of it (<s> scrolls, <b> bytes)`: the TSC at kmain's first statement, its rate measured against
   10 ms of the firmware's clock (kernel/clock: the HPET, else the PM timer), the console's share from
-  `kernel/screen`'s own TSC cycles inside `put` and `attach` (`7cd69ef3`) (R-px87-10). This is the metal A/B's number.
+  `kernel/screen`'s own TSC cycles inside `put` and `attach` (`09295398`) (R-px87-10). This is the metal A/B's number.
 
 | row | red | green |
 |---|---|---|
-| T6 (`a4bc0b81`) | `6fce7a12` (`console-red.log`): `'no kernel: line', not 'kernel: 6fce7a12… sha256 6969c859…, 3265904 bytes'` | `b9e54a31` (`console-caps.log`): `kernel: b9e54a31… sha256 07aabe04…, 3283920 bytes`, every session |
-| T6's repeat (`a3e12072`) | `a3e12072` (`t6r-red.log`): `not repeated before the boot line ('ahci0: 8086:2922 at 00:1f.2 port 2: ATAPI skipped …')`, every session | the gauntlet (§4.8) |
-| T7 (`6fce7a12`) | `6fce7a12`: `no boot line as expected ('')` | `b9e54a31`: `boot: 1568 ms from the kernel's entry to its first program; the console drew for 34 ms of it (0 scrolls, 2724 bytes)` |
+| T6 (`7b50779d`) | `c337a03e` (`console-red.log`): `'no kernel: line', not 'kernel: 6fce7a12… sha256 6969c859…, 3265904 bytes'` | `5c33b1c7` (`console-caps.log`): `kernel: b9e54a31… sha256 07aabe04…, 3283920 bytes`, every session |
+| T6's repeat (`40eeb4a1`) | `40eeb4a1` (`t6r-red.log`): `not repeated before the boot line ('ahci0: 8086:2922 at 00:1f.2 port 2: ATAPI skipped …')`, every session | the gauntlet (§4.8) |
+| T7 (`c337a03e`) | `c337a03e`: `no boot line as expected ('')` | `5c33b1c7`: `boot: 1568 ms from the kernel's entry to its first program; the console drew for 34 ms of it (0 scrolls, 2724 bytes)` |
 
 **The hash's cost** (`hashprobe.log`; the head and the same commit with `identity.report()` dropped, a probe commit
 made on kasumi and never pushed; three BIOS boots each, TCG): 1,444-1,477 ms to the first program with it, 160-164
@@ -239,10 +245,11 @@ TCG; CI boots run that kernel (R-px87-8 names the trade).
   **A**, and B as the cross-check (§5.5).
 - **R-px87-0, the plant's base.** (A) the lane's head, its draft PR against `px87`, so its run is the planner's
   `tier pr` for `kernel/screen` alone (the @console suites and `mpx6-firmware`), RULES §7's smallest run that shows
-  it, and every other row of those suites green; (B) an earlier commit of the fix. B was my first cut (`4e27eb30`)
-  and was wrong: its run tested the plant merged into the head pushed at the time, `c27c9810`, which carried T6 and
-  T7's red-first rows without the identity code, so `mpx3-console` failed T6 and T7 beside V7's red (§4.6).
-  Recommended and implemented: **A** (`26439858` on `0eadf6b4`).
+  it, and every other row of those suites green; (B) an earlier commit of the fix. B was my first cut (on `4e27eb30`,
+  rebased `0c4ce54e`) and was wrong: its run tested the plant merged into the head pushed at the time, `c27c9810`
+  (rebased `82d605d7`), which carried T6 and T7's red-first rows without the identity code, so `mpx3-console` failed
+  T6 and T7 beside V7's red (§4.6). Recommended and implemented: **A**: `26439858` on the pre-rebase head `0eadf6b4`,
+  then the same commit on the rebased head (R-px87-14; its commit in #269's body).
 - **R-px87-11, the Linux side on kasumi.** `mpx3-console`'s `tools/linux-tty --pid1` makes a pid namespace, which
   needs `CAP_SYS_ADMIN`: (A) `--cap-add SYS_ADMIN` inside the rootless user namespace, for the lane's runs only; (B)
   leave T2 and T5 to CI. Recommended and implemented: **A** (nothing on the host gains a capability; CI is unchanged).
@@ -253,8 +260,12 @@ TCG; CI boots run that kernel (R-px87-8 names the trade).
 - **R-px87-13, the boot line in the triage.** `tests/mpx6-triage`'s T2 compares a plain boot's transcript with a
   triage boot's, masking what moves between boots (the clock's numbers); the new `boot:` line's milliseconds,
   scroll and byte counts move too (1470 ms and 0 scrolls plain, 1518 ms and 2 scrolls under triage in gauntlet2):
-  (A) mask the line's numbers as the clock's are (`b1dc9c5e`); (B) a command-line word to drop the line under
+  (A) mask the line's numbers as the clock's are (`a3a9ba6f`); (B) a command-line word to drop the line under
   triage. Recommended and implemented: **A**: the triage still sees the line, only its measured numbers are masked.
+- **R-px87-14 (the orchestrator's, decided): rebase before the label; gauntlet3 stands by tree.** The lane is
+  rebased onto trunk `5da8daaf` before the `full-matrix` label, every cited commit mapped by script, and gauntlet3
+  at `0eadf6b4` stands for the rebased code because the trees differ only in `notes/pm00*` (§4.10). The plant is
+  re-cut on the rebased head; the main branch and the plant are pushed once each.
 
 
 ### 4.6 The plant, `px87-plant-scroll-read`
@@ -263,16 +274,18 @@ One commit: the scroll copies one band of the framebuffer onto the band above it
 redraw, as px19's copy did for every band. The picture is still right (the redraw covers whatever the band copy got
 wrong), so only a witness of reads can see it. Never merged; draft PR #269 against `px87`.
 
-- **The first cut, `bc142626` on `4e27eb30`, run 41503056548: wrong.** Two jobs red. `mpx3-screen`: V7 red by name,
+- **The first cut, `bc142626` on `4e27eb30` (rebased `0c4ce54e`), run 41503056548: wrong.** Two jobs red. `mpx3-screen`: V7 red by name,
   `64+ framebuffer reads in 393 scrolls, the first by pax_fb_copy+0x7 (rsi 0xffff8000fd014008, framebuffer +
   0x14008) called from _Wscreen.scroll$917b10a6eb8f6acc+0xf4`, the plant. `mpx3-console`: T6 and T7 red on every
   session (`'no kernel: line'`, `no boot line as expected ('')`), T1 to T5 green. That is not the scroll read-back
-  (`mpx3-console` has no row that sees framebuffer reads): GitHub tested the plant merged into `c27c9810`, the lane
-  head pushed then (`Merge bc142626… into c27c9810…`, the job's checkout), which held T6 and T7's red-first rows
-  (`a4bc0b81`, `6fce7a12`) but not the identity code (`a7498021` to `4571fcf7`, pushed later). The plant was cut
+  (`mpx3-console` has no row that sees framebuffer reads): GitHub tested the plant merged into `c27c9810` (rebased
+  `82d605d7`), the lane head pushed then (`Merge bc142626… into c27c9810…`, the job's checkout), which held T6 and T7's red-first rows
+  (`7b50779d`, `c337a03e`) but not the identity code (`d76911ce` to `348256a8`, pushed later). The plant was cut
   from a commit whose own rows were still red (R-px87-0).
-- **The re-cut, `26439858` on the head `0eadf6b4`, run 41527028948** (read once at 21:17Z; the watch is the
-  orchestrator's). Expected: V7 alone red, by the same name; `mpx3-console` green.
+- **The second cut, `26439858` on the pre-rebase head `0eadf6b4` (rebased `e9887549`), run 41527028948** (read
+  once at 21:17Z; the watch is the orchestrator's). Expected: V7 alone red, by the same name; `mpx3-console` green.
+- **The third cut, after the rebase** (R-px87-14): the same one commit on the rebased lane head, pushed once; its
+  commit and run id are in #269's body and the hand-back.
 
 Locally (`plant-local.log`, kasumi, native BIOS): `FAIL V7 native bios readwatch: 64+ framebuffer reads in 393
 scrolls, the first by pax_fb_copy+0x7 (rsi 0xffff8000fd014008, framebuffer + 0x14008) called from
@@ -293,7 +306,8 @@ options, R-px87-12) that must stay byte-identical: `serial` (COM1, the live sess
 USB keyboard by QMP, the xHCI on MSI behind OVMF's 64 GiB window, the transcript read from PAX's memory log by QMP
 memsave), `fbread` (the second entry, the serial rows).
 
-**stick3 at the head `0eadf6b4` (`stick3.log`): every step green.** The staged image:
+**stick3 at the pre-rebase head `0eadf6b4` (rebased `e9887549`, the same tree but for `notes/pm00*`, §4.10;
+`stick3.log`): every step green.** The staged image:
 
 | | |
 |---|---|
@@ -310,16 +324,16 @@ host memory, so reading it back costs nothing there, while the cell redraw write
 
 **How it got there** (each fault mine, in order):
 
-1. `stick` (`63843c5d`'s fix): the first qualification booted with `tools/qemu-run`'s default 256 MiB, which cannot
+1. `stick` (`4658a0dd`'s fix): the first qualification booted with `tools/qemu-run`'s default 256 MiB, which cannot
    hold the 385 MB archive; QEMU sat in Limine's load and was ended by its own pid. The legs boot with 3 GiB.
-2. `stick2` at `14d5237b`: sstick printed `FAIL USB: required boot file missing: /EFI/BOOT/BOOTX64.EFI` and `FAIL
+2. `stick2` at `14d5237b` (rebased `db518ae1`): sstick printed `FAIL USB: required boot file missing: /EFI/BOOT/BOOTX64.EFI` and `FAIL
    USB: protective MBR must cover the disk`. Those were `tools/check-usb`'s refusals of the two copies the chain breaks
    on purpose, the expected answers in check-usb's own words; the good image's U2 had read BOOTX64.EFI's sha256. The
-   chain now says each as `PASS a copy with its <fault> broken is refused by name` (`ae380b14`). squal-serial then
+   chain now says each as `PASS a copy with its <fault> broken is refused by name` (`7edb9cdf`). squal-serial then
    failed every row with an empty transcript: `tools/qemu-run` exits 2 at once when `--nvme` or `--ahci` is given
-   beside `--usb-stick` (as `109dace6` gave them), so no guest started. `ae380b14` attaches the disks as QEMU's own
+   beside `--usb-stick` (as `96f35f71` gave them), so no guest started. `7edb9cdf` attaches the disks as QEMU's own
    options and keeps qemu-run's output (`qemu-run.out`) for a leg that does not boot.
-3. `probe-fix` at `ae380b14` against stick2's image (`probe-fix.log`): the serial leg ran the whole session (Q1-login,
+3. `probe-fix` at `ae380b14` (rebased `7edb9cdf`) against stick2's image (`probe-fix.log`): the serial leg ran the whole session (Q1-login,
    -quiet, -user-reboot, -user-check, -power and Q-nowrite green) and three rows failed on the script, not on PAX:
    Q1-banner read the line with the console's cursor escapes in front (`ESC[01;01HESC[01;01HPAX: the console`);
    Q1-boot took the boot medium's line, `boot: /boot/initramfs.cpio from a disk: …`, which also begins `boot: `;
@@ -331,11 +345,11 @@ host memory, so reading it back costs nothing there, while the cell redraw write
    as unsigned numbers (`probe-memsave.log`, QEMU 8.2.2: `0xffffffff80123450` -> `Invalid parameter type for 'val',
    expected: integer`; the same address as its two's complement accepted, `Invalid addr 0xffffffff80123450/size 8`
    on a stopped machine). So the stick does boot behind the NEC controller under QEMU 8.2.2 and OVMF, and no run on
-   the stock `qemu-xhci` (INTx) was needed. `ec432240` reads every line with the escapes removed, picks the boot line
+   the stock `qemu-xhci` (INTx) was needed. `196b1371` reads every line with the escapes removed, picks the boot line
    by its own pattern (and checks the identity line just before it), checks root's `--check` by every listed disk
    refused, nothing written, status 1, and passes memsave's address as int64; the new rows were checked against
    probe-fix's own transcript (green) and against it with the stick's refusal removed (red) before the commit.
-4. `stick3` at `0eadf6b4`: green, above.
+4. `stick3` at `0eadf6b4` (rebased `e9887549`): green, above.
 
 ### 4.8 The gauntlet
 
@@ -346,42 +360,72 @@ mpx3-screen (both tiers and firmwares: V0-V7), mpx3-console (both tiers and firm
 --firmware bios`, the as-user rows included), mpx6-firmware (`--tier native --firmware both`, F10 the triage). It
 stops at the first nonzero step and prints `END <step> exit=N` for each.
 
-**gauntlet2 at `14d5237b` (`gauntlet2.log`): red at mpx6-firmware.** `END ci-plan exit=0`, `END ci-budgets exit=0`,
+**gauntlet2 at `14d5237b` (rebased `db518ae1`; `gauntlet2.log`): red at mpx6-firmware.** `END ci-plan exit=0`, `END ci-budgets exit=0`,
 `END pax-release exit=0`, `END mpx1 exit=0`, `END mpx3-screen exit=0`, `END mpx3-console exit=0`, `END u7-build
 exit=0`, `END u7-disk exit=0`, `END u7-boot exit=0`, `END u7 exit=0`, `END mpx6-install exit=0`, `END mpx6-firmware
 exit=2` (`mpx6-triage: FAIL T2 bios: triage changed a line PAX prints`, `mpx6-firmware: FAIL F10 native: the metal
 triage`), `END gauntlet2 exit=2`. T2 compares a plain boot's transcript with a triage boot's; the one line that
 differed (`gauntlet2-triage-bios.transcript.diff`) was the new `boot:` line's measurements, `1470 ms … 31 ms of it
 (0 scrolls, 2799 bytes)` plain against `1518 ms … 50 ms of it (2 scrolls, 2799 bytes)` under triage. The change
-did not break what the triage protects; the expectation moves with the new line (R-px87-13): `b1dc9c5e` masks the
-line's numbers as T2 masks the clock's. Green at `ae380b14` (`probe-fix.log`): `PASS T1/T2 bios: plain and triage,
+did not break what the triage protects; the expectation moves with the new line (R-px87-13): `a3a9ba6f` masks the
+line's numbers as T2 masks the clock's. Green at `ae380b14` (rebased `7edb9cdf`; `probe-fix.log`): `PASS T1/T2 bios: plain and triage,
 the same transcript but for the screen line (41 lines)`, the same on UEFI (42 lines), every TRIAGE row passing,
 `END triage exit=0`.
 
-**gauntlet3 at the head `0eadf6b4`** (`gauntlet3.log`): launched 21:17Z behind stick3, holding the lock from
+**gauntlet3 at the pre-rebase head `0eadf6b4`** (rebased `e9887549`, the same tree but for `notes/pm00*`, §4.10;
+`gauntlet3.log`): launched 21:17Z behind stick3, holding the lock from
 21:25Z; at this note's commit `END ci-plan exit=0`, `END ci-budgets exit=0`, `END pax-release exit=0`, mpx1
 running. It is a detached job (pid 3499701, log `/home/mfwolffe/lanes/px87/runs/gauntlet3.log`, exit marker
 `runs/gauntlet3.exit`); its END lines are read from that log, and the PR's body carries them when it ends.
 
-### 4.9 Commits (on `3e28a8bc`, oldest first; the failing row before each fix)
+### 4.9 Commits (rebased on `5da8daaf`, oldest first; the failing row before each fix)
 
-- `bb54f7b9` the prediction, first.
-- pax#253: `26bf7af1`, `7eff6b75` (the witness), `c5999258` (V7, red at `3e28a8bc` + V7: `64+ framebuffer reads … by
-  pax_fb_copy … called from _Wscreen.scroll`), `c3915560` (the fix; V7 0 reads), `4e27eb30` (V3's loop, after
-  `c3915560`'s 1.56 ms), `7cd69ef3` (the console's TSC cycles, for T7).
-- pax#265, #266, #243: `f8ce61c5`, `20fdc56e` (the as-user rows, red at `20fdc56e`: `inventory: io`, a silent
-  `reboot`, root's `poweroff` restarting), `d65cd1f9` (reboot.S), `dbe4caab`, `28c1a535` (the inventory),
-  `b8ab8c6b` (red by the missing name), `c27c9810` (`/bin/poweroff`).
-- pax#176: `a4bc0b81`, `6fce7a12` (T6 and T7, red at `6fce7a12`: `no kernel: line`, `no boot line`), `a7498021`,
-  `c06fdb18`, `4a827d5b`, `00806a21`, `4571fcf7` (green at `b9e54a31`), `b9e54a31` (the tier map), `a3e12072` (T6's
-  repeat, red at `a3e12072`), `7beffdd5`, `14d5237b` (green).
-- pax#246: `06afa68f` (U7, red at `06afa68f`: `user: exec pid 1 …`), `91a31125` (U7 names the line), `1af2da89`
-  (`quiet`; green at `e9e74308`).
-- The triage: `b1dc9c5e` (T2 red at `14d5237b` in gauntlet2: only the `boot:` line's numbers differed; R-px87-13).
-- Docs: `aa6081a2` (BOOT.md), `e9e74308` (INSTALL-METAL.md), `b96785bb` (README, README only), `e9757e8a`
+- `ac0d327f` the prediction, first.
+- pax#253: `c0101798`, `ed5b144c` (the witness), `d0e243d1` (V7, red at `3e28a8bc` + V7: `64+ framebuffer reads … by
+  pax_fb_copy … called from _Wscreen.scroll`), `9d6d78b5` (the fix; V7 0 reads), `0c4ce54e` (V3's loop, after
+  `9d6d78b5`'s 1.56 ms), `09295398` (the console's TSC cycles, for T7).
+- pax#265, #266, #243: `f694a9b1`, `5d96b19f` (the as-user rows, red at `5d96b19f`: `inventory: io`, a silent
+  `reboot`, root's `poweroff` restarting), `dc41ead5` (reboot.S), `55ca3bfc`, `73d188e7` (the inventory),
+  `e52b4393` (red by the missing name), `82d605d7` (`/bin/poweroff`).
+- pax#176: `7b50779d`, `c337a03e` (T6 and T7, red at `c337a03e`: `no kernel: line`, `no boot line`), `d76911ce`,
+  `e0621eb1`, `9ba59ea8`, `b1ea1480`, `348256a8` (green at `5c33b1c7`), `5c33b1c7` (the tier map), `40eeb4a1` (T6's
+  repeat, red at `40eeb4a1`), `4ee44add`, `db518ae1` (green).
+- pax#246: `43937c5d` (U7, red at `43937c5d`: `user: exec pid 1 …`), `d704c536` (U7 names the line), `5da10840`
+  (`quiet`; green at `0c7e1710`).
+- The triage: `a3a9ba6f` (T2 red at `db518ae1` in gauntlet2: only the `boot:` line's numbers differed; R-px87-13).
+- Docs: `4e7fce98` (BOOT.md), `0c7e1710` (INSTALL-METAL.md), `144db186` (README, README only), `8a8fb5b2`
   (SOURCES.md).
-- The stick and the lane's tools: `6ba68905`, `109dace6`, `63843c5d`, `ae380b14`, `ec432240` (notes/px87/stick),
-  `4d561cab` (notes/px87/linux), `7380320e`, `0eadf6b4` (notes/px87/kasumi); then this note and the logs.
+- The stick and the lane's tools: `a28dc800`, `96f35f71`, `4658a0dd`, `7edb9cdf`, `196b1371` (notes/px87/stick),
+  `7c20722b` (notes/px87/linux), `ad345890`, `e9887549` (notes/px87/kasumi); then this note and the logs.
+
+### 4.10 The rebase (R-px87-14)
+
+After gauntlet3 began and stick3 ended, trunk had moved from `3e28a8bc` to `5da8daaf` by pm00's notes alone
+(`notes/pm00-the-design.md`, `notes/pm00/SOURCES.md`, `notes/pm00/matrix.md`, `notes/pm00/prediction.txt`; no
+path in common with this lane). The 47 commits were rebased onto `5da8daaf` without a conflict.
+`notes/px87/rebase/map.sh 3e28a8bc fa6796d8 5da8daaf <rebased head>` pairs each pre-rebase commit with its rebased
+one in order and stops unless the subjects are equal, the patches equal (`git patch-id --stable`) and the trees
+differ by exactly trunk's four paths; it passed for all 47, and its table is `notes/px87/rebase/map.txt` (old,
+new, subject). The table resolves every pre-rebase name in the logs, the transcripts and the stick: the stick's
+`kernel: 0eadf6b42fa3…` line and gauntlet3's head `0eadf6b4` are the rebased `e9887549`.
+
+The code head before and after (`notes/px87/rebase/code-head-diff.txt`):
+
+```
+$ git diff --stat 0eadf6b4 e9887549
+ notes/pm00-the-design.md  | 222 ++++++++++++++++++++++++++++++++++++++++++++++
+ notes/pm00/SOURCES.md     | 126 ++++++++++++++++++++++++++
+ notes/pm00/matrix.md      |  59 ++++++++++++
+ notes/pm00/prediction.txt |   6 ++
+ 4 files changed, 413 insertions(+)
+$ git diff 0eadf6b4 e9887549 -- . ':(exclude)notes/pm00*' | wc -c
+0
+$ git diff --name-only 0eadf6b4 e9887549 -- . ':(exclude)notes/pm00*' | wc -l
+0
+```
+
+So the rebased code is gauntlet3's and stick3's tree plus pm00's notes, and gauntlet3 at `0eadf6b4` stands for it.
+The staged stick stays as it was built: the pre-merge stick, its kernel line naming `0eadf6b4`.
 
 ## 5. Done-when
 
@@ -402,7 +446,7 @@ running. It is a detached job (pid 3499701, log `/home/mfwolffe/lanes/px87/runs/
 - [x] Item 7: no kernel, firmware or driver source (§1).
 - [x] Item 8: this note, the plant (`px87-plant-scroll-read`, draft PR #269), the PR, the audit.
 - [x] README read against the pass: the banner sentence, the live stick's paragraph, the console paragraph, the
-  power commands and two rows of the test table moved and are refreshed (`b96785bb`, a README-only commit).
+  power commands and two rows of the test table moved and are refreshed (`144db186`, a README-only commit).
 
 ### 5.2 Departures and limits
 
@@ -423,7 +467,7 @@ running. It is a detached job (pid 3499701, log `/home/mfwolffe/lanes/px87/runs/
 
 - The framebuffer's reads in kmain_screen's boot, every scroll included: base 64+ (the cap) by the first scroll;
   head 0 in 393 scrolls (BIOS) and 394 (UEFI), native and release (§4.1).
-- V3's scrolled line under TCG: base 0.98 ms native; 0.63 ms native at `4e27eb30` (§4.1); gauntlet3's V3 lines at the
+- V3's scrolled line under TCG: base 0.98 ms native; 0.63 ms native at `0c4ce54e` (§4.1); gauntlet3's V3 lines at the
   head are in its log (§4.8).
 - The live stick under TCG (stick3, release kernel, 1280x800): `boot:` 1016 ms, the console 565 ms of it in 340
   scrolls with the new scroll; 804 ms and 361 ms with `fbread` (§4.7).
@@ -441,7 +485,9 @@ numbers to come from §5.5's session), #246, #243, #265, #266, #176. Owed to fil
 - pax#246's other half: the per-program lines kept in the kernel's memory log for the stick's log file.
 - kernel/identity's SHA-256 inner loop through calls: about 1.3 s of every TCG boot of the native kernel.
 - The `fbread` word and V7's control: drop both once the metal A/B is in (R-px87-3).
-- kasumi's VT-x (a host fact, not pax's): off in the firmware since the PAX install.
+
+kasumi's VT-x is a firmware setting, not an issue: the orchestrator tells the maintainer, and the metal session's
+optional step 6 turns it on.
 
 ### 5.5 The metal session (the maintainer's; the same text heads `~/pax-smoke/INSTALL.txt`)
 
