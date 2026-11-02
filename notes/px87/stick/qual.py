@@ -10,11 +10,14 @@ topology (tools/qemu-run --usb-stick: qemu-xhci + usb-storage, no CD-ROM, no vir
 LEG serial: COM1 present (the transcript is the serial file), keys typed into COM1: the live login as
   root, then each command followed by `echo PX87-MARK-$?`; the rows:
   Q1-banner  `PAX: the console`, then `kernel: COMMIT sha256 <sha256 of KERNEL.elf>, <size> bytes`
-  Q1-boot    `boot: <n> ms ...; the console drew for <m> ms of it (...)` before `run 1:`
+  Q1-boot    `boot: <n> ms ...; the console drew for <m> ms of it (...)` before `run 1:`, right after the
+             identity line again (the boot medium's own `boot: <path> from a disk` line is not it)
   Q1-quiet   no line of a program's ordinary life (`user: exec pid`, `user: ... exit_group N after`)
   Q1-user    `su pax -c reboot` -> `reboot: Operation not permitted`, status 1;
              `su pax -c 'pax-install --check'` -> `pax-install: inventory: /dev/sda: Permission denied; ...`
-  Q1-check   `pax-install --check` as root: the stick refused as the live medium, no target, status 1
+  Q1-check   `pax-install --check` as root: the three disks listed, each refused by name (the blank disks:
+             no allow-list names them; the stick: read-only, as QEMU attaches it), nothing written, status 1
+Every row reads the transcript with the console's escapes removed (the screen's cursor moves and query).
   Q1-power   `poweroff`: QEMU ends with status 0, the kernel's last power line `poweroff: ACPI S5 types a/b`
 Both legs attach an NVMe and a SATA disk (blank, standing in for kasumi's other disks; QEMU's own -drive and
 -device options, since tools/qemu-run boots a stick alone) and hold each byte-identical (Q-nowrite); qemu-run's
@@ -71,6 +74,15 @@ assert sha(copy) == sha(stick), 'the copy differs from the stick'
 print('stick %s sha256 %s (the copy equal)' % (stick, sha(stick)), flush=True)
 want_kernel = 'kernel: %s sha256 %s, %d bytes' % (commit, sha(kernel), kernel.stat().st_size)
 quiet_re = re.compile(r'^user: (exec pid |[^ ]+ pid [0-9]+ (exit_group|exit) [0-9]+ after )')
+esc_re = re.compile(r'\x1b\[[0-9;?=<>]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[c78DEHM=>]')
+
+
+def plain(t):
+    # the console's own escapes (cursor moves, the terminal query) are not text: the rows read the lines
+    # as a reader of the screen would, with every escape removed
+    return esc_re.sub('', t).replace('\r', '')
+
+
 boot_re = re.compile(r"^boot: ([0-9]+) ms from the kernel's entry to its first program; the console drew for ([0-9]+) ms of it \(([0-9]+) scrolls, ([0-9]+) bytes\)$")
 
 
@@ -78,10 +90,10 @@ def common_rows(prefix, lines):
     i = lines.index('PAX: the console') if 'PAX: the console' in lines else -1
     got = lines[i + 1] if 0 <= i < len(lines) - 1 else ''
     row(prefix + '-banner', got == want_kernel, repr(got) + ('' if got == want_kernel else ' not ' + repr(want_kernel)))
-    b = [l for l in lines if l.startswith('boot: ')]
+    b = [k for k, l in enumerate(lines) if boot_re.match(l)]
     r1 = [k for k, l in enumerate(lines) if l.startswith('run 1: ')]
-    ok = bool(b) and bool(boot_re.match(b[0])) and r1 and lines.index(b[0]) < r1[0]
-    row(prefix + '-boot', ok, b[0] if b else 'no boot line')
+    ok = bool(b) and bool(r1) and b[0] < r1[0] and lines[b[0] - 1] == want_kernel
+    row(prefix + '-boot', ok, (lines[b[0]] + ('' if ok else ' (not before run 1:, or not after the identity line again)')) if b else 'no boot line')
     bad = [l for l in lines if quiet_re.match(l)]
     row(prefix + '-quiet', not bad, 'no per-program line' if not bad else bad[0])
 
@@ -99,7 +111,7 @@ if leg == 'serial':
 
     def text():
         try:
-            return serial.read_bytes().decode('latin-1').replace('\r', '')
+            return plain(serial.read_bytes().decode('latin-1'))
         except OSError:
             return ''
 
@@ -145,8 +157,15 @@ if leg == 'serial':
     row('Q1-user-reboot', 'reboot: Operation not permitted' in s0 and 'PX87-MARK-0-1' in s0, ' | '.join(s0.strip().splitlines()[-2:]))
     ok1 = re.search(r'^pax-install: inventory: /dev/(sd[a-z]|nvme[0-9]n[0-9]): Permission denied; pax-install opens every disk to measure it, so run it as root$', s1, re.M) and 'PX87-MARK-1-1' in s1
     row('Q1-user-check', bool(ok1), ' | '.join(s1.strip().splitlines()[-2:]))
-    ok2 = 'refused: a PAX live medium' in s2 and 'PX87-MARK-2-1' in s2
-    row('Q1-check', ok2, ' | '.join(l for l in s2.strip().splitlines() if 'refused' in l or 'MARK' in l or 'Disks' in l))
+    # root's --check: the three disks listed (the NVMe, the SATA disk and the stick), each refused by
+    # name (the two blank disks: no allow-list names them; the stick: read-only, as QEMU attaches it),
+    # nothing written, status 1
+    nd = re.search(r'^Disks \(([0-9]+)\)', s2, re.M)
+    listed = re.findall(r'^(/dev/[a-z0-9]+) bytes=', s2, re.M)
+    refused = re.findall(r'^    refused: .*: (/dev/[a-z0-9]+)$', s2, re.M)
+    ok2 = (nd and nd.group(1) == '3' and len(listed) == 3 and sorted(refused) == sorted(listed)
+           and 'No disk may be a target, so nothing will be written.' in s2 and 'PX87-MARK-2-1' in s2)
+    row('Q1-check', bool(ok2), ' | '.join(l.strip() for l in s2.strip().splitlines() if 'refused' in l or 'MARK' in l or l.startswith('Disks') or 'nothing will be written' in l))
     power = [l for l in lines if re.match(r'^(reboot|poweroff): ', l) and not l.endswith('Operation not permitted')]
     last = power[-1] if power else ''
     row('Q1-power', rc == 0 and bool(re.fullmatch(r'poweroff: ACPI S5 types [0-7]/[0-7]', last)), 'QEMU status %d, the last power line %r' % (rc, last))
@@ -185,14 +204,28 @@ elif leg == 'kasumi':
     json.loads(fh.readline())
     call('qmp_capabilities')
 
+    def i64(a):
+        # QMP's memsave declares val an int (int64): the kernel's higher-half addresses (0xffffffff8...)
+        # are refused as unsigned numbers and taken as their two's complement
+        return a - (1 << 64) if a >= 1 << 63 else a
+
+    said = set()
+
+    def memsave(addr, size, p):
+        m = call('memsave', val=i64(addr), size=size, filename=str(p))
+        if 'error' in m and m['error'].get('desc') not in said:
+            said.add(m['error'].get('desc'))
+            print('  memsave %#x: %s' % (addr, m['error'].get('desc')), flush=True)
+        return 'error' not in m
+
     def transcript():
         p = work / 'mem.bin'
-        if 'error' in call('memsave', val=sym['pax_serial_log_count'], size=8, filename=str(p)):
+        if not memsave(sym['pax_serial_log_count'], 8, p):
             return ''
         n = min(int.from_bytes(p.read_bytes()[:8], 'little'), 65536)
-        if n == 0 or 'error' in call('memsave', val=sym['pax_serial_log'], size=n, filename=str(p)):
+        if n == 0 or not memsave(sym['pax_serial_log'], n, p):
             return ''
-        return p.read_bytes()[:n].decode('latin-1').replace('\r', '')
+        return plain(p.read_bytes()[:n].decode('latin-1'))
 
     def wait(pattern, timeout=900):
         t0 = time.time()
