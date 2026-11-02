@@ -75,11 +75,23 @@
 #      (px13's answer, a serial line's); and the two sessions are
 #      byte-identical otherwise (tests/mpx3-console holds the serial-only
 #      session to Linux's).
+#   V7 (px87, pax#253) no framebuffer reads: kmain_screen again, under
+#      TCG with QEMU's gdb stub (tests/mpx3-screen.d/readwatch.py): a
+#      hardware breakpoint on the first pax_fb_fill (the screen's clear,
+#      whose arguments are the framebuffer's range), then one read
+#      watchpoint over that whole range until pax_halt. The kernel's
+#      whole boot after its screen attaches, every scroll of V3 and the
+#      pattern's included (its last `screen: <n> bytes, <s> scrolls`
+#      line counts them, s > 0), reads the framebuffer 0 times. The
+#      control: the same kernel booted with `fbread` on its command line
+#      (px19's scroll, kept for measurements) is seen reading, the first
+#      read by pax_fb_copy called from kernel/screen's scroll: the
+#      witness sees what V7 says is absent.
 #
 # --images DIR boots what this script built earlier (DIR holds
-# <tier>/kmain_screen.{elf,iso}, <tier>/kmain_console.elf,
-# <tier>/console-{ask,pelt}.iso): any host with QEMU and python3, no
-# wolf. Without it the script builds (linux x86-64); --no-boot stops
+# <tier>/kmain_screen.{elf,iso}, <tier>/kmain_screen-fbread.iso,
+# <tier>/kmain_console.elf, <tier>/console-{ask,pelt}.iso): any host
+# with QEMU and python3, no wolf. Without it the script builds (linux x86-64); --no-boot stops
 # after V0. --pelt DIR takes pelt from DIR instead of building it.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
@@ -164,6 +176,11 @@ if [ -z "$images" ]; then
                 if [ "$k" = kmain_screen ]; then
                     "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/kmain_screen.iso" >/dev/null || why+=" $tier kmain_screen: mkimage;"
                     say "built $tier kmain_screen: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/kmain_screen.iso")"
+                    # px87: V7's control, the same kernel with `fbread`.
+                    cp "$PAX_ROOT/boot/limine.conf" "$work/$tier/fbread.conf"
+                    printf '\n    cmdline: fbread\n' >> "$work/$tier/fbread.conf"
+                    "$PAX_ROOT/tools/mkimage" --conf "$work/$tier/fbread.conf" "$elf" "$work/$tier/kmain_screen-fbread.iso" >/dev/null \
+                        || why+=" $tier kmain_screen-fbread: mkimage;"
                 else
                     for p in ask pelt; do
                         "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
@@ -291,6 +308,39 @@ for leg in $legs; do
             why+=" no scroll line ('$cl');"
         fi
         [ -z "$why" ] && say "PASS V3 $id: $cl: $cost ms a scrolled line ($(sed -n 's/^accel: //p' "$slog.meta"))" || bad "V3 $id:$why"
+
+        # --- readwatch: V7 (px87, pax#253) ------------------------------------
+        # One port per boot of this run (PAX_READWATCH_PORT moves them all).
+        id="$tier $leg readwatch"
+        why=
+        rwport=$(( ${PAX_READWATCH_PORT:-12340} + ran * 2 ))
+        rw=$PAX_BUILD/mpx3-screen-$tier-$leg-readwatch
+        rwc=$PAX_BUILD/mpx3-screen-$tier-$leg-readwatch-fbread
+        rwi=$images/$tier/kmain_screen-fbread.iso
+        rm -f "$rw.log" "$rw.serial.log" "$rwc.log" "$rwc.serial.log"
+        python3 "$here/mpx3-screen.d/readwatch.py" --elf "$selft" --firmware "$leg" --serial "$rw.serial.log" \
+            --port "$rwport" --cap 64 --timeout 900 "$images/$tier/kmain_screen.iso" > "$rw.log" 2>&1 \
+            || why+=" the watched boot did not reach pax_halt ($(tail -n 1 "$rw.log"));"
+        res=$(sed -n 's/^readwatch: RESULT //p' "$rw.log")
+        reads=${res#reads=}; reads=${reads%% *}
+        fbl=$(sed -n 's/^readwatch: framebuffer 0x[0-9a-f]*, \([0-9]*\) bytes .*/\1/p' "$rw.log")
+        sc=$(tr -d '\r' < "$rw.serial.log" 2>/dev/null | sed -n 's/^screen: [0-9]* bytes, \([0-9]*\) scrolls$/\1/p' | tail -n 1)
+        grep -q '^readwatch: read watchpoint over the whole range: OK$' "$rw.log" || why+=" no read watchpoint over the framebuffer ($(grep -m1 'watchpoint' "$rw.log"));"
+        [ "$reads" = 0 ] || why+=" $reads framebuffer reads in $sc scrolls, the first $(sed -n 's/^readwatch: read 1: //p' "$rw.log");"
+        [ -n "$sc" ] && [ "$sc" -gt 0 ] || why+=" no scroll was watched ('$sc');"
+        if [ -f "$rwi" ]; then
+            python3 "$here/mpx3-screen.d/readwatch.py" --elf "$selft" --firmware "$leg" --serial "$rwc.serial.log" \
+                --port "$((rwport + 1))" --cap 8 --timeout 900 "$rwi" > "$rwc.log" 2>&1 \
+                || why+=" the control's boot did not reach pax_halt ($(tail -n 1 "$rwc.log"));"
+            cres=$(sed -n 's/^readwatch: RESULT //p' "$rwc.log")
+            creads=${cres#reads=}; creads=${creads%% *}; creads=${creads%+}
+            cfirst=$(sed -n 's/^readwatch: read 1: //p' "$rwc.log")
+            [ "${creads:-0}" -ge 1 ] && [[ $cfirst == *"by pax_fb_copy"*"called from _Wscreen.scroll"* ]] \
+                || why+=" the control (fbread) was not seen reading in screen's scroll ('$cres', '$cfirst');"
+        else
+            why+=" no $rwi (the control's image);"
+        fi
+        [ -z "$why" ] && say "PASS V7 $id: 0 reads of the framebuffer's $fbl bytes in $sc scrolls under one read watchpoint; the control (fbread) read it $cres, the first $cfirst" || bad "V7 $id:$why"
 
         # --- screen-serial: V4 ----------------------------------------------
         id="$tier $leg screen-serial"
