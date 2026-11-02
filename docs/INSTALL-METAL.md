@@ -150,7 +150,7 @@ Compare with `02-check.png`. You should see:
 
 **Photo 1: this screen.** If the target is refused, stop here: its refusal prints the exact line that would allow it,
 so compare that with the file on the stick (step 2). If `nvme0n1`, `sda` or `sdb` is anything but refused, stop and
-power off (`reboot -p`); do not install.
+power off (`poweroff`; `reboot -p` is the same); do not install.
 
 ## 5. Install
 
@@ -213,7 +213,7 @@ login:
 
 **Photo 4: this screen.** Log in as `root`, or as the user you made, and run `ls /home` and `cat /etc/pax-release`.
 To check the safety rule from the installed system, `pax-install --check` refuses its own disk as `the running root`.
-Power off with `reboot -p`.
+Power off with `poweroff` (px87: the reboot program under its second name; `reboot -p` is the same).
 
 ## 8. Back to CachyOS
 
