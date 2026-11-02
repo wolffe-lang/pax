@@ -80,4 +80,47 @@ All read 2026-11-02. Specification prose and vectors only, not sample implementa
 | F06 | https://pubs.opengroup.org/onlinepubs/9799919799/utilities/pax.html | POSIX.1-2024 ustar/pax format sections: 512-byte records, headers/checksums, extended length/keyword precedence. Relevant earlier material read, final approximately 33k characters not read. |
 | F07 | https://engineering.fb.com/2016/08/31/core-infra/smaller-and-faster-data-compression-with-zstandard/ | 2016 vendor-reported Silesia/zstd1.0 versus zlib/gzip conditions and numbers; contextual evidence only, no current PAX benchmark or numeric xz claim. |
 
-Failed reads are not evidence: Guix's guix.gnu.org manual endpoints returned 403 in the first pass; ArchWiki partial-upgrade page was access-denied; facebook.github.io/zstd returned 404. Follow-up documentation, if obtained, is recorded separately. No blocked page was counted as proof of absence.
+## Follow-up documentation and incidents
+
+All read 2026-11-02. Guix pages below are a **third-party manual mirror**, not authenticated current upstream documentation; their release date/version was not established. They are used only for explicitly attributed behavioral documentation.
+
+| ID | URL | What was taken |
+|---|---|---|
+| A19 | https://man.archlinux.org/man/alpm-hooks.5.en | Trigger/action matching, alphabetical ordering, AbortOnFail before transaction, post hooks only after successful transaction; no rollback guarantee. |
+| A20 | https://man.archlinux.org/man/PKGINFO.5.en | Root-level key=value identity/dependencies/provides/conflicts/replaces/backup and v2 pkgtype metadata. |
+| A21 | https://man.archlinux.org/man/BUILDINFO.5.en | PKGBUILD hash, complete installed build-environment versions, tool/options/environment/build directories and timestamp. |
+| A22 | https://man.archlinux.org/man/extra/alpm-mtree/ALPM-MTREEv2.5.en | Gzip .MTREE, paths/modes/owners/times, file size/SHA-256 and symlink targets; v2 no generated MD5. |
+| A23 | https://manpages.debian.org/bookworm/dpkg-dev/deb.5.en.html | ar container, debian-binary/control.tar/data.tar and supported compression/extension ordering. |
+| A24 | https://www.debian.org/doc/debian-policy/ch-controlfields.html | Debian epoch/upstream/revision ordering, tilde/nondigit/digit rules; not generic semver. |
+| A25 | https://www.debian.org/doc/debian-policy/ch-relationships.html | Depends/Pre-Depends, alternatives, versioned Provides, Breaks/Conflicts/Replaces and file takeover distinction. |
+| A26 | https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/10/html-single/packaging_and_distributing_software/index | First 100,000 characters: RPM signature/header/cpio payload, source spec/patches, config(noreplace)→rpmnew. Not full byte-level format. |
+| A27 | https://rpm.org/docs/latest/man/rpm-payloadflags.7 | Read RPM 6.1.0 compression flags: none/gzip/bzip2/xz/lzma/zstd, levels/threads/windows; threading and reproducibility warning. |
+| A28 | https://man.voidlinux.org/xbps.d.5 | Installed pkgdb plist, per-package file plist, arch-repodata and download cache paths, signed remote repositories; not crash ordering. |
+| A29 | https://github.com/void-linux/void-packages/blob/master/README.md | Documentation only: masterdir/chroot/user-namespace build and staging, non-root build, clean-root recreation, source bootstrap host influence; no script or source implementation opened. |
+| A30 | https://man.archlinux.org/man/extra/abuild/abuild.1.en | Recipe phases, rootbld clean chroot, fakeroot packaging, dependency handling, signing-key variable and SOURCE_DATE_EPOCH. No inferred fallback logic. |
+| I09 | https://guix-home.trop.in/Features.html | Third-party manual: input-derived store paths, isolated build intent and prebuilt substitutes. |
+| I10 | https://guix-home.trop.in/Invoking-guix-package.html | Profile transactions/generations, rollback linear history, explicit name/version/output selection, manifest/expression package definitions, collision policy. |
+| I11 | https://guix-home.trop.in/Substitutes.html and https://guix-home.trop.in/Substitute-Server-Authorization.html | Prebuilt outputs, authorization ACL/public key, explicit trust in substitute server; no exact signature-byte coverage claim. |
+| I12 | https://guix-home.trop.in/Invoking-guix-gc.html and https://guix-home.trop.in/ | Profile/process reachability, deletion of generations versus collection, live-item refusal and explicitly non-atomic repair; index used for navigation. |
+| I13 | https://brew.sh/2021/04/21/security-incident-disclosure/ | Cask review/automerge diff-classification incident, authorized harmless proof/revert, workflow removal/revoked bot permission; not formula bottle compromise or the 2018 token incident. |
+| I14 | https://github.com/ostreedev/ostree/security/advisories/GHSA-7cgc-gp99-6jmm | 2026-08-05 static-delta memory/storage exhaustion, 2014.5–2026.2 affected, 2026.3 fixed; bounded compressed input did not bound expansion. Advisory prose only; independently spot-read in the main lane too. |
+| I15 | https://github.com/flatpak/flatpak/security/advisories/GHSA-phv6-cpc2-2fgj | CVE-2024-32462 portal/command argument interpretation sandbox escape, fixed branches; not an OSTree object-integrity flaw. Advisory prose only. |
+| I16 | https://pkg.go.dev/vuln/GO-2023-2042 | CVE-2023-39320 toolchain directive execution, including proxy-delivered modules; fixed go1.21.1, not a sumdb forgery. |
+| I17 | https://blog.rust-lang.org/2026/03/21/cve-2026-33056/ | Cargo archive extraction can change outside-directory permissions; crates.io upload filtering/audit and scheduled 1.94.1 fix, not independent confirmation of release shipment. |
+
+## Naming survey
+
+All read-only checks on 2026-11-02; no registration, domain query or package-manager execution. N01: complete Homebrew formula/cask listings https://formulae.brew.sh/formula/ and https://formulae.brew.sh/cask/ were successfully read (8,694 formula links and 5,192 cask links reported at read time), then exact candidate tokens checked. Individual JSON 404s alone were not treated as complete negative evidence. AUR returned HTTP 200/resultcount 0; Arch returned HTTP 200/valid true/empty results; crates.io gave explicit nonexistent-crate JSON for four candidates, while vask existed. Debian's rendered searches said names-contain despite exact=1; all returned no results, also excluding an exact match. These are current registry-scope observations, not trademark/alias/history/all-tap/private-repository clearance.
+
+| ID / name | Exact URLs retrieved | What was taken |
+|---|---|---|
+| N02 sivra | https://formulae.brew.sh/api/formula/sivra.json ; https://formulae.brew.sh/api/cask/sivra.json ; https://aur.archlinux.org/rpc/v5/info?arg[]=sivra ; https://crates.io/api/v1/crates/sivra ; https://packages.debian.org/search?keywords=sivra&searchon=names&suite=all&section=all&exact=1 ; https://archlinux.org/packages/search/json/?name=sivra | No exact entry in checked scopes; proposed first choice. |
+| N03 kelvo | https://formulae.brew.sh/api/formula/kelvo.json ; https://formulae.brew.sh/api/cask/kelvo.json ; https://aur.archlinux.org/rpc/v5/info?arg[]=kelvo ; https://crates.io/api/v1/crates/kelvo ; https://packages.debian.org/search?keywords=kelvo&searchon=names&suite=all&section=all&exact=1 ; https://archlinux.org/packages/search/json/?name=kelvo | No exact entry in checked scopes. |
+| N04 rynna | https://formulae.brew.sh/api/formula/rynna.json ; https://formulae.brew.sh/api/cask/rynna.json ; https://aur.archlinux.org/rpc/v5/info?arg[]=rynna ; https://crates.io/api/v1/crates/rynna ; https://packages.debian.org/search?keywords=rynna&searchon=names&suite=all&section=all&exact=1 ; https://archlinux.org/packages/search/json/?name=rynna | No exact entry in checked scopes. |
+| N05 vask | https://formulae.brew.sh/api/formula/vask.json ; https://formulae.brew.sh/api/cask/vask.json ; https://aur.archlinux.org/rpc/v5/info?arg[]=vask ; https://crates.io/api/v1/crates/vask ; https://packages.debian.org/search?keywords=vask&searchon=names&suite=all&section=all&exact=1 ; https://archlinux.org/packages/search/json/?name=vask | Exact crates.io collision; reject despite other scopes returning none. |
+| N06 orven | https://formulae.brew.sh/api/formula/orven.json ; https://formulae.brew.sh/api/cask/orven.json ; https://aur.archlinux.org/rpc/v5/info?arg[]=orven ; https://crates.io/api/v1/crates/orven ; https://packages.debian.org/search?keywords=orven&searchon=names&suite=all&section=all&exact=1 ; https://archlinux.org/packages/search/json/?name=orven | No exact entry in checked scopes. |
+| N07 org metadata | https://api.github.com/orgs/wolffe-lang/repos?per_page=100&page=1 ; https://api.github.com/orgs/wolffe-lang/repos?per_page=100&page=2 | Public repository-name metadata only, 29 then 0 entries, none of the five names; not private-repo clearance. |
+
+Failed reads are not evidence: official Guix manual endpoints returned 403; ArchWiki partial-upgrade page returned no readable policy; facebook.github.io/zstd and one guessed RPM format URL returned 404. The Guix third-party mirror is identified above. No blocked page was counted as proof of absence.
+
+Clean-room exposure log, 2026-11-02: the query `abuild man page APKBUILD rootbld SOURCE_DATE_EPOCH` incidentally returned an implementation-file result with a timestamp-selection summary. The file was not opened, and the result and its claims were excluded. No result path or snippet is reproduced. A30 is the only abuild behavior authority used. This qualification applies to the lane's clean-room statement; zero deliberate implementation reads is not zero incidental search exposure.
