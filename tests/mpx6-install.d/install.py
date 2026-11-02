@@ -215,6 +215,15 @@ if used and 'INSTALL-EXIT-0' not in s:
     sys.exit(1)
 assert 'INSTALL-EXIT-0' in s,('FAIL I-boot-files' if 'phase verify-boot-' in s else 'FAIL I-install')+'\n'+s[-18000:]
 assert sha(work/'source-guard.img')==guard
+# px88 (pax#248): the two peak lines read getrusage's ru_maxrss, RUSAGE_SELF
+# and RUSAGE_CHILDREN, in KiB: more than 1 MiB and less than the guest's
+# 1536 MiB, never `unavailable`.
+peaks={}
+for label in ('Installer peak RSS through copy verification','Formatter children peak RSS'):
+    got=[l.split(': ',1)[1].strip() for l in s.replace('\r','').splitlines() if l.startswith(label+': ')]
+    assert len(got)==1 and got[0].endswith(' KiB') and got[0][:-4].isdigit() and 1024<int(got[0][:-4])<1536*1024,f'FAIL I-peak: {label}: {got}'
+    peaks[label]=got[0]
+print(f"PASS I-peak: installer {peaks['Installer peak RSS through copy verification']}, formatter children {peaks['Formatter children peak RSS']} (getrusage, pax#248)",flush=True)
 with (work/'target.img').open('rb') as f:
     f.seek(65536);log=f.read(65536).split(b'\0',1)[0]
 records=[json.loads(x) for x in log.splitlines()]
