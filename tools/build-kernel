@@ -41,6 +41,10 @@
 # Step 3: assembles boot/start.S (the Limine entry) and links
 #   ld.lld -T boot/kernel.ld start.o NAME.asm-*.o <wolf objects> [NAME.rt-none.a] -> OUTDIR/NAME.elf
 # (the archive after every kernel object, as kw12 asks).
+# Step 4 (px87, pax#176): the tree's commit (`git rev-parse HEAD`, with
+# `-dirty` when a tracked file differs; PAX_KERNEL_COMMIT instead when
+# set) is written into boot/start.S's 48 zeroed bytes `pax_kernel_commit`
+# in the linked ELF, which kernel/identity prints under the banner.
 #
 # The assembler (as02b, R-as02-2 A): WOLF_AS, set and not empty, is ONE
 # explicit choice for every assembly source of the kernel, the same
@@ -263,5 +267,52 @@ if [ -f "$rt" ]; then
         fail "the linked kernel (runtime archive included) names an xmm/ymm register: $(grep -Em1 '%[xy]mm[0-9]' "$out/$name.elf.dis")"
     fi
     printf 'build-kernel: ok: step 3 (%s, %s): linked with %s.rt-none.a; the whole ELF names no xmm/ymm\n' "$name" "$tier" "$name" >&2
+fi
+
+# --- px87 (pax#176): the commit, into boot/start.S's pax_kernel_commit -----
+# kernel/identity prints it under the banner. The tree's `git rev-parse
+# HEAD`, `-dirty` after it when a tracked file differs from it; outside a
+# checkout nothing is written (all zeros: the kernel says `unknown`).
+# PAX_KERNEL_COMMIT, set, is written instead (a tree that is not a
+# checkout naming its source). At most 47 bytes; the slot's 48 must be
+# zero before (a fresh link), and the ELF is changed nowhere else.
+commit=${PAX_KERNEL_COMMIT:-}
+if [ -z "$commit" ] && git -C "$PAX_ROOT" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    commit=$(git -C "$PAX_ROOT" rev-parse HEAD)
+    [ -z "$(git -C "$PAX_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ] || commit+=-dirty
+fi
+if [ -n "$commit" ]; then
+    need python3
+    python3 - "$elf" "$commit" <<'PY' || fail "could not write the commit '$commit' into pax_kernel_commit"
+import struct, sys
+path, commit = sys.argv[1], sys.argv[2].encode()
+assert 0 < len(commit) <= 47 and all(32 < c < 127 for c in commit), 'not a commit: %r' % commit
+blob = bytearray(open(path, 'rb').read())
+assert blob[:6] == b'\x7fELF\x02\x01', 'not an ELF64 little-endian file'
+phoff, shoff = struct.unpack_from('<QQ', blob, 0x20)
+phentsize, phnum, shentsize, shnum = struct.unpack_from('<HHHH', blob, 0x36)
+secs = [struct.unpack_from('<IIQQQQIIQQ', blob, shoff + i * shentsize) for i in range(shnum)]
+symtab = [s for s in secs if s[1] == 2]  # SHT_SYMTAB
+assert len(symtab) == 1, 'no single .symtab'
+_, _, _, _, symoff, symsize, link, _, _, entsize = symtab[0]
+stroff = secs[link][4]
+value = None
+for k in range(symsize // entsize):
+    name, info, other, shndx, val, size = struct.unpack_from('<IBBHQQ', blob, symoff + k * entsize)
+    end = blob.index(0, stroff + name)
+    if blob[stroff + name:end] == b'pax_kernel_commit':
+        value = val
+assert value is not None, 'no pax_kernel_commit symbol'
+at = None
+for i in range(phnum):
+    ptype, flags, off, vaddr, paddr, filesz, memsz, align = struct.unpack_from('<IIQQQQQQ', blob, phoff + i * phentsize)
+    if ptype == 1 and vaddr <= value and value + 48 <= vaddr + filesz:
+        at = off + value - vaddr
+assert at is not None, 'pax_kernel_commit is in no PT_LOAD file range'
+assert blob[at:at + 48] == bytes(48), 'pax_kernel_commit is not the zeroed slot'
+blob[at:at + len(commit)] = commit
+open(path, 'wb').write(blob)
+PY
+    printf 'build-kernel: ok: the commit %s written into pax_kernel_commit (%s, %s)\n' "$commit" "$name" "$tier" >&2
 fi
 printf '%s\n' "$elf"
