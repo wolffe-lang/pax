@@ -266,6 +266,10 @@ TCG; CI boots run that kernel (R-px87-8 names the trade).
   rebased onto trunk `5da8daaf` before the `full-matrix` label, every cited commit mapped by script, and gauntlet3
   at `0eadf6b4` stands for the rebased code because the trees differ only in `notes/pm00*` (§4.10). The plant is
   re-cut on the rebased head; the main branch and the plant are pushed once each.
+- **R-px87-15 (the orchestrator's, decided): gauntlet3's red step again under a short path.** gauntlet3's
+  mpx6-firmware failed on a 108-byte QMP socket path (sun_path holds 107), not on the code; the step runs once
+  more from the same tree under `/home/mfwolffe/lanes/px87/g/`, the socket's length printed first, and with
+  gauntlet3's earlier steps completes the gauntlet (§4.8). The tests' follow-on is pax#273.
 
 
 ### 4.6 The plant, `px87-plant-scroll-read`
@@ -373,10 +377,24 @@ the same transcript but for the screen line (41 lines)`, the same on UEFI (42 li
 `END triage exit=0`.
 
 **gauntlet3 at the pre-rebase head `0eadf6b4`** (rebased `e9887549`, the same tree but for `notes/pm00*`, §4.10;
-`gauntlet3.log`): launched 21:17Z behind stick3, holding the lock from
-21:25Z; at this note's commit `END ci-plan exit=0`, `END ci-budgets exit=0`, `END pax-release exit=0`, mpx1
-running. It is a detached job (pid 3499701, log `/home/mfwolffe/lanes/px87/runs/gauntlet3.log`, exit marker
-`runs/gauntlet3.exit`); its END lines are read from that log, and the PR's body carries them when it ends.
+`gauntlet3.log`): `END ci-plan exit=0`, `END ci-budgets exit=0`, `END pax-release exit=0`, `END mpx1 exit=0` (1084
+s), `END mpx3-screen exit=0` (1070 s), `END mpx3-console exit=0` (674 s), `END u7-build exit=0`, `END u7-disk
+exit=0`, `END u7-boot exit=0`, `END u7 exit=0`, `END mpx6-install exit=0` (826 s), `END mpx6-firmware exit=2` (593
+s), `END gauntlet3 exit=2`. Every row before the red passed (F1 to F9, T0, TRIAGE plain, triage, stop6 and fault3,
+`PASS T1/T2 bios`); then `tests/mpx6-triage.d/leg.py` line 66 raised `OSError: AF_UNIX path too long`, and
+`FAIL mpx6-triage bios fault3-reset`, `FAIL F10 native: the metal triage` followed. The rig's path, not the code:
+leg.py puts its QMP socket in the leg's output directory (line 28), under PAX_BUILD, and gauntlet3's
+`/home/mfwolffe/lanes/px87/gbuild/mpx6-firmware/firmware/native/mpx6-triage/native/bios/fault3-reset/qmp.sock` is
+108 bytes, past sun_path's 107 and its NUL; probe-fix's shorter directory had passed the same legs.
+
+**The step again under a short path (R-px87-15, `firmware-short.log`, `notes/px87/kasumi/firmware-short.sh`)**: the
+same tree (`0eadf6b4`, a worktree at `/home/mfwolffe/lanes/px87/g/t`), PAX_BUILD `/home/mfwolffe/lanes/px87/g/b`,
+one hold of the lock, the socket's length printed first: `…/g/b/firmware/native/mpx6-triage/native/bios/
+fault3-reset/qmp.sock: 91 bytes` (the same on UEFI). F1 to F11 pass, `PASS TRIAGE fault3-reset: no triage IDT,
+the fault became a reset` on both firmwares, `PASS T1/T2 bios` (41 lines) and `uefi` (42), `PASS F10 native: the
+metal triage on bios uefi`, `END mpx6-firmware exit=0` (631 s), `END firmware-short exit=0`. With gauntlet3's earlier
+steps that completes the gauntlet for `0eadf6b4` = `e9887549`. The socket's dependence on the caller's path is
+pax#273, filed by the orchestrator.
 
 ### 4.9 Commits (rebased on `5da8daaf`, oldest first; the failing row before each fix)
 
@@ -477,7 +495,8 @@ The staged stick stays as it was built: the pre-merge stick, its kernel line nam
 
 ### 5.4 Issues
 
-Filed or closed: none (a lane files and closes nothing). Fixed here, to close at the merge: pax#253 (its metal
+Filed or closed by this lane: none (a lane files and closes nothing); the orchestrator filed pax#273 (the tests' QMP
+sockets under the output tree overflow sun_path when PAX_BUILD is deep, §4.8). Fixed here, to close at the merge: pax#253 (its metal
 numbers to come from §5.5's session), #246, #243, #265, #266, #176. Owed to file (pax), the orchestrator's call:
 
 - `/proc/version` (pax#176's second half): a fixed procfs entry naming the kernel as its banner does.
