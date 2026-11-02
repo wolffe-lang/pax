@@ -494,7 +494,8 @@ optional step 6 turns it on.
 ```
 READ THIS FIRST (px87, 2026-11-02): the console stick, to look and to time, never to install
 =============================================================================================
-  pax-stick-0eadf6b4.img   pax branch px87 at 0eadf6b4 (the px87 PR, not yet merged)
+  pax-stick-0eadf6b4.img   pax branch px87 at 0eadf6b4 (PR #272, not yet merged; since rebased onto trunk as
+                           e9887549, the same code: the kernel line still names 0eadf6b4)
       795869184 bytes, SHA256 e65b28090768f3501c4df3a028ed968c8c764756d3e28b75eeafb08adf6ad1f6
 
   It writes no disk: its install allow-list names none, so pax-install refuses every disk. Leave the 860
