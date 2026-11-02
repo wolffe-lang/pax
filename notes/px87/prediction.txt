@@ -1,0 +1,46 @@
+px87 — the console on metal: the prediction, written 2026-11-02T18:05Z before the first change.
+Base pax trunk 3e28a8bc. Host: kasumi CPUs 0-3 (kasumi-cores-0-3.lock), rootless podman, localhost/px76-ubuntu
+(QEMU 8.2.2, OVMF). Read at launch: kasumi's firmware has VT-x off ("VMX (outside TXT) disabled by BIOS", no
+/dev/kvm), so every QEMU run here is TCG, as CI's are.
+
+1. pax#253, the scroll reads the framebuffer back.
+   Change: kernel/screen's scroll moves the cell grid in RAM and redraws only the cells whose glyph or colours
+   changed (the grid is already the RAM shadow of the cells; the framebuffer shows the active grid plainly
+   except the cursor's cell, which is hidden before every scroll). No pixel copy, no new storage, nothing under
+   boot/. The old readback stays behind one boot word for the witness's positive control and the metal A/B.
+   Row V7 (tests/mpx3-screen): kmain_screen under TCG with QEMU's gdbstub; a hardware breakpoint on the first
+   pax_fb_fill (screen.attach's clear: its dst and qword count give the framebuffer's range), then ONE read
+   watchpoint (Z3) over that whole range until the halt; every stop counted.
+   - QEMU 8.2.2's stub accepts one Z3 of the framebuffer's full length (about 4 MB) under TCG. If it refuses a
+     length over a page, the row splits the range by page instead.
+   - At base: red, by name: at least the cap's count of reads before the first scroll ends, the first by
+     pax_fb_copy (REP MOVSQ) at an address one band above the first scrolled band.
+   - At the head: 0 reads in all of kmain_screen's scrolls (V3 counts them, between 1 and 400 per run),
+     the boot with the readback word red the same way the base was (the positive control).
+   - V2, V5, V6 (the screendumps against tools/screen-ref) pixel-identical before and after; V3's per-line cost
+     under TCG lower at the head than at base (QEMU's VRAM is cheap to read, so the gain is smaller than metal's).
+   - The plant (px87-plant-*: the scroll reads one band back): V7 red by name, V2 still green.
+   Metal (the maintainer, item 6): boot-to-login on kasumi's 4090 at 2560x1440, the old scroll against the new
+   one on the same stick: seconds to tens of seconds before (309 scrolls of about 23 MB of uncached reads),
+   about a second after.
+2. pax#246: `quiet` (px15's word) on the stick's live entry. tests/usb-stick's live-login row gains: no
+   `user: exec pid` line on the serial. Red at base (pelt's and the login script's execs are printed), green
+   after. Nothing else in the stick's rows moves.
+3. pax#243: `poweroff` is the reboot program under a second name (argv[0]'s base name), sending
+   LINUX_REBOOT_CMD_POWER_OFF; the stick carries /bin/poweroff. A session row types `poweroff`: QEMU exits 0,
+   the last kernel line `poweroff: ACPI S5 types a/b`. Red at base (`poweroff: not found`).
+4. pax#265: reboot as a user prints Linux's message, measured black-box (busybox's `reboot -f` and the
+   systemd `reboot` that Ubuntu 24.04 ships, each as uid 1000 in a container), exit 1. Expected:
+   `reboot: Operation not permitted` or close to it. A row as uid 1000 under QEMU: red at base (no output).
+   pax#266: `pax-install --check` as a user names the node it could not open and why, and says root is needed:
+   `pax-install: inventory: /dev/<name>: permission denied; --check reads every disk, run it as root`.
+   A row as uid 1000 under QEMU: red at base (`pax-install: inventory: io`).
+5. pax#176: the kernel names itself in its banner: the commit written into the ELF by tools/build-kernel,
+   and the SHA-256 of the file Limine loaded (a new Executable File request), computed at boot. A boot row
+   compares both with git rev-parse HEAD and sha256sum of the ELF the image carries: red at base (no line).
+   Cost of the hash at boot: under TCG about 1 s for the native kernel's 3 MB; on metal under 0.1 s.
+   FULL paths (boot/start.S, tools/build-kernel), so the PR's run is tier all.
+6. The stick: built at the head by px86's recipe (tools/mkdistribution, mkdisk --usb, check-usb, a second
+   build byte-identical), its allow-list empty (it writes no disk), staged on nomad under ~/pax-smoke/ with an
+   INSTALL.txt block; qualified first under OVMF shaped like kasumi (no COM1, xHCI keyboard, TCG).
+Footprint: cross-cutting (boot/, tools/build-kernel).
