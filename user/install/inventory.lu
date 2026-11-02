@@ -12,7 +12,8 @@ extern "c" fn install_close(fd: int) -> int
 
 extern "c" fn install_sync(fd: int) -> int
 
-fn raw_open(path: str, flags: int) -> int ! {io, invalid} {
+/// open(2)'s answer as it came (px87): a descriptor, or -errno.
+fn raw_open_errno(path: str, flags: int) -> int ! {invalid} {
     if path.len == 0 || path.len > 4095 { return invalid }
     for i in 0..path.len {
         let b = path.bytes()[i] as int
@@ -23,8 +24,33 @@ fn raw_open(path: str, flags: int) -> int ! {io, invalid} {
     // # Safety: the terminating NUL fits the 4096-byte assembly buffer.
     unsafe { install_path_byte(path.len, 0) }
     // # Safety: the buffer now holds a complete C string; no concurrent callers.
-    let fd = unsafe { install_open(flags) }
+    unsafe { install_open(flags) }
+}
+
+fn raw_open(path: str, flags: int) -> int ! {io, invalid} {
+    let fd = raw_open_errno(path, flags)?
     if fd < 0 { return io }
+    fd
+}
+
+/// px87 (pax#266): the inventory opens every disk's node read-only to
+/// measure it (its size, its sector, its sequence). A disk's node is
+/// root's alone (`brw-------`, devtmpfs's own mode: kernel/files'
+/// MODE_BLK, px79), so a user's open is refused: the refusal names the
+/// node, the errno's text and that root is needed, on standard error, and
+/// the inventory stops `denied` (main prints nothing more). Any other
+/// failed open names the node and its errno, and stops `io` as before.
+fn open_disk(dev: str) -> int ! {io, invalid, denied} {
+    let fd = raw_open_errno(dev, 524288)?
+    if fd == -13 || fd == -1 {
+        let why = if fd == -13 then "Permission denied" else "Operation not permitted"
+        eprint("pax-install: inventory: {dev}: {why}; pax-install opens every disk to measure it, so run it as root")
+        return denied
+    }
+    if fd < 0 {
+        eprint("pax-install: inventory: {dev}: open failed, errno {0 - fd}")
+        return io
+    }
     fd
 }
 
@@ -52,13 +78,13 @@ fn number_file(path: str) -> int ! {io, invalid} {
     n
 }
 
-fn inventory_one(name: str) -> Target ! {io, invalid} {
+fn inventory_one(name: str) -> Target ! {io, invalid, denied} {
     if !valid_disk(name) { return invalid }
     let base = "/sys/block/{name}"
     let dev = "/dev/{name}"
     let st = fs_lstat(dev) else |_| { return io }
     if st[0] != 7 { return invalid }
-    let fd = raw_open(dev, 524288)?
+    let fd = open_disk(dev)?
     defer raw_close(fd)
     // # Safety: fd is owned here; assembly supplies a 144-byte x86-64 stat buffer.
     let rdev = unsafe { install_rdev(fd) }
@@ -118,7 +144,7 @@ fn inventory_one(name: str) -> Target ! {io, invalid} {
     }
 }
 
-fn inventory() -> List[Target] ! {io, invalid} {
+fn inventory() -> List[Target] ! {io, invalid, denied} {
     var targets = List[Target]()
     for name in sorted_names("/sys/block")? {
         if !valid_disk(name) { return invalid }
