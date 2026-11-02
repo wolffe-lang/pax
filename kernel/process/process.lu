@@ -209,6 +209,7 @@ const EXEC_VECTOR: u64 = 0x102
 
 // Linux's numbers (syscall_64.tbl).
 const SYS_CLONE: u64 = 56
+const SYS_FORK: u64 = 57 // px88
 const SYS_VFORK: u64 = 58
 const SYS_CLONE3: u64 = 435
 
@@ -1300,14 +1301,20 @@ fn run_file(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> 
     0
 }
 
-// --- clone, clone3, vfork (px14) ------------------------------------------------
+// --- clone, clone3, fork, vfork (px14; fork px88) --------------------------------
 
-/// `clone`, `clone3` or `vfork` (`nr`) from the frame `f`: the frame to
-/// resume — the next thread's while the caller waits for its vfork
-/// child, `f` with %rax the child's pid after a fork (px17), or `f` with
-/// %rax -errno when refused. `a0`, `a1`, `a2`, `a3`: clone's flags,
+/// `clone`, `clone3`, `fork` or `vfork` (`nr`) from the frame `f`: the
+/// frame to resume — the next thread's while the caller waits for its
+/// vfork child, `f` with %rax the child's pid after a fork (px17), or `f`
+/// with %rax -errno when refused. `a0`, `a1`, `a2`, `a3`: clone's flags,
 /// stack, parent_tid and child_tid (clone3's come from its struct).
+/// px88: `fork` (57) takes no argument and is `clone(SIGCHLD, 0)`
+/// (fork(2): the child on a copy of the caller's space, its own stack
+/// pointer the caller's, no tid words), so its registers are never read.
 pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if nr == SYS_FORK {
+        return fork(f, 0, 0, 0, 0)
+    }
     var flags: u64 = CLONE_VM | CLONE_VFORK
     var usp: u64 = 0
     var ptid: u64 = a2
