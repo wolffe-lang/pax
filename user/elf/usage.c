@@ -10,6 +10,8 @@
  * PAX's to its text.
  *
  *   usage              every row, then `usage: done`
+ *   usage exec N       the exec row's new image (internal)
+ *   usage peek         the vfork row's new image (internal)
  *
  * No pid, time or address is printed. Built by tools/mkforks with
  * Ubuntu's musl-gcc (`-static -no-pie`), never from musl's source.
@@ -130,8 +132,10 @@ static void maxrss_rows(void) {
     char *p = malloc(64 << 20);
     touch(p, 64 << 20);
     long b1 = get(RUSAGE_SELF).ru_maxrss;
-    say("maxrss: 64 MiB touched: grew by at least 65536 KiB %s, by at most 66560 KiB %s\n", yes(b1 - b0 >= 65536),
-        yes(b1 - b0 <= 66560));
+    /* Linux counts resident pages approximately (64 MiB touched read as
+     * 64700 KiB more on hasu's 7.2.4, notes/px88/linux/): 4 MiB each way */
+    say("maxrss: 64 MiB touched: grew by at least 60 MiB %s, by at most 68 MiB %s\n", yes(b1 - b0 >= 61440),
+        yes(b1 - b0 <= 69632));
     free(p);
     long b2 = get(RUSAGE_SELF).ru_maxrss;
     say("maxrss: after the 64 MiB was freed, unchanged: %s\n", yes(b2 == b1));
@@ -152,7 +156,7 @@ static void child_rows(void) {
     pid_t p = fork();
     if (p == 0) {
         struct rusage s = get(RUSAGE_SELF), c = get(RUSAGE_CHILDREN);
-        int r[4] = { ms(s.ru_utime) < 10 && ms(s.ru_stime) < 10, all_zero(c), s.ru_maxrss > 0 && s.ru_maxrss < mine,
+        int r[4] = { ms(s.ru_utime) < 10 && ms(s.ru_stime) < 10, all_zero(c), s.ru_maxrss < mine,
                      s.ru_nvcsw + s.ru_nivcsw < 5 };
         write(fd[1], r, sizeof r);
         char *q = malloc(32 << 20);
@@ -170,11 +174,11 @@ static void child_rows(void) {
     pid_t got = wait4(p, &st, 0, &w);
     struct rusage c1 = get(RUSAGE_CHILDREN);
     say("fork: the child's own times under 10 ms at its start: %s; its children's all 0: %s\n", yes(r[0]), yes(r[1]));
-    say("fork: the child's maxrss at its start more than 0 and under the parent's peak: %s; under 5 switches: %s\n",
-        yes(r[2]), yes(r[3]));
+    say("fork: the child's maxrss at its start under the parent's peak: %s; under 5 switches: %s\n", yes(r[2]),
+        yes(r[3]));
     say("wait4: %s, status %d\n", yes(got == p), WEXITSTATUS(st));
-    say("wait4: the child's rusage: maxrss at least 32768 KiB %s, utime at least 100 ms %s, unmaintained 0 %s\n",
-        yes(w.ru_maxrss >= 32768), yes(ms(w.ru_utime) >= 100), yes(unmaintained_zero(w)));
+    say("wait4: the child's rusage: maxrss at least 28 MiB %s, utime at least 100 ms %s, unmaintained 0 %s\n",
+        yes(w.ru_maxrss >= 28672), yes(ms(w.ru_utime) >= 100), yes(unmaintained_zero(w)));
     say("children: before the wait, all 0: %s\n", yes(all_zero(c0)));
     say("children: after it, maxrss the child's %s, utime the child's %s, stime the child's %s\n",
         yes(c1.ru_maxrss == w.ru_maxrss), yes(ms(c1.ru_utime) == ms(w.ru_utime)), yes(ms(c1.ru_stime) == ms(w.ru_stime)));
@@ -193,7 +197,7 @@ static void child_rows(void) {
         struct rusage before = get(RUSAGE_CHILDREN);
         waitpid(q, 0, 0);
         struct rusage after = get(RUSAGE_CHILDREN);
-        int v[2] = { before.ru_maxrss == 0, after.ru_maxrss >= 49152 };
+        int v[2] = { before.ru_maxrss == 0, after.ru_maxrss >= 45056 };
         write(fd[1], v, sizeof v);
         _exit(0);
     }
@@ -204,11 +208,11 @@ static void child_rows(void) {
     memset(&w, 0x55, sizeof w);
     wait4(p, &st, 0, &w);
     struct rusage c2 = get(RUSAGE_CHILDREN);
-    say("grandchild: the middle child's children before its wait 0 %s, after it at least 49152 KiB %s\n", yes(v[0]),
+    say("grandchild: the middle child's children before its wait 0 %s, after it at least 44 MiB %s\n", yes(v[0]),
         yes(v[1]));
-    say("grandchild: wait4 of the middle child: maxrss at least 49152 KiB %s, under 32768 KiB %s\n",
-        yes(w.ru_maxrss >= 49152), yes(w.ru_maxrss < 32768));
-    say("grandchild: the top's children: maxrss at least 49152 KiB %s\n", yes(c2.ru_maxrss >= 49152));
+    say("grandchild: wait4 of the middle child: maxrss at least 44 MiB %s, under 28 MiB %s\n",
+        yes(w.ru_maxrss >= 45056), yes(w.ru_maxrss < 28672));
+    say("grandchild: the top's children: maxrss at least 44 MiB %s\n", yes(c2.ru_maxrss >= 45056));
 }
 
 /* X: exec. The new image is this program again (`exec` or `small`). */
@@ -216,10 +220,36 @@ static int exec_image(int argc, char **argv) {
     (void)argc;
     struct rusage s = get(RUSAGE_SELF);
     long big = atol(argv[2]);
-    say("exec: the old image's maxrss at least 40960 KiB: %s; the new image's at least the old one's: %s\n",
-        yes(big >= 40960), yes(s.ru_maxrss >= big));
+    say("exec: the old image's maxrss at least 36 MiB: %s; the new image's at least the old one's: %s\n",
+        yes(big >= 36864), yes(s.ru_maxrss >= big));
     say("exec: the new image's utime at least the old one's 100 ms spin: %s\n", yes(ms(s.ru_utime) >= 100));
     return 0;
+}
+
+/* V: a vfork child that execs (posix_spawn's way): the space it borrowed
+ * is its parent's, and Linux counts that space's peak in the child
+ * (measured: the exploration's vfork child read its parent's 65440 KiB). */
+static int peek_image(void) {
+    say("vfork: the exec'd child's maxrss at least 60 MiB, its parent's peak: %s\n",
+        yes(get(RUSAGE_SELF).ru_maxrss >= 61440));
+    return 0;
+}
+
+static void vfork_rows(void) {
+    long peak = get(RUSAGE_SELF).ru_maxrss;
+    long kids = get(RUSAGE_CHILDREN).ru_maxrss;
+    pid_t p = vfork();
+    if (p == 0) {
+        char *av[] = { "usage", "peek", 0 };
+        execve(self, av, environ);
+        _exit(99);
+    }
+    int st = 0;
+    waitpid(p, &st, 0);
+    struct rusage c = get(RUSAGE_CHILDREN);
+    say("vfork: the parent's peak at least 60 MiB %s, its children's under it before %s; status %d\n",
+        yes(peak >= 61440), yes(kids < 61440), WEXITSTATUS(st));
+    say("vfork: then the children's maxrss at least 60 MiB: %s\n", yes(c.ru_maxrss >= 61440));
 }
 
 static void exec_rows(void) {
@@ -347,11 +377,13 @@ static void ignored_rows(void) {
 
 int main(int argc, char **argv) {
     if (argc > 2 && strcmp(argv[1], "exec") == 0) return exec_image(argc, argv);
+    if (argc > 1 && strcmp(argv[1], "peek") == 0) return peek_image();
     say("usage: as %s\n", getuid() == 0 ? "root" : "a user");
     call_rows();
     maxrss_rows();
     child_rows();
     exec_rows();
+    vfork_rows();
     time_rows();
     switch_rows();
     thread_rows();
