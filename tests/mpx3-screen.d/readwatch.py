@@ -199,11 +199,13 @@ def main():
                 continue
             reads += 1
             if len(first) < 4:
-                addr = stop.split("watch:", 1)[1].split(";", 1)[0]
-                line = "read %d: 0x%s by %s" % (reads, addr, where(rows, g["rip"]))
+                # QEMU's stop reply names the watchpoint (its first byte), not
+                # the byte read; inside pax_fb_copy, REP MOVSQ's %rsi says where
+                # the copy was reading.
+                line = "read %d: by %s" % (reads, where(rows, g["rip"]))
                 if sym["pax_fb_copy"] <= g["rip"] < sym["pax_fb_copy"] + 32:
                     ret = int.from_bytes(bytes.fromhex(r.ask("m%x,8" % g["rsp"])), "little")
-                    line += " called from %s" % where(rows, ret)
+                    line += " (rsi 0x%x, framebuffer + 0x%x) called from %s" % (g["rsi"], g["rsi"] - fb, where(rows, ret))
                 first.append(line)
             if watching and reads >= a.cap:
                 r.ask("z3,%x,%x" % (fb, length))
