@@ -21,10 +21,13 @@ L=/home/mfwolffe/lanes/px88
 S=$L/scripts
 case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; esac
 export PATH=/home/mfwolffe/lanes/hasu-env/bin:$PATH
-[ -d "$L/pax/.git" ] || git clone -q https://github.com/wolffe-lang/pax.git "$L/pax"
-git -C "$L/pax" fetch -q origin '+refs/heads/px88*:refs/remotes/origin/px88*' || { echo "END fetch exit=1"; exit 1; }
+# The lane's clone is shared by its chains (one a block): its git steps
+# take a lane-local lock (never a block's).
+G="flock /home/mfwolffe/lanes/px88/git.lock git"
+[ -d "$L/pax/.git" ] || $G clone -q https://github.com/wolffe-lang/pax.git "$L/pax"
+$G -C "$L/pax" fetch -q origin '+refs/heads/px88*:refs/remotes/origin/px88*' || { echo "END fetch exit=1"; exit 1; }
 WT=$L/wt-${SHA:0:8}
-[ -d "$WT" ] || git -C "$L/pax" worktree add -q --detach "$WT" "$SHA" || { echo "END worktree exit=1"; exit 1; }
+[ -d "$WT" ] || $G -C "$L/pax" worktree add -q --detach "$WT" "$SHA" || { echo "END worktree exit=1"; exit 1; }
 [ "$(git -C "$WT" rev-parse HEAD)" = "$(git -C "$L/pax" rev-parse "$SHA^{commit}")" ] || { echo "END worktree exit=1 (not at $SHA)"; exit 1; }
 echo "worktree $WT at $(git -C "$WT" rev-parse HEAD)"
 R=$L/build/$RUN
