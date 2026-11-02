@@ -489,27 +489,28 @@ fn scroll() {
     }
     hide()
     let cols = sv(S_COLS)
-    let first = sv(S_TOP) * cols
-    let last = (sv(S_END) - 1) * cols // the bottom row's first cell
+    let bottom = sv(S_END) - 1
     // px59: the new row is blank in the current rendition, as the
     // measured VT's (notes/px59/vt2.rows, scroll-background): a space is
     // its background colour alone.
     let c = blank()
-    var i = first
-    while i < last {
-        let v = cell(i + cols)
-        if v != cell(i) {
-            put_cell(i, v)
-            draw(i % cols, i / cols, false)
+    let g = cells_base()
+    var y = sv(S_TOP)
+    while y <= bottom {
+        let row = g + y * cols * 4
+        var x: u64 = 0
+        while x < cols {
+            let at = row + x * 4
+            // # Safety: (x, y) and (x, y + 1) lie inside the active grid
+            // (y < S_END <= rows, x < cols: cells_base's MAX_COLS * MAX_ROWS).
+            let v = if y < bottom { unsafe { ((at + cols * 4) as *u32).read_volatile() as u64 } } else { c }
+            if unsafe { (at as *u32).read_volatile() as u64 } != v {
+                unsafe { (at as *u32).write_volatile(v as u32) }
+                draw(x, y, false)
+            }
+            x += 1
         }
-        i += 1
-    }
-    while i < last + cols {
-        if cell(i) != c {
-            put_cell(i, c)
-            draw(i % cols, i / cols, false)
-        }
-        i += 1
+        y += 1
     }
     bump(S_SCROLLS)
 }
