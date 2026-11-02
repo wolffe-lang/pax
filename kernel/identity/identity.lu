@@ -14,7 +14,10 @@
 //!   cannot hold its own digest, so it is measured, never stored.
 //!
 //! The line: `kernel: <commit> sha256 <64 hex digits>, <n> bytes`, or
-//! `kernel: <commit> sha256 none (no executable file response)`.
+//! `kernel: <commit> sha256 none (no executable file response)`; printed
+//! under the banner (`report`, which measures) and again, the same, just
+//! before the boot line (`repeat`), so the screen at the login prompt
+//! still shows it once the boot's lines have scrolled the banner away.
 //!
 //! **The boot's time** (px87, pax#253: the console's cost on metal, read
 //! off the screen): the TSC at kmain's first statement (`mark_entry`),
@@ -334,34 +337,76 @@ pub fn report_boot() {
     log.end()
 }
 
-/// `kernel: <commit> sha256 <digest>, <n> bytes` (see the module's
-/// note). After frames.start, before any process.
-pub fn report() {
+// The digest as `report` measured it, for `repeat`: four words of two
+// 32-bit hash words each (big end first), the file's size, and whether
+// they hold a digest (module state: scalars, written once at boot, before
+// any thread, read after).
+var dg0: u64 = 0
+var dg1: u64 = 0
+var dg2: u64 = 0
+var dg3: u64 = 0
+var dg_size: u64 = 0
+var dg_ok: bool = false
+
+fn dg(i: u64) -> u64 {
+    // # Safety: module state, read after `report`'s one write.
+    let w = unsafe { if i < 2 { if i == 0 { dg0 } else { dg1 } } else { if i == 2 { dg2 } else { dg3 } } }
+    w
+}
+
+/// The line, from the kept digest.
+fn put_line() {
     log.put("kernel: ")
     put_commit()
-    let addr = boot_info.exe_file_addr()
-    let n = boot_info.exe_file_size()
-    if addr == 0 || n == 0 || addr % 4096 != 0 {
+    // # Safety: as `dg`.
+    let ok = unsafe { dg_ok }
+    let size = unsafe { dg_size }
+    if !ok {
         log.put(" sha256 none (no executable file response)")
         log.end()
         return
     }
-    let pa = frames.alloc() else |_| {
-        log.put(" sha256 none (no frame)")
-        log.end()
-        return
-    }
-    let f = pa + frames.hhdm()
-    digest(f, addr, n)
     log.put(" sha256 ")
     var i: u64 = 0
-    while i < 8 {
-        log.hex_n(rd32(f + HOFF + i * 4), 8)
+    while i < 4 {
+        log.hex_n(dg(i), 16)
         i += 1
     }
     log.put(", ")
-    log.dec(n as int)
+    log.dec(size as int)
     log.put(" bytes")
     log.end()
-    frames.free(pa)
+}
+
+/// `kernel: <commit> sha256 <digest>, <n> bytes` (see the module's
+/// note). After frames.start, before any process.
+pub fn report() {
+    let addr = boot_info.exe_file_addr()
+    let n = boot_info.exe_file_size()
+    if addr != 0 && n != 0 && addr % 4096 == 0 {
+        let pa = frames.alloc() else |_| 0
+        if pa != 0 {
+            let f = pa + frames.hhdm()
+            digest(f, addr, n)
+            let h = f + HOFF
+            // # Safety: module state, written once here, before any thread.
+            unsafe {
+                dg0 = (rd32(h) << 32) | rd32(h + 4)
+                dg1 = (rd32(h + 8) << 32) | rd32(h + 12)
+                dg2 = (rd32(h + 16) << 32) | rd32(h + 20)
+                dg3 = (rd32(h + 24) << 32) | rd32(h + 28)
+                dg_size = n
+                dg_ok = true
+            }
+            frames.free(pa)
+        }
+    }
+    put_line()
+}
+
+/// The same line again, just before the boot line (px87: on a machine
+/// with no serial port the banner has scrolled off the screen by the
+/// login prompt, so the screen at the prompt names the kernel too).
+pub fn repeat() {
+    put_line()
 }
