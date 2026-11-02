@@ -127,6 +127,7 @@ extern "c" fn pax_irq_save() -> u64
 extern "c" fn pax_irq_restore(flags: u64)
 extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
 extern "c" fn pax_fb_fill(dst: u64, v: u64, qwords: u64)
+extern "c" fn pax_rdtsc() -> u64
 
 extern "c" let pax_screen_state: *u64
 extern "c" let pax_screen_cells: *u32
@@ -468,6 +469,16 @@ fn get_readback() -> bool {
 fn set_readback(on: bool) {
     // # Safety: as `get_readback`.
     unsafe { readback = on }
+}
+
+/// px87: the TSC cycles spent drawing (inside `put` and `attach`), for
+/// kernel/identity's boot line: what the console cost the boot. Written
+/// with IF clear (`put`, `attach`), read by `cycles`.
+var spent: u64 = 0
+
+fn add_spent(c: u64) {
+    // # Safety: module state, written behind `put`'s and `attach`'s IF clear.
+    unsafe { spent = spent + c }
 }
 
 /// The grid up one row; the last row blank.
@@ -1148,8 +1159,11 @@ pub fn put(b: u8) {
     let flags = unsafe { pax_irq_save() }
     if sv(S_BUSY) == 0 {
         put_sv(S_BUSY, 1)
+        // # Safety: fpu.S's RDTSC (px87: the console's cost, `cycles`).
+        let t0 = unsafe { pax_rdtsc() }
         feed(b as u64)
         show()
+        add_spent(unsafe { pax_rdtsc() } - t0)
         put_sv(S_BUSY, 0)
     }
     // # Safety: sched.S's STI when `flags` had IF.
@@ -1180,6 +1194,8 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
     }
     // # Safety: as `put`.
     let flags = unsafe { pax_irq_save() }
+    // # Safety: fpu.S's RDTSC (px87: the console's cost, `cycles`).
+    let t0 = unsafe { pax_rdtsc() }
     put_sv(S_BUSY, 1)
     put_sv(S_SCALE, scale)
     put_sv(S_BOOT, 0)
@@ -1246,6 +1262,7 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
     }
     put_sv(S_REPLAYED, n)
     show()
+    add_spent(unsafe { pax_rdtsc() } - t0)
     put_sv(S_BUSY, 0)
     // # Safety: as `put`.
     unsafe { pax_irq_restore(flags) }
@@ -1304,6 +1321,12 @@ pub fn replayed() -> u64 {
 /// Bytes written before `attach` that the early buffer had no room for.
 pub fn lost() -> u64 {
     sv(S_LOST)
+}
+
+/// px87: the TSC cycles the screen has spent drawing (`spent`).
+pub fn cycles() -> u64 {
+    // # Safety: a scalar read; `put` and `attach` write it with IF clear.
+    unsafe { spent }
 }
 
 /// Bytes fed to the terminal (the replay included).
