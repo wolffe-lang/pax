@@ -93,12 +93,17 @@
 //! foreground is 7 and background 0.
 //!
 //! **Drawing.** A cell is 8x16 pixels; a glyph row is four 64-bit
-//! stores of two pixels each. A scroll moves the grid's pixel rows up by
-//! 16 lines with boot/screen.S's `pax_fb_copy` (REP MOVSQ) and clears
-//! the last 16 with `pax_fb_fill` (REP STOSQ); the cell grid moves the
-//! same way. The framebuffer is mapped by kernel/fb (write-combining
-//! where the PAT allows). The grid is at most 256 columns by 128 rows;
-//! pixels right of and below it stay background.
+//! stores of two pixels each. The framebuffer is written, never read
+//! (px87, pax#253: reads through a GPU's write-combining mapping cost
+//! about 23 MB of uncached loads a scrolled line on kasumi's 4090): the
+//! cell grid is its shadow in RAM, and a scroll moves the cells up and
+//! draws only the cells whose value changed (`scroll`). px19's scroll,
+//! which moved the pixel rows up with boot/screen.S's `pax_fb_copy`
+//! (REP MOVSQ of the framebuffer onto itself), runs only under the
+//! command-line word `fbread`, for measurements. The framebuffer is
+//! mapped by kernel/fb (write-combining where the PAT allows). The grid
+//! is at most 256 columns by 128 rows; pixels right of and below it stay
+//! background (px87: a scroll no longer moves them).
 //!
 //! **Interrupts.** `put` runs with IF clear (sched.S's `pax_irq_save`
 //! and `pax_irq_restore`), so a timer switch cannot interleave two
@@ -413,6 +418,19 @@ fn draw(x: u64, y: u64, cursor: bool) {
     }
 }
 
+/// Whether the space's sixteen rows are empty (a BLANK cell is then its
+/// background alone, which `attach`'s clear draws).
+fn space_empty() -> bool {
+    var r: u64 = 0
+    while r < GH {
+        if font_row(32, r) != 0 {
+            return false
+        }
+        r += 1
+    }
+    true
+}
+
 /// Take the cursor off the screen (redraw its cell plainly).
 fn hide() {
     if sv(S_CUR) != 0 {
@@ -433,8 +451,72 @@ fn show() {
     }
 }
 
-/// The grid up one row: pixels, then cells; the last row blank.
+/// px87 (pax#253): whether a scroll reads the framebuffer back, as px19's
+/// did, the command line's `fbread` (read once, at attach, with IF clear;
+/// only read after). Kept for two measurements, never a default: the
+/// read-watch row's positive control (tests/mpx3-screen V7: the same
+/// kernel, booted with the word, must be seen reading) and the metal A/B
+/// of the boot's time (the stick's second Limine entry).
+var readback: bool = false
+
+fn get_readback() -> bool {
+    // # Safety: module state, written by `attach` with IF clear before any
+    // scroll, read by `scroll` (behind `put`'s IF clear).
+    unsafe { readback }
+}
+
+fn set_readback(on: bool) {
+    // # Safety: as `get_readback`.
+    unsafe { readback = on }
+}
+
+/// The grid up one row; the last row blank.
+///
+/// px87 (pax#253): the framebuffer is never read. The cell grid is the
+/// screen's shadow in RAM: the framebuffer shows each cell of the active
+/// grid as `draw` draws it (every writer of a cell draws it; `attach` and
+/// `repaint_palette` clear and draw the whole grid), but for the cursor's
+/// cell while the cursor is shown, and the cursor is hidden first. So the
+/// scroll moves the cells up in RAM and draws only the cells whose value
+/// changed: a cell that already shows what moves into it is left alone.
+/// px19's pixel copy (REP MOVSQ of the framebuffer onto itself, about
+/// 23 MB of reads a line through the write-combining mapping of kasumi's
+/// GPU) runs only under the `fbread` word.
 fn scroll() {
+    if get_readback() {
+        scroll_readback()
+        return
+    }
+    hide()
+    let cols = sv(S_COLS)
+    let first = sv(S_TOP) * cols
+    let last = (sv(S_END) - 1) * cols // the bottom row's first cell
+    // px59: the new row is blank in the current rendition, as the
+    // measured VT's (notes/px59/vt2.rows, scroll-background): a space is
+    // its background colour alone.
+    let c = blank()
+    var i = first
+    while i < last {
+        let v = cell(i + cols)
+        if v != cell(i) {
+            put_cell(i, v)
+            draw(i % cols, i / cols, false)
+        }
+        i += 1
+    }
+    while i < last + cols {
+        if cell(i) != c {
+            put_cell(i, c)
+            draw(i % cols, i / cols, false)
+        }
+        i += 1
+    }
+    bump(S_SCROLLS)
+}
+
+/// px19's scroll, kept behind `fbread` (see `readback`): pixels, then
+/// cells; it reads the framebuffer back.
+fn scroll_readback() {
     let cols = sv(S_COLS)
     let first = sv(S_TOP)
     let rows = sv(S_END) - first
@@ -442,9 +524,6 @@ fn scroll() {
     let band = GH * sv(S_SCALE) * pitch
     let va = sv(S_VA) + first * band
     let base = first * cols
-    // px59: the new row is blank in the current rendition, as the
-    // measured VT's (notes/px59/vt2.rows, scroll-background): a space is
-    // its background colour alone.
     let c = blank()
     let pb = pal((c >> 12) & 15)
     // # Safety: boot/screen.S's REP MOVSQ/STOSQ inside the framebuffer
@@ -1144,6 +1223,17 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
         put_cell(i, BLANK)
         i += 1
     }
+    // px87: `scroll` draws only the cells that change, so the cleared
+    // framebuffer must already show every BLANK cell: it does when the
+    // font's space is empty (Spleen's is); otherwise the grid is drawn.
+    if !space_empty() {
+        i = 0
+        while i < cols * rows {
+            draw(i % cols, i / cols, false)
+            i += 1
+        }
+    }
+    set_readback(boot_info.cmdline_has("fbread"))
     put_sv(S_ON, 1)
     let n = sv(S_EARLY)
     var k: u64 = 0
