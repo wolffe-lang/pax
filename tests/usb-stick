@@ -109,7 +109,12 @@ for tier in $tiers; do
         tr -d '\r' < "$work/login-$tier-$fw.serial" > "$work/login-$tier-$fw.norm"
         grep -q '^Only root is available on the live medium\.' "$work/login-$tier-$fw.norm"
         grep -qx USB-LIVE-ROOT "$work/login-$tier-$fw.norm"
-        say "PASS U7: $tier $fw live login rejects nobody, root reaches pelt, echo and exit complete"
+        # px87 (pax#246): the live entry is `quiet` (px15's word): the
+        # session prints no line of a program's ordinary life (its exec,
+        # its exit), so the screen holds the installer's pages alone.
+        ! grep -Eq '^user: (exec pid |[^ ]+ pid [0-9]+ (exit_group|exit) [0-9]+ after )' "$work/login-$tier-$fw.norm" \
+            || die "FAIL U7: $tier $fw the live session printed a per-program line: $(grep -m1 -E '^user: ' "$work/login-$tier-$fw.norm")"
+        say "PASS U7: $tier $fw live login rejects nobody, root reaches pelt, echo and exit complete; no per-program line (quiet)"
     done
     # Linux sees the same image as an actual xHCI mass-storage device, mounts
     # its ESP and compares all five files to the host inputs, byte for byte.
