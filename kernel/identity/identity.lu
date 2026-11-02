@@ -1,0 +1,367 @@
+//! identity — the kernel names itself under its banner (px87, pax#176):
+//! the commit it was built from and the SHA-256 of the file it was loaded
+//! from, one line, so a transcript or a photo says which kernel ran.
+//!
+//! - **The commit** is boot/start.S's 48 bytes `pax_kernel_commit`
+//!   (.rodata), which tools/build-kernel writes after the link: the tree's
+//!   `git rev-parse HEAD`, then `-dirty` when a tracked file differed from
+//!   it, or `unknown` outside a checkout; printed to its first NUL.
+//! - **The digest** is FIPS 180-4's SHA-256 of the executable file as
+//!   Limine loaded it (PROTOCOL.md's Executable File Feature: the
+//!   response's `struct limine_file`, its address and size; boot/start.S's
+//!   eleventh request), computed here, at boot: the bytes `sha256sum
+//!   /boot/pax` reads, and /etc/pax-release's kernel row (px82). A kernel
+//!   cannot hold its own digest, so it is measured, never stored.
+//!
+//! The line: `kernel: <commit> sha256 <64 hex digits>, <n> bytes`, or
+//! `kernel: <commit> sha256 none (no executable file response)`.
+//!
+//! **The boot's time** (px87, pax#253: the console's cost on metal, read
+//! off the screen): the TSC at kmain's first statement (`mark_entry`),
+//! its rate measured once against the firmware's clock (kernel/clock:
+//! 10 ms of the HPET or the PM timer, `calibrate`), and before the first
+//! program (`report_boot`): `boot: <n> ms from the kernel's entry to its
+//! first program; the console drew for <m> ms of it (<s> scrolls, <b>
+//! bytes)`, m from kernel/screen's own cycles. Without a clock the rate
+//! is unknown and the line says so (`boot: no clock to time it`).
+//!
+//! One frame (kernel/frames) holds the 64 round constants and the message
+//! schedule while it runs, and is freed after; a block is read from the
+//! file in place, the last one or two built in the frame. Written from
+//! FIPS 180-4 (§4.1.2 the functions, §4.2.2 the constants, §5.1.1 the
+//! padding, §5.3.3 the initial hash value, §6.2.2 the computation) and
+//! the Limine protocol (PROTOCOL.md, limine-protocol 3a0526b7: the
+//! Executable File Feature, `struct limine_file`). No other
+//! implementation's source.
+
+use boot_info
+use clock
+use frames
+use log
+use screen
+
+extern "c" let pax_kernel_commit: *u8
+extern "c" fn pax_rdtsc() -> u64
+
+const M: u64 = 0xffffffff
+const COMMIT_BYTES: u64 = 48
+// The frame's layout: K at 0 (64 words), W at 256 (64 words), the last
+// blocks at 512 (128 bytes).
+const KOFF: u64 = 0
+const WOFF: u64 = 256
+const TAIL: u64 = 512
+
+fn rd32(a: u64) -> u64 {
+    // # Safety: `a` is 4-aligned inside the frame `report` owns.
+    unsafe { (a as *u32).read_volatile() as u64 }
+}
+
+fn wr32(a: u64, v: u64) {
+    // # Safety: as `rd32`.
+    unsafe { (a as *u32).write_volatile((v & M) as u32) }
+}
+
+fn rd8(a: u64) -> u64 {
+    // # Safety: `a` is a byte of the executable file Limine loaded (in the
+    // HHDM, mapped by PAX's paging as every executable/module entry is), or
+    // of the frame.
+    unsafe { (a as *u8).read_volatile() as u64 }
+}
+
+fn wr8(a: u64, v: u64) {
+    // # Safety: a byte of the frame `report` owns.
+    unsafe { (a as *u8).write_volatile((v & 255) as u8) }
+}
+
+/// The big-endian 32-bit word at `a` (4-aligned): a block's word.
+fn be32(a: u64) -> u64 {
+    // # Safety: `a` is a 4-aligned word of the file (its first byte is
+    // 4 KiB aligned, PROTOCOL.md's `struct limine_file`) or of the frame.
+    let v = unsafe { (a as *u32).read_volatile() as u64 }
+    ((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >> 8) & 0xff00) | (v >> 24)
+}
+
+fn rotr(x: u64, n: u64) -> u64 {
+    ((x >> n) | (x << (32 - n))) & M
+}
+
+/// FIPS 180-4 §4.2.2: the first 32 bits of the fractional parts of the
+/// cube roots of the first 64 primes.
+fn put_constants(k: u64) {
+    wr32(k + 0, 0x428a2f98)
+    wr32(k + 4, 0x71374491)
+    wr32(k + 8, 0xb5c0fbcf)
+    wr32(k + 12, 0xe9b5dba5)
+    wr32(k + 16, 0x3956c25b)
+    wr32(k + 20, 0x59f111f1)
+    wr32(k + 24, 0x923f82a4)
+    wr32(k + 28, 0xab1c5ed5)
+    wr32(k + 32, 0xd807aa98)
+    wr32(k + 36, 0x12835b01)
+    wr32(k + 40, 0x243185be)
+    wr32(k + 44, 0x550c7dc3)
+    wr32(k + 48, 0x72be5d74)
+    wr32(k + 52, 0x80deb1fe)
+    wr32(k + 56, 0x9bdc06a7)
+    wr32(k + 60, 0xc19bf174)
+    wr32(k + 64, 0xe49b69c1)
+    wr32(k + 68, 0xefbe4786)
+    wr32(k + 72, 0x0fc19dc6)
+    wr32(k + 76, 0x240ca1cc)
+    wr32(k + 80, 0x2de92c6f)
+    wr32(k + 84, 0x4a7484aa)
+    wr32(k + 88, 0x5cb0a9dc)
+    wr32(k + 92, 0x76f988da)
+    wr32(k + 96, 0x983e5152)
+    wr32(k + 100, 0xa831c66d)
+    wr32(k + 104, 0xb00327c8)
+    wr32(k + 108, 0xbf597fc7)
+    wr32(k + 112, 0xc6e00bf3)
+    wr32(k + 116, 0xd5a79147)
+    wr32(k + 120, 0x06ca6351)
+    wr32(k + 124, 0x14292967)
+    wr32(k + 128, 0x27b70a85)
+    wr32(k + 132, 0x2e1b2138)
+    wr32(k + 136, 0x4d2c6dfc)
+    wr32(k + 140, 0x53380d13)
+    wr32(k + 144, 0x650a7354)
+    wr32(k + 148, 0x766a0abb)
+    wr32(k + 152, 0x81c2c92e)
+    wr32(k + 156, 0x92722c85)
+    wr32(k + 160, 0xa2bfe8a1)
+    wr32(k + 164, 0xa81a664b)
+    wr32(k + 168, 0xc24b8b70)
+    wr32(k + 172, 0xc76c51a3)
+    wr32(k + 176, 0xd192e819)
+    wr32(k + 180, 0xd6990624)
+    wr32(k + 184, 0xf40e3585)
+    wr32(k + 188, 0x106aa070)
+    wr32(k + 192, 0x19a4c116)
+    wr32(k + 196, 0x1e376c08)
+    wr32(k + 200, 0x2748774c)
+    wr32(k + 204, 0x34b0bcb5)
+    wr32(k + 208, 0x391c0cb3)
+    wr32(k + 212, 0x4ed8aa4a)
+    wr32(k + 216, 0x5b9cca4f)
+    wr32(k + 220, 0x682e6ff3)
+    wr32(k + 224, 0x748f82ee)
+    wr32(k + 228, 0x78a5636f)
+    wr32(k + 232, 0x84c87814)
+    wr32(k + 236, 0x8cc70208)
+    wr32(k + 240, 0x90befffa)
+    wr32(k + 244, 0xa4506ceb)
+    wr32(k + 248, 0xbef9a3f7)
+    wr32(k + 252, 0xc67178f2)
+}
+
+/// The eight hash words, word `i` at frame offset 768 + 4i (after the
+/// tail blocks).
+const HOFF: u64 = 768
+
+/// One 64-byte block at `p` into the hash in the frame `f` (§6.2.2).
+fn block(f: u64, p: u64) {
+    let w = f + WOFF
+    var t: u64 = 0
+    while t < 16 {
+        wr32(w + t * 4, be32(p + t * 4))
+        t += 1
+    }
+    while t < 64 {
+        let x = rd32(w + (t - 2) * 4)
+        let y = rd32(w + (t - 15) * 4)
+        let s1 = rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10)
+        let s0 = rotr(y, 7) ^ rotr(y, 18) ^ (y >> 3)
+        wr32(w + t * 4, s1 + rd32(w + (t - 7) * 4) + s0 + rd32(w + (t - 16) * 4))
+        t += 1
+    }
+    let h = f + HOFF
+    var a = rd32(h)
+    var b = rd32(h + 4)
+    var c = rd32(h + 8)
+    var d = rd32(h + 12)
+    var e = rd32(h + 16)
+    var g6 = rd32(h + 20)
+    var g7 = rd32(h + 24)
+    var g8 = rd32(h + 28)
+    t = 0
+    while t < 64 {
+        let big1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+        let ch = (e & g6) ^ ((e ^ M) & g7)
+        let t1 = (g8 + big1 + ch + rd32(f + KOFF + t * 4) + rd32(w + t * 4)) & M
+        let big0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+        let maj = (a & b) ^ (a & c) ^ (b & c)
+        let t2 = (big0 + maj) & M
+        g8 = g7
+        g7 = g6
+        g6 = e
+        e = (d + t1) & M
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & M
+        t += 1
+    }
+    wr32(h, rd32(h) + a)
+    wr32(h + 4, rd32(h + 4) + b)
+    wr32(h + 8, rd32(h + 8) + c)
+    wr32(h + 12, rd32(h + 12) + d)
+    wr32(h + 16, rd32(h + 16) + e)
+    wr32(h + 20, rd32(h + 20) + g6)
+    wr32(h + 24, rd32(h + 24) + g7)
+    wr32(h + 28, rd32(h + 28) + g8)
+}
+
+/// SHA-256 of `n` bytes at `addr` (4 KiB aligned) into the frame `f`'s
+/// hash words.
+fn digest(f: u64, addr: u64, n: u64) {
+    put_constants(f + KOFF)
+    let h = f + HOFF
+    wr32(h, 0x6a09e667) // §5.3.3
+    wr32(h + 4, 0xbb67ae85)
+    wr32(h + 8, 0x3c6ef372)
+    wr32(h + 12, 0xa54ff53a)
+    wr32(h + 16, 0x510e527f)
+    wr32(h + 20, 0x9b05688c)
+    wr32(h + 24, 0x1f83d9ab)
+    wr32(h + 28, 0x5be0cd19)
+    var off: u64 = 0
+    while off + 64 <= n {
+        block(f, addr + off)
+        off += 64
+    }
+    // §5.1.1: the rest, 0x80, zeros, and the length in bits, big-endian,
+    // in one block or two.
+    let tail = f + TAIL
+    var i: u64 = 0
+    while i < 128 {
+        wr8(tail + i, 0)
+        i += 1
+    }
+    let rest = n - off
+    i = 0
+    while i < rest {
+        wr8(tail + i, rd8(addr + off + i))
+        i += 1
+    }
+    wr8(tail + rest, 0x80)
+    let blocks: u64 = if rest + 9 <= 64 { 1 } else { 2 }
+    let end = tail + blocks * 64
+    let bits = n * 8
+    var k: u64 = 0
+    while k < 8 {
+        wr8(end - 1 - k, (bits >> (k * 8)) & 255)
+        k += 1
+    }
+    block(f, tail)
+    if blocks == 2 {
+        block(f, tail + 64)
+    }
+}
+
+/// Print the commit, to its first NUL (at most 48 bytes; `unknown` if
+/// tools/build-kernel never wrote it).
+fn put_commit() {
+    var i: u64 = 0
+    while i < COMMIT_BYTES {
+        // # Safety: one of boot/start.S's 48 bytes at pax_kernel_commit.
+        let b = unsafe { ((pax_kernel_commit as u64 + i) as *u8).read_volatile() } as int
+        if b == 0 {
+            if i == 0 {
+                log.put("unknown")
+            }
+            return
+        }
+        log.put_byte(b)
+        i += 1
+    }
+}
+
+// The boot's time: module state (scalars), each written once at boot
+// with interrupts off, before any thread.
+var entry_tsc: u64 = 0
+var tsc_hz: u64 = 0
+
+fn rdtsc() -> u64 {
+    // # Safety: fpu.S's RDTSC.
+    unsafe { pax_rdtsc() }
+}
+
+/// The TSC at the kernel's entry (kmain's first statement).
+pub fn mark_entry() {
+    let t = rdtsc()
+    // # Safety: module state, written once, before any thread.
+    unsafe { entry_tsc = t }
+}
+
+/// The TSC's rate, against 10 ms of the firmware's clock (after
+/// clock.start; nothing without a clock).
+pub fn calibrate() {
+    if !clock.started() {
+        return
+    }
+    let r0 = rdtsc()
+    let n0 = clock.now_ns()
+    clock.wait_us(10000)
+    let r1 = rdtsc()
+    let n1 = clock.now_ns()
+    if n1 > n0 && r1 > r0 {
+        let hz = (r1 - r0) * 1000000000 / (n1 - n0)
+        // # Safety: as `mark_entry`.
+        unsafe { tsc_hz = hz }
+    }
+}
+
+/// `boot: <n> ms from the kernel's entry to its first program; the
+/// console drew for <m> ms of it (<s> scrolls, <b> bytes)`.
+pub fn report_boot() {
+    // # Safety: module state, read after its one write.
+    let hz = unsafe { tsc_hz }
+    let t0 = unsafe { entry_tsc }
+    if hz == 0 || t0 == 0 {
+        log.line("boot: no clock to time it")
+        return
+    }
+    let now = rdtsc()
+    log.put("boot: ")
+    log.dec(((now - t0) * 1000 / hz) as int)
+    log.put(" ms from the kernel's entry to its first program; the console drew for ")
+    log.dec((screen.cycles() * 1000 / hz) as int)
+    log.put(" ms of it (")
+    log.dec(screen.scrolls() as int)
+    log.put(" scrolls, ")
+    log.dec(screen.bytes() as int)
+    log.put(" bytes)")
+    log.end()
+}
+
+/// `kernel: <commit> sha256 <digest>, <n> bytes` (see the module's
+/// note). After frames.start, before any process.
+pub fn report() {
+    log.put("kernel: ")
+    put_commit()
+    let addr = boot_info.exe_file_addr()
+    let n = boot_info.exe_file_size()
+    if addr == 0 || n == 0 || addr % 4096 != 0 {
+        log.put(" sha256 none (no executable file response)")
+        log.end()
+        return
+    }
+    let pa = frames.alloc() else |_| {
+        log.put(" sha256 none (no frame)")
+        log.end()
+        return
+    }
+    let f = pa + frames.hhdm()
+    digest(f, addr, n)
+    log.put(" sha256 ")
+    var i: u64 = 0
+    while i < 8 {
+        log.hex_n(rd32(f + HOFF + i * 4), 8)
+        i += 1
+    }
+    log.put(", ")
+    log.dec(n as int)
+    log.put(" bytes")
+    log.end()
+    frames.free(pa)
+}
