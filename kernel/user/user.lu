@@ -891,6 +891,7 @@ const SYS_DUP: u64 = 32
 const SYS_DUP2: u64 = 33
 const SYS_GETPID: u64 = 39
 const SYS_CLONE: u64 = 56
+const SYS_FORK: u64 = 57 // px88: musl's fork()
 const SYS_VFORK: u64 = 58
 const SYS_EXECVE: u64 = 59
 const SYS_EXECVEAT: u64 = 322 // px56
@@ -1515,8 +1516,10 @@ pub fn syscall(f: u64) -> u64 {
         refusal_line(nr, r)
         return f
     }
-    // px14: the calls that make, replace and wait for processes.
-    if nr == SYS_CLONE || nr == SYS_CLONE3 || nr == SYS_VFORK {
+    // px14: the calls that make, replace and wait for processes. px88:
+    // fork (57), which musl's fork() asks where x86-64 has it (pax#175),
+    // is clone(SIGCHLD, 0) there.
+    if nr == SYS_CLONE || nr == SYS_CLONE3 || nr == SYS_VFORK || nr == SYS_FORK {
         let g = process.clone(f, nr, a0, a1, a2, a3, a4)
         if g == f {
             refusal_line(nr, word(f, W_RAX))
