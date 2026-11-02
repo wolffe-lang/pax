@@ -2042,6 +2042,16 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
     if old != 0 && owned == 1 {
         note_rss(proc_area(c), paging.user_pages(old)) // px88: the process's peak outlives its image
         let _freed = paging.free_user(old)
+    } else if old != 0 {
+        // px88: a vfork child's exec. The space it leaves is its parent's,
+        // and Linux counts that space's peak in the child (measured: a
+        // vfork child's new image read its parent's peak,
+        // notes/px88/linux/): the parent's peak, or the space's pages now
+        // when they are more.
+        let vp = field(c, offset_of(Thread, vparent))
+        let pk = if vp != 0 { ru_get(proc_area(vp - 1), RU_PEAK) } else { 0 }
+        let now = paging.user_pages(old)
+        note_rss(proc_area(c), if pk > now { pk } else { now })
     }
     release_vfork(c)
 }
