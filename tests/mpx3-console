@@ -59,6 +59,11 @@
 #   T5 the end: `PAX: init /bin/<prog> ended with status <s>; nothing
 #      left to run` with s Linux's status, `halt`, and qemu-halt holds
 #      the machine halted.
+#   T6 (px87, pax#176) the kernel names itself: the line after `PAX: the
+#      console` is `kernel: <commit> sha256 <digest>, <n> bytes`, the
+#      commit the images were built at (kernel.commit, `git rev-parse
+#      HEAD`), the digest and the size the booted ELF's own (the kernel
+#      hashes the file Limine loaded).
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_console.elf, <tier>/console-{ask,pelt}.iso and linux/):
@@ -297,6 +302,15 @@ for leg in $legs; do
             "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
                 || why+=" the log does not end with the init line and halt;"
             [ -z "$why" ] && say "PASS T5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "T5 $id:$why"
+
+            # T6 (px87, pax#176): the kernel names itself under the banner.
+            why=
+            kc=$(cat "$images/kernel.commit" 2>/dev/null || git -C "$PAX_ROOT" rev-parse HEAD)
+            kwant="kernel: $kc sha256 $(sha256_of "$elf"), $(wc -c < "$elf" | tr -d ' ') bytes"
+            kgot=$(grep -m1 '^kernel: ' "$norm")
+            [ "$kgot" = "$kwant" ] || why+=" '${kgot:-no kernel: line}', not '$kwant';"
+            [ "$(grep -A1 -m1 -x 'PAX: the console' "$norm" | sed -n 2p)" = "$kgot" ] || why+=" not the line after 'PAX: the console';"
+            [ -z "$why" ] && say "PASS T6 $id: $kgot" || bad "T6 $id:$why"
         done
     done
 done
