@@ -1536,6 +1536,88 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px88: static musl programs that fork (pax#175) and getrusage (pax#185,
+  # #248). Two probes built with the distribution's musl-gcc (Ubuntu's
+  # musl-tools, never musl from its source: user/elf/forks.c, usage.c;
+  # tools/mkforks) as pid 1 on PAX and in a throwaway container on Linux,
+  # root and 1000:1000: tests/mpx5-forks: the build (K0), the outputs
+  # byte-identical (K1), what PAX does not count, by name (K2), -ENOSYS,
+  # refusals and kills (K3), every frame back (K4), the end (K5).
+  mpx5-forks:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-forks')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, musl-tools (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev musl-tools
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          musl-gcc --version | head -n 1
+          dpkg -s musl | grep -E '^(Package|Version):'
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-forks-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's containers are made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: fork, exec, vfork, posix_spawn, wait and getrusage from static musl against Linux, root and a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-forks $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-forks-linux
+          path: |
+            build/mpx5-forks/probes.txt
+            build/mpx5-forks/linux/
+            build/mpx5-forks/*.initramfs.txt
+            build/mpx5-forks/*/kmain_console.elf
+            build/mpx5-forks/*/*.log
+            build/mpx5-forks-*.session
+            build/mpx5-forks-*.session.linux
+            build/mpx5-forks-*.log
+            build/mpx5-forks-*.norm
+            build/mpx5-forks-*.meta
+            build/mpx5-forks-*.halt
+            build/mpx5-forks-*.verdict
+            build/mpx5-forks-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px18: the speaker. pelt as pid 1 runs /bin/play (user/play, wolf),
   # which sounds note files through the console's KIOCSOUND; the kernel
   # drives the 8254's channel 2 and port 0x61 (kernel/speaker). QEMU's
@@ -4842,6 +4924,7 @@ jobs:
       - mpx3-threads
       - mpx3-tree
       - mpx3-maps
+      - mpx5-forks
       - mpx3-speaker
       - mpx3-sound
       - mpx3-orchestra
