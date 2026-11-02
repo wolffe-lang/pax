@@ -15,8 +15,10 @@
 // ended and halts:
 //
 //     PAX: the console
+//     kernel: <commit> sha256 <the file's digest>, <n> bytes   (px87, kernel/identity)
 //     paging: …
 //     console: com1 irq 4 vector 36, i8042 0x.. -> 0x.. irq 1 vector 33, 8259 master mask 0xec; …
+//     boot: <n> ms from the kernel's entry to its first program; the console drew for <m> ms of it (…)   (px87)
 //     run 1: /bin/pelt
 //     user: exec pid 1 cr3 0x… …
 //     $ echo hi
@@ -54,6 +56,7 @@ use fb
 use fpu
 use frames
 use fstab
+use identity
 use initramfs
 use interrupts
 use log
@@ -216,6 +219,7 @@ fn release_identity() {
 }
 
 export fn kmain() {
+    identity.mark_entry() // px87 (pax#253): the TSC at the entry, for the boot line
     // px77d: with `triage` on the command line, boot/triage.S's IDT,
     // CR4.MCE and band first (box 1), then a numbered box at each step
     // below; without it every triage call returns at once.
@@ -233,6 +237,7 @@ export fn kmain() {
     triage.step(3) // the early screen attached (or `nofb`)
     log.line("PAX: the console")
     frames.start()
+    identity.report() // px87 (pax#176): the commit and the SHA-256 of the file Limine loaded
     triage.step(4)
     let limine = paging.cr3()
     let before = frames.free_count()
@@ -274,6 +279,7 @@ export fn kmain() {
     // px30: the sound device, when the machine has one (`/dev/dsp`);
     // silent when it has none, so no existing session's serial moves.
     clock.start() // bootstrap deadlines also work without a scheduler
+    identity.calibrate() // px87: the TSC's rate against 10 ms of that clock
     triage.step(16)
     let _pci = pci.scan()
     triage.step(17)
@@ -343,6 +349,7 @@ export fn kmain() {
         c = j + 1
     }
     triage.step(26) // the run list read: init next
+    identity.report_boot() // px87 (pax#253): `boot: <n> ms … the console drew for <m> ms …`
     var k: u64 = 0
     var i: u64 = 0
     var init_at: u64 = 0
