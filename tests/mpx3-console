@@ -63,7 +63,8 @@
 #      console` is `kernel: <commit> sha256 <digest>, <n> bytes`, the
 #      commit the images were built at (kernel.commit, `git rev-parse
 #      HEAD`), the digest and the size the booted ELF's own (the kernel
-#      hashes the file Limine loaded).
+#      hashes the file Limine loaded); the same line again just before
+#      T7's boot line (the screen at the prompt names the kernel too).
 #   T7 (px87, pax#253) the boot's time: before `run 1:`, `boot: <n> ms
 #      from the kernel's entry to its first program; the console drew for
 #      <m> ms of it (<s> scrolls, <b> bytes)`, m <= n (the TSC at the
@@ -315,6 +316,8 @@ for leg in $legs; do
             kgot=$(grep -m1 '^kernel: ' "$norm")
             [ "$kgot" = "$kwant" ] || why+=" '${kgot:-no kernel: line}', not '$kwant';"
             [ "$(grep -A1 -m1 -x 'PAX: the console' "$norm" | sed -n 2p)" = "$kgot" ] || why+=" not the line after 'PAX: the console';"
+            # and again, the same, just before the boot line (on the screen at the prompt)
+            [ "$(grep -B1 -m1 '^boot: ' "$norm" | head -n 1)" = "$kwant" ] || why+=" not repeated before the boot line ('$(grep -B1 -m1 '^boot: ' "$norm" | head -n 1)');"
             [ -z "$why" ] && say "PASS T6 $id: $kgot" || bad "T6 $id:$why"
 
             # T7 (px87, pax#253): the boot's time to the first program, and
