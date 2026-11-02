@@ -1805,3 +1805,32 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
 - **The pipe shape** (pax#256): POSIX's awk `exit` and SIGPIPE on a write to a closed pipe, as px78b measured them
   (`notes/px78b-the-one-word-confirmation.md` §4); no awk's or nm's source.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
+
+## px87 — the console on metal
+
+- **The GDB remote serial protocol** (GDB's manual, "Remote Protocol": the packet framing and checksum, `?`, `g`,
+  `m`, `c`, `k`, `QStartNoAckMode`, `Z1`/`z1` hardware breakpoints and `Z3`/`z3` read watchpoints, the `T` stop
+  reply and its `rwatch`/`watch` field): `tests/mpx3-screen.d/readwatch.py`, V7's witness. **QEMU 8.2.2 as a black
+  box**: its gdb stub under TCG accepts one read watchpoint of the whole 4,096,000-byte framebuffer and stops after
+  each guest load from it; the stop reply names the watchpoint's first byte, not the byte read (measured, px87's
+  `probe-rw` runs).
+- **QMP** (QEMU's documented machine protocol): `memsave` of boot/io.S's `pax_serial_log` and its count, `send-key`
+  to the USB keyboard, `screendump`: `notes/px87/stick/qual.py`, the stick's kasumi-shaped leg.
+- **FIPS 180-4** (Secure Hash Standard, August 2015): §4.1.2 (the six functions), §4.2.2 (the 64 constants), §5.1.1
+  (the padding), §5.3.3 (the initial hash value), §6.2.2 (the computation): `kernel/identity`'s SHA-256 of the file
+  Limine loaded, checked against `sha256sum` of the same ELF by `tests/mpx3-console` T6.
+- **The Limine Boot Protocol**, `PROTOCOL.md` (limine-protocol `3a0526b7`, the copy px15 and px19 fetched, sha256
+  `9e69fdd0…`): the Executable File Feature (id words `0xad97e90e83f1ed67, 0x31eb5d1c5ff23b69`, the response
+  `{revision, executable_file}`) and `struct limine_file` (`address`, 4 KiB aligned; `size`): `boot/start.S`'s
+  eleventh request, `kernel/boot_info`'s `exe_file_addr` and `exe_file_size`.
+- **The ELF-64 object format** (the System V gABI: the file header's `e_phoff`, `e_shoff`, the section headers'
+  `SHT_SYMTAB` and `sh_link`, `Elf64_Sym`, `PT_LOAD`'s `p_offset`/`p_vaddr`/`p_filesz`): `tools/build-kernel`'s
+  step 4, which writes the commit at `pax_kernel_commit`'s file offset.
+- **The Intel SDM** vol. 2 (RDTSC; REP MOVS and its use of RSI, which V7 reads at a stop inside `pax_fb_copy`).
+- **reboot(2)** (LINUX_REBOOT_CMD_POWER_OFF and the EPERM refusal), **reboot(8)** (`reboot`, `halt` and `poweroff`
+  as one program), **errno(3)** (the texts of EPERM, EINVAL, EFAULT and EACCES), **open(2)** (EACCES): `user/elf/
+  reboot.S`, `user/install/inventory.lu`. **Ubuntu 24.04's busybox-static 1.36.1** (user/busybox.pin's, by
+  digest) run black-box as uid 1000 in a rootless container (`notes/px87/linux/measure-reboot.sh`, its output
+  `reboot-as-user.log`): `reboot -f`, `poweroff -f` and `halt -f` each print `<name>: Operation not permitted` and
+  exit 1. The image has no systemd `reboot`, so none was measured.
+- No Linux source; no other kernel's, firmware's, bootloader's, emulator's, debugger's or driver's source.
