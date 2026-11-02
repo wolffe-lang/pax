@@ -49,7 +49,8 @@ Then, to use it rather than test it:
 
 1. Build the disk that boots: `tools/mkdisk --gpt --kernel K.elf --root I.cpio 512M pax-disk.img`.
 2. Boot it in a terminal with the SeaBIOS line under [A disk that boots](#a-disk-that-boots).
-3. Type at pelt's prompt; `reboot` restarts on the same disk, `exit` (or Ctrl-D) writes `/` and halts.
+3. Type at pelt's prompt; `reboot` restarts on the same disk, `poweroff` powers off, `exit` (or Ctrl-D) writes `/`
+   and halts. As a user, `reboot` and `poweroff` say `Operation not permitted`, as Linux's do.
 
 The harness never installs anything: a missing tool is named and the tool stops. `tools/qemu-run` boots an image
 headless and returns QEMU's status, `(v << 1) | 1` when the kernel writes `v` to the exit port, 0 for a reset or
@@ -60,7 +61,10 @@ monitor. Each tool's header comment states its usage; `qemu-run` and `qemu-gdb` 
 
 The release and dev images carry the programs below. `/etc/pax-release` prints their exact input identities (the pin
 files' digests, the games' source archives, the kernel's own ELF digest and `SOURCE_DATE_EPOCH`), and the boot banner
-shows the kernel commit and the first eight digits of that file's SHA256.
+shows the kernel commit and the first eight digits of that file's SHA256. The kernel names itself on every boot, on the
+line under `PAX: the console`: `kernel: <commit> sha256 <digest>, <n> bytes`, the commit `tools/build-kernel` wrote into
+it and the SHA-256 of the file the boot loader loaded, so a transcript or a photo says which kernel ran; before its
+first program it prints how long its boot took and how much of that the console spent drawing (`boot: …`).
 
 | Program | What it is | Pin |
 |---|---|---|
@@ -182,13 +186,14 @@ What to know at the prompt:
 `tools/mkdisk --usb` writes a reproducible raw GPT image with one FAT32 EFI system partition and a reserved Limine BIOS
 partition; the supplied initramfs is preserved byte for byte, so the whole live system and any installer or games
 payload stay in memory. The live entry accepts `root` with no password and starts pelt; it changes no installed
-account and provides no authentication.
+account and provides no authentication. It boots `quiet`: no line for a program's ordinary life on the screen the
+installer draws on.
 
 ```sh
 tools/mkdisk --usb --kernel K.elf --initramfs I.cpio --conf boot/limine-usb.conf pax-stick.img
 tools/qemu-run --firmware uefi --usb-stick pax-stick.img       # xHCI mass storage, no CD-ROM, no virtio disk
 tools/usb-write --dry-run pax-stick.img /dev/sdX               # inspect a removable target; the write is yours to do
-PAX_WOLF=$(tools/fetch-wolf) tests/usb-stick --tier native     # BIOS and UEFI, the live login, Linux mounting the ESP
+PAX_WOLF=$(tools/fetch-wolf) tests/usb-stick --tier native     # BIOS and UEFI, the quiet live login, Linux mounting the ESP
 ```
 
 Physical writes and real-machine boots are not tested here. See
@@ -260,7 +265,9 @@ where nobody sees it; `-vga none` (`tools/qemu-run --no-screen`) boots a machine
 
 The framebuffer uses the firmware's width, height, row pitch and RGB masks. It draws before the allocator starts, even
 without COM1. Spleen's 8×16 glyphs give 160×50 cells at 1280×800; above 2560 pixels wide they are doubled, giving
-240×67 cells at 3840×2160. The console supports:
+240×67 cells at 3840×2160. The framebuffer is written and never read: its cell grid in RAM is its shadow, and a scroll
+redraws only the cells that changed (reads through a GPU's write-combining mapping are the slowest thing a user would
+see). The console supports:
 
 - the Linux VT's colour renditions (dim, italic, underline, RGB mapped to its small palette), `OSC P` and `OSC R` for
   the palette, sixteen CSI parameters, scroll margins, character and line insertion and deletion;
@@ -376,10 +383,10 @@ and `--tier native --firmware bios` picks one leg.
 |---|---|---|
 | The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
-| Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, threads and signals, the writable tree, mappings, sound captures |
+| Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving |
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, each program's typed session against the same binary in a container |
-| Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
+| Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
 | Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine, the metal triage's boxes, fault screens and words, an NMI survived and a machine check named anywhere in the boot (`tests/mpx6-nmi`) |
 
