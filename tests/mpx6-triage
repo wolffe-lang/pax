@@ -20,7 +20,9 @@
 #      boxes 1-26 and no 27, CR4.MCE set (clear at the handover), the
 #      boxes drawn on Limine's CR3, the console above the band; and its
 #      serial transcript is T1's but for the `screen:` line and the
-#      clock's measured numbers: triage changes no line PAX prints.
+#      clock's measured numbers (px87: and the boot line's, the boot's
+#      time, the console's share and its scrolls, which the band's shorter
+#      console makes more): triage changes no line PAX prints.
 #   T3 `triage stop=6`: the green banner, boxes 1-6, halted.
 #   T4 `triage fault=3`: #UD at step 3 drawn through the triage IDT
 #      (FAULT 00, RIP pax_ud2), halted; T5 the same with `noidt`: Limine's
@@ -105,7 +107,8 @@ mask() { # the transcript without the screen's line, numbers masked where Limine
     # `paging: limine cr3`, `initramfs: module`, the map's usable bytes, the frame counts)
     # (the firmware's and Limine's own bytes before PAX's first line, escape sequences among them, vary: from it on)
     tr -d '\r' < "$1" | sed -E 's/\x1b\[[0-9;=?]*[A-Za-z]//g' | sed -n '/PAX: the console/,$p' | sed -E '1s/.*(PAX: the console)/\1/' \
-        | grep -av '^screen: ' | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g'
+        | grep -av '^screen: ' | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g' \
+        | sed -E '/^boot: [0-9]+ ms /s/[0-9]+/N/g'
 }
 for fw in $legs; do
     leg "$fw" plain plain
