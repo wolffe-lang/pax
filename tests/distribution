@@ -62,8 +62,9 @@ def check(blob):
     assert rows['usr/share/zoneinfo/UTC'][1] == rows['etc/localtime'][1] and len(rows['etc/localtime'][1]) == 114, 'image-zoneinfo-utc'
     assert rows['usr/share/zoneinfo/UTC'][0][1] == 0o100644, 'image-zoneinfo-mode'
     assert rows['etc/pax-live'][1] == b'pax-live-games-v1\n', 'image-live-marker'
-    for name in ('pax-install', 'paxgpt', 'paxfat', 'paxext2', 'limine', 'reboot'):
+    for name in ('pax-install', 'paxgpt', 'paxfat', 'paxext2', 'limine', 'reboot', 'poweroff'):
         assert rows['bin/'+name][0][1] == 0o100755, 'image-installer-mode-'+name
+    assert rows['bin/poweroff'][1] == rows['bin/reboot'][1], 'image-poweroff-is-reboot'  # px87 (pax#243)
     for line in rows['usr/share/pax-install/boot.sha256'][1].decode().splitlines():
         digest, path = line.split()
         assert sha(rows[path.lstrip('/')][1]) == digest, 'image-installer-boot-'+path
