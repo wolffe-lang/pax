@@ -17,6 +17,15 @@
 //! `proc_area`, zero for a fresh process): the break's start and its
 //! current value, and the mmap cursor.
 //!
+//! **The peak** (px88, getrusage's ru_maxrss): before a call takes pages
+//! out of a space — `munmap`, `brk` down, MADV_DONTNEED and MADV_FREE
+//! where they unmap, `mremap` smaller, a MAP_FIXED mapping over mapped
+//! pages, a truncate's cut of a process's mapping (`cut_maps`) — the
+//! space's mapped pages are counted (kernel/paging's `user_pages`) and
+//! the process's peak raised to them (kernel/sched's `note_rss`; exec
+//! and a process's end are kernel/sched's own). Nothing else lowers the
+//! count, so the peak is exact.
+//!
 //! **The break** starts at the page above the highest byte of the ELF
 //! image (`start`; Linux places a static program's there too, plus a
 //! random offset PAX does not model). `brk(addr)` answers the current
@@ -271,6 +280,12 @@ fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
 }
 
+/// px88: the space at `pml4`'s mapped pages, before a call lowers them,
+/// into the peak of the process whose area is `a` (kernel/sched's).
+fn note_peak(a: u64, pml4: u64) {
+    sched.note_rss(a, paging.user_pages(pml4))
+}
+
 /// The refusal the last call left (0 none), cleared by reading it.
 pub fn take_refusal(a: u64) -> u64 {
     let r = get(a, A_REFUSAL)
@@ -510,6 +525,7 @@ pub fn brk(a: u64, pml4: u64, addr: u64) -> u64 {
             pg += PAGE
         }
     } else if want < have {
+        note_peak(a, pml4) // px88
         unmap_range(pml4, want, have)
     }
     put(a, A_BRK, addr)
@@ -579,15 +595,22 @@ fn place(a: u64, pml4: u64, addr: u64, n: u64, flags: u64, extra: u64) -> u64 {
             return NEG_ENOMEM
         }
         var pg = addr
+        var over = false // px88: whether a mapped page is replaced
         while pg < addr + n {
             if taken(a, pml4, pg) && flags & MAP_FIXED_NOREPLACE != 0 && flags & MAP_FIXED == 0 {
                 return NEG_EEXIST
+            }
+            if !over && mapped(pml4, pg) != 0 {
+                over = true
             }
             pg += PAGE
         }
         if !splits_ok(a, addr, addr + n, extra) {
             put(a, A_REFUSAL, R_RECORDS)
             return NEG_ENOMEM
+        }
+        if over {
+            note_peak(a, pml4) // px88
         }
         unmap_range(pml4, addr, addr + n)
         unreserve(a, addr, addr + n) // px26
@@ -739,6 +762,7 @@ pub fn munmap(a: u64, pml4: u64, addr: u64, len: u64) -> u64 {
         put(a, A_REFUSAL, R_RECORDS) // px62: a record cut in two needs one more
         return NEG_ENOMEM
     }
+    note_peak(a, pml4) // px88
     unmap_range(pml4, addr, end)
     unreserve(a, addr, end) // px26
     unmap_records(a, addr, end) // px62
@@ -865,6 +889,9 @@ pub fn madvise(a: u64, pml4: u64, addr: u64, len: u64, advice: u64) -> u64 {
     }
     if hint {
         return 0
+    }
+    if adv == MADV_DONTNEED || adv == MADV_FREE {
+        note_peak(a, pml4) // px88: a record's page or a lazy range's may go
     }
     pg = addr
     while pg < end {
@@ -1245,10 +1272,15 @@ pub fn cut_maps(ino: u64, size: u64) {
     while s < sched.SLOTS {
         let (a, pml4) = sched.space_of(s)
         if a != 0 && pml4 != 0 {
+            var noted = false // px88: the process's peak, once, before its first page goes
             var r: u64 = 0
             while r < MAPS {
                 let lo = mw(a, r, M_LO)
                 if lo != 0 && mw(a, r, M_INO) == ino {
+                    if !noted {
+                        note_peak(a, pml4)
+                        noted = true
+                    }
                     let hi = mw(a, r, M_HI)
                     let off = mw(a, r, M_OFF)
                     var pg = lo
@@ -1449,6 +1481,7 @@ pub fn mremap(a: u64, pml4: u64, old: u64, osz: u64, nsz: u64, flags: u64) -> u6
             put(a, A_REFUSAL, R_RECORDS)
             return NEG_ENOMEM
         }
+        note_peak(a, pml4) // px88
         unmap_range(pml4, old + ns, old + os)
         unreserve(a, old + ns, old + os)
         unmap_records(a, old + ns, old + os)
