@@ -1224,7 +1224,18 @@ fn process_ends(l: u64, st: u64) {
         let pp = field(l, offset_of(Thread, ppid))
         let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
         if ps != SLOTS {
-            put_field(l, offset_of(Thread, zombie), 1)
+            // px88: a parent whose SIGCHLD is ignored, or whose action for
+            // it has SA_NOCLDWAIT, keeps no zombie: the child's slot is let
+            // go at its reap, uncounted in the parent's children, and a
+            // wait in the parent runs again and answers -ECHILD once no
+            // child is left (wait(2), getrusage(2), sigaction(2): SIGCHLD
+            // is still sent, as Linux sends it).
+            let act = own_area(ps) + (SIG_WORDS + (SIGCHLD - 1) * 4) * 8
+            // # Safety: the parent's area, words SIG_WORDS + 16 * 4 and the one after < 512: its SIGCHLD action's handler and flags.
+            let (h, fl) = unsafe { ((act as *u64).read_volatile(), ((act + 8) as *u64).read_volatile()) }
+            if h != SIG_IGN && fl & SA_NOCLDWAIT == 0 {
+                put_field(l, offset_of(Thread, zombie), 1)
+            }
             wake_waiter(pp)
             // px26: SIGCHLD for the parent (`signal(7)`; siginfo's
             // CLD_EXITED with the exit code, CLD_KILLED with the signal).
@@ -2730,6 +2741,7 @@ pub fn raise_tid(tgid: u64, tid: u64, sig: u64, info: u64) -> bool {
 // black-box runs on Linux (notes/px48-job-control.md); no kernel's source.
 
 const SA_NOCLDSTOP: u64 = 1
+const SA_NOCLDWAIT: u64 = 2 // px88
 const SIGHUP: u64 = 1
 const STOPS: u64 = 0x3c0000 // SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU: bits 18 to 21
 
