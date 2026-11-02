@@ -215,6 +215,24 @@ The image's banner and `/etc/pax-release` are separate archive contents
 (px82); this builder preserves them byte for byte and leaves their kernel
 printing separate from the medium line.
 
+**The live entry is `quiet`** (px87, pax#246): `boot/limine-usb.conf`'s
+`cmdline: quiet` (px15's word) keeps a program's ordinary life (its exec,
+its exit, the first system call PAX lacks) off the live screen, where the
+installer draws its pages; refusals, faults and bad buffers still print.
+The kernel names itself under its banner whatever the medium (px87,
+pax#176): `kernel: <commit> sha256 <digest>, <n> bytes`, the commit
+`tools/build-kernel` wrote into the ELF and the SHA-256 of the file Limine
+loaded (Limine's Executable File response), the bytes `sha256sum
+/boot/pax` and `/etc/pax-release`'s kernel row hash. Before its first
+program it times its own boot: `boot: <n> ms from the kernel's entry to
+its first program; the console drew for <m> ms of it (<s> scrolls, <b>
+bytes)` (the TSC, its rate measured against 10 ms of the HPET or the PM
+timer). The console writes the framebuffer and never reads it (px87,
+pax#253: a scroll redraws the cells that changed from the cell grid, its
+shadow in RAM); the command-line word `fbread` brings px19's scroll back,
+which copied the framebuffer onto itself, for measurements only (px87's
+metal A/B and `tests/mpx3-screen` V7's control).
+
 `tests/usb-stick` runs inside the console CI job in full/all tiers and
 explicit partial dispatches. It requires both SeaBIOS and OVMF, replays all
 five console sessions from both the ISO and USB (50 assertions per medium
