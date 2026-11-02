@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# tests/mpx5-forks — px88: static MUSL programs that fork (pax#175) and
+# getrusage (pax#185, #248). Two probes, built by tools/mkforks with the
+# distribution's musl-gcc, run on PAX and on Linux and compared byte for
+# byte:
+#
+#   - forks (user/elf/forks.c): musl's fork() is system call 57 (glibc
+#     and wolf ask clone, 56): the child's 0 and the parent's pid, the
+#     child's parent, memory copied, a pipe and a file's offset shared,
+#     FD_CLOEXEC, dispositions and the mask kept, the pending set
+#     emptied, exit statuses and a killing signal, WNOHANG and ECHILD;
+#     exec after fork; vfork (58) and exec from it; posix_spawn with file
+#     actions; a hundred children in turn, eight at once, a fork from a
+#     second thread;
+#   - usage (user/elf/usage.c): getrusage's RUSAGE_SELF, RUSAGE_CHILDREN
+#     and RUSAGE_THREAD and its refusals, every field (the seven Linux
+#     leaves unmaintained, majflt, inblock and oublock 0 there too),
+#     ru_maxrss across an allocation, a free, a fork, an exec, a waited-for
+#     grandchild and children whose SIGCHLD is ignored, the times of a
+#     spin and of system calls, the voluntary and involuntary switches,
+#     a second thread's own, and wait4's rusage. Each row says what a
+#     number did, so the line is the same on both kernels; its `~` lines
+#     are what PAX does not keep (ru_minflt), held to their text.
+#
+# Each runs as root and again as 1000:1000 through px39's `as` (px47: every
+# suite as a user), in /t, which the image gives the user. The Linux side
+# of each is the same binaries as the same user in a throwaway container
+# (tools/linux-tree), so nothing under test runs on the host.
+#
+#   tests/mpx5-forks [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# Images, per tier: forks-<session>.iso for the four sessions (forks,
+# usage, forks-user, usage-user), one kernel, kmain_console. Assertions,
+# per tier, firmware and session:
+#   K0 build: kmain_console built; both probes static musl and `as`
+#      static; the images built (digests printed); the Linux side ran
+#      every session.
+#   K1 the output, differential: every line the program wrote on PAX (the
+#      kernel's own `user: …` lines left out) is byte-identical to what it
+#      wrote on Linux, `~` lines apart, and the exit status is Linux's.
+#   K2 usage: the `~` lines are PAX's own answers where Linux keeps a
+#      count PAX does not, held to their text (ru_minflt 0, R-px88-4).
+#   K3 -ENOSYS for nothing the probes ask (musl's start-up and these
+#      calls ask nothing PAX lacks; a user's session's `as`, glibc-static,
+#      its set_robust_list and rseq); no `refused:` line; killed by a
+#      signal: forks' one child that raises SIGTERM, nobody in usage.
+#   K4 everything given back: the frames line as many frames free after
+#      init's end as before the first program; the tree's line as many
+#      frames and inodes held as when it was made, but for the frames the
+#      inode table grew by (never given back).
+#   K5 the end: `PAX: init … ended with status 0; nothing left to run`,
+#      and qemu-halt holds the machine halted.
+# PAX_FORKS_SESSIONS names the sessions to boot (all four by default; a
+# plant or a red-first run may name one). The first session of the first
+# leg runs first, and the suite stops at its first failure. The UEFI leg needs OVMF: SKIPPED LOUDLY without it
+# unless PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0
+# when every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-forks [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need python3
+
+SESSIONS="forks usage forks-user usage-user"
+prog_of() { case $1 in forks*) echo forks ;; *) echo usage ;; esac; }
+user_of() { case $1 in *-user) echo 1 ;; *) echo 0 ;; esac; }
+TILDE_USAGE='~minflt: self 0
+~minflt: at the end, self 0, children 0'
+
+work=$PAX_BUILD/mpx5-forks
+runs=$PAX_BUILD/mpx5-forks-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The Linux side of every session, each in its own throwaway container.
+linux_side() { # dir -> reasons on stdout
+    local s p own
+    mkdir -p "$1/linux"
+    for s in $SESSIONS; do
+        p=$(prog_of "$s")
+        own=(--owners "$1/$s.owners")
+        args=("/bin/$p")
+        [ "$(user_of "$s")" = 0 ] || args=(/bin/as 1000 1000 "/bin/$p")
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/$s/root" --keys "$1/none.keys" --prompt '$ ' --argv0 "${args[0]}" \
+            --size 64m --rdev "${own[@]}" "$1/linux/$s.tty" -- "${args[@]}"; then
+            say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc")"
+        else
+            printf ' tools/linux-tree %s;' "$s"
+        fi
+    done
+}
+
+if [ "$only" = linux ]; then
+    why=$(linux_side "$images")
+    [ -z "$why" ] && say "PASS K0 (linux): the Linux side ran every session, each in a throwaway container" || bad "K0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    need readelf
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkforks" "$work/bin" > "$work/probes.txt" || why+=" tools/mkforks;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" >> "$work/probes.txt" || why+=" tools/mkas;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    : > "$work/none.keys"
+    for f in "$work/bin/forks" "$work/bin/usage" "$work/bin/as"; do
+        r=$(static_ok "$f") || why+=" $r;"
+    done
+    for s in $SESSIONS; do
+        p=$(prog_of "$s")
+        r=$work/$s/root
+        mkdir -p "$r/bin" "$r/etc" "$r/t"
+        cp "$work/bin/$p" "$r/bin/$p" || why+=" no $p;"
+        pairs=("/bin/$p=$r/bin/$p:755")
+        if [ "$(user_of "$s")" = 1 ]; then
+            cp "$work/bin/as" "$r/bin/as" || why+=" no as;"
+            pairs+=("/bin/as=$r/bin/as:755" "/t/:755:1000:1000")
+            echo "/bin/as 1000 1000 /bin/$p" > "$r/etc/pax-run"
+            printf '/t 755 1000 1000\n' > "$work/$s.owners"
+        else
+            pairs+=("/t/:755:0:0")
+            echo "/bin/$p" > "$r/etc/pax-run"
+            printf '/t 755 0 0\n' > "$work/$s.owners"
+        fi
+        pairs+=("/etc/pax-run=$r/etc/pax-run:644")
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${pairs[@]}" > "$work/$s.initramfs.txt"; then
+            sed "s/^/  initramfs $s: /" "$work/$s.initramfs.txt" >&2
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for s in $SESSIONS; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/forks-$s.iso" >/dev/null \
+                    || why+=" $tier forks-$s: mkimage;"
+                say "built $tier forks-$s: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/forks-$s.iso"), initramfs $(sha256_of "$work/$s.cpio")"
+            done
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ]; then
+        [ -z "$why" ] && say "PASS K0 (build): kmain_console built ($tiers), both probes static musl, four images a tier" || bad "K0 (build):$why"
+        exit "$fail"
+    fi
+    if [ "$(uname -s)" != Linux ]; then
+        why+=" the Linux side needs Linux (this is $(uname -s)): build on Linux, boot here with --images;"
+    else
+        why+=$(linux_side "$work")
+    fi
+    [ -z "$why" ] && say "PASS K0: kmain_console built ($tiers), both probes static musl, four images a tier, Linux ran four sessions, each in a throwaway container" || bad "K0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-forks build (K0): PASS (no boot: --no-boot)" || say "mpx5-forks build: FAIL"
+        exit "$fail"
+    fi
+fi
+lx=$images/linux
+[ -d "$lx" ] || die "no $lx (build first, and run the Linux side)"
+
+record() { # tier leg session status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
+        "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+stopped=
+for leg in $legs; do
+    [ -z "$stopped" ] || break
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        [ -z "$stopped" ] || break
+        for s in ${PAX_FORKS_SESSIONS:-$SESSIONS}; do
+            id="$tier $leg $s"
+            before=$fail
+            p=$(prog_of "$s")
+            log=$PAX_BUILD/mpx5-forks-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/forks-$s.iso
+            rm -f "$log" "$log.verdict"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                for t in K1 K3 K4 K5; do bad "$t $id: no image"; done
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 \
+                --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            record "$tier" "$leg" "$s" "$hrc"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+
+            # K1: the program's lines against Linux's (a kernel line that
+            # lands inside a line a process has not finished is cut out).
+            why=
+            out=$PAX_BUILD/mpx5-forks-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { on = 1; next } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            tr -d '\r' < "$lx/$s.tty" > "$out.linux"
+            grep -v '^~' "$out" > "$out.cmp"
+            grep -v '^~' "$out.linux" > "$out.linux.cmp"
+            if ! cmp -s "$out.linux.cmp" "$out.cmp"; then
+                why+=" the output differs from Linux's: $(diff "$out.linux.cmp" "$out.cmp" | head -n 12 | cut -c1-400 | tr '\n' '|');"
+            fi
+            pst=$(sed -n -E 's/^user: [^ ]+ pid 1 (exit_group|exit) ([0-9]+) after .*/\2/p' "$norm" | head -n 1)
+            lst=$(cat "$lx/$s.tty.rc" 2>/dev/null)
+            [ "$pst" = "$lst" ] || why+=" exit '$pst' on PAX, '$lst' on Linux;"
+            [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 20 ] || why+=" fewer than 21 lines;"
+            grep -qx "$p: done" "$out.cmp" || why+=" no '$p: done';"
+            [ -z "$why" ] && say "PASS K1 $id: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to Linux's ($(sha256_of "$out.cmp" | cut -c1-12)…), exit $pst" || bad "K1 $id:$why"
+
+            # K2: what PAX does not keep, by name.
+            if [ "$p" = usage ]; then
+                g=$(grep '^~' "$out")
+                [ "$g" = "$TILDE_USAGE" ] && say "PASS K2 $id: $(printf '%s' "$g" | tr '\n' '|') (Linux here: $(grep '^~' "$out.linux" | tr '\n' '|'))" || bad "K2 $id: '$(printf '%s' "$g" | tr '\n' '|')'"
+            fi
+
+            # K3: what PAX lacks or refuses, and who was killed.
+            why=
+            # (a user's session starts in `as`, glibc-static: its start-up's
+            # set_robust_list and rseq are the two -ENOSYS every glibc
+            # program earns on PAX, px39; the probes, musl, earn none)
+            ns=$(sed -n -E 's/^.*user: ([^ ]+) pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1 \2/p' "$norm" | grep -v '^as ' | sort -u | paste -sd'|' -)
+            [ -z "$ns" ] || why+=" -ENOSYS for '$ns';"
+            na=$(sed -n -E 's/^.*user: as pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+            wa=; [ "$(user_of "$s")" = 0 ] || wa="273 334"
+            [ "$na" = "$wa" ] || why+=" as's -ENOSYS '$na', not '$wa';"
+            rf=$(grep ': refused: ' "$norm" | sed -E 's/^.*user: [^ ]+ pid [0-9]+ //' | LC_ALL=C sort -u | paste -sd'|' -)
+            [ -z "$rf" ] || why+=" refusals '$rf';"
+            kl=$(grep -c 'user: [^ ]* pid [0-9]* killed: ' "$norm")
+            kt=$(grep -c 'user: [^ ]* pid [0-9]* killed: SIGTERM' "$norm")
+            if [ "$p" = forks ]; then
+                { [ "$kl" = 1 ] && [ "$kt" = 1 ]; } || why+=" $kl killed ($kt by SIGTERM), not the one SIGTERM row: $(grep -m3 ' killed: ' "$norm" | tr '\n' '|');"
+            else
+                [ "$kl" = 0 ] || why+=" $kl killed: $(grep -m3 ' killed: ' "$norm" | tr '\n' '|');"
+            fi
+            [ -z "$why" ] && say "PASS K3 $id: -ENOSYS for nothing the probe asked${wa:+ (as: $wa)}; nothing refused; killed: $kl ($kt by SIGTERM)" || bad "K3 $id:$why"
+
+            # K4: every frame back, and the tree as it was made (the
+            # root-on-disk leg skips it by name: the memory tree's census).
+            why=
+            fl=$(grep -m1 '^user: frames free ' "$norm")
+            if [ "${PAX_ROOTDISK:-0}" = 1 ]; then
+                say "SKIP K4 $id: the memory tree's census; / is on a disk, whose cache keeps frames (rootdisk): $fl"
+            else
+            fa=$(printf '%s\n' "$fl" | sed -n -E 's/^user: frames free ([0-9]+) before, [0-9]+ with [0-9]+ processes, ([0-9]+) after$/\1 \2/p')
+            set -- $fa
+            { [ -n "$fa" ] && [ "$1" = "$2" ]; } || why+=" frames not all back ('$fl');"
+            tl=$(grep -m1 '^tree: frames ' "$norm")
+            set -- $(printf '%s\n' "$tl" | sed -n -E "s/^tree: frames ([0-9]+) \\(([0-9]+) when made\\), ([0-9]+) \\(([0-9]+)\\) of them the inode table's, inodes ([0-9]+) \\(([0-9]+)\\), cap ([0-9]+), refusals [0-9]+\$/\\1 \\2 \\3 \\4 \\5 \\6/p")
+            if [ $# -ne 6 ]; then
+                why+=" no tree line ('$tl');"
+            else
+                [ $(($1 - $2)) = $(($3 - $4)) ] || why+=" the tree holds $(($1 - $2)) frames more than when made, the inode table $(($3 - $4)) ('$tl');"
+                [ "$5" = "$6" ] || why+=" inodes $5, $6 when made ('$tl');"
+            fi
+            [ -z "$why" ] && say "PASS K4 $id: $fl; $tl" || bad "K4 $id:$why"
+            fi
+
+            # K5: the end.
+            why=
+            grep -qx "PAX: init /bin/[a-z]* ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init … ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            [ "$lst" = 0 ] || why+=" Linux's status $lst, not 0;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            ! grep -q '^PANIC ' "$norm" || why+=" $(grep -m1 '^PANIC ' "$norm");"
+            [ -z "$why" ] && say "PASS K5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "K5 $id:$why"
+
+            if [ "$before" = 0 ] && [ "$fail" != 0 ]; then
+                stopped="$id"
+                say "FAIL stopped early: $id failed; the later boots would fail the same way and are not run"
+                break
+            fi
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-forks: PASS" || say "mpx5-forks: FAIL"
+exit "$fail"
