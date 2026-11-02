@@ -982,6 +982,7 @@ const SYS_FACCESSAT2: u64 = 439
 const SYS_FCHMODAT2: u64 = 452
 // px45: priority, the scheduler, and root's calls.
 const SYS_GETPRIORITY: u64 = 140
+const SYS_GETRUSAGE: u64 = 98 // px88
 const SYS_SETPRIORITY: u64 = 141
 const SYS_SCHED_SETSCHEDULER: u64 = 144
 const SYS_SCHED_GETSCHEDULER: u64 = 145
@@ -1416,8 +1417,19 @@ fn sleep_until(req: u64, abs: bool, wall: bool) -> (u64, u64) {
 
 /// A system call (kernel/interrupts, vector PAX_SYSCALL): the frame to
 /// resume — `f` with %rax set, or, after `exit`, `exit_group` or a
-/// sleep, the next thread's.
+/// sleep, the next thread's. px88: bracketed for its caller's system
+/// time (kernel/sched's `syscall_begins`, which `serve` opens with, and
+/// `syscall_ends`), the caller's slot taken first: a call that waits or
+/// ends its caller hands back another thread's frame.
 pub fn syscall(f: u64) -> u64 {
+    let c = sched.self_slot()
+    let g = serve(f)
+    sched.syscall_ends(c)
+    g
+}
+
+/// The system call in `f`, served: `syscall`'s frame.
+fn serve(f: u64) -> u64 {
     let nr = word(f, W_RAX)
     let a0 = word(f, W_RDI)
     let a1 = word(f, W_RSI)
@@ -2322,6 +2334,9 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     // only root may make.
     if nr == SYS_GETPRIORITY {
         return process.getpriority(r0, a1)
+    }
+    if nr == SYS_GETRUSAGE {
+        return process.getrusage(r0, a1) // px88 (pax#185, #248)
     }
     if nr == SYS_SETPRIORITY {
         return process.setpriority(r0, a1, a2)
