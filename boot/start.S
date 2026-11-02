@@ -36,6 +36,11 @@
    PROTOCOL.md's Executable Command Line Feature), for `quiet`. px19
    adds a ninth, the framebuffer request (revision 0; PROTOCOL.md's
    Framebuffer Feature), for the screen.
+   px87 adds an eleventh, the executable file request (revision 0;
+   PROTOCOL.md's Executable File Feature: the kernel's own file as Limine
+   loaded it), whose SHA-256 kernel/identity prints under the banner
+   (pax#176), and `pax_kernel_commit`, 48 bytes of .rodata that
+   tools/build-kernel writes after the link (the commit it built).
 
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
@@ -112,11 +117,22 @@ limine_efi_system_table_request:
         .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x5ceba5163eaaf6d6, 0x0a6981610cf65fcc
         .quad 0, 0
 
+        .globl limine_executable_file_request
+limine_executable_file_request:         /* px87: the kernel's own file (pax#176) */
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0xad97e90e83f1ed67, 0x31eb5d1c5ff23b69
+        .quad 0, 0
+
         .globl limine_base_revision
         .set limine_base_revision, base_revision
 
 requests_end:
         .quad 0xadc0e0531bb10d03, 0x9572709f31764c62
+
+/* --- px87: the commit, written into the ELF by tools/build-kernel ------ */
+        .section .rodata.pax_identity, "a"
+        .globl pax_kernel_commit
+pax_kernel_commit:                      /* NUL-padded ASCII; all zeros: unknown */
+        .zero 48
 
 /* --- code --------------------------------------------------------------- */
         .text
