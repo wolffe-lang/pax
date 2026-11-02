@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# mkforks — build px88's two probes, static x86-64 Linux executables
+# linked against MUSL: `forks` (user/elf/forks.c: fork, exec after fork,
+# vfork, posix_spawn, wait; pax#175) and `usage` (user/elf/usage.c:
+# getrusage and wait4's rusage; pax#185, #248), for tests/mpx5-forks.
+#
+#   tools/mkforks OUTDIR
+#
+# musl's fork() asks system call 57, which glibc's and wolf's never do, so
+# these two are built with musl: the distribution's packaged musl and its
+# musl-gcc wrapper (Ubuntu 24.04's musl-tools, on CI's runner and in
+# px88's container), never musl built from its source (MUSL_CC names
+# another wrapper). `-static -no-pie -O1`, ET_EXEC with no PT_INTERP, and
+# no glibc in it (neither glibc's banner nor a GLIBC_ version string),
+# each checked. Prints the compiler's and musl's versions, then `<name>
+# <sha256> <bytes>` for each. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkforks OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${MUSL_CC:-musl-gcc}
+need "$cc" readelf
+say "musl-gcc: $("$cc" --version 2>&1 | head -n 1)"
+if command -v dpkg-query > /dev/null 2>&1; then
+    say "musl: $(dpkg-query -W -f '${Package} ${Version}' musl 2>/dev/null || echo 'not a dpkg package')"
+fi
+# Each source by its whole name: the CI map reads the paths a tool names.
+for src in "$PAX_ROOT/user/elf/forks.c" "$PAX_ROOT/user/elf/usage.c"; do
+    p=$(basename "$src" .c)
+    "$cc" -static -no-pie -O1 -pthread -Wall -Wextra -Wno-unused-result -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$out/$p" "$src" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    ! readelf -SW "$out/$p" | grep -q '\.dynamic' || die "$p has a .dynamic section"
+    ! LC_ALL=C grep -aqE 'GNU C Library|GLIBC_' "$out/$p" || die "$p carries glibc (not musl)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
