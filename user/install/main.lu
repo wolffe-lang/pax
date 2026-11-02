@@ -118,14 +118,20 @@ fn main() -> int {
         return 2
     }
     if o.mode == "--inventory" {
-        let ts = inventory() else |e| { eprint("pax-install: inventory: {e}"); return 1 }
+        let ts = inventory() else |e| match e {
+            denied => { return 1 }, // px87 (pax#266): open_disk named the node and why
+            _ => { eprint("pax-install: inventory: {e}"); return 1 },
+        }
         for t in ts { print(inventory_text(t)) }
         return 0
     }
     // Scratch before the inventory and the snapshot (execute_plan's note).
     let work = "/tmp/pax-install-{os_pid()}"
     fs_create_dir_mode(work, 448) else |_| { eprint("pax-install: scratch {work}"); return 1 }
-    let ts = inventory() else |e| { eprint("pax-install: inventory: {e}"); return 1 }
+    let ts = inventory() else |e| match e {
+        denied => { return 1 }, // px87 (pax#266): open_disk named the node and why
+        _ => { eprint("pax-install: inventory: {e}"); return 1 },
+    }
     let (disks, list) = judge_all(ts, o.allow, o.tools, work)
     var lg = if o.mode == "--check" then no_log("--check writes nothing") else open_log(disks, o.tools, work)
     note(mut lg, "PAX install log {lg.path}")
