@@ -1805,3 +1805,30 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
 - **The pipe shape** (pax#256): POSIX's awk `exit` and SIGPIPE on a write to a closed pipe, as px78b measured them
   (`notes/px78b-the-one-word-confirmation.md` §4); no awk's or nm's source.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
+
+## px88 — fork for musl, and getrusage
+
+- **The man pages** (the Linux man-pages project, as published): fork(2) (the child's 0 and the parent's pid, the
+  copied memory, the duplicated descriptors and their shared open files, the dispositions and the mask kept, the
+  pending set emptied, "the child's resource utilizations … reset to zero"), vfork(2), clone(2) (fork as
+  `clone(SIGCHLD, 0)`), execve(2), wait(2) and wait4(2) (the rusage a wait fills, SIGCHLD set to SIG_IGN),
+  getrusage(2) (the three `who`s, every field, which Linux leaves unmaintained, RUSAGE_CHILDREN's largest child and
+  its waited-for descendants), posix_spawn(3), pthread_create(3), sigaction(2), signal(7), fcntl(2), pipe(2),
+  lseek(2), nanosleep(2), sched_getaffinity(2).
+- **POSIX.1-2024**: XSH fork, vfork's rationale, _Exit, execve, waitpid, posix_spawn and
+  posix_spawn_file_actions_adddup2, getrusage and `<sys/resource.h>`, sigaction, sigprocmask, sigpending,
+  pthread_create, sched_yield.
+- **The syscall table** (`arch/x86/entry/syscalls/syscall_64.tbl`: 57 fork, 58 vfork, 98 getrusage, as pax#175
+  and pax#185 cite them); the `who` values (RUSAGE_SELF 0, RUSAGE_CHILDREN -1, RUSAGE_THREAD 1) as the packaged
+  musl passes them, seen in the exploration probe's calls; `struct rusage`'s layout from getrusage(2)'s field list
+  and the x86-64 psABI's sizes (two `struct timeval`s of two longs, then fourteen longs: 144 bytes, as
+  kernel/process's wait4 already took); `include/uapi/asm-generic/signal-defs.h` for SA_NOCLDWAIT (0x2), the flag
+  that, as SIG_IGN for SIGCHLD does, keeps a parent from holding zombies (wait(2), sigaction(2)).
+- **The Intel SDM**: vol. 2B RDTSC, vol. 3B §18.17 (the time-stamp counter, its constant rate on the processors
+  that have one): the scheduler's cycles, converted against kernel/clock's nanoseconds.
+- **Black-box Linux** (hasu's kernel, from a rootless container, `notes/px88/linux/`): the exploration probe's
+  numbers (`explore.c`), and `strace -f` of musl's `fork`, `vfork` and `posix_spawn` (which system calls each
+  makes), and the two witnesses' transcripts (`tests/mpx5-forks`'s Linux side).
+- **musl** only as Ubuntu 24.04's packaged binaries (`musl`, `musl-dev`, `musl-tools`: `musl-gcc`), used to build
+  the witnesses; never musl's source, glibc's, a BSD's or any kernel's.
+- No Linux source; no other kernel's, libc's or firmware's source.
