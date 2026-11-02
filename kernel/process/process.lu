@@ -34,6 +34,10 @@
 //! space-separated words for `exec_span`, the caller's vectors (copied
 //! out of its memory before anything else changes) for `execve`.
 //!
+//! **fork** (57, px88, pax#175): `clone(SIGCHLD, 0)` (fork(2)), the fork
+//! below: musl's fork() asks it where x86-64 has it, glibc's and wolf's
+//! ask clone.
+//!
 //! **clone, clone3, vfork** (56, 435, 58): PAX makes the child pelt's
 //! spawn makes (measured: `clone3({flags=CLONE_VM|CLONE_VFORK|
 //! CLONE_CLEAR_SIGHAND, exit_signal=SIGCHLD, stack, stack_size})`): a
@@ -82,7 +86,9 @@
 //! **wait4, waitid** (61, 247): a child that has ended (a zombie,
 //! kernel/sched) is reaped: its pid returned, its status word written
 //! (Linux's encoding: `code << 8` after an exit, the signal's number
-//! after a kill), rusage zeroed; with none ended, WNOHANG answers 0 and
+//! after a kill), rusage the child's (px88: its own and its reaped
+//! children's, `put_rusage`; zeroed before), its sums added to the
+//! caller's children's (kernel/sched's `zombie`); with none ended, WNOHANG answers 0 and
 //! otherwise the caller blocks, its frame rewound to run the call
 //! again when a child ends; no child at all is -ECHILD. waitid fills
 //! the SIGCHLD siginfo (si_signo 17, si_code CLD_EXITED or CLD_KILLED,
@@ -91,6 +97,23 @@
 //! caller's), and WUNTRACED (WSTOPPED) and WCONTINUED report a stop and
 //! a continue once each (kernel/sched's `wait_find`); no such child at
 //! all is -ECHILD.
+//!
+//! **getrusage** (98, px88, pax#185, #248; getrusage(2)): `who` read as
+//! an int, RUSAGE_SELF (0) the process's, RUSAGE_CHILDREN (-1) its
+//! children reaped by a wait (their reaped children's too, the largest
+//! set kept), RUSAGE_THREAD (1) the calling thread's own, any other
+//! -EINVAL, then a `usage` that is not 144 writable bytes -EFAULT. From
+//! kernel/sched's counts: ru_utime and ru_stime the cycles run outside
+//! and inside system calls, as nanoseconds (`sched.cycles_ns`), in
+//! microseconds; ru_maxrss the peak of the space's mapped pages, in KiB
+//! (a thread's its process's); ru_nvcsw and ru_nivcsw the switches. The
+//! rest are 0: the seven getrusage(2) calls unmaintained (ru_ixrss,
+//! ru_idrss, ru_isrss, ru_nswap, ru_msgsnd, ru_msgrcv, ru_nsignals: 0 on
+//! Linux too), and four PAX does not count (R-px88-4): ru_minflt (PAX maps
+//! anonymous memory at the call and takes no fault where Linux takes one
+//! a first touch), ru_majflt, ru_inblock and ru_oublock (no block I/O
+//! for a fault or a read is counted; 0 on Linux too for programs and
+//! files in memory, measured).
 //!
 //! **Groups and sessions** (px48): `setpgid` (109), `getpgrp` (111),
 //! `setsid` (112), `getpgid` (121), `getsid` (124), by kernel/sched's
@@ -1550,7 +1573,9 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
     }
     var cp: u64 = 0
     var st: u64 = 0
+    var ru_child: (u64, u64, u64, u64, u64) = (0, 0, 0, 0, 0)
     if what == sched.W_EXITED {
+        ru_child = sched.child_usage(s) // px88: before the reap folds it into the caller's children's
         let (zp, zs) = sched.zombie(s, true)
         cp = zp
         st = zs
@@ -1563,7 +1588,11 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
         uaccess.put(pml4, wstatus, st, 4)
     }
     if rusage != 0 {
-        uaccess.zero(pml4, rusage, 144)
+        if what == sched.W_EXITED {
+            put_rusage(pml4, rusage, ru_child)
+        } else {
+            uaccess.zero(pml4, rusage, 144) // px88: a stop's or continue's report carries none (measured)
+        }
     }
     put_word(f, W_RAX, cp)
     f
@@ -1613,7 +1642,9 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
     var cp: u64 = 0
     var code: u64 = 0
     var status: u64 = 0
+    var ru_child: (u64, u64, u64, u64, u64) = (0, 0, 0, 0, 0)
     if what == sched.W_EXITED {
+        ru_child = sched.child_usage(s) // px88
         let (zp, st) = sched.zombie(s, o & WNOWAIT == 0)
         let killed = st & 0x7f != 0
         cp = zp
@@ -1633,10 +1664,59 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
         uaccess.put(pml4, infop + 24, status, 4)
     }
     if rusage != 0 {
-        uaccess.zero(pml4, rusage, 144)
+        if what == sched.W_EXITED {
+            put_rusage(pml4, rusage, ru_child)
+        } else {
+            uaccess.zero(pml4, rusage, 144)
+        }
     }
     put_word(f, W_RAX, 0)
     f
+}
+
+// --- getrusage (px88) ------------------------------------------------------------
+
+const RUSAGE_SELF: u64 = 0
+const RUSAGE_THREAD: u64 = 1
+const RUSAGE_CHILDREN: u64 = 0xffffffff // -1, as the int `who` is read
+const RUSAGE_BYTES: u64 = 144 // struct rusage on x86-64: two timevals, fourteen longs
+
+/// `ns` nanoseconds as a struct timeval at `va` in `pml4` (written).
+fn put_timeval(pml4: u64, va: u64, ns: u64) {
+    uaccess.put(pml4, va, ns / 1000000000, 8)
+    uaccess.put(pml4, va + 8, (ns % 1000000000) / 1000, 8)
+}
+
+/// px88: a struct rusage at `va` (144 writable bytes in `pml4`) from
+/// kernel/sched's sums `u` (cycles run, cycles in system calls, peak
+/// pages, voluntary switches, involuntary ones): ru_utime and ru_stime
+/// (offsets 0 and 16), ru_maxrss in KiB (32), ru_nvcsw (128) and
+/// ru_nivcsw (136); every other field 0 (the module's words above).
+pub fn put_rusage(pml4: u64, va: u64, u: (u64, u64, u64, u64, u64)) {
+    let (cpu, sys, peak, vcs, ics) = u
+    let s = if sys > cpu { cpu } else { sys }
+    uaccess.zero(pml4, va, RUSAGE_BYTES)
+    put_timeval(pml4, va, sched.cycles_ns(cpu - s))
+    put_timeval(pml4, va + 16, sched.cycles_ns(s))
+    uaccess.put(pml4, va + 32, peak * 4, 8)
+    uaccess.put(pml4, va + 128, vcs, 8)
+    uaccess.put(pml4, va + 136, ics, 8)
+}
+
+/// px88: `getrusage(who, usage)` (98): 0, -EINVAL for a `who` that is
+/// none of the three, -EFAULT for a `usage` that is not 144 writable
+/// bytes (the module's words above).
+pub fn getrusage(who: u64, va: u64) -> u64 {
+    let w = who & 0xffffffff
+    if w != RUSAGE_SELF && w != RUSAGE_CHILDREN && w != RUSAGE_THREAD {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    if !uaccess.writable(pml4, va, RUSAGE_BYTES) {
+        return NEG_EFAULT
+    }
+    put_rusage(pml4, va, sched.usage(if w == RUSAGE_SELF { 0 } else if w == RUSAGE_CHILDREN { 1 } else { 2 }))
+    0
 }
 
 // --- px48: process groups and sessions --------------------------------------------
