@@ -116,6 +116,11 @@ D=$PAX_ROOT/tests/mpx6-install.d
 first=$tier; [ "$tier" != both ] || first=native
 export PAX_INSTALL_TIER=$first
 python3 -I "$D/inventory.py" "$PAX_ROOT" "$work/inventory" "$inputs/build/install-gate/bin" "$(cat "$inputs/build/disktools/$first.elf.path")"
+# px87 (pax#243, #265, #266): --check, reboot and poweroff as uid 1000 (su),
+# each refusal named; then poweroff by name as root, ending by ACPI S5.
+rm -rf "$work/asuser" "$work/asuser-su"
+"$PAX_ROOT/tools/mksu" "$work/asuser-su" > "$work/asuser-su.log"
+python3 -I "$D/asuser.py" "$PAX_ROOT" "$work/asuser" "$inputs/build/install-gate/bin" "$inputs/build/full" "$work/asuser-su" "$(cat "$inputs/build/disktools/$first.elf.path")"
 # Both decisions and a different target name are unconditional smoke rows.
 for game in no yes; do
     target=vdb; [ "$game" != yes ] || target=vdc
