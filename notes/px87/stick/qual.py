@@ -3,7 +3,8 @@
 
     qual.py REPO STICK.img KERNEL.elf COMMIT WORK LEG
 
-The stick is booted from a COPY (its bytes are checked equal to STICK's first), read-only on the USB
+The stick is booted from a COPY (its bytes are checked equal to STICK's first), with 3 GiB of memory (the live
+system's 385 MB archive is loaded whole; tools/qemu-run's default 256 MiB cannot hold it), read-only on the USB
 topology (tools/qemu-run --usb-stick: qemu-xhci + usb-storage, no CD-ROM, no virtio disk), under OVMF.
 
 LEG serial: COM1 present (the transcript is the serial file), keys typed into COM1: the live login as
@@ -88,7 +89,8 @@ if leg == 'serial':
     os.mkfifo(fifo)
     fd = os.open(fifo, os.O_RDWR)
     q = subprocess.Popen([repo / 'tools/qemu-run', '--firmware', 'uefi', '--accel', 'tcg', '--usb-stick', '--timeout', '1500',
-                          '--serial', serial, '--serial-input', fifo, *disk_args, copy], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                          '--serial', serial, '--serial-input', fifo, *disk_args, copy, '--', '-m', '3072M'],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def text():
         try:
@@ -154,7 +156,7 @@ elif leg == 'kasumi':
         qmp.unlink()
     q = subprocess.Popen([repo / 'tools/qemu-run', '--firmware', 'uefi', '--accel', 'tcg', '--usb-stick', '--usb-kbd', '--no-serial',
                           '--usb-irq=msi', '--high-bar', '--timeout', '1500', '--serial', work / 'none.log', *disk_args, copy, '--',
-                          '-qmp', 'unix:%s,server=on,wait=off' % qmp], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                          '-qmp', 'unix:%s,server=on,wait=off' % qmp, '-m', '3072M'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     for _ in range(200):
         if qmp.exists():
             break
