@@ -173,6 +173,27 @@
 //! code after such a wait never runs, so the region would never be
 //! left), and no interrupt handler allocates.
 //!
+//! **Usage** (px88, getrusage(2)): each thread's record counts the TSC
+//! cycles it has run (`cpu`, added at every switch out: `account`, from
+//! `run_next`), the part of them spent in its system calls (`sys`:
+//! kernel/user's `syscall` brackets every call with `syscall_begins` and
+//! `syscall_ends`, and a switch inside a call stops and restarts the
+//! bracket), and its voluntary and involuntary switches (`vcs`, `ics`: a
+//! switch away from a thread that is still READY is involuntary, from
+//! one that waits voluntary, from one that has ended neither). Its
+//! process's area holds the same four sums for the whole process
+//! (`A_RU`), the highest count of its address space's mapped pages seen
+//! so far (`note_rss`, called before every lowering: kernel/vm's calls,
+//! `exec_current`, `reap`), and the sums of its children reaped by a
+//! wait (`zombie`): times and switches added, the largest set kept. A
+//! fork's child starts at zero (`clone_current`); exec keeps the
+//! process's. The cycles become nanoseconds against kernel/clock
+//! (`cycles_ns`): the TSC and the clock read at `start`, the rate fixed
+//! one second of ticks later (`calibrate`, from `preempt`). Written from
+//! getrusage(2), wait4(2), fork(2), execve(2), the Intel SDM vol. 2B
+//! RDTSC and vol. 3B §18.17 (the time-stamp counter), and black-box
+//! Linux; no kernel's source.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`, volatile (`field`/`put_field`): wolf 0.2.26 stores a
 //! field of a raw element in place (wolf-lang#577), but as an ordinary
@@ -183,6 +204,7 @@
 //! saved on the thread's own stack, deferred reaping) is the textbook
 //! one, consulted from no kernel's source. No Linux source.
 
+use clock
 use fpu
 use frames
 use gdt
@@ -196,6 +218,7 @@ use timer
 
 extern "c" fn pax_switch()
 extern "c" fn pax_wrmsr(msr: u64, v: u64)
+extern "c" fn pax_rdtsc() -> u64 // px88: boot/fpu.S's RDTSC
 
 extern "c" let pax_threads: *u64
 extern "c" let pax_sched_state: *u64
@@ -264,6 +287,11 @@ struct Thread {
     xname0: u64, // px56: the program's name when `name` is 0: the last component of the path it was run by, 15 bytes at most (Linux's comm), NUL-padded
     xname1: u64,
     fifo: u64, // px62: an open of a FIFO that waits for the other end (kernel/files' word: the inode + 1, the end, the other end's count seen); 0 none
+    cpu: u64, // px88: TSC cycles it has run (getrusage's RUSAGE_THREAD)
+    sys: u64, // px88: the part of them in its system calls
+    sysin: u64, // px88: in a system call: the TSC its bracket opened at, 1 while it is switched out; 0 not in one
+    vcs: u64, // px88: switches away while it waited (ru_nvcsw)
+    ics: u64, // px88: switches away while it was ready (ru_nivcsw)
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -368,6 +396,23 @@ const S_TTY_SID: u64 = 15 // px48: the session the console is the controlling te
 const S_TTY_PGRP: u64 = 16 // px48: the console's foreground process group; 0 none
 const S_WAITPID: u64 = 17 // px67: the pid whose end also readies the waiter (`wait_pid_or_down`); 0 none
 const S_ENDING: u64 = 18 // px67: 1 once the end has begun (kmain_console): pid 1 takes signals as any process does
+const S_IN_TSC: u64 = 19 // px88: the TSC when the current thread was switched in
+const S_TSC0: u64 = 20 // px88: the TSC at `start` (0: not taken)
+const S_NS0: u64 = 21 // px88: kernel/clock's nanoseconds at `start`
+const S_TICK0: u64 = 22 // px88: the tick at `start`
+const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once calibrated (0: not yet)
+
+// px88: the process area's usage words (kernel/sched's; words 6084-6093
+// of the 6144, past kernel/vm's last, 6083): the process's own sums,
+// then those of its children reaped by a wait.
+const A_RU: u64 = 6084
+const RU_CPU: u64 = 0 // TSC cycles its threads have run
+const RU_SYS: u64 = 1 // the part of them in system calls
+const RU_PEAK: u64 = 2 // the highest count of its space's mapped pages seen
+const RU_VCS: u64 = 3
+const RU_ICS: u64 = 4
+const RU_KIDS: u64 = 5 // the children's five, in the same order
+const RU_WORDS: u64 = 10
 
 const W_RAX_OFF: u64 = 112 // the frame's %rax (word 14)
 const NEG_ETIMEDOUT: u64 = 0xffffffffffffff92 // -110
@@ -502,6 +547,7 @@ fn run_next() -> u64 {
         n = dequeue()
     }
     let s = if n == 0 { IDLE } else { n - 1 }
+    account(from, s) // px88
     if s != from {
         fpu.switch(from, s) // px10: a no-op before fpu.start
         // px21a: the ambient region goes with its thread. IF is clear.
@@ -524,6 +570,9 @@ fn run_next() -> u64 {
 pub fn preempt(f: u64) -> u64 {
     if sv(S_STARTED) == 0 {
         return f
+    }
+    if sv(S_MULT) == 0 {
+        calibrate() // px88: once, a second of ticks after `start`
     }
     wake_sleepers()
     let c = cur()
@@ -704,6 +753,11 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, wcont), 0)
     put_field(s, offset_of(Thread, ssold), 0)
     put_field(s, offset_of(Thread, fifo), 0) // px62
+    put_field(s, offset_of(Thread, cpu), 0) // px88
+    put_field(s, offset_of(Thread, sys), 0)
+    put_field(s, offset_of(Thread, sysin), 0)
+    put_field(s, offset_of(Thread, vcs), 0)
+    put_field(s, offset_of(Thread, ics), 0)
     let a = own_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
@@ -847,6 +901,14 @@ pub fn start(pml4: u64) {
     put_sv(S_WAITER, 0)
     put_sv(S_FLOOR, 0)
     put_sv(S_SLICE, timer.ticks())
+    // px88: the bases the TSC's cycles are converted against.
+    // # Safety: boot/fpu.S's RDTSC, which every x86-64 CPU has.
+    let t0 = unsafe { pax_rdtsc() }
+    put_sv(S_TSC0, if clock.started() { t0 } else { 0 })
+    put_sv(S_NS0, if clock.started() { clock.now_ns() } else { 0 })
+    put_sv(S_TICK0, timer.ticks())
+    put_sv(S_MULT, 0)
+    put_sv(S_IN_TSC, t0)
     put_field(MAIN, offset_of(Thread, state), RUNNING)
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
@@ -892,6 +954,7 @@ fn reap() {
             }
             let c = field(s, offset_of(Thread, cr3))
             if c != 0 && field(s, offset_of(Thread, owns)) == 1 {
+                note_rss(own_area(s), paging.user_pages(c)) // px88: its last count, before it goes
                 let _freed = paging.free_user(c) // px09: the user half, its tables, its PML4
             }
             if field(s, offset_of(Thread, zombie)) == 1 {
@@ -1645,6 +1708,13 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
         unsafe { ((to + i * 8) as *u64).write_volatile(((from + i * 8) as *u64).read_volatile()) }
         i += 1
     }
+    // px88: a child's usage starts at zero (fork(2)), its own and its
+    // children's.
+    i = 0
+    while i < RU_WORDS {
+        ru_put(to, i, 0)
+        i += 1
+    }
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
     s
@@ -1959,6 +2029,7 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
     // # Safety: as in `enter_space`.
     unsafe { pax_wrmsr(FS_BASE, 0) }
     if old != 0 && owned == 1 {
+        note_rss(proc_area(c), paging.user_pages(old)) // px88: the process's peak outlives its image
         let _freed = paging.free_user(old)
     }
     release_vfork(c)
@@ -2035,6 +2106,7 @@ pub fn wait_report(s: u64, what: u64, consume: bool) -> (u64, u64) {
 pub fn zombie(s: u64, reap_it: bool) -> (u64, u64) {
     let r = (field(s, offset_of(Thread, pid)), field(s, offset_of(Thread, status)))
     if reap_it {
+        fold(proc_area(cur()), own_area(s)) // px88: the waiter's children's sums (getrusage(2))
         clear(s)
     }
     r
@@ -2190,9 +2262,29 @@ pub fn set_self_done(v: u64) {
 }
 
 /// A system call begins (kernel/user): whatever wait the thread's last
-/// call was in is over.
+/// call was in is over. px88: its bracket opens (`syscall_ends` closes
+/// it; a switch inside it stops and restarts it, `account`).
 pub fn syscall_begins() {
-    put_field(cur(), offset_of(Thread, rst), W_NONE)
+    let c = cur()
+    put_field(c, offset_of(Thread, rst), W_NONE)
+    put_field(c, offset_of(Thread, sysin), tsc())
+}
+
+/// px88: the system call slot `c` made has ended (kernel/user, after
+/// the call's work: the thread running now may be another, when the call
+/// waited or ended its caller). Its bracket, when it is still open on
+/// this run, is added to its own and its process's system time; it is
+/// closed either way.
+pub fn syscall_ends(c: u64) {
+    let si = field(c, offset_of(Thread, sysin))
+    put_field(c, offset_of(Thread, sysin), 0)
+    if si > 1 && c == cur() && field(c, offset_of(Thread, tgid)) != 0 {
+        let now = tsc()
+        if now > si {
+            put_field(c, offset_of(Thread, sys), field(c, offset_of(Thread, sys)) + (now - si))
+            ru_add(proc_area(c), RU_SYS, now - si)
+        }
+    }
 }
 
 /// How the running thread's system call was waiting when it was made
@@ -3202,6 +3294,193 @@ pub fn count_signal() -> u64 {
     let n = sv(S_SIGNALS) + 1
     put_sv(S_SIGNALS, n)
     n
+}
+
+// --- px88: usage (getrusage, wait4's and waitid's rusage) ------------------------
+
+fn tsc() -> u64 {
+    // # Safety: boot/fpu.S's RDTSC, which every x86-64 CPU has.
+    unsafe { pax_rdtsc() }
+}
+
+/// Word `i` of the usage words of the process area at `a`.
+fn ru_get(a: u64, i: u64) -> u64 {
+    // # Safety: `a` is a process area (PROC_AREA bytes, 6144 words); A_RU + i < A_RU + RU_WORDS = 6094.
+    unsafe { ((a + (A_RU + i) * 8) as *u64).read_volatile() }
+}
+
+fn ru_put(a: u64, i: u64, v: u64) {
+    // # Safety: as `ru_get`.
+    unsafe { ((a + (A_RU + i) * 8) as *u64).write_volatile(v) }
+}
+
+fn ru_add(a: u64, i: u64, d: u64) {
+    ru_put(a, i, ru_get(a, i) + d)
+}
+
+/// The switch from slot `from` to slot `to` (`run_next`, IF clear): the
+/// run `from` has had since it was switched in charged to it and to its
+/// process; its system call's bracket, if one is open, closed at this
+/// instant (reopened at once when `to` is `from`, marked switched out
+/// otherwise) and `to`'s reopened if `to` was switched out inside one;
+/// and, between two threads, the switch counted: involuntary when `from`
+/// is still ready (preempted, or it yielded), voluntary when it waits,
+/// neither when it has ended. Kernel threads (no process) count nothing.
+fn account(from: u64, to: u64) {
+    let now = tsc()
+    let was = sv(S_IN_TSC)
+    put_sv(S_IN_TSC, now)
+    if field(from, offset_of(Thread, tgid)) != 0 {
+        let a = proc_area(from)
+        if was != 0 && now > was {
+            put_field(from, offset_of(Thread, cpu), field(from, offset_of(Thread, cpu)) + (now - was))
+            ru_add(a, RU_CPU, now - was)
+        }
+        let si = field(from, offset_of(Thread, sysin))
+        if si > 1 {
+            if now > si {
+                put_field(from, offset_of(Thread, sys), field(from, offset_of(Thread, sys)) + (now - si))
+                ru_add(a, RU_SYS, now - si)
+            }
+            put_field(from, offset_of(Thread, sysin), if to == from { now } else { 1 })
+        }
+        if to != from {
+            let st = field(from, offset_of(Thread, state))
+            if st == READY || st == RUNNING {
+                put_field(from, offset_of(Thread, ics), field(from, offset_of(Thread, ics)) + 1)
+                ru_add(a, RU_ICS, 1)
+            } else if st != DEAD && st != FREE && st != ZOMBIE && st != HELD {
+                put_field(from, offset_of(Thread, vcs), field(from, offset_of(Thread, vcs)) + 1)
+                ru_add(a, RU_VCS, 1)
+            }
+        }
+    }
+    if to != from && field(to, offset_of(Thread, sysin)) == 1 {
+        put_field(to, offset_of(Thread, sysin), now)
+    }
+}
+
+/// Nanoseconds per TSC cycle times 2^24, from `dns` nanoseconds of
+/// kernel/clock across `dt` cycles (both halved together until `dns`
+/// shifted by 24 fits in 64 bits); at least 1 once `dt` is not 0.
+fn rate(dns: u64, dt: u64) -> u64 {
+    var n = dns
+    var t = dt
+    while n >= 0x8000000000 {
+        n = n >> 1
+        t = t >> 1
+    }
+    if t == 0 {
+        return 0
+    }
+    let m = (n << 24) / t
+    // At least 1, and at most 2^32 (a counter slower than 4 MHz is no
+    // TSC): `cycles_ns`'s products stay inside 64 bits.
+    if m == 0 { 1 } else if m > 0x100000000 { 0x100000000 } else { m }
+}
+
+/// The rate fixed once (`preempt`, IF clear): when a second of ticks has
+/// passed since `start`, the TSC and the clock across it.
+fn calibrate() {
+    let t0 = sv(S_TSC0)
+    if t0 == 0 || timer.ticks() < sv(S_TICK0) + 100 {
+        return
+    }
+    let ns = clock.now_ns()
+    let now = tsc()
+    let n0 = sv(S_NS0)
+    if now > t0 && ns > n0 {
+        put_sv(S_MULT, rate(ns - n0, now - t0))
+    }
+}
+
+/// px88: `c` TSC cycles as nanoseconds (kernel/user's getrusage); before
+/// the rate is fixed, the rate from `start` to now; 0 in a kernel whose
+/// clock never started.
+pub fn cycles_ns(c: u64) -> u64 {
+    var m = sv(S_MULT)
+    if m == 0 {
+        let t0 = sv(S_TSC0)
+        if t0 == 0 {
+            return 0
+        }
+        let now = tsc()
+        let ns = clock.now_ns()
+        let n0 = sv(S_NS0)
+        if now <= t0 || ns <= n0 {
+            return 0
+        }
+        m = rate(ns - n0, now - t0)
+    }
+    (c >> 24) * m + (((c & 0xffffff) * m) >> 24)
+}
+
+/// px88: `pages` are mapped in the space of the process whose area is
+/// `a` (kernel/vm before a call lowers the count; `exec_current` and
+/// `reap` before a space goes): the process's peak raised to them.
+/// Between two lowerings the count only grows, so the peak sampled at
+/// each and when it is read is the true one, page for page.
+pub fn note_rss(a: u64, pages: u64) {
+    if pages > ru_get(a, RU_PEAK) {
+        ru_put(a, RU_PEAK, pages)
+    }
+}
+
+/// The sums of the ended process whose area is `a`, its own and its
+/// reaped children's: (cycles run, cycles in system calls, the larger
+/// peak, voluntary switches, involuntary ones).
+fn totals(a: u64) -> (u64, u64, u64, u64, u64) {
+    let pk = ru_get(a, RU_PEAK)
+    let kp = ru_get(a, RU_KIDS + RU_PEAK)
+    (ru_get(a, RU_CPU) + ru_get(a, RU_KIDS + RU_CPU), ru_get(a, RU_SYS) + ru_get(a, RU_KIDS + RU_SYS), if pk > kp { pk } else { kp }, ru_get(a, RU_VCS) + ru_get(a, RU_KIDS + RU_VCS), ru_get(a, RU_ICS) + ru_get(a, RU_KIDS + RU_ICS))
+}
+
+/// A child reaped by a wait (`zombie`): its sums (area `from`) added to
+/// the children's of its waiter's area `to`, the times and switches
+/// summed, the largest set kept (getrusage(2): RUSAGE_CHILDREN's maxrss
+/// is the largest child's, not the tree's).
+fn fold(to: u64, from: u64) {
+    let (cpu, sys, peak, vcs, ics) = totals(from)
+    ru_add(to, RU_KIDS + RU_CPU, cpu)
+    ru_add(to, RU_KIDS + RU_SYS, sys)
+    if peak > ru_get(to, RU_KIDS + RU_PEAK) {
+        ru_put(to, RU_KIDS + RU_PEAK, peak)
+    }
+    ru_add(to, RU_KIDS + RU_VCS, vcs)
+    ru_add(to, RU_KIDS + RU_ICS, ics)
+}
+
+/// px88: the zombie in slot `s`'s sums, before a wait reaps it (wait4's
+/// and waitid's rusage): as `totals`.
+pub fn child_usage(s: u64) -> (u64, u64, u64, u64, u64) {
+    totals(own_area(s))
+}
+
+/// px88: the usage getrusage(2) asks of the running thread: `which` 0
+/// its process's (RUSAGE_SELF), 1 its process's reaped children's
+/// (RUSAGE_CHILDREN), 2 its own (RUSAGE_THREAD): (TSC cycles run, the
+/// part in system calls, the peak in pages, voluntary switches,
+/// involuntary ones). The running slice and the open system call (this
+/// one) are counted to now; the peak is the space's count now when that
+/// is higher (a thread's is its process's).
+pub fn usage(which: u64) -> (u64, u64, u64, u64, u64) {
+    let c = cur()
+    let a = proc_area(c)
+    if which == 1 {
+        return (ru_get(a, RU_KIDS + RU_CPU), ru_get(a, RU_KIDS + RU_SYS), ru_get(a, RU_KIDS + RU_PEAK), ru_get(a, RU_KIDS + RU_VCS), ru_get(a, RU_KIDS + RU_ICS))
+    }
+    let now = tsc()
+    let was = sv(S_IN_TSC)
+    let run = if was != 0 && now > was { now - was } else { 0 }
+    let si = field(c, offset_of(Thread, sysin))
+    let open = if si > 1 && now > si { now - si } else { 0 }
+    let pk = ru_get(a, RU_PEAK)
+    let live = paging.user_pages(paging.live())
+    let peak = if live > pk { live } else { pk }
+    if which == 2 {
+        return (field(c, offset_of(Thread, cpu)) + run, field(c, offset_of(Thread, sys)) + open, peak, field(c, offset_of(Thread, vcs)), field(c, offset_of(Thread, ics)))
+    }
+    (ru_get(a, RU_CPU) + run, ru_get(a, RU_SYS) + open, peak, ru_get(a, RU_VCS), ru_get(a, RU_ICS))
 }
 
 /// The scheduler's line:
