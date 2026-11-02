@@ -16,8 +16,9 @@ LEG serial: COM1 present (the transcript is the serial file), keys typed into CO
              `su pax -c 'pax-install --check'` -> `pax-install: inventory: /dev/sda: Permission denied; ...`
   Q1-check   `pax-install --check` as root: the stick refused as the live medium, no target, status 1
   Q1-power   `poweroff`: QEMU ends with status 0, the kernel's last power line `poweroff: ACPI S5 types a/b`
-Both legs attach an NVMe and a SATA disk (blank, as kasumi's other disks stand in for them) and hold each
-byte-identical (Q-nowrite). LEG kasumi: kasumi's shape: no COM1 (the transcript is PAX's own memory, boot/io.S's pax_serial_log, read
+Both legs attach an NVMe and a SATA disk (blank, standing in for kasumi's other disks; QEMU's own -drive and
+-device options, since tools/qemu-run boots a stick alone) and hold each byte-identical (Q-nowrite); qemu-run's
+output is kept (qemu-run.out) and quoted when a leg fails to boot. LEG kasumi: kasumi's shape: no COM1 (the transcript is PAX's own memory, boot/io.S's pax_serial_log, read
   by QMP memsave at KERNEL.elf's symbols), the USB keyboard (QMP send-key), the xHCI on MSI only behind
   OVMF's 64 GiB window (--usb-irq=msi --high-bar, px76's F8): the login screen saved (screen-login.ppm),
   root typed, `poweroff` typed, QEMU's status 0.
@@ -58,7 +59,11 @@ disks = [work / 'nvme.img', work / 'sata.img']
 for d in disks:
     with open(d, 'wb') as f:
         f.truncate(64 << 20)
-disk_args = ['--nvme', str(disks[0]), '--ahci', str(disks[1]) + ',serial=PX87-SATA,model=PX87-860']
+# tools/qemu-run refuses --nvme and --ahci beside --usb-stick (the stick boots alone), so the disks are
+# QEMU's own options, after `--`: an NVMe controller, and a second AHCI controller with one SATA disk.
+qemu_disks = ['-drive', 'file=%s,if=none,id=px87nv,format=raw' % disks[0], '-device', 'nvme,serial=PX87-NVME,drive=px87nv',
+              '-drive', 'file=%s,if=none,id=px87sa,format=raw' % disks[1], '-device', 'ahci,id=px87ahci',
+              '-device', 'ide-hd,drive=px87sa,bus=px87ahci.0,serial=PX87-SATA,model=PX87-860']
 disk_before = [hashlib.sha256(d.read_bytes()).hexdigest() for d in disks]
 copy = work / 'stick-copy.img'
 shutil.copyfile(stick, copy)
@@ -89,8 +94,8 @@ if leg == 'serial':
     os.mkfifo(fifo)
     fd = os.open(fifo, os.O_RDWR)
     q = subprocess.Popen([repo / 'tools/qemu-run', '--firmware', 'uefi', '--accel', 'tcg', '--usb-stick', '--timeout', '1500',
-                          '--serial', serial, '--serial-input', fifo, *disk_args, copy, '--', '-m', '3072M'],
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                          '--serial', serial, '--serial-input', fifo, copy, '--', '-m', '3072M', *qemu_disks],
+                         stdout=open(work / 'qemu-run.out', 'wb'), stderr=subprocess.STDOUT)
 
     def text():
         try:
@@ -116,7 +121,7 @@ if leg == 'serial':
             time.sleep(0.02)
 
     at = wait(r'^login: ', 0, 900)
-    row('Q1-login', at > 0, 'the live login reached')
+    row('Q1-login', at > 0, 'the live login reached' if at > 0 else 'no live login (qemu-run: %s)' % (work / 'qemu-run.out').read_text(errors='replace').strip()[-300:])
     typ('root\r')
     at = wait(r'[#$] $', at, 300)
     marks = {}
@@ -155,12 +160,16 @@ elif leg == 'kasumi':
     if qmp.exists():
         qmp.unlink()
     q = subprocess.Popen([repo / 'tools/qemu-run', '--firmware', 'uefi', '--accel', 'tcg', '--usb-stick', '--usb-kbd', '--no-serial',
-                          '--usb-irq=msi', '--high-bar', '--timeout', '1500', '--serial', work / 'none.log', *disk_args, copy, '--',
-                          '-qmp', 'unix:%s,server=on,wait=off' % qmp, '-m', '3072M'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                          '--usb-irq=msi', '--high-bar', '--timeout', '1500', '--serial', work / 'none.log', copy, '--',
+                          '-qmp', 'unix:%s,server=on,wait=off' % qmp, '-m', '3072M', *qemu_disks],
+                         stdout=open(work / 'qemu-run.out', 'wb'), stderr=subprocess.STDOUT)
     for _ in range(200):
-        if qmp.exists():
+        if qmp.exists() or q.poll() is not None:
             break
         time.sleep(0.1)
+    if not qmp.exists():
+        row('Q2-login', False, 'QEMU never listened (qemu-run: %s)' % (work / 'qemu-run.out').read_text(errors='replace').strip()[-300:])
+        sys.exit(1)
     s = socket.socket(socket.AF_UNIX)
     s.connect(str(qmp))
     fh = s.makefile('rwb')
@@ -204,7 +213,7 @@ elif leg == 'kasumi':
             time.sleep(0.05)
 
     t = wait(r'^login: ', 1200)
-    row('Q2-login', bool(t), 'the live login reached with no COM1, the keyboard on USB (xHCI on MSI)')
+    row('Q2-login', bool(t), 'the live login reached with no COM1, the keyboard on USB (xHCI on MSI)' if t else 'no live login (qemu-run: %s)' % (work / 'qemu-run.out').read_text(errors='replace').strip()[-300:])
     call('screendump', filename=str(work / 'screen-login.ppm'))
     lines = t.splitlines()
     common_rows('Q2', lines)

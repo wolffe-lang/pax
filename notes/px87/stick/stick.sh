@@ -73,10 +73,13 @@ sstick() (
         cp --sparse=always "$stick" "$broken"
         python3 -I tests/usb-stick.d/corrupt.py "$broken" "$fault"
         if tools/check-usb "$broken" > "$O/slogs/usb-$fault-red.log" 2>&1; then echo 'FAIL corrupt image accepted'; exit 1; fi
+        # The expected refusal of a deliberately broken COPY (never the staged image), said as a pass.
         case $fault in
-            efi) grep -F 'required boot file missing: /EFI/BOOT/BOOTX64.EFI' "$O/slogs/usb-$fault-red.log" ;;
-            mbr) grep -F 'protective MBR must cover the disk' "$O/slogs/usb-$fault-red.log" ;;
+            efi) want='required boot file missing: /EFI/BOOT/BOOTX64.EFI' ;;
+            mbr) want='protective MBR must cover the disk' ;;
         esac
+        grep -qF "$want" "$O/slogs/usb-$fault-red.log"
+        echo "PASS a copy with its $fault broken is refused by name ('$want')"
         rm "$broken"
     done
     { printf 'default_entry: 2\n'; cat "$conf"; } > "$O/sout/fbread-default.conf"
