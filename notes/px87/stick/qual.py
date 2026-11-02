@@ -15,7 +15,8 @@ LEG serial: COM1 present (the transcript is the serial file), keys typed into CO
              `su pax -c 'pax-install --check'` -> `pax-install: inventory: /dev/sda: Permission denied; ...`
   Q1-check   `pax-install --check` as root: the stick refused as the live medium, no target, status 1
   Q1-power   `poweroff`: QEMU ends with status 0, the kernel's last power line `poweroff: ACPI S5 types a/b`
-LEG kasumi: kasumi's shape: no COM1 (the transcript is PAX's own memory, boot/io.S's pax_serial_log, read
+Both legs attach an NVMe and a SATA disk (blank, as kasumi's other disks stand in for them) and hold each
+byte-identical (Q-nowrite). LEG kasumi: kasumi's shape: no COM1 (the transcript is PAX's own memory, boot/io.S's pax_serial_log, read
   by QMP memsave at KERNEL.elf's symbols), the USB keyboard (QMP send-key), the xHCI on MSI only behind
   OVMF's 64 GiB window (--usb-irq=msi --high-bar, px76's F8): the login screen saved (screen-login.ppm),
   root typed, `poweroff` typed, QEMU's status 0.
@@ -50,6 +51,14 @@ def row(name, ok, what):
         fail = 1
 
 
+# kasumi's other disks, as QEMU can make them: an NVMe and a SATA (AHCI) disk, blank, 64 MiB each; neither
+# may change (Q-nowrite): the stick writes no disk.
+disks = [work / 'nvme.img', work / 'sata.img']
+for d in disks:
+    with open(d, 'wb') as f:
+        f.truncate(64 << 20)
+disk_args = ['--nvme', str(disks[0]), '--ahci', str(disks[1]) + ',serial=PX87-SATA,model=PX87-860']
+disk_before = [hashlib.sha256(d.read_bytes()).hexdigest() for d in disks]
 copy = work / 'stick-copy.img'
 shutil.copyfile(stick, copy)
 assert sha(copy) == sha(stick), 'the copy differs from the stick'
@@ -79,7 +88,7 @@ if leg == 'serial':
     os.mkfifo(fifo)
     fd = os.open(fifo, os.O_RDWR)
     q = subprocess.Popen([repo / 'tools/qemu-run', '--firmware', 'uefi', '--accel', 'tcg', '--usb-stick', '--timeout', '1500',
-                          '--serial', serial, '--serial-input', fifo, copy], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                          '--serial', serial, '--serial-input', fifo, *disk_args, copy], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def text():
         try:
@@ -127,7 +136,7 @@ if leg == 'serial':
     seg = lambda k: t[marks[k][0]:marks[k][1]] if marks[k][1] > 0 else ''
     s0, s1, s2 = seg(0), seg(1), seg(2)
     row('Q1-user-reboot', 'reboot: Operation not permitted' in s0 and 'PX87-MARK-0-1' in s0, ' | '.join(s0.strip().splitlines()[-2:]))
-    ok1 = re.search(r'^pax-install: inventory: /dev/sd[a-z]: Permission denied; pax-install opens every disk to measure it, so run it as root$', s1, re.M) and 'PX87-MARK-1-1' in s1
+    ok1 = re.search(r'^pax-install: inventory: /dev/(sd[a-z]|nvme[0-9]n[0-9]): Permission denied; pax-install opens every disk to measure it, so run it as root$', s1, re.M) and 'PX87-MARK-1-1' in s1
     row('Q1-user-check', bool(ok1), ' | '.join(s1.strip().splitlines()[-2:]))
     ok2 = 'refused: a PAX live medium' in s2 and 'PX87-MARK-2-1' in s2
     row('Q1-check', ok2, ' | '.join(l for l in s2.strip().splitlines() if 'refused' in l or 'MARK' in l or 'Disks' in l))
@@ -144,7 +153,7 @@ elif leg == 'kasumi':
     if qmp.exists():
         qmp.unlink()
     q = subprocess.Popen([repo / 'tools/qemu-run', '--firmware', 'uefi', '--accel', 'tcg', '--usb-stick', '--usb-kbd', '--no-serial',
-                          '--usb-irq=msi', '--high-bar', '--timeout', '1500', '--serial', work / 'none.log', copy, '--',
+                          '--usb-irq=msi', '--high-bar', '--timeout', '1500', '--serial', work / 'none.log', *disk_args, copy, '--',
                           '-qmp', 'unix:%s,server=on,wait=off' % qmp], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     for _ in range(200):
         if qmp.exists():
@@ -213,5 +222,7 @@ elif leg == 'kasumi':
     (work / 'transcript.txt').write_text(t)
 else:
     sys.exit('qual.py: LEG is serial or kasumi')
+disk_after = [hashlib.sha256(d.read_bytes()).hexdigest() for d in disks]
+row('Q-nowrite', disk_after == disk_before, 'the NVMe and SATA disks byte-identical after the session (%s, %s)' % (disk_after[0][:12], disk_after[1][:12]))
 print('qual %s: %s' % (leg, 'PASS' if fail == 0 else 'FAIL'), flush=True)
 sys.exit(fail)

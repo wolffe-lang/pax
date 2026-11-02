@@ -86,8 +86,10 @@ sstick() (
     stat -c '%s' "$stick"
 )
 
+# The qualification script is this script's sibling (it may be newer than HEAD's: a notes-only change).
+Q=$(cd "$(dirname "$0")" && pwd)/qual.py
 squal() {
-    ctr bash -c "cd $W && export PAX_CACHE=$L/cache TMPDIR=$L/tmp && python3 -I notes/px87/stick/qual.py $W $1 $O/sout/kernel/kmain_console.elf $HEAD $O/q-$2 $3"
+    ctr bash -c "cd $W && export PAX_CACHE=$L/cache TMPDIR=$L/tmp && python3 -I $Q $W $1 $O/sout/kernel/kmain_console.elf $HEAD $O/q-$2 $3"
 }
 
 step sbuild sbuild
