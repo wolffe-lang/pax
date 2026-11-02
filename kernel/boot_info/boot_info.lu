@@ -54,13 +54,15 @@ extern "c" let limine_executable_cmdline_request: *u64
 extern "c" let limine_framebuffer_request: *u64
 extern "c" let limine_rsdp_request: *u64
 extern "c" let limine_efi_system_table_request: *u64
+extern "c" let limine_executable_file_request: *u64 // px87: the kernel's own file (pax#176)
 extern "c" let __pax_image_start: *u8
 extern "c" let __pax_image_end: *u8
 
 /// The address of request `which` in boot/start.S: 0 the base revision
 /// tag, 1 bootloader info, 2 firmware type, 3 memory map, 4 HHDM, 5
 /// executable address, 6 modules (px10), 7 the executable command line
-/// (px15), 8 the framebuffer (px19); 0 for any other `which`.
+/// (px15), 8 the framebuffer (px19), 9 the RSDP and 10 the EFI system
+/// table (px76), 11 the executable file (px87); 0 for any other `which`.
 fn request(which: int) -> u64 {
     // # Safety: link-time addresses; nothing is read.
     unsafe {
@@ -93,6 +95,7 @@ fn request(which: int) -> u64 {
         }
         if which == 9 { return limine_rsdp_request as u64 }
         if which == 10 { return limine_efi_system_table_request as u64 }
+        if which == 11 { return limine_executable_file_request as u64 }
     }
     0
 }
@@ -394,6 +397,35 @@ fn module_file(i: u64) -> u64 {
         return 0
     }
     word(word(r + 16) + i * 8)
+}
+
+/// px87 (pax#176): the executable file's `struct limine_file` (the
+/// response's second word, PROTOCOL.md's Executable File Feature), or 0.
+fn exe_file() -> u64 {
+    let r = response(11)
+    if r == 0 {
+        return 0
+    }
+    word(r + 8)
+}
+
+/// The kernel's own file as Limine loaded it: its first byte, a virtual
+/// address in the HHDM, 4 KiB aligned (0 without a response).
+pub fn exe_file_addr() -> u64 {
+    let f = exe_file()
+    if f == 0 {
+        return 0
+    }
+    word(f + 8)
+}
+
+/// And its size in bytes (0 without a response).
+pub fn exe_file_size() -> u64 {
+    let f = exe_file()
+    if f == 0 {
+        return 0
+    }
+    word(f + 16)
 }
 
 /// Module `i`'s first byte, a virtual address in the HHDM (0 out of
