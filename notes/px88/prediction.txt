@@ -1,0 +1,88 @@
+px88 — fork for musl, and getrusage (pax#175, #185, #248): the prediction,
+written 2026-11-02T17:55Z at base 3e28a8bc, before the first change and
+before any witness ran (r1, black-box Linux exploration, was queued on hasu
+block B; nothing of it was read before this file).
+
+What changes (the plan):
+  1. fork (57) dispatched to kernel/process's existing fork path as
+     clone(SIGCHLD, 0); vfork (58) already reaches its vfork path.
+  2. getrusage (98): RUSAGE_SELF, RUSAGE_CHILDREN, RUSAGE_THREAD. CPU time
+     counted by kernel/sched in TSC cycles at every switch (a thread's run)
+     and by kernel/user around every system call (its system part),
+     converted to ns against kernel/clock when read; ru_nvcsw/ru_nivcsw
+     counted at every switch; ru_maxrss the highest count of the space's
+     mapped pages, sampled before every call that can lower it and when
+     read. The children's totals folded in when a child is reaped by a
+     wait. wait4's and waitid's rusage filled with the reaped child's.
+  3. The installer's two peak lines read a number; tests/mpx6-install
+     holds them; docs/CENSUS.md's installer paragraph and a "served since
+     px04" section move.
+  4. A new suite, tests/mpx5-forks: two static musl probes (Ubuntu's
+     musl-gcc, never musl's source), user/elf/forks.c (fork, exec after
+     fork, vfork, posix_spawn, wait) and user/elf/usage.c (getrusage),
+     each run as root and as 1000:1000 on PAX and in a throwaway Linux
+     container, compared byte for byte.
+
+The rows, predicted:
+  P1 base + the suite: forks red. musl's fork() asks 57, PAX answers
+     -ENOSYS, so every fork row prints `-1 ENOSYS` (not Linux's lines); the
+     kernel logs `syscall 57: -ENOSYS` once. The vfork rows (58) and the
+     posix_spawn rows (clone with CLONE_VM|CLONE_VFORK) are already green
+     at base.
+  P2 base + the suite: usage red. Every getrusage answers -1 ENOSYS; wait4's
+     rusage is all zeros (its maxrss row says `no`).
+  P3 the fork fix alone turns every forks row green, root and user, both
+     tiers, both firmwares; nothing else in the kernel moves for it.
+  P4 with the accounting: every usage row byte-identical to Linux's,
+     root and user, both tiers and firmwares, but the `~` rows: ru_minflt,
+     which Linux counts per first touch and PAX (eager anonymous memory,
+     no demand paging) does not keep: PAX prints 0 there. ru_majflt,
+     ru_inblock and ru_oublock are 0 on Linux in the tmpfs container too
+     (the program and its files are in memory), and the seven fields
+     getrusage(2) calls unmaintained are 0 on both.
+  P5 maxrss: the 64 MiB touch adds between 64 and 65 MiB on both; the
+     free leaves it unchanged; RUSAGE_CHILDREN after a 32 MiB child and
+     wait4's rusage say at least 32 MiB; a waited-for grandchild's 48 MiB
+     reaches the top process's children's maximum through the middle
+     child. Across exec I expect Linux to keep the old image's peak
+     (the process's maximum, not the image's); if the exploration says
+     otherwise, PAX follows Linux.
+  P6 times: a 300 ms user spin adds 150-320 ms of utime on both and
+     under 50 ms of stime; 300 ms of 1 MiB reads of /dev/zero add at least
+     100 ms of stime, more than their utime. With tick sampling instead
+     (rejected below) PAX's stime would read about 0: system calls run
+     with interrupts off, so a tick never lands in one.
+  P7 switches: ten 5 ms sleeps add at least 10 voluntary switches; a 400
+     ms spin beside two spinners a CPU adds at least 2 involuntary ones.
+  P8 the installer: `Installer peak RSS through copy verification:` and
+     `Formatter children peak RSS:` print `<N> KiB`. PAX maps anonymous
+     memory at the call, so its peaks are above Linux's 11884 KiB
+     reference: between 12 MiB and 256 MiB for the installer.
+  P9 nothing else moves: every existing suite green (CI's tier pr runs
+     every suite: kernel/sched is the core); the cost is two TSC reads a
+     switch and two a system call, and one page-table walk per lowering
+     call (munmap, brk down, madvise, mremap, MAP_FIXED), none of which
+     a suite's budget notices.
+  P10 the plant (px88-plant-fork: a fork's child given the parent's pid
+     where it should get 0) reddens tests/mpx5-forks' forks rows by name
+     and nothing in the usage rows that does not fork.
+
+Rulings to recommend (R-px88-N, each implemented as recommended):
+  1 fork: (A) 57 through the existing fork path as clone(SIGCHLD, 0);
+    (B) a fork of its own. A.
+  2 CPU time: (A) TSC cycles at switches and around system calls,
+    converted against kernel/clock; (B) tick sampling (stime always ~0 on
+    PAX); (C) kernel/clock read at every switch and call (a VM exit each
+    under KVM). A.
+  3 peak RSS: (A) sampled before every lowering call and when read
+    (exact: between two lowerings the count only grows); (B) an
+    incremental count at every map and unmap; (C) at exec, end and read
+    only (a freed peak missed). A.
+  4 fields PAX does not keep: (A) minflt, majflt, inblock, oublock 0,
+    minflt a `~` row; (B) PAX's own faults as minflt. A.
+  5 wait4/waitid's rusage: (A) the reaped child's; (B) zeros. A.
+  6 RUSAGE_THREAD: (A) served; (B) -EINVAL. A.
+  7 the witness's home: (A) a new suite, tests/mpx5-forks; (B) sessions
+    of mpx3-maps. A.
+  8 times(2) and /proc/<pid>/stat's utime and stime: (A) left, an issue
+    owed; (B) served from the same accounting here. A.
