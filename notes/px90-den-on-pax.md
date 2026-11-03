@@ -33,7 +33,7 @@ before a reboot reads back clean after it.
 
 | input | identity | read |
 |---|---|---|
-| pax base | trunk `5da8daaf` (px87's #272 and px88's #275 still open: nothing to rebase onto) | `git log` |
+| pax base | launched on trunk `5da8daaf`; rebased once onto `9e106768` (px88's merge, fork and getrusage: no path of this lane's but the shared suite lists of `tools/ci-tiers.map`, `tests/ci-plan`, the README's tests table and `docs/SOURCES.md`, both lanes' rows kept); `notes/px90/rebase-map.txt` pairs each commit with its twin | `git merge-base --is-ancestor` |
 | den | `13bc2caa46efa152ea7709da0b84180a9f350d85` (den trunk, r41p's pin to wolf 0.2.36), `user/den.pin` | `tools/mkden` refuses any other HEAD |
 | den's wolf | 0.2.36, `wolf 0.2.36 (wolfgang, pin 5adf3d9)`, archive `d383c74c8cd123b9d9dfaa268271d4f004294f85c2b230237d0ef07027d9500d`, its bundled std `78b9d3cb` (the pin's) | the archive read twice, the version line and STD-REV checked |
 | den's lupin | 0.1.58, `lupin 0.1.58 (wolf-interp, reference interpreter at pin a5378e3)`, archive `34f52792bb59bc7565e0edc1235cd47d9a6ad13d5e6528993627f2e699b62193` | read twice (den's `tools/lib-toolchain.sh` wants it beside wolf; the static build never runs it) |
@@ -43,12 +43,12 @@ before a reboot reads back clean after it.
 
 ## 3. Prediction, scored
 
-The prediction is `notes/px90/prediction.txt`, committed first (`5f6c8e15`).
+The prediction is `notes/px90/prediction.txt`, committed first (`d514cd64`).
 
 | predicted | measured | verdict |
 |---|---|---|
 | den static 16.3 MB (15.5-17.5), stripped 2-4 MB | 16,698,144 bytes; stripped 2,590,744 | held (+2.4%) |
-| two checkouts through den's own `tools/mkden`, one digest | four builds, `d4d3d6b8…` each, at 8181588b and again in every later build | held |
+| two checkouts through den's own `tools/mkden`, one digest | four builds, `d4d3d6b8…` each, first at the pre-rebase 8181588b and again in every later build | held |
 | no fork, exec, pipe or wait from den | none needed and none seen: den's source uses no `std.process`, no editor or pager ran (`GIT_EDITOR=yew` is refused by name, `not yet implemented: commit editor yew`), and every verb's status matched Linux's | held |
 | -ENOSYS only 273 and 334, no `refused:` | exactly that, from den and from every program of the session, on both firmwares | held |
 | every file call served on ext2 (O_EXCL locks, link, rename, fsync of files and directories, getdents64) | 198 den runs a boot exit 0, 4 exit 1 and 10 exit 2, each the same status on Linux; the disk e2fsck-clean after the boot; git reads both repositories whole | held |
@@ -64,27 +64,27 @@ The prediction is `notes/px90/prediction.txt`, committed first (`5f6c8e15`).
 
 ### The pin, the build, the install
 
-- `user/den.pin` (`51a09f20`): den at `13bc2caa`, a header in `user/scent.pin`'s style (what den is, its clean
+- `user/den.pin` (`9b47f69c`): den at `13bc2caa`, a header in `user/scent.pin`'s style (what den is, its clean
   room, what the pin carries and lacks). `/etc/pax-release` gains its `den` row from it (`tools/mkpax-release`
   reads every pin; `tests/census` C6 and R0 green).
-- `tools/mkden` (`8181588b`, `278d8a04`, `b631daec`): `PAX_DEN_REPO` for a local cache, exactly the pin through
-  `tools/fetch-retry` (its seventeenth site, `55fcb7eb`), den's `wolf-toolchain.toml` read, the wolf and lupin
+- `tools/mkden` (`e482554e`, `22bea601`, `5322f388`): `PAX_DEN_REPO` for a local cache, exactly the pin through
+  `tools/fetch-retry` (its seventeenth site, `5eb121cf`), den's `wolf-toolchain.toml` read, the wolf and lupin
   archives by den's digests read twice, the std the archive bundles checked against the pin's, den's own
   `tools/mkden` in two checkouts (each builds twice and refuses two digests), the two checkouts' binaries
-  compared, ET_EXEC and no PT_INTERP, `sums.txt`. Four builds, `d4d3d6b8…` every time (first at `8181588b`,
-  again in every later build of this lane).
-- `tools/install-den` (`b94ddeb7`): `/bin/den` byte for byte (checked against `sums.txt`), 0755, and `/bin/git`
-  a symbolic link to `den`; one helper for both image builders. `tools/distribution-root` (`e9ecfbf7`) puts both
+  compared, ET_EXEC and no PT_INTERP, `sums.txt`. Four builds, `d4d3d6b8…` every time (first at the
+  pre-rebase 8181588b, the twin of `e482554e`, again in every later build of this lane).
+- `tools/install-den` (`e4e4f478`): `/bin/den` byte for byte (checked against `sums.txt`), 0755, and `/bin/git`
+  a symbolic link to `den`; one helper for both image builders. `tools/distribution-root` (`1f006608`) puts both
   in the dev and the release roots, den unstripped; `pax-install` copies the live root whole, links included
   (`user/install/snapshot.lu`), so the installed disk carries them with no installer change.
-- `tests/distribution` (`5e62f233`, `914fd794`): the packed den is mkden's bytes and size, 0755, root's; `bin/git`
+- `tests/distribution` (`3fec9c16`, `186281b1`): the packed den is mkden's bytes and size, 0755, root's; `bin/git`
   an entry of mode 0120777 whose data is `den`; the zone file is `/etc/localtime`'s bytes. `tests/distribution-boot`
-  (`a68bbb6b`): on both ISOs and both firmwares `den --version` and `git --version` print
+  (`b1e7e5b2`): on both ISOs and both firmwares `den --version` and `git --version` print
   `den 0.0.0 (built with wolf 0.2.36)` and `readlink /bin/git` prints `den` (I2, four boots).
 
 ### The typed session (`tests/mpx5-den`, `user/console/den.keys`)
 
-The keys (`238015ff`, `6c39ddb4`, `d74b7be6`, `b2ffe960`) set den's pinned environment themselves (den's
+The keys (`49a9d029`, `2338cd0b`, `d44b822d`, `d01d8467`) set den's pinned environment themselves (den's
 `tools/environment.py`: `LC_ALL=C`, `TZ=UTC`, a scratch HOME and XDG home, a global config of a fixed identity
 with no system config, colour off, pager cat, empty hooks and template, `GIT_EDITOR=false`, `GIT_PAGER=cat`, and
 author and committer dates a minute apart a step), then type 138 lines between `den-session-begin` and
@@ -127,9 +127,9 @@ the container); the native boot under KVM took about seven minutes, nearly all o
 ### The installed disk across a reboot (`tests/distribution-den`, `tests/mpx6-install.d/den.py`)
 
 `tests/distribution-install` installs from the rebuilt release ISO onto a fresh 1 GiB virtio disk (px82's test;
-`1843d7d5` gives it px78's install allow-list, without which `pax-install` now refuses every target of a live
+`5713ca98` gives it px78's install allow-list, without which `pax-install` now refuses every target of a live
 ISO: `refused: no usable install allow-list`), then boots the disk alone under BIOS and UEFI (I3). `den.py`
-(`eaeeeb66`, `1abc642c`) boots a copy of it alone, as `session.py` does: boot 1 at the installed root shell,
+(`cda70539`, `894e9df0`) boots a copy of it alone, as `session.py` does: boot 1 at the installed root shell,
 den's pinned environment, `den init`, `add`, `commit`, `reboot`; boot 2 `den log`, `den fsck --full`, `git log
 --oneline`, `den status --porcelain`, `exit`. Then, on the host: the root partition `e2fsck -fn`; `/bin/den` and
 the repository read back by debugfs; the same steps on Linux with that den.
@@ -140,14 +140,16 @@ the repository read back by debugfs; the same steps on Linux with that den.
 | P2 after the reboot `den log --no-decorate` is Linux's byte for byte, `den fsck --full` exits 0 with nothing on either stream, `git log --oneline --no-decorate` is den's on Linux, the worktree clean | PASS | PASS |
 | P3 the root `e2fsck -fn` clean; the three object files on the disk (`.git/objects/6e/cec20e…`, `78/80b89c…`, `ef/f7d832…`) byte-identical to Linux's; HEAD and `refs/heads/main` Linux's | PASS | PASS |
 
-The pre-run (hasu, `~/lanes/px90/jobs/dist2/` and `persist2/`) installed from the release ISO built at
-`660a8871`; the gauntlet repeats every step at the final head.
+The pre-run (hasu, `~/lanes/px90/jobs/dist2/` and `persist2/`) installed from the release ISO built at the
+pre-rebase head 660a8871 (its twin is `7fdf2850`, `notes/px90/rebase-map.txt`); the gauntlet repeats every
+step at the final head.
 
 ### The images
 
 `tools/mkdistribution` at a clean checkout, with every program input rebuilt at the head by its own builder
 (pelt, scent, den, lupin, lope, aspen, lobo, the games, yew, the base std, boreutils' 107: about 48 minutes on
-six CPUs) and px82's base payload. The pre-run at `660a8871` (`~/lanes/px90/jobs/dist1/out/`):
+six CPUs) and px82's base payload. The pre-run at the pre-rebase head 660a8871 (`~/lanes/px90/jobs/dist1/out/`;
+the ISOs carry that head's first eight digits in their names):
 
 | artifact | bytes | sha256 |
 |---|---:|---|
@@ -221,7 +223,7 @@ say (31.7 MB; 4.1 MB stripped), which is a separate choice from the base set.
 
 ### R-px90-2: the zone file (recommended and implemented)
 
-- **A (implemented, `49fa017b`, `b39cbdcd`):** both distribution roots and mpx5-den's image carry
+- **A (implemented, `cbe3506a`, `a4a4a149`):** both distribution roots and mpx5-den's image carry
   `/usr/share/zoneinfo/UTC`, 114 bytes, the bytes `/etc/localtime` already has (`tools/mkzone`, RFC 8536);
   `tools/distribution-root` builds it with `tools/mkzone` and refuses if it is not the base's `/etc/localtime`.
   den's dates then work with `TZ=UTC` and with TZ unset.
@@ -239,16 +241,16 @@ row. The record and its FAIL lines are in the PR body.
 
 ### CI
 
-`mpx5-den` is a CI job (`feac14de`): it builds den, the image and the home disk, runs the Linux side in a
-throwaway container and boots the plan's legs; the tier job needs it. `tools/ci-tiers.map` (`4f1c3464`) and
-`tests/ci-plan` (`81fb98bf`, 319 rows green locally) route den's pin, builder, installer and keys to it, and
+`mpx5-den` is a CI job (`773a1d83`): it builds den, the image and the home disk, runs the Linux side in a
+throwaway container and boots the plan's legs; the tier job needs it. `tools/ci-tiers.map` (`64634423`) and
+`tests/ci-plan` (`f45b3607`, 319 rows green locally) route den's pin, builder, installer and keys to it, and
 kernel/ext2, kernel/fstab, kernel/vblk, kernel/block and `as` reach it as they reach the other user and disk
 suites. The image builders, a pin and CI itself make this PR `cross-cutting`. The distribution's tests are
 local, as px82 left them (their base payload is a lane input, not in the repository).
 
 ## 5. Done-when
 
-- [x] 1. The prediction, committed first (`5f6c8e15`), scored above.
+- [x] 1. The prediction, committed first (`d514cd64`), scored above.
 - [x] 2. The pin: `user/den.pin` at the full sha, with its header.
 - [x] 3. `tools/mkden`: `PAX_DEN_REPO`, exactly the pin, den's toolchain read, the archives read twice, den's own
   builder in two checkouts, one digest, ET_EXEC and no PT_INTERP, the sums; built only in the Ubuntu 24.04
