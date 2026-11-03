@@ -1,0 +1,73 @@
+px90 — den on PAX: the prediction, written before any implementation
+(2026-11-03, pax trunk 5da8daaf; den 13bc2caa46efa152ea7709da0b84180a9f350d85).
+
+1. The binary.
+   - den's own wolf-toolchain.toml pins wolf 0.2.36 (5adf3d91), lupin
+     0.1.58 and wolf-std 78b9d3cb; PAX's kernel stays at 0.2.35. tools/mkden
+     builds with den's pin, as mkscent builds with scent's.
+   - Static size, unstripped (installed unmodified): 16.3 MB, range
+     15.5-17.5 MB. Basis: a static wolf 0.2.35 program starts near 14.7 MB
+     (boreutils' smallest), scent adds 0.3 MB for 0.35 MB of source, den
+     has 0.82 MB of non-test source. Stripped: 2-4 MB (recorded, not
+     installed).
+   - Two builds in two checkouts, each through den's own tools/mkden
+     (which itself builds twice), give one digest. ET_EXEC, no PT_INTERP.
+
+2. The ABI.
+   - No fork, exec, pipe or wait: den's source uses no std.process, and a
+     requested editor or pager is never launched (den's README). So no
+     process-control gap can appear in this lane.
+   - The calls den makes are file calls PAX already serves on an ext2
+     volume: openat (O_EXCL lock files), read/write, fstat/statx/lstat,
+     rename, link (loose objects are installed by a no-replace hard link),
+     unlink, mkdir, getdents64, fsync of files and of directories,
+     readlink/symlink, getcwd, the tty ioctls.
+   - -ENOSYS expected only for set_robust_list (273) and rseq (334), as
+     every wolf program before; no `refused:` line. If wolf 0.2.36's
+     runtime makes a call 0.2.35's did not, it shows here first.
+   - Every fsync writes the whole volume's dirty blocks and a FLUSH
+     (docs/CENSUS.md), and den syncs every object and directory: a commit
+     of a few files is still under 2 s under KVM.
+
+3. The verbs (contract item 5) against den's README at the pin.
+   - `config` is read-only (`config --get`): user and core.* are set by
+     writing the config files and read back with --get; `den config KEY
+     VALUE` is shown as den's refusal, not worked around.
+   - `gc` is a named refusal at the pin ("gc remains separate and
+     unsupported"); packs come from `repack -a -d` and `prune-packed`
+     (M4), read back by `verify-pack`, `fsck --full` and git.
+   - init, add, status (porcelain v1 and human), commit -m / -a, log
+     (default, --oneline, -p), diff (worktree, --cached, two commits),
+     branch, switch, merge (fast-forward; a three-way with a conflict
+     and its resolution), linear rebase, cherry-pick, revert --no-edit,
+     tag (lightweight and -a -m), blame, stash push/list/pop, notes
+     add/show/list, reset --soft/--mixed/--hard: all inside den's
+     measured surface; each gives the same bytes on PAX as on Linux.
+   - GIT_EDITOR=false: `den commit` with no message fails with den's
+     measured editor message and status 1; any other editor is refused,
+     never run.
+   - `git` (a symbolic link to den) answers exactly as den: `git
+     --version` prints den's own line, `den 0.0.0 (built with wolf
+     0.2.36)`, because den does not read argv[0] at the pin.
+
+4. The typed session (tests/mpx5-den).
+   - About 110 typed lines a session, about 600 transcript lines; two
+     sessions (root, `pax`) a boot; 4-6 minutes a boot under KVM (typing
+     at 20 ms a character dominates), 10-15 minutes under TCG.
+   - Byte-identical to the same den binary in a Linux container, as root
+     and as `pax`, on the first try of a correct rig. If not, the first
+     divergence is a PAX defect (st_* fields, link, rename, getdents
+     order, the tty), minimised and reported, never fixed in den.
+   - Linux's git reads the repository PAX wrote on the ext2 disk:
+     `git fsck --full` clean, the same commit ids.
+
+5. The installed disk (item 6).
+   - pax-install copies the live root, symbolic links included, so
+     /bin/den and /bin/git reach the disk with no installer change.
+   - After the reboot, `den log` and `den fsck --full` are clean and every
+     object file is byte-identical to the same steps on Linux (one den
+     binary, deterministic deflate).
+
+6. The images.
+   - Each ISO grows by den's unstripped size and two cpio headers
+     (16.3 MB predicted); nothing else in the root changes.
