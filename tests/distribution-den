@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# px90: den's repository across a reboot of the system installed from the
+# rebuilt medium: tests/distribution-install's installed.img (the live
+# ISO's pax-install onto a fresh disk), booted alone under BIOS and UEFI by
+# tests/mpx6-install.d/den.py (P1-P3: den init, add, commit, reboot; den
+# log and den fsck clean after it; the object files on the disk Linux's
+# byte for byte). Only lane-owned copies of the image are booted.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+[ $# -eq 1 ] || die 'usage: distribution-den IMAGE_DIRECTORY'
+out=$(realpath "$1")
+[ -f "$out/installed.img" ] || die "no $out/installed.img: run tests/distribution-install first"
+need python3 qemu-system-x86_64 e2fsck debugfs dumpe2fs
+rc=0
+for firmware in bios uefi; do
+    python3 -I "$PAX_ROOT/tests/mpx6-install.d/den.py" "$out/den" "$firmware" "$out/installed.img" || rc=1
+done
+[ "$rc" = 0 ] && say 'PASS: den on the installed disk across a reboot, both firmwares' || say 'FAIL: den on the installed disk'
+exit "$rc"
