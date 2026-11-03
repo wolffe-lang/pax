@@ -256,10 +256,12 @@ fn now() -> u64 {
 
 fn rand() -> u64 {
     // xorshift64 (Marsaglia, 2003): never zero from a seed that is not.
+    // The left shifts drop their high bits by mask first: a shift that
+    // loses set bits is an overflow trap in wolf.
     var x = dw(D_RAND)
-    x = x ^ (x << 13)
+    x = x ^ ((x & 0x0007ffffffffffff) << 13)
     x = x ^ (x >> 7)
-    x = x ^ (x << 17)
+    x = x ^ ((x & 0x00007fffffffffff) << 17)
     put_dw(D_RAND, x)
     x
 }
