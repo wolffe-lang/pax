@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# tests/mpx4-igb — PAX on QEMU's Intel 82576 (`-device igb`), the ring
+# model kernel/gbe shares with the I225 (px89, R-px89-1): the DHCP client
+# and the existing UDP and TCP rows over it, by the suites that hold them
+# on virtio-net, each run with --nic igb.
+#
+#   tests/mpx4-igb [--firmware bios|uefi|both] [--tier native|release|both]
+#                  [--accel auto|kvm|tcg]
+#
+#   G1 tests/mpx4-dhcp --nic igb, its slirp, renew and nak ways: the
+#      lease, T1 and a NAK over the controller (D0-D10 as on virtio)
+#   G2 tests/mpx4-udp --nic igb, the peer and user ways (the user way's
+#      address by DHCP): U0-U9 as on virtio
+#   G3 tests/mpx4-tcp --nic igb, the peer and user ways: T0-T9 as on
+#      virtio
+#   G4 tests/mpx4-udp --nic igb --netpoll, the user way, a 1000-datagram
+#      soak: the controller polled every tick by the network's clock, the
+#      path the I225 takes on kasumi (no INTx line), U0-U9
+#
+# Each child's lines are printed as they come; a child's exit is its
+# row's verdict, and its own FAIL lines name what broke. Exit 0 when all
+# four held, 1 otherwise, 2 on a usage error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+pass=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware|--tier|--accel) pass+=("$1" "$2"); shift 2 ;;
+        *) die "usage: tests/mpx4-igb [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+    esac
+done
+fail=0
+row() { # name what command...
+    local name=$1 what=$2 rc=0 t0=$SECONDS
+    shift 2
+    "$@" || rc=$?
+    if [ "$rc" = 0 ]; then
+        say "PASS $name: $what ($((SECONDS - t0)) s)"
+    else
+        say "FAIL $name: $what: exit $rc ($((SECONDS - t0)) s)"
+        fail=1
+    fi
+}
+row G1 "the DHCP client over igb (tests/mpx4-dhcp --nic igb, slirp renew nak)" \
+    "$here/mpx4-dhcp" --nic igb --ways slirp,renew,nak ${pass[@]+"${pass[@]}"}
+row G2 "UDP over igb (tests/mpx4-udp --nic igb, peer and user)" \
+    "$here/mpx4-udp" --nic igb ${pass[@]+"${pass[@]}"}
+row G3 "TCP over igb (tests/mpx4-tcp --nic igb, peer and user)" \
+    "$here/mpx4-tcp" --nic igb ${pass[@]+"${pass[@]}"}
+row G4 "UDP over igb polled (tests/mpx4-udp --nic igb --netpoll, user, soak 1000)" \
+    "$here/mpx4-udp" --nic igb --netpoll --ways user --soak 1000 ${pass[@]+"${pass[@]}"}
+[ "$fail" = 0 ] && say "mpx4-igb: PASS" || say "mpx4-igb: FAIL"
+exit "$fail"
