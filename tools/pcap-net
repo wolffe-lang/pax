@@ -3,7 +3,7 @@
 # frames it must contain, byte by byte (px20, px21, px22, px23;
 # tests/mpx4-net, tests/mpx4-udp, tests/mpx4-tcp).
 #
-#   tools/pcap-net [--small N] [--large N] [--list K] [--serial LOG] [--tcp] FILE.pcap
+#   tools/pcap-net [--small N] [--large N] [--list K] [--serial LOG] [--tcp] [--dhcp] FILE.pcap
 #
 # FILE.pcap is what QEMU's `-object filter-dump,netdev=…,file=…` wrote:
 # the classic pcap format (a 24-byte header, magic 0xa1b2c3d4 in the
@@ -108,6 +108,13 @@
 # books are closed too: every transmit buffer reclaimed, every received
 # one restocked, every queued frame sent, pushed out or given up.
 #
+# --dhcp (px89): PAX's DHCP client ran (its address from QEMU's server):
+# a datagram from PAX's port 68 to port 67 and one to PAX from port 67 to
+# port 68 are the client's and the server's. They are not modelled here
+# (tools/pcap-dhcp holds the client's to its bytes); they count as what
+# they are to kernel/ip (sent; delivered, broadcast) and to nothing else,
+# and the client's identifications are PAX's like any other datagram's.
+#
 # Prints what it found and, last, `pcap-net: PASS <counts>` or `pcap-net:
 # FAIL <the first frame that is wrong, with the expected and found
 # bytes>`. --list K also prints the first K frames in hex. Exit 0 on
@@ -167,7 +174,7 @@ KEYS = (["from-pax", "to-pax", "before", "net.type", "net.other", "arp.requests-
         ["icmp.echo", "icmp.replies-out", "icmp.requests-out", "icmp.matched", "icmp.stray", "unreachable.sent",
          "unreachable.limited", "unreachable.silent", "udp.in", "udp.unchecked", "udp.out", "udp.echoed", "udp.ready",
          "port-unreachable.sent", "icmp.error", "tcp.in", "tcp.out", "tcp.retransmitted", "tcp.resets-out", "tcp.probes", "tcp.connections",
-         "tcp.bytes-out", "markers", "burst.small", "burst.large", "checksums"])
+         "tcp.bytes-out", "markers", "burst.small", "burst.large", "checksums", "dhcp.out", "dhcp.in"])
 
 
 LINES = [
@@ -511,6 +518,7 @@ def main(argv):
     opt = {"small": "0", "large": "0", "list": "0", "serial": ""}
     path = None
     tcp = False
+    dhcp = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -518,11 +526,14 @@ def main(argv):
             tcp = True
             px.TCP_SPOKEN = True
             i += 1
+        elif a == "--dhcp":
+            dhcp = True
+            i += 1
         elif a.startswith("--") and a[2:] in opt and i + 1 < len(argv):
             opt[a[2:]] = argv[i + 1]
             i += 2
         elif a.startswith("--") or path is not None:
-            die("usage: pcap-net [--small N] [--large N] [--list K] [--serial LOG] [--tcp] FILE.pcap")
+            die("usage: pcap-net [--small N] [--large N] [--list K] [--serial LOG] [--tcp] [--dhcp] FILE.pcap")
         else:
             path = a
             i += 1
@@ -628,6 +639,10 @@ def main(argv):
             last_ident = ident
             c["ip.out"] += 1
             c["checksums"] += 2
+            if dhcp and h[9] == 17 and px.be16(h, 20) == 68 and px.be16(h, 22) == 67:
+                # px89: the DHCP client's (tools/pcap-dhcp holds its bytes).
+                c["dhcp.out"] += 1
+                continue
             if px.is_broadcast(dst):
                 to = px.BCAST
             else:
@@ -779,6 +794,10 @@ def main(argv):
             tcp_in(conns, last_in, (seg.dport, f[26:30], seg.sport), seg, c)
         elif verdict in ("udp", "udp.port-zero"):
             sport, dport, data, summed = px.udp_fields(f)
+            if dhcp and sport == 67 and dport == 68:
+                # px89: the server's answer is kernel/dhcp's, never a socket's.
+                c["dhcp.in"] += 1
+                continue
             if not summed:
                 c["udp.unchecked"] += 1
             if verdict == "udp":
