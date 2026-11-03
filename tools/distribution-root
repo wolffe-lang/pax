@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble px82's distribution payload from verified, built inputs.
+"""Assemble px82's distribution payload from verified, built inputs (px90: den).
 Usage: distribution-root BASE.cpio INPUTS IDENTITY_DIR OUT.cpio dev|release
 The old payload supplies only unchanged support files and the pinned native
 compiler/linker bundle. Every current org binary and the base std are replaced.
@@ -100,6 +100,16 @@ def main():
                 put('bin/'+name, data, 0o755)
                 if project == 'pelt':
                     put('bin/sh', data, 0o755)
+        # px90: den unmodified (never stripped) and /bin/git a symbolic link
+        # to it, by the one helper tests/mpx5-den's own image uses as well.
+        stage = Path(scratch)/'den-root'
+        subprocess.run([str(ROOT/'tools/install-den'), str(inputs/'den'), str(stage)], check=True)
+        for source in sorted((stage/'bin').iterdir()):
+            assert 'bin/'+source.name not in rows, 'den would replace bin/'+source.name
+            if source.is_symlink():
+                rows['bin/'+source.name] = (0o120777, 0, 0, os.readlink(source).encode())
+            else:
+                put('bin/'+source.name, source.read_bytes(), 0o755)
     put('bin/pax-release', (ROOT/'user/pax-release').read_bytes(), 0o755)
     for name, source in [('pax-install', identity/'installer/pax-install'),
                          ('limine', identity/'limine/limine'), ('reboot', identity/'diskprobe/reboot')]:
