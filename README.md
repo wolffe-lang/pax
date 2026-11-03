@@ -96,7 +96,10 @@ den reads and writes Git's repositories byte for byte on its local verbs: `init`
 wire yet (`clone`, `fetch`, `pull`, `push`), no `gc`, no hooks and no config writer (`config --get` only, so set
 `user.name` in `~/.gitconfig` or with `GIT_AUTHOR_NAME`), and it never runs an editor or a pager: give a message
 with `-m` or `-F` (with `GIT_EDITOR=false` the attempt fails as Git's does, and any other editor is refused by
-name). `tests/mpx5-den` types a whole session at PAX, as root and as a user, in repositories on an ext2 `/home`, and
+name). Two things to know at the console: den prints a date only from the zone database (`$TZDIR/$TZ`, by
+default `/usr/share/zoneinfo/UTC`, which the images carry as the bytes of `/etc/localtime`), and a `den log` written
+to the terminal asks for decorations den does not draw yet, so it says `not yet implemented: history decorations`:
+use `den log --no-decorate`, or `log.decorate = false` in `~/.gitconfig`. `tests/mpx5-den` types a whole session at PAX, as root and as a user, in repositories on an ext2 `/home`, and
 holds every verb's status, output and error to the same den on Linux; `tests/distribution-den` commits on a disk
 the installer wrote, reboots, and reads the repository back clean, every object file Linux's bytes.
 
