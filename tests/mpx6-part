@@ -58,7 +58,10 @@
 #      written; halted.
 #   P8 UEFI: the same disk under OVMF.
 #   P9 the ISO with a bare ext2 disk (tools/mkdisk --home): mounted at
-#      /home from /dev/vda as px63 has it, no table line, no `boot:` line.
+#      /home from /dev/vda as px63 has it, no table line, no boot medium
+#      line (`boot: /boot/initramfs.cpio from a disk: ...`; the kernel's
+#      own `boot: <n> ms from the kernel's entry ...` line, px87, is
+#      printed on every boot and is not the medium's).
 #   P10 the clean flag: after P7's `exit` the host's `dumpe2fs -h` of
 #      partition 2 says `clean`; after `reboot(2)` too, and the second
 #      boot reads the note (mount 2); QEMU killed the moment the session
@@ -582,9 +585,9 @@ iso_row() { # tier
     cp "$images/$t/home.img" "$img"
     rc=0; con_boot "$t" bios iso "$img" || rc=$?
     id="$t bios iso"
-    if sgrep -qx 'fstab: /dev/vda on /home: ext2, read-write, write-back' && ! sgrep -q '^block: vda: \(GPT\|MBR\)' && ! sgrep -q '^boot: ' \
+    if sgrep -qx 'fstab: /dev/vda on /home: ext2, read-write, write-back' && ! sgrep -q '^block: vda: \(GPT\|MBR\)' && ! sgrep -q '^boot: /' \
         && sgrep -qx '/home/pax fe00 1000:1000 755' && sgrep -qx 'a note on the disk that booted' && [ "$rc" = 0 ]; then
-        say "PASS P9 $id: the ISO with a bare ext2 disk: /home from /dev/vda (254:0), no table, no boot: line, the note written, halted"
+        say "PASS P9 $id: the ISO with a bare ext2 disk: /home from /dev/vda (254:0), no table, no boot medium line, the note written, halted"
     else
         bad "P9 $id: $(sgrep -E '^(fstab|block: vda: (GPT|MBR)|boot:)' | tr '\n' ' ') (qemu-halt $rc)"
     fi
