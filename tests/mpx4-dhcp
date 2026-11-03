@@ -1,0 +1,382 @@
+#!/usr/bin/env bash
+# tests/mpx4-dhcp — PAX's DHCP client (px89): kernel/dhcp, started when
+# the image's /etc/pax-net says `dhcp`, takes a lease (RFC 2131), keeps
+# it at T1 and T2, gives it up when it runs out or is refused, and sets
+# the station's address, netmask and default route and /etc/resolv.conf
+# from it.
+#
+#   tests/mpx4-dhcp [--images DIR | --no-boot] [--ways LIST] [--nic virtio|igb]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#                   [--accel auto|kvm|tcg]
+#
+# The kernel is kmain_sockets (and, for the `session` way, kmain_session:
+# init's list over the lease). The programs: user/net's netstate
+# (tools/mknet), which prints /etc/resolv.conf as a program reads it. Each
+# way's initramfs holds /etc/pax-net and a run list (/etc/pax-run).
+# The ways:
+#   slirp    QEMU's user-mode network: its DHCP server at 10.0.2.2
+#            (10.0.2.15/24, router 10.0.2.2, DNS 10.0.2.3, 86400 s)
+#   backoff  dnsmasq (tools/dhcp-wire, a tap) started 20 s after PAX's
+#            first DISCOVER: the retransmissions
+#   renew    dnsmasq from the start, a 2-minute lease, T1 10 s, T2 20 s
+#   rebind   dnsmasq gone from the lease to 2 s after the renewal: the
+#            renewal unanswered, the rebinding at T2 answered
+#   expiry   dnsmasq gone from the lease until 3 s after it ran out
+#   nak      dnsmasq restarted at the lease with another range and DNS
+#            server: the renewal draws a NAK, the next exchange a new
+#            address
+#   session  kmain_session on QEMU's user-mode network: the image's init
+#            list runs over the lease
+# Every way's frames go to a pcap file (QEMU's filter-dump) that
+# tools/pcap-dhcp holds byte for byte to what kernel/dhcp sends.
+#
+# Assertions, per tier, firmware and way:
+#   D0 build: the kernels, netstate static (ET_EXEC, no PT_INTERP), each
+#      way's initramfs and ISO.
+#   D1 the exchange: `dhcp: started on <MAC>`, then DISCOVER, OFFER,
+#      REQUEST, ACK and `bound` in that order; tools/pcap-dhcp PASS
+#      (every client frame rebuilt byte for byte, RFC 2131's order).
+#   D2 the state: after the first `bound`, kernel/ip's line names the
+#      lease's address, netmask and router; the kernel's own read-back of
+#      /etc/resolv.conf and netstate's (a program's open and read) name
+#      the lease's DNS servers, one `nameserver` line each.
+#   D3 the route works: `dhcp: the router <R> answers the kernel's echo`.
+#   D4 (backoff) RFC 2131 4.1: the DISCOVERs 4, 8 and 16 s apart, each
+#      within 1 s (tools/pcap-dhcp --backoff), the xid kept, the kernel's
+#      try count rising.
+#   D5 (renew) at T1 (10 s after the lease, +-1 s) a REQUEST unicast to
+#      the server (`RENEW`), its ACK, `bound` again on the same address;
+#      the server logged the renewal.
+#   D6 (rebind) the renewal at T1 unanswered; at T2 (20 s, +-1 s) a
+#      broadcast REQUEST (`REBIND`), its ACK, the same address.
+#   D7 (expiry) RENEW at T1, REBIND at T2 and again at +80 s (half the
+#      lease left, at least 60 s: RFC 2131 4.4.5), `expired` at 120 s
+#      (+-1 s), then `unbound: ip 0.0.0.0 netmask 0.0.0.0 gateway
+#      0.0.0.0; /etc/resolv.conf: no servers`, then a new exchange and a
+#      lease again.
+#   D8 (nak) RENEW at T1, a NAK, `unbound`, a DISCOVER of a new xid, an
+#      address in configuration B's range, its DNS server in
+#      /etc/resolv.conf (netstate's last read).
+#   D9 (session) kmain_session: the lease before `run 1:`, netstate's
+#      read, `PAX: init /bin/netstate ended with status 0`.
+#   D10 the end: `halt`, no PANIC, qemu-halt holds the machine halted.
+#
+# The tap ways need ip(8) and dnsmasq(8) and root (as root, or with
+# --sudo-able `sudo -n`): SKIPPED LOUDLY without them unless
+# PAX_REQUIRE_DHCP_WIRE=1, when it is a failure. The UEFI leg needs OVMF
+# (PAX_REQUIRE_UEFI=1: a failure without it). Exit 0 when every assertion
+# held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 accel=auto nic=virtio
+ways="slirp backoff renew rebind expiry nak session"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --ways)     ways=$2; shift 2 ;;
+        --nic)      nic=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "usage: tests/mpx4-dhcp [--images DIR | --no-boot] [--ways LIST] [--nic virtio|igb] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $nic in virtio) device=virtio-net-pci ;; igb) device=igb ;; *) die "--nic takes virtio or igb" ;; esac
+for w in $ways; do case $w in slirp|backoff|renew|rebind|expiry|nak|session) ;; *) die "unknown way $w" ;; esac; done
+
+MAC=52:54:00:12:34:56
+work=$PAX_BUILD/mpx4-dhcp
+runs=$PAX_BUILD/mpx4-dhcp-runs.txt
+fail=0 ran=0 skipped=0
+bad() { say "FAIL $*"; fail=1; }
+need nm python3
+
+kernel_of() { case $1 in session) echo kmain_session ;; *) echo kmain_sockets ;; esac; }
+# What each way's run list holds, and its /etc/pax-net.
+runlist_of() {
+    case $1 in
+        slirp|session) printf '/bin/netstate 0\n' ;;
+        backoff) printf '/bin/netstate 0\n/bin/netstate 3\n' ;;
+        renew)   printf '/bin/netstate 0\n/bin/netstate 25\n' ;;
+        rebind)  printf '/bin/netstate 0\n/bin/netstate 32\n' ;;
+        expiry)  printf '/bin/netstate 0\n/bin/netstate 150\n' ;;
+        nak)     printf '/bin/netstate 0\n/bin/netstate 32\n' ;;
+    esac
+}
+paxnet_of() { case $1 in backoff) printf 'dhcp wait=60\n' ;; *) printf 'dhcp\n' ;; esac; }
+timeout_of() { case $1 in expiry) echo 420 ;; backoff|rebind|nak|renew) echo 240 ;; *) echo 180 ;; esac; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" readelf
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work"
+    why=
+    "$PAX_ROOT/tools/mknet" "$work/net" > "$work/net.txt" || why+=" tools/mknet;"
+    r=$(static_ok "$work/net/netstate") || why+=" $r;"
+    say "  program: bin/netstate $(sha256_of "$work/net/netstate") $(wc -c < "$work/net/netstate" | tr -d ' ') bytes"
+    for way in $ways; do
+        runlist_of "$way" > "$work/$way.run"
+        paxnet_of "$way" > "$work/$way.pax-net"
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$way.cpio" "/bin/netstate=$work/net/netstate" \
+            "/etc/pax-run=$work/$way.run" "/etc/pax-net=$work/$way.pax-net" > "$work/$way.initramfs.txt" || why+=" tools/mkinitramfs ($way);"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        for k in kmain_sockets kmain_session; do
+            need_k=0
+            for way in $ways; do [ "$(kernel_of "$way")" = "$k" ] && need_k=1; done
+            [ "$need_k" = 1 ] || continue
+            log=$work/$tier/$k.build-kernel.log
+            if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
+                cat "$log" >&2
+                for way in $ways; do
+                    [ "$(kernel_of "$way")" = "$k" ] || continue
+                    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                        --add "$work/$way.cpio" initramfs.cpio "$elf" "$work/$tier/$way.iso" >/dev/null \
+                        || why+=" $tier $k: mkimage ($way);"
+                done
+                say "built $tier $k: elf $(sha256_of "$elf")"
+            else
+                cat "$log" >&2
+                why+=" $tier $k: tools/build-kernel;"
+            fi
+        done
+    done
+    [ -z "$why" ] && say "PASS D0: the kernels ($tiers), netstate static, $(echo $ways | wc -w | tr -d ' ') initramfs and ISOs" || bad "D0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx4-dhcp build (D0): PASS (no boot: --no-boot)" || say "mpx4-dhcp build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+# Can this host run the tap ways?
+wire=() wire_why=
+if [ "$(id -u)" = 0 ]; then
+    :
+elif sudo -n true 2>/dev/null; then
+    wire=(--sudo)
+else
+    wire_why="not root and no sudo -n"
+fi
+command -v dnsmasq >/dev/null 2>&1 || wire_why+=" no dnsmasq"
+command -v ip >/dev/null 2>&1 || wire_why+=" no ip(8)"
+[ -c /dev/net/tun ] || wire_why+=" no /dev/net/tun"
+
+has() { grep -Eq -- "$2" "$1"; }
+# The kernel's dhcp lines' times: `dhcp: +12.34 s WORD …` -> 12.34 for
+# the k-th (1-based) line whose WORD is $2.
+at() { awk -v w="$2" -v k="${3:-1}" '$1 == "dhcp:" && $2 ~ /^\+/ && $4 == w { n++; if (n == k) { sub(/^\+/, "", $2); print $2; exit } }' "$1"; }
+near() { python3 -c 'import sys; a, b, t = map(float, sys.argv[1:]); sys.exit(0 if abs(a - b) <= t else 1)' "$1" "$2" "$3" 2>/dev/null; }
+plus() { python3 -c 'import sys; print("%.2f" % (float(sys.argv[1]) + float(sys.argv[2])))' "$1" "$2"; }
+
+boot() { # tier leg way -> $log $norm $pcap $acct
+    local tier=$1 leg=$2 way=$3 rc=0 k
+    k=$(kernel_of "$way")
+    log=$PAX_BUILD/mpx4-dhcp-$tier-$leg-$way.serial.log
+    pcap=$PAX_BUILD/mpx4-dhcp-$tier-$leg-$way.pcap
+    acct=$PAX_BUILD/mpx4-dhcp-$tier-$leg-$way.wire
+    norm=$log.norm
+    local iso=$images/$tier/$way.iso elf=$images/$tier/$k.elf
+    rm -rf "$log" "$log.verdict" "$pcap" "$norm" "$acct"
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $way ($iso)"; : > "$log"; : > "$norm"; return 2; }
+    local net=() halt=()
+    halt=("$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout "$(timeout_of "$way")" --accel "$accel" --elf "$elf" --marker halt)
+    case $way in
+        slirp|session)
+            net=(--qemu -netdev --qemu "user,id=n0,ipv6=off")
+            ;;
+        *)
+            net=(--qemu -netdev --qemu "tap,id=n0,ifname=pxdhcp0,script=no,downscript=no")
+            ;;
+    esac
+    net+=(--qemu -device --qemu "$device,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
+    case $way in
+        slirp|session)
+            "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 || rc=$?
+            ;;
+        *)
+            "$PAX_ROOT/tools/dhcp-wire" --scenario "$way" --serial "$log" --work "$acct" ${wire[@]+"${wire[@]}"} -- \
+                "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 || rc=$?
+            ;;
+    esac
+    ran=$((ran + 1))
+    serial_norm "$log" > "$norm"
+    printf '%s %s %s %s halt-status=%s serial=%s iso=%s pcap=%s\n' "$tier" "$leg" "$way" "$nic" "$rc" \
+        "$(sha256_of "$log")" "$(sha256_of "$iso")" "$( [ -f "$pcap" ] && sha256_of "$pcap")" >> "$runs"
+    return "$rc"
+}
+
+# Expected per way: the address pattern, the DNS servers, the router.
+want_addr() { case $1 in slirp|session) echo '10\.0\.2\.15' ;; nak) echo '192\.168\.89\.(5[0-9]|[6-9][0-9])' ;; *) echo '192\.168\.89\.(5[0-9]|[6-9][0-9])' ;; esac; }
+want_dns() { case $1 in slirp|session) echo 'nameserver 10.0.2.3' ;; *) echo 'nameserver 192.168.89.53|nameserver 192.168.89.54' ;; esac; }
+want_router() { case $1 in slirp|session) echo 10.0.2.2 ;; *) echo 192.168.89.1 ;; esac; }
+want_mask() { echo 255.255.255.0; }
+
+one() { # tier leg way
+    local tier=$1 leg=$2 way=$3 L="$1 $2 $3 ($nic)" hrc=0 why
+    boot "$tier" "$leg" "$way" || hrc=$?
+    local addr router dns
+    addr=$(want_addr "$way") router=$(want_router "$way") dns=$(want_dns "$way")
+
+    # --- D1: the exchange -----------------------------------------------------
+    why=
+    has "$norm" "^dhcp: started on $MAC, client id 01:$MAC; asking for a lease" || why+=" no 'dhcp: started on $MAC' line;"
+    local seq
+    seq=$(awk '$1 == "dhcp:" && $2 ~ /^\+/ { print $4 }' "$norm" | awk '!($0 in s) { s[$0] = 1; print }' | paste -sd' ' -)
+    case " $seq " in
+        *" DISCOVER OFFER REQUEST ACK bound "*) ;;
+        *) why+=" the first of each message: '$seq', not DISCOVER OFFER REQUEST ACK bound;" ;;
+    esac
+    local pc= po=()
+    [ "$way" = backoff ] && po=(--backoff)
+    if [ -s "$pcap" ]; then
+        pc=$("$PAX_ROOT/tools/pcap-dhcp" --mac "$MAC" ${po[@]+"${po[@]}"} "$pcap" 2>&1)
+        printf '%s\n' "$pc" > "$pcap.check"
+        printf '%s\n' "$pc" | grep -q '^pcap-dhcp: PASS' || why+=" $(printf '%s\n' "$pc" | grep -m1 'FAIL' | cut -c1-220);"
+    else
+        why+=" no capture;"
+    fi
+    [ -z "$why" ] && say "PASS D1 $L: $seq; $(printf '%s\n' "$pc" | tail -n 1 | cut -c12-200)" || bad "D1 $L:$why"
+
+    # --- D2: the state after the lease ---------------------------------------------
+    why=
+    local b1 ipl
+    b1=$(grep -m1 -E '^dhcp: \+[0-9.]+ s bound ' "$norm")
+    printf '%s\n' "$b1" | grep -Eq "bound $addr netmask 255\.255\.255\.0 gateway ${router//./\\.}; /etc/resolv.conf: " || why+=" first bound line: '$b1';"
+    ipl=$(awk '/^dhcp: \+[0-9.]+ s bound / { on = 1; next } on && /^ip: / { print; exit }' "$norm")
+    printf '%s\n' "$ipl" | grep -Eq "^ip: $addr netmask 255\.255\.255\.0 gateway ${router//./\\.}, MTU 1500, TTL 64, DF set, no fragments either way$" || why+=" ip line after it: '$ipl';"
+    local ns
+    ns=$(grep -E '^netstate: /etc/resolv.conf: ' "$norm" | head -n 2 | sed 's/^netstate: \/etc\/resolv.conf: //' | paste -sd'|' -)
+    case $way in
+        slirp|session) [ "$ns" = "nameserver 10.0.2.3" ] || why+=" netstate read '$ns', not 'nameserver 10.0.2.3';" ;;
+        *) [ "$ns" = "nameserver 192.168.89.53|nameserver 192.168.89.54" ] || why+=" netstate read '$ns';" ;;
+    esac
+    [ -z "$why" ] && say "PASS D2 $L: ${b1#dhcp: }; netstate: $ns" || bad "D2 $L:$why"
+
+    # --- D3: the route ---------------------------------------------------------
+    if has "$norm" "^dhcp: the router ${router//./\\.} answers the kernel's echo"; then
+        say "PASS D3 $L: $(grep -m1 '^dhcp: the router' "$norm")"
+    else
+        bad "D3 $L: '$(grep -m1 '^dhcp: the router' "$norm")'"
+    fi
+
+    # --- D4-D9: each way's own ---------------------------------------------------
+    local tb t1 t2 t3 te
+    tb=$(at "$norm" bound 1)
+    case $way in
+        backoff)
+            why=
+            local tries
+            tries=$(grep -E '^dhcp: \+[0-9.]+ s DISCOVER ' "$norm" | sed -E 's/.*xid (0x[0-9a-f]+).*\(try ([0-9]+);.*/\1 \2/' | paste -sd' ' -)
+            printf '%s\n' "$tries" | grep -Eq '^(0x[0-9a-f]+) 1 \1 2 \1 3 \1 4' || why+=" the DISCOVER lines' xid and try: '$tries';"
+            printf '%s\n' "$pc" | grep -q '^pcap-dhcp: backoff: ' || why+=" no backoff verdict from tools/pcap-dhcp;"
+            [ -z "$why" ] && say "PASS D4 $L: $tries; $(printf '%s\n' "$pc" | grep '^pcap-dhcp: backoff: ' | cut -c12-)" || bad "D4 $L:$why"
+            ;;
+        renew)
+            why=
+            t1=$(at "$norm" RENEW 1)
+            [ -n "$tb" ] && [ -n "$t1" ] && near "$t1" "$(plus "$tb" 10)" 1 || why+=" RENEW at '${t1:-none}', the lease at '${tb:-none}' (T1 10 s);"
+            local b2
+            b2=$(grep -E '^dhcp: \+[0-9.]+ s bound ' "$norm" | sed -n 2p)
+            [ "$(printf '%s\n' "$b1" | sed -E 's/^dhcp: \+[0-9.]+ s //')" = "$(printf '%s\n' "$b2" | sed -E 's/^dhcp: \+[0-9.]+ s //')" ] || why+=" bound after the renewal '$b2' differs from the first '$b1';"
+            grep -q 'DHCPACK.*192\.168\.89\.' "$acct"/dnsmasq-1.log 2>/dev/null && [ "$(grep -c 'DHCPREQUEST' "$acct"/dnsmasq-1.log)" -ge 2 ] || why+=" dnsmasq logged $(grep -c DHCPREQUEST "$acct"/dnsmasq-1.log 2>/dev/null) requests;"
+            printf '%s\n' "$pc" | grep -q 'client REQUEST (renewing)' || why+=" no renewing REQUEST in the capture;"
+            [ -z "$why" ] && say "PASS D5 $L: lease at +$tb s, RENEW at +$t1 s; ${b2#dhcp: }" || bad "D5 $L:$why"
+            ;;
+        rebind)
+            why=
+            t1=$(at "$norm" RENEW 1) t2=$(at "$norm" REBIND 1)
+            [ -n "$tb" ] && [ -n "$t1" ] && near "$t1" "$(plus "$tb" 10)" 1 || why+=" RENEW at '${t1:-none}', the lease at '${tb:-none}';"
+            [ -n "$t2" ] && near "$t2" "$(plus "$tb" 20)" 1 || why+=" REBIND at '${t2:-none}' (T2 20 s after '${tb:-none}');"
+            local ack2; ack2=$(at "$norm" ACK 2)
+            [ -n "$ack2" ] && [ -n "$t2" ] && near "$ack2" "$t2" 5 || why+=" the second ACK at '${ack2:-none}';"
+            printf '%s\n' "$pc" | grep -q 'client REQUEST (rebinding)' || why+=" no rebinding REQUEST in the capture;"
+            [ "$(grep -cE '^dhcp: \+[0-9.]+ s bound '"$(want_addr rebind)"' ' "$norm")" -ge 2 ] || why+=" no second bound line on the same range;"
+            [ -z "$why" ] && say "PASS D6 $L: lease +$tb, RENEW +$t1 (unanswered), REBIND +$t2, ACK +$ack2" || bad "D6 $L:$why"
+            ;;
+        expiry)
+            why=
+            t1=$(at "$norm" RENEW 1) t2=$(at "$norm" REBIND 1) t3=$(at "$norm" REBIND 2) te=$(at "$norm" expired 1)
+            [ -n "$tb" ] && [ -n "$t1" ] && near "$t1" "$(plus "$tb" 10)" 1 || why+=" RENEW '${t1:-none}';"
+            [ -n "$t2" ] && near "$t2" "$(plus "$tb" 20)" 1 || why+=" REBIND '${t2:-none}';"
+            [ -n "$t3" ] && near "$t3" "$(plus "$tb" 80)" 1 || why+=" second REBIND '${t3:-none}' (due +80 s);"
+            [ -n "$te" ] && near "$te" "$(plus "$tb" 120)" 1 || why+=" expired '${te:-none}' (due +120 s);"
+            has "$norm" '^dhcp: \+[0-9.]+ s unbound: ip 0\.0\.0\.0 netmask 0\.0\.0\.0 gateway 0\.0\.0\.0; /etc/resolv.conf: no servers$' || why+=" no unbound line;"
+            local b2; b2=$(at "$norm" bound 2)
+            [ -n "$b2" ] && [ -n "$te" ] && near "$b2" "$te" 30 || why+=" no lease again after it ran out ('${b2:-none}');"
+            [ -z "$why" ] && say "PASS D7 $L: lease +$tb, RENEW +$t1, REBIND +$t2 and +$t3, expired +$te, a lease again +$b2" || bad "D7 $L:$why"
+            ;;
+        nak)
+            why=
+            t1=$(at "$norm" RENEW 1)
+            [ -n "$tb" ] && [ -n "$t1" ] && near "$t1" "$(plus "$tb" 10)" 1 || why+=" RENEW '${t1:-none}';"
+            has "$norm" '^dhcp: \+[0-9.]+ s NAK from server 192\.168\.89\.1 ' || why+=" no NAK line;"
+            has "$norm" '^dhcp: \+[0-9.]+ s unbound: ip 0\.0\.0\.0 netmask 0\.0\.0\.0 gateway 0\.0\.0\.0; /etc/resolv.conf: no servers$' || why+=" no unbound line;"
+            local x1 x2 b2 last
+            x1=$(grep -E '^dhcp: \+[0-9.]+ s DISCOVER ' "$norm" | head -n 1 | sed -E 's/.*xid (0x[0-9a-f]+).*/\1/')
+            x2=$(awk '/ s NAK from / { on = 1 } on && / s DISCOVER / { print; exit }' "$norm" | sed -E 's/.*xid (0x[0-9a-f]+).*/\1/')
+            [ -n "$x2" ] && [ "$x1" != "$x2" ] || why+=" the DISCOVER after the NAK: xid '${x2:-none}' (the first '$x1');"
+            b2=$(grep -E '^dhcp: \+[0-9.]+ s bound ' "$norm" | sed -n 2p)
+            printf '%s\n' "$b2" | grep -Eq 'bound 192\.168\.89\.(1[0-4][0-9]) netmask 255\.255\.255\.0 gateway 192\.168\.89\.1; /etc/resolv.conf: nameserver 192\.168\.89\.55$' || why+=" the second lease: '$b2';"
+            last=$(grep -E '^netstate: /etc/resolv.conf: ' "$norm" | tail -n 1)
+            [ "$last" = "netstate: /etc/resolv.conf: nameserver 192.168.89.55" ] || why+=" netstate's last read: '$last';"
+            [ -z "$why" ] && say "PASS D8 $L: RENEW +$t1, NAK, new xid $x2, ${b2#dhcp: }" || bad "D8 $L:$why"
+            ;;
+        session)
+            why=
+            local lb lr
+            lb=$(grep -n -m1 -E '^dhcp: \+[0-9.]+ s bound ' "$norm" | cut -d: -f1)
+            lr=$(grep -n -m1 '^run 1: /bin/netstate 0' "$norm" | cut -d: -f1)
+            [ -n "$lb" ] && [ -n "$lr" ] && [ "$lb" -lt "$lr" ] || why+=" the lease (line '${lb:-none}') not before run 1 (line '${lr:-none}');"
+            has "$norm" '^PAX: init /bin/netstate ended with status 0; nothing left to run$' || why+=" init's end: '$(grep -m1 '^PAX: init' "$norm")';"
+            [ -z "$why" ] && say "PASS D9 $L: the lease at line $lb, run 1 at line $lr; $(grep -m1 '^PAX: init' "$norm")" || bad "D9 $L:$why"
+            ;;
+    esac
+
+    # --- D10: the end -------------------------------------------------------------
+    if [ "$hrc" = 0 ] && has "$norm" '^halt$' && ! has "$norm" 'PANIC'; then
+        say "PASS D10 $L: halted ($(tail -n 1 "$log.verdict" | cut -c1-120))"
+    else
+        bad "D10 $L: qemu-halt $hrc ($(tail -n 1 "$log.verdict" | cut -c1-160)); $(grep -m1 'PANIC' "$norm")"
+    fi
+}
+
+: > "$runs"
+for tier in $tiers; do
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && ! find_ovmf >/dev/null 2>&1; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "the UEFI leg: no OVMF"; else say "SKIP the UEFI leg ($tier): no OVMF"; skipped=$((skipped + 1)); fi
+            continue
+        fi
+        for way in $ways; do
+            case $way in
+                slirp|session) ;;
+                *)
+                    if [ -n "$wire_why" ]; then
+                        if [ "${PAX_REQUIRE_DHCP_WIRE:-0}" = 1 ]; then bad "D1 $tier $leg $way: the tap way cannot run here:$wire_why"; else say "SKIP $tier $leg $way: the tap way cannot run here:$wire_why"; skipped=$((skipped + 1)); fi
+                        continue
+                    fi
+                    ;;
+            esac
+            one "$tier" "$leg" "$way"
+        done
+    done
+done
+[ "$fail" = 0 ] && say "mpx4-dhcp: PASS ($ran boots, $skipped skipped, nic $nic)" || say "mpx4-dhcp: FAIL ($ran boots, $skipped skipped, nic $nic)"
+exit "$fail"
