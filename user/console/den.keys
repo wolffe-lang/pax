@@ -1,0 +1,156 @@
+umask 022; PS1='$ '; D=/tmp/den-$(id -u); O=$D/out; G=$D/gitconfig
+mkdir -p $D/home $D/xdg $D/hooks $D/template $O
+export LC_ALL=C TZ=UTC PATH=/bin COLUMNS=80 HOME=$D/home
+export XDG_CONFIG_HOME=$D/xdg GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=$G
+export GIT_EDITOR=false GIT_PAGER=cat PAGER=cat GIT_TERMINAL_PROMPT=0
+export GIT_OPTIONAL_LOCKS=0; unset EDITOR VISUAL LANG GIT_DIR
+unset GIT_WORK_TREE GIT_INDEX_FILE GIT_AUTHOR_NAME GIT_COMMITTER_NAME
+printf '[user]\n\tname = Den Tester\n' > $G
+printf '\temail = den@example.invalid\n[color]\n\tui = never\n' >> $G
+printf '[core]\n\tpager = cat\n\thooksPath = %s/hooks\n' $D >> $G
+printf '[init]\n\tdefaultBranch = main\n' >> $G
+printf '\ttemplateDir = %s/template\n' $D >> $G
+printf '[commit]\n\tgpgsign = false\n' >> $G
+t=1700000000; tock() { export GIT_COMMITTER_DATE="$t +0000"; }; E='[stderr]'
+tick() { t=$((t + 60)); export GIT_AUTHOR_DATE="$t +0000"; tock; }; tick
+s() { "$@" >$O/o 2>$O/e; echo "status $?"; cat $O/o; echo "$E"; cat $O/e; }
+W=/home/pax; [ "$(id -u)" != 0 ] || W=/home/den-root; mkdir -p $W; cd $W
+echo den-session-begin
+command -v den git
+readlink /bin/git
+sha256sum /bin/den
+s den --version
+s git --version
+s den
+s den init repo
+cd repo
+s den config --get core.bare
+s den config --get core.filemode
+s den config --get user.name
+s den config --get init.defaultBranch
+printf '[core]\n\tautocrlf = false\n' >> .git/config
+s den config --get core.autocrlf
+s den config user.name Other
+printf 'alpha\nbeta\ngamma\n' > a.txt; printf 'one\n' > b.txt
+s den status
+s den status --porcelain
+s den add a.txt b.txt
+s den status --porcelain
+s den status
+s den commit -m 'first: two files'
+tick; printf 'delta\n' >> a.txt
+s den status --porcelain
+s den diff
+s den add a.txt
+s den diff --cached
+s den commit -m 'second: delta'
+tick; printf 'two\n' >> b.txt
+s den commit -a -m 'third: commit -a'
+s den log
+s den log --oneline
+s den log -p -n 1
+s den diff HEAD~2 HEAD
+tick; s den branch ff
+s den switch ff
+printf 'fast\n' > f.txt
+s den add f.txt
+s den commit -m 'ff: f.txt'
+s den switch main
+s den merge ff
+s den branch
+tick; s den switch -c side
+printf 'alpha\nbeta from side\ngamma\ndelta\n' > a.txt
+s den commit -a -m 'side: beta'
+s den switch main
+tick; printf 'alpha\nbeta from main\ngamma\ndelta\n' > a.txt
+s den commit -a -m 'main: beta'
+s den merge side
+s den status --porcelain
+cat a.txt
+printf 'alpha\nbeta from both\ngamma\ndelta\n' > a.txt
+s den add a.txt
+tick; s den commit -m 'merge side: resolved'
+s den log --oneline
+s den branch feat
+s den switch feat
+printf 'feature\n' > c.txt
+s den add c.txt
+tick; s den commit -m 'feat: c.txt'
+s den switch main
+printf 'one\ntwo\nthree\n' > b.txt
+tick; s den commit -a -m 'main: three'
+s den switch feat
+tick; s den rebase main
+s den log --oneline -n 3
+s den switch main
+s den merge feat
+s den branch pick
+s den switch pick
+printf 'picked\n' > p.txt
+s den add p.txt
+tick; s den commit -m 'pick: p.txt'
+s den switch main
+tick; s den cherry-pick pick
+s den log --oneline -n 2
+tick; s den revert --no-edit HEAD
+s den log --oneline -n 2
+s den status --porcelain
+s den tag v1
+tick; s den tag -a v2 -m 'annotated v2'
+s den tag
+s den cat-file -t v2
+s den cat-file -p v2
+s den blame a.txt
+printf 'stashed line\n' >> b.txt
+tick; s den stash push -m wip
+s den stash list
+s den status --porcelain
+s den stash pop
+s den status --porcelain
+s den diff
+tick; s den commit -a -m 'after the stash'
+s den notes add -m 'a note on HEAD' HEAD
+s den notes show HEAD
+s den notes list
+s den log -n 1
+printf 'reset me\n' > r.txt
+s den add r.txt
+tick; s den commit -m 'to be reset soft'
+s den reset --soft HEAD~1
+s den status --porcelain
+s den reset --mixed HEAD
+s den status --porcelain
+s den add r.txt
+tick; s den commit -m 'to be reset hard'
+s den reset --hard HEAD~1
+s den status --porcelain
+s ls r.txt
+s den commit --allow-empty
+s env GIT_EDITOR=yew den commit --allow-empty
+s den status
+s git status
+s den log --oneline -n 3
+s git log --oneline -n 3
+s den branch
+s git branch
+s den tag
+s git tag
+s den diff HEAD~1 HEAD
+s git diff HEAD~1 HEAD
+s den cat-file -p HEAD
+s git cat-file -p HEAD
+s git init ../made-by-git
+sha256sum .git/objects/??/*
+s den fsck --full --no-dangling
+s den gc
+s den repack -a -n -q -d
+s den prune-packed
+sha256sum .git/objects/pack/*
+s den verify-pack -v .git/objects/pack/pack-*.idx
+s den fsck --full --no-dangling
+s git fsck --full --no-dangling
+s den log
+den log --oneline -n 2
+cd /
+echo den-session-end
+exit
