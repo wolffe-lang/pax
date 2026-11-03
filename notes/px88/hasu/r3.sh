@@ -11,6 +11,12 @@ B=$1 HEAD=$2 ROW=$3
 S=/home/mfwolffe/lanes/px88/scripts
 [ -s "$S/r3.head" ] && HEAD=$(tr -d ' \n' < "$S/r3.head")
 echo "r3: head $HEAD (argument $2), row $ROW"
-bash "$S/suite.sh" "$B" "r3-green-${HEAD:0:8}" "$HEAD" both bios:native:all uefi:release:all
-bash "$S/inst.sh" "$B" "r3-peak-red-${ROW:0:8}" "$ROW"
-bash "$S/inst.sh" "$B" "r3-peak-green-${HEAD:0:8}" "$HEAD"
+# The chain's status is its worst step's (r3-B read 0 over a red suite when
+# it returned only the last step's): a nonzero step makes it nonzero. The
+# red-first step is expected nonzero, and says so in its own END line.
+worst=0
+bash "$S/suite.sh" "$B" "r3-green-${HEAD:0:8}" "$HEAD" both bios:native:all uefi:release:all || worst=1
+bash "$S/inst.sh" "$B" "r3-peak-red-${ROW:0:8}" "$ROW" || worst=1
+bash "$S/inst.sh" "$B" "r3-peak-green-${HEAD:0:8}" "$HEAD" || worst=1
+echo "r3: worst step exit=$worst"
+exit "$worst"
