@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# px87 (copied from px88's notes/px88/hasu, by value): the engine tools/linux-tree is given on hasu (PAX_ENGINE): hasu's
+# rootless podman, every `run` given `--memory 12g` and its command run
+# under `taskset -c $PX87_CPUS` inside the container (hasu-env/README.md:
+# rootless podman has no cpuset controller, so the pinning is inside).
+# The image is found as the argument equal to $PAX_TREE_IMAGE.
+set -euo pipefail
+P=/home/mfwolffe/lanes/hasu-env/bin/podman
+[ -n "${PX87_CPUS:-}" ] || { echo "podman-blk: PX87_CPUS unset" >&2; exit 2; }
+if [ "${1:-}" != run ]; then exec "$P" "$@"; fi
+shift
+out=(run --memory 12g --pids-limit 16384)
+seen=0
+for a in "$@"; do
+    out+=("$a")
+    if [ "$seen" = 0 ] && [ "$a" = "${PAX_TREE_IMAGE:-}" ]; then
+        out+=(taskset -c "$PX87_CPUS")
+        seen=1
+    fi
+done
+[ "$seen" = 1 ] || { echo "podman-blk: no image argument $PAX_TREE_IMAGE in: $*" >&2; exit 2; }
+exec "$P" "${out[@]}"
