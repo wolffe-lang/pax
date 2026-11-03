@@ -10,13 +10,18 @@ disk=$out/installed.img
 [ ! -e "$disk" ] || die 'installed.img already exists; use a fresh image directory'
 truncate -s 1073741824 "$disk"
 blank=$(sha256_of "$disk")
+# px90: since px78 pax-install writes only to a disk on the install
+# allow-list; the live ISO has no stick's /pax/install-targets, so the
+# session names its one target by the serial QEMU gives it (a virtio disk
+# shows no model), as tests/mpx6-install.d/install.py does.
 cat > "$out/install.keys" <<'KEYS'
-pax-install --install --ext2-preview --target vda --seed px82-image --user pax --games yes --confirm 'ERASE /dev/vda 254:0-seq1 1073741824 px82-image'
+printf 'model= serial=PX90-TARGET\n' > /tmp/install-targets
+pax-install --install --ext2-preview --target vda --seed px82-image --user pax --games yes --allow-list /tmp/install-targets --confirm 'ERASE /dev/vda 254:0-seq1 1073741824 px82-image'
 echo PX82-INSTALL=$?
 exit 0
 KEYS
 "$PAX_ROOT/tools/qemu-halt" --firmware bios --serial "$out/install.serial.log" --timeout 1800 \
-    --qemu -m --qemu 4096M --elf "$out/kernel/kmain_console.elf" --drive "$disk" \
+    --qemu -m --qemu 4096M --elf "$out/kernel/kmain_console.elf" --drive "$disk;serial=PX90-TARGET" \
     --type "$out/install.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
     "$out/pax-${head:0:8}.iso" > "$out/install.halt.log" 2>&1
 serial_norm "$out/install.serial.log" > "$out/install.norm"
