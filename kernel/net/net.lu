@@ -73,6 +73,17 @@
 //! buffers reclaimed and restocked. Everything is changed under
 //! `sync.net()` (IF clear), by whichever thread sends or receives.
 //!
+//! **px89: Intel's controllers.** With no virtio network device, `start`
+//! looks for one kernel/gbe drives (QEMU's 82576, the I225/I226) and
+//! brings it up through that module; every function below then reaches
+//! its rings instead of the virtqueues, with the same rows, counters and
+//! lines (`report`'s last line is the same shape: the address, the line,
+//! its vector and ELCR, 66 frames held — or, when the controller is
+//! polled, `polled every tick` and why). `poll`: the network's clock asks
+//! a polled controller every tick whether a frame came (kernel/netd),
+//! and wakes the network thread as the interrupt would. `netpoll` on the
+//! kernel command line polls it whatever its line.
+//!
 //! Written from the OASIS VIRTIO specification 1.1/1.2 §5.1 (the
 //! network device: its queues, feature bits, configuration layout,
 //! `virtio_net_hdr`, the receive buffer's least size), RFC 894 (the
@@ -81,7 +92,9 @@
 //! sheet (the interrupt line, ELCR). No Linux source; no other
 //! kernel's or network stack's source; no driver.
 
+use boot_info
 use frames
+use gbe
 use log
 use pci
 use sched
@@ -138,6 +151,11 @@ const N_TX_HEAD: u64 = 32 // the free list: a descriptor index + 1, 0 empty
 const N_TX_FREE: u64 = 33 // how many are on it
 const N_ELCR: u64 = 34 // ELCR as the firmware left it
 const N_STATE: u64 = 35 // what `start` answered
+const N_KIND: u64 = 36 // px89: KIND_VIRTIO or KIND_GBE
+const N_POLLS: u64 = 37 // px89: the polled controller's frames found by `poll`
+
+const KIND_VIRTIO: u64 = 0
+const KIND_GBE: u64 = 1
 
 /// `start`'s answers (and `state`): the device is up.
 pub const UP: u64 = 0
@@ -232,7 +250,63 @@ pub fn mac_byte(i: u64) -> u64 {
 
 /// Frames this driver holds (the rings and the buffers).
 pub fn frames_held() -> u64 {
-    nw(N_FRAMES)
+    if gbe_kind() { gbe.frames_held() } else { nw(N_FRAMES) }
+}
+
+fn gbe_kind() -> bool {
+    nw(N_KIND) == KIND_GBE
+}
+
+/// px89: whether the device is an Intel controller kernel/netd's clock
+/// must poll.
+pub fn polled() -> bool {
+    up() && gbe_kind() && gbe.polled()
+}
+
+/// px89: the network's clock, every tick: a polled controller that has
+/// a frame is as an interrupt would make it, pending. Whether it was.
+pub fn poll() -> bool {
+    if !polled() {
+        return false
+    }
+    let saved = sync.irq_save()
+    let due = gbe.due()
+    if due && nw(N_PENDING) == 0 {
+        put_nw(N_PENDING, 1)
+        put_nw(N_POLLS, nw(N_POLLS) + 1)
+    }
+    sync.irq_restore(saved)
+    due
+}
+
+/// px89: bring up the Intel controller at kernel/pci's index `g`.
+fn start_gbe(pml4: u64, g: u64) -> u64 {
+    put_nw(N_KIND, KIND_GBE)
+    put_nw(N_PCI, g)
+    if gbe.start(pml4, g, boot_info.cmdline_has("netpoll")) != 0 {
+        put_nw(N_STATE, REFUSED)
+        return REFUSED
+    }
+    var m: u64 = 0
+    var j: u64 = 0
+    while j < 6 {
+        m = m | gbe.mac_byte(j) << (j * 8)
+        j += 1
+    }
+    put_nw(N_MAC, m)
+    put_nw(N_ELCR, timer.elcr())
+    if !gbe.polled() {
+        let line = pci.line(g)
+        put_nw(N_LINE, line)
+        timer.level(line)
+        put_nw(N_VECTOR, timer.MASTER_BASE + line)
+        timer.unmask_line(line)
+    } else {
+        put_nw(N_LINE, pci.line(g))
+    }
+    put_nw(N_UP, 1)
+    put_nw(N_STATE, UP)
+    UP
 }
 
 fn zeroed_frame() -> u64 {
@@ -292,6 +366,11 @@ pub fn start(pml4: u64) -> u64 {
         i = pci.find(virtio.VENDOR, 0x1041, 0x1041, 0)
     }
     if i == pci.MAX {
+        // px89: Intel's controllers, when there is no virtio device.
+        let g = gbe.find()
+        if g != pci.MAX {
+            return start_gbe(pml4, g)
+        }
         log.put("net: no virtio network device among ")
         log.dec(pci.count() as int)
         log.put(" PCI functions; the network is off")
@@ -378,7 +457,7 @@ pub fn start(pml4: u64) -> u64 {
 /// The device's interrupt (kernel/interrupts, IF clear): read the
 /// cause, which withdraws the request; note it; acknowledge the 8259.
 pub fn irq(v: u64) {
-    let cause = virtio.isr()
+    let cause = if gbe_kind() { if gbe.irq() { 1 } else { 0 } } else { virtio.isr() }
     bump(C_IRQ, 1)
     if cause == 0 {
         bump(C_IRQ_IDLE, 1)
@@ -424,6 +503,9 @@ fn for_us(frame: u64) -> bool {
 /// station is counted, its buffer handed straight back, and the next
 /// one looked at. The caller hands `buffer` back with `rx_give`.
 pub fn rx_take() -> (u64, u64, u64) {
+    if gbe_kind() {
+        return gbe_take()
+    }
     let rxq = virtio.state(N_RXQ)
     let saved = sync.acquire(sync.net())
     while nw(N_UP) == 1 && virtio.returned(rxq) {
@@ -457,8 +539,47 @@ pub fn rx_take() -> (u64, u64, u64) {
     (0, 0, 0)
 }
 
+/// px89: `rx_take` for an Intel controller: its rows, the same causes.
+fn gbe_take() -> (u64, u64, u64) {
+    let saved = sync.acquire(sync.net())
+    var more = nw(N_UP) == 1
+    while more {
+        let (frame, len, id, eop) = gbe.rx_next()
+        if len == 0 {
+            more = false
+        } else {
+            var cause: u64 = 0
+            if !eop || len > FRAME_MAX {
+                cause = C_RX_LONG
+            } else if len < ETH_HEADER {
+                cause = C_RX_RUNT
+            } else if !for_us(frame) {
+                cause = C_RX_OTHER
+            }
+            if cause == 0 {
+                bump(C_RX_FRAMES, 1)
+                bump(C_RX_BYTES, len)
+                sync.release(sync.net(), saved)
+                return (frame, len, id)
+            }
+            bump(cause, 1)
+            gbe.rx_give(id)
+            bump(C_RESTOCKED, 1)
+        }
+    }
+    sync.release(sync.net(), saved)
+    (0, 0, 0)
+}
+
 /// Offer receive buffer `buffer` (from `rx_take`) to the device again.
 pub fn rx_give(buffer: u64) {
+    if gbe_kind() {
+        let s = sync.acquire(sync.net())
+        gbe.rx_give(buffer)
+        bump(C_RESTOCKED, 1)
+        sync.release(sync.net(), s)
+        return
+    }
     let rxq = virtio.state(N_RXQ)
     let saved = sync.acquire(sync.net())
     virtio.offer(rxq, buffer % QUEUE)
@@ -470,6 +591,10 @@ pub fn rx_give(buffer: u64) {
 /// Take back every transmit buffer the device has returned. The net
 /// lock held.
 fn reclaim() {
+    if gbe_kind() {
+        bump(C_RECLAIMED, gbe.reclaim())
+        return
+    }
     let txq = virtio.state(N_TXQ)
     while virtio.returned(txq) {
         let (head, _wrote) = virtio.collect(txq)
@@ -489,7 +614,7 @@ pub fn tx_free() -> u64 {
     }
     let saved = sync.acquire(sync.net())
     reclaim()
-    let n = nw(N_TX_FREE)
+    let n = if gbe_kind() { gbe.tx_free() } else { nw(N_TX_FREE) }
     sync.release(sync.net(), saved)
     n
 }
@@ -504,6 +629,9 @@ fn stage(src: u64, len: u64, k: u64) -> (u64, u64) {
     if len < ETH_HEADER || len > FRAME_MAX {
         bump(C_TX_SIZE, 1)
         return (0, 1)
+    }
+    if gbe_kind() {
+        return gbe_stage(src, len)
     }
     reclaim()
     var head = nw(N_TX_HEAD)
@@ -542,12 +670,43 @@ fn stage(src: u64, len: u64, k: u64) -> (u64, u64) {
     (wire, 0)
 }
 
+/// px89: `stage` for an Intel controller: the same wait for a buffer.
+fn gbe_stage(src: u64, len: u64) -> (u64, u64) {
+    reclaim()
+    var wire = gbe.stage(src, len)
+    var spins: u64 = 0
+    while wire == 0 && spins < TX_SPINS {
+        sync.relax()
+        reclaim()
+        wire = gbe.stage(src, len)
+        spins += 1
+    }
+    if wire == 0 {
+        bump(C_TX_FULL, 1)
+        return (0, 2)
+    }
+    bump(C_TX_FRAMES, 1)
+    bump(C_TX_BYTES, wire)
+    (wire, 0)
+}
+
+/// The staged frames to the device: virtio's ring index and its
+/// notification, or (px89) the controller's TDT.
+fn give(n: u64) {
+    if gbe_kind() {
+        gbe.publish()
+    } else {
+        let txq = virtio.state(N_TXQ)
+        virtio.publish(txq, n)
+        let _told = virtio.notify(txq)
+    }
+}
+
 /// Send the `len` bytes at `src` as one frame (14 to 1514 bytes: the
 /// two addresses, the type, the payload; shorter than 60 is padded
 /// with zeros). Returns the bytes queued. Rows, each counted: `down`,
 /// `size`, `full` (every buffer is still with the device).
 pub fn send(src: u64, len: u64) -> u64 ! SendError {
-    let txq = virtio.state(N_TXQ)
     let saved = sync.acquire(sync.net())
     if nw(N_UP) != 1 {
         bump(C_TX_DOWN, 1)
@@ -556,8 +715,7 @@ pub fn send(src: u64, len: u64) -> u64 ! SendError {
     }
     let (wire, why) = stage(src, len, 0)
     if why == 0 {
-        virtio.publish(txq, 1)
-        let _told = virtio.notify(txq)
+        give(1)
     }
     sync.release(sync.net(), saved)
     if why == 1 {
@@ -578,7 +736,6 @@ pub fn send(src: u64, len: u64) -> u64 ! SendError {
 /// made both before it took that reply in. Each refused one is counted
 /// as `send` counts it. How many were taken.
 pub fn send_batch(a: u64, alen: u64, b: u64, blen: u64, n: u64) -> u64 {
-    let txq = virtio.state(N_TXQ)
     let saved = sync.acquire(sync.net())
     if nw(N_UP) != 1 {
         bump(C_TX_DOWN, n)
@@ -597,8 +754,7 @@ pub fn send_batch(a: u64, alen: u64, b: u64, blen: u64, n: u64) -> u64 {
         }
     }
     if k > 0 {
-        virtio.publish(txq, k)
-        let _told = virtio.notify(txq)
+        give(k)
     }
     sync.release(sync.net(), saved)
     k
@@ -641,6 +797,31 @@ fn put_queue(name: str, q: u64) {
 ///     net: <aa:bb:cc:dd:ee:ff>, line <l> (vector <v>, level; elcr 0x<before> -> 0x<after>), <n> frames held
 pub fn report() {
     if !up() {
+        return
+    }
+    if gbe_kind() {
+        gbe.report()
+        log.put("net: ")
+        put_mac()
+        if gbe.polled() {
+            log.put(", polled every tick (line ")
+            log.dec(nw(N_LINE) as int)
+            log.put(if boot_info.cmdline_has("netpoll") { ", netpoll asked" } else { " is not one this kernel can take" })
+            log.put("), ")
+        } else {
+            log.put(", line ")
+            log.dec(nw(N_LINE) as int)
+            log.put(" (vector ")
+            log.dec(nw(N_VECTOR) as int)
+            log.put(", level; elcr ")
+            log.hex_n(nw(N_ELCR), 4)
+            log.put(" -> ")
+            log.hex_n(timer.elcr(), 4)
+            log.put("), ")
+        }
+        log.dec(gbe.frames_held() as int)
+        log.put(" frames held")
+        log.end()
         return
     }
     let i = nw(N_PCI)
