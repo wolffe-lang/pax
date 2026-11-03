@@ -162,8 +162,9 @@ r = subprocess.run(['e2fsck', '-fn', str(root)], capture_output=True)
 dump = work / f'den-{firmware}-disk'
 shutil.rmtree(dump, ignore_errors=True); dump.mkdir()
 subprocess.run(['debugfs', '-R', f'rdump {REPO} {dump}', str(root)], capture_output=True)
-subprocess.run(['debugfs', '-R', f'dump /bin/den {dump}/den', str(root)], capture_output=True)
+subprocess.run(['debugfs', '-R', f'dump -p /bin/den {dump}/den', str(root)], capture_output=True)
 den = dump / 'den'
+den.chmod(0o755)  # debugfs's dump keeps the owner's bits only with -p, and only as root
 lin = work / f'den-{firmware}-linux'
 shutil.rmtree(lin, ignore_errors=True); (lin / 'home').mkdir(parents=True); (lin / 'xdg').mkdir(); (lin / 'hooks').mkdir(); (lin / 'template').mkdir()
 (lin / 'gitconfig').write_text('[user]\n\tname = Den Tester\n\temail = den@example.invalid\n[color]\n\tui = never\n'
