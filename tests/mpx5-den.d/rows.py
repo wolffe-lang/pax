@@ -95,8 +95,9 @@ def main():
         return not why
 
     # The install: den is the binary mkden built; git is a link to it.
-    if find('command -v den git', row='link') != ['/bin/den', '/bin/git']:
-        fail('link', 'command -v den git: %r' % find('command -v den git'))
+    # pelt's `command -v` answers for one name (POSIX's synopsis): two.
+    if find('command -v den; command -v git', row='link') != ['/bin/den', '/bin/git']:
+        fail('link', 'command -v den, git: %r' % find('command -v den; command -v git'))
     if find('readlink /bin/git', row='link') != ['den']:
         fail('link', 'readlink /bin/git: %r, not den' % find('readlink /bin/git'))
     if find('sha256sum /bin/den', row='binary') != [sha + '  /bin/den']:
