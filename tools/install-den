@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# install-den — put den into a root as PAX ships it (px90): /bin/den, the
+# binary tools/mkden built, unmodified, mode 0755, and /bin/git a symbolic
+# link to den (den's R5: installed under its own name with a `git` alias,
+# as scent is /bin/grep).
+#
+#   tools/install-den DEN-DIR ROOT
+#
+# DEN-DIR is tools/mkden's OUTDIR: refused unless DEN-DIR/den is its
+# sums.txt's `den` line (sha256 and size) and static (ET_EXEC, no
+# PT_INTERP). ROOT/bin is made if it is missing; an existing ROOT/bin/den
+# or ROOT/bin/git is refused, never replaced. The image builders share it:
+# tools/distribution-root (the dev and release roots, and so the root
+# pax-install copies to disk) and tests/mpx5-den's own image.
+#
+# den does not read argv[0] at its pin (its README), so the link behaves
+# exactly as den: `git --version` prints den's own line. The link is the
+# whole of the alias: no wrapper, no copy, nothing that renames den.
+# Exit 0, or 2 on a refusal.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 2 ] || die "usage: install-den DEN-DIR ROOT"
+d=$1 r=$2
+need readelf cmp
+row=$(awk '$1 == "den" { print }' "$d/sums.txt" 2>/dev/null) || row=
+read -r name sha bytes <<< "$row"
+[ "${name:-}" = den ] && [ -f "$d/den" ] && [ "$(sha256_of "$d/den")" = "$sha" ] \
+    && [ "$(wc -c < "$d/den" | tr -d ' ')" = "$bytes" ] || die "den differs from its sums.txt: $d"
+readelf -hW "$d/den" | grep -Eq 'Type: +EXEC' || die "den is not ET_EXEC"
+! readelf -lW "$d/den" | grep -q INTERP || die "den has a PT_INTERP (not static)"
+mkdir -p "$r/bin"
+for n in den git; do
+    [ ! -e "$r/bin/$n" ] && [ ! -L "$r/bin/$n" ] || die "$r/bin/$n is already there"
+done
+cp "$d/den" "$r/bin/den"
+chmod 755 "$r/bin/den"
+cmp -s "$d/den" "$r/bin/den" || die "the copy of den is not its bytes"
+ln -s den "$r/bin/git"
+[ "$(readlink "$r/bin/git")" = den ] || die "/bin/git is not a link to den"
+say "installed /bin/den ($sha, $bytes bytes, 0755) and /bin/git -> den"
