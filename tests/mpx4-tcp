@@ -134,8 +134,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 only= ways="peer user none none-user" accel=auto progs= soak=10000 bulk=16777216 lossy=1048576 deadline=2700 stall=300 keep=0
-usage="usage: tests/mpx4-tcp [--images DIR | --no-boot | --only build | --only linux --images DIR] [--ways LIST] [--progs DIR] [--soak N] [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS] [--stall SECONDS] [--keep-going] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
+images= legs=both tiers=both noboot=0 only= ways="peer user none none-user" accel=auto progs= soak=10000 bulk=16777216 lossy=1048576 deadline=2700 stall=300 keep=0 nic=virtio netpoll=0
+usage="usage: tests/mpx4-tcp [--images DIR | --no-boot | --only build | --only linux --images DIR] [--ways LIST] [--progs DIR] [--soak N] [--bulk BYTES] [--lossy BYTES] [--deadline SECONDS] [--stall SECONDS] [--keep-going] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--nic virtio|igb [--netpoll]]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -149,6 +149,8 @@ while [ $# -gt 0 ]; do
         --deadline) deadline=$2; shift 2 ;;
         --stall)    stall=$2; shift 2 ;;
         --keep-going) keep=1; shift ;;
+        --nic)      nic=$2; shift 2 ;;
+        --netpoll)  netpoll=1; shift ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
@@ -160,11 +162,28 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 for w in $ways; do case $w in peer|user|none|none-user) ;; *) die "--ways takes peer, user, none and none-user" ;; esac; done
+# px89: --nic igb runs the peer and user ways on QEMU's 82576 (kernel/gbe),
+# every row as it is; the user way takes its address from QEMU's DHCP
+# server (/etc/pax-net `dhcp`) and T6 holds the client's frames to
+# tools/pcap-dhcp and the rest to tools/pcap-net --tcp --dhcp. --netpoll:
+# `netpoll` on the command line, the controller polled every tick. Under
+# build/mpx4-tcp-igb (or -igb-poll).
+sfx= device=virtio-net-pci
+case $nic in
+    virtio) [ "$netpoll" = 0 ] || die "--netpoll is for --nic igb" ;;
+    igb)
+        device=igb sfx=-igb
+        [ "$netpoll" = 0 ] || sfx=-igb-poll
+        [ "$ways" != "peer user none none-user" ] || ways="peer user"
+        for w in $ways; do case $w in none|none-user) die "--nic igb: the $w way has no device" ;; esac; done
+        ;;
+    *) die "--nic takes virtio or igb" ;;
+esac
 
 k=kmain_sockets
 PROGS="tcperr tcpecho tcpclient tcploop tcpbulk tcpsoak tcpend tcpfull tcpwolf tcpwolfd"
-work=$PAX_BUILD/mpx4-tcp
-runs=$PAX_BUILD/mpx4-tcp-runs.txt
+work=$PAX_BUILD/mpx4-tcp$sfx
+runs=$PAX_BUILD/mpx4-tcp$sfx-runs.txt
 MAC=52:54:00:12:34:56
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
@@ -229,10 +248,12 @@ if [ -z "$images" ]; then
     cp -R "$root/." "$work/root-user/"
     cp "$work/cred/as" "$work/root-user/bin/as" || why+=" no as;"
     say "  program: bin/as $(sha256_of "$work/cred/as") $(wc -c < "$work/cred/as" | tr -d ' ') bytes"
+    printf 'dhcp\n' > "$work/pax-net" # px89: the igb user way's
     for way in peer user none none-user; do
         pairs=()
         for p in $PROGS; do pairs+=("/bin/$p=$root/bin/$p"); done
         [ "$way" != none-user ] || pairs+=("/bin/as=$work/root-user/bin/as")
+        [ "$nic" = virtio ] || [ "$way" != user ] || pairs+=("/etc/pax-net=$work/pax-net")
         pairs+=("/etc/pax-run=$work/$way.run")
         "$PAX_ROOT/tools/mkinitramfs" "$work/$way.cpio" "${pairs[@]}" > "$work/$way.initramfs.txt" || why+=" tools/mkinitramfs ($way);"
     done
@@ -242,8 +263,14 @@ if [ -z "$images" ]; then
         log=$work/$tier/$k.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/$k.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
+            conf=$PAX_ROOT/boot/limine-initramfs.conf
+            if [ "$netpoll" = 1 ]; then
+                # px89: the same entry with `netpoll` on the command line.
+                sed 's|^    module_path: |    cmdline: netpoll\n    module_path: |' "$conf" > "$work/limine-netpoll.conf"
+                conf=$work/limine-netpoll.conf
+            fi
             for way in peer user none none-user; do
-                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                "$PAX_ROOT/tools/mkimage" --conf "$conf" \
                     --add "$work/$way.cpio" initramfs.cpio "$elf" "$work/$tier/$k-$way.iso" >/dev/null \
                     || why+=" $tier $k: mkimage ($way);"
             done
@@ -364,8 +391,8 @@ started=$SECONDS
 # account in $log.end. Status: qemu-halt's.
 boot() { # tier leg way
     local tier=$1 leg=$2 way=$3 rc=0 ports port port2 pid=
-    log=$PAX_BUILD/mpx4-tcp-$tier-$leg-$way.serial.log
-    pcap=$PAX_BUILD/mpx4-tcp-$tier-$leg-$way.pcap
+    log=$PAX_BUILD/mpx4-tcp$sfx-$tier-$leg-$way.serial.log
+    pcap=$PAX_BUILD/mpx4-tcp$sfx-$tier-$leg-$way.pcap
     norm=$log.norm
     iso=$images/$tier/$k-$way.iso elf=$images/$tier/$k.elf
     rm -f "$log" "$log.verdict" "$log.end" "$pcap" "$norm"
@@ -391,7 +418,7 @@ boot() { # tier leg way
         local w=0
         while [ "$w" -lt 18000 ] && ! grep -q '^tcp-host: 127.0.0.1 ports\|^tcp-host: FAIL' "$log.end" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
     fi
-    [ "$way" = none ] || [ "$way" = none-user ] || q+=(--qemu -device --qemu "virtio-net-pci,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
+    [ "$way" = none ] || [ "$way" = none-user ] || q+=(--qemu -device --qemu "$device,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
     "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1200 --accel "$accel" \
         --elf "$elf" --marker halt ${q[@]+"${q[@]}"} "$iso" >"$log.verdict" 2>&1 &
     local hpid=$! said=0 checked=0 seen=0 quiet=0 size=0 now line lk stopped=0
@@ -466,7 +493,7 @@ rate() { # count us
 
 # T1-T9 for one boot.
 one() { # tier leg way
-    local tier=$1 leg=$2 way=$3 L="$1 $2 $3" hrc=0 why
+    local tier=$1 leg=$2 way=$3 L="$1 $2 $3$sfx" hrc=0 why
     if [ "$fail" != 0 ] && [ "$ran" -gt 0 ] && [ "$keep" = 0 ]; then
         bad "T9 $L: not booted: an earlier boot failed (--keep-going boots them all)"
         return
@@ -481,6 +508,7 @@ one() { # tier leg way
 
     # --- T1: the stack up ---------------------------------------------------
     local netline="net: $MAC, line [0-9]+ \(vector [0-9]+, level; elcr [0-9a-f]+ -> [0-9a-f]+\), 66 frames held" netframes=66
+    [ "$netpoll" = 0 ] || netline="net: $MAC, polled every tick \(line [0-9]+, netpoll asked\), 66 frames held" # px89
     case $way in none*) netline='net: no virtio network device among [0-9]+ PCI functions; the network is off' netframes=0 ;; esac
     if has "$norm" "$netline" \
         && has "$norm" 'ip: 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2, MTU 1500, TTL 64, DF set, no fragments either way' \
@@ -493,7 +521,7 @@ one() { # tier leg way
 
     # --- T2: each command against Linux -------------------------------------
     why=
-    local out=$PAX_BUILD/mpx4-tcp-$tier-$leg-$way.out n=0 line s endl lk want wrc
+    local out=$PAX_BUILD/mpx4-tcp$sfx-$tier-$leg-$way.out n=0 line s endl lk want wrc
     rm -rf "$out"; mkdir -p "$out"
     while IFS= read -r line; do
         case $line in ''|'#'*) continue ;; esac
@@ -591,20 +619,23 @@ tcperr syscall 54: refused: a socket option PAX does not have: level and option 
     fi
 
     # --- T6: the capture ---------------------------------------------------------------
+    local dhcpw=() # px89: the igb user way's DHCP client
+    [ "$nic" = virtio ] || [ "$way" != user ] || dhcpw=(--dhcp)
     if [ "$way" = none ] || [ "$way" = none-user ]; then
         :
-    elif [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" --tcp --serial "$log" "$pcap" >"$pcap.check" 2>&1; then
-        say "PASS T6 $L: $(grep '^pcap-net: [0-9]' "$pcap.check" | cut -c1-330); $(grep '^pcap-net: the kernel' "$pcap.check"); $(grep -o 'tcp\.in=[0-9]* tcp\.out=[0-9]* tcp\.retransmitted=[0-9]* tcp\.resets-out=[0-9]* tcp\.probes=[0-9]* tcp\.connections=[0-9]* tcp\.bytes-out=[0-9]*' "$pcap.check") [pcap $(sha256_of "$pcap" | cut -c1-12)…]"
+    elif [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-net" --tcp ${dhcpw[@]+"${dhcpw[@]}"} --serial "$log" "$pcap" >"$pcap.check" 2>&1 \
+        && { [ "${#dhcpw[@]}" = 0 ] || "$PAX_ROOT/tools/pcap-dhcp" --mac "$MAC" "$pcap" >>"$pcap.check" 2>&1; }; then
+        say "PASS T6 $L: $(grep '^pcap-net: [0-9]' "$pcap.check" | cut -c1-330); $(grep '^pcap-net: the kernel' "$pcap.check"); $(grep -o 'tcp\.in=[0-9]* tcp\.out=[0-9]* tcp\.retransmitted=[0-9]* tcp\.resets-out=[0-9]* tcp\.probes=[0-9]* tcp\.connections=[0-9]* tcp\.bytes-out=[0-9]*' "$pcap.check")$(grep '^pcap-dhcp: PASS' "$pcap.check" | sed 's/^/; /' | cut -c1-200) [pcap $(sha256_of "$pcap" | cut -c1-12)…]"
     else
         tail -n 4 "$pcap.check" 2>/dev/null | cut -c1-900 >&2
-        bad "T6 $L: the capture ($pcap): $(grep -m1 '^pcap-net: FAIL' "$pcap.check" 2>/dev/null | cut -c1-600)"
+        bad "T6 $L: the capture ($pcap): $(grep -m1 '^pcap-net: FAIL\|^pcap-dhcp: FAIL' "$pcap.check" 2>/dev/null | cut -c1-600)"
     fi
     # A capture of two 16 MiB transfers is tens of megabytes: judged
     # whole above and its digest written with the boot's line, it is
     # kept as its first 4000 frames (PAX_KEEP_PCAP=1 keeps it whole,
     # which a failed check does too).
     if [ "$way" != none ] && [ "$way" != none-user ] && [ -s "$pcap" ] && [ "${PAX_KEEP_PCAP:-0}" != 1 ] && grep -q '^pcap-net: PASS' "$pcap.check" 2>/dev/null; then
-        python3 - "$pcap" "$PAX_BUILD/mpx4-tcp-$tier-$leg-$way.head.pcap" <<'PY'
+        python3 - "$pcap" "$PAX_BUILD/mpx4-tcp$sfx-$tier-$leg-$way.head.pcap" <<'PY'
 import struct, sys
 d = open(sys.argv[1], "rb").read()
 e = "<" if d[:4] == b"\xd4\xc3\xb2\xa1" else ">"
@@ -671,7 +702,7 @@ PY
     fi
     if [ "$way" = peer ]; then
         [ "$(grep -c '^net-peer: loss out ' "$log.end")" = 4 ] && [ "$(grep -c '^net-peer: loss in ' "$log.end")" = 4 ] || why+=" the loss matrix's eight lines;"
-        grep '^net-peer: loss ' "$log.end" | sed "s/^net-peer: /$tier $leg: /" >> "$PAX_BUILD/mpx4-tcp-loss.txt"
+        grep '^net-peer: loss ' "$log.end" | sed "s/^net-peer: /$tier $leg: /" >> "$PAX_BUILD/mpx4-tcp$sfx-loss.txt"
         t8+="the loss matrix: $(grep '^net-peer: loss ' "$log.end" | sed -E 's/^net-peer: loss (out|in) ([^:]*): ([0-9]+) bytes .* in ([0-9.]+) s \(([0-9]+) KB\/s\); (PAX|this end) retransmitted ([0-9]+).*/\1 \2 \5 KB\/s \7 rexmt/' | paste -sd';' -)"
     fi
     [ -z "$why" ] && say "PASS T8 $L: $t8" || bad "T8 $L:$why $t8"
@@ -690,7 +721,7 @@ PY
 
 mkdir -p "$PAX_BUILD"
 : > "$runs"
-: > "$PAX_BUILD/mpx4-tcp-loss.txt"
+: > "$PAX_BUILD/mpx4-tcp$sfx-loss.txt"
 
 for leg in $legs; do
     if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
@@ -708,7 +739,7 @@ for leg in $legs; do
     done
 done
 cat "$runs"
-[ -s "$PAX_BUILD/mpx4-tcp-loss.txt" ] && { say "the loss matrix, every boot:"; cat "$PAX_BUILD/mpx4-tcp-loss.txt"; }
+[ -s "$PAX_BUILD/mpx4-tcp$sfx-loss.txt" ] && { say "the loss matrix, every boot:"; cat "$PAX_BUILD/mpx4-tcp$sfx-loss.txt"; }
 say "elapsed: $((SECONDS - started)) s of a deadline of $deadline"
 [ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
 [ "$fail" = 0 ] && say "mpx4-tcp: PASS" || say "mpx4-tcp: FAIL"
