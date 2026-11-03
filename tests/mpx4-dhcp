@@ -209,7 +209,21 @@ boot() { # tier leg way -> $log $norm $pcap $acct
     net+=(--qemu -device --qemu "$device,netdev=n0,mac=$MAC" --qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap")
     case $way in
         slirp|session)
-            "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 || rc=$?
+            # A kernel that has panicked is stopped 2 s after its line,
+            # not left to the timeout.
+            "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 &
+            local hpid=$! said=0
+            while kill -0 "$hpid" 2>/dev/null; do
+                sleep 1
+                if grep -q '^PANIC' "$log" 2>/dev/null; then
+                    said=$((said + 1))
+                    if [ "$said" = 2 ]; then
+                        kill "$hpid" 2>/dev/null
+                        printf 'qemu-halt: NOT HALTED: stopped by tests/mpx4-dhcp 2 s after a PANIC line\n' >> "$log.verdict"
+                    fi
+                fi
+            done
+            wait "$hpid" || rc=$?
             ;;
         *)
             "$PAX_ROOT/tools/dhcp-wire" --scenario "$way" --serial "$log" --work "$acct" ${wire[@]+"${wire[@]}"} -- \
