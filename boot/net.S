@@ -1,6 +1,7 @@
-/* net.S — the network's storage (px20, px21, px22, px23): no routines, only
+/* net.S — the network's storage (px20, px21, px22, px23, px89): no routines, only
    the .bss kernel/pci, kernel/virtio, kernel/net, kernel/arp,
-   kernel/ip, kernel/icmp and kernel/udp keep their state in.
+   kernel/ip, kernel/icmp, kernel/udp, kernel/tcp and kernel/dhcp keep
+   their state in.
 
    Listed under `asm` in kernel/wolf.pkg like every file here. Module
    state holds scalars only ([mem.static.3]), the device's interrupt
@@ -47,6 +48,9 @@
                      timers and the 32 frames of its two buffers (px23)
      pax_tcp_tw      256 eight-byte words: the frames of the time-wait
                      table (px23)
+     pax_dhcp_state  128 eight-byte words: kernel/dhcp's (the state, the
+                     xid, the timers, the lease, its three frames, what
+                     the waiting message said, the counters; px89)
 
    No Linux source; no other kernel's source. */
 
@@ -92,5 +96,8 @@ pax_tcp_tw:
         .globl pax_tcp_conns
 pax_tcp_conns:
         .zero 1024 * 1024
+        .globl pax_dhcp_state
+pax_dhcp_state:
+        .zero 1024
 
         .section .note.GNU-stack, "", @progbits
