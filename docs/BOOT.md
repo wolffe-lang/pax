@@ -1027,11 +1027,13 @@ host CPUs took 5m52s, so these rows are in `tier full`, not nightly-only.
 each target then booted alone under BIOS and UEFI. One fault row gives
 the installer a 4Kn target (virtio `logical_block_size=4096`): it is
 refused as `sector_size` before any write, the target byte-identical.
-PAX currently returns ENOSYS for `getrusage`: guest peak RSS is reported as
-unavailable, not zero and not replaced with QEMU's host RSS. Linux's same
-snapshot/copy reference measured 11884 KiB peak RSS. The missing guest
-measurement, the journalled formatter and timer-driven cursor blink remain
-separate prerequisites.
+Since px88 PAX serves `getrusage`, so the installer prints its own peak RSS
+(RUSAGE_SELF through the copy's verification) and its formatter children's
+(RUSAGE_CHILDREN): 5904 KiB and 28264 KiB on the unattended install row,
+held by `tests/mpx6-install`'s I-peak to a number of KiB, never
+`unavailable` and never QEMU's host RSS. Linux's same snapshot/copy
+reference measured 11884 KiB peak RSS. The journalled formatter and
+timer-driven cursor blink remain separate prerequisites.
 
 `tests/mpx6-kasumi` (px78, `tier full`) runs the whole path on a QEMU
 machine shaped like kasumi: OVMF with a fresh variable store, no serial
