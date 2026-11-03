@@ -70,6 +70,9 @@
 #      <m> ms of it (<s> scrolls, <b> bytes)`, m <= n (the TSC at the
 #      entry, its rate measured against the firmware's clock; the screen's
 #      own cycles): a measurement for the metal stick's A/B, no bound.
+#      T6 and T7 find that line by its own words (`boot: <n> ms from`):
+#      a boot from a disk (--usb-stick) prints the medium's `boot:
+#      /boot/initramfs.cpio from a disk: ...` line first.
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_console.elf, <tier>/console-{ask,pelt}.iso and linux/):
@@ -311,23 +314,24 @@ for leg in $legs; do
 
             # T6 (px87, pax#176): the kernel names itself under the banner.
             why=
+            timing="^boot: [0-9]+ ms from the kernel's entry to its first program; "
             kc=$(cat "$images/kernel.commit" 2>/dev/null || git -C "$PAX_ROOT" rev-parse HEAD)
             kwant="kernel: $kc sha256 $(sha256_of "$elf"), $(wc -c < "$elf" | tr -d ' ') bytes"
             kgot=$(grep -m1 '^kernel: ' "$norm")
             [ "$kgot" = "$kwant" ] || why+=" '${kgot:-no kernel: line}', not '$kwant';"
             [ "$(grep -A1 -m1 -x 'PAX: the console' "$norm" | sed -n 2p)" = "$kgot" ] || why+=" not the line after 'PAX: the console';"
             # and again, the same, just before the boot line (on the screen at the prompt)
-            [ "$(grep -B1 -m1 '^boot: ' "$norm" | head -n 1)" = "$kwant" ] || why+=" not repeated before the boot line ('$(grep -B1 -m1 '^boot: ' "$norm" | head -n 1)');"
+            [ "$(grep -B1 -m1 -E "$timing" "$norm" | head -n 1)" = "$kwant" ] || why+=" not repeated before the boot line ('$(grep -B1 -m1 -E "$timing" "$norm" | head -n 1)');"
             [ -z "$why" ] && say "PASS T6 $id: $kgot" || bad "T6 $id:$why"
 
             # T7 (px87, pax#253): the boot's time to the first program, and
             # the console's share of it, on one line before `run 1:` (a
             # measurement read off the screen on metal; no bound here).
             why=
-            bl=$(grep -m1 '^boot: ' "$norm")
+            bl=$(grep -m1 -E "$timing" "$norm")
             if [[ $bl =~ ^boot:\ ([0-9]+)\ ms\ from\ the\ kernel\'s\ entry\ to\ its\ first\ program\;\ the\ console\ drew\ for\ ([0-9]+)\ ms\ of\ it\ \(([0-9]+)\ scrolls,\ ([0-9]+)\ bytes\)$ ]]; then
                 [ "${BASH_REMATCH[2]}" -le "${BASH_REMATCH[1]}" ] || why+=" the console's share is more than the whole;"
-                bn=$(grep -n -m1 '^boot: ' "$norm" | cut -d: -f1); rn=$(grep -n -m1 '^run 1: ' "$norm" | cut -d: -f1)
+                bn=$(grep -n -m1 -E "$timing" "$norm" | cut -d: -f1); rn=$(grep -n -m1 '^run 1: ' "$norm" | cut -d: -f1)
                 [ -n "$rn" ] && [ "$bn" -lt "$rn" ] || why+=" not before 'run 1:';"
             else
                 why+=" no boot line as expected ('$bl');"
