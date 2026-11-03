@@ -281,6 +281,16 @@ pub fn start(ip: u64, age: u64) {
     }
 }
 
+/// px89: this station's protocol address changed at run time
+/// (kernel/dhcp's lease, or 0.0.0.0 while none is held: a request for
+/// 0.0.0.0 is never answered, since a sender of 0.0.0.0 teaches nothing
+/// and the station claims no address). The cache is kept.
+pub fn set_ip(a: u64) {
+    let saved = sync.acquire(sync.arp())
+    put_aw(A_IP, a)
+    sync.release(sync.arp(), saved)
+}
+
 /// This station's protocol address.
 pub fn ip() -> u64 {
     aw(A_IP)
