@@ -225,13 +225,18 @@ pax#176): `kernel: <commit> sha256 <digest>, <n> bytes`, the commit
 loaded (Limine's Executable File response), the bytes `sha256sum
 /boot/pax` and `/etc/pax-release`'s kernel row hash. Before its first
 program it times its own boot: `boot: <n> ms from the kernel's entry to
-its first program; the console drew for <m> ms of it (<s> scrolls, <b>
-bytes)` (the TSC, its rate measured against 10 ms of the HPET or the PM
-timer). The console writes the framebuffer and never reads it (px87,
-pax#253: a scroll redraws the cells that changed from the cell grid, its
-shadow in RAM); the command-line word `fbread` brings px19's scroll back,
-which copied the framebuffer onto itself, for measurements only (px87's
-metal A/B and `tests/mpx3-screen` V7's control).
+its first program; the console drew for <m> ms of it (<s> scrolls by
+copy|redraw, <b> bytes)` (the TSC, its rate measured against 10 ms of the
+HPET or the PM timer). A scroll either redraws, from the cell grid (the
+screen's shadow in RAM), only the cells that changed, never reading the
+framebuffer, or copies the framebuffer onto itself as px19's scroll did.
+When the screen attaches it times a 32 KiB read of the framebuffer
+against a write of the same bytes and copies only when a read costs at
+most four writes: through a GPU's write-combining mapping a read is
+uncached and far dearer (pax#253: kasumi's GPU), so the scroll redraws;
+an emulator's framebuffer is ordinary host memory, where the copy is the
+cheaper way. The command-line words `fbread` (copy) and `fbwrite`
+(redraw) force either way (the metal A/B; `tests/mpx3-screen` V7 and V8).
 
 `tests/usb-stick` runs inside the console CI job in full/all tiers and
 explicit partial dispatches. It requires both SeaBIOS and OVMF, replays all
