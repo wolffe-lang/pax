@@ -33,9 +33,18 @@
 //
 // With no network device the run list still runs: loopback needs none
 // (`net: no virtio network device …; the network is off`).
+//
+// px89: when the archive's /etc/pax-net says `dhcp`, kernel/dhcp takes
+// the station's address from a DHCP server instead of the fixed one: its
+// thread starts with the network's, the list waits for the first lease
+// (`dhcp wait=<s>`, 30 s by default; one line either way), the kernel's
+// echo goes to the lease's router, and kernel/ip's line is printed when
+// the lease is taken. No /etc/pax-net is the fixed address: every line
+// above is what it was.
 use clock
 use apic
 use arp
+use dhcp
 use files
 use fpu
 use frames
@@ -63,6 +72,7 @@ use user
 extern "c" let pax_user_thread: *u8
 extern "c" let pax_netd: *u8
 extern "c" let pax_net_clock: *u8
+extern "c" let pax_dhcpd: *u8
 
 extern "c" fn pax_rdtsc() -> u64
 
@@ -230,12 +240,18 @@ export fn kmain() {
     let _n = pci.scan()
     let up = net.start(pml4) == net.UP
     net.report()
+    // px89: the image's /etc/pax-net may ask for DHCP; else the fixed
+    // address, as always.
+    let want = dhcp.from_file()
     arp.start(OWN_IP, arp.AGE)
     ip.start(OWN_IP, NETMASK, GATEWAY)
     icmp.start()
     udp.start()
     tcp.start(process.random_word(0))
-    ip.report()
+    let dh = want && dhcp.start(process.random_word(1))
+    if !dh {
+        ip.report() // with a lease, kernel/dhcp prints it when it has one
+    }
     udp.report()
     tcp.report()
     if stack_frames() != 333 {
@@ -251,17 +267,28 @@ export fn kmain() {
         floor = 2
     }
     sched.create(clock, 0)
+    if dh {
+        // # Safety: the address of kernel/dhcp's export; nothing is read.
+        let dt = unsafe { pax_dhcpd as u64 }
+        sched.create(dt, 0)
+        floor += 1
+    }
     sync.enable()
+    if dh && dhcp.wait_bound() {
+        dhcp.echo_router()
+    }
     let per20 = calibrate()
     // px23: loopback is below every protocol: the kernel's own echo to
     // 127.0.0.1 and to this station's address comes back with no device
     // asked.
     let l1 = ping_self(ip.LOOPBACK, 1)
-    let l2 = ping_self(OWN_IP, 2)
+    let l2 = ping_self(ip.address(), 2)
     let sl = sync.acquire(sync.console())
     log.put("loopback: 127.0.0.1 ")
     log.put(if l1 { "answers" } else { "does NOT answer" })
-    log.put(" the kernel's echo, 10.0.2.15 ")
+    log.put(" the kernel's echo, ")
+    arp.put_ip(ip.address()) // px89: the address held (10.0.2.15 when fixed)
+    log.put(" ")
     log.put(if l2 { "answers" } else { "does NOT answer" })
     log.put(", ")
     log.dec(net.count(net.C_TX_FRAMES) as int)
@@ -300,6 +327,7 @@ export fn kmain() {
     icmp.counters()
     udp.counters()
     tcp.counters()
+    dhcp.counters() // px89: only when the client ran
     log.put("netd: ")
     log.dec(netd.turns() as int)
     log.put(" turns, ")
