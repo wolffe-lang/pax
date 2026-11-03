@@ -31,13 +31,16 @@
 # merge gate (`tier full`, the label) runs all of them on native BIOS,
 # and every trunk push and nightly (`tier all`) on every leg (tl29).
 
-@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx5-forks mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent mpx5-bore mpx6-root mpx6-journal mpx6-disktools mpx6-install mpx6-fsck mpx6-games
+@user    = mpx3-user mpx3-loader mpx3-boreutils mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-maps mpx5-forks mpx3-speaker mpx3-sound mpx3-orchestra mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-users mpx5-accounts mpx5-jobs mpx5-yew mpx5-screen mpx5-wolf mpx6-ext2 mpx5-scent mpx5-den mpx5-bore mpx6-root mpx6-journal mpx6-disktools mpx6-install mpx6-fsck mpx6-games
 @net     = mpx4-net mpx4-udp mpx4-tcp mpx4-ready mpx4-session mpx4-unix mpx4-lobo mpx5-jobs
 @music   = mpx3-speaker mpx3-sound mpx3-orchestra mpx4-session
 @console = mpx3-console mpx3-screen mpx3-shell mpx3-threads mpx3-tree mpx3-speaker mpx3-sound mpx3-orchestra mpx4-unix mpx4-session mpx5-accounts mpx5-jobs tour mpx5-yew mpx5-screen mpx5-wolf mpx6-install mpx6-games
 # px65: mpx5-bore is in @user (boreutils' new utilities ask for FIFOs,
 # links, sizes, syncs, random bytes, the tree's names and the console as
 # a terminal) and @asuser (its user sessions run through `as`).
+# px90: mpx5-den is in @user and @asuser as mpx5-scent is (an archive
+# link, /bin/git -> den; a user session through `as`), and its sessions'
+# repositories live on the ext2 /home.
 # px64: mpx5-scent is in @user: its image is the one whose archive holds
 # a symbolic link (/bin/grep -> scent, tools/mkinitramfs' `->`), which
 # kernel/tree adopts and kernel/files and kernel/process follow (exec
@@ -65,7 +68,7 @@
 # session is a user's; the console and the screen are what it holds).
 # gm01: mpx6-games (the wolf games typed at the screen as `pax`) is in
 # @user, @console and @asuser, as mpx5-yew.
-@asuser  = mpx3-tree mpx3-maps mpx5-forks mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-wolf mpx5-scent mpx5-bore mpx6-games
+@asuser  = mpx3-tree mpx3-maps mpx5-forks mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-users mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-wolf mpx5-scent mpx5-den mpx5-bore mpx6-games
 @suuser  = mpx3-tree mpx3-shell mpx3-speaker mpx4-lobo mpx5-accounts
 # px63: the disk's two suites (the block device, the file system on it);
 # px66: and its partition table's (the windows, the names, a disk that boots);
@@ -184,7 +187,7 @@ tools/mkinitramfs               @user
 # looks). Each user run's keys, run list, steps and recordings are its
 # suite's own, by the same derivation.
 user/elf/as.c                   @asuser
-tools/mkas                      mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-scent mpx5-bore
+tools/mkas                      mpx3-tree mpx3-maps mpx3-shell mpx3-boreutils mpx4-unix mpx4-tcp mpx4-udp mpx5-jobs mpx5-lope mpx5-aspen mpx5-lupin mpx5-yew mpx5-screen mpx5-scent mpx5-den mpx5-bore
 user/su/*                       @suuser
 tools/mksu                      @suuser
 user/mpx3-boreutils-user.run    mpx3-boreutils
@@ -214,6 +217,18 @@ user/console/aspen.keys         mpx5-aspen
 user/scent.pin                  mpx5-scent
 tools/mkscent                   mpx5-scent
 user/console/scent.keys         mpx5-scent
+# px90: den on PAX: its pin, its builder and the typed session are
+# mpx5-den's (its extractor and rows, tests/mpx5-den.d/, by the
+# derivation); its installer is the distribution's as well (tools/
+# distribution-root runs it), so it reaches what that tool reaches. Its
+# image is @user's (its archive holds a link, its session's files are on
+# the ext2 /home: kernel/ext2 and kernel/fstab reach it there) and
+# @asuser's (its user session runs through `as`); its disk is a virtio
+# block device (kernel/vblk, kernel/block).
+user/den.pin                    mpx5-den
+tools/mkden                     mpx5-den
+tools/install-den               mpx5-den census mpx6-install
+user/console/den.keys           mpx5-den
 # px65: boreutils' new utilities on PAX: the two typed sessions' keys are
 # mpx5-bore's (its fixture and rows, tests/mpx5-bore.d/, by the
 # derivation; the boreutils pin reaches it through tools/mkboreutils).
@@ -279,8 +294,8 @@ kernel/virtio/*                 @net mpx3-sound mpx3-orchestra @disk
 # @user). The disk's tools and its recordings are mpx6-ext2's by the
 # derivation (the test names them); its probes reach mpx5-users too,
 # which reads user/elf. (@disk is defined with the groups above.)
-kernel/vblk/*                   @disk
-kernel/block/*                  @disk
+kernel/vblk/*                   @disk mpx5-den
+kernel/block/*                  @disk mpx5-den
 kernel/ext2/*                   mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes @user
 kernel/fstab/*                  mpx6-ext2 mpx6-part mpx6-root mpx6-journal mpx6-nodes @user
 # px68: the journal is kernel/ext2's, and reaches what ext2 reaches.
