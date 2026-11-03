@@ -534,6 +534,24 @@ was handed no kernel (`linux-part: cannot read the kernel /usr/lib/modules/7.3.0
 the throwaway container and the JSON read from its last line, `usb6.log`: `PASS U8: Linux xHCI lists the GPT, mounts
 the ESP read-only, all five file digests identical`, `usb-stick: PASS; 0 SKIP; 323 seconds`, `END usb-stick exit=0`.
 
+### 4.13 The third rebase, onto `b38643a5` (px90's den), and the records
+
+record7 at `bcd81d3e` (`record7.green.log`, planning's `tools/gauntlet-record.sh`, a fresh clone, kasumi CPUs 0-3):
+`END ci-plan exit=0 secs=49`, `END mpx3-console exit=0 secs=629`, `END mpx3-screen exit=0 secs=1167`, `END usb-stick
+exit=0 secs=240`, `END mpx5-forks exit=0 secs=609`, `END mpx6-install exit=0 secs=692`, `RECORD-END worst=0 steps=6`
+(verified with `--verify` against `bcd81d3e`). record6, at the same head, died in kasumi's reset of 08:03:12Z inside
+mpx6-install and is not evidence. The labelled run at `bcd81d3e` was cancelled twice by runner-speed timeouts (pax#280).
+
+px90 (pax#279) then merged at `b38643a5`, and the lane was rebased onto it. Four commits met px90's lines and were
+resolved by hand or by git keeping both lanes' rows: the README's test table (px90's `mpx5-den` row with this lane's
+disks words), `docs/SOURCES.md` (px90's section, then this lane's), `tests/distribution` and
+`tools/distribution-root` (px90's den and this lane's `/bin/poweroff` side by side); `tools/ci-tiers.map` merged
+cleanly. `notes/px87/rebase/map3.txt` pairs all 71 commits (`map.sh 9e106768 <before> b38643a5 <after>`, four marked
+`context`). The commit names in §4.12 are the second rebase's (on `9e106768`); map3.txt resolves them onward. The
+same six steps are recorded again at the rebased head (`notes/px87/kasumi/record8.sh`), and the plant's one-hunk break
+is cut on that head on its own branch with a local plant record (`notes/px87/kasumi/plant8.sh`, `--plant V7`); their
+END lines are in the PR's body.
+
 ## 5. Done-when
 
 ### 5.1 Checklist
