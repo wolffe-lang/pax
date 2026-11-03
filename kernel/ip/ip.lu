@@ -86,7 +86,7 @@
 //! station's address otherwise.
 //!
 //! The address, netmask and gateway are `start`'s arguments, given
-//! once at boot. State is words of boot/net.S's `pax_ip_state` and
+//! once at boot, or (px89) kernel/dhcp's, through `configure`. State is words of boot/net.S's `pax_ip_state` and
 //! `pax_ip_loop`, one frame to compose in and the loopback's 64, under
 //! `sync.ip()`, which is taken before `sync.arp()` and
 //! `sync.net()`. Nothing here allocates from the heap.
@@ -313,6 +313,18 @@ pub fn start(address: u64, netmask: u64, gateway: u64) {
         put_lw(LOOP + i, 0)
         i += 1
     }
+}
+
+/// px89: the triple changed at run time (kernel/dhcp): the lease's
+/// address, netmask and router, or 0.0.0.0, 0 and 0 while no lease is
+/// held (no route; every destination on-link; the limited broadcast
+/// still sent and taken). Any context; takes `sync.ip()`.
+pub fn configure(address: u64, netmask: u64, gateway: u64) {
+    let saved = sync.acquire(sync.ip())
+    put_iw(I_ADDR, address)
+    put_iw(I_MASK, netmask)
+    put_iw(I_GATEWAY, gateway)
+    sync.release(sync.ip(), saved)
 }
 
 /// kernel/tcp is there (px23): protocol 6 is its, not `protocol`.
