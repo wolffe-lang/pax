@@ -2,7 +2,7 @@
 
 Contract: `wolf/sprints/pax/88-the-fork/px88-the-fork.md` (crawl 54, batch C, launched 2026-11-02 on the maintainer's
 word "Launch them"), under `sprints/the-lane-rules-1031.md` (every "Added 2026-11-01" item) and RULES §1–§10. Base
-pax trunk `3e28a8bc`, branch `px88`. Footprint: cross-cutting (`kernel/sched`, the kernel's core; a comment in
+pax trunk `3e28a8bc`, rebased once onto `5da8daaf`; branch `px88`. Footprint: cross-cutting (`kernel/sched`, the kernel's core; a comment in
 `boot/sched.S`; CI's new `mpx5-forks` job, `tools/ci-tiers.map`, `tests/ci-plan`).
 
 A static musl program's `fork()` asks system call 57 where x86-64 has it; glibc's and wolf's ask `clone` (56). PAX
@@ -32,7 +32,7 @@ by mistake (a list of script digests and a 128 KiB tarball of transcripts) and w
 
 ## Inputs, verified
 
-- **Base** `3e28a8bc79d7ff879f74c1872fe1bc9ccfa97a1f`, pax trunk at launch. Branch `px88`; the Mac clone
+- **Base** `3e28a8bc79d7ff879f74c1872fe1bc9ccfa97a1f`, pax trunk at launch (rebased once, below). Branch `px88`; the Mac clone
   `~/lanes/px88/pax` (git, `gh`, three compile checks); the hasu clone `/home/mfwolffe/lanes/px88/pax`, a worktree
   per tested commit (`wt-<sha>`), its git steps behind a lane-local lock.
 - **Toolchain** wolf 0.2.35 by `kernel/wolf.pin` (archive `4cc4045b…`, copied from px85's cache, never moved; its
@@ -51,48 +51,54 @@ by mistake (a list of script digests and a 128 KiB tarball of transcripts) and w
   r2-B then failed in 20 s: scp had left every hasu copy of the scripts at mode 644, and `podman-blk` is executed
   directly (`Permission denied`, exit 126); the modes restored to git's and every copy's sha256 compared with its
   commit, it ran again as r2-B2. r3-B read `exit=0` over a red suite because `r3.sh` returned its last step's status;
-  every chain now returns its worst step's (`efff7957`). Two commits went to hasu as a git bundle, not a push, while
+  every chain now returns its worst step's (`9c8979cc`). Two commits went to hasu as a git bundle, not a push, while
   the head was not yet green.
+- **The rebase.** Rebased once, at the orchestrator's word, from `3e28a8bc` onto trunk `5da8daaf` (pm00's ten
+  commits, notes only), the old head `f7472de8` and the rebased head `835fb70c` differ by exactly trunk's four
+  `notes/pm00*` files with the lane's own diff byte-identical, so the gauntlet's evidence, and every run here named
+  by the sha it ran at before the rebase (`notes/px88/rebase-map.txt` pairs each commit with its twin), stands for
+  the code at the new head.
 
-Commits (the prediction first; the failing rows before each fix):
+Commits, by their rebased shas (the prediction first; the failing rows before each fix):
 
-- `4fa9e7de` notes/px88/prediction.txt, before any change
-- `bc63b6f5`, `a09b74b1`, `25d25c85`, `7505f0cc`, `efff7957` notes/px88/hasu: the launcher, the container step, the
+- `955b203c` notes/px88/prediction.txt, before any change
+- `79049170`, `69d3bb81`, `216945d2`, `7ea9cbce`, `9c8979cc` notes/px88/hasu: the launcher, the container step, the
   image, the suite at a commit, the installer's row at a commit, the chains, the wrapper's worst-step exit
-- `4cc7cc01` notes/px88/linux/explore.c: black-box Linux's numbers, before the witness
-- `026692f6` user/elf/forks.c; `9298b362` user/elf/usage.c; `78173bf0` tools/mkforks
-- `3df2ae18` tests/mpx5-forks (red: fork and getrusage -ENOSYS)
-- `26872978` tests/mpx6-install: I-peak (red: `unavailable (-38)`)
-- `8952728f` kernel/process: fork (57) is clone(SIGCHLD, 0); `48b8881f` kernel/user: its dispatch
-- `624d73aa` kernel/sched: the accounting; `54c603eb` boot/sched.S: the record's size (a comment)
-- `67f6e7ce` kernel/vm: the peak before every lowering call
-- `bdbe71d2` kernel/process: getrusage, and wait4's and waitid's rusage
-- `da375bf8` kernel/user: every system call bracketed; getrusage dispatched
-- `8d48071e` ci: the mpx5-forks job; `18390307` tools/ci-tiers.map; `d57a9cba` tests/ci-plan
-- `a6b2828f` kernel/sched: a parent ignoring SIGCHLD keeps no zombie (R-px88-9)
-- `33a991d3` docs/SOURCES.md; `d262e497` kernel/README.md
-- `d616e393` user/elf/usage.c: bounds as Linux reads RSS, a vfork child's exec row; `08d5ef50` kernel/sched: a vfork
+- `b22051a4` notes/px88/linux/explore.c: black-box Linux's numbers, before the witness
+- `315aa9aa` user/elf/forks.c; `a182013b` user/elf/usage.c; `9961da28` tools/mkforks
+- `64821aa2` tests/mpx5-forks (red: fork and getrusage -ENOSYS)
+- `04ee8e44` tests/mpx6-install: I-peak (red: `unavailable (-38)`)
+- `373ee5e4` kernel/process: fork (57) is clone(SIGCHLD, 0); `9d278ba0` kernel/user: its dispatch
+- `bb7bb4c1` kernel/sched: the accounting; `0d07b4ae` boot/sched.S: the record's size (a comment)
+- `5e0b6362` kernel/vm: the peak before every lowering call
+- `239e1d5d` kernel/process: getrusage, and wait4's and waitid's rusage
+- `8d75e8cf` kernel/user: every system call bracketed; getrusage dispatched
+- `1d0c24e8` ci: the mpx5-forks job; `6989829a` tools/ci-tiers.map; `56cff3c1` tests/ci-plan
+- `46d5f5a9` kernel/sched: a parent ignoring SIGCHLD keeps no zombie (R-px88-9)
+- `1b075adc` docs/SOURCES.md; `14699d9e` kernel/README.md
+- `f7d00736` user/elf/usage.c: bounds as Linux reads RSS, a vfork child's exec row; `473c28ed` kernel/sched: a vfork
   child's exec counts its parent's peak
-- `a4fb4ec9` user/elf/usage.c: no hang on a kernel that cannot fork; `1ce14056` the 64 MiB peak itself
-- `34568fd5` docs/CENSUS.md; `93687f55` docs/BOOT.md; `d628abf0` notes/px88: the chains' logs and transcripts
-- `5caece74` README (a README-only commit); `ce2a07ac` this note, before the plant and the gauntlet
-- `fe87b745` notes/px88/hasu: the gauntlet (FROM, UNTIL, a step-log directory per run) and the plant's match
-- `5ff8f988`, `111e7074` notes/px88: the gauntlets' logs, the plant's session, the match's proof; after them, this
+- `642a32c2` user/elf/usage.c: no hang on a kernel that cannot fork; `7de73447` the 64 MiB peak itself
+- `e15c5178` docs/CENSUS.md; `8a1fe9b8` docs/BOOT.md; `3f69b4b0` notes/px88: the chains' logs and transcripts
+- `961baede` README (a README-only commit); `91f1f7b7` this note, before the plant and the gauntlet
+- `bd38c7bf` notes/px88/hasu: the gauntlet (FROM, UNTIL, a step-log directory per run) and the plant's match
+- `bcc3580c`, `b28a2702` notes/px88: the gauntlets' logs, the plant's session, the match's proof; after them, this
   note's plant and gauntlet sections
+- after the rebase: `notes/px88/rebase-map.txt`, and this note's rebase, hang-check and issue lines
 
 ## Prediction, scored
 
-`notes/px88/prediction.txt` (`4fa9e7de`, 2026-11-02T17:55Z, pushed before the first change):
+`notes/px88/prediction.txt` (`955b203c`, 2026-11-02T17:55Z, pushed before the first change):
 
 | predicted | measured |
 |---|---|
 | P1 base: forks red, fork -ENOSYS, the kernel logs 57 once; vfork and posix_spawn rows green at base | **right**: `fork: -38`, K3 `-ENOSYS for 'forks 57'`; every vfork and spawn row byte-identical to Linux's at base (`sessions/r2-red/`) |
-| P2 base: usage red, every getrusage -ENOSYS, wait4's rusage zeros | **right**, and **not predicted**: at base the usage probe hung (its parent read a pipe whose write end it still held, waiting for a child fork never made): NOT HALTED within 600 s (r2-B2). Fixed in the probe (`a4fb4ec9`); on the fork-less kernel the fixed probe runs to its end (r4's hang check) |
+| P2 base: usage red, every getrusage -ENOSYS, wait4's rusage zeros | **right**, and **not predicted**: at base the usage probe hung (its parent read a pipe whose write end it still held, waiting for a child fork never made): NOT HALTED within 600 s (r2-B2). Fixed in the probe (`642a32c2`); on the fork-less kernel the fixed probe runs to its end (r4's hang check) |
 | P3 the fork fix turns every forks row green, root and user, both tiers and firmwares | **right**: 49 lines byte-identical to Linux's, as root and as 1000:1000, native BIOS and release UEFI (r3-B, r4) |
 | P4 every usage row byte-identical but the `~` rows (minflt 0 on PAX); majflt, inblock, oublock 0 on both; the seven unmaintained 0 on both | **right** at r4: 43 lines byte-identical, both users, both legs; K2 `~minflt: self 0`, Linux's 240 (root) and 267 (the user) |
-| P5 maxrss: the 64 MiB touch adds 64-65 MiB on both | **wrong for Linux**: Linux reads RSS approximately (64 MiB touched read as +64,700 KiB; a 32 MiB child 32,640; a 48 MiB grandchild 49,120: `notes/px88/linux/r1-explore.log`), so the rows take 4 MiB of slack (`d616e393`); and a process's peak outlives exec, so on Linux's side the probe starts with tools/linux-tree's Python's peak and its growth from there is under 60 MiB: the rows hold the peak itself (`1ce14056`). PAX reads the count exactly |
+| P5 maxrss: the 64 MiB touch adds 64-65 MiB on both | **wrong for Linux**: Linux reads RSS approximately (64 MiB touched read as +64,700 KiB; a 32 MiB child 32,640; a 48 MiB grandchild 49,120: `notes/px88/linux/r1-explore.log`), so the rows take 4 MiB of slack (`f7d00736`); and a process's peak outlives exec, so on Linux's side the probe starts with tools/linux-tree's Python's peak and its growth from there is under 60 MiB: the rows hold the peak itself (`7de73447`). PAX reads the count exactly |
 | P5 the free leaves it unchanged; the children's and wait4's at least the child's; a grandchild's through the middle child | **right** on both kernels |
-| P5 across exec Linux keeps the old image's peak | **right** (`before exec: maxrss 40960`, `after exec: maxrss 40960`); **not predicted**: a vfork child's exec carries its parent's peak (`small: maxrss 65440`), which PAX now does too (`08d5ef50`, the `vfork:` rows) |
+| P5 across exec Linux keeps the old image's peak | **right** (`before exec: maxrss 40960`, `after exec: maxrss 40960`); **not predicted**: a vfork child's exec carries its parent's peak (`small: maxrss 65440`), which PAX now does too (`473c28ed`, the `vfork:` rows) |
 | P6 times: the spin's utime 150-320 ms, stime under 50; the reads' stime at least 100, more than utime | **right** on both (Linux: +299 ms utime; +299 ms stime for the reads) |
 | P7 switches: ten sleeps at least 10 voluntary; a shared spin at least 2 involuntary | **right**; **not predicted**: Linux counts a `sched_yield` that switches as involuntary (+20 nivcsw for 20 yields), as PAX does |
 | P8 the installer prints `<N> KiB`, above Linux's 11884 KiB, 12-256 MiB | **right on the line, wrong on the size**: `Installer peak RSS through copy verification: 5904 KiB`, `Formatter children peak RSS: 28264 KiB`, below Linux's reference |
@@ -101,7 +107,7 @@ Commits (the prediction first; the failing rows before each fix):
 
 Not predicted at all: a parent whose SIGCHLD is ignored keeps no zombie on Linux and does not count the child
 (`ignored SIGCHLD: waitpid -1 errno 10`, the children's utime and maxrss unchanged), where PAX kept a zombie; the
-usage probe's `ignored:` rows found it and `a6b2828f` serves it (R-px88-9).
+usage probe's `ignored:` rows found it and `46d5f5a9` serves it (R-px88-9).
 
 ## Evidence index
 
@@ -130,7 +136,7 @@ usage probe's `ignored:` rows found it and `a6b2828f` serves it (R-px88-9).
   answers); (B) -EINVAL. **A**.
 - **R-px88-7, the witness's home.** (A) a new suite, `tests/mpx5-forks`, with its own CI job; (B) sessions of
   mpx3-maps. **A**: its own probes, builder and Linux side, and a plan entry of its own.
-- **R-px88-8, times(2) and /proc.** (A) left as they are, an issue owed; (B) served here from the same counts. **A**:
+- **R-px88-8, times(2) and /proc.** (A) left as they are, owed as pax#270 and pax#271; (B) served here from the same counts. **A**:
   outside the contract's items.
 - **R-px88-9, SIGCHLD ignored** (found by the witness). (A) a parent whose SIGCHLD is SIG_IGN, or whose action has
   SA_NOCLDWAIT, keeps no zombie: a wait answers -ECHILD once no child is left and the child is not counted (wait(2),
@@ -139,9 +145,9 @@ usage probe's `ignored:` rows found it and `a6b2828f` serves it (R-px88-9).
 
 ### The change
 
-- **fork** (`8952728f`, `48b8881f`): kernel/user dispatches 57 with clone, clone3 and vfork; kernel/process's `clone`
+- **fork** (`373ee5e4`, `9d278ba0`): kernel/user dispatches 57 with clone, clone3 and vfork; kernel/process's `clone`
   sends it to `fork(f, 0, 0, 0, 0)`: the copy of the space, the child's %rax 0, the parent's the child's pid.
-- **The accounting** (`624d73aa`, `da375bf8`, `67f6e7ce`, `08d5ef50`): each thread's record gains five words (`cpu`,
+- **The accounting** (`bb7bb4c1`, `8d75e8cf`, `5e0b6362`, `473c28ed`): each thread's record gains five words (`cpu`,
   `sys`, `sysin`, `vcs`, `ics`; 464 of the slot's 512 bytes) and each process area ten (words 6084-6093, past
   kernel/vm's last): the process's sums and its reaped children's. `run_next`'s `account` charges the outgoing
   thread's run, closes and reopens a system call's bracket across a switch, and counts the switch (involuntary from a
@@ -149,17 +155,19 @@ usage probe's `ignored:` rows found it and `a6b2828f` serves it (R-px88-9).
   The peak is `note_rss`, called by kernel/vm before each lowering, by `exec_current` (the old space; for a vfork
   child, its parent's peak) and by `reap`. A wait's `zombie` folds the child's sums into the waiter's children's
   (times and switches added, the largest set kept). A fork's child starts at zero; exec keeps the process's sums.
-- **getrusage** (`bdbe71d2`): `who` read as an int (0, -1, 1; else -EINVAL), then 144 writable bytes (else -EFAULT);
+- **getrusage** (`239e1d5d`): `who` read as an int (0, -1, 1; else -EINVAL), then 144 writable bytes (else -EFAULT);
   ru_utime and ru_stime, ru_maxrss in KiB, ru_nvcsw, ru_nivcsw; everything else 0.
 
 ### The rows (hasu; `notes/px88/hasu-logs/`, `notes/px88/sessions/`)
+
+Each run is named by the commit it ran at, before the rebase (`notes/px88/rebase-map.txt` gives each one's twin).
 
 | run | commit | what it showed |
 |---|---|---|
 | r1 (block B) | — | the image built; black-box Linux's numbers and musl's system calls (`notes/px88/linux/r1-explore.log`) |
 | r2-B2 (block B) | `3df2ae18`, the suite before any fix | **red**: forks K1 and K3 (`-ENOSYS for 'forks 57'`), root and user; usage K1, K2, K3 (`usage 57`, `usage 98`) and NOT HALTED (the probe's hang) |
 | r3-B (block B) | `7505f0cc` | forks green on both legs; usage two rows red where Linux's side, not PAX's, said `no` (the inherited peak); I-peak red at `26872978` by name (`AssertionError: FAIL I-peak: … ['unavailable (-38); not zero memory']`) and green at the head |
-| r4 (block A) | `efff7957` | **green**: all four sessions on native BIOS and release UEFI (forks 49 lines, usage 43, byte-identical to Linux's, root and 1000:1000); the fixed usage probe runs to its end on the fork-less kernel (`4420a145`, a lane-only commit: `3df2ae18`'s kernel with the head's probe); `PASS I-peak: installer 5904 KiB, formatter children 28264 KiB` |
+| r4 (block A) | `efff7957` | **green**: all four sessions on native BIOS and release UEFI (forks 49 lines, usage 43, byte-identical to Linux's, root and 1000:1000); the fixed usage probe runs to its end on the fork-less kernel (a lane-only commit, never pushed: `3df2ae18`'s tree with `efff7957`'s `user/elf/usage.c`); `PASS I-peak: installer 5904 KiB, formatter children 28264 KiB` |
 
 The probes (`probes.txt`): `forks` `e99479d9…` (73,472 bytes), `usage` `4d7f8226…` (68,640), both ET_EXEC, no
 PT_INTERP, no `.dynamic`, no glibc; `as` `fb82459…` (glibc-static, the user sessions' `setuid` front).
@@ -171,9 +179,10 @@ exec (the same unless the parent's earlier image was larger).
 
 ### The plant
 
-`px88-plant-fork` = `fe780b7f` (draft PR #274, base `px88`, never to merge; its CI run `41560213359` is the
-orchestrator's to watch): `ce2a07ac` with one line of `kernel/sched`'s `clone_current` changed, the child's %rax the
-parent's tgid where fork(2) gives it 0.
+`px88-plant-fork` (draft PR #274, base `px88`, never to merge) was `fe780b7f` for the gauntlet: `ce2a07ac` with one
+line of `kernel/sched`'s `clone_current` changed, the child's %rax the parent's tgid where fork(2) gives it 0 (its
+CI run `41560213359`). After the rebase it was re-cut onto px88's final head with the same one line; the PR's test
+targets name its sha.
 
 ```
 -        ((cf + W_RAX * 8) as *u64).write_volatile(0)
@@ -206,7 +215,8 @@ plant's session with a green K1).
 
 `notes/px88/hasu/gauntlet.sh` on hasu block A, at `ce2a07ac`, behind both of the block's locks, each step's log its
 own (`notes/px88/hasu-logs/gauntlet*-ce2a07ac/`). Everything after `ce2a07ac` on the branch is `notes/` alone (the
-scripts, the logs, this note), so the head's kernel, probes, tests and CI are the gauntlet's.
+scripts, the logs, this note), and the rebase (above) moved only trunk's notes, so the head's kernel, probes, tests
+and CI are the gauntlet's.
 
 **gauntlet** (the first): stopped at its first step on its own bug, a step name with `/` used as a file name; no test
 ran.
@@ -240,11 +250,11 @@ END g-plant-fe780b7f-boot-bios-native-forks exit=1
 ```
 
 mpx5-forks' four legs (native and release, BIOS and UEFI; the four sessions each): 72 PASS rows, every forks session
-49 lines and every usage session 43 byte-identical to Linux's, root and 1000:1000. The hang check (`4420a145`: the
-fork-less kernel with the head's probe) is red on K1-K3 as it must be and runs to its end (`PASS K5 … init ended,
-status 0`, halted). Those two steps' boot logs are kept from their own build directories
-(`gauntlet2-ce2a07ac/`); gauntlet2's step logs for the nine fast steps were erased when gauntlet3 cleared the
-directory they shared, which is why gauntlet4 ran them again.
+49 lines and every usage session 43 byte-identical to Linux's, root and 1000:1000. The hang check (the lane-only
+commit above, never pushed: `3df2ae18`'s fork-less tree with `efff7957`'s `user/elf/usage.c`) is red on K1-K3 as it
+must be and runs to its end (`PASS K5 … init ended, status 0`, halted). Those two steps' boot logs are kept from
+their own build directories (`gauntlet2-ce2a07ac/`); gauntlet2's step logs for the nine fast steps were erased when
+gauntlet3 cleared the directory they shared, which is why gauntlet4 ran them again.
 
 **gauntlet3**: from the plant on, every step 0. The steps before the plant print SKIP (they ran 0 in gauntlet2, at
 the same head):
@@ -311,11 +321,11 @@ no FAIL in any.
 - [x] Item 4: the clean room, as above.
 - [x] Item 5: this note; the plant `px88-plant-fork` (#274) red by name; the gauntlet at the head (above); the PR
   and the audit are the hand-back's.
-- [x] README read against the pass: the Programs row and the suites table moved (`5caece74`, a README-only
+- [x] README read against the pass: the Programs row and the suites table moved (`961baede`, a README-only
   commit); nothing else in it moved.
 
 **Issues** (none filed or closed by this lane): pax#175, #185 and #248 are fixed by this PR and are to be closed by
-hand at the merge. Owed, for the orchestrator to file or drop:
-- `times(2)` (100) is -ENOSYS; the same counts would serve it (R-px88-8).
-- `/proc/<pid>/stat`'s utime, stime, cutime and cstime are 0 and `/proc/<pid>/status`'s VmHWM and VmPeak are the
+hand at the merge. Owed, filed by the orchestrator:
+- pax#270: `times(2)` (100) is -ENOSYS; the same counts would serve it (R-px88-8).
+- pax#271: `/proc/<pid>/stat`'s utime, stime, cutime and cstime are 0 and `/proc/<pid>/status`'s VmHWM and VmPeak are the
   current count; both could read px88's counts.
