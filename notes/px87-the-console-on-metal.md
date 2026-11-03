@@ -270,6 +270,10 @@ TCG; CI boots run that kernel (R-px87-8 names the trade).
   mpx6-firmware failed on a 108-byte QMP socket path (sun_path holds 107), not on the code; the step runs once
   more from the same tree under `/home/mfwolffe/lanes/px87/g/`, the socket's length printed first, and with
   gauntlet3's earlier steps completes the gauntlet (§4.8). The tests' follow-on is pax#273.
+- **R-px87-16 (ruled A by the orchestrator): the boot line's readers.** (A) the tests find the timing line by its own
+  words, and `boot:` stays the kernel's family of boot reports (Limine, firmware, the medium, the timing); (B)
+  rename the kernel's line away from `boot:` (the kernel, the docs, qual.py and the staged stick's text change).
+  **A** (`0aeab4e2`, `08da7c51`; §4.11).
 
 
 ### 4.6 The plant, `px87-plant-scroll-read`
@@ -415,6 +419,10 @@ pax#273, filed by the orchestrator.
   (SOURCES.md).
 - The stick and the lane's tools: `a28dc800`, `96f35f71`, `4658a0dd`, `7edb9cdf`, `196b1371` (notes/px87/stick),
   `7c20722b` (notes/px87/linux), `ad345890`, `e9887549` (notes/px87/kasumi); then this note and the logs.
+- After the rebase (§4.10): `8460ebe0`, `7b7a99fe` (the map), `a9a3d548` (the short-path step), `f90dd16d` (CI's reds
+  on kasumi, the engine stand-in); the fixes after CI's tier all (§4.11): `0aeab4e2` (T6, T7; red at `088312b1` in
+  `ci-red-native-usb.log`), `08da7c51` (P9; red at `088312b1` in `ci-red.log`); gauntlet4's script; the note and
+  the logs.
 
 ### 4.10 The rebase (R-px87-14)
 
@@ -445,6 +453,57 @@ $ git diff --name-only 0eadf6b4 e9887549 -- . ':(exclude)notes/pm00*' | wc -l
 So the rebased code is gauntlet3's and stick3's tree plus pm00's notes, and gauntlet3 at `0eadf6b4` stands for it.
 The staged stick stays as it was built: the pre-merge stick, its kernel line naming `0eadf6b4`.
 
+### 4.11 CI's tier all at `088312b1`: two reds, both one cause (R-px87-16)
+
+Run 41530916165 (the PR's labelled tier all at `088312b1`): 59 jobs green, two red, `mpx3-console` and
+`mpx6-part`; the plant's run 41530700041 (`d82d30f0`) red in `mpx3-screen` and `mpx3-console`.
+
+**The cause.** A boot from a disk prints the medium's line, `boot: /boot/initramfs.cpio from a disk: partition 1,
+GPT disk …, partition …`, and the kernel now prints its own `boot: <n> ms from the kernel's entry …` line on every
+boot. Two readers took "the first `^boot: ` line" or "no `^boot: ` line" to mean the medium's:
+- `tests/mpx3-console`'s T6 (the identity line repeated before the boot line) and T7 (`grep -m1 '^boot: '`). On
+  the ISO the first `boot:` line is the timing line, so the suite's own job and every gauntlet here passed them;
+  booted from the stick (`tests/usb-stick`'s U5, `tests/mpx3-console --usb-stick`) the medium's line comes first.
+  U5's console suite writes to `$work/native-usb.log` and the script stops under `set -e`, so CI's log shows only
+  U4's lines (`FAIL USB: required boot file missing: …` and `FAIL USB: protective MBR must cover the disk` are
+  `tools/check-usb`'s answers to the two copies U4 breaks on purpose; `PASS U4: efi rejected by name`, `PASS U4: mbr
+  rejected by name`) and then the job's exit 1.
+- `tests/mpx6-part`'s P9 (`! sgrep -q '^boot: '`, "the ISO prints no boot medium line"): the timing line matched.
+- A sweep of `tests/` and `tools/` found no other reader that takes the first `boot:` line or refuses any; every
+  other `boot:` pattern names its own words (`boot: /boot/initramfs.cpio from a disk: …`, `boot: Limine …`, `boot:
+  firmware …`, mpx6-triage's `boot: [0-9]+ ms` mask).
+
+Why the lane's runs missed it: the gauntlets ran U7 alone (`probe-u7.sh`) and left the whole of `tests/usb-stick`
+and `tests/mpx6-part` to CI (§5.2), because their disk tools (`tools/e2fs`, `tools/disktools`) start a container
+and the lane's QEMU runs inside one. CI's stick did not differ from the lane's: U1 to U4 green, the same ESP.
+
+**Red, reproduced on kasumi** (`ci-red.log`, `notes/px87/kasumi/probe-ci.sh` at `088312b1`): the disk tools ran
+inside the container through `notes/px87/kasumi/engine-local.sh` (PAX_ENGINE: the program run in the container,
+the pinned disktools packages from their own store; the container's e2fsprogs checked first against the pinned
+image's: `e2fsprogs: 1.47.0-2.4~exp1ubuntu4.1`, mke2fs, e2fsck and debugfs the same sha256, `the same programs,
+pinned and in the container`). tests/usb-stick: U1 to U4 green, U5's ISO leg green (70 PASS T rows, 0 FAIL), its
+USB leg red on every session (`ci-red-native-usb.log`, 20 FAIL lines):
+
+```
+mpx3-console: FAIL T6 native bios ask-serial: not repeated before the boot line ('ahci0: 8086:2922 at 00:1f.2 port 2: ATAPI skipped (0x00000000eb140101)');
+mpx3-console: FAIL T7 native bios ask-serial: no boot line as expected ('boot: /boot/initramfs.cpio from a disk: partition 1, GPT disk dad29f0e-363f-4763-6a5e-c9167573a524, partition 407e1c0d-9130-145d-9467-3854200e2116');
+```
+
+and `END usb-stick exit=1`. tests/mpx6-part (native, BIOS and UEFI legs): every row green but
+
+```
+mpx6-part: FAIL P9 native bios iso: fstab: /dev/vda on /home: ext2, read-write, write-back boot: 2008 ms from the kernel's entry to its first program; the console drew for 184 ms of it (16 scrolls, 3996 bytes)  (qemu-halt 0)
+```
+
+and `END mpx6-part exit=1`. In the container `tools/fetch-usb-linux` failed (`apt-cache depends linux-image-generic`
+exit 100, `E: No packages found`: the container's apt lists are empty). That is the environment, and U8 was not
+reached here; it is not counted as a pass.
+
+**The fix** (R-px87-16, ruled A): `0aeab4e2` T6 and T7 find the line by its own words (`^boot: [0-9]+ ms from the
+kernel's entry to its first program; `); `08da7c51` P9 refuses the medium's line (`^boot: /`). The kernel does not
+change; `boot:` stays the kernel's family of boot reports. The green is gauntlet4's (`notes/px87/kasumi/gauntlet4.sh`,
+at the pushed head; its END lines go in the PR's body) and CI's.
+
 ## 5. Done-when
 
 ### 5.1 Checklist
@@ -469,6 +528,9 @@ The staged stick stays as it was built: the pre-merge stick, its kernel line nam
 ### 5.2 Departures and limits
 
 - Every QEMU run was TCG: kasumi's firmware has VT-x off (§2). The contract's KVM was not needed by any row.
+- Until §4.11, `tests/usb-stick` (but U7) and `tests/mpx6-part` were left to CI; from gauntlet4 they run here,
+  their disk tools through `engine-local.sh` inside the container (the programs checked equal to the pinned
+  images'). The rest below stays CI's.
 - Not run here, left to CI's tier all (the PR touches FULL paths): `tests/kernel-as` (K5 assembles `boot/start.S`'s
   new request and slot through clef; it needs a source-built wolf), `tests/mpx6-ext2` (E7's `/bin/reboot` restart;
   its disk tools want a container engine beside its QEMU), `tests/mpx6-kasumi` (metal.py's legs: M9 still types
