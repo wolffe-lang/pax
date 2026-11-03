@@ -333,7 +333,9 @@ pub fn report_boot() {
     log.dec(screen.scrolls() as int)
     // px87: the way kernel/screen's attach chose (copy where a framebuffer
     // read is cheap, redraw where it is not): the metal A/B's other half.
-    if screen.copy_scroll() {
+    if !screen.scroll_decided() {
+        log.put(" scrolls by none (no screen")
+    } else if screen.copy_scroll() {
         log.put(" scrolls by copy (")
     } else {
         log.put(" scrolls by redraw (")
@@ -341,7 +343,9 @@ pub fn report_boot() {
     // and why: the word that forced it, or the probe's two costs and the
     // rule (kernel/screen's COPY_MAX), so a photo of the screen says why
     let f = screen.scroll_forced()
-    if f == 1 {
+    if !screen.scroll_decided() {
+        // no screen attached: no way, no reason beyond that
+    } else if f == 1 {
         log.put("fbread")
     } else if f == 2 {
         log.put("fbwrite")
