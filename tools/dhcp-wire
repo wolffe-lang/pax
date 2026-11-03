@@ -30,6 +30,7 @@
 #            after `expired`
 #   nak      A from the start; at `bound` stopped and B started: the
 #            renewal draws a NAK, and the next DISCOVER a new address
+# A PANIC line stops COMMAND (SIGTERM) 2 s later.
 # Every step is written to DIR/account.txt as `dhcp-wire: +<s> <what>`,
 # the time from COMMAND's start.
 #
@@ -142,7 +143,7 @@ def main():
         dnsmasq_start("A", True)
     guest = subprocess.Popen(command, stdin=subprocess.DEVNULL)
     note("guest started: pid %d: %s" % (guest.pid, " ".join(command)))
-    seen, pos, due = "", 0, None
+    seen, pos, due, panic_at = "", 0, None, None
     while guest.poll() is None:
         time.sleep(0.1)
         try:
@@ -153,6 +154,14 @@ def main():
             more = b""
         pos += len(more)
         seen += more.decode("latin-1")
+        # A kernel that has panicked waits for nothing: its guest is
+        # stopped 2 s after the line, not left to its timeout.
+        if panic_at is None and "\nPANIC" in "\n" + more.decode("latin-1"):
+            panic_at = time.time()
+            note("PANIC seen; the guest is stopped in 2 s")
+        if panic_at is not None and time.time() >= panic_at + 2:
+            guest.send_signal(signal.SIGTERM)
+            panic_at = float("inf")
         if plan and due is None:
             word, delay, _act = plan[0]
             for line in seen.splitlines():
