@@ -14,7 +14,7 @@
 #   mpx6-install  --rows smoke --tier native --firmware bios (px88's I-peak and this lane's as-user rows)
 set -uo pipefail
 . "$L/bin/gauntlet-record.sh"
-S=$PWD B=$L/r6 E=$L/bin/engine-local.sh
+S=$PWD B=${PX87_STEPS_BUILD:-$L/r6} E=$L/bin/engine-local.sh
 ind() { "$@" 2>&1 | sed -u 's/^/  /'; return "${PIPESTATUS[0]}"; }
 inc() { local n=$1; shift; ctr bash "$L/bin/run.sh" "$S" "$B/$n" "$n" "$@"; }
 mkdir -p "$B/usb-stick" "$B/mpx5-forks"
