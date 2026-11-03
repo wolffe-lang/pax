@@ -265,9 +265,11 @@ where nobody sees it; `-vga none` (`tools/qemu-run --no-screen`) boots a machine
 
 The framebuffer uses the firmware's width, height, row pitch and RGB masks. It draws before the allocator starts, even
 without COM1. Spleen's 8×16 glyphs give 160×50 cells at 1280×800; above 2560 pixels wide they are doubled, giving
-240×67 cells at 3840×2160. The framebuffer is written and never read: its cell grid in RAM is its shadow, and a scroll
-redraws only the cells that changed (reads through a GPU's write-combining mapping are the slowest thing a user would
-see). The console supports:
+240×67 cells at 3840×2160. Its cell grid in RAM is the screen's shadow. Where reading the framebuffer is slow (a GPU's
+write-combining mapping: such reads are the slowest thing a user would see), a scroll redraws only the cells that
+changed and never reads it; where reading is cheap (an emulator's framebuffer is host memory) it copies the framebuffer
+onto itself. The screen times one read against one write when it attaches to choose, and the boot line names the way.
+The console supports:
 
 - the Linux VT's colour renditions (dim, italic, underline, RGB mapped to its small palette), `OSC P` and `OSC R` for
   the palette, sixteen CSI parameters, scroll margins, character and line insertion and deletion;
