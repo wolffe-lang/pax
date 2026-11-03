@@ -53,9 +53,11 @@ SETUP = [l for l in KEYS[:KEYS.index('echo den-session-begin')] if not l.startsw
 BOOT1 = ['mkdir -p ' + REPO, 'cd ' + REPO, 'den init -q . ; echo PX90-INIT=$?',
          "printf 'persisted on PAX\\n' > notes.txt", 'den add notes.txt; echo PX90-ADD=$?',
          "den commit -q -m 'written before the reboot'; echo PX90-COMMIT=$?", 'cd /', 'reboot']
-BOOT2 = ['cd ' + REPO, 'echo PX90-LOG-BEGIN', 'den log; echo PX90-LOG=$?', 'echo PX90-LOG-END',
+# At the console den's log is written to a terminal, where den draws no
+# decorations yet and says so: --no-decorate, as the README tells a user.
+BOOT2 = ['cd ' + REPO, 'echo PX90-LOG-BEGIN', 'den log --no-decorate; echo PX90-LOG=$?', 'echo PX90-LOG-END',
          'den fsck --full > /tmp/f.o 2> /tmp/f.e; echo PX90-FSCK=$?', 'cat /tmp/f.o /tmp/f.e; echo PX90-FSCK-END',
-         'echo PX90-ONELINE-BEGIN', 'git log --oneline', 'echo PX90-ONELINE-END',
+         'echo PX90-ONELINE-BEGIN', 'git log --oneline --no-decorate', 'echo PX90-ONELINE-END',
          'den status --porcelain; echo PX90-STATUS=$?', 'cd /', 'exit']
 
 image = work / f'den-{firmware}.img'
@@ -143,8 +145,19 @@ def between(lines, a, b):
         i = lines.index(a); j = lines.index(b, i + 1)
     except ValueError:
         return None
-    # The typed command line's echo follows the prompt; drop it.
-    return [l for l in lines[i + 1:j] if not l.startswith('$ ')]
+    # The typed command line's echo follows the prompt, and the console's
+    # CR-LF puts an empty line after it: drop both, keep every other line.
+    out, skip = [], False
+    for l in lines[i + 1:j]:
+        if l.startswith('$ '):
+            skip = True
+            continue
+        if skip and l == '':
+            skip = False
+            continue
+        skip = False
+        out.append(l)
+    return out
 
 # The same steps on Linux, with the den the disk carries.
 root = work / f'den-{firmware}-root.img'
@@ -167,9 +180,10 @@ den = dump / 'den'
 den.chmod(0o755)  # debugfs's dump keeps the owner's bits only with -p, and only as root
 lin = work / f'den-{firmware}-linux'
 shutil.rmtree(lin, ignore_errors=True); (lin / 'home').mkdir(parents=True); (lin / 'xdg').mkdir(); (lin / 'hooks').mkdir(); (lin / 'template').mkdir()
+# The guest's config, with this side's own (empty) hooks and template.
 (lin / 'gitconfig').write_text('[user]\n\tname = Den Tester\n\temail = den@example.invalid\n[color]\n\tui = never\n'
-                               f'[core]\n\tpager = cat\n\thooksPath = /tmp/den-0/hooks\n[init]\n\tdefaultBranch = main\n'
-                               f'\ttemplateDir = /tmp/den-0/template\n[commit]\n\tgpgsign = false\n')
+                               f'[core]\n\tpager = cat\n\thooksPath = {lin}/hooks\n[init]\n\tdefaultBranch = main\n'
+                               f'\ttemplateDir = {lin}/template\n[commit]\n\tgpgsign = false\n')
 env = {'LC_ALL': 'C', 'TZ': 'UTC', 'PATH': '/usr/bin:/bin', 'COLUMNS': '80', 'HOME': str(lin / 'home'),
        'XDG_CONFIG_HOME': str(lin / 'xdg'), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': str(lin / 'gitconfig'),
        'GIT_EDITOR': 'false', 'GIT_PAGER': 'cat', 'PAGER': 'cat', 'GIT_TERMINAL_PROMPT': '0', 'GIT_OPTIONAL_LOCKS': '0',
@@ -181,9 +195,9 @@ def den_run(*args):
 lsteps = [den_run('init', '-q', '.')]
 (repo / 'notes.txt').write_text('persisted on PAX\n')
 lsteps += [den_run('add', 'notes.txt'), den_run('commit', '-q', '-m', 'written before the reboot')]
-llog, lfsck, lone = den_run('log'), den_run('fsck', '--full'), den_run('log', '--oneline')
+llog, lfsck, lone = den_run('log', '--no-decorate'), den_run('fsck', '--full'), den_run('log', '--oneline', '--no-decorate')
 if any(x.returncode for x in lsteps) or llog.returncode or lfsck.returncode:
-    fail('P2', 'the Linux side did not run clean: ' + repr([x.returncode for x in lsteps + [llog, lfsck]]))
+    fail('P2', 'the Linux side did not run clean: ' + repr([(x.returncode, x.stderr[-200:]) for x in lsteps + [llog, lfsck]]))
 
 plog = between(lines2, 'PX90-LOG-BEGIN', 'PX90-LOG-END')
 want = llog.stdout.decode().splitlines() + ['PX90-LOG=0']
@@ -216,7 +230,7 @@ if not pobj or pobj != lobj:
                f'only Linux {sorted(set(lobj) - set(pobj))[:3]}, other bytes {[k for k in pobj if k in lobj and pobj[k] != lobj[k]][:3]}')
 for ref in ('HEAD', 'refs/heads/main'):
     a, b = dump / 'den-persist/.git' / ref, repo / '.git' / ref
-    if not a.is_file() or a.read_bytes() != b.read_bytes():
+    if not a.is_file() or not b.is_file() or a.read_bytes() != b.read_bytes():
         why.append(f'.git/{ref} differs')
 (work / f'den-{firmware}.objects').write_text(''.join(f'{v}  {k}\n' for k, v in pobj.items()))
 if why:
