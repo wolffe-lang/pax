@@ -14,7 +14,8 @@
 #   nohash    HEAD + a probe commit (local, never pushed): kernel/identity does not hash the loaded file, to see
 #             the SHA-256's share
 # The Linux side runs once (base's images; tools/linux-tree on the host through podman-blk) and is copied to the
-# others. Every boot step's output is timestamped (seconds since the epoch), so a case's wall time is its `begin`
+# others. The probe commits are never signed (-c commit.gpgsign=false: hasu's own git configuration signs with a
+# key a lane must not use). Every boot step's output is timestamped (seconds since the epoch), so a case's wall time is its `begin`
 # line to its `F3` line; the head's serial logs carry the kernel's own `boot:` line (the time to the first program
 # and the console's share).
 set -uo pipefail
@@ -25,7 +26,7 @@ I=localhost/px88-ubuntu:1
 TREE=docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 CASES="corpus probes c_jc_mixed_pipeline cnf_cd"
 case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; esac
-M=$L/m1 G="flock $L/git.lock git"
+M=$L/${PX87_MEASURE_DIR:-m2} G="flock $L/git.lock git"
 [ ! -e "$M" ] || { echo "$M exists"; exit 3; }
 mkdir -p "$M" "$L/cache" "$L/tmp"
 ts() { date -u +%FT%TZ; }
@@ -39,8 +40,8 @@ clone() {
     done
     sed -i 's/^    set_readback(boot_info.cmdline_has("fbread"))$/    set_readback(true)/' "$M/readback/kernel/screen/screen.lu"
     sed -i '/^            digest(f, addr, n)$/d' "$M/nohash/kernel/identity/identity.lu"
-    git -C "$M/readback" -c user.name=px87-probe -c user.email=px87@probe.invalid commit -q -am "PROBE (never pushed): the scroll reads the framebuffer back by default" || return 1
-    git -C "$M/nohash" -c user.name=px87-probe -c user.email=px87@probe.invalid commit -q -am "PROBE (never pushed): kernel/identity does not hash the loaded file" || return 1
+    git -C "$M/readback" -c user.name=px87-probe -c user.email=px87@probe.invalid -c commit.gpgsign=false commit -q -am "PROBE (never pushed): the scroll reads the framebuffer back by default" || return 1
+    git -C "$M/nohash" -c user.name=px87-probe -c user.email=px87@probe.invalid -c commit.gpgsign=false commit -q -am "PROBE (never pushed): kernel/identity does not hash the loaded file" || return 1
     for v in base head readback nohash; do
         printf '%s %s %s\n' "$v" "$(git -C "$M/$v" rev-parse HEAD)" "$(git -C "$M/$v" diff --stat HEAD~1 2>/dev/null | tail -n 1 | sed 's/^ *//')"
     done
