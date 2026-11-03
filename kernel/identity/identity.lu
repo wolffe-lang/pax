@@ -334,10 +334,27 @@ pub fn report_boot() {
     // px87: the way kernel/screen's attach chose (copy where a framebuffer
     // read is cheap, redraw where it is not): the metal A/B's other half.
     if screen.copy_scroll() {
-        log.put(" scrolls by copy, ")
+        log.put(" scrolls by copy (")
     } else {
-        log.put(" scrolls by redraw, ")
+        log.put(" scrolls by redraw (")
     }
+    // and why: the word that forced it, or the probe's two costs and the
+    // rule (kernel/screen's COPY_MAX), so a photo of the screen says why
+    let f = screen.scroll_forced()
+    if f == 1 {
+        log.put("fbread")
+    } else if f == 2 {
+        log.put("fbwrite")
+    } else {
+        log.put("read ")
+        log.dec(screen.probe_read_cycles() as int)
+        log.put(", write ")
+        log.dec(screen.probe_write_cycles() as int)
+        log.put(" cycles; copy when read <= ")
+        log.dec(screen.copy_max() as int)
+        log.put(" x write")
+    }
+    log.put("), ")
     log.dec(screen.bytes() as int)
     log.put(" bytes)")
     log.end()
