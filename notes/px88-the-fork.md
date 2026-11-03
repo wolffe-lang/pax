@@ -75,7 +75,10 @@ Commits (the prediction first; the failing rows before each fix):
   child's exec counts its parent's peak
 - `a4fb4ec9` user/elf/usage.c: no hang on a kernel that cannot fork; `1ce14056` the 64 MiB peak itself
 - `34568fd5` docs/CENSUS.md; `93687f55` docs/BOOT.md; `d628abf0` notes/px88: the chains' logs and transcripts
-- `5caece74` README (a README-only commit); this note
+- `5caece74` README (a README-only commit); `ce2a07ac` this note, before the plant and the gauntlet
+- `fe87b745` notes/px88/hasu: the gauntlet (FROM, UNTIL, a step-log directory per run) and the plant's match
+- `5ff8f988`, `111e7074` notes/px88: the gauntlets' logs, the plant's session, the match's proof; after them, this
+  note's plant and gauntlet sections
 
 ## Prediction, scored
 
@@ -93,8 +96,8 @@ Commits (the prediction first; the failing rows before each fix):
 | P6 times: the spin's utime 150-320 ms, stime under 50; the reads' stime at least 100, more than utime | **right** on both (Linux: +299 ms utime; +299 ms stime for the reads) |
 | P7 switches: ten sleeps at least 10 voluntary; a shared spin at least 2 involuntary | **right**; **not predicted**: Linux counts a `sched_yield` that switches as involuntary (+20 nivcsw for 20 yields), as PAX does |
 | P8 the installer prints `<N> KiB`, above Linux's 11884 KiB, 12-256 MiB | **right on the line, wrong on the size**: `Installer peak RSS through copy verification: 5904 KiB`, `Formatter children peak RSS: 28264 KiB`, below Linux's reference |
-| P9 nothing else moves | the suites run here (the gauntlet, below) green; CI's `tier pr` runs every suite (kernel/sched is the core) |
-| P10 the plant reddens the forks rows by name | see the plant, below |
+| P9 nothing else moves | **right** for the suites run here: mpx2-sched and mpx3-user, all four legs, and every self-test and the census green (the gauntlet, below); CI's `tier pr` runs every suite (kernel/sched is the core) |
+| P10 the plant reddens the forks rows by name | **right**, and more than the one row: K1 red at line 2 (`fork: child status 0`), the child never reaching its own rows, and the session hanging (K3-K5; the plant, below) |
 
 Not predicted at all: a parent whose SIGCHLD is ignored keeps no zombie on Linux and does not count the child
 (`ignored SIGCHLD: waitpid -1 errno 10`, the children's utime and maxrss unchanged), where PAX kept a zombie; the
@@ -168,11 +171,133 @@ exec (the same unless the parent's earlier image was larger).
 
 ### The plant
 
-(Filled in after the gauntlet, below.)
+`px88-plant-fork` = `fe780b7f` (draft PR #274, base `px88`, never to merge; its CI run `41560213359` is the
+orchestrator's to watch): `ce2a07ac` with one line of `kernel/sched`'s `clone_current` changed, the child's %rax the
+parent's tgid where fork(2) gives it 0.
+
+```
+-        ((cf + W_RAX * 8) as *u64).write_volatile(0)
++        ((cf + W_RAX * 8) as *u64).write_volatile(if cr3 != 0 { field(p, offset_of(Thread, tgid)) } else { 0 }) // PLANT …
+```
+
+Red by name, native BIOS, the forks session (`notes/px88/sessions/plant-fe780b7f/`, gauntlet3's run): PAX's whole
+transcript is two lines, `forks: as root` and `fork: child status 0`, where Linux's lines 2 and 3 are `fork: child`
+and `fork: child status 7`. Given a nonzero answer the child takes the parent's branch at the first fork: it never
+prints `fork: child`, its waitpid of the pid it was given answers ECHILD (status 0), and both processes then wait as
+parents on a pipe nobody writes, so the session never halts. The rows:
+
+```
+mpx5-forks: FAIL K1 native bios forks: the output differs from Linux's: 2,49c2|< fork: child|< fork: child status 7|…
+mpx5-forks: FAIL K3 native bios forks: 0 killed (0 by SIGTERM), not the one SIGTERM row: ;
+mpx5-forks: FAIL K4 native bios forks: frames not all back (''); no tree line ('');
+mpx5-forks: FAIL K5 native bios forks: no 'PAX: init … ended with status 0' (); not halted (qemu-halt: NOT HALTED: no line matching /halt|PANIC .*/ within 600s);
+```
+
+K3, K4 and K5 follow from K1: a fork's child knows it is the child only by its 0, so the contract's break cannot
+spare what the child does next, and the plant was not re-cut. The first form of `plantred.sh` (gauntlet2) looked for
+the `what fork answered the child:` row, which the hang means is never reached, and failed the step on a red plant.
+The step now holds the red at its first sign (K1 red, the session's line 2 exactly `fork: child status 0`, no
+`fork: child` line), and its `--match` mode is its own proof (`notes/px88/hasu-logs/plantred-match-proof.log`):
+green (exit 0) on the plant's real session and log, gauntlet2's and gauntlet3's; red (exit 1) on five wrong inputs
+(the green session, the green session with the plant's log, a child that printed its line, fork's -ENOSYS, the
+plant's session with a green K1).
 
 ### The gauntlet at the final head
 
-(Filled in after the gauntlet, below.)
+`notes/px88/hasu/gauntlet.sh` on hasu block A, at `ce2a07ac`, behind both of the block's locks, each step's log its
+own (`notes/px88/hasu-logs/gauntlet*-ce2a07ac/`). Everything after `ce2a07ac` on the branch is `notes/` alone (the
+scripts, the logs, this note), so the head's kernel, probes, tests and CI are the gauntlet's.
+
+**gauntlet** (the first): stopped at its first step on its own bug, a step name with `/` used as a file name; no test
+ran.
+
+```
+2026-11-03T01:32:00Z END tests/ci-plan exit=1
+2026-11-03T01:32:00Z px88 gauntlet: released block A; END gauntlet exit=1
+```
+
+**gauntlet2**: every step 0 up to the plant, which failed on the check's bug (above).
+
+```
+2026-11-03T01:33:25Z END tests/ci-plan exit=0
+2026-11-03T01:33:26Z END python3 -I tests/ci-retry.py exit=0
+2026-11-03T01:33:26Z END python3 -I tests/mpx2-heap.d/budget.py exit=0
+2026-11-03T01:33:27Z END python3 -I tests/ci-budgets.py exit=0
+2026-11-03T01:33:27Z END tests/fetch-retry-selftest exit=0
+2026-11-03T01:33:28Z END python3 -I tests/usb-session-selftest exit=0
+2026-11-03T01:33:28Z END python3 -I tests/pipe-shape-selftest exit=0
+2026-11-03T01:33:28Z END tests/expect-serial-selftest exit=0
+2026-11-03T01:33:29Z END tests/census exit=0
+END g-forks-ce2a07ac-boot-uefi-release-forks+usage+forks-user+usage-user exit=0
+2026-11-03T01:40:59Z END tests/mpx5-forks all four legs exit=0
+END g-hang-4420a145-boot-bios-native-usage exit=1
+2026-11-03T01:41:13Z END g-hang-4420a145-ends exit=0 (the suite's own exit 1: its rows are red at this kernel by design)
+2026-11-03T01:41:13Z END mpx5-forks usage ends on a kernel without fork exit=0
+END g-plant-fe780b7f-boot-bios-native-forks exit=1
+2026-11-03T01:51:23Z END g-plant-fe780b7f-red exit=1 (the suite's own exit 1)
+2026-11-03T01:51:23Z END the plant red by name exit=1
+2026-11-03T01:51:23Z px88 gauntlet2: released block A; END gauntlet2 exit=1
+```
+
+mpx5-forks' four legs (native and release, BIOS and UEFI; the four sessions each): 72 PASS rows, every forks session
+49 lines and every usage session 43 byte-identical to Linux's, root and 1000:1000. The hang check (`4420a145`: the
+fork-less kernel with the head's probe) is red on K1-K3 as it must be and runs to its end (`PASS K5 … init ended,
+status 0`, halted). Those two steps' boot logs are kept from their own build directories
+(`gauntlet2-ce2a07ac/`); gauntlet2's step logs for the nine fast steps were erased when gauntlet3 cleared the
+directory they shared, which is why gauntlet4 ran them again.
+
+**gauntlet3**: from the plant on, every step 0. The steps before the plant print SKIP (they ran 0 in gauntlet2, at
+the same head):
+
+```
+SKIP tests/ci-plan (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP python3 -I tests/ci-retry.py (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP python3 -I tests/mpx2-heap.d/budget.py (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP python3 -I tests/ci-budgets.py (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP tests/fetch-retry-selftest (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP python3 -I tests/usb-session-selftest (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP python3 -I tests/pipe-shape-selftest (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP tests/expect-serial-selftest (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP tests/census (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP tests/mpx5-forks all four legs (before 'the plant red by name': 0 in the earlier gauntlet)
+SKIP mpx5-forks usage ends on a kernel without fork (before 'the plant red by name': 0 in the earlier gauntlet)
+2026-11-03T02:08:16Z END g-plant-fe780b7f-red exit=0 (the suite's own exit 1)
+2026-11-03T02:08:16Z END the plant red by name exit=0
+END g-peak-ce2a07ac-install exit=0
+2026-11-03T02:08:49Z END mpx6-install I-peak exit=0
+2026-11-03T02:18:23Z END g-mpx2-sched exit=0
+2026-11-03T02:18:23Z END tests/mpx2-sched all four legs exit=0
+2026-11-03T02:37:51Z END g-mpx3-user exit=0
+2026-11-03T02:37:51Z END tests/mpx3-user all four legs exit=0
+2026-11-03T02:37:51Z px88 gauntlet3: released block A; END gauntlet3 exit=0
+```
+
+I-peak read `PASS I-peak: installer 5872 KiB, formatter children 28264 KiB (getrusage, pax#248)`; r4 read 5904 at
+`efff7957`, the same kernel, probes and tests (nothing under `kernel/`, `boot/`, `user/`, `tools/`, `tests/` or
+`.github/` differs between the two): eight pages apart run to run, both below Linux's 11884. mpx2-sched: 33 PASS lines, no FAIL, seven rows on each of the four legs. mpx3-user: 39 PASS lines, no FAIL, eight
+rows on each leg, the SMAP and SMEP panics by name.
+
+**gauntlet4**: the nine fast steps once more, in a step-log directory of its own (`gauntlet4-ce2a07ac/`), ending at
+`tests/census` (`UNTIL`). Each step's log was read, not only its exit: ci-plan's 317 PASS lines, among them px88's
+(the musl probes reach mpx5-forks and mpx5-users, their builder mpx5-forks alone, kernel/process every user suite,
+P4's mpx5-forks job); census's C1-C6 and R0-R3 PASS, `docs/CENSUS.md matches` (the served section regenerates
+byte-identically); expect-serial's 26 `ok` rows; the budgets, retry, USB, pipe-shape and fetch-retry rows all PASS,
+no FAIL in any.
+
+```
+2026-11-03T02:43:48Z END tests/ci-plan exit=0
+2026-11-03T02:43:49Z END python3 -I tests/ci-retry.py exit=0
+2026-11-03T02:43:50Z END python3 -I tests/mpx2-heap.d/budget.py exit=0
+2026-11-03T02:43:50Z END python3 -I tests/ci-budgets.py exit=0
+2026-11-03T02:43:51Z END tests/fetch-retry-selftest exit=0
+2026-11-03T02:43:51Z END python3 -I tests/usb-session-selftest exit=0
+2026-11-03T02:43:52Z END python3 -I tests/pipe-shape-selftest exit=0
+2026-11-03T02:43:53Z END tests/expect-serial-selftest exit=0
+2026-11-03T02:43:53Z END tests/census exit=0
+2026-11-03T02:43:53Z px88 gauntlet4: released block A; END gauntlet4 exit=0
+```
+
+(Each step also prints its container's own `END g-<name> exit=N`; the logs hold both.)
 
 ## Done-when
 
@@ -184,7 +309,8 @@ exec (the same unless the parent's earlier image was larger).
 - [x] Item 3: the installer's two peak lines print KiB (I-peak, red first); docs/CENSUS.md's served section and its
   installer paragraph moved; docs/BOOT.md likewise.
 - [x] Item 4: the clean room, as above.
-- [ ] Item 5: the note, the plant, the PR, the audit (below).
+- [x] Item 5: this note; the plant `px88-plant-fork` (#274) red by name; the gauntlet at the head (above); the PR
+  and the audit are the hand-back's.
 - [x] README read against the pass: the Programs row and the suites table moved (`5caece74`, a README-only
   commit); nothing else in it moved.
 
