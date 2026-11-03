@@ -2155,6 +2155,79 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px89: QEMU's Intel 82576 (`-device igb`), the ring model kernel/gbe
+  # shares with the I225: tests/mpx4-igb runs the DHCP client
+  # (tests/mpx4-dhcp: slirp, renew, nak), the UDP rows (tests/mpx4-udp:
+  # peer and user, the user way's address by DHCP) and the TCP rows
+  # (tests/mpx4-tcp: peer and user) over it, then the UDP user way with
+  # the controller polled every tick (`netpoll`, the I225's path on
+  # kasumi). Every row is the virtio suite's own; the Linux reference
+  # sides are theirs (sudo, a tap in a network namespace).
+  mpx4-igb:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-igb')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace, dnsmasq (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace dnsmasq-base iproute2
+          qemu-system-x86_64 --version
+          qemu-system-x86_64 -device help | grep -F '"igb"'
+          dnsmasq --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx4-igb-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the runner's tap device
+        run: |
+          sudo modprobe tun
+          ls -l /dev/net/tun
+
+      - name: DHCP, UDP and TCP over igb, the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_REQUIRE_DHCP_WIRE: "1"
+        run: tests/mpx4-igb $PAX_LEGS
+
+      - name: keep the logs and the captures' verdicts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx4-igb
+          path: |
+            build/mpx4-*-igb*.log
+            build/mpx4-*-igb*.norm
+            build/mpx4-*-igb*.verdict
+            build/mpx4-*-igb*.check
+            build/mpx4-*-igb*.end
+            build/mpx4-*-igb*.wire/
+            build/mpx4-*-igb*-runs.txt
+            build/mpx4-*-igb*/*.run
+            build/mpx4-*-igb*/*/kmain_sockets.build-kernel.log
+          retention-days: 14
+          if-no-files-found: warn
+
   # px23: TCP. Ten static Linux programs (user/net: eight C files built
   # here by tools/mknet against this runner's glibc, and two wolf
   # programs built by the pinned wolf) run unmodified on
@@ -5096,6 +5169,7 @@ jobs:
       - tour
       - mpx4-net
       - mpx4-dhcp
+      - mpx4-igb
       - mpx4-udp
       - mpx4-tcp
       - mpx4-ready
