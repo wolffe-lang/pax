@@ -88,12 +88,12 @@ done
 ways=${ways//,/ } # a list by commas or spaces
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $nic in virtio) device=virtio-net-pci ;; igb) device=igb ;; *) die "--nic takes virtio or igb" ;; esac
+case $nic in virtio) device=virtio-net-pci sfx= ;; igb) device=igb sfx=-igb ;; *) die "--nic takes virtio or igb" ;; esac
 for w in $ways; do case $w in slirp|backoff|renew|rebind|expiry|nak|session) ;; *) die "unknown way $w" ;; esac; done
 
 MAC=52:54:00:12:34:56
-work=$PAX_BUILD/mpx4-dhcp
-runs=$PAX_BUILD/mpx4-dhcp-runs.txt
+work=$PAX_BUILD/mpx4-dhcp$sfx
+runs=$PAX_BUILD/mpx4-dhcp$sfx-runs.txt
 fail=0 ran=0 skipped=0
 bad() { say "FAIL $*"; fail=1; }
 need nm python3
@@ -189,9 +189,9 @@ plus() { python3 -c 'import sys; print("%.2f" % (float(sys.argv[1]) + float(sys.
 boot() { # tier leg way -> $log $norm $pcap $acct
     local tier=$1 leg=$2 way=$3 rc=0 k
     k=$(kernel_of "$way")
-    log=$PAX_BUILD/mpx4-dhcp-$tier-$leg-$way.serial.log
-    pcap=$PAX_BUILD/mpx4-dhcp-$tier-$leg-$way.pcap
-    acct=$PAX_BUILD/mpx4-dhcp-$tier-$leg-$way.wire
+    log=$PAX_BUILD/mpx4-dhcp$sfx-$tier-$leg-$way.serial.log
+    pcap=$PAX_BUILD/mpx4-dhcp$sfx-$tier-$leg-$way.pcap
+    acct=$PAX_BUILD/mpx4-dhcp$sfx-$tier-$leg-$way.wire
     norm=$log.norm
     local iso=$images/$tier/$way.iso elf=$images/$tier/$k.elf
     rm -rf "$log" "$log.verdict" "$pcap" "$norm" "$acct"
