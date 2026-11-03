@@ -226,13 +226,14 @@ loaded (Limine's Executable File response), the bytes `sha256sum
 /boot/pax` and `/etc/pax-release`'s kernel row hash. Before its first
 program it times its own boot: `boot: <n> ms from the kernel's entry to
 its first program; the console drew for <m> ms of it (<s> scrolls by
-copy|redraw, <b> bytes)` (the TSC, its rate measured against 10 ms of the
-HPET or the PM timer). A scroll either redraws, from the cell grid (the
+copy|redraw (<why>), <b> bytes)` (the TSC, its rate measured against 10 ms
+of the HPET or the PM timer), <why> being the word that forced the way or
+the probe's `read <r>, write <w> cycles; copy when read <= 4 x write`. A scroll either redraws, from the cell grid (the
 screen's shadow in RAM), only the cells that changed, never reading the
 framebuffer, or copies the framebuffer onto itself as px19's scroll did.
-When the screen attaches it times a 32 KiB read of the framebuffer
-against a write of the same bytes and copies only when a read costs at
-most four writes: through a GPU's write-combining mapping a read is
+When the screen first attaches it times a 32 KiB read of the framebuffer
+against a write of the same bytes, once, and copies for the rest of the
+boot only when the read cost at most four writes: through a GPU's write-combining mapping a read is
 uncached and far dearer (pax#253: kasumi's GPU), so the scroll redraws;
 an emulator's framebuffer is ordinary host memory, where the copy is the
 cheaper way. The command-line words `fbread` (copy) and `fbwrite`
