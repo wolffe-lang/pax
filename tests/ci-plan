@@ -590,7 +590,7 @@ say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tie
 for j in SUITES:
     b = blocks[j]
     needs = "[plan, proof]" if j == "macos-run" else "plan"
-    ok = ("    needs: %s\n" % needs) in b and ("    if: contains(fromJSON(needs.plan.outputs.suites), '%s')\n" % j) in b
+    ok = ("    needs: %s\n" % needs) in b and ("    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), '%s')) }}\n" % j) in b
     why = ""
     script = os.path.join(ROOT, "tests", j)
     run = re.search(r"^\s+run: tests/%s\b(.*)$" % re.escape(j), b, re.M)
@@ -601,7 +601,7 @@ for j in SUITES:
         why = " (the step: tests/%s%s; the script takes --tier/--firmware: %s)" % (j, run.group(1), takes)
     say(ok, "P4 %s needs the plan, runs when chosen%s" % (j, why))
 tn = re.findall(r"^      - ([A-Za-z0-9_-]+)\s*$", blocks["tier"], re.M)
-say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: ${{ !cancelled() }}" in blocks["tier"],
+say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (!cancelled()) }}" in blocks["tier"],
     "P4 the tier job runs unless cancelled and needs every job (%d of %d)" % (len(tn), len(SUITES) + 1))
 say("        run: tools/ci-plan --verdict\n" in blocks["tier"] and "actions/checkout" in blocks["tier"],
     "P4 the tier job's check is tools/ci-plan --verdict")

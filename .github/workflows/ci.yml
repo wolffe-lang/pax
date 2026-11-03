@@ -1,3 +1,5 @@
+# Local evidence gate: unlabelled PRs are cheap; ci/full-matrix opt in.
+# Existing release labels, nightly tiers and every test command are preserved.
 # pax — CI.
 #
 # The harness proof on every push to trunk and every pull request:
@@ -65,9 +67,41 @@ name: ci
 on:
   push:
     branches: [trunk]
+    paths:
+      - '.github/**'
+      - 'ci/**'
+      - '!ci/**/*.md'
+      - 'tools/**'
+      - 'spec/**'
+      - '**/wolf-toolchain.toml'
+      - '**/rust-toolchain.toml'
+      - '**/*.pin'
+      - '**/PAIRING'
+      - '**/STD-PIN'
+      - 'vendor/tools.toml'
+      - 'gnu-oracle.toml'
+      - '.gitmodules'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'boot/**'
+      - 'kernel/wolf.pkg'
+      - 'kernel/elf/**'
+      - 'kernel/serial/**'
+      - 'kernel/log/**'
+      - 'kernel/panic/**'
+      - 'kernel/boot_info/**'
+      - 'kernel/frames/**'
+      - 'kernel/paging/**'
+      - 'kernel/gdt/**'
+      - 'kernel/idt/**'
+      - 'kernel/interrupts/**'
+      - 'kernel/apic/**'
+      - 'kernel/timer/**'
+      - 'kernel/heap/**'
+      - 'kernel/sync/**'
+      - 'kernel/sched/**'
+      - 'kernel/fpu/**'
   pull_request:
-    # `labeled` so adding `full-matrix` starts the full run at once; any
-    # other label's run is a noop (the plan, then nothing).
     types: [opened, synchronize, reopened, labeled]
   schedule:
     # Nightly, the all tier (every suite, every leg), on trunk; a red one
@@ -130,10 +164,12 @@ jobs:
       legs: ${{ steps.plan.outputs.legs }}
     steps:
       - uses: actions/checkout@v4
+        if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
         with:
           fetch-depth: 0
 
       - name: the planner can say no (tests/ci-plan)
+        if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
         run: |
           tests/ci-plan
           python3 -I tests/ci-retry.py
@@ -144,9 +180,10 @@ jobs:
           python3 -I tests/pipe-shape-selftest
 
       - name: the plan
+        if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
         id: plan
         env:
-          EVENT: ${{ github.event_name }}
+          EVENT: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'release-matrix') && 'push' || github.event_name }}
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
@@ -156,9 +193,15 @@ jobs:
           IN_SUITES: ${{ inputs.suites }}
         run: tools/ci-plan --github-output "$GITHUB_OUTPUT"
 
+      - name: local gate wiring proof
+        if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
+        run: python3 -I ci/local-gate-test.py
+      - name: local evidence gate
+        if: ${{ !(github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) }}
+        run: echo 'Local gauntlet evidence is the gate; request ci or full-matrix for CI.'
   proof:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'proof')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'proof')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -216,7 +259,7 @@ jobs:
 
   macos-run:
     needs: [plan, proof]
-    if: contains(fromJSON(needs.plan.outputs.suites), 'macos-run')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'macos-run')) }}
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -248,7 +291,7 @@ jobs:
   # same run. Every step bare, exit codes read directly.
   mkw:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mkw')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mkw')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -314,7 +357,7 @@ jobs:
   # spinning kernel refused by the halt probe in the same run (A6).
   mpx1:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx1')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx1')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -376,7 +419,7 @@ jobs:
   # containers on kasumi (tools/census/census).
   census:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'census')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'census')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -397,7 +440,7 @@ jobs:
   # usable each panicking by name (F6, F7), every halt proven (F8).
   mpx2-frames:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-frames')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx2-frames')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -458,7 +501,7 @@ jobs:
   # mpx2-frames job's (G5).
   mpx2-paging:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-paging')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx2-paging')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -525,7 +568,7 @@ jobs:
   # (I6).
   mpx2-interrupts:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-interrupts')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx2-interrupts')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -590,7 +633,7 @@ jobs:
   # (S5), the halt (S6).
   mpx2-sched:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-sched')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx2-sched')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -656,7 +699,7 @@ jobs:
   # heap (H9) each panicking by name.
   mpx2-heap:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-heap')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx2-heap')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -726,7 +769,7 @@ jobs:
   # (U8).
   mpx3-user:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-user')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-user')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -791,7 +834,7 @@ jobs:
   # asks for (L8, the gap census); both tiers, BIOS and UEFI.
   mpx3-loader:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-loader')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-loader')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -867,7 +910,7 @@ jobs:
   # and UEFI.
   mpx3-boreutils:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-boreutils')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-boreutils')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -954,7 +997,7 @@ jobs:
   # BIOS and UEFI.
   mpx3-console:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-console')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-console')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1088,7 +1131,7 @@ jobs:
   # screen (V6); both tiers, BIOS and UEFI.
   mpx3-screen:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-screen')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-screen')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1165,7 +1208,7 @@ jobs:
   # BIOS and UEFI.
   mpx3-shell:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-shell')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-shell')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1277,7 +1320,7 @@ jobs:
   # the job at 45 minutes: a kernel that hangs here fails fast.
   mpx3-threads:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-threads')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-threads')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1367,7 +1410,7 @@ jobs:
   # the job ends at 60 minutes: a kernel that hangs here fails fast.
   mpx3-tree:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-tree')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-tree')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1453,7 +1496,7 @@ jobs:
   # back (T4), the mremap census (T5), the end (T6).
   mpx3-maps:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-maps')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-maps')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1548,7 +1591,7 @@ jobs:
   # builds it static from its source package, by digest).
   mpx3-speaker:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-speaker')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-speaker')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1627,7 +1670,7 @@ jobs:
   # O_NONBLOCK (S6), play mixed (S7).
   mpx3-sound:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-sound')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-sound')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1694,7 +1737,7 @@ jobs:
   # judged by the same specs (O5) and the cost in the guest (O6).
   mpx3-orchestra:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-orchestra')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx3-orchestra')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1757,7 +1800,7 @@ jobs:
   # (R7).
   tour:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'tour')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'tour')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1833,7 +1876,7 @@ jobs:
   # socket); the sockets themselves are the mpx4-udp job's.
   mpx4-net:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-net')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx4-net')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -1922,7 +1965,7 @@ jobs:
   # datagrams each way (U8); the halt (U9).
   mpx4-udp:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-udp')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx4-udp')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2029,7 +2072,7 @@ jobs:
   # broken kernel is red here in minutes.
   mpx4-tcp:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-tcp')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx4-tcp')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2131,7 +2174,7 @@ jobs:
   # a later way's or leg's red is seen; a dispatch's `ways` names a subset.
   mpx4-ready:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-ready')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx4-ready')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2226,7 +2269,7 @@ jobs:
   # 256 MiB and UEFI.
   mpx4-session:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-session')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx4-session')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2321,7 +2364,7 @@ jobs:
   # at 60 minutes: a kernel that hangs here fails fast.
   mpx4-unix:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-unix')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx4-unix')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2405,7 +2448,7 @@ jobs:
   # and hands on both tiers, BIOS and UEFI.
   mpx4-lobo:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-lobo')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx4-lobo')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2524,7 +2567,7 @@ jobs:
   # calls' rules, nothing more.
   mpx5-users:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2619,7 +2662,7 @@ jobs:
   # clock, the suite's script or the root-disk tools.
   mpx5-users-ahci:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users-ahci')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users-ahci')) }}
     runs-on: ubuntu-latest
     # R-px75b-6: CI's leg 3436 s (run 40818748481), the users virtio root
     # floor 3422 s x hasu's TCG ratio 1733/1728 = 3432 s; floor 50 + 3436 + 180
@@ -2690,7 +2733,7 @@ jobs:
   # (tests/mpx5-accounts.d/linux/).
   mpx5-accounts:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-accounts')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-accounts')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2780,7 +2823,7 @@ jobs:
   # signal calls, against the same.
   mpx5-jobs:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-jobs')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-jobs')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2887,7 +2930,7 @@ jobs:
   # image, no archive).
   mpx5-lope:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lope')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lope')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -2991,7 +3034,7 @@ jobs:
   # eleven fork shapes, nine probes and static table checks, root and pax.
   mpx5-pelt:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-pelt')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-pelt')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_PELT_CASES: ${{ inputs.pelt_cases }}
@@ -3092,7 +3135,7 @@ jobs:
   # (tools/linux-tree). aspen is public: tools/mkaspen fetches it.
   mpx5-aspen:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-aspen')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-aspen')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3173,7 +3216,7 @@ jobs:
   # tools/mkscent fetches it.
   mpx5-scent:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-scent')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-scent')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3252,7 +3295,7 @@ jobs:
   # container (tests/mpx5-bore).
   mpx5-bore:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-bore')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-bore')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3334,7 +3377,7 @@ jobs:
   # installs nothing.
   mpx5-lupin:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lupin')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lupin')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3421,7 +3464,7 @@ jobs:
   # px60: the patched musl compiler and its checked-machine sessions.
   mpx5-wolf:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-wolf')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-wolf')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_WOLF_PLANT: ${{ inputs.wolf_plant }}
@@ -3534,7 +3577,7 @@ jobs:
   # release carries #957 yet. Nothing boots.
   kernel-as:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'kernel-as')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'kernel-as')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3606,7 +3649,7 @@ jobs:
   # objects GNU as's by clef's structural rule (tests/mpx5-clef).
   mpx5-clef:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-clef')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-clef')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3685,7 +3728,7 @@ jobs:
   # throwaway container (tools/linux-tree) but the gap table's named rows.
   mpx5-yew:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-yew')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-yew')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3768,7 +3811,7 @@ jobs:
   # while they run held to screen-ref's.
   mpx5-screen:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-screen')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx5-screen')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3835,7 +3878,7 @@ jobs:
   # (VIRTIO_BLK_F_RO, the write refused by name); no disk.
   mpx6-blk:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-blk')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-blk')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
@@ -3896,7 +3939,7 @@ jobs:
   # the runner's kernel is root's to read.
   mpx6-ext2:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-ext2')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-ext2')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_EXT2_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'read' || 'all' }}
@@ -3969,7 +4012,7 @@ jobs:
   # the numbers past 15 and the fstab boot too.
   mpx6-nodes:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-nodes')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-nodes')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_NODES_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
@@ -4044,7 +4087,7 @@ jobs:
   # the full and all tiers every session.
   mpx6-nvme:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-nvme')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-nvme')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_NVME_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
@@ -4124,7 +4167,7 @@ jobs:
   # clean flag after an exit, a reboot and a power cut.
   mpx6-ahci:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-ahci')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-ahci')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_AHCI_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
@@ -4184,7 +4227,7 @@ jobs:
 
   mpx6-part:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-part')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-part')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_PART_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'table' || 'all' }}
@@ -4258,7 +4301,7 @@ jobs:
   # /etc across a reboot, a power cut and the next boot, the ISO way.
   mpx6-root:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-root')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-root')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
@@ -4331,7 +4374,7 @@ jobs:
   # (tests/mpx6-journal.d/linux/, Linux 7.3.0 with an ext3 root).
   mpx6-journal:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-journal')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-journal')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_JOURNAL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
@@ -4396,7 +4439,7 @@ jobs:
   # px69: three filesystem-format differentials and a disk built on PAX.
   mpx6-disktools:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-disktools')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-disktools')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
@@ -4471,7 +4514,7 @@ jobs:
   # px71: smallest policy/executor rows plus real second-disk installs.
   mpx6-install:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-install')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-install')) }}
     runs-on: ubuntu-24.04
     # px84 (R-px84-6): sizing floors pr 642 s, full 4675 s (with the 500 GB
     # row), all 7438 s (with 4 TB), 40% headroom; see ci-budgets. px76's
@@ -4544,7 +4587,7 @@ jobs:
   # installer's smoke inputs (no yew), then the one leg.
   mpx6-kasumi:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-kasumi')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-kasumi')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -4603,7 +4646,7 @@ jobs:
 
   mpx6-fsck:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-fsck')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-fsck')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
@@ -4673,7 +4716,7 @@ jobs:
   # names the keys; the terminal restored), and the font row withheld.
   mpx6-games:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-games')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-games')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-24.04
@@ -4736,7 +4779,7 @@ jobs:
 
   mpx6-usb:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-usb')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-usb')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
@@ -4781,7 +4824,7 @@ jobs:
   # and both (F9, native). F5 and F8 are UEFI on every leg.
   mpx6-firmware:
     needs: plan
-    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-firmware')
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.suites), 'mpx6-firmware')) }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
@@ -4820,7 +4863,7 @@ jobs:
 
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
-    if: ${{ !cancelled() }}
+    if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (!cancelled()) }}
     needs:
       - plan
       - proof
