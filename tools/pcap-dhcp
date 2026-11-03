@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+# pcap-dhcp — hold a capture of PAX's DHCP client to RFC 2131 and to the
+# exact bytes kernel/dhcp says it sends (px89; tests/mpx4-dhcp,
+# tests/mpx4-igb).
+#
+#   tools/pcap-dhcp --mac MAC [--backoff] [--list] FILE.pcap
+#
+# FILE.pcap is what QEMU's `-object filter-dump` wrote (pcap-savefile(5):
+# a 24-byte header, link type 1; a 16-byte record header and the frame
+# without its checksum per frame), both ways. The checker reads it once,
+# in order, with a model of the client written from RFC 2131 and RFC 2132
+# (and RFC 951's BOOTP body, RFC 768, RFC 791): every frame from MAC to
+# UDP port 67 is a client message, rebuilt from its meaning and compared
+# with the capture BYTE FOR BYTE:
+#
+#   Ethernet  to ff:ff:ff:ff:ff:ff, or (a renewal) to the hardware
+#             address the server's own frames came from
+#   IPv4      version 4, IHL 5, TOS 0, DF, TTL 64, protocol 17, the
+#             header checksum right; from 0.0.0.0 while no lease is
+#             held, from the leased address after; to 255.255.255.255,
+#             or (a renewal) to the server; the identification above the
+#             last of MAC's datagrams, modulo 65536
+#   UDP       68 -> 67, the checksum made (never zero) and right
+#   BOOTP     op 1, htype 1, hlen 6, hops 0; the xid the exchange keeps;
+#             secs; flags 0x8000 (BROADCAST) until a lease is held, 0
+#             after; ciaddr 0, or the leased address in a renewal or a
+#             rebinding; yiaddr, siaddr, giaddr 0; chaddr MAC and ten
+#             zeros; sname and file zero; the magic cookie
+#   options   53 (the type); 61 (client identifier: 1, MAC); then for a
+#             REQUEST answering an OFFER, 50 (the address offered) and
+#             54 (the server that offered it); 55 (1 3 6 51 58 59); 255;
+#             zeros to a 300-byte BOOTP message (RFC 1542 2.1)
+#
+# and held to the exchange as the capture shows it so far:
+#
+#   DISCOVER  first, after a NAK and after a lease ran out; again (the
+#             same xid, secs not going back) while no OFFER came
+#   REQUEST   (selecting) the xid of an OFFER seen, naming its address
+#             and server; (renewing) unicast to the server of the lease,
+#             ciaddr the lease's address; (rebinding) the same,
+#             broadcast
+#
+# A server message is one from port 67 to port 68 whose xid and chaddr
+# are the client's; it is decoded (53, 54, 51, 58, 59, 1, 3, 6, 56) and
+# printed, never judged. --backoff also holds the DISCOVERs of the first
+# exchange to RFC 2131 4.1's retransmission: 4 s after the first, then
+# each wait doubled up to 64 s, each within 1 s of its due time.
+#
+# Prints one `pcap-dhcp: +T.TTT <who> <what>` line per DHCP message
+# (T from the capture's first frame), then `pcap-dhcp: PASS <counts>` or
+# `pcap-dhcp: FAIL <the first frame that is wrong, expected and found>`.
+# --list prints every client frame in hex. Exit 0 on PASS, 1 on FAIL, 2
+# on a usage or format error.
+#
+# Written from pcap-savefile(5) and the RFCs named. No DHCP
+# implementation's source; no network stack's source.
+import struct
+import sys
+
+COOKIE = b"\x63\x82\x53\x63"
+PRL = bytes([1, 3, 6, 51, 58, 59])
+BOOTP_MIN = 300
+NAMES = {1: "DISCOVER", 2: "OFFER", 3: "REQUEST", 4: "DECLINE", 5: "ACK", 6: "NAK", 7: "RELEASE", 8: "INFORM"}
+
+
+def die(msg):
+    print("pcap-dhcp: " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def frames_of(path):
+    d = open(path, "rb").read()
+    if len(d) < 24:
+        die("%s: shorter than a pcap header" % path)
+    if d[:4] == b"\xd4\xc3\xb2\xa1":
+        e = "<"
+    elif d[:4] == b"\xa1\xb2\xc3\xd4":
+        e = ">"
+    else:
+        die("%s: not a pcap file (magic %s)" % (path, d[:4].hex()))
+    if struct.unpack(e + "I", d[20:24])[0] != 1:
+        die("%s: link type is not Ethernet" % path)
+    out, i = [], 24
+    while i + 16 <= len(d):
+        sec, usec, incl, _orig = struct.unpack(e + "IIII", d[i:i + 16])
+        out.append((sec + usec / 1e6, d[i + 16:i + 16 + incl]))
+        i += 16 + incl
+    return out
+
+
+def csum(b):
+    if len(b) % 2:
+        b += b"\0"
+    s = sum(struct.unpack("!%dH" % (len(b) // 2), b))
+    while s >> 16:
+        s = (s & 0xffff) + (s >> 16)
+    return (~s) & 0xffff
+
+
+def ip_s(b):
+    return ".".join(str(x) for x in b)
+
+
+def options_of(body):
+    """The options of a BOOTP body, as {code: bytes}; with option 52 the
+    file and sname fields are read too (RFC 2131 4.1)."""
+    got = {}
+
+    def walk(area):
+        i = 0
+        while i < len(area):
+            t = area[i]
+            if t == 0:
+                i += 1
+                continue
+            if t == 255:
+                return
+            if i + 1 >= len(area):
+                return
+            ln = area[i + 1]
+            got.setdefault(t, b"")
+            got[t] += area[i + 2:i + 2 + ln]
+            i += 2 + ln
+
+    walk(body[240:])
+    over = got.get(52, b"\0")[:1]
+    if over and over[0] in (1, 3):
+        walk(body[108:236])
+    if over and over[0] in (2, 3):
+        walk(body[44:108])
+    return got
+
+
+def build_client(mac, kind, xid, secs, flags, ciaddr, requested, server):
+    o = bytes([53, 1, kind, 61, 7, 1]) + mac
+    if requested is not None:
+        o += bytes([50, 4]) + requested + bytes([54, 4]) + server
+    o += bytes([55, len(PRL)]) + PRL + b"\xff"
+    b = struct.pack("!BBBBIHH", 1, 1, 6, 0, xid, secs, flags) + ciaddr + b"\0" * 12
+    b += mac + b"\0" * 10 + b"\0" * 64 + b"\0" * 128 + COOKIE + o
+    if len(b) < BOOTP_MIN:
+        b += b"\0" * (BOOTP_MIN - len(b))
+    return b
+
+
+def build_frame(mac, dmac, src, dst, ident, bootp):
+    udp = struct.pack("!HHHH", 68, 67, 8 + len(bootp), 0) + bootp
+    c = csum(src + dst + struct.pack("!BBH", 0, 17, len(udp)) + udp) or 0xffff
+    udp = udp[:6] + struct.pack("!H", c) + udp[8:]
+    h = struct.pack("!BBHHHBBH", 0x45, 0, 20 + len(udp), ident, 0x4000, 64, 17, 0) + src + dst
+    h = h[:10] + struct.pack("!H", csum(h)) + h[12:]
+    return dmac + mac + b"\x08\x00" + h + udp
+
+
+def main():
+    args = sys.argv[1:]
+    mac = None
+    backoff = listing = False
+    path = None
+    while args:
+        a = args.pop(0)
+        if a == "--mac":
+            mac = bytes.fromhex(args.pop(0).replace(":", ""))
+        elif a == "--backoff":
+            backoff = True
+        elif a == "--list":
+            listing = True
+        elif path is None:
+            path = a
+        else:
+            die("usage: pcap-dhcp --mac MAC [--backoff] [--list] FILE.pcap")
+    if mac is None or path is None or len(mac) != 6:
+        die("usage: pcap-dhcp --mac MAC [--backoff] [--list] FILE.pcap")
+    frames = frames_of(path)
+    if not frames:
+        print("pcap-dhcp: FAIL the capture holds no frame")
+        return 1
+    t0 = frames[0][0]
+    bcast_mac, bcast, zero = b"\xff" * 6, b"\xff" * 4, b"\0" * 4
+    # The exchange as the capture shows it.
+    state = "init"  # init, selecting, bound
+    xid = None
+    secs_last = -1
+    offers = {}  # (xid, yiaddr) -> server id
+    lease = None  # (address, server)
+    lease_end = 0.0
+    server_mac = {}  # server address -> its hardware address
+    last_ident = None
+    n_client = n_server = 0
+    counts = {}
+    first_discovers = []
+    exchanges = 0
+
+    def fail(i, why, want=None, got=None):
+        print("pcap-dhcp: FAIL frame %d (+%.3f): %s" % (i, frames[i][0] - t0, why))
+        if want is not None:
+            print("pcap-dhcp:   expected %s" % want.hex())
+            print("pcap-dhcp:   found    %s" % got.hex())
+        return 1
+
+    for i, (ts, f) in enumerate(frames):
+        if len(f) < 42 or f[12:14] != b"\x08\x00":
+            continue
+        h = f[14:]
+        if h[0] >> 4 != 4 or h[9] != 17:
+            if f[6:12] == mac and h[0] >> 4 == 4:
+                last_ident = struct.unpack("!H", h[4:6])[0]
+            continue
+        ihl = (h[0] & 15) * 4
+        u = h[ihl:]
+        if len(u) < 8:
+            continue
+        sp, dp = struct.unpack("!HH", u[:4])
+        body = u[8:]
+        t = ts - t0
+        if f[6:12] == mac:
+            ident = struct.unpack("!H", h[4:6])[0]
+            if not (sp == 68 and dp == 67):
+                last_ident = ident
+                continue
+            n_client += 1
+            if len(body) < 244 or body[236:240] != COOKIE:
+                return fail(i, "a client message with no BOOTP body or cookie")
+            o = options_of(body)
+            kind = o.get(53, b"\0")[0]
+            name = NAMES.get(kind, "type %d" % kind)
+            mx, ms, mf = struct.unpack("!IHH", body[4:12])
+            ci = body[12:16]
+            src, dst = h[12:16], h[16:20]
+            requested = server = None
+            if kind == 1:
+                if state == "bound" and t < lease_end - 1.0:
+                    return fail(i, "a DISCOVER while a lease is held (it runs out at +%.3f)" % lease_end)
+                if state == "bound":
+                    state, lease = "init", None  # the lease ran out (RFC 2131 4.4.5)
+                if state == "selecting" and mx == xid:
+                    if ms < secs_last:
+                        return fail(i, "a retransmitted DISCOVER's secs went back (%d after %d)" % (ms, secs_last))
+                else:
+                    xid = mx
+                    exchanges += 1
+                state = "selecting"
+                secs_last = ms
+                if exchanges == 1:
+                    first_discovers.append(t)
+                dmac, want_src, want_dst, flags, want_ci = bcast_mac, zero, bcast, 0x8000, zero
+                what = "DISCOVER xid=%#x secs=%d" % (mx, ms)
+            elif kind == 3 and state == "selecting":
+                if mx != xid:
+                    return fail(i, "a REQUEST with xid %#x, not the exchange's %#x" % (mx, xid))
+                requested, server = o.get(50, b""), o.get(54, b"")
+                if offers.get((mx, requested)) != server:
+                    return fail(i, "a REQUEST for %s from %s, which no OFFER of xid %#x made" % (ip_s(requested), ip_s(server), mx))
+                dmac, want_src, want_dst, flags, want_ci = bcast_mac, zero, bcast, 0x8000, zero
+                what = "REQUEST xid=%#x secs=%d for %s from %s" % (mx, ms, ip_s(requested), ip_s(server))
+            elif kind == 3 and state == "bound":
+                addr, srv = lease
+                want_ci, want_src, flags = addr, addr, 0
+                if dst == srv:
+                    if srv not in server_mac:
+                        return fail(i, "a renewal to %s, whose hardware address no frame showed" % ip_s(srv))
+                    dmac, want_dst = server_mac[srv], srv
+                    what = "REQUEST (renewing) xid=%#x secs=%d %s to %s" % (mx, ms, ip_s(addr), ip_s(srv))
+                else:
+                    dmac, want_dst = bcast_mac, bcast
+                    what = "REQUEST (rebinding) xid=%#x secs=%d %s" % (mx, ms, ip_s(addr))
+                xid = mx
+            else:
+                return fail(i, "a client %s in state %s" % (name, state))
+            if last_ident is not None and not 0 < ((ident - last_ident) & 0xffff) < 0x8000:
+                return fail(i, "the identification %d is not above the last, %d" % (ident, last_ident))
+            last_ident = ident
+            want = build_frame(mac, dmac, want_src, want_dst, ident,
+                               build_client(mac, kind, mx, ms, flags, want_ci, requested, server))
+            if f[:len(want)] != want or any(f[len(want):]):
+                return fail(i, "the client's %s is not the bytes kernel/dhcp makes" % name, want, f)
+            key = what.split(" xid")[0]
+            counts[key] = counts.get(key, 0) + 1
+            print("pcap-dhcp: +%.3f client %s" % (t, what))
+            if listing:
+                print("pcap-dhcp:   %s" % f.hex())
+        elif sp == 67 and dp == 68 and len(body) >= 244 and body[236:240] == COOKIE and body[28:34] == mac:
+            mx = struct.unpack("!I", body[4:8])[0]
+            o = options_of(body)
+            kind = o.get(53, b"\0")[0]
+            name = NAMES.get(kind, "type %d" % kind)
+            sid = o.get(54, h[12:16])
+            server_mac[sid] = f[6:12]
+            server_mac[h[12:16]] = f[6:12]
+            yi = body[16:20]
+            n_server += 1
+            counts["server " + name] = counts.get("server " + name, 0) + 1
+            extra = ""
+            for code, label in ((51, "lease"), (58, "T1"), (59, "T2")):
+                if code in o:
+                    extra += " %s=%d" % (label, struct.unpack("!I", o[code][:4])[0])
+            for code, label in ((1, "mask"), (3, "router"), (6, "dns")):
+                if code in o:
+                    v = o[code]
+                    extra += " %s=%s" % (label, ",".join(ip_s(v[k:k + 4]) for k in range(0, len(v) - 3, 4)))
+            if 56 in o:
+                extra += " message=%r" % o[56].decode("latin-1")
+            print("pcap-dhcp: +%.3f server %s xid=%#x yiaddr=%s server=%s to %s%s" % (t, name, mx, ip_s(yi), ip_s(sid), ip_s(h[16:20]), extra))
+            if mx != xid:
+                continue
+            if kind == 2 and state == "selecting":
+                offers[(mx, yi)] = sid
+            elif kind == 5 and state in ("selecting", "bound"):
+                if state == "selecting":
+                    lease = (yi, sid)
+                state = "bound"
+                lease_end = t + (struct.unpack("!I", o[51][:4])[0] if 51 in o else 0)
+            elif kind == 6:
+                state, lease = "init", None
+    if n_client == 0:
+        print("pcap-dhcp: FAIL no client message in the capture")
+        return 1
+    if backoff:
+        due, wait = None, 4.0
+        for k in range(1, len(first_discovers)):
+            gap = first_discovers[k] - first_discovers[k - 1]
+            if abs(gap - wait) > 1.0:
+                print("pcap-dhcp: FAIL DISCOVER %d came %.3f s after the one before, not %.0f +- 1 s" % (k + 1, gap, wait))
+                return 1
+            wait = min(wait * 2, 64.0)
+        if len(first_discovers) < 3:
+            print("pcap-dhcp: FAIL --backoff: %d DISCOVERs in the first exchange, fewer than 3" % len(first_discovers))
+            return 1
+        gaps = ["%.2f" % (first_discovers[k] - first_discovers[k - 1]) for k in range(1, len(first_discovers))]
+        print("pcap-dhcp: backoff: %d DISCOVERs, %s s apart" % (len(first_discovers), ", ".join(gaps)))
+    summary = " ".join("%s=%d" % (k, v) for k, v in sorted(counts.items()) if v)
+    print("pcap-dhcp: PASS %d client frames rebuilt byte for byte, %d server messages; %s" % (n_client, n_server, summary))
+    return 0
+
+
+sys.exit(main())
