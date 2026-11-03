@@ -14,8 +14,9 @@
 # /bin/sh, /bin/den (unmodified) and /bin/git -> den (an archive link:
 # tools/mkinitramfs' `/PATH->TARGET`), boreutils' cat env id ls mkdir
 # readlink sha256sum (user/boreutils.pin), /bin/as; /etc (fstab: the disk
-# at /home, user/fstab; hostname, motd, pax-run), /tmp (1777), /home/pax
-# (0755, 1000:1000). The disk is tools/mkdisk --home 32M with
+# at /home, user/fstab; localtime, tools/mkzone's UTC; hostname, motd,
+# pax-run), /usr/share/zoneinfo/UTC (the same bytes: den reads a zone only
+# from $TZDIR/$TZ, R-px90-2), /tmp (1777), /home/pax (0755, 1000:1000). The disk is tools/mkdisk --home 32M with
 # SOURCE_DATE_EPOCH=1700000000, the bytes tests/mpx6-ext2.d/disks.sha256
 # records for its home disk: ext2, pax/ owned 1000:1000. Its run list, one
 # typed session a run (user/console/den.keys, typed twice), prompt `$ `:
@@ -186,6 +187,11 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/install-den" "$work/den" "$r" || why+=" tools/install-den;"
     for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
     cp "$work/bin/as" "$r/bin/as" 2>/dev/null || why+=" no as;"
+    # The zone, as the distribution's roots carry it (R-px90-2): den
+    # prints a date only from $TZDIR/$TZ, /usr/share/zoneinfo/UTC here.
+    mkdir -p "$r/usr/share/zoneinfo"
+    "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
+    cp "$r/etc/localtime" "$r/usr/share/zoneinfo/UTC" 2>/dev/null || why+=" no zone;"
     for f in "$r"/bin/*; do
         [ -L "$f" ] && { say "  program: ${f#"$r"/} -> $(readlink "$f")"; continue; }
         x=$(static_ok "$f") || why+=" $x;"
@@ -198,6 +204,7 @@ if [ -z "$images" ]; then
     cp "$PAX_ROOT/user/fstab" "$r/etc/fstab"
     printf '%s\n' '/tmp 1777 0 0' '/home/pax 755 1000 1000' > "$work/owners"
     args=(/tmp/:1777 /home/:755 /home/pax/:755:1000:1000 /etc/fstab="$r/etc/fstab":644
+        /etc/localtime="$r/etc/localtime":644 /usr/share/zoneinfo/UTC="$r/usr/share/zoneinfo/UTC":644
         /etc/pax-run="$r/etc/pax-run":644 /etc/hostname="$r/etc/hostname":644 /etc/motd="$r/etc/motd":644)
     for f in "$r"/bin/*; do
         if [ -L "$f" ]; then args+=("/bin/${f##*/}->$(readlink "$f")"); else args+=("/bin/${f##*/}=$f:755"); fi
@@ -416,9 +423,9 @@ PY
     for tier in $tiers; do
         id="$tier $leg"
         log=$PAX_BUILD/mpx5-den-$tier-$leg.serial.log
-        elf=$images/$tier/kmain_console.elf iso=$images/$tier/den.iso
+        elf=$images/$tier/kmain_console.elf dimg=$images/$tier/den.iso
         rm -f "$log" "$log.verdict" "$log.typed"
-        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+        if [ ! -f "$dimg" ] || [ ! -f "$elf" ]; then
             bad "D4 $id: no image"
             continue
         fi
@@ -428,7 +435,7 @@ PY
         hrc=0
         "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 1800 --qemu -m --qemu 1024M \
             --elf "$elf" --marker 'halt|PANIC .*' --type "$images/den.keys" --prompt '$ ' --drive "$home" \
-            "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            "$dimg" >"$log.verdict" 2>&1 || hrc=$?
         record "$tier" "$leg" den "$hrc"
         norm=$log.norm; serial_norm "$log" > "$norm"
         grep -Eq '^fstab: /dev/vda on /home: ext2, read-write, write-(back|through)$' "$norm" \
