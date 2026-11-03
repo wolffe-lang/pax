@@ -13,6 +13,7 @@
 //     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
 //     screen: <w>x<h> 32 bpp pitch <p> rgb 8:16 8:8 8:0 at 0x…, wc (pat 0x…), … cells; <r> bytes replayed, 0 lost
 //     scroll: 400 lines in <a> ticks without scrolling, 400 in <b> with <s> scrolls
+//     scroll: 200 varied lines of 120 cells in <t> ticks with <s> scrolls, by copy|redraw
 //     …the pattern…
 //     screen: <n> bytes, <s> scrolls
 //     halt
@@ -55,6 +56,20 @@ fn colour(n: int, label: str) {
 }
 
 /// `line NNN` (k zero-padded to three digits).
+// px87: varied text, every cell of a scrolled row new (V3's numbered
+// lines change a few cells a row): line k is the printable ASCII from
+// 33 + k, wrapping at 126, VW cells long.
+const VARIED: u64 = 200
+const VW: u64 = 120
+
+fn varied(k: u64) {
+    var i: u64 = 0
+    while i < VW {
+        log.put_byte((33 + (i + k) % 94) as int)
+        i += 1
+    }
+}
+
 fn numbered(k: u64) {
     log.put("line ")
     log.put_byte((k / 100 % 10 + 48) as int)
@@ -268,6 +283,18 @@ export fn kmain() {
     }
     let t3 = timer.ticks()
     let s2 = screen.scrolls()
+    // px87 (pax#253; CI's mpx5-pelt, whose sessions scroll varied text):
+    // the same on lines whose every cell changes, by the way `attach`
+    // chose (tests/mpx3-screen V8 boots each way and the default).
+    let t4 = timer.ticks()
+    k = 0
+    while k < VARIED {
+        varied(k)
+        log.end()
+        k += 1
+    }
+    let t5 = timer.ticks()
+    let s3 = screen.scrolls()
     let _off = sync.irq_save()
     timer.stop()
     log.put("scroll: ")
@@ -281,6 +308,21 @@ export fn kmain() {
     log.put(" with ")
     log.dec((s2 - s1) as int)
     log.put(" scrolls")
+    log.end()
+    log.put("scroll: ")
+    log.dec(VARIED as int)
+    log.put(" varied lines of ")
+    log.dec(VW as int)
+    log.put(" cells in ")
+    log.dec((t5 - t4) as int)
+    log.put(" ticks with ")
+    log.dec((s3 - s2) as int)
+    log.put(" scrolls, by ")
+    if screen.copy_scroll() {
+        log.put("copy")
+    } else {
+        log.put("redraw")
+    }
     log.end()
 
     pattern()
