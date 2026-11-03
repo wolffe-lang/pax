@@ -23,7 +23,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
-| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
+| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
 What PAX is not: a security boundary. The permission checks hold for honest programs; the kernel has never been fuzzed
 or audited, it loads programs at fixed addresses, and the live USB entry accepts `root` with no password.
@@ -70,6 +70,7 @@ shows the kernel commit and the first eight digits of that file's SHA256.
 | pelt | the POSIX shell, PID 1 at the console | `4683b3f5` |
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `0f7a57b6` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `81d761d6` |
+| den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it | `13bc2caa` (wolf 0.2.36) |
 | yew | the editor | `0ccb2c67` |
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `e6f623c7`, `3692cf5d`, `49ed870e` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
@@ -85,6 +86,19 @@ is resolved. Every ELF process starts with a fixed 1 MiB initial stack, which `R
 Two things the shipped `grep` says that GNU's would not: `--help` and `--version` are scent's own prose, and a
 diagnostic names the program as `grep:` whatever path ran it. `-r` and colour are refused by name until scent's next
 milestone. Everything else on its first-milestone options is byte-identical to GNU grep 3.12 in the C locale.
+
+`git` is den. `/bin/git` is a symbolic link to `/bin/den`, and den does not read argv[0] yet, so `git` behaves
+exactly as `den` does: `git --version` prints den's own line, `den 0.0.0 (built with wolf 0.2.36)`, and `git` or
+`den` alone prints den's own usage text, `den: not yet implemented: <command> (unplanned command)`, with status 2.
+den reads and writes Git's repositories byte for byte on its local verbs: `init`, `add`, `rm`, `mv`, `status`,
+`commit`, `log`, `show`, `diff`, `restore`, `branch`, `switch`, `tag`, `reset`, `merge`, `rebase` (linear),
+`cherry-pick`, `revert`, `blame`, `stash`, `notes`, `repack`, `verify-pack`, `fsck` and Git's plumbing. It has no
+wire yet (`clone`, `fetch`, `pull`, `push`), no `gc`, no hooks and no config writer (`config --get` only, so set
+`user.name` in `~/.gitconfig` or with `GIT_AUTHOR_NAME`), and it never runs an editor or a pager: give a message
+with `-m` or `-F` (with `GIT_EDITOR=false` the attempt fails as Git's does, and any other editor is refused by
+name). `tests/mpx5-den` types a whole session at PAX, as root and as a user, in repositories on an ext2 `/home`, and
+holds every verb's status, output and error to the same den on Linux; `tests/distribution-den` commits on a disk
+the installer wrote, reboots, and reads the repository back clean, every object file Linux's bytes.
 
 ## Booting PAX
 
@@ -361,7 +375,7 @@ and `--tier native --firmware bios` picks one leg.
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving |
-| Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, each program's typed session against the same binary in a container |
+| Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, each program's typed session against the same binary in a container |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer, the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
 | Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine, the metal triage's boxes, fault screens and words, an NMI survived and a machine check named anywhere in the boot (`tests/mpx6-nmi`) |
