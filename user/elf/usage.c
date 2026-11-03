@@ -165,9 +165,9 @@ static void child_rows(void) {
         _exit(3);
     }
     int r[4] = { 0 };
+    close(fd[1]); /* the child's end only: a kernel that cannot fork ends the read, never hangs it */
     read(fd[0], r, sizeof r);
     close(fd[0]);
-    close(fd[1]);
     struct rusage w, c0 = get(RUSAGE_CHILDREN);
     memset(&w, 0x55, sizeof w);
     int st = 0;
@@ -202,9 +202,9 @@ static void child_rows(void) {
         _exit(0);
     }
     int v[2] = { 0 };
+    close(fd[1]); /* as above */
     read(fd[0], v, sizeof v);
     close(fd[0]);
-    close(fd[1]);
     memset(&w, 0x55, sizeof w);
     wait4(p, &st, 0, &w);
     struct rusage c2 = get(RUSAGE_CHILDREN);
