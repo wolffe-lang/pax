@@ -1,0 +1,12 @@
+# px89: px88's image (px75's QEMU 8.2.2, OVMF, clang, lld 18, gcc,
+# xorriso; Ubuntu 24.04's musl-tools and strace) and Ubuntu 24.04's
+# dnsmasq-base (the second DHCP server, a black box), iproute2 (the tap
+# the guest and dnsmasq share, inside the container's own network
+# namespace) and tcpdump (black-box observation of that tap). CPUS is the
+# block's CPU list: rootless podman has no cpuset controller on hasu, so
+# the step pins itself.
+FROM localhost/px88-ubuntu:1
+ARG CPUS=0-5
+RUN taskset -c "$CPUS" sh -c 'apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+      dnsmasq-base iproute2 tcpdump && rm -rf /var/lib/apt/lists/*' \
+    && dpkg-query -W dnsmasq-base iproute2 tcpdump qemu-system-x86 > /etc/px89-packages.txt
