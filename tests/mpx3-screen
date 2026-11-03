@@ -98,6 +98,10 @@
 #      at most 5/4 of the cheaper forced boot's, plus 2 (the tick's
 #      granularity). A budget against this machine's own two ways, not a
 #      number of milliseconds.
+#   V9 (px87) the way does not change what is drawn: the copy boot's and
+#      the redraw boot's screendumps (V8's) each equal tools/screen-ref's
+#      image of their own serial bytes, pixel for pixel, as V2 holds the
+#      plain boot's.
 #
 # --images DIR boots what this script built earlier (DIR holds
 # <tier>/kmain_screen.{elf,iso}, <tier>/kmain_screen-{fbread,fbwrite}.iso,
@@ -331,8 +335,10 @@ for leg in $legs; do
         vre='^scroll: 200 varied lines of 120 cells in ([0-9]+) ticks with ([0-9]+) scrolls, by (copy|redraw)$'
         vl=$(grep -m1 '^scroll: 200 varied' "$sn")
         if [[ $vl =~ $vre ]]; then vd=${BASH_REMATCH[1]} vdw=${BASH_REMATCH[3]}; else why+=" the plain boot: no varied line ('$vl');"; vd=; fi
+        why9= pic9=
         for w in fbread fbwrite; do
             boot "scroll-$w" "$selft" "$images/$tier/kmain_screen-$w.iso"
+            if r9=$(compare "$tier $leg scroll-$w" 'PAX: the screen'); then pic9+=" $w $r9;"; else why9+=" $w:$r9"; fi
             l=$(grep -m1 '^scroll: 200 varied' "$norm")
             want=copy; [ "$w" = fbwrite ] && want=redraw
             if [[ $l =~ $vre ]] && [ "${BASH_REMATCH[3]}" = "$want" ] && [ "$hrc" = 0 ]; then
@@ -346,6 +352,7 @@ for leg in $legs; do
             [ $((4 * vd)) -le $((5 * vmin + 8)) ] || why+=" the default ($vdw) took $vd ticks, more than 5/4 of the cheaper way's $vmin + 2 (copy $v_fbread, redraw $v_fbwrite);"
         fi
         [ -z "$why" ] && say "PASS V8 $id: the default scrolled by $vdw in $vd ticks; copy $v_fbread, redraw $v_fbwrite ($(sed -n 's/^accel: //p' "$slog.meta"))" || bad "V8 $id:$why"
+        [ -z "$why9" ] && say "PASS V9 $tier $leg scroll-ways: each way's screendump equals its reference:$pic9" || bad "V9 $tier $leg scroll-ways:$why9"
 
         # --- readwatch: V7 (px87, pax#253) ------------------------------------
         # One port per boot of this run (PAX_READWATCH_PORT moves them all).
