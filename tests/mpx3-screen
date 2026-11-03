@@ -75,7 +75,9 @@
 #      (px13's answer, a serial line's); and the two sessions are
 #      byte-identical otherwise (tests/mpx3-console holds the serial-only
 #      session to Linux's).
-#   V7 (px87, pax#253) no framebuffer reads: kmain_screen again, under
+#   V7 (px87, pax#253) no framebuffer reads: kmain_screen again, booted
+#      with `fbwrite` (the scroll redraws the cells that change, the way
+#      a framebuffer slow to read gets), under
 #      TCG with QEMU's gdb stub (tests/mpx3-screen.d/readwatch.py): a
 #      hardware breakpoint on the first pax_fb_fill (the screen's clear,
 #      whose arguments are the framebuffer's range), then one read
@@ -87,9 +89,18 @@
 #      (px19's scroll, kept for measurements) is seen reading, the first
 #      read by pax_fb_copy called from kernel/screen's scroll: the
 #      witness sees what V7 says is absent.
+#   V8 (px87; CI's mpx5-pelt, 23 % slower under TCG) the default scroll
+#      is the cheaper way here: kmain_screen booted plainly, with `fbread`
+#      (copy) and with `fbwrite` (redraw); each prints `scroll: 200 varied
+#      lines of 120 cells in <t> ticks with <s> scrolls, by copy|redraw`
+#      (every cell of a scrolled row new, as a session's output is). The
+#      forced boots say the way they were told; the plain boot's ticks are
+#      at most 5/4 of the cheaper forced boot's, plus 2 (the tick's
+#      granularity). A budget against this machine's own two ways, not a
+#      number of milliseconds.
 #
 # --images DIR boots what this script built earlier (DIR holds
-# <tier>/kmain_screen.{elf,iso}, <tier>/kmain_screen-fbread.iso,
+# <tier>/kmain_screen.{elf,iso}, <tier>/kmain_screen-{fbread,fbwrite}.iso,
 # <tier>/kmain_console.elf, <tier>/console-{ask,pelt}.iso): any host
 # with QEMU and python3, no wolf. Without it the script builds (linux x86-64); --no-boot stops
 # after V0. --pelt DIR takes pelt from DIR instead of building it.
@@ -181,6 +192,11 @@ if [ -z "$images" ]; then
                     printf '\n    cmdline: fbread\n' >> "$work/$tier/fbread.conf"
                     "$PAX_ROOT/tools/mkimage" --conf "$work/$tier/fbread.conf" "$elf" "$work/$tier/kmain_screen-fbread.iso" >/dev/null \
                         || why+=" $tier kmain_screen-fbread: mkimage;"
+                    # px87: V7's watched boot and V8's redraw, with `fbwrite`.
+                    cp "$PAX_ROOT/boot/limine.conf" "$work/$tier/fbwrite.conf"
+                    printf '\n    cmdline: fbwrite\n' >> "$work/$tier/fbwrite.conf"
+                    "$PAX_ROOT/tools/mkimage" --conf "$work/$tier/fbwrite.conf" "$elf" "$work/$tier/kmain_screen-fbwrite.iso" >/dev/null \
+                        || why+=" $tier kmain_screen-fbwrite: mkimage;"
                 else
                     for p in ask pelt; do
                         "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
@@ -309,6 +325,28 @@ for leg in $legs; do
         fi
         [ -z "$why" ] && say "PASS V3 $id: $cl: $cost ms a scrolled line ($(sed -n 's/^accel: //p' "$slog.meta"))" || bad "V3 $id:$why"
 
+        # --- V8 (px87): the default scroll is the cheaper way here ----------
+        id="$tier $leg scroll-ways"
+        why=
+        vre='^scroll: 200 varied lines of 120 cells in ([0-9]+) ticks with ([0-9]+) scrolls, by (copy|redraw)$'
+        vl=$(grep -m1 '^scroll: 200 varied' "$sn")
+        if [[ $vl =~ $vre ]]; then vd=${BASH_REMATCH[1]} vdw=${BASH_REMATCH[3]}; else why+=" the plain boot: no varied line ('$vl');"; vd=; fi
+        for w in fbread fbwrite; do
+            boot "scroll-$w" "$selft" "$images/$tier/kmain_screen-$w.iso"
+            l=$(grep -m1 '^scroll: 200 varied' "$norm")
+            want=copy; [ "$w" = fbwrite ] && want=redraw
+            if [[ $l =~ $vre ]] && [ "${BASH_REMATCH[3]}" = "$want" ] && [ "$hrc" = 0 ]; then
+                eval "v_$w=${BASH_REMATCH[1]}"
+            else
+                why+=" the $w boot: not '$want' or not halted ('$l', qemu-halt $hrc);"; eval "v_$w="
+            fi
+        done
+        if [ -z "$why" ]; then
+            vmin=$v_fbread; [ "$v_fbwrite" -lt "$vmin" ] && vmin=$v_fbwrite
+            [ $((4 * vd)) -le $((5 * vmin + 8)) ] || why+=" the default ($vdw) took $vd ticks, more than 5/4 of the cheaper way's $vmin + 2 (copy $v_fbread, redraw $v_fbwrite);"
+        fi
+        [ -z "$why" ] && say "PASS V8 $id: the default scrolled by $vdw in $vd ticks; copy $v_fbread, redraw $v_fbwrite ($(sed -n 's/^accel: //p' "$slog.meta"))" || bad "V8 $id:$why"
+
         # --- readwatch: V7 (px87, pax#253) ------------------------------------
         # One port per boot of this run (PAX_READWATCH_PORT moves them all).
         id="$tier $leg readwatch"
@@ -319,7 +357,7 @@ for leg in $legs; do
         rwi=$images/$tier/kmain_screen-fbread.iso
         rm -f "$rw.log" "$rw.serial.log" "$rwc.log" "$rwc.serial.log"
         python3 "$here/mpx3-screen.d/readwatch.py" --elf "$selft" --firmware "$leg" --serial "$rw.serial.log" \
-            --port "$rwport" --cap 64 --timeout 900 "$images/$tier/kmain_screen.iso" > "$rw.log" 2>&1 \
+            --port "$rwport" --cap 64 --timeout 900 "$images/$tier/kmain_screen-fbwrite.iso" > "$rw.log" 2>&1 \
             || why+=" the watched boot did not reach pax_halt ($(tail -n 1 "$rw.log"));"
         res=$(sed -n 's/^readwatch: RESULT //p' "$rw.log")
         reads=${res#reads=}; reads=${reads%% *}
