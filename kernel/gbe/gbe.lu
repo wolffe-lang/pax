@@ -1,0 +1,667 @@
+//! gbe — Intel's gigabit Ethernet controllers on one programming model:
+//! QEMU's 82576 (`-device igb`) and the I225/I226 (px89).
+//!
+//! kernel/net's frame interface reaches this module when the machine has
+//! no virtio network device and has one of these (kernel/net's `start`).
+//!
+//! **One model, two sources (R-px89-1).** Everything here but the paths
+//! marked I225 is written from Intel's public 82576EB datasheet (rev
+//! 2.63) and its public I210 datasheet (333016 rev 3.7), which agree, word
+//! for word, on every register, bit and descriptor this module touches:
+//! the reset (CTRL.RST, bit 26), the interrupt registers (ICR 0x1500, IMS
+//! 0x1508, IMC 0x150C, EIMC 0x1528: §8.8), the receive and transmit
+//! control (RCTL 0x0100, TCTL 0x0400: §8.10.1, §8.12.1), queue 0's ring
+//! (RDBAL/RDBAH/RDLEN/SRRCTL/RDH/RDT/RXDCTL at 0xC000-0xC028,
+//! TDBAL/TDBAH/TDLEN/TDH/TDT/TXDCTL at 0xE000-0xE028), the receive
+//! address (RAL0/RAH0 0x5400, loaded from the NVM with RAH0.AV, bit 31),
+//! the multicast table (MTA, 0x5200, 128 words), the advanced one-buffer
+//! receive descriptor (§7.1.5: read format packet address at 0, header
+//! address at 8; write-back status and errors at 8, DD bit 0, EOP bit 1,
+//! the length at 12) and the legacy transmit descriptor (§7.2.2.1: the
+//! buffer at 0, the length at 8, CMD at 11 — EOP bit 0, IFCS bit 1, RS
+//! bit 3 — and STA at 12, DD bit 0), and the initialisation order (§4.5:
+//! interrupts off, the reset, interrupts off again, the link, receive,
+//! transmit, interrupts on). Intel's public I225/I226 datasheet (596659
+//! rev 2.6) has no register map; it names the same registers (RAL0/RAH0
+//! loaded from the NVM, CTRL[11] FRCSPD, CTRL.VME, RCTL.VFE, VET, FCRTH0,
+//! LEDCTL, EEC/EERD) and the same legacy and advanced transmit
+//! descriptors. Its register-level manual is Intel Confidential, so the
+//! I225 is driven on the I210's model and confirmed on metal by what this
+//! module reads back (`dump`, the stick's log).
+//!
+//! **The I225-only paths**, named where they are:
+//!   - the ids (the public datasheet's table): I225-V 15f3, I225-LM 15f2,
+//!     I225-IT 0d9f, I225-LMvP 5502, I226-LM 125b, I226-V 125c, I226-IT
+//!     125d; an empty NVM's 15fd and 125f are refused by name;
+//!   - the BAR: 1 MiB on kasumi (black box), of which 64 KiB is mapped;
+//!   - the link: no PHY register is read or written (its PHY is not the
+//!     I210's and its manual is not public): CTRL.SLU set, the NVM's
+//!     defaults auto-negotiate, STATUS.LU waited for up to 10 s;
+//!   - the speed: STATUS bits 7:6 as the I210 reads them (10, 100, 1000)
+//!     and, since the I210's table has 1000 twice and no 2500, the raw
+//!     value beside it;
+//!   - the interrupt: the I225 gets no INTx on kasumi (its line is the
+//!     firmware's 255, as the xHCI's was, px76), so it is polled every
+//!     tick by the network's clock (kernel/netd); MSI/MSI-X would need
+//!     GPIE/EIMS/IVAR programming the public documents do not give.
+//!
+//! **The rings.** 64 receive and 64 transmit descriptors of 16 bytes, a
+//! ring in one frame each (RDLEN/TDLEN 1024: the datasheets' 128-byte
+//! multiple, the base 128-byte aligned), and 64 buffers of 2048 bytes
+//! each way, two to a frame: 66 frames, as kernel/net's virtio-net
+//! holds. Receive: every descriptor armed, RDT 63 (the hardware owns
+//! RDH to RDT - 1); a frame taken is the descriptor at the head with DD,
+//! and its descriptor is armed again and handed back by moving RDT onto
+//! it (the frames are taken and given back in order). SRRCTL: 2 KiB
+//! buffers, the advanced one-buffer type, Drop_En. RCTL: RXEN, BAM
+//! (broadcasts), SECRC (the CRC stripped), BSIZE 2048, no promiscuity.
+//! Transmit: a frame is copied into the next free buffer, padded with
+//! zeros to 60 bytes, its descriptor written (EOP, IFCS, RS) and TDT
+//! moved past it; at most 63 are outstanding (TDH = TDT is empty); the
+//! descriptors the hardware has written back with DD are taken back at
+//! the next send.
+//!
+//! **The interrupt** (the 82576 in QEMU): INTx on the 8259 line the
+//! firmware wrote, level-triggered (kernel/net sets ELCR and unmasks it),
+//! IMS = RXDW (7), RXO (6), RXDMT0 (4) and LSC (2); `irq` reads ICR,
+//! which clears it and withdraws the request. A line this kernel cannot
+//! take (not 3-15, or 4, 8, 13), or `poll` asked for, and the device is
+//! polled instead: IMS 0, and kernel/netd's clock asks `due` every tick.
+//!
+//! State: words of boot/net.S's `pax_gbe_state`, changed under
+//! kernel/net's lock (its frame interface) or before the device is up.
+//! Nothing here allocates from the heap or opens a region.
+//!
+//! No Linux source; no FreeBSD, QEMU or other driver source.
+
+use clock
+use frames
+use log
+use paging
+use pci
+
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
+extern "c" fn pax_fb_fill(dst: u64, v: u64, qwords: u64)
+
+extern "c" let pax_gbe_state: *u64
+
+const PAGE: u64 = 4096
+const VENDOR: u64 = 0x8086
+/// Entries in each ring, and what a buffer holds.
+pub const RING: u64 = 64
+const BUFFER: u64 = 2048
+const DESC: u64 = 16
+const FRAME_MIN: u64 = 60
+// Where the registers go: window 48 of the device slot (PML4 slot 352;
+// kernel/virtio's windows are 0-7, kernel/nvme's from 24, kernel/ahci's
+// from 28, kernel/xhci's at 63 and up). 64 KiB of BAR0 is mapped: every
+// register used is below 0x10000.
+const WINDOW_VA: u64 = 0xffffb00003100000
+const MAPPED: u64 = 0x10000
+const UNCACHED: u64 = 24 // PCD | PWT
+
+// The registers (the 82576 and I210 datasheets, §8).
+const CTRL: u64 = 0x0000
+const STATUS: u64 = 0x0008
+const CTRL_EXT: u64 = 0x0018
+const ICR: u64 = 0x1500
+const IMS: u64 = 0x1508
+const IMC: u64 = 0x150c
+const EIMC: u64 = 0x1528
+const RCTL: u64 = 0x0100
+const TCTL: u64 = 0x0400
+const RDBAL: u64 = 0xc000
+const RDBAH: u64 = 0xc004
+const RDLEN: u64 = 0xc008
+const SRRCTL: u64 = 0xc00c
+const RDH: u64 = 0xc010
+const RDT: u64 = 0xc018
+const RXDCTL: u64 = 0xc028
+const TDBAL: u64 = 0xe000
+const TDBAH: u64 = 0xe004
+const TDLEN: u64 = 0xe008
+const TDH: u64 = 0xe010
+const TDT: u64 = 0xe018
+const TXDCTL: u64 = 0xe028
+const MTA: u64 = 0x5200
+const RAL0: u64 = 0x5400
+const RAH0: u64 = 0x5404
+
+const CTRL_LRST: u64 = 0x8 // bit 3
+const CTRL_SLU: u64 = 0x40 // bit 6
+const CTRL_ILOS: u64 = 0x80 // bit 7
+const CTRL_FRCSPD: u64 = 0x800 // bit 11
+const CTRL_FRCDPLX: u64 = 0x1000 // bit 12
+const CTRL_RST: u64 = 0x4000000 // bit 26
+const CTRL_PHY_RST: u64 = 0x80000000 // bit 31
+const STATUS_LU: u64 = 0x2
+const RCTL_RXEN: u64 = 0x2
+const RCTL_BAM: u64 = 0x8000
+const RCTL_SECRC: u64 = 0x4000000
+const TCTL_EN: u64 = 0x2
+const TCTL_PSP: u64 = 0x8
+const QUEUE_ENABLE: u64 = 0x2000000 // RXDCTL/TXDCTL bit 25
+const WTHRESH_1: u64 = 0x10000 // bits 20:16 = 1
+const SRRCTL_2K_ADV: u64 = 0x82000002 // Drop_En, DESCTYPE 001, BSIZEPACKET 2
+const IMS_RX: u64 = 0xd4 // RXDW 7, RXO 6, RXDMT0 4, LSC 2
+const RAH_AV: u64 = 0x80000000
+
+/// The models.
+pub const M_82576: u64 = 1
+pub const M_I225: u64 = 2
+
+// pax_gbe_state's words.
+const G_UP: u64 = 0
+const G_MODEL: u64 = 1
+const G_PCI: u64 = 2
+const G_BAR: u64 = 3 // BAR0's physical address
+const G_RXR: u64 = 4 // the receive ring (HHDM)
+const G_TXR: u64 = 5
+const G_RX_HEAD: u64 = 6 // the next receive descriptor to look at
+const G_TX_TAIL: u64 = 7 // the next transmit descriptor to fill
+const G_TX_CLEAN: u64 = 8 // the oldest not taken back
+const G_TX_OUT: u64 = 9 // outstanding
+const G_POLL: u64 = 10
+const G_MAC: u64 = 11
+const G_FRAMES: u64 = 12
+const G_LINK_MS: u64 = 13 // how long the link took, ms; 0xffff… none
+const G_STATUS0: u64 = 14 // STATUS after the link wait
+const G_STAGED: u64 = 15 // descriptors filled but not yet given (TDT)
+const G_RESET_US: u64 = 16
+const G_MAC_FROM: u64 = 17 // 1 RAL0/RAH0 with AV
+const G_RXB: u64 = 64 // 64 words: receive buffer i's physical address
+const G_TXB: u64 = 128 // 64 words: transmit buffer i's
+
+fn gw(i: u64) -> u64 {
+    // # Safety: i < 256, a word of boot/net.S's pax_gbe_state.
+    unsafe { ((pax_gbe_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_gw(i: u64, v: u64) {
+    // # Safety: as `gw`.
+    unsafe { ((pax_gbe_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn rd(r: u64) -> u64 {
+    // # Safety: a register of BAR0, below MAPPED, mapped uncached at
+    // WINDOW_VA by `start`; 32-bit, as the datasheets require.
+    unsafe { ((WINDOW_VA + r) as *u32).read_volatile() as u64 }
+}
+
+fn wr(r: u64, v: u64) {
+    // # Safety: as `rd`.
+    unsafe { ((WINDOW_VA + r) as *u32).write_volatile((v & 0xffffffff) as u32) }
+}
+
+fn m64(a: u64) -> u64 {
+    // # Safety: a descriptor word of a ring this module owns, through the
+    // HHDM, 8-aligned.
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn put_m64(a: u64, v: u64) {
+    // # Safety: as `m64`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn m32(a: u64) -> u64 {
+    // # Safety: as `m64`, 4-aligned.
+    unsafe { (a as *u32).read_volatile() as u64 }
+}
+
+fn m16(a: u64) -> u64 {
+    // # Safety: as `m64`, 2-aligned.
+    unsafe { (a as *u16).read_volatile() as u64 }
+}
+
+fn m8(a: u64) -> u64 {
+    // # Safety: as `m64`.
+    unsafe { (a as *u8).read_volatile() as u64 }
+}
+
+/// Wait `us` microseconds, IF set or clear: kernel/clock's deadline when
+/// it has a source, else that many reads of STATUS (each one a bus
+/// round trip, a microsecond or more).
+fn delay(us: u64) {
+    if clock.started() {
+        clock.wait_us(us)
+    } else {
+        var i: u64 = 0
+        while i < us {
+            let _s = rd(STATUS)
+            i += 1
+        }
+    }
+}
+
+/// The model of the PCI function at kernel/pci's index `i`: M_82576,
+/// M_I225, or 0. `empty` when it is one of the I225/I226 ids an empty or
+/// unread NVM leaves.
+fn model_of(i: u64) -> (u64, bool) {
+    if pci.vendor(i) != VENDOR {
+        return (0, false)
+    }
+    let d = pci.device(i)
+    if d == 0x10c9 {
+        return (M_82576, false)
+    }
+    // I225 (the public datasheet's device id table).
+    if d == 0x15f3 || d == 0x15f2 || d == 0x0d9f || d == 0x5502 || d == 0x125b || d == 0x125c || d == 0x125d {
+        return (M_I225, false)
+    }
+    if d == 0x15fd || d == 0x125f {
+        return (M_I225, true)
+    }
+    (0, false)
+}
+
+/// kernel/pci's index of the first function this module drives, or
+/// pci.MAX.
+pub fn find() -> u64 {
+    var i: u64 = 0
+    while i < pci.count() {
+        let (m, _empty) = model_of(i)
+        if m != 0 {
+            return i
+        }
+        i += 1
+    }
+    pci.MAX
+}
+
+/// Whether the device is up.
+pub fn up() -> bool {
+    gw(G_UP) == 1
+}
+
+/// Whether it is polled (no interrupt line this kernel can take).
+pub fn polled() -> bool {
+    gw(G_POLL) == 1
+}
+
+/// Byte `i` of the device's address.
+pub fn mac_byte(i: u64) -> u64 {
+    (gw(G_MAC) >> (i * 8)) & 0xff
+}
+
+/// Frames this module holds.
+pub fn frames_held() -> u64 {
+    gw(G_FRAMES)
+}
+
+fn zeroed_frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa != 0 {
+        // # Safety: the frame just taken, through the HHDM; 512 words.
+        unsafe { pax_fb_fill(pa + frames.hhdm(), 0, PAGE / 8) }
+        put_gw(G_FRAMES, gw(G_FRAMES) + 1)
+    }
+    pa
+}
+
+fn refuse(what: str, v: u64) -> u64 {
+    log.put("net: refused: ")
+    log.put(what)
+    log.put(" ")
+    log.hex(v)
+    log.put("; the network is off")
+    log.end()
+    2
+}
+
+/// Arm receive descriptor `k`: its buffer's address (the read format's
+/// packet address) and a zero header address, whose bit 0 is DD.
+fn arm(k: u64) {
+    let d = gw(G_RXR) + k * DESC
+    put_m64(d, gw(G_RXB + k))
+    put_m64(d + 8, 0)
+}
+
+/// Bring the device at kernel/pci's index `i` up on the paging
+/// structures at `pml4`, as the datasheets' §4.5 orders. `poll` asks for
+/// the polled path whatever the line. Answers 0 (up), 2 (refused, one
+/// line says why). The interrupt line, when the device is not polled,
+/// is kernel/net's to route: `line` says which.
+pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
+    var w: u64 = 0
+    while w < 256 {
+        put_gw(w, 0)
+        w += 1
+    }
+    let (m, empty) = model_of(i)
+    put_gw(G_MODEL, m)
+    put_gw(G_PCI, i)
+    if empty {
+        return refuse("an Intel I225/I226 whose NVM is empty or unread (device id)", pci.device(i))
+    }
+    let b = pci.bdf(i)
+    let (kind, pa) = pci.bar(b, 0)
+    if (kind != pci.BAR_MEM32 && kind != pci.BAR_MEM64) || pa == 0 {
+        return refuse("the controller's BAR0 is not a memory BAR, BAR0", pa)
+    }
+    put_gw(G_BAR, pa)
+    var off: u64 = 0
+    while off < MAPPED {
+        let n = paging.map(pml4, WINDOW_VA + off, pa + off, paging.NX | paging.RW | UNCACHED) else 9
+        if n == 9 {
+            return refuse("the controller's registers could not be mapped, at", pa + off)
+        }
+        off += PAGE
+    }
+    // Memory decoding and bus mastering on; INTx left as the polled path
+    // wants it (off) or on.
+    var cmd = pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER
+    cmd = if poll { cmd | pci.CMD_INTX_OFF } else { cmd & !pci.CMD_INTX_OFF }
+    pci.set_command(b, cmd)
+    // §4.5.4: interrupts off; the receiver and transmitter stopped (the
+    // firmware may have left its own rings running), then the reset.
+    wr(IMC, 0xffffffff)
+    wr(EIMC, 0xffffffff)
+    wr(RCTL, 0)
+    wr(TCTL, TCTL_PSP)
+    delay(10000)
+    wr(CTRL, rd(CTRL) | CTRL_RST)
+    delay(10000)
+    var waited: u64 = 10000
+    while rd(CTRL) & CTRL_RST != 0 && waited < 1000000 {
+        delay(1000)
+        waited += 1000
+    }
+    if rd(CTRL) & CTRL_RST != 0 {
+        return refuse("the controller did not leave its reset, CTRL", rd(CTRL))
+    }
+    // The NVM's address in RAL0/RAH0 once it is loaded (AV).
+    while rd(RAH0) & RAH_AV == 0 && waited < 1500000 {
+        delay(1000)
+        waited += 1000
+    }
+    put_gw(G_RESET_US, waited)
+    wr(IMC, 0xffffffff)
+    wr(EIMC, 0xffffffff)
+    if rd(RAH0) & RAH_AV == 0 {
+        return refuse("no address in RAL0/RAH0 after the reset (AV clear), RAH0", rd(RAH0))
+    }
+    put_gw(G_MAC_FROM, 1)
+    put_gw(G_MAC, rd(RAL0) | ((rd(RAH0) & 0xffff) << 32))
+    // §4.5.7.2.1: the MAC follows the PHY's resolution; Set Link Up.
+    // (I225: no PHY register is touched; its NVM defaults negotiate.)
+    let c = rd(CTRL)
+    wr(CTRL, (c | CTRL_SLU) & !(CTRL_LRST | CTRL_ILOS | CTRL_FRCSPD | CTRL_FRCDPLX | CTRL_RST | CTRL_PHY_RST))
+    // The rings and the buffers.
+    let rxr = zeroed_frame()
+    let txr = zeroed_frame()
+    if rxr == 0 || txr == 0 {
+        return refuse("no frame for a ring, receive at", rxr)
+    }
+    put_gw(G_RXR, rxr + frames.hhdm())
+    put_gw(G_TXR, txr + frames.hhdm())
+    var k: u64 = 0
+    while k < RING {
+        let rb = zeroed_frame()
+        let tb = zeroed_frame()
+        if rb == 0 || tb == 0 {
+            return refuse("no frame for the buffers, after", gw(G_FRAMES))
+        }
+        put_gw(G_RXB + k, rb)
+        put_gw(G_RXB + k + 1, rb + BUFFER)
+        put_gw(G_TXB + k, tb)
+        put_gw(G_TXB + k + 1, tb + BUFFER)
+        k += 2
+    }
+    // §4.5.9: receive.
+    k = 0
+    while k < 128 {
+        wr(MTA + k * 4, 0)
+        k += 1
+    }
+    wr(RCTL, 0)
+    k = 0
+    while k < RING {
+        arm(k)
+        k += 1
+    }
+    wr(RDBAL, rxr & 0xffffffff)
+    wr(RDBAH, rxr >> 32)
+    wr(RDLEN, RING * DESC)
+    wr(SRRCTL, SRRCTL_2K_ADV)
+    wr(RDH, 0)
+    wr(RDT, 0)
+    wr(RXDCTL, QUEUE_ENABLE | WTHRESH_1)
+    var q: u64 = 0
+    while rd(RXDCTL) & QUEUE_ENABLE == 0 && q < 100 {
+        delay(100)
+        q += 1
+    }
+    if rd(RXDCTL) & QUEUE_ENABLE == 0 {
+        return refuse("the receive queue did not enable, RXDCTL", rd(RXDCTL))
+    }
+    wr(RDT, RING - 1)
+    wr(RCTL, RCTL_RXEN | RCTL_BAM | RCTL_SECRC)
+    // §4.5.10: transmit.
+    wr(TDBAL, txr & 0xffffffff)
+    wr(TDBAH, txr >> 32)
+    wr(TDLEN, RING * DESC)
+    wr(TDH, 0)
+    wr(TDT, 0)
+    wr(TXDCTL, QUEUE_ENABLE | WTHRESH_1)
+    q = 0
+    while rd(TXDCTL) & QUEUE_ENABLE == 0 && q < 100 {
+        delay(100)
+        q += 1
+    }
+    if rd(TXDCTL) & QUEUE_ENABLE == 0 {
+        return refuse("the transmit queue did not enable, TXDCTL", rd(TXDCTL))
+    }
+    wr(TCTL, rd(TCTL) | TCTL_EN | TCTL_PSP)
+    // The link: STATUS.LU, up to 10 s (I225: the NVM's auto-negotiation).
+    var ms: u64 = 0
+    while rd(STATUS) & STATUS_LU == 0 && ms < 10000 {
+        delay(1000)
+        ms += 1
+    }
+    put_gw(G_LINK_MS, if rd(STATUS) & STATUS_LU != 0 { ms } else { 0xffffffffffffffff })
+    put_gw(G_STATUS0, rd(STATUS))
+    // The interrupt, or the polled path.
+    let line = pci.line(i)
+    let can = pci.pin(i) != 0 && line >= 3 && line <= 15 && line != 4 && line != 8 && line != 13
+    if poll || !can {
+        put_gw(G_POLL, 1)
+        wr(IMC, 0xffffffff)
+    } else {
+        let _clear = rd(ICR)
+        wr(IMS, IMS_RX)
+    }
+    put_gw(G_UP, 1)
+    0
+}
+
+/// The device's interrupt (kernel/net's `irq`, IF clear): read ICR,
+/// which clears it and withdraws the request. Whether it had a cause.
+pub fn irq() -> bool {
+    rd(ICR) != 0
+}
+
+/// Polled: whether the descriptor at the receive head has been written
+/// back (kernel/netd's clock, every tick).
+pub fn due() -> bool {
+    up() && m32(gw(G_RXR) + gw(G_RX_HEAD) * DESC + 8) & 1 != 0
+}
+
+/// The next received frame: `(address, length, descriptor, eop)`, length
+/// 0 when the head's descriptor is not written back. The descriptor is
+/// the caller's until `rx_give`. `eop` false: the frame did not fit one
+/// buffer (kernel/net counts it `long`).
+pub fn rx_next() -> (u64, u64, u64, bool) {
+    let k = gw(G_RX_HEAD)
+    let d = gw(G_RXR) + k * DESC
+    let st = m32(d + 8)
+    if st & 1 == 0 {
+        return (0, 0, 0, false)
+    }
+    let len = m16(d + 12)
+    put_gw(G_RX_HEAD, (k + 1) % RING)
+    (gw(G_RXB + k) + frames.hhdm(), len, k, st & 2 != 0)
+}
+
+/// Hand receive descriptor `k` (from `rx_next`) back: armed again, and
+/// RDT moved onto it (the hardware may use everything before it).
+pub fn rx_give(k: u64) {
+    arm(k)
+    wr(RDT, k)
+}
+
+/// Take back every transmit descriptor the hardware has written back.
+/// How many.
+pub fn reclaim() -> u64 {
+    var n: u64 = 0
+    while gw(G_TX_OUT) > 0 && m8(gw(G_TXR) + gw(G_TX_CLEAN) * DESC + 12) & 1 != 0 {
+        put_m64(gw(G_TXR) + gw(G_TX_CLEAN) * DESC + 8, 0)
+        put_gw(G_TX_CLEAN, (gw(G_TX_CLEAN) + 1) % RING)
+        put_gw(G_TX_OUT, gw(G_TX_OUT) - 1)
+        n += 1
+    }
+    n
+}
+
+/// How many transmit buffers are free (64 when none is outstanding).
+pub fn tx_free() -> u64 {
+    RING - gw(G_TX_OUT)
+}
+
+/// Copy the `len` bytes at `src` (14 to 1514, checked by kernel/net)
+/// into the next free transmit buffer and fill its descriptor, not yet
+/// given to the hardware (`publish`). The bytes on the wire, or 0 when
+/// 63 are outstanding.
+pub fn stage(src: u64, len: u64) -> u64 {
+    if gw(G_TX_OUT) >= RING - 1 {
+        return 0
+    }
+    let k = gw(G_TX_TAIL)
+    let buf = gw(G_TXB + k) + frames.hhdm()
+    let wire = if len < FRAME_MIN { FRAME_MIN } else { len }
+    // # Safety: a transmit buffer of 2048 bytes this module owns and the
+    // hardware does not hold (it is not outstanding): 64 zeroed bytes
+    // cover a padded least frame, then `len` <= 1514 of the caller's.
+    unsafe {
+        pax_fb_fill(buf, 0, 8)
+        pax_fb_copy(buf, src, len)
+    }
+    let d = gw(G_TXR) + k * DESC
+    put_m64(d, gw(G_TXB + k))
+    // Length, CSO 0, CMD EOP | IFCS | RS (0x0b) in byte 11, STA 0.
+    put_m64(d + 8, wire | (0x0b << 24))
+    put_gw(G_TX_TAIL, (k + 1) % RING)
+    put_gw(G_TX_OUT, gw(G_TX_OUT) + 1)
+    wire
+}
+
+/// Give every staged descriptor to the hardware: TDT past the last.
+pub fn publish() {
+    wr(TDT, gw(G_TX_TAIL))
+}
+
+fn put_mac() {
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            log.put(":")
+        }
+        log.hex_n(mac_byte(i), 2)
+        i += 1
+    }
+}
+
+/// The speed STATUS bits 7:6 give, as the I210 reads them (10, 100,
+/// 1000); the I225's 2500 has no row there, so the raw bits go beside it.
+fn put_speed(st: u64) {
+    let s = (st >> 6) & 3
+    log.put(if s == 0 { "10" } else if s == 1 { "100" } else { "1000" })
+    log.put(" Mb/s by the I210's table, STATUS[7:6] ")
+    log.dec(s as int)
+}
+
+/// The device's lines, once it is up (the last is kernel/net's):
+///
+///     net: Intel 82576 (QEMU igb) 8086:10c9 at <bb>:<dd>.<f>, bar0 0x<pa>, reset in <us> us, address from RAL0/RAH0
+///     net: link up after <ms> ms: full duplex, <speed> (STATUS 0x<s>); 64 receive and 64 transmit descriptors, 2048-byte buffers
+pub fn report() {
+    if !up() {
+        return
+    }
+    let i = gw(G_PCI)
+    let b = pci.bdf(i)
+    log.put("net: Intel ")
+    log.put(if gw(G_MODEL) == M_82576 { "82576 (QEMU igb)" } else { "I225/I226" })
+    log.put(" ")
+    log.hex_n(pci.vendor(i), 4)
+    log.put(":")
+    log.hex_n(pci.device(i), 4)
+    log.put(" at ")
+    log.hex_n(b >> 16, 2)
+    log.put(":")
+    log.hex_n((b >> 8) & 0x1f, 2)
+    log.put(".")
+    log.hex_n(b & 7, 1)
+    log.put(", bar0 ")
+    log.hex(gw(G_BAR))
+    log.put(", reset in ")
+    log.dec(gw(G_RESET_US) as int)
+    log.put(" us, address from RAL0/RAH0")
+    log.end()
+    let st = gw(G_STATUS0)
+    if gw(G_LINK_MS) == 0xffffffffffffffff {
+        log.put("net: NO link after 10000 ms (STATUS ")
+        log.hex_n(st, 8)
+        log.put("); frames go nowhere until it comes")
+    } else {
+        log.put("net: link up after ")
+        log.dec(gw(G_LINK_MS) as int)
+        log.put(" ms: ")
+        log.put(if st & 1 != 0 { "full" } else { "half" })
+        log.put(" duplex, ")
+        put_speed(st)
+        log.put(" (STATUS ")
+        log.hex_n(st, 8)
+        log.put(")")
+    }
+    log.put("; 64 receive and 64 transmit descriptors, 2048-byte buffers")
+    log.end()
+}
+
+/// The registers this module programs, read back on one line (the metal
+/// leg's record of what the I225 answered; ICR is not read: reading it
+/// clears it):
+///
+///     net: regs CTRL <c> STATUS <s> CTRL_EXT <e> RCTL <r> TCTL <t> SRRCTL <x> RXDCTL <y> TXDCTL <z> RDH <h> RDT <t> TDH <h> TDT <t> RAL0 <l> RAH0 <h> IMS <m>
+pub fn dump() {
+    if gw(G_MODEL) == 0 {
+        return
+    }
+    log.put("net: regs")
+    reg(" CTRL ", CTRL)
+    reg(" STATUS ", STATUS)
+    reg(" CTRL_EXT ", CTRL_EXT)
+    reg(" RCTL ", RCTL)
+    reg(" TCTL ", TCTL)
+    reg(" SRRCTL ", SRRCTL)
+    reg(" RXDCTL ", RXDCTL)
+    reg(" TXDCTL ", TXDCTL)
+    reg(" RDH ", RDH)
+    reg(" RDT ", RDT)
+    reg(" TDH ", TDH)
+    reg(" TDT ", TDT)
+    reg(" RAL0 ", RAL0)
+    reg(" RAH0 ", RAH0)
+    reg(" IMS ", IMS)
+    log.end()
+}
+
+fn reg(name: str, r: u64) {
+    log.put(name)
+    log.hex_n(rd(r), 8)
+}
+
+/// The station's address, for kernel/net's own line.
+pub fn put_address() {
+    put_mac()
+}
