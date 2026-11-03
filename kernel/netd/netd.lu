@@ -16,7 +16,9 @@
 //!             this station's); kernel/tcp's `input` for protocol 6
 //!             (px23); kernel/udp's `input` for protocol 17, and
 //!             kernel/icmp's `unreachable` (code 3) when it says no
-//!             socket takes the datagram (px22); kernel/icmp's
+//!             socket takes the datagram (px22) — but from port 67 to
+//!             port 68, while kernel/dhcp runs, kernel/dhcp's `input`
+//!             (px89); kernel/icmp's
 //!             `unreachable` (code 2) for a protocol nothing speaks;
 //!             nothing more for one it dropped (px21)
 //!     others  counted and dropped (kernel/net's `drop_type`)
@@ -49,6 +51,7 @@
 //! No Linux source; no other kernel's or network stack's source.
 
 use arp
+use dhcp
 use icmp
 use ip
 use net
@@ -90,6 +93,12 @@ pub fn deliver(frame: u64, len: u64, looped: bool) {
     } else if what == ip.TO_TCP {
         tcp.input(frame, ihl, total, looped)
     } else if what == ip.TO_UDP {
+        // px89: a server's answer to the DHCP client is the client's,
+        // before any socket's.
+        if !looped && dhcp.claims(frame, ihl, total) {
+            dhcp.input(frame, ihl, total)
+            return
+        }
         // px22: a datagram no socket takes draws a port unreachable,
         // and kernel/udp counts what became of the wire's.
         if udp.input(frame, ihl, total, looped) == udp.NO_PORT {
