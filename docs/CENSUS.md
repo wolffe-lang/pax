@@ -828,6 +828,24 @@ the directories themselves (a named drift: what is read through them is
 the same). lsblk and blkid are dynamic glibc programs (px66) and do not
 run on PAX; the probe reads what they read.
 
+## Served since px04: fork for musl, and getrusage (px88)
+
+px04's union counted `getrusage` (cc's) and `vfork` (the shell's) and no
+`fork`: every traced workload was glibc's or wolf's, which fork with
+`clone`. A static musl program asks `fork` (57) itself, and ld01 found
+it -ENOSYS (pax#175: every musl program that forked failed); px71 and
+px78 found `getrusage` -ENOSYS, so the installer could print no peak
+(pax#185, #248). px88 serves both, each row held to Linux by two static
+musl probes (Ubuntu's musl-gcc), as root and as a user
+(`tests/mpx5-forks`: `user/elf/forks.c`, `user/elf/usage.c`).
+
+| nr | call | served | not kept, by name |
+|---:|---|---|---|
+| 57 | `fork` | `clone(SIGCHLD, 0)`: the child's 0 and the parent's pid, the space copied, the descriptors and their open files shared, the dispositions and the mask kept, the pending set empty, the child's usage zero | |
+| 98 | `getrusage` | RUSAGE_SELF, RUSAGE_CHILDREN (the children reaped by a wait, their own reaped children's with them, the largest set kept), RUSAGE_THREAD; `who` read as an int, any other -EINVAL, then a buffer that is not 144 writable bytes -EFAULT; ru_utime and ru_stime (TSC cycles at every switch and around every system call, as nanoseconds against kernel/clock), ru_maxrss (the space's peak of mapped pages, sampled before every call that lowers it), ru_nvcsw and ru_nivcsw; the seven fields getrusage(2) calls unmaintained 0, as on Linux | ru_minflt 0 (PAX maps anonymous memory at the call and takes no fault a first touch takes on Linux), ru_majflt, ru_inblock, ru_oublock 0 (no block I/O is counted; 0 on Linux too for programs and files in memory) |
+| 61, 247 | `wait4`, `waitid` | the rusage argument the reaped child's (its own and its reaped children's); a stop's or continue's report zero | |
+| 13 | `rt_sigaction` of SIGCHLD | SIG_IGN, or SA_NOCLDWAIT: the children keep no zombie, a wait answers -ECHILD once none is left, and they are not counted in RUSAGE_CHILDREN (wait(2), getrusage(2)) | |
+
 ## Disk formatters and Limine (px69)
 
 Linux strace of the static binaries records 26 distinct calls for paxgpt
@@ -891,11 +909,15 @@ formatters and Limine measured above; each status and target fsync is
 checked. The line UI uses terminal-size queries without cursor-control or
 signal handlers of its own.
 
-One additional measured absence is **getrusage (98)**: self and children
-requests on PAX return **-ENOSYS (-38)**. The installer prints “unavailable”,
-not a zero peak RSS. Linux's reference copy reports real wait4 child
-resource usage (11884 KiB peak RSS); this is not a measurement of PAX and
-not QEMU's host RSS. The existing glibc set_robust_list/rseq startup
+One measured absence was **getrusage (98)**: until px88 self and children
+requests on PAX returned **-ENOSYS (-38)** and the installer printed
+“unavailable”, never a zero peak RSS. px88 serves it (above): the
+installer's two lines now print PAX's own peaks in KiB (`tests/mpx6-install`'s
+I-peak): 5904 KiB for the installer through the copy's verification and
+28264 KiB for the formatter children, on the unattended install row. Linux's
+reference copy reports real wait4 child resource usage (11884 KiB peak RSS);
+that is a Linux measurement, not PAX's and not QEMU's host RSS, and PAX's
+installer peak is below it. The existing glibc set_robust_list/rseq startup
 fallbacks remain as in the disk-tool census. No new syscall implementation
 is claimed by this userspace lane.
 
