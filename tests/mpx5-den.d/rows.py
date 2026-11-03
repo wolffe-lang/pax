@@ -37,7 +37,9 @@ def parse(lines):
     blocks = []
     for line in lines[1:]:
         if line.startswith('$ '):
-            blocks.append([line[2:], []])
+            # `tick; s …` moves the dates first: the block is the `s …`.
+            cmd = line[2:]
+            blocks.append([cmd[6:] if cmd.startswith('tick; ') else cmd, []])
         elif blocks:
             blocks[-1][1].append(line)
     return blocks
