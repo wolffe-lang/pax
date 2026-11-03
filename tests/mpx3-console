@@ -67,9 +67,10 @@
 #      T7's boot line (the screen at the prompt names the kernel too).
 #   T7 (px87, pax#253) the boot's time: before `run 1:`, `boot: <n> ms
 #      from the kernel's entry to its first program; the console drew for
-#      <m> ms of it (<s> scrolls, <b> bytes)`, m <= n (the TSC at the
-#      entry, its rate measured against the firmware's clock; the screen's
-#      own cycles): a measurement for the metal stick's A/B, no bound.
+#      <m> ms of it (<s> scrolls by copy|redraw, <b> bytes)`, m <= n (the
+#      TSC at the entry, its rate measured against the firmware's clock;
+#      the screen's own cycles; the way kernel/screen's attach chose to
+#      scroll): a measurement for the metal stick's A/B, no bound.
 #      T6 and T7 find that line by its own words (`boot: <n> ms from`):
 #      a boot from a disk (--usb-stick) prints the medium's `boot:
 #      /boot/initramfs.cpio from a disk: ...` line first.
@@ -329,7 +330,7 @@ for leg in $legs; do
             # measurement read off the screen on metal; no bound here).
             why=
             bl=$(grep -m1 -E "$timing" "$norm")
-            if [[ $bl =~ ^boot:\ ([0-9]+)\ ms\ from\ the\ kernel\'s\ entry\ to\ its\ first\ program\;\ the\ console\ drew\ for\ ([0-9]+)\ ms\ of\ it\ \(([0-9]+)\ scrolls,\ ([0-9]+)\ bytes\)$ ]]; then
+            if [[ $bl =~ ^boot:\ ([0-9]+)\ ms\ from\ the\ kernel\'s\ entry\ to\ its\ first\ program\;\ the\ console\ drew\ for\ ([0-9]+)\ ms\ of\ it\ \(([0-9]+)\ scrolls\ by\ (copy|redraw),\ ([0-9]+)\ bytes\)$ ]]; then
                 [ "${BASH_REMATCH[2]}" -le "${BASH_REMATCH[1]}" ] || why+=" the console's share is more than the whole;"
                 bn=$(grep -n -m1 -E "$timing" "$norm" | cut -d: -f1); rn=$(grep -n -m1 '^run 1: ' "$norm" | cut -d: -f1)
                 [ -n "$rn" ] && [ "$bn" -lt "$rn" ] || why+=" not before 'run 1:';"
