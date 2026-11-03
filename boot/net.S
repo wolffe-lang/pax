@@ -1,5 +1,5 @@
 /* net.S — the network's storage (px20, px21, px22, px23, px89): no routines, only
-   the .bss kernel/pci, kernel/virtio, kernel/net, kernel/arp,
+   the .bss kernel/pci, kernel/virtio, kernel/gbe, kernel/net, kernel/arp,
    kernel/ip, kernel/icmp, kernel/udp, kernel/tcp and kernel/dhcp keep
    their state in.
 
@@ -48,6 +48,9 @@
                      timers and the 32 frames of its two buffers (px23)
      pax_tcp_tw      256 eight-byte words: the frames of the time-wait
                      table (px23)
+     pax_gbe_state   256 eight-byte words: kernel/gbe's (the controller,
+                     its rings' heads and tails, the 128 buffers'
+                     addresses; px89)
      pax_dhcp_state  128 eight-byte words: kernel/dhcp's (the state, the
                      xid, the timers, the lease, its three frames, what
                      the waiting message said, the counters; px89)
@@ -96,6 +99,9 @@ pax_tcp_tw:
         .globl pax_tcp_conns
 pax_tcp_conns:
         .zero 1024 * 1024
+        .globl pax_gbe_state
+pax_gbe_state:
+        .zero 2048
         .globl pax_dhcp_state
 pax_dhcp_state:
         .zero 1024
