@@ -153,7 +153,7 @@ def main():
     m = s('den merge side', row='merge-conflict')
     if ok('merge-conflict', m, None, None, 1) and 'CONFLICT (content): Merge conflict in a.txt' not in m.out:
         fail('merge-conflict', 'no CONFLICT line: %r' % m.out)
-    ok('merge-conflict', s('den status --porcelain', 6, 'merge-conflict'), ['UU a.txt'], [])
+    ok('merge-conflict', s('den status --porcelain', 4, 'merge-conflict'), ['UU a.txt'], [])
     if find('cat a.txt', row='merge-conflict') != ['alpha', '<<<<<<< HEAD', 'beta from main', '=======',
                                                    'beta from side', '>>>>>>> side', 'gamma', 'delta']:
         fail('merge-conflict', 'the markers: %r' % find('cat a.txt'))
@@ -187,22 +187,22 @@ def main():
         fail('blame', 'den blame a.txt: %r' % bl.out)
     ok('stash', s('den stash push -m wip', row='stash'), None, [])
     ok('stash', s('den stash list', row='stash'), ['stash@{0}: On main: wip'], [])
-    ok('stash', s('den status --porcelain', 8, 'stash'), [], [])
+    ok('stash', s('den status --porcelain', 6, 'stash'), [], [])
     ok('stash', s('den stash pop', row='stash'), None, None)
-    ok('stash', s('den status --porcelain', 9, 'stash'), [' M b.txt'], [])
+    ok('stash', s('den status --porcelain', 7, 'stash'), [' M b.txt'], [])
     ok('notes', s("den notes add -m 'a note on HEAD' HEAD", row='notes'), None, None)
     ok('notes', s('den notes show HEAD', row='notes'), ['a note on HEAD'], [])
     n = s('den log -n 1', row='notes')
     if ok('notes', n, None, []) and not ('Notes:' in n.out and '    a note on HEAD' in n.out):
         fail('notes', 'den log -n 1 shows no note: %r' % n.out)
     ok('reset', s('den reset --soft HEAD~1', row='reset'), [], [])
-    ok('reset', s('den status --porcelain', 10, 'reset'), ['A  r.txt'], [])
+    ok('reset', s('den status --porcelain', 8, 'reset'), ['A  r.txt'], [])
     ok('reset', s('den reset --mixed HEAD', row='reset'), None, None)
-    ok('reset', s('den status --porcelain', 11, 'reset'), ['?? r.txt'], [])
+    ok('reset', s('den status --porcelain', 9, 'reset'), ['?? r.txt'], [])
     r = s('den reset --hard HEAD~1', row='reset')
     if ok('reset', r, None, []) and not (len(r.out) == 1 and r.out[0].startswith('HEAD is now at ')):
         fail('reset', 'reset --hard: %r' % r.out)
-    ok('reset', s('den status --porcelain', 12, 'reset'), [], [])
+    ok('reset', s('den status --porcelain', 10, 'reset'), [], [])
     lsr = s('ls r.txt', row='reset')
     if lsr and lsr.status == 0:
         fail('reset', 'r.txt is still there after reset --hard')
