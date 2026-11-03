@@ -3247,6 +3247,94 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px90: den (user/den.pin, tools/mkden), version control in wolf,
+  # preinstalled on PAX as /bin/den with /bin/git an archive link to it
+  # (tools/install-den), typed at pelt in repositories on the writable
+  # ext2 /home (tools/mkdisk --home, e2fsprogs from the image pinned by
+  # digest): a session as root and as a user against the same den in a
+  # throwaway container (tools/linux-tree), the disk read back after the
+  # boot (debugfs) and checked by the runner's git. den is public:
+  # tools/mkden fetches it and its own toolchain (wolf 0.2.36) by digest.
+  mpx5-den:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-den')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 240 || 120 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          git --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-den-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: den's session against the container, as root and as a user, on the ext2 /home; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-den $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the sessions, the disks, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-den
+          path: |
+            build/mpx5-den/*.txt
+            build/mpx5-den/den/sums.txt
+            build/mpx5-den/pelt/sums.txt
+            build/mpx5-den/bore/sums.txt
+            build/mpx5-den/linux/
+            build/mpx5-den/*/kmain_console.elf
+            build/mpx5-den/*/*.log
+            build/mpx5-den-*.session
+            build/mpx5-den-*.serial.log
+            build/mpx5-den-*.norm
+            build/mpx5-den-*.meta
+            build/mpx5-den-*.halt
+            build/mpx5-den-*.verdict
+            build/mpx5-den-*.typed
+            build/mpx5-den-*.fsck
+            build/mpx5-den-*.git-fsck
+            build/mpx5-den-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px64: scent (user/scent.pin, tools/mkscent), grep in wolf, preinstalled
   # on PAX as /bin/scent with /bin/grep an archive link to it and its
   # egrep/fgrep wrappers run by /bin/sh (pelt), typed at pelt: a session as
@@ -4944,6 +5032,7 @@ jobs:
       - mpx5-pelt
       - mpx5-aspen
       - mpx5-scent
+      - mpx5-den
       - mpx5-bore
       - mpx5-lupin
       - mpx5-wolf
