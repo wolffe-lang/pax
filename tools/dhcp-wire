@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+# dhcp-wire — a second DHCP server for PAX's client, a black box: dnsmasq
+# on a tap device, started, stopped and changed on a scenario's cues
+# (px89; tests/mpx4-dhcp, tests/mpx4-igb).
+#
+#   tools/dhcp-wire --scenario NAME --serial LOG --work DIR [--tap NAME]
+#                   [--sudo] -- COMMAND...
+#
+# Makes the tap NAME (default pxdhcp0, owned by the calling user so QEMU
+# opens it unprivileged), 192.168.89.1/24, up; runs COMMAND (a
+# tools/qemu-run line whose netdev is `tap,ifname=NAME,script=no,
+# downscript=no`); watches LOG, the guest's serial log, for kernel/dhcp's
+# lines and drives dnsmasq by the scenario; when COMMAND ends, stops
+# dnsmasq and removes the tap. Exits with COMMAND's status.
+#
+# dnsmasq is a black box here (RFC 2131's server side, as Ubuntu ships
+# it): `--no-daemon --port=0` (no DNS), authoritative, one range, the
+# router 192.168.89.1, a 2-minute lease (its least: shorter is raised to
+# 2 minutes), T1 10 s and T2 20 s, its log at DIR/dnsmasq-<k>.log, its
+# leases at DIR/leases. Two configurations:
+#   A  192.168.89.50-99, DNS 192.168.89.53 and .54
+#   B  192.168.89.100-149, DNS 192.168.89.55 (a fresh lease file)
+# The scenarios (the cue is the first serial line holding the word):
+#   renew    A from the start
+#   backoff  A started 20 s after the first `DISCOVER`
+#   rebind   A from the start; stopped at `bound`; started again (the
+#            same leases) 2 s after `RENEW`: the renewal is unanswered,
+#            the rebinding answered
+#   expiry   A from the start; stopped at `bound`; started again 3 s
+#            after `expired`
+#   nak      A from the start; at `bound` stopped and B started: the
+#            renewal draws a NAK, and the next DISCOVER a new address
+# Every step is written to DIR/account.txt as `dhcp-wire: +<s> <what>`,
+# the time from COMMAND's start.
+#
+# --sudo prefixes `sudo -n` to what needs root (ip, dnsmasq, kill of
+# dnsmasq) when this is not root. Needs ip(8) and dnsmasq(8). Exit 2 on
+# a usage or setup error.
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+SUBNET = "192.168.89"
+CONF = {
+    "A": ("%s.50" % SUBNET, "%s.99" % SUBNET, "%s.53,%s.54" % (SUBNET, SUBNET)),
+    "B": ("%s.100" % SUBNET, "%s.149" % SUBNET, "%s.55" % SUBNET),
+}
+SCENARIOS = ("renew", "backoff", "rebind", "expiry", "nak")
+
+
+def die(msg):
+    print("dhcp-wire: " + msg, file=sys.stderr)
+    sys.exit(2)
+
+
+def main():
+    a = sys.argv[1:]
+    scenario = serial = work = None
+    tap, use_sudo = "pxdhcp0", False
+    while a and a[0] != "--":
+        k = a.pop(0)
+        if k == "--scenario":
+            scenario = a.pop(0)
+        elif k == "--serial":
+            serial = a.pop(0)
+        elif k == "--work":
+            work = a.pop(0)
+        elif k == "--tap":
+            tap = a.pop(0)
+        elif k == "--sudo":
+            use_sudo = True
+        else:
+            die("unknown option %s" % k)
+    if not a or a[0] != "--" or len(a) < 2 or scenario not in SCENARIOS or not serial or not work:
+        die("usage: dhcp-wire --scenario {%s} --serial LOG --work DIR [--tap NAME] [--sudo] -- COMMAND..." % ",".join(SCENARIOS))
+    command = a[1:]
+    os.makedirs(work, exist_ok=True)
+    pre = ["sudo", "-n"] if use_sudo and os.geteuid() != 0 else []
+    account = open(os.path.join(work, "account.txt"), "w", buffering=1)
+    start = time.time()
+
+    def note(what):
+        account.write("dhcp-wire: +%.2f %s\n" % (time.time() - start, what))
+
+    def run(*cmd):
+        r = subprocess.run(pre + list(cmd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        if r.returncode != 0:
+            die("%s: %s" % (" ".join(cmd), r.stdout.strip()))
+
+    uid = str(os.getuid())
+    subprocess.run(pre + ["ip", "link", "del", tap], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    run("ip", "tuntap", "add", "dev", tap, "mode", "tap", "user", uid)
+    run("ip", "addr", "add", SUBNET + ".1/24", "dev", tap)
+    run("ip", "link", "set", tap, "up")
+    note("tap %s %s.1/24 up (user %s)" % (tap, SUBNET, uid))
+    servers = {"k": 0, "proc": None}
+
+    def dnsmasq_start(which, fresh):
+        lo, hi, dns = CONF[which]
+        leases = os.path.join(work, "leases")
+        if fresh and os.path.exists(leases):
+            os.rename(leases, leases + ".%d" % servers["k"])
+        servers["k"] += 1
+        log = os.path.join(work, "dnsmasq-%d.log" % servers["k"])
+        cmd = pre + ["dnsmasq", "--no-daemon", "--user=root", "--port=0", "--interface=" + tap, "--bind-interfaces",
+                     "--dhcp-authoritative", "--dhcp-range=%s,%s,255.255.255.0,2m" % (lo, hi),
+                     "--dhcp-option=option:router,%s.1" % SUBNET, "--dhcp-option=option:dns-server," + dns,
+                     "--dhcp-option=option:T1,10", "--dhcp-option=option:T2,20",
+                     "--dhcp-leasefile=" + leases, "--log-dhcp", "--log-facility=" + log]
+        servers["proc"] = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        note("dnsmasq %d started: configuration %s (%s-%s, dns %s)%s, pid %d, log %s" % (
+            servers["k"], which, lo, hi, dns, ", a fresh lease file" if fresh else "", servers["proc"].pid, log))
+
+    def dnsmasq_stop():
+        p = servers["proc"]
+        if p is None:
+            return
+        if pre:
+            subprocess.run(pre + ["kill", "-TERM", str(p.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            p.send_signal(signal.SIGTERM)
+        try:
+            p.wait(10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+        note("dnsmasq %d stopped (status %s)" % (servers["k"], p.returncode))
+        servers["proc"] = None
+
+    # cue word -> (delay, action); each fires once, in order.
+    plan = {
+        "renew": [],
+        "backoff": [("DISCOVER", 20.0, lambda: dnsmasq_start("A", False))],
+        "rebind": [("bound", 0.0, dnsmasq_stop), ("RENEW", 2.0, lambda: dnsmasq_start("A", False))],
+        "expiry": [("bound", 0.0, dnsmasq_stop), ("expired", 3.0, lambda: dnsmasq_start("A", False))],
+        "nak": [("bound", 0.0, lambda: (dnsmasq_stop(), dnsmasq_start("B", True)))],
+    }[scenario]
+    if scenario != "backoff":
+        dnsmasq_start("A", True)
+    guest = subprocess.Popen(command, stdin=subprocess.DEVNULL)
+    note("guest started: pid %d: %s" % (guest.pid, " ".join(command)))
+    seen, pos, due = "", 0, None
+    while guest.poll() is None:
+        time.sleep(0.1)
+        try:
+            with open(serial, "rb") as f:
+                f.seek(pos)
+                more = f.read()
+        except OSError:
+            more = b""
+        pos += len(more)
+        seen += more.decode("latin-1")
+        if plan and due is None:
+            word, delay, _act = plan[0]
+            for line in seen.splitlines():
+                if line.startswith("dhcp: ") and re.search(r"\b%s\b" % word, line):
+                    due = time.time() + delay
+                    note("cue %r seen: %s" % (word, line.strip()))
+                    break
+        if due is not None and time.time() >= due:
+            _w, _d, act = plan.pop(0)
+            act()
+            due = None
+            # the next cue is looked for in what comes after this one
+            seen = ""
+    rc = guest.returncode
+    note("guest ended: status %d" % rc)
+    dnsmasq_stop()
+    subprocess.run(pre + ["ip", "link", "del", tap], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    note("tap %s removed" % tap)
+    left = [w for w, _d, _a in plan]
+    if left:
+        note("cues never seen: %s" % " ".join(left))
+    account.close()
+    return rc
+
+
+sys.exit(main())
