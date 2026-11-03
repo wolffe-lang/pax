@@ -452,13 +452,65 @@ fn show() {
     }
 }
 
-/// px87 (pax#253): whether a scroll reads the framebuffer back, as px19's
-/// did, the command line's `fbread` (read once, at attach, with IF clear;
-/// only read after). Kept for two measurements, never a default: the
-/// read-watch row's positive control (tests/mpx3-screen V7: the same
-/// kernel, booted with the word, must be seen reading) and the metal A/B
-/// of the boot's time (the stick's second Limine entry).
+/// px87 (pax#253): whether a scroll copies the framebuffer onto itself, as
+/// px19's did (reading it back), or redraws the cells that change from the
+/// cell grid (never reading it). Decided once, at attach, with IF clear;
+/// only read after. `fbread` on the command line copies and `fbwrite`
+/// redraws (tests/mpx3-screen V7 and V8, the metal A/B); otherwise
+/// `attach` times a read of the framebuffer against a write of the same
+/// bytes (`probe_copy`) and copies only when a read costs at most COPY_MAX
+/// writes. Through a GPU's write-combining mapping a read is uncached and
+/// costs many writes (kasumi's 4090: about 23 MB of reads a scrolled line,
+/// pax#253), so the scroll redraws; an emulator's framebuffer is host
+/// memory, where the copy is the cheap way (CI's mpx5-pelt under TCG was
+/// 23 % slower redrawing).
 var readback: bool = false
+
+/// px87: the probe's measure: a framebuffer read may cost this many writes
+/// of the same bytes before the scroll stops copying.
+const COPY_MAX: u64 = 4
+
+/// px87: the bytes the probe reads and writes (eight pages; at most the
+/// framebuffer's).
+const PROBE_BYTES: u64 = 32768
+
+/// px87: what the probe measured (TSC cycles), 0 when it did not run.
+var probe_read: u64 = 0
+var probe_write: u64 = 0
+
+/// px87: time PROBE_BYTES of the framebuffer at `va` read (into the active
+/// cell grid's storage, `room` bytes, which `attach` blanks after) against
+/// the same bytes written with `v` (the colour the clear just gave them:
+/// the screen does not change). Whether a read costs at most COPY_MAX
+/// writes.
+fn probe_copy(va: u64, bytes: u64, room: u64, v: u64) -> bool {
+    var n = PROBE_BYTES
+    if bytes < n {
+        n = bytes
+    }
+    if room < n {
+        n = room
+    }
+    n = n - n % 8
+    if n == 0 {
+        return false
+    }
+    // # Safety: n is at most `room`, the active grid's cols * rows four-byte
+    // cells at the start of pax_screen_cells, which `attach` blanks after
+    // this; and at most pitch * h, the framebuffer kernel/fb mapped. REP
+    // MOVSQ reads the framebuffer's first n bytes, REP STOSQ writes them.
+    let t0 = unsafe { pax_rdtsc() }
+    unsafe { pax_fb_copy(pax_screen_cells as u64, va, n) }
+    let t1 = unsafe { pax_rdtsc() }
+    unsafe { pax_fb_fill(va, v, n / 8) }
+    let t2 = unsafe { pax_rdtsc() }
+    // # Safety: module state, written here with IF clear (attach).
+    unsafe {
+        probe_read = t1 - t0
+        probe_write = t2 - t1
+    }
+    t1 - t0 <= COPY_MAX * (t2 - t1)
+}
 
 fn get_readback() -> bool {
     // # Safety: module state, written by `attach` with IF clear before any
@@ -1235,6 +1287,15 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
     // mapped by kernel/fb.
     unsafe { pax_fb_fill(va, p0 | (p0 << 32), pitch * h / 8) }
     if (pitch * h) % 8 != 0 { unsafe { ((va + pitch * h - 4) as *u32).write_volatile(p0 as u32) } }
+    // px87: the scroll's way (see `readback`), before the grid is blanked
+    // (the probe reads into the grid's storage).
+    if boot_info.cmdline_has("fbread") {
+        set_readback(true)
+    } else if boot_info.cmdline_has("fbwrite") {
+        set_readback(false)
+    } else {
+        set_readback(probe_copy(va, pitch * h, cols * rows * 4, p0 | (p0 << 32)))
+    }
     i = 0
     while i < cols * rows {
         put_cell(i, BLANK)
@@ -1250,7 +1311,6 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
             i += 1
         }
     }
-    set_readback(boot_info.cmdline_has("fbread"))
     put_sv(S_ON, 1)
     let n = sv(S_EARLY)
     var k: u64 = 0
