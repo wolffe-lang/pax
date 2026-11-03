@@ -83,7 +83,7 @@ def plain(t):
     return esc_re.sub('', t).replace('\r', '')
 
 
-boot_re = re.compile(r"^boot: ([0-9]+) ms from the kernel's entry to its first program; the console drew for ([0-9]+) ms of it \(([0-9]+) scrolls(?: by (?:copy|redraw))?, ([0-9]+) bytes\)$")
+boot_re = re.compile(r"^boot: ([0-9]+) ms from the kernel's entry to its first program; the console drew for ([0-9]+) ms of it \(([0-9]+) scrolls(?: by (?:copy|redraw)(?: \([^)]*\))?)?, ([0-9]+) bytes\)$")
 
 
 def common_rows(prefix, lines):
