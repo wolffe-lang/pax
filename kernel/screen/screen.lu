@@ -478,6 +478,25 @@ const PROBE_BYTES: u64 = 32768
 var probe_read: u64 = 0
 var probe_write: u64 = 0
 
+/// px87: how the way was decided: 0 the probe, 1 `fbread`, 2 `fbwrite`;
+/// and whether it was (once, at the first attach: no retry, no second
+/// probe, the way kept for the boot).
+var forced: u64 = 0
+var decided: bool = false
+
+fn get_decided() -> bool {
+    // # Safety: module state, written by `attach` with IF clear.
+    unsafe { decided }
+}
+
+fn set_forced(f: u64) {
+    // # Safety: as `get_decided`.
+    unsafe {
+        forced = f
+        decided = true
+    }
+}
+
 /// px87: time PROBE_BYTES of the framebuffer at `va` read (into the active
 /// cell grid's storage, `room` bytes, which `attach` blanks after) against
 /// the same bytes written with `v` (the colour the clear just gave them:
@@ -1289,12 +1308,17 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
     if (pitch * h) % 8 != 0 { unsafe { ((va + pitch * h - 4) as *u32).write_volatile(p0 as u32) } }
     // px87: the scroll's way (see `readback`), before the grid is blanked
     // (the probe reads into the grid's storage).
-    if boot_info.cmdline_has("fbread") {
+    if get_decided() {
+        // decided at the first attach: kept for the boot
+    } else if boot_info.cmdline_has("fbread") {
         set_readback(true)
+        set_forced(1)
     } else if boot_info.cmdline_has("fbwrite") {
         set_readback(false)
+        set_forced(2)
     } else {
         set_readback(probe_copy(va, pitch * h, cols * rows * 4, p0 | (p0 << 32)))
+        set_forced(0)
     }
     i = 0
     while i < cols * rows {
@@ -1387,6 +1411,28 @@ pub fn lost() -> u64 {
 /// rather than redrawing the cells that change: what `attach` chose.
 pub fn copy_scroll() -> bool {
     get_readback()
+}
+
+/// px87: how the way was chosen: 0 the probe, 1 `fbread`, 2 `fbwrite`.
+pub fn scroll_forced() -> u64 {
+    // # Safety: a scalar read after `attach`'s one write.
+    unsafe { forced }
+}
+
+/// px87: the probe's read and write of PROBE_BYTES (TSC cycles; 0 when the
+/// way was forced), and the measure it held them to (COPY_MAX).
+pub fn probe_read_cycles() -> u64 {
+    // # Safety: as `scroll_forced`.
+    unsafe { probe_read }
+}
+
+pub fn probe_write_cycles() -> u64 {
+    // # Safety: as `scroll_forced`.
+    unsafe { probe_write }
+}
+
+pub fn copy_max() -> u64 {
+    COPY_MAX
 }
 
 /// px87: the TSC cycles the screen has spent drawing (`spent`).
