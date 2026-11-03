@@ -127,15 +127,19 @@ static void call_rows(void) {
 
 /* M: the largest resident set. */
 static void maxrss_rows(void) {
+    /* A process's peak outlives exec (the exec rows), so the start is the
+     * peak of whatever ran before this image in the process: on Linux's side
+     * tools/linux-tree's Python, on PAX nothing (the kernel starts it) or
+     * `as`. The rows below hold the peak itself, not its growth from there. */
     long b0 = get(RUSAGE_SELF).ru_maxrss;
-    say("maxrss: at the start, more than 0 and under 4 MiB: %s\n", yes(b0 > 0 && b0 < 4096));
+    say("maxrss: at the start, more than 0 and under 48 MiB: %s\n", yes(b0 > 0 && b0 < 49152));
     char *p = malloc(64 << 20);
     touch(p, 64 << 20);
     long b1 = get(RUSAGE_SELF).ru_maxrss;
     /* Linux counts resident pages approximately (64 MiB touched read as
      * 64700 KiB more on hasu's 7.2.4, notes/px88/linux/): 4 MiB each way */
-    say("maxrss: 64 MiB touched: grew by at least 60 MiB %s, by at most 68 MiB %s\n", yes(b1 - b0 >= 61440),
-        yes(b1 - b0 <= 69632));
+    say("maxrss: 64 MiB touched: at least 60 MiB %s, at most 68 MiB above the start %s\n", yes(b1 >= 61440),
+        yes(b1 <= b0 + 69632));
     free(p);
     long b2 = get(RUSAGE_SELF).ru_maxrss;
     say("maxrss: after the 64 MiB was freed, unchanged: %s\n", yes(b2 == b1));
