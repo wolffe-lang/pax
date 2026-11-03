@@ -504,6 +504,36 @@ kernel's entry to its first program; `); `08da7c51` P9 refuses the medium's line
 change; `boot:` stays the kernel's family of boot reports. The green is gauntlet4's (`notes/px87/kasumi/gauntlet4.sh`,
 at the pushed head; its END lines go in the PR's body) and CI's.
 
+### 4.12 The second rebase, onto `9e106768` (px88's fork and getrusage)
+
+CI's labelled run at `6ee08d75` (41562678596) ended cancelled: `mpx5-pelt` hit its 210-minute limit; every other
+suite of the lane's was green. px88 (pax#275) then merged at `9e106768` (fork for musl, getrusage, the scheduler's
+usage counts), and the lane was rebased onto it. Two commits met px88's in the same lines and were resolved by hand:
+the README's test table (px88's `mpx5-forks` row kept, with this lane's words on the console and the installer) and
+`docs/SOURCES.md` (px88's section, then this lane's). `tools/ci-tiers.map`, `tests/mpx6-install` (px88's I-peak beside
+this lane's as-user rows) and `docs/BOOT.md` merged without a conflict.
+
+`notes/px87/rebase/map.sh 5da8daaf <the head before> 9e106768 <the head after>` paired all 64 commits (the subjects
+equal; the patches equal, or for the two resolved commits the same added and removed lines with their context moved,
+marked `context`; the trees differing by exactly trunk's paths since `5da8daaf`): `notes/px87/rebase/map2.txt`.
+**The commit names in this note before this section are the first rebase's (on `5da8daaf`); map2.txt resolves each
+to its commit on `9e106768`.** Unlike the first rebase, trunk's change here is code (`kernel/process`, `kernel/sched`,
+`kernel/user`, `kernel/vm`, `boot/sched.S`), so the earlier gauntlets do not stand for the rebased code by tree: the
+steps px88 can touch (the console rows, the stick's sessions, the installer, and px88's own `mpx5-forks` with this
+lane's kernel lines) run again at the rebased head under planning's `tools/gauntlet-record.sh`
+(`notes/px87/kasumi/record6.sh`, `steps6.sh`); the record's END lines are in the PR's body.
+
+Since §4.11 (gauntlet4 at `6ee08d75`, `gauntlet4.log`): its fixes held (U5/U6 `native ISO 50/50, USB 50/50`, both
+console logs 70 PASS T rows and 0 FAIL, U7, P9); its two reds were the rig's. `mpx6-firmware`: `mpx6-nmi`'s
+`mce@initramfs.report` leg never booted, its QMP socket 108 bytes (`tests/mpx6-nmi.d/inject.py` line 65, `OSError:
+AF_UNIX path too long`; the leg's directory from `tests/mpx6-nmi` line 72), pax#273's class; green under a shorter
+build directory (`rerun5.log`: the socket 94 bytes, `PASS F11 native: an NMI survived and a machine check named,
+anywhere in the boot, on bios uefi`, `END mpx6-firmware exit=0`). `usb-stick`'s U8: the container had no `depmod`
+(kmod), then the lane's script read `tools/fetch-usb-linux`'s whole output as JSON (its JSON is the last line), so U8
+was handed no kernel (`linux-part: cannot read the kernel /usr/lib/modules/7.3.0-4-cachyos/vmlinuz`); with kmod in
+the throwaway container and the JSON read from its last line, `usb6.log`: `PASS U8: Linux xHCI lists the GPT, mounts
+the ESP read-only, all five file digests identical`, `usb-stick: PASS; 0 SKIP; 323 seconds`, `END usb-stick exit=0`.
+
 ## 5. Done-when
 
 ### 5.1 Checklist
