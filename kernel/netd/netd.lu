@@ -39,7 +39,9 @@
 //! else would deliver. No device is needed for any of it.
 //!
 //! `pax_net_clock` (px21) is the network's clock: a second thread that
-//! turns every tick (px23; every ten before), runs kernel/tcp's `tick`
+//! turns every tick (px23; every ten before), (px89) asks a polled Intel
+//! controller whether a frame came and wakes the network thread if so
+//! (kernel/net's `poll`), runs kernel/tcp's `tick`
 //! (its timers) on every turn and kernel/arp's `tick` on every tenth — the retries, the giving up, the ageing
 //! — which nothing else would do while no frame arrives; then `drain`.
 //! A kernel with no network device runs it alone.
@@ -167,6 +169,11 @@ export fn pax_net_clock(_arg: u64) {
     while true {
         let _s = sched.sleep(1)
         turn += 1
+        // px89: a polled controller's frames wake the network thread as
+        // an interrupt would.
+        if net.poll() {
+            let _w = sched.wake_net()
+        }
         tcp.tick()
         if turn % 10 == 0 {
             arp.tick()
