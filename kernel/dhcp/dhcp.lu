@@ -1,0 +1,1195 @@
+//! dhcp — the station's address from a DHCP server (px89).
+//!
+//! A client of RFC 2131 (DHCP), RFC 2132's options and RFC 951's BOOTP
+//! message, in the kernel, as Linux's `ip=dhcp` is: PAX has no interface
+//! configuration a program could reach (no SIOCSIFADDR, no rtnetlink, no
+//! packet socket) and a client in a program would need all three
+//! (R-px89-2). It runs only when the image's `/etc/pax-net` says `dhcp`
+//! (`from_file`); otherwise the fixed address a kmain gives kernel/ip is
+//! the station's, as it always was.
+//!
+//! **The states** (RFC 2131 §4.4, figure 5), each a word of
+//! boot/net.S's `pax_dhcp_state`:
+//!
+//!     INIT        no lease: kernel/ip holds 0.0.0.0; a DISCOVER is sent
+//!     SELECTING   DISCOVERs sent, waiting for an OFFER: again 4 s after
+//!                 the first, the wait doubled each time up to 64 s,
+//!                 each randomised by up to 1 s either way (§4.1); the
+//!                 xid kept, `secs` counting from the first
+//!     REQUESTING  an OFFER taken: a REQUEST naming its address (50) and
+//!                 server (54), sent as the DISCOVERs were; four of them
+//!                 unanswered and the client starts again (§4.4.1)
+//!     BOUND       an ACK: the address, netmask (1) and router (3) to
+//!                 kernel/ip and kernel/arp, the DNS servers (6) to
+//!                 /etc/resolv.conf; T1 (58, else half the lease, 51)
+//!                 and T2 (59, else seven eighths) start
+//!     RENEWING    at T1: a REQUEST unicast to the lease's server, ciaddr
+//!                 the address, no 50 or 54 (§4.3.2); again after half
+//!                 the time left to T2, but never sooner than 60 s
+//!                 (§4.4.5)
+//!     REBINDING   at T2: the same REQUEST broadcast; again after half
+//!                 the lease left, never sooner than 60 s
+//!
+//! An ACK in RENEWING or REBINDING renews the lease (BOUND, the times
+//! from the ACK). A NAK in REQUESTING, RENEWING or REBINDING, and the
+//! lease's end in RENEWING or REBINDING, give the address up at once:
+//! kernel/ip and kernel/arp back to 0.0.0.0 with no route, every server
+//! out of /etc/resolv.conf, and INIT (§3.1 step 4, §4.4.5).
+//!
+//! **What the client sends** is one shape (tools/pcap-dhcp holds every
+//! one of them to it byte for byte): UDP 68 to 67, from the address the
+//! station holds (0.0.0.0 without a lease), to 255.255.255.255 or, when
+//! renewing, the server; a 300-byte BOOTP message (RFC 1542 §2.1's least)
+//! — op 1, htype 1, hlen 6, hops 0, the xid, secs, flags 0x8000
+//! (BROADCAST: PAX takes no unicast for an address it does not hold,
+//! §4.1) until a lease is held and 0 after, ciaddr 0 or the lease's
+//! address when renewing or rebinding, yiaddr, siaddr and giaddr 0,
+//! chaddr the device's address and ten zeros, sname and file zero, the
+//! magic cookie — and the options 53 (the type), 61 (the client
+//! identifier: type 1 and the device's address), 50 and 54 (the REQUEST
+//! answering an OFFER), 55 (1 3 6 51 58 59), 255, then zeros.
+//!
+//! **What it takes**: from port 67 to port 68 (kernel/netd hands it
+//! over before kernel/udp sees it), a whole UDP datagram whose checksum
+//! (when there is one) is right, a BOOTP reply (op 2, htype 1, hlen 6)
+//! with the cookie, the client's xid and chaddr, and option 53; the
+//! options read from the options field and, when option 52 says so,
+//! from `file` and `sname` (§4.1). Anything else is counted by why and
+//! dropped. One message waits at a time between kernel/netd and the
+//! client's thread; another that comes before it is taken is dropped
+//! (`busy`) and the server's retransmission or ours brings it again.
+//!
+//! **The thread.** `pax_dhcpd` turns every tick (10 ms): it takes the
+//! waiting message, then the timers. Every state change prints a line
+//! stamped with the seconds since `start`:
+//!
+//!     dhcp: started on <mac>, client id 01:<mac>; asking for a lease (/etc/pax-net: dhcp, wait <n> s)
+//!     dhcp: +<t> s DISCOVER xid 0x<x> secs <s> (try <k>; again in <w> s)
+//!     dhcp: +<t> s OFFER <a> from server <s> xid 0x<x>
+//!     dhcp: +<t> s REQUEST <a> from server <s> xid 0x<x> secs <s> (try <k>; again in <w> s)
+//!     dhcp: +<t> s ACK <a> from server <s> xid 0x<x>: netmask <m>, router <r>, dns <d> …, lease <l> s, T1 <t1> s, T2 <t2> s
+//!     dhcp: +<t> s bound <a> netmask <m> gateway <r>; /etc/resolv.conf: nameserver <d>, …
+//!     dhcp: +<t> s RENEW <a> to server <s> xid 0x<x> secs <s> (unicast; again in <w> s)
+//!     dhcp: +<t> s REBIND <a> xid 0x<x> secs <s> (broadcast; again in <w> s)
+//!     dhcp: +<t> s NAK from server <s> xid 0x<x>: "<option 56>"
+//!     dhcp: +<t> s expired <a> (the lease ran out)
+//!     dhcp: +<t> s unbound: ip 0.0.0.0 netmask 0.0.0.0 gateway 0.0.0.0; /etc/resolv.conf: no servers
+//!
+//! The `bound` and `unbound` lines read the state back from where it
+//! lives (kernel/ip's words, the file in the tree), not from the lease.
+//! kernel/ip's own line follows each `bound` line.
+//!
+//! **/etc/resolv.conf** (resolv.conf(5)) is the client's to write: one
+//! `nameserver <a.b.c.d>` line per server option 6 names, three at most
+//! (resolv.conf(5)'s MAXNS), the file made (0644, root's) when it is not
+//! there and cut to nothing when the lease is given up or names no
+//! server. Nothing here resolves a name (wolf-lang#831).
+//!
+//! **Not yet:** DHCPDECLINE after an ARP probe of the offered address
+//! (§2.2's SHOULD: the probe is not made), DHCPRELEASE at the halt,
+//! INIT-REBOOT (a lease remembered across boots), DHCPINFORM, more than
+//! one interface, a relay agent's giaddr, option 57 and any option but
+//! the ones above.
+//!
+//! Locks: none of its own (the eight lock words are taken). Its words
+//! are changed with IF clear, by kernel/netd's thread (`input`) and its
+//! own; it calls kernel/ip, kernel/arp and kernel/tree with nothing of
+//! theirs held. It allocates nothing from the heap: three frames, taken
+//! at `start` and kept.
+//!
+//! Written from RFC 2131, RFC 2132, RFC 951, RFC 1542 and resolv.conf(5);
+//! the black-box replies of QEMU's server and dnsmasq
+//! (notes/px89/blackbox.txt). No DHCP implementation's source; no other
+//! kernel's or network stack's source.
+
+use arp
+use frames
+use icmp
+use ip
+use log
+use net
+use sched
+use sync
+use timer
+use tree
+use udp
+
+extern "c" fn pax_fb_copy(dst: u64, src: u64, bytes: u64)
+extern "c" fn pax_fb_fill(dst: u64, v: u64, qwords: u64)
+
+extern "c" let pax_dhcp_state: *u64
+
+const PAGE: u64 = 4096
+const HZ: u64 = 100
+const CLIENT: u64 = 68
+const SERVER: u64 = 67
+/// The BOOTP message the client sends: always this many bytes.
+const BOOTP: u64 = 300
+const COOKIE: u64 = 0x63825363
+/// The longest server message kept (a datagram's payload at the MTU).
+const RX_MAX: u64 = 1472
+
+// The states.
+const INIT: u64 = 0
+const SELECTING: u64 = 1
+const REQUESTING: u64 = 2
+const BOUND: u64 = 3
+const RENEWING: u64 = 4
+const REBINDING: u64 = 5
+
+// Message types (option 53).
+const DISCOVER: u64 = 1
+const OFFER: u64 = 2
+const REQUEST: u64 = 3
+const ACK: u64 = 5
+const NAK: u64 = 6
+
+// pax_dhcp_state's words.
+const D_ON: u64 = 0
+const D_STATE: u64 = 1
+const D_XID: u64 = 2
+const D_T0: u64 = 3 // the tick `start` ran
+const D_BEGIN: u64 = 4 // the tick this exchange began (secs)
+const D_TRY: u64 = 5
+const D_NEXT: u64 = 6 // the tick of the next retransmission
+const D_WAIT: u64 = 7 // the wait before it, in ticks, unrandomised
+const D_OFFERED: u64 = 8
+const D_SERVER: u64 = 9 // the offer's, then the lease's server
+const D_ADDR: u64 = 10
+const D_MASK: u64 = 11
+const D_ROUTER: u64 = 12
+const D_DNS: u64 = 13 // three words
+const D_NDNS: u64 = 16
+const D_LEASE: u64 = 17 // seconds; 0xffffffff for ever
+const D_T1: u64 = 18
+const D_T2: u64 = 19
+const D_T1_AT: u64 = 20 // ticks
+const D_T2_AT: u64 = 21
+const D_END_AT: u64 = 22
+const D_TX: u64 = 23 // the frame a message is composed in (HHDM)
+const D_RX: u64 = 24 // the frame a server's message waits in
+const D_SCRATCH: u64 = 25 // the frame names and the file are made in
+const D_RX_LEN: u64 = 26 // the BOOTP bytes waiting; 0 none
+const D_RAND: u64 = 27 // xorshift64's state
+const D_MAC: u64 = 28 // byte i in bits 8i..8i+7
+const D_WAIT_S: u64 = 29 // how long a kmain waits for the first lease
+const D_FRAMES: u64 = 30
+const D_LEASES: u64 = 31
+// What `parse` found in the waiting message.
+const P_TYPE: u64 = 40
+const P_YIADDR: u64 = 41
+const P_SERVER: u64 = 42
+const P_LEASE: u64 = 43
+const P_T1: u64 = 44
+const P_T2: u64 = 45
+const P_MASK: u64 = 46
+const P_ROUTER: u64 = 47
+const P_DNS: u64 = 48 // three words
+const P_NDNS: u64 = 51
+const P_MSG: u64 = 52 // option 56's offset in the RX frame
+const P_MSG_LEN: u64 = 53
+const P_OVERLOAD: u64 = 54
+const P_HAS: u64 = 55 // a bit per option seen: 1 << (code & 63)
+// The counters (`count`), from word 64.
+pub const C_DISCOVER: u64 = 64
+pub const C_REQUEST: u64 = 65
+pub const C_RENEW: u64 = 66
+pub const C_REBIND: u64 = 67
+pub const C_OFFER: u64 = 68
+pub const C_ACK: u64 = 69
+pub const C_NAK: u64 = 70
+pub const C_SHORT: u64 = 71 // a datagram or BOOTP message too short, or its UDP length wrong
+pub const C_CHECKSUM: u64 = 72
+pub const C_NOT_REPLY: u64 = 73 // op, htype, hlen, cookie or option 53
+pub const C_XID: u64 = 74 // another client's, or an old exchange's
+pub const C_STATE: u64 = 75 // a message this state does not take
+pub const C_BUSY: u64 = 76
+pub const C_NOT_SENT: u64 = 77
+pub const C_EXPIRED: u64 = 78
+pub const C_GAVE_UP: u64 = 79 // REQUESTING gave up after four
+pub const C_FILE: u64 = 80 // /etc/resolv.conf not written
+
+fn dw(i: u64) -> u64 {
+    // # Safety: i < 128, a word of boot/net.S's pax_dhcp_state.
+    unsafe { ((pax_dhcp_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_dw(i: u64, v: u64) {
+    // # Safety: as `dw`.
+    unsafe { ((pax_dhcp_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64) {
+    let saved = sync.irq_save()
+    put_dw(i, dw(i) + 1)
+    sync.irq_restore(saved)
+}
+
+/// Counter `i` (C_*).
+pub fn count(i: u64) -> u64 {
+    dw(i)
+}
+
+/// Whether the client runs.
+pub fn on() -> bool {
+    dw(D_ON) == 1
+}
+
+/// Whether a lease is held (BOUND, RENEWING or REBINDING).
+pub fn bound() -> bool {
+    on() && dw(D_STATE) >= BOUND
+}
+
+/// Frames the client holds.
+pub fn frames_held() -> u64 {
+    dw(D_FRAMES)
+}
+
+/// How long, in seconds, a kmain waits for the first lease.
+pub fn wait_seconds() -> u64 {
+    dw(D_WAIT_S)
+}
+
+fn now() -> u64 {
+    timer.ticks()
+}
+
+fn rand() -> u64 {
+    // xorshift64 (Marsaglia, 2003): never zero from a seed that is not.
+    var x = dw(D_RAND)
+    x = x ^ (x << 13)
+    x = x ^ (x >> 7)
+    x = x ^ (x << 17)
+    put_dw(D_RAND, x)
+    x
+}
+
+/// `ticks` randomised by up to one second either way (RFC 2131 §4.1).
+fn jitter(ticks: u64) -> u64 {
+    let r = rand() % (2 * HZ + 1)
+    if ticks + r < HZ { 1 } else { ticks + r - HZ }
+}
+
+fn rb(a: u64) -> u64 {
+    ip.octet(a)
+}
+
+fn wb(a: u64, v: u64) {
+    ip.put_byte(a, v)
+}
+
+fn mac_byte(i: u64) -> u64 {
+    (dw(D_MAC) >> (i * 8)) & 0xff
+}
+
+// --- the lines -------------------------------------------------------------------
+
+fn put_mac() {
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            log.put(":")
+        }
+        log.hex_n(mac_byte(i), 2)
+        i += 1
+    }
+}
+
+fn put_xid(x: u64) {
+    log.put("0x")
+    log.hex_n(x, 8)
+}
+
+/// `dhcp: +<s>.<cc> s ` from the client's start.
+fn stamp() {
+    let t = now() - dw(D_T0)
+    log.put("dhcp: +")
+    log.dec((t / HZ) as int)
+    log.put(".")
+    let c = t % HZ
+    if c < 10 {
+        log.put("0")
+    }
+    log.dec(c as int)
+    log.put(" s ")
+}
+
+fn put_secs(ticks: u64) {
+    log.dec(((ticks + HZ / 2) / HZ) as int)
+}
+
+/// /etc/resolv.conf as the tree holds it: its lines joined by ", ", or
+/// `no servers` when it is empty.
+fn put_resolv() {
+    let (b, size, why) = tree.small_file("/etc/resolv.conf")
+    if why != 0 {
+        log.put("not there (")
+        log.dec(why as int)
+        log.put(")")
+        return
+    }
+    if size == 0 {
+        log.put("no servers")
+    } else {
+        var i: u64 = 0
+        while i < size {
+            let c = rb(b + i)
+            if c == 10 {
+                if i + 1 < size {
+                    log.put(", ")
+                }
+            } else {
+                log.put_byte(c as int)
+            }
+            i += 1
+        }
+    }
+    frames.free(b - frames.hhdm())
+}
+
+/// The state as it lives: kernel/ip's triple and the file.
+fn put_state() {
+    log.put("ip ")
+    arp.put_ip(ip.address())
+    log.put(" netmask ")
+    arp.put_ip(ip.netmask())
+    log.put(" gateway ")
+    arp.put_ip(ip.gateway())
+    log.put("; /etc/resolv.conf: ")
+    put_resolv()
+}
+
+// --- /etc/pax-net --------------------------------------------------------------
+
+/// Read the image's /etc/pax-net (from the tree: the initramfs's, or
+/// the disk's when `/` is there) and say whether it asks for DHCP. The
+/// file's first line that is neither empty nor a comment is `dhcp`,
+/// optionally ` wait=<seconds>` (1-600; 30 by default): how long the
+/// kmain waits for the first lease before it runs its list. No file is
+/// the fixed address, silently; a file that says anything else is the
+/// fixed address and one line saying so.
+pub fn from_file() -> bool {
+    put_dw(D_WAIT_S, 30)
+    let (b, size, why) = tree.small_file("/etc/pax-net")
+    if why != 0 {
+        return false
+    }
+    var i: u64 = 0
+    var want = false
+    var known = false
+    var seen = false
+    while i < size && !seen {
+        var j = i
+        while j < size && rb(b + j) != 10 {
+            j += 1
+        }
+        if j > i && rb(b + i) != 35 {
+            seen = true
+            if j - i >= 4 && rb(b + i) == 100 && rb(b + i + 1) == 104 && rb(b + i + 2) == 99 && rb(b + i + 3) == 112 {
+                var k = i + 4
+                known = k == j
+                if !known && j - k > 6 && rb(b + k) == 32 && rb(b + k + 1) == 119 && rb(b + k + 2) == 97 && rb(b + k + 3) == 105 && rb(b + k + 4) == 116 && rb(b + k + 5) == 61 {
+                    k += 6
+                    var n: u64 = 0
+                    var digits = true
+                    while k < j {
+                        let c = rb(b + k)
+                        if c < 48 || c > 57 {
+                            digits = false
+                        } else {
+                            n = n * 10 + (c - 48)
+                        }
+                        k += 1
+                    }
+                    if digits && n >= 1 && n <= 600 {
+                        known = true
+                        put_dw(D_WAIT_S, n)
+                    }
+                }
+                want = known
+            }
+        }
+        i = j + 1
+    }
+    if seen && !known {
+        log.line("dhcp: /etc/pax-net is neither `dhcp` nor `dhcp wait=<1-600>`; the fixed address stays")
+    }
+    frames.free(b - frames.hhdm())
+    want
+}
+
+// --- starting ----------------------------------------------------------------
+
+fn frame() -> u64 {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return 0
+    }
+    // # Safety: the frame just taken, through the HHDM; 512 words.
+    unsafe { pax_fb_fill(pa + frames.hhdm(), 0, PAGE / 8) }
+    put_dw(D_FRAMES, dw(D_FRAMES) + 1)
+    pa + frames.hhdm()
+}
+
+/// Start the client (after `from_file` said so, kernel/net up,
+/// kernel/ip and kernel/arp started): kernel/ip and kernel/arp to
+/// 0.0.0.0, three frames, the random state from `seed`. False, with one
+/// line saying why, when there is no device or no frame; the fixed
+/// address then stays. The thread (`pax_dhcpd`) is the kmain's to start.
+pub fn start(seed: u64) -> bool {
+    var i: u64 = 0
+    while i < 128 {
+        if i != D_WAIT_S {
+            put_dw(i, 0)
+        }
+        i += 1
+    }
+    if !net.up() {
+        log.line("dhcp: no network device is up; the fixed address stays")
+        return false
+    }
+    put_dw(D_TX, frame())
+    put_dw(D_RX, frame())
+    put_dw(D_SCRATCH, frame())
+    if dw(D_TX) == 0 || dw(D_RX) == 0 || dw(D_SCRATCH) == 0 {
+        log.line("dhcp: no frame to work in; the fixed address stays")
+        return false
+    }
+    var m: u64 = 0
+    var k: u64 = 0
+    while k < 6 {
+        m = m | (net.mac_byte(k) << (k * 8))
+        k += 1
+    }
+    put_dw(D_MAC, m)
+    put_dw(D_RAND, if seed == 0 { 0x9e3779b97f4a7c15 } else { seed })
+    put_dw(D_T0, now())
+    put_dw(D_STATE, INIT)
+    ip.configure(0, 0, 0)
+    arp.set_ip(0)
+    put_dw(D_ON, 1)
+    let s = sync.acquire(sync.console())
+    log.put("dhcp: started on ")
+    put_mac()
+    log.put(", client id 01:")
+    put_mac()
+    log.put("; asking for a lease (/etc/pax-net: dhcp, wait ")
+    log.dec(dw(D_WAIT_S) as int)
+    log.put(" s)")
+    log.end()
+    sync.release(sync.console(), s)
+    true
+}
+
+// --- sending -----------------------------------------------------------------
+
+/// Compose a client message of type `kind` in the TX frame and send it
+/// from the station's address to `dst`: 12 bytes of pseudo-header (for
+/// the checksum), the UDP header, the 300-byte BOOTP message.
+fn send(kind: u64, dst: u64, flags: u64, ciaddr: u64, requested: u64, server: u64) -> bool {
+    let f = dw(D_TX)
+    let u = f + 12
+    let b = u + 8
+    // # Safety: the TX frame, 4096 bytes, the client's own; 12 + 8 + 300
+    // of them are written.
+    unsafe { pax_fb_fill(f, 0, (12 + 8 + BOOTP + 7) / 8) }
+    wb(b, 1)
+    wb(b + 1, 1)
+    wb(b + 2, 6)
+    wb(b + 3, 0)
+    ip.put_be32(b + 4, dw(D_XID))
+    let secs = (now() - dw(D_BEGIN)) / HZ
+    ip.put_be16(b + 8, if secs > 0xffff { 0xffff } else { secs })
+    ip.put_be16(b + 10, flags)
+    ip.put_be32(b + 12, ciaddr)
+    var i: u64 = 0
+    while i < 6 {
+        wb(b + 28 + i, mac_byte(i))
+        i += 1
+    }
+    ip.put_be32(b + 236, COOKIE)
+    var o = b + 240
+    wb(o, 53)
+    wb(o + 1, 1)
+    wb(o + 2, kind)
+    wb(o + 3, 61)
+    wb(o + 4, 7)
+    wb(o + 5, 1)
+    i = 0
+    while i < 6 {
+        wb(o + 6 + i, mac_byte(i))
+        i += 1
+    }
+    o += 12
+    if requested != 0 {
+        wb(o, 50)
+        wb(o + 1, 4)
+        ip.put_be32(o + 2, requested)
+        wb(o + 6, 54)
+        wb(o + 7, 4)
+        ip.put_be32(o + 8, server)
+        o += 12
+    }
+    wb(o, 55)
+    wb(o + 1, 6)
+    wb(o + 2, 1)
+    wb(o + 3, 3)
+    wb(o + 4, 6)
+    wb(o + 5, 51)
+    wb(o + 6, 58)
+    wb(o + 7, 59)
+    wb(o + 8, 255)
+    // The UDP header, its checksum over the pseudo-header from the
+    // address kernel/ip sends from.
+    ip.put_be16(u, CLIENT)
+    ip.put_be16(u + 2, SERVER)
+    ip.put_be16(u + 4, 8 + BOOTP)
+    ip.put_be16(u + 6, 0)
+    let c = udp.checksum(ip.address(), dst, u, 8 + BOOTP)
+    ip.put_be16(u + 6, if c == 0 { 0xffff } else { c })
+    let r = ip.send_from(ip.address(), dst, ip.UDP, u, 8 + BOOTP)
+    if r != arp.SENT && r != arp.QUEUED {
+        bump(C_NOT_SENT)
+        return false
+    }
+    true
+}
+
+fn secs_now() -> u64 {
+    (now() - dw(D_BEGIN)) / HZ
+}
+
+/// The line of a message just sent: `<what> … (try <k>; again in <w> s)`,
+/// or `(<how>; again in <w> s)` for a renewal (`tries` false).
+fn sent_line(what: str, addr: u64, to: str, server: u64, tries: bool, how: str, wait: u64) {
+    let s = sync.acquire(sync.console())
+    stamp()
+    log.put(what)
+    if addr != 0 {
+        log.put(" ")
+        arp.put_ip(addr)
+    }
+    if server != 0 {
+        log.put(to)
+        arp.put_ip(server)
+    }
+    log.put(" xid ")
+    put_xid(dw(D_XID))
+    log.put(" secs ")
+    log.dec(secs_now() as int)
+    log.put(" (")
+    if tries {
+        log.put("try ")
+        log.dec(dw(D_TRY) as int)
+    } else {
+        log.put(how)
+    }
+    log.put("; again in ")
+    put_secs(wait)
+    log.put(" s)")
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+fn discover() {
+    let w = jitter(dw(D_WAIT))
+    put_dw(D_NEXT, now() + w)
+    let _ok = send(DISCOVER, 0xffffffff, 0x8000, 0, 0, 0)
+    bump(C_DISCOVER)
+    sent_line("DISCOVER", 0, "", 0, true, "", w)
+}
+
+fn request() {
+    let w = jitter(dw(D_WAIT))
+    put_dw(D_NEXT, now() + w)
+    let _ok = send(REQUEST, 0xffffffff, 0x8000, 0, dw(D_OFFERED), dw(D_SERVER))
+    bump(C_REQUEST)
+    sent_line("REQUEST", dw(D_OFFERED), " from server ", dw(D_SERVER), true, "", w)
+}
+
+/// Half of what is left to `until`, but 60 s at least (RFC 2131 §4.4.5).
+fn half_to(until: u64) -> u64 {
+    let t = now()
+    let left = if until > t { until - t } else { 0 }
+    if left / 2 < 60 * HZ { 60 * HZ } else { left / 2 }
+}
+
+fn renew() {
+    let w = half_to(dw(D_T2_AT))
+    put_dw(D_NEXT, now() + w)
+    let _ok = send(REQUEST, dw(D_SERVER), 0, dw(D_ADDR), 0, 0)
+    bump(C_RENEW)
+    sent_line("RENEW", dw(D_ADDR), " to server ", dw(D_SERVER), false, "unicast", w)
+}
+
+fn rebind() {
+    let w = half_to(dw(D_END_AT))
+    put_dw(D_NEXT, now() + w)
+    let _ok = send(REQUEST, 0xffffffff, 0, dw(D_ADDR), 0, 0)
+    bump(C_REBIND)
+    sent_line("REBIND", dw(D_ADDR), "", 0, false, "broadcast", w)
+}
+
+/// A new exchange: a fresh xid, `secs` from now, the first wait 4 s.
+fn begin(state: u64) {
+    put_dw(D_XID, rand() & 0xffffffff)
+    put_dw(D_BEGIN, now())
+    put_dw(D_TRY, 1)
+    put_dw(D_WAIT, 4 * HZ)
+    put_dw(D_STATE, state)
+}
+
+// --- receiving -----------------------------------------------------------------
+
+/// Whether the datagram (from kernel/ip's `input`, TO_UDP) is the
+/// client's: it runs, and the datagram is from port 67 to port 68.
+pub fn claims(frame: u64, ihl: u64, total: u64) -> bool {
+    if !on() || total < ihl + 8 {
+        return false
+    }
+    let u = frame + ip.ETH + ihl
+    ip.be16(u) == SERVER && ip.be16(u + 2) == CLIENT
+}
+
+/// Take a server's datagram (`claims` said it is the client's): judge
+/// its UDP header, keep its BOOTP message for the thread.
+pub fn input(frame: u64, ihl: u64, total: u64) {
+    let h = frame + ip.ETH
+    let u = h + ihl
+    let n = total - ihl
+    let ulen = ip.be16(u + 4)
+    if ulen < 8 + 240 || ulen > n {
+        bump(C_SHORT)
+        return
+    }
+    if ip.be16(u + 6) != 0 && udp.checksum(ip.be32(h + 12), ip.be32(h + 16), u, ulen) != 0 {
+        bump(C_CHECKSUM)
+        return
+    }
+    let saved = sync.irq_save()
+    if dw(D_RX_LEN) != 0 {
+        put_dw(C_BUSY, dw(C_BUSY) + 1)
+    } else {
+        let len = if ulen - 8 > RX_MAX { RX_MAX } else { ulen - 8 }
+        // # Safety: the RX frame, 4096 bytes, the client's own; `len` <=
+        // 1472 bytes of the receive buffer kernel/netd holds.
+        unsafe { pax_fb_copy(dw(D_RX), u + 8, len) }
+        put_dw(D_RX_LEN, len)
+    }
+    sync.irq_restore(saved)
+}
+
+fn opt_seen(code: u64) -> bool {
+    dw(P_HAS) & (1 << (code & 63)) != 0
+}
+
+/// Walk the options in [a, end) of the waiting message.
+fn walk(a: u64, end: u64) {
+    var i = a
+    var done = false
+    while i < end && !done {
+        let t = rb(i)
+        if t == 0 {
+            i += 1
+        } else if t == 255 || i + 1 >= end {
+            done = true
+        } else {
+            let l = rb(i + 1)
+            let v = i + 2
+            if v + l > end {
+                done = true
+            } else {
+                put_dw(P_HAS, dw(P_HAS) | (1 << (t & 63)))
+                if t == 53 && l >= 1 {
+                    put_dw(P_TYPE, rb(v))
+                } else if t == 54 && l >= 4 {
+                    put_dw(P_SERVER, ip.be32(v))
+                } else if t == 51 && l >= 4 {
+                    put_dw(P_LEASE, ip.be32(v))
+                } else if t == 58 && l >= 4 {
+                    put_dw(P_T1, ip.be32(v))
+                } else if t == 59 && l >= 4 {
+                    put_dw(P_T2, ip.be32(v))
+                } else if t == 1 && l >= 4 {
+                    put_dw(P_MASK, ip.be32(v))
+                } else if t == 3 && l >= 4 {
+                    put_dw(P_ROUTER, ip.be32(v))
+                } else if t == 6 {
+                    var k: u64 = 0
+                    while k + 4 <= l && dw(P_NDNS) < 3 {
+                        put_dw(P_DNS + dw(P_NDNS), ip.be32(v + k))
+                        put_dw(P_NDNS, dw(P_NDNS) + 1)
+                        k += 4
+                    }
+                } else if t == 56 {
+                    put_dw(P_MSG, v)
+                    put_dw(P_MSG_LEN, l)
+                } else if t == 52 && l >= 1 {
+                    put_dw(P_OVERLOAD, rb(v))
+                }
+                i = v + l
+            }
+        }
+    }
+}
+
+/// Judge the waiting message: 0 when it is a reply to this client (its
+/// fields in the P_ words), else the counter it goes to.
+fn parse(b: u64, len: u64) -> u64 {
+    var k = P_TYPE
+    while k <= P_HAS {
+        put_dw(k, 0)
+        k += 1
+    }
+    if len < 240 {
+        return C_SHORT
+    }
+    if rb(b) != 2 || rb(b + 1) != 1 || rb(b + 2) != 6 || ip.be32(b + 236) != COOKIE {
+        return C_NOT_REPLY
+    }
+    var i: u64 = 0
+    while i < 6 {
+        if rb(b + 28 + i) != mac_byte(i) {
+            return C_XID
+        }
+        i += 1
+    }
+    if ip.be32(b + 4) != dw(D_XID) {
+        return C_XID
+    }
+    put_dw(P_YIADDR, ip.be32(b + 16))
+    walk(b + 240, b + len)
+    let over = dw(P_OVERLOAD)
+    if (over == 1 || over == 3) && len >= 236 {
+        walk(b + 108, b + 236)
+    }
+    if (over == 2 || over == 3) && len >= 108 {
+        walk(b + 44, b + 108)
+    }
+    if dw(P_TYPE) == 0 {
+        return C_NOT_REPLY
+    }
+    0
+}
+
+// --- the lease ---------------------------------------------------------------------
+
+/// Write /etc/resolv.conf: one `nameserver` line per server held, or
+/// nothing. False (counted) when the tree refused.
+fn write_resolv(n: u64) -> bool {
+    let s = dw(D_SCRATCH)
+    // The names, then the text, in the scratch frame.
+    wb(s, 101)
+    wb(s + 1, 116)
+    wb(s + 2, 99) // "etc"
+    var name = s + 16
+    let file = "resolv.conf"
+    var fl: u64 = 0
+    for c in file.bytes() {
+        wb(name + fl, (c as int) as u64)
+        fl += 1
+    }
+    let t = s + 64
+    var len: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let word = "nameserver "
+        for c in word.bytes() {
+            wb(t + len, (c as int) as u64)
+            len += 1
+        }
+        let a = dw(D_DNS + k)
+        var sh: u64 = 24
+        var first = true
+        while first || sh > 0 {
+            if !first {
+                sh -= 8
+            }
+            let v = (a >> sh) & 0xff
+            if v >= 100 {
+                wb(t + len, 48 + v / 100)
+                len += 1
+            }
+            if v >= 10 {
+                wb(t + len, 48 + (v / 10) % 10)
+                len += 1
+            }
+            wb(t + len, 48 + v % 10)
+            len += 1
+            if sh > 0 {
+                wb(t + len, 46)
+                len += 1
+            }
+            first = false
+        }
+        wb(t + len, 10)
+        len += 1
+        k += 1
+    }
+    let saved = sync.irq_save()
+    let root = tree.top()
+    var etc = tree.lookup(root, s, 3)
+    if etc == tree.NONE {
+        etc = tree.mkdir(root, s, 3, 0x1ed, 0, 0) // 0755
+    }
+    var ok = !tree.failed(etc) && etc != tree.NONE && tree.is_dir(etc)
+    if ok {
+        var f = tree.lookup(etc, name, fl)
+        if f == tree.NONE {
+            f = tree.create(etc, name, fl, 0x1a4, 0, 0) // 0644
+        }
+        ok = !tree.failed(f) && f != tree.NONE && tree.is_regular(f)
+        if ok {
+            ok = !tree.failed(tree.truncate(f, 0))
+            if ok && len > 0 {
+                ok = tree.write(0, f, 0, t, len) == len
+            }
+        }
+    }
+    sync.irq_restore(saved)
+    if !ok {
+        bump(C_FILE)
+    }
+    ok
+}
+
+/// Take the lease the ACK in the P_ words names (kernel/ip, kernel/arp,
+/// /etc/resolv.conf), and its times.
+fn take(renewal: bool) {
+    let addr = if renewal { dw(D_ADDR) } else { dw(D_OFFERED) }
+    let server = if dw(P_SERVER) != 0 { dw(P_SERVER) } else { dw(D_SERVER) }
+    var mask = dw(P_MASK)
+    if !opt_seen(1) {
+        // No option 1: the address's class (RFC 2132 §3.3 leaves it to
+        // the client; RFC 950's default).
+        mask = if addr >> 31 == 0 { 0xff000000 } else if addr >> 30 == 2 { 0xffff0000 } else { 0xffffff00 }
+    }
+    let lease = if opt_seen(51) { dw(P_LEASE) } else { 3600 }
+    var t1 = if opt_seen(58) { dw(P_T1) } else { lease / 2 }
+    var t2 = if opt_seen(59) { dw(P_T2) } else { lease / 8 * 7 }
+    if lease != 0xffffffff && (t2 >= lease || t1 >= t2) {
+        t1 = lease / 2
+        t2 = lease / 8 * 7
+    }
+    put_dw(D_ADDR, addr)
+    put_dw(D_SERVER, server)
+    put_dw(D_MASK, mask)
+    put_dw(D_ROUTER, dw(P_ROUTER))
+    var k: u64 = 0
+    while k < 3 {
+        put_dw(D_DNS + k, dw(P_DNS + k))
+        k += 1
+    }
+    put_dw(D_NDNS, dw(P_NDNS))
+    put_dw(D_LEASE, lease)
+    put_dw(D_T1, t1)
+    put_dw(D_T2, t2)
+    let t = now()
+    let forever: u64 = 0xffffffffffffffff
+    put_dw(D_T1_AT, if lease == 0xffffffff { forever } else { t + t1 * HZ })
+    put_dw(D_T2_AT, if lease == 0xffffffff { forever } else { t + t2 * HZ })
+    put_dw(D_END_AT, if lease == 0xffffffff { forever } else { t + lease * HZ })
+    put_dw(D_STATE, BOUND)
+    put_dw(D_LEASES, dw(D_LEASES) + 1)
+    ip.configure(addr, mask, dw(P_ROUTER))
+    arp.set_ip(addr)
+    let _w = write_resolv(dw(P_NDNS))
+    let s = sync.acquire(sync.console())
+    stamp()
+    log.put("ACK ")
+    arp.put_ip(addr)
+    log.put(" from server ")
+    arp.put_ip(server)
+    log.put(" xid ")
+    put_xid(dw(D_XID))
+    log.put(": netmask ")
+    arp.put_ip(mask)
+    log.put(", router ")
+    arp.put_ip(dw(P_ROUTER))
+    log.put(", dns")
+    if dw(P_NDNS) == 0 {
+        log.put(" none")
+    }
+    k = 0
+    while k < dw(P_NDNS) {
+        log.put(" ")
+        arp.put_ip(dw(P_DNS + k))
+        k += 1
+    }
+    log.put(", lease ")
+    log.dec(lease as int)
+    log.put(" s, T1 ")
+    log.dec(t1 as int)
+    log.put(" s, T2 ")
+    log.dec(t2 as int)
+    log.put(" s")
+    log.end()
+    stamp()
+    log.put("bound ")
+    arp.put_ip(ip.address())
+    log.put(" netmask ")
+    arp.put_ip(ip.netmask())
+    log.put(" gateway ")
+    arp.put_ip(ip.gateway())
+    log.put("; /etc/resolv.conf: ")
+    put_resolv()
+    log.end()
+    ip.report()
+    sync.release(sync.console(), s)
+}
+
+/// Give the lease up: kernel/ip and kernel/arp to 0.0.0.0, no route, no
+/// server in /etc/resolv.conf; INIT.
+fn give_up() {
+    put_dw(D_ADDR, 0)
+    put_dw(D_NDNS, 0)
+    ip.configure(0, 0, 0)
+    arp.set_ip(0)
+    let _w = write_resolv(0)
+    put_dw(D_STATE, INIT)
+    let s = sync.acquire(sync.console())
+    stamp()
+    log.put("unbound: ")
+    put_state()
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+/// The waiting message, by the state it finds.
+fn handle() {
+    let b = dw(D_RX)
+    let len = dw(D_RX_LEN)
+    let why = parse(b, len)
+    put_dw(D_RX_LEN, 0)
+    if why != 0 {
+        bump(why)
+        return
+    }
+    let st = dw(D_STATE)
+    let kind = dw(P_TYPE)
+    if kind == OFFER && st == SELECTING {
+        bump(C_OFFER)
+        if dw(P_YIADDR) == 0 || dw(P_SERVER) == 0 {
+            bump(C_NOT_REPLY)
+            return
+        }
+        put_dw(D_OFFERED, dw(P_YIADDR))
+        put_dw(D_SERVER, dw(P_SERVER))
+        let s = sync.acquire(sync.console())
+        stamp()
+        log.put("OFFER ")
+        arp.put_ip(dw(P_YIADDR))
+        log.put(" from server ")
+        arp.put_ip(dw(P_SERVER))
+        log.put(" xid ")
+        put_xid(dw(D_XID))
+        log.end()
+        sync.release(sync.console(), s)
+        // The REQUEST keeps the exchange's xid and secs.
+        put_dw(D_STATE, REQUESTING)
+        put_dw(D_TRY, 1)
+        put_dw(D_WAIT, 4 * HZ)
+        request()
+    } else if kind == ACK && (st == REQUESTING || st == RENEWING || st == REBINDING) {
+        bump(C_ACK)
+        if st == REQUESTING && dw(P_YIADDR) != dw(D_OFFERED) {
+            bump(C_NOT_REPLY)
+            return
+        }
+        take(st != REQUESTING)
+    } else if kind == NAK && (st == REQUESTING || st == RENEWING || st == REBINDING) {
+        bump(C_NAK)
+        let s = sync.acquire(sync.console())
+        stamp()
+        log.put("NAK from server ")
+        arp.put_ip(dw(P_SERVER))
+        log.put(" xid ")
+        put_xid(dw(D_XID))
+        log.put(": \"")
+        var i: u64 = 0
+        while i < dw(P_MSG_LEN) && i < 80 {
+            let c = rb(dw(P_MSG) + i)
+            log.put_byte(if c >= 32 && c < 127 && c != 34 { c as int } else { 63 })
+            i += 1
+        }
+        log.put("\"")
+        log.end()
+        sync.release(sync.console(), s)
+        give_up()
+    } else {
+        bump(C_STATE)
+    }
+}
+
+/// The timers, by the state.
+fn timers() {
+    let t = now()
+    let st = dw(D_STATE)
+    if st == INIT {
+        begin(SELECTING)
+        discover()
+    } else if st == SELECTING && t >= dw(D_NEXT) {
+        put_dw(D_TRY, dw(D_TRY) + 1)
+        put_dw(D_WAIT, if dw(D_WAIT) * 2 > 64 * HZ { 64 * HZ } else { dw(D_WAIT) * 2 })
+        discover()
+    } else if st == REQUESTING && t >= dw(D_NEXT) {
+        if dw(D_TRY) >= 4 {
+            bump(C_GAVE_UP)
+            let s = sync.acquire(sync.console())
+            stamp()
+            log.put("no ACK to four REQUESTs for ")
+            arp.put_ip(dw(D_OFFERED))
+            log.put("; starting again")
+            log.end()
+            sync.release(sync.console(), s)
+            put_dw(D_STATE, INIT)
+        } else {
+            put_dw(D_TRY, dw(D_TRY) + 1)
+            put_dw(D_WAIT, dw(D_WAIT) * 2)
+            request()
+        }
+    } else if st == BOUND && t >= dw(D_T1_AT) {
+        begin(RENEWING)
+        renew()
+    } else if (st == RENEWING || st == REBINDING) && t >= dw(D_END_AT) {
+        bump(C_EXPIRED)
+        let s = sync.acquire(sync.console())
+        stamp()
+        log.put("expired ")
+        arp.put_ip(dw(D_ADDR))
+        log.put(" (the lease ran out)")
+        log.end()
+        sync.release(sync.console(), s)
+        give_up()
+    } else if st == RENEWING && t >= dw(D_T2_AT) {
+        put_dw(D_STATE, REBINDING)
+        put_dw(D_XID, rand() & 0xffffffff)
+        rebind()
+    } else if st == RENEWING && t >= dw(D_NEXT) {
+        renew()
+    } else if st == REBINDING && t >= dw(D_NEXT) {
+        rebind()
+    }
+}
+
+/// One turn of the client: the waiting message, then the timers. The
+/// thread's, every tick.
+pub fn step() {
+    if !on() {
+        return
+    }
+    if dw(D_RX_LEN) != 0 {
+        handle()
+    }
+    timers()
+}
+
+/// Wait (a kernel thread or a kmain, IF set) for the first lease, up to
+/// `wait_seconds`, and say how it went:
+///
+///     dhcp: a lease after <t> s
+///     dhcp: no lease after <n> s; the client goes on asking
+pub fn wait_bound() -> bool {
+    let from = now()
+    let limit = dw(D_WAIT_S) * HZ
+    while !bound() && now() - from < limit {
+        let _s = sched.sleep(5)
+    }
+    let s = sync.acquire(sync.console())
+    if bound() {
+        log.put("dhcp: a lease after ")
+        let t = now() - from
+        log.dec((t / HZ) as int)
+        log.put(".")
+        if t % HZ < 10 {
+            log.put("0")
+        }
+        log.dec((t % HZ) as int)
+        log.put(" s")
+    } else {
+        log.put("dhcp: no lease after ")
+        log.dec(dw(D_WAIT_S) as int)
+        log.put(" s; the client goes on asking")
+    }
+    log.end()
+    sync.release(sync.console(), s)
+    bound()
+}
+
+/// With a lease, the kernel's echo to its router, waited for 3 s:
+///
+///     dhcp: the router <r> answers the kernel's echo
+///     dhcp: the router <r> does NOT answer the kernel's echo
+///     dhcp: the lease names no router
+pub fn echo_router() {
+    if !bound() {
+        return
+    }
+    let r = dw(D_ROUTER)
+    if r == 0 {
+        log.line("dhcp: the lease names no router")
+        return
+    }
+    let _sent = icmp.ping(r, 1, 56)
+    let from = now()
+    var got = false
+    while !got && now() - from < 3 * HZ {
+        let (g, _rtt, _ttl) = icmp.answer()
+        got = g
+        if !got {
+            let _s = sched.sleep(1)
+        }
+    }
+    let s = sync.acquire(sync.console())
+    log.put("dhcp: the router ")
+    arp.put_ip(r)
+    log.put(if got { " answers the kernel's echo" } else { " does NOT answer the kernel's echo" })
+    log.end()
+    sync.release(sync.console(), s)
+}
+
+fn item(v: u64, name: str) {
+    log.put(" ")
+    log.dec(dw(v) as int)
+    log.put(" ")
+    log.put(name)
+}
+
+/// The counters' line, when the client ran:
+///
+///     dhcp: sent <d> discover <q> request <r> renew <b> rebind <u> not sent; received <o> offer <a> ack <n> nak, dropped <…> short <…> checksum <…> not-reply <…> xid <…> state <…> busy; <l> leases, <e> expired, <g> gave up, <f> file
+pub fn counters() {
+    if !on() {
+        return
+    }
+    log.put("dhcp: sent")
+    item(C_DISCOVER, "discover")
+    item(C_REQUEST, "request")
+    item(C_RENEW, "renew")
+    item(C_REBIND, "rebind")
+    item(C_NOT_SENT, "not sent;")
+    log.put(" received")
+    item(C_OFFER, "offer")
+    item(C_ACK, "ack")
+    item(C_NAK, "nak,")
+    log.put(" dropped")
+    item(C_SHORT, "short")
+    item(C_CHECKSUM, "checksum")
+    item(C_NOT_REPLY, "not-reply")
+    item(C_XID, "xid")
+    item(C_STATE, "state")
+    item(C_BUSY, "busy;")
+    item(D_LEASES, "leases,")
+    item(C_EXPIRED, "expired,")
+    item(C_GAVE_UP, "gave up,")
+    item(C_FILE, "file")
+    log.end()
+}
+
+/// The client's thread: a turn every tick.
+export fn pax_dhcpd(_arg: u64) {
+    while true {
+        let _s = sched.sleep(1)
+        step()
+    }
+}
