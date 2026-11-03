@@ -331,7 +331,13 @@ pub fn report_boot() {
     log.dec((screen.cycles() * 1000 / hz) as int)
     log.put(" ms of it (")
     log.dec(screen.scrolls() as int)
-    log.put(" scrolls, ")
+    // px87: the way kernel/screen's attach chose (copy where a framebuffer
+    // read is cheap, redraw where it is not): the metal A/B's other half.
+    if screen.copy_scroll() {
+        log.put(" scrolls by copy, ")
+    } else {
+        log.put(" scrolls by redraw, ")
+    }
     log.dec(screen.bytes() as int)
     log.put(" bytes)")
     log.end()
