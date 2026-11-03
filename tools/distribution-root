@@ -110,6 +110,14 @@ def main():
                 rows['bin/'+source.name] = (0o120777, 0, 0, os.readlink(source).encode())
             else:
                 put('bin/'+source.name, source.read_bytes(), 0o755)
+    # px90 (R-px90-2): the zone database's UTC, the bytes /etc/localtime
+    # already has (tools/mkzone): den prints a date only from $TZDIR/$TZ
+    # (default /usr/share/zoneinfo), with TZ=UTC or with TZ unset.
+    zone = rows['etc/localtime'][3]
+    with tempfile.TemporaryDirectory(prefix='px90-zone-') as scratch:
+        subprocess.run([str(ROOT/'tools/mkzone'), scratch+'/UTC'], check=True, stdout=subprocess.DEVNULL)
+        assert Path(scratch+'/UTC').read_bytes() == zone, 'tools/mkzone is not the base /etc/localtime'
+    put('usr/share/zoneinfo/UTC', zone)
     put('bin/pax-release', (ROOT/'user/pax-release').read_bytes(), 0o755)
     for name, source in [('pax-install', identity/'installer/pax-install'),
                          ('limine', identity/'limine/limine'), ('reboot', identity/'diskprobe/reboot')]:
