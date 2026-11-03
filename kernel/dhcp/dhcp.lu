@@ -855,7 +855,7 @@ fn write_resolv(n: u64) -> bool {
 
 /// Take the lease the ACK in the P_ words names (kernel/ip, kernel/arp,
 /// /etc/resolv.conf), and its times.
-fn take(renewal: bool) {
+fn hold_lease(renewal: bool) {
     let addr = if renewal { dw(D_ADDR) } else { dw(D_OFFERED) }
     let server = if dw(P_SERVER) != 0 { dw(P_SERVER) } else { dw(D_SERVER) }
     var mask = dw(P_MASK)
@@ -996,7 +996,7 @@ fn handle() {
             bump(C_NOT_REPLY)
             return
         }
-        take(st != REQUESTING)
+        hold_lease(st != REQUESTING)
     } else if kind == NAK && (st == REQUESTING || st == RENEWING || st == REBINDING) {
         bump(C_NAK)
         let s = sync.acquire(sync.console())
