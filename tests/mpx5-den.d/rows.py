@@ -28,7 +28,7 @@ ROWS = [
     'merge-resolved', 'rebase', 'cherry-pick', 'revert', 'tag', 'blame', 'stash',
     'notes', 'reset', 'editor-false', 'editor-refused', 'git-status', 'git-log',
     'git-branch', 'git-tag', 'git-diff', 'git-cat-file', 'git-init', 'objects',
-    'fsck', 'gc-refused', 'repack', 'git-fsck', 'final-log',
+    'fsck', 'gc-refused', 'repack', 'git-fsck', 'final-log', 'terminal',
 ]
 VERSION = 'den 0.0.0 (built with wolf 0.2.36)'
 
@@ -255,6 +255,13 @@ def main():
         ids = [l for l in lg.out if re.fullmatch(r'commit [0-9a-f]{40}', l)]
         if len(ids) < 12:
             fail('final-log', 'den log from the pack: %d commits' % len(ids))
+    # At the terminal: den draws no decorations yet, and says so; with
+    # --no-decorate the log is the one-line log.
+    if find('den log --oneline -n 2', row='terminal') != ['den: not yet implemented: history decorations']:
+        fail('terminal', 'bare den log at the terminal: %r' % find('den log --oneline -n 2'))
+    one = find('den log --oneline --no-decorate -n 2', row='terminal') or []
+    if len(one) != 2 or not re.fullmatch(r'[0-9a-f]{7,} after the stash', one[0]):
+        fail('terminal', 'den log --no-decorate at the terminal: %r' % one)
     for line in bad:
         print(line)
     return 0
