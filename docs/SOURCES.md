@@ -1832,3 +1832,21 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
 - **musl** only as Ubuntu 24.04's packaged binaries (`musl`, `musl-dev`, `musl-tools`: `musl-gcc`), used to build
   the witnesses; never musl's source, glibc's, a BSD's or any kernel's.
 - No Linux source; no other kernel's, libc's or firmware's source.
+
+## px90 — den on PAX (/bin/den, and /bin/git a link to it)
+
+- **den at its pin** (`wolffe-lang/den` `13bc2caa`, the org's own, GPL-3.0-only): its README (the commands, the
+  limits, "argv[0] is available since wolf 0.2.36 and den does not read it yet", the editor's handling),
+  `docs/MAP.md`, `wolf-toolchain.toml` (wolf 0.2.36, lupin 0.1.58, wolf-std `78b9d3cb`), `tools/mkden` and
+  `tools/build` (built through as they are, never edited), `tools/lib-toolchain.sh` and `tools/fetch-toolchain`
+  (what a build needs beside wolf: the pinned lupin, the std at its commit), `tools/environment.py` (the pinned
+  environment the typed session reproduces), and a census of the calls `src/` makes into the OS (no
+  `std.process`: den runs no editor, pager or hook). No other part of den's source was read for this lane.
+- **den as a black box**: its answers on Linux (the dry run of `user/console/den.keys`, the session's Linux side,
+  `tests/mpx6-install.d/den.py`'s Linux steps) and at a pseudo-terminal (`script(1)`): the zone it reads only
+  from `$TZDIR/$TZ` (R-px90-2), the `history decorations` refusal at a terminal and `--no-decorate`.
+- **git**, never its source (den's clean room): the runner's or the container's `git` reads the repositories PAX
+  wrote (`fsck --full`, `rev-list`), run, never read.
+- **RFC 8536** (TZif), as px26's `tools/mkzone` already cites it: the zone file the images now also carry at
+  `/usr/share/zoneinfo/UTC`.
+- No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no Git source.
