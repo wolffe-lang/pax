@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **den on PAX (px90).** den, version control in wolf that reads and writes
+  Git's repositories byte for byte, is `/bin/den` in the dev and release
+  images and on the disk `pax-install` writes, with `/bin/git` a symbolic
+  link to it (`user/den.pin` at den `13bc2caa`, built twice by den's own
+  builder, `tools/mkden`; installed by `tools/install-den`). den reads no
+  argv[0] yet, so `git` answers exactly as `den`. `tests/mpx5-den` types
+  every local verb at the console as root and as `pax` in repositories on
+  an ext2 `/home`, each verb's status, output and error byte-identical to
+  the same den on Linux, nine of them through `git`; Linux's git reads the
+  repositories back from the disk. `tests/distribution-den` commits on a
+  disk the installer wrote, reboots, and reads it back clean, every object
+  file Linux's bytes. The images now carry `/usr/share/zoneinfo/UTC`, the
+  bytes of `/etc/localtime`: den prints a date only from the zone database.
+
 - **SATA disks (px75b).** `kernel/ahci` drives AHCI controllers (PCI
   class 01.06.01), written from the Serial ATA AHCI 1.3.1 specification,
   ATA Command Set 4 and Serial ATA 1.0a's FIS layouts: the BIOS/OS
