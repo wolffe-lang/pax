@@ -14,7 +14,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 
 | Area | What PAX does today | Held to |
 |---|---|---|
-| Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto the one disk the stick's allow-list names, its log written to the stick | both firmwares under QEMU, every push; the whole install on a machine shaped like kasumi |
+| Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto the one disk the stick's allow-list names, its log written to the stick | both firmwares under QEMU in the full CI set and nightly; the whole install on a machine shaped like kasumi |
 | Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers; `fork`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; `su` in wolf; no passwords yet | Linux as root and as a user |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
@@ -372,11 +372,11 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 
 ## Continuous integration
 
-- A pull request's push runs the suites its change can affect (`tools/ci-plan`, `tools/ci-tiers.map`) on one leg,
-  native BIOS; a change to the kernel's core or to CI itself runs every suite on that leg.
-- The `full-matrix` label runs every suite on the merge leg (`tier full`); a push to trunk, the nightly and a dispatch
-  run every suite on every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run
-  at the head.
+- Unlabelled pull requests run one cheap job that reports the local-evidence gate.
+- The `ci` or `full-matrix` label runs the full set: every suite on every compiler and firmware leg (`tier all`).
+- Trunk pushes run that full set only when they change cross-cutting paths: workflows, CI, shared tools, pins,
+  boot code, the loader or the kernel core. Module-only pushes run no CI. The nightly still runs every suite on
+  every leg, as does the default dispatch; explicit dispatch tiers remain available.
 - Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, 90 for users again
   with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
   (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in
@@ -396,7 +396,7 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 | host | build an image | boot one (`qemu-run`, `tests/proof --image`) | gdb (`qemu-gdb`) |
 |---|---|---|---|
 | linux x86-64 (CI's ubuntu, the pool) | yes: binutils, cc, make, curl, xorriso | yes: `qemu-system-x86_64`; OVMF for UEFI; KVM used when `/dev/kvm` is usable | yes: gdb |
-| macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every push | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
+| macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO in the full CI set and nightly | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
 
 - **CI**: `ubuntu-latest` with QEMU 8.2.2, OVMF and xorriso from apt (TCG); the `macos-run` job boots the same ISO,
   checked by digest, with Homebrew's QEMU 11.1.1 (TCG).
