@@ -20,7 +20,7 @@ same environment, in a directory of WORK. Held:
   P2 boot 2's `den log` is Linux's byte for byte and exits 0; `den fsck
      --full` exits 0 with nothing on either stream; `git log --oneline`
      is den's own `log --oneline` on Linux; the worktree is clean;
-  P3 the disk is clean and mounted twice; every object file of the
+  P3 the disk is clean, its mount count past the reboot's; every object file of the
      repository on the disk is byte-identical to Linux's (the same paths,
      the same bytes), and its HEAD and refs/heads/main are Linux's.
 Prints PASS lines and exits 0; a failed row is `FAIL <row> …` and exit 1.
@@ -218,8 +218,9 @@ why = []
 if r.returncode != 0 or b'WARNING' in r.stdout + r.stderr:
     why.append('e2fsck -fn: ' + (r.stdout + r.stderr).decode(errors='replace')[-400:])
 g = subprocess.run(['dumpe2fs', '-h', str(root)], capture_output=True)
-if not (re.search(rb'^Filesystem state:\s+clean$', g.stdout, re.M) and re.search(rb'^Mount count:\s+[2-9]', g.stdout, re.M)):
-    why.append('the root is not clean after two mounts')
+mounts = re.search(rb'^Mount count:\s+(\d+)$', g.stdout, re.M)
+if not (re.search(rb'^Filesystem state:\s+clean$', g.stdout, re.M) and mounts and int(mounts[1]) >= 2):
+    why.append('the root is not clean, or was not mounted across the reboot')
 def objects(top):
     base = top / '.git' / 'objects'
     return {p.relative_to(top).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -236,7 +237,7 @@ for ref in ('HEAD', 'refs/heads/main'):
 if why:
     fail('P3', '; '.join(why))
 else:
-    print(f'PASS P3 {firmware}: the root clean after two mounts; {len(pobj)} object files on the disk byte-identical to Linux\'s '
+    print(f'PASS P3 {firmware}: the root clean (mount count {int(mounts[1])}); {len(pobj)} object files on the disk byte-identical to Linux\'s '
           f'(den {hashlib.sha256(den.read_bytes()).hexdigest()[:12]}…), HEAD and main Linux\'s', flush=True)
 image.unlink(); root.unlink()
 sys.exit(1 if fails else 0)
