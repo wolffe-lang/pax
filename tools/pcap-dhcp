@@ -44,7 +44,8 @@
 # are the client's; it is decoded (53, 54, 51, 58, 59, 1, 3, 6, 56) and
 # printed, never judged. --backoff also holds the DISCOVERs of the first
 # exchange to RFC 2131 4.1's retransmission: 4 s after the first, then
-# each wait doubled up to 64 s, each within 1 s of its due time.
+# each wait doubled up to 64 s, each within 1 s of its due time (and a
+# tick, 10 ms, and the capture's own clock: 1.05 s).
 #
 # Prints one `pcap-dhcp: +T.TTT <who> <what>` line per DHCP message
 # (T from the capture's first frame), then `pcap-dhcp: PASS <counts>` or
@@ -319,7 +320,7 @@ def main():
         due, wait = None, 4.0
         for k in range(1, len(first_discovers)):
             gap = first_discovers[k] - first_discovers[k - 1]
-            if abs(gap - wait) > 1.0:
+            if abs(gap - wait) > 1.05:
                 print("pcap-dhcp: FAIL DISCOVER %d came %.3f s after the one before, not %.0f +- 1 s" % (k + 1, gap, wait))
                 return 1
             wait = min(wait * 2, 64.0)
