@@ -6,8 +6,10 @@
 #   3 w0         tests/mpx5-wolf --only build --firmware bios --tier native (px75-ubuntu:2): W0, the root, the image;
 #                the kernel's compiler is kernel/wolf.pin's, staged by tools/fetch-wolf by digest (PAX_WOLF), as in CI
 #   4 boot       tests/mpx5-wolf --images <W0's work> --firmware bios --tier native: the boot under TCG as the suite
-#                types it, both sessions, W2 (rows.py) on each; W1 fails by design (no Linux side here)
-#   5 fixtures   the two sessions as the suite compares them (.session.cmp), and rows.py on them again
+#                types it, both sessions cut to pb/*.session; W1 fails by design (no Linux side here) and
+#                continues before it writes .session.cmp, so W2 never runs in this step
+#   5 fixtures   fixtures.sh: the two .session files (serial_norm leaves them byte for byte: the .cmp form)
+#                as notes/px92/wolf-pax-{root,user}.tty, and rows.py (W2) on each
 # One take of both satoyama locks (A, then B), slot A's CPUs 0-3,8-11.
 #   rec.sh CHECKOUT
 set -uo pipefail
@@ -45,10 +47,7 @@ rec() {
     bash -c "set -e; PAX_BUILD=$R/wb tools/mkwolf $R/wolf; PAX_BUILD=$R/wb tools/mkwolf-std $R/std; cmp $R/wolf/sums.txt user/wolf.sums && echo 'PASS the build reproduces user/wolf.sums'" || return 1
   CTR_ENV="$DEV" step w0 ctr rec-w0 localhost/px75-ubuntu:2 bash -c "export PAX_WOLF=\$(tools/fetch-wolf) && \"\$PAX_WOLF\" --version | head -1 && tests/mpx5-wolf --only build --firmware bios --tier native" || return 1
   CTR_ENV="$DEV" step boot ctr rec-boot localhost/px75-ubuntu:2 bash -c "export PAX_WOLF=\$(tools/fetch-wolf); tests/mpx5-wolf --images $R/pb/mpx5-wolf --firmware bios --tier native; echo \"mpx5-wolf exit \$? (W1 is red by design here: no Linux side)\""
-  mkdir -p "$R/fixtures"
-  cp "$R/pb/mpx5-wolf-native-bios-root.session.cmp" "$R/fixtures/wolf-pax-root.tty" || return 1
-  cp "$R/pb/mpx5-wolf-native-bios-pax.session.cmp" "$R/fixtures/wolf-pax-user.tty" || return 1
-  step fixtures ctr rec-rows localhost/px75-ubuntu:2 bash -c "python3 -I tests/mpx5-wolf.d/rows.py $R/fixtures/wolf-pax-root.tty root && python3 -I tests/mpx5-wolf.d/rows.py $R/fixtures/wolf-pax-user.tty pax && wc -l $R/fixtures/*.tty && sha256sum $R/fixtures/*.tty"
+  step fixtures ctr rec-rows localhost/px75-ubuntu:2 bash "$L/lane/notes/px92/satoyama/fixtures.sh" "$R" "$C"
 }
 rec; rc=$?
 flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
