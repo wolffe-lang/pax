@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The console's terminal is the user's (px98).** A user logged in at the
+  console got `fatal: denied` from `den status`, and `Permission denied`
+  from `echo x > /dev/stdout`, because the terminal stayed root's, mode
+  0600. `/dev/stdout` reopens it (`/proc/self/fd/1`), and den's `status`
+  writes its report by opening `/dev/stdout` by name. The kernel now keeps
+  an owner and a mode for the console's terminals (the console's own
+  descriptors with `/dev/ttyS0`, `/dev/tty0`, `/dev/console`): root's and
+  0600 at boot, set by `chown` and `chmod` as a file's are. The installed
+  login gives the terminal to the account before it drops to it (the
+  user, its primary group, 0600, as `login(1)` does), and root's login and
+  the live login take it back. `/dev/tty` and the rest of `/dev` stay
+  fixed. `tests/mpx5-den` logs in through the installed login as `pax` and
+  runs den at the terminal, under `/tmp` and on the ext2 home.
+
 - **den on PAX (px90).** den, version control in wolf that reads and writes
   Git's repositories byte for byte, is `/bin/den` in the dev and release
   images and on the disk `pax-install` writes, with `/bin/git` a symbolic
