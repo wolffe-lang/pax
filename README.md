@@ -70,14 +70,14 @@ first program it prints how long its boot took and how much of that the console 
 |---|---|---|
 | wolf | the build compiler (`kernel/wolf.pin`) | 0.2.35 |
 | wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.36, `5adf3d9` |
-| lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.58, `6240efe5` |
-| wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `78b9d3cb` |
+| lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.59, `668fb752` |
+| wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `3111d39f` |
 | pelt | the POSIX shell, PID 1 at the console | `4683b3f5` |
-| boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `0f7a57b6` |
-| scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `81d761d6` |
-| den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it | `13bc2caa` (wolf 0.2.36) |
-| yew | the editor | `0ccb2c67` |
-| lope, aspen, lobo | the directory jumper, tree(1), the web server | `e6f623c7`, `3692cf5d`, `49ed870e` |
+| boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
+| scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
+| den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it | `584b18a3` (wolf 0.2.36) |
+| yew | the editor | `1218169e` |
+| lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `64e7339d` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
 
@@ -97,9 +97,11 @@ exactly as `den` does: `git --version` prints den's own line, `den 0.0.0 (built 
 `den` alone prints den's own usage text, `den: not yet implemented: <command> (unplanned command)`, with status 2.
 den reads and writes Git's repositories byte for byte on its local verbs: `init`, `add`, `rm`, `mv`, `status`,
 `commit`, `log`, `show`, `diff`, `restore`, `branch`, `switch`, `tag`, `reset`, `merge`, `rebase` (linear),
-`cherry-pick`, `revert`, `blame`, `stash`, `notes`, `repack`, `verify-pack`, `fsck` and Git's plumbing. It has no
-wire yet (`clone`, `fetch`, `pull`, `push`), no `gc`, no hooks and no config writer (`config --get` only, so set
-`user.name` in `~/.gitconfig` or with `GIT_AUTHOR_NAME`), and it never runs an editor or a pager: give a message
+`cherry-pick`, `revert`, `blame`, `stash`, `notes`, `repack`, `verify-pack`, `fsck` and Git's plumbing. Its wire
+(`clone`, `fetch`, `pull`, `push` over `file://`, `git://` and SSH, with `upload-pack`, `receive-pack` and a
+one-session `daemon`) is in the binary within den's own limits, and PAX does not test it yet. `config` still only
+reads (`config --get`; `remote` and `branch --set-upstream-to` edit a repository's config), so set `user.name` in
+`~/.gitconfig` or with `GIT_AUTHOR_NAME`. It has no HTTPS, no `gc` and no hooks, and it never runs an editor or a pager: give a message
 with `-m` or `-F` (with `GIT_EDITOR=false` the attempt fails as Git's does, and any other editor is refused by
 name). Two things to know at the console: den prints a date only from the zone database (`$TZDIR/$TZ`, by
 default `/usr/share/zoneinfo/UTC`, which the images carry as the bytes of `/etc/localtime`), and a `den log` written
