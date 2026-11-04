@@ -68,7 +68,8 @@ first program it prints how long its boot took and how much of that the console 
 
 | Program | What it is | Pin |
 |---|---|---|
-| wolf | the build compiler, and the dev image's compiler | 0.2.35 |
+| wolf | the build compiler (`kernel/wolf.pin`) | 0.2.35 |
+| wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.36, `5adf3d9` |
 | lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.58, `6240efe5` |
 | wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `78b9d3cb` |
 | pelt | the POSIX shell, PID 1 at the console | `4683b3f5` |
@@ -314,8 +315,8 @@ The dev variant adds to the base image, which it leaves unchanged:
 
 | Addition | Where | Notes |
 |---|---|---|
-| a musl-static `wolf` | `/usr/bin/wolf` | the v0.2.35 tag built unpatched, so it says the release's own line |
-| the compiler's paired standard library | `/usr/share/wolf/compiler-std` | lupin's own stays at `/usr/share/wolf/std`; the shell selects it through `WOLF_STD` |
+| a musl-static `wolf` | `/usr/bin/wolf` | the v0.2.36 tag built unpatched, so it says the release's own line; the first whose static musl programs read their arguments (wolf-lang#962) |
+| the compiler's paired standard library | `/usr/share/wolf/compiler-std` | the tag's own, `78b9d3cb`; lupin's stays at `/usr/share/wolf/std`; the shell selects it through `WOLF_STD` |
 | a static `ld.lld` 18.1.8 and a link-only `cc` | `/usr/bin` | built from LLVM's release tarball with zlib and zstd (`notes/px80/build-lld.sh`); not a C or assembly compiler |
 | musl's binary CRT and libc inputs | | recorded in `user/wolf-link.sums` |
 | scent as `grep`, with its fixture | `/usr/share/scent` | `cd /usr/share/scent; grep -n -C1 cat words.txt` |
