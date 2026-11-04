@@ -62,7 +62,7 @@ leg() { # NAME NEWSTICK ROWS [LINUX]
   local w=$L/runs/leg-$1-$short
   rm -rf "$w"; mkdir -p "$w"
   CTR_ENV="-e PAX_UPGRADE_SERIAL=$SERIAL -e PAX_UPGRADE_LINUX=${4:-} -e PYTHONUNBUFFERED=1" \
-    ctr "leg-$1" localhost/px78-ubuntu:1 1 python3 -I tests/mpx6-install.d/upgrade.py "$CO" "$w" "$OLD" "$2" "$3" 2>&1 | sed "s/$SERIAL/<kasumi-serial>/g" | tee "$w/leg.log"
+    ctr "leg-$1" localhost/px78-ubuntu:1 1 python3 -I tests/mpx6-install.d/upgrade.py "$CO" "$w" "$OLD" "$2" "$3" 2>&1 | sed -u "s/$SERIAL/<kasumi-serial>/g" | tee "$w/leg.log"
   return "${PIPESTATUS[0]}"
 }
 red_expect() { # LOG NEEDLE: a red step's FAIL line, by name
