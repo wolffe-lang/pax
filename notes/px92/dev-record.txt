@@ -1,0 +1,26 @@
+px92 dev stick record, 2026-11-04 (the coordinator's addition; the maintainer's serial written <kasumi-serial>)
+
+pax-install-kasumi-dev-9c88ec8a.img, 1,116,733,440 bytes, sha256 9e82ca4fc1168dc17250f4540df2ae689e13868eb801aeafb9496983ce10321f,
+read six times, all equal (twice after the build, twice at staging on satoyama, twice on nomad), 0444. The plain dev
+stick b96bd62a... (twice). The same head, inputs, kernel and recipe as the release stick; the archive is the dev cpio
+with px86's live entry (notes/px92/live-payload-dev.py): 545,376,324 bytes, e94d3c7c...
+
+The take: the maintainer's exception, no locks, slot B's CPUs, beside vc17 (my waiting flock on satoyama-A.lock,
+pid 1383525, confirmed blocked and stopped first, as the coordinator said). Sensor logs beside it
+(logs/sensors-dev-take1.log, logs/sensors-devresume.log). The first take stopped at sdevcmp: `paxfat cat` of the
+545 MB archive ran over six minutes at 100% CPU with nothing written; stopped by its pid; the ESP's archive is held by
+check-usb's U2 instead (c1eb83e9). devresume:
+  2026-11-04T07:53:03Z END sdevcmp exit=0       (the ESP files and bin/, boot/, usr/share/pax-install/ identical;
+                                                 128 dev-only paths; etc/shrc +2 lines; etc/motd `PAX dev:`)
+  2026-11-04T07:53:05Z END devlegs-prep exit=0
+  2026-11-04T07:55:06Z END sleg-rel exit=0      (the release stick over adb53141's install: M0-M11 PASS, 57.85 s)
+  2026-11-04T07:57:48Z END sleg-dev exit=1      (the dev stick over that: P0, P1, M1-M4 (65.25 s), M6, M7, P2-kernel-line,
+                                                 M8, D1 `wolf 0.2.35 (wolfgang, pin cf0c13d)`, D2 `wolf build` 0 in 6.6 s;
+                                                 FAIL D3-run: `./px92args one two` printed nothing, status 0)
+  after: the NVMe, Steam and SanDisk images = their before digests (diag/witness-after.py).
+
+D3, discriminated on Linux (black box, px78-ubuntu:1, the dev image's own toolchain at the dev image's paths):
+the binary built on the 860, run on Linux: nothing, status 0; built on Linux: `count 0` for `one two`; `wolf run`
+count.lu one two (and with --): `count 0`. env_args() is empty in programs this toolchain (wolf 0.2.35 with the dev
+image's musl link bundle) makes; PAX's kernel and the installer are not involved. A program without arguments builds
+and prints (`hello from the 860`, Linux).
