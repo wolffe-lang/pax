@@ -7,7 +7,8 @@
 # `taskset -c <the block's CPUs>` inside the container, `--memory 12g`,
 # the pids and process limits hasu-env/README.md names, no core files.
 # /dev/kvm only with KVM=1. NET=1 adds /dev/net/tun and CAP_NET_ADMIN
-# (a tap inside the container's own network namespace: dnsmasq and the
+# and CAP_SYS_ADMIN (the Linux reference sides unshare a network
+# namespace of their own; a tap inside the container's own network namespace: dnsmasq and the
 # guest on one wire; nothing of the host's network is touched).
 # Prints `END NAME exit=N` (indented: the gauntlet's step owns its END).
 set -uo pipefail
@@ -25,7 +26,7 @@ while :; do
 done
 [ "${1:-}" = -- ] && shift
 dev=(); [ "$kvm" = 1 ] && dev+=(--device /dev/kvm)
-[ "$net" = 1 ] && dev+=(--device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW)
+[ "$net" = 1 ] && dev+=(--device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN)
 echo "  $(date -u +%FT%TZ) container $N: $I, CPUs $cpus, kvm=$kvm net=$net: $*"
 rc=0
 "$P" run --rm --name "px89-$N" --memory 12g --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 \
