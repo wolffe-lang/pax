@@ -6,8 +6,9 @@
 # output indented two spaces; a suite's own `FAIL <row> …` lines are
 # repeated unindented at the step's end (the plant record's names). A
 # step's command is its CI job's `run: tests/…` lines with the PR leg
-# (`--tier native --firmware bios`) for $PAX_LEGS.
-#   gauntlet.sh BLOCK SUITE...   (from the checkout's root)
+# (`--tier native --firmware bios`) for $PAX_LEGS; SUITE@all runs every
+# leg (`--tier both --firmware both`), SUITE@release-uefi the one.
+#   gauntlet.sh BLOCK SUITE[@LEGS]...   (from the checkout's root)
 set -uo pipefail
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) # gaunt-launch.sh's snapshot of the scripts
 . "$S/gauntlet-record.sh"
@@ -63,7 +64,14 @@ one() { # name kvm/net opts -- cmd
     return $rc
 }
 suite() {
-    local s=$1
+    local s=${1%@*} l=
+    case $1 in
+        *@all) l="--tier both --firmware both" ;;
+        *@release-uefi) l="--tier release --firmware uefi" ;;
+        *@*) echo "  no such legs: ${1#*@}"; return 2 ;;
+        *) l="--tier native --firmware bios" ;;
+    esac
+    legs=$l
     mapfile -t CMDS < <(cmds_of "$s")
     [ "${#CMDS[@]}" -gt 0 ] || { echo "  no run: tests/ line in the $s job"; return 2; }
     one "$s" KVM=1 NET=1 ENGINE=1 --
@@ -72,7 +80,8 @@ for s in "$@"; do
     case $s in
         selftests)
             CMDS=("tests/ci-plan" "python3 -I tests/ci-retry.py" "python3 -I tests/mpx2-heap.d/budget.py" "python3 -I tests/ci-budgets.py"
-                  "tests/fetch-retry-selftest" "tests/expect-serial-selftest" "sh tests/census")
+                  "tests/fetch-retry-selftest" "python3 -I tests/usb-session-selftest" "python3 -I tests/pipe-shape-selftest"
+                  "tests/expect-serial-selftest" "sh tests/census")
             gauntlet_step selftests one selftests -- || exit $?
             ;;
         *)
