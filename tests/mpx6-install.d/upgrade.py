@@ -60,7 +60,9 @@ import sys
 import time
 
 repo, work, old_src, new_src = map(Path, sys.argv[1:5])
-ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7']
+ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7',
+                                                        'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11']
+DEV_SRC = Path(os.environ['PAX_UPGRADE_DEV_STICK']) if os.environ.get('PAX_UPGRADE_DEV_STICK') else None
 work.mkdir(parents=True, exist_ok=True)
 SERIAL = os.environ['PAX_UPGRADE_SERIAL']
 LINUX_ARGS = os.environ.get('PAX_UPGRADE_LINUX', '')
@@ -177,7 +179,7 @@ def foreign_disk(path, spec, parts):
 DISKS = work/'disks'
 
 
-def make_disks():
+def make_disks(size=None, used=None):
     if DISKS.exists():
         shutil.rmtree(DISKS)
     DISKS.mkdir()
@@ -187,7 +189,9 @@ def make_disks():
     q = SANDISK['bytes'] // 512 // 4
     foreign_disk(DISKS/'sandisk.img', SANDISK, [('linux', 2048, q - 1), ('linux', q, 2 * q - 1), ('linux', 2 * q, 3 * q - 1), ('linux', 3 * q, None)])
     with open(DISKS/'target.img', 'wb') as f:
-        f.truncate(TARGET['bytes'])
+        f.truncate(size or TARGET['bytes'])
+    if used:
+        log(run([repo/'tools/used-disk', 'make', DISKS/'target.img', used]).stdout.decode().strip())
 
 
 def witnesses():
@@ -518,102 +522,250 @@ def user_paths(rows):
 
 # --- the leg ---------------------------------------------------------------------
 
-def main():
-    old = work/'old-stick.img'
-    new = work/'new-stick.img'
-    for s, d in ((old_src, old), (new_src, new)):
-        shutil.copyfile(s, d)
-        d.chmod(0o644)
-        if sha(d) != sha(s):
-            fail('U0-setup', f'the copy of {s} differs')
-    result['old_stick'] = sha(old_src)
-    result['new_stick'] = sha(new_src)
-    old_k = esp_get(old, '/boot/pax', work/'old-kernel.elf')
-    new_k = esp_get(new, '/boot/pax', work/'new-kernel.elf')
-    new_cpio = esp_get(new, '/boot/initramfs.cpio', work/'new-initramfs.cpio')
-    sym_old, sym_new = symbols(old_k), symbols(new_k)
-    new_manifest = run(['python3', '-I', repo/'tools/install-manifest', '--cpio', new_cpio, new_k, 'the new stick']).stdout.decode()
-    (work/'new-stick.manifest').write_text(new_manifest)
-    new_rows = manifest_rows(new_manifest)
-    new_commit = new_manifest.splitlines()[1].split()[1]
-    new_cpio.unlink()
-    for img in (old, new):
-        listed = run(['mtype', '-i', f'{img}@@{esp_range(img)[0]}', '::/pax/install-targets'], env={'MTOOLS_SKIP_CHECK': '1', 'PATH': '/usr/bin:/bin'}).stdout.decode()
-        if listed.splitlines().count(f'model={TARGET_MODEL} serial={SERIAL}') != 1:
-            fail('U0-setup', f'{img.name} does not list the target exactly once')
-    log(f'new commit {new_commit}; {len(new_rows)} rows in its manifest')
-    make_disks()
-    WITNESS.update(witnesses())
-    result['witnesses'] = WITNESS
-    nonce = 'px93-' + secrets.token_hex(6)
 
-    # U1: the old stick installs (metal.py's guided flow).
-    m = Machine('u1-install', sym_old, old)
+C = {}
+
+
+def sticks():
+    """The sticks copied in and checked; the new stick's manifest by the host tool."""
+    pairs = [('old', old_src), ('new', new_src)] + ([('dev', DEV_SRC)] if DEV_SRC else [])
+    for name, src in pairs:
+        d = work/f'{name}-stick.img'
+        shutil.copyfile(src, d)
+        d.chmod(0o644)
+        if sha(d) != sha(src):
+            fail('U0-setup', f'the copy of {src} differs')
+        result[f'{name}_stick'] = sha(src)
+        C[name] = d
+        C['sym_' + name] = symbols(esp_get(d, '/boot/pax', work/f'{name}-kernel.elf'))
+        listed = run(['mtype', '-i', f'{d}@@{esp_range(d)[0]}', '::/pax/install-targets'], env={'MTOOLS_SKIP_CHECK': '1', 'PATH': '/usr/bin:/bin'}).stdout.decode()
+        if listed.splitlines().count(f'model={TARGET_MODEL} serial={SERIAL}') != 1:
+            fail('U0-setup', f'{d.name} does not list the target exactly once')
+    cpio = esp_get(C['new'], '/boot/initramfs.cpio', work/'new-initramfs.cpio')
+    text = run(['python3', '-I', repo/'tools/install-manifest', '--cpio', cpio, work/'new-kernel.elf', 'the new stick']).stdout.decode()
+    cpio.unlink()
+    (work/'new-stick.manifest').write_text(text)
+    C['new_rows'] = manifest_rows(text)
+    C['new_commit'] = text.splitlines()[1].split()[1]
+    log(f'new commit {C["new_commit"]}; {len(C["new_rows"])} rows in its manifest')
+
+
+def disks(size=None, used=None):
+    make_disks(size, used)
+    WITNESS.clear()
+    WITNESS.update(witnesses())
+    result.setdefault('witnesses', []).append(dict(WITNESS))
+
+
+def install_from(stick, sym, name, row):
+    """The stick's guided install onto /dev/sdc: user wolf, no games, yes."""
+    m = Machine(name, sym, stick)
     try:
-        login(m, 'U1-install')
+        login(m, row)
         m.type('pax-install\n')
-        page = m.wait(r'pax-install> *$', 'U1-install', 600, bad=STOPPED)
+        page = m.wait(r'pax-install> *$', row, 600, bad=STOPPED)
         num = re.search(r'^[> ] (\d+)\. /dev/sdc ', m.unwrapped(page), re.M)
         if not num:
-            fail('U1-install', 'the target is not on the page:\n' + page)
+            fail(row, 'the target is not on the page:\n' + page)
         m.type(num.group(1) + '\n')
-        m.wait(r'New user name', 'U1-install', 120, bad=STOPPED)
+        m.wait(r'New user name', row, 120, bad=STOPPED)
         m.type('wolf\n')
-        m.wait(r'Install the lair', 'U1-install', 120, bad=STOPPED)
+        m.wait(r'Install the lair', row, 120, bad=STOPPED)
         m.type('n\n')
-        m.wait(r'Type yes to install; anything else cancels: pax-install> *$', 'U1-install', 300, bad=STOPPED)
+        m.wait(r'Type yes to install; anything else cancels: pax-install> *$', row, 300, bad=STOPPED)
         m.type('yes\n')
         t = time.monotonic()
-        m.wait(r'^Installation complete', 'U1-install', 3600, bad=STOPPED)
-        result['install_seconds'] = round(time.monotonic() - t, 2)
-        m.wait(r'poweroff to power off', 'U1-install', 120)
-        poweroff(m, 'U1-install')
+        m.wait(r'^Installation complete', row, 3600, bad=STOPPED)
+        secs = round(time.monotonic() - t, 2)
+        m.wait(r'poweroff to power off', row, 120)
+        poweroff(m, row)
     finally:
         m.kill()
-    check_witnesses('U1-install')
-    passed('U1-install', f'the old stick installed the target in {result["install_seconds"]} s')
+    check_witnesses(row)
+    return secs
 
-    # U2: the user's state, typed at the installed console.
-    m = Machine('u2-state', sym_old, None)
+
+STATE = ['mkdir -p /home/wolf/notes /usr/local/bin',
+         "printf '%s\\n' '{nonce} notes' > /home/wolf/notes/a.txt",
+         "printf 'line one\\nline two\\n' > /home/wolf/notes/b.txt",
+         'cp /bin/den /home/wolf/den-copy',
+         "printf '# px93: the user changed this file\\nexport PX93=yes\\n' >> /etc/shrc",
+         "printf 'mine {nonce}\\n' > /etc/mine.conf",
+         "printf '#!/bin/sh\\necho hello from /usr/local\\n' > /usr/local/bin/hello",
+         'chmod 755 /usr/local/bin/hello',
+         'rm /etc/motd',
+         'cd /home/wolf',
+         'export GIT_AUTHOR_NAME=Wolf GIT_AUTHOR_EMAIL=wolf@pax.invalid GIT_COMMITTER_NAME=Wolf GIT_COMMITTER_EMAIL=wolf@pax.invalid TZ=UTC',
+         'den init repo', 'cd repo',
+         "printf 'one\\n' > a.txt", 'den add a.txt', "den commit -m 'first'",
+         "printf 'two\\n' >> a.txt", 'den add a.txt', "den commit -m 'second'",
+         "printf 'three\\n' > b.txt", 'den add b.txt', "den commit -m 'third'",
+         'den log > /root/den-log-before.txt; echo den-log=$?']
+ARGS_SRC = "printf 'fn main() {\\n    for a in env_args() { print(\"arg: {a}\") }\\n}\\n' > main.lu"
+ARGS_OUT = b'arg: one\narg: two words\n'
+
+
+def state(sym, name, row, wolf_program=False):
+    """A user's state, typed at the installed console (and, on a dev install, a
+    program built there by /usr/bin/wolf, its source, binary and output under
+    /home/wolf/args); the root's tree read on the host."""
+    nonce = 'px93-' + secrets.token_hex(6)
+    m = Machine(name, sym, None)
     try:
-        login(m, 'U2-state')
-        for c in ['mkdir -p /home/wolf/notes /usr/local/bin',
-                  f"printf '%s\\n' '{nonce} notes' > /home/wolf/notes/a.txt",
-                  "printf 'line one\\nline two\\n' > /home/wolf/notes/b.txt",
-                  'cp /bin/den /home/wolf/den-copy',
-                  "printf '# px93: the user changed this file\\nexport PX93=yes\\n' >> /etc/shrc",
-                  f"printf 'mine {nonce}\\n' > /etc/mine.conf",
-                  "printf '#!/bin/sh\\necho hello from /usr/local\\n' > /usr/local/bin/hello",
-                  'chmod 755 /usr/local/bin/hello',
-                  'rm /etc/motd',
-                  'cd /home/wolf',
-                  'export GIT_AUTHOR_NAME=Wolf GIT_AUTHOR_EMAIL=wolf@pax.invalid GIT_COMMITTER_NAME=Wolf GIT_COMMITTER_EMAIL=wolf@pax.invalid TZ=UTC',
-                  'den init repo', 'cd repo',
-                  "printf 'one\\n' > a.txt", 'den add a.txt', "den commit -m 'first'",
-                  "printf 'two\\n' >> a.txt", 'den add a.txt', "den commit -m 'second'",
-                  "printf 'three\\n' > b.txt", 'den add b.txt', "den commit -m 'third'",
-                  'den log > /root/den-log-before.txt; echo den-log=$?']:
-            s = m.command(c, 'U2-state', 300)
-        need(m.unwrapped(s), 'den-log=0', 'U2-state')
-        m.command('cd /', 'U2-state')
-        poweroff(m, 'U2-state')
+        login(m, row)
+        if wolf_program:
+            for c in ['mkdir -p /home/wolf/args', 'cd /home/wolf/args', ARGS_SRC,
+                      'wolf build --no-cache main.lu -o args; echo build=$?']:
+                s = m.command(c, row, 900)
+            need(m.unwrapped(s), 'build=0', row)
+            s = m.command("./args one 'two words' > out.txt; echo run=$?; cd /", row)
+            need(m.unwrapped(s), 'run=0', row)
+        for c in STATE:
+            s = m.command(c.replace('{nonce}', nonce), row, 300)
+        need(m.unwrapped(s), 'den-log=0', row)
+        m.command('cd /', row)
+        poweroff(m, row)
     finally:
         m.kill()
-    check_witnesses('U2-state')
-    before, rc, text = tree('u2', 'U2-state')
+    check_witnesses(row)
+    before, rc, text = tree(name, row)
     if rc != 0:
-        fail('U2-state', 'e2fsck -fn after the user state: ' + text[-2000:])
-    den_before = (work/'u2-tree/root/den-log-before.txt').read_text()
-    if den_before.count('\ncommit ') + den_before.startswith('commit ') != 3:
-        fail('U2-state', 'den log does not show three commits:\n' + den_before)
-    for p in ('/home/wolf/notes/a.txt', '/home/wolf/den-copy', '/etc/mine.conf', '/usr/local/bin/hello', '/home/wolf/repo/.git'):
+        fail(row, 'e2fsck -fn after the user state: ' + text[-2000:])
+    den = (work/f'{name}-tree/root/den-log-before.txt').read_text()
+    if den.count('\ncommit ') + den.startswith('commit ') != 3:
+        fail(row, 'den log does not show three commits:\n' + den)
+    for p in ('/home/wolf/notes/a.txt', '/home/wolf/den-copy', '/etc/mine.conf', '/usr/local/bin/hello', '/home/wolf/repo/.git') + \
+            (('/home/wolf/args/main.lu', '/home/wolf/args/args', '/home/wolf/args/out.txt') if wolf_program else ()):
         if p not in before:
-            fail('U2-state', f'{p} is not on the target')
+            fail(row, f'{p} is not on the target')
+    if wolf_program and (work/f'{name}-tree/home/wolf/args/out.txt').read_bytes() != ARGS_OUT:
+        fail(row, 'the program built on the target printed ' + repr((work/f'{name}-tree/home/wolf/args/out.txt').read_bytes()))
     if '/etc/motd' in before:
-        fail('U2-state', '/etc/motd is still there')
+        fail(row, '/etc/motd is still there')
+    return before, den
+
+
+def token_of(flat, row):
+    t = re.search(r'^(UPGRADE /dev/sdc .*\S)\s*$', flat, re.M)
+    if not t:
+        fail(row, 'no UPGRADE line:\n' + flat)
+    return t.group(1)
+
+
+def upgrade(m, row, needles):
+    """pax-install --upgrade in a booted upgrade entry: the plan, its needles,
+    the line typed, complete."""
+    m.run('pax-install --upgrade')
+    s = m.wait(r'^UPGRADE /dev/sdc .*$', row, 900, bad=STOPPED)
+    flat = m.unwrapped(s)
+    (work/f'{row}-plan.txt').write_text(flat)
+    for n in needles:
+        need(flat, n, row)
+    token = token_of(flat, row)
+    if not token.startswith(f'UPGRADE /dev/sdc {TARGET_MODEL} {SERIAL} '):
+        fail(row, 'the line does not name the disk: ' + token)
+    m.wait(r'pax-install> *$', row, 60, last=True)
+    m.type(token + '\n')
+    t = time.monotonic()
+    m.wait(r'^Upgrade complete', row, 3600, bad=STOPPED)
+    secs = round(time.monotonic() - t, 2)
+    m.wait(r'poweroff to power off', row, 120)
+    m.shot('complete')
+    return secs
+
+
+def after(name, row, before, base_name, fsck_required=True):
+    new_rows = C['new_rows']
+    rows, rc, text = tree(name, row)
+    for p, v in user_paths(before).items():
+        if rows.get(p) != v:
+            fail(row, f'the user path {p} changed: {before.get(p)} -> {rows.get(p)}')
+    if rows.get('/etc/shrc') != before['/etc/shrc']:
+        fail(row, '/etc/shrc is not the user\'s')
+    if rows.get('/etc/shrc.pax-new', ('',))[2:] != (new_rows['/etc/shrc'][2],):
+        fail(row, f'/etc/shrc.pax-new is not the new image\'s: {rows.get("/etc/shrc.pax-new")}')
+    wrong_rows = []
+    for p, (k, mode, digest) in new_rows.items():
+        if k == 'g' or p == '/etc/shrc':
+            continue
+        got = rows.get(p)
+        if got is None or (k == 'd' and got[0] != 'd') or (k != 'd' and (got[0], got[2]) != (k, digest)) or (k == 'f' and got[1] != mode):
+            wrong_rows.append((p, got, (k, mode, digest)))
+    if wrong_rows:
+        fail(row, f'{len(wrong_rows)} shipped path(s) not the new image\'s: {wrong_rows[:8]}')
+    base = manifest_rows((repo/f'user/install/baselines/{base_name}.manifest').read_text())
+    left = [p for p in base if p not in new_rows and base[p][0] in 'fl' and p in rows]
+    if left:
+        fail(row, f'dropped shipped paths still there: {left[:8]}')
+    mtext = (work/f'{name}-tree/etc/pax-install/manifest').read_text()
+    # Files by kind, mode and sha256; a link by its target; a directory by its kind (PAX's lstat and the
+    # archive's header may spell a link's or a directory's mode differently: never a file's).
+    def key(v):
+        return v if v[0] == 'f' else (v[0], v[2]) if v[0] == 'l' else (v[0],)
+    mine = {p: key(v) for p, v in manifest_rows(mtext).items() if v[0] != 'g'}
+    host = {p: key(v) for p, v in new_rows.items() if v[0] != 'g'}
+    if mine != host:
+        diff = sorted(set(mine.items()) ^ set(host.items()))[:8]
+        fail(row, f'the target\'s manifest differs from tools/install-manifest\'s: {diff}')
+    if rc != 0 and fsck_required:
+        fail(row, 'e2fsck -fn: ' + text[-3000:])
+    return rows, rc
+
+
+def again(name, row, prev, expect='Nothing to change: /dev/sdc already holds this image', needles=()):
+    """The upgrade entry once more: nothing to change, and no path changed."""
+    m = Machine(name, C['sym_new'], C['new'])
+    try:
+        m.upgrade_entry(row)
+        login(m, row)
+        m.run('pax-install --upgrade')
+        s = m.wait('^' + re.escape(expect), row, 900, bad=r'^UPGRADE /dev/sdc|' + STOPPED)
+        for n in needles:
+            need(m.unwrapped(s), n, row)
+        m.wait(PROMPT, row, 60, last=True)
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    rows, rc, text = tree(name, row)
+    if prev is not None and rows != prev:
+        diff = sorted(set(rows.items()) ^ set(prev.items()))[:8]
+        fail(row, f'the run changed paths: {diff}')
+    return rows
+
+
+def boot_after(name, row, den_before, extra=()):
+    """The upgraded disk booted alone: its kernel line names the new commit,
+    den log is the same, and `extra` commands' outputs saved under /root."""
+    m = Machine(name, C['sym_new'], None)
+    try:
+        s = login(m, row)
+        need(m.unwrapped(s), f'kernel: {C["new_commit"]}', row)
+        s = m.command('cd /home/wolf/repo && den log > /root/den-log-after.txt; echo den-log=$?; cd /', row)
+        need(m.unwrapped(s), 'den-log=0', row)
+        for c, want in extra:
+            s = m.command(c, row, 900)
+            need(m.unwrapped(s), want, row)
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    rows, rc, text = tree(name, row)
+    if (work/f'{name}-tree/root/den-log-after.txt').read_text() != den_before:
+        fail(row, 'den log differs after the upgrade')
+    return rows
+
+
+def track_a():
+    """The 860 as px92's 9c88ec8a stick left it, upgraded (U1-U8)."""
+    old, new, new_rows, new_commit = C['old'], C['new'], C['new_rows'], C['new_commit']
+    sym_old, sym_new = C['sym_old'], C['sym_new']
+    disks()
+    result['install_seconds'] = install_from(old, sym_old, 'u1-install', 'U1-install')
+    passed('U1-install', f'the old stick installed the target in {result["install_seconds"]} s')
+    before, den_before = state(sym_old, 'u2', 'U2-state')
     run(['cp', '--sparse=always', DISKS/'target.img', work/'u2-target.img'], row='U2-state')
     passed('U2-state', f'{len(user_paths(before))} user paths, den log with three commits, /etc/shrc edited, /etc/motd deleted; e2fsck -fn clean')
-
     # U0: the new stick's default entry mounts nothing and writes nothing.
     t0 = extents_sha(DISKS/'target.img')
     m = Machine('u0-default', sym_new, new)
@@ -679,8 +831,7 @@ def main():
         # The confirmation mistyped.
         m.run('pax-install --upgrade')
         s = m.wait(r'^UPGRADE /dev/sdc .*$', 'U8-mistyped', 900, bad=STOPPED)
-        flat = m.unwrapped(s)
-        token = re.search(r'^(UPGRADE /dev/sdc .*\S)\s*$', flat, re.M).group(1)
+        token = token_of(m.unwrapped(s), 'U8-mistyped')
         m.wait(r'pax-install> *$', 'U8-mistyped', 60, last=True)
         m.type(token[:-1] + ('0' if token[-1] != '0' else '1') + '\n')
         s = m.wait(r'^pax-install: upgrade cancelled before writes', 'U8-mistyped', 120)
@@ -688,124 +839,29 @@ def main():
         s = m.command('[ -e /mnt/target/etc/pax-install ]; echo p=$?', 'U8-mistyped')
         need(m.unwrapped(s), 'p=1', 'U8-mistyped')
         passed('U8-mistyped', 'the line mistyped by one character: cancelled by name; /etc/pax-install not made')
-        # The upgrade.
-        m.run('pax-install --upgrade')
-        s = m.wait(r'^UPGRADE /dev/sdc .*$', 'U3-upgrade', 900, bad=STOPPED)
-        flat = m.unwrapped(s)
-        (work/'u3-plan.txt').write_text(flat)
-        need(flat, 'Installed: ', 'U3-upgrade')
-        need(flat, 'from the baseline 9c88ec8a.manifest', 'U3-upgrade')
-        need(flat, 'beside /etc/shrc.pax-new', 'U3-upgrade')
-        token = re.search(r'^(UPGRADE /dev/sdc .*\S)\s*$', flat, re.M).group(1)
-        if not token.startswith(f'UPGRADE /dev/sdc {TARGET_MODEL} {SERIAL} '):
-            fail('U3-upgrade', 'the line does not name the disk: ' + token)
-        m.wait(r'pax-install> *$', 'U3-upgrade', 60, last=True)
-        m.type(token + '\n')
-        t = time.monotonic()
-        m.wait(r'^Upgrade complete', 'U3-upgrade', 3600, bad=STOPPED)
-        result['upgrade_seconds'] = round(time.monotonic() - t, 2)
-        m.wait(r'poweroff to power off', 'U3-upgrade', 120)
-        m.shot('complete')
+        result['upgrade_seconds'] = upgrade(m, 'U3-upgrade', ['Installed: ', 'from the baseline 9c88ec8a.manifest', 'beside /etc/shrc.pax-new'])
         poweroff(m, 'U3-upgrade')
     finally:
         m.kill()
     check_witnesses('U3-upgrade')
     passed('U3-upgrade', f'the upgrade entry, the plan from the 9c88ec8a baseline, the line typed; complete in {result["upgrade_seconds"]} s')
-
-    def after(name, row, fsck_required=True):
-        rows, rc, text = tree(name, row)
-        for p, v in user_paths(before).items():
-            if rows.get(p) != v:
-                fail(row, f'the user path {p} changed: {before.get(p)} -> {rows.get(p)}')
-        if rows.get('/etc/shrc') != before['/etc/shrc']:
-            fail(row, '/etc/shrc is not the user\'s')
-        if rows.get('/etc/shrc.pax-new', ('',))[2:] != (new_rows['/etc/shrc'][2],):
-            fail(row, f'/etc/shrc.pax-new is not the new image\'s: {rows.get("/etc/shrc.pax-new")}')
-        wrong_rows = []
-        for p, (k, mode, digest) in new_rows.items():
-            if k == 'g' or p == '/etc/shrc':
-                continue
-            got = rows.get(p)
-            want = (k, mode, digest) if k == 'f' else (k, 0, digest) if k == 'l' else ('d',)
-            if got is None or (k == 'd' and got[0] != 'd') or (k != 'd' and (got[0], got[2]) != (k, digest)) or (k == 'f' and got[1] != mode):
-                wrong_rows.append((p, got, want))
-        if wrong_rows:
-            fail(row, f'{len(wrong_rows)} shipped path(s) not the new image\'s: {wrong_rows[:8]}')
-        old_only = [p for p in before if p not in new_rows and p not in user_paths(before)
-                    and not p.startswith(('/root', '/etc/pax-install', '/dev', '/proc', '/sys', '/tmp', '/lost+found', '/mnt'))
-                    and p not in ('/etc/shrc.pax-new',)]
-        base = (repo/'user/install/baselines/9c88ec8a.manifest').read_text()
-        dropped = [p for p in manifest_rows(base) if p not in new_rows and manifest_rows(base)[p][0] in 'fl']
-        left = [p for p in dropped if p in rows]
-        if left:
-            fail(row, f'dropped shipped paths still there: {left[:8]}')
-        mtext = (work/f'{name}-tree/etc/pax-install/manifest').read_text()
-        # Files by kind, mode and sha256; a link by its target; a directory by its kind (PAX's lstat and the
-        # archive's header may spell a link's or a directory's mode differently: never a file's).
-        def key(v):
-            return v if v[0] == 'f' else (v[0], v[2]) if v[0] == 'l' else (v[0],)
-        mine = {p: key(v) for p, v in manifest_rows(mtext).items() if v[0] != 'g'}
-        host = {p: key(v) for p, v in new_rows.items() if v[0] != 'g'}
-        if mine != host:
-            diff = sorted(set(mine.items()) ^ set(host.items()))[:8]
-            fail(row, f'the target\'s manifest differs from tools/install-manifest\'s: {diff}')
-        if rc != 0 and fsck_required:
-            fail(row, 'e2fsck -fn: ' + text[-3000:])
-        return rows, old_only, rc
-
-    rows4, extra, _rc = after('u4', 'U4-after')
-    (work/'u4-not-shipped.txt').write_text('\n'.join(extra) + '\n')
-    m = Machine('u4-boot', sym_new, None)
-    try:
-        s = login(m, 'U4-boot')
-        need(m.unwrapped(s), f'kernel: {new_commit}', 'U4-boot')
-        s = m.command('cd /home/wolf/repo && den log > /root/den-log-after.txt; echo den-log=$?; cd /', 'U4-boot')
-        need(m.unwrapped(s), 'den-log=0', 'U4-boot')
-        # U5: the compiler, R-px93-D.
-        if 'U5' in ROWS:
-            for c in ['mkdir -p /root/args',
-                      "printf 'fn main() {\\n    for a in env_args() { print(\"arg: {a}\") }\\n}\\n' > /root/args/main.lu",
-                      'cd /root/args',
-                      'env PATH=/usr/bin:/bin WOLF_STD=/usr/share/wolf/compiler-std wolf build --no-cache main.lu -o args; echo build=$?']:
-                s = m.command(c, 'U5-compiler', 900)
-            need(m.unwrapped(s), 'build=0', 'U5-compiler')
-            s = m.command("./args one 'two words' > out.txt; echo run=$?; cd /", 'U5-compiler')
-            need(m.unwrapped(s), 'run=0', 'U5-compiler')
-        poweroff(m, 'U4-boot')
-    finally:
-        m.kill()
-    check_witnesses('U4-boot')
-    rows5, rc, text = tree('u5', 'U4-boot')
-    den_after = (work/'u5-tree/root/den-log-after.txt').read_text()
-    if den_after != den_before:
-        fail('U4-after', 'den log differs after the upgrade')
+    after('u4', 'U4-after', before, '9c88ec8a')
+    extra = []
+    if 'U5' in ROWS:
+        extra = [('mkdir -p /root/args && cd /root/args', ''), (ARGS_SRC, ''),
+                 ('env PATH=/usr/bin:/bin WOLF_STD=/usr/share/wolf/compiler-std wolf build --no-cache main.lu -o args; echo build=$?', 'build=0'),
+                 ("./args one 'two words' > out.txt; echo run=$?; cd /", 'run=0')]
+    rows5 = boot_after('u5', 'U4-after', den_before, extra)
     passed('U4-after', f'every user path byte-identical ({len(user_paths(before))}), den log the same, /etc/shrc yours and /etc/shrc.pax-new the new image\'s, '
            f'{len(new_rows)} shipped rows the new image\'s, the dropped gone, the manifest the host tool\'s, e2fsck -fn clean; booted with kernel: {new_commit[:8]}')
     if 'U5' in ROWS:
         got = (work/'u5-tree/root/args/out.txt').read_bytes()
-        want = Path(LINUX_ARGS).read_bytes() if LINUX_ARGS else b'arg: one\narg: two words\n'
+        want = Path(LINUX_ARGS).read_bytes() if LINUX_ARGS else ARGS_OUT
         if got != want:
             fail('U5-compiler', f'PAX printed {got!r}, Linux {want!r}')
         passed('U5-compiler', f'/usr/bin/wolf built env_args() on PAX; it printed {got!r}, the same bytes as on Linux')
-
-    # U6: again, with the same stick.
-    m = Machine('u6-again', sym_new, new)
-    try:
-        m.upgrade_entry('U6-again')
-        login(m, 'U6-again')
-        m.run('pax-install --upgrade')
-        s = m.wait(r'^Nothing to change: /dev/sdc already holds this image', 'U6-again', 900, bad=r'^UPGRADE /dev/sdc|' + STOPPED)
-        m.wait(PROMPT, 'U6-again', 60, last=True)
-        poweroff(m, 'U6-again')
-    finally:
-        m.kill()
-    check_witnesses('U6-again')
-    rows6, rc, text = tree('u6', 'U6-again')
-    if rows6 != rows5:
-        diff = sorted(set(rows6.items()) ^ set(rows5.items()))[:8]
-        fail('U6-again', f'the second run changed paths: {diff}')
+    again('u6', 'U6-again', rows5)
     passed('U6-again', 'the second upgrade: "Nothing to change", every path as it was')
-
     # U7: a power cut mid-upgrade on a copy of U2's target.
     if 'U7' in ROWS:
         run(['cp', '--sparse=always', work/'u2-target.img', DISKS/'target.img'], row='U7-cut')
@@ -842,13 +898,106 @@ def main():
         finally:
             m.kill()
         check_witnesses('U7-again')
-        _r, _x, rc7 = after('u7', 'U7-cut', fsck_required=False)
+        _r, rc7 = after('u7', 'U7-cut', before, '9c88ec8a', fsck_required=False)
         verdict = 'clean' if rc7 == 0 else 'exit %d (%s)' % (rc7, ' | '.join(l for l in (work/'u7-e2fsck.txt').read_text().splitlines() if l and not l.startswith(('Pass ', 'e2fsck ')))[:600])
         result['u7_e2fsck'] = verdict
         passed('U7-cut', f'killed after 100 steps, re-run from the record: complete; every user path byte-identical, every shipped path the new image\'s; e2fsck -fn {verdict}')
+
+
+def track_d():
+    """The 860 as it is now: px92's dev stick 8b4e98ae's install, a user's state and
+    a wolf program built on it, upgraded (U1d-U6d)."""
+    if not DEV_SRC:
+        fail('U1d-install', 'PAX_UPGRADE_DEV_STICK names no stick')
+    disks()
+    secs = install_from(C['dev'], C['sym_dev'], 'u1d-install', 'U1d-install')
+    passed('U1d-install', f'the 8b4e98ae dev stick installed the target in {secs} s')
+    before, den_before = state(C['sym_dev'], 'u2d', 'U2d-state', wolf_program=True)
+    passed('U2d-state', f'{len(user_paths(before))} user paths, /usr/bin/wolf built /home/wolf/args/args on the target and it printed its two arguments; den log with three commits, /etc/shrc edited, /etc/motd deleted; e2fsck -fn clean')
+    m = Machine('u3d-upgrade', C['sym_new'], C['new'])
+    try:
+        m.upgrade_entry('U3d-upgrade')
+        login(m, 'U3d-upgrade')
+        secs = upgrade(m, 'U3d-upgrade', ['Installed: 8b4e98ae', 'from the baseline 8b4e98ae.manifest', 'beside /etc/shrc.pax-new'])
+        poweroff(m, 'U3d-upgrade')
+    finally:
+        m.kill()
+    check_witnesses('U3d-upgrade')
+    passed('U3d-upgrade', f'the plan from the 8b4e98ae baseline, the line typed; complete in {secs} s')
+    after('u4d', 'U4d-after', before, '8b4e98ae')
+    rows = boot_after('u4d-boot', 'U4d-after', den_before,
+                      [("/home/wolf/args/args one 'two words' > /root/args-after.txt; echo run=$?", 'run=0')])
+    if (work/'u4d-boot-tree/root/args-after.txt').read_bytes() != ARGS_OUT:
+        fail('U4d-after', 'the program built before the upgrade prints otherwise after it')
+    passed('U4d-after', f'every user path byte-identical ({len(user_paths(before))}: the program\'s source, binary and output among them), the program still prints its arguments, '
+           f'/etc/shrc yours and /etc/shrc.pax-new the new image\'s, every shipped path the new image\'s, the manifest the host tool\'s, e2fsck -fn clean; booted with kernel: {C["new_commit"][:8]}')
+    again('u6d', 'U6d-again', rows)
+    passed('U6d-again', 'the second upgrade of the dev install: "Nothing to change", every path as it was')
+
+
+def track_x():
+    """A fresh install from the new stick upgraded with no baseline (U9); the
+    refusals that need their own disk: not PAX's (U10), too little space (U11)."""
+    disks()
+    secs = install_from(C['new'], C['sym_new'], 'u9-install', 'U9-fresh')
+    rows, rc, text = tree('u9-installed', 'U9-fresh')
+    if '/etc/pax-install/manifest' not in rows or rc != 0:
+        fail('U9-fresh', f'the fresh install has no /etc/pax-install/manifest, or e2fsck -fn exit {rc}')
+    again('u9-again', 'U9-fresh', rows, needles=[f'Installed: {C["new_commit"]}, from its manifest'])
+    passed('U9-fresh', f'the new stick installed the target in {secs} s with its own /etc/pax-install/manifest; the upgrade with the same stick read it, no baseline: "Nothing to change", every path as it was')
+
+    disks(used='fat32')
+    t0 = extents_sha(DISKS/'target.img')
+    m = Machine('u10-not-pax', C['sym_new'], C['new'])
+    try:
+        m.upgrade_entry('U10-not-pax')
+        login(m, 'U10-not-pax')
+        m.run('pax-install --upgrade')
+        s = m.wait(r'^pax-install: upgrade refused: ', 'U10-not-pax', 600, bad=USAGE)
+        need(m.unwrapped(s), 'pax-install: upgrade refused: /dev/sdc holds ', 'U10-not-pax')
+        need(m.unwrapped(s), 'not a PAX install', 'U10-not-pax')
+        m.wait(PROMPT, 'U10-not-pax', 60, last=True)
+        s = m.command('[ -e /mnt/target ]; echo t=$?', 'U10-not-pax')
+        need(m.unwrapped(s), 't=1', 'U10-not-pax')
+        poweroff(m, 'U10-not-pax')
+    finally:
+        m.kill()
+    check_witnesses('U10-not-pax')
+    if extents_sha(DISKS/'target.img') != t0:
+        fail('U10-not-pax', 'the used disk changed')
+    passed('U10-not-pax', 'a listed disk holding an older system (tools/used-disk fat32): nothing mounted, pax-install refused by name (not a PAX install), the disk byte-identical')
+
+    disks(size=1073741824)
+    install_from(C['old'], C['sym_old'], 'u11-install', 'U11-no-space')
+    m = Machine('u11-no-space', C['sym_new'], C['new'])
+    try:
+        m.upgrade_entry('U11-no-space')
+        login(m, 'U11-no-space')
+        s = m.command('dd if=/dev/zero of=/mnt/target/home/wolf/fill bs=1048576 count=4000; echo dd=$?', 'U11-no-space', 900)
+        m.run('pax-install --upgrade')
+        s = m.wait(r'^pax-install: upgrade refused: ', 'U11-no-space', 900, bad=r'^UPGRADE /dev/sdc|' + USAGE)
+        need(m.unwrapped(s), "pax-install: upgrade refused: too little space on /dev/sdc's root", 'U11-no-space')
+        m.wait(PROMPT, 'U11-no-space', 60, last=True)
+        s = m.command('[ -e /mnt/target/etc/pax-install ]; echo p=$?', 'U11-no-space')
+        need(m.unwrapped(s), 'p=1', 'U11-no-space')
+        poweroff(m, 'U11-no-space')
+    finally:
+        m.kill()
+    check_witnesses('U11-no-space')
+    passed('U11-no-space', 'a 1 GiB 860 from the old stick, its root filled by a user file: pax-install refused by name (too little space), /etc/pax-install not made')
+
+
+def main():
+    sticks()
+    if 'U1' in ROWS:
+        track_a()
+    if 'U1d' in ROWS:
+        track_d()
+    if 'U9' in ROWS:
+        track_x()
     result['leg_seconds'] = round(time.monotonic() - t_leg, 2)
     save()
-    print(f'PASS U-all: the upgrade leg in {result["leg_seconds"]} s', flush=True)
+    print(f'PASS U-all: the upgrade leg ({",".join(ROWS)}) in {result["leg_seconds"]} s', flush=True)
 
 
 main()
