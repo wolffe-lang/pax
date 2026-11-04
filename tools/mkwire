@@ -27,6 +27,10 @@
 # (its `<ip> <port>` lines: the TCP connections the script makes; with no
 # such file, the router's port 80; any OS can make the file on the ESP
 # before the boot). Its sha256, read twice, in OUTDIR/stick.sha256.
+# WIRE_NETPOLL=1 makes OUTDIR/pax-wire-netpoll.img instead (sha256 in
+# OUTDIR/stick-netpoll.sha256), the same but for `cmdline: netpoll` in its
+# Limine entry: kernel/gbe polls QEMU's 82576 as it polls the I225, the
+# qualification's second machine (never the stick that goes to kasumi).
 #
 # /etc/wire.sh, on the machine: waits for kernel/dhcp's lease file
 # (/var/lib/dhcp/pax.lease, 60 s), then writes to /tmp/wire.txt and the
@@ -91,10 +95,15 @@ fi
 
 [ "$mode" = stick ] || die "usage: mkwire root|stick OUTDIR"
 [ -f "$out/kmain_session.elf" ] && [ -f "$out/wire.cpio" ] && [ -f "$out/token" ] || die "no root in $out (tools/mkwire root first)"
-img=$out/pax-wire.img
+img=$out/pax-wire.img sums=$out/stick.sha256 conf=$PAX_ROOT/boot/limine-usb.conf
+if [ "${WIRE_NETPOLL:-0}" = 1 ]; then
+    img=$out/pax-wire-netpoll.img sums=$out/stick-netpoll.sha256 conf=$out/limine-netpoll.conf
+    awk '{ print } /^ *module_path:/ { print "    cmdline: netpoll" }' "$PAX_ROOT/boot/limine-usb.conf" > "$conf"
+    grep -q '^    cmdline: netpoll$' "$conf" || die "no module_path line in boot/limine-usb.conf to put netpoll after"
+fi
 rm -f "$img"
 "$PAX_ROOT/tools/mkdisk" --usb --kernel "$out/kmain_session.elf" --initramfs "$out/wire.cpio" \
-    --conf "$PAX_ROOT/boot/limine-usb.conf" "$img" > "$out/mkdisk.txt"
+    --conf "$conf" "$img" > "$out/mkdisk$([ "${WIRE_NETPOLL:-0}" = 1 ] && echo -netpoll).txt"
 fat=$out/root/bin/paxfat
 "$fat" --offset "$OFF" ls "$img" /boot | grep -q 'initramfs.cpio' || die "the stick's ESP at $OFF holds no /boot/initramfs.cpio"
 cp "$out/token" "$out/wire-stick"
@@ -104,5 +113,5 @@ if [ -n "${WIRE_TARGETS:-}" ]; then
     "$fat" --offset "$OFF" copy "$img" "$out/wire-target" /pax/wire-target
 fi
 [ "$("$fat" --offset "$OFF" cat "$img" /pax/wire-stick)" = "$(cat "$out/token")" ] || die "the token did not read back"
-for n in 1 2; do sha256sum "$img"; done > "$out/stick.sha256"
-say "stick: $img $(wc -c < "$img" | tr -d ' ') bytes, $(head -n 1 "$out/stick.sha256" | cut -c1-64)"
+for n in 1 2; do sha256sum "$img"; done > "$sums"
+say "stick: $img $(wc -c < "$img" | tr -d ' ') bytes, $(head -n 1 "$sums" | cut -c1-64)"
