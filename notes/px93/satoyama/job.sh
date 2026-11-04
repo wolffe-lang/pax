@@ -11,7 +11,7 @@
 #   job.sh build SHA   tools/mkdistribution at SHA, the dev variant's live payload, the upgrade stick
 #                      (tools/mkdisk --usb, tools/check-usb, a second build byte-identical, the 860's line,
 #                      read-only, sha256 twice)
-#   job.sh legs  SHA   tests/mpx6-install.d/upgrade.py, every row, the staged old stick and the new stick
+#   job.sh legs-a|legs-d|legs-x SHA   tests/mpx6-install.d/upgrade.py's three sections, each one take
 set -uo pipefail
 L=/home/mfwolffe/lanes/px93
 CHUNK=$1 SHA=$2
@@ -62,6 +62,7 @@ ctr() { # NAME IMAGE KVM CMD...
 SERIAL=$(sed -n 's/^model=Samsung SSD 860 serial=//p' "$L/allow-line")
 [ -n "$SERIAL" ] || { echo "no serial"; exit 3; }
 OLD=$L/old/pax-install-kasumi-9c88ec8a.img
+DEV=$L/old/pax-install-kasumi-dev-8b4e98ae.img  # px92's dev stick: the 860's install since 2026-11-04 03:30
 
 fat_row() { # OUT: build paxfat at the checkout, then fat.py against the oracles
   local out=$L/runs/$1
@@ -81,7 +82,7 @@ leg() { # NAME NEWSTICK ROWS [LINUX]
     git -C "$L/repo" show "$(cat "$L/legtest-$short"):tests/mpx6-install.d/upgrade.py" > "$w/upgrade.py" || return 3
     script=$w/upgrade.py; echo "the leg script from $(cat "$L/legtest-$short")"
   fi
-  CTR_ENV="-e PAX_UPGRADE_SERIAL=$SERIAL -e PAX_UPGRADE_LINUX=${4:-} -e PYTHONUNBUFFERED=1" \
+  CTR_ENV="-e PAX_UPGRADE_SERIAL=$SERIAL -e PAX_UPGRADE_LINUX=${4:-} -e PAX_UPGRADE_DEV_STICK=$DEV -e PYTHONUNBUFFERED=1" \
     ctr "leg-$1" localhost/px78-ubuntu:1 1 python3 -I "$script" "$CO" "$w" "$OLD" "$2" "$3" 2>&1 | sed -u "s/$SERIAL/<kasumi-serial>/g" | tee "$w/leg.log"
   return "${PIPESTATUS[0]}"
 }
@@ -183,15 +184,21 @@ case $CHUNK in
     step sbuild sbuild
     step sstick sstick
     ;;
-  legs)
-    # U5 needs px92's wolf re-pin (wolf-lang#962: 0.2.35's static musl links see argc 0); ROWS can drop it.
+  legs-a|legs-d|legs-x)
+    # Three takes, each under 20 minutes: a, the 9c88ec8a install (U5 needs px92's wolf re-pin,
+    # wolf-lang#962); d, the 8b4e98ae dev install; x, a fresh install's own manifest and the refusals
+    # that need their own disk.
     args=$L/runs/args-$short/linux-args.out
     [ -s "$args" ] || args=$(ls -t "$L"/runs/args-*/linux-args.out | head -1)
-    rows=U1,U2,U0,U8,U3,U4,U5,U6,U7
-    grep -q '^WOLF_SRC_VERSION_LINE="wolf 0.2.35 ' "$CO/user/wolf.pin" && rows=U1,U2,U0,U8,U3,U4,U6,U7  # U5 pending (wolf-lang#962)
-    step legs leg all "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
+    case $CHUNK in
+      legs-a) rows=U1,U2,U0,U8,U3,U4,U5,U6,U7
+              grep -q '^WOLF_SRC_VERSION_LINE="wolf 0.2.35 ' "$CO/user/wolf.pin" && rows=U1,U2,U0,U8,U3,U4,U6,U7 ;;
+      legs-d) rows=U1d,U2d,U3d,U4d,U6d ;;
+      legs-x) rows=U9,U10,U11 ;;
+    esac
+    step "$CHUNK" leg "${CHUNK#legs-}" "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
     ;;
-  *) echo "CHUNK is red, units, build or legs"; exit 2 ;;
+  *) echo "CHUNK is red, units, build, legs-a, legs-d or legs-x"; exit 2 ;;
 esac
 sensors > "$L/runs/$CHUNK-$short-sensors-end.txt" 2>&1 || true
 flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
