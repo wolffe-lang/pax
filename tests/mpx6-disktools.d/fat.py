@@ -96,6 +96,28 @@ assert listing(own) == listing(ref), (listing(own), listing(ref))
 fsck(own)
 passed("ESP tree: exact mdir recursive listing and all file bytes both directions")
 
+# px93: `replace` gives an existing file new bytes (pax-install --upgrade's
+# kernel, Limine and limine.conf): a new chain written first, the entry
+# moved in its one sector, the old chain freed last. Larger, smaller and
+# empty in turn; no lost cluster for fsck.fat; the other files' bytes kept.
+replaced = OUT / "replaced.img"
+replaced.write_bytes(own.read_bytes())
+for k, data in enumerate([bytes(range(256)) * 23003, b"short kernel\n", b"", b"grown again" * 999]):
+    src = OUT / ("r%d" % k)
+    src.write_bytes(data)
+    run([BIN, "replace", replaced, src, "/boot/pax"])
+    assert run([BIN, "cat", replaced, "/boot/pax"]).stdout == data, k
+    assert oracle("mtype", "-i", replaced, "::/boot/pax").stdout == data, k
+    fsck(replaced)
+    for name, want in files:
+        if name != "/boot/pax":
+            assert run([BIN, "cat", replaced, name]).stdout == want, (k, name)
+before = hashlib.sha256(replaced.read_bytes()).digest()
+for args in [["replace", replaced, src, "/boot/absent"], ["replace", replaced, src, "/boot"], ["replace", replaced, replaced, "/boot/pax"]]:
+    run([BIN, *args], ok=False)
+    assert hashlib.sha256(replaced.read_bytes()).digest() == before, args
+passed("px93 replace: new bytes larger, smaller and empty, fsck clean, the rest kept; an absent file, a directory and the volume itself refused unchanged")
+
 # Exercise directory expansion, alias collision, empty files and LFN boundaries.
 source = OUT / "small"
 source.write_bytes(b"\0\xfftest\n")
