@@ -84,6 +84,10 @@ Commits on `px92`. The failing row comes before the fix; the lane's tools, recor
 - **The fix:** `8d1fa272` user/wolf.pin (v0.2.36), `ea29923c` user/wolf.sums, `7e16f25e` tools/distribution-root.
 - **Docs:** `341ab63c` and `85078c03`, the README (README-only commits).
 - Then this note.
+- **CI's tier full red (§4.8):** `dfed684c` the clock issue draft; `f207f154` the second addendum; `a739c007`,
+  `8d43723e` and `69a92b37` satoyama/rec.sh; `a029d023` satoyama/fixtures.sh; `622f153e` and `52a223fa` the v0.2.36
+  sessions; `fa8097dc` tests/mpx5-wolf.d/test_rows.py (red before it: at `efe12e51` in CI, and locally at `69a92b37`, the same test, witness and pin);
+  `543ad566` tools/ci-tiers.map; `068af15b` and `a760c1ed` the logs.
 
 ## 3. Prediction, scored
 
@@ -107,9 +111,19 @@ the plant. **Departure:** no prediction preceded the re-pin itself; the maintain
 | the plant: mkwolf reproduces v0.2.35's sums (`ef5dd0c2…`); I2 red by name on dev-bios after both release boots pass | **right** |
 | d2cmp's `bin/` differences: a stamp of the head (its hash or its time) | **wrong for `bin/`**: the builders' random temporary names (§4.6). **Right** for `boot/pax`, `etc/pax-banner`, `etc/pax-release` and `boot.sha256`, which carry the kernel's head and digest |
 
+The second addendum (`f207f154`) was written at 10:55Z, after CI's red but before the re-recording ran (§4.8):
+
+| predicted (`f207f154`) | found |
+|---|---|
+| two sessions of about 150 lines, which rows.py passes as root and as pax | **right**: 152 lines each, W2 PASS on both (from `fixtures.sh`; W2 never runs inside the suite without a Linux side) |
+| they differ from px65's in the version lines, the paired lupin line and the records' `impl_version`, and in nothing else | **wrong in one field**: the records' `commit` moved too (`cf0c13d` to `5adf3d9`); nothing else did |
+| W0 and one boot in 10-25 minutes | **wrong**: 3 min 43 s (11:19:43Z to 11:23:26Z), or 6 min 5 s with mkwolf |
+| W1 red by design | **right** |
+| test_rows.py at the new fixtures: both tests PASS | **right** |
+
 ## 4. Evidence index
 
-The chains' logs are in `notes/px92/logs/`, compiler progress lines dropped and the serial masked (`build.log`, `legs.log`, `devresume.log`, `dev2.log`, `i2-red.log`, `take3.log`); the full trees are on satoyama under `/home/mfwolffe/lanes/px92/` until pruned, and on nomad under `~/lanes/px92/evidence*`.
+The chains' logs are in `notes/px92/logs/`, compiler progress lines dropped and the serial masked (`build.log`, `legs.log`, `devresume.log`, `dev2.log`, `i2-red.log`, `take3.log`, and §4.8's `rec-red1.log`, `rec.log`, `rec-fixtures.log`, `test_rows-red.log`, `test_rows-green.log`); the full trees are on satoyama under `/home/mfwolffe/lanes/px92/` until pruned, and on nomad under `~/lanes/px92/evidence*`.
 
 ### 4.1 The release stick, `pax-install-kasumi-9c88ec8a.img`
 
@@ -275,6 +289,48 @@ head differ.
   `base-dev.cpio` with 0.2.36, rebuilding px82's whole payload; (C) a published musl archive (none exists, #887).
   **A**: the smallest change, and the compiler comes from the pin's own builder.
 
+### 4.8 CI's tier full at `efe12e51` (run 41805401996): two reds, one of them this lane's
+
+The labelled run passed 61 jobs and failed 3: mpx5-wolf, mpx5-users and the tier aggregate.
+
+- **mpx5-wolf: this lane's.** At "the independent observation checker rejects broken records",
+  `tests/mpx5-wolf.d/test_rows.py`'s `test_live_root_and_user_recordings` failed with `FAIL W2 root: version
+  missing`, then 17 lines of `FAIL W2 root: wrong checked-machine identity`. It is red locally at `efe12e51`, by the
+  same names.
+  - `rows.py` reads the version line and `impl_version` from `user/wolf.pin`, which is now 0.2.36. Its fixtures
+    (`notes/px65/wolf-pax-{root,user}.tty`) are px65's sessions at 0.2.35. The fixture is the stale side: px65
+    built the witness so that a pin move moves it.
+  - The fix records the sessions again at the pin with `tests/mpx5-wolf` itself, unmodified, PAX side only
+    (`notes/px92/satoyama/rec.sh`), and points the test at them.
+  - **The first take** was red at W0 (`build-kernel: missing tool: wolf`, `logs/rec-red1.log`). rec.sh had not
+    staged the kernel's compiler, `kernel/wolf.pin`'s 0.2.35, which CI stages with `tools/fetch-wolf` by digest.
+    `8d43723e` does the same (`PAX_WOLF`). A dry `--only build` found it before the second take was queued.
+  - **The second take** (11:17:21Z to 11:23:26Z, both locks, slot A's CPUs, `logs/rec.log`) reproduced
+    `user/wolf.sums`, passed W0, and booted once on native BIOS under TCG. W1 was red by design
+    (`Linux reference absent`). W3 found `unserved=273 334` and 12 mremap calls served.
+  - Its copy step then stopped it. The step asked for `.session.cmp`, but the suite writes that only beside a
+    Linux reference: with none, W1 continues first, so W2 never ran inside the suite. `a029d023` adds
+    `fixtures.sh`, and `69a92b37` makes it rec.sh's step 5.
+  - **The fixtures** are the boot's `.session` files on disk (no third boot), and that is the form the suite
+    compares. They hold no ESC or CR byte, so `serial_norm` leaves them byte for byte: the `.cmp` the suite would
+    write is the same file. They are 152 lines each.
+  - With the pin's lines mapped (the version, the paired lupin and the records' `commit` and `impl_version`),
+    px65's fixtures are byte-identical to them. `rows.py` passes W2 on each, as root and as pax
+    (`logs/rec-fixtures.log`).
+  - **test_rows.py:** red at px65's fixtures (`logs/test_rows-red.log`) and green at px92's (`fa8097dc`,
+    `logs/test_rows-green.log`). Green covers both tests, including the five planted witnesses, each failing by name.
+  - `tools/ci-tiers.map` sent px65's fixtures to mpx5-wolf, but px92's to nothing (`notes/*`). So a change to
+    them would not run the test that reads them. `543ad566` maps them, and `tests/ci-plan` passes.
+- **mpx5-users: latent, not this lane's.** At "the same suite with / on a disk, native BIOS", the rights-soak boot
+  ended with `PANIC overflow ./clock/clock.lu:313`, and U1, U4 and U5 failed after it.
+  - Nothing of this PR reaches that boot. The kernel builds from `kernel/wolf.pin`, which is unchanged. `/bin/rights`
+    is C (`user/elf/rights.c`). `tests/mpx5-users` reads none of the eight paths outside `notes/` that px92 changes.
+  - The same leg was green in the nightly tier-full runs 41650462131 (`b38643a5`) and 41474341676 (`3e28a8bc`).
+  - The arithmetic: a forward gap cannot overflow the HPET's `(delta / 1e6) * period`, since the bound is 1.84e18
+    ticks, about 584 years at 10 ns. A backward reading on a 64-bit HPET can, because the wrap branch then makes
+    `delta` about 2^64.
+  - Drafted for the coordinator as `notes/px92/issue-clock-overflow.txt`, not fixed here.
+
 ## 5. Done-when
 
 ### 5.1 Checklist
@@ -290,6 +346,8 @@ head differ.
 - [x] The re-pin, red first: I2's row (`f4b5083d`, `bf8c0b04`) red at v0.2.35 by name; the fix (`8d1fa272`,
   `ea29923c`, `7e16f25e`); the v0.2.36 dev stick (`8b4e98ae`) qualified and staged (D3, D4); the gauntlet green
   at `086dc4e0`; the plant red by name; the README rows; this note; the PR; the audit.
+- [x] CI's tier full at `efe12e51` (§4.8): mpx5-wolf's stale fixtures recorded again at the pin, test_rows.py
+  red then green locally, and the CI map; mpx5-users found latent and its issue drafted.
 - [x] README read against the pass: the pin table, the dev additions and the three facts moved (`341ab63c`,
   `85078c03`, README-only commits).
 
@@ -298,11 +356,14 @@ Test targets:
   (v0.2.35 images) and at the plant
 - [x] `tools/mkdistribution` with `tests/distribution` (I0, I1) on both variants
 - [x] `tools/mkwolf` and `mkwolf-std` at the pin, twice, reproducing `user/wolf.sums`
-- [x] `python3 -I tests/ci-plan`, `python3 -I tests/ci-budgets.py`
+- [x] `python3 -I tests/ci-plan` (again after `543ad566`), `python3 -I tests/ci-budgets.py`
+- [x] `python3 -I tests/mpx5-wolf.d/test_rows.py`: red at px65's fixtures, green at px92's
+- [x] `tests/mpx5-wolf` at the pin, PAX side only: W0 and one native BIOS boot under TCG (W3; W1 red by design)
 - [x] The stick legs (the head's `metal.py` through `make-variant.py`, KVM): the release stick's four legs and
   the v0.2.36 dev stick's leg
 - [ ] CI full-matrix (cross-cutting: `user/wolf.pin`): the 11 suites `tools/ci-plan` selects, mpx5-wolf among
-  them; the orchestrator's
+  them; the orchestrator's. Tier full 41805401996 at `efe12e51` was red in mpx5-wolf (fixed here, §4.8) and
+  mpx5-users (latent)
 
 ### 5.2 Departures and limits
 
@@ -313,12 +374,15 @@ Test targets:
   (R-px92-6).
 - The v0.2.36 dev stick's leg gave the guest 4 GiB (the dev root is larger). kasumi has more. The release legs
   kept 2 GiB.
+- The v0.2.36 fixtures were cut by `fixtures.sh` from the second take's sessions on disk, outside the locks (a
+  copy and a text check), not by a third take (§4.8).
 - Nothing ran on kasumi.
 
 ### 5.3 Issues
 
-Filed or closed: none. The coordinator files the paxfat issue from `notes/px92/issue-paxfat-cat.txt`. Owed to
-file (pax), the orchestrator's call:
+Filed or closed: none. The coordinator files the paxfat issue from `notes/px92/issue-paxfat-cat.txt` and the
+clock issue (`now_ns`'s overflow at `kernel/clock/clock.lu:313` on a backward HPET reading, §4.8) from
+`notes/px92/issue-clock-overflow.txt`. Owed to file (pax), the orchestrator's call:
 - the release pair's programs embed their builders' temporary paths, so two builds of one commit differ (§4.6);
 - a CI job for `tests/distribution-boot`, or a link-stack leg in mpx5-wolf (R-px92-6);
 - px87 §5.4's "the installed system's console is not quiet" is stale (§4.1);
