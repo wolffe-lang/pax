@@ -283,6 +283,12 @@ class Machine:
         self.q = QMP(self.sock)
         self.shots = 0
         self.cols = 0
+        self.since = ''
+
+    def run(self, cmd):
+        """Type a command whose output the next waits read alone."""
+        self.since = '$ ' + cmd
+        self.type(cmd + '\n')
 
     def screen(self):
         self.q.call('stop')
@@ -323,10 +329,16 @@ class Machine:
             if self.p.poll() is not None:
                 fail(row, f'QEMU ended (exit {self.p.returncode}) before /{pattern}/; screen:\n{text}')
             text = self.screen()
-            look = text.rstrip('\n').split('\n')[-1] if last else self.unwrapped(text)
+            flat = self.unwrapped(text)
+            # After a command typed by run(), only what follows its last echo counts: a
+            # previous run's lines may still be on the screen.
+            if self.since and self.since in flat:
+                flat = flat[flat.rindex(self.since):]
+                text = flat
+            look = text.rstrip('\n').split('\n')[-1] if last else flat
             if re.search(pattern, look, re.M):
                 return text
-            if bad and re.search(bad, self.unwrapped(text), re.M):
+            if bad and re.search(bad, flat, re.M):
                 self.shot('bad')
                 fail(row, f'/{bad}/ on the screen before /{pattern}/; screen:\n{text}')
             time.sleep(.3)
@@ -368,6 +380,7 @@ class Machine:
             time.sleep(.03)
 
     def command(self, line, row, timeout=300):
+        self.since = '$ ' + line
         self.type(line + '\n')
         time.sleep(.5)
         return self.wait(PROMPT, row, timeout, last=True)
@@ -632,7 +645,7 @@ def main():
     try:
         m.upgrade_entry('U8-wrong-serial')
         login(m, 'U8-wrong-serial')
-        m.type('pax-install --upgrade\n')
+        m.run('pax-install --upgrade')
         s = m.wait(r'^pax-install: upgrade refused: ', 'U8-wrong-serial', 600, bad=USAGE)
         need(m.unwrapped(s), 'pax-install: upgrade refused: no disk here is on the install allow-list', 'U8-wrong-serial')
         m.wait(PROMPT, 'U8-wrong-serial', 60, last=True)
@@ -656,7 +669,7 @@ def main():
         need(m.unwrapped(s), '/mnt/target ext2', 'U3-upgrade')
         # No baseline: the target's /etc/pax-release changed for one run.
         m.command('cp /mnt/target/etc/pax-release /root/pr; echo changed >> /mnt/target/etc/pax-release', 'U8-no-baseline')
-        m.type('pax-install --upgrade\n')
+        m.run('pax-install --upgrade')
         s = m.wait(r'^pax-install: upgrade refused: ', 'U8-no-baseline', 900, bad=USAGE)
         need(m.unwrapped(s), 'has no manifest and matches no baseline this stick carries', 'U8-no-baseline')
         m.wait(PROMPT, 'U8-no-baseline', 60, last=True)
@@ -664,7 +677,7 @@ def main():
         need(m.unwrapped(s), 'p=1', 'U8-no-baseline')
         passed('U8-no-baseline', 'an install matching no baseline refused by name, before any write')
         # The confirmation mistyped.
-        m.type('pax-install --upgrade\n')
+        m.run('pax-install --upgrade')
         s = m.wait(r'^UPGRADE /dev/sdc .*$', 'U8-mistyped', 900, bad=STOPPED)
         flat = m.unwrapped(s)
         token = re.search(r'^(UPGRADE /dev/sdc .*\S)\s*$', flat, re.M).group(1)
@@ -676,7 +689,7 @@ def main():
         need(m.unwrapped(s), 'p=1', 'U8-mistyped')
         passed('U8-mistyped', 'the line mistyped by one character: cancelled by name; /etc/pax-install not made')
         # The upgrade.
-        m.type('pax-install --upgrade\n')
+        m.run('pax-install --upgrade')
         s = m.wait(r'^UPGRADE /dev/sdc .*$', 'U3-upgrade', 900, bad=STOPPED)
         flat = m.unwrapped(s)
         (work/'u3-plan.txt').write_text(flat)
@@ -780,7 +793,7 @@ def main():
     try:
         m.upgrade_entry('U6-again')
         login(m, 'U6-again')
-        m.type('pax-install --upgrade\n')
+        m.run('pax-install --upgrade')
         s = m.wait(r'^Nothing to change: /dev/sdc already holds this image', 'U6-again', 900, bad=r'^UPGRADE /dev/sdc|' + STOPPED)
         m.wait(PROMPT, 'U6-again', 60, last=True)
         poweroff(m, 'U6-again')
@@ -800,7 +813,7 @@ def main():
         try:
             m.upgrade_entry('U7-cut')
             login(m, 'U7-cut')
-            m.type('pax-install --upgrade\n')
+            m.run('pax-install --upgrade')
             s = m.wait(r'^UPGRADE /dev/sdc .*$', 'U7-cut', 900, bad=STOPPED)
             token = re.search(r'^(UPGRADE /dev/sdc .*\S)\s*$', m.unwrapped(s), re.M).group(1)
             m.wait(r'pax-install> *$', 'U7-cut', 60, last=True)
@@ -815,7 +828,7 @@ def main():
         try:
             m.upgrade_entry('U7-again')
             login(m, 'U7-again')
-            m.type('pax-install --upgrade\n')
+            m.run('pax-install --upgrade')
             s = m.wait(r'^UPGRADE /dev/sdc .*$', 'U7-again', 900, bad=STOPPED)
             flat = m.unwrapped(s)
             (work/'u7-plan.txt').write_text(flat)
