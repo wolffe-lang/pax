@@ -1,0 +1,187 @@
+//! px93: the install manifest, `/etc/pax-install/manifest` on a root this
+//! installer wrote (R-px93-2). Its first lines name the image:
+//!
+//!     pax-install manifest v1
+//!     commit <the kernel row's commit in /etc/pax-release>
+//!     kernel <sha256 of /boot/pax>
+//!     release <sha256 of /etc/pax-release>
+//!     files <sha256 of /etc/pax-files.sha256>
+//!     source <one line: where the list was read>
+//!
+//! then one line a path the image shipped, `<kind> <mode> <uid> <gid>
+//! <size> <sha256> <path>`: kind `f` a file, `d` a directory (digest
+//! `-`), `l` a symbolic link (its size and the sha256 of its target's
+//! bytes), `g` a file the installer writes itself (GENERATED: its digest
+//! the target's as written, `-` in a baseline). The path is last and may
+//! hold spaces. Never listed: the homes (/home, /root), the trees the
+//! kernel serves or the installer skips (/dev, /proc, /sys, /tmp, /mnt,
+//! /lost+found, /usr/share/pax-install) and /etc/pax-install itself.
+//! tools/install-manifest writes the same lines from a stick's archive
+//! (a baseline for an install made before manifests).
+
+use std.x.crypto.sha2
+
+const MANIFEST_DIR: str = "/etc/pax-install"
+
+/// The paths the installer writes itself (prepare.lu's configure_tree).
+fn generated_paths() -> List[str] {
+    ["/boot/limine/limine.conf", "/etc/fstab", "/etc/group", "/etc/passwd", "/etc/pax-login", "/etc/pax-run"]
+}
+
+struct Row { kind: str, mode: int, uid: int, gid: int, size: int, digest: str, path: str }
+
+struct Manifest {
+    commit: str,
+    kernel: str,
+    release: str,
+    files: str,
+    source: str,
+    rows: List[Row],
+    at: Map[str, int],
+}
+
+/// Whether a manifest lists `path` at all (the header's rule).
+fn listed(path: str) -> bool {
+    if path == "/" { return false }
+    for top in ["/dev", "/proc", "/sys", "/tmp", "/mnt", "/home", "/root", "/lost+found", "/usr/share/pax-install", MANIFEST_DIR] {
+        if path == top || path.starts_with("{top}/") { return false }
+    }
+    true
+}
+
+fn generated(path: str) -> bool {
+    for g in generated_paths() { if g == path { return true } }
+    false
+}
+
+fn row_text(r: Row) -> str {
+    "{r.kind} {octal_mode(r.mode)} {r.uid} {r.gid} {r.size} {r.digest} {r.path}\n"
+}
+
+fn manifest_text(m: Manifest) -> str {
+    var s = "pax-install manifest v1\ncommit {m.commit}\nkernel {m.kernel}\nrelease {m.release}\nfiles {m.files}\nsource {m.source}\n"
+    for r in m.rows { s += row_text(r) }
+    s
+}
+
+fn octal_value(s: str) -> int ! {invalid} {
+    if s.len == 0 || s.len > 6 { return invalid }
+    var n = 0
+    for b in s.bytes() {
+        let c = b as int
+        if c < 48 || c > 55 { return invalid }
+        n = n * 8 + c - 48
+    }
+    n
+}
+
+fn header_value(line: str, key: str) -> str ! {invalid} {
+    if !line.starts_with("{key} ") { return invalid }
+    line[key.len + 1..]
+}
+
+/// A manifest's text read back: `invalid` for any line out of its shape.
+fn parse_manifest(text: str) -> Manifest ! {invalid} {
+    let lines = text.lines()
+    if lines.len < 6 || lines[0] != "pax-install manifest v1" { return invalid }
+    var m = Manifest {
+        commit: header_value(lines[1], "commit")?,
+        kernel: header_value(lines[2], "kernel")?,
+        release: header_value(lines[3], "release")?,
+        files: header_value(lines[4], "files")?,
+        source: header_value(lines[5], "source")?,
+        rows: List[Row](),
+        at: Map[str, int](),
+    }
+    for k in 6..lines.len {
+        let line = lines[k]
+        // Six fields, then the path (which may hold spaces).
+        let b = line.bytes()
+        var cuts = List[int]()
+        var i = 0
+        while i < b.len && cuts.len < 6 {
+            if b[i] == 32 as byte { (mut cuts).push(i) }
+            i += 1
+        }
+        if cuts.len != 6 { return invalid }
+        let kind = line[0..cuts[0]]
+        if kind != "f" && kind != "d" && kind != "l" && kind != "g" { return invalid }
+        let path = line[cuts[5] + 1..]
+        if !path.starts_with("/") || (m.at[path] else -1) != -1 { return invalid }
+        let r = Row {
+            kind: kind,
+            mode: octal_value(line[cuts[0] + 1..cuts[1]])?,
+            uid: line[cuts[1] + 1..cuts[2]].to_int() else |_| { return invalid },
+            gid: line[cuts[2] + 1..cuts[3]].to_int() else |_| { return invalid },
+            size: line[cuts[3] + 1..cuts[4]].to_int() else |_| { return invalid },
+            digest: line[cuts[4] + 1..cuts[5]],
+            path: path,
+        }
+        m.at[path] = m.rows.len
+        (mut m.rows).push(r)
+    }
+    m
+}
+
+fn file_sha(path: str) -> str {
+    hash_file(path) else |_| "-"
+}
+
+/// The kernel row's commit in a pax-release text ("unknown" without one).
+fn release_commit(text: str) -> str {
+    for line in text.lines() {
+        let w = line.words()
+        if w.len == 3 && w[0] == "kernel" { return w[1] }
+    }
+    "unknown"
+}
+
+/// The image `base` holds (the live tree at "/"), as a manifest: every
+/// listed entry of its walk (snapshot.lu's, every file hashed), the
+/// generated paths marked, /etc/pax-login among them.
+fn image_manifest(base: str, rows: List[Entry], source: str) -> Manifest {
+    let at = if base == "/" then "" else base
+    var m = Manifest {
+        commit: release_commit(fs_read_text("{at}/etc/pax-release") else |_| ""),
+        kernel: file_sha("{at}/boot/pax"),
+        release: file_sha("{at}/etc/pax-release"),
+        files: file_sha("{at}/etc/pax-files.sha256"),
+        source: source,
+        rows: List[Row](),
+        at: Map[str, int](),
+    }
+    var login = false
+    for e in rows {
+        if !listed(e.path) { continue }
+        var kind = "f"
+        var digest = e.digest
+        var size = e.meta[1]
+        if e.meta[0] == 1 {
+            kind = "d"
+            digest = "-"
+            size = 0
+        } else if e.meta[0] == 3 {
+            kind = "l"
+            digest = sha2.to_hex(sha2.sum256(e.link.bytes()))
+            size = e.link.len
+        } else if generated(e.path) {
+            kind = "g"
+        }
+        if e.path == "/etc/pax-login" { login = true }
+        m.at[e.path] = m.rows.len
+        (mut m.rows).push(Row { kind: kind, mode: e.meta[4] & 4095, uid: e.meta[6], gid: e.meta[7], size: size, digest: digest, path: e.path })
+    }
+    if !login {
+        m.at["/etc/pax-login"] = m.rows.len
+        (mut m.rows).push(Row { kind: "g", mode: 420, uid: 0, gid: 0, size: 0, digest: "-", path: "/etc/pax-login" })
+    }
+    m
+}
+
+fn same_image(a: Manifest, b: Manifest) -> bool {
+    a.commit == b.commit && a.kernel == b.kernel && a.release == b.release && a.files == b.files
+}
+
+fn short(digest: str) -> str {
+    if digest.len > 12 then digest[0..12] else digest
+}
