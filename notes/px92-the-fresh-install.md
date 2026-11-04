@@ -1,6 +1,6 @@
 # px92 — the fresh install: kasumi's stick from trunk after px87, and the dev image's compiler at wolf 0.2.36 (P6)
 
-Contract: `wolf/sprints/pax/92-the-fresh-install/px92-the-fresh-install.md` (crawl 54, 2026-11-04), under the lane
+Contract: px92's (crawl 54, 2026-11-04), under the lane
 rules of 2026-10-31 and their additions. The lane built the maintainer's install stick for kasumi's 860 from trunk
 after px87, by px86's recipe, and qualified it against an 860 that already holds a PAX install.
 
