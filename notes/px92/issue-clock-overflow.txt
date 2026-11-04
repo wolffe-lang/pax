@@ -1,0 +1,35 @@
+px92: a draft pax issue (the coordinator files it)
+
+Title: kernel/clock: now_ns panics with overflow when the HPET reads backwards (clock.lu:313)
+
+The witness: pax#289's labelled tier-full run 41805401996 at efe12e51, job mpx5-users, step "the same suite with / on
+a disk, native BIOS (px67, tools/rootdisk-leg)": the rights-soak boot (`/bin/rights soak 100000`, TCG) ended
+`PANIC overflow ./clock/clock.lu:313` (U1 and U4 then failed on the missing soak line, U5 on the panic). The
+same leg ran green in the nightly tier-full runs 41650462131 (b38643a5, 2026-11-03) and 41474341676 (3e28a8bc,
+2026-11-02); on the nightly the rootdisk leg's rights-soak verdict came about 59 minutes after its image was made,
+so the soak is a long run under TCG. Nothing px92 changed reaches that boot: the kernel builds from
+kernel/wolf.pin (unchanged), /bin/rights is C (user/elf/rights.c), and tests/mpx5-users reads none of px92's paths.
+
+The line (kernel/clock/clock.lu, now_ns):
+
+    delta = if current >= prev { current - prev } else { (m - prev) + current + 1 }
+    let denominator = if src == 1 { 1000000 } else { unit }       // the HPET: 1e6; else the source's period
+    let multiplier = if src == 1 { unit } else { 1000000000 }       // the HPET: its period in fs
+    let remainder = (delta % denominator) * multiplier + fraction
+    elapsed += (delta / denominator) * multiplier + remainder / denominator      // line 313
+
+The bound. With the HPET (src 1) the product (delta / 1e6) * period overflows a u64 once
+delta > (2^64 - 1) / period * 1e6. At QEMU's HPET period of 10 ns (10,000,000 fs) that is delta > 1.84e18 ticks,
+about 584 years of forward time: no stall of a CI runner can reach it. The PM timer (24 or 32 bits, unit 3,579,545)
+and the PIT (16 bits) cannot either: their delta is below 2^32, so the products stay below 2^63.
+
+What does reach it: a reading that goes BACKWARDS on a 64-bit HPET (mask 0xffff_ffff_ffff_ffff when the
+capability's COUNT_SIZE_CAP bit is set, as QEMU's is). Then `current < prev` and the wrap branch gives
+delta = 2^64 - (prev - current), and (delta / 1e6) * 1e7 overflows at once. A torn or out-of-order 64-bit read of
+the main counter would do it (raw() reads it with one 8-byte volatile load; whether the device or QEMU's TCG MMIO
+path ever splits that into two 4-byte halves is not measured here), as would a counter reset. Also not measured:
+whether the witness was a backward reading, since the panic prints no operands.
+
+Suggested rows: a kernel unit (or a test word) feeding now_ns a reading below `previous` on a 64-bit mask, held
+to no panic and a monotonic answer (treat a backward step as zero elapsed, and count it); and the panic message
+naming current, prev and the mask, so the next witness says which.
