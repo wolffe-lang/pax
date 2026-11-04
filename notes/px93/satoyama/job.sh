@@ -53,6 +53,8 @@ checkout() {
 ctr() { # NAME IMAGE KVM CMD...
   local name=$1 img=$2 kvm=$3; shift 3
   local dev=(); [ "$kvm" = 1 ] && dev=(--device /dev/kvm)
+  # The worktrees' git pointers name the real path (satoyama's /mnt/space): mount it as well.
+  local real; real=$(realpath "$L"); [ "$real" != "$L" ] && dev+=(-v "$real:$real")
   "$P" run --rm --name "px93-$name-$short" --memory 12g --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 "${dev[@]}" \
     -v "$L:$L" -w "$CO" -e TMPDIR="$L/tmp" -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' \
     ${CTR_ENV:-} "$img" taskset -c "$CPUS" "$@"
