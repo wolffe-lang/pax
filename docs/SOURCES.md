@@ -1850,3 +1850,29 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
 - **RFC 8536** (TZif), as px26's `tools/mkzone` already cites it: the zone file the images now also carry at
   `/usr/share/zoneinfo/UTC`.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no Git source.
+
+## px89 — the wire on metal: a DHCP client, then the I225-V
+
+No kernel, firmware, driver, hypervisor, DHCP client or server source was
+read: no Linux `igc`/`igb`/`e1000e`, no FreeBSD `em`/`igc`, no QEMU device
+model, no dnsmasq, ISC, busybox or systemd-networkd source. `kernel/dhcp`,
+`kernel/gbe`, the changes to `kernel/net`, `kernel/netd`, `kernel/ip`,
+`kernel/arp` and `kernel/udp`, `tools/pcap-dhcp`, `tools/dhcp-wire`,
+`tools/mkwire`, `user/wire.sh`, `user/net/netstate.c` and
+`user/net/tcpprobe.c` are this project's own, written from the documents
+below and the black-box runs in `notes/px89/blackbox.txt`.
+
+| source | version | consulted for |
+|---|---|---|
+| RFC 2131, Dynamic Host Configuration Protocol | March 1997 | read: the message format (§2), the client states and their transitions (§4.4, figure 5), retransmission and backoff (§4.1: 4 s, doubled to 64 s, ±1 s), the BROADCAST flag (§4.1), SELECTING's REQUEST with 50 and 54, RENEWING's unicast and REBINDING's broadcast REQUEST with ciaddr (§4.3.2, §4.4.5), T1/T2 defaults and the retransmission there (half the time left, 60 s at least), NAK and expiry back to INIT, option overload (§4.1) |
+| RFC 2132, DHCP Options and BOOTP Vendor Extensions | March 1997 | read: options 1, 3, 6, 50, 51, 52, 53, 54, 55, 56, 58, 59, 61, the pad and end options, the magic cookie |
+| RFC 951, Bootstrap Protocol | September 1985 | read: the BOOTP message layout (op, htype, hlen, hops, xid, secs, the four addresses, chaddr, sname, file) |
+| RFC 1542, Clarifications and Extensions for BOOTP | October 1993 | read: the 300-byte least message (§2.1) |
+| RFC 950, Internet Standard Subnetting Procedure | August 1985 | knowledge: the classful mask a client assumes when a lease names none |
+| resolv.conf(5), the man-pages project | 6.x | read: `nameserver` lines, three at most (MAXNS) |
+| Intel 82576EB Gigabit Ethernet Controller Datasheet | rev 2.63, December 2011 (Intel's public URL, through the Internet Archive; sha256 in `notes/px89/datasheets.sha256`) | read: §4.5 initialisation, §7.1.4-7.1.5 the legacy and advanced receive descriptors, §7.2.2.1 the legacy transmit descriptor, §7.3 interrupts in legacy mode, §8.1.3 the register summary, §8.2.1-8.2.2 CTRL and STATUS, §8.8 ICR/IMS/IMC/EIMC, §8.10 RCTL, SRRCTL, RXDCTL, §8.12 TCTL, TXDCTL |
+| Intel Ethernet Controller I210 Datasheet | 333016 rev 3.7, January 2021 (cdrdv2-public.intel.com) | read: the same sections, side by side with the 82576's (they agree on everything `kernel/gbe` uses); CTRL.RST as the port reset, STATUS.PF_RST_DONE, RAH.AV |
+| Intel Ethernet Controller I225/I226 Datasheet | 596659 rev 2.6, February 2022 | read: the device id table (§5.1.1.8), RAL0/RAH0 loaded from the NVM, the registers it names in chapter 6 (VLAN: CTRL.VME, RCTL.VFE, VET, legacy and advanced transmit descriptors). It has no register map; Intel's I225 software manual is not public and was not read |
+| PCI Local Bus 3.0 | 3.0 | as px20: the command register's memory, bus-master and INTx-disable bits |
+| QEMU 8.2.2 (Ubuntu 24.04's), `-netdev user`'s DHCP server; dnsmasq 2.91 | black box | run: what each answers each client message (`notes/px89/blackbox.txt`); never read |
+| kasumi's CachyOS 7.3.0 | black box | run, read only: `lspci -nn`, `lspci -v`, `/sys/class/net`, `ip -br addr`, `ip route`: the I225-V's PCI id, BARs, MAC and link |
