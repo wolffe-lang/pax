@@ -285,6 +285,13 @@ export fn kmain() {
     floor += xhci.start(pml4, unsafe { pax_usbd as u64 })
     sync.enable()
     xhci.wait_ready()
+    // px89: the USB disks (the metal leg's stick, which its script writes
+    // its record to) once xHCI's first pass is done, as kmain_console has
+    // them (px78): kernel/usb_storage probes each, kernel/block names it.
+    // With no USB storage device nothing is printed.
+    let usb_saved = sync.irq_save()
+    let _usb = block.attach_usb()
+    sync.irq_restore(usb_saved)
     if dhcp.on() && dhcp.wait_bound() {
         dhcp.echo_router() // px89: init's list runs over the lease
     }
