@@ -181,10 +181,18 @@ fn prepared_dir(tree: str, attrs: str, path: str, uid: int) -> () ! {io, invalid
 // su(1), root dropping to the user: px46), no passwords in this preview.
 const INSTALLED_RUN: str = "/bin/pelt /etc/pax-login\n"
 
+// px98: the login gives the terminal to the account before it drops to
+// it, as a Linux console login does (login(1); login.defs(5)'s default:
+// the account, its primary group, mode 0600), so what the user opens by
+// name (/dev/stdout, /dev/stderr, the terminal itself) is theirs; root's
+// login takes it back. Through /dev/stdin, the terminal the login reads
+// (kernel/files keeps the console terminals' owners and modes). A kernel
+// that keeps none refuses the change (EROFS) and the login goes on.
 fn installed_login() -> str {
     "#!/bin/pelt\n" +
     "# The installed system's console login, written by pax-install (px78):\n" +
     "# root, or an account /etc/passwd names; no passwords in this preview.\n" +
+    "# The terminal is given to the account first, as login(1) gives it (px98).\n" +
     "printf 'PAX: log in as root or as the user pax-install made.\\n'\n" +
     "while :; do\n" +
     "    printf 'login: '\n" +
@@ -195,13 +203,17 @@ fn installed_login() -> str {
     "    if [ \"$account\" = root ]; then\n" +
     "        export HOME=/root USER=root LOGNAME=root\n" +
     "        cd /root 2>/dev/null || cd /\n" +
+    "        /bin/chown 0:0 /dev/stdin 2>/dev/null && /bin/chmod 600 /dev/stdin 2>/dev/null\n" +
     "        exec /bin/pelt -i -m\n" +
     "    fi\n" +
     "    found=\n" +
+    "    group=\n" +
     "    while IFS=: read -r name pw uid gid gecos home shell; do\n" +
     "        [ \"$name\" != \"$account\" ] || found=$uid\n" +
+    "        [ \"$name\" != \"$account\" ] || group=$gid\n" +
     "    done < /etc/passwd\n" +
     "    if [ -n \"$found\" ] && [ -x /bin/su ]; then\n" +
+    "        /bin/chown \"$found:$group\" /dev/stdin 2>/dev/null && /bin/chmod 600 /dev/stdin 2>/dev/null\n" +
     "        exec /bin/su \"$account\" -c 'cd; exec /bin/pelt -i -m'\n" +
     "    fi\n" +
     "    printf 'Login incorrect\\n'\n" +
