@@ -447,8 +447,10 @@ const MODE_DIR: u64 = 0x41ed // 040755
 // 7.2.8: the memory devices and /dev/tty 0666; the terminals and the
 // sound card 0600 (root's alone: a user's `open` is -EACCES by the
 // class rule; a distribution's udev gives some to a group instead,
-// which PAX has no rule for). Everything in /dev is root's, 0:0.
-const MODE_CONSOLE: u64 = 0x2180 // 020600 (020620 before px45)
+// which PAX has no rule for). Everything in /dev is root's, 0:0, at
+// boot; px98: the console's terminals then keep the owner and the mode
+// a login gives them (the records beside `changeable`).
+const MODE_CONSOLE: u64 = 0x2180 // 020600 (020620 before px45): a terminal's at boot
 const MODE_LINK: u64 = 0xa1ff // 0120777: /dev/std*'s links (px52, measured)
 const MODE_NULL: u64 = 0x21b6 // 020666
 const MODE_DSP: u64 = 0x2180 // 020600 (020666 before px45; px30: one user here)
@@ -6278,13 +6280,110 @@ fn checked(n: u64) -> bool {
 /// px36: what a change of mode, owner or times may be made to: a node of
 /// the tree (0), else what PAX keeps fixed — `/dev` and what is in it,
 /// `/proc`, `/sys`, a pipe, a socket — refused by name, -EROFS (root on
-/// Linux may change them: named drift).
+/// Linux may change them: named drift). px98: but the console's
+/// terminals (`is_term`) keep an owner and a mode, which a change of
+/// mode or owner may set (0); their times stay fixed (`utimensat` asks
+/// `changeable_times`, which refuses them by name, as before).
 fn changeable(a: u64, n: u64) -> u64 {
     if ty(n) == T_INO {
         return if tree.read_only(rf(n)) { neg(EROFS) } else { 0 } // px63
     }
+    if is_term(n) {
+        return 0
+    }
     refuse(a, R_FIXED)
     neg(EROFS)
+}
+
+/// px98: what a change of times may be made to: `changeable`'s nodes but
+/// the console's terminals, whose times stay fixed (refused by name,
+/// -EROFS: named drift).
+fn changeable_times(a: u64, n: u64) -> u64 {
+    if is_term(n) {
+        refuse(a, R_FIXED)
+        return neg(EROFS)
+    }
+    changeable(a, n)
+}
+
+// --- the console's terminals: an owner and a mode (px98) --------------------------
+//
+// A Linux terminal node has an owner and a mode like any file's, and a
+// console login gives its terminal to the user it logs in (`login(1)`;
+// `login.defs(5)`: by default the user, the user's primary group, mode
+// 0600). What the user then opens by name — `/dev/stdout`, `/dev/stderr`,
+// `/proc/self/fd/N`, the terminal's own name — is theirs to open
+// (`proc_pid_fd(5)`: such a name reopens the file, asked of that file's
+// owner and mode). PAX's console terminals keep the same: one record for
+// the console's own descriptors (reference 0) and `/dev/ttyS0`, one device
+// (4:64, the name the descriptors' links give); one for `/dev/tty0`
+// (4:0); one for `/dev/console` (5:1). Each is root's, 0600, at boot
+// (px45's devtmpfs mode, MODE_CONSOLE). `chown` and `fchown` by
+// file-system user id 0 set the owner and the group, and `chmod` and
+// `fchmod` by the owner or by user id 0 the twelve permission bits, by
+// the rules a file of the tree has (`fchownat`, `chmod_as`). `/dev/tty`,
+// the caller's controlling terminal whoever it is, stays fixed: 0666,
+// root's. One CPU, IF clear for each system call: no lock.
+var term_ids0: u64 = 0 // the console's descriptors and /dev/ttyS0: uid | gid << 32
+var term_ids1: u64 = 0 // /dev/tty0
+var term_ids2: u64 = 0 // /dev/console
+var term_perm0: u64 = 0x180 // 0600
+var term_perm1: u64 = 0x180
+var term_perm2: u64 = 0x180
+
+/// px98: whether node `n` is one of the console's terminals that keep an
+/// owner and a mode (`/dev/tty` is not).
+fn is_term(n: u64) -> bool {
+    ty(n) == T_CONSOLE && rf(n) != TTY
+}
+
+/// px98: the record terminal node `n` keeps: 1 `/dev/tty0`, 2
+/// `/dev/console`, 0 the console's descriptors and `/dev/ttyS0`.
+fn term_slot(n: u64) -> u64 {
+    if rf(n) == TTY0 {
+        return 1
+    }
+    if rf(n) == CONSOLE {
+        return 2
+    }
+    0
+}
+
+/// px98: terminal node `n`'s owner (`which` 0) or group (1).
+fn term_owner(n: u64, which: int) -> u64 {
+    let s = term_slot(n)
+    // # Safety: one CPU, IF clear for the whole system call (the records' note).
+    let ids = unsafe { if s == 1 { term_ids1 } else if s == 2 { term_ids2 } else { term_ids0 } }
+    if which == 0 { ids & 0xffffffff } else { ids >> 32 }
+}
+
+/// px98: terminal node `n`'s twelve permission bits.
+fn term_perm(n: u64) -> u64 {
+    let s = term_slot(n)
+    // # Safety: as `term_owner`.
+    unsafe { if s == 1 { term_perm1 } else if s == 2 { term_perm2 } else { term_perm0 } }
+}
+
+/// px98: terminal node `n` becomes owner `u` and group `g` (tree.KEEP
+/// leaves either as it is), with permission bits `perm`.
+fn term_set(n: u64, u: u64, g: u64, perm: u64) {
+    let nu = if u == tree.KEEP { term_owner(n, 0) } else { u }
+    let ng = if g == tree.KEEP { term_owner(n, 1) } else { g }
+    let ids = nu | (ng << 32)
+    let s = term_slot(n)
+    // # Safety: as `term_owner`.
+    unsafe {
+        if s == 1 {
+            term_ids1 = ids
+            term_perm1 = perm & 0xfff
+        } else if s == 2 {
+            term_ids2 = ids
+            term_perm2 = perm & 0xfff
+        } else {
+            term_ids0 = ids
+            term_perm0 = perm & 0xfff
+        }
+    }
 }
 
 /// px36: `fchmodat(dirfd, path, mode)` (and `chmod`; `fchmodat2` with
@@ -6333,6 +6432,10 @@ fn chmod_as(a: u64, n: u64, mode: u64) -> u64 {
     if m & S_ISGID != 0 && cred.uid(a, cred.FS) != 0 && !member(a, n_owner(a, n, 1)) {
         m = m & !S_ISGID
     }
+    if is_term(n) {
+        term_set(n, tree.KEEP, tree.KEEP, m) // px98: a terminal's record
+        return 0
+    }
     tree.set_mode(rf(n), m)
     0
 }
@@ -6361,7 +6464,8 @@ fn chmod_as(a: u64, n: u64, mode: u64) -> u64 {
 /// Flags AT_SYMLINK_NOFOLLOW (the link itself, as `lchown`) and
 /// AT_EMPTY_PATH; any other -EINVAL. What PAX keeps fixed (`/dev`,
 /// `/proc`, `/sys`, a pipe, a socket) is refused by name, -EROFS, as
-/// before (px36's named drift). `byfd`: `fchown`, `dirfd` the
+/// before (px36's named drift); px98: but the console's terminals keep
+/// an owner by this same rule (their records, beside `changeable`). `byfd`: `fchown`, `dirfd` the
 /// descriptor and no path. This is the one rule about who asks that
 /// PAX has before U3: no `open`, walk or `chmod` asks yet.
 pub fn fchownat(a: u64, pml4: u64, dirfd: u64, va: u64, owner: u64, group: u64, flags: u64, byfd: bool) -> u64 {
@@ -6388,6 +6492,21 @@ pub fn fchownat(a: u64, pml4: u64, dirfd: u64, va: u64, owner: u64, group: u64, 
     let u = owner & 0xffffffff
     let g = group & 0xffffffff
     let fu = cred.uid(a, cred.FS)
+    if is_term(n) {
+        // px98: a terminal's record, by the same rule of who asks; it has
+        // no set-ID bit to lose (no regular file), and its times stay.
+        if fu != 0 {
+            let mine = term_owner(n, 0) == fu
+            if u != tree.KEEP && !(mine && u == fu) {
+                return neg(EPERM)
+            }
+            if g != tree.KEEP && !(mine && (g == term_owner(n, 1) || member(a, g))) {
+                return neg(EPERM)
+            }
+        }
+        term_set(n, u, g, term_perm(n))
+        return 0
+    }
     if fu != 0 {
         let mine = tree.uid(i) == fu
         if u != tree.KEEP && !(mine && u == fu) {
@@ -6497,7 +6616,7 @@ pub fn utimensat(a: u64, pml4: u64, dirfd: u64, va: u64, times: u64, flags: u64)
             return neg(EACCES)
         }
     }
-    let r = changeable(a, n)
+    let r = changeable_times(a, n)
     if r != 0 {
         return r
     }
@@ -6619,7 +6738,7 @@ fn n_mode(n: u64) -> u64 {
         return MODE_NULL // px45: /dev/tty is anyone's, 0666 (measured)
     }
     if t == T_CONSOLE {
-        return MODE_CONSOLE
+        return (MODE_CONSOLE & S_IFMT) | term_perm(n) // px98: its record, 0600 at boot
     }
     if t == T_STD {
         return MODE_LINK // px52: /dev/std*, links
@@ -6887,6 +7006,9 @@ fn n_owner(a: u64, n: u64, which: int) -> u64 {
     let t = ty(n)
     if t == T_INO {
         return if which == 0 { tree.uid(rf(n)) } else { tree.gid(rf(n)) }
+    }
+    if is_term(n) {
+        return term_owner(n, which) // px98: root's at boot
     }
     if t == T_PIPE || t == T_SOCK {
         let o = ppw(rf(n) & 0xffff, P_OWNER)
