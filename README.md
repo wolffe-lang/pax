@@ -195,6 +195,17 @@ compiler and linker bundle from the digest-pinned prior dev payload. Every packe
 inventory. trail is held at its pin until the [glyph-probe mismatch](https://github.com/wolffe-lang/trail/issues/8)
 is resolved. Every ELF process starts with a fixed 1 MiB initial stack, which `RLIMIT_STACK` reports.
 
+`tools/mkdistribution --latest[=OVERLAYS] VERIFIED_BASE.cpio NEW_OUT` builds the same two images from what is newest
+instead of from the pins: every program's tree at its repository's trunk head when the build starts, lupin at its
+newest release, and the dev compiler at its pin's release (a newer wolf release is refused until that pin moves).
+An OVERLAYS line, `COMPONENT REPOSITORY SHA RECORD`, builds one tree at a sha not yet on its trunk, and only when
+RECORD is a green local gauntlet record of that repository at exactly that sha; any other overlay is refused by
+name before anything is built (`tools/latest-resolve`, held by `tests/latest`). `/etc/pax-release` then names each
+such tree as `NAME SHA merged` or `NAME SHA unmerged`, the checkout as `pax COMMIT merged|unmerged`, and the
+resolution itself by its sha256 (`latest resolved …`); the install manifest's `release` line is that file's
+sha256. A latest image is reproducible only from its resolution, never from the pins, so CI and lane records
+always build from the pins.
+
 Two things the shipped `grep` says that GNU's would not: `--help` and `--version` are scent's own prose, and a
 diagnostic names the program as `grep:` whatever path ran it. `-r` and colour are refused by name until scent's next
 milestone. Everything else on its first-milestone options is byte-identical to GNU grep 3.12 in the C locale.
