@@ -27,7 +27,8 @@ output is a file of their own, so nothing had exercised a user writing to the te
 - **The images run black box:** the dev install stick at `8b4e98ae`, sha256
   `665f815ab193907c007d7b431b6f833730bf1b51adbddf5ad92fb13d4d67501b` (read before each clone), booted from a clone
   of it. An 860-shaped target from the upgrade lane's leg: installed from that stick, given user state (a den
-  repository with three commits), then upgraded in place to `e528bbb5`. Booted from a sparse copy.
+  repository with three commits), then upgraded in place by the upgrade lane's newest stick. Booted from a sparse
+  copy.
 - **The installed login's text:** an installed tree's `/etc/pax-login` is sha256
   `85a48ba8f2bc23574469f965a60400debdc9bdeea9f850eb443a5953b52be188`. That is the text the base's
   `installed_login()` gives, byte for byte (`tests/mpx5-den.d/login.py text`).
@@ -126,7 +127,8 @@ So the failing call is the open of the terminal, by name, for writing.
 ### 4.3 The 860's own history (an installed ext2 disk)
 
 An 860-shaped target from the upgrade lane's leg: installed from the `8b4e98ae` dev stick, given user state (files
-under `/home/wolf` and a den repository with three commits), then upgraded in place to `e528bbb5`. That is the
+under `/home/wolf` and a den repository with three commits), then upgraded in place by the upgrade lane's newest
+stick. That is the
 installed system's own history. A sparse copy is booted alone under KVM (BIOS), and the installed login is typed on
 COM1 as `wolf`:
 - the terminal's owner;
