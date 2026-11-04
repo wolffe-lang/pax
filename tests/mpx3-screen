@@ -92,12 +92,15 @@
 #   V8 (px87; CI's mpx5-pelt, 23 % slower under TCG) the default scroll
 #      is the cheaper way here: kmain_screen booted plainly, with `fbread`
 #      (copy) and with `fbwrite` (redraw); each prints `scroll: 200 varied
-#      lines of 120 cells in <t> ticks with <s> scrolls, by copy|redraw`
-#      (every cell of a scrolled row new, as a session's output is). The
-#      forced boots say the way they were told; the plain boot's ticks are
-#      at most 5/4 of the cheaper forced boot's, plus 2 (the tick's
+#      lines of 120 cells in <t> ticks with <s> scrolls, by copy|redraw
+#      (<why>)` (every cell of a scrolled row new, as a session's output
+#      is). The forced boots say the way they were told and why; a plain
+#      boot's way follows from its probe's printed numbers, and its ticks
+#      are at most 5/4 of the cheaper forced boot's, plus 2 (the tick's
 #      granularity). A budget against this machine's own two ways, not a
-#      number of milliseconds.
+#      number of milliseconds. The plain boot runs three times on release
+#      UEFI (record9 saw one probe there choose redraw where copy was 4.4
+#      times cheaper), so a probe that is sometimes wrong is seen.
 #   V9 (px87) the way does not change what is drawn: the copy boot's and
 #      the redraw boot's screendumps (V8's) each equal tools/screen-ref's
 #      image of their own serial bytes, pixel for pixel, as V2 holds the
@@ -332,26 +335,47 @@ for leg in $legs; do
         # --- V8 (px87): the default scroll is the cheaper way here ----------
         id="$tier $leg scroll-ways"
         why=
-        vre='^scroll: 200 varied lines of 120 cells in ([0-9]+) ticks with ([0-9]+) scrolls, by (copy|redraw)$'
-        vl=$(grep -m1 '^scroll: 200 varied' "$sn")
-        if [[ $vl =~ $vre ]]; then vd=${BASH_REMATCH[1]} vdw=${BASH_REMATCH[3]}; else why+=" the plain boot: no varied line ('$vl');"; vd=; fi
+        vre='^scroll: 200 varied lines of 120 cells in ([0-9]+) ticks with ([0-9]+) scrolls, by (copy|redraw) \(([^)]*)\)$'
+        pre='^read ([0-9]+), write ([0-9]+) cycles; copy when read <= ([0-9]+) x write$'
+        plain=("$sn")
+        if [ "$tier $leg" = "release uefi" ]; then
+            for rep in 2 3; do boot "scroll-plain-$rep" "$selft" "$images/$tier/kmain_screen.iso"; plain+=("$norm"); done
+        fi
         why9= pic9=
         for w in fbread fbwrite; do
             boot "scroll-$w" "$selft" "$images/$tier/kmain_screen-$w.iso"
             if r9=$(compare "$tier $leg scroll-$w" 'PAX: the screen'); then pic9+=" $w $r9;"; else why9+=" $w:$r9"; fi
             l=$(grep -m1 '^scroll: 200 varied' "$norm")
             want=copy; [ "$w" = fbwrite ] && want=redraw
-            if [[ $l =~ $vre ]] && [ "${BASH_REMATCH[3]}" = "$want" ] && [ "$hrc" = 0 ]; then
+            if [[ $l =~ $vre ]] && [ "${BASH_REMATCH[3]}" = "$want" ] && [ "${BASH_REMATCH[4]}" = "$w" ] && [ "$hrc" = 0 ]; then
                 eval "v_$w=${BASH_REMATCH[1]}"
             else
                 why+=" the $w boot: not '$want' or not halted ('$l', qemu-halt $hrc);"; eval "v_$w="
             fi
         done
+        seen8=
         if [ -z "$why" ]; then
             vmin=$v_fbread; [ "$v_fbwrite" -lt "$vmin" ] && vmin=$v_fbwrite
-            [ $((4 * vd)) -le $((5 * vmin + 8)) ] || why+=" the default ($vdw) took $vd ticks, more than 5/4 of the cheaper way's $vmin + 2 (copy $v_fbread, redraw $v_fbwrite);"
+            n=0
+            for pn in "${plain[@]}"; do
+                n=$((n + 1))
+                vl=$(grep -m1 '^scroll: 200 varied' "$pn")
+                if [[ $vl =~ $vre ]]; then
+                    vd=${BASH_REMATCH[1]} vdw=${BASH_REMATCH[3]} vwhy=${BASH_REMATCH[4]}
+                    if [[ $vwhy =~ $pre ]]; then
+                        rule=redraw; [ "${BASH_REMATCH[1]}" -le $(( ${BASH_REMATCH[3]} * ${BASH_REMATCH[2]} )) ] && rule=copy
+                        [ "$vdw" = "$rule" ] || why+=" plain boot $n: by $vdw, but its probe's numbers say $rule ('$vwhy');"
+                    else
+                        why+=" plain boot $n: not the probe's reason ('$vwhy');"
+                    fi
+                    [ $((4 * vd)) -le $((5 * vmin + 8)) ] || why+=" plain boot $n: the default ($vdw: $vwhy) took $vd ticks, more than 5/4 of the cheaper way's $vmin + 2 (copy $v_fbread, redraw $v_fbwrite);"
+                    seen8+=" boot $n by $vdw in $vd ticks ($vwhy);"
+                else
+                    why+=" plain boot $n: no varied line ('$vl');"
+                fi
+            done
         fi
-        [ -z "$why" ] && say "PASS V8 $id: the default scrolled by $vdw in $vd ticks; copy $v_fbread, redraw $v_fbwrite ($(sed -n 's/^accel: //p' "$slog.meta"))" || bad "V8 $id:$why"
+        [ -z "$why" ] && say "PASS V8 $id: copy $v_fbread, redraw $v_fbwrite ticks; the default:$seen8 ($(sed -n 's/^accel: //p' "$slog.meta"))" || bad "V8 $id:$why"
         [ -z "$why9" ] && say "PASS V9 $tier $leg scroll-ways: each way's screendump equals its reference:$pic9" || bad "V9 $tier $leg scroll-ways:$why9"
 
         # --- readwatch: V7 (px87, pax#253) ------------------------------------
