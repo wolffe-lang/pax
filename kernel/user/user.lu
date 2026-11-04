@@ -462,7 +462,7 @@ pub fn report() {
     log.dec(bit(cr4, CR4_SMAP))
     log.end()
     if log.quiet() {
-        log.line("user: quiet (the kernel command line): no exec, exit, -ENOSYS or frames line for a program")
+        log.line("user: quiet (the kernel command line): no exec, exit, -ENOSYS, write -EBADF or -EFAULT, or frames line for a program")
     }
 }
 
@@ -615,6 +615,16 @@ fn who() {
     process.who()
 }
 
+/// px96: whether a program's ordinary errno gets a console line, the
+/// `write`'s `write fd <F>: -EBADF` (a closed descriptor, or one opened
+/// to read) and `write fd <F> buf 0x<b> len <L>: -EFAULT` (a buffer it
+/// cannot read): not when the console is quiet, as its exec and exit
+/// get none (px15). The program has its errno; a quiet console is the
+/// user's. A refusal by name, a fault that kills, a panic still print.
+fn errno_lines() -> bool {
+    !log.quiet()
+}
+
 /// ` after <r> runs`, for the running thread.
 fn runs_tail() {
     log.put(" after ")
@@ -691,6 +701,8 @@ fn remap_line() {
 /// send the bytes to the serial console; `/dev/null` swallows them; a
 /// pipe, a socket, (px27) a file of the tree and (px79) a block device's
 /// node take them; anything else (closed, opened to read) is -EBADF.
+/// -EBADF and a console write's -EFAULT say so on the console unless it
+/// is quiet (px96, `errno_lines`).
 fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if socket.is_inet(area(), fd) {
         return socket.sendto(area(), paging.live(), fd, buf, len, 0, 0, 0) // px22
@@ -705,11 +717,13 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         }
     }
     if t == 2 {
-        who()
-        log.put(" write fd ")
-        num(fd)
-        log.put(": -EBADF")
-        log.end()
+        if errno_lines() {
+            who()
+            log.put(" write fd ")
+            num(fd)
+            log.put(": -EBADF")
+            log.end()
+        }
         return NEG_EBADF
     }
     if t == 3 {
@@ -739,15 +753,17 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         return len
     }
     if !readable(buf, len) {
-        who()
-        log.put(" write fd ")
-        num(fd)
-        log.put(" buf ")
-        log.hex(buf)
-        log.put(" len ")
-        num(len)
-        log.put(": -EFAULT")
-        log.end()
+        if errno_lines() {
+            who()
+            log.put(" write fd ")
+            num(fd)
+            log.put(" buf ")
+            log.hex(buf)
+            log.put(" len ")
+            num(len)
+            log.put(": -EFAULT")
+            log.end()
+        }
         return NEG_EFAULT
     }
     let smap = state(U_SMAP)
