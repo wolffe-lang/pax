@@ -86,7 +86,7 @@ release; no attribution trailers.
 Every log named here is under `notes/px87/kasumi/runs/` (copied from kasumi's `/home/mfwolffe/lanes/px87/runs/`);
 each run's first line names its commit, and each step prints `END <step> exit=N`.
 
-### 4.1 pax#253: the console writes the framebuffer and never reads it
+### 4.1 pax#253: the console writes the framebuffer and never reads it (§4.14: where reading it is slow)
 
 **The change** (`9d6d78b5`, `0c4ce54e`, in `kernel/screen` alone). The cell grid already held every cell of the
 screen in RAM; it is the framebuffer's shadow. The framebuffer shows each cell of the active grid as `draw` draws it
@@ -200,7 +200,7 @@ made on kasumi and never pushed; three BIOS boots each, TCG): 1,444-1,477 ms to 
 ms without. The SHA-256 of the native kernel's 3,283,920 bytes costs about 1.3 s of every console-kernel boot under
 TCG; CI boots run that kernel (R-px87-8 names the trade).
 
-### 4.5 Rulings (recommended and implemented, not decided)
+### 4.5 Rulings (recommended and implemented; ruled at the merge, 2026-11-04: A on R-px87-0 to 13, R-px87-14 to 17 as ruled)
 
 - **R-px87-1, V7's witness.** (A) QEMU's gdb stub under TCG: one read watchpoint over the framebuffer, counted
   from outside the kernel, with the `fbread` boot as its control; (B) a guest-side MMU tracer (the framebuffer's
@@ -274,6 +274,13 @@ TCG; CI boots run that kernel (R-px87-8 names the trade).
   words, and `boot:` stays the kernel's family of boot reports (Limine, firmware, the medium, the timing); (B)
   rename the kernel's line away from `boot:` (the kernel, the docs, qual.py and the staged stick's text change).
   **A** (`0aeab4e2`, `08da7c51`; §4.11).
+- **R-px87-17 (ruled A by the orchestrator, three conditions): the scroll's way, by a probe at attach.** (A) at
+  the first attach, time a read of the framebuffer against a write of the same bytes and copy (px19's way) only when
+  the read costs at most 4 writes, else redraw from the cell grid; `fbread` and `fbwrite` force either way; (B) a
+  rule by the mapping's type (which cannot tell an emulator's write-combining mapping of host memory from a GPU's);
+  (C) redraw always and make the redraw cheaper (under an emulator the copy is close to free, so the redraw stays
+  slower). **A**, with the orchestrator's conditions: the two ways draw the same (V9); the probe's costs and its rule
+  on the boot line; one decision a boot, no retry, no hysteresis (§4.14).
 
 
 ### 4.6 The plant, `px87-plant-scroll-read`
@@ -552,6 +559,83 @@ same six steps are recorded again at the rebased head (`notes/px87/kasumi/record
 is cut on that head on its own branch with a local plant record (`notes/px87/kasumi/plant8.sh`, `--plant V7`); their
 END lines are in the PR's body.
 
+### 4.14 The fork replay's slowdown and the scroll's two ways (R-px87-17)
+
+CI's labelled tier all at `3db35c73` cancelled `mpx5-pelt` at its 210-minute limit twice: pelt's complete fork
+replay took 141 minutes on both runs against trunk `b38643a5`'s 115, about 23 % slower, the same on both. Every boot
+of that suite on CI is TCG (`accel tcg`). Per case, from the two job logs: the 80 small cases about +3.85 s each, the
+24 output-heavy ones about +45 s each (`probes`, 335 KB of output: native UEFI 200 to 361 s).
+
+**Measured** on hasu block B (`notes/px87/hasu/measure.sh`, `notes/px87/hasu/runs/`): a fixed slice of the replay
+(`corpus probes c_jc_mixed_pipeline cnf_cd`, native BIOS, root and pax, a fresh boot each) at the base and the head,
+and at two probe commits of the head (never pushed, never signed): the old copy as the default (`readback`), and no
+hash (`nohash`). Wall seconds:
+
+| run | base | head | readback | nohash |
+|---|---|---|---|---|
+| TCG | 616.4 | 755.7 (+22.6 %) | 621.4 | 750.3 |
+| KVM | 375.2 | 389.5 (+3.8 %) | | |
+
+The scroll was about 134 s of the 139; the SHA-256 about 5 (1.09 s a TCG boot: `boot: ~1770 ms` at the head against
+`~683 ms` with no hash). The console's share of a boot to its first program: 484 ms redrawing against 124 ms copying
+(71 scrolls). Under an emulator the framebuffer is host memory, so the old copy is close to free there, while the
+redraw draws every changed cell; V3's numbered lines change a few cells a row and hid it. On metal (kasumi's 4090,
+write-combining) the copy's reads are what pax#253 removes.
+
+**The rows, red first** (kasumi CPUs 4-7, `fix9.log`, `fix10.log`, their step logs):
+- kmain_screen scrolls 200 varied lines of 120 cells (every cell of a scrolled row new) and prints the ticks and the
+  way. V8 (`tests/mpx3-screen`) boots it plainly, with `fbread` and with `fbwrite`: the plain boot's ticks at most 5/4
+  of the cheaper forced way's, plus 2. Red at `bf1eabca`, before the probe: `FAIL V8 native bios scroll-ways: the
+  default (redraw) took 217 ticks, more than 5/4 of the cheaper way's 44 + 2 (copy 44, redraw 219)`.
+- The fix (`b63d0dfb`, then `4483782c`): at the first attach `kernel/screen` times a read of the framebuffer (REP MOVSQ
+  into the active grid's storage, which attach blanks after) against a write of the same bytes (REP STOSQ of the
+  colour the clear just gave them), and copies for the rest of the boot only when the read costs at most 4 writes.
+  `fbread` and `fbwrite` force either way. V7's watched boot is the `fbwrite` boot, so the redraw is still witnessed
+  reading nothing.
+- V9 (`2620143d`): each forced way's screendump equals tools/screen-ref's image of its own serial bytes, pixel for
+  pixel, as V2 holds the plain boot's (the orchestrator's first condition; the two boots' screens differ in their
+  measured numbers, so each is held to its own reference). A guard, seen green.
+- The boot line says the way and why (`c2b418d3`, `43665c71`, `0f34bd3b`, `ed1de982`, `99bc4398`, `9a63313d`,
+  `93bd8b88`): `(<s> scrolls by copy|redraw (read <r>, write <w> cycles; copy when read <= 4 x write) | (fbread) |
+  (fbwrite) | by none (no screen), <b> bytes)`. T7 holds the way to its printed reason. Red at `c2b418d3` (the way not
+  named, every session), at `0f34bd3b` (the reason not printed, all five sessions) and at `99bc4398` (the serial-only
+  sessions, which attach no screen: `by redraw, but its probe's numbers say copy (read 0, write 0 …)`).
+- After the probe the slice matched the base under TCG (fix9 at `b0ca4e68`), and mpx6-firmware passed with the boot
+  line's new words (fix10: T1/T2 on BIOS and UEFI, F10, F11).
+- record9 at `014bb1c7`: the probe read one sample of each, and on one boot it chose redraw where copy was 4.4 times
+  cheaper (`FAIL V8 release uefi scroll-ways: the default (redraw) took 122 ticks, more than 5/4 of the cheaper way's
+  27 + 2 (copy 27, redraw 120)`; the other three legs chose copy). kmain_screen did not yet print the probe's numbers.
+  `36bb53d9` makes it print them; `06b5613e` makes V8 hold each plain boot's way to its own numbers and boot the plain
+  image three times on release UEFI; `c77d8f70` warms both ways once and compares the cheapest of five samples of
+  each (16 KiB a sample): still one decision a boot. record10: every plain boot by copy, e.g. `read 34762, write
+  29226 cycles; copy when read <= 4 x write`.
+- The hash's 4 % stays as its own issue (§5.4).
+
+### 4.15 The records from record8 on
+
+Each under planning's `tools/gauntlet-record.sh` from a fresh clone of the repository at the head, the six steps of
+`notes/px87/kasumi/steps6.sh` (ci-plan, mpx3-console, mpx3-screen, usb-stick, mpx5-forks, mpx6-install), each plant
+a one-commit, one-hunk branch with `--plant V7`:
+
+| record | head | result | plant |
+|---|---|---|---|
+| record8 (`record8.green.log`) | `3db35c73` | `RECORD-END worst=0 steps=6` | plant8, V7 red by name |
+| record9 (`record9.green.log`) | `014bb1c7` | `RECORD-END worst=1 steps=4` (V8 release UEFI, above) | plant9, V7 red by name |
+| record10 (`record10.green.log`) | `a6e2fcb5`, the merged head | `RECORD-END worst=0 steps=6` | plant10, V7 red by name |
+
+record10's END lines: `END ci-plan exit=0 secs=51`, `END mpx3-console exit=0 secs=580`, `END mpx3-screen exit=0
+secs=1034`, `END usb-stick exit=0 secs=250`, `END mpx5-forks exit=0 secs=561`, `END mpx6-install exit=0 secs=680`.
+plant10 at `c05eae54`: `FAIL V7 native bios readwatch: 64+ framebuffer reads in 594 scrolls, the first by
+pax_fb_copy+0x7 (rsi 0xffff8000fd014008, framebuffer + 0x14008) called from _Wscreen.scroll$917b10a6eb8f6acc+0xf4`,
+`END mpx3-screen-plant exit=1`, `RECORD-END worst=1 steps=2`. The two `FAIL USB:` lines inside each usb-stick step
+are U4's broken-image controls, which must fail (`tests/usb-stick` lines 68-76, `tools/check-usb` line 125), each
+followed by `PASS U4: … rejected by name`. CI's labelled tier all at `a6e2fcb5` (41754355963) passed, 64 of 64 jobs,
+and the lane merged by fast-forward onto `b38643a5`.
+
+The staged stick (`pax-stick-0eadf6b4.img`) predates the probe: its default entry always redraws, so the metal A/B
+(entry 1 redraw, entry 2 `fbread`) stands; the probe's choice on the 4090 is for a later stick, whose boot line will
+name it.
+
 ## 5. Done-when
 
 ### 5.1 Checklist
@@ -606,14 +690,19 @@ END lines are in the PR's body.
 ### 5.4 Issues
 
 Filed or closed by this lane: none (a lane files and closes nothing); the orchestrator filed pax#273 (the tests' QMP
-sockets under the output tree overflow sun_path when PAX_BUILD is deep, §4.8). Fixed here, to close at the merge: pax#253 (its metal
+sockets under the output tree overflow sun_path when PAX_BUILD is deep, §4.8). Fixed here, closed at the merge (2026-11-04): pax#253 (its metal
 numbers to come from §5.5's session), #246, #243, #265, #266, #176. Owed to file (pax), the orchestrator's call:
 
 - `/proc/version` (pax#176's second half): a fixed procfs entry naming the kernel as its banner does.
 - The installed system's console is not quiet: pax-install writes its own Limine configuration, without `quiet`.
 - pax#246's other half: the per-program lines kept in the kernel's memory log for the stick's log file.
-- kernel/identity's SHA-256 inner loop through calls: about 1.3 s of every TCG boot of the native kernel.
-- The `fbread` word and V7's control: drop both once the metal A/B is in (R-px87-3).
+- kernel/identity's SHA-256 inner loop through calls: about 1.1-1.3 s of every TCG boot of the native kernel (about
+  4 % of the fork replay's slice under TCG, §4.14).
+- The `fbread` and `fbwrite` words and V7's control: drop them once the metal A/B is in (R-px87-3), or keep `fbwrite`
+  for V7 if the probe stays.
+- pax#273's addition: `tests/mpx6-nmi.d/inject.py` (its QMP and gdb sockets in the leg's output directory, lines
+  58-65) and `tests/mpx6-nmi` line 72 (`--output "$work/$1/$2-$3"`), whose `mce-initramfs.report` leg overflowed
+  sun_path in gauntlet4 (108 bytes).
 
 kasumi's VT-x is a firmware setting, not an issue: the orchestrator tells the maintainer, and the metal session's
 optional step 6 turns it on.
