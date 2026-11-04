@@ -9,7 +9,9 @@
 //! 2.63) and its public I210 datasheet (333016 rev 3.7), which agree, word
 //! for word, on every register, bit and descriptor this module touches:
 //! the reset (CTRL.RST, bit 26), the interrupt registers (ICR 0x1500, IMS
-//! 0x1508, IMC 0x150C, EIMC 0x1528: §8.8), the receive and transmit
+//! 0x1508, IMC 0x150C, EICR 0x1580, EIMS 0x1524, EIMC 0x1528, IVAR0
+//! 0x1700 and its entry 0, receive queue 0: §8.8, §7.3.1.1 or §7.3.2.1),
+//! the receive and transmit
 //! control (RCTL 0x0100, TCTL 0x0400: §8.10.1, §8.12.1), queue 0's ring
 //! (RDBAL/RDBAH/RDLEN/SRRCTL/RDH/RDT/RXDCTL at 0xC000-0xC028,
 //! TDBAL/TDBAH/TDLEN/TDH/TDT/TXDCTL at 0xE000-0xE028), the receive
@@ -42,8 +44,15 @@
 //!     value beside it;
 //!   - the interrupt: the I225 gets no INTx on kasumi (its line is the
 //!     firmware's 255, as the xHCI's was, px76), so it is polled every
-//!     tick by the network's clock (kernel/netd); MSI/MSI-X would need
-//!     GPIE/EIMS/IVAR programming the public documents do not give.
+//!     tick by the network's clock (kernel/netd); MSI or MSI-X is not
+//!     programmed (one interrupt path fewer to confirm on metal).
+//!
+//! **The 82576-only path:** a link that has not come 1 s after Set Link
+//! Up (QEMU's igb leaves its PHY's auto-negotiation idle after CTRL.RST,
+//! black box) has its PHY told to negotiate again: PCTRL (PHY register 0)
+//! bits 12 and 9 through MDIC (§8.2.4, §3.5.2.2.1) at the internal PHY's
+//! MDIO address 1 (§3.5.7.8.3.16), PCTRL and PSTATUS (§8.25.1, §8.25.2)
+//! read before and PSTATUS after, in its report.
 //!
 //! **The rings.** 64 receive and 64 transmit descriptors of 16 bytes, a
 //! ring in one frame each (RDLEN/TDLEN 1024: the datasheets' 128-byte
@@ -62,11 +71,16 @@
 //! the next send.
 //!
 //! **The interrupt** (the 82576 in QEMU): INTx on the 8259 line the
-//! firmware wrote, level-triggered (kernel/net sets ELCR and unmasks it),
-//! IMS = RXDW (7), RXO (6), RXDMT0 (4) and LSC (2); `irq` reads ICR,
-//! which clears it and withdraws the request. A line this kernel cannot
-//! take (not 3-15, or 4, 8, 13), or `poll` asked for, and the device is
-//! polled instead: IMS 0, and kernel/netd's clock asks `due` every tick.
+//! firmware wrote, level-triggered (kernel/net sets ELCR and unmasks it).
+//! In INTx and MSI mode a queue's causes reach EICR through IVAR, ICR's
+//! only through EICR's Other bit (§7.3.1.1): IVAR0's entry 0 maps
+//! receive queue 0 to EICR bit 0, EIMS = bit 0 and Other (31), IMS = LSC
+//! (2). `irq` reads EICR and ICR, which clears them and withdraws the
+//! request. (QEMU's igb keeps EIMS bit 0 and drops 31, and reads IMS as
+//! 0 whatever is written; ICR's RXDW is never set there: black box,
+//! notes/px89/blackbox.txt.) A line this kernel cannot take (not 3-15, or
+//! 4, 8, 13), or `poll` asked for, and the device is polled instead:
+//! every mask clear, and kernel/netd's clock asks `due` every tick.
 //!
 //! State: words of boot/net.S's `pax_gbe_state`, changed under
 //! kernel/net's lock (its frame interface) or before the device is up.
@@ -108,6 +122,9 @@ const ICR: u64 = 0x1500
 const IMS: u64 = 0x1508
 const IMC: u64 = 0x150c
 const EIMC: u64 = 0x1528
+const EIMS: u64 = 0x1524
+const EICR: u64 = 0x1580
+const IVAR0: u64 = 0x1700
 const RCTL: u64 = 0x0100
 const TCTL: u64 = 0x0400
 const RDBAL: u64 = 0xc000
@@ -144,7 +161,9 @@ const TCTL_PSP: u64 = 0x8
 const QUEUE_ENABLE: u64 = 0x2000000 // RXDCTL/TXDCTL bit 25
 const WTHRESH_1: u64 = 0x10000 // bits 20:16 = 1
 const SRRCTL_2K_ADV: u64 = 0x82000002 // Drop_En, DESCTYPE 001, BSIZEPACKET 2
-const IMS_RX: u64 = 0xd4 // RXDW 7, RXO 6, RXDMT0 4, LSC 2
+const IMS_LSC: u64 = 0x4 // bit 2; the rest of ICR's causes masked
+const EIMS_RXQ0: u64 = 0x80000001 // RxTxQ bit 0 (IVAR0's entry 0) and Other, bit 31
+const IVAR_RXQ0: u64 = 0x80 // entry 0 (receive queue 0): EICR bit 0, valid (bit 7)
 const RAH_AV: u64 = 0x80000000
 const MDIC_WRITE: u64 = 0x4000000 // OP 01b, bits 27:26
 const MDIC_READ: u64 = 0x8000000 // OP 10b
@@ -185,6 +204,7 @@ const G_PSTATUS0: u64 = 20 // and PSTATUS then
 const G_PSTATUS1: u64 = 21 // PSTATUS after the restart's wait
 const G_RESTARTED: u64 = 22 // 1: auto-negotiation restarted through MDIC
 const G_IMS: u64 = 23 // IMS read back after it was set
+const G_EIMS: u64 = 24 // EIMS read back after it was set
 const G_RXB: u64 = 64 // 64 words: receive buffer i's physical address
 const G_TXB: u64 = 128 // 64 words: transmit buffer i's
 
@@ -497,10 +517,17 @@ pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
     if poll || !can {
         put_gw(G_POLL, 1)
         wr(IMC, 0xffffffff)
+        wr(EIMC, 0xffffffff)
     } else {
-        let _clear = rd(ICR)
-        wr(IMS, IMS_RX)
+        // §7.3.1.1: in INTx and MSI mode a queue's causes reach EICR
+        // through IVAR, and ICR's are EICR's Other bit (31).
+        wr(IVAR0, IVAR_RXQ0)
+        let _e = rd(EICR)
+        let _c = rd(ICR)
+        wr(IMS, IMS_LSC)
+        wr(EIMS, EIMS_RXQ0)
         put_gw(G_IMS, rd(IMS))
+        put_gw(G_EIMS, rd(EIMS))
     }
     put_gw(G_UP, 1)
     0
@@ -534,10 +561,13 @@ fn mdi_wait() -> u64 {
     rd(MDIC)
 }
 
-/// The device's interrupt (kernel/net's `irq`, IF clear): read ICR,
-/// which clears it and withdraws the request. Whether it had a cause.
+/// The device's interrupt (kernel/net's `irq`, IF clear): read EICR and
+/// ICR, which clears them and withdraws the request. Whether it had a
+/// cause.
 pub fn irq() -> bool {
-    rd(ICR) != 0
+    let e = rd(EICR)
+    let c = rd(ICR)
+    e != 0 || c != 0
 }
 
 /// Polled: whether the descriptor at the receive head has been written
@@ -701,7 +731,7 @@ pub fn report() {
 /// leg's record of what the I225 answered; ICR is not read: reading it
 /// clears it):
 ///
-///     net: regs CTRL <c> STATUS <s> CTRL_EXT <e> RCTL <r> TCTL <t> SRRCTL <x> RXDCTL <y> TXDCTL <z> RDH <h> RDT <t> TDH <h> TDT <t> RAL0 <l> RAH0 <h> IMS <m>
+///     net: regs CTRL <c> STATUS <s> CTRL_EXT <e> RCTL <r> TCTL <t> SRRCTL <x> RXDCTL <y> TXDCTL <z> RDH <h> RDT <t> TDH <h> TDT <t> RAL0 <l> RAH0 <h> IMS <m> (<m0> when set) EIMS <e> (<e0> when set) IVAR0 <v>; STATUS before the reset <s0>
 pub fn dump() {
     if gw(G_MODEL) == 0 {
         return
@@ -724,7 +754,13 @@ pub fn dump() {
     reg(" IMS ", IMS)
     log.put(" (")
     log.hex_n(gw(G_IMS), 8)
-    log.put(" when set); STATUS before the reset ")
+    log.put(" when set) EIMS ")
+    log.hex_n(rd(EIMS), 8)
+    log.put(" (")
+    log.hex_n(gw(G_EIMS), 8)
+    log.put(" when set) IVAR0 ")
+    log.hex_n(rd(IVAR0), 8)
+    log.put("; STATUS before the reset ")
     log.hex_n(gw(G_STATUS_PRE), 8)
     log.end()
 }
