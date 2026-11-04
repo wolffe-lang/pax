@@ -470,9 +470,15 @@ var readback: bool = false
 /// of the same bytes before the scroll stops copying.
 const COPY_MAX: u64 = 4
 
-/// px87: the bytes the probe reads and writes (eight pages; at most the
-/// framebuffer's).
-const PROBE_BYTES: u64 = 32768
+/// px87: the bytes the probe reads and writes (four pages; at most the
+/// framebuffer's and the active grid's).
+const PROBE_BYTES: u64 = 16384
+
+/// px87: the probe's samples of each, after one of each to warm them (the
+/// first read of a framebuffer page pays for its mapping: record9 saw a
+/// single cold sample under TCG choose redraw where copy was 4.4 times
+/// cheaper); the cheapest of each is compared. Still one decision a boot.
+const PROBE_SAMPLES: u64 = 5
 
 /// px87: what the probe measured (TSC cycles), 0 when it did not run.
 var probe_read: u64 = 0
@@ -500,8 +506,9 @@ fn set_forced(f: u64) {
 /// px87: time PROBE_BYTES of the framebuffer at `va` read (into the active
 /// cell grid's storage, `room` bytes, which `attach` blanks after) against
 /// the same bytes written with `v` (the colour the clear just gave them:
-/// the screen does not change). Whether a read costs at most COPY_MAX
-/// writes.
+/// the screen does not change): one read and one write to warm both, then
+/// the cheapest of PROBE_SAMPLES of each. Whether that read costs at most
+/// COPY_MAX of that write.
 fn probe_copy(va: u64, bytes: u64, room: u64, v: u64) -> bool {
     var n = PROBE_BYTES
     if bytes < n {
@@ -518,17 +525,33 @@ fn probe_copy(va: u64, bytes: u64, room: u64, v: u64) -> bool {
     // cells at the start of pax_screen_cells, which `attach` blanks after
     // this; and at most pitch * h, the framebuffer kernel/fb mapped. REP
     // MOVSQ reads the framebuffer's first n bytes, REP STOSQ writes them.
-    let t0 = unsafe { pax_rdtsc() }
-    unsafe { pax_fb_copy(pax_screen_cells as u64, va, n) }
-    let t1 = unsafe { pax_rdtsc() }
-    unsafe { pax_fb_fill(va, v, n / 8) }
-    let t2 = unsafe { pax_rdtsc() }
+    unsafe {
+        pax_fb_copy(pax_screen_cells as u64, va, n)
+        pax_fb_fill(va, v, n / 8)
+    }
+    var r: u64 = 0xffffffffffffffff
+    var w: u64 = 0xffffffffffffffff
+    var i: u64 = 0
+    while i < PROBE_SAMPLES {
+        let t0 = unsafe { pax_rdtsc() }
+        unsafe { pax_fb_copy(pax_screen_cells as u64, va, n) }
+        let t1 = unsafe { pax_rdtsc() }
+        unsafe { pax_fb_fill(va, v, n / 8) }
+        let t2 = unsafe { pax_rdtsc() }
+        if t1 - t0 < r {
+            r = t1 - t0
+        }
+        if t2 - t1 < w {
+            w = t2 - t1
+        }
+        i += 1
+    }
     // # Safety: module state, written here with IF clear (attach).
     unsafe {
-        probe_read = t1 - t0
-        probe_write = t2 - t1
+        probe_read = r
+        probe_write = w
     }
-    t1 - t0 <= COPY_MAX * (t2 - t1)
+    r <= COPY_MAX * w
 }
 
 fn get_readback() -> bool {
