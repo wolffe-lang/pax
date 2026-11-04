@@ -198,7 +198,40 @@ case $CHUNK in
     esac
     step "$CHUNK" leg "${CHUNK#legs-}" "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
     ;;
-  *) echo "CHUNK is red, units, build, legs-a, legs-d or legs-x"; exit 2 ;;
+  gauntlet-1|gauntlet-2|gauntlet-3)
+    # The one gauntlet at the final head, three takes before the legs' three (px86's set, the paths' own
+    # suites): 1 the planner's proofs, the budgets, the FAT oracle rows (paxfat replace); 2 mpx6-install's
+    # smoke rows (verify.py's manifest rows among them), TCG; 3 the kasumi legs as CI runs them (the live
+    # entry, two entries on the stick now) and mpx6-ahci's pr rows, KVM.
+    G=$L/g-$short; GE="-e PAX_CACHE=$L/cache -e PAX_BUILD=$L/gb-$short -e PAX_LOPE_REPO=$L/inputs/lope-local -e CARGO_INCREMENTAL=0"
+    mkdir -p "$G"
+    case $CHUNK in
+      gauntlet-1)
+        CTR_ENV="$GE" step ci-plan ctr g-plan localhost/px75-ubuntu:2 0 python3 -I tests/ci-plan
+        CTR_ENV="$GE" step ci-budgets ctr g-budgets localhost/px75-ubuntu:2 0 python3 -I tests/ci-budgets.py
+        CTR_ENV="$GE" step mpx6-disktools-fat ctr g-fat localhost/px78-ubuntu:1 0 bash -c "export PAX_WOLF=\$(tools/fetch-wolf); tests/mpx6-disktools --only fat --work $G/disktools; exit \$?"
+        ;;
+      gauntlet-2)
+        rm -rf "$G/install"
+        CTR_ENV="$GE" step mpx6-install ctr g-install localhost/px78-ubuntu:1 0 bash -c "export PAX_WOLF=\$(tools/fetch-wolf); tests/mpx6-install --rows smoke --tier native --firmware bios --work $G/install; exit \$?"
+        ;;
+      gauntlet-3)
+        kbuild() (
+          cd "$CO" && export PAX_CACHE=$L/cache PAX_BUILD=$L/gbh-$short TMPDIR=$L/tmp PAX_ENGINE=podman PAX_E2FS_IMAGE=localhost/px75-ubuntu:2 PAX_METAL_MODE=build \
+          && rm -rf "$G/kasumi" "$G/kasumi-ext4" \
+          && taskset -c "$CPUS" tests/mpx6-install --only metal --work "$G/kasumi" --inputs "$G/install/inputs" \
+          && taskset -c "$CPUS" tests/mpx6-install --only metal --work "$G/kasumi/metal/used-fat32" --inputs "$G/install/inputs"
+        )
+        step kasumi-build kbuild
+        CTR_ENV="$GE -e PAX_METAL_MODE=run -e PAX_METAL_ACCEL=kvm" \
+          step kasumi-870 ctr g-k870 localhost/px78-ubuntu:1 1 bash -c "tests/mpx6-install --only metal --work $G/kasumi --inputs $G/install/inputs; exit \$?"
+        CTR_ENV="$GE -e PAX_METAL_MODE=run -e PAX_METAL_ACCEL=kvm -e PAX_METAL_TARGET=860 -e PAX_METAL_USED=fat32" \
+          step kasumi-860 ctr g-k860 localhost/px78-ubuntu:1 1 bash -c "tests/mpx6-install --only metal --work $G/kasumi/metal/used-fat32 --inputs $G/install/inputs; exit \$?"
+        CTR_ENV="$GE" step mpx6-ahci ctr g-ahci localhost/px78-ubuntu:1 1 bash -c "export PAX_WOLF=\$(tools/fetch-wolf); tests/mpx6-ahci --tier native --firmware bios --rows pr; exit \$?"
+        ;;
+    esac
+    ;;
+  *) echo "CHUNK is red, units, build, legs-a, legs-d, legs-x or gauntlet-1..3"; exit 2 ;;
 esac
 sensors > "$L/runs/$CHUNK-$short-sensors-end.txt" 2>&1 || true
 flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
