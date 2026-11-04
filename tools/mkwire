@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# mkwire — px89's metal stick: PAX live from a USB stick on a machine
+# whose network is an Intel I225 (kasumi's I225-V, kernel/gbe), its
+# address by DHCP (kernel/dhcp), and a script that records the lease,
+# the router's answer and one TCP connection to the stick's own log.
+#
+#   tools/mkwire root OUTDIR      the kernel and the live root (a Linux
+#                                 build host: wolf, cc, clang, lld)
+#   tools/mkwire stick OUTDIR     the stick from them (tools/mkdisk --usb:
+#                                 a container engine, as tools/disktools)
+#
+# root: kmain_session (native); pelt (tools/mkpelt); boreutils' cat, ls,
+# echo and sleep (tools/mkboreutils); paxfat (tools/mkdisktools);
+# netstate and tcpprobe (tools/mknet); /etc/passwd and /etc/group;
+# /etc/pax-net `dhcp wait=60`; /etc/wire.sh (below); /etc/pax-run:
+#
+#     /bin/pelt /etc/wire.sh      the record, once
+#     /bin/pelt -i                a shell for whoever is at the keyboard
+#
+# OUTDIR/kmain_session.elf, OUTDIR/wire.cpio, OUTDIR/root/.
+#
+# stick: OUTDIR/pax-wire.img by tools/mkdisk --usb (boot/limine-usb.conf;
+# the ESP, partition 1, at byte 2097152 as every --usb stick has it), then
+# on its ESP, by the stick's own paxfat: /pax/wire-stick (a token made
+# here, which /etc/wire.sh also holds: the one disk it writes is the one
+# whose ESP holds that token) and, when WIRE_TARGETS is set, /pax/wire-target
+# (its `<ip> <port>` lines: the TCP connections the script makes; with no
+# such file, the router's port 80; any OS can make the file on the ESP
+# before the boot). Its sha256, read twice, in OUTDIR/stick.sha256.
+#
+# /etc/wire.sh, on the machine: waits for kernel/dhcp's lease file
+# (/var/lib/dhcp/pax.lease, 60 s), then writes to /tmp/wire.txt and the
+# screen: the lease (address, netmask, router, servers, times, whether
+# the router answered the kernel's echo), /etc/resolv.conf, and one
+# `tcpprobe` per /pax/wire-target line (the router's port 80 when the file
+# names none); then finds the stick (each /dev/sd? whose ESP at 2097152
+# holds /pax/wire-stick with the token) and appends the record to
+# /pax/logs/wire-<n>.txt there (paxfat append: fsync'd). It writes no
+# other disk: a disk whose ESP does not hold the token is only read
+# (`paxfat cat`), never written.
+#
+# Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 2 ] || die "usage: mkwire root|stick OUTDIR"
+mode=$1 out=$2
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+OFF=2097152
+BORE="cat ls echo sleep"
+
+if [ "$mode" = root ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" readelf
+    "$PAX_ROOT/tools/fetch-limine" >/dev/null
+    rm -rf "$out/root" "$out/build"
+    r=$out/root
+    mkdir -p "$r/bin" "$r/etc" "$r/tmp" "$out/build"
+    "$PAX_ROOT/tools/mkpelt" "$out/build/pelt" > "$out/build/pelt.txt"
+    cp "$out/build/pelt/pelt" "$r/bin/pelt"
+    # shellcheck disable=SC2086
+    "$PAX_ROOT/tools/mkboreutils" "$out/build/bore" $BORE > "$out/build/bore.txt"
+    for u in $BORE; do cp "$out/build/bore/$u" "$r/bin/$u"; done
+    "$PAX_ROOT/tools/mkdisktools" "$out/build/disk" paxfat > "$out/build/disk.txt"
+    cp "$out/build/disk/paxfat" "$r/bin/paxfat"
+    PAX_WOLF=$wolf "$PAX_ROOT/tools/mknet" "$out/build/net" > "$out/build/net.txt"
+    cp "$out/build/net/netstate" "$out/build/net/tcpprobe" "$r/bin/"
+    token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    printf '%s\n' "$token" > "$out/token"
+    printf 'root:x:0:0:root:/:/bin/pelt\n' > "$r/etc/passwd"
+    printf 'root:x:0:\n' > "$r/etc/group"
+    printf 'dhcp wait=60\n' > "$r/etc/pax-net"
+    printf '/bin/pelt /etc/wire.sh\n/bin/pelt -i\n' > "$r/etc/pax-run"
+    sed -e "s/@TOKEN@/$token/" -e "s/@OFF@/$OFF/" "$PAX_ROOT/user/wire.sh" > "$r/etc/wire.sh"
+    pairs=()
+    for f in $(cd "$r" && find . -type f | sort); do
+        f=${f#./}
+        m=644; [ -x "$r/$f" ] && m=755
+        pairs+=("/$f=$r/$f:$m")
+    done
+    "$PAX_ROOT/tools/mkinitramfs" "$out/wire.cpio" "${pairs[@]}" > "$out/build/initramfs.txt"
+    elf=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_session.lu" "$out/build/kernel" 2> "$out/build/kernel.log")
+    cp "$elf" "$out/kmain_session.elf"
+    git -C "$PAX_ROOT" rev-parse HEAD > "$out/commit"
+    for f in "$out/kmain_session.elf" "$out/wire.cpio" "$r"/bin/*; do
+        say "  $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') ${f#"$out"/}"
+    done
+    say "root: commit $(cat "$out/commit"), token $token"
+    exit 0
+fi
+
+[ "$mode" = stick ] || die "usage: mkwire root|stick OUTDIR"
+[ -f "$out/kmain_session.elf" ] && [ -f "$out/wire.cpio" ] && [ -f "$out/token" ] || die "no root in $out (tools/mkwire root first)"
+img=$out/pax-wire.img
+rm -f "$img"
+"$PAX_ROOT/tools/mkdisk" --usb --kernel "$out/kmain_session.elf" --initramfs "$out/wire.cpio" \
+    --conf "$PAX_ROOT/boot/limine-usb.conf" "$img" > "$out/mkdisk.txt"
+fat=$out/root/bin/paxfat
+"$fat" --offset "$OFF" ls "$img" /boot | grep -q 'initramfs.cpio' || die "the stick's ESP at $OFF holds no /boot/initramfs.cpio"
+cp "$out/token" "$out/wire-stick"
+"$fat" --offset "$OFF" copy "$img" "$out/wire-stick" /pax/wire-stick
+if [ -n "${WIRE_TARGETS:-}" ]; then
+    printf '%s\n' "$WIRE_TARGETS" > "$out/wire-target"
+    "$fat" --offset "$OFF" copy "$img" "$out/wire-target" /pax/wire-target
+fi
+[ "$("$fat" --offset "$OFF" cat "$img" /pax/wire-stick)" = "$(cat "$out/token")" ] || die "the token did not read back"
+for n in 1 2; do sha256sum "$img"; done > "$out/stick.sha256"
+say "stick: $img $(wc -c < "$img" | tr -d ' ') bytes, $(head -n 1 "$out/stick.sha256" | cut -c1-64)"
