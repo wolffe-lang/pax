@@ -16,8 +16,8 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   runs out; without the file the fixed 10.0.2.15 stays, every existing
   row as it was. Intel's gigabit controllers (`kernel/gbe`): QEMU's 82576
   and the I225/I226 on the one ring model the 82576 and I210 datasheets
-  share, polled every tick where the firmware gives the controller no
-  interrupt line (kasumi's I225-V). `tests/mpx4-dhcp` holds the client to
+  share; the 82576 interrupts by MSI-X, the I225 (kasumi's I225-V, whose
+  firmware gives it no interrupt line) is polled every tick. `tests/mpx4-dhcp` holds the client to
   QEMU's server and to dnsmasq on a tap (backoff, renewal, rebinding,
   expiry, a NAK), every client frame byte for byte (`tools/pcap-dhcp`);
   `tests/mpx4-igb` runs the DHCP, UDP and TCP rows again over the 82576,
