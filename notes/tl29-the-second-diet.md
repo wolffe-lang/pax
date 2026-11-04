@@ -52,7 +52,7 @@ handed to the orchestrator.
 
 ## 3. The measurement, before the plan change
 
-Every org repo (18; `wollf-heldout` has no runs), from the Actions API
+Every org repo (18; a private eval set has no runs), from the Actions API
 (`notes/tl29/fetch.py`, `fetch_repo.py`; jobs `filter=latest`, cached once
 completed). **Before**: each repo's last 30 runs created before
 2026-10-20T18:13:58Z, every workflow, every event (fewer where the repo
