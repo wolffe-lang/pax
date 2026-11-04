@@ -19,9 +19,10 @@ What a row holds, and from where (no row is read from scent's output):
   - rulings #115-#117's published answers (scent's README, the table):
     scent's, which differ from GNU's by decision;
   - the eight upstream-blocked rows' shapes (scent's README): the argv0
-    seam (`grep:` whatever the invocation's name), and the runtime's abort
-    on an argument that is not UTF-8, here passed by the kernel from a
-    `#!` line (pelt refuses the byte in ANSI-C quoting before invoking scent);
+    seam (`grep:` whatever the invocation's name), and the runtime's
+    named trap on an argument that is not UTF-8 (an abort before wolf
+    0.2.36), here passed by the kernel from a `#!` line (pelt refuses the
+    byte in ANSI-C quoting before invoking scent);
   - scent's own prose where GNU's is not asked for (--help's first line,
     --version), and recursive matching of the fixed fixture, and what PAX and the image are:
     the link, the wrappers' warnings, /bin/sh, no locale, pelt's words.
@@ -31,10 +32,6 @@ import sys
 
 W = "egrep: warning: egrep is obsolescent; using grep -E"
 F = "fgrep: warning: fgrep is obsolescent; using grep -F"
-PANIC = ["", "thread '<unnamed>' ({pid}) panicked at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/env.rs:876:51:",
-         'called `Result::unwrap()` on an `Err` value: "-F\\xFF"',
-         "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
-         "fatal runtime error: failed to initiate panic, error 5, aborting"]
 
 
 def s(cmd, status, out=(), err=()):
@@ -109,11 +106,14 @@ ROWS = [
     ("the argv0 seam (wolf-lang#899, #904): /bin/grep's diagnostic says grep: (GNU's says /bin/grep:)",
      s("/bin/grep --bad", 2, err=["grep: unrecognized option '--bad'", "Usage: grep [OPTION]... PATTERNS [FILE]...",
                                   "Try 'grep --help' for more information."])),
-    # px65: pelt 70eec14 (sh24) says a simple command's end by a signal
-    # through the command's own redirected standard error, so the line is
-    # the error file's last, after the runtime's panic text.
-    ("an argument that is not UTF-8, from a #! line (wolf-lang#406, #904): the runtime aborts",
-     ["$ s ./ff-arg", "status 134", "[stderr]"] + PANIC + ["pelt: ended by signal 6 (ABRT)"]),
+    # px97: scent built by wolf 0.2.36 (the toolchain scent eb888dfc pins):
+    # the runtime traps an argument that is not UTF-8 by name, pointing at
+    # env_args_bytes(), where 0.2.35's panicked (px65's row, the panic
+    # text and pelt's line about the signal after it). The status is still
+    # 134, measured on PAX and on Linux alike.
+    ("an argument that is not UTF-8, from a #! line (wolf-lang#406, #904): the runtime traps it by name",
+     ["$ s ./ff-arg", "status 134", "[stderr]", "wolf-trap: argument-utf8",
+      "  argument 1 is not UTF-8; read it with env_args_bytes()"]),
     ("pelt refuses byte FF before invoking scent (pelt#65)",
      ["$ s grep -F x $'\\377'",
       "pelt: line 50: $'\\377': a byte that is not UTF-8 cannot be carried yet (pelt#65)"]),
