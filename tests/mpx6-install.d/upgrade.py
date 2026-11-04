@@ -727,8 +727,12 @@ def main():
         if left:
             fail(row, f'dropped shipped paths still there: {left[:8]}')
         mtext = (work/f'{name}-tree/etc/pax-install/manifest').read_text()
-        mine = {p: v for p, v in manifest_rows(mtext).items() if v[0] != 'g'}
-        host = {p: v for p, v in new_rows.items() if v[0] != 'g'}
+        # Files by kind, mode and sha256; a link by its target; a directory by its kind (PAX's lstat and the
+        # archive's header may spell a link's or a directory's mode differently: never a file's).
+        def key(v):
+            return v if v[0] == 'f' else (v[0], v[2]) if v[0] == 'l' else (v[0],)
+        mine = {p: key(v) for p, v in manifest_rows(mtext).items() if v[0] != 'g'}
+        host = {p: key(v) for p, v in new_rows.items() if v[0] != 'g'}
         if mine != host:
             diff = sorted(set(mine.items()) ^ set(host.items()))[:8]
             fail(row, f'the target\'s manifest differs from tools/install-manifest\'s: {diff}')
