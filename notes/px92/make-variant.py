@@ -305,6 +305,63 @@ edit("""    for n in ('nvme', 'steam', 'sandisk', 'target'):
         (d/(n + '.img')).unlink()
 """)
 
+# px92 (the dev stick, the coordinator's addition): PAX_METAL_MEM sets the guest's memory (the head's 2048M by
+# default); PAX_METAL_DEV=1 adds the dev rows at the installed shell: `wolf --version` says the pin's line, and a
+# small program printing env_args() is built there by `wolf build` and run with two arguments.
+edit("""    a = ['qemu-system-x86_64', '-machine', 'q35', '-cpu', 'max', '-m', '2048M', '-accel', accel(),
+""", """    a = ['qemu-system-x86_64', '-machine', 'q35', '-cpu', 'max', '-m', os.environ.get('PAX_METAL_MEM', '2048M'), '-accel', accel(),
+""")
+
+edit("""PX87 = os.environ.get('PAX_METAL_PX87', '')
+""", """PX87 = os.environ.get('PAX_METAL_PX87', '')
+DEV = os.environ.get('PAX_METAL_DEV', '') == '1'
+""")
+
+edit("""def boot0(d, stick):
+""", """def dev_rows(m):
+    """ + '"""' + """The dev image's compiler on the installed system, at root's shell (ENV=/etc/shrc: the dev PATH and WOLF_STD)."""
+    + '"""' + """
+    pin = (repo/'user/wolf.pin').read_text()
+    vline = next(l.split('=', 1)[1].strip().strip('"') for l in pin.splitlines() if l.startswith('WOLF_SRC_VERSION_LINE='))
+    s = m.command('wolf --version; echo PX92-V-$?', 'D1-wolf-version', 300)
+    m.shot('wolf-version')
+    flat = m.unwrapped(s)
+    if vline not in flat or 'PX92-V-0' not in flat:
+        fail('D1-wolf-version', f'want {vline!r} and status 0; screen:\\n{s}')
+    print(f'PASS D1-wolf-version: `wolf --version` on the installed 860 says {vline!r}, status 0', flush=True)
+    src = ['fn main() {', '    for a in env_args() {', '        print("arg {a}")', '    }', '}']
+    for k, line in enumerate(src):
+        m.command(f"echo '{line}' {'>' if k == 0 else '>>'} /root/px92args.lu", 'D2-source')
+    s = m.command('cat /root/px92args.lu', 'D2-source')
+    if any(l not in s for l in src):
+        fail('D2-source', f'the source as typed is not the program; screen:\\n{s}')
+    t0 = time.monotonic()
+    s = m.command('cd /root; wolf build px92args.lu; echo PX92-B-$?', 'D2-build', 900)
+    secs = time.monotonic() - t0
+    m.shot('wolf-build')
+    if 'PX92-B-0' not in m.unwrapped(s):
+        fail('D2-build', f'`wolf build px92args.lu` did not exit 0; screen:\\n{s}')
+    result['dev_build_seconds'] = round(secs, 2)
+    print(f'PASS D2-build: `wolf build px92args.lu` on the installed 860, status 0, {secs:.1f} s', flush=True)
+    s = m.command('./px92args one two; echo PX92-R-$?', 'D3-run', 300)
+    m.shot('run-args')
+    flat = m.unwrapped(s).split('./px92args one two; echo PX92-R-$?')[-1]
+    got = [l.strip() for l in flat.split('\\n') if l.strip()]
+    if got[:3] != ['arg one', 'arg two', 'PX92-R-0']:
+        fail('D3-run', f'want arg one, arg two, status 0; got {got[:4]!r}; screen:\\n{s}')
+    result['dev_run'] = got[:3]
+    print("PASS D3-run: `./px92args one two` printed 'arg one', 'arg two', status 0", flush=True)
+
+
+def boot0(d, stick):
+""")
+
+edit("""        need(s, 'wolf', 'M8-witness-read')
+""", """        need(s, 'wolf', 'M8-witness-read')
+        if DEV:
+            dev_rows(m)
+""")
+
 for old, new in EDITS:
     n = text.count(old)
     assert n == 1, (n, old[:120])
