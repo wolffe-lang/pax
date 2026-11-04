@@ -217,8 +217,9 @@ printing separate from the medium line.
 
 **The live entry is `quiet`** (px87, pax#246): `boot/limine-usb.conf`'s
 `cmdline: quiet` (px15's word) keeps a program's ordinary life (its exec,
-its exit, the first system call PAX lacks) off the live screen, where the
-installer draws its pages; refusals, faults and bad buffers still print.
+its exit, the first system call PAX lacks, and since px96 a write's -EBADF
+or -EFAULT) off the live screen, where the installer draws its pages;
+refusals and faults still print.
 The kernel names itself under its banner whatever the medium (px87,
 pax#176): `kernel: <commit> sha256 <digest>, <n> bytes`, the commit
 `tools/build-kernel` wrote into the ELF and the SHA-256 of the file Limine
