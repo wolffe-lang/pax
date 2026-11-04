@@ -467,6 +467,7 @@ def tree(name, row):
     img = root_image(work/f'{name}-root.img')
     out = work/f'{name}-tree'
     if out.exists():
+        run(['chmod', '-R', 'u+w', out], row=row)  # the root's 0555 directories, dumped as they are
         shutil.rmtree(out)
     out.mkdir()
     run(['debugfs', '-R', f'rdump / {out}', img], row=row)
