@@ -13,6 +13,7 @@
 #                      (tools/mkdisk --usb, tools/check-usb, a second build byte-identical, the 860's line,
 #                      read-only, sha256 twice)
 #   job.sh legs-a|legs-d|legs-x SHA   tests/mpx6-install.d/upgrade.py's three sections, each one take
+#   job.sh stick SHA   build and the three sections (d, a, x) in one hold
 set -uo pipefail
 L=/home/mfwolffe/lanes/px93
 CHUNK=$1 SHA=$2
@@ -154,6 +155,18 @@ print(struct.unpack_from("<Q",e,32)[0]*512)' "$k.tmp")
   stat -c '%s' "$k"
 )
 
+section() { # legs-a|legs-d|legs-x: one of upgrade.py's three sections against this head's stick
+  local args=$L/runs/args-$short/linux-args.out rows
+  [ -s "$args" ] || args=$(ls -t "$L"/runs/args-*/linux-args.out | head -1)
+  case $1 in
+    legs-a) rows=U1,U2,U0,U8,U3,U4,U5,U6,U7
+            grep -q '^WOLF_SRC_VERSION_LINE="wolf 0.2.35 ' "$CO/user/wolf.pin" && rows=U1,U2,U0,U8,U3,U4,U6,U7 ;;
+    legs-d) rows=U1d,U2d,U3d,U4d,U6d ;;
+    legs-x) rows=U9,U10,U11 ;;
+  esac
+  step "$1" leg "${1#legs-}" "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
+}
+
 exec 8>"$LOCK1"
 printf '%s px93 %s %s: waiting on %s (flock -w 21600), then %s\n' "$(ts)" "$CHUNK" "$short" "$LOCK1" "$LOCK2"
 flock -w 21600 8 || { echo "$(ts) the first lock wait timed out"; exit 4; }
@@ -201,15 +214,16 @@ case $CHUNK in
     # Three takes, each under 20 minutes: a, the 9c88ec8a install (U5 needs px92's wolf re-pin,
     # wolf-lang#962); d, the 8b4e98ae dev install; x, a fresh install's own manifest and the refusals
     # that need their own disk.
-    args=$L/runs/args-$short/linux-args.out
-    [ -s "$args" ] || args=$(ls -t "$L"/runs/args-*/linux-args.out | head -1)
-    case $CHUNK in
-      legs-a) rows=U1,U2,U0,U8,U3,U4,U5,U6,U7
-              grep -q '^WOLF_SRC_VERSION_LINE="wolf 0.2.35 ' "$CO/user/wolf.pin" && rows=U1,U2,U0,U8,U3,U4,U6,U7 ;;
-      legs-d) rows=U1d,U2d,U3d,U4d,U6d ;;
-      legs-x) rows=U9,U10,U11 ;;
-    esac
-    step "$CHUNK" leg "${CHUNK#legs-}" "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
+    section "$CHUNK"
+    ;;
+  stick)
+    # The stick the maintainer waits on, in one hold: the build, then the three sections, the 860's
+    # 8b4e98ae shape first (a queue between four chunks would cost more than the hold).
+    step sbuild sbuild
+    step sstick sstick
+    section legs-d
+    section legs-a
+    section legs-x
     ;;
   gauntlet-1|gauntlet-2|gauntlet-3)
     # The one gauntlet at the final head, three takes before the legs' three (px86's set, the paths' own
@@ -244,7 +258,7 @@ case $CHUNK in
         ;;
     esac
     ;;
-  *) echo "CHUNK is red, red-verify, units, build, legs-a, legs-d, legs-x or gauntlet-1..3"; exit 2 ;;
+  *) echo "CHUNK is red, red-verify, units, build, legs-a, legs-d, legs-x, stick or gauntlet-1..3"; exit 2 ;;
 esac
 sensors > "$L/runs/$CHUNK-$short-sensors-end.txt" 2>&1 || true
 flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
