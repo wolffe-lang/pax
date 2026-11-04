@@ -333,7 +333,7 @@ wolf build hello.lu
 ./hello
 ```
 
-Three things to know at 0.2.35: there is no `wolf check` command; `wolf run --checked` is a native build, not the
+Three things px65 measured at 0.2.35 (not measured again at 0.2.36): there is no `wolf check` command; `wolf run --checked` is a native build, not the
 checked machine, and needs the native link step; and `--release` still needs an external clang, which the image does
 not carry. `wolf build --no-cache --emit=obj hello.lu -o hello.o` emits a native object with no linker. The dev ISO is
 tested with 2 GiB of RAM. `tests/mpx5-wolf` holds root and `pax` sessions byte for byte to the same binaries on Linux
