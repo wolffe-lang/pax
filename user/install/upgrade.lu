@@ -23,9 +23,16 @@
 //! - every other path, and /home and /root whole, never touched;
 //! - /etc/passwd and /etc/group stay the user's, with any system account
 //!   the new image adds that they lack appended;
-//! - /etc/fstab and the root's and the ESP's limine.conf regenerated for
-//!   the target's own PARTUUID (a root copy the user changed is kept, its
-//!   regenerated text beside it); /etc/pax-run and /etc/pax-login kept;
+//! - /etc/fstab, the root's limine.conf, /etc/pax-run and /etc/pax-login,
+//!   the files an install generates: written again when they hold the new
+//!   installer's text or one an installer wrote before (R-px93-9: the old
+//!   manifest's row for the path, when that manifest records installers'
+//!   texts, or the stick's `/usr/share/pax-install/baselines/
+//!   generated.sha256`); any other text is the user's, kept, the new text
+//!   beside it. /etc/fstab and limine.conf name the target's own PARTUUID,
+//!   and their template is the only text an installer has written there.
+//!   The new manifest records each one's installer text, never a text of the
+//!   user's it kept. The ESP's limine.conf is always regenerated;
 //! - on the ESP, /boot/pax, Limine's limine-bios.sys and BOOTX64.EFI
 //!   replaced where their bytes differ (paxfat replace).
 //!
@@ -57,6 +64,8 @@ struct UpPlan {
     bytes: int,
     largest: int,
     paths: int,
+    // R-px93-9: [path, sha256, size] of each generated file's installer text, for the new manifest.
+    gen: List[List[str]],
 }
 
 fn absent_row(path: str) -> Row {
@@ -104,6 +113,7 @@ fn plan_paths(old: Manifest, new: Manifest) -> UpPlan ! {io} {
         bytes: 0,
         largest: 0,
         paths: 0,
+        gen: List[List[str]](),
     }
     for n in new.rows {
         if n.kind == "g" { continue }
@@ -182,20 +192,56 @@ fn new_accounts(text: str, have: str) -> List[str] {
 }
 
 /// A text for `path` on the root: [path, the text to write, why]. The
-/// target's copy equal to `want` needs nothing; a missing one is
-/// written; any other is the user's, kept, `want` beside it.
-fn text_step(mut p: UpPlan, path: str, want: str, why: str) {
+/// target's copy equal to `want` needs nothing; a missing one is written,
+/// and so is one holding an installer's earlier text (`known`, R-px93-9);
+/// any other is the user's, kept, `want` beside it.
+fn text_step(mut p: UpPlan, path: str, want: str, why: str, known: List[str]) {
+    (mut p.gen).push([path, sha2.to_hex(sha2.sum256(want.bytes())), "{want.len}"])
     let present = fs_exists("{TARGET_ROOT}{path}")
     let have = fs_read_text("{TARGET_ROOT}{path}") else |_| ""
     if present && have == want { return }
     if !present {
         (mut p.texts).push([path, want, why])
+    } else if has(known, "{sha2.to_hex(sha2.sum256(have.bytes()))} {path}") {
+        (mut p.texts).push([path, want, "{why}: an earlier installer's text, regenerated"])
     } else {
         (mut p.kept).push("{path} ({why}: yours kept)")
         let beside = fs_read_text("{TARGET_ROOT}{path}.pax-new") else |_| ""
         if beside != want { (mut p.texts).push(["{path}.pax-new", want, why]) }
     }
     p.bytes += want.len
+}
+
+fn has(xs: List[str], x: str) -> bool {
+    for y in xs {
+        if y == x { return true }
+    }
+    false
+}
+
+/// R-px93-9: the manifest source line of an upgrade that records each
+/// generated file's installer text (a fresh install's rows are its texts).
+const GEN_RECORDED: str = " (generated rows: the installer's texts)"
+
+/// The texts installers wrote into the generated files, as `sha256 path`:
+/// the stick's table of earlier installers' (`baselines/generated.sha256`)
+/// and the old manifest's own rows, when that manifest records installers'
+/// texts (a fresh install's, or an upgrade's that says so; an earlier
+/// upgrade recorded the text it left, which may be the user's).
+fn known_texts(old: Manifest, payload: str) -> List[str] {
+    var k = List[str]()
+    let table = fs_read_text("{payload}/baselines/generated.sha256") else |_| ""
+    for line in table.lines() {
+        let l = line.trim()
+        if l.len == 0 || l.starts_with("#") { continue }
+        (mut k).push(l)
+    }
+    if old.source == "pax-install, a fresh install" || old.source.ends_with(GEN_RECORDED) {
+        for r in old.rows {
+            if r.kind == "g" && r.digest != "-" { (mut k).push("{r.digest} {r.path}") }
+        }
+    }
+    k
 }
 
 /// The ESP's file `dst` as the target has it, hashed (by paxfat cat).
@@ -441,10 +487,11 @@ fn upgrade_main(o: Options, work: str) -> int {
         for g in groups { t += "{g}\n" }
         (mut p.texts).push(["/etc/group", t, "groups appended"])
     }
-    text_step(mut p, "/etc/fstab", fstab_text(uuid), "regenerated for PARTUUID={uuid}")
-    text_step(mut p, "/boot/limine/limine.conf", config_text(uuid), "regenerated for PARTUUID={uuid}")
-    text_step(mut p, "/etc/pax-run", INSTALLED_RUN, "the installed login")
-    text_step(mut p, "/etc/pax-login", installed_login(), "the installed login")
+    let known = known_texts(old, o.payload)
+    text_step(mut p, "/etc/fstab", fstab_text(uuid), "regenerated for PARTUUID={uuid}", known)
+    text_step(mut p, "/boot/limine/limine.conf", config_text(uuid), "regenerated for PARTUUID={uuid}", known)
+    text_step(mut p, "/etc/pax-run", INSTALLED_RUN, "the installed login", known)
+    text_step(mut p, "/etc/pax-login", installed_login(), "the installed login", known)
     let from_esp = ["/boot/pax", "/boot/limine/limine-bios.sys", "/boot/EFI/BOOT/BOOTX64.EFI"]
     let to_esp = ["/boot/pax", "/boot/limine/limine-bios.sys", "/EFI/BOOT/BOOTX64.EFI"]
     for i in 0..from_esp.len {
@@ -585,7 +632,8 @@ fn upgrade_main(o: Options, work: str) -> int {
         say(mut lg, "phase limine: durable")
     }
     flush_up(mut lg, tlog)
-    // The manifest last: the new image's rows, the generated ones as written.
+    // The manifest last: the new image's rows, the generated ones the
+    // installer's texts (R-px93-9; the accounts as written).
     var m = copy new
     for i in 0..m.rows.len {
         if m.rows[i].kind == "g" {
@@ -593,9 +641,15 @@ fn upgrade_main(o: Options, work: str) -> int {
             m.rows[i].digest = t.digest
             m.rows[i].mode = t.mode
             m.rows[i].size = t.size
+            for g in p.gen {
+                if g[0] == m.rows[i].path {
+                    m.rows[i].digest = g[1]
+                    m.rows[i].size = g[2].to_int() else |_| t.size
+                }
+            }
         }
     }
-    m.source = "pax-install --upgrade from {old.commit}"
+    m.source = "pax-install --upgrade from {old.commit}{GEN_RECORDED}"
     put_text("{dir}/manifest", manifest_text(m), 420) else |_| { return stop(mut lg, "pax-install: upgrade stopped: {dir}/manifest; run pax-install --upgrade again from this stick to finish") }
     fs_remove("{dir}/upgrading") else |_| {}
     if fs_exists("{dir}/previous") { fs_remove("{dir}/previous") else |_| {} }
