@@ -295,7 +295,15 @@ case $CHUNK in
     VARIANT=$L/variant-dev step sleg-rel sleg rel "$L/sout/pax-install-kasumi-$short.img" pax "" "$L/legs/mpx6/metal/target-after.img" keep
     VARIANT=$L/variant-dev SLEG_EXTRA="-e PAX_METAL_MEM=4096M -e PAX_METAL_DEV=1" step sleg-dev sleg dev "$D/pax-install-kasumi-dev-$short.img" pax "$HEAD" "$L/legs/rel/metal/target-after.img"
     ;;
-  *) echo "CHUNK is build, legs or dev"; exit 2 ;;
+  devresume)
+    # dev after its first take stopped at sdevcmp (the slow paxfat cat, stopped): the same steps from sdevcmp on.
+    [ -f "$D/pax-install-kasumi-dev-$short.img" ] && [ "$(sha256sum "$D/pax-install-kasumi-dev-$short.img" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$D/kasumi-dev-build-read-1.sha256")" ]
+    step sdevcmp sdevcmp
+    step devlegs-prep devlegs_prep
+    VARIANT=$L/variant-dev step sleg-rel sleg rel "$L/sout/pax-install-kasumi-$short.img" pax "" "$L/legs/mpx6/metal/target-after.img" keep
+    VARIANT=$L/variant-dev SLEG_EXTRA="-e PAX_METAL_MEM=4096M -e PAX_METAL_DEV=1" step sleg-dev sleg dev "$D/pax-install-kasumi-dev-$short.img" pax "$HEAD" "$L/legs/rel/metal/target-after.img"
+    ;;
+  *) echo "CHUNK is build, legs, dev or devresume"; exit 2 ;;
 esac
 [ "$SLOT" = NOLOCK-B ] || { flock -u 9; exec 9>&-; }
 { [ "$SLOT" = AB ] || [ "$SLOT" = ABA ]; } && { flock -u 8; exec 8>&-; }
