@@ -61,7 +61,7 @@ import time
 
 repo, work, old_src, new_src = map(Path, sys.argv[1:5])
 ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7',
-                                                        'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11']
+                                                        'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11', 'U12']
 DEV_SRC = Path(os.environ['PAX_UPGRADE_DEV_STICK']) if os.environ.get('PAX_UPGRADE_DEV_STICK') else None
 work.mkdir(parents=True, exist_ok=True)
 SERIAL = os.environ['PAX_UPGRADE_SERIAL']
@@ -937,7 +937,19 @@ def track_d():
 
 def track_x():
     """A fresh install from the new stick upgraded with no baseline (U9); the
-    refusals that need their own disk: not PAX's (U10), too little space (U11)."""
+    refusals that need their own disk: not PAX's (U10), too little space (U11);
+    a generated file in an earlier installer's text regenerated, the user's kept (U12)."""
+    if 'U9' in ROWS:
+        u9()
+    if 'U10' in ROWS:
+        u10()
+    if 'U11' in ROWS:
+        u11()
+    if 'U12' in ROWS:
+        u12()
+
+
+def u9():
     disks()
     secs = install_from(C['new'], C['sym_new'], 'u9-install', 'U9-fresh')
     rows, rc, text = tree('u9-installed', 'U9-fresh')
@@ -946,6 +958,8 @@ def track_x():
     again('u9-again', 'U9-fresh', rows, needles=[f'Installed: {C["new_commit"]}, from its manifest'])
     passed('U9-fresh', f'the new stick installed the target in {secs} s with its own /etc/pax-install/manifest; the upgrade with the same stick read it, no baseline: "Nothing to change", every path as it was')
 
+
+def u10():
     disks(used='fat32')
     t0 = extents_sha(DISKS/'target.img')
     m = Machine('u10-not-pax', C['sym_new'], C['new'])
@@ -967,6 +981,8 @@ def track_x():
         fail('U10-not-pax', 'the used disk changed')
     passed('U10-not-pax', 'a listed disk holding an older system (tools/used-disk fat32): nothing mounted, pax-install refused by name (not a PAX install), the disk byte-identical')
 
+
+def u11():
     disks(size=1073741824)
     install_from(C['old'], C['sym_old'], 'u11-install', 'U11-no-space')
     m = Machine('u11-no-space', C['sym_new'], C['new'])
@@ -987,13 +1003,77 @@ def track_x():
     passed('U11-no-space', 'a 1 GiB 860 from the old stick, its root filled by a user file: pax-install refused by name (too little space), /etc/pax-install not made')
 
 
+U12_OLD = "printf '# px93 U12: an earlier installer wrote this login\\nexec /bin/pelt -i -m\\n' > /mnt/target/etc/pax-login; echo w=$?"
+U12_LINE = b'# px93 U12: the user own line\n'
+
+
+def u12():
+    """R-px93-9: a generated file holding the text an earlier installer wrote
+    (its manifest's row says so) is the installer's: regenerated, nothing
+    beside it. The same file edited by its user is kept, the new text beside
+    it as .pax-new; and a third run changes nothing, so the manifest the
+    upgrade wrote records the installer's text, not the user's."""
+    row = 'U12-installer-text'
+    disks()
+    install_from(C['new'], C['sym_new'], 'u12-install', row)
+    rows, rc, text = tree('u12-installed', row)
+    want = rows.get('/etc/pax-login', ('', 0, ''))[2]
+    if rc != 0 or not want or '/etc/pax-install/manifest' not in rows:
+        fail(row, f'the fresh install: e2fsck -fn exit {rc}, /etc/pax-login {want!r}')
+    m = Machine('u12-upgrade', C['sym_new'], C['new'])
+    try:
+        m.upgrade_entry(row)
+        login(m, row)
+        # The earlier installer's text, and the install's manifest naming it as the installer's.
+        s = m.command(U12_OLD, row)
+        need(m.unwrapped(s), 'w=0', row)
+        s = m.command("grep -v ' /etc/pax-login$' /mnt/target/etc/pax-install/manifest > /root/m.u12; echo g=$?", row)
+        need(m.unwrapped(s), 'g=0', row)
+        s = m.command("d=$(sha256sum /mnt/target/etc/pax-login | cut -d' ' -f1); printf 'g 0644 0 0 0 %s /etc/pax-login\\n' \"$d\" >> /root/m.u12; cat /root/m.u12 > /mnt/target/etc/pax-install/manifest; echo m=$?", row)
+        need(m.unwrapped(s), 'm=0', row)
+        upgrade(m, 'U12-old-text', ['text /etc/pax-login (the installed login: an earlier installer'])
+        plan = (work/'U12-old-text-plan.txt').read_text()
+        if 'keep /etc/pax-login' in plan or '/etc/pax-login.pax-new' in plan:
+            fail(row, 'the earlier installer\'s text was kept as the user\'s:\n' + plan)
+        m.wait(PROMPT, row, 60, last=True)
+        # The user's edit.
+        s = m.command("printf '# px93 U12: the user own line\\n' >> /mnt/target/etc/pax-login; echo e=$?", row)
+        need(m.unwrapped(s), 'e=0', row)
+        upgrade(m, 'U12-edited', ['keep /etc/pax-login (the installed login: yours kept)', 'text /etc/pax-login.pax-new (the installed login)'])
+        m.wait(PROMPT, row, 60, last=True)
+        # Once more: nothing to change.
+        m.run('pax-install --upgrade')
+        m.wait('^' + re.escape('Nothing to change: /dev/sdc already holds this image'), row, 900, bad=r'^UPGRADE /dev/sdc|' + STOPPED)
+        m.wait(PROMPT, row, 60, last=True)
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    rows, rc, text = tree('u12-after', row)
+    top = work/'u12-after-tree'
+    kids = list(top.iterdir())
+    top = kids[0] if len(kids) == 1 and not (top/'etc').exists() else top
+    login_now = (top/'etc/pax-login').read_bytes()
+    beside = (top/'etc/pax-login.pax-new').read_bytes() if (top/'etc/pax-login.pax-new').exists() else b''
+    if hashlib.sha256(beside).hexdigest() != want:
+        fail(row, f'/etc/pax-login.pax-new is not the installer\'s text: {hashlib.sha256(beside).hexdigest()}')
+    if login_now != beside + U12_LINE:
+        fail(row, '/etc/pax-login is not the regenerated text with the user\'s line')
+    mrow = manifest_rows((top/'etc/pax-install/manifest').read_text()).get('/etc/pax-login')
+    if mrow is None or mrow[2] != want:
+        fail(row, f'the manifest\'s /etc/pax-login row is not the installer\'s text: {mrow}')
+    if rc != 0:
+        fail(row, f'e2fsck -fn exit {rc}:\n{text}')
+    passed(row, 'an earlier installer\'s /etc/pax-login (the manifest\'s row) regenerated, nothing beside it; the user\'s edit kept with /etc/pax-login.pax-new the new text; a third run "Nothing to change"; the manifest records the installer\'s text; e2fsck -fn clean')
+
+
 def main():
     sticks()
     if 'U1' in ROWS:
         track_a()
     if 'U1d' in ROWS:
         track_d()
-    if 'U9' in ROWS:
+    if any(r in ROWS for r in ('U9', 'U10', 'U11', 'U12')):
         track_x()
     result['leg_seconds'] = round(time.monotonic() - t_leg, 2)
     save()
