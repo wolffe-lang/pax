@@ -52,11 +52,14 @@ def main():
     blob = base.read_bytes()
     assert sha(blob) == BASE_SHA, 'baseline payload digest mismatch'
     rows = read_cpio(blob)
-    # Validate the retained compiler/linker individually, not only the container.
+    # px92 (wolf-lang#962): the dev compiler is user/wolf.pin's, built from source by tools/mkwolf into
+    # INPUTS/wolf and held to user/wolf.sums; it replaces the base payload's v0.2.35, whose static musl
+    # programs read an empty env_args(). The link stack stays the base payload's, validated below.
     for line in (ROOT / 'user/wolf.sums').read_text().splitlines():
         name, digest, size = line.split()
-        data = rows['usr/bin/'+name][3]
+        data = (inputs/'wolf'/name).read_bytes()
         assert (sha(data), len(data)) == (digest, int(size)), 'compiler input mismatch: '+name
+        rows['usr/bin/'+name] = (*rows['usr/bin/'+name][:3], data)
     for line in (ROOT / 'user/wolf-link.sums').read_text().splitlines():
         name, digest, size = line.split()
         path = 'usr/lib/wolf-musl/'+name[8:] if name.startswith('sysroot/') else 'usr/bin/'+name
@@ -67,15 +70,21 @@ def main():
             if parent.as_posix() != '.':
                 rows.setdefault(parent.as_posix(), (0o40755, uid, gid, b''))
         rows[name] = (0o100000 | mode, uid, gid, data)
-    # The compiler keeps its own std, while lupin gets user/std.pin in BOTH images.
+    # The compiler keeps its own std, while lupin gets user/std.pin in BOTH images. px92: the compiler's is
+    # user/wolf.pin's WOLF_STD_REV, staged by tools/mkwolf-std into INPUTS/wolf-std (the base payload's
+    # compiler std was v0.2.35's).
     for name in list(rows):
         if name.startswith('usr/share/wolf/std/'):
-            if variant == 'dev':
-                rows[name.replace('usr/share/wolf/std/', 'usr/share/wolf/compiler-std/', 1)] = rows[name]
             del rows[name]
     if variant == 'dev':
+        std_rev = next(l.split('=', 1)[1].strip() for l in (ROOT / 'user/wolf.pin').read_text().splitlines()
+                       if l.startswith('WOLF_STD_REV='))
         rows['usr/share/wolf/compiler-std'] = (0o40755, 0, 0, b'')
-        assert rows['usr/share/wolf/compiler-std/STD-REV'][3].strip() == b'2386522eb059cca5a84108562c2c0a0e72345d34'
+        for source in sorted((inputs/'wolf-std').rglob('*')):
+            assert not source.is_symlink(), 'compiler std symlink'
+            name = 'usr/share/wolf/compiler-std/' + source.relative_to(inputs/'wolf-std').as_posix()
+            rows[name] = (0o40755, 0, 0, b'') if source.is_dir() else (0o100644, 0, 0, source.read_bytes())
+        assert rows['usr/share/wolf/compiler-std/STD-REV'][3].strip() == std_rev.encode(), 'compiler std revision'
     else:
         for name in list(rows):
             if name == 'usr/bin' or name.startswith('usr/bin/') or name == 'usr/lib/wolf-musl' or name.startswith('usr/lib/wolf-musl/'):
