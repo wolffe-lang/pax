@@ -84,15 +84,12 @@ fn header_value(line: str, key: str) -> str ! {invalid} {
 fn parse_manifest(text: str) -> Manifest ! {invalid} {
     let lines = text.lines()
     if lines.len < 6 || lines[0] != "pax-install manifest v1" { return invalid }
-    var m = Manifest {
-        commit: header_value(lines[1], "commit")?,
-        kernel: header_value(lines[2], "kernel")?,
-        release: header_value(lines[3], "release")?,
-        files: header_value(lines[4], "files")?,
-        source: header_value(lines[5], "source")?,
-        rows: List[Row](),
-        at: Map[str, int](),
-    }
+    let commit = header_value(lines[1], "commit")?
+    let kernel = header_value(lines[2], "kernel")?
+    let release = header_value(lines[3], "release")?
+    let files = header_value(lines[4], "files")?
+    let source = header_value(lines[5], "source")?
+    var m = Manifest { commit: commit, kernel: kernel, release: release, files: files, source: source, rows: List[Row](), at: Map[str, int]() }
     for k in 6..lines.len {
         let line = lines[k]
         // Six fields, then the path (which may hold spaces).
@@ -108,15 +105,11 @@ fn parse_manifest(text: str) -> Manifest ! {invalid} {
         if kind != "f" && kind != "d" && kind != "l" && kind != "g" { return invalid }
         let path = line[cuts[5] + 1..]
         if !path.starts_with("/") || (m.at[path] else -1) != -1 { return invalid }
-        let r = Row {
-            kind: kind,
-            mode: octal_value(line[cuts[0] + 1..cuts[1]])?,
-            uid: line[cuts[1] + 1..cuts[2]].to_int() else |_| { return invalid },
-            gid: line[cuts[2] + 1..cuts[3]].to_int() else |_| { return invalid },
-            size: line[cuts[3] + 1..cuts[4]].to_int() else |_| { return invalid },
-            digest: line[cuts[4] + 1..cuts[5]],
-            path: path,
-        }
+        let mode = octal_value(line[cuts[0] + 1..cuts[1]])?
+        let uid = line[cuts[1] + 1..cuts[2]].to_int() else |_| { return invalid }
+        let gid = line[cuts[2] + 1..cuts[3]].to_int() else |_| { return invalid }
+        let size = line[cuts[3] + 1..cuts[4]].to_int() else |_| { return invalid }
+        let r = Row { kind: kind, mode: mode, uid: uid, gid: gid, size: size, digest: line[cuts[4] + 1..cuts[5]], path: path }
         m.at[path] = m.rows.len
         (mut m.rows).push(r)
     }
