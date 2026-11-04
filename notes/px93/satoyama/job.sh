@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# px93 on satoyama: one chunk per run, both locks (A outside, then B), slot A's CPUs 0-3,8-11 for every
-# step (taskset inside each container), at most 2 h a hold. A step's END line carries its exit; a red
+# px93 on satoyama or hasu: one chunk per run, at most 2 h a hold. On satoyama both locks (A outside, then
+# B) and slot A's CPUs 0-3,8-11; on hasu block B by both its lock names (hasu-block-B outside, then hasu-B)
+# and CPUs 6-11; taskset inside each container. $L/STOP-<host> makes a queued chunk stand down before its
+# locks (a chunk another host has already run). A step's END line carries its exit; a red
 # step stops the chunk, but in the `red` chunk, where each step must fail by name.
 #   job.sh red   SHA   the tests-only head: fat.py's replace row, and the leg's U1, U2, U0 and U8 with the
 #                      staged 9c88ec8a stick as both sticks (its pax-install has no --upgrade)
@@ -14,9 +16,17 @@ set -uo pipefail
 L=/home/mfwolffe/lanes/px93
 CHUNK=$1 SHA=$2
 short=${SHA:0:8}
-CPUS=0-3,8-11
-P=/home/mfwolffe/lanes/satoyama-env/bin/podman
-export PATH=/home/mfwolffe/lanes/satoyama-env/bin:$PATH TMPDIR=$L/tmp
+HOST=$(hostname -s)
+case $HOST in
+  hasu*) CPUS=6-11; LOCK1=/home/mfwolffe/lanes/hasu-block-B.lock; LOCK2=/home/mfwolffe/lanes/hasu-B.lock
+         P=/home/mfwolffe/lanes/hasu-env/bin/podman
+         export PATH=/home/mfwolffe/lanes/hasu-env/bin:/home/mfwolffe/lanes/hasu-env/profile/bin:$PATH ;;
+  *)     CPUS=0-3,8-11; LOCK1=/home/mfwolffe/lanes/satoyama-A.lock; LOCK2=/home/mfwolffe/lanes/satoyama-B.lock
+         P=/home/mfwolffe/lanes/satoyama-env/bin/podman
+         export PATH=/home/mfwolffe/lanes/satoyama-env/bin:$PATH ;;
+esac
+export TMPDIR=$L/tmp
+if [ -e "$L/STOP-$HOST" ]; then echo "$(date -u +%FT%TZ) px93 $CHUNK ${SHA:0:8}: $L/STOP-$HOST says stand down"; exit 0; fi
 mkdir -p "$L/tmp" "$L/slogs" "$L/runs"
 printf '%s\n' "$$" > "$L/$CHUNK-$short.pid"
 taskset -cp "$CPUS" $$ > /dev/null
@@ -44,7 +54,7 @@ ctr() { # NAME IMAGE KVM CMD...
     -v "$L:$L" -w "$CO" -e TMPDIR="$L/tmp" -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' \
     ${CTR_ENV:-} "$img" taskset -c "$CPUS" "$@"
 }
-SERIAL=$(sed -n 's/^model=Samsung SSD 860 serial=//p' /home/mfwolffe/lanes/px92/allow-line)
+SERIAL=$(sed -n 's/^model=Samsung SSD 860 serial=//p' "$L/allow-line")
 [ -n "$SERIAL" ] || { echo "no serial"; exit 3; }
 OLD=$L/old/pax-install-kasumi-9c88ec8a.img
 
@@ -122,9 +132,9 @@ sstick() (
   esp=$(python3 -I -c 'import struct,sys
 f=open(sys.argv[1],"rb"); f.seek(512); h=f.read(92); a=struct.unpack_from("<Q",h,72)[0]; f.seek(a*512); e=f.read(128)
 print(struct.unpack_from("<Q",e,32)[0]*512)' "$k.tmp")
-  "$out/disktools/paxfat" --offset "$esp" append "$k.tmp" /home/mfwolffe/lanes/px92/allow-line /pax/install-targets
+  "$out/disktools/paxfat" --offset "$esp" append "$k.tmp" "$L/allow-line" /pax/install-targets
   "$out/disktools/paxfat" --offset "$esp" cat "$k.tmp" /pax/install-targets > "$out/install-targets.on-stick"
-  cat boot/install-targets /home/mfwolffe/lanes/px92/allow-line > "$out/install-targets.expected"
+  cat boot/install-targets "$L/allow-line" > "$out/install-targets.expected"
   cmp "$out/install-targets.on-stick" "$out/install-targets.expected"
   tools/check-usb "$k.tmp" "${exp[@]:0:10}" --expect "/pax/install-targets=$out/install-targets.expected" | tee "$L/slogs/kasumi-usb-check-$short.log"
   mv "$k.tmp" "$k"; chmod 444 "$k"
@@ -132,13 +142,13 @@ print(struct.unpack_from("<Q",e,32)[0]*512)' "$k.tmp")
   stat -c '%s' "$k"
 )
 
-exec 8>/home/mfwolffe/lanes/satoyama-A.lock
-printf '%s px93 %s %s: waiting on satoyama-A.lock (flock -w 21600), then B\n' "$(ts)" "$CHUNK" "$short"
-flock -w 21600 8 || { echo "$(ts) the A lock wait timed out"; exit 4; }
-printf '%s px93 %s: satoyama-A.lock acquired; waiting on satoyama-B.lock\n' "$(ts)" "$CHUNK"
-exec 9>/home/mfwolffe/lanes/satoyama-B.lock
-flock -w 21600 9 || { echo "$(ts) the B lock wait timed out"; exit 4; }
-printf '%s px93 %s: both satoyama locks acquired (CPUs %s)\n' "$(ts)" "$CHUNK" "$CPUS"
+exec 8>"$LOCK1"
+printf '%s px93 %s %s: waiting on %s (flock -w 21600), then %s\n' "$(ts)" "$CHUNK" "$short" "$LOCK1" "$LOCK2"
+flock -w 21600 8 || { echo "$(ts) the first lock wait timed out"; exit 4; }
+printf '%s px93 %s: %s acquired; waiting on %s\n' "$(ts)" "$CHUNK" "$LOCK1" "$LOCK2"
+exec 9>"$LOCK2"
+flock -w 21600 9 || { echo "$(ts) the second lock wait timed out"; exit 4; }
+printf '%s px93 %s: both locks acquired on %s (CPUs %s)\n' "$(ts)" "$CHUNK" "$HOST" "$CPUS"
 sensors > "$L/runs/$CHUNK-$short-sensors-start.txt" 2>&1 || true
 checkout
 case $CHUNK in
@@ -167,5 +177,5 @@ case $CHUNK in
 esac
 sensors > "$L/runs/$CHUNK-$short-sensors-end.txt" 2>&1 || true
 flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
-printf '%s px93 %s: both satoyama locks RELEASED\n' "$(ts)" "$CHUNK"
+printf '%s px93 %s: both locks RELEASED on %s\n' "$(ts)" "$CHUNK" "$HOST"
 printf '%s CHUNK %s DONE %s\n' "$(ts)" "$CHUNK" "$short"
