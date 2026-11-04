@@ -628,6 +628,7 @@ Intel I225/I226 through kernel/gbe (`tests/mpx4-dhcp`, `tests/mpx4-igb`).
 | `ip/`, `arp/` | (px89) `configure` and `set_ip`: the address, netmask and gateway changed at run time (0.0.0.0 while no lease is held) |
 | `udp/` | (px89) `checksum` public |
 | `../boot/net.S` | (px89) `pax_gbe_state` (256 words), `pax_dhcp_state` (128) |
+| `kmain_sockets.lu`, `kmain_session.lu` | (px89) `/etc/pax-net` read, the client started, the list run after the first lease (or the wait); the loopback line counts its own pings' frames; kmain_session attaches the USB disks after xHCI's first pass as kmain_console does (the metal stick writes its record to itself) |
 
 - Locks: kernel/dhcp has no lock word of its own (the eight are taken); its
   words change with IF clear, and it calls kernel/ip, kernel/arp and
