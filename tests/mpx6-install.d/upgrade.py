@@ -1020,11 +1020,11 @@ def u12():
     want = rows.get('/etc/pax-login', ('', 0, ''))[2]
     if rc != 0 or not want or '/etc/pax-install/manifest' not in rows:
         fail(row, f'the fresh install: e2fsck -fn exit {rc}, /etc/pax-login {want!r}')
+    # The earlier installer's text, and the install's manifest naming it as the installer's.
     m = Machine('u12-upgrade', C['sym_new'], C['new'])
     try:
         m.upgrade_entry(row)
         login(m, row)
-        # The earlier installer's text, and the install's manifest naming it as the installer's.
         s = m.command(U12_OLD, row)
         need(m.unwrapped(s), 'w=0', row)
         s = m.command("grep -v ' /etc/pax-login$' /mnt/target/etc/pax-install/manifest > /root/m.u12; echo g=$?", row)
@@ -1035,22 +1035,39 @@ def u12():
         plan = (work/'U12-old-text-plan.txt').read_text()
         if 'keep /etc/pax-login' in plan or '/etc/pax-login.pax-new' in plan:
             fail(row, 'the earlier installer\'s text was kept as the user\'s:\n' + plan)
-        m.wait(PROMPT, row, 60, last=True)
-        # The user's edit.
+        poweroff(m, row)  # the answer to pax-install's reboot-or-power-off question
+    finally:
+        m.kill()
+    check_witnesses(row)
+    rows, rc, text = tree('u12-regenerated', row)
+    if rows.get('/etc/pax-login', ('', 0, ''))[2] != want or '/etc/pax-login.pax-new' in rows:
+        fail(row, f'after the first upgrade /etc/pax-login is {rows.get("/etc/pax-login")}, not the installer\'s {want}, or a .pax-new is beside it')
+    # The regenerated login is the console's: the upgraded disk alone, root logged in.
+    b = Machine('u12-boot', C['sym_new'], None)
+    try:
+        login(b, row)
+        s = b.command('echo in=$?', row)
+        need(b.unwrapped(s), 'in=0', row)
+        poweroff(b, row)
+    finally:
+        b.kill()
+    check_witnesses(row)
+    # The user's edit: kept, the new text beside it.
+    m = Machine('u12-edited', C['sym_new'], C['new'])
+    try:
+        m.upgrade_entry(row)
+        login(m, row)
         s = m.command("printf '# px93 U12: the user own line\\n' >> /mnt/target/etc/pax-login; echo e=$?", row)
         need(m.unwrapped(s), 'e=0', row)
         upgrade(m, 'U12-edited', ['keep /etc/pax-login (the installed login: yours kept)', 'text /etc/pax-login.pax-new (the installed login)'])
-        m.wait(PROMPT, row, 60, last=True)
-        # Once more: nothing to change.
-        m.run('pax-install --upgrade')
-        m.wait('^' + re.escape('Nothing to change: /dev/sdc already holds this image'), row, 900, bad=r'^UPGRADE /dev/sdc|' + STOPPED)
-        m.wait(PROMPT, row, 60, last=True)
         poweroff(m, row)
     finally:
         m.kill()
     check_witnesses(row)
-    rows, rc, text = tree('u12-after', row)
-    top = work/'u12-after-tree'
+    rows, rc, text = tree('u12-edited', row)
+    # Once more: nothing to change, so the manifest records the installer's text, not the user's.
+    again('u12-again', row, rows)
+    top = work/'u12-again-tree'
     kids = list(top.iterdir())
     top = kids[0] if len(kids) == 1 and not (top/'etc').exists() else top
     login_now = (top/'etc/pax-login').read_bytes()
@@ -1064,7 +1081,7 @@ def u12():
         fail(row, f'the manifest\'s /etc/pax-login row is not the installer\'s text: {mrow}')
     if rc != 0:
         fail(row, f'e2fsck -fn exit {rc}:\n{text}')
-    passed(row, 'an earlier installer\'s /etc/pax-login (the manifest\'s row) regenerated, nothing beside it; the user\'s edit kept with /etc/pax-login.pax-new the new text; a third run "Nothing to change"; the manifest records the installer\'s text; e2fsck -fn clean')
+    passed(row, 'an earlier installer\'s /etc/pax-login (the manifest\'s row) regenerated, nothing beside it, and root logged in at the upgraded disk\'s console by it; the user\'s edit kept with /etc/pax-login.pax-new the new text; a third run "Nothing to change"; the manifest records the installer\'s text; e2fsck -fn clean')
 
 
 def main():
