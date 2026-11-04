@@ -9,8 +9,10 @@
 #                   [--tier native|release|both]
 #
 # Three kernels, from kernel/: kmain_user (U1-U6), kmain_user_smap (U7),
-# kmain_user_smep (U8). Assertions, per tier (native, release) and
-# firmware (bios, uefi):
+# kmain_user_smep (U8); and kmain_user again in a fourth image, with
+# `quiet` on the kernel command line (tests/mpx3-user.d/limine-quiet.conf,
+# px96: U9, U10). Assertions, per tier (native, release) and firmware
+# (bios, uefi):
 #   U0 build: tools/build-kernel's object assertions for all three; the
 #      ELF defines pax_syscall_entry, pax_enter_user, pax_peek_user,
 #      pax_sysret, pax_isr_common and pax_interrupt (T); in `objdump -d`
@@ -47,10 +49,13 @@
 #   U4 badptr: `write(1, p, 16)` with a kernel-half pointer, an unmapped
 #      user pointer and a stack pointer whose 16 bytes run off the top of
 #      the stack: three `user: badptr pid <p> write fd 1 buf 0x<b> len
-#      16: -EFAULT` lines with those three bufs, nothing written by the
-#      program, and `exit 14` (it exits 14 only when all three came back
-#      -14, Linux's EFAULT; drift from the contract, argued in
-#      notes/px09-user-mode.md §2).
+#      16: -EFAULT` lines with those three bufs; px96: then `close(2)` and
+#      a write to fd 2, `user: badptr pid <p> write fd 2: -EBADF`; then
+#      the program's own line, once, `badptr: -EFAULT three times, -EBADF
+#      on a closed fd 2`, and nothing else written by it, and `exit 14`
+#      (it says so and exits 14 only when all three came back -14,
+#      Linux's EFAULT, the close 0 and the closed fd's write -9, EBADF;
+#      drift from the contract, argued in notes/px09-user-mode.md §2).
 #   U5 two at once: spin1 and spin2 run together, each writing `spinN:
 #      begin` and `spinN: end` around a busy loop with no system call in
 #      it, and keeping a mark of its own in %r12 and on its own stack
@@ -74,11 +79,21 @@
 #      `smep: ring 0 jumps to user 0x0000000000400000` then `PANIC page
 #      fault vector 14 error 0x0000000000000011 rip 0x0000000000400000 …
 #      cr2 0x0000000000400000`, halted.
+#   U9 quiet, a program's errno (px96): on the quiet image badptr's own
+#      line is there once (all five answers came back as Linux's) and no
+#      `write fd` line is, neither -EFAULT nor -EBADF: a program's
+#      ordinary errno is its own business, as its exec and exit are
+#      (px15).
+#   U10 quiet keeps the rest: one `user: quiet` line; the five faults'
+#      `killed:` lines, as U3 has them (a fault that ends a process still
+#      prints); no -ENOSYS line and no exit line (px15's); the log ends
+#      `halt` and qemu-halt holds the machine halted.
 #
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR
-# holds <tier>/<kernel>.{iso,elf}): any host with QEMU and nm, no wolf
-# needed. Without it the script builds with $PAX_WOLF (linux); --no-boot
-# stops after the build (U0), leaving them in build/mpx3-user.
+# holds <tier>/<kernel>.{iso,elf} and <tier>/kmain_user-quiet.iso): any
+# host with QEMU and nm, no wolf needed. Without it the script builds
+# with $PAX_WOLF (linux); --no-boot stops after the build (U0), leaving
+# them in build/mpx3-user.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
@@ -113,6 +128,7 @@ runs=$PAX_BUILD/mpx3-user-runs.txt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
 HEX='0x[0-9a-f]{16}'
+BADPTR_LINE='badptr: -EFAULT three times, -EBADF on a closed fd 2' # user/programs.S's .Lbadptr_msg
 
 sym() { nm "$1" | awk -v s="$2" '$3 == s && !f { print "0x" $1; f = 1 }'; } # pax#256: nm read to its end
 
@@ -161,6 +177,11 @@ if [ -z "$images" ]; then
                 fi
                 "$PAX_ROOT/tools/mkimage" "$elf" "$work/$tier/$k.iso" >/dev/null || bad "$tier $k: mkimage"
                 say "built $tier $k: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$k.iso")"
+                if [ "$k" = kmain_user ]; then # px96: the same kernel, quiet (U9, U10)
+                    "$PAX_ROOT/tools/mkimage" --conf "$here/mpx3-user.d/limine-quiet.conf" "$elf" "$work/$tier/$k-quiet.iso" >/dev/null \
+                        || bad "$tier $k: mkimage (quiet)"
+                    say "built $tier $k-quiet: iso $(sha256_of "$work/$tier/$k-quiet.iso")"
+                fi
             else
                 cat "$log" >&2
                 bad "U0 $tier $k: tools/build-kernel"
@@ -174,17 +195,17 @@ if [ -z "$images" ]; then
     fi
 fi
 
-record() { # tier kernel leg status
+record() { # tier image leg status
     ran=$((ran + 1))
     printf '%s %s %s halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" "$4" \
         "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" \
         "$(sha256_of "$images/$1/$2.iso")" >> "$runs"
 }
-halt_boot() { # tier kernel leg marker
-    local tier=$1 k=$2 leg=$3 marker=$4 hrc=0
-    log=$PAX_BUILD/mpx3-user-$tier-$k-$leg.serial.log
+halt_boot() { # tier kernel leg marker [image: <kernel>.iso unless named; px96's kmain_user-quiet]
+    local tier=$1 k=$2 leg=$3 marker=$4 img=${5:-$2} hrc=0
+    log=$PAX_BUILD/mpx3-user-$tier-$img-$leg.serial.log
     elf=$images/$tier/$k.elf
-    local iso=$images/$tier/$k.iso
+    local iso=$images/$tier/$img.iso
     rm -f "$log" "$log.verdict" "$log".cmd*
     if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
         say "no image or ELF: $iso"
@@ -192,7 +213,7 @@ halt_boot() { # tier kernel leg marker
     fi
     "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 \
         --elf "$elf" --marker "$marker" "$iso" >"$log.verdict" 2>&1 || hrc=$?
-    record "$tier" "$k" "$leg" "$hrc"
+    record "$tier" "$img" "$leg" "$hrc"
     return "$hrc"
 }
 halted() { tail -n 1 "$log.verdict"; }
@@ -320,13 +341,16 @@ for leg in $legs; do
             for b in 0xffffffff80000000 0x0000000000000010 0x00007fffffffeff8; do
                 grep -qx "user: badptr pid $bpid write fd 1 buf $b len 16: -EFAULT" "$norm" || why+=" no -EFAULT line for buf $b;"
             done
+            grep -qx "user: badptr pid $bpid write fd 2: -EBADF" "$norm" || why+=" no -EBADF line for the closed fd 2;"
+            [ "$(grep -cx "$BADPTR_LINE" "$norm")" = 1 ] || why+=" $(grep -cx "$BADPTR_LINE" "$norm") '$BADPTR_LINE' lines, not 1;"
             [ "$(exited badptr "$norm")" = 14 ] || why+=" badptr exit '$(exited badptr "$norm")', not 14;"
-            # nothing the program wrote reached the console: between its
-            # space line and its exit line, only the kernel's lines
-            stray=$(awk -v p="$bpid" '$0 ~ "^user: badptr pid " p " cr3 " { on = 1; next } on && $0 ~ "^user: badptr pid " p " exit " { exit } on && $0 !~ "^user: badptr " { print }' "$norm" | head -n 3)
+            # nothing else the program wrote reached the console: between
+            # its space line and its exit line, only the kernel's lines and
+            # its own line (once, counted above)
+            stray=$(awk -v p="$bpid" -v own="$BADPTR_LINE" '$0 ~ "^user: badptr pid " p " cr3 " { on = 1; next } on && $0 ~ "^user: badptr pid " p " exit " { exit } on && $0 !~ "^user: badptr " && $0 != own { print }' "$norm" | head -n 3)
             [ -z "$stray" ] || why+=" bytes reached the console: '$stray';"
             if [ -z "$why" ]; then
-                say "PASS U4 $tier kmain_user $leg: write(1, kernel half / unmapped / off the stack's top, 16) each -EFAULT, nothing written, exit 14"
+                say "PASS U4 $tier kmain_user $leg: write(1, kernel half / unmapped / off the stack's top, 16) each -EFAULT, write to the closed fd 2 -EBADF, each its line; badptr's own line once, nothing else written, exit 14"
             else
                 bad "U4 $tier kmain_user $leg:$why"; grep -E '^user: badptr' "$norm" | sed 's/^/  /' >&2
             fi
@@ -362,6 +386,49 @@ for leg in $legs; do
                 say "PASS U6 $tier kmain_user $leg: after exit 0 after every fault; frames A/B/C per batch$fr; $(halted)"
             else
                 bad "U6 $tier kmain_user $leg:$why"; tail_lines 6
+            fi
+        fi
+
+        # --- U9, U10: kmain_user, quiet (px96) -------------------------------
+        hrc=0; halt_boot "$tier" kmain_user "$leg" 'halt' kmain_user-quiet || hrc=$?
+        if [ "$hrc" = 3 ]; then
+            for s in U9 U10; do bad "$s $tier kmain_user-quiet $leg: no image"; done
+        else
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            # U9
+            why=
+            [ "$(grep -cx "$BADPTR_LINE" "$norm")" = 1 ] || why+=" $(grep -cx "$BADPTR_LINE" "$norm") '$BADPTR_LINE' lines, not 1 (badptr says it only when every answer was Linux's);"
+            n=$(grep -Ec '^user: [^ ]+ pid [0-9]+ write fd [0-9]+ buf 0x[0-9a-f]+ len [0-9]+: -EFAULT$' "$norm")
+            [ "$n" = 0 ] || why+=" $n -EFAULT write lines on the quiet image ($(grep -Em1 ' write fd [0-9]+ buf ' "$norm"));"
+            n=$(grep -Ec '^user: [^ ]+ pid [0-9]+ write fd [0-9]+: -EBADF$' "$norm")
+            [ "$n" = 0 ] || why+=" $n -EBADF write lines on the quiet image ($(grep -Em1 ' write fd [0-9]+: -EBADF' "$norm"));"
+            n=$(grep -Ec '^user: [^ ]+ pid [0-9]+ write fd ' "$norm")
+            [ "$n" = 0 ] || why+=" $n 'write fd' lines in all;"
+            if [ -z "$why" ]; then
+                say "PASS U9 $tier kmain_user-quiet $leg: badptr's -EFAULT (three) and -EBADF came back with no line; its own line once"
+            else
+                bad "U9 $tier kmain_user-quiet $leg:$why"; grep -E '^(user: badptr|badptr)' "$norm" | sed 's/^/  /' >&2
+            fi
+            # U10
+            why= got=
+            [ "$(grep -c '^user: quiet' "$norm")" = 1 ] || why+=" $(grep -c '^user: quiet' "$norm") 'user: quiet' lines, not 1;"
+            for c in "segv|page fault|14|0x0000000000000004|0x0000000000000000" \
+                     "kread|page fault|14|0x0000000000000005|0xffffffff80000000" \
+                     "textwrite|page fault|14|0x0000000000000007|0x0000000000400[0-9a-f]{3}" \
+                     "guard|page fault|14|0x0000000000000006|0x00007fffffffa[0-9a-f]{3}" \
+                     "priv|general protection|13|0x0000000000000000|none"; do
+                IFS='|' read -r n e v r c2 <<<"$c"
+                if v1=$(fault_case "$n" "$e" "$v" "$r" "$c2" "$norm"); then got+=" $n"; else why+=" $n: $v1;"; fi
+            done
+            n=$(grep -Ec ': -ENOSYS$|^user: [^ ]+ pid [0-9]+ (exit|exit_group) [0-9]+ after ' "$norm")
+            [ "$n" = 0 ] || why+=" $n -ENOSYS or exit lines on the quiet image ($(grep -Em1 ': -ENOSYS$|^user: [^ ]+ pid [0-9]+ (exit|exit_group) [0-9]+ after ' "$norm"));"
+            [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'user: ticks in ring 3 [0-9]+' 'halt' >/dev/null \
+                || why+=" the log does not end with the ring-3 ticks and halt;"
+            if [ -z "$why" ]; then
+                say "PASS U10 $tier kmain_user-quiet $leg: $(grep -m1 '^user: quiet' "$norm"); killed by name:$got; no -ENOSYS or exit line; $(halted)"
+            else
+                bad "U10 $tier kmain_user-quiet $leg:$why"; tail_lines 6
             fi
         fi
 
