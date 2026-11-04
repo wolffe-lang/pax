@@ -7,7 +7,10 @@
 # and UEFI. Rows: Q1 the lease and resolv.conf in the record; Q2 the
 # router answered the kernel's echo; Q3 tcpprobe connected and read the
 # server's line; Q4 the record on the copy's ESP, /pax/logs/wire-1.txt,
-# equal to what the screen showed. Prints PASS/FAIL Qn per firmware and
+# equal to what the screen showed; Q5 the machine's other disks (a SATA
+# disk on AHCI and an NVMe namespace, 64 MiB of random bytes each, as
+# kasumi has both) byte-identical after the boot: the script writes only
+# the disk that holds the stick's token. Prints PASS/FAIL Qn per firmware and
 # stick: pax-wire.img (the 82576 by MSI-X) and pax-wire-netpoll.img
 # (`cmdline: netpoll`: polled every tick, as the I225 is on kasumi).
 set -uo pipefail
@@ -30,6 +33,8 @@ for run in bios uefi bios-netpoll uefi-netpoll; do
     src=$O/pax-wire.img; [ "$run" = "$fw" ] || src=$O/pax-wire-netpoll.img
     w=$O/q-$run; rm -rf "$w"; mkdir -p "$w"
     cp "$src" "$w/stick.img"
+    head -c 67108864 /dev/urandom > "$w/sata.img"; head -c 67108864 /dev/urandom > "$w/nvme.img"
+    before=$(cat "$w/sata.img" "$w/nvme.img" | sha256sum | cut -c1-64)
     printf '10.0.2.2 %s\n' "$port" > "$w/target"
     # The staged stick names no target (the maintainer's to write); the
     # copy names this script's server.
@@ -45,6 +50,8 @@ for run in bios uefi bios-netpoll uefi-netpoll; do
         -no-reboot -serial "file:$w/serial.log" "${fwargs[@]}" \
         -device qemu-xhci,id=xhci -drive "file=$w/stick.img,if=none,id=stick,format=raw" \
         -device usb-storage,bus=xhci.0,drive=stick,bootindex=0 \
+        -device ahci,id=ahci -drive "file=$w/sata.img,if=none,id=sata,format=raw" -device ide-hd,drive=sata,bus=ahci.0 \
+        -drive "file=$w/nvme.img,if=none,id=nvme,format=raw" -device nvme,serial=px89q,drive=nvme \
         -netdev user,id=n0,ipv6=off -device igb,netdev=n0,mac=52:54:00:12:34:56 &
     q=$!
     t=0
@@ -60,6 +67,9 @@ for run in bios uefi bios-netpoll uefi-netpoll; do
     grep -aq "^tcpprobe: the server's first line: px89-wire-qualify: hello from the host" "$norm" && echo "PASS Q3 $run: tcpprobe" || { echo "FAIL Q3 $run"; fail=1; }
     rec=$("$fat" --offset "$OFF" cat "$w/stick.img" /pax/logs/wire-1.txt 2>&1)
     printf '%s\n' "$rec" | grep -q '^state bound' && echo "PASS Q4 $run: /pax/logs/wire-1.txt on the stick ($(printf '%s\n' "$rec" | wc -l) lines)" || { echo "FAIL Q4 $run: $(printf '%s\n' "$rec" | head -3)"; fail=1; }
+    after=$(cat "$w/sata.img" "$w/nvme.img" | sha256sum | cut -c1-64)
+    [ "$after" = "$before" ] && echo "PASS Q5 $run: the SATA and NVMe disks byte-identical ($before)" || { echo "FAIL Q5 $run: the other disks changed ($before -> $after)"; fail=1; }
+    rm -f "$w/sata.img" "$w/nvme.img"
 done
 kill $srv 2>/dev/null; wait $srv 2>/dev/null
 exit $fail
