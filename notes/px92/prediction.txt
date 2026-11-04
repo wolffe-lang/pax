@@ -1,0 +1,59 @@
+px92 prediction, written 2026-11-04 05:00Z, before any build or guest ran.
+
+Head. The contract names a6e2fcb5 (px87's merge) or a later trunk head if trunk moves before the build.
+Trunk moved at 04:4xZ to 9c88ec8a with notes only (0 paths outside notes/ since a6e2fcb5). I build trunk's
+head as it is when the build starts (9c88ec8a unless notes land again) and name it (R-px92-2).
+
+Inputs. px86's stick inputs, copied from hasu's ~/lanes/px86 (px78b -> px77c -> px86's provenance): the
+cache, build/inputs, base-dev.cpio 098b918e..., limine-download, lope-local, live-payload.py; plus den,
+the one program input trunk gained since adb53141 (user/den.pin, px90), copied from px90's record at
+b38643a5: sums `den d4d3d6b8... 16698144`, as px90's note records (R-px92-1). Every other program's
+sums.txt is equal between px86's and px90's inputs (read on hasu before the copy).
+
+The stick, by px86's recipe (notes/px86/hasu/stick.sh) on satoyama:
+- tools/mkdistribution green, tests/distribution I0 on both variants (den's bytes and its git link,
+  /bin/poweroff, the zone). wolf 0.2.35 4cc4045b... and Limine 12.9.1 5cdebc51..., each read twice.
+- The plain stick: 828,375,040 bytes (790 MiB) or one MiB more. The rule (tools/mkdisk --usb):
+  ceil((kernel + initramfs) * 2 + 16 MiB) + 3 MiB; px90's release initramfs 401,615,828 bytes plus
+  px87's /bin/poweroff and the live payload, a release kernel near 2.59 MB: the sum sits within a few
+  KB of the 787 MiB boundary, so I cannot call which side.
+- A second build byte-identical; the EFI and MBR corruptions refused by name; check-usb's six files;
+  /boot/limine/limine.conf = boot/limine-usb.conf (sha256 a1e45ca2..., `cmdline: quiet`).
+- The kasumi copy: /pax/install-targets = boot/install-targets (19 lines, 0 entries) + the 860's line,
+  one entry, sha256 c21b04ae... (as on 197330ad's and adb53141's sticks: the file is unchanged).
+
+The qualification (KVM, px78-ubuntu:1, the head's metal.py in run mode, PAX_METAL_TARGET=860,
+PAX_METAL_TARGET_SERIAL=<kasumi-serial>, PAX_METAL_LISTED=1, SOURCE_DATE_EPOCH=1700000000), through a
+lane-local variant of metal.py made by make-variant.py, each edit asserted once (R-px92-3):
+1. leg mpx6: px86's staged stick adb53141 (ce86a7e6..., read twice on nomad) onto a used 860 (fat32):
+   M0-M11 PASS as px86's own stick leg (install 35-50 s), the installed target kept: the state M-PX6
+   left on kasumi's 860 (a used disk, then adb53141's install).
+2. leg pax: the new stick onto a copy of that target. --check: the target `PAX's install layout; on the
+   install allow-list`; the guided page `This install erases /dev/sdc's PAX's install layout.` then the
+   summary `Erase Samsung SSD 860, serial <kasumi-serial> (1.0 TB, /dev/sdc), and install PAX?`;
+   M0-M11 PASS; install 30-50 s from the yes; the leg 100-170 s with boot 0.
+3. legs fat32 and ext4: px86's used cases with the new stick, M0-M11 PASS.
+In every leg with the new stick, px87's rows:
+- boot 0 (the live entry, the stick, nothing typed but root and poweroff): the login screen holds
+  `kernel: <head> sha256 <sha256 of the stick's /boot/pax>, <its size> bytes` and the boot line right
+  after it (`boot: <n> ms from the kernel's entry to its first program; ... scrolls by copy (...)`:
+  under KVM QEMU's framebuffer is host memory, so the probe finds a read cheap and copies); the memory
+  transcript has `PAX: the console` then that kernel line, and no per-program line (`user: exec pid`,
+  `user: ... exit_group N after`); `poweroff` typed at the shell ends QEMU by ACPI power-off (QMP's
+  SHUTDOWN reason guest-shutdown, not guest-reset), exit 0; the target and the three other disks
+  byte-identical over boot 0.
+- boot 1: the same lines at the live login; the transcript quiet through the install (the memory log
+  keeps the first 64 KiB only; the install's output may pass it: then the screen at `Installation
+  complete` is checked too); the installer's own `poweroff` answer is guest-shutdown too.
+- boot 2 (the installed 860): the same kernel line and a boot line at its login (the installer copies
+  the live tree's /boot/pax, the stick's ELF); `poweroff` typed at the installed shell, guest-shutdown.
+  NOT predicted by px87, which owed "the installed system's console is not quiet": I predict the
+  installed system IS quiet too, because pax-install's own configuration (user/install/prepare.lu
+  new_config, since 61949606) already says `cmdline: quiet root=PARTUUID=... rootfstype=ext2 rw`, and
+  kernel/user reads the word with boot_info.cmdline_has. Recorded, not required (the contract asks the
+  live console to be quiet).
+- M5 in every leg: the NVMe, Steam and SanDisk witnesses px78's (23e7b466..., e1203a73..., 303fd56e...),
+  unchanged before and after every boot.
+
+Staging: the kasumi stick read-only at ~/pax-smoke/pax-install-kasumi-<head8>.img, its sha256 read twice
+after the build on satoyama, twice at staging there, twice on nomad after the copy, all equal.
