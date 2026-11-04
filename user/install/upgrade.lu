@@ -394,10 +394,18 @@ fn upgrade_main(o: Options, work: str) -> int {
     note(mut lg, "release {release_line()}")
     note(mut lg, "mode --upgrade")
     say(mut lg, "Install log: {log_place(lg)}")
-    report_disks(mut lg, disks, list)
-    flush_log(mut lg)
     if disks.len == 0 { return stop(mut lg, "pax-install: upgrade refused: no disk") }
     let (d, why) = upgrade_target(disks, list)
+    // The page: the upgrade's own target, mounted by the upgrade entry, is
+    // shown as on the list, not "refused: mounted" (a fresh install's word).
+    var shown = List[Disk]()
+    for x in disks {
+        var y = copy x
+        if why.len == 0 && y.target.name == d.target.name { y.reason = "" }
+        (mut shown).push(y)
+    }
+    report_disks(mut lg, shown, list)
+    flush_log(mut lg)
     if why.len != 0 { return stop(mut lg, why) }
     let dev = "/dev/{d.target.name}"
     let uuid = root_partuuid(dev, o.tools, work)
