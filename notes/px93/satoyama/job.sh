@@ -165,7 +165,7 @@ case $CHUNK in
     ;;
   units)
     step units-install ctr instbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/pb-$short; tools/mkinstall $L/runs/inst-$short"
-    step units-kernel ctr kbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/pb-$short; tools/fetch-limine >/dev/null; tools/build-kernel --release --src kernel/kmain_console.lu $L/runs/kernel-$short"
+    step units-kernel ctr kbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/pb-$short; export PAX_WOLF=\$(tools/fetch-wolf); tools/fetch-limine >/dev/null; tools/build-kernel --release --src kernel/kmain_console.lu $L/runs/kernel-$short"
     step units-fat fat_row "fat-$short"
     step units-args units_args
     ;;
