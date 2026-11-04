@@ -178,3 +178,31 @@ fn same_image(a: Manifest, b: Manifest) -> bool {
 fn short(digest: str) -> str {
     if digest.len > 12 then digest[0..12] else digest
 }
+
+/// The contract's item 1: a fresh install's own manifest, so it can be
+/// upgraded with no baseline: the source's rows (its walk, `rows`), the
+/// generated ones as configure_tree wrote them into `tree`, in the tree
+/// and its attrs as an installer-written file (root's, 0644; its
+/// directory 0755).
+fn install_manifest(source: str, tree: str, attrs: str, rows: List[Entry]) -> () ! {io} {
+    var m = image_manifest(source, rows, "pax-install, a fresh install")
+    for i in 0..m.rows.len {
+        if m.rows[i].kind != "g" { continue }
+        let path = "{tree}{m.rows[i].path}"
+        if fs_exists(path) {
+            m.rows[i].digest = hash_file(path)?
+            m.rows[i].size = fs_size(path) else |_| { return io }
+        } else {
+            m.rows[i].digest = "-"
+            m.rows[i].size = 0
+        }
+        m.rows[i].mode = 420
+        m.rows[i].uid = 0
+        m.rows[i].gid = 0
+    }
+    let dir = "{tree}{MANIFEST_DIR}"
+    if !fs_exists(dir) { fs_create_dir_mode(dir, 448) else |_| { return io } }
+    append_attrs(attrs, MANIFEST_DIR, "0755", 0, 0)?
+    durable_text("{dir}/manifest", manifest_text(m))?
+    append_attrs(attrs, "{MANIFEST_DIR}/manifest", "0644", 0, 0)?
+}

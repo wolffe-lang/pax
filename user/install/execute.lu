@@ -7,6 +7,8 @@
 //! px86: after the table, the zero phases (plan.lu's wipes): a used disk's
 //! old bytes where PAX puts a file system or a tool looks for a signature,
 //! partition 3 first of all, which Limine refuses to hold a file system.
+//! px93: the staged tree gets its own /etc/pax-install/manifest (manifest.lu)
+//! before the root is written, so every install can be upgraded.
 
 use std.json
 use std.x.crypto.sha2
@@ -332,6 +334,7 @@ fn execute_plan(mut lg: Log, p: Plan, source: str, payload: str, tools: str, wor
     let after = source_snapshot(source)?
     if !same_snapshot(rows, after) { return source_changed }
     configure_tree(p, tree, attrs, games)?
+    install_manifest(source, tree, attrs, rows)? // px93: every install can be upgraded
     let commands = actions(p, tree, attrs, tools)?
     durable_text("{work}/plan.txt", plan_text(p))?
     say(mut lg, "Source staged and rechecked in {(os_clock_ns() - start) / 1000000} ms")
