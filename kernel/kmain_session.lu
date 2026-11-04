@@ -288,6 +288,7 @@ export fn kmain() {
     if dhcp.on() && dhcp.wait_bound() {
         dhcp.echo_router() // px89: init's list runs over the lease
     }
+    let wire0 = net.count(net.C_TX_FRAMES) // px89: a lease's frames went before
     let l1 = ping_self(ip.LOOPBACK, 1)
     let l2 = ping_self(ip.address(), 2)
     let sl = sync.acquire(sync.console())
@@ -298,7 +299,7 @@ export fn kmain() {
     log.put(" ")
     log.put(if l2 { "answers" } else { "does NOT answer" })
     log.put(", ")
-    log.dec(net.count(net.C_TX_FRAMES) as int)
+    log.dec((net.count(net.C_TX_FRAMES) - wire0) as int)
     log.put(" frames on the wire")
     log.end()
     sync.release(sync.console(), sl)
