@@ -1,0 +1,48 @@
+px97 prediction, written 2026-11-04 10:35Z before the first change past trunk 9c88ec8a.
+
+Base: pax trunk 9c88ec8a (later than the contract's 5da8daaf). Every head read 2026-11-04 10:20Z.
+
+A. The sweep. One commit per component, in this order, each pin at its trunk head:
+
+  component   old pin    head       ahead  toolchain at the head          what moved (outside notes, docs, CI)
+  boreutils   0f7a57b6   ff5396ad       7  wolf 0.2.35 -> 0.2.36          the toolchain only
+  lope        e6f623c7   d65bb03c       7  wolf 0.2.35 -> 0.2.36          the toolchain only
+  lobo        49ed870e   64e7339d      25  wolf 0.2.35 -> 0.2.36          the binary-identity check, the toolchain
+  scent       81d761d6   eb888dfc      35  wolf 0.2.35 -> 0.2.36          a literal prefilter, the reader's EOF, divergence tables
+  aspen       3692cf5d   096245c8      37  wolf 0.2.35 -> 0.2.36          its own zone reader (src/zone), clock retired
+  clef        b71b43f4   900bdf0a      49  wolf 0.2.35 -> 0.2.36          census forms, a pax directive fixture
+  den         13bc2caa   584b18a3     139  wolf 0.2.36 (unchanged)        M5's wire verbs; the local verbs as before
+  pelt        4683b3f5   301e25e0      61  wolf 0.2.35 -> 0.2.36          session tests mostly; a small src change
+  yew         0ccb2c67   1218169e     213  wolf 0.2.35 -> 0.2.36          the editor and fl, widely
+  lupin       v0.1.58    v0.1.59        -  the published static musl archive, by digest
+  wolf-std    78b9d3cb   b1babae3      57  pins wolf 0.2.36 / lupin 0.1.58 itself; std.env wraps env_arg0
+  wolf        user/wolf.pin is px92's (pax#289, v0.2.36); kernel/wolf.pin stays 0.2.35 (R-px97-1)
+
+Predicted, row by row (native BIOS, the PR leg, under KVM on satoyama slot A):
+- census: C4 (pelt) and C5 (yew, boreutils, scent) go red at the commit that moves the census snapshot
+  (tools/census/inside/pins.sh) and green at the pin's own commit. These are the only rows that can be red
+  before the pin moves; every mpx5 row is differential (PAX against the same binary on Linux), so it can be red
+  only if PAX breaks under the new head.
+- mpx5-bore, mpx5-lope, mpx5-scent, mpx5-clef, kernel-as, mpx4-unix, mpx5-lupin: green at the new pins.
+- mpx5-aspen: green. Risk: aspen's new zone reader asks for /etc/localtime or a zoneinfo file the image lacks;
+  both sides get the same tree, so a gap would show as a D-row difference, not a crash.
+- mpx5-den: green. M5 adds clone/fetch/push; the session types only local verbs. D4's -ENOSYS list unchanged.
+- mpx5-pelt: green; the source change since 4683b3f5 is small.
+- mpx5-yew, mpx5-screen: the riskiest. yew's stack at trunk was why px82 set a 1 MiB initial stack; 213 commits
+  later the editor may need more (Y4/Y7 would stop at yew's start). Predicted green; if red, yew stays at its
+  pin and the break is filed on yew with the PAX witness.
+- mpx4-lobo: L0 (the build) locally; its sessions need a container engine beside the boot, which a lane
+  container lacks, so they are CI's.
+- lupin 0.1.59 with std b1babae3: mpx5-lupin green. std.env's arg0 and args_bytes need lupin 0.1.59's env_arg0,
+  so std moves after lupin, never before.
+- No kernel change: every kernel ELF is byte-identical to trunk's (no kernel path changes).
+- Wall time on satoyama slot A, running hot: each row about half its single-leg CI time; the rows above sum to
+  about 2.5 h, so the gauntlet takes the locks once per step.
+
+The plant: user/den.pin moved to a sha that does not exist; mpx5-den's build is red by name, `FAIL D0 (build):
+tools/mkden`.
+
+B. --latest (after A's hand-back; px93's upgrade path).
+- tools/mkdistribution --latest[=FILE] resolves every component's trunk head at build time and records it.
+- An overlay without a green local record at its exact sha is refused by name.
+- /etc/pax-release, the install manifest and the stick's README carry every sha and merged/unmerged.
