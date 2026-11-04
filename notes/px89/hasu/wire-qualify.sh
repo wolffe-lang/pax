@@ -7,7 +7,9 @@
 # and UEFI. Rows: Q1 the lease and resolv.conf in the record; Q2 the
 # router answered the kernel's echo; Q3 tcpprobe connected and read the
 # server's line; Q4 the record on the copy's ESP, /pax/logs/wire-1.txt,
-# equal to what the screen showed. Prints PASS/FAIL Qn per firmware.
+# equal to what the screen showed. Prints PASS/FAIL Qn per firmware and
+# stick: pax-wire.img (the 82576 by MSI-X) and pax-wire-netpoll.img
+# (`cmdline: netpoll`: polled every tick, as the I225 is on kasumi).
 set -uo pipefail
 O=$1
 . tools/lib.sh
@@ -23,17 +25,19 @@ while True:
     c, _ = s.accept(); c.sendall(b"px89-wire-qualify: hello from the host\r\n"); c.close()
 ' "$port" &
 srv=$!
-for fw in bios uefi; do
-    w=$O/q-$fw; rm -rf "$w"; mkdir -p "$w"
-    cp "$O/pax-wire.img" "$w/stick.img"
+for run in bios uefi bios-netpoll uefi-netpoll; do
+    fw=${run%-netpoll}
+    src=$O/pax-wire.img; [ "$run" = "$fw" ] || src=$O/pax-wire-netpoll.img
+    w=$O/q-$run; rm -rf "$w"; mkdir -p "$w"
+    cp "$src" "$w/stick.img"
     printf '10.0.2.2 %s\n' "$port" > "$w/target"
     # The staged stick names no target (the maintainer's to write); the
     # copy names this script's server.
-    "$fat" --offset "$OFF" copy "$w/stick.img" "$w/target" /pax/wire-target || { echo "FAIL Q0 $fw: paxfat copy"; fail=1; continue; }
+    "$fat" --offset "$OFF" copy "$w/stick.img" "$w/target" /pax/wire-target || { echo "FAIL Q0 $run: paxfat copy"; fail=1; continue; }
     fwargs=()
     if [ "$fw" = uefi ]; then
         read -r code vars <<< "$(find_ovmf)"
-        [ -n "$code" ] && [ -n "$vars" ] || { echo "FAIL Q0 $fw: no OVMF"; fail=1; continue; }
+        [ -n "$code" ] && [ -n "$vars" ] || { echo "FAIL Q0 $run: no OVMF"; fail=1; continue; }
         cp "$vars" "$w/vars.fd"
         fwargs=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$code" -drive "if=pflash,format=raw,unit=1,file=$w/vars.fd")
     fi
@@ -49,11 +53,13 @@ for fw in bios uefi; do
     kill $q 2>/dev/null; wait $q 2>/dev/null
     norm=$w/serial.norm; serial_norm "$w/serial.log" > "$norm"
     grep -a -E '^(net|dhcp|wire|==|tcpprobe|state|address|router)' "$norm" | head -60 | sed 's/^/  /'
-    grep -aq '^state bound' "$norm" && grep -aq '^nameserver 10.0.2.3' "$norm" && echo "PASS Q1 $fw: the lease and resolv.conf in the record" || { echo "FAIL Q1 $fw"; fail=1; }
-    grep -aq '^router-echo answered' "$norm" && echo "PASS Q2 $fw: the router answered the kernel's echo" || { echo "FAIL Q2 $fw"; fail=1; }
-    grep -aq "^tcpprobe: the server's first line: px89-wire-qualify: hello from the host" "$norm" && echo "PASS Q3 $fw: tcpprobe" || { echo "FAIL Q3 $fw"; fail=1; }
+    want="MSI-X vector 83"; [ "$run" = "$fw" ] || want="polled every tick \\(line [0-9]+, netpoll asked\\)"
+    grep -aqE "^net: 52:54:00:12:34:56, $want" "$norm" && echo "PASS Q0 $run: net: ... $want" || { echo "FAIL Q0 $run: no '$want' line"; fail=1; }
+    grep -aq '^state bound' "$norm" && grep -aq '^nameserver 10.0.2.3' "$norm" && echo "PASS Q1 $run: the lease and resolv.conf in the record" || { echo "FAIL Q1 $run"; fail=1; }
+    grep -aq '^router-echo answered' "$norm" && echo "PASS Q2 $run: the router answered the kernel's echo" || { echo "FAIL Q2 $run"; fail=1; }
+    grep -aq "^tcpprobe: the server's first line: px89-wire-qualify: hello from the host" "$norm" && echo "PASS Q3 $run: tcpprobe" || { echo "FAIL Q3 $run"; fail=1; }
     rec=$("$fat" --offset "$OFF" cat "$w/stick.img" /pax/logs/wire-1.txt 2>&1)
-    printf '%s\n' "$rec" | grep -q '^state bound' && echo "PASS Q4 $fw: /pax/logs/wire-1.txt on the stick ($(printf '%s\n' "$rec" | wc -l) lines)" || { echo "FAIL Q4 $fw: $(printf '%s\n' "$rec" | head -3)"; fail=1; }
+    printf '%s\n' "$rec" | grep -q '^state bound' && echo "PASS Q4 $run: /pax/logs/wire-1.txt on the stick ($(printf '%s\n' "$rec" | wc -l) lines)" || { echo "FAIL Q4 $run: $(printf '%s\n' "$rec" | head -3)"; fail=1; }
 done
 kill $srv 2>/dev/null; wait $srv 2>/dev/null
 exit $fail

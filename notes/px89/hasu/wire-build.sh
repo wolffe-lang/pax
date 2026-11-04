@@ -22,5 +22,5 @@ case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; esac
 ( cd "$WT" && export PATH=/home/mfwolffe/lanes/hasu-env/bin:/home/mfwolffe/lanes/hasu-env/profile/bin:$PATH \
     PAX_ENGINE=podman PAX_E2FS_IMAGE=localhost/px75-ubuntu:2 PAX_CACHE=$L/cache TMPDIR=$L/tmp \
     SOURCE_DATE_EPOCH=$($G -C "$WT" show -s --format=%ct HEAD) WIRE_TARGETS="${WIRE_TARGETS:-}" && \
-    taskset -c "$cpus" tools/mkwire stick "$O" ) || { echo "  mkwire stick failed"; exit 1; }
+    taskset -c "$cpus" tools/mkwire stick "$O" && WIRE_NETPOLL=1 WIRE_TARGETS= taskset -c "$cpus" tools/mkwire stick "$O" ) || { echo "  mkwire stick failed"; exit 1; }
 CTR_WD=$WT bash "$S/ctr.sh" "$B" wire-qualify localhost/px89-dhcp:1 KVM=1 -- bash "$S/wire-qualify.sh" "$O" || exit 1
