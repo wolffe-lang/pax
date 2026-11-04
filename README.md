@@ -204,7 +204,9 @@ name before anything is built (`tools/latest-resolve`, held by `tests/latest`). 
 such tree as `NAME SHA merged` or `NAME SHA unmerged`, the checkout as `pax COMMIT merged|unmerged`, and the
 resolution itself by its sha256 (`latest resolved …`); the install manifest's `release` line is that file's
 sha256. A latest image is reproducible only from its resolution, never from the pins, so CI and lane records
-always build from the pins.
+always build from the pins. On a host whose holds are shorter than the whole build, `--latest-step[=OVERLAYS] LATEST
+[INPUT...]` resolves once into LATEST and then builds the named inputs, a step at a time, and `--latest-from LATEST
+VERIFIED_BASE.cpio NEW_OUT` assembles the images from them, all at the commit the resolution names.
 
 Two things the shipped `grep` says that GNU's would not: `--help` and `--version` are scent's own prose, and a
 diagnostic names the program as `grep:` whatever path ran it. `-r` and colour are refused by name until scent's next
