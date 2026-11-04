@@ -286,7 +286,9 @@ if [ -z "$images" ]; then
             why+=" tools/linux-net (needs root and /dev/net/tun): $(tail -n 1 "$work/linux.txt");"
         fi
         [ "${#sudo[@]}" = 0 ] || "${sudo[@]}" chown -R "$(id -u):$(id -g)" "$work/linux"
-        why+=$(linux_user_side "$work")
+        # px89: the none-user way's side only when that way runs (--nic igb
+        # has no none ways).
+        case " $ways " in *" none-user "*) why+=$(linux_user_side "$work") ;; esac
     fi
     if [ "$only" = build ]; then
         [ -z "$why" ] && say "PASS U0 (build): $k built ($tiers), the programs static, four initramfs" || bad "U0 (build):$why"
