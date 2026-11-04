@@ -6,6 +6,7 @@
 # step stops the chunk, but in the `red` chunk, where each step must fail by name.
 #   job.sh red   SHA   the tests-only head: fat.py's replace row, and the leg's U1, U2, U0 and U8 with the
 #                      staged 9c88ec8a stick as both sticks (its pax-install has no --upgrade)
+#   job.sh red-verify SHA   mpx6-install's smoke rows at the commit before the installer writes its manifest
 #   job.sh units SHA   the head's installer and kernel compiled, its paxfat and fat.py; a Linux build of the
 #                      env_args() program (U5's twin)
 #   job.sh build SHA   tools/mkdistribution at SHA, the dev variant's live payload, the upgrade stick
@@ -17,7 +18,7 @@ L=/home/mfwolffe/lanes/px93
 CHUNK=$1 SHA=$2
 # A queued chain's later chunks may be pointed at another head (the branch rebased onto px92's wolf
 # re-pin while the chain waited): $L/retarget-<short> holds it.
-if [ "$CHUNK" != units ] && [ "$CHUNK" != red ] && [ -s "$L/retarget-${SHA:0:8}" ]; then SHA=$(cat "$L/retarget-${SHA:0:8}"); fi
+if [ "$CHUNK" != units ] && [ "$CHUNK" != red ] && [ "$CHUNK" != red-verify ] && [ -s "$L/retarget-${SHA:0:8}" ]; then SHA=$(cat "$L/retarget-${SHA:0:8}"); fi
 short=${SHA:0:8}
 HOST=$(hostname -s)
 case $HOST in
@@ -174,6 +175,18 @@ case $CHUNK in
     step red-leg leg red "$OLD" U1,U2,U0,U8
     red_expect "$L/runs/leg-red-$short/leg.log" "FAIL U8-wrong-serial: /^usage: pax-install/" ; echo "red-leg-named=$?"
     ;;
+  red-verify)
+    # R-px93-6's item 2, red first: at 4f2f6f10 verify.py's I-manifest is in and the installer does not
+    # yet write its manifest (3697b5ee): mpx6-install's smoke rows must fail on the first install, by name.
+    RED=1
+    log=$L/runs/install-red-$short.log
+    rm -rf "$L/runs/install-red-$short"
+    CTR_ENV="-e PAX_CACHE=$L/cache -e PAX_BUILD=$L/gb-$short -e PAX_LOPE_REPO=$L/inputs/lope-local -e CARGO_INCREMENTAL=0" \
+      step red-verify ctr red-install localhost/px78-ubuntu:1 0 bash -c "export PAX_WOLF=\$(tools/fetch-wolf); tests/mpx6-install --rows smoke --tier native --firmware bios --work $L/runs/install-red-$short > $log 2>&1; rc=\$?; grep -E '^(PASS|FAIL)|Error' $log | tail -12; exit \$rc"
+    grep -m1 -B2 'AssertionError' "$log"
+    grep -q 'AssertionError: no /etc/pax-install/manifest on the installed root' "$log" && echo 'RED BY NAME: no /etc/pax-install/manifest on the installed root'
+    echo "red-verify-named=$?"
+    ;;
   units)
     step units-install ctr instbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/pb-$short; tools/mkinstall $L/runs/inst-$short"
     step units-kernel ctr kbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/pb-$short; export PAX_WOLF=\$(tools/fetch-wolf); tools/fetch-limine >/dev/null; tools/build-kernel --release --src kernel/kmain_console.lu $L/runs/kernel-$short"
@@ -231,7 +244,7 @@ case $CHUNK in
         ;;
     esac
     ;;
-  *) echo "CHUNK is red, units, build, legs-a, legs-d, legs-x or gauntlet-1..3"; exit 2 ;;
+  *) echo "CHUNK is red, red-verify, units, build, legs-a, legs-d, legs-x or gauntlet-1..3"; exit 2 ;;
 esac
 sensors > "$L/runs/$CHUNK-$short-sensors-end.txt" 2>&1 || true
 flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
