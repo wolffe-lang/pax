@@ -577,6 +577,53 @@ fn probe() {
     log.end()
 }
 
+/// px89-probe: one way of asking for an interrupt (k 1-6).
+pub fn probe_kick(k: u64) {
+    let b = pci.bdf(gw(G_PCI))
+    if k == 1 {
+        wr(0x1520, 1)
+    } else if k == 2 {
+        wr(0x1514, 0x10)
+        wr(EIMS, 0x1)
+        wr(0x1520, 1)
+    } else if k == 3 {
+        wr(0x1514, 0)
+        wr(IMS, 0xffffffff)
+        wr(0x1504, 0x80)
+    } else if k == 4 {
+        wr(0x1514, 0x80000010)
+        wr(EIMS, 0x1)
+        wr(0x1520, 1)
+    } else if k == 5 {
+        wr(0x1514, 0x40000011)
+        wr(0x152c, 0x1)
+        wr(0x1530, 0x1)
+        wr(EIMS, 0x1)
+        wr(0x1520, 1)
+    } else {
+        wr(0x1514, 0)
+        let at = pci.capability(b, 5)
+        pci.write32(b, at, pci.read32(b, at) & !0x10000)
+        pci.set_command(b, pci.command(b) & !pci.CMD_INTX_OFF)
+        wr(EIMS, 0x1)
+        wr(0x1520, 1)
+    }
+}
+
+pub fn probe_regs() {
+    let b = pci.bdf(gw(G_PCI))
+    log.put(" EICR ")
+    log.hex_n(rd(EICR), 8)
+    log.put(" EIMS ")
+    log.hex_n(rd(EIMS), 8)
+    log.put(" GPIE ")
+    log.hex_n(rd(0x1514), 8)
+    log.put(" status ")
+    log.hex_n(pci.read16(b, 6), 4)
+    log.put(" msi ")
+    log.hex_n(pci.read32(b, pci.capability(b, 5)), 8)
+}
+
 /// The ring's registers at the end of a run (px89-probe), then causes
 /// forced by ICS and EICS with PCI status bit 3 read after each.
 pub fn probe_end() {

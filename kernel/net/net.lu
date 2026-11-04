@@ -95,6 +95,7 @@
 
 use apic
 use boot_info
+use clock
 use frames
 use gbe
 use log
@@ -876,6 +877,23 @@ pub fn report() {
 pub fn counters() {
     if gbe_kind() {
         gbe.probe_end()
+        var k: u64 = 1
+        while k <= 6 {
+            let saved = sync.irq_save()
+            sync.irq_restore(saved)
+            let before = count(C_IRQ)
+            gbe.probe_kick(k)
+            clock.wait_us(20000)
+            log.put("probe: kick ")
+            log.dec(k as int)
+            log.put(" rflags ")
+            log.hex_n(saved, 8)
+            log.put(" interrupts ")
+            log.dec((count(C_IRQ) - before) as int)
+            gbe.probe_regs()
+            log.end()
+            k += 1
+        }
     }
     let free = tx_free()
     log.put("net: rx ")
