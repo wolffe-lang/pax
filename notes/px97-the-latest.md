@@ -68,6 +68,11 @@ Committed first (`notes/px97/prediction.txt`).
 - **clef:** predicted green; Q0 was red. `tools/mkclef` holds clef's toolchain to `kernel/wolf.pin`'s release, which
   is 0.2.35, and clef's head pins 0.2.36. PAX's own pairing rule refused it, so clef was not broken (R-px97-6).
 - **pelt:** predicted green; red three ways (R-px97-7).
+- **The images:** at the probe's head, every input built (`inputs`, 7657 s), `tools/mkdistribution` assembled both
+  variants (4605 s), and `tests/distribution-boot` booted both ISOs on BIOS and UEFI (825 s), all green. That was
+  with pelt and clef at their heads; the final gauntlet builds the images again at the pins here.
+- **The probe's record:** 45 steps, worst 1. The red steps are the ones named above: scent's A2, clef's Q0, pelt's
+  replay and friendly rows, and mpx3-shell (pelt's prompt).
 - **Wall time:** far over the estimate. Under one slot running hot, the builds alone took 35 to 72 minutes a row
   (boreutils 35, yew 38, pelt 64, lobo's two builds 72).
 
