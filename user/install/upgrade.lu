@@ -252,7 +252,8 @@ fn upgrade_target(disks: List[Disk], list: AllowList) -> (Disk, str) {
     let d = copy found[0]
     let dev = "/dev/{d.target.name}"
     if d.layout != "PAX's install layout" {
-        return (d, "pax-install: upgrade refused: {dev} holds {d.layout}, not a PAX install")
+        let why = "pax-install: upgrade refused: {dev} holds {d.layout}, not a PAX install"
+        return (d, why)
     }
     var p2 = ""
     let parts = d.target.identity.split(";")
@@ -299,13 +300,15 @@ fn installed_manifest(new: Manifest, dev: str, payload: str, tools: str, work: s
         let prev = parse_manifest(fs_read_text("{dir}/previous") else |_| "") else |_| {
             return (none, "", false, "pax-install: upgrade refused: {dir}/previous is unreadable; it is never guessed at")
         }
-        return (prev, "the cut upgrade's record ({prev.source})", true, "")
+        let from = "the cut upgrade's record ({prev.source})"
+        return (prev, from, true, "")
     }
     if fs_exists("{dir}/manifest") {
         let m = parse_manifest(fs_read_text("{dir}/manifest") else |_| "") else |_| {
             return (none, "", false, "pax-install: upgrade refused: {dir}/manifest is unreadable; it is never guessed at")
         }
-        return (m, "its manifest ({m.commit})", false, "")
+        let from = "its manifest ({m.commit})"
+        return (m, from, false, "")
     }
     let kernel = esp_sha(dev, "/boot/pax", tools, work, 0)
     let release = file_sha("{TARGET_ROOT}/etc/pax-release")
@@ -314,7 +317,8 @@ fn installed_manifest(new: Manifest, dev: str, payload: str, tools: str, work: s
         if !name.ends_with(".manifest") { continue }
         let b = parse_manifest(fs_read_text("{payload}/baselines/{name}") else |_| "") else |_| { continue }
         if b.kernel == kernel && b.release == release {
-            return (b, "the baseline {name} ({b.source})", false, "")
+            let from = "the baseline {name} ({b.source})"
+            return (b, from, false, "")
         }
     }
     (none, "", false, "pax-install: upgrade refused: the install on {dev} has no manifest and matches no baseline this stick carries (its ESP /boot/pax sha256 {short(kernel)}, its /etc/pax-release sha256 {short(release)}); an install is never guessed at")
