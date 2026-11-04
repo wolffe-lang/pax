@@ -1,0 +1,22 @@
+px92: a draft pax issue (the coordinator files it)
+
+Title: paxfat cat of a 545 MB file runs for minutes at 100% CPU before writing a byte
+
+What happened (2026-11-04, satoyama, px92's dev stick comparison): the release pair's own
+`sout/disktools/paxfat --offset 2097152 cat <dev stick image> /boot/initramfs.cpio` (the dev archive,
+545,376,324 bytes, on the stick's FAT32 ESP) ran 6 min 48 s at 99.7% of one CPU with an RSS of about 80 MB.
+/proc/<pid>/io read twice 10 s apart: rchar 17,135,841 both times, syscr 24, wchar 0. It had read 17 MB in
+24 reads and written nothing to its stdout pipe. Stopped by its pid. The same file's sha256 came from
+tools/check-usb's U2 in seconds (the expected digest matched).
+
+Why it matters: not on the installer's path (pax-install copies the running root; Limine loads the archive),
+but `paxfat cat` is how the lanes and the metal legs read files off a stick (the install log, the kernel for the
+screen's symbols, the allow-list), and a large file looks hung.
+
+Expected: a 545 MB file out in about the time its clusters take to read (seconds), or output streamed as it is
+read.
+
+Not measured: the time it would have taken to finish, or where the CPU goes (cluster-chain walk per cluster,
+an output buffer built by appending, or something else). A reproducer: tools/mkdisk --usb with any release
+archive over ~400 MB, then `paxfat --offset <ESP byte> cat IMAGE /boot/initramfs.cpio | sha256sum`, timed
+against the archive's size.
