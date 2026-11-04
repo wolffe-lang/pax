@@ -21,7 +21,7 @@
 set -uo pipefail
 L=/home/mfwolffe/lanes/px92
 SLOT=$1 HEAD=$2 SERIAL=$3 CHUNK=$4
-case $SLOT in A) CPUS=0-3,8-11 ;; B) CPUS=4-7,12-15 ;; AB) CPUS=0-15 ;; *) echo "slot A, B or AB (both locks)"; exit 2 ;; esac
+case $SLOT in A) CPUS=0-3,8-11 ;; B) CPUS=4-7,12-15 ;; AB) CPUS=0-15 ;; ABA) CPUS=0-3,8-11 ;; *) echo "slot A, B, AB or ABA (both locks; ABA on slot A's CPUs)"; exit 2 ;; esac
 short=${HEAD:0:8}
 P=/home/mfwolffe/lanes/satoyama-env/bin/podman
 export PATH=/home/mfwolffe/lanes/satoyama-env/bin:$PATH TMPDIR=$L/tmp
@@ -164,7 +164,7 @@ print(struct.unpack_from("<Q",e,32)[0]*512)' "$src")
   [ -n "$px87" ] && env+=(-e PAX_METAL_PX87=$px87)
   [ -n "$from" ] && env+=(-e PAX_METAL_TARGET_FROM=$from)
   [ -n "$keep" ] && env+=(-e PAX_METAL_KEEP_TARGET=1)
-  CTR_ENV="${env[*]}" ctr "sleg-$name" localhost/px78-ubuntu:1 1 bash -c "time python3 -I $L/variant/metal-px92.py $L/stick $I $W/metal run"
+  CTR_ENV="${env[*]} ${SLEG_EXTRA:-}" ctr "sleg-$name" localhost/px78-ubuntu:1 1 bash -c "time python3 -I ${VARIANT:-$L/variant}/metal-px92.py $L/stick $I $W/metal run"
 }
 
 legs_prep() {
@@ -176,7 +176,82 @@ legs_prep() {
   [ "$(sha256sum "$L/sout/pax-install-kasumi-$short.img" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$L/kasumi-build-read-1.sha256")" ]
 }
 
-if [ "$SLOT" = AB ]; then
+# The dev stick (the coordinator's addition, 2026-11-04): the same recipe and head, the dev archive.
+D=$L/sdev
+sdevpay() {
+  mkdir -p "$D"
+  [ ! -e "$D/dev-live.cpio" ] || { echo "$D/dev-live.cpio exists"; return 2; }
+  CTR_ENV= ctr sdevpay localhost/px75-ubuntu:2 0 python3 -I "$L/lane/notes/px92/live-payload-dev.py" "$L/stick" "$L/sout/dev.cpio" "$D/dev-live.cpio" "$D/live-payload.txt"
+}
+
+sdevstick() (
+  set -euo pipefail
+  cd "$L/stick"
+  export PAX_CACHE=$L/cache PAX_BUILD=$L/sb TMPDIR=$L/tmp PAX_ENGINE=podman PAX_E2FS_IMAGE=localhost/px75-ubuntu:2
+  [ "$(command -v podman)" = "$P" ] || { echo "podman on PATH is not satoyama-env's"; exit 1; }
+  . tools/lib.sh
+  export SOURCE_DATE_EPOCH=$(cat "$L/sout/source-date-epoch")
+  head=$(cat "$L/sout/commit"); [ "$head" = "$HEAD" ]
+  elf=$L/sout/kernel/kmain_console.elf cpio=$D/dev-live.cpio conf=$PWD/boot/limine-usb.conf allow=$PWD/boot/install-targets
+  load_limine_pin
+  stick=$D/pax-install-dev-$short.img
+  expected=(--expect "/boot/pax=$elf" --expect "/boot/initramfs.cpio=$cpio"
+    --expect "/EFI/BOOT/BOOTX64.EFI=$LIMINE_DIR/BOOTX64.EFI"
+    --expect "/boot/limine/limine-bios.sys=$LIMINE_DIR/limine-bios.sys"
+    --expect "/boot/limine/limine.conf=$conf"
+    --expect "/pax/install-targets=$allow")
+  tools/mkdisk --usb --kernel "$elf" --initramfs "$cpio" --conf "$conf" --kernel-commit "$head" "$stick" > "$D/usb-build.log"
+  tools/check-usb "$stick" "${expected[@]}" | tee "$D/usb-check.log"
+  tools/mkdisk --usb --kernel "$elf" --initramfs "$cpio" --conf "$conf" --kernel-commit "$head" "$D/repeat.img" > "$D/usb-repeat.log"
+  cmp "$stick" "$D/repeat.img"
+  echo 'PASS second dev stick build byte-identical'
+  rm "$D/repeat.img" "$D/repeat.img.inputs.json"
+  for n in 1 2; do sha256sum "$stick" | tee "$D/stick-plain-read-$n.sha256"; done
+  stat -c '%s' "$stick"
+)
+
+sdevline() (
+  set -euo pipefail
+  cd "$L/stick"
+  export PAX_CACHE=$L/cache PAX_BUILD=$L/sb TMPDIR=$L/tmp
+  . tools/lib.sh
+  load_limine_pin
+  plain=$D/pax-install-dev-$short.img k=$D/pax-install-kasumi-dev-$short.img
+  rm -f "$k" "$k.tmp"
+  cp --sparse=always "$plain" "$k.tmp"
+  esp=$(python3 -I -c '
+import struct,sys
+f=open(sys.argv[1],"rb"); f.seek(512); h=f.read(92); a=struct.unpack_from("<Q",h,72)[0]; f.seek(a*512); e=f.read(128)
+print(struct.unpack_from("<Q",e,32)[0]*512)' "$k.tmp")
+  "$L/sout/disktools/paxfat" --offset "$esp" append "$k.tmp" "$L/allow-line" /pax/install-targets
+  "$L/sout/disktools/paxfat" --offset "$esp" cat "$k.tmp" /pax/install-targets > "$D/install-targets.on-stick"
+  cmp "$D/install-targets.on-stick" "$L/install-targets.expected"
+  echo "PASS /pax/install-targets on the dev copy: the release stick's file, one entry"
+  tools/check-usb "$k.tmp" --expect "/boot/pax=$L/sout/kernel/kmain_console.elf" --expect "/boot/initramfs.cpio=$D/dev-live.cpio" \
+    --expect "/EFI/BOOT/BOOTX64.EFI=$LIMINE_DIR/BOOTX64.EFI" --expect "/boot/limine/limine-bios.sys=$LIMINE_DIR/limine-bios.sys" \
+    --expect "/boot/limine/limine.conf=$PWD/boot/limine-usb.conf" --expect "/pax/install-targets=$L/install-targets.expected" | tee "$D/kasumi-usb-check.log"
+  mv "$k.tmp" "$k"
+  chmod 444 "$k"
+  for n in 1 2; do sha256sum "$k" | tee "$D/kasumi-dev-build-read-$n.sha256"; done
+  stat -c '%s' "$k"
+)
+
+sdevcmp() {
+  python3 -I "$L/lane/notes/px92/dev-compare.py" "$L/stick" "$L/sout/pax-install-kasumi-$short.img" "$D/pax-install-kasumi-dev-$short.img" \
+    "$L/sout/release.cpio" "$D/dev-live.cpio" "$L/sout/disktools/paxfat" | tee "$D/compare.log"
+  return "${PIPESTATUS[0]}"
+}
+
+devlegs_prep() {
+  rm -rf "$L/variant-dev"; mkdir -p "$L/variant-dev"
+  python3 -I "$L/lane/notes/px92/make-variant.py" "$L/stick/tests/mpx6-install.d/metal.py" "$L/variant-dev/metal-px92.py"
+  diff -u "$L/stick/tests/mpx6-install.d/metal.py" "$L/variant-dev/metal-px92.py" > "$L/variant-dev/metal-px92.diff" || true
+  sha256sum "$L/stick/tests/mpx6-install.d/metal.py" "$L/variant-dev/metal-px92.py" "$L/lane/notes/px92/make-variant.py" | tee "$L/variant-dev/sha256.txt"
+  [ "$(sha256sum "$L/sout/pax-install-kasumi-$short.img" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$L/kasumi-build-read-1.sha256")" ]
+  [ -f "$L/legs/mpx6/metal/target-after.img" ]
+}
+
+if [ "$SLOT" = AB ] || [ "$SLOT" = ABA ]; then
   # The maintainer's ruling (2026-11-04): one heavy job at a time on satoyama, both locks, A outside then B.
   exec 8>/home/mfwolffe/lanes/satoyama-A.lock
   printf '%s px92 %s: waiting on satoyama-A.lock (one flock -w 21600), then B\n' "$(ts)" "$CHUNK"
@@ -206,9 +281,18 @@ case $CHUNK in
     step sleg-fat32 sleg fat32 "$k" fat32 "$HEAD"
     step sleg-ext4 sleg ext4 "$k" ext4 "$HEAD"
     ;;
-  *) echo "CHUNK is build or legs"; exit 2 ;;
+  dev)
+    step sdevpay sdevpay
+    step sdevstick sdevstick
+    step sdevline sdevline
+    step sdevcmp sdevcmp
+    step devlegs-prep devlegs_prep
+    VARIANT=$L/variant-dev step sleg-rel sleg rel "$L/sout/pax-install-kasumi-$short.img" pax "" "$L/legs/mpx6/metal/target-after.img" keep
+    VARIANT=$L/variant-dev SLEG_EXTRA="-e PAX_METAL_MEM=4096M -e PAX_METAL_DEV=1" step sleg-dev sleg dev "$D/pax-install-kasumi-dev-$short.img" pax "$HEAD" "$L/legs/rel/metal/target-after.img"
+    ;;
+  *) echo "CHUNK is build, legs or dev"; exit 2 ;;
 esac
 flock -u 9; exec 9>&-
-[ "$SLOT" = AB ] && { flock -u 8; exec 8>&-; }
+{ [ "$SLOT" = AB ] || [ "$SLOT" = ABA ]; } && { flock -u 8; exec 8>&-; }
 printf '%s px92 %s: satoyama-%s lock(s) RELEASED\n' "$(ts)" "$CHUNK" "$SLOT"
 printf '%s CHUNK %s DONE %s\n' "$(ts)" "$CHUNK" "$short"
