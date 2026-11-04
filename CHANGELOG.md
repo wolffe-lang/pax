@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The wire on metal, part one (px89).** A DHCP client in the kernel
+  (`kernel/dhcp`, RFC 2131): when the image's `/etc/pax-net` says `dhcp`,
+  kmain_sockets and kmain_session take the address, netmask and default
+  route from a lease, write `/etc/resolv.conf` (a `nameserver` line per
+  server) and `/var/lib/dhcp/pax.lease`, renew at T1 by unicast, rebind
+  at T2 by broadcast, and give the address up on a NAK or when the lease
+  runs out; without the file the fixed 10.0.2.15 stays, every existing
+  row as it was. Intel's gigabit controllers (`kernel/gbe`): QEMU's 82576
+  and the I225/I226 on the one ring model the 82576 and I210 datasheets
+  share, polled every tick where the firmware gives the controller no
+  interrupt line (kasumi's I225-V). `tests/mpx4-dhcp` holds the client to
+  QEMU's server and to dnsmasq on a tap (backoff, renewal, rebinding,
+  expiry, a NAK), every client frame byte for byte (`tools/pcap-dhcp`);
+  `tests/mpx4-igb` runs the DHCP, UDP and TCP rows again over the 82576,
+  and polled. `tools/mkwire` makes the metal stick for kasumi: DHCP on the
+  I225-V, the router's answer, a TCP connection, the record on the stick.
+
 - **The console's terminal is the user's (px98).** A user logged in at the
   console got `fatal: denied` from `den status`, and `Permission denied`
   from `echo x > /dev/stdout`, because the terminal stayed root's, mode
