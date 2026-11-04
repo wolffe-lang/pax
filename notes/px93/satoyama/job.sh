@@ -72,10 +72,15 @@ fat_row() { # OUT: build paxfat at the checkout, then fat.py against the oracles
   return $rc
 }
 leg() { # NAME NEWSTICK ROWS [LINUX]
-  local w=$L/runs/leg-$1-$short
+  local w=$L/runs/leg-$1-$short script=tests/mpx6-install.d/upgrade.py
   rm -rf "$w"; mkdir -p "$w"
+  # $L/legtest-<short> names a later commit whose leg script runs against this head's stick.
+  if [ -s "$L/legtest-$short" ]; then
+    git -C "$L/repo" show "$(cat "$L/legtest-$short"):tests/mpx6-install.d/upgrade.py" > "$w/upgrade.py" || return 3
+    script=$w/upgrade.py; echo "the leg script from $(cat "$L/legtest-$short")"
+  fi
   CTR_ENV="-e PAX_UPGRADE_SERIAL=$SERIAL -e PAX_UPGRADE_LINUX=${4:-} -e PYTHONUNBUFFERED=1" \
-    ctr "leg-$1" localhost/px78-ubuntu:1 1 python3 -I tests/mpx6-install.d/upgrade.py "$CO" "$w" "$OLD" "$2" "$3" 2>&1 | sed -u "s/$SERIAL/<kasumi-serial>/g" | tee "$w/leg.log"
+    ctr "leg-$1" localhost/px78-ubuntu:1 1 python3 -I "$script" "$CO" "$w" "$OLD" "$2" "$3" 2>&1 | sed -u "s/$SERIAL/<kasumi-serial>/g" | tee "$w/leg.log"
   return "${PIPESTATUS[0]}"
 }
 red_expect() { # LOG NEEDLE: a red step's FAIL line, by name
