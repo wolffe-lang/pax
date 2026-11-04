@@ -111,9 +111,17 @@ fn new_partuuid(seed: str) -> str {
     "{hex[0..8]}-{hex[8..12]}-{hex[12..16]}-{hex[16..20]}-{hex[20..32]}"
 }
 
-fn new_config(seed: str) -> str {
+fn new_config(seed: str) -> str { config_text(new_partuuid(seed)) }
+
+/// px93: the installed disk's limine.conf and /etc/fstab for its root's
+/// PARTUUID, the texts a fresh install writes and an upgrade regenerates.
+fn config_text(partuuid: str) -> str {
     "timeout: 0\nquiet: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n" +
-        "    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={new_partuuid(seed)} rootfstype=ext2 rw\n"
+        "    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={partuuid} rootfstype=ext2 rw\n"
+}
+
+fn fstab_text(partuuid: str) -> str {
+    "PARTUUID={partuuid} / ext2 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n"
 }
 
 fn append_attrs(attrs: str, path: str, mode: str, uid: int, gid: int) -> () ! {io} {
@@ -233,12 +241,7 @@ fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
     }
     replace_config(tree, attrs, "/etc/passwd", account_table(passwd, p.user, false)?)?
     replace_config(tree, attrs, "/etc/group", account_table(group, p.user, true)?)?
-    replace_config(
-        tree,
-        attrs,
-        "/etc/fstab",
-        "PARTUUID={new_partuuid(p.seed)} / ext2 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n",
-    )?
+    replace_config(tree, attrs, "/etc/fstab", fstab_text(new_partuuid(p.seed)))?
     replace_config(tree, attrs, "/boot/limine/limine.conf", new_config(p.seed))?
     prepared_dir(tree, attrs, "/home/{p.user}", INSTALL_USER_ID)?
     if fs_exists("{tree}/home/{p.user}/Games") { return invalid }
