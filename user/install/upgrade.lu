@@ -531,6 +531,9 @@ fn upgrade_main(o: Options, work: str) -> int {
             if ok { fs_set_mode(dest, a.row.mode) else |_| { ok = false } }
         } else if a.op == "write" || a.op == "replace" {
             put_file(a.path, dest, a.row) else |e| { say(mut lg, "{a.op} {a.path}: {e}"); ok = false }
+        } else if a.op == "beside" && a.row.kind == "l" {
+            let t = str_from_utf8(fs_read_link(a.path) else |_| List[byte]()) else |_| ""
+            if t.len == 0 { ok = false } else { put_link(t, "{dest}.pax-new") else |_| { ok = false } }
         } else if a.op == "beside" {
             put_file(a.path, "{dest}.pax-new", a.row) else |e| { say(mut lg, "beside {a.path}: {e}"); ok = false }
         } else if a.op == "link" || a.op == "relink" {
