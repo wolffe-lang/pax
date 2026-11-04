@@ -366,12 +366,15 @@ holds `w` as a word. `user.start` reads `quiet` there once into
 | line | with `quiet` |
 |---|---|
 | `user: exec pid …` (`process/`), `user: <name> pid <n> exit_group <s> after <r> runs` and `… syscall <n>: -ENOSYS` (`user/`), `user: frames free …` (`kmain_console.lu`) | not printed |
+| px96: `… write fd <F>: -EBADF` and `… write fd <F> buf 0x<b> len <L>: -EFAULT` (`user/`'s `write`, and `writev` through it: a program's own errno, `errno_lines`) | not printed |
 | `user: quiet (the kernel command line): …` (`user.report`) | printed once, at start-up |
-| refusals (`refused:`), `killed:`, `-EBADF`/`-EFAULT` on a write, the tty ioctl refusal, panics, every boot line | printed |
+| refusals (`refused:`), `killed:`, the tty ioctl refusal, panics, every boot line | printed |
 
 Every test kernel boots without it; `tests/mpx3-shell` boots the shell's
 initramfs with `../boot/limine-initramfs-quiet.conf` beside the
-narrating legs and holds both to the same Linux transcript.
+narrating legs and holds both to the same Linux transcript, and
+`tests/mpx3-user` boots kmain_user both ways (px96: U4 the write lines
+without it, U9 and U10 with it).
 
 ## The screen (px19)
 
