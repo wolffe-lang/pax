@@ -115,6 +115,12 @@ Commits (the prediction first; each phase's rows red before its code):
   no such file and keeps the fixed address.
 - **R-px89-5, resolv.conf on a lost lease.** (A) emptied (no `nameserver` line) at NAK or expiry, rewritten at the
   next ACK; (B) left. **A**: a server the network no longer gives should not be asked.
+- **R-px89-7, the record's rig (ruled B).** mpx4-lobo's Linux side runs its container on the engine's `--network
+  host`, hasu's own namespace, and connects to it at 127.0.0.1; the gauntlet's step had a namespace of its own, so
+  every Linux leg was refused (red at base `b38643a5` as at the head, green with the step in hasu's namespace:
+  `ctr2.sh HOSTNET=1`, mpx4-lobo's step alone, no tap). The scripts' copies are committed before the record.
+- **R-px89-8, kernel-as (ruled A).** CI-only for this PR, a named SKIP line in the local record; the full-matrix
+  run must show it green before the merge.
 - **R-px89-6, the 82576's interrupt.** (A) MSI-X vector 0 (GPIE.Multiple_MSIX, IVAR0, the table in BAR3) to
   kernel/net's vector 83, the last of kernel/idt's four MSI gates; (B) poll it as the I225 is polled. **A**: it is
   the only interrupt QEMU's igb sends; polled costs a tick a round trip (100 a second). The I225 stays polled (one
@@ -173,8 +179,10 @@ today (CachyOS's `lspci -nn` and `/sys/class/net`, read once; `notes/px89/blackb
 Both records are in the PR body (each at the head they name: this note is part of the gauntlet's head, so it cannot
 hold them). The gauntlet (`notes/px89/hasu/gauntlet.sh` under planning's `gauntlet-record.sh`, hasu block B, each
 step its own lock take): the plan job's self-tests; `mpx4-dhcp` and `mpx4-igb` on all four legs; `mpx4-unix`,
-`mpx4-session`, `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-lobo`, `mpx5-jobs`, `kernel-as` and
-`mpx3-shell` on the merge leg (native BIOS): the readers of every kernel path changed but 20 of kmain_sockets'
+`mpx4-session`, `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-lobo` (its step in hasu's own network
+namespace, where its Linux side's container listens: R-px89-7), `mpx5-jobs` and `mpx3-shell` on the merge leg
+(native BIOS). `kernel-as` is CI-only, a named `SKIP` line in the record (R-px89-8): it builds a second wolf from
+source with cargo, which the lane image does not have; the full-matrix run holds it. Those are the readers of every kernel path changed but 20 of kmain_sockets'
 (mpx3-boreutils, -console, -screen, -threads, -tree, -maps; mpx5-forks, -accounts, -lope, -pelt, -aspen, -den,
 -scent, -bore, -lupin, -wolf, -clef, -yew, -screen; mpx6-games: their kernel is the same but for px89's `dhcp`
 branch, never taken without `/etc/pax-net`, and the loopback line's count), which the cross-cutting `full-matrix`
@@ -205,7 +213,7 @@ wrong and what to photograph for each is in the README. The stick writes only it
 - [x] Item 4 (R-px89-1): kernel/gbe from the datasheets, one ring/RX/TX path for QEMU's 82576 and the I225, the
   I225-only paths named; the 82576 and I210 share the ring layout, the I225's public datasheet has no register map.
 - [x] Item 5: PAX on `-device igb` takes its lease by DHCP and passes the existing UDP and TCP rows (mpx4-igb
-  G1-G4, BIOS and UEFI: the gauntlet's `mpx4-igb@all`).
+  G1-G4, BIOS and UEFI: the gauntlet's `mpx4-igb:all`).
 - [x] Item 6: the stick for kasumi built, qualified under QEMU (BIOS and UEFI, MSI-X and polled, no other disk
   written) and staged with the session's exact steps (below); the I225-V identified (PCI `70:00.0`, `8086:15f3`
   rev 03, the cabled port, `enp112s0`). Not run: the maintainer's session.
