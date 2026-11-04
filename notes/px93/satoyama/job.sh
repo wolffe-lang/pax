@@ -180,7 +180,9 @@ case $CHUNK in
     # U5 needs px92's wolf re-pin (wolf-lang#962: 0.2.35's static musl links see argc 0); ROWS can drop it.
     args=$L/runs/args-$short/linux-args.out
     [ -s "$args" ] || args=$(ls -t "$L"/runs/args-*/linux-args.out | head -1)
-    step legs leg all "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-U1,U2,U0,U8,U3,U4,U5,U6,U7}" "$args"
+    rows=U1,U2,U0,U8,U3,U4,U5,U6,U7
+    grep -q '^WOLF_SRC_VERSION_LINE="wolf 0.2.35 ' "$CO/user/wolf.pin" && rows=U1,U2,U0,U8,U3,U4,U6,U7  # U5 pending (wolf-lang#962)
+    step legs leg all "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
     ;;
   *) echo "CHUNK is red, units, build or legs"; exit 2 ;;
 esac
