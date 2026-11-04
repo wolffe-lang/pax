@@ -6,6 +6,7 @@
 # step stops the chunk, but in the `red` chunk, where each step must fail by name.
 #   job.sh red   SHA   the tests-only head: fat.py's replace row, and the leg's U1, U2, U0 and U8 with the
 #                      staged 9c88ec8a stick as both sticks (its pax-install has no --upgrade)
+#   job.sh red-text SHA     the build and the leg's U12 at the commit before the upgrade knows earlier installers' texts
 #   job.sh red-verify SHA   mpx6-install's smoke rows at the commit before the installer writes its manifest
 #   job.sh units SHA   the head's installer and kernel compiled, its paxfat and fat.py; a Linux build of the
 #                      env_args() program (U5's twin)
@@ -19,7 +20,7 @@ L=/home/mfwolffe/lanes/px93
 CHUNK=$1 SHA=$2
 # A queued chain's later chunks may be pointed at another head (the branch rebased onto px92's wolf
 # re-pin while the chain waited): $L/retarget-<short> holds it.
-if [ "$CHUNK" != units ] && [ "$CHUNK" != red ] && [ "$CHUNK" != red-verify ] && [ -s "$L/retarget-${SHA:0:8}" ]; then SHA=$(cat "$L/retarget-${SHA:0:8}"); fi
+if [ "$CHUNK" != units ] && [ "$CHUNK" != red ] && [ "$CHUNK" != red-verify ] && [ "$CHUNK" != red-text ] && [ -s "$L/retarget-${SHA:0:8}" ]; then SHA=$(cat "$L/retarget-${SHA:0:8}"); fi
 short=${SHA:0:8}
 HOST=$(hostname -s)
 case $HOST in
@@ -162,7 +163,7 @@ section() { # legs-a|legs-d|legs-x: one of upgrade.py's three sections against t
     legs-a) rows=U1,U2,U0,U8,U3,U4,U5,U6,U7
             grep -q '^WOLF_SRC_VERSION_LINE="wolf 0.2.35 ' "$CO/user/wolf.pin" && rows=U1,U2,U0,U8,U3,U4,U6,U7 ;;
     legs-d) rows=U1d,U2d,U3d,U4d,U6d ;;
-    legs-x) rows=U9,U10,U11 ;;
+    legs-x) rows=U9,U10,U11,U12 ;;
   esac
   step "$1" leg "${1#legs-}" "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
 }
@@ -187,6 +188,16 @@ case $CHUNK in
     red_expect "$L/runs/fat-red-$short/fat.log" "replace" ; echo "red-fat-named=$?"
     step red-leg leg red "$OLD" U1,U2,U0,U8
     red_expect "$L/runs/leg-red-$short/leg.log" "FAIL U8-wrong-serial: /^usage: pax-install/" ; echo "red-leg-named=$?"
+    ;;
+  red-text)
+    # R-px93-9, red first: U12 at the tests-only head, where an earlier installer's text is kept as the
+    # user's (text_step regenerates only the new installer's own text).
+    RED=1
+    args=$(ls -t "$L"/runs/args-*/linux-args.out | head -1)
+    step sbuild sbuild
+    step sstick sstick
+    step red-text leg x "$L/sout-$short/pax-upgrade-kasumi-$short.img" U12 "$args"
+    red_expect "$L/runs/leg-x-$short/leg.log" "FAIL U12-old-text: missing 'text /etc/pax-login (the installed login: an earlier installer'"; echo "red-text-named=$?"
     ;;
   red-verify)
     # R-px93-6's item 2, red first: at 4f2f6f10 verify.py's I-manifest is in and the installer does not
@@ -267,7 +278,7 @@ case $CHUNK in
         ;;
     esac
     ;;
-  *) echo "CHUNK is red, red-verify, units, build, legs-a, legs-d, legs-x, stick or gauntlet-1..3"; exit 2 ;;
+  *) echo "CHUNK is red, red-text, red-verify, units, build, legs-a, legs-d, legs-x, stick or gauntlet-1..3"; exit 2 ;;
 esac
 sensors > "$L/runs/$CHUNK-$short-sensors-end.txt" 2>&1 || true
 flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
