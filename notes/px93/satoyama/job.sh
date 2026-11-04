@@ -149,6 +149,10 @@ printf '%s px93 %s: %s acquired; waiting on %s\n' "$(ts)" "$CHUNK" "$LOCK1" "$LO
 exec 9>"$LOCK2"
 flock -w 21600 9 || { echo "$(ts) the second lock wait timed out"; exit 4; }
 printf '%s px93 %s: both locks acquired on %s (CPUs %s)\n' "$(ts)" "$CHUNK" "$HOST" "$CPUS"
+if [ -e "$L/STOP-$HOST" ]; then
+  flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
+  echo "$(ts) px93 $CHUNK $short: $L/STOP-$HOST says stand down; both locks RELEASED at once"; exit 0
+fi
 sensors > "$L/runs/$CHUNK-$short-sensors-start.txt" 2>&1 || true
 checkout
 case $CHUNK in
