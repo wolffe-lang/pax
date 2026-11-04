@@ -1,0 +1,45 @@
+//! px93: what the install's and the upgrade's flows share (from main.lu),
+//! in a file every build compiles: the unit builds replace main.lu with a
+//! test's main and keep the rest, upgrade.lu among them.
+
+struct Options {
+    mode: str,
+    target: str,
+    seed: str,
+    user: str,
+    games: str,
+    confirm: str,
+    preview: bool,
+    source: str,
+    payload: str,
+    tools: str,
+    allow: str,
+}
+
+/// The release's first line, for the log's head ("" without one).
+fn release_line() -> str {
+    let s = fs_read_text("/etc/pax-release") else |_| { return "" }
+    let lines = s.lines()
+    if lines.len == 0 then "" else lines[0]
+}
+
+/// The page every flow but the inventory begins with: each disk and its
+/// verdict, the list's source, and how to add a disk when none may be one.
+fn report_disks(mut lg: Log, disks: List[Disk], list: AllowList) {
+    let state = if list.refusal.len == 0 then ", {list.entries.len} line(s)" else ": {list.refusal}"
+    say(mut lg, "Disks ({disks.len}); install allow-list {list.source}{state}")
+    for d in disks { say(mut lg, disk_text(d)) }
+    if eligible(disks).len == 0 {
+        say(mut lg, "No disk may be a target, so nothing will be written.")
+        say(mut lg, how_to_allow())
+    }
+}
+
+/// A stop: the line kept for the log (not printed: stderr carries it, once,
+/// as before the log), the log flushed, the line on stderr.
+fn stop(mut lg: Log, line: str) -> int {
+    note(mut lg, line)
+    flush_log(mut lg)
+    eprint(line)
+    1
+}
