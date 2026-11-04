@@ -160,7 +160,8 @@ case $CHUNK in
     step sstick sstick
     ;;
   legs)
-    step legs leg all "$L/sout-$short/pax-upgrade-kasumi-$short.img" U1,U2,U0,U8,U3,U4,U5,U6,U7 "$L/runs/args-$short/linux-args.out"
+    # U5 waits for px92's wolf re-pin (wolf-lang#962: 0.2.35's static musl links see argc 0): ROWS=... adds it.
+    step legs leg all "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-U1,U2,U0,U8,U3,U4,U6,U7}" "$L/runs/args-$short/linux-args.out"
     ;;
   *) echo "CHUNK is red, units, build or legs"; exit 2 ;;
 esac
