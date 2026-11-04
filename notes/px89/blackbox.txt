@@ -40,3 +40,26 @@ px89 — black-box measurements (no source read: QEMU, dnsmasq and Linux run as 
    network), the I210 datasheet 333016 rev 3.7 (cdrdv2-public.intel.com), the I225/I226
    datasheet 596659 rev 2.6 (the LCSC mirror: no register map in it). Their sha256 are in
    notes/px89/datasheets.sha256.
+5. QEMU 8.2.2's `-device igb` (8086:10c9), measured from PAX's own boots (kernel/gbe's
+   read-backs on the serial log; hasu block B, KVM, 2026-11-04 00:30-00:50Z; the boots
+   i1, i2, i3 and p3 in notes/px89-the-wire-on-metal.md; p3 ran a lane-only probe
+   commit, f4eef2ca on the branch px89-probe, never merged):
+   - after CTRL.RST and CTRL.SLU, STATUS.LU stays 0 for the full 10 s (STATUS
+     80080481); PHY register 0 (PCTRL) reads 1140 (auto-negotiation enabled, full
+     duplex, 1000) and register 1 (PSTATUS) 794d (link down, negotiation not complete)
+     at MDIO address 1. Writing PCTRL with bit 9 (restart) set brings the link up in
+     about 0.5 s (STATUS 80080483, PSTATUS 796d; CTRL gains RFCE and TFCE, 18100241).
+   - with the link up, frames are received into the ring (RDH moves: 4 after four
+     OFFERs) but ICR never shows RXDW and no INTx comes with IMS = d4: IMS reads 0
+     after any write (d4, then 4); ICS = 4 sets nothing ICR or EICR reads back.
+   - EIMS keeps bit 0 of 80000001 (bit 31 is dropped); IVAR0 keeps 8181; with IVAR0
+     8181 (receive and transmit queue 0 to EICR bit 1) EICR reads 2 at the end of the
+     run. GPIE, IAM, EIAC and EIAM read 0.
+   - polled (no interrupt, `netpoll`): the DHCP lease in 0.05 s, every U0-U9 row of
+     tests/mpx4-udp's user way passes, at one datagram per 10 ms tick (100 a second).
+   - p4 (a second probe commit on px89-probe, daa2643b): with IVAR0 80 (receive queue 0
+     to EICR bit 0) and EIMS bit 0 set, EICR reads 1 at the end of the run (the cause is
+     there, unmasked) but PCI status bit 3 (Interrupt Status) stays clear (status 0010,
+     command 0107: INTx not disabled), before and after EICS = 1; IMS = ffffffff reads
+     back 0; ICS = 4 sets nothing, with GPIE.NSICR 0 or 1. QEMU's igb raises no INTx
+     here; its MSI capability is at 50 and MSI-X at 70.

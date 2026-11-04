@@ -70,17 +70,19 @@
 //! descriptors the hardware has written back with DD are taken back at
 //! the next send.
 //!
-//! **The interrupt** (the 82576 in QEMU): INTx on the 8259 line the
-//! firmware wrote, level-triggered (kernel/net sets ELCR and unmasks it).
-//! In INTx and MSI mode a queue's causes reach EICR through IVAR, ICR's
-//! only through EICR's Other bit (§7.3.1.1): IVAR0's entry 0 maps
+//! **The interrupt** (the 82576 in QEMU): one MSI (PCI Local Bus 3.0
+//! §6.8, kernel/pci's `enable_msi`) of kernel/net's vector to the boot
+//! CPU's local APIC, edge-triggered, acknowledged there. In INTx and MSI
+//! mode (GPIE.Multiple_MSIX 0) a queue's causes reach EICR through IVAR,
+//! ICR's only through EICR's Other bit (§7.3.1.1): IVAR0's entry 0 maps
 //! receive queue 0 to EICR bit 0, EIMS = bit 0 and Other (31), IMS = LSC
-//! (2). `irq` reads EICR and ICR, which clears them and withdraws the
-//! request. (QEMU's igb keeps EIMS bit 0 and drops 31, and reads IMS as
-//! 0 whatever is written; ICR's RXDW is never set there: black box,
-//! notes/px89/blackbox.txt.) A line this kernel cannot take (not 3-15, or
-//! 4, 8, 13), or `poll` asked for, and the device is polled instead:
-//! every mask clear, and kernel/netd's clock asks `due` every tick.
+//! (2). `irq` reads EICR and ICR, which clears them; the next cause sends
+//! the next message. INTx is not used: QEMU's igb never asserts it (PCI
+//! status bit 3 stays clear with EICR bit 0 set and unmasked; IMS reads
+//! 0 whatever is written; ICR's RXDW is never set: black box,
+//! notes/px89/blackbox.txt). An 82576 with no MSI capability, one whose
+//! MSI does not enable, every I225, and `poll` asked for: polled, every
+//! mask clear, kernel/netd's clock asking `due` every tick.
 //!
 //! State: words of boot/net.S's `pax_gbe_state`, changed under
 //! kernel/net's lock (its frame interface) or before the device is up.
@@ -205,6 +207,13 @@ const G_PSTATUS1: u64 = 21 // PSTATUS after the restart's wait
 const G_RESTARTED: u64 = 22 // 1: auto-negotiation restarted through MDIC
 const G_IMS: u64 = 23 // IMS read back after it was set
 const G_EIMS: u64 = 24 // EIMS read back after it was set
+const G_VECTOR: u64 = 25 // the MSI's vector, 0 when polled
+
+// G_POLL's values: 0 an MSI; else why it is polled.
+const P_ASKED: u64 = 1
+const P_I225: u64 = 2
+const P_NO_MSI: u64 = 3
+const P_MSI_OFF: u64 = 4
 const G_RXB: u64 = 64 // 64 words: receive buffer i's physical address
 const G_TXB: u64 = 128 // 64 words: transmit buffer i's
 
@@ -310,9 +319,22 @@ pub fn up() -> bool {
     gw(G_UP) == 1
 }
 
-/// Whether it is polled (no interrupt line this kernel can take).
+/// Whether it is polled: asked for (`netpoll`), an I225 (polled by
+/// design: no MSI programmed), or an 82576 whose MSI is missing or did
+/// not enable.
 pub fn polled() -> bool {
-    gw(G_POLL) == 1
+    gw(G_POLL) != 0
+}
+
+/// Why it is polled, for kernel/net's line.
+pub fn poll_reason() -> str {
+    let p = gw(G_POLL)
+    if p == P_ASKED { "netpoll asked" } else if p == P_I225 { "an I225: polled by design" } else if p == P_NO_MSI { "no MSI capability" } else { "MSI did not enable" }
+}
+
+/// The MSI vector, when the device interrupts.
+pub fn vector() -> u64 {
+    gw(G_VECTOR)
 }
 
 /// Byte `i` of the device's address.
@@ -354,11 +376,11 @@ fn arm(k: u64) {
 }
 
 /// Bring the device at kernel/pci's index `i` up on the paging
-/// structures at `pml4`, as the datasheets' §4.5 orders. `poll` asks for
-/// the polled path whatever the line. Answers 0 (up), 2 (refused, one
-/// line says why). The interrupt line, when the device is not polled,
-/// is kernel/net's to route: `line` says which.
-pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
+/// structures at `pml4`, as the datasheets' §4.5 orders. The 82576's
+/// interrupt is an MSI of `vector` to the local APIC `cpu`; `poll` asks
+/// for the polled path whatever the model. Answers 0 (up), 2 (refused,
+/// one line says why).
+pub fn start(pml4: u64, i: u64, poll: bool, vector: u64, cpu: u64) -> u64 {
     var w: u64 = 0
     while w < 256 {
         put_gw(w, 0)
@@ -384,11 +406,10 @@ pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
         }
         off += PAGE
     }
-    // Memory decoding and bus mastering on; INTx left as the polled path
-    // wants it (off) or on.
-    var cmd = pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER
-    cmd = if poll { cmd | pci.CMD_INTX_OFF } else { cmd & !pci.CMD_INTX_OFF }
-    pci.set_command(b, cmd)
+    // Memory decoding and bus mastering on; INTx, MSI and MSI-X off (the
+    // firmware may have left one on) until the end.
+    pci.interrupts_off(b)
+    pci.set_command(b, pci.command(b) | pci.CMD_MEMORY | pci.CMD_MASTER)
     // §4.5.4: interrupts off; the receiver and transmitter stopped (the
     // firmware may have left its own rings running), then the reset.
     wr(IMC, 0xffffffff)
@@ -511,14 +532,11 @@ pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
     }
     put_gw(G_LINK_MS, if rd(STATUS) & STATUS_LU != 0 { ms } else { 0xffffffffffffffff })
     put_gw(G_STATUS0, rd(STATUS))
-    // The interrupt, or the polled path.
-    let line = pci.line(i)
-    let can = pci.pin(i) != 0 && line >= 3 && line <= 15 && line != 4 && line != 8 && line != 13
-    if poll || !can {
-        put_gw(G_POLL, 1)
-        wr(IMC, 0xffffffff)
-        wr(EIMC, 0xffffffff)
-    } else {
+    // The interrupt (the 82576: an MSI), or the polled path.
+    wr(IMC, 0xffffffff)
+    wr(EIMC, 0xffffffff)
+    put_gw(G_POLL, if poll { P_ASKED } else if m != M_82576 { P_I225 } else if pci.capability(b, 5) == 0 { P_NO_MSI } else { 0 })
+    if gw(G_POLL) == 0 {
         // §7.3.1.1: in INTx and MSI mode a queue's causes reach EICR
         // through IVAR, and ICR's are EICR's Other bit (31).
         wr(IVAR0, IVAR_RXQ0)
@@ -528,6 +546,13 @@ pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
         wr(EIMS, EIMS_RXQ0)
         put_gw(G_IMS, rd(IMS))
         put_gw(G_EIMS, rd(EIMS))
+        if pci.enable_msi(b, cpu, vector) {
+            put_gw(G_VECTOR, vector)
+        } else {
+            wr(IMC, 0xffffffff)
+            wr(EIMC, 0xffffffff)
+            put_gw(G_POLL, P_MSI_OFF)
+        }
     }
     probe()
     put_gw(G_UP, 1)
