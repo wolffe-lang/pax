@@ -4,6 +4,7 @@
 //! paxfat [--offset BYTES] mkdir IMAGE /PATH
 //! paxfat [--offset BYTES] copy IMAGE SOURCE /PATH
 //! paxfat [--offset BYTES] append IMAGE SOURCE /PATH
+//! paxfat [--offset BYTES] replace IMAGE SOURCE /PATH
 //! paxfat [--offset BYTES] ls IMAGE [/PATH]
 //! paxfat [--offset BYTES] cat IMAGE /PATH
 //! px78: `append` adds SOURCE's bytes to the end of /PATH (made as `copy`
@@ -14,6 +15,15 @@
 //! cluster moved by what was taken (§5), then fsync: a log grown a step
 //! at a time, each step durable. Volumes up to 2 GiB with one sector a
 //! cluster, as every command here (pax-install's boot stick: px78).
+//! px93: `replace` gives an existing file /PATH SOURCE's bytes for
+//! pax-install --upgrade, in an order a power cut cannot make half of:
+//! a new chain written and its FAT sectors saved in both FATs, fsynced;
+//! then the one sector of the directory entry rewritten (its first
+//! cluster and size, §6), fsynced: the file is the new bytes from here;
+//! then the old chain freed (§4) and FSInfo's free count moved, fsynced.
+//! A cut before the entry leaves the old file and a chain no entry
+//! names; after it, the new file and the old chain unfreed: lost
+//! clusters for fsck.fat, never a file of mixed bytes. Never a directory.
 
 use diskio
 use std.x.crypto.sha2
@@ -665,6 +675,79 @@ fn append(mut v: Volume, path: str, source: str) -> () ! {
     fs_sync(v.fd)?
 }
 
+/// px93: /PATH's bytes become SOURCE's (see the module's header).
+fn replace(mut v: Volume, path: str, source: str) -> () ! {
+    invalid,
+    io,
+    full,
+    exists,
+    not_found,
+} {
+    let paths = components(path)?
+    if paths.len == 0 { return invalid }
+    let parent = lookup(v, paths[0..paths.len - 1])?
+    if parent.attr & 16 == 0 { return invalid }
+    var bytes = directory(v, parent.cluster)?
+    let name = paths[paths.len - 1]
+    var slot = -1
+    var cluster = 0
+    var size = 0
+    for e in entries(bytes)? {
+        let abase = oem_text(e.alias[0..8]).trim()
+        let aext = oem_text(e.alias[8..11]).trim()
+        let aname = if aext.len == 0 then abase else "{abase}.{aext}"
+        if e.name.lower() == name.lower() || aname.lower() == name.lower() {
+            if e.attr & 16 != 0 { return invalid }
+            slot = e.slot
+            cluster = e.cluster
+            size = e.size
+        }
+    }
+    if slot < 0 { return not_found }
+    let input = fs_open_mode(source, 5) else |_| { return io }
+    defer fs_close(input) else |_| {}
+    let src = fs_fstat_record(input) else |_| { return io }
+    let dst = fs_fstat_record(v.fd) else |_| { return io }
+    if src[0] != 0 || src[9] == dst[9] && src[10] == dst[10] { return invalid }
+    let n = src[1]
+    if n < 0 || n > 4294967295 { return invalid }
+    let old = if cluster == 0 then List[int]() else chain(v, cluster)?
+    if old.len != (size + 511) / 512 { return invalid }
+    // 1. The new chain and its bytes, its FAT sectors in both FATs.
+    let fresh = allocate(mut v, (n + 511) / 512)?
+    var done = 0
+    for i in 0..fresh.len {
+        region chunk {
+            var b = diskio.zeros(512)
+            let amount = if n - done < 512 then n - done else 512
+            diskio.paste(mut b, 0, diskio.exact(input, done, amount)?)
+            diskio.write_at(v.fd, offset(v, fresh[i])?, b)?
+            done += amount
+        }
+    }
+    if fresh.len != 0 { save_part(v, fresh, fresh.len)? }
+    fs_sync(v.fd)?
+    // 2. The entry, in its one sector: the file is the new bytes now.
+    let first = if fresh.len == 0 then 0 else fresh[0]
+    let at = slot * 32
+    diskio.put(mut bytes, at + 20, first >> 16, 2)
+    diskio.put(mut bytes, at + 26, first & 65535, 2)
+    diskio.put(mut bytes, at + 28, n, 4)
+    var e = bytes[at..at + 32]
+    stamp(mut e)?
+    diskio.paste(mut bytes, at, e)
+    let dcs = chain(v, parent.cluster)?
+    let k = at / 512
+    diskio.write_at(v.fd, offset(v, dcs[k])?, bytes[k * 512..(k + 1) * 512])?
+    fs_sync(v.fd)?
+    // 3. The old chain freed, FSInfo's count given back.
+    if old.len != 0 {
+        for c in old { diskio.put(mut v.fat, c * 4, 0, 4) }
+        save_part(v, old, 0 - old.len)?
+        fs_sync(v.fd)?
+    }
+}
+
 /// px78: the FAT sectors holding the entries of `touched` written to both
 /// FATs, and FSInfo's free count (when it holds one) less `taken`, its
 /// next free hint the cluster after the last one taken: `append`'s save,
@@ -719,11 +802,11 @@ fn run(args: List[str]) -> () ! {invalid, io, full, exists, not_found} {
             seed,
         )?
     }
-    if cmd != "mkdir" && cmd != "copy" && cmd != "append" && cmd != "ls" && cmd != "cat" { return invalid }
+    if cmd != "mkdir" && cmd != "copy" && cmd != "append" && cmd != "replace" && cmd != "ls" && cmd != "cat" { return invalid }
     if (cmd == "mkdir" || cmd == "cat") && i + 1 != args.len { return invalid }
-    if (cmd == "copy" || cmd == "append") && i + 2 != args.len { return invalid }
+    if (cmd == "copy" || cmd == "append" || cmd == "replace") && i + 2 != args.len { return invalid }
     if cmd == "ls" && i != args.len && i + 1 != args.len { return invalid }
-    var v = open_volume(image, base, cmd == "mkdir" || cmd == "copy" || cmd == "append")?
+    var v = open_volume(image, base, cmd == "mkdir" || cmd == "copy" || cmd == "append" || cmd == "replace")?
     defer fs_close(v.fd) else |_| {}
     if cmd == "mkdir" {
         if i + 1 != args.len { return invalid }
@@ -733,13 +816,14 @@ fn run(args: List[str]) -> () ! {invalid, io, full, exists, not_found} {
         if i + 2 != args.len { return invalid }
         return add(mut v, args[i + 1], args[i], false)?
     }
-    if cmd == "append" {
+    if cmd == "append" || cmd == "replace" {
         if i + 2 != args.len { return invalid }
         // FSInfo's next-free hint starts the search (§5.2), past the
         // clusters a stick's payload already holds.
         let fsinfo = diskio.exact(v.fd, v.base + 512, 512)?
         let hint = diskio.le(fsinfo, 492, 4)?
         if hint >= 3 && hint < v.clusters + 2 { v.next = hint }
+        if cmd == "replace" { return replace(mut v, args[i + 1], args[i])? }
         return append(mut v, args[i + 1], args[i])?
     }
     if i != args.len && i + 1 != args.len { return invalid }
