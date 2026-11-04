@@ -13,7 +13,7 @@
 //     paging: limine cr3 0x<A>, pax cr3 0x<B>, <P> table frames
 //     screen: <w>x<h> 32 bpp pitch <p> rgb 8:16 8:8 8:0 at 0x…, wc (pat 0x…), … cells; <r> bytes replayed, 0 lost
 //     scroll: 400 lines in <a> ticks without scrolling, 400 in <b> with <s> scrolls
-//     scroll: 200 varied lines of 120 cells in <t> ticks with <s> scrolls, by copy|redraw
+//     scroll: 200 varied lines of 120 cells in <t> ticks with <s> scrolls, by copy|redraw (<why>)
 //     …the pattern…
 //     screen: <n> bytes, <s> scrolls
 //     halt
@@ -319,10 +319,29 @@ export fn kmain() {
     log.dec((s3 - s2) as int)
     log.put(" scrolls, by ")
     if screen.copy_scroll() {
-        log.put("copy")
+        log.put("copy (")
     } else {
-        log.put("redraw")
+        log.put("redraw (")
     }
+    // and why, as kernel/identity's boot line says it (tests/mpx3-screen
+    // V8 holds the way to the probe's numbers)
+    let f = screen.scroll_forced()
+    if !screen.scroll_decided() {
+        log.put("no screen")
+    } else if f == 1 {
+        log.put("fbread")
+    } else if f == 2 {
+        log.put("fbwrite")
+    } else {
+        log.put("read ")
+        log.dec(screen.probe_read_cycles() as int)
+        log.put(", write ")
+        log.dec(screen.probe_write_cycles() as int)
+        log.put(" cycles; copy when read <= ")
+        log.dec(screen.copy_max() as int)
+        log.put(" x write")
+    }
+    log.put(")")
     log.end()
 
     pattern()
