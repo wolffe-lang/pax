@@ -15,6 +15,9 @@
 set -uo pipefail
 L=/home/mfwolffe/lanes/px93
 CHUNK=$1 SHA=$2
+# A queued chain's later chunks may be pointed at another head (the branch rebased onto px92's wolf
+# re-pin while the chain waited): $L/retarget-<short> holds it.
+if [ "$CHUNK" != units ] && [ "$CHUNK" != red ] && [ -s "$L/retarget-${SHA:0:8}" ]; then SHA=$(cat "$L/retarget-${SHA:0:8}"); fi
 short=${SHA:0:8}
 HOST=$(hostname -s)
 case $HOST in
@@ -174,8 +177,10 @@ case $CHUNK in
     step sstick sstick
     ;;
   legs)
-    # U5 waits for px92's wolf re-pin (wolf-lang#962: 0.2.35's static musl links see argc 0): ROWS=... adds it.
-    step legs leg all "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-U1,U2,U0,U8,U3,U4,U6,U7}" "$L/runs/args-$short/linux-args.out"
+    # U5 needs px92's wolf re-pin (wolf-lang#962: 0.2.35's static musl links see argc 0); ROWS can drop it.
+    args=$L/runs/args-$short/linux-args.out
+    [ -s "$args" ] || args=$(ls -t "$L"/runs/args-*/linux-args.out | head -1)
+    step legs leg all "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-U1,U2,U0,U8,U3,U4,U5,U6,U7}" "$args"
     ;;
   *) echo "CHUNK is red, units, build or legs"; exit 2 ;;
 esac
