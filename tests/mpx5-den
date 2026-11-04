@@ -70,6 +70,31 @@
 # (or a link) broken on both sides leaves D1 green and turns D2; a kernel
 # break of PAX's alone turns D1.
 #
+# px98, the console user: a second image, the same archive with su
+# (tools/mksu), boreutils' chmod, chown and stat, accounts root and `pax`
+# (1000:1000), and four logins as its /etc/pax-run: the installed system's
+# console login three times (the text pax-install writes as /etc/pax-login,
+# user/install/prepare.lu's `installed_login`, extracted by
+# tests/mpx5-den.d/login.py, never copied) and the live medium's
+# (user/usb-login.sh) once. tests/mpx5-den.d/login.py types at each
+# `login:` (pax, root, pax, root) and at each prompt, with nothing
+# redirected: den writes to the terminal, as a user's den does. Its rows,
+# per tier and firmware (login.py's header has them whole):
+#   L1 the login gave the terminal to the account (`stat -L /dev/stdin`:
+#      1000 1000 600, login.defs(5)'s default); its owner may chmod it and
+#      may not chown it to root (-EPERM);
+#   L2 `echo > /dev/stdout` and `> /dev/stderr` print, status 0;
+#   L3 den init, status, add, commit, log --no-decorate and status at the
+#      terminal, under /tmp and under ~ (the ext2 disk), each status 0, no
+#      `fatal:` line (den's status opens /dev/stdout by name);
+#   L4 root's login takes the terminal back (0 0 600) and /dev/tty stays
+#      fixed; pax's next login has it again, the live login's is root's;
+#   L5 D4's end rows for that boot (one refusal by name: root's chown of
+#      /dev/tty).
+# These rows are held to login(1)'s documented behaviour, not to a Linux
+# side: a Linux console login gives its terminal to the user, which no
+# container here reproduces.
+#
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. A failed row is
 # printed `FAIL <row> …` at the start of a line. Exit 0 when every
@@ -108,6 +133,7 @@ need readelf python3 cmp
 KEYS=$PAX_ROOT/user/console/den.keys
 DD=$here/mpx5-den.d
 BORE="cat env id ls mkdir readlink sha256sum" # boreutils in the image (user/boreutils.pin)
+LOGIN_BORE="chmod chown stat" # px98: and in the login image beside them
 RUNS=("/bin/sh -i -m" "/bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m")
 NAMES=(den-root den-user)
 WORKDIRS=(/home/den-root /home/pax)
@@ -180,8 +206,10 @@ if [ -z "$images" ]; then
     why=
     "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
     "$PAX_ROOT/tools/mkden" "$work/den" > "$work/den.txt" || why+=" tools/mkden;"
-    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    # shellcheck disable=SC2086 # the utilities' names, one word each
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE $LOGIN_BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
     "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    "$PAX_ROOT/tools/mksu" "$work/su" > "$work/su.txt" || why+=" tools/mksu;"
     cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null || why+=" no pelt;"
     cp "$work/pelt/pelt" "$r/bin/sh" 2>/dev/null || true
     "$PAX_ROOT/tools/install-den" "$work/den" "$r" || why+=" tools/install-den;"
@@ -212,6 +240,24 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/mkinitramfs" "$work/den.cpio" "${args[@]}" > "$work/den.initramfs.txt" || why+=" tools/mkinitramfs;"
     e=$(cpio_entry "$work/den.cpio" bin/git)
     [ "$e" = "120777 1 3 den" ] || why+=" the archive's bin/git is '$e', not a link to den (120777 1 3 den);"
+    # px98: the login image's archive: den's, its own runs, the accounts,
+    # su, the three utilities a login and its rows use, the installed
+    # login as pax-install writes it and the live medium's.
+    for f in "$work/su/su" "$work/bore/chmod" "$work/bore/chown" "$work/bore/stat"; do
+        x=$(static_ok "$f") || why+=" $x;"
+    done
+    printf '%s\n' 'root:x:0:0:root:/root:/bin/pelt' 'pax:x:1000:1000:pax:/home/pax:/bin/pelt' > "$work/login.passwd"
+    printf '%s\n' 'root:x:0:' 'pax:x:1000:' > "$work/login.group"
+    printf '%s\n' '/bin/pelt /etc/pax-login' '/bin/pelt /etc/pax-login' '/bin/pelt /etc/pax-login' \
+        '/bin/pelt /etc/pax-live-login' > "$work/login.run"
+    python3 -I "$DD/login.py" text "$PAX_ROOT/user/install/prepare.lu" > "$work/pax-login" || why+=" the installed login's text;"
+    largs=()
+    for e in "${args[@]}"; do case $e in /etc/pax-run=*) ;; *) largs+=("$e") ;; esac; done
+    largs+=(/root/:700 "/etc/pax-run=$work/login.run:644" "/etc/passwd=$work/login.passwd:644"
+        "/etc/group=$work/login.group:644" "/etc/pax-login=$work/pax-login:644"
+        "/etc/pax-live-login=$PAX_ROOT/user/usb-login.sh:644" "/bin/su=$work/su/su:755")
+    for u in $LOGIN_BORE; do largs+=("/bin/$u=$work/bore/$u:755"); done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/login.cpio" "${largs[@]}" > "$work/login.initramfs.txt" || why+=" tools/mkinitramfs (login);"
     # The home disk: tools/mkdisk --home, the bytes mpx6-ext2 records.
     if SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --home 32M "$work/home.img" > "$work/home.mkdisk.txt" 2>&1; then
         want=$(awk '$1 == "home" { print $2 }' "$here/mpx6-ext2.d/disks.sha256")
@@ -228,7 +274,10 @@ if [ -z "$images" ]; then
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                 --add "$work/den.cpio" initramfs.cpio "$elf" "$work/$tier/den.iso" >/dev/null || why+=" $tier: mkimage;"
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/login.cpio" initramfs.cpio "$elf" "$work/$tier/den-login.iso" >/dev/null || why+=" $tier: mkimage (login);"
             say "built $tier den: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/den.iso"), initramfs $(sha256_of "$work/den.cpio")"
+            say "built $tier den-login: iso $(sha256_of "$work/$tier/den-login.iso"), initramfs $(sha256_of "$work/login.cpio")"
         else
             cat "$log" >&2
             why+=" $tier kmain_console: tools/build-kernel;"
@@ -359,6 +408,32 @@ d4_rows() { # id halt-status
     [ -z "$why" ] && say "PASS D4 $1: -ENOSYS from den only for '${ns:-none}' (of 273 334); nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "D4 $1:$why"
 }
 
+# px98: L1-L5, the login image (tests/mpx5-den.d/login.py), on a fresh
+# copy of the home disk.
+login_rows() { # tier leg
+    local id="$1 $2" lhome llog limg=$images/$1/den-login.iso ovmf= line lrc=0 lfail=0
+    if [ ! -f "$limg" ]; then
+        bad "L5 $id: no image $limg"
+        return
+    fi
+    [ "$2" != uefi ] || read -r ovmf _ <<<"$(find_ovmf)"
+    lhome=$PAX_BUILD/mpx5-den-login-$1-$2.home.img
+    llog=$PAX_BUILD/mpx5-den-login-$1-$2.serial.log
+    cp "$images/home.img" "$lhome"
+    rm -f "$llog"
+    python3 -I "$DD/login.py" run "$limg" "$lhome" "$llog" "$2" ${ovmf:+"$ovmf"} > "$llog.rows" 2>&1 || lrc=$?
+    ran=$((ran + 1))
+    printf '%s %s den-login rows-status=%s serial=%s\n' "$1" "$2" "$lrc" "$(sha256_of "$llog" 2>/dev/null)" >> "$runs"
+    while IFS= read -r line; do
+        case $line in
+            'PASS '*) say "$line [$1]" ;;
+            'FAIL '*) bad "${line#FAIL } [$1]"; lfail=1 ;;
+            *) printf '  %s\n' "$line" ;;
+        esac
+    done < "$llog.rows"
+    [ "$lrc" = 0 ] || [ "$lfail" = 1 ] || bad "L5 $id: tests/mpx5-den.d/login.py exited $lrc"
+}
+
 mkdir -p "$PAX_BUILD"
 : > "$runs"
 for leg in $legs; do
@@ -418,6 +493,7 @@ PY
             say "NOTE D3 $id: not run: the dev ISO's /home is the in-memory tree (its root carries no fstab)"
         fi
         d4_rows "$id" "$hrc"
+        say "NOTE L1-L5 $id: not run: the login image is a build's (tests/mpx5-den.d/login.py)"
         continue
     fi
     for tier in $tiers; do
@@ -450,6 +526,7 @@ PY
         disk_rows "$id" "$home" "" \
             "$PAX_BUILD/mpx5-den-$tier-$leg-${NAMES[0]}.session" "$PAX_BUILD/mpx5-den-$tier-$leg-${NAMES[1]}.session"
         d4_rows "$id" "$hrc"
+        login_rows "$tier" "$leg"
     done
 done
 cat "$runs"
