@@ -1,0 +1,41 @@
+px96 — the quiet console: the prediction, written 2026-11-04T15:06Z before the first change.
+
+Base: trunk 44b44435.
+
+The census (kernel/user/user.lu, kernel/process/process.lu, kernel/signal/signal.lu read
+for every `user: <name> pid <n> …` line; kernel/files prints no line of its own):
+  - `write fd F: -EBADF` (write and writev on a closed or read-only descriptor): printed
+    whatever `quiet` says. No test asserts it.
+  - `write fd F buf 0x<b> len L: -EFAULT` (a console write whose buffer is not readable):
+    printed whatever `quiet` says. tests/mpx3-user U4 asserts three of them, booted without
+    `quiet`.
+  - `syscall N: -ENOSYS`: already gated on `quiet` (px15).
+  - refusals by name (`syscall N: refused: <why>, -<errno>`, `syscall 16: refused: tty ioctl
+    0x<r>, -ENOTTY`, `user: exec <path>: refused: <why>`): printed whatever `quiet` says, by
+    px15's design; quiet suites (mpx3-shell S2 and S4, mpx4-session E1, mpx4-lobo L2) hold
+    quiet boots to "no refusal", which means something only while refusals print. Predicted
+    ruling: they stay (R-px96-1).
+  - `killed:` (a fault or a signal that ends the process) and panics: not errno lines; they stay.
+
+The change, predicted:
+  1. user/programs.S: badptr also closes fd 2 and writes to it (-EBADF, 9), and when all four
+     answers are Linux's it writes its own line on fd 1 and exits 14 as before.
+  2. tests/mpx3-user: U4 takes the -EBADF line and badptr's own line; a fourth image,
+     kmain_user booted with `cmdline: quiet` (tests/mpx3-user.d/limine-quiet.conf), adds
+       U9  quiet: badptr's own line (its errnos came back) and no `write fd` line at all;
+       U10 quiet keeps the rest: one `user: quiet` line, the five faults' `killed:` lines,
+           no -ENOSYS and no exit line.
+     At the rows' commit, before the gate: U0-U8 and U10 PASS, U9 FAILs naming the -EFAULT
+     and -EBADF lines on the quiet image.
+  3. kernel/user/user.lu: the two lines behind one gate, `errno_lines()` (false when the console
+     is quiet), the way exec and exit are; the `user: quiet` line names them. Then U9 PASSes and
+     nothing else moves.
+  4. The plant, one hunk off the final head: `errno_lines()` answers true. U9 red by name
+     (FAIL U9 … on every leg it boots), U4 and U10 still PASS.
+
+The gauntlet at the final head (satoyama, both locks, slot A's CPUs): tests/ci-plan; tests/mpx3-user
+on both tiers and both firmware; kmain_console built, native and release. Predicted all green.
+
+What it costs: one more boot per tier and firmware in mpx3-user (about the time of kmain_user's).
+The Footprint is `module`: kernel/user, user/programs.S, kernel/kmain_user.lu, tests/mpx3-user
+and its .d, kernel/README.md, docs/BOOT.md and notes. Nothing under boot/, .github/ or a pin.
