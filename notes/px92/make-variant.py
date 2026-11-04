@@ -110,11 +110,24 @@ def px87_login(m, screen, row):
     and, on the next line, the boot line (R-px87-9: repeated there because the banner scrolls off)."""
     lines = m.unwrapped(screen).split('\n')
     want = want_kernel()
-    at = [k for k, l in enumerate(lines) if l == want and k + 1 < len(lines) and boot_re.match(lines[k + 1])]
-    if not at:
+    got = ''
+    for k, l in enumerate(lines):
+        if l != want:
+            continue
+        # The boot line is longer than a row at 1280x800: unwrapped() joins a row filled to the last column,
+        # but a row whose last column is a space reads shorter (screen() strips the row's end), so the row
+        # after is tried both ways.
+        nxt = lines[k + 1:k + 3] + ['', '']
+        for c in (nxt[0], nxt[0] + nxt[1], nxt[0] + ' ' + nxt[1]):
+            if boot_re.match(c):
+                got = c
+                break
+        if got:
+            break
+    if not got:
         fail(row + '-kernel-line', f'no {want!r} followed by the boot line on the login screen:\n{screen}')
-    result[row + '_boot_line'] = lines[at[0] + 1]
-    print(f'PASS {row}-kernel-line: the login screen reads {want!r}, then {lines[at[0] + 1]!r}', flush=True)
+    result[row + '_boot_line'] = got
+    print(f'PASS {row}-kernel-line: the login screen reads {want!r}, then {got!r}', flush=True)
 
 
 def px87_transcript(m, row, quiet=True, banner=True):
