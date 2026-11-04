@@ -236,7 +236,16 @@ case $CHUNK in
       gauntlet-1)
         CTR_ENV="$GE" step ci-plan ctr g-plan localhost/px75-ubuntu:2 0 python3 -I tests/ci-plan
         CTR_ENV="$GE" step ci-budgets ctr g-budgets localhost/px75-ubuntu:2 0 python3 -I tests/ci-budgets.py
-        CTR_ENV="$GE" step mpx6-disktools-fat ctr g-fat localhost/px78-ubuntu:1 0 bash -c "export PAX_WOLF=\$(tools/fetch-wolf); tests/mpx6-disktools --only fat --work $G/disktools; exit \$?"
+        # `--only fat` runs a staged paxfat (it dies "build paxfat with tools/mkdisktools", exit 2, without
+        # one) against the pinned oracles, which tools/disktools runs in a container: paxfat built first in
+        # the build image, the suite on the host with podman, as gauntlet-3's kasumi build runs tools/e2fs.
+        dfat() (
+          rm -rf "$G/disktools"
+          ctr g-fatbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/gb-$short CARGO_INCREMENTAL=0; tools/mkdisktools $G/disktools/bin paxfat" || exit $?
+          cd "$CO" && export PAX_CACHE=$L/cache PAX_BUILD=$L/gbh-$short TMPDIR=$L/tmp PAX_ENGINE=podman PAX_E2FS_IMAGE=localhost/px75-ubuntu:2 \
+            && taskset -c "$CPUS" tests/mpx6-disktools --only fat --work "$G/disktools"
+        )
+        step mpx6-disktools-fat dfat
         ;;
       gauntlet-2)
         rm -rf "$G/install"
