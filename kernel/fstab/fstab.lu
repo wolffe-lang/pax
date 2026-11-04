@@ -81,12 +81,34 @@
 //! /proc/self/mounts' line. A line's `file` may now be a directory of
 //! the disk's.
 //!
+//! **The upgrade entry (px93, R-px93-1).** The install stick's second
+//! Limine entry says `pax.upgrade` on the command line and loads the
+//! stick's `/pax/install-targets` as a second module: the very file
+//! pax-install reads its allow-list from. Under that word alone, after
+//! the table, `mount_upgrade` reads the module as allow.lu does (a line
+//! `model=<model> serial=<serial>`, `#` and blank lines saying nothing,
+//! any other line refusing the whole list), takes the one disk whose
+//! model and serial (kernel/block's identity, trimmed, as sysfs gives
+//! it) a line names, and mounts its GPT partition 2 at sector 135168,
+//! PAX's root, read-write at /mnt/target (made in the memory tree) only
+//! when its ext2 label is `pax-root`; the line names it by PARTUUID.
+//! Nothing else is ever mounted there; without the word nothing is read
+//! and nothing is said. The ESP (partition 1) is not mounted: PAX has
+//! no FAT driver, and pax-install writes it through the disk's node, as
+//! a fresh install does. One line for the match, one for the mount, or
+//! one naming why nothing was mounted:
+//!
+//!     upgrade: /pax/install-targets names sda (model "…" serial "…"); sda2 is PAX's root (LABEL=pax-root)
+//!     upgrade: PARTUUID=<guid> (sda2) on /mnt/target: ext2, read-write, write-back
+//!     upgrade: nothing mounted at /mnt/target: <why>
+//!
 //! Written from fstab(5) and mount(8)'s option names, and px67's
 //! bootparam(7). No Linux source; no other system's init or mount source.
 
 use block
 use boot_info
 use ext2
+use frames
 use initramfs
 use log
 use panic
@@ -788,4 +810,300 @@ fn tmpfs_line(fa: u64, fl: u64, ga: u64, gl: u64, opts: u64, mode: u64) -> bool 
     put_oct(mode)
     log.end()
     true
+}
+
+/// px93: the upgrade entry's word, the module it loads, and where PAX's
+/// root begins on an install's disk (user/install/plan.lu's ROOT_START).
+const UPGRADE_WORD: str = "pax.upgrade"
+const TARGETS_PATH: str = "/pax/install-targets"
+const ROOT_SECTOR: u64 = 135168
+
+fn space(b: u64) -> bool {
+    b == 32 || b == 9 || b == 13
+}
+
+/// px93: the module whose path is the stick's /pax/install-targets, or
+/// the module count when Limine loaded none of that path.
+fn targets_module() -> u64 {
+    let n = boot_info.module_count()
+    var i: u64 = 0
+    while i < n {
+        var k: u64 = 0
+        var same = true
+        for c in TARGETS_PATH.bytes() {
+            if same && boot_info.module_path_byte(i, k) != c as int {
+                same = false
+            }
+            k += 1
+        }
+        if same && boot_info.module_path_byte(i, k) == -1 {
+            return i
+        }
+        i += 1
+    }
+    n
+}
+
+/// px93: whether disk `d`'s model (or serial, `sn`), its spaces at both
+/// ends dropped as allow.lu's trim does, is the `n` bytes at `a`.
+fn ident_is(d: u64, sn: bool, a: u64, n: u64) -> bool {
+    var s: u64 = 0
+    var e = block.identity_len(d, sn)
+    while s < e && space(block.identity_byte(d, sn, s)) {
+        s += 1
+    }
+    while e > s && space(block.identity_byte(d, sn, e - 1)) {
+        e -= 1
+    }
+    if e - s != n {
+        return false
+    }
+    var k: u64 = 0
+    while k < n {
+        if block.identity_byte(d, sn, s + k) != byte(a + k) {
+            return false
+        }
+        k += 1
+    }
+    true
+}
+
+fn put_ident(d: u64, sn: bool) {
+    var k: u64 = 0
+    let n = block.identity_len(d, sn)
+    while k < n {
+        log.put_byte(block.identity_byte(d, sn, k) as int)
+        k += 1
+    }
+}
+
+/// px93: the directory `name` in directory `d` of the memory tree, made
+/// (0755, root's) when it is not there; NONE when it cannot be had. The
+/// name's bytes go through a frame, freed after.
+fn dir_in(d: u64, name: str) -> u64 {
+    if d == tree.NONE {
+        return tree.NONE
+    }
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return tree.NONE
+    }
+    let b = pa + frames.hhdm()
+    var n: u64 = 0
+    for c in name.bytes() {
+        // # Safety: a byte of the frame just taken, through the HHDM.
+        unsafe { ((b + n) as *u8).write_volatile((c as int) as u8) }
+        n += 1
+    }
+    var c = tree.lookup(d, b, n)
+    if c == tree.NONE {
+        let r = tree.mkdir(d, b, n, 0x1ed, 0, 0)
+        c = if tree.failed(r) { tree.NONE } else { tree.lookup(d, b, n) }
+    }
+    frames.free(pa)
+    if c != tree.NONE && !tree.is_dir(c) {
+        return tree.NONE
+    }
+    c
+}
+
+fn no_upgrade(why: str) -> u64 {
+    log.put("upgrade: nothing mounted at /mnt/target: ")
+    log.put(why)
+    log.end()
+    0
+}
+
+/// The same, naming disk `d` first.
+fn no_upgrade_on(d: u64, why: str) -> u64 {
+    log.put("upgrade: nothing mounted at /mnt/target: ")
+    block.put_name(d)
+    log.put(" (model \"")
+    put_ident(d, false)
+    log.put("\" serial \"")
+    put_ident(d, true)
+    log.put("\") ")
+    log.put(why)
+    log.end()
+    0
+}
+
+/// px93 (R-px93-1): under the upgrade entry (`pax.upgrade`), the PAX root
+/// of the one disk the stick's /pax/install-targets names, mounted
+/// read-write at /mnt/target (the header's rule): 1 when it is, 0 when
+/// the word is absent or nothing was mounted (said once, with why).
+pub fn mount_upgrade() -> u64 {
+    if !boot_info.cmdline_has(UPGRADE_WORD) {
+        return 0
+    }
+    let mi = targets_module()
+    if mi == boot_info.module_count() {
+        return no_upgrade("Limine loaded no /pax/install-targets module")
+    }
+    let a = boot_info.module_addr(mi)
+    let size = boot_info.module_size(mi)
+    var matched: u64 = 0 // a bit per disk number a line names
+    var entries: u64 = 0
+    var no: u64 = 0
+    var i: u64 = 0
+    while i < size {
+        var j = i
+        while j < size && byte(a + j) != 10 {
+            j += 1
+        }
+        no += 1
+        var s = i
+        var e = j
+        while s < e && space(byte(a + s)) {
+            s += 1
+        }
+        while e > s && space(byte(a + e - 1)) {
+            e -= 1
+        }
+        if e > s && byte(a + s) != 35 {
+            var good = e - s > 6 && is(a + s, 6, "model=")
+            var cut: u64 = 0
+            var cuts: u64 = 0
+            var k = s
+            while k < e {
+                let b = byte(a + k)
+                if b < 32 && b != 9 {
+                    good = false
+                }
+                if k + 8 <= e && is(a + k, 8, " serial=") {
+                    cut = k
+                    cuts += 1
+                }
+                k += 1
+            }
+            if cuts != 1 {
+                good = false
+            }
+            if !good {
+                log.put("upgrade: nothing mounted at /mnt/target: /pax/install-targets line ")
+                log.dec(no as int)
+                log.put(" is not `model=<model> serial=<serial>`; the list refuses every disk")
+                log.end()
+                return 0
+            }
+            var ms = s + 6
+            var me = cut
+            while ms < me && space(byte(a + ms)) {
+                ms += 1
+            }
+            while me > ms && space(byte(a + me - 1)) {
+                me -= 1
+            }
+            var ss = cut + 8
+            var se = e
+            while ss < se && space(byte(a + ss)) {
+                ss += 1
+            }
+            if ss == se {
+                log.put("upgrade: nothing mounted at /mnt/target: /pax/install-targets line ")
+                log.dec(no as int)
+                log.put(" names no serial; the list refuses every disk")
+                log.end()
+                return 0
+            }
+            entries += 1
+            var dn: u64 = 0
+            while dn < block.disks() && dn < 64 {
+                let d = dn * block.DPD
+                if block.present(d) && ident_is(d, false, a + ms, me - ms) && ident_is(d, true, a + ss, se - ss) {
+                    matched = matched | (1 << dn)
+                }
+                dn += 1
+            }
+        }
+        i = j + 1
+    }
+    if entries == 0 {
+        return no_upgrade("/pax/install-targets names no disk")
+    }
+    var count: u64 = 0
+    var disk = block.DEVS
+    var dn: u64 = 0
+    while dn < 64 {
+        if matched & (1 << dn) != 0 {
+            count += 1
+            if disk == block.DEVS {
+                disk = dn * block.DPD
+            }
+        }
+        dn += 1
+    }
+    if count == 0 {
+        return no_upgrade("no disk here is on /pax/install-targets")
+    }
+    if count > 1 {
+        log.put("upgrade: nothing mounted at /mnt/target: ")
+        log.dec(count as int)
+        log.put(" disks are on /pax/install-targets; it must name one")
+        log.end()
+        return 0
+    }
+    // Its partition 2, where pax-install puts the root, and only an ext2
+    // volume there labelled pax-root.
+    var p = block.DEVS
+    var q = disk + 1
+    while q < disk + block.DPD {
+        if block.present(q) && block.partno(q) == 2 {
+            p = q
+        }
+        q += 1
+    }
+    if p == block.DEVS || block.kind(p) != block.KIND_GPT || block.start_of(p) != ROOT_SECTOR {
+        return no_upgrade_on(disk, "has no GPT partition 2 at sector 135168: not PAX's install layout")
+    }
+    let (has, _h, _l) = ext2.probe(p)
+    if !has {
+        return no_upgrade_on(disk, "holds no ext2 volume in its partition 2")
+    }
+    var lk: u64 = 0
+    var label = true
+    for c in "pax-root".bytes() {
+        if ext2.probed_label(lk) != c as int as u64 {
+            label = false
+        }
+        lk += 1
+    }
+    if !label || ext2.probed_label(lk) != 0 {
+        return no_upgrade_on(disk, "has an ext2 partition 2 not labelled pax-root: not PAX's root")
+    }
+    log.put("upgrade: /pax/install-targets names ")
+    block.put_name(disk)
+    log.put(" (model \"")
+    put_ident(disk, false)
+    log.put("\" serial \"")
+    put_ident(disk, true)
+    log.put("\"); ")
+    block.put_name(p)
+    log.put(" is PAX's root (LABEL=pax-root)")
+    log.end()
+    let point = dir_in(dir_in(tree.top(), "mnt"), "target")
+    if point == tree.NONE {
+        return no_upgrade("/mnt/target could not be made in the memory tree")
+    }
+    let _old = block.set_policy(block.WRITE_BACK)
+    let m = tree.mount(point, p, false, 0)
+    log.put("upgrade: PARTUUID=")
+    block.put_partuuid(p)
+    log.put(" (")
+    block.put_name(p)
+    log.put(") on /mnt/target: ")
+    if ext2.failed(m) {
+        log.put("not mounted, -")
+        log.dec((!m + 1) as int)
+        log.end()
+        return 0
+    }
+    // # Safety: a scalar module var, written at boot with IF clear.
+    unsafe { write_back = 1 }
+    let v = tree.mounted(m)
+    ext2.ask_type(v, 2)
+    put_kind(v, false)
+    log.end()
+    ext2.report(v)
+    1
 }
