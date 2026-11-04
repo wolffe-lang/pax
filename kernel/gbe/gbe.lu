@@ -126,6 +126,7 @@ const TXDCTL: u64 = 0xe028
 const MTA: u64 = 0x5200
 const RAL0: u64 = 0x5400
 const RAH0: u64 = 0x5404
+const MDIC: u64 = 0x0020 // §8.2.4: the PHY's registers over MDIO
 
 const CTRL_LRST: u64 = 0x8 // bit 3
 const CTRL_SLU: u64 = 0x40 // bit 6
@@ -145,6 +146,15 @@ const WTHRESH_1: u64 = 0x10000 // bits 20:16 = 1
 const SRRCTL_2K_ADV: u64 = 0x82000002 // Drop_En, DESCTYPE 001, BSIZEPACKET 2
 const IMS_RX: u64 = 0xd4 // RXDW 7, RXO 6, RXDMT0 4, LSC 2
 const RAH_AV: u64 = 0x80000000
+const MDIC_WRITE: u64 = 0x4000000 // OP 01b, bits 27:26
+const MDIC_READ: u64 = 0x8000000 // OP 10b
+const MDIC_READY: u64 = 0x10000000 // bit 28
+const MDIC_ERROR: u64 = 0x40000000 // bit 30
+const PHY_82576: u64 = 1 // §3.5.7.8.3.16: the internal PHY's MDIO address
+const PCTRL: u64 = 0 // §8.25.1, PHY register 0
+const PSTATUS: u64 = 1 // §8.25.2, PHY register 1
+const PCTRL_AN: u64 = 0x1000 // bit 12, auto-negotiation enable
+const PCTRL_RESTART: u64 = 0x200 // bit 9, restart auto-negotiation
 
 /// The models.
 pub const M_82576: u64 = 1
@@ -169,6 +179,12 @@ const G_STATUS0: u64 = 14 // STATUS after the link wait
 const G_STAGED: u64 = 15 // descriptors filled but not yet given (TDT)
 const G_RESET_US: u64 = 16
 const G_MAC_FROM: u64 = 17 // 1 RAL0/RAH0 with AV
+const G_STATUS_PRE: u64 = 18 // STATUS before the reset
+const G_PCTRL0: u64 = 19 // 82576: PCTRL when the link had not come in 1 s
+const G_PSTATUS0: u64 = 20 // and PSTATUS then
+const G_PSTATUS1: u64 = 21 // PSTATUS after the restart's wait
+const G_RESTARTED: u64 = 22 // 1: auto-negotiation restarted through MDIC
+const G_IMS: u64 = 23 // IMS read back after it was set
 const G_RXB: u64 = 64 // 64 words: receive buffer i's physical address
 const G_TXB: u64 = 128 // 64 words: transmit buffer i's
 
@@ -360,6 +376,7 @@ pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
     wr(RCTL, 0)
     wr(TCTL, TCTL_PSP)
     delay(10000)
+    put_gw(G_STATUS_PRE, rd(STATUS))
     wr(CTRL, rd(CTRL) | CTRL_RST)
     delay(10000)
     var waited: u64 = 10000
@@ -454,10 +471,23 @@ pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
     }
     wr(TCTL, rd(TCTL) | TCTL_EN | TCTL_PSP)
     // The link: STATUS.LU, up to 10 s (I225: the NVM's auto-negotiation).
+    // The 82576 whose link has not come in 1 s: its PHY (§8.25, MDIO
+    // address 1) told to auto-negotiate again (PCTRL bits 12 and 9).
     var ms: u64 = 0
     while rd(STATUS) & STATUS_LU == 0 && ms < 10000 {
+        if ms == 1000 && m == M_82576 {
+            let pc = mdi_read(PCTRL)
+            put_gw(G_PCTRL0, pc)
+            put_gw(G_PSTATUS0, mdi_read(PSTATUS))
+            if pc != 0xffffffff && mdi_write(PCTRL, pc | PCTRL_AN | PCTRL_RESTART) {
+                put_gw(G_RESTARTED, 1)
+            }
+        }
         delay(1000)
         ms += 1
+    }
+    if gw(G_RESTARTED) != 0 {
+        put_gw(G_PSTATUS1, mdi_read(PSTATUS))
     }
     put_gw(G_LINK_MS, if rd(STATUS) & STATUS_LU != 0 { ms } else { 0xffffffffffffffff })
     put_gw(G_STATUS0, rd(STATUS))
@@ -470,9 +500,38 @@ pub fn start(pml4: u64, i: u64, poll: bool) -> u64 {
     } else {
         let _clear = rd(ICR)
         wr(IMS, IMS_RX)
+        put_gw(G_IMS, rd(IMS))
     }
     put_gw(G_UP, 1)
     0
+}
+
+/// One of the 82576's PHY registers (§3.5.2.2.1: MDIC with the address,
+/// the register and OP read; Ready set at the end, Error on a failed
+/// read). 0xffffffff when it did not complete in 10 ms or failed.
+fn mdi_read(r: u64) -> u64 {
+    wr(MDIC, (r << 16) | (PHY_82576 << 21) | MDIC_READ)
+    let v = mdi_wait()
+    if v & MDIC_READY == 0 || v & MDIC_ERROR != 0 {
+        return 0xffffffff
+    }
+    v & 0xffff
+}
+
+/// Write one of the 82576's PHY registers. Whether it completed.
+fn mdi_write(r: u64, v: u64) -> bool {
+    wr(MDIC, (v & 0xffff) | (r << 16) | (PHY_82576 << 21) | MDIC_WRITE)
+    let d = mdi_wait()
+    d & MDIC_READY != 0 && d & MDIC_ERROR == 0
+}
+
+fn mdi_wait() -> u64 {
+    var n: u64 = 0
+    while rd(MDIC) & MDIC_READY == 0 && n < 1000 {
+        delay(10)
+        n += 1
+    }
+    rd(MDIC)
 }
 
 /// The device's interrupt (kernel/net's `irq`, IF clear): read ICR,
@@ -626,6 +685,16 @@ pub fn report() {
     }
     log.put("; 64 receive and 64 transmit descriptors, 2048-byte buffers")
     log.end()
+    if gw(G_PCTRL0) != 0 || gw(G_RESTARTED) != 0 {
+        log.put("net: no link in 1 s: PHY 1 PCTRL ")
+        log.hex_n(gw(G_PCTRL0), 4)
+        log.put(" PSTATUS ")
+        log.hex_n(gw(G_PSTATUS0), 4)
+        log.put(if gw(G_RESTARTED) != 0 { ", auto-negotiation restarted, PSTATUS " } else { ", NOT restarted (MDIC), PSTATUS " })
+        log.hex_n(gw(G_PSTATUS1), 4)
+        log.put(" after")
+        log.end()
+    }
 }
 
 /// The registers this module programs, read back on one line (the metal
@@ -653,6 +722,10 @@ pub fn dump() {
     reg(" RAL0 ", RAL0)
     reg(" RAH0 ", RAH0)
     reg(" IMS ", IMS)
+    log.put(" (")
+    log.hex_n(gw(G_IMS), 8)
+    log.put(" when set); STATUS before the reset ")
+    log.hex_n(gw(G_STATUS_PRE), 8)
     log.end()
 }
 
