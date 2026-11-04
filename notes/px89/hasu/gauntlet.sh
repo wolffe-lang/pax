@@ -6,9 +6,12 @@
 # output indented two spaces; a suite's own `FAIL <row> …` lines are
 # repeated unindented at the step's end (the plant record's names). A
 # step's command is its CI job's `run: tests/…` lines with the PR leg
-# (`--tier native --firmware bios`) for $PAX_LEGS; SUITE@all runs every
-# leg (`--tier both --firmware both`), SUITE@release-uefi the one.
-#   gauntlet.sh BLOCK SUITE[@LEGS]...   (from the checkout's root)
+# (`--tier native --firmware bios`) for $PAX_LEGS; SUITE:all runs every
+# leg (`--tier both --firmware both`), SUITE:release-uefi the one (the
+# step is named so: the record's names take letters, digits and _.:/-).
+# skip=SUITE prints the record's `SKIP SUITE reason=…` line for a suite
+# this rig cannot run (kernel-as: CI-only, R-px89-8), never a silence.
+#   gauntlet.sh BLOCK [skip=SUITE...] SUITE[:LEGS]...   (from the checkout's root)
 set -uo pipefail
 S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) # gaunt-launch.sh's snapshot of the scripts
 . "$S/gauntlet-record.sh"
@@ -64,11 +67,11 @@ one() { # name kvm/net opts -- cmd
     return $rc
 }
 suite() {
-    local s=${1%@*} l=
+    local s=${1%:*} l=
     case $1 in
-        *@all) l="--tier both --firmware both" ;;
-        *@release-uefi) l="--tier release --firmware uefi" ;;
-        *@*) echo "  no such legs: ${1#*@}"; return 2 ;;
+        *:all) l="--tier both --firmware both" ;;
+        *:release-uefi) l="--tier release --firmware uefi" ;;
+        *:*) echo "  no such legs: ${1#*:}"; return 2 ;;
         *) l="--tier native --firmware bios" ;;
     esac
     legs=$l
@@ -83,6 +86,12 @@ suite() {
 }
 for s in "$@"; do
     case $s in
+        skip=kernel-as)
+            echo "SKIP kernel-as reason=CI-only: needs cargo to build the seam wolf (tests/kernel-as.d/wolf.pin), and the lane image has none; the full-matrix CI run holds it (R-px89-8)"
+            ;;
+        skip=*)
+            echo "  no reason known for ${s#skip=}"; exit 2
+            ;;
         selftests)
             CMDS=("tests/ci-plan" "python3 -I tests/ci-retry.py" "python3 -I tests/mpx2-heap.d/budget.py" "python3 -I tests/ci-budgets.py"
                   "tests/fetch-retry-selftest" "python3 -I tests/usb-session-selftest" "python3 -I tests/pipe-shape-selftest"
