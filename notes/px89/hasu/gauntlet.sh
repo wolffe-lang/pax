@@ -74,7 +74,12 @@ suite() {
     legs=$l
     mapfile -t CMDS < <(cmds_of "$s")
     [ "${#CMDS[@]}" -gt 0 ] || { echo "  no run: tests/ line in the $s job"; return 2; }
-    one "$s" KVM=1 NET=1 ENGINE=1 --
+    # mpx4-lobo's Linux side (tools/lobo-session) runs its container on
+    # the engine's `--network host`, hasu's own namespace, and connects to
+    # it at 127.0.0.1: the step must share that namespace (HOSTNET, no tap).
+    local nets=NET=1
+    case $s in mpx4-lobo) nets=HOSTNET=1 ;; esac
+    one "$s" KVM=1 $nets ENGINE=1 --
 }
 for s in "$@"; do
     case $s in
