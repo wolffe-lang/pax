@@ -1914,3 +1914,16 @@ below and the black-box runs in `notes/px89/blackbox.txt`.
 | QEMU 8.2.2 (Ubuntu 24.04's), `-netdev user`'s DHCP server; dnsmasq 2.91 | black box | run: what each answers each client message (`notes/px89/blackbox.txt`); never read |
 | QEMU 8.2.2's `-device igb` | black box | run: what its registers read back after kernel/gbe's writes, its link after CTRL.RST, which interrupt it sends (none by INTx or MSI; MSI-X vector 0 yes), `notes/px89/blackbox.txt` §5; its device model never read. Its documentation page (docs/system/devices/igb) was read and says nothing of interrupts |
 | kasumi's CachyOS 7.3.0 | black box | run, read only: `lspci -nn`, `lspci -v`, `/sys/class/net`, `ip -br addr`, `ip route`: the I225-V's PCI id, BARs, MAC and link |
+
+## px97 — the latest pins
+
+The org's own trees, read only where a pin needs them: each one's `wolf-toolchain.toml` at its pin and at its trunk
+head, its log between the two, and the paths of `src/` the log names, to say in the pin what moved. boreutils
+`ff5396ad`, lope `d65bb03c`, lobo `64e7339d` (`src/main.lu`'s worker reload), scent `eb888dfc` (`src/re`,
+`src/reader`), aspen `096245c8` (`src/zone`, `src/clock` retired), den `584b18a3` (its README's wire and config rows),
+yew `1218169e`, wolf-std `3111d39f` and wolf-interp's `v0.1.59` (`CHANGELOG.md`, `vendor/upstream/PIN`,
+`rust-toolchain.toml`). The release archives and the source archives were read by digest, each twice. The published
+lupin musl binary was checked by its ELF header (ET_EXEC, no PT_INTERP, no PT_DYNAMIC) and never run outside a
+container. pelt `301e25e0` (`src/sh/main.lu`'s and `src/sh/edit.lu`'s friendly default, and `src/sh/edit_prompt.lu`'s
+prompt) and clef `900bdf0a` were read for the pins this pass leaves where they were. No other implementation's
+source; no kernel's, firmware's or driver's.
