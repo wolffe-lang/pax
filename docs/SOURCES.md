@@ -1879,3 +1879,11 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
   `reboot-as-user.log`): `reboot -f`, `poweroff -f` and `halt -f` each print `<name>: Operation not permitted` and
   exit 1. The image has no systemd `reboot`, so none was measured.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's, debugger's or driver's source.
+
+## px96 — the quiet console
+
+- Nothing new consulted. `close` (3), `write` (1) and `exit` (60) are the numbers px09 read in `syscall_64.tbl`
+  and PAX already uses (`kernel/user`'s `SYS_CLOSE`, `SYS_WRITE`); EBADF (9) and EFAULT (14) are px09's row from
+  the uapi errno headers (`kernel/user`'s `NEG_EBADF`, `NEG_EFAULT`); Limine's entry key `cmdline` is px15's row
+  (`tests/mpx3-user.d/limine-quiet.conf`, as `boot/limine-initramfs-quiet.conf`).
+- No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
