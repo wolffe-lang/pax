@@ -16,13 +16,14 @@ for variant in release dev; do
     for firmware in bios uefi; do
         log=$out/$variant-$firmware.serial.log
         PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$log" \
-            --timeout 300 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
+            --timeout 600 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
             --type "$PAX_ROOT/user/console/distribution.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
             "$out/$name" > "$out/$variant-$firmware.halt.log" 2>&1
-        python3 -I - "$log" "$out" <<'PY'
+        python3 -I - "$log" "$out" "$variant" <<'PY'
 from pathlib import Path
 import hashlib, re, sys
-log, root = map(Path, sys.argv[1:])
+log, root = map(Path, sys.argv[1:3])
+variant = sys.argv[3]
 raw = log.read_bytes()
 normal = re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', raw).replace(b'\r', b'')
 lines = normal.splitlines()
@@ -36,8 +37,13 @@ for line in [(root/'pax-banner').read_bytes().strip(),
              hashlib.sha256(release).hexdigest().encode()+b'  /etc/pax-release',
              b'PAX: init /bin/env ended with status 0; nothing left to run']:
     assert line in lines, 'guest-row: ' + repr(line)
+# px92 (wolf-lang#962): on the dev image a program `wolf build` makes reads its own argv through env_args().
+if variant == 'dev':
+    for line in [b'PX92-ARG=one', b'PX92-ARG=two', b'PX92-ARGS=0']:
+        assert line in lines, 'guest-dev-args: ' + repr(line)
 assert b'PANIC ' not in normal
-print('I2 PASS', log.name, 'pid1, complete release, guest SHA256, Fletch, printf, phased -P, den and git, clean halt')
+print('I2 PASS', log.name, 'pid1, complete release, guest SHA256, Fletch, printf, phased -P, den and git,'
+      + (' a built program reads its argv,' if variant == 'dev' else ''), 'clean halt')
 PY
     done
 done
