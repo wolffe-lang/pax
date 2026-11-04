@@ -64,6 +64,32 @@ for p in sorted(source.rglob('*')):
         assert row[-1]==hashlib.sha256(content).hexdigest(),(path,row)
     for i in [8,9,10]:assert row[i]==('1700000000.000000000' if path in changed_meta else '0.000000000'),(path,row)
 allowed=expected|{'/lost+found'}
+# px93 (the contract's item 1): every fresh install writes its own manifest, an installer-generated file
+# (user/install/manifest.lu): the image's identity and one row a listed path, each row held here to the
+# installed root (tools/e2tree's sha256), so the install can be upgraded with no baseline.
+listed=SourceFileLoader('px93_manifest',str(repo/'tools/install-manifest')).load_module().listed
+mpath='/etc/pax-install/manifest'
+assert '/etc/pax-install' in actual and mpath in actual,'no /etc/pax-install/manifest on the installed root'
+assert int(actual['/etc/pax-install'][2],8)==0o755 and actual['/etc/pax-install'][3:5]==['0','0'],actual['/etc/pax-install']
+assert int(actual[mpath][2],8)==0o644 and actual[mpath][3:5]==['0','0'],actual[mpath]
+mtext,_e=run('debugfs','-R','cat '+mpath,root)
+assert hashlib.sha256(mtext).hexdigest()==actual[mpath][-1],'the dumped manifest is not the listed one'
+mlines=mtext.decode().splitlines()
+assert mlines[0]=='pax-install manifest v1' and [l.split(' ')[0] for l in mlines[1:6]]==['commit','kernel','release','files','source'],mlines[:6]
+mrows={}
+for l in mlines[6:]:
+    k,mode,uid,gid,size,digest,path=l.split(' ',6);mrows[path]=(k,int(mode,8),int(uid),int(gid),int(size),digest)
+for path,(k,mode,uid,gid,size,digest) in mrows.items():
+    if k=='g':
+        assert digest==(actual[path][-1] if path in actual else '-'),(path,digest)
+        continue
+    row=actual[path]
+    assert int(row[2],8)==mode and (int(row[3]),int(row[4]))==(uid,gid),(path,row,mode)
+    if k=='f':assert row[-1]==digest,(path,row,digest)
+    if k=='l':assert hashlib.sha256(row[-1][3:].encode()).hexdigest()==digest,(path,row,digest)
+assert {x for x in actual if listed(x)}<=set(mrows),{x for x in actual if listed(x)}-set(mrows)
+allowed|={'/etc/pax-install',mpath}
+print(f'PASS I-manifest: /etc/pax-install/manifest, {len(mrows)} rows, every listed path of the root with its kind, mode, owner and bytes')
 # gm01: every game of games.txt, its binary, its source and its engine's
 catalog=[r.split() for r in (repo/'user/install/games.txt').read_text().splitlines() if r.strip() and not r.startswith('#')]
 sums={w[1]:w[0] for w in (l.split() for l in (work/'payload/games.sha256').read_text().splitlines())}
