@@ -18,8 +18,9 @@
    System calls follow Linux's x86-64 ABI (the psABI's A.2.1, numbers
    from arch/x86/entry/syscalls/syscall_64.tbl): %rax the number, %rdi,
    %rsi, %rdx the first three arguments, `syscall`, the result in %rax,
-   -4095..-1 an errno (EFAULT 14, ENOSYS 38 from the uapi errno headers).
-   write is 1, _sysctl 156, exit 60; 156 must come back -38 (ENOSYS:
+   -4095..-1 an errno (EBADF 9, EFAULT 14, ENOSYS 38 from the uapi errno
+   headers). write is 1, close 3, _sysctl 156, exit 60; 156 must come
+   back -38 (ENOSYS:
    the table names it sys_ni_syscall, so Linux answers ENOSYS too, and
    PAX never implements it), as must 500 (no such number). px09 used
    getpid (39) here; px14 implements getpid, so the witness moved.
@@ -40,8 +41,13 @@
      priv       `hlt` at CPL 3: #GP(0) (SDM vol. 2 HLT)
      badptr     write(1, p, 16) with p a kernel-half address, an unmapped
                 user address (0x10), and the stack's top less 8 (8 bytes
-                mapped, then the unmapped page above); exit(14) when all
-                three returned -14 (EFAULT), exit(1) otherwise
+                mapped, then the unmapped page above), each expected -14
+                (EFAULT); px96: then close(2), expected 0, and write(2,
+                its line), expected -9 (EBADF: fd 2 is closed); when all
+                five came back so, its line on fd 1 ("badptr: -EFAULT
+                three times, -EBADF on a closed fd 2") and exit(14);
+                otherwise exit(1) (an -EFAULT missed), 2 (close), 3 (the
+                closed fd's write) or 4 (the line on fd 1), with no line
      spin1, spin2
                 write(1, "spinN: begin\n", 13); a mark of its own
                 ("SPIN11" or "SPIN22") in %r12 and pushed on its own
@@ -186,10 +192,35 @@ pax_uprog_badptr:
 3:      movl    $1, %edi
         cmpl    $3, %r12d
         jne     4f
+        movl    $3, %eax                /* px96: close(2) */
+        movl    $2, %edi
+        syscall
+        cmpq    $0, %rax
+        movl    $2, %edi
+        jne     4f
+        movl    $1, %eax                /* write(2, …): fd 2 is closed now */
+        movl    $2, %edi
+        leaq    .Lbadptr_msg(%rip), %rsi
+        movl    $(.Lbadptr_msg_end - .Lbadptr_msg), %edx
+        syscall
+        cmpq    $-9, %rax
+        movl    $3, %edi
+        jne     4f
+        movl    $1, %eax                /* every answer Linux's: say so on fd 1 */
+        movl    $1, %edi
+        leaq    .Lbadptr_msg(%rip), %rsi
+        movl    $(.Lbadptr_msg_end - .Lbadptr_msg), %edx
+        syscall
+        cmpq    $(.Lbadptr_msg_end - .Lbadptr_msg), %rax
+        movl    $4, %edi
+        jne     4f
         movl    $14, %edi
 4:      movl    $60, %eax
         syscall
         ud2
+.Lbadptr_msg:
+        .ascii  "badptr: -EFAULT three times, -EBADF on a closed fd 2\n"
+.Lbadptr_msg_end:
 pax_uprog_badptr_end:
 
         .p2align 4
