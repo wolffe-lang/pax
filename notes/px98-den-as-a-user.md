@@ -176,6 +176,22 @@ nonzero step stops it:
 `tools/ci-plan` selects 41 suites for these paths; CI's run of the PR covers the rest (`mpx5-users` among them, whose
 `/dev` rows read the modes at boot, unchanged).
 
+**The first take, red at `ci-plan`** (at `707b35d6`, the record `green-707b35d6-20261104T151602Z.log`):
+
+```
+END wolf-pin exit=0 secs=3045
+ci-plan: FAIL P2 su reaches every suite whose user run uses it (px47): pr (suites mpx3-shell mpx3-tree mpx3-speaker mpx4-lobo mpx5-accounts mpx5-den mpx6-install, wanted mpx3-tree mpx3-shell mpx3-speaker mpx4-lobo mpx5-accounts mpx6-install)
+END ci-plan exit=1
+```
+
+- **The row was right to go red.** `tests/mpx5-den` now builds `su` (`tools/mksu`) for its login image, so the
+  planner's derivation sends `user/su/*` and `tools/mksu` to `mpx5-den` too. `tests/ci-plan`'s table of su's
+  suites did not name it yet. It does now: `SUUSER` gains `mpx5-den`, and `tests/ci-plan` passes whole.
+- **That makes the change cross-cutting** by the audit's rules: `tests/ci-plan` is CI's own proof.
+- **The 3045 s of `wolf-pin` were the wait for the host's locks** (15:16:02Z to 16:06:47Z), counted inside the
+  first step, which took them. The fetch itself was already staged. The next take waits in a step of its own,
+  `locks`, so each later step's seconds are its own.
+
 **The plant**, `px98-plant-kernel`: the head plus one commit, one file, one hunk. `kernel/files/files.lu`'s
 `n_owner` loses its terminal branch, so the console's terminals answer root's owner again, whatever a `chown` set.
 P6 predicts the terminal row (L1) and the den row (L3) red by name, from one step, `tests/mpx5-den --tier native
@@ -225,6 +241,7 @@ the report on any kernel.
   hand the terminal over (PAX); den#55 filed for den's reopen.
 - [x] The sweep (§4.1 r5): no further EACCES by name. Of what was swept, only `poweroff` as a user is refused, an
   EPERM (`reboot(2)` is root's).
+- [x] `tests/ci-plan`'s su row: red in the first take at `707b35d6`, green with `mpx5-den` in `SUUSER` (§4.6).
 - [ ] The gauntlet green at the head, every END line in the PR.
 - [ ] The plant `px98-plant-kernel` red by name (L1, L3) in its own record.
 - [ ] The audit, once: `--local GREEN --plant-record RED pax px98 <PR>`.
