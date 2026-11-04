@@ -23,10 +23,11 @@ LOBO_REV=f79418d1181d47e987c35fc2a8efbbe0caa3984b
 # The image's own pins (tools/census/Containerfile).
 BASE_IMAGE_DIGEST=sha256:8185e444e45ba166146b244b41f1cba2d7d91f3eddce533a839cc9591e0fa785
 
+# px97: pelt trunk 301e25e0, the sweep's; red (C4) until the pelt pin moves.
 # px81: pelt launch-trunk identity, read twice; tests/census C4 keeps
 # the image pin and this census input together. This is not a live-head gate.
 PELT_REPO=https://github.com/wolffe-lang/pelt
-PELT_REV=4683b3f5faf46cd393ec2632f345f8cd483a4f1f
+PELT_REV=301e25e0136bfe705f7f38ad13a1cbca9909fa52
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
 IMAGE_YEW_REV=0ccb2c67661a2dd789b5ce86180d592370a79c31
