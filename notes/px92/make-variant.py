@@ -351,6 +351,18 @@ edit("""def boot0(d, stick):
         fail('D3-run', f'want arg one, arg two, status 0; got {got[:4]!r}; screen:\\n{s}')
     result['dev_run'] = got[:3]
     print("PASS D3-run: `./px92args one two` printed 'arg one', 'arg two', status 0", flush=True)
+    # D4: the same through `wolf run` (a directory of its own: a directory's .lu files are one module).
+    m.command('mkdir -p /root/px92c', 'D4-source')
+    for k, line in enumerate(['fn main() {', '    let a = env_args()', '    print("count {a.len}")', '}']):
+        m.command(f"echo '{line}' {'>' if k == 0 else '>>'} /root/px92c/count.lu", 'D4-source')
+    s = m.command('cd /root/px92c; wolf run count.lu one two; echo PX92-W-$?; cd /root', 'D4-wolf-run', 900)
+    m.shot('wolf-run-count')
+    flat = m.unwrapped(s).split('wolf run count.lu one two; echo PX92-W-$?; cd /root')[-1]
+    got = [l.strip() for l in flat.split('\\n') if l.strip()]
+    if got[:2] != ['count 2', 'PX92-W-0']:
+        fail('D4-wolf-run', f'want count 2, status 0; got {got[:3]!r}; screen:\\n{s}')
+    result['dev_wolf_run'] = got[:2]
+    print("PASS D4-wolf-run: `wolf run count.lu one two` printed 'count 2', status 0", flush=True)
 
 
 def boot0(d, stick):
