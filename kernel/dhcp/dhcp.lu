@@ -79,6 +79,11 @@
 //! lives (kernel/ip's words, the file in the tree), not from the lease.
 //! kernel/ip's own line follows each `bound` line.
 //!
+//! **/var/lib/dhcp/pax.lease** is the lease as a program can read it
+//! (`write_lease`: the state, the address, netmask, router, servers, the
+//! times, and whether the router answered the kernel's echo), rewritten
+//! at each change; the stick's script copies it into its log.
+//!
 //! **/etc/resolv.conf** (resolv.conf(5)) is the client's to write: one
 //! `nameserver <a.b.c.d>` line per server option 6 names, three at most
 //! (resolv.conf(5)'s MAXNS), the file made (0644, root's) when it is not
@@ -776,83 +781,152 @@ fn parse(b: u64, len: u64) -> u64 {
 
 // --- the lease ---------------------------------------------------------------------
 
-/// Write /etc/resolv.conf: one `nameserver` line per server held, or
-/// nothing. False (counted) when the tree refused.
-fn write_resolv(n: u64) -> bool {
+// --- the files ---------------------------------------------------------------------
+//
+// A file's text is made at TEXT in the scratch frame (`t_*` append to it,
+// `D_TLEN` its length), the path's names at NAMES; `put_file` writes it.
+
+const TEXT: u64 = 512
+const NAMES: u64 = 0
+const D_TLEN: u64 = 32
+
+fn t_byte(c: u64) {
+    if dw(D_TLEN) < PAGE - TEXT {
+        wb(dw(D_SCRATCH) + TEXT + dw(D_TLEN), c)
+        put_dw(D_TLEN, dw(D_TLEN) + 1)
+    }
+}
+
+fn t_str(w: str) {
+    for c in w.bytes() {
+        t_byte((c as int) as u64)
+    }
+}
+
+fn t_dec(v: u64) {
+    if v >= 10 {
+        t_dec(v / 10)
+    }
+    t_byte(48 + v % 10)
+}
+
+fn t_ip(a: u64) {
+    t_dec((a >> 24) & 0xff)
+    t_byte(46)
+    t_dec((a >> 16) & 0xff)
+    t_byte(46)
+    t_dec((a >> 8) & 0xff)
+    t_byte(46)
+    t_dec(a & 0xff)
+}
+
+/// Write the text made at TEXT to `path` (absolute, its names separated
+/// by single `/`): every directory on the way made (0755, root's) when
+/// it is not there, the file made (0644, root's) or cut, then written.
+/// False (counted) when the tree refused.
+fn put_file(path: str) -> bool {
     let s = dw(D_SCRATCH)
-    // The names, then the text, in the scratch frame.
-    wb(s, 101)
-    wb(s + 1, 116)
-    wb(s + 2, 99) // "etc"
-    var name = s + 16
-    let file = "resolv.conf"
-    var fl: u64 = 0
-    for c in file.bytes() {
-        wb(name + fl, (c as int) as u64)
-        fl += 1
-    }
-    let t = s + 64
-    var len: u64 = 0
-    var k: u64 = 0
-    while k < n {
-        let word = "nameserver "
-        for c in word.bytes() {
-            wb(t + len, (c as int) as u64)
-            len += 1
+    var n: u64 = 0
+    for c in path.bytes() {
+        if n < TEXT {
+            wb(s + NAMES + n, (c as int) as u64)
         }
-        let a = dw(D_DNS + k)
-        var sh: u64 = 24
-        var first = true
-        while first || sh > 0 {
-            if !first {
-                sh -= 8
-            }
-            let v = (a >> sh) & 0xff
-            if v >= 100 {
-                wb(t + len, 48 + v / 100)
-                len += 1
-            }
-            if v >= 10 {
-                wb(t + len, 48 + (v / 10) % 10)
-                len += 1
-            }
-            wb(t + len, 48 + v % 10)
-            len += 1
-            if sh > 0 {
-                wb(t + len, 46)
-                len += 1
-            }
-            first = false
-        }
-        wb(t + len, 10)
-        len += 1
-        k += 1
+        n += 1
     }
+    let len = dw(D_TLEN)
     let saved = sync.irq_save()
-    let root = tree.top()
-    var etc = tree.lookup(root, s, 3)
-    if etc == tree.NONE {
-        etc = tree.mkdir(root, s, 3, 0x1ed, 0, 0) // 0755
-    }
-    var ok = !tree.failed(etc) && etc != tree.NONE && tree.is_dir(etc)
-    if ok {
-        var f = tree.lookup(etc, name, fl)
-        if f == tree.NONE {
-            f = tree.create(etc, name, fl, 0x1a4, 0, 0) // 0644
+    var d = tree.top()
+    var i: u64 = 1
+    var ok = n > 1 && n < TEXT
+    while ok {
+        var j = i
+        while j < n && rb(s + NAMES + j) != 47 {
+            j += 1
         }
-        ok = !tree.failed(f) && f != tree.NONE && tree.is_regular(f)
-        if ok {
-            ok = !tree.failed(tree.truncate(f, 0))
-            if ok && len > 0 {
-                ok = tree.write(0, f, 0, t, len) == len
+        if j >= n {
+            // The last name: the file.
+            var f = tree.lookup(d, s + NAMES + i, j - i)
+            if f == tree.NONE {
+                f = tree.create(d, s + NAMES + i, j - i, 0x1a4, 0, 0) // 0644
             }
+            ok = !tree.failed(f) && f != tree.NONE && tree.is_regular(f)
+            if ok {
+                ok = !tree.failed(tree.truncate(f, 0))
+            }
+            if ok && len > 0 {
+                ok = tree.write(0, f, 0, s + TEXT, len) == len
+            }
+            break
         }
+        var e = tree.lookup(d, s + NAMES + i, j - i)
+        if e == tree.NONE {
+            e = tree.mkdir(d, s + NAMES + i, j - i, 0x1ed, 0, 0) // 0755
+        }
+        ok = !tree.failed(e) && e != tree.NONE && tree.is_dir(e)
+        d = e
+        i = j + 1
     }
     sync.irq_restore(saved)
+    put_dw(D_TLEN, 0)
     if !ok {
         bump(C_FILE)
     }
     ok
+}
+
+/// Write /etc/resolv.conf: one `nameserver` line per server held (`n`
+/// of them), or nothing.
+fn write_resolv(n: u64) -> bool {
+    put_dw(D_TLEN, 0)
+    var k: u64 = 0
+    while k < n {
+        t_str("nameserver ")
+        t_ip(dw(D_DNS + k))
+        t_byte(10)
+        k += 1
+    }
+    put_file("/etc/resolv.conf")
+}
+
+/// Write /var/lib/dhcp/pax.lease (px89, the metal leg's record: what a
+/// program can read of the lease), `name value` a line:
+///
+///     state bound|unbound
+///     address, netmask, router, dns (each server), server  a.b.c.d
+///     lease, t1, t2  seconds;  since  seconds from the client's start
+///     router-echo  answered | not answered | not tried
+fn write_lease(echo: str) -> bool {
+    put_dw(D_TLEN, 0)
+    t_str(if bound() { "state bound\n" } else { "state unbound\n" })
+    if bound() {
+        t_str("address ")
+        t_ip(dw(D_ADDR))
+        t_str("\nnetmask ")
+        t_ip(dw(D_MASK))
+        t_str("\nrouter ")
+        t_ip(dw(D_ROUTER))
+        var k: u64 = 0
+        while k < dw(D_NDNS) {
+            t_str("\ndns ")
+            t_ip(dw(D_DNS + k))
+            k += 1
+        }
+        t_str("\nserver ")
+        t_ip(dw(D_SERVER))
+        t_str("\nlease ")
+        t_dec(dw(D_LEASE))
+        t_str("\nt1 ")
+        t_dec(dw(D_T1))
+        t_str("\nt2 ")
+        t_dec(dw(D_T2))
+        t_str("\n")
+    }
+    t_str("since ")
+    t_dec((now() - dw(D_T0)) / HZ)
+    t_str("\nrouter-echo ")
+    t_str(echo)
+    t_str("\n")
+    put_file("/var/lib/dhcp/pax.lease")
 }
 
 /// Take the lease the ACK in the P_ words names (kernel/ip, kernel/arp,
@@ -896,6 +970,7 @@ fn hold_lease(renewal: bool) {
     ip.configure(addr, mask, dw(P_ROUTER))
     arp.set_ip(addr)
     let _w = write_resolv(dw(P_NDNS))
+    let _l = write_lease("not tried")
     let s = sync.acquire(sync.console())
     stamp()
     log.put("ACK ")
@@ -949,6 +1024,7 @@ fn give_up() {
     arp.set_ip(0)
     let _w = write_resolv(0)
     put_dw(D_STATE, INIT)
+    let _l = write_lease("not tried")
     let s = sync.acquire(sync.console())
     stamp()
     log.put("unbound: ")
@@ -1148,6 +1224,7 @@ pub fn echo_router() {
     log.put(if got { " answers the kernel's echo" } else { " does NOT answer the kernel's echo" })
     log.end()
     sync.release(sync.console(), s)
+    let _l = write_lease(if got { "answered" } else { "not answered" })
 }
 
 fn item(v: u64, name: str) {
