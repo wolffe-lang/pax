@@ -611,6 +611,33 @@ programs that open AF_INET stream sockets (`tests/mpx4-tcp`,
   delivered to a UDP socket; more than 256 control blocks or a listen
   queue past 129 (64 and 33 before px24); a closed connection whose peer acknowledges and never
   opens its window stays until the peer goes.
+## The DHCP client and Intel's controllers (px89)
+
+With `/etc/pax-net` saying `dhcp` (optionally ` wait=<s>`), kmain_sockets
+and kmain_session take the station's address from a DHCP server instead
+of the fixed 10.0.2.15; with no such file nothing changes. With no virtio
+network device, kernel/net drives QEMU's 82576 (`-device igb`) or an
+Intel I225/I226 through kernel/gbe (`tests/mpx4-dhcp`, `tests/mpx4-igb`).
+
+| module or file | what |
+|---|---|
+| `dhcp/` | RFC 2131's client in the kernel (R-px89-2: PAX has no interface-configuration ABI a program could use): INIT, SELECTING, REQUESTING, BOUND, RENEWING, REBINDING; retransmission at 4 s doubled to 64 s, ±1 s; T1 renewal unicast to the server, T2 rebinding broadcast, half the time left and never under 60 s between tries; a NAK or the lease's end back to INIT with the address, the route and the servers withdrawn. One 300-byte message shape (`tools/pcap-dhcp` holds it byte for byte). Its thread, `pax_dhcpd`, turns every tick; every state change is a `dhcp:` line stamped from its start. Writes `/etc/resolv.conf` (a `nameserver` line per server, three at most) and `/var/lib/dhcp/pax.lease` (the lease as a program reads it, and whether the router answered the kernel's echo). `from_file`, `start`, `claims`/`input` (kernel/netd's), `wait_bound`, `echo_router`, `counters` |
+| `gbe/` | Intel's gigabit controllers on the 82576/I210 programming model (R-px89-1): CTRL.RST, RAL0/RAH0 with AV, CTRL.SLU and no PHY register, one receive ring of 64 advanced one-buffer descriptors and one transmit ring of 64 legacy descriptors, 2048-byte buffers, 66 frames; INTx through ICR/IMS when the firmware's line is one the 8259 takes, else polled every tick by the network's clock (`netpoll` on the command line forces it). The I225-only paths (the ids, the reset's wait, the link wait, the speed's raw bits, the polled path) are named in the module. `dump` prints the registers it programmed, read back |
+| `net/` | (px89) the frame interface dispatched to kernel/gbe when there is no virtio device; `poll`, `polled`; the last `report` line the same shape for both |
+| `netd/` | (px89) UDP from 67 to 68 to kernel/dhcp while it runs; the clock asks a polled controller every tick |
+| `ip/`, `arp/` | (px89) `configure` and `set_ip`: the address, netmask and gateway changed at run time (0.0.0.0 while no lease is held) |
+| `udp/` | (px89) `checksum` public |
+| `../boot/net.S` | (px89) `pax_gbe_state` (256 words), `pax_dhcp_state` (128) |
+
+- Locks: kernel/dhcp has no lock word of its own (the eight are taken); its
+  words change with IF clear, and it calls kernel/ip, kernel/arp and
+  kernel/tree with nothing of theirs held. kernel/gbe's words change under
+  kernel/net's lock.
+- Not yet: DHCPDECLINE after an ARP probe, DHCPRELEASE, INIT-REBOOT,
+  INFORM, a relay's giaddr; more than one interface; MSI or MSI-X for
+  kernel/gbe, its PHY registers, checksum and segmentation offload, more
+  than one queue each way; a name resolver (wolf-lang#831).
+
 ## Who a process is (px39)
 
 The first lane of the users campaign (`notes/px39-the-credentials.md`,
