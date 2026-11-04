@@ -77,7 +77,7 @@
 //! looks for one kernel/gbe drives (QEMU's 82576, the I225/I226) and
 //! brings it up through that module; every function below then reaches
 //! its rings instead of the virtqueues, with the same rows, counters and
-//! lines (`report`'s last line: the address, the 82576's MSI vector,
+//! lines (`report`'s last line: the address, the 82576's MSI-X vector,
 //! GBE_VECTOR, and the local APIC it goes to, 66 frames held — or, when
 //! the controller is polled, `polled every tick` and why). `poll`: the
 //! network's clock asks a polled controller every tick whether a frame
@@ -281,7 +281,7 @@ pub fn poll() -> bool {
     due
 }
 
-/// px89: the Intel controller's MSI vector: the last of the four
+/// px89: the Intel controller's MSI-X vector: the last of the four
 /// kernel/idt routes to MSI trampolines (80-83; kernel/xhci takes 79 +
 /// its controller's number from the bottom).
 const GBE_VECTOR: u64 = 83
@@ -302,7 +302,7 @@ fn start_gbe(pml4: u64, g: u64) -> u64 {
     }
     put_nw(N_MAC, m)
     put_nw(N_LINE, pci.line(g))
-    put_nw(N_VECTOR, gbe.vector()) // an MSI's (no 8259 line is routed), or 0 when polled
+    put_nw(N_VECTOR, gbe.vector()) // an MSI-X message's (no 8259 line is routed), or 0 when polled
     put_nw(N_UP, 1)
     put_nw(N_STATE, UP)
     UP
@@ -797,7 +797,7 @@ fn put_queue(name: str, q: u64) {
 ///
 /// or, for an Intel controller (px89), kernel/gbe's lines and then
 ///
-///     net: <aa:bb:cc:dd:ee:ff>, MSI vector <v> to APIC <id>, <n> frames held
+///     net: <aa:bb:cc:dd:ee:ff>, MSI-X vector <v> to APIC <id>, <n> frames held
 ///     net: <aa:bb:cc:dd:ee:ff>, polled every tick (line <l>, <why>), <n> frames held
 pub fn report() {
     if !up() {
@@ -815,7 +815,7 @@ pub fn report() {
             log.put(gbe.poll_reason())
             log.put("), ")
         } else {
-            log.put(", MSI vector ")
+            log.put(", MSI-X vector ")
             log.dec(nw(N_VECTOR) as int)
             log.put(" to APIC ")
             log.dec(apic.id() as int)

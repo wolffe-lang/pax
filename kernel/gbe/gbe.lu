@@ -10,7 +10,8 @@
 //! for word, on every register, bit and descriptor this module touches:
 //! the reset (CTRL.RST, bit 26), the interrupt registers (ICR 0x1500, IMS
 //! 0x1508, IMC 0x150C, EICR 0x1580, EIMS 0x1524, EIMC 0x1528, IVAR0
-//! 0x1700 and its entry 0, receive queue 0: §8.8, §7.3.1.1 or §7.3.2.1),
+//! 0x1700 and its entry 0, receive queue 0; GPIE 0x1514's Multiple_MSIX
+//! and PBA bits: §8.8, §7.3.1),
 //! the receive and transmit
 //! control (RCTL 0x0100, TCTL 0x0400: §8.10.1, §8.12.1), queue 0's ring
 //! (RDBAL/RDBAH/RDLEN/SRRCTL/RDH/RDT/RXDCTL at 0xC000-0xC028,
@@ -44,8 +45,8 @@
 //!     value beside it;
 //!   - the interrupt: the I225 gets no INTx on kasumi (its line is the
 //!     firmware's 255, as the xHCI's was, px76), so it is polled every
-//!     tick by the network's clock (kernel/netd); MSI or MSI-X is not
-//!     programmed (one interrupt path fewer to confirm on metal).
+//!     tick by the network's clock (kernel/netd); MSI-X is not
+//!     programmed for it (one interrupt path fewer to confirm on metal).
 //!
 //! **The 82576-only path:** a link that has not come 1 s after Set Link
 //! Up (QEMU's igb leaves its PHY's auto-negotiation idle after CTRL.RST,
@@ -70,18 +71,19 @@
 //! descriptors the hardware has written back with DD are taken back at
 //! the next send.
 //!
-//! **The interrupt** (the 82576 in QEMU): one MSI (PCI Local Bus 3.0
-//! §6.8, kernel/pci's `enable_msi`) of kernel/net's vector to the boot
-//! CPU's local APIC, edge-triggered, acknowledged there. In INTx and MSI
-//! mode (GPIE.Multiple_MSIX 0) a queue's causes reach EICR through IVAR,
-//! ICR's only through EICR's Other bit (§7.3.1.1): IVAR0's entry 0 maps
-//! receive queue 0 to EICR bit 0, EIMS = bit 0 and Other (31), IMS = LSC
-//! (2). `irq` reads EICR and ICR, which clears them; the next cause sends
-//! the next message. INTx is not used: QEMU's igb never asserts it (PCI
-//! status bit 3 stays clear with EICR bit 0 set and unmasked; IMS reads
-//! 0 whatever is written; ICR's RXDW is never set: black box,
-//! notes/px89/blackbox.txt). An 82576 with no MSI capability, one whose
-//! MSI does not enable, every I225, and `poll` asked for: polled, every
+//! **The interrupt** (the 82576 in QEMU): MSI-X vector 0 (PCI Local Bus
+//! 3.0 §6.8.2: the table entry in the BAR the capability names, the
+//! 82576's BAR3, §8.1.4), a message of kernel/net's vector to the boot
+//! CPU's local APIC (kernel/msi: fixed, edge), acknowledged there. In
+//! MSI-X mode (GPIE.Multiple_MSIX, with PBA support) IVAR0's entry 0
+//! sends receive queue 0's causes to vector 0, which EICR bit 0 reflects
+//! (§7.3.1.2), and EIMS bit 0 unmasks it; `irq` reads EICR and ICR,
+//! which clears them, and the next cause sends the next message. Neither
+//! INTx nor MSI is used: QEMU's igb raises neither for a cause in EICR
+//! that EIMS unmasks (PCI status bit 3 stays clear; no MSI arrives; IMS
+//! reads 0 whatever is written and ICR's RXDW is never set: black box,
+//! notes/px89/blackbox.txt). An 82576 with no MSI-X capability or whose
+//! MSI-X does not enable, every I225, and `poll` asked for: polled, every
 //! mask clear, kernel/netd's clock asking `due` every tick.
 //!
 //! State: words of boot/net.S's `pax_gbe_state`, changed under
@@ -93,6 +95,7 @@
 use clock
 use frames
 use log
+use msi
 use paging
 use pci
 
@@ -163,9 +166,14 @@ const TCTL_PSP: u64 = 0x8
 const QUEUE_ENABLE: u64 = 0x2000000 // RXDCTL/TXDCTL bit 25
 const WTHRESH_1: u64 = 0x10000 // bits 20:16 = 1
 const SRRCTL_2K_ADV: u64 = 0x82000002 // Drop_En, DESCTYPE 001, BSIZEPACKET 2
-const IMS_LSC: u64 = 0x4 // bit 2; the rest of ICR's causes masked
-const EIMS_RXQ0: u64 = 0x80000001 // RxTxQ bit 0 (IVAR0's entry 0) and Other, bit 31
-const IVAR_RXQ0: u64 = 0x80 // entry 0 (receive queue 0): EICR bit 0, valid (bit 7)
+const EIMS_V0: u64 = 0x1 // MSI-X vector 0 (IVAR0's entry 0)
+const IVAR_RXQ0: u64 = 0x80 // entry 0 (receive queue 0): vector 0, valid (bit 7)
+const GPIE: u64 = 0x1514
+const GPIE_MSIX: u64 = 0x10 // bit 4, Multiple_MSIX
+const GPIE_PBA: u64 = 0x80000000 // bit 31, PBA support (MSI-X)
+const CAP_MSIX: u64 = 0x11 // PCI 3.0 §6.8.2's capability id
+const MSIX_ENABLE: u64 = 0x80000000 // Message Control bit 15 (the dword's 31)
+const MSIX_MASKALL: u64 = 0x40000000 // Function Mask, bit 14 (30)
 const RAH_AV: u64 = 0x80000000
 const MDIC_WRITE: u64 = 0x4000000 // OP 01b, bits 27:26
 const MDIC_READ: u64 = 0x8000000 // OP 10b
@@ -205,11 +213,12 @@ const G_PCTRL0: u64 = 19 // 82576: PCTRL when the link had not come in 1 s
 const G_PSTATUS0: u64 = 20 // and PSTATUS then
 const G_PSTATUS1: u64 = 21 // PSTATUS after the restart's wait
 const G_RESTARTED: u64 = 22 // 1: auto-negotiation restarted through MDIC
-const G_IMS: u64 = 23 // IMS read back after it was set
 const G_EIMS: u64 = 24 // EIMS read back after it was set
-const G_VECTOR: u64 = 25 // the MSI's vector, 0 when polled
+const G_VECTOR: u64 = 25 // the MSI-X message's vector, 0 when polled
+const G_PML4: u64 = 26
+const G_MSIX_PA: u64 = 27 // MSI-X table entry 0's physical address
 
-// G_POLL's values: 0 an MSI; else why it is polled.
+// G_POLL's values: 0 an MSI-X message; else why it is polled.
 const P_ASKED: u64 = 1
 const P_I225: u64 = 2
 const P_NO_MSI: u64 = 3
@@ -320,7 +329,7 @@ pub fn up() -> bool {
 }
 
 /// Whether it is polled: asked for (`netpoll`), an I225 (polled by
-/// design: no MSI programmed), or an 82576 whose MSI is missing or did
+/// design: no MSI programmed), or an 82576 whose MSI-X is missing or did
 /// not enable.
 pub fn polled() -> bool {
     gw(G_POLL) != 0
@@ -329,10 +338,10 @@ pub fn polled() -> bool {
 /// Why it is polled, for kernel/net's line.
 pub fn poll_reason() -> str {
     let p = gw(G_POLL)
-    if p == P_ASKED { "netpoll asked" } else if p == P_I225 { "an I225: polled by design" } else if p == P_NO_MSI { "no MSI capability" } else { "MSI did not enable" }
+    if p == P_ASKED { "netpoll asked" } else if p == P_I225 { "an I225: polled by design" } else if p == P_NO_MSI { "no MSI-X capability" } else { "MSI-X did not enable" }
 }
 
-/// The MSI vector, when the device interrupts.
+/// The MSI-X message's vector, when the device interrupts.
 pub fn vector() -> u64 {
     gw(G_VECTOR)
 }
@@ -377,9 +386,9 @@ fn arm(k: u64) {
 
 /// Bring the device at kernel/pci's index `i` up on the paging
 /// structures at `pml4`, as the datasheets' §4.5 orders. The 82576's
-/// interrupt is an MSI of `vector` to the local APIC `cpu`; `poll` asks
-/// for the polled path whatever the model. Answers 0 (up), 2 (refused,
-/// one line says why).
+/// interrupt is MSI-X vector 0, a message of `vector` to the local APIC
+/// `cpu`; `poll` asks for the polled path whatever the model. Answers 0
+/// (up), 2 (refused, one line says why).
 pub fn start(pml4: u64, i: u64, poll: bool, vector: u64, cpu: u64) -> u64 {
     var w: u64 = 0
     while w < 256 {
@@ -389,6 +398,7 @@ pub fn start(pml4: u64, i: u64, poll: bool, vector: u64, cpu: u64) -> u64 {
     let (m, empty) = model_of(i)
     put_gw(G_MODEL, m)
     put_gw(G_PCI, i)
+    put_gw(G_PML4, pml4)
     if empty {
         return refuse("an Intel I225/I226 whose NVM is empty or unread (device id)", pci.device(i))
     }
@@ -532,30 +542,61 @@ pub fn start(pml4: u64, i: u64, poll: bool, vector: u64, cpu: u64) -> u64 {
     }
     put_gw(G_LINK_MS, if rd(STATUS) & STATUS_LU != 0 { ms } else { 0xffffffffffffffff })
     put_gw(G_STATUS0, rd(STATUS))
-    // The interrupt (the 82576: an MSI), or the polled path.
+    // The interrupt (the 82576: MSI-X vector 0), or the polled path.
     wr(IMC, 0xffffffff)
     wr(EIMC, 0xffffffff)
-    put_gw(G_POLL, if poll { P_ASKED } else if m != M_82576 { P_I225 } else if pci.capability(b, 5) == 0 { P_NO_MSI } else { 0 })
+    put_gw(G_POLL, if poll { P_ASKED } else if m != M_82576 { P_I225 } else if pci.capability(b, CAP_MSIX) == 0 { P_NO_MSI } else { 0 })
     if gw(G_POLL) == 0 {
-        // §7.3.1.1: in INTx and MSI mode a queue's causes reach EICR
-        // through IVAR, and ICR's are EICR's Other bit (31).
+        // §7.3.1.2: in MSI-X mode (GPIE.Multiple_MSIX) IVAR0's entry 0
+        // sends receive queue 0's causes to vector 0, which EICR bit 0
+        // reflects; nothing else is unmasked (ICR's causes would need
+        // IVAR_MISC's vector).
+        wr(GPIE, GPIE_MSIX | GPIE_PBA)
         wr(IVAR0, IVAR_RXQ0)
         let _e = rd(EICR)
         let _c = rd(ICR)
-        wr(IMS, IMS_LSC)
-        wr(EIMS, EIMS_RXQ0)
-        put_gw(G_IMS, rd(IMS))
-        put_gw(G_EIMS, rd(EIMS))
-        if pci.enable_msi(b, cpu, vector) {
+        if msix(b, vector, cpu) {
+            wr(EIMS, EIMS_V0)
+            put_gw(G_EIMS, rd(EIMS))
             put_gw(G_VECTOR, vector)
         } else {
-            wr(IMC, 0xffffffff)
-            wr(EIMC, 0xffffffff)
+            wr(GPIE, 0)
             put_gw(G_POLL, P_MSI_OFF)
         }
     }
     put_gw(G_UP, 1)
     0
+}
+
+/// PCI Local Bus 3.0 §6.8.2: the function's MSI-X table entry 0 (in the
+/// BAR its Table BIR names, at its Table Offset; the 82576's BAR3,
+/// §8.1.4) made a message of `vector` to the local APIC `cpu` (kernel/msi:
+/// fixed, edge), unmasked, the table's page mapped after the registers'
+/// 64 KiB; INTx and MSI off, MSI-X enabled with the function masked while
+/// the entry is written, then unmasked. Whether it reads back enabled.
+fn msix(b: u64, vector: u64, cpu: u64) -> bool {
+    let at = pci.capability(b, CAP_MSIX)
+    let table = pci.read32(b, at + 4)
+    let (kind, pa) = pci.bar(b, table & 7)
+    if (kind != pci.BAR_MEM32 && kind != pci.BAR_MEM64) || pa == 0 {
+        return false
+    }
+    let entry = (table & 0xfffffff8) & 0xfff
+    let page = pa + ((table & 0xfffffff8) & !0xfff)
+    let n = paging.map(gw(G_PML4), WINDOW_VA + MAPPED, page, paging.NX | paging.RW | UNCACHED) else 9
+    if n == 9 {
+        return false
+    }
+    put_gw(G_MSIX_PA, page + entry)
+    pci.interrupts_off(b)
+    let header = pci.read32(b, at) & 0x3fffffff
+    pci.write32(b, at, header | MSIX_ENABLE | MSIX_MASKALL)
+    wr(MAPPED + entry, msi.address(cpu))
+    wr(MAPPED + entry + 4, 0)
+    wr(MAPPED + entry + 8, msi.data(vector))
+    wr(MAPPED + entry + 12, 0) // vector control: unmasked
+    pci.write32(b, at, header | MSIX_ENABLE)
+    pci.read32(b, at) & (MSIX_ENABLE | MSIX_MASKALL) == MSIX_ENABLE
 }
 
 /// One of the 82576's PHY registers (§3.5.2.2.1: MDIC with the address,
@@ -756,7 +797,7 @@ pub fn report() {
 /// leg's record of what the I225 answered; ICR is not read: reading it
 /// clears it):
 ///
-///     net: regs CTRL <c> STATUS <s> CTRL_EXT <e> RCTL <r> TCTL <t> SRRCTL <x> RXDCTL <y> TXDCTL <z> RDH <h> RDT <t> TDH <h> TDT <t> RAL0 <l> RAH0 <h> IMS <m> (<m0> when set) EIMS <e> (<e0> when set) IVAR0 <v>; STATUS before the reset <s0>
+///     net: regs CTRL <c> STATUS <s> CTRL_EXT <e> RCTL <r> TCTL <t> SRRCTL <x> RXDCTL <y> TXDCTL <z> RDH <h> RDT <t> TDH <h> TDT <t> RAL0 <l> RAH0 <h> IMS <m> EIMS <e> (<e0> when set) IVAR0 <v> GPIE <g>; STATUS before the reset <s0>
 pub fn dump() {
     if gw(G_MODEL) == 0 {
         return
@@ -777,14 +818,12 @@ pub fn dump() {
     reg(" RAL0 ", RAL0)
     reg(" RAH0 ", RAH0)
     reg(" IMS ", IMS)
-    log.put(" (")
-    log.hex_n(gw(G_IMS), 8)
-    log.put(" when set) EIMS ")
-    log.hex_n(rd(EIMS), 8)
+    reg(" EIMS ", EIMS)
     log.put(" (")
     log.hex_n(gw(G_EIMS), 8)
-    log.put(" when set) IVAR0 ")
-    log.hex_n(rd(IVAR0), 8)
+    log.put(" when set)")
+    reg(" IVAR0 ", IVAR0)
+    reg(" GPIE ", GPIE)
     log.put("; STATUS before the reset ")
     log.hex_n(gw(G_STATUS_PRE), 8)
     log.end()
