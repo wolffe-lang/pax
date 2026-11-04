@@ -231,9 +231,10 @@ of the HPET or the PM timer), <why> being the word that forced the way or
 the probe's `read <r>, write <w> cycles; copy when read <= 4 x write`. A scroll either redraws, from the cell grid (the
 screen's shadow in RAM), only the cells that changed, never reading the
 framebuffer, or copies the framebuffer onto itself as px19's scroll did.
-When the screen first attaches it times a 32 KiB read of the framebuffer
-against a write of the same bytes, once, and copies for the rest of the
-boot only when the read cost at most four writes: through a GPU's write-combining mapping a read is
+When the screen first attaches it times a 16 KiB read of the framebuffer
+against a write of the same bytes (one of each to warm them, then the
+cheapest of five of each), once, and copies for the rest of the boot only
+when the read cost at most four writes: through a GPU's write-combining mapping a read is
 uncached and far dearer (pax#253: kasumi's GPU), so the scroll redraws;
 an emulator's framebuffer is ordinary host memory, where the copy is the
 cheaper way. The command-line words `fbread` (copy) and `fbwrite`
