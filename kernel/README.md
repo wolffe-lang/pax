@@ -622,8 +622,8 @@ Intel I225/I226 through kernel/gbe (`tests/mpx4-dhcp`, `tests/mpx4-igb`).
 | module or file | what |
 |---|---|
 | `dhcp/` | RFC 2131's client in the kernel (R-px89-2: PAX has no interface-configuration ABI a program could use): INIT, SELECTING, REQUESTING, BOUND, RENEWING, REBINDING; retransmission at 4 s doubled to 64 s, ±1 s; T1 renewal unicast to the server, T2 rebinding broadcast, half the time left and never under 60 s between tries; a NAK or the lease's end back to INIT with the address, the route and the servers withdrawn. One 300-byte message shape (`tools/pcap-dhcp` holds it byte for byte). Its thread, `pax_dhcpd`, turns every tick; every state change is a `dhcp:` line stamped from its start. Writes `/etc/resolv.conf` (a `nameserver` line per server, three at most) and `/var/lib/dhcp/pax.lease` (the lease as a program reads it, and whether the router answered the kernel's echo). `from_file`, `start`, `claims`/`input` (kernel/netd's), `wait_bound`, `echo_router`, `counters` |
-| `gbe/` | Intel's gigabit controllers on the 82576/I210 programming model (R-px89-1): CTRL.RST, RAL0/RAH0 with AV, CTRL.SLU and no PHY register, one receive ring of 64 advanced one-buffer descriptors and one transmit ring of 64 legacy descriptors, 2048-byte buffers, 66 frames; INTx through ICR/IMS when the firmware's line is one the 8259 takes, else polled every tick by the network's clock (`netpoll` on the command line forces it). The I225-only paths (the ids, the reset's wait, the link wait, the speed's raw bits, the polled path) are named in the module. `dump` prints the registers it programmed, read back |
-| `net/` | (px89) the frame interface dispatched to kernel/gbe when there is no virtio device; `poll`, `polled`; the last `report` line the same shape for both |
+| `gbe/` | Intel's gigabit controllers on the 82576/I210 programming model (R-px89-1): CTRL.RST, RAL0/RAH0 with AV, CTRL.SLU, one receive ring of 64 advanced one-buffer descriptors and one transmit ring of 64 legacy descriptors, 2048-byte buffers, 66 frames. The 82576 (QEMU's igb): its PHY told to auto-negotiate again through MDIC when the link has not come in 1 s, and its receive interrupt as MSI-X vector 0 (GPIE.Multiple_MSIX, IVAR0, EIMS; the table entry in BAR3) to kernel/net's vector 83: QEMU's igb raises no INTx and sends no MSI (black box). The I225: no PHY register, polled every tick by the network's clock (`netpoll` on the command line polls the 82576 too). The I225-only paths (the ids, the reset's wait, the link wait, the speed's raw bits, the polled path) are named in the module. `dump` prints the registers it programmed, read back |
+| `net/` | (px89) the frame interface dispatched to kernel/gbe when there is no virtio device; `poll`, `polled`; the last `report` line names the 82576's MSI-X vector or why the controller is polled |
 | `netd/` | (px89) UDP from 67 to 68 to kernel/dhcp while it runs; the clock asks a polled controller every tick |
 | `ip/`, `arp/` | (px89) `configure` and `set_ip`: the address, netmask and gateway changed at run time (0.0.0.0 while no lease is held) |
 | `udp/` | (px89) `checksum` public |
@@ -634,9 +634,10 @@ Intel I225/I226 through kernel/gbe (`tests/mpx4-dhcp`, `tests/mpx4-igb`).
   kernel/tree with nothing of theirs held. kernel/gbe's words change under
   kernel/net's lock.
 - Not yet: DHCPDECLINE after an ARP probe, DHCPRELEASE, INIT-REBOOT,
-  INFORM, a relay's giaddr; more than one interface; MSI or MSI-X for
-  kernel/gbe, its PHY registers, checksum and segmentation offload, more
-  than one queue each way; a name resolver (wolf-lang#831).
+  INFORM, a relay's giaddr; more than one interface; an interrupt for the
+  I225 (it is polled), the I225's PHY registers, checksum and
+  segmentation offload, more than one queue each way; a name resolver
+  (wolf-lang#831).
 
 ## Who a process is (px39)
 
