@@ -4,7 +4,8 @@
 # step stops the chunk, but in the `red` chunk, where each step must fail by name.
 #   job.sh red   SHA   the tests-only head: fat.py's replace row, and the leg's U1, U2, U0 and U8 with the
 #                      staged 9c88ec8a stick as both sticks (its pax-install has no --upgrade)
-#   job.sh units SHA   the head's paxfat and fat.py; a Linux build of the env_args() program (U5's twin)
+#   job.sh units SHA   the head's installer and kernel compiled, its paxfat and fat.py; a Linux build of the
+#                      env_args() program (U5's twin)
 #   job.sh build SHA   tools/mkdistribution at SHA, the dev variant's live payload, the upgrade stick
 #                      (tools/mkdisk --usb, tools/check-usb, a second build byte-identical, the 860's line,
 #                      read-only, sha256 twice)
@@ -149,6 +150,8 @@ case $CHUNK in
     red_expect "$L/runs/leg-red-$short/leg.log" "FAIL U8-wrong-serial: /^usage: pax-install/" ; echo "red-leg-named=$?"
     ;;
   units)
+    step units-install ctr instbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/pb-$short; tools/mkinstall $L/runs/inst-$short"
+    step units-kernel ctr kbuild localhost/px75-ubuntu:2 0 bash -c "export PAX_CACHE=$L/cache PAX_BUILD=$L/pb-$short; tools/fetch-limine >/dev/null; tools/build-kernel --release --src kernel/kmain_console.lu $L/runs/kernel-$short"
     step units-fat fat_row "fat-$short"
     step units-args units_args
     ;;
