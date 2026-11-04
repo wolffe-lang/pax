@@ -16,11 +16,12 @@
 #                                                 installed target kept: the state M-PX6 left on kasumi's 860
 #                                     sleg-pax    the new stick onto a copy of that target, px87's rows
 #                                     sleg-fat32, sleg-ext4   px86's used cases with the new stick, px87's rows
-# SLOT is A (CPUs 0-3,8-11) or B (4-7,12-15); a red step stops the chunk.
+# SLOT is A (CPUs 0-3,8-11), B (4-7,12-15) or AB (both locks, A outside then B, CPUs 0-15: the maintainer's
+# one-heavy-job ruling of 2026-11-04, every run after the first build); a red step stops the chunk.
 set -uo pipefail
 L=/home/mfwolffe/lanes/px92
 SLOT=$1 HEAD=$2 SERIAL=$3 CHUNK=$4
-case $SLOT in A) CPUS=0-3,8-11 ;; B) CPUS=4-7,12-15 ;; *) echo "slot A or B"; exit 2 ;; esac
+case $SLOT in A) CPUS=0-3,8-11 ;; B) CPUS=4-7,12-15 ;; AB) CPUS=0-15 ;; *) echo "slot A, B or AB (both locks)"; exit 2 ;; esac
 short=${HEAD:0:8}
 P=/home/mfwolffe/lanes/satoyama-env/bin/podman
 export PATH=/home/mfwolffe/lanes/satoyama-env/bin:$PATH TMPDIR=$L/tmp
@@ -175,10 +176,21 @@ legs_prep() {
   [ "$(sha256sum "$L/sout/pax-install-kasumi-$short.img" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$L/kasumi-build-read-1.sha256")" ]
 }
 
-exec 9>"/home/mfwolffe/lanes/satoyama-$SLOT.lock"
-printf '%s px92 %s: waiting on satoyama-%s.lock (one flock -w 21600)\n' "$(ts)" "$CHUNK" "$SLOT"
-flock -w 21600 9 || { echo "$(ts) the lock wait timed out"; exit 4; }
-printf '%s px92 %s: satoyama-%s.lock acquired (CPUs %s)\n' "$(ts)" "$CHUNK" "$SLOT" "$CPUS"
+if [ "$SLOT" = AB ]; then
+  # The maintainer's ruling (2026-11-04): one heavy job at a time on satoyama, both locks, A outside then B.
+  exec 8>/home/mfwolffe/lanes/satoyama-A.lock
+  printf '%s px92 %s: waiting on satoyama-A.lock (one flock -w 21600), then B\n' "$(ts)" "$CHUNK"
+  flock -w 21600 8 || { echo "$(ts) the A lock wait timed out"; exit 4; }
+  printf '%s px92 %s: satoyama-A.lock acquired; waiting on satoyama-B.lock\n' "$(ts)" "$CHUNK"
+  exec 9>/home/mfwolffe/lanes/satoyama-B.lock
+  flock -w 21600 9 || { echo "$(ts) the B lock wait timed out"; exit 4; }
+  printf '%s px92 %s: both satoyama locks acquired (CPUs %s)\n' "$(ts)" "$CHUNK" "$CPUS"
+else
+  exec 9>"/home/mfwolffe/lanes/satoyama-$SLOT.lock"
+  printf '%s px92 %s: waiting on satoyama-%s.lock (one flock -w 21600)\n' "$(ts)" "$CHUNK" "$SLOT"
+  flock -w 21600 9 || { echo "$(ts) the lock wait timed out"; exit 4; }
+  printf '%s px92 %s: satoyama-%s.lock acquired (CPUs %s)\n' "$(ts)" "$CHUNK" "$SLOT" "$CPUS"
+fi
 case $CHUNK in
   build)
     [ ! -e "$L/sout" ] || { echo "$L/sout exists"; exit 3; }
@@ -197,5 +209,6 @@ case $CHUNK in
   *) echo "CHUNK is build or legs"; exit 2 ;;
 esac
 flock -u 9; exec 9>&-
-printf '%s px92 %s: satoyama-%s.lock RELEASED\n' "$(ts)" "$CHUNK" "$SLOT"
+[ "$SLOT" = AB ] && { flock -u 8; exec 8>&-; }
+printf '%s px92 %s: satoyama-%s lock(s) RELEASED\n' "$(ts)" "$CHUNK" "$SLOT"
 printf '%s CHUNK %s DONE %s\n' "$(ts)" "$CHUNK" "$short"
