@@ -1,0 +1,54 @@
+px92 qualification record, 2026-11-04 (satoyama; the maintainer's serial written <kasumi-serial>)
+
+The stick: pax-install-kasumi-9c88ec8a.img, 829,423,616 bytes, sha256
+850ff60b8e5e614233deb82fa040a8d99ece802569123b9cc93d91aef7179f7e, read seven times, all equal: twice after the
+build on satoyama (kasumi-build-read-{1,2}), once per leg copy (stick-at-start, three legs), twice at staging
+on satoyama (kasumi-stage-read-{1,2}), twice on nomad at ~/pax-smoke/ (mac/image-nomad-read-{1,2}), mode 0444.
+The plain stick f2008346...7f819e (stick-plain-read-{1,2}). Head 9c88ec8a (trunk; a6e2fcb5, px87's merge, plus
+notes), SOURCE_DATE_EPOCH 1793767182. /boot/pax 2,560,632 bytes b4963d4d...56d7be; /boot/initramfs.cpio
+401,751,268 bytes de9e7ddd...99c159; limine.conf a1e45ca2... (boot/limine-usb.conf, `cmdline: quiet`);
+/pax/install-targets c21b04ae... (boot/install-targets + the 860's line, one entry); BOOTX64.EFI 90a9a6a5...,
+limine-bios.sys 96867c2b... Inputs: px86's (wolf 0.2.35 4cc4045b..., Limine 12.9.1 5cdebc51..., each read
+twice; base-dev.cpio 098b918e...), copied from hasu with equal manifests (561 paths, size and type), plus
+px90's den d4d3d6b8... (16,698,144 bytes, its sums.txt).
+
+The build chunk (satoyama-B.lock, CPUs 4-7,12-15; it began before the one-heavy-job ruling and ran to its
+end, as the coordinator said):
+  2026-11-04T05:22:00Z END sbuild exit=0     (I0 PASS release 253 digests and dev 320, den and its git link)
+  2026-11-04T05:22:50Z END sstick exit=0     (U1, U2 six files, the list empty, a second build byte-identical,
+                                              the EFI and MBR corruptions refused by name)
+  2026-11-04T05:23:07Z END sline exit=0      (the 860's line on a copy, read back, check-usb again, 0444)
+
+The legs chunk (both locks, A then B, CPUs 0-15; KVM; px78-ubuntu:1; the head's metal.py through
+make-variant.py, 13 edits each applied once: metal.py 2ed1065a..., the variant 7ad77d92...):
+  2026-11-04T05:25:06Z END legs-prep exit=0
+  2026-11-04T05:27:40Z END sleg-mpx6 exit=0    adb53141's staged stick (ce86a7e6...) onto a used 860 (fat32):
+                                                M0-M11 PASS, install 76.71 s, leg 145.72 s; the target kept
+                                                (extents 00816e8f..., 7950 extents)
+  2026-11-04T05:30:08Z END sleg-pax exit=0     the new stick onto a copy of that target: P0, P1, P-target-layout,
+                                                P-erase-line, P1-install, P2 rows and M0-M11 PASS; install
+                                                57.13 s, leg 139.53 s
+  2026-11-04T05:32:20Z END sleg-fat32 exit=0   px86's used fat32: P and M rows PASS; install 53.65 s, leg 126.28 s
+  2026-11-04T05:34:31Z END sleg-ext4 exit=0    px86's used ext4: P and M rows PASS; install 54.51 s, leg 124.69 s
+Witnesses in every leg before and after every boot: nvme 23e7b466..., steam e1203a73..., sandisk 303fd56e...
+(px78's). Boot 0 left the target and the three disks byte-identical. Every power-off read from QMP's SHUTDOWN
+event: guest-shutdown (boot 0's shell `poweroff`, the installer's `poweroff` answer, the installed shell's
+`poweroff`). The live transcripts 21,918-22,131 bytes, the install's 29,841-30,034 (under the log's 64 KiB),
+the installed system's 7,083-7,137: each with 2 `user:` lines (the syscall setup and `user: quiet (the kernel
+command line): ...`) and 0 of a program's ordinary life.
+
+The prediction (c639bb04), scored:
+- head 9c88ec8a: right.
+- 828,375,040 bytes or one MiB more: right, one MiB more (791 MiB; kernel + archive 404,311,900 bytes).
+- a second build byte-identical, both corruptions refused, six files, the conf a1e45ca2, the list c21b04ae:
+  right.
+- the mpx6 leg M0-M11 PASS: right; its install 35-50 s: wrong, 76.71 s (satoyama at 100 C, shared with two
+  other lanes' jobs and the maintainer's own builds; the slowest of the four installs).
+- the pax leg's layout and erase lines, M0-M11: right; install 30-50 s: wrong, 57.13 s; leg 100-170 s: right.
+- the fat32 and ext4 legs: right.
+- px87's rows: the kernel line and the boot line at every login (`by copy` under KVM), the live transcript
+  quiet, every poweroff guest-shutdown, boot 0 writing nothing: right.
+- the installed system quiet too, against px87's owed item: right (prepare.lu's `cmdline: quiet root=...`).
+- not predicted: at 1280x800 the boot line wraps at a space (`copy when read <=` / `4 x write)`), so the
+  screen's rows read shorter than the row; make-variant.py's reader tries the row after both ways
+  (634992bf, before any guest ran); the first leg needed it.
