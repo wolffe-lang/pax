@@ -77,12 +77,13 @@
 //! looks for one kernel/gbe drives (QEMU's 82576, the I225/I226) and
 //! brings it up through that module; every function below then reaches
 //! its rings instead of the virtqueues, with the same rows, counters and
-//! lines (`report`'s last line is the same shape: the address, the line,
-//! its vector and ELCR, 66 frames held — or, when the controller is
-//! polled, `polled every tick` and why). `poll`: the network's clock asks
-//! a polled controller every tick whether a frame came (kernel/netd),
-//! and wakes the network thread as the interrupt would. `netpoll` on the
-//! kernel command line polls it whatever its line.
+//! lines (`report`'s last line: the address, the 82576's MSI vector,
+//! GBE_VECTOR, and the local APIC it goes to, 66 frames held — or, when
+//! the controller is polled, `polled every tick` and why). `poll`: the
+//! network's clock asks a polled controller every tick whether a frame
+//! came (kernel/netd), and wakes the network thread as the interrupt
+//! would. `netpoll` on the kernel command line polls it whatever its
+//! model.
 //!
 //! Written from the OASIS VIRTIO specification 1.1/1.2 §5.1 (the
 //! network device: its queues, feature bits, configuration layout,
@@ -92,6 +93,7 @@
 //! sheet (the interrupt line, ELCR). No Linux source; no other
 //! kernel's or network stack's source; no driver.
 
+use apic
 use boot_info
 use frames
 use gbe
@@ -279,11 +281,16 @@ pub fn poll() -> bool {
     due
 }
 
+/// px89: the Intel controller's MSI vector: the last of the four
+/// kernel/idt routes to MSI trampolines (80-83; kernel/xhci takes 79 +
+/// its controller's number from the bottom).
+const GBE_VECTOR: u64 = 83
+
 /// px89: bring up the Intel controller at kernel/pci's index `g`.
 fn start_gbe(pml4: u64, g: u64) -> u64 {
     put_nw(N_KIND, KIND_GBE)
     put_nw(N_PCI, g)
-    if gbe.start(pml4, g, boot_info.cmdline_has("netpoll")) != 0 {
+    if gbe.start(pml4, g, boot_info.cmdline_has("netpoll"), GBE_VECTOR, apic.id()) != 0 {
         put_nw(N_STATE, REFUSED)
         return REFUSED
     }
@@ -294,16 +301,8 @@ fn start_gbe(pml4: u64, g: u64) -> u64 {
         j += 1
     }
     put_nw(N_MAC, m)
-    put_nw(N_ELCR, timer.elcr())
-    if !gbe.polled() {
-        let line = pci.line(g)
-        put_nw(N_LINE, line)
-        timer.level(line)
-        put_nw(N_VECTOR, timer.MASTER_BASE + line)
-        timer.unmask_line(line)
-    } else {
-        put_nw(N_LINE, pci.line(g))
-    }
+    put_nw(N_LINE, pci.line(g))
+    put_nw(N_VECTOR, gbe.vector()) // an MSI's (no 8259 line is routed), or 0 when polled
     put_nw(N_UP, 1)
     put_nw(N_STATE, UP)
     UP
@@ -795,6 +794,11 @@ fn put_queue(name: str, q: u64) {
 ///     net: receive queue 0: 64 entries, descriptors 0x<pa> avail 0x<pa> used 0x<pa>
 ///     net: transmit queue 1: 64 entries, descriptors 0x<pa> avail 0x<pa> used 0x<pa>
 ///     net: <aa:bb:cc:dd:ee:ff>, line <l> (vector <v>, level; elcr 0x<before> -> 0x<after>), <n> frames held
+///
+/// or, for an Intel controller (px89), kernel/gbe's lines and then
+///
+///     net: <aa:bb:cc:dd:ee:ff>, MSI vector <v> to APIC <id>, <n> frames held
+///     net: <aa:bb:cc:dd:ee:ff>, polled every tick (line <l>, <why>), <n> frames held
 pub fn report() {
     if !up() {
         return
@@ -807,18 +811,15 @@ pub fn report() {
         if gbe.polled() {
             log.put(", polled every tick (line ")
             log.dec(nw(N_LINE) as int)
-            log.put(if boot_info.cmdline_has("netpoll") { ", netpoll asked" } else { " is not one this kernel can take" })
+            log.put(", ")
+            log.put(gbe.poll_reason())
             log.put("), ")
         } else {
-            log.put(", line ")
-            log.dec(nw(N_LINE) as int)
-            log.put(" (vector ")
+            log.put(", MSI vector ")
             log.dec(nw(N_VECTOR) as int)
-            log.put(", level; elcr ")
-            log.hex_n(nw(N_ELCR), 4)
-            log.put(" -> ")
-            log.hex_n(timer.elcr(), 4)
-            log.put("), ")
+            log.put(" to APIC ")
+            log.dec(apic.id() as int)
+            log.put(", ")
         }
         log.dec(gbe.frames_held() as int)
         log.put(" frames held")
