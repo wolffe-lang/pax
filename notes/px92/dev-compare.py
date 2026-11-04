@@ -34,10 +34,10 @@ for path in ['/boot/pax', '/EFI/BOOT/BOOTX64.EFI', '/boot/limine/limine-bios.sys
     bad |= not same
     print(f"{'PASS' if same else 'FAIL'} ESP {path}: release {hashlib.sha256(a).hexdigest()[:16]}... "
           f"dev {hashlib.sha256(b).hexdigest()[:16]}... ({len(b)} bytes){'' if same else ' DIFFER'}")
-ra = subprocess.run([str(paxfat), '--offset', str(esp(dev)), 'cat', str(dev), '/boot/initramfs.cpio'], capture_output=True, check=True).stdout
-print(f"ESP /boot/initramfs.cpio on the dev stick: {len(ra)} bytes sha256 {hashlib.sha256(ra).hexdigest()}"
-      f" ({'= ' + devc.name if ra == devc.read_bytes() else 'NOT ' + devc.name})")
-bad |= ra != devc.read_bytes()
+# The ESP's /boot/initramfs.cpio is held to DEV_LIVE.cpio by tools/check-usb's U2 (its sha256 against the
+# file's) in sdevstick and sdevline; `paxfat cat` of a 545 MB file ran over six minutes at 100% CPU with nothing
+# written (stopped; not the installer's path), so it is not read again here.
+print(f"ESP /boot/initramfs.cpio: held to {devc.name} (sha256 {hashlib.sha256(devc.read_bytes()).hexdigest()}) by check-usb's U2")
 
 R = m.read_cpio(relc.read_bytes())
 D = m.read_cpio(devc.read_bytes())
