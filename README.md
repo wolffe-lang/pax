@@ -105,8 +105,10 @@ name). Two things to know at the console: den prints a date only from the zone d
 default `/usr/share/zoneinfo/UTC`, which the images carry as the bytes of `/etc/localtime`), and a `den log` written
 to the terminal asks for decorations den does not draw yet, so it says `not yet implemented: history decorations`:
 use `den log --no-decorate`, or `log.decorate = false` in `~/.gitconfig`. `tests/mpx5-den` types a whole session at PAX, as root and as a user, in repositories on an ext2 `/home`, and
-holds every verb's status, output and error to the same den on Linux; `tests/distribution-den` commits on a disk
-the installer wrote, reboots, and reads the repository back clean, every object file Linux's bytes.
+holds every verb's status, output and error to the same den on Linux; it also logs in as a user through the
+installed system's console login and runs den at the terminal, with nothing redirected. `tests/distribution-den`
+commits on a disk the installer wrote, reboots, and reads the repository back clean, every object file Linux's
+bytes.
 
 ## Booting PAX
 
@@ -237,7 +239,9 @@ and writes only after the word `yes` (anything else cancels). It is an explicit 
 - it appends its transcript to `/pax/logs/install-<n>.txt` on the stick after every step, ending with the SHA-256 of
   the first MiB of each partition it wrote, for a machine with no serial port;
 - an install made from the live stick boots to a console login (root or the new user), not the stick's
-  passwordless entry.
+  passwordless entry. As Linux's `login` does, the login gives the terminal to the account it logs in (its user,
+  its primary group, mode 0600), so what the user opens by name, such as `/dev/stdout` or `/dev/stderr`, is
+  theirs to open.
 
 The installer and the installed tree are tested on separate QEMU virtio disks under BIOS and UEFI, including reboot
 persistence, and on used ones (an old ESP and root, an old root and swap, an old live image; `tools/used-disk`), each
