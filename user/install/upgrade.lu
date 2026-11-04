@@ -1,0 +1,600 @@
+//! px93: `pax-install --upgrade`, a new image over an install in place,
+//! the user's files kept (R-px93-A, B and C). Run from the stick's
+//! upgrade entry, where kernel/fstab has mounted the allow-listed disk's
+//! PAX root at /mnt/target (R-px93-1); the ESP is written through the
+//! disk's node at its offset by paxfat, as a fresh install writes it.
+//!
+//! **What the install was** comes from, in this order: an upgrade's own
+//! in-progress record (`/etc/pax-install/upgrading` and `previous`, a
+//! cut run's), the root's `/etc/pax-install/manifest`, or a baseline the
+//! stick carries (`/usr/share/pax-install/baselines/*.manifest`) whose
+//! kernel and /etc/pax-release digests are the target's ESP /boot/pax's
+//! and its root's /etc/pax-release's. Anything else is refused by name:
+//! an install is never guessed at.
+//!
+//! **The plan**, from the target, the old manifest and the new image (the
+//! running stick's tree, walked as a fresh install walks it):
+//! - a path the new image ships, absent on the target: written; equal to
+//!   the new image's already: left; equal to the old manifest's (the
+//!   user left it as shipped): replaced; anything else is the user's:
+//!   kept, and the new version written beside it as `PATH.pax-new`;
+//! - a path the old manifest has and the new image does not: deleted
+//!   when it is as shipped, kept when the user changed it;
+//! - every other path, and /home and /root whole, never touched;
+//! - /etc/passwd and /etc/group stay the user's, with any system account
+//!   the new image adds that they lack appended;
+//! - /etc/fstab and the root's and the ESP's limine.conf regenerated for
+//!   the target's own PARTUUID (a root copy the user changed is kept, its
+//!   regenerated text beside it); /etc/pax-run and /etc/pax-login kept;
+//! - on the ESP, /boot/pax, Limine's limine-bios.sys and BOOTX64.EFI
+//!   replaced where their bytes differ (paxfat replace).
+//!
+//! **The order, for a power cut**: the in-progress record first; every
+//! file written to `PATH.pax-tmp`, fsynced, its digest read back, then
+//! renamed over; the root before the ESP; the new manifest last, then the
+//! record removed. Run again after a cut, the plan is made afresh from
+//! what is there and the same record, so it completes; run again after it
+//! completed, nothing is left to do and nothing on the target is written.
+//! The log goes to the stick (`/pax/logs/install-<n>.txt`) and to the
+//! target (`/etc/pax-install/upgrade-<n>.txt`), each appended and synced.
+
+use std.x.crypto.sha2
+
+const TARGET_ROOT: str = "/mnt/target"
+
+/// One step of the plan. op: mkdir, write, link (absent: made), replace,
+/// relink (as shipped: renewed), beside (`path.pax-new` from the new
+/// image's `row`), delete, rmdir.
+struct Act { op: str, path: str, row: Row }
+
+struct UpPlan {
+    acts: List[Act],
+    kept: List[str],
+    dropped_kept: List[str],
+    texts: List[List[str]],
+    esp: List[List[str]],
+    bios: bool,
+    bytes: int,
+    largest: int,
+    paths: int,
+}
+
+fn absent_row(path: str) -> Row {
+    Row { kind: "", mode: 0, uid: 0, gid: 0, size: 0, digest: "-", path: path }
+}
+
+/// What the target holds at `path` (its kind "" when nothing), hashed.
+fn target_row(path: str) -> Row ! {io} {
+    let host = "{TARGET_ROOT}{path}"
+    let st = fs_lstat(host) else |_| { return absent_row(path) }
+    var r = Row { kind: "o", mode: st[4] & 4095, uid: st[6], gid: st[7], size: st[1], digest: "-", path: path }
+    if st[0] == 0 {
+        r.kind = "f"
+        r.digest = hash_file(host)?
+    } else if st[0] == 1 {
+        r.kind = "d"
+        r.size = 0
+    } else if st[0] == 3 {
+        r.kind = "l"
+        let b = fs_read_link(host) else |_| { return io }
+        r.digest = sha2.to_hex(sha2.sum256(b))
+        r.size = b.len
+    }
+    r
+}
+
+/// Whether the target's `t` is the manifest's `m`: the same kind and,
+/// for a file or a link, the same bytes, mode and owner (a generated
+/// row compares as a file).
+fn same_as(t: Row, m: Row) -> bool {
+    let mk = if m.kind == "g" then "f" else m.kind
+    if t.kind != mk { return false }
+    if mk == "d" { return true }
+    t.digest == m.digest && (mk == "l" || t.mode == m.mode && t.uid == m.uid && t.gid == m.gid)
+}
+
+fn plan_paths(old: Manifest, new: Manifest) -> UpPlan ! {io} {
+    var p = UpPlan {
+        acts: List[Act](),
+        kept: List[str](),
+        dropped_kept: List[str](),
+        texts: List[List[str]](),
+        esp: List[List[str]](),
+        bios: false,
+        bytes: 0,
+        largest: 0,
+        paths: 0,
+    }
+    for n in new.rows {
+        if n.kind == "g" { continue }
+        let t = target_row(n.path)?
+        if t.kind == "" {
+            var op = "write"
+            if n.kind == "d" { op = "mkdir" }
+            if n.kind == "l" { op = "link" }
+            (mut p.acts).push(Act { op: op, path: n.path, row: copy n })
+            continue
+        }
+        if same_as(t, n) { continue }
+        if n.kind == "d" {
+            (mut p.kept).push("{n.path} (the image ships a directory there)")
+            continue
+        }
+        let oi = old.at[n.path] else -1
+        if oi >= 0 && old.rows[oi].kind == n.kind && same_as(t, old.rows[oi]) {
+            let op = if n.kind == "l" then "relink" else "replace"
+            (mut p.acts).push(Act { op: op, path: n.path, row: copy n })
+            continue
+        }
+        (mut p.kept).push(n.path)
+        let b = target_row("{n.path}.pax-new")?
+        if !same_as(b, n) { (mut p.acts).push(Act { op: "beside", path: n.path, row: copy n }) }
+    }
+    var dirs = List[Row]()
+    for o in old.rows {
+        if (new.at[o.path] else -1) >= 0 || o.kind == "g" { continue }
+        let t = target_row(o.path)?
+        if t.kind == "" { continue }
+        if o.kind == "d" {
+            if t.kind == "d" { (mut dirs).push(copy o) }
+            continue
+        }
+        if same_as(t, o) {
+            (mut p.acts).push(Act { op: "delete", path: o.path, row: copy o })
+        } else {
+            (mut p.dropped_kept).push(o.path)
+        }
+    }
+    // Dropped directories last, the deepest first (a walk's order reversed).
+    var k = dirs.len
+    while k > 0 {
+        k -= 1
+        (mut p.acts).push(Act { op: "rmdir", path: dirs[k].path, row: copy dirs[k] })
+    }
+    for a in p.acts {
+        if a.op == "write" || a.op == "replace" || a.op == "beside" {
+            p.bytes += a.row.size
+            if a.row.size > p.largest { p.largest = a.row.size }
+        }
+        if a.op != "delete" && a.op != "rmdir" { p.paths += 1 }
+    }
+    p
+}
+
+/// The account lines of the image's `text` (the live tree's /etc/passwd
+/// or /etc/group, its 1000 the live user's) that `have` lacks by name
+/// and by id: the system accounts to append.
+fn new_accounts(text: str, have: str) -> List[str] {
+    var names = Map[str, bool]()
+    var ids = Map[str, bool]()
+    for line in have.lines() {
+        let f = line.split(":")
+        if f.len >= 3 { names[f[0]] = true; ids[f[2]] = true }
+    }
+    var out = List[str]()
+    for line in text.lines() {
+        let f = line.split(":")
+        if f.len < 3 || f[2] == "{INSTALL_USER_ID}" { continue }
+        if (names[f[0]] else false) || (ids[f[2]] else false) { continue }
+        (mut out).push(line)
+    }
+    out
+}
+
+/// A text for `path` on the root: [path, the text to write, why]. The
+/// target's copy equal to `want` needs nothing; a missing one is
+/// written; any other is the user's, kept, `want` beside it.
+fn text_step(mut p: UpPlan, path: str, want: str, why: str) {
+    let present = fs_exists("{TARGET_ROOT}{path}")
+    let have = fs_read_text("{TARGET_ROOT}{path}") else |_| ""
+    if present && have == want { return }
+    if !present {
+        (mut p.texts).push([path, want, why])
+    } else {
+        (mut p.kept).push("{path} ({why}: yours kept)")
+        let beside = fs_read_text("{TARGET_ROOT}{path}.pax-new") else |_| ""
+        if beside != want { (mut p.texts).push(["{path}.pax-new", want, why]) }
+    }
+    p.bytes += want.len
+}
+
+/// The ESP's file `dst` as the target has it, hashed (by paxfat cat).
+fn esp_sha(dev: str, dst: str, tools: str, work: str, n: int) -> str {
+    let (status, _t) = tool("{tools}/paxfat", ["--offset", "{ESP_START}", "cat", dev, dst], work, "esp-{n}")
+    if status != 0 { return "absent" }
+    hash_file("{work}/esp-{n}.out") else |_| "absent"
+}
+
+/// The target disk's partition 2 GPT GUID, lowercase, from paxgpt --dump.
+fn root_partuuid(dev: str, tools: str, work: str) -> str {
+    let (status, text) = tool("{tools}/paxgpt", ["--dump", dev], work, "upgrade-gpt")
+    if status != 0 { return "" }
+    let last = dev.bytes()[dev.len - 1] as int
+    let sep = if last >= 48 && last <= 57 then "p" else ""
+    for line in text.lines() {
+        if !line.starts_with("{dev}{sep}2 :") { continue }
+        for f in line.split(", ") {
+            let w = f.trim()
+            if w.starts_with("uuid=") { return w[5..].lower() }
+        }
+    }
+    ""
+}
+
+fn le32(b: List[byte], o: int) -> int {
+    (b[o] as int) | (b[o + 1] as int) << 8 | (b[o + 2] as int) << 16 | (b[o + 3] as int) << 24
+}
+
+/// The target root's free bytes and inodes, from its superblock on the
+/// disk (read once, before any write: the mount wrote it at boot).
+fn root_free(fd: int) -> (int, int) {
+    let sb = fs_read_at(fd, ROOT_START + 1024, 1024) else |_| { return (-1, -1) }
+    if sb.len != 1024 || sb[56] != 83 as byte || sb[57] != 239 as byte { return (-1, -1) }
+    let bs = 1024 << le32(sb, 24)
+    let free = le32(sb, 12) - le32(sb, 8)
+    (if free < 0 then 0 else free * bs, le32(sb, 16))
+}
+
+/// The one disk the upgrade may write, judged: on the allow-list, PAX's
+/// layout, its partition 2 mounted at /mnt/target and nothing else of it
+/// mounted; or the refusal, by name.
+fn upgrade_target(disks: List[Disk], list: AllowList) -> (Disk, str) {
+    var found = List[Disk]()
+    for d in disks {
+        if d.live || d.target.running_root || d.target.readonly { continue }
+        if on_list(list, d.model, d.serial) { (mut found).push(copy d) }
+    }
+    if found.len == 0 {
+        let why = if list.refusal.len != 0 then list.refusal else "no disk here is on the install allow-list"
+        return (copy disks[0], "pax-install: upgrade refused: {why}")
+    }
+    if found.len > 1 { return (copy found[0], "pax-install: upgrade refused: {found.len} disks are on the install allow-list; it must name one") }
+    let d = copy found[0]
+    let dev = "/dev/{d.target.name}"
+    if d.layout != "PAX's install layout" {
+        return (d, "pax-install: upgrade refused: {dev} holds {d.layout}, not a PAX install")
+    }
+    var p2 = ""
+    let parts = d.target.identity.split(";")
+    for k in 1..parts.len {
+        let f = parts[k].split(":")
+        if f.len == 6 && f[3] == "2" { p2 = "{f[1]}:{f[2]}" }
+    }
+    let mounts = fs_read_text("/proc/self/mountinfo") else |_| ""
+    var at_target = false
+    var elsewhere = ""
+    for line in mounts.lines() {
+        let w = line.words()
+        if w.len < 5 { continue }
+        var mine = w[2] == p2
+        for k in 1..parts.len {
+            let f = parts[k].split(":")
+            if f.len == 6 && w[2] == "{f[1]}:{f[2]}" { mine = true }
+        }
+        if w[2] == d.target.identity.split("-")[0] { mine = true }
+        if !mine { continue }
+        if w[4] == TARGET_ROOT && w[2] == p2 { at_target = true } else { elsewhere = w[4] }
+    }
+    if elsewhere.len != 0 {
+        return (d, "pax-install: upgrade refused: {dev} is mounted at {elsewhere}, not only its root at {TARGET_ROOT}")
+    }
+    if !at_target {
+        return (d, "pax-install: upgrade refused: {dev} is on the install allow-list, but no PAX root of it is mounted at {TARGET_ROOT}: boot the stick's entry \"PAX: upgrade the installed system\" (its upgrade: line at boot says why it mounted nothing)")
+    }
+    (d, "")
+}
+
+/// What the target was installed from: (the old manifest, where it came
+/// from, whether a cut upgrade is being finished); or a refusal.
+fn installed_manifest(new: Manifest, dev: str, payload: str, tools: str, work: str) -> (Manifest, str, bool, str) {
+    let none = Manifest { commit: "", kernel: "", release: "", files: "", source: "", rows: List[Row](), at: Map[str, int]() }
+    let dir = "{TARGET_ROOT}{MANIFEST_DIR}"
+    if fs_exists("{dir}/upgrading") {
+        let mark = parse_manifest(fs_read_text("{dir}/upgrading") else |_| "") else |_| {
+            return (none, "", false, "pax-install: upgrade refused: {dir}/upgrading is unreadable; it is never guessed at")
+        }
+        if !same_image(mark, new) {
+            return (none, "", false, "pax-install: upgrade refused: an upgrade to {mark.commit} was cut short on {dev}; finish it with that stick first")
+        }
+        let prev = parse_manifest(fs_read_text("{dir}/previous") else |_| "") else |_| {
+            return (none, "", false, "pax-install: upgrade refused: {dir}/previous is unreadable; it is never guessed at")
+        }
+        return (prev, "the cut upgrade's record ({prev.source})", true, "")
+    }
+    if fs_exists("{dir}/manifest") {
+        let m = parse_manifest(fs_read_text("{dir}/manifest") else |_| "") else |_| {
+            return (none, "", false, "pax-install: upgrade refused: {dir}/manifest is unreadable; it is never guessed at")
+        }
+        return (m, "its manifest ({m.commit})", false, "")
+    }
+    let kernel = esp_sha(dev, "/boot/pax", tools, work, 0)
+    let release = file_sha("{TARGET_ROOT}/etc/pax-release")
+    let names = sorted_names("{payload}/baselines") else |_| List[str]()
+    for name in names {
+        if !name.ends_with(".manifest") { continue }
+        let b = parse_manifest(fs_read_text("{payload}/baselines/{name}") else |_| "") else |_| { continue }
+        if b.kernel == kernel && b.release == release {
+            return (b, "the baseline {name} ({b.source})", false, "")
+        }
+    }
+    (none, "", false, "pax-install: upgrade refused: the install on {dev} has no manifest and matches no baseline this stick carries (its ESP /boot/pax sha256 {short(kernel)}, its /etc/pax-release sha256 {short(release)}); an install is never guessed at")
+}
+
+/// Write `dest` by its temporary name: `fill` makes `tmp`, then it is
+/// fsynced, held to `digest` and renamed over `dest`.
+fn tmp_of(dest: str) -> str ! {io} {
+    let tmp = "{dest}.pax-tmp"
+    let _st = fs_lstat(tmp) else |_| { return tmp }
+    // A cut run's leftover goes first.
+    fs_remove(tmp) else |_| { return io }
+    tmp
+}
+
+fn finish(tmp: str, dest: str, mode: int, uid: int, gid: int) -> () ! {io} {
+    if uid != 0 || gid != 0 { fs_set_owner(tmp, uid, gid, false) else |_| { return io } }
+    fs_set_mode(tmp, mode) else |_| { return io }
+    let fd = fs_open(tmp) else |_| { return io }
+    fs_sync(fd) else |_| { fs_close(fd) else |_| {}; return io }
+    fs_close(fd) else |_| { return io }
+    fs_rename(tmp, dest) else |_| { return io }
+}
+
+fn put_file(src: str, dest: str, r: Row) -> () ! {io, source_changed} {
+    let tmp = tmp_of(dest)?
+    copy_regular(src, tmp)?
+    if hash_file(tmp)? != r.digest { return source_changed }
+    finish(tmp, dest, r.mode, r.uid, r.gid)?
+}
+
+fn put_text(dest: str, text: str, mode: int) -> () ! {io} {
+    let tmp = tmp_of(dest)?
+    durable_text(tmp, text)?
+    finish(tmp, dest, mode, 0, 0)?
+}
+
+fn put_link(target: str, dest: str) -> () ! {io} {
+    let tmp = tmp_of(dest)?
+    fs_symlink(target, tmp) else |_| { return io }
+    fs_rename(tmp, dest) else |_| { return io }
+}
+
+fn append_text(path: str, text: str) -> () ! {io} {
+    let fd = fs_open_mode(path, 2) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    fs_write_chunk(fd, text.bytes()) else |_| { return io }
+    fs_sync(fd) else |_| { return io }
+}
+
+/// The stick's log and, once it is open, the target's: both appended.
+fn flush_up(mut lg: Log, tlog: str) {
+    if tlog.len != 0 && lg.pending.len != 0 {
+        append_text(tlog, lg.pending) else |_| { print("target log: an append to {tlog} failed") }
+    }
+    flush_log(mut lg)
+}
+
+fn upgrade_seed() -> str {
+    var bytes = List[byte]()
+    for n in os_random(4) { (mut bytes).push(n as byte) }
+    sha2.to_hex(bytes)
+}
+
+fn upgrade_main(o: Options, work: str) -> int {
+    let ts = inventory() else |e| match e {
+        denied => { return 1 },
+        _ => { eprint("pax-install: inventory: {e}"); return 1 },
+    }
+    let (disks, list) = judge_all(ts, o.allow, o.tools, work)
+    var lg = open_log(disks, o.tools, work)
+    note(mut lg, "PAX install log {lg.path}")
+    note(mut lg, "release {release_line()}")
+    note(mut lg, "mode --upgrade")
+    say(mut lg, "Install log: {log_place(lg)}")
+    report_disks(mut lg, disks, list)
+    flush_log(mut lg)
+    if disks.len == 0 { return stop(mut lg, "pax-install: upgrade refused: no disk") }
+    let (d, why) = upgrade_target(disks, list)
+    if why.len != 0 { return stop(mut lg, why) }
+    let dev = "/dev/{d.target.name}"
+    let uuid = root_partuuid(dev, o.tools, work)
+    let fstab = fs_read_text("{TARGET_ROOT}/etc/fstab") else |_| ""
+    if uuid.len == 0 || !fstab.lower().contains("partuuid={uuid}") {
+        return stop(mut lg, "pax-install: upgrade refused: {dev}'s partition 2 (PARTUUID={uuid}) is not the root its own /etc/fstab names")
+    }
+    say(mut lg, "Upgrading {dev}: its root PARTUUID={uuid} at {TARGET_ROOT}; its ESP at byte {ESP_START}")
+    flush_log(mut lg)
+    // The new image: the running stick's tree, walked as an install walks it.
+    let rows = source_snapshot("/") else |e| { return stop(mut lg, "pax-install: upgrade: the stick's tree: {e}") }
+    let new = image_manifest("/", rows, "the stick (pax-install --upgrade)")
+    let (old, from, resuming, refusal) = installed_manifest(new, dev, o.payload, o.tools, work)
+    if refusal.len != 0 { return stop(mut lg, refusal) }
+    say(mut lg, "Installed: {old.commit}, from {from}")
+    say(mut lg, "This stick: {new.commit} (kernel sha256 {short(new.kernel)})")
+    flush_log(mut lg)
+    var p = plan_paths(old, new) else |e| { return stop(mut lg, "pax-install: upgrade: reading the target: {e}") }
+    // The accounts, the generated texts and the ESP.
+    let fresh_passwd = fs_read_text("/etc/passwd") else |_| ""
+    let fresh_group = fs_read_text("/etc/group") else |_| ""
+    let have_passwd = fs_read_text("{TARGET_ROOT}/etc/passwd") else |_| { return stop(mut lg, "pax-install: upgrade refused: {dev} has no /etc/passwd") }
+    let have_group = fs_read_text("{TARGET_ROOT}/etc/group") else |_| { return stop(mut lg, "pax-install: upgrade refused: {dev} has no /etc/group") }
+    let users = new_accounts(fresh_passwd, have_passwd)
+    let groups = new_accounts(fresh_group, have_group)
+    if users.len != 0 {
+        var t = have_passwd
+        for u in users { t += "{u}\n" }
+        (mut p.texts).push(["/etc/passwd", t, "accounts appended"])
+    }
+    if groups.len != 0 {
+        var t = have_group
+        for g in groups { t += "{g}\n" }
+        (mut p.texts).push(["/etc/group", t, "groups appended"])
+    }
+    text_step(mut p, "/etc/fstab", fstab_text(uuid), "regenerated for PARTUUID={uuid}")
+    text_step(mut p, "/boot/limine/limine.conf", config_text(uuid), "regenerated for PARTUUID={uuid}")
+    text_step(mut p, "/etc/pax-run", INSTALLED_RUN, "the installed login")
+    text_step(mut p, "/etc/pax-login", installed_login(), "the installed login")
+    let from_esp = ["/boot/pax", "/boot/limine/limine-bios.sys", "/boot/EFI/BOOT/BOOTX64.EFI"]
+    let to_esp = ["/boot/pax", "/boot/limine/limine-bios.sys", "/EFI/BOOT/BOOTX64.EFI"]
+    for i in 0..from_esp.len {
+        let want = file_sha(from_esp[i])
+        if esp_sha(dev, to_esp[i], o.tools, work, i + 1) != want {
+            (mut p.esp).push([from_esp[i], to_esp[i]])
+            if i == 1 { p.bios = true }
+        }
+    }
+    let conf = "{work}/upgrade-limine.conf"
+    durable_text(conf, config_text(uuid)) else |_| { return stop(mut lg, "pax-install: upgrade: scratch {conf}") }
+    if esp_sha(dev, "/boot/limine/limine.conf", o.tools, work, 9) != file_sha(conf) {
+        (mut p.esp).push([conf, "/boot/limine/limine.conf"])
+    }
+    // The space: every byte written, and the largest file's temporary twin.
+    let fd = fs_open(dev) else |_| { return stop(mut lg, "pax-install: upgrade: {dev} cannot be read") }
+    let (free, inodes) = root_free(fd)
+    fs_close(fd) else |_| {}
+    let need = p.bytes + p.largest + 8388608
+    // The plan, on the screen and in the logs.
+    var writes = 0
+    var replaces = 0
+    var besides = 0
+    var deletes = 0
+    for a in p.acts {
+        if a.op == "mkdir" || a.op == "write" || a.op == "link" { writes += 1 }
+        if a.op == "replace" || a.op == "relink" { replaces += 1 }
+        if a.op == "beside" { besides += 1 }
+        if a.op == "delete" || a.op == "rmdir" { deletes += 1 }
+    }
+    say(mut lg, "PAX upgrade plan v1")
+    say(mut lg, "write {writes} path(s) the target lacks; replace {replaces} the user left as shipped; delete {deletes} the new image drops")
+    for k in p.kept { say(mut lg, "keep {k}") }
+    for a in p.acts { if a.op == "beside" { say(mut lg, "beside {a.path}.pax-new (the new image's)") } }
+    for t in p.texts { say(mut lg, "text {t[0]} ({t[2]})") }
+    for k in p.dropped_kept { say(mut lg, "keep {k} (the new image drops it; you changed it)") }
+    for e in p.esp { say(mut lg, "ESP {e[1]} replaced") }
+    if users.len + groups.len == 0 { say(mut lg, "accounts: /etc/passwd and /etc/group kept; nothing to append") }
+    for u in users { say(mut lg, "account appended: {u.split(":")[0]}") }
+    for g in groups { say(mut lg, "group appended: {g.split(":")[0]}") }
+    say(mut lg, "never touched: /home, /root, and every path neither image lists")
+    say(mut lg, "space: {need} bytes needed, {free} free; {p.paths} inode(s) needed, {inodes} free")
+    flush_log(mut lg)
+    for a in p.acts { note(mut lg, "{a.op} {a.path}") }
+    flush_log(mut lg)
+    let empty = p.acts.len == 0 && p.texts.len == 0 && p.esp.len == 0
+    if empty && !resuming && same_image(old, new) {
+        say(mut lg, "Nothing to change: {dev} already holds this image ({new.commit}), with your files as they are.")
+        flush_log(mut lg)
+        return 0
+    }
+    if free < 0 || need > free || p.paths > inodes {
+        return stop(mut lg, "pax-install: upgrade refused: too little space on {dev}'s root: {need} bytes and {p.paths} inode(s) needed, {free} bytes and {inodes} inode(s) free")
+    }
+    // The confirmation: the line, typed exactly (R-px93-3).
+    let seed = if o.seed.len == 0 then upgrade_seed() else o.seed
+    let token = "UPGRADE {dev} {d.model} {d.serial} {seed}"
+    say(mut lg, "Upgrade {d.model}, serial {d.serial} ({size_text(d.target.bytes)}, {dev}) from {old.commit} to {new.commit}, keeping your files?")
+    say(mut lg, "To upgrade, type this line exactly; anything else cancels:")
+    say(mut lg, token)
+    flush_log(mut lg)
+    var typed = o.confirm
+    if o.confirm.len == 0 {
+        typed = answer(mut lg, "") else |_| ""
+    }
+    if typed != token {
+        return stop(mut lg, "pax-install: upgrade cancelled before writes: the confirmation was not the line above")
+    }
+    // The writes. The record first.
+    let dir = "{TARGET_ROOT}{MANIFEST_DIR}"
+    if !fs_exists(dir) { fs_create_dir_mode(dir, 493) else |_| { return stop(mut lg, "pax-install: upgrade stopped: {dir}") } }
+    var n = 1
+    while fs_exists("{dir}/upgrade-{n}.txt") { n += 1 }
+    let tlog = "{dir}/upgrade-{n}.txt"
+    durable_text(tlog, "PAX upgrade log {tlog}\nstick log {lg.path}\nfrom {old.commit} ({from})\nto {new.commit}\n") else |_| {
+        return stop(mut lg, "pax-install: upgrade stopped: {tlog} could not be written")
+    }
+    say(mut lg, "Target log: {tlog}")
+    var mark = copy new
+    mark.rows = List[Row]()
+    if !resuming {
+        put_text("{dir}/previous", manifest_text(old), 420) else |_| { return stop(mut lg, "pax-install: upgrade stopped: {dir}/previous") }
+    }
+    put_text("{dir}/upgrading", manifest_text(mark), 420) else |_| { return stop(mut lg, "pax-install: upgrade stopped: {dir}/upgrading") }
+    fs_sync_dir(dir) else |_| {}
+    say(mut lg, "phase record: durable ({dir}/upgrading)")
+    flush_up(mut lg, tlog)
+    let start = os_clock_ns()
+    var done = 0
+    for a in p.acts {
+        let dest = "{TARGET_ROOT}{a.path}"
+        var ok = true
+        if a.op == "mkdir" {
+            fs_create_dir_mode(dest, 448) else |_| { ok = false }
+            if ok && (a.row.uid != 0 || a.row.gid != 0) { fs_set_owner(dest, a.row.uid, a.row.gid, false) else |_| { ok = false } }
+            if ok { fs_set_mode(dest, a.row.mode) else |_| { ok = false } }
+        } else if a.op == "write" || a.op == "replace" {
+            put_file(a.path, dest, a.row) else |e| { say(mut lg, "{a.op} {a.path}: {e}"); ok = false }
+        } else if a.op == "beside" {
+            put_file(a.path, "{dest}.pax-new", a.row) else |e| { say(mut lg, "beside {a.path}: {e}"); ok = false }
+        } else if a.op == "link" || a.op == "relink" {
+            let t = str_from_utf8(fs_read_link(a.path) else |_| List[byte]()) else |_| ""
+            if t.len == 0 { ok = false } else { put_link(t, dest) else |_| { ok = false } }
+        } else if a.op == "delete" {
+            fs_remove(dest) else |_| { ok = false }
+        } else if a.op == "rmdir" {
+            fs_remove_dir(dest) else |_| { (mut p.dropped_kept).push("{a.path} (a directory not empty)") }
+        }
+        if !ok {
+            return stop(mut lg, "pax-install: upgrade stopped at {a.op} {a.path}; run pax-install --upgrade again from this stick to finish")
+        }
+        done += 1
+        note(mut lg, "done {a.op} {a.path}")
+        if done % 100 == 0 {
+            say(mut lg, "upgrade: {done} of {p.acts.len} done")
+            flush_up(mut lg, tlog)
+        }
+    }
+    for t in p.texts {
+        put_text("{TARGET_ROOT}{t[0]}", t[1], 420) else |_| { return stop(mut lg, "pax-install: upgrade stopped at {t[0]}; run pax-install --upgrade again from this stick to finish") }
+        note(mut lg, "done text {t[0]}")
+    }
+    say(mut lg, "phase root: durable ({p.acts.len} path(s), {p.texts.len} text(s), {(os_clock_ns() - start) / 1000000} ms)")
+    flush_up(mut lg, tlog)
+    for e in p.esp {
+        let (status, _t) = tool("{o.tools}/paxfat", ["--offset", "{ESP_START}", "replace", dev, e[0], e[1]], work, "esp-replace")
+        if status != 0 {
+            return stop(mut lg, "pax-install: upgrade stopped: paxfat replace {e[1]} exited {status}; run pax-install --upgrade again from this stick to finish")
+        }
+        say(mut lg, "phase esp {e[1]}: durable")
+    }
+    if p.bios {
+        let (status, _t) = tool("{o.tools}/limine", ["bios-install", dev, "3"], work, "upgrade-limine")
+        if status != 0 { return stop(mut lg, "pax-install: upgrade stopped: limine bios-install exited {status}; run pax-install --upgrade again from this stick to finish") }
+        say(mut lg, "phase limine: durable")
+    }
+    flush_up(mut lg, tlog)
+    // The manifest last: the new image's rows, the generated ones as written.
+    var m = copy new
+    for i in 0..m.rows.len {
+        if m.rows[i].kind == "g" {
+            let t = target_row(m.rows[i].path) else |_| absent_row(m.rows[i].path)
+            m.rows[i].digest = t.digest
+            m.rows[i].mode = t.mode
+            m.rows[i].size = t.size
+        }
+    }
+    m.source = "pax-install --upgrade from {old.commit}"
+    put_text("{dir}/manifest", manifest_text(m), 420) else |_| { return stop(mut lg, "pax-install: upgrade stopped: {dir}/manifest; run pax-install --upgrade again from this stick to finish") }
+    fs_remove("{dir}/upgrading") else |_| {}
+    if fs_exists("{dir}/previous") { fs_remove("{dir}/previous") else |_| {} }
+    fs_sync_dir(dir) else |_| {}
+    say(mut lg, "phase manifest: durable ({dir}/manifest, {m.rows.len} paths)")
+    say(mut lg, "Upgrade complete: {dev} holds {new.commit}; {p.kept.len} of your changed file(s) kept, {besides} new version(s) beside them as .pax-new.")
+    flush_up(mut lg, tlog)
+    let s = answer(mut lg, "Type reboot to reboot now or poweroff to power off; anything else leaves the running system up: ") else |_| ""
+    flush_up(mut lg, tlog)
+    if s == "reboot" || s == "poweroff" {
+        let argv = if s == "reboot" then ["/bin/reboot"] else ["/bin/reboot", "-p"]
+        let child = os_spawn(argv) else |e| { eprint("pax-install: {s}: {e}"); return 1 }
+        let status = os_wait(child) else |e| { eprint("pax-install: {s}: {e}"); return 1 }
+        return status
+    }
+    0
+}

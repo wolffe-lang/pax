@@ -5,6 +5,8 @@
 //! px78: only a disk on the install allow-list is ever a target (allow.lu);
 //! `--check` prints every disk's verdict and writes nothing; the stick's
 //! install log records the run.
+//! px93: `--upgrade` puts the running stick's image over the install the
+//! upgrade entry mounted at /mnt/target, the user's files kept (upgrade.lu).
 
 use std.x.crypto.sha2
 
@@ -43,7 +45,7 @@ fn options(args: List[str]) -> Options ! {invalid} {
         if seen[key] else false { return invalid }
         seen[key] = true
         i += 1
-        if key == "--inventory" || key == "--dry-run" || key == "--install" || key == "--check" {
+        if key == "--inventory" || key == "--dry-run" || key == "--install" || key == "--check" || key == "--upgrade" {
             if o.mode != "guided" { return invalid }
             o.mode = key
             continue
@@ -71,6 +73,12 @@ fn options(args: List[str]) -> Options ! {invalid} {
     }
     if (o.mode == "guided" || o.mode == "--check") &&
         (o.target.len != 0 || o.user.len != 0 || o.games.len != 0 || o.confirm.len != 0) {
+        return invalid
+    }
+    // px93: the upgrade names its target by the allow-list alone; a
+    // scripted run gives the seed and the confirmation line together.
+    if o.mode == "--upgrade" &&
+        (o.target.len != 0 || o.user.len != 0 || o.games.len != 0 || o.preview || (o.confirm.len == 0) != (o.seed.len == 0)) {
         return invalid
     }
     o
@@ -113,7 +121,7 @@ fn stop(mut lg: Log, line: str) -> int {
 fn main() -> int {
     let o = options(env_args()) else |_| {
         eprint(
-            "usage: pax-install [--inventory | --check | --dry-run | --install --ext2-preview --confirm TOKEN] [--target NAME --seed TEXT --user NAME --games yes|no] [--allow-list FILE] [--source DIR --payload DIR --tool-dir DIR]",
+            "usage: pax-install [--inventory | --check | --dry-run | --install --ext2-preview --confirm TOKEN | --upgrade [--seed TEXT --confirm LINE]] [--target NAME --seed TEXT --user NAME --games yes|no] [--allow-list FILE] [--source DIR --payload DIR --tool-dir DIR]",
         )
         return 2
     }
@@ -128,6 +136,7 @@ fn main() -> int {
     // Scratch before the inventory and the snapshot (execute_plan's note).
     let work = "/tmp/pax-install-{os_pid()}"
     fs_create_dir_mode(work, 448) else |_| { eprint("pax-install: scratch {work}"); return 1 }
+    if o.mode == "--upgrade" { return upgrade_main(o, work) } // px93
     let ts = inventory() else |e| match e {
         denied => { return 1 }, // px87 (pax#266): open_disk named the node and why
         _ => { eprint("pax-install: inventory: {e}"); return 1 },
