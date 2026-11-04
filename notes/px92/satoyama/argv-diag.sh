@@ -10,14 +10,12 @@ echo "== the PAX-built binary, run on Linux"
 file pax-built-px92args 2>/dev/null | cut -c1-200; sha256sum pax-built-px92args
 ./pax-built-px92args one two; echo "status $?"
 export WOLF_STD=/usr/share/wolf/compiler-std PATH=/usr/bin:/bin
-mkdir -p "$G/lin" && cd "$G/lin"
-cp "$G/px92args.lu" .
-printf 'fn main() {\n    let a = env_args()\n    print("count {a.len}")\n}\n' > count.lu
+rm -rf "$G/lin"; mkdir -p "$G/lin/a" "$G/lin/c"   # one program per directory: a directory's .lu files are one module (D32)
+cp "$G/px92args.lu" "$G/lin/a/"
+printf 'fn main() {\n    let a = env_args()\n    print("count {a.len}")\n}\n' > "$G/lin/c/count.lu"
 echo "== built on Linux by the dev image's toolchain"
 wolf --version | head -1
-wolf build px92args.lu; echo "build status $?"
-wolf build count.lu; echo "build status $?"
-sha256sum px92args count
-./px92args one two; echo "status $?"
-./count one two; echo "status $?"
-echo "== the PAX-built and Linux-built binaries: $(cmp -s px92args "$G/pax-built-px92args" && echo identical || echo differ)"
+(cd "$G/lin/a" && wolf build px92args.lu; echo "build status $?"; sha256sum px92args; ./px92args one two; echo "status $?")
+(cd "$G/lin/c" && wolf build count.lu; echo "build status $?"; ./count one two; echo "status $?")
+cp "$G/lin/c/count.lu" "$G/count.lu"
+echo "== the PAX-built and Linux-built binaries: $(cmp -s "$G/lin/a/px92args" "$G/pax-built-px92args" && echo identical || echo differ)"
