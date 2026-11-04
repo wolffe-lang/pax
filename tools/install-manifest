@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""px93: an install manifest from a stick's archive (user/install/manifest.lu's lines).
+
+    tools/install-manifest STICK.img NAME      the baseline for installs made from STICK
+    tools/install-manifest --cpio ARCHIVE KERNEL NAME   the same from an archive and its kernel
+
+The stick's ESP is read with mtools (`mcopy`, a black box): /boot/pax and
+/boot/initramfs.cpio. The archive is the live tree the stick's installer
+copied to the root; its rows are the ones pax-install --upgrade's own walk
+lists (manifest.lu's `listed`): never /home, /root, /dev, /proc, /sys,
+/tmp, /mnt, /lost+found, /usr/share/pax-install or /etc/pax-install; the
+six installer-written paths marked `g` with digest `-` (their text is the
+install's, not the archive's). The header names the image: the commit in
+/etc/pax-release's kernel row, the kernel's sha256, /etc/pax-release's and
+/etc/pax-files.sha256's sha256s; `source` names the stick and its sha256.
+Written on stdout. No network, no device, nothing installed.
+"""
+from pathlib import Path
+import hashlib
+import struct
+import subprocess
+import sys
+import tempfile
+
+SKIP = ['/dev', '/proc', '/sys', '/tmp', '/mnt', '/home', '/root', '/lost+found', '/usr/share/pax-install', '/etc/pax-install']
+GENERATED = {'/boot/limine/limine.conf', '/etc/fstab', '/etc/group', '/etc/passwd', '/etc/pax-login', '/etc/pax-run'}
+
+
+def sha(b):
+    return hashlib.sha256(b).hexdigest()
+
+
+def listed(path):
+    return path != '/' and not any(path == t or path.startswith(t + '/') for t in SKIP)
+
+
+def read_cpio(blob):
+    rows = {}
+    offset = 0
+    while True:
+        h = blob[offset:offset + 110]
+        assert h[:6] == b'070701', 'not a newc archive'
+        f = [int(h[i:i + 8], 16) for i in range(6, 110, 8)]
+        name = blob[offset + 110:offset + 110 + f[11] - 1].decode()
+        start = (offset + 110 + f[11] + 3) & ~3
+        data = blob[start:start + f[6]]
+        offset = (start + f[6] + 3) & ~3
+        if name == 'TRAILER!!!':
+            return rows
+        name = name[2:] if name.startswith('./') else name
+        if name in ('', '.'):
+            continue
+        rows['/' + name] = (f[1], f[2], f[3], data)
+
+
+def esp_offset(img):
+    with open(img, 'rb') as f:
+        f.seek(512)
+        h = f.read(92)
+        assert h[:8] == b'EFI PART', 'no GPT'
+        f.seek(struct.unpack_from('<Q', h, 72)[0] * 512)
+        e = f.read(128)
+    return struct.unpack_from('<Q', e, 32)[0] * 512
+
+
+def esp_file(img, off, path, scratch):
+    out = Path(scratch) / Path(path).name
+    subprocess.run(['mcopy', '-n', '-i', f'{img}@@{off}', '::' + path, str(out)], check=True,
+                   env={'MTOOLS_SKIP_CHECK': '1', 'PATH': '/usr/bin:/bin'})
+    return out.read_bytes()
+
+
+def manifest(archive, kernel, source):
+    rows = read_cpio(archive)
+    release = rows['/etc/pax-release'][3]
+    commit = 'unknown'
+    for line in release.decode().splitlines():
+        w = line.split()
+        if len(w) == 3 and w[0] == 'kernel':
+            commit = w[1]
+    files = rows['/etc/pax-files.sha256'][3] if '/etc/pax-files.sha256' in rows else b''
+    out = ['pax-install manifest v1', f'commit {commit}', f'kernel {sha(kernel)}', f'release {sha(release)}',
+           f'files {sha(files) if files else "-"}', f'source {source}']
+    paths = sorted((p for p in rows if listed(p)), key=lambda p: p.encode().split(b'/'))
+    if '/etc/pax-login' not in rows:
+        paths.append('/etc/pax-login')
+    for p in paths:
+        mode, uid, gid, data = rows.get(p, (0o100644, 0, 0, b''))
+        kind = {0o040000: 'd', 0o120000: 'l', 0o100000: 'f'}.get(mode & 0o170000)
+        assert kind, f'{p}: a file kind the installer refuses'
+        if kind == 'f' and p in GENERATED:
+            out.append(f'g {mode & 0o7777:04o} {uid} {gid} 0 - {p}')
+        elif kind == 'd':
+            out.append(f'd {mode & 0o7777:04o} {uid} {gid} 0 - {p}')
+        else:
+            out.append(f'{kind} {mode & 0o7777:04o} {uid} {gid} {len(data)} {sha(data)} {p}')
+    return '\n'.join(out) + '\n'
+
+
+def main(argv):
+    if len(argv) == 4 and argv[0] == '--cpio':
+        sys.stdout.write(manifest(Path(argv[1]).read_bytes(), Path(argv[2]).read_bytes(), argv[3]))
+        return 0
+    if len(argv) != 2:
+        raise SystemExit(__doc__)
+    img = Path(argv[0])
+    with tempfile.TemporaryDirectory(prefix='px93-manifest-', dir=None) as scratch:
+        off = esp_offset(img)
+        kernel = esp_file(img, off, '/boot/pax', scratch)
+        archive = esp_file(img, off, '/boot/initramfs.cpio', scratch)
+    with open(img, 'rb') as f:
+        digest = hashlib.file_digest(f, 'sha256').hexdigest()
+    sys.stdout.write(manifest(archive, kernel, f'{argv[1]} ({img.name} sha256 {digest})'))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
