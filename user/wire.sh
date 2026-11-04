@@ -8,6 +8,7 @@
 TOKEN=@TOKEN@
 OFF=@OFF@
 out=/tmp/wire.txt
+mkdir -p /tmp # the root is an archive of files: no /tmp until one is made
 echo "wire: waiting for the lease (kernel/dhcp, /var/lib/dhcp/pax.lease)"
 n=0
 while [ ! -e /var/lib/dhcp/pax.lease ] && [ "$n" -lt 60 ]; do
