@@ -36,4 +36,5 @@ IMAGE_YEW_REV=0ccb2c67661a2dd789b5ce86180d592370a79c31
 IMAGE_BORE_REV=ff5396aded1ea37a3dbd321c2c625d30359a8e19
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
-IMAGE_SCENT_REV=81d761d6d3b3c32f83a7b54801728088afea245a
+# px97: scent trunk eb888dfc, the sweep's; red (C5) until the scent pin moves.
+IMAGE_SCENT_REV=eb888dfc09cba931a747cc59c7c44ab549bd9997
