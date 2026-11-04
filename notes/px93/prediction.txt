@@ -1,0 +1,61 @@
+px93 prediction, written 2026-11-04 before the first change and before any guest ran.
+
+Base: pax trunk 9c88ec8a (5da8daaf is its ancestor; nothing newer on trunk). Branch px93.
+
+The coordinator's two additions bind: R-px93-D (the upgrade's new image is the dev variant, with wolf
+0.2.35, its musl sysroot and compiler-std; a release-to-dev upgrade adds them as new files) and R-px93-E
+(speed: the upgrade, the KVM rows, the staged stick and a hand-back first; the note, the plant, the PR
+and the audit after; one baseline, 9c88ec8a; one Limine mechanism; refusal rows at their minimum).
+
+The design I expect to hold:
+- The mechanism (R-px93-1): the stick's second Limine entry, "PAX: upgrade the installed system", has
+  `cmdline: quiet pax.upgrade` and a second module, `boot():/pax/install-targets`: the same file the
+  installer reads. Under that word alone kernel/fstab reads the module, finds the one disk whose model
+  and serial a line names, takes its GPT partition 2 at sector 135168 only when its ext2 label is
+  pax-root, and mounts it read-write at /mnt/target (made in the memory tree). The default entry has
+  neither, so it never mounts the 860. PAX has no FAT driver, so the ESP is not mounted: pax-install
+  writes it through the disk's node at its offset with paxfat, as a fresh install does.
+- The manifest: /etc/pax-install/manifest, one line a path (kind, mode, uid, gid, size, sha256, path),
+  /home never listed, the six installer-generated paths marked `g`, and the identity: the commit, the
+  kernel's sha256, the sha256 of /etc/pax-release and of /etc/pax-files.sha256. A running installer
+  cannot know its stick's own sha256 (the stick carries its allow-list line and its logs), so the
+  stick's sha256 goes in the log and the README, not in the identity (R-px93-2).
+- The baseline: tools/install-manifest reads the 9c88ec8a stick's ESP and its /boot/initramfs.cpio
+  and applies the installer's own walk (the excluded trees, the games marker); committed under
+  user/install/baselines/ and carried in /usr/share/pax-install/baselines/. Matched by the ESP's
+  /boot/pax sha256 and the root's /etc/pax-release sha256 together.
+- paxfat replace: red first (an unknown command), then a new chain written first, the directory
+  entry moved in one sector, the old chain freed last.
+
+The rows (KVM, satoyama slot A, px78-ubuntu:1, copies of each stick):
+- U0, the default entry: the upgrade stick's live entry with the target attached writes nothing to it
+  and /mnt/target is absent (no `upgrade:` line).
+- U1, the old install: 9c88ec8a's staged stick installs onto an 860-shaped target (as px92's legs).
+- U2, the user state, typed into the installed system: files in /home/wolf, a den repository with
+  three commits, /etc/shrc edited, /etc/mine.conf, /usr/local/bin/hello, /etc/motd deleted.
+- U3, the upgrade: the upgrade entry chosen in Limine's menu (Down, Enter, seen by its green
+  countdown line), root, `pax-install --upgrade`, the plan naming 9c88ec8a's baseline, the confirmation
+  `UPGRADE /dev/sdc Samsung SSD 860 <serial> <seed>` typed. I expect: every /usr/bin and
+  /usr/lib/wolf-musl file written new (a few hundred), most /bin programs replaced only where their
+  bytes differ (the release and dev variants share most of /bin, so most are equal), /etc/shrc kept with
+  /etc/shrc.pax-new beside it (the dev lines), /etc/motd written again (absent: written), /etc/fstab and
+  limine.conf already equal to their regenerated text (unchanged), the accounts kept and nothing
+  appended (the same system accounts), /boot/pax replaced on the ESP and in the root.
+- U4, after: every user file byte-identical (a host tree digest), `den log` the same lines, every
+  shipped file equal to the new manifest, the installed system boots with `kernel: <head>`.
+- U5, the compiler (R-px93-D): /usr/bin/wolf builds a program printing env_args() and it prints the
+  same two arguments as the same program built by wolf 0.2.35 on Linux.
+- U6, idempotence: the second run says nothing to change and writes no file (the tree digest equal;
+  only the superblock's mount fields move).
+- U7, a power cut: QEMU killed after the first hundred writes, the stick booted again, the upgrade
+  re-run: it completes from the in-progress record and U4's checks hold. e2fsck -fn may then report
+  what a cut leaves on an ext2 without a journal (an unreferenced inode or a bitmap count); I expect
+  the files themselves to be right and say what e2fsck says.
+- U8, refusals by name: a wrong serial on the stick's list (the kernel mounts nothing, pax-install
+  says the disk is not on the list); the confirmation mistyped (cancelled, nothing written). The other
+  three (a non-PAX disk, no matching baseline, too little space) at the planner's unit level only, if
+  time is short (R-px93-E).
+- Every other disk's witness unchanged over every boot.
+
+Times (satoyama at 100 C, KVM): each boot of a stick 40-90 s to its login; the upgrade 60-240 s
+from the confirmation; the whole leg 20-40 min. The dev stick near 1.1 GB (the dev archive 545 MB).
