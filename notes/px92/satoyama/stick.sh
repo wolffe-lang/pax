@@ -21,7 +21,7 @@
 set -uo pipefail
 L=/home/mfwolffe/lanes/px92
 SLOT=$1 HEAD=$2 SERIAL=$3 CHUNK=$4
-case $SLOT in A) CPUS=0-3,8-11 ;; B) CPUS=4-7,12-15 ;; AB) CPUS=0-15 ;; ABA) CPUS=0-3,8-11 ;; *) echo "slot A, B, AB or ABA (both locks; ABA on slot A's CPUs)"; exit 2 ;; esac
+case $SLOT in A) CPUS=0-3,8-11 ;; B) CPUS=4-7,12-15 ;; AB) CPUS=0-15 ;; ABA) CPUS=0-3,8-11 ;; NOLOCK-B) CPUS=4-7,12-15 ;; *) echo "slot A, B, AB or ABA (both locks; ABA on slot A's CPUs)"; exit 2 ;; esac
 short=${HEAD:0:8}
 P=/home/mfwolffe/lanes/satoyama-env/bin/podman
 export PATH=/home/mfwolffe/lanes/satoyama-env/bin:$PATH TMPDIR=$L/tmp
@@ -251,7 +251,12 @@ devlegs_prep() {
   [ -f "$L/legs/mpx6/metal/target-after.img" ]
 }
 
-if [ "$SLOT" = AB ] || [ "$SLOT" = ABA ]; then
+if [ "$SLOT" = NOLOCK-B ]; then
+  # The maintainer's exception for the dev stick's take only (2026-11-04, through the coordinator): no satoyama
+  # lock, slot B's CPUs, beside vc17 (which holds both locks and runs on 0-3,8-11); a sensor log beside the take.
+  printf "%s px92 %s: the maintainer's exception, no locks, slot B's CPUs (%s), beside vc17\n" "$(ts)" "$CHUNK" "$CPUS"
+  ( while kill -0 $$ 2>/dev/null; do printf '%s ' "$(ts)"; sensors 2>/dev/null | grep -E '^(Package id 0|Core [0-9]+):' | awk '{printf "%s%s %s; ", $1, $2, $3}'; echo; sleep 30; done ) > "$L/logs/sensors-$CHUNK.log" 2>&1 &
+elif [ "$SLOT" = AB ] || [ "$SLOT" = ABA ]; then
   # The maintainer's ruling (2026-11-04): one heavy job at a time on satoyama, both locks, A outside then B.
   exec 8>/home/mfwolffe/lanes/satoyama-A.lock
   printf '%s px92 %s: waiting on satoyama-A.lock (one flock -w 21600), then B\n' "$(ts)" "$CHUNK"
@@ -292,7 +297,7 @@ case $CHUNK in
     ;;
   *) echo "CHUNK is build, legs or dev"; exit 2 ;;
 esac
-flock -u 9; exec 9>&-
+[ "$SLOT" = NOLOCK-B ] || { flock -u 9; exec 9>&-; }
 { [ "$SLOT" = AB ] || [ "$SLOT" = ABA ]; } && { flock -u 8; exec 8>&-; }
 printf '%s px92 %s: satoyama-%s lock(s) RELEASED\n' "$(ts)" "$CHUNK" "$SLOT"
 printf '%s CHUNK %s DONE %s\n' "$(ts)" "$CHUNK" "$short"
