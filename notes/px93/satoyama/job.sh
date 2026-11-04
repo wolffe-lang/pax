@@ -168,6 +168,10 @@ section() { # legs-a|legs-d|legs-x: one of upgrade.py's three sections against t
   step "$1" leg "${1#legs-}" "$L/sout-$short/pax-upgrade-kasumi-$short.img" "${ROWS:-$rows}" "$args"
 }
 
+# PX93_HELD=1: the caller (rec-gauntlet.sh under gauntlet-record.sh) holds both locks for the whole take.
+if [ "${PX93_HELD:-}" = 1 ]; then
+  printf '%s px93 %s %s: both locks held by the caller on %s (CPUs %s)\n' "$(ts)" "$CHUNK" "$short" "$HOST" "$CPUS"
+else
 exec 8>"$LOCK1"
 printf '%s px93 %s %s: waiting on %s (flock -w 21600), then %s\n' "$(ts)" "$CHUNK" "$short" "$LOCK1" "$LOCK2"
 flock -w 21600 8 || { echo "$(ts) the first lock wait timed out"; exit 4; }
@@ -175,7 +179,8 @@ printf '%s px93 %s: %s acquired; waiting on %s\n' "$(ts)" "$CHUNK" "$LOCK1" "$LO
 exec 9>"$LOCK2"
 flock -w 21600 9 || { echo "$(ts) the second lock wait timed out"; exit 4; }
 printf '%s px93 %s: both locks acquired on %s (CPUs %s)\n' "$(ts)" "$CHUNK" "$HOST" "$CPUS"
-if [ -e "$L/STOP-$HOST" ]; then
+fi
+if [ "${PX93_HELD:-}" != 1 ] && [ -e "$L/STOP-$HOST" ]; then
   flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
   echo "$(ts) px93 $CHUNK $short: $L/STOP-$HOST says stand down; both locks RELEASED at once"; exit 0
 fi
@@ -284,6 +289,8 @@ case $CHUNK in
   *) echo "CHUNK is red, red-text, red-verify, units, build, legs-a, legs-d, legs-x, stick or gauntlet-1..3"; exit 2 ;;
 esac
 sensors > "$L/runs/$CHUNK-$short-sensors-end.txt" 2>&1 || true
-flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
-printf '%s px93 %s: both locks RELEASED on %s\n' "$(ts)" "$CHUNK" "$HOST"
+if [ "${PX93_HELD:-}" != 1 ]; then
+  flock -u 9; exec 9>&-; flock -u 8; exec 8>&-
+  printf '%s px93 %s: both locks RELEASED on %s\n' "$(ts)" "$CHUNK" "$HOST"
+fi
 printf '%s CHUNK %s DONE %s\n' "$(ts)" "$CHUNK" "$short"
