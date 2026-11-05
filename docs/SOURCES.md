@@ -1887,3 +1887,23 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
   the uapi errno headers (`kernel/user`'s `NEG_EBADF`, `NEG_EFAULT`); Limine's entry key `cmdline` is px15's row
   (`tests/mpx3-user.d/limine-quiet.conf`, as `boot/limine-initramfs-quiet.conf`).
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
+
+## px99 — wolf lsp on PAX
+
+- **The program under test**, read as a program: wolf-lang's `crates/wolf_lsp` and the driver's `lsp` entry at the
+  `v0.2.36` tag (`5adf3d91`, `user/wolf.pin`'s), and the `lsp-server` 0.10.0 crate's stdio transport and framing
+  (its reader, writer and dropper threads; `Content-Length` headers). wolf-lsp's `lspconf` scripts and recorded
+  transcripts at the same compiler pin: `transcripts/diagnostics/overlay-unsaved.jsonl`'s `initialize` answer is
+  the capabilities `tests/mpx5-lsp.d/rows.py` holds.
+- **An editor's client**, read for how it starts and watches a server: sagitta's `src/mod/lsp/client.c` (the
+  `wolf` row: argv `wolf lsp`) and `src/edit/job.c` (three pipes and an exec-status pipe, `fork`, `setpgid`, the
+  read ends non-blocking, a group kill), the C editor yew ports.
+- **The LSP 3.17 specification**: the base protocol's framing, the lifecycle (`initialize`, `initialized`,
+  `shutdown`, `exit` and its exit code), `textDocument/didOpen`, `didChange` (full text), `publishDiagnostics`.
+- **The man pages**: pipe(2), fork(2), execve(2), dup(2), poll(2), wait4(2), setpgid(2), kill(2), sigaction(2)
+  (SA_RESTORER, SA_NOCLDSTOP), signal(7) (SIGPIPE, EPIPE), clock_gettime(2); the uapi headers' numbers and layouts
+  (`asm/signal.h`, `asm-generic/poll.h`, `asm-generic/fcntl.h`, `linux/time.h`): `user/elf/lspc.c`.
+- **Black-box behaviour of Linux**: the same client and server under `strace -f` (strace 6.8, Ubuntu 24.04) for the
+  calls the server makes, and every session's transcript in a throwaway container (`tools/linux-tree`).
+- No kernel change. No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no
+  libc's, editor's or LSP library's source but the program under test's transport.
