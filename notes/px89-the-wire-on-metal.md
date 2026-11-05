@@ -55,10 +55,10 @@ holds three probe commits (register read-backs) that are not part of this PR.
 - **Toolchain** wolf 0.2.35 by `kernel/wolf.pin` (`tools/fetch-wolf`'s digest check every build), Limine 12.9.1.
 - **Image** `localhost/px89-dhcp:1`: px88's `localhost/px88-ubuntu:1` (px75's QEMU 8.2.2, OVMF, clang, lld 18,
   gcc; musl-tools, strace) plus Ubuntu 24.04's `dnsmasq-base` 2.91, `iproute2` and `tcpdump`
-  (`notes/px89/hasu/Containerfile`); the suites' Linux sides that run throwaway containers reach hasu's podman
-  through a lane-owned rootless service (`notes/px89/hasu/podman-service.sh`, `podman-remote`). CI's two jobs get dnsmasq-base and
+  (`notes/px89/rig/Containerfile`); the suites' Linux sides that run throwaway containers reach hasu's podman
+  through a lane-owned rootless service (`notes/px89/rig/podman-service.sh`, `podman-remote`). CI's two jobs get dnsmasq-base and
   iproute2 from the runner's apt and `modprobe tun`.
-- **Hosts** hasu block B (CPUs 6-11, `/dev/kvm`), `notes/px89/hasu/launch.sh` (both lock names, one `flock -w
+- **Hosts** hasu block B (CPUs 6-11, `/dev/kvm`), `notes/px89/rig/launch.sh` (both lock names, one `flock -w
   21600` each, detached, pid, log and exit marker). dnsmasq runs on a tap in the container's own network namespace
   (`/dev/net/tun`, CAP_NET_ADMIN: nothing of hasu's network is touched).
 - **kasumi** (read once, 2026-11-03 23:05Z): the cabled port is the I225-V, PCI `70:00.0`, `8086:15f3` rev 03,
@@ -71,7 +71,7 @@ holds three probe commits (register read-backs) that are not part of this PR.
 Commits (the prediction first; each phase's rows red before its code):
 
 - `fddfa54d` notes/px89/prediction.txt, before any change; `a64b1b99` the black boxes and the datasheets' digests;
-  `eb4d4f70` notes/px89/hasu: the container, the launcher, the probes
+  `eb4d4f70` notes/px89/rig: the container, the launcher, the probes
 - Phase A rows: `a69926e7` user/net/netstate.c; `4dd9ee41` tools/pcap-dhcp; `c0127021` tools/dhcp-wire;
   `388ed38a` tests/mpx4-dhcp (D0-D10); `95b85ff4` CI's mpx4-dhcp job; `08e7c2db` notes/px89/red: D1-D9 red at base
 - Phase A code: `60059340` boot/net.S; `704e8314` kernel/udp; `f78e4682` kernel/ip; `2ab17c2a` kernel/arp;
@@ -176,7 +176,7 @@ owner and its mode 644, and dnsmasq appends to it.
   (`notes/px89/logs/d5-lifted.txt`).
 - `a8ab4ae1`, the fix: dhcp-wire makes each log, mode 644, as the caller before dnsmasq opens it, and says in
   `account.txt` whether the caller can read it.
-- The CI mirror (`notes/px89/hasu/Containerfile.ci`, `ci-mirror-run.sh`, `probes/ci-mirror.sh`;
+- The CI mirror (`notes/px89/rig/Containerfile.ci`, `ci-mirror-run.sh`, `probes/ci-mirror.sh`;
   `notes/px89/logs/cimirror1.log`): the lane image with sudo and a user `runner`, uid 1001, with password-less sudo,
   as GitHub's runner has; the renew way's native BIOS boot run as runner, as CI runs it, one image for the three
   commits (only tests/ and tools/ differ). At the rebased head before the row (`0b5cb6b0`) D5 red in CI's own
@@ -215,12 +215,12 @@ the lease as a program reads it, and whether the router answered the kernel's ec
 | w3 | `1fde2d17` | **the stick qualified**: Q0-Q5 PASS on all four boots (BIOS, UEFI, each MSI-X and netpoll), after `3ba2a213` (kmain_session attaches USB disks), `75c85ddc` and `1fde2d17` (`mkdir -p /tmp`) |
 | w4 | `b6200d20` | the stick after the second rebase: the MSI-X stick's Q0-Q5 green on BIOS and UEFI, the netpoll twin red at Q0 alone (`MSI-X vector 83`: its word on a second `cmdline:` line after px87's `quiet`) |
 | w5 | `d8a51e49` | **the stick qualified again**: Q0-Q5 PASS on all four boots, the twin's word on the entry's own command line |
-| eng | — | the container engine inside a lane container (`notes/px89/hasu/eng-test.sh`): podman 5.8.9 client and server, one throwaway container: the gauntlet's Linux sides |
+| eng | — | the container engine inside a lane container (`notes/px89/rig/eng-test.sh`): podman 5.8.9 client and server, one throwaway container: the gauntlet's Linux sides |
 
 ### The metal leg (staged, not run)
 
-`tools/mkwire root` and `tools/mkwire stick` at `1fde2d17` on hasu (`notes/px89/hasu/wire-build.sh`), qualified by
-`notes/px89/hasu/wire-qualify.sh` (`notes/px89/logs/w3.rows`): a copy of the image as USB storage on qemu-xhci,
+`tools/mkwire root` and `tools/mkwire stick` at `1fde2d17` on hasu (`notes/px89/rig/wire-build.sh`), qualified by
+`notes/px89/rig/wire-qualify.sh` (`notes/px89/logs/w3.rows`): a copy of the image as USB storage on qemu-xhci,
 QEMU's 82576 on its user network, a server on the host for the TCP row, a SATA disk and an NVMe disk of 64 MiB of
 random bytes beside it; four boots (BIOS and UEFI; the stick, and its twin `pax-wire-netpoll.img` with `netpoll`
 on its command line so the controller is polled as the I225 will be). Every boot: Q0 the controller's line, Q1 the lease and
@@ -237,13 +237,13 @@ today (CachyOS's `lspci -nn` and `/sys/class/net`, read once; `notes/px89/blackb
 ### The plant and the gauntlet
 
 Both records are in the PR body (each at the head they name: this note is part of the gauntlet's head, so it cannot
-hold them). The gauntlet (`notes/px89/hasu/gauntlet.sh` under planning's `gauntlet-record.sh`, hasu block B, each
+hold them). The gauntlet (`notes/px89/rig/gauntlet.sh` under planning's `gauntlet-record.sh`, hasu block B, each
 step its own lock take): the plan job's self-tests; `mpx4-dhcp` and `mpx4-igb` on native BIOS and release UEFI
 (R-px89-9: BIOS and UEFI as item 5 asks; the full-matrix label and tier all cover the other legs); `mpx4-unix`,
 `mpx4-session`, `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-lobo` (its step in hasu's own network
 namespace, where its Linux side's container listens: R-px89-7), `mpx5-jobs` and `mpx3-shell` on the merge leg
 (native BIOS). The gauntlet's containers run the suites as root; CI's runner is not root, and
-`notes/px89/hasu/probes/ci-mirror-suites.sh` runs `mpx4-dhcp` and `mpx4-igb` whole as runner on the leg CI ran red
+`notes/px89/rig/probes/ci-mirror-suites.sh` runs `mpx4-dhcp` and `mpx4-igb` whole as runner on the leg CI ran red
 (its take is in the PR body). `kernel-as` is CI-only, a named `SKIP` line in the record (R-px89-8): it builds a second wolf from
 source with cargo, which the lane image does not have; the full-matrix run holds it. Those are the readers of every kernel path changed but 20 of kmain_sockets'
 (mpx3-boreutils, -console, -screen, -threads, -tree, -maps; mpx5-forks, -accounts, -lope, -pelt, -aspen, -den,
