@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -183,7 +183,7 @@ static void path(char *dst, i64 pid, int task, const char *leaf) {
     s = leaf; while (*s) dst[k++] = *s++;
     dst[k] = 0;
 }
-static void trace_status(void) {
+static i64 trace_status(void) {
     char name[80], buf[4096]; path(name, child, 0, "/status");
     i64 fd = call(2, (i64)name, 0, 0, 0, 0);
     dec("status.open", fd < 0 ? fd : 0);
@@ -212,6 +212,7 @@ static void trace_status(void) {
         break;
     }
     dec("status.tracer-is-parent", tracer == call(39, 0, 0, 0, 0, 0));
+    return tracer;
 }
 static void memory(void) {
     u64 value = peek("data.initial", PEEKDATA, DATA);
@@ -471,13 +472,13 @@ static void child_events(const char *mode) {
     int vf = equal(mode, "vfork-event") || equal(mode, "vfork-order");
     int clone = equal(mode, "clone-event");
     int child_first = equal(mode, "vfork-order");
-    ok("event.options", ptrace(SETOPTIONS, 0, vf ? 0x34 : clone ? 8 : 2));
+    if (!equal(mode, "seize-fork")) ok("event.options", ptrace(SETOPTIONS, 0, vf ? 0x34 : clone ? 8 : 2));
     resume(CONT, "event.parent.status");
     u64 target = 0;
     ok("event.child.message", ptrace(GETEVENTMSG, 0, (u64)&target));
     dec("event.child.valid", target != 0 && target != (u64)child);
     if (!target || target == (u64)child) fail("event.child.pid");
-    if (wait_other(target, "event.child.initial") != 0x137f) fail("event.child.initial");
+    if (wait_other(target, "event.child.initial") != (equal(mode, "seize-fork") ? 0x80057f : 0x137f)) fail("event.child.initial");
     if (vf) {
         if (!child_first) { ok("event.parent.resume", ptrace(CONT, 0, 0)); no_parent_event(); }
         cont_other(target);
@@ -506,6 +507,157 @@ static void child_events(const char *mode) {
     if (wait_child("event.parent.exit") != (37 << 8)) fail("event.parent.exit");
     int status;
     dec("event.echild", call(61, -1, (i64)&status, WALL | 1, 0, 0));
+}
+static volatile u64 control_flag, control_seen;
+static int control_ackfd;
+extern void trace_signal_recover(void), control_single_step(void), control_tf_after(void);
+__asm__(".global trace_signal_recover\ntrace_signal_recover:\nmov $37,%edi\nmov $60,%eax\nsyscall\nud2\n"
+        ".global control_single_step,control_tf_after\ncontrol_single_step:\npushfq\norq $0x100,(%rsp)\npopfq\nnop\ncontrol_tf_after:\nret\n");
+struct control_packet { i64 sig, code; u64 from, addr; };
+static void control_handler(int sig, struct siginfo *si, void *ctx) {
+    control_seen |= sig == 10 ? 1 : sig == 12 ? 2 : sig == 11 ? 4 : 8;
+    u64 *gregs = (u64 *)((unsigned char *)ctx + 40);
+    if (sig == 11) gregs[16] = (u64)trace_signal_recover;
+    if (sig == 5) gregs[17] &= ~0x100UL;
+    struct control_packet packet = { sig, si->code, si->fields[0], si->fields[0] };
+    call(1, control_ackfd, (i64)&packet, sizeof(packet), 0, 0);
+}
+static void control_action(int sig) {
+    struct { u64 handler, flags, restorer, mask; } action = {
+        (u64)control_handler, 0x14000004, (u64)trace_restorer, 0
+    };
+    if (call(13, sig, (i64)&action, 0, 8, 0)) done(111);
+}
+static void control_ack(int fd, int fault, int step) {
+    struct control_packet packet; u64 have = 0;
+    while (have < sizeof(packet)) {
+        i64 n = call(0, fd, (i64)((unsigned char *)&packet + have), sizeof(packet) - have, 0, 0);
+        if (n == -4) continue;
+        if (n <= 0) fail("control.ack.read");
+        have += n;
+    }
+    dec("control.ack.signal", packet.sig); dec("control.ack.code", packet.code);
+    if (step) dec("control.ack.next-rip", packet.addr == (u64)control_tf_after);
+    else if (fault) hex("control.ack.addr", packet.addr);
+    else {
+        dec("control.ack.sender-parent", (unsigned)packet.from == (unsigned)call(39, 0, 0, 0, 0, 0));
+        dec("control.ack.uid", (unsigned)(packet.from >> 32) == (unsigned)call(102, 0, 0, 0, 0, 0));
+    }
+}
+static void control_info(void) {
+    struct siginfo si; zero(&si, sizeof(si));
+    ok("control.getsiginfo", ptrace(GETSIGINFO, 0, (u64)&si));
+    dec("control.signal", si.signo); dec("control.code", si.code);
+    dec("control.sender-parent", (unsigned)si.fields[0] == (unsigned)call(39, 0, 0, 0, 0, 0));
+    dec("control.sender-target", (unsigned)si.fields[0] == (u64)child);
+    dec("control.sender-zero", (unsigned)si.fields[0] == 0);
+    dec("control.sender-uid", (unsigned)(si.fields[0] >> 32) == (unsigned)call(102, 0, 0, 0, 0, 0));
+}
+static int controlled_mode(const char *mode) {
+    return equal(mode, "attach") || equal(mode, "seize") || equal(mode, "replace-signal") ||
+           equal(mode, "fault-handler") || equal(mode, "untraced-db") || equal(mode, "seize-fork");
+}
+static void controlled(const char *mode) {
+    int fds[2]; ok("control.pipe", call(293, (i64)fds, 0, 0, 0, 0));
+    control_ackfd = fds[1]; control_flag = control_seen = 0;
+    child = call(57, 0, 0, 0, 0, 0);
+    if (child < 0) fail("control.fork");
+    if (child == 0) {
+        call(3, fds[0], 0, 0, 0, 0);
+        control_action(10); control_action(12); control_action(11); control_action(5);
+        char ready = 'R';
+        if (call(1, fds[1], (i64)&ready, 1, 0, 0) != 1) done(111);
+        if (equal(mode, "untraced-db")) { control_single_step(); done(37); }
+        if (equal(mode, "fault-handler")) {
+            if (call(101, TRACEME, 0, 0, 0, 0)) done(111);
+            call(62, call(39, 0, 0, 0, 0, 0), 19, 0, 0, 0);
+            __asm__ volatile("xor %%eax,%%eax; mov (%%rax),%%rax" ::: "rax", "memory");
+            done(111);
+        }
+        while (control_flag != 37) {
+            if (control_flag == 1) {
+                control_flag = 2;
+                if (equal(mode, "seize-fork")) role_fork();
+                i64 pid = call(39, 0, 0, 0, 0, 0);
+                call(234, pid, pid, 10, 0, 0);
+            }
+            __asm__ volatile("pause" ::: "memory");
+        }
+        u64 expected = equal(mode, "attach") ? 1 : equal(mode, "replace-signal") ? 2 : 0;
+        done(control_seen == expected ? 37 : 113);
+    }
+    call(3, fds[1], 0, 0, 0, 0);
+    char ready = 0;
+    if (call(0, fds[0], (i64)&ready, 1, 0, 0) != 1 || ready != 'R') fail("control.ready");
+    if (equal(mode, "untraced-db")) {
+        control_ack(fds[0], 0, 1);
+    } else if (equal(mode, "fault-handler")) {
+        stopped("control.initial.status");
+        resume(CONT, "control.fault.status"); siginfo();
+        ok("control.pass-fault", ptrace(CONT, 0, 11));
+        control_ack(fds[0], 1, 0);
+    } else {
+        int seized = equal(mode, "seize") || equal(mode, "seize-fork");
+        if (seized) {
+            dec("control.seize.bad-addr", ptrace(0x4206, 1, 0));
+            dec("control.seize.bad-options", ptrace(0x4206, 0, 0x80000000));
+            ok("control.seize", ptrace(0x4206, 0, equal(mode, "seize-fork") ? 2 : 0));
+            int status = 0;
+            dec("control.seize.nohang", call(61, child, (i64)&status, WALL | 1, 0, 0));
+            dec("control.running.getregs", ptrace(GETREGS, 0, (u64)&r));
+            ok("control.interrupt", ptrace(0x4207, 0, 0));
+        } else ok("control.attach", ptrace(ATTACH, 0, 0));
+        waitid_peek(); stopped("control.stop.status"); control_info();
+        if (!seized) dec("control.interrupt-unseized", ptrace(0x4207, 0, 0));
+        dec("control.attach-again", ptrace(ATTACH, 0, 0));
+        if (equal(mode, "seize-fork")) {
+            ok("control.start-fork", ptrace(POKEDATA, (u64)&control_flag, 1));
+            child_events(mode);
+            call(3, fds[0], 0, 0, 0, 0);
+            return;
+        }
+        if (equal(mode, "attach")) {
+            ok("control.inject-usr1", ptrace(CONT, 0, 10)); control_ack(fds[0], 0, 0);
+            ok("control.send-usr2", call(62, child, 12, 0, 0, 0));
+            stopped("control.usr2.status"); control_info();
+            ok("control.finish", ptrace(POKEDATA, (u64)&control_flag, 37));
+        } else if (equal(mode, "replace-signal")) {
+            ok("control.self-signal", ptrace(POKEDATA, (u64)&control_flag, 1));
+            resume(CONT, "control.self-signal.status"); control_info();
+            ok("control.finish", ptrace(POKEDATA, (u64)&control_flag, 37));
+        }
+        dec("control.detach.bad-signal", ptrace(17, 0, 65));
+        ok("control.detach", ptrace(17, 0, equal(mode, "replace-signal") ? 12 : 0));
+        if (equal(mode, "replace-signal")) control_ack(fds[0], 0, 0);
+        if (equal(mode, "seize")) {
+            dec("control.detached.getregs", ptrace(GETREGS, 0, (u64)&r));
+            dec("control.tracer-zero", trace_status() == 0);
+            char name[80]; path(name, child, 0, "/mem");
+            i64 fd = call(2, (i64)name, 2, 0, 0, 0); if (fd < 0) fail("control.mem.open");
+            u64 value = 37;
+            dec("control.mem.finish", call(18, fd, (i64)&value, 8, (u64)&control_flag, 0));
+            call(3, fd, 0, 0, 0, 0);
+        }
+    }
+    if (wait_child("control.exit.status") != (37 << 8)) fail("control.exit.status");
+    call(3, fds[0], 0, 0, 0, 0);
+}
+static int fault_mode(const char *mode) {
+    return equal(mode, "fault-segv") || equal(mode, "fault-ill") || equal(mode, "fault-fpe") || equal(mode, "fault-pass");
+}
+static void fault_rows(const char *mode) {
+    getregs(); r.rip = TEXT + (equal(mode, "fault-ill") ? 0x40 : equal(mode, "fault-fpe") ? 0x60 : 0x50);
+    r.orig_rax = ~0UL;
+    ok("fault.setregs", ptrace(SETREGS, 0, (u64)&r));
+    resume(CONT, "fault.status"); siginfo();
+    if (equal(mode, "fault-pass")) {
+        ok("fault.inject-term", ptrace(CONT, 0, 15));
+        if (wait_child("fault.passed.status") != 15) fail("fault.passed.status");
+    } else {
+        getregs(); hex("fault.rip", r.rip); r.rip = TEXT + 0x80;
+        ok("fault.recover", ptrace(SETREGS, 0, (u64)&r));
+        exit_tracee();
+    }
 }
 static void tracer_exit(const char *self, int exitkill) {
     if (call(39, 0, 0, 0, 0, 0) != 1) {
@@ -548,13 +700,16 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     if (argc == 2 && equal(argv[1], "role-fork")) role_fork();
     if (argc == 2 && equal(argv[1], "role-vfork")) role_vfork(argv[0]);
     if (argc == 2 && equal(argv[1], "role-clone")) role_clone();
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
+    if (controlled_mode(mode)) {
+        controlled(mode); text("trace.complete\n"); done(0);
+    }
     if (equal(mode, "exitkill") || equal(mode, "detach-exit")) {
         tracer_exit(argv[0], equal(mode, "exitkill"));
         text("trace.complete\n"); done(0);
     }
-    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall") && !event_mode(mode)) done(2);
+    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall") && !event_mode(mode) && !fault_mode(mode)) done(2);
     if (equal(mode, "notify") || equal(mode, "notify-syscall")) {
         struct { u64 handler, flags, restorer, mask; } action = {
             (u64)child_notice, 0x14000004, (u64)trace_restorer, 0
@@ -586,7 +741,8 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         getregs(); hex("event.exec.rip", r.rip);
         ok("exec.kill", ptrace(KILL, 0, 0));
         if (wait_child("kill.status") != 9) fail("kill.status");
-    } else if (event_mode(mode)) child_events(mode);
+    } else if (fault_mode(mode)) fault_rows(mode);
+    else if (event_mode(mode)) child_events(mode);
     else if (equal(mode, "errors")) errors();
     else if (equal(mode, "syscall") || equal(mode, "notify-syscall")) syscall_rows(equal(mode, "notify-syscall"));
     else if (equal(mode, "stops")) stops();

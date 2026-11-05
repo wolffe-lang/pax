@@ -23,6 +23,33 @@ trace_exit:
     syscall
     ud2
 
+/* Independently addressed synchronous faults; old core offsets stay fixed. */
+.org 0x40
+.global trace_ud
+trace_ud:
+    ud2
+.org 0x50
+.global trace_segv, trace_segv_at
+trace_segv:
+    xor %eax, %eax
+trace_segv_at:
+    mov (%rax), %rax
+.org 0x60
+.global trace_div, trace_div_at
+trace_div:
+    xor %edx, %edx
+    mov $1, %eax
+    xor %ecx, %ecx
+trace_div_at:
+    div %rcx
+.org 0x80
+.global trace_recover
+trace_recover:
+    mov $37, %edi
+    mov $60, %eax
+    syscall
+    ud2
+
 .section .data
 .balign 8
 .global trace_value
