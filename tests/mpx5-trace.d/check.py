@@ -11,10 +11,14 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall')
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'notify-syscall': (
+        ('sigchld-syscall-entry', 'syscall.entry.status=', 'syscall.entry.orig_rax='),
+        ('sigchld-syscall-exit', 'syscall.exit.status=', 'syscall.exit.orig_rax='),
+    ),
     'notify': (
         ('sigchld-exec', 'notify.options=', 'notify.exec code='),
         ('sigchld-exit', 'notify.second.status=', 'notify.exit-event code='),
