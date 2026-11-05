@@ -3,7 +3,7 @@
 # first when missing. launch.sh runs it as `ci-mirror-run.sh BLOCK IMGTREE TREE...`.
 set -uo pipefail
 L=/home/mfwolffe/lanes/px89
-P=/home/mfwolffe/lanes/hasu-env/bin/podman
+P=/home/mfwolffe/lanes/rig-env/bin/podman
 B=$1; shift
 case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; C) cpus=12-17 ;; esac
 if ! "$P" image exists localhost/px89-dhcp-ci:1; then

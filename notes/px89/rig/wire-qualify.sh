@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # px89: qualify the metal stick under QEMU (in the container): a COPY of
 # OUTDIR/pax-wire.img on qemu-xhci + usb-storage, written to (as the stick
-# is on kasumi), `-device igb` on QEMU's user-mode network (kasumi's
+# is on the metal target), `-device igb` on QEMU's user-mode network (the metal target's
 # I225-V on QEMU's 82576: the ring model they share), /pax/wire-target
 # naming a server this script runs at 127.0.0.1 (QEMU's 10.0.2.2), BIOS
 # and UEFI. Rows: Q1 the lease and resolv.conf in the record; Q2 the
@@ -9,10 +9,10 @@
 # server's line; Q4 the record on the copy's ESP, /pax/logs/wire-1.txt,
 # equal to what the screen showed; Q5 the machine's other disks (a SATA
 # disk on AHCI and an NVMe namespace, 64 MiB of random bytes each, as
-# kasumi has both) byte-identical after the boot: the script writes only
+# the metal target has both) byte-identical after the boot: the script writes only
 # the disk that holds the stick's token. Prints PASS/FAIL Qn per firmware and
 # stick: pax-wire.img (the 82576 by MSI-X) and pax-wire-netpoll.img
-# (`cmdline: netpoll`: polled every tick, as the I225 is on kasumi).
+# (`cmdline: netpoll`: polled every tick, as the I225 is on the metal target).
 set -uo pipefail
 O=$1
 . tools/lib.sh

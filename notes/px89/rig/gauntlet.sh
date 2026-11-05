@@ -56,7 +56,7 @@ one() { # name kvm/net opts -- cmd
     while [ "${1:-}" != -- ]; do opts+=("$1"); shift; done
     shift
     local f; f=$R/$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_').log
-    flock -w 21600 /home/mfwolffe/lanes/hasu-block-$B.lock flock -w 21600 /home/mfwolffe/lanes/hasu-$B.lock \
+    flock -w 21600 /home/mfwolffe/lanes/rig-block-$B.lock flock -w 21600 /home/mfwolffe/lanes/rig-$B.lock \
         env CTR_WD="$WT" CTR_ENV="-e PAX_REQUIRE_UEFI=1 -e PAX_REQUIRE_DHCP_WIRE=1" \
         bash "$S/ctr2.sh" "$B" "g-${HEAD:0:8}-$name" localhost/px89-dhcp:1 ${opts[@]+"${opts[@]}"} -- \
         bash -c 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); for c in "$@"; do echo "+ $c"; eval "$c" || exit $?; done; exit 0' px89 "${CMDS[@]}" \
@@ -78,7 +78,7 @@ suite() {
     mapfile -t CMDS < <(cmds_of "$s")
     [ "${#CMDS[@]}" -gt 0 ] || { echo "  no run: tests/ line in the $s job"; return 2; }
     # mpx4-lobo's Linux side (tools/lobo-session) runs its container on
-    # the engine's `--network host`, hasu's own namespace, and connects to
+    # the engine's `--network host`, the lane host's own namespace, and connects to
     # it at 127.0.0.1: the step must share that namespace (HOSTNET, no tap).
     local nets=NET=1
     case $s in mpx4-lobo) nets=HOSTNET=1 ;; esac

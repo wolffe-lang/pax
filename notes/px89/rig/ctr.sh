@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# px89: one container step on hasu (by copy of px88's notes/px88/hasu/ctr.sh).
+# px89: one container step on the lane host (by copy of px88's ctr.sh).
 #
 #   ctr.sh BLOCK NAME IMAGE [KVM=1] [NET=1] -- CMD...
 #
 # The lane directory is mounted at its own path, the command runs under
 # `taskset -c <the block's CPUs>` inside the container, `--memory 12g`,
-# the pids and process limits hasu-env/README.md names, no core files.
+# the pids and process limits rig-env/README.md names, no core files.
 # /dev/kvm only with KVM=1. NET=1 adds /dev/net/tun and CAP_NET_ADMIN
 # and CAP_SYS_ADMIN (the Linux reference sides unshare a network
 # namespace of their own; a tap inside the container's own network namespace: dnsmasq and the
@@ -13,7 +13,7 @@
 # Prints `END NAME exit=N` (indented: the gauntlet's step owns its END).
 set -uo pipefail
 L=/home/mfwolffe/lanes/px89
-P=/home/mfwolffe/lanes/hasu-env/bin/podman
+P=/home/mfwolffe/lanes/rig-env/bin/podman
 B=$1 N=$2 I=$3; shift 3
 case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; C) cpus=12-17 ;; *) echo "ctr.sh: BLOCK is A, B or C" >&2; exit 2 ;; esac
 kvm=0 net=0

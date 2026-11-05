@@ -3,7 +3,7 @@
 # locks (launch.sh runs this as `run.sh BLOCK NAME SHA [KVM=1] [NET=1] -- CMD...`).
 # The commit is checked out in a worktree of its own (never the live
 # tree: the lane rules, "Build from a commit"); the build directory is
-# build/NAME. Every git here passes -c commit.gpgsign=false (hasu's
+# build/NAME. Every git here passes -c commit.gpgsign=false (the lane host's
 # global config signs with the maintainer's key; nothing is committed
 # here, and the flag is passed anyway).
 set -uo pipefail

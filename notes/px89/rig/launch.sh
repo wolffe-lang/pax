@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# px89: start a job on hasu, detached, behind both of a block's locks (by
-# copy of px88's notes/px88/hasu/launch.sh).
+# px89: start a job on the lane host, detached, behind both of a block's locks (by
+# copy of px88's launch.sh).
 #
 #   launch.sh BLOCK NAME SCRIPT [ARG...]
 #
@@ -19,10 +19,10 @@ setsid -f bash -c '
     L=$1 B=$2 N=$3 S=$4; shift 4
     echo $$ > "$L/logs/$N.pid"
     {
-        echo "$(date -u +%FT%TZ) px89 $N: waiting for hasu-block-$B.lock, then hasu-$B.lock"
+        echo "$(date -u +%FT%TZ) px89 $N: waiting for rig-block-$B.lock, then rig-$B.lock"
         rc=0
-        flock -w 21600 /home/mfwolffe/lanes/hasu-block-$B.lock \
-            flock -w 21600 /home/mfwolffe/lanes/hasu-$B.lock \
+        flock -w 21600 /home/mfwolffe/lanes/rig-block-$B.lock \
+            flock -w 21600 /home/mfwolffe/lanes/rig-$B.lock \
             bash "$S" "$B" "$@" || rc=$?
         echo "$(date -u +%FT%TZ) px89 $N: released block $B; END $N exit=$rc"
         echo "$rc" > "$L/logs/$N.exit"
