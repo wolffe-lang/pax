@@ -279,6 +279,10 @@ pub fn exception(f: u64, vector: u64) -> u64 {
     let s = sched.self_slot()
     if sched.tracer_of(s) == 0 { return 0 }
     sched.trace_set_orig(s, 0xffffffffffffffff)
+    // A user-mode exception is beyond any previously completed syscall,
+    // including one which resumed directly from a blocking wait.
+    trace_state.set_phase(s, 0)
+    trace_state.set_finish_pending(s, 0)
     trace_state.set_stop_kind(s, 1)
     trace_state.set_event(s, 0)
     put_word(f, 19, word(f, 19) & !TF)
