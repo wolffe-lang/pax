@@ -438,6 +438,9 @@ static __attribute__((noreturn)) void role_clone(void) {
         if (!value) break;
         call(202, (i64)&thread_ctid, 0, value, 0, 0); /* clear-child-tid uses shared FUTEX_WAKE */
     }
+    /* Keep exit_group from racing the tracer's collection of the thread's
+       individual status: Linux otherwise may report the group's 37. */
+    __asm__ volatile("int3");
     done(37);
 }
 static int event_mode(const char *mode) {
@@ -492,6 +495,8 @@ static void child_events(const char *mode) {
         ok("event.parent.resume", ptrace(CONT, 0, 0));
         cont_other(target);
         if (wait_other(target, "event.child.exit") != (19 << 8)) fail("event.child.exit");
+        if (wait_child("event.parent.after-thread") != 0x57f) fail("event.parent.after-thread");
+        ok("event.parent.after-thread.resume", ptrace(CONT, 0, 0));
     } else {
         cont_other(target);
         if (wait_other(target, "event.child.exit") != (19 << 8)) fail("event.child.exit");
