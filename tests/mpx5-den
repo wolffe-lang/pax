@@ -635,13 +635,18 @@ for leg in $legs; do
     fi
     if [ -n "$iso$disk" ]; then
         # A shipped image: one console shell types the keys as root, then
-        # as `pax` under su, then leaves both shells.
+        # as `pax` under su, then leaves both shells. Before `su pax`, root
+        # turns pelt's friendly mode off the way a user does, a line in
+        # /etc/shrc: the console exports ENV=/etc/shrc and su keeps it, so
+        # pax's login shell (/bin/pelt, friendly by default when it is not
+        # started as `sh`) reads it before its first prompt and prompts `$ `.
         what=iso; [ -n "$disk" ] && what=disk
         id="$what $leg"
         log=$PAX_BUILD/mpx5-den-$what-$leg.serial.log
         rm -f "$log" "$log.verdict" "$log.typed"
         keys=$PAX_BUILD/mpx5-den-$what.keys
-        { grep -vx exit "$KEYS"; echo 'su pax'; grep -vx exit "$KEYS"; echo exit; echo exit; } > "$keys"
+        { grep -vx exit "$KEYS"; echo "echo 'set +o friendly' >> /etc/shrc"; echo 'su pax'; grep -vx exit "$KEYS"
+            echo exit; echo exit; } > "$keys"
         hargs=(--firmware "$leg" --serial "$log" --timeout 1800 --qemu -m --qemu 2048M --elf "$kelf"
             --marker 'halt|PANIC .*' --type "$keys" --prompt '$ ')
         hrc=0
