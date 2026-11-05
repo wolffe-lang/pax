@@ -38,14 +38,19 @@ holds three probe commits (register read-backs) that are not part of this PR.
   before and after, each commit's patch-id the same. The first rebase's only conflicts were README.md (trunk's
   Programs row kept, px89's network rows taken), CHANGELOG.md (px89's entry above px98's) and docs/SOURCES.md (px87's
   and px96's sections, then px89's); none of px98's other files is one px89 touches. The second had none: no file
-  px93 changes is one px89 changes. The two meet in one place: px93 adds an upgrade entry to
-  `boot/limine-usb.conf`, the configuration tools/mkwire's stick takes. mkwire's netpoll twin put its
-  `cmdline: netpoll` after every `module_path` line, which would have overridden that entry's `quiet pax.upgrade`; it
-  now puts it in the first entry alone (`2785deaa`; that entry's text is what it was, byte for byte). A stick built at
-  the head carries px93's entry, which mounts nothing: the stick's `/pax/install-targets` names no disk as shipped.
-  The staged stick (`f68505c6`) predates px93 and has no such entry. `notes/px89/rebase-map.txt` pairs each commit
-  with its twins: this note cites the last, and every run in its tables ran at the map's first column (the commit
-  before the rebases) but the CI mirror's, which names its own. Branch `px89` in `~/lanes/px89/pax`; on hasu a clone at
+  px93 changes is one px89 changes. The two meet in `boot/limine-usb.conf`, the configuration tools/mkwire's stick
+  takes: px93 adds an upgrade entry, and mkwire's netpoll twin put a `cmdline: netpoll` line after every
+  `module_path` line, that entry's too (`2785deaa` keeps the word to the first entry). The stick at that commit (w4,
+  `notes/px89/logs/w4.rows`) showed the twin had not been polled since the first rebase: px87's `cmdline: quiet`
+  (pax#246) gave the first entry a command line of its own, and a second `cmdline:` line in an entry does not reach
+  the kernel, so Q0 was red on both netpoll boots (`MSI-X vector 83`) and every other row green. `d8a51e49` puts the
+  word on the entry's own line (`cmdline: quiet netpoll`), or makes the line when there is none, and refuses a first
+  entry with more than one; the stick at that commit qualified again (w5, `notes/px89/logs/w5.rows`). The staged
+  stick (`f68505c6`, the MSI-X one the metal leg uses) predates both: its first entry had no command line, and w3's
+  twin was polled. A stick built at the head carries px93's entry, which mounts nothing: the stick's
+  `/pax/install-targets` names no disk as shipped. `notes/px89/rebase-map.txt` pairs each commit with its twins:
+  this note cites the last, and every run in its tables ran at the map's first column (the commit before the
+  rebases) but w4's, w5's and the CI mirror's, which name their own. Branch `px89` in `~/lanes/px89/pax`; on hasu a clone at
   `/home/mfwolffe/lanes/px89/pax`, a worktree per tested commit (`wt-<sha8>`), git behind a lane-local lock.
 - **Toolchain** wolf 0.2.35 by `kernel/wolf.pin` (`tools/fetch-wolf`'s digest check every build), Limine 12.9.1.
 - **Image** `localhost/px89-dhcp:1`: px88's `localhost/px88-ubuntu:1` (px75's QEMU 8.2.2, OVMF, clang, lld 18,
@@ -208,6 +213,8 @@ the lease as a program reads it, and whether the router answered the kernel's ec
 | i9 | `e71a5afa` | **mpx4-tcp over igb green**, both ways, after the loopback line's fix (T8: 16 MiB out of PAX at 9.3 MB/s, in at 15.1 MB/s) |
 | w2 | `e71a5afa` | the stick: Q0 green (MSI-X), Q1-Q4 red: the root archive has no `/tmp` (the record could not be made) and kmain_session attached no USB disk (no `/dev/sd?` for the stick) |
 | w3 | `1fde2d17` | **the stick qualified**: Q0-Q5 PASS on all four boots (BIOS, UEFI, each MSI-X and netpoll), after `3ba2a213` (kmain_session attaches USB disks), `75c85ddc` and `1fde2d17` (`mkdir -p /tmp`) |
+| w4 | `b6200d20` | the stick after the second rebase: the MSI-X stick's Q0-Q5 green on BIOS and UEFI, the netpoll twin red at Q0 alone (`MSI-X vector 83`: its word on a second `cmdline:` line after px87's `quiet`) |
+| w5 | `d8a51e49` | **the stick qualified again**: Q0-Q5 PASS on all four boots, the twin's word on the entry's own command line |
 | eng | — | the container engine inside a lane container (`notes/px89/hasu/eng-test.sh`): podman 5.8.9 client and server, one throwaway container: the gauntlet's Linux sides |
 
 ### The metal leg (staged, not run)
@@ -215,8 +222,8 @@ the lease as a program reads it, and whether the router answered the kernel's ec
 `tools/mkwire root` and `tools/mkwire stick` at `1fde2d17` on hasu (`notes/px89/hasu/wire-build.sh`), qualified by
 `notes/px89/hasu/wire-qualify.sh` (`notes/px89/logs/w3.rows`): a copy of the image as USB storage on qemu-xhci,
 QEMU's 82576 on its user network, a server on the host for the TCP row, a SATA disk and an NVMe disk of 64 MiB of
-random bytes beside it; four boots (BIOS and UEFI; the stick, and its twin `pax-wire-netpoll.img` with `cmdline:
-netpoll` so the controller is polled as the I225 will be). Every boot: Q0 the controller's line, Q1 the lease and
+random bytes beside it; four boots (BIOS and UEFI; the stick, and its twin `pax-wire-netpoll.img` with `netpoll`
+on its command line so the controller is polled as the I225 will be). Every boot: Q0 the controller's line, Q1 the lease and
 resolv.conf in the record, Q2 the router's answer to the kernel's echo, Q3 tcpprobe's connection and the server's
 line, Q4 the record on the image afterwards (`/pax/logs/wire-1.txt`, 19 lines), Q5 the other two disks
 byte-identical. The stick: `~/pax-smoke/pax-wire-f68505c6.img` on nomad, 241,172,480 bytes, sha256
