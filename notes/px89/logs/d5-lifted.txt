@@ -1,0 +1,17 @@
+# px89: tests/mpx4-dhcp's D5 xid clause (1b9b40d5), lifted, on g6's renew boot (records/wt-g6/build:
+# mpx4-dhcp-native-bios-renew.wire/dnsmasq-1.log and .pcap.check), then on two altered copies of the log:
+# dropped.log, the first renewal's lines gone (grep -v ' 273854788 '); nak.log, its DHCPACK made DHCPNAK.
+$ cat check.sh
+# the D5 clause, lifted, on g6's files ($1 log, $2 pcap.check)
+dl=$1 pc=$(cat "$2") why= nrx=0
+rx=$(printf '%s\n' "$pc" | sed -nE 's/^pcap-dhcp: \+[0-9.]+ client REQUEST \(renewing\) xid=(0x[0-9a-f]+) .*/\1/p')
+[ -n "$rx" ] || why+=" no renewing REQUEST in the capture;"
+[ "$(grep -c 'DHCPREQUEST(' "$dl")" -ge 2 ] && grep -q 'DHCPACK(.*192\.168\.89\.' "$dl" || why+=" dnsmasq logged ...;"
+for x in $rx; do d=$((x)); if grep -Eq " $d DHCPREQUEST\(" "$dl" && grep -Eq " $d DHCPACK\([^)]*\) 192\.168\.89\." "$dl"; then nrx=$((nrx+1)); else why+=" xid $x ($d) missing;"; fi; done
+echo "rx=[$(echo $rx)] nrx=$nrx why=[$why]"
+$ bash check.sh dnsmasq-1.log mpx4-dhcp-native-bios-renew.pcap.check
+rx=[0x1052b144 0xc4bac526] nrx=2 why=[]
+$ bash check.sh dropped.log mpx4-dhcp-native-bios-renew.pcap.check
+rx=[0x1052b144 0xc4bac526] nrx=1 why=[ xid 0x1052b144 (273854788) missing;]
+$ bash check.sh nak.log mpx4-dhcp-native-bios-renew.pcap.check
+rx=[0x1052b144 0xc4bac526] nrx=1 why=[ xid 0x1052b144 (273854788) missing;]
