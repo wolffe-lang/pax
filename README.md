@@ -351,7 +351,8 @@ client of its own (`user/elf/lspc.c`, C with no libc: three pipes and an exec-st
 error opened (its E0401 published), an unsaved edit that fixes it (the diagnostics cleared after the server's 100 ms
 debounce), `shutdown` and `exit`, status 0; and a server made to hang, killed by its process group after 3 s. Every
 frame, both ways, is byte-identical to the same client and server on Linux, as root and as `pax`. PAX's monotonic
-clock advances with its 100 Hz tick, so a program's own timings there read in steps of 10 ms.
+clock advances with its 100 Hz tick, so a program's own timings there read in steps of 10 ms
+([#299](https://github.com/wolffe-lang/pax/issues/299)).
 
 ## Disks and rescue
 
