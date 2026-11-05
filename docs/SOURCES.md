@@ -1947,3 +1947,27 @@ source; no kernel's, firmware's or driver's.
   calls the server makes, and every session's transcript in a throwaway container (`tools/linux-tree`).
 - No kernel change. No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no
   libc's, editor's or LSP library's source but the program under test's transport.
+
+## px100 — den's remotes on PAX (file:// through two wrappers, git:// through den daemon)
+
+- **den at its pin** (`wolffe-lang/den` `584b18a3`, the org's own, GPL-3.0-only): its README's "Commands implemented
+  so far" and "Wire protocols and transport bounds" (the supported command forms, the bare receive-pack, the
+  one-connection loopback daemon and its `git-daemon-export-ok`, the 30-second TCP deadlines), and its
+  `src/transport/channel.lu` (file:// runs `$DEN_UPLOAD_PACK` or `$DEN_RECEIVE_PACK`, else `git-upload-pack` or
+  `git-receive-pack`, with the repository's path as the only argument, `GIT_PROTOCOL=version=2` in its
+  environment), `src/wiregit/command.lu` (`upload-pack PATH`, `receive-pack PATH`, `daemon [--enable-receive-pack]
+  BASE PORT`), `src/wiregit/daemon.lu` (listen, `port N`, one accept) and `src/wiregit/service.lu`. Its open
+  issues den#49 (status with an upstream) and den#52 (a plain local path) as the limits they name.
+- **wolf-std and wolf's runtime** (the org's own): `std/process` (a bare program name is found on PATH, a missing
+  one is `start`'s `not_found`), `std/net` (`set_deadline`, `set_listener_deadline`), and `wolf_rt`'s `net.rs`
+  (non-blocking sockets parked in poll against the deadline, `SO_REUSEADDR` set before `bind`): what den asks of
+  the kernel.
+- **pelt at its pin** (`4683b3f5`): its README's friendly mode, opt-in at that pin.
+- **den as a black box** on Linux: the remote session's Linux side and its dry runs (`tools/linux-tree` in a
+  throwaway container with no network but its loopback), as root and as uid 1000.
+- **git**, never its source (den's clean room): the container's `git` reads the repositories PAX wrote on the ext2
+  disk (`fsck --full`, `rev-parse`), run, never read.
+- PAX's own `kernel/kmain_console.lu`, `kernel/kmain_session.lu`, `kernel/socket`, `kernel/tcp`, `kernel/ip` and
+  `kernel/netd` (which kernel starts the network stack and what a never-started stack answers), and px56's note on
+  `#!` and exec from the tree.
+- No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no Git source.
