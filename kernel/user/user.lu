@@ -1486,7 +1486,7 @@ fn serve(f: u64) -> u64 {
             uaccess.put(pml4, ct, 0, 4)
             futex.wake_tid(pml4, ct)
         }
-        return sched.end_thread(f)
+        return sched.end_thread(f, (a0 & 0xff) << 8)
     }
     if nr == SYS_EXIT || nr == SYS_EXIT_GROUP {
         if !log.quiet() { // px15
@@ -2581,4 +2581,13 @@ export fn pax_trace_resume_syscall(f: u64) -> u64 {
     sched.syscall_ends(c)
     let out = if g == f && sched.self_slot() == c { trace.syscall_return(g) } else { g }
     signal.on_return(out)
+}
+
+
+/// A creation/exec event has already completed the syscall. Restarting
+/// it only applies syscall-exit/step tracing; it must never create twice.
+export fn pax_trace_finish_syscall(f: u64) -> u64 {
+    trace_state.set_finish_pending(sched.self_slot(), 0)
+    put_word(f, W_VECTOR, 0x101)
+    signal.on_return(trace.syscall_return(f))
 }

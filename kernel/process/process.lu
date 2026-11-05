@@ -173,6 +173,7 @@ use panic
 use procfs
 use sched
 use tree
+use trace
 use uaccess
 use vm
 
@@ -1398,6 +1399,9 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u6
     if flags & CLONE_CLEAR_SIGHAND != 0 {
         reset_handlers(sched.proc_area(s))
     }
+    put_word(f, W_RAX, sched.slot_pid(s))
+    let event = trace.created(f, s, 2)
+    if event != 0 { return event }
     sched.vfork_wait(f, s)
 }
 
@@ -1440,7 +1444,8 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
         uaccess.put(pml4, ptid, pid, 4)
     }
     put_word(f, W_RAX, pid)
-    f
+    let event = trace.created(f, s, 1)
+    if event != 0 { event } else { f }
 }
 
 /// px26: a thread (a clone with CLONE_THREAD) from the frame `f`: `f`
@@ -1503,7 +1508,8 @@ fn thread(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
         log.end()
     }
     put_word(f, W_RAX, t)
-    f
+    let event = trace.created(f, s, 3)
+    if event != 0 { event } else { f }
 }
 
 // --- wait4, waitid (px14; px48: groups, stops, continues) -------------------------

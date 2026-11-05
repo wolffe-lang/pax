@@ -951,6 +951,12 @@ pub fn on_return(f: u64) -> u64 {
         if word(g, W_CS) & 3 != 3 {
             return g
         }
+        let initial = trace.initial_stop(g)
+        if initial != 0 {
+            g = initial
+            guard += 1
+            continue
+        }
         if sched.self_parks() {
             // px48: its process is stopped: it runs nothing, and takes
             // nothing, until continued (or killed: SIGKILL readies it).
@@ -975,8 +981,8 @@ pub fn on_return(f: u64) -> u64 {
             return g
         }
         if sig != SIGKILL && sched.tracer_of(sched.self_slot()) != 0 {
-            let (code, pid, uid, _status) = origin(info)
-            g = trace.signal_stop(g, sig, code, (uid << 32) | pid)
+            let (code, pid, uid, status) = origin(info)
+            g = trace.signal_stop(g, sig, code, (uid << 32) | pid, status)
         } else {
             g = act(g, sig, info)
         }

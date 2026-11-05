@@ -1197,6 +1197,7 @@ fn thread_gone() {
 /// stays a zombie for a parent, which is woken if it is waiting and
 /// (px26) sent SIGCHLD. IF clear.
 fn process_ends(l: u64, st: u64) {
+    trace_state.set_exit_uid(l, real_uid(l))
     put_field(l, offset_of(Thread, status), st)
     put_field(l, offset_of(Thread, threads), 0)
     put_field(l, offset_of(Thread, gpend), 0)
@@ -1254,7 +1255,8 @@ fn process_ends(l: u64, st: u64) {
         }
         let pp = field(l, offset_of(Thread, ppid))
         let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
-        if ps != SLOTS {
+        let traced = trace_death(l)
+        if ps != SLOTS && !traced {
             // px88: a parent whose SIGCHLD is ignored, or whose action for
             // it has SA_NOCLDWAIT, keeps no zombie: the child's slot is let
             // go at its reap, uncounted in the parent's children, and a
@@ -1393,13 +1395,29 @@ fn own_borrowed(l: u64) -> bool {
 /// Slot `c`'s vfork parent, if it holds one suspended, resumed.
 fn release_vfork(c: u64) {
     let vp = field(c, offset_of(Thread, vparent))
-    if vp == 0 {
-        return
-    }
+    if vp == 0 { return }
     put_field(c, offset_of(Thread, vparent), 0)
-    if field(vp - 1, offset_of(Thread, state)) == VFORK {
-        put_field(vp - 1, offset_of(Thread, state), READY)
-        enqueue(vp - 1)
+    let p = vp - 1
+    trace_state.set_vfork_child(p, 0)
+    let st = field(p, offset_of(Thread, state))
+    if tracer_of(p) != 0 && trace_state.options(p) & 0x20 != 0 {
+        let pid = field(c, offset_of(Thread, pid))
+        if st == TRACED {
+            // Do not overwrite the unconsumed VFORK event when the
+            // tracer chose to run the child before restarting the parent.
+            trace_state.set_vfork_done(p, pid)
+            return
+        }
+        if st == VFORK || st == READY {
+            trace_state.set_event(p, pid)
+            trace_state.set_stop_kind(p, 4)
+            if trace_park(p, 0, 0x505, 0x505, field(p, offset_of(Thread, pid)) | (real_uid(field(p, offset_of(Thread, lead))) << 32)) { return }
+        }
+    }
+    if st == VFORK {
+        trace_finish_frame(p)
+        put_field(p, offset_of(Thread, state), READY)
+        enqueue(p)
     }
 }
 
@@ -1467,9 +1485,12 @@ pub fn end_with(_f: u64, st: u64) -> u64 {
 /// (kernel/process) has cleared and woken the clear-child-tid word.
 /// With no other thread left the caller uses `end_with` instead. IF
 /// clear. The next thread's frame.
-pub fn end_thread(_f: u64) -> u64 {
+pub fn end_thread(_f: u64, status: u64) -> u64 {
     let c = cur()
     let l = field(c, offset_of(Thread, lead))
+    put_field(c, offset_of(Thread, status), status)
+    trace_state.set_exit_uid(c, real_uid(l))
+    if c != l { let _traced = trace_death(c) }
     put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) - 1)
     if c == l {
         put_field(c, offset_of(Thread, gone), 1)
@@ -2117,8 +2138,14 @@ pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
     while s < SLOTS {
         let st = field(s, offset_of(Thread, state))
         let ok = how == 0 || (how == 1 && field(s, offset_of(Thread, pid)) == sel) || (how == 2 && field(s, offset_of(Thread, pgid)) == sel)
-        if st != FREE && field(s, offset_of(Thread, ppid)) == me && field(s, offset_of(Thread, tgid)) == field(s, offset_of(Thread, pid)) && ok {
+        let tr = tracer_of(s)
+        let owned = tr == self_tid()
+        let real_child = field(s, offset_of(Thread, ppid)) == me && field(s, offset_of(Thread, tgid)) == field(s, offset_of(Thread, pid))
+        if st != FREE && (owned || real_child) && ok {
             any = true
+            // A foreign tracer reports the death first. The real parent
+            // still has a child, but cannot consume its status yet.
+            if tr != 0 && !owned { s += 1; continue }
             if st == ZOMBIE {
                 if want & W_EXITED != 0 {
                     return (true, s, W_EXITED)
@@ -2170,8 +2197,15 @@ pub fn wait_report(s: u64, what: u64, consume: bool) -> (u64, u64) {
 pub fn zombie(s: u64, reap_it: bool) -> (u64, u64) {
     let r = (field(s, offset_of(Thread, pid)), field(s, offset_of(Thread, status)))
     if reap_it {
-        fold(proc_area(cur()), own_area(s)) // px88: the waiter's children's sums (getrusage(2))
-        clear(s)
+        let thread = field(s, offset_of(Thread, tgid)) != field(s, offset_of(Thread, pid))
+        let foreign = tracer_of(s) == self_tid() && field(s, offset_of(Thread, ppid)) != self_pid()
+        if foreign && !thread {
+            put_field(s, offset_of(Thread, tracer), 0)
+            if !trace_real_parent(s) { clear(s) }
+        } else {
+            if !thread { fold(proc_area(cur()), own_area(s)) }
+            clear(s)
+        }
     }
     r
 }
@@ -3588,6 +3622,7 @@ pub fn trace_me() -> bool {
     let c = cur()
     let pp = self_ppid()
     if tracer_of(c) != 0 || pp == 0 || live_slot(pp) == SLOTS { return false }
+    trace_state.clear(c)
     put_field(c, offset_of(Thread, tracer), pp)
     true
 }
@@ -3609,24 +3644,36 @@ pub fn trace_info(s: u64) -> (u64, u64, u64) {
     ((field(s, offset_of(Thread, trace_status)) >> 8) & 0xff, field(s, offset_of(Thread, trace_code)), field(s, offset_of(Thread, trace_addr)))
 }
 
-pub fn trace_stop(f: u64, sig: u64, code: u64, addr: u64) -> u64 {
-    let c = cur()
+fn trace_park(c: u64, f: u64, sig: u64, code: u64, addr: u64) -> bool {
     let tr = tracer_of(c)
     let ps = live_slot(tr)
-    if tr == 0 || ps == SLOTS { return f }
-    put_field(c, offset_of(Thread, frame), f)
+    if tr == 0 || ps == SLOTS { return false }
+    if field(c, offset_of(Thread, state)) == READY { unqueue(c) }
+    if f != 0 { put_field(c, offset_of(Thread, frame), f) }
     put_field(c, offset_of(Thread, trace_status), (1 << 32) | (sig << 8) | 0x7f)
     put_field(c, offset_of(Thread, trace_code), code)
     put_field(c, offset_of(Thread, trace_addr), addr)
     put_field(c, offset_of(Thread, state), TRACED)
     wake_waiter(tr)
-    raise_group(ps, SIGCHLD, sig_info(I_CHLD_TRAPPED, self_tid(), sig & 0x7f, real_uid(field(c, offset_of(Thread, lead)))))
+    raise_group(ps, SIGCHLD, sig_info(I_CHLD_TRAPPED, field(c, offset_of(Thread, pid)), sig & 0x7f, real_uid(field(c, offset_of(Thread, lead)))))
+    true
+}
+
+pub fn trace_stop(f: u64, sig: u64, code: u64, addr: u64) -> u64 {
+    if !trace_park(cur(), f, sig, code, addr) { return f }
     wake_sleepers()
     run_next()
 }
 
 pub fn trace_resume(s: u64) {
     if s >= SLOTS || field(s, offset_of(Thread, state)) != TRACED { return }
+    let done = trace_state.vfork_done(s)
+    if done != 0 {
+        trace_state.set_vfork_done(s, 0)
+        trace_state.set_event(s, done)
+        trace_state.set_stop_kind(s, 4)
+        if trace_park(s, 0, 0x505, 0x505, field(s, offset_of(Thread, pid)) | (real_uid(field(s, offset_of(Thread, lead))) << 32)) { return }
+    }
     // Entry/exit-event stops resume the in-kernel syscall continuation,
     // not the user SYSCALL instruction (which a tracer may have patched).
     if trace_state.phase(s) == 1 || trace_state.exit_pending(s) == 1 {
@@ -3634,6 +3681,15 @@ pub fn trace_resume(s: u64) {
         // # Safety: the complete stopped frame; vector word 15.
         unsafe { ((f + 15 * 8) as *u64).write_volatile(0x102) }
         if trace_state.exit_pending(s) == 1 { trace_state.set_exit_pending(s, 2) }
+    } else if trace_state.phase(s) == 2 && (trace_state.stop_kind(s) == 4 || trace_state.initial(s) == 2 || trace_state.finish_pending(s) != 0) {
+        trace_finish_frame(s)
+    }
+    trace_state.set_initial(s, 0)
+    let vc = trace_state.vfork_child(s)
+    if vc != 0 && field(vc - 1, offset_of(Thread, vparent)) == s + 1 {
+        put_field(s, offset_of(Thread, trace_status), 0)
+        put_field(s, offset_of(Thread, state), VFORK)
+        return
     }
     put_field(s, offset_of(Thread, trace_status), 0)
     put_field(s, offset_of(Thread, state), READY)
@@ -3646,6 +3702,12 @@ fn trace_release_owned(tid: u64) {
     while s < SLOTS {
         if tracer_of(s) == tid {
             put_field(s, offset_of(Thread, tracer), 0)
+            if field(s, offset_of(Thread, state)) == ZOMBIE {
+                let thread = field(s, offset_of(Thread, pid)) != field(s, offset_of(Thread, tgid))
+                if thread || !trace_real_parent(s) { clear(s) }
+                s += 1
+                continue
+            }
             trace_set_dr(s, 7, 0)
             let f = field(s, offset_of(Thread, frame))
             if f != 0 {
@@ -3732,4 +3794,67 @@ fn trace_group(l: u64) -> bool {
         s += 1
     }
     false
+}
+
+
+fn trace_finish_frame(s: u64) {
+    let f = field(s, offset_of(Thread, frame))
+    if f == 0 || trace_state.phase(s) != 2 { return }
+    trace_state.set_finish_pending(s, 1)
+    // # Safety: a complete saved frame; vector word 15.
+    unsafe { ((f + 15 * 8) as *u64).write_volatile(0x103) }
+}
+
+pub fn trace_inherit(s: u64) {
+    let c = cur()
+    put_field(s, offset_of(Thread, tracer), tracer_of(c))
+    put_field(s, offset_of(Thread, trace_orig), trace_orig(c))
+    trace_state.set_options(s, trace_state.options(c))
+    trace_state.set_initial(s, 1)
+    trace_state.set_phase(s, 2)
+}
+
+pub fn trace_vfork_link(s: u64) {
+    put_field(s, offset_of(Thread, vparent), cur() + 1)
+    trace_state.set_vfork_child(cur(), s + 1)
+    trace_state.set_vfork_done(cur(), 0)
+}
+
+pub fn kill_pending() -> bool {
+    let c = cur()
+    let l = field(c, offset_of(Thread, lead))
+    (field(c, offset_of(Thread, pend)) | field(l, offset_of(Thread, gpend))) & bit(SIGKILL) != 0
+}
+
+/// A traced thread/process death belongs to its tracer first. Keep its
+/// slot until that wait, even when the real parent ignores SIGCHLD.
+fn trace_death(s: u64) -> bool {
+    let tr = tracer_of(s)
+    let ps = if tr != 0 { live_slot(tr) } else { SLOTS }
+    if ps == SLOTS {
+        put_field(s, offset_of(Thread, tracer), 0)
+        return false
+    }
+    put_field(s, offset_of(Thread, zombie), 1)
+    let st = field(s, offset_of(Thread, status))
+    let killed = st & 0x7f != 0
+    wake_waiter(tr)
+    raise_group(ps, SIGCHLD, sig_info(if killed { I_CHLD_KILLED } else { I_CHLD_EXITED }, field(s, offset_of(Thread, pid)), if killed { st & 0x7f } else { (st >> 8) & 0xff }, trace_state.exit_uid(s)))
+    true
+}
+
+/// After a foreign tracer collects a process's death, hand the zombie
+/// back to its real parent. A thread has no independent real-parent wait.
+fn trace_real_parent(s: u64) -> bool {
+    let pp = field(s, offset_of(Thread, ppid))
+    let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
+    if ps == SLOTS { return false }
+    let act = own_area(ps) + (SIG_WORDS + (SIGCHLD - 1) * 4) * 8
+    // # Safety: SIGCHLD's action and flags in the live parent's area.
+    let (h, fl) = unsafe { ((act as *u64).read_volatile(), ((act + 8) as *u64).read_volatile()) }
+    let st = field(s, offset_of(Thread, status))
+    let killed = st & 0x7f != 0
+    wake_waiter(pp)
+    raise_group(ps, SIGCHLD, sig_info(if killed { I_CHLD_KILLED } else { I_CHLD_EXITED }, field(s, offset_of(Thread, pid)), if killed { st & 0x7f } else { (st >> 8) & 0xff }, trace_state.exit_uid(s)))
+    h != SIG_IGN && fl & SA_NOCLDWAIT == 0
 }

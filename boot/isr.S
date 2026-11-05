@@ -181,6 +181,8 @@ pax_isr_common:
         movq    %rax, %rsp              /* the frame to resume (px07) */
         cmpq    $0x102, 120(%rsp)       /* px102: stopped syscall's kernel continuation */
         je      .Lpax_trace_syscall
+        cmpq    $0x103, 120(%rsp)       /* px102: finish a completed clone/vfork/exec call */
+        je      .Lpax_trace_finished
         cmpq    $0x100, 120(%rsp)       /* PAX_SYSCALL's frame (px09) */
         je      pax_sysret
         jmp     .Lpax_iret
@@ -188,6 +190,11 @@ pax_isr_common:
         movq    %rsp, %rdi
         andq    $-16, %rsp
         call    pax_trace_resume_syscall
+        jmp     .Lpax_resume_frame
+.Lpax_trace_finished:
+        movq    %rsp, %rdi
+        andq    $-16, %rsp
+        call    pax_trace_finish_syscall
         jmp     .Lpax_resume_frame
 .Lpax_iret:
         popq    %r15

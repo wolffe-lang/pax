@@ -1104,11 +1104,14 @@ legacy exec stop, `CONT` with no injected signal, `GETSIGINFO`, `KILL`,
 GETREGS/SETREGS, GETFPREGS, GETREGSET for PRSTATUS/PRFPREG, PEEKUSER of
 register words and debug registers, POKEUSER of debug registers, SINGLESTEP,
 PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA, and proc memory read/write.
-SETOPTIONS now accepts TRACESYSGOOD, TRACEEXEC, TRACEEXIT and EXITKILL;
+SETOPTIONS now accepts TRACESYSGOOD, TRACEFORK/VFORK/CLONE/EXEC/VFORKDONE/EXIT and EXITKILL;
 GETEVENTMSG reports exec/exit events, and PTRACE_SYSCALL stops at entry/exit.
 Signal-delivery stops can be suppressed with CONT(0).
-It is not yet enough to run a debugger: attach, clone/fork/vfork events,
-signal injection and full thread lifecycle are still being implemented. Other requests are refused
+Creation events auto-attach the child and report its initial stop; vfork
+completion is held until its earlier event has been consumed. A traced death
+is collected by the tracer before it is handed back to the real parent.
+It is not yet enough to run a debugger: attach, signal injection and complete
+group-exit/thread lifecycle are still being implemented. Other requests are refused
 by name; NT_X86_XSTATE is named and returns EINVAL.
 
 | Change | Behaviour and row |
@@ -1143,3 +1146,11 @@ status has bit 7, but SIGCHLD's signal does not. `T-traceexec`, `T-traceexit`,
 The tracer-death rows cover automatic detach and EXITKILL separately.
 
 Memory compatibility still needs cross-page, partial-buffer, PROT_NONE, shared/private file mapping, held-descriptor exec, and credential-change rows; the present probe covers mapped ELF text/data and unmapped-address errors.
+
+The child-event rows cover fork plus the real parent's subsequent wait,
+both vfork resume orders (parent first and child first), and a cloned thread's
+individual exit followed by its group's exit. The thread witness uses the
+shared futex key for clear-child-tid, and stops its leader at an INT3 barrier
+before group exit: Linux may otherwise replace a racing thread's status with
+the group-exit status. `T-fork-real-parent`, `T-vfork-blocked-parent`,
+`T-vfork-child-first`, and `T-traced-thread-exit` hold these sequences.

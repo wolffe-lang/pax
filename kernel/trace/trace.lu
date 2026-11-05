@@ -232,9 +232,8 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
         return 0
     }
     if req == 0x4200 {
-        // TRACESYSGOOD, TRACEEXEC, TRACEEXIT, EXITKILL. Clone/fork/vfork
-        // option bits remain refused until their own event paths land.
-        if data & !0x100051 != 0 { return EINVAL }
+        // TRACESYSGOOD, TRACEFORK/VFORK/CLONE/EXEC/VFORKDONE/EXIT, EXITKILL.
+        if data & !0x10007f != 0 { return EINVAL }
         trace_state.set_options(s, data)
         return 0
     }
@@ -253,6 +252,7 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
         uaccess.put(pml4, data, if kind == 2 || kind == 3 { 5 } else { sig }, 4)
         uaccess.put(pml4, data + 8, code, 4)
         uaccess.put(pml4, data + 16, at, 8)
+        if sig == 17 { uaccess.put(pml4, data + 24, trace_state.signal_status(s), 4) }
         return 0
     }
     refused(req)
@@ -261,8 +261,8 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
 pub fn exec_stop(f: u64) -> u64 {
     let s = sched.self_slot()
     if sched.tracer_of(s) == 0 { return f }
-    trace_state.set_phase(s, 0)
     if trace_state.options(s) & 0x10 != 0 { return event_stop(f, 4, sched.self_tid()) }
+    trace_state.set_phase(s, 0)
     trace_state.set_stop_kind(s, 1)
     trace_state.set_event(s, 0)
     sched.trace_stop(f, 5, 0, sender())
@@ -307,7 +307,8 @@ fn event_stop(f: u64, event: u64, message: u64) -> u64 {
     sched.trace_stop(f, tagged, tagged, sender())
 }
 
-pub fn signal_stop(f: u64, sig: u64, code: u64, from: u64) -> u64 {
+pub fn signal_stop(f: u64, sig: u64, code: u64, from: u64, status: u64) -> u64 {
+    trace_state.set_signal_status(sched.self_slot(), status)
     trace_state.set_stop_kind(sched.self_slot(), 1)
     trace_state.set_event(sched.self_slot(), 0)
     sched.trace_stop(f, sig, code, from)
@@ -353,13 +354,35 @@ pub fn before_exit(f: u64, nr: u64, status: u64) -> u64 {
 /// Linux's measured TRAP_BRKPT, rather than an extra hardware instruction.
 pub fn syscall_return(f: u64) -> u64 {
     let s = sched.self_slot()
-    if sched.tracer_of(s) == 0 || word(f, 18) & 3 != 3 { return f }
-    if trace_state.phase(s) == 2 {
-        trace_state.set_phase(s, 0)
-        if trace_state.mode(s) == 1 { return syscall_stop(f, 3) }
-    }
+    if word(f, 18) & 3 != 3 { return f }
+    let completed = trace_state.phase(s) == 2
+    if completed { trace_state.set_phase(s, 0) }
+    if sched.tracer_of(s) == 0 { return f }
+    if completed && trace_state.mode(s) == 1 { return syscall_stop(f, 3) }
     if word(f, 19) & TF == 0 { return f }
     put_word(f, 19, word(f, 19) & !TF)
     trace_state.set_stop_kind(s, 1)
     sched.trace_stop(f, 5, 1, word(f, 17))
+}
+
+
+/// Creation events bind the new child before either side can return to
+/// user mode. The child's initial stop is taken on its first return.
+pub fn created(f: u64, child: u64, event: u64) -> u64 {
+    let s = sched.self_slot()
+    if sched.tracer_of(s) == 0 { return 0 }
+    if event == 2 { sched.trace_vfork_link(child) }
+    let option = if event == 1 { 2 } else if event == 2 { 4 } else { 8 }
+    if trace_state.options(s) & option == 0 { return 0 }
+    sched.trace_inherit(child)
+    event_stop(f, event, sched.slot_pid(child))
+}
+
+pub fn initial_stop(f: u64) -> u64 {
+    let s = sched.self_slot()
+    if sched.tracer_of(s) == 0 || trace_state.initial(s) != 1 || sched.kill_pending() { return 0 }
+    trace_state.set_initial(s, 2)
+    trace_state.set_stop_kind(s, 1)
+    trace_state.set_event(s, 0)
+    sched.trace_stop(f, 19, 0, 0)
 }
