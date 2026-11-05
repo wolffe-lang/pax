@@ -33,9 +33,12 @@
      quiet LABEL MS TEXT   read frames for MS milliseconds; TEXT should not come
      close                 close the server's input
      kill                  kill the server's process group with SIGKILL
-     end                   wait for the server's output and error to end and
-                           its SIGCHLD, then reap it
-   `close`, `kill` and `end` start the server first if no `send` has.
+     reap                  wait for the server's output and error to end and
+                           its SIGCHLD, then reap it; its input stays open
+     end                   close the server's input, then `reap`
+   `close`, `kill`, `reap` and `end` start the server first if no `send` has.
+   SIGPIPE is ignored, as an editor ignores it: a write to a server that has
+   gone answers EPIPE, which the `send` prints.
 
    What it prints, each line in one write:
      lspc: begin NAME
@@ -49,6 +52,7 @@
      came: LABEL           (a `quiet` wait's text came)
      eof: the server's output ended before LABEL
      kill: the server's process group, SIGKILL: R
+     lspc: write to the server failed R
      exit: status N | exit: signal N
      sigchld: N            the bytes the SIGCHLD handler wrote
      tty: N bytes          what was read from descriptor 0 meanwhile
@@ -100,6 +104,7 @@ typedef unsigned char u8;
 #define POLLHUP 0x10
 #define POLLNVAL 0x20
 #define SIGKILL 9
+#define SIGPIPE 13
 #define SIGCHLD 17
 #define SA_NOCLDSTOP 0x1
 #define SA_RESTORER 0x04000000
@@ -478,6 +483,7 @@ static void reap(void) {
    the deadline (it is killed then), and it is reaped. */
 static void finish(u64 until, const char *label) {
     int late = 0;
+    if (reaped) return;
     while (fd_out >= 0 || fd_err >= 0 || nsig == 0) {
         int m = 0;
         while (frame(0, &m)) {}
@@ -546,7 +552,10 @@ int cmain(u64 *sp) {
     sig_r = sp2[0];
     sig_w = sp2[1];
     u64 act[4] = { (u64)on_chld, SA_NOCLDSTOP | SA_RESTORER, (u64)lspc_restorer, 0 };
-    if (sys6(SYS_rt_sigaction, SIGCHLD, (i64)act, 0, 8, 0) != 0) { o_s("lspc: rt_sigaction failed"); o_end(); quit(2); }
+    u64 ign[4] = { 1, SA_RESTORER, (u64)lspc_restorer, 0 }; /* SIG_IGN */
+    if (sys6(SYS_rt_sigaction, SIGCHLD, (i64)act, 0, 8, 0) != 0 || sys6(SYS_rt_sigaction, SIGPIPE, (i64)ign, 0, 8, 0) != 0) {
+        o_s("lspc: rt_sigaction failed"); o_end(); quit(2);
+    }
 
     const char *name = "(unnamed)";
     u64 deadline = 600000;
@@ -612,6 +621,9 @@ int cmain(u64 *sp) {
             if (!started) spawn();
             o_s("kill: the server's process group, SIGKILL: "); o_i(sys(SYS_kill, -child, SIGKILL, 0)); o_end();
             t_last = now_us();
+        } else if (sprefix(l, "reap")) {
+            if (!started) spawn();
+            finish(now_us() + deadline * 1000, "exit");
         } else if (sprefix(l, "end")) {
             if (!started) spawn();
             if (fd_in >= 0) { sys(SYS_close, fd_in, 0, 0); fd_in = -1; }
