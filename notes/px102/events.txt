@@ -1,0 +1,192 @@
+px102 — storage and event checkpoint, 2026-11-05
+
+Dry runs, not final records. Tested code head:
+56ca2d6273ce4380556f47f86cf0e88c1428b6a8.
+No rebase, push, PR, final plant record or audit. Not debugger-ready yet.
+
+R-px102-2 (storage continuation): side table; Thread remains 512 bytes.
+TraceState uses 112 of each 128-byte slot (two spare words). Both record
+sizes are checked against actual assembly reservation bounds before writes.
+notes/px102/storage.txt records the real red-first layout test and local
+overflow witness 2b81d9f3: Thread 520/512, FAIL T-trace-layout before scheduler
+initialization. This is not the final lane plant. The proc-mem alias decision
+is unchanged.
+
+Implemented after the accepted foundation:
+- SETOPTIONS: TRACESYSGOOD, TRACEFORK/VFORK/CLONE/EXEC/VFORKDONE/EXIT,
+  EXITKILL; GETEVENTMSG; entry/exit PTRACE_SYSCALL stops.
+- A stopped syscall resumes in the kernel (vector 0x102), not by executing
+  the user opcode again. Completed creation/exec events use a finish-only
+  continuation (0x103); finish_pending survives an intervening signal stop.
+- Signal-delivery stops and CONT(0) suppression. Nonzero injection remains
+  refused. Tracer exit detaches, or kills its tracees under EXITKILL.
+- Child auto-attach; both vfork resume orders; individual traced thread
+  exits; tracer-before-real-parent death collection and SIGCHLD handback.
+
+Measured details:
+- waitid's EXEC/EXIT event statuses are 1029/1541, but SIGCHLD si_status is
+  5. TRACESYSGOOD gives wait status 0x857f, likewise SIGCHLD status 5.
+  Separate real-handler rows verify this, including uid equality.
+- The clone witness's first Linux take exposed its wrong private futex
+  key. Clear-child-tid uses the shared key (fixed in 7f2c6a0b).
+- Linux may replace a racing individual thread status with the group-exit
+  status. d908efa6 holds the leader at INT3 until collection of the thread's
+  19, then allows group exit 37. Unordered group-exit cases remain owed.
+
+Red first: exec/syscall and notification/EXITKILL rows ran on 01ac77ad
+before 84417fa0. Child-event rows were measured and committed, then failed
+at SETOPTIONS on 84417fa0 before 5ffb830e/56ca2d62. No failure was inferred.
+
+Completed checkpoint at 56ca2d62:
+- Fourteen modes: stops, regs, step, core, exec, syscall, notify,
+  notify-syscall, detach-exit, exitkill, fork-event, vfork-event,
+  vfork-order, clone-event. Errors was not rerun in this checkpoint.
+- All fourteen on Linux as uid/gid 0 and 1000, in fresh PID namespaces.
+- All fourteen on native BIOS/KVM as root and uid/gid 1000.
+- Native BIOS/TCG and UEFI/KVM: core, syscall, notify, fork-event,
+  vfork-event, vfork-order, clone-event, exitkill.
+- All fourteen on release BIOS/KVM. The actual booted kernel digest was
+  checked against the release ELF, not an image filename.
+- Exact transcripts and layout assertions, no skips. Matrix cases also
+  checked no panic, init status 0 and restored process-frame counts; prior
+  native root logs received those checks too.
+- Both-tier interrupt/scheduler regressions remain pending at handoff.
+  The release console build completed; pending regressions are not green.
+
+Builds used the pinned wolf 0.2.35 and both heavy locks. Light legs used
+2-CPU affinity and 6 GiB containers; measured PAX boot averages were about
+0.25–0.64 busy CPUs. No Mac builds/tests or forbidden source reads.
+
+Next: finish/read regressions; attach/control and nonzero injection;
+synchronous fault stops, group death and nonleader exec; every owed memory,
+register, permission and concurrency row; suite/CI/census/final docs.
+Tracer lookup still assumes a leader is the tracer. Blocking syscall
+completion/restart needs rows separating rewound waits from direct returns
+(futex/sleep); only measured nonblocking and creation/exec paths are claimed.
+Final records and PR still wait for the named rebase and authorization.
+
+Completed checkpoint END lines follow verbatim. No pending heavy-job
+result is included as green.
+
+native root
+  END stops-halt exit=0
+  END stops-layout exit=0
+  END stops-gate exit=0
+  END regs-halt exit=0
+  END regs-layout exit=0
+  END regs-gate exit=0
+  END step-halt exit=0
+  END step-layout exit=0
+  END step-gate exit=0
+  END core-halt exit=0
+  END core-layout exit=0
+  END core-gate exit=0
+  END exec-halt exit=0
+  END exec-layout exit=0
+  END exec-gate exit=0
+  END syscall-halt exit=0
+  END syscall-layout exit=0
+  END syscall-gate exit=0
+  END notify-halt exit=0
+  END notify-layout exit=0
+  END notify-gate exit=0
+  END notify-syscall-halt exit=0
+  END notify-syscall-layout exit=0
+  END notify-syscall-gate exit=0
+  END detach-exit-halt exit=0
+  END detach-exit-layout exit=0
+  END detach-exit-gate exit=0
+  END exitkill-halt exit=0
+  END exitkill-layout exit=0
+  END exitkill-gate exit=0
+  END fork-event-halt exit=0
+  END fork-event-layout exit=0
+  END fork-event-gate exit=0
+  END vfork-event-halt exit=0
+  END vfork-event-layout exit=0
+  END vfork-event-gate exit=0
+  END vfork-order-halt exit=0
+  END vfork-order-layout exit=0
+  END vfork-order-gate exit=0
+  END clone-event-halt exit=0
+  END clone-event-layout exit=0
+  END clone-event-gate exit=0
+
+Linux root and user
+  END checkpoint-linux-0-stops exit=0
+  END checkpoint-linux-0-regs exit=0
+  END checkpoint-linux-0-step exit=0
+  END checkpoint-linux-0-core exit=0
+  END checkpoint-linux-0-exec exit=0
+  END checkpoint-linux-0-syscall exit=0
+  END checkpoint-linux-0-notify exit=0
+  END checkpoint-linux-0-notify-syscall exit=0
+  END checkpoint-linux-0-detach-exit exit=0
+  END checkpoint-linux-0-exitkill exit=0
+  END checkpoint-linux-0-fork-event exit=0
+  END checkpoint-linux-0-vfork-event exit=0
+  END checkpoint-linux-0-vfork-order exit=0
+  END checkpoint-linux-0-clone-event exit=0
+  END checkpoint-linux-1000-stops exit=0
+  END checkpoint-linux-1000-regs exit=0
+  END checkpoint-linux-1000-step exit=0
+  END checkpoint-linux-1000-core exit=0
+  END checkpoint-linux-1000-exec exit=0
+  END checkpoint-linux-1000-syscall exit=0
+  END checkpoint-linux-1000-notify exit=0
+  END checkpoint-linux-1000-notify-syscall exit=0
+  END checkpoint-linux-1000-detach-exit exit=0
+  END checkpoint-linux-1000-exitkill exit=0
+  END checkpoint-linux-1000-fork-event exit=0
+  END checkpoint-linux-1000-vfork-event exit=0
+  END checkpoint-linux-1000-vfork-order exit=0
+  END checkpoint-linux-1000-clone-event exit=0
+
+native user, TCG, UEFI
+  END checkpoint-root-sanity exit=0
+  END checkpoint-user-stops exit=0
+  END checkpoint-user-regs exit=0
+  END checkpoint-user-step exit=0
+  END checkpoint-user-core exit=0
+  END checkpoint-user-exec exit=0
+  END checkpoint-user-syscall exit=0
+  END checkpoint-user-notify exit=0
+  END checkpoint-user-notify-syscall exit=0
+  END checkpoint-user-detach-exit exit=0
+  END checkpoint-user-exitkill exit=0
+  END checkpoint-user-fork-event exit=0
+  END checkpoint-user-vfork-event exit=0
+  END checkpoint-user-vfork-order exit=0
+  END checkpoint-user-clone-event exit=0
+  END checkpoint-tcg-core exit=0
+  END checkpoint-tcg-syscall exit=0
+  END checkpoint-tcg-notify exit=0
+  END checkpoint-tcg-fork-event exit=0
+  END checkpoint-tcg-vfork-event exit=0
+  END checkpoint-tcg-vfork-order exit=0
+  END checkpoint-tcg-clone-event exit=0
+  END checkpoint-tcg-exitkill exit=0
+  END checkpoint-uefi-core exit=0
+  END checkpoint-uefi-syscall exit=0
+  END checkpoint-uefi-notify exit=0
+  END checkpoint-uefi-fork-event exit=0
+  END checkpoint-uefi-vfork-event exit=0
+  END checkpoint-uefi-vfork-order exit=0
+  END checkpoint-uefi-clone-event exit=0
+  END checkpoint-uefi-exitkill exit=0
+
+release root
+  END checkpoint-release-stops exit=0
+  END checkpoint-release-regs exit=0
+  END checkpoint-release-step exit=0
+  END checkpoint-release-core exit=0
+  END checkpoint-release-exec exit=0
+  END checkpoint-release-syscall exit=0
+  END checkpoint-release-notify exit=0
+  END checkpoint-release-notify-syscall exit=0
+  END checkpoint-release-detach-exit exit=0
+  END checkpoint-release-exitkill exit=0
+  END checkpoint-release-fork-event exit=0
+  END checkpoint-release-vfork-event exit=0
+  END checkpoint-release-vfork-order exit=0
+  END checkpoint-release-clone-event exit=0

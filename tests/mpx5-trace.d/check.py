@@ -2,8 +2,8 @@
 """Exact transcript gate, plus independently named tracing ABI rows.
 
 Usage: check.py MODE TRANSCRIPT | --selftest
-No filtering or normalization here. trace.c names its two normalizations
-(pid equality, successful-open descriptor). The *.linux files are observed
+No filtering or normalization here. trace.c names its normalizations
+(pid equality, successful-open descriptor, notification uid equality). The *.linux files are observed
 Linux output, not output generated from the implementation being tested.
 """
 import difflib
