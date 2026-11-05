@@ -29,7 +29,8 @@
 # before the boot). Its sha256, read twice, in OUTDIR/stick.sha256.
 # WIRE_NETPOLL=1 makes OUTDIR/pax-wire-netpoll.img instead (sha256 in
 # OUTDIR/stick-netpoll.sha256), the same but for `cmdline: netpoll` in its
-# Limine entry: kernel/gbe polls QEMU's 82576 as it polls the I225, the
+# first Limine entry, the default (px93's upgrade entry after it is kept
+# as written): kernel/gbe polls QEMU's 82576 as it polls the I225, the
 # qualification's second machine (never the stick that goes to kasumi).
 #
 # /etc/wire.sh, on the machine: waits for kernel/dhcp's lease file
@@ -98,8 +99,8 @@ fi
 img=$out/pax-wire.img sums=$out/stick.sha256 conf=$PAX_ROOT/boot/limine-usb.conf
 if [ "${WIRE_NETPOLL:-0}" = 1 ]; then
     img=$out/pax-wire-netpoll.img sums=$out/stick-netpoll.sha256 conf=$out/limine-netpoll.conf
-    awk '{ print } /^ *module_path:/ { print "    cmdline: netpoll" }' "$PAX_ROOT/boot/limine-usb.conf" > "$conf"
-    grep -q '^    cmdline: netpoll$' "$conf" || die "no module_path line in boot/limine-usb.conf to put netpoll after"
+    awk '/^\// { n++ } { print } n == 1 && /^ *module_path:/ { print "    cmdline: netpoll" }' "$PAX_ROOT/boot/limine-usb.conf" > "$conf"
+    [ "$(grep -c '^    cmdline: netpoll$' "$conf")" = 1 ] || die "not one module_path line in boot/limine-usb.conf's first entry to put netpoll after"
 fi
 rm -f "$img"
 "$PAX_ROOT/tools/mkdisk" --usb --kernel "$out/kmain_session.elf" --initramfs "$out/wire.cpio" \
