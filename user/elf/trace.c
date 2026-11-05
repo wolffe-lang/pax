@@ -7,7 +7,8 @@
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
- * The notify mode also compares si_uid with the caller's getuid().
+ * Notification/control modes compare valid si_uid with getuid(); an
+ * SI_KERNEL control stop instead requires its unused uid word to be zero.
  * Registers, status words, siginfo codes, memory and errors are not masked.
  * A failed prerequisite prints FAIL and kills/reaps only our own child.
  * Run inside a disposable pid namespace/container, or PAX, with a deadline.
@@ -551,7 +552,9 @@ static void control_info(void) {
     dec("control.sender-parent", (unsigned)si.fields[0] == (unsigned)call(39, 0, 0, 0, 0, 0));
     dec("control.sender-target", (unsigned)si.fields[0] == (u64)child);
     dec("control.sender-zero", (unsigned)si.fields[0] == 0);
-    dec("control.sender-uid", (unsigned)(si.fields[0] >> 32) == (unsigned)call(102, 0, 0, 0, 0, 0));
+    /* ATTACH's SI_KERNEL stop has a zeroed union; other control stops
+       in these same-uid cases identify the caller/target's real uid. */
+    dec("control.sender-uid", (unsigned)(si.fields[0] >> 32) == (si.code == 128 ? 0U : (unsigned)call(102, 0, 0, 0, 0, 0)));
 }
 static int controlled_mode(const char *mode) {
     return equal(mode, "attach") || equal(mode, "seize") || equal(mode, "replace-signal") ||
