@@ -1,0 +1,158 @@
+umask 022; D=/tmp/den-$(id -u); O=$D/out; G=$D/gitconfig
+mkdir -p $D/home $D/xdg $D/hooks $D/template $O
+export LC_ALL=C TZ=UTC PATH=/bin COLUMNS=80 HOME=$D/home
+export XDG_CONFIG_HOME=$D/xdg GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=$G
+export GIT_EDITOR=false GIT_PAGER=cat PAGER=cat GIT_TERMINAL_PROMPT=0
+export GIT_OPTIONAL_LOCKS=0; unset EDITOR VISUAL LANG GIT_DIR
+unset GIT_WORK_TREE GIT_INDEX_FILE GIT_AUTHOR_NAME GIT_COMMITTER_NAME
+printf '[user]\n\tname = Den Tester\n' > $G
+printf '\temail = den@example.invalid\n[color]\n\tui = never\n' >> $G
+printf '[core]\n\tpager = cat\n\thooksPath = %s/hooks\n' $D >> $G
+printf '[init]\n\tdefaultBranch = main\n' >> $G
+printf '\ttemplateDir = %s/template\n' $D >> $G
+printf '[commit]\n\tgpgsign = false\n' >> $G
+t=1700000000; tock() { export GIT_COMMITTER_DATE="$t +0000"; }; E='[stderr]'
+tick() { t=$((t + 60)); export GIT_AUTHOR_DATE="$t +0000"; tock; }; tick
+s() { "$@" >$O/o 2>$O/e; echo "status $?"; cat $O/o; echo "$E"; cat $O/e; }
+W=/home/pax; [ "$(id -u)" != 0 ] || W=/home/den-root; mkdir -p $W
+Q=9428; [ "$(id -u)" != 0 ] || Q=9418
+U=$DEN_UPLOAD_PACK; V=$DEN_RECEIVE_PACK
+dm() { den daemon --enable-receive-pack $P $Q 2>$O/d; echo "daemon $?"; }
+dc() { read l; echo "$l"; s "$@"; cat; }
+echo den-session-begin
+echo "upload=$DEN_UPLOAD_PACK receive=$DEN_RECEIVE_PACK"
+sha256sum /usr/libexec/den/upload-pack /usr/libexec/den/receive-pack
+cat /usr/libexec/den/upload-pack /usr/libexec/den/receive-pack
+B=$D/bin; mkdir -p $B
+printf '#!/bin/sh\nexec /bin/den upload-pack "$1"\n' > $B/upload-pack
+printf '#!/bin/sh\nexec /bin/den receive-pack "$1"\n' > $B/receive-pack
+chmod 755 $B/upload-pack $B/receive-pack
+sha256sum $B/upload-pack $B/receive-pack
+echo den-place-tmp
+P=$D/r; mkdir -p $P; cd $P
+s den init src
+cd src
+printf 'one\n' > a.txt
+s den add a.txt
+s den commit -m 'first: a.txt'
+cd ..
+unset DEN_UPLOAD_PACK DEN_RECEIVE_PACK
+s den clone -q --bare file://$P/src none.git
+export DEN_UPLOAD_PACK=$B/upload-pack DEN_RECEIVE_PACK=$B/receive-pack
+s den clone -q --bare file://$P/src hub.git
+s ls hub.git
+cd src
+s den remote add origin file://$P/hub.git
+s den remote -v
+tick; printf 'two\n' >> a.txt
+s den commit -a -m 'second: two'
+s den push -u origin main
+s cat .git/config
+s cat ../hub.git/refs/heads/main
+s den status
+tick; printf 'three\n' >> a.txt
+s den commit -a -m 'third: three'
+s den push
+cd ..
+s den clone -q file://$P/hub.git c2
+cd c2
+s den log --oneline
+s den remote -v
+tick; printf 'from c2\n' > c.txt
+s den add c.txt
+s den commit -m 'c2: c.txt'
+s den push
+cd ../src
+s den fetch
+s den log --oneline origin/main
+s den pull --no-rebase
+s den log --oneline
+cd ..
+: > hub.git/git-daemon-export-ok
+dm | dc den clone -q git://127.0.0.1:$Q/hub.git c3
+cat $O/d
+cd c3
+s den log --oneline
+s den remote -v
+tick; printf 'from c3\n' > d.txt
+s den add d.txt
+s den commit -m 'c3: d.txt'
+dm | dc den push
+cat $O/d
+s den fetch
+cd ../src
+s den pull --no-rebase
+s den log --oneline
+cd ..
+s cat hub.git/refs/heads/main
+sha256sum hub.git/objects/??/*
+cd hub.git
+s den fsck --full
+cd ../src
+s den fsck --full
+cd ../c2
+s den fsck --full
+cd ../c3
+s den fsck --full
+echo den-place-home
+export DEN_UPLOAD_PACK=$U DEN_RECEIVE_PACK=$V; Q=$((Q + 1))
+P=$W/r; mkdir -p $P; cd $P
+s den init src
+cd src
+printf 'one\n' > a.txt
+s den add a.txt
+s den commit -m 'first: a.txt'
+cd ..
+s den clone -q --bare file://$P/src hub.git
+cd src
+s den remote add origin file://$P/hub.git
+s den remote -v
+tick; printf 'two\n' >> a.txt
+s den commit -a -m 'second: two'
+s den push -u origin main
+s cat ../hub.git/refs/heads/main
+tick; printf 'three\n' >> a.txt
+s den commit -a -m 'third: three'
+s den push
+cd ..
+s den clone -q file://$P/hub.git c2
+cd c2
+s den log --oneline
+tick; printf 'from c2\n' > c.txt
+s den add c.txt
+s den commit -m 'c2: c.txt'
+s den push
+cd ../src
+s den fetch
+s den log --oneline origin/main
+s den pull --no-rebase
+s den log --oneline
+cd ..
+: > hub.git/git-daemon-export-ok
+dm | dc den clone -q git://127.0.0.1:$Q/hub.git c3
+cat $O/d
+cd c3
+s den log --oneline
+tick; printf 'from c3\n' > d.txt
+s den add d.txt
+s den commit -m 'c3: d.txt'
+dm | dc den push
+cat $O/d
+s den fetch
+cd ../src
+s den pull --no-rebase
+s den log --oneline
+cd ..
+s cat hub.git/refs/heads/main
+sha256sum hub.git/objects/??/*
+cd hub.git
+s den fsck --full
+cd ../src
+s den fsck --full
+cd ../c2
+s den fsck --full
+cd ../c3
+s den fsck --full
+cd /
+echo den-session-end
+exit
