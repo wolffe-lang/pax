@@ -46,7 +46,9 @@
 #      try count rising.
 #   D5 (renew) at T1 (10 s after the lease, +-1 s) a REQUEST unicast to
 #      the server (`RENEW`), its ACK, `bound` again on the same address;
-#      the server logged the renewal.
+#      the server logged the renewal: each renewing REQUEST the capture
+#      holds is in dnsmasq's log by its xid, requested and ACKed (a log
+#      this user cannot read fails by its mode and owner).
 #   D6 (rebind) the renewal at T1 unanswered; at T2 (20 s, +-1 s) a
 #      broadcast REQUEST (`REBIND`), its ACK, the same address.
 #   D7 (expiry) RENEW at T1, REBIND at T2 and again at +80 s (half the
@@ -310,9 +312,27 @@ one() { # tier leg way
             local b2
             b2=$(grep -E '^dhcp: \+[0-9.]+ s bound ' "$norm" | sed -n 2p)
             [ "$(printf '%s\n' "$b1" | sed -E 's/^dhcp: \+[0-9.]+ s //')" = "$(printf '%s\n' "$b2" | sed -E 's/^dhcp: \+[0-9.]+ s //')" ] || why+=" bound after the renewal '$b2' differs from the first '$b1';"
-            grep -q 'DHCPACK.*192\.168\.89\.' "$acct"/dnsmasq-1.log 2>/dev/null && [ "$(grep -c 'DHCPREQUEST' "$acct"/dnsmasq-1.log)" -ge 2 ] || why+=" dnsmasq logged $(grep -c DHCPREQUEST "$acct"/dnsmasq-1.log 2>/dev/null) requests;"
-            printf '%s\n' "$pc" | grep -q 'client REQUEST (renewing)' || why+=" no renewing REQUEST in the capture;"
-            [ -z "$why" ] && say "PASS D5 $L: lease at +$tb s, RENEW at +$t1 s; ${b2#dhcp: }" || bad "D5 $L:$why"
+            # The renewal by both witnesses: the capture's renewing
+            # REQUESTs, each found by its xid in dnsmasq's own log (which
+            # writes the xid in decimal), requested and ACKed. A log this
+            # user cannot read is said so, by its mode and owner.
+            local dl=$acct/dnsmasq-1.log rx x d nrx=0
+            rx=$(printf '%s\n' "$pc" | sed -nE 's/^pcap-dhcp: \+[0-9.]+ client REQUEST \(renewing\) xid=(0x[0-9a-f]+) .*/\1/p')
+            [ -n "$rx" ] || why+=" no renewing REQUEST in the capture;"
+            if [ ! -r "$dl" ]; then
+                why+=" dnsmasq's log $dl cannot be read by uid $(id -u): $(stat -c '%a %U:%G' "$dl" 2>/dev/null || echo 'no such file');"
+            else
+                [ "$(grep -c 'DHCPREQUEST(' "$dl")" -ge 2 ] && grep -q 'DHCPACK(.*192\.168\.89\.' "$dl" || why+=" dnsmasq logged $(grep -c 'DHCPREQUEST(' "$dl") requests and $(grep -c 'DHCPACK(' "$dl") ACKs;"
+                for x in $rx; do
+                    d=$((x))
+                    if grep -Eq " $d DHCPREQUEST\(" "$dl" && grep -Eq " $d DHCPACK\([^)]*\) 192\.168\.89\." "$dl"; then
+                        nrx=$((nrx + 1))
+                    else
+                        why+=" the capture's renewing REQUEST xid $x ($d) is not requested and ACKed under that xid in dnsmasq's log;"
+                    fi
+                done
+            fi
+            [ -z "$why" ] && say "PASS D5 $L: lease at +$tb s, RENEW at +$t1 s; ${b2#dhcp: }; dnsmasq's log holds the capture's $nrx renewing REQUESTs by xid, each ACKed" || bad "D5 $L:$why"
             ;;
         rebind)
             why=
