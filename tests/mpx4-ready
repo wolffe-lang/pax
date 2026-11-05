@@ -55,7 +55,8 @@
 #   T0 build: tools/build-kernel's object assertions for kmain_sockets;
 #      every program static (ET_EXEC, no PT_INTERP); the initramfs and
 #      ISOs built; the Linux side ran every command and its script
-#      ended PASS.
+#      ended PASS; the reference's pipe held Linux's default 65536 bytes
+#      (else it is refused by name and nothing is compared with it).
 #   T1 the stack up: the device's address (none: the network is off),
 #      kernel/ip's and kernel/tcp's lines (1024 blocks since px34; 256 before).
 #   T2 the programs, differential: for each line k, `run k: <line>`, its
@@ -169,9 +170,18 @@ done
 [ -z "$subset" ] || say "ways: $ways (PAX_READY_WAYS: a subset of the suite's ways, not its verdict)"
 
 # Why a Linux reference (a directory of its N.out) must not be compared
-# with, or nothing when it may be.
-reference_refusal() {
-    return 0 # no guard yet: every reference is compared
+# with, or nothing when it may be. A new pipe holds Linux's default, 16
+# pages (65536 bytes), only while its user's pipe pages are under
+# /proc/sys/fs/pipe-user-pages-soft; past it a new pipe holds two pages
+# (pipe(7)). The reference runs as this host's user, whose pipes every
+# other job of that user counts too, so nbprobe's pipe row is read
+# before anything is compared with the reference.
+reference_refusal() { # DIR
+    local row
+    row=$(grep -h -m1 '^writes until the pipe is full: ' "$1"/*.out 2>/dev/null | head -n 1)
+    [ "$row" = "writes until the pipe is full: 65536 bytes, then -EAGAIN" ] && return 0
+    printf "the Linux reference's pipe held '%s', not Linux's default 65536 bytes (pipe(7): its user's pipe pages past pipe-user-pages-soft, %s pages): the reference is refused, and no boot is compared with it" \
+        "${row#writes until the pipe is full: }" "$(cat /proc/sys/fs/pipe-user-pages-soft 2>/dev/null || echo ?)"
 }
 
 # T0r, the reference guard's own row: the fixture is a reference whose
@@ -299,6 +309,14 @@ fi
 lx=$images/linux
 [ -f "$images/peer.run" ] && [ -f "$images/user.run" ] && [ -f "$images/none.run" ] && [ -d "$lx" ] && [ -f "$images/sizes" ] || die "no $images/peer.run, user.run, none.run, sizes or linux/ (build first)"
 read -r soak < "$images/sizes"
+# The reference this run compares with, refused by name when its pipe
+# was not Linux's default (reference_refusal, T0r).
+ref_why=$(reference_refusal "$lx")
+if [ -n "$ref_why" ]; then
+    bad "T0: $ref_why"
+    say "mpx4-ready: FAIL (the Linux reference was refused)"
+    exit 1
+fi
 
 # Two ports on this host, free to bind (UDP for the socket netdev, TCP
 # for the forwards).
