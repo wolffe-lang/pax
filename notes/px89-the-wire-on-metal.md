@@ -9,7 +9,7 @@ PAX had one network device (virtio-net) and one address (10.0.2.15, fixed). px89
 kernel (`kernel/dhcp`, RFC 2131: the whole client state machine, renewal, rebinding, expiry, NAK) that a boot uses
 when its image's `/etc/pax-net` says `dhcp`, and a driver for Intel's gigabit controllers (`kernel/gbe`) on the
 programming model QEMU's 82576 (`-device igb`) and the I225 share, so the DHCP, UDP and TCP rows run over a
-second device; and it stages a stick for kasumi whose script takes a lease on the I225-V, records the router's
+second device; and it stages a stick for the metal target whose script takes a lease on the I225-V, records the router's
 answer and one TCP connection, and writes the record to the stick.
 
 ## Forbidden
@@ -19,18 +19,28 @@ FreeBSD `em`/`igc`, no QEMU device model, no dnsmasq, ISC, busybox or systemd-ne
 2132, 951, 1542 and 950, resolv.conf(5), Intel's public 82576EB (rev 2.63), I210 (333016 rev 3.7) and I225/I226
 (596659 rev 2.6) datasheets, PCI Local Bus 3.0 (§6.8, MSI and MSI-X), and black-box runs of QEMU 8.2.2's user-mode
 DHCP server, of QEMU's `-device igb` (what its registers read back after PAX's writes), of dnsmasq 2.91, and of
-kasumi's CachyOS (read-only `lspci`, `ip`, `/sys/class/net`). Each is in `docs/SOURCES.md` (px89's section); the
+the metal target's CachyOS (read-only `lspci`, `ip`, `/sys/class/net`). Each is in `docs/SOURCES.md` (px89's section); the
 measurements are in `notes/px89/blackbox.txt`; the datasheets' digests in `notes/px89/datasheets.sha256`. QEMU's igb
 documentation page (not its source) was read once and says nothing about interrupts. No DNS resolver: writing
 `/etc/resolv.conf` is the limit (wolf-lang#831).
 
-Hosts: hasu block B only, both lock names, every take under 2 h; nothing in `/tmp` or `/var/folders`, TMPDIR under
-`~/lanes/px89/`; no commit signed or made on hasu (every git there passes `-c commit.gpgsign=false`). kasumi was read
+Hosts: the lane host's block B only, both lock names, every take under 2 h; nothing in `/tmp` or `/var/folders`, TMPDIR under
+`~/lanes/px89/`; no commit signed or made on the lane host (every git there passes `-c commit.gpgsign=false`). The metal target was read
 once, read-only, under CachyOS (no disk touched, `/mnt/steamlib` not mounted, the rpc-server not touched); the metal
 leg is staged, not run. No label, merge, tag or close; no attribution trailers. A lane-only branch, `px89-probe`,
 holds three probe commits (register read-backs) that are not part of this PR.
 
 ## Inputs, verified
+
+The machines, by the names this note and every file of `notes/px89/` give them (by description since the merge; the
+rig's scripts and logs read `rig` in the environment's path and the lock names where the lane host's name stood, and
+are otherwise as they ran):
+
+| name here | the machine |
+|---|---|
+| the lane host | an x86-64 Linux workstation with KVM, three blocks of six CPUs, two lock names to each block: the records, the CI mirror and every QEMU row |
+| the metal target | the machine with the Intel I225-V the stick is for (its identity under "The metal target" below), read once under its own CachyOS |
+| the build Mac | where the stick is staged (`~/pax-smoke/`), its digest read and the stick written |
 
 - **Base** `b38643a520eefcd89203c9e1e4188017a23e97bc`, pax trunk at clone time, rebased onto
   `37217ba0832ea36304c0eb517ff2662801b26a46` (px98's merge, then pax#297's), then onto
@@ -50,18 +60,18 @@ holds three probe commits (register read-backs) that are not part of this PR.
   twin was polled. A stick built at the head carries px93's entry, which mounts nothing: the stick's
   `/pax/install-targets` names no disk as shipped. `notes/px89/rebase-map.txt` pairs each commit with its twins:
   this note cites the last, and every run in its tables ran at the map's first column (the commit before the
-  rebases) but w4's, w5's and the CI mirror's, which name their own. Branch `px89` in `~/lanes/px89/pax`; on hasu a clone at
+  rebases) but w4's, w5's and the CI mirror's, which name their own. Branch `px89` in `~/lanes/px89/pax`; on the lane host a clone at
   `/home/mfwolffe/lanes/px89/pax`, a worktree per tested commit (`wt-<sha8>`), git behind a lane-local lock.
 - **Toolchain** wolf 0.2.35 by `kernel/wolf.pin` (`tools/fetch-wolf`'s digest check every build), Limine 12.9.1.
 - **Image** `localhost/px89-dhcp:1`: px88's `localhost/px88-ubuntu:1` (px75's QEMU 8.2.2, OVMF, clang, lld 18,
   gcc; musl-tools, strace) plus Ubuntu 24.04's `dnsmasq-base` 2.91, `iproute2` and `tcpdump`
-  (`notes/px89/rig/Containerfile`); the suites' Linux sides that run throwaway containers reach hasu's podman
+  (`notes/px89/rig/Containerfile`); the suites' Linux sides that run throwaway containers reach the lane host's podman
   through a lane-owned rootless service (`notes/px89/rig/podman-service.sh`, `podman-remote`). CI's two jobs get dnsmasq-base and
   iproute2 from the runner's apt and `modprobe tun`.
-- **Hosts** hasu block B (CPUs 6-11, `/dev/kvm`), `notes/px89/rig/launch.sh` (both lock names, one `flock -w
+- **Hosts** the lane host's block B (CPUs 6-11, `/dev/kvm`), `notes/px89/rig/launch.sh` (both lock names, one `flock -w
   21600` each, detached, pid, log and exit marker). dnsmasq runs on a tap in the container's own network namespace
-  (`/dev/net/tun`, CAP_NET_ADMIN: nothing of hasu's network is touched).
-- **kasumi** (read once, 2026-11-03 23:05Z): the cabled port is the I225-V, PCI `70:00.0`, `8086:15f3` rev 03,
+  (`/dev/net/tun`, CAP_NET_ADMIN: nothing of the lane host's network is touched).
+- **The metal target** (read once, 2026-11-03 23:05Z): the cabled port is the I225-V, PCI `70:00.0`, `8086:15f3` rev 03,
   BAR0 1 MiB at 0xa4900000 (32-bit), BAR3 16 KiB, `enp112s0`, MAC `7c:10:c9:3f:cb:9c`, 1000 Mb/s, DHCP from
   `192.168.0.1` on `192.168.0.0/24`. The other port is an Aquantia AQC113CS (`6f:00.0`, `1d6a:94c0`), no cable.
 - **The datasheets**: the I225/I226 public datasheet has no register map, no descriptor layout, no reset, PHY or
@@ -134,8 +144,8 @@ Commits (the prediction first; each phase's rows red before its code):
 - **R-px89-5, resolv.conf on a lost lease.** (A) emptied (no `nameserver` line) at NAK or expiry, rewritten at the
   next ACK; (B) left. **A**: a server the network no longer gives should not be asked.
 - **R-px89-7, the record's rig (ruled B).** mpx4-lobo's Linux side runs its container on the engine's `--network
-  host`, hasu's own namespace, and connects to it at 127.0.0.1; the gauntlet's step had a namespace of its own, so
-  every Linux leg was refused (red at base `b38643a5` as at the head, green with the step in hasu's namespace:
+  host`, the lane host's own namespace, and connects to it at 127.0.0.1; the gauntlet's step had a namespace of its own, so
+  every Linux leg was refused (red at base `b38643a5` as at the head, green with the step in the lane host's namespace:
   `ctr2.sh HOSTNET=1`, mpx4-lobo's step alone, no tap). The scripts' copies are committed before the record.
 - **R-px89-8, kernel-as (ruled A).** CI-only for this PR, a named SKIP line in the local record; the full-matrix
   run must show it green before the merge.
@@ -165,7 +175,7 @@ renew boot: `REQUEST (renewing)=2 server ACK=3`). CI's dnsmasq is the lane's, `d
 tools/dhcp-wire starts dnsmasq through `sudo -n`. dnsmasq run as root makes its `--log-facility` file mode 640,
 root:root, which the runner cannot read, and the row's `grep -c … 2>/dev/null` printed nothing. The same file
 stopped the jobs' artifact uploads (`EACCES … dnsmasq-1.log`). The lane's containers run every suite as root, so
-no local record met it. Witnessed on hasu block B (`notes/px89/logs/dnslog1.log`, `dnslog2.log`): the log dnsmasq
+no local record met it. Witnessed on the lane host's block B (`notes/px89/logs/dnslog1.log`, `dnslog2.log`): the log dnsmasq
 makes as root is 640 root:root and uid 1001's read is `Permission denied`; a log the caller makes first keeps its
 owner and its mode 644, and dnsmasq appends to it.
 
@@ -195,7 +205,7 @@ RENEW unicast to the server, T2 (0.875) REBIND broadcast, the retransmission the
 and 59 when given. Every change is a `dhcp:` line stamped from the client's start. `/var/lib/dhcp/pax.lease` holds
 the lease as a program reads it, and whether the router answered the kernel's echo.
 
-### The rows (hasu block B; each run's verdict lines in `notes/px89/logs/<run>.rows`, the igb boots' `net:` and probe lines in `notes/px89/logs/igb-boots.txt`)
+### The rows (the lane host's block B; each run's verdict lines in `notes/px89/logs/<run>.rows`, the igb boots' `net:` and probe lines in `notes/px89/logs/igb-boots.txt`)
 
 | run | commit | what it showed |
 |---|---|---|
@@ -219,28 +229,28 @@ the lease as a program reads it, and whether the router answered the kernel's ec
 
 ### The metal leg (staged, not run)
 
-`tools/mkwire root` and `tools/mkwire stick` at `1fde2d17` on hasu (`notes/px89/rig/wire-build.sh`), qualified by
+`tools/mkwire root` and `tools/mkwire stick` at `1fde2d17` on the lane host (`notes/px89/rig/wire-build.sh`), qualified by
 `notes/px89/rig/wire-qualify.sh` (`notes/px89/logs/w3.rows`): a copy of the image as USB storage on qemu-xhci,
 QEMU's 82576 on its user network, a server on the host for the TCP row, a SATA disk and an NVMe disk of 64 MiB of
 random bytes beside it; four boots (BIOS and UEFI; the stick, and its twin `pax-wire-netpoll.img` with `netpoll`
 on its command line so the controller is polled as the I225 will be). Every boot: Q0 the controller's line, Q1 the lease and
 resolv.conf in the record, Q2 the router's answer to the kernel's echo, Q3 tcpprobe's connection and the server's
 line, Q4 the record on the image afterwards (`/pax/logs/wire-1.txt`, 19 lines), Q5 the other two disks
-byte-identical. The stick: `~/pax-smoke/pax-wire-f68505c6.img` on nomad, 241,172,480 bytes, sha256
-`ba06df59…358c7` (read twice on hasu, twice on nomad), with `~/pax-smoke/README-wire-f68505c6.txt` (a copy in
+byte-identical. The stick: `~/pax-smoke/pax-wire-f68505c6.img` on the build Mac, 241,172,480 bytes, sha256
+`ba06df59…358c7` (read twice on the lane host, twice on the build Mac), with `~/pax-smoke/README-wire-f68505c6.txt` (a copy in
 `notes/px89/stick-README.txt`).
 
-The I225-V on kasumi: PCI `70:00.0`, `8086:15f3` rev 03, `enp112s0`, MAC `7c:10:c9:3f:cb:9c`, the port cabled
+The I225-V on the metal target: PCI `70:00.0`, `8086:15f3` rev 03, `enp112s0`, MAC `7c:10:c9:3f:cb:9c`, the port cabled
 today (CachyOS's `lspci -nn` and `/sys/class/net`, read once; `notes/px89/blackbox.txt` §3). The stick's own
 `net: Intel I225/I226 8086:15f3 at 70:00.0` line will confirm it from PAX's side.
 
 ### The plant and the gauntlet
 
 Both records are in the PR body (each at the head they name: this note is part of the gauntlet's head, so it cannot
-hold them). The gauntlet (`notes/px89/rig/gauntlet.sh` under planning's `gauntlet-record.sh`, hasu block B, each
+hold them). The gauntlet (`notes/px89/rig/gauntlet.sh` under planning's `gauntlet-record.sh`, the lane host's block B, each
 step its own lock take): the plan job's self-tests; `mpx4-dhcp` and `mpx4-igb` on native BIOS and release UEFI
 (R-px89-9: BIOS and UEFI as item 5 asks; the full-matrix label and tier all cover the other legs); `mpx4-unix`,
-`mpx4-session`, `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-lobo` (its step in hasu's own network
+`mpx4-session`, `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-lobo` (its step in the lane host's own network
 namespace, where its Linux side's container listens: R-px89-7), `mpx5-jobs` and `mpx3-shell` on the merge leg
 (native BIOS). The gauntlet's containers run the suites as root; CI's runner is not root, and
 `notes/px89/rig/probes/ci-mirror-suites.sh` runs `mpx4-dhcp` and `mpx4-igb` whole as runner on the leg CI ran red
@@ -259,7 +269,7 @@ The steps are `~/pax-smoke/README-wire-f68505c6.txt` (`notes/px89/stick-README.t
 (balenaEtcher; its digest checked first), optionally name the TCP host in its ESP's `pax/wire-target` (R-px89-3),
 the cable in the I225-V's port, F8, the stick's UEFI entry, the default Limine entry; a video from the menu, photos
 of the `net:` and `dhcp:` lines and of the record; the line `== written to /pax/logs/wire-1.txt on /dev/sd?`; then
-the power button (the stick has no reboot program); the record copied from the stick's ESP on nomad. What can go
+the power button (the stick has no reboot program); the record copied from the stick's ESP on the build Mac. What can go
 wrong and what to photograph for each is in the README. The stick writes only itself.
 
 ## Done-when
@@ -277,7 +287,7 @@ wrong and what to photograph for each is in the README. The stick writes only it
   I225-only paths named; the 82576 and I210 share the ring layout, the I225's public datasheet has no register map.
 - [x] Item 5: PAX on `-device igb` takes its lease by DHCP and passes the existing UDP and TCP rows (mpx4-igb
   G1-G4, BIOS and UEFI: the gauntlet's `mpx4-igb` and `mpx4-igb:release-uefi`).
-- [x] Item 6: the stick for kasumi built, qualified under QEMU (BIOS and UEFI, MSI-X and polled, no other disk
+- [x] Item 6: the stick for the metal target built, qualified under QEMU (BIOS and UEFI, MSI-X and polled, no other disk
   written) and staged with the session's exact steps (below); the I225-V identified (PCI `70:00.0`, `8086:15f3`
   rev 03, the cabled port, `enp112s0`). Not run: the maintainer's session.
 - [x] Item 7: each phase's rows red by name before its code (`notes/px89/red/`).
