@@ -90,6 +90,17 @@ Committed first (`notes/px97/prediction.txt`).
   replay and friendly rows, and mpx3-shell (pelt's prompt).
 - **Wall time:** far over the estimate. Under one slot running hot, the builds alone took 35 to 72 minutes a row
   (boreutils 35, yew 38, pelt 64, lobo's two builds 72).
+- **mpx6-part, found by CI's labelled full tier** (run 42105296028, at the first head `4d07bf3b`): not predicted.
+  Its console disks hold the kernel and the whole initramfs on a 64 MiB ESP, and at trunk that ESP was already 98%
+  full (126,658 of 129,022 clusters on the native tier). boreutils' `cat`, `ls` and `stat` at `ff5396ad`, built by
+  wolf 0.2.36, are about 15 MB each unstripped (15,191,560, 15,339,584 and 15,201,912 bytes), and copying the
+  initramfs failed: `mkdisk: mcopy ::/boot/initramfs.cpio: exit 1: Disk full`. With no boot disk, P0, P6, P7, P8
+  and P10 were red; the GPT fixtures' rows (P1 to P5) held. P0 named the transcript's last line, a progress line
+  mkdisk had buffered, not the refusal. Two commits: P0 now names mkdisk's own refusal (`7d44562d`, red by name at
+  the new pin), then the initramfs carries the wolf programs stripped, as `tools/distribution-root` ships them
+  (`d6915414`). The local gauntlet had left mpx6-part to the labelled full tier with the other suites the
+  boreutils pin reaches (R-px97-4), so neither the probe nor the first final run had it; the final gauntlet now
+  runs every mpx6-part row on the PR leg, and the other suites stay the full tier's (all green in that run).
 
 ## 4. Evidence index
 
@@ -97,7 +108,8 @@ The commits, each a component or a row:
 
 **The final gauntlet and the plant:** their records and every `END` line are in the pull request's body.
 - The gauntlet runs at the final head, in stop mode: ci-plan, census, red-first (the census pairs), the A2 row at its
-  red commit, then each moved component's rows on native BIOS under KVM, then the inputs, `tools/mkdistribution` and
+  red commit, every mpx6-part row, then each moved component's rows on native BIOS under KVM, then the inputs (the
+  dev compiler among them, `tools/mkwolf`'s bytes held to `user/wolf.sums`), `tools/mkdistribution` and
   `tests/distribution-boot`.
 - The plant, `px97-plant-den`, is one hunk of `user/den.pin`: a revision that does not exist, red by name as
   `FAIL D0 (build)`.
