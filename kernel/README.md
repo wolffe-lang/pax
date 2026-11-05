@@ -1106,12 +1106,15 @@ register words and debug registers, POKEUSER of debug registers, SINGLESTEP,
 PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA, and proc memory read/write.
 SETOPTIONS now accepts TRACESYSGOOD, TRACEFORK/VFORK/CLONE/EXEC/VFORKDONE/EXIT and EXITKILL;
 GETEVENTMSG reports exec/exit events, and PTRACE_SYSCALL stops at entry/exit.
-Signal-delivery stops can be suppressed with CONT(0).
+Signal-delivery stops can be suppressed with CONT(0), passed on, or replaced;
+DETACH also accepts a signal. ATTACH and SEIZE/INTERRUPT bind running targets
+under the real-credential access rule. Synchronous faults stop before their
+handler or default action, and passed faults retain their captured siginfo.
 Creation events auto-attach the child and report its initial stop; vfork
 completion is held until its earlier event has been consumed. A traced death
 is collected by the tracer before it is handed back to the real parent.
-It is not yet enough to run a debugger: attach, signal injection and complete
-group-exit/thread lifecycle are still being implemented. Other requests are refused
+Group-stop/listen behavior, stopped/blocked attach targets and complete
+group-exit/thread lifecycle still require their dedicated rows and handling. Other requests are refused
 by name; NT_X86_XSTATE is named and returns EINVAL.
 
 | Change | Behaviour and row |
@@ -1127,11 +1130,10 @@ by name; NT_X86_XSTATE is named and returns EINVAL.
 
 The new state fills the existing 512-byte thread slot (six words added), plus
 64 bytes per thread for virtual debug registers. SETREGS currently refuses
-non-user RIP/RSP/FS bases; general-word POKEUSER and nonzero signal injection
-remain unsupported. These restrictions need their own compatibility rows
+non-user RIP/RSP/FS bases; general-word POKEUSER remains unsupported. These restrictions need their own compatibility rows
 before the full tracing interface is claimed.
 
-Tracing option/event state uses a separate 128-byte slot per thread, leaving
+Tracing option/event/control state uses a separate 256-byte slot per thread, leaving
 Thread at 512 bytes. Before any thread/table write, `T-trace-layout` compares
 both record sizes against actual assembly start/end reservation bounds. A
 520-byte Thread overflow was rejected at boot before scheduler initialization.
@@ -1154,3 +1156,11 @@ shared futex key for clear-child-tid, and stops its leader at an INT3 barrier
 before group exit: Linux may otherwise replace a racing thread's status with
 the group-exit status. `T-fork-real-parent`, `T-vfork-blocked-parent`,
 `T-vfork-child-first`, and `T-traced-thread-exit` hold these sequences.
+
+The running-target control rows cover ATTACH (its initial SI_KERNEL stop has
+zero pid/uid fields), SEIZE argument errors, INTERRUPT's EVENT_STOP, DETACH
+clearing TracerPid, nonzero signal injection and replacement, and a seized
+fork child's EVENT_STOP. Passing the original synchronous fault uses the
+captured vector/error/address, not a later CR2. SIGSEGV, SIGILL and SIGFPE
+recovery, passing a fault to a handler, replacement by SIGTERM, and untraced
+single-step siginfo have separate Linux reference rows.

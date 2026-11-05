@@ -2692,9 +2692,10 @@ fn next_for(t: u64) -> (u64, u64) {
     let m = field(t, offset_of(Thread, sigmask))
     let own = field(t, offset_of(Thread, pend)) & !m
     let grp = field(l, offset_of(Thread, gpend)) & !m
-    if own == 0 && grp == 0 {
-        return (0, 0)
-    }
+    if own == 0 && grp == 0 { return (0, 0) }
+    // A pending SIGKILL must not be delayed by another tracing stop.
+    if own & bit(SIGKILL) != 0 { return (SIGKILL, 0) }
+    if grp & bit(SIGKILL) != 0 && taker(l, SIGKILL) == t { return (SIGKILL, 1) }
     var sig: u64 = 1
     while sig <= NSIG {
         if own & bit(sig) != 0 {
@@ -3687,11 +3688,11 @@ pub fn trace_resume(s: u64) {
     trace_state.set_initial(s, 0)
     let vc = trace_state.vfork_child(s)
     if vc != 0 && field(vc - 1, offset_of(Thread, vparent)) == s + 1 {
-        put_field(s, offset_of(Thread, trace_status), 0)
+        put_field(s, offset_of(Thread, trace_status), field(s, offset_of(Thread, trace_status)) & 0xffffffff)
         put_field(s, offset_of(Thread, state), VFORK)
         return
     }
-    put_field(s, offset_of(Thread, trace_status), 0)
+    put_field(s, offset_of(Thread, trace_status), field(s, offset_of(Thread, trace_status)) & 0xffffffff)
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
 }
@@ -3810,6 +3811,7 @@ pub fn trace_inherit(s: u64) {
     put_field(s, offset_of(Thread, tracer), tracer_of(c))
     put_field(s, offset_of(Thread, trace_orig), trace_orig(c))
     trace_state.set_options(s, trace_state.options(c))
+    trace_state.set_control(s, trace_state.control(c) & trace_state.SEIZED)
     trace_state.set_initial(s, 1)
     trace_state.set_phase(s, 2)
 }
@@ -3857,4 +3859,46 @@ fn trace_real_parent(s: u64) -> bool {
     wake_waiter(pp)
     raise_group(ps, SIGCHLD, sig_info(if killed { I_CHLD_KILLED } else { I_CHLD_EXITED }, field(s, offset_of(Thread, pid)), if killed { st & 0x7f } else { (st >> 8) & 0xff }, trace_state.exit_uid(s)))
     h != SIG_IGN && fl & SA_NOCLDWAIT == 0
+}
+
+
+/// A live user tid, whether or not it is already traced.
+pub fn trace_live(tid: u64) -> u64 {
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if takes(s) && field(s, offset_of(Thread, pid)) == tid && field(s, offset_of(Thread, tgid)) != 0 { return s }
+        s += 1
+    }
+    SLOTS
+}
+pub fn trace_tgid(s: u64) -> u64 { field(s, offset_of(Thread, tgid)) }
+
+pub fn trace_bind(s: u64, seized: bool, options: u64) {
+    put_field(s, offset_of(Thread, tracer), self_tid())
+    trace_state.set_options(s, options)
+    trace_state.set_mode(s, 0)
+    // Keep any committed continuation/injection from an earlier detach.
+    trace_state.set_control(s, (trace_state.control(s) & trace_state.FAULT) | (if seized { trace_state.SEIZED } else { 0 }))
+}
+
+pub fn trace_interrupt(s: u64) {
+    trace_state.set_control(s, trace_state.control(s) | trace_state.INTERRUPT)
+    interrupt(s) // rewound and direct-return waits resume at on_return
+}
+
+pub fn trace_detach(s: u64) {
+    put_field(s, offset_of(Thread, tracer), 0)
+    trace_state.set_options(s, 0)
+    trace_state.set_mode(s, 0)
+    trace_state.set_control(s, trace_state.control(s) & trace_state.FAULT)
+    trace_set_dr(s, 7, 0)
+    let f = field(s, offset_of(Thread, frame))
+    if f != 0 {
+        // # Safety: the owned stopped frame, before trace_resume makes it ready.
+        unsafe {
+            let p = (f + W_RFLAGS * 8) as *u64
+            p.write_volatile(p.read_volatile() & !0x100)
+        }
+    }
+    trace_resume(s)
 }

@@ -9,7 +9,7 @@ extern "c" let pax_trace_state: *u8
 extern "c" let pax_trace_state_end: *u8
 
 const SLOTS: u64 = 64
-const STRIDE: u64 = 128
+const STRIDE: u64 = 256
 
 #[repr(c)]
 struct TraceState {
@@ -27,6 +27,11 @@ struct TraceState {
     signal_status: u64,
     exit_uid: u64,
     finish_pending: u64,
+    control: u64,
+    inject_sig: u64,
+    signal_info: u64,
+    fault_vector: u64,
+    fault_error: u64,
 }
 
 /// Called before the first thread or side-table write. Capacities are
@@ -114,3 +119,23 @@ pub fn set_exit_uid(s: u64, v: u64) { put(s, offset_of(TraceState, exit_uid), v)
 
 pub fn finish_pending(s: u64) -> u64 { get(s, offset_of(TraceState, finish_pending)) }
 pub fn set_finish_pending(s: u64, v: u64) { put(s, offset_of(TraceState, finish_pending), v) }
+
+
+pub const SEIZED: u64 = 1
+pub const INTERRUPT: u64 = 2
+pub const FAULT: u64 = 4
+
+pub fn control(s: u64) -> u64 { get(s, offset_of(TraceState, control)) }
+pub fn set_control(s: u64, v: u64) { put(s, offset_of(TraceState, control), v) }
+
+pub fn inject_sig(s: u64) -> u64 { get(s, offset_of(TraceState, inject_sig)) }
+pub fn set_inject_sig(s: u64, v: u64) { put(s, offset_of(TraceState, inject_sig), v) }
+
+pub fn signal_info(s: u64) -> u64 { get(s, offset_of(TraceState, signal_info)) }
+pub fn set_signal_info(s: u64, v: u64) { put(s, offset_of(TraceState, signal_info), v) }
+
+pub fn fault_vector(s: u64) -> u64 { get(s, offset_of(TraceState, fault_vector)) }
+pub fn set_fault_vector(s: u64, v: u64) { put(s, offset_of(TraceState, fault_vector), v) }
+
+pub fn fault_error(s: u64) -> u64 { get(s, offset_of(TraceState, fault_error)) }
+pub fn set_fault_error(s: u64, v: u64) { put(s, offset_of(TraceState, fault_error), v) }

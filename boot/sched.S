@@ -213,7 +213,7 @@ pax_debugregs:
         .p2align 6
         .globl pax_trace_state
 pax_trace_state:
-        .zero 64 * 128
+        .zero 64 * 256
         .globl pax_trace_state_end
 pax_trace_state_end:
 

@@ -150,6 +150,7 @@ use paging
 use process
 use sched
 use trace
+use trace_state
 use timer
 use uaccess
 use vm
@@ -799,6 +800,8 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bo
     put_word(f, W_RDX, uc)
     put_word(f, W_RAX, 0)
     put_word(f, W_RFLAGS, (word(f, W_RFLAGS) & !(FLAG_TF | FLAG_DF)) | FLAGS_FIXED)
+    trace_state.set_phase(s, 0)
+    trace_state.set_finish_pending(s, 0)
     put_word(f, W_CS, USER_CS)
     put_word(f, W_SS, USER_SS)
     put_word(f, W_VECTOR, SIGNAL_VECTOR)
@@ -951,11 +954,27 @@ pub fn on_return(f: u64) -> u64 {
         if word(g, W_CS) & 3 != 3 {
             return g
         }
+        let injected = trace_state.inject_sig(sched.self_slot())
+        if injected != 0 && !sched.kill_pending() {
+            trace_state.set_inject_sig(sched.self_slot(), 0)
+            g = inject(g, injected)
+            guard += 1
+            continue
+        }
         let initial = trace.initial_stop(g)
         if initial != 0 {
             g = initial
             guard += 1
             continue
+        }
+        // A queued signal wins over an asynchronous PTRACE_INTERRUPT.
+        if !sched.signal_waits() {
+            let interrupted = trace.interrupt_stop(g)
+            if interrupted != 0 {
+                g = interrupted
+                guard += 1
+                continue
+            }
         }
         if sched.self_parks() {
             // px48: its process is stopped: it runs nothing, and takes
@@ -982,7 +1001,7 @@ pub fn on_return(f: u64) -> u64 {
         }
         if sig != SIGKILL && sched.tracer_of(sched.self_slot()) != 0 {
             let (code, pid, uid, status) = origin(info)
-            g = trace.signal_stop(g, sig, code, (uid << 32) | pid, status)
+            g = trace.signal_stop(g, sig, code, (uid << 32) | pid, status, info)
         } else {
             g = act(g, sig, info)
         }
@@ -1056,9 +1075,6 @@ pub fn fault(f: u64, v: u64, bus: bool) -> u64 {
     let a = area()
     let w = SIG_WORDS + (sig - 1) * 4
     let h = aget(a, w)
-    if h == SIG_DFL || h == SIG_IGN || sched.self_sigmask() & bit(sig) != 0 {
-        return 0
-    }
     var code = SI_KERNEL
     var addr: u64 = 0
     let err = word(f, W_ERROR)
@@ -1071,6 +1087,16 @@ pub fn fault(f: u64, v: u64, bus: bool) -> u64 {
         if bus {
             code = BUS_ADRERR
         }
+    } else if v == 1 {
+        // # Safety: read the debug status of this untraced #DB.
+        let dr6 = unsafe { pax_debug_status() }
+        if dr6 & 0x4000 != 0 {
+            code = 2
+            addr = word(f, W_RIP)
+        } else if dr6 & 15 != 0 {
+            code = 4
+            addr = word(f, W_RIP)
+        }
     } else if v == 0 {
         code = FPE_INTDIV
         addr = word(f, W_RIP)
@@ -1081,9 +1107,35 @@ pub fn fault(f: u64, v: u64, bus: bool) -> u64 {
         code = FPE_FLTINV
         addr = word(f, W_RIP)
     }
+    if sched.tracer_of(sched.self_slot()) != 0 {
+        return trace.fault_stop(f, sig, code, addr, v, err)
+    }
+    if h == SIG_DFL || h == SIG_IGN || sched.self_sigmask() & bit(sig) != 0 { return 0 }
     let _w = sched.self_wait()
     if !enter(f, sig, code, 0, 0, 0, true, addr, v, err, sched.self_sigmask()) {
         return 0
+    }
+    f
+}
+
+
+extern "c" fn pax_debug_status() -> u64
+
+/// Deliver a tracer-approved signal without tracing it a second time.
+/// A synchronous signal keeps its captured fault payload, not live CR2.
+fn inject(f: u64, sig: u64) -> u64 {
+    let s = sched.self_slot()
+    if trace_state.control(s) & trace_state.FAULT == 0 {
+        return act(f, sig, trace_state.signal_info(s))
+    }
+    let (_old, code, addr) = sched.trace_info(s)
+    let h = aget(area(), SIG_WORDS + (sig - 1) * 4)
+    if h == SIG_DFL || h == SIG_IGN || sched.self_sigmask() & bit(sig) != 0 {
+        return die(f, sig, ", injected synchronous fault")
+    }
+    let _wait = sched.self_wait()
+    if !enter(f, sig, code, 0, 0, 0, true, addr, trace_state.fault_vector(s), trace_state.fault_error(s), sched.self_sigmask()) {
+        return die(f, SIGSEGV, ", no room for injected fault frame")
     }
     f
 }

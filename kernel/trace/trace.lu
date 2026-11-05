@@ -199,10 +199,31 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
         if parent == sched.SLOTS || !files.may_trace_mode(sched.proc_area(parent), sched.proc_area(sched.self_slot()), true) { return EPERM }
         return if sched.trace_me() { 0 } else { EPERM }
     }
-    if req == 16 && (pid & 0xffffffff) == sched.self_tid() { return EPERM }
-    let s = sched.trace_target(pid & 0xffffffff)
+    let tid = pid & 0xffffffff
+    if req == 16 || req == 0x4206 {
+        let seized = req == 0x4206
+        // SEIZE's argument failures are EIO, unlike SETOPTIONS' EINVAL.
+        if seized && (addr != 0 || data & !0x10007f != 0) { return EIO }
+        let target = sched.trace_live(tid)
+        if target == sched.SLOTS { return ESRCH }
+        if sched.trace_tgid(target) == sched.self_pid() || sched.tracer_of(target) != 0 { return EPERM }
+        if !files.may_trace_mode(sched.proc_area(sched.self_slot()), sched.proc_area(target), true) { return EPERM }
+        sched.trace_bind(target, seized, if seized { data } else { 0 })
+        if !seized {
+            // Measured ATTACH stop: SI_KERNEL, zero pid/uid union.
+            sched.raise_thread(target, 19, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+        }
+        return 0
+    }
+    if req == 0x4207 {
+        let target = sched.trace_live(tid)
+        if target == sched.SLOTS || sched.tracer_of(target) != sched.self_tid() { return ESRCH }
+        if trace_state.control(target) & trace_state.SEIZED == 0 { return EIO }
+        if !sched.trace_is_stopped(target) { sched.trace_interrupt(target) }
+        return 0
+    }
+    let s = sched.trace_target(tid)
     if s == sched.SLOTS { return ESRCH }
-    if req == 16 { return EPERM } // already traced
     if req == 1 || req == 2 {
         let (ok, value) = trace_mem.peek(s, addr)
         if !ok { return EIO }
@@ -218,9 +239,15 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
     if req == 3 { return peekuser(s, addr, data) }
     if req == 6 { return pokeuser(s, addr, data) }
     if req == 0x4204 { return getregset(s, addr, data) }
+    if req == 17 {
+        if data > 64 { return EIO }
+        request_signal(s, data)
+        sched.trace_detach(s)
+        return 0
+    }
     if req == 7 || req == 9 || req == 24 {
         if data > 64 { return EIO }
-        if data != 0 { return refused(req) }
+        request_signal(s, data)
         trace_state.set_mode(s, if req == 24 { 1 } else { 0 })
         let f = sched.trace_frame(s)
         put_word(f, 19, (word(f, 19) & !TF) | (if req == 9 { TF } else { 0 }))
@@ -262,7 +289,10 @@ pub fn exec_stop(f: u64) -> u64 {
     let s = sched.self_slot()
     if sched.tracer_of(s) == 0 { return f }
     if trace_state.options(s) & 0x10 != 0 { return event_stop(f, 4, sched.self_tid()) }
+    if trace_state.control(s) & trace_state.SEIZED != 0 { return f }
     trace_state.set_phase(s, 0)
+    trace_state.set_control(s, trace_state.control(s) & !(trace_state.FAULT | trace_state.INTERRUPT))
+    trace_state.set_signal_info(s, sched.sig_info(sched.I_USER, sched.self_tid(), 0, cred.uid(sched.proc_area(s), cred.REAL)))
     trace_state.set_stop_kind(s, 1)
     trace_state.set_event(s, 0)
     sched.trace_stop(f, 5, 0, sender())
@@ -285,6 +315,9 @@ pub fn exception(f: u64, vector: u64) -> u64 {
     trace_state.set_finish_pending(s, 0)
     trace_state.set_stop_kind(s, 1)
     trace_state.set_event(s, 0)
+    trace_state.set_control(s, (trace_state.control(s) & !trace_state.INTERRUPT) | trace_state.FAULT)
+    trace_state.set_fault_vector(s, vector)
+    trace_state.set_fault_error(s, word(f, 16))
     put_word(f, 19, word(f, 19) & !TF)
     if vector == 3 { return sched.trace_stop(f, 5, 128, 0) }
     if vector == 1 {
@@ -306,12 +339,17 @@ fn sender() -> u64 {
 fn event_stop(f: u64, event: u64, message: u64) -> u64 {
     let s = sched.self_slot()
     trace_state.set_event(s, message)
+    trace_state.set_control(s, trace_state.control(s) & !(trace_state.FAULT | trace_state.INTERRUPT))
     trace_state.set_stop_kind(s, 4)
     let tagged = 5 | (event << 8)
     sched.trace_stop(f, tagged, tagged, sender())
 }
 
-pub fn signal_stop(f: u64, sig: u64, code: u64, from: u64, status: u64) -> u64 {
+pub fn signal_stop(f: u64, sig: u64, code: u64, from: u64, status: u64, info: u64) -> u64 {
+    async_snapshot(f)
+    let s = sched.self_slot()
+    trace_state.set_control(s, trace_state.control(s) & !(trace_state.FAULT | trace_state.INTERRUPT))
+    trace_state.set_signal_info(s, info)
     trace_state.set_signal_status(sched.self_slot(), status)
     trace_state.set_stop_kind(sched.self_slot(), 1)
     trace_state.set_event(sched.self_slot(), 0)
@@ -321,6 +359,7 @@ pub fn signal_stop(f: u64, sig: u64, code: u64, from: u64, status: u64) -> u64 {
 fn syscall_stop(f: u64, kind: u64) -> u64 {
     let s = sched.self_slot()
     trace_state.set_stop_kind(s, kind)
+    trace_state.set_control(s, trace_state.control(s) & !(trace_state.FAULT | trace_state.INTERRUPT))
     trace_state.set_event(s, 0)
     let sig = if trace_state.options(s) & 1 != 0 { 0x85 } else { 5 }
     sched.trace_stop(f, sig, sig, sender())
@@ -365,6 +404,9 @@ pub fn syscall_return(f: u64) -> u64 {
     if completed && trace_state.mode(s) == 1 { return syscall_stop(f, 3) }
     if word(f, 19) & TF == 0 { return f }
     put_word(f, 19, word(f, 19) & !TF)
+    trace_state.set_control(s, trace_state.control(s) | trace_state.FAULT)
+    trace_state.set_fault_vector(s, 1)
+    trace_state.set_fault_error(s, 0)
     trace_state.set_stop_kind(s, 1)
     sched.trace_stop(f, 5, 1, word(f, 17))
 }
@@ -386,7 +428,58 @@ pub fn initial_stop(f: u64) -> u64 {
     let s = sched.self_slot()
     if sched.tracer_of(s) == 0 || trace_state.initial(s) != 1 || sched.kill_pending() { return 0 }
     trace_state.set_initial(s, 2)
+    if trace_state.control(s) & trace_state.SEIZED != 0 { return event_stop(f, 128, 0) }
     trace_state.set_stop_kind(s, 1)
+    trace_state.set_signal_info(s, 0)
     trace_state.set_event(s, 0)
     sched.trace_stop(f, 19, 0, 0)
+}
+
+
+/// A changed signal is newly attributed to the tracer (SI_USER), not
+/// to the original sender. Non-signal-delivery stops do not inject.
+fn request_signal(s: u64, sig: u64) {
+    trace_state.set_inject_sig(s, 0)
+    if sig == 0 || trace_state.stop_kind(s) != 1 { return }
+    let (old, _code, _addr) = sched.trace_info(s)
+    if old != sig {
+        trace_state.set_control(s, trace_state.control(s) & !trace_state.FAULT)
+        trace_state.set_signal_info(s, sched.sig_info(sched.I_USER, sched.self_tid(), 0, cred.uid(sched.proc_area(sched.self_slot()), cred.REAL)))
+    }
+    trace_state.set_inject_sig(s, sig)
+}
+
+/// Ring-3 asynchronous snapshots are outside the last completed syscall.
+/// Saved syscall continuations keep orig_rax and their completion state.
+fn async_snapshot(f: u64) {
+    let v = word(f, 15)
+    if v != 0x100 && v != 0x102 && v != 0x103 {
+        let s = sched.self_slot()
+        sched.trace_set_orig(s, 0xffffffffffffffff)
+        trace_state.set_phase(s, 0)
+        trace_state.set_finish_pending(s, 0)
+    }
+}
+
+pub fn interrupt_stop(f: u64) -> u64 {
+    let s = sched.self_slot()
+    if sched.tracer_of(s) == 0 || trace_state.control(s) & trace_state.INTERRUPT == 0 || sched.kill_pending() { return 0 }
+    async_snapshot(f)
+    event_stop(f, 128, 0)
+}
+
+/// Synchronous faults stop before either a handler or the default action.
+/// The original vector/error/address survive tracer syscalls and CR2 changes.
+pub fn fault_stop(f: u64, sig: u64, code: u64, addr: u64, vector: u64, error: u64) -> u64 {
+    let s = sched.self_slot()
+    sched.trace_set_orig(s, 0xffffffffffffffff)
+    trace_state.set_phase(s, 0)
+    trace_state.set_finish_pending(s, 0)
+    trace_state.set_stop_kind(s, 1)
+    trace_state.set_event(s, 0)
+    trace_state.set_control(s, (trace_state.control(s) & !trace_state.INTERRUPT) | trace_state.FAULT)
+    trace_state.set_fault_vector(s, vector)
+    trace_state.set_fault_error(s, error)
+    put_word(f, 19, word(f, 19) & !TF)
+    sched.trace_stop(f, sig, code, addr)
 }
