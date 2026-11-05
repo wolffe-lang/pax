@@ -1,0 +1,79 @@
+//! trace_state — bounded per-thread tracing side storage (px102).
+//! This module deliberately does not import sched: both the scheduler
+//! and ptrace paths use it without an import cycle. All access holds IF
+//! clear. Thread's existing 512-byte layout remains unchanged.
+use log
+use panic
+
+extern "c" let pax_trace_state: *u8
+extern "c" let pax_trace_state_end: *u8
+
+const SLOTS: u64 = 64
+const STRIDE: u64 = 128
+
+#[repr(c)]
+struct TraceState {
+    options: u64,
+    event: u64,
+    mode: u64,
+    phase: u64,
+}
+
+/// Called before the first thread or side-table write. Capacities are
+/// actual assembly start/end bounds, not a second guessed size_of.
+pub fn check_layout(thread_size: u64, thread_bytes: u64, slots: u64) {
+    // # Safety: the linker symbols delimit boot/sched.S's reservation.
+    let bytes = unsafe { pax_trace_state_end as u64 - pax_trace_state as u64 }
+    let trace_size = size_of(TraceState) as u64
+    let cap = thread_bytes / SLOTS
+    log.put("trace-layout: Thread=")
+    log.dec(thread_size as int)
+    log.put(" thread-capacity=")
+    log.dec(cap as int)
+    log.put(" TraceState=")
+    log.dec(trace_size as int)
+    log.put(" trace-capacity=")
+    log.dec((bytes / SLOTS) as int)
+    log.put(" slots=")
+    log.dec(slots as int)
+    log.end()
+    if slots != SLOTS || thread_size != 512 || cap != 512 || thread_bytes != SLOTS * 512 || trace_size > STRIDE || bytes != SLOTS * STRIDE {
+        log.put("FAIL T-trace-layout")
+        log.end()
+        panic.fail("trace storage layout", thread_size)
+    }
+}
+
+fn address(s: u64) -> u64 {
+    if s >= SLOTS { panic.fail("trace storage slot", s) }
+    // # Safety: only the address; layout was checked before any clear.
+    unsafe { pax_trace_state as u64 + s * STRIDE }
+}
+
+fn get(s: u64, off: int) -> u64 {
+    // # Safety: off is offset_of a u64 field within the asserted record.
+    unsafe { ((address(s) + off as u64) as *u64).read_volatile() }
+}
+fn put(s: u64, off: int, value: u64) {
+    // # Safety: same bounded slot and field as get.
+    unsafe { ((address(s) + off as u64) as *u64).write_volatile(value) }
+}
+
+pub fn clear(s: u64) {
+    let a = address(s)
+    var i: u64 = 0
+    while i < STRIDE {
+        // # Safety: this slot's complete reserved storage, including padding.
+        unsafe { ((a + i) as *u64).write_volatile(0) }
+        i += 8
+    }
+}
+
+pub fn options(s: u64) -> u64 { get(s, offset_of(TraceState, options)) }
+pub fn set_options(s: u64, v: u64) { put(s, offset_of(TraceState, options), v) }
+pub fn event(s: u64) -> u64 { get(s, offset_of(TraceState, event)) }
+pub fn set_event(s: u64, v: u64) { put(s, offset_of(TraceState, event), v) }
+pub fn mode(s: u64) -> u64 { get(s, offset_of(TraceState, mode)) }
+pub fn set_mode(s: u64, v: u64) { put(s, offset_of(TraceState, mode), v) }
+pub fn phase(s: u64) -> u64 { get(s, offset_of(TraceState, phase)) }
+pub fn set_phase(s: u64, v: u64) { put(s, offset_of(TraceState, phase), v) }

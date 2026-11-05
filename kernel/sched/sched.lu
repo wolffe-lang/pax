@@ -215,6 +215,7 @@ use panic
 use speaker
 use sync
 use timer
+use trace_state
 
 extern "c" let pax_debugregs: *u64
 extern "c" fn pax_debug_load(a: u64)
@@ -224,6 +225,7 @@ extern "c" fn pax_wrmsr(msr: u64, v: u64)
 extern "c" fn pax_rdtsc() -> u64 // px88: boot/fpu.S's RDTSC
 
 extern "c" let pax_threads: *u64
+extern "c" let pax_threads_end: *u8
 extern "c" let pax_sched_state: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
@@ -715,6 +717,7 @@ fn first_frame(s: u64, rip: u64, entry: u64, arg: u64) {
 }
 
 fn clear(s: u64) {
+    trace_state.clear(s)
     put_field(s, offset_of(Thread, frame), 0)
     put_field(s, offset_of(Thread, state), FREE)
     put_field(s, offset_of(Thread, wake), 0)
@@ -909,6 +912,9 @@ pub fn kick(f: u64) -> u64 {
 /// caller enables them (`sync.enable`) when it wants preemption.
 pub fn start(pml4: u64) {
     let saved = sync.irq_save()
+    // # Safety: linker bounds of the assembly's complete thread reservation.
+    let thread_bytes = unsafe { pax_threads_end as u64 - pax_threads as u64 }
+    trace_state.check_layout(size_of(Thread) as u64, thread_bytes, SLOTS)
     var s: u64 = 0
     while s < SLOTS {
         clear(s)

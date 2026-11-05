@@ -186,6 +186,8 @@ pax_irq_restore:
         .globl pax_threads
 pax_threads:
         .zero 64 * 512
+        .globl pax_threads_end
+pax_threads_end:
         .p2align 6
         .globl pax_procs
 pax_procs:
@@ -207,5 +209,12 @@ pax_sched_state:
         .globl pax_debugregs
 pax_debugregs:
         .zero 64 * 64
+        /* px102: options/events/restart state, independent of Thread's stride. */
+        .p2align 6
+        .globl pax_trace_state
+pax_trace_state:
+        .zero 64 * 128
+        .globl pax_trace_state_end
+pax_trace_state_end:
 
         .section .note.GNU-stack, "", @progbits
