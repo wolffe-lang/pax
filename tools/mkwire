@@ -28,9 +28,9 @@
 # such file, the router's port 80; any OS can make the file on the ESP
 # before the boot). Its sha256, read twice, in OUTDIR/stick.sha256.
 # WIRE_NETPOLL=1 makes OUTDIR/pax-wire-netpoll.img instead (sha256 in
-# OUTDIR/stick-netpoll.sha256), the same but for `cmdline: netpoll` in its
-# first Limine entry, the default (px93's upgrade entry after it is kept
-# as written): kernel/gbe polls QEMU's 82576 as it polls the I225, the
+# OUTDIR/stick-netpoll.sha256), the same but for the word `netpoll` on
+# its first Limine entry's command line, the default (px93's upgrade entry
+# after it is kept as written): kernel/gbe polls QEMU's 82576 as it polls the I225, the
 # qualification's second machine (never the stick that goes to kasumi).
 #
 # /etc/wire.sh, on the machine: waits for kernel/dhcp's lease file
@@ -99,8 +99,19 @@ fi
 img=$out/pax-wire.img sums=$out/stick.sha256 conf=$PAX_ROOT/boot/limine-usb.conf
 if [ "${WIRE_NETPOLL:-0}" = 1 ]; then
     img=$out/pax-wire-netpoll.img sums=$out/stick-netpoll.sha256 conf=$out/limine-netpoll.conf
-    awk '/^\// { n++ } { print } n == 1 && /^ *module_path:/ { print "    cmdline: netpoll" }' "$PAX_ROOT/boot/limine-usb.conf" > "$conf"
-    [ "$(grep -c '^    cmdline: netpoll$' "$conf")" = 1 ] || die "not one module_path line in boot/limine-usb.conf's first entry to put netpoll after"
+    # A second `cmdline:` line in an entry does not reach the kernel
+    # (notes/px89/logs/w4.rows: the twin's Q0 red with the word on its own
+    # line after px87's `cmdline: quiet`), so the word joins the entry's own
+    # line, or is the line when the entry has none.
+    awk 'FNR == 1 { n = 0 } /^\// { n++ }
+         NR == FNR { if (n == 1 && /^ *cmdline:/) has = 1; next }
+         n == 1 && /^ *cmdline:/ { $0 = $0 " netpoll" }
+         { print }
+         n == 1 && !has && !put && /^ *module_path:/ { print "    cmdline: netpoll"; put = 1 }' \
+        "$PAX_ROOT/boot/limine-usb.conf" "$PAX_ROOT/boot/limine-usb.conf" > "$conf"
+    first=$(awk '/^\// { n++ } n == 1 && /^ *cmdline:/' "$conf")
+    [ "$(printf '%s\n' "$first" | grep -c .)" = 1 ] && printf '%s\n' "$first" | grep -qw netpoll \
+        || die "the first entry of $conf has not one cmdline line holding netpoll: '$first'"
 fi
 rm -f "$img"
 "$PAX_ROOT/tools/mkdisk" --usb --kernel "$out/kmain_session.elf" --initramfs "$out/wire.cpio" \
