@@ -99,9 +99,10 @@ den reads and writes Git's repositories byte for byte on its local verbs: `init`
 `commit`, `log`, `show`, `diff`, `restore`, `branch`, `switch`, `tag`, `reset`, `merge`, `rebase` (linear),
 `cherry-pick`, `revert`, `blame`, `stash`, `notes`, `repack`, `verify-pack`, `fsck` and Git's plumbing. Its wire
 (`clone`, `fetch`, `pull`, `push` over `file://`, `git://` and SSH, with `upload-pack`, `receive-pack` and a
-one-session `daemon`) is in the binary within den's own limits, and PAX does not test it yet. `config` still only
-reads (`config --get`; `remote` and `branch --set-upstream-to` edit a repository's config), so set `user.name` in
-`~/.gitconfig` or with `GIT_AUTHOR_NAME`. It has no HTTPS, no `gc` and no hooks, and it never runs an editor or a pager: give a message
+one-session `daemon`) is in the binary within den's own limits; on PAX it works on one machine (remotes, below).
+`config` still only reads (`config --get`; `remote` and `branch --set-upstream-to` edit a repository's config), so
+set `user.name` in `~/.gitconfig` or with `GIT_AUTHOR_NAME`. It has no HTTPS, no `gc` and no hooks, and it never
+runs an editor or a pager: give a message
 with `-m` or `-F` (with `GIT_EDITOR=false` the attempt fails as Git's does, and any other editor is refused by
 name). Two things to know at the console: den prints a date only from the zone database (`$TZDIR/$TZ`, by
 default `/usr/share/zoneinfo/UTC`, which the images carry as the bytes of `/etc/localtime`), and a `den log` written
@@ -111,6 +112,33 @@ holds every verb's status, output and error to the same den on Linux; it also lo
 installed system's console login and runs den at the terminal, with nothing redirected. `tests/distribution-den`
 commits on a disk the installer wrote, reboots, and reads the repository back clean, every object file Linux's
 bytes.
+
+**Remotes on one machine.** den's `file://` remotes work at the console. den runs a remote's service as a program,
+`$DEN_UPLOAD_PACK` or `$DEN_RECEIVE_PACK` with the repository's path, and looks for Git's `git-upload-pack` and
+`git-receive-pack` on `PATH` when they are unset. PAX has no Git, so it installs two wrappers,
+`/usr/libexec/den/upload-pack` and `/usr/libexec/den/receive-pack`, each two lines (`exec /bin/den upload-pack "$1"`,
+and `receive-pack` likewise), and `/etc/shrc` exports the two variables, so every console shell and every program
+it starts has them:
+
+```sh
+den clone -q --bare file:///home/pax/src /home/pax/hub.git   # a bare repository to push to
+cd /home/pax/src
+den remote add origin file:///home/pax/hub.git
+den push -u origin main
+den clone -q file:///home/pax/hub.git /home/pax/work         # then fetch, pull --no-rebase and push
+```
+
+Name a remote by a `file:///absolute/path` URL (den refuses a plain path), and push only to a bare repository
+(den's receive-pack takes no other). A shell that did not read `/etc/shrc` exports the two variables itself;
+without them den answers `den: wire: io`. Once a branch tracks a remote, den's `status` and `branch` answer `not yet
+implemented` (den's own limits, the same on Linux); `log`, `fetch`, `pull` and `push` still answer.
+`git://` remotes need the network stack: `den daemon --enable-receive-pack BASE PORT` serves one connection on
+127.0.0.1 from a bare repository holding `git-daemon-export-ok`, and a clone or push through
+`git://127.0.0.1:PORT/…` then works on PAX's session kernel (`kmain_session`). The kernel the release and dev
+images boot starts no network yet: there `den daemon` prints its port, but a client's clone neither connects nor
+gives up (it was still waiting four minutes later), so use `file://` on those images. There is no `ssh` client and no HTTPS on PAX, so `ssh://` and
+`https://` remotes are out. `tests/mpx5-den` types all of this at PAX as root and as `pax`, under `/tmp` and on
+the ext2 `/home`, and holds every answer, object id and ref to the same keys typed on Linux.
 
 ## Booting PAX
 
