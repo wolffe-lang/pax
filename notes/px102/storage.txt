@@ -31,3 +31,21 @@ Prediction, before implementation:
   This is the requested layout overflow witness, not the final lane plant.
 - The layout checker's own negative cases reject oversized side state,
   a changed capacity/count, a missing line and duplicate lines.
+
+Measured:
+  c271a0a4's checker against the actual b715dd44 boot log:
+    FAIL T-trace-layout
+    END layout-baseline exit=1
+  01ac77ad, native BIOS/KVM:
+    trace-layout: Thread=512 thread-capacity=512 TraceState=32 trace-capacity=128 slots=64
+    END core-layout exit=0
+    END core-gate exit=0
+    END layout-01ac77ad exit=0
+  Local branch px102-layout-overflow, 2b81d9f3, one added u64 field:
+    trace-layout: Thread=520 thread-capacity=512 TraceState=32 trace-capacity=128 slots=64
+    FAIL T-trace-layout
+    PANIC trace storage layout 0x0000000000000208
+    END stops-layout exit=1
+    END layout-2b81d9f3 exit=1
+The overflow stops before scheduler initialization or any user program.
+Both binaries built successfully. No final plant record or public step.
