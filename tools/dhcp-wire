@@ -17,7 +17,12 @@
 # it): `--no-daemon --port=0` (no DNS), authoritative, one range, the
 # router 192.168.89.1, a 2-minute lease (its least: shorter is raised to
 # 2 minutes), T1 10 s and T2 20 s, its log at DIR/dnsmasq-<k>.log, its
-# leases at DIR/leases. Two configurations:
+# leases at DIR/leases. The log is made here, by the caller, mode 644,
+# before dnsmasq opens it: dnsmasq run as root makes a log of its own
+# mode 640 root:root, which a caller that is not root cannot read (CI's
+# runner, --sudo); a log that exists it appends to, its owner and mode
+# kept (both witnessed with Ubuntu 24.04's dnsmasq 2.91). Two
+# configurations:
 #   A  192.168.89.50-99, DNS 192.168.89.53 and .54
 #   B  192.168.89.100-149, DNS 192.168.89.55 (a fresh lease file)
 # The scenarios (the cue is the first serial line holding the word):
@@ -106,6 +111,10 @@ def main():
             os.rename(leases, leases + ".%d" % servers["k"])
         servers["k"] += 1
         log = os.path.join(work, "dnsmasq-%d.log" % servers["k"])
+        with open(log, "w"):
+            pass
+        os.chmod(log, 0o644)
+        servers["log"] = log
         cmd = pre + ["dnsmasq", "--no-daemon", "--user=root", "--port=0", "--interface=" + tap, "--bind-interfaces",
                      "--dhcp-authoritative", "--dhcp-range=%s,%s,255.255.255.0,2m" % (lo, hi),
                      "--dhcp-option=option:router,%s.1" % SUBNET, "--dhcp-option=option:dns-server," + dns,
@@ -128,7 +137,8 @@ def main():
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
-        note("dnsmasq %d stopped (status %s)" % (servers["k"], p.returncode))
+        note("dnsmasq %d stopped (status %s); its log %s by uid %d" % (
+            servers["k"], p.returncode, "readable" if os.access(servers["log"], os.R_OK) else "NOT readable", os.getuid()))
         servers["proc"] = None
 
     # cue word -> (delay, action); each fires once, in order.
