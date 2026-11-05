@@ -197,7 +197,8 @@ is resolved. Every ELF process starts with a fixed 1 MiB initial stack, which `R
 
 `tools/mkdistribution --latest[=OVERLAYS] VERIFIED_BASE.cpio NEW_OUT` builds the same two images from what is newest
 instead of from the pins: every program's tree at its repository's trunk head when the build starts, lupin at its
-newest release, and the dev compiler at its pin's release (a newer wolf release is refused until that pin moves).
+newest release, and the dev compiler at its pin's release (a newer wolf release is refused until that pin moves),
+built by `tools/mkwolf` or staged from `PAX_WOLF_INPUT`, held either way to `user/wolf.sums`.
 An OVERLAYS line, `COMPONENT REPOSITORY SHA RECORD`, builds one tree at a sha not yet on its trunk, and only when
 RECORD is a green local gauntlet record of that repository at exactly that sha; any other overlay is refused by
 name before anything is built (`tools/latest-resolve`, held by `tests/latest`). `/etc/pax-release` then names each
