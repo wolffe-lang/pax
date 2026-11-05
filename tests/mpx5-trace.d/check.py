@@ -11,10 +11,19 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step')
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'regs': (
+        ('selectors', 'exec.rip=', 'user.dr7.initial='),
+        ('regset', 'getregset.prstatus=', 'getregset.fp.length='),
+    ),
+    'step': (
+        ('setregs', 'setregs=', 'setregs.ss='),
+        ('single-step', 'step.nop.status=', 'step.dr6='),
+        ('step-syscall', 'step.syscall.status=', 'step.syscall.dr6='),
+    ),
     'stops': (
         ('stop-waitid', 'waitid.nowait=', 'initial.status='),
         ('int3-stop', 'int3.status=', 'int3.second.status='),
