@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # px89: a gauntlet record at one commit, detached (pid, log, exit marker):
 #   gaunt-launch.sh BLOCK NAME SHA [--plant ROW... --base GREEN] -- SUITE...
+# (GAUNTLET=guard-gauntlet.sh in the environment: that script in place of
+# gauntlet.sh, the mpx4-ready guard's record.)
 # A clean worktree at SHA (records/wt-NAME), then planning's
 # gauntlet-record.sh --output records/NAME.log -- bash gauntlet.sh BLOCK SUITE...
 set -euo pipefail
@@ -39,7 +41,7 @@ setsid -f bash -c '
     python3 --version > /dev/null 2>&1
     bash "$S/gauntlet-record.sh" --output "$L/records/$N.log" "$@" || rc=$?
     echo "$rc" > "$L/logs/$N.exit"
-' px89-gaunt "$L" "$S" "$B" "$N" "$WT" ${rec[@]+"${rec[@]}"} -- bash "$S/gauntlet.sh" "$B" "$@" < /dev/null > "$L/logs/$N.log" 2>&1
+' px89-gaunt "$L" "$S" "$B" "$N" "$WT" ${rec[@]+"${rec[@]}"} -- bash "$S/${GAUNTLET:-gauntlet.sh}" "$B" "$@" < /dev/null > "$L/logs/$N.log" 2>&1
 n=0
 while [ ! -s "$L/logs/$N.pid" ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 echo "launched gauntlet $N at $full on block $B: pid $(cat "$L/logs/$N.pid" 2>/dev/null), record $L/records/$N.log, log $L/logs/$N.log"
