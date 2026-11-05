@@ -1,0 +1,101 @@
+px100 — den's remotes on PAX: the prediction, written before the first change
+and before the first measurement (2026-11-05). Base: pax trunk 411fc9f5. den
+584b18a3 (the pin px97's sweep moves user/den.pin to; trunk's 13bc2caa has no
+wire), pelt 4683b3f5, boreutils at trunk's pin, wolf 0.2.36.
+
+Read for this (den's own code, org code): den's README "Wire protocols and
+transport bounds", src/transport/channel.lu, src/wiregit/{command,daemon,
+service}.lu; wolf-std's std/process (a bare program name is found on PATH) and
+std/net (deadlines), wolf_rt's net.rs (non-blocking sockets parked in poll
+with a deadline, SO_REUSEADDR set before bind). PAX's own: kernel/kmain_console,
+kernel/kmain_session, kernel/socket, kernel/tcp (start, emit, bind, connect),
+kernel/ip (the loopback queue, drained by kernel/netd), notes/px56 (exec from
+the tree, `#!`), notes/px90, px98, px97 (R-px97-14). No kernel, firmware or
+driver source of any other system; no Git source.
+
+What den asks of the kernel, by transport
+------------------------------------------
+file://   den forks a child (wolf's spawn: fork, a socketpair handshake, execve
+          with two pipes as its stdin and stdout, GIT_PROTOCOL=version=2 in
+          its environment). The program is $DEN_UPLOAD_PACK or
+          $DEN_RECEIVE_PACK, else `git-upload-pack` / `git-receive-pack`
+          looked up on PATH. Here it is a `#!/bin/sh` wrapper: the kernel
+          reads the `#!` line (px56) and runs /bin/sh WRAPPER PATH; pelt
+          then `exec`s /bin/den upload-pack PATH (or receive-pack), which
+          talks pkt-lines over the two pipes. receive-pack (a bare
+          repository) writes loose objects (O_EXCL temporary files, fsync,
+          rename into place, directory fsync), takes ref lock files with
+          O_EXCL, renames them over the refs; the client then updates its
+          own remote-tracking refs and config the same way. wait4 reaps
+          the child.
+git://    `den daemon` binds and listens on 127.0.0.1:PORT (SO_REUSEADDR),
+          prints `port PORT`, accepts one connection inside a 30 s deadline
+          (poll), serves it in its own process and exits. The client
+          connects to 127.0.0.1:PORT, its reads and writes parked in poll
+          with 30 s deadlines. No child process: the daemon is the server.
+
+Predictions
+-----------
+P1 file:// through the wrappers, on PAX, as root and as pax, under /tmp (the
+   in-memory tree) and under /home (the ext2 disk): `clone -q --bare
+   file://…`, `remote add origin file://…`, `remote -v`, `push -u origin
+   main`, a second commit and `push`, a second clone and its `log
+   --oneline`, a commit pushed from it, `fetch`, `pull --no-rebase` (a fast
+   forward) and the logs: every block (status, stdout, stderr) byte-identical
+   to the same keys typed on Linux in the lane container, so every object id
+   and every ref the session prints is Linux's. No PAX change needed: px17's
+   pipes, px26's fork and wait, px56's `#!` and exec of a file written since
+   boot, px27/px63's renames and fsync on both trees are all already there.
+   The wrappers the image installs and a pair typed at the console (written
+   since boot, then chmod +x) answer alike.
+P2 Without the variables, `den clone file://…` asks PATH=/bin for
+   git-upload-pack, which neither tree has; den names the failure, the same
+   bytes and status on both.
+P3 git:// on kmain_console: RED. kmain_console, the kernel of mpx5-den's own
+   image and of every shipped image (tools/mkdistribution builds the release
+   kmain_console), never starts kernel/ip, kernel/tcp or kernel/netd. The
+   socket calls are there (kernel/user reaches kernel/socket), so `den
+   daemon`'s socket, bind and listen succeed and it prints `port PORT`; but
+   kernel/tcp's composing frame is never taken (tcp.start), so emit() sends
+   nothing and the client's SYN never leaves, and nothing drains the
+   loopback queue. Predicted: the client fails after its 30 s deadline (den
+   prints an io failure, status 2) or waits longer if PAX's connect never
+   returns under poll; the daemon's accept ends at its own 30 s deadline.
+   Linux clones. The rows are red by name at the git:// blocks.
+P4 git:// on kmain_session (the console as kmain_console's, and the network
+   stack: loopback only with no device, as mpx5-jobs' TCP rows use it):
+   `den daemon --enable-receive-pack BASE PORT` with git-daemon-export-ok in
+   the bare repository, read by the session through a pipe so the client
+   dials only after `port PORT` is printed; `clone -q git://127.0.0.1:PORT/…`;
+   then a second daemon on the same PORT and `push` through the clone's
+   configured remote; byte-identical to Linux. The second daemon binds over
+   the first connection's TIME-WAIT because wolf sets SO_REUSEADDR, on PAX
+   as on Linux. (Uncertain: if PAX's bind refuses a port its time-wait table
+   holds, that is a PAX gap with its own row.)
+P5 One daemon, one connection: a fetch after the daemon has exited is refused
+   (ECONNREFUSED from a reset), the same bytes and status on both.
+P6 After the session `den fsck --full` is clean on every repository (the
+   source, the bare hub, both clones), on PAX and on Linux; the disk's
+   repositories read back on the host are whole to Linux's own git (fsck
+   --full), e2fsck -fn clean.
+P7 pelt's friendly prompt: at pelt 4683b3f5 friendly mode is opt-in
+   (README: "remains opt-in"), so no shell of these rows starts friendly.
+   The rows' shells are /bin/sh (never friendly, at this pin and at pelt's
+   head). Where a /bin/pelt login shell is typed at (`su pax` on a shipped
+   image), the keys opt out first in /etc/shrc as R-px97-14 did; harmless
+   at this pin.
+P8 The layout (an R-px100 ruling): /usr/libexec/den/upload-pack and
+   receive-pack, 0755, two lines each, installed by tools/install-den (so
+   the distribution's roots and mpx5-den's images alike), and /etc/shrc
+   exporting DEN_UPLOAD_PACK and DEN_RECEIVE_PACK. An interactive shell has
+   them; a program it starts inherits them.
+P9 Kernel lines: -ENOSYS only for 273 and 334, as px90; nothing refused by
+   name (no `refused:` line) on kmain_session. On kmain_console's git://
+   blocks perhaps none either (the calls answer; the stack is idle).
+P10 Wall time: the remote session is about 100 typed lines a run; at 20 ms a
+   character and a prompt wait a line, about 4-5 minutes a boot for both
+   runs under KVM, plus the 30 s deadlines where P3 fails.
+P11 The plant (one hunk): the installed upload-pack wrapper passes no path
+   (`exec /bin/den upload-pack`): den's upload-pack answers `invalid`, every
+   file:// clone and fetch fails on both sides alike, so the comparison stays
+   green and the session's own witness rows go red by name.
