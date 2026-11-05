@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -344,14 +344,18 @@ static void core(void) {
     resume(CONT, "int3.second.status"); siginfo();
     exit_tracee();
 }
-static void syscall_rows(void) {
+static void syscall_rows(int reports) {
     getregs(); r.rip = SYSCALL; r.rax = 39;
     ok("syscall.setregs", ptrace(SETREGS, 0, (u64)&r));
     ok("syscall.options", ptrace(SETOPTIONS, 0, 1));
-    resume(24, "syscall.entry.status"); getregs();
+    resume(24, "syscall.entry.status");
+    if (reports) notice("notify.syscall-entry");
+    getregs();
     hex("syscall.entry.rip", r.rip); dec("syscall.entry.rax", r.rax);
     dec("syscall.entry.orig_rax", r.orig_rax);
-    resume(24, "syscall.exit.status"); getregs();
+    resume(24, "syscall.exit.status");
+    if (reports) notice("notify.syscall-exit");
+    getregs();
     hex("syscall.exit.rip", r.rip); dec("syscall.exit.pid", r.rax == (u64)child);
     dec("syscall.exit.orig_rax", r.orig_rax);
     ok("exit.options", ptrace(SETOPTIONS, 0, 0x40));
@@ -399,10 +403,10 @@ static void errors(void) {
 }
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
-    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify")) done(2);
-    if (equal(mode, "notify")) {
+    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall")) done(2);
+    if (equal(mode, "notify") || equal(mode, "notify-syscall")) {
         struct { u64 handler, flags, restorer, mask; } action = {
             (u64)child_notice, 0x14000004, (u64)trace_restorer, 0
         };
@@ -430,7 +434,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         ok("exec.kill", ptrace(KILL, 0, 0));
         if (wait_child("kill.status") != 9) fail("kill.status");
     } else if (equal(mode, "errors")) errors();
-    else if (equal(mode, "syscall")) syscall_rows();
+    else if (equal(mode, "syscall") || equal(mode, "notify-syscall")) syscall_rows(equal(mode, "notify-syscall"));
     else if (equal(mode, "stops")) stops();
     else if (equal(mode, "step")) steps();
     else if (equal(mode, "notify")) notifications();
