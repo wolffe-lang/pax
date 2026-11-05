@@ -7,7 +7,7 @@
 # loopback and over the wire, their output and exit status
 # byte-identical to the same binaries on Linux.
 #
-#   tests/mpx4-ready [--images DIR | --no-boot] [--progs DIR] [--soak N]
+#   tests/mpx4-ready [--guard-only] [--images DIR | --no-boot] [--progs DIR] [--soak N]
 #                    [--deadline SECONDS] [--stall SECONDS] [--keep-going | --fail-fast]
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
 #                    [--accel auto|kvm|tcg] [--ways "none peer user"]
@@ -49,6 +49,9 @@
 # to PAX's own answer (T2).
 #
 # Assertions:
+#   T0r the reference guard, first, on its own with --guard-only: a
+#      Linux reference whose pipe held 8192 bytes (a fixture,
+#      tests/mpx4-ready.d/capped-reference) is refused by name
 #   T0 build: tools/build-kernel's object assertions for kmain_sockets;
 #      every program static (ET_EXEC, no PT_INTERP); the initramfs and
 #      ISOs built; the Linux side ran every command and its script
@@ -131,12 +134,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 accel=auto progs= soak=10000 deadline=2400 stall=240 keep=1 ways="none peer user"
-usage="usage: tests/mpx4-ready [--images DIR | --no-boot] [--progs DIR] [--soak N] [--deadline SECONDS] [--stall SECONDS] [--keep-going | --fail-fast] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--ways \"none peer user\"]"
+images= guardonly=0 legs=both tiers=both noboot=0 accel=auto progs= soak=10000 deadline=2400 stall=240 keep=1 ways="none peer user"
+usage="usage: tests/mpx4-ready [--guard-only] [--images DIR | --no-boot] [--progs DIR] [--soak N] [--deadline SECONDS] [--stall SECONDS] [--keep-going | --fail-fast] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--ways \"none peer user\"]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
+        --guard-only) guardonly=1; shift ;;
         --progs)    progs=$2; shift 2 ;;
         --soak)     soak=$2; shift 2 ;;
         --deadline) deadline=$2; shift 2 ;;
@@ -164,6 +168,24 @@ done
 [ -n "$(echo $ways)" ] || die "no way to boot"
 [ -z "$subset" ] || say "ways: $ways (PAX_READY_WAYS: a subset of the suite's ways, not its verdict)"
 
+# Why a Linux reference (a directory of its N.out) must not be compared
+# with, or nothing when it may be.
+reference_refusal() {
+    return 0 # no guard yet: every reference is compared
+}
+
+# T0r, the reference guard's own row: the fixture is a reference whose
+# pipe the host capped at 8192 bytes (tests/mpx4-ready.d/capped-reference,
+# px89's g4); it must be refused, by name.
+guard_row() {
+    local why
+    why=$(reference_refusal "$here/mpx4-ready.d/capped-reference")
+    case $why in
+        *"8192 bytes"*"refused"*) say "PASS T0r: a reference whose pipe held 8192 bytes is refused by name: $why" ;;
+        *) bad "T0r: the fixture's reference (its pipe held 8192 bytes) was not refused ('$why')" ;;
+    esac
+}
+
 k=kmain_sockets
 PROGS="nbprobe pollprobe epollprobe evprobe restprobe epollecho pair waitwolf"
 MEM=1024M
@@ -173,6 +195,11 @@ MAC=52:54:00:12:34:56
 fail=0 ran=0 bfail=
 # px55: a boot's failed assertions (bfail), for its own verdict.
 bad() { say "FAIL $*"; fail=1; bfail+=" ${1%% *}"; }
+guard_row
+if [ "$guardonly" = 1 ]; then
+    [ "$fail" = 0 ] && say "mpx4-ready: PASS (the reference guard alone, --guard-only)" || say "mpx4-ready: FAIL (the reference guard alone, --guard-only)"
+    exit "$fail"
+fi
 need nm python3
 
 static_ok() { # file -> reason on failure
