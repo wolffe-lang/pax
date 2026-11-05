@@ -7,6 +7,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **wolf lsp on PAX (px99).** The dev image's `/usr/bin/wolf lsp`, the compiler's
+  language server (a transport of three threads, a thread for each diagnostics
+  publication, channels over futexes and a 100 ms debounce on a timed wait),
+  runs on PAX unchanged and asks nothing PAX did not already serve. A new suite,
+  `tests/mpx5-lsp`, and its CI job start it the way an editor's client does,
+  from `user/elf/lspc.c` (C with no libc: three pipes and an exec-status pipe,
+  `fork`, `setpgid`, one `poll` over the terminal, the pipes and a SIGCHLD
+  self-pipe), type a session (a file with a type error opened, its diagnostic,
+  an unsaved fix and the diagnostics cleared, `shutdown`, `exit`) and a hung
+  server killed by its process group, as root and as `pax`, and hold every
+  frame both ways byte for byte to the same programs on Linux.
+
 - **The wire on metal, part one (px89).** A DHCP client in the kernel
   (`kernel/dhcp`, RFC 2131): when the image's `/etc/pax-net` says `dhcp`,
   kmain_sockets and kmain_session take the address, netmask and default
