@@ -18,7 +18,7 @@ mkdir -p "$O"
 echo "  wire stick at $full in $O"
 CTR_WD=$WT bash "$S/ctr.sh" "$B" wire-root localhost/px89-dhcp:1 -- \
     bash -c 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); tools/mkwire root "$1"; exit $?' px89 "$O" || exit 1
-case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; esac
+case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; C) cpus=12-17 ;; *) echo "wire-build.sh: BLOCK is A, B or C" >&2; exit 2 ;; esac
 ( cd "$WT" && export PATH=/home/mfwolffe/lanes/hasu-env/bin:/home/mfwolffe/lanes/hasu-env/profile/bin:$PATH \
     PAX_ENGINE=podman PAX_E2FS_IMAGE=localhost/px75-ubuntu:2 PAX_CACHE=$L/cache TMPDIR=$L/tmp \
     SOURCE_DATE_EPOCH=$($G -C "$WT" show -s --format=%ct HEAD) WIRE_TARGETS="${WIRE_TARGETS:-}" && \
