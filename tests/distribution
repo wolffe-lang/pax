@@ -58,6 +58,15 @@ def check(blob):
         (inputs/'den'/'sums.txt').read_text().split()[1:3]), 'image-den-sums'
     assert rows['bin/den'][0][1] == 0o100755 and rows['bin/den'][0][2:4] == [0, 0], 'image-den-mode'
     assert rows['bin/git'][0][1] == 0o120777 and rows['bin/git'][1] == b'den', 'image-git-link'
+    # px100 (R-px100-1): den's service wrappers, user/den's bytes, 0755,
+    # root's, and /etc/shrc exporting the two variables that name them.
+    ROOT = Path(__file__).resolve().parent.parent
+    for n in ('upload-pack', 'receive-pack'):
+        assert rows['usr/libexec/den/'+n][1] == (ROOT/'user/den'/n).read_bytes(), 'image-den-'+n
+        assert rows['usr/libexec/den/'+n][0][1] == 0o100755 and rows['usr/libexec/den/'+n][0][2:4] == [0, 0], 'image-den-'+n+'-mode'
+    shrc = rows['etc/shrc'][1].decode().splitlines()
+    for line in ('export DEN_UPLOAD_PACK=/usr/libexec/den/upload-pack', 'export DEN_RECEIVE_PACK=/usr/libexec/den/receive-pack'):
+        assert line in shrc, 'image-shrc-den'
     # px90 (R-px90-2): den's zone, the bytes of /etc/localtime.
     assert rows['usr/share/zoneinfo/UTC'][1] == rows['etc/localtime'][1] and len(rows['etc/localtime'][1]) == 114, 'image-zoneinfo-utc'
     assert rows['usr/share/zoneinfo/UTC'][0][1] == 0o100644, 'image-zoneinfo-mode'
@@ -79,7 +88,7 @@ def check(blob):
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers and /etc/shrc's two variables, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
