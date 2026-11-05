@@ -19,7 +19,9 @@ so the bytes on the wire are the same wherever the file is made.
             query sleeps first, in 5 ms slices): after `didOpen` no
             diagnostics come within 3 s, so the client kills the server's
             process group and reaps it, as an editor gives up on a server
-            that hangs.
+            that hangs; then one more frame is written to the server that
+            has gone, which answers EPIPE (the client ignores SIGPIPE, as
+            an editor does).
 
 The server is /usr/bin/wolf with argv `wolf lsp` (sagitta's row for the
 language, src/mod/lsp/client.c), in the workspace's directory, with the
@@ -88,6 +90,8 @@ def hung():
     return head("hung", slow=600000) + [
         'quiet first-diagnostics 3000 "method":"textDocument/publishDiagnostics"',
         "kill",
+        "reap",
+        "send " + body({"jsonrpc": "2.0", "id": 2, "method": "shutdown"}),
         "end",
     ]
 
