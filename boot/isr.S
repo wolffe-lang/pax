@@ -220,6 +220,8 @@ pax_isr_common:
         .globl pax_sysret
         .type pax_sysret, @function
 pax_sysret:
+        testq   $0x100, 152(%rsp)       /* TF: IRETQ restores the step flag */
+        jnz     .Lpax_iret
         cmpq    $0x23, 144(%rsp)        /* the frame's CS */
         jne     .Lpax_iret
         movabsq $0x00007ffffffff000, %rcx
@@ -360,5 +362,11 @@ pax_ist3_stack:
         .zero 16384
         .globl pax_ist3_top
 pax_ist3_top:
+        /* px102: #DB can arrive after SYSCALL, before RSP has switched. */
+        .globl pax_ist4_stack
+pax_ist4_stack:
+        .zero 16384
+        .globl pax_ist4_top
+pax_ist4_top:
 
         .section .note.GNU-stack, "", @progbits

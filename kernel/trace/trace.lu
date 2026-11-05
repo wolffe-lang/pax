@@ -1,20 +1,22 @@
-//! trace — Linux ptrace(2)'s tracing stops (px102).
-//!
-//! Clean room: ptrace(2), wait(2), Intel SDM vol. 3A interrupt gates
-//! and #BP, and the committed Linux probe. No debugger/kernel source.
-//! This first layer implements TRACEME, CONT with signal zero,
-//! GETSIGINFO and KILL. Further requests are refused by name until
-//! their independently measured rows are implemented.
+//! trace — Linux ptrace(2) stops and x86-64 register access (px102).
+//! Clean room: ptrace(2), wait(2), Intel SDM vol. 3A interrupt gates,
+//! vol. 3B chapter 20, and the committed binary-only Linux witnesses.
+use fpu
 use log
 use paging
 use sched
 use uaccess
+
+extern "c" fn pax_debug_status() -> u64
+extern "c" let pax_syscall_entry: *u8
 
 const EPERM: u64 = 0xffffffffffffffff
 const ESRCH: u64 = 0xfffffffffffffffd
 const EIO: u64 = 0xfffffffffffffffb
 const EFAULT: u64 = 0xfffffffffffffff2
 const EINVAL: u64 = 0xffffffffffffffea
+const TOP: u64 = 0x00007ffffffff000
+const TF: u64 = 0x100
 
 fn refused(req: u64) -> u64 {
     log.put("ptrace: refused request ")
@@ -23,49 +25,244 @@ fn refused(req: u64) -> u64 {
     EIO
 }
 
-pub fn call(req: u64, pid: u64, _addr: u64, data: u64) -> u64 {
-    if req == 0 { // TRACEME: pid, addr and data are ignored
-        return if sched.trace_me() { 0 } else { EPERM }
+fn word(f: u64, i: u64) -> u64 {
+    // # Safety: callers name one of the 22 words in a live saved frame.
+    unsafe { ((f + i * 8) as *u64).read_volatile() }
+}
+fn put_word(f: u64, i: u64, v: u64) {
+    // # Safety: same live frame and bounded index as word.
+    unsafe { ((f + i * 8) as *u64).write_volatile(v) }
+}
+
+/// Linux user_regs_struct index to the PAX interrupt frame's word.
+fn frame_index(i: u64) -> u64 {
+    if i < 4 { return i }
+    if i == 4 { return 8 } // rbp
+    if i == 5 { return 13 } // rbx
+    if i >= 6 && i <= 9 { return i - 2 } // r11, r10, r9, r8
+    if i == 10 { return 14 } // rax
+    if i == 11 { return 12 } // rcx
+    if i == 12 { return 11 } // rdx
+    if i == 13 { return 10 } // rsi
+    if i == 14 { return 9 } // rdi
+    if i == 16 { return 17 } // rip
+    if i == 18 { return 19 } // flags
+    20 // rsp (i == 19)
+}
+
+fn reg(s: u64, i: u64) -> u64 {
+    if i == 15 { return sched.trace_orig(s) }
+    // The external ABI is Linux amd64, not PAX's GDT numbering.
+    if i == 17 { return 0x33 }
+    if i == 20 { return 0x2b }
+    if i == 21 { return sched.trace_fs(s) }
+    if i >= 22 { return 0 } // GS base and the unused data selectors
+    word(sched.trace_frame(s), frame_index(i))
+}
+
+fn getregs(s: u64, data: u64, bytes: u64) -> u64 {
+    let pml4 = paging.live()
+    if bytes != 0 && !uaccess.writable(pml4, data, bytes) { return EFAULT }
+    var i: u64 = 0
+    while i < bytes / 8 {
+        uaccess.put(pml4, data + i * 8, reg(s, i), 8)
+        i += 1
     }
+    0
+}
+
+fn setregs(s: u64, data: u64) -> u64 {
+    let pml4 = paging.live()
+    if !uaccess.readable(pml4, data, 216) { return EFAULT }
+    // Validate the complete image before changing any saved register.
+    // Only the 64-bit ABI is supported: no compatibility-mode selectors,
+    // GS-base switching or user data segments are enabled by this layer.
+    if uaccess.get64(pml4, data + 17 * 8) != 0x33 || uaccess.get64(pml4, data + 20 * 8) != 0x2b { return EIO }
+    if uaccess.get64(pml4, data + 16 * 8) >= TOP || uaccess.get64(pml4, data + 19 * 8) >= TOP || uaccess.get64(pml4, data + 21 * 8) >= TOP { return EIO }
+    var i: u64 = 22
+    while i < 27 {
+        if uaccess.get64(pml4, data + i * 8) != 0 { return EIO }
+        i += 1
+    }
+    let f = sched.trace_frame(s)
+    i = 0
+    while i < 15 {
+        put_word(f, frame_index(i), uaccess.get64(pml4, data + i * 8))
+        i += 1
+    }
+    sched.trace_set_orig(s, uaccess.get64(pml4, data + 15 * 8))
+    put_word(f, 17, uaccess.get64(pml4, data + 16 * 8))
+    put_word(f, 18, 0x23) // map the reported Linux CS back to PAX's
+    put_word(f, 19, (uaccess.get64(pml4, data + 18 * 8) & 0x250dd5) | 0x202)
+    put_word(f, 20, uaccess.get64(pml4, data + 19 * 8))
+    put_word(f, 21, 0x1b) // likewise Linux SS 0x2b -> PAX SS 0x1b
+    sched.trace_set_fs(s, uaccess.get64(pml4, data + 21 * 8))
+    put_word(f, 15, 0x101) // IRETQ, preserving the requested RCX/R11
+    0
+}
+
+fn fpregs(s: u64, data: u64, bytes: u64) -> u64 {
+    let pml4 = paging.live()
+    if bytes != 0 && !uaccess.writable(pml4, data, bytes) { return EFAULT }
+    let a = fpu.area(s) // stopped: the switch saved this thread's state
+    if a == 0 { return EIO }
+    // # Safety: XSAVE areas include the header word at byte 512.
+    let bv = if fpu.xsave() { unsafe { ((a + 512) as *u64).read_volatile() } } else { 3 }
+    var i: u64 = 0
+    while i < bytes {
+        // # Safety: a is the thread's FXSAVE/XSAVE area, >= 512 bytes.
+        var b = unsafe { ((a + i) as *u8).read_volatile() as u64 }
+        // XSAVE may omit init-state components; stale bytes then have
+        // no meaning. Export the architectural initial values instead.
+        if bv & 1 == 0 && (i < 24 || (i >= 32 && i < 160)) {
+            b = if i == 0 { 0x7f } else if i == 1 { 3 } else { 0 }
+        }
+        if bv & 2 == 0 && ((i >= 24 && i < 28) || (i >= 160 && i < 416)) {
+            b = if i == 24 { 0x80 } else if i == 25 { 0x1f } else { 0 }
+        }
+        if i >= 416 { b = 0 } // user_fpregs_struct's reserved padding
+        uaccess.put(pml4, data + i, b, 1)
+        i += 1
+    }
+    0
+}
+
+fn getregset(s: u64, note: u64, data: u64) -> u64 {
+    let pml4 = paging.live()
+    if !uaccess.readable(pml4, data, 16) || !uaccess.writable(pml4, data + 8, 8) { return EFAULT }
+    if note != 1 && note != 2 {
+        log.put("ptrace: refused register set ")
+        log.hex(note)
+        log.end()
+        return EINVAL
+    }
+    let dst = uaccess.get64(pml4, data)
+    let n = uaccess.get64(pml4, data + 8)
+    if n & 7 != 0 { return EINVAL }
+    let max = if note == 1 { 216 } else { 512 }
+    let bytes = if n < max { n } else { max }
+    let err = if note == 1 { getregs(s, dst, bytes) } else { fpregs(s, dst, bytes) }
+    if err == 0 { uaccess.put(pml4, data + 8, bytes, 8) }
+    err
+}
+
+fn peekuser(s: u64, addr: u64, data: u64) -> u64 {
+    if addr & 7 != 0 || addr >= 928 { return EIO }
+    var v: u64 = 0
+    if addr < 216 { v = reg(s, addr / 8) }
+    else if addr >= 848 && addr < 912 { v = sched.trace_dr(s, (addr - 848) / 8) }
+    let pml4 = paging.live()
+    if !uaccess.writable(pml4, data, 8) { return EFAULT }
+    uaccess.put(pml4, data, v, 8)
+    0
+}
+
+fn dr7_valid(s: u64, dr7: u64, changed: u64, addr: u64) -> bool {
+    if dr7 >> 32 != 0 { return false }
+    var i: u64 = 0
+    while i < 4 {
+        if (dr7 >> (i * 2)) & 3 != 0 {
+            let control = (dr7 >> (16 + 4 * i)) & 15
+            let rw = control & 3
+            let len = control >> 2
+            if rw == 2 || (rw == 0 && len != 0) { return false }
+            let n = if len == 0 { 1 } else if len == 1 { 2 } else if len == 2 { 8 } else { 4 }
+            let a = if changed == i { addr } else { sched.trace_dr(s, i) }
+            if a >= TOP || a & (n - 1) != 0 { return false }
+        }
+        i += 1
+    }
+    true
+}
+
+fn pokeuser(s: u64, addr: u64, data: u64) -> u64 {
+    if addr & 7 != 0 || addr < 848 || addr >= 912 { return EIO }
+    let n = (addr - 848) / 8
+    if n == 4 || n == 5 { return EIO }
+    if n < 4 {
+        if data >= TOP { return EIO }
+        if !dr7_valid(s, sched.trace_dr(s, 7), n, data) { return EINVAL }
+    }
+    if n == 7 && !dr7_valid(s, data, 8, 0) { return EINVAL }
+    if n == 6 && data >> 32 != 0 { return EIO }
+    sched.trace_set_dr(s, n, data)
+    0
+}
+
+pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
+    if req == 0 { return if sched.trace_me() { 0 } else { EPERM } }
+    if req == 16 && (pid & 0xffffffff) == sched.self_tid() { return EPERM }
     let s = sched.trace_target(pid & 0xffffffff)
     if s == sched.SLOTS { return ESRCH }
-    if req == 7 { // CONT: signal injection is a later row
+    if req == 16 { return EPERM } // already traced
+    if req == 12 { return getregs(s, data, 216) }
+    if req == 13 { return setregs(s, data) }
+    if req == 14 { return fpregs(s, data, 512) }
+    if req == 3 { return peekuser(s, addr, data) }
+    if req == 6 { return pokeuser(s, addr, data) }
+    if req == 0x4204 { return getregset(s, addr, data) }
+    if req == 7 || req == 9 {
         if data > 64 { return EIO }
         if data != 0 { return refused(req) }
+        let f = sched.trace_frame(s)
+        put_word(f, 19, (word(f, 19) & !TF) | (if req == 9 { TF } else { 0 }))
         sched.trace_resume(s)
         return 0
     }
-    if req == 8 { // KILL: SIGKILL bypasses the trace stop
+    if req == 8 {
         let _sent = sched.raise_tid(0, pid & 0xffffffff, 9, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
         return 0
     }
-    if req == 0x4200 { // SETOPTIONS(0), also used by failure cleanup
+    if req == 0x4200 {
         if data != 0 { return EINVAL }
         return 0
     }
-    if req == 0x4202 { // GETSIGINFO
+    if req == 0x4202 {
         let pml4 = paging.live()
         if !uaccess.writable(pml4, data, 128) { return EFAULT }
-        let (sig, code, addr) = sched.trace_info(s)
+        let (sig, code, at) = sched.trace_info(s)
         uaccess.zero(pml4, data, 128)
         uaccess.put(pml4, data, sig, 4)
         uaccess.put(pml4, data + 8, code, 4)
-        uaccess.put(pml4, data + 16, addr, 8)
+        uaccess.put(pml4, data + 16, at, 8)
         return 0
     }
     refused(req)
 }
 
-/// A successful exec of a TRACEME child stops before its first opcode.
 pub fn exec_stop(f: u64) -> u64 {
     if sched.tracer_of(sched.self_slot()) == 0 { return f }
     sched.trace_stop(f, 5, 0, sched.self_tid())
 }
 
-/// A user exception becomes the tracer's SIGTRAP stop. Zero means the
-/// ordinary (untraced) signal path must handle it instead.
+/// Only the single-step trap at the SYSCALL entry's first instruction is
+/// consumed in ring 0. Other kernel #DB exceptions remain fatal.
+pub fn kernel_debug(f: u64) -> bool {
+    // # Safety: the entry symbol's address; MOV DR6 in this #DB handler.
+    unsafe { word(f, 17) == pax_syscall_entry as u64 && pax_debug_status() & 0x4000 != 0 }
+}
+
 pub fn exception(f: u64, vector: u64) -> u64 {
-    if sched.tracer_of(sched.self_slot()) == 0 { return 0 }
+    let s = sched.self_slot()
+    if sched.tracer_of(s) == 0 { return 0 }
+    sched.trace_set_orig(s, 0xffffffffffffffff)
+    put_word(f, 19, word(f, 19) & !TF)
     if vector == 3 { return sched.trace_stop(f, 5, 128, 0) }
-    0 // #DB and its DR6 decoding are the next independent layer
+    if vector == 1 {
+        // # Safety: MOV DR6 from the debug exception that just arrived.
+        let dr6 = unsafe { pax_debug_status() }
+        sched.trace_set_dr(s, 6, (dr6 & 0xe00f) | 0xffff0ff0)
+        put_word(f, 19, word(f, 19) & !TF)
+        return sched.trace_stop(f, 5, if dr6 & 0x4000 != 0 { 2 } else { 4 }, word(f, 17))
+    }
+    0
+}
+
+/// SYSCALL clears TF through FMASK. Report completion before the next
+/// user opcode, as Linux's measured TRAP_BRKPT (not TRAP_TRACE) stop.
+pub fn syscall_return(f: u64) -> u64 {
+    let s = sched.self_slot()
+    if sched.tracer_of(s) == 0 || word(f, 18) & 3 != 3 || word(f, 19) & TF == 0 { return f }
+    put_word(f, 19, word(f, 19) & !TF)
+    sched.trace_stop(f, 5, 1, word(f, 17))
 }

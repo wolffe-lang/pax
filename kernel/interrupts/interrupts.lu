@@ -396,10 +396,13 @@ fn route(f: *Frame) -> *Frame {
     let v = unsafe { f[0].vector }
     // px102: the DPL-3 INT3 gate delivers #BP, not #GP. A traced
     // user receives a stop; an untraced user takes SIGTRAP normally.
+    if v == 1 && !user.from_user(unsafe { f as u64 }) && trace.kernel_debug(unsafe { f as u64 }) { return f }
     if (v == 1 || v == 3) && user.from_user(unsafe { f as u64 }) {
-        let stopped = trace.exception(unsafe { f as u64 }, v)
+        // #DB arrives on shared IST4: never park a pointer into it.
+        let owned = if v == 1 { sched.trace_own_frame(unsafe { f as u64 }) } else { unsafe { f as u64 } }
+        let stopped = trace.exception(owned, v)
         if stopped != 0 { return unsafe { stopped as *Frame } }
-        return unsafe { user.kill(f as u64, name(v)) as *Frame }
+        return unsafe { user.kill(owned, name(v)) as *Frame }
     }
     if v == 3 {
         // # Safety: as above.

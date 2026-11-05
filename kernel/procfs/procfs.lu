@@ -1138,6 +1138,8 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
         k = put_s(base, k, "\nState:\tR (running)\n")
     } else if sched.proc_word(s, 8) == 1 {
         k = put_s(base, k, "\nState:\tZ (zombie)\n")
+    } else if sched.trace_is_stopped(s) {
+        k = put_s(base, k, "\nState:\tt (tracing stop)\n")
     } else if sched.proc_word(s, 11) == 1 {
         k = put_s(base, k, "\nState:\tT (stopped)\n") // px48
     } else {
@@ -1149,7 +1151,7 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
     k = put_field(base, k, "Ngid", 0)
     k = put_field(base, k, "Pid", tid)
     k = put_field(base, k, "PPid", if me { sched.self_ppid() } else { sched.proc_word(s, 0) })
-    k = put_field(base, k, "TracerPid", 0)
+    k = put_field(base, k, "TracerPid", sched.tracer_of(if me { sched.self_slot() } else { s }))
     // px39: who the process is (kernel/cred): real, effective, saved,
     // file-system; then its groups, each followed by a space, and one
     // space when there is none (Linux's line, measured both ways).

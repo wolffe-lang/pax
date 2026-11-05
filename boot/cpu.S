@@ -201,3 +201,36 @@ pax_cpuid7_ebx:
         .size pax_cpuid7_ebx, . - pax_cpuid7_ebx
 
         .section .note.GNU-stack, "", @progbits
+
+/* px102: debug registers. Intel SDM vol. 3B 20.2. Caller holds IF clear;
+   addresses/control have been validated before reaching these routines.
+   Disable DR7 before changing addresses, then enable the incoming thread. */
+        .text
+        .globl pax_debug_load
+        .type pax_debug_load, @function
+pax_debug_load:
+        xor %eax, %eax
+        mov %rax, %dr7
+        mov 0(%rdi), %rax
+        mov %rax, %dr0
+        mov 8(%rdi), %rax
+        mov %rax, %dr1
+        mov 16(%rdi), %rax
+        mov %rax, %dr2
+        mov 24(%rdi), %rax
+        mov %rax, %dr3
+        mov 48(%rdi), %rax
+        mov $0xffff0ff0, %edx
+        or %rdx, %rax
+        mov %rax, %dr6
+        mov 56(%rdi), %rax
+        and $0xffff03ff, %eax           /* user-visible reserved/GD bits never reach hardware */
+        mov %rax, %dr7
+        ret
+        .size pax_debug_load, .-pax_debug_load
+        .globl pax_debug_status
+        .type pax_debug_status, @function
+pax_debug_status:
+        mov %dr6, %rax
+        ret
+        .size pax_debug_status, .-pax_debug_status

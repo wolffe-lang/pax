@@ -216,6 +216,9 @@ use speaker
 use sync
 use timer
 
+extern "c" let pax_debugregs: *u64
+extern "c" fn pax_debug_load(a: u64)
+
 extern "c" fn pax_switch()
 extern "c" fn pax_wrmsr(msr: u64, v: u64)
 extern "c" fn pax_rdtsc() -> u64 // px88: boot/fpu.S's RDTSC
@@ -296,6 +299,8 @@ struct Thread {
     trace_status: u64, // low 32 bits: wait status; bit 32: not reported yet
     trace_code: u64, // GETSIGINFO's si_code at the current trace stop
     trace_addr: u64, // GETSIGINFO's fault address at that stop
+    trace_orig: u64, // Linux orig_rax: syscall number, or -1 at a trap
+    trace_flags: u64, // px102: reserved tracing restart/options state
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -532,6 +537,9 @@ fn enter_space(s: u64) {
     // # Safety: cpu.S's WRMSR of IA32_FS_BASE, an architectural MSR every
     // x86-64 CPU has; the kernel never uses FS, so only ring 3 sees it.
     unsafe { pax_wrmsr(FS_BASE, field(s, offset_of(Thread, fs))) }
+    // # Safety: all 8 virtual DR words are initialized by clear; the
+    // tracing module validates addresses and DR7 before setting them.
+    unsafe { pax_debug_load(pax_debugregs as u64 + s * 64) }
     let hi = field(s, offset_of(Thread, stack_hi))
     if hi != 0 {
         gdt.set_rsp0(hi)
@@ -767,6 +775,13 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, trace_status), 0)
     put_field(s, offset_of(Thread, trace_code), 0)
     put_field(s, offset_of(Thread, trace_addr), 0)
+    put_field(s, offset_of(Thread, trace_orig), 0xffffffffffffffff)
+    put_field(s, offset_of(Thread, trace_flags), 0)
+    var dr: u64 = 0
+    while dr < 8 {
+        trace_set_dr(s, dr, if dr == 6 { 0xffff0ff0 } else { 0 })
+        dr += 1
+    }
     let a = own_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
@@ -3614,8 +3629,60 @@ fn trace_release_owned(tid: u64) {
     while s < SLOTS {
         if tracer_of(s) == tid {
             put_field(s, offset_of(Thread, tracer), 0)
+            trace_set_dr(s, 7, 0)
+            let f = field(s, offset_of(Thread, frame))
+            if f != 0 {
+                // # Safety: the stopped thread's complete live frame.
+                unsafe {
+                    let p = (f + W_RFLAGS * 8) as *u64
+                    p.write_volatile(p.read_volatile() & !0x100)
+                }
+            }
             trace_resume(s)
         }
         s += 1
     }
+}
+
+
+pub fn trace_is_stopped(s: u64) -> bool {
+    s < SLOTS && field(s, offset_of(Thread, state)) == TRACED
+}
+
+pub fn trace_frame(s: u64) -> u64 {
+    if !trace_is_stopped(s) { return 0 }
+    field(s, offset_of(Thread, frame))
+}
+
+pub fn trace_orig(s: u64) -> u64 { field(s, offset_of(Thread, trace_orig)) }
+pub fn trace_set_orig(s: u64, value: u64) { put_field(s, offset_of(Thread, trace_orig), value) }
+pub fn trace_fs(s: u64) -> u64 { field(s, offset_of(Thread, fs)) }
+pub fn trace_set_fs(s: u64, value: u64) { put_field(s, offset_of(Thread, fs), value) }
+
+pub fn trace_dr(s: u64, n: u64) -> u64 {
+    if s >= SLOTS || n >= 8 { return 0 }
+    // # Safety: 64 slots, each 8 words, reserved by boot/sched.S.
+    unsafe { ((pax_debugregs as u64 + s * 64 + n * 8) as *u64).read_volatile() }
+}
+
+pub fn trace_set_dr(s: u64, n: u64, value: u64) {
+    if s >= SLOTS || n >= 8 { return }
+    // # Safety: same bounded virtual register storage as trace_dr.
+    unsafe { ((pax_debugregs as u64 + s * 64 + n * 8) as *u64).write_volatile(value) }
+}
+
+/// #DB uses a shared IST. Its user frame must be copied to the running
+/// thread's own empty kernel stack before parking it or entering a user
+/// signal handler: another thread's #DB must never overwrite this frame.
+pub fn trace_own_frame(f: u64) -> u64 {
+    let top = field(cur(), offset_of(Thread, stack_hi))
+    let dst = top - FRAME_WORDS * 8
+    var i: u64 = 0
+    while i < FRAME_WORDS {
+        // # Safety: the source is the complete IST interrupt frame; dst
+        // is the top 176 bytes of this user thread's allocated stack.
+        unsafe { ((dst + i * 8) as *u64).write_volatile(((f + i * 8) as *u64).read_volatile()) }
+        i += 1
+    }
+    dst
 }

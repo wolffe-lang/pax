@@ -1440,9 +1440,10 @@ fn sleep_until(req: u64, abs: bool, wall: bool) -> (u64, u64) {
 /// ends its caller hands back another thread's frame.
 pub fn syscall(f: u64) -> u64 {
     let c = sched.self_slot()
+    sched.trace_set_orig(c, word(f, W_RAX))
     let g = serve(f)
     sched.syscall_ends(c)
-    g
+    if g == f && sched.self_slot() == c { trace.syscall_return(g) } else { g }
 }
 
 /// The system call in `f`, served: `syscall`'s frame.

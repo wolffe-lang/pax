@@ -1100,9 +1100,12 @@ to F9); `notes/px76-uefi-on-metal.md` has the measurements.
 
 `ptrace(2)` is being added against the no-libc Linux transcripts in
 `tests/mpx5-trace.d/`. This first layer supports a child's `TRACEME`, the
-legacy exec stop, `CONT` with no injected signal, `GETSIGINFO`, and `KILL`.
-It is not yet enough to run a debugger. Other requests are refused by name;
-registers, stepping, memory access and attach are still being implemented.
+legacy exec stop, `CONT` with no injected signal, `GETSIGINFO`, `KILL`,
+GETREGS/SETREGS, GETFPREGS, GETREGSET for PRSTATUS/PRFPREG, PEEKUSER of
+register words and debug registers, POKEUSER of debug registers, and SINGLESTEP.
+It is not yet enough to run a debugger: memory access, attach, options and
+thread/signal lifecycle are still being implemented. Other requests are refused
+by name; NT_X86_XSTATE is named and returns EINVAL.
 
 | Change | Behaviour and row |
 |---|---|
@@ -1110,6 +1113,13 @@ registers, stepping, memory access and attach are still being implemented.
 | `sched/`, `process/` | A tracing stop has its own parked state, separate from job control; wait4 reports it without WUNTRACED, waitid reports CLD_TRAPPED and honours WNOWAIT. `T-stop-waitid` and `T-stops-transcript` |
 | `trace/` | TRACEME binds the child to its parent; CONT resumes only an owned, traced stop; GETSIGINFO copies its 128-byte record. SIGKILL wakes a tracing stop; an exiting tracer releases its tracees. `T-int3-stop`, `T-stop-exit` |
 
-The new state uses four words of the thread record's spare space: 496 bytes
-in the existing 512-byte slot. No debug registers are loaded by this layer.
-The #DB/TF path and the Linux selector translation have not landed yet.
+| Selector translation | GETREGS, PEEKUSER and GETREGSET report Linux amd64 CS 0x33 and SS 0x2b. SETREGS accepts that pair and maps it to PAX's CS 0x23/SS 0x1b. The GDT is unchanged; 32-bit compatibility selectors and nonzero GS/data selectors are refused. `T-selectors`, `T-setregs` |
+| `idt/`, `gdt/`, `boot/isr.S`: #DB | Vector 1 retains DPL 0 and uses IST4. A user #DB frame is copied to the thread's own kernel stack before a stop can outlive the shared IST. The single-step #DB at SYSCALL entry is consumed in ring 0; other kernel #DB exceptions remain fatal. `T-single-step` |
+| `boot/cpu.S`, `sched/`: DR0–DR7 | Four address registers, DR6 and DR7 saved per thread; DR7 disabled before loading the next set. Unsupported I/O breakpoints, execute lengths and misaligned enabled ranges are rejected. Reserved/GD control bits never reach the hardware. `T-hardware-db`, `T-dr7-validation` |
+| `trace/`: stepping | Ordinary #DB reports TRAP_TRACE (2); completion of a stepped syscall reports the measured Linux TRAP_BRKPT (1) before another user opcode executes. `T-single-step`, `T-step-syscall` |
+
+The new state fills the existing 512-byte thread slot (six words added), plus
+64 bytes per thread for virtual debug registers. SETREGS currently refuses
+non-user RIP/RSP/FS bases; general-word POKEUSER and nonzero signal injection
+remain unsupported. These restrictions need their own compatibility rows
+before the full tracing interface is claimed.

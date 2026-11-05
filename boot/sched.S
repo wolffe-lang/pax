@@ -75,7 +75,7 @@
 
    Storage (.bss, zero until kernel/sched writes it):
      pax_threads       64 thread slots (16 before px24), 512 bytes each (kernel/sched's
-                       #[repr(c)] Thread, 496 bytes since px102's four trace-stop words;
+                       #[repr(c)] Thread, 512 bytes since px102's six tracing words;
                        464 bytes of it since px88's
                        five usage words, 424 since px62's
                        FIFO word, 416 since px56's
@@ -202,5 +202,10 @@ pax_sched_locks:
         .globl pax_sched_state
 pax_sched_state:
         .zero 256
+        /* px102: per-thread virtual DR0-DR7, 8 words in each of 64 slots. */
+        .p2align 6
+        .globl pax_debugregs
+pax_debugregs:
+        .zero 64 * 64
 
         .section .note.GNU-stack, "", @progbits
