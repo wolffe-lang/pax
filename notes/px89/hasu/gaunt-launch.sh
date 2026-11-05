@@ -18,7 +18,9 @@ flock "$L/git.lock" $G -C "$L/pax" fetch -q origin '+refs/heads/px89*:refs/remot
 full=$($G -C "$L/pax" rev-parse "$SHA^{commit}")
 WT=$L/records/wt-$N
 if [ ! -d "$WT" ]; then
-    branch=$($G -C "$L/pax" branch -r --points-at "$full" | sed -n 's|^ *origin/||p' | grep '^px89' | head -n 1)
+    # No remote branch at SHA (a commit brought by a bundle, not pushed):
+    # a detached worktree; grep's empty answer is not an error here.
+    branch=$($G -C "$L/pax" branch -r --points-at "$full" | sed -n 's|^ *origin/||p' | { grep '^px89' || true; } | head -n 1)
     if [ -n "$branch" ]; then
         flock "$L/git.lock" $G -C "$L/pax" worktree add -q -B "$branch" "$WT" "$full"
     else
