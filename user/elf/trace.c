@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -50,6 +50,17 @@ _Static_assert(sizeof(struct siginfo) == 128, "siginfo layout");
 #define GETREGSET 0x4204
 
 static i64 child;
+static volatile int notify_code, notify_status;
+static volatile unsigned notify_pid, notify_uid;
+extern void trace_restorer(void);
+static void child_notice(int signo, struct siginfo *si, void *context) {
+    (void)signo; (void)context;
+    notify_code = si->code;
+    notify_status = (int)si->fields[1];
+    notify_pid = (unsigned)si->fields[0];
+    notify_uid = (unsigned)(si->fields[0] >> 32);
+}
+__asm__(".global trace_restorer\ntrace_restorer:\nmov $15,%rax\nsyscall\nud2\n");
 static struct regs r;
 static i64 call(i64 nr, i64 a, i64 b, i64 c, i64 d, i64 e) {
     register i64 r10 __asm__("r10") = d;
@@ -270,6 +281,30 @@ static void steps(void) {
     resume(CONT, "int3.second.status");
     exit_tracee();
 }
+static void notice(const char *name) {
+    text(name); text(" code="); number((unsigned)notify_code, 10);
+    text(" status="); number((unsigned)notify_status, 10);
+    text(" pid="); number(notify_pid == (unsigned)child, 10);
+    text(" uid="); number(notify_uid == (unsigned)call(102, 0, 0, 0, 0, 0), 10);
+    text("\n");
+}
+static void notifications(void) {
+    notice("notify.initial");
+    ok("notify.options", ptrace(SETOPTIONS, 0, 0x50));
+    resume(CONT, "notify.exec.status"); notice("notify.exec");
+    resume(CONT, "notify.int3.status"); notice("notify.int3");
+    resume(CONT, "notify.second.status");
+    resume(CONT, "notify.exit-event.status"); notice("notify.exit-event");
+    u64 message = 0;
+    ok("notify.eventmsg", ptrace(GETEVENTMSG, 0, (u64)&message));
+    hex("notify.exit-message", message);
+    exit_tracee();
+    /* wait_child clears child after the exit; retain the raw si_pid only
+       as a nonzero check here, with exit status and uid unnormalized. */
+    dec("notify.final.code", notify_code);
+    dec("notify.final.status", notify_status);
+    dec("notify.final.pid-present", notify_pid != 0);
+}
 static void stops(void) {
     resume(CONT, "int3.status"); siginfo();
     resume(CONT, "int3.second.status"); siginfo();
@@ -358,15 +393,21 @@ static void errors(void) {
 }
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
-    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step")) done(2);
+    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify")) done(2);
+    if (equal(mode, "notify")) {
+        struct { u64 handler, flags, restorer, mask; } action = {
+            (u64)child_notice, 0x14000004, (u64)trace_restorer, 0
+        };
+        ok("notify.sigaction", call(13, 17, (i64)&action, 0, 8, 0));
+    }
     child = call(57, 0, 0, 0, 0, 0);
     if (child < 0) { dec("fork", child); done(1); }
     if (child == 0) {
         i64 ret = call(101, TRACEME, 0, 0, 0, 0);
         if (ret) { dec("traceme", ret); done(111); }
-        if (equal(mode, "exec")) call(62, call(39, 0, 0, 0, 0, 0), 19, 0, 0, 0);
+        if (equal(mode, "exec") || equal(mode, "notify")) call(62, call(39, 0, 0, 0, 0, 0), 19, 0, 0, 0);
         char *av[] = { argv[1], 0 }; char *ev[] = { 0 };
         ret = call(59, (i64)argv[1], (i64)av, (i64)ev, 0, 0);
         dec("execve", ret); done(111);
@@ -386,6 +427,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     else if (equal(mode, "syscall")) syscall_rows();
     else if (equal(mode, "stops")) stops();
     else if (equal(mode, "step")) steps();
+    else if (equal(mode, "notify")) notifications();
     else if (equal(mode, "regs")) {
         registers();
         ok("regs.kill", ptrace(KILL, 0, 0));
