@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -401,10 +401,50 @@ static void errors(void) {
     ok("ptrace.kill", ptrace(KILL, 0, 0));
     if (wait_child("kill.status") != 9) fail("kill.status");
 }
+static void tracer_exit(const char *self, int exitkill) {
+    if (call(39, 0, 0, 0, 0, 0) != 1) {
+        text("FAIL tracer-exit-needs-pid1\n"); done(2);
+    }
+    int pipe[2];
+    ok("orphan.pipe", call(293, (i64)pipe, 0x80000, 0, 0, 0));
+    child = call(57, 0, 0, 0, 0, 0);
+    if (child < 0) fail("orphan.fork");
+    if (child == 0) {
+        call(3, pipe[0], 0, 0, 0, 0);
+        child = call(57, 0, 0, 0, 0, 0);
+        if (child < 0) fail("orphan.target-fork");
+        if (child == 0) {
+            if (call(101, TRACEME, 0, 0, 0, 0)) done(111);
+            char *av[] = { (char *)self, "orphan-target", 0 };
+            char *ev[] = { 0 };
+            call(59, (i64)self, (i64)av, (i64)ev, 0, 0);
+            done(111);
+        }
+        stopped("orphan.ready.status");
+        ok("orphan.options", ptrace(SETOPTIONS, 0, exitkill ? 0x100000 : 0));
+        u64 pid = child;
+        if (call(1, pipe[1], (i64)&pid, 8, 0, 0) != 8) fail("orphan.publish");
+        done(0); /* target is still in the initial exec stop */
+    }
+    call(3, pipe[1], 0, 0, 0, 0);
+    u64 target = 0;
+    i64 n;
+    do { n = call(0, pipe[0], (i64)&target, 8, 0, 0); } while (n == -4);
+    call(3, pipe[0], 0, 0, 0, 0);
+    if (n != 8 || !target) fail("orphan.pid-message");
+    if (wait_child("tracer.exit.status") != 0) fail("tracer.exit.status");
+    child = target; /* pid 1 now owns the orphan, on both kernels */
+    if (wait_child("tracee.after-tracer.status") != (exitkill ? 9 : (23 << 8))) fail("tracee.after-tracer.status");
+}
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall]\n"); done(2); }
+    if (argc == 2 && equal(argv[1], "orphan-target")) done(23);
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
+    if (equal(mode, "exitkill") || equal(mode, "detach-exit")) {
+        tracer_exit(argv[0], equal(mode, "exitkill"));
+        text("trace.complete\n"); done(0);
+    }
     if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall")) done(2);
     if (equal(mode, "notify") || equal(mode, "notify-syscall")) {
         struct { u64 handler, flags, restorer, mask; } action = {
