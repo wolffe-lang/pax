@@ -1,0 +1,81 @@
+px102 — what a real debugger asks of Linux, measured (contract item 2),
+2026-11-05T19:30Z, after notes/px102/prediction.txt was committed.
+
+How: GNU gdb 15.1 (Ubuntu 24.04's package), strace 6.8, gcc 13.3 in a
+rootless Ubuntu 24.04 container on a Linux 7.2.4 x86-64 host (Yama
+ptrace_scope 1); gdb -batch over prog.c built `gcc -g -O0 -static`
+(gdb/inner.sh, gdb/inner2.sh, the scripts gdb/s2.gdb, gdb/watch.gdb,
+gdb/attach.gdb). strace runs WITHOUT -f: with -f strace takes the
+inferior as its own tracee and the inferior's PTRACE_TRACEME fails (gdb
+exits 1, measured: "ptrace: Operation not permitted"); every request gdb
+makes comes from its main thread, which plain strace sees. The attach
+session runs with CAP_SYS_PTRACE (Yama's scope 1 refuses gdb -p of a
+sibling: measured). The lines are gdb/gdb-*.trace.txt.
+
+The S2 session (break add; run; next; step; print; info registers rip;
+x/4xb; finish; continue; delete; continue): 70 ptrace calls.
+  start      vfork(); the child (unseen) PTRACE_TRACEME and execve of the
+             shell; SIGCHLD si_code CLD_TRAPPED si_status SIGTRAP;
+             wait4(-1, WNOHANG|__WALL) = the stop 0x57f; PTRACE_CONT; the
+             second exec (the shell's `exec prog`) stops 0x57f again: the
+             legacy post-execve SIGTRAP (no options are set yet).
+  probes     two throwaway children: one stops with SIGSTOP (TRACEME +
+             raise) and is given SETOPTIONS(EXITKILL) and kill(SIGKILL);
+             one stops with SIGSEGV (GETREGS, kill). Then
+             SETOPTIONS(TRACESYSGOOD|TRACEFORK|TRACEVFORK|TRACECLONE|
+             TRACEEXEC|TRACEVFORKDONE|EXITKILL) on the inferior.
+  identity   PEEKUSER(8*CS) = 0x33, PEEKUSER(184, ds) = 0: gdb decides
+             amd64 from CS (0x23 is i386's user code on Linux);
+             GETREGSET(NT_X86_XSTATE, 576 bytes) for XCR0.
+  registers  GETREGS 19, SETREGS 6 (orig_rax set to -1 at the exec stop;
+             rip moved back over the 0xcc, or to a displaced step).
+  memory     NO PEEKDATA/POKEDATA: every read and write is pread64 and
+             pwrite64 of /proc/<pid>/task/<tid>/mem (after a test
+             pwrite of /proc/self/mem), byte-sized for breakpoints
+             (0xcc into r-x text); /proc/<pid>/auxv, task/<tid>/maps,
+             task/<tid>/stat (before each resume).
+  stops      int3: 0x57f, GETSIGINFO si_code SI_KERNEL (0x80) si_addr 0,
+             rip one past the 0xcc; single-step: 0x57f, si_code TRAP_TRACE
+             (2), si_addr the new rip, PEEKUSER(DR6) = 0xffff4ff0 (BS and
+             the always-one bits); exit: wait4 WIFEXITED 0, then ECHILD.
+  run        SINGLESTEP 8, CONT 5; personality(ADDR_NO_RANDOMIZE) tried
+             (ENOSYS in the container: gdb warns and goes on).
+The watch session adds: POKEUSER(DR7, 0), POKEUSER(DR0, &counter),
+POKEUSER(DR7, 0xd0101: L0, LE, RW0 write, LEN0 4 bytes), POKEUSER(DR6,
+0); a hit: 0x57f, si_code TRAP_HWBKPT (4), si_addr the rip after the
+write, DR6 = 0xffff0ff1 (B0), DR7 and DR0 read back.
+The attach session: PTRACE_ATTACH; /proc/<pid>/status; wait4(pid,
+__WALL) = 0x137f (SIGSTOP); /proc/<pid>/task (listed), task/<tid>/mem,
+/proc/<pid>/exe, /proc/<pid>/ns/{mnt,pid}; GETREGS of a tracee asleep in
+clock_nanosleep: rax -516 (ERESTART_RESTARTBLOCK), orig_rax 230, rip after
+the syscall; SETOPTIONS (no EXITKILL); PTRACE_DETACH(0).
+Not asked in any session: PEEK/POKEDATA, GETFPREGS, PTRACE_SYSCALL,
+PTRACE_KILL, SEIZE, INTERRUPT, GETEVENTMSG.
+
+Against the prediction (A): the request set held, with four corrections:
+  1. memory is /proc/<pid>/task/<tid>/mem, not PEEK/POKE (predicted as
+     the newer gdb's way); the /proc files gdb reads are more than mem.
+  2. gdb tells amd64 from i386 by CS: PAX's 0x23 is Linux's 32-bit user
+     code selector, so a tracee reported as it is would be debugged as
+     i386 (R-px102-1).
+  3. the start is vfork, not fork, and through a shell: two exec stops,
+     the first with no options set.
+  4. the vector state is asked as NT_X86_XSTATE first (GETFPREGS only if
+     that fails).
+
+The order item 3 follows (what S2's gdb-shaped session needs first):
+  1. TRACEME, the exec stop (legacy SIGTRAP and TRACEEXEC), wait4 with
+     __WALL and WNOHANG, SIGCHLD CLD_TRAPPED to the tracer, CONT, kill
+     and PTRACE_KILL, the exit and death reports.
+  2. int3 from ring 3 as SIGTRAP (gate 3 DPL 3); GETSIGINFO.
+  3. GETREGS/SETREGS (selectors as Linux's, R-px102-1), PEEKUSER of the
+     register words and DR0-DR7, GETFPREGS, GETREGSET NT_PRSTATUS and
+     NT_PRFPREG; NT_X86_XSTATE refused by name.
+  4. memory: PEEK/POKEDATA and /proc/<pid>/mem read and write, honouring
+     page permissions as Linux's force does.
+  5. SINGLESTEP (TF, #DB, DR6.BS, over `syscall`).
+  6. SETOPTIONS and the events: EXEC, EXIT, FORK/VFORK/CLONE auto-attach,
+     GETEVENTMSG; SYSCALL stops.
+  7. permission (may_trace with the real ids), ATTACH, SEIZE, INTERRUPT,
+     DETACH, the tracer's end; TracerPid.
+  8. DR7 validated, hardware breakpoints and watchpoints (S5's).
