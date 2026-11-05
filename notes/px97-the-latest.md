@@ -27,8 +27,9 @@ the rows made was written. No label, merge, tag, release or issue.
 
 ## 2. Inputs, verified
 
-Base: trunk `b8e77f7a`. The pins were first moved on `9c88ec8a`, where the probe ran, and moved onto trunk once
-before the final gauntlet.
+Base: trunk `a9f5b6f1`. The pins were first moved on `9c88ec8a`, where the probe ran, and rebased onto trunk before
+the final gauntlet; the one conflict on the way was `docs/SOURCES.md`, where px89's section and this one both end
+the file (both kept, px89's first).
 
 | component | pin before | pin now | commits | toolchain at the head | read |
 |---|---|---|---:|---|---|
@@ -52,6 +53,13 @@ Left where they were:
 - **wolf**: `user/wolf.pin` has been v0.2.36 since px92. `kernel/wolf.pin`, the kernel's own compiler, stays 0.2.35:
   R-px97-1.
 - **The games' catalog** keeps its pins: R-px97-5.
+
+Moved since the read (2026-11-04), for the next pass:
+- **den**'s trunk is `ef0bb0ca` (57 commits). It now draws history decorations at a terminal, which
+  `tests/mpx5-den.d/rows.py`'s terminal row holds as `den: not yet implemented: history decorations`; that row moves
+  first, red at `584b18a3`, as scent's A2 did.
+- **lobo**'s trunk is `6b8b9ee7` (9 commits: tests and notes, nothing under `src/`).
+- **wolf** 0.2.37 was released on 2026-11-05. Every head above still pins 0.2.36.
 
 ## 3. Prediction, scored
 
