@@ -14,6 +14,8 @@ import json
 import os
 import sys
 
+sys.dont_write_bytecode = True  # the module it loads leaves no __pycache__ in the tree
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("px99_rows", os.path.join(HERE, "rows.py"))
 rows = importlib.util.module_from_spec(spec)
