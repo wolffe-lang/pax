@@ -11,10 +11,28 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass')
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'attach': (
+        ('attach', 'control.attach=', 'control.attach-again='),
+        ('inject-signal', 'control.inject-usr1=', 'control.usr2.status='),
+        ('detach-suppress', 'control.detach.bad-signal=', 'control.exit.status='),
+    ),
+    'seize': (
+        ('seize-arguments', 'control.seize.bad-addr=', 'control.interrupt='),
+        ('interrupt', 'control.stop.status=', 'control.attach-again='),
+        ('detach-live', 'control.detach=', 'control.mem.finish='),
+    ),
+    'replace-signal': (('replace-signal', 'control.self-signal=', 'control.exit.status='),),
+    'seize-fork': (('seized-child', 'control.start-fork=', 'event.echild='),),
+    'fault-handler': (('fault-pass-handler', 'control.fault.status=', 'control.exit.status='),),
+    'untraced-db': (('untraced-db', 'control.ack.signal=', 'control.exit.status='),),
+    'fault-segv': (('fault-segv', 'fault.status=', 'wait.echild='),),
+    'fault-ill': (('fault-ill', 'fault.status=', 'wait.echild='),),
+    'fault-fpe': (('fault-fpe', 'fault.status=', 'wait.echild='),),
+    'fault-pass': (('fault-replace-signal', 'fault.status=', 'fault.passed.status='),),
     'fork-event': (
         ('fork-event', 'event.parent.status=', 'event.child.initial='),
         ('fork-real-parent', 'event.child.exit=', 'event.echild='),
