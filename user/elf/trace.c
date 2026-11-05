@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -256,6 +256,11 @@ static void exit_tracee(void) {
     if (status != (37 << 8)) fail("exit.code");
     dec("wait.echild", call(61, -1, (i64)&status, WALL | 1, 0, 0));
 }
+static void stops(void) {
+    resume(CONT, "int3.status"); siginfo();
+    resume(CONT, "int3.second.status"); siginfo();
+    exit_tracee();
+}
 static void core(void) {
     trace_status();
     registers();
@@ -339,9 +344,9 @@ static void errors(void) {
 }
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
-    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors")) done(2);
+    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops")) done(2);
     child = call(57, 0, 0, 0, 0, 0);
     if (child < 0) { dec("fork", child); done(1); }
     if (child == 0) {
@@ -365,6 +370,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         if (wait_child("kill.status") != 9) fail("kill.status");
     } else if (equal(mode, "errors")) errors();
     else if (equal(mode, "syscall")) syscall_rows();
+    else if (equal(mode, "stops")) stops();
     else core();
     text("trace.complete\n"); done(0);
 }
