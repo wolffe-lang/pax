@@ -98,7 +98,11 @@ Committed first (`notes/px97/prediction.txt`).
   and P10 were red; the GPT fixtures' rows (P1 to P5) held. P0 named the transcript's last line, a progress line
   mkdisk had buffered, not the refusal. Two commits: P0 now names mkdisk's own refusal (`7d44562d`, red by name at
   the new pin), then the initramfs carries the wolf programs stripped, as `tools/distribution-root` ships them
-  (`d6915414`). The local gauntlet had left mpx6-part to the labelled full tier with the other suites the
+  (`d6915414`). That commit's comments named `tools/distribution-root`, and `tests/ci-plan` reads a path a suite
+  names as an input: at `353fee7a` CI's plan job was red on six P2 rows (den's, lope's, the games table's and the
+  compiler pin's paths reached mpx6-part). mpx6-part reads none of those, so the comments now name no path, and the
+  planner's table is unchanged. The follow-on is pax#303: an ESP sized with stated headroom, and mkdisk flushing its
+  progress so a failed run's last line names the failure. The local gauntlet had left mpx6-part to the labelled full tier with the other suites the
   boreutils pin reaches (R-px97-4), so neither the probe nor the first final run had it; the final gauntlet now
   runs every mpx6-part row on the PR leg, and the other suites stay the full tier's (all green in that run).
 
