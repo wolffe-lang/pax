@@ -125,6 +125,14 @@ static int wait_child(const char *name) {
 static void stopped(const char *name) {
     if ((wait_child(name) & 255) != 127) fail(name);
 }
+static void waitid_peek(void) {
+    struct siginfo si;
+    zero(&si, sizeof(si));
+    ok("waitid.nowait", call(247, 1, child, (i64)&si, WALL | 6 | 0x1000000, 0));
+    dec("waitid.signo", si.signo); dec("waitid.code", si.code);
+    dec("waitid.pid", (unsigned)si.fields[0] == (u64)child);
+    dec("waitid.status", (int)si.fields[1]);
+}
 static void getregs(void) {
     zero(&r, sizeof(r));
     ok("getregs", ptrace(GETREGS, 0, (u64)&r));
@@ -149,7 +157,7 @@ static void resume(i64 req, const char *name) {
     ok("resume", ptrace(req, 0, 0));
     stopped(name);
 }
-static void path(char *dst, i64 pid, int task) {
+static void path(char *dst, i64 pid, int task, const char *leaf) {
     char num[24]; unsigned n = 0, k = 0;
     const char *s = "/proc/";
     while (*s) dst[k++] = *s++;
@@ -160,8 +168,38 @@ static void path(char *dst, i64 pid, int task) {
         s = "/task/"; while (*s) dst[k++] = *s++;
         n = digits; while (n) dst[k++] = num[--n];
     }
-    s = "/mem"; while (*s) dst[k++] = *s++;
+    s = leaf; while (*s) dst[k++] = *s++;
     dst[k] = 0;
+}
+static void trace_status(void) {
+    char name[80], buf[4096]; path(name, child, 0, "/status");
+    i64 fd = call(2, (i64)name, 0, 0, 0, 0);
+    dec("status.open", fd < 0 ? fd : 0);
+    if (fd < 0) fail("status.open");
+    u64 used = 0;
+    while (used < sizeof(buf) - 1) {
+        i64 n = call(0, fd, (i64)(buf + used), sizeof(buf) - 1 - used, 0, 0);
+        if (n == -4) continue;
+        if (n < 0) fail("status.read");
+        if (!n) break;
+        used += n;
+    }
+    buf[used] = 0;
+    ok("status.close", call(3, fd, 0, 0, 0, 0));
+    const char *key = "TracerPid:";
+    i64 tracer = -1;
+    for (u64 i = 0; i < used; i++) {
+        if (i && buf[i - 1] != '\n') continue;
+        u64 j = 0;
+        while (key[j] && i + j < used && key[j] == buf[i + j]) j++;
+        if (key[j]) continue;
+        i += j;
+        while (i < used && (buf[i] == ' ' || buf[i] == '\t')) i++;
+        tracer = 0;
+        while (i < used && buf[i] >= '0' && buf[i] <= '9') tracer = tracer * 10 + buf[i++] - '0';
+        break;
+    }
+    dec("status.tracer-is-parent", tracer == call(39, 0, 0, 0, 0, 0));
 }
 static void memory(void) {
     u64 value = peek("data.initial", PEEKDATA, DATA);
@@ -169,7 +207,7 @@ static void memory(void) {
     peek("data.minus-one", PEEKDATA, DATA);
     ok("pokedata.restore", ptrace(POKEDATA, DATA, value));
     for (int task = 0; task < 2; task++) {
-        char name[80]; path(name, child, task);
+        char name[80]; path(name, child, task, "/mem");
         i64 fd = call(2, (i64)name, 2, 0, 0, 0);
         dec(task ? "task.mem.open" : "pid.mem.open", fd < 0 ? fd : 0);
         if (fd < 0) fail("mem.open");
@@ -219,6 +257,7 @@ static void exit_tracee(void) {
     dec("wait.echild", call(61, -1, (i64)&status, WALL | 1, 0, 0));
 }
 static void core(void) {
+    trace_status();
     registers();
     memory();
     resume(CONT, "int3.status"); siginfo(); getregs(); hex("int3.rip", r.rip);
@@ -272,7 +311,16 @@ static void errors(void) {
     dec("error.setregs.bad-buffer", ptrace(SETREGS, 0, 0));
     dec("error.getsiginfo.bad-buffer", ptrace(GETSIGINFO, 0, 0));
     dec("error.peekuser.unaligned", ptrace(PEEKUSER, 1, (u64)&value));
-    dec("error.peekuser.outside", ptrace(PEEKUSER, 912, (u64)&value));
+    dec("peekuser.padding", ptrace(PEEKUSER, 912, (u64)&value));
+    hex("peekuser.padding.value", value);
+    dec("error.peekuser.outside", ptrace(PEEKUSER, 4096, (u64)&value));
+    struct iovec io = { &r, 7 };
+    dec("error.regset.unaligned-length", ptrace(GETREGSET, 1, (u64)&io));
+    io.len = 8;
+    dec("regset.short", ptrace(GETREGSET, 1, (u64)&io));
+    dec("regset.short.length", io.len);
+    dec("error.regset.bad-iovec", ptrace(GETREGSET, 1, 0));
+    dec("error.regset.unknown", ptrace(GETREGSET, 0x7fffffff, (u64)&io));
     dec("error.poke.dr4", ptrace(POKEUSER, DR(4), 0));
     dec("error.poke.dr5", ptrace(POKEUSER, DR(5), 0));
     dec("error.options.unknown", ptrace(SETOPTIONS, 0, 0x80000000));
@@ -304,6 +352,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         ret = call(59, (i64)argv[1], (i64)av, (i64)ev, 0, 0);
         dec("execve", ret); done(111);
     }
+    waitid_peek();
     stopped("initial.status");
     if (equal(mode, "exec")) {
         ok("exec.options", ptrace(SETOPTIONS, 0, 0x10));
