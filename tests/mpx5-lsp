@@ -50,7 +50,11 @@
 #   LSP2 the session's own witness (tests/mpx5-lsp.d/rows.py): the frames
 #        a session must hold, by the protocol and by the compiler's answer
 #        to typed.lu, so a server or a client broken on both sides alike
-#        cannot pass LSP1 and LSP2 together.
+#        cannot pass LSP1 and LSP2 together. Before any boot is read, the
+#        witness's own proof (tests/mpx5-lsp.d/test_rows.py: the Linux
+#        side's recorded transcripts pass it, and each of their mutations
+#        fails at its row); a witness that cannot run, or exits other than
+#        0, is a failure, never a pass.
 #   LSP3 the kernel's end: no -ENOSYS but set_robust_list (273) and rseq
 #        (334); no `refused:` line; no panic; init ended, status 0; halted.
 #   LSP4 evidence, never a pass bound: the time to the first diagnostics
@@ -205,6 +209,14 @@ if [ -z "$images" ]; then
     images=$work
 fi
 
+# LSP2's witness proves it can fail before it is trusted.
+if st=$(python3 -I "$DD/test_rows.py" 2>&1); then
+    say "PASS LSP2 (self-test): $(printf '%s\n' "$st" | grep -c '^  ok ') cases (tests/mpx5-lsp.d/test_rows.py)"
+else
+    printf '%s\n' "$st" | grep -v '^  ok ' | head -n 8 | while IFS= read -r line; do printf 'FAIL LSP2 (self-test): %s\n' "$line"; done
+    fail=1
+fi
+
 lx=$images/linux
 for n in "${NAMES[@]}"; do
     [ -f "$lx/$n.tty" ] || { bad "LSP0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"; continue; }
@@ -270,8 +282,10 @@ for leg in $legs; do
                 why+=" no container transcript;"
             fi
             [ -z "$why" ] && say "PASS LSP1 $id $n: $(grep -c '^s2c ' "$out.region") frames read and $(grep -c '^c2s ' "$out.region") sent, $(wc -l < "$out.region" | tr -d ' ') lines byte-identical to the container's ($(sha256_of "$out.region" | cut -c1-12)…; the time: lines left out)" || bad "LSP1 $id $n:$why"
-            why=$(python3 -I "$DD/rows.py" "${SESSIONS[$k]}" "$out.region")
-            if [ -z "$why" ]; then
+            rrc=0
+            why=$(python3 -I "$DD/rows.py" "${SESSIONS[$k]}" "$out.region" 2>&1) || rrc=$?
+            [ "$rrc" = 0 ] || [ -n "$why" ] || why="tests/mpx5-lsp.d/rows.py exited $rrc"
+            if [ "$rrc" = 0 ] && [ -z "$why" ]; then
                 say "PASS LSP2 $id $n: the ${SESSIONS[$k]} session's frames (tests/mpx5-lsp.d/rows.py)"
             else
                 while IFS= read -r line; do bad "LSP2 $id $n: $line"; done <<< "$why"
