@@ -186,8 +186,15 @@ The rows, per tier, firmware and run:
 
 ### 4.3 At the head
 
-(The development runs at the head: every leg under KVM, and native BIOS under TCG, as CI boots. Filled in from the
-runs; the records are §4.8.)
+Development runs at `33062033` (the rebased head, the witness in), not records (those are §4.8):
+
+| run | legs | LSP0 | LSP1 | LSP2 | LSP3 | FAIL |
+|---|---|---|---|---|---|---|
+| KVM | native and release, BIOS and UEFI | 2 | 16 of 16 | 16 of 16, and the self-test's 25 cases | 4 of 4 | 0 |
+| TCG, as CI's runners boot | native BIOS, the same images | | 4 of 4 | 4 of 4, and the self-test | 1 of 1 | 0 |
+
+Under TCG the first diagnostics came 110–120 ms after the `didOpen`, and the whole boot took 13 s; under KVM 0 to
+20 ms. The frames are the same bytes on every leg and both accelerators.
 
 ### 4.4 The calls `wolf lsp` makes (`notes/px99/strace-census.txt`)
 
@@ -213,7 +220,7 @@ On Linux, under `strace -f`, the client's own pid left out (`notes/px99/linux-op
 
 | | Linux (container) | PAX, KVM |
 |---|---|---|
-| first diagnostics | 588–666 µs | 0, 10,000 or 20,000 µs |
+| first diagnostics | 567–666 µs | 0, 10,000 or 20,000 µs (TCG: 110,002–120,001) |
 | cleared, from the edit | 100 ms debounce plus well under a millisecond | 110,001 µs |
 | the server's end, from `close` or the kill | 215–531 µs | 0 or 10,000 µs |
 
