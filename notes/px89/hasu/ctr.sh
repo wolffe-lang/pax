@@ -15,7 +15,7 @@ set -uo pipefail
 L=/home/mfwolffe/lanes/px89
 P=/home/mfwolffe/lanes/hasu-env/bin/podman
 B=$1 N=$2 I=$3; shift 3
-case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; *) echo "ctr.sh: BLOCK is A or B" >&2; exit 2 ;; esac
+case $B in A) cpus=0-5 ;; B) cpus=6-11 ;; C) cpus=12-17 ;; *) echo "ctr.sh: BLOCK is A, B or C" >&2; exit 2 ;; esac
 kvm=0 net=0
 while :; do
     case ${1:-} in

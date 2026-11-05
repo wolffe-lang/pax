@@ -12,7 +12,7 @@
 set -euo pipefail
 L=/home/mfwolffe/lanes/px89
 B=$1 N=$2 S=$3; shift 3
-case $B in A|B) ;; *) echo "launch.sh: BLOCK is A or B" >&2; exit 2 ;; esac
+case $B in A|B|C) ;; *) echo "launch.sh: BLOCK is A, B or C" >&2; exit 2 ;; esac
 mkdir -p "$L/logs"
 rm -f "$L/logs/$N.exit"
 setsid -f bash -c '
