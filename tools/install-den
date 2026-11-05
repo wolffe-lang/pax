@@ -2,14 +2,23 @@
 # install-den — put den into a root as PAX ships it (px90): /bin/den, the
 # binary tools/mkden built, unmodified, mode 0755, and /bin/git a symbolic
 # link to den (den's R5: installed under its own name with a `git` alias,
-# as scent is /bin/grep).
+# as scent is /bin/grep). px100: and den's two service wrappers,
+# /usr/libexec/den/upload-pack and /usr/libexec/den/receive-pack, 0755,
+# the bytes of user/den/ (R-px100-1). den's file:// transport runs
+# $DEN_UPLOAD_PACK or $DEN_RECEIVE_PACK with the repository's path as its
+# only argument, and git-upload-pack or git-receive-pack from PATH when
+# the variable is unset (den's src/transport/channel.lu); PAX has no Git,
+# so each wrapper is two lines, `#!/bin/sh` and `exec /bin/den
+# upload-pack "$1"` (receive-pack likewise): den's own service commands.
+# /etc/shrc (user/shrc) exports the two variables.
 #
 #   tools/install-den DEN-DIR ROOT
 #
 # DEN-DIR is tools/mkden's OUTDIR: refused unless DEN-DIR/den is its
 # sums.txt's `den` line (sha256 and size) and static (ET_EXEC, no
 # PT_INTERP). ROOT/bin is made if it is missing; an existing ROOT/bin/den
-# or ROOT/bin/git is refused, never replaced. The image builders share it:
+# or ROOT/bin/git is refused, never replaced, and so is an existing
+# wrapper. The image builders share it:
 # the distribution's root builder (distribution-root: the dev and release
 # roots, and so the root pax-install copies to disk) and mpx5-den's image.
 #
@@ -37,4 +46,13 @@ chmod 755 "$r/bin/den"
 cmp -s "$d/den" "$r/bin/den" || die "the copy of den is not its bytes"
 ln -s den "$r/bin/git"
 [ "$(readlink "$r/bin/git")" = den ] || die "/bin/git is not a link to den"
-say "installed /bin/den ($sha, $bytes bytes, 0755) and /bin/git -> den"
+# px100: the service wrappers (R-px100-1).
+x=usr/libexec/den
+mkdir -p "$r/$x"
+for n in upload-pack receive-pack; do
+    [ ! -e "$r/$x/$n" ] && [ ! -L "$r/$x/$n" ] || die "$r/$x/$n is already there"
+    cp "$PAX_ROOT/user/den/$n" "$r/$x/$n"
+    chmod 755 "$r/$x/$n"
+    cmp -s "$PAX_ROOT/user/den/$n" "$r/$x/$n" || die "the copy of user/den/$n is not its bytes"
+done
+say "installed /bin/den ($sha, $bytes bytes, 0755), /bin/git -> den and /$x/upload-pack, receive-pack (0755)"
