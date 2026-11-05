@@ -7,6 +7,7 @@
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
+ * The notify mode also compares si_uid with the caller's getuid().
  * Registers, status words, siginfo codes, memory and errors are not masked.
  * A failed prerequisite prints FAIL and kills/reaps only our own child.
  * Run inside a disposable pid namespace/container, or PAX, with a deadline.
@@ -288,13 +289,18 @@ static void notice(const char *name) {
     text(" uid="); number(notify_uid == (unsigned)call(102, 0, 0, 0, 0, 0), 10);
     text("\n");
 }
+static void resume_notice(const char *name) {
+    ok("resume", ptrace(CONT, 0, 0));
+    waitid_peek();
+    stopped(name);
+}
 static void notifications(void) {
     notice("notify.initial");
     ok("notify.options", ptrace(SETOPTIONS, 0, 0x50));
-    resume(CONT, "notify.exec.status"); notice("notify.exec");
+    resume_notice("notify.exec.status"); notice("notify.exec");
     resume(CONT, "notify.int3.status"); notice("notify.int3");
     resume(CONT, "notify.second.status");
-    resume(CONT, "notify.exit-event.status"); notice("notify.exit-event");
+    resume_notice("notify.exit-event.status"); notice("notify.exit-event");
     u64 message = 0;
     ok("notify.eventmsg", ptrace(GETEVENTMSG, 0, (u64)&message));
     hex("notify.exit-message", message);
