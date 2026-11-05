@@ -1,12 +1,14 @@
 //! trace — Linux ptrace(2) stops and x86-64 register access (px102).
 //! Clean room: ptrace(2), wait(2), Intel SDM vol. 3A interrupt gates,
 //! vol. 3B chapter 20, and the committed binary-only Linux witnesses.
+use cred
 use files
 use fpu
 use log
 use paging
 use sched
 use trace_mem
+use trace_state
 use uaccess
 
 extern "c" fn pax_debug_status() -> u64
@@ -216,9 +218,10 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
     if req == 3 { return peekuser(s, addr, data) }
     if req == 6 { return pokeuser(s, addr, data) }
     if req == 0x4204 { return getregset(s, addr, data) }
-    if req == 7 || req == 9 {
+    if req == 7 || req == 9 || req == 24 {
         if data > 64 { return EIO }
         if data != 0 { return refused(req) }
+        trace_state.set_mode(s, if req == 24 { 1 } else { 0 })
         let f = sched.trace_frame(s)
         put_word(f, 19, (word(f, 19) & !TF) | (if req == 9 { TF } else { 0 }))
         sched.trace_resume(s)
@@ -229,7 +232,16 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
         return 0
     }
     if req == 0x4200 {
-        if data != 0 { return EINVAL }
+        // TRACESYSGOOD, TRACEEXEC, TRACEEXIT, EXITKILL. Clone/fork/vfork
+        // option bits remain refused until their own event paths land.
+        if data & !0x100051 != 0 { return EINVAL }
+        trace_state.set_options(s, data)
+        return 0
+    }
+    if req == 0x4201 {
+        let pml4 = paging.live()
+        if !uaccess.writable(pml4, data, 8) { return EFAULT }
+        uaccess.put(pml4, data, trace_state.event(s), 8)
         return 0
     }
     if req == 0x4202 {
@@ -237,7 +249,8 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
         if !uaccess.writable(pml4, data, 128) { return EFAULT }
         let (sig, code, at) = sched.trace_info(s)
         uaccess.zero(pml4, data, 128)
-        uaccess.put(pml4, data, sig, 4)
+        let kind = trace_state.stop_kind(s)
+        uaccess.put(pml4, data, if kind == 2 || kind == 3 { 5 } else { sig }, 4)
         uaccess.put(pml4, data + 8, code, 4)
         uaccess.put(pml4, data + 16, at, 8)
         return 0
@@ -246,8 +259,13 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
 }
 
 pub fn exec_stop(f: u64) -> u64 {
-    if sched.tracer_of(sched.self_slot()) == 0 { return f }
-    sched.trace_stop(f, 5, 0, sched.self_tid())
+    let s = sched.self_slot()
+    if sched.tracer_of(s) == 0 { return f }
+    trace_state.set_phase(s, 0)
+    if trace_state.options(s) & 0x10 != 0 { return event_stop(f, 4, sched.self_tid()) }
+    trace_state.set_stop_kind(s, 1)
+    trace_state.set_event(s, 0)
+    sched.trace_stop(f, 5, 0, sender())
 }
 
 /// Only the single-step trap at the SYSCALL entry's first instruction is
@@ -261,6 +279,8 @@ pub fn exception(f: u64, vector: u64) -> u64 {
     let s = sched.self_slot()
     if sched.tracer_of(s) == 0 { return 0 }
     sched.trace_set_orig(s, 0xffffffffffffffff)
+    trace_state.set_stop_kind(s, 1)
+    trace_state.set_event(s, 0)
     put_word(f, 19, word(f, 19) & !TF)
     if vector == 3 { return sched.trace_stop(f, 5, 128, 0) }
     if vector == 1 {
@@ -273,11 +293,73 @@ pub fn exception(f: u64, vector: u64) -> u64 {
     0
 }
 
-/// SYSCALL clears TF through FMASK. Report completion before the next
-/// user opcode, as Linux's measured TRAP_BRKPT (not TRAP_TRACE) stop.
+/// SIGCHLD carries only the signal, while wait4/waitid retain event
+/// tags. sender() is the signal-info union's pid/uid pair.
+fn sender() -> u64 {
+    sched.self_tid() | (cred.uid(sched.proc_area(sched.self_slot()), cred.REAL) << 32)
+}
+
+fn event_stop(f: u64, event: u64, message: u64) -> u64 {
+    let s = sched.self_slot()
+    trace_state.set_event(s, message)
+    trace_state.set_stop_kind(s, 4)
+    let tagged = 5 | (event << 8)
+    sched.trace_stop(f, tagged, tagged, sender())
+}
+
+pub fn signal_stop(f: u64, sig: u64, code: u64, from: u64) -> u64 {
+    trace_state.set_stop_kind(sched.self_slot(), 1)
+    trace_state.set_event(sched.self_slot(), 0)
+    sched.trace_stop(f, sig, code, from)
+}
+
+fn syscall_stop(f: u64, kind: u64) -> u64 {
+    let s = sched.self_slot()
+    trace_state.set_stop_kind(s, kind)
+    trace_state.set_event(s, 0)
+    let sig = if trace_state.options(s) & 1 != 0 { 0x85 } else { 5 }
+    sched.trace_stop(f, sig, sig, sender())
+}
+
+/// A new syscall stops before execution; a blocked syscall retry does
+/// not produce a second entry stop. A zero result means serve it now.
+pub fn syscall_enter(f: u64) -> u64 {
+    let s = sched.self_slot()
+    if sched.tracer_of(s) == 0 { return 0 }
+    if trace_state.phase(s) == 2 { return 0 }
+    trace_state.set_phase(s, 2)
+    if trace_state.mode(s) != 1 { return 0 }
+    trace_state.set_phase(s, 1)
+    put_word(f, 14, 0xffffffffffffffda) // -ENOSYS at syscall entry
+    syscall_stop(f, 2)
+}
+
+/// TRACEEXIT precedes destruction. Its continuation ignores register
+/// edits that would attempt to turn the committed exit into another call.
+pub fn before_exit(f: u64, nr: u64, status: u64) -> u64 {
+    let s = sched.self_slot()
+    if trace_state.exit_pending(s) == 2 {
+        trace_state.set_exit_pending(s, 0)
+        return 0
+    }
+    if sched.tracer_of(s) == 0 || trace_state.options(s) & 0x40 == 0 { return 0 }
+    trace_state.set_exit_pending(s, 1)
+    trace_state.set_exit_nr(s, nr)
+    trace_state.set_exit_status(s, status)
+    event_stop(f, 6, status)
+}
+
+/// A syscall exit stop precedes user execution. A stepped syscall uses
+/// Linux's measured TRAP_BRKPT, rather than an extra hardware instruction.
 pub fn syscall_return(f: u64) -> u64 {
     let s = sched.self_slot()
-    if sched.tracer_of(s) == 0 || word(f, 18) & 3 != 3 || word(f, 19) & TF == 0 { return f }
+    if sched.tracer_of(s) == 0 || word(f, 18) & 3 != 3 { return f }
+    if trace_state.phase(s) == 2 {
+        trace_state.set_phase(s, 0)
+        if trace_state.mode(s) == 1 { return syscall_stop(f, 3) }
+    }
+    if word(f, 19) & TF == 0 { return f }
     put_word(f, 19, word(f, 19) & !TF)
+    trace_state.set_stop_kind(s, 1)
     sched.trace_stop(f, 5, 1, word(f, 17))
 }

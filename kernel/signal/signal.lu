@@ -149,6 +149,7 @@ use netd
 use paging
 use process
 use sched
+use trace
 use timer
 use uaccess
 use vm
@@ -973,7 +974,12 @@ pub fn on_return(f: u64) -> u64 {
         if sig == 0 {
             return g
         }
-        g = act(g, sig, info)
+        if sig != SIGKILL && sched.tracer_of(sched.self_slot()) != 0 {
+            let (code, pid, uid, _status) = origin(info)
+            g = trace.signal_stop(g, sig, code, (uid << 32) | pid)
+        } else {
+            g = act(g, sig, info)
+        }
         guard += 1
     }
     g

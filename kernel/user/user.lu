@@ -265,6 +265,7 @@ use speaker
 use sync
 use timer
 use trace
+use trace_state
 use tree
 use uaccess
 use unix
@@ -1441,6 +1442,8 @@ fn sleep_until(req: u64, abs: bool, wall: bool) -> (u64, u64) {
 pub fn syscall(f: u64) -> u64 {
     let c = sched.self_slot()
     sched.trace_set_orig(c, word(f, W_RAX))
+    let stopped = trace.syscall_enter(f)
+    if stopped != 0 { return stopped }
     let g = serve(f)
     sched.syscall_ends(c)
     if g == f && sched.self_slot() == c { trace.syscall_return(g) } else { g }
@@ -1459,6 +1462,10 @@ fn serve(f: u64) -> u64 {
     if nr == 101 { // ptrace(2)
         put_word(f, W_RAX, trace.call(a0, a1, a2, a3))
         return f
+    }
+    if nr == SYS_EXIT || nr == SYS_EXIT_GROUP {
+        let stopped = trace.before_exit(f, nr, (a0 & 0xff) << 8)
+        if stopped != 0 { return stopped }
     }
     if nr == SYS_EXIT && sched.self_threads() > 1 {
         // px26: `exit` ends the calling thread alone while its process
@@ -2555,4 +2562,23 @@ pub fn exec_line(body: u64, pa: u64, pl: u64, aa: u64, al: u64, envp: str) -> u6
 /// kernel/process's `exec_span` (px12).
 pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64) -> u64 {
     process.exec_span(body, pa, pl, aa, al, ea, el)
+}
+
+
+/// boot/isr.S's special return vector resumes a stopped syscall in the
+/// kernel. No user opcode is re-executed, even if the tracer rewrote it.
+export fn pax_trace_resume_syscall(f: u64) -> u64 {
+    let c = sched.self_slot()
+    if trace_state.exit_pending(c) == 2 {
+        put_word(f, W_RAX, trace_state.exit_nr(c))
+        put_word(f, W_RDI, trace_state.exit_status(c) >> 8)
+    } else {
+        put_word(f, W_RAX, sched.trace_orig(c))
+    }
+    put_word(f, W_VECTOR, 0x101) // IRETQ preserves any registers the tracer set
+    trace_state.set_phase(c, 2)
+    let g = serve(f)
+    sched.syscall_ends(c)
+    let out = if g == f && sched.self_slot() == c { trace.syscall_return(g) } else { g }
+    signal.on_return(out)
 }

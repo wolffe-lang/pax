@@ -2594,6 +2594,7 @@ fn handler_of(l: u64, sig: u64) -> u64 {
 /// default is not inert: it stops the process (`job_signal` when it is
 /// sent, kernel/signal when a blocked one is taken).
 fn inert(l: u64, sig: u64) -> bool {
+    if sig != SIGKILL && trace_group(l) { return false }
     // px67: pid 1 is spared until the end, which ends it too (the
     // kernel's init is kmain's run list: `ending`).
     let init = field(l, offset_of(Thread, tgid)) == 1 && sv(S_ENDING) == 0
@@ -3194,9 +3195,10 @@ fn job_signal(l: u64, sig: u64, blocked: bool) -> bool {
         continue_proc(l)
         return false
     }
-    if !is_stop(sig) {
-        return false
-    }
+    if !is_stop(sig) { return false }
+    // A traced signal must reach signal-delivery-stop before its default
+    // group-stop action; CONT(0) can suppress it entirely.
+    if trace_group(l) { return false }
     discard(l, true)
     if sig != SIGSTOP && (handler_of(l, sig) != SIG_DFL || blocked) {
         return false
@@ -3618,13 +3620,21 @@ pub fn trace_stop(f: u64, sig: u64, code: u64, addr: u64) -> u64 {
     put_field(c, offset_of(Thread, trace_addr), addr)
     put_field(c, offset_of(Thread, state), TRACED)
     wake_waiter(tr)
-    raise_group(ps, SIGCHLD, sig_info(I_CHLD_TRAPPED, self_tid(), sig, real_uid(field(c, offset_of(Thread, lead)))))
+    raise_group(ps, SIGCHLD, sig_info(I_CHLD_TRAPPED, self_tid(), sig & 0x7f, real_uid(field(c, offset_of(Thread, lead)))))
     wake_sleepers()
     run_next()
 }
 
 pub fn trace_resume(s: u64) {
     if s >= SLOTS || field(s, offset_of(Thread, state)) != TRACED { return }
+    // Entry/exit-event stops resume the in-kernel syscall continuation,
+    // not the user SYSCALL instruction (which a tracer may have patched).
+    if trace_state.phase(s) == 1 || trace_state.exit_pending(s) == 1 {
+        let f = field(s, offset_of(Thread, frame))
+        // # Safety: the complete stopped frame; vector word 15.
+        unsafe { ((f + 15 * 8) as *u64).write_volatile(0x102) }
+        if trace_state.exit_pending(s) == 1 { trace_state.set_exit_pending(s, 2) }
+    }
     put_field(s, offset_of(Thread, trace_status), 0)
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
@@ -3645,7 +3655,11 @@ fn trace_release_owned(tid: u64) {
                     p.write_volatile(p.read_volatile() & !0x100)
                 }
             }
-            trace_resume(s)
+            if trace_state.options(s) & 0x100000 != 0 {
+                raise_thread(s, SIGKILL, sig_info(I_KERNEL, 0, 0, 0))
+            } else {
+                trace_resume(s)
+            }
         }
         s += 1
     }
@@ -3708,4 +3722,14 @@ pub fn trace_epoch(s: u64) -> u64 {
 pub fn thread_tid(s: u64, pid: u64) -> u64 {
     if s >= SLOTS || !takes(s) || field(s, offset_of(Thread, tgid)) != pid { return 0 }
     field(s, offset_of(Thread, pid))
+}
+
+
+fn trace_group(l: u64) -> bool {
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if takes(s) && field(s, offset_of(Thread, lead)) == l && tracer_of(s) != 0 { return true }
+        s += 1
+    }
+    false
 }

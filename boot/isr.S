@@ -177,9 +177,18 @@ pax_isr_common:
         andq    $-16, %rsp
         cld
         call    pax_interrupt
+.Lpax_resume_frame:
         movq    %rax, %rsp              /* the frame to resume (px07) */
+        cmpq    $0x102, 120(%rsp)       /* px102: stopped syscall's kernel continuation */
+        je      .Lpax_trace_syscall
         cmpq    $0x100, 120(%rsp)       /* PAX_SYSCALL's frame (px09) */
         je      pax_sysret
+        jmp     .Lpax_iret
+.Lpax_trace_syscall:
+        movq    %rsp, %rdi
+        andq    $-16, %rsp
+        call    pax_trace_resume_syscall
+        jmp     .Lpax_resume_frame
 .Lpax_iret:
         popq    %r15
         popq    %r14

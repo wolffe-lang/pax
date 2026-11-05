@@ -1104,8 +1104,11 @@ legacy exec stop, `CONT` with no injected signal, `GETSIGINFO`, `KILL`,
 GETREGS/SETREGS, GETFPREGS, GETREGSET for PRSTATUS/PRFPREG, PEEKUSER of
 register words and debug registers, POKEUSER of debug registers, SINGLESTEP,
 PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA, and proc memory read/write.
-It is not yet enough to run a debugger: attach, options and
-thread/signal lifecycle are still being implemented. Other requests are refused
+SETOPTIONS now accepts TRACESYSGOOD, TRACEEXEC, TRACEEXIT and EXITKILL;
+GETEVENTMSG reports exec/exit events, and PTRACE_SYSCALL stops at entry/exit.
+Signal-delivery stops can be suppressed with CONT(0).
+It is not yet enough to run a debugger: attach, clone/fork/vfork events,
+signal injection and full thread lifecycle are still being implemented. Other requests are refused
 by name; NT_X86_XSTATE is named and returns EINVAL.
 
 | Change | Behaviour and row |
@@ -1124,5 +1127,19 @@ The new state fills the existing 512-byte thread slot (six words added), plus
 non-user RIP/RSP/FS bases; general-word POKEUSER and nonzero signal injection
 remain unsupported. These restrictions need their own compatibility rows
 before the full tracing interface is claimed.
+
+Tracing option/event state uses a separate 128-byte slot per thread, leaving
+Thread at 512 bytes. Before any thread/table write, `T-trace-layout` compares
+both record sizes against actual assembly start/end reservation bounds. A
+520-byte Thread overflow was rejected at boot before scheduler initialization.
+
+Syscall-entry stops resume through an explicit kernel continuation, not by
+re-executing the user SYSCALL opcode. TRACEEXIT likewise resumes the committed
+exit before any destruction. The exec/syscall references and SIGCHLD-handler
+rows distinguish wait tags from notification payloads: waitid carries event
+1029/1541, while SIGCHLD si_status remains SIGTRAP (5); TRACESYSGOOD's wait
+status has bit 7, but SIGCHLD's signal does not. `T-traceexec`, `T-traceexit`,
+`T-syscall-entry`, `T-syscall-exit`, and the `T-sigchld-*` rows hold these.
+The tracer-death rows cover automatic detach and EXITKILL separately.
 
 Memory compatibility still needs cross-page, partial-buffer, PROT_NONE, shared/private file mapping, held-descriptor exec, and credential-change rows; the present probe covers mapped ELF text/data and unmapped-address errors.
