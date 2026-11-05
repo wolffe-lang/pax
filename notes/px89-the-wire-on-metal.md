@@ -1,7 +1,7 @@
 # px89 — the wire on metal: a DHCP client, then the I225-V
 
 Contract: `wolf/sprints/pax/89-the-wire-on-metal/px89-the-wire-on-metal.md` (planning `e8db61a`), under
-`sprints/the-lane-rules-1031.md` (every "Added" item). Base pax trunk `b38643a5`, rebased once onto `37217ba0` (px98's merge and pax#297's); branch `px89`. Footprint:
+`sprints/the-lane-rules-1031.md` (every "Added" item). Base pax trunk `b38643a5`, rebased onto `37217ba0` (px98's merge and pax#297's), then onto `411fc9f5` (px93's); branch `px89`. Footprint:
 cross-cutting (two new CI jobs, `mpx4-dhcp` and `mpx4-igb`; `tools/ci-tiers.map`; `tests/ci-plan`; kernel/net,
 kernel/netd, kernel/ip, kernel/arp, kernel/udp and both network kmains).
 
@@ -32,12 +32,20 @@ holds three probe commits (register read-backs) that are not part of this PR.
 
 ## Inputs, verified
 
-- **Base** `b38643a520eefcd89203c9e1e4188017a23e97bc`, pax trunk at clone time, rebased once onto
-  `37217ba0832ea36304c0eb517ff2662801b26a46` (px98's merge, then pax#297's). The lane's own diff did not move: each
-  file's added and removed lines are the same before and after. The only conflicts were README.md (trunk's Programs
-  row kept, px89's network rows taken), CHANGELOG.md (px89's entry above px98's) and docs/SOURCES.md (px87's and
-  px96's sections, then px89's); none of px98's other files is one px89 touches. `notes/px89/rebase-map.txt` pairs
-  each commit with its twin: this note cites the twins, and every run it names ran at the commit before the rebase. Branch `px89` in `~/lanes/px89/pax`; on hasu a clone at
+- **Base** `b38643a520eefcd89203c9e1e4188017a23e97bc`, pax trunk at clone time, rebased onto
+  `37217ba0832ea36304c0eb517ff2662801b26a46` (px98's merge, then pax#297's), then onto
+  `411fc9f524595c4fc1a174487879839259aef317` (px93's merge). The lane's own diff did not move: each file's added and removed lines are the same
+  before and after, each commit's patch-id the same. The first rebase's only conflicts were README.md (trunk's
+  Programs row kept, px89's network rows taken), CHANGELOG.md (px89's entry above px98's) and docs/SOURCES.md (px87's
+  and px96's sections, then px89's); none of px98's other files is one px89 touches. The second had none: no file
+  px93 changes is one px89 changes. The two meet in one place: px93 adds an upgrade entry to
+  `boot/limine-usb.conf`, the configuration tools/mkwire's stick takes. mkwire's netpoll twin put its
+  `cmdline: netpoll` after every `module_path` line, which would have overridden that entry's `quiet pax.upgrade`; it
+  now puts it in the first entry alone (`2785deaa`; that entry's text is what it was, byte for byte). A stick built at
+  the head carries px93's entry, which mounts nothing: the stick's `/pax/install-targets` names no disk as shipped.
+  The staged stick (`f68505c6`) predates px93 and has no such entry. `notes/px89/rebase-map.txt` pairs each commit
+  with its twins: this note cites the last, and every run in its tables ran at the map's first column (the commit
+  before the rebases) but the CI mirror's, which names its own. Branch `px89` in `~/lanes/px89/pax`; on hasu a clone at
   `/home/mfwolffe/lanes/px89/pax`, a worktree per tested commit (`wt-<sha8>`), git behind a lane-local lock.
 - **Toolchain** wolf 0.2.35 by `kernel/wolf.pin` (`tools/fetch-wolf`'s digest check every build), Limine 12.9.1.
 - **Image** `localhost/px89-dhcp:1`: px88's `localhost/px88-ubuntu:1` (px75's QEMU 8.2.2, OVMF, clang, lld 18,
@@ -57,40 +65,40 @@ holds three probe commits (register read-backs) that are not part of this PR.
 
 Commits (the prediction first; each phase's rows red before its code):
 
-- `126540dc` notes/px89/prediction.txt, before any change; `afbd8fb9` the black boxes and the datasheets' digests;
-  `93b478ea` notes/px89/hasu: the container, the launcher, the probes
-- Phase A rows: `c0db220c` user/net/netstate.c; `398ba3fd` tools/pcap-dhcp; `cd6108d0` tools/dhcp-wire;
-  `3bda4b11` tests/mpx4-dhcp (D0-D10); `0ca0a68e` CI's mpx4-dhcp job; `e06b6675` notes/px89/red: D1-D9 red at base
-- Phase A code: `a153ec54` boot/net.S; `065890bc` kernel/udp; `238a8ebc` kernel/ip; `4db3944a` kernel/arp;
-  `cf1a2034` kernel/dhcp; `6e12801d` kernel/netd; `1b54fe21` kmain_sockets; `c444ae47` kmain_session; `97ad77c5`,
-  `38d95884`, `4c1ca01a` kernel/dhcp: two reserved words, a trapping shift; `2bf85f72` kernel/dhcp: the lease file
-- Phase B rows: `14159baa` tools/pcap-net --dhcp; `68fb1aad` tests/mpx4-dhcp per NIC; `22726094`, `aa94ab58`
-  tests/mpx4-udp and tests/mpx4-tcp `--nic igb`; `1926d371` tests/mpx4-igb (G1-G4); `56bfa0d9` CI's mpx4-igb job;
-  `093331f5` notes/px89/red: G1-G4 red before kernel/gbe
-- Phase B code: `79025542` boot/net.S; `60933ad4` kernel/gbe; `37e7e41f` kernel/net; `9a9bd9bc` kernel/netd;
-  `85e02a3c` kernel/net: the registers read back; `87234acd` kernel/gbe: the 82576's PHY restart; `c2cb5c08`,
-  `154655e3`, `0e6f7179` kernel/gbe, kernel/net: the interrupt (IVAR/EIMS, then MSI, then MSI-X); `50c67150`,
-  `9759a809` the kmains' loopback line counts its own frames; `2cfd39fa` kmain_session attaches the USB disks
-- The metal leg: `066f6442` user/net/tcpprobe.c; `93ecd17a`, `cf2c8123` user/wire.sh; `34f6e4b8`, `2c9fca7b`,
-  `8a336d42` tools/mkwire (the stick, its netpoll twin, mkdir); `885d7315` tools/ci-tiers.map
-- Docs: `2334e339`, `81e68119` docs/SOURCES.md; `1999360e`, `3b7d52f2`, `f776d464` kernel/README.md; `ad0184b6`, `67fe1382`
-  CHANGELOG; `409f6ee1`, `5726d179` README (README-only commits)
-- Harness fixes on the way: `1c813232`, `cb4233f9`, `21f10804`, `4b21e049`, `cfdd2405`, `5706ce57`, `d2e51533`,
-  `6babcd20`, `52e487eb`; notes: `f47d654c`, `9b0e7257`, `236f3ac6`, `37d157f8`, `3f6acf30`, `8d8e51eb`,
-  `fe3ddcc8`, `dbdcc163`, and this note
+- `fddfa54d` notes/px89/prediction.txt, before any change; `a64b1b99` the black boxes and the datasheets' digests;
+  `eb4d4f70` notes/px89/hasu: the container, the launcher, the probes
+- Phase A rows: `a69926e7` user/net/netstate.c; `4dd9ee41` tools/pcap-dhcp; `c0127021` tools/dhcp-wire;
+  `388ed38a` tests/mpx4-dhcp (D0-D10); `95b85ff4` CI's mpx4-dhcp job; `08e7c2db` notes/px89/red: D1-D9 red at base
+- Phase A code: `60059340` boot/net.S; `704e8314` kernel/udp; `f78e4682` kernel/ip; `2ab17c2a` kernel/arp;
+  `86c86f7f` kernel/dhcp; `508154c8` kernel/netd; `aee0aee0` kmain_sockets; `40730537` kmain_session; `b23c9144`,
+  `0d7caee5`, `7f061f48` kernel/dhcp: two reserved words, a trapping shift; `30442f5a` kernel/dhcp: the lease file
+- Phase B rows: `0d832222` tools/pcap-net --dhcp; `d72e245f` tests/mpx4-dhcp per NIC; `242b4897`, `12d04376`
+  tests/mpx4-udp and tests/mpx4-tcp `--nic igb`; `c5d5806a` tests/mpx4-igb (G1-G4); `bc119edd` CI's mpx4-igb job;
+  `6c7fc4e3` notes/px89/red: G1-G4 red before kernel/gbe
+- Phase B code: `cbd40129` boot/net.S; `7240dd9c` kernel/gbe; `a2f77968` kernel/net; `65f7a006` kernel/netd;
+  `4d2c9af1` kernel/net: the registers read back; `a141470c` kernel/gbe: the 82576's PHY restart; `ee327936`,
+  `49103a6e`, `386a3228` kernel/gbe, kernel/net: the interrupt (IVAR/EIMS, then MSI, then MSI-X); `0ebe35bf`,
+  `e71a5afa` the kmains' loopback line counts its own frames; `3ba2a213` kmain_session attaches the USB disks
+- The metal leg: `0ac9a661` user/net/tcpprobe.c; `d6245d8a`, `75c85ddc` user/wire.sh; `5c218350`, `b8585bee`,
+  `1fde2d17` tools/mkwire (the stick, its netpoll twin, mkdir); `8a528bd0` tools/ci-tiers.map
+- Docs: `7ca67e6b`, `90fa7e45` docs/SOURCES.md; `75bf3c36`, `9132f88b`, `e201f025` kernel/README.md; `5498d651`, `acb6c6ca`
+  CHANGELOG; `fba06cb7`, `e2f4ab70` README (README-only commits)
+- Harness fixes on the way: `b8fc225b`, `abef5f7c`, `033f430a`, `3ed74f49`, `6f46dab4`, `026438ff`, `c3547e5c`,
+  `d21c9218`, `0512ae48`; notes: `841da07c`, `836acd04`, `ad1d562e`, `9fc430ee`, `d7780088`, `514a60c4`,
+  `2f35dd75`, `83cca6c8`, and this note
 
 ## Prediction, scored
 
-`notes/px89/prediction.txt` (`126540dc`, 2026-11-03 23:25Z, pushed before the first change):
+`notes/px89/prediction.txt` (`fddfa54d`, 2026-11-03 23:25Z, pushed before the first change):
 
 | predicted | measured |
 |---|---|
-| D0-D9 red by name at the base | **right**: D1-D9 red by name (`no 'dhcp: started on …' line`, `RENEW at 'none'`, …) at `0ca0a68e` (`notes/px89/red/mpx4-dhcp-at-ba7fc305.log`); D0 (the build) and D10 (the halt) were green there, not red as predicted: the base kernel builds and halts, it only ignores `/etc/pax-net` |
-| G rows red at base: `net: no virtio network device …` | **right**: G1-G4 red by name at `56bfa0d9` (`notes/px89/red/mpx4-igb-at-9cb8e014.log`) |
+| D0-D9 red by name at the base | **right**: D1-D9 red by name (`no 'dhcp: started on …' line`, `RENEW at 'none'`, …) at `95b85ff4` (`notes/px89/red/mpx4-dhcp-at-ba7fc305.log`); D0 (the build) and D10 (the halt) were green there, not red as predicted: the base kernel builds and halts, it only ignores `/etc/pax-net` |
+| G rows red at base: `net: no virtio network device …` | **right**: G1-G4 red by name at `bc119edd` (`notes/px89/red/mpx4-igb-at-9cb8e014.log`) |
 | DISCOVER→ACK against QEMU's server in under 0.1 s of guest time | **right**: bound at +0.03 s (virtio), +0.04 s (igb) |
 | retransmission at 4, 8, 16, 32 s ±1 s, the xid kept, secs counting up | **right**: 4.99, 8.27, 16.52 s apart, one xid (D4; dnsmasq started 20 s late) |
 | renew at T1 unicast, rebind at T2 broadcast, expiry, NAK back to INIT | **right**: RENEW at lease+10.00 s; REBIND +20.00 after an unanswered RENEW; expiry at lease+120 s then a new lease; NAK → new xid, a new address and its server's DNS (D5-D8) |
-| no existing row moves | **right** for the rows run (the gauntlet, below) — and one row needed a kernel change to stay so: the loopback line counted every frame sent since boot, which a lease's frames made non-zero; it now counts its own pings' frames (`50c67150`, `9759a809`: the same bytes on every fixed-address boot) |
+| no existing row moves | **right** for the rows run (the gauntlet, below) — and one row needed a kernel change to stay so: the loopback line counted every frame sent since boot, which a lease's frames made non-zero; it now counts its own pings' frames (`0ebe35bf`, `e71a5afa`: the same bytes on every fixed-address boot) |
 | igb: INTx on the firmware's line (10 or 11) | **wrong**: QEMU's igb raises no INTx and sends no MSI for an unmasked cause (PCI status bit 3 never set; EICR bit 0 set and EIMS bit 0 set; IMS reads 0 whatever is written). MSI-X vector 0 works; the 82576 now interrupts by MSI-X (R-px89-6) |
 | no PHY register access | **wrong for the 82576**: QEMU's igb leaves its PHY's auto-negotiation idle after CTRL.RST (no link for 10 s); PCTRL's restart through MDIC brings it up in 0.5 s. The I225 still touches no PHY register |
 | igb throughput within a factor of 2 of virtio-net's (U8, ~20,000 a second) | **right**: 22,886 datagrams a second in, 22,773 out (peer way); polled, 100 a second (one a tick) |
@@ -143,6 +151,34 @@ Commits (the prediction first; each phase's rows red before its code):
   the only interrupt QEMU's igb sends; polled costs a tick a round trip (100 a second). The I225 stays polled (one
   interrupt path fewer to confirm on metal); its MSI-X is a later lane's once the stick has spoken.
 
+### CI's red at D5 (pax#298's full-matrix run 41967637438)
+
+D5 failed on native BIOS in `mpx4-dhcp` (virtio) and in `mpx4-igb` (G1's igb boots) with
+`dnsmasq logged  requests;`, an empty count, while every other row of the same boots passed (D1's capture of the
+renew boot: `REQUEST (renewing)=2 server ACK=3`). CI's dnsmasq is the lane's, `dnsmasq-base 2.91-0ubuntu0.24.04.2` (Ubuntu
+24.04), so the version was not the difference; the user was. CI runs the suite as its runner, not root, and
+tools/dhcp-wire starts dnsmasq through `sudo -n`. dnsmasq run as root makes its `--log-facility` file mode 640,
+root:root, which the runner cannot read, and the row's `grep -c … 2>/dev/null` printed nothing. The same file
+stopped the jobs' artifact uploads (`EACCES … dnsmasq-1.log`). The lane's containers run every suite as root, so
+no local record met it. Witnessed on hasu block B (`notes/px89/logs/dnslog1.log`, `dnslog2.log`): the log dnsmasq
+makes as root is 640 root:root and uid 1001's read is `Permission denied`; a log the caller makes first keeps its
+owner and its mode 644, and dnsmasq appends to it.
+
+- `1b9b40d5`, the row, first: D5 finds each renewing REQUEST of the capture in dnsmasq's log by its xid (dnsmasq
+  writes it in decimal: `273854788` is the capture's `0x1052b144`), requested and ACKed, beside the row's earlier
+  counts; a log the suite cannot read fails by its mode and owner. A lifted copy of the clause on g6's renew files
+  passed, and failed on two altered copies of the log, one renewal's lines gone and its ACK made a NAK
+  (`notes/px89/logs/d5-lifted.txt`).
+- `a8ab4ae1`, the fix: dhcp-wire makes each log, mode 644, as the caller before dnsmasq opens it, and says in
+  `account.txt` whether the caller can read it.
+- The CI mirror (`notes/px89/hasu/Containerfile.ci`, `ci-mirror-run.sh`, `probes/ci-mirror.sh`;
+  `notes/px89/logs/cimirror1.log`): the lane image with sudo and a user `runner`, uid 1001, with password-less sudo,
+  as GitHub's runner has; the renew way's native BIOS boot run as runner, as CI runs it, one image for the three
+  commits (only tests/ and tools/ differ). At the rebased head before the row (`0b5cb6b0`) D5 red in CI's own
+  words; at the row (`1b9b40d5`) red by name, `cannot be read by uid 1001: 640 root:root`; at the fix (`a8ab4ae1`)
+  green, `dnsmasq's log holds the capture's 2 renewing REQUESTs by xid, each ACKed`, every file of the wire
+  directory readable by runner.
+
 ### The client (kernel/dhcp)
 
 The states INIT, SELECTING, REQUESTING, BOUND, RENEWING, REBINDING; 300-byte BOOTP messages with 53, 61 (`01` +
@@ -158,25 +194,25 @@ the lease as a program reads it, and whether the router answered the kernel's ec
 
 | run | commit | what it showed |
 |---|---|---|
-| red1 | `0ca0a68e` | D1-D9 red by name on the base kernel |
-| red2 | `56bfa0d9` | G1-G4 red by name before kernel/gbe |
-| d2 | `409f6ee1` | **mpx4-dhcp green on virtio**, native BIOS: 7 boots, D0-D10 |
-| i1 | `cfdd2405` | igb: DISCOVERs out, no OFFER in: no link (STATUS.LU 0 for 10 s) |
-| i2 | `87234acd` | the PHY restart: link in 1.5 s; still no frame taken (0 interrupts) |
-| i3 | `87234acd` | igb **polled**: every U0-U9 row of mpx4-udp's user way, 100 datagrams a second |
+| red1 | `95b85ff4` | D1-D9 red by name on the base kernel |
+| red2 | `bc119edd` | G1-G4 red by name before kernel/gbe |
+| d2 | `fba06cb7` | **mpx4-dhcp green on virtio**, native BIOS: 7 boots, D0-D10 |
+| i1 | `6f46dab4` | igb: DISCOVERs out, no OFFER in: no link (STATUS.LU 0 for 10 s) |
+| i2 | `a141470c` | the PHY restart: link in 1.5 s; still no frame taken (0 interrupts) |
+| i3 | `a141470c` | igb **polled**: every U0-U9 row of mpx4-udp's user way, 100 datagrams a second |
 | p3, p4 | `f4eef2ca`, `daa2643b` (px89-probe) | the ring receives (RDH 4), EICR bit 0 set and unmasked, PCI Interrupt Status never set; IMS never holds a bit |
-| i4, i5 | `c2cb5c08`, `37d157f8` (`154655e3`'s code) | IVAR/EIMS by INTx, then MSI: 0 interrupts |
+| i4, i5 | `ee327936`, `9fc430ee` (`49103a6e`'s code) | IVAR/EIMS by INTx, then MSI: 0 interrupts |
 | p5 | `9fbd3ccf` (px89-probe) | six GPIE/EIMS/EIAC/EIAM/ICS/EICS variants, read back; run with IF clear, so silent on delivery (`notes/px89/blackbox.txt`) |
-| i6 | `52e487eb` | **MSI-X: D1-D3, D10 green over igb** |
-| i8 | `52e487eb` | mpx4-igb: G1, G2, G4 green (U8 over igb 22,886 datagrams a second); G3 red only at T1 of the user way (`4 frames on the wire`: the lease's) |
-| i9 | `9759a809` | **mpx4-tcp over igb green**, both ways, after the loopback line's fix (T8: 16 MiB out of PAX at 9.3 MB/s, in at 15.1 MB/s) |
-| w2 | `9759a809` | the stick: Q0 green (MSI-X), Q1-Q4 red: the root archive has no `/tmp` (the record could not be made) and kmain_session attached no USB disk (no `/dev/sd?` for the stick) |
-| w3 | `8a336d42` | **the stick qualified**: Q0-Q5 PASS on all four boots (BIOS, UEFI, each MSI-X and netpoll), after `2cfd39fa` (kmain_session attaches USB disks), `cf2c8123` and `8a336d42` (`mkdir -p /tmp`) |
+| i6 | `0512ae48` | **MSI-X: D1-D3, D10 green over igb** |
+| i8 | `0512ae48` | mpx4-igb: G1, G2, G4 green (U8 over igb 22,886 datagrams a second); G3 red only at T1 of the user way (`4 frames on the wire`: the lease's) |
+| i9 | `e71a5afa` | **mpx4-tcp over igb green**, both ways, after the loopback line's fix (T8: 16 MiB out of PAX at 9.3 MB/s, in at 15.1 MB/s) |
+| w2 | `e71a5afa` | the stick: Q0 green (MSI-X), Q1-Q4 red: the root archive has no `/tmp` (the record could not be made) and kmain_session attached no USB disk (no `/dev/sd?` for the stick) |
+| w3 | `1fde2d17` | **the stick qualified**: Q0-Q5 PASS on all four boots (BIOS, UEFI, each MSI-X and netpoll), after `3ba2a213` (kmain_session attaches USB disks), `75c85ddc` and `1fde2d17` (`mkdir -p /tmp`) |
 | eng | — | the container engine inside a lane container (`notes/px89/hasu/eng-test.sh`): podman 5.8.9 client and server, one throwaway container: the gauntlet's Linux sides |
 
 ### The metal leg (staged, not run)
 
-`tools/mkwire root` and `tools/mkwire stick` at `8a336d42` on hasu (`notes/px89/hasu/wire-build.sh`), qualified by
+`tools/mkwire root` and `tools/mkwire stick` at `1fde2d17` on hasu (`notes/px89/hasu/wire-build.sh`), qualified by
 `notes/px89/hasu/wire-qualify.sh` (`notes/px89/logs/w3.rows`): a copy of the image as USB storage on qemu-xhci,
 QEMU's 82576 on its user network, a server on the host for the TCP row, a SATA disk and an NVMe disk of 64 MiB of
 random bytes beside it; four boots (BIOS and UEFI; the stick, and its twin `pax-wire-netpoll.img` with `cmdline:
@@ -199,7 +235,9 @@ step its own lock take): the plan job's self-tests; `mpx4-dhcp` and `mpx4-igb` o
 (R-px89-9: BIOS and UEFI as item 5 asks; the full-matrix label and tier all cover the other legs); `mpx4-unix`,
 `mpx4-session`, `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-lobo` (its step in hasu's own network
 namespace, where its Linux side's container listens: R-px89-7), `mpx5-jobs` and `mpx3-shell` on the merge leg
-(native BIOS). `kernel-as` is CI-only, a named `SKIP` line in the record (R-px89-8): it builds a second wolf from
+(native BIOS). The gauntlet's containers run the suites as root; CI's runner is not root, and
+`notes/px89/hasu/probes/ci-mirror-suites.sh` runs `mpx4-dhcp` and `mpx4-igb` whole as runner on the leg CI ran red
+(its take is in the PR body). `kernel-as` is CI-only, a named `SKIP` line in the record (R-px89-8): it builds a second wolf from
 source with cargo, which the lane image does not have; the full-matrix run holds it. Those are the readers of every kernel path changed but 20 of kmain_sockets'
 (mpx3-boreutils, -console, -screen, -threads, -tree, -maps; mpx5-forks, -accounts, -lope, -pelt, -aspen, -den,
 -scent, -bore, -lupin, -wolf, -clef, -yew, -screen; mpx6-games: their kernel is the same but for px89's `dhcp`
@@ -238,7 +276,7 @@ wrong and what to photograph for each is in the README. The stick writes only it
 - [x] Item 7: each phase's rows red by name before its code (`notes/px89/red/`).
 - [x] Item 8: the plant (the PR body).
 - [x] Item 9: this note; the PR and the audit are the hand-back's.
-- README read against the change: the Network row and the network suites' row moved (`409f6ee1`, `5726d179`,
+- README read against the change: the Network row and the network suites' row moved (`fba06cb7`, `e2f4ab70`,
   README-only commits).
 
 **Issues** (none filed or closed by this lane). Owed, for the orchestrator to file: the I225's interrupt (MSI-X,
