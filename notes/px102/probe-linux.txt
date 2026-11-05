@@ -1,0 +1,109 @@
+px102 — no-libc tracing probe, measured 2026-11-05
+
+This is probe evidence, not a kernel-support claim or the final lane record.
+The kernel is unchanged from 411fc9f5. Probe sources were committed before
+building: d8218589, extended by 69e3d2f5; the exact transcripts and checker
+are committed in 618e15a5. The prediction's host name was later replaced
+with a hardware-neutral description; none of its predictions was changed.
+
+Reproduce on x86-64 Linux, inside a disposable container/pid namespace:
+  tools/mktrace out
+  python3 -I tests/mpx5-trace.d/check.py --selftest
+  timeout 30 out/trace "$PWD/out/tracee" core > core.txt
+  python3 -I tests/mpx5-trace.d/check.py core core.txt
+Repeat with syscall, exec, errors in place of core. Repeat all four as
+uid/gid 1000, with no supplementary groups. No added capability is needed
+for these parent/child cases. Do not run the trace probe under strace -f:
+strace would take its child and make TRACEME fail.
+
+Environment:
+  x86-64 Linux 7.2.4, rootless Ubuntu 24.04 container;
+  gcc 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1);
+  two-CPU affinity, 6 GiB memory cap, SigBlk=SigIgn=0.
+The build's elapsed/user/system seconds were 0.181/0.132/0.043, about
+0.97 busy CPUs. The 80-run stability loop was 0.143/0.074/0.073 seconds,
+about 1.03 busy CPUs including subprocess/clock granularity. These are
+placement checks, not performance claims. No Mac build or test ran.
+
+Binaries (same exact binaries as root and as uid 1000):
+  trace   16032 bytes
+    250aa7a4a2402aa05ad52624ca35170835b0394e73c2998b17caec3597e48249
+  tracee   9032 bytes
+    9e4e64729799e5e1569b23c4f4ef92edca189ddf145fd9cf35f621ae1341c4b2
+Both are ET_EXEC with no PT_INTERP. mktrace checks every address the probe
+uses, the tracee's R-X text and RW- data. No libraries or platform headers
+are linked or included. Sources consulted for the probe: man-pages 6.7
+ptrace(2), wait(2) (including waitid), proc_pid_mem(5), proc_pid_status(5);
+the existing PAX no-libc syscall witnesses and the prior binary-only gdb
+measurement in notes/px102/gdb. No other OS's or debugger's implementation
+was read.
+
+Coverage measured, not inferred:
+  core: TRACEME + legacy exec stop, waitid WNOWAIT/CLD_TRAPPED then wait4;
+    TracerPid; GETREGS, GETFPREGS, GETREGSET PRSTATUS/PRFPREG; Linux CS/SS
+    through GETREGS, PEEKUSER, GETREGSET and a SETREGS round trip;
+    PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA (including the all-ones word);
+    /proc/<pid>/mem and /proc/<pid>/task/<tid>/mem, pread and pwrite of
+    R-X text, EIO for unmapped memory; literal int3 and inserted software
+    breakpoint, exact si_code/si_addr/RIP; RDI changed and then stored by
+    the tracee; single-step of nop, mov, syscall; an 8-byte write
+    watchpoint, exact DR6/DR7 and siginfo; normal exit then ECHILD.
+  syscall: TRACESYSGOOD entry/exit stops, orig_rax, entry rax=-ENOSYS,
+    getpid's result; TRACEEXIT and GETEVENTMSG before the real exit.
+  exec: pre-exec SIGSTOP, TRACEEXEC, GETEVENTMSG (the same thread ID),
+    PTRACE_KILL and SIGKILL death status.
+  errors: bad tracee memory versus bad tracer buffer, USER alignment and
+    padding, GETREGSET lengths and note types, DR4/DR5 writes, options,
+    unknown request, ATTACH to self/already traced, DR7 execute length,
+    I/O mode and an unaligned 8-byte watchpoint.
+
+Corrections to the prediction for the kernel implementation:
+  - SINGLESTEP over syscall reports si_code=1 (TRAP_BRKPT), si_addr and
+    RIP the instruction after syscall (0x401009), with getpid completed.
+    The preceding ordinary steps report si_code=2 (TRAP_TRACE).
+  - Initial DR6 is 0xffff0ff0, ordinary single-step 0xffff4ff0, and the
+    write watchpoint after explicitly clearing DR6 is 0xffff0ff1.
+  - PEEKUSER at offset 912 succeeds with zero padding; offset 4096 is
+    EIO. GETREGSET PRSTATUS with length 7 is EINVAL, length 8 succeeds
+    and returns length 8; an unknown note type is EINVAL.
+  - Unmapped PEEK/POKE and /proc mem are EIO; bad output buffers in the
+    tracer are EFAULT. Invalid DR7 combinations above are EINVAL.
+
+The only normalizations are stated in trace.c: the child's pid is tested
+for equality, and a successful open's descriptor is printed as zero.
+No selector, address, other register value, status, errno or siginfo code
+is normalized.
+The tracee's text/data addresses are fixed at link time; stack addresses
+are not printed. check.py compares the entire transcript byte-for-byte
+and also reports 24 separately named ABI rows (28 with transcript gates).
+Its selftest changes, removes and duplicates every row's first marker,
+and tests empty/extra transcripts, requiring each damaged row to fail.
+
+Dry-run results at 618e15a5 (not final gauntlet records):
+  PASS trace-layout
+  PASS trace-checker-selftest
+  END linux-core-uid0 exit=0
+  END linux-syscall-uid0 exit=0
+  END linux-exec-uid0 exit=0
+  END linux-errors-uid0 exit=0
+  END linux-core-uid1000 exit=0
+  END linux-syscall-uid1000 exit=0
+  END linux-exec-uid1000 exit=0
+  END linux-errors-uid1000 exit=0
+  END linux-repeat-80 exit=0
+Every named ABI row ran and passed in each applicable root/user mode.
+The 80 extra runs were twenty repetitions of each of the four modes,
+each held byte-for-byte to the committed Linux transcript. No skips.
+
+Still owed before the lane can claim completion:
+  kernel implementation; successful ATTACH/SEIZE/INTERRUPT/DETACH and
+  non-dumpable/credential permission rows; tracer exit and EXITKILL;
+  fork/vfork/clone events, signal injection/suppression and thread
+  lifecycle; /proc/self/mem; short/cross-page memory transfers; full
+  register write validation; named unsupported-request rows; the PAX
+  suite/CI wiring, syscall census, README (including selector translation
+  and IDT DPL changes), gdb's PAX session, final note, plant and records.
+For sniff: maps, auxv, status's TracerPid and task/<tid>/stat remain owed
+until implemented and tested; this probe measures TracerPid only. S5's
+watchpoint mechanism has an oracle row, not kernel support. S6's thread
+and clone behaviour and S7's core dumps are not established by this work.
