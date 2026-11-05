@@ -1,0 +1,117 @@
+px102 — kernel foundation, dry runs through 2026-11-05T21:03Z
+
+This is a natural implementation boundary, not the final lane record.
+It supersedes the support-status paragraph in the earlier probe-only note;
+that note's Linux evidence still belongs to its stated source commit.
+No final gauntlet, plant, rebase, push or PR has been taken.
+
+Code head: b715dd44 (subsequent changes are documentation only).
+Base: 411fc9f5. The implementation follows the measured Linux requests;
+unsupported options, attach and signal/thread lifecycle are not complete.
+
+Red first, actually run under QEMU:
+  - 618e15a5's unchanged kernel: TRACEME returned -38, child exited 111,
+    waitid reported CLD_EXITED and wait4 0x6f00. Core checker failed by
+    name, including T-int3, T-single-step and T-hardware-db. The machine
+    halted and returned all process frames. Evidence is committed as
+    notes/px102/baseline.core.txt and baseline.red.txt (01cfcf46).
+  - 59e55e86's isolated stops mode on the same kernel: Linux passed,
+    PAX failed T-stops-transcript at TRACEME, before 50f73421's fix.
+  - 67f7aa4b's isolated regs/step modes on kernel 50f73421: Linux passed;
+    PAX failed T-regs-transcript and T-step-transcript at GETREGS=-EIO.
+    Their references were committed in 2c08682f before implementation.
+  - d88960c2's first memory implementation panicked at the all-ones
+    POKEDATA row: wolf's checked u64-to-u8 conversion needs a mask.
+    b715dd44 masks each byte before conversion. The same row now passes.
+
+Kernel changes:
+  50f73421: TRACEME, a distinct tracing-stop state, legacy exec stop,
+    CONT, GETSIGINFO, KILL, wait4/waitid including WNOWAIT/CLD_TRAPPED;
+    vector 3 DPL 3; traced int3 -> SIGTRAP/SI_KERNEL. Existing kernel
+    int3 behaviour is unchanged.
+  c1de9a85: GETREGS/SETREGS, GETFPREGS, GETREGSET PRSTATUS/PRFPREG,
+    PEEKUSER, debug-register POKEUSER and SINGLESTEP. The external
+    selectors are Linux CS 0x33/SS 0x2b; setters translate to PAX's
+    0x23/0x1b. No GDT renumbering. TracerPid is truthful.
+    #DB remains DPL 0, uses IST4, and copies a user frame onto the
+    thread's own kernel stack before it can be parked. Ordinary steps
+    return si_code 2; stepped syscall completion returns the measured
+    si_code 1. DR state is loaded per thread; reserved/GD bits cannot
+    reach hardware. The thread record fills its existing 512-byte slot.
+  d88960c2, b715dd44: traced memory words; /proc/<pid>/mem and
+    task/<tid>/mem, with the shared FSCREDS rule at open; real-credential
+    permission for TRACEME. Private borrowed file pages are copied;
+    forced text writes do not grant the tracee write permission.
+    Held proc-mem descriptors bind to an exec generation and CR3; they
+    return EOF after the target ends or execs, not a later image's bytes.
+
+Dry runs at b715dd44 (native compiler, QEMU):
+  END kernel-build-b715dd44 exit=0
+  END stops-halt exit=0
+  END stops-gate exit=0
+  END regs-halt exit=0
+  END regs-gate exit=0
+  END step-halt exit=0
+  END step-gate exit=0
+  END core-halt exit=0
+  END core-gate exit=0
+The core transcript is byte-identical to Linux, including an actual hardware
+write-watchpoint stop with si_code 4, DR6 0xffff0ff1 and DR7 0x90101.
+The checker mutation selftest passed too.
+
+The same binaries were compared as uid/gid 1000 on Linux and PAX:
+  END linux-user-core exit=0
+  END linux-user-regs exit=0
+  END linux-user-step exit=0
+  END linux-user-stops exit=0
+  END linux-user-errors exit=0
+  END user-core exit=0
+  END user-regs exit=0
+  END user-step exit=0
+  END user-stops exit=0
+  END user-errors exit=0
+  END tcg-core exit=0
+  END uefi-core exit=0
+The user cases use BIOS/KVM, tcg-core uses BIOS/TCG, and uefi-core uses
+UEFI/KVM. Every matrix case also required no panic, init status 0 and
+its process frame count restored. No skips. The errors case removes only
+two kernel-narration lines, checked byte-for-byte first: the unknown
+register set and unknown request, both 0x7fffffff. Nothing of the probe's
+output is filtered. These rows complement, not replace, a future suite.
+
+Light work used a two-CPU affinity and 6 GiB container cap. Measured busy
+CPU averages for the boot legs were about 0.41–0.76; the small as launcher
+build averaged 0.56. Kernel builds and the regression suites used a heavy
+CPU block with both lock names. No Mac build/test ran.
+
+Regression dry runs at the same code head, native BIOS/KVM:
+  END regression-mpx2-interrupts exit=0
+  END regression-mpx2-sched exit=0
+Both suites' own PASS verdicts were observed, not just their exits.
+
+Still owed:
+  - SETOPTIONS/events (TRACEEXEC/TRACEEXIT/clone/fork/vfork), SYSCALL
+    stops, successful ATTACH/SEIZE/INTERRUPT/DETACH, signal delivery,
+    suppression/injection, tracer/tracee thread lifecycle and EXITKILL.
+    The committed exec/syscall reference modes are not green on PAX yet.
+  - Full register validation/PEEKUSER boundaries and POKEUSER of general
+    register words; SETREGS currently accepts only the measured amd64
+    selectors, zero GS/data selectors and user-range RIP/RSP/FS bases.
+  - Cross-page and partial-buffer memory rows, PROT_NONE (not forced
+    through at present), shared/private mapped files, held-descriptor
+    exec, non-dumpable and credential-change cases, concurrent tracees,
+    and untraced #DB siginfo. The present end-to-end memory rows are ELF
+    text/data; they do not establish all those unmeasured cases.
+  - Task mem aliases enumerate threads, but no multi-threaded probe has
+    validated the new path yet. /proc/self/mem is routed but has no row.
+  - tests/mpx5-trace's top-level runner, CI wiring, syscall census,
+    complete README refresh, broader process/signal/mapping regressions,
+    release-tier takes, debugger-on-PAX session and final note/plant.
+  - Maps, auxv and task/<tid>/stat remain owed to sniff. TracerPid is now
+    implemented and tested. S5 has a tested write watchpoint mechanism;
+    S6 threads/clone events and S7 cores are not established here.
+
+No new ruling is requested. The selector translation and proc-mem aliases
+follow the existing decisions. Architectural references read directly for
+this phase are recorded in docs/SOURCES.md. No other OS/debugger source was
+read. The public compatibility table explicitly remains in progress.
