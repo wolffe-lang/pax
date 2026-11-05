@@ -93,6 +93,7 @@ use signal
 use sound
 use speaker
 use timer
+use trace
 use triage
 use user
 use xhci
@@ -393,6 +394,13 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
 fn route(f: *Frame) -> *Frame {
     // # Safety: `f` is the trampoline's frame, live for this call.
     let v = unsafe { f[0].vector }
+    // px102: the DPL-3 INT3 gate delivers #BP, not #GP. A traced
+    // user receives a stop; an untraced user takes SIGTRAP normally.
+    if (v == 1 || v == 3) && user.from_user(unsafe { f as u64 }) {
+        let stopped = trace.exception(unsafe { f as u64 }, v)
+        if stopped != 0 { return unsafe { stopped as *Frame } }
+        return unsafe { user.kill(f as u64, name(v)) as *Frame }
+    }
     if v == 3 {
         // # Safety: as above.
         let rip = unsafe { f[0].rip }

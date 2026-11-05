@@ -1,0 +1,71 @@
+//! trace — Linux ptrace(2)'s tracing stops (px102).
+//!
+//! Clean room: ptrace(2), wait(2), Intel SDM vol. 3A interrupt gates
+//! and #BP, and the committed Linux probe. No debugger/kernel source.
+//! This first layer implements TRACEME, CONT with signal zero,
+//! GETSIGINFO and KILL. Further requests are refused by name until
+//! their independently measured rows are implemented.
+use log
+use paging
+use sched
+use uaccess
+
+const EPERM: u64 = 0xffffffffffffffff
+const ESRCH: u64 = 0xfffffffffffffffd
+const EIO: u64 = 0xfffffffffffffffb
+const EFAULT: u64 = 0xfffffffffffffff2
+const EINVAL: u64 = 0xffffffffffffffea
+
+fn refused(req: u64) -> u64 {
+    log.put("ptrace: refused request ")
+    log.dec(req as int)
+    log.end()
+    EIO
+}
+
+pub fn call(req: u64, pid: u64, _addr: u64, data: u64) -> u64 {
+    if req == 0 { // TRACEME: pid, addr and data are ignored
+        return if sched.trace_me() { 0 } else { EPERM }
+    }
+    let s = sched.trace_target(pid & 0xffffffff)
+    if s == sched.SLOTS { return ESRCH }
+    if req == 7 { // CONT: signal injection is a later row
+        if data > 64 { return EIO }
+        if data != 0 { return refused(req) }
+        sched.trace_resume(s)
+        return 0
+    }
+    if req == 8 { // KILL: SIGKILL bypasses the trace stop
+        let _sent = sched.raise_tid(0, pid & 0xffffffff, 9, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+        return 0
+    }
+    if req == 0x4200 { // SETOPTIONS(0), also used by failure cleanup
+        if data != 0 { return EINVAL }
+        return 0
+    }
+    if req == 0x4202 { // GETSIGINFO
+        let pml4 = paging.live()
+        if !uaccess.writable(pml4, data, 128) { return EFAULT }
+        let (sig, code, addr) = sched.trace_info(s)
+        uaccess.zero(pml4, data, 128)
+        uaccess.put(pml4, data, sig, 4)
+        uaccess.put(pml4, data + 8, code, 4)
+        uaccess.put(pml4, data + 16, addr, 8)
+        return 0
+    }
+    refused(req)
+}
+
+/// A successful exec of a TRACEME child stops before its first opcode.
+pub fn exec_stop(f: u64) -> u64 {
+    if sched.tracer_of(sched.self_slot()) == 0 { return f }
+    sched.trace_stop(f, 5, 0, sched.self_tid())
+}
+
+/// A user exception becomes the tracer's SIGTRAP stop. Zero means the
+/// ordinary (untraced) signal path must handle it instead.
+pub fn exception(f: u64, vector: u64) -> u64 {
+    if sched.tracer_of(sched.self_slot()) == 0 { return 0 }
+    if vector == 3 { return sched.trace_stop(f, 5, 128, 0) }
+    0 // #DB and its DR6 decoding are the next independent layer
+}

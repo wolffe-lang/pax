@@ -1095,3 +1095,21 @@ to F9); `notes/px76-uefi-on-metal.md` has the measurements.
 | `xhci/` (px76 change) | a controller with an MSI capability is put on it (vector 79 + its number; `xhci N: ports P MSI vector V …`), else on its INTx line as before; its bootstrap waits are `clock` deadlines; its BAR0 on a line |
 | `screen/`, `fb/` (px76 change) | any width, height, pitch and channel shifts Limine reports (an invalid pitch or overlapping masks refused); glyphs doubled above 2560 pixels wide (R-px76-3 B: 240x67 cells at 3840x2160); drawn from `serial.init`'s first line through Limine's own mapping until PAX's paging takes over, then replayed; `fb.report`'s mode line in the console and session kernels |
 | `serial/` (px76 change) | an absent UART (its registers read all ones) is never polled; the lines go to the screen and to a 64 KiB transcript in memory (`boot/io.S`'s `pax_serial_log`) |
+
+## Tracing stops (px102, in progress)
+
+`ptrace(2)` is being added against the no-libc Linux transcripts in
+`tests/mpx5-trace.d/`. This first layer supports a child's `TRACEME`, the
+legacy exec stop, `CONT` with no injected signal, `GETSIGINFO`, and `KILL`.
+It is not yet enough to run a debugger. Other requests are refused by name;
+registers, stepping, memory access and attach are still being implemented.
+
+| Change | Behaviour and row |
+|---|---|
+| `idt/`: vector 3 DPL 3 | Ring-3 `INT3` reaches #BP instead of #GP; every other present gate retains DPL 0. Kernel-mode INT3 still logs and returns. `T-int3-stop` requires a SIGTRAP stop with SI_KERNEL (128), not SIGSEGV |
+| `sched/`, `process/` | A tracing stop has its own parked state, separate from job control; wait4 reports it without WUNTRACED, waitid reports CLD_TRAPPED and honours WNOWAIT. `T-stop-waitid` and `T-stops-transcript` |
+| `trace/` | TRACEME binds the child to its parent; CONT resumes only an owned, traced stop; GETSIGINFO copies its 128-byte record. SIGKILL wakes a tracing stop; an exiting tracer releases its tracees. `T-int3-stop`, `T-stop-exit` |
+
+The new state uses four words of the thread record's spare space: 496 bytes
+in the existing 512-byte slot. No debug registers are loaded by this layer.
+The #DB/TF path and the Linux selector translation have not landed yet.

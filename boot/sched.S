@@ -75,7 +75,8 @@
 
    Storage (.bss, zero until kernel/sched writes it):
      pax_threads       64 thread slots (16 before px24), 512 bytes each (kernel/sched's
-                       #[repr(c)] Thread, 464 bytes of it since px88's
+                       #[repr(c)] Thread, 496 bytes since px102's four trace-stop words;
+                       464 bytes of it since px88's
                        five usage words, 424 since px62's
                        FIFO word, 416 since px56's
                        two name words, 400 since px48's eight

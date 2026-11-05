@@ -9,7 +9,8 @@
 //! - vectors 0-31, the exceptions, and 32-47, the 8259's sixteen lines
 //!   once kernel/timer remaps them there: a 64-bit interrupt gate each
 //!   (type 0xE: IF is cleared on entry, so a handler is never
-//!   interrupted), present, DPL 0, selector 0x08 (kernel/gdt's kernel
+//!   interrupted), present, DPL 0 except vector 3 (DPL 3, px102),
+//!   selector 0x08 (kernel/gdt's kernel
 //!   code), its offset the vector's trampoline in boot/isr.S
 //!   (pax_isr_table), which calls kernel/interrupts' `pax_interrupt`;
 //! - vector 8, the double fault, with IST 1: the CPU switches to the
@@ -84,7 +85,7 @@ fn set(v: int, at: u64, ist: u8) {
             offset_lo: (at & 0xffff) as u16,
             selector: KERNEL_CODE,
             ist: ist,
-            attr: INTERRUPT_GATE,
+            attr: if v == 3 { 0xee } else { INTERRUPT_GATE }, // px102: INT3 may be called from CPL 3
             offset_mid: ((at >> 16) & 0xffff) as u16,
             offset_hi: ((at >> 32) & 0xffffffff) as u32,
             reserved: 0,

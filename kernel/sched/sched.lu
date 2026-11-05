@@ -292,6 +292,10 @@ struct Thread {
     sysin: u64, // px88: in a system call: the TSC its bracket opened at, 1 while it is switched out; 0 not in one
     vcs: u64, // px88: switches away while it waited (ru_nvcsw)
     ics: u64, // px88: switches away while it was ready (ru_nivcsw)
+    tracer: u64, // px102: tracer's tid, 0 when untraced
+    trace_status: u64, // low 32 bits: wait status; bit 32: not reported yet
+    trace_code: u64, // GETSIGINFO's si_code at the current trace stop
+    trace_addr: u64, // GETSIGINFO's fault address at that stop
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -317,6 +321,7 @@ const FUTEX: u64 = 12 // px26: in a futex wait
 const HELD: u64 = 13 // px26: a leader that has ended while its group's threads live on: no stack, never run, its slot the group's
 const STOPPED: u64 = 14 // px48: a thread of a stopped process, parked with its frame until the process is continued (or killed)
 const SUSPEND: u64 = 15 // px48: in rt_sigsuspend until a signal that runs a handler or ends the process
+const TRACED: u64 = 16 // px102: stopped until the tracer resumes, or SIGKILL
 
 /// px26: how a thread's system call is waiting, read when a signal ends
 /// the wait (kernel/signal): `W_REWOUND` the frame is rewound to run the
@@ -758,6 +763,10 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, sysin), 0)
     put_field(s, offset_of(Thread, vcs), 0)
     put_field(s, offset_of(Thread, ics), 0)
+    put_field(s, offset_of(Thread, tracer), 0)
+    put_field(s, offset_of(Thread, trace_status), 0)
+    put_field(s, offset_of(Thread, trace_code), 0)
+    put_field(s, offset_of(Thread, trace_addr), 0)
     let a = own_area(s)
     var i: u64 = 0
     while i < PROC_AREA / 8 {
@@ -1172,6 +1181,7 @@ fn process_ends(l: u64, st: u64) {
     put_field(l, offset_of(Thread, gpend), 0)
     release_vfork(l)
     let me = field(l, offset_of(Thread, tgid))
+    trace_release_owned(me) // px102: a dead tracer cannot strand its tracees
     if me != 0 && sv(S_WAITPID) == me {
         wake_kmain() // px67: the run list's last command (init) has ended
     }
@@ -2075,6 +2085,7 @@ pub fn child_ended(sel: u64) -> (bool, u64) {
 pub const W_EXITED: u64 = 1
 pub const W_STOPPED: u64 = 2
 pub const W_CONTINUED: u64 = 4
+pub const W_TRACED: u64 = 8 // px102: reported even without WUNTRACED
 
 pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
     reap()
@@ -2091,6 +2102,9 @@ pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
                     return (true, s, W_EXITED)
                 }
             } else if running_state(s) {
+                if st == TRACED && field(s, offset_of(Thread, tracer)) == self_tid() && field(s, offset_of(Thread, trace_status)) >> 32 != 0 {
+                    return (true, s, W_TRACED)
+                }
                 if want & W_STOPPED != 0 && field(s, offset_of(Thread, wstop)) != 0 {
                     return (true, s, W_STOPPED)
                 }
@@ -2109,6 +2123,13 @@ pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
 /// without WNOWAIT).
 pub fn wait_report(s: u64, what: u64, consume: bool) -> (u64, u64) {
     let pid = field(s, offset_of(Thread, pid))
+    if what == W_TRACED {
+        let status = field(s, offset_of(Thread, trace_status)) & 0xffffffff
+        if consume {
+            put_field(s, offset_of(Thread, trace_status), status)
+        }
+        return (pid, status)
+    }
     if what == W_STOPPED {
         let sig = field(s, offset_of(Thread, wstop))
         if consume {
@@ -2493,6 +2514,7 @@ pub const I_PIPE: u64 = 6
 pub const I_CONN: u64 = 7 // px23's: a write to a stream socket whose connection is over
 pub const I_CHLD_STOPPED: u64 = 8 // px48: a child stopped (CLD_STOPPED, the signal)
 pub const I_CHLD_CONTINUED: u64 = 9 // px48: a child continued (CLD_CONTINUED, SIGCONT)
+pub const I_CHLD_TRAPPED: u64 = 10 // px102: a ptrace stop (CLD_TRAPPED)
 
 /// An origin word: the kind (four bits; three before px48), a status (a
 /// child's exit code or signal: eight bits), the sender's (or the
@@ -3132,6 +3154,13 @@ fn job_signal(l: u64, sig: u64, blocked: bool) -> bool {
         return false
     }
     if sig == SIGKILL {
+        var t: u64 = FIRST
+        while t < SLOTS {
+            if field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, state)) == TRACED {
+                trace_resume(t)
+            }
+            t += 1
+        }
         if field(l, offset_of(Thread, stopped)) == 1 {
             put_field(l, offset_of(Thread, stopped), 0)
             unpark(l)
@@ -3520,4 +3549,73 @@ pub fn report() {
     log.dec(QUANTUM as int)
     log.put(" ticks")
     log.end()
+}
+
+// --- px102: tracing stops -----------------------------------------------------
+// ptrace(2), wait(2): a tracing stop is not a job-control stop. All calls
+// here hold IF clear. A saved frame belongs to the tracee's kernel stack.
+
+pub fn tracer_of(s: u64) -> u64 {
+    if s >= SLOTS { return 0 }
+    field(s, offset_of(Thread, tracer))
+}
+
+pub fn trace_me() -> bool {
+    let c = cur()
+    let pp = self_ppid()
+    if tracer_of(c) != 0 || pp == 0 || live_slot(pp) == SLOTS { return false }
+    put_field(c, offset_of(Thread, tracer), pp)
+    true
+}
+
+/// The stopped thread tid belonging to the caller, or SLOTS. Never
+/// mistake an untraced job-control stop for a ptrace stop.
+pub fn trace_target(tid: u64) -> u64 {
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, pid)) == tid && tracer_of(s) == self_tid() && field(s, offset_of(Thread, state)) == TRACED {
+            return s
+        }
+        s += 1
+    }
+    SLOTS
+}
+
+pub fn trace_info(s: u64) -> (u64, u64, u64) {
+    ((field(s, offset_of(Thread, trace_status)) >> 8) & 0xff, field(s, offset_of(Thread, trace_code)), field(s, offset_of(Thread, trace_addr)))
+}
+
+pub fn trace_stop(f: u64, sig: u64, code: u64, addr: u64) -> u64 {
+    let c = cur()
+    let tr = tracer_of(c)
+    let ps = live_slot(tr)
+    if tr == 0 || ps == SLOTS { return f }
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, trace_status), (1 << 32) | (sig << 8) | 0x7f)
+    put_field(c, offset_of(Thread, trace_code), code)
+    put_field(c, offset_of(Thread, trace_addr), addr)
+    put_field(c, offset_of(Thread, state), TRACED)
+    wake_waiter(tr)
+    raise_group(ps, SIGCHLD, sig_info(I_CHLD_TRAPPED, self_tid(), sig, real_uid(field(c, offset_of(Thread, lead)))))
+    wake_sleepers()
+    run_next()
+}
+
+pub fn trace_resume(s: u64) {
+    if s >= SLOTS || field(s, offset_of(Thread, state)) != TRACED { return }
+    put_field(s, offset_of(Thread, trace_status), 0)
+    put_field(s, offset_of(Thread, state), READY)
+    enqueue(s)
+}
+
+fn trace_release_owned(tid: u64) {
+    if tid == 0 { return }
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if tracer_of(s) == tid {
+            put_field(s, offset_of(Thread, tracer), 0)
+            trace_resume(s)
+        }
+        s += 1
+    }
 }

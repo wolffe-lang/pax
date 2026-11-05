@@ -264,6 +264,7 @@ use sound
 use speaker
 use sync
 use timer
+use trace
 use tree
 use uaccess
 use unix
@@ -1454,6 +1455,10 @@ fn serve(f: u64) -> u64 {
     let a4 = word(f, W_R8)
     sched.syscall_begins() // px26: whatever wait the last call was in is over
     tree.tick() // px63: a volume's record looked up before this call may be given back
+    if nr == 101 { // ptrace(2)
+        put_word(f, W_RAX, trace.call(a0, a1, a2, a3))
+        return f
+    }
     if nr == SYS_EXIT && sched.self_threads() > 1 {
         // px26: `exit` ends the calling thread alone while its process
         // has others: the clear-child-tid word zeroed and its futex
@@ -1562,7 +1567,7 @@ fn serve(f: u64) -> u64 {
             refusal_line(nr, r)
         }
         let _n = netd.drain() // px23: a close-on-exec socket's last words
-        return f
+        return if r == 0 { trace.exec_stop(f) } else { f }
     }
     if nr == SYS_WAIT4 {
         return process.wait4(f, nr, a0, a1, a2, a3)

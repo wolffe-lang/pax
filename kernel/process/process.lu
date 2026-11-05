@@ -1582,7 +1582,7 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
     } else {
         let (rp, sig) = sched.wait_report(s, what, true)
         cp = rp
-        st = if what == sched.W_STOPPED { (sig << 8) | 0x7f } else { 0xffff }
+        st = if what == sched.W_TRACED { sig } else if what == sched.W_STOPPED { (sig << 8) | 0x7f } else { 0xffff }
     }
     if wstatus != 0 {
         uaccess.put(pml4, wstatus, st, 4)
@@ -1653,8 +1653,8 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
     } else {
         let (rp, sig) = sched.wait_report(s, what, o & WNOWAIT == 0)
         cp = rp
-        code = if what == sched.W_STOPPED { CLD_STOPPED } else { CLD_CONTINUED }
-        status = if what == sched.W_STOPPED { sig } else { SIGCONT }
+        code = if what == sched.W_TRACED { 4 } else if what == sched.W_STOPPED { CLD_STOPPED } else { CLD_CONTINUED } // CLD_TRAPPED
+        status = if what == sched.W_TRACED { sig >> 8 } else if what == sched.W_STOPPED { sig } else { SIGCONT }
     }
     if infop != 0 {
         uaccess.zero(pml4, infop, 128)
