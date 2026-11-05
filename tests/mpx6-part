@@ -228,9 +228,14 @@ oracles() { # dir -> reasons
 
 # The console disks of a tier (all rows): tools/mkdisk --gpt with the
 # tier's kernel and each session's initramfs, and the ISO row's bare disk.
+# A refusal is named by mkdisk's own line (`mkdisk: WHAT: exit N: ...`):
+# its error reaches the transcript before its buffered progress lines,
+# so the transcript's last line is not the reason.
 disk_of() { # tier name cpio -> reasons
+    local t=$images/$1/$2.mkdisk.txt
     SOURCE_DATE_EPOCH=$EPOCH "$PAX_ROOT/tools/mkdisk" --gpt --kernel "$images/$1/kmain_console.elf" --initramfs "$3" \
-        128M "$images/$1/$2.img" > "$images/$1/$2.mkdisk.txt" 2>&1 || printf ' mkdisk --gpt %s %s: %s;' "$1" "$2" "$(tail -n 1 "$images/$1/$2.mkdisk.txt")"
+        128M "$images/$1/$2.img" > "$t" 2>&1 \
+        || printf ' mkdisk --gpt %s %s: %s;' "$1" "$2" "$(command grep -m 1 -E '^mkdisk: .*: exit [0-9]+' "$t" || tail -n 1 "$t")"
 }
 
 # --- the Linux side ----------------------------------------------------------------
