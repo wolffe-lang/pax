@@ -1,0 +1,33 @@
+px102 — tracing storage decision and prediction, 2026-11-05T21:08Z
+
+R-px102-2 (storage continuation): use a side table indexed by thread slot.
+The existing Thread remains exactly 512 bytes; no new event/option field
+will be added to it. The earlier proc-mem alias decision is unchanged.
+
+Reason: the scheduler's record is full, and its field addressing uses
+size_of(Thread). Growing it would change every thread's stride and the
+assembly reservation at once. A bounded side table keeps that layout
+unchanged, separates tracing-only state, and permits a non-circular
+module used by both sched and trace. A fixed 128-byte slot reserves
+sixteen words; a repr(c) TraceState initially names options, event message,
+restart mode and syscall phase. Additional fields may use only spare
+capacity that the layout assertion verifies.
+
+Before any slot is cleared or indexed, the boot-time layout check will
+compare size_of(Thread) and size_of(TraceState) against actual assembly
+reservation bounds divided by 64. Its successful line names both sizes,
+both capacities and the slot count. A mismatch prints FAIL T-trace-layout
+and panics before a write can reach the next slot.
+
+Prediction, before implementation:
+- The new layout checker is red against the existing kernel's actual
+  serial log, which has no layout assertion line.
+- With the side table and assertion added, Thread=512, thread-capacity=512,
+  TraceState=32, trace-capacity=128, slots=64, and the existing core probe
+  remains green.
+- One off-line local overflow witness adds a u64 field to Thread without
+  changing its reservation. It builds, then fails at boot with Thread=520
+  against capacity=512, by T-trace-layout, before scheduler initialization.
+  This is the requested layout overflow witness, not the final lane plant.
+- The layout checker's own negative cases reject oversized side state,
+  a changed capacity/count, a missing line and duplicate lines.
