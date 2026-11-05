@@ -436,7 +436,7 @@ static __attribute__((noreturn)) void role_clone(void) {
     for (;;) {
         unsigned value = thread_ctid;
         if (!value) break;
-        call(202, (i64)&thread_ctid, 128, value, 0, 0);
+        call(202, (i64)&thread_ctid, 0, value, 0, 0); /* clear-child-tid uses shared FUTEX_WAKE */
     }
     done(37);
 }
