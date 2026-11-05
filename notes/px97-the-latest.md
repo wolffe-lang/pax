@@ -19,10 +19,17 @@ the `src/` paths the log names, and the release notes and mirror pin of the new 
 every source archive was read by digest, twice. The published lupin binary was checked by its ELF header, never run
 outside a container.
 
-Builds and boots ran on satoyama under both of its locks, inside slot A's CPUs, in the baseline Ubuntu 24.04
-container (`localhost/px75-ubuntu:2`) with KVM. Each step took the locks for itself, and the Linux side of each row
-ran in throwaway containers through the lane's own podman. The Mac held git and the Python-only rows (census,
-`tests/ci-plan`, `tests/pax-release`), behind its build lock. No package was installed, and no disk but a QEMU image
+The machines, by the names this note and `notes/px97/` give them:
+
+| name here | the machine |
+|---|---|
+| the lane host | an x86-64 Linux workstation with KVM: a heavy slot of eight CPUs behind two lock names, and a light slot beside it. Every build, boot and record |
+| the build Mac | git, and the Python-only rows (census, `tests/ci-plan`, `tests/pax-release`), behind its build lock |
+
+Builds and boots ran on the lane host under both of its locks, inside the heavy slot's CPUs, in the baseline Ubuntu
+24.04 container (`localhost/px75-ubuntu:2`) with KVM. Each step took the locks for itself, and the Linux side of each
+row ran in throwaway containers through the lane's own podman. Two lines of `notes/px97/prediction.txt` named the lane
+host by its own name when committed; they were reworded to these names before the merge, and nothing else in it. No package was installed, and no disk but a QEMU image
 the rows made was written. No label, merge, tag, release or issue.
 
 ## 2. Inputs, verified
