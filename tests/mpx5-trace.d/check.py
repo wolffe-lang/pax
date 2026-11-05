@@ -11,10 +11,15 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops')
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'stops': (
+        ('stop-waitid', 'waitid.nowait=', 'initial.status='),
+        ('int3-stop', 'int3.status=', 'int3.second.status='),
+        ('stop-exit', 'continue.exit=', 'wait.echild='),
+    ),
     'core': (
         ('waitid', 'waitid.nowait=', 'initial.status='),
         ('tracer-pid', 'status.open=', 'status.tracer-is-parent='),
