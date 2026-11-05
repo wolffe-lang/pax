@@ -346,6 +346,15 @@ tested with 2 GiB of RAM. `tests/mpx5-wolf` holds root and `pax` sessions byte f
 and checks independent command and verdict witnesses, so agreement on a broken compiler cannot pass; its fast CI root
 omits the link bundle on purpose and checks the missing-tool errors.
 
+`wolf lsp`, the compiler's language server, runs on PAX unchanged: it speaks the Language Server Protocol on its
+standard input and output, so an editor starts it as a child on pipes. `tests/mpx5-lsp` starts it that way from a
+client of its own (`user/elf/lspc.c`, C with no libc: three pipes and an exec-status pipe, `fork`, `setpgid`, one
+`poll` over the terminal, the pipes and a SIGCHLD self-pipe) and types a session: `initialize`, a file with a type
+error opened (its E0401 published), an unsaved edit that fixes it (the diagnostics cleared after the server's 100 ms
+debounce), `shutdown` and `exit`, status 0; and a server made to hang, killed by its process group after 3 s. Every
+frame, both ways, is byte-identical to the same client and server on Linux, as root and as `pax`. PAX's monotonic
+clock advances with its 100 Hz tick, so a program's own timings there read in steps of 10 ms.
+
 ## Disks and rescue
 
 AHCI uses one polled command slot per disk, with reads and writes up to 128 KiB and explicit cache flushes.
@@ -395,7 +404,7 @@ and `--tier native --firmware bios` picks one leg.
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), and the UDP and TCP rows again on QEMU's 82576 |
-| Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, each program's typed session against the same binary in a container |
+| Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, each program's typed session against the same binary in a container, the language server's frames both ways |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
 | Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine, the metal triage's boxes, fault screens and words, an NMI survived and a machine check named anywhere in the boot (`tests/mpx6-nmi`) |
