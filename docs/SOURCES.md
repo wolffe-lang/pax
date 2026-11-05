@@ -1971,3 +1971,16 @@ source; no kernel's, firmware's or driver's.
   `kernel/netd` (which kernel starts the network stack and what a never-started stack answers), and px56's note on
   `#!` and exec from the tree.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no Git source.
+
+## px102 — tracing
+
+- Linux man-pages 6.7: `ptrace(2)`, `wait(2)` (including waitid),
+  `proc_pid_mem(5)`, `proc_pid_status(5)`; binary-only gdb/strace evidence
+  and the no-libc Linux transcripts under `notes/px102/` and `tests/mpx5-trace.d/`.
+- [Intel SDM, revision 090](https://cdrdv2-public.intel.com/874240/325462-090-sdm-vol-1-2abcd-3abcd-4.pdf):
+  volume 2's SYSCALL/SYSRET; volume 3A's gate privilege checks and #BP;
+  volume 3B 20.2 (DR0–DR7) and 20.3.1.4 (single stepping). #DB uses a
+  dedicated IST, and a user frame is copied before it can be parked.
+- System V AMD64 psABI draft 0.99.6, A.2.1, the syscall register convention.
+  No other operating system's kernel, firmware or driver source and no
+  debugger source was consulted.

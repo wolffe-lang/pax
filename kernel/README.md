@@ -1102,8 +1102,9 @@ to F9); `notes/px76-uefi-on-metal.md` has the measurements.
 `tests/mpx5-trace.d/`. This first layer supports a child's `TRACEME`, the
 legacy exec stop, `CONT` with no injected signal, `GETSIGINFO`, `KILL`,
 GETREGS/SETREGS, GETFPREGS, GETREGSET for PRSTATUS/PRFPREG, PEEKUSER of
-register words and debug registers, POKEUSER of debug registers, and SINGLESTEP.
-It is not yet enough to run a debugger: memory access, attach, options and
+register words and debug registers, POKEUSER of debug registers, SINGLESTEP,
+PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA, and proc memory read/write.
+It is not yet enough to run a debugger: attach, options and
 thread/signal lifecycle are still being implemented. Other requests are refused
 by name; NT_X86_XSTATE is named and returns EINVAL.
 
@@ -1116,6 +1117,7 @@ by name; NT_X86_XSTATE is named and returns EINVAL.
 | Selector translation | GETREGS, PEEKUSER and GETREGSET report Linux amd64 CS 0x33 and SS 0x2b. SETREGS accepts that pair and maps it to PAX's CS 0x23/SS 0x1b. The GDT is unchanged; 32-bit compatibility selectors and nonzero GS/data selectors are refused. `T-selectors`, `T-setregs` |
 | `idt/`, `gdt/`, `boot/isr.S`: #DB | Vector 1 retains DPL 0 and uses IST4. A user #DB frame is copied to the thread's own kernel stack before a stop can outlive the shared IST. The single-step #DB at SYSCALL entry is consumed in ring 0; other kernel #DB exceptions remain fatal. `T-single-step` |
 | `boot/cpu.S`, `sched/`: DR0–DR7 | Four address registers, DR6 and DR7 saved per thread; DR7 disabled before loading the next set. Unsupported I/O breakpoints, execute lengths and misaligned enabled ranges are rejected. Reserved/GD control bits never reach the hardware. `T-hardware-db`, `T-dr7-validation` |
+| `trace_mem/`, `vm/`, `files/`, `procfs/`: memory | `/proc/<pid>/mem`, `/proc/self/mem`, and `task/<tid>/mem` aliases use the shared FSCREDS access rule at open. PEEK/POKE uses an owned tracing stop. Writes into read-only private text work without making it writable to the tracee; borrowed private file pages are copied. Held proc-mem descriptors retain their exec generation and return EOF after exit/exec instead of accessing a later image. `T-memory`, `T-task-mem` |
 | `trace/`: stepping | Ordinary #DB reports TRAP_TRACE (2); completion of a stepped syscall reports the measured Linux TRAP_BRKPT (1) before another user opcode executes. `T-single-step`, `T-step-syscall` |
 
 The new state fills the existing 512-byte thread slot (six words added), plus
@@ -1123,3 +1125,5 @@ The new state fills the existing 512-byte thread slot (six words added), plus
 non-user RIP/RSP/FS bases; general-word POKEUSER and nonzero signal injection
 remain unsupported. These restrictions need their own compatibility rows
 before the full tracing interface is claimed.
+
+Memory compatibility still needs cross-page, partial-buffer, PROT_NONE, shared/private file mapping, held-descriptor exec, and credential-change rows; the present probe covers mapped ELF text/data and unmapped-address errors.

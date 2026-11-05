@@ -1,10 +1,12 @@
 //! trace — Linux ptrace(2) stops and x86-64 register access (px102).
 //! Clean room: ptrace(2), wait(2), Intel SDM vol. 3A interrupt gates,
 //! vol. 3B chapter 20, and the committed binary-only Linux witnesses.
+use files
 use fpu
 use log
 use paging
 use sched
+use trace_mem
 use uaccess
 
 extern "c" fn pax_debug_status() -> u64
@@ -190,11 +192,24 @@ fn pokeuser(s: u64, addr: u64, data: u64) -> u64 {
 }
 
 pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
-    if req == 0 { return if sched.trace_me() { 0 } else { EPERM } }
+    if req == 0 {
+        let parent = sched.proc_slot(sched.self_ppid())
+        if parent == sched.SLOTS || !files.may_trace_mode(sched.proc_area(parent), sched.proc_area(sched.self_slot()), true) { return EPERM }
+        return if sched.trace_me() { 0 } else { EPERM }
+    }
     if req == 16 && (pid & 0xffffffff) == sched.self_tid() { return EPERM }
     let s = sched.trace_target(pid & 0xffffffff)
     if s == sched.SLOTS { return ESRCH }
     if req == 16 { return EPERM } // already traced
+    if req == 1 || req == 2 {
+        let (ok, value) = trace_mem.peek(s, addr)
+        if !ok { return EIO }
+        let pml4 = paging.live()
+        if !uaccess.writable(pml4, data, 8) { return EFAULT }
+        uaccess.put(pml4, data, value, 8)
+        return 0
+    }
+    if req == 4 || req == 5 { return trace_mem.poke(s, addr, data) }
     if req == 12 { return getregs(s, data, 216) }
     if req == 13 { return setregs(s, data) }
     if req == 14 { return fpregs(s, data, 512) }

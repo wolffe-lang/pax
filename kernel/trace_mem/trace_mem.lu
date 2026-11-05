@@ -1,0 +1,77 @@
+//! trace_mem — bounded access to another process's user pages (px102).
+//! Used by ptrace words and /proc/<pid>/mem; permissions are checked by
+//! their callers. Page preparation lives in vm so private file mappings
+//! are copied rather than writing through a borrowed page into the file.
+use frames
+use paging
+use sched
+use uaccess
+use vm
+
+const EIO: u64 = 0xfffffffffffffffb
+const EFAULT: u64 = 0xfffffffffffffff2
+
+pub fn peek(s: u64, addr: u64) -> (bool, u64) {
+    let (a, space) = sched.trace_space(s)
+    if space == 0 || addr >= paging.USER_TOP || paging.USER_TOP - addr < 8 { return (false, 0) }
+    var value: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        let pa = vm.trace_address(a, space, addr + i, false)
+        if pa == 0 { return (false, 0) }
+        // # Safety: trace_address checked a user leaf and prepared its page.
+        value = value | (unsafe { ((pa + frames.hhdm()) as *u8).read_volatile() as u64 } << (i * 8))
+        i += 1
+    }
+    (true, value)
+}
+
+pub fn poke(s: u64, addr: u64, value: u64) -> u64 {
+    let (a, space) = sched.trace_space(s)
+    if space == 0 || addr >= paging.USER_TOP || paging.USER_TOP - addr < 8 { return EIO }
+    // Check both possible pages before writing any byte.
+    if vm.trace_address(a, space, addr, true) == 0 || vm.trace_address(a, space, addr + 7, true) == 0 { return EIO }
+    var i: u64 = 0
+    while i < 8 {
+        let pa = vm.trace_address(a, space, addr + i, true)
+        if pa == 0 { return EIO }
+        // # Safety: the page is private or an approved shared writable page.
+        unsafe { ((pa + frames.hhdm()) as *u8).write_volatile((value >> (i * 8)) as u8) }
+        i += 1
+    }
+    0
+}
+
+/// Copy up to n bytes between the caller's checked buffer and target
+/// address space. An unmapped first page is EIO; a later hole ends a
+/// short transfer. A dead address space has proc-mem's EOF semantics.
+pub fn transfer(s: u64, pml4: u64, buf: u64, n: u64, addr: u64, write: bool) -> u64 {
+    let (a, space) = sched.trace_space(s)
+    if space == 0 || n == 0 { return 0 }
+    let count = if n < 0x7ffff000 { n } else { 0x7ffff000 }
+    if (write && !uaccess.readable(pml4, buf, count)) || (!write && !uaccess.writable(pml4, buf, count)) { return EFAULT }
+    var done: u64 = 0
+    while done < count {
+        if addr >= paging.USER_TOP || done >= paging.USER_TOP - addr { return if done == 0 { EIO } else { done } }
+        let at = addr + done
+        let pa = vm.trace_address(a, space, at, write)
+        if pa == 0 { return if done == 0 { EIO } else { done } }
+        let page_left = 4096 - (at & 4095)
+        let bytes = if count - done < page_left { count - done } else { page_left }
+        var k: u64 = 0
+        while k < bytes {
+            if write {
+                let b = uaccess.get(pml4, buf + done + k, 1)
+                // # Safety: bytes stays inside the prepared user page.
+                unsafe { ((pa + frames.hhdm() + k) as *u8).write_volatile(b as u8) }
+            } else {
+                // # Safety: same checked user page; caller's buffer was checked above.
+                let b = unsafe { ((pa + frames.hhdm() + k) as *u8).read_volatile() as u64 }
+                uaccess.put(pml4, buf + done + k, b, 1)
+            }
+            k += 1
+        }
+        done += bytes
+    }
+    done
+}

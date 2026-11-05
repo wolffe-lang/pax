@@ -1615,3 +1615,35 @@ pub fn msync(a: u64, pml4: u64, addr: u64, len: u64, flags: u64) -> u64 {
     }
     0
 }
+
+/// px102: prepare a present user page for debugger access. Read-only
+/// private text may be written through its physical alias, but a page
+/// borrowed from a file must first become this process's private copy.
+/// Shared mappings are writable only when their mapping permits writes.
+/// Returns a physical byte address, or 0 for an inaccessible address.
+pub fn trace_address(a: u64, pml4: u64, va: u64, write: bool) -> u64 {
+    if va >= paging.USER_TOP { return 0 }
+    let pg = va & !(PAGE - 1)
+    var e = paging.leaf(pml4, pg)
+    if e == 0 {
+        let _fault = fault(a, pml4, pg, false)
+        e = paging.leaf(pml4, pg)
+    }
+    if e & (paging.P | paging.US) != (paging.P | paging.US) { return 0 }
+    if write && e & paging.BORROWED != 0 {
+        let r = map_at(a, pg)
+        if r == MAPS { return 0 }
+        let fl = mw(a, r, M_FL)
+        if fl & M_SHARED != 0 {
+            if fl & PROT_WRITE == 0 { return 0 }
+            tree.shared_write(mw(a, r, M_INO))
+        } else {
+            if !unshare(pml4, pg, e) { return 0 }
+            // unshare makes a user-writable leaf for ordinary COW. A
+            // forced write must not make originally read-only text RW.
+            let flags = (e & (paging.US | paging.NX)) | (if fl & PROT_WRITE != 0 { paging.RW } else { 0 })
+            if !paging.protect_user(pml4, pg, flags) { return 0 }
+        }
+    }
+    paging.translate(pml4, va) else 0
+}

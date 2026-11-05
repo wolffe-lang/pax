@@ -300,7 +300,7 @@ struct Thread {
     trace_code: u64, // GETSIGINFO's si_code at the current trace stop
     trace_addr: u64, // GETSIGINFO's fault address at that stop
     trace_orig: u64, // Linux orig_rax: syscall number, or -1 at a trap
-    trace_flags: u64, // px102: reserved tracing restart/options state
+    trace_epoch: u64, // px102: successful exec generation for held proc-mem descriptors
 }
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
@@ -776,7 +776,7 @@ fn clear(s: u64) {
     put_field(s, offset_of(Thread, trace_code), 0)
     put_field(s, offset_of(Thread, trace_addr), 0)
     put_field(s, offset_of(Thread, trace_orig), 0xffffffffffffffff)
-    put_field(s, offset_of(Thread, trace_flags), 0)
+    put_field(s, offset_of(Thread, trace_epoch), 0)
     var dr: u64 = 0
     while dr < 8 {
         trace_set_dr(s, dr, if dr == 6 { 0xffff0ff0 } else { 0 })
@@ -2045,6 +2045,7 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
     let c = cur()
     let old = field(c, offset_of(Thread, cr3))
     let owned = field(c, offset_of(Thread, owns))
+    put_field(c, offset_of(Thread, trace_epoch), field(c, offset_of(Thread, trace_epoch)) + 1)
     put_field(c, offset_of(Thread, cr3), cr3)
     put_field(c, offset_of(Thread, owns), 1)
     put_field(c, offset_of(Thread, prog), ELF_PROG)
@@ -3685,4 +3686,20 @@ pub fn trace_own_frame(f: u64) -> u64 {
         i += 1
     }
     dst
+}
+
+
+/// Address space of any live user thread (the group leader owns it).
+pub fn trace_space(s: u64) -> (u64, u64) {
+    if s >= SLOTS || !takes(s) { return (0, 0) }
+    space_of(field(s, offset_of(Thread, lead)))
+}
+pub fn trace_epoch(s: u64) -> u64 {
+    if s >= SLOTS { return 0 }
+    field(field(s, offset_of(Thread, lead)), offset_of(Thread, trace_epoch))
+}
+/// Used by /proc/<pid>/task to enumerate only this group's live tids.
+pub fn thread_tid(s: u64, pid: u64) -> u64 {
+    if s >= SLOTS || !takes(s) || field(s, offset_of(Thread, tgid)) != pid { return 0 }
+    field(s, offset_of(Thread, pid))
 }

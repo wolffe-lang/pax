@@ -218,6 +218,7 @@ use sched
 use sound
 use tcp
 use tree
+use trace_mem
 use uaccess
 use udp
 use unix
@@ -317,6 +318,7 @@ const K_DSP: u64 = 12 // px30: /dev/dsp, the sound device (kernel/sound's)
 const K_UNIX: u64 = 13 // px34: an AF_UNIX path socket (kernel/unix's record)
 const K_SYN: u64 = 14 // px34: a file of /proc or /sys (kernel/procfs's)
 const K_BLK: u64 = 15 // px79: a block device's node opened (kernel/block's device)
+const K_MEM: u64 = 16 // px102: a held /proc/<pid>/mem address-space identity
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -790,7 +792,7 @@ fn of_drop(o: u64) {
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK
+    k == K_MEM || k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -902,7 +904,7 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     if k == K_PIPE || k == K_SOCK || k == K_UNIX {
         return 3
     }
-    if k == K_FILE {
+    if k == K_FILE || k == K_MEM {
         return 4
     }
     if k == K_SYN {
@@ -3053,6 +3055,14 @@ fn is_dir_node(n: u64) -> bool {
 /// px34: the entry of /proc or /sys named [s, s + n) of pax_kbuf in `d`
 /// (an entry, or procfs.ROOT), or an error node (ENOENT).
 fn syn_child(d: u64, s: u64, n: u64) -> u64 {
+    if procfs.trace_dir(d) {
+        let c = procfs.trace_child(d, raw() + s, n)
+        return if c == procfs.NONE { err(ENOENT) } else { (T_SYN << T_SHIFT) | c }
+    }
+    if (d == 1 || (d != procfs.ROOT && procfs.entry(d) == procfs.PIDDIR)) && (comp_is(s, n, "mem") || comp_is(s, n, "task")) {
+        let dir = if d == 1 { procfs.pid_dir(sched.self_pid()) } else { d }
+        return (T_SYN << T_SHIFT) | procfs.child_at(dir, if n == 3 { 10 } else { 11 })
+    }
     if d != procfs.ROOT && procfs.entry(d) == procfs.PIDDIR {
         if comp_is(s, n, "status") {
             return (T_SYN << T_SHIFT) | procfs.child_at(d, 0) // px25
@@ -3214,15 +3224,20 @@ fn fdl_read() -> (bool, u64, u64) {
 /// process `ta`'s descriptors, `environ`? Itself, a privileged one, or
 /// one whose file-system user and group ids are each of the target's
 /// real, effective and saved ones while the target is dumpable.
-fn may_trace(a: u64, ta: u64) -> bool {
+fn may_trace(a: u64, ta: u64) -> bool { may_trace_mode(a, ta, false) }
+
+/// Shared ptrace access rule: real credentials for tracing, file-system
+/// credentials for proc-mem and the existing proc readers.
+pub fn may_trace_mode(a: u64, ta: u64, real: bool) -> bool {
     if ta == a || cred.privileged(a) {
         return true
     }
     if cred.dumpable(ta) != 1 {
         return false
     }
-    let u = cred.uid(a, cred.FS)
-    let g = cred.gid(a, cred.FS)
+    let who = if real { cred.REAL } else { cred.FS }
+    let u = cred.uid(a, who)
+    let g = cred.gid(a, who)
     u == cred.uid(ta, cred.REAL) && u == cred.uid(ta, cred.EFFECTIVE) && u == cred.uid(ta, cred.SAVED) && g == cred.gid(ta, cred.REAL) && g == cred.gid(ta, cred.EFFECTIVE) && g == cred.gid(ta, cred.SAVED)
 }
 
@@ -4186,6 +4201,7 @@ fn may_read_of(a: u64, n: u64, want: u64) -> bool {
 /// px34: open a file of /proc or /sys: its text made now (kernel/procfs)
 /// into a frame the new open file holds.
 fn syn_open(a: u64, n: u64, flags: u64) -> u64 {
+    if procfs.is_mem(rf(n)) { return mem_open(a, n, flags) }
     if lowest_free(a, 0) == FDS {
         return neg(EMFILE)
     }
@@ -4499,7 +4515,7 @@ fn fdinfo_of(ta: u64, fd: u64) -> (u64, u64) {
     if flags_of(ta, fd) & O_CLOEXEC != 0 {
         f = f | O_CLOEXEC
     }
-    if k == K_FILE || k == K_DIR || k == K_CONSOLE || k == K_NULL || k == K_SYN || k == K_DSP || k == K_BLK {
+    if k == K_FILE || k == K_DIR || k == K_CONSOLE || k == K_NULL || k == K_SYN || k == K_MEM || k == K_DSP || k == K_BLK {
         f = f | O_LARGEFILE
     }
     let extra: u64 = if k == K_EVENT { 1 } else if k == K_SOCK || k == K_UNIX { 2 } else { 0 }
@@ -4658,6 +4674,11 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_SYN {
         return syn_read(a, pml4, fd, buf, n) // px34
     }
+    if k == K_MEM {
+        let r = mem_io(a, pml4, fd, buf, n, pos(a, fd), false)
+        if r < 0x8000000000000000 { set_pos(a, fd, pos(a, fd) + r) }
+        return r
+    }
     if k == K_INET || k == K_TCP {
         return neg(EINVAL) // px22: kernel/user sends a socket's read to kernel/socket
     }
@@ -4691,6 +4712,7 @@ pub fn pread(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
     if k == K_DIR {
         return neg(EISDIR)
     }
+    if k == K_MEM { return mem_io(a, pml4, fd, buf, n, off, false) }
     if k == K_BLK && off < 0x8000000000000000 {
         return blk_in(pml4, blk_dev(node_of(a, fd)), off, buf, n) // px79
     }
@@ -4712,6 +4734,11 @@ pub fn pread(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
 /// whole buffer is checked first: nothing is written), -ENOSPC, -EFBIG.
 /// One call writes at most 0x7ffff000 bytes, as Linux.
 pub fn file_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    if kind(a, fd) == K_MEM {
+        let r = mem_io(a, pml4, fd, buf, n, pos(a, fd), true)
+        if r < 0x8000000000000000 { set_pos(a, fd, pos(a, fd) + r) }
+        return r
+    }
     if n == 0 {
         return 0
     }
@@ -4742,6 +4769,7 @@ pub fn pwrite(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64) -> u64 {
     if k == K_CLOSED || access(a, fd) == O_RDONLY || k == K_DIR {
         return neg(EBADF)
     }
+    if k == K_MEM { return mem_io(a, pml4, fd, buf, n, off, true) }
     if k == K_BLK {
         if off >= 0x8000000000000000 {
             return neg(EINVAL)
@@ -8148,4 +8176,32 @@ pub fn map_target(a: u64, fd: u64) -> (u64, u64, u64) {
         return (MT_FILE, rf(n), m)
     }
     (MT_ERR, neg(ENODEV), 0)
+}
+
+
+// --- px102: /proc/<pid>/mem ---------------------------------------------------
+// O_TEXT and O_TEXT_LEN hold the exec generation and CR3 for K_MEM,
+// never a text frame. The node holds the pid (and a task alias's slot).
+// No reference to freed page tables is followed: exit/exec makes this
+// held descriptor read EOF, rather than retargeting it to a new image.
+fn mem_open(a: u64, n: u64, flags: u64) -> u64 {
+    let sl = sched.proc_slot(procfs.pid_of(rf(n)))
+    if sl == sched.SLOTS { return neg(ESRCH) }
+    let (ta, space) = sched.trace_space(sl)
+    if ta == 0 || !may_trace(a, ta) { return neg(EACCES) }
+    let fd = open_new(a, 0, K_MEM, n, flags)
+    if fd >= 0x8000000000000000 { return fd }
+    let o = of_of(a, fd) - 1
+    put_ofw(o, O_TEXT, sched.trace_epoch(sl))
+    put_ofw(o, O_TEXT_LEN, space)
+    fd
+}
+
+fn mem_io(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, off: u64, write: bool) -> u64 {
+    let sl = sched.proc_slot(procfs.pid_of(rf(node_of(a, fd))))
+    if sl == sched.SLOTS { return 0 }
+    let (_ta, space) = sched.trace_space(sl)
+    let o = of_of(a, fd) - 1
+    if space == 0 || space != ofw(o, O_TEXT_LEN) || sched.trace_epoch(sl) != ofw(o, O_TEXT) { return 0 }
+    trace_mem.transfer(sl, pml4, buf, n, off, write)
 }

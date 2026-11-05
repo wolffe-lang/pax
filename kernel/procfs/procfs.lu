@@ -197,6 +197,10 @@ const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
 const BATTR: u64 = 0x1810
+pub const PMEM: u64 = 0x1820 // px102: pid/mem, handled by kernel/files
+const PTASK: u64 = 0x1821
+const PTID: u64 = 0x1822 // slot + 1 in bits 40..46, pid still in 16..39
+pub const TMEM: u64 = 0x1823
 const A_DEV: u64 = 0
 const A_SIZE: u64 = 1
 const A_RO: u64 = 2
@@ -497,6 +501,7 @@ pub fn fd_dir(pid: u64, which: u64) -> u64 {
 /// `may_read_of` of them. px50: and `fdinfo/` and its entries (a 0555
 /// directory and 0444 files, guarded all the same: measured).
 pub fn guarded(r: u64) -> bool {
+    if entry(r) == PMEM || entry(r) == TMEM { return true }
     let e = entry(r)
     let (isfi, _n) = fi_of(r)
     e == PENVIRON || e == SENVIRON || e == PFD || e == PFDINFO || isfi
@@ -523,6 +528,8 @@ fn put_word(area: u64, i: u64, v: u64) {
 
 /// Fixed entry `e`'s name (not PIDDIR's, whose name is its pid).
 pub fn name(e: u64) -> str {
+    if e == PMEM || e == TMEM { return "mem" }
+    if e == PTASK { return "task" }
     if e == 0 { return "proc" }
     if e == 1 { return "self" }
     if e == 2 || e == PSTATUS { return "status" }
@@ -587,9 +594,8 @@ fn digits(v: u64) -> u64 {
 
 /// The length of reference `r`'s name.
 pub fn name_len(r: u64) -> u64 {
-    if entry(r) == PIDDIR {
-        return digits(pid_of(r))
-    }
+    if entry(r) == PIDDIR { return digits(pid_of(r)) }
+    if entry(r) == PTID { return digits(task_tid(r)) }
     if entry(r) == BDEV || entry(r) == CBDEV {
         return block.name_len(dev_of(r)) // px79: the device's name
     }
@@ -611,8 +617,8 @@ pub fn name_byte(r: u64, i: u64) -> u64 {
     }
     let fdn = desc_of(r)
     let isfd = fdn != FDS_MAX
-    if entry(r) == PIDDIR || isfd {
-        let p = if isfd { fdn } else { pid_of(r) }
+    if entry(r) == PIDDIR || entry(r) == PTID || isfd {
+        let p = if isfd { fdn } else if entry(r) == PTID { task_tid(r) } else { pid_of(r) }
         var d: u64 = 1
         var k = digits(p) - 1 - i
         while k > 0 {
@@ -637,6 +643,9 @@ pub fn parent(r: u64) -> u64 {
     if e == 0 || e == 7 { return ROOT }
     if e == SYSBLOCK || e == SYSCLASS { return 7 } // px79
     if e == SYSCLASSBLOCK { return SYSCLASS }
+    if e == PMEM || e == PTASK { return pid_dir(pid_of(r)) }
+    if e == PTID { return (pid_of(r) << 16) | PTASK }
+    if e == TMEM { return (r & !EMASK) | PTID }
     if e == CBDEV { return SYSCLASSBLOCK }
     if e == BDEV {
         let d = dev_of(r)
@@ -671,6 +680,7 @@ pub fn parent(r: u64) -> u64 {
 
 fn gen(r: u64) -> u64 {
     let e = entry(r)
+    if e == PMEM || e == TMEM { return 25 } // not a directory; not a generated-text file
     if e == 2 { return G_STATUS }
     if e == 16 { return G_MEMINFO }
     if e == 18 { return G_FILENR }
@@ -709,6 +719,8 @@ pub fn is_dir(r: u64) -> bool {
 /// Reference `r`'s mode, type and permission bits (measured).
 pub fn mode(r: u64) -> u64 {
     let e = entry(r)
+    if e == PMEM || e == TMEM { return S_IFREG | 0x180 } // 0600
+    if e == PTASK || e == PTID { return S_IFDIR | 0x16d } // 0555
     let (isfd, _n) = fd_of(r)
     if isfd {
         return 0xa000 | 0x1c0 // px45: S_IFLNK 0700, as Linux lists a descriptor
@@ -749,7 +761,7 @@ pub fn mode(r: u64) -> u64 {
 pub fn owner(r: u64, area: u64, which: int) -> u64 {
     let e = entry(r)
     let isfd = desc_of(r) != FDS_MAX
-    let per = e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || e == SLIMITS || e == PLIMITS || e == SMOUNTS || e == SMOUNTINFO || e == PMOUNTS || e == PMOUNTINFO || isfd
+    let per = e == PMEM || e == TMEM || e == PTASK || e == PTID || e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || e == SLIMITS || e == PLIMITS || e == SMOUNTS || e == SMOUNTINFO || e == PMOUNTS || e == PMOUNTINFO || isfd
     if e != 1 && e != PIDDIR && e != PFDINFO && !per {
         return 0
     }
@@ -801,6 +813,20 @@ pub fn fs(r: u64) -> u64 {
 /// `status` and (px39) its `setgroups`.
 pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
+    if d != ROOT && entry(d) == PTASK {
+        var sl: u64 = 0
+        while sl < sched.SLOTS {
+            if sched.thread_tid(sl, pid_of(d)) != 0 {
+                if seen == k { return (pid_of(d) << 16) | ((sl + 1) << 40) | PTID }
+                seen += 1
+            }
+            sl += 1
+        }
+        return NONE
+    }
+    if d != ROOT && entry(d) == PTID {
+        return if k == 0 && task_tid(d) != 0 { (d & !EMASK) | TMEM } else { NONE }
+    }
     // px79: the block devices' directories, counted from kernel/block
     if d != ROOT && entry(d) == SYSBLOCK {
         return if k < block.disks() { dev_ref(k * block.DPD, BDEV) } else { NONE }
@@ -842,7 +868,7 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     }
     if d != ROOT && entry(d) == PIDDIR {
         // px45: status, setgroups, cmdline, environ, fd (kernel/files lists fd's own); px48: stat; px50: fdinfo; px55: limits
-        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else if k == 6 { PFDINFO } else if k == 7 { PLIMITS } else if k == 8 { PMOUNTS } else if k == 9 { PMOUNTINFO } else { NONE }
+        let e = if k == 0 { PSTATUS } else if k == 1 { PSETGROUPS } else if k == 2 { PCMDLINE } else if k == 3 { PENVIRON } else if k == 4 { PFD } else if k == 5 { PSTAT } else if k == 6 { PFDINFO } else if k == 7 { PLIMITS } else if k == 8 { PMOUNTS } else if k == 9 { PMOUNTINFO } else if k == 10 { PMEM } else if k == 11 { PTASK } else { NONE }
         return if e == NONE { NONE } else { (pid_of(d) << 16) | e }
     }
     var e: u64 = 0
@@ -864,6 +890,8 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         if seen + 3 == k { return SLIMITS }
         if seen + 4 == k { return SMOUNTS } // px67
         if seen + 5 == k { return SMOUNTINFO }
+        if seen + 6 == k { return (sched.self_pid() << 16) | PMEM }
+        if seen + 7 == k { return (sched.self_pid() << 16) | PTASK }
         return NONE
     }
     if d != 0 {
@@ -1480,4 +1508,29 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = put_s(base, 0, "0\n")
     }
     (pa, n)
+}
+
+
+pub fn is_mem(r: u64) -> bool { entry(r) == PMEM || entry(r) == TMEM }
+fn task_tid(r: u64) -> u64 {
+    let slot = (r >> 40) & 127
+    if slot == 0 { return 0 }
+    sched.thread_tid(slot - 1, pid_of(r))
+}
+
+pub fn trace_dir(r: u64) -> bool { entry(r) == PTASK || entry(r) == PTID }
+/// A dynamic task-directory child named by the caller's kernel buffer.
+pub fn trace_child(r: u64, a: u64, n: u64) -> u64 {
+    var k: u64 = 0
+    while k <= sched.SLOTS {
+        let c = child_at(r, k)
+        if c == NONE { return NONE }
+        if name_len(c) == n {
+            var j: u64 = 0
+            while j < n && name_byte(c, j) == abyte(a + j) { j += 1 }
+            if j == n { return c }
+        }
+        k += 1
+    }
+    NONE
 }
