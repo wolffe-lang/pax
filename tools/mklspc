@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# mklspc — build px99's Language Server Protocol client
+# (user/elf/lspc.c), C without a libc, a static x86-64 Linux executable,
+# for tests/mpx5-lsp: it starts a server on pipes, types a recorded
+# session at it and prints every frame both ways.
+#
+#   tools/mklspc OUTDIR
+#
+# tools/mkuser's line for its no-libc probe (-nostdlib -ffreestanding
+# -fno-builtin, static, no PIE), with -Wall -Wextra -Werror. ET_EXEC with
+# no PT_INTERP and no dynamic section, checked. Build on a baseline x86-64
+# glibc host (the CI runner's Ubuntu, the lane's Ubuntu 24.04 container);
+# the program takes nothing from the host's C library. Prints `lspc
+# <sha256> <bytes>` and writes it to OUTDIR/sums.txt. Exit 0, or 2 on a
+# tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mklspc OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+"$cc" -nostdlib -static -no-pie -O1 -ffreestanding -fno-builtin -fno-stack-protector \
+    -fno-asynchronous-unwind-tables -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/lspc" "$PAX_ROOT/user/elf/lspc.c" || die "cc: lspc"
+readelf -hW "$out/lspc" | grep -Eq 'Type: +EXEC' || die "lspc is not ET_EXEC"
+! readelf -lW "$out/lspc" | grep -q INTERP || die "lspc has a PT_INTERP (not static)"
+readelf -dW "$out/lspc" | grep -q "no dynamic section" || die "lspc has a dynamic section"
+printf '%s %s %s\n' lspc "$(sha256_of "$out/lspc")" "$(wc -c < "$out/lspc" | tr -d ' ')" | tee "$out/sums.txt"
