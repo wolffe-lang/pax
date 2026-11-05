@@ -15,8 +15,8 @@ The coordinator added, during the lane:
 - after the first hand-back (stick `769bac07`), the 860 was installed fresh from px92's dev stick
   (`pax-install-kasumi-dev-8b4e98ae.img`). R-px93-6 brought back what R-px93-E had cut, in its order (5.1), and
   R-px93-7 put px92 first: this branch was rebased onto px92's head `44b44435`, then onto trunk `b8e77f7a` after
-  px92's and px96's merges, and last onto px98's head `946245e6` (den as a user, the next to merge), so this
-  branch's commits are px93's alone above px98's.
+  px92's and px96's merges, onto px98's head `946245e6` (den as a user, which merged first), and last onto trunk
+  `37217ba0` (px98's merge and px89's mpx4-ready pipe guard), so this branch's commits are px93's alone.
 
 Footprint: cross-cutting (`boot/limine-usb.conf`, the loader and the boot path; `kernel/fstab` and
 `kernel/kmain_console.lu`; `tools/install-manifest`, which the CI plan maps to the full set).
@@ -53,15 +53,16 @@ kasumi was not touched, booted or written. Only QEMU images this lane made were 
 
 ## 2. Inputs, verified
 
-- **Base**: px98's head `946245e6` (den as a user: the console terminals' owners and modes in `kernel/files`, the
-  installed login's terminal handover in `installed_login()`, `tests/mpx5-den`), on trunk `b8e77f7a`: px92's merge
+- **Base**: trunk `37217ba0`: px89's mpx4-ready pipe guard (`tests/mpx4-ready` and its fixture) over px98's merge
+  (`946245e6`, den as a user: the console terminals' owners and modes in `kernel/files`, the installed login's
+  terminal handover in `installed_login()`, `tests/mpx5-den`), over `b8e77f7a`: px92's merge
   (`44b44435`, fast-forward) and then px96's (the quiet console's write-error lines: `kernel/user`,
   `kernel/kmain_user.lu`, `tests/mpx3-user`, `user/programs.S`, docs). px92's head brought its wolf v0.2.36 re-pin
   (`user/wolf.{pin,sums}`, `tools/distribution-root`, `user/console/distribution.keys`), `tests/mpx5-wolf.d/test_rows.py`,
   `tools/ci-tiers.map` and its notes. Until then this branch sat on px92's branch at `5d33b425`; `git rebase --onto
   44b44435 5d33b425` replayed this lane's commits alone, with no conflict (px92 touched none of this lane's files),
-  and so did the rebases onto `b8e77f7a` and onto `946245e6` (px96 touched none of them; px98 touched
-  `user/install/prepare.lu` in `installed_login()` alone, apart from this lane's hunks there).
+  and so did the rebases onto `b8e77f7a`, onto `946245e6` and onto `37217ba0` (px96 and px89 touched none of
+  them; px98 touched `user/install/prepare.lu` in `installed_login()` alone, apart from this lane's hunks there).
   Records run before that rebase name the commit they ran at; the same subject's commit is in the list below
   (4.3 maps each).
 - **The old sticks**, each copied from px92's satoyama directory and read twice there, equal to px92's figures:
@@ -82,26 +83,26 @@ kasumi was not touched, booted or written. Only QEMU images this lane made were 
 
 **Commits** (`44b44435..` this branch's head), the failing rows before the code they hold:
 
-- `f6092fe6` notes/px93/prediction.txt, first.
-- The rows first (red first where they can be): `d188bc83` tools/install-manifest; `fcb2f43e` the 9c88ec8a baseline;
-  `d3c9ef85` the upgrade leg (`tests/mpx6-install.d/upgrade.py`); `8d7a2b9b` fat.py's replace row.
+- `601b7a6f` notes/px93/prediction.txt, first.
+- The rows first (red first where they can be): `bb3bbcb8` tools/install-manifest; `bb410e33` the 9c88ec8a baseline;
+  `1e31839b` the upgrade leg (`tests/mpx6-install.d/upgrade.py`); `a5f70c84` fat.py's replace row.
 - The change:
-  - `472fb654` kernel/fstab, the upgrade entry's mount;
-  - `91cbb067` boot/limine-usb.conf, the upgrade entry;
-  - `c930084f` paxfat replace;
-  - `d91f056e` prepare.lu, `b5498cbf` snapshot.lu, `96a30bc4` tools/mkinstall-payload;
-  - `4ec705ee` manifest.lu;
-  - `c91a06e6` `pax-install --upgrade`.
-- Fixes the units and the legs found: `e5b4a92f` (a kept link's `.pax-new` is a link), `4b860be7` and `e7872a45`
-  (the uses after a move), `78f97ece` (the upgrade's disk page); in the leg script `0fab750d`, `f5b4d290`,
-  `e3e3ebfe`.
-- R-px93-6: `5be473df` the 8b4e98ae baseline; `e989c424` verify.py's I-manifest; `6556173c` flow.lu (the unit
-  builds); `0bee8761` every fresh install writes its manifest; `7c8ee537` the leg's three sections.
-- R-px93-9, red first: `407a6134` U12; `e927fbc8` the earlier installers' texts; `3c61b5a3` the regeneration and
-  the manifest's record; `8856b014` U12 answering pax-install's question and logging in at the regenerated login.
-- The lane's job script (`notes/px93/satoyama/`): `64dcc10c`, `a949b440`, `3cf28bd1`, `1edbd3e7`, `d68c2e95`,
-  `cc703a26`, `36a24a55`, `57c61d56`, `170ccac5`, `e29416ee`, `18dd1968`, `c186a99f`, `0908dc64`, `f29a33f9`,
-  `8c4df60d`, `85694de7`, `ebb327f8`, `acbf7a02`, `cfc92c80`; `42ff4bdf` rec-gauntlet.sh, the recorded take.
+  - `cf345515` kernel/fstab, the upgrade entry's mount;
+  - `57f744f2` boot/limine-usb.conf, the upgrade entry;
+  - `71fc1acb` paxfat replace;
+  - `b46b4816` prepare.lu, `70464244` snapshot.lu, `3c6a6874` tools/mkinstall-payload;
+  - `d9fc44e4` manifest.lu;
+  - `ab2392fb` `pax-install --upgrade`.
+- Fixes the units and the legs found: `f8e10009` (a kept link's `.pax-new` is a link), `1d0c186a` and `76206a01`
+  (the uses after a move), `29c343f7` (the upgrade's disk page); in the leg script `93fca3db`, `be1fd925`,
+  `a3c2e95c`.
+- R-px93-6: `5dc9d125` the 8b4e98ae baseline; `0a300a09` verify.py's I-manifest; `96d60ef6` flow.lu (the unit
+  builds); `43e53a83` every fresh install writes its manifest; `e666d38b` the leg's three sections.
+- R-px93-9, red first: `c87a5017` U12; `91426820` the earlier installers' texts; `6c876db1` the regeneration and
+  the manifest's record; `ae35e31a` U12 answering pax-install's question and logging in at the regenerated login.
+- The lane's job script (`notes/px93/satoyama/`): `9ade9041`, `0eb5d981`, `377e46bb`, `85e61b7f`, `8360473c`,
+  `8762c632`, `f9fc6637`, `d286ddaf`, `c2f97484`, `6c5ccbe2`, `7c451942`, `3d82a205`, `2ed8e583`, `eef06dc2`,
+  `8e330570`, `fb0327f6`, `63dc473c`, `2010c379`, `d66df783`; `5f8ee912` rec-gauntlet.sh, the recorded take.
 - Then this note and its logs.
 
 ## 3. Prediction, scored
@@ -175,7 +176,7 @@ last. So an install made by this stick or a later one needs no baseline (U9).
 - every listed path of the root in it;
 - `/etc/pax-install` and the manifest as the only paths beyond the source's in the exact-tree check.
 
-It was red first: at 4f2f6f10 (`6556173c` now), before the installer wrote the manifest, `mpx6-install`'s smoke rows failed by name
+It was red first: at 4f2f6f10 (`96d60ef6` now), before the installer wrote the manifest, `mpx6-install`'s smoke rows failed by name
 (4.3).
 
 For installs made before manifests, the two baselines (section 2) are carried at `/usr/share/pax-install/baselines/`
@@ -257,35 +258,46 @@ Before the rebase onto `44b44435` (run at; the same subject's commit now):
 
 | run at | now | END lines | what |
 |---|---|---|---|
-| 6a965973 | `8d7a2b9b` | `08:04:09Z END red-fat exit=1`; `08:07:30Z END red-leg exit=1` | **red first, by name**: `fat.py:108`, `paxfat: invalid` (no replace yet); `FAIL U8-wrong-serial: /^usage: pax-install/` (no `--upgrade` yet) |
-| 77eca689 | `a949b440` | `08:17:37Z END units-install exit=2` | the first compile: four uses after a move (E1001) |
-| 2ae903d7 | `e7872a45` | `08:28:52Z END units-install exit=0`; `08:28:52Z END units-kernel exit=2`; then `08:29:59Z END units-install exit=0`, `08:38:09Z END units-kernel exit=0`, `08:38:23Z END units-fat exit=0`, `08:38:23Z END units-args exit=0` | the kernel unit without `PAX_WOLF` (the job script's), then every unit green; the Linux `env_args()` program printed `arg: one`, `arg: two words` |
-| hasu, 2ae903d7 | `e7872a45` | `08:52:23Z END units-install exit=0`; `08:52:24Z END units-kernel exit=2` | the same job-script fault, before its fix reached hasu |
+| 6a965973 | `a5f70c84` | `08:04:09Z END red-fat exit=1`; `08:07:30Z END red-leg exit=1` | **red first, by name**: `fat.py:108`, `paxfat: invalid` (no replace yet); `FAIL U8-wrong-serial: /^usage: pax-install/` (no `--upgrade` yet) |
+| 77eca689 | `0eb5d981` | `08:17:37Z END units-install exit=2` | the first compile: four uses after a move (E1001) |
+| 2ae903d7 | `76206a01` | `08:28:52Z END units-install exit=0`; `08:28:52Z END units-kernel exit=2`; then `08:29:59Z END units-install exit=0`, `08:38:09Z END units-kernel exit=0`, `08:38:23Z END units-fat exit=0`, `08:38:23Z END units-args exit=0` | the kernel unit without `PAX_WOLF` (the job script's), then every unit green; the Linux `env_args()` program printed `arg: one`, `arg: two words` |
+| hasu, 2ae903d7 | `76206a01` | `08:52:23Z END units-install exit=0`; `08:52:24Z END units-kernel exit=2` | the same job-script fault, before its fix reached hasu |
 | 2ae903d7 | | `09:03:35Z END sbuild exit=2` | stood down on purpose (its output directory made first): 0.2.35's build, superseded by the re-pin |
-| 58da8e55 | `e29416ee` | `09:03:35Z END sbuild exit=1` | `fatal: not a git repository: /mnt/space/lanes/…` (the worktree's real path not mounted) |
-| 60303fa8 | `18dd1968` | `09:14:00Z END sbuild exit=0`; `09:14:34Z END sstick exit=0`; `09:18:45Z END legs exit=1` | `FAIL U8-mistyped`: the stop pattern matched the previous command's line still on the screen |
-| 769bac07 | `e3e3ebfe` | `09:29:05Z END sbuild exit=0`; `09:29:38Z END sstick exit=0`; `09:38:38Z END legs exit=0` | every row of the first leg; the upgrade 10.77 s; the leg 488.93 s; the first hand-back's stick |
-| ce1a8862 | `c186a99f` | `10:46:44Z END sbuild exit=0`; `10:47:17Z END sstick exit=0`; `10:52:57Z END legs-d exit=0`; `10:57:30Z END legs-x exit=0`; `11:10:00Z END legs-a exit=0` | R-px93-6's rows, all three sections green: d 323.45 s (U3d 4.01 s), x 272.65 s, a 492.72 s (U3 11.06 s) |
-| 4f2f6f10 | `6556173c` | `11:30:09Z END red-verify exit=1` | **red first, by name**: `mpx6-install --rows smoke`'s first install, `AssertionError: no /etc/pax-install/manifest on the installed root` (verify.py's I-manifest in, the installer not yet writing it) |
+| 58da8e55 | `6c5ccbe2` | `09:03:35Z END sbuild exit=1` | `fatal: not a git repository: /mnt/space/lanes/…` (the worktree's real path not mounted) |
+| 60303fa8 | `7c451942` | `09:14:00Z END sbuild exit=0`; `09:14:34Z END sstick exit=0`; `09:18:45Z END legs exit=1` | `FAIL U8-mistyped`: the stop pattern matched the previous command's line still on the screen |
+| 769bac07 | `a3c2e95c` | `09:29:05Z END sbuild exit=0`; `09:29:38Z END sstick exit=0`; `09:38:38Z END legs exit=0` | every row of the first leg; the upgrade 10.77 s; the leg 488.93 s; the first hand-back's stick |
+| ce1a8862 | `3d82a205` | `10:46:44Z END sbuild exit=0`; `10:47:17Z END sstick exit=0`; `10:52:57Z END legs-d exit=0`; `10:57:30Z END legs-x exit=0`; `11:10:00Z END legs-a exit=0` | R-px93-6's rows, all three sections green: d 323.45 s (U3d 4.01 s), x 272.65 s, a 492.72 s (U3 11.06 s) |
+| 4f2f6f10 | `96d60ef6` | `11:30:09Z END red-verify exit=1` | **red first, by name**: `mpx6-install --rows smoke`'s first install, `AssertionError: no /etc/pax-install/manifest on the installed root` (verify.py's I-manifest in, the installer not yet writing it) |
 
 After the rebase onto `44b44435` (run at, before the rebase onto trunk's px96 merge; now):
 
 | run at | now | END lines | what |
 |---|---|---|---|
-| 7a65f930 (job.sh only) | `85694de7` | `15:16:39Z END ci-plan exit=0`, `15:16:39Z END ci-budgets exit=0`, `15:16:47Z END mpx6-disktools-fat exit=1` | the fat rows' oracles could not open the work directory: fat.py resolves `/mnt/space/lanes/…`, tools/disktools mounted the `/home/…` path (fixed in `acbf7a02`) |
-| 9dd66333 | `ebb327f8` | `15:24:55Z END sbuild exit=0`, `15:25:28Z END sstick exit=0`, `15:28:19Z END red-text exit=1` | **red first, by name**: `FAIL U12-old-text: missing 'text /etc/pax-login (the installed login: an earlier installer'` |
-| 00c902f4 | `3c61b5a3` | `16:16:01Z END sbuild exit=0`, `16:16:33Z END sstick exit=0`, `16:21:53Z END legs-d exit=0`, `16:30:02Z END legs-a exit=0`, `16:38:16Z END legs-x exit=1` | U12's row fault (4.1, R-px93-9): the regeneration right, the question after it unanswered |
-| 9dd66333's stick, e64d1751's leg | `ebb327f8`, `acbf7a02` | `17:21:21Z END legs-x exit=1` | **red again, by name**, with the corrected row: `FAIL U12-old-text` |
-| e64d1751 | `acbf7a02` | `18:30:22Z END sbuild exit=0`, `18:30:55Z END sstick exit=0`, `18:36:15Z END legs-d exit=0`, `18:44:20Z END legs-a exit=0`, `18:53:21Z END legs-x exit=0` | every row of the three sections, U12 among them; the staged stick |
-| e64d1751 | `acbf7a02` | `19:01:57Z END ci-plan exit=0`, `19:01:57Z END ci-budgets exit=0`, `19:02:30Z END mpx6-disktools-fat exit=0` | gauntlet-1 |
-| e64d1751 | `acbf7a02` | `20:11:49Z END mpx6-install exit=0` | gauntlet-2, the smoke rows, verify.py's I-manifest |
-| e64d1751 | `acbf7a02` | `22:25:02Z END kasumi-build exit=0`, `22:26:19Z END kasumi-870 exit=0`, `22:28:12Z END kasumi-860 exit=0`, `22:30:34Z END mpx6-ahci exit=0` | gauntlet-3 |
+| 7a65f930 (job.sh only) | `fb0327f6` | `15:16:39Z END ci-plan exit=0`, `15:16:39Z END ci-budgets exit=0`, `15:16:47Z END mpx6-disktools-fat exit=1` | the fat rows' oracles could not open the work directory: fat.py resolves `/mnt/space/lanes/…`, tools/disktools mounted the `/home/…` path (fixed in `2010c379`) |
+| 9dd66333 | `63dc473c` | `15:24:55Z END sbuild exit=0`, `15:25:28Z END sstick exit=0`, `15:28:19Z END red-text exit=1` | **red first, by name**: `FAIL U12-old-text: missing 'text /etc/pax-login (the installed login: an earlier installer'` |
+| 00c902f4 | `6c876db1` | `16:16:01Z END sbuild exit=0`, `16:16:33Z END sstick exit=0`, `16:21:53Z END legs-d exit=0`, `16:30:02Z END legs-a exit=0`, `16:38:16Z END legs-x exit=1` | U12's row fault (4.1, R-px93-9): the regeneration right, the question after it unanswered |
+| 9dd66333's stick, e64d1751's leg | `63dc473c`, `2010c379` | `17:21:21Z END legs-x exit=1` | **red again, by name**, with the corrected row: `FAIL U12-old-text` |
+| e64d1751 | `2010c379` | `18:30:22Z END sbuild exit=0`, `18:30:55Z END sstick exit=0`, `18:36:15Z END legs-d exit=0`, `18:44:20Z END legs-a exit=0`, `18:53:21Z END legs-x exit=0` | every row of the three sections, U12 among them; the staged stick |
+| e64d1751 | `2010c379` | `19:01:57Z END ci-plan exit=0`, `19:01:57Z END ci-budgets exit=0`, `19:02:30Z END mpx6-disktools-fat exit=0` | gauntlet-1 |
+| e64d1751 | `2010c379` | `20:11:49Z END mpx6-install exit=0` | gauntlet-2, the smoke rows, verify.py's I-manifest |
+| e64d1751 | `2010c379` | `22:25:02Z END kasumi-build exit=0`, `22:26:19Z END kasumi-870 exit=0`, `22:28:12Z END kasumi-860 exit=0`, `22:30:34Z END mpx6-ahci exit=0` | gauntlet-3 |
 
 Every chunk above is the lane's job script's own log (`notes/px93/logs/`): its START and END lines carry a time, and
 its lock lines sit outside any step, so `tools/gauntlet-record.sh --verify` cannot read them (`malformed record
 header/footer`). The recorded take is therefore run once more at this branch's head, both locks held for the whole
 take, each chunk one step (`notes/px93/satoyama/rec-gauntlet.sh`): the green record and the plant's, verified by the
 recorder, are the PR's evidence, their END lines in its body.
+
+The first recorded take, at the head on px98's (b57be3ca, its plant 0915a5da), verified, before px89's guard merged
+and moved trunk under it (both on satoyama, both locks for the whole take; the inner END lines are the chunks'):
+
+| record | steps (END, secs) | the chunks' END lines inside |
+|---|---|---|
+| green, worst 0, 4 steps, 01:36:26Z–02:29:03Z | stick 1837, gauntlet-1 107, gauntlet-2 878, gauntlet-3 334 | `01:44:13Z sbuild 0`, `01:44:45Z sstick 0`, `01:50:04Z legs-d 0`, `01:58:11Z legs-a 0`, `02:07:03Z legs-x 0`, `02:08:11Z ci-plan 0`, `02:08:11Z ci-budgets 0`, `02:08:50Z mpx6-disktools-fat 0`, `02:23:28Z mpx6-install 0`, `02:23:42Z kasumi-build 0`, `02:25:00Z kasumi-870 0`, `02:26:51Z kasumi-860 0`, `02:29:02Z mpx6-ahci 0` |
+| plant, worst 1, 02:29:03Z–02:41:11Z | plant 727 (exit 1) | `02:36:44Z sbuild 0`, `02:37:16Z sstick 0`, `02:41:10Z legs-d 1`; `FAIL U3d-upgrade: missing 'beside /etc/shrc.pax-new' on the screen:` at column 0 |
+
+On px98's login U3 and U3d's plans read `text /etc/pax-login (the installed login: an earlier installer's text,
+regenerated)` (U3 10.46 s, U3d 3.67 s), and U4, U4d and U12 logged in through px98's login.
 
 ### 4.4 The plant
 
@@ -304,7 +316,7 @@ the user's `/etc/shrc` would have been overwritten. Its recorded take is the pla
 
 ### 4.5 The staged stick
 
-`~/pax-smoke/pax-upgrade-kasumi-e64d1751.img`, read-only, from e64d1751 (`acbf7a02` now), the last code commit on
+`~/pax-smoke/pax-upgrade-kasumi-e64d1751.img`, read-only, from e64d1751 (`2010c379` now), the last code commit on
 px92's head, before this branch was rebased onto trunk's px96 merge (`b8e77f7a`: the quiet console's write-error
 lines) and px98's head (`946245e6`: px98's login, which this stick does not carry). The recorded take at this
 branch's head builds and runs the stick again on that base:
@@ -398,7 +410,7 @@ the stick the 860 was upgraded with; it predates R-px93-9).
     `limine.conf`'s digest is recorded from now on, and `/etc/fstab` has no manifest row (the image ships none);
   - U12, red first: an earlier installer's `/etc/pax-login`, the install's manifest naming it, regenerated with
     nothing beside it, and the console's login through it; then the user's edit kept with `.pax-new`; a third run
-    "Nothing to change". Its first green take at 00c902f4 (`3c61b5a3` now) stopped after the regeneration, a fault of the row: the
+    "Nothing to change". Its first green take at 00c902f4 (`6c876db1` now) stopped after the regeneration, a fault of the row: the
     plan and the result were right (the regenerated line on the screen, `Upgrade complete`), but pax-install then asks
     "Type reboot to reboot now or poweroff to power off" at its own `pax-install>` prompt, which the row did not
     answer, so it waited 60 s for a shell's. The row now answers by powering off, as every other row does, and boots
@@ -412,8 +424,8 @@ the stick the 860 was upgraded with; it predates R-px93-9).
   login, nothing beside it, so U3 and U3d's plans now carry `text /etc/pax-login (the installed login: an earlier
   installer's text, regenerated)`, and U4 and U4d boot through px98's login.
 - **R-px93-7, px92 first.** This branch was rebased onto px92's head `44b44435`, then onto trunk `b8e77f7a` (px92's
-  and px96's merges), and last onto px98's head `946245e6`, which merges first; the recorded take and the plant are
-  from this branch's head. Until px98 merges, this PR's diff carries px98's commits too.
+  and px96's merges), onto px98's head `946245e6` (merged first), and last onto trunk `37217ba0`; the recorded take
+  and the plant are from this branch's head.
 
 ### 5.2 Not done
 
@@ -429,10 +441,10 @@ the stick the 860 was upgraded with; it predates R-px93-9).
 
 ### 5.3 Checklist
 
-Run before the PR, at e64d1751 (`acbf7a02` now) unless named (4.3), and recorded once more at the head:
+Run before the PR, at e64d1751 (`2010c379` now) unless named (4.3), and recorded once more at the head:
 - [x] `tests/ci-plan`, `tests/ci-budgets.py`
 - [x] `tests/mpx6-disktools --only fat` (F5, `paxfat replace`), red first at the tests-only head
-- [x] `tests/mpx6-install --rows smoke --tier native --firmware bios` (verify.py's I-manifest), red first at 4f2f6f10 (`6556173c` now)
+- [x] `tests/mpx6-install --rows smoke --tier native --firmware bios` (verify.py's I-manifest), red first at 4f2f6f10 (`96d60ef6` now)
 - [x] `tests/mpx6-install --only metal`: the kasumi build, the 870 leg and the 860 leg over a used fat32 disk, KVM
 - [x] `tests/mpx6-ahci --tier native --firmware bios --rows pr`
 - [x] the upgrade leg (`tests/mpx6-install.d/upgrade.py`), sections a, d and x, KVM; U8 red first at the tests-only
