@@ -3840,6 +3840,96 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px99: wolf lsp, the dev compiler's language server, on PAX: a client
+  # with no libc (user/elf/lspc.c) types two sessions at /usr/bin/wolf's
+  # `lsp` (tools/mkwolf's build, held to user/wolf.sums), as root and as a
+  # user, and each transcript is held frame for frame to the same client
+  # and server in the container.
+  mpx5-lsp:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lsp')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          uname -sr
+          docker --version
+
+      - name: wolf's Rust (user/wolf.pin's channel, the tree's) and the musl target (rustup)
+        run: |
+          . user/wolf.pin
+          rustup --version
+          rustup toolchain install "$WOLF_SRC_RUST" --profile minimal --target "$WOLF_SRC_TARGET"
+          rustup run "$WOLF_SRC_RUST" rustc --version
+          rustup target list --installed --toolchain "$WOLF_SRC_RUST"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-lsp-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's container is made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: the sessions' witness rejects broken transcripts
+        run: python3 -I tests/mpx5-lsp.d/test_rows.py
+
+      - name: wolf lsp's sessions against the container, as root and as a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-lsp $PAX_LEGS
+
+      - name: keep the programs' sums, the Linux side, the transcripts, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-lsp
+          path: |
+            build/mpx5-lsp/*.txt
+            build/mpx5-lsp/wolf/sums.txt
+            build/mpx5-lsp/lspc/
+            build/mpx5-lsp/root/etc/pax-run
+            build/mpx5-lsp/root/usr/share/lsp/
+            build/mpx5-lsp/linux/
+            build/mpx5-lsp/*/kmain_console.elf
+            build/mpx5-lsp/*/*.log
+            build/mpx5-lsp-*.run
+            build/mpx5-lsp-*.region
+            build/mpx5-lsp-*.log
+            build/mpx5-lsp-*.norm
+            build/mpx5-lsp-*.meta
+            build/mpx5-lsp-*.halt
+            build/mpx5-lsp-*.verdict
+            build/mpx5-lsp-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # as02b: the kernel's assembler seam (tools/build-kernel's boot/start.S
   # branch and wolf's manifest seam honour ONE explicit WOLF_AS, R-as02-2
   # A). tests/kernel-as builds kmain_console with every C-driver and
@@ -5188,6 +5278,7 @@ jobs:
       - mpx5-bore
       - mpx5-lupin
       - mpx5-wolf
+      - mpx5-lsp
       - kernel-as
       - mpx5-clef
       - mpx5-yew
