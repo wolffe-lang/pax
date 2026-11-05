@@ -1,0 +1,161 @@
+px102 — ptrace on PAX: the prediction, written 2026-11-05T19:25Z at base
+411fc9f5 (pax trunk at launch), before the first change and before any
+output of the gdb measurement was read (it was started on hasu, light C,
+at 19:19Z; nothing of it has been looked at when this file is committed).
+Sources, the only ones: ptrace(2), wait(2), signal(7), proc(5),
+proc_pid_mem(5), proc_pid_status(5), prctl(2) (man-pages 6.7), the uapi
+headers linux/ptrace.h and asm/{ptrace,ptrace-abi,debugreg}.h, the x86-64
+psABI, the Intel SDM (vol. 3A ch. 6 and ch. 18: TF, #DB, #BP, DR0-DR7).
+No kernel source of any OS, no debugger source: gdb runs only as a binary
+under strace.
+
+A. What a gdb-like debugger asks of Linux x86-64 (predicted)
+
+Requests (the uapi numbers), by what a session does:
+  start a program   fork; the child PTRACE_TRACEME (0), then execve; the
+                    parent's waitpid sees the exec SIGTRAP stop
+                    ((SIGTRAP << 8) | 0x7f); PTRACE_SETOPTIONS (0x4200)
+                    with TRACESYSGOOD | TRACEFORK | TRACEVFORK | TRACECLONE
+                    | TRACEEXEC | TRACEVFORKDONE | EXITKILL; gdb also first
+                    forks throwaway children to probe which options the
+                    kernel takes (TRACEME, SIGSTOP, SETOPTIONS, a fork in
+                    the child, GETEVENTMSG (0x4201), KILL (8)).
+  read and write    PEEKTEXT/PEEKDATA (1, 2) and POKEDATA (5) word by
+  memory            word, or (a newer gdb) pread64/pwrite64 of
+                    /proc/<pid>/mem; breakpoints are an 0xcc POKEd into
+                    read-only text.
+  registers         GETREGS (12) / SETREGS (13), or GETREGSET (0x4204)
+                    NT_PRSTATUS; GETFPREGS (14) or GETREGSET NT_PRFPREG /
+                    NT_X86_XSTATE (0x202) for the vector state; PEEKUSER (3)
+                    of DR6 and DR7 (offsets 848 + 8 * n of struct user)
+                    at stops, POKEUSER (6) for watchpoints.
+  run               CONT (7), SINGLESTEP (9) (stepping off a breakpoint,
+                    `step`/`next` over a line), SYSCALL (24) only for
+                    `catch syscall`; KILL (8) or kill(SIGKILL) at the end.
+  stops             waitpid(-1 or pid, __WALL | WNOHANG) after a SIGCHLD
+                    (a handler and sigsuspend), GETSIGINFO (0x4202) at a
+                    SIGTRAP to tell a breakpoint (si_code SI_KERNEL 0x80)
+                    from a step (TRAP_TRACE 2) or a watchpoint (TRAP_HWBKPT
+                    4); the event stops' status >> 16 (PTRACE_EVENT_*).
+  attach            ATTACH (16) or SEIZE (0x4206) + INTERRUPT (0x4207);
+                    DETACH (17).
+The wait statuses: an exit (code << 8), a signal death (sig), a ptrace
+stop (sig << 8) | 0x7f, a syscall stop ((SIGTRAP | 0x80) << 8) | 0x7f
+under TRACESYSGOOD, an event stop (((PTRACE_EVENT_x << 8) | SIGTRAP) << 8)
+| 0x7f, PTRACE_EVENT_STOP 128 for SEIZE's group-stops and INTERRUPT.
+
+Which sniff needs when:
+  S2 (the core): TRACEME + exec stop, SETOPTIONS (TRACEEXEC, TRACESYSGOOD,
+     EXITKILL; the TRACE{FORK,VFORK,CLONE} bits accepted), PEEK/POKEDATA
+     and /proc/<pid>/mem read and write, GETREGS/SETREGS, GETFPREGS,
+     PEEKUSER of DR6/DR7 (reads 0 with no watchpoint), CONT, SINGLESTEP
+     (including over `syscall`), KILL, GETSIGINFO, waitpid with __WALL and
+     WNOHANG, SIGCHLD to the tracer at every stop, TRACEEXIT's
+     GETEVENTMSG, the exit and death reports.
+  S5 (watchpoints): POKEUSER of DR0-DR3 and DR7 validated as Linux does,
+     DR6's status bits after a hit, TRAP_HWBKPT, PEEKUSER of DR6 cleared
+     by the tracer.
+  S6 (threads, signals, attach): ATTACH, SEIZE, INTERRUPT, DETACH,
+     TRACECLONE of CLONE_THREAD children and their per-thread stops,
+     group-stop and LISTEN, signal injection and suppression across
+     threads, GETEVENTMSG of clone and exec.
+  S7 (cores): not ptrace; PAX writing core(5) files (its own lane).
+
+B. The kernel paths each leans on (PAX at 411fc9f5)
+
+  - kernel/user `serve`: the dispatch (101 is -ENOSYS today); the
+    syscall-entry and -exit stops wrap it; exit/exit_group for TRACEEXIT.
+  - kernel/signal `on_return`, `act`, `fault`, `die`: where a traced
+    thread's taken signal becomes a signal-delivery-stop instead of an
+    action, and where the injected signal is acted on after the resume.
+  - kernel/interrupts `route`: vector 3 from ring 3 is today a #GP (every
+    gate is DPL 0) that kills with SIGSEGV; vector 1 from ring 3 kills
+    "debug". Both become SIGTRAP; gate 3 is made DPL 3; #DB goes on an
+    IST stack (a SYSCALL with TF set may raise #DB at the entry, on the
+    user's stack, in ring 0).
+  - kernel/sched: a new thread state for a ptrace-stop (parked with its
+    frame, run only when the tracer restarts it or SIGKILL), the trace
+    words per thread (tracer, options, the stop's report, the event
+    message, the stopped signal and its origin, the debug registers),
+    `wait_find` taking a tracer's tracees as well as its children, SIGCHLD
+    and a wake for the tracer at every stop, the tracer's end detaching
+    its tracees, a traced child's death reported to the tracer first.
+  - kernel/process `wait4`/`waitid` (__WALL, the stop reports, CLD_TRAPPED),
+    `execve` (the exec stop or the legacy SIGTRAP), `clone` (fork, vfork
+    and clone events and auto-attach).
+  - kernel/fpu: a stopped thread's saved area read as user_fpregs_struct
+    (the FXSAVE image; XSAVE's init-state bits honoured).
+  - kernel/paging, kernel/vm, kernel/uaccess: a tracee's memory through
+    its own tables, written even where ring 3 may not (breakpoints into
+    r-x text), a file's page copied before a private write.
+  - kernel/files and kernel/procfs: `may_trace` reused with the real ids
+    (PTRACE_MODE_ATTACH_REALCREDS) and with the file-system ids (ATTACH_
+    FSCREDS for /proc/<pid>/mem); /proc/<pid>/mem read and written;
+    `status`'s TracerPid and State "t (tracing stop)".
+  - boot/isr.S `pax_sysret`: a frame with TF set leaves by IRETQ.
+  - boot/cpu.S: MOV to and from DR0-DR3, DR6, DR7; kernel/sched loads a
+    thread's at every switch in and clears DR7 for one with none.
+
+C. The rows, predicted (tests/mpx5-trace: a static no-libc tracer,
+   user/elf/trace.c, and an assembly tracee, user/elf/tracee.S, run on
+   PAX as root and as 1000:1000 and in a throwaway Linux container,
+   compared byte for byte)
+
+  T1 base + the suite: red. Every ptrace call answers -38 (ENOSYS) and the
+     kernel logs `syscall 101: -ENOSYS`; the child's TRACEME fails, its
+     execve runs untraced, and its int3 is a #GP killed as SIGSEGV
+     (status 0xb), where Linux's is a SIGTRAP stop at the breakpoint.
+  T2 attach and stop: the exec stop is (SIGTRAP << 8) | 0x7f = 0x57f;
+     with TRACEEXEC, 0x4057f; the int3 stop 0x57f with rip one past the
+     0xcc; GETSIGINFO si_signo 5, si_code 0x80 (SI_KERNEL) for the int3,
+     2 (TRAP_TRACE) for a step; TracerPid the tracer's pid while traced
+     and 0 after; State "t (tracing stop)" while stopped.
+  T3 memory: PEEKDATA of the tracee's text and data words equal the bytes
+     the tracer reads from its own copy of the image; POKEDATA of 0xcc
+     into r-x text succeeds; /proc/<pid>/mem pread and pwrite at an
+     address agree with PEEK/POKE; an unmapped address is -EIO on both
+     (Linux may say EFAULT: whatever Linux says, PAX says).
+  T4 registers: GETREGS's 27 words in user_regs_struct's order (r15 …
+     rdi, orig_rax, rip, cs, eflags, rsp, ss, fs_base, gs_base, ds, es,
+     fs, gs); cs and ss differ by name (PAX 0x23/0x1b, Linux 0x33/0x2b:
+     the transcript prints them normalised, R-px102 on selectors);
+     SETREGS of rdi is what the tracee then prints; GETFPREGS's fcw
+     0x037f and mxcsr 0x1f80 at exec; PEEKUSER of DR7 0, POKEUSER of DR7
+     with an execute breakpoint at a function stops there with DR6's B0
+     set and si_code 4; an invalid DR7 (a 2-byte execute breakpoint, RW =
+     2 I/O, a misaligned 8-byte watch) answers what Linux answers.
+  T5 single-step: n steps from the breakpoint report n consecutive rips,
+     each a SIGTRAP stop with TRAP_TRACE; a step over `syscall` stops at
+     the next instruction with the call done (rax its result), not one
+     further.
+  T6 syscall stops: under TRACESYSGOOD the entry stop is 0x857f with rax
+     -38 and orig_rax the number, the exit stop 0x857f with rax the result.
+  T7 permission: a second tracer's ATTACH -EPERM; ATTACH to itself
+     -EPERM; to a non-dumpable process (PR_SET_DUMPABLE 0) -EPERM to a
+     user, 0 to root; a user's ATTACH to a descendant with other ids
+     -EPERM; a request to a running tracee -ESRCH; a tracer's end
+     detaches its tracee, which runs on and exits by itself; EXITKILL's
+     tracee dies of SIGKILL with its tracer.
+  T8 events: TRACEEXIT's stop is 0x6057f with GETEVENTMSG the exit
+     status word; TRACEFORK's 0x1057f with GETEVENTMSG the child's pid,
+     the child stopped by SIGSTOP (0x137f).
+  T9 refused by name, each its own `~` row (PAX's answer held to its text,
+     Linux's printed beside it): PTRACE_SYSEMU (31), GETREGSET
+     NT_X86_XSTATE (0x202), PTRACE_ARCH_PRCTL (30), and whatever else the
+     measurement shows gdb asks and S2 does not need.
+  T10 the kernel's books: every frame back at the end, no -ENOSYS for 101,
+     no PANIC, init's end status Linux's.
+
+D. What I expect to be hard or to differ
+  - SYSCALL with TF set: whether QEMU (TCG and KVM) raises #DB at the
+    entry point; either way the step after a syscall is the kernel's
+    (it stops the tracee on the call's way out), and #DB on its own IST
+    stack makes the entry case harmless.
+  - orig_rax at a stop after an interrupt is not deterministic on Linux
+    (an irq's negated vector); the transcript prints it only at syscall
+    and exception stops.
+  - ASLR: Linux randomises the stack of an ET_EXEC tracee and PAX does
+    not: rsp and every stack address are printed relative to the
+    tracee's own reading of its rsp at start (named in the row).
+  - PAX's tracer is a process (any of its threads may ask); Linux's is
+    the attaching thread. Named, not tested (one-thread tracers).
