@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -401,6 +401,107 @@ static void errors(void) {
     ok("ptrace.kill", ptrace(KILL, 0, 0));
     if (wait_child("kill.status") != 9) fail("kill.status");
 }
+static unsigned char thread_stack[8192] __attribute__((aligned(16)));
+static volatile unsigned thread_ctid;
+extern i64 trace_spawn_thread(void *stack, volatile unsigned *ctid);
+extern i64 trace_vfork_exec(const char *self);
+__asm__(".global trace_spawn_thread\ntrace_spawn_thread:\n"
+        "mov %rsi,%r10\nmov %rdi,%rsi\nmov $0x1250f00,%edi\n"
+        "xor %edx,%edx\nxor %r8d,%r8d\nmov $56,%eax\nsyscall\n"
+        "test %rax,%rax\njnz 1f\nmov $19,%edi\nmov $60,%eax\nsyscall\nud2\n1: ret\n"
+        ".global trace_vfork_exec\ntrace_vfork_exec:\npush %r12\nmov %rdi,%r12\n"
+        "mov $58,%eax\nsyscall\ntest %rax,%rax\njnz 2f\n"
+        "sub $24,%rsp\nmov %r12,(%rsp)\nlea 3f(%rip),%rax\nmov %rax,8(%rsp)\n"
+        "movq $0,16(%rsp)\nmov %rsp,%rsi\nmov %r12,%rdi\nxor %edx,%edx\n"
+        "mov $59,%eax\nsyscall\nmov $111,%edi\nmov $60,%eax\nsyscall\nud2\n"
+        "2: pop %r12\nret\n3: .asciz \"orphan-target\"\n");
+static __attribute__((noreturn)) void role_fork(void) {
+    i64 pid = call(57, 0, 0, 0, 0, 0);
+    if (pid == 0) done(19);
+    if (pid < 0) done(111);
+    int status = 0; i64 got;
+    do { got = call(61, pid, (i64)&status, 0, 0, 0); } while (got == -4);
+    done(got == pid && status == (19 << 8) ? 37 : 112);
+}
+static __attribute__((noreturn)) void role_vfork(const char *self) {
+    i64 pid = trace_vfork_exec(self);
+    if (pid <= 0) done(111);
+    int status = 0; i64 got;
+    do { got = call(61, pid, (i64)&status, 0, 0, 0); } while (got == -4);
+    done(got == pid && status == (23 << 8) ? 37 : 112);
+}
+static __attribute__((noreturn)) void role_clone(void) {
+    thread_ctid = 1;
+    if (trace_spawn_thread(thread_stack + sizeof(thread_stack), &thread_ctid) <= 0) done(111);
+    for (;;) {
+        unsigned value = thread_ctid;
+        if (!value) break;
+        call(202, (i64)&thread_ctid, 128, value, 0, 0);
+    }
+    done(37);
+}
+static int event_mode(const char *mode) {
+    return equal(mode, "fork-event") || equal(mode, "vfork-event") ||
+           equal(mode, "vfork-order") || equal(mode, "clone-event");
+}
+static int wait_other(i64 pid, const char *name) {
+    i64 parent = child; child = pid;
+    int status = wait_child(name);
+    child = parent;
+    return status;
+}
+static void cont_other(i64 pid) { ok("resume.other", call(101, CONT, pid, 0, 0, 0)); }
+static void no_parent_event(void) {
+    int status = 0;
+    dec("event.parent.nohang", call(61, child, (i64)&status, WALL | 1, 0, 0));
+}
+static void parent_child_signal(i64 target) {
+    if (wait_child("event.parent.sigchld") != 0x117f) fail("event.parent.sigchld");
+    struct siginfo si; zero(&si, sizeof(si));
+    ok("event.parent.getsiginfo", ptrace(GETSIGINFO, 0, (u64)&si));
+    dec("event.sigchld.code", si.code);
+    dec("event.sigchld.status", (int)si.fields[1]);
+    dec("event.sigchld.pid", (unsigned)si.fields[0] == (u64)target);
+    ok("event.parent.suppress", ptrace(CONT, 0, 0));
+}
+static void child_events(const char *mode) {
+    int vf = equal(mode, "vfork-event") || equal(mode, "vfork-order");
+    int clone = equal(mode, "clone-event");
+    int child_first = equal(mode, "vfork-order");
+    ok("event.options", ptrace(SETOPTIONS, 0, vf ? 0x34 : clone ? 8 : 2));
+    resume(CONT, "event.parent.status");
+    u64 target = 0;
+    ok("event.child.message", ptrace(GETEVENTMSG, 0, (u64)&target));
+    dec("event.child.valid", target != 0 && target != (u64)child);
+    if (!target || target == (u64)child) fail("event.child.pid");
+    if (wait_other(target, "event.child.initial") != 0x137f) fail("event.child.initial");
+    if (vf) {
+        if (!child_first) { ok("event.parent.resume", ptrace(CONT, 0, 0)); no_parent_event(); }
+        cont_other(target);
+        if (wait_other(target, "event.child.exec") != 0x4057f) fail("event.child.exec");
+        if (child_first) { no_parent_event(); ok("event.parent.resume", ptrace(CONT, 0, 0)); }
+        if (wait_child("event.vfork.done") != 0x5057f) fail("event.vfork.done");
+        u64 message = 0;
+        ok("event.vfork.message", ptrace(GETEVENTMSG, 0, (u64)&message));
+        dec("event.vfork.child", message == target);
+        ok("event.parent.wait-child", ptrace(CONT, 0, 0));
+        cont_other(target);
+        if (wait_other(target, "event.child.exit") != (23 << 8)) fail("event.child.exit");
+        parent_child_signal(target);
+    } else if (clone) {
+        ok("event.parent.resume", ptrace(CONT, 0, 0));
+        cont_other(target);
+        if (wait_other(target, "event.child.exit") != (19 << 8)) fail("event.child.exit");
+    } else {
+        cont_other(target);
+        if (wait_other(target, "event.child.exit") != (19 << 8)) fail("event.child.exit");
+        ok("event.parent.resume", ptrace(CONT, 0, 0));
+        parent_child_signal(target);
+    }
+    if (wait_child("event.parent.exit") != (37 << 8)) fail("event.parent.exit");
+    int status;
+    dec("event.echild", call(61, -1, (i64)&status, WALL | 1, 0, 0));
+}
 static void tracer_exit(const char *self, int exitkill) {
     if (call(39, 0, 0, 0, 0, 0) != 1) {
         text("FAIL tracer-exit-needs-pid1\n"); done(2);
@@ -439,13 +540,16 @@ static void tracer_exit(const char *self, int exitkill) {
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
     if (argc == 2 && equal(argv[1], "orphan-target")) done(23);
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit]\n"); done(2); }
+    if (argc == 2 && equal(argv[1], "role-fork")) role_fork();
+    if (argc == 2 && equal(argv[1], "role-vfork")) role_vfork(argv[0]);
+    if (argc == 2 && equal(argv[1], "role-clone")) role_clone();
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
     if (equal(mode, "exitkill") || equal(mode, "detach-exit")) {
         tracer_exit(argv[0], equal(mode, "exitkill"));
         text("trace.complete\n"); done(0);
     }
-    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall")) done(2);
+    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall") && !event_mode(mode)) done(2);
     if (equal(mode, "notify") || equal(mode, "notify-syscall")) {
         struct { u64 handler, flags, restorer, mask; } action = {
             (u64)child_notice, 0x14000004, (u64)trace_restorer, 0
@@ -458,8 +562,12 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         i64 ret = call(101, TRACEME, 0, 0, 0, 0);
         if (ret) { dec("traceme", ret); done(111); }
         if (equal(mode, "exec") || equal(mode, "notify")) call(62, call(39, 0, 0, 0, 0, 0), 19, 0, 0, 0);
-        char *av[] = { argv[1], 0 }; char *ev[] = { 0 };
-        ret = call(59, (i64)argv[1], (i64)av, (i64)ev, 0, 0);
+        char *av[] = { argv[1], 0, 0 }; char *ev[] = { 0 };
+        if (event_mode(mode)) {
+            av[0] = argv[0];
+            av[1] = equal(mode, "fork-event") ? "role-fork" : equal(mode, "clone-event") ? "role-clone" : "role-vfork";
+        }
+        ret = call(59, (i64)av[0], (i64)av, (i64)ev, 0, 0);
         dec("execve", ret); done(111);
     }
     waitid_peek();
@@ -473,7 +581,8 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         getregs(); hex("event.exec.rip", r.rip);
         ok("exec.kill", ptrace(KILL, 0, 0));
         if (wait_child("kill.status") != 9) fail("kill.status");
-    } else if (equal(mode, "errors")) errors();
+    } else if (event_mode(mode)) child_events(mode);
+    else if (equal(mode, "errors")) errors();
     else if (equal(mode, "syscall") || equal(mode, "notify-syscall")) syscall_rows(equal(mode, "notify-syscall"));
     else if (equal(mode, "stops")) stops();
     else if (equal(mode, "step")) steps();
