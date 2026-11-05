@@ -242,7 +242,7 @@ that dies or hangs), each item against this suite:
 | a deadline, then a group kill of a hung server | the hung runs: `setpgid`, `kill(-pgid, SIGKILL)` 0, `exit: signal 9`, every thread ended | working |
 | a write to a server that has gone answers EPIPE, not a death by SIGPIPE | the hung runs, SIGPIPE ignored: `-32` | working |
 | the same as an ordinary user | the `pax` runs, through `as` | working |
-| a timer finer than 10 ms | PAX's monotonic clock is the tick's | a limit to know (R-px99-2) |
+| a timer finer than 10 ms | PAX's monotonic clock is the tick's | a limit to know (R-px99-2, pax#299) |
 
 Not shown here, and not known to be missing: non-blocking writes with POLLOUT to a server whose input pipe is full
 (no frame here reaches the pipe's 64 KiB), a server that crashes by its own fault, and incremental `didChange` (the
@@ -250,7 +250,7 @@ server negotiates full sync). yew's own client rows meet them first.
 
 ### 4.7 Rulings (recommended and implemented)
 
-- **R-px99-1, the row's home.** Options:
+- **R-px99-1, the row's home** (ruled A). Options:
   - (A) its own suite and CI job, `tests/mpx5-lsp`;
   - (B) a third image in `tests/mpx5-wolf`, which already builds the dev compiler.
 
@@ -261,7 +261,7 @@ server negotiates full sync). yew's own client rows meet them first.
 - **R-px99-2, PAX's monotonic clock.** It advances only with the 100 Hz tick, and `clock_getres` is not served. Nothing
   here needs finer, and `wolf lsp`'s 100 ms debounce works. Options: (a) say so (README, this note) and leave it; (b)
   an issue for a later lane: a monotonic clock read between ticks (the TSC calibrated against the timer PAX already
-  calibrates), and `clock_getres`. Recommended: **(b)**, filed by the coordinator if agreed; (a) is done here.
+  calibrates), and `clock_getres`. Recommended: **(b)**, and so ruled: filed as pax#299; (a) is done here.
 - **R-px99-3, no kernel change.** The contract's item 3 asks for a fix where `wolf lsp` meets a gap; it met none. So
   this lane's PAX change is the suite, its client and their wiring, and the plant is the witness's own (P8).
 
