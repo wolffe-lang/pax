@@ -124,7 +124,9 @@
 #   R3 the disk after the boot: e2fsck -fn clean, the four repositories of
 #      each session read back (debugfs), Linux's own git finds each whole
 #      (`fsck --full`) and the bare hub's main the id the session printed;
-#   R4 D4's end rows for that boot.
+#   R4 D4's end rows for that boot, and the kernel's books: 8 connections
+#      accepted and 8 made over the loopback (two daemons a place), none
+#      left open.
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. A failed row is
@@ -598,6 +600,10 @@ remote_rows() { # tier leg
     done
     remote_disk_rows "$id" "$rhome" "$PAX_BUILD/mpx5-den-remote-$tier-$leg-${REMOTE_NAMES[0]}.session" \
         "$PAX_BUILD/mpx5-den-remote-$tier-$leg-${REMOTE_NAMES[1]}.session"
+    # The kernel's own books: each session's two places dial two daemons
+    # (a clone, then a push), and a fetch with no daemon makes nothing.
+    grep -Eqx 'network: tcp connections 8 accepted, 8 made, 0 open' "$norm" \
+        || bad "R4 remote $id: the kernel's books say '$(grep -m1 '^network: tcp ' "$norm")', not 8 accepted, 8 made, 0 open"
     d4_rows "remote $id" "$hrc" R4
 }
 
