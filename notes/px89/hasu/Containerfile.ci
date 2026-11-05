@@ -1,0 +1,10 @@
+# px89: the lane image as GitHub's ubuntu-24.04 runner meets the suites:
+# a user `runner` (uid 1001, as on GitHub's runners) with password-less
+# sudo, so a suite run as that user takes the tap ways by `sudo -n` as
+# CI's does (tests/mpx4-dhcp's `wire=(--sudo)`). CPUS as in Containerfile.
+FROM localhost/px89-dhcp:1
+ARG CPUS=0-5
+RUN taskset -c "$CPUS" sh -c 'apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends sudo && rm -rf /var/lib/apt/lists/*' \
+    && useradd -u 1001 -m -s /bin/bash runner \
+    && echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner && chmod 440 /etc/sudoers.d/runner \
+    && dpkg-query -W sudo dnsmasq-base > /etc/px89-ci-packages.txt
