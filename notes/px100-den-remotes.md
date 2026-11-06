@@ -41,8 +41,8 @@ Footprint: cross-cutting (`tests/ci-plan` and `tools/ci-tiers.map`, CI's own pro
 
 | input | identity | read |
 |---|---|---|
-| pax base | trunk `411fc9f5` | `git merge-base --is-ancestor` |
-| den | `584b18a35fe7373735b673601af71e1722f5af29` (`user/den.pin`, the pin px97's sweep moves it to; carried here as px97's own commit until the rebase) | `tools/mkden` refuses any other HEAD |
+| pax base | launched on trunk `411fc9f5`; rebased once onto px99's head `ab3a1827` (stacked, the coordinator's word; pax#302's trunk `aba55824` under it). `notes/px100/rebase-map.txt` pairs each commit with its twin. Runs named below by a pre-rebase sha ran at that sha | `git merge-base --is-ancestor` |
+| den | `584b18a35fe7373735b673601af71e1722f5af29` (`user/den.pin`, px97's sweep; carried here as px97's own commit until the rebase, which dropped it: the base has it byte for byte) | `tools/mkden` refuses any other HEAD |
 | den, static | `ac1ec5268869397f1f6c9d4b197dae2f3531f3742c8fd12e5198566ed39c5289`, 17,251,992 bytes; stripped `99fffc19…`, 3,074,744 (not installed) | four builds, one digest, on each host |
 | pelt | `4683b3f5` (`user/pelt.pin`): friendly mode opt-in at this pin | its README |
 | the wrappers | `user/den/upload-pack` `9f482f05…`, `user/den/receive-pack` `c6e2e052…` (two lines each) | `sha256sum`, in the session too |
@@ -50,7 +50,7 @@ Footprint: cross-cutting (`tests/ci-plan` and `tools/ci-tiers.map`, CI's own pro
 
 ## 3. Prediction, scored
 
-The prediction is `notes/px100/prediction.txt`, committed first (`43b7d704`).
+The prediction is `notes/px100/prediction.txt`, committed first (`43b7d704`, now `ecb89212`).
 
 | | predicted | measured | |
 |---|---|---|---|
@@ -71,18 +71,18 @@ The prediction is `notes/px100/prediction.txt`, committed first (`43b7d704`).
 
 ### 4.1 The change
 
-- **The wrappers** (`a07f21da`): `user/den/upload-pack` and `receive-pack`, `#!/bin/sh` and `exec /bin/den
+- **The wrappers** (`828bcba7`): `user/den/upload-pack` and `receive-pack`, `#!/bin/sh` and `exec /bin/den
   upload-pack "$1"` (receive-pack likewise). den's file:// transport runs `$DEN_UPLOAD_PACK` or
   `$DEN_RECEIVE_PACK` with the repository's path as its only argument, and `git-upload-pack` or
   `git-receive-pack` from PATH when the variable is unset; PAX has no Git.
-- **Installed where the image's users get them** (`4a8fdda1`): `tools/install-den` copies them to
+- **Installed where the image's users get them** (`ad166d3a`): `tools/install-den` copies them to
   `/usr/libexec/den/`, 0755, in every root it makes: mpx5-den's images and, through `tools/distribution-root`
-  (`984c3825`), the dev and release roots and so the disk `pax-install` writes. `tests/distribution` (`11ebf071`)
+  (`bd55548d`), the dev and release roots and so the disk `pax-install` writes. `tests/distribution` (`de210de7`)
   holds their bytes, modes and owners in both roots, and `/etc/shrc`'s two exports.
-- **`/etc/shrc`** (`d9f83f84`): `user/shrc` exports `DEN_UPLOAD_PACK=/usr/libexec/den/upload-pack` and
+- **`/etc/shrc`** (`7d9ee917`): `user/shrc` exports `DEN_UPLOAD_PACK=/usr/libexec/den/upload-pack` and
   `DEN_RECEIVE_PACK=/usr/libexec/den/receive-pack`. Every console shell reads it (`ENV=/etc/shrc`), `su pax`
   keeps `ENV`, and a program a shell starts inherits the exports.
-- **The keys** (`c04279b9`), `user/console/den-remote.keys`: den's pinned environment as `den.keys` sets it, then
+- **The keys** (`59d5850e`), `user/console/den-remote.keys`: den's pinned environment as `den.keys` sets it, then
   `den-session-begin`. The keys print the variables and the installed wrappers' bytes, then type a second pair at
   the console (written since boot, `chmod 755`; the same bytes). Then two places, each opened by its marker:
   - `den-place-tmp`: under `/tmp/den-UID/r`, the typed pair;
@@ -103,7 +103,7 @@ The prediction is `notes/px100/prediction.txt`, committed first (`43b7d704`).
 
   The port is 9418 for root and 9428 for `pax`, plus one at home. Every typed line is under 78 columns: the
   container's terminal wraps at 80, PAX's console does not, so a longer echo would differ.
-- **The rows** (`8d27865f`, `6e6d1f2e`, `6f001738`, `c0e526bd`): `tests/mpx5-den` builds a third image (den's
+- **The rows** (`993ce07b`, `6f4dfdec`, `c1fcdc84`, `1210b7e7`): `tests/mpx5-den` builds a third image (den's
   archive with `chmod`, `/etc/shrc` the two lines of `user/shrc`, read from the shipped file, and its own run list:
   `/bin/env ENV=/etc/shrc /bin/sh -i -m`, then the same through `as 1000 1000`), boots it on REMOTE_KERNEL
   (`kmain_session`, R-px100-2) with a fresh copy of the home disk, and holds:
@@ -118,11 +118,11 @@ The prediction is `notes/px100/prediction.txt`, committed first (`43b7d704`).
 
   The Linux side types the same keys into the same tree in a throwaway container (`tools/linux-tree`, its network
   namespace's loopback).
-- **CI's routing** (`b6034cee`, then `d38168b3`): the remote keys and the wrappers reach mpx5-den, and the wrappers
+- **CI's routing** (`601a30f5`, then `3f4df824`): the remote keys and the wrappers reach mpx5-den, and the wrappers
   reach its installer's suites as well; mpx5-den is in `@net` (its remote image runs loopback TCP) and in
-  `user/shrc`'s suites. `tests/ci-plan` was red first at `b6034cee`: two rows, mpx4-net's renew step (`@net`
+  `user/shrc`'s suites. `tests/ci-plan` was red first at `b6034cee` (pre-rebase; `601a30f5` now): two rows, mpx4-net's renew step (`@net`
   without mpx5-den) and the wrappers' row. It went green with the map.
-- **README** (`681eead8`) and `docs/SOURCES.md` (`ed8cba30`).
+- **README** (`ad572ec9`) and `docs/SOURCES.md` (`b3936036`).
 
 ### 4.2 The Linux side, dry (Linux host 1, before any PAX boot)
 
@@ -137,7 +137,7 @@ mutations of the transcript, one at a time, each turned exactly its own row red:
 - `/etc/shrc`'s value;
 - the port.
 
-### 4.3 Green at `d38168b3` (Linux host 2)
+### 4.3 Green at `d38168b3`, before the rebase (Linux host 2; its twin is `3f4df824`)
 
 `tests/mpx5-den --tier native --firmware bios`, all three phases exit 0, 1681 s:
 - D0, D1–D4, L1–L5: the existing sessions at den `584b18a3`, 859 lines each identical to Linux (`631f1649…`,
@@ -164,10 +164,22 @@ file:// half ran as on kmain_session. At `dm | dc den clone -q git://127.0.0.1:$
 There was no panic and no `refused:` line. The red-first record of the same rows at `6e6d1f2e`, the commit before
 the wrappers and the kernel switch, is §4.5.
 
-### 4.5 Red at `6e6d1f2e` (Linux host 1)
+### 4.5 Red at `6e6d1f2e`, the rows before the change (Linux host 1; its twin is `6f4dfdec`)
 
-The rows committed before the wrappers, `install-den`, `/etc/shrc` and the kernel switch: R0 and R2's
-wrapper and variable rows red, and the git:// rows red on kmain_console. (The record goes here when it lands.)
+`tests/mpx5-den --tier native --firmware bios` at the commit with the rows and keys and none of the change (no
+wrappers, no `/etc/shrc` lines, the remote image on kmain_console), 3325 s, `END mpx5-den-native-bios exit=1`:
+
+```
+FAIL R0 (build): user/shrc exports 0 of den's two service variables; no /usr/libexec/den/upload-pack (tools/install-den); no /usr/libexec/den/receive-pack (tools/install-den);
+FAIL R1 native bios remote-root: no whole den session in run 1
+FAIL R1 native bios remote-user: no whole den session in run 2
+FAIL R3 native bios: remote-root: no src read back from the disk; … (each of the eight repositories)
+FAIL R4 remote native bios: no 'PAX: init … ended with status 0' (); not halted (qemu-halt: NOT HALTED: QEMU ended before prompt 73 ('$ ') for step 73: cat $O/d);
+```
+
+The remote boot stalled at the same place as §4.4's probe, the first `dm | dc` (step 72): the git:// clone on
+kmain_console never returned. D0 to D4 passed (the existing sessions, 859 lines each, `631f1649…` and
+`47cb3dd4…`), and the Linux side ran. Red first, then green at the fix (§4.3).
 
 ### 4.6 The gauntlet, the plant, CI
 
@@ -236,13 +248,13 @@ not run (mpx6-install, mpx6-disktools, mpx6-fsck, mpx6-kasumi) are CI's labelled
 
 ### 5.3 Checklist
 
-- [x] The prediction, committed first (`43b7d704`), scored above.
+- [x] The prediction, committed first (`43b7d704`, now `ecb89212`), scored above.
 - [x] file:// through the wrappers and git:// through `den daemon`, typed at PAX as root and as `pax`, under `/tmp`
   and on the ext2 `/home`, byte-identical to Linux, `fsck --full` clean on every repository (§4.3).
 - [x] PAX's gap measured (§4.4) and ruled (R-px100-2 A; B its own lane).
 - [x] The rows stay: `tests/mpx5-den` R0–R4, routed to CI with den's other rows.
 - [x] The wrappers where the image's users get them (R-px100-1 A), `/etc/shrc`, the README.
-- [ ] The red record at `6e6d1f2e` (§4.5).
+- [x] Red first at `6e6d1f2e` (§4.5): R0, R1, R3 and R4 red by name.
 - [ ] The gauntlet green at the head, every END line in the PR.
 - [ ] The plant red by name in its own record.
 - [ ] The audit, once.
