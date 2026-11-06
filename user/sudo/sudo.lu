@@ -735,6 +735,14 @@ fn parse_text(text: str, file: str, mut pol: Policy, depth: int) {
 }
 
 fn include_dir(dir: str, mut pol: Policy, depth: int) {
+    let dst = fs_stat(dir) else |_| {
+        return
+    }
+    let dwhy = bad_owner(dir, dst)
+    if dwhy.len > 0 {
+        (mut pol.warnings).push(dwhy)
+        return
+    }
     let names = fs_read_dir(dir) else |_| {
         return
     }
