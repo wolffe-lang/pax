@@ -1,0 +1,37 @@
+px102 — memory rows beyond ELF text/data: the prediction, written
+2026-11-06 at 9a2109a4, before the witness has run anywhere. Sources:
+ptrace(2) (PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA), proc_pid_mem(5),
+pread(2), lseek(2), mmap(2), mprotect(2). No kernel source.
+
+One witness, mode `memory`: the TRACEME child re-execs trace as role-mem,
+which maps fixed regions and stops at int3:
+  MA  0x500000, two private anonymous pages, bytes i*7+1
+  MB  0x502000, one page of 0x5a, then mprotect PROT_NONE
+  MC  0x503000, a read-only private file page (the trace binary, offset 0)
+  MC2 0x504000, a second private mapping of the same file page
+  MD  0x505000, one shared anonymous page of 0x3c; 0x506000 unmapped
+Rows, each judged by check.py's named span plus the whole transcript:
+  mem-cross-page   PEEK/POKE of a word straddling MA's page boundary.
+  mem-prot-none    PEEK and POKE on PROT_NONE.
+  mem-private-file POKE into a read-only private file page: it must take
+                   (a breakpoint into text), and the other private mapping
+                   of the same file page must keep the original byte.
+  mem-shared       POKE into a shared page; the edge row reads/writes a
+                   word that runs off the end of the mapping; kernel and
+                   non-canonical addresses.
+  mem-proc-mem     /proc/<pid>/mem pread/pwrite across a page boundary,
+                   a short count at the end of a mapping, zero length,
+                   a kernel address, a negative offset, PROT_NONE and a
+                   read-only page, lseek+read.
+  mem-proc-self    /proc/self/mem read and write of the tracer's own data.
+  mem-held-exec    a descriptor opened before the target's exec reads
+                   EOF (0) and writes 0 after it; a fresh open sees the
+                   new image.
+The target also reports, in r15 at a second stop, whether it saw the
+pokes (shared byte, private file byte, the other mapping unchanged, the
+cross-page word).
+Prediction: Linux forces PEEK/POKE through read-only and PROT_NONE
+private mappings (copy on write) but not through a shared one's file;
+a short pread/pwrite at a mapping end returns the bytes reached and a
+hole at the start gives -EIO (5). PAX's position is unknown; the
+transcript is the reference wherever the two disagree.
