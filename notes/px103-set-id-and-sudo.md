@@ -188,10 +188,11 @@ where sudo shows `sh -c 'exit 7'`; measured on Ubuntu's sudo (a blank puts
 single quotes round the word, `\` and `'` are backslash-escaped, a control
 byte is `#0` and its octal value), fixed in `user/sudo` (`log_word`).
 
-**On the live image** the accounts do not exist (`/etc/passwd` is the live
-image's, there is no uid 1000 account and no `wolf`): `sudo` works for root
-(`root ALL=(ALL:ALL) ALL`), and uid 1000 would match the `#1000` rule if a
-process had it, but no login makes one. The installer writes the accounts.
+**On the live image** `/etc/passwd` and `/etc/group` list root, `pax` (1000) and
+`lobo` (990), as the base archive has them; the live login accepts root. So
+`sudo` works there for root (`root ALL=(ALL:ALL) ALL`), and `su pax` (root
+dropping to the user) then `sudo` matches the `#1000` rule. The installer
+rewrites both files with the installing user's account (U13's `wolf`).
 
 ## 8. For the second half: passwords (R1)
 

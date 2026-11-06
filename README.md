@@ -66,9 +66,8 @@ prints, and power off. The upgrade writes the three paths and touches nothing
 of yours (your `/etc/passwd`, `/etc/group`, `/home` and `/etc/shrc` stay as
 they are). After it, log in as your own account and run `sudo yew /etc/shrc`
 or `sudo -i`; the policy names uid 1000, which is the installer's account
-whatever it is called, so no edit is needed. The live USB has no accounts of
-its own: there `sudo` works for root only, and uid 1000 has no rule until an
-installed system makes the account.
+whatever it is called, so no edit is needed. On the live USB you are root already; its
+`/etc/passwd` lists `pax` (1000), so `su pax` then `sudo` works there too.
 
 All of this is **enforced for honest programs; not a boundary against an
 attacker**: the kernel has never been fuzzed or audited and loads programs at
