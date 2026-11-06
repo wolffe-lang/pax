@@ -99,24 +99,24 @@ no-effect rows); after the kernel work all 49. Mispredicted:
 - **R-px103-1** (accepted as C): the shipped policy is `root ALL=(ALL:ALL)
   ALL` and `#1000 ALL=(ALL:ALL) NOPASSWD: ALL`; the second names uid 1000,
   not a user name (README says so); `lobo` gets nothing. `user/sudo/sudoers`.
-- **R-px103-2, a command that is a symbolic link in the policy**: the
+- **R-px103-2 (accepted; a named choice), a command that is a symbolic link in the policy**: the
   contract asked for a refusal by name. Linux accepts it and matches the file
   (device and inode), and its own rows (`bob-idlink`, `bob-id-bin`) rely on
   it. Recommend (implemented): a rule's path matches a command when the
   paths are equal or name the same real file (`fs_realpath`); a relative path,
   `..` or `//` in a rule is refused by name. Option B: refuse links, which
   breaks `/bin/id` against a `/usr/bin/id` rule.
-- **R-px103-3, the log's time**: PAX keeps no zone, so the stamp is UTC.
+- **R-px103-3 (accepted), the log's time**: PAX keeps no zone, so the stamp is UTC.
   Recommend keeping it; the format is sudo's, wrapped at 80 columns with
   `!loglinelen` honoured.
-- **R-px103-4, the distribution build** (not done in this head): adding
+- **R-px103-4 (ruled: done in this lane, not a follow-on), the distribution build**: adding
   `sudo` to the images needs a build input (`tools/mksudo`), `distribution-root`
   rows (`bin/sudo` mode 04755, `etc/sudoers` 0440, `var/log`), `tests/distribution`'s
   inventory, and a check that the installer's ext2 writer and upgrade keep the
   04755 mode and write the absent `etc/sudoers`. Recommend one follow-on lane
   after the rebase, with a real-disk witness (`mpx6-install` installs, boots, and
   runs `sudo` as `pax`).
-- **R-px103-5, the Linux reference for set-ID**: a real Linux booted under
+- **R-px103-5 (accepted), the Linux reference for set-ID**: a real Linux booted under
   QEMU with the build host's kernel image (7.2.4) rather than the campaign's
   usual reference machine. Recommend keeping it: reproducible by
   `notes/px103/record-sid.sh`, and the same program is init.

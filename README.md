@@ -50,7 +50,7 @@ always uid 1000, whatever it is called. The service account `lobo` (990) has
 no rule. To use it as the `pax` account: `sudo yew /etc/shrc`, `sudo -i` for a
 root shell, `sudo -u lobo CMD` for another user, `sudo -l` to see what you may
 run. Every use, allowed or refused, appends a line to `/var/log/sudo.log`
-(root's, mode 0600). `sudo` reads `/etc/sudoers` and files in `/etc/sudoers.d`
+(root's, mode 0600; sudo's format, `Mon DD HH:MM:SS : user : ...`, with the time in **UTC**, since PAX keeps no zone). A policy rule's command matches a command by an equal path or by naming the same real file (a symbolic link is fine); a relative path, `..` or `//` in a rule is refused by name. `sudo` reads `/etc/sudoers` and files in `/etc/sudoers.d`
 only when they are root's and not group- or world-writable, as Linux's `sudo`
 does; the subset it implements, and what it refuses by name, are in
 `user/sudo/sudo.lu`'s header. `tests/mpx5-sudo` holds the set-ID rules to a real
