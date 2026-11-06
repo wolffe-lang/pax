@@ -1099,10 +1099,10 @@ to F9); `notes/px76-uefi-on-metal.md` has the measurements.
 ## Tracing stops (px102, in progress)
 
 `ptrace(2)` is being added against the no-libc Linux transcripts in
-`tests/mpx5-trace.d/`. It supports a child's `TRACEME`, the
+`tests/mpx5-trace.d/` (suite: `tests/mpx5-trace`). It supports a child's `TRACEME`, the
 legacy exec stop, `CONT`, `GETSIGINFO`, `KILL`,
 GETREGS/SETREGS, GETFPREGS, GETREGSET for PRSTATUS/PRFPREG, PEEKUSER of
-register words and debug registers, POKEUSER of debug registers, SINGLESTEP,
+register words and debug registers, POKEUSER of the general words and the debug registers, SINGLESTEP,
 PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA, and proc memory read/write.
 SETOPTIONS now accepts TRACESYSGOOD, TRACEFORK/VFORK/CLONE/EXEC/VFORKDONE/EXIT and EXITKILL;
 GETEVENTMSG reports exec/exit events, and PTRACE_SYSCALL stops at entry/exit.
@@ -1123,8 +1123,11 @@ thread id as its message. A stop taken in a blocked call shows Linux's
 -ERESTART codes (-512, -514, -516) and the call restarts on resume as on
 Linux, a relative sleep through restart_syscall (219); a direct-return wait
 takes its syscall-exit stop when it completes.
-Group-stop and PTRACE_LISTEN, ATTACH of a job-control-stopped target, and the
-timed futex, timed receive and sigsuspend restart codes still need their rows.
+Group-stop and PTRACE_LISTEN, ATTACH of a job-control-stopped target, the timed
+futex, timed receive and sigsuspend restart codes, the syscall-exit stop that
+precedes a signal stop under PTRACE_SYSCALL, a non-tracer thread consuming a
+tracee's stop, and an untraced caller's exit_group with TRACEEXIT in the others
+still need their rows.
 Other requests are refused by name; NT_X86_XSTATE is named and returns EINVAL.
 
 | Change | Behaviour and row |
@@ -1139,9 +1142,14 @@ Other requests are refused by name; NT_X86_XSTATE is named and returns EINVAL.
 | `trace/`: stepping | Ordinary #DB reports TRAP_TRACE (2); completion of a stepped syscall reports the measured Linux TRAP_BRKPT (1) before another user opcode executes. `T-single-step`, `T-step-syscall` |
 
 The new state fills the existing 512-byte thread slot (six words added), plus
-64 bytes per thread for virtual debug registers. SETREGS currently refuses
-non-user RIP/RSP/FS bases; general-word POKEUSER remains unsupported. These restrictions need their own compatibility rows
-before the full tracing interface is claimed.
+64 bytes per thread for virtual debug registers. POKEUSER of the 27 general
+words and SETREGS share one validation: Linux's selectors (CS 0x33, SS 0x2b),
+a canonical rip or rsp (a kernel-half one faults in ring 3, as on Linux), an
+fs_base in user space, and flags with only the bits user code may set (plus
+the fixed bit 1 and IF). Four limits are named, with their own rows
+(`regs2-limits`, held to PAX's transcript): a non-canonical rip or rsp is
+-EIO (Linux accepts it and faults the process when resumed), NT in the flags
+is dropped, and a nonzero GS base or data/GS selector is -EIO.
 
 Tracing option/event/control state uses a separate 256-byte slot per thread, leaving
 Thread at 512 bytes. Before any thread/table write, `T-trace-layout` compares
@@ -1157,7 +1165,24 @@ status has bit 7, but SIGCHLD's signal does not. `T-traceexec`, `T-traceexit`,
 `T-syscall-entry`, `T-syscall-exit`, and the `T-sigchld-*` rows hold these.
 The tracer-death rows cover automatic detach and EXITKILL separately.
 
-Memory compatibility still needs cross-page, partial-buffer, PROT_NONE, shared/private file mapping, held-descriptor exec, and credential-change rows; the present probe covers mapped ELF text/data and unmapped-address errors.
+The memory rows cover a word straddling a page boundary, PROT_NONE pages
+(PEEK, POKE and /proc/<pid>/mem all reach a page that holds a frame, as
+Linux's forced access does), a private file page (a breakpoint is copied into
+the tracee's own page and a second private mapping of the page keeps the
+original byte), a shared page, a word running off a mapping's end (-EIO, the
+bytes below it written first), proc mem at a mapping's end (a short count),
+a zero length, a negative offset (-EINVAL), `lseek` plus `read`,
+`/proc/self/mem`, and a descriptor held across the target's exec (EOF).
+The permission rows (`perm`, root-started) cover a uid-changed target, a
+target whose credentials a root process changed (not dumpable, and so is its
+fork child), PR_SET_DUMPABLE on and off: ATTACH and the opens of `mem` and
+`environ` agree with Linux. Two tracees at once keep their memory and
+registers apart; wait(-1) reports each once; killing one leaves the other
+stopped. `task/<tid>/status` shows one thread's Pid, TracerPid and state, and
+`/proc/<tid>` of a live non-leader thread opens and shows that thread's files.
+`tests/mpx5-trace` runs every mode, as root and as 1000:1000, on each leg, and
+`--only linux` re-runs the same binaries in throwaway containers against the
+references. `T-mem-*`, `T-perm-*`, `T-conc-*`, `T-tasks-*`, `T-regs2-*`.
 
 The child-event rows cover fork plus the real parent's subsequent wait,
 both vfork resume orders (parent first and child first), and a cloned thread's
