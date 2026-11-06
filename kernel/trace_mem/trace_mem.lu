@@ -10,6 +10,7 @@ use vm
 
 const EIO: u64 = 0xfffffffffffffffb
 const EFAULT: u64 = 0xfffffffffffffff2
+const EINVAL: u64 = 0xffffffffffffffea
 
 pub fn peek(s: u64, addr: u64) -> (bool, u64) {
     let (a, space) = sched.trace_space(s)
@@ -29,8 +30,8 @@ pub fn peek(s: u64, addr: u64) -> (bool, u64) {
 pub fn poke(s: u64, addr: u64, value: u64) -> u64 {
     let (a, space) = sched.trace_space(s)
     if space == 0 || addr >= paging.USER_TOP || paging.USER_TOP - addr < 8 { return EIO }
-    // Check both possible pages before writing any byte.
-    if vm.trace_address(a, space, addr, true) == 0 || vm.trace_address(a, space, addr + 7, true) == 0 { return EIO }
+    // Linux writes the bytes below an unmapped page before it answers
+    // -EIO (measured by the memory witness): no pre-check of the second page.
     var i: u64 = 0
     while i < 8 {
         let pa = vm.trace_address(a, space, addr + i, true)
@@ -46,6 +47,9 @@ pub fn poke(s: u64, addr: u64, value: u64) -> u64 {
 /// address space. An unmapped first page is EIO; a later hole ends a
 /// short transfer. A dead address space has proc-mem's EOF semantics.
 pub fn transfer(s: u64, pml4: u64, buf: u64, n: u64, addr: u64, write: bool) -> u64 {
+    // An offset with the top bit set is a negative file position: -EINVAL
+    // before anything else, as pread does for any file (measured).
+    if addr >> 63 != 0 { return EINVAL }
     let (a, space) = sched.trace_space(s)
     if space == 0 || n == 0 { return 0 }
     let count = if n < 0x7ffff000 { n } else { 0x7ffff000 }
