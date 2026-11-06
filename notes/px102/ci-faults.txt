@@ -1,0 +1,37 @@
+px102 — three faults the first CI run found, and how each was fixed.
+
+1. mpx6-usb and mpx6-firmware failed to link. boot/isr.S is in every kernel
+   entry, and since the tracing work it calls pax_trace_resume_syscall and
+   pax_trace_finish_syscall for the special frame vectors 0x102 and 0x103.
+   kernel/user defines them, so only the entries that link it resolved them;
+   the six minimal entries (kmain_usbcheck and kmain_metal_msi, _panic,
+   _power, _screen and _serial; each defines its own pax_interrupt for the
+   same reason) did not. Fix: each minimal entry defines both hooks as a
+   halt, next to its pax_interrupt. A weak default in the assembly was not
+   possible (clef has no .weak and kernel-as builds boot/*.S with it), and
+   linking the tracing module everywhere would pull in the scheduler and the
+   user layer. Row: tests/mpx2-frames F1b builds and links every
+   kernel/kmain*.lu (native tier), so a new entry cannot break silently.
+   Seen red first on the six entries (40 entries built, 6 failed).
+
+2. kernel-as K5 (clef assembles the kernel) failed. boot/cpu.S wrote the
+   debug-register moves as `mov %rax, %dr7` and the like; clef answers
+   "bad_operand %dr7". Fix: the moves are written as their encodings
+   (Intel SDM vol. 2B, MOV to and from debug registers, 0F 23 /r and
+   0F 21 /r), which GNU as emits too; the .text of the two assemblers is
+   byte for byte the same. No pin moved. The existing K5 row is the row.
+
+3. mpx5-trace's Linux reference differed on a CI runner. The regs2 mode
+   set fs_base to 2^48 and the reference (taken on a 4-level host) said -EIO.
+   2^48 is canonical under 5-level paging and a runner whose Linux uses it
+   accepts it, so the reference depended on the host. The value is now 2^56,
+   which no paging level accepts. PAX was never affected: it refuses any
+   fs_base at or above 0x00007ffffffff000 (Linux's user limit for 4-level
+   paging, the paging PAX uses) and any gs_base but zero, before storing it,
+   so a refused value cannot reach the processor's WRMSR (non-canonical is
+   #GP, SDM vol. 3A 5.8.5), and arch_prctl(ARCH_SET_FS) refuses at the user
+   top. New rows (regs2-refused-resume): a refused fs_base or gs_base, by
+   SETREGS and by POKEUSER, answers -EIO, the bases read back unchanged, the
+   tracee resumes and stops at its next int3, and its bases are unchanged.
+   PAX is stricter than a 5-level Linux for values between 2^47 and 2^56; the
+   rows avoid that range.
