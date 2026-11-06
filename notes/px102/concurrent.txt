@@ -1,0 +1,21 @@
+px102 — concurrent tracees and task aliases: the prediction, written
+2026-11-06 at the permission oracle commit, before either witness has
+run anywhere. Sources: ptrace(2), wait(2), proc_pid_mem(5), proc(5).
+
+Mode `conc`: one tracer, two TRACEME children (the fixed tracee), both
+live at once. Rows: their memory and registers are independent (the same
+address holds 0xaaaa... in one and 0xbbbb... in the other; SETREGS rdi
+0x1111 and 0x2222 reach each store); wait(-1) reports each exactly once
+in either order (the witness prints set equality, not the order);
+killing one leaves the other stopped (WNOHANG 0), its registers intact,
+and a GETREGS for the dead one ESRCH; the survivor exits 37 and then
+ECHILD.
+Mode `tasks`: a TRACEME leader with a second thread blocked in a futex,
+stopped at int3. /proc/<pid>/task/<tid>/mem of the non-leader thread
+reads and writes the group's memory; the leader's task alias, /proc/<tid>
+as a pid alias, a nonexistent tid (ENOENT), TracerPid of the thread
+(0: only the leader is traced) and of the leader (the tracer), PEEKDATA
+addressed to the thread's tid (ESRCH, the thread is not a tracee), and
+a descriptor held across the group's exit (EOF).
+Prediction: PAX's task mem path was never driven by a threaded target,
+so it is the likeliest to be red (kernel-foundation.txt says so).
