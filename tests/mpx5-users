@@ -378,7 +378,7 @@ IDS_LINUX_LINES=62 # of ids' 71 lines, those that are Linux's to the byte (the o
 IDS_REFUSED="" # px45: SO_PEERCRED is answered (px34's refusal of it is gone)
 # px45: sig's 102 sender rows, of which PAX writes these Linux's; and
 # priv's 30 lines.
-SIG_LINUX_ROWS=99
+SIG_LINUX_ROWS=102
 PRIV_LINUX_LINES=20 # px45 (4 before; px62: 19 before PAX made FIFOs, the user's mknod row is Linux's now): the ten left are what PAX has not (/dev/mem, /dev/kmsg, /dev/ptmx, a raw socket, limits, root's device node), /dev/tty (Linux's probe has no controlling terminal; every PAX process's is the console) and, for that same reason, the user's KIOCSOUND row
 PRIV_REFUSED="syscall 133: refused: a device node (the tree makes none), -1|syscall 41: refused: an AF_INET socket that is neither a datagram nor a stream socket: type 3, -94" # px62: root's and the user's FIFOs are made now
 SIG_ENOSYS="273 334" # glibc's two (px49, pax#73: sig's targets wait in `pause`, which PAX has now; 34 before)
@@ -836,6 +836,15 @@ for leg in $legs; do
                         say "SKIP U1 $id sizes: ext2's directory sizes and block totals masked on both sides (rootdisk)"
                         masked=", ext2's directory sizes and totals masked"
                     fi ;; esac
+                    # px103: the recording's set-ID copy was run on a nosuid mount (not
+                    # honoured); the kernel honours the bits now, so that one row is the
+                    # honoured one (tests/mpx5-users.d/ident*.setid: root's file run by
+                    # the actor), and every other line is the recording's.
+                    case $s in ident|ident-user)
+                        sl=$(cat "$here/mpx5-users.d/$s.setid")
+                        awk -v new="$sl" -v key="${sl%%execve\'d:*}" 'index($0, key "execve'"'"'d:") == 1 { print new; n++; next } { print } END { if (n != 1) exit 3 }' "$out.want" > "$out.want2" \
+                            && mv "$out.want2" "$out.want" || why+=" the recording has not exactly one set-ID execve row;" ;;
+                    esac
                     cmp -s "$out.want" "$out.cmp" || why+=" the session differs: $(diff "$out.want" "$out.cmp" | head -n 10 | cut -c1-400 | tr '\n' '|');"
                     [ "$(wc -l < "$ref/$s.txt" | tr -d ' ')" = "$n" ] || why+=" $n lines, the recording has $(wc -l < "$ref/$s.txt" | tr -d ' ');"
                     t=$(grep -c '^~' "$out")
