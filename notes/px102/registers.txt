@@ -1,0 +1,22 @@
+px102 — register-word rows: the prediction, written 2026-11-06 before the
+witness has run anywhere. Sources: ptrace(2), the System V psABI A.2.1,
+the Intel SDM (RFLAGS, segment selectors, canonical addresses).
+
+Mode `regs2`, at the first int3 stop of the fixed tracee:
+  regs2-peek-words  PEEKUSER of each of the 27 general words equals
+                    GETREGS's; the selectors, flags, orig_rax and bases.
+  regs2-user-area   PEEKUSER past the registers: offsets 216, 224, 232,
+                    240, 800, 840, 880, 888, 904, 912, 4088 and 4096.
+  regs2-poke-words  POKEUSER of general words (valid and invalid values:
+                    a non-canonical or kernel rip, ring-0 or zero
+                    selectors, a TF flags word, all-ones flags, bases),
+                    each read back, each followed by a full SETREGS of
+                    the original registers.
+  regs2-setregs     SETREGS with the same invalid values.
+Prediction: Linux refuses a non-canonical rip, kernel-range bases and
+bad selectors with -EIO (5) and leaves the word unchanged; all-ones
+flags are accepted with only the user-modifiable bits kept (the reserved
+bits and IF as the kernel keeps them). PAX's rules for these are the
+foundation note's "SETREGS currently accepts only the measured amd64
+selectors, zero GS/data selectors and user-range RIP/RSP/FS bases"; its
+POKEUSER of general words is "owed". The transcript is the reference.
