@@ -1,0 +1,95 @@
+=== pax: $ /bin/sid h:ran
+h ran: uid 0 0 0 0 fs 0 | gid 0 0 0 0 fs 0 | groups 1 [0] | secure 0 | dumpable 1 | nnp 0 (0) | CapPrm 000001ffffffffff CapEff 000001ffffffffff | /proc/self 0:0 status 0:0
+--- status 0
+=== pax: $ -u lobo /bin/sid env a b
+argv[0]=/bin/sid
+argv[1]=env
+argv[2]=a b
+env TERM=linux
+env PATH=/bin:/usr/bin
+env DISPLAY=:0
+env LANG=C
+env MAIL=/var/mail/lobo
+env LOGNAME=lobo
+env USER=lobo
+env HOME=/srv/lobo
+env SHELL=/bin/false
+env SUDO_COMMAND=/bin/sid env a b
+env SUDO_USER=pax
+env SUDO_UID=1000
+env SUDO_GID=1000
+h env: uid 0 990 990 990 fs 990 | gid 0 990 990 990 fs 990 | groups 1 [990] | secure 0 | dumpable 1 | nnp 0 (0) | CapPrm 0000000000000000 CapEff 0000000000000000 | /proc/self 990:990 status 990:990
+--- status 0
+=== pax: $ -n -l
+Matching Defaults entries for pax on pax:
+   
+    secure_path=/bin\:/usr/bin
+
+User pax may run the following commands on pax:
+    (ALL : ALL) NOPASSWD: ALL
+--- status 0
+=== pax: $ -g pack /bin/sid h:grp
+h grp: uid 0 1000 1000 1000 fs 1000 | gid 0 2000 2000 2000 fs 2000 | groups 2 [1000 2000] | secure 0 | dumpable 1 | nnp 0 (0) | CapPrm 0000000000000000 CapEff 0000000000000000 | /proc/self 1000:2000 status 1000:2000
+--- status 0
+=== pax: $ -u nosuch /bin/sid h:x
+sudo: unknown user nosuch
+sudo: error initializing audit plugin sudoers_audit
+--- status 1
+=== pax: $ sid h:search
+h search: uid 0 0 0 0 fs 0 | gid 0 0 0 0 fs 0 | groups 1 [0] | secure 0 | dumpable 1 | nnp 0 (0) | CapPrm 000001ffffffffff CapEff 000001ffffffffff | /proc/self 0:0 status 0:0
+--- status 0
+=== pax: $ -E /bin/sid env
+argv[0]=/bin/sid
+argv[1]=env
+env TERM=linux
+env PATH=/bin:/usr/bin
+env FOO=bar
+env DISPLAY=:0
+env LANG=C
+env HOME=/home/pax
+env LOGNAME=root
+env USER=root
+env SUDO_COMMAND=/bin/sid env
+env SUDO_USER=pax
+env SUDO_UID=1000
+env SUDO_GID=1000
+h env: uid 0 0 0 0 fs 0 | gid 0 0 0 0 fs 0 | groups 1 [0] | secure 0 | dumpable 1 | nnp 0 (0) | CapPrm 000001ffffffffff CapEff 000001ffffffffff | /proc/self 0:0 status 0:0
+--- status 0
+=== lobo: $ /bin/sid h:ran
+sudo: lobo is not in the sudoers file.
+--- status 1
+=== lobo: $ -n -l
+User lobo is not allowed to run sudo on pax.
+--- status 1
+=== root: $ -u pax /bin/sid h:asself
+h asself: uid 0 1000 1000 1000 fs 1000 | gid 0 1000 1000 1000 fs 1000 | groups 2 [1000 2000] | secure 0 | dumpable 1 | nnp 0 (0) | CapPrm 0000000000000000 CapEff 0000000000000000 | /proc/self 1000:1000 status 1000:1000
+--- status 0
+=== pax: $ -V
+Sudo version 0.1 (PAX, px103)
+PAX's sudo reads a subset of sudoers(5), authenticates nobody (ruling R1) and is
+enforced for honest programs; not a boundary against an attacker (ruling R6).
+--- status 0
+=== pax: $ --bogus
+sudo: unrecognized option '--bogus'
+usage: sudo -h | -K | -k | -V
+usage: sudo -v [-ABkNnS] [-g group] [-h host] [-p prompt] [-u user]
+usage: sudo -l [-ABkNnS] [-g group] [-h host] [-p prompt] [-U user]
+            [-u user] [command [arg ...]]
+usage: sudo [-ABbEHkNnPS] [-r role] [-t type] [-C num] [-D directory]
+            [-g group] [-h host] [-p prompt] [-R directory] [-T timeout]
+            [-u user] [VAR=value] [-i | -s] [command [arg ...]]
+usage: sudo -e [-ABkNnS] [-r role] [-t type] [-C num] [-D directory]
+            [-g group] [-h host] [-p prompt] [-R directory] [-T timeout]
+            [-u user] file ...
+--- status 1
+=== log (root's, 0600): 600 0:0
+log: pax : PWD=/ ; USER=root ; COMMAND=/bin/sid h:ran
+log: pax : PWD=/ ; USER=lobo ; COMMAND=/bin/sid env a b
+log: pax : PWD=/ ; USER=pax ; GROUP=pack ; COMMAND=/bin/sid h:grp
+log: pax : PWD=/ ; USER=root ; COMMAND=/bin/sid h:search
+log: pax : PWD=/ ; USER=root ; COMMAND=/bin/sid env
+log: lobo : user NOT in sudoers ; PWD=/ ; USER=root ;
+log:     COMMAND=/bin/sid h:ran
+log: lobo : user NOT in sudoers ; PWD=/ ; USER=root ; COMMAND=list
+log: root : PWD=/ ; USER=pax ; COMMAND=/bin/sid h:asself
+sid: done
