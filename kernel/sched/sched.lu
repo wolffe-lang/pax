@@ -3734,6 +3734,10 @@ pub fn trace_stop(f: u64, sig: u64, code: u64, addr: u64) -> u64 {
 
 pub fn trace_resume(s: u64) {
     if s >= SLOTS || field(s, offset_of(Thread, state)) != TRACED { return }
+    if trace_state.exit_pending(s) == 3 {
+        trace_exit_thread(s)
+        return
+    }
     let done = trace_state.vfork_done(s)
     if done != 0 {
         trace_state.set_vfork_done(s, 0)
@@ -3975,4 +3979,46 @@ pub fn trace_detach(s: u64) {
         }
     }
     trace_resume(s)
+}
+
+
+/// px102: exit_group(2) by a tracee with PTRACE_O_TRACEEXIT. Every other
+/// traced thread of its group with the option stops in PTRACE_EVENT_EXIT
+/// too (ptrace(2): "This applies to exits via exit(2), exit_group(2)"),
+/// its message the group's status; resumed, it ends with that status.
+/// Only a traced, stopping caller does this (it holds the group's end
+/// until its tracer resumes it). IF clear.
+pub fn trace_group_exit(status: u64) {
+    let c = cur()
+    let l = field(c, offset_of(Thread, lead))
+    var t: u64 = FIRST
+    while t < SLOTS {
+        let st = field(t, offset_of(Thread, state))
+        if t != c && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && tracer_of(t) != 0 && trace_state.options(t) & 0x40 != 0 && trace_state.exit_pending(t) == 0 {
+            trace_state.set_exit_pending(t, 3)
+            trace_state.set_exit_status(t, status)
+            trace_state.set_event(t, status)
+            trace_state.set_stop_kind(t, 4)
+            trace_state.set_control(t, trace_state.control(t) & !(trace_state.FAULT | trace_state.INTERRUPT))
+            let _parked = trace_park(t, 0, 0x605, 0x605, field(t, offset_of(Thread, pid)) | (real_uid(l) << 32))
+        }
+        t += 1
+    }
+}
+
+/// A thread resumed from a group exit's PTRACE_EVENT_EXIT ends now (it is
+/// not running: it is simply dead, as `end_others` ends one), reporting
+/// its own death; a leader's slot is held for its process. IF clear.
+fn trace_exit_thread(s: u64) {
+    let l = field(s, offset_of(Thread, lead))
+    trace_state.set_exit_pending(s, 0)
+    put_field(s, offset_of(Thread, state), DEAD)
+    put_field(s, offset_of(Thread, rst), W_NONE)
+    thread_gone()
+    put_field(s, offset_of(Thread, status), trace_state.exit_status(s))
+    trace_state.set_exit_uid(s, real_uid(l))
+    if s != l { let _traced = trace_death(s) }
+    trace_release_owned(field(s, offset_of(Thread, pid)))
+    if s == l { put_field(s, offset_of(Thread, gone), 1) }
+    put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) - 1)
 }
