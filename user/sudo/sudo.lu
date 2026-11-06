@@ -82,6 +82,7 @@ struct Policy {
     secure_path: str,
     has_secure: bool,
     keep: List[str],
+    logfile: bool,
     wrap: bool,
     error: str,
     warnings: List[str],
@@ -202,7 +203,9 @@ fn main() -> int {
     let found = target.name.len > 0
     if !found {
         eprint("sudo: unknown user {tname0}")
-        eprint("sudo: error initializing audit plugin sudoers_audit")
+        if !tname0.starts_with("#") {
+            eprint("sudo: error initializing audit plugin sudoers_audit")
+        }
         return 1
     }
     var tgid = target.gid
@@ -633,7 +636,7 @@ fn hostname() -> str {
 // ---- the policy ------------------------------------------------------
 
 fn new_policy() -> Policy {
-    Policy { entries: List[Entry](), secure_path: "", has_secure: false, keep: default_keep(), wrap: true, error: "", warnings: List[str]() }
+    Policy { entries: List[Entry](), secure_path: "", has_secure: false, keep: default_keep(), logfile: false, wrap: true, error: "", warnings: List[str]() }
 }
 
 fn load_policy() -> Policy {
@@ -838,7 +841,7 @@ fn parse_defaults(rest0: str, file: str, line: int, mut pol: Policy) {
         } else if name == "loglinelen" {
             continue
         } else if name == "logfile" && eq >= 0 {
-            continue
+            pol.logfile = true
         } else {
             fail(mut pol, file, line, "Defaults {name} is not supported")
             return
@@ -1167,7 +1170,12 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
     if pol.has_secure {
         def = "secure_path={pol.secure_path.replace(":", "\\:")}"
     }
-    print("    {def}")
+    if pol.logfile {
+        print("    {def},")
+        print("    logfile={LOG_FILE}")
+    } else {
+        print("    {def}")
+    }
     print("")
     print("User {who.name} may run the following commands on {host}:")
     if a.longer {
