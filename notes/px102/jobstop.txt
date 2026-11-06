@@ -28,3 +28,24 @@ stopped, SIGCONT reports 0x80057f (code 32773), and resuming ends with the
 SIGCONT's own signal-delivery stop 0x127f. ATTACH of a stopped process is
 accepted with a 0x137f stop whose GETSIGINFO is -EINVAL (a group-stop has
 no siginfo); CONT then reports 0x137f once more; SIGCONT is not reported.
+
+Red on fbdc2b59 (both modes, by name): FAIL T-group-stop-event,
+T-ptrace-listen, T-attach-stopped-attach, T-attach-stopped-resume. PAX
+reports no group-stop to a tracer: a SEIZEd tracee resumed with SIGSTOP
+injected goes into PAX's job-control stop and the tracer's later requests
+are -ESRCH; ATTACH of a stopped process was accepted and then nothing was
+reported.
+
+R-px102-4 (recommendation: accept the refusal, implement later if sniff
+asks). Contained fix found: ATTACH and SEIZE of a job-control-stopped
+process is refused by name (-EIO and the log line "ptrace: refused attach of
+a job-control-stopped process"); the rest is not contained: reporting a
+group-stop to a tracer (PTRACE_EVENT_STOP with the stop signal, GETSIGINFO
+absent, LISTEN keeping the stop, SIGCONT's notification) needs the
+job-control park in kernel/sched (STOPPED, px48's wstop/wcont reports) to
+hand a tracer the stop instead of the parent, and a resume path that leaves
+it parked. group-stop.pax and attach-stopped.pax hold PAX's present
+transcripts, so a change is seen. What sniff loses: the debugger cannot be
+told that its inferior was stopped by SIGSTOP/SIGTSTP (Ctrl-Z) or attach to
+a stopped process; ordinary signal-delivery stops, breakpoints, and
+attach to a running process (S2 through S6) are unaffected.
