@@ -29,8 +29,8 @@ PELT_REPO=https://github.com/wolffe-lang/pelt
 PELT_REV=4683b3f5faf46cd393ec2632f345f8cd483a4f1f
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
-# px97: yew trunk 1218169e, the sweep's; red (C5) until the yew pin moves.
-IMAGE_YEW_REV=1218169e5220f56131ae2aefe8341b9f6495b3cb
+# px97: yew trunk 2eb9cb9b, read again on 2026-11-06; red (C5) until the yew pin moves.
+IMAGE_YEW_REV=2eb9cb9b2a8e33d788011aa6a81c3e633241c67c
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
 # px97: boreutils trunk ff5396ad, the sweep's; red (C5) until the boreutils pin moves.
