@@ -1919,9 +1919,9 @@ below and the black-box runs in `notes/px89/blackbox.txt`.
 
 The org's own trees, read only where a pin needs them: each one's `wolf-toolchain.toml` at its pin and at its trunk
 head, its log between the two, and the paths of `src/` the log names, to say in the pin what moved. boreutils
-`ff5396ad`, lope `d65bb03c`, lobo `64e7339d` (`src/main.lu`'s worker reload), scent `eb888dfc` (`src/re`,
+`ff5396ad`, lope `d65bb03c`, lobo `64e7339d` (`src/main.lu`'s worker reload) and, read again on 2026-11-06, `39788b86` (its admission counters and per-drive TIME_WAIT settling), scent `eb888dfc` (`src/re`,
 `src/reader`), aspen `096245c8` (`src/zone`, `src/clock` retired), den `584b18a3` (its README's wire and config rows),
-yew `1218169e`, wolf-std `3111d39f` and wolf-interp's `v0.1.59` (`CHANGELOG.md`, `vendor/upstream/PIN`,
+yew `1218169e` and `2eb9cb9b` (read again on 2026-11-06), wolf-std `3111d39f` and wolf-interp's `v0.1.59` (`CHANGELOG.md`, `vendor/upstream/PIN`,
 `rust-toolchain.toml`). The release archives and the source archives were read by digest, each twice. The published
 lupin musl binary was checked by its ELF header (ET_EXEC, no PT_INTERP, no PT_DYNAMIC) and never run outside a
 container. pelt `301e25e0` (`src/sh/main.lu`'s and `src/sh/edit.lu`'s friendly default, and `src/sh/edit_prompt.lu`'s
