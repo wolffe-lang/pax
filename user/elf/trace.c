@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -1005,6 +1005,131 @@ static void tracer_exit(const char *self, int exitkill) {
     child = target; /* pid 1 now owns the orphan, on both kernels */
     if (wait_child("tracee.after-tracer.status") != (exitkill ? 9 : (23 << 8))) fail("tracee.after-tracer.status");
 }
+
+/* px102 memory witnesses (notes/px102/memory.txt). The target maps
+ * fixed regions, stops at int3, and later reports what it sees in r15
+ * at a second stop. Sources: ptrace(2) PEEK/POKE, proc_pid_mem(5). */
+#define MA 0x500000UL   /* two private anonymous pages */
+#define MB 0x502000UL   /* a PROT_NONE page that held bytes */
+#define MC 0x503000UL   /* read-only private file page */
+#define MC2 0x504000UL  /* a second private mapping of the same file page */
+#define MD 0x505000UL   /* shared anonymous page; MD+0x1000 is unmapped */
+static i64 mmap6(u64 addr, u64 len, u64 prot, u64 flags, i64 fd) {
+    register i64 r10 __asm__("r10") = flags;
+    register i64 r8 __asm__("r8") = fd;
+    register i64 r9 __asm__("r9") = 0;
+    i64 ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"(9), "D"(addr), "S"(len), "d"(prot), "r"(r10), "r"(r8), "r"(r9)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+static int memory_mode(const char *mode) { return equal(mode, "memory"); }
+static __attribute__((noreturn)) void role_mem(void) {
+    if (mmap6(MA, 0x2000, 3, 0x32, -1) != (i64)MA) done(111);
+    if (mmap6(MB, 0x1000, 3, 0x32, -1) != (i64)MB) done(111);
+    if (mmap6(MD, 0x1000, 3, 0x21, -1) != (i64)MD) done(111);
+    for (u64 i = 0; i < 0x2000; i++) ((volatile unsigned char *)MA)[i] = (unsigned char)(i * 7 + 1);
+    for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MB)[i] = 0x5a;
+    for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MD)[i] = 0x3c;
+    if (call(10, MB, 0x1000, 0, 0, 0)) done(111); /* PROT_NONE */
+    i64 fd = call(2, (i64)self_path, 0, 0, 0, 0);
+    if (fd < 0) done(111);
+    if (mmap6(MC, 0x1000, 1, 2, fd) != (i64)MC) done(111);
+    if (mmap6(MC2, 0x1000, 1, 2, fd) != (i64)MC2) done(111);
+    call(3, fd, 0, 0, 0, 0);
+    __asm__ volatile("int3");
+    u64 bits = 0;
+    if (*(volatile unsigned char *)MD == 0xab) bits |= 1;
+    if (*(volatile unsigned char *)MC == 0xcc) bits |= 2;
+    if (*(volatile unsigned char *)MC2 != 0xcc) bits |= 4;
+    if (*(volatile unsigned char *)(MA + 0xffd) == 0x88) bits |= 8;
+    __asm__ volatile("mov %0,%%r15\nint3" : : "r"(bits) : "r15");
+    char *av[] = { (char *)self_path, "orphan-target", 0 }; char *ev[] = { 0 };
+    call(59, (i64)self_path, (i64)av, (i64)ev, 0, 0);
+    done(111);
+}
+static void bytes(const char *name, const unsigned char *b, u64 n) {
+    text(name); text("=");
+    for (u64 i = 0; i < n; i++) { number(b[i] >> 4, 16); number(b[i] & 15, 16); }
+    text("\n");
+}
+static i64 memfd(const char *leaf, int self) {
+    char name[80]; path(name, child, 0, leaf);
+    if (self) { const char *s = "/proc/self/mem"; u64 k = 0; while ((name[k] = s[k])) k++; }
+    return call(2, (i64)name, 2, 0, 0, 0);
+}
+static void memory_rows(void) {
+    resume(CONT, "mem.ready.status");
+    u64 w = 0;
+    dec("mem.cross.peek", ptrace(PEEKDATA, MA + 0xffd, (u64)&w)); hex("mem.cross.peek.value", w);
+    dec("mem.cross.poke", ptrace(POKEDATA, MA + 0xffd, 0x1122334455667788UL));
+    dec("mem.cross.poke.low", ptrace(PEEKDATA, MA + 0xff8, (u64)&w)); hex("mem.cross.poke.low.value", w);
+    dec("mem.cross.poke.high", ptrace(PEEKDATA, MA + 0x1000, (u64)&w)); hex("mem.cross.poke.high.value", w);
+    dec("mem.none.peek", ptrace(PEEKDATA, MB, (u64)&w)); hex("mem.none.peek.value", w);
+    dec("mem.none.poke", ptrace(POKEDATA, MB, 0x77));
+    dec("mem.none.after", ptrace(PEEKDATA, MB, (u64)&w)); hex("mem.none.after.value", w);
+    dec("mem.ro.peek", ptrace(PEEKDATA, MC, (u64)&w)); hex("mem.ro.peek.value", w);
+    dec("mem.ro.poke", ptrace(POKEDATA, MC, (w & ~255UL) | 0xcc));
+    dec("mem.ro.after", ptrace(PEEKDATA, MC, (u64)&w)); hex("mem.ro.after.value", w);
+    dec("mem.private.other", ptrace(PEEKDATA, MC2, (u64)&w)); hex("mem.private.other.value", w);
+    dec("mem.shared.peek", ptrace(PEEKDATA, MD, (u64)&w)); hex("mem.shared.peek.value", w);
+    dec("mem.shared.poke", ptrace(POKEDATA, MD, (w & ~255UL) | 0xab));
+    dec("mem.edge.peek", ptrace(PEEKDATA, MD + 0xff9, (u64)&w)); hex("mem.edge.peek.value", w);
+    dec("mem.edge.poke", ptrace(POKEDATA, MD + 0xff9, 0));
+    dec("mem.kernel.peek", ptrace(PEEKDATA, 0xffff800000000000UL, (u64)&w));
+    dec("mem.noncanonical.peek", ptrace(PEEKDATA, 0x0001000000000000UL, (u64)&w));
+    i64 fd = memfd("/mem", 0);
+    dec("mem.open", fd < 0 ? fd : 0);
+    if (fd < 0) fail("mem.open");
+    unsigned char buf[32]; zero(buf, sizeof(buf));
+    dec("mem.cross.pread", call(17, fd, (i64)buf, 16, MA + 0xff8, 0)); bytes("mem.cross.pread.bytes", buf, 16);
+    zero(buf, sizeof(buf));
+    dec("mem.edge.pread", call(17, fd, (i64)buf, 16, MD + 0xff8, 0)); bytes("mem.edge.pread.bytes", buf, 16);
+    dec("mem.hole.pread", call(17, fd, (i64)buf, 16, MD + 0x1000, 0));
+    dec("mem.zero.pread", call(17, fd, (i64)buf, 0, MD + 0x1000, 0));
+    dec("mem.kernel.pread", call(17, fd, (i64)buf, 8, 0xffff800000000000UL, 0));
+    dec("mem.negative.pread", call(17, fd, (i64)buf, 8, (u64)-1, 0));
+    zero(buf, sizeof(buf));
+    dec("mem.none.pread", call(17, fd, (i64)buf, 4, MB, 0)); bytes("mem.none.pread.bytes", buf, 4);
+    unsigned char pat[16]; for (int i = 0; i < 16; i++) pat[i] = (unsigned char)(0xa0 + i);
+    dec("mem.edge.pwrite", call(18, fd, (i64)pat, 16, MD + 0xff8, 0));
+    dec("mem.none.pwrite", call(18, fd, (i64)pat, 4, MB, 0));
+    dec("mem.ro.pwrite", call(18, fd, (i64)pat, 4, MC + 8, 0));
+    dec("mem.lseek", call(8, fd, MA + 0xffc, 0, 0, 0));
+    zero(buf, sizeof(buf));
+    dec("mem.lseek.read", call(0, fd, (i64)buf, 8, 0, 0)); bytes("mem.lseek.read.bytes", buf, 8);
+    dec("mem.lseek.pos", call(8, fd, 0, 1, 0, 0));
+    dec("mem.after.edge", ptrace(PEEKDATA, MD + 0xff8, (u64)&w)); hex("mem.after.edge.value", w);
+    dec("mem.after.none", ptrace(PEEKDATA, MB, (u64)&w)); hex("mem.after.none.value", w);
+    dec("mem.after.ro", ptrace(PEEKDATA, MC + 8, (u64)&w)); hex("mem.after.ro.value", w);
+    i64 self = memfd("", 1);
+    dec("mem.self.open", self < 0 ? self : 0);
+    if (self >= 0) {
+        static volatile u64 mine = 0x0102030405060708UL;
+        u64 got = 0;
+        dec("mem.self.pread", call(17, self, (i64)&got, 8, (u64)&mine, 0)); hex("mem.self.value", got);
+        u64 put = 0x1111111122222222UL;
+        dec("mem.self.pwrite", call(18, self, (i64)&put, 8, (u64)&mine, 0)); hex("mem.self.after", mine);
+        call(3, self, 0, 0, 0, 0);
+    }
+    resume(CONT, "mem.second.status");
+    getregs(); hex("mem.target.saw", r.r15);
+    ok("mem.exec.cont", ptrace(CONT, 0, 0));
+    int st = wait_child("mem.exec.status");
+    if ((st & 255) != 127) fail("mem.exec.status");
+    zero(buf, sizeof(buf));
+    dec("mem.held.pread", call(17, fd, (i64)buf, 8, MA, 0));
+    dec("mem.held.pwrite", call(18, fd, (i64)pat, 4, MA, 0));
+    call(3, fd, 0, 0, 0, 0);
+    char name[80]; path(name, child, 0, "/mem");
+    i64 fd2 = call(2, (i64)name, 2, 0, 0, 0);
+    dec("mem.reopen", fd2 < 0 ? fd2 : 0);
+    if (fd2 >= 0) { dec("mem.reopen.pread", call(17, fd2, (i64)buf, 8, MA, 0)); call(3, fd2, 0, 0, 0, 0); }
+    ok("mem.final.cont", ptrace(CONT, 0, 0));
+    int fin = wait_child("mem.final.status");
+    if (child) fail("mem.final.stopped");
+    if (fin != (23 << 8)) fail("mem.final.code");
+}
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
     if (argc == 2 && equal(argv[1], "orphan-target")) done(23);
@@ -1013,8 +1138,9 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     if (argc == 2 && equal(argv[1], "role-clone")) role_clone();
     self_path = argv[0];
     if (argc == 2 && equal(argv[1], "role-group")) role_group();
+    if (argc == 2 && equal(argv[1], "role-mem")) role_mem();
     if (argc == 2 && equal(argv[1], "role-exec-thread")) role_exec_thread();
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
     if (controlled_mode(mode)) {
         controlled(mode); text("trace.complete\n"); done(0);
@@ -1029,7 +1155,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         tracer_exit(argv[0], equal(mode, "exitkill"));
         text("trace.complete\n"); done(0);
     }
-    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall") && !event_mode(mode) && !fault_mode(mode) && !lifecycle_mode(mode)) done(2);
+    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall") && !event_mode(mode) && !fault_mode(mode) && !lifecycle_mode(mode) && !memory_mode(mode)) done(2);
     if (equal(mode, "notify") || equal(mode, "notify-syscall")) {
         struct { u64 handler, flags, restorer, mask; } action = {
             (u64)child_notice, 0x14000004, (u64)trace_restorer, 0
@@ -1047,6 +1173,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
             av[0] = argv[0];
             av[1] = equal(mode, "fork-event") ? "role-fork" : equal(mode, "clone-event") ? "role-clone" : "role-vfork";
         }
+        if (memory_mode(mode)) { av[0] = argv[0]; av[1] = "role-mem"; }
         if (lifecycle_mode(mode)) { av[0] = argv[0]; av[1] = equal(mode, "exec-thread") ? "role-exec-thread" : "role-group"; }
         ret = call(59, (i64)av[0], (i64)av, (i64)ev, 0, 0);
         dec("execve", ret); done(111);
@@ -1065,6 +1192,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     } else if (fault_mode(mode)) fault_rows(mode);
     else if (event_mode(mode)) child_events(mode);
     else if (lifecycle_mode(mode)) lifecycle(mode);
+    else if (memory_mode(mode)) memory_rows();
     else if (equal(mode, "errors")) errors();
     else if (equal(mode, "syscall") || equal(mode, "notify-syscall")) syscall_rows(equal(mode, "notify-syscall"));
     else if (equal(mode, "stops")) stops();

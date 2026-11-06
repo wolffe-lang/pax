@@ -11,10 +11,19 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory')
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'memory': (
+        ('mem-cross-page', 'mem.cross.peek=', 'mem.cross.poke.high.value='),
+        ('mem-prot-none', 'mem.none.peek=', 'mem.none.after.value='),
+        ('mem-private-file', 'mem.ro.peek=', 'mem.private.other.value='),
+        ('mem-shared', 'mem.shared.peek=', 'mem.noncanonical.peek='),
+        ('mem-proc-mem', 'mem.open=', 'mem.after.ro.value='),
+        ('mem-proc-self', 'mem.self.open=', 'mem.self.after='),
+        ('mem-held-exec', 'mem.held.pread=', 'mem.reopen.pread='),
+    ),
     'blocked-read': (
         ('read-attach-regs', 'blocked.attach.status=', 'blocked.attach.after-syscall='),
         ('read-restarted', 'blocked.entry.status=', 'blocked.end.status='),
