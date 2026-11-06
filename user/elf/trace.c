@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -876,6 +876,100 @@ static void thread_tracers(const char *mode) {
     dec("tthread.echild", call(61, -1, (i64)&s, WALL | 1, 0, 0));
     call(3, fds[1], 0, 0, 0, 0);
 }
+/* px102 blocked-call witnesses (notes/px102/restart.txt): the target
+ * blocks, the tracer attaches; the registers shown and how the call ends. */
+static volatile u64 blocked_word;
+static volatile int blocked_seen;
+static void blocked_handler(int sig, struct siginfo *si, void *ctx) { (void)sig; (void)si; (void)ctx; blocked_seen = 1; }
+static int blocked_mode(const char *mode) {
+    return equal(mode, "blocked-read") || equal(mode, "blocked-sleep") || equal(mode, "blocked-futex") ||
+           equal(mode, "blocked-restart") || equal(mode, "blocked-eintr");
+}
+static __attribute__((noreturn)) void blocked_target(const char *mode, int rfd, int ready) {
+    if (equal(mode, "blocked-restart") || equal(mode, "blocked-eintr")) {
+        struct { u64 handler, flags, restorer, mask; } action = {
+            (u64)blocked_handler, equal(mode, "blocked-restart") ? 0x14000004 : 0x04000004, (u64)trace_restorer, 0
+        };
+        if (call(13, 10, (i64)&action, 0, 8, 0)) done(111);
+    }
+    char c = 'R';
+    if (call(1, ready, (i64)&c, 1, 0, 0) != 1) done(111);
+    if (equal(mode, "blocked-sleep")) {
+        struct { i64 sec, nsec; } t = { 0, 600000000 };
+        i64 rc = call(35, (i64)&t, 0, 0, 0, 0);
+        done(rc == 0 ? 37 : rc == -4 ? 36 : 112);
+    }
+    if (equal(mode, "blocked-futex")) {
+        i64 rc = call(202, (i64)&blocked_word, 0, 0, 0, 0);
+        done(rc == -11 ? 37 : rc == -4 ? 36 : rc == 0 ? 35 : 112);
+    }
+    char b; i64 n = call(0, rfd, (i64)&b, 1, 0, 0);
+    done(n == 1 ? (blocked_seen ? 37 : 38) : n == -4 ? (blocked_seen ? 36 : 35) : 112);
+}
+/* Let the target reach its blocking call: yield, then (Linux) wait for
+ * /proc/<pid>/stat's state S. Nothing here is printed. */
+static void settle(void) {
+    for (int k = 0; k < 200; k++) yield();
+    char name[80], buf[512]; path(name, child, 0, "/stat");
+    for (int k = 0; k < 20000; k++) {
+        i64 fd = call(2, (i64)name, 0, 0, 0, 0);
+        if (fd < 0) return;
+        i64 n = call(0, fd, (i64)buf, sizeof(buf) - 1, 0, 0);
+        call(3, fd, 0, 0, 0, 0);
+        if (n <= 0) return;
+        buf[n] = 0;
+        i64 i = n - 1; while (i > 0 && buf[i] != ')') i--;
+        if (i + 2 < n && buf[i + 2] != 'R') return;
+        yield();
+    }
+}
+static void blocked_regs(const char *name) {
+    getregs();
+    text(name); text(".rax="); if ((i64)r.rax < 0) { text("-"); number(0UL - r.rax, 10); } else number(r.rax, 10); text("\n");
+    text(name); text(".orig_rax="); if ((i64)r.orig_rax < 0) { text("-"); number(0UL - r.orig_rax, 10); } else number(r.orig_rax, 10); text("\n");
+    u64 before = 0;
+    ok("peek.return", ptrace(PEEKTEXT, r.rip - 2, (u64)&before));
+    text(name); text(".after-syscall="); number((before & 0xffff) == 0x050f, 10); text("\n");
+}
+static void blocked(const char *mode) {
+    int data[2], ready[2];
+    ok("blocked.pipe", call(293, (i64)data, 0, 0, 0, 0));
+    ok("blocked.ready-pipe", call(293, (i64)ready, 0, 0, 0, 0));
+    child = call(57, 0, 0, 0, 0, 0);
+    if (child < 0) fail("blocked.fork");
+    if (child == 0) { call(3, data[1], 0, 0, 0, 0); call(3, ready[0], 0, 0, 0, 0); blocked_target(mode, data[0], ready[1]); }
+    call(3, data[0], 0, 0, 0, 0); call(3, ready[1], 0, 0, 0, 0);
+    char c = 0;
+    if (call(0, ready[0], (i64)&c, 1, 0, 0) != 1 || c != 'R') fail("blocked.ready");
+    settle();
+    ok("blocked.attach", ptrace(ATTACH, 0, 0));
+    stopped("blocked.attach.status");
+    blocked_regs("blocked.attach");
+    char go = 'G';
+    if (equal(mode, "blocked-restart") || equal(mode, "blocked-eintr")) {
+        ok("blocked.resume", ptrace(CONT, 0, 0));
+        settle();
+        ok("blocked.signal", call(62, child, 10, 0, 0, 0));
+        stopped("blocked.signal.status");
+        blocked_regs("blocked.signal");
+        ok("blocked.deliver", ptrace(CONT, 0, 10));
+        if (equal(mode, "blocked-restart")) { settle(); dec("blocked.write", call(1, data[1], (i64)&go, 1, 0, 0)); }
+    } else {
+        if (equal(mode, "blocked-futex")) ok("blocked.futex.change", ptrace(POKEDATA, (u64)&blocked_word, 1));
+        ok("blocked.options", ptrace(SETOPTIONS, 0, 1));
+        resume(24, "blocked.entry.status");
+        blocked_regs("blocked.entry");
+        if (equal(mode, "blocked-read")) dec("blocked.write", call(1, data[1], (i64)&go, 1, 0, 0));
+        resume(24, "blocked.exit.status");
+        blocked_regs("blocked.exit");
+        ok("blocked.continue", ptrace(CONT, 0, 0));
+    }
+    wait_child("blocked.end.status");
+    if (child) fail("blocked.still-stopped");
+    int s = 0;
+    dec("blocked.echild", call(61, -1, (i64)&s, WALL | 1, 0, 0));
+    call(3, data[1], 0, 0, 0, 0); call(3, ready[0], 0, 0, 0, 0);
+}
 static void tracer_exit(const char *self, int exitkill) {
     if (call(39, 0, 0, 0, 0, 0) != 1) {
         text("FAIL tracer-exit-needs-pid1\n"); done(2);
@@ -920,10 +1014,13 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     self_path = argv[0];
     if (argc == 2 && equal(argv[1], "role-group")) role_group();
     if (argc == 2 && equal(argv[1], "role-exec-thread")) role_exec_thread();
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
     if (controlled_mode(mode)) {
         controlled(mode); text("trace.complete\n"); done(0);
+    }
+    if (blocked_mode(mode)) {
+        blocked(mode); text("trace.complete\n"); done(0);
     }
     if (thread_tracer_mode(mode)) {
         thread_tracers(mode); text("trace.complete\n"); done(0);
