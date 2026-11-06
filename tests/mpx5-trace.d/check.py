@@ -21,7 +21,7 @@ ROWS = {
         ('conc-kill-one', 'conc.a.kill=', 'conc.b.reaped='),
     ),
     'tasks': (
-        ('tasks-thread-mem', 'tasks.tid.distinct=', 'tasks.thread.after.value='),
+        ('tasks-thread-mem', 'tasks.tid.distinct=', 'tasks.thread.after='),
         ('tasks-leader-bogus', 'tasks.leader.open=', 'tasks.tidpath.open='),
         ('tasks-thread-status', 'tasks.thread.tracer=', 'tasks.leader.tracer-is-parent='),
         ('tasks-ptrace-thread', 'tasks.thread.ptrace-peek=', 'tasks.held.pread='),
