@@ -11,13 +11,21 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory', 'perm', 'conc', 'tasks', 'regs2', 'regs2-limits', 'blocked-timed-futex', 'blocked-timed-recv', 'blocked-sigsuspend', 'blocked-order', 'consume-stop', 'exit-untraced', 'tgkill-ended', 'tgkill-traced')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory', 'perm', 'conc', 'tasks', 'regs2', 'regs2-limits', 'blocked-timed-futex', 'blocked-timed-recv', 'blocked-sigsuspend', 'blocked-order', 'consume-stop', 'exit-untraced', 'tgkill-ended', 'tgkill-traced', 'group-stop', 'attach-stopped')
 # regs2-limits: what Linux accepts and PAX refuses by design (R-px102-3);
 # its reference is PAX's own transcript, regs2-limits.linux keeps Linux's.
 REFERENCE = {'regs2-limits': 'regs2-limits.pax'}
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'group-stop': (
+        ('group-stop-event', 'js.stop.status=', 'js.stop.code='),
+        ('ptrace-listen', 'js.listen=', 'js.cont.code='),
+    ),
+    'attach-stopped': (
+        ('attach-stopped-attach', 'js.attach=', 'js.attach.code='),
+        ('attach-stopped-resume', 'js.attach.cont=', 'js.cont.status='),
+    ),
     'tgkill-ended': (('tgkill-untraced-ended', 'tgkill.untraced.tgkill=', 'tgkill.untraced.tkill='),),
     'tgkill-traced': (('tgkill-traced-ended', 'tgkill.traced.tgkill=', 'tgkill.traced.tkill='),),
     'consume-stop': (

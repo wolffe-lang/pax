@@ -1,0 +1,16 @@
+px102 — group-stop with PTRACE_LISTEN, and ATTACH to a job-control-stopped
+target: the prediction, written 2026-11-06 before either witness has run.
+Sources: ptrace(2) ("Group-stop", PTRACE_LISTEN, PTRACE_SEIZE, "Attaching and
+detaching"), signal(7), wait(2).
+
+group-stop: SEIZE a child that is not traced otherwise, SIGSTOP it.
+Predicted: a PTRACE_EVENT_STOP report with SIGSTOP (status 0x80137f), siginfo
+SIGSTOP; PTRACE_LISTEN keeps it stopped and wait sees nothing; SIGCONT then
+brings a PTRACE_EVENT_STOP report with SIGTRAP (0x80057f); CONT resumes it
+and the child exits 37.
+attach-stopped: SIGSTOP a child, wait(WUNTRACED) sees 0x137f; ATTACH it.
+Predicted: the attach is accepted and the tracer is told of a stop (0x137f)
+though the task never ran; resuming it leaves it job-control-stopped until
+SIGCONT; nothing else is predicted: the transcript is the reference.
+PAX: PTRACE_LISTEN is "refused by name" (-EIO, a log line); no row separates
+a group-stop from a signal-delivery stop. Expected RED at both modes.

@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits|blocked-timed-futex|blocked-timed-recv|blocked-sigsuspend|blocked-order|consume-stop|exit-untraced|tgkill-ended|tgkill-traced]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits|blocked-timed-futex|blocked-timed-recv|blocked-sigsuspend|blocked-order|consume-stop|exit-untraced|tgkill-ended|tgkill-traced|group-stop|attach-stopped]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -1639,6 +1639,75 @@ static void tgkill_rows(const char *mode, const char *self) {
     int st = wait_child("tgkill.traced.status");
     dec("tgkill.traced.tgkill", ((st >> 8) - 40) & 3); dec("tgkill.traced.tkill", (((st >> 8) - 40) >> 2) & 3);
 }
+
+/* px102 job-control witnesses (notes/px102/jobstop.txt): a group-stop seen
+ * by a SEIZEd tracee and PTRACE_LISTEN; ATTACH to a stopped process.
+ * Waits are bounded polls (WNOHANG), so a missing report prints "none". */
+static int jobstop_mode(const char *mode) { return equal(mode, "group-stop") || equal(mode, "attach-stopped"); }
+static i64 wait_poll(const char *name, int *status) {
+    i64 got = 0;
+    *status = 0;
+    for (int k = 0; k < 3000; k++) {
+        got = call(61, child, (i64)status, WALL | 1, 0, 0);
+        if (got != 0 && got != -4) break;
+        yield();
+    }
+    if (got == child) { hex(name, (unsigned)*status); } else { text(name); text("=none\n"); }
+    return got;
+}
+static void jobstop_rows(const char *mode) {
+    int go[2];
+    ok("js.pipe", call(293, (i64)go, 0, 0, 0, 0));
+    child = call(57, 0, 0, 0, 0, 0);
+    if (child < 0) fail("js.fork");
+    if (child == 0) {
+        call(3, go[1], 0, 0, 0, 0);
+        char b; i64 n = call(0, go[0], (i64)&b, 1, 0, 0);
+        done(n == 1 ? 37 : 38);
+    }
+    call(3, go[0], 0, 0, 0, 0);
+    for (int k = 0; k < 200; k++) yield();
+    int st = 0;
+    if (equal(mode, "group-stop")) {
+        ok("js.seize", ptrace(0x4206, 0, 0));
+        ok("js.stop", call(62, child, 19, 0, 0, 0));
+        wait_poll("js.stop.status", &st);
+        struct siginfo si; zero(&si, sizeof(si));
+        dec("js.stop.getsiginfo", ptrace(GETSIGINFO, 0, (u64)&si));
+        dec("js.stop.signo", si.signo); dec("js.stop.code", si.code);
+        dec("js.listen", ptrace(0x4208, 0, 0));
+        wait_poll("js.listen.wait", &st);
+        ok("js.cont.signal", call(62, child, 18, 0, 0, 0));
+        wait_poll("js.cont.status", &st);
+        zero(&si, sizeof(si));
+        dec("js.cont.getsiginfo", ptrace(GETSIGINFO, 0, (u64)&si));
+        dec("js.cont.signo", si.signo); dec("js.cont.code", si.code);
+        dec("js.resume", ptrace(CONT, 0, 0));
+        wait_poll("js.resume.wait", &st);
+    } else {
+        ok("js.stop", call(62, child, 19, 0, 0, 0));
+        i64 got;
+        do { got = call(61, child, (i64)&st, 2 | WALL, 0, 0); } while (got == -4);
+        hex("js.untraced.status", (unsigned)st);
+        dec("js.attach", ptrace(ATTACH, 0, 0));
+        wait_poll("js.attach.status", &st);
+        struct siginfo si; zero(&si, sizeof(si));
+        dec("js.attach.getsiginfo", ptrace(GETSIGINFO, 0, (u64)&si));
+        dec("js.attach.signo", si.signo); dec("js.attach.code", si.code);
+        dec("js.attach.cont", ptrace(CONT, 0, 0));
+        wait_poll("js.attach.cont.wait", &st);
+        ok("js.cont.signal", call(62, child, 18, 0, 0, 0));
+        wait_poll("js.cont.status", &st);
+        dec("js.detach", ptrace(17, 0, 0));
+    }
+    char go_ = 'G';
+    call(1, go[1], (i64)&go_, 1, 0, 0);
+    call(3, go[1], 0, 0, 0, 0);
+    wait_poll("js.exit.status", &st);
+    if (child) { ptrace(SETOPTIONS, 0, 0); call(62, child, 9, 0, 0, 0); wait_poll("js.kill.status", &st); }
+    dec("js.echild", call(61, -1, (i64)&st, WALL | 1, 0, 0));
+    child = 0;
+}
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
     if (argc == 2 && equal(argv[1], "orphan-target")) done(23);
@@ -1656,6 +1725,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     if (controlled_mode(mode)) {
         controlled(mode); text("trace.complete\n"); done(0);
     }
+    if (jobstop_mode(mode)) { jobstop_rows(mode); text("trace.complete\n"); done(0); }
     if (tgkill_mode(mode)) { tgkill_rows(mode, argv[0]); text("trace.complete\n"); done(0); }
     if (conc_mode(mode)) { conc_rows(argv[1]); text("trace.complete\n"); done(0); }
     if (perm_mode(mode)) { perm_rows(); text("trace.complete\n"); done(0); }
