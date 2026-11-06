@@ -1050,6 +1050,7 @@ const PR_GET_DUMPABLE: u64 = 3 // uapi linux/prctl.h
 const PR_SET_DUMPABLE: u64 = 4 // px50
 const PR_GET_KEEPCAPS: u64 = 7
 const PR_GET_SECUREBITS: u64 = 27
+const PR_SET_NO_NEW_PRIVS: u64 = 38 // px103
 const PR_GET_NO_NEW_PRIVS: u64 = 39
 // px24: readiness, and the rest wolf's hosted runtime and lobo ask.
 const SYS_POLL: u64 = 7
@@ -1205,6 +1206,7 @@ fn arch_prctl(code: u64, addr: u64) -> u64 {
 /// the thread sets one) and, px26, PR_SET_NAME (the thread's own, cut
 /// at 15 bytes); px39: PR_GET_DUMPABLE, PR_GET_KEEPCAPS,
 /// PR_GET_SECUREBITS and PR_GET_NO_NEW_PRIVS; px50: PR_SET_DUMPABLE;
+/// px103: PR_SET_NO_NEW_PRIVS;
 /// anything else -EINVAL.
 fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     let pml4 = paging.live()
@@ -1255,7 +1257,16 @@ fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     }
     if option == PR_GET_NO_NEW_PRIVS {
         // Linux wants every other argument 0 here, and only here (measured).
-        return if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 { NEG_EINVAL } else { 0 }
+        return if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 { NEG_EINVAL } else { cred.no_new_privs(area()) }
+    }
+    // px103: PR_SET_NO_NEW_PRIVS(2const): only 1, and every other argument
+    // 0 (measured on Linux 7.2.4); once set it is set for good.
+    if option == PR_SET_NO_NEW_PRIVS {
+        if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+            return NEG_EINVAL
+        }
+        cred.set_no_new_privs(area())
+        return 0
     }
     if option != PR_GET_NAME {
         return NEG_EINVAL

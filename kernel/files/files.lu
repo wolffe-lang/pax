@@ -5202,6 +5202,15 @@ pub fn exec_inode(o: u64) -> u64 {
     rf(ofw(o - 1, O_NODE))
 }
 
+/// px103: what `execve` reads of the file `o` (an `exec_open` open file)
+/// for the set-ID rules: its mode (type and permission bits), its owner
+/// and group, and whether its directory is on a `nosuid` mount.
+pub fn exec_setid(o: u64) -> (u64, u64, u64, bool) {
+    let i = rf(ofw(o - 1, O_NODE))
+    let di = ofw(o - 1, O_DIRI)
+    (tree.mode(i), tree.uid(i), tree.gid(i), di != 0 && tree.nosuid_dir(di - 1))
+}
+
 /// px56: whether descriptor `fd` is open with close-on-exec (execveat's
 /// script by a descriptor the new program will not have).
 pub fn is_cloexec(a: u64, fd: u64) -> bool {

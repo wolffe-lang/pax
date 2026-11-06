@@ -633,7 +633,7 @@ fn map_stack(pml4: u64) -> bool {
 /// caller's for `execve`; 0 for a program the kernel starts, which is
 /// root: every id 0, AT_SECURE 0).
 /// Returns the stack pointer (argc's address).
-fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev: u64, envc: u64, eb: u64, pa: u64, pl: u64, ca: u64) -> u64 {
+fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev: u64, envc: u64, eb: u64, pa: u64, pl: u64, ca: u64, eu: u64, eg: u64) -> u64 {
     // The strings' block, under eight zero bytes at the top: argv's,
     // envp's, the path's.
     let sbytes = ab + eb + pl + 1
@@ -671,11 +671,11 @@ fn build_stack(pml4: u64, file: u64, entry: u64, av: u64, argc: u64, ab: u64, ev
     // ids, which `execve` keeps, and whether they call for care.
     let known = ca != 0
     a = put_aux(pml4, a, AT_UID, if known { cred.uid(ca, cred.REAL) } else { 0 })
-    a = put_aux(pml4, a, AT_EUID, if known { cred.uid(ca, cred.EFFECTIVE) } else { 0 })
+    a = put_aux(pml4, a, AT_EUID, if known { eu } else { 0 })
     a = put_aux(pml4, a, AT_GID, if known { cred.gid(ca, cred.REAL) } else { 0 })
-    a = put_aux(pml4, a, AT_EGID, if known { cred.gid(ca, cred.EFFECTIVE) } else { 0 })
+    a = put_aux(pml4, a, AT_EGID, if known { eg } else { 0 })
     a = put_aux(pml4, a, AT_CLKTCK, 100)
-    a = put_aux(pml4, a, AT_SECURE, if known { cred.at_secure(ca) } else { 0 })
+    a = put_aux(pml4, a, AT_SECURE, if known { cred.at_secure(ca, eu, eg) } else { 0 })
     a = put_aux(pml4, a, AT_RANDOM, rnd)
     a = put_aux(pml4, a, AT_EXECFN, path_at)
     a = put_aux(pml4, a, AT_NULL, 0)
@@ -814,7 +814,7 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
     let av = argbuf()
     let (argc, ab) = stage_words(av, aa, al)
     let (envc, eb) = stage_words(av + ab, ea, el)
-    let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl, 0)
+    let sp = build_stack(pml4, file, entry, av, argc, ab, av + ab, envc, eb, pa, pl, 0, 0, 0)
     let (w0, w1, nl) = comm_of(pa, pl)
     let id = sched.create_process(body, sched.ELF_PROG - 1, pml4, entry, sp, 0, nl)
     sched.set_xname_of(id, w0, w1) // px56: the name is the record's own words
@@ -1281,7 +1281,13 @@ fn run_file(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> 
         files.exec_drop(o)
         return NEG_ENOMEM
     }
-    let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, pl, a)
+    // px103: the file's set-ID bits (execve(2)): the effective ids the
+    // new program will have, read from the FINAL file (a script's own
+    // bits were passed over with the script), AT_SECURE and AT_EUID
+    // from them, the point of no return below applies them.
+    let (smode, suid, sgid, nosuid) = files.exec_setid(o)
+    let (eu, eg) = cred.exec_ids(a, smode, suid, sgid, nosuid)
+    let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, pl, a, eu, eg)
     let (w0, w1, nl) = if itself { files.exe_name(o) } else { comm_of(pa, pl) }
     // The point of no return. px26: every other thread of the process
     // ends first, and the caller is its leader from here (the area is
@@ -1297,7 +1303,7 @@ fn run_file(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> 
     sched.trace_exec_tid() // px102: GETEVENTMSG's former thread id at PTRACE_EVENT_EXEC
     sched.exec_alone()
     let na = area()
-    cred.exec(na) // px39: the saved and file-system ids become the effective ids; nothing is raised
+    cred.exec(na, eu, eg) // px39: the saved and file-system ids become the effective ids; px103: raised by the file's set-ID bits
     files.exec_close(na)
     reset_handlers(na)
     set_args(na, ae, ee - ae, pl)

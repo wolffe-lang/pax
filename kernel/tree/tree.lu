@@ -2546,6 +2546,42 @@ pub fn mount_of_root(i: u64) -> u64 {
     if m == MOUNTS { NONE } else { m }
 }
 
+/// px103: whether directory `d` is on a mount made `nosuid` (the set-ID
+/// bits of a file there are not honoured by `execve`): a volume's, by
+/// the mount that holds the volume; the memory's, by the first mount
+/// root met going up (the root mount of a memory tree has none).
+pub fn nosuid_dir(d: u64) -> bool {
+    if st(S_VOLF) == 0 {
+        return false
+    }
+    if on_volume(d) {
+        let v = store(d) - 1
+        var k: u64 = 0
+        while k < MOUNTS {
+            if mw(k, M_POINT) != 0 && mw(k, M_VOL) == v {
+                return mw(k, M_HOW) & MH_NOSUID != 0
+            }
+            k += 1
+        }
+        return false
+    }
+    var x = d
+    var n: u64 = 0
+    while n < 4096 {
+        let m = mount_of_root(x)
+        if m != NONE {
+            return mw(m, M_HOW) & MH_NOSUID != 0
+        }
+        let p = parent(x)
+        if p == x {
+            return false
+        }
+        x = p
+        n += 1
+    }
+    false
+}
+
 fn free_mount() -> u64 {
     var k: u64 = 0
     while k < MOUNTS {
