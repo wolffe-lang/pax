@@ -42,11 +42,11 @@ the file (both kept, px89's first).
 |---|---|---|---:|---|---|
 | boreutils | `0f7a57b6` | `ff5396ad` | 7 | wolf 0.2.36 / lupin 0.1.58 / std `78b9d3cb` | source archive `30d5ccc0…`, twice |
 | lope | `e6f623c7` | `d65bb03c` | 7 | the same | |
-| lobo | `49ed870e` | `64e7339d` | 25 | the same | wolf 0.2.36's archive `d383c74c…`, from the release API twice |
+| lobo | `49ed870e` | `39788b86` | 82 | the same | wolf 0.2.36's archive `d383c74c…`, from the release API twice (`64e7339d` at the first read, 25) |
 | scent | `81d761d6` | `eb888dfc` | 35 | the same | source archive `c6c0daeb…`, twice |
 | aspen | `3692cf5d` | `096245c8` | 37 | the same | |
 | den | `13bc2caa` | `584b18a3` | 139 | the same (unchanged) | |
-| yew | `0ccb2c67` | `1218169e` | 213 | the same | source archive `fdf3cb07…`, twice |
+| yew | `0ccb2c67` | `2eb9cb9b` | 243 | the same | source archive `049c6f36…`, twice (`1218169e` and `fdf3cb07…` at the first read, 213) |
 | lupin | v0.1.58 `6240efe5` | v0.1.59 `668fb752` | 38 | Rust 1.97.1 | musl archive `29ee2c30…` (the API twice, two downloads); binary `9de724f5…` (two extractions): ET_EXEC, no PT_INTERP, no PT_DYNAMIC; `lupin 0.1.59 (wolf-interp, reference interpreter at pin b16353e)` |
 | wolf-std | `78b9d3cb` | `3111d39f` | 78 | wolf 0.2.36 / lupin 0.1.58 | |
 
@@ -61,12 +61,17 @@ Left where they were:
   R-px97-1.
 - **The games' catalog** keeps its pins: R-px97-5.
 
-Moved since the read (2026-11-04), for the next pass:
-- **den**'s trunk is `ef0bb0ca` (57 commits). It now draws history decorations at a terminal, which
-  `tests/mpx5-den.d/rows.py`'s terminal row holds as `den: not yet implemented: history decorations`; that row moves
-  first, red at `584b18a3`, as scent's A2 did.
-- **lobo**'s trunk is `6b8b9ee7` (9 commits: tests and notes, nothing under `src/`).
-- **wolf** 0.2.37 was released on 2026-11-05. Every head above still pins 0.2.36.
+Read again on 2026-11-06, before the final gauntlet: the trunks that moved after the first final head (`c2728e2f`)
+were taken. **yew** moved to `2eb9cb9b` (yw14's sweep, #110; its census snapshot first, C5 red, then the pin) and
+**lobo** to `39788b86` (ws76's admission counters, the per-drive TIME_WAIT settling; the same wolf archive).
+
+Moved before that, for the next pass:
+- **den**'s trunk is `ef0bb0ca` (57 commits). It now draws history decorations at a terminal and writes config, which
+  `tests/mpx5-den.d/rows.py`'s terminal and config rows hold as refusals; those rows move first, red at `584b18a3`,
+  as scent's A2 did. (A local image with den ten commits past that trunk, built on 2026-11-06, passed mpx5-den --iso with them moved.)
+- **wolf-std**'s trunk is `d4a4d4ca` (sc79's public-PKI TLS); it moves after lupin, with the next lupin.
+- **wolf** 0.2.37 was released on 2026-11-05. Every head above still pins 0.2.36; its build progress, a line it
+  erases at a terminal, needs `tests/distribution-boot` to read an erased line as the terminal shows it first.
 
 ## 3. Prediction, scored
 
