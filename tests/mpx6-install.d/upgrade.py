@@ -511,6 +511,10 @@ def tree(name, row):
             rows[rel] = ('d', p.stat().st_mode & 0o7777, '-')
         else:
             rows[rel] = ('f', p.stat().st_mode & 0o7777, sha(p))
+    # rdump (run as the host's user) drops the set-ID bits: those paths' modes are debugfs's stat (px103).
+    for rel, (k, mode, _d) in C.get('new_rows', {}).items():
+        if k == 'f' and mode & 0o7000 and rel in rows:
+            rows[rel] = (rows[rel][0], debugfs_stat(img, rel, row)[1], rows[rel][2])
     img.unlink()
     (work/f'{name}-tree.json').write_text(json.dumps(rows, indent=1, sort_keys=True) + '\n')
     return rows, fsck.returncode, (fsck.stdout + fsck.stderr).decode(errors='replace')
