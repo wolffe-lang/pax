@@ -509,7 +509,10 @@ fn request_signal(s: u64, sig: u64) {
 /// Saved syscall continuations keep orig_rax and their completion state.
 fn async_snapshot(f: u64) {
     let v = word(f, 15)
-    if v != 0x100 && v != 0x102 && v != 0x103 {
+    let s0 = sched.self_slot()
+    // 0x101: resumed from a syscall-entry stop (IRETQ); a call in flight, not an async frame.
+    let in_flight = v == 0x101 && trace_state.phase(s0) == 2
+    if v != 0x100 && v != 0x102 && v != 0x103 && !in_flight {
         let s = sched.self_slot()
         sched.trace_set_orig(s, 0xffffffffffffffff)
         trace_state.set_phase(s, 0)
