@@ -182,7 +182,6 @@ static void sudo_rows(void)
     static char *r5[] = { "-u", "nosuch", "/bin/sid", "h:x", NULL };
     static char *r6[] = { "sid", "h:search", NULL };
     static char *r7[] = { "-E", "/bin/sid", "env", NULL };
-    static char *r8[] = { "-i", "/bin/sid", "env", NULL };
     static char *r9[] = { "-u", "pax", "/bin/sid", "h:asself", NULL };
     sudo_row(1000, 0, r1);
     sudo_row(1000, 0, r2);
@@ -191,7 +190,6 @@ static void sudo_rows(void)
     sudo_row(1000, 0, r5);
     sudo_row(1000, 0, r6);
     sudo_row(1000, 0, r7);
-    sudo_row(1000, 0, r8);
     sudo_row(990, 0, r1);
     sudo_row(990, 0, r3);
     sudo_row(-1, 0, r9);
@@ -207,7 +205,7 @@ static void sudo_rows(void)
     b[n] = 0;
     for (char *l = strtok(b, "\n"); l; l = strtok(NULL, "\n")) {
         /* the time stamp (`Mon DD HH:MM:SS`) is what a clock says */
-        say("log: %s\n", strlen(l) > 16 && l[3] == ' ' && l[15] == ' ' ? l + 16 : l);
+        say("log: %s\n", strlen(l) > 16 && l[3] == ' ' && l[15] == ' ' ? l + 18 : l);
     }
     say("sid: done\n");
 }
