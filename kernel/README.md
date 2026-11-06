@@ -659,9 +659,9 @@ the id calls to a real Linux's recorded answers, as root and as a user.
   whole for a fork's and a vfork's child, keeps it over `execve` and
   gives a process's threads their leader's. So ids are a process's on
   PAX; Linux keeps them per thread (a named difference).
-- What is not there: any permission check; set-ID execution (ruling
-  R5); `capget` and `capset` (-ENOSYS, R9); more than 32 groups;
-  `PR_SET_DUMPABLE`; per-thread ids.
+- What is not there: any permission check; `capget` and `capset`
+  (-ENOSYS, R9); more than 32 groups; per-thread ids. (Set-ID execution
+  and `PR_SET_NO_NEW_PRIVS` came with px103, below; `PR_SET_DUMPABLE` with px50.)
 
 ## Who a file belongs to (px42)
 
@@ -858,13 +858,40 @@ by its `#!` line or, with none, by the shell that gets ENOEXEC.
 | `sched/` | two words of the record hold a program's name when no archive memory does (`xname0`, `xname1`; `name` 0): copied by a fork and a thread; `set_self_xname`, `set_xname_of` |
 | `user/` | execveat dispatched |
 
-- What is not there: set-ID execution (ruling #75 R5: the bits are
-  kept and not honoured, so `mpx5-users`' setid and sig rows that ask
-  them stay PAX's); `execve` of `/proc/self/exe` and of `/proc/<pid>/exe`
+- What is not there: `execve` of `/proc/self/exe` and of `/proc/<pid>/exe`
   (not links PAX's walk follows; not asked); a mount's `noexec`; whether
   a program run without read permission is dumpable, argv NULL and
   E2BIG past the vectors' 64 KiB (PAX's bound is its staging buffer's):
   not asked of Linux.
+
+## Set-ID execution (px103)
+
+The first half of the users campaign's U8 (`notes/px103-set-id-and-sudo.md`;
+ruling #75 R5, which kept the bits and honoured none, is amended): `execve`
+honours the set-user-ID and set-group-ID bits as `execve(2)` and
+`credentials(7)` say, and `PR_SET_NO_NEW_PRIVS` is real. Held to a real
+Linux 7.2.4's recording of `user/elf/sid.c` (49 lines, every one), and to
+`mpx5-users`' setid, ident and sig rows, which now include the honoured
+ones. **Enforced for honest programs; not a boundary against an attacker**
+(ruling R6): the kernel has never been fuzzed or audited and loads programs
+at fixed addresses.
+
+| module or file | what |
+|---|---|
+| `cred/` | `exec_ids(a, mode, owner, group, ignored)`: the effective user id becomes the file's owner when it is set-user-ID, the effective group id its group when it is set-group-ID **and group-executable** (a set-group-ID file with no group execute is no set-ID file), unless the program is on a `nosuid` mount (`ignored`) or the caller has no_new_privs; `at_secure(a, eu, eg)` asks the ids the program will have; `exec(a, eu, eg)` applies them, then makes the saved and file-system ids the effective ones, and leaves the process not dumpable when an id changed (or already differed). `no_new_privs` is bit 1 of the dumpable word, so a fork's child and an `execve` keep it, and nothing clears it |
+| `process/` | `run_file` reads the mode, owner and group of the FINAL file (a script's own bits were passed over with the script; its interpreter's are honoured) after the loader accepts it, passes the ids to `build_stack` (AT_EUID, AT_EGID, AT_SECURE) and to `cred.exec` at the point of no return |
+| `files/` | `exec_setid(o)`: the mode, owner, group and whether the directory the file was found in is on a `nosuid` mount |
+| `tree/` | `nosuid_dir(d)`: a volume's directory by the mount that holds the volume, the memory's by the first mount root met going up |
+| `user/` | `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`; any other argument is -EINVAL; `PR_GET_NO_NEW_PRIVS` answers it |
+| `procfs/` | `NoNewPrivs` in `status` |
+
+- A traced exec of a set-ID file (the tracer without privilege leaves the
+  bits ignored) and an owner's `ptrace` attach to a process that ran one
+  (refused: not dumpable) wait for px102's ptrace: `tests/mpx5-sudo` says
+  `SKIP` by name until the base carries it. `cred.exec_ids`' `ignored` is
+  where the first plugs in.
+- Capabilities are not modelled: root is the effective user id 0 (R9), so a
+  process whose saved set-user-ID is 0 reads Linux's full masks in `status`.
 
 ## yew on PAX: the census (px58)
 
