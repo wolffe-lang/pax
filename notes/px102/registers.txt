@@ -33,3 +33,28 @@ and flags with every settable bit but NT), judged against Linux;
 `regs2-limits` holds the refused ones. Its Linux transcript is kept
 (regs2-limits.linux) and PAX's own reference is regs2-limits.pax, so a
 refusal is a named row rather than a silent -EIO.
+
+Measured (Linux transcripts regs2.linux and regs2-limits.linux from
+3 byte-identical takes per uid, uid 0 equal to uid 1000):
+  END linux-regs2-0, linux-regs2-1000, linux-regs2-limits-0,
+  linux-regs2-limits-1000, all exit=0 takes=3.
+Red on 9dcfbf0f's kernel (unchanged since 536c082e for these paths):
+  FAIL T-regs2-poke-words, T-regs2-setregs, T-regs2-transcript: every
+  POKEUSER of a general word answered -EIO (5) and left the register.
+Changes: POKEUSER of the 27 general words; one validation (word_ok) and
+one store (store_word) shared with SETREGS; a canonical kernel-half rip
+or rsp is accepted as Linux accepts it; flags keep the bits user code
+may set (0x50dd5 plus the fixed 0x202).
+Green: T-regs2-* all PASS, root, BIOS/KVM (END root-regs2 exit=0).
+regs2-limits has PAX's own reference (regs2-limits.pax); the lines that
+differ from Linux are these, nothing else:
+  non-canonical rip and rsp (POKEUSER and SETREGS): -EIO; Linux accepts
+    and faults the process when it resumes;
+  flags with NT: PAX keeps 0x50fd7 where Linux keeps 0x54fd7 (NT, bit 14,
+    is withheld: an IRETQ with NT set is not something this layer tests);
+  gs_base and non-zero ds/es/fs/gs selectors: -EIO; Linux accepts the
+    ones its GDT has (0x2b, 0x33).
+R-px102-3 (recommendation: accept): these four limits are PAX's to keep
+until the kernel has GS-base switching, user data segments and a
+resume-time #GP path. sniff needs none of them (gdb restores registers it
+read, and the debugger never sets a non-canonical rip).
