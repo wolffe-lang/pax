@@ -1,0 +1,21 @@
+px102 — permission rows: the prediction, written 2026-11-06 at 1ff27985,
+before the witness has run anywhere. Sources: ptrace(2) ("Ptrace access
+mode checking", PTRACE_ATTACH EPERM), proc_pid_mem(5), proc(5),
+prctl(2) PR_SET_DUMPABLE, setresuid(2). No kernel source.
+
+Mode `perm` (root-started, so run as uid 0 only): forks four targets as
+root, each of which changes its credentials and then blocks, drops the
+tracer to uid/gid 1000, forks a control, and asks of each target:
+ATTACH, open of /proc/<pid>/mem read-write, open of environ.
+  control               plain child of the uid-1000 tracer
+  uid-changed           uid 2000, gid 1000
+  same-uid-after-setuid uid/gid 1000, set by a root process; no prctl
+  dumpable-reset        as above, then PR_SET_DUMPABLE 1
+  dumpable-off          as above, then PR_SET_DUMPABLE 0
+Prediction: control succeeds in all three. uid-changed is refused (-1 on
+ATTACH, -13 on opens). A same-uid target whose credentials changed
+through setresuid is not dumpable (fs.suid_dumpable), so refused, unless
+the prctl set it dumpable again; PR_SET_DUMPABLE 0 refuses again.
+The tracee being a descendant keeps Yama out of the comparison.
+PAX has a credential record and a dumpable word; whether ATTACH consults
+it is unknown, the transcript is the reference.
