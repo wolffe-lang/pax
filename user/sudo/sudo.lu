@@ -70,6 +70,7 @@ struct Entry {
     groups: List[str],
     has_groups: bool,
     nopasswd: bool,
+    explicit: bool,
     setenv: bool,
     cmd: str,
     file: str,
@@ -93,6 +94,7 @@ struct Args {
     login: bool,
     shell: bool,
     list: bool,
+    longer: bool,
     validate: bool,
     kill: bool,
     preserve: bool,
@@ -276,7 +278,7 @@ fn main() -> int {
 
     // The policy: the last rule that names the caller, the target and the command.
     var hit = false
-    var best = Entry { who: "", users: List[str](), groups: List[str](), has_groups: false, nopasswd: false, setenv: false, cmd: "", file: "", line: 0 }
+    var best = Entry { who: "", users: List[str](), groups: List[str](), has_groups: false, nopasswd: false, explicit: false, setenv: false, cmd: "", file: "", line: 0 }
     var named = false
     for e in pol.entries {
         if !who_matches(e.who, me, my_groups, group_text) {
@@ -401,7 +403,7 @@ fn main() -> int {
 /// `VAR=value` words, `--`.
 fn parse(args: List[str]) -> Args {
     var a = Args {
-        user: "", group: "", other: "", login: false, shell: false, list: false, validate: false, kill: false,
+        user: "", group: "", other: "", login: false, shell: false, list: false, longer: false, validate: false, kill: false,
         preserve: false, help: false, version: false, assigns: List[str](), words: List[str](), error: "", refused: "",
     }
     var i = 0
@@ -498,6 +500,7 @@ fn parse(args: List[str]) -> Args {
                 } else if c == "s" {
                     a.shell = true
                 } else if c == "l" {
+                    a.longer = a.list
                     a.list = true
                 } else if c == "v" {
                     a.validate = true
@@ -847,6 +850,7 @@ fn parse_spec(line: str, file: str, lineno: int, mut pol: Policy) {
     var groups_ = List[str]()
     var has_groups = false
     var nopass = false
+    var explicit = false
     var setenv = false
     var first = true
     for item0 in split_top(tail, ",") {
@@ -893,10 +897,12 @@ fn parse_spec(line: str, file: str, lineno: int, mut pol: Policy) {
             again = false
             if item.starts_with("NOPASSWD:") {
                 nopass = true
+                explicit = true
                 item = trim(item[9..])
                 again = true
             } else if item.starts_with("PASSWD:") {
                 nopass = false
+                explicit = true
                 item = trim(item[7..])
                 again = true
             } else if item.starts_with("SETENV:") {
@@ -938,7 +944,7 @@ fn parse_spec(line: str, file: str, lineno: int, mut pol: Policy) {
                 return
             }
         }
-        (mut pol.entries).push(Entry { who: who, users: copy users_, groups: copy groups_, has_groups: has_groups, nopasswd: nopass, setenv: setenv, cmd: item, file: file, line: lineno })
+        (mut pol.entries).push(Entry { who: who, users: copy users_, groups: copy groups_, has_groups: has_groups, nopasswd: nopass, explicit: explicit, setenv: setenv, cmd: item, file: file, line: lineno })
         first = false
     }
     if first {
@@ -1104,18 +1110,24 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
     print("    {def}")
     print("")
     print("User {who.name} may run the following commands on {host}:")
+    if a.longer {
+        long_list(mine)
+        return 0
+    }
     var i = 0
     var cur = ""
     var cur_run = ""
-    var cur_pw = true
+    var cur_pw = false
+    var cur_spec = ""
     var have = false
     while i < mine.len {
         let e = copy mine[i]
         i += 1
-        let ra = runas_text_list(e)
+        let ra = runas_text(e)
+        let spec = "{e.file}:{e.line}"
         let pwtag = if e.nopasswd then "NOPASSWD: " else "PASSWD: "
-        if have && ra == cur_run {
-            // same run-as list: more commands on the line, a tag when it changes
+        if have && ra == cur_run && spec == cur_spec {
+            // more commands on the line, with a tag when it changes
             if e.nopasswd != cur_pw {
                 cur = "{cur}, {pwtag}{e.cmd}"
             } else {
@@ -1127,12 +1139,10 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
                 print(cur)
             }
             cur_run = ra
+            cur_spec = spec
             cur_pw = e.nopasswd
             have = true
-            cur = "    {ra} {if e.nopasswd then pwtag else ""}{e.cmd}"
-            if !e.nopasswd {
-                cur = "    {ra} PASSWD: {e.cmd}"
-            }
+            cur = "    {ra} {if e.explicit then pwtag else ""}{e.cmd}"
         }
     }
     if have {
@@ -1141,9 +1151,37 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
     0
 }
 
-/// The run-as list as `-l` prints it: `(ALL : ALL)`, `(root)`, `(lobo : pack)`.
-fn runas_text_list(e: Entry) -> str {
-    runas_text(e)
+/// `sudo -ll`: one block for each run of commands that share a spec, a
+/// run-as list and a password tag.
+fn long_list(mine: List[Entry]) {
+    var i = 0
+    var cur_run = ""
+    var cur_spec = ""
+    var cur_pw = false
+    var open = false
+    while i < mine.len {
+        let e = copy mine[i]
+        i += 1
+        let ra = runas_text(e)
+        let spec = "{e.file}:{e.line}"
+        if open && ra == cur_run && spec == cur_spec && e.nopasswd == cur_pw {
+            print("\t{e.cmd}")
+            continue
+        }
+        print("")
+        print("Sudoers entry: {e.file}")
+        print("    RunAsUsers: {str_join(", ", e.users)}")
+        if e.has_groups {
+            print("    RunAsGroups: {str_join(", ", e.groups)}")
+        }
+        print("    Options: {if e.nopasswd then "!authenticate" else "authenticate"}")
+        print("    Commands:")
+        print("\t{e.cmd}")
+        cur_run = ra
+        cur_spec = spec
+        cur_pw = e.nopasswd
+        open = true
+    }
 }
 
 // ---- the command and the environment ------------------------------------
@@ -1436,10 +1474,10 @@ fn pad(n: int, blank: bool) -> str {
 fn trim(s: str) -> str {
     var b = 0
     var e = s.len
-    while b < e && (s[b..b + 1] == " " || s[b..b + 1] == "\t") {
+    while b < e && (s[b..b + 1] == " " || s[b..b + 1] == "\t" || s[b..b + 1] == "\n") {
         b += 1
     }
-    while e > b && (s[e - 1..e] == " " || s[e - 1..e] == "\t" || s[e - 1..e] == "\r") {
+    while e > b && (s[e - 1..e] == " " || s[e - 1..e] == "\t" || s[e - 1..e] == "\r" || s[e - 1..e] == "\n") {
         e -= 1
     }
     s[b..e]
