@@ -188,6 +188,23 @@ where sudo shows `sh -c 'exit 7'`; measured on Ubuntu's sudo (a blank puts
 single quotes round the word, `\` and `'` are backslash-escaped, a control
 byte is `#0` and its octal value), fixed in `user/sudo` (`log_word`).
 
+**Records (hasu block A, KVM, the stick built at `04b219ac`; the later
+commits touch tests and docs only).** Red: `END red-build exit=1` with
+`image-sudo-missing` (tests-only head `8d402cc5`); the session's first run
+(`13b6f41f`) was red by name on the log's quoting of `sh -c 'exit 7'`.
+Green at `04b219ac`: `END sbuild exit=0`, `END sstick exit=0`,
+`END legs-x exit=0` (U9, U13f, U14, U10, U11, U12), `END legs-d exit=0`
+(U1d-U6d, U13d), `END legs-a exit=0` (U1-U4, U6, U7, U13a; U5 is not run:
+the wolf pin is past 0.2.35 and the row's twin is not built here),
+`END sudo-compare exit=0` (the typed session held to Ubuntu's, run by
+`tests/mpx6-install.d/sudo-compare.py`); at `afab5d4a`: `END mpx5-sudo
+exit=0`, `END mpx5-users exit=0` (`mpx5-accounts` exits 2 there at A0,
+`tools/linux-tree`: no container engine inside the build container, not
+this lane's change). Two harness flakes met and handled: a keystroke the USB
+keyboard dropped under host load (`su wof`), now caught by `vcommand`, which
+reads the typed line back before Enter, with keys 50 ms apart; and
+`rdump` dropping set-ID bits (above). The two ptrace rows still SKIP by name.
+
 **On the live image** `/etc/passwd` and `/etc/group` list root, `pax` (1000) and
 `lobo` (990), as the base archive has them; the live login accepts root. So
 `sudo` works there for root (`root ALL=(ALL:ALL) ALL`), and `su pax` (root
