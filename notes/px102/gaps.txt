@@ -34,3 +34,29 @@ takes per mode as uid 0 and as uid 1000, uid 0 equal to uid 1000):
   (the timed futex at -516 with orig_rax 202, the timed receive at -4,
   sigsuspend at -514, and the order: a syscall-exit stop, then the
   signal-delivery stop, both with rax -512).
+
+Amendment: the timed-receive witness first used a socketpair and failed
+on PAX before any trace (SO_RCVTIMEO is kept on UDP sockets only); it is
+a UDP socket bound on the loopback now, and its Linux reference was
+re-measured (END linux-blocked-timed-recv-0/-1000 exit=0 takes=3; same
+-4 at the attach stop).
+
+Red on 2a051ff6 (the kernel of 536c082e plus witnesses), by name:
+  blocked-timed-futex  FAIL T-timed-futex-attach-regs   (rax -110)
+  blocked-timed-recv   target died before the attach (the socketpair)
+                       and then FAIL T-timed-recv-attach-regs
+  blocked-sigsuspend   FAIL T-sigsuspend-attach-regs, T-sigsuspend-signal
+                       (rax -4 where Linux shows -514)
+  blocked-order        FAIL T-syscall-exit-before-signal (signal stop
+                       first, orig_rax -1; no exit stop)
+Changes: a wait cut by a stop shows -516 for a timed futex wait (its
+restart_syscall sleeps out the rest and answers -ETIMEDOUT; named limit:
+a wake in that remaining time is not seen), -4 for a timed receive (rip
+past the SYSCALL, no restart), and -514 for sigsuspend (the wait stays
+recorded, so the handler's frame still restores the mask and with no
+handler the thread waits again). A PTRACE_SYSCALL tracee cut out of a call
+stops at the call's exit first, then at the signal (the signal waits in
+the side table, five words); a frame resumed from the entry stop is a call
+in flight, not an asynchronous frame, so orig_rax and the phase survive.
+Green: all four modes, root, BIOS/KVM (END root-blocked-timed-futex,
+-timed-recv, -sigsuspend, -order exit=0).
