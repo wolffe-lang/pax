@@ -11,10 +11,17 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory', 'perm')
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'perm': (
+        ('perm-control', 'perm.control.attach=', 'perm.control.environ='),
+        ('perm-uid-changed', 'perm.uid-changed.attach=', 'perm.uid-changed.environ='),
+        ('perm-same-uid-after-setuid', 'perm.same-uid-after-setuid.attach=', 'perm.same-uid-after-setuid.environ='),
+        ('perm-dumpable-reset', 'perm.dumpable-reset.attach=', 'perm.dumpable-reset.environ='),
+        ('perm-dumpable-off', 'perm.dumpable-off.attach=', 'perm.dumpable-off.environ='),
+    ),
     'memory': (
         ('mem-cross-page', 'mem.cross.peek=', 'mem.cross.poke.high.value='),
         ('mem-prot-none', 'mem.none.peek=', 'mem.none.after.value='),

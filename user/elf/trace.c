@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -1130,6 +1130,82 @@ static void memory_rows(void) {
     if (child) fail("mem.final.stopped");
     if (fin != (23 << 8)) fail("mem.final.code");
 }
+
+/* px102 permission witnesses (notes/px102/perm.txt). Root-started: it
+ * forks targets with different credentials and dumpable states, drops to
+ * uid/gid 1000, then asks to attach and to open the target's mem and
+ * environ. Every target is a descendant (no Yama scope in play). */
+static int perm_mode(const char *mode) { return equal(mode, "perm"); }
+static __attribute__((noreturn)) void perm_child(int variant, int ready, int go) {
+    if (variant == 1) { call(119, 1000, 1000, 1000, 0, 0); call(117, 2000, 2000, 2000, 0, 0); }
+    if (variant >= 2 && variant <= 4) { call(119, 1000, 1000, 1000, 0, 0); call(117, 1000, 1000, 1000, 0, 0); }
+    if (variant == 3) call(157, 4, 1, 0, 0, 0);   /* PR_SET_DUMPABLE 1 */
+    if (variant == 4) call(157, 4, 0, 0, 0, 0);   /* PR_SET_DUMPABLE 0 */
+    char c = 'r'; unsigned char sink;
+    call(1, ready, (i64)&c, 1, 0, 0);
+    call(0, go, (i64)&sink, 1, 0, 0);
+    done(0);
+}
+static void perm_target(const char *label, i64 pid) {
+    char name[96]; u64 k = 0;
+    while (label[k]) { name[k] = label[k]; k++; }
+    const char *tails[3] = { ".attach", ".mem-rw", ".environ" };
+    child = pid;
+    char leaf[24];
+    const char *files[3] = { "", "/mem", "/environ" };
+    for (int t = 0; t < 3; t++) {
+        u64 n = k; for (const char *s = tails[t]; *s; s++) name[n++] = *s; name[n] = 0;
+        if (t == 0) {
+            i64 ret = ptrace(ATTACH, 0, 0);
+            dec(name, ret);
+            if (ret == 0) {
+                int st = 0; i64 got;
+                do { got = call(61, pid, (i64)&st, WALL, 0, 0); } while (got == -4);
+                hex("perm.attach.status", (unsigned)st);
+                zero(&r, sizeof(r));
+                dec("perm.attach.getregs", ptrace(GETREGS, 0, (u64)&r));
+                dec("perm.attach.detach", ptrace(17, 0, 0));
+            }
+        } else {
+            path(leaf, pid, 0, files[t]);
+            i64 fd = call(2, (i64)leaf, t == 1 ? 2 : 0, 0, 0, 0);
+            dec(name, fd < 0 ? fd : 0);
+            if (fd >= 0) call(3, fd, 0, 0, 0, 0);
+        }
+    }
+    child = 0;
+}
+static void perm_rows(void) {
+    dec("perm.root", call(102, 0, 0, 0, 0, 0) == 0);
+    if (call(102, 0, 0, 0, 0, 0) != 0) fail("perm.root");
+    i64 pids[5]; int ready[2], go[2];
+    ok("perm.pipe.ready", call(22, (i64)ready, 0, 0, 0, 0));
+    ok("perm.pipe.go", call(22, (i64)go, 0, 0, 0, 0));
+    for (int v = 1; v <= 4; v++) {
+        pids[v] = call(57, 0, 0, 0, 0, 0);
+        if (pids[v] == 0) { call(3, go[1], 0, 0, 0, 0); call(3, ready[0], 0, 0, 0, 0); perm_child(v, ready[1], go[0]); }
+        if (pids[v] < 0) fail("perm.fork");
+        char c = 0; i64 n;
+        do { n = call(0, ready[0], (i64)&c, 1, 0, 0); } while (n == -4);
+        if (n != 1) fail("perm.ready");
+    }
+    ok("perm.drop.gid", call(119, 1000, 1000, 1000, 0, 0));
+    ok("perm.drop.uid", call(117, 1000, 1000, 1000, 0, 0));
+    pids[0] = call(57, 0, 0, 0, 0, 0);
+    if (pids[0] == 0) { call(3, go[1], 0, 0, 0, 0); call(3, ready[0], 0, 0, 0, 0); perm_child(0, ready[1], go[0]); }
+    { char c = 0; i64 n; do { n = call(0, ready[0], (i64)&c, 1, 0, 0); } while (n == -4); if (n != 1) fail("perm.ready"); }
+    perm_target("perm.control", pids[0]);
+    perm_target("perm.uid-changed", pids[1]);
+    perm_target("perm.same-uid-after-setuid", pids[2]);
+    perm_target("perm.dumpable-reset", pids[3]);
+    perm_target("perm.dumpable-off", pids[4]);
+    call(3, go[1], 0, 0, 0, 0);
+    for (int v = 0; v < 5; v++) {
+        int st = 0; i64 got;
+        do { got = call(61, pids[v], (i64)&st, WALL, 0, 0); } while (got == -4);
+        dec("perm.exit.pid", got == pids[v]); hex("perm.exit.status", (unsigned)st);
+    }
+}
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
     if (argc == 2 && equal(argv[1], "orphan-target")) done(23);
@@ -1140,11 +1216,12 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     if (argc == 2 && equal(argv[1], "role-group")) role_group();
     if (argc == 2 && equal(argv[1], "role-mem")) role_mem();
     if (argc == 2 && equal(argv[1], "role-exec-thread")) role_exec_thread();
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
     if (controlled_mode(mode)) {
         controlled(mode); text("trace.complete\n"); done(0);
     }
+    if (perm_mode(mode)) { perm_rows(); text("trace.complete\n"); done(0); }
     if (blocked_mode(mode)) {
         blocked(mode); text("trace.complete\n"); done(0);
     }
