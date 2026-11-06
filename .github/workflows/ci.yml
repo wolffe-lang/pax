@@ -1618,6 +1618,84 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px102: ptrace(2), Linux-compatible. Two no-libc programs (user/elf/trace.c
+  # and tracee.S, tools/mktrace) run forty-odd fixed scripts of tracing
+  # requests as pid 1 on PAX, as root and as 1000:1000, each held to the
+  # transcript Linux printed for the same binaries (tests/mpx5-trace.d);
+  # the Linux side re-run in throwaway containers on the same job. The
+  # build (K0), each transcript and its named rows (K1), the machine (K2).
+  mpx5-trace:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-trace')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          uname -sr
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-trace-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image the Linux side's containers are made from (by digest)
+        run: |
+          docker pull "$PAX_TREE_IMAGE"
+          docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
+        env:
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      - name: every trace mode against Linux, root and a user; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx5-trace $PAX_LEGS
+
+      - name: the same binaries on Linux, each mode in a throwaway container, against the references
+        env:
+          PAX_ENGINE: docker
+          PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+        run: tests/mpx5-trace --only linux
+
+      - name: keep the programs' sums, the transcripts, the serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-trace
+          path: |
+            build/mpx5-trace/probes.txt
+            build/mpx5-trace/linux-*.txt
+            build/mpx5-trace/*/kmain_console.elf
+            build/mpx5-trace-*.session
+            build/mpx5-trace-*.session.txt
+            build/mpx5-trace-*.serial.log
+            build/mpx5-trace-*.norm
+            build/mpx5-trace-*.verdict
+            build/mpx5-trace-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px18: the speaker. pelt as pid 1 runs /bin/play (user/play, wolf),
   # which sounds note files through the console's KIOCSOUND; the kernel
   # drives the 8254's channel 2 and port 0x61 (kernel/speaker). QEMU's
@@ -5253,6 +5331,7 @@ jobs:
       - mpx3-tree
       - mpx3-maps
       - mpx5-forks
+      - mpx5-trace
       - mpx3-speaker
       - mpx3-sound
       - mpx3-orchestra
