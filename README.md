@@ -57,9 +57,18 @@ does; the subset it implements, and what it refuses by name, are in
 Linux's recording and `sudo`'s rows to Ubuntu 24.04's own `sudo`; the rows
 where PAX differs on purpose are named in `notes/px103/ctnamed.txt`.
 
-**Not yet:** the distribution build does not carry `sudo` and the policy
-(that is the next step; an installed system gains them by an upgrade once it
-does). Until then a built image carries them only in `tests/mpx5-sudo`.
+**On an installed system.** The image carries `/bin/sudo` (set-user-ID root,
+mode 4755), `/etc/sudoers` (root's, mode 0440) and `/var/log`. A system
+installed from this image has them. A system installed earlier, such as the
+one on the 860, gains all three by the next upgrade: boot the upgrade entry
+of the new stick, run `pax-install --upgrade`, type the confirmation line it
+prints, and power off. The upgrade writes the three paths and touches nothing
+of yours (your `/etc/passwd`, `/etc/group`, `/home` and `/etc/shrc` stay as
+they are). After it, log in as your own account and run `sudo yew /etc/shrc`
+or `sudo -i`; the policy names uid 1000, which is the installer's account
+whatever it is called, so no edit is needed. The live USB has no accounts of
+its own: there `sudo` works for root only, and uid 1000 has no rule until an
+installed system makes the account.
 
 All of this is **enforced for honest programs; not a boundary against an
 attacker**: the kernel has never been fuzzed or audited and loads programs at
