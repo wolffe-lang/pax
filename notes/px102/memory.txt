@@ -73,3 +73,15 @@ below an unmapped page and then answers -EIO; trace_mem.transfer answers
 -EINVAL for a negative offset before anything else.
 Green: root, BIOS/KVM, all rows and the whole transcript, frames back;
 user (uid 1000) the same: END root-memory exit=0, END user-memory exit=0.
+
+mpx5-users sig (checkpoint4, 877dca46): the readers' mem column. With
+/proc/<pid>/mem present, sig.pax's thirty reader rows changed in that one
+column (-2 to -13 or -5). Held to the Linux recording
+tests/mpx5-users.d/linux/sig.txt, which has the column: 28 of 30 rows equal
+it (-13 where the reader's file-system ids differ from the target's, as
+proc(5) and ptrace(2)'s attach mode say; -5 for root, whose open succeeds and
+whose read at address 0 is EIO). The other two, a uid-1000 reader of a
+uid-1000 process that is not its descendant, are -13 on the recording's Linux
+(Yama ptrace_scope 1) and -5 here: PAX has no Yama, and Linux at scope 0
+answers -5. maps, auxv and io stay -2 (owed to sniff). The base tree passes
+U1 with the old sig.pax; the head with the regenerated one (see its commit).
