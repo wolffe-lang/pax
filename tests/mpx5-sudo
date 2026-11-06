@@ -92,7 +92,9 @@ if [ -z "$images" ]; then
     if [ -n "$bindir" ]; then
         cp "$bindir/sid" "$work/bin/sid" || why+=" no $bindir/sid;"
     else
-        "$PAX_ROOT/tools/mkcred" "$work/bin" > "$work/programs.txt" || why+=" tools/mkcred;"
+        # sid alone, as the other probes are built (the host's cc and its static glibc)
+        cc -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function -Wl,--build-id=none -Wl,-z,noexecstack \
+            -o "$work/bin/sid" "$PAX_ROOT/user/elf/sid.c" || why+=" cc sid.c;"
     fi
     r=$(static_ok "$work/bin/sid") || why+=" $r;"
     say "  program: sid $(sha256_of "$work/bin/sid") $(wc -c < "$work/bin/sid" | tr -d ' ') bytes"

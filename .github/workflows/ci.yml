@@ -2992,6 +2992,67 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px103: set-ID execution and sudo (P5 U8's first half). user/elf/sid.c's
+  # witness against a real Linux's recording; PAX's sudo (user/sudo,
+  # tools/mksudo: wolf 0.2.35 by digest) as pax, lobo and root in an image
+  # of its own; and the same sudo, built for Linux, run through
+  # notes/px103/sudo-ct.sh in a throwaway Ubuntu 24.04 container with no
+  # network, every row held to Ubuntu's recorded output, the differences
+  # by name (notes/px103/ctnamed.txt). The ptrace rows say SKIP by name
+  # until px102 is on the base.
+  mpx5-sudo:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-sudo')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          python3 --version
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-sudo-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: set-ID execution against a real Linux's recording, sudo's rows, sudo against Ubuntu's; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx5-sudo $PAX_LEGS
+
+      - name: keep the sessions and the Linux side
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-sudo
+          path: |
+            build/mpx5-sudo/*.txt
+            build/mpx5-sudo-linux/pax.txt
+            build/mpx5-sudo-*.session
+            build/mpx5-sudo-*.log
+            build/mpx5-sudo-*.norm
+            build/mpx5-sudo-*.verdict
+            build/mpx5-sudo-runs.txt
+
   # px46: the accounts (P5 U6). An image with root, pax and lobo, pelt
   # as pid 1, boreutils' identity tools and PAX's own su (user/su,
   # tools/mksu: wolf 0.2.35 by digest, px65); one typed session against the
@@ -5348,6 +5409,7 @@ jobs:
       - mpx5-users
       - mpx5-users-ahci
       - mpx5-accounts
+      - mpx5-sudo
       - mpx5-jobs
       - mpx5-lope
       - mpx5-pelt
