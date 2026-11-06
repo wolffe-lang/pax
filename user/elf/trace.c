@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits|blocked-timed-futex|blocked-timed-recv|blocked-sigsuspend|blocked-order|consume-stop|exit-untraced]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits|blocked-timed-futex|blocked-timed-recv|blocked-sigsuspend|blocked-order|consume-stop|exit-untraced|tgkill-ended|tgkill-traced]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -1607,6 +1607,38 @@ static void regs2_limits(void) {
     regs2_roundtrip();
     regs2_kill();
 }
+
+/* A thread that has ended and been joined: tgkill and tkill of its tid
+ * (ESRCH on Linux), untraced and inside a traced process. */
+static int tgkill_mode(const char *mode) { return equal(mode, "tgkill-ended") || equal(mode, "tgkill-traced"); }
+static void tgkill_body(void) { }
+static i64 tgkill_probe(void) {
+    spawn(tgkill_body);
+    join();
+    i64 a = call(234, call(39, 0, 0, 0, 0, 0), last_tid, 0, 0, 0);
+    i64 b = call(200, last_tid, 0, 0, 0, 0);
+    return (a == -3 ? 0 : a == 0 ? 1 : 2) | ((b == -3 ? 0 : b == 0 ? 1 : 2) << 2);
+}
+static __attribute__((noreturn)) void role_tgkill(void) { done(40 + (int)tgkill_probe()); }
+static void tgkill_rows(const char *mode, const char *self) {
+    if (equal(mode, "tgkill-ended")) {
+        i64 v = tgkill_probe();
+        dec("tgkill.untraced.tgkill", v & 3); dec("tgkill.untraced.tkill", v >> 2);
+        return;
+    }
+    child = call(57, 0, 0, 0, 0, 0);
+    if (child < 0) fail("tgkill.fork");
+    if (child == 0) {
+        if (call(101, TRACEME, 0, 0, 0, 0)) done(111);
+        char *av[] = { (char *)self, "role-tgkill", 0 }; char *ev[] = { 0 };
+        call(59, (i64)self, (i64)av, (i64)ev, 0, 0);
+        done(111);
+    }
+    stopped("tgkill.initial");
+    ok("tgkill.cont", ptrace(CONT, 0, 0));
+    int st = wait_child("tgkill.traced.status");
+    dec("tgkill.traced.tgkill", ((st >> 8) - 40) & 3); dec("tgkill.traced.tkill", (((st >> 8) - 40) >> 2) & 3);
+}
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
     if (argc == 2 && equal(argv[1], "orphan-target")) done(23);
@@ -1616,6 +1648,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     self_path = argv[0];
     if (argc == 2 && equal(argv[1], "role-group")) role_group();
     if (argc == 2 && equal(argv[1], "role-mem")) role_mem();
+    if (argc == 2 && equal(argv[1], "role-tgkill")) role_tgkill();
     if (argc == 2 && equal(argv[1], "role-tasks")) role_tasks();
     if (argc == 2 && equal(argv[1], "role-exec-thread")) role_exec_thread();
     if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits]\n"); done(2); }
@@ -1623,6 +1656,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     if (controlled_mode(mode)) {
         controlled(mode); text("trace.complete\n"); done(0);
     }
+    if (tgkill_mode(mode)) { tgkill_rows(mode, argv[0]); text("trace.complete\n"); done(0); }
     if (conc_mode(mode)) { conc_rows(argv[1]); text("trace.complete\n"); done(0); }
     if (perm_mode(mode)) { perm_rows(); text("trace.complete\n"); done(0); }
     if (blocked_mode(mode)) {
