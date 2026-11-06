@@ -399,8 +399,9 @@ class Machine:
 
     def vcommand(self, line, row, timeout=300):
         """px103: type the line, read it back from the screen, and only then press Enter: a key the
-        keyboard dropped (seen under host load: 'su wof') fails the row by name before anything runs."""
-        self.since = '$ ' + line
+        keyboard dropped (seen under host load: 'su wof') fails the row by name before anything runs.
+        Its echo is found by the line's own text, as run()'s and command()'s: the prompt may be pelt's friendly one."""
+        self.since = line
         self.type(line)
         time.sleep(.3)
         shown = [l for l in self.unwrapped(self.screen()).split('\n') if l.strip()]
