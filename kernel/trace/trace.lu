@@ -237,6 +237,13 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
         let target = sched.trace_live(tid)
         if target == sched.SLOTS { return ESRCH }
         if sched.trace_tgid(target) == sched.self_pid() || sched.tracer_of(target) != 0 { return EPERM }
+        let leader = sched.proc_slot(sched.trace_tgid(target))
+        if leader != sched.SLOTS && sched.proc_word(leader, 11) == 1 {
+            // R-px102-4: a job-control stop is not reported to a tracer yet.
+            log.put("ptrace: refused attach of a job-control-stopped process")
+            log.end()
+            return EIO
+        }
         if !files.may_trace_mode(sched.proc_area(sched.self_slot()), sched.proc_area(target), true) { return EPERM }
         sched.trace_bind(target, seized, if seized { data } else { 0 })
         if !seized {
