@@ -1544,6 +1544,30 @@ static void regs2_kill(void) {
     ok("regs2.kill", ptrace(KILL, 0, 0));
     if (wait_child("regs2.kill.status") != 9) fail("regs2.kill.status");
 }
+/* A base no paging level accepts: 2^56 is past the 57-bit canonical range
+   (5-level paging) as well as the 48-bit one (4-level), so every Linux
+   refuses it with EIO; 2^48 is canonical under 5-level paging and a CI
+   runner's Linux accepts it (the reference was taken on a 4-level host). */
+#define NONCANON 0x0100000000000000UL
+/* A refused base never reaches the processor. WRMSR of IA32_FS_BASE or
+   IA32_GS_BASE with a non-canonical value is #GP (Intel SDM vol. 3A 5.8.5),
+   so the tracee is resumed after every refusal: if a refused value had been
+   stored, the kernel would fault restoring it. The tracee runs on to its
+   next stop with the bases it had. */
+static void regs2_refused_resume(void) {
+    struct regs w2;
+    w2 = saved; w2.fs_base = NONCANON; dec("regs2.refused.fs_base.high", ptrace(SETREGS, 0, (u64)&w2));
+    w2 = saved; w2.fs_base = 0xffff800000000000UL; dec("regs2.refused.fs_base.kernel", ptrace(SETREGS, 0, (u64)&w2));
+    w2 = saved; w2.gs_base = NONCANON; dec("regs2.refused.gs_base.high", ptrace(SETREGS, 0, (u64)&w2));
+    w2 = saved; w2.gs_base = 0xffff800000000000UL; dec("regs2.refused.gs_base.kernel", ptrace(SETREGS, 0, (u64)&w2));
+    dec("regs2.refused.poke.fs_base", ptrace(POKEUSER, 21 * 8, NONCANON));
+    dec("regs2.refused.poke.gs_base", ptrace(POKEUSER, 22 * 8, 0xffff800000000000UL));
+    getregs();
+    hex("regs2.refused.fs_base.kept", r.fs_base); hex("regs2.refused.gs_base.kept", r.gs_base);
+    resume(CONT, "regs2.refused.resume.status");
+    getregs();
+    hex("regs2.refused.fs_base.after", r.fs_base); hex("regs2.refused.gs_base.after", r.gs_base);
+}
 /* The words PAX can hand back to ring 3 as Linux does. */
 static void regs2_rows(void) {
     regs2_prefix();
@@ -1560,16 +1584,17 @@ static void regs2_rows(void) {
     poke_word("regs2.poke.flags.most", 18 * 8, ~0UL & ~0x4000UL);
     poke_word("regs2.poke.flags.tf", 18 * 8, saved.flags | 0x100);
     poke_word("regs2.poke.rsp.kernel", 19 * 8, 0xffff800000000000UL);
-    poke_word("regs2.poke.fs_base.noncanonical", 21 * 8, 0x0001000000000000UL);
+    poke_word("regs2.poke.fs_base.noncanonical", 21 * 8, NONCANON);
     poke_word("regs2.poke.fs_base.user", 21 * 8, 0x402000);
     struct regs w2;
     w2 = saved; w2.cs = 0x10; set_regs("regs2.set.cs.ring0", &w2);
     w2 = saved; w2.ss = 0; set_regs("regs2.set.ss.zero", &w2);
     w2 = saved; w2.flags = ~0UL & ~0x4000UL; set_regs("regs2.set.flags.most", &w2);
-    w2 = saved; w2.fs_base = 0x0001000000000000UL; set_regs("regs2.set.fs_base.noncanonical", &w2);
+    w2 = saved; w2.fs_base = NONCANON; set_regs("regs2.set.fs_base.noncanonical", &w2);
     w2 = saved; w2.rsp = 0xffff800000000000UL; set_regs("regs2.set.rsp.kernel", &w2);
     w2 = saved; w2.rip = 0xffff800000000000UL; set_regs("regs2.set.rip.kernel", &w2);
     w2 = saved; w2.rdi = 0x1234; w2.orig_rax = 0; set_regs("regs2.set.valid", &w2);
+    regs2_refused_resume();
     regs2_kill();
 }
 /* A debugger restores what it read: a live tracee that set fs_base through

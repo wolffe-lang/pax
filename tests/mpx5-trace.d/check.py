@@ -50,6 +50,7 @@ ROWS = {
         ('regs2-user-area', 'regs2.peek.off=216', 'regs2.peek.off=4096'),
         ('regs2-poke-words', 'regs2.poke.rdi=', 'regs2.poke.fs_base.user='),
         ('regs2-setregs', 'regs2.set.cs.ring0=', 'regs2.set.valid='),
+        ('regs2-refused-resume', 'regs2.refused.fs_base.high=', 'regs2.refused.gs_base.after='),
     ),
     'regs2-limits': (
         ('regs2-limits-poke', 'regs2.poke.rip.noncanonical=', 'regs2.poke.gs.user='),
