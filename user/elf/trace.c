@@ -907,11 +907,13 @@ static __attribute__((noreturn)) void blocked_target(const char *mode, int rfd, 
         done(rc == -110 ? 37 : rc == -4 ? 36 : 112);
     }
     if (equal(mode, "blocked-timed-recv")) {
-        int sv[2];
-        if (call(53, 1, 1, 0, (i64)sv, 0)) done(111);
+        /* A UDP socket on the loopback: PAX keeps SO_RCVTIMEO there. */
+        i64 sock = call(41, 2, 2, 0, 0, 0);
+        unsigned char sa[16] = { 2, 0, 0xb7, 0xa9, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+        if (sock < 0 || call(49, sock, (i64)sa, 16, 0, 0)) done(111);
         struct { i64 sec, usec; } tv = { 0, 300000 };
-        if (call(54, sv[0], 1, 20, (i64)&tv, sizeof(tv))) done(111); /* SOL_SOCKET SO_RCVTIMEO */
-        char b2; i64 rc = call(45, sv[0], (i64)&b2, 1, 0, 0);
+        if (call(54, sock, 1, 20, (i64)&tv, sizeof(tv))) done(111); /* SOL_SOCKET SO_RCVTIMEO */
+        char b2; i64 rc = call(45, sock, (i64)&b2, 1, 0, 0);
         done(rc == -11 ? 37 : rc == -4 ? 36 : 112);
     }
     if (equal(mode, "blocked-sigsuspend")) {

@@ -883,6 +883,7 @@ const SYS_PREAD64: u64 = 17
 const SYS_NANOSLEEP: u64 = 35
 const SYS_RESTART_SYSCALL: u64 = 219 // px102
 const NEG_EINTR: u64 = 0xfffffffffffffffc // -4
+const NEG_ETIMEDOUT: u64 = 0xffffffffffffff92 // -110
 const SYS_UNAME: u64 = 63
 const SYS_GETCWD: u64 = 79
 const SYS_GETTIMEOFDAY: u64 = 96
@@ -1596,6 +1597,12 @@ fn serve(f: u64) -> u64 {
         if wake == 0 {
             put_word(f, W_RAX, NEG_EINTR)
             return f
+        }
+        if rem == 1 {
+            // a futex wait's block (kernel/trace): out its time, then -ETIMEDOUT
+            put_word(f, W_RAX, NEG_ETIMEDOUT)
+            if wake <= timer.ticks() { return f }
+            return sched.sleep_current_rem(f, wake, 0)
         }
         put_word(f, W_RAX, 0)
         if wake <= timer.ticks() { return f }
