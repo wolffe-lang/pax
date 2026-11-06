@@ -1352,7 +1352,7 @@ fn unqueue(s: u64) {
 /// so each is simply dead, its stack reaped later like any other. A
 /// leader already held stays held: the caller decides its slot's fate.
 /// IF clear.
-fn end_others(l: u64, keep: u64) {
+fn end_others(l: u64, keep: u64, status: u64) {
     var t: u64 = FIRST
     while t < SLOTS {
         let st = field(t, offset_of(Thread, state))
@@ -1366,6 +1366,16 @@ fn end_others(l: u64, keep: u64) {
             thread_gone()
             put_field(t, offset_of(Thread, state), DEAD)
             put_field(t, offset_of(Thread, rst), W_NONE)
+            // px102: a traced non-leader reports its own death (ptrace(2):
+            // "every tracee in its thread group reports its death"; at an
+            // exec, "as if they exited via _exit(2) with exit code 0").
+            // The leader's is its process's, reported by process_ends.
+            if t != l && tracer_of(t) != 0 {
+                put_field(t, offset_of(Thread, status), status)
+                trace_state.set_exit_uid(t, real_uid(l))
+                let _traced = trace_death(t)
+            }
+            trace_release_owned(field(t, offset_of(Thread, pid)))
         }
         t += 1
     }
@@ -1462,7 +1472,8 @@ pub fn end_with(_f: u64, st: u64) -> u64 {
     let c = cur()
     let l = field(c, offset_of(Thread, lead))
     speaker.ended(field(l, offset_of(Thread, tgid))) // px18: its tone stops with it
-    end_others(l, c)
+    end_others(l, c, st)
+    trace_release_owned(field(c, offset_of(Thread, pid))) // px102: the caller's own tracees
     let _taken = own_borrowed(l)
     process_ends(l, st)
     if l != c {
@@ -1888,7 +1899,7 @@ pub fn exec_alone() {
     if field(l, offset_of(Thread, threads)) <= 1 && l == c {
         return
     }
-    end_others(l, c)
+    end_others(l, c, 0)
     if l != c {
         let from = own_area(l)
         let to = own_area(c)
@@ -2139,6 +2150,19 @@ pub const W_STOPPED: u64 = 2
 pub const W_CONTINUED: u64 = 4
 pub const W_TRACED: u64 = 8 // px102: reported even without WUNTRACED
 
+/// px102: whether leader slot `l` still has a traced thread's death not
+/// yet collected: wait(2) reports a leader's death after its threads'.
+fn threads_unreported(l: u64) -> bool {
+    if field(l, offset_of(Thread, pid)) != field(l, offset_of(Thread, tgid)) { return false }
+    var t: u64 = FIRST
+    while t < SLOTS {
+        let st = field(t, offset_of(Thread, state))
+        if t != l && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, zombie)) == 1 && (st == ZOMBIE || st == DEAD) { return true }
+        t += 1
+    }
+    false
+}
+
 pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
     reap()
     let me = field(cur(), offset_of(Thread, tgid)) // px26: the caller's process
@@ -2156,7 +2180,8 @@ pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
             // still has a child, but cannot consume its status yet.
             if tr != 0 && !owned { s += 1; continue }
             if st == ZOMBIE {
-                if want & W_EXITED != 0 {
+                // px102: a leader's exit is reported after its threads'.
+                if want & W_EXITED != 0 && !threads_unreported(s) {
                     return (true, s, W_EXITED)
                 }
             } else if running_state(s) {
