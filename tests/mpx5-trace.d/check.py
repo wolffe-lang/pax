@@ -11,10 +11,24 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread')
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'group-exit': (('group-exit', 'group.first.status=', 'group.second.is-leader='),),
+    'group-exit-event': (
+        ('group-exit-event', 'group.event.distinct=', 'group.event.leader.resume='),
+        ('group-exit-order', 'group.first.status=', 'group.second.is-leader='),
+    ),
+    'exec-thread': (
+        ('exec-former-tid', 'exec.event.status=', 'exec.former-is-leader='),
+        ('exec-thread-gone', 'exec.thread.getregs=', 'exec.exit.pid-is-leader='),
+    ),
+    'tracer-thread': (
+        ('tracer-thread', 'tthread.seize=', 'tthread.leader.nohang='),
+        ('tracer-thread-exit', 'tthread.detached=', 'tthread.echild='),
+    ),
+    'traceme-thread': (('traceme-thread', 'mthread.wait.found=', 'mthread.leader.getregs='),),
     'attach': (
         ('attach', 'control.attach=', 'control.attach-again='),
         ('inject-signal', 'control.inject-usr1=', 'control.usr2.status='),
