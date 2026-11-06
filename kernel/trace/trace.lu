@@ -21,6 +21,9 @@ const EFAULT: u64 = 0xfffffffffffffff2
 const EINVAL: u64 = 0xffffffffffffffea
 const TOP: u64 = 0x00007ffffffff000
 const TF: u64 = 0x100
+const ERESTARTSYS: u64 = 0xfffffffffffffe00 // -512
+const ERESTARTNOHAND: u64 = 0xfffffffffffffdfe // -514
+const ERESTART_RESTARTBLOCK: u64 = 0xfffffffffffffdfc // -516
 
 fn refused(req: u64) -> u64 {
     log.put("ptrace: refused request ")
@@ -349,6 +352,7 @@ fn event_stop(f: u64, event: u64, message: u64) -> u64 {
 
 pub fn signal_stop(f: u64, sig: u64, code: u64, from: u64, status: u64, info: u64) -> u64 {
     async_snapshot(f)
+    blocked_view(f)
     let s = sched.self_slot()
     trace_state.set_control(s, trace_state.control(s) & !(trace_state.FAULT | trace_state.INTERRUPT))
     trace_state.set_signal_info(s, info)
@@ -468,6 +472,7 @@ pub fn interrupt_stop(f: u64) -> u64 {
     let s = sched.self_slot()
     if sched.tracer_of(s) == 0 || trace_state.control(s) & trace_state.INTERRUPT == 0 || sched.kill_pending() { return 0 }
     async_snapshot(f)
+    blocked_view(f)
     event_stop(f, 128, 0)
 }
 
@@ -485,4 +490,38 @@ pub fn fault_stop(f: u64, sig: u64, code: u64, addr: u64, vector: u64, error: u6
     trace_state.set_fault_error(s, error)
     put_word(f, 19, word(f, 19) & !TF)
     sched.trace_stop(f, sig, code, addr)
+}
+
+
+/// A tracing stop out of a waiting system call shows Linux's registers
+/// (ptrace(2), measured): rip past the SYSCALL, rax a -ERESTART* code,
+/// orig_rax the call. -512 for a rewound read/write/wait and an untimed
+/// futex wait, -516 for a relative sleep (restart_syscall finishes it),
+/// -514 for an absolute clock_nanosleep. kernel/signal settles the code
+/// when the tracee resumes; other waits keep PAX's own settling.
+fn blocked_view(f: u64) {
+    let s = sched.self_slot()
+    trace_state.set_restart(s, 0)
+    let (w, arg) = sched.self_wait_peek()
+    if w == sched.W_REWOUND {
+        put_word(f, 17, word(f, 17) + 2)
+        put_word(f, 14, ERESTARTSYS)
+    } else if w == sched.W_FUTEX {
+        put_word(f, 14, ERESTARTSYS)
+    } else if w == sched.W_SLEEP {
+        if sched.trace_orig(s) == 230 && word(f, 10) & 1 != 0 {
+            put_word(f, 14, ERESTARTNOHAND) // TIMER_ABSTIME: run again as it was
+        } else {
+            put_word(f, 14, ERESTART_RESTARTBLOCK)
+            trace_state.set_restart_wake(s, sched.self_wake())
+            trace_state.set_restart_arg(s, arg)
+        }
+    } else {
+        return
+    }
+    let _taken = sched.self_wait()
+    trace_state.set_restart(s, word(f, 14))
+    // Its restart is a new call to a tracer: a fresh syscall-entry stop.
+    trace_state.set_phase(s, 0)
+    trace_state.set_finish_pending(s, 0)
 }

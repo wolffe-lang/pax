@@ -34,6 +34,9 @@ struct TraceState {
     fault_error: u64,
     exec_tid: u64,
     parent_tid: u64,
+    restart: u64,
+    restart_wake: u64,
+    restart_arg: u64,
 }
 
 /// Called before the first thread or side-table write. Capacities are
@@ -150,3 +153,13 @@ pub fn set_exec_tid(s: u64, v: u64) { put(s, offset_of(TraceState, exec_tid), v)
 
 pub fn parent_tid(s: u64) -> u64 { get(s, offset_of(TraceState, parent_tid)) }
 pub fn set_parent_tid(s: u64, v: u64) { put(s, offset_of(TraceState, parent_tid), v) }
+
+/// A tracing stop taken out of a waiting call: the -ERESTART* code its
+/// rax shows (0: none), and for a relative sleep its end tick and where
+/// the time left goes (restart_syscall's restart block).
+pub fn restart(s: u64) -> u64 { get(s, offset_of(TraceState, restart)) }
+pub fn set_restart(s: u64, v: u64) { put(s, offset_of(TraceState, restart), v) }
+pub fn restart_wake(s: u64) -> u64 { get(s, offset_of(TraceState, restart_wake)) }
+pub fn set_restart_wake(s: u64, v: u64) { put(s, offset_of(TraceState, restart_wake), v) }
+pub fn restart_arg(s: u64) -> u64 { get(s, offset_of(TraceState, restart_arg)) }
+pub fn set_restart_arg(s: u64, v: u64) { put(s, offset_of(TraceState, restart_arg), v) }

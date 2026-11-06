@@ -637,6 +637,7 @@ fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, uid: u64, stat
 /// the call again, or its -EINTR. `restart`: the action has SA_RESTART.
 fn settle_wait(f: u64, restart: bool) {
     files.fifo_abandon() // px62: a FIFO's waiting open gives its count back (run again, it counts afresh)
+    if restart_handler(f, restart) { return }
     let (w, arg) = sched.self_wait()
     if w == sched.W_NONE || w == sched.W_SUSPEND {
         return // px48: rt_sigsuspend's -EINTR is in the frame already
@@ -993,11 +994,11 @@ pub fn on_return(f: u64) -> u64 {
                 guard += 1
                 continue
             }
-            return g
+            return restart_fixup(g)
         }
         let (sig, info) = sched.take_signal()
         if sig == 0 {
-            return g
+            return restart_fixup(g)
         }
         if sig != SIGKILL && sched.tracer_of(sched.self_slot()) != 0 {
             let (code, pid, uid, status) = origin(info)
@@ -1138,4 +1139,52 @@ fn inject(f: u64, sig: u64) -> u64 {
         return die(f, SIGSEGV, ", no room for injected fault frame")
     }
     f
+}
+
+
+const ERESTARTSYS: u64 = 0xfffffffffffffe00 // -512
+const ERESTART_RESTARTBLOCK: u64 = 0xfffffffffffffdfc // -516
+
+/// px102: back to ring 3 with no handler run after a tracing stop out of
+/// a waiting call (kernel/trace's blocked_view): a -ERESTART* code still
+/// in rax (the tracer may have changed it) restarts the call, rip back
+/// over the SYSCALL; -516 as restart_syscall (219). signal(7), ptrace(2).
+fn restart_fixup(f: u64) -> u64 {
+    let s = sched.self_slot()
+    let code = trace_state.restart(s)
+    if code == 0 { return f }
+    trace_state.set_restart(s, 0)
+    if word(f, W_RAX) != code { return f }
+    put_word(f, W_RIP, word(f, W_RIP) - 2)
+    put_word(f, W_RAX, if code == ERESTART_RESTARTBLOCK { 219 } else { sched.trace_orig(s) })
+    f
+}
+
+/// px102: a handler runs after such a stop: -512 restarts under
+/// SA_RESTART, else (and -514, -516 always) the call answers -EINTR; a
+/// relative sleep writes its time left. True when a recorded code decided.
+fn restart_handler(f: u64, restart: bool) -> bool {
+    let s = sched.self_slot()
+    let code = trace_state.restart(s)
+    if code == 0 { return false }
+    trace_state.set_restart(s, 0)
+    if word(f, W_RAX) != code { return true }
+    if code == ERESTARTSYS && restart {
+        put_word(f, W_RIP, word(f, W_RIP) - 2)
+        put_word(f, W_RAX, sched.trace_orig(s))
+        return true
+    }
+    put_word(f, W_RAX, NEG_EINTR)
+    let rem = trace_state.restart_arg(s)
+    if code == ERESTART_RESTARTBLOCK && rem != 0 {
+        let pml4 = paging.live()
+        if uaccess.writable(pml4, rem, 16) {
+            let end = trace_state.restart_wake(s)
+            let now = timer.ticks()
+            let left = if end > now { (end - now) * NS_PER_TICK } else { 0 }
+            uaccess.put(pml4, rem, left / NS_PER_SEC, 8)
+            uaccess.put(pml4, rem + 8, left % NS_PER_SEC, 8)
+        }
+    }
+    true
 }

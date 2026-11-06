@@ -881,6 +881,8 @@ const SYS_BRK: u64 = 12
 const SYS_IOCTL: u64 = 16
 const SYS_PREAD64: u64 = 17
 const SYS_NANOSLEEP: u64 = 35
+const SYS_RESTART_SYSCALL: u64 = 219 // px102
+const NEG_EINTR: u64 = 0xfffffffffffffffc // -4
 const SYS_UNAME: u64 = 63
 const SYS_GETCWD: u64 = 79
 const SYS_GETTIMEOFDAY: u64 = 96
@@ -1582,6 +1584,22 @@ fn serve(f: u64) -> u64 {
     }
     if nr == SYS_WAITID {
         return process.waitid(f, nr, a0, a1, a2, a3, a4)
+    }
+    if nr == SYS_RESTART_SYSCALL {
+        // px102: restart_syscall(2) after a tracing stop cut a relative
+        // sleep short (-516): sleep out the rest from the saved block.
+        let s = sched.self_slot()
+        let wake = trace_state.restart_wake(s)
+        let rem = trace_state.restart_arg(s)
+        trace_state.set_restart_wake(s, 0)
+        trace_state.set_restart_arg(s, 0)
+        if wake == 0 {
+            put_word(f, W_RAX, NEG_EINTR)
+            return f
+        }
+        put_word(f, W_RAX, 0)
+        if wake <= timer.ticks() { return f }
+        return sched.sleep_current_rem(f, wake, rem)
     }
     if nr == SYS_CLOCK_NANOSLEEP || nr == SYS_NANOSLEEP {
         var req = a0
