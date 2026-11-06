@@ -35,3 +35,18 @@ private mappings (copy on write) but not through a shared one's file;
 a short pread/pwrite at a mapping end returns the bytes reached and a
 hole at the start gives -EIO (5). PAX's position is unknown; the
 transcript is the reference wherever the two disagree.
+
+Measured on Linux (78369437's binaries; a fresh container per take; 3
+takes as uid 0 and 3 as uid 1000, all byte-identical, uid 0 equal to
+uid 1000): END linux-memory-0 exit=0 takes=3, END linux-memory-1000
+exit=0 takes=3. Reference: tests/mpx5-trace.d/memory.linux.
+Disagreements with the prediction, recorded not hidden:
+  - PEEK and POKE reach a PROT_NONE page (the poke took, mem.none.after
+    0x77), and so does /proc/<pid>/mem, which also pwrites it.
+  - A word straddling the end of a mapping fails -EIO (-5) for PEEK, and
+    for POKE the bytes below the mapping's end are still written before
+    the failure (mem.edge.pread shows 3c then seven zero bytes).
+  - A kernel address and a negative offset through /proc/<pid>/mem are
+    -EINVAL (-22), and PEEK of a kernel or non-canonical address -EIO.
+  - After the target's exec, a descriptor opened before it reads 0 and
+    writes 0; a fresh open reads -EIO at the old address.
