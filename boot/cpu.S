@@ -202,7 +202,10 @@ pax_cpuid7_ebx:
 
         .section .note.GNU-stack, "", @progbits
 
-/* px102: debug registers. Intel SDM vol. 3B 20.2. Caller holds IF clear;
+/* px102: debug registers. Intel SDM vol. 3B 20.2. The moves to and from
+   %drN are written as their encodings (SDM vol. 2B, MOV: 0F 23 /r and
+   0F 21 /r, mod 11) because clef, the assembler in wolf, has no %dr operand;
+   GNU as emits these same bytes. Caller holds IF clear;
    addresses/control have been validated before reaching these routines.
    Disable DR7 before changing addresses, then enable the incoming thread. */
         .text
@@ -210,27 +213,27 @@ pax_cpuid7_ebx:
         .type pax_debug_load, @function
 pax_debug_load:
         xor %eax, %eax
-        mov %rax, %dr7
+        .byte 0x0f, 0x23, 0xf8            /* mov %rax, %dr7 */
         mov 0(%rdi), %rax
-        mov %rax, %dr0
+        .byte 0x0f, 0x23, 0xc0            /* mov %rax, %dr0 */
         mov 8(%rdi), %rax
-        mov %rax, %dr1
+        .byte 0x0f, 0x23, 0xc8            /* mov %rax, %dr1 */
         mov 16(%rdi), %rax
-        mov %rax, %dr2
+        .byte 0x0f, 0x23, 0xd0            /* mov %rax, %dr2 */
         mov 24(%rdi), %rax
-        mov %rax, %dr3
+        .byte 0x0f, 0x23, 0xd8            /* mov %rax, %dr3 */
         mov 48(%rdi), %rax
         mov $0xffff0ff0, %edx
         or %rdx, %rax
-        mov %rax, %dr6
+        .byte 0x0f, 0x23, 0xf0            /* mov %rax, %dr6 */
         mov 56(%rdi), %rax
         and $0xffff03ff, %eax           /* user-visible reserved/GD bits never reach hardware */
-        mov %rax, %dr7
+        .byte 0x0f, 0x23, 0xf8            /* mov %rax, %dr7 */
         ret
         .size pax_debug_load, .-pax_debug_load
         .globl pax_debug_status
         .type pax_debug_status, @function
 pax_debug_status:
-        mov %dr6, %rax
+        .byte 0x0f, 0x21, 0xf0            /* mov %dr6, %rax */
         ret
         .size pax_debug_status, .-pax_debug_status
