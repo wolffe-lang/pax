@@ -6,6 +6,7 @@ from pathlib import Path
 import hashlib
 import sys
 
+ROOT = Path(__file__).resolve().parents[1]
 cpio, kernel, inputs, identity = map(Path, sys.argv[1:5])
 variant = sys.argv[5]
 def check(blob):
@@ -50,6 +51,19 @@ def check(blob):
             assert rows['usr/share/wolf/std/'+source.relative_to(inputs/'base-std/std').as_posix()][1] == source.read_bytes(), 'image-base-std'
     assert rows['bin/lupin'][1] == (inputs/'lupin/lupin').read_bytes(), 'image-published-lupin'
     assert rows['bin/lobo'][0][1] == 0o100755, 'image-lobo'
+    # px103: sudo, set-user-ID root (04755, the mode survives the archive), its policy 0440 root's, and
+    # /var/log for its log; the bytes are tools/mksudo's and user/sudo/sudoers'.
+    sudo = inputs/'sudo'/'sudo'
+    assert 'bin/sudo' in rows, 'image-sudo-missing'
+    assert rows['bin/sudo'][0][1] == 0o104755 and rows['bin/sudo'][0][2:4] == [0, 0], 'image-sudo-mode'
+    assert rows['bin/sudo'][1] == sudo.read_bytes(), 'image-sudo-bytes'
+    assert (sha(rows['bin/sudo'][1]) + ' ' + str(len(rows['bin/sudo'][1]))) == ' '.join(
+        (inputs/'sudo'/'sums.txt').read_text().split()[1:3]), 'image-sudo-sums'
+    assert 'etc/sudoers' in rows, 'image-sudoers-missing'
+    assert rows['etc/sudoers'][0][1] == 0o100440 and rows['etc/sudoers'][0][2:4] == [0, 0], 'image-sudoers-mode'
+    assert rows['etc/sudoers'][1] == (ROOT/'user/sudo/sudoers').read_bytes(), 'image-sudoers-bytes'
+    assert 'var/log' in rows and rows['var/log'][0][1] == 0o40755 and rows['var/log'][0][2:4] == [0, 0], 'image-var-log'
+    assert 'var/log/sudo.log' not in rows, 'image-no-sudo-log'
     # px90: den byte for byte as tools/mkden built it (never stripped), 0755,
     # and git a symbolic link to it, not a copy.
     den = inputs/'den'/'den'
@@ -88,7 +102,7 @@ def check(blob):
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers and /etc/shrc's two variables, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers and /etc/shrc's two variables, sudo and its policy, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0

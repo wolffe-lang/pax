@@ -44,6 +44,13 @@ name:
   U7 cut       on a copy of U2's target: QEMU killed after 100 steps, the
                stick booted again and the upgrade re-run: it completes, and
                U4's file checks hold
+  U13 sudo     (px103) the installed disk booted: /bin/sudo /bin/id typed as
+               uid 1000 (su wolf -c) answers uid=0 and /var/log/sudo.log holds
+               its line; on the disk /bin/sudo is 04755 root:root, /etc/sudoers
+               0440 root:root and the shipped bytes, /var/log a root directory,
+               the log 0600 root:root. U13f after a fresh install from the new
+               stick, U13d after the upgrade of the 8b4e98ae dev install (the
+               860's), U13a after the upgrade of the 9c88ec8a install.
 Every boot: the NVMe, Steam and SanDisk images byte-identical.
 """
 from pathlib import Path
@@ -61,7 +68,8 @@ import time
 
 repo, work, old_src, new_src = map(Path, sys.argv[1:5])
 ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7',
-                                                        'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11', 'U12']
+                                                        'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11', 'U12',
+                                                        'U13a', 'U13d', 'U13f']
 DEV_SRC = Path(os.environ['PAX_UPGRADE_DEV_STICK']) if os.environ.get('PAX_UPGRADE_DEV_STICK') else None
 work.mkdir(parents=True, exist_ok=True)
 SERIAL = os.environ['PAX_UPGRADE_SERIAL']
@@ -756,6 +764,74 @@ def boot_after(name, row, den_before, extra=()):
     return rows
 
 
+# --- px103: sudo on the installed disk -------------------------------------------
+
+def debugfs_stat(img, path, row):
+    """(type, mode, uid, gid) of a path on an ext2 image, by debugfs's stat (a black box)."""
+    out = run(['debugfs', '-R', f'stat {path}', img], row=row).stdout.decode(errors='replace')
+    m = re.search(r'Type: (\w+)\s+Mode:\s+(\d+)\s+Flags:.*?\nGeneration.*?\nUser:\s+(\d+)\s+Group:\s+(\d+)', out, re.S)
+    if not m:
+        fail(row, f'debugfs has no stat for {path}: {out[:300]!r}')
+    return m.group(1), int(m.group(2), 8), int(m.group(3)), int(m.group(4))
+
+
+def debugfs_cat(img, path, row):
+    return run(['debugfs', '-R', f'cat {path}', img], row=row).stdout
+
+
+def sudo_boot(name, row):
+    """The installed disk booted alone and sudo used by uid 1000 (su wolf -c), typed at the root console;
+    then the disk read on the host: sudo's and sudoers' modes and owners, /var/log, the log line."""
+    m = Machine(name, C['sym_new'], None)
+    try:
+        s = login(m, row)
+        need(m.unwrapped(s), f'kernel: {C["new_commit"]}', row)
+        for c, want in [("/bin/su wolf -c '/bin/id' > /root/w0.txt 2>&1; echo w0=$?", 'w0=0'),
+                        ("/bin/su wolf -c '/bin/sudo /bin/id' > /root/w1.txt 2>&1; echo w1=$?", 'w1=0')]:
+            s = m.command(c, row, 300)
+            need(m.unwrapped(s), want, row)
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    img = root_image(work/f'{name}-root.img')
+    try:
+        have = {p: debugfs_stat(img, p, row) for p in ('/bin/sudo', '/etc/sudoers', '/var/log')}
+        for p, want in (('/bin/sudo', ('regular', 0o4755, 0, 0)), ('/etc/sudoers', ('regular', 0o440, 0, 0)),
+                        ('/var/log', ('directory', 0o755, 0, 0))):
+            if have[p] != want:
+                fail(row, f'{p} on the disk is {have[p]} (type, mode, uid, gid); want {want}')
+        if debugfs_cat(img, '/etc/sudoers', row) != (repo/'user/sudo/sudoers').read_bytes():
+            fail(row, '/etc/sudoers on the disk is not user/sudo/sudoers')
+        want_sha = C['new_rows']['/bin/sudo'][2]
+        if hashlib.sha256(debugfs_cat(img, '/bin/sudo', row)).hexdigest() != want_sha:
+            fail(row, '/bin/sudo on the disk is not the new image\'s')
+        logst = debugfs_stat(img, '/var/log/sudo.log', row)
+        if logst != ('regular', 0o600, 0, 0):
+            fail(row, f'/var/log/sudo.log is {logst}; want regular 0600 0 0')
+        text = debugfs_cat(img, '/var/log/sudo.log', row).decode(errors='replace')
+        w0 = debugfs_cat(img, '/root/w0.txt', row).decode(errors='replace')
+        w1 = debugfs_cat(img, '/root/w1.txt', row).decode(errors='replace')
+    finally:
+        img.unlink()
+    if not re.match(r'uid=1000\(wolf\) ', w0):
+        fail(row, f'su wolf -c /bin/id printed {w0!r}')
+    if not re.match(r'uid=0\(root\) gid=0\(root\) ', w1):
+        fail(row, f'sudo /bin/id as uid 1000 printed {w1!r}')
+    if not re.search(r'^\w{3} [ \d]\d \d\d:\d\d:\d\d : wolf : .*USER=root ; COMMAND=/bin/id$', text.replace('\n    ', ' '), re.M):
+        fail(row, f'/var/log/sudo.log has no line for wolf running /bin/id: {text!r}')
+    return have, w1.strip(), text.strip()
+
+
+def passed_sudo(name, row, what, fresh=False):
+    have, out, log_text = sudo_boot(name, row)
+    log(f'{row}: {out}')
+    log(f'{row}: {log_text}')
+    (work/f'{row}.txt').write_text(f'{what}\nstat (type, mode, uid, gid): {have}\nsudo /bin/id as uid 1000: {out}\n/var/log/sudo.log:\n{log_text}\n')
+    passed(row, f'{what}: booted; /bin/sudo 04755 0:0, /etc/sudoers 0440 0:0 (user/sudo/sudoers\' bytes), /var/log a root directory; '
+           f'uid 1000 ran /bin/sudo /bin/id and it printed {out!r}; /var/log/sudo.log 0600 0:0 holds the line')
+
+
 def track_a():
     """The 860 as px92's 9c88ec8a stick left it, upgraded (U1-U8)."""
     old, new, new_rows, new_commit = C['old'], C['new'], C['new_rows'], C['new_commit']
@@ -862,6 +938,8 @@ def track_a():
         passed('U5-compiler', f'/usr/bin/wolf built env_args() on PAX; it printed {got!r}, the same bytes as on Linux')
     again('u6', 'U6-again', rows5)
     passed('U6-again', 'the second upgrade: "Nothing to change", every path as it was')
+    if 'U13a' in ROWS:
+        passed_sudo('u13a', 'U13a-sudo-upgrade-9c88ec8a', 'the 9c88ec8a install, upgraded')
     # U7: a power cut mid-upgrade on a copy of U2's target.
     if 'U7' in ROWS:
         run(['cp', '--sparse=always', work/'u2-target.img', DISKS/'target.img'], row='U7-cut')
@@ -933,6 +1011,8 @@ def track_d():
            f'/etc/shrc yours and /etc/shrc.pax-new the new image\'s, every shipped path the new image\'s, the manifest the host tool\'s, e2fsck -fn clean; booted with kernel: {C["new_commit"][:8]}')
     again('u6d', 'U6d-again', rows)
     passed('U6d-again', 'the second upgrade of the dev install: "Nothing to change", every path as it was')
+    if 'U13d' in ROWS:
+        passed_sudo('u13d', 'U13d-sudo-upgrade-8b4e98ae', 'the 8b4e98ae dev install (the 860\'s), upgraded')
 
 
 def track_x():
@@ -956,6 +1036,8 @@ def u9():
     if '/etc/pax-install/manifest' not in rows or rc != 0:
         fail('U9-fresh', f'the fresh install has no /etc/pax-install/manifest, or e2fsck -fn exit {rc}')
     again('u9-again', 'U9-fresh', rows, needles=[f'Installed: {C["new_commit"]}, from its manifest'])
+    if 'U13f' in ROWS:
+        passed_sudo('u13f', 'U13f-sudo-fresh', 'a fresh install from the new stick', fresh=True)
     passed('U9-fresh', f'the new stick installed the target in {secs} s with its own /etc/pax-install/manifest; the upgrade with the same stick read it, no baseline: "Nothing to change", every path as it was')
 
 
