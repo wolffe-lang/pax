@@ -2160,6 +2160,7 @@ fn threads_unreported(l: u64) -> bool {
     while t < SLOTS {
         let st = field(t, offset_of(Thread, state))
         if t != l && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, zombie)) == 1 && (st == ZOMBIE || st == DEAD) { return true }
+        if t != l && field(t, offset_of(Thread, lead)) == l && trace_state.exit_pending(t) == 3 && tracer_of(t) != 0 && st != FREE && st != DEAD { return true } // parked in EVENT_EXIT
         t += 1
     }
     false
