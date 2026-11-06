@@ -19,7 +19,8 @@ REFERENCE = {'regs2-limits': 'regs2-limits.pax'}
 # comparison also covers every call result outside these spans.
 ROWS = {
     'group-stop': (
-        ('group-stop-event', 'js.stop.status=', 'js.stop.code='),
+        ('signal-stop-seized', 'js.stop.status=', 'js.stop.code='),
+        ('group-stop-event', 'js.stop.inject=', 'js.group.code='),
         ('ptrace-listen', 'js.listen=', 'js.cont.code='),
     ),
     'attach-stopped': (

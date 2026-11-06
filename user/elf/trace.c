@@ -1675,6 +1675,11 @@ static void jobstop_rows(const char *mode) {
         struct siginfo si; zero(&si, sizeof(si));
         dec("js.stop.getsiginfo", ptrace(GETSIGINFO, 0, (u64)&si));
         dec("js.stop.signo", si.signo); dec("js.stop.code", si.code);
+        dec("js.stop.inject", ptrace(CONT, 0, 19));
+        wait_poll("js.group.status", &st);
+        zero(&si, sizeof(si));
+        dec("js.group.getsiginfo", ptrace(GETSIGINFO, 0, (u64)&si));
+        dec("js.group.signo", si.signo); dec("js.group.code", si.code);
         dec("js.listen", ptrace(0x4208, 0, 0));
         wait_poll("js.listen.wait", &st);
         ok("js.cont.signal", call(62, child, 18, 0, 0, 0));
