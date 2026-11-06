@@ -45,8 +45,8 @@
 //! `Defaults logfile` (accepted, the log is always the same file); user,
 //! `#uid` and `%group` specs with the host `ALL`; `(users[:groups])`
 //! run-as lists of `ALL`, names and `#ids`; `NOPASSWD:`, `PASSWD:`,
-//! `SETENV:` and `NOSETENV:` tags; commands that are `ALL` or an absolute
-//! path that is not a symbolic link; `#includedir`. **Anything else is a
+//! `SETENV:` and `NOSETENV:` tags; commands that are `ALL` or a plain absolute
+//! path (a symbolic link is matched by its own name, never followed); `#includedir`. **Anything else is a
 //! parse error naming the file and line, and every command is denied**
 //! (Linux reports a syntax error with a caret and goes on). Options the
 //! subset has no use for (`-A -b -B -C -D -e -H -P -p -R -r -S -T -t`, long
@@ -931,14 +931,6 @@ fn parse_spec(line: str, file: str, lineno: int, mut pol: Policy) {
         if item != "ALL" {
             if !item.starts_with("/") {
                 fail(mut pol, file, lineno, "the command {item} is not an absolute path")
-                return
-            }
-            let lst = fs_lstat(item) else |_| {
-                // a path that is not there yet may be a rule for later
-                [0, 0, 0, 0, 0]
-            }
-            if lst[0] == 3 {
-                fail(mut pol, file, lineno, "the command {item} is a symbolic link (PAX's sudo matches real paths only)")
                 return
             }
             if item.contains("//") || item.contains("/./") || item.contains("/../") || item.ends_with("/") {
