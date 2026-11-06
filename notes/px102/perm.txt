@@ -19,3 +19,16 @@ the prctl set it dumpable again; PR_SET_DUMPABLE 0 refuses again.
 The tracee being a descendant keeps Yama out of the comparison.
 PAX has a credential record and a dumpable word; whether ATTACH consults
 it is unknown, the transcript is the reference.
+
+Measured on Linux (the witness commit's binaries, a fresh container per
+take, three byte-identical takes as uid 0; the uid-1000 leg of the
+runner fails by design since the mode requires a root start):
+  END linux-perm-0 exit=0 takes=3. Reference: tests/mpx5-trace.d/perm.linux.
+One prediction was wrong, recorded not hidden: the "control" is refused
+too. A root process that dropped to uid 1000 is itself no longer
+dumpable, and its fork child inherits that, so a uid-1000 tracer may not
+attach to it or open its mem or environ. The rows are therefore
+"descendant of a credential-changed parent" (control), uid changed,
+same uid after setresuid, dumpable reset by prctl (the only one that
+succeeds, attach stop 0x137f), and dumpable off. perm.control keeps its
+label.
