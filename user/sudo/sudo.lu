@@ -131,6 +131,13 @@ fn main() -> int {
     let uid = os_uid() else 0
     let euid = os_euid() else 0
     // sudo's own file: root's, with the set-user-ID bit (Linux's words)
+    let exe = os_exe() else "/usr/bin/sudo"
+    let est = fs_stat(exe) else [0, 0, 0, 0, 0, 0, 1, 1]
+    if est[6] != 0 || est[4] & 0o4000 == 0 {
+        eprint("sudo: {exe} must be owned by uid 0 and have the setuid bit set")
+        return 1
+    }
+
     if euid != 0 {
         if nnp_set() {
             eprint("sudo: The \"no new privileges\" flag is set, which prevents sudo from running as root.")
@@ -140,13 +147,6 @@ fn main() -> int {
         }
         return 1
     }
-    let exe = os_exe() else "/usr/bin/sudo"
-    let est = fs_stat(exe) else [0, 0, 0, 0, 0, 0, 1, 1]
-    if est[6] != 0 || est[4] & 0o4000 == 0 {
-        eprint("sudo: {exe} must be owned by uid 0 and have the setuid bit set")
-        return 1
-    }
-
     let passwd = fs_read_text("/etc/passwd") else ""
     let group_text = fs_read_text("/etc/group") else ""
     let me = users.user_by_id(passwd, uid) else |_| {
@@ -161,7 +161,7 @@ fn main() -> int {
         }
         eprint("sudo: {pol.error}")
         if !pol.error.starts_with("unable") {
-            let _l = log_line(me.name, "policy error", os_cwd() else "/", "root", "", pol.error, true)
+            let _l = log_line(true, me.name, "policy error", os_cwd() else "/", "root", "", pol.error, true)
         }
         if pol.error.contains(" is world writable") || pol.error.contains(", should be ") || pol.error.starts_with("unable to open") {
             eprint("sudo: error initializing audit plugin sudoers_audit")
@@ -218,7 +218,6 @@ fn main() -> int {
             }
             let gx = users.group_by_id(group_text, n) else |_| {
                 eprint("sudo: unknown group {a.group}")
-                eprint("sudo: error initializing audit plugin sudoers_audit")
                 return 1
             }
             tgid = n
@@ -305,17 +304,17 @@ fn main() -> int {
     let shown_log = shown.replace("\\", "\\\\")
     if !named {
         eprint("sudo: {me.name} is not in the sudoers file.")
-        let _l = log_line(me.name, "user NOT in sudoers", cwd, target.name, gname, shown_log, true)
+        let _l = log_line(pol.wrap, me.name, "user NOT in sudoers", cwd, target.name, gname, shown_log, true)
         return 1
     }
     if !hit {
         eprint("sudo: Sorry, user {me.name} is not allowed to execute '{shown}' as {target.name} on {host}.")
-        let _l = log_line(me.name, "command not allowed", cwd, target.name, gname, shown_log, true)
+        let _l = log_line(pol.wrap, me.name, "command not allowed", cwd, target.name, gname, shown_log, true)
         return 1
     }
-    if uid != 0 && !best.nopasswd {
+    if uid != 0 && target.uid != uid && !best.nopasswd {
         eprint("sudo: no password database yet (R1): only NOPASSWD rules are honoured")
-        let _l = log_line(me.name, "no password database (R1)", cwd, target.name, gname, shown_log, true)
+        let _l = log_line(pol.wrap, me.name, "no password database (R1)", cwd, target.name, gname, shown_log, true)
         return 1
     }
     let can_setenv = best.setenv || best.cmd == "ALL"
@@ -326,12 +325,12 @@ fn main() -> int {
             names = if names.len == 0 then kv[0..eq] else "{names}, {kv[0..eq]}"
         }
         eprint("sudo: sorry, you are not allowed to set the following environment variables: {names}")
-        let _l = log_line(me.name, "environment variables not allowed", cwd, target.name, gname, shown_log, true)
+        let _l = log_line(pol.wrap, me.name, "environment variables not allowed", cwd, target.name, gname, shown_log, true)
         return 1
     }
     if a.preserve && !can_setenv {
         eprint("sudo: sorry, you are not allowed to preserve the environment")
-        let _l = log_line(me.name, "environment not preserved", cwd, target.name, gname, shown_log, true)
+        let _l = log_line(pol.wrap, me.name, "environment not preserved", cwd, target.name, gname, shown_log, true)
         return 1
     }
 
@@ -352,7 +351,7 @@ fn main() -> int {
             (mut groups).push(tgid)
         }
     }
-    if !log_line(me.name, "", cwd, target.name, gname, shown_log, false) {
+    if !log_line(pol.wrap, me.name, "", cwd, target.name, gname, shown_log, false) {
         return 1
     }
     var why = ""
@@ -1126,7 +1125,7 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
         } else {
             eprint("User {who.name} is not allowed to run sudo on {host}.")
         }
-        let _l = log_line(me.name, "user NOT in sudoers", os_cwd() else "/", "root", "", "list", true)
+        let _l = log_line(pol.wrap, me.name, "user NOT in sudoers", os_cwd() else "/", "root", "", "list", true)
         return 1
     }
     if a.words.len > 0 {
@@ -1443,8 +1442,8 @@ fn escape_blanks(words: List[str]) -> str {
 /// user : [reason ; ]PWD=… ; USER=… ; [GROUP=… ; ]COMMAND=…`, wrapped at
 /// 80 columns (continuations indented four blanks) unless `!loglinelen`.
 /// False when it cannot be written (an allowed command is then not run).
-fn log_line(user: str, reason: str, cwd: str, target: str, group: str, command: str, refused: bool) -> bool {
-    let pol_wrap = true
+fn log_line(wrap: bool, user: str, reason: str, cwd: str, target: str, group: str, command: str, refused: bool) -> bool {
+    let pol_wrap = wrap
     var body = "{user} : "
     if reason.len > 0 {
         body = "{body}{reason} ; "
