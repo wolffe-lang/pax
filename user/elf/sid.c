@@ -25,6 +25,7 @@
 #include "px38.h"
 #include <sys/auxv.h>
 #include <sys/mount.h>
+#include <sys/reboot.h>
 
 #ifndef PR_SET_NO_NEW_PRIVS
 #define PR_SET_NO_NEW_PRIVS 38
@@ -145,6 +146,28 @@ int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++)
         if (strncmp(argv[i], "h:", 2) == 0) return helper(argv[i] + 2);
+    if (getpid() == 1 && argc == 1) { /* a real Linux's init (the recording): /proc, the console, the driver, power off */
+        mkdir("/proc", 0755);
+        mkdir("/dev", 0755);
+        mount("proc", "/proc", "proc", 0, "");
+        mount("devtmpfs", "/dev", "devtmpfs", 0, "");
+        int c = open("/dev/console", O_RDWR);
+        if (c >= 0) { dup2(c, 0); dup2(c, 1); dup2(c, 2); }
+        {
+            char b[16] = "?";
+            int f = open("/proc/sys/fs/suid_dumpable", O_RDONLY);
+            if (f >= 0) { long k = read(f, b, 15); b[k > 0 ? k : 0] = 0; close(f); }
+            say("suid_dumpable %s", b);
+        }
+        char *iv[] = { "/bin/sid", "/t/sid", NULL };
+        pid_t d = fork();
+        if (d == 0) { mkdir("/t", 0777); execve("/bin/sid", iv, NULL); _exit(98); }
+        int st = reap(d);
+        say("sid: exit %d\n", st);
+        sync();
+        reboot(RB_POWER_OFF);
+        return 0;
+    }
     if (argc != 2) { say("usage: sid DIR | sid h:TAG\n"); return 2; }
     SELF = argv[0];
     snprintf(DIR, sizeof DIR, "%s", argv[1]);
