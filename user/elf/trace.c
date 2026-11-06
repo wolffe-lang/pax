@@ -1027,7 +1027,7 @@ static int memory_mode(const char *mode) { return equal(mode, "memory"); }
 static __attribute__((noreturn)) void role_mem(void) {
     if (mmap6(MA, 0x2000, 3, 0x32, -1) != (i64)MA) done(121);
     if (mmap6(MB, 0x1000, 3, 0x32, -1) != (i64)MB) done(122);
-    if (mmap6(MD, 0x1000, 3, 0x21, -1) != (i64)MD) done(123);
+    if (mmap6(MD, 0x1000, 3, 0x31, -1) != (i64)MD) done(123);
     for (u64 i = 0; i < 0x2000; i++) ((volatile unsigned char *)MA)[i] = (unsigned char)(i * 7 + 1);
     for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MB)[i] = 0x5a;
     for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MD)[i] = 0x3c;
