@@ -180,6 +180,10 @@ fn main() -> int {
     if a.list {
         return list_mode(pol, a, me, passwd, group_text, my_groups, host)
     }
+    if a.validate && (a.words.len > 0 || a.login || a.shell) {
+        eprint_raw(usage())
+        return 1
+    }
     if a.validate && a.words.len == 0 && !a.login && !a.shell {
         // -v: nothing to validate without a password; Linux's words for a user with no rule
         if !has_rule(pol, me, my_groups, group_text) {
@@ -212,8 +216,13 @@ fn main() -> int {
                 eprint("sudo: error initializing audit plugin sudoers_audit")
                 return 1
             }
+            let gx = users.group_by_id(group_text, n) else |_| {
+                eprint("sudo: unknown group {a.group}")
+                eprint("sudo: error initializing audit plugin sudoers_audit")
+                return 1
+            }
             tgid = n
-            gname = a.group
+            gname = gx.name
         } else {
             let g = users.group_named(group_text, a.group) else |_| {
                 eprint("sudo: unknown group {a.group}")
@@ -288,7 +297,7 @@ fn main() -> int {
         if !runas_matches(e, target, tgid, gname, a.group.len > 0) {
             continue
         }
-        if e.cmd == "ALL" || e.cmd == path {
+        if cmd_matches(e.cmd, path) {
             hit = true
             best = e
         }
@@ -548,7 +557,7 @@ fn parse(args: List[str]) -> Args {
         (mut a.words).push(w)
     }
     if a.login && a.shell {
-        a.error = "you may not specify both the '-i' and '-s' options"
+        a.error = "you may not specify both the -i and -s options"
     }
     a
 }
@@ -609,7 +618,7 @@ fn find_user(passwd: str, spec: str) -> users.User {
         if n < 0 {
             return empty_user()
         }
-        return users.user_by_id(passwd, n) else users.User { name: spec, uid: n, gid: n, comment: "", home: "/", shell: "" }
+        return users.user_by_id(passwd, n) else empty_user()
     }
     users.user_named(passwd, spec) else empty_user()
 }
@@ -626,7 +635,7 @@ fn hostname() -> str {
 // ---- the policy ------------------------------------------------------
 
 fn new_policy() -> Policy {
-    Policy { entries: List[Entry](), secure_path: "", has_secure: false, keep: List[str](), wrap: true, error: "", warnings: List[str]() }
+    Policy { entries: List[Entry](), secure_path: "", has_secure: false, keep: default_keep(), wrap: true, error: "", warnings: List[str]() }
 }
 
 fn load_policy() -> Policy {
@@ -1042,6 +1051,17 @@ fn runas_matches(e: Entry, target: users.User, tgid: int, gname: str, explicit_g
     false
 }
 
+/// A rule's command names the file `path` is: the same path, or (as Linux
+/// compares them, by the file) the same real path.
+fn cmd_matches(cmd: str, path: str) -> bool {
+    if cmd == "ALL" || cmd == path {
+        return true
+    }
+    let a = fs_realpath(cmd) else ""
+    let b = fs_realpath(path) else ""
+    a.len > 0 && a == b
+}
+
 fn has_rule(pol: Policy, me: users.User, my_groups: List[int], group_text: str) -> bool {
     for e in pol.entries {
         if who_matches(e.who, me, my_groups, group_text) {
@@ -1088,7 +1108,7 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
             }
         }
         if !allowed {
-            eprint("Sorry, user {me.name} is not allowed to run sudo on {host}.")
+            eprint("Sorry, user {me.name} is not allowed to execute 'list' as {o.name} on {host}.")
             return 1
         }
         who = copy o
@@ -1119,13 +1139,12 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
         }
         var ok = false
         for e in mine {
-            if e.cmd == "ALL" || e.cmd == path {
+            if cmd_matches(e.cmd, path) {
                 ok = true
             }
         }
         if !ok {
-            eprint("sudo: Sorry, user {who.name} is not allowed to execute '{path}' as root on {host}.")
-            return 1
+            return 1 // Linux prints nothing for a command the list does not allow
         }
         var line = path
         var k = 1
@@ -1268,11 +1287,6 @@ fn env_safe(name: str, value: str) -> bool {
 }
 
 fn kept_by_default(name: str, pol: Policy) -> bool {
-    for k in default_keep() {
-        if k == name {
-            return true
-        }
-    }
     for k in pol.keep {
         if k == name {
             return true
@@ -1305,7 +1319,9 @@ fn build_env(pol: Policy, a: Args, me: users.User, target: users.User, shell: st
             continue
         }
         var keep = false
-        if a.preserve {
+        if value.starts_with("()") {
+            keep = false
+        } else if a.preserve {
             keep = !(name.starts_with("LD_") || name.starts_with("BASH_FUNC_") || name == "IFS" || value.starts_with("()")) && (!checked(name) || env_safe(name, value))
         } else if name == "PATH" {
             keep = true
@@ -1415,7 +1431,7 @@ fn escape_blanks(words: List[str]) -> str {
         if k > 0 {
             out = out + " "
         }
-        out = out + words[k].replace(" ", "\\ ")
+        out = out + words[k].replace(" ", "\\ ").replace("\t", "\\\t")
         k += 1
     }
     out
