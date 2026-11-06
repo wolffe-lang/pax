@@ -13,7 +13,10 @@ common=(-nostdlib -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack)
 "$cc" "${common[@]}" -O1 -ffreestanding -fno-builtin -fno-stack-protector \
     -fno-asynchronous-unwind-tables -Wall -Wextra -Werror \
     -o "$out/trace" "$PAX_ROOT/user/elf/trace.c"
-"$cc" "${common[@]}" -Wl,-Ttext=0x401000,-Tdata=0x402000 \
+# -mx86-used-note=no: some assemblers (a newer binutils, as NixOS ships) add a
+# .note.gnu.property that the linker then places at 0x402000, on the probe's
+# fixed data address; the tracee needs no property note.
+"$cc" "${common[@]}" -Wa,-mx86-used-note=no -Wl,-Ttext=0x401000,-Tdata=0x402000 \
     -o "$out/tracee" "$PAX_ROOT/user/elf/tracee.S"
 python3 - "$out" <<'PY'
 import pathlib, struct, subprocess, sys
