@@ -50,3 +50,26 @@ Disagreements with the prediction, recorded not hidden:
     -EINVAL (-22), and PEEK of a kernel or non-canonical address -EIO.
   - After the target's exec, a descriptor opened before it reads 0 and
     writes 0; a fresh open reads -EIO at the old address.
+
+Harness amendments before the final reference: the shared page needed
+MAP_FIXED (PAX, unlike Linux, ignores a free address hint); the file
+page is now a file the target makes in /tmp (the archive's /tmp, 1777, is
+added to every image) and unlinks once mapped, because the memory tree's
+page cache keeps a mapped archive file's frame, which the frames line
+counts. memory.linux was regenerated for that page's bytes (a byte
+pattern, in place of the ELF header): END linux-memory-0/-1000 exit=0
+takes=5.
+
+Red on af216464's kernel (the kernel of 9a2109a4 plus witnesses), by name:
+  FAIL T-mem-prot-none   PEEK/POKE/pread/pwrite of a PROT_NONE page: -EIO
+  FAIL T-mem-proc-mem    a partial pwrite at a mapping's end wrote
+                         nothing (PAX checked the second page first),
+                         and an offset with the top bit set was -EIO
+  (T-mem-cross-page, private-file, shared, proc-self, held-exec: PASS
+  at the first run; they held already.)
+Changes: kernel/vm trace_address reaches a present page whatever its
+user bit (PROT_NONE keeps its frame); trace_mem.poke writes the bytes
+below an unmapped page and then answers -EIO; trace_mem.transfer answers
+-EINVAL for a negative offset before anything else.
+Green: root, BIOS/KVM, all rows and the whole transcript, frames back;
+user (uid 1000) the same: END root-memory exit=0, END user-memory exit=0.

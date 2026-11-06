@@ -27,3 +27,16 @@ linux-tasks-0, linux-tasks-1000, all exit=0 takes=3. References:
 tests/mpx5-trace.d/conc.linux and tasks.linux. Every prediction held
 (the thread's TracerPid is 0; PEEKDATA to the thread's tid is ESRCH, -3;
 a held task descriptor reads EOF after the group's exit).
+
+PAX at b284e6e0, BIOS/KVM root:
+  conc: all three rows and the whole transcript held at the first run
+    (END root-conc exit=0): the side table and the tracer lookups already
+    keep two tracees apart.
+  tasks: red by name before the change, T-tasks-leader-bogus and
+    T-tasks-thread-status: /proc/<tid>/mem of a non-leader thread was
+    -ENOENT, and task/<tid>/status did not exist (so a thread's TracerPid
+    could not be read).
+  Changes (kernel/procfs): task/<tid>/status, one thread's (its Pid, its
+    TracerPid, its state); /proc/<tid> of a live non-leader thread opens
+    and shows that thread's files, though no listing names it.
+  Green: END root-tasks exit=0.
