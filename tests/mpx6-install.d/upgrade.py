@@ -836,7 +836,7 @@ def passed_sudo(name, row, what, fresh=False):
            f'uid 1000 ran /bin/sudo /bin/id and it printed {out!r}; /var/log/sudo.log 0600 0:0 holds the line')
 
 
-SESSION = repo/'tests/mpx6-install.d/sudo-session.txt'
+SESSION = Path(__file__).resolve().parent/'sudo-session.txt'
 
 
 def session_lines():
