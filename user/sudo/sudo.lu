@@ -195,7 +195,7 @@ fn main() -> int {
 
     // The target: -u (a name or #uid), -g (a name or #gid).
     let tname0 = if a.user.len > 0 then a.user else "root"
-    let target = find_user(passwd, tname0)
+    let target = if a.user.len == 0 && a.group.len > 0 then copy me else find_user(passwd, tname0)
     let found = target.name.len > 0
     if !found {
         eprint("sudo: unknown user {tname0}")
@@ -309,7 +309,8 @@ fn main() -> int {
         let _l = log_line(me.name, "no password database (R1)", cwd, target.name, gname, shown_log, true)
         return 1
     }
-    if a.assigns.len > 0 && !best.setenv {
+    let can_setenv = best.setenv || best.cmd == "ALL"
+    if a.assigns.len > 0 && !can_setenv {
         var names = ""
         for kv in a.assigns {
             let eq = kv.find("=") else kv.len
@@ -319,7 +320,7 @@ fn main() -> int {
         let _l = log_line(me.name, "environment variables not allowed", cwd, target.name, gname, shown_log, true)
         return 1
     }
-    if a.preserve && !best.setenv {
+    if a.preserve && !can_setenv {
         eprint("sudo: sorry, you are not allowed to preserve the environment")
         let _l = log_line(me.name, "environment not preserved", cwd, target.name, gname, shown_log, true)
         return 1
@@ -568,6 +569,33 @@ fn nnp_set() -> bool {
         }
     }
     false
+}
+
+/// The caller's environment in the order the kernel handed it over
+/// (`/proc/self/environ`; `env_vars()` is sorted), else `env_vars()`.
+fn caller_env() -> List[str] {
+    let raw = fs_read_bytes("/proc/self/environ") else |_| {
+        return env_vars()
+    }
+    var out = List[str]()
+    var start = 0
+    var i = 0
+    while i < raw.len {
+        if (raw[i] as int) == 0 {
+            if i > start {
+                let s = str_from_utf8(raw[start..i]) else ""
+                if s.len > 0 {
+                    (mut out).push(s)
+                }
+            }
+            start = i + 1
+        }
+        i += 1
+    }
+    if out.len == 0 {
+        return env_vars()
+    }
+    out
 }
 
 fn empty_user() -> users.User {
@@ -1260,11 +1288,11 @@ fn build_env(pol: Policy, a: Args, me: users.User, target: users.User, shell: st
     var have_term = false
     var have_path = false
     let tname = target.name
-    for kv in env_vars() {
+    for kv in caller_env() {
         let eq = kv.find("=") else kv.len
         let name = kv[0..eq]
         let value = if eq < kv.len then kv[eq + 1..] else ""
-        if is_set_by_sudo(name) {
+        if is_set_by_sudo(name) && !(a.preserve && name != "SUDO_COMMAND" && !name.starts_with("SUDO_") && name != "LOGNAME" && name != "USER") {
             continue
         }
         var keep = false
@@ -1297,6 +1325,20 @@ fn build_env(pol: Policy, a: Args, me: users.User, target: users.User, shell: st
         if kv.starts_with("TERM=") {
             have_term = true
         }
+    }
+    if a.preserve {
+        // -E: the caller's environment whole (but for what is unsafe), with
+        // only the user names, secure_path and SUDO_* set (measured)
+        set_var(mut env, "LOGNAME={tname}")
+        set_var(mut env, "USER={tname}")
+        if pol.has_secure {
+            set_var(mut env, "PATH={pol.secure_path}")
+        }
+        set_var(mut env, "SUDO_COMMAND={shown}")
+        set_var(mut env, "SUDO_USER={me.name}")
+        set_var(mut env, "SUDO_UID={me.uid}")
+        set_var(mut env, "SUDO_GID={me.gid}")
+        return env
     }
     (mut env).push("MAIL=/var/mail/{tname}")
     if pol.has_secure && !have_path {
