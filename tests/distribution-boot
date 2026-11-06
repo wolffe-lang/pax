@@ -25,7 +25,10 @@ import hashlib, re, sys
 log, root = map(Path, sys.argv[1:3])
 variant = sys.argv[3]
 raw = log.read_bytes()
-normal = re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', raw).replace(b'\r', b'')
+# A line a program erases (CR, then EL: `\r\x1b[2K`, wolf 0.2.37's build progress) is read as the
+# terminal shows it: gone, and what follows starts the line.
+normal = re.sub(rb'[^\n]*\r\x1b\[2K', b'', raw)
+normal = re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', normal).replace(b'\r', b'')
 lines = normal.splitlines()
 release = (root/'pax-release').read_bytes()
 for line in release.splitlines():
