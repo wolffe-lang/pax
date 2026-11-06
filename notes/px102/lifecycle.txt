@@ -54,3 +54,62 @@ L5 traceme-thread. A non-leader thread forks a child that calls
 Each row is judged by check.py's named spans plus the whole transcript.
 If Linux disagrees with a prediction, the Linux transcript is the
 reference and the disagreement is recorded here, not hidden.
+
+Measured, 2026-11-06T00:10Z-00:40Z
+
+Linux (the same trace/tracee binaries, built at 22873aac; a fresh
+container and pid namespace per take): every prediction held. Ten takes
+per mode as uid 0 and ten as uid 1000 were byte-identical, and uid 0
+equalled uid 1000:
+  END linux-group-exit-0 exit=0 takes=10        (and -1000)
+  END linux-group-exit-event-0 exit=0 takes=10  (and -1000)
+  END linux-exec-thread-0 exit=0 takes=10       (and -1000)
+  END linux-tracer-thread-0 exit=0 takes=10     (and -1000)
+  END linux-traceme-thread-0 exit=0 takes=10    (and -1000)
+The references are 0403610f's tests/mpx5-trace.d/*.linux.
+
+Red on the unchanged kernel (678f8fff's ELF, 0403610f's witnesses):
+  group-exit        FAIL T-group-exit (the tracer saw only the leader:
+                    group.first.is-thread=0, then ECHILD)
+  group-exit-event  FAIL T-group-exit-event, T-group-exit-order (one
+                    EVENT_EXIT stop; the second wait never returned:
+                    NOT HALTED within 120 s)
+  exec-thread       FAIL T-exec-former-tid (exec.former-is-leader=1);
+                    T-exec-thread-gone passed already
+  tracer-thread     FAIL T-tracer-thread, T-tracer-thread-exit (the
+                    stop never reached the tracing thread's poll)
+  traceme-thread    FAIL T-traceme-thread (likewise)
+
+The changes:
+  009884d5  GETEVENTMSG at EVENT_EXEC answers the former tid, kept in
+            the side table before execve's point of no return.
+  d826c66b  The tracer is a thread. PTRACE_TRACEME's tracer is the thread
+            that forked the child (its id kept at fork), or another live
+            thread of the parent process if that one has ended. A stop
+            parks for a non-leader tracer, SIGCHLD and the wake go to the
+            tracer's process, and a tracer thread's exit (or its end in
+            a group exit or an exec) detaches its tracees. An exec'ing
+            tracer keeps its tracees under its new id.
+  42b5bafc  At exit_group, a fatal signal or an exec, every traced
+            non-leader reports its own death (the group's status; 0 at
+            an exec, as ptrace(2) says), and a zombie leader is not
+            reported while a traced thread's death is uncollected.
+  b22824b3  exit_group by a tracee with TRACEEXIT stops every other
+            traced thread with TRACEEXIT in EVENT_EXIT too (message the
+            group status); resumed, each ends with that status. Only a
+            caller that itself stops does this (named limit: an untraced
+            caller's exit_group still ends the others at once, with
+            their death reports but without their EVENT_EXIT stops).
+
+Green at b22824b3 (BIOS/KVM unless named; each case also checked no
+PANIC, init status 0, frames restored, the booted kernel's commit and
+digest, and T-trace-layout):
+  root, all 30 modes: 30 END lines, exit=0
+  uid/gid 1000, all 30 modes: 30 END lines, exit=0
+  BIOS/TCG and UEFI/KVM: the five lifecycle modes, core and attach
+    END tcg-group-exit exit=0 ... END uefi-attach exit=0 (14, all 0)
+
+Named, not measured: whether another thread of the tracer's process may
+wait for (consume) a tracee's stop (wait(2)'s default for children; PAX
+lets only the tracer thread consume a stop); SIGCHLD for a leader whose
+death is deferred behind its threads' (PAX raises it at the leader's end).
