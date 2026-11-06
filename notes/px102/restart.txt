@@ -1,0 +1,33 @@
+px102 — blocked system calls under tracing: the prediction, written
+2026-11-06T00:33Z at 49b2bab8, before the witnesses exist. Sources:
+ptrace(2) (signal-delivery-stop, syscall-stops, "Attaching and
+detaching", BUGS on EINTR), signal(7) ("Interruption of system calls and
+library functions by signal handlers", SA_RESTART), restart_syscall(2),
+nanosleep(2), futex(2). Linux's -ERESTART* values are the uapi errno
+numbers 512-516 seen by tracers only. gdb's attach measurement
+(notes/px102/measured.txt) already showed rax -516 and orig_rax 230 at
+the attach stop of a tracee asleep in clock_nanosleep.
+
+Five witnesses; each forks a target that blocks, then the tracer ATTACHes:
+B1 blocked-read: a blocking pipe read. At the attach stop rax -512
+   (ERESTARTSYS), orig_rax 0, rip just past the SYSCALL. Resumed under
+   PTRACE_SYSCALL the read is restarted (an entry stop, orig_rax 0); with
+   a byte written it completes (exit stop rax 1); the program never sees
+   EINTR.
+B2 blocked-sleep: nanosleep(0.6 s). At the attach stop rax -516
+   (ERESTART_RESTARTBLOCK), orig_rax 35. The restart is restart_syscall
+   (the entry stop's orig_rax 219), which sleeps out the rest and returns
+   0; the program exits as if never interrupted.
+B3 blocked-futex: FUTEX_WAIT on a zero word, no timeout. At the attach
+   stop rax -512, orig_rax 202. With the word changed by POKEDATA, the
+   restarted wait (entry orig_rax 202) returns -EAGAIN (-11).
+B4 blocked-restart: a SA_RESTART SIGUSR1 handler; after the attach stop
+   is resumed the read waits again; SIGUSR1's delivery stop shows rax
+   -512; delivered, the handler runs and the read restarts (completes 1).
+B5 blocked-eintr: the same without SA_RESTART: the read answers -EINTR
+   after the handler.
+PAX at 49b2bab8, predicted RED: a stop taken in a wait shows PAX's own
+frame (a rewound read: rip AT the SYSCALL and rax its number; a sleep or
+futex wait: its -EINTR result), never -512/-516, and a sleep or futex
+wait interrupted by the attach's SIGSTOP returns -EINTR to the program
+when resumed. restart_syscall (219) is not implemented.
