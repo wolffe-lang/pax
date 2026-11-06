@@ -12,6 +12,8 @@
 # kmain_frames (the exercise), kmain_double_free, kmain_free_unusable.
 # Assertions, per tier (native, release) and firmware (bios, uefi):
 #   F1 build: tools/build-kernel's object assertions for all four.
+#   F1b entries (px102): every kernel/kmain*.lu builds and links, native tier
+#      (boot/isr.S is in each, so a hook only some define breaks the rest).
 #   F2 totals: kmain's transcript carries, right before `halt`,
 #        frames: T usable, L below 1 MiB, S allocator, F free
 #      with T * 4096 = the `mem:` line's usable bytes (the map, summed
@@ -105,6 +107,23 @@ if [ -z "$images" ]; then
             fi
         done
     done
+    # F1b (px102): every kernel entry links. boot/isr.S is in each one, so a
+    # symbol it calls that only some entries define breaks the rest, silently
+    # until that entry is built (pax_trace_resume_syscall broke mpx6-usb and
+    # mpx6-firmware). Native tier: the link is the same on both.
+    case " $tiers " in *" native "*)
+        mkdir -p "$work/entries"
+        for src in "$PAX_ROOT"/kernel/kmain*.lu; do
+            k=$(basename "$src" .lu)
+            log=$work/entries/$k.build-kernel.log
+            if "$PAX_ROOT/tools/build-kernel" --src "$src" "$work/entries" >/dev/null 2>"$log"; then
+                say "PASS F1b $k: links"
+            else
+                cat "$log" >&2
+                bad "F1b $k: does not link: $(grep -m1 -E 'undefined symbol|error:|FAIL' "$log")"
+            fi
+        done ;;
+    esac
     images=$work
     if [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx2-frames build (F1): PASS (no boot: --no-boot)" || say "mpx2-frames build: FAIL"
