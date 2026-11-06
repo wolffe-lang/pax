@@ -1,0 +1,212 @@
+px103 — set-ID execution and sudo: the prediction, written before the first change
+(2026-11-06, base trunk a9f5b6f1)
+
+The claim stays ruling #75 R6, here and in every doc this lane writes:
+enforced for honest programs; not a boundary against an attacker. The
+kernel has never been fuzzed or audited and loads programs at fixed
+addresses. R1 stands: no passwords, hashes or prompts in this lane.
+
+Sources: execve(2), execveat(2), credentials(7), setuid(2), setresuid(2),
+capabilities(7), prctl(2), PR_SET_NO_NEW_PRIVS(2const),
+PR_GET_NO_NEW_PRIVS(2const), PR_SET_DUMPABLE(2const), proc(5), proc_pid(5),
+proc_sys_fs(5), ptrace(2), getauxval(3), mount(8), chmod(2) (man7.org);
+sudo(8), sudoers(5), su(1) (Ubuntu noble's manual pages); black-box runs
+of Ubuntu 24.04's sudo 1.9.15p5 in a throwaway container with no network
+(notes/px103/sudo-ct.sh; its recorded output is the reference for every
+sudo row below). No implementation of any of these was read.
+
+## A. Set-ID execution, in the kernel
+
+State today (trunk): cred.exec copies the effective ids to the saved and
+file-system ids and never raises anything (R5). run_file in
+kernel/process never looks at the file's mode. AT_SECURE is computed from
+the ids before the exec. prctl answers PR_GET_NO_NEW_PRIVS 0 and refuses
+PR_SET_NO_NEW_PRIVS. /proc/<pid>/status prints NoNewPrivs 0 always. A
+mount's nosuid is kept for /proc/self/mounts and nothing else.
+
+Each rule, with Linux's answer and the PAX path that has to change:
+
+ S1 A regular file with S_ISUID run by execve: the effective user id
+    becomes the file's owner, the saved and the file-system ids follow
+    the effective one, the real id and the groups are unchanged.
+    Path: kernel/process run_file reads the mode and owner of the FINAL
+    file (after #! resolution) and passes them to cred.exec at the point
+    of no return; kernel/files exposes them (exec_mode, exec_owner).
+ S2 S_ISGID acts only with S_IXGRP also set: effective group id, then
+    saved and file-system, from the file's group; the real group and the
+    supplementary list are unchanged. S_ISGID without group-execute
+    (Linux's mandatory-locking marker) does nothing. Same path.
+ S3 Both bits together act independently.
+ S4 A script's own bits are ignored (#!); the interpreter's bits, being
+    the file finally executed, are honoured. Path: the loop in run_file
+    already ends on the interpreter's inode; only that inode is read.
+ S5 A nosuid mount: both bits ignored (the mount's M_HOW, MH_NOSUID).
+    Path: kernel/tree gains the mount of an inode (`mount_how_of`),
+    kernel/files exposes `exec_nosuid`.
+ S6 no_new_privs: prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) sets it; any
+    other arg2 (and, as Linux, a nonzero arg3..5) is -EINVAL; it cannot
+    be unset; a fork's child and an execve keep it; PR_GET_NO_NEW_PRIVS
+    reads it; /proc/<pid>/status prints NoNewPrivs. While set, both bits
+    are ignored at execve. Path: bit 1 of cred's C_UNDUMP word (bit 0 is
+    "not dumpable"; the word is copied whole by fork), kernel/user
+    prctl, kernel/procfs status.
+ S7 A traced exec of a set-ID file by a tracee whose tracer lacks
+    privilege: the bits are ignored (the process stays unprivileged). A
+    privileged tracer: honoured. NEEDS px102's ptrace: the row is
+    written now and SKIPs by name ("needs px102's ptrace") until the
+    rebase.
+ S8 AT_SECURE: 1 in the auxiliary vector of the program after a set-ID
+    exec (real and effective differ), as the program's own getauxval
+    shows; 0 when the bits did nothing (S4 script, S5, S6, S7) and the
+    ids match. Path: build_stack asks cred.at_secure of the ids AFTER
+    the raise, so the order in run_file changes (cred first).
+ S9 Dumpable: after a set-ID exec that changed the effective user or
+    group id the process is not dumpable (fs.suid_dumpable 0): PR_GET_
+    DUMPABLE 0, /proc/<pid> and its files owned by root (procfs.owner
+    already follows the word), and ptrace attach by the owner refused
+    (-EPERM). The attach half NEEDS px102 and SKIPs by name until the
+    rebase. A set-ID exec whose bits did nothing leaves the exec rule as
+    it is (dumpable iff real, effective and file-system ids are equal).
+    A set-ID file owned by the caller's own effective id changes nothing
+    and so stays dumpable on Linux (the rule is "a change").
+ S10 Capabilities: a process whose saved user id is 0 prints Linux's
+    CapPrm/CapEff after the exec (cred.cap already derives them from the
+    ids); a set-ID exec to a non-root owner prints none.
+ S11 The mode is read at exec time from the inode: a chmod between the
+    open and the exec is seen; chown clears the bits (px44) so a file
+    chowned by its owner is no longer set-ID (already held).
+ S12 su: unchanged in shape. Installed 0755 (not set-ID); a user's su
+    still refuses by name. Honouring set-ID adds nothing to it, except
+    that nothing a user runs can now become root by it.
+
+Rows that MOVE from "stay PAX's" to Linux's (R5 amended):
+ - setid.c: the execve rows px44 held to tests/mpx5-users.d/setid.pax as
+   PAX's own (the 72-vs-74 line difference: "pax_lines_of ... setid)
+   echo 72"), every row that execs a set-ID copy and prints ids.
+ - ident.c: "a set-ID file not honoured" (ident-setid, mode 6755).
+ - sig.c: the set-ID target rows (sig's `!` line px45/px56 and the rows
+   that exec a set-ID target and ask who may signal it).
+I name each in notes/px103-set-id-and-sudo.md once the witnesses show
+them; the files are tests/mpx5-users.d/{setid,sig}.pax and the
+SETID_SESSIONS/ident lines of tests/mpx5-users.
+
+Witness: user/elf/sid.c, a static no-libc C program (as the others),
+run as pid 1 on PAX and on Linux (a throwaway container for the
+unprivileged half, QEMU for the real-root half, as mpx5-users does).
+Its rows print: ids after exec of each helper (the helper is the same
+binary re-run by name, mode set by the harness: 4755 root, 2755, 6755,
+4755 without S_IXGRP for 2xxx, 2644, 4755 under nosuid mount (tmpfs
+mounted nosuid in the container; mount(2) with MS_NOSUID on PAX), a #!
+script with 4755, a script whose interpreter is 4755), NNP rows
+(set; set again; set with 0, 2; child inherits; exec keeps; set-ID
+ignored), the AT_SECURE read from /proc/self/auxv (the vector's raw
+bytes), PR_GET_DUMPABLE, /proc/self owner via fstat, and the two px102
+rows. Every row is RED on trunk (honouring is absent) before the kernel
+changes. The expected red set on trunk: S1, S2, S3, S4 (the interpreter
+half), S6 (set), S8, S9, S10, S11; GREEN already on trunk because the
+bits do nothing there: S2-without-IXGRP, S4's script half, S5, S6's
+"ignored" half, S7, S12. The ones green on trunk are held anyway.
+
+## B. sudo, in wolf (user/sudo/sudo.lu, installed 4755 root)
+
+The forms: sudo CMD [ARGS...]; -u USER (a name or #uid); -g GROUP
+(a name or #gid); -i [CMD]; -s [CMD]; -l [CMD] (and -U USER);
+-n; -v and -k and -K (accepted, documented no-ops: no timestamp
+without passwords); -E (where the policy allows it); -V; -h; and --.
+
+The policy /etc/sudoers (a subset of sudoers(5)): "user", "#uid",
+"%group" specs; host list ALL; (runas[:rungroup]) with ALL and
+names/#ids; command lists of absolute paths (with args patterns not
+supported: refused) and ALL; tags NOPASSWD: and PASSWD:; Defaults
+secure_path, env_keep (+=, =), loglinelen, env_reset (only "on"
+accepted); #includedir /etc/sudoers.d; comments; line continuation.
+Everything else is refused BY NAME with its line: a parse error that
+denies everything (Linux reports file:line:column and carries on: a
+NAMED DIFFERENCE, as is its prompting: Linux asks for a password
+before saying "not allowed", PAX gives the final words without
+asking).
+
+Refusals by name (each a row; the message text is Linux's where the
+case exists, PAX's own after "(R1)" where it does not):
+ - sudo not setuid / not root-owned: Linux's "sudo must be owned by uid
+   0 and have the setuid bit set"; under no_new_privs a two-line
+   message (measured).
+ - /etc/sudoers owned by a non-root uid, world-writable, group-writable
+   by a non-root group: fatal, "sudo: /etc/sudoers is owned by uid N,
+   should be 0" / "is world writable" / "is owned by gid N, should be
+   0"; a symlink to a root-owned target accepted.
+ - an /etc/sudoers.d file user-owned or world-writable: skipped with a
+   warning (Linux's text).
+ - a rule without NOPASSWD: "no password database yet (R1): only
+   NOPASSWD rules are honoured"; never a prompt; the caller stays
+   unprivileged; exit 1.
+ - an unsupported directive (Cmnd_Alias, User_Alias, Defaults other
+   than the above, !negation, NOEXEC, SETENV tags, a Runas_Alias, a
+   host other than ALL, a command with arguments, a wildcard, a
+   relative command): "sudoers line N: <what> is not supported" and
+   everything denied.
+ - a command path that is a symlink or not absolute in the policy:
+   refused by name; the matching rule never matches.
+ - an over-long line (> 1024) or argv (> the kernel's 64 KiB vector):
+   refused by name.
+ - the caller has no rule: Linux's "<user> is not in the sudoers file"
+   (without asking); a rule that does not allow the command: "Sorry,
+   user X is not allowed to execute '...' as Y on HOST."
+ - -u/-g naming nothing: "sudo: unknown user X" / "unknown group X".
+ - -u USER where the policy's runas list does not include it.
+ - -E when the matching rule is not SETENV-capable: Linux's "you are
+   not permitted to use the -E option" (ALL implies SETENV: measured).
+ - a command that cannot be found / is a directory / not executable:
+   Linux's "command not found" / "is a directory" messages.
+
+Environment: env_reset as measured: kept variables in the caller's
+order (the default env_keep and env_check lists; LD_*, PATH injection,
+BASH_FUNC_*, TZ with a slash/dot-dot, all removed or kept as the
+measured rows say), then MAIL, [PATH], LOGNAME, USER, HOME, SHELL,
+[TERM=unknown], then SUDO_COMMAND, SUDO_USER, SUDO_UID, SUDO_GID.
+-i/-s -c strings escape everything but letters, digits, '_', '-', '$';
+SUDO_COMMAND escapes only blanks; -i puts SHELL in twice. Last
+matching rule wins. secure_path replaces PATH when set.
+
+The log /var/log/sudo.log, root:root 0600, one line per use, allowed
+or refused: "Mon DD HH:MM:SS : user : [reason ; ]PWD=... ; USER=... ;
+[GROUP=... ; ]COMMAND=...", wrapped at 80 columns, one line under
+!loglinelen. PAX has no clock before NTP: the stamp is whatever
+clock_gettime says; rows normalise it.
+
+Honest limits, said in the README beside R6: sudo here trusts the
+policy file alone and authenticates nobody; NOPASSWD rules only. The
+shipped policy (R-px103-1, ruled C): "root ALL=(ALL:ALL) ALL" and
+"#1000 ALL=(ALL:ALL) NOPASSWD: ALL"; lobo (990) gets nothing.
+
+## C. The rows, and what Linux holds them
+
+ 1. sid (set-ID witness, section A): every row identical to Linux,
+    as pid 1 root and as 1000:1000; px102 rows SKIP by name.
+ 2. sudo typed sessions as root, pax and lobo under the shipped
+    subset plus the /etc/sudoers.d rules sudo-ct.sh writes: stdout,
+    stderr and status identical to the recorded Ubuntu output after
+    the named normalisations (host name, date, the sudo version line,
+    the "on HOST" name, Linux-only messages in the named-difference
+    list: parse-error recovery, prompt-before-refusal, PAM).
+ 3. The hostile rows of the contract's item 6 (world-writable
+    /etc/sudoers; a user-owned sudoers.d file; a symlinked
+    /etc/sudoers; sudo without its bit; no_new_privs; LD_PRELOAD and
+    PATH injection; symlink and relative command paths; over-long
+    line and argv), each with Linux's recorded answer or, where PAX
+    deliberately differs, the named difference.
+ 4. The log: format held to Linux line by line, mode 0600 root.
+ 5. The suite tests/mpx5-sudo in tests/ci-plan at mpx5-users' tier.
+
+## D. Expected shape of the work
+
+Red first: sid.c's rows and the sudo rows are committed failing
+(sudo absent: every row "sudo: not found"); then the kernel (cred,
+run_file, files.exec_*, tree mount lookup, user.prctl, procfs status),
+then user/sudo/sudo.lu, then the suite and the docs. One plant on the
+final head, in cred.exec or in sudo's NOPASSWD check.
+
+Left for the second half (notes/px103-set-id-and-sudo.md, section "For
+the passwords lane"): the memory-hard hash with test vectors,
+/etc/shadow, login, su and sudo prompting, a timestamp, and the draft
+of that lane.
