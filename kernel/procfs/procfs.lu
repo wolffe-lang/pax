@@ -201,6 +201,7 @@ pub const PMEM: u64 = 0x1820 // px102: pid/mem, handled by kernel/files
 const PTASK: u64 = 0x1821
 const PTID: u64 = 0x1822 // slot + 1 in bits 40..46, pid still in 16..39
 pub const TMEM: u64 = 0x1823
+const TSTATUS: u64 = 0x1824 // px102: task/<tid>/status, one thread's
 const A_DEV: u64 = 0
 const A_SIZE: u64 = 1
 const A_RO: u64 = 2
@@ -532,7 +533,7 @@ pub fn name(e: u64) -> str {
     if e == PTASK { return "task" }
     if e == 0 { return "proc" }
     if e == 1 { return "self" }
-    if e == 2 || e == PSTATUS { return "status" }
+    if e == 2 || e == PSTATUS || e == TSTATUS { return "status" }
     if e == 3 { return "cgroup" }
     if e == 4 { return "sys" }
     if e == 5 { return "vm" }
@@ -645,7 +646,7 @@ pub fn parent(r: u64) -> u64 {
     if e == SYSCLASSBLOCK { return SYSCLASS }
     if e == PMEM || e == PTASK { return pid_dir(pid_of(r)) }
     if e == PTID { return (pid_of(r) << 16) | PTASK }
-    if e == TMEM { return (r & !EMASK) | PTID }
+    if e == TMEM || e == TSTATUS { return (r & !EMASK) | PTID }
     if e == CBDEV { return SYSCLASSBLOCK }
     if e == BDEV {
         let d = dev_of(r)
@@ -685,7 +686,7 @@ fn gen(r: u64) -> u64 {
     if e == 16 { return G_MEMINFO }
     if e == 18 { return G_FILENR }
     if e == 20 { return G_SOCKSTAT }
-    if e == PSTATUS { return G_PSTATUS }
+    if e == PSTATUS || e == TSTATUS { return G_PSTATUS }
     if e == 21 || e == PSETGROUPS { return G_SETGROUPS }
     if e >= PROTECTED && e < PROTECTED + 4 { return G_PROTECTED }
     if e == UNPRIV { return G_UNPRIV }
@@ -761,7 +762,7 @@ pub fn mode(r: u64) -> u64 {
 pub fn owner(r: u64, area: u64, which: int) -> u64 {
     let e = entry(r)
     let isfd = desc_of(r) != FDS_MAX
-    let per = e == PMEM || e == TMEM || e == PTASK || e == PTID || e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || e == SLIMITS || e == PLIMITS || e == SMOUNTS || e == SMOUNTINFO || e == PMOUNTS || e == PMOUNTINFO || isfd
+    let per = e == PMEM || e == TMEM || e == TSTATUS || e == PTASK || e == PTID || e == 2 || e == 3 || e == 21 || e == PSTATUS || e == PSETGROUPS || e == SCMDLINE || e == SENVIRON || e == PCMDLINE || e == PENVIRON || e == PFD || e == SSTAT || e == PSTAT || e == SLIMITS || e == PLIMITS || e == SMOUNTS || e == SMOUNTINFO || e == PMOUNTS || e == PMOUNTINFO || isfd
     if e != 1 && e != PIDDIR && e != PFDINFO && !per {
         return 0
     }
@@ -825,7 +826,8 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         return NONE
     }
     if d != ROOT && entry(d) == PTID {
-        return if k == 0 && task_tid(d) != 0 { (d & !EMASK) | TMEM } else { NONE }
+        if task_tid(d) == 0 { return NONE }
+        return if k == 0 { (d & !EMASK) | TMEM } else if k == 1 { (d & !EMASK) | TSTATUS } else { NONE }
     }
     // px79: the block devices' directories, counted from kernel/block
     if d != ROOT && entry(d) == SYSBLOCK {
@@ -1015,8 +1017,15 @@ pub fn self_stat() -> u64 {
 /// px25: the child of `d` named by a process number `v` (`/proc/<v>`),
 /// or NONE when no process has it.
 pub fn pid_child(d: u64, v: u64) -> u64 {
-    if d != 0 || sched.proc_slot(v) == sched.SLOTS {
+    if d != 0 {
         return NONE
+    }
+    if sched.proc_slot(v) == sched.SLOTS {
+        // px102: /proc/<tid> of a thread that is not a leader opens, though
+        // no listing names it, as on Linux; it shows that thread's files.
+        let t = sched.trace_live(v)
+        if t == sched.SLOTS { return NONE }
+        return (sched.trace_tgid(t) << 16) | ((t + 1) << 40) | PTID
     }
     pid_dir(v)
 }
@@ -1154,7 +1163,7 @@ fn put_name(base: u64, at: u64, s: u64) -> u64 {
 /// (`s` the process's leader's slot, `pid` its pid) into the frame at
 /// `base`: its length. `area` is the process's area (the signal
 /// actions), `umask` its mask, `fds` the descriptor table's size.
-fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 {
+fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64, ts: u64) -> u64 {
     let me = s == sched.SLOTS
     var k = put_s(base, 0, "Name:\t")
     k = put_name(base, k, s)
@@ -1166,7 +1175,7 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
         k = put_s(base, k, "\nState:\tR (running)\n")
     } else if sched.proc_word(s, 8) == 1 {
         k = put_s(base, k, "\nState:\tZ (zombie)\n")
-    } else if sched.trace_is_stopped(s) {
+    } else if sched.trace_is_stopped(if ts != sched.SLOTS { ts } else { s }) {
         k = put_s(base, k, "\nState:\tt (tracing stop)\n")
     } else if sched.proc_word(s, 11) == 1 {
         k = put_s(base, k, "\nState:\tT (stopped)\n") // px48
@@ -1174,12 +1183,12 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64) -> u64 
         k = put_s(base, k, "\nState:\tS (sleeping)\n")
     }
     let pid = if me { sched.self_pid() } else { pid0 }
-    let tid = if me { sched.self_tid() } else { pid0 }
+    let tid = if me { sched.self_tid() } else if ts != sched.SLOTS { sched.thread_tid(ts, pid0) } else { pid0 }
     k = put_field(base, k, "Tgid", pid)
     k = put_field(base, k, "Ngid", 0)
     k = put_field(base, k, "Pid", tid)
     k = put_field(base, k, "PPid", if me { sched.self_ppid() } else { sched.proc_word(s, 0) })
-    k = put_field(base, k, "TracerPid", sched.tracer_of(if me { sched.self_slot() } else { s }))
+    k = put_field(base, k, "TracerPid", sched.tracer_of(if me { sched.self_slot() } else if ts != sched.SLOTS { ts } else { s }))
     // px39: who the process is (kernel/cred): real, effective, saved,
     // file-system; then its groups, each followed by a space, and one
     // space when there is none (Linux's line, measured both ways).
@@ -1464,9 +1473,9 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
     let base = pa + frames.hhdm()
     var n: u64 = 0
     if g == G_STATUS {
-        n = status(base, sched.SLOTS, 0, area, umask, fds)
+        n = status(base, sched.SLOTS, 0, area, umask, fds, sched.SLOTS)
     } else if g == G_PSTATUS {
-        n = status(base, slot, pid_of(r), area, umask, fds)
+        n = status(base, slot, pid_of(r), area, umask, fds, if entry(r) == TSTATUS { ((r >> 40) & 127) - 1 } else { sched.SLOTS })
     } else if g == G_STAT {
         n = stat(base, if slot == sched.SLOTS { sched.proc_slot(sched.self_pid()) } else { slot }, slot == sched.SLOTS, area)
     } else if g == G_MEMINFO {
