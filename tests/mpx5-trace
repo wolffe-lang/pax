@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# tests/mpx5-trace — px102: ptrace(2), Linux-compatible, so a debugger runs
+# on PAX. Two no-libc programs (user/elf/trace.c, tracee.S; tools/mktrace)
+# run a fixed script of tracing requests, one mode a script, and each mode's
+# transcript is held to what Linux printed for the same binaries
+# (tests/mpx5-trace.d/MODE.linux, observed output, never generated here).
+# The modes: stops regs step core exec syscall notify notify-syscall errors
+# detach-exit exitkill fork-event vfork-event vfork-order clone-event attach
+# seize replace-signal seize-fork fault-handler untraced-db fault-segv
+# fault-ill fault-fpe fault-pass group-exit group-exit-event exec-thread
+# tracer-thread traceme-thread blocked-read blocked-sleep blocked-futex
+# blocked-restart blocked-eintr memory conc tasks regs2 (and regs2-limits,
+# held to PAX's own named refusals), and perm (root-started: run as root only).
+#
+# Every mode runs as root and, but for perm, again as 1000:1000 through px39's
+# `as`, in its own boot. The Linux side: --only linux runs the same binaries
+# in a throwaway container per mode and uid and holds each to its reference
+# (a container engine: PAX_ENGINE=docker|podman).
+#
+#   tests/mpx5-trace [--no-boot | --only build | --only linux]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# Assertions, per tier, firmware, family and mode:
+#   K0 build: the programs static and the layout asserted (tools/mktrace),
+#      the checkers' selftests, the kernel and the images built.
+#   K1 the transcript: tests/mpx5-trace.d/check.py (every named row, then
+#      the whole transcript) and the side-table layout line
+#      (tests/mpx5-trace.d/layout.py).
+#   K2 the machine: no PANIC, the init ended with status 0, every process
+#      frame back, the booted kernel is the one built (its digest).
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when every
+# assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-trace [--no-boot | --only build | --only linux] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+need python3
+
+MODES="stops regs step core exec syscall notify notify-syscall errors detach-exit exitkill fork-event vfork-event vfork-order clone-event attach seize replace-signal seize-fork fault-handler untraced-db fault-segv fault-ill fault-fpe fault-pass group-exit group-exit-event exec-thread tracer-thread traceme-thread blocked-read blocked-sleep blocked-futex blocked-restart blocked-eintr memory conc tasks regs2 regs2-limits perm"
+work=$PAX_BUILD/mpx5-trace
+runs=$PAX_BUILD/mpx5-trace-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+ref_of() { case $1 in regs2-limits) echo "$here/mpx5-trace.d/regs2-limits.pax" ;; *) echo "$here/mpx5-trace.d/$1.linux" ;; esac; }
+family_modes() { # family -> its modes (perm needs a root start)
+    for m in $MODES; do [ "$1" = root ] || [ "$m" != perm ] && echo "$m"; done
+}
+
+if [ "$only" = linux ]; then
+    engine=${PAX_ENGINE:-}
+    [ -n "$engine" ] || for e in docker podman; do command -v "$e" >/dev/null 2>&1 && { engine=$e; break; }; done
+    [ -n "$engine" ] || die "--only linux needs a container engine (PAX_ENGINE=docker|podman)"
+    image=${PAX_TREE_IMAGE:-docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1}
+    need cc readelf nm
+    rm -rf "$work"; mkdir -p "$work/bin"
+    "$PAX_ROOT/tools/mktrace" "$work/bin" >&2 || die "tools/mktrace"
+    for fam in 0 1000; do
+        for m in $MODES; do
+            [ "$m" != perm ] || [ "$fam" = 0 ] || continue
+            out=$work/linux-$m-$fam.txt
+            "$engine" run --rm --user "$fam:$fam" --pids-limit 256 -v "$work/bin:/w:ro" "$image" /w/trace /w/tracee "$m" > "$out" 2>&1 || true
+            if cmp -s "$out" "$(ref_of "$m" | sed 's/\.pax$/.linux/')"; then
+                say "PASS K0 (linux) $m uid $fam: byte-identical to its reference"
+            else
+                bad "K0 (linux) $m uid $fam: differs from its reference: $(diff "$out" "$(ref_of "$m" | sed 's/\.pax$/.linux/')" | head -n 6 | tr '\n' '|')"
+            fi
+        done
+    done
+    [ "$fail" = 0 ] && say "mpx5-trace (linux): PASS" || say "mpx5-trace (linux): FAIL"
+    exit "$fail"
+fi
+
+need readelf nm cc
+wolf=${PAX_WOLF:-wolf}
+need "$wolf"
+say "wolf: $("$wolf" --version | head -n 1)"
+"$PAX_ROOT/tools/fetch-limine" || exit 2
+rm -rf "$work"
+mkdir -p "$work/bin"
+why=
+python3 -I "$here/mpx5-trace.d/check.py" --selftest > "$work/selftest.txt" 2>&1 || why+=" the checker's selftest;"
+python3 -I "$here/mpx5-trace.d/layout.py" --selftest >> "$work/selftest.txt" 2>&1 || why+=" the layout checker's selftest;"
+"$PAX_ROOT/tools/mktrace" "$work/bin" > "$work/probes.txt" || why+=" tools/mktrace;"
+"$PAX_ROOT/tools/mkas" "$work/bin" >> "$work/probes.txt" || why+=" tools/mkas;"
+sed 's/^/  program: /' "$work/probes.txt" >&2
+for fam in root user; do
+    for m in $(family_modes "$fam"); do
+        if [ "$fam" = user ]; then
+            printf '/bin/as 1000 1000 /bin/trace /bin/tracee %s\n' "$m" > "$work/$fam-$m.run"
+            files=(/bin/as="$work/bin/as":755 /bin/trace="$work/bin/trace":755 /bin/tracee="$work/bin/tracee":755)
+        else
+            printf '/bin/trace /bin/tracee %s\n' "$m" > "$work/$fam-$m.run"
+            files=(/bin/trace="$work/bin/trace":755 /bin/tracee="$work/bin/tracee":755)
+        fi
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$fam-$m.cpio" "${files[@]}" /tmp/:1777 "/etc/pax-run=$work/$fam-$m.run:644" > "$work/$fam-$m.initramfs.txt" \
+            || why+=" tools/mkinitramfs $fam-$m;"
+    done
+done
+for tier in $tiers; do
+    flag=(); [ "$tier" = release ] && flag=(--release)
+    mkdir -p "$work/$tier"
+    log=$work/$tier/kmain_console.build-kernel.log
+    if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+        cat "$log" >&2
+        for fam in root user; do
+            for m in $(family_modes "$fam"); do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$fam-$m.cpio" initramfs.cpio "$elf" "$work/$tier/$fam-$m.iso" >/dev/null \
+                    || why+=" $tier $fam-$m: mkimage;"
+            done
+        done
+        printf '%s\n' "$elf" > "$work/$tier/elf.path"
+        say "built $tier: elf $(sha256_of "$elf")"
+    else
+        cat "$log" >&2
+        why+=" $tier kmain_console: tools/build-kernel;"
+    fi
+done
+if [ "$only" = build ] || [ "$noboot" = 1 ]; then
+    [ -z "$why" ] && say "PASS K0 (build): programs static, selftests, kernel ($tiers) and every image built" || bad "K0 (build):$why"
+    exit "$fail"
+fi
+[ -z "$why" ] && say "PASS K0: programs static, checker selftests, kernel ($tiers) and every image built" || { bad "K0:$why"; exit 1; }
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+stopped=
+for leg in $legs; do
+    [ -z "$stopped" ] || break
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        [ -z "$stopped" ] || break
+        elf=$(cat "$work/$tier/elf.path")
+        digest=$(sha256_of "$elf")
+        for fam in root user; do
+            [ -z "$stopped" ] || break
+            for m in ${PAX_TRACE_MODES:-$(family_modes "$fam")}; do
+                [ "$fam" = root ] || [ "$m" != perm ] || continue
+                id="$tier $leg $fam $m"
+                before=$fail
+                iso=$work/$tier/$fam-$m.iso
+                log=$PAX_BUILD/mpx5-trace-$tier-$leg-$fam-$m.serial.log
+                rm -f "$log" "$log.verdict"
+                hrc=0
+                "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 180 \
+                    --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+                ran=$((ran + 1))
+                printf '%s %s %s halt-status=%s serial=%s iso=%s\n' "$tier" "$leg" "$fam-$m" "$hrc" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+                norm=$log.norm; serial_norm "$log" > "$norm"
+                out=$PAX_BUILD/mpx5-trace-$tier-$leg-$fam-$m.session
+                awk '/^user: exec pid 1 / { on = 1; next } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                     on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+                if [ "$m" = errors ]; then
+                    # The kernel narrates the two deliberately unknown requests.
+                    grep '^ptrace:' "$out" > "$out.refusals"
+                    printf 'ptrace: refused register set 0x000000007fffffff\nptrace: refused request 0x000000007fffffff\n' > "$out.expected"
+                    grep -v '^ptrace:' "$out" > "$out.txt"
+                else
+                    cp "$out" "$out.txt"
+                fi
+                why=
+                [ "$m" != errors ] || cmp -s "$out.expected" "$out.refusals" || why+=" the kernel's refusal narration is not the two expected lines;"
+                gate=$(python3 -I "$here/mpx5-trace.d/check.py" "$m" "$out.txt" 2>&1) || why+=" $(printf '%s\n' "$gate" | grep '^FAIL' | tr '\n' ' ');"
+                lay=$(python3 -I "$here/mpx5-trace.d/layout.py" "$norm" 2>&1) || why+=" the side-table layout line: $(printf '%s' "$lay" | head -n 2 | tr '\n' ' ');"
+                [ -z "$why" ] && say "PASS K1 $id: $(printf '%s\n' "$gate" | grep -c '^PASS') checks, transcript byte-identical to its reference" || bad "K1 $id:$why"
+
+                why=
+                grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
+                grep -q '^PAX: init .* ended with status 0; nothing left to run$' "$norm" || why+=" no 'PAX: init … ended with status 0';"
+                awk '/^user: frames free / { seen++; if ($4 != $10) bad=1 } END { exit seen != 1 || bad }' "$norm" || why+=" frames not all back ($(grep -m1 '^user: frames free ' "$norm"));"
+                grep -q "^kernel: .* sha256 $digest, " "$norm" || why+=" the booted kernel is not the one built;"
+                [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+                [ -z "$why" ] && say "PASS K2 $id: init ended, frames back, kernel $digest; $(tail -n 1 "$log.verdict")" || bad "K2 $id:$why"
+
+                if [ "$before" = 0 ] && [ "$fail" != 0 ]; then
+                    stopped="$id"
+                    say "FAIL stopped early: $id failed; the later boots would fail the same way and are not run"
+                    break
+                fi
+            done
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-trace: PASS" || say "mpx5-trace: FAIL"
+exit "$fail"
