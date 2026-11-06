@@ -26,8 +26,12 @@ new suite, `tests/mpx5-lsp`, keeps the session as a row.
 
 ## 2. Inputs, verified
 
-- **Base:** pax trunk `411fc9f5`. The work began on `37217ba0` and was rebased once, with no conflict; shas from before
-  the rebase are named as such, and that head is kept on origin as `px99-prerebase`.
+- **Base:** pax trunk `aba55824`. The work began on `37217ba0` and was rebased twice: onto `411fc9f5` with no
+  conflict, then onto `aba55824`, where the map's groups, the README's suites table, `docs/SOURCES.md` and the
+  CHANGELOG met trunk's own additions beside them, each kept whole beside this branch's. The second base moves the
+  kernel this suite boots (the network's modules, which every kernel links); the suite uses no network, and its rows
+  at the head are the same (§4.8). Shas from the first base are named "before the rebase" (that head is kept on
+  origin as `px99-prerebase`), and the development runs of §4.3 ran on the second (`px99-prerebase2`).
 - **The server:** `/usr/bin/wolf`, sha256 `2df1fb7660ce27dd6bd0d8c7395abec74bb399824842f89b8a407060be80ab59`,
   16,257,584 bytes, and `wolf-cimport-worker` `11850e70…`, the bytes `user/wolf.sums` records for `tools/mkwolf`'s
   build of wolf-lang `v0.2.36` (`5adf3d91`, Rust 1.97.1, `x86_64-unknown-linux-musl`). Three earlier builds of the
@@ -50,7 +54,7 @@ new suite, `tests/mpx5-lsp`, keeps the session as a row.
 
 ## 3. Prediction, scored
 
-The prediction was committed first (`318d2a7a`; `faf8e5d4` before the rebase) and is kept below as written. Scored:
+The prediction was committed first (`523abd49`; `faf8e5d4` before the rebase) and is kept below as written. Scored:
 
 | | predicted | measured | |
 |---|---|---|---|
@@ -177,16 +181,17 @@ The rows, per tier, firmware and run:
 - **The first boot** (`6014b64a`, before the rebase; native BIOS, KVM): every run byte-identical to Linux, LSP3 clean,
   at the first try. It also showed a hole in the suite: LSP2 **passed with its witness absent**, because python's
   error went to standard error and an empty capture read as a pass (`notes/px99/dev1-vacuous-lsp2-6014b64a.txt`). A
-  row that has never been red had passed for nothing. The fix (`bc02415e`) makes a witness that cannot run, or exits
+  row that has never been red had passed for nothing. The fix (`c1bd9138`) makes a witness that cannot run, or exits
   other than 0, a failure, and runs the witness's own proof first.
-- **Red first** (`1421edf0`, before the rebase; `07eb969f` after; every leg under KVM): the fix and the self-test
+- **Red first** (`1421edf0`, before the rebase; `1f770fa1` after; every leg under KVM): the fix and the self-test
   committed, the witness not yet. LSP2 red by name in the self-test and in all 16 runs; LSP0, LSP1 and LSP3 green on
   all four legs (`notes/px99/dev2-red-lsp2-1421edf0.txt`).
-- **Green:** with `rows.py` (`c05e1106`) the self-test passes whole and every LSP2 row holds (§4.3).
+- **Green:** with `rows.py` (`0a60558e`) the self-test passes whole and every LSP2 row holds (§4.3).
 
 ### 4.3 At the head
 
-Development runs at `33062033` (the rebased head, the witness in), not records (those are §4.8):
+Development runs at `33062033` (the head on trunk `411fc9f5`, `px99-prerebase2`; its files are this branch's
+`ab987672`), not records (those are §4.8):
 
 | run | legs | LSP0 | LSP1 | LSP2 | LSP3 | FAIL |
 |---|---|---|---|---|---|---|
@@ -267,17 +272,32 @@ server negotiates full sync). yew's own client rows meet them first.
 
 ### 4.8 The gauntlet and the plant
 
-(Taken at the coordinator's word, once trunk has settled: the record at the head, every END line, and the plant's.)
+**The gauntlet**, at the head, recorded by the org's `gauntlet-record.sh` from a clean checkout, in one take of the
+host's two lock names inside one slot's CPUs; each step's output indented two spaces; the first nonzero step stops it:
+- `locks`, then `wolf-pin` (the kernel's compiler, `kernel/wolf.pin`'s archive by digest);
+- `dev-wolf`: the dev compiler given to the suite held to `user/wolf.sums` (the suite's LSP0 holds it again; CI's
+  job builds its own from source);
+- `preflight`: the lane's engines, the build image, KVM;
+- `ci-plan`: `tests/ci-plan`;
+- `mpx5-lsp`: the suite on every leg, native and release, BIOS and UEFI, under KVM, its three phases;
+- `mpx5-lsp-tcg`: the same images booted under TCG, native BIOS, as CI's runners boot.
+
+**The plant**, `px99-plant-witness`: the head plus one commit, one file, one hunk. `tests/mpx5-lsp.d/rows.py`'s
+`DIAGNOSTICS` is 2 where `typed.lu` has one error. P8 predicts LSP2 red by name (the self-test and both open-fix runs)
+and LSP1 green, from one step, `tests/mpx5-lsp --tier native --firmware bios`; its `FAIL` lines reach the record at
+column 0. It is pushed with no pull request and recorded by `gauntlet-record.sh --plant LSP2`.
+
+Both records, with every END line, are in the pull request's body.
 
 ### 4.9 The CI wiring, red first
 
-`tests/ci-plan` derives a suite's paths from its script. With the job added (`2143827c`; `47f4ffdb` before the
+`tests/ci-plan` derives a suite's paths from its script. With the job added (`e3421f84`; `47f4ffdb` before the
 rebase) and nothing else, three rows went red by name, each because it lists its suites exactly and the derivation
 now adds mpx5-lsp: `P2 as reaches every suite whose user run uses it`, `P2 tools/mkas reaches the user runs` and `P2
 compiler pin and dev root reach both shared-stager readers`. The rows were right to go red. With mpx5-lsp in `@user`
-and `@asuser` and on the dev compiler's map lines (`616fb9a3`), the three rows naming it and four new ones
-(`3ca99979`: the client and its builder, the suite's own files, the dev compiler's bytes and builders, and the
-futex, readiness and process modules), all 328 checks pass. That makes the change `cross-cutting`: CI's own files and
+and `@asuser` and on the dev compiler's map lines (`16a2707e`), the three rows naming it and four new ones
+(`89a3b36f`: the client and its builder, the suite's own files, the dev compiler's bytes and builders, and the
+futex, readiness and process modules), all 328 checks passed; 329 at the head, after trunk's own rows came in. That makes the change `cross-cutting`: CI's own files and
 CI's own proof.
 
 ## 5. Done-when
