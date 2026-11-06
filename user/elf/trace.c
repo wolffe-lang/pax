@@ -1025,17 +1025,17 @@ static i64 mmap6(u64 addr, u64 len, u64 prot, u64 flags, i64 fd) {
 }
 static int memory_mode(const char *mode) { return equal(mode, "memory"); }
 static __attribute__((noreturn)) void role_mem(void) {
-    if (mmap6(MA, 0x2000, 3, 0x32, -1) != (i64)MA) done(111);
-    if (mmap6(MB, 0x1000, 3, 0x32, -1) != (i64)MB) done(111);
-    if (mmap6(MD, 0x1000, 3, 0x21, -1) != (i64)MD) done(111);
+    if (mmap6(MA, 0x2000, 3, 0x32, -1) != (i64)MA) done(121);
+    if (mmap6(MB, 0x1000, 3, 0x32, -1) != (i64)MB) done(122);
+    if (mmap6(MD, 0x1000, 3, 0x21, -1) != (i64)MD) done(123);
     for (u64 i = 0; i < 0x2000; i++) ((volatile unsigned char *)MA)[i] = (unsigned char)(i * 7 + 1);
     for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MB)[i] = 0x5a;
     for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MD)[i] = 0x3c;
-    if (call(10, MB, 0x1000, 0, 0, 0)) done(111); /* PROT_NONE */
+    if (call(10, MB, 0x1000, 0, 0, 0)) done(124); /* PROT_NONE */
     i64 fd = call(2, (i64)self_path, 0, 0, 0, 0);
-    if (fd < 0) done(111);
-    if (mmap6(MC, 0x1000, 1, 2, fd) != (i64)MC) done(111);
-    if (mmap6(MC2, 0x1000, 1, 2, fd) != (i64)MC2) done(111);
+    if (fd < 0) done(125);
+    if (mmap6(MC, 0x1000, 1, 2, fd) != (i64)MC) done(126);
+    if (mmap6(MC2, 0x1000, 1, 2, fd) != (i64)MC2) done(127);
     call(3, fd, 0, 0, 0, 0);
     __asm__ volatile("int3");
     u64 bits = 0;
@@ -1046,7 +1046,7 @@ static __attribute__((noreturn)) void role_mem(void) {
     __asm__ volatile("mov %0,%%r15\nint3" : : "r"(bits) : "r15");
     char *av[] = { (char *)self_path, "orphan-target", 0 }; char *ev[] = { 0 };
     call(59, (i64)self_path, (i64)av, (i64)ev, 0, 0);
-    done(111);
+    done(128);
 }
 static void bytes(const char *name, const unsigned char *b, u64 n) {
     text(name); text("=");
