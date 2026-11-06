@@ -24,3 +24,13 @@ PAX at 9a2109a4 (restart.txt: "keep PAX's own settling"): the timed futex
 and receive and sigsuspend show their -EINTR result rather than a restart
 code, and blocked-order lacks the exit stop: all RED by name at the
 attach-regs rows and T-syscall-exit-before-signal.
+
+Measured on Linux (the witness commit's binaries; three byte-identical
+takes per mode as uid 0 and as uid 1000, uid 0 equal to uid 1000):
+  END linux-blocked-timed-futex-0/-1000, linux-blocked-timed-recv-0/-1000,
+  linux-blocked-sigsuspend-0/-1000, linux-blocked-order-0/-1000, all exit=0
+  takes=3. References: tests/mpx5-trace.d/blocked-timed-*.linux,
+  blocked-sigsuspend.linux, blocked-order.linux. Every prediction held
+  (the timed futex at -516 with orig_rax 202, the timed receive at -4,
+  sigsuspend at -514, and the order: a syscall-exit stop, then the
+  signal-delivery stop, both with rax -512).
