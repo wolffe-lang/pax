@@ -38,3 +38,25 @@ kept out of tests/mpx5-trace's list until they are):
                  stop, as lifecycle.txt named.
 Owed beside them, with no witness yet: group-stop and PTRACE_LISTEN, and
 ATTACH to a job-control-stopped target.
+
+Fixed at f1db73e0, both green (root, BIOS/KVM; frames back):
+  consume-stop   wait(2) lets any thread of the tracer's process wait for
+                 the tracee (kernel/sched: tracer_here); requests stay the
+                 tracer thread's (the other thread's GETREGS is -ESRCH).
+  exit-untraced  an untraced caller's exit_group parks every attached
+                 TRACEEXIT thread in EVENT_EXIT and goes on exiting; the
+                 parked threads are not ended with it, and the leader's
+                 death is reported after theirs.
+Both are in tests/mpx5-trace now.
+
+tgkill of a joined thread (the mpx3-threads T1 report). Measured, not
+guessed: the new witnesses tgkill-ended and tgkill-traced join a thread by
+its clear-child-tid word and then tgkill/tkill its tid. On PAX the answer
+is -ESRCH at the base kernel (411fc9f5's kernel and boot, with the same
+programs) and at this lane's head alike: nothing here changed it. On
+Linux it is a race with the exiting thread (the word is cleared before the
+thread is gone): untraced, 0 in all takes on a 2-CPU slice; traced, 0 in
+one take and -ESRCH in another. The mpx3-threads T1 line therefore
+differs when Linux's run lands on the 0 side (the checkpoint's six CPUs).
+No kernel change; the two witnesses are kept out of the suite because
+Linux gives no stable reference for them.
