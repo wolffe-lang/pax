@@ -1572,6 +1572,24 @@ static void regs2_rows(void) {
     w2 = saved; w2.rdi = 0x1234; w2.orig_rax = 0; set_regs("regs2.set.valid", &w2);
     regs2_kill();
 }
+/* A debugger restores what it read: a live tracee that set fs_base through
+   arch_prctl, GETREGS then SETREGS of the same image must succeed and
+   change nothing (R-px102-3's condition). */
+static void regs2_roundtrip(void) {
+    getregs();
+    r.rip = SYSCALL; r.rax = 158; r.rdi = 0x1002; r.rsi = 0x402000; r.orig_rax = ~0UL;
+    ok("regs2.rt.prepare", ptrace(SETREGS, 0, (u64)&r));
+    resume(CONT, "regs2.rt.status");
+    getregs();
+    hex("regs2.rt.fs_base", r.fs_base);
+    struct regs back = r;
+    dec("regs2.rt.setregs", ptrace(SETREGS, 0, (u64)&back));
+    getregs();
+    int same = 1;
+    for (u64 i = 0; i < sizeof(r); i++) if (((unsigned char *)&r)[i] != ((unsigned char *)&back)[i]) same = 0;
+    dec("regs2.rt.same", same);
+    hex("regs2.rt.fs_base.after", r.fs_base);
+}
 /* Named limits (notes/px102/registers.txt, R-px102-3): what Linux accepts
    and PAX refuses by design. Compared with PAX's own reference. */
 static void regs2_limits(void) {
@@ -1586,6 +1604,7 @@ static void regs2_limits(void) {
     struct regs w2;
     w2 = saved; w2.rip = 0x0001000000000000UL; set_regs("regs2.set.rip.noncanonical", &w2);
     w2 = saved; w2.flags = ~0UL; set_regs("regs2.set.flags.nt", &w2);
+    regs2_roundtrip();
     regs2_kill();
 }
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {

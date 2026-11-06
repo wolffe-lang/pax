@@ -43,6 +43,7 @@ ROWS = {
     'regs2-limits': (
         ('regs2-limits-poke', 'regs2.poke.rip.noncanonical=', 'regs2.poke.gs.user='),
         ('regs2-limits-setregs', 'regs2.set.rip.noncanonical=', 'regs2.set.flags.nt='),
+        ('regs2-roundtrip', 'regs2.rt.prepare=', 'regs2.rt.fs_base.after='),
     ),
     'conc': (
         ('conc-memory', 'conc.a.poke=', 'conc.b.data='),
