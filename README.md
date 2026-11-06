@@ -76,8 +76,8 @@ first program it prints how long its boot took and how much of that the console 
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it | `584b18a3` (wolf 0.2.36) |
-| yew | the editor | `1218169e` |
-| lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `64e7339d` |
+| yew | the editor | `2eb9cb9b` |
+| lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
 
