@@ -849,6 +849,7 @@ pub fn sleep_current(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, wake), wake)
     put_field(c, offset_of(Thread, state), SLEEPING)
     put_field(c, offset_of(Thread, rst), W_SLEEP) // px26: a signal ends it with -EINTR
+    trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
     wake_sleepers()
     run_next()
 }
@@ -2538,6 +2539,7 @@ pub fn futex_wait(f: u64, key: u64, bits: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, wake), wake)
     put_field(c, offset_of(Thread, state), FUTEX)
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_FUTEX } else { W_TIMED })
+    trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
     wake_sleepers()
     run_next()
 }
