@@ -441,6 +441,12 @@ pub fn before_exit(f: u64, nr: u64, status: u64) -> u64 {
         trace_state.set_exit_pending(s, 0)
         return 0
     }
+    if nr == 231 && sched.tracer_of(s) == 0 {
+        // An untraced caller's exit_group still gives every attached thread
+        // with TRACEEXIT its EVENT_EXIT stop (ptrace(2)); it goes on exiting.
+        sched.trace_group_exit(status)
+        return 0
+    }
     if sched.tracer_of(s) == 0 || trace_state.options(s) & 0x40 == 0 { return 0 }
     if nr == 231 { sched.trace_group_exit(status) } // exit_group: the others stop too
     trace_state.set_exit_pending(s, 1)

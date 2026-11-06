@@ -1357,7 +1357,8 @@ fn end_others(l: u64, keep: u64, status: u64) {
     var t: u64 = FIRST
     while t < SLOTS {
         let st = field(t, offset_of(Thread, state))
-        if t != keep && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 {
+        let held = trace_state.exit_pending(t) == 3 && tracer_of(keep) == 0 // px102: parked in EVENT_EXIT for its tracer
+        if t != keep && !held && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 {
             if st == READY {
                 unqueue(t)
             }
@@ -4037,5 +4038,5 @@ fn trace_exit_thread(s: u64) {
     if s != l { let _traced = trace_death(s) }
     trace_release_owned(field(s, offset_of(Thread, pid)))
     if s == l { put_field(s, offset_of(Thread, gone), 1) }
-    put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) - 1)
+    if field(l, offset_of(Thread, threads)) > 0 { put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) - 1) }
 }
