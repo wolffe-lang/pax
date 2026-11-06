@@ -31,3 +31,56 @@ frame (a rewound read: rip AT the SYSCALL and rax its number; a sleep or
 futex wait: its -EINTR result), never -512/-516, and a sleep or futex
 wait interrupted by the attach's SIGSTOP returns -EINTR to the program
 when resumed. restart_syscall (219) is not implemented.
+
+Measured, 2026-11-06T00:35Z-01:10Z
+
+Linux (540a97bb's binaries; a fresh container per take): every
+prediction held, with one detail the prediction left open: at the
+restarted call's syscall-entry stop rip is already past the SYSCALL
+(after-syscall=1), as at any entry stop. Ten takes per mode as uid 0 and
+ten as uid 1000, all byte-identical, uid 0 equal to uid 1000:
+  END linux-blocked-read-0 exit=0 takes=10     (and -1000)
+  END linux-blocked-sleep-0 exit=0 takes=10    (and -1000)
+  END linux-blocked-futex-0 exit=0 takes=10    (and -1000)
+  END linux-blocked-restart-0 exit=0 takes=10  (and -1000)
+  END linux-blocked-eintr-0 exit=0 takes=10    (and -1000)
+References: 9c18a183's tests/mpx5-trace.d/blocked-*.linux.
+
+Red on b22824b3's kernel (9c18a183's witnesses), every mode by name:
+  blocked-read     FAIL T-read-attach-regs (rax 0: PAX's rewound frame)
+  blocked-sleep    FAIL T-sleep-attach-regs, T-sleep-restart-syscall (rax
+                   0; the sleep was cut short and returned 0 at once: the
+                   next entry stop was exit_group's, orig_rax 231)
+  blocked-futex    FAIL T-futex-attach-regs, T-futex-restarted (rax -110;
+                   the wait's -ETIMEDOUT placeholder reached the program,
+                   which exited 112)
+  blocked-restart  FAIL T-restart-attach-regs (handler path already right)
+  blocked-eintr    FAIL T-eintr-attach-regs (likewise)
+
+The changes:
+  184a4a59  A tracing stop (signal-delivery or INTERRUPT) out of a wait
+            shows Linux's registers: a rewound read/write/wait or an
+            untimed futex wait rip past the SYSCALL and rax -512, a
+            relative sleep -516, an absolute clock_nanosleep -514; orig_rax
+            the call. Resumed with no handler, a code still in rax
+            restarts the call (rip back over the SYSCALL, rax orig_rax, or
+            restart_syscall for -516); with a handler, -512 restarts under
+            SA_RESTART and otherwise answers -EINTR (a relative sleep
+            writes its time left). restart_syscall (219) sleeps out the
+            saved block. The restarted call is a new call: its own entry
+            stop. Other waits (timed futex, timed receive, sigsuspend)
+            keep PAX's own settling: named, no rows yet.
+  536c082e  A traced call's direct-return wait (sleep, futex) takes its
+            syscall-exit stop when it completes (before, PTRACE_SYSCALL
+            never saw it, and the next call's entry stop was skipped).
+
+Green at 536c082e (each case also checked no PANIC, init status 0,
+frames restored, the booted kernel's commit and digest, T-trace-layout):
+  root, all 35 modes, BIOS/KVM: 35 END lines exit=0
+  uid/gid 1000, all 35 modes: 35 END lines exit=0
+  BIOS/TCG and UEFI/KVM: the five blocked modes, group-exit,
+    tracer-thread and core: 8 + 8 END lines exit=0
+
+Named, not done: a syscall-exit stop with rax -ERESTART* before the
+signal-delivery stop when a PTRACE_SYSCALL tracee is interrupted inside
+a call (Linux shows both; PAX shows only the signal stop).
