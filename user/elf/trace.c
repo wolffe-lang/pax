@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -1206,6 +1206,137 @@ static void perm_rows(void) {
         dec("perm.exit.pid", got == pids[v]); hex("perm.exit.status", (unsigned)st);
     }
 }
+
+/* px102 concurrency and task-alias witnesses (notes/px102/concurrent.txt). */
+static int conc_mode(const char *mode) { return equal(mode, "conc"); }
+static int tasks_mode(const char *mode) { return equal(mode, "tasks"); }
+static i64 pt(i64 pid, i64 req, u64 addr, u64 data) { return call(101, req, pid, addr, data, 0); }
+static i64 conc_start(const char *tracee) {
+    i64 pid = call(57, 0, 0, 0, 0, 0);
+    if (pid < 0) done(111);
+    if (pid == 0) {
+        if (call(101, TRACEME, 0, 0, 0, 0)) done(111);
+        char *av[] = { (char *)tracee, 0 }; char *ev[] = { 0 };
+        call(59, (i64)tracee, (i64)av, (i64)ev, 0, 0);
+        done(111);
+    }
+    return pid;
+}
+static u64 pt_peek(const char *name, i64 pid, u64 addr) {
+    u64 v = 0; ok("conc.peek", pt(pid, PEEKDATA, addr, (u64)&v)); hex(name, v); return v;
+}
+static void conc_rows(const char *tracee) {
+    i64 a = conc_start(tracee), b = conc_start(tracee);
+    dec("conc.distinct", a != b);
+    if (wait_other(a, "conc.a.initial") != 0x57f) fail("conc.a.initial");
+    if (wait_other(b, "conc.b.initial") != 0x57f) fail("conc.b.initial");
+    ok("conc.a.cont", pt(a, CONT, 0, 0)); ok("conc.b.cont", pt(b, CONT, 0, 0));
+    if (wait_other(a, "conc.a.int3") != 0x57f) fail("conc.a.int3");
+    if (wait_other(b, "conc.b.int3") != 0x57f) fail("conc.b.int3");
+    ok("conc.a.poke", pt(a, POKEDATA, DATA, 0xaaaaaaaaaaaaaaaaUL));
+    ok("conc.b.poke", pt(b, POKEDATA, DATA, 0xbbbbbbbbbbbbbbbbUL));
+    pt_peek("conc.a.data", a, DATA); pt_peek("conc.b.data", b, DATA);
+    child = a; getregs(); r.rdi = 0x1111; ok("conc.a.setregs", pt(a, SETREGS, 0, (u64)&r));
+    child = b; getregs(); r.rdi = 0x2222; ok("conc.b.setregs", pt(b, SETREGS, 0, (u64)&r));
+    ok("conc.a.cont2", pt(a, CONT, 0, 0)); ok("conc.b.cont2", pt(b, CONT, 0, 0));
+    int sa = 0, sb = 0;
+    i64 w1, w2;
+    do { w1 = call(61, -1, (i64)&sa, WALL, 0, 0); } while (w1 == -4);
+    do { w2 = call(61, -1, (i64)&sb, WALL, 0, 0); } while (w2 == -4);
+    dec("conc.any.distinct", w1 != w2);
+    dec("conc.any.both-seen", (w1 == a && w2 == b) || (w1 == b && w2 == a));
+    dec("conc.any.status-a", (w1 == a ? sa : sb) == 0x57f);
+    dec("conc.any.status-b", (w1 == b ? sa : sb) == 0x57f);
+    pt_peek("conc.a.value", a, DATA); pt_peek("conc.b.value", b, DATA);
+    child = a; getregs(); hex("conc.a.rdi", r.rdi);
+    child = b; getregs(); hex("conc.b.rdi", r.rdi);
+    ok("conc.a.kill", pt(a, KILL, 0, 0));
+    int st = 0;
+    do { w1 = call(61, a, (i64)&st, WALL, 0, 0); } while (w1 == -4);
+    dec("conc.a.reaped", w1 == a); hex("conc.a.status", (unsigned)st);
+    dec("conc.b.nohang", call(61, b, (i64)&st, WALL | 1, 0, 0));
+    child = b; getregs(); hex("conc.b.rdi.after", r.rdi);
+    dec("conc.a.gone", pt(a, GETREGS, 0, (u64)&r));
+    ok("conc.b.cont3", pt(b, CONT, 0, 0));
+    do { w1 = call(61, b, (i64)&st, WALL, 0, 0); } while (w1 == -4);
+    dec("conc.b.reaped", w1 == b); hex("conc.b.status", (unsigned)st);
+    dec("conc.echild", call(61, -1, (i64)&st, WALL | 1, 0, 0));
+    child = 0;
+}
+static volatile u64 task_tid, task_mark = 0x0123456789abcdefUL;
+static void tasks_block(void) { group_ready = 1; block_forever(); }
+static __attribute__((noreturn)) void role_tasks(void) {
+    task_tid = (u64)trace_spawn_body(body_stack + sizeof(body_stack), &body_ctid, tasks_block);
+    while (!group_ready) yield();
+    __asm__ volatile("int3");
+    done(37);
+}
+static void path2(char *dst, i64 pid, i64 tid, const char *leaf) {
+    path(dst, pid, 0, "/task/");
+    u64 k = 0; while (dst[k]) k++;
+    char num[24]; unsigned n = 0;
+    do { num[n++] = '0' + tid % 10; tid /= 10; } while (tid);
+    while (n) dst[k++] = num[--n];
+    for (const char *s = leaf; *s; s++) dst[k++] = *s;
+    dst[k] = 0;
+}
+static void tasks_rows(void) {
+    resume(CONT, "tasks.ready.status");
+    u64 tid = 0;
+    ok("tasks.tid.peek", pt(child, PEEKDATA, (u64)&task_tid, (u64)&tid));
+    dec("tasks.tid.distinct", tid != (u64)child && tid != 0);
+    char name[96];
+    path2(name, child, tid, "/mem");
+    i64 fd = call(2, (i64)name, 2, 0, 0, 0);
+    dec("tasks.thread.open", fd < 0 ? fd : 0);
+    if (fd >= 0) {
+        u64 got = 0, put = 0x1020304050607080UL;
+        dec("tasks.thread.pread", call(17, fd, (i64)&got, 8, (u64)&task_mark, 0)); hex("tasks.thread.value", got);
+        dec("tasks.thread.pwrite", call(18, fd, (i64)&put, 8, (u64)&task_mark, 0));
+        pt_peek("tasks.thread.after", child, (u64)&task_mark);
+        ok("tasks.thread.restore", pt(child, POKEDATA, (u64)&task_mark, 0x0123456789abcdefUL));
+        call(3, fd, 0, 0, 0, 0);
+    }
+    path2(name, child, child, "/mem");
+    fd = call(2, (i64)name, 2, 0, 0, 0);
+    dec("tasks.leader.open", fd < 0 ? fd : 0);
+    if (fd >= 0) call(3, fd, 0, 0, 0, 0);
+    path2(name, child, tid + 100000, "/mem");
+    dec("tasks.bogus.open", call(2, (i64)name, 2, 0, 0, 0));
+    path(name, (i64)tid, 0, "/mem");
+    fd = call(2, (i64)name, 2, 0, 0, 0);
+    dec("tasks.tidpath.open", fd < 0 ? fd : 0);
+    if (fd >= 0) call(3, fd, 0, 0, 0, 0);
+    for (int t = 0; t < 2; t++) {
+        path2(name, child, t ? child : (i64)tid, "/status");
+        fd = call(2, (i64)name, 0, 0, 0, 0);
+        char buf[2048]; i64 n = fd < 0 ? fd : call(0, fd, (i64)buf, sizeof(buf) - 1, 0, 0);
+        i64 tracer = -1;
+        if (n > 0) {
+            buf[n] = 0;
+            const char *key = "TracerPid:";
+            for (i64 i = 0; i < n; i++) {
+                if (i && buf[i - 1] != '\n') continue;
+                u64 j = 0;
+                while (key[j] && key[j] == buf[i + j]) j++;
+                if (key[j]) continue;
+                i += j; while (buf[i] == ' ' || buf[i] == '\t') i++;
+                tracer = 0; while (buf[i] >= '0' && buf[i] <= '9') tracer = tracer * 10 + buf[i++] - '0';
+                break;
+            }
+        }
+        dec(t ? "tasks.leader.tracer-is-parent" : "tasks.thread.tracer", t ? tracer == call(39, 0, 0, 0, 0, 0) : tracer);
+        if (fd >= 0) call(3, fd, 0, 0, 0, 0);
+    }
+    u64 v = 0;
+    dec("tasks.thread.ptrace-peek", pt((i64)tid, PEEKDATA, (u64)&task_mark, (u64)&v));
+    path2(name, child, tid, "/mem");
+    fd = call(2, (i64)name, 2, 0, 0, 0);
+    ok("tasks.cont", ptrace(CONT, 0, 0));
+    int st = wait_child("tasks.exit.status");
+    if (child || st != (37 << 8)) fail("tasks.exit");
+    if (fd >= 0) { u64 got = 0; dec("tasks.held.pread", call(17, fd, (i64)&got, 8, (u64)&task_mark, 0)); call(3, fd, 0, 0, 0, 0); }
+}
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
     if (argc == 2 && equal(argv[1], "orphan-target")) done(23);
@@ -1215,12 +1346,14 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     self_path = argv[0];
     if (argc == 2 && equal(argv[1], "role-group")) role_group();
     if (argc == 2 && equal(argv[1], "role-mem")) role_mem();
+    if (argc == 2 && equal(argv[1], "role-tasks")) role_tasks();
     if (argc == 2 && equal(argv[1], "role-exec-thread")) role_exec_thread();
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
     if (controlled_mode(mode)) {
         controlled(mode); text("trace.complete\n"); done(0);
     }
+    if (conc_mode(mode)) { conc_rows(argv[1]); text("trace.complete\n"); done(0); }
     if (perm_mode(mode)) { perm_rows(); text("trace.complete\n"); done(0); }
     if (blocked_mode(mode)) {
         blocked(mode); text("trace.complete\n"); done(0);
@@ -1232,7 +1365,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
         tracer_exit(argv[0], equal(mode, "exitkill"));
         text("trace.complete\n"); done(0);
     }
-    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall") && !event_mode(mode) && !fault_mode(mode) && !lifecycle_mode(mode) && !memory_mode(mode)) done(2);
+    if (!equal(mode, "core") && !equal(mode, "syscall") && !equal(mode, "exec") && !equal(mode, "errors") && !equal(mode, "stops") && !equal(mode, "regs") && !equal(mode, "step") && !equal(mode, "notify") && !equal(mode, "notify-syscall") && !event_mode(mode) && !fault_mode(mode) && !lifecycle_mode(mode) && !memory_mode(mode) && !tasks_mode(mode)) done(2);
     if (equal(mode, "notify") || equal(mode, "notify-syscall")) {
         struct { u64 handler, flags, restorer, mask; } action = {
             (u64)child_notice, 0x14000004, (u64)trace_restorer, 0
@@ -1250,6 +1383,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
             av[0] = argv[0];
             av[1] = equal(mode, "fork-event") ? "role-fork" : equal(mode, "clone-event") ? "role-clone" : "role-vfork";
         }
+        if (tasks_mode(mode)) { av[0] = argv[0]; av[1] = "role-tasks"; }
         if (memory_mode(mode)) { av[0] = argv[0]; av[1] = "role-mem"; }
         if (lifecycle_mode(mode)) { av[0] = argv[0]; av[1] = equal(mode, "exec-thread") ? "role-exec-thread" : "role-group"; }
         ret = call(59, (i64)av[0], (i64)av, (i64)ev, 0, 0);
@@ -1270,6 +1404,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     else if (event_mode(mode)) child_events(mode);
     else if (lifecycle_mode(mode)) lifecycle(mode);
     else if (memory_mode(mode)) memory_rows();
+    else if (tasks_mode(mode)) tasks_rows();
     else if (equal(mode, "errors")) errors();
     else if (equal(mode, "syscall") || equal(mode, "notify-syscall")) syscall_rows(equal(mode, "notify-syscall"));
     else if (equal(mode, "stops")) stops();
