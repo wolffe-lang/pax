@@ -1130,6 +1130,20 @@ tracee's stop, and an untraced caller's exit_group with TRACEEXIT in the others
 still need their rows.
 Other requests are refused by name; NT_X86_XSTATE is named and returns EINVAL.
 
+The requests (the syscall census of `ptrace`, number 101; every one not listed is
+refused by name: -EIO and a `ptrace: refused request 0x…` line, never -ENOSYS):
+
+| Request | Status |
+|---|---|
+| TRACEME 0, ATTACH 16, SEIZE 0x4206, INTERRUPT 0x4207, DETACH 17, KILL 8 | supported; ATTACH and SEIZE of a job-control-stopped process refused by name (R-px102-4) |
+| CONT 7, SINGLESTEP 9, SYSCALL 24 | supported |
+| PEEKTEXT 1, PEEKDATA 2, POKETEXT 4, POKEDATA 5 | supported; a word running off a mapping is -EIO after its lower bytes are written |
+| PEEKUSER 3, POKEUSER 6 | the 27 general words (the limits of R-px102-3), DR0-DR7 (DR4 and DR5 -EIO); other offsets read 0 |
+| GETREGS 12, SETREGS 13, GETFPREGS 14 | supported |
+| GETREGSET 0x4204 | NT_PRSTATUS and NT_PRFPREG; others -EINVAL, named |
+| SETOPTIONS 0x4200, GETEVENTMSG 0x4201, GETSIGINFO 0x4202 | supported (the options TRACESYSGOOD, FORK, VFORK, CLONE, EXEC, VFORKDONE, EXIT, EXITKILL) |
+| SETFPREGS 15, GETFPXREGS 18, SETFPXREGS 19, SETSIGINFO 0x4203, SETREGSET 0x4205, LISTEN 0x4208, PEEKSIGINFO 0x4209, GETSIGMASK, SETSIGMASK, SECCOMP_GET_FILTER, GET_SYSCALL_INFO, SYSEMU 31, SYSEMU_SINGLESTEP 32, SINGLEBLOCK 33, ARCH_PRCTL 30 | refused by name (`errors` row for the unknown ones) |
+
 | Change | Behaviour and row |
 |---|---|
 | `idt/`: vector 3 DPL 3 | Ring-3 `INT3` reaches #BP instead of #GP; every other present gate retains DPL 0. Kernel-mode INT3 still logs and returns. `T-int3-stop` requires a SIGTRAP stop with SI_KERNEL (128), not SIGSEGV |

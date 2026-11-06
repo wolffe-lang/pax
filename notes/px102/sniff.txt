@@ -1,0 +1,34 @@
+px102 — what sniff can rely on, and what it still needs (item 6), as of
+the head named in the hand-back. Every statement below has a mode in
+tests/mpx5-trace held byte-for-byte to Linux (or, where named, to PAX's own
+transcript of a refusal).
+
+S2 can rely on (break, step, print, continue, exit):
+  TRACEME and ATTACH/SEIZE/INTERRUPT/DETACH; exec stops; int3 and
+  single-step stops (SIGTRAP codes as Linux); CONT/SINGLESTEP/SYSCALL with
+  signal injection and replacement; GETREGS/SETREGS (with the round trip of
+  everything PAX reports), GETFPREGS, GETREGSET PRSTATUS/PRFPREG;
+  PEEK/POKE of text and data (a breakpoint into read-only text works),
+  /proc/<pid>/mem read and write, PROT_NONE and private-file pages as
+  Linux; wait statuses with the event bits; TracerPid; permission checks
+  (dumpable, credentials).
+S5 (hardware watchpoints): DR0-DR3 and DR7 through POKEUSER, DR6 through
+  PEEKUSER, validated as Linux validates; a real write watchpoint stop
+  (SI code 4). Still needed: nothing known for write watchpoints; read
+  (RW=3) and execute breakpoints follow DR7's validation, but only the
+  write case has a PAX row with a hardware hit.
+S6 (threads): TRACECLONE with auto-attach, individual thread deaths, the
+  group's death and EVENT_EXIT, a non-leader's exec, the tracer as a thread,
+  any tracer-process thread waiting, task/<tid>/mem and task/<tid>/status.
+  Still needed: task/<tid>/stat, per-thread registers of a thread the
+  debugger found through task/ (it works for a traced thread), PTRACE_O_
+  tracing of a thread's SIGSTOP stop ordering under load.
+S7 (core dumps): nothing from ptrace; the cores themselves are PAX's
+  (kernel writes none; core_pattern is a fixed "core").
+Refused, and what that costs:
+  SETFPREGS/SETREGSET (restoring FP/vector state after an inferior call),
+  SETSIGINFO and PEEKSIGINFO (rare), GET_SYSCALL_INFO (a newer gdb prefers
+  it; the old SYSCALL-stop registers still work), SYSEMU, SINGLEBLOCK,
+  LISTEN and group-stop reporting (R-px102-4), non-canonical/NT/GS-base
+  register writes (R-px102-3), NT_X86_XSTATE (AVX state).
+Not covered: maps, auxv, and the gdb-on-PAX session itself (sn00's).

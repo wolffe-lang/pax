@@ -148,3 +148,12 @@ installed tree's programs, and yew's build alone has ranged from 99 s to
 40817980461 past 60 minutes before its full rows began. 175 minutes is
 below the 6-hour per-job ceiling. It holds one of the org's 20 slots for
 up to three hours in each trunk push and nightly run.
+
+## mpx5-trace (px102)
+
+Not a long job: `timeout-minutes: 60`. An estimate, not a runner
+observation: on a 2-CPU KVM slice the native BIOS leg ran its 43 modes as
+root and 42 as uid 1000 in 192 s (boots of about 1.5 s each, a build of
+under a minute). Four legs are about 13 minutes plus the apt and wolf
+fetches and `--only linux` (43 containers); the bound leaves more than four
+times that. The first runner observation replaces this paragraph.
