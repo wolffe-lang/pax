@@ -109,7 +109,7 @@ no-effect rows); after the kernel work all 49. Mispredicted:
 - **R-px103-3 (accepted), the log's time**: PAX keeps no zone, so the stamp is UTC.
   Recommend keeping it; the format is sudo's, wrapped at 80 columns with
   `!loglinelen` honoured.
-- **R-px103-4 (ruled: done in this lane, not a follow-on), the distribution build**: adding
+- **R-px103-4 (ruled: done in this lane, not a follow-on; done, section 9), the distribution build**: adding
   `sudo` to the images needs a build input (`tools/mksudo`), `distribution-root`
   rows (`bin/sudo` mode 04755, `etc/sudoers` 0440, `var/log`), `tests/distribution`'s
   inventory, and a check that the installer's ext2 writer and upgrade keep the
@@ -137,17 +137,61 @@ no-effect rows); after the kernel work all 49. Mispredicted:
 
 ## 7. What is not done
 
-- The distribution build (R-px103-4) and so the README's instructions for an
-  installed 860 hold for a built image only; the README says so.
-- Typed `pelt` sessions as root, `pax` and `lobo`, held to the same typed
-  session on Linux (contract item 5): not built. Its place is taken by
-  `sid`'s `sudo` rows on PAX (`tests/mpx5-sudo.d/sudo.pax`, PAX's own) and the
-  Ubuntu container comparison; a typed session needs the accounts image of
-  `mpx5-accounts` plus `sudo`, and Ubuntu's `sudo` in the Linux side.
+- Typed `pelt` sessions on the accounts image of `mpx5-accounts` (the earlier
+  plan): replaced by section 9's sessions at the installed console.
 - The plant, the final gauntlet record, the PR and the audit: taken at the
   orchestrator's word, after one rebase onto the trunk that carries px102.
+  The leg runs below are at the stick's head (named there), not the final one.
 - Every log line's text has been compared to Ubuntu's for the rows in
   `sudo-ct.sh`; the over-long-argument limits are not.
+
+## 9. The image, the install-and-upgrade witness and the typed sessions
+
+**The image.** `tools/distribution-root` takes `INPUTS/sudo/` (`tools/mksudo`'s
+`sudo` and `sums.txt`, held to the sums) and writes `bin/sudo` (mode 04755,
+root:root: `put` writes `0o100000|mode` whole, so the set-ID bit stays),
+`etc/sudoers` (0440, root:root, the bytes of `user/sudo/sudoers`) and the
+directories `var` and `var/log`. `etc/pax-files.sha256` is generated from the
+rows, so it lists both files. `tests/distribution` checks all of it by name
+(`image-sudo-missing`, `-mode`, `-bytes`, `-sums`, `image-sudoers-mode`,
+`-bytes`, `image-var-log`, `image-no-sudo-log`). Red first: at the tests-only
+head the real `tools/mkdistribution` stopped at `image-sudo-missing`.
+
+**The witness**, `tests/mpx6-install.d/upgrade.py`'s rows U13f, U13d and U13a:
+the installed disk is booted alone, `/bin/su wolf -c '/bin/sudo /bin/id'` is
+typed at the root console (uid 1000 runs sudo) and must print `uid=0(root)`;
+then, on the shut-down disk, debugfs's `stat` must give `/bin/sudo` 04755 0:0,
+`/etc/sudoers` 0440 0:0 with the shipped bytes, `/var/log` a root directory,
+`/var/log/sudo.log` 0600 0:0 with the line for `wolf : ... COMMAND=/bin/id`.
+U13f follows a fresh install from the new stick (U9), U13d the upgrade of the
+8b4e98ae dev install (the 860's own history), U13a the upgrade of the
+9c88ec8a install. The installer's ext2 writer and `pax-install --upgrade`
+kept 04755 and 0440 in all three; the upgrade wrote the absent `etc/sudoers`,
+`bin/sudo` and `var/log` with no hand edit and left `/etc/passwd`, `/etc/group`
+and the user's files alone (the leg's existing user-path checks). One test
+fix: `rdump` run as the host's user drops set-ID bits, so a set-ID path's
+mode in `tree()` is `debugfs stat`'s (U4d failed by name on `/bin/sudo` before).
+
+**The sessions**, row U14: `tests/mpx6-install.d/sudo-session.txt`'s lines are
+typed at the installed console as root, as uid 1000 (`su wolf`, interactive)
+and as lobo (`sudo -n -u lobo /bin/sudo -n ...` from the root console, since
+lobo's shell is /bin/false); each line's output is appended to a capture file
+and read from the disk. The same lines run on Linux in the Ubuntu 24.04
+container (`sudo-linux.sh`, no network, the same accounts and the same
+`/etc/sudoers` plus one Linux-only line, `Defaults logfile`), and
+`sudo-compare.py` holds the two: root's and uid 1000's captures byte for byte
+with no normalisation; lobo's differ by name N1 (Linux asks for a password
+before it says no), and the log by N2 (time stamp and PWD masked, U13's own
+line dropped, PAX's two logged refusals of lobo are PAX's alone). The session
+caught a real difference at its first run: a log line showed `sh -c exit 7`
+where sudo shows `sh -c 'exit 7'`; measured on Ubuntu's sudo (a blank puts
+single quotes round the word, `\` and `'` are backslash-escaped, a control
+byte is `#0` and its octal value), fixed in `user/sudo` (`log_word`).
+
+**On the live image** the accounts do not exist (`/etc/passwd` is the live
+image's, there is no uid 1000 account and no `wolf`): `sudo` works for root
+(`root ALL=(ALL:ALL) ALL`), and uid 1000 would match the `#1000` rule if a
+process had it, but no login makes one. The installer writes the accounts.
 
 ## 8. For the second half: passwords (R1)
 
