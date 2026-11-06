@@ -13,7 +13,7 @@
 # the `cc` first on PATH (wolf has no `--static`), and a `cc` that adds
 # `-static` is put there, so the binary is a static glibc executable:
 # ET_EXEC, no PT_INTERP. It is checked to be exactly that (readelf), and
-# `OUTDIR/sums.txt` gets `sudo <sha256> <bytes>`.
+# `OUTDIR/sums.txt` gets `sudo <sha256> <bytes>` of the file after `strip`.
 #
 # Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
 # container), never on a glibc built for x86-64-v4 (px10).
@@ -23,7 +23,7 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die "usage: mksudo OUTDIR"
 out=$1
-need git curl tar readelf cc clang
+need git curl tar readelf strip cc clang
 mkdir -p "$out" "$PAX_CACHE"
 out=$(cd "$out" && pwd)
 
@@ -83,5 +83,10 @@ cp "$PAX_ROOT/user/sudo/sudo.lu" "$w/src/sudo.lu"
     || die "wolf build of user/sudo/sudo.lu"
 readelf -hW "$out/sudo" | grep -Eq 'Type: +EXEC' || die "sudo is not ET_EXEC"
 ! readelf -lW "$out/sudo" | grep -q INTERP || die "sudo has a PT_INTERP (not static)"
+# Stripped, as tools/distribution-root strips the image's other user binaries (its
+# `strip -o` over bore, pelt, yew, lope, aspen, lobo): sums.txt names the stripped file,
+# which is what the image holds and tests/distribution compares.
+strip -o "$out/sudo.stripped" "$out/sudo" && mv "$out/sudo.stripped" "$out/sudo"
+readelf -hW "$out/sudo" | grep -Eq 'Type: +EXEC' || die "stripped sudo is not ET_EXEC"
 printf '%s %s %s\n' sudo "$(sha256_of "$out/sudo")" "$(wc -c < "$out/sudo" | tr -d ' ')" | tee -a "$out/sums.txt"
 printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
