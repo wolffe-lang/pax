@@ -1,0 +1,1535 @@
+//! sudo — run a command as another user (px103, P5 lane U8's first half;
+//! ruling #75 R6 and R8's place, beside `su`).
+//!
+//! PAX's `sudo` is installed set-user-ID root (set-ID execution is honoured
+//! since px103: kernel/process, kernel/cred) and reads `/etc/sudoers`, a
+//! subset of `sudoers(5)`. **It authenticates nobody.** There are no
+//! passwords yet (ruling #75 R1; the second half of U8): a rule that does
+//! not say `NOPASSWD:` is refused by name for anyone but root, and nothing
+//! ever prompts. The policy file is trusted whole, so what protects it is
+//! what protects any file here: its owner and mode, checked as Linux's
+//! `sudo` checks them. **Enforced for honest programs; not a boundary
+//! against an attacker** (R6): the kernel has never been fuzzed or audited
+//! and loads programs at fixed addresses.
+//!
+//! References consulted: `sudo(8)` and `sudoers(5)` (Ubuntu 24.04, sudo
+//! 1.9.15p5, the manual pages), `credentials(7)`, `execve(2)`, and black-box
+//! runs of Ubuntu 24.04's own `sudo` in a throwaway container with no
+//! network (`notes/px103/sudo-ct.sh`, its output `notes/px103/ubuntu.txt`).
+//! Never the source of `sudo`, `doas`, `su`, `login`, util-linux,
+//! shadow-utils, PAM, polkit or any libc.
+//!
+//! **What it does** (each measured against Ubuntu's):
+//! - `sudo [-u USER] [-g GROUP] [-E] [VAR=value] [--] COMMAND [ARG...]`:
+//!   the command is looked up in `secure_path` (else the caller's `PATH`),
+//!   matched against the last rule that names the caller, run with the
+//!   target's user id, group id and groups, and the environment
+//!   `env_reset` leaves: the variables `env_keep` and `env_check` allow, in
+//!   the caller's order, then `MAIL`, `PATH` when `secure_path` is set,
+//!   `LOGNAME`, `USER`, `HOME`, `SHELL`, `TERM=unknown` when none is kept,
+//!   and `SUDO_COMMAND`, `SUDO_USER`, `SUDO_UID` and `SUDO_GID`. argv[0] is
+//!   the command's resolved path.
+//! - `-i` and `-s`: the target's login shell (or `$SHELL` for `-s`), given
+//!   `-c` and the words with every character but letters, digits, `_`, `-`
+//!   and `$` escaped; `-i` also enters the target's home directory.
+//! - `-l [-U USER] [COMMAND]`: what the caller may run (`-ll` is the same).
+//! - `-n`, `-v`, `-k`, `-K`: accepted; there is no timestamp (no
+//!   passwords), so `-v`, `-k` and `-K` change nothing, and `-n` has
+//!   nothing to refuse to ask.
+//! - `-h` and `-V`.
+//! - one line to `/var/log/sudo.log` (root's, mode 0600) for every use,
+//!   allowed or refused, in sudo's log format, wrapped at 80 columns.
+//!
+//! **What it does not, by name.** The sudoers subset is: `Defaults
+//! secure_path`, `env_keep` (`=` and `+=`), `env_reset`, `loglinelen`, and
+//! `Defaults logfile` (accepted, the log is always the same file); user,
+//! `#uid` and `%group` specs with the host `ALL`; `(users[:groups])`
+//! run-as lists of `ALL`, names and `#ids`; `NOPASSWD:`, `PASSWD:`,
+//! `SETENV:` and `NOSETENV:` tags; commands that are `ALL` or an absolute
+//! path that is not a symbolic link; `#includedir`. **Anything else is a
+//! parse error naming the file and line, and every command is denied**
+//! (Linux reports a syntax error with a caret and goes on). Options the
+//! subset has no use for (`-A -b -B -C -D -e -H -P -p -R -r -S -T -t`, long
+//! forms, `--preserve-env=LIST`) are refused by name. Linux asks for a
+//! password before it says "not allowed"; this one says it at once.
+
+use std.os.users
+use std.fmt
+use std.time
+
+const PLAIN_FLAGS: str = "ABbEHkKnPSsiVvlhe"
+const LOG_FILE: str = "/var/log/sudo.log"
+const SUDOERS: str = "/etc/sudoers"
+const LINE_MAX: int = 1024
+const SECURE_PATH_DEFAULT: str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+/// One command of one rule: who may, as whom, with which tags.
+struct Entry {
+    who: str,
+    users: List[str],
+    groups: List[str],
+    has_groups: bool,
+    nopasswd: bool,
+    setenv: bool,
+    cmd: str,
+    file: str,
+    line: int,
+}
+
+struct Policy {
+    entries: List[Entry],
+    secure_path: str,
+    has_secure: bool,
+    keep: List[str],
+    wrap: bool,
+    error: str,
+    warnings: List[str],
+}
+
+struct Args {
+    user: str,
+    group: str,
+    other: str,
+    login: bool,
+    shell: bool,
+    list: bool,
+    validate: bool,
+    kill: bool,
+    preserve: bool,
+    help: bool,
+    version: bool,
+    assigns: List[str],
+    words: List[str],
+    error: str,
+    refused: str,
+}
+
+fn main() -> int {
+    let a = parse(env_args())
+    if a.error.len > 0 {
+        eprint("sudo: {a.error}")
+        eprint_raw(usage())
+        return 1
+    }
+    if a.refused.len > 0 {
+        eprint("sudo: {a.refused}: not built in PAX's sudo (notes/px103-set-id-and-sudo.md)")
+        eprint_raw(usage())
+        return 1
+    }
+    if a.help {
+        print_raw(help())
+        return 0
+    }
+    if a.version {
+        print("Sudo version 0.1 (PAX, px103)")
+        print("PAX's sudo reads a subset of sudoers(5), authenticates nobody (ruling R1) and is")
+        print("enforced for honest programs; not a boundary against an attacker (ruling R6).")
+        return 0
+    }
+    let uid = os_uid() else 0
+    let euid = os_euid() else 0
+    // sudo's own file: root's, with the set-user-ID bit (Linux's words)
+    if euid != 0 {
+        if nnp_set() {
+            eprint("sudo: The \"no new privileges\" flag is set, which prevents sudo from running as root.")
+            eprint("sudo: If sudo is running in a container, you may need to adjust the container configuration to disable the flag.")
+        } else {
+            eprint("sudo: effective uid is not 0, is /usr/bin/sudo on a file system with the 'nosuid' option set or an NFS file system without root privileges?")
+        }
+        return 1
+    }
+    let exe = os_exe() else "/usr/bin/sudo"
+    let est = fs_stat(exe) else [0, 0, 0, 0, 0, 0, 1, 1]
+    if est[6] != 0 || est[4] & 0o4000 == 0 {
+        eprint("sudo: {exe} must be owned by uid 0 and have the setuid bit set")
+        return 1
+    }
+
+    let passwd = fs_read_text("/etc/passwd") else ""
+    let group_text = fs_read_text("/etc/group") else ""
+    let me = users.user_by_id(passwd, uid) else |_| {
+        eprint("sudo: you do not exist in the passwd database")
+        return 1
+    }
+    let host = hostname()
+    let pol = load_policy()
+    if pol.error.len > 0 {
+        for w in pol.warnings {
+            eprint("sudo: {w}")
+        }
+        eprint("sudo: {pol.error}")
+        if !pol.error.starts_with("unable") {
+            let _l = log_line(me.name, "policy error", os_cwd() else "/", "root", "", pol.error, true)
+        }
+        if pol.error.contains(" is world writable") || pol.error.contains(", should be ") || pol.error.starts_with("unable to open") {
+            eprint("sudo: error initializing audit plugin sudoers_audit")
+        }
+        return 1
+    }
+    for w in pol.warnings {
+        eprint("sudo: {w}")
+    }
+    let my_groups = users.groups_of(group_text, me.name, me.gid)
+
+    if a.kill && a.words.len == 0 && !a.list && !a.validate {
+        return 0 // -k, -K: there is no timestamp to forget
+    }
+    let who_list = if a.other.len > 0 then a.other else me.name
+    if a.list {
+        return list_mode(pol, a, me, passwd, group_text, my_groups, host)
+    }
+    if a.validate && a.words.len == 0 && !a.login && !a.shell {
+        // -v: nothing to validate without a password; Linux's words for a user with no rule
+        if !has_rule(pol, me, my_groups, group_text) {
+            eprint("Sorry, user {me.name} may not run sudo on {host}.")
+            return 1
+        }
+        return 0
+    }
+    if a.words.len == 0 && !a.login && !a.shell {
+        eprint_raw(usage())
+        return 1
+    }
+
+    // The target: -u (a name or #uid), -g (a name or #gid).
+    let tname0 = if a.user.len > 0 then a.user else "root"
+    let target = find_user(passwd, tname0)
+    let found = target.name.len > 0
+    if !found {
+        eprint("sudo: unknown user {tname0}")
+        eprint("sudo: error initializing audit plugin sudoers_audit")
+        return 1
+    }
+    var tgid = target.gid
+    var gname = ""
+    if a.group.len > 0 {
+        if a.group.starts_with("#") {
+            let n = fmt.parse_int(a.group[1..]) else -1
+            if n < 0 {
+                eprint("sudo: unknown group {a.group}")
+                eprint("sudo: error initializing audit plugin sudoers_audit")
+                return 1
+            }
+            tgid = n
+            gname = a.group
+        } else {
+            let g = users.group_named(group_text, a.group) else |_| {
+                eprint("sudo: unknown group {a.group}")
+                eprint("sudo: error initializing audit plugin sudoers_audit")
+                return 1
+            }
+            tgid = g.gid
+            gname = g.name
+        }
+    }
+
+    // The command: -i/-s run a shell; otherwise the word, found on secure_path.
+    let cwd = os_cwd() else "/"
+    let sp = if pol.has_secure then pol.secure_path else (env_get("PATH") else "/usr/bin:/bin")
+    var shell = target.shell
+    if shell.len == 0 {
+        shell = "/bin/sh"
+    }
+    if a.shell && !a.login {
+        let mine = env_get("SHELL") else ""
+        if mine.len > 0 {
+            shell = mine
+        }
+    }
+    var path = ""
+    var argv = List[str]()
+    var shown = ""
+    if a.login || a.shell {
+        path = shell
+        if !fs_is_file(path) {
+            eprint("sudo: {path}: command not found")
+            return 1
+        }
+        (mut argv).push(if a.login then "-" + base_name(shell) else shell)
+        if a.words.len > 0 {
+            let body = escape_words(a.words)
+            (mut argv).push("-c")
+            (mut argv).push(body)
+            shown = "{shell} -c {escape_blanks(a.words)}"
+        } else {
+            shown = shell
+        }
+    } else {
+        path = find_command(a.words[0], sp, cwd)
+        if path.len == 0 {
+            eprint("sudo: {a.words[0]}: command not found")
+            return 1
+        }
+        (mut argv).push(path)
+        var k = 1
+        while k < a.words.len {
+            (mut argv).push(a.words[k])
+            k += 1
+        }
+        shown = path
+        k = 1
+        while k < a.words.len {
+            shown = "{shown} {a.words[k]}"
+            k += 1
+        }
+    }
+
+    // The policy: the last rule that names the caller, the target and the command.
+    var hit = false
+    var best = Entry { who: "", users: List[str](), groups: List[str](), has_groups: false, nopasswd: false, setenv: false, cmd: "", file: "", line: 0 }
+    var named = false
+    for e in pol.entries {
+        if !who_matches(e.who, me, my_groups, group_text) {
+            continue
+        }
+        named = true
+        if !runas_matches(e, target, tgid, gname, a.group.len > 0) {
+            continue
+        }
+        if e.cmd == "ALL" || e.cmd == path {
+            hit = true
+            best = e
+        }
+    }
+    let shown_log = shown.replace("\\", "\\\\")
+    if !named {
+        eprint("sudo: {me.name} is not in the sudoers file.")
+        let _l = log_line(me.name, "user NOT in sudoers", cwd, target.name, gname, shown_log, true)
+        return 1
+    }
+    if !hit {
+        eprint("sudo: Sorry, user {me.name} is not allowed to execute '{shown}' as {target.name} on {host}.")
+        let _l = log_line(me.name, "command not allowed", cwd, target.name, gname, shown_log, true)
+        return 1
+    }
+    if uid != 0 && !best.nopasswd {
+        eprint("sudo: no password database yet (R1): only NOPASSWD rules are honoured")
+        let _l = log_line(me.name, "no password database (R1)", cwd, target.name, gname, shown_log, true)
+        return 1
+    }
+    if a.assigns.len > 0 && !best.setenv {
+        var names = ""
+        for kv in a.assigns {
+            let eq = kv.find("=") else kv.len
+            names = if names.len == 0 then kv[0..eq] else "{names}, {kv[0..eq]}"
+        }
+        eprint("sudo: sorry, you are not allowed to set the following environment variables: {names}")
+        let _l = log_line(me.name, "environment variables not allowed", cwd, target.name, gname, shown_log, true)
+        return 1
+    }
+    if a.preserve && !best.setenv {
+        eprint("sudo: sorry, you are not allowed to preserve the environment")
+        let _l = log_line(me.name, "environment not preserved", cwd, target.name, gname, shown_log, true)
+        return 1
+    }
+
+    // The environment and the ids.
+    var env = build_env(pol, a, me, target, shell, shown)
+    var groups = users.groups_of(group_text, target.name, target.gid)
+    if target.name.starts_with("#") {
+        groups = [target.gid]
+    }
+    if a.group.len > 0 {
+        var have = false
+        for g in groups {
+            if g == tgid {
+                have = true
+            }
+        }
+        if !have {
+            (mut groups).push(tgid)
+        }
+    }
+    if !log_line(me.name, "", cwd, target.name, gname, shown_log, false) {
+        return 1
+    }
+    var why = ""
+    os_set_ids(target.uid, tgid, groups) else |e| match e {
+        denied => {
+            why = "Operation not permitted"
+        },
+        invalid => {
+            why = "Invalid argument"
+        },
+        io => {
+            why = "Input/output error"
+        },
+        unsupported => {
+            why = "this host cannot change a process's ids"
+        },
+    }
+    if why.len > 0 {
+        eprint("sudo: unable to change to {target.name} ids: {why}")
+        return 1
+    }
+    if a.login {
+        os_chdir(target.home) else |_| {
+            eprint("sudo: unable to change directory to {target.home}")
+            return 1
+        }
+    }
+    var row = ""
+    var status = 1
+    os_exec(path, argv, env, List[int]()) else |e| match e {
+        not_found => {
+            row = "No such file or directory"
+            status = 127
+        },
+        denied => {
+            row = "Permission denied"
+            status = 126
+        },
+        io => {
+            row = "Exec format error"
+            status = 126
+        },
+        invalid => {
+            row = "Invalid argument"
+            status = 1
+        },
+        unsupported => {
+            row = "this host has no exec"
+            status = 1
+        },
+    }
+    eprint("sudo: unable to execute {path}: {row}")
+    status
+}
+
+/// The command line, as getopt_long reads it for `sudo`: options before
+/// the command, a short cluster, an argument joined or the next word,
+/// `VAR=value` words, `--`.
+fn parse(args: List[str]) -> Args {
+    var a = Args {
+        user: "", group: "", other: "", login: false, shell: false, list: false, validate: false, kill: false,
+        preserve: false, help: false, version: false, assigns: List[str](), words: List[str](), error: "", refused: "",
+    }
+    var i = 0
+    var opts = true
+    while i < args.len {
+        let w = args[i]
+        i += 1
+        if !opts {
+            (mut a.words).push(w)
+            continue
+        }
+        if w == "--" {
+            opts = false
+            continue
+        }
+        if w.starts_with("--") {
+            let body = w[2..]
+            let eq = body.find("=") else -1
+            var name = body
+            var value = ""
+            if eq >= 0 {
+                name = body[0..eq]
+                value = body[eq + 1..]
+            }
+            if name == "help" {
+                a.help = true
+            } else if name == "version" {
+                a.version = true
+            } else if name == "login" {
+                a.login = true
+            } else if name == "shell" {
+                a.shell = true
+            } else if name == "list" {
+                a.list = true
+            } else if name == "validate" {
+                a.validate = true
+            } else if name == "reset-timestamp" || name == "remove-timestamp" {
+                a.kill = true
+            } else if name == "non-interactive" {
+                a.kill = a.kill
+            } else if name == "preserve-env" && eq < 0 {
+                a.preserve = true
+            } else if name == "user" || name == "group" || name == "other-user" {
+                if eq < 0 {
+                    if i >= args.len {
+                        a.error = "option '--{name}' requires an argument"
+                        return a
+                    }
+                    value = args[i]
+                    i += 1
+                }
+                if name == "user" {
+                    a.user = value
+                } else if name == "group" {
+                    a.group = value
+                } else {
+                    a.other = value
+                }
+            } else if is_long(name) {
+                if a.refused.len == 0 {
+                    a.refused = "--{name}"
+                }
+            } else {
+                a.error = "unrecognized option '{w}'"
+                return a
+            }
+            continue
+        }
+        if w.starts_with("-") && w.len > 1 {
+            var k = 1
+            while k < w.len {
+                let c = w[k..k + 1]
+                k += 1
+                if c == "u" || c == "g" || c == "U" || c == "h" && false {
+                    var value = w[k..]
+                    k = w.len
+                    if value.len == 0 {
+                        if i >= args.len {
+                            a.error = "option requires an argument -- '{c}'"
+                            return a
+                        }
+                        value = args[i]
+                        i += 1
+                    }
+                    if c == "u" {
+                        a.user = value
+                    } else if c == "g" {
+                        a.group = value
+                    } else {
+                        a.other = value
+                    }
+                } else if c == "i" {
+                    a.login = true
+                } else if c == "s" {
+                    a.shell = true
+                } else if c == "l" {
+                    a.list = true
+                } else if c == "v" {
+                    a.validate = true
+                } else if c == "k" || c == "K" {
+                    a.kill = true
+                } else if c == "n" {
+                    a.kill = a.kill
+                } else if c == "E" {
+                    a.preserve = true
+                } else if c == "h" {
+                    a.help = true
+                } else if c == "V" {
+                    a.version = true
+                } else if c == "C" || c == "D" || c == "p" || c == "R" || c == "r" || c == "T" || c == "t" {
+                    if a.refused.len == 0 {
+                        a.refused = "-{c}"
+                    }
+                    if k >= w.len {
+                        i += 1
+                    }
+                    k = w.len
+                } else if PLAIN_FLAGS.contains(c) {
+                    if a.refused.len == 0 {
+                        a.refused = "-{c}"
+                    }
+                } else {
+                    a.error = "invalid option -- '{c}'"
+                    return a
+                }
+            }
+            continue
+        }
+        // the first word that is no option: a VAR=value word, else the command
+        let eq = w.find("=") else -1
+        if eq > 0 && !w[0..eq].contains("/") && !a.login && !a.shell {
+            (mut a.assigns).push(w)
+            continue
+        }
+        if eq > 0 && !w[0..eq].contains("/") {
+            (mut a.assigns).push(w)
+            continue
+        }
+        opts = false
+        (mut a.words).push(w)
+    }
+    if a.login && a.shell {
+        a.error = "you may not specify both the '-i' and '-s' options"
+    }
+    a
+}
+
+fn is_long(name: str) -> bool {
+    name == "askpass" || name == "background" || name == "bell" || name == "close-from" || name == "chdir" || name == "edit" ||
+        name == "set-home" || name == "host" || name == "preserve-groups" || name == "prompt" || name == "chroot" || name == "role" ||
+        name == "stdin" || name == "type" || name == "command-timeout" || name == "non-interactive" || name == "no-update" ||
+        name == "reset-timestamp"
+}
+
+/// Whether `/proc/self/status` says no_new_privs is set.
+fn nnp_set() -> bool {
+    let s = fs_read_text("/proc/self/status") else ""
+    for line in s.split("\n") {
+        if line.starts_with("NoNewPrivs:") {
+            return trim(line[11..]) == "1"
+        }
+    }
+    false
+}
+
+fn empty_user() -> users.User {
+    users.User { name: "", uid: 0, gid: 0, comment: "", home: "", shell: "" }
+}
+
+/// A user by name, or `#uid` (which needs no account); name "" when none.
+fn find_user(passwd: str, spec: str) -> users.User {
+    if spec.starts_with("#") {
+        let n = fmt.parse_int(spec[1..]) else -1
+        if n < 0 {
+            return empty_user()
+        }
+        return users.user_by_id(passwd, n) else users.User { name: spec, uid: n, gid: n, comment: "", home: "/", shell: "" }
+    }
+    users.user_named(passwd, spec) else empty_user()
+}
+
+fn hostname() -> str {
+    let h = fs_read_text("/proc/sys/kernel/hostname") else ""
+    let t = trim(h)
+    if t.len == 0 {
+        return "pax"
+    }
+    t
+}
+
+// ---- the policy ------------------------------------------------------
+
+fn new_policy() -> Policy {
+    Policy { entries: List[Entry](), secure_path: "", has_secure: false, keep: List[str](), wrap: true, error: "", warnings: List[str]() }
+}
+
+fn load_policy() -> Policy {
+    var pol = new_policy()
+    // /etc/sudoers: through a link if need be (Linux accepts a root-owned target)
+    let st = fs_stat(SUDOERS) else |_| {
+        pol.error = "unable to open {SUDOERS}: No such file or directory"
+        return pol
+    }
+    let why = bad_owner(SUDOERS, st)
+    if why.len > 0 {
+        pol.error = why
+        return pol
+    }
+    let text = fs_read_text(SUDOERS) else |_| {
+        pol.error = "unable to open {SUDOERS}: Permission denied"
+        return pol
+    }
+    parse_text(text, SUDOERS, mut pol, 0)
+    pol
+}
+
+/// Linux's message for a policy file it will not read, else "".
+fn bad_owner(path: str, st: List[int]) -> str {
+    if st[6] != 0 {
+        return "{path} is owned by uid {st[6]}, should be 0"
+    }
+    if st[4] & 0o002 != 0 {
+        return "{path} is world writable"
+    }
+    if st[7] != 0 && st[4] & 0o020 != 0 {
+        return "{path} is owned by gid {st[7]}, should be 0"
+    }
+    ""
+}
+
+fn fail(mut pol: Policy, file: str, line: int, what: str) {
+    if pol.error.len == 0 {
+        pol.error = "{file}:{line}: {what}; every command is denied"
+    }
+}
+
+fn parse_text(text: str, file: str, mut pol: Policy, depth: int) {
+    var lineno = 0
+    var pending = ""
+    var pend_at = 0
+    for raw in text.split("\n") {
+        lineno += 1
+        if pol.error.len > 0 {
+            return
+        }
+        if raw.len > LINE_MAX {
+            fail(mut pol, file, lineno, "line is longer than {LINE_MAX} bytes (PAX's sudo refuses it)")
+            return
+        }
+        var line = trim(raw)
+        if pending.len > 0 {
+            line = pending + line
+        } else {
+            pend_at = lineno
+        }
+        if line.ends_with("\\") {
+            pending = line[0..line.len - 1]
+            continue
+        }
+        pending = ""
+        if line.len == 0 {
+            continue
+        }
+        if line.starts_with("#includedir ") {
+            if depth >= 1 {
+                fail(mut pol, file, pend_at, "#includedir inside an included file is not supported")
+                return
+            }
+            include_dir(trim(line[12..]), mut pol, depth + 1)
+            continue
+        }
+        if line.starts_with("#include ") || line.starts_with("@include") || line.starts_with("@includedir") {
+            fail(mut pol, file, pend_at, "#include is not supported (only #includedir)")
+            return
+        }
+        if line.starts_with("#") {
+            let d = if line.len > 1 then line[1..2] else ""
+            if !(d >= "0" && d <= "9") {
+                continue // a comment
+            }
+        }
+        if line.starts_with("Defaults") {
+            parse_defaults(line[8..], file, pend_at, mut pol)
+            continue
+        }
+        if line.starts_with("User_Alias") || line.starts_with("Runas_Alias") || line.starts_with("Host_Alias") || line.starts_with("Cmnd_Alias") || line.starts_with("Cmd_Alias") {
+            fail(mut pol, file, pend_at, "aliases are not supported")
+            return
+        }
+        parse_spec(line, file, pend_at, mut pol)
+    }
+}
+
+fn include_dir(dir: str, mut pol: Policy, depth: int) {
+    let names = fs_read_dir(dir) else |_| {
+        return
+    }
+    var sorted = List[str]()
+    for n in names {
+        if n.ends_with("~") || n.contains(".") {
+            continue
+        }
+        (mut sorted).push(n)
+    }
+    // names in the byte order of the C locale
+    var i = 1
+    while i < sorted.len {
+        var j = i
+        while j > 0 && sorted[j - 1] > sorted[j] {
+            let t = sorted[j - 1]
+            sorted[j - 1] = sorted[j]
+            sorted[j] = t
+            j -= 1
+        }
+        i += 1
+    }
+    for n in sorted {
+        let p = "{dir}/{n}"
+        let st = fs_stat(p) else |_| {
+            continue
+        }
+        let why = bad_owner(p, st)
+        if why.len > 0 {
+            (mut pol.warnings).push(why)
+            continue
+        }
+        let t = fs_read_text(p) else |_| {
+            continue
+        }
+        parse_text(t, p, mut pol, depth)
+        if pol.error.len > 0 {
+            return
+        }
+    }
+}
+
+fn parse_defaults(rest0: str, file: str, line: int, mut pol: Policy) {
+    var rest = trim(rest0)
+    if rest.starts_with(":") || rest.starts_with("@") || rest.starts_with(">") || rest.starts_with("!") && rest.contains(" ") && false {
+        fail(mut pol, file, line, "Defaults for a user, host, runas or command is not supported")
+        return
+    }
+    if rest.len == 0 {
+        fail(mut pol, file, line, "empty Defaults")
+        return
+    }
+    // several settings may share a line, separated by commas
+    for item0 in split_top(rest, ",") {
+        let item = trim(item0)
+        if item.len == 0 {
+            continue
+        }
+        let eq = item.find("=") else -1
+        var name = item
+        var value = ""
+        var plus = false
+        if eq >= 0 {
+            name = trim(item[0..eq])
+            value = trim(item[eq + 1..])
+            if name.ends_with("+") {
+                plus = true
+                name = trim(name[0..name.len - 1])
+            }
+            if name.ends_with("-") || name.ends_with("^") {
+                fail(mut pol, file, line, "Defaults {name} with -= or ^= is not supported")
+                return
+            }
+            if value.starts_with("\"") && value.ends_with("\"") && value.len >= 2 {
+                value = value[1..value.len - 1]
+            }
+        }
+        if name == "secure_path" && eq >= 0 {
+            pol.secure_path = value
+            pol.has_secure = true
+        } else if name == "env_keep" && eq >= 0 {
+            if !plus {
+                pol.keep = List[str]()
+            }
+            for v in value.split(" ") {
+                if v.len > 0 {
+                    (mut pol.keep).push(v)
+                }
+            }
+        } else if name == "env_reset" && eq < 0 {
+            continue
+        } else if name == "!loglinelen" || (name == "loglinelen" && (value == "0")) {
+            pol.wrap = false
+        } else if name == "loglinelen" {
+            continue
+        } else if name == "logfile" && eq >= 0 {
+            continue
+        } else {
+            fail(mut pol, file, line, "Defaults {name} is not supported")
+            return
+        }
+    }
+}
+
+/// Split at a separator outside double quotes.
+fn split_top(s: str, sep: str) -> List[str] {
+    var out = List[str]()
+    var cur = ""
+    var q = false
+    var i = 0
+    while i < s.len {
+        let c = s[i..i + 1]
+        if c == "\"" {
+            q = !q
+        }
+        if c == sep && !q {
+            (mut out).push(cur)
+            cur = ""
+        } else {
+            cur = cur + c
+        }
+        i += 1
+    }
+    (mut out).push(cur)
+    out
+}
+
+fn parse_spec(line: str, file: str, lineno: int, mut pol: Policy) {
+    // WHO HOST=(RUNAS) TAGS: CMD, CMD ...
+    let eq = line.find("=") else -1
+    if eq < 0 {
+        fail(mut pol, file, lineno, "not a user specification")
+        return
+    }
+    let head = trim(line[0..eq])
+    let sp = head.find(" ") else head.find("\t") else -1
+    if sp < 0 {
+        fail(mut pol, file, lineno, "a user specification needs WHO HOST=...")
+        return
+    }
+    let who = trim(head[0..sp])
+    let host = trim(head[sp..])
+    if who.contains(",") || who.starts_with("!") || host != "ALL" {
+        fail(mut pol, file, lineno, "only one user and the host ALL are supported ('{who}' on '{host}')")
+        return
+    }
+    var tail = trim(line[eq + 1..])
+    var users_ = ["root"]
+    var groups_ = List[str]()
+    var has_groups = false
+    var nopass = false
+    var setenv = false
+    var first = true
+    for item0 in split_top(tail, ",") {
+        var item = trim(item0)
+        // a run-as list opens an item
+        if item.starts_with("(") {
+            let close = item.find(")") else -1
+            if close < 0 {
+                fail(mut pol, file, lineno, "unterminated (run-as list)")
+                return
+            }
+            let ra = item[1..close]
+            item = trim(item[close + 1..])
+            users_ = List[str]()
+            groups_ = List[str]()
+            has_groups = false
+            let colon = ra.find(":") else -1
+            let ulist = if colon >= 0 then ra[0..colon] else ra
+            for u in ulist.split(",") {
+                let t = trim(u)
+                if t.len > 0 {
+                    (mut users_).push(t)
+                }
+            }
+            if colon >= 0 {
+                has_groups = true
+                for g in ra[colon + 1..].split(",") {
+                    let t = trim(g)
+                    if t.len > 0 {
+                        (mut groups_).push(t)
+                    }
+                }
+            }
+            if users_.len == 0 && !has_groups {
+                users_ = ["root"]
+            }
+            if users_.len == 0 {
+                users_ = ["root"]
+            }
+        }
+        // tags
+        var again = true
+        while again {
+            again = false
+            if item.starts_with("NOPASSWD:") {
+                nopass = true
+                item = trim(item[9..])
+                again = true
+            } else if item.starts_with("PASSWD:") {
+                nopass = false
+                item = trim(item[7..])
+                again = true
+            } else if item.starts_with("SETENV:") {
+                setenv = true
+                item = trim(item[7..])
+                again = true
+            } else if item.starts_with("NOSETENV:") {
+                setenv = false
+                item = trim(item[9..])
+                again = true
+            } else if item.starts_with("NOEXEC:") || item.starts_with("EXEC:") || item.starts_with("LOG_INPUT:") || item.starts_with("LOG_OUTPUT:") || item.starts_with("MAIL:") || item.starts_with("FOLLOW:") {
+                fail(mut pol, file, lineno, "the tag {item} is not supported")
+                return
+            }
+        }
+        if item.len == 0 {
+            fail(mut pol, file, lineno, "an empty command")
+            return
+        }
+        if item.starts_with("!") {
+            fail(mut pol, file, lineno, "a negated command is not supported")
+            return
+        }
+        if item.contains(" ") || item.contains("\t") {
+            fail(mut pol, file, lineno, "a command with arguments is not supported ('{item}')")
+            return
+        }
+        if item.contains("*") || item.contains("?") || item.contains("[") || item.contains("\\") {
+            fail(mut pol, file, lineno, "a wildcard in a command is not supported ('{item}')")
+            return
+        }
+        if item != "ALL" {
+            if !item.starts_with("/") {
+                fail(mut pol, file, lineno, "the command {item} is not an absolute path")
+                return
+            }
+            let lst = fs_lstat(item) else |_| {
+                // a path that is not there yet may be a rule for later
+                [0, 0, 0, 0, 0]
+            }
+            if lst[0] == 3 {
+                fail(mut pol, file, lineno, "the command {item} is a symbolic link (PAX's sudo matches real paths only)")
+                return
+            }
+            if item.contains("//") || item.contains("/./") || item.contains("/../") || item.ends_with("/") {
+                fail(mut pol, file, lineno, "the command {item} is not a plain absolute path")
+                return
+            }
+        }
+        (mut pol.entries).push(Entry { who: who, users: copy users_, groups: copy groups_, has_groups: has_groups, nopasswd: nopass, setenv: setenv, cmd: item, file: file, line: lineno })
+        first = false
+    }
+    if first {
+        fail(mut pol, file, lineno, "a user specification with no command")
+    }
+}
+
+fn who_matches(who: str, me: users.User, my_groups: List[int], group_text: str) -> bool {
+    if who == "ALL" {
+        return true
+    }
+    if who.starts_with("#") {
+        return who[1..] == "{me.uid}"
+    }
+    if who.starts_with("%") {
+        var g = who[1..]
+        if g.starts_with("#") {
+            let n = fmt.parse_int(g[1..]) else -1
+            for x in my_groups {
+                if x == n {
+                    return true
+                }
+            }
+            return false
+        }
+        let gr = users.group_named(group_text, g) else |_| {
+            return false
+        }
+        for x in my_groups {
+            if x == gr.gid {
+                return true
+            }
+        }
+        return false
+    }
+    who == me.name
+}
+
+fn runas_matches(e: Entry, target: users.User, tgid: int, gname: str, explicit_group: bool) -> bool {
+    var ok = false
+    for u in e.users {
+        if u == "ALL" || u == target.name || (u.starts_with("#") && u[1..] == "{target.uid}") {
+            ok = true
+        }
+    }
+    if !ok {
+        return false
+    }
+    if !explicit_group {
+        return true
+    }
+    if !e.has_groups {
+        return tgid == target.gid
+    }
+    for g in e.groups {
+        if g == "ALL" || g == gname || (g.starts_with("#") && g[1..] == "{tgid}") {
+            return true
+        }
+    }
+    false
+}
+
+fn has_rule(pol: Policy, me: users.User, my_groups: List[int], group_text: str) -> bool {
+    for e in pol.entries {
+        if who_matches(e.who, me, my_groups, group_text) {
+            return true
+        }
+    }
+    false
+}
+
+// ---- -l --------------------------------------------------------------
+
+fn runas_text(e: Entry) -> str {
+    let u = str_join(", ", e.users)
+    if e.has_groups {
+        return "({u} : {str_join(", ", e.groups)})"
+    }
+    "({u})"
+}
+
+fn str_join(sep: str, xs: List[str]) -> str {
+    var s = ""
+    var i = 0
+    while i < xs.len {
+        s = if i == 0 then xs[i] else "{s}{sep}{xs[i]}"
+        i += 1
+    }
+    s
+}
+
+fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str, my_groups: List[int], host: str) -> int {
+    var who = copy me
+    var gs = copy my_groups
+    if a.other.len > 0 {
+        // another user's list: for root, or a caller who may run ALL
+        let o = users.user_named(passwd, a.other) else |_| {
+            eprint("sudo: unknown user {a.other}")
+            eprint("sudo: error initializing audit plugin sudoers_audit")
+            return 1
+        }
+        var allowed = (os_uid() else 1) == 0
+        for e in pol.entries {
+            if who_matches(e.who, me, my_groups, group_text) && e.cmd == "ALL" {
+                allowed = true
+            }
+        }
+        if !allowed {
+            eprint("Sorry, user {me.name} is not allowed to run sudo on {host}.")
+            return 1
+        }
+        who = copy o
+        gs = users.groups_of(group_text, o.name, o.gid)
+    }
+    var mine = List[Entry]()
+    for e in pol.entries {
+        if who_matches(e.who, who, gs, group_text) {
+            (mut mine).push(e)
+        }
+    }
+    if mine.len == 0 {
+        if a.other.len > 0 {
+            eprint("sudo: User {who.name} is not allowed to run sudo on {host}.")
+        } else {
+            eprint("User {who.name} is not allowed to run sudo on {host}.")
+        }
+        let _l = log_line(me.name, "user NOT in sudoers", os_cwd() else "/", "root", "", "list", true)
+        return 1
+    }
+    if a.words.len > 0 {
+        let cwd = os_cwd() else "/"
+        let sp = if pol.has_secure then pol.secure_path else (env_get("PATH") else "/usr/bin:/bin")
+        let path = find_command(a.words[0], sp, cwd)
+        if path.len == 0 {
+            eprint("sudo: {a.words[0]}: command not found")
+            return 1
+        }
+        var ok = false
+        for e in mine {
+            if e.cmd == "ALL" || e.cmd == path {
+                ok = true
+            }
+        }
+        if !ok {
+            eprint("sudo: Sorry, user {who.name} is not allowed to execute '{path}' as root on {host}.")
+            return 1
+        }
+        var line = path
+        var k = 1
+        while k < a.words.len {
+            line = "{line} {a.words[k]}"
+            k += 1
+        }
+        print(line)
+        return 0
+    }
+    print("Matching Defaults entries for {who.name} on {host}:")
+    print("   ")
+    var def = ""
+    if pol.has_secure {
+        def = "secure_path={pol.secure_path.replace(":", "\\:")}"
+    }
+    print("    {def}")
+    print("")
+    print("User {who.name} may run the following commands on {host}:")
+    var i = 0
+    var cur = ""
+    var cur_run = ""
+    var cur_pw = true
+    var have = false
+    while i < mine.len {
+        let e = copy mine[i]
+        i += 1
+        let ra = runas_text_list(e)
+        let pwtag = if e.nopasswd then "NOPASSWD: " else "PASSWD: "
+        if have && ra == cur_run {
+            // same run-as list: more commands on the line, a tag when it changes
+            if e.nopasswd != cur_pw {
+                cur = "{cur}, {pwtag}{e.cmd}"
+            } else {
+                cur = "{cur}, {e.cmd}"
+            }
+            cur_pw = e.nopasswd
+        } else {
+            if have {
+                print(cur)
+            }
+            cur_run = ra
+            cur_pw = e.nopasswd
+            have = true
+            cur = "    {ra} {if e.nopasswd then pwtag else ""}{e.cmd}"
+            if !e.nopasswd {
+                cur = "    {ra} PASSWD: {e.cmd}"
+            }
+        }
+    }
+    if have {
+        print(cur)
+    }
+    0
+}
+
+/// The run-as list as `-l` prints it: `(ALL : ALL)`, `(root)`, `(lobo : pack)`.
+fn runas_text_list(e: Entry) -> str {
+    runas_text(e)
+}
+
+// ---- the command and the environment ------------------------------------
+
+fn find_command(word: str, sp: str, cwd: str) -> str {
+    if word.contains("/") {
+        let p = if word.starts_with("/") then word else "{cwd}/{word}"
+        if fs_is_file(p) {
+            return p
+        }
+        return ""
+    }
+    for dir in sp.split(":") {
+        let d = if dir.len == 0 then "." else dir
+        let p = "{d}/{word}"
+        if fs_is_file(p) {
+            return p
+        }
+    }
+    ""
+}
+
+fn env_safe(name: str, value: str) -> bool {
+    if value.starts_with("()") {
+        return false
+    }
+    if name == "TZ" {
+        if value.contains("..") {
+            return false
+        }
+        var i = 0
+        while i < value.len {
+            let c = value[i..i + 1]
+            let ok = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_" || c == "." || c == "," || c == "+" || c == ":" || c == "/" || c == "-"
+            if !ok {
+                return false
+            }
+            i += 1
+        }
+        let v = if value.starts_with(":") then value[1..] else value
+        if v.starts_with("/") && !v.starts_with("/usr/share/zoneinfo") {
+            return false
+        }
+        return true
+    }
+    !(value.contains("/") || value.contains("%"))
+}
+
+fn kept_by_default(name: str, pol: Policy) -> bool {
+    for k in default_keep() {
+        if k == name {
+            return true
+        }
+    }
+    for k in pol.keep {
+        if k == name {
+            return true
+        }
+        if k.ends_with("*") && name.starts_with(k[0..k.len - 1]) {
+            return true
+        }
+    }
+    false
+}
+
+fn checked(name: str) -> bool {
+    name == "COLORTERM" || name == "LANG" || name == "LANGUAGE" || name == "LINGUAS" || name == "TERM" || name == "TZ" || name.starts_with("LC_")
+}
+
+fn is_set_by_sudo(name: str) -> bool {
+    name == "MAIL" || name == "LOGNAME" || name == "USER" || name == "HOME" || name == "SHELL" || name.starts_with("SUDO_")
+}
+
+fn build_env(pol: Policy, a: Args, me: users.User, target: users.User, shell: str, shown: str) -> List[str] {
+    var env = List[str]()
+    var have_term = false
+    var have_path = false
+    let tname = target.name
+    for kv in env_vars() {
+        let eq = kv.find("=") else kv.len
+        let name = kv[0..eq]
+        let value = if eq < kv.len then kv[eq + 1..] else ""
+        if is_set_by_sudo(name) {
+            continue
+        }
+        var keep = false
+        if a.preserve {
+            keep = !(name.starts_with("LD_") || name.starts_with("BASH_FUNC_") || name == "IFS" || value.starts_with("()")) && (!checked(name) || env_safe(name, value))
+        } else if name == "PATH" {
+            keep = true
+        } else if checked(name) {
+            keep = env_safe(name, value)
+        } else {
+            keep = kept_by_default(name, pol)
+        }
+        if !keep {
+            continue
+        }
+        if name == "PATH" {
+            have_path = true
+            if pol.has_secure {
+                (mut env).push("PATH={pol.secure_path}")
+                continue
+            }
+        }
+        if name == "TERM" {
+            have_term = true
+        }
+        (mut env).push(kv)
+    }
+    for kv in a.assigns {
+        set_var(mut env, kv)
+        if kv.starts_with("TERM=") {
+            have_term = true
+        }
+    }
+    (mut env).push("MAIL=/var/mail/{tname}")
+    if pol.has_secure && !have_path {
+        (mut env).push("PATH={pol.secure_path}")
+    }
+    (mut env).push("LOGNAME={tname}")
+    (mut env).push("USER={tname}")
+    (mut env).push("HOME={target.home}")
+    (mut env).push("SHELL={shell}")
+    if a.login {
+        (mut env).push("SHELL={shell}")
+    }
+    if !have_term {
+        (mut env).push("TERM=unknown")
+    }
+    (mut env).push("SUDO_COMMAND={shown}")
+    (mut env).push("SUDO_USER={me.name}")
+    (mut env).push("SUDO_UID={me.uid}")
+    (mut env).push("SUDO_GID={me.gid}")
+    env
+}
+
+fn set_var(mut env: List[str], kv: str) {
+    let eq = kv.find("=") else kv.len
+    var k = 0
+    while k < env.len {
+        let e = env[k]
+        let q = e.find("=") else e.len
+        if e[0..q] == kv[0..eq] {
+            env[k] = kv
+            return
+        }
+        k += 1
+    }
+    (mut env).push(kv)
+}
+
+/// `-c`'s string: every character but letters, digits, `_`, `-` and `$`
+/// backslash-escaped, the words joined by blanks.
+fn escape_words(words: List[str]) -> str {
+    var out = ""
+    var k = 0
+    while k < words.len {
+        if k > 0 {
+            out = out + " "
+        }
+        let w = words[k]
+        var i = 0
+        while i < w.len {
+            let c = w[i..i + 1]
+            let plain = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_" || c == "-" || c == "$"
+            out = if plain then out + c else out + "\\" + c
+            i += 1
+        }
+        k += 1
+    }
+    out
+}
+
+/// SUDO_COMMAND's form of the words: only blanks escaped.
+fn escape_blanks(words: List[str]) -> str {
+    var out = ""
+    var k = 0
+    while k < words.len {
+        if k > 0 {
+            out = out + " "
+        }
+        out = out + words[k].replace(" ", "\\ ")
+        k += 1
+    }
+    out
+}
+
+// ---- the log -------------------------------------------------------------
+
+/// One line of `/var/log/sudo.log`, root's, mode 0600: `Mon DD HH:MM:SS :
+/// user : [reason ; ]PWD=… ; USER=… ; [GROUP=… ; ]COMMAND=…`, wrapped at
+/// 80 columns (continuations indented four blanks) unless `!loglinelen`.
+/// False when it cannot be written (an allowed command is then not run).
+fn log_line(user: str, reason: str, cwd: str, target: str, group: str, command: str, refused: bool) -> bool {
+    let pol_wrap = true
+    var body = "{user} : "
+    if reason.len > 0 {
+        body = "{body}{reason} ; "
+    }
+    body = "{body}PWD={cwd} ; USER={target} ; "
+    if group.len > 0 {
+        body = "{body}GROUP={group} ; "
+    }
+    body = "{body}COMMAND={command}"
+    let line = "{stamp()} : {body}"
+    let text = if pol_wrap then wrap80(line) else line
+    let fd = fs_open_perm(LOG_FILE, 2, 0o600) else |_| {
+        fs_create_dir_all("/var/log") else |_| {
+        }
+        let fd2 = fs_open_perm(LOG_FILE, 2, 0o600) else |_| {
+            -1
+        }
+        fd2
+    }
+    if fd < 0 {
+        eprint("sudo: unable to write {LOG_FILE}")
+        return refused
+    }
+    fs_write(fd, "{text}\n") else |_| {
+        eprint("sudo: unable to write {LOG_FILE}")
+        return refused
+    }
+    fs_close(fd) else |_| {
+    }
+    true
+}
+
+fn wrap80(line: str) -> str {
+    if line.len <= 80 {
+        return line
+    }
+    var out = ""
+    var cur = ""
+    var first = true
+    for w in line.split(" ") {
+        if cur.len == 0 {
+            cur = w
+            continue
+        }
+        if cur.len + 1 + w.len <= 80 {
+            cur = "{cur} {w}"
+        } else {
+            out = if first then cur else "{out}\n{cur}"
+            first = false
+            cur = "    {w}"
+        }
+    }
+    if first then cur else "{out}\n{cur}"
+}
+
+fn month_name(m: int) -> str {
+    let names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    names[m - 1]
+}
+
+fn default_keep() -> List[str] {
+    ["COLORS", "DISPLAY", "HOSTNAME", "KRB5CCNAME", "LS_COLORS", "PATH_LOCALE", "XAUTHORIZATION", "XAUTHORITY"]
+}
+
+/// `Mon DD HH:MM:SS` in UTC (PAX keeps no time zone), the day padded with a blank.
+fn stamp() -> str {
+    let secs = time.unix_ms() / 1000
+    let days = secs / 86400
+    let rem = secs % 86400
+    // civil date from days since 1970-01-01
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 then mp + 3 else mp - 9
+    let hh = rem / 3600
+    let mm = (rem % 3600) / 60
+    let ss = rem % 60
+    "{month_name(m)} {pad(d, true)} {pad(hh, false)}:{pad(mm, false)}:{pad(ss, false)}"
+}
+
+fn pad(n: int, blank: bool) -> str {
+    if n < 10 {
+        return if blank then " {n}" else "0{n}"
+    }
+    "{n}"
+}
+
+// ---- small things ----------------------------------------------------
+
+fn trim(s: str) -> str {
+    var b = 0
+    var e = s.len
+    while b < e && (s[b..b + 1] == " " || s[b..b + 1] == "\t") {
+        b += 1
+    }
+    while e > b && (s[e - 1..e] == " " || s[e - 1..e] == "\t" || s[e - 1..e] == "\r") {
+        e -= 1
+    }
+    s[b..e]
+}
+
+fn base_name(path: str) -> str {
+    let cut = path.rfind("/") else -1
+    if cut < 0 {
+        return path
+    }
+    path[cut + 1..]
+}
+
+fn usage() -> str {
+    """
+    usage: sudo -h | -K | -k | -V
+    usage: sudo -v [-ABkNnS] [-g group] [-h host] [-p prompt] [-u user]
+    usage: sudo -l [-ABkNnS] [-g group] [-h host] [-p prompt] [-U user]
+                [-u user] [command [arg ...]]
+    usage: sudo [-ABbEHkNnPS] [-r role] [-t type] [-C num] [-D directory]
+                [-g group] [-h host] [-p prompt] [-R directory] [-T timeout]
+                [-u user] [VAR=value] [-i | -s] [command [arg ...]]
+    usage: sudo -e [-ABkNnS] [-r role] [-t type] [-C num] [-D directory]
+                [-g group] [-h host] [-p prompt] [-R directory] [-T timeout]
+                [-u user] file ...
+    """
+}
+
+fn help() -> str {
+    """
+    sudo - execute a command as another user
+
+    usage: sudo -h | -K | -k | -V
+    usage: sudo -v [-ABkNnS] [-g group] [-h host] [-p prompt] [-u user]
+    usage: sudo -l [-ABkNnS] [-g group] [-h host] [-p prompt] [-U user]
+                [-u user] [command [arg ...]]
+    usage: sudo [-ABbEHkNnPS] [-r role] [-t type] [-C num] [-D directory]
+                [-g group] [-h host] [-p prompt] [-R directory] [-T timeout]
+                [-u user] [VAR=value] [-i | -s] [command [arg ...]]
+    usage: sudo -e [-ABkNnS] [-r role] [-t type] [-C num] [-D directory]
+                [-g group] [-h host] [-p prompt] [-R directory] [-T timeout]
+                [-u user] file ...
+
+    Options:
+      -A, --askpass                 use a helper program for password prompting
+      -b, --background              run command in the background
+      -B, --bell                    ring bell when prompting
+      -C, --close-from=num          close all file descriptors >= num
+      -D, --chdir=directory         change the working directory before running
+                                    command
+      -E, --preserve-env            preserve user environment when running command
+          --preserve-env=list       preserve specific environment variables
+      -e, --edit                    edit files instead of running a command
+      -g, --group=group             run command as the specified group name or ID
+      -H, --set-home                set HOME variable to target user's home dir
+      -h, --help                    display help message and exit
+      -h, --host=host               run command on host (if supported by plugin)
+      -i, --login                   run login shell as the target user; a command
+                                    may also be specified
+      -K, --remove-timestamp        remove timestamp file completely
+      -k, --reset-timestamp         invalidate timestamp file
+      -l, --list                    list user's privileges or check a specific
+                                    command; use twice for longer format
+      -n, --non-interactive         non-interactive mode, no prompts are used
+      -P, --preserve-groups         preserve group vector instead of setting to
+                                    target's
+      -p, --prompt=prompt           use the specified password prompt
+      -R, --chroot=directory        change the root directory before running command
+      -r, --role=role               create SELinux security context with specified
+                                    role
+      -S, --stdin                   read password from standard input
+      -s, --shell                   run shell as the target user; a command may
+                                    also be specified
+      -t, --type=type               create SELinux security context with specified
+                                    type
+      -T, --command-timeout=timeout terminate command after the specified time limit
+      -U, --other-user=user         in list mode, display privileges for user
+      -u, --user=user               run command (or edit file) as specified user
+                                    name or ID
+      -V, --version                 display version information and exit
+      -v, --validate                update user's timestamp without running a
+                                    command
+      --                            stop processing command line arguments
+    """
+}
