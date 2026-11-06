@@ -1130,6 +1130,8 @@ tracee's stop, and an untraced caller's exit_group with TRACEEXIT in the others
 still need their rows.
 Other requests are refused by name; NT_X86_XSTATE is named and returns EINVAL.
 
+PAX applies `ptrace(2)`'s access-mode checks without Yama; same-uid processes may trace and read each other, as Linux does at `ptrace_scope` 0.
+
 The requests (the syscall census of `ptrace`, number 101; every one not listed is
 refused by name: -EIO and a `ptrace: refused request 0x…` line, never -ENOSYS):
 

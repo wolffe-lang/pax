@@ -85,3 +85,24 @@ uid-1000 process that is not its descendant, are -13 on the recording's Linux
 (Yama ptrace_scope 1) and -5 here: PAX has no Yama, and Linux at scope 0
 answers -5. maps, auxv and io stay -2 (owed to sniff). The base tree passes
 U1 with the old sig.pax; the head with the regenerated one (see its commit).
+
+Corrections and limits for the sig note above.
+- My first report of this diff was wrong. I read the session pair that the
+  suite's U1 builds for its sender rows (the .cmp and .want files, whose
+  three set-ID kill rows U1 already tolerates against the Linux recording),
+  not the comparison against tests/mpx5-users.d/sig.pax that failed. The
+  checker prints that failure cut at 400 characters starting at line 114, and
+  I did not open the full session against sig.pax until the second look, which
+  is where the mem column showed.
+- Yama. PAX applies ptrace(2)'s access-mode checks without Yama: same-uid
+  processes may trace and read each other's /proc/<pid>/mem, as Linux does at
+  ptrace_scope 0. That is security-relevant (a uid-1000 process can read and
+  write the memory of any other uid-1000 process). Adding Yama
+  (ptrace_scope 1: only descendants) is a later item, not this lane's.
+- "Linux at scope 0 answers -5" was read from ptrace(2)'s Yama section, not
+  measured: the rules forbid changing a host's setting, and the host's scope
+  is 1. What was measured: a descendant's mem on Linux at scope 1 (memory
+  witness, -5 for a read at address 0) and the recording's -13 for a
+  non-descendant.
+- final2's mpx5-users stage ran with sig.pax copied into build-fbda0bb9 while
+  the job ran: dev evidence, not a run at fbda0bb9 or 884ba058.
