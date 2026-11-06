@@ -78,32 +78,51 @@ fn getregs(s: u64, data: u64, bytes: u64) -> u64 {
     0
 }
 
+/// A user-mode address the processor accepts: canonical. The kernel half
+/// is accepted too (Linux does): ring 3 faults on it and takes SIGSEGV.
+fn canonical(v: u64) -> bool {
+    v < 0x0000800000000000 || v >= 0xffff800000000000
+}
+
+/// Whether user_regs_struct word `i` may hold `v` (R-px102-3: what PAX can
+/// hand back to ring 3). Selectors are Linux's 0x33 and 0x2b; the data
+/// selectors and GS base stay zero; a non-canonical rip or rsp would
+/// fault in the kernel at IRETQ, and fs_base is a user address.
+fn word_ok(i: u64, v: u64) -> bool {
+    if i == 16 || i == 19 { return canonical(v) }
+    if i == 17 { return v == 0x33 }
+    if i == 20 { return v == 0x2b }
+    if i == 21 { return v < TOP }
+    if i >= 22 { return v == 0 }
+    true
+}
+
+/// Store word `i` (already accepted by word_ok) into the stopped thread.
+fn store_word(s: u64, f: u64, i: u64, v: u64) {
+    if i == 15 { sched.trace_set_orig(s, v); return }
+    if i == 17 { put_word(f, 18, 0x23); return } // Linux CS 0x33 -> PAX's 0x23
+    if i == 18 { put_word(f, 19, (v & 0x50dd5) | 0x202); return }
+    if i == 20 { put_word(f, 21, 0x1b); return } // Linux SS 0x2b -> PAX's 0x1b
+    if i == 21 { sched.trace_set_fs(s, v); return }
+    if i >= 22 { return }
+    put_word(f, frame_index(i), v)
+}
+
 fn setregs(s: u64, data: u64) -> u64 {
     let pml4 = paging.live()
     if !uaccess.readable(pml4, data, 216) { return EFAULT }
     // Validate the complete image before changing any saved register.
-    // Only the 64-bit ABI is supported: no compatibility-mode selectors,
-    // GS-base switching or user data segments are enabled by this layer.
-    if uaccess.get64(pml4, data + 17 * 8) != 0x33 || uaccess.get64(pml4, data + 20 * 8) != 0x2b { return EIO }
-    if uaccess.get64(pml4, data + 16 * 8) >= TOP || uaccess.get64(pml4, data + 19 * 8) >= TOP || uaccess.get64(pml4, data + 21 * 8) >= TOP { return EIO }
-    var i: u64 = 22
+    var i: u64 = 0
     while i < 27 {
-        if uaccess.get64(pml4, data + i * 8) != 0 { return EIO }
+        if !word_ok(i, uaccess.get64(pml4, data + i * 8)) { return EIO }
         i += 1
     }
     let f = sched.trace_frame(s)
     i = 0
-    while i < 15 {
-        put_word(f, frame_index(i), uaccess.get64(pml4, data + i * 8))
+    while i < 22 {
+        store_word(s, f, i, uaccess.get64(pml4, data + i * 8))
         i += 1
     }
-    sched.trace_set_orig(s, uaccess.get64(pml4, data + 15 * 8))
-    put_word(f, 17, uaccess.get64(pml4, data + 16 * 8))
-    put_word(f, 18, 0x23) // map the reported Linux CS back to PAX's
-    put_word(f, 19, (uaccess.get64(pml4, data + 18 * 8) & 0x250dd5) | 0x202)
-    put_word(f, 20, uaccess.get64(pml4, data + 19 * 8))
-    put_word(f, 21, 0x1b) // likewise Linux SS 0x2b -> PAX SS 0x1b
-    sched.trace_set_fs(s, uaccess.get64(pml4, data + 21 * 8))
     put_word(f, 15, 0x101) // IRETQ, preserving the requested RCX/R11
     0
 }
@@ -183,6 +202,13 @@ fn dr7_valid(s: u64, dr7: u64, changed: u64, addr: u64) -> bool {
 }
 
 fn pokeuser(s: u64, addr: u64, data: u64) -> u64 {
+    if addr & 7 == 0 && addr < 216 {
+        if !word_ok(addr / 8, data) { return EIO }
+        let f = sched.trace_frame(s)
+        store_word(s, f, addr / 8, data)
+        put_word(f, 15, 0x101)
+        return 0
+    }
     if addr & 7 != 0 || addr < 848 || addr >= 912 { return EIO }
     let n = (addr - 848) / 8
     if n == 4 || n == 5 { return EIO }
