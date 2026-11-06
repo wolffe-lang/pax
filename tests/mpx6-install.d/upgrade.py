@@ -69,7 +69,7 @@ import time
 repo, work, old_src, new_src = map(Path, sys.argv[1:5])
 ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7',
                                                         'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11', 'U12',
-                                                        'U13a', 'U13d', 'U13f']
+                                                        'U13a', 'U13d', 'U13f', 'U14']
 DEV_SRC = Path(os.environ['PAX_UPGRADE_DEV_STICK']) if os.environ.get('PAX_UPGRADE_DEV_STICK') else None
 work.mkdir(parents=True, exist_ok=True)
 SERIAL = os.environ['PAX_UPGRADE_SERIAL']
@@ -832,6 +832,62 @@ def passed_sudo(name, row, what, fresh=False):
            f'uid 1000 ran /bin/sudo /bin/id and it printed {out!r}; /var/log/sudo.log 0600 0:0 holds the line')
 
 
+SESSION = repo/'tests/mpx6-install.d/sudo-session.txt'
+
+
+def session_lines():
+    out, who = {}, None
+    for l in SESSION.read_text().splitlines():
+        if l.startswith('#') or not l.strip():
+            continue
+        if l.startswith('['):
+            who = l.strip('[]')
+            out[who] = []
+        else:
+            out[who].append(l)
+    return out
+
+
+def typed(line, out):
+    return f'{line} >> {out} 2>&1; echo rc=$? >> {out}'
+
+
+def sudo_session(name, row):
+    """px103 item 5: the typed sessions of tests/mpx6-install.d/sudo-session.txt at the installed console,
+    as root, as uid 1000 (su wolf) and as lobo (sudo -u lobo /bin/sudo); the captures read from the disk."""
+    lines = session_lines()
+    m = Machine(name, C['sym_new'], None)
+    try:
+        login(m, row)
+        for l in lines['root']:
+            m.command(typed(l, '/root/s-root.txt'), row, 300)
+        m.type('/bin/su wolf\n')
+        m.wait(PROMPT, row, 120, last=True)
+        for l in lines['wolf']:
+            m.command(typed(l, '/tmp/s-wolf.txt'), row, 300)
+        m.command('exit', row, 60)
+        m.command('cp /tmp/s-wolf.txt /root/s-wolf.txt; echo cp=$?', row, 60)
+        for l in lines['lobo']:
+            m.command(typed('sudo -n -u lobo /bin/sudo -n ' + l, '/root/s-lobo.txt'), row, 300)
+        m.command('cp /var/log/sudo.log /root/s-log.txt; echo log=$?', row, 60)
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    img = root_image(work/f'{name}-root.img')
+    outd = work/'session-pax'
+    outd.mkdir(exist_ok=True)
+    try:
+        for f in ('s-root', 's-wolf', 's-lobo', 's-log'):
+            (outd/(f + '.txt')).write_bytes(debugfs_cat(img, f'/root/{f}.txt', row))
+    finally:
+        img.unlink()
+    for f in ('s-root', 's-wolf', 's-lobo', 's-log'):
+        if not (outd/(f + '.txt')).stat().st_size:
+            fail(row, f'{f}.txt is empty')
+    return outd
+
+
 def track_a():
     """The 860 as px92's 9c88ec8a stick left it, upgraded (U1-U8)."""
     old, new, new_rows, new_commit = C['old'], C['new'], C['new_rows'], C['new_commit']
@@ -1038,6 +1094,9 @@ def u9():
     again('u9-again', 'U9-fresh', rows, needles=[f'Installed: {C["new_commit"]}, from its manifest'])
     if 'U13f' in ROWS:
         passed_sudo('u13f', 'U13f-sudo-fresh', 'a fresh install from the new stick', fresh=True)
+    if 'U14' in ROWS:
+        outd = sudo_session('u14', 'U14-sudo-session')
+        passed('U14-sudo-session', f'typed at the installed console as root, uid 1000 and lobo; captures in {outd.name}/')
     passed('U9-fresh', f'the new stick installed the target in {secs} s with its own /etc/pax-install/manifest; the upgrade with the same stick read it, no baseline: "Nothing to change", every path as it was')
 
 
