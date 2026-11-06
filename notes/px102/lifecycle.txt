@@ -1,0 +1,56 @@
+px102 — thread lifecycle under tracing: the prediction, written
+2026-11-06T00:10Z at ae9afe5d, before the witnesses below exist and before
+any Linux output of them has been seen. Sources: ptrace(2) ("Death under
+ptrace", "execve(2) under ptrace", "Attaching and detaching", BUGS),
+wait(2) (__WALL, __WNOTHREAD), clone(2), execve(2). No kernel source.
+
+Four witnesses, each its own trace.c mode, the same binary on both
+kernels, run as uid 0 and 1000:
+
+L1 group-exit. A TRACEME tracee (trace re-exec'd as role-group) with
+   TRACECLONE spawns one thread, which blocks in FUTEX_WAIT; the leader then
+   calls exit_group(37). Predicted on Linux: EVENT_CLONE 0x3057f with the
+   thread's tid; the thread's initial stop 0x137f; after both are resumed,
+   two death reports, the thread's first (0x2500, "every tracee in its
+   thread group reports its death"), the leader's last (0x2500: a leader's
+   WIFEXITED waits for the other threads), then ECHILD.
+   PAX at ae9afe5d: end_others ends the thread silently, so the tracer sees
+   only the leader: RED at T-group-exit.
+
+L2 group-exit-event. L1 with TRACEEXIT as well. Predicted on Linux: both
+   threads stop in PTRACE_EVENT_EXIT (0x6057f, GETEVENTMSG 0x2500 each),
+   in either order (the witness prints them leader first, by identity,
+   and their arrival order is not printed); then the two deaths, thread
+   first. PAX: only the caller of exit_group stops: RED at
+   T-group-exit-event.
+
+L3 exec-thread. A TRACEME tracee with TRACECLONE|TRACEEXEC spawns a thread
+   that execs trace again (as orphan-target, exit 23) while the leader
+   blocks in FUTEX_WAIT. Predicted on Linux: no death report for the
+   leader; EVENT_EXEC 0x4057f reported under the LEADER's pid (the tid is
+   reset to the tgid); GETEVENTMSG is the FORMER tid (the thread's); then
+   exit 0x1700 under the leader's pid, then ECHILD.
+   PAX: GETEVENTMSG answers the new tid (= pid): RED at T-exec-former-tid.
+
+L4 tracer-thread. The tracer's second thread SEIZEs and INTERRUPTs a
+   running child of the process (a non-blocking pipe poll), waits for
+   its EVENT_STOP (0x80057f) and reads its registers. Predicted on Linux:
+   from the leader thread, GETREGS of that tracee is ESRCH (the tracer is
+   the thread); when the tracing thread exits, the tracee is detached and
+   runs on (TracerPid 0); the leader may then ATTACH it (0x137f), DETACH,
+   and collect its exit 0x2500.
+   PAX: a stop of a non-leader tracer's tracee is never parked (the
+   tracer's process is looked up by a leader's pid), so the tracing
+   thread's bounded WNOHANG poll times out: RED at T-tracer-thread.
+
+L5 traceme-thread. A non-leader thread forks a child that calls
+   PTRACE_TRACEME and raises SIGSTOP. Predicted on Linux: the tracer is
+   the forking thread (the child's real parent thread): that thread's
+   wait sees 0x137f and its GETREGS is 0, the leader's GETREGS is ESRCH.
+   PAX records the parent process's pid as the tracer, so the forking
+   thread's wait never sees the stop (the stop belongs to the leader's
+   tid): RED at T-traceme-thread.
+
+Each row is judged by check.py's named spans plus the whole transcript.
+If Linux disagrees with a prediction, the Linux transcript is the
+reference and the disagreement is recorded here, not hidden.
