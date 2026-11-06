@@ -16,7 +16,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 |---|---|---|
 | Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto the one disk the stick's allow-list names, its log written to the stick | both firmwares under QEMU, every push; the whole install on a machine shaped like kasumi |
 | Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers; `fork` (glibc's and wolf's `clone`, and musl's `fork` itself), `vfork`, `posix_spawn`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; `getrusage` (user and system time, the peak resident set, the context switches, a process's and its children's); `ptrace` (TRACEME, ATTACH, SEIZE, stops and events, registers, memory, single-step, hardware watchpoints), the requests a debugger uses; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
-| Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; `su` in wolf; no passwords yet | Linux as root and as a user |
+| Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; set-user-ID and set-group-ID honoured as `execve(2)` says (`no_new_privs`, `nosuid`); `su` and `sudo` in wolf; no passwords yet (`sudo` runs `NOPASSWD` rules only) | Linux as root and as a user; Ubuntu's `sudo` for the command |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
 | Disks | Up to eight disks: virtio (four), NVMe (`nvme0n1`, major 259), SATA AHCI (`sda`, major 8, LBA48; a controller in RAID mode named and left alone), or USB mass storage (`sdX`, Bulk-Only Transport), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on every bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
 | Network | virtio-net, and Intel's 82576 (by MSI-X) and I225/I226 (polled) on one ring model; ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections; a DHCP client (RFC 2131) when `/etc/pax-net` says `dhcp`, with `/etc/resolv.conf` from the lease | Linux in a namespace, captures rebuilt byte by byte, and dnsmasq as a black box for every lease event |
@@ -27,6 +27,43 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 
 What PAX is not: a security boundary. The permission checks hold for honest programs; the kernel has never been fuzzed
 or audited, it loads programs at fixed addresses, and the live USB entry accepts `root` with no password.
+
+
+## Becoming root: `sudo`
+
+PAX honours the set-user-ID and set-group-ID bits of a program as Linux does
+(`execve(2)`: the file's owner becomes the effective user id; a set-group-ID
+file needs group execute; a script's own bits are ignored; a `nosuid` mount
+and `no_new_privs` switch them off), and ships `sudo`, written in wolf
+(`user/sudo`), installed set-user-ID root. **It authenticates nobody:** there
+are no passwords yet, so it trusts `/etc/sudoers` alone, and a rule that does
+not say `NOPASSWD:` is refused by name (`no password database yet (R1): only
+NOPASSWD rules are honoured`) for anyone but root. It never prompts.
+
+The policy PAX ships (`user/sudo/sudoers`) holds two rules:
+
+    root ALL=(ALL:ALL) ALL
+    #1000 ALL=(ALL:ALL) NOPASSWD: ALL
+
+The second names **uid 1000, not a user name**: the installer's account is
+always uid 1000, whatever it is called. The service account `lobo` (990) has
+no rule. To use it as the `pax` account: `sudo yew /etc/shrc`, `sudo -i` for a
+root shell, `sudo -u lobo CMD` for another user, `sudo -l` to see what you may
+run. Every use, allowed or refused, appends a line to `/var/log/sudo.log`
+(root's, mode 0600). `sudo` reads `/etc/sudoers` and files in `/etc/sudoers.d`
+only when they are root's and not group- or world-writable, as Linux's `sudo`
+does; the subset it implements, and what it refuses by name, are in
+`user/sudo/sudo.lu`'s header. `tests/mpx5-sudo` holds the set-ID rules to a real
+Linux's recording and `sudo`'s rows to Ubuntu 24.04's own `sudo`; the rows
+where PAX differs on purpose are named in `notes/px103/ctnamed.txt`.
+
+**Not yet:** the distribution build does not carry `sudo` and the policy
+(that is the next step; an installed system gains them by an upgrade once it
+does). Until then a built image carries them only in `tests/mpx5-sudo`.
+
+All of this is **enforced for honest programs; not a boundary against an
+attacker**: the kernel has never been fuzzed or audited and loads programs at
+fixed addresses.
 
 ## Quick start
 

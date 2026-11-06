@@ -1,0 +1,177 @@
+# px103 — set-ID execution and `sudo` (P5 U8, the first half)
+
+Base: pax trunk `a9f5b6f1`. The claim, here and wherever this lane writes:
+**enforced for honest programs; not a boundary against an attacker**
+(ruling #75 R6). The kernel has never been fuzzed or audited and loads
+programs at fixed addresses. R1 stands: no passwords, hashes or prompts.
+
+## 1. What this lane does
+
+- The kernel honours set-user-ID and set-group-ID as `execve(2)` and
+  `credentials(7)` say (`kernel/README.md`, "Set-ID execution (px103)"),
+  and `PR_SET_NO_NEW_PRIVS` is real.
+- `sudo`, in wolf, in `user/sudo/`, installed set-user-ID root, reading a
+  subset of `sudoers(5)`; no password, no prompt; every use logged.
+- `tests/mpx5-sudo`: the set-ID witness (`user/elf/sid.c`) held to a real
+  Linux 7.2.4's recording, 49 lines, byte for byte; `sudo`'s rows as
+  `pax`, `lobo` and root on PAX; and PAX's `sudo` run in Ubuntu 24.04's
+  container through `notes/px103/sudo-ct.sh`, 300 of 360 rows the same as
+  Ubuntu's own `sudo`, the other 60 differing by name.
+
+## 2. The prediction, and what it got wrong
+
+`notes/px103/prediction.txt` was committed before any code. The red run on
+trunk showed 22 of 49 witness lines equal (the plain, root-actor and
+no-effect rows); after the kernel work all 49. Mispredicted:
+
+- Linux's `/proc/self` directory itself is owned by the effective ids even
+  when the process is not dumpable (only the files under it turn root's);
+  the witness prints both.
+- Linux 7.2.4 under a container on the build host reports dumpable 2
+  (`fs.suid_dumpable` 2 on that host), where the kernel's default and PAX's
+  fixed value are 0. The recording is therefore made by booting the host's
+  kernel image under QEMU with the witness as init (`notes/px103/record-sid.sh`),
+  which reads 0 (printed first).
+- `sudo` does not ask for a password when the target user is the caller
+  (`sudo -u pax` as pax): measured, implemented.
+- The sudo file check ("must be owned by uid 0 and have the setuid bit set")
+  is made only when `sudo` did not become root; root running an unmarked
+  copy is fine.
+
+## 3. Commits
+
+- `6dc27563` notes/px103/sudo-ct.sh: the black-box script for Ubuntu's sudo
+- `f36dc37e` notes/px103/prediction.txt: set-ID execution and sudo, before code
+- `d7931487` user/elf/sid.c: the set-ID execution witness
+- `d99ff7a7` user/elf/sid.c: init mode for a real Linux's recording
+- `37ef9c9c` user/elf/sid.c: the owner of a file under /proc/self too
+- `c6e4be9a` tools/mkcred: build sid
+- `35b35aff` notes/px103/record-sid.sh: sid on a real Linux under QEMU
+- `35336c56` tests/mpx5-sudo: the set-ID witness against a real Linux's recording, red on trunk
+- `d2ea42e5` tests/mpx5-sudo.d/linux/sid.txt: a real Linux 7.2.4's recording of sid
+- `4a8891f1` kernel: honour set-ID bits at execve, no_new_privs, nosuid lookup
+- `dfe44df9` user/sudo: sudo in wolf, and tools/mksudo
+- `9fe21fc0` notes/px103: show.c and Ubuntu sudo's recorded output
+- `73c251d6` user/sudo: a symbolic link in a rule matches by its own path
+- `888de764` user/sudo: -ll, tags as sudo prints them, the host name trimmed
+- `faac0868` user/sudo: the kernel's environment order, -E, -g alone
+- `b728d5ae` user/sudo: a run-as list's commas do not split a spec
+- `72d3f9d5` user/sudo: real-path rule match, env_keep replaces, -v with a command, numeric ids must exist
+- `cfa35d4e` user/sudo: the file check first, a caller as itself needs no password, !loglinelen
+- `c3d513af` user/sudo: a sudoers.d directory that is not root's is skipped with a warning
+- `1bd46f6a` tests/mpx5-users.d/setid.pax: set-ID execution honoured, every execve row Linux's
+- `0a36262f` tests/mpx5-sudo: the sudo session, red (no expectations yet)
+- `07e89f27` sudo: the log is root's; sid: the sudo rows
+- `11c800cc` tests/mpx5-sudo.d/sudo.pax: PAX's sudo rows
+- `1d3256fc` user/sudo: sudo's own file is checked only when it did not make us root
+- `68df3077` notes/px103: ctdiff with the named differences
+- `bc66fd54` user/sudo: -V with a command is a usage error
+- `977961d3` tests/mpx5-sudo: PAX's sudo against Ubuntu's recorded rows, the differences by name
+- `7521db07` tests/mpx5-sudo: show is built with the programs
+- `9a5819af` tests/mpx5-users: sig and ident's set-ID rows are honoured ones (R5 amended)
+- `fb6f49a1` CI: the mpx5-sudo job, its tier-map rules; sid is built by its own suite
+- `34c70e75` docs/SOURCES.md: px103's sources, the man pages' digests
+- `95b13f04` kernel/README: set-ID execution (px103)
+- `1856675a` user/su: the header says set-ID is honoured and su is not installed set-ID
+
+## 4. Rows that moved from PAX's to Linux's (ruling R5 amended)
+
+- `mpx5-users` **setid**: every `execve` row of the set-ID copies is Linux's
+  now (the recording's 74 lines against PAX's 72: the two mount lines and the
+  one `nosuid` row differ, nothing else); `tests/mpx5-users.d/setid.pax`
+  holds the new text.
+- `mpx5-users` **sig**: the set-ID target's rows (its three sender rows with
+  `kill`, and its five reader rows, whose `/proc/<pid>` files follow the new
+  effective user): all 102 sender rows are the recording's now
+  (`SIG_LINUX_ROWS` 99 to 102); `sig.pax` holds the rest.
+- `mpx5-users` **ident**, **ident-user**: the one row each that ran the
+  set-ID copy. The recording was made with the copy on a `nosuid` mount
+  (not honoured); the honoured text is `tests/mpx5-users.d/ident.setid` and
+  `ident-user.setid`, and the suite substitutes it for that one line.
+- Not run on this base: the rows that need px102's ptrace (a traced exec of
+  a set-ID file stays unprivileged; an owner's attach after a set-ID exec is
+  refused). `tests/mpx5-sudo` prints `SKIP traced-exec-setid` and
+  `SKIP attach-after-setid` by name, with the reason. `cred.exec_ids`' `ignored`
+  argument is where the first plugs in.
+
+## 5. Rulings
+
+- **R-px103-1** (accepted as C): the shipped policy is `root ALL=(ALL:ALL)
+  ALL` and `#1000 ALL=(ALL:ALL) NOPASSWD: ALL`; the second names uid 1000,
+  not a user name (README says so); `lobo` gets nothing. `user/sudo/sudoers`.
+- **R-px103-2, a command that is a symbolic link in the policy**: the
+  contract asked for a refusal by name. Linux accepts it and matches the file
+  (device and inode), and its own rows (`bob-idlink`, `bob-id-bin`) rely on
+  it. Recommend (implemented): a rule's path matches a command when the
+  paths are equal or name the same real file (`fs_realpath`); a relative path,
+  `..` or `//` in a rule is refused by name. Option B: refuse links, which
+  breaks `/bin/id` against a `/usr/bin/id` rule.
+- **R-px103-3, the log's time**: PAX keeps no zone, so the stamp is UTC.
+  Recommend keeping it; the format is sudo's, wrapped at 80 columns with
+  `!loglinelen` honoured.
+- **R-px103-4, the distribution build** (not done in this head): adding
+  `sudo` to the images needs a build input (`tools/mksudo`), `distribution-root`
+  rows (`bin/sudo` mode 04755, `etc/sudoers` 0440, `var/log`), `tests/distribution`'s
+  inventory, and a check that the installer's ext2 writer and upgrade keep the
+  04755 mode and write the absent `etc/sudoers`. Recommend one follow-on lane
+  after the rebase, with a real-disk witness (`mpx6-install` installs, boots, and
+  runs `sudo` as `pax`).
+- **R-px103-5, the Linux reference for set-ID**: a real Linux booted under
+  QEMU with the build host's kernel image (7.2.4) rather than the campaign's
+  usual reference machine. Recommend keeping it: reproducible by
+  `notes/px103/record-sid.sh`, and the same program is init.
+
+## 6. Named differences (sudo against Ubuntu's, `notes/px103/ctnamed.txt`)
+
+- Linux asks for a password before it says no, or yes to a rule without
+  `NOPASSWD`; PAX never prompts. Rows ending in "a password is required" or
+  "a terminal is required" differ here (PAX says `no password database yet
+  (R1): ...` or the final words at once).
+- A syntax error: Linux reports file:line:column with a caret and goes on;
+  PAX names the file and line and denies every command. Likewise a relative
+  command, `Cmnd_Alias`, a command with arguments, a host other than `ALL`
+  and a line over 1,024 bytes.
+- `-V`'s text; `-h HOST`; the PAM-installed configuration's `umask` (PAX has no
+  PAM); the argument-size bound of the long-argument rows.
+- `-ll` prints Linux's long format only as far as the subset goes.
+
+## 7. What is not done
+
+- The distribution build (R-px103-4) and so the README's instructions for an
+  installed 860 hold for a built image only; the README says so.
+- Typed `pelt` sessions as root, `pax` and `lobo`, held to the same typed
+  session on Linux (contract item 5): not built. Its place is taken by
+  `sid`'s `sudo` rows on PAX (`tests/mpx5-sudo.d/sudo.pax`, PAX's own) and the
+  Ubuntu container comparison; a typed session needs the accounts image of
+  `mpx5-accounts` plus `sudo`, and Ubuntu's `sudo` in the Linux side.
+- The plant, the final gauntlet record, the PR and the audit: taken at the
+  orchestrator's word, after one rebase onto the trunk that carries px102.
+- Every log line's text has been compared to Ubuntu's for the rows in
+  `sudo-ct.sh`; the over-long-argument limits are not.
+
+## 8. For the second half: passwords (R1)
+
+What a password lane needs:
+
+1. **The hash**: a memory-hard function in wolf-std, with test vectors from
+   its specification, run on PAX's allocator and a 4-core budget; a salt from
+   `getrandom`; no default password in any published image.
+2. **`/etc/shadow`**, root's, 0600 (or 0640 with a `shadow` group), one line
+   a user, locked by default (`!`); the installer asks for the first
+   password and writes it, and an upgrade never touches it.
+3. **`login`** (U9's cousin; waits on job control): a prompt, no echo
+   (`termios`), three tries and a delay, a session leader.
+4. **`su` and `sudo` prompting**: both read the password from the terminal
+   (`/dev/tty`, no echo), `sudo -S` from standard input, `-n` refuses, and
+   `sudo` stops printing "no password database yet (R1)": a rule without
+   `NOPASSWD:` asks, Linux's three-try loop and its messages.
+5. **A timestamp**: `/var/run/sudo/ts/USER`, root's, per terminal and
+   caller, 5 minutes, `-v` refreshes it and `-k`/`-K` remove it (today
+   accepted and doing nothing).
+6. **Rate limiting** and the log lines for failures (`N incorrect password
+   attempts`).
+
+Draft lane `px1NN`: "passwords: the hash, shadow, login, su and sudo
+prompting", needs the hash in wolf-std first (a `wolf-std` lane with vectors),
+then `tests/mpx5-accounts` gaining a typed password session held to Ubuntu's
+`su` and `sudo`.
