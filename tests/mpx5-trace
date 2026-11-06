@@ -18,7 +18,7 @@
 # in a throwaway container per mode and uid and holds each to its reference
 # (a container engine: PAX_ENGINE=docker|podman).
 #
-#   tests/mpx5-trace [--no-boot | --only build | --only linux]
+#   tests/mpx5-trace [--no-boot | --only build | --only linux [--images DIR]]
 #                    [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # Assertions, per tier, firmware, family and mode:
@@ -37,12 +37,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-legs=both tiers=both noboot=0 only=
-usage="usage: tests/mpx5-trace [--no-boot | --only build | --only linux] [--firmware bios|uefi|both] [--tier native|release|both]"
+legs=both tiers=both noboot=0 only= images=
+usage="usage: tests/mpx5-trace [--no-boot | --only build | --only linux [--images DIR]] [--firmware bios|uefi|both] [--tier native|release|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --no-boot)  noboot=1; shift ;;
         --only)     only=$2; shift 2 ;;
+        --images)   images=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         *)          die "$usage" ;;
@@ -70,9 +71,16 @@ if [ "$only" = linux ]; then
     [ -n "$engine" ] || for e in docker podman; do command -v "$e" >/dev/null 2>&1 && { engine=$e; break; }; done
     [ -n "$engine" ] || die "--only linux needs a container engine (PAX_ENGINE=docker|podman)"
     image=${PAX_TREE_IMAGE:-docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1}
-    need cc readelf nm
     rm -rf "$work"; mkdir -p "$work/bin"
-    "$PAX_ROOT/tools/mktrace" "$work/bin" >&2 || die "tools/mktrace"
+    if [ -n "$images" ]; then
+        # The programs built elsewhere (CI's split: built where the toolchain
+        # is the pinned one, run here on the engine): only these two run.
+        [ -x "$images/trace" ] && [ -x "$images/tracee" ] || die "--images $images: no trace and tracee"
+        cp "$images/trace" "$images/tracee" "$work/bin/"
+    else
+        need cc readelf nm
+        "$PAX_ROOT/tools/mktrace" "$work/bin" >&2 || die "tools/mktrace"
+    fi
     for fam in 0 1000; do
         for m in $MODES; do
             [ "$m" != perm ] || [ "$fam" = 0 ] || continue
