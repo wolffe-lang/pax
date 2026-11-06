@@ -255,6 +255,7 @@ fn main() -> int {
     var path = ""
     var argv = List[str]()
     var shown = ""
+    var shown_log_cmd = ""
     if a.login || a.shell {
         path = shell
         if !fs_is_file(path) {
@@ -288,6 +289,12 @@ fn main() -> int {
             shown = "{shown} {a.words[k]}"
             k += 1
         }
+        shown_log_cmd = path
+        k = 1
+        while k < a.words.len {
+            shown_log_cmd = "{shown_log_cmd} {log_word(a.words[k])}"
+            k += 1
+        }
     }
 
     // The policy: the last rule that names the caller, the target and the command.
@@ -307,7 +314,7 @@ fn main() -> int {
             best = e
         }
     }
-    let shown_log = shown.replace("\\", "\\\\")
+    let shown_log = if a.login || a.shell then shown.replace("\\", "\\\\") else shown_log_cmd
     if !named {
         eprint("sudo: {me.name} is not in the sudoers file.")
         let _l = log_line(pol.wrap, me.name, "user NOT in sudoers", cwd, target.name, gname, shown_log, true)
@@ -1417,6 +1424,39 @@ fn set_var(mut env: List[str], kv: str) {
         k += 1
     }
     (mut env).push(kv)
+}
+
+fn octal(n: int) -> str {
+    if n < 8 {
+        return "{n}"
+    }
+    "{octal(n / 8)}{n % 8}"
+}
+
+/// One argument as sudo's log file shows it (measured on Ubuntu 24.04's sudo): a backslash and a
+/// single quote backslash-escaped, a control byte (and DEL) as `#0` and its octal value, and the
+/// whole word in single quotes when it holds a blank.
+fn log_word(w: str) -> str {
+    var out = ""
+    var i = 0
+    let b = w.bytes()
+    while i < w.len {
+        let v = b[i] as int
+        if v == 92 {
+            out = out + "\\\\"
+        } else if v == 39 {
+            out = out + "\\'"
+        } else if v < 32 || v == 127 {
+            out = out + "#0" + octal(v)
+        } else {
+            out = out + w[i..i + 1]
+        }
+        i += 1
+    }
+    if w.contains(" ") {
+        out = "'" + out + "'"
+    }
+    out
 }
 
 /// `-c`'s string: every character but letters, digits, `_`, `-` and `$`
