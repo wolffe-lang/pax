@@ -1034,8 +1034,8 @@ static __attribute__((noreturn)) void role_mem(void) {
     if (call(10, MB, 0x1000, 0, 0, 0)) done(124); /* PROT_NONE */
     i64 fd = call(2, (i64)self_path, 0, 0, 0, 0);
     if (fd < 0) done(125);
-    if (mmap6(MC, 0x1000, 1, 2, fd) != (i64)MC) done(126);
-    if (mmap6(MC2, 0x1000, 1, 2, fd) != (i64)MC2) done(127);
+    if (mmap6(MC, 0x1000, 1, 0x12, fd) != (i64)MC) done(126);
+    if (mmap6(MC2, 0x1000, 1, 0x12, fd) != (i64)MC2) done(127);
     call(3, fd, 0, 0, 0, 0);
     __asm__ volatile("int3");
     u64 bits = 0;
