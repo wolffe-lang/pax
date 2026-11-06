@@ -1,0 +1,22 @@
+px102 — a non-tracer thread consuming a stop, and an untraced caller's
+exit_group: the prediction, written 2026-11-06 before the witnesses have
+run anywhere. Sources: ptrace(2) ("Death under ptrace", the tracer is a
+thread), wait(2) (__WNOTHREAD: by default a thread waits for children of
+other threads), clone(2).
+
+consume-stop: the leader forks a TRACEME child that raises SIGSTOP; the
+tracer's second thread (not the tracer) calls wait4(child, __WALL).
+Predicted on Linux: it sees the stop (0x137f), consuming it; its own
+GETREGS is ESRCH (-3: it is not the tracer); the leader's GETREGS is 0
+and its WNOHANG wait finds nothing (0); the leader CONTs; the second
+thread's next wait sees the exit (0x2500); then ECHILD.
+PAX at 536c082e: "PAX lets only the tracer thread consume a stop"
+(lifecycle.txt): the second thread's wait never sees the stop: RED.
+
+exit-untraced: an untraced process whose non-leader thread alone is
+ATTACHed with TRACEEXIT; the untraced leader calls exit_group. Predicted:
+the attached thread stops in PTRACE_EVENT_EXIT (0x6057f), the message
+its exit code, then (CONT) the thread's death and the leader's are
+reported, the thread's first. PAX: "an untraced caller's exit_group still
+ends the others at once, with their death reports but without their
+EVENT_EXIT stops" (lifecycle.txt): RED at the event stop.

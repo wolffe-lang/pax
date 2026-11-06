@@ -11,13 +11,22 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory', 'perm', 'conc', 'tasks', 'regs2', 'regs2-limits', 'blocked-timed-futex', 'blocked-timed-recv', 'blocked-sigsuspend', 'blocked-order')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory', 'perm', 'conc', 'tasks', 'regs2', 'regs2-limits', 'blocked-timed-futex', 'blocked-timed-recv', 'blocked-sigsuspend', 'blocked-order', 'consume-stop', 'exit-untraced')
 # regs2-limits: what Linux accepts and PAX refuses by design (R-px102-3);
 # its reference is PAX's own transcript, regs2-limits.linux keeps Linux's.
 REFERENCE = {'regs2-limits': 'regs2-limits.pax'}
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
+    'consume-stop': (
+        ('consume-thread-wait', 'consume.thread.wait=', 'consume.thread.getregs='),
+        ('consume-leader', 'consume.leader.getregs=', 'consume.leader.cont='),
+        ('consume-exit', 'consume.thread.exit=', 'consume.echild='),
+    ),
+    'exit-untraced': (
+        ('untraced-exit-event', 'untraced.first.is-thread=', 'untraced.event.cont='),
+        ('untraced-deaths', 'untraced.death.0', 'untraced.echild='),
+    ),
     'blocked-timed-futex': (('timed-futex-attach-regs', 'blocked.attach.status=', 'blocked.attach.after-syscall='),),
     'blocked-timed-recv': (('timed-recv-attach-regs', 'blocked.attach.status=', 'blocked.attach.after-syscall='),),
     'blocked-sigsuspend': (

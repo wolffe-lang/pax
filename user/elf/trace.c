@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits|blocked-timed-futex|blocked-timed-recv|blocked-sigsuspend|blocked-order]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits|blocked-timed-futex|blocked-timed-recv|blocked-sigsuspend|blocked-order|consume-stop|exit-untraced]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -678,9 +678,11 @@ static void yield(void) { call(24, 0, 0, 0, 0, 0); }
 static __attribute__((noreturn)) void block_forever(void) {
     for (;;) call(202, (i64)&block_word, 0, 0, 0, 0); /* FUTEX_WAIT, shared key */
 }
+static i64 last_tid;
 static void spawn(void (*body)(void)) {
     body_ctid = 1;
-    if (trace_spawn_body(body_stack + sizeof(body_stack), &body_ctid, body) <= 0) done(111);
+    last_tid = trace_spawn_body(body_stack + sizeof(body_stack), &body_ctid, body);
+    if (last_tid <= 0) done(111);
 }
 static void join(void) {
     for (;;) { unsigned v = body_ctid; if (!v) break; call(202, (i64)&body_ctid, 0, v, 0, 0); }
@@ -828,10 +830,110 @@ static void traceme_body(void) {
     hex("mthread.exit.status", (unsigned)s);
 }
 static int thread_tracer_mode(const char *mode) {
-    return equal(mode, "tracer-thread") || equal(mode, "traceme-thread");
+    return equal(mode, "tracer-thread") || equal(mode, "traceme-thread") ||
+           equal(mode, "consume-stop") || equal(mode, "exit-untraced");
+}
+/* consume-stop: a TRACEME child stops; a thread of the tracer that is not
+ * the tracer thread waits for the stop and consumes it (wait(2) lets any
+ * thread of the process wait for the process's children). */
+static void consume_body(void) {
+    int st = 0;
+    i64 got;
+    do { got = call(61, child, (i64)&st, WALL, 0, 0); } while (got == -4);
+    dec("consume.thread.wait", got == child);
+    hex("consume.thread.status", (unsigned)st);
+    dec("consume.thread.getregs", ptrace(GETREGS, 0, (u64)&r));
+    phase = 1;
+    while (phase != 2) yield();
+    do { got = call(61, child, (i64)&st, WALL, 0, 0); } while (got == -4);
+    dec("consume.thread.exit", got == child);
+    hex("consume.thread.exit.status", (unsigned)st);
+    phase = 3;
+}
+static void consume_stop(void) {
+    phase = 0;
+    child = call(57, 0, 0, 0, 0, 0);
+    if (child < 0) fail("consume.fork");
+    if (child == 0) {
+        if (call(101, TRACEME, 0, 0, 0, 0)) done(111);
+        call(62, call(39, 0, 0, 0, 0, 0), 19, 0, 0, 0);
+        done(37);
+    }
+    spawn(consume_body);
+    while (phase != 1) yield();
+    int st = 0;
+    dec("consume.leader.getregs", ptrace(GETREGS, 0, (u64)&r));
+    dec("consume.leader.nohang", call(61, child, (i64)&st, WALL | 1, 0, 0));
+    ok("consume.leader.cont", ptrace(CONT, 0, 0));
+    phase = 2;
+    while (phase != 3) yield();
+    join();
+    dec("consume.echild", call(61, -1, (i64)&st, WALL | 1, 0, 0));
+    child = 0;
+}
+/* exit-untraced: only a non-leader thread of an untraced process is
+ * attached, with TRACEEXIT; the untraced leader calls exit_group. */
+static void untraced_group(int w) {
+    spawn(group_block);
+    while (!group_ready) yield();
+    u64 tid = (u64)last_tid;
+    if (call(1, w, (i64)&tid, 8, 0, 0) != 8) done(111);
+    char c; call(0, w - 1, (i64)&c, 1, 0, 0); /* the go pipe's read end is w - 1 */
+    done(37);
+}
+static void exit_untraced(void) {
+    int up[2], go[2];
+    ok("untraced.pipe", call(293, (i64)up, 0, 0, 0, 0));
+    ok("untraced.go", call(293, (i64)go, 0, 0, 0, 0));
+    child = call(57, 0, 0, 0, 0, 0);
+    if (child < 0) fail("untraced.fork");
+    if (child == 0) {
+        /* descriptors: up[1] is written, go[0] is read; untraced_group wants them adjacent */
+        call(33, up[1], 20, 0, 0, 0); call(33, go[0], 19, 0, 0, 0);
+        untraced_group(20);
+    }
+    u64 tid = 0; i64 n;
+    do { n = call(0, up[0], (i64)&tid, 8, 0, 0); } while (n == -4);
+    if (n != 8 || !tid) fail("untraced.tid");
+    i64 lead = child;
+    child = (i64)tid;
+    ok("untraced.attach", ptrace(ATTACH, 0, 0));
+    int st = 0; i64 got;
+    do { got = call(61, (i64)tid, (i64)&st, WALL, 0, 0); } while (got == -4);
+    hex("untraced.attach.status", (unsigned)st);
+    ok("untraced.options", ptrace(SETOPTIONS, 0, 0x40));
+    ok("untraced.thread.cont", ptrace(CONT, 0, 0));
+    char go_ = 'G';
+    dec("untraced.release", call(1, go[1], (i64)&go_, 1, 0, 0));
+    i64 who; int ev = 0;
+    do { who = call(61, -1, (i64)&ev, WALL, 0, 0); } while (who == -4);
+    dec("untraced.first.is-thread", who == (i64)tid);
+    dec("untraced.first.is-leader", who == lead);
+    hex("untraced.first.status", (unsigned)ev);
+    if (who == (i64)tid && (ev & 255) == 127) {
+        u64 msg = 0;
+        dec("untraced.eventmsg", ptrace(GETEVENTMSG, 0, (u64)&msg)); hex("untraced.eventmsg.value", msg);
+        ok("untraced.event.cont", ptrace(CONT, 0, 0));
+        i64 seen = 0;
+        for (int k = 0; k < 2; k++) {
+            do { who = call(61, -1, (i64)&ev, WALL, 0, 0); } while (who == -4);
+            text("untraced.death."); number(k, 10); text(who == (i64)tid ? ".thread" : who == lead ? ".leader" : ".other");
+            hex("", (unsigned)ev);
+            seen += who == (i64)tid ? 1 : who == lead ? 2 : 4;
+        }
+        dec("untraced.deaths", seen);
+    } else {
+        i64 s2 = 0;
+        do { who = call(61, -1, (i64)&ev, WALL, 0, 0); } while (who == -4 && ++s2 < 3);
+        dec("untraced.after", who);
+    }
+    dec("untraced.echild", call(61, -1, (i64)&ev, WALL | 1, 0, 0));
+    child = 0;
 }
 static void thread_tracers(const char *mode) {
     phase = 0;
+    if (equal(mode, "consume-stop")) { consume_stop(); return; }
+    if (equal(mode, "exit-untraced")) { exit_untraced(); return; }
     if (equal(mode, "traceme-thread")) {
         spawn(traceme_body);
         while (phase != 1) yield();
