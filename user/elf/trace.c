@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits|blocked-timed-futex|blocked-timed-recv|blocked-sigsuspend|blocked-order]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -883,12 +883,14 @@ static volatile int blocked_seen;
 static void blocked_handler(int sig, struct siginfo *si, void *ctx) { (void)sig; (void)si; (void)ctx; blocked_seen = 1; }
 static int blocked_mode(const char *mode) {
     return equal(mode, "blocked-read") || equal(mode, "blocked-sleep") || equal(mode, "blocked-futex") ||
-           equal(mode, "blocked-restart") || equal(mode, "blocked-eintr");
+           equal(mode, "blocked-restart") || equal(mode, "blocked-eintr") ||
+           equal(mode, "blocked-timed-futex") || equal(mode, "blocked-timed-recv") ||
+           equal(mode, "blocked-sigsuspend") || equal(mode, "blocked-order");
 }
 static __attribute__((noreturn)) void blocked_target(const char *mode, int rfd, int ready) {
-    if (equal(mode, "blocked-restart") || equal(mode, "blocked-eintr")) {
+    if (equal(mode, "blocked-restart") || equal(mode, "blocked-eintr") || equal(mode, "blocked-sigsuspend") || equal(mode, "blocked-order")) {
         struct { u64 handler, flags, restorer, mask; } action = {
-            (u64)blocked_handler, equal(mode, "blocked-restart") ? 0x14000004 : 0x04000004, (u64)trace_restorer, 0
+            (u64)blocked_handler, equal(mode, "blocked-eintr") ? 0x04000004 : 0x14000004, (u64)trace_restorer, 0
         };
         if (call(13, 10, (i64)&action, 0, 8, 0)) done(111);
     }
@@ -898,6 +900,24 @@ static __attribute__((noreturn)) void blocked_target(const char *mode, int rfd, 
         struct { i64 sec, nsec; } t = { 0, 600000000 };
         i64 rc = call(35, (i64)&t, 0, 0, 0, 0);
         done(rc == 0 ? 37 : rc == -4 ? 36 : 112);
+    }
+    if (equal(mode, "blocked-timed-futex")) {
+        struct { i64 sec, nsec; } t = { 0, 300000000 };
+        i64 rc = call(202, (i64)&blocked_word, 0, 0, (i64)&t, 0);
+        done(rc == -110 ? 37 : rc == -4 ? 36 : 112);
+    }
+    if (equal(mode, "blocked-timed-recv")) {
+        int sv[2];
+        if (call(53, 1, 1, 0, (i64)sv, 0)) done(111);
+        struct { i64 sec, usec; } tv = { 0, 300000 };
+        if (call(54, sv[0], 1, 20, (i64)&tv, sizeof(tv))) done(111); /* SOL_SOCKET SO_RCVTIMEO */
+        char b2; i64 rc = call(45, sv[0], (i64)&b2, 1, 0, 0);
+        done(rc == -11 ? 37 : rc == -4 ? 36 : 112);
+    }
+    if (equal(mode, "blocked-sigsuspend")) {
+        u64 mask = 0;
+        i64 rc = call(130, (i64)&mask, 8, 0, 0, 0);
+        done(rc == -4 ? (blocked_seen ? 37 : 38) : 112);
     }
     if (equal(mode, "blocked-futex")) {
         i64 rc = call(202, (i64)&blocked_word, 0, 0, 0, 0);
@@ -946,7 +966,29 @@ static void blocked(const char *mode) {
     stopped("blocked.attach.status");
     blocked_regs("blocked.attach");
     char go = 'G';
-    if (equal(mode, "blocked-restart") || equal(mode, "blocked-eintr")) {
+    if (equal(mode, "blocked-timed-futex") || equal(mode, "blocked-timed-recv")) {
+        ok("blocked.continue", ptrace(CONT, 0, 0));
+    } else if (equal(mode, "blocked-sigsuspend")) {
+        ok("blocked.resume", ptrace(CONT, 0, 0));
+        settle();
+        ok("blocked.signal", call(62, child, 10, 0, 0, 0));
+        stopped("blocked.signal.status");
+        blocked_regs("blocked.signal");
+        ok("blocked.deliver", ptrace(CONT, 0, 10));
+    } else if (equal(mode, "blocked-order")) {
+        ok("blocked.options", ptrace(SETOPTIONS, 0, 1));
+        resume(24, "blocked.entry.status");
+        blocked_regs("blocked.entry");
+        ok("blocked.resume", ptrace(24, 0, 0));
+        settle();
+        ok("blocked.signal", call(62, child, 10, 0, 0, 0));
+        stopped("blocked.first.status");
+        blocked_regs("blocked.first");
+        ok("blocked.next", ptrace(24, 0, 0));
+        stopped("blocked.second.status");
+        blocked_regs("blocked.second");
+        ok("blocked.kill", ptrace(KILL, 0, 0));
+    } else if (equal(mode, "blocked-restart") || equal(mode, "blocked-eintr")) {
         ok("blocked.resume", ptrace(CONT, 0, 0));
         settle();
         ok("blocked.signal", call(62, child, 10, 0, 0, 0));

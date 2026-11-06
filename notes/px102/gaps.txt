@@ -1,0 +1,26 @@
+px102 — named blocked-call gaps: the prediction, written 2026-11-06 before
+the witnesses have run anywhere. Sources: ptrace(2), signal(7)'s
+"Interruption of system calls", restart_syscall(2), futex(2), recv(2),
+socket(7) SO_RCVTIMEO, sigsuspend(2).
+
+Four blocked-call modes, each a variant of the blocked-* family (attach to
+a target asleep in the call; registers at the stop):
+  blocked-timed-futex  FUTEX_WAIT with a 300 ms relative timeout. Predicted
+                       at the attach stop: rax -516 (restart_syscall),
+                       orig_rax 202; resumed, the wait runs out (-ETIMEDOUT).
+  blocked-timed-recv   recv on a socket with SO_RCVTIMEO 300 ms. Predicted:
+                       rax -4 (a timed socket wait returns -EINTR, never a
+                       restart code), orig_rax 45.
+  blocked-sigsuspend   rt_sigsuspend. Predicted: rax -514
+                       (ERESTARTNOHAND), orig_rax 130; a SIGUSR1 then shows
+                       the same rax at its delivery stop and the handler's
+                       delivery ends the call with -EINTR.
+  blocked-order        a PTRACE_SYSCALL tracee asleep in a pipe read gets
+                       SIGUSR1. Predicted: first a syscall-exit stop
+                       (rax -512, orig_rax 0), then the signal-delivery
+                       stop (SIGUSR1, rax -512). PAX at 536c082e shows only
+                       the signal stop (named in restart.txt).
+PAX at 9a2109a4 (restart.txt: "keep PAX's own settling"): the timed futex
+and receive and sigsuspend show their -EINTR result rather than a restart
+code, and blocked-order lacks the exit stop: all RED by name at the
+attach-regs rows and T-syscall-exit-before-signal.
