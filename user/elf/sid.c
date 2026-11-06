@@ -12,6 +12,11 @@
  *                 below). Cases that need a second system's help (a
  *                 traced exec, an attach after a set-ID exec) are px102's
  *                 and are not here: tests/mpx5-sudo prints their SKIPs.
+ *   sid sudo      the sudo rows (user/sudo): each runs /bin/sudo as an
+ *                 actor with a small environment, and prints its command
+ *                 line, what it wrote and its exit status; then the log
+ *   sid env       what a program run through sudo prints: argv and the
+ *                 environment, in order, and its ids
  *   sid h:TAG     what a program run by the driver prints: its three
  *                 user ids and three group ids, the file-system ids, the
  *                 supplementary groups, AT_SECURE, dumpable,
@@ -33,6 +38,7 @@
 #define PR_GET_DUMPABLE_ 3
 #define PR_GET_NNP 39
 
+extern char **environ;
 static char DIR[256];
 static const char *SELF;
 
@@ -144,8 +150,76 @@ static void nnp_calls(void)
     reap(p);
 }
 
+/* One sudo row: an actor (uid -1: root) runs /bin/sudo with ARGS and a
+ * small environment that has what an attacker or a habit adds. */
+static void sudo_row(int uid, unsigned grp, char *const *args)
+{
+    char line[512] = "$";
+    for (char *const *a = args; *a; a++) { strncat(line, " ", sizeof line - strlen(line) - 1); strncat(line, *a, sizeof line - strlen(line) - 1); }
+    say("=== %s: %s\n", uid < 0 ? "root" : uid == 1000 ? "pax" : uid == 990 ? "lobo" : "other", line);
+    pid_t p = fork();
+    if (p == 0) {
+        if (uid >= 0) { unsigned g = grp; become(uid, uid, g ? 1 : 0, &g); }
+        char *av[32] = { "/bin/sudo" };
+        int n = 1;
+        for (char *const *a = args; *a && n < 30; a++) av[n++] = *a;
+        av[n] = NULL;
+        char *ev[] = { "TERM=linux", "PATH=/home/pax/evil:/bin", "FOO=bar", "LD_PRELOAD=/home/pax/evil.so", "DISPLAY=:0", "LANG=C", "HOME=/home/pax", "USER=pax", NULL };
+        execve("/bin/sudo", av, ev);
+        say("execve /bin/sudo: %d\n", -errno);
+        _exit(98);
+    }
+    say("--- status %d\n", reap(p));
+}
+
+static void sudo_rows(void)
+{
+    mkdir("/var", 0755); mkdir("/var/log", 0700);
+    static char *r1[] = { "/bin/sid", "h:ran", NULL };
+    static char *r2[] = { "-u", "lobo", "/bin/sid", "env", "a b", NULL };
+    static char *r3[] = { "-n", "-l", NULL };
+    static char *r4[] = { "-g", "pack", "/bin/sid", "h:grp", NULL };
+    static char *r5[] = { "-u", "nosuch", "/bin/sid", "h:x", NULL };
+    static char *r6[] = { "sid", "h:search", NULL };
+    static char *r7[] = { "-E", "/bin/sid", "env", NULL };
+    static char *r8[] = { "-i", "/bin/sid", "env", NULL };
+    static char *r9[] = { "-u", "pax", "/bin/sid", "h:asself", NULL };
+    sudo_row(1000, 0, r1);
+    sudo_row(1000, 0, r2);
+    sudo_row(1000, 0, r3);
+    sudo_row(1000, 0, r4);
+    sudo_row(1000, 0, r5);
+    sudo_row(1000, 0, r6);
+    sudo_row(1000, 0, r7);
+    sudo_row(1000, 0, r8);
+    sudo_row(990, 0, r1);
+    sudo_row(990, 0, r3);
+    sudo_row(-1, 0, r9);
+    static char *r10[] = { "-V", NULL };
+    sudo_row(1000, 0, r10);
+    static char *r11[] = { "--bogus", NULL };
+    sudo_row(1000, 0, r11);
+    say("=== log (root's, 0600): %o %s\n", mode_of("/var/log/sudo.log"), own_of("/var/log/sudo.log"));
+    int f = open("/var/log/sudo.log", O_RDONLY);
+    char b[8192];
+    long n = f >= 0 ? read(f, b, sizeof b - 1) : 0;
+    if (n < 0) n = 0;
+    b[n] = 0;
+    for (char *l = strtok(b, "\n"); l; l = strtok(NULL, "\n")) {
+        /* the time stamp (`Mon DD HH:MM:SS`) is what a clock says */
+        say("log: %s\n", strlen(l) > 16 && l[3] == ' ' && l[15] == ' ' ? l + 16 : l);
+    }
+    say("sid: done\n");
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "sudo") == 0) { sudo_rows(); return 0; }
+    if (argc >= 2 && strcmp(argv[1], "env") == 0) {
+        for (int i = 0; i < argc; i++) say("argv[%d]=%s\n", i, argv[i]);
+        for (char **e = environ; *e; e++) say("env %s\n", *e);
+        return helper("env");
+    }
     for (int i = 1; i < argc; i++)
         if (strncmp(argv[i], "h:", 2) == 0) return helper(argv[i] + 2);
     if (getpid() == 1 && argc == 1) { /* a real Linux's init (the recording): /proc, the console, the driver, power off */

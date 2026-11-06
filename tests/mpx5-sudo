@@ -11,6 +11,15 @@
 #
 # Sessions (each an image of its own):
 #
+#   sudo (user/sudo, set-user-ID root; user/elf/sid.c's `sudo` rows): the
+#   shipped policy's first rows run as `pax`, `lobo` and root with a small
+#   hostile environment: a command run, as another user, in a group, with
+#   -E and -i, a user with no rule, an unknown user, a bad option; the
+#   ids and environment the command sees, the exit statuses, and the log
+#   (/var/log/sudo.log, root's, mode 0600), held to
+#   tests/mpx5-sudo.d/sudo.pax: PAX's own rows (the same program holds the
+#   Ubuntu-sudo comparison by `--only linux`, below).
+#
 #   sid (user/elf/sid.c): the driver, run as root, makes copies of itself
 #   with set-ID modes and owners, scripts that name them, and a nosuid
 #   tmpfs; each case becomes an actor (root, 1000:1000, with or without a
@@ -39,14 +48,15 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 only= bindir=
-usage="usage: tests/mpx5-sudo [--images DIR | --no-boot | --only build] [--bin DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+images= legs=both tiers=both noboot=0 only= bindir= sudodir=
+usage="usage: tests/mpx5-sudo [--images DIR | --no-boot | --only build] [--bin DIR] [--sudo DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
         --no-boot)  noboot=1; shift ;;
         --only)     only=$2; shift 2 ;;
         --bin)      bindir=$2; shift 2 ;;
+        --sudo)     sudodir=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         *)          die "$usage" ;;
@@ -57,14 +67,14 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 case $only in ''|build) ;; *) die "--only takes build" ;; esac
 need readelf python3
 
-SESSIONS="sid"
+SESSIONS="sid sudo"
 ref=$here/mpx5-sudo.d/linux
 work=$PAX_BUILD/mpx5-sudo
 runs=$PAX_BUILD/mpx5-sudo-runs.txt
 fail=0
 bad() { say "FAIL $*"; fail=1; }
-run_of() { case $1 in sid) echo "/bin/sid /t/sid" ;; esac; }
-init_of() { echo "$1"; }
+run_of() { case $1 in sid) echo "/bin/sid /t/sid" ;; sudo) echo "/bin/sid sudo" ;; esac; }
+init_of() { echo sid; }
 
 static_ok() {
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
@@ -86,10 +96,27 @@ if [ -z "$images" ]; then
     fi
     r=$(static_ok "$work/bin/sid") || why+=" $r;"
     say "  program: sid $(sha256_of "$work/bin/sid") $(wc -c < "$work/bin/sid" | tr -d ' ') bytes"
+    printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$work/passwd"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\npack:x:2000:pax\n' > "$work/group"
+    printf 'Defaults secure_path="/bin:/usr/bin"\nroot ALL=(ALL:ALL) ALL\n#1000 ALL=(ALL:ALL) NOPASSWD: ALL\n#includedir /etc/sudoers.d\n' > "$work/sudoers"
+    if [ -n "$sudodir" ]; then
+        cp "$sudodir/sudo" "$work/bin/sudo" || why+=" no $sudodir/sudo;"
+    else
+        "$PAX_ROOT/tools/mksudo" "$work/sudobin" > "$work/sudo.txt" && cp "$work/sudobin/sudo" "$work/bin/sudo" || why+=" tools/mksudo;"
+    fi
+    r=$(static_ok "$work/bin/sudo") || why+=" $r;"
+    say "  program: sudo $(sha256_of "$work/bin/sudo") $(wc -c < "$work/bin/sudo" | tr -d ' ') bytes"
     for s in $SESSIONS; do
-        [ -f "$ref/$s.txt" ] || why+=" no recording $s.txt;"
         run_of "$s" > "$work/$s.run"
-        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "/bin/sid=$work/bin/sid:755" "/t/:777" "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
+        if [ "$s" = sid ]; then
+            [ -f "$ref/$s.txt" ] || why+=" no recording $s.txt;"
+            files=("/bin/sid=$work/bin/sid:755" "/t/:777")
+        else
+            [ -f "$here/mpx5-sudo.d/$s.pax" ] || why+=" no tests/mpx5-sudo.d/$s.pax;"
+            files=("/bin/sid=$work/bin/sid:755" "/bin/sudo=$work/bin/sudo:4755" "/etc/passwd=$work/passwd:644" "/etc/group=$work/group:644"
+                "/etc/sudoers=$work/sudoers:440" "/etc/sudoers.d/:755" "/var/:755" "/home/pax/:755:1000:1000" "/srv/lobo/:750:990:990" "/t/:777")
+        fi
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${files[@]}" "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
             say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
         else
             why+=" tools/mkinitramfs $s;"
@@ -154,8 +181,10 @@ for leg in $legs; do
             awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
                  on { i = match($0, /user: [^ ]+ pid [0-9]+ /); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
             why=
-            cmp -s "$ref/$s.txt" "$out" || why+=" the session differs from the recording ($(diff "$ref/$s.txt" "$out" | grep -c '^>') of $(wc -l < "$ref/$s.txt" | tr -d ' ') lines): $(diff "$ref/$s.txt" "$out" | head -n 12 | cut -c1-300 | tr '\n' '|');"
-            [ -z "$why" ] && say "PASS S1 $id: $(wc -l < "$out" | tr -d ' ') lines byte-identical to a real Linux's recording" || bad "S1 $id:$why"
+            want=$ref/$s.txt what="a real Linux's recording"
+            if [ "$s" != sid ]; then want=$here/mpx5-sudo.d/$s.pax what="tests/mpx5-sudo.d/$s.pax (PAX's own)"; fi
+            cmp -s "$want" "$out" || why+=" the session differs from $what ($(diff "$want" "$out" | grep -c '^>') lines): $(diff "$want" "$out" | head -n 12 | cut -c1-300 | tr '\n' '|');"
+            [ -z "$why" ] && say "PASS S1 $id: $(wc -l < "$out" | tr -d ' ') lines byte-identical to $what" || bad "S1 $id:$why"
             why=
             grep -qx "PAX: init /bin/$(init_of "$s") ended with status 0; nothing left to run" "$norm" \
                 || why+=" no 'PAX: init /bin/$(init_of "$s") ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
