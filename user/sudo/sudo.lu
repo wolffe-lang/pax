@@ -836,13 +836,20 @@ fn split_top(s: str, sep: str) -> List[str] {
     var out = List[str]()
     var cur = ""
     var q = false
+    var depth = 0
     var i = 0
     while i < s.len {
         let c = s[i..i + 1]
         if c == "\"" {
             q = !q
         }
-        if c == sep && !q {
+        if c == "(" && !q {
+            depth += 1
+        }
+        if c == ")" && !q && depth > 0 {
+            depth -= 1
+        }
+        if c == sep && !q && depth == 0 {
             (mut out).push(cur)
             cur = ""
         } else {
@@ -1202,7 +1209,9 @@ fn long_list(mine: List[Entry]) {
         if e.has_groups {
             print("    RunAsGroups: {str_join(", ", e.groups)}")
         }
-        print("    Options: {if e.nopasswd then "!authenticate" else "authenticate"}")
+        if e.explicit {
+            print("    Options: {if e.nopasswd then "!authenticate" else "authenticate"}")
+        }
         print("    Commands:")
         print("\t{e.cmd}")
         cur_run = ra
