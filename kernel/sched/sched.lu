@@ -1491,6 +1491,7 @@ pub fn end_thread(_f: u64, status: u64) -> u64 {
     put_field(c, offset_of(Thread, status), status)
     trace_state.set_exit_uid(c, real_uid(l))
     if c != l { let _traced = trace_death(c) }
+    trace_release_owned(field(c, offset_of(Thread, pid))) // px102: a tracer thread's end detaches
     put_field(l, offset_of(Thread, threads), field(l, offset_of(Thread, threads)) - 1)
     if c == l {
         put_field(c, offset_of(Thread, gone), 1)
@@ -1757,6 +1758,7 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     put_field(s, offset_of(Thread, xname0), field(p, offset_of(Thread, xname0))) // px56
     put_field(s, offset_of(Thread, xname1), field(p, offset_of(Thread, xname1)))
     put_field(s, offset_of(Thread, ppid), field(p, offset_of(Thread, tgid))) // px26: the caller's process
+    trace_state.set_parent_tid(s, field(p, offset_of(Thread, pid))) // px102: the creating thread
     // px48: a fork's child is in its parent's group and session, with its
     // controlling terminal; it has not exec'd, and it runs.
     let pl = field(p, offset_of(Thread, lead))
@@ -1900,6 +1902,13 @@ pub fn exec_alone() {
         while i < NSIG {
             put_info(c, 1, i + 1, info_of(l, 1, i + 1))
             i += 1
+        }
+        // px102: the caller's own tracees follow it to its new thread id.
+        let old_tid = field(c, offset_of(Thread, pid))
+        var u: u64 = FIRST
+        while u < SLOTS {
+            if field(u, offset_of(Thread, tracer)) == old_tid { put_field(u, offset_of(Thread, tracer), field(l, offset_of(Thread, tgid))) }
+            u += 1
         }
         put_field(c, offset_of(Thread, pid), field(l, offset_of(Thread, tgid)))
         put_field(c, offset_of(Thread, ppid), field(l, offset_of(Thread, ppid)))
@@ -3623,9 +3632,39 @@ pub fn trace_me() -> bool {
     let c = cur()
     let pp = self_ppid()
     if tracer_of(c) != 0 || pp == 0 || live_slot(pp) == SLOTS { return false }
+    // The tracer is the real parent THREAD (measured: a non-leader that
+    // forked is the tracer, its leader's requests are ESRCH). If that
+    // thread has ended, another live thread of the parent process.
+    let pt = trace_state.parent_tid(c)
+    let ts = tid_slot(pt)
+    let tr = if ts != SLOTS && field(ts, offset_of(Thread, tgid)) == pp { pt } else { group_tid(pp) }
+    if tr == 0 { return false }
     trace_state.clear(c)
-    put_field(c, offset_of(Thread, tracer), pp)
+    put_field(c, offset_of(Thread, tracer), tr)
     true
+}
+
+/// The slot of the live thread `tid` (any thread, not only a leader),
+/// or SLOTS. A held leader (its own thread has exited) is not live.
+fn tid_slot(tid: u64) -> u64 {
+    if tid == 0 { return SLOTS }
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, pid)) == tid && field(s, offset_of(Thread, tgid)) != 0 && running_state(s) && field(s, offset_of(Thread, state)) != HELD { return s }
+        s += 1
+    }
+    SLOTS
+}
+
+/// A live thread of process `pid`: its leader if live, else the first.
+fn group_tid(pid: u64) -> u64 {
+    if tid_slot(pid) != SLOTS { return pid }
+    var s: u64 = FIRST
+    while s < SLOTS {
+        if field(s, offset_of(Thread, tgid)) == pid && tid_slot(field(s, offset_of(Thread, pid))) == s { return field(s, offset_of(Thread, pid)) }
+        s += 1
+    }
+    0
 }
 
 /// The stopped thread tid belonging to the caller, or SLOTS. Never
@@ -3647,15 +3686,17 @@ pub fn trace_info(s: u64) -> (u64, u64, u64) {
 
 fn trace_park(c: u64, f: u64, sig: u64, code: u64, addr: u64) -> bool {
     let tr = tracer_of(c)
-    let ps = live_slot(tr)
-    if tr == 0 || ps == SLOTS { return false }
+    // The tracer is a thread; SIGCHLD and the wake go to its process.
+    let ts = tid_slot(tr)
+    if tr == 0 || ts == SLOTS { return false }
+    let ps = field(ts, offset_of(Thread, lead))
     if field(c, offset_of(Thread, state)) == READY { unqueue(c) }
     if f != 0 { put_field(c, offset_of(Thread, frame), f) }
     put_field(c, offset_of(Thread, trace_status), (1 << 32) | (sig << 8) | 0x7f)
     put_field(c, offset_of(Thread, trace_code), code)
     put_field(c, offset_of(Thread, trace_addr), addr)
     put_field(c, offset_of(Thread, state), TRACED)
-    wake_waiter(tr)
+    wake_waiter(field(ts, offset_of(Thread, tgid)))
     raise_group(ps, SIGCHLD, sig_info(I_CHLD_TRAPPED, field(c, offset_of(Thread, pid)), sig & 0x7f, real_uid(field(c, offset_of(Thread, lead)))))
     true
 }
@@ -3832,15 +3873,16 @@ pub fn kill_pending() -> bool {
 /// slot until that wait, even when the real parent ignores SIGCHLD.
 fn trace_death(s: u64) -> bool {
     let tr = tracer_of(s)
-    let ps = if tr != 0 { live_slot(tr) } else { SLOTS }
-    if ps == SLOTS {
+    let ts = tid_slot(tr)
+    if ts == SLOTS {
         put_field(s, offset_of(Thread, tracer), 0)
         return false
     }
+    let ps = field(ts, offset_of(Thread, lead))
     put_field(s, offset_of(Thread, zombie), 1)
     let st = field(s, offset_of(Thread, status))
     let killed = st & 0x7f != 0
-    wake_waiter(tr)
+    wake_waiter(field(ts, offset_of(Thread, tgid)))
     raise_group(ps, SIGCHLD, sig_info(if killed { I_CHLD_KILLED } else { I_CHLD_EXITED }, field(s, offset_of(Thread, pid)), if killed { st & 0x7f } else { (st >> 8) & 0xff }, trace_state.exit_uid(s)))
     true
 }
