@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# tests/mpx5-sudo — px103, P5 lane U8's first half: set-ID execution
+# honoured as Linux honours it, and `sudo`.
+#
+#   tests/mpx5-sudo [--images DIR | --no-boot | --only build] [--bin DIR]
+#                   [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The claim, here and wherever this lane writes: enforced for honest
+# programs; not a boundary against an attacker (ruling #75 R6). The kernel
+# has never been fuzzed or audited and loads programs at fixed addresses.
+#
+# Sessions (each an image of its own):
+#
+#   sid (user/elf/sid.c): the driver, run as root, makes copies of itself
+#   with set-ID modes and owners, scripts that name them, and a nosuid
+#   tmpfs; each case becomes an actor (root, 1000:1000, with or without a
+#   supplementary group, with or without no_new_privs), execs a file, and
+#   the program run prints its ids, AT_SECURE, dumpable, no_new_privs, the
+#   capabilities and who owns its /proc files. Held to a real Linux's
+#   recording (tests/mpx5-sudo.d/linux/sid.txt: notes/px103/record-sid.sh,
+#   Linux 7.2.4 booted under QEMU with the same program as init, so
+#   fs.suid_dumpable is the kernel's default 0), every line.
+#
+# Rows that need px102's ptrace (a traced exec of a set-ID file; ptrace
+# attach after a set-ID exec) are not run on a base without it and say
+# SKIP by name, at column 0, with their reason.
+#
+# Assertions, per tier, firmware and session:
+#   S0 build: kmain_console built, the programs static, the images made.
+#   S1 the session is byte-identical to the recording.
+#   S5 the end: `PAX: init … ended with status 0; nothing left to run`,
+#      `halt`, held halted.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it). Exit 0 when every assertion held,
+# 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only= bindir=
+usage="usage: tests/mpx5-sudo [--images DIR | --no-boot | --only build] [--bin DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --bin)      bindir=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build) ;; *) die "--only takes build" ;; esac
+need readelf python3
+
+SESSIONS="sid"
+ref=$here/mpx5-sudo.d/linux
+work=$PAX_BUILD/mpx5-sudo
+runs=$PAX_BUILD/mpx5-sudo-runs.txt
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+run_of() { case $1 in sid) echo "/bin/sid /t/sid" ;; esac; }
+init_of() { echo "$1"; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    if [ -n "$bindir" ]; then
+        cp "$bindir/sid" "$work/bin/sid" || why+=" no $bindir/sid;"
+    else
+        "$PAX_ROOT/tools/mkcred" "$work/bin" > "$work/programs.txt" || why+=" tools/mkcred;"
+    fi
+    r=$(static_ok "$work/bin/sid") || why+=" $r;"
+    say "  program: sid $(sha256_of "$work/bin/sid") $(wc -c < "$work/bin/sid" | tr -d ' ') bytes"
+    for s in $SESSIONS; do
+        [ -f "$ref/$s.txt" ] || why+=" no recording $s.txt;"
+        run_of "$s" > "$work/$s.run"
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "/bin/sid=$work/bin/sid:755" "/t/:777" "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
+            say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for s in $SESSIONS; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/sudo-$s.iso" >/dev/null \
+                    || why+=" $tier sudo-$s: mkimage;"
+            done
+            say "built $tier: elf $(sha256_of "$elf"), $(echo $SESSIONS | wc -w | tr -d ' ') images"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), sid static, the recordings there, $(echo $SESSIONS | wc -w | tr -d ' ') images" || bad "S0:$why"
+    images=$work
+    if [ "$only" = build ] || [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx5-sudo build (S0): PASS (no boot)" || say "mpx5-sudo build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+# What the ptrace lane (px102) adds, and this base does not carry.
+say "SKIP traced-exec-setid reason=needs px102's ptrace (not on this base): a traced exec of a set-ID file stays unprivileged"
+say "SKIP attach-after-setid reason=needs px102's ptrace (not on this base): an owner's attach to a process that ran a set-ID file is refused"
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi reason=no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        for s in $SESSIONS; do
+            id="$tier $leg $s"
+            log=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/sudo-$s.iso
+            rm -f "$log" "$log.verdict"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                bad "S1 $id: no image"
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 300 --qemu -m --qemu 256M \
+                --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            printf '%s kmain_console %s %s halt-status=%s serial=%s iso=%s\n' "$tier" "$leg" "$s" "$hrc" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            out=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = match($0, /user: [^ ]+ pid [0-9]+ /); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            why=
+            cmp -s "$ref/$s.txt" "$out" || why+=" the session differs from the recording ($(diff "$ref/$s.txt" "$out" | grep -c '^>') of $(wc -l < "$ref/$s.txt" | tr -d ' ') lines): $(diff "$ref/$s.txt" "$out" | head -n 12 | cut -c1-300 | tr '\n' '|');"
+            [ -z "$why" ] && say "PASS S1 $id: $(wc -l < "$out" | tr -d ' ') lines byte-identical to a real Linux's recording" || bad "S1 $id:$why"
+            why=
+            grep -qx "PAX: init /bin/$(init_of "$s") ended with status 0; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/$(init_of "$s") ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS S5 $id: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
+        done
+    done
+done
+[ "$fail" = 0 ] && say "mpx5-sudo: PASS" || say "mpx5-sudo: FAIL"
+exit "$fail"
