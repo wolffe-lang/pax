@@ -224,7 +224,7 @@ pax_debug_load:
         .byte 0x0f, 0x23, 0xd8            /* mov %rax, %dr3 */
         mov 48(%rdi), %rax
         mov $0xffff0ff0, %edx
-        or %rdx, %rax
+        .byte 0x48, 0x09, 0xd0            /* or %rdx, %rax: the pinned clef has no `or` */
         .byte 0x0f, 0x23, 0xf0            /* mov %rax, %dr6 */
         mov 56(%rdi), %rax
         and $0xffff03ff, %eax           /* user-visible reserved/GD bits never reach hardware */
