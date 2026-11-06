@@ -64,7 +64,7 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $only in ''|build) ;; *) die "--only takes build" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
 need readelf python3
 
 SESSIONS="sid sudo"
@@ -140,11 +140,37 @@ if [ -z "$images" ]; then
         fi
     done
     [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), sid static, the recordings there, $(echo $SESSIONS | wc -w | tr -d ' ') images" || bad "S0:$why"
+    linux_ct "$work/bin"
     images=$work
     if [ "$only" = build ] || [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx5-sudo build (S0): PASS (no boot)" || say "mpx5-sudo build: FAIL"
         exit "$fail"
     fi
+fi
+
+# L: PAX's sudo, built for Linux like the rest, run in a throwaway container
+# of Ubuntu 24.04 (notes/px103/Containerfile: the stock sudo package's image,
+# no network) through notes/px103/sudo-ct.sh in place of Ubuntu's own, and
+# every row of the run held to Ubuntu's recorded output (notes/px103/ubuntu.txt)
+# by notes/px103/ctdiff.py: the rows that differ do so by name, each with its
+# reason (notes/px103/ctnamed.txt), and no other row differs.
+linux_ct() {
+    local eng=${PAX_ENGINE:-} img=localhost/px103-sudo:1 b=${1:-$work/bin} o="$PAX_BUILD/mpx5-sudo-linux"
+    if [ -z "$eng" ]; then command -v docker >/dev/null 2>&1 && eng=docker || { command -v podman >/dev/null 2>&1 && eng=podman; }; fi
+    if [ -z "$eng" ]; then say "SKIP linux-ct reason=no container engine (docker or podman)"; return 0; fi
+    mkdir -p "$o"
+    "$eng" image inspect "$img" >/dev/null 2>&1 || "$eng" build -q -t "$img" -f "$PAX_ROOT/notes/px103/Containerfile" "$PAX_ROOT/notes/px103" >/dev/null || { bad "L1: cannot build $img"; return 0; }
+    cc -static -O1 -o "$o/show" "$PAX_ROOT/notes/px103/show.c" || { bad "L1: cc show.c"; return 0; }
+    cp "$b/sudo" "$o/sudo-pax"; cp "$PAX_ROOT/notes/px103/sudo-ct.sh" "$o/sudo-ct.sh"
+    "$eng" run --rm --network none --hostname pax -v "$o:/ct" "$img" bash /ct/sudo-ct.sh /ct/show /ct/sudo-pax > "$o/pax.txt" 2>&1
+    local res
+    res=$(python3 "$PAX_ROOT/notes/px103/ctdiff.py" "$PAX_ROOT/notes/px103/ubuntu.txt" "$o/pax.txt" --named "$PAX_ROOT/notes/px103/ctnamed.txt" 2>&1)
+    if [ $? = 0 ]; then say "PASS L1: $(printf '%s' "$res" | tail -n 1)"; else bad "L1: $(printf '%s' "$res" | head -n 12 | tr '\n' '|')"; fi
+}
+if [ "$only" = linux ]; then
+    linux_ct "${images:-$work}/bin"
+    [ "$fail" = 0 ] && say "mpx5-sudo linux: PASS" || say "mpx5-sudo linux: FAIL"
+    exit "$fail"
 fi
 
 # What the ptrace lane (px102) adds, and this base does not carry.
