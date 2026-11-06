@@ -105,6 +105,7 @@ if [ -z "$images" ]; then
         "$PAX_ROOT/tools/mksudo" "$work/sudobin" > "$work/sudo.txt" && cp "$work/sudobin/sudo" "$work/bin/sudo" || why+=" tools/mksudo;"
     fi
     r=$(static_ok "$work/bin/sudo") || why+=" $r;"
+    cc -static -O1 -o "$work/bin/show" "$PAX_ROOT/notes/px103/show.c" || why+=" cc show.c;"
     say "  program: sudo $(sha256_of "$work/bin/sudo") $(wc -c < "$work/bin/sudo" | tr -d ' ') bytes"
     for s in $SESSIONS; do
         run_of "$s" > "$work/$s.run"
@@ -160,7 +161,7 @@ linux_ct() {
     if [ -z "$eng" ]; then say "SKIP linux-ct reason=no container engine (docker or podman)"; return 0; fi
     mkdir -p "$o"
     "$eng" image inspect "$img" >/dev/null 2>&1 || "$eng" build -q -t "$img" -f "$PAX_ROOT/notes/px103/Containerfile" "$PAX_ROOT/notes/px103" >/dev/null || { bad "L1: cannot build $img"; return 0; }
-    cc -static -O1 -o "$o/show" "$PAX_ROOT/notes/px103/show.c" || { bad "L1: cc show.c"; return 0; }
+    if [ -f "$b/show" ]; then cp "$b/show" "$o/show"; else cc -static -O1 -o "$o/show" "$PAX_ROOT/notes/px103/show.c" || { bad "L1: cc show.c"; return 0; }; fi
     cp "$b/sudo" "$o/sudo-pax"; cp "$PAX_ROOT/notes/px103/sudo-ct.sh" "$o/sudo-ct.sh"
     "$eng" run --rm --network none --hostname pax -v "$o:/ct" "$img" bash /ct/sudo-ct.sh /ct/show /ct/sudo-pax > "$o/pax.txt" 2>&1
     local res
