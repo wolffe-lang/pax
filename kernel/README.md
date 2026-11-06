@@ -1099,8 +1099,8 @@ to F9); `notes/px76-uefi-on-metal.md` has the measurements.
 ## Tracing stops (px102, in progress)
 
 `ptrace(2)` is being added against the no-libc Linux transcripts in
-`tests/mpx5-trace.d/`. This first layer supports a child's `TRACEME`, the
-legacy exec stop, `CONT` with no injected signal, `GETSIGINFO`, `KILL`,
+`tests/mpx5-trace.d/`. It supports a child's `TRACEME`, the
+legacy exec stop, `CONT`, `GETSIGINFO`, `KILL`,
 GETREGS/SETREGS, GETFPREGS, GETREGSET for PRSTATUS/PRFPREG, PEEKUSER of
 register words and debug registers, POKEUSER of debug registers, SINGLESTEP,
 PEEKTEXT/PEEKDATA/POKETEXT/POKEDATA, and proc memory read/write.
@@ -1113,9 +1113,19 @@ handler or default action, and passed faults retain their captured siginfo.
 Creation events auto-attach the child and report its initial stop; vfork
 completion is held until its earlier event has been consumed. A traced death
 is collected by the tracer before it is handed back to the real parent.
-Group-stop/listen behavior, stopped/blocked attach targets and complete
-group-exit/thread lifecycle still require their dedicated rows and handling. Other requests are refused
-by name; NT_X86_XSTATE is named and returns EINVAL.
+The tracer is a thread: TRACEME's tracer is the thread that forked the
+child, another thread's requests are ESRCH, and a tracer thread's exit
+detaches its tracees. At exit_group, a fatal signal or an exec, each traced
+thread reports its own death and the leader's comes last; with TRACEEXIT
+every traced thread of a traced, stopping caller stops in EVENT_EXIT. A
+non-leader's exec reports EVENT_EXEC under the process id with the former
+thread id as its message. A stop taken in a blocked call shows Linux's
+-ERESTART codes (-512, -514, -516) and the call restarts on resume as on
+Linux, a relative sleep through restart_syscall (219); a direct-return wait
+takes its syscall-exit stop when it completes.
+Group-stop and PTRACE_LISTEN, ATTACH of a job-control-stopped target, and the
+timed futex, timed receive and sigsuspend restart codes still need their rows.
+Other requests are refused by name; NT_X86_XSTATE is named and returns EINVAL.
 
 | Change | Behaviour and row |
 |---|---|
@@ -1164,3 +1174,12 @@ fork child's EVENT_STOP. Passing the original synchronous fault uses the
 captured vector/error/address, not a later CR2. SIGSEGV, SIGILL and SIGFPE
 recovery, passing a fault to a handler, replacement by SIGTERM, and untraced
 single-step siginfo have separate Linux reference rows.
+
+The lifecycle rows (`T-group-exit`, `T-group-exit-event`, `T-group-exit-order`,
+`T-exec-former-tid`, `T-exec-thread-gone`, `T-tracer-thread`,
+`T-tracer-thread-exit`, `T-traceme-thread`) and the blocked-call rows
+(`T-read-attach-regs`, `T-read-restarted`, `T-sleep-attach-regs`,
+`T-sleep-restart-syscall`, `T-futex-attach-regs`, `T-futex-restarted`,
+`T-restart-attach-regs`, `T-handler-sa-restart`, `T-eintr-attach-regs`,
+`T-handler-eintr`) each have a Linux reference measured ten times as root and
+as uid 1000, byte-identical.
