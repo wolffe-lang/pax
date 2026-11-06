@@ -51,13 +51,15 @@ static int helper(const char *tag)
     struct stat s;
     char own[64] = "?";
     if (stat("/proc/self", &s) == 0) snprintf(own, sizeof own, "%u:%u", s.st_uid, s.st_gid);
+    char own2[64] = "?";
+    if (stat("/proc/self/status", &s) == 0) snprintf(own2, sizeof own2, "%u:%u", s.st_uid, s.st_gid);
     char capp[64], cape[64], nnp[16];
     snprintf(capp, sizeof capp, "%s", status_line("/proc/self/status", "CapPrm"));
     snprintf(cape, sizeof cape, "%s", status_line("/proc/self/status", "CapEff"));
     snprintf(nnp, sizeof nnp, "%s", status_line("/proc/self/status", "NoNewPrivs"));
-    say("h %s: uid %ld %u %u %u fs %ld | gid %ld %u %u %u fs %ld | groups %ld [%s] | secure %lu | dumpable %ld | nnp %ld (%s) | CapPrm %s CapEff %s | /proc/self %s\n",
+    say("h %s: uid %ld %u %u %u fs %ld | gid %ld %u %u %u fs %ld | groups %ld [%s] | secure %lu | dumpable %ld | nnp %ld (%s) | CapPrm %s CapEff %s | /proc/self %s status %s\n",
         tag, a, ru, eu, su, fu, b, rg, eg, sg, fg, n, list, getauxval(AT_SECURE), rc(SYS_prctl, PR_GET_DUMPABLE_, 0, 0, 0, 0),
-        rc(SYS_prctl, PR_GET_NNP, 0, 0, 0, 0), nnp, capp, cape, own);
+        rc(SYS_prctl, PR_GET_NNP, 0, 0, 0, 0), nnp, capp, cape, own, own2);
     return 0;
 }
 
