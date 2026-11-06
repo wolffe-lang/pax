@@ -67,7 +67,7 @@ CAPS = {
     "textDocumentSync": {"change": 1, "openClose": True, "save": {"includeText": False}},
 }
 SERVER = {"name": "wolf-lsp", "version": "0.2.36"}
-DIAGNOSTICS = 1  # typed.lu has one error
+DIAGNOSTICS = 2  # typed.lu has one error
 
 
 def session_lines(name):
