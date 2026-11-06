@@ -2173,7 +2173,7 @@ pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
         let st = field(s, offset_of(Thread, state))
         let ok = how == 0 || (how == 1 && field(s, offset_of(Thread, pid)) == sel) || (how == 2 && field(s, offset_of(Thread, pgid)) == sel)
         let tr = tracer_of(s)
-        let owned = tr == self_tid()
+        let owned = tr == self_tid() || tracer_here(s)
         let real_child = field(s, offset_of(Thread, ppid)) == me && field(s, offset_of(Thread, tgid)) == field(s, offset_of(Thread, pid))
         if st != FREE && (owned || real_child) && ok {
             any = true
@@ -2186,7 +2186,7 @@ pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
                     return (true, s, W_EXITED)
                 }
             } else if running_state(s) {
-                if st == TRACED && field(s, offset_of(Thread, tracer)) == self_tid() && field(s, offset_of(Thread, trace_status)) >> 32 != 0 {
+                if st == TRACED && owned && field(s, offset_of(Thread, trace_status)) >> 32 != 0 {
                     return (true, s, W_TRACED)
                 }
                 if want & W_STOPPED != 0 && field(s, offset_of(Thread, wstop)) != 0 {
@@ -2233,7 +2233,7 @@ pub fn zombie(s: u64, reap_it: bool) -> (u64, u64) {
     let r = (field(s, offset_of(Thread, pid)), field(s, offset_of(Thread, status)))
     if reap_it {
         let thread = field(s, offset_of(Thread, tgid)) != field(s, offset_of(Thread, pid))
-        let foreign = tracer_of(s) == self_tid() && field(s, offset_of(Thread, ppid)) != self_pid()
+        let foreign = (tracer_of(s) == self_tid() || tracer_here(s)) && field(s, offset_of(Thread, ppid)) != self_pid()
         if foreign && !thread {
             put_field(s, offset_of(Thread, tracer), 0)
             if !trace_real_parent(s) { clear(s) }
@@ -3654,6 +3654,16 @@ pub fn report() {
 // --- px102: tracing stops -----------------------------------------------------
 // ptrace(2), wait(2): a tracing stop is not a job-control stop. All calls
 // here hold IF clear. A saved frame belongs to the tracee's kernel stack.
+
+/// Whether slot `s`'s tracer is a thread of the running process: wait(2)
+/// lets any thread of a process wait for the children of the others
+/// (no __WNOTHREAD), tracees included. Requests stay the tracer thread's.
+fn tracer_here(s: u64) -> bool {
+    let tr = tracer_of(s)
+    if tr == 0 { return false }
+    let t = trace_live(tr)
+    t != SLOTS && trace_tgid(t) == field(cur(), offset_of(Thread, tgid))
+}
 
 pub fn tracer_of(s: u64) -> u64 {
     if s >= SLOTS { return 0 }
