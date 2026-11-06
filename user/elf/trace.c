@@ -1032,11 +1032,20 @@ static __attribute__((noreturn)) void role_mem(void) {
     for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MB)[i] = 0x5a;
     for (u64 i = 0; i < 0x1000; i++) ((volatile unsigned char *)MD)[i] = 0x3c;
     if (call(10, MB, 0x1000, 0, 0, 0)) done(124); /* PROT_NONE */
-    i64 fd = call(2, (i64)self_path, 0, 0, 0, 0);
+    /* A file of the target's own, unlinked once mapped: the memory tree's
+       page cache holds a file's frames until the file goes (a binary from
+       the archive would stay counted against the frames line). */
+    i64 fd = call(2, (i64)"/tmp/px102-mem", 0x242, 0600, 0, 0);
     if (fd < 0) done(125);
+    {
+        unsigned char page[4096];
+        for (u64 i = 0; i < sizeof(page); i++) page[i] = (unsigned char)(i * 3 + 5);
+        if (call(1, fd, (i64)page, sizeof(page), 0, 0) != (i64)sizeof(page)) done(129);
+    }
     if (mmap6(MC, 0x1000, 1, 0x12, fd) != (i64)MC) done(126);
     if (mmap6(MC2, 0x1000, 1, 0x12, fd) != (i64)MC2) done(127);
     call(3, fd, 0, 0, 0, 0);
+    call(87, (i64)"/tmp/px102-mem", 0, 0, 0, 0);
     __asm__ volatile("int3");
     u64 bits = 0;
     if (*(volatile unsigned char *)MD == 0xab) bits |= 1;
