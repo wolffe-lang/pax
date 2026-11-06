@@ -131,19 +131,18 @@ fn main() -> int {
     let uid = os_uid() else 0
     let euid = os_euid() else 0
     // sudo's own file: root's, with the set-user-ID bit (Linux's words)
-    let exe = os_exe() else "/usr/bin/sudo"
-    let est = fs_stat(exe) else [0, 0, 0, 0, 0, 0, 1, 1]
-    if est[6] != 0 || est[4] & 0o4000 == 0 {
-        eprint("sudo: {exe} must be owned by uid 0 and have the setuid bit set")
-        return 1
-    }
-
     if euid != 0 {
+        let exe = os_exe() else "/usr/bin/sudo"
+        let est = fs_stat(exe) else [0, 0, 0, 0, 0, 0, 1, 1]
+        if est[6] != 0 || est[4] & 0o4000 == 0 {
+            eprint("sudo: {exe} must be owned by uid 0 and have the setuid bit set")
+            return 1
+        }
         if nnp_set() {
             eprint("sudo: The \"no new privileges\" flag is set, which prevents sudo from running as root.")
             eprint("sudo: If sudo is running in a container, you may need to adjust the container configuration to disable the flag.")
         } else {
-            eprint("sudo: effective uid is not 0, is /usr/bin/sudo on a file system with the 'nosuid' option set or an NFS file system without root privileges?")
+            eprint("sudo: effective uid is not 0, is {exe} on a file system with the 'nosuid' option set or an NFS file system without root privileges?")
         }
         return 1
     }
