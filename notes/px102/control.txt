@@ -1,0 +1,54 @@
+px102 — running-target control and synchronous faults, measured 2026-11-05
+
+Dry runs, not final records. Tested code head:
+678f8fff479f021dbe9af1eaffca8b58b546a68d (the kernel built from an exact
+copy of that commit: all 9,920 blobs re-hashed equal on the build host).
+
+Red first, committed before the kernel change:
+  5699db5d/4ec95da2 added the ten witnesses (attach, seize, replace-signal,
+  seize-fork, fault-handler, untraced-db, fault-segv, fault-ill, fault-fpe,
+  fault-pass); e14df8e0 committed their Linux references (uid 0 and 1000,
+  each byte-identical to the other and to the reference) and ran them on
+  the 56ca2d62 kernel: every mode failed by name, for example
+    FAIL T-attach / T-inject-signal / T-detach-suppress
+    FAIL T-seize-arguments / T-interrupt / T-detach-live
+    FAIL T-replace-signal, T-seized-child, T-fault-pass-handler,
+         T-untraced-db, T-fault-segv, T-fault-ill, T-fault-fpe,
+         T-fault-replace-signal (and each mode's transcript row).
+  The Linux oracles were produced by the same trace/tracee binaries PAX
+  runs (sha256 4e674ed9... and ad1de0fa...).
+
+Green at 678f8fff (native BIOS/KVM unless named; every case also checked:
+no PANIC, init status 0, process frames restored, the booted kernel's
+commit and sha256, and T-trace-layout at 256-byte side slots):
+  root, all 25 modes: stops regs step core exec syscall notify
+    notify-syscall detach-exit exitkill fork-event vfork-event vfork-order
+    clone-event errors attach seize replace-signal seize-fork fault-handler
+    untraced-db fault-segv fault-ill fault-fpe fault-pass
+  uid/gid 1000 (through /bin/as), all 25 modes
+  BIOS/TCG and UEFI/KVM: the ten new modes and core
+  END lines (verbatim, in run order):
+    END root-attach exit=0
+    END root-seize exit=0
+    END root-replace-signal exit=0
+    END root-seize-fork exit=0
+    END root-fault-handler exit=0
+    END root-untraced-db exit=0
+    END root-fault-segv exit=0
+    END root-fault-ill exit=0
+    END root-fault-fpe exit=0
+    END root-fault-pass exit=0
+    END root-stops exit=0 ... END root-errors exit=0 (15 modes, all 0)
+    END user-stops exit=0 ... END user-fault-pass exit=0 (25 modes, all 0)
+    END tcg-attach exit=0 ... END tcg-core exit=0 (11 modes, all 0)
+    END uefi-attach exit=0 ... END uefi-core exit=0 (11 modes, all 0)
+  Each mode's own PASS rows were read, not only its exit.
+
+The runner is the lane's measure.sh (one light 2-CPU QEMU leg at a time,
+6 GiB container). No release-tier or heavy regression take at this head:
+the scheduler and interrupt suites run at the next checkpoint head.
+
+Not covered by these rows (still owed): group-stop and PTRACE_LISTEN,
+ATTACH/SEIZE of a job-control-stopped or syscall-blocked target, group
+death and non-leader exec, a non-leader tracer thread, blocking-syscall
+restart, and the remaining register/memory/permission rows.
