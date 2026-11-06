@@ -11,15 +11,22 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory', 'perm', 'conc', 'tasks', 'regs2')
+MODES = ('core', 'syscall', 'exec', 'errors', 'stops', 'regs', 'step', 'notify', 'notify-syscall', 'detach-exit', 'exitkill', 'fork-event', 'vfork-event', 'vfork-order', 'clone-event', 'attach', 'seize', 'replace-signal', 'seize-fork', 'fault-handler', 'untraced-db', 'fault-segv', 'fault-ill', 'fault-fpe', 'fault-pass', 'group-exit', 'group-exit-event', 'exec-thread', 'tracer-thread', 'traceme-thread', 'blocked-read', 'blocked-sleep', 'blocked-futex', 'blocked-restart', 'blocked-eintr', 'memory', 'perm', 'conc', 'tasks', 'regs2', 'regs2-limits')
+# regs2-limits: what Linux accepts and PAX refuses by design (R-px102-3);
+# its reference is PAX's own transcript, regs2-limits.linux keeps Linux's.
+REFERENCE = {'regs2-limits': 'regs2-limits.pax'}
 # Each inclusive span is a separately named red-first row. The whole-file
 # comparison also covers every call result outside these spans.
 ROWS = {
     'regs2': (
         ('regs2-peek-words', 'regs2.peek.equals.getregs=', 'regs2.gs='),
         ('regs2-user-area', 'regs2.peek.off=216', 'regs2.peek.off=4096'),
-        ('regs2-poke-words', 'regs2.poke.rdi=', 'regs2.poke.gs.bad='),
-        ('regs2-setregs', 'regs2.set.rip.noncanonical=', 'regs2.set.valid='),
+        ('regs2-poke-words', 'regs2.poke.rdi=', 'regs2.poke.fs_base.user='),
+        ('regs2-setregs', 'regs2.set.cs.ring0=', 'regs2.set.valid='),
+    ),
+    'regs2-limits': (
+        ('regs2-limits-poke', 'regs2.poke.rip.noncanonical=', 'regs2.poke.gs.user='),
+        ('regs2-limits-setregs', 'regs2.set.rip.noncanonical=', 'regs2.set.flags.nt='),
     ),
     'conc': (
         ('conc-memory', 'conc.a.poke=', 'conc.b.data='),
@@ -184,7 +191,7 @@ def span(lines, begin, end):
 
 
 def judge(mode, actual):
-    expected = (ROOT / (mode + '.linux')).read_bytes()
+    expected = (ROOT / REFERENCE.get(mode, mode + '.linux')).read_bytes()
     want = expected.splitlines(keepends=True)
     got = actual.splitlines(keepends=True)
     result = []
@@ -199,7 +206,7 @@ def judge(mode, actual):
 
 def selftest():
     for mode in MODES:
-        source = (ROOT / (mode + '.linux')).read_bytes()
+        source = (ROOT / REFERENCE.get(mode, mode + '.linux')).read_bytes()
         assert all(ok for _, ok in judge(mode, source))
         assert not any(ok for _, ok in judge(mode, b''))
         for name, begin, end in ROWS[mode]:
@@ -231,7 +238,7 @@ def main():
     for name, ok in result:
         print(('PASS ' if ok else 'FAIL ') + name)
     if not all(ok for _, ok in result):
-        expected = (ROOT / (mode + '.linux')).read_text().splitlines(keepends=True)
+        expected = (ROOT / REFERENCE.get(mode, mode + '.linux')).read_text().splitlines(keepends=True)
         sys.stdout.writelines(difflib.unified_diff(expected, actual.decode(errors='replace').splitlines(keepends=True),
                                                 fromfile=mode + '.linux', tofile=sys.argv[2]))
         return 1

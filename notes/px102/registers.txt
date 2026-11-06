@@ -20,3 +20,16 @@ bits and IF as the kernel keeps them). PAX's rules for these are the
 foundation note's "SETREGS currently accepts only the measured amd64
 selectors, zero GS/data selectors and user-range RIP/RSP/FS bases"; its
 POKEUSER of general words is "owed". The transcript is the reference.
+
+Amendment, before the PAX runs (Linux measured first, see below): the
+first Linux transcript (regs2.linux at the witness commit) showed Linux
+accepts values PAX cannot return to ring 3 safely: a non-canonical rip
+or rsp (the process faults when resumed), flags with NT, a nonzero
+gs_base, and nonzero data selectors. The foundation already refuses
+them, and returning them through IRETQ would fault in the kernel. So the
+mode is split: `regs2` holds the words PAX hands back as Linux does
+(including a canonical kernel-half rip and rsp, which fault in ring 3,
+and flags with every settable bit but NT), judged against Linux;
+`regs2-limits` holds the refused ones. Its Linux transcript is kept
+(regs2-limits.linux) and PAX's own reference is regs2-limits.pax, so a
+refusal is a named row rather than a silent -EIO.

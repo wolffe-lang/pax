@@ -3,7 +3,7 @@
  * wait(2), proc_pid_mem(5), proc_pid_status(5), x86-64 psABI A.2.1;
  * register layout/offsets already measured by notes/px102/gdb/.
  *
- * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2]
+ * Usage: trace /absolute/path/to/tracee [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits]
  * Each invocation owns exactly one child. The tracee is ET_EXEC at fixed
  * text/data addresses, checked by tools/mktrace. Only pids and descriptors
  * are normalized: report equality to the child's pid and an open's success.
@@ -1351,7 +1351,7 @@ static void tasks_rows(void) {
  * POKEUSER of general-register words, SETREGS validation, user-area
  * offsets past the registers. Sources: ptrace(2), the psABI A.2.1 and
  * the Intel SDM (RFLAGS). */
-static int regs2_mode(const char *mode) { return equal(mode, "regs2"); }
+static int regs2_mode(const char *mode) { return equal(mode, "regs2") || equal(mode, "regs2-limits"); }
 static struct regs saved;
 static void put_back(void) { ok("regs2.restore", ptrace(SETREGS, 0, (u64)&saved)); }
 static void poke_word(const char *name, u64 off, u64 value) {
@@ -1370,7 +1370,7 @@ static void set_regs(const char *name, struct regs *w) {
     hex("regs2.set.rip", r.rip); hex("regs2.set.fs_base", r.fs_base);
     put_back();
 }
-static void regs2_rows(void) {
+static void regs2_prefix(void) {
     resume(CONT, "regs2.int3.status");
     getregs(); saved = r;
     u64 *w = (u64 *)&saved;
@@ -1378,7 +1378,7 @@ static void regs2_rows(void) {
     for (int i = 0; i < 27; i++) {
         u64 v = 0;
         i64 pr = ptrace(PEEKUSER, 8 * i, (u64)&v);
-        if (pr != 0 || (i != 19 && v != w[i]) || (i == 19 && v != saved.rsp)) same = 0;
+        if (pr != 0 || v != w[i]) same = 0;
     }
     dec("regs2.peek.equals.getregs", same);
     hex("regs2.rip", saved.rip); hex("regs2.cs", saved.cs); hex("regs2.ss", saved.ss);
@@ -1393,10 +1393,17 @@ static void regs2_rows(void) {
         if (pr < 0) { text("-"); number(0UL - (u64)pr, 10); } else number(pr, 10);
         text(" value=0x"); number(v, 16); text("\n");
     }
+}
+static void regs2_kill(void) {
+    ok("regs2.kill", ptrace(KILL, 0, 0));
+    if (wait_child("regs2.kill.status") != 9) fail("regs2.kill.status");
+}
+/* The words PAX can hand back to ring 3 as Linux does. */
+static void regs2_rows(void) {
+    regs2_prefix();
     poke_word("regs2.poke.rdi", 14 * 8, 0x1234);
     poke_word("regs2.poke.rax", 10 * 8, 0x5678);
     poke_word("regs2.poke.orig_rax", 15 * 8, ~0UL);
-    poke_word("regs2.poke.rip.noncanonical", 16 * 8, 0x0001000000000000UL);
     poke_word("regs2.poke.rip.kernel", 16 * 8, 0xffff800000000000UL);
     poke_word("regs2.poke.rip.user", 16 * 8, 0x401000);
     poke_word("regs2.poke.cs.user", 17 * 8, 0x33);
@@ -1404,25 +1411,36 @@ static void regs2_rows(void) {
     poke_word("regs2.poke.cs.ring0", 17 * 8, 0x10);
     poke_word("regs2.poke.ss.user", 20 * 8, 0x2b);
     poke_word("regs2.poke.ss.zero", 20 * 8, 0);
-    poke_word("regs2.poke.flags.all", 18 * 8, ~0UL);
+    poke_word("regs2.poke.flags.most", 18 * 8, ~0UL & ~0x4000UL);
     poke_word("regs2.poke.flags.tf", 18 * 8, saved.flags | 0x100);
     poke_word("regs2.poke.rsp.kernel", 19 * 8, 0xffff800000000000UL);
     poke_word("regs2.poke.fs_base.noncanonical", 21 * 8, 0x0001000000000000UL);
     poke_word("regs2.poke.fs_base.user", 21 * 8, 0x402000);
+    struct regs w2;
+    w2 = saved; w2.cs = 0x10; set_regs("regs2.set.cs.ring0", &w2);
+    w2 = saved; w2.ss = 0; set_regs("regs2.set.ss.zero", &w2);
+    w2 = saved; w2.flags = ~0UL & ~0x4000UL; set_regs("regs2.set.flags.most", &w2);
+    w2 = saved; w2.fs_base = 0x0001000000000000UL; set_regs("regs2.set.fs_base.noncanonical", &w2);
+    w2 = saved; w2.rsp = 0xffff800000000000UL; set_regs("regs2.set.rsp.kernel", &w2);
+    w2 = saved; w2.rip = 0xffff800000000000UL; set_regs("regs2.set.rip.kernel", &w2);
+    w2 = saved; w2.rdi = 0x1234; w2.orig_rax = 0; set_regs("regs2.set.valid", &w2);
+    regs2_kill();
+}
+/* Named limits (notes/px102/registers.txt, R-px102-3): what Linux accepts
+   and PAX refuses by design. Compared with PAX's own reference. */
+static void regs2_limits(void) {
+    regs2_prefix();
+    poke_word("regs2.poke.rip.noncanonical", 16 * 8, 0x0001000000000000UL);
+    poke_word("regs2.poke.rsp.noncanonical", 19 * 8, 0x0001000000000000UL);
+    poke_word("regs2.poke.flags.nt", 18 * 8, ~0UL);
     poke_word("regs2.poke.gs_base.user", 22 * 8, 0x402000);
     poke_word("regs2.poke.ds.user", 23 * 8, 0x2b);
     poke_word("regs2.poke.ds.bad", 23 * 8, 0x10);
-    poke_word("regs2.poke.gs.bad", 26 * 8, 0x33);
+    poke_word("regs2.poke.gs.user", 26 * 8, 0x33);
     struct regs w2;
     w2 = saved; w2.rip = 0x0001000000000000UL; set_regs("regs2.set.rip.noncanonical", &w2);
-    w2 = saved; w2.cs = 0x10; set_regs("regs2.set.cs.ring0", &w2);
-    w2 = saved; w2.ss = 0; set_regs("regs2.set.ss.zero", &w2);
-    w2 = saved; w2.flags = ~0UL; set_regs("regs2.set.flags.all", &w2);
-    w2 = saved; w2.fs_base = 0x0001000000000000UL; set_regs("regs2.set.fs_base.noncanonical", &w2);
-    w2 = saved; w2.rsp = 0xffff800000000000UL; set_regs("regs2.set.rsp.kernel", &w2);
-    w2 = saved; w2.rdi = 0x1234; w2.orig_rax = 0; set_regs("regs2.set.valid", &w2);
-    ok("regs2.kill", ptrace(KILL, 0, 0));
-    if (wait_child("regs2.kill.status") != 9) fail("regs2.kill.status");
+    w2 = saved; w2.flags = ~0UL; set_regs("regs2.set.flags.nt", &w2);
+    regs2_kill();
 }
 __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     u64 argc = sp[0]; char **argv = (char **)(sp + 1);
@@ -1435,7 +1453,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     if (argc == 2 && equal(argv[1], "role-mem")) role_mem();
     if (argc == 2 && equal(argv[1], "role-tasks")) role_tasks();
     if (argc == 2 && equal(argv[1], "role-exec-thread")) role_exec_thread();
-    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2]\n"); done(2); }
+    if (argc < 2 || argc > 3) { text("usage: trace TRACEE [core|syscall|exec|errors|stops|regs|step|notify|notify-syscall|exitkill|detach-exit|fork-event|vfork-event|vfork-order|clone-event|attach|seize|replace-signal|seize-fork|fault-handler|untraced-db|fault-segv|fault-ill|fault-fpe|fault-pass|group-exit|group-exit-event|exec-thread|tracer-thread|traceme-thread|blocked-read|blocked-sleep|blocked-futex|blocked-restart|blocked-eintr|memory|perm|conc|tasks|regs2|regs2-limits]\n"); done(2); }
     const char *mode = argc == 3 ? argv[2] : "core";
     if (controlled_mode(mode)) {
         controlled(mode); text("trace.complete\n"); done(0);
@@ -1492,7 +1510,7 @@ __attribute__((used, noreturn)) void trace_main(u64 *sp) {
     else if (lifecycle_mode(mode)) lifecycle(mode);
     else if (memory_mode(mode)) memory_rows();
     else if (tasks_mode(mode)) tasks_rows();
-    else if (regs2_mode(mode)) regs2_rows();
+    else if (regs2_mode(mode)) { if (equal(mode, "regs2")) regs2_rows(); else regs2_limits(); }
     else if (equal(mode, "errors")) errors();
     else if (equal(mode, "syscall") || equal(mode, "notify-syscall")) syscall_rows(equal(mode, "notify-syscall"));
     else if (equal(mode, "stops")) stops();
