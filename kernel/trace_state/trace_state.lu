@@ -32,6 +32,8 @@ struct TraceState {
     signal_info: u64,
     fault_vector: u64,
     fault_error: u64,
+    exec_tid: u64,
+    parent_tid: u64,
 }
 
 /// Called before the first thread or side-table write. Capacities are
@@ -139,3 +141,12 @@ pub fn set_fault_vector(s: u64, v: u64) { put(s, offset_of(TraceState, fault_vec
 
 pub fn fault_error(s: u64) -> u64 { get(s, offset_of(TraceState, fault_error)) }
 pub fn set_fault_error(s: u64, v: u64) { put(s, offset_of(TraceState, fault_error), v) }
+
+/// The thread id an exec'ing non-leader had before it became the leader
+/// (GETEVENTMSG at PTRACE_EVENT_EXEC), and the creating thread of a forked
+/// child (PTRACE_TRACEME's tracer is that thread, not its process).
+pub fn exec_tid(s: u64) -> u64 { get(s, offset_of(TraceState, exec_tid)) }
+pub fn set_exec_tid(s: u64, v: u64) { put(s, offset_of(TraceState, exec_tid), v) }
+
+pub fn parent_tid(s: u64) -> u64 { get(s, offset_of(TraceState, parent_tid)) }
+pub fn set_parent_tid(s: u64, v: u64) { put(s, offset_of(TraceState, parent_tid), v) }

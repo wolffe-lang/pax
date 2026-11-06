@@ -3873,6 +3873,13 @@ pub fn trace_live(tid: u64) -> u64 {
 }
 pub fn trace_tgid(s: u64) -> u64 { field(s, offset_of(Thread, tgid)) }
 
+/// Before execve's point of no return: the caller's thread id, which a
+/// non-leader loses when it becomes the leader (ptrace(2): the tracer
+/// reads the former id with GETEVENTMSG at PTRACE_EVENT_EXEC).
+pub fn trace_exec_tid() {
+    trace_state.set_exec_tid(cur(), self_tid())
+}
+
 pub fn trace_bind(s: u64, seized: bool, options: u64) {
     put_field(s, offset_of(Thread, tracer), self_tid())
     trace_state.set_options(s, options)

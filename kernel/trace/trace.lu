@@ -288,7 +288,9 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
 pub fn exec_stop(f: u64) -> u64 {
     let s = sched.self_slot()
     if sched.tracer_of(s) == 0 { return f }
-    if trace_state.options(s) & 0x10 != 0 { return event_stop(f, 4, sched.self_tid()) }
+    let former = trace_state.exec_tid(s)
+    trace_state.set_exec_tid(s, 0)
+    if trace_state.options(s) & 0x10 != 0 { return event_stop(f, 4, if former != 0 { former } else { sched.self_tid() }) }
     if trace_state.control(s) & trace_state.SEIZED != 0 { return f }
     trace_state.set_phase(s, 0)
     trace_state.set_control(s, trace_state.control(s) & !(trace_state.FAULT | trace_state.INTERRUPT))
