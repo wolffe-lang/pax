@@ -385,15 +385,28 @@ class Machine:
             if shift:
                 self.key('shift', True)
             self.key(k, True)
-            time.sleep(.03)
+            time.sleep(.05)
             self.key(k, False)
             if shift:
                 self.key('shift', False)
-            time.sleep(.03)
+            time.sleep(.05)
 
     def command(self, line, row, timeout=300):
         self.since = '$ ' + line
         self.type(line + '\n')
+        time.sleep(.5)
+        return self.wait(PROMPT, row, timeout, last=True)
+
+    def vcommand(self, line, row, timeout=300):
+        """px103: type the line, read it back from the screen, and only then press Enter: a key the
+        keyboard dropped (seen under host load: 'su wof') fails the row by name before anything runs."""
+        self.since = '$ ' + line
+        self.type(line)
+        time.sleep(.3)
+        shown = [l for l in self.unwrapped(self.screen()).split('\n') if l.strip()]
+        if not shown or not shown[-1].rstrip().endswith(line):
+            fail(row, f'keys dropped before Enter: typed {line!r}, the screen shows {shown[-1:]!r}')
+        self.type('\n')
         time.sleep(.5)
         return self.wait(PROMPT, row, timeout, last=True)
 
@@ -792,7 +805,7 @@ def sudo_boot(name, row):
         need(m.unwrapped(s), f'kernel: {C["new_commit"]}', row)
         for c, want in [("/bin/su wolf -c '/bin/id' > /root/w0.txt 2>&1; echo w0=$?", 'w0=0'),
                         ("/bin/su wolf -c '/bin/sudo /bin/id' > /root/w1.txt 2>&1; echo w1=$?", 'w1=0')]:
-            s = m.command(c, row, 300)
+            s = m.vcommand(c, row, 300)
             need(m.unwrapped(s), want, row)
         poweroff(m, row)
     finally:
@@ -864,16 +877,15 @@ def sudo_session(name, row):
     try:
         login(m, row)
         for l in lines['root']:
-            m.command(typed(l, '/root/s-root.txt'), row, 300)
-        m.type('/bin/su wolf\n')
-        m.wait(PROMPT, row, 120, last=True)
+            m.vcommand(typed(l, '/root/s-root.txt'), row, 300)
+        m.vcommand('/bin/su wolf', row, 120)
         for l in lines['wolf']:
-            m.command(typed(l, '/tmp/s-wolf.txt'), row, 300)
-        m.command('exit', row, 60)
-        m.command('cp /tmp/s-wolf.txt /root/s-wolf.txt; echo cp=$?', row, 60)
+            m.vcommand(typed(l, '/tmp/s-wolf.txt'), row, 300)
+        m.vcommand('exit', row, 60)
+        m.vcommand('cp /tmp/s-wolf.txt /root/s-wolf.txt; echo cp=$?', row, 60)
         for l in lines['lobo']:
-            m.command(typed('sudo -n -u lobo /bin/sudo -n ' + l, '/root/s-lobo.txt'), row, 300)
-        m.command('cp /var/log/sudo.log /root/s-log.txt; echo log=$?', row, 60)
+            m.vcommand(typed('sudo -n -u lobo /bin/sudo -n ' + l, '/root/s-lobo.txt'), row, 300)
+        m.vcommand('cp /var/log/sudo.log /root/s-log.txt; echo log=$?', row, 60)
         poweroff(m, row)
     finally:
         m.kill()
