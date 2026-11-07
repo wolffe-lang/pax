@@ -25,12 +25,13 @@ copy read first, scans everything the boot wrote: 0 files in every class.
 Ways and rows (each printed `PASS <row> …` or `FAIL <row> …` at column 0):
   names  igb, a static address with this host as its DNS server (10.0.2.2:53,
          tools/dns-fixture: github.com is 10.0.2.2, everything else
-         NXDOMAIN; root), /etc/hosts naming hosts.test:
+         NXDOMAIN; root), /etc/hosts naming hosts.test (the C library reads it
+       first, with no /etc/nsswitch.conf: measured, notes/px104/probes.txt):
     N1 dgramopts' output byte-identical to the same binary's on this host;
     N2 gai github.com hosts.test nosuch.test 10.0.2.2: the fixture's
        address, /etc/hosts' address, EAI_NONAME, the literal; the fixture
        saw the guest's A and AAAA questions for github.com and none for
-       hosts.test (/etc/nsswitch.conf: files first).
+       hosts.test.
   https  the same network; den's own smart-HTTP fixture (its
          tools/http-git-test.py Server: OpenSSL's s_server and
          git-http-backend, black boxes) with a leaf for DNS:github.com from a
