@@ -1,0 +1,95 @@
+px104 — the measurements before any change (2026-11-07 02:40Z to 02:56Z, at
+px105's head 56c360e5, branch px104).
+
+Built once (Linux host 1, a block's two lock names, Ubuntu 24.04 container):
+  kmain_console native     c4e8631d73b964f1ffd65338f76167673cf7b7fa731cd7ce5dd2cc8e1ce24615  3,430,192 bytes
+  den at ac2332bf          cc00cd9a367a3632772fd8f6d9a0fceed55b491d27656f95a1369f38dbc28988  17,696,760 bytes
+                           (tools/mkden, PAX_DEN_PIN=tests/mpx4-console-net.d/den-https.pin:
+                           four builds, one digest)
+  burrow at 0d98ce9        ae0e800f28aef0e1b60c55a38c0d0850587517b34e65ba602cb3649e4361ac43  16,326,632 bytes
+  burrow-keygen            5b21c26c2c22a0a3db6f3210faea0f7c70e7dfdeed4d8775f440e662a5ac2ea2  15,480,472 bytes
+                           (burrow's own tools/fetch-toolchain and tools/build --static, in a
+                           path of its own: both digests are the ones burrow's merge gauntlet
+                           printed at /work/burrow, so the static build does not depend on
+                           its path)
+Every probe ran in a container with --network none: QEMU's user network
+reaches only the container's loopback, and the container's resolver is
+dnsmasq on 127.0.0.1 (a black box, logging every query), to which QEMU
+forwards the guest's DNS (10.0.2.3). No probe sent a packet off the host.
+
+Probe 1: does a name resolve at PAX's console? (the console kernel, igb,
+QEMU's user network, a lease; dnsmasq answers probe.test with 10.0.2.2;
+a listener on the container's 4443 and 22 logs each connection)
+
+  run                                         PAX's console                                  listener   dnsmasq
+  den clone https://probe.test:4443/…         setsockopt(SOL_IP, IP_RECVERR) refused,        none       no query
+                                              -ENOPROTOOPT; `den: wire: io`, exit 2
+  den clone https://nosuch.test:4443/…        the same                                       none       no query
+  den clone https://10.0.2.2:4443/…           a TLS ClientHello reaches the listener;        connect    -
+                                              `den: wire: Unsupported(TLS closed)`
+  ssh -T git@probe.test (burrow)              the same refusal; `burrow: io: connect to       none       no query
+                                              host probe.test port 22`, exit 255
+  ssh -T git@nosuch.test                      the same                                       none       no query
+  ssh -T git@10.0.2.2                         `SSH-2.0-burrow_0.0.0` reaches the listener;   connect    -
+                                              `burrow: closed: …`
+
+  The guest's capture holds no packet to or from port 53: the lookup ends in
+  the guest before a query is sent, so github.com cannot resolve either.
+  Every literal address works. The kernel's line, for den and for ssh:
+    user: den pid 1 syscall 54: refused: a socket option PAX does not have: level and option 0 11, -92
+
+  The same binaries on Linux (strace, a black box's calls) resolve through
+  the static C library's resolver, which reads /etc/nsswitch.conf,
+  /etc/host.conf, /etc/resolv.conf and /etc/hosts, tries nscd's socket, then:
+    socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, 0)
+    setsockopt(fd, SOL_IP, IP_RECVERR, [1], 4)          PAX: -ENOPROTOOPT
+    connect(fd, 127.0.0.1:53)
+    poll(POLLOUT, 0)
+    sendmmsg(fd, [A query, AAAA query], 2, MSG_NOSIGNAL) PAX: syscall 307 not served
+    poll(POLLIN, 5000); ioctl(fd, FIONREAD); recvfrom(…)  twice   PAX: FIONREAD on a datagram socket -ENOTTY
+  burrow's trace is the same calls.
+
+Probe 2: which of PAX's answers stop the resolver? The same den on Linux
+with strace's fault injection giving PAX's answers, one at a time:
+
+  case                                   result
+  plain                                  resolves, connects (exit 2 at the listener: not TLS)
+  setsockopt -> ENOPROTOOPT              `den: wire: io`, no query sent: PAX's failure, reproduced
+  sendmmsg -> ENOSYS                     no fallback: the resolver tries twice and gives up, `den: wire: io`
+  ioctl FIONREAD -> ENOTTY               tolerated: the answers are read with a 65,536-byte buffer and
+                                         den connects (the case's exit came from den's own FIONBIO,
+                                         which the same injection also failed)
+  no /etc/nsswitch.conf, /etc/host.conf  resolves (PAX ships neither)
+  the name only in /etc/hosts, no DNS    resolves with no datagram socket at all, IP_RECVERR refused or not
+
+  So two answers stand between den and burrow and a name: IP_RECVERR on a
+  datagram socket, and sendmmsg(2). /etc/hosts works at PAX today.
+
+Probe 3: does den's TLS (wolf-std's public-PKI client) take Mozilla's root
+set whole? (Linux, den against openssl s_server -www with a leaf for
+linux.test from a test root; s_server is no git server, so a handshake that
+verifies ends in den's HTTP layer)
+
+  the set: curl's extract of Mozilla's store, https://curl.se/ca/cacert-2026-10-20.pem,
+    sha256 796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe (read twice, and
+    curl's published .sha256 says the same), 200,116 bytes, 118 certificates;
+  as den's concatenated DER (an RFC 7468 decoder of the lane's own): 127,103 bytes, sha256
+    7a713f238d42397d0360c7f8523d45bedee6824f583372d6afd96a129ea5c1f1, the same bytes as
+    openssl x509 -outform DER per certificate, concatenated;
+  key types: RSA 2048 and 4096 (sha1, sha256, sha384, sha512 signatures), ECDSA P-256,
+    P-384 and one P-521.
+
+  roots                          den
+  the test root alone            `Unsupported(HTTPS close-delimited body (wolf-std#133))`: TLS verified
+  Mozilla's set + test root      the same: the whole set parses, P-521 root and all
+  test root + Mozilla's set      the same
+  Mozilla's set alone            `Unsupported(TLS issuer_mismatch)`: refused by the client's own name
+
+Probe 4: at PAX's console (the same kernel and network, the container's s_server
+reached at 10.0.2.2, the name hosts.test in the image's /etc/hosts alone)
+
+  den clone, Mozilla's set + test root   `HTTPS close-delimited body (wolf-std#133)`: resolved from
+                                          /etc/hosts and verified at the console
+  den clone, Mozilla's set alone         `TLS issuer_mismatch`
+  burrow-keygen -t ed25519 -q -f …       exit 0 (its entropy, /dev/urandom, is there)
+  burrow-keygen -y / -l                  the public line and `256 SHA256:… no comment (ED25519)`
