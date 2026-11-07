@@ -675,7 +675,10 @@ def way_ssh(out, images, c, git):
             if sshd.poll() is not None:
                 raise RuntimeError('sshd ended: ' + (d / 'sshd.log').read_text()[-400:])
             time.sleep(0.1)
-    (work / 'known_hosts').write_text('px104-fixture %s %s\n' % (host_line[0], host_line[1]))
+    # This host's ssh: the alias alone and with the port (OpenSSH may look a
+    # HostKeyAlias up with the port it dials).
+    (work / 'known_hosts').write_text('px104-fixture %s %s\n[px104-fixture]:%d %s %s\n'
+                                      % (host_line[0], host_line[1], port, host_line[0], host_line[1]))
     (work / 'ssh_config').write_text('Host github.com\n\tHostName 127.0.0.1\n\tPort %d\n\tUser %s\n\tIdentityFile %s\n'
                                      '\tIdentitiesOnly yes\n\tUserKnownHostsFile %s\n\tHostKeyAlias px104-fixture\n'
                                      '\tStrictHostKeyChecking yes\n\tBatchMode yes\n'
