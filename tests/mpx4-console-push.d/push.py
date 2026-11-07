@@ -75,7 +75,9 @@ Ways and rows (each printed `PASS <row> …` or `FAIL <row> …` at column 0):
     ref; L6 the deletion, ls-remote empty; L7 den fetch --prune, and den log
     of the remote-tracking ref fails. This host's git, the same steps on
     refs/heads/px104-live/<nonce>/git-<way>; anything of <nonce> left on
-    the fixture is deleted at the end, whatever happened.
+    the fixture is deleted at the end, whatever happened (L9). L10 the
+    fixture's whole ref listing (ls-remote) before the session and after
+    the cleanup: the same, by count and sha256 alone (no ref is printed).
   every way:
     K1 the canary: the session prints the carrier's three files on purpose;
        the transcript holds the three placeholders there, and the scan finds
@@ -788,6 +790,12 @@ def way_live(out, images, c, git):
         return ''
     base = m.group(1)
     ok('L0', 'the fixture\'s default branch read by this host\'s git (exit 0)')
+
+    def listing():
+        r = run([git, 'ls-remote', 'live-https:'], env=genv, check=False, timeout=120)
+        lines = sorted(r.stdout.decode().splitlines())
+        return r.returncode, len(lines), hashlib.sha256('\n'.join(lines).encode()).hexdigest()
+    before = listing()
     refs = {'L': 'px104-live/%s/https' % nonce, 'M': 'px104-live/%s/ssh' % nonce}
     keys = PRELUDE.splitlines() + [
         'export DEN_HTTP_TOKEN="$(cat /run/live/token)"',
@@ -817,6 +825,12 @@ def way_live(out, images, c, git):
             ok('L9', 'nothing of this run is left on the fixture (ls-remote empty for its refs)')
         else:
             bad('L9', 'refs of this run left on the fixture: exit %d, %d lines' % (final.returncode, len(final.stdout.splitlines())))
+        after = listing()
+        if before[0] == 0 and after == before:
+            ok('L10', 'the fixture\'s refs before and after: %d, sha256 %s, identical' % (before[1], before[2][:16]))
+        else:
+            bad('L10', 'the fixture\'s refs before (exit %d, %d, sha256 %s) and after (exit %d, %d, sha256 %s)'
+                % (before[0], before[1], before[2][:16], after[0], after[1], after[2][:16]))
     b = blocks(log)
     seen = hooks_seen(out)
     for p in ('L', 'M'):
