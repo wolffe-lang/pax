@@ -80,7 +80,7 @@ fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
     let t = pick_target(mut lg, disks)?
     var user = ""
     loop {
-        user = answer(mut lg, "New user name (uid/gid 1000, no password; q cancels): ")?
+        user = answer(mut lg, "New user name (uid/gid 1000; q cancels): ")?
         if valid_name(user) { break }
         say(mut lg, "Use 1-32 lowercase letters, digits, _ or -; start with a letter or _. Not root.")
     }
@@ -108,4 +108,47 @@ fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
     flush_log(mut lg)
     if answer(mut lg, "Type yes to install; anything else cancels: ")? != "yes" { return cancelled }
     p
+}
+
+/// px106: after the confirmation and before any write, the guided install
+/// asks whether to set root's password and the new user's. Each yes runs
+/// the image's /bin/passwd -R on a scratch copy of the accounts the
+/// install will write (its prompts and the typed password go to the
+/// terminal, never to the install log); a no, or a passwd that does not
+/// finish, leaves the account locked. Returns the /etc/shadow text, every
+/// account locked but those set.
+fn guided_passwords(mut lg: Log, user: str, work: str) -> str ! {cancelled, io} {
+    let dir = "{work}/accounts"
+    fs_create_dir_all("{dir}/etc") else |_| { return io }
+    let live = fs_read_text("/etc/passwd") else |_| { return io }
+    let accounts = account_table(live, user, false) else |_| { return io }
+    durable_text("{dir}/etc/passwd", accounts)?
+    durable_text("{dir}/etc/shadow", locked_shadow(accounts, today()))?
+    for who in ["root", user] {
+        var yes = false
+        loop {
+            let s = answer(mut lg, "Set a password for {who} now? y/n (n leaves {who} locked; no default): ")?
+            if s == "y" { yes = true; break }
+            if s == "n" { break }
+            say(mut lg, "An explicit y or n is required.")
+        }
+        if !yes {
+            say(mut lg, "{who} is locked: set a password later with passwd.")
+            continue
+        }
+        flush_log(mut lg)
+        let child = os_spawn(["/bin/passwd", "-R", dir, who]) else |_| {
+            say(mut lg, "{who} is locked: /bin/passwd could not be started.")
+            continue
+        }
+        let status = os_wait(child) else |_| -1
+        if status == 0 {
+            say(mut lg, "{who}'s password is set (the install log never holds it).")
+        } else {
+            say(mut lg, "{who} is locked: passwd exited {status}; set a password later with passwd.")
+        }
+    }
+    let text = fs_read_text("{dir}/etc/shadow") else |_| { return io }
+    fs_remove_dir_all(dir) else |_| {}
+    text
 }

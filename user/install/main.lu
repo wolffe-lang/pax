@@ -139,8 +139,16 @@ fn main() -> int {
     if o.mode != "guided" {
         confirm_plan(p, p.target, o.confirm) else |e| { return stop(mut lg, "pax-install: before writes: {e}") }
     }
+    // px106: the guided install asks for root's password and the user's (passwd -R on the
+    // accounts it will write), or leaves them locked; the scripted one leaves both locked.
+    var shadow = ""
+    if o.mode == "guided" {
+        shadow = guided_passwords(mut lg, p.user, work) else |e| {
+            return stop(mut lg, "pax-install: cancelled/refused before writes: {e}")
+        }
+    }
     let source = fs_realpath(o.source) else |e| { return stop(mut lg, "pax-install: source: {e}") }
-    execute_plan(mut lg, p, source, o.payload, o.tools, work) else |e| {
+    execute_plan(mut lg, p, source, o.payload, o.tools, work, shadow) else |e| {
         return stop(
             mut lg,
             "pax-install: stopped: {e}; no rollback promised. If writes began, inspect the target's persistent phase log; bootability is NOT established.",
