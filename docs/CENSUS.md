@@ -846,6 +846,30 @@ musl probes (Ubuntu's musl-gcc), as root and as a user
 | 61, 247 | `wait4`, `waitid` | the rusage argument the reaped child's (its own and its reaped children's); a stop's or continue's report zero | |
 | 13 | `rt_sigaction` of SIGCHLD | SIG_IGN, or SA_NOCLDWAIT: the children keep no zombie, a wait answers -ECHILD once none is left, and they are not counted in RUSAGE_CHILDREN (wait(2), getrusage(2)) | |
 
+## Served since px04: the resolver's datagram calls (px104)
+
+px04's workloads dialled addresses; den and burrow dial names. Static and
+linked against glibc, they find a host through the C library's resolver,
+which px104 measured black box (`notes/px104/probes.txt`): it reads
+/etc/nsswitch.conf, /etc/host.conf, /etc/resolv.conf and /etc/hosts,
+then opens a datagram socket, sets SOL_IP's IP_RECVERR, connects it to
+the name server and sends its A and AAAA questions with one `sendmmsg`,
+then polls and reads each answer after FIONREAD. PAX refused IP_RECVERR
+(-ENOPROTOOPT), so no question left the machine and no name resolved
+(strace's fault injection on Linux gave the same answer: and with
+IP_RECVERR served, `sendmmsg` -ENOSYS stops it again, while FIONREAD's
+-ENOTTY is tolerated). px104 serves the three, each row held to Linux by a
+static witness over loopback (`tests/mpx4-console-push` N1:
+`user/net/dgramopts.c`) and the resolver itself through a DNS fixture of
+the suite's own (N2: `user/net/gai.c`).
+
+| nr | call | served | refused by name |
+|---:|---|---|---|
+| 54, 55 | `setsockopt`, `getsockopt` of SOL_IP's IP_RECVERR, on an AF_INET datagram socket | an int, kept as 0 or 1 and read back (getsockopt: an int of at most the caller's length); nothing else the socket does changes, since PAX queues no ICMP error for a socket | an option shorter than an int: -EINVAL (not served) |
+| 45 | `recvfrom` with MSG_ERRQUEUE | -EAGAIN: the error queue is always empty | |
+| 307 | `sendmmsg` | on an AF_INET datagram socket, the first `vlen` (at most 1024) messages, each one datagram to its msg_name or the connected peer, its iovecs (at most 1024) gathered; each sent one's msg_len written; the count sent, or the first message's -errno when none went (-EDESTADDRREQ, -EMSGSIZE, -EINVAL, -EFAULT, sendto's); -EBADF, -ENOTSOCK | ancillary data (msg_control), -EINVAL; a stream socket, -EOPNOTSUPP; a datagram over 1472 bytes, as sendto refuses it |
+| 16 | `ioctl` FIONREAD on an AF_INET datagram socket | the length of the next queued datagram, 0 when none (and 0 for an empty datagram first in the queue) | |
+
 ## Disk formatters and Limine (px69)
 
 Linux strace of the static binaries records 26 distinct calls for paxgpt
