@@ -1308,7 +1308,7 @@ def u12():
     rows, rc, text = tree('u12-regenerated', row)
     if rows.get('/etc/pax-login', ('', 0, ''))[2] != want or '/etc/pax-login.pax-new' in rows:
         fail(row, f'after the first upgrade /etc/pax-login is {rows.get("/etc/pax-login")}, not the installer\'s {want}, or a .pax-new is beside it')
-    # The regenerated login is the console's: the upgraded disk alone, root logged in.
+    # The upgraded disk alone, root logged in at its console (px106: by /bin/login).
     b = Machine('u12-boot', C['sym_new'], None)
     try:
         login(b, row)
@@ -1347,7 +1347,7 @@ def u12():
         fail(row, f'the manifest\'s /etc/pax-login row is not the installer\'s text: {mrow}')
     if rc != 0:
         fail(row, f'e2fsck -fn exit {rc}:\n{text}')
-    passed(row, 'an earlier installer\'s /etc/pax-login (the manifest\'s row) regenerated, nothing beside it, and root logged in at the upgraded disk\'s console by it; the user\'s edit kept with /etc/pax-login.pax-new the new text; a third run "Nothing to change"; the manifest records the installer\'s text; e2fsck -fn clean')
+    passed(row, 'an earlier installer\'s /etc/pax-login (the manifest\'s row) regenerated, nothing beside it, and root logged in at the upgraded disk\'s console (px106: /bin/login, which /etc/pax-run names; /etc/pax-login only starts it); the user\'s edit kept with /etc/pax-login.pax-new the new text; a third run "Nothing to change"; the manifest records the installer\'s text; e2fsck -fn clean')
 
 
 def main():
