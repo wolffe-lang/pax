@@ -421,7 +421,8 @@ def liveness(port, ca, spid, bound=15):
         p.communicate()
         answered, seen = False, 'no TLS handshake within %d s (s_client ended at its bound)' % bound
     try:
-        wchan = open('/proc/%d/wchan' % spid).read().strip() or 'running'
+        wchan = open('/proc/%d/wchan' % spid).read().strip()
+        wchan = 'running' if wchan in ('', '0') else wchan
     except OSError:
         wchan = 'unreadable'
     states = {}
