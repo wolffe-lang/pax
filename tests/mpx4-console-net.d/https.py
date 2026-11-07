@@ -20,13 +20,14 @@ host's loopback, which the guest reaches through QEMU's user network at
     /etc/den/ca.der (den's --tls-roots), /etc/pax-net `dhcp`, and the run
     list, written once the fixture's port is known:
         /bin/den clone -q --tls-roots=/etc/den/ca.der https://10.0.2.2:<port>/remote.git /c
-        /bin/indir /c /bin/den log --oneline
+        /bin/indir /c /bin/den log --oneline --no-decorate
         /bin/indir /c /bin/den fsck --full
   - booted on QEMU's igb with the user network.
 
 Rows (printed as the suite prints them):
   H1 the clone: den's first run ends `exit_group 0`, before it the lease;
-  H2 its log is git's `log --oneline` of the repository, line for line;
+  H2 its log is git's `log --oneline` of the repository, line for line
+     (`--no-decorate`: den decorates at a terminal by default, as git does);
   H3 `fsck --full` ends `exit_group 0` and prints nothing;
   H4 the fixture saw protocol v2: discovery (`info/refs?service=
      git-upload-pack`, `Git-Protocol: version=2`) and a fetch POST, and
@@ -120,7 +121,7 @@ def main():
     try:
         url = "https://%s:%d/remote.git" % (GUEST_HOST, server.port)
         (work / "run").write_text("/bin/den clone -q --tls-roots=/etc/den/ca.der %s /c\n"
-                                  "/bin/indir /c /bin/den log --oneline\n"
+                                  "/bin/indir /c /bin/den log --oneline --no-decorate\n"
                                   "/bin/indir /c /bin/den fsck --full\n" % url)
         (work / "pax-net").write_text("dhcp\n")
         run([ROOT / "tools/mkinitramfs", work / "https.cpio", "/bin/den=" + args.den, "/bin/indir=" + args.indir,
