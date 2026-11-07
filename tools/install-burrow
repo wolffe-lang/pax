@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# install-burrow — put burrow into a root as PAX ships it (px104,
+# R-px104-4): /bin/ssh, the `burrow` tools/mkburrow built, and
+# /bin/burrow-keygen, each unmodified (never stripped), mode 0755. den runs
+# `ssh` from PATH for its ssh:// and scp-like remotes (it reads neither
+# GIT_SSH nor core.sshCommand at its pin), so /bin/ssh is all the wiring
+# den needs; a person types `ssh` and `burrow-keygen` the same way.
+#
+#   tools/install-burrow BURROW-DIR ROOT
+#
+# BURROW-DIR is tools/mkburrow's OUTDIR: each binary refused unless it is
+# its sums.txt line (sha256 and size) and static (ET_EXEC, no PT_INTERP).
+# ROOT/bin is made if it is missing; an existing ROOT/bin/ssh or
+# ROOT/bin/burrow-keygen is refused, never replaced. The image builders
+# share it: the distribution's root builder (distribution-root) and
+# tests/mpx4-console-push's image. Exit 0, or 2 on a refusal.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 2 ] || die "usage: install-burrow BURROW-DIR ROOT"
+d=$1 r=$2
+need readelf cmp
+mkdir -p "$r/bin"
+for pair in burrow:ssh burrow-keygen:burrow-keygen; do
+    from=${pair%%:*} to=${pair#*:}
+    row=$(awk -v n="$from" '$1 == n { print }' "$d/sums.txt" 2>/dev/null) || row=
+    read -r name sha bytes <<< "$row"
+    [ "${name:-}" = "$from" ] && [ -f "$d/$from" ] && [ "$(sha256_of "$d/$from")" = "$sha" ] \
+        && [ "$(wc -c < "$d/$from" | tr -d ' ')" = "$bytes" ] || die "$from differs from its sums.txt: $d"
+    readelf -hW "$d/$from" | grep -Eq 'Type: +EXEC' || die "$from is not ET_EXEC"
+    ! readelf -lW "$d/$from" | grep -q INTERP || die "$from has a PT_INTERP (not static)"
+    [ ! -e "$r/bin/$to" ] && [ ! -L "$r/bin/$to" ] || die "$r/bin/$to is already there"
+    cp "$d/$from" "$r/bin/$to"
+    chmod 755 "$r/bin/$to"
+    cmp -s "$d/$from" "$r/bin/$to" || die "the copy of $from is not its bytes"
+    say "installed /bin/$to ($from: $sha, $bytes bytes, 0755)"
+done
