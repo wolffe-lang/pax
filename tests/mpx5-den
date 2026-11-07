@@ -96,9 +96,11 @@
 # container here reproduces.
 #
 # px100, den's remotes: a third image, den's archive with chmod, /etc/shrc
-# the den lines of user/shrc (DEN_UPLOAD_PACK and DEN_RECEIVE_PACK, the
-# service wrappers tools/install-den puts in /usr/libexec/den, as the
-# distribution's roots carry them) and its own run list, the console's
+# the exports of user/shrc (px104, R-px104-5: none names a service program
+# any more; tools/install-den puts den's two wrappers on PATH as
+# /bin/git-upload-pack and /bin/git-receive-pack, the names den's
+# transport runs when DEN_UPLOAD_PACK and DEN_RECEIVE_PACK are unset, as
+# the distribution's roots carry them) and its own run list, the console's
 # shell with ENV=/etc/shrc as root and then as `pax` (through `as`), each
 # typed user/console/den-remote.keys. Its kernel is REMOTE_KERNEL,
 # kmain_console since px105 (the console starts the stack; before it,
@@ -281,6 +283,8 @@ if [ -z "$images" ]; then
     cp "$r/etc/localtime" "$r/usr/share/zoneinfo/UTC" 2>/dev/null || why+=" no zone;"
     for f in "$r"/bin/*; do
         [ -L "$f" ] && { say "  program: ${f#"$r"/} -> $(readlink "$f")"; continue; }
+        # px104: den's two service wrappers are scripts (#!/bin/sh).
+        case ${f##*/} in git-upload-pack|git-receive-pack) say "  script: ${f#"$r"/} $(sha256_of "$f")"; continue ;; esac
         x=$(static_ok "$f") || why+=" $x;"
         say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
@@ -308,10 +312,11 @@ if [ -z "$images" ]; then
     rm -rf "$rr"
     cp -a "$r" "$rr"
     cp "$work/bore/chmod" "$rr/bin/chmod" 2>/dev/null || why+=" no chmod;"
-    command grep -E '^export DEN_(UPLOAD|RECEIVE)_PACK=' "$PAX_ROOT/user/shrc" > "$rr/etc/shrc" || true
-    [ "$(wc -l < "$rr/etc/shrc" | tr -d ' ')" = 2 ] || rwhy+=" user/shrc exports $(wc -l < "$rr/etc/shrc" | tr -d ' ') of den's two service variables;"
+    command grep -E '^export ' "$PAX_ROOT/user/shrc" > "$rr/etc/shrc" || true
+    ! command grep -Eq '^export DEN_(UPLOAD|RECEIVE)_PACK=' "$rr/etc/shrc" \
+        || rwhy+=" user/shrc still exports a service program (R-px104-5: the wrappers are on PATH);"
     for n in upload-pack receive-pack; do
-        [ -x "$rr/usr/libexec/den/$n" ] || rwhy+=" no /usr/libexec/den/$n (tools/install-den);"
+        [ -x "$rr/bin/git-$n" ] || rwhy+=" no /bin/git-$n (tools/install-den);"
     done
     printf '%s\n' "${REMOTE_RUNS[@]}" > "$rr/etc/pax-run"
     rargs=()
@@ -375,7 +380,7 @@ if [ -z "$images" ]; then
             say "built $tier den-remote: $REMOTE_KERNEL elf $(sha256_of "$relf"), iso $(sha256_of "$work/$tier/den-remote.iso"), initramfs $(sha256_of "$work/remote.cpio")"
         fi
     done
-    [ -z "$rwhy" ] && say "PASS R0 (build): the remote image's /etc/shrc names den's two service wrappers, installed in /usr/libexec/den" || bad "R0 (build):$rwhy"
+    [ -z "$rwhy" ] && say "PASS R0 (build): den's two service wrappers on PATH as /bin/git-upload-pack and /bin/git-receive-pack, /etc/shrc naming none" || bad "R0 (build):$rwhy"
     if [ "$only" = build ]; then
         [ -z "$why" ] && say "PASS D0 (build): kmain_console built ($tiers), every program static, den to one digest, bin/git an archive link to den, the home disk the recorded bytes, the image built" || bad "D0 (build):$why"
         exit "$fail"
