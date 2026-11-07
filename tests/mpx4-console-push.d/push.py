@@ -835,14 +835,17 @@ def main():
     log = ''
     held = {}
     try:
-        if way == 'names':
-            log = way_names(out, images, c)
-        elif way == 'https':
-            log = way_https(out, images, c, images / 'den-src', git)
-        elif way == 'ssh':
-            log = way_ssh(out, images, c, git)
-        elif way == 'live':
-            log = way_live(out, images, c, git)
+        try:
+            if way == 'names':
+                log = way_names(out, images, c)
+            elif way == 'https':
+                log = way_https(out, images, c, images / 'den-src', git)
+            elif way == 'ssh':
+                log = way_ssh(out, images, c, git)
+            elif way == 'live':
+                log = way_live(out, images, c, git)
+        except Exception as e:  # the rows below still run: the carrier's end and the scan
+            bad('P0', 'the way could not run: %s: %s' % (type(e).__name__, str(e)[:300]))
         canary_row(log, c / 'd')
     finally:
         # The secrets, held in memory for the scan alone; the carrier goes.
