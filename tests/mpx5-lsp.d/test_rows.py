@@ -23,7 +23,10 @@ spec.loader.exec_module(rows)
 
 
 def good(name):
-    return open(os.path.join(HERE, name + ".good"), encoding="utf-8", errors="surrogateescape").read()
+    """The recording (made at wolf 0.2.36), its initialize answer naming the pin's version (rows.SERVER): the
+    rows hold the version user/wolf.pin names."""
+    text = open(os.path.join(HERE, name + ".good"), encoding="utf-8", errors="surrogateescape").read()
+    return frame_edit(text, 0, lambda o: o["result"]["serverInfo"].update(version=rows.SERVER["version"]))
 
 
 def frame_edit(text, k, edit):
