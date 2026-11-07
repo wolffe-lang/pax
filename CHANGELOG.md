@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The networked console (px105).** `kmain_console`, the kernel every shipped
+  image boots, starts the network: a virtio device or one of Intel's gigabit
+  controllers (QEMU's igb, the I225-V and I226), the protocols over it, and
+  loopback with no device at all. It takes its address as `/etc/pax-net` says:
+  `dhcp` (the release and dev images ship `dhcp wait=10`) or, new, `static
+  <a.b.c.d>/<prefix> [gateway …] [dns …]`, honoured by the session kernels too.
+  A missing device, a cable with no link or a server that never answers never
+  stops the boot, and one line says how long the console waited and the bound it
+  held itself to. Under `quiet` the DHCP client's routine lines (a renewal among
+  them) stay off the console. den's git:// remotes work at the console now, and a
+  new suite, `tests/mpx4-console-net`, holds each of these, a quiet renewal
+  against dnsmasq and den's clone over https from den's own fixture.
+  `tests/distribution-net` is the stick's leg for the metal target's I225-V.
+
 - **wolf lsp on PAX (px99).** The dev image's `/usr/bin/wolf lsp`, the compiler's
   language server (a transport of three threads, a thread for each diagnostics
   publication, channels over futexes and a 100 ms debounce on a timed wait),
