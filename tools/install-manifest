@@ -8,7 +8,7 @@ The stick's ESP is read with mtools (`mcopy`, a black box): /boot/pax and
 /boot/initramfs.cpio. The archive is the live tree the stick's installer
 copied to the root; its rows are the ones pax-install --upgrade's own walk
 lists (manifest.lu's `listed`): never /home, /root, /dev, /proc, /sys,
-/tmp, /mnt, /lost+found, /usr/share/pax-install or /etc/pax-install; the
+/tmp, /mnt, /lost+found, /usr/share/pax-install, /etc/pax-install or (px106) /etc/shadow; the
 six installer-written paths marked `g` with digest `-` (their text is the
 install's, not the archive's). The header names the image: the commit in
 /etc/pax-release's kernel row, the kernel's sha256, /etc/pax-release's and
@@ -31,6 +31,9 @@ def sha(b):
 
 
 def listed(path):
+    # px106: /etc/shadow and its writers' files are never an image's (manifest.lu's listed)
+    if path == '/etc/shadow' or path.startswith('/etc/shadow.pax-'):
+        return False
     return path != '/' and not any(path == t or path.startswith(t + '/') for t in SKIP)
 
 
