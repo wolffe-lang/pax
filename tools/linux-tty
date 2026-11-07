@@ -46,7 +46,11 @@
 # exactly as tools/qemu-halt --type types it (the same format: before
 # step k, wait until TEXT has been shown k times; then the step's
 # bytes, `^C ^D ^U ^W ^\ ^Z ^? ^^` the control characters (^Z px48's), DEL and `^`, and
-# Enter (CR) unless the step ends with `^D` or `^.`), 20 ms a byte.
+# Enter (CR) unless the step ends with `^D` or `^.`), 20 ms a byte. A step
+# that starts with `^{TEXT}` (px106) waits for its own TEXT as
+# tools/qemu-halt does: the n-th such step naming TEXT waits until TEXT has
+# been shown n times, then types what follows the `}` (a password, typed
+# only once its prompt has turned the echo off).
 # OUT gets every byte the terminal showed (the program's output and the
 # line discipline's echo, CR LF as the terminal writes them); OUT.rc the
 # program's exit status. Exit 0 when the session ran (whatever the
@@ -105,6 +109,16 @@ def step_bytes(line):
     if not (line.endswith("^D") or line.endswith("^.")):
         out.append(13)
     return bytes(out)
+
+
+def gated(line):
+    """px106: a step that starts with `^{TEXT}` waits until TEXT has been
+    shown once more than the gated steps before it that name TEXT.
+    Returns (TEXT or None, the step's text)."""
+    if line.startswith("^{") and "}" in line:
+        end = line.index("}")
+        return line[2:end], line[end + 1:]
+    return None, line
 
 
 def timed(line):
@@ -264,10 +278,25 @@ def main(argv):
 
     ok = True
     want = 0
+    gates = {}
     for k, line in enumerate(steps, 1):
         late, line = timed(line)
+        gate, line = gated(line)
         if late:
             pump(PAUSE)
+        elif gate is not None:
+            gates[gate] = gates.get(gate, 0) + 1
+            gb = gate.encode()
+            end = time.time() + WAIT
+            while buf.count(gb) < gates[gate]:
+                if not alive or time.time() > end:
+                    sys.stderr.write("linux-tty: %r %d did not come for step %d\n" % (gate, gates[gate], k))
+                    ok = False
+                    break
+                pump(0.05)
+            if not ok:
+                break
+            pump(0.2)
         else:
             want += 1
             end = time.time() + WAIT
