@@ -6,13 +6,18 @@
 //! reach the hash only through the three functions below, so a change of
 //! wolf-std's surface is a change of this file.
 //!
-//! **The cost** (R-px106-5): N = 2^PW_N_LOG2, r = PW_R, p = PW_P, chosen
-//! by the timing row of notes/px106-passwords.md on PAX under KVM, aimed
-//! at 0.5-1 s on the class of CPU the 860's machine has and at PAX's
-//! memory. A stored string keeps its own cost: verifying reads N, r and p
-//! from it, and refuses one whose memory (128·r·N) is over PW_CAP
-//! (`over_cap`: a string from elsewhere, such as `mkpasswd -m scrypt`'s
-//! default of 64 MiB, is checked when it fits).
+//! **The cost** (R-px106-5): N = 2^17, r = 8, p = 1, 128 MiB a hash,
+//! chosen by tests/mpx5-sudo's P7 on PAX under KVM, aimed at 0.5-1 s on
+//! the class of CPU the 860's machine has: 620-740 ms on a laptop i7 of
+//! that era (2^16 took 370-380 ms, 2^14 90-100 ms; the table is in
+//! notes/px106-passwords.md). Memory over time: N grows before p, so a
+//! guess costs the memory as well as the time; the test machines that
+//! hash a password have 512 MiB or more (tests/mpx5-sudo's typed sessions;
+//! the installer's and the upgrade's 2-4 GiB). A stored string
+//! keeps its own cost: verifying reads N, r and p from it, and refuses one
+//! whose memory (128·r·N) is over PW_CAP (`over_cap`: no check dearer than
+//! PAX's own; a string from elsewhere, such as `mkpasswd -m scrypt`'s
+//! default of 64 MiB, is checked).
 //!
 //! **The salt** is 16 bytes of the operating system's random source
 //! (`os_random`: getrandom(2) on Linux and on PAX), never a fixed salt:
@@ -26,10 +31,10 @@
 
 use std.x.crypto.passwd
 
-const PW_N_LOG2: int = 14
+const PW_N_LOG2: int = 17
 const PW_R: int = 8
 const PW_P: int = 1
-/// The most memory one check may take: 128 MiB.
+/// The most memory one check may take: 128 MiB, the shipped cost's.
 const PW_CAP: int = 134217728
 
 fn pw_random16() -> List[byte] {
