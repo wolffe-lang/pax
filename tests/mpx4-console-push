@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# tests/mpx4-console-push — den pushes to a GitHub-shaped remote from PAX's
+# console, over https and over ssh through burrow (px104).
+#
+#   tests/mpx4-console-push [--images DIR | --no-boot] [--ways LIST]
+#                           [--firmware bios|uefi|both] [--tier native|release|both]
+#                           [--accel auto|kvm|tcg]
+#
+# The kernel is kmain_console, the one every shipped image boots, with
+# `quiet` as they boot it, on QEMU's igb and its user network. The image is
+# a typed console: pelt as /bin/sh (PID 1's run list: `/bin/env HOME=/root
+# ENV=/etc/shrc /bin/sh -i -m`), den as the images install it
+# (tools/install-den, user/den.pin), burrow as /bin/ssh and
+# /bin/burrow-keygen (tools/install-burrow, user/burrow.pin),
+# /etc/ssl/certs/ca-roots.der (tools/mkroots, user/ca-roots.pin),
+# /etc/ssh/ssh_known_hosts, /etc/nsswitch.conf and /etc/shrc's exports (the
+# shipped files' bytes, from user/), boreutils' cat env mkdir chmod cp rm ls,
+# user/net's dgramopts and gai, /etc/hosts naming hosts.test, and an
+# /etc/fstab that mounts the carrier disk (label px104-live) read-only at
+# /run/live, or nothing without it. A piece the tree cannot build is named
+# at P0 and left out, so the rows that need it fail by name.
+#
+# The ways (tests/mpx4-console-push.d/push.py's header has every row):
+#   names  N1 the resolver's datagram calls (dgramopts) byte-identical to
+#          Linux; N2 getaddrinfo through a DNS fixture of the suite's own
+#          (tools/dns-fixture) and /etc/hosts
+#   https  den against den's own smart-HTTP fixture posing as github.com:
+#          H8 the wrong root refused by name; H1-H7 clone, commit, push,
+#          the console's witness and this host's ls-remote, the deletion,
+#          the empty answer, held to git's answers for the same steps
+#   ssh    the same through burrow against OpenSSH's sshd posing as
+#          github.com: S0 git's own command from a console shell, S8 the
+#          pinned GitHub key refusing the fixture's (`host_key_changed`), S9
+#          burrow-keygen, S1-S7
+#   live   (asked by name only) the same steps against the GitHub fixture
+#          the environment names (PAX_LIVE_NAME_FILE, PAX_LIVE_TOKEN_FILE,
+#          PAX_LIVE_KEY_FILE): SKIPPED by name without them, and refused
+#          unless the same run's https and ssh ways, their canaries
+#          included, passed on that tier and firmware first
+# Every way: K1 the canary (the scrub of the transcript, proven on fake
+# secrets, or the real ones), K2 the carrier removed, K3 the scan of
+# everything the boot wrote, 0 files in every class; C1 the session.
+#
+# Hermetic ways need root for the DNS fixture's port 53 (as root, or with
+# `sudo -n`), and mke2fs, ssh-keygen, git, /usr/bin/openssl and (ssh)
+# /usr/sbin/sshd: SKIPPED LOUDLY without them unless
+# PAX_REQUIRE_PUSH_FIXTURES=1, when it is a failure. The UEFI leg needs
+# OVMF (PAX_REQUIRE_UEFI=1: a failure without it). Exit 0 when every row
+# held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 accel=auto
+ways="names https ssh"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --ways)     ways=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "usage: tests/mpx4-console-push [--images DIR | --no-boot] [--ways LIST] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+    esac
+done
+ways=${ways//,/ }
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+for w in $ways; do case $w in names|https|ssh|live) ;; *) die "unknown way $w" ;; esac; done
+
+BORE="cat env mkdir chmod cp rm ls"
+work=$PAX_BUILD/mpx4-console-push
+fail=0
+need python3 readelf
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" git
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc/ssl/certs" "$r/etc/ssh" "$r/usr/share/zoneinfo" "$work/linux"
+    why= missing=
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" 2>&1 || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkden" "$work/den" > "$work/den.txt" 2>&1 || why+=" tools/mkden;"
+    # shellcheck disable=SC2086 # the utilities' names, one word each
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" 2>&1 || why+=" tools/mkboreutils;"
+    "$PAX_ROOT/tools/mknet" "$work/net" > "$work/net.txt" 2>&1 || why+=" tools/mknet;"
+    cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null && cp "$work/pelt/pelt" "$r/bin/sh" || why+=" no pelt;"
+    "$PAX_ROOT/tools/install-den" "$work/den" "$r" > "$work/install-den.txt" 2>&1 || why+=" tools/install-den;"
+    for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    for p in dgramopts gai; do
+        if cp "$work/net/$p" "$r/bin/$p" 2>/dev/null; then cp "$work/net/$p" "$work/linux/$p"; else missing+=" user/net/$p (tools/mknet)"; fi
+    done
+    # burrow, the root set and the shipped files: each named when the tree
+    # has none, and left out.
+    if [ -x "$PAX_ROOT/tools/mkburrow" ] && [ -x "$PAX_ROOT/tools/install-burrow" ]; then
+        "$PAX_ROOT/tools/mkburrow" "$work/burrow" > "$work/burrow.txt" 2>&1 \
+            && "$PAX_ROOT/tools/install-burrow" "$work/burrow" "$r" >> "$work/burrow.txt" 2>&1 || why+=" tools/mkburrow;"
+    else
+        missing+=" /bin/ssh and /bin/burrow-keygen (no tools/mkburrow, tools/install-burrow)"
+    fi
+    if [ -x "$PAX_ROOT/tools/mkroots" ]; then
+        "$PAX_ROOT/tools/mkroots" "$work/roots" > "$work/roots.txt" 2>&1 \
+            && cp "$work/roots/ca-roots.der" "$r/etc/ssl/certs/ca-roots.der" || why+=" tools/mkroots;"
+    else
+        missing+=" /etc/ssl/certs/ca-roots.der (no tools/mkroots)"
+    fi
+    for f in ssh_known_hosts:etc/ssh/ssh_known_hosts nsswitch.conf:etc/nsswitch.conf; do
+        if [ -f "$PAX_ROOT/user/${f%%:*}" ]; then cp "$PAX_ROOT/user/${f%%:*}" "$r/${f#*:}"; else missing+=" /${f#*:} (no user/${f%%:*})"; fi
+    done
+    # /etc/shrc: the shipped file's exports (its lope hook needs lope, which
+    # this image does not carry), read from user/shrc, never copied by hand.
+    command grep -E '^export ' "$PAX_ROOT/user/shrc" > "$r/etc/shrc" || true
+    "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" 2>&1 || why+=" tools/mkzone;"
+    cp "$r/etc/localtime" "$r/usr/share/zoneinfo/UTC" 2>/dev/null || why+=" no zone;"
+    printf '127.0.0.1 localhost\n10.0.2.2 hosts.test\n' > "$r/etc/hosts"
+    printf 'LABEL=px104-live /run/live ext2 ro,nofail 0 0\n' > "$r/etc/fstab"
+    printf '/bin/env HOME=/root ENV=/etc/shrc /bin/sh -i -m\n' > "$r/etc/pax-run"
+    printf 'static 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.2\n' > "$work/hermetic.pax-net"
+    cp "$PAX_ROOT/user/pax-net" "$work/live.pax-net"
+    # den's tree at the image's pin, for its smart-HTTP fixture (loaded from
+    # there, never copied).
+    (
+        . "$PAX_ROOT/user/den.pin"
+        mkdir -p "$work/den-src" && git -C "$work/den-src" init -q \
+            && "$PAX_ROOT/tools/fetch-retry" "$work/den-src" "$DEN_REPO" "$DEN_REV" "$DEN_REV" \
+            && git -C "$work/den-src" checkout -q --detach FETCH_HEAD \
+            && [ "$(git -C "$work/den-src" rev-parse HEAD)" = "$DEN_REV" ]
+    ) > "$work/den-src.txt" 2>&1 || why+=" den's tree at user/den.pin;"
+    [ -f "$work/den-src/tools/http-git-test.py" ] || missing+=" den's smart-HTTP fixture (tools/http-git-test.py at user/den.pin)"
+    # The archive's arguments, one a line.
+    : > "$work/files.txt"
+    printf '%s\n' /tmp/:1777 /root/:700 /run/:755 /run/live/:755 >> "$work/files.txt"
+    (cd "$r" && find . -mindepth 1 \( -type f -o -type l \) | sort) | while IFS= read -r f; do
+        f=${f#./}
+        if [ -L "$r/$f" ]; then
+            printf '/%s->%s\n' "$f" "$(readlink "$r/$f")"
+        else
+            m=644; [ -x "$r/$f" ] && m=755
+            printf '/%s=%s:%s\n' "$f" "$r/$f" "$m"
+        fi
+    done >> "$work/files.txt"
+    for f in "$r"/bin/*; do
+        [ -L "$f" ] && { say "  program: ${f#"$r"/} -> $(readlink "$f")"; continue; }
+        case $(head -c 2 "$f") in '#!') say "  script: ${f#"$r"/} $(sha256_of "$f")"; continue ;; esac
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    for f in etc/ssl/certs/ca-roots.der etc/ssh/ssh_known_hosts etc/nsswitch.conf etc/shrc; do
+        [ -f "$r/$f" ] && say "  file: /$f $(sha256_of "$r/$f") $(wc -c < "$r/$f" | tr -d ' ') bytes"
+    done
+    git -C "$PAX_ROOT" rev-parse HEAD > "$work/tree.commit" 2>/dev/null || true
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            [ "$elf" = "$work/$tier/kmain_console.elf" ] || cp "$elf" "$work/$tier/kmain_console.elf"
+            say "built $tier kmain_console: elf $(sha256_of "$elf"), $(wc -c < "$elf" | tr -d ' ') bytes"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    printf '%s\n' "${missing# }" > "$work/missing.txt"
+    if [ -n "$missing" ]; then
+        say "P0 the tree builds no$missing: left out of the image; the rows that need them fail by name"
+    fi
+    if [ -n "$why" ]; then
+        say "FAIL P0 build:$why"
+        exit 1
+    fi
+    say "P0 PASS build: kmain_console, the console's programs static, the image's tree (build/mpx4-console-push/files.txt)"
+    images=$work
+fi
+[ "$noboot" = 1 ] && exit 0
+
+out=$PAX_BUILD/mpx4-console-push-runs
+mkdir -p "$out"
+skipped=0 ran=0
+for tier in $tiers; do
+    elf=$images/$tier/kmain_console.elf
+    [ -f "$elf" ] || { say "FAIL P1 $tier: no $elf"; fail=1; continue; }
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf 2>/dev/null)" ]; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then say "FAIL $tier uefi: no OVMF"; fail=1; else say "SKIPPED LOUDLY $tier uefi: no OVMF"; fi
+            continue
+        fi
+        hok=0 sok=0
+        for way in $ways; do
+            green=0; [ "$hok$sok" = 11 ] && green=1
+            [ "$way" != live ] || [ "$green" = 1 ] || { say "FAIL L0 $tier $leg live: this run's https and ssh ways (their canaries) did not both pass first"; fail=1; continue; }
+            say "boot: $tier $leg $way"
+            rc=0
+            PAX_PUSH_CANARY_GREEN=$green python3 -I "$here/mpx4-console-push.d/push.py" --way "$way" --images "$images" --elf "$elf" \
+                --tier "$tier" --leg "$leg" --accel "$accel" --out "$out/$tier-$leg-$way" || rc=$?
+            case $rc in
+                0) ran=$((ran + 1)); case $way in https) hok=1 ;; ssh) sok=1 ;; esac ;;
+                3)
+                    if [ "$way" = live ]; then
+                        say "SKIP $tier $leg live: no fixture named in the environment"
+                    elif [ "${PAX_REQUIRE_PUSH_FIXTURES:-0}" = 1 ]; then
+                        say "FAIL $tier $leg $way: skipped, and PAX_REQUIRE_PUSH_FIXTURES=1"; fail=1
+                    else
+                        say "SKIPPED LOUDLY $tier $leg $way"; skipped=$((skipped + 1))
+                    fi ;;
+                *) fail=1; ran=$((ran + 1)) ;;
+            esac
+        done
+    done
+done
+say "mpx4-console-push: $ran boots, $skipped skipped"
+exit $fail
