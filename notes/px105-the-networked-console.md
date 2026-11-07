@@ -180,3 +180,16 @@ None filed or closed by this lane. For the orchestrator to consider:
 - [x] The gauntlet green at the final head, every END line in the PR body (after the rebase onto the named trunk).
 - [x] The plant red by name in its own record (the PR body).
 - [x] The audit, once (the hand-back).
+
+## 6. After the merge: F11's frames point on the release tier
+
+Trunk's first `tier all` run at `7e65c2ce` (42389754709) went red on a leg the gates above never ran:
+`FAIL N0 release: injection points that are not one symbol in …/kmain_console.elf: frames.start(0) frames.start(0)`,
+then `FAIL F11 release`. `tests/mpx6-nmi` injects an NMI and a machine check at a breakpoint on named functions, and
+N0 asks each to be one symbol in the tier's kernel. `frames.start` is `init` and its panics; once kmain_console
+started the network, the release tier inlined that wrapper into kmain (`nm`: no `_Wframes.start`, one
+`_Wframes.init`, called once from kmain). The point moves to `frames.init`, the walk itself, as pax#252 moved the
+scan's point from `pci.scan` to `pci.scan_bus`: the same moment in the boot, a function both tiers still call. wolf
+has no attribute that keeps a function out of line, so a point is chosen, not forced; N0 names any point a later
+build inlines. The red is trunk's own (that run, and the same `exit=2` here at `7e65c2ce`); the green is
+`mpx6-firmware` on both tiers and both firmwares.
