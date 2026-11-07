@@ -282,6 +282,13 @@ fn pm_since(a: u64, b: u64) -> u64 {
 /// PM ticks as nanoseconds (3.579545 MHz).
 fn pm_ns(ticks: u64) -> u64 { ticks * 1000000000 / 3579545 }
 
+/// The HPET's low word alone (px107): one 4-byte read, which nothing can
+/// tear, for the check's brackets, so a bracket stays one device read wide
+/// (raw()'s §2.4.7 read is three). The check's window is at most 2 s
+/// (LONGEST_NS; a longer one is measured again), under 2^32 ticks at any
+/// period try_hpet accepts, so the low words' difference is its count.
+fn hpet_low() -> u64 { (read32(unsafe { address } + 0xf0) + unsafe { test_add }) & 0xffffffff }
+
 /// One end of the measured interval: a PM read, the HPET's main counter,
 /// a PM read, taken again until the two PM reads lie at most BRACKET
 /// ticks apart (the HPET's reading then lies between them). `at` is the
@@ -291,7 +298,7 @@ fn bracket(at: u64) -> (bool, u64, u64, u64) {
     while n < BRACKET_TRIES {
         let p = pm()
         let stalled = stall(at)
-        let h = raw()
+        let h = hpet_low()
         let q = pm()
         if pm_since(p, q) <= BRACKET { return (true, p, h, q) }
         unsafe { check_retaken += 1 }
@@ -317,8 +324,7 @@ fn measure() -> u64 {
     if pm_since(p0, b) < WINDOW { return 2 }
     let (ok1, p1, h1, q1) = bracket(2)
     if !ok1 { return 2 }
-    let m = unsafe { mask }
-    let ticks = if h1 >= h0 { h1 - h0 } else { (m - h0) + h1 + 1 }
+    let ticks = (h1 + 0x100000000 - h0) & 0xffffffff // the low words (hpet_low)
     let fs = unsafe { period }
     let hns = (ticks / 1000000) * fs + (ticks % 1000000) * fs / 1000000
     // The PM interval the HPET's two readings lie within: from the opening
