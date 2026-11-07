@@ -113,7 +113,11 @@
 //!   are `recvfrom` and `sendto` with no address. A receive that must
 //!   wait parks the thread as a pipe's read does, until a datagram or
 //!   the socket's receive timeout. `sendmsg` (46), `recvmsg` (47) and
-//!   `shutdown` (48) are not here.
+//!   `shutdown` (48) are not here. px104, what a C library's resolver
+//!   asks (den and burrow find a host through it): `sendmmsg` (307) on
+//!   an AF_INET datagram socket, `setsockopt`/`getsockopt` of SOL_IP's
+//!   IP_RECVERR, `ioctl` FIONREAD on a datagram socket, and a receive
+//!   with MSG_ERRQUEUE (-EAGAIN: no ICMP error is queued).
 //! - threads, futexes and signals (px26, what pelt `b32bebc` and a
 //!   static glibc with pthreads make, `notes/px26/`): `clone`/`clone3`
 //!   with CLONE_THREAD (kernel/process); `exit` (60) ends the calling
@@ -952,6 +956,8 @@ const SYS_GETPEERNAME: u64 = 52
 const SYS_SETSOCKOPT: u64 = 54
 const SYS_GETSOCKOPT: u64 = 55
 const SYS_ACCEPT4: u64 = 288
+const SYS_SENDMMSG: u64 = 307 // px104: a C library resolver's questions
+const FIONREAD: u64 = 0x541b // px104: on a datagram socket (udp(7))
 // px26: threads, futexes and signals.
 const SYS_RT_SIGRETURN: u64 = 15
 const SYS_SCHED_YIELD: u64 = 24
@@ -2052,7 +2058,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     let pml4 = paging.live()
     // The calls whose first argument is an int (a descriptor), read as
     // one; the others take r0 whole.
-    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDFILE || nr == SYS_SPLICE || nr == SYS_COPY_FILE_RANGE || nr == SYS_SENDTO || nr == SYS_RECVFROM || nr == SYS_SOCKET || nr == SYS_CONNECT || nr == SYS_ACCEPT || nr == SYS_BIND || nr == SYS_LISTEN || nr == SYS_GETSOCKNAME || nr == SYS_GETPEERNAME || nr == SYS_SETSOCKOPT || nr == SYS_GETSOCKOPT || nr == SYS_ACCEPT4 || nr == SYS_WRITEV || nr == SYS_EPOLL_WAIT || nr == SYS_EPOLL_CTL || nr == SYS_EPOLL_CREATE1 { int32(r0) } else { r0 }
+    let a0 = if nr == SYS_READ || nr == SYS_WRITE || nr == SYS_PREAD64 || nr == SYS_OPENAT || nr == SYS_CLOSE || nr == SYS_LSEEK || nr == SYS_FSTAT || nr == SYS_NEWFSTATAT || nr == SYS_STATX || nr == SYS_GETDENTS64 || nr == SYS_IOCTL || nr == SYS_READLINKAT || nr == SYS_DUP || nr == SYS_DUP2 || nr == SYS_DUP3 || nr == SYS_FCNTL || nr == SYS_FCHDIR || nr == SYS_SENDFILE || nr == SYS_SPLICE || nr == SYS_COPY_FILE_RANGE || nr == SYS_SENDTO || nr == SYS_RECVFROM || nr == SYS_SOCKET || nr == SYS_CONNECT || nr == SYS_ACCEPT || nr == SYS_BIND || nr == SYS_LISTEN || nr == SYS_GETSOCKNAME || nr == SYS_GETPEERNAME || nr == SYS_SETSOCKOPT || nr == SYS_GETSOCKOPT || nr == SYS_ACCEPT4 || nr == SYS_SENDMMSG || nr == SYS_WRITEV || nr == SYS_EPOLL_WAIT || nr == SYS_EPOLL_CTL || nr == SYS_EPOLL_CREATE1 { int32(r0) } else { r0 }
     if nr == SYS_WRITE {
         return write(a0, a1, a2)
     }
@@ -2113,6 +2119,9 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         if speaker.request(req) && files.is_console(a, a0) && !cred.privileged(a) && !console.controlling() {
             return NEG_EPERM
         }
+        if req == FIONREAD && socket.is_datagram(a, a0) {
+            return socket.fionread(a, pml4, a0, a2) // px104
+        }
         let r = files.ioctl(a, pml4, a0, req, a2)
         if r == 0 && speaker.request(req) {
             speaker.own(sched.self_pid()) // px18: the tone stops when this process ends
@@ -2145,6 +2154,11 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
             return socket.sendto(a, pml4, a0, a1, a2, int32(a3), a4, int32(a5)) // px22
         }
         return files.sendto(a, pml4, a0, a1, a2, int32(a3), a4)
+    }
+    if nr == SYS_SENDMMSG {
+        // px104: AF_INET datagram sockets (kernel/socket's sendmmsg); any
+        // other descriptor its -EBADF, -ENOTSOCK or refusal.
+        return socket.sendmmsg(a, pml4, a0, a1, int32(a2), int32(a3))
     }
     if nr == SYS_RECVFROM {
         if socket.is_inet(a, a0) {
