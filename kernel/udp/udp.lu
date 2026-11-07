@@ -184,6 +184,7 @@ const S_RD: u64 = 8 // bytes taken from the ring since it was made
 const S_WR: u64 = 9 // bytes put
 const S_COUNT: u64 = 10 // datagrams waiting
 const S_TIMEVAL: u64 = 11 // two words: the timeout as it was set
+const S_RECVERR: u64 = 13 // px104: IP_RECVERR as set (ip(7)), 0 or 1
 const S_FRAMES: u64 = 16 // sixteen: the ring's frames (physical)
 
 /// `recv`'s answer when nothing is queued.
@@ -556,6 +557,31 @@ pub fn timeval(s: u64) -> (u64, u64) {
     (sw(s, S_TIMEVAL), sw(s, S_TIMEVAL + 1))
 }
 
+/// px104: socket `s`'s IP_RECVERR (ip(7)) as set: kept and read back,
+/// and nothing else changes with it, since PAX queues no ICMP error for a
+/// socket (its error queue is always empty).
+pub fn set_recverr(s: u64, on: bool) {
+    put_sw(s, S_RECVERR, if on { 1 } else { 0 })
+}
+
+pub fn recverr(s: u64) -> u64 {
+    sw(s, S_RECVERR)
+}
+
+/// px104: the length of the oldest datagram on socket `s`'s queue, 0
+/// when none waits (FIONREAD on a datagram socket, udp(7)).
+pub fn next_len(s: u64) -> u64 {
+    let saved = sync.acquire(sync.udp())
+    var n: u64 = 0
+    if sw(s, S_COUNT) != 0 {
+        let (h, _room) = ring_at(s, sw(s, S_RD))
+        // # Safety: the head `push` wrote, in a ring frame this socket owns.
+        n = unsafe { (h as *u64).read_volatile() } & 0xffff
+    }
+    sync.release(sync.udp(), saved)
+    n
+}
+
 // --- the queue ---------------------------------------------------------------------
 
 /// The kernel address of byte `at` (a count since the socket was made)
@@ -732,12 +758,22 @@ fn frame() -> u64 {
 /// be had). A destination of 0.0.0.0 is 127.0.0.1.
 pub fn send(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, dport: u64) -> u64 {
     let saved = sync.acquire(sync.udp())
-    let r = send_locked(s, pml4, buf, len, named, daddr, dport)
+    let r = send_locked(s, pml4, buf, len, 0, named, daddr, dport)
     sync.release(sync.udp(), saved)
     r
 }
 
-fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, dport: u64) -> u64 {
+/// px104: `send` of one datagram gathered from `parts` user iovecs (an
+/// array at `iov` of {base, len} pairs, `len` bytes in all, the caller's
+/// sum): sendmmsg's messages (kernel/socket).
+pub fn send_vec(s: u64, pml4: u64, iov: u64, parts: u64, len: u64, named: bool, daddr: u64, dport: u64) -> u64 {
+    let saved = sync.acquire(sync.udp())
+    let r = send_locked(s, pml4, iov, len, parts, named, daddr, dport)
+    sync.release(sync.udp(), saved)
+    r
+}
+
+fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, parts: u64, named: bool, daddr: u64, dport: u64) -> u64 {
     var dst = daddr
     var port = dport
     if !named {
@@ -772,8 +808,23 @@ fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, named: bool, daddr: u64, d
         }
         put_sw(s, S_LPORT, p)
     }
-    if !uaccess.copy_in(pml4, f + 8, buf, len) {
-        return EFAULT
+    if parts == 0 {
+        if !uaccess.copy_in(pml4, f + 8, buf, len) {
+            return EFAULT
+        }
+    } else {
+        // px104: the iovecs in order, each part's bytes after the last's.
+        var at: u64 = 0
+        var i: u64 = 0
+        while i < parts {
+            let base = uaccess.get64(pml4, buf + i * 16)
+            let n = uaccess.get64(pml4, buf + i * 16 + 8)
+            if n > 0 && !uaccess.copy_in(pml4, f + 8 + at, base, n) {
+                return EFAULT
+            }
+            at += n
+            i += 1
+        }
     }
     let sport = sw(s, S_LPORT)
     // What loops back keeps the address the socket holds; what leaves
