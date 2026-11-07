@@ -15,25 +15,28 @@ way (the caller counts the lines), 2 on a malformed session.
 
 The session has two places, each opened by its marker line: `den-place-tmp`
 (the in-memory /tmp, the wrappers typed at the console) and `den-place-home`
-(the ext2 disk, the wrappers the image installs, named by /etc/shrc). The
+(the ext2 disk, the wrappers the image installs on PATH as
+/bin/git-upload-pack and /bin/git-receive-pack, px104). The
 rows hold den's answers at its pin where they are fixed by Git's documented
 words and den's README (the push and fetch reports, `branch ... set up to
 track`, the fast-forward), the session's own ids (each commit's short id as
 `commit` printed it, carried through every later report), and den's named
-refusals (no service without the variables, `status` with an upstream, a
-fetch with no daemon). Nothing here is checked against den's source.
+refusals (`status` with an upstream, a fetch with no daemon), and (px104)
+the command den's ssh transport asks for from a console shell, git's own
+`git-receive-pack '<path>'`, read from a recording `ssh` first on PATH.
+Nothing here is checked against den's source.
 """
 import re
 import sys
 
 PLACES = ('tmp', 'home')
-ROWS = ['remote-shrc', 'remote-wrappers', 'remote-no-variable', 'remote-config', 'remote-status-limit'] + [
+ROWS = ['remote-shrc', 'remote-wrappers', 'remote-path', 'remote-ssh-command', 'remote-config', 'remote-status-limit'] + [
     'remote-%s-%s' % (r, p) for p in PLACES for r in (
         'clone-bare', 'add', 'push-u', 'push', 'clone', 'clone-push', 'fetch', 'pull', 'daemon-clone',
         'daemon-push', 'one-session', 'final-pull', 'refs', 'fsck')]
 WRAP = {'upload-pack': ['#!/bin/sh', 'exec /bin/den upload-pack "$1"'],
         'receive-pack': ['#!/bin/sh', 'exec /bin/den receive-pack "$1"']}
-LIBEXEC = '/usr/libexec/den'
+WRAPPERS = '/bin/git-upload-pack /bin/git-receive-pack'  # px104 (R-px104-5): den's PATH names
 
 
 def parse(lines):
@@ -230,25 +233,34 @@ def main():
     home = Place('home', parse(lines[h + 1:-1]), bad)
     d = '/tmp/den-%d' % uid
     port = 9418 if uid == 0 else 9428
-    # /etc/shrc names the installed pair; the pair typed at the console is
-    # the same bytes (the image installs exactly these two lines each).
+    # px104 (R-px104-5, amending R-px100-1): /etc/shrc names no service
+    # program; the image installs den's two wrappers under git's own names
+    # on PATH, the pair typed at the console the same bytes.
     out = head.raw('echo "upload=$DEN_UPLOAD_PACK receive=$DEN_RECEIVE_PACK"', 1, 'remote-shrc')
-    want = ['upload=%s/upload-pack receive=%s/receive-pack' % (LIBEXEC, LIBEXEC)]
-    if out is not None and out != want:
-        head.fail('remote-shrc', '/etc/shrc gave %r, not %r' % (out, want))
-    out = head.raw('cat %s/upload-pack %s/receive-pack' % (LIBEXEC, LIBEXEC), 1, 'remote-wrappers')
+    if out is not None and out != ['upload= receive=']:
+        head.fail('remote-shrc', '/etc/shrc gave %r, not two empty variables' % out)
+    out = head.raw('cat ' + WRAPPERS, 1, 'remote-wrappers')
     if out is not None and out != WRAP['upload-pack'] + WRAP['receive-pack']:
         head.fail('remote-wrappers', 'the installed wrappers read %r' % out)
-    inst = head.raw('sha256sum %s/upload-pack %s/receive-pack' % (LIBEXEC, LIBEXEC), 1, 'remote-wrappers')
+    inst = head.raw('sha256sum ' + WRAPPERS, 1, 'remote-wrappers')
     typed = head.raw('sha256sum $B/upload-pack $B/receive-pack', 1, 'remote-wrappers')
     if inst is not None and typed is not None:
         si = [l.split()[0] for l in inst if re.fullmatch(r'[0-9a-f]{64}  \S+', l)]
         st = [l.split()[0] for l in typed if re.fullmatch(r'[0-9a-f]{64}  \S+', l)]
         if len(si) != 2 or si != st:
             head.fail('remote-wrappers', 'the typed pair %r is not the installed pair %r' % (st, si))
-    b = tmp.s('den clone -q --bare file://$P/src none.git', 1, 'remote-no-variable')
-    if b is not None and (b.status, b.out, b.err) != (2, [], ['den: wire: io']):
-        tmp.fail('remote-no-variable', 'with no DEN_UPLOAD_PACK: %d %r %r (want 2 and den: wire: io: no git-upload-pack on PATH)' % (b.status, b.out, b.err))
+    # den's ssh transport from a console shell: a recording `ssh` first on
+    # PATH shows the command den asks the far side to run: git's own,
+    # `git-receive-pack '<path>'`, never a program of PAX's.
+    out = tmp.raw('(PATH=$B:$PATH; s den push ssh://git@example.invalid/r.git main)', 1, 'remote-ssh-command')
+    b = tmp.s('cat $O/ssh-argv', 1, 'remote-ssh-command')
+    if out is not None and b is not None:
+        if b.status != 0 or b.out[-4:] != ['--', 'git@example.invalid', 'git-receive-pack', "'/r.git'"] \
+                or any('libexec' in l for l in b.out):
+            tmp.fail('remote-ssh-command', 'den asked ssh to run %r (want -- git@example.invalid git-receive-pack \'/r.git\')' % b.out[-4:])
+    b = tmp.s('den clone -q --bare file://$P/src none.git', 1, 'remote-path')
+    if b is not None and (b.status, b.out, b.err) != (0, [], []):
+        tmp.fail('remote-path', 'with no DEN_UPLOAD_PACK: %d %r %r (want 0: git-upload-pack from PATH, den\'s wrapper)' % (b.status, b.out, b.err))
     b = tmp.s('cat .git/config', 1, 'remote-config')
     if b is not None:
         want = ['[remote "origin"]', '\turl = file://%s/r/hub.git' % d, '\tfetch = +refs/heads/*:refs/remotes/origin/*',
