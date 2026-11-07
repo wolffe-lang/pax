@@ -12,7 +12,11 @@
 //!
 //! `mkshadow --check` (S0's row, on the build host): a string made at the
 //! shipped cost is one PAX can check (user/auth's pw_refusal says ""), its
-//! own password matches it and another does not; `check ok`, else exit 1.
+//! own password matches it and another does not; the same string one step
+//! dearer (N doubled: its cost character the next one) is refused by name
+//! (`over_cap`) and matches nothing, so the cap is the shipped cost's and
+//! neither saturated (log2 N and N swapped in scrypt.memory) nor short of
+//! it; `check ok`, else exit 1.
 //!
 //! `mkshadow --time NLOG2 R P` (the cost row, px106 R-px106-5): makes a
 //! `$7$` string at N = 2^NLOG2, r = R, p = P three times and prints the
@@ -102,6 +106,23 @@ fn check() -> int {
         print("check FAIL: another password matches")
         return 1
     }
-    print("check ok: {h[0..14]}")
+    // h is `$7$` + N's log2 as one itoa64 character + ...: the next character is N doubled.
+    let abc = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    let at = abc.find(h[3..4]) else -1
+    if at < 0 || at + 1 >= abc.len {
+        print("check FAIL: the string's cost character is not itoa64: {h[0..14]}")
+        return 1
+    }
+    let dearer = h[0..3] + abc[at + 1..at + 2] + h[4..]
+    let why2 = pw_refusal(dearer)
+    if why2 != "over_cap" {
+        print("check FAIL: a string one step dearer than the shipped cost is not refused by the cap: '{why2}'")
+        return 1
+    }
+    if pw_matches("check-row", dearer) {
+        print("check FAIL: a string over the cap matches")
+        return 1
+    }
+    print("check ok: {h[0..14]} checked, {dearer[0..14]} over the cap")
     0
 }
