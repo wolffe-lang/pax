@@ -608,6 +608,10 @@ def main():
         print(f'PASS M3-summary: {SUMMARY!r}, the ext2 notice, one word asked; no token on the screen', flush=True)
         m.type('yes\n')
         t_confirm = time.monotonic()
+        # px106: the installer asks for root's and wolf's passwords after the word; n leaves both locked.
+        for who in ('root', 'wolf'):
+            m.wait(rf'Set a password for {who} now\? .*pax-install> *$', 'M4-install', 300, last=True, bad=STOPPED)
+            m.type('n\n')
         m.wait(r'^Installation complete', 'M4-install', 3600, bad=STOPPED)
         t_done = time.monotonic()
         m.wait(r'poweroff to power off', 'M4-install', 120)
@@ -658,11 +662,12 @@ def main():
     # with no boot entry of its own.
     m = Machine('boot2', qemu_args(d, vars_fd, None))
     try:
-        s = m.wait(r'^login: *$', 'M7-disk-boot', 900)
-        need(s, 'PAX: log in as root or as the user pax-install made.', 'M7-disk-boot')
+        s = m.wait(r'^\S+ login: *$', 'M7-disk-boot', 900)
         m.shot('disk-login')
         m.type('root\n')
-        m.wait(r'^.*[$#] *$', 'M7-disk-login', 120, last=True)
+        # px106: /bin/login; every account locked, so root comes in with no password and the console says so.
+        t = m.wait(r'^.*[$#] *$', 'M7-disk-login', 120, last=True)
+        need(m.unwrapped(t), 'PAX: no account here has a password, so root logs in without one; set one with passwd.', 'M7-disk-login')
         s = m.command('cat /root/px78-witness', 'M8-witness-read')
         need(s, nonce, 'M8-witness-read')
         s = m.command('ls /home', 'M8-witness-read')
