@@ -63,12 +63,16 @@
 #     P4 sudo -S, -n and su with no terminal, PAX's against Ubuntu's.
 #     P5 /etc/shadow after each session in the container: root's, pax's
 #        and bob's lines `$7$`, lobo's locked, the file passwd wrote 0600
-#        root's.
+#        root's, pax's line (passwd's) at the shipped cost; the sessions'
+#        own lines are made at TEST_COST (2^14), so their timing is the
+#        programs' and not an emulator's.
 #     P6 the end: init ended, `halt`, held halted.
 #     P7 the cost (R-px106-5): the `cost` image runs the hash at seven
 #        costs (tests/mpx5-sudo.d/mkshadow.lu --time, three times each) on
-#        PAX; the table is printed, and the shipped cost (user/auth/
-#        pwhash.lu's) must take no more than 3 s at its fastest.
+#        PAX; the table is printed, and under KVM the shipped cost
+#        (user/auth/pwhash.lu's) must take no more than 3 s at its fastest;
+#        under TCG the table is the emulator's and the row says NOT
+#        MEASURED (every cost must still hash).
 #
 # Two rows are not run yet and say SKIP by name, at column 0, with their
 # reason: a traced exec of a set-ID file, and a ptrace attach after a
@@ -119,6 +123,20 @@ work=$PAX_BUILD/mpx5-sudo
 runs=$PAX_BUILD/mpx5-sudo-runs.txt
 fail=0
 bad() { say "FAIL $*"; fail=1; }
+# px106: the typed sessions' shadow lines are made at this cost (mkshadow --cost); the shipped cost
+# is user/auth/pwhash.lu's, and ship_prefix prints its `$7$` prefix (crypt(5): N's log2 as one
+# character, then r and p as five each, little-endian, in the itoa64 alphabet).
+TEST_COST="14 8 1"
+ship_prefix() {
+    python3 -I - "$PAX_ROOT/user/auth/pwhash.lu" <<'PY'
+import re, sys
+t = open(sys.argv[1]).read()
+v = {k: int(re.search(r'^const PW_%s: int = (\d+)$' % k, t, re.M).group(1)) for k in ('N_LOG2', 'R', 'P')}
+a = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+enc = lambda x: ''.join(a[(x >> (6 * i)) & 63] for i in range(5))
+print('$7$' + a[v['N_LOG2']] + enc(v['R']) + enc(v['P']))
+PY
+}
 run_of() { case $1 in sid) echo "/bin/sid /t/sid" ;; sudo) echo "/bin/sid sudo" ;; esac; }
 init_of() { echo sid; }
 
@@ -191,7 +209,10 @@ auth_ct() {
     for s in pw login-first; do
         [ "$(cat "$o/out/pax/$s.shadow-mode")" = "600 root:root" ] || st+=" $s: passwd left /etc/shadow $(cat "$o/out/pax/$s.shadow-mode");"
     done
-    [ -z "$st" ] && say "PASS P5: after every session root's, pax's and bob's lines are \$7\$, lobo's locked, and the file passwd wrote 0600 root's" || bad "P5:$st"
+    # pax's line after the pw session is passwd's (pax changed it, then root set it): the shipped cost.
+    ship=$(ship_prefix)
+    grep -q "^pax:$ship" "$o/out/pax/pw.shadow" || st+=" pw: pax's line is not at the shipped cost ($ship): $(grep '^pax:' "$o/out/pax/pw.shadow" | cut -c1-20);"
+    [ -z "$st" ] && say "PASS P5: after every session root's, pax's and bob's lines are \$7\$, lobo's locked, the file passwd wrote 0600 root's, pax's line passwd's at the shipped cost ($ship)" || bad "P5:$st"
 }
 
 if [ -z "$images" ]; then
@@ -240,7 +261,10 @@ if [ -z "$images" ]; then
     # px106: the typed sessions' passwords (made now), keys and /etc/shadow; the image tree.
     pw=$work/pw
     python3 -I "$here/mpx5-sudo.d/session.py" make "$here/mpx5-sudo.d" "$pw" >&2 || why+=" session.py make;"
-    if [ -x "$work/bin/mkshadow" ]; then "$work/bin/mkshadow" < "$pw/shadow-in.txt" > "$pw/shadow.txt" || why+=" mkshadow;"
+    # The sessions' lines at N=2^14 (TEST_COST): a stored string keeps its own cost, and a session's
+    # timing must be the programs' and not CI's emulator's (login's 60 s holds five tries under TCG).
+    # What passwd writes in a session is at the shipped cost (P5 reads it); P7 measures that cost.
+    if [ -x "$work/bin/mkshadow" ]; then "$work/bin/mkshadow" --cost $TEST_COST < "$pw/shadow-in.txt" > "$pw/shadow.txt" || why+=" mkshadow;"
     else sed 's/ .*/:!:0:0:99999:7:::/' "$pw/shadow-in.txt" > "$pw/shadow.txt"; fi
     [ "$(grep -c ':\$7\$' "$pw/shadow.txt")" = 3 ] || why+=" mkshadow made no \$7\$ lines;"
     printf 'root:x:0:0:root:/root:/bin/pelt\npax:x:1000:1000::/home/pax:/bin/pelt\nlobo:x:990:990::/srv/lobo:/bin/false\nbob:x:1001:1001::/home/bob:/bin/pelt\n' > "$pw/passwd"
@@ -260,7 +284,9 @@ if [ -z "$images" ]; then
     for s in $TYPED; do
         prog=/bin/login; [ "$s" != pw ] || prog=/bin/pelt
         echo "$prog" > "$work/$s.run"
-        files=("/bin/pelt=$work/bin/pelt:755" "/bin/id=$work/bin/id:755" "/bin/cat=$work/bin/cat:755"
+        # /usr/bin/id as well: sudo finds a command on secure_path, where the container's id is
+        # /usr/bin/id (Ubuntu's /bin is a link to usr/bin), so the log's COMMAND= is the same on both.
+        files=("/bin/pelt=$work/bin/pelt:755" "/bin/id=$work/bin/id:755" "/usr/bin/id->/bin/id" "/bin/cat=$work/bin/cat:755"
             "/etc/passwd=$pw/passwd:644" "/etc/group=$pw/group:644" "/etc/login.defs=$pw/login.defs:644"
             "/etc/sudoers=$pw/sudoers:440" "/etc/sudoers.d/:755" "/var/:755" "/var/log/:755" "/root/:700"
             "/home/:755" "/home/pax/:750:1000:1000" "/home/bob/:750:1001:1001" "/srv/:755" "/srv/lobo/:750:990:990")
@@ -392,10 +418,17 @@ for leg in $legs; do
             best=$(serial_norm "$log" | grep -aE "^cost $ship ms " | awk '{ m = $6; for (i = 7; i <= NF; i++) if ($i < m) m = $i; print m }')
             say "  the cost on PAX ($id; N log2, r, p, then ms):"
             printf '%s\n' "$table" >&2
-            if [ -n "$best" ] && [ "$best" -le 3000 ] && [ "$hrc" = 0 ]; then
-                say "PASS P7 $id: the shipped cost ($ship) at its fastest $best ms; $(printf '%s' "$table" | wc -l | tr -d ' ') costs measured"
+            n=$(printf '%s\n' "$table" | grep -c 'cost ')
+            if grep -q 'accel kvm' "$log.verdict"; then
+                if [ -n "$best" ] && [ "$best" -le 3000 ] && [ "$n" = 7 ] && [ "$hrc" = 0 ]; then
+                    say "PASS P7 $id: the shipped cost ($ship) at its fastest $best ms under KVM; $n costs measured"
+                else
+                    bad "P7 $id: the shipped cost ($ship) $best ms under KVM, $n of 7 costs, halt $hrc"
+                fi
+            elif [ -n "$best" ] && [ "$n" = 7 ] && [ "$hrc" = 0 ]; then
+                say "PASS P7 $id: all 7 costs hashed on PAX; NOT MEASURED: this is TCG, the table is the emulator's (shipped cost $ship: $best ms)"
             else
-                bad "P7 $id: the shipped cost ($ship) $best ms, halt $hrc"
+                bad "P7 $id: the shipped cost ($ship) $best ms, $n of 7 costs, halt $hrc"
             fi
         else
             bad "P7 $id: no image"
