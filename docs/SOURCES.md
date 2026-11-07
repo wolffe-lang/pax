@@ -1996,3 +1996,43 @@ source; no kernel's, firmware's or driver's.
   and `tests/mpx4-dhcp`, `tests/mpx4-igb`, `tests/mpx5-den`, `tools/dhcp-wire`, `tools/pcap-dhcp`, `tools/mkden`.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no DHCP, HTTP or TLS
   implementation's source; no Git source.
+
+## px104 — push from the console (burrow as ssh, the root set, the resolver's calls)
+
+- **ip(7), udp(7), sendmmsg(2), socket(7)** (the Linux man-pages project's text, as published): IP_RECVERR's
+  int at SOL_IP and the error queue it names (`MSG_ERRQUEUE`), FIONREAD on a datagram socket (the next datagram's
+  length, 0 with none), and sendmmsg's vector (`struct mmsghdr`, its `msg_len`, `vlen` capped at UIO_MAXIOV, the
+  count sent, an error after the first message not reported). What a C library's resolver asks of them was read
+  black box, by strace of den and burrow on Linux and by strace's fault injection giving PAX's old answers
+  (`notes/px104/probes.txt`); no C library's source was read.
+- **hosts(5)** and **nsswitch.conf(5)**: /etc/hosts' lines, and the order the C library reads it and DNS in with no
+  nsswitch.conf (files first), measured black box (`notes/px104/probes.txt`); PAX ships no nsswitch.conf.
+- **RFC 1035** (sections 4.1 and 4.2.1: the message, the question, an A record), **RFC 2308** (NODATA: NOERROR with
+  no answer) and **RFC 4343** (names compare case-insensitively), for `tools/dns-fixture`.
+- **RFC 7468** (section 2: the PEM certificate's textual encoding), for `tools/mkroots`' decoder; OpenSSL's
+  `x509 -outform DER` as a black box to cross-check it.
+- **The root set**: curl's extract of Mozilla's root store, `https://curl.se/ca/cacert-2026-10-20.pem` (sha256
+  `796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe`, read twice, curl's published `.sha256` the
+  same; 118 certificates), the certificate data Mozilla publishes as NSS's certdata.txt under the **Mozilla Public
+  License 2.0**; curl's page `https://curl.se/docs/caextract.html` for its provenance and dates. PAX ships it,
+  converted, as `/etc/ssl/certs/ca-roots.der` (`user/roots.pin`).
+- **GitHub's published host key**: the `github.com ssh-ed25519` line and its SHA256 fingerprint, as GitHub's meta API
+  and its "GitHub's SSH key fingerprints" page publish them, taken from burrow's `ci/github-known-hosts` at
+  `0d98ce9`, whose `docs/SOURCES.md` records both documents by digest.
+- **burrow at `0d98ce9`** (the org's own): its README (the CLI, `~/.ssh/config`'s keys, the refusals by name, the
+  static build), `tools/build`, `tools/lib-toolchain.sh` (WOLF_BIN, LUPIN_BIN, WOLF_STD), `src/config` (the
+  known_hosts files it reads: `UserKnownHostsFile`, `~/.ssh/known_hosts` and `known_hosts2`, no /etc/ssh file),
+  and `notes/bw03-den-over-burrow.md` ("For the px lane").
+- **den at `ac2332bf`** (the org's own): `src/transport/ssh.lu` and `channel.lu` (the ssh argv; `ssh` from PATH, no
+  GIT_SSH or core.sshCommand; the service program from DEN_UPLOAD_PACK or DEN_RECEIVE_PACK, git-upload-pack and
+  git-receive-pack from PATH when unset), `src/http/auth.lu` (DEN_HTTP_TOKEN, the `Token:` prompt with no echo),
+  `src/http/tls.lu` (DEN_TLS_ROOTS), its README's smart-HTTP section and `tools/http-git-test.py`, whose `Server` the
+  https rows load from den's tree and run, never copy.
+- **OpenSSH's sshd, ssh and ssh-keygen** (Ubuntu 24.04's openssh-server and openssh-client) and **git**, as black
+  boxes: the ssh fixture's server, the fixture's and the carrier's keys, and git's answers for the same steps;
+  sshd(8)'s AUTHORIZED_KEYS FILE FORMAT (`command=`, SSH_ORIGINAL_COMMAND) and sshd_config(5) as documentation;
+  **mke2fs(8)** (`-d`, `-L`) for the carrier disk.
+- PAX's own `kernel/socket`, `kernel/udp`, `kernel/user`, `kernel/files`, `kernel/fstab`, `tools/mkden`,
+  `tools/install-den`, `tools/distribution-root`, `tests/mpx4-console-net`, `tests/mpx5-den`, `user/install/upgrade.lu`
+  (an edited file kept, the new one beside it as `.pax-new`).
+- No Linux source; no C library's, resolver's, ssh implementation's, TLS implementation's or Git's source.
