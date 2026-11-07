@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # tests/mpx5-sudo — px103, P5 lane U8's first half: set-ID execution
-# honoured as Linux honours it, and `sudo`.
+# honoured as Linux honours it, and `sudo`; px106, its second half:
+# passwords (/etc/shadow, passwd, login, su and sudo prompting, sudo's
+# timestamp, the delays and caps).
 #
 #   tests/mpx5-sudo [--images DIR | --no-boot | --only build] [--bin DIR]
+#                   [--auth DIR] [--pelt DIR] [--bore DIR]
 #                   [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # The claim, here and wherever this lane writes: enforced for honest
@@ -30,6 +33,39 @@
 #   Linux 7.2.4 booted under QEMU with the same program as init, so
 #   fs.suid_dumpable is the kernel's default 0), every line.
 #
+#   The typed sessions (px106): pw, login, login-max, login-first, each an
+#   image whose /etc/shadow holds passwords the suite makes at run time
+#   (root's, pax's and bob's; lobo locked; login-first has no shadow at
+#   all), typed at the console by tools/qemu-halt from
+#   tests/mpx5-sudo.d/*.keys with the passwords put in (their `^{TEXT}`
+#   steps wait for each prompt, so nothing is typed while the echo is on).
+#   pw is pelt as root: passwd -S, -l, -u and a change, su (wrong, right,
+#   locked), sudo with bob's password rule (wrong, right, the timestamp,
+#   -k, -v, -n, -K, three wrong), the log. login, login-max and
+#   login-first are /bin/login as pid 1, the installed system's shape: a
+#   locked, an unknown and a wrong account then a right one; five failures
+#   (then, as pid 1, a new login); the first-boot rule (root with no
+#   password while none is set, then passwd, then `exec /bin/login` asks
+#   it). The same keys run in the Ubuntu 24.04 container twice
+#   (notes/px106/auth-ct.sh): with PAX's su, sudo, passwd and login in
+#   place of Ubuntu's, and with Ubuntu's own.
+#     P1 the session on PAX is byte-identical to PAX's programs in the
+#        container (normalised by notes/px106/ttydiff.py: the log's time, a
+#        date, a hash, a shadow line's day, the terminal's name).
+#     P2 PAX's programs in the container and Ubuntu's own differ only by
+#        name (notes/px106/named.txt), each with its reason; login-first and
+#        login-max's second login, which have no Ubuntu side, are held to
+#        tests/mpx5-sudo.d/*.pax (PAX's own).
+#     P3 the delays (rate limiting): after each wrong password the next
+#        words come no sooner than sudo 1.9 s, su 2.9 s, login 2.9 s,
+#        passwd 1.4 s (the container's clock, PAX's programs); the caps:
+#        sudo's third, login's fifth.
+#     P4 sudo -S, -n and su with no terminal, PAX's against Ubuntu's.
+#     P5 /etc/shadow after each session in the container: root's, pax's
+#        and bob's lines `$7$`, lobo's locked, the file passwd wrote 0600
+#        root's.
+#     P6 the end: init ended, `halt`, held halted.
+#
 # Two rows are not run yet and say SKIP by name, at column 0, with their
 # reason: a traced exec of a set-ID file, and a ptrace attach after a
 # set-ID exec. The kernel's traced-exec hook is not done: the exec path
@@ -49,8 +85,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 only= bindir= sudodir=
-usage="usage: tests/mpx5-sudo [--images DIR | --no-boot | --only build] [--bin DIR] [--sudo DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+images= legs=both tiers=both noboot=0 only= bindir= sudodir= authdir= peltdir= boredir=
+usage="usage: tests/mpx5-sudo [--images DIR | --no-boot | --only build] [--bin DIR] [--sudo DIR] [--auth DIR] [--pelt DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -58,6 +94,9 @@ while [ $# -gt 0 ]; do
         --only)     only=$2; shift 2 ;;
         --bin)      bindir=$2; shift 2 ;;
         --sudo)     sudodir=$2; shift 2 ;;
+        --auth)     authdir=$2; shift 2 ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --bore)     boredir=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         *)          die "$usage" ;;
@@ -69,6 +108,7 @@ case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
 need readelf python3
 
 SESSIONS="sid sudo"
+TYPED="pw login login-max login-first"
 ref=$here/mpx5-sudo.d/linux
 work=$PAX_BUILD/mpx5-sudo
 runs=$PAX_BUILD/mpx5-sudo-runs.txt
@@ -80,6 +120,73 @@ init_of() { echo sid; }
 static_ok() {
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
     ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# L: PAX's sudo, built for Linux like the rest, run in a throwaway container
+# of Ubuntu 24.04 (notes/px103/Containerfile: the stock sudo package's image,
+# no network) through notes/px103/sudo-ct.sh in place of Ubuntu's own, and
+# every row of the run held to Ubuntu's recorded output (notes/px103/ubuntu.txt)
+# by notes/px103/ctdiff.py: the rows that differ do so by name, each with its
+# reason (notes/px103/ctnamed.txt), and no other row differs.
+linux_ct() {
+    local eng=${PAX_ENGINE:-} img=localhost/px103-sudo:1 b=${1:-$work/bin} o="$PAX_BUILD/mpx5-sudo-linux"
+    if [ -z "$eng" ]; then command -v docker >/dev/null 2>&1 && eng=docker || { command -v podman >/dev/null 2>&1 && eng=podman; }; fi
+    if [ -z "$eng" ]; then say "SKIP linux-ct reason=no container engine (docker or podman)"; return 0; fi
+    mkdir -p "$o"
+    "$eng" image inspect "$img" >/dev/null 2>&1 || "$eng" build -q -t "$img" -f "$PAX_ROOT/notes/px103/Containerfile" "$PAX_ROOT/notes/px103" >/dev/null || { bad "L1: cannot build $img"; return 0; }
+    if [ -f "$b/show" ]; then cp "$b/show" "$o/show"; else cc -static -O1 -o "$o/show" "$PAX_ROOT/notes/px103/show.c" || { bad "L1: cc show.c"; return 0; }; fi
+    cp "$b/sudo" "$o/sudo-pax"; cp "$PAX_ROOT/notes/px103/sudo-ct.sh" "$o/sudo-ct.sh"
+    "$eng" run --rm --network none --hostname pax -v "$o:/ct" "$img" bash /ct/sudo-ct.sh /ct/show /ct/sudo-pax > "$o/pax.txt" 2>&1
+    local res
+    res=$(python3 "$PAX_ROOT/notes/px103/ctdiff.py" "$PAX_ROOT/notes/px103/ubuntu.txt" "$o/pax.txt" --named "$PAX_ROOT/notes/px103/ctnamed.txt" 2>&1)
+    if [ $? = 0 ]; then say "PASS L1: $(printf '%s' "$res" | tail -n 1)"; else bad "L1: $(printf '%s' "$res" | head -n 12 | tr '\n' '|')"; fi
+}
+# A (px106): the typed password sessions in a throwaway Ubuntu 24.04 container
+# (notes/px106/Containerfile, no network) through notes/px106/auth-ct.sh,
+# twice: with PAX's su, sudo, passwd and login put in place of Ubuntu's, and
+# with Ubuntu's own. P2 holds the first to the second (notes/px106/ttydiff.py,
+# every difference named in notes/px106/named.txt), P3 reads the delays of
+# the first, P4 the rows with no terminal, P5 the shadow file each left. The
+# PAX boots' P1 holds each session to the first.
+auth_ct() {
+    local w=$1 eng=${PAX_ENGINE:-} img=localhost/px106-auth:1 o="$PAX_BUILD/mpx5-sudo-auth" res st
+    if [ -z "$eng" ]; then command -v docker >/dev/null 2>&1 && eng=docker || { command -v podman >/dev/null 2>&1 && eng=podman; }; fi
+    if [ -z "$eng" ]; then say "SKIP auth-ct reason=no container engine (docker or podman)"; return 0; fi
+    "$eng" image inspect "$img" >/dev/null 2>&1 || "$eng" build -q -t "$img" -f "$PAX_ROOT/notes/px106/Containerfile" "$PAX_ROOT/notes/px106" >/dev/null || { bad "P2: cannot build $img"; return 0; }
+    rm -rf "$o"; mkdir -p "$o/pax"
+    cp "$w/bin/pelt" "$o/pelt"; cp "$PAX_ROOT/tools/linux-tty" "$o/linux-tty"; cp "$PAX_ROOT/notes/px106/auth-ct.sh" "$o/auth-ct.sh"
+    cp "$w/pw/shadow.txt" "$w/pw/passwords.txt" "$w/pw/sudoers" "$o/"; cp "$w/pw/"*.keys "$o/"
+    for x in su sudo passwd login; do cp "$w/bin/$x" "$o/pax/$x"; done
+    for m in ubuntu pax; do
+        "$eng" run --rm --network none --hostname pax -v "$o:/ct" "$img" bash /ct/auth-ct.sh "$m" > "$o/$m.log" 2>&1
+        say "  auth-ct $m: exit $?; $(cat "$o/out/$m/"*.run 2>/dev/null | tr '\n' ' ')"
+    done
+    for s in pw login login-max login-time; do
+        res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$o/out/ubuntu/$s.tty" "$o/out/pax/$s.tty" --named "$PAX_ROOT/notes/px106/named.txt" "$s" 2>&1); st=$?
+        [ "$st" = 0 ] && say "PASS P2 $s: PAX's programs against Ubuntu's: $(printf '%s' "$res" | tail -n 1)" || bad "P2 $s: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
+    done
+    res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$here/mpx5-sudo.d/login-first.pax" "$o/out/pax/login-first.tty" 2>&1); st=$?
+    [ "$st" = 0 ] && say "PASS P2 login-first: PAX's programs against tests/mpx5-sudo.d/login-first.pax: $res" || bad "P2 login-first: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
+    res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$o/out/ubuntu/stdin.txt" "$o/out/pax/stdin.txt" --named "$PAX_ROOT/notes/px106/named.txt" stdin 2>&1); st=$?
+    [ "$st" = 0 ] && say "PASS P4: sudo -S, -n and su with no terminal: $(printf '%s' "$res" | tail -n 1)" || bad "P4: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
+    for m in pax ubuntu; do
+        for s in pw login login-max; do
+            res=$(python3 -I "$here/mpx5-sudo.d/session.py" delays "$here/mpx5-sudo.d/$s.keys" "$o/out/$m/$s.tty" "$o/out/$m/$s.times" \
+                'password for bob: =1.9,Password: =2.9,Current password: =1.4' 2>&1); st=$?
+            if [ "$m" = ubuntu ]; then say "  Ubuntu's delays, $s: $(printf '%s' "$res" | sed 's/^PASS //' | tr '\n' ';')"; continue; fi
+            [ "$st" = 0 ] && say "PASS P3 $s: $(printf '%s' "$res" | grep -c '^PASS') delays at their floors: $(printf '%s' "$res" | sed 's/^PASS step [0-9]* //' | tr '\n' ';')" || bad "P3 $s: $(printf '%s' "$res" | grep '^FAIL' | tr '\n' '|')"
+        done
+    done
+    st=
+    for s in pw login login-max; do
+        f=$o/out/pax/$s.shadow
+        [ "$(grep -c '^\(root\|pax\|bob\):\$7\$' "$f")" = 3 ] || st+=" $s: $(cut -d: -f1,2 "$f" | cut -c1-24 | tr '\n' ' ');"
+        grep -q '^lobo:!:' "$f" || st+=" $s: lobo is not locked;"
+    done
+    for s in pw login-first; do
+        [ "$(cat "$o/out/pax/$s.shadow-mode")" = "600 root:root" ] || st+=" $s: passwd left /etc/shadow $(cat "$o/out/pax/$s.shadow-mode");"
+    done
+    [ -z "$st" ] && say "PASS P5: after every session root's, pax's and bob's lines are \$7\$, lobo's locked, and the file passwd wrote 0600 root's" || bad "P5:$st"
 }
 
 if [ -z "$images" ]; then
@@ -102,14 +209,55 @@ if [ -z "$images" ]; then
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$work/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\npack:x:2000:pax\n' > "$work/group"
     printf 'Defaults secure_path="/bin:/usr/bin"\nroot ALL=(ALL:ALL) ALL\n#1000 ALL=(ALL:ALL) NOPASSWD: ALL\n#includedir /etc/sudoers.d\n' > "$work/sudoers"
+    # px106: su, sudo, passwd and login (tools/mkauth: user/auth beside each), and the test
+    # helper mkshadow; pelt and boreutils' id and cat for the typed sessions.
+    ad=$authdir
+    if [ -z "$ad" ]; then
+        ad=$work/authbin
+        : > "$work/auth.txt"
+        for x in su sudo passwd login mkshadow; do
+            "$PAX_ROOT/tools/mkauth" "$ad/$x.d" "$x" >> "$work/auth.txt" 2>&1 && cp "$ad/$x.d/$x" "$ad/$x" || why+=" tools/mkauth $x;"
+        done
+    fi
+    for x in su sudo passwd login mkshadow; do cp "$ad/$x" "$work/bin/$x" 2>/dev/null || why+=" no $ad/$x;"; done
     if [ -n "$sudodir" ]; then
         cp "$sudodir/sudo" "$work/bin/sudo" || why+=" no $sudodir/sudo;"
-    else
-        "$PAX_ROOT/tools/mksudo" "$work/sudobin" > "$work/sudo.txt" && cp "$work/sudobin/sudo" "$work/bin/sudo" || why+=" tools/mksudo;"
     fi
-    r=$(static_ok "$work/bin/sudo") || why+=" $r;"
+    if [ -n "$peltdir" ]; then cp "$peltdir/pelt" "$work/bin/pelt" || why+=" no $peltdir/pelt;"
+    else "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt" && cp "$work/peltbin/pelt" "$work/bin/pelt" || why+=" tools/mkpelt;"; fi
+    bd=$boredir
+    if [ -z "$bd" ]; then bd=$work/bore; "$PAX_ROOT/tools/mkboreutils" "$bd" id cat > "$work/bore.txt" || why+=" tools/mkboreutils;"; fi
+    for x in id cat; do cp "$bd/$x" "$work/bin/$x" || why+=" no $bd/$x;"; done
+    for x in sudo su passwd login pelt id cat; do [ ! -f "$work/bin/$x" ] || { r=$(static_ok "$work/bin/$x") || why+=" $r;"; }; done
     cc -static -O1 -o "$work/bin/show" "$PAX_ROOT/notes/px103/show.c" || why+=" cc show.c;"
-    say "  program: sudo $(sha256_of "$work/bin/sudo") $(wc -c < "$work/bin/sudo" | tr -d ' ') bytes"
+    for x in sudo su passwd login; do [ ! -f "$work/bin/$x" ] || say "  program: $x $(sha256_of "$work/bin/$x") $(wc -c < "$work/bin/$x" | tr -d ' ') bytes"; done
+    grep -q 'DEVELOPMENT BUILD' "$work/auth.txt" 2>/dev/null && say "  NOTE: a development build of the account programs (PAX_AUTH_STD): no record is taken from it"
+    # px106: the typed sessions' passwords (made now), keys and /etc/shadow; the image tree.
+    pw=$work/pw
+    python3 -I "$here/mpx5-sudo.d/session.py" make "$here/mpx5-sudo.d" "$pw" >&2 || why+=" session.py make;"
+    if [ -x "$work/bin/mkshadow" ]; then "$work/bin/mkshadow" < "$pw/shadow-in.txt" > "$pw/shadow.txt" || why+=" mkshadow;"
+    else sed 's/ .*/:!:0:0:99999:7:::/' "$pw/shadow-in.txt" > "$pw/shadow.txt"; fi
+    [ "$(grep -c ':\$7\$' "$pw/shadow.txt")" = 3 ] || why+=" mkshadow made no \$7\$ lines;"
+    printf 'root:x:0:0:root:/root:/bin/pelt\npax:x:1000:1000::/home/pax:/bin/pelt\nlobo:x:990:990::/srv/lobo:/bin/false\nbob:x:1001:1001::/home/bob:/bin/pelt\n' > "$pw/passwd"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nbob:x:1001:\npack:x:2000:pax\n' > "$pw/group"
+    printf 'ENV_SUPATH\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nENV_PATH\tPATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\n' > "$pw/login.defs"
+    cp "$here/mpx5-sudo.d/sudoers.pw" "$pw/sudoers"
+    for s in $TYPED; do
+        prog=/bin/login; [ "$s" != pw ] || prog=/bin/pelt
+        echo "$prog" > "$work/$s.run"
+        files=("/bin/pelt=$work/bin/pelt:755" "/bin/id=$work/bin/id:755" "/bin/cat=$work/bin/cat:755"
+            "/etc/passwd=$pw/passwd:644" "/etc/group=$pw/group:644" "/etc/login.defs=$pw/login.defs:644"
+            "/etc/sudoers=$pw/sudoers:440" "/etc/sudoers.d/:755" "/var/:755" "/var/log/:755" "/root/:700"
+            "/home/:755" "/home/pax/:750:1000:1000" "/home/bob/:750:1001:1001" "/srv/:755" "/srv/lobo/:750:990:990")
+        for x in su sudo passwd; do [ ! -f "$work/bin/$x" ] || files+=("/bin/$x=$work/bin/$x:4755"); done
+        [ ! -f "$work/bin/login" ] || files+=("/bin/login=$work/bin/login:755")
+        [ "$s" = login-first ] || files+=("/etc/shadow=$pw/shadow.txt:600")
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${files[@]}" "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
+            say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
     for s in $SESSIONS; do
         run_of "$s" > "$work/$s.run"
         if [ "$s" = sid ]; then
@@ -132,19 +280,20 @@ if [ -z "$images" ]; then
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for s in $SESSIONS; do
+            for s in $SESSIONS $TYPED; do
                 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                     --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/sudo-$s.iso" >/dev/null \
                     || why+=" $tier sudo-$s: mkimage;"
             done
-            say "built $tier: elf $(sha256_of "$elf"), $(echo $SESSIONS | wc -w | tr -d ' ') images"
+            say "built $tier: elf $(sha256_of "$elf"), $(echo $SESSIONS $TYPED | wc -w | tr -d ' ') images"
         else
             cat "$log" >&2
             why+=" $tier kmain_console: tools/build-kernel;"
         fi
     done
-    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), sid static, the recordings there, $(echo $SESSIONS | wc -w | tr -d ' ') images" || bad "S0:$why"
+    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), sid static, the recordings there, $(echo $SESSIONS $TYPED | wc -w | tr -d ' ') images" || bad "S0:$why"
     linux_ct "$work/bin"
+    auth_ct "$work"
     images=$work
     if [ "$only" = build ] || [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx5-sudo build (S0): PASS (no boot)" || say "mpx5-sudo build: FAIL"
@@ -152,25 +301,6 @@ if [ -z "$images" ]; then
     fi
 fi
 
-# L: PAX's sudo, built for Linux like the rest, run in a throwaway container
-# of Ubuntu 24.04 (notes/px103/Containerfile: the stock sudo package's image,
-# no network) through notes/px103/sudo-ct.sh in place of Ubuntu's own, and
-# every row of the run held to Ubuntu's recorded output (notes/px103/ubuntu.txt)
-# by notes/px103/ctdiff.py: the rows that differ do so by name, each with its
-# reason (notes/px103/ctnamed.txt), and no other row differs.
-linux_ct() {
-    local eng=${PAX_ENGINE:-} img=localhost/px103-sudo:1 b=${1:-$work/bin} o="$PAX_BUILD/mpx5-sudo-linux"
-    if [ -z "$eng" ]; then command -v docker >/dev/null 2>&1 && eng=docker || { command -v podman >/dev/null 2>&1 && eng=podman; }; fi
-    if [ -z "$eng" ]; then say "SKIP linux-ct reason=no container engine (docker or podman)"; return 0; fi
-    mkdir -p "$o"
-    "$eng" image inspect "$img" >/dev/null 2>&1 || "$eng" build -q -t "$img" -f "$PAX_ROOT/notes/px103/Containerfile" "$PAX_ROOT/notes/px103" >/dev/null || { bad "L1: cannot build $img"; return 0; }
-    if [ -f "$b/show" ]; then cp "$b/show" "$o/show"; else cc -static -O1 -o "$o/show" "$PAX_ROOT/notes/px103/show.c" || { bad "L1: cc show.c"; return 0; }; fi
-    cp "$b/sudo" "$o/sudo-pax"; cp "$PAX_ROOT/notes/px103/sudo-ct.sh" "$o/sudo-ct.sh"
-    "$eng" run --rm --network none --hostname pax -v "$o:/ct" "$img" bash /ct/sudo-ct.sh /ct/show /ct/sudo-pax > "$o/pax.txt" 2>&1
-    local res
-    res=$(python3 "$PAX_ROOT/notes/px103/ctdiff.py" "$PAX_ROOT/notes/px103/ubuntu.txt" "$o/pax.txt" --named "$PAX_ROOT/notes/px103/ctnamed.txt" 2>&1)
-    if [ $? = 0 ]; then say "PASS L1: $(printf '%s' "$res" | tail -n 1)"; else bad "L1: $(printf '%s' "$res" | head -n 12 | tr '\n' '|')"; fi
-}
 if [ "$only" = linux ]; then
     linux_ct "${images:-$work}/bin"
     [ "$fail" = 0 ] && say "mpx5-sudo linux: PASS" || say "mpx5-sudo linux: FAIL"
@@ -222,6 +352,49 @@ for leg in $legs; do
             [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             [ -z "$why" ] && say "PASS S5 $id: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
+        done
+        # px106: the typed password sessions, the keys with this run's passwords in them.
+        ax=$PAX_BUILD/mpx5-sudo-auth/out/pax
+        for s in $TYPED; do
+            id="$tier $leg $s"
+            log=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/sudo-$s.iso
+            keys=$images/pw/$s.keys
+            if [ "$s" = login-max ]; then cat "$images/pw/login-max.keys" "$images/pw/login-max.pax-keys" > "$images/pw/login-max.boot-keys"; keys=$images/pw/login-max.boot-keys; fi
+            rm -f "$log" "$log.verdict" "$log.typed"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ] || [ ! -f "$keys" ]; then
+                bad "P1 $id: no image or keys"
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 240 --qemu -m --qemu 512M \
+                --elf "$elf" --marker 'halt|PANIC .*' --type "$keys" --prompt '$ ' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            printf '%s kmain_console %s %s halt-status=%s serial=%s iso=%s\n' "$tier" "$leg" "$s" "$hrc" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            out=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            why=
+            cut=(); [ "$s" != login-max ] || cut=(--cut 'Maximum number of tries exceeded')
+            if [ -f "$ax/$s.tty" ]; then
+                res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" --mask-tty "${cut[@]}" "$ax/$s.tty" "$out" 2>&1) || why+=" the session differs from PAX's programs in the container: $(printf '%s' "$res" | head -n 14 | cut -c1-200 | tr '\n' '|');"
+                [ -z "$why" ] && say "PASS P1 $id: byte-identical to PAX's programs in the container ($res)" || bad "P1 $id:$why"
+            else
+                say "SKIP P1-$s reason=the container did not run (no engine): $id is held to its expectation alone"
+            fi
+            why=
+            if [ "$s" = login-first ] || [ "$s" = login-max ]; then
+                res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" --mask-tty "$here/mpx5-sudo.d/$s.pax" "$out" 2>&1) || why+=" the session differs from tests/mpx5-sudo.d/$s.pax: $(printf '%s' "$res" | head -n 14 | cut -c1-200 | tr '\n' '|');"
+                [ -z "$why" ] && say "PASS P2 $id: as tests/mpx5-sudo.d/$s.pax ($res)" || bad "P2 $id:$why"
+            fi
+            why=
+            init=/bin/login; [ "$s" != pw ] || init=/bin/pelt
+            grep -qE "^PAX: init $init ended with status [0-9]+; nothing left to run$" "$norm" \
+                || why+=" no 'PAX: init $init ended' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS P6 $id: init ended ($(grep -m1 '^PAX: init ' "$norm" | cut -c1-80)); $(tail -n 1 "$log.verdict")" || bad "P6 $id:$why"
         done
     done
 done
