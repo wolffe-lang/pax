@@ -20,8 +20,10 @@ with `<scrubbed:name>`, `<scrubbed:token>` and `<scrubbed:key>`. A secret
 split across two reads is caught: the last (longest secret - 1) bytes are
 held back until more arrives. Only the scrubbed bytes are written, to FILE;
 what was typed goes to FILE.typed after the same scrub (the keys never hold
-a secret: the session reads them from /run/live by redirection), and each
-hook's output to FILE.hooks.
+a secret: the session reads them from /run/live by redirection), each line
+with the seconds since QEMU started at which its prompt came and its
+typing began and ended (so a step's wall time is the next prompt's less
+this line's end), and each hook's output to FILE.hooks.
 
 The keys are typed as tools/qemu-halt types them: one line after each new
 TEXT prompt (counted from kmain_console's `run 1:` line), 0.2 s after it,
@@ -163,6 +165,8 @@ def main():
     halted = False
     t_end = time.monotonic() + args.timeout
     t_prompt = time.monotonic()
+    t0 = t_prompt
+    prompt_at = 0.0
     pause_until = 0.0
 
     def pump(wait):
@@ -214,17 +218,20 @@ def main():
             if n > counted:
                 if not pause_until:
                     pause_until = time.monotonic() + 0.2
+                    prompt_at = time.monotonic() - t0
                 if time.monotonic() >= pause_until:
                     pause_until = 0.0
                     counted += 1
                     line = keys[typed_n]
                     typed_n += 1
-                    typed.write(scrub.text(('step %d: %s\n' % (typed_n, line)).encode()))
-                    typed.flush()
+                    began = time.monotonic() - t0
                     for ch in line.encode() + b'\r':
                         os.write(wfd, bytes([ch]))
                         time.sleep(0.02)
                     t_prompt = time.monotonic()
+                    typed.write(scrub.text(('step %d: %s  [prompt %.2f s, typed %.2f-%.2f s]\n'
+                                            % (typed_n, line, prompt_at, began, t_prompt - t0)).encode()))
+                    typed.flush()
             elif time.monotonic() - t_prompt > args.prompt_timeout:
                 why = 'prompt %d did not come within %d s (step %d)' % (counted + 1, args.prompt_timeout, typed_n + 1)
                 break
