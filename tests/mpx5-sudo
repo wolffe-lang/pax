@@ -61,6 +61,8 @@
 #        passwd 1.4 s (the container's clock, PAX's programs); the caps:
 #        sudo's third, login's fifth.
 #     P4 sudo -S, -n and su with no terminal, PAX's against Ubuntu's.
+#     (S0 also runs `mkshadow --check` on the build host: a string at the
+#        shipped cost is within the cap and matches its own password.)
 #     P5 /etc/shadow after each session in the container: root's, pax's
 #        and bob's lines `$7$`, lobo's locked, the file passwd wrote 0600
 #        root's, bob's line (passwd's) at the shipped cost; the sessions'
@@ -267,6 +269,8 @@ if [ -z "$images" ]; then
     if [ -x "$work/bin/mkshadow" ]; then "$work/bin/mkshadow" --cost $TEST_COST < "$pw/shadow-in.txt" > "$pw/shadow.txt" || why+=" mkshadow;"
     else sed 's/ .*/:!:0:0:99999:7:::/' "$pw/shadow-in.txt" > "$pw/shadow.txt"; fi
     [ "$(grep -c ':\$7\$' "$pw/shadow.txt")" = 3 ] || why+=" mkshadow made no \$7\$ lines;"
+    # The shipped cost checks: a string made at it is accepted by the cap and matches (pwhash.lu).
+    if [ -x "$work/bin/mkshadow" ]; then r=$("$work/bin/mkshadow" --check 2>&1) || why+=" $r;"; say "  $r"; fi
     printf 'root:x:0:0:root:/root:/bin/pelt\npax:x:1000:1000::/home/pax:/bin/pelt\nlobo:x:990:990::/srv/lobo:/bin/false\nbob:x:1001:1001::/home/bob:/bin/pelt\n' > "$pw/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nbob:x:1001:\npack:x:2000:pax\n' > "$pw/group"
     printf 'ENV_SUPATH\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nENV_PATH\tPATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\n' > "$pw/login.defs"
