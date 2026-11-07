@@ -15,7 +15,9 @@ it as --key-file, the scanner must say:
      public key begins there), a hit (`key=1`);
   T3 that key it made itself is a key: `fresh_key('ssh-ed25519')`, written
      once into the same 0700 directory for this row alone, is read by
-     ssh-keygen -y as the public key the scanner derived for it.
+     ssh-keygen -y as the public key the scanner derived, and a signature
+     ssh-keygen makes with it (-Y sign) checks against that public key
+     (-Y check-novalidate), so the public half is the seed's.
 PASS or FAIL per row. Exit 0, 1 when a row failed, 3 without ssh-keygen.
 """
 import base64
@@ -93,13 +95,21 @@ def main():
             mine.write_bytes(pem)
             os.chmod(mine, 0o600)
             r = subprocess.run([keygen, '-y', '-f', str(mine)], capture_output=True, timeout=60)
+            blob = b''.join(len(x).to_bytes(4, 'big') + x for x in (b'ssh-ed25519', public))
+            want = b'ssh-ed25519 ' + base64.b64encode(blob)
+            got = b' '.join(r.stdout.strip().split(b' ')[:2])
+            msg = d / 'f/message'
+            msg.write_bytes(b'px104 scan-rows\n')
+            sig = subprocess.run([keygen, '-Y', 'sign', '-f', str(mine), '-n', 'px104', str(msg)], capture_output=True, timeout=60)
+            chk = subprocess.run([keygen, '-Y', 'check-novalidate', '-n', 'px104', '-s', str(msg) + '.sig'],
+                                 stdin=open(msg, 'rb'), capture_output=True, timeout=60) if sig.returncode == 0 else sig
             mine.unlink()
-            want = b'ssh-ed25519 ' + base64.b64encode(public)
-            got = r.stdout.strip().split(b' ')[:2]
-            if r.returncode == 0 and b' '.join(got) == want:
-                ok('T3', 'the scanner\'s own fresh ed25519 key: ssh-keygen -y reads its public key back, the one it derived')
+            if r.returncode == 0 and got == want and chk.returncode == 0:
+                ok('T3', 'the scanner\'s own fresh ed25519 key: ssh-keygen -y reads back the public key it derived, '
+                   'and a signature made with it checks against that key')
             else:
-                bad('T3', 'ssh-keygen -y on the scanner\'s fresh key: exit %d, %r' % (r.returncode, r.stderr[:120]))
+                bad('T3', 'the scanner\'s fresh key: -y exit %d (the derived key %s), sign/check exit %d %r'
+                    % (r.returncode, 'read back' if got == want else 'not read back', chk.returncode, chk.stderr[:120]))
     finally:
         shutil.rmtree(d, ignore_errors=True)
     print('SCAN-ROWS: %d of 3 failed%s' % (len(FAILS), (': ' + ' '.join(FAILS)) if FAILS else ''), flush=True)
