@@ -1,0 +1,31 @@
+//! mkshadow (px106, a test helper; never in an image): /etc/shadow lines
+//! for the password sessions of tests/mpx5-sudo, from passwords the suite
+//! makes at run time. Reads `NAME PASSWORD` lines on standard input and
+//! prints `NAME:HASH:DAY:0:99999:7:::` for each, the hash made by
+//! user/auth/pwhash.lu (wolf-std's `$7$`, a fresh salt each), the line by
+//! user/auth/shadow.lu. A line `NAME !` is a locked account.
+
+fn main() -> int {
+    loop {
+        let line = read_line() else |_| {
+            break
+        }
+        let cut = line.find(" ") else -1
+        if cut < 1 {
+            eprint("mkshadow: a line is NAME PASSWORD")
+            return 2
+        }
+        let name = line[0..cut]
+        let pw = line[cut + 1..]
+        if pw == "!" {
+            print(shadow_line(shadow_fresh(name, "!")))
+            continue
+        }
+        let h = pw_make(pw) else |_| {
+            eprint("mkshadow: the hash could not be made")
+            return 2
+        }
+        print(shadow_line(shadow_fresh(name, h)))
+    }
+    0
+}
