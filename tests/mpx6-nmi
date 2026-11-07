@@ -25,14 +25,20 @@
 #      into kmain (pax#252's run 41014032632, `no single symbol for
 #      pci.scan`); scan_bus calls itself behind a bridge, so it stays a
 #      function in both tiers, and its first entry is the scan's start.
+#      The frames point is frames.init, the walk itself, for the same
+#      reason: frames.start is init and its panics, and once the console
+#      started the network (px105) the release tier inlined that wrapper
+#      into kmain too (trunk run 42389754709, `frames.start(0)`); init,
+#      with its loops over the memory map, is still called, and its first
+#      entry is the allocator's start.
 #   N1 an NMI (an MSI with delivery mode NMI, as a device's or the
 #      chipset's message: QEMU's inject-nmi goes through LINT1, which
-#      Limine hands over masked) at serial.init, frames.start,
+#      Limine hands over masked) at serial.init, frames.init,
 #      paging.switch_to, fb.start and initramfs.report (each before the
 #      old IDT), apic.start and pci.scan_bus (after it): the boot survives to
 #      its end, `nmi: 1 at rip … reason …, continuing` in its transcript.
 #   N2 a machine check (the monitor's mce: bank 1, VAL|UC|EN|PCC) at
-#      frames.start, initramfs.report and pci.scan_bus: `mce: bank 1 status …`,
+#      frames.init, initramfs.report and pci.scan_bus: `mce: bank 1 status …`,
 #      `PANIC machine check vector 18 …`, halted, not reset.
 # N1 needs KVM (under TCG QEMU drops the NMI's message): without a usable
 # /dev/kvm its rows are skipped, each by name, and counted. N2 runs under
@@ -58,8 +64,8 @@ elf=$("$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/
 printf '# px77d: no command; the boot runs every step and halts\n' > "$work/pax-run"
 "$PAX_ROOT/tools/mkinitramfs" "$work/nmi.cpio" "/etc/pax-run=$work/pax-run" > "$work/initramfs.txt"
 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/nmi.cpio" initramfs.cpio "$elf" "$work/nmi.iso" > /dev/null
-n1='serial.init frames.start paging.switch_to fb.start initramfs.report apic.start pci.scan_bus'
-n2='frames.start initramfs.report pci.scan_bus'
+n1='serial.init frames.init paging.switch_to fb.start initramfs.report apic.start pci.scan_bus'
+n2='frames.init initramfs.report pci.scan_bus'
 missing=
 for at in $n1 $n2; do
     n=$(nm "$elf" | grep -c -E " _W$(printf '%s' "$at" | sed 's/\./\\./g')\\\$[0-9a-f]+$" || true)
