@@ -807,6 +807,18 @@ fn item(v: u64, name: str) {
 /// The module's first line:
 /// `udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from <p>, 1472 bytes a datagram, loopback by kernel/ip`.
 pub fn report() {
+    first_line(true)
+}
+
+/// px105: the first line with `from a random start` for `<p>`, for a
+/// transcript that reads the same every boot (the console's: a person
+/// reads it, and mpx6-triage's T2 holds two boots' line for line). The
+/// start is as random as ever; the socket kernels' suites read it.
+pub fn report_unnumbered() {
+    first_line(false)
+}
+
+fn first_line(start: bool) {
     log.put("udp: ")
     log.dec(SOCKS as int)
     log.put(" sockets, a ")
@@ -815,8 +827,12 @@ pub fn report() {
     log.dec(EPHEMERAL_LO as int)
     log.put("-")
     log.dec(EPHEMERAL_HI as int)
-    log.put(" from ")
-    log.dec(uw(U_NEXT_PORT) as int)
+    if start {
+        log.put(" from ")
+        log.dec(uw(U_NEXT_PORT) as int)
+    } else {
+        log.put(" from a random start")
+    }
     log.put(", ")
     log.dec(DATA_MAX as int)
     log.put(" bytes a datagram, loopback by kernel/ip")
