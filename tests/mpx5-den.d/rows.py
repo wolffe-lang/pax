@@ -24,7 +24,7 @@ import sys
 
 ROWS = [
     'link', 'binary', 'den-version', 'git-version', 'usage', 'init', 'config',
-    'config-refused', 'add', 'commit', 'log', 'diff', 'merge-ff', 'merge-conflict',
+    'config-write', 'add', 'commit', 'log', 'diff', 'merge-ff', 'merge-conflict',
     'merge-resolved', 'rebase', 'cherry-pick', 'revert', 'tag', 'blame', 'stash',
     'notes', 'reset', 'editor-false', 'editor-refused', 'git-status', 'git-log',
     'git-branch', 'git-tag', 'git-diff', 'git-cat-file', 'git-init', 'objects',
@@ -116,9 +116,10 @@ def main():
     for key, want in [('core.bare', 'false'), ('core.filemode', 'true'), ('user.name', 'Den Tester'),
                       ('init.defaultBranch', 'main'), ('core.autocrlf', 'false')]:
         ok('config', s('den config --get ' + key, row='config'), [want], [])
-    c = s('den config user.name Other', row='config-refused')
-    if c and c.status == 0:
-        fail('config-refused', '`den config user.name Other` succeeded (the pin has no writer)')
+    # px104: den writes config since its pin moved (user/den.pin, ac2332bf):
+    # a key nothing after it reads, set, then read back.
+    ok('config-write', s('den config px104.row written', row='config-write'), [], [])
+    ok('config-write', s('den config --get px104.row', row='config-write'), ['written'], [])
 
     # add, status, commit.
     ok('add', s('den status --porcelain', 1, 'add'), ['?? a.txt', '?? b.txt'], [])
@@ -255,10 +256,12 @@ def main():
         ids = [l for l in lg.out if re.fullmatch(r'commit [0-9a-f]{40}', l)]
         if len(ids) < 12:
             fail('final-log', 'den log from the pack: %d commits' % len(ids))
-    # At the terminal: den draws no decorations yet, and says so; with
-    # --no-decorate the log is the one-line log.
-    if find('den log --oneline -n 2', row='terminal') != ['den: not yet implemented: history decorations']:
-        fail('terminal', 'bare den log at the terminal: %r' % find('den log --oneline -n 2'))
+    # At the terminal: den draws its decorations as git does at a terminal
+    # (px104: since its pin moved; color.ui is never in the keys' config);
+    # with --no-decorate the log is the one-line log.
+    deco = find('den log --oneline -n 2', row='terminal') or []
+    if len(deco) != 2 or not re.fullmatch(r'[0-9a-f]{7,} \(HEAD -> main\) after the stash', deco[0]):
+        fail('terminal', 'den log at the terminal, decorated: %r' % deco)
     one = find('den log --oneline --no-decorate -n 2', row='terminal') or []
     if len(one) != 2 or not re.fullmatch(r'[0-9a-f]{7,} after the stash', one[0]):
         fail('terminal', 'den log --no-decorate at the terminal: %r' % one)
