@@ -50,7 +50,11 @@
 # that starts with `^{TEXT}` (px106) waits for its own TEXT as
 # tools/qemu-halt does: the n-th such step naming TEXT waits until TEXT has
 # been shown n times, then types what follows the `}` (a password, typed
-# only once its prompt has turned the echo off).
+# only once its prompt has turned the echo off). --times FILE (px106)
+# writes when each step was typed (`SECONDS step K`) and when each read of
+# the terminal ended (`SECONDS out BYTES`, the bytes shown so far), so a
+# delay a program makes after a step can be read; --end-wait SECONDS how
+# long the program may run after the last step (default 30).
 # OUT gets every byte the terminal showed (the program's output and the
 # line discipline's echo, CR LF as the terminal writes them); OUT.rc the
 # program's exit status. Exit 0 when the session ran (whatever the
@@ -140,6 +144,10 @@ def main(argv):
     rdev = False
     nsproc = False
     winsize = None
+    times = None
+    end_wait = WAIT
+    marks = []
+    t0 = time.time()
     args = argv[1:]
     while args and args[0].startswith("--") and args[0] != "--":
         if args[0] == "--keys":
@@ -171,6 +179,10 @@ def main(argv):
         elif args[0] == "--isig":
             args = args[1:]
             continue
+        elif args[0] == "--times":
+            times = args[1]
+        elif args[0] == "--end-wait":
+            end_wait = float(args[1])
         elif args[0] == "--winsize":
             try:
                 winsize = tuple(int(v) for v in args[1].split("x"))
@@ -275,6 +287,7 @@ def main(argv):
                     alive = False
                     return
                 buf.extend(d)
+                marks.append("%.3f out %d" % (time.time() - t0, len(buf)))
 
     ok = True
     want = 0
@@ -309,11 +322,12 @@ def main(argv):
             if not ok:
                 break
             pump(0.2)
+        marks.append("%.3f step %d" % (time.time() - t0, k))
         for b in step_bytes(line):
             os.write(fd, bytes([b]))
             pump(0.02)
     st = None
-    end = time.time() + WAIT
+    end = time.time() + end_wait
     while time.time() < end:
         pump(0.1)
         p, w = os.waitpid(pid, os.WNOHANG)
@@ -323,6 +337,9 @@ def main(argv):
             break
     with open(out, "wb") as f:
         f.write(bytes(buf))
+    if times:
+        with open(times, "w") as f:
+            f.write("\n".join(marks) + "\n")
     if st is None:
         os.kill(pid, 9)
         os.waitpid(pid, 0)
