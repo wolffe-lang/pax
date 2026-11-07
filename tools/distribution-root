@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Assemble px82's distribution payload from verified, built inputs (px90: den).
 Usage: distribution-root BASE.cpio INPUTS IDENTITY_DIR OUT.cpio dev|release
-INPUTS holds sudo/ (tools/mksudo's output: sudo and sums.txt) beside the other programs (px103).
+INPUTS holds auth/ (tools/mkauth's output: su, sudo, passwd, login and sums.txt) beside the other
+programs (px106; px103's sudo/ before it).
 The old payload supplies only unchanged support files and the pinned native
 compiler/linker bundle. Every current org binary and the base std are replaced.
 """
@@ -149,13 +150,21 @@ def main():
         assert Path(scratch+'/UTC').read_bytes() == zone, 'tools/mkzone is not the base /etc/localtime'
     put('usr/share/zoneinfo/UTC', zone)
     # px103: sudo, set-user-ID root (put keeps the set-ID bit: the mode is 0o100000|mode, written whole),
-    # tools/mksudo's static program held to its sums, with the policy (root-owned, 0440: sudo refuses a
-    # writable one) and /var/log for its log. The log file itself is sudo's to make (0600, root's).
-    for line in (inputs/'sudo'/'sums.txt').read_text().splitlines():
+    # with the policy (root-owned, 0440: sudo refuses a writable one) and /var/log for its log. The log
+    # file itself is sudo's to make (0600, root's). px106: tools/mkauth's su, sudo, passwd and login,
+    # each held to its sums: su, sudo and passwd set-user-ID root (su replaces the base payload's old
+    # build), login 0755 (the installed system's /etc/pax-run). No /etc/shadow: no image ships a
+    # password (R1); an install writes it, an upgrade makes one when there is none.
+    modes = {'su': 0o4755, 'sudo': 0o4755, 'passwd': 0o4755, 'login': 0o755}
+    for line in (inputs/'auth'/'sums.txt').read_text().splitlines():
+        if not line.strip():
+            continue
         name, digest, size = line.split()
-        data = (inputs/'sudo'/name).read_bytes()
+        data = (inputs/'auth'/name).read_bytes()
         assert (sha(data), len(data)) == (digest, int(size)), 'built input mismatch: '+name
-        put('bin/'+name, data, 0o4755)
+        assert name in modes, 'an unknown account program: '+name
+        put('bin/'+name, data, modes[name])
+    assert 'etc/shadow' not in rows, 'the base payload ships /etc/shadow'
     put('etc/sudoers', (ROOT/'user/sudo/sudoers').read_bytes(), 0o440)
     rows['var'] = (0o40755, 0, 0, b'')
     rows['var/log'] = (0o40755, 0, 0, b'')
