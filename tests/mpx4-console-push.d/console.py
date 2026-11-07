@@ -26,7 +26,8 @@ hook's output to FILE.hooks.
 The keys are typed as tools/qemu-halt types them: one line after each new
 TEXT prompt (counted from kmain_console's `run 1:` line), 0.2 s after it,
 a byte every 20 ms, CR at the end. A line of the console's that is exactly
-`STEP:LABEL` runs --hook LABEL's PROGRAM (on this host, before the next
+`STEP:LABEL` runs --hook LABEL's PROGRAM, a shell script read by /bin/sh
+(on this host, before the next
 line is typed; its stdout and stderr scrubbed into FILE.hooks with
 `HOOK LABEL exit=N`). When every line is typed the session's own `exit`
 ends the run list; at the kernel's `halt` line (or after 60 s more) the
@@ -203,7 +204,8 @@ def main():
             steps_done += 1
             prog = hooks.get(label)
             if prog:
-                h = subprocess.run([prog], capture_output=True, timeout=600)
+                # Read by sh, never exec'd: the carrier's tmpfs may be noexec.
+                h = subprocess.run(['/bin/sh', prog], capture_output=True, timeout=600)
                 hooklog.write(scrub.text(b'HOOK %s exit=%d\n' % (label.encode(), h.returncode) + h.stdout + h.stderr))
                 hooklog.flush()
             t_prompt = time.monotonic()
