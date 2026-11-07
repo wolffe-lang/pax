@@ -23,6 +23,9 @@
 //! - every other path, and /home and /root whole, never touched;
 //! - /etc/passwd and /etc/group stay the user's, with any system account
 //!   the new image adds that they lack appended;
+//! - /etc/shadow (px106) is never touched once it is there; an install that
+//!   has none (made before px106) gets one, every account locked, root's,
+//!   0600, written after the texts;
 //! - /etc/fstab, the root's limine.conf, /etc/pax-run and /etc/pax-login,
 //!   the files an install generates: written again when they hold the new
 //!   installer's text or one an installer wrote before (R-px93-9: the old
@@ -487,6 +490,17 @@ fn upgrade_main(o: Options, work: str) -> int {
         for g in groups { t += "{g}\n" }
         (mut p.texts).push(["/etc/group", t, "groups appended"])
     }
+    // px106: /etc/shadow is never touched once it is there (never read, written or listed: no
+    // manifest names it). An install that has none, every install made before px106, gets one,
+    // one locked line for each account of its /etc/passwd as the upgrade leaves it (R-px106-1:
+    // root's, 0600), so its console login admits root with no password until one is set
+    // (R-px106-2's first-boot rule).
+    var shadow_new = ""
+    if !fs_exists("{TARGET_ROOT}/etc/shadow") {
+        var t = have_passwd
+        for u in users { t += "{u}\n" }
+        shadow_new = locked_shadow(t, today())
+    }
     let known = known_texts(old, o.payload)
     text_step(mut p, "/etc/fstab", fstab_text(uuid), "regenerated for PARTUUID={uuid}", known)
     text_step(mut p, "/boot/limine/limine.conf", config_text(uuid), "regenerated for PARTUUID={uuid}", known)
@@ -530,6 +544,11 @@ fn upgrade_main(o: Options, work: str) -> int {
     for k in p.dropped_kept { say(mut lg, "keep {k} (the new image drops it; you changed it)") }
     for e in p.esp { say(mut lg, "ESP {e[1]} replaced") }
     if users.len + groups.len == 0 { say(mut lg, "accounts: /etc/passwd and /etc/group kept; nothing to append") }
+    if shadow_new.len != 0 {
+        say(mut lg, "shadow: /etc/shadow created, every account locked (the install has none); root logs in with no password until one is set")
+    } else {
+        say(mut lg, "shadow: /etc/shadow kept, never touched")
+    }
     for u in users { say(mut lg, "account appended: {u.split(":")[0]}") }
     for g in groups { say(mut lg, "group appended: {g.split(":")[0]}") }
     say(mut lg, "never touched: /home, /root, and every path neither image lists")
@@ -537,7 +556,7 @@ fn upgrade_main(o: Options, work: str) -> int {
     flush_log(mut lg)
     for a in p.acts { note(mut lg, "{a.op} {a.path}") }
     flush_log(mut lg)
-    let empty = p.acts.len == 0 && p.texts.len == 0 && p.esp.len == 0
+    let empty = p.acts.len == 0 && p.texts.len == 0 && p.esp.len == 0 && shadow_new.len == 0
     if empty && !resuming && same_image(old, new) {
         say(mut lg, "Nothing to change: {dev} already holds this image ({new.commit}), with your files as they are.")
         flush_log(mut lg)
@@ -616,6 +635,10 @@ fn upgrade_main(o: Options, work: str) -> int {
     for t in p.texts {
         put_text("{TARGET_ROOT}{t[0]}", t[1], 420) else |_| { return stop(mut lg, "pax-install: upgrade stopped at {t[0]}; run pax-install --upgrade again from this stick to finish") }
         note(mut lg, "done text {t[0]}")
+    }
+    if shadow_new.len != 0 && !fs_exists("{TARGET_ROOT}/etc/shadow") {
+        put_text("{TARGET_ROOT}/etc/shadow", shadow_new, 384) else |_| { return stop(mut lg, "pax-install: upgrade stopped at /etc/shadow; run pax-install --upgrade again from this stick to finish") }
+        note(mut lg, "done shadow /etc/shadow (every account locked)")
     }
     say(mut lg, "phase root: durable ({p.acts.len} path(s), {p.texts.len} text(s), {(os_clock_ns() - start) / 1000000} ms)")
     flush_up(mut lg, tlog)
