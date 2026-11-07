@@ -52,7 +52,14 @@ Ways and rows (each printed `PASS <row> …` or `FAIL <row> …` at column 0):
     H6 den fetch --prune exit 0, and den log of the remote-tracking ref
        fails: it is gone;
     H7 this host's git, the same steps against the same fixture: the same
-       statuses (zero or not) and the same lines.
+       statuses (zero or not) and the same lines;
+    H9 only after a failed H1: the fixture probed (`liveness`: openssl
+       s_client, 15 s) and named, stuck (no TLS handshake, s_server's wchan,
+       ss) or answering. Throughout the session a sampler records ss on
+       the fixture's port and s_server's state twice a second
+       (fixture-samples.txt); PAX_PUSH_PCAP=1 adds the guest's frames
+       (QEMU's filter-dump, diag.pcap). Hooks and this host's git steps end
+       at 120 s by name (`timeout after 120 s`).
   ssh    the same network; OpenSSH's sshd (a black box) on this host,
          its authorized key the carrier's (a forced command records the
          command den sends and runs it in the fixture's root with git's
@@ -100,6 +107,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -390,6 +398,44 @@ def seed_repo(work, git, env, bare):
     return run([git, 'log', '--oneline'], env=env, cwd=src).stdout.decode().splitlines()
 
 
+# This host's git, each step ended at its bound by name (R-px104-16).
+GIT_STEP_BOUND = 120
+
+
+def liveness(port, ca, spid, bound=15):
+    """(answered, why): one TLS handshake with the fixture on 127.0.0.1:PORT
+    (openssl s_client, its trust CA when given), ended at BOUND seconds;
+    WHY names what was seen, with the server's (pid SPID) wchan and ss's
+    count of the port's connections by state."""
+    argv = ['/usr/bin/openssl', 's_client', '-connect', '127.0.0.1:%d' % port, '-servername', 'github.com', '-brief']
+    if ca:
+        argv += ['-CAfile', str(ca)]
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        out, _ = p.communicate(timeout=bound)
+        answered = p.returncode == 0 and b'CONNECTION ESTABLISHED' in out
+        seen = 'a TLS handshake (s_client exit 0)' if answered else 's_client exit %d: %s' % (
+            p.returncode, (out.decode(errors='replace').strip().splitlines() or [''])[-1][:80])
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        answered, seen = False, 'no TLS handshake within %d s (s_client ended at its bound)' % bound
+    try:
+        wchan = open('/proc/%d/wchan' % spid).read().strip() or 'running'
+    except OSError:
+        wchan = 'unreadable'
+    states = {}
+    try:
+        r = subprocess.run(['ss', '-Htan', '( sport = :%d or dport = :%d )' % (port, port)], capture_output=True, timeout=10)
+        for line in r.stdout.decode().splitlines():
+            st = line.split()[0] if line.split() else '?'
+            states[st] = states.get(st, 0) + 1
+    except (OSError, subprocess.TimeoutExpired):
+        states = {'ss unavailable': 1}
+    return answered, '%s; the server (pid %d) in %s; ss on port %d: %s' % (
+        seen, spid, wchan, port, ', '.join('%s %d' % kv for kv in sorted(states.items())) or 'none')
+
+
 def git_steps(git, env, alias, work, ref, base=None):
     """This host's git, the session's steps: [(step, status, out)]."""
     w = work / ('git-' + ref.replace('/', '-'))
@@ -397,7 +443,11 @@ def git_steps(git, env, alias, work, ref, base=None):
     res = []
 
     def step(name, argv, cwd):
-        r = run([git] + argv, env=env, cwd=cwd, check=False, timeout=300)
+        try:
+            r = run([git] + argv, env=env, cwd=cwd, check=False, timeout=GIT_STEP_BOUND)
+        except subprocess.TimeoutExpired:
+            res.append((name, 124, 'timeout after %d s' % GIT_STEP_BOUND))
+            return None
         res.append((name, r.returncode, r.stdout.decode().strip()))
         return r
     if base is None:
@@ -472,12 +522,13 @@ def hook(c, name, git, env, alias, pattern):
 
 
 
-# The https way's diagnosis (R-px104-14), PAX_PUSH_DIAG=1 only: what the
-# fixture's TLS server (one openssl s_server, serving one connection at a
-# time) and the bridge's threads are doing, read from this host's /proc and
-# ss twice a second through the session (a sampler of push.py's own, so the
-# typed session is the https way's own up to H1); nothing secret is read.
-DIAG_SNAP = r"""#!/bin/sh
+# The https way's sampler (R-px104-14, R-px104-16): what the fixture's TLS
+# server (one openssl s_server, serving one connection at a time) and the
+# bridge's threads are doing, read from this host's /proc and ss twice a
+# second through the session by a thread of push.py's own (no hook, so the
+# typed session keeps its timing); nothing secret is read. PAX_PUSH_DIAG=1
+# types only the lines up to H1's clone.
+FIXTURE_SNAP = r"""#!/bin/sh
 echo "== $(date -u +%FT%T.%N) $1"
 echo "-- ss, the fixture's port {port}"
 ss -tanoie "( sport = :{port} or dport = :{port} )"
@@ -499,7 +550,8 @@ def hooks_seen(out):
     for part in t.split('HOOK ')[1:]:
         head, _, body = part.partition('\n')
         name, _, code = head.partition(' exit=')
-        res[name] = (int(code or -1), body.split('FILE com1')[0].split('QEMU-RUN')[0].strip())
+        code = -2 if code == 'timeout' else int(code or -1)
+        res[name] = (code, body.split('FILE com1')[0].split('QEMU-RUN')[0].strip())
     return res
 
 
@@ -627,38 +679,50 @@ def way_https(out, images, c, den_src, git):
         hooks = {'H-pushed': hook(c, 'H-pushed', git, genv, 'rows-https:', 'refs/heads/px104/pushed'),
                  'H-deleted': hook(c, 'H-deleted', git, genv, 'rows-https:', 'refs/heads/px104/*')}
         qemu = user_net()
+        # The fixture's state twice a second, through the whole session
+        # (R-px104-16): ss on its port, s_server's and the bridge's threads.
+        snap = c / 'run' / 'fixture-snap'
+        snap.parent.mkdir(mode=0o700, exist_ok=True)
+        snap.write_text(FIXTURE_SNAP.format(port=port, spid=server.process.pid, ppid=os.getpid()))
         diag = os.environ.get('PAX_PUSH_DIAG') == '1'
         if diag:
             # The https way's own lines up to H1's clone, typed as it types
-            # them, then the canary; no hook; the sampler throughout; the
-            # guest's frames in a pcap.
-            snap = c / 'run' / 'diag-snap'
-            snap.parent.mkdir(mode=0o700, exist_ok=True)
-            snap.write_text(DIAG_SNAP.format(port=port, spid=server.process.pid, ppid=os.getpid()))
+            # them, then the canary; no hook.
             hooks = {}
             keys = keys[:keys.index('cd cH')] + CANARY.splitlines()
-            if os.environ.get('PAX_PUSH_DIAG_PCAP', '1') == '1':
-                qemu = qemu + ['-object', 'filter-dump,id=f0,netdev=n0,file=%s' % (out / 'diag.pcap')]
             say('DIAG the fixture: 127.0.0.1:%d, s_server pid %d, the bridge in pid %d' % (port, server.process.pid, os.getpid()))
-            import threading
-            stop = threading.Event()
+        if os.environ.get('PAX_PUSH_PCAP') == '1':
+            qemu = qemu + ['-object', 'filter-dump,id=f0,netdev=n0,file=%s' % (out / 'diag.pcap')]
+        stop = threading.Event()
 
-            def sampler():
-                with open(out / 'diag-samples.txt', 'wb') as f:
-                    while not stop.is_set():
+        def sampler():
+            with open(out / 'fixture-samples.txt', 'wb') as f:
+                while not stop.is_set():
+                    try:
                         r = subprocess.run(['/bin/sh', str(snap), 'sample'], capture_output=True, timeout=30)
                         f.write(r.stdout + r.stderr)
-                        f.flush()
-                        stop.wait(0.5)
-            sampling = threading.Thread(target=sampler, name='px104-diag-sampler')
-            sampling.start()
+                    except subprocess.TimeoutExpired:
+                        f.write(b'== a sample past 30 s\n')
+                    f.flush()
+                    stop.wait(0.5)
+        sampling = threading.Thread(target=sampler, name='px104-fixture-sampler')
+        sampling.start()
         iso = image(images, out, 'https', {'/etc/ssl/rows-roots.der': (rows_roots, '644')}, 'hermetic.pax-net')
         try:
             log = boot(out, iso, keys, c, qemu, hooks)
         finally:
-            if diag:
-                stop.set()
-                sampling.join(timeout=60)
+            stop.set()
+            sampling.join(timeout=60)
+        b = blocks(log)
+        h1 = (b.get('H1') or [None])[0]
+        if h1 is None or h1[0] != 0:
+            # H9: a failed H1 names the fixture's state, before anything
+            # else asks it (this host's git would wait on a stuck server).
+            answered, why = liveness(port, pki / 'ca.pem', server.process.pid)
+            r = subprocess.run(['/bin/sh', str(snap), 'after a failed H1'], capture_output=True, timeout=30)
+            (out / 'fixture-after-h1.txt').write_bytes(r.stdout + r.stderr)
+            (ok if answered else bad)('H9', 'after H1 failed (%s), the fixture: %s (fixture-after-h1.txt)' % (
+                'no block' if h1 is None else 'status %d' % h1[0], why))
         if diag:
             # s_server's stderr as it stands (read only now, so the session
             # ran with the pipe as the fixture left it): its capacity, what
@@ -684,9 +748,8 @@ def way_https(out, images, c, den_src, git):
         dns.close()
         server.close()
     if os.environ.get('PAX_PUSH_DIAG') == '1':
-        for f in ('diag-samples.txt', 'diag.pcap'):
+        for f in ('fixture-samples.txt', 'diag.pcap'):
             say('DIAG %s: %s' % (f, '%d bytes' % (out / f).stat().st_size if (out / f).exists() else 'missing'))
-        b = blocks(log)
         for r in ('H8', 'H1'):
             x = (b.get(r) or [None])[0]
             say('DIAG %s: %s' % (r, 'no block' if x is None else 'status %d, %s' % (x[0], x[2][:2])))
