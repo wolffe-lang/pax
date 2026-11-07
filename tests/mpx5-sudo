@@ -65,6 +65,10 @@
 #        and bob's lines `$7$`, lobo's locked, the file passwd wrote 0600
 #        root's.
 #     P6 the end: init ended, `halt`, held halted.
+#     P7 the cost (R-px106-5): the `cost` image runs the hash at seven
+#        costs (tests/mpx5-sudo.d/mkshadow.lu --time, three times each) on
+#        PAX; the table is printed, and the shipped cost (user/auth/
+#        pwhash.lu's) must take no more than 3 s at its fastest.
 #
 # Two rows are not run yet and say SKIP by name, at column 0, with their
 # reason: a traced exec of a set-ID file, and a ptrace attach after a
@@ -243,6 +247,16 @@ if [ -z "$images" ]; then
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nbob:x:1001:\npack:x:2000:pax\n' > "$pw/group"
     printf 'ENV_SUPATH\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nENV_PATH\tPATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\n' > "$pw/login.defs"
     cp "$here/mpx5-sudo.d/sudoers.pw" "$pw/sudoers"
+    # P7's image: the hash at seven costs, on PAX.
+    printf '%s\n' '/bin/mkshadow --time 14 8 1' '/bin/mkshadow --time 15 8 1' '/bin/mkshadow --time 16 8 1' '/bin/mkshadow --time 17 8 1' \
+        '/bin/mkshadow --time 15 8 4' '/bin/mkshadow --time 16 8 2' '/bin/mkshadow --time 16 8 4' > "$pw/cost.sh"
+    echo "/bin/pelt /etc/cost.sh" > "$work/cost.run"
+    if [ -f "$work/bin/mkshadow" ] && "$PAX_ROOT/tools/mkinitramfs" "$work/cost.cpio" "/bin/pelt=$work/bin/pelt:755" "/bin/mkshadow=$work/bin/mkshadow:755" \
+        "/etc/cost.sh=$pw/cost.sh:644" "/etc/pax-run=$work/cost.run:644" > "$work/cost.initramfs.txt"; then
+        say "  initramfs cost: $(tail -n 1 "$work/cost.initramfs.txt")"
+    else
+        why+=" tools/mkinitramfs cost;"
+    fi
     for s in $TYPED; do
         prog=/bin/login; [ "$s" != pw ] || prog=/bin/pelt
         echo "$prog" > "$work/$s.run"
@@ -281,7 +295,7 @@ if [ -z "$images" ]; then
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for s in $SESSIONS $TYPED; do
+            for s in $SESSIONS $TYPED cost; do
                 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                     --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/sudo-$s.iso" >/dev/null \
                     || why+=" $tier sudo-$s: mkimage;"
@@ -363,6 +377,29 @@ for leg in $legs; do
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             [ -z "$why" ] && say "PASS S5 $id: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
         done
+        # px106: P7, the cost table on PAX.
+        id="$tier $leg cost"
+        log=$PAX_BUILD/mpx5-sudo-$tier-$leg-cost.serial.log
+        elf=$images/$tier/kmain_console.elf iso=$images/$tier/sudo-cost.iso
+        rm -f "$log" "$log.verdict"
+        if [ -f "$iso" ] && [ -f "$elf" ]; then
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 --qemu -m --qemu 1G \
+                --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            printf '%s kmain_console %s cost halt-status=%s serial=%s iso=%s\n' "$tier" "$leg" "$hrc" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+            table=$(serial_norm "$log" | grep -aE '^cost [0-9]+ [0-9]+ [0-9]+ ' | sed 's/^/    /')
+            ship=$(sed -n -E 's/^const PW_(N_LOG2|R|P): int = ([0-9]+)$/\2/p' "$PAX_ROOT/user/auth/pwhash.lu" | paste -sd' ' -)
+            best=$(serial_norm "$log" | grep -aE "^cost $ship ms " | awk '{ m = $6; for (i = 7; i <= NF; i++) if ($i < m) m = $i; print m }')
+            say "  the cost on PAX ($id; N log2, r, p, then ms):"
+            printf '%s\n' "$table" >&2
+            if [ -n "$best" ] && [ "$best" -le 3000 ] && [ "$hrc" = 0 ]; then
+                say "PASS P7 $id: the shipped cost ($ship) at its fastest $best ms; $(printf '%s' "$table" | wc -l | tr -d ' ') costs measured"
+            else
+                bad "P7 $id: the shipped cost ($ship) $best ms, halt $hrc"
+            fi
+        else
+            bad "P7 $id: no image"
+        fi
         # px106: the typed password sessions, the keys with this run's passwords in them.
         ax=$PAX_BUILD/mpx5-sudo-auth/out/pax
         for s in $TYPED; do
