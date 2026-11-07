@@ -9,9 +9,14 @@ set -uo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
 # A line a program erases (CR, then EL: `\r\x1b[2K`, wolf's build progress since 0.2.37) is read as the
 # terminal shows it, gone, before serial_norm, as tests/distribution-boot reads it: on PAX's serial log and on
-# the Linux reference alike (how many progress frames each printed is timing, not the session).
+# the Linux reference alike (how many progress frames each printed is timing, not the session). A frame wolf
+# left unerased before an error (`Building [..] N/M · … (N reused)` and the error on the same line: PAX's
+# slower build drew one where Linux's drew none) is progress too, and goes the same way.
 erased_norm() {
-    python3 -I -c 'import re, sys; sys.stdout.buffer.write(re.sub(rb"[^\n]*\r\x1b\[2K", b"", open(sys.argv[1], "rb").read()))' "$1" > "$1.erased" \
+    python3 -I -c 'import re, sys
+b = re.sub(rb"[^\n]*\r\x1b\[2K", b"", open(sys.argv[1], "rb").read())
+b = re.sub(rb"Building \[[^\]\n]*\] [0-9]+/[0-9]+ \xc2\xb7 [^\n]*?\([0-9]+ reused\)", b"", b)
+sys.stdout.buffer.write(b)' "$1" > "$1.erased" \
         && serial_norm "$1.erased"
 }
 images= only= legs=both tiers=both
