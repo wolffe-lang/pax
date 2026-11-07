@@ -1,0 +1,82 @@
+px107 — the clock reads forward: the prediction, written before any measurement
+(2026-11-07 23:15Z, at trunk db516c69, branch px107).
+
+Item 1 (pax#293). kernel/clock's now_ns panics `overflow ./clock/clock.lu:313`
+when a reading of a 64-bit counter is below the one before: the wrap branch
+turns the step back into a delta near 2^64, and (delta / 10^6) * period
+overflows. Three witnesses, all TCG soaks on CI (41805401996 at efe12e51,
+42055543811 at 411fc9f5, the chk-soak-user boot; 42403298471 at db516c69,
+the rights-soak boot, `clock: HPET 10000000 fs/tick, checked against the PM
+timer`).
+
+What was read before writing this (no measurement):
+  - PAX runs one CPU. now_ns reads raw() and `previous` with IF clear
+    (sync.irq_save), and nothing else writes `previous` after start. The NMI
+    handler (kernel/interrupts) reads no clock. Nothing writes the HPET after
+    try_hpet's one write of ENABLE_CNF.
+  - raw() on the native tier is one 8-byte load: `mov (%rax),%rax` at
+    HPET_VA + 0xf0 (objdump of a native kmain_console built from a tree whose
+    kernel/clock is trunk's).
+  - IA-PC HPET 1.0a §2.4.7, the note: "On a 64-bit platform, if software
+    attempts a 64 bit read of the 64-bit counter, software must be aware that
+    some platforms may break the 64 bit read into two 32 bit reads, and
+    therefore the read may be inaccurate if the low 32 bits roll over between
+    the high and low part reads." The section gives the safe read: high,
+    low, high again, repeated until the two highs agree.
+
+R-px107-1, the cause, predicted: (A) the read is torn. QEMU's HPET (a black
+box) answers the 8-byte load as two 4-byte reads taken at different
+instants, and when the low word rolls over between them the value is one
+high word (2^32 ticks, 42.9 s at 10 ns) off.
+  - Every backward reading on the HPET (source 1, mask 0xffffffffffffffff)
+    has prev - current within 2^24 ticks (168 ms) of 2^32: the high words one
+    apart, the low words on the two sides of a rollover. None is a reset
+    (current below the uptime's ticks with no 2^32 shape) and none is of
+    another size.
+  - Each comes with a forward step of about 2^32 ticks next to it: before it
+    if the device reads the low half first (the torn reading is ahead), after
+    it if it reads the high half first (the torn reading is behind).
+  - Not (B): nothing restarts the counter; not (C): no second CPU, no
+    interrupt between the two reads of now_ns, no store of `previous`
+    elsewhere.
+
+The rate, predicted:
+  - The rights soak (`/bin/rights soak 100000`, TCG, the image mpx5-users
+    builds) reads the clock about 100 times a second (the tick), and a torn
+    read needs the two halves to straddle a rollover, one every 42.9 s. In
+    the soaks this lane can run (20 or more, about 10 minutes each under
+    TCG): 0 or 1 backward readings. The rate is below 1 in 10 soaks; if none
+    shows, the note says how many soaks saw none, and the fix stands on the
+    arithmetic and on the spec.
+  - A hammer boot (now_ns in a tight loop for 600 s of the clock's own time,
+    13 rollovers or more) under TCG: at least one backward reading of that
+    shape. Under KVM: at least one too, since the split is the device's
+    answer, not the translator's.
+
+The fix, predicted:
+  - raw() reads a 64-bit HPET as §2.4.7 says: high, low, high, again until
+    the highs agree (bounded); a 32-bit HPET's one 4-byte read of 0xf0.
+  - now_ns: on a 64-bit mask a reading below `previous` is no time passing:
+    elapsed unchanged, `previous` unchanged (the counter's high-water mark),
+    the reading counted and its operands kept (current, previous, mask,
+    source). On a narrower mask (the PIT, the PM timer, a 32-bit HPET) it is
+    still a wrap and counts forward.
+  - The arithmetic bounded per source so no implicit overflow check can
+    fire; any check left names current, previous and the mask.
+  - Each kernel grows by under 2 KiB of ELF a tier.
+
+The rows, predicted:
+  - The backward-read row (a test word: the next reading of a 64-bit HPET
+    taken 2^32 - 7 ticks behind the one before), committed before the fix:
+    at the rows' commit it ends `PANIC overflow ./clock/clock.lu:<the line
+    of elapsed's sum>`; after the fix the two answers around it are
+    monotonic, and the count of backward readings is 1.
+  - A true rollover of a 32-bit HPET and of the PM timer (test words that
+    put the counter just before its rollover) count forward correctly at
+    the rows' commit and after the fix: green at both.
+  - The bound row (the largest step each source can produce, through the
+    arithmetic): green after the fix.
+  - No existing row moves: tests/mpx6-firmware's F1 (mpx6-metal), the
+    interrupt and scheduler suites, mpx5-users.
+
+Items 2 to 4 get their own addenda here before their first change.
