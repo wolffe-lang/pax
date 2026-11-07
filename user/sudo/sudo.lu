@@ -374,9 +374,11 @@ fn main() -> int {
     }
     let shown_log = if a.login || a.shell then shown.replace("\\", "\\\\") else shown_log_cmd
     // px106: the caller's password first, as Linux's sudo asks it before it says no: for anyone but
-    // root, unless the rule that allows the command says NOPASSWD or the target is the caller
-    // (measured), or the caller's timestamp for this terminal is still good.
-    let need_pw = uid != 0 && !(hit && (best.nopasswd || (target.uid == uid && a.group.len == 0)))
+    // root, unless the rule that allows the command says NOPASSWD or the target is the caller with
+    // no -g or with one of the caller's own groups (measured: `-u pax -g pack` as pax, a PASSWD
+    // rule, ran with -n), or the caller's timestamp for this terminal is still good.
+    let own_group = a.group.len == 0 || tgid == me.gid || has_gid(my_groups, tgid)
+    let need_pw = uid != 0 && !(hit && (best.nopasswd || (target.uid == uid && own_group)))
     if need_pw {
         let why = authenticate(pol, a, me, host, target.name)
         if why.len > 0 {
@@ -1964,6 +1966,15 @@ fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) ->
     close_tty(tty)
     eprint("sudo: {attempts_text(wrong)}")
     attempts_text(wrong)
+}
+
+fn has_gid(gs: List[int], g: int) -> bool {
+    for x in gs {
+        if x == g {
+            return true
+        }
+    }
+    false
 }
 
 fn close_tty(fd: int) {
