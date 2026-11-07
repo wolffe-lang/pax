@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# px105: the networked console's stick leg. The actual release and dev
+# ISOs (tools/mkdistribution's) booted on QEMU's igb, the 82576 that
+# kernel/gbe drives on the I225's programming model, with QEMU's DHCP
+# server, both firmwares. Before the prompt the console takes its lease
+# (/etc/pax-net, user/pax-net's `dhcp wait=10`) and says so; then
+# user/console/distribution-net.keys types the witness a person reads at
+# the metal target's console: /etc/pax-net, the lease file kernel/dhcp
+# writes and /etc/resolv.conf.
+#   tests/distribution-net IMAGE_DIRECTORY
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+[ $# -eq 1 ] || die 'usage: distribution-net IMAGE_DIRECTORY'
+out=$(realpath "$1")
+head=$(cat "$out/commit")
+MAC=52:54:00:12:34:56
+for variant in release dev; do
+    name=pax-${head:0:8}.iso
+    [ "$variant" = dev ] && name=pax-dev-${head:0:8}.iso
+    for firmware in bios uefi; do
+        log=$out/$variant-$firmware-net.serial.log
+        PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$log" \
+            --timeout 600 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
+            --qemu -netdev --qemu user,id=n0,ipv6=off --qemu -device --qemu "igb,netdev=n0,mac=$MAC" \
+            --type "$PAX_ROOT/user/console/distribution-net.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
+            "$out/$name" > "$out/$variant-$firmware-net.halt.log" 2>&1
+        python3 -I - "$log" "$PAX_ROOT/user/pax-net" "$MAC" <<'PY'
+from pathlib import Path
+import re, sys
+log, paxnet, mac = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+normal = re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', log.read_bytes()).replace(b'\r', b'').decode('latin-1')
+lines = normal.splitlines()
+def at(pattern):
+    for k, line in enumerate(lines):
+        if re.search(pattern, line):
+            return k
+    raise AssertionError('net-row: no line ' + pattern)
+first = at(r'^run 1: ')
+for pattern in (r'^dhcp: started on ' + mac + ', client id 01:' + mac + '; asking for a lease \(/etc/pax-net: dhcp, wait 10 s\)$',
+                r'^dhcp: \+[0-9.]+ s bound 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2; /etc/resolv\.conf: nameserver 10\.0\.2\.3$',
+                r'^dhcp: a lease after [0-9]+\.[0-9]+ s$',
+                r"^dhcp: the router 10\.0\.2\.2 answers the kernel's echo$",
+                r'^net: the console waited [0-9]+ ms for the network \(bound 25000 ms: device 12000, lease 10000, echo 3000\)$'):
+    assert at(pattern) < first, 'net-row-before-prompt: ' + pattern
+w = int(re.search(r'waited ([0-9]+) ms', lines[at(r'^net: the console waited ')]).group(1))
+assert w <= 25000, 'net-row-bound: waited %d ms' % w
+# The routine lines stay off a quiet console (R-px105-3).
+assert not any(re.match(r'^dhcp: \+[0-9.]+ s (DISCOVER|OFFER|REQUEST|ACK) ', l) for l in lines), 'net-row-quiet'
+b, e = at(r'^PX105-NET=begin$'), at(r'^PX105-NET=end$')
+typed = lines[b:e]
+want = [l for l in paxnet.read_text().splitlines()]
+for l in want:
+    assert l in typed, 'net-row-pax-net: ' + l
+for l in ('state bound', 'address 10.0.2.15', 'netmask 255.255.255.0', 'router 10.0.2.2', 'dns 10.0.2.3', 'router-echo answered', 'nameserver 10.0.2.3'):
+    assert l in typed, 'net-row-lease: ' + l
+assert 'PAX: init /bin/env ended with status 0; nothing left to run' in lines, 'net-row-end'
+assert 'PANIC ' not in normal
+print('N1 PASS', log.name, 'the lease before the prompt (%d ms of a 25000 ms bound), the router answers, the typed witness reads /etc/pax-net, the lease and resolv.conf, clean halt' % w)
+PY
+    done
+done
