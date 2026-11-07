@@ -12,6 +12,8 @@
 # cache that holds the commit) and from DEN_REPO otherwise, through
 # tools/fetch-retry; HEAD is refused unless it is DEN_REV. Nothing of
 # den's tree is kept: the build directory is removed at the end.
+# px105: PAX_DEN_PIN names another pin file of the same two lines (a
+# test row's own den, never what an image ships); unset, user/den.pin.
 #
 # The toolchain is the one THAT tree pins in its wolf-toolchain.toml, not
 # kernel/wolf.pin's:
@@ -47,9 +49,10 @@ set -euo pipefail
 [ $# -eq 1 ] || die "usage: mkden OUTDIR"
 out=$1
 need git curl tar readelf strip cc clang
-. "$PAX_ROOT/user/den.pin"
+pin=${PAX_DEN_PIN:-$PAX_ROOT/user/den.pin}
+. "$pin"
 [ -n "${DEN_REPO:-}" ] && printf '%s' "${DEN_REV:-}" | grep -Eq '^[0-9a-f]{40}$' \
-    || die "user/den.pin must set DEN_REPO and DEN_REV (a full 40-hex sha, never a branch)"
+    || die "$pin must set DEN_REPO and DEN_REV (a full 40-hex sha, never a branch)"
 mkdir -p "$out" "$PAX_CACHE"
 out=$(cd "$out" && pwd)
 
