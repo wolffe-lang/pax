@@ -40,7 +40,7 @@ the pins `user/den.pin`, `user/burrow.pin`, `user/roots.pin`).
 
 | input | identity | read |
 |---|---|---|
-| pax base | px105's head `56c360e5` (on trunk `84a1fde3`) | `git log` at the clone |
+| pax base | developed on px105's head `56c360e5`; rebased onto trunk `7e65c2ce` (px105 merged), every row commit ahead of the first fix | `git range-diff` (61 commits equal, 4 with resolved context: tests/distribution twice, tools/ci-tiers.map, the README) |
 | den | `ac2332bf` (`user/den.pin`), wolf 0.2.36 / lupin 0.1.58 / wolf-std `d4a4d4ca`; static, 17,696,760 bytes, `cc00cd9a…` | `tools/mkden`: four builds, one digest |
 | burrow | `0d98ce92` (`user/burrow.pin`), wolf 0.2.37 / lupin 0.1.59 / wolf-std `5b3a5994`; `burrow` `ae0e800f…` 16,326,632 bytes, `burrow-keygen` `5b21c26c…` 15,480,472 bytes, burrow's own gate's digests | `tools/mkburrow`: two checkouts, one digest each |
 | the root set | `cacert-2026-10-20.pem`, sha256 `796f1389…3cbe`, 118 certificates; as DER 127,103 bytes, `7a713f23…c1f1` | `tools/mkroots`: read twice; openssl's per-certificate DER the same bytes |
@@ -84,7 +84,8 @@ Every take ran on Linux host 1 in the Ubuntu 24.04 container; logs are the takes
 | sc2 | the host scan with the scanner's generic line: 0 in every class | `334ef253` |
 | pf2 | 12 boots, both tiers and legs, names, https and ssh: green, 12 K3 rows at 0 | `2aad4761` |
 | lv2 | the live take: the canary ways, then L0-L10 and M1-M8 against the fixture on GitHub; L9 nothing left, L10 the ref listing identical; the host's carriers 0, the scan 0 in every class | `2aad4761` |
-| the final records | red at the rows tip, green at the head, the plant red by name | at the head px105's merge names |
+| the final records | red at the rows tip (the trunk and px104's rows, no fix), green at the head (ci-plan, census, mpx6-firmware native on both legs, the push suite on both tiers and legs, mpx4-console-net, mpx4-udp on every leg, mpx4-dhcp, mpx4-tcp, mpx5-den), the plant `px104-plant-recverr` red by name on the green head; their END lines are in the PR | the rows tip and the head of `px104-r2` on `7e65c2ce` |
+| the live take at the head | the pre-flight, then the gate, then L0-L10 and M1-M8 again with the kernel the rebase moved | the head of `px104-r2` |
 
 ## 5. Done-when
 
@@ -125,8 +126,8 @@ Every take ran on Linux host 1 in the Ubuntu 24.04 container; logs are the takes
 - **R-px104-8, den's pin: ruled.** `user/den.pin` to `ac2332bf`, mpx5-den's rows moved first, red at `584b18a3`;
   `tests/mpx4-console-net.d/den-https.pin` retired into it.
 
-- **R-px104-9, the branch: (a).** The rows-first history is the branch `px104-r`; a later rebase is pushed under a
-  new name, never forced.
+- **R-px104-9, the branch: (a).** The rows-first history is the branch `px104-r`; each rebase is pushed under a new
+  name, never forced (`px104-r2` on trunk `7e65c2ce`).
 - **R-px104-10, the witness.** The configured fetch and `den log -n 1 --pretty=oneline --no-decorate`; the
   deletion by `den fetch --prune` exiting 0 and that log failing. The live take runs only after a pre-flight whose
   marker reads 0 and whose 12 K3 rows read 0 in every class, at the head the take runs.
