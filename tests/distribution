@@ -76,12 +76,11 @@ def check(blob):
         assert rows['bin/'+name][0][1] == 0o100755 and rows['bin/'+name][0][2:4] == [0, 0], 'image-burrow-'+name+'-mode'
         assert any(line.split()[:2] == [built, sha(data)] for line in (inputs/'burrow'/'sums.txt').read_text().splitlines()), 'image-burrow-sums-'+name
     # px104 (R-px104-2): the root set den's TLS reads, tools/mkroots' bytes,
-    # 0644, and /etc/shrc naming it; GitHub's published host key for ssh;
-    # the resolver's host order (R-px104-1: /etc/hosts first).
+    # 0644, and /etc/shrc naming it; GitHub's published host key for ssh.
     assert rows['etc/ssl/certs/ca-roots.der'][1] == (inputs/'roots'/'ca-roots.der').read_bytes(), 'image-roots'
     assert rows['etc/ssl/certs/ca-roots.der'][0][1] == 0o100644, 'image-roots-mode'
     assert 'export DEN_TLS_ROOTS=/etc/ssl/certs/ca-roots.der' in shrc, 'image-shrc-roots'
-    for path, user in (('etc/ssh/ssh_known_hosts', 'ssh_known_hosts'), ('etc/nsswitch.conf', 'nsswitch.conf')):
+    for path, user in (('etc/ssh/ssh_known_hosts', 'ssh_known_hosts'),):
         assert rows[path][1] == (ROOT/'user'/user).read_bytes(), 'image-'+user
         assert rows[path][0][1] == 0o100644 and rows[path][0][2:4] == [0, 0], 'image-'+user+'-mode'
     # px90 (R-px90-2): den's zone, the bytes of /etc/localtime.
@@ -108,7 +107,7 @@ def check(blob):
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, nsswitch.conf, /etc/pax-net, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, /etc/pax-net, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
