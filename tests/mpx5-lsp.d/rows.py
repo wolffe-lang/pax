@@ -66,7 +66,16 @@ CAPS = {
     "signatureHelpProvider": {"retriggerCharacters": [","], "triggerCharacters": ["(", ","]},
     "textDocumentSync": {"change": 1, "openClose": True, "save": {"includeText": False}},
 }
-SERVER = {"name": "wolf-lsp", "version": "0.2.36"}
+# The server's version is the dev compiler's, user/wolf.pin's tag (0.2.36 at trunk's pin; a --latest stick's
+# own pin may name a newer one).
+def _pin_version():
+    for line in open(os.path.join(HERE, "..", "..", "user", "wolf.pin"), encoding="utf-8"):
+        if line.startswith("WOLF_SRC_TAG=v"):
+            return line.strip().split("=v", 1)[1]
+    raise SystemExit("rows.py: user/wolf.pin names no WOLF_SRC_TAG")
+
+
+SERVER = {"name": "wolf-lsp", "version": _pin_version()}
 DIAGNOSTICS = 1  # typed.lu has one error
 
 
