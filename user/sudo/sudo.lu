@@ -46,10 +46,14 @@
 //!   unless every one does (sudoers(5)'s listpw=any and verifypw=all).
 //! - **The timestamp** (px106): `/var/run/sudo/ts/UID` (Ubuntu's names the
 //!   file by uid too), root's with the caller's group, mode 0600, in PAX's
-//!   own format: one line a terminal and session, `tty NR sid SID boot B
-//!   time MS` (with no terminal, `ppid PPID sid SID ...`), B the boot's start
-//!   in seconds, so a reboot voids every record (an installed PAX keeps
-//!   /var on ext2). Good for `Defaults timestamp_timeout` minutes (5; 0
+//!   own format: one line a terminal and session, `tty NR sid SID time MS`
+//!   (with no terminal, `ppid PPID sid SID time MS`), MS the wall clock's.
+//!   A reboot voids every record: Linux's /run is a new tmpfs at each boot,
+//!   and an installed PAX keeps /var on ext2, so the installed system's pid
+//!   1, /bin/login, empties `/var/run/sudo/ts` when it starts (the images
+//!   hold /var in their RAM archive). A record from the future (the clock
+//!   set back) is void too. The directories are root's (`/var/run/sudo`
+//!   0711, `ts` 0700). Good for `Defaults timestamp_timeout` minutes (5; 0
 //!   always asks, a negative number never expires), refreshed by each use
 //!   and by `-v`; `-k` makes the records old, `-k COMMAND` ignores them for
 //!   this run, `-K` removes the file (`-K` with a command is a usage error).
@@ -1977,56 +1981,55 @@ fn ts_key() -> str {
     "ppid {os_ppid() else 0} sid {sid}"
 }
 
-/// When this boot began, in seconds since the epoch: the wall clock less
-/// the monotonic clock, the same all through one boot.
-fn ts_boot() -> int {
-    (time_unix_ms() - os_clock_ns() / 1000000) / 1000
-}
-
 fn ts_path(uid: int) -> str {
     "{TS_DIR}/{uid}"
 }
 
-/// Whether the caller's record for `key` was made in this boot and is
-/// younger than `timestamp_timeout` (0: never good; negative: never old).
+/// Whether the caller's record for `key` is younger than
+/// `timestamp_timeout` (0: never good; negative: never old) and not from
+/// the future.
 fn ts_valid(pol: Policy, uid: int, key: str) -> bool {
     if pol.ts_ms == 0 {
         return false
     }
     let text = fs_read_text(ts_path(uid)) else ""
     let now = time_unix_ms()
-    let boot = ts_boot()
     for line in text.split("\n") {
-        if !line.starts_with("{key} boot ") {
-            continue
-        }
-        let f = line[key.len..].split(" ")
-        // " boot B time T"
-        if f.len != 5 || f[1] != "boot" || f[3] != "time" {
-            continue
-        }
-        let b = fmt.parse_int(f[2]) else -1
-        let t = fmt.parse_int(f[4]) else -1
-        if t <= 0 || b < 0 || b - boot > 2 || boot - b > 2 || t > now {
-            continue
-        }
-        if pol.ts_ms < 0 || now - t < pol.ts_ms {
+        if line.starts_with("{key} time ") && ts_fresh(pol, line, now) {
             return true
         }
     }
     false
 }
 
+/// A record line's time, or -1: `... time MS`.
+fn ts_time(line: str) -> int {
+    let cut = line.rfind(" time ") else -1
+    if cut <= 0 {
+        return -1
+    }
+    fmt.parse_int(line[cut + 6..]) else -1
+}
+
+/// Whether a record line is still good at `now`.
+fn ts_fresh(pol: Policy, line: str, now: int) -> bool {
+    let t = ts_time(line)
+    if t <= 0 || t > now {
+        return false
+    }
+    pol.ts_ms < 0 || now - t < pol.ts_ms
+}
+
 /// Write `text` as the caller's timestamp file: root's, the caller's group, 0600.
 fn ts_save(me: users.User, text: str) {
-    for d in ["/var", "/var/run", "/var/run/sudo"] {
+    for d in ["/var", "/var/run", "/var/run/sudo", TS_DIR] {
         if !fs_is_dir(d) {
-            fs_create_dir_mode(d, if d == "/var/run/sudo" then 0o711 else 0o755) else |_| {
+            let mode = if d == TS_DIR then 0o700 else if d == "/var/run/sudo" then 0o711 else 0o755
+            fs_create_dir_mode(d, mode) else |_| {
             }
-        }
-    }
-    if !fs_is_dir(TS_DIR) {
-        fs_create_dir_mode(TS_DIR, 0o700) else |_| {
+            // made by a set-user-ID root sudo, so the caller's group: root's, as Linux's are
+            fs_set_owner(d, 0, 0, false) else |_| {
+            }
         }
     }
     let path = ts_path(me.uid)
@@ -2048,28 +2051,24 @@ fn ts_save(me: users.User, text: str) {
     }
 }
 
-/// Make or refresh the caller's record for `key`; other records of this
-/// boot are kept, older ones dropped.
+/// Make or refresh the caller's record for `key`; the caller's other
+/// records still good are kept, old ones dropped.
 fn ts_write(pol: Policy, me: users.User, key: str) {
     if pol.ts_ms == 0 {
         return
     }
     let text = fs_read_text(ts_path(me.uid)) else ""
-    let boot = ts_boot()
+    let now = time_unix_ms()
     var out = ""
     for line in text.split("\n") {
-        if line.len == 0 || line.starts_with("{key} boot ") {
+        if line.len == 0 || line.starts_with("{key} time ") {
             continue
         }
-        let f = line.split(" ")
-        if f.len >= 8 {
-            let b = fmt.parse_int(f[f.len - 3]) else -1
-            if b >= 0 && b - boot <= 2 && boot - b <= 2 {
-                out = "{out}{line}\n"
-            }
+        if ts_fresh(pol, line, now) {
+            out = "{out}{line}\n"
         }
     }
-    out = "{out}{key} boot {boot} time {time_unix_ms()}\n"
+    out = "{out}{key} time {now}\n"
     ts_save(me, out)
 }
 
