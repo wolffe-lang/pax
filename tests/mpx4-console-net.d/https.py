@@ -79,8 +79,11 @@ def main():
                GIT_AUTHOR_DATE="1700000000 +0000", GIT_COMMITTER_DATE="1700000000 +0000")
     (work / "home").mkdir()
 
-    def run(argv, cwd=None, data=b""):
-        r = subprocess.run([str(x) for x in argv], cwd=cwd, env=env, input=data, capture_output=True, timeout=120)
+    def run(argv, cwd=None, data=b"", own=False):
+        # The fixture's commands get its pinned environment; PAX's own tools
+        # (own=True) the suite's, PAX_CACHE and the rest.
+        r = subprocess.run([str(x) for x in argv], cwd=cwd, env=None if own else env, input=data,
+                           capture_output=True, timeout=120)
         if r.returncode:
             raise RuntimeError("%s: exit %d: %s" % (" ".join(map(str, argv[:3])), r.returncode, r.stderr.decode(errors="replace")[-300:]))
         return r.stdout
@@ -122,9 +125,9 @@ def main():
         (work / "pax-net").write_text("dhcp\n")
         run([ROOT / "tools/mkinitramfs", work / "https.cpio", "/bin/den=" + args.den, "/bin/indir=" + args.indir,
              "/etc/den/ca.der=%s" % (pki / "ca.der"), "/etc/pax-run=%s" % (work / "run"),
-             "/etc/pax-net=%s" % (work / "pax-net")])
+             "/etc/pax-net=%s" % (work / "pax-net"), "/tmp/:1777"], own=True)
         run([ROOT / "tools/mkimage", "--conf", ROOT / "boot/limine-initramfs.conf", "--add", work / "https.cpio",
-             "initramfs.cpio", args.elf, work / "https.iso"])
+             "initramfs.cpio", args.elf, work / "https.iso"], own=True)
         with open(str(log) + ".verdict", "wb") as v:
             hrc = subprocess.run([str(ROOT / "tools/qemu-halt"), "--firmware", args.leg, "--serial", str(log),
                                   "--timeout", "300", "--accel", args.accel, "--elf", args.elf, "--marker", "halt|PANIC .*",
@@ -191,4 +194,9 @@ def main():
     return 1 if fail else 0
 
 
-sys.exit(main())
+try:
+    sys.exit(main())
+except Exception as e:
+    # A setup that failed is the row's failure by name, never a traceback.
+    say("FAIL H1 https: the row could not be set up: %s: %s" % (type(e).__name__, str(e)[-300:]))
+    sys.exit(1)
