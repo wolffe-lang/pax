@@ -1,0 +1,160 @@
+px105 — the networked console: the prediction, written before the first change
+(2026-11-06 23:59Z, at pax trunk 84a1fde3, branch px105).
+
+The kernel every shipped image boots, kernel/kmain_console.lu, starts no
+network. It links every network module already: kernel/user runs
+kernel/netd's `drain` after each system call (netd reaches kernel/dhcp,
+kernel/ip, kernel/tcp, kernel/udp, kernel/arp, kernel/icmp and kernel/net,
+and kernel/net reaches kernel/gbe), and kernel/user reaches kernel/socket.
+What it lacks is the bring-up kmain_session does: net.start, the
+protocols' start, their frames, the network clock thread, the receiving
+thread, /etc/pax-net and the lease.
+
+R-px105-1, where the stack starts (recommended: A)
+  (A) kmain_console starts kernel/net, the protocols, kernel/dhcp and
+      kernel/gbe as kmain_session does, with the console's own bounds.
+  (B) the console images boot kmain_session.
+
+  Cost of A, predicted:
+  - size: under 4 KiB more ELF on each tier (the bring-up calls only;
+    every module is linked today). Under 0.5 % of the kernel.
+  - boot time under KVM, read off the `boot: <n> ms` line:
+      no network device (every existing row: tools/qemu-run passes
+      -nic none): under 10 ms more (333 frames zeroed for the stack,
+      two loopback echoes);
+      virtio-net with QEMU's DHCP server: under 0.2 s more (px89 took
+      its lease at +0.03 s);
+      QEMU's igb with QEMU's DHCP server: about 1.5 s more (the 82576's
+      PHY restart at 1 s, kernel/gbe), then the lease.
+  - every row that boots the console: five more kernel lines before
+    `run 1:` with no device (`net: no virtio network device …; the
+    network is off`, `ip:`, `udp:`, `tcp:`, `loopback:`); 333 frames
+    fewer free from the boot on (each run's frames line compares its own
+    before and after, so it holds); one more kernel thread, the
+    network clock, turning every tick and never ending (the console's
+    `kernel_threads` floor counts it, or every run would wait for it).
+    No DHCP and no receiving thread without a device and /etc/pax-net.
+    Predicted: no existing row's assertion moves. The console suites
+    hold the session between `run 1:` and the frames line, T6 holds the
+    identity line just before the boot line (the bring-up goes before
+    both), and no row holds the boot's whole log.
+  Cost of B, predicted:
+  - kmain_session lacks what kmain_console grew since px28: triage and
+    the early tables (px77d), the identity and boot lines (px87), the
+    sound device (px30), `init=` (px68), `nofb`/`noxhci`/`noblock`/
+    `nosound` (px77d), the boot medium line (px66), /etc/pax-banner
+    (px82), the upgrade entry's mount (px93) and the Unix sockets'
+    report (px34). B either loses them on every shipped image or moves
+    them all into kmain_session, which makes the two files one.
+  - every builder that names kmain_console (tools/mkdistribution,
+    tests/usb-stick, tools/usb-session, tools/qemu-halt's prompt rule)
+    and about 50 suites that build it would move to the other kernel,
+    and the banner every row reads (`PAX: the console`) would change.
+  - its size and boot time are A's, plus whatever it ports.
+  So A, measured against B at the base by building both ELFs.
+
+R-px105-2, the https row's den (recommended: B)
+  den at PAX's pin (584b18a3) has no https. den's smart-HTTP transport
+  merged at ac2332bf.
+  (A) move user/den.pin to ac2332bf here, with mpx5-den's rows moved
+      first for den's new behaviour (px97's note: terminal decorations,
+      config writes);
+  (B) the https row builds den at ac2332bf for its own image only, and
+      the pin moves in the next PAX lane that carries den's push, which
+      then points the row at the pin;
+  (C) the row SKIPs by name until the pin moves.
+  B holds the kernel's part (the console's network carries den's TLS
+  and smart HTTP to a fixture) without folding a 100-commit den move
+  into a kernel lane.
+
+R-px105-3, kernel/dhcp's routine lines under `quiet` (recommended: A)
+  Every shipped console boots `quiet` (the ISOs, the stick, the
+  installed system). A lease renewed at T1 prints RENEW, ACK, `bound`
+  and an `ip:` line into whatever the console shows, an editor's
+  screen included, every T1 (half a lease: 30 minutes on a router with
+  one-hour leases).
+  (A) under `quiet`, the retransmissions, OFFER, ACK, RENEW, REBIND and a
+      renewal that keeps the address are not printed; `started`, the
+      first `bound` and its `ip:` line, a `bound` on a new address, NAK,
+      `expired`, `unbound`, `gave up`, the lease wait's line and the
+      router's line still are. Without `quiet` every line is as now.
+  (B) leave every line.
+
+R-px105-4, a static address in /etc/pax-net (recommended: A)
+  (A) one line `static <a.b.c.d>/<prefix> [gateway <a.b.c.d>] [dns
+      <a.b.c.d>]…` (three dns at most, resolv.conf(5)'s MAXNS), read by
+      the same reader as `dhcp`; kernel/ip and kernel/arp configured,
+      /etc/resolv.conf written as a lease writes it, one `net: static …`
+      line, the kernel's echo to the gateway. Anything malformed: one
+      line naming it, the fixed address stays (as an unknown word does).
+  (B) key=value words (`address=… netmask=… gateway=…`).
+
+R-px105-5, the bound on the console's wait for the network (recommended: A)
+  (A) the console waits for the first lease at most the file's `wait=`
+      (the shipped file says `dhcp wait=10`), not at all when the device
+      has no link after the driver's own wait, and 3 s for the router's
+      echo when a lease is held. The console prints how long it waited
+      and the bound it held itself to, on one line before the identity
+      line:
+        net: the console waited <w> ms for the network (bound <b> ms: …)
+      with b = 10000 for an Intel controller's link wait (none for
+      virtio-net, which reports no link) + the lease wait + 3000.
+      No device: b = 0, w under 10.
+  (B) kmain_session's waits unchanged (30 s by default, whatever the link).
+
+Also, by design (not rulings):
+  - the shipped roots get /etc/pax-net `dhcp wait=10` (tools/distribution-
+    root; tests/distribution holds it); an image without the file keeps
+    the fixed 10.0.2.15, as R-px89-4 has it.
+  - `triage nonet` on the command line starts the stack with no device
+    (loopback only), the escape hatch beside nofb/noxhci/noblock/nosound.
+  - kmain_session and kmain_sockets honour the static line too (the same
+    reader); their other lines do not move.
+
+The rows (a new suite, tests/mpx4-console-net, on kmain_console; red first
+at the base by name, green after):
+  C0 build: kmain_console each tier, netstate, each way's image.
+  C1 lease (igb, QEMU's DHCP server): `dhcp: started on`, `bound 10.0.2.15
+     netmask 255.255.255.0 gateway 10.0.2.2`, `dhcp: a lease after`, the
+     router answers, all before `run 1:`; netstate reads `nameserver
+     10.0.2.3`; the screen shows the bound line. Red at base: no
+     `dhcp:` line at all (the console never reads /etc/pax-net).
+  C1v the same over virtio-net.
+  C2 static (virtio, QEMU's user network): `static 10.0.2.20/24 gateway
+     10.0.2.2 dns 10.0.2.3`: the `net: static` line, the ip line, the
+     router answers the kernel's echo, netstate reads the dns. Red at base
+     (no line; and on kmain_session at base the file draws `neither dhcp
+     nor dhcp wait=`).
+  C3 no device: the boot reaches the prompt, `net: no virtio network
+     device …`, loopback answers, waited under 10 ms (bound 0). Red at
+     base: no `net:` line on the console.
+  C4 a device with no link (igb, its link down from the start): `net: NO
+     link after 10000 ms`, the client started, the console does not wait
+     for a lease, waited at most 10 s + 1 s, the prompt comes. Red at base.
+  C5 a DHCP server that never answers (virtio on a socket network with no
+     one on it): `dhcp: no lease after 5 s`, waited at most 5 s + 1 s,
+     the prompt comes and a typed command runs. Red at base.
+  C6 quiet (R-px105-3): the console under `quiet` with dnsmasq's 2-minute
+     lease (T1 10 s, tools/dhcp-wire): the capture holds the renewing
+     REQUEST, the console shows the first bound line and no RENEW, ACK or
+     second bound line. Red at base (no dhcp at all on the console).
+  mpx5-den R4 (px100's git:// row) on kmain_console instead of
+     kmain_session (REMOTE_KERNEL): red at base at prompt 73, as px100's
+     P3b measured; green after, the session byte-identical to Linux's.
+  https (R-px105-2 B): den at ac2332bf on kmain_console clones from a TLS
+     fixture on the host's loopback, reached through QEMU's user network
+     at 10.0.2.2, with DEN_TLS_ROOTS the fixture CA's DER on the image.
+     Predicted risks, measured before the row is trusted: the leaf's
+     name (wolf-std matches dNSName only: a SAN `DNS:10.0.2.2`, or a name
+     /etc/hosts gives, if den's static binary reads it on PAX), the SNI
+     den sends for an address, and the clock (QEMU's RTC is UTC).
+     Red at base (no network on the console: the connect waits).
+  distribution-net (the stick leg for px97's next stick): the release
+     image under igb and QEMU's DHCP server: the lease lines before the
+     prompt, then the typed witness (`cat /etc/pax-net`, `cat
+     /var/lib/dhcp/pax.lease`, `cat /etc/resolv.conf`), the same a person
+     reads at the metal target's console on its I225-V.
+
+Hosts: x86-64 Linux hosts with KVM, each behind its lock names, for the
+builds and boots; the build Mac for git and the planner's rows. The
+metal target is never touched by this lane.
