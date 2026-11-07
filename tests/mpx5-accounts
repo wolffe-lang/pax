@@ -55,7 +55,7 @@
 #      and the exit status is the recording's.
 #   A3 -ENOSYS only for set_robust_list (273) and rseq (334); no
 #      `refused:` line; nobody killed.
-#   A4 the end: `PAX: init /bin/pelt ended with status <s>; nothing
+#   A4 the end: `PAX: init /bin/env ended with status <s>; nothing
 #      left to run`, `halt`, held halted.
 #
 # The checks this exercises are enforced for honest programs; not a
@@ -135,8 +135,11 @@ linux_side() { # dir -> reasons on stdout
     # px106: --rdev, /dev bound with what is mounted under it: su opens /dev/tty, and a rootless
     # engine's /dev/tty is the host's node bound onto a placeholder file a plain bind leaves out
     # (a user is refused it, EACCES), so su took its no-terminal path in the container alone.
-    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$KEYS" --prompt "$PROMPT" --argv0 /bin/pelt --size 512m --rdev \
-        --owners "$1/owners.txt" "$1/linux/accounts.tty" -- /bin/pelt; then
+    # px97d: pelt from its trunk (b80d6570) starts an interactive shell not invoked as `sh` with friendly on; the
+    # session is the plain one the recording holds, so every shell reads /etc/pelt-plain (`set +o friendly`)
+    # through ENV, which `su USER` keeps, before its first prompt: init is `/bin/env ENV=/etc/pelt-plain /bin/pelt`.
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$KEYS" --prompt "$PROMPT" --size 512m --rdev \
+        --owners "$1/owners.txt" "$1/linux/accounts.tty" -- /bin/env ENV=/etc/pelt-plain /bin/pelt; then
         say "  linux accounts: $(wc -c < "$1/linux/accounts.tty" | tr -d ' ') bytes, status $(cat "$1/linux/accounts.tty.rc")"
     else
         printf ' tools/linux-tree accounts;'
@@ -193,7 +196,8 @@ if [ -z "$images" ]; then
     printf 'hello from pax\n' > "$r/home/pax/hello.txt"
     printf '<p>lobo</p>\n' > "$r/srv/lobo/index.html"
     "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
-    echo /bin/pelt > "$r/etc/pax-run"
+    printf 'set +o friendly\n' > "$r/etc/pelt-plain"
+    echo /bin/env ENV=/etc/pelt-plain /bin/pelt > "$r/etc/pax-run"
     owners_of > "$work/owners.txt"
     for f in "$r"/bin/*; do
         x=$(static_ok "$f") || why+=" $x;"
@@ -326,8 +330,8 @@ for leg in $legs; do
 
             # A4: the end.
             why=
-            grep -qx "PAX: init /bin/pelt ended with status $lst; nothing left to run" "$norm" \
-                || why+=" no 'PAX: init /bin/pelt ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            grep -qx "PAX: init /bin/env ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/env ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
             pn=$(grep -m1 '^PANIC ' "$norm")
             [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
