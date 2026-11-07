@@ -471,6 +471,40 @@ def hook(c, name, git, env, alias, pattern):
     return p
 
 
+
+# The https way's diagnosis (R-px104-14), PAX_PUSH_DIAG=1 only: what the
+# fixture's TLS server (one openssl s_server, serving one connection at a
+# time) and the bridge's threads are doing, read from this host's /proc and
+# ss at three points of the session; nothing secret is read.
+DIAG_SNAP = r"""#!/bin/sh
+echo "== $(date -u +%FT%T.%N) $1"
+echo "-- ss, the fixture's port {port}"
+ss -tanoie "( sport = :{port} or dport = :{port} )"
+echo "-- s_server {spid}"
+grep -E '^(State|Threads)' /proc/{spid}/status
+echo "syscall: $(cat /proc/{spid}/syscall)"
+echo "wchan: $(cat /proc/{spid}/wchan)"
+ls -l /proc/{spid}/fd
+for f in /proc/{spid}/fdinfo/*; do echo "fdinfo ${{f##*/}}: $(tr '\n' ' ' < "$f")"; done
+echo "-- the bridge: push.py {ppid}'s threads"
+for t in /proc/{ppid}/task/*; do echo "task ${{t##*/}} $(cat "$t/comm"): syscall $(cat "$t/syscall"), wchan $(cat "$t/wchan")"; done
+"""
+
+
+def diag_hook(c, name, snap, dest, delay):
+    """A host program the console runs at STEP:name: the snapshot into DEST,
+    DELAY seconds later in the background when DELAY is not 0."""
+    p = c / 'run' / ('hook-' + name)
+    p.parent.mkdir(mode=0o700, exist_ok=True)
+    if delay:
+        body = '( sleep %d; /bin/sh %s %s > %s 2>&1 ) < /dev/null > /dev/null 2>&1 &\necho "snapshot in %d s"\n' % (
+            delay, sh_quote(str(snap)), name, sh_quote(str(dest)), delay)
+    else:
+        body = '/bin/sh %s %s > %s 2>&1\ncat %s\n' % (sh_quote(str(snap)), name, sh_quote(str(dest)), sh_quote(str(dest)))
+    p.write_text('#!/bin/sh\n' + body)
+    os.chmod(p, 0o700)
+    return p
+
 def hooks_seen(out):
     p = out / 'serial.log.hooks'
     t = p.read_text(errors='replace') if p.exists() else ''
@@ -605,12 +639,57 @@ def way_https(out, images, c, den_src, git):
         ] + den_steps('H', 'https://github.com:%d/remote.git' % port, 'px104/pushed') + CANARY.splitlines()
         hooks = {'H-pushed': hook(c, 'H-pushed', git, genv, 'rows-https:', 'refs/heads/px104/pushed'),
                  'H-deleted': hook(c, 'H-deleted', git, genv, 'rows-https:', 'refs/heads/px104/*')}
+        qemu = user_net()
+        diag = os.environ.get('PAX_PUSH_DIAG') == '1'
+        if diag:
+            # H8, then H1's clone, and nothing after: snapshots at H8's end,
+            # 4 s into H1 and at H1's end; the guest's frames in a pcap.
+            snap = c / 'run' / 'diag-snap'
+            snap.parent.mkdir(mode=0o700, exist_ok=True)
+            snap.write_text(DIAG_SNAP.format(port=port, spid=server.process.pid, ppid=os.getpid()))
+            hooks = {'D-h8-end': diag_hook(c, 'D-h8-end', snap, out / 'diag-h8-end.txt', 0),
+                     'D-h1-start': diag_hook(c, 'D-h1-start', snap, out / 'diag-h1-start.txt', 4),
+                     'D-h1-end': diag_hook(c, 'D-h1-end', snap, out / 'diag-h1-end.txt', 0)}
+            keys = keys[:keys.index('export DEN_TLS_ROOTS=/etc/ssl/rows-roots.der')] + [
+                'echo STEP:"D-h8-end"', 'export DEN_TLS_ROOTS=/etc/ssl/rows-roots.der', 'echo STEP:"D-h1-start"',
+                'echo ROW H1; s den clone -q https://github.com:%d/remote.git cH' % port, 'echo STEP:"D-h1-end"',
+            ] + CANARY.splitlines()
+            qemu = qemu + ['-object', 'filter-dump,id=f0,netdev=n0,file=%s' % (out / 'diag.pcap')]
+            say('DIAG the fixture: 127.0.0.1:%d, s_server pid %d, the bridge in pid %d' % (port, server.process.pid, os.getpid()))
         iso = image(images, out, 'https', {'/etc/ssl/rows-roots.der': (rows_roots, '644')}, 'hermetic.pax-net')
-        log = boot(out, iso, keys, c, user_net(), hooks)
-        gitres = git_steps(git, genv, 'rows-https:', work, 'px104/git-pushed')
+        log = boot(out, iso, keys, c, qemu, hooks)
+        if diag:
+            # s_server's stderr as it stands (read only now, so the session
+            # ran with the pipe as the fixture left it): its capacity, what
+            # waits in it, and those bytes.
+            import fcntl
+            import termios
+            import array
+            fd = server.process.stderr.fileno()
+            size = fcntl.fcntl(fd, 1032)  # F_GETPIPE_SZ
+            n = array.array('i', [0])
+            fcntl.ioctl(fd, termios.FIONREAD, n)
+            os.set_blocking(fd, False)
+            try:
+                pending = os.read(fd, 1 << 20)
+            except BlockingIOError:
+                pending = b''
+            (out / 'diag-s_server.stderr').write_bytes(pending)
+            say('DIAG s_server stderr: a %d-byte pipe holding %d bytes (diag-s_server.stderr)' % (size, n[0]))
+            gitres = []
+        else:
+            gitres = git_steps(git, genv, 'rows-https:', work, 'px104/git-pushed')
     finally:
         dns.close()
         server.close()
+    if os.environ.get('PAX_PUSH_DIAG') == '1':
+        for f in ('diag-h8-end.txt', 'diag-h1-start.txt', 'diag-h1-end.txt', 'diag.pcap'):
+            say('DIAG %s: %s' % (f, '%d bytes' % (out / f).stat().st_size if (out / f).exists() else 'missing'))
+        b = blocks(log)
+        for r in ('H8', 'H1'):
+            x = (b.get(r) or [None])[0]
+            say('DIAG %s: %s' % (r, 'no block' if x is None else 'status %d, %s' % (x[0], x[2][:2])))
+        return log
     b = blocks(log)
     h8 = (b.get('H8') or [None])[0]
     if h8 is None:
