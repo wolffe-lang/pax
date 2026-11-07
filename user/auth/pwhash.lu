@@ -42,10 +42,15 @@ fn pw_random16() -> List[byte] {
 
 /// A new `$7$` string for `password`: a fresh salt, the chosen cost.
 fn pw_make(password: str) -> str ! {io} {
+    pw_make_at(password, PW_N_LOG2, PW_R, PW_P)?
+}
+
+/// The same at another cost: the cost row's (tests/mpx5-sudo.d/mkshadow.lu --time).
+fn pw_make_at(password: str, n_log2: int, r: int, p: int) -> str ! {io} {
     let salt = passwd.gen_salt(pw_random16()) else |_| {
         return io
     }
-    let c = passwd.cost(PW_N_LOG2, PW_R, PW_P) else |_| {
+    let c = passwd.cost(n_log2, r, p) else |_| {
         return io
     }
     passwd.hash(password.bytes(), salt, c) else |_| {

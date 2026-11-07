@@ -4,8 +4,17 @@
 //! prints `NAME:HASH:DAY:0:99999:7:::` for each, the hash made by
 //! user/auth/pwhash.lu (wolf-std's `$7$`, a fresh salt each), the line by
 //! user/auth/shadow.lu. A line `NAME !` is a locked account.
+//!
+//! `mkshadow --time NLOG2 R P` (the cost row, px106 R-px106-5): makes a
+//! `$7$` string at N = 2^NLOG2, r = R, p = P three times and prints the
+//! wall milliseconds of each by the monotonic clock, as
+//! `cost NLOG2 R P ms A B C`.
 
 fn main() -> int {
+    let args = env_args()
+    if args.len == 4 && args[0] == "--time" {
+        return timing(args[1].to_int() else 14, args[2].to_int() else 8, args[3].to_int() else 1)
+    }
     loop {
         let line = read_line() else |_| {
             break
@@ -27,5 +36,21 @@ fn main() -> int {
         }
         print(shadow_line(shadow_fresh(name, h)))
     }
+    0
+}
+
+fn timing(n: int, r: int, p: int) -> int {
+    var out = "cost {n} {r} {p} ms"
+    var k = 0
+    while k < 3 {
+        let t0 = os_clock_ns()
+        let _h = pw_make_at("cost-row", n, r, p) else |_| {
+            print("cost {n} {r} {p} refused")
+            return 1
+        }
+        out = "{out} {(os_clock_ns() - t0) / 1000000}"
+        k += 1
+    }
+    print(out)
     0
 }
