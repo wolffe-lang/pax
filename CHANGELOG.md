@@ -7,6 +7,25 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Push from the console (px104).** den pushes to GitHub from the console of
+  every image, over HTTPS and over SSH. Names resolve: the kernel now answers
+  what a C library's resolver asks of a datagram socket (`sendmmsg`, SOL_IP's
+  `IP_RECVERR`, FIONREAD and an empty error queue), so den and burrow find a host
+  through `/etc/hosts` and the DNS server the lease names, as on Linux. The images
+  carry burrow, the org's ssh client, as `/bin/ssh` and `/bin/burrow-keygen`
+  (`user/burrow.pin`, `tools/mkburrow`); Mozilla's root store as curl extracts it,
+  `/etc/ssl/certs/ca-roots.der` (`user/roots.pin`, `tools/mkroots`), which
+  `/etc/shrc` names as `DEN_TLS_ROOTS`; GitHub's published host key in
+  `/etc/ssh/ssh_known_hosts`; and den at `ac2332bf`, its smart-HTTP transport,
+  config writes and terminal decorations. den's two service wrappers moved onto
+  PATH as `/bin/git-upload-pack` and `/bin/git-receive-pack`, and `/etc/shrc` no
+  longer exports DEN_UPLOAD_PACK or DEN_RECEIVE_PACK, so den over ssh sends git's
+  own command (an edited `/etc/shrc` is kept by an upgrade: the README names the
+  two lines to delete). A new suite, `tests/mpx4-console-push`, types clone,
+  commit, push, a witness fetch and the deletion at the console against fixtures
+  that answer as github.com, held to git's answers on Linux, with every transcript
+  scrubbed before it is written and scanned for the secrets after.
+
 - **The networked console (px105).** `kmain_console`, the kernel every shipped
   image boots, starts the network: a virtio device or one of Intel's gigabit
   controllers (QEMU's igb, the I225-V and I226), the protocols over it, and
