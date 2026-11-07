@@ -40,8 +40,33 @@
 # (hpet-fast: read 1.25 times, hpet-slow: 0.8 times), which the old
 # 5-20 ms band let through: `clock: HPET … refused`, then the PM timer.
 #
+# px107 (pax#293): three legs of kernel/clock's own (more test words). A
+# reading of a 64-bit counter below the one before is no time passing,
+# never a wrap: clock-behind (q35 as it is, the HPET's readings 5 * 2^32
+# up) feeds now_ns a reading one high word behind (the shape of a torn
+# read, HPET 1.0a §2.4.7) and a reading of all ones (an absent device's),
+# and requires the answers monotonic, 20 ticks in 150-300 ms across the
+# first, and both counted (`metal: a reading 2^32 ticks behind …`); then a
+# skip of 2^40 ticks must count forward exactly. A true rollover still
+# counts forward: clock-32 (the HPET read as a 32-bit counter) and
+# clock-pmwrap (--no-hpet: the PM timer's 24 bits) each put the counter
+# 100 ms before its rollover, and across 20 ticks the clock must agree
+# with the PM timer read directly within 2% and have counted the
+# rollover; then the largest step the mask allows (a reading one behind
+# the last) must count forward exactly. And the read itself: clock-torn
+# puts the HPET's counter 50 us before its low word rolls over, 20000
+# times (halted, written, enabled again), and reads it across each
+# through the clock's own read: none may be below the one before (HPET
+# 1.0a §2.4.7's note: a 64-bit read may be broken into two 32-bit ones;
+# QEMU 8.2's is, its low half first, so one 8-byte load is torn in 14% of
+# such crossings under TCG and 0.1-0.5% under KVM). Every `metal: step` line's
+# nanoseconds are held here to its ticks times the source's period
+# (exact, or one more for the carried fraction).
+#
 # PAX_METAL_TIER (native, release) and PAX_METAL_FIRMWARE ("bios uefi")
-# choose the build and the firmwares (tests/mpx6-firmware sets both).
+# choose the build and the firmwares (tests/mpx6-firmware sets both);
+# PAX_METAL_LEGS (px107), when set, the legs, by name (a plant's run, or
+# one leg's witness).
 # A failing machine prints its `FAIL METAL`/`PANIC` lines by name.
 set -euo pipefail
 flags=()
@@ -58,7 +83,7 @@ printf '\n    cmdline: metal_x2apic\n' >> "$work/x2apic.conf"
 cp "$PAX_ROOT/boot/limine.conf" "$work/pitonly.conf"
 printf '\n    cmdline: metal_pitonly\n' >> "$work/pitonly.conf"
 "$PAX_ROOT/tools/mkimage" --conf "$work/pitonly.conf" "$work/kmain_metal.elf" "$work/pitonly.iso"
-for word in stall_window stall_edge stall_long hpet_fast hpet_slow; do
+for word in stall_window stall_edge stall_long hpet_fast hpet_slow clock_behind clock_torn clock_32 clock_pmwrap; do
     cp "$PAX_ROOT/boot/limine.conf" "$work/$word.conf"
     printf '\n    cmdline: metal_%s\n' "$word" >> "$work/$word.conf"
     "$PAX_ROOT/tools/mkimage" --conf "$work/$word.conf" "$work/kmain_metal.elf" "$work/$word.iso"
@@ -69,9 +94,10 @@ fail() { # leg why
     exit 1
 }
 for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
-    legs='hpet pm pitless pm-pitless ram8 stall-window stall-edge stall-long hpet-fast hpet-slow'
+    legs='hpet pm pitless pm-pitless ram8 stall-window stall-edge stall-long hpet-fast hpet-slow clock-behind clock-torn clock-32 clock-pmwrap'
     [ "$fw" != uefi ] || legs="$legs pitonly"
     [ "${PAX_METAL_X2APIC:-0}" != 1 ] || legs="$legs x2apic"
+    [ -z "${PAX_METAL_LEGS:-}" ] || legs=$PAX_METAL_LEGS
     for leg in $legs; do
         args=() qargs=() iso=$work/check.iso
         source=HPET
@@ -84,6 +110,10 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
             ram8) qargs=(-m 8G);;
             stall-*) iso=$work/stall_${leg#stall-}.iso;;
             hpet-*) iso=$work/hpet_${leg#hpet-}.iso; source=PM;;
+            clock-behind) iso=$work/clock_behind.iso;;
+            clock-torn) iso=$work/clock_torn.iso;;
+            clock-32) iso=$work/clock_32.iso;;
+            clock-pmwrap) iso=$work/clock_pmwrap.iso; args=(--no-hpet); source=PM;;
         esac
         rc=0
         "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" ${args[@]+"${args[@]}"} "$iso" -- ${qargs[@]+"${qargs[@]}"} || rc=$?
@@ -99,6 +129,36 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
                 || fail "$fw-$leg" "the stall inside the closing bracket did not make the check take it again";;
             stall-long) grep -aqE "^metal: the HPET's check measured 2 window\(s\), 1 too long, " "$work/$fw-$leg.log" \
                 || fail "$fw-$leg" "the 5 s window was not measured again";;
+        esac
+        case $leg in
+            clock-behind) grep -aqE '^metal: a reading 2\^32 ticks behind .*; 1 reading\(s\) taken as no time passing$' "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "the reading behind was not taken as no time passing";;
+            clock-32|clock-pmwrap) grep -aqE '^metal: across a rollover of the .*; rollovers [1-9]' "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "no rollover counted across the window";;
+            clock-torn) grep -aqE '^metal: the HPET read across 20000 rollovers of its low word: [0-9]+ read across, 0 torn, ' "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "a reading of the HPET was torn across a rollover";;
+        esac
+        case $leg in
+            clock-behind|clock-32|clock-pmwrap)
+                why=$(tr -d '\r' < "$work/$fw-$leg.log" | python3 -I -c '
+import re, sys
+n = 0
+lines = sys.stdin.read().splitlines()
+fs = [int(x) for l in lines for x in re.findall(r"^clock: HPET (\d+) fs/tick", l)]
+for l in lines:
+    m = re.match(r"metal: step (\w+) (HPET|PM) from 0x([0-9a-f]+) to 0x([0-9a-f]+) mask 0x([0-9a-f]+) read as (\d+) ns$", l.strip())
+    if not m:
+        continue
+    n += 1
+    a, b, k, ns = int(m.group(3), 16), int(m.group(4), 16), int(m.group(5), 16), int(m.group(6))
+    d = (b - a) & k
+    want = d * fs[-1] // 10**6 if m.group(2) == "HPET" and fs else d * 10**9 // 3579545
+    if ns not in (want, want + 1):
+        print("step %s: %d ticks read as %d ns, not %d" % (m.group(1), d, ns, want))
+if n != 1:
+    print("%d step lines, not 1" % n)
+') || why="python3 failed"
+                [ -z "$why" ] || fail "$fw-$leg" "$why";;
         esac
         tr -d '\r' < "$work/$fw-$leg.log" | grep -aE '^(clock|timer|metal): |^apic: x2APIC|^PASS METAL LAPIC tick rate'
         echo "PASS METAL firmware $fw $leg"
