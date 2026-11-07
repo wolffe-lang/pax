@@ -1931,6 +1931,7 @@ fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) ->
             }
         }
         if ended {
+            close_tty(tty)
             eprint("sudo: no password was provided")
             if wrong == 0 {
                 eprint("sudo: a password is required")
@@ -1940,6 +1941,7 @@ fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) ->
             return attempts_text(wrong)
         }
         if pw_matches(got, stored) {
+            close_tty(tty)
             if !a.reset {
                 ts_write(pol, me, key)
             }
@@ -1951,8 +1953,16 @@ fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) ->
             eprint("Sorry, try again.")
         }
     }
+    close_tty(tty)
     eprint("sudo: {attempts_text(wrong)}")
     attempts_text(wrong)
+}
+
+fn close_tty(fd: int) {
+    if fd >= 0 {
+        fs_close(fd) else |_| {
+        }
+    }
 }
 
 /// This terminal and session (proc_pid_stat(5)'s tty_nr and session),
