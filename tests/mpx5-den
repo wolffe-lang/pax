@@ -76,8 +76,10 @@
 # console login three times (the text pax-install writes as /etc/pax-login,
 # user/install/prepare.lu's `installed_login`, extracted by
 # tests/mpx5-den.d/login.py, never copied) and the live medium's
-# (user/usb-login.sh) once. tests/mpx5-den.d/login.py types at each
-# `login:` (pax, root, pax, root) and at each prompt, with nothing
+# (user/usb-login.sh) once. px106: the installed login execs /bin/login,
+# so the image carries it and an /etc/shadow with root's and pax's passwords
+# made at run time. tests/mpx5-den.d/login.py types at each
+# `login:` (pax, root, pax, root), each password, and at each prompt, with nothing
 # redirected: den writes to the terminal, as a user's den does. Its rows,
 # per tier and firmware (login.py's header has them whole):
 #   L1 the login gave the terminal to the account (`stat -L /dev/stdin`:
@@ -271,6 +273,11 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE $LOGIN_BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
     "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
     "$PAX_ROOT/tools/mksu" "$work/su" > "$work/su.txt" || why+=" tools/mksu;"
+    # px106: the installed login is /bin/login, asking a password: login and the test helper
+    # mkshadow (tools/mkauth), and root's and pax's passwords made now (never in the tree).
+    "$PAX_ROOT/tools/mkauth" "$work/auth" login mkshadow > "$work/auth.txt" || why+=" tools/mkauth login mkshadow;"
+    python3 -I -c 'import secrets; print("root", secrets.token_hex(6)); print("pax", secrets.token_hex(6))' > "$work/login.passwords"
+    "$work/auth/mkshadow" < "$work/login.passwords" > "$work/login.shadow" 2>/dev/null || why+=" mkshadow;"
     cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null || why+=" no pelt;"
     cp "$work/pelt/pelt" "$r/bin/sh" 2>/dev/null || true
     "$PAX_ROOT/tools/install-den" "$work/den" "$r" || why+=" tools/install-den;"
@@ -340,7 +347,8 @@ if [ -z "$images" ]; then
     for e in "${args[@]}"; do case $e in /etc/pax-run=*) ;; *) largs+=("$e") ;; esac; done
     largs+=(/root/:700 "/etc/pax-run=$work/login.run:644" "/etc/passwd=$work/login.passwd:644"
         "/etc/group=$work/login.group:644" "/etc/pax-login=$work/pax-login:644"
-        "/etc/pax-live-login=$PAX_ROOT/user/usb-login.sh:644" "/bin/su=$work/su/su:755")
+        "/etc/pax-live-login=$PAX_ROOT/user/usb-login.sh:644" "/bin/su=$work/su/su:755"
+        "/bin/login=$work/auth/login:755" "/etc/shadow=$work/login.shadow:600")
     for u in $LOGIN_BORE; do largs+=("/bin/$u=$work/bore/$u:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/login.cpio" "${largs[@]}" > "$work/login.initramfs.txt" || why+=" tools/mkinitramfs (login);"
     # The home disk: tools/mkdisk --home, the bytes mpx6-ext2 records.
@@ -519,7 +527,7 @@ login_rows() { # tier leg
     llog=$PAX_BUILD/mpx5-den-login-$1-$2.serial.log
     cp "$images/home.img" "$lhome"
     rm -f "$llog"
-    python3 -I "$DD/login.py" run "$limg" "$lhome" "$llog" "$2" ${ovmf:+"$ovmf"} > "$llog.rows" 2>&1 || lrc=$?
+    python3 -I "$DD/login.py" run "$limg" "$lhome" "$llog" "$2" ${ovmf:+"$ovmf"} --passwords "$images/login.passwords" > "$llog.rows" 2>&1 || lrc=$?
     ran=$((ran + 1))
     printf '%s %s den-login rows-status=%s serial=%s\n' "$1" "$2" "$lrc" "$(sha256_of "$llog" 2>/dev/null)" >> "$runs"
     while IFS= read -r line; do

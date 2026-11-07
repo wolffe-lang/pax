@@ -2,7 +2,7 @@
 """px98: den at the console as a user who logged in, and the terminal that login gives.
 
     login.py text PREPARE.lu > pax-login
-    login.py run ISO HOME.img LOG FIRMWARE [OVMF_CODE]
+    login.py run ISO HOME.img LOG FIRMWARE [OVMF_CODE] [--passwords FILE]
 
 `text` prints the installed system's console login, the very text
 `pax-install` writes as /etc/pax-login (user/install/prepare.lu's
@@ -12,7 +12,10 @@ boots the login an install has, not a copy of it.
 `run` boots ISO (kmain_console with tests/mpx5-den's login archive: its
 /etc/pax-run runs four logins in turn) with HOME.img as its ext2 /home, under
 FIRMWARE, and types at each `login:` and at each prompt on COM1, waiting for
-every prompt before the next line, as tests/mpx6-install.d/den.py does. Nothing
+every prompt before the next line, as tests/mpx6-install.d/den.py does. px106:
+the installed login is /bin/login, which asks a password: FILE (`NAME PW`
+lines, made at run time by tests/mpx5-den) gives the one typed at each of its
+`Password: ` prompts (runs 1 to 3); the live medium's login asks none. Nothing
 the user types is redirected: den writes to the terminal. QEMU's monitor ends the
 machine after the kernel's `halt` line (no host signal). Then the rows, on the
 serial log as tools/lib.sh's serial_norm leaves it:
@@ -96,7 +99,13 @@ LIVE_D = ["stat -L -c 'PX98-LIVE-TERM %u %g %a' /dev/stdin", 'exit']
 RUNS = [('pax', USER_A), ('root', ROOT_B), ('pax', USER_C), ('root', LIVE_D)]
 
 
-def run(iso, home, logp, firmware, ovmf):
+def run(iso, home, logp, firmware, ovmf, passwords=None):
+    pw = {}
+    if passwords:
+        for line in Path(passwords).read_text().splitlines():
+            if ' ' in line:
+                n, v = line.split(' ', 1)
+                pw[n] = v
     logp = Path(logp)
     mon = str(logp) + '.mon'
     if os.path.exists(mon):
@@ -149,6 +158,10 @@ def run(iso, home, logp, firmware, ovmf):
             mark = b'\nrun %d: ' % k
             wait(lambda s: mark in s and b'login: ' in s.split(mark, 1)[1], f'run {k} login prompt')
             send(account)
+            if k <= 3 and account in pw:
+                wait(lambda s: b'Password: ' in s.split(mark, 1)[1].split(b'login: ', 1)[1], f'run {k} password prompt')
+                time.sleep(.3)
+                send(pw[account])
             for n, line in enumerate(lines, 1):
                 assert '$ ' not in line, line
                 wait(lambda s: s.split(mark, 1)[1].split(b'login: ', 1)[1].count(b'$ ') >= n, f'run {k} prompt {n}')
@@ -309,10 +322,14 @@ def main():
     if len(a) == 2 and a[0] == 'text':
         sys.stdout.write(login_text(a[1]))
         return 0
+    passwords = None
+    if len(a) >= 2 and a[-2] == '--passwords':
+        passwords = a[-1]
+        a = a[:-2]
     if len(a) in (5, 6) and a[0] == 'run':
         _, iso, home, logp, firmware = a[:5]
         ovmf = a[5] if len(a) == 6 else ''
-        why = run(iso, home, logp, firmware, ovmf)
+        why = run(iso, home, logp, firmware, ovmf, passwords)
         return rows(logp, firmware, why)
     print(__doc__, file=sys.stderr)
     return 2
