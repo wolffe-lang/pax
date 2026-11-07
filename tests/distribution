@@ -72,14 +72,31 @@ def check(blob):
         (inputs/'den'/'sums.txt').read_text().split()[1:3]), 'image-den-sums'
     assert rows['bin/den'][0][1] == 0o100755 and rows['bin/den'][0][2:4] == [0, 0], 'image-den-mode'
     assert rows['bin/git'][0][1] == 0o120777 and rows['bin/git'][1] == b'den', 'image-git-link'
-    # px100 (R-px100-1): den's service wrappers, user/den's bytes, 0755,
-    # root's, and /etc/shrc exporting the two variables that name them.
+    # px104 (R-px104-5, amending px100's R-px100-1): den's service wrappers,
+    # user/den's bytes, 0755, root's, on PATH under git's names; /etc/shrc
+    # names no service program, and nothing is left under /usr/libexec/den.
     for n in ('upload-pack', 'receive-pack'):
-        assert rows['usr/libexec/den/'+n][1] == (ROOT/'user/den'/n).read_bytes(), 'image-den-'+n
-        assert rows['usr/libexec/den/'+n][0][1] == 0o100755 and rows['usr/libexec/den/'+n][0][2:4] == [0, 0], 'image-den-'+n+'-mode'
+        assert rows['bin/git-'+n][1] == (ROOT/'user/den'/n).read_bytes(), 'image-den-'+n
+        assert rows['bin/git-'+n][0][1] == 0o100755 and rows['bin/git-'+n][0][2:4] == [0, 0], 'image-den-'+n+'-mode'
+    assert not any(name.startswith('usr/libexec/den/') for name in rows), 'image-den-libexec'
     shrc = rows['etc/shrc'][1].decode().splitlines()
-    for line in ('export DEN_UPLOAD_PACK=/usr/libexec/den/upload-pack', 'export DEN_RECEIVE_PACK=/usr/libexec/den/receive-pack'):
-        assert line in shrc, 'image-shrc-den'
+    assert not any(line.startswith(('export DEN_UPLOAD_PACK=', 'export DEN_RECEIVE_PACK=')) for line in shrc), 'image-shrc-den'
+    # px104: burrow as /bin/ssh and /bin/burrow-keygen, byte for byte as
+    # tools/mkburrow built them (never stripped), 0755, root's.
+    for name, built in (('ssh', 'burrow'), ('burrow-keygen', 'burrow-keygen')):
+        data = (inputs/'burrow'/built).read_bytes()
+        assert rows['bin/'+name][1] == data, 'image-burrow-'+name
+        assert rows['bin/'+name][0][1] == 0o100755 and rows['bin/'+name][0][2:4] == [0, 0], 'image-burrow-'+name+'-mode'
+        assert any(line.split()[:2] == [built, sha(data)] for line in (inputs/'burrow'/'sums.txt').read_text().splitlines()), 'image-burrow-sums-'+name
+    # px104 (R-px104-2): the root set den's TLS reads, tools/mkroots' bytes,
+    # 0644, and /etc/shrc naming it; GitHub's published host key for ssh;
+    # the resolver's host order (R-px104-1: /etc/hosts first).
+    assert rows['etc/ssl/certs/ca-roots.der'][1] == (inputs/'roots'/'ca-roots.der').read_bytes(), 'image-roots'
+    assert rows['etc/ssl/certs/ca-roots.der'][0][1] == 0o100644, 'image-roots-mode'
+    assert 'export DEN_TLS_ROOTS=/etc/ssl/certs/ca-roots.der' in shrc, 'image-shrc-roots'
+    for path, user in (('etc/ssh/ssh_known_hosts', 'ssh_known_hosts'), ('etc/nsswitch.conf', 'nsswitch.conf')):
+        assert rows[path][1] == (ROOT/'user'/user).read_bytes(), 'image-'+user
+        assert rows[path][0][1] == 0o100644 and rows[path][0][2:4] == [0, 0], 'image-'+user+'-mode'
     # px90 (R-px90-2): den's zone, the bytes of /etc/localtime.
     assert rows['usr/share/zoneinfo/UTC'][1] == rows['etc/localtime'][1] and len(rows['etc/localtime'][1]) == 114, 'image-zoneinfo-utc'
     assert rows['usr/share/zoneinfo/UTC'][0][1] == 0o100644, 'image-zoneinfo-mode'
@@ -104,7 +121,7 @@ def check(blob):
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers and /etc/shrc's two variables, sudo and its policy, /etc/pax-net, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, nsswitch.conf, sudo and its policy, /etc/pax-net, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
