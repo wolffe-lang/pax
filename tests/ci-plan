@@ -61,7 +61,7 @@ PR_LEGS = "--tier native --firmware bios"
 MERGE_LEGS = "--tier native --firmware bios"  # tl29: the merge gate's legs
 TIER_LEGS = {"all": "", "full": MERGE_LEGS, "pr": PR_LEGS, "noop": PR_LEGS}
 NIGHTLY_RED = os.path.join(ROOT, "tools", "nightly-red")
-NET = ["mpx4-net", "mpx4-udp", "mpx4-tcp", "mpx4-ready", "mpx4-session", "mpx4-unix", "mpx4-lobo", "mpx5-jobs", "mpx4-dhcp", "mpx4-igb", "mpx5-den", "mpx4-console-net"]  # px49: mpx5-jobs (gaps' TCP rows); px89: mpx4-dhcp, mpx4-igb; px100: mpx5-den (den daemon on the remote image's loopback); px105: mpx4-console-net
+NET = ["mpx4-net", "mpx4-udp", "mpx4-tcp", "mpx4-ready", "mpx4-session", "mpx4-unix", "mpx4-lobo", "mpx5-jobs", "mpx4-dhcp", "mpx4-igb", "mpx5-den", "mpx4-console-net", "mpx4-console-push"]  # px49: mpx5-jobs (gaps' TCP rows); px89: mpx4-dhcp, mpx4-igb; px100: mpx5-den (den daemon on the remote image's loopback); px105: mpx4-console-net; px104: mpx4-console-push
 MUSIC = ["mpx3-speaker", "mpx3-sound", "mpx3-orchestra", "mpx4-session", "mpx6-install"]
 fails = 0
 
@@ -173,9 +173,17 @@ expect("P2 a kmain selects its suites", plan(["kernel/kmain_sockets.lu"], **pr),
        has=["mpx4-udp", "mpx4-tcp", "mpx4-ready"], lacks=["mpx3-orchestra", "mpx2-heap"])
 expect("P2 the console's network reaches its suite, den's remote rows and the console's (px105)",
        plan(["kernel/kmain_console.lu"], **pr), "pr", has=["mpx4-console-net", "mpx5-den", "mpx3-console"], lacks=["mpx2-heap"])
-expect("P2 the shipped /etc/pax-net and the https row's den reach the console's network (px105)",
-       plan(["user/pax-net", "tests/mpx4-console-net.d/den-https.pin", "tools/mkden"], **pr), "pr",
+expect("P2 the shipped /etc/pax-net and the images' den reach the console's network (px105, px104)",
+       plan(["user/pax-net", "user/den.pin", "tools/mkden"], **pr), "pr",
        has=["mpx4-console-net", "mpx5-den", "census", "mpx6-install"], lacks=["mpx2-heap", "mpx4-tcp"])
+expect("P2 burrow, the root set, the host key and the host order reach the push suite and the distribution's checks (px104)",
+       plan(["user/burrow.pin", "tools/install-burrow", "user/roots.pin", "user/ssh_known_hosts", "user/nsswitch.conf"], **pr), "pr",
+       ["mpx4-console-push", "census", "mpx6-install"])
+expect("P2 the push suite's builders and fixtures are its own (px104)",
+       plan(["tools/mkburrow", "tools/mkroots", "tools/dns-fixture", "tools/secret-scan", "tests/mpx4-console-push.d/push.py"], **pr), "pr",
+       has=["mpx4-console-push"], lacks=["mpx2-heap", "mpx4-tcp"])
+expect("P2 the resolver's witnesses reach the network's suites (px104)",
+       plan(["user/net/dgramopts.c", "user/net/gai.c"], **pr), "pr", has=["mpx4-console-push", "mpx4-udp"], lacks=["mpx2-heap"])
 expect("P2 a test selects itself", plan(["tests/mpx3-tree"], **pr), "pr", has=["mpx3-tree"], lacks=["mpx4-tcp"])
 expect("P2 a user program selects its reader", plan(["user/elf/threads.c"], **pr), "pr", has=["mpx3-threads"], lacks=["mpx4-tcp"])
 expect("P2 the bus the sound device shares", plan(["kernel/pci/pci.lu"], **pr), "pr", has=["mpx4-net", "mpx3-sound"], lacks=["mpx2-heap"])
@@ -381,7 +389,7 @@ expect("P2 the pelt and boreutils pins reach mpx5-jobs and the shell's suites (p
 # file and the typed session are mpx5-lope's alone; the keys file is
 # read by the suites that read user/console too.
 expect("P2 lope's inputs reach its own suite and the disk playground (px54, px69), and /etc/shrc's den lines mpx5-den's remote image (px100)",
-       plan(["user/lope.pin", "tools/mklope", "user/shrc"], **pr), "pr", ["mpx5-lope", "mpx5-den", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-kasumi", "mpx4-console-net"])
+       plan(["user/lope.pin", "tools/mklope", "user/shrc"], **pr), "pr", ["mpx5-lope", "mpx5-den", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-kasumi", "mpx4-console-net", "mpx4-console-push"])  # px104: its image's /etc/shrc
 # px105: mpx4-console-net's https row builds its own den through tools/mkden,
 # so what mkden's text names (user/den.pin, tools/install-den and, through
 # it, den's wrappers and user/shrc) reaches that suite too.
@@ -454,7 +462,7 @@ expect("P2 scent's session keys reach mpx5-scent (and the suites that read user/
 # px90: den's pin, builder, keys and rows are mpx5-den's; its installer
 # reaches the distribution's checks too (tools/distribution-root runs it).
 expect("P2 den's pin and builder are mpx5-den's, and the console's https row's (px90, px105)",
-       plan(["user/den.pin", "tools/mkden"], **pr), "pr", ["mpx5-den", "mpx4-console-net"])
+       plan(["user/den.pin", "tools/mkden"], **pr), "pr", ["mpx5-den", "mpx4-console-net", "mpx4-console-push"])  # px104: the push suite's den
 expect("P2 den's session keys reach mpx5-den (px90)",
        plan(["user/console/den.keys"], **pr), "pr", has=["mpx5-den"], lacks=["mpx2-heap", "mpx4-tcp", "mpx5-scent"])
 expect("P2 den's extractor and rows are mpx5-den's alone (px90)",
@@ -462,9 +470,9 @@ expect("P2 den's extractor and rows are mpx5-den's alone (px90)",
 expect("P2 den's remote session keys reach mpx5-den (px100)",
        plan(["user/console/den-remote.keys"], **pr), "pr", has=["mpx5-den"], lacks=["mpx2-heap", "mpx4-tcp", "mpx5-scent"])
 expect("P2 den's service wrappers reach mpx5-den and the distribution's checks, as its installer does (px100)",
-       plan(["user/den/upload-pack", "user/den/receive-pack"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net"])
+       plan(["user/den/upload-pack", "user/den/receive-pack"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net", "mpx4-console-push"])
 expect("P2 den's installer reaches mpx5-den and the distribution's checks (px90)",
-       plan(["tools/install-den"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net"])
+       plan(["tools/install-den"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net", "mpx4-console-push"])
 expect("P2 ext2 and the virtio disk reach mpx5-den's /home (px90)",
        plan(["kernel/ext2/ext2.lu", "kernel/vblk/vblk.lu"], **pr), "pr", has=["mpx5-den", "mpx6-ext2"], lacks=["mpx2-heap"])
 expect("P2 scent's fixture and rows are mpx5-scent's alone (px64)",
