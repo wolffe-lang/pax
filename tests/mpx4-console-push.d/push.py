@@ -594,7 +594,7 @@ def way_https(out, images, c, den_src, git):
         # header of a 0600 configuration in the carrier.
         cfg = c / 'gitconfig'
         basic = base64.b64encode(('x-access-token:' + token).encode()).decode()
-        cfg.write_text('[url "%s"]\n\tinsteadOf = live-https:\n[http]\n\tsslCAInfo = %s\n\tcurloptResolve = github.com:%d:127.0.0.1\n'
+        cfg.write_text('[url "%s"]\n\tinsteadOf = rows-https:\n[http]\n\tsslCAInfo = %s\n\tcurloptResolve = github.com:%d:127.0.0.1\n'
                        '\textraHeader = Authorization: Basic %s\n[protocol]\n\tversion = 2\n' % (url, pki / 'ca.pem', port, basic))
         os.chmod(cfg, 0o600)
         genv = dict(env, GIT_CONFIG_GLOBAL=str(cfg))
@@ -603,11 +603,11 @@ def way_https(out, images, c, den_src, git):
             'echo ROW H8; DEN_TLS_ROOTS=/etc/ssl/certs/ca-roots.der s den clone -q https://github.com:%d/remote.git c8' % port,
             'export DEN_TLS_ROOTS=/etc/ssl/rows-roots.der',
         ] + den_steps('H', 'https://github.com:%d/remote.git' % port, 'px104/pushed') + CANARY.splitlines()
-        hooks = {'H-pushed': hook(c, 'H-pushed', git, genv, 'live-https:', 'refs/heads/px104/pushed'),
-                 'H-deleted': hook(c, 'H-deleted', git, genv, 'live-https:', 'refs/heads/px104/*')}
+        hooks = {'H-pushed': hook(c, 'H-pushed', git, genv, 'rows-https:', 'refs/heads/px104/pushed'),
+                 'H-deleted': hook(c, 'H-deleted', git, genv, 'rows-https:', 'refs/heads/px104/*')}
         iso = image(images, out, 'https', {'/etc/ssl/rows-roots.der': (rows_roots, '644')}, 'hermetic.pax-net')
         log = boot(out, iso, keys, c, user_net(), hooks)
-        gitres = git_steps(git, genv, 'live-https:', work, 'px104/git-pushed')
+        gitres = git_steps(git, genv, 'rows-https:', work, 'px104/git-pushed')
     finally:
         dns.close()
         server.close()
@@ -699,7 +699,7 @@ def way_ssh(out, images, c, git):
                                      % (port, user, c / 'd/key', work / 'known_hosts'))
     cfg = c / 'gitconfig'
     url = '%s@github.com:%s/%s.git' % (user, ORG, name)
-    cfg.write_text('[url "%s"]\n\tinsteadOf = live-ssh:\n[core]\n\tsshCommand = ssh -F %s\n[protocol]\n\tversion = 2\n'
+    cfg.write_text('[url "%s"]\n\tinsteadOf = rows-ssh:\n[core]\n\tsshCommand = ssh -F %s\n[protocol]\n\tversion = 2\n'
                    % (url, work / 'ssh_config'))
     os.chmod(cfg, 0o600)
     genv = dict(env, GIT_CONFIG_GLOBAL=str(cfg))
@@ -716,11 +716,11 @@ def way_ssh(out, images, c, git):
             'echo ROW S0; s den push -q %s HEAD:refs/heads/px104-zero' % u,
             'cd /tmp',
         ] + den_steps('S', u, 'px104/pushed') + CANARY.splitlines()
-        hooks = {'S-pushed': hook(c, 'S-pushed', git, genv, 'live-ssh:', 'refs/heads/px104/pushed'),
-                 'S-deleted': hook(c, 'S-deleted', git, genv, 'live-ssh:', 'refs/heads/px104/*')}
+        hooks = {'S-pushed': hook(c, 'S-pushed', git, genv, 'rows-ssh:', 'refs/heads/px104/pushed'),
+                 'S-deleted': hook(c, 'S-deleted', git, genv, 'rows-ssh:', 'refs/heads/px104/*')}
         iso = image(images, out, 'ssh', {}, 'hermetic.pax-net')
         log = boot(out, iso, keys, c, user_net(), hooks)
-        gitres = git_steps(git, genv, 'live-ssh:', work, 'px104/git-pushed')
+        gitres = git_steps(git, genv, 'rows-ssh:', work, 'px104/git-pushed')
     finally:
         dns.close()
         sshd.terminate()
