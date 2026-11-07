@@ -46,12 +46,12 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx4-console-net
 
 | | predicted | measured | |
 |---|---|---|---|
-| R-px105-1 size | A: under 4 KiB more ELF a tier, under 0.5 % | on `84a1fde3`: native 3,410,880 → 3,430,168 bytes, +19,288 (0.57 %); rebased on `571576bf`: native 3,502,528 → 3,525,936, +23,408 (0.67 %), release 2,669,240 → 2,701,376, +32,136 (1.20 %) | **wrong**: the bring-up, the static parser and the lines are five to eight times the guess; native under 1 %, release 1.2 % |
+| R-px105-1 size | A: under 4 KiB more ELF a tier, under 0.5 % | on `84a1fde3`: native 3,410,880 → 3,430,168 bytes, +19,288 (0.57 %); rebased on `571576bf` (head `d278eab8`, before the unnumbered lines): native 3,502,528 → 3,525,936, +23,408 (0.67 %), release 2,669,240 → 2,701,376, +32,136 (1.20 %) | **wrong**: the bring-up, the static parser and the lines are five to eight times the guess; native under 1 %, release 1.2 % |
 | boot, no device | under 10 ms more | `boot:` 201 and 203 ms at the base, 199 and 198 at the head (none, nofile) | held |
 | boot, virtio-net + QEMU's DHCP | under 0.2 s more | 264 ms (base 200): +64 ms; the console waited 64 ms | held |
 | boot, igb + QEMU's DHCP | about 1.5 s more (the 82576's PHY restart) | 1,792 ms (base 200): +1.6 s; waited 1,593 ms | held |
 | every console row | five more lines before `run 1:` with no device; one more kernel thread; 333 frames fewer | six: the five and R-px105-5's waited line (`notes/px105/probe1.txt`'s base log against the head's, numbers aside); no other line moved | held, with the sixth line the prediction's own R-px105-5 asks for |
-| no existing row's assertion moves | | the gauntlet's suites (the record) and the labelled full tier | see the record |
+| no existing row's assertion moves | | one moved: CI's `mpx6-firmware` (F10, `tests/mpx6-triage`'s T2, a plain boot's transcript against a triage boot's, line for line) caught the udp and tcp lines' ephemeral start, random each boot, which the console now printed; the local gauntlet never ran that suite | **wrong**, fixed (§4.1): the console's two lines name the start and do not print it, C7 holding them, red first; T2 also masks the console's measured wait, as it masks the boot's time |
 | C1-C9, H1-H5 red at the base by name | | red at the rows tip (the base's kernel): C1-C7 and C9 by name; C8 (the halt) held there, as a base kernel halts; H1-H5 red, den's clone never returning and the fixture seeing no request (§4.2) | held |
 | mpx5-den R4 red at the base at prompt 73 | | red at the rows tip: R1 (both sessions), R3, and R4 at prompt 73 (`QEMU ended before prompt 73`), D0-D4 held; green at the head, R0-R4 (§4.2) | held |
 | C1-C9, H1-H5 green at the head | | green on BIOS and UEFI (§4.2) | held |
@@ -78,6 +78,10 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx4-console-net
   `net: /etc/pax-net: <why>` line and the fixed address), quiet's routine lines (R-px105-3), and `echo_of`, one
   echo loop for the router and the gateway.
 - **kernel/net, kernel/gbe**: `link()` (STATUS.LU read at the call; virtio-net always) and `intel()`.
+- **kernel/udp, kernel/tcp**: `report_unnumbered()`, the first line with `from a random start` for the ephemeral
+  start, which stays random; the console prints these, so its transcript reads the same every boot. The socket
+  kernels keep `report()` and the number their suites read. `tests/mpx6-triage`'s T2 masks the console's measured
+  wait (`waited N ms`), its bound kept.
 - **kmain_session, kmain_sockets**: the static line and the gateway's echo; with no file, every line as it was.
 - **The shipped roots**: `/etc/pax-net` from `user/pax-net` (`dhcp wait=10`, its grammar in comments), in both
   roots (`tools/distribution-root`), held by `tests/distribution`. A fresh install copies it from the live tree;
@@ -172,6 +176,7 @@ None filed or closed by this lane. For the orchestrator to consider:
   the last stick; green on the next stick, the stick lane's.
 - [x] Every row red first at the rows tip, before the first kernel commit.
 - [x] README, kernel/README.md, docs/SOURCES.md and CHANGELOG (README-only commits for README).
-- [ ] The gauntlet green at the final head, every END line in the PR body (after the rebase onto the named trunk).
-- [ ] The plant red by name in its own record.
-- [ ] The audit, once.
+- [x] `tests/mpx6-firmware` (F10's T2 and F11 at the console kernel): red in CI at `5c5ad7e5`, green at the head.
+- [x] The gauntlet green at the final head, every END line in the PR body (after the rebase onto the named trunk).
+- [x] The plant red by name in its own record (the PR body).
+- [x] The audit, once (the hand-back).
