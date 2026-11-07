@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# mkroots — the root set PAX ships for den's TLS (px104, R-px104-2):
+# user/roots.pin's PEM bundle (curl's extract of Mozilla's store),
+# fetched by name into PAX_CACHE, its sha256 read twice and refused unless
+# both reads are the pin's, then converted to den's form, the certificates'
+# DER concatenated (den's README, "Smart HTTP and HTTPS").
+#
+#   tools/mkroots OUTDIR
+#
+# The decoder is PAX's own, from RFC 7468 section 2 alone: each
+# `-----BEGIN CERTIFICATE-----` … `-----END CERTIFICATE-----` block's
+# base64 (whitespace removed, decoded strictly), which must be a DER
+# SEQUENCE; the text between blocks (curl's comments, each certificate's
+# name and fingerprint line) is not read. The result is refused unless it
+# is the pin's count of certificates and its bytes have the pin's sha256;
+# with openssl on PATH (a black box) it must also be the bytes of
+# `openssl x509 -outform DER` of each block, concatenated. OUTDIR gets
+# ca-roots.der and sums.txt (`ca-roots.der <sha256> <bytes> <count>`).
+# Exit 0, or 2 on a refusal or a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkroots OUTDIR"
+out=$1
+need curl python3
+. "$PAX_ROOT/user/roots.pin"
+[ -n "${ROOTS_URL:-}" ] && printf '%s' "${ROOTS_PEM_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$' \
+    && printf '%s' "${ROOTS_DER_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$' && [ -n "${ROOTS_COUNT:-}" ] \
+    || die "user/roots.pin must set ROOTS_URL, ROOTS_PEM_SHA256, ROOTS_COUNT and ROOTS_DER_SHA256"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+pem=$PAX_CACHE/${ROOTS_URL##*/}
+if [ ! -f "$pem" ] || [ "$(sha256_of "$pem")" != "$ROOTS_PEM_SHA256" ]; then
+    curl -sSfL --retry 3 -o "$pem.part" "$ROOTS_URL" || die "cannot download $ROOTS_URL"
+    mv "$pem.part" "$pem"
+fi
+for k in 1 2; do
+    have=$(sha256_of "$pem")
+    [ "$have" = "$ROOTS_PEM_SHA256" ] || die "${pem##*/}, read $k: sha256 $have, the pin says $ROOTS_PEM_SHA256"
+done
+say "${pem##*/}: sha256 $ROOTS_PEM_SHA256, read twice"
+python3 -I - "$pem" "$out/ca-roots.der" "$ROOTS_COUNT" "$ROOTS_DER_SHA256" <<'PY'
+import base64, binascii, hashlib, sys
+src, dst, count, want = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+text = open(src, 'rb').read()
+begin, end = b'-----BEGIN CERTIFICATE-----', b'-----END CERTIFICATE-----'
+out, n, pos = bytearray(), 0, 0
+while True:
+    start = text.find(begin, pos)
+    if start < 0:
+        break
+    stop = text.find(end, start)
+    if stop < 0:
+        sys.exit('mkroots: an unterminated certificate block')
+    try:
+        der = base64.b64decode(b''.join(text[start + len(begin):stop].split()), validate=True)
+    except binascii.Error as e:
+        sys.exit('mkroots: certificate %d: %s' % (n + 1, e))
+    if len(der) < 2 or der[0] != 0x30:
+        sys.exit('mkroots: certificate %d is not a DER SEQUENCE' % (n + 1))
+    out += der
+    n += 1
+    pos = stop + len(end)
+digest = hashlib.sha256(out).hexdigest()
+if n != count or digest != want:
+    sys.exit('mkroots: %d certificates, sha256 %s; the pin says %d and %s' % (n, digest, count, want))
+open(dst, 'wb').write(out)
+print('%d certificates, %d bytes, sha256 %s' % (n, len(out), digest), file=sys.stderr)
+PY
+if command -v openssl >/dev/null 2>&1; then
+    w=$(mktemp -d "${TMPDIR:-/tmp}/pax-roots.XXXXXX")
+    trap 'rm -rf "$w"' EXIT
+    awk -v d="$w" '/-----BEGIN CERTIFICATE-----/ { n++; f = sprintf("%s/%04d.pem", d, n) } f { print > f } /-----END CERTIFICATE-----/ { close(f); f = "" }' "$pem"
+    : > "$w/all.der"
+    for c in "$w"/*.pem; do openssl x509 -in "$c" -outform DER >> "$w/all.der" || die "openssl x509: $c"; done
+    cmp -s "$w/all.der" "$out/ca-roots.der" || die "the decoder's bytes are not openssl's per-certificate DER"
+    say "the same bytes as openssl x509 -outform DER of each certificate ($(openssl version))"
+else
+    say "no openssl on PATH: the cross-check is not made"
+fi
+printf 'ca-roots.der %s %s %s\n' "$(sha256_of "$out/ca-roots.der")" "$(wc -c < "$out/ca-roots.der" | tr -d ' ')" "$ROOTS_COUNT" | tee "$out/sums.txt"
