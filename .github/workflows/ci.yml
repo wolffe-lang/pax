@@ -3142,14 +3142,20 @@ jobs:
   # notes/px103/sudo-ct.sh in a throwaway Ubuntu 24.04 container with no
   # network, every row held to Ubuntu's recorded output, the differences
   # by name (notes/px103/ctnamed.txt). The ptrace rows say SKIP by name
-  # until px102 is on the base.
+  # until px102 is on the base. px106: passwords. tools/mkauth builds su,
+  # sudo, passwd and login (user/auth: wolf 0.2.36 and wolf-std's `$7$`
+  # hash, by digest and commit); four typed sessions with passwords made at
+  # run time (pw, login, login-max, login-first) on PAX, held to the same
+  # keys typed at PAX's programs and at Ubuntu's own in a throwaway Ubuntu
+  # 24.04 container (notes/px106/auth-ct.sh, notes/px106/named.txt); the
+  # delays, the no-terminal rows, the shadow file, the hash's cost on PAX.
   mpx5-sudo:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-sudo')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -3176,7 +3182,7 @@ jobs:
       - name: fetch limine (by digest)
         run: tools/fetch-limine
 
-      - name: set-ID execution against a real Linux's recording, sudo's rows, sudo against Ubuntu's; the plan's legs (all four in the all tier)
+      - name: set-ID execution against a real Linux's recording, sudo's rows, sudo against Ubuntu's, the password sessions; the plan's legs (all four in the all tier)
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
@@ -3190,6 +3196,12 @@ jobs:
           path: |
             build/mpx5-sudo/*.txt
             build/mpx5-sudo-linux/pax.txt
+            build/mpx5-sudo-auth/*.log
+            build/mpx5-sudo-auth/out/*/*.tty
+            build/mpx5-sudo-auth/out/*/*.times
+            build/mpx5-sudo-auth/out/*/*.run
+            build/mpx5-sudo-auth/out/*/setup.txt
+            build/mpx5-sudo-auth/out/*/stdin.txt
             build/mpx5-sudo-*.session
             build/mpx5-sudo-*.log
             build/mpx5-sudo-*.norm
