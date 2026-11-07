@@ -50,7 +50,19 @@ name:
                0440 root:root and the shipped bytes, /var/log a root directory,
                the log 0600 root:root. U13f after a fresh install from the new
                stick, U13d after the upgrade of the 8b4e98ae dev install (the
-               860's), U13a after the upgrade of the 9c88ec8a install.
+               860's), U13a after the upgrade of the 9c88ec8a install. px106: the
+               console's /bin/login let root in with no password and said so
+               (every account locked); on the disk /bin/su and /bin/passwd
+               04755, /bin/login 0755, /etc/shadow 0600 root:root with one locked
+               line for each /etc/passwd account (written by the fresh install,
+               made by the upgrade where the old install had none).
+  U15 passwords (px106) a fresh install from the new stick that sets root's
+               and wolf's passwords (made at run time) at the installer's
+               questions: on the disk their lines are $7$ and lobo's locked;
+               booted, login asks root's password (a wrong one: Login
+               incorrect; the right one: the shell); the upgrade with the same
+               stick keeps /etc/shadow byte for byte ("shadow: /etc/shadow
+               kept, never touched"); booted again, login still asks.
 Every boot: the NVMe, Steam and SanDisk images byte-identical.
 """
 from pathlib import Path
@@ -69,7 +81,7 @@ import time
 repo, work, old_src, new_src = map(Path, sys.argv[1:5])
 ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7',
                                                         'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11', 'U12',
-                                                        'U13a', 'U13d', 'U13f', 'U14']
+                                                        'U13a', 'U13d', 'U13f', 'U14', 'U15']
 DEV_SRC = Path(os.environ['PAX_UPGRADE_DEV_STICK']) if os.environ.get('PAX_UPGRADE_DEV_STICK') else None
 work.mkdir(parents=True, exist_ok=True)
 SERIAL = os.environ['PAX_UPGRADE_SERIAL']
@@ -461,11 +473,26 @@ def need(text, needle, row):
         fail(row, f'missing {needle!r} on the screen:\n{text}')
 
 
-def login(m, row, timeout=900):
-    s = m.wait(r'^login: *$', row, timeout)
+def login(m, row, timeout=900, password=None, first_boot=None):
+    """root's login: the stick's live entry (`login: `) or, px106, the installed /bin/login
+    (`pax login: `), with root's password when one is set; first_boot True needs /bin/login's
+    first-boot line (every account locked), False its absence."""
+    s = m.wait(r'^(\S+ )?login: *$', row, timeout)
     m.type('root\n')
-    m.wait(PROMPT, row, 120, last=True)
+    if password is not None:
+        m.wait(r'Password: *$', row, 120, last=True)
+        m.type(password + '\n')
+    t = m.wait(PROMPT, row, 300, last=True)
+    seen = FIRST_BOOT in m.unwrapped(t)
+    if first_boot is True and not seen:
+        fail(row, 'no first-boot line: root was let in with no password and nothing said so')
+    if first_boot is False and seen:
+        fail(row, 'the first-boot line with a password set: the door is open')
     return s
+
+
+FIRST_BOOT = 'PAX: no account here has a password, so root logs in without one; set one with passwd.'
+PW = {'root': secrets.token_hex(6), 'wolf': secrets.token_hex(6), 'wrong': secrets.token_hex(6)}
 
 
 def poweroff(m, row):
@@ -583,8 +610,9 @@ def disks(size=None, used=None):
     result.setdefault('witnesses', []).append(dict(WITNESS))
 
 
-def install_from(stick, sym, name, row):
-    """The stick's guided install onto /dev/sdc: user wolf, no games, yes."""
+def install_from(stick, sym, name, row, passwords=None):
+    """The stick's guided install onto /dev/sdc: user wolf, no games, yes; px106: a stick that asks
+    for root's and wolf's passwords is answered n (both locked), or y with `passwords` (made at run time)."""
     m = Machine(name, sym, stick)
     try:
         login(m, row)
@@ -601,7 +629,22 @@ def install_from(stick, sym, name, row):
         m.wait(r'Type yes to install; anything else cancels: pax-install> *$', row, 300, bad=STOPPED)
         m.type('yes\n')
         t = time.monotonic()
-        m.wait(r'^Installation complete', row, 3600, bad=STOPPED)
+        s = m.wait(r'(Set a password for root now\? .*pax-install> *$|^Installation complete)', row, 3600, bad=STOPPED)
+        if re.search(r'Set a password for root now\?', m.unwrapped(s)):
+            for who in ('root', 'wolf'):
+                m.wait(rf'Set a password for {who} now\? .*pax-install> *$', row, 120, last=True, bad=STOPPED)
+                pw = (passwords or {}).get(who)
+                m.type('y\n' if pw else 'n\n')
+                if pw:
+                    m.wait(r'New password: *$', row, 120, last=True)
+                    m.type(pw + '\n')
+                    m.wait(r'Retype new password: *$', row, 120, last=True)
+                    m.type(pw + '\n')
+                    m.wait(rf"{who}'s password is set", row, 300, bad=STOPPED + rf"|{who} is locked")
+            t = time.monotonic()
+            m.wait(r'^Installation complete', row, 3600, bad=STOPPED)
+        elif passwords:
+            fail(row, 'the stick asked for no password')
         secs = round(time.monotonic() - t, 2)
         m.wait(r'poweroff to power off', row, 120)
         poweroff(m, row)
@@ -802,7 +845,7 @@ def sudo_boot(name, row):
     then the disk read on the host: sudo's and sudoers' modes and owners, /var/log, the log line."""
     m = Machine(name, C['sym_new'], None)
     try:
-        s = login(m, row)
+        s = login(m, row, first_boot=True)
         need(m.unwrapped(s), f'kernel: {C["new_commit"]}', row)
         for c, want in [("/bin/su wolf -c '/bin/id' > /root/w0.txt 2>&1; echo w0=$?", 'w0=0'),
                         ("/bin/su wolf -c '/bin/sudo /bin/id' > /root/w1.txt 2>&1; echo w1=$?", 'w1=0')]:
@@ -814,9 +857,11 @@ def sudo_boot(name, row):
     check_witnesses(row)
     img = root_image(work/f'{name}-root.img')
     try:
-        have = {p: debugfs_stat(img, p, row) for p in ('/bin/sudo', '/etc/sudoers', '/var/log')}
+        have = {p: debugfs_stat(img, p, row) for p in ('/bin/sudo', '/etc/sudoers', '/var/log', '/bin/su', '/bin/passwd', '/bin/login', '/etc/shadow')}
         for p, want in (('/bin/sudo', ('regular', 0o4755, 0, 0)), ('/etc/sudoers', ('regular', 0o440, 0, 0)),
-                        ('/var/log', ('directory', 0o755, 0, 0))):
+                        ('/var/log', ('directory', 0o755, 0, 0)), ('/bin/su', ('regular', 0o4755, 0, 0)),
+                        ('/bin/passwd', ('regular', 0o4755, 0, 0)), ('/bin/login', ('regular', 0o755, 0, 0)),
+                        ('/etc/shadow', ('regular', 0o600, 0, 0))):
             if have[p] != want:
                 fail(row, f'{p} on the disk is {have[p]} (type, mode, uid, gid); want {want}')
         if debugfs_cat(img, '/etc/sudoers', row) != (repo/'user/sudo/sudoers').read_bytes():
@@ -828,6 +873,8 @@ def sudo_boot(name, row):
         if logst != ('regular', 0o600, 0, 0):
             fail(row, f'/var/log/sudo.log is {logst}; want regular 0600 0 0')
         text = debugfs_cat(img, '/var/log/sudo.log', row).decode(errors='replace')
+        shadow = debugfs_cat(img, '/etc/shadow', row).decode(errors='replace')
+        accounts = [l.split(':')[0] for l in debugfs_cat(img, '/etc/passwd', row).decode(errors='replace').splitlines() if l.count(':') >= 6]
         w0 = debugfs_cat(img, '/root/w0.txt', row).decode(errors='replace')
         w1 = debugfs_cat(img, '/root/w1.txt', row).decode(errors='replace')
     finally:
@@ -838,6 +885,10 @@ def sudo_boot(name, row):
         fail(row, f'sudo /bin/id as uid 1000 printed {w1!r}')
     if not re.search(r'^\w{3} [ \d]\d \d\d:\d\d:\d\d : wolf : .*USER=root ; COMMAND=/bin/id$', text.replace('\n    ', ' '), re.M):
         fail(row, f'/var/log/sudo.log has no line for wolf running /bin/id: {text!r}')
+    # px106: one locked line for each account, none with a password.
+    lines = {l.split(':')[0]: l.split(':') for l in shadow.splitlines() if l.count(':') == 8}
+    if sorted(lines) != sorted(accounts) or any(f[1] not in ('*', '!') for f in lines.values()):
+        fail(row, f'/etc/shadow is not one locked line an account ({accounts}): {[(n, f[1][:3]) for n, f in lines.items()]}')
     return have, w1.strip(), text.strip()
 
 
@@ -847,7 +898,9 @@ def passed_sudo(name, row, what, fresh=False):
     log(f'{row}: {log_text}')
     (work/f'{row}.txt').write_text(f'{what}\nstat (type, mode, uid, gid): {have}\nsudo /bin/id as uid 1000: {out}\n/var/log/sudo.log:\n{log_text}\n')
     passed(row, f'{what}: booted; /bin/sudo 04755 0:0, /etc/sudoers 0440 0:0 (user/sudo/sudoers\' bytes), /var/log a root directory; '
-           f'uid 1000 ran /bin/sudo /bin/id and it printed {out!r}; /var/log/sudo.log 0600 0:0 holds the line')
+           f'uid 1000 ran /bin/sudo /bin/id and it printed {out!r}; /var/log/sudo.log 0600 0:0 holds the line; '
+           f'px106: login let root in with no password and said so; /bin/su and /bin/passwd 04755, /bin/login 0755, '
+           f'/etc/shadow 0600 0:0, every account locked')
 
 
 SESSION = Path(__file__).resolve().parent/'sudo-session.txt'
@@ -1105,6 +1158,8 @@ def track_x():
         u11()
     if 'U12' in ROWS:
         u12()
+    if 'U15' in ROWS:
+        u15()
 
 
 def u9():
@@ -1120,6 +1175,54 @@ def u9():
         outd = sudo_session('u14', 'U14-sudo-session')
         passed('U14-sudo-session', f'typed at the installed console as root, uid 1000 and lobo; captures in {outd.name}/')
     passed('U9-fresh', f'the new stick installed the target in {secs} s with its own /etc/pax-install/manifest; the upgrade with the same stick read it, no baseline: "Nothing to change", every path as it was')
+
+
+def u15():
+    """px106: a fresh install with root's and wolf's passwords; login asks; an upgrade keeps shadow."""
+    row = 'U15-passwords'
+    disks()
+    secs = install_from(C['new'], C['sym_new'], 'u15-install', row, passwords={'root': PW['root'], 'wolf': PW['wolf']})
+    img = root_image(work/'u15-root.img')
+    try:
+        st = debugfs_stat(img, '/etc/shadow', row)
+        shadow0 = debugfs_cat(img, '/etc/shadow', row)
+    finally:
+        img.unlink()
+    if st != ('regular', 0o600, 0, 0):
+        fail(row, f'/etc/shadow is {st}; want regular 0600 0 0')
+    f = {l.split(':')[0]: l.split(':')[1] for l in shadow0.decode(errors='replace').splitlines() if l.count(':') == 8}
+    if not (f.get('root', '').startswith('$7$') and f.get('wolf', '').startswith('$7$') and f.get('lobo') == '!'):
+        fail(row, f'the passwords are not $7$ lines, or lobo is not locked: {[(n, v[:4]) for n, v in f.items()]}')
+    def boot(name):
+        m = Machine(name, C['sym_new'], None)
+        try:
+            m.wait(r'^(\S+ )?login: *$', row, 900)
+            m.type('root\n')
+            m.wait(r'Password: *$', row, 120, last=True)
+            m.type(PW['wrong'] + '\n')
+            s = m.wait(r'^Login incorrect', row, 120)
+            if FIRST_BOOT in m.unwrapped(s):
+                fail(row, 'the first-boot line with passwords set')
+            login(m, row, timeout=120, password=PW['root'], first_boot=False)
+            s = m.command('id -u; echo id=$?', row)
+            need(m.unwrapped(s), 'id=0', row)
+            poweroff(m, row)
+        finally:
+            m.kill()
+        check_witnesses(row)
+    boot('u15-boot')
+    rows0, _rc, _t = tree('u15-before', row)
+    again('u15-again', row, rows0, needles=['shadow: /etc/shadow kept, never touched'])
+    img = root_image(work/'u15-root.img')
+    try:
+        shadow1 = debugfs_cat(img, '/etc/shadow', row)
+    finally:
+        img.unlink()
+    if shadow1 != shadow0:
+        fail(row, 'the upgrade changed /etc/shadow')
+    boot('u15-boot-after')
+    passed(row, f'installed in {secs} s with root\'s and wolf\'s passwords set at the questions ($7$ lines, lobo locked, 0600 0:0); '
+           f'login asked root\'s password (a wrong one: Login incorrect), before and after an upgrade that kept /etc/shadow byte for byte')
 
 
 def u10():
@@ -1253,7 +1356,7 @@ def main():
         track_a()
     if 'U1d' in ROWS:
         track_d()
-    if any(r in ROWS for r in ('U9', 'U10', 'U11', 'U12')):
+    if any(r in ROWS for r in ('U9', 'U10', 'U11', 'U12', 'U15')):
         track_x()
     result['leg_seconds'] = round(time.monotonic() - t_leg, 2)
     save()
