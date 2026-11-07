@@ -658,7 +658,8 @@ def way_ssh(out, images, c, git):
     pub = (c / 'key.pub').read_text().split()
     (d / 'record-command').write_text(RECORD.format(d=d, root=root))
     os.chmod(d / 'record-command', 0o755)
-    (d / 'authorized_keys').write_text('command="%s",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding %s %s\n'
+    # The forced command is read by sh, never exec'd: the carrier's tmpfs may be noexec.
+    (d / 'authorized_keys').write_text('command="/bin/sh %s",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding %s %s\n'
                                        % (d / 'record-command', pub[0], pub[1]))
     port = free_port()
     (d / 'sshd_config').write_text(SSHD.format(port=port, d=d))
