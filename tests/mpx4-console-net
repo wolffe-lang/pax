@@ -29,9 +29,9 @@
 #            `cont` all show igb a link 1.5 s after the driver's PHY
 #            restart: notes/px105/probe1.txt, probe2.txt); /etc/pax-net
 #            `dhcp`
-#   nonet    igb on QEMU's user network, the kernel booted with `triage
-#            nonet` (mpx4-console-net.d/limine-nonet.conf): no device is
-#            started; /etc/pax-net `dhcp`
+#   nonet    igb on QEMU's user network, the kernel booted with `nonet`
+#            (mpx4-console-net.d/limine-nonet.conf): no device is started;
+#            /etc/pax-net `dhcp`
 #   silent   virtio-net on a hub with nothing else on it (frames leave,
 #            nothing answers); /etc/pax-net `dhcp wait=5`
 #   quiet    virtio-net on a tap with dnsmasq (tools/dhcp-wire's renew:
@@ -65,7 +65,7 @@
 #      no link; the console does not wait for a lease (the client goes on
 #      asking)`.
 #   C5 (silent) `dhcp: no lease after 5 s; the client goes on asking`.
-#   C9 (nonet) `net: no device (triage nonet); loopback only`, no line of
+#   C9 (nonet) `net: no device (nonet); loopback only`, no line of
 #      the controller's, `dhcp: no network device is up; the fixed address
 #      stays`.
 #   C6 (quiet) under `quiet` the renewal happens (the capture holds the
@@ -365,9 +365,9 @@ one() { # tier leg way
             [ -z "$why" ] && say "PASS C4 $L: $(grep -m1 '^net: NO link' "$norm" | cut -c1-80); $(grep -m1 '^dhcp: no link' "$norm" | cut -c7-)" || bad "C4 $L:$why"
             ;;
         nonet)
-            # --- C9: triage nonet -----------------------------------------------
+            # --- C9: nonet --------------------------------------------------------
             why=
-            before_run "$norm" '^net: no device \(triage nonet\); loopback only$' || why+=" no 'net: no device (triage nonet)' before run 1;"
+            before_run "$norm" '^net: no device \(nonet\); loopback only$' || why+=" no 'net: no device (nonet)' before run 1;"
             ! has "$norm" '^net: (Intel|virtio-net|link|NO link|regs) ' || why+=" a device line: '$(grep -m1 -E '^net: (Intel|virtio-net|link|NO link|regs) ' "$norm")';"
             before_run "$norm" '^dhcp: no network device is up; the fixed address stays$' || why+=" no 'dhcp: no network device is up' before run 1;"
             [ -z "$why" ] && say "PASS C9 $L: $(grep -m1 '^net: no device' "$norm"); $(grep -m1 '^dhcp: ' "$norm")" || bad "C9 $L:$why"
