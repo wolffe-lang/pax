@@ -1919,6 +1919,17 @@ below and the black-box runs in `notes/px89/blackbox.txt`.
 | Ubuntu 24.04's `sudo` 1.9.15p5-3ubuntu5.24.04.4 and `su`, in a throwaway container with no network | black box | run: every message, status, environment and log line of `notes/px103/sudo-ct.sh`, recorded in `notes/px103/ubuntu.txt`; never read | `user/sudo`, `tests/mpx5-sudo` |
 | Linux 7.2.4 (a distribution kernel image, bzImage sha256 `37a40a926373f3714f12e883fc37fe195704a56a259bee7381e5cdb0d8db3396`) booted under QEMU with `user/elf/sid.c` as init | black box | run: every row of `tests/mpx5-sudo.d/linux/sid.txt` (`notes/px103/record-sid.sh`); fs.suid_dumpable is the kernel's default 0 | `tests/mpx5-sudo` |
 
+## px106 — passwords
+
+No implementation of login, passwd, su, sudo, shadow-utils, util-linux, PAM, any libc or any crypt was read; Ubuntu's
+programs were run as black boxes only, and the hash is the org's own wolf-std.
+
+| Source | Version | Use | Where |
+|---|---|---|---|
+| wolf-std's `std.x.crypto.passwd` and `std.x.crypto.scrypt` (sc80: RFC 7914 scrypt in crypt(5)'s `$7$` form) | sc80's branch `2411d868` (the development pin; the records at its merge) | the org's own: its surface (`cost`, `gen_salt`, `hash`, `verify_capped`, `parse`), named in `user/auth/pwhash.lu` alone | `user/auth` |
+| passwd(1), passwd(5), shadow(5), login(1), login.defs(5), su(1), sudo(8), sudoers(5), termios(3), crypt(5) | Ubuntu 24.04's (noble) | knowledge: the documented options, the shadow file's nine fields and its `!` and `*`, LOGIN_RETRIES, LOGIN_TIMEOUT, ENV_PATH, `timestamp_timeout`, listpw and verifypw, the `$7$` prefix; every behaviour was then measured on the black boxes below | `user/auth`, `user/passwd`, `user/login`, `user/su`, `user/sudo` |
+| Ubuntu 24.04's `login` and `passwd` 1:4.13+dfsg1-4ubuntu3.2, `su` (util-linux 2.39.3-9ubuntu6.6), `sudo` 1.9.15p5-3ubuntu5.24.04.4, `mkpasswd` (whois 5.5.22), libcrypt1 1:4.4.36-4build1, in a throwaway container with no network (`notes/px106/Containerfile`) | black box | run on a pseudo-terminal: every prompt, message, status and delay of `notes/px106/auth-ct.sh` (the typed sessions of `tests/mpx5-sudo.d/*.keys`), /etc/shadow's mode and lines, `passwd -S`'s format, the sudo timestamp's place and mode, the log's lines; Ubuntu's crypt verifying the `$7$` strings PAX makes; never read | `user/*`, `tests/mpx5-sudo`, `notes/px106/named.txt` |
+
 ## px97 — the latest pins
 
 The org's own trees, read only where a pin needs them: each one's `wolf-toolchain.toml` at its pin and at its trunk
