@@ -119,10 +119,26 @@ def main():
                 rows['bin/'+source.name] = (0o120777, 0, 0, os.readlink(source).encode())
             else:
                 put('bin/'+source.name, source.read_bytes(), 0o755)
-        # px100 (R-px100-1): den's service wrappers from the same stage;
-        # /etc/shrc (user/shrc) names them.
-        for source in sorted((stage/'usr/libexec/den').iterdir()):
-            put('usr/libexec/den/'+source.name, source.read_bytes(), 0o755)
+        # px100's service wrappers come from the same stage: since px104
+        # (R-px104-5) /bin/git-upload-pack and /bin/git-receive-pack, the
+        # loop above's, and /etc/shrc names neither.
+        assert not (stage/'usr/libexec/den').exists(), 'tools/install-den left wrappers under /usr/libexec/den'
+        # px104 (R-px104-4): burrow unmodified (never stripped) as /bin/ssh
+        # and /bin/burrow-keygen, by the helper tests/mpx4-console-push's
+        # image uses as well.
+        stage = Path(scratch)/'burrow-root'
+        subprocess.run([str(ROOT/'tools/install-burrow'), str(inputs/'burrow'), str(stage)], check=True)
+        for source in sorted((stage/'bin').iterdir()):
+            assert 'bin/'+source.name not in rows, 'burrow would replace bin/'+source.name
+            put('bin/'+source.name, source.read_bytes(), 0o755)
+    # px104 (R-px104-2): the root set den's TLS reads (tools/mkroots, held
+    # to user/roots.pin's digests here as well), /etc/shrc exporting
+    # DEN_TLS_ROOTS; (R-px104-6) GitHub's published host key.
+    roots = (inputs/'roots'/'ca-roots.der').read_bytes()
+    pin = dict(l.split('=', 1) for l in (ROOT/'user/roots.pin').read_text().splitlines() if l and not l.startswith('#'))
+    assert sha(roots) == pin['ROOTS_DER_SHA256'], 'the root set is not user/roots.pin\'s'
+    put('etc/ssl/certs/ca-roots.der', roots)
+    put('etc/ssh/ssh_known_hosts', (ROOT/'user/ssh_known_hosts').read_bytes())
     # px90 (R-px90-2): the zone database's UTC, the bytes /etc/localtime
     # already has (tools/mkzone): den prints a date only from $TZDIR/$TZ
     # (default /usr/share/zoneinfo), with TZ=UTC or with TZ unset.
