@@ -2,9 +2,10 @@
 //!
 //! The ONE place in PAX that names wolf-std's crypt layer
 //! (`std.x.crypto.passwd`, sc80: scrypt, RFC 7914, in crypt(5)'s `$7$`
-//! form, which Ubuntu 24.04's crypt reads). passwd, su, sudo and login
-//! reach the hash only through the three functions below, so a change of
-//! wolf-std's surface is a change of this file.
+//! form, which Ubuntu 24.04's crypt reads; and `std.x.crypto.scrypt` for
+//! its account of a cost's memory). passwd, su, sudo and login reach the
+//! hash only through the functions below, so a change of wolf-std's
+//! surface is a change of this file.
 //!
 //! **The cost** (R-px106-5): N = 2^17, r = 8, p = 1, 128 MiB a hash,
 //! chosen by tests/mpx5-sudo's P7 on PAX under KVM, aimed at 0.5-1 s on
@@ -15,9 +16,14 @@
 //! hash a password have 512 MiB or more (tests/mpx5-sudo's typed sessions;
 //! the installer's and the upgrade's 2-4 GiB). A stored string
 //! keeps its own cost: verifying reads N, r and p from it, and refuses one
-//! whose memory (128·r·N) is over PW_CAP (`over_cap`: no check dearer than
-//! PAX's own; a string from elsewhere, such as `mkpasswd -m scrypt`'s
-//! default of 64 MiB, is checked).
+//! whose working memory is over the shipped cost's (`over_cap`: no check
+//! dearer than PAX's own; a string from elsewhere, such as `mkpasswd -m
+//! scrypt`'s default of 64 MiB, is checked). The memory is wolf-std's own
+//! account of it (`scrypt.memory`: 128·r·(N + 2p + 2), the key and 16 KiB
+//! besides V's 128·r·N; 134,238,240 octets at the shipped cost), the one
+//! `verify_capped` holds a string to, so the cap is that number for the
+//! shipped cost and never a round 128 MiB, which the shipped cost's own
+//! strings would exceed.
 //!
 //! **The salt** is 16 bytes of the operating system's random source
 //! (`os_random`: getrandom(2) on Linux and on PAX), never a fixed salt:
@@ -30,12 +36,19 @@
 //! (ruling #75 R6).
 
 use std.x.crypto.passwd
+use std.x.crypto.scrypt
 
 const PW_N_LOG2: int = 17
 const PW_R: int = 8
 const PW_P: int = 1
-/// The most memory one check may take: 128 MiB, the shipped cost's.
-const PW_CAP: int = 134217728
+/// The digest's octets in a `$7$` string (the dk_len wolf-std's crypt layer derives).
+const PW_DK: int = 32
+
+/// The most memory one check may take: the shipped cost's working memory,
+/// by wolf-std's own account (about 128 MiB).
+fn pw_cap() -> int {
+    scrypt.memory(PW_N_LOG2, PW_R, PW_P, PW_DK)
+}
 
 fn pw_random16() -> List[byte] {
     var out = List[byte]()
@@ -67,7 +80,7 @@ fn pw_make_at(password: str, n_log2: int, r: int, p: int) -> str ! {io} {
 /// hash refuses (locked, empty, another method, malformed, over the cap)
 /// matches no password.
 fn pw_matches(password: str, stored: str) -> bool {
-    passwd.verify_capped(password.bytes(), stored, PW_CAP) else false
+    passwd.verify_capped(password.bytes(), stored, pw_cap()) else false
 }
 
 /// "" when `stored` is a password field PAX can check, else why not, by
@@ -99,7 +112,7 @@ fn pw_refusal(stored: str) -> str {
             return "bad_hash"
         },
     }
-    if h.cost.n_log2 > 30 || 128 * h.cost.r * (1 << h.cost.n_log2) > PW_CAP {
+    if scrypt.memory(h.cost.n_log2, h.cost.r, h.cost.p, PW_DK) > pw_cap() {
         return "over_cap"
     }
     ""
