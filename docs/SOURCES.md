@@ -1971,3 +1971,28 @@ source; no kernel's, firmware's or driver's.
   `kernel/netd` (which kernel starts the network stack and what a never-started stack answers), and px56's note on
   `#!` and exec from the tree.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no Git source.
+
+## px105 — the networked console
+
+- **RFC 2131, RFC 2132 and resolv.conf(5)**, as px89 read them: nothing new of the protocol; the static line writes
+  `/etc/resolv.conf` as a lease does (one `nameserver` line a server, three at most).
+- **Intel's public 82576EB and I210 datasheets** (px89's, by digest in `notes/px89/datasheets.sha256`): STATUS.LU
+  (bit 1), read at the call for `link()`. No other register is touched.
+- **QEMU's documentation** (its manual and the monitor's `help`, never its source): `-S`, `-chardev socket,…,server=on`
+  and `-mon` for a second human monitor, `set_link`, `info network`, and the user network's 10.0.2.2 as the host's
+  loopback. How QEMU 8.2.2's igb answers `set_link` before and after `cont` was measured, black box
+  (`notes/px105/probe1.txt`, `probe2.txt`).
+- **den at `ac2332bf`** (the org's own, its smart-HTTP transport): its README's `--tls-roots`/`DEN_TLS_ROOTS` and
+  `GIT_DIR`, `src/http/url.lu` (an address literal is a host), `src/http/tls.lu` (roots, `/dev/urandom`, the UTC
+  clock), and `tools/http-git-test.py`, whose `Server` (OpenSSL's `s_server` in front of git's `http-backend`) the
+  https row loads from den's own tree and runs, never copies.
+- **wolf-std at `d4a4d4c`** (the org's own): `std/x/tls/cert`'s `san_matches` and `check_hostname` (dNSName only, so
+  the fixture's leaf names the address the guest dials as a dNSName), and `std/net`'s `connect` (an address string to
+  the host).
+- **git and OpenSSL** as black boxes in the lane's container and on the runner: the fixture's repository, its
+  `http-backend`, and its PKI made as den's rows make theirs.
+- PAX's own `kernel/kmain_console.lu`, `kmain_session.lu`, `kmain_sockets.lu`, `kernel/net`, `kernel/gbe`,
+  `kernel/dhcp`, `kernel/netd`, `kernel/clock` and `kernel/identity` (the bring-up, the waits and the boot line),
+  and `tests/mpx4-dhcp`, `tests/mpx4-igb`, `tests/mpx5-den`, `tools/dhcp-wire`, `tools/pcap-dhcp`, `tools/mkden`.
+- No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no DHCP, HTTP or TLS
+  implementation's source; no Git source.
