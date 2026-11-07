@@ -1,92 +1,15 @@
 #!/usr/bin/env bash
-# mksudo — build sudo (user/sudo/sudo.lu, px103: P5's U8, ruling #75 R8's place),
-# PAX's own program in wolf, as a fully static x86-64 Linux executable.
+# mksudo — build sudo (user/sudo/sudo.lu, px103: P5's U8, ruling #75 R8's
+# place) with user/auth (px106: the caller's password, the timestamp), as a
+# fully static x86-64 Linux executable: tools/mkauth OUTDIR sudo, whose
+# header says how.
 #
 #   tools/mksudo OUTDIR
 #
-# The toolchain is user/sudo/wolf-toolchain.toml's, read as tools/mkpelt
-# reads pelt's: the wolf release archive for x86_64-unknown-linux-gnu by
-# its sha256 (refused on a mismatch, and on a `--version` that is not the
-# file's `version_line`), and wolf-std at the commit it names
-# (`WOLF_STD`). sudo is built as pelt is (`wolf build --release
-# --deny-warnings`), with the same one difference: wolf links through
-# the `cc` first on PATH (wolf has no `--static`), and a `cc` that adds
-# `-static` is put there, so the binary is a static glibc executable:
-# ET_EXEC, no PT_INTERP. It is checked to be exactly that (readelf), and
-# `OUTDIR/sums.txt` gets `sudo <sha256> <bytes>` of the file after `strip`.
-#
-# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
-# container), never on a glibc built for x86-64-v4 (px10).
-# The release tier needs clang at run time (wolf's D33). Exit 0, or 2 on
-# a tool error.
+# OUTDIR gets sudo and sums.txt (`sudo <sha256> <bytes>`, of the stripped
+# file). The toolchain is user/auth/wolf-toolchain.toml's (until px106,
+# sudo had its own, user/sudo/wolf-toolchain.toml). Exit 0, or 2 on a tool
+# error.
 set -euo pipefail
-. "$(dirname "$0")/lib.sh"
-[ $# -eq 1 ] || die "usage: mksudo OUTDIR"
-out=$1
-need git curl tar readelf strip cc clang
-mkdir -p "$out" "$PAX_CACHE"
-out=$(cd "$out" && pwd)
-
-w=$(mktemp -d "${TMPDIR:-/tmp}/pax-sudo.XXXXXX")
-trap 'rm -rf "$w"' EXIT
-
-toml=$PAX_ROOT/user/sudo/wolf-toolchain.toml
-key() { # section key
-    awk -v s="[$1]" -v k="$2" '
-        /^\[/ { on = ($0 == s); next }
-        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
-}
-wv=$(key wolf version)
-wsha=$(key wolf x86_64-unknown-linux-gnu)
-wline=$(key wolf version_line)
-srepo=$(key std repo)
-srev=$(key std rev)
-[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srepo" ] && [ -n "$srev" ] \
-    || die "cannot read wolf version/digest and std repo/rev from $toml"
-say "sudo pins wolf $wv (${wsha:0:8}…), wolf-std $srev"
-
-# wolf, by the digest the file names (cached by digest).
-arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
-if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
-    curl -sSfL --retry 3 -o "$arc.part" \
-        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
-        || die "cannot download wolf $wv"
-    mv "$arc.part" "$arc"
-fi
-[ "$(sha256_of "$arc")" = "$wsha" ] || die "wolf $wv archive: sha256 $(sha256_of "$arc"), sudo pins $wsha"
-mkdir -p "$w/wolf"
-tar -xzf "$arc" -C "$w/wolf" --strip-components=1
-wolf=$w/wolf/wolf
-have=$("$wolf" --version | head -n 1)
-[ "$have" = "$wline" ] || die "wolf --version says '$have'; sudo pins '$wline'"
-say "$have"
-
-# wolf-std at the commit the file names.
-mkdir -p "$w/stdrepo"
-git -C "$w/stdrepo" init -q
-"$PAX_ROOT/tools/fetch-retry" "$w/stdrepo" "https://github.com/${srepo}" "$srev" "$srev" || die "cannot fetch $srepo at $srev"
-git -C "$w/stdrepo" checkout -q --detach FETCH_HEAD
-[ "$(git -C "$w/stdrepo" rev-parse HEAD)" = "$srev" ] || die "$srepo: HEAD is not $srev"
-std=$w/stdrepo/std
-[ -d "$std" ] || die "wolf-std $srev has no std/"
-
-# The static `cc`.
-mkdir -p "$w/bin" "$w/src"
-real=$(command -v cc)
-printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
-chmod +x "$w/bin/cc"
-cp "$PAX_ROOT/user/sudo/sudo.lu" "$w/src/sudo.lu"
-
-: > "$out/sums.txt"
-(cd "$w/src" && PATH="$w/bin:$PATH" WOLF_STD=$std \
-    "$wolf" build --release --no-cache --deny-warnings sudo.lu -o "$out/sudo") >&2 \
-    || die "wolf build of user/sudo/sudo.lu"
-readelf -hW "$out/sudo" | grep -Eq 'Type: +EXEC' || die "sudo is not ET_EXEC"
-! readelf -lW "$out/sudo" | grep -q INTERP || die "sudo has a PT_INTERP (not static)"
-# Stripped, as the distribution's root assembler strips the image's other user binaries (its
-# `strip -o` over bore, pelt, yew, lope, aspen, lobo): sums.txt names the stripped file,
-# which is what the image holds and the distribution's image check compares.
-strip -o "$out/sudo.stripped" "$out/sudo" && mv "$out/sudo.stripped" "$out/sudo"
-readelf -hW "$out/sudo" | grep -Eq 'Type: +EXEC' || die "stripped sudo is not ET_EXEC"
-printf '%s %s %s\n' sudo "$(sha256_of "$out/sudo")" "$(wc -c < "$out/sudo" | tr -d ' ')" | tee -a "$out/sums.txt"
-printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
+[ $# -eq 1 ] || { echo "usage: mksudo OUTDIR" >&2; exit 2; }
+exec "$(dirname "$0")/mkauth" "$1" sudo
