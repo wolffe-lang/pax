@@ -4,7 +4,7 @@
     https.py --work DIR --den BIN --den-src DIR --indir BIN --elf KERNEL.elf
              --tier T --leg L --accel A --mac MAC --log SERIAL.log
 
-den at the https pin (tests/mpx4-console-net.d/den-https.pin, built by
+den at the images' pin (user/den.pin since px104; R-px105-2 B's own pin, built by
 tools/mkden) clones over https at PAX's console from a TLS fixture on this
 host's loopback, which the guest reaches through QEMU's user network at
 10.0.2.2, as den's own smart-HTTP rows hold den to git:
