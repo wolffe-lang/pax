@@ -151,7 +151,8 @@ static void nnp_calls(void)
 }
 
 /* One sudo row: an actor (uid -1: root) runs /bin/sudo with ARGS and a
- * small environment that has what an attacker or a habit adds. */
+ * small environment that has what an attacker or a habit adds, in a
+ * session of its own with no terminal (px106). */
 static void sudo_row(int uid, unsigned grp, char *const *args)
 {
     char line[512] = "$";
@@ -159,6 +160,9 @@ static void sudo_row(int uid, unsigned grp, char *const *args)
     say("=== %s: %s\n", uid < 0 ? "root" : uid == 1000 ? "pax" : uid == 990 ? "lobo" : "other", line);
     pid_t p = fork();
     if (p == 0) {
+        /* px106: no controlling terminal, so a row that needs a password says
+         * Linux's words for that and never waits at the console */
+        setsid();
         if (uid >= 0) { unsigned g = grp; become(uid, uid, g ? 1 : 0, &g); }
         char *av[32] = { "/bin/sudo" };
         int n = 1;
