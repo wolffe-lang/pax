@@ -40,7 +40,10 @@
 // (`dhcp wait=<s>`, 30 s by default; one line either way), the kernel's
 // echo goes to the lease's router, and kernel/ip's line is printed when
 // the lease is taken. No /etc/pax-net is the fixed address: every line
-// above is what it was.
+// above is what it was. px105: a `static …` line instead gives the
+// station that address (kernel/dhcp's `take_static`, its line and
+// kernel/ip's in place of the fixed address's), and the kernel's echo
+// goes to its gateway.
 use clock
 use apic
 use arp
@@ -248,8 +251,11 @@ export fn kmain() {
     icmp.start()
     udp.start()
     tcp.start(process.random_word(0))
-    let dh = want && dhcp.start(process.random_word(1))
-    if !dh {
+    let st = dhcp.static_asked()
+    let dh = want && !st && dhcp.start(process.random_word(1))
+    if st {
+        dhcp.take_static() // px105: its line, then kernel/ip's
+    } else if !dh {
         ip.report() // with a lease, kernel/dhcp prints it when it has one
     }
     udp.report()
@@ -277,6 +283,7 @@ export fn kmain() {
     if dh && dhcp.wait_bound() {
         dhcp.echo_router()
     }
+    dhcp.echo_gateway() // px105: only with a static address
     let per20 = calibrate()
     // px23: loopback is below every protocol: the kernel's own echo to
     // 127.0.0.1 and to this station's address comes back with no device

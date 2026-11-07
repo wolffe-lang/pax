@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+# tests/mpx4-console-net — the console's network (px105): kmain_console,
+# the kernel every shipped image boots, starts the stack as kmain_session
+# does, takes its address as the image's /etc/pax-net says (a DHCP lease,
+# or a static address), and never lets a missing or silent network stop
+# the boot or hold the first program past a stated bound.
+#
+#   tests/mpx4-console-net [--images DIR | --no-boot] [--ways LIST]
+#                          [--firmware bios|uefi|both] [--tier native|release|both]
+#                          [--accel auto|kvm|tcg]
+#
+# Each way's initramfs holds user/net's netstate (tools/mknet: it prints
+# /etc/resolv.conf as a program reads it), /etc/pax-run and, but for
+# `nofile`, /etc/pax-net. The ways:
+#   lease    QEMU's igb (the I225's emulated sibling, kernel/gbe) on QEMU's
+#            user network: its DHCP server at 10.0.2.2; /etc/pax-net `dhcp`
+#   virtio   the same over virtio-net
+#   static   virtio-net, user network; /etc/pax-net `static 10.0.2.20/24
+#            gateway 10.0.2.2 dns 10.0.2.3`
+#   none     no network device at all; /etc/pax-net `dhcp`
+#   nofile   no network device and no /etc/pax-net: every line but the
+#            network's is what the console printed before px105
+#   nolink   igb on QEMU's user network with its link down before the
+#            kernel starts: the machine starts paused (-S) with a second
+#            monitor on a unix socket, which takes `cont` and, 0.3 s later,
+#            in the firmware, `set_link` off for the NIC and its netdev
+#            (mpx4-console-net.d/link-off.py; a listening socket netdev, a
+#            hub port alone, a NIC with no peer, and a link set down before
+#            `cont` all show igb a link 1.5 s after the driver's PHY
+#            restart: notes/px105/probe1.txt, probe2.txt); /etc/pax-net
+#            `dhcp`
+#   nonet    igb on QEMU's user network, the kernel booted with `nonet`
+#            (mpx4-console-net.d/limine-nonet.conf): no device is started;
+#            /etc/pax-net `dhcp`
+#   silent   virtio-net on a hub with nothing else on it (frames leave,
+#            nothing answers); /etc/pax-net `dhcp wait=5`
+#   quiet    virtio-net on a tap with dnsmasq (tools/dhcp-wire's renew:
+#            a 2-minute lease, T1 10 s), the kernel booted with `quiet`;
+#            /etc/pax-net `dhcp`; the list waits past T1
+#   https    igb on QEMU's user network; den at the https pin
+#            (tests/mpx4-console-net.d/den-https.pin, R-px105-2 B, built
+#            by tools/mkden) clones over https from den's own smart-HTTP
+#            fixture on this host's loopback, reached at 10.0.2.2
+#            (tests/mpx4-console-net.d/https.py: its image is made once the
+#            fixture's port is known)
+# Every way but none, nofile and nolink sends its frames to a pcap file
+# (QEMU's filter-dump); the lease ways' client frames are held byte for
+# byte by tools/pcap-dhcp.
+#
+# Assertions, per tier, firmware and way:
+#   C0 build: kmain_console, netstate static, each way's initramfs and ISO.
+#   C1 (lease, virtio) the lease before the first program: `dhcp: started
+#      on <MAC>`, `bound 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2;
+#      /etc/resolv.conf: nameserver 10.0.2.3`, `dhcp: a lease after`, the
+#      router answers the kernel's echo, each before `run 1:`;
+#      tools/pcap-dhcp PASS; netstate reads `nameserver 10.0.2.3`.
+#   C2 (static) `net: static 10.0.2.20/24 gateway 10.0.2.2; /etc/resolv.conf:
+#      nameserver 10.0.2.3`, kernel/ip's line for that address, the
+#      gateway answers the kernel's echo, no DHCP client started, the
+#      loopback line names 10.0.2.20, netstate reads the dns.
+#   C3 (none, nofile) no device: `net: no virtio network device …; the
+#      network is off`; with /etc/pax-net, `dhcp: no network device is
+#      up; the fixed address stays`; without it, no `dhcp:` line at all.
+#   C4 (nolink) `net: NO link after 10000 ms`, the client started, `dhcp:
+#      no link; the console does not wait for a lease (the client goes on
+#      asking)`.
+#   C5 (silent) `dhcp: no lease after 5 s; the client goes on asking`.
+#   C9 (nonet) `net: no device (nonet); loopback only`, no line of
+#      the controller's, `dhcp: no network device is up; the fixed address
+#      stays`.
+#   C6 (quiet) under `quiet` the renewal happens (the capture holds the
+#      renewing REQUEST) and the console prints none of it: one `bound`
+#      line, `dhcp: a lease after`, and no DISCOVER, OFFER, REQUEST,
+#      ACK or RENEW line; netstate's second read (after T1) still names
+#      dnsmasq's servers.
+#   C7 (every way) the bound: one line before the identity line,
+#      `net: the console waited <w> ms for the network (bound <b> ms:
+#      device <d>, lease <l>, echo <e>)`, w <= b and b the way's own
+#      (none, nofile: 10, the PCI table searched and one line; nonet: 0;
+#      virtio-net 1000 + the lease's and the echo's; igb 12000 + …;
+#      nolink: no lease wait); the loopback line answers
+#      for 127.0.0.1 and the station's address; the first program runs.
+#   C8 (every way but https) the end: `PAX: init /bin/netstate ended …`,
+#      `halt`, no PANIC, qemu-halt holds the machine halted.
+#   H1-H5 (https) the lease, then den's clone over https exits 0; its
+#      `log --oneline` is git's; `fsck --full` exits 0 and prints nothing;
+#      the fixture saw protocol v2's discovery and a fetch and no error of
+#      its own; halted (https.py's header).
+#
+# The quiet way needs ip(8), dnsmasq(8) and root (as root, or with
+# `sudo -n`): SKIPPED LOUDLY without them unless PAX_REQUIRE_DHCP_WIRE=1,
+# when it is a failure. The https way needs git and /usr/bin/openssl (the
+# fixture's black boxes): SKIPPED LOUDLY without them unless
+# PAX_REQUIRE_HTTPS_FIXTURE=1, when it is a failure. The UEFI leg needs OVMF (PAX_REQUIRE_UEFI=1: a
+# failure without it). Exit 0 when every assertion held, 1 otherwise, 2
+# on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 accel=auto
+ways="lease virtio static none nofile nolink nonet silent quiet https"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --ways)     ways=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "usage: tests/mpx4-console-net [--images DIR | --no-boot] [--ways LIST] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+    esac
+done
+ways=${ways//,/ }
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+for w in $ways; do case $w in lease|virtio|static|none|nofile|nolink|nonet|silent|quiet|https) ;; *) die "unknown way $w" ;; esac; done
+
+MAC=52:54:00:12:34:56
+work=$PAX_BUILD/mpx4-console-net
+runs=$PAX_BUILD/mpx4-console-net-runs.txt
+fail=0 ran=0 skipped=0
+bad() { say "FAIL $*"; fail=1; }
+need nm python3
+
+runlist_of() { case $1 in quiet) printf '/bin/netstate 0\n/bin/netstate 25\n' ;; *) printf '/bin/netstate 0\n' ;; esac; }
+paxnet_of() {
+    case $1 in
+        static) printf 'static 10.0.2.20/24 gateway 10.0.2.2 dns 10.0.2.3\n' ;;
+        silent) printf 'dhcp wait=5\n' ;;
+        nofile) ;;
+        *) printf 'dhcp\n' ;;
+    esac
+}
+conf_of() { case $1 in quiet) echo "$PAX_ROOT/boot/limine-initramfs-quiet.conf" ;; nonet) echo "$here/mpx4-console-net.d/limine-nonet.conf" ;; *) echo "$PAX_ROOT/boot/limine-initramfs.conf" ;; esac; }
+timeout_of() { case $1 in quiet) echo 240 ;; *) echo 180 ;; esac; }
+device_of() { case $1 in lease|nolink|nonet) echo igb ;; virtio|static|silent|quiet) echo virtio-net-pci ;; *) echo ;; esac; }
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" readelf
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work"
+    why=
+    "$PAX_ROOT/tools/mknet" "$work/net" > "$work/net.txt" || why+=" tools/mknet;"
+    r=$(static_ok "$work/net/netstate") || why+=" $r;"
+    say "  program: bin/netstate $(sha256_of "$work/net/netstate") $(wc -c < "$work/net/netstate" | tr -d ' ') bytes"
+    case " $ways " in
+        *" https "*)
+            # R-px105-2 B: den at the https pin for the https way alone,
+            # its tree for den's own fixture, and the run list's indir.
+            PAX_DEN_PIN=$here/mpx4-console-net.d/den-https.pin "$PAX_ROOT/tools/mkden" "$work/den-https" > "$work/den-https.txt" 2>&1 \
+                || { tail -n 20 "$work/den-https.txt" >&2; why+=" tools/mkden (the https pin);"; }
+            (
+                . "$here/mpx4-console-net.d/den-https.pin"
+                mkdir -p "$work/den-src" && git -C "$work/den-src" init -q \
+                    && "$PAX_ROOT/tools/fetch-retry" "$work/den-src" "$DEN_REPO" "$DEN_REV" "$DEN_REV" \
+                    && git -C "$work/den-src" checkout -q --detach FETCH_HEAD \
+                    && [ "$(git -C "$work/den-src" rev-parse HEAD)" = "$DEN_REV" ]
+            ) > "$work/den-src.txt" 2>&1 || why+=" den's tree at the https pin;"
+            cc -O1 -Wall -Wextra -static -no-pie -Wl,--build-id=none -o "$work/indir" "$here/mpx4-console-net.d/indir.c" || why+=" indir;"
+            r=$(static_ok "$work/indir") || why+=" $r;"
+            [ -f "$work/den-https/den" ] && say "  https: den $(sha256_of "$work/den-https/den") (tests/mpx4-console-net.d/den-https.pin), indir $(sha256_of "$work/indir")"
+            ;;
+    esac
+    for way in $ways; do
+        [ "$way" = https ] && continue # its image is made at its boot (https.py)
+        runlist_of "$way" > "$work/$way.run"
+        files=("/bin/netstate=$work/net/netstate" "/etc/pax-run=$work/$way.run")
+        if [ "$way" != nofile ]; then
+            paxnet_of "$way" > "$work/$way.pax-net"
+            files+=("/etc/pax-net=$work/$way.pax-net")
+        fi
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$way.cpio" "${files[@]}" > "$work/$way.initramfs.txt" || why+=" tools/mkinitramfs ($way);"
+    done
+    git -C "$PAX_ROOT" rev-parse HEAD > "$work/kernel.commit" 2>/dev/null || true
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for way in $ways; do
+                [ "$way" = https ] && continue
+                "$PAX_ROOT/tools/mkimage" --conf "$(conf_of "$way")" \
+                    --add "$work/$way.cpio" initramfs.cpio "$elf" "$work/$tier/$way.iso" >/dev/null \
+                    || why+=" $tier: mkimage ($way);"
+            done
+            say "built $tier kmain_console: elf $(sha256_of "$elf"), $(wc -c < "$elf" | tr -d ' ') bytes"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS C0: kmain_console ($tiers), netstate static, $(echo $ways | wc -w | tr -d ' ') initramfs and ISOs" || bad "C0:$why"
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        [ "$fail" = 0 ] && say "mpx4-console-net build (C0): PASS (no boot: --no-boot)" || say "mpx4-console-net build: FAIL"
+        exit "$fail"
+    fi
+fi
+
+# Can this host run the tap way?
+wire=() wire_why=
+if [ "$(id -u)" = 0 ]; then
+    :
+elif sudo -n true 2>/dev/null; then
+    wire=(--sudo)
+else
+    wire_why="not root and no sudo -n"
+fi
+command -v dnsmasq >/dev/null 2>&1 || wire_why+=" no dnsmasq"
+https_why=
+command -v git >/dev/null 2>&1 || https_why+=" no git"
+[ -x /usr/bin/openssl ] || https_why+=" no /usr/bin/openssl"
+command -v ip >/dev/null 2>&1 || wire_why+=" no ip(8)"
+[ -c /dev/net/tun ] || wire_why+=" no /dev/net/tun"
+
+has() { grep -Eq -- "$2" "$1"; }
+before_run() { # FILE ERE: the first line matching ERE comes before `run 1:`
+    local a b
+    a=$(grep -n -m1 -E -- "$2" "$1" | cut -d: -f1)
+    b=$(grep -n -m1 '^run 1: ' "$1" | cut -d: -f1)
+    [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+# The no-link way's second monitor: wait for its socket, then `cont` and,
+# in the firmware, the link down (mpx4-console-net.d/link-off.py).
+link_off() { # SOCKET LOG
+    python3 -I "$here/mpx4-console-net.d/link-off.py" "$1" "$2"
+}
+
+boot() { # tier leg way -> $log $norm $pcap $acct
+    local tier=$1 leg=$2 way=$3 rc=0 dev
+    log=$PAX_BUILD/mpx4-console-net-$tier-$leg-$way.serial.log
+    pcap=$PAX_BUILD/mpx4-console-net-$tier-$leg-$way.pcap
+    acct=$PAX_BUILD/mpx4-console-net-$tier-$leg-$way.wire
+    norm=$log.norm
+    local iso=$images/$tier/$way.iso elf=$images/$tier/kmain_console.elf
+    rm -rf "$log" "$log.verdict" "$pcap" "$norm" "$acct"
+    [ -f "$iso" ] && [ -f "$elf" ] || { say "no image or ELF for $tier $way ($iso)"; : > "$log"; : > "$norm"; return 2; }
+    local net=() halt=()
+    halt=("$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout "$(timeout_of "$way")" --accel "$accel" --elf "$elf" --marker 'halt|PANIC .*')
+    dev=$(device_of "$way")
+    case $way in
+        lease|virtio|static|nonet) net=(--qemu -netdev --qemu "user,id=n0,ipv6=off") ;;
+        nolink)
+            local sock=$PAX_BUILD/mpx4-console-net-$tier-$leg-$way.mon
+            rm -f "$sock"
+            net=(--qemu -S --qemu -chardev --qemu "socket,id=cnmon,path=$sock,server=on,wait=off" --qemu -mon --qemu "chardev=cnmon,mode=readline"
+                 --qemu -netdev --qemu "user,id=n0,ipv6=off") ;;
+        silent) net=(--qemu -netdev --qemu "hubport,id=n0,hubid=7") ;;
+        quiet) net=(--qemu -netdev --qemu "tap,id=n0,ifname=pxcnet0,script=no,downscript=no") ;;
+    esac
+    if [ -n "$dev" ]; then
+        net+=(--qemu -device --qemu "$dev,netdev=n0,mac=$MAC,id=nic0")
+        case $way in nolink) ;; *) net+=(--qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap") ;; esac
+    fi
+    case $way in
+        nolink)
+            "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 &
+            local hpid=$!
+            link_off "$PAX_BUILD/mpx4-console-net-$tier-$leg-$way.mon" "$log.link" || say "the no-link way's monitor: $(tail -n 1 "$log.link")"
+            wait "$hpid" || rc=$?
+            ;;
+        quiet)
+            "$PAX_ROOT/tools/dhcp-wire" --scenario renew --tap pxcnet0 --serial "$log" --work "$acct" ${wire[@]+"${wire[@]}"} -- \
+                "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 || rc=$?
+            ;;
+        *)
+            "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 || rc=$?
+            ;;
+    esac
+    ran=$((ran + 1))
+    serial_norm "$log" > "$norm"
+    printf '%s %s %s halt-status=%s serial=%s iso=%s pcap=%s\n' "$tier" "$leg" "$way" "$rc" \
+        "$(sha256_of "$log")" "$(sha256_of "$iso")" "$( [ -f "$pcap" ] && sha256_of "$pcap")" >> "$runs"
+    return "$rc"
+}
+
+# The bound a way's console holds itself to, by its parts (C7).
+bound_of() { # way -> "device lease echo"
+    case $1 in
+        none|nofile) echo "10 0 0" ;;
+        nonet) echo "0 0 0" ;;
+        lease) echo "12000 30000 3000" ;;
+        virtio|quiet) echo "1000 30000 3000" ;;
+        static) echo "1000 0 3000" ;;
+        nolink) echo "12000 0 0" ;;
+        https) echo "12000 30000 3000" ;;
+        silent) echo "1000 5000 0" ;;
+    esac
+}
+
+one() { # tier leg way
+    local tier=$1 leg=$2 way=$3 L="$1 $2 $3" hrc=0 why
+    if [ "$way" = https ]; then
+        log=$PAX_BUILD/mpx4-console-net-$tier-$leg-https.serial.log
+        norm=$log.norm
+        python3 -I "$here/mpx4-console-net.d/https.py" --work "$PAX_BUILD/mpx4-console-net-$tier-$leg-https.d" \
+            --den "$images/den-https/den" --den-src "$images/den-src" --indir "$images/indir" \
+            --elf "$images/$tier/kmain_console.elf" --tier "$tier" --leg "$leg" --accel "$accel" --mac "$MAC" --log "$log" || fail=1
+        [ -f "$norm" ] || : > "$norm" # a row that could not be set up: C7 reads nothing
+        ran=$((ran + 1))
+        printf '%s %s https serial=%s\n' "$tier" "$leg" "$( [ -f "$log" ] && sha256_of "$log")" >> "$runs"
+    else
+        boot "$tier" "$leg" "$way" || hrc=$?
+    fi
+
+    case $way in
+        lease|virtio)
+            # --- C1: the lease before the first program ----------------------
+            why=
+            before_run "$norm" "^dhcp: started on $MAC, client id 01:$MAC; asking for a lease" || why+=" no 'dhcp: started on $MAC' before run 1;"
+            before_run "$norm" '^dhcp: \+[0-9.]+ s bound 10\.0\.2\.15 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2; /etc/resolv\.conf: nameserver 10\.0\.2\.3$' \
+                || why+=" no bound line before run 1 ('$(grep -m1 -E '^dhcp: \+[0-9.]+ s bound ' "$norm")');"
+            before_run "$norm" '^dhcp: a lease after [0-9]+\.[0-9]+ s$' || why+=" no 'dhcp: a lease after' before run 1;"
+            before_run "$norm" "^dhcp: the router 10\.0\.2\.2 answers the kernel's echo$" || why+=" '$(grep -m1 '^dhcp: the router' "$norm")';"
+            local pc=
+            if [ -s "$pcap" ]; then
+                pc=$("$PAX_ROOT/tools/pcap-dhcp" --mac "$MAC" "$pcap" 2>&1)
+                printf '%s\n' "$pc" > "$pcap.check"
+                printf '%s\n' "$pc" | grep -q '^pcap-dhcp: PASS' || why+=" $(printf '%s\n' "$pc" | grep -m1 'FAIL' | cut -c1-200);"
+            else
+                why+=" no capture;"
+            fi
+            has "$norm" '^netstate: /etc/resolv\.conf: nameserver 10\.0\.2\.3$' || why+=" netstate read '$(grep -m1 '^netstate: ' "$norm")';"
+            [ -z "$why" ] && say "PASS C1 $L: $(grep -m1 -E '^dhcp: \+[0-9.]+ s bound ' "$norm" | cut -c7-); $(grep -m1 '^dhcp: a lease after' "$norm" | cut -c7-)" || bad "C1 $L:$why"
+            ;;
+        static)
+            # --- C2: the static address ---------------------------------------
+            why=
+            before_run "$norm" '^net: static 10\.0\.2\.20/24 gateway 10\.0\.2\.2; /etc/resolv\.conf: nameserver 10\.0\.2\.3$' \
+                || why+=" no static line before run 1 ('$(grep -m1 '^net: static' "$norm")');"
+            has "$norm" '^ip: 10\.0\.2\.20 netmask 255\.255\.255\.0 gateway 10\.0\.2\.2, MTU 1500' || why+=" no ip line for 10.0.2.20;"
+            before_run "$norm" "^net: the gateway 10\.0\.2\.2 answers the kernel's echo$" || why+=" '$(grep -m1 '^net: the gateway' "$norm")';"
+            ! has "$norm" '^dhcp: started' || why+=" the DHCP client started;"
+            has "$norm" "^loopback: 127\.0\.0\.1 answers the kernel's echo, 10\.0\.2\.20 answers, " || why+=" loopback '$(grep -m1 '^loopback:' "$norm")';"
+            has "$norm" '^netstate: /etc/resolv\.conf: nameserver 10\.0\.2\.3$' || why+=" netstate read '$(grep -m1 '^netstate: ' "$norm")';"
+            [ -z "$why" ] && say "PASS C2 $L: $(grep -m1 '^net: static' "$norm"); $(grep -m1 '^net: the gateway' "$norm")" || bad "C2 $L:$why"
+            ;;
+        none|nofile)
+            # --- C3: no device ------------------------------------------------
+            why=
+            before_run "$norm" '^net: no virtio network device among [0-9]+ PCI functions; the network is off$' || why+=" no 'net: no virtio network device' line before run 1;"
+            if [ "$way" = none ]; then
+                before_run "$norm" '^dhcp: no network device is up; the fixed address stays$' || why+=" no 'dhcp: no network device is up' before run 1;"
+            else
+                ! has "$norm" '^dhcp: ' || why+=" a dhcp line with no /etc/pax-net: '$(grep -m1 '^dhcp: ' "$norm")';"
+            fi
+            local said=$(grep -m1 '^dhcp: ' "$norm")
+            [ -z "$why" ] && say "PASS C3 $L: $(grep -m1 '^net: no virtio' "$norm"); ${said:-no dhcp line}" || bad "C3 $L:$why"
+            ;;
+        nolink)
+            # --- C4: no link --------------------------------------------------
+            why=
+            before_run "$norm" '^net: NO link after 10000 ms' || why+=" no 'net: NO link after 10000 ms' before run 1 ('$(grep -m1 -E '^net: (NO link|link up)' "$norm")');"
+            before_run "$norm" "^dhcp: started on $MAC" || why+=" no 'dhcp: started' before run 1;"
+            before_run "$norm" '^dhcp: no link; the console does not wait for a lease \(the client goes on asking\)$' || why+=" no no-link line before run 1;"
+            [ -z "$why" ] && say "PASS C4 $L: $(grep -m1 '^net: NO link' "$norm" | cut -c1-80); $(grep -m1 '^dhcp: no link' "$norm" | cut -c7-)" || bad "C4 $L:$why"
+            ;;
+        nonet)
+            # --- C9: nonet --------------------------------------------------------
+            why=
+            before_run "$norm" '^net: no device \(nonet\); loopback only$' || why+=" no 'net: no device (nonet)' before run 1;"
+            ! has "$norm" '^net: (Intel|virtio-net|link|NO link|regs) ' || why+=" a device line: '$(grep -m1 -E '^net: (Intel|virtio-net|link|NO link|regs) ' "$norm")';"
+            before_run "$norm" '^dhcp: no network device is up; the fixed address stays$' || why+=" no 'dhcp: no network device is up' before run 1;"
+            [ -z "$why" ] && say "PASS C9 $L: $(grep -m1 '^net: no device' "$norm"); $(grep -m1 '^dhcp: ' "$norm")" || bad "C9 $L:$why"
+            ;;
+        silent)
+            # --- C5: nothing answers ------------------------------------------
+            why=
+            before_run "$norm" "^dhcp: started on $MAC" || why+=" no 'dhcp: started' before run 1;"
+            before_run "$norm" '^dhcp: no lease after 5 s; the client goes on asking$' || why+=" no 'dhcp: no lease after 5 s' before run 1;"
+            [ -s "$pcap" ] && "$PAX_ROOT/tools/pcap-dhcp" --mac "$MAC" "$pcap" > "$pcap.check" 2>&1 || true
+            [ -z "$why" ] && say "PASS C5 $L: $(grep -m1 '^dhcp: no lease after' "$norm" | cut -c7-)" || bad "C5 $L:$why"
+            ;;
+        quiet)
+            # --- C6: quiet ----------------------------------------------------
+            why=
+            local pc=
+            if [ -s "$pcap" ]; then
+                pc=$("$PAX_ROOT/tools/pcap-dhcp" --mac "$MAC" "$pcap" 2>&1)
+                printf '%s\n' "$pc" > "$pcap.check"
+                printf '%s\n' "$pc" | grep -q 'client REQUEST (renewing)' || why+=" no renewing REQUEST in the capture;"
+            else
+                why+=" no capture;"
+            fi
+            [ "$(grep -cE '^dhcp: \+[0-9.]+ s bound ' "$norm")" = 1 ] || why+=" $(grep -cE '^dhcp: \+[0-9.]+ s bound ' "$norm") bound lines, not 1;"
+            before_run "$norm" '^dhcp: a lease after [0-9]+\.[0-9]+ s$' || why+=" no 'dhcp: a lease after' before run 1;"
+            ! has "$norm" '^dhcp: \+[0-9.]+ s (DISCOVER|OFFER|REQUEST|ACK|RENEW|REBIND) ' || why+=" a routine line under quiet: '$(grep -m1 -E '^dhcp: \+[0-9.]+ s (DISCOVER|OFFER|REQUEST|ACK|RENEW|REBIND) ' "$norm")';"
+            [ "$(grep -E '^netstate: /etc/resolv.conf: ' "$norm" | tail -n 2 | sed 's/^netstate: \/etc\/resolv.conf: //' | paste -sd'|' -)" = "nameserver 192.168.89.53|nameserver 192.168.89.54" ] \
+                || why+=" netstate's last read: '$(grep -E '^netstate: ' "$norm" | tail -n 2 | paste -sd'|' -)';"
+            [ -z "$why" ] && say "PASS C6 $L: one bound line, no routine line; $(printf '%s\n' "$pc" | grep -c 'client REQUEST (renewing)') renewing REQUEST(s) on the wire" || bad "C6 $L:$why"
+            ;;
+    esac
+
+    # --- C7: the bound, loopback, the first program ------------------------------
+    why=
+    local wl w b d l e
+    read -r d l e <<< "$(bound_of "$way")"
+    wl=$(grep -m1 -E '^net: the console waited [0-9]+ ms for the network \(bound [0-9]+ ms: device [0-9]+, lease [0-9]+, echo [0-9]+\)$' "$norm")
+    if [[ $wl =~ waited\ ([0-9]+)\ ms.*bound\ ([0-9]+)\ ms:\ device\ ([0-9]+),\ lease\ ([0-9]+),\ echo\ ([0-9]+) ]]; then
+        w=${BASH_REMATCH[1]} b=${BASH_REMATCH[2]}
+        [ "${BASH_REMATCH[3]}" = "$d" ] && [ "${BASH_REMATCH[4]}" = "$l" ] && [ "${BASH_REMATCH[5]}" = "$e" ] \
+            || why+=" the bound's parts '${BASH_REMATCH[3]} ${BASH_REMATCH[4]} ${BASH_REMATCH[5]}', not '$d $l $e';"
+        [ "$b" = $((d + l + e)) ] || why+=" bound $b is not $d + $l + $e;"
+        [ "$w" -le "$b" ] || why+=" waited $w ms, over the bound $b;"
+        case $way in none|nofile|nonet) [ "$w" -le 10 ] || why+=" waited $w ms with no device;" ;; esac
+        before_run "$norm" '^net: the console waited ' || why+=" the waited line not before run 1;"
+    else
+        why+=" no waited line ('$(grep -m1 '^net: the console' "$norm")');"
+    fi
+    has "$norm" "^loopback: 127\.0\.0\.1 answers the kernel's echo, [0-9.]+ answers, [0-9]+ frames on the wire$" || why+=" loopback '$(grep -m1 '^loopback:' "$norm")';"
+    has "$norm" '^run 1: /bin/' || why+=" the first program never ran;"
+    [ -z "$why" ] && say "PASS C7 $L: ${wl#net: }" || bad "C7 $L:$why"
+
+    # --- C8: the end -----------------------------------------------------------------
+    [ "$way" = https ] && return # H5 is its end
+    if [ "$hrc" = 0 ] && has "$norm" '^PAX: init /bin/netstate ended with status [0-9]+; nothing left to run$' && has "$norm" '^halt$' && ! has "$norm" 'PANIC'; then
+        say "PASS C8 $L: $(grep -m1 '^PAX: init' "$norm"); halted"
+    else
+        bad "C8 $L: qemu-halt $hrc ($(tail -n 1 "$log.verdict" | cut -c1-160)); $(grep -m1 'PANIC' "$norm")"
+    fi
+}
+
+: > "$runs"
+for tier in $tiers; do
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && ! find_ovmf >/dev/null 2>&1; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "the UEFI leg: no OVMF"; else say "SKIP the UEFI leg ($tier): no OVMF"; skipped=$((skipped + 1)); fi
+            continue
+        fi
+        for way in $ways; do
+            if [ "$way" = https ] && [ -n "$https_why" ]; then
+                if [ "${PAX_REQUIRE_HTTPS_FIXTURE:-0}" = 1 ]; then bad "H1 $tier $leg https: the fixture cannot run here:$https_why"; else say "SKIP $tier $leg https: the fixture cannot run here:$https_why"; skipped=$((skipped + 1)); fi
+                continue
+            fi
+            if [ "$way" = quiet ] && [ -n "$wire_why" ]; then
+                if [ "${PAX_REQUIRE_DHCP_WIRE:-0}" = 1 ]; then bad "C6 $tier $leg quiet: the tap way cannot run here:$wire_why"; else say "SKIP $tier $leg quiet: the tap way cannot run here:$wire_why"; skipped=$((skipped + 1)); fi
+                continue
+            fi
+            one "$tier" "$leg" "$way"
+        done
+    done
+done
+[ "$fail" = 0 ] && say "mpx4-console-net: PASS ($ran boots, $skipped skipped)" || say "mpx4-console-net: FAIL ($ran boots, $skipped skipped)"
+exit "$fail"

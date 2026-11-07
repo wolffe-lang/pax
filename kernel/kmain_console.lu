@@ -47,40 +47,90 @@
 // as init in place of the run list, its only argument its own path (a
 // journalled disk booted again after a power cut, its replay the point,
 // not its session: tools/root-crash).
+//
+// px105: the network, as kmain_session has it (px28, px89), with the
+// console's own bounds. After the PCI scan: kernel/net's device (virtio-
+// net, else one of kernel/gbe's Intel controllers; none is no device,
+// one line), then kernel/arp, kernel/ip, kernel/icmp, kernel/udp and
+// kernel/tcp as 10.0.2.15/24 gateway 10.0.2.2, their lines, the network
+// clock thread always (loopback's backstop, TCP's timers) and the
+// receiving thread with a device; `nonet` on the command line starts no
+// device (with or without `triage`: the metal escape hatch). After
+// the disk is mounted, the tree's /etc/pax-net (an installed system's own
+// file): `dhcp` starts kernel/dhcp and its thread, `static …` holds that
+// address (kernel/dhcp's `take_static`). Before the identity line, the
+// waits, each bounded and none a reason to stop:
+//   - the first lease, at most the file's `wait=` (30 s by default), and
+//     not at all when the device has no link (the client goes on asking);
+//   - the kernel's echo to the lease's router or the static gateway, 3 s;
+// then the two loopback echoes' line, and one line saying how long the
+// console waited and the bound it held itself to:
+//
+//     net: the console waited <w> ms for the network (bound <b> ms: device <d>, lease <l>, echo <e>)
+//
+// d is the device's own start: 10 with none (the PCI table searched and
+// its one line), 0 with `nonet`, 1000 for virtio-net, 12000 for an Intel
+// controller (kernel/gbe: the reset's 1 s, the address's 0.5 s and the
+// link's 10 s); l the lease wait's bound (0 with no client
+// or no link); e 3000 when an echo is asked for. w is measured by
+// kernel/clock over those three waits alone. With no device, no file and
+// no `quiet` the console's other lines are what they were.
 use clock
 use apic
+use arp
 use block
 use boot_info
 use console
+use dhcp
 use fb
 use fpu
 use frames
 use fstab
+use icmp
 use identity
 use initramfs
 use interrupts
+use ip
 use log
+use net
+use netd
 use paging
 use panic
 use pci
+use process
 use sched
 use screen
 use serial
 use sound
 use speaker
 use sync
+use tcp
 use timer
 use tree
 use triage
+use udp
 use user
 use xhci
 
 extern "c" let pax_user_thread: *u8
 extern "c" let pax_usbd: *u8
 extern "c" let pax_flushd: *u8 // px63: kernel/fstab's flusher
+extern "c" let pax_netd: *u8 // px105: kernel/netd's receiving thread
+extern "c" let pax_net_clock: *u8 // px105: the network's clock
+extern "c" let pax_dhcpd: *u8 // px105: kernel/dhcp's thread
 
 const ENV: str = "HOME=/ TERM=linux PAX=1 PATH=/bin" // px14: PATH, for a shell's commands
 const RUN_LIST: str = "/etc/pax-run"
+// px105: the station's fixed address, as kmain_session's, until
+// /etc/pax-net names another (a lease or a static address).
+const OWN_IP: u64 = 0x0a00020f // 10.0.2.15
+const NETMASK: u64 = 0xffffff00 // 255.255.255.0
+const GATEWAY: u64 = 0x0a000202 // 10.0.2.2
+// px105: the bound on each of the console's waits for the network, ms.
+const BOUND_ABSENT: u64 = 10 // the PCI table searched, one line
+const BOUND_VIRTIO: u64 = 1000
+const BOUND_INTEL: u64 = 12000
+const BOUND_ECHO: u64 = 3000
 
 
 
@@ -91,6 +141,188 @@ var kernel_threads: u64 = 0
 fn kthreads() -> u64 {
     // # Safety: a scalar module var, written once at boot.
     unsafe { kernel_threads }
+}
+
+fn add_kthreads(n: u64) {
+    // # Safety: a scalar module var, written at boot with IF clear.
+    unsafe { kernel_threads = kernel_threads + n }
+}
+
+/// px105: the console's waits for the network, in kernel/clock's
+/// nanoseconds, and the bound on each, ms.
+var net_waited: u64 = 0
+var bound_device: u64 = 0
+var bound_lease: u64 = 0
+var bound_echo: u64 = 0
+
+fn waited(ns: u64) {
+    // # Safety: a scalar module var, written by kmain alone.
+    unsafe { net_waited = net_waited + ns }
+}
+
+/// Frames the protocols above the driver hold (as kmain_session's).
+fn stack_frames() -> u64 {
+    arp.frames_held() + ip.frames_held() + icmp.frames_held() + udp.frames_held() + tcp.frames_held()
+}
+
+/// Ping `dst`, an address of this machine, and say whether the reply
+/// came back over kernel/ip's loopback queue (as kmain_session does).
+fn ping_self(dst: u64, seq: u64) -> bool {
+    let _r = icmp.ping(dst, seq, 56)
+    let _n = netd.drain()
+    let (got, _rtt, _ttl) = icmp.answer()
+    got
+}
+
+/// px105: whether the network carried anything since the boot: a frame
+/// either way, a datagram, a connection.
+fn network_used() -> bool {
+    net.count(net.C_RX_FRAMES) + net.count(net.C_TX_FRAMES) + udp.count(udp.C_RX) + udp.count(udp.C_TX) + tcp.count(tcp.C_ACCEPTED) + tcp.count(tcp.C_ACTIVE) != 0
+}
+
+/// px105: kmain_session's closing lines about the network, when it
+/// carried anything (a console that never used it ends as it did):
+///
+///     network: frames <a> in, <b> out; udp datagrams <c> in, <d> out
+///     network: tcp connections <e> accepted, <f> made, <g> open
+fn network_lines() {
+    if !network_used() {
+        return
+    }
+    log.put("network: frames ")
+    log.dec(net.count(net.C_RX_FRAMES) as int)
+    log.put(" in, ")
+    log.dec(net.count(net.C_TX_FRAMES) as int)
+    log.put(" out; udp datagrams ")
+    log.dec(udp.count(udp.C_RX) as int)
+    log.put(" in, ")
+    log.dec(udp.count(udp.C_TX) as int)
+    log.put(" out")
+    log.end()
+    log.put("network: tcp connections ")
+    log.dec(tcp.count(tcp.C_ACCEPTED) as int)
+    log.put(" accepted, ")
+    log.dec(tcp.count(tcp.C_ACTIVE) as int)
+    log.put(" made, ")
+    log.dec(tcp.blocks() as int)
+    log.put(" open")
+    log.end()
+}
+
+/// px105: the device (with `nonet` on the command line, none) and the
+/// protocols over it, their lines, and the network's threads: the clock
+/// always, the receiving thread with a device. After pci.scan, IF clear.
+/// A device that is missing or refused is one line and loopback only.
+/// The wait counted is the device's start alone, not its lines.
+fn network_start(pml4: u64) {
+    var up = false
+    let none = boot_info.cmdline_has("nonet")
+    if none {
+        log.line("net: no device (nonet); loopback only")
+    } else {
+        let t0 = clock.now_ns()
+        up = net.start(pml4) == net.UP
+        waited(clock.now_ns() - t0)
+        net.report()
+    }
+    // The device's own start: nothing to wait for without one; up to
+    // kernel/gbe's waits for an Intel controller, refused or not.
+    let d = if none { 0 } else if net.state() == net.ABSENT { BOUND_ABSENT } else if net.intel() { BOUND_INTEL } else { BOUND_VIRTIO }
+    // # Safety: a scalar module var, written by kmain alone.
+    unsafe { bound_device = d }
+    arp.start(OWN_IP, arp.AGE)
+    ip.start(OWN_IP, NETMASK, GATEWAY)
+    icmp.start()
+    udp.start()
+    tcp.start(process.random_word(0))
+    ip.report()
+    udp.report()
+    tcp.report()
+    if stack_frames() != 333 {
+        panic.fail("console: no frame for the stack, frames", stack_frames())
+    }
+    // # Safety: the addresses of kernel/netd's exports; nothing is read.
+    let (nd, nc) = unsafe { (pax_netd as u64, pax_net_clock as u64) }
+    if up {
+        let _r = sched.create(nd, 0)
+        add_kthreads(1)
+    }
+    let _c = sched.create(nc, 0)
+    add_kthreads(1)
+}
+
+/// px105: the tree's /etc/pax-net (after the disk is mounted, so an
+/// installed system's own file decides): a static address held now, or
+/// the DHCP client and its thread started. IF clear.
+fn network_address() {
+    let want = dhcp.from_file()
+    if dhcp.static_asked() {
+        dhcp.take_static()
+        // # Safety: a scalar module var, written by kmain alone.
+        unsafe { bound_echo = BOUND_ECHO }
+    } else if want && dhcp.start(process.random_word(1)) {
+        // # Safety: the address of kernel/dhcp's export; nothing is read.
+        let dt = unsafe { pax_dhcpd as u64 }
+        let _t = sched.create(dt, 0)
+        add_kthreads(1)
+    }
+}
+
+/// px105: the console's waits for the network, IF set: the first lease
+/// (at most the file's `wait=`; none when the device has no link) and
+/// the kernel's echo to its router, or the static gateway's echo; then
+/// the loopback line and the waited line.
+fn network_wait() {
+    if dhcp.on() {
+        if net.link() {
+            // # Safety: a scalar module var, written by kmain alone.
+            unsafe { bound_lease = dhcp.wait_seconds() * 1000 }
+            let t0 = clock.now_ns()
+            let got = dhcp.wait_bound()
+            waited(clock.now_ns() - t0)
+            if got {
+                unsafe { bound_echo = BOUND_ECHO }
+                let t1 = clock.now_ns()
+                dhcp.echo_router()
+                waited(clock.now_ns() - t1)
+            }
+        } else {
+            log.line("dhcp: no link; the console does not wait for a lease (the client goes on asking)")
+        }
+    } else if dhcp.static_asked() {
+        let t0 = clock.now_ns()
+        dhcp.echo_gateway()
+        waited(clock.now_ns() - t0)
+    }
+    let wire0 = net.count(net.C_TX_FRAMES)
+    let l1 = ping_self(ip.LOOPBACK, 1)
+    let l2 = ping_self(ip.address(), 2)
+    let s = sync.acquire(sync.console())
+    log.put("loopback: 127.0.0.1 ")
+    log.put(if l1 { "answers" } else { "does NOT answer" })
+    log.put(" the kernel's echo, ")
+    arp.put_ip(ip.address())
+    log.put(" ")
+    log.put(if l2 { "answers" } else { "does NOT answer" })
+    log.put(", ")
+    log.dec((net.count(net.C_TX_FRAMES) - wire0) as int)
+    log.put(" frames on the wire")
+    log.end()
+    // # Safety: scalar module vars, written by kmain alone.
+    let (w, d, l, e) = unsafe { (net_waited, bound_device, bound_lease, bound_echo) }
+    log.put("net: the console waited ")
+    log.dec((w / 1000000) as int)
+    log.put(" ms for the network (bound ")
+    log.dec((d + l + e) as int)
+    log.put(" ms: device ")
+    log.dec(d as int)
+    log.put(", lease ")
+    log.dec(l as int)
+    log.put(", echo ")
+    log.dec(e as int)
+    log.put(")")
+    log.end()
+    sync.release(sync.console(), s)
 }
 
 /// The body ELF processes run (kernel/user's export).
@@ -145,6 +377,14 @@ fn run(k: u64, a: u64, n: u64, last: bool) {
     }
     if user.end_asked() != 0 {
         return // px67: reboot(2): the end is kmain's
+    }
+    // px105: a connection its process closed may still be saying goodbye
+    // (a FIN to be acknowledged): up to thirty seconds for that, as
+    // kmain_session waits, so the lines below are the run's. A run that
+    // made no connection waits for nothing.
+    let patience = timer.ticks() + 3000
+    while tcp.finishing() != 0 && timer.ticks() < patience {
+        let _s = sched.sleep(1)
     }
     let after = frames.free_count()
     if log.quiet() { // px15: the kernel command line said `quiet`
@@ -282,12 +522,13 @@ export fn kmain() {
     identity.calibrate() // px87: the TSC's rate against 10 ms of that clock
     triage.step(16)
     let _pci = pci.scan()
+    network_start(pml4) // px105: the device, the protocols, the network's threads
     triage.step(17)
     let _snd = if triage.off("nosound") { 0 } else { sound.start(pml4) }
     triage.step(18)
     let usb = !triage.off("noxhci")
     let usb_threads = if usb { xhci.start(pml4, unsafe { pax_usbd as u64 }) } else { 0 }
-    unsafe { kernel_threads = usb_threads }
+    add_kthreads(usb_threads) // px105: after the network's own
     triage.step(19)
     // px63: the disk, when the machine has one, and what /etc/fstab mounts.
     if !triage.off("noblock") && block.start(pml4) != 0 {
@@ -298,14 +539,14 @@ export fn kmain() {
     let _root = fstab.mount_root() // px67: `/` on the disk, when the command line says `root=`
     let _mounted = fstab.mount_all()
     let _upgrade = fstab.mount_upgrade() // px93: the stick's upgrade entry alone mounts the listed disk's root
+    network_address() // px105: /etc/pax-net, on the disk when `/` is there
     triage.step(21)
     release_identity() // px82: separate from the boot-medium line
     if fstab.wants_flusher() {
         // # Safety: the address of kernel/fstab's export; nothing is read.
         let fl = unsafe { pax_flushd as u64 }
         let _t = sched.create(fl, 0) // px63: a write-back volume's blocks written every 5 s
-        // # Safety: a scalar module var, written once at boot with IF clear.
-        unsafe { kernel_threads = kernel_threads + 1 }
+        add_kthreads(1)
     }
     triage.step(22)
     sync.enable()
@@ -321,6 +562,7 @@ export fn kmain() {
         let _usb = block.attach_usb()
         sync.irq_restore(usb_saved)
     }
+    network_wait() // px105: the lease and the echo, bounded; the loopback and waited lines
     triage.step(25)
 
     // px67: the run list is the tree's (`/` on the disk when it is there,
@@ -385,6 +627,8 @@ export fn kmain() {
     console.summary()
     speaker.summary() // px18: only when a tone was started
     sound.summary() // px30: only when /dev/dsp was opened
+    network_lines() // px105: only when the network carried anything
+    dhcp.counters() // px105: only when the client ran
     sync.release(sync.console(), s)
 
     let _off = sync.irq_save()

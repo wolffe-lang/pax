@@ -235,6 +235,23 @@ pub fn up() -> bool {
     nw(N_UP) == 1
 }
 
+/// px105: whether the device has a link now. virtio-net negotiates no
+/// link status here (VIRTIO_NET_F_STATUS is declined), so an up virtio
+/// device always has one; an Intel controller answers kernel/gbe's
+/// STATUS.LU, read at the call. False when no device is up.
+pub fn link() -> bool {
+    if !up() {
+        return false
+    }
+    if gbe_kind() { gbe.link() } else { true }
+}
+
+/// px105: whether the device is one of kernel/gbe's (whose `start` may
+/// wait up to 10 s for a link), for a kmain's bound on its wait.
+pub fn intel() -> bool {
+    gbe_kind()
+}
+
 /// What `start` answered: UP, ABSENT or REFUSED.
 pub fn state() -> u64 {
     nw(N_STATE)

@@ -640,6 +640,31 @@ Intel I225/I226 through kernel/gbe (`tests/mpx4-dhcp`, `tests/mpx4-igb`).
   segmentation offload, more than one queue each way; a name resolver
   (wolf-lang#831).
 
+
+## The console's network (px105)
+
+`kmain_console`, the kernel every shipped image boots, starts the network as
+kmain_session does, with bounds of its own (`tests/mpx4-console-net`), and
+`/etc/pax-net` gains a static address. With no device, no file and no
+`quiet` the console's other lines are what they were; the network's own
+lines come before the identity line, and its books at the end only when it
+carried anything.
+
+| module or file | what |
+|---|---|
+| `kmain_console.lu` | after the PCI scan: kernel/net's device (none with `nonet` on the command line), kernel/arp, ip, icmp, udp and tcp as 10.0.2.15/24 gateway 10.0.2.2, their lines, the network clock thread always and the receiving thread with a device, both counted among the kernel threads a run does not wait for; after the disk is mounted, `/etc/pax-net` (the client and its thread, or the static address); before the identity line, the waits (the first lease at most `wait=`, none when the device has no link; the router's or gateway's echo, 3 s), the loopback line and `net: the console waited <w> ms for the network (bound <b> ms: device <d>, lease <l>, echo <e>)`; each run waits up to 30 s for a closing connection's FIN, as kmain_session's does; `network:` books and kernel/dhcp's counters at the end, each only when there is something to count |
+| `dhcp/` | the static line (`static_asked`, `take_static`: kernel/ip, kernel/arp, /etc/resolv.conf, `net: static …` and kernel/ip's line; `echo_gateway`); a malformed static line is one `net: /etc/pax-net: <why>` line and the fixed address; under `quiet` the routine lines (the sent messages, OFFER, ACK, a renewal's `bound`) are not printed (R-px105-3); `echo_of`, the router's and the gateway's echo alike |
+| `gbe/`, `net/` | `link()`: STATUS.LU read at the call (virtio-net, which negotiates no link status, always has one); `net.intel()`, for the console's bound |
+| `kmain_session.lu`, `kmain_sockets.lu` | the static line too, and the gateway's echo |
+
+- The bound: an Intel controller's start is at most 12 s (kernel/gbe's
+  reset, address and 10 s link waits), virtio-net's 1 s, 10 ms without a
+  device (the PCI table searched and one line), none with `nonet`; the
+  lease wait the file's `wait=`; the echo 3 s. QEMU's igb shows
+  no link when the monitor sets its link down once the firmware runs
+  (`notes/px105/probe2.txt`).
+- Not yet: the I225's own interrupt, a resolver (wolf-lang#831), DHCPRELEASE
+  at the halt.
 ## Who a process is (px39)
 
 The first lane of the users campaign (`notes/px39-the-credentials.md`,

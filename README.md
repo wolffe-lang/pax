@@ -19,7 +19,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; set-user-ID and set-group-ID honoured as `execve(2)` says (`no_new_privs`, `nosuid`); `su` and `sudo` in wolf; no passwords yet (`sudo` runs `NOPASSWD` rules only) | Linux as root and as a user; Ubuntu's `sudo` for the command |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
 | Disks | Up to eight disks: virtio (four), NVMe (`nvme0n1`, major 259), SATA AHCI (`sda`, major 8, LBA48; a controller in RAID mode named and left alone), or USB mass storage (`sdX`, Bulk-Only Transport), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on every bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
-| Network | virtio-net, and Intel's 82576 (by MSI-X) and I225/I226 (polled) on one ring model; ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections; a DHCP client (RFC 2131) when `/etc/pax-net` says `dhcp`, with `/etc/resolv.conf` from the lease | Linux in a namespace, captures rebuilt byte by byte, and dnsmasq as a black box for every lease event |
+| Network | virtio-net, and Intel's 82576 (by MSI-X) and I225/I226 (polled) on one ring model; ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections; a DHCP client (RFC 2131) when `/etc/pax-net` says `dhcp`, with `/etc/resolv.conf` from the lease, or a static address when it says `static`; the console every image boots takes its address so, bounded: a missing device, a cable with no link or a server that never answers never stops the boot | Linux in a namespace, captures rebuilt byte by byte, and dnsmasq as a black box for every lease event |
 | Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
@@ -177,12 +177,11 @@ Name a remote by a `file:///absolute/path` URL (den refuses a plain path), and p
 (den's receive-pack takes no other). A shell that did not read `/etc/shrc` exports the two variables itself;
 without them den answers `den: wire: io`. Once a branch tracks a remote, den's `status` and `branch` answer `not yet
 implemented` (den's own limits, the same on Linux); `log`, `fetch`, `pull` and `push` still answer.
-`git://` remotes need the network stack: `den daemon --enable-receive-pack BASE PORT` serves one connection on
-127.0.0.1 from a bare repository holding `git-daemon-export-ok`, and a clone or push through
-`git://127.0.0.1:PORT/…` then works on PAX's session kernel (`kmain_session`). The kernel the release and dev
-images boot starts no network yet: there `den daemon` prints its port, but a client's clone neither connects nor
-gives up (it was still waiting four minutes later), so use `file://` on those images. There is no `ssh` client and no HTTPS on PAX, so `ssh://` and
-`https://` remotes are out. `tests/mpx5-den` types all of this at PAX as root and as `pax`, under `/tmp` and on
+`git://` remotes go over the network stack, which the console kernel every image boots starts: `den daemon
+--enable-receive-pack BASE PORT` serves one connection on 127.0.0.1 from a bare repository holding
+`git-daemon-export-ok`, and a clone or push through `git://127.0.0.1:PORT/…` then works at the console. There is no
+`ssh` client on PAX yet, so `ssh://` remotes are out. The den the images carry has no HTTPS yet; `tests/mpx4-console-net`
+already clones over `https://` at the console with den's smart-HTTP transport built for that row alone. `tests/mpx5-den` types all of this at PAX as root and as `pax`, under `/tmp` and on
 the ext2 `/home`, and holds every answer, object id and ref to the same keys typed on Linux.
 
 ## Booting PAX
@@ -328,6 +327,31 @@ and reads back a file written before the reboot, and holds every other disk byte
 onto a used 1 TB disk shaped like kasumi's own target. Nothing here is a claim about a real machine:
 [docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for kasumi. See
 [Guided installation](docs/BOOT.md#guided-installation).
+
+### The network at the console
+
+The console kernel every image boots brings its network up before the first program: a virtio network device, or
+one of Intel's gigabit controllers (QEMU's `-device igb`, the I225-V and I226), and over it ARP, IPv4, ICMP, UDP and
+TCP. With no device the console still has 127.0.0.1. The image's `/etc/pax-net` (on an installed system, the copy
+on its own disk) says how the address is taken; the release and dev images ship `dhcp wait=10`:
+
+```
+dhcp [wait=<1-600>]                                          # a lease; wait at most that long for it (30 s without)
+static <a.b.c.d>/<prefix> [gateway <a.b.c.d>] [dns <a.b.c.d>]...   # this address, up to three DNS servers
+```
+
+Without the file the address is 10.0.2.15/24, gateway 10.0.2.2 (QEMU's user network). The lease or the static
+address is on the console before the prompt (`dhcp: … bound …`, or `net: static …`), with the router's answer to
+the kernel's echo, and `/var/lib/dhcp/pax.lease` and `/etc/resolv.conf` say the same to any program. A missing or
+silent network never stops the boot: the console waits for the first lease at most `wait` seconds, not at all when
+the cable has no link (the client goes on asking), and an Intel controller's own start at most 12 s; one line,
+`net: the console waited <w> ms for the network (bound <b> ms: …)`, says how long it took and the bound it held.
+Under `quiet` (every shipped image boots with it) a renewal prints nothing. `nonet` on the kernel command line
+starts no device at all. To try it under QEMU, give the ISO a NIC:
+
+```sh
+tools/qemu-run --firmware uefi pax.iso -- -netdev user,id=n0 -device igb,netdev=n0
+```
 
 ## Seeing the screen
 
@@ -477,7 +501,7 @@ and `--tier native --firmware bios` picks one leg.
 | The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
-| The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), and the UDP and TCP rows again on QEMU's 82576 |
+| The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes) |
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, each program's typed session against the same binary in a container, the language server's frames both ways |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
