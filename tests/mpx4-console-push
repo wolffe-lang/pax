@@ -12,7 +12,7 @@
 # ENV=/etc/shrc /bin/sh -i -m`), den as the images install it
 # (tools/install-den, user/den.pin), burrow as /bin/ssh and
 # /bin/burrow-keygen (tools/install-burrow, user/burrow.pin),
-# /etc/ssl/certs/ca-roots.der (tools/mkroots, user/ca-roots.pin),
+# /etc/ssl/certs/ca-roots.der (tools/mkroots, user/roots.pin),
 # /etc/ssh/ssh_known_hosts, /etc/nsswitch.conf and /etc/shrc's exports (the
 # shipped files' bytes, from user/), boreutils' cat env mkdir chmod cp rm ls,
 # user/net's dgramopts and gai, /etc/hosts naming hosts.test, and an
@@ -127,16 +127,16 @@ if [ -z "$images" ]; then
     printf '/bin/env HOME=/root ENV=/etc/shrc /bin/sh -i -m\n' > "$r/etc/pax-run"
     printf 'static 10.0.2.15/24 gateway 10.0.2.2 dns 10.0.2.2\n' > "$work/hermetic.pax-net"
     cp "$PAX_ROOT/user/pax-net" "$work/live.pax-net"
-    # den's tree at the image's pin, for its smart-HTTP fixture (loaded from
-    # there, never copied).
+    # den's tree for its smart-HTTP fixture (loaded from there, never
+    # copied), at the suite's own pin of it, not the image's den.
     (
-        . "$PAX_ROOT/user/den.pin"
+        . "$here/mpx4-console-push.d/den-fixture.pin"
         mkdir -p "$work/den-src" && git -C "$work/den-src" init -q \
             && "$PAX_ROOT/tools/fetch-retry" "$work/den-src" "$DEN_REPO" "$DEN_REV" "$DEN_REV" \
             && git -C "$work/den-src" checkout -q --detach FETCH_HEAD \
             && [ "$(git -C "$work/den-src" rev-parse HEAD)" = "$DEN_REV" ]
-    ) > "$work/den-src.txt" 2>&1 || why+=" den's tree at user/den.pin;"
-    [ -f "$work/den-src/tools/http-git-test.py" ] || missing+=" den's smart-HTTP fixture (tools/http-git-test.py at user/den.pin)"
+    ) > "$work/den-src.txt" 2>&1 || why+=" den's tree at tests/mpx4-console-push.d/den-fixture.pin;"
+    [ -f "$work/den-src/tools/http-git-test.py" ] || why+=" no tools/http-git-test.py in den's fixture tree;"
     # The archive's arguments, one a line.
     : > "$work/files.txt"
     printf '%s\n' /tmp/:1777 /root/:700 /run/:755 /run/live/:755 >> "$work/files.txt"
