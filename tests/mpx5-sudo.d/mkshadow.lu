@@ -10,6 +10,10 @@
 //! cost, and the sessions' timing should be the programs', not CI's
 //! emulator's; what passwd writes in a session is at the shipped cost).
 //!
+//! `mkshadow --check` (S0's row, on the build host): a string made at the
+//! shipped cost is one PAX can check (user/auth's pw_refusal says ""), its
+//! own password matches it and another does not; `check ok`, else exit 1.
+//!
 //! `mkshadow --time NLOG2 R P` (the cost row, px106 R-px106-5): makes a
 //! `$7$` string at N = 2^NLOG2, r = R, p = P three times and prints the
 //! wall milliseconds of each by the monotonic clock, as
@@ -19,6 +23,9 @@ fn main() -> int {
     let args = env_args()
     if args.len == 4 && args[0] == "--time" {
         return timing(args[1].to_int() else 14, args[2].to_int() else 8, args[3].to_int() else 1)
+    }
+    if args.len == 1 && args[0] == "--check" {
+        return check()
     }
     var cost = List[int]()
     if args.len == 4 && args[0] == "--cost" {
@@ -74,5 +81,27 @@ fn timing(n: int, r: int, p: int) -> int {
         k += 1
     }
     print(out)
+    0
+}
+
+fn check() -> int {
+    let h = pw_make("check-row") else |_| {
+        print("check FAIL: no string made at the shipped cost")
+        return 1
+    }
+    let why = pw_refusal(h)
+    if why.len > 0 {
+        print("check FAIL: a string at the shipped cost is refused: {why}")
+        return 1
+    }
+    if !pw_matches("check-row", h) {
+        print("check FAIL: a string at the shipped cost does not match its own password")
+        return 1
+    }
+    if pw_matches("check-row-not", h) {
+        print("check FAIL: another password matches")
+        return 1
+    }
+    print("check ok: {h[0..14]}")
     0
 }
