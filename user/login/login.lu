@@ -1,0 +1,309 @@
+//! login — the console's login (px106, P5 lane U8's second half; ruling #75
+//! R8's place, beside `su`).
+//!
+//! The installed system's `/etc/pax-run` is `/bin/login` (R-px106-2): the
+//! kernel starts it as pid 1, the leader of the console's session with the
+//! console as its terminal (kernel/sched), and it replaces itself with the
+//! account's shell, so the shell leads that session. The dev and release
+//! images keep ruling #75 R2's root shell, and the live stick its root
+//! entry (user/usb-login.sh). Run as root, from /etc/pax-run or a shell.
+//! **Enforced for honest programs; not a boundary against an attacker**
+//! (R6): the kernel has never been fuzzed or audited and loads programs at
+//! fixed addresses.
+//!
+//! References consulted: login(1), login.defs(5), shadow(5) (Ubuntu
+//! 24.04's manual pages) and black-box runs of Ubuntu 24.04's own login
+//! (1:4.13+dfsg1-4ubuntu3.2) on a pseudo-terminal in a throwaway container
+//! (notes/px106/auth-ct.sh). Never the source of login, shadow-utils,
+//! util-linux, PAM or any libc.
+//!
+//! **What it does** (each measured against Ubuntu's):
+//! - `HOST login: ` (the name echoed), `Password: ` (no echo: user/auth/
+//!   secret.lu) for every name, known, locked or not; the password checked
+//!   against /etc/shadow (user/auth, wolf-std's `$7$`). A failure: about
+//!   3 s, a blank line and `Login incorrect`, and the name asked again; a
+//!   locked or unknown account answers the same words (R-px106-4), so the
+//!   console never says which accounts exist. The fifth failure: `Maximum
+//!   number of tries exceeded (5)`; 60 s from the start: `Login timed out
+//!   after 60 seconds.` (R-px106-3). An empty name asks the name again.
+//! - **The first-boot rule** (R-px106-2): while no account in /etc/shadow
+//!   has a password PAX can check (every line locked, or no file at all),
+//!   the name `root` is let in with no password, and one line says so. An
+//!   unconfigured system is as open as the console was before px106 until
+//!   its owner sets a password (`passwd`); from the first password on, the
+//!   rules above hold for root too.
+//! - The session: the terminal given to the account (owner the account,
+//!   group its primary group, mode 0600: px98's rule; Ubuntu's group is
+//!   `tty`, which PAX has not), the groups /etc/group gives it, its group
+//!   and user ids (`os_set_ids`, whole or the process ends), an
+//!   environment of TERM (as found) and HOME, SHELL, PATH (/etc/login.defs'
+//!   ENV_PATH, or ENV_SUPATH for root, else Ubuntu's defaults), LOGNAME,
+//!   USER and MAIL (`/var/mail/NAME`), and ENV=/etc/shrc when that file is
+//!   there (pelt reads it: PAX's own); the home directory entered (else
+//!   `No directory, logging in with HOME=/`); the shell exec'd with argv[0]
+//!   `-` and its name.
+//! - `login NAME` asks only the password first; `login -f NAME` (root
+//!   only) asks nothing.
+//!
+//! **What it does not, by name:** as pid 1 it has no getty to start it
+//! again, so after the fifth failure or the timeout it starts over
+//! itself (Ubuntu's ends, and getty starts a new one); it does not stay
+//! as the shell's parent (no PAM session to close: the shell's end is the
+//! session's end, and on PAX's console init's end halts the machine, as
+//! before px106); no /etc/motd (PAX's console prints it before the first
+//! program), no last-login line, no /etc/nologin, /etc/securetty or
+//! hushlogin; `-p`, `-h` and `-r` are refused by name; a login that is
+//! not its session's leader stays in its caller's session (PAX's console
+//! login always leads it).
+
+use std.os.users
+
+const TRIES: int = 5
+const TIMEOUT_MS: int = 60000
+const FAIL_DELAY_MS: int = 3000
+
+fn main() -> int {
+    let args = env_args()
+    var name = ""
+    var force = false
+    var i = 0
+    while i < args.len {
+        let w = args[i]
+        i += 1
+        if w == "-f" {
+            force = true
+            continue
+        }
+        if w == "-p" || w == "-h" || w == "-r" || (w.starts_with("-") && w != "--") {
+            eprint("login: {w}: not built in PAX's login (notes/px106-passwords.md)")
+            return 1
+        }
+        if w == "--" {
+            continue
+        }
+        name = w
+    }
+    let euid = os_euid() else -1
+    if euid != 0 {
+        eprint("login: Cannot possibly work without effective root")
+        return 1
+    }
+    if force && name.len == 0 {
+        eprint("login: -f needs a name")
+        return 1
+    }
+    if force {
+        let ptext = fs_read_text("/etc/passwd") else ""
+        let u = users.user_named(ptext, name) else |_| {
+            eprint("login: no user {name}")
+            return 1
+        }
+        return enter(u)
+    }
+    let pid1 = os_pid() == 1
+    loop {
+        let r = session(name)
+        if !pid1 {
+            return r
+        }
+        name = ""
+    }
+}
+
+fn now_ms() -> int {
+    os_clock_ns() / 1000000
+}
+
+/// One login: up to five tries in 60 s. Returns only when they are spent;
+/// a success becomes the shell.
+fn session(first: str) -> int {
+    let host = hostname()
+    let start = now_ms()
+    var tries = 0
+    var name = first
+    while tries < TRIES {
+        if name.len == 0 {
+            print_raw("{host} login: ")
+            let left = TIMEOUT_MS - (now_ms() - start)
+            name = secret_read(0, 1, true, if left > 0 then left else 1) else |e| match e {
+                timeout => {
+                    print("\nLogin timed out after 60 seconds.")
+                    return 1
+                },
+                interrupted => {
+                    return 1
+                },
+                _ => {
+                    return 1
+                },
+            }
+            if name.len == 0 {
+                continue
+            }
+        }
+        let stext = shadow_text("")
+        let ptext = fs_read_text("/etc/passwd") else ""
+        if name == "root" && !shadow_any_usable(stext) {
+            print("PAX: no account here has a password, so root logs in without one; set one with passwd.")
+            let r = users.user_named(ptext, "root") else |_| {
+                users.User { name: "root", uid: 0, gid: 0, comment: "", home: "/root", shell: "/bin/sh" }
+            }
+            return enter(r)
+        }
+        print_raw("Password: ")
+        let left = TIMEOUT_MS - (now_ms() - start)
+        let pw = secret_read(0, 1, false, if left > 0 then left else 1) else |e| match e {
+            timeout => {
+                print("\nLogin timed out after 60 seconds.")
+                return 1
+            },
+            _ => {
+                ""
+            },
+        }
+        let found = users.user_named(ptext, name) else |_| {
+            users.User { name: "", uid: -1, gid: -1, comment: "", home: "", shell: "" }
+        }
+        if found.name.len > 0 && pw_matches(pw, shadow_entry(stext, name).field) {
+            return enter(found)
+        }
+        time_sleep_ms(FAIL_DELAY_MS)
+        print("\nLogin incorrect")
+        tries += 1
+        name = ""
+    }
+    print("Maximum number of tries exceeded ({TRIES})")
+    1
+}
+
+/// The session for `u`: the terminal, the ids, the environment, the home
+/// directory, the shell. Returns only when something fails.
+fn enter(u: users.User) -> int {
+    let group = fs_read_text("/etc/group") else ""
+    let groups = users.groups_of(group, u.name, u.gid)
+    // The terminal is the account's, as login(1) gives it (px98's rule).
+    fs_set_owner("/dev/stdin", u.uid, u.gid, true) else |_| {
+    }
+    fs_set_mode("/dev/stdin", 0o600) else |_| {
+    }
+    var shell = u.shell
+    if shell.len == 0 {
+        shell = "/bin/sh"
+    }
+    var home = u.home
+    var env = List[str]()
+    let term = env_get("TERM") else ""
+    if term.len > 0 {
+        (mut env).push("TERM={term}")
+    }
+    var why = ""
+    os_set_ids(u.uid, u.gid, groups) else |e| match e {
+        denied => {
+            why = "Operation not permitted"
+        },
+        invalid => {
+            why = "Invalid argument"
+        },
+        io => {
+            why = "Input/output error"
+        },
+        unsupported => {
+            why = "this host cannot change a process's ids"
+        },
+    }
+    if why.len > 0 {
+        eprint("login: cannot set user and group ids: {why}")
+        return 1
+    }
+    os_chdir(home) else |_| {
+        print("No directory, logging in with HOME=/")
+        home = "/"
+        os_chdir("/") else |_| {
+        }
+    }
+    (mut env).push("HOME={home}")
+    (mut env).push("SHELL={shell}")
+    (mut env).push("PATH={login_path(u.uid == 0)}")
+    (mut env).push("LOGNAME={u.name}")
+    (mut env).push("USER={u.name}")
+    (mut env).push("MAIL=/var/mail/{u.name}")
+    if fs_is_file("/etc/shrc") {
+        (mut env).push("ENV=/etc/shrc")
+    }
+    let base = base_name(shell)
+    var row = ""
+    os_exec(shell, ["-" + base], env, List[int]()) else |e| match e {
+        not_found => {
+            row = "No such file or directory"
+        },
+        denied => {
+            row = "Permission denied"
+        },
+        io => {
+            row = "Exec format error"
+        },
+        invalid => {
+            row = "Invalid argument"
+        },
+        unsupported => {
+            row = "this host has no exec"
+        },
+    }
+    eprint("login: failed to execute {shell}: {row}")
+    1
+}
+
+/// `PATH`: /etc/login.defs' ENV_SUPATH (root) or ENV_PATH, as `PATH=…` or
+/// bare, else Ubuntu's defaults.
+fn login_path(root: bool) -> str {
+    let key = if root then "ENV_SUPATH" else "ENV_PATH"
+    let defs = fs_read_text("/etc/login.defs") else ""
+    for line in defs.split("\n") {
+        if !line.starts_with(key) {
+            continue
+        }
+        let rest = line[key.len..]
+        if rest.len == 0 || !(rest.starts_with(" ") || rest.starts_with("\t")) {
+            continue
+        }
+        var v = trim(rest)
+        if v.starts_with("PATH=") {
+            v = v[5..]
+        }
+        if v.len > 0 {
+            return v
+        }
+    }
+    if root {
+        return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    }
+    "/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games"
+}
+
+fn hostname() -> str {
+    let h = trim(fs_read_text("/proc/sys/kernel/hostname") else "")
+    if h.len == 0 {
+        return "pax"
+    }
+    h
+}
+
+fn trim(s: str) -> str {
+    var b = 0
+    var e = s.len
+    while b < e && (s[b..b + 1] == " " || s[b..b + 1] == "\t") {
+        b += 1
+    }
+    while e > b && (s[e - 1..e] == " " || s[e - 1..e] == "\t" || s[e - 1..e] == "\r" || s[e - 1..e] == "\n") {
+        e -= 1
+    }
+    s[b..e]
+}
+
+fn base_name(path: str) -> str {
+    let cut = path.rfind("/") else -1
+    if cut < 0 {
+        return path
+    }
+    path[cut + 1..]
+}
