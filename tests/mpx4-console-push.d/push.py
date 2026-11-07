@@ -475,7 +475,8 @@ def hook(c, name, git, env, alias, pattern):
 # The https way's diagnosis (R-px104-14), PAX_PUSH_DIAG=1 only: what the
 # fixture's TLS server (one openssl s_server, serving one connection at a
 # time) and the bridge's threads are doing, read from this host's /proc and
-# ss at three points of the session; nothing secret is read.
+# ss twice a second through the session (a sampler of push.py's own, so the
+# typed session is the https way's own up to H1); nothing secret is read.
 DIAG_SNAP = r"""#!/bin/sh
 echo "== $(date -u +%FT%T.%N) $1"
 echo "-- ss, the fixture's port {port}"
@@ -490,20 +491,6 @@ echo "-- the bridge: push.py {ppid}'s threads"
 for t in /proc/{ppid}/task/*; do echo "task ${{t##*/}} $(cat "$t/comm"): syscall $(cat "$t/syscall"), wchan $(cat "$t/wchan")"; done
 """
 
-
-def diag_hook(c, name, snap, dest, delay):
-    """A host program the console runs at STEP:name: the snapshot into DEST,
-    DELAY seconds later in the background when DELAY is not 0."""
-    p = c / 'run' / ('hook-' + name)
-    p.parent.mkdir(mode=0o700, exist_ok=True)
-    if delay:
-        body = '( sleep %d; /bin/sh %s %s > %s 2>&1 ) < /dev/null > /dev/null 2>&1 &\necho "snapshot in %d s"\n' % (
-            delay, sh_quote(str(snap)), name, sh_quote(str(dest)), delay)
-    else:
-        body = '/bin/sh %s %s > %s 2>&1\ncat %s\n' % (sh_quote(str(snap)), name, sh_quote(str(dest)), sh_quote(str(dest)))
-    p.write_text('#!/bin/sh\n' + body)
-    os.chmod(p, 0o700)
-    return p
 
 def hooks_seen(out):
     p = out / 'serial.log.hooks'
@@ -642,22 +629,35 @@ def way_https(out, images, c, den_src, git):
         qemu = user_net()
         diag = os.environ.get('PAX_PUSH_DIAG') == '1'
         if diag:
-            # H8, then H1's clone, and nothing after: snapshots at H8's end,
-            # 4 s into H1 and at H1's end; the guest's frames in a pcap.
+            # The https way's own lines up to H1's clone, typed as it types
+            # them, then the canary; no hook; the sampler throughout; the
+            # guest's frames in a pcap.
             snap = c / 'run' / 'diag-snap'
             snap.parent.mkdir(mode=0o700, exist_ok=True)
             snap.write_text(DIAG_SNAP.format(port=port, spid=server.process.pid, ppid=os.getpid()))
-            hooks = {'D-h8-end': diag_hook(c, 'D-h8-end', snap, out / 'diag-h8-end.txt', 0),
-                     'D-h1-start': diag_hook(c, 'D-h1-start', snap, out / 'diag-h1-start.txt', 4),
-                     'D-h1-end': diag_hook(c, 'D-h1-end', snap, out / 'diag-h1-end.txt', 0)}
-            keys = keys[:keys.index('export DEN_TLS_ROOTS=/etc/ssl/rows-roots.der')] + [
-                'echo STEP:"D-h8-end"', 'export DEN_TLS_ROOTS=/etc/ssl/rows-roots.der', 'echo STEP:"D-h1-start"',
-                'echo ROW H1; s den clone -q https://github.com:%d/remote.git cH' % port, 'echo STEP:"D-h1-end"',
-            ] + CANARY.splitlines()
+            hooks = {}
+            keys = keys[:keys.index('cd cH')] + CANARY.splitlines()
             qemu = qemu + ['-object', 'filter-dump,id=f0,netdev=n0,file=%s' % (out / 'diag.pcap')]
             say('DIAG the fixture: 127.0.0.1:%d, s_server pid %d, the bridge in pid %d' % (port, server.process.pid, os.getpid()))
+            import threading
+            stop = threading.Event()
+
+            def sampler():
+                with open(out / 'diag-samples.txt', 'wb') as f:
+                    while not stop.is_set():
+                        r = subprocess.run(['/bin/sh', str(snap), 'sample'], capture_output=True, timeout=30)
+                        f.write(r.stdout + r.stderr)
+                        f.flush()
+                        stop.wait(0.5)
+            sampling = threading.Thread(target=sampler, name='px104-diag-sampler')
+            sampling.start()
         iso = image(images, out, 'https', {'/etc/ssl/rows-roots.der': (rows_roots, '644')}, 'hermetic.pax-net')
-        log = boot(out, iso, keys, c, qemu, hooks)
+        try:
+            log = boot(out, iso, keys, c, qemu, hooks)
+        finally:
+            if diag:
+                stop.set()
+                sampling.join(timeout=60)
         if diag:
             # s_server's stderr as it stands (read only now, so the session
             # ran with the pipe as the fixture left it): its capacity, what
@@ -683,7 +683,7 @@ def way_https(out, images, c, den_src, git):
         dns.close()
         server.close()
     if os.environ.get('PAX_PUSH_DIAG') == '1':
-        for f in ('diag-h8-end.txt', 'diag-h1-start.txt', 'diag-h1-end.txt', 'diag.pcap'):
+        for f in ('diag-samples.txt', 'diag.pcap'):
             say('DIAG %s: %s' % (f, '%d bytes' % (out / f).stat().st_size if (out / f).exists() else 'missing'))
         b = blocks(log)
         for r in ('H8', 'H1'):
