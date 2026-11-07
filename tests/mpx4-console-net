@@ -79,7 +79,11 @@
 #      (none, nofile: 10, the PCI table searched and one line; nonet: 0;
 #      virtio-net 1000 + the lease's and the echo's; igb 12000 + …;
 #      nolink: no lease wait); the loopback line answers
-#      for 127.0.0.1 and the station's address; the first program runs.
+#      for 127.0.0.1 and the station's address; the first program runs;
+#      the udp and tcp lines name the ephemeral range `from a random
+#      start`, no number, so two boots' transcripts read the same (the
+#      start itself stays random; mpx6-triage's T2 holds a plain boot's
+#      transcript to a triage boot's, line for line).
 #   C8 (every way but https) the end: `PAX: init /bin/netstate ended …`,
 #      `halt`, no PANIC, qemu-halt holds the machine halted.
 #   H1-H5 (https) the lease, then den's clone over https exits 0; its
@@ -420,6 +424,10 @@ one() { # tier leg way
     fi
     has "$norm" "^loopback: 127\.0\.0\.1 answers the kernel's echo, [0-9.]+ answers, [0-9]+ frames on the wire$" || why+=" loopback '$(grep -m1 '^loopback:' "$norm")';"
     has "$norm" '^run 1: /bin/' || why+=" the first program never ran;"
+    has "$norm" '^udp: 16 sockets, a 65536-byte queue each, ports 32768-60999 from a random start, 1472 bytes a datagram, loopback by kernel/ip$' \
+        || why+=" udp's line '$(grep -m1 '^udp: 16 sockets' "$norm")';"
+    has "$norm" '^tcp: 1024 blocks, 65536 bytes each way a connection, MSS 1460, ports 32768-60999 from a random start, RTO 200 ms to 60 s, time-wait 60 s in 32768 entries$' \
+        || why+=" tcp's line '$(grep -m1 '^tcp: 1024 blocks' "$norm")';"
     [ -z "$why" ] && say "PASS C7 $L: ${wl#net: }" || bad "C7 $L:$why"
 
     # --- C8: the end -----------------------------------------------------------------
