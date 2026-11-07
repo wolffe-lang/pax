@@ -1,0 +1,45 @@
+px104 — for the next stick: pushing to GitHub from the metal target's console
+
+What the stick carries since px104 (both images, release and dev):
+  /bin/ssh, /bin/burrow-keygen   burrow at 0d98ce92 (user/burrow.pin), unmodified
+  /bin/den, /bin/git -> den      den at ac2332bf (user/den.pin): https as well as file://, git:// and ssh
+  /bin/git-upload-pack, /bin/git-receive-pack
+                                 den's two wrappers, on PATH (R-px104-5; /usr/libexec/den is gone)
+  /etc/ssl/certs/ca-roots.der    Mozilla's root store as curl extracts it, cacert-2026-10-20.pem,
+                                 sha256 796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe,
+                                 118 certificates, as concatenated DER (sha256 7a713f23…, 127,103 bytes);
+                                 source https://curl.se/ca/cacert-2026-10-20.pem, the certificate data
+                                 Mozilla publishes under the Mozilla Public License 2.0 (user/roots.pin)
+  /etc/ssh/ssh_known_hosts       GitHub's published ed25519 host key,
+                                 SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+  /etc/shrc                      exports DEN_TLS_ROOTS=/etc/ssl/certs/ca-roots.der, and no
+                                 DEN_UPLOAD_PACK or DEN_RECEIVE_PACK
+Nothing secret: no token, no key. The stick lane's INPUTS gains two
+directories, burrow/ (tools/mkburrow's OUTDIR) and roots/ (tools/mkroots'),
+read by tools/distribution-root and held by tests/distribution.
+
+The leg, typed at the console with a network cable in the I225-V (px105's
+stick-leg gives the lease first). Each line, and what it should show:
+
+  cat /etc/resolv.conf                 the lease's name server
+  den clone -q https://github.com/wolffe-lang/burrow.git /tmp/burrow-ro
+                                       (a public repository: no token) exit 0, quietly;
+                                       a name that resolves, a chain Mozilla's set verifies
+  mkdir -p ~/.ssh && chmod 700 ~/.ssh && burrow-keygen -t ed25519 -f ~/.ssh/id_ed25519
+  burrow-keygen -y -f ~/.ssh/id_ed25519
+                                       the public line, to add to GitHub (a deploy key of a
+                                       repository of yours, write access) if you want the ssh push
+  printf 'Host github.com\n\tUserKnownHostsFile ~/.ssh/known_hosts /etc/ssh/ssh_known_hosts\n' > ~/.ssh/config
+  ssh -T git@github.com                (the key not yet on GitHub) the refusal OpenSSH's ssh gives a
+                                       keyless login, after GitHub's host key matched the pin
+
+and then a push of your own, over either: `den push -q origin main` in a
+clone of yours asks `Token: ` (no echo) unless DEN_HTTP_TOKEN is set; over
+ssh it uses ~/.ssh/id_ed25519. What another answer means:
+  den: wire: io, on a name          no name resolved: /etc/resolv.conf empty (no lease), or
+                                    the server unreachable; a line in /etc/hosts is the fallback
+  den: wire: Unsupported(TLS …)     the TLS client's own name for the refusal: issuer_mismatch
+                                    (a root missing from the set, or a proxy in the way),
+                                    expired or not_yet_valid (the clock: PAX reads the RTC as UTC)
+  burrow: host_key_changed          something answered for github.com with another key: stop
+  burrow: host_key_unknown          ~/.ssh/config does not name /etc/ssh/ssh_known_hosts
