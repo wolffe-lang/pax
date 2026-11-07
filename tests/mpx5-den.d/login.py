@@ -97,6 +97,7 @@ ROOT_B = [
 USER_C = ["stat -L -c 'PX98-AGAIN-TERM %u %g %a' /dev/stdin", 'exit']
 LIVE_D = ["stat -L -c 'PX98-LIVE-TERM %u %g %a' /dev/stdin", 'exit']
 RUNS = [('pax', USER_A), ('root', ROOT_B), ('pax', USER_C), ('root', LIVE_D)]
+FRIENDLY = re.compile(rb'\x1b\[0m[>#] \x1b\[0m')  # pelt's friendly prompt's end, as COM1 carries it
 
 
 def run(iso, home, logp, firmware, ovmf, passwords=None):
@@ -162,9 +163,16 @@ def run(iso, home, logp, firmware, ovmf, passwords=None):
                 wait(lambda s: b'Password: ' in s.split(mark, 1)[1].split(b'login: ', 1)[1], f'run {k} password prompt')
                 time.sleep(.3)
                 send(pw[account])
+            # px97c: pelt starts its interactive shells friendly (`pax@? ~> `, `root@? ~# `, colours) unless
+            # invoked as `sh`; the first prompt is either shape, and the session turns friendly mode off the
+            # way a user does before its lines, so every later prompt is `$ `.
+            after = lambda s: s.split(mark, 1)[1].split(b'login: ', 1)[1]
+            wait(lambda s: b'$ ' in after(s) or FRIENDLY.search(after(s)) is not None, f'run {k} first prompt')
+            base = after(text()).count(b'$ ')
+            send('set +o friendly')
             for n, line in enumerate(lines, 1):
                 assert '$ ' not in line, line
-                wait(lambda s: s.split(mark, 1)[1].split(b'login: ', 1)[1].count(b'$ ') >= n, f'run {k} prompt {n}')
+                wait(lambda s: after(s).count(b'$ ') >= base + n, f'run {k} prompt {n}')
                 send(line)
         wait(lambda s: re.search(rb'\nhalt\r?\n', s) is not None or b'PANIC ' in s, 'halt', 300)
     except AssertionError as e:
