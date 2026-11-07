@@ -1,15 +1,16 @@
-//! su — run a shell as another user (px46, P5 lane U6; ruling #75 R8).
+//! su — run a shell as another user (px46, P5 lane U6; px106, passwords;
+//! ruling #75 R8).
 //!
-//! PAX's `su` is ROOT DROPPING TO A USER, and nothing else. Ruling #75
-//! has no passwords (R1), and `su` is installed as an ordinary program,
-//! not set-user-ID (set-ID execution is honoured since px103, for `sudo`
-//! alone), so there is no way up: run by root it becomes the user it names for
-//! good — the groups, then the group ids, then the user ids, in one
-//! `os_set_ids` that is whole or ends the process — and runs that user's
-//! shell; run by anyone else it refuses, with the message and the status
-//! Linux's `su` gives a user who cannot authenticate. Nothing here is a
-//! boundary against an attacker: the checks it relies on are enforced
-//! for honest programs (R6).
+//! Run by root, PAX's `su` becomes the user it names with no question;
+//! run by anyone else it asks for THAT user's password (px106: ruling #75
+//! R1's scrypt, from /etc/shadow, through user/auth), one try, as Linux's
+//! does. Since px106 it is installed set-user-ID root (04755, Ubuntu's
+//! mode: set-ID execution is honoured since px103), so after the right
+//! password it can become the user: the groups, then the group ids, then
+//! the user ids, in one `os_set_ids` that is whole or ends the process —
+//! and runs that user's shell. Nothing here is a boundary against an
+//! attacker: the checks it relies on are enforced for honest programs
+//! (R6).
 //!
 //! References consulted: `su(1)` and `login.defs(5)` (util-linux 2.39,
 //! shadow 4.13), `passwd(5)`, `group(5)`, `credentials(7)`; pax
@@ -54,16 +55,19 @@
 //!   requires an argument -- 'c'`, each followed by `Try 'su --help' for
 //!   more information.`); a user `/etc/passwd` does not hold (`su: user
 //!   NAME does not exist or the user entry does not contain all the
-//!   required fields`); then, when the caller is not root, `su:
-//!   Authentication failure` — Linux's words for a user without the
-//!   password, after a `Password: ` prompt and a pause of about three
-//!   seconds. **This one asks for no password** (there is none: R1), so
-//!   it prints the message alone, at once. A shell that is not there:
+//!   required fields`); then, when the caller is not root, `Password: `
+//!   (no echo, from /dev/tty; with no terminal, standard input) and, for a
+//!   wrong, empty or locked one, about 3 s and `su: Authentication
+//!   failure` (1 s after the end of input), as Linux's (px106, measured on
+//!   Ubuntu 24.04's su, notes/px106/auth-ct.sh). For a caller who is not
+//!   root, a target whose shell /etc/shells does not list (with none,
+//!   /bin/sh and /bin/csh) keeps that shell whatever `-s` or `-m` asks
+//!   (su(1)'s rule; not measured). A shell that is not there:
 //!   `su: failed to execute SHELL: No such file or directory`, 127.
 //!
 //! **What this one does not do, by name:** no PAM, so none of what
 //! Ubuntu's PAM adds (`MAIL`, `LANG`, `/etc/environment`'s `PATH`, the
-//! umask from `pam_umask`, the delay); no `setsid` with `-c` (PAX has
+//! umask from `pam_umask`; the delay is this program's own); no `setsid` with `-c` (PAX has
 //! one session; job control is ruling #79's track); no parent left
 //! waiting: Linux's `su` stays as the shell's parent to close its PAM
 //! session and passes the shell's status on (`Terminated` and 143 for a
@@ -128,13 +132,15 @@ fn main() -> int {
         eprint("su: user {name} does not exist or the user entry does not contain all the required fields")
         return 1
     }
-    let euid = os_euid() else -1
-    if euid != 0 {
-        // No password exists to ask for (R1), and set-ID is not honoured
-        // (R5): a user can become no one.
-        eprint("su: Authentication failure")
-        return 1
+    let uid = os_uid() else -1
+    if uid != 0 {
+        // px106: the target's password, one try, as Linux's su asks it.
+        if !authenticate(u.name) {
+            eprint("su: Authentication failure")
+            return 1
+        }
     }
+    let restricted = uid != 0 && !listed_shell(u.shell)
     let group = fs_read_text("/etc/group") else ""
     let groups = users.groups_of(group, u.name, u.gid)
 
@@ -143,13 +149,15 @@ fn main() -> int {
     if shell.len == 0 {
         shell = "/bin/sh"
     }
-    if keep {
+    // su(1): a target whose shell /etc/shells does not list keeps it,
+    // whatever a caller who is not root asks with -s or -m.
+    if keep && !restricted {
         let mine = env_get("SHELL") else ""
         if mine.len > 0 {
             shell = mine
         }
     }
-    if a.shell.len > 0 {
+    if a.shell.len > 0 && !restricted {
         shell = a.shell
     }
     let base = base_name(shell)
@@ -367,6 +375,47 @@ fn parse(args: List[str]) -> Args {
     a
 }
 
+/// Read the target's password (`Password: `, the echo off, from
+/// /dev/tty; with no terminal, the prompt on standard output and the
+/// answer from standard input, as Linux's su does) and check it against
+/// /etc/shadow (user/auth). A failure waits as Linux's does: about 3 s
+/// after a wrong or empty password, 1 s after the end of input.
+fn authenticate(name: str) -> bool {
+    let stored = shadow_entry(shadow_text(""), name).field
+    let tty = secret_tty()
+    var ended = false
+    var got = ""
+    if tty >= 0 {
+        got = secret_ask(tty, "Password: ") else |_| {
+            ended = true
+            ""
+        }
+    } else {
+        print_raw("Password: ")
+        got = secret_read(0, -1, false, 0) else |_| {
+            ended = true
+            ""
+        }
+    }
+    if !ended && pw_matches(got, stored) {
+        return true
+    }
+    time_sleep_ms(if ended then 1000 else 3000)
+    false
+}
+
+/// Whether /etc/shells lists `shell` (su(1)'s restricted-shell rule); with
+/// no /etc/shells, its defaults /bin/sh and /bin/csh.
+fn listed_shell(shell: str) -> bool {
+    let text = fs_read_text("/etc/shells") else "/bin/sh\n/bin/csh\n"
+    for line in text.split("\n") {
+        if trim(line) == shell && !line.starts_with("#") {
+            return true
+        }
+    }
+    false
+}
+
 /// A long option Linux's `su` has and this one does not build.
 fn linux_long(name: str) -> bool {
     name == "fast" || name == "group" || name == "supp-group" || name == "pty" ||
@@ -440,8 +489,8 @@ fn set(mut env: List[str], name: str, value: str) {
 fn help() -> str {
     """
     Usage: su [OPTION]... [-] [USER [ARG]...]
-    Run USER's shell (root when no USER is named) as USER. Only root may
-    use it: PAX has no passwords, and a set-user-ID bit is not honoured.
+    Run USER's shell (root when no USER is named) as USER. Anyone but
+    root gives USER's password.
 
       -, -l, --login                  a login shell: the environment
                                       emptied but TERM, HOME, SHELL,
