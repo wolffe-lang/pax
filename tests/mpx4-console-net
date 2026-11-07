@@ -37,9 +37,10 @@
 #   quiet    virtio-net on a tap with dnsmasq (tools/dhcp-wire's renew:
 #            a 2-minute lease, T1 10 s), the kernel booted with `quiet`;
 #            /etc/pax-net `dhcp`; the list waits past T1
-#   https    igb on QEMU's user network; den at the https pin
-#            (tests/mpx4-console-net.d/den-https.pin, R-px105-2 B, built
-#            by tools/mkden) clones over https from den's own smart-HTTP
+#   https    igb on QEMU's user network; den at the images' pin
+#            (user/den.pin since px104, R-px104-8; R-px105-2 B's own pin
+#            retired into it, built by tools/mkden) clones over https
+#            from den's own smart-HTTP
 #            fixture on this host's loopback, reached at 10.0.2.2
 #            (tests/mpx4-console-net.d/https.py: its image is made once the
 #            fixture's port is known)
@@ -155,20 +156,20 @@ if [ -z "$images" ]; then
     say "  program: bin/netstate $(sha256_of "$work/net/netstate") $(wc -c < "$work/net/netstate" | tr -d ' ') bytes"
     case " $ways " in
         *" https "*)
-            # R-px105-2 B: den at the https pin for the https way alone,
-            # its tree for den's own fixture, and the run list's indir.
-            PAX_DEN_PIN=$here/mpx4-console-net.d/den-https.pin "$PAX_ROOT/tools/mkden" "$work/den-https" > "$work/den-https.txt" 2>&1 \
-                || { tail -n 20 "$work/den-https.txt" >&2; why+=" tools/mkden (the https pin);"; }
+            # R-px105-2 B, retired by px104 (R-px104-8): den at the images'
+            # pin, its tree for den's own fixture, and the run list's indir.
+            "$PAX_ROOT/tools/mkden" "$work/den-https" > "$work/den-https.txt" 2>&1 \
+                || { tail -n 20 "$work/den-https.txt" >&2; why+=" tools/mkden (user/den.pin);"; }
             (
-                . "$here/mpx4-console-net.d/den-https.pin"
+                . "$PAX_ROOT/user/den.pin"
                 mkdir -p "$work/den-src" && git -C "$work/den-src" init -q \
                     && "$PAX_ROOT/tools/fetch-retry" "$work/den-src" "$DEN_REPO" "$DEN_REV" "$DEN_REV" \
                     && git -C "$work/den-src" checkout -q --detach FETCH_HEAD \
                     && [ "$(git -C "$work/den-src" rev-parse HEAD)" = "$DEN_REV" ]
-            ) > "$work/den-src.txt" 2>&1 || why+=" den's tree at the https pin;"
+            ) > "$work/den-src.txt" 2>&1 || why+=" den's tree at user/den.pin;"
             cc -O1 -Wall -Wextra -static -no-pie -Wl,--build-id=none -o "$work/indir" "$here/mpx4-console-net.d/indir.c" || why+=" indir;"
             r=$(static_ok "$work/indir") || why+=" $r;"
-            [ -f "$work/den-https/den" ] && say "  https: den $(sha256_of "$work/den-https/den") (tests/mpx4-console-net.d/den-https.pin), indir $(sha256_of "$work/indir")"
+            [ -f "$work/den-https/den" ] && say "  https: den $(sha256_of "$work/den-https/den") (user/den.pin), indir $(sha256_of "$work/indir")"
             ;;
     esac
     for way in $ways; do
