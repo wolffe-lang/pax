@@ -279,7 +279,14 @@ def boot(out, iso, keys, c, qemu, hooks):
     if r.returncode == 0:
         ok('C1', 'the session typed and halted (%s)' % ARGS.way)
     else:
-        bad('C1', 'the session: %s' % (text.strip().splitlines() or ['no output'])[-1])
+        # The driver's own error, through the same scrub as the transcript.
+        spec = importlib.util.spec_from_file_location('console_driver', HERE / 'console.py')
+        driver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(driver)
+        err = driver.Scrub(str(c / 'd')).text(r.stderr).decode(errors='replace').strip().splitlines()
+        for line in err[-6:]:
+            say('  console stderr: ' + line)
+        bad('C1', 'the session: %s' % (text.strip().splitlines() or err[-1:] or ['no output'])[-1])
     return (out / 'serial.log').read_bytes().decode(errors='replace') if (out / 'serial.log').exists() else ''
 
 
@@ -392,6 +399,8 @@ def git_steps(git, env, alias, work, ref, base=None):
         step('remote', ['remote', 'add', 'origin', alias], w)
         step('fetch', ['fetch', '-q', 'origin'], w)
         step('switch', ['switch', '-q', '-c', 'px104-work', 'origin/' + base], w)
+    if not w.is_dir() or any(rc for _, rc, _ in res):
+        return res  # the rest needs a working clone: the row names what failed
     (w / FILE).write_text('from the console\n')
     step('add', ['add', FILE], w)
     step('commit', ['commit', '-q', '-m', MESSAGE], w)
@@ -468,7 +477,7 @@ def judge(prefix, b, hooks, gitres, ref, clone_log=None, live=False):
     if clone_log is not None:
         c = blk(1)
         if len(c) < 2 or c[0][0] != 0:
-            bad(prefix + '1', 'den clone: %s' % (c[0] if c else 'no block'))
+            bad(prefix + '1', 'den clone: %r' % ((c[0] if c else 'no block'),))
         elif c[1][1] != clone_log:
             bad(prefix + '1', 'den log after the clone %s, git\'s %s' % (c[1][1], clone_log))
         else:
@@ -476,11 +485,11 @@ def judge(prefix, b, hooks, gitres, ref, clone_log=None, live=False):
     else:
         f, s_ = blk(1), blk(2)
         if not f or f[0][0] != 0:
-            bad(prefix + '1', 'den fetch: %s' % (f[0] if f else 'no block'))
+            bad(prefix + '1', 'den fetch: %r' % ((f[0] if f else 'no block'),))
         else:
             ok(prefix + '1', 'den fetch exit 0')
         if not s_ or s_[0][0] != 0:
-            bad(prefix + '2', 'den switch: %s' % (s_[0] if s_ else 'no block'))
+            bad(prefix + '2', 'den switch: %r' % ((s_[0] if s_ else 'no block'),))
         else:
             ok(prefix + '2', 'den switch -c onto the default branch, exit 0')
     k = 2 if clone_log is not None else 3
@@ -496,7 +505,7 @@ def judge(prefix, b, hooks, gitres, ref, clone_log=None, live=False):
     p = blk(k + 1)
     seen = hooks.get(prefix + '-pushed', (-1, ''))
     if not p or p[0][0] != 0:
-        bad(prefix + str(k + 1), 'den push: %s' % (p[0] if p else 'no block'))
+        bad(prefix + str(k + 1), 'den push: %r' % ((p[0] if p else 'no block'),))
     elif seen[0] != 0 or seen[1] != '%s\trefs/heads/%s' % (oid, ref):
         bad(prefix + str(k + 1), 'den push exit 0, but this host\'s ls-remote said %s' % (seen,))
     else:
@@ -509,7 +518,7 @@ def judge(prefix, b, hooks, gitres, ref, clone_log=None, live=False):
     d = blk(k + 3)
     gone = hooks.get(prefix + '-deleted', (-1, 'x'))
     if not d or d[0][0] != 0:
-        bad(prefix + str(k + 3), 'den push of the deletion: %s' % (d[0] if d else 'no block'))
+        bad(prefix + str(k + 3), 'den push of the deletion: %r' % ((d[0] if d else 'no block'),))
     elif gone[0] not in (0, 2) or gone[1] != '':
         bad(prefix + str(k + 3), 'the deletion: this host\'s ls-remote said %s' % (gone,))
     else:
