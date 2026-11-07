@@ -40,14 +40,19 @@ Ways and rows (each printed `PASS <row> …` or `FAIL <row> …` at column 0):
          test root appended:
     H8 the shipped set alone: `TLS issuer_mismatch`, by the client's name;
     H1 den clone https://github.com:PORT/remote.git, its log git's;
-    H2 a commit, its id the one git makes on this host for the same steps;
+    H2 a commit; `den log -n 1 --pretty=oneline --no-decorate` (den has no
+       rev-parse at its pin) prints the id and subject git makes on this
+       host for the same steps;
     H3 den push (the token from the carrier), and this host's git ls-remote
        sees the ref at that id;
-    H4 den fetch of the ref into a scratch ref, den rev-parse of it: the id;
+    H4 den fetch (the configured fetch: den fetches no refspec named with a
+       remote) makes the remote-tracking ref, the scratch ref; den log of it:
+       the id;
     H5 den push of the ref's deletion, and ls-remote no longer sees it;
-    H6 den fetch of the ref fails, and no scratch ref is made;
+    H6 den fetch --prune exit 0, and den log of the remote-tracking ref
+       fails: it is gone;
     H7 this host's git, the same steps against the same fixture: the same
-       statuses (zero or not) and the same ids.
+       statuses (zero or not) and the same lines.
   ssh    the same network; OpenSSH's sshd (a black box) on this host,
          its authorized key the carrier's (a forced command records the
          command den sends and runs it in the fixture's root with git's
@@ -66,8 +71,9 @@ Ways and rows (each printed `PASS <row> …` or `FAIL <row> …` at column 0):
          URL on no argv), for https and then ssh:
     L1 den fetch; L2 den switch -c onto the default branch; L3 a commit,
     the id git makes; L4 den push to refs/heads/px104-live/<nonce>/<way>
-    and ls-remote sees it; L5 den fetch into a scratch ref; L6 the deletion,
-    ls-remote empty; L7 den fetch fails. This host's git, the same steps on
+    and ls-remote sees it; L5 den fetch, den log of the remote-tracking
+    ref; L6 the deletion, ls-remote empty; L7 den fetch --prune, and den log
+    of the remote-tracking ref fails. This host's git, the same steps on
     refs/heads/px104-live/<nonce>/git-<way>; anything of <nonce> left on
     the fixture is deleted at the end, whatever happened.
   every way:
@@ -405,18 +411,21 @@ def git_steps(git, env, alias, work, ref, base=None):
     (w / FILE).write_text('from the console\n')
     step('add', ['add', FILE], w)
     step('commit', ['commit', '-q', '-m', MESSAGE], w)
-    step('rev-parse', ['rev-parse', 'HEAD'], w)
+    step('log', LOG + ['HEAD'], w)
     step('push', ['push', '-q', 'origin', 'HEAD:refs/heads/' + ref], w)
-    step('fetch-seen', ['fetch', '-q', 'origin', 'refs/heads/%s:refs/heads/px104-seen' % ref], w)
-    step('rev-parse-seen', ['rev-parse', 'px104-seen'], w)
+    step('fetch-seen', ['fetch', '-q', 'origin'], w)
+    step('log-seen', LOG + ['refs/remotes/origin/' + ref], w)
     step('delete', ['push', '-q', 'origin', ':refs/heads/' + ref], w)
-    step('fetch-gone', ['fetch', '-q', 'origin', 'refs/heads/%s:refs/heads/px104-gone' % ref], w)
-    step('rev-parse-gone', ['rev-parse', '--verify', '-q', 'px104-gone'], w)
+    step('fetch-gone', ['fetch', '-q', '--prune', 'origin'], w)
+    step('log-gone', LOG + ['refs/remotes/origin/' + ref], w)
     return res
 
 
 FILE = 'px104.txt'
 MESSAGE = 'px104: a commit from the console'
+# The commit's witness, the same words for den and git: den has no rev-parse
+# at its pin, and its log prints the whole id in the oneline pretty.
+LOG = ['log', '-n', '1', '--pretty=oneline', '--no-decorate']
 
 
 def den_steps(prefix, url_line, ref, clone=True, base=None):
@@ -430,14 +439,15 @@ def den_steps(prefix, url_line, ref, clone=True, base=None):
               'echo ROW %s1; s den fetch -q origin' % prefix,
               'echo ROW %s2; s den switch -q -c px104-work origin/%s' % (prefix, base)]
     n = 2 if clone else 3
+    log = ' '.join(LOG)
     k += ["printf 'from the console\\n' > %s" % FILE,
-          'echo ROW %s%d; s den add %s; s den commit -q -m %s; s den rev-parse HEAD' % (prefix, n, FILE, sh_quote(MESSAGE)),
+          'echo ROW %s%d; s den add %s; s den commit -q -m %s; s den %s HEAD' % (prefix, n, FILE, sh_quote(MESSAGE), log),
           'echo ROW %s%d; s den push -q origin HEAD:refs/heads/%s' % (prefix, n + 1, ref),
           'echo STEP:"%s-pushed"' % prefix,
-          'echo ROW %s%d; s den fetch -q origin refs/heads/%s:refs/heads/px104-seen; s den rev-parse px104-seen' % (prefix, n + 2, ref),
+          'echo ROW %s%d; s den fetch -q origin; s den %s refs/remotes/origin/%s' % (prefix, n + 2, log, ref),
           'echo ROW %s%d; s den push -q origin :refs/heads/%s' % (prefix, n + 3, ref),
           'echo STEP:"%s-deleted"' % prefix,
-          'echo ROW %s%d; s den fetch -q origin refs/heads/%s:refs/heads/px104-gone; s den rev-parse --verify -q px104-gone' % (prefix, n + 4, ref),
+          'echo ROW %s%d; s den fetch -q --prune origin; s den %s refs/remotes/origin/%s' % (prefix, n + 4, log, ref),
           'cd /tmp']
     return k
 
@@ -496,13 +506,14 @@ def judge(prefix, b, hooks, gitres, ref, clone_log=None, live=False):
     k = 2 if clone_log is not None else 3
     g = {name: (rc, o) for name, rc, o in gitres}
     commit = blk(k)
-    oid = commit[2][1][0] if len(commit) == 3 and commit[2][1] else ''
+    line = commit[2][1][0] if len(commit) == 3 and commit[2][1] else ''
+    oid = line.split(' ')[0]
     if len(commit) != 3 or any(x[0] for x in commit):
-        bad(prefix + str(k), 'den add, commit, rev-parse: %s' % [x[0] for x in commit])
-    elif oid != g.get('rev-parse', (1, ''))[1]:
-        bad(prefix + str(k), 'den\'s commit %s, git\'s %s' % (oid, g.get('rev-parse')))
+        bad(prefix + str(k), 'den add, commit, log: %s' % [(x[0], x[2]) for x in commit])
+    elif not re.fullmatch(r'[0-9a-f]{40}', oid) or line != g.get('log', (1, ''))[1]:
+        bad(prefix + str(k), 'den log said %r, git\'s %r' % (line, g.get('log')))
     else:
-        ok(prefix + str(k), 'the commit %s, the id git makes for the same steps' % oid)
+        ok(prefix + str(k), 'the commit %s, the id and subject git makes for the same steps' % oid)
     p = blk(k + 1)
     seen = hooks.get(prefix + '-pushed', (-1, ''))
     if not p or p[0][0] != 0:
@@ -512,10 +523,10 @@ def judge(prefix, b, hooks, gitres, ref, clone_log=None, live=False):
     else:
         ok(prefix + str(k + 1), 'den push exit 0; ls-remote sees refs/heads/%s at %s' % (ref, oid[:12]))
     f = blk(k + 2)
-    if len(f) != 2 or f[0][0] or f[1][0] or f[1][1] != [oid]:
-        bad(prefix + str(k + 2), 'den fetch of the ref, rev-parse: %s' % [(x[0], x[1]) for x in f])
+    if len(f) != 2 or f[0][0] or f[1][0] or f[1][1] != [line]:
+        bad(prefix + str(k + 2), 'den fetch, den log of the remote-tracking ref: %s' % [(x[0], x[1], x[2]) for x in f])
     else:
-        ok(prefix + str(k + 2), 'den fetch of the pushed ref into a scratch ref: %s' % oid[:12])
+        ok(prefix + str(k + 2), 'den fetch made refs/remotes/origin/%s; den log of it: %s' % (ref, oid[:12]))
     d = blk(k + 3)
     gone = hooks.get(prefix + '-deleted', (-1, 'x'))
     if not d or d[0][0] != 0:
@@ -525,21 +536,22 @@ def judge(prefix, b, hooks, gitres, ref, clone_log=None, live=False):
     else:
         ok(prefix + str(k + 3), 'den push of the deletion exit 0; ls-remote empty')
     f = blk(k + 4)
-    if len(f) != 2 or f[0][0] == 0 or f[1][0] == 0:
-        bad(prefix + str(k + 4), 'den fetch of the deleted ref: %s' % [(x[0], x[1], x[2]) for x in f])
+    if len(f) != 2 or f[0][0] != 0 or f[1][0] == 0 or f[1][1]:
+        bad(prefix + str(k + 4), 'den fetch --prune, den log of the pruned ref: %s' % [(x[0], x[1], x[2]) for x in f])
     else:
-        ok(prefix + str(k + 4), 'den fetch of the deleted ref fails (%d: %s), no scratch ref' % (f[0][0], ' '.join(f[0][2])[:80]))
+        ok(prefix + str(k + 4), 'den fetch --prune exit 0; den log of refs/remotes/origin/%s fails (%d: %s)'
+           % (ref, f[1][0], ' '.join(f[1][2])[:80]))
     # The same steps by this host's git.
     want_zero = ['clone'] if clone_log is not None else ['init', 'remote', 'fetch', 'switch']
-    want_zero += ['add', 'commit', 'rev-parse', 'push', 'fetch-seen', 'rev-parse-seen', 'delete']
+    want_zero += ['add', 'commit', 'log', 'push', 'fetch-seen', 'log-seen', 'delete', 'fetch-gone']
     gz = [name for name in want_zero if g.get(name, (1, ''))[0] != 0]
     gr = prefix + str(k + 5)
-    if gz or g.get('fetch-gone', (0, ''))[0] == 0 or g.get('rev-parse-gone', (0, ''))[0] == 0:
+    if gz or g.get('log-gone', (0, ''))[0] == 0:
         bad(gr, 'this host\'s git: %s' % gitres)
-    elif g['rev-parse'][1] != oid or g['rev-parse-seen'][1] != oid:
-        bad(gr, 'this host\'s git made %s and fetched %s, den %s' % (g['rev-parse'][1], g['rev-parse-seen'][1], oid))
+    elif g['log'][1] != line or g['log-seen'][1] != line:
+        bad(gr, 'this host\'s git logged %r and fetched %r, den %r' % (g['log'][1], g['log-seen'][1], line))
     else:
-        ok(gr, 'this host\'s git, the same steps: every status den\'s (zero, then the deleted ref\'s fetch not), the same id')
+        ok(gr, 'this host\'s git, the same steps: every status den\'s (zero, then the pruned ref\'s log not), the same line')
 
 
 def way_https(out, images, c, den_src, git):
