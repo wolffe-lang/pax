@@ -6,7 +6,10 @@
 //! packet socket) and a client in a program would need all three
 //! (R-px89-2). It runs only when the image's `/etc/pax-net` says `dhcp`
 //! (`from_file`); otherwise the fixed address a kmain gives kernel/ip is
-//! the station's, as it always was.
+//! the station's, as it always was. px105: the file may name a static
+//! address instead (`static <a.b.c.d>/<prefix> [gateway <a.b.c.d>] [dns
+//! <a.b.c.d>]…`), which `take_static` gives kernel/ip, kernel/arp and
+//! /etc/resolv.conf; the client does not run then.
 //!
 //! **The states** (RFC 2131 §4.4, figure 5), each a word of
 //! boot/net.S's `pax_dhcp_state`:
@@ -78,6 +81,16 @@
 //! The `bound` and `unbound` lines read the state back from where it
 //! lives (kernel/ip's words, the file in the tree), not from the lease.
 //! kernel/ip's own line follows each `bound` line.
+//!
+//! **px105: `quiet`.** With `quiet` on the kernel command line (every
+//! shipped console boots with it) the routine lines are not printed: the
+//! DISCOVER, REQUEST, RENEW and REBIND lines, OFFER, ACK, and the `bound`
+//! line (with kernel/ip's) of a renewal, which keeps the address. A
+//! renewal at T1 would otherwise print into whatever the console shows,
+//! an editor's screen included. `started`, the first `bound` of a lease
+//! and its `ip:` line, NAK, `expired`, `unbound`, `no ACK to four
+//! REQUESTs`, the lease wait's line and the router's are printed either
+//! way; so is every counter. Without `quiet` every line is as it was.
 //!
 //! **/var/lib/dhcp/pax.lease** is the lease as a program can read it
 //! (`write_lease`: the state, the address, netmask, router, servers, the
@@ -213,6 +226,14 @@ pub const C_NOT_SENT: u64 = 77
 pub const C_EXPIRED: u64 = 78
 pub const C_GAVE_UP: u64 = 79 // REQUESTING gave up after four
 pub const C_FILE: u64 = 80 // /etc/resolv.conf not written
+// px105: the static address /etc/pax-net named, from word 96.
+const S_ON: u64 = 96 // 1: `static …` read and well formed
+const S_ADDR: u64 = 97
+const S_MASK: u64 = 98
+const S_GATEWAY: u64 = 99 // 0: none
+const S_PREFIX: u64 = 100
+const S_DNS: u64 = 101 // three words
+const S_NDNS: u64 = 104
 
 fn dw(i: u64) -> u64 {
     // # Safety: i < 128, a word of boot/net.S's pax_dhcp_state.
@@ -372,11 +393,18 @@ fn put_state() {
 /// the disk's when `/` is there) and say whether it asks for DHCP. The
 /// file's first line that is neither empty nor a comment is `dhcp`,
 /// optionally ` wait=<seconds>` (1-600; 30 by default): how long the
-/// kmain waits for the first lease before it runs its list. No file is
-/// the fixed address, silently; a file that says anything else is the
-/// fixed address and one line saying so.
+/// kmain waits for the first lease before it runs its list. px105: or
+/// it is `static <a.b.c.d>/<prefix>`, then optionally ` gateway
+/// <a.b.c.d>` and up to three ` dns <a.b.c.d>`, in any order, words
+/// separated by single spaces (`static_asked`, `take_static`): the
+/// prefix 1-30, the address neither its subnet's network nor its
+/// broadcast address, the gateway on its subnet. No file is the fixed
+/// address, silently; a file that says anything else is the fixed
+/// address and one line saying so (a malformed static line: one line
+/// naming what is wrong).
 pub fn from_file() -> bool {
     put_dw(D_WAIT_S, 30)
+    put_dw(S_ON, 0)
     let (b, size, why) = tree.small_file("/etc/pax-net")
     if why != 0 {
         return false
@@ -414,15 +442,222 @@ pub fn from_file() -> bool {
                     }
                 }
                 want = known
+            } else if j - i >= 6 && word_at(b, i, j, "static") {
+                // px105: a static address, or one line saying why not.
+                known = true
+                let bad = parse_static(b, i + 6, j)
+                if bad == "" {
+                    put_dw(S_ON, 1)
+                } else {
+                    log.put("net: /etc/pax-net: ")
+                    log.put(bad)
+                    log.put("; the fixed address stays")
+                    log.end()
+                }
             }
         }
         i = j + 1
     }
     if seen && !known {
-        log.line("dhcp: /etc/pax-net is neither `dhcp` nor `dhcp wait=<1-600>`; the fixed address stays")
+        log.line("dhcp: /etc/pax-net is neither `dhcp`, `dhcp wait=<1-600>` nor `static <a.b.c.d>/<prefix> …`; the fixed address stays")
     }
     frames.free(b - frames.hhdm())
     want
+}
+
+// --- a static address (px105) --------------------------------------------------
+
+/// Whether the bytes at b+k.. (before b+j) begin with `w`.
+fn word_at(b: u64, k: u64, j: u64, w: str) -> bool {
+    var i = k
+    for c in w.bytes() {
+        if i >= j || rb(b + i) != (c as int) as u64 {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+/// The dotted quad at b+k.. (before b+j): whether it is one, its value
+/// (a.b.c.d as a << 24 | … | d) and the index after it.
+fn quad(b: u64, k: u64, j: u64) -> (bool, u64, u64) {
+    var i = k
+    var a: u64 = 0
+    var part: u64 = 0
+    while part < 4 {
+        var n: u64 = 0
+        var digits: u64 = 0
+        while i < j && rb(b + i) >= 48 && rb(b + i) <= 57 && digits < 4 {
+            n = n * 10 + (rb(b + i) - 48)
+            digits += 1
+            i += 1
+        }
+        if digits == 0 || digits > 3 || n > 255 {
+            return (false, 0, i)
+        }
+        a = (a << 8) | n
+        part += 1
+        if part < 4 {
+            if i >= j || rb(b + i) != 46 {
+                return (false, 0, i)
+            }
+            i += 1
+        }
+    }
+    (true, a, i)
+}
+
+/// The rest of a `static` line, b+k..b+j (just after the word): the
+/// S_ words set (not S_ON) and "", or what is wrong with it.
+fn parse_static(b: u64, k: u64, j: u64) -> str {
+    var i = k
+    if i >= j || rb(b + i) != 32 {
+        return "`static` names no address"
+    }
+    i += 1
+    let (ok, a, at) = quad(b, i, j)
+    if !ok {
+        return "the static address is not a.b.c.d"
+    }
+    i = at
+    if i >= j || rb(b + i) != 47 {
+        return "the static address has no /prefix"
+    }
+    i += 1
+    var p: u64 = 0
+    var digits: u64 = 0
+    while i < j && rb(b + i) >= 48 && rb(b + i) <= 57 && digits < 3 {
+        p = p * 10 + (rb(b + i) - 48)
+        digits += 1
+        i += 1
+    }
+    if digits == 0 || p < 1 || p > 30 {
+        return "the prefix is not 1-30"
+    }
+    let all: u64 = 0xffffffff
+    let mask = (all << (32 - p)) & all
+    var gw: u64 = 0
+    var nd: u64 = 0
+    while i < j {
+        if rb(b + i) != 32 {
+            return "the words after the address are not separated by single spaces"
+        }
+        i += 1
+        if word_at(b, i, j, "gateway ") {
+            let (g_ok, g, g_at) = quad(b, i + 8, j)
+            if !g_ok {
+                return "the gateway is not a.b.c.d"
+            }
+            if gw != 0 {
+                return "two gateways"
+            }
+            gw = g
+            i = g_at
+        } else if word_at(b, i, j, "dns ") {
+            let (d_ok, d, d_at) = quad(b, i + 4, j)
+            if !d_ok {
+                return "a dns server is not a.b.c.d"
+            }
+            if nd == 3 {
+                return "more than three dns servers"
+            }
+            put_dw(S_DNS + nd, d)
+            nd += 1
+            i = d_at
+        } else {
+            return "a word after the address is neither `gateway` nor `dns`"
+        }
+    }
+    let host = a & (all ^ mask)
+    if host == 0 || host == (all ^ mask) {
+        return "the static address is its subnet's network or broadcast address"
+    }
+    if gw != 0 && (gw & mask) != (a & mask) {
+        return "the gateway is not on the static address's subnet"
+    }
+    put_dw(S_ADDR, a)
+    put_dw(S_MASK, mask)
+    put_dw(S_PREFIX, p)
+    put_dw(S_GATEWAY, gw)
+    put_dw(S_NDNS, nd)
+    ""
+}
+
+/// px105: whether /etc/pax-net named a static address (`from_file`).
+pub fn static_asked() -> bool {
+    dw(S_ON) == 1
+}
+
+/// px105: hold the static address /etc/pax-net named: kernel/ip and
+/// kernel/arp, /etc/resolv.conf (one `nameserver` line a server, as a
+/// lease writes it), then
+///
+///     net: static <a>/<prefix> gateway <g>; /etc/resolv.conf: nameserver <d>, …
+///
+/// (`gateway none` without one) and kernel/ip's line. One frame is taken
+/// for the file's text and kept. Call after kernel/ip and kernel/arp
+/// are started.
+pub fn take_static() {
+    if !static_asked() {
+        return
+    }
+    if dw(D_SCRATCH) == 0 {
+        put_dw(D_SCRATCH, frame())
+    }
+    let a = dw(S_ADDR)
+    ip.configure(a, dw(S_MASK), dw(S_GATEWAY))
+    arp.set_ip(a)
+    var k: u64 = 0
+    while k < 3 {
+        put_dw(D_DNS + k, dw(S_DNS + k))
+        k += 1
+    }
+    let ok = dw(D_SCRATCH) != 0 && write_resolv(dw(S_NDNS))
+    let s = sync.acquire(sync.console())
+    log.put("net: static ")
+    arp.put_ip(a)
+    log.put("/")
+    log.dec(dw(S_PREFIX) as int)
+    log.put(" gateway ")
+    if dw(S_GATEWAY) == 0 {
+        log.put("none")
+    } else {
+        arp.put_ip(dw(S_GATEWAY))
+    }
+    log.put("; /etc/resolv.conf: ")
+    if ok {
+        put_resolv()
+    } else {
+        log.put("not written")
+    }
+    log.end()
+    ip.report()
+    sync.release(sync.console(), s)
+}
+
+/// px105: with a static gateway, the kernel's echo to it, waited for 3 s
+/// (IF set):
+///
+///     net: the gateway <g> answers the kernel's echo
+///     net: the gateway <g> does NOT answer the kernel's echo
+///     net: the static address names no gateway
+pub fn echo_gateway() {
+    if !static_asked() {
+        return
+    }
+    let g = dw(S_GATEWAY)
+    if g == 0 {
+        log.line("net: the static address names no gateway")
+        return
+    }
+    let got = echo_of(g)
+    let s = sync.acquire(sync.console())
+    log.put("net: the gateway ")
+    arp.put_ip(g)
+    log.put(if got { " answers the kernel's echo" } else { " does NOT answer the kernel's echo" })
+    log.end()
+    sync.release(sync.console(), s)
 }
 
 // --- starting ----------------------------------------------------------------
@@ -569,6 +804,9 @@ fn secs_now() -> u64 {
 /// The line of a message just sent: `<what> … (try <k>; again in <w> s)`,
 /// or `(<how>; again in <w> s)` for a renewal (`tries` false).
 fn sent_line(what: str, addr: u64, to: str, server: u64, tries: bool, how: str, wait: u64) {
+    if log.quiet() {
+        return // px105: a routine line
+    }
     let s = sync.acquire(sync.console())
     stamp()
     log.put(what)
@@ -971,7 +1209,32 @@ fn hold_lease(renewal: bool) {
     arp.set_ip(addr)
     let _w = write_resolv(dw(P_NDNS))
     let _l = write_lease("not tried")
+    // px105: under `quiet` the ACK is routine, and so is a renewal's
+    // `bound` (the same address); a lease's first `bound` is printed.
+    let q = log.quiet()
+    if q && renewal {
+        return
+    }
     let s = sync.acquire(sync.console())
+    if !q {
+        ack_line(addr, server, mask, lease, t1, t2)
+    }
+    stamp()
+    log.put("bound ")
+    arp.put_ip(ip.address())
+    log.put(" netmask ")
+    arp.put_ip(ip.netmask())
+    log.put(" gateway ")
+    arp.put_ip(ip.gateway())
+    log.put("; /etc/resolv.conf: ")
+    put_resolv()
+    log.end()
+    ip.report()
+    sync.release(sync.console(), s)
+}
+
+/// The ACK's line (the console's lock held).
+fn ack_line(addr: u64, server: u64, mask: u64, lease: u64, t1: u64, t2: u64) {
     stamp()
     log.put("ACK ")
     arp.put_ip(addr)
@@ -987,7 +1250,7 @@ fn hold_lease(renewal: bool) {
     if dw(P_NDNS) == 0 {
         log.put(" none")
     }
-    k = 0
+    var k: u64 = 0
     while k < dw(P_NDNS) {
         log.put(" ")
         arp.put_ip(dw(P_DNS + k))
@@ -1001,18 +1264,6 @@ fn hold_lease(renewal: bool) {
     log.dec(t2 as int)
     log.put(" s")
     log.end()
-    stamp()
-    log.put("bound ")
-    arp.put_ip(ip.address())
-    log.put(" netmask ")
-    arp.put_ip(ip.netmask())
-    log.put(" gateway ")
-    arp.put_ip(ip.gateway())
-    log.put("; /etc/resolv.conf: ")
-    put_resolv()
-    log.end()
-    ip.report()
-    sync.release(sync.console(), s)
 }
 
 /// Give the lease up: kernel/ip and kernel/arp to 0.0.0.0, no route, no
@@ -1053,16 +1304,18 @@ fn take_message() {
         }
         put_dw(D_OFFERED, dw(P_YIADDR))
         put_dw(D_SERVER, dw(P_SERVER))
-        let s = sync.acquire(sync.console())
-        stamp()
-        log.put("OFFER ")
-        arp.put_ip(dw(P_YIADDR))
-        log.put(" from server ")
-        arp.put_ip(dw(P_SERVER))
-        log.put(" xid ")
-        put_xid(dw(D_XID))
-        log.end()
-        sync.release(sync.console(), s)
+        if !log.quiet() { // px105: a routine line
+            let s = sync.acquire(sync.console())
+            stamp()
+            log.put("OFFER ")
+            arp.put_ip(dw(P_YIADDR))
+            log.put(" from server ")
+            arp.put_ip(dw(P_SERVER))
+            log.put(" xid ")
+            put_xid(dw(D_XID))
+            log.end()
+            sync.release(sync.console(), s)
+        }
         // The REQUEST keeps the exchange's xid and secs.
         put_dw(D_STATE, REQUESTING)
         put_dw(D_TRY, 1)
@@ -1208,6 +1461,19 @@ pub fn echo_router() {
         log.line("dhcp: the lease names no router")
         return
     }
+    let got = echo_of(r)
+    let s = sync.acquire(sync.console())
+    log.put("dhcp: the router ")
+    arp.put_ip(r)
+    log.put(if got { " answers the kernel's echo" } else { " does NOT answer the kernel's echo" })
+    log.end()
+    sync.release(sync.console(), s)
+    let _l = write_lease(if got { "answered" } else { "not answered" })
+}
+
+/// The kernel's echo to `r`, waited for 3 s (IF set): whether it was
+/// answered.
+fn echo_of(r: u64) -> bool {
     let _sent = icmp.ping(r, 1, 56)
     let from = now()
     var got = false
@@ -1218,13 +1484,7 @@ pub fn echo_router() {
             let _s = sched.sleep(1)
         }
     }
-    let s = sync.acquire(sync.console())
-    log.put("dhcp: the router ")
-    arp.put_ip(r)
-    log.put(if got { " answers the kernel's echo" } else { " does NOT answer the kernel's echo" })
-    log.end()
-    sync.release(sync.console(), s)
-    let _l = write_lease(if got { "answered" } else { "not answered" })
+    got
 }
 
 fn item(v: u64, name: str) {
