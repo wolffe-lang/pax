@@ -44,6 +44,9 @@
 //!   `-` and its name.
 //! - `login NAME` asks only the password first; `login -f NAME` (root
 //!   only) asks nothing.
+//! - As pid 1 it first empties sudo's timestamp records
+//!   (`/var/run/sudo/ts`, user/sudo): Linux's /run is a new tmpfs at each
+//!   boot, an installed PAX's /var is on ext2, and a reboot must void them.
 //!
 //! **What it does not, by name:** as pid 1 it has no getty to start it
 //! again, so after the fifth failure or the timeout it starts over
@@ -101,6 +104,9 @@ fn main() -> int {
         return enter(u)
     }
     let pid1 = os_pid() == 1
+    if pid1 {
+        boot_clean()
+    }
     loop {
         let r = session(name)
         if !pid1 {
@@ -112,6 +118,20 @@ fn main() -> int {
 
 fn now_ms() -> int {
     os_clock_ns() / 1000000
+}
+
+/// As pid 1, the boot's first program: sudo's timestamp records emptied
+/// (`/var/run/sudo/ts`), as Linux's /run is a new tmpfs at each boot, so
+/// a reboot voids every record (an installed PAX keeps /var on ext2).
+fn boot_clean() {
+    let dir = "/var/run/sudo/ts"
+    let names = fs_read_dir(dir) else |_| {
+        return
+    }
+    for n in names {
+        fs_remove("{dir}/{n}") else |_| {
+        }
+    }
 }
 
 /// One login: up to five tries in 60 s. Returns only when they are spent;
