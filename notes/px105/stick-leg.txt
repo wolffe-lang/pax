@@ -1,0 +1,54 @@
+px105: the networked console's metal leg, for the next stick built from a tree that carries px105.
+
+Under QEMU the leg is tests/distribution-net IMAGE_DIRECTORY (the directory tools/mkdistribution made): the
+release and dev ISOs on QEMU's igb, the I225's emulated sibling, with QEMU's DHCP server, both firmwares, and the
+witness below typed at the prompt (user/console/distribution-net.keys). The stick lane runs it beside
+tests/distribution-boot before staging the stick.
+
+On the metal target:
+
+1. The cable in the I225-V's port (the one the target's earlier Linux boot named for its cabled link; the other
+   port, the Aquantia controller, has no driver in PAX and is never used).
+2. Boot the stick's default entry: the live console.
+3. Before the prompt, among the kernel's lines, the console prints, in this order:
+
+     net: Intel I225/I226 8086:15f3 at <bus:dev.fn>, bar0 …, reset in … us, address from RAL0/RAH0
+     net: link up after <ms> ms: full duplex, 1000 Mb/s …
+     net: <mac>, polled every tick (an I225: polled by design), 66 frames held
+     dhcp: started on <mac>, client id 01:<mac>; asking for a lease (/etc/pax-net: dhcp, wait 10 s)
+     dhcp: +<t> s bound <address> netmask <mask> gateway <router>; /etc/resolv.conf: nameserver <dns>
+     ip: <address> netmask <mask> gateway <router>, MTU 1500, …
+     dhcp: a lease after <t> s
+     dhcp: the router <router> answers the kernel's echo
+     loopback: 127.0.0.1 answers the kernel's echo, <address> answers, 0 frames on the wire
+     net: the console waited <w> ms for the network (bound 25000 ms: device 12000, lease 10000, echo 3000)
+
+   then the kernel's identity line and its boot line, then the prompt. <w> is at most 25000.
+4. The witness, typed at the prompt:
+
+     cat /var/lib/dhcp/pax.lease
+     cat /etc/resolv.conf
+
+   The lease file says `state bound`, the address, netmask, router and DNS servers of the bound line, the server,
+   the lease's times, and `router-echo answered`; /etc/resolv.conf has one `nameserver` line a DNS server.
+5. A photograph of the lines in 3 and 4 is the record.
+
+What each other answer means, and what to photograph:
+- `net: NO link after 10000 ms (STATUS …)` and `dhcp: no link; the console does not wait for a lease`: the
+  controller saw no link in 10 s. The cable, the port, or the switch's port. The prompt still comes; the client
+  goes on asking, and a `bound` line follows when a link and a server do.
+- `dhcp: no lease after 10 s; the client goes on asking`: a link, and no answer from a DHCP server in 10 s. The
+  prompt comes; a later `bound` line, if one comes, is the lease.
+- `dhcp: the router <router> does NOT answer the kernel's echo`: a lease whose router does not answer ICMP echo.
+  Not a failure of the lease; photograph it.
+- `net: refused: …; the network is off`: kernel/gbe refused the controller by name; photograph the line and the
+  `net: regs …` line before it, if there is one.
+- No `net:` line naming the I225 at all, but `net: no virtio network device among <n> PCI functions; the network
+  is off`: PAX did not find the controller on the bus; photograph it.
+- If the boot stops before the prompt with the network's lines last on the screen, boot again with `nonet` added
+  to the entry's command line (Limine's editor, `e`): the console then starts no device, and the stop is the
+  network's.
+
+An installed system takes its address from its own /etc/pax-net, which a fresh install or an upgrade from such a
+stick puts there with the same `dhcp wait=10`; edit it to `static <a.b.c.d>/<prefix> gateway <router> dns <dns>`
+for a fixed address (the file's comments give the grammar).
