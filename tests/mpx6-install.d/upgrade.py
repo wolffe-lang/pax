@@ -397,7 +397,7 @@ class Machine:
         time.sleep(.5)
         return self.wait(PROMPT, row, timeout, last=True)
 
-    def vcommand(self, line, row, timeout=300):
+    def vcommand(self, line, row, timeout=300, prompt=None):
         """px103: type the line, read it back from the screen, and only then press Enter: a key the
         keyboard dropped (seen under host load: 'su wof') fails the row by name before anything runs.
         Its echo is found by the line's own text, as run()'s and command()'s: the prompt may be pelt's friendly one."""
@@ -409,7 +409,7 @@ class Machine:
             fail(row, f'keys dropped before Enter: typed {line!r}, the screen shows {shown[-1:]!r}')
         self.type('\n')
         time.sleep(.5)
-        return self.wait(PROMPT, row, timeout, last=True)
+        return self.wait(prompt or PROMPT, row, timeout, last=True)
 
     def upgrade_entry(self, row):
         """Limine's menu (its green countdown line at the screen's foot,
@@ -882,7 +882,8 @@ def sudo_session(name, row):
         m.vcommand('set +o friendly', row, 60)
         for l in lines['root']:
             m.vcommand(typed(l, '/root/s-root.txt'), row, 300)
-        m.vcommand('/bin/su wolf', row, 120)
+        # wolf's login shell starts friendly too: its prompt `wolf@? ~> ` ends `>`, not PROMPT's `$` or `#`.
+        m.vcommand('/bin/su wolf', row, 120, prompt=r'^.*[$#>] *$')
         m.vcommand('set +o friendly', row, 60)
         for l in lines['wolf']:
             m.vcommand(typed(l, '/tmp/s-wolf.txt'), row, 300)
