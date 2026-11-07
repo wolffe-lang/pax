@@ -63,7 +63,7 @@
 #     P4 sudo -S, -n and su with no terminal, PAX's against Ubuntu's.
 #     P5 /etc/shadow after each session in the container: root's, pax's
 #        and bob's lines `$7$`, lobo's locked, the file passwd wrote 0600
-#        root's, pax's line (passwd's) at the shipped cost; the sessions'
+#        root's, bob's line (passwd's) at the shipped cost; the sessions'
 #        own lines are made at TEST_COST (2^14), so their timing is the
 #        programs' and not an emulator's.
 #     P6 the end: init ended, `halt`, held halted.
@@ -209,10 +209,10 @@ auth_ct() {
     for s in pw login-first; do
         [ "$(cat "$o/out/pax/$s.shadow-mode")" = "600 root:root" ] || st+=" $s: passwd left /etc/shadow $(cat "$o/out/pax/$s.shadow-mode");"
     done
-    # pax's line after the pw session is passwd's (pax changed it, then root set it): the shipped cost.
+    # bob's line after the pw session is passwd's (bob changed his own): the shipped cost.
     ship=$(ship_prefix)
-    grep -q "^pax:$ship" "$o/out/pax/pw.shadow" || st+=" pw: pax's line is not at the shipped cost ($ship): $(grep '^pax:' "$o/out/pax/pw.shadow" | cut -c1-20);"
-    [ -z "$st" ] && say "PASS P5: after every session root's, pax's and bob's lines are \$7\$, lobo's locked, the file passwd wrote 0600 root's, pax's line passwd's at the shipped cost ($ship)" || bad "P5:$st"
+    grep -qF "bob:$ship" "$o/out/pax/pw.shadow" || st+=" pw: bob's line is not at the shipped cost ($ship): $(grep '^bob:' "$o/out/pax/pw.shadow" | cut -c1-20);"
+    [ -z "$st" ] && say "PASS P5: after every session root's, pax's and bob's lines are \$7\$, lobo's locked, the file passwd wrote 0600 root's, bob's line passwd's at the shipped cost ($ship)" || bad "P5:$st"
 }
 
 if [ -z "$images" ]; then
