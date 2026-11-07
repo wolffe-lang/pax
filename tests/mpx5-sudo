@@ -30,9 +30,10 @@
 #   Linux 7.2.4 booted under QEMU with the same program as init, so
 #   fs.suid_dumpable is the kernel's default 0), every line.
 #
-# Rows that need px102's ptrace (a traced exec of a set-ID file; ptrace
-# attach after a set-ID exec) are not run on a base without it and say
-# SKIP by name, at column 0, with their reason.
+# Two rows are not run yet and say SKIP by name, at column 0, with their
+# reason: a traced exec of a set-ID file, and a ptrace attach after a
+# set-ID exec. The kernel's traced-exec hook is not done: the exec path
+# (process.lu) consults no tracer when it asks which ids a program gets.
 #
 # Assertions, per tier, firmware and session:
 #   S0 build: kmain_console built, the programs static, the images made.
@@ -176,9 +177,9 @@ if [ "$only" = linux ]; then
     exit "$fail"
 fi
 
-# What the ptrace lane (px102) adds, and this base does not carry.
-say "SKIP traced-exec-setid reason=needs px102's ptrace (not on this base): a traced exec of a set-ID file stays unprivileged"
-say "SKIP attach-after-setid reason=needs px102's ptrace (not on this base): an owner's attach to a process that ran a set-ID file is refused"
+# Not run yet: the kernel's traced-exec hook, a tracer driver in user/elf/sid.c and a Linux re-record of sid.txt.
+say "SKIP traced-exec-setid reason=the kernel's traced-exec hook is not done (the exec path consults no tracer): a traced exec of a set-ID file stays unprivileged"
+say "SKIP attach-after-setid reason=the kernel's traced-exec hook is not done (the exec path consults no tracer): an owner's attach to a process that ran a set-ID file is refused"
 
 mkdir -p "$PAX_BUILD"
 : > "$runs"

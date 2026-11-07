@@ -10,8 +10,8 @@
  *                 optionally sets no_new_privs, and execs a file; the
  *                 program run prints who it became (the `h:TAG` form
  *                 below). Cases that need a second system's help (a
- *                 traced exec, an attach after a set-ID exec) are px102's
- *                 and are not here: tests/mpx5-sudo prints their SKIPs.
+ *                 traced exec, an attach after a set-ID exec) are not here yet
+ *                 (the kernel's traced-exec hook is not done): tests/mpx5-sudo prints their SKIPs.
  *   sid sudo      the sudo rows (user/sudo): each runs /bin/sudo as an
  *                 actor with a small environment, and prints its command
  *                 line, what it wrote and its exit status; then the log

@@ -88,11 +88,14 @@ no-effect rows); after the kernel work all 49. Mispredicted:
   set-ID copy. The recording was made with the copy on a `nosuid` mount
   (not honoured); the honoured text is `tests/mpx5-users.d/ident.setid` and
   `ident-user.setid`, and the suite substitutes it for that one line.
-- Not run on this base: the rows that need px102's ptrace (a traced exec of
-  a set-ID file stays unprivileged; an owner's attach after a set-ID exec is
-  refused). `tests/mpx5-sudo` prints `SKIP traced-exec-setid` and
-  `SKIP attach-after-setid` by name, with the reason. `cred.exec_ids`' `ignored`
-  argument is where the first plugs in.
+- Not run yet: a traced exec of a set-ID file (it stays unprivileged on
+  Linux) and an owner's attach after a set-ID exec (refused). The kernel's
+  traced-exec hook is not done: the exec path consults no tracer when it asks
+  `cred.exec_ids` which ids a program gets. `tests/mpx5-sudo` prints
+  `SKIP traced-exec-setid` and `SKIP attach-after-setid` by name, with the
+  reason. The hook, a tracer driver in `user/elf/sid.c` and a Linux re-record
+  of `sid.txt` are a follow-on. `cred.exec_ids`' `ignored` argument is where
+  the first plugs in.
 
 ## 5. Rulings
 
