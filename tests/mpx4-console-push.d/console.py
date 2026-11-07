@@ -31,7 +31,9 @@ a byte every 20 ms, CR at the end. A line of the console's that is exactly
 `STEP:LABEL` runs --hook LABEL's PROGRAM, a shell script read by /bin/sh
 (on this host, before the next
 line is typed; its stdout and stderr scrubbed into FILE.hooks with
-`HOOK LABEL exit=N`). When every line is typed the session's own `exit`
+`HOOK LABEL exit=N`). A hook still running after --hook-bound seconds (120)
+is ended by name, `HOOK LABEL exit=timeout` and `timeout after N s`, and
+the session goes on (run_hook). When every line is typed the session's own `exit`
 ends the run list; at the kernel's `halt` line (or after 60 s more) the
 monitor's `quit` ends QEMU, and so tools/qemu-run.
 
@@ -108,6 +110,39 @@ def say(line):
     print(line, flush=True)
 
 
+def run_hook(prog, bound):
+    """(exit status, or 'timeout', and its output) of /bin/sh PROG, ended at
+    BOUND seconds: the hook's pid and the children it started (pid by pid,
+    from /proc, never a process group) are killed, and the output so far
+    ends with `timeout after BOUND s`."""
+    # Read by sh, never exec'd: the carrier's tmpfs may be noexec.
+    p = subprocess.Popen(['/bin/sh', prog], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT)
+    try:
+        out, _ = p.communicate(timeout=bound)
+        return p.returncode, out
+    except subprocess.TimeoutExpired:
+        pids = [p.pid]
+        try:
+            for t in os.listdir('/proc/%d/task' % p.pid):
+                pids += [int(c) for c in open('/proc/%d/task/%s/children' % (p.pid, t)).read().split()]
+        except OSError:
+            pass
+        for pid in pids:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        p.wait(timeout=30)
+        os.set_blocking(p.stdout.fileno(), False)
+        try:
+            out = p.stdout.read() or b''
+        except (BlockingIOError, OSError):
+            out = b''
+        p.stdout.close()
+        return 'timeout', out + b'timeout after %d s\n' % bound
+
+
 def main():
     a = argparse.ArgumentParser()
     a.add_argument('--run', required=True)
@@ -122,6 +157,7 @@ def main():
     a.add_argument('--secrets')
     a.add_argument('--drive')
     a.add_argument('--hook', action='append', default=[])
+    a.add_argument('--hook-bound', type=int, default=120)
     a.add_argument('qemu', nargs='*')
     args = a.parse_args()
     run = args.run
@@ -208,9 +244,8 @@ def main():
             steps_done += 1
             prog = hooks.get(label)
             if prog:
-                # Read by sh, never exec'd: the carrier's tmpfs may be noexec.
-                h = subprocess.run(['/bin/sh', prog], capture_output=True, timeout=600)
-                hooklog.write(scrub.text(b'HOOK %s exit=%d\n' % (label.encode(), h.returncode) + h.stdout + h.stderr))
+                code, text = run_hook(prog, args.hook_bound)
+                hooklog.write(scrub.text(b'HOOK %s exit=%s\n' % (label.encode(), str(code).encode()) + text))
                 hooklog.flush()
             t_prompt = time.monotonic()
         if typed_n < len(keys):
