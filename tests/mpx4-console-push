@@ -40,6 +40,10 @@
 # Every way: K1 the canary (the scrub of the transcript, proven on fake
 # secrets, or the real ones), K2 the carrier removed, K3 the scan of
 # everything the boot wrote, 0 files in every class; C1 the session.
+# Before the boots, T1-T3 (mpx4-console-push.d/scan-rows.py): the scanner
+# on a throwaway key, a line every OpenSSH key of its type shares no hit,
+# a line of its own a hit, the key the scanner makes to tell them apart a
+# key (ssh-keygen -y).
 #
 # Hermetic ways need root for the DNS fixture's port 53 (as root, or with
 # `sudo -n`), and mke2fs, ssh-keygen, git, /usr/bin/openssl and (ssh)
@@ -187,6 +191,19 @@ fi
 out=$PAX_BUILD/mpx4-console-push-runs
 mkdir -p "$out"
 skipped=0 ran=0
+# R-px104-15: the scanner's own rows, on a throwaway key.
+rc=0
+python3 -I "$here/mpx4-console-push.d/scan-rows.py" "$out" || rc=$?
+case $rc in
+    0) ;;
+    3)
+        if [ "${PAX_REQUIRE_PUSH_FIXTURES:-0}" = 1 ]; then
+            say "FAIL T1-T3: no ssh-keygen, and PAX_REQUIRE_PUSH_FIXTURES=1"; fail=1
+        else
+            say "SKIPPED LOUDLY T1-T3: no ssh-keygen"
+        fi ;;
+    *) fail=1 ;;
+esac
 for tier in $tiers; do
     elf=$images/$tier/kmain_console.elf
     [ -f "$elf" ] || { say "FAIL P1 $tier: no $elf"; fail=1; continue; }
