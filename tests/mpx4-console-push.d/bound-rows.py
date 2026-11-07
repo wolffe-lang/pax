@@ -30,6 +30,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 FAILS = []
+sys.dont_write_bytecode = True  # no __pycache__ beside the driver it loads
 
 
 def ok(row, why):
