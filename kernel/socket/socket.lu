@@ -144,7 +144,12 @@ const MSG_TRUNC: u64 = 0x20
 const MSG_DONTWAIT: u64 = 0x40
 
 const MSG_OOB: u64 = 0x1
+const MSG_ERRQUEUE: u64 = 0x2000 // px104
 const SOL_SOCKET: u64 = 1
+const SOL_IP: u64 = 0 // px104: ip(7)'s level
+const IP_RECVERR: u64 = 11 // px104: uapi linux/in.h
+const UIO_MAXIOV: u64 = 1024 // px104: sendmmsg's vector, and a message's iovecs, at most
+const MMSG: u64 = 64 // px104: sizeof(struct mmsghdr) (a 56-byte msghdr, msg_len, padding)
 const SO_REUSEADDR: u64 = 2
 const TCP_NODELAY: u64 = 1 // uapi linux/tcp.h
 const TCP_SYNCNT: u64 = 7
@@ -204,6 +209,8 @@ const R_UNIX: u64 = 70
 const R_STREAM_PROTOCOL: u64 = 71
 const R_SHUTDOWN: u64 = 72
 const R_OOB: u64 = 73
+const R_CONTROL: u64 = 74 // px104
+const R_MMSG: u64 = 75 // px104
 
 /// The first refusal code that is this module's.
 pub const REFUSALS: u64 = 64
@@ -257,6 +264,12 @@ pub fn why(r: u64) -> str {
     if r == R_UNIX {
         return "an AF_UNIX socketpair's end, which has no name or options: call"
     }
+    if r == R_CONTROL {
+        return "a message with ancillary data (PAX sends none): bytes"
+    }
+    if r == R_MMSG {
+        return "sendmmsg on a stream socket (PAX's is a datagram socket's): call"
+    }
     ""
 }
 
@@ -296,6 +309,11 @@ pub fn is_inet(a: u64, fd: u64) -> bool {
 
 fn is_stream(a: u64, fd: u64) -> bool {
     files.sock_kind(a, fd) == files.TCP
+}
+
+/// px104: whether descriptor `fd` is an AF_INET datagram socket.
+pub fn is_datagram(a: u64, fd: u64) -> bool {
+    files.sock_kind(a, fd) == files.INET
 }
 
 /// The tick the running receive gives up at; 0 when it has no deadline
@@ -530,41 +548,137 @@ pub fn sendto(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: u6
     if e != 0 {
         return e
     }
-    var ip4: u64 = 0
-    var port: u64 = 0
-    let named = addr != 0
-    if named {
-        let (ae, i4, p) = addr_in(pml4, addr, len)
-        if ae != 0 {
-            return ae
-        }
-        ip4 = i4
-        port = p
-    } else {
-        let (connected, pa, pp) = udp.peer(s)
-        if !connected {
-            return neg(udp.EDESTADDRREQ)
-        }
-        ip4 = pa
-        port = pp
-    }
-    if n > DATAGRAM_MAX {
-        return neg(EMSGSIZE)
-    }
-    if port == 0 {
-        return neg(EINVAL)
-    }
-    if ip.is_broadcast(ip4) {
-        return refuse(a, R_BROADCAST, EACCES, ip4, 0)
-    }
-    if n > udp.DATA_MAX {
-        return refuse(a, R_FRAGMENT, EMSGSIZE, n, 0)
+    let (de, ip4, port) = destination(a, pml4, s, addr, len, n)
+    if de != 0 {
+        return de
     }
     let r = udp.send(s, pml4, buf, n, true, ip4, port)
     if r != 0 {
         return neg(r)
     }
     n
+}
+
+/// Where a datagram of `n` bytes from socket `s` goes: the address at
+/// `addr` (`len` bytes) when there is one, else the connected peer.
+/// `(0, ip4, port)`, or `(-errno, 0, 0)` with sendto's refusals.
+fn destination(a: u64, pml4: u64, s: u64, addr: u64, len: u64, n: u64) -> (u64, u64, u64) {
+    var ip4: u64 = 0
+    var port: u64 = 0
+    if addr != 0 {
+        let (ae, i4, p) = addr_in(pml4, addr, len)
+        if ae != 0 {
+            return (ae, 0, 0)
+        }
+        ip4 = i4
+        port = p
+    } else {
+        let (connected, pa, pp) = udp.peer(s)
+        if !connected {
+            return (neg(udp.EDESTADDRREQ), 0, 0)
+        }
+        ip4 = pa
+        port = pp
+    }
+    if n > DATAGRAM_MAX {
+        return (neg(EMSGSIZE), 0, 0)
+    }
+    if port == 0 {
+        return (neg(EINVAL), 0, 0)
+    }
+    if ip.is_broadcast(ip4) {
+        return (refuse(a, R_BROADCAST, EACCES, ip4, 0), 0, 0)
+    }
+    if n > udp.DATA_MAX {
+        return (refuse(a, R_FRAGMENT, EMSGSIZE, n, 0), 0, 0)
+    }
+    (0, ip4, port)
+}
+
+/// px104: `sendmmsg(fd, vec, vlen, flags)` (sendmmsg(2)) on an AF_INET
+/// datagram socket, what a C library's resolver sends its A and AAAA
+/// questions with: each of the first `vlen` (at most 1024) mmsghdrs at
+/// `vec` is one datagram, its iovecs gathered, to its msg_name or the
+/// connected peer, with sendto's checks and refusals; each one sent gets
+/// its msg_len. The count sent; the first message's -errno when none was
+/// (an error after one is not reported, as sendmmsg(2) says). `flags` as
+/// sendto's (a datagram socket reads none). Ancillary data is refused by
+/// name, -EINVAL; a stream socket's sendmmsg likewise, -EOPNOTSUPP.
+pub fn sendmmsg(a: u64, pml4: u64, fd: u64, vec: u64, vlen: u64, _flags: u64) -> u64 {
+    if is_stream(a, fd) {
+        return refuse(a, R_MMSG, EOPNOTSUPP, 307, 0)
+    }
+    let (e, s) = sock(a, fd, 307)
+    if e != 0 {
+        return e
+    }
+    let count = if vlen > UIO_MAXIOV { UIO_MAXIOV } else { vlen }
+    var k: u64 = 0
+    while k < count {
+        let r = one_message(a, pml4, s, vec + k * MMSG)
+        if r >= 0x8000000000000000 {
+            return if k > 0 { k } else { r }
+        }
+        k += 1
+    }
+    k
+}
+
+/// One mmsghdr of sendmmsg at `m`: the datagram sent and its msg_len
+/// written; 0 or -errno.
+fn one_message(a: u64, pml4: u64, s: u64, m: u64) -> u64 {
+    if !uaccess.readable(pml4, m, MMSG) || !uaccess.writable(pml4, m + 56, 4) {
+        return neg(EFAULT)
+    }
+    let name = uaccess.get64(pml4, m)
+    let namelen = uaccess.get(pml4, m + 8, 4)
+    let iov = uaccess.get64(pml4, m + 16)
+    let parts = uaccess.get64(pml4, m + 24)
+    let control = uaccess.get64(pml4, m + 40)
+    if control != 0 {
+        return refuse(a, R_CONTROL, EINVAL, control, 0)
+    }
+    if parts > UIO_MAXIOV {
+        return neg(EMSGSIZE)
+    }
+    if parts > 0 && !uaccess.readable(pml4, iov, parts * 16) {
+        return neg(EFAULT)
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < parts {
+        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        if l >= 0x8000000000000000 || n + l > DATAGRAM_MAX + 1 {
+            return neg(if l >= 0x8000000000000000 { EINVAL } else { EMSGSIZE })
+        }
+        n += l
+        i += 1
+    }
+    let (de, ip4, port) = destination(a, pml4, s, name, if name != 0 { namelen } else { 0 }, n)
+    if de != 0 {
+        return de
+    }
+    let r = udp.send_vec(s, pml4, iov, parts, n, true, ip4, port)
+    if r != 0 {
+        return neg(r)
+    }
+    uaccess.put(pml4, m + 56, n, 4)
+    0
+}
+
+/// px104: FIONREAD on an AF_INET datagram socket: the next datagram's
+/// length at `arg` (an int), 0 when none waits (udp(7)); -ENOTTY for a
+/// stream socket, which kernel/files answers as before.
+pub fn fionread(a: u64, pml4: u64, fd: u64, arg: u64) -> u64 {
+    let (e, s) = sock(a, fd, 16)
+    if e != 0 {
+        return e
+    }
+    if !uaccess.writable(pml4, arg, 4) {
+        return neg(EFAULT)
+    }
+    uaccess.put(pml4, arg, udp.next_len(s), 4)
+    0
 }
 
 /// `recvfrom(fd, buf, n, flags, addr, lenp)` on an AF_INET socket, and
@@ -593,6 +707,12 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
     let (e, s) = sock(a, fd, 45)
     if e != 0 {
         return e
+    }
+    if flags & MSG_ERRQUEUE != 0 {
+        // px104: the error queue (ip(7), IP_RECVERR): PAX queues no ICMP
+        // error for a socket, so it is always empty, as Linux's is with
+        // no error.
+        return neg(EAGAIN)
     }
     let wants = addr != 0 && lenp != 0
     if wants {
@@ -715,6 +835,17 @@ pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     if e != 0 {
         return e
     }
+    if level == SOL_IP && option == IP_RECVERR {
+        // px104: ip(7)'s int, kept as 0 or 1 (udp.set_recverr).
+        if len < 4 || len >= 0x80000000 {
+            return neg(EINVAL)
+        }
+        if !uaccess.readable(pml4, value, 4) {
+            return neg(EFAULT)
+        }
+        udp.set_recverr(s, uaccess.get(pml4, value, 4) != 0)
+        return 0
+    }
     if level != SOL_SOCKET || option != SO_RCVTIMEO_OLD {
         return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
     }
@@ -783,7 +914,8 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     if e != 0 {
         return e
     }
-    if level != SOL_SOCKET || (option != SO_TYPE && option != SO_ERROR && option != SO_RCVTIMEO_OLD && option != SO_ACCEPTCONN) {
+    let recverr = level == SOL_IP && option == IP_RECVERR // px104
+    if !recverr && (level != SOL_SOCKET || (option != SO_TYPE && option != SO_ERROR && option != SO_RCVTIMEO_OLD && option != SO_ACCEPTCONN)) {
         return refuse(a, R_OPTION, ENOPROTOOPT, level, option)
     }
     if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
@@ -810,7 +942,7 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     if !uaccess.writable(pml4, value, n) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, value, if option == SO_TYPE { SOCK_DGRAM } else { 0 }, n)
+    uaccess.put(pml4, value, if recverr { udp.recverr(s) } else if option == SO_TYPE { SOCK_DGRAM } else { 0 }, n)
     uaccess.put(pml4, lenp, n, 4)
     0
 }
