@@ -154,10 +154,10 @@ def main():
         cmd += ['--drive', args.drive + ',ro']
     cmd += [args.iso, '--', '-monitor', 'unix:%s,server=on,wait=off' % mon] + args.qemu
     q = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    seen = b''      # the scrubbed transcript, CRs removed, for prompts and STEP lines
+    seen = b''      # the scrubbed transcript written so far, CRs removed
     counted = 0     # prompts seen since `run 1:`
     typed_n = 0
-    step_at = 0     # where the next STEP: search starts in `seen`
+    steps_done = 0  # STEP: lines whose hooks have run
     why = ''
     halted = False
     t_end = time.monotonic() + args.timeout
@@ -182,19 +182,25 @@ def main():
             seen += out.replace(b'\r', b'')
         return True
 
+    def view():
+        # What the console has shown, scrubbed: the bytes written and the
+        # tail the scrub still holds (in memory only, never written until
+        # it is known to begin no secret). Prompts and STEP lines are read
+        # here, so a prompt in the held tail is still seen.
+        return seen + scrub.pending.replace(b'\r', b'')
+
     def prompts():
-        s = seen.find(b'run 1: ')
-        return 0 if s < 0 else seen[s:].count(args.prompt.encode())
+        v = view()
+        s = v.find(b'run 1: ')
+        return 0 if s < 0 else v[s:].count(args.prompt.encode())
 
     while time.monotonic() < t_end and q.poll() is None:
         pump(0.1)
         # STEP:LABEL lines run their hooks before anything more is typed.
-        while True:
-            m = re.search(rb'(?m)^STEP:([A-Za-z0-9_.-]+)\n', seen[step_at:])
-            if not m:
-                break
-            step_at += m.end()
-            label = m.group(1).decode()
+        found = re.findall(rb'(?m)^STEP:([A-Za-z0-9_.-]+)\n', view())
+        while steps_done < len(found):
+            label = found[steps_done].decode()
+            steps_done += 1
             prog = hooks.get(label)
             if prog:
                 h = subprocess.run([prog], capture_output=True, timeout=600)
@@ -221,7 +227,7 @@ def main():
                 why = 'prompt %d did not come within %d s (step %d)' % (counted + 1, args.prompt_timeout, typed_n + 1)
                 break
         else:
-            if re.search(rb'(?m)^halt$', seen):
+            if re.search(rb'(?m)^halt$', view()):
                 halted = True
                 break
             if time.monotonic() - t_prompt > 60:
