@@ -16,13 +16,12 @@ tick() { t=$((t + 60)); export GIT_AUTHOR_DATE="$t +0000"; tock; }; tick
 s() { "$@" >$O/o 2>$O/e; echo "status $?"; cat $O/o; echo "$E"; cat $O/e; }
 W=/home/pax; [ "$(id -u)" != 0 ] || W=/home/den-root; mkdir -p $W
 Q=9428; [ "$(id -u)" != 0 ] || Q=9418
-U=$DEN_UPLOAD_PACK; V=$DEN_RECEIVE_PACK
 dm() { den daemon --enable-receive-pack $P $Q 2>$O/d; echo "daemon $?"; }
 dc() { read l; echo "$l"; s "$@"; cat; }
 echo den-session-begin
 echo "upload=$DEN_UPLOAD_PACK receive=$DEN_RECEIVE_PACK"
-sha256sum /usr/libexec/den/upload-pack /usr/libexec/den/receive-pack
-cat /usr/libexec/den/upload-pack /usr/libexec/den/receive-pack
+sha256sum /bin/git-upload-pack /bin/git-receive-pack
+cat /bin/git-upload-pack /bin/git-receive-pack
 B=$D/bin; mkdir -p $B
 printf '#!/bin/sh\nexec /bin/den upload-pack "$1"\n' > $B/upload-pack
 printf '#!/bin/sh\nexec /bin/den receive-pack "$1"\n' > $B/receive-pack
@@ -35,6 +34,9 @@ cd src
 printf 'one\n' > a.txt
 s den add a.txt
 s den commit -m 'first: a.txt'
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > %s/ssh-argv\nexit 255\n' $O > $B/ssh; chmod 755 $B/ssh
+(PATH=$B:$PATH; s den push ssh://git@example.invalid/r.git main)
+s cat $O/ssh-argv
 cd ..
 unset DEN_UPLOAD_PACK DEN_RECEIVE_PACK
 s den clone -q --bare file://$P/src none.git
@@ -95,7 +97,7 @@ s den fsck --full
 cd ../c3
 s den fsck --full
 echo den-place-home
-export DEN_UPLOAD_PACK=$U DEN_RECEIVE_PACK=$V; Q=$((Q + 1))
+unset DEN_UPLOAD_PACK DEN_RECEIVE_PACK; Q=$((Q + 1))
 P=$W/r; mkdir -p $P; cd $P
 s den init src
 cd src
