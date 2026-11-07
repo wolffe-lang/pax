@@ -185,50 +185,49 @@ fn prepared_dir(tree: str, attrs: str, path: str, uid: int) -> () ! {io, invalid
 // made from the live medium (its tree has /etc/pax-live-login) must not
 // boot into the live medium's passwordless-root entry (BOOT.md: "Do not
 // use this live entry in the installed system"). Its /etc/pax-run becomes
-// this console login instead: root, or the account pax-install made (by
-// su(1), root dropping to the user: px46), no passwords in this preview.
-const INSTALLED_RUN: str = "/bin/pelt /etc/pax-login\n"
+// the console login instead. px106 (R-px106-2): that login is /bin/login
+// (user/login, in wolf), pid 1 and the console's session leader, asking
+// for a password from /etc/shadow; while no account has one, it lets root
+// in with no password and says so (the first-boot rule).
+const INSTALLED_RUN: str = "/bin/login\n"
 
 // px98: the login gives the terminal to the account before it drops to
 // it, as a Linux console login does (login(1); login.defs(5)'s default:
-// the account, its primary group, mode 0600), so what the user opens by
-// name (/dev/stdout, /dev/stderr, the terminal itself) is theirs; root's
-// login takes it back. Through /dev/stdin, the terminal the login reads
-// (kernel/files keeps the console terminals' owners and modes). A kernel
-// that keeps none refuses the change (EROFS) and the login goes on.
+// the account, its primary group, mode 0600); /bin/login does that since
+// px106. /etc/pax-login stays for an /etc/pax-run an earlier installer
+// wrote and its owner kept (`/bin/pelt /etc/pax-login`): it starts the
+// login.
 fn installed_login() -> str {
     "#!/bin/pelt\n" +
-    "# The installed system's console login, written by pax-install (px78):\n" +
-    "# root, or an account /etc/passwd names; no passwords in this preview.\n" +
-    "# The terminal is given to the account first, as login(1) gives it (px98).\n" +
-    "printf 'PAX: log in as root or as the user pax-install made.\\n'\n" +
-    "while :; do\n" +
-    "    printf 'login: '\n" +
-    "    IFS= read -r account || exit 0\n" +
-    "    [ -n \"$account\" ] || continue\n" +
-    "    export PATH=/bin TERM=linux\n" +
-    "    [ ! -f /etc/shrc ] || export ENV=/etc/shrc\n" +
-    "    if [ \"$account\" = root ]; then\n" +
-    "        export HOME=/root USER=root LOGNAME=root\n" +
-    "        cd /root 2>/dev/null || cd /\n" +
-    "        /bin/chown 0:0 /dev/stdin 2>/dev/null && /bin/chmod 600 /dev/stdin 2>/dev/null\n" +
-    "        exec /bin/pelt -i -m\n" +
-    "    fi\n" +
-    "    found=\n" +
-    "    group=\n" +
-    "    while IFS=: read -r name pw uid gid gecos home shell; do\n" +
-    "        [ \"$name\" != \"$account\" ] || found=$uid\n" +
-    "        [ \"$name\" != \"$account\" ] || group=$gid\n" +
-    "    done < /etc/passwd\n" +
-    "    if [ -n \"$found\" ] && [ -x /bin/su ]; then\n" +
-    "        /bin/chown \"$found:$group\" /dev/stdin 2>/dev/null && /bin/chmod 600 /dev/stdin 2>/dev/null\n" +
-    "        exec /bin/su \"$account\" -c 'cd; exec /bin/pelt -i -m'\n" +
-    "    fi\n" +
-    "    printf 'Login incorrect\\n'\n" +
-    "done\n"
+    "# The installed system's console login is /bin/login since px106; this\n" +
+    "# file, written by pax-install, is kept for an /etc/pax-run that names it.\n" +
+    "exec /bin/login\n"
 }
 
-fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
+// px106 (R-px106-1): /etc/shadow, root's, 0600, one line an account of
+// `passwd_text`, every one locked (root `*`, the rest `!`, as Ubuntu's
+// base image and useradd leave them; the ages 0, 99999 and 7); `day` the
+// date of the last change, days since 1970. The same lines as user/auth's
+// shadow_all_locked, which the installer cannot link (its own toolchain).
+fn locked_shadow(passwd_text: str, day: int) -> str {
+    var out = ""
+    for line in passwd_text.lines() {
+        let f = line.split(":")
+        if f.len < 7 || f[0].len == 0 { continue }
+        let field = if f[0] == "root" then "*" else "!"
+        out += "{f[0]}:{field}:{day}:0:99999:7:::\n"
+    }
+    out
+}
+
+fn today() -> int {
+    time_unix_ms() / 86400000
+}
+
+/// px106: `shadow` is the /etc/shadow the guided install's passwords made
+/// (passwd -R on the accounts it will write), or "" for every account
+/// locked; either way root's, 0600 (R-px106-1).
+fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game], shadow: str) -> () ! {
     io,
     invalid,
     corrupt_asset,
@@ -239,8 +238,13 @@ fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game]) -> () ! {
         replace_config(tree, attrs, "/etc/pax-run", INSTALLED_RUN)?
         replace_config(tree, attrs, "/etc/pax-login", installed_login())?
     }
-    replace_config(tree, attrs, "/etc/passwd", account_table(passwd, p.user, false)?)?
+    let accounts = account_table(passwd, p.user, false)?
+    replace_config(tree, attrs, "/etc/passwd", accounts)?
     replace_config(tree, attrs, "/etc/group", account_table(group, p.user, true)?)?
+    let shadow_text = if shadow.len > 0 then shadow else locked_shadow(accounts, today())
+    if fs_exists("{tree}/etc/shadow") { fs_remove("{tree}/etc/shadow") else |_| { return io } }
+    durable_text("{tree}/etc/shadow", shadow_text)?
+    append_attrs(attrs, "/etc/shadow", "0600", 0, 0)?
     replace_config(tree, attrs, "/etc/fstab", fstab_text(new_partuuid(p.seed)))?
     replace_config(tree, attrs, "/boot/limine/limine.conf", new_config(p.seed))?
     prepared_dir(tree, attrs, "/home/{p.user}", INSTALL_USER_ID)?
