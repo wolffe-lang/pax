@@ -1,0 +1,96 @@
+//! user/auth/pwhash.lu — the binding to wolf-std's password hash (px106).
+//!
+//! The ONE place in PAX that names wolf-std's crypt layer
+//! (`std.x.crypto.passwd`, sc80: scrypt, RFC 7914, in crypt(5)'s `$7$`
+//! form, which Ubuntu 24.04's crypt reads). passwd, su, sudo and login
+//! reach the hash only through the three functions below, so a change of
+//! wolf-std's surface is a change of this file.
+//!
+//! **The cost** (R-px106-5): N = 2^PW_N_LOG2, r = PW_R, p = PW_P, chosen
+//! by the timing row of notes/px106-passwords.md on PAX under KVM, aimed
+//! at 0.5-1 s on the class of CPU the 860's machine has and at PAX's
+//! memory. A stored string keeps its own cost: verifying reads N, r and p
+//! from it, and refuses one whose memory (128·r·N) is over PW_CAP
+//! (`over_cap`: a string from elsewhere, such as `mkpasswd -m scrypt`'s
+//! default of 64 MiB, is checked when it fits).
+//!
+//! **The salt** is 16 bytes of the operating system's random source
+//! (`os_random`: getrandom(2) on Linux and on PAX), never a fixed salt:
+//! Ubuntu's 22 salt characters.
+//!
+//! **One named difference**, wolf-std's: crypt(3) stops at a zero byte,
+//! this hashes every byte of the password. A terminal line holds none.
+//!
+//! Enforced for honest programs; not a boundary against an attacker
+//! (ruling #75 R6).
+
+use std.x.crypto.passwd
+
+const PW_N_LOG2: int = 14
+const PW_R: int = 8
+const PW_P: int = 1
+/// The most memory one check may take: 128 MiB.
+const PW_CAP: int = 134217728
+
+fn pw_random16() -> List[byte] {
+    var out = List[byte]()
+    for v in os_random(16) {
+        (mut out).push(v as byte)
+    }
+    out
+}
+
+/// A new `$7$` string for `password`: a fresh salt, the chosen cost.
+fn pw_make(password: str) -> str ! {io} {
+    let salt = passwd.gen_salt(pw_random16()) else |_| {
+        return io
+    }
+    let c = passwd.cost(PW_N_LOG2, PW_R, PW_P) else |_| {
+        return io
+    }
+    passwd.hash(password.bytes(), salt, c) else |_| {
+        return io
+    }
+}
+
+/// Whether `password` is the one `stored` was made from. A field the
+/// hash refuses (locked, empty, another method, malformed, over the cap)
+/// matches no password.
+fn pw_matches(password: str, stored: str) -> bool {
+    passwd.verify_capped(password.bytes(), stored, PW_CAP) else false
+}
+
+/// "" when `stored` is a password field PAX can check, else why not, by
+/// wolf-std's name for it: the parser alone, so no hash is run.
+fn pw_refusal(stored: str) -> str {
+    let h = passwd.parse(stored) else |e| match e {
+        empty => {
+            return "empty"
+        },
+        locked => {
+            return "locked"
+        },
+        unsupported => {
+            return "unsupported"
+        },
+        malformed => {
+            return "malformed"
+        },
+        bad_n => {
+            return "bad_n"
+        },
+        bad_rp => {
+            return "bad_rp"
+        },
+        bad_salt => {
+            return "bad_salt"
+        },
+        bad_hash => {
+            return "bad_hash"
+        },
+    }
+    if h.cost.n_log2 > 30 || 128 * h.cost.r * (1 << h.cost.n_log2) > PW_CAP {
+        return "over_cap"
+    }
+    ""
+}
