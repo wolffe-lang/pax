@@ -1,0 +1,136 @@
+px104 — push from the console: the prediction, written before the first change
+(2026-11-07 03:15Z, at px105's head 56c360e5 + the probes, branch px104).
+
+The goal: at the console of the kernel every image boots (px105's
+kmain_console), `den push` to a GitHub repository works over https and over
+ssh, with burrow as /bin/ssh. notes/px104/probes.txt measured what stands in
+the way: no name resolves (the C library's resolver inside den and burrow is
+stopped by two of PAX's answers), the images carry no root set, no ssh
+client and no pinned host key, and the images' den has no https.
+
+The rulings (recommended in the probes' hand-back, ruled on 2026-11-07):
+  R-px104-1 (a) the kernel answers what the resolver asks: IP_RECVERR on a
+            datagram socket, sendmmsg(2) for AF_INET datagrams, FIONREAD on
+            one; /etc/hosts stays documented as the fallback.
+  R-px104-2 (a) curl's extract of Mozilla's store, cacert-2026-10-20.pem, by
+            name and sha256 (796f1389…), through tools/mkroots (an RFC 7468
+            decoder of PAX's own, checked against openssl) to
+            /etc/ssl/certs/ca-roots.der; /etc/shrc exports DEN_TLS_ROOTS.
+  R-px104-3 (A) with (ii) an ephemeral 0600 secrets disk, read-only to QEMU,
+            read in the guest by redirection only; the serial output
+            scrubbed in memory before any write, proven by a canary row; the
+            live session builds its remote with pelt's printf (init, fetch,
+            switch, push); den clone proven hermetically.
+  R-px104-4 (a) burrow ships as /bin/ssh and /bin/burrow-keygen (den finds
+            `ssh` on PATH; it reads no GIT_SSH or core.sshCommand).
+  R-px104-5 waits on the maintainer: /etc/shrc's DEN_UPLOAD_PACK and
+            DEN_RECEIVE_PACK stay as they are; den sends them as the remote
+            command over ssh, so the ssh session unsets them before an ssh
+            remote, and a row records what a console shell sends today.
+  R-px104-6 (a) /etc/ssh/ssh_known_hosts carries GitHub's ed25519 line;
+            `UserKnownHostsFile ~/.ssh/known_hosts /etc/ssh/ssh_known_hosts`
+            in ~/.ssh/config is documented (burrow reads no /etc/ssh file).
+  R-px104-7 (a) den has no ls-remote: the console's witness is `den fetch`
+            of the pushed ref into a scratch ref and `den rev-parse` of it;
+            Linux git's ls-remote is the outside witness between steps.
+  R-px104-8 user/den.pin moves to ac2332bf, mpx5-den's rows first;
+            tests/mpx4-console-net.d/den-https.pin retires into the pin.
+
+What changes, predicted:
+
+1. kernel/socket (and kernel/user's dispatch, kernel/files' ioctl):
+   - setsockopt(SOL_IP, IP_RECVERR, int) on an AF_INET datagram socket: 0;
+     the value kept (nonzero is 1) and read back by getsockopt as an int.
+     PAX queues no ICMP error for a socket, so a receive with MSG_ERRQUEUE
+     answers -EAGAIN (the error queue is empty, as Linux's is with no
+     error), and nothing else a datagram socket does changes with the flag.
+   - sendmmsg (307) on an AF_INET datagram socket: each message of the
+     vector (vlen capped at 1024, as sendmmsg(2) caps UIO_MAXIOV) sent as
+     sendto sends it: its msg_name or the connected peer, its iovecs
+     gathered into one datagram (the 1472-byte bound and its refusal by
+     name unchanged); msg_len written for each; the count returned, or the
+     first message's -errno when none went; ancillary data (msg_control)
+     refused by name; on any other descriptor kind refused by name.
+   - FIONREAD on an AF_INET datagram socket: the next queued datagram's
+     length, 0 with none (udp(7)).
+   Size: under 4 KiB more ELF a tier. No existing row moves: the calls were
+   -ENOSYS or refused before, and no suite's witness asked them but the
+   refusal lines' count (mpx4-udp U4 holds sockerr's five refusals; none of
+   them is these).
+2. tools/mkburrow + user/burrow.pin: burrow at 0d98ce9, built by its own
+   tools/fetch-toolchain and tools/build --static, twice in two checkouts
+   (mkden's shape), the digests the probes measured (ae0e800f…, 5b21c26c…),
+   installed unmodified as /bin/ssh and /bin/burrow-keygen.
+3. tools/mkroots + user/ca-roots.pin: the PEM fetched by name, its digest
+   read twice (796f1389…), converted to 118 certificates, 127,103 bytes,
+   sha256 7a713f23…, and held to openssl's per-certificate DER when openssl
+   is on PATH.
+4. The shipped roots (tools/distribution-root, tests/distribution):
+   /bin/ssh, /bin/burrow-keygen, /etc/ssl/certs/ca-roots.der,
+   /etc/ssh/ssh_known_hosts, and /etc/shrc exporting DEN_TLS_ROOTS. The
+   release and dev images grow by about 31.8 MB (both burrow programs,
+   unstripped as den is) plus 127 KB. Risk named: the images' memory at
+   boot; measured on the shipped images' boot rows.
+5. user/den.pin to ac2332bf (wolf 0.2.36 / lupin 0.1.58, std d4a4d4ca,
+   the toolchain den pins): den 17,696,760 bytes, cc00cd9a… (the probes'
+   build). mpx5-den moves first: `den config user.name Other` now writes
+   (the config row's refusal becomes a write read back, on a key that
+   changes nothing after it), and `den log` at the terminal draws its
+   decorations (the terminal row reads them); both red at 584b18a3, green
+   at ac2332bf. Every other den row holds (den's changes between the pins
+   touch no verb mpx5-den types but these two and the failed clone's
+   directory, which mpx5-den does not type).
+
+The rows, red first (each committed before its fix; the rows tip is the red
+commit, px105's head plus the rows, nothing else):
+
+  tests/mpx4-console-push (new), the console kernel, igb on QEMU's user
+  network with an address of its own and the fixtures on this host's
+  loopback (10.0.2.2), a DNS fixture of the suite's own on 127.0.0.1:53
+  (root, as root or by sudo -n; SKIPPED LOUDLY without it unless
+  PAX_REQUIRE_PUSH_FIXTURES=1) answering github.com with 10.0.2.2:
+    N1 dgramopts (a static C witness, user/net): IP_RECVERR set and read
+       back, sendmmsg of datagrams to itself over loopback (connected and
+       addressed), FIONREAD before and after: byte-identical to the same
+       binary on Linux. Red at the base: setsockopt -ENOPROTOOPT,
+       sendmmsg -ENOSYS, FIONREAD -ENOTTY, each by name.
+    N2 gai (a static C witness): getaddrinfo of github.com (the DNS
+       fixture), hosts.test (/etc/hosts alone), nosuch.test (the fixture's
+       NXDOMAIN) and a literal; the fixture logs the guest's A and AAAA
+       queries. Red at the base: github.com fails (no query leaves the
+       guest).
+    H1-H7 https, den against den's own smart-HTTP fixture (s_server and
+       git-http-backend, black boxes) posing as github.com (a leaf for
+       DNS:github.com from a test root): den clone; a commit (its id git's
+       for the same tree, identity and dates); den push (the token from the
+       carrier); the console's witness (den fetch into a scratch ref,
+       rev-parse) and Linux git's ls-remote showing the ref; the delete;
+       the witness failing and ls-remote empty; each step held to git's
+       answers for the same steps on Linux against a twin repository.
+       H8 the wrong root: the shipped set alone refuses `TLS
+       issuer_mismatch`. Red at the base: no name resolves, the base den
+       has no https, no shipped root set.
+    S1-S7 ssh, the same steps through burrow (/bin/ssh) against OpenSSH's
+       sshd (a black box) posing as github.com. S0 records the command a
+       console shell sends with /etc/shrc's two variables (R-px104-5:
+       `/usr/libexec/den/upload-pack '…'` today). S8 known_hosts: with the
+       shipped /etc/ssh/ssh_known_hosts, burrow refuses the fixture's key
+       for github.com as `host_key_changed`. Red at the base: no /bin/ssh,
+       no name.
+    K1 the canary: a fake secrets disk; the session reads it by
+       redirection only, then prints each fake secret on purpose; every
+       file the suite writes holds placeholders and 0 of the fake values
+       (the scan's classes: name, url, token, key). Red at the base only
+       for want of the image's pieces (the carrier and the scrub are the
+       suite's own): the row is shown red by a plant of its own, the scrub
+       turned off.
+    L1-L7 the live way (the fixture on GitHub): SKIP by name without its
+       files' paths in the environment; never run before the canary is
+       green.
+  tests/distribution: the five shipped paths above, red at the base.
+  tests/mpx5-den: the config and terminal rows, red at 584b18a3.
+  tests/ci-plan and tools/ci-tiers.map: the new paths reach the suite.
+
+Measured, to be scored: each kernel tier's ELF size; den's https clone and
+push wall time at the console against the fixture (one KVM leg); the
+console's resolve time (the DNS fixture's query stamps); the images' sizes.
