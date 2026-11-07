@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# mkauth — build PAX's account programs in wolf (px106): su (user/su,
+# px46), sudo (user/sudo, px103), passwd (user/passwd) and login
+# (user/login), each with the shared modules of user/auth (the shadow
+# file, the terminal's password read, and the one binding to wolf-std's
+# `$7$` hash), as fully static x86-64 Linux executables.
+#
+#   tools/mkauth OUTDIR [PROGRAM...]      (default: su sudo passwd login)
+#
+# PROGRAM may also be `mkshadow`, the test helper tests/mpx5-sudo.d/
+# mkshadow.lu (the image's /etc/shadow lines from passwords made at run
+# time; never part of an image).
+#
+# The toolchain is user/auth/wolf-toolchain.toml's, read as tools/mkpelt
+# reads pelt's: the wolf release archive for x86_64-unknown-linux-gnu by
+# its sha256 (refused on a mismatch, and on a `--version` that is not the
+# file's `version_line`), and wolf-std at the commit it names
+# (`WOLF_STD`). Each program is its own directory's main file beside
+# user/auth/*.lu (one package: wolf compiles the files of a directory
+# together), built as pelt is (`wolf build --release --deny-warnings`),
+# with the same one difference: wolf links through the `cc` first on
+# PATH (wolf has no `--static`), and a `cc` that adds `-static` is put
+# there, so the binary is a static glibc executable: ET_EXEC, no
+# PT_INTERP. It is checked to be exactly that (readelf), stripped, as the
+# distribution's root assembler strips the image's other user programs,
+# and `OUTDIR/sums.txt` gets `NAME <sha256> <bytes>` of each stripped file.
+#
+# PAX_AUTH_STD=DIR (development only) builds against the std/ tree DIR
+# instead of the pinned wolf-std, and says so on every line it prints; a
+# record is never taken from such a build.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# container), never on a glibc built for x86-64-v4 (px10). The release
+# tier needs clang at run time (wolf's D33). Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -ge 1 ] || die "usage: mkauth OUTDIR [su|sudo|passwd|login|mkshadow]..."
+out=$1; shift
+progs=("$@")
+[ ${#progs[@]} -gt 0 ] || progs=(su sudo passwd login)
+for p in "${progs[@]}"; do
+    case $p in su|sudo|passwd|login|mkshadow) ;; *) die "no program $p (su, sudo, passwd, login or mkshadow)" ;; esac
+done
+need git curl tar readelf strip cc clang
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-auth.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+toml=$PAX_ROOT/user/auth/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+wline=$(key wolf version_line)
+srepo=$(key std repo)
+srev=$(key std rev)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srepo" ] && [ -n "$srev" ] \
+    || die "cannot read wolf version/digest and std repo/rev from $toml"
+say "the account programs pin wolf $wv (${wsha:0:8}…), wolf-std $srev"
+
+# wolf, by the digest the file names (cached by digest).
+arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" \
+        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
+        || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+[ "$(sha256_of "$arc")" = "$wsha" ] || die "wolf $wv archive: sha256 $(sha256_of "$arc"), the pin is $wsha"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+have=$("$wolf" --version | head -n 1)
+[ "$have" = "$wline" ] || die "wolf --version says '$have'; the pin is '$wline'"
+say "$have"
+
+# wolf-std at the commit the file names (or, in development, PAX_AUTH_STD).
+if [ -n "${PAX_AUTH_STD:-}" ]; then
+    std=$(cd "$PAX_AUTH_STD" && pwd)
+    say "DEVELOPMENT BUILD: std from PAX_AUTH_STD=$std, not wolf-std $srev"
+else
+    mkdir -p "$w/stdrepo"
+    git -C "$w/stdrepo" init -q
+    "$PAX_ROOT/tools/fetch-retry" "$w/stdrepo" "https://github.com/${srepo}" "$srev" "$srev" || die "cannot fetch $srepo at $srev"
+    git -C "$w/stdrepo" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$w/stdrepo" rev-parse HEAD)" = "$srev" ] || die "$srepo: HEAD is not $srev"
+    std=$w/stdrepo/std
+fi
+[ -d "$std/x/crypto/passwd" ] || die "the std at $std has no x/crypto/passwd"
+
+# The static `cc`.
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+: > "$out/sums.txt"
+for p in "${progs[@]}"; do
+    src=$PAX_ROOT/user/$p/$p.lu
+    [ "$p" != mkshadow ] || src=$PAX_ROOT/tests/mpx5-sudo.d/mkshadow.lu
+    [ -f "$src" ] || die "no $src"
+    mkdir -p "$w/src-$p"
+    cp "$PAX_ROOT"/user/auth/*.lu "$w/src-$p/"
+    cp "$src" "$w/src-$p/$p.lu"
+    (cd "$w/src-$p" && PATH="$w/bin:$PATH" WOLF_STD=$std \
+        "$wolf" build --release --no-cache --deny-warnings "$p.lu" -o "$out/$p") >&2 \
+        || die "wolf build of $p (${src#"$PAX_ROOT"/} and user/auth)"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    strip -o "$out/$p.stripped" "$out/$p" && mv "$out/$p.stripped" "$out/$p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "stripped $p is not ET_EXEC"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')" | tee -a "$out/sums.txt"
+done
+printf 'linked against: %s\n' "$("$real" -print-file-name=libc.a)"
+[ -z "${PAX_AUTH_STD:-}" ] || printf 'DEVELOPMENT BUILD: std from %s\n' "$std"
