@@ -21,8 +21,10 @@ rows hold den's answers at its pin where they are fixed by Git's documented
 words and den's README (the push and fetch reports, `branch ... set up to
 track`, the fast-forward), the session's own ids (each commit's short id as
 `commit` printed it, carried through every later report), and den's named
-refusals (`status` with an upstream, a fetch with no daemon), and (px104)
-the command den's ssh transport asks for from a console shell, git's own
+refusal of a fetch with no daemon, and (px104) `status` with an upstream,
+which den answers with Git's words since ac2332bf (at 584b18a3 it said
+`not yet implemented: status upstream tracking`), and the command den's
+ssh transport asks for from a console shell, git's own
 `git-receive-pack '<path>'`, read from a recording `ssh` first on PATH.
 Nothing here is checked against den's source.
 """
@@ -30,7 +32,7 @@ import re
 import sys
 
 PLACES = ('tmp', 'home')
-ROWS = ['remote-shrc', 'remote-wrappers', 'remote-path', 'remote-ssh-command', 'remote-config', 'remote-status-limit'] + [
+ROWS = ['remote-shrc', 'remote-wrappers', 'remote-path', 'remote-ssh-command', 'remote-config', 'remote-status-upstream'] + [
     'remote-%s-%s' % (r, p) for p in PLACES for r in (
         'clone-bare', 'add', 'push-u', 'push', 'clone', 'clone-push', 'fetch', 'pull', 'daemon-clone',
         'daemon-push', 'one-session', 'final-pull', 'refs', 'fsck')]
@@ -267,9 +269,10 @@ def main():
                 '[branch "main"]', '\tremote = origin', '\tmerge = refs/heads/main']
         if b.status != 0 or b.out[-6:] != want:
             tmp.fail('remote-config', '.git/config ends %r, not %r' % (b.out[-6:], want))
-    b = tmp.s('den status', 1, 'remote-status-limit')
-    if b is not None and (b.status, b.out, b.err) != (2, [], ['den: not yet implemented: status upstream tracking']):
-        tmp.fail('remote-status-limit', '`status` with an upstream: %d %r %r (den names it not yet implemented at its pin)' % (b.status, b.out, b.err))
+    b = tmp.s('den status', 1, 'remote-status-upstream')
+    want = ['On branch main', "Your branch is up to date with 'origin/main'.", '', 'nothing to commit, working tree clean']
+    if b is not None and (b.status, b.out, b.err) != (0, want, []):
+        tmp.fail('remote-status-upstream', '`status` with an upstream: %d %r %r (want 0 and Git\'s words: up to date with origin/main)' % (b.status, b.out, b.err))
     # The places' blocks are typed with $P; the rows name what $P is.
     for place, root, port_ in ((tmp, d + '/r', port), (home, work + '/r', port + 1)):
         place.blocks = [[c.replace('$P', root) if not c.startswith('dm | dc ') else c, o] for c, o in place.blocks]
