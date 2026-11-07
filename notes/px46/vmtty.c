@@ -6,7 +6,8 @@
  * controlling terminal, IXON cleared, PAX's environment HOME=/ TERM=linux
  * PAX=1 PATH=/bin, argv[0] /bin/pelt, in /), the keys of /px46/keys typed
  * with tools/qemu-halt's rules (before step k wait until the prompt has
- * been shown k times; `^C ^D ^U ^W ^\ ^? ^^` control characters; Enter
+ * been shown k times, or (px106) a `^{TEXT}` step until TEXT has been shown
+ * once more than before; `^C ^D ^U ^W ^\ ^? ^^` control characters; Enter
  * unless the step ends `^D` or `^.`; a step starting `^~` typed 1.5 s
  * after the one before; 20 ms a byte), and every byte the terminal showed
  * kept. At the end it writes them to the console as hex lines between
@@ -119,10 +120,28 @@ int main(void) {
         _exit(127);
     }
     int want = 0, ok = 1;
+    char gtext[16][64]; int gseen[16]; int ngates = 0;
     for (char *line = strtok(keys, "\n"); line && ok; line = strtok(NULL, "\n")) {
         int late = strncmp(line, "^~", 2) == 0;
+        char *rb = strncmp(line, "^{", 2) == 0 ? strchr(line, '}') : NULL;
         if (late) { line += 2; pump(1500); }
-        else {
+        else if (rb && rb - line - 2 < 64) {
+            /* px106: a step that waits for its own text (tools/qemu-halt's ^{TEXT}) */
+            char g[64]; size_t gl = (size_t)(rb - line - 2);
+            memcpy(g, line + 2, gl); g[gl] = 0;
+            int k = 0;
+            while (k < ngates && strcmp(gtext[k], g) != 0) k++;
+            if (k == ngates && ngates < 16) { strcpy(gtext[ngates], g); gseen[ngates++] = 0; }
+            int n = k < 16 ? ++gseen[k] : 1;
+            long end = now_ms() + 30000;
+            while (count(g) < n) {
+                if (!alive || now_ms() > end) { printf("=== px46 vm: '%s' %d did not come\n", g, n); ok = 0; break; }
+                pump(50);
+            }
+            if (!ok) break;
+            pump(200);
+            line = rb + 1;
+        } else {
             want++;
             long end = now_ms() + 30000;
             while (count(prompt) < want) {
