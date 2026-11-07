@@ -1,12 +1,13 @@
 //! sudo — run a command as another user (px103, P5 lane U8's first half;
-//! ruling #75 R6 and R8's place, beside `su`).
+//! px106, its second: passwords; ruling #75 R6 and R8's place, beside `su`).
 //!
 //! PAX's `sudo` is installed set-user-ID root (set-ID execution is honoured
 //! since px103: kernel/process, kernel/cred) and reads `/etc/sudoers`, a
-//! subset of `sudoers(5)`. **It authenticates nobody.** There are no
-//! passwords yet (ruling #75 R1; the second half of U8): a rule that does
-//! not say `NOPASSWD:` is refused by name for anyone but root, and nothing
-//! ever prompts. The policy file is trusted whole, so what protects it is
+//! subset of `sudoers(5)`. **Since px106 it asks for the caller's
+//! password** (ruling #75 R1: scrypt in crypt(5)'s `$7$` form, from
+//! /etc/shadow, through user/auth): a rule that does not say `NOPASSWD:`,
+//! and every refusal, asks first, as Linux's does, for anyone but root and
+//! anyone running a command as themself. The policy file is trusted whole, so what protects it is
 //! what protects any file here: its owner and mode, checked as Linux's
 //! `sudo` checks them. **Enforced for honest programs; not a boundary
 //! against an attacker** (R6): the kernel has never been fuzzed or audited
@@ -33,25 +34,49 @@
 //!   `-c` and the words with every character but letters, digits, `_`, `-`
 //!   and `$` escaped; `-i` also enters the target's home directory.
 //! - `-l [-U USER] [COMMAND]`: what the caller may run (`-ll` is the same).
-//! - `-n`, `-v`, `-k`, `-K`: accepted; there is no timestamp (no
-//!   passwords), so `-v`, `-k` and `-K` change nothing, and `-n` has
-//!   nothing to refuse to ask.
+//! - **The password** (px106): `[sudo] password for NAME: ` on /dev/tty
+//!   with the echo off (user/auth/secret.lu), or `-p PROMPT` (`%p` `%u`
+//!   `%U` `%h` `%H` `%%`); three tries, each wrong one followed by 2 s and
+//!   `Sorry, try again.`, then `sudo: 3 incorrect password attempts`; the
+//!   end of input: `sudo: no password was provided` and `sudo: a password
+//!   is required` or `N incorrect password attempt(s)`. `-S` reads standard
+//!   input (the prompt on standard error); `-n` refuses at once (`sudo: a
+//!   password is required`); with no terminal and no `-S`, Linux's two
+//!   lines. `-l` asks unless one of the caller's rules says NOPASSWD, `-v`
+//!   unless every one does (sudoers(5)'s listpw=any and verifypw=all).
+//! - **The timestamp** (px106): `/var/run/sudo/ts/UID` (Ubuntu's names the
+//!   file by uid too), root's with the caller's group, mode 0600, in PAX's
+//!   own format: one line a terminal and session, `tty NR sid SID boot B
+//!   time MS` (with no terminal, `ppid PPID sid SID ...`), B the boot's start
+//!   in seconds, so a reboot voids every record (an installed PAX keeps
+//!   /var on ext2). Good for `Defaults timestamp_timeout` minutes (5; 0
+//!   always asks, a negative number never expires), refreshed by each use
+//!   and by `-v`; `-k` makes the records old, `-k COMMAND` ignores them for
+//!   this run, `-K` removes the file (`-K` with a command is a usage error).
 //! - `-h` and `-V`.
 //! - one line to `/var/log/sudo.log` (root's, mode 0600) for every use,
-//!   allowed or refused, in sudo's log format, wrapped at 80 columns.
+//!   allowed or refused, in sudo's log format (with `TTY=NAME ;` when there
+//!   is a controlling terminal, and the password refusals `3 incorrect
+//!   password attempts ;`, `a password is required ;`), wrapped at 80
+//!   columns.
 //!
 //! **What it does not, by name.** The sudoers subset is: `Defaults
-//! secure_path`, `env_keep` (`=` and `+=`), `env_reset`, `loglinelen`, and
-//! `Defaults logfile` (accepted, the log is always the same file); user,
+//! secure_path`, `env_keep` (`=` and `+=`), `env_reset`, `loglinelen`,
+//! `timestamp_timeout`, and `Defaults logfile` (accepted, the log is always
+//! the same file); user,
 //! `#uid` and `%group` specs with the host `ALL`; `(users[:groups])`
 //! run-as lists of `ALL`, names and `#ids`; `NOPASSWD:`, `PASSWD:`,
 //! `SETENV:` and `NOSETENV:` tags; commands that are `ALL` or a plain absolute
 //! path (a symbolic link is matched by its own name, never followed); `#includedir`. **Anything else is a
 //! parse error naming the file and line, and every command is denied**
 //! (Linux reports a syntax error with a caret and goes on). Options the
-//! subset has no use for (`-A -b -B -C -D -e -H -P -p -R -r -S -T -t`, long
-//! forms, `--preserve-env=LIST`) are refused by name. Linux asks for a
-//! password before it says "not allowed"; this one says it at once.
+//! subset has no use for (`-A -b -B -C -D -e -H -P -R -r -T -t`, long
+//! forms, `--preserve-env=LIST`) are refused by name. The password is
+//! asked before "not allowed", as Linux's asks it; `passwd_tries`,
+//! `passwd_timeout`, `lecture` and the other authentication Defaults are
+//! not in the subset: three tries and no lecture, as Ubuntu's measured;
+//! the prompt never times out (sudoers(5)'s `passwd_timeout`, 5 minutes, is
+//! not built).
 
 use std.os.users
 use std.fmt
@@ -62,6 +87,10 @@ const LOG_FILE: str = "/var/log/sudo.log"
 const SUDOERS: str = "/etc/sudoers"
 const LINE_MAX: int = 1024
 const SECURE_PATH_DEFAULT: str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+const TS_DIR: str = "/var/run/sudo/ts"
+const TS_DEFAULT_MS: int = 300000
+const TRIES: int = 3
+const FAIL_DELAY_MS: int = 2000
 
 /// One command of one rule: who may, as whom, with which tags.
 struct Entry {
@@ -84,6 +113,7 @@ struct Policy {
     keep: List[str],
     logfile: bool,
     wrap: bool,
+    ts_ms: int,
     error: str,
     warnings: List[str],
 }
@@ -97,7 +127,12 @@ struct Args {
     list: bool,
     longer: bool,
     validate: bool,
-    kill: bool,
+    reset: bool,
+    remove: bool,
+    noninter: bool,
+    stdin: bool,
+    prompt: str,
+    has_prompt: bool,
     preserve: bool,
     help: bool,
     version: bool,
@@ -128,10 +163,15 @@ fn main() -> int {
         return 1
     }
     if a.version {
-        print("Sudo version 0.1 (PAX, px103)")
-        print("PAX's sudo reads a subset of sudoers(5), authenticates nobody (ruling R1) and is")
-        print("enforced for honest programs; not a boundary against an attacker (ruling R6).")
+        print("Sudo version 0.2 (PAX, px106)")
+        print("PAX's sudo reads a subset of sudoers(5), asks for the caller's password (scrypt,")
+        print("ruling R1) and is enforced for honest programs; not a boundary against an attacker")
+        print("(ruling R6).")
         return 0
+    }
+    if a.remove && (a.words.len > 0 || a.list || a.validate || a.login || a.shell) {
+        eprint_raw(usage())
+        return 1
     }
     let uid = os_uid() else 0
     let euid = os_euid() else 0
@@ -177,8 +217,13 @@ fn main() -> int {
     }
     let my_groups = users.groups_of(group_text, me.name, me.gid)
 
-    if a.kill && a.words.len == 0 && !a.list && !a.validate {
-        return 0 // -k, -K: there is no timestamp to forget
+    if a.remove {
+        ts_remove(me.uid)
+        return 0
+    }
+    if a.reset && a.words.len == 0 && !a.list && !a.validate && !a.login && !a.shell {
+        ts_reset(me.uid)
+        return 0
     }
     let who_list = if a.other.len > 0 then a.other else me.name
     if a.list {
@@ -189,9 +234,18 @@ fn main() -> int {
         return 1
     }
     if a.validate && a.words.len == 0 && !a.login && !a.shell {
-        // -v: nothing to validate without a password; Linux's words for a user with no rule
+        // -v: Linux's words for a user with no rule; no password when every rule says NOPASSWD
+        // (sudoers(5)'s verifypw=all); else the password, and the timestamp made or refreshed
         if !has_rule(pol, me, my_groups, group_text) {
             eprint("Sorry, user {me.name} may not run sudo on {host}.")
+            return 1
+        }
+        if uid == 0 || all_nopasswd(pol, me, my_groups, group_text) {
+            return 0
+        }
+        let why = authenticate(pol, a, me, host, "root")
+        if why.len > 0 {
+            let _l = log_line(pol.wrap, me.name, why, os_cwd() else "/", "root", "", "validate", true)
             return 1
         }
         return 0
@@ -315,6 +369,25 @@ fn main() -> int {
         }
     }
     let shown_log = if a.login || a.shell then shown.replace("\\", "\\\\") else shown_log_cmd
+    // px106: the caller's password first, as Linux's sudo asks it before it says no: for anyone but
+    // root, unless the rule that allows the command says NOPASSWD or the target is the caller
+    // (measured), or the caller's timestamp for this terminal is still good.
+    let need_pw = uid != 0 && !(hit && (best.nopasswd || (target.uid == uid && a.group.len == 0)))
+    if need_pw {
+        let why = authenticate(pol, a, me, host, target.name)
+        if why.len > 0 {
+            if !named {
+                if !a.noninter {
+                    let _l = log_line(pol.wrap, me.name, "user NOT in sudoers", cwd, target.name, gname, shown_log, true)
+                }
+            } else if !hit {
+                let _l = log_line(pol.wrap, me.name, "command not allowed", cwd, target.name, gname, shown_log, true)
+            } else {
+                let _l = log_line(pol.wrap, me.name, why, cwd, target.name, gname, shown_log, true)
+            }
+            return 1
+        }
+    }
     if !named {
         eprint("sudo: {me.name} is not in the sudoers file.")
         let _l = log_line(pol.wrap, me.name, "user NOT in sudoers", cwd, target.name, gname, shown_log, true)
@@ -323,11 +396,6 @@ fn main() -> int {
     if !hit {
         eprint("sudo: Sorry, user {me.name} is not allowed to execute '{shown}' as {target.name} on {host}.")
         let _l = log_line(pol.wrap, me.name, "command not allowed", cwd, target.name, gname, shown_log, true)
-        return 1
-    }
-    if uid != 0 && target.uid != uid && !best.nopasswd {
-        eprint("sudo: no password database yet (R1): only NOPASSWD rules are honoured")
-        let _l = log_line(pol.wrap, me.name, "no password database (R1)", cwd, target.name, gname, shown_log, true)
         return 1
     }
     let can_setenv = best.setenv || best.cmd == "ALL"
@@ -425,7 +493,8 @@ fn main() -> int {
 /// `VAR=value` words, `--`.
 fn parse(args: List[str]) -> Args {
     var a = Args {
-        user: "", group: "", other: "", login: false, shell: false, list: false, longer: false, validate: false, kill: false,
+        user: "", group: "", other: "", login: false, shell: false, list: false, longer: false, validate: false, reset: false,
+        remove: false, noninter: false, stdin: false, prompt: "", has_prompt: false,
         preserve: false, help: false, version: false, assigns: List[str](), words: List[str](), error: "", refused: "",
     }
     var i = 0
@@ -462,13 +531,17 @@ fn parse(args: List[str]) -> Args {
                 a.list = true
             } else if name == "validate" {
                 a.validate = true
-            } else if name == "reset-timestamp" || name == "remove-timestamp" {
-                a.kill = true
+            } else if name == "reset-timestamp" {
+                a.reset = true
+            } else if name == "remove-timestamp" {
+                a.remove = true
             } else if name == "non-interactive" {
-                a.kill = a.kill
+                a.noninter = true
+            } else if name == "stdin" {
+                a.stdin = true
             } else if name == "preserve-env" && eq < 0 {
                 a.preserve = true
-            } else if name == "user" || name == "group" || name == "other-user" {
+            } else if name == "user" || name == "group" || name == "other-user" || name == "prompt" {
                 if eq < 0 {
                     if i >= args.len {
                         a.error = "option '--{name}' requires an argument"
@@ -481,6 +554,9 @@ fn parse(args: List[str]) -> Args {
                     a.user = value
                 } else if name == "group" {
                     a.group = value
+                } else if name == "prompt" {
+                    a.prompt = value
+                    a.has_prompt = true
                 } else {
                     a.other = value
                 }
@@ -499,7 +575,7 @@ fn parse(args: List[str]) -> Args {
             while k < w.len {
                 let c = w[k..k + 1]
                 k += 1
-                if c == "u" || c == "g" || c == "U" || c == "h" && false {
+                if c == "u" || c == "g" || c == "U" || c == "p" {
                     var value = w[k..]
                     k = w.len
                     if value.len == 0 {
@@ -514,6 +590,9 @@ fn parse(args: List[str]) -> Args {
                         a.user = value
                     } else if c == "g" {
                         a.group = value
+                    } else if c == "p" {
+                        a.prompt = value
+                        a.has_prompt = true
                     } else {
                         a.other = value
                     }
@@ -526,17 +605,21 @@ fn parse(args: List[str]) -> Args {
                     a.list = true
                 } else if c == "v" {
                     a.validate = true
-                } else if c == "k" || c == "K" {
-                    a.kill = true
+                } else if c == "k" {
+                    a.reset = true
+                } else if c == "K" {
+                    a.remove = true
                 } else if c == "n" {
-                    a.kill = a.kill
+                    a.noninter = true
+                } else if c == "S" {
+                    a.stdin = true
                 } else if c == "E" {
                     a.preserve = true
                 } else if c == "h" {
                     a.help = true
                 } else if c == "V" {
                     a.version = true
-                } else if c == "C" || c == "D" || c == "p" || c == "R" || c == "r" || c == "T" || c == "t" {
+                } else if c == "C" || c == "D" || c == "R" || c == "r" || c == "T" || c == "t" {
                     if a.refused.len == 0 {
                         a.refused = "-{c}"
                     }
@@ -577,8 +660,7 @@ fn parse(args: List[str]) -> Args {
 fn is_long(name: str) -> bool {
     name == "askpass" || name == "background" || name == "bell" || name == "close-from" || name == "chdir" || name == "edit" ||
         name == "set-home" || name == "host" || name == "preserve-groups" || name == "prompt" || name == "chroot" || name == "role" ||
-        name == "stdin" || name == "type" || name == "command-timeout" || name == "non-interactive" || name == "no-update" ||
-        name == "reset-timestamp"
+        name == "type" || name == "command-timeout" || name == "no-update"
 }
 
 /// Whether `/proc/self/status` says no_new_privs is set.
@@ -647,7 +729,7 @@ fn hostname() -> str {
 // ---- the policy ------------------------------------------------------
 
 fn new_policy() -> Policy {
-    Policy { entries: List[Entry](), secure_path: "", has_secure: false, keep: default_keep(), logfile: false, wrap: true, error: "", warnings: List[str]() }
+    Policy { entries: List[Entry](), secure_path: "", has_secure: false, keep: default_keep(), logfile: false, wrap: true, ts_ms: TS_DEFAULT_MS, error: "", warnings: List[str]() }
 }
 
 fn load_policy() -> Policy {
@@ -853,6 +935,13 @@ fn parse_defaults(rest0: str, file: str, line: int, mut pol: Policy) {
             continue
         } else if name == "logfile" && eq >= 0 {
             pol.logfile = true
+        } else if name == "timestamp_timeout" && eq >= 0 {
+            let ms = minutes_ms(value)
+            if ms == -2 {
+                fail(mut pol, file, line, "Defaults timestamp_timeout={value} is not a number of minutes")
+                return
+            }
+            pol.ts_ms = ms
         } else {
             fail(mut pol, file, line, "Defaults {name} is not supported")
             return
@@ -1082,6 +1171,30 @@ fn cmd_matches(cmd: str, path: str) -> bool {
     a.len > 0 && a == b
 }
 
+/// Whether one of the caller's rules says NOPASSWD (-l needs no password then).
+fn any_nopasswd(pol: Policy, me: users.User, my_groups: List[int], group_text: str) -> bool {
+    for e in pol.entries {
+        if who_matches(e.who, me, my_groups, group_text) && e.nopasswd {
+            return true
+        }
+    }
+    false
+}
+
+/// Whether every one of the caller's rules says NOPASSWD (-v needs no password then).
+fn all_nopasswd(pol: Policy, me: users.User, my_groups: List[int], group_text: str) -> bool {
+    var any = false
+    for e in pol.entries {
+        if who_matches(e.who, me, my_groups, group_text) {
+            any = true
+            if !e.nopasswd {
+                return false
+            }
+        }
+    }
+    any
+}
+
 fn has_rule(pol: Policy, me: users.User, my_groups: List[int], group_text: str) -> bool {
     for e in pol.entries {
         if who_matches(e.who, me, my_groups, group_text) {
@@ -1114,6 +1227,17 @@ fn str_join(sep: str, xs: List[str]) -> str {
 fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str, my_groups: List[int], host: str) -> int {
     var who = copy me
     var gs = copy my_groups
+    // px106: the caller's password, unless one of its rules says NOPASSWD (sudoers(5)'s listpw=any)
+    if (os_uid() else 1) != 0 && !any_nopasswd(pol, me, my_groups, group_text) {
+        let why = authenticate(pol, a, me, host, "root")
+        if why.len > 0 {
+            let reason = if has_rule(pol, me, my_groups, group_text) then why else "user NOT in sudoers"
+            if !(a.noninter && reason == "user NOT in sudoers") {
+                let _l = log_line(pol.wrap, me.name, reason, os_cwd() else "/", "root", "", "list", true)
+            }
+            return 1
+        }
+    }
     if a.other.len > 0 {
         // another user's list: for root, or a caller who may run ALL
         let o = users.user_named(passwd, a.other) else |_| {
@@ -1507,6 +1631,10 @@ fn log_line(wrap: bool, user: str, reason: str, cwd: str, target: str, group: st
     if reason.len > 0 {
         body = "{body}{reason} ; "
     }
+    let tn = secret_tty_name()
+    if tn.len > 0 {
+        body = "{body}TTY={tn} ; "
+    }
     body = "{body}PWD={cwd} ; USER={target} ; "
     if group.len > 0 {
         body = "{body}GROUP={group} ; "
@@ -1690,4 +1818,272 @@ fn help() -> str {
                                     command
       --                            stop processing command line arguments
     """
+}
+
+// ---- the password and the timestamp (px106) --------------------------------
+
+/// `timestamp_timeout`'s minutes (a decimal fraction allowed) in ms; a
+/// negative number is -1 (never expires); -2 when it is not a number.
+fn minutes_ms(v: str) -> int {
+    var t = trim(v)
+    var neg = false
+    if t.starts_with("-") {
+        neg = true
+        t = t[1..]
+    }
+    let dot = t.find(".") else t.len
+    let whole = if dot == 0 then 0 else (fmt.parse_int(t[0..dot]) else -1)
+    if whole < 0 {
+        return -2
+    }
+    var frac_ms = 0
+    if dot < t.len {
+        var scale = 6000
+        var i = dot + 1
+        while i < t.len {
+            let d = fmt.parse_int(t[i..i + 1]) else -1
+            if d < 0 {
+                return -2
+            }
+            frac_ms = frac_ms + d * scale
+            scale = scale / 10
+            i += 1
+        }
+    }
+    if neg {
+        return -1
+    }
+    whole * 60000 + frac_ms
+}
+
+/// sudo's -p escapes: %p and %u the caller, %U the target, %h and %H the host, %% a %.
+fn expand_prompt(p: str, me: str, target: str, host: str) -> str {
+    var out = ""
+    var i = 0
+    while i < p.len {
+        let c = p[i..i + 1]
+        if c == "%" && i + 1 < p.len {
+            let d = p[i + 1..i + 2]
+            if d == "p" || d == "u" {
+                out = out + me
+            } else if d == "U" {
+                out = out + target
+            } else if d == "h" || d == "H" {
+                out = out + host
+            } else if d == "%" {
+                out = out + "%"
+            } else {
+                out = out + c + d
+            }
+            i += 2
+            continue
+        }
+        out = out + c
+        i += 1
+    }
+    out
+}
+
+fn attempts_text(n: int) -> str {
+    if n == 1 then "1 incorrect password attempt" else "{n} incorrect password attempts"
+}
+
+/// "" when the caller may go on: a good timestamp for this terminal
+/// (refreshed), or its password within three tries (the timestamp then
+/// made, unless -k came with the command); else the reason the log names,
+/// after Linux's words on standard error.
+fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) -> str {
+    let key = ts_key()
+    if !a.reset && ts_valid(pol, me.uid, key) {
+        ts_write(pol, me, key)
+        return ""
+    }
+    if a.noninter {
+        eprint("sudo: a password is required")
+        return "a password is required"
+    }
+    var tty = -1
+    if !a.stdin {
+        tty = secret_tty()
+        if tty < 0 {
+            eprint("sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper")
+            eprint("sudo: a password is required")
+            return "a password is required"
+        }
+    }
+    let stored = shadow_entry(shadow_text(""), me.name).field
+    let shown = expand_prompt(if a.has_prompt then a.prompt else "[sudo] password for %p: ", me.name, target, host)
+    var wrong = 0
+    while wrong < TRIES {
+        var got = ""
+        var ended = false
+        if tty >= 0 {
+            got = secret_ask(tty, shown) else |_| {
+                ended = true
+                ""
+            }
+        } else {
+            eprint_raw(shown)
+            let isatty = os_isatty(0) else false
+            got = secret_read(0, if isatty then 2 else -1, false, 0) else |_| {
+                ended = true
+                ""
+            }
+        }
+        if ended {
+            eprint("sudo: no password was provided")
+            if wrong == 0 {
+                eprint("sudo: a password is required")
+                return "a password is required"
+            }
+            eprint("sudo: {attempts_text(wrong)}")
+            return attempts_text(wrong)
+        }
+        if pw_matches(got, stored) {
+            if !a.reset {
+                ts_write(pol, me, key)
+            }
+            return ""
+        }
+        wrong += 1
+        time_sleep_ms(FAIL_DELAY_MS)
+        if wrong < TRIES {
+            eprint("Sorry, try again.")
+        }
+    }
+    eprint("sudo: {attempts_text(wrong)}")
+    attempts_text(wrong)
+}
+
+/// This terminal and session (proc_pid_stat(5)'s tty_nr and session),
+/// or, with no terminal, the parent and the session: a timestamp
+/// record's key.
+fn ts_key() -> str {
+    let nr = secret_tty_nr()
+    let sid = secret_session()
+    if nr != 0 {
+        return "tty {nr} sid {sid}"
+    }
+    "ppid {os_ppid() else 0} sid {sid}"
+}
+
+/// When this boot began, in seconds since the epoch: the wall clock less
+/// the monotonic clock, the same all through one boot.
+fn ts_boot() -> int {
+    (time_unix_ms() - os_clock_ns() / 1000000) / 1000
+}
+
+fn ts_path(uid: int) -> str {
+    "{TS_DIR}/{uid}"
+}
+
+/// Whether the caller's record for `key` was made in this boot and is
+/// younger than `timestamp_timeout` (0: never good; negative: never old).
+fn ts_valid(pol: Policy, uid: int, key: str) -> bool {
+    if pol.ts_ms == 0 {
+        return false
+    }
+    let text = fs_read_text(ts_path(uid)) else ""
+    let now = time_unix_ms()
+    let boot = ts_boot()
+    for line in text.split("\n") {
+        if !line.starts_with("{key} boot ") {
+            continue
+        }
+        let f = line[key.len..].split(" ")
+        // " boot B time T"
+        if f.len != 5 || f[1] != "boot" || f[3] != "time" {
+            continue
+        }
+        let b = fmt.parse_int(f[2]) else -1
+        let t = fmt.parse_int(f[4]) else -1
+        if t <= 0 || b < 0 || b - boot > 2 || boot - b > 2 || t > now {
+            continue
+        }
+        if pol.ts_ms < 0 || now - t < pol.ts_ms {
+            return true
+        }
+    }
+    false
+}
+
+/// Write `text` as the caller's timestamp file: root's, the caller's group, 0600.
+fn ts_save(me: users.User, text: str) {
+    for d in ["/var", "/var/run", "/var/run/sudo"] {
+        if !fs_is_dir(d) {
+            fs_create_dir_mode(d, if d == "/var/run/sudo" then 0o711 else 0o755) else |_| {
+            }
+        }
+    }
+    if !fs_is_dir(TS_DIR) {
+        fs_create_dir_mode(TS_DIR, 0o700) else |_| {
+        }
+    }
+    let path = ts_path(me.uid)
+    let tmp = "{path}.tmp"
+    fs_remove(tmp) else |_| {
+    }
+    let fd = fs_open_perm(tmp, 4, 0o600) else |_| {
+        return
+    }
+    fs_set_owner_fd(fd, 0, me.gid) else |_| {
+    }
+    fs_write(fd, text) else |_| {
+    }
+    fs_close(fd) else |_| {
+    }
+    fs_rename(tmp, path) else |_| {
+        fs_remove(tmp) else |_| {
+        }
+    }
+}
+
+/// Make or refresh the caller's record for `key`; other records of this
+/// boot are kept, older ones dropped.
+fn ts_write(pol: Policy, me: users.User, key: str) {
+    if pol.ts_ms == 0 {
+        return
+    }
+    let text = fs_read_text(ts_path(me.uid)) else ""
+    let boot = ts_boot()
+    var out = ""
+    for line in text.split("\n") {
+        if line.len == 0 || line.starts_with("{key} boot ") {
+            continue
+        }
+        let f = line.split(" ")
+        if f.len >= 8 {
+            let b = fmt.parse_int(f[f.len - 3]) else -1
+            if b >= 0 && b - boot <= 2 && boot - b <= 2 {
+                out = "{out}{line}\n"
+            }
+        }
+    }
+    out = "{out}{key} boot {boot} time {time_unix_ms()}\n"
+    ts_save(me, out)
+}
+
+/// -k: every record of the caller's made old (the file stays).
+fn ts_reset(uid: int) {
+    let path = ts_path(uid)
+    let text = fs_read_text(path) else |_| {
+        return
+    }
+    var out = ""
+    for line in text.split("\n") {
+        let cut = line.rfind(" time ") else -1
+        if cut > 0 {
+            out = "{out}{line[0..cut]} time 0\n"
+        }
+    }
+    let st = fs_stat(path) else |_| {
+        return
+    }
+    ts_save(users.User { name: "", uid: uid, gid: st[7], comment: "", home: "", shell: "" }, out)
+}
+
+/// -K: the caller's file removed.
+fn ts_remove(uid: int) {
+    fs_remove(ts_path(uid)) else |_| {
+    }
 }
