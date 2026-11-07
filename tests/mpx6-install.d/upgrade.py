@@ -877,9 +877,13 @@ def sudo_session(name, row):
     m = Machine(name, C['sym_new'], None)
     try:
         login(m, row)
+        # pelt's friendly mode shows a history line's rest after the typed text (U13f typed `/bin/su wolf -c
+        # ...` on this disk), which vcommand's read-back would take for dropped keys: off in each shell first.
+        m.vcommand('set +o friendly', row, 60)
         for l in lines['root']:
             m.vcommand(typed(l, '/root/s-root.txt'), row, 300)
         m.vcommand('/bin/su wolf', row, 120)
+        m.vcommand('set +o friendly', row, 60)
         for l in lines['wolf']:
             m.vcommand(typed(l, '/tmp/s-wolf.txt'), row, 300)
         m.vcommand('exit', row, 60)
