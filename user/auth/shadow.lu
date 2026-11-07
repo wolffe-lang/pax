@@ -33,11 +33,11 @@ struct Shadow {
     rest: List[str],
 }
 
-/// A line's nine fields, or `parse` for anything else.
-fn shadow_parse(line: str) -> Shadow ! {parse} {
+/// A line's nine fields, or `malformed` for anything else.
+fn shadow_parse(line: str) -> Shadow ! {malformed} {
     let f = line.split(":")
     if f.len != 9 || f[0].len == 0 {
-        return parse
+        return malformed
     }
     var rest = List[str]()
     var i = 2
@@ -108,6 +108,12 @@ fn shadow_today() -> int {
 /// Ubuntu's ages (0, 99999, 7) and the rest empty.
 fn shadow_fresh(name: str, field: str) -> Shadow {
     Shadow { name: name, field: field, rest: ["{shadow_today()}", "0", "99999", "7", "", "", ""] }
+}
+
+/// The line passwd writes for an account /etc/shadow had no line for:
+/// today's date and the rest empty, as Ubuntu's passwd writes it.
+fn shadow_bare(name: str, field: str) -> Shadow {
+    Shadow { name: name, field: field, rest: ["{shadow_today()}", "", "", "", "", "", ""] }
 }
 
 /// `text` with `s` in place of its name's line, or `s` added at the end.
