@@ -19,11 +19,11 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; `su` in wolf; no passwords yet | Linux as root and as a user |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
 | Disks | Up to eight disks: virtio (four), NVMe (`nvme0n1`, major 259), SATA AHCI (`sda`, major 8, LBA48; a controller in RAID mode named and left alone), or USB mass storage (`sdX`, Bulk-Only Transport), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on every bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
-| Network | virtio-net, and Intel's 82576 (by MSI-X) and I225/I226 (polled) on one ring model; ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections; a DHCP client (RFC 2131) when `/etc/pax-net` says `dhcp`, with `/etc/resolv.conf` from the lease, or a static address when it says `static`; the console every image boots takes its address so, bounded: a missing device, a cable with no link or a server that never answers never stops the boot | Linux in a namespace, captures rebuilt byte by byte, and dnsmasq as a black box for every lease event |
+| Network | virtio-net, and Intel's 82576 (by MSI-X) and I225/I226 (polled) on one ring model; ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections; a DHCP client (RFC 2131) when `/etc/pax-net` says `dhcp`, with `/etc/resolv.conf` from the lease, or a static address when it says `static`; the console every image boots takes its address so, bounded: a missing device, a cable with no link or a server that never answers never stops the boot; names resolve through the C library's resolver as on Linux (`/etc/hosts`, then DNS) | Linux in a namespace, captures rebuilt byte by byte, and dnsmasq as a black box for every lease event |
 | Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
-| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
+| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
 What PAX is not: a security boundary. The permission checks hold for honest programs; the kernel has never been fuzzed
 or audited, it loads programs at fixed addresses, and the live USB entry accepts `root` with no password.
@@ -75,7 +75,9 @@ first program it prints how long its boot took and how much of that the console 
 | pelt | the POSIX shell, PID 1 at the console | `4683b3f5` |
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
-| den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it | `584b18a3` (wolf 0.2.36) |
+| den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `ac2332bf` (wolf 0.2.36) |
+| burrow | the ssh client in wolf: `/bin/ssh` and `/bin/burrow-keygen` (Ed25519) | `0d98ce92` (wolf 0.2.37) |
+| the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `2eb9cb9b` |
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
@@ -98,27 +100,25 @@ exactly as `den` does: `git --version` prints den's own line, `den 0.0.0 (built 
 den reads and writes Git's repositories byte for byte on its local verbs: `init`, `add`, `rm`, `mv`, `status`,
 `commit`, `log`, `show`, `diff`, `restore`, `branch`, `switch`, `tag`, `reset`, `merge`, `rebase` (linear),
 `cherry-pick`, `revert`, `blame`, `stash`, `notes`, `repack`, `verify-pack`, `fsck` and Git's plumbing. Its wire
-(`clone`, `fetch`, `pull`, `push` over `file://`, `git://` and SSH, with `upload-pack`, `receive-pack` and a
-one-session `daemon`) is in the binary within den's own limits; on PAX it works on one machine (remotes, below).
-`config` still only reads (`config --get`; `remote` and `branch --set-upstream-to` edit a repository's config), so
-set `user.name` in `~/.gitconfig` or with `GIT_AUTHOR_NAME`. It has no HTTPS, no `gc` and no hooks, and it never
-runs an editor or a pager: give a message
+(`clone`, `fetch`, `pull`, `push` over `file://`, `git://`, SSH and HTTPS, with `upload-pack`, `receive-pack` and
+a one-session `daemon`) is in the binary within den's own limits; on PAX it works on one machine and, over the
+network the console starts, with GitHub (both below). `config` writes a repository's settings as well as reading
+them; set `user.name` in `~/.gitconfig` or with `GIT_AUTHOR_NAME`. It has no `ls-remote`, no `gc`
+and no hooks, and it never runs an editor or a pager: give a message
 with `-m` or `-F` (with `GIT_EDITOR=false` the attempt fails as Git's does, and any other editor is refused by
-name). Two things to know at the console: den prints a date only from the zone database (`$TZDIR/$TZ`, by
-default `/usr/share/zoneinfo/UTC`, which the images carry as the bytes of `/etc/localtime`), and a `den log` written
-to the terminal asks for decorations den does not draw yet, so it says `not yet implemented: history decorations`:
-use `den log --no-decorate`, or `log.decorate = false` in `~/.gitconfig`. `tests/mpx5-den` types a whole session at PAX, as root and as a user, in repositories on an ext2 `/home`, and
+name). One thing to know at the console: den prints a date only from the zone database (`$TZDIR/$TZ`, by default
+`/usr/share/zoneinfo/UTC`, which the images carry as the bytes of `/etc/localtime`); at the terminal `den log` draws
+its decorations as Git does (`--no-decorate` leaves them out). `tests/mpx5-den` types a whole session at PAX, as root and as a user, in repositories on an ext2 `/home`, and
 holds every verb's status, output and error to the same den on Linux; it also logs in as a user through the
 installed system's console login and runs den at the terminal, with nothing redirected. `tests/distribution-den`
 commits on a disk the installer wrote, reboots, and reads the repository back clean, every object file Linux's
 bytes.
 
 **Remotes on one machine.** den's `file://` remotes work at the console. den runs a remote's service as a program,
-`$DEN_UPLOAD_PACK` or `$DEN_RECEIVE_PACK` with the repository's path, and looks for Git's `git-upload-pack` and
-`git-receive-pack` on `PATH` when they are unset. PAX has no Git, so it installs two wrappers,
-`/usr/libexec/den/upload-pack` and `/usr/libexec/den/receive-pack`, each two lines (`exec /bin/den upload-pack "$1"`,
-and `receive-pack` likewise), and `/etc/shrc` exports the two variables, so every console shell and every program
-it starts has them:
+`$DEN_UPLOAD_PACK` or `$DEN_RECEIVE_PACK` with the repository's path, and Git's `git-upload-pack` and
+`git-receive-pack` from `PATH` when they are unset. PAX has no Git, so it installs those two names as den's own
+wrappers, `/bin/git-upload-pack` and `/bin/git-receive-pack`, each two lines (`exec /bin/den upload-pack "$1"`,
+and `receive-pack` likewise), and sets neither variable, so every shell finds them:
 
 ```sh
 den clone -q --bare file:///home/pax/src /home/pax/hub.git   # a bare repository to push to
@@ -129,15 +129,61 @@ den clone -q file:///home/pax/hub.git /home/pax/work         # then fetch, pull 
 ```
 
 Name a remote by a `file:///absolute/path` URL (den refuses a plain path), and push only to a bare repository
-(den's receive-pack takes no other). A shell that did not read `/etc/shrc` exports the two variables itself;
-without them den answers `den: wire: io`. Once a branch tracks a remote, den's `status` and `branch` answer `not yet
-implemented` (den's own limits, the same on Linux); `log`, `fetch`, `pull` and `push` still answer.
+(den's receive-pack takes no other). Once a branch tracks a remote, `status` and `branch -vv` name it as Git does
+(`Your branch is up to date with 'origin/main'.`).
 `git://` remotes go over the network stack, which the console kernel every image boots starts: `den daemon
 --enable-receive-pack BASE PORT` serves one connection on 127.0.0.1 from a bare repository holding
-`git-daemon-export-ok`, and a clone or push through `git://127.0.0.1:PORT/…` then works at the console. There is no
-`ssh` client on PAX yet, so `ssh://` remotes are out. The den the images carry has no HTTPS yet; `tests/mpx4-console-net`
-already clones over `https://` at the console with den's smart-HTTP transport built for that row alone. `tests/mpx5-den` types all of this at PAX as root and as `pax`, under `/tmp` and on
-the ext2 `/home`, and holds every answer, object id and ref to the same keys typed on Linux.
+`git-daemon-export-ok`, and a clone or push through `git://127.0.0.1:PORT/…` then works at the console.
+`tests/mpx5-den` types all of this at PAX as root and as `pax`, under `/tmp` and on the ext2 `/home`, and holds
+every answer, object id and ref to the same keys typed on Linux.
+
+Until px104 the wrappers lived in `/usr/libexec/den` and `/etc/shrc` exported the two variables naming them, as px100
+decided; px104 changed that decision. den's ssh transport sends the same program word to the far side, so a console
+shell asked the server to run `/usr/libexec/den/receive-pack '…'` where a Git server expects `git-receive-pack '…'`.
+An upgrade replaces an `/etc/shrc` you never changed; if you
+changed yours, the upgrade keeps it and writes the new one beside it as `/etc/shrc.pax-new`: delete these two lines
+from yours (the new text is in the `.pax-new` file):
+
+```sh
+export DEN_UPLOAD_PACK=/usr/libexec/den/upload-pack
+export DEN_RECEIVE_PACK=/usr/libexec/den/receive-pack
+```
+
+**Pushing to GitHub.** den pushes over HTTPS and over SSH from the console, through the network it starts (below).
+Names resolve as on Linux: the lease (or `/etc/pax-net`'s static line) writes `/etc/resolv.conf`, and the C
+library reads `/etc/hosts` first, so a line there (`140.82.112.3 github.com`, an address of GitHub's
+published ranges) is the fallback when no DNS server answers.
+
+- **HTTPS** checks the server against `/etc/ssl/certs/ca-roots.der`, Mozilla's root store as curl publishes it
+  (dated 2026-10-20, 118 certificates; the Mozilla Public License 2.0; `user/roots.pin`), which `/etc/shrc` names
+  as `DEN_TLS_ROOTS`; a server whose chain reaches no root in it is refused by the TLS client's own name (`TLS
+  issuer_mismatch`). The credential is a GitHub token: den reads `DEN_HTTP_TOKEN`, or asks for it at the terminal
+  (`Token: `, with no echo) when stdin is one, and never writes it anywhere.
+
+  ```sh
+  den clone -q https://github.com/OWNER/REPO.git repo
+  cd repo && den commit -a -m '…' && den push -q origin main   # asks `Token: ` unless DEN_HTTP_TOKEN is set
+  ```
+- **SSH** goes through burrow, the org's ssh client, installed as `/bin/ssh` with `/bin/burrow-keygen`: den runs
+  `ssh` from `PATH` (it reads no `GIT_SSH` or `core.sshCommand`). Make a key on PAX and add its public line to
+  GitHub (a deploy key or your account's), or copy a key you have (an unencrypted Ed25519 key in OpenSSH's format,
+  mode 0600). GitHub's published host key is pinned in `/etc/ssh/ssh_known_hosts`; burrow reads known_hosts files
+  only from `~/.ssh`, so name it in `~/.ssh/config`. A server answering for github.com with another key is refused
+  by name (`host_key_changed`).
+
+  ```sh
+  mkdir -p ~/.ssh && chmod 700 ~/.ssh
+  burrow-keygen -t ed25519 -f ~/.ssh/id_ed25519      # then: burrow-keygen -y -f ~/.ssh/id_ed25519 to GitHub
+  printf 'Host github.com\n\tUserKnownHostsFile ~/.ssh/known_hosts /etc/ssh/ssh_known_hosts\n' > ~/.ssh/config
+  den clone -q git@github.com:OWNER/REPO.git repo
+  ```
+
+Nothing secret ships: the images carry no token and no key, and a key made on the live medium is gone at reboot
+unless `~` is on a disk. den has no `ls-remote` and no `rev-parse` yet: `den fetch origin`, then `den log -n 1
+--pretty=oneline --no-decorate origin/BRANCH`, shows what a push left, and `den fetch --prune origin` drops a branch
+the far side no longer has. `tests/mpx4-console-push` types these steps at the console against fixtures that answer as
+github.com (den's own HTTPS fixture and OpenSSH's sshd, a DNS server of the suite's own), holds each to Git's
+answers for the same steps on Linux, and, given a repository on GitHub in its environment, pushes there.
 
 ## Booting PAX
 
@@ -297,7 +343,8 @@ static <a.b.c.d>/<prefix> [gateway <a.b.c.d>] [dns <a.b.c.d>]...   # this addres
 
 Without the file the address is 10.0.2.15/24, gateway 10.0.2.2 (QEMU's user network). The lease or the static
 address is on the console before the prompt (`dhcp: … bound …`, or `net: static …`), with the router's answer to
-the kernel's echo, and `/var/lib/dhcp/pax.lease` and `/etc/resolv.conf` say the same to any program. A missing or
+the kernel's echo, and `/var/lib/dhcp/pax.lease` and `/etc/resolv.conf` say the same to any program; a program's
+resolver reads them (and `/etc/hosts` first), so den and burrow reach a host by name. A missing or
 silent network never stops the boot: the console waits for the first lease at most `wait` seconds, not at all when
 the cable has no link (the client goes on asking), and an Intel controller's own start at most 12 s; one line,
 `net: the console waited <w> ms for the network (bound <b> ms: …)`, says how long it took and the bound it held.
@@ -456,7 +503,7 @@ and `--tier native --firmware bios` picks one leg.
 | The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
-| The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes) |
+| The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net`, `mpx4-console-push` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes); den pushing from the console over https and through burrow over ssh to fixtures that answer as github.com, names through a DNS server of the suite's own, the resolver's datagram calls against Linux, a scrubbed transcript proven on fake secrets (root, sshd, mke2fs) |
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, each program's typed session against the same binary in a container, the language server's frames both ways |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
