@@ -16,6 +16,7 @@ use log
 use paging
 use panic
 use serial
+use sync
 use timer
 extern "c" fn pax_exit(v: u8)
 extern "c" fn pax_inl(port: u16) -> u32
@@ -52,6 +53,90 @@ fn pit_only(pml4: u64) -> never {
     unsafe { pax_exit(0x10) }
     panic.halt()
 }
+// px107 (pax#293): kernel/clock's answers to a misread and at a rollover
+// (tests/mpx6-metal's clock-* legs, each a word on the command line).
+// clock-behind (the HPET, 64 bits, its readings 5 * 2^32 up): a reading
+// one high word behind the one before, as a torn read gives, must leave
+// the clock monotonic and counted; a reading of all ones (an absent
+// device's) the same; a skip of 2^40 ticks counts forward exactly.
+// clock-32 (the HPET read as a 32-bit counter) and clock-pmwrap (the PM
+// timer's 24 bits): across a rollover the clock agrees with the PM timer
+// read directly, and the largest step the mask allows (a reading one
+// behind: a whole rollover less one tick) counts forward exactly.
+// tests/mpx6-metal checks each `metal: step` line's nanoseconds against
+// its ticks and period.
+fn ticks20() { let first = timer.ticks(); while timer.ticks() - first < 20 { timer.wait() } }
+fn step(what: str, before: u64, after: u64, t0: u64, t1: u64) {
+    log.put("metal: step "); log.put(what); log.put(" "); log.put(clock.name())
+    log.put(" from "); log.hex(before); log.put(" to "); log.hex(after) // log.hex writes the 0x
+    log.put(" mask "); log.hex(clock.mask_of()); log.put(" read as "); log.dec((t1 - t0) as int); log.line(" ns")
+}
+fn behind() {
+    let flags = sync.irq_save()
+    let t1 = clock.now_ns()
+    let r1 = clock.last()
+    clock.test_reading(r1 - 0x100000000) // one high word behind (HPET 1.0a §2.4.7's torn read)
+    let t2 = clock.now_ns()
+    sync.irq_restore(flags)
+    ticks20()
+    let t3 = clock.now_ns()
+    log.put("metal: a reading 2^32 ticks behind "); log.hex(r1); log.put(": the clock read "); log.dec(t1 as int)
+    log.put(", "); log.dec(t2 as int); log.put(", "); log.dec(t3 as int); log.put(" ns; ")
+    log.dec(clock.refused_count() as int); log.line(" reading(s) taken as no time passing")
+    check(t1 <= t2 && t2 <= t3 && t3 - t1 >= 150000000 && t3 - t1 <= 300000000, "the clock monotonic across a reading 2^32 ticks behind, 20 ticks in 150..300ms")
+    check(clock.refused_count() == 1, "the reading behind counted once")
+    let f4 = sync.irq_save()
+    let t4 = clock.now_ns()
+    clock.test_reading(0xffffffffffffffff)
+    let t5 = clock.now_ns()
+    sync.irq_restore(f4)
+    check(t5 == t4 && clock.refused_count() == 2, "a reading of all ones taken as no time passing")
+    let t6 = clock.now_ns()
+    let r6 = clock.last()
+    clock.test_skip(0x10000000000)
+    let t7 = clock.now_ns()
+    step("skip", r6, clock.last(), t6, t7)
+    check(clock.refused_count() == 2, "a skip of 2^40 ticks taken as time")
+}
+fn rollover() {
+    let wraps = clock.wrapped()
+    let port = acpi.pm_port()
+    let p0 = unsafe { pax_inl(port as u16) as u64 } & 0xffffff
+    // 100 ms of either: 357954 PM ticks, or 10^7 of q35's HPET (10 ns)
+    clock.test_rollover_in(if boot_info.cmdline_has("metal_clock_pmwrap") { 357954 } else { 10000000 })
+    let t0 = clock.now_ns()
+    ticks20()
+    let t1 = clock.now_ns()
+    let p1 = unsafe { pax_inl(port as u16) as u64 } & 0xffffff
+    let pm = ((p1 + 0x1000000 - p0) & 0xffffff) * 1000000000 / 3579545
+    log.put("metal: across a rollover of the "); log.put(clock.name()); log.put(" (mask "); log.hex(clock.mask_of())
+    log.put(") the clock read "); log.dec((t1 - t0) as int); log.put(" ns, the PM timer read directly "); log.dec(pm as int)
+    log.put(" ns; rollovers "); log.dec((clock.wrapped() - wraps) as int); log.end()
+    check(clock.wrapped() > wraps, "the counter rolled over inside the window")
+    check((t1 - t0) * 100 >= pm * 98 && (t1 - t0) * 100 <= pm * 102, "the clock within 2% of the PM timer across the rollover")
+    // With IF clear, so no tick's read comes between (the step is these
+    // two reads' alone).
+    let flags = sync.irq_save()
+    let t2 = clock.now_ns()
+    let r2 = clock.last()
+    clock.test_reading((r2 + clock.mask_of()) & clock.mask_of()) // one behind: the largest step
+    let t3 = clock.now_ns()
+    let r3 = clock.last()
+    sync.irq_restore(flags)
+    step("largest", r2, r3, t2, t3)
+    check(clock.refused_count() == 0, "a rollover is no misread")
+}
+// clock-torn (q35 as it is): the HPET's counter put 50 us before its low
+// word rolls over, 20000 times, and read across each by the clock's own
+// read: no reading may be below the one before (HPET 1.0a §2.4.7: a 64-bit
+// read may be broken into two 32-bit ones, and QEMU's is).
+fn torn() {
+    let (spanned, bad, late) = clock.test_crossings(20000, 5000)
+    log.put("metal: the HPET read across 20000 rollovers of its low word: "); log.dec(spanned as int)
+    log.put(" read across, "); log.dec(bad as int); log.put(" torn, "); log.dec(late as int); log.line(" first read after the rollover")
+    check(spanned >= 18000, "the reads went across the rollovers")
+    check(bad == 0, "no reading of the HPET torn across a rollover of its low word")
+}
 export fn kmain() {
     serial.init()
     frames.start()
@@ -75,6 +160,8 @@ export fn kmain() {
     if boot_info.cmdline_has("metal_stall_long") { clock.test_stall(1, 17897725) }
     if boot_info.cmdline_has("metal_hpet_fast") { clock.test_period(1250) }
     if boot_info.cmdline_has("metal_hpet_slow") { clock.test_period(800) }
+    if boot_info.cmdline_has("metal_clock_behind") { clock.test_counter(0x500000000) }
+    if boot_info.cmdline_has("metal_clock_32") { clock.test_32bit() }
     clock.start()
     let (windows, toolong, retaken, stalled) = clock.check_counts()
     log.put("metal: the HPET's check measured "); log.dec(windows as int)
@@ -85,6 +172,9 @@ export fn kmain() {
     if boot_info.cmdline_has("metal_pitonly") {
         pit_only(pml4)
     }
+    if boot_info.cmdline_has("metal_clock_behind") { behind() }
+    if boot_info.cmdline_has("metal_clock_torn") { torn() }
+    if boot_info.cmdline_has("metal_clock_32") || boot_info.cmdline_has("metal_clock_pmwrap") { rollover() }
     check(acpi.tables() > 0, "ACPI checked tables")
     let port = acpi.pm_port()
     check(port != 0, "independent PM rate reference")
