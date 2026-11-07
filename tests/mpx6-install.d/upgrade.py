@@ -44,8 +44,10 @@ name:
   U7 cut       on a copy of U2's target: QEMU killed after 100 steps, the
                stick booted again and the upgrade re-run: it completes, and
                U4's file checks hold
-  U13 sudo     (px103) the installed disk booted: /bin/sudo /bin/id typed as
-               uid 1000 (su wolf -c) answers uid=0 and /var/log/sudo.log holds
+  U13 sudo     (px103) the installed disk booted: /bin/sudo -n /bin/id typed as
+               uid 1000 (su wolf -c) answers uid=0 (px106: or, if the shipped
+               sudoers' uid-1000 line drops NOPASSWD, R-px106-6, `sudo: a
+               password is required`) and /var/log/sudo.log holds
                its line; on the disk /bin/sudo is 04755 root:root, /etc/sudoers
                0440 root:root and the shipped bytes, /var/log a root directory,
                the log 0600 root:root. U13f after a fresh install from the new
@@ -840,15 +842,23 @@ def debugfs_cat(img, path, row):
     return run(['debugfs', '-R', f'cat {path}', img], row=row).stdout
 
 
+def wolf_nopasswd():
+    """R-px106-6: whether the shipped sudoers' one line for uid 1000 says NOPASSWD (U13 follows it)."""
+    line = next(l for l in (repo/'user/sudo/sudoers').read_text().splitlines() if l.startswith('#1000 '))
+    return 'NOPASSWD:' in line
+
+
 def sudo_boot(name, row):
     """The installed disk booted alone and sudo used by uid 1000 (su wolf -c), typed at the root console;
-    then the disk read on the host: sudo's and sudoers' modes and owners, /var/log, the log line."""
+    then the disk read on the host: sudo's and sudoers' modes and owners, /var/log, the log line.
+    `sudo -n`: under R-px106-6's other choice (a password rule) it refuses at once rather than ask."""
+    nopw = wolf_nopasswd()
     m = Machine(name, C['sym_new'], None)
     try:
         s = login(m, row, first_boot=True)
         need(m.unwrapped(s), f'kernel: {C["new_commit"]}', row)
         for c, want in [("/bin/su wolf -c '/bin/id' > /root/w0.txt 2>&1; echo w0=$?", 'w0=0'),
-                        ("/bin/su wolf -c '/bin/sudo /bin/id' > /root/w1.txt 2>&1; echo w1=$?", 'w1=0')]:
+                        ("/bin/su wolf -c '/bin/sudo -n /bin/id' > /root/w1.txt 2>&1; echo w1=$?", 'w1=0' if nopw else 'w1=1')]:
             s = m.vcommand(c, row, 300)
             need(m.unwrapped(s), want, row)
         poweroff(m, row)
@@ -881,9 +891,12 @@ def sudo_boot(name, row):
         img.unlink()
     if not re.match(r'uid=1000\(wolf\) ', w0):
         fail(row, f'su wolf -c /bin/id printed {w0!r}')
-    if not re.match(r'uid=0\(root\) gid=0\(root\) ', w1):
-        fail(row, f'sudo /bin/id as uid 1000 printed {w1!r}')
-    if not re.search(r'^\w{3} [ \d]\d \d\d:\d\d:\d\d : wolf : .*USER=root ; COMMAND=/bin/id$', text.replace('\n    ', ' '), re.M):
+    if nopw and not re.match(r'uid=0\(root\) gid=0\(root\) ', w1):
+        fail(row, f'sudo -n /bin/id as uid 1000 printed {w1!r}')
+    if not nopw and w1 != 'sudo: a password is required\n':
+        fail(row, f'sudo -n /bin/id as uid 1000 under a password rule printed {w1!r}')
+    why = '' if nopw else 'a password is required ; '
+    if not re.search(r'^\w{3} [ \d]\d \d\d:\d\d:\d\d : wolf : ' + why + r'.*USER=root ; COMMAND=/bin/id$', text.replace('\n    ', ' '), re.M):
         fail(row, f'/var/log/sudo.log has no line for wolf running /bin/id: {text!r}')
     # px106: one locked line for each account, none with a password.
     lines = {l.split(':')[0]: l.split(':') for l in shadow.splitlines() if l.count(':') == 8}
@@ -898,7 +911,7 @@ def passed_sudo(name, row, what, fresh=False):
     log(f'{row}: {log_text}')
     (work/f'{row}.txt').write_text(f'{what}\nstat (type, mode, uid, gid): {have}\nsudo /bin/id as uid 1000: {out}\n/var/log/sudo.log:\n{log_text}\n')
     passed(row, f'{what}: booted; /bin/sudo 04755 0:0, /etc/sudoers 0440 0:0 (user/sudo/sudoers\' bytes), /var/log a root directory; '
-           f'uid 1000 ran /bin/sudo /bin/id and it printed {out!r}; /var/log/sudo.log 0600 0:0 holds the line; '
+           f'uid 1000 ran /bin/sudo -n /bin/id and it printed {out!r} (the shipped uid-1000 rule NOPASSWD: {wolf_nopasswd()}); /var/log/sudo.log 0600 0:0 holds the line; '
            f'px106: login let root in with no password and said so; /bin/su and /bin/passwd 04755, /bin/login 0755, '
            f'/etc/shadow 0600 0:0, every account locked')
 
