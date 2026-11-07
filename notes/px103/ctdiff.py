@@ -8,6 +8,10 @@ markers (a row is its name in its configuration group). A row is the same
 when its text is equal after the named normalisations:
   - the container's host name and sudo's hash and version line;
   - log lines' time stamps (`Mon DD HH:MM:SS`);
+  - (px106) where the row's shell's `Terminated` line falls: the script's
+    standard error reaches the file through the container's own stream, so
+    it lands before or after `--- stdout` by the reader's timing; it is
+    counted, not placed;
 and is listed otherwise. Prints `same N of M` and the differing rows.
 """
 import re, sys
@@ -31,7 +35,10 @@ def rows(path):
 PAM = False
 
 def norm(lines):
-    t = "\n".join(l for l in lines if not l.startswith("light:"))
+    kept = [l for l in lines if l != "Terminated"]
+    t = "\n".join(l for l in kept if not l.startswith("light:"))
+    if len(kept) != len(lines):
+        t = "shell: Terminated x%d\n" % (len(lines) - len(kept)) + t
     if PAM:
         t = re.sub(r"^umask=\d+$", "umask=N", t, flags=re.M)
     t = re.sub(r"^[A-Z][a-z]{2} [ 0-9]\d \d\d:\d\d:\d\d ", "STAMP ", t, flags=re.M)
