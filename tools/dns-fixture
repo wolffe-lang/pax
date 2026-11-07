@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""dns-fixture — a DNS server of the suite's own for the console's names (px104).
+
+    tools/dns-fixture --bind ADDR:PORT --log FILE [--deadline SECS] NAME=A.B.C.D...
+
+Answers UDP queries (RFC 1035 sections 4.1 and 4.2.1) on ADDR:PORT, one
+datagram each, until its standard input reaches end of file (the suite
+holds it open on a pipe, so the server never outlives the suite) or the
+deadline passes:
+  - a query of class IN and type A for a NAME given: one A record, TTL 60;
+  - type AAAA (or any other type) for a NAME given: no records, NOERROR
+    (no data of that type: RFC 2308's NODATA);
+  - any other name: NXDOMAIN, no records;
+  - anything that is not one question, or not a query: FORMERR, the
+    question echoed when there is one.
+Names compare case-insensitively (RFC 4343) and never by suffix. Each query
+is one line of the log: `QUERY <seconds> <source> <type> <name> -> <answer>`.
+When it was started as root through sudo it drops to the invoking user once
+its socket is bound (the port may be below 1024: QEMU's user network maps
+the guest's 10.0.2.2:53 to this host's 127.0.0.1:53). It prints `LISTENING
+ADDR:PORT` when it is ready. Written from RFC 1035, RFC 2308 and RFC 4343
+only (docs/SOURCES.md, px104). Exit 0, or 2 on a usage or bind error.
+"""
+import argparse
+import os
+import select
+import socket
+import struct
+import sys
+import time
+
+TYPES = {1: 'A', 28: 'AAAA', 5: 'CNAME', 15: 'MX', 16: 'TXT', 2: 'NS', 6: 'SOA', 12: 'PTR', 33: 'SRV', 65: 'HTTPS'}
+
+
+def parse_name(msg, at):
+    labels = []
+    while True:
+        if at >= len(msg):
+            raise ValueError('truncated name')
+        n = msg[at]
+        if n & 0xc0:
+            raise ValueError('a pointer in a question')
+        at += 1
+        if n == 0:
+            return '.'.join(labels), at
+        if at + n > len(msg):
+            raise ValueError('truncated label')
+        labels.append(msg[at:at + n].decode('ascii', 'replace'))
+        at += n
+
+
+def answer(msg, names):
+    """The reply datagram and a short account of it, or None to stay silent."""
+    if len(msg) < 12:
+        return None, 'short'
+    ident, flags, qd, an, ns, ar = struct.unpack('>HHHHHH', msg[:12])
+    if flags & 0x8000:
+        return None, 'a response'
+    rd = flags & 0x0100
+    opcode = (flags >> 11) & 0xf
+    try:
+        if qd != 1 or opcode != 0:
+            raise ValueError('not one standard query')
+        qname, at = parse_name(msg, 12)
+        if at + 4 > len(msg):
+            raise ValueError('truncated question')
+        qtype, qclass = struct.unpack('>HH', msg[at:at + 4])
+        question = msg[12:at + 4]
+    except ValueError as e:
+        head = struct.pack('>HHHHHH', ident, 0x8000 | rd | 1, 0, 0, 0, 0)
+        return head, '? ? -> FORMERR (%s)' % e
+    key = qname.lower().rstrip('.')
+    tname = TYPES.get(qtype, str(qtype))
+    if key not in names or qclass != 1:
+        head = struct.pack('>HHHHHH', ident, 0x8000 | 0x0400 | rd | 0x0080 | 3, 1, 0, 0, 0)
+        return head + question, '%s %s -> NXDOMAIN' % (tname, qname)
+    if qtype != 1:
+        head = struct.pack('>HHHHHH', ident, 0x8000 | 0x0400 | rd | 0x0080, 1, 0, 0, 0)
+        return head + question, '%s %s -> NODATA' % (tname, qname)
+    head = struct.pack('>HHHHHH', ident, 0x8000 | 0x0400 | rd | 0x0080, 1, 1, 0, 0)
+    rr = struct.pack('>HHHIH', 0xc00c, 1, 1, 60, 4) + socket.inet_aton(names[key])
+    return head + question + rr, '%s %s -> %s' % (tname, qname, names[key])
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--bind', required=True)
+    p.add_argument('--log', required=True)
+    p.add_argument('--deadline', type=float, default=3600)
+    p.add_argument('names', nargs='+')
+    a = p.parse_args()
+    names = {}
+    for n in a.names:
+        name, _, ip = n.partition('=')
+        socket.inet_aton(ip)
+        names[name.lower().rstrip('.')] = ip
+    host, _, port = a.bind.rpartition(':')
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind((host, int(port)))
+    except OSError as e:
+        print('dns-fixture: cannot bind %s: %s' % (a.bind, e), file=sys.stderr, flush=True)
+        return 2
+    log = open(a.log, 'a', buffering=1)
+    if os.getuid() == 0 and os.environ.get('SUDO_UID'):
+        os.setgid(int(os.environ.get('SUDO_GID', os.environ['SUDO_UID'])))
+        os.setuid(int(os.environ['SUDO_UID']))
+    print('LISTENING %s:%d' % s.getsockname(), flush=True)
+    end = time.monotonic() + a.deadline
+    watch = [s, sys.stdin]
+    while time.monotonic() < end:
+        ready, _, _ = select.select(watch, [], [], 1.0)
+        if sys.stdin in ready:
+            if not os.read(sys.stdin.fileno(), 4096):
+                break
+        if s in ready:
+            msg, src = s.recvfrom(4096)
+            reply, what = answer(msg, names)
+            log.write('QUERY %.3f %s:%d %s\n' % (time.time(), src[0], src[1], what))
+            if reply is not None:
+                s.sendto(reply, src)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
