@@ -637,7 +637,8 @@ def way_https(out, images, c, den_src, git):
             snap.write_text(DIAG_SNAP.format(port=port, spid=server.process.pid, ppid=os.getpid()))
             hooks = {}
             keys = keys[:keys.index('cd cH')] + CANARY.splitlines()
-            qemu = qemu + ['-object', 'filter-dump,id=f0,netdev=n0,file=%s' % (out / 'diag.pcap')]
+            if os.environ.get('PAX_PUSH_DIAG_PCAP', '1') == '1':
+                qemu = qemu + ['-object', 'filter-dump,id=f0,netdev=n0,file=%s' % (out / 'diag.pcap')]
             say('DIAG the fixture: 127.0.0.1:%d, s_server pid %d, the bridge in pid %d' % (port, server.process.pid, os.getpid()))
             import threading
             stop = threading.Event()
