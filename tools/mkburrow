@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+# mkburrow — build burrow, the ssh client in wolf (wolffe-lang/burrow), as
+# two fully static x86-64 Linux executables, `burrow` and `burrow-keygen`,
+# unmodified, from burrow's own tree, through burrow's own tools/build
+# --static (px104).
+#
+#   tools/mkburrow OUTDIR
+#
+# tools/mkden's twin. The tree is user/burrow.pin's commit of
+# wolffe-lang/burrow (public), fetched from PAX_BURROW_REPO when it is set
+# (a local clone or cache that holds the commit) and from BURROW_REPO
+# otherwise, through tools/fetch-retry; HEAD is refused unless it is
+# BURROW_REV. Nothing of burrow's tree is kept: the build directory is
+# removed at the end.
+#
+# The toolchain is the one THAT tree pins in its wolf-toolchain.toml:
+#   - the whole wolf release archive for x86_64-unknown-linux-gnu, its
+#     sha256 read twice and refused unless both reads are the pin's, its
+#     `wolf --version` refused unless it is the pin's `version_line`, the
+#     runtime (`libwolf_rt.a`) beside `wolf`, as the archive lays it out;
+#   - lupin's release archive likewise (burrow's tools/lib-toolchain.sh
+#     refuses to build without the pinned lupin beside wolf, though the
+#     static build never runs it), read twice, its version line checked;
+#   - the std at the pin's `[std] rev`: the wolf archive's bundled std
+#     (`std/STD-REV`) when it is that commit, else wolf-std fetched at it.
+# Both archives are cached in PAX_CACHE by digest (the same files
+# tools/mkden caches), and given to burrow's tools/build as WOLF_BIN,
+# LUPIN_BIN and WOLF_STD, which its tools/lib-toolchain.sh verifies again.
+#
+# burrow is built once in each of two checkouts at paths of their own, and
+# the two checkouts' binaries must agree (exit 1 otherwise). Each binary is
+# checked static (readelf: ET_EXEC, no PT_INTERP, no dynamic section).
+# `OUTDIR/sums.txt` gets `burrow <sha256> <bytes>` and `burrow-keygen
+# <sha256> <bytes>`; whether they are the digests user/burrow.pin records
+# from burrow's own gate is printed (the binary depends on the libc.a it
+# links, so a host's newer libc.a is a new digest, not a failure). Nothing
+# here makes /bin/ssh: tools/install-burrow does.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu 24.04
+# container), never on a newer host glibc (px10). The release tier needs
+# clang at run time (wolf's D33). Exit 0, 1 when two builds differ, or 2
+# on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkburrow OUTDIR"
+out=$1
+need git curl tar readelf cc clang
+pin=$PAX_ROOT/user/burrow.pin
+. "$pin"
+[ -n "${BURROW_REPO:-}" ] && printf '%s' "${BURROW_REV:-}" | grep -Eq '^[0-9a-f]{40}$' \
+    || die "$pin must set BURROW_REPO and BURROW_REV (a full 40-hex sha, never a branch)"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-burrow.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repo rev dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    "$PAX_ROOT/tools/fetch-retry" "$3" "$1" "$2" "$2" || die "cannot fetch $1 at $2"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+
+tree "${PAX_BURROW_REPO:-$BURROW_REPO}" "$BURROW_REV" "$w/a/burrow"
+toml=$w/a/burrow/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+wline=$(key wolf version_line)
+lv=$(key lupin version)
+lsha=$(key lupin x86_64-unknown-linux-gnu)
+lline=$(key lupin version_line)
+srepo=$(key std repo)
+srev=$(key std rev)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$wline" ] && [ -n "$lv" ] && [ -n "$lsha" ] && [ -n "$lline" ] \
+    && [ -n "$srepo" ] && [ -n "$srev" ] \
+    || die "cannot read wolf and lupin version/digest/version_line and std repo/rev from burrow's wolf-toolchain.toml"
+say "burrow $BURROW_REV pins wolf $wv (${wsha:0:8}…), lupin $lv (${lsha:0:8}…), wolf-std $srev"
+
+archive() { # name version digest repo -> the cached path
+    local arc=$PAX_CACHE/$1-$2-x86_64-unknown-linux-gnu-$3.tar.gz have k
+    if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$3" ]; then
+        curl -sSfL --retry 3 -o "$arc.part" \
+            "https://github.com/wolffe-lang/$4/releases/download/v$2/$1-$2-x86_64-unknown-linux-gnu.tar.gz" \
+            || die "cannot download $1 $2"
+        mv "$arc.part" "$arc"
+    fi
+    for k in 1 2; do
+        have=$(sha256_of "$arc")
+        [ "$have" = "$3" ] || die "$1 $2 archive, read $k: sha256 $have, burrow pins $3"
+    done
+    say "$1 $2 archive: sha256 $3, read twice"
+    printf '%s\n' "$arc"
+}
+arc=$(archive wolf "$wv" "$wsha" wolf-lang)
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+[ -x "$wolf" ] || die "the wolf $wv archive has no wolf"
+[ -f "$w/wolf/libwolf_rt.a" ] || die "the wolf $wv archive has no libwolf_rt.a beside wolf"
+have=$("$wolf" --version | head -n 1)
+[ "$have" = "$wline" ] || die "wolf --version says '$have'; burrow pins '$wline'"
+arc=$(archive lupin "$lv" "$lsha" wolf-interp)
+mkdir -p "$w/lupin"
+tar -xzf "$arc" -C "$w/lupin" --strip-components=1
+lupin=$w/lupin/lupin
+[ -x "$lupin" ] || die "the lupin $lv archive has no lupin"
+have=$("$lupin" --version | head -n 1)
+[ "$have" = "$lline" ] || die "lupin --version says '$have'; burrow pins '$lline'"
+say "$wline; libwolf_rt.a beside it; $lline"
+
+std=$w/wolf/std
+bundled=$(tr -d '[:space:]' < "$std/STD-REV" 2>/dev/null || true)
+if [ "$bundled" = "$srev" ]; then
+    say "the wolf $wv archive bundles std $srev, the pin's"
+else
+    say "the wolf $wv archive bundles std '${bundled:-none}'; burrow pins $srev: fetching it"
+    tree "https://github.com/$srepo" "$srev" "$w/std-src"
+    std=$w/std
+    mkdir -p "$std"
+    git -C "$w/std-src" archive HEAD std | tar -x -C "$w"
+    printf '%s\n' "$srev" > "$std/STD-REV"
+fi
+
+# burrow's own builder in two checkouts of its own; the second is fetched
+# from the first (the pinned commit either way, checked).
+tree "$w/a/burrow" "$BURROW_REV" "$w/b/burrow"
+for k in a b; do
+    rc=0
+    (cd "$w/$k/burrow" && WOLF_BIN=$wolf LUPIN_BIN=$lupin WOLF_STD=$std TMPDIR=$w/$k \
+        sh tools/build --static) > "$w/$k.log" 2>&1 || rc=$?
+    cat "$w/$k.log" >&2
+    [ "$rc" = 0 ] || die "burrow's tools/build --static (checkout $k) exited $rc"
+done
+static() {
+    readelf -hW "$1" | grep -Eq 'Type: +EXEC' || die "$1 is not ET_EXEC"
+    ! readelf -lW "$1" | grep -q INTERP || die "$1 has a PT_INTERP (not static)"
+    readelf -dW "$1" | grep -q 'There is no dynamic section' || die "$1 has a dynamic section"
+}
+: > "$out/sums.txt"
+for n in burrow burrow-keygen; do
+    one=$(sha256_of "$w/a/burrow/target/static/$n")
+    two=$(sha256_of "$w/b/burrow/target/static/$n")
+    if [ "$one" != "$two" ]; then
+        say "REFUSED: the two checkouts' $n differ: $one, then $two"
+        exit 1
+    fi
+    cp "$w/a/burrow/target/static/$n" "$out/$n"
+    chmod 755 "$out/$n"
+    static "$out/$n"
+    row="$n $one $(wc -c < "$out/$n" | tr -d ' ')"
+    printf '%s\n' "$row" | tee -a "$out/sums.txt"
+    if grep -Eq "^#   $n +$one " "$pin"; then
+        say "$n: the digest burrow's own gate printed (user/burrow.pin)"
+    else
+        say "$n: not the digest user/burrow.pin records from burrow's gate (this host's libc.a): $one"
+    fi
+done
+printf 'burrow built twice (two checkouts), the same digests; linked against: %s\n' "$(cc -print-file-name=libc.a)"
