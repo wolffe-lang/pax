@@ -20,9 +20,13 @@
 #   none     no network device at all; /etc/pax-net `dhcp`
 #   nofile   no network device and no /etc/pax-net: every line but the
 #            network's is what the console printed before px105
-#   nolink   igb on a socket network nobody has joined (a listening
-#            socket netdev: the link is down from the start);
-#            /etc/pax-net `dhcp`
+#   nolink   igb on QEMU's user network with its link down from the
+#            start: the machine starts paused (-S) with a second monitor on
+#            a unix socket, which takes `set_link n0 off` and then `cont`
+#            (a listening socket netdev, a hub port with no other port and
+#            a NIC with no peer all show igb a link 1.5 s after the
+#            driver's PHY restart: notes/px105/probe1.txt); /etc/pax-net
+#            `dhcp`
 #   silent   virtio-net on a hub with nothing else on it (frames leave,
 #            nothing answers); /etc/pax-net `dhcp wait=5`
 #   quiet    virtio-net on a tap with dnsmasq (tools/dhcp-wire's renew:
@@ -183,7 +187,11 @@ before_run() { # FILE ERE: the first line matching ERE comes before `run 1:`
     b=$(grep -n -m1 '^run 1: ' "$1" | cut -d: -f1)
     [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
 }
-port=$((47000 + $$ % 1000))
+# The no-link way's second monitor: wait for its socket, then `set_link
+# n0 off` and `cont`, each answered, before the machine runs a cycle.
+link_off() { # SOCKET LOG
+    python3 -I "$here/mpx4-console-net.d/link-off.py" "$1" "$2"
+}
 
 boot() { # tier leg way -> $log $norm $pcap $acct
     local tier=$1 leg=$2 way=$3 rc=0 dev
@@ -199,7 +207,11 @@ boot() { # tier leg way -> $log $norm $pcap $acct
     dev=$(device_of "$way")
     case $way in
         lease|virtio|static) net=(--qemu -netdev --qemu "user,id=n0,ipv6=off") ;;
-        nolink) port=$((port + 1)); net=(--qemu -netdev --qemu "socket,id=n0,listen=127.0.0.1:$port") ;;
+        nolink)
+            local sock=$PAX_BUILD/mpx4-console-net-$tier-$leg-$way.mon
+            rm -f "$sock"
+            net=(--qemu -S --qemu -chardev --qemu "socket,id=cnmon,path=$sock,server=on,wait=off" --qemu -mon --qemu "chardev=cnmon,mode=readline"
+                 --qemu -netdev --qemu "user,id=n0,ipv6=off") ;;
         silent) net=(--qemu -netdev --qemu "hubport,id=n0,hubid=7") ;;
         quiet) net=(--qemu -netdev --qemu "tap,id=n0,ifname=pxcnet0,script=no,downscript=no") ;;
     esac
@@ -208,6 +220,12 @@ boot() { # tier leg way -> $log $norm $pcap $acct
         case $way in nolink) ;; *) net+=(--qemu -object --qemu "filter-dump,id=f0,netdev=n0,file=$pcap") ;; esac
     fi
     case $way in
+        nolink)
+            "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 &
+            local hpid=$!
+            link_off "$PAX_BUILD/mpx4-console-net-$tier-$leg-$way.mon" "$log.link" || say "the no-link way's monitor: $(tail -n 1 "$log.link")"
+            wait "$hpid" || rc=$?
+            ;;
         quiet)
             "$PAX_ROOT/tools/dhcp-wire" --scenario renew --tap pxcnet0 --serial "$log" --work "$acct" ${wire[@]+"${wire[@]}"} -- \
                 "${halt[@]}" ${net[@]+"${net[@]}"} "$iso" > "$log.verdict" 2>&1 || rc=$?
