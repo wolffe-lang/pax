@@ -5,10 +5,14 @@ second QEMU monitor (px105).
 The machine was started paused (-S) with a human monitor on the unix
 socket SOCKET (`-chardev socket,…,server=on,wait=off -mon
 chardev=…,mode=readline`), beside tools/qemu-halt's own. This waits for
-the socket (30 s at most), then types `set_link n0 off`, `info network`
-and `cont`, each answered by the monitor's prompt, so the guest's first
-cycle runs with the network's link already down. Everything the monitor
-said goes to LOG. Exit 0 when all three were answered, 1 otherwise.
+the socket (30 s at most), then types `cont` and, 0.3 s later, while the
+firmware still runs and long before the kernel resets the controller,
+`set_link nic0 off`, `set_link n0 off` and `info network`, each answered
+by the monitor's prompt. Measured (notes/px105/probe2.txt): QEMU's igb
+with its link set down before `cont` shows a link again 1.5 s after the
+driver's PHY restart; set down this way it shows none for the driver's
+whole 10 s wait. Everything the monitor said goes to LOG. Exit 0 when
+every command was answered, 1 otherwise.
 """
 import socket
 import sys
@@ -43,11 +47,14 @@ def until_prompt():
 
 try:
     out.write(until_prompt())
-    for cmd in ("set_link n0 off", "info network", "cont"):
+    for cmd in ("cont", "sleep", "set_link nic0 off", "set_link n0 off", "info network"):
+        if cmd == "sleep":
+            time.sleep(0.3)
+            continue
         s.sendall(cmd.encode() + b"\n")
         out.write(until_prompt())
 except (OSError, EOFError) as e:
     out.write("\nlink-off: %s\n" % e)
     sys.exit(1)
 s.close()
-out.write("\nlink-off: set_link n0 off, cont: done\n")
+out.write("\nlink-off: cont, then set_link nic0 off and n0 off: done\n")
