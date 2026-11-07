@@ -41,7 +41,8 @@ accounts, and all four read one password file:
 - **`/etc/shadow`**, root's, mode 0600 (Ubuntu's is 0640 with a `shadow`
   group, read by helpers PAX does not have; every reader here is root). One
   line an account, locked by default (`!`, or `*` for root). A password is
-  stored as scrypt in crypt(5)'s `$7$` form (N = 2^14, r = 8, p = 1), the
+  stored as scrypt in crypt(5)'s `$7$` form (N = 2^17, r = 8, p = 1: 128 MiB
+  and about 0.6-0.7 s a check on PAX on a laptop i7 under KVM), the
   string Ubuntu's own crypt reads, made with a fresh 16-byte salt from the
   kernel's random source. `/etc/passwd`'s second field stays `x`.
 - **`passwd`** (`user/passwd`, set-user-ID root) sets a password: root
