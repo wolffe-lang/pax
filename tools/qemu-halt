@@ -44,7 +44,13 @@
 # and `^^` a `^`. A step that starts with `^~` (px26) waits for no
 # prompt: it is typed PAX_TYPE_PAUSE seconds (default 2) after the
 # step before it, at whatever program is running (Ctrl-C on a `sleep`);
-# prompts are counted over the other steps only. --keyboard serial (the default) writes the bytes to
+# prompts are counted over the other steps only. A step that starts with
+# `^{TEXT}` (px106) waits for its own TEXT instead of the prompt: the n-th
+# such step naming TEXT waits until TEXT has appeared n times (counted as
+# the prompt is), then types what follows the `}`; a password is typed
+# only after its prompt has turned the echo off, and FILE.typed records
+# the step's byte count, never its characters. TEXT holds no `}`.
+# --keyboard serial (the default) writes the bytes to
 # COM1's input (tools/qemu-run --serial-input), 20 ms apart; ps2 sends
 # each as a key through the monitor's `sendkey` (a-z, A-Z with shift,
 # digits, the US layout's punctuation, spc, ret, backspace, tab,
@@ -223,10 +229,10 @@ mirror() { # --no-serial: FILE := the kernel's in-memory transcript
 }
 
 # --type: the session (px13).
-prompts() { # how many times the prompt has appeared since the first exec line
+prompts() { # how many times the prompt (or TEXT) has appeared since the first exec line
     # (or kmain_console's `run 1:` line, px15: a quiet kernel prints no exec line)
     serial_norm "$serial" | awk 'on { print } /^user: exec pid |^run 1: / { on = 1 }' \
-        | LC_ALL=C grep -aoF -- "$prompt" | wc -l | tr -d ' '
+        | LC_ALL=C grep -aoF -- "${1:-$prompt}" | wc -l | tr -d ' '
 }
 key_of() { # byte (decimal) -> a sendkey name
     local b=$1 c
@@ -281,14 +287,29 @@ step_bytes() { # a KEYS line -> the bytes it types, as decimal numbers
     printf '%s\n' ${out[@]+"${out[@]}"}
 }
 if [ -n "$keys" ]; then
-    k=0 want=0
+    k=0 want=0 gates=
     while IFS= read -r line || [ -n "$line" ]; do
         k=$((k + 1))
+        shown=$line secret=0
         case $line in
             '^~'*)  # px26: typed at a running program, a pause after the step before
-                line=${line#'^~'}
+                line=${line#'^~'} shown=${line#'^~'}
                 kill -0 "$qpid" 2>/dev/null || no "QEMU ended before step $k: $line"
                 sleep "$pause" ;;
+            '^{'*'}'*)  # px106: a step that waits for its own text
+                line=${line#'^{'}
+                gtext=${line%%'}'*}
+                line=${line#*'}'}
+                gates=$gates$gtext$'\n'
+                gwant=$(printf '%s' "$gates" | LC_ALL=C grep -cxF -- "$gtext")
+                shown="^{$gtext} (${#line} characters)" secret=1
+                t0=$SECONDS
+                until mirror; [ "$(prompts "$gtext")" -ge "$gwant" ]; do
+                    kill -0 "$qpid" 2>/dev/null || no "QEMU ended before '$gtext' $gwant for step $k"
+                    [ $((SECONDS - t0)) -lt "$timeout" ] || no "'$gtext' $gwant did not come within ${timeout}s (step $k; $(prompts "$gtext") seen)"
+                    sleep 0.1
+                done
+                sleep 0.2 ;;
             *)
                 want=$((want + 1))
                 t0=$SECONDS
@@ -302,7 +323,7 @@ if [ -n "$keys" ]; then
                 done
                 sleep 0.2 ;;
         esac
-        printf 'step %s: %s\n' "$k" "$line" >> "$serial.typed"
+        printf 'step %s: %s\n' "$k" "$shown" >> "$serial.typed"
         nb=0
         for b in $(step_bytes "$line"); do
             nb=$((nb + 1))
@@ -312,7 +333,7 @@ if [ -n "$keys" ]; then
             else
                 kname=$(key_of "$b") || no "no key for byte $b (step $k)"
                 mon_cmd "sendkey $kname" "$serial.key" || no "the monitor did not answer 'sendkey $kname'"
-                printf '  key %s\n' "$kname" >> "$serial.typed"
+                [ "$secret" = 1 ] || printf '  key %s\n' "$kname" >> "$serial.typed"
             fi
         done
         printf '  bytes %s\n' "$nb" >> "$serial.typed"
