@@ -1,0 +1,237 @@
+//! user/auth/shadow.lu — /etc/shadow, as passwd, su, sudo and login read
+//! and write it (px106; shadow(5)).
+//!
+//! **The file** is root's, mode 0600 (R-px106-1: Ubuntu's is 0640
+//! root:shadow, read through the group by its set-group-ID helpers; PAX has
+//! none, and every reader here is root). One line a user, nine fields
+//! split at `:`: the name, the password field, the day of the last change
+//! (days since 1970-01-01), the minimum and maximum ages, the warning and
+//! inactive days, the expiry and a reserved field. /etc/passwd's second
+//! field stays `x`.
+//!
+//! **The password field:** a `$7$` string (user/auth/pwhash.lu); `!`
+//! before anything locks it (`passwd -l`), and `*` or a bare `!` is an
+//! account no password opens; empty is no password at all (`passwd -d`).
+//! An account /etc/passwd names with no line here, or a missing file, is
+//! locked: as `!`.
+//!
+//! **A change** is written whole: to `/etc/shadow.pax-tmp` (mode 0600,
+//! root's), synced, renamed over /etc/shadow, the directory synced, so a
+//! cut leaves the old file or the new one. `/etc/shadow.pax-lock` (made
+//! exclusively, holding the writer's pid) keeps two writers apart; a lock
+//! whose pid is gone is taken over.
+//!
+//! Enforced for honest programs; not a boundary against an attacker
+//! (ruling #75 R6).
+
+const SHADOW_PATH: str = "/etc/shadow"
+
+struct Shadow {
+    name: str,
+    field: str,
+    /// Fields 3 to 9 as the line has them.
+    rest: List[str],
+}
+
+/// A line's nine fields, or `parse` for anything else.
+fn shadow_parse(line: str) -> Shadow ! {parse} {
+    let f = line.split(":")
+    if f.len != 9 || f[0].len == 0 {
+        return parse
+    }
+    var rest = List[str]()
+    var i = 2
+    while i < 9 {
+        (mut rest).push(f[i])
+        i += 1
+    }
+    Shadow { name: f[0], field: f[1], rest: rest }
+}
+
+fn shadow_line(s: Shadow) -> str {
+    var line = "{s.name}:{s.field}"
+    for r in s.rest {
+        line = "{line}:{r}"
+    }
+    line
+}
+
+/// The file under `root` ("" for /), or "" when there is none.
+fn shadow_text(root: str) -> str {
+    fs_read_text("{root}{SHADOW_PATH}") else ""
+}
+
+/// `name`'s entry; locked (`!`, no dates) when the file has no line for it.
+fn shadow_entry(text: str, name: str) -> Shadow {
+    for line in text.split("\n") {
+        let s = shadow_parse(line) else |_| {
+            continue
+        }
+        if s.name == name {
+            return s
+        }
+    }
+    Shadow { name: name, field: "!", rest: ["", "", "", "", "", "", ""] }
+}
+
+/// passwd -S's letter: L (locked: `!` or `*` first), NP (empty), P.
+fn shadow_state(field: str) -> str {
+    if field.len == 0 {
+        return "NP"
+    }
+    if field.starts_with("!") || field.starts_with("*") {
+        return "L"
+    }
+    "P"
+}
+
+/// Whether some account has a password PAX can check (the first-boot rule,
+/// R-px106-2: while none has, login admits root with no password).
+fn shadow_any_usable(text: str) -> bool {
+    for line in text.split("\n") {
+        let s = shadow_parse(line) else |_| {
+            continue
+        }
+        if pw_refusal(s.field).len == 0 {
+            return true
+        }
+    }
+    false
+}
+
+/// Days since 1970-01-01, UTC: field 3's unit.
+fn shadow_today() -> int {
+    time_unix_ms() / 86400000
+}
+
+/// A new line for an account /etc/passwd names: `field`, today's date,
+/// Ubuntu's ages (0, 99999, 7) and the rest empty.
+fn shadow_fresh(name: str, field: str) -> Shadow {
+    Shadow { name: name, field: field, rest: ["{shadow_today()}", "0", "99999", "7", "", "", ""] }
+}
+
+/// `text` with `s` in place of its name's line, or `s` added at the end.
+fn shadow_replace(text: str, s: Shadow) -> str {
+    var out = ""
+    var done = false
+    for line in text.split("\n") {
+        if line.len == 0 {
+            continue
+        }
+        let old = shadow_parse(line) else |_| {
+            out = "{out}{line}\n"
+            continue
+        }
+        if old.name == s.name && !done {
+            out = "{out}{shadow_line(s)}\n"
+            done = true
+        } else {
+            out = "{out}{line}\n"
+        }
+    }
+    if !done {
+        out = "{out}{shadow_line(s)}\n"
+    }
+    out
+}
+
+/// One locked line for each account of `passwd_text` (root `*`, the rest
+/// `!`, as Ubuntu's base image and useradd leave them): the file an
+/// installer writes, and an upgrade when there is none.
+fn shadow_all_locked(passwd_text: str) -> str {
+    var out = ""
+    for line in passwd_text.split("\n") {
+        let f = line.split(":")
+        if f.len < 7 || f[0].len == 0 {
+            continue
+        }
+        let field = if f[0] == "root" then "*" else "!"
+        out = "{out}{shadow_line(shadow_fresh(f[0], field))}\n"
+    }
+    out
+}
+
+/// Whether the process `pid` still runs (its /proc directory is there).
+fn shadow_pid_alive(pid: str) -> bool {
+    pid.len > 0 && fs_exists("/proc/{pid}")
+}
+
+/// Take /etc/shadow's lock under `root`; false when another writer holds it.
+fn shadow_lock(root: str) -> bool {
+    let path = "{root}{SHADOW_PATH}.pax-lock"
+    var tries = 0
+    while tries < 2 {
+        tries += 1
+        let fd = fs_open_perm(path, 4, 0o600) else |e| match e {
+            exists => {
+                let holder = fs_read_text(path) else ""
+                let pid = holder.replace("\n", "")
+                if shadow_pid_alive(pid) && pid != "{os_pid()}" {
+                    return false
+                }
+                fs_remove(path) else |_| {
+                }
+                -1
+            },
+            _ => {
+                return false
+            },
+        }
+        if fd >= 0 {
+            fs_write(fd, "{os_pid()}\n") else |_| {
+            }
+            fs_close(fd) else |_| {
+            }
+            return true
+        }
+    }
+    false
+}
+
+fn shadow_unlock(root: str) {
+    fs_remove("{root}{SHADOW_PATH}.pax-lock") else |_| {
+    }
+}
+
+/// Write `text` as `root`'s /etc/shadow: whole, 0600, root's, synced, then
+/// renamed over the old one.
+fn shadow_write(root: str, text: str) -> () ! {io} {
+    let path = "{root}{SHADOW_PATH}"
+    let tmp = "{path}.pax-tmp"
+    fs_remove(tmp) else |_| {
+    }
+    let fd = fs_open_perm(tmp, 4, 0o600) else |_| {
+        return io
+    }
+    var ok = true
+    if (os_euid() else 1) == 0 {
+        fs_set_owner_fd(fd, 0, 0) else |_| {
+            ok = false
+        }
+    }
+    fs_write(fd, text) else |_| {
+        ok = false
+    }
+    fs_sync(fd) else |_| {
+        ok = false
+    }
+    fs_close(fd) else |_| {
+        ok = false
+    }
+    fs_set_mode(tmp, 0o600) else |_| {
+        ok = false
+    }
+    if !ok {
+        fs_remove(tmp) else |_| {
+        }
+        return io
+    }
+    fs_rename(tmp, path) else |_| {
+        fs_remove(tmp) else |_| {
+        }
+        return io
+    }
+    let dir = if root.len == 0 then "/etc" else "{root}/etc"
+    fs_sync_dir(dir) else |_| {
+    }
+}
