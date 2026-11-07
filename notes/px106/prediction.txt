@@ -1,0 +1,170 @@
+px106 — passwords: the prediction, written before the first change
+(2026-11-07, base trunk 7e65c2ce)
+
+The claim stays ruling #75 R6, here and in every doc this lane writes:
+enforced for honest programs; not a boundary against an attacker. The
+kernel has never been fuzzed or audited and loads programs at fixed
+addresses. R1 stands: no password in any published image.
+
+Sources: passwd(1), passwd(5), shadow(5), login(1), login.defs(5), su(1),
+sudo(8), sudoers(5), termios(3), crypt(5) (Ubuntu noble's manual pages);
+black-box runs of Ubuntu 24.04's own login (1:4.13+dfsg1-4ubuntu3.2),
+passwd (the same source package), su (util-linux 2.39.3-9ubuntu6.6) and
+sudo 1.9.15p5-3ubuntu5.24.04.4 on a pseudo-terminal in a throwaway
+container with no network (localhost/px106-auth:1, notes/px106/
+Containerfile). The hash is wolf-std's (sc80: scrypt in the `$7$` form),
+named in one module. No implementation of any of these was read.
+
+## What Ubuntu answers (measured 2026-11-07, the exploration runs)
+
+U-shadow  /etc/shadow 0640 root:shadow (gid 42), read through the group
+          only by unix_chkpwd, chage and expiry (2755 root:shadow); su,
+          sudo and passwd 4755 root; login 0755. A new account's field
+          is `!`, root's `*`; /etc/passwd's second field is `x`.
+U-passwd  root: `New password: `, `Retype new password: `, `passwd:
+          password updated successfully` (0). A mismatch: `Sorry,
+          passwords do not match.`, `passwd: Authentication token
+          manipulation error`, `passwd: password unchanged` (10). An empty
+          one: `No password has been supplied.` and the prompt again. A
+          user: `Changing password for pax.` and `Current password: `
+          first; a wrong one about 1.5 s later, the two error lines (10);
+          too short: `You must choose a longer password.`; the same:
+          `The password has not been changed.`. `-S`: `pax P 2026-11-07 0
+          99999 7 -1` (L, NP, P). `-l`: `passwd: password changed.` (0);
+          `-u` of a bare `!`: two lines, 3. Another's status as a user:
+          `passwd: You may not view or modify password information for
+          bob.` (1); `-l` as a user: `passwd: Permission denied.` (1).
+U-su      a user: `Password: ` (no echo), one try; wrong, empty or a
+          locked target: about 3 s, `su: Authentication failure` (1).
+          Root: no prompt. Ctrl-D at the prompt: the failure after about
+          1 s. No terminal: the prompt on standard output, the password
+          read from standard input.
+U-sudo    `[sudo] password for bob: ` (no echo); a wrong or empty one:
+          about 2 s, `Sorry, try again.`; the third: `sudo: 3 incorrect
+          password attempts` (1); Ctrl-D: `sudo: no password was
+          provided` then `sudo: a password is required` or `sudo: N
+          incorrect password attempt(s)`. `-n`: `sudo: a password is
+          required`. No terminal: `sudo: a terminal is required to read
+          the password; either use the -S option to read from standard
+          input or configure an askpass helper` and `sudo: a password is
+          required`. `-S`: the prompt on standard error, standard input
+          read. `-l` asks unless a matching rule is NOPASSWD; `-v` asks
+          unless every one is. A user with no rule is asked before the
+          refusal (`-v` excepted). The timestamp is per terminal (a
+          second pseudo-terminal is asked again), `/run/sudo/ts/<uid>`,
+          0600 root:<the user's group>; `-k` and `-K` print nothing. The
+          log adds `TTY=pts/0 ;` and the refusals `3 incorrect password
+          attempts ;`, `a password is required ;`.
+U-login   `pax login: ` (the host name), `Password: ` for every name,
+          known, locked or not; a failure: about 3 s, a blank line,
+          `Login incorrect`, the name asked again; the fifth:
+          `Maximum number of tries exceeded (5)`; 60 s: `Login timed out
+          after 60 seconds.`. The shell's argv[0] `-` and its name.
+U-crypt   Ubuntu's crypt reads `$7$`: a string `mkpasswd -m scrypt` made
+          (`$7$CU..../....`) was accepted by Ubuntu's own sudo.
+
+## The rulings (2026-11-07)
+
+R-px106-1 (A) /etc/shadow is 0600 root:root: PAX has no set-group-ID
+          reader and every reader is root. Named against Ubuntu's 0640.
+R-px106-2 (A) a wolf /bin/login is the installed system's /etc/pax-run,
+          pid 1 and the session leader on the console. While no account
+          in /etc/shadow has a usable password (all locked, or no file),
+          login admits root with no password and prints one line saying
+          so; once one exists the normal rules apply. The dev and release
+          images keep R2's root shell, the stick its live root entry.
+R-px106-3 login: 5 tries and Ubuntu's words, the 60 s timeout.
+R-px106-4 login: a locked or unknown account is asked for a password and
+          answers `Login incorrect`.
+And: su one try at 04755; the timestamp at /var/run/sudo/ts/<uid> in
+PAX's own format, keyed by terminal and session, void across a reboot;
+su, sudo, passwd and login on wolf 0.2.36 with wolf-std at sc80's merge;
+the installer writes an all-locked shadow, then runs `passwd -R`; Ubuntu's
+per-attempt delays and caps.
+
+## The prediction, by item (red at the rows' tip, green at the head)
+
+P1 shadow. A shared module (user/auth) reads and writes /etc/shadow:
+   one line a user, nine fields; written whole to a temporary file 0600
+   root:root, synced, renamed over, the directory synced; a line missing
+   for an account is read as `!` (locked). Rows: passwd -S's L/NP/P for
+   `!`, `*`, empty and a hash; -l prefixes `!` and -u removes it; -u of a
+   bare `!` refused as Ubuntu's (3); the file's mode and owner after every
+   change 0600 0:0; /etc/passwd's field stays `x`. Red: no /bin/passwd
+   (the session's first passwd row says `passwd: not found`).
+P2 the hash. Only user/auth/pwhash.lu names sc80's module: hash, verify,
+   the salt from os_random (16 bytes). The cost is chosen by a timing
+   row on PAX under KVM on the Linux build host, aimed at 0.5-1 s on the 860's machine's class of
+   CPU; predicted N=2^14, r=8, p=1 (16 MiB), the note states the
+   measurement. A `$6$`, `$y$` or other prefix is refused by sc80's
+   name and the program says so. Cross-check: every `$7$` line PAX makes
+   in the session is verified by Ubuntu's crypt in the container.
+P3 passwd. Ubuntu's prompts, messages and statuses (U-passwd); -S, -l,
+   -u, -d, -R DIR; the obscure checks beyond length and sameness are
+   named differences. Installed 04755. Red: absent.
+P4 su. Installed 04755 (the image's bin/su moves from the base payload's
+   0755 build to tools/mksu's); a caller who is not root gives the
+   target's password, one try, 3 s, `su: Authentication failure`; root
+   asks nothing; -s and -m for a caller who is not root follow
+   /etc/shells as su(1) says. mpx5-accounts' `su` rows as pax now show
+   `Password: `, so its keys gain an answer line and its real-root
+   recording is made again on the Linux build host (its own kernel under QEMU). Red:
+   today's su refuses at once with no prompt.
+P5 sudo. A rule without NOPASSWD asks the caller's password: three tries,
+   2 s after each wrong one, Ubuntu's words (U-sudo), -S, -n, -p, the
+   log's refusal lines and TTY=; "no password database yet (R1)" goes.
+   notes/px103's ctnamed.txt loses its two password names (a stale name
+   is a failure), so the 360 rows of sudo-ct.sh are compared again with
+   only the differences that remain: predicted 0 password rows differ.
+   The timestamp: /var/run/sudo/ts/<uid>, 0600 root:<gid>, one line a
+   terminal and session (device, session id, the boot's start, the
+   time), 5 minutes (Defaults timestamp_timeout, minutes, in the
+   subset), -v refreshes, -k invalidates, -K removes, a reboot voids it.
+   Red: px103's sudo prints the R1 line and never prompts.
+P6 login. Ubuntu's prompts, 5 tries, 3 s, `Login incorrect`, the 60 s
+   timeout; as pid 1 with nothing to start it again it starts over
+   (named: Ubuntu's exits and getty starts it again). The terminal given
+   to the user (0600, its primary group: px98's rule), HOME, SHELL,
+   USER, LOGNAME, PATH (login.defs ENV_PATH or Ubuntu's defaults), MAIL,
+   the home entered, /etc/motd, the shell exec'd with argv[0] `-pelt`.
+   The first-boot rule (R-px106-2). Red: absent.
+P7 rate limiting. The delays are floors the rows read (sudo >= 1.9 s,
+   su and login >= 2.9 s by the console's clock); the caps are rows.
+P8 the installer and the upgrade. A fresh install writes /etc/shadow,
+   every account locked (root `*`, the rest `!`), 0600 0:0, then asks
+   `Set a password for root now? y/n` and for the user, and runs
+   /bin/passwd -R on the staged tree; n leaves the account locked. The
+   scripted install asks nothing. An upgrade never writes /etc/shadow
+   when it is there (byte-identical before and after); when it is
+   missing it creates one, one locked line for each /etc/passwd account.
+   /etc/shadow is in no manifest. The upgrade witness (upgrade.py U13a,
+   U13d) shows both over the last two sticks' installs, and a new row
+   over an install with passwords shows the door stays shut. Red: today's
+   installer and upgrade write no shadow.
+P9 the image. tests/distribution names: no etc/shadow in either image;
+   bin/passwd 04755, bin/su 04755, bin/login 0755, each held to its
+   builder's sums; the dev and release images' /etc/pax-run unchanged
+   (R2). Red: bin/passwd missing.
+P10 the harness. tools/qemu-halt and tools/linux-tty learn a step that
+   waits for its own text (`^{TEXT}`), so a password is typed only after
+   its prompt (typed early, a terminal would echo it); the keys of a
+   session holding passwords are written at run time and never committed.
+
+## The rows held to Ubuntu (tests/mpx5-sudo, its new sessions)
+
+The typed session `pw` (root, pax, bob, lobo; root's, pax's and bob's
+passwords made at run time, lobo locked) and `login` (pid 1 /bin/login)
+run on PAX, then the same keys run in the Ubuntu container twice: with
+PAX's su, sudo, passwd and login put in place of Ubuntu's, and with
+Ubuntu's own. PAX's session is byte-identical to PAX's programs in the
+container (after the named normalisations: the log's time, a hash's
+salt and digest); PAX's programs and Ubuntu's differ only by name
+(notes/px106/named.txt), each with its reason.
+
+## Mispredictions to look for
+
+- the console's /dev/tty for pid 1's children (kernel/files: a session
+  leader with no terminal that opens the console takes it);
+- non-canonical reads with VMIN 0 on PAX's console (the login timeout);
+- the scrypt cost on PAX: wolf's native code on PAX's allocator may be
+  several times slower than Linux's, which moves the chosen N.
