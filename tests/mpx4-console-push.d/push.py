@@ -75,13 +75,14 @@ Ways and rows (each printed `PASS <row> …` or `FAIL <row> …` at column 0):
          and refused unless this run's https and ssh ways (their canaries)
          passed first. igb on QEMU's user network with its DHCP and DNS; the
          remote made by pelt's printf in .git/config (R-px104-3 (ii): the
-         URL on no argv), for https and then ssh:
+         URL on no argv), for https (rows L1-L8) and then for ssh through
+         burrow (rows M1-M8, each as its L row), in the one session:
     L1 den fetch; L2 den switch -c onto the default branch; L3 a commit,
     the id git makes; L4 den push to refs/heads/px104-live/<nonce>/<way>
     and ls-remote sees it; L5 den fetch, den log of the remote-tracking
     ref; L6 the deletion, ls-remote empty; L7 den fetch --prune, and den log
-    of the remote-tracking ref fails. This host's git, the same steps on
-    refs/heads/px104-live/<nonce>/git-<way>; anything of <nonce> left on
+    of the remote-tracking ref fails; L8 this host's git, the same steps on
+    refs/heads/px104-live/<nonce>/git-<way>. Anything of <nonce> left on
     the fixture is deleted at the end, whatever happened (L9). L10 the
     fixture's whole ref listing (ls-remote) before the session and after
     the cleanup: the same, by count and sha256 alone (no ref is printed).
