@@ -112,12 +112,35 @@ var check_retaken: u64 = 0
 var check_stall_retaken: u64 = 0
 fn read32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
 fn write32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile(v as u32) } }
+/// The HPET's main counter (§2.3.8). A 32-bit counter's is its low word,
+/// one 4-byte read. A 64-bit one's is read as IA-PC HPET 1.0a §2.4.7 says:
+/// the high half, the low half, the high half again, until the two highs
+/// agree (px107, pax#293). One 8-byte load is not enough: "some platforms
+/// may break the 64 bit read into two 32 bit reads" (§2.4.7's note), and
+/// QEMU 8.2's does, its low half first, so a load across a rollover of the
+/// low word read 2^32 ticks ahead (notes/px107/measure.txt: 14% of forced
+/// crossings under TCG, 0.5% under KVM; this read, none). The high word
+/// changes once in 2^32 ticks (42.9 s at 10 ns), so a second try always
+/// agrees on a working counter; after eight, the last pair is taken, and
+/// now_ns takes it as no time passing if it lies behind.
+fn hpet() -> u64 {
+    let a = unsafe { address }
+    if unsafe { mask } != 0xffffffffffffffff { return read32(a + 0xf0) }
+    var high = read32(a + 0xf4)
+    var low = read32(a + 0xf0)
+    var n: u64 = 0
+    while n < 8 {
+        let again = read32(a + 0xf4)
+        if again == high { return (high << 32) | low }
+        high = again
+        low = read32(a + 0xf0)
+        n += 1
+    }
+    (high << 32) | low
+}
 fn raw() -> u64 {
     let src = unsafe { source }
-    if src == 1 {
-        let a = unsafe { address }
-        return (unsafe { ((a + 0xf0) as *u64).read_volatile() } + unsafe { test_add }) & unsafe { mask }
-    }
+    if src == 1 { return (hpet() + unsafe { test_add }) & unsafe { mask } }
     if src == 2 { return (unsafe { pax_inl(acpi.pm_port() as u16) as u64 } + unsafe { test_add }) & acpi.pm_mask() }
     unsafe {
         pax_outb(0x43, 0)
