@@ -61,6 +61,7 @@ session() { # name program
     (cd / && python3 "$in/linux-tty" --keys "$in/$s.keys" --prompt '$ ' --times "$out/$s.times" --end-wait 75 \
         "$out/$s.tty" -- "$prog")
     echo "linux-tty exit $?" > "$out/$s.run"
+    stat -c '%a %U:%G' /etc/shadow > "$out/$s.shadow-mode" 2>/dev/null || echo none > "$out/$s.shadow-mode"
     cp /etc/shadow "$out/$s.shadow" 2>/dev/null || : > "$out/$s.shadow"
     cp /var/log/sudo.log "$out/$s.sudo.log" 2>/dev/null || : > "$out/$s.sudo.log"
 }
