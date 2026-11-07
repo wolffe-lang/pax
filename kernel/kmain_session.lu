@@ -36,7 +36,9 @@
 // takes the station's address from a DHCP server: its thread starts with
 // the disk's, the list waits for the first lease (one `dhcp:` line
 // either way) and the kernel's echo goes to the lease's router. Without
-// the file every line is what it was.
+// the file every line is what it was. px105: a `static …` line instead
+// gives the station that address (kernel/dhcp's `take_static`, its line
+// and kernel/ip's), and the kernel's echo goes to its gateway.
 //
 // px67: with a disk, as kmain_console has it (px63, px66, px67): the
 // disk after the network, `/` on it when the command line says `root=`
@@ -268,7 +270,10 @@ export fn kmain() {
     // px89: the image's /etc/pax-net (on the disk when `/` is there) may
     // ask for DHCP: kernel/dhcp then takes the address the fixed one held
     // until now.
-    if dhcp.from_file() && dhcp.start(process.random_word(1)) {
+    let want = dhcp.from_file()
+    if dhcp.static_asked() {
+        dhcp.take_static() // px105
+    } else if want && dhcp.start(process.random_word(1)) {
         // # Safety: the address of kernel/dhcp's export; nothing is read.
         let dt = unsafe { pax_dhcpd as u64 }
         let _t = sched.create(dt, 0)
@@ -295,6 +300,7 @@ export fn kmain() {
     if dhcp.on() && dhcp.wait_bound() {
         dhcp.echo_router() // px89: init's list runs over the lease
     }
+    dhcp.echo_gateway() // px105: only with a static address
     let wire0 = net.count(net.C_TX_FRAMES) // px89: a lease's frames went before
     let l1 = ping_self(ip.LOOPBACK, 1)
     let l2 = ping_self(ip.address(), 2)
