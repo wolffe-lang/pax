@@ -7,6 +7,13 @@
 # called the checked machine: only conform-run --json --checked is one.
 set -uo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
+# A line a program erases (CR, then EL: `\r\x1b[2K`, wolf's build progress since 0.2.37) is read as the
+# terminal shows it, gone, before serial_norm, as tests/distribution-boot reads it: on PAX's serial log and on
+# the Linux reference alike (how many progress frames each printed is timing, not the session).
+erased_norm() {
+    python3 -I -c 'import re, sys; sys.stdout.buffer.write(re.sub(rb"[^\n]*\r\x1b\[2K", b"", open(sys.argv[1], "rb").read()))' "$1" > "$1.erased" \
+        && serial_norm "$1.erased"
+}
 images= only= legs=both tiers=both
 while [ $# -gt 0 ]; do
     case $1 in
@@ -148,14 +155,14 @@ for leg in $legs; do
         "${limit[@]}" "$PAX_ROOT/tools/qemu-halt" --accel tcg --firmware "$leg" --serial "$log" --timeout 1500 \
           --qemu -m --qemu 1024M --elf "$images/$tier/kmain_console.elf" \
           --marker "halt|PANIC .*" --type "$images/wolf.keys" --prompt '$ ' "$iso" > "$log.verdict" 2>&1 || hrc=$?
-        serial_norm "$log" > "$log.norm"
+        erased_norm "$log" > "$log.norm"
         for k in 0 1; do
             n=${NAMES[$k]}
             out=$PAX_BUILD/mpx5-wolf-$tier-$leg-$n.session
             run_part "$log.norm" "$((k+1))" > "$out"
             ref=$images/linux/$n.tty
             if [ ! -f "$ref" ]; then bad "W1 $tier $leg $n: Linux reference absent"; continue; fi
-            serial_norm "$ref" > "$ref.cmp"
+            erased_norm "$ref" > "$ref.cmp"
             serial_norm "$out" > "$out.cmp"
             if cmp -s "$ref.cmp" "$out.cmp"; then
                 say "PASS W1 $tier $leg $n: byte-identical $(sha256_of "$out.cmp")"
