@@ -1,0 +1,177 @@
+px107 (pax#308, folded into this pull request): the tick's calibration
+measured, 2026-11-08. Every take ran on Linux host 1 (Intel Core i7-12700KF)
+in an Ubuntu 24.04 container (QEMU 8.2.2, dnsmasq 2.91, the CI runner's
+releases), behind a block's two lock names or a light slot.
+
+1. The red row and which clock it reads
+
+CI's red at 584c5313 (run 42459307387, job 128665265213):
+  FAIL D1 native bios expiry (virtio): pcap-dhcp: FAIL frame 30 (+122.511):
+  a DISCOVER while a lease is held (it runs out at +123.549)
+tools/pcap-dhcp fails a DISCOVER more than 1.0 s before the lease's end.
+
+kernel/dhcp counts its lease, T1 and T2 in timer.ticks(): the local APIC
+timer's interrupts, 100 a second. The tick's length is set once, at boot:
+timer.start counts the LAPIC timer down across clock.wait_us(20000), and
+before this change it read the clock, then the count; the count, then
+the clock. So the clock's interval held the LAPIC's, and the time the
+reads themselves took was in the clock's interval alone. The rate came
+out low, the tick short, and every timeout counted in ticks early by
+the same fraction.
+
+The guest's own interval from lease to `expired` (its ticks: 120.000 s
+every time) against the capture's from ACK to the next DISCOVER, in
+every expiry boot of two CI artifacts (bin/dhcp-clock.py):
+
+  boot                         calibrated (Hz)  capture/guest  implied rate (Hz)
+  584c5313 native BIOS            61,940,478      0.99135       62,480,650
+  ab3a1827 native BIOS            61,188,519      0.97915       62,491,275
+  ab3a1827 native UEFI            62,116,863      0.99402       62,490,527
+  ab3a1827 release BIOS           62,235,490      0.99590       62,491,498
+  ab3a1827 release UEFI           62,229,499      0.99581       62,491,090
+
+Each boot implies the same LAPIC rate to 0.02% whatever its calibration
+read. The tick ran ahead of real time by exactly the calibration's
+shortfall, and the clock (the HPET) read true. Under KVM the paired
+calibration below reads 62,500,0xx Hz.
+
+2. The history (every completed CI run with an mpx4-dhcp job, 11-05 to 11-08)
+
+47 runs; mpx4-dhcp jobs 29 green, 7 red, 3 cancelled, 2 skipped. D1's
+expiry row was red 4 times at 3 commits, 3 of them before px107:
+ab3a1827's push run 42229549382 (2.5 s early) and schedule run 42231925519
+(1.1 s), 19c1016f's 42306799748 (2.7 s), and 584c5313's (1.04 s). Two
+more reds were 2c5236bf's compile error (kmain_session, fixed in
+584c5313) and one was 3f31af32's D5 (pax#298).
+
+The calibrations of 323 boots in those runs' artifacts:
+  native tier before px107: 224 boots, median 62,091,533 Hz; the runs'
+    medians short by 0.41% to 0.79% (median 0.62%, 32 runs)
+  native tier with px107's clock: 19 boots, median 61,984,856 Hz; the
+    three runs' medians short by 0.73%, 0.75% and 0.99%
+  release tier before px107: 77 boots, none short by 0.83% (the line
+    over a 120 s lease)
+
+3. Equal load: whether px107's clock made it worse (dh2)
+
+tests/mpx4-dhcp --ways expiry --tier native --firmware bios --accel tcg,
+three boots at once on two CPUs each, the commits alternating by slot,
+9 boots each; then 15 slirp boots each, one at a time:
+
+                               db516c69 (trunk)    584c5313
+  D1 expiry red                0 of 9               3 of 9
+  DISCOVER early (capture)     0.63-0.97 s          0.86-1.06 s
+  calibration, expiry boots    median 62,114,323    median 62,024,060
+  calibration, slirp boots     median 62,122,552    median 62,017,891
+
+px107's HPET read (high, low, high: three device reads where one 8-byte
+load was) puts one more read at each end of the old bracket, inside the
+clock's interval: 0.17% more short, 0.2 s over a 120 s lease. The three
+reds came on the most loaded pair of CPUs, where the trunk was 0.84 to
+0.97 s early.
+
+4. The fix's first half: paired, warmed reads (dh4)
+
+Each end of the window reads the count and then the clock back to back
+through one function, after one read to warm the path, so the reads'
+own time is in both intervals and cancels. The same take, the row's
+commit (the old calibration) against the paired one:
+
+                               old (2c5ca0ae)        paired (80681407)
+  D1 expiry red                4 of 9                0 of 9
+  D11 red (the tick clock)     9 of 9, ahead          0 of 9
+                               7,087-13,309 ppm
+  DISCOVER (capture)           0.85-1.58 s early     0.013-0.052 s late
+  calibration, expiry boots    median 62,024,600     median 62,500,747
+                                                     (62,498,469-62,506,753)
+  calibration, slirp boots     median 62,020,669     median 62,501,539
+
+D11 then measured from the tick's arming and read 156 to 821 ppm behind
+at the paired commit: ticks lost while the boot keeps interrupts off
+(24 to 126 ms over 153 s), which is not the tick's length. So D11 now
+measures from a mark at the lease wait and holds only "ahead".
+
+5. A boot that calibrated 1.433 times high
+
+The install image's kernel (this pull request's clock) under KVM: 1 boot
+in 19 printed `timer: LAPIC calibrated by HPET divide16 89527688 Hz`
+(the others 62.45-62.49 MHz), and its clock, sleeps and timeouts ran at
+0.70 of real time: `sleep 5` took 7.168 s by the host against 5.03 s by
+the guest's `date` (its serial log's sha256 b3f00c0d...).
+
+That boot is unexplained. A stall between two reads does not give it:
+in the old order the clock's interval holds the LAPIC's, so a stall
+anywhere can only make the rate low. Tested: 20 KVM boots of the session
+kernel at 584c5313 with the vCPU's CPU shared with a busy loop (m5a) all
+calibrated at 62.472-62.476 MHz. A rate 1.433 times high needs one
+counter to have moved unevenly against the other inside the window, in
+one of two shapes: the clock stood still (for about 8.6 ms of a 20 ms
+window), or the LAPIC's count jumped. Which of the two that boot met is
+not known, and nothing here reproduces it unprompted. The calibration
+below catches either: a clock that stood still by the PM timer
+(`timer: LAPIC calibration: window <k> set aside: …`), a count that
+jumped by the next window (`timer: LAPIC calibration: windows <j> and <k>
+disagree: …`).
+
+timer-stall (tests/mpx6-metal) makes the clock stand still 8.6 ms inside
+the calibration (one HPET reading 8.6 ms ahead, then the readings behind
+it taken as no time passing) and times 50 ticks by the PM timer read
+directly (lt1, BIOS):
+
+                    old (row)           paired              windows
+  KVM calibrated    89,281,777 Hz       89,287,452 Hz       62,505,550 Hz
+  KVM 50 ticks      714,232 us          714,373 us          500,017 us
+  TCG calibrated    88,057,666 Hz       88,037,568 Hz       62,501,880 Hz
+  TCG 50 ticks      703,747 us          703,610 us          499,339 us
+  the row           red                 red                 green
+
+At the windows commit both lines are on the console:
+  timer: LAPIC calibration: window 1 set aside: 89274972 Hz, the clock 20008 us against the PM timer's 28581 us
+  timer: LAPIC calibration: windows 2 and 3 of 6 agree
+
+The fix's second half: 20 ms windows until two in a row agree within
+0.1% (their mean); a window whose clock interval is not the PM timer's
+within 0.5% is set aside (when a PM timer stands beside the HPET); each
+set-aside window and each disagreement is a boot line; after six, the
+median of the last three kept. A clock that stands still is caught by
+the PM timer; a LAPIC count that jumps, by the next window's
+disagreement.
+
+6. On real hardware
+
+Under KVM the old bracket read 62.472-62.476 MHz against 62.500 (m5a):
+0.04% short, where every HPET read is a trip to the emulator. A hardware
+read costs no more than that, so before this change the shortfall on
+hardware is under 0.04% from the reads, if no stall falls inside the
+window. After it the reads' time cancels on any machine, and what
+remains is the window's resolution (20 ms of a 14.318 MHz HPET is 70 ns,
+3.5 ppm; the LAPIC's count, one in 20 ms of its rate) and the two
+counters' crystals drifting apart after the calibration, which these
+takes cannot measure without the hardware. A stall on hardware (an
+SMI inside a window) is set aside like any other.
+
+7. With no PM timer beside the clock
+
+Then the agreement rule works alone, and the boot says so first:
+  timer: LAPIC calibration: no second counter beside the HPET to hold each window to; two windows off alike in a row would pass
+timer-stall-nopm (the same stall, the PM timer hidden from the
+calibration by a test word) at the head, lt2:
+  KVM: windows 1 and 2 disagree: 87048098 and 62499001 Hz; windows 2 and
+       3 of 6 agree; calibrated 62,499,825 Hz; 50 ticks in 499,914 us
+  TCG: windows 1 and 2 disagree: 84219705 and 62500881 Hz; windows 2 and
+       3 of 6 agree; calibrated 62,501,552 Hz; 50 ticks in 499,374 us
+So a counter that stands still or jumps in one window is caught without
+a PM timer too. What it cannot catch: the same disturbance, alike within
+0.1%, in two windows in a row, which the boot line names. The same line
+prints when the clock is the PM timer or the PIT.
+
+8. The boot's cost (bt1)
+
+By construction the calibration now takes two 20 ms windows where it took
+one, and one more for each window set aside or disagreeing. The console
+kernel's own `boot: <n> ms from the kernel's entry to its first program`
+line (tests/mpx3-threads' probes boot, KVM, four boots each, alternating):
+  584c5313 (one window, the old order)   206, 206, 206, 207 ms  (mean 206.25)
+  58a2c797 (paired windows)              211, 212, 213, 214 ms  (mean 212.5)
+So it costs 6.25 ms on that boot, less than the 20 ms the second window
+takes. Where the rest went is not measured here.
