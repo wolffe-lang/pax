@@ -1,0 +1,219 @@
+diff --git a/boot/limine-hammer.conf b/boot/limine-hammer.conf
+new file mode 100644
+index 00000000..63990a47
+--- /dev/null
++++ b/boot/limine-hammer.conf
+@@ -0,0 +1,9 @@
++# px107 MEASUREMENT ONLY: the initramfs conf with `clock_hammer`.
++timeout: 0
++quiet: yes
++
++/PAX
++    protocol: limine
++    path: boot():/boot/pax
++    module_path: boot():/boot/initramfs.cpio
++    cmdline: clock_hammer
+diff --git a/boot/limine-tear.conf b/boot/limine-tear.conf
+new file mode 100644
+index 00000000..3265f346
+--- /dev/null
++++ b/boot/limine-tear.conf
+@@ -0,0 +1,9 @@
++# px107 MEASUREMENT ONLY: the initramfs conf with `clock_tear`.
++timeout: 0
++quiet: yes
++
++/PAX
++    protocol: limine
++    path: boot():/boot/pax
++    module_path: boot():/boot/initramfs.cpio
++    cmdline: clock_tear
+diff --git a/kernel/clock/clock.lu b/kernel/clock/clock.lu
+index 56af322a..0b485cfa 100644
+--- a/kernel/clock/clock.lu
++++ b/kernel/clock/clock.lu
+@@ -289,6 +289,127 @@ pub fn start() {
+ /// Whether `start` has chosen a source.
+ pub fn started() -> bool { unsafe { source } != 0 }
+ 
++// px107 MEASUREMENT ONLY (branch px107-measure, never merged): count every
++// reading, and log each one below the one before on a 64-bit mask
++// ("back"), each forward step of 2^31 ticks or more on the HPET ("jump"),
++// and the three readings after either ("next"), with the reading before
++// `prev` ("before"). A backward reading is not panicked on here: it is
++// taken as no time and `previous` moves to it, so each misread is logged
++// once and the next good reading shows as the step that follows.
++var m_reads: u64 = 0
++var m_back: u64 = 0
++var m_jump: u64 = 0
++var m_logged: u64 = 0
++var m_before: u64 = 0
++var m_follow: u64 = 0
++const M_JUMP: u64 = 0x80000000
++const M_LINES: u64 = 96
++fn m_line(kind: str, current: u64, prev: u64) {
++    if unsafe { m_logged } >= M_LINES { return }
++    unsafe { m_logged += 1 }
++    log.end()
++    log.put("clock-m: "); log.put(kind)
++    log.put(" current 0x"); log.hex(current)
++    log.put(" prev 0x"); log.hex(prev)
++    log.put(" before 0x"); log.hex(unsafe { m_before })
++    log.put(" mask 0x"); log.hex(unsafe { mask })
++    log.put(" source "); log.put(name())
++    log.put(" read "); log.dec(unsafe { m_reads } as int)
++    log.end()
++}
++/// px107 measurement: the counts, one line.
++pub fn m_summary() {
++    log.put("clock-m: reads "); log.dec(unsafe { m_reads } as int)
++    log.put(" back "); log.dec(unsafe { m_back } as int)
++    log.put(" jump "); log.dec(unsafe { m_jump } as int)
++    log.put(" source "); log.put(name())
++    log.put(" mask 0x"); log.hex(unsafe { mask })
++    log.end()
++}
++/// px107 measurement: now_ns in a tight loop for `seconds` of the clock's
++/// own time, then the counts and the high words the loop covered.
++pub fn m_hammer(seconds: u64) {
++    let r0 = raw()
++    let t0 = now_ns()
++    let end = t0 + seconds * 1000000000
++    var n: u64 = 0
++    while now_ns() < end { n += 1 }
++    let r1 = raw()
++    log.put("clock-m: hammer "); log.dec(n as int); log.put(" reads in "); log.dec(seconds as int)
++    log.put(" s of the clock, raw 0x"); log.hex(r0); log.put(" to 0x"); log.hex(r1); log.end()
++    m_summary()
++}
++
++/// px107 measurement: the HPET's main counter put `lead` ticks before its
++/// low word rolls over (halted, written, enabled: HPET 1.0a §2.3.8 rule 2),
++/// then read 64 times; `n` such crossings for each of three ways of reading
++/// it: one 8-byte load (raw()'s), two 4-byte loads (low, then high: the
++/// positive control), and §2.4.7's high, low, high. Counts the crossings
++/// the 64 reads spanned (high word 5 first, 6 last) and those in which a
++/// reading was below the one before. Interrupts masked throughout.
++pub fn m_tear(n: u64, lead: u64) {
++    let a = unsafe { address }
++    if a == 0 { log.line("clock-m: tear: no HPET mapped"); return }
++    let flags = sync.irq_save()
++    let cfg = read32(a + 0x10)
++    var way: u64 = 0
++    while way < 3 {
++        var torn: u64 = 0
++        var spanned: u64 = 0
++        var shown: u64 = 0
++        var i: u64 = 0
++        while i < n {
++            write32(a + 0x10, cfg & !1)
++            write32(a + 0xf0, 0x100000000 - lead)
++            write32(a + 0xf4, 5)
++            write32(a + 0x10, cfg | 1)
++            var first: u64 = 0
++            var last: u64 = 0
++            var k: u64 = 0
++            var bad = false
++            while k < 64 {
++                let v = m_read(a, way)
++                if k == 0 { first = v }
++                if k > 0 && v < last {
++                    bad = true
++                    if shown < 3 {
++                        shown += 1
++                        log.put("clock-m: tear way "); log.dec(way as int); log.put(" crossing "); log.dec(i as int)
++                        log.put(" read "); log.dec(k as int); log.put(": 0x"); log.hex(v); log.put(" after 0x"); log.hex(last); log.end()
++                    }
++                }
++                last = v
++                k += 1
++            }
++            if (first >> 32) == 5 && (last >> 32) == 6 { spanned += 1 }
++            if bad { torn += 1 }
++            i += 1
++        }
++        log.put("clock-m: tear way "); log.dec(way as int)
++        log.put(if way == 0 { " (one 8-byte load)" } else { if way == 1 { " (low, then high)" } else { " (high, low, high)" } })
++        log.put(": crossings "); log.dec(n as int); log.put(", spanned "); log.dec(spanned as int)
++        log.put(", torn "); log.dec(torn as int); log.put(", lead "); log.dec(lead as int); log.end()
++        way += 1
++    }
++    sync.irq_restore(flags)
++}
++fn m_read(a: u64, way: u64) -> u64 {
++    if way == 0 { return unsafe { ((a + 0xf0) as *u64).read_volatile() } }
++    if way == 1 {
++        let l = read32(a + 0xf0)
++        let h = read32(a + 0xf4)
++        return (h << 32) | l
++    }
++    var t: u64 = 0
++    while t < 8 {
++        let h = read32(a + 0xf4)
++        let l = read32(a + 0xf0)
++        if read32(a + 0xf4) == h { return (h << 32) | l }
++        t += 1
++    }
++    0
++}
++
+ pub fn now_ns() -> u64 {
+     let src = unsafe { source }
+     // No source has a period: a loud stop, never a division by zero.
+@@ -296,11 +417,24 @@ pub fn now_ns() -> u64 {
+     let flags = sync.irq_save()
+     let current = raw()
+     let prev = unsafe { previous }
++    unsafe { m_reads += 1 }
+     var delta: u64 = 0
+     if src == 3 { delta = if current >= prev { current - prev } else { current + 65535 - prev } }
+     else {
+         let m = unsafe { mask }
+-        delta = if current >= prev { current - prev } else { (m - prev) + current + 1 }
++        if m == 0xffffffffffffffff && current < prev {
++            unsafe { m_back += 1; m_follow = 3 }
++            m_line("back", current, prev)
++        } else {
++            delta = if current >= prev { current - prev } else { (m - prev) + current + 1 }
++            if src == 1 && delta >= M_JUMP {
++                unsafe { m_jump += 1; m_follow = 3 }
++                m_line("jump", current, prev)
++            } else if unsafe { m_follow } > 0 {
++                unsafe { m_follow -= 1 }
++                m_line("next", current, prev)
++            }
++        }
+     }
+     let unit = unsafe { period }
+     let denominator = if src == 1 { 1000000 } else { unit }
+@@ -309,6 +443,7 @@ pub fn now_ns() -> u64 {
+     // its femtosecond product. Preserve the fractional nanosecond.
+     let remainder = (delta % denominator) * multiplier + unsafe { fraction }
+     unsafe {
++        m_before = prev
+         previous = current
+         elapsed += (delta / denominator) * multiplier + remainder / denominator
+         fraction = remainder % denominator
+diff --git a/kernel/kmain_console.lu b/kernel/kmain_console.lu
+index db016432..163cb6f6 100644
+--- a/kernel/kmain_console.lu
++++ b/kernel/kmain_console.lu
+@@ -554,6 +554,9 @@ export fn kmain() {
+     triage.step(22)
+     sync.enable()
+     triage.step(23) // interrupts on
++    // px107 MEASUREMENT ONLY: `clock_hammer` on the command line reads the
++    // clock in a tight loop for 600 s of its own time (interrupts on).
++    if boot_info.cmdline_has("clock_hammer") { clock.m_hammer(600) }
+     if usb {
+         xhci.wait_ready()
+     }
+@@ -664,6 +667,8 @@ export fn kmain() {
+     log.put("; nothing left to run")
+     log.end()
+     timer.stop()
++    clock.m_summary() // px107 MEASUREMENT ONLY
++    if boot_info.cmdline_has("clock_tear") { clock.m_tear(50000, 2000) } // px107 MEASUREMENT ONLY
+     log.line("halt")
+     panic.halt()
+ }

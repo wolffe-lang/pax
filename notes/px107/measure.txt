@@ -1,0 +1,106 @@
+px107 — R-px107-1 measured (2026-11-07 23:16Z to 23:59Z), after the prediction
+(e5cafb13, 23:13Z). The forced crossings (item 1, 23:32Z) came before the rows
+were first committed (23:36Z); the soaks ran on to 23:59Z beside them.
+
+The kernels: trunk with notes/px107/measure.patch, never merged (the lane's
+measure branch, kept in its records: 63954e10 is the whole patch on the
+prediction's tree; 6339ae92 the same without `m_tear` and limine-tear.conf;
+both shas are the kernels' own identity line in every serial log). 6339ae92 makes now_ns count
+every reading and log each one below the one before on a 64-bit mask
+(`back`), each forward step of 2^31 ticks or more on the HPET (`jump`) and the
+three readings after either, takes a backward reading as no time (no panic),
+and adds `clock_hammer` (now_ns in a loop for 600 s of the clock's own time).
+63954e10 adds `clock_tear`: the HPET's main counter halted, written 2000 ticks
+(20 us) before its low word rolls over (low word 0xfffff830, high word 5) and
+enabled again (IA-PC HPET 1.0a §2.3.8 rule 2), then read 64 times, 50,000
+times over, for each of three ways of reading it: one 8-byte load (raw()'s at
+trunk), two 4-byte loads low then high (a positive control), and §2.4.7's
+high, low, high. A crossing is "spanned" when its first read has high word 5
+and its last high word 6; "torn" when a read in it is below the one before.
+
+The host: Linux host 1, Ubuntu 24.04 container, QEMU 8.2.2
+(1:8.2.2+ds-0ubuntu1.18, the CI runner's release), the native tier's
+kmain_console, `-machine q35 -cpu max -m 256M`, SeaBIOS. Every TCG boot chose
+`clock: HPET 10000000 fs/tick, checked against the PM timer`.
+
+1. The torn read, forced (63954e10, CPUs 4-5, one TCG and one KVM boot side by
+   side):
+
+   | accel | way                  | crossings | spanned | torn  |
+   |-------|----------------------|-----------|---------|-------|
+   | TCG   | one 8-byte load      | 50,000    | 49,998  | 7,180 (14.4%) |
+   | TCG   | low, then high       | 50,000    | 49,995  | 10,471 |
+   | TCG   | high, low, high      | 50,000    | 49,992  | 0     |
+   | KVM   | one 8-byte load      | 50,000    | 49,974  | 232 (0.46%) |
+   | KVM   | low, then high       | 50,000    | 49,998  | 47,888 |
+   | KVM   | high, low, high      | 50,000    | 49,996  | 0     |
+
+   A second sample of the same kernel (CPUs 16-17, beside a heavy job of
+   another lane's, 23:48Z): TCG one 8-byte load 9,114 torn of 49,992 (18.2%),
+   high-low-high 0 of 49,980; KVM one 8-byte load 798 of 49,883 (1.6%), low
+   then high 2,347 of 47,551, high-low-high spanned none (its three exits a
+   read, on a loaded host, took longer than the 20 us lead, so every first
+   read came after the rollover: no measurement). The load widened the
+   gap: 18% against 14% under TCG, 1.6% against 0.46% under KVM. That boot's
+   HPET was refused by the check against the PM timer, as the KVM hammer's
+   was (item 2); `m_tear` reads the mapped counter either way.
+
+   Every torn 8-byte reading logged has the new high word and the old low
+   word, e.g. `0x00000006fffffffc` then `0x0000000600000021` (TCG, crossing
+   24) and `0x00000006fffffffd` then `0x000000060000013c` (KVM, crossing 67):
+   QEMU's HPET answers one 8-byte load of the main counter as two 4-byte
+   reads, the low half first, each taken at its own instant. When the low
+   word rolls over between them the reading is 2^32 ticks (42.9 s) AHEAD, and
+   the next reading is 2^32 ticks behind it. At trunk, now_ns takes the first
+   as 42.9 s passing (every deadline then ends 42.9 s early) and panics on the
+   second (`overflow ./clock/clock.lu:313`). The read the spec gives (high,
+   low, high, again until the highs agree) is never torn, under either
+   accelerator.
+
+2. The hammer (6339ae92; one TCG, one KVM boot of the rights-user image with
+   `clock_hammer`, CPUs 12-17 shared with the soaks below):
+   - TCG: 510,877,436 reads in 600 s of the clock (1.17 us a read), raw
+     0x0000000000fd3bb3 to 0x0000000df944a430: 13 rollovers of the low word,
+     0 backward readings, 0 forward steps of 2^31 ticks.
+   - KVM: the HPET was refused at that boot (`no window measured cleanly
+     against the PM timer in 3; refused`, the host's load average 16 on 20
+     CPUs), so the clock was the PM timer: 150,188,051 reads, nothing to
+     count. (Under KVM in item 1, a quieter minute, the HPET was checked
+     and chosen.)
+   Why 13 rollovers showed none: in the forced crossings the loads follow
+   one another about 0.5 us apart under TCG (the first torn read lands near
+   read 39 of a crossing 20 us long) and 3.6 us under KVM (near read 6), so
+   the two halves of one load are about 75 ns (TCG) and 17 ns (KVM) apart.
+   The hammer's loads are 1.17 us apart: about 6% a rollover, and 13
+   rollovers see none 42% of the time.
+
+3. The rights soak (6339ae92; `/bin/rights soak 100000`, the image
+   tests/mpx5-users builds, booted as it boots it but for `--accel tcg` and a
+   2400 s timeout; up to six at a time on CPUs 12-17, beside the hammers): 24
+   soaks, 251-585 s each, every one `soak: 100000 rounds … 0 wrong answers`
+   and halted, 98,509-204,007 clock readings each (3,317,691 in 12,807 s, 259
+   a second: the 100 Hz tick's sample and the kernel's other reads): 0
+   backward readings and 0 forward steps in all 24. The rate on this host's
+   ISO leg is below 1 in 24 soaks. That is what the gap predicts: a tear
+   needs a reading to land in the 75 ns between the halves at one of the
+   298 rollovers those soaks covered, about 259 * 75 ns = 2 * 10^-5 a
+   rollover, 0.006 tears expected in all 24.
+
+   The three witnesses all came from soaks on a disk leg (the root-on-virtio
+   leg twice, the AHCI job once) on a shared CI runner, which saw them far
+   more often than the idle gap gives. Not measured here: how far apart the
+   two halves fall when QEMU is also serving a disk and the runner is
+   loaded. The fix does not depend on it: the §2.4.7 read is never torn
+   however far apart its reads fall.
+
+R-px107-1, scored: (A), the torn read, right; its shape as predicted for a
+device that reads the low half first (the torn reading ahead by 2^32, the
+next one 2^32 behind it); present under KVM as well, right. The soak rate,
+"0 or 1 in 20 or more", right (0 in 24). The hammer's "at least one under
+TCG", wrong (0 in 13 rollovers; the forced test shows why). The KVM hammer
+did not measure the HPET (refused at that boot).
+
+What it means for the fix: taking a backward reading as no time passing
+alone leaves the clock 42.9 s ahead; the read itself must not tear. raw()
+reads a 64-bit HPET as §2.4.7 says, and now_ns still takes any reading below
+the last on a 64-bit mask as no time passing.
