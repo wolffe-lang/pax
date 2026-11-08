@@ -53,7 +53,10 @@
 #   /etc/sudoers, PAX's user/sudo/sudoers): sudo -n refused, the password
 #   asked (wrong, right), the timestamp, -k, three wrong, then a wrong one
 #   with standard error discarded (the retry line is the terminal's, as on
-#   Ubuntu, measured with standard error a file). The same keys run
+#   Ubuntu, measured with standard error a file); then bob, a password and no
+#   rule: `sudo -l` and `sudo -l id`, each asked his password and refused
+#   (`Sorry, user bob may not run sudo on pax.`), and root reads the log,
+#   which a sudoers.d line on each side makes a file. The same keys run
 #   in the Ubuntu 24.04 container twice
 #   (notes/px106/auth-ct.sh): with PAX's su, sudo, passwd and login in
 #   place of Ubuntu's, and with Ubuntu's own.
@@ -289,6 +292,9 @@ if [ -z "$images" ]; then
     printf 'root:x:0:\nsudo:x:27:pax\npax:x:1000:\nlobo:x:990:\nbob:x:1001:\npack:x:2000:pax\n' > "$pw/group.admin"
     printf 'ENV_SUPATH\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nENV_PATH\tPATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\n' > "$pw/login.defs"
     cp "$here/mpx5-sudo.d/sudoers.pw" "$pw/sudoers"
+    # The admin session's log as a file on both sides (Ubuntu's stock policy logs to syslog): one
+    # sudoers.d line, read through each shipped policy's includedir.
+    printf 'Defaults logfile=/var/log/sudo.log\n' > "$pw/sudoers.d-log"
     # P7's image: the hash at seven costs, on PAX.
     printf '%s\n' '/bin/mkshadow --time 14 8 1' '/bin/mkshadow --time 15 8 1' '/bin/mkshadow --time 16 8 1' '/bin/mkshadow --time 17 8 1' \
         '/bin/mkshadow --time 15 8 4' '/bin/mkshadow --time 16 8 2' '/bin/mkshadow --time 16 8 4' > "$pw/cost.sh"
@@ -314,6 +320,7 @@ if [ -z "$images" ]; then
             "/home/:755" "/home/pax/:750:1000:1000" "/home/bob/:750:1001:1001" "/srv/:755" "/srv/lobo/:750:990:990")
         for x in su sudo passwd; do [ ! -f "$work/bin/$x" ] || files+=("/bin/$x=$work/bin/$x:4755"); done
         [ ! -f "$work/bin/login" ] || files+=("/bin/login=$work/bin/login:755")
+        [ "$s" != admin ] || files+=("/etc/sudoers.d/log=$pw/sudoers.d-log:440")
         [ "$s" = login-first ] || [ "$s" = login-trap ] || files+=("/etc/shadow=$pw/shadow.txt:600")
         if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${files[@]}" "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
             say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
