@@ -147,6 +147,13 @@ The measurement is `notes/px107/measure-308.txt`; in short:
   known. `timer-stall` makes the clock stand still 8.6 ms and reproduces it (89,281,777 Hz, 50 ticks in 714 ms under
   KVM); the windows set that window aside by the PM timer (`window 1 set aside: … the clock 20008 us against the PM
   timer's 28581 us`), and a count that jumped would disagree with the next window (`windows 1 and 2 disagree`).
+- **The trigger, looked for.** The install image's kernel calibrated high in 3 of its 8 boots, each the first
+  boot of a disk the host had just rewritten. Under a host write load (one or two 2 GiB fsync loops, the guest's
+  disk rewritten before each boot, virtio or a 64 GiB sparse image on AHCI) the old calibration read normal in 14
+  of 14 boots, so the trigger is not reproduced; the load did stall the emulated counters (a KVM boot beside it had
+  its HPET refused by the clock's check, pax#314's shape). One emulator stall could hold the HPET's read and the PM
+  timer's alike, so `timer-stall-shared` has the PM timer stand still with the clock: the PM timer passes the
+  window, and the next window's disagreement catches it (`windows 1 and 2 disagree: 89258253 and 62500293 Hz`).
 - **No PM timer.** The agreement rule alone still catches one window off (`timer-stall-nopm`: `windows 1 and 2
   disagree: 87048098 and 62499001 Hz`); the same disturbance alike in two windows in a row would pass, and the
   boot says so: `timer: LAPIC calibration: no second counter beside the HPET to hold each window to; two windows
@@ -189,6 +196,7 @@ slot; the records are kept in the lane's directories.
 | dh4 | the same at the row's commit against the paired one: D1 4 of 9 against 0 of 9, D11 9 of 9 against 0 of 9 | the row and paired commits before the mark |
 | m5a | 20 KVM boots each of the session kernel with the vCPU's CPU shared with a busy loop: no high rate | `584c5313`, the paired commit |
 | lt1, lt2 | `timer-stall` red at the row's and the paired commits, green at the windows'; `timer-stall-nopm` green at the head; KVM and TCG | the row, paired and windows commits; the head |
+| m6a, m6b, lt5 | the calibration under a host write load (14 boots of the old one, 14 of the windows); `timer-stall-shared` with the other two stall legs, KVM and TCG | `584c5313`, `4f485e76`; the head |
 | bt1 | the console kernel's boot time, 4 boots each under KVM | `584c5313`, the windows commit |
 | mx3, dh5 | every `mpx4-dhcp` way under TCG and KVM at the D11 row and at the windows commit; the dh take between them | the row and windows commits |
 | the final records | red at the rows' tip and the plant red by name; green at the head | the PR's head |
@@ -224,6 +232,7 @@ slot; the records are kept in the lane's directories.
 - [x] F1b: every kernel entry builds and links (`mpx2-frames --no-boot --tier native`) at `584c5313`
 - [x] D11 red at its row under TCG, green at the paired commit; D1's expiry 0 of 9 at the paired commit
 - [x] timer-stall red at its row and at the paired commit, green at the windows commit; timer-stall-nopm green
+- [x] timer-stall-shared green (a stall the PM timer shares, caught by the next window), KVM and TCG
 - [ ] mx3: every `mpx4-dhcp` way at the row and at the head, TCG and KVM; dh5: the dh take, row against head
 - [ ] the final records at the head: green (with `mpx2-frames --no-boot`), and the plant red by name
 - [ ] the PR's tier pr (every suite: `kernel/clock/*` is ALL in `tools/ci-tiers.map`), then `full-matrix`
