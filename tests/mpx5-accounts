@@ -21,7 +21,7 @@
 #
 # **The session is the same binaries on three systems, byte for byte.**
 # PAX (COM1, and the PS/2 keyboard); Linux in a throwaway container
-# (tools/linux-tree --owners: pelt as pid 1 of a fresh pid namespace,
+# (tools/linux-tree --owners --rdev: pelt as pid 1 of a fresh pid namespace,
 # its root a tmpfs holding the image's tree with the image's owners and
 # modes), run live, as the other suites' Linux sides are; and real root
 # — a real Linux booted under QEMU with the same archive as its root,
@@ -132,7 +132,10 @@ EOF
 
 linux_side() { # dir -> reasons on stdout
     mkdir -p "$1/linux"
-    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$KEYS" --prompt "$PROMPT" --argv0 /bin/pelt --size 512m \
+    # px106: --rdev, /dev bound with what is mounted under it: su opens /dev/tty, and a rootless
+    # engine's /dev/tty is the host's node bound onto a placeholder file a plain bind leaves out
+    # (a user is refused it, EACCES), so su took its no-terminal path in the container alone.
+    if "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$KEYS" --prompt "$PROMPT" --argv0 /bin/pelt --size 512m --rdev \
         --owners "$1/owners.txt" "$1/linux/accounts.tty" -- /bin/pelt; then
         say "  linux accounts: $(wc -c < "$1/linux/accounts.tty" | tr -d ' ') bytes, status $(cat "$1/linux/accounts.tty.rc")"
     else
