@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Assemble px82's distribution payload from verified, built inputs (px90: den).
 Usage: distribution-root BASE.cpio INPUTS IDENTITY_DIR OUT.cpio dev|release
-INPUTS holds sudo/ (tools/mksudo's output: sudo and sums.txt) beside the other programs (px103).
+INPUTS holds sudo/ (tools/mksudo's output: sudo and sums.txt) beside the other programs (px103),
+and trash/ (tools/mktrash's: the five commands and sums.txt) (tb03).
 The old payload supplies only unchanged support files and the pinned native
 compiler/linker bundle. Every current org binary and the base std are replaced.
 """
@@ -132,6 +133,15 @@ def main():
         for source in sorted((stage/'bin').iterdir()):
             assert 'bin/'+source.name not in rows, 'burrow would replace bin/'+source.name
             put('bin/'+source.name, source.read_bytes(), 0o755)
+    # tb03: trash's five commands unmodified (tools/mktrash's: stripped by
+    # trash's own build, and not again here), 0755, each held to its
+    # builder's sums; tests/distribution holds them to user/trash.pin.
+    for line in (inputs/'trash'/'sums.txt').read_text().splitlines():
+        name, digest, size = line.split()
+        data = (inputs/'trash'/name).read_bytes()
+        assert (sha(data), len(data)) == (digest, int(size)), 'built input mismatch: '+name
+        assert 'bin/'+name not in rows, 'trash would replace bin/'+name
+        put('bin/'+name, data, 0o755)
     # px104 (R-px104-2): the root set den's TLS reads (tools/mkroots, held
     # to user/roots.pin's digests here as well), /etc/shrc exporting
     # DEN_TLS_ROOTS; (R-px104-6) GitHub's published host key.
