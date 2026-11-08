@@ -10,8 +10,10 @@ asks for the caller's password before it says no, as Linux's does, so lobo's two
   N2 s-log.txt: each entry unwrapped first (sudo wraps at 80 columns, and the next mask moves the wrap); the
      time stamp is masked (Mon DD HH:MM:SS); PWD= is masked (/root on PAX's console, / in the container);
      px106: `TTY=NAME ; ` is dropped (PAX's lines are typed at its console, ttyS0; the container's run with no
-     terminal, so Linux's sudo writes none); PAX's first entry is U13's own use (wolf running /bin/id before
-     the session, allowed or, under R-px106-6's other choice, `a password is required`) and is dropped.
+     terminal, so Linux's sudo writes none); PAX's first five entries are U13's own uses on this disk before
+     the session (R-px106-6 B3: wolf's `sudo -n /bin/id` refused at boot 1; at boot 2 /bin/id after a wrong
+     password, `-n` within the timestamp, `-k` then `-n` refused, /bin/poweroff) and are dropped, those five
+     exactly and in that order, so a change in U13's own logging shows here too.
      px106: PAX's two extra lines for lobo's refusals are gone; any entry left over is a difference.
 Exits 0 and prints the verdict per file, 1 on a difference outside the name.
 """
@@ -41,10 +43,19 @@ def norm(t):
     return re.sub(r'PWD=\S+', 'PWD=*', t)
 
 
+U13 = ['STAMP : wolf : a password is required ; PWD=* ; USER=root ; COMMAND=/bin/id',
+       'STAMP : wolf : PWD=* ; USER=root ; COMMAND=/bin/id',
+       'STAMP : wolf : PWD=* ; USER=root ; COMMAND=/bin/id',
+       'STAMP : wolf : a password is required ; PWD=* ; USER=root ; COMMAND=/bin/id',
+       'STAMP : wolf : PWD=* ; USER=root ; COMMAND=/bin/poweroff']
 pl = norm((pax/'s-log.txt').read_text()).splitlines()
 ll = norm((lin/'s-log.txt').read_text()).splitlines()
-if pl and pl[0] in ('STAMP : wolf : PWD=* ; USER=root ; COMMAND=/bin/id',
-                    'STAMP : wolf : a password is required ; PWD=* ; USER=root ; COMMAND=/bin/id'):
-    pl = pl[1:]
-say(pl == ll, f's-log.txt: {len(ll)} entries equal after N2 (unwrapped; stamp, TTY= and PWD masked; U13\'s entry dropped); no entry for lobo on either')
+if pl[:len(U13)] == U13:
+    pl = pl[len(U13):]
+what = f's-log.txt: {len(ll)} entries equal after N2 (unwrapped; stamp, TTY= and PWD masked; U13\'s five dropped); no entry for lobo on either'
+if pl != ll:
+    i = next((k for k in range(min(len(pl), len(ll))) if pl[k] != ll[k]), min(len(pl), len(ll)))
+    what = (f's-log.txt: PAX {len(pl)} entries, Linux {len(ll)} after N2; the first difference, entry {i}: '
+            f'PAX {pl[i] if i < len(pl) else "(none)"!r}, Linux {ll[i] if i < len(ll) else "(none)"!r}')
+say(pl == ll, what)
 sys.exit(1 if bad else 0)
