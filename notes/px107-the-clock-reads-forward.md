@@ -157,7 +157,8 @@ The measurement is `notes/px107/measure-308.txt`; in short:
 - **No PM timer.** The agreement rule alone still catches one window off (`timer-stall-nopm`: `windows 1 and 2
   disagree: 87048098 and 62499001 Hz`); the same disturbance alike in two windows in a row would pass, and the
   boot says so: `timer: LAPIC calibration: no second counter beside the HPET to hold each window to; two windows
-  off alike in a row would pass`.
+  off alike in a row would pass`. It prints only when the clock is the HPET; with the PM timer or the PIT as the clock the
+  rule works alone too, and the `clock:` line says which counter it is.
 - **Real hardware.** Under KVM, where every HPET read is a trip to the emulator, the old bracket was 0.04% short; a
   hardware read costs no more, so the reads' part is under 0.04% there before this change, and none after it. What
   remains is the window's resolution (a few ppm) and the two crystals drifting apart, which these takes cannot
@@ -233,6 +234,8 @@ slot; the records are kept in the lane's directories.
 - [x] D11 red at its row under TCG, green at the paired commit; D1's expiry 0 of 9 at the paired commit
 - [x] timer-stall red at its row and at the paired commit, green at the windows commit; timer-stall-nopm green
 - [x] timer-stall-shared green (a stall the PM timer shares, caught by the next window), KVM and TCG
+- [x] CI at `113332cb`: 896 HPET calibrations under TCG at 62,487,507-62,511,719 Hz, no window set aside or
+  disagreeing outside the stall legs; one red, I5 on a PM clock (the no-second-counter line in its tail), fixed
 - [ ] mx3: every `mpx4-dhcp` way at the row and at the head, TCG and KVM; dh5: the dh take, row against head
 - [ ] the final records at the head: green (with `mpx2-frames --no-boot`), and the plant red by name
 - [ ] the PR's tier pr (every suite: `kernel/clock/*` is ALL in `tools/ci-tiers.map`), then `full-matrix`
