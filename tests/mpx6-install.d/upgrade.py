@@ -44,20 +44,22 @@ name:
   U7 cut       on a copy of U2's target: QEMU killed after 100 steps, the
                stick booted again and the upgrade re-run: it completes, and
                U4's file checks hold
-  U13 sudo     (px103) the installed disk booted: /bin/sudo -n /bin/id typed as
-               uid 1000 (su wolf -c) answers uid=0 (px106: or, if the shipped
-               sudoers' uid-1000 line drops NOPASSWD, R-px106-6, `sudo: a
-               password is required`) and /var/log/sudo.log holds
-               its line; on the disk /bin/sudo is 04755 root:root, /etc/sudoers
-               0440 root:root and the shipped bytes, /var/log a root directory,
-               the log 0600 root:root. U13f after a fresh install from the new
-               stick, U13d after the upgrade of the 8b4e98ae dev install (the
-               860's), U13a after the upgrade of the 9c88ec8a install. px106: the
-               console's /bin/login let root in with no password and said so
-               (every account locked); on the disk /bin/su and /bin/passwd
-               04755, /bin/login 0755, /etc/shadow 0600 root:root with one locked
-               line for each /etc/passwd account (written by the fresh install,
-               made by the upgrade where the old install had none).
+  U13 sudo     (px103; px106, R-px106-6 B3 and R-px106-9) the installed disk booted, every account
+               locked: wolf (uid 1000) refused at the console, root let in with no password and
+               the console says so; wolf in group sudo (27) and `sudo -n /bin/id` refused (a
+               password is required); root sets wolf's and its own password with passwd; booted
+               again: no first-boot line, wolf logs in, sudo asks wolf's password, refuses a wrong
+               one, runs /bin/id as root with the right one, `-n` runs within the timeout and is
+               refused after `-k`, `sudo poweroff` asks again. On the disk /bin/sudo, /bin/su and
+               /bin/passwd 04755, /bin/login 0755, /etc/sudoers 0440 root:root and the shipped
+               bytes, /etc/group's sudo line naming wolf, /var/log/sudo.log 0600 root:root with the
+               refusal and the run, /etc/shadow 0600 root:root (wolf's and root's lines $7$, every
+               other locked). U13f after a fresh install from the new stick, U13d after the
+               upgrade of the 8b4e98ae dev install (the 860's), U13a after the upgrade of the
+               9c88ec8a install (both made before px106: the upgrade creates /etc/shadow, every
+               account locked, and adds wolf to sudo).
+  U14 session  (px103) the typed sudo session at the installed console (root, uid 1000, lobo),
+               captured for sudo-compare.py; px106: root logs in with the password U13f set.
   U15 passwords (px106) a fresh install from the new stick that sets root's
                and wolf's passwords (made at run time) at the installer's
                questions: on the disk their lines are $7$ and lobo's locked;
@@ -475,16 +477,16 @@ def need(text, needle, row):
         fail(row, f'missing {needle!r} on the screen:\n{text}')
 
 
-def login(m, row, timeout=900, password=None, first_boot=None):
-    """root's login: the stick's live entry (`login: `) or, px106, the installed /bin/login
-    (`pax login: `), with root's password when one is set; first_boot True needs /bin/login's
-    first-boot line (every account locked), False its absence."""
+def login(m, row, timeout=900, password=None, first_boot=None, user='root', prompt=None):
+    """root's login (or `user`'s): the stick's live entry (`login: `) or, px106, the installed
+    /bin/login (`pax login: `), with the password when one is set; first_boot True needs /bin/login's
+    first-boot line (no account that can reach root has a password), False its absence."""
     s = m.wait(r'^(\S+ )?login: *$', row, timeout)
-    m.type('root\n')
+    m.type(user + '\n')
     if password is not None:
         m.wait(r'Password: *$', row, 120, last=True)
         m.type(password + '\n')
-    t = m.wait(PROMPT, row, 300, last=True)
+    t = m.wait(prompt or PROMPT, row, 300, last=True)
     seen = FIRST_BOOT in m.unwrapped(t)
     if first_boot is True and not seen:
         fail(row, 'no first-boot line: root was let in with no password and nothing said so')
@@ -495,6 +497,21 @@ def login(m, row, timeout=900, password=None, first_boot=None):
 
 FIRST_BOOT = 'PAX: no account here has a password, so root logs in without one; set one with passwd.'
 PW = {'root': secrets.token_hex(6), 'wolf': secrets.token_hex(6), 'wrong': secrets.token_hex(6)}
+
+
+# The installed user's login shell starts friendly: its prompt (`wolf@? ~> `) ends `>`.
+UPROMPT = r'^.*[$#>] *$'
+
+
+def set_password(m, row, who, pw, prompt=PROMPT):
+    """`passwd WHO` typed as root at the console, the new password twice (made at run time)."""
+    m.type(f'passwd {who}\n')
+    m.wait(r'New password: *$', row, 120, last=True)
+    m.type(pw + '\n')
+    m.wait(r'Retype new password: *$', row, 120, last=True)
+    m.type(pw + '\n')
+    t = m.wait(prompt, row, 120, last=True)
+    need(m.unwrapped(t), 'passwd: password updated successfully', row)
 
 
 def poweroff(m, row):
@@ -842,26 +859,59 @@ def debugfs_cat(img, path, row):
     return run(['debugfs', '-R', f'cat {path}', img], row=row).stdout
 
 
-def wolf_nopasswd():
-    """R-px106-6: whether the shipped sudoers' one line for uid 1000 says NOPASSWD (U13 follows it)."""
-    line = next(l for l in (repo/'user/sudo/sudoers').read_text().splitlines() if l.startswith('#1000 '))
-    return 'NOPASSWD:' in line
-
-
 def sudo_boot(name, row):
-    """The installed disk booted alone and sudo used by uid 1000 (su wolf -c), typed at the root console;
-    then the disk read on the host: sudo's and sudoers' modes and owners, /var/log, the log line.
-    `sudo -n`: under R-px106-6's other choice (a password rule) it refuses at once rather than ask."""
-    nopw = wolf_nopasswd()
+    """px103's U13, px106 (R-px106-6 B3, R-px106-9): the installed disk booted alone, every account locked.
+    Boot 1: the user (wolf, uid 1000) is refused at the console (`Login incorrect`); root comes in with no
+    password and the console says so; the user is in group sudo (`27(sudo)`) and `sudo -n` refuses (`a
+    password is required`); root sets the user's password and its own (made at run time) with passwd.
+    Boot 2: the first-boot line is gone; the user logs in with the password; sudo asks for it (`[sudo]
+    password for wolf: `), refuses a wrong one (`Sorry, try again.`) and runs /bin/id as root with the
+    right one; within the timeout `sudo -n` runs, after `sudo -k` it refuses; `sudo poweroff` asks again.
+    Then the disk read on the host: the programs' modes and owners, /etc/sudoers' bytes, /etc/group's sudo
+    line, the log's lines, /etc/shadow (the user's and root's lines `$7$`, every other locked)."""
+    user = 'wolf'
+    upw, rpw = secrets.token_hex(6), secrets.token_hex(6)
     m = Machine(name, C['sym_new'], None)
     try:
-        s = login(m, row, first_boot=True)
-        need(m.unwrapped(s), f'kernel: {C["new_commit"]}', row)
-        for c, want in [("/bin/su wolf -c '/bin/id' > /root/w0.txt 2>&1; echo w0=$?", 'w0=0'),
-                        ("/bin/su wolf -c '/bin/sudo -n /bin/id' > /root/w1.txt 2>&1; echo w1=$?", 'w1=0' if nopw else 'w1=1')]:
+        s0 = m.wait(r'^(\S+ )?login: *$', row, 900)
+        need(m.unwrapped(s0), f'kernel: {C["new_commit"]}', row)
+        m.type(user + '\n')
+        m.wait(r'Password: *$', row, 120, last=True)
+        m.type(PW['wrong'] + '\n')
+        m.wait(r'^Login incorrect', row, 120)
+        login(m, row, timeout=120, first_boot=True)
+        for c, want in [(f"/bin/su {user} -c '/bin/id' > /root/w0.txt 2>&1; echo w0=$?", 'w0=0'),
+                        (f"/bin/su {user} -c '/bin/sudo -n /bin/id' > /root/w1.txt 2>&1; echo w1=$?", 'w1=1')]:
             s = m.vcommand(c, row, 300)
             need(m.unwrapped(s), want, row)
+        set_password(m, row, user, upw)
+        set_password(m, row, 'root', rpw)
         poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    C['root_pw'] = rpw  # the rows after this one log in as root with it (U14 on U13f's disk)
+    m = Machine(name + '-2', C['sym_new'], None)
+    try:
+        login(m, row, password=upw, first_boot=False, user=user, prompt=UPROMPT)
+        m.vcommand('set +o friendly', row, 60, prompt=UPROMPT)
+        m.type(f'/bin/sudo /bin/id > /home/{user}/w2.txt 2>&1; echo w2=$?\n')
+        m.wait(rf'\[sudo\] password for {user}: *$', row, 120, last=True)
+        m.type(PW['wrong'] + '\n')
+        m.wait(r'^Sorry, try again\.', row, 120)
+        m.wait(rf'\[sudo\] password for {user}: *$', row, 120, last=True)
+        m.type(upw + '\n')
+        t = m.wait(PROMPT, row, 300, last=True)
+        need(m.unwrapped(t), 'w2=0', row)
+        for c, want in [(f'/bin/sudo -n /bin/id > /home/{user}/w3.txt 2>&1; echo w3=$?', 'w3=0'),
+                        (f'/bin/sudo -k; /bin/sudo -n /bin/id > /home/{user}/w4.txt 2>&1; echo w4=$?', 'w4=1')]:
+            s = m.vcommand(c, row, 300)
+            need(m.unwrapped(s), want, row)
+        m.type('/bin/sudo /bin/poweroff\n')
+        m.wait(rf'\[sudo\] password for {user}: *$', row, 120, last=True)
+        m.type(upw + '\n')
+        if m.ended(row) != 0:
+            fail(row, 'QEMU did not exit 0 at sudo poweroff')
     finally:
         m.kill()
     check_witnesses(row)
@@ -884,25 +934,34 @@ def sudo_boot(name, row):
             fail(row, f'/var/log/sudo.log is {logst}; want regular 0600 0 0')
         text = debugfs_cat(img, '/var/log/sudo.log', row).decode(errors='replace')
         shadow = debugfs_cat(img, '/etc/shadow', row).decode(errors='replace')
+        group = debugfs_cat(img, '/etc/group', row).decode(errors='replace')
         accounts = [l.split(':')[0] for l in debugfs_cat(img, '/etc/passwd', row).decode(errors='replace').splitlines() if l.count(':') >= 6]
-        w0 = debugfs_cat(img, '/root/w0.txt', row).decode(errors='replace')
-        w1 = debugfs_cat(img, '/root/w1.txt', row).decode(errors='replace')
+        w = {k: debugfs_cat(img, p, row).decode(errors='replace') for k, p in
+             (('w0', '/root/w0.txt'), ('w1', '/root/w1.txt'), ('w2', f'/home/{user}/w2.txt'), ('w3', f'/home/{user}/w3.txt'), ('w4', f'/home/{user}/w4.txt'))}
     finally:
         img.unlink()
-    if not re.match(r'uid=1000\(wolf\) ', w0):
-        fail(row, f'su wolf -c /bin/id printed {w0!r}')
-    if nopw and not re.match(r'uid=0\(root\) gid=0\(root\) ', w1):
-        fail(row, f'sudo -n /bin/id as uid 1000 printed {w1!r}')
-    if not nopw and w1 != 'sudo: a password is required\n':
-        fail(row, f'sudo -n /bin/id as uid 1000 under a password rule printed {w1!r}')
-    why = '' if nopw else 'a password is required ; '
-    if not re.search(r'^\w{3} [ \d]\d \d\d:\d\d:\d\d : wolf : ' + why + r'.*USER=root ; COMMAND=/bin/id$', text.replace('\n    ', ' '), re.M):
-        fail(row, f'/var/log/sudo.log has no line for wolf running /bin/id: {text!r}')
-    # px106: one locked line for each account, none with a password.
+    if not re.match(rf'uid=1000\({user}\) .*27\(sudo\)', w['w0']):
+        fail(row, f'su {user} -c /bin/id printed {w["w0"]!r} (no 27(sudo))')
+    if w['w1'] != 'sudo: a password is required\n':
+        fail(row, f'sudo -n /bin/id as uid 1000 with no password set printed {w["w1"]!r}')
+    for k in ('w2', 'w3'):
+        if not re.match(r'uid=0\(root\) gid=0\(root\) ', w[k]):
+            fail(row, f'{k}: sudo /bin/id as uid 1000 printed {w[k]!r}')
+    if w['w4'] != 'sudo: a password is required\n':
+        fail(row, f'sudo -n /bin/id after sudo -k printed {w["w4"]!r}')
+    if not re.search(rf'^sudo:[^:]*:27:([^:\n]*,)?{user}(,[^:\n]*)?$', group, re.M):
+        fail(row, f'/etc/group has no sudo line (gid 27) naming {user}: {group!r}')
+    flat = text.replace('\n    ', ' ')
+    for why, what in (('a password is required ; ', 'the refused sudo -n'), ('', 'the allowed /bin/id')):
+        if not re.search(rf'^\w{{3}} [ \d]\d \d\d:\d\d:\d\d : {user} : {why}(TTY=\S+ ; )?PWD=\S+ ; USER=root ; COMMAND=/bin/id$', flat, re.M):
+            fail(row, f'/var/log/sudo.log has no line for {what}: {text!r}')
     lines = {l.split(':')[0]: l.split(':') for l in shadow.splitlines() if l.count(':') == 8}
-    if sorted(lines) != sorted(accounts) or any(f[1] not in ('*', '!') for f in lines.values()):
-        fail(row, f'/etc/shadow is not one locked line an account ({accounts}): {[(n, f[1][:3]) for n, f in lines.items()]}')
-    return have, w1.strip(), text.strip()
+    if sorted(lines) != sorted(accounts):
+        fail(row, f'/etc/shadow is not one line an account ({accounts}): {sorted(lines)}')
+    for n, f in lines.items():
+        if (n in (user, 'root')) != f[1].startswith('$7$') or (n not in (user, 'root') and f[1] not in ('*', '!')):
+            fail(row, f'/etc/shadow: {n} is {f[1][:3]!r}; want $7$ for {user} and root, every other locked')
+    return have, w['w2'].strip(), text.strip()
 
 
 def passed_sudo(name, row, what, fresh=False):
@@ -910,10 +969,12 @@ def passed_sudo(name, row, what, fresh=False):
     log(f'{row}: {out}')
     log(f'{row}: {log_text}')
     (work/f'{row}.txt').write_text(f'{what}\nstat (type, mode, uid, gid): {have}\nsudo /bin/id as uid 1000: {out}\n/var/log/sudo.log:\n{log_text}\n')
-    passed(row, f'{what}: booted; /bin/sudo 04755 0:0, /etc/sudoers 0440 0:0 (user/sudo/sudoers\' bytes), /var/log a root directory; '
-           f'uid 1000 ran /bin/sudo -n /bin/id and it printed {out!r} (the shipped uid-1000 rule NOPASSWD: {wolf_nopasswd()}); /var/log/sudo.log 0600 0:0 holds the line; '
-           f'px106: login let root in with no password and said so; /bin/su and /bin/passwd 04755, /bin/login 0755, '
-           f'/etc/shadow 0600 0:0, every account locked')
+    passed(row, f'{what}: booted, every account locked: wolf refused at the console, root let in with no password and the console said so; '
+           f'wolf in group sudo (27), sudo -n refused (a password is required); root set wolf\'s password and its own; booted again: no '
+           f'first-boot line, wolf logged in, sudo asked wolf\'s password, refused a wrong one, ran /bin/id as root ({out!r}), -n ran '
+           f'within the timeout, refused after -k, and sudo poweroff asked again; /bin/sudo, /bin/su, /bin/passwd 04755, /bin/login 0755, '
+           f'/etc/sudoers 0440 (user/sudo/sudoers\' bytes), /etc/shadow 0600 0:0 (wolf\'s and root\'s lines $7$), /var/log/sudo.log 0600 '
+           f'with the refusal and the run')
 
 
 SESSION = Path(__file__).resolve().parent/'sudo-session.txt'
@@ -942,7 +1003,7 @@ def sudo_session(name, row):
     lines = session_lines()
     m = Machine(name, C['sym_new'], None)
     try:
-        login(m, row)
+        login(m, row, password=C.get('root_pw'))  # px106: U13f set root's password on this disk
         # pelt's friendly mode shows a history line's rest after the typed text (U13f typed `/bin/su wolf -c
         # ...` on this disk), which vcommand's read-back would take for dropped keys: off in each shell first.
         m.vcommand('set +o friendly', row, 60)
