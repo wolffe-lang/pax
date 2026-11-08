@@ -7,6 +7,15 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **trash on the image (tb03).** The images carry trash, a reversible `rm` in
+  wolf: `/bin/trash` moves files into the user's `~/Trash` (the FreeDesktop.org
+  Trash specification's layout) instead of removing them, and `trash-list`,
+  `trash-restore`, `trash-rm` and `trash-empty` list, put back, remove and
+  empty what is there (`user/trash.pin` at trash `90169ed5`, `tools/mktrash`,
+  which builds the five static from trash's own tree, twice). The distribution
+  check holds the five to the pin's digests, and `tests/mpx5-trash` types a
+  session at the console, as root and as a user, against the same binaries in a
+  Linux container.
 - **Push from the console (px104).** den pushes to GitHub from the console of
   every image, over HTTPS and over SSH. Names resolve: the kernel now answers
   what a C library's resolver asks of a datagram socket (`sendmmsg`, SOL_IP's
