@@ -46,7 +46,9 @@
 #   locked, an unknown and a wrong account then a right one; five failures
 #   (then, as pid 1, a new login); the first-boot rule (root with no
 #   password while none is set, then passwd, then `exec /bin/login` asks
-#   it). admin (R-px106-6, B3) is pelt as root, then pax, a member of group
+#   it). login-trap (R-px106-9): every account locked, pax in group sudo;
+#   root comes in, sets only lobo's password, and `exec /bin/login` still
+#   lets root in (lobo cannot reach root). admin (R-px106-6, B3) is pelt as root, then pax, a member of group
 #   sudo (27), on each side's own shipped policy (Ubuntu's stock
 #   /etc/sudoers, PAX's user/sudo/sudoers): sudo -n refused, the password
 #   asked (wrong, right), the timestamp, -k, three wrong. The same keys run
@@ -123,7 +125,7 @@ case $only in ''|build|linux|auth) ;; *) die "--only takes build, linux or auth"
 need readelf python3
 
 SESSIONS="sid sudo"
-TYPED="pw login login-max login-first admin"
+TYPED="pw login login-max login-first admin login-trap"
 ref=$here/mpx5-sudo.d/linux
 work=$PAX_BUILD/mpx5-sudo
 runs=$PAX_BUILD/mpx5-sudo-runs.txt
@@ -195,8 +197,10 @@ auth_ct() {
         res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$o/out/ubuntu/$s.tty" "$o/out/pax/$s.tty" --named "$PAX_ROOT/notes/px106/named.txt" "$s" 2>&1); st=$?
         [ "$st" = 0 ] && say "PASS P2 $s: PAX's programs against Ubuntu's: $(printf '%s' "$res" | tail -n 1)" || bad "P2 $s: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
     done
-    res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$here/mpx5-sudo.d/login-first.pax" "$o/out/pax/login-first.tty" 2>&1); st=$?
-    [ "$st" = 0 ] && say "PASS P2 login-first: PAX's programs against tests/mpx5-sudo.d/login-first.pax: $res" || bad "P2 login-first: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
+    for s in login-first login-trap; do
+        res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$here/mpx5-sudo.d/$s.pax" "$o/out/pax/$s.tty" 2>&1); st=$?
+        [ "$st" = 0 ] && say "PASS P2 $s: PAX's programs against tests/mpx5-sudo.d/$s.pax: $res" || bad "P2 $s: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
+    done
     res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$o/out/ubuntu/stdin.txt" "$o/out/pax/stdin.txt" --named "$PAX_ROOT/notes/px106/named.txt" stdin 2>&1); st=$?
     [ "$st" = 0 ] && say "PASS P4: sudo -S, -n and su with no terminal: $(printf '%s' "$res" | tail -n 1)" || bad "P4: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
     for m in pax ubuntu; do
@@ -213,7 +217,7 @@ auth_ct() {
         [ "$(grep -c '^\(root\|pax\|bob\):\$7\$' "$f")" = 3 ] || st+=" $s: $(cut -d: -f1,2 "$f" | cut -c1-24 | tr '\n' ' ');"
         grep -q '^lobo:!:' "$f" || st+=" $s: lobo is not locked;"
     done
-    for s in pw login-first; do
+    for s in pw login-first login-trap; do
         [ "$(cat "$o/out/pax/$s.shadow-mode")" = "600 root:root" ] || st+=" $s: passwd left /etc/shadow $(cat "$o/out/pax/$s.shadow-mode");"
     done
     # bob's line after the pw session is passwd's (bob changed his own): the shipped cost.
@@ -294,20 +298,21 @@ if [ -z "$images" ]; then
         why+=" tools/mkinitramfs cost;"
     fi
     for s in $TYPED; do
-        prog=/bin/login; [ "$s" != pw ] || prog=/bin/pelt
+        prog=/bin/login; case $s in pw|admin) prog=/bin/pelt ;; esac
         echo "$prog" > "$work/$s.run"
         # /usr/bin/id as well: sudo finds a command on secure_path, where the container's id is
         # /usr/bin/id (Ubuntu's /bin is a link to usr/bin), so the log's COMMAND= is the same on both.
         grp=$pw/group pol=$pw/sudoers
         # admin: PAX's shipped policy (user/sudo/sudoers) and pax in group sudo (R-px106-6, B3).
         [ "$s" != admin ] || { grp=$pw/group.admin pol=$PAX_ROOT/user/sudo/sudoers; }
+        [ "$s" != login-trap ] || grp=$pw/group.admin
         files=("/bin/pelt=$work/bin/pelt:755" "/bin/id=$work/bin/id:755" "/usr/bin/id->/bin/id" "/bin/cat=$work/bin/cat:755"
             "/etc/passwd=$pw/passwd:644" "/etc/group=$grp:644" "/etc/login.defs=$pw/login.defs:644"
             "/etc/sudoers=$pol:440" "/etc/sudoers.d/:755" "/var/:755" "/var/log/:755" "/root/:700"
             "/home/:755" "/home/pax/:750:1000:1000" "/home/bob/:750:1001:1001" "/srv/:755" "/srv/lobo/:750:990:990")
         for x in su sudo passwd; do [ ! -f "$work/bin/$x" ] || files+=("/bin/$x=$work/bin/$x:4755"); done
         [ ! -f "$work/bin/login" ] || files+=("/bin/login=$work/bin/login:755")
-        [ "$s" = login-first ] || files+=("/etc/shadow=$pw/shadow.txt:600")
+        [ "$s" = login-first ] || [ "$s" = login-trap ] || files+=("/etc/shadow=$pw/shadow.txt:600")
         if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${files[@]}" "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
             say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
         else
@@ -478,12 +483,12 @@ for leg in $legs; do
                 say "SKIP P1-$s reason=the container did not run (no engine): $id is held to its expectation alone"
             fi
             why=
-            if [ "$s" = login-first ] || [ "$s" = login-max ]; then
+            if [ "$s" = login-first ] || [ "$s" = login-max ] || [ "$s" = login-trap ]; then
                 res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" --mask-tty "$here/mpx5-sudo.d/$s.pax" "$out" 2>&1) || why+=" the session differs from tests/mpx5-sudo.d/$s.pax: $(printf '%s' "$res" | head -n 14 | cut -c1-200 | tr '\n' '|');"
                 [ -z "$why" ] && say "PASS P2 $id: as tests/mpx5-sudo.d/$s.pax ($res)" || bad "P2 $id:$why"
             fi
             why=
-            init=/bin/login; [ "$s" != pw ] || init=/bin/pelt
+            init=/bin/login; case $s in pw|admin) init=/bin/pelt ;; esac
             grep -qE "^PAX: init $init ended with status [0-9]+; nothing left to run$" "$norm" \
                 || why+=" no 'PAX: init $init ended' ($(grep -m1 '^PAX: init ' "$norm"));"
             pn=$(grep -m1 '^PANIC ' "$norm")
