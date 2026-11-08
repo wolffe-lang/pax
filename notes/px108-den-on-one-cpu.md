@@ -4,7 +4,8 @@ The console's den cloned `wolffe-lang/pelt` (12,670 objects, a 4.4 MB pack, 9,68
 over https and 86 s over ssh on the metal target, where git on another machine takes about 2 s. This lane measured
 where those seconds go. Most of them are den's own work, not PAX's. Run on Linux, the same den clone takes 70 s of user
 CPU against git's 0.4 s, and PAX's system time is a small share of the clone (§3, §4.3). The measurements also found
-PAX rows far off Linux's. The largest of them, a pipe's 64 KiB round trip at 0.04 of Linux's rate, is fixed here:
+PAX rows far off Linux's. Under the same KVM on the same cores, PAX clones pelt in 0.68 of a one-vCPU Linux guest's
+time (§4.4). The largest of the far-off rows, a pipe's 64 KiB round trip at 0.04 of Linux's rate, is fixed here:
 `kernel/uaccess` moved every byte between a process and the kernel one at a time, and now moves a page's part at a
 time with the string instructions the file tree already used. The other rows are listed in order of size in §5.
 
@@ -51,7 +52,7 @@ the first Linux measurement (`e6ac5f45`), once after the orchestrator's correcti
 | P2 | the pinned den (`ac2332b`) clones pelt on no kernel | right: its pack stream refuses more than 10,000 objects (`den: wire: limit`, Linux, 1–3 s) | held, at the stream's bound, not closure's |
 | S1 | file:// at `474a926`: den's own upload-pack refuses pelt on any kernel | right: Linux, `den: wire: limit` then `den: wire: invalid` after 54.5 s; PAX, the same after 124 s (filed by the orchestrator as den#73) | held |
 | S2 | the 85 s is den's file work through PAX's calls, 100 µs to several ms a call | den's CPU, mostly user; PAX's per-call costs are real but small in the total (§4.3) | wrong in mechanism |
-| S3 | under KVM PAX takes 40–90 s; the guest 2–6 s | PAX 122 s on the light slot's E-cores; the guest: the timed series (§4.4) | PAX reproduced; the guest's figure was wrong by far: den itself is slow on Linux |
+| S3 | under KVM PAX takes 40–90 s; the guest 2–6 s | PAX 122 s on the light slot's E-cores; on one block's P-cores PAX 71 s and the guest 104 s (§4.4) | PAX reproduced; the guest's figure was wrong by far: den itself is slow on Linux, and slower in the guest than on PAX |
 | P4 (a) | anonymous memory and the walk before every unmap are the first suspect | `mmap` of 256 KiB 0.125 of Linux's rate, 0.05 with 512 MiB mapped; `brk` 0.38, 0.06 | real, and not what dominates a clone |
 | P5 | a pipe's round trip within 3x the guest | 64 KiB: 0.04 of Linux's (fixed here, 0.55); 1 byte: 0.33 | wrong for 64 KiB |
 | P5 | TCP into PAX 10–20 MB/s under QEMU's user network; 6 MB/s polled | 38.6 MB/s (QEMU's own TCP as the peer); across a Linux peer and a 30 ms round trip, 1.63 MB/s, polled: the 64 KiB window's own limit | the window, not the poll |
@@ -157,10 +158,82 @@ The files rows ran into the tree's 16,384 inodes at trunk (B2 red): they now sto
 
 ### 4.4 The timed series
 
-PAX at trunk, PAX at the fix and the Linux guest (one vCPU, virtio-net, a tmpfs root), interleaved, five rounds, on
-one block's P-cores with its two lock names and its light lock: git://, https and ssh, each clone's tree removed after
-it, then the microbenchmarks; and the TCP row across the delay line for each. Its record is the hand-back's; this
-section takes its table when it is in.
+The series (`t4`; a take is named `t4-<what>-r<round>`) ran five rounds on 2026-11-08 between 07:28Z and 09:20Z,
+on one block's six P-core threads, with its two lock names and its light lock held (nothing ran beside it). Each
+round booted six takes in turn under the same KVM and QEMU 8.2.2:
+- PAX at trunk (`db516c69`'s kmain_console), the Linux guest, and PAX at the fix (`221d66b0`). Each one cloned pelt with
+  den `474a926` over https (den's TLS fixture), git:// and ssh (burrow against OpenSSH), removed each clone's tree, then
+  ran the microbenchmarks.
+- The same three, running the microbenchmarks only, with the TCP row taken across a 15 ms delay each way.
+The guest is Ubuntu's 6.8 generic kernel on one vCPU with a tmpfs root. PAX's network is QEMU's igb (MSI-X), the
+guest's is virtio-net. The table gives medians over the rounds that exited 0, with the range in parentheses. A ratio
+is PAX's median over the guest's.
+
+| way | PAX at trunk | PAX at the fix | the guest | trunk / guest | fix / guest |
+|---|---|---|---|---|---|
+| https | 71.0 s (70.7–72.8; user 63.0, sys 7.9; n=5) | 68.6 s (68.1–71.0; user 62.8, sys 5.5; n=5) | 104.4 s (101.9–108.8; user 69.2, sys 35.5; n=5) | 0.68 | 0.66 |
+| git | 70.2 s (69.4–74.2; user 63.4, sys 7.9; n=5) | 67.6 s (67.1–71.8; user 63.2, sys 5.1; n=5) | 101.5 s (99.5–107.3; user 67.8, sys 33.2; n=5) | 0.69 | 0.67 |
+| ssh | 70.7 s (69.2–73.6; user 63.1, sys 7.3; n=5) | 68.4 s (67.1–70.7; user 63.3, sys 5.4; n=5) | 101.0 s (96.5–108.8; user 67.5, sys 33.3; n=5) | 0.70 | 0.68 |
+
+| row | PAX at trunk | PAX at the fix | the guest | trunk / guest | fix / guest |
+|---|---|---|---|---|---|
+| syscall | 3,225,951/s (n=5) | 3,098,953/s (n=5) | 11,184,826/s (n=4) | 0.29 | 0.28 |
+| cpu | 787,988/s (n=5) | 787,988/s (n=5) | 792,760/s (n=4) | 0.99 | 0.99 |
+| pingpong 1 | 158,142/s (n=5) | 155,454/s (n=5) | 538,462/s (n=4) | 0.29 | 0.29 |
+| pingpong 65536 | 3,648/s (n=5) | 47,423/s (n=5) | 129,493/s (n=4) | 0.03 | 0.37 |
+| files | 37,599/s (n=5) | 46,276/s (n=5) | 183,642/s (n=4) | 0.20 | 0.25 |
+| files nosync | 54,690/s (n=5) | 60,159/s (n=5) | 253,778/s (n=4) | 0.22 | 0.24 |
+| miss | 919,186/s (n=5) | 917,086/s (n=5) | 1,955,466/s (n=4) | 0.47 | 0.47 |
+| mmap 256 KiB | 2,304/s (n=5) | 2,352/s (n=5) | 23,802/s (n=4) | 0.10 | 0.10 |
+| mmap 256 KiB over 512 MiB | 1,248/s (n=5) | 1,264/s (n=5) | 24,321/s (n=4) | 0.05 | 0.05 |
+| brk 256 KiB | 9,248/s (n=5) | 9,264/s (n=5) | 24,693/s (n=4) | 0.37 | 0.38 |
+| brk 256 KiB over 512 MiB | 1,632/s (n=5) | 1,632/s (n=5) | 23,815/s (n=4) | 0.07 | 0.07 |
+| malloc 256 KiB | 14,492,357/s (n=5) | 14,385,447/s (n=5) | 73,236,479/s (n=4) | 0.20 | 0.20 |
+| malloc 256 KiB over 512 MiB | 14,486,645/s (n=5) | 14,438,422/s (n=5) | 73,135,685/s (n=4) | 0.20 | 0.20 |
+
+| TCP into the machine | PAX at trunk | PAX at the fix | the guest | trunk / guest | fix / guest |
+|---|---|---|---|---|---|
+| QEMU's user network | 117.73 MB/s (111.85–122.01; n=5) | 129.05 MB/s (119.84–139.81; n=5) | 1667.84 MB/s (1550.49–1794.78; n=4) | 0.07 | 0.08 |
+| a Linux peer, 30 ms round trip | 2.09 MB/s (2.09–2.09; n=5) | 2.09 MB/s (1.90–2.09; n=5) | 10.07 MB/s (7.33–10.99; n=5) | 0.21 | 0.21 |
+
+- **The clone.** On the same cores PAX clones pelt in about 0.7 of the guest's time, and the ranges do not overlap.
+  The user time is within a tenth of the guest's: it is den's own work, the same program on both. The difference is
+  system time, 5 to 8 s on PAX against 33 to 36 s in the guest. Where the guest's system time goes was not split
+  (there is no strace in the guest); on the host's Linux the same clone made about 1.05 million calls (§4.3). git in
+  the same guest clones pelt in 0.50 s over git://, 0.75 s over ssh and 0.50 s over file:// (rounds 2 to 5), about
+  two hundred times faster than den. So the metal target's 85 s against git's 2 s is den's, as §4.3 found. One CPU
+  under this hypervisor does not make den's clone slower on PAX than on Linux.
+- **The fix**: the 64 KiB pipe round trip goes from 0.03 to 0.37 of the guest's rate. Over https the clone is 2.4 s
+  faster (68.6 s against 71.0 s), as much as its system time drops (5.5 s against 7.9 s).
+- **The rows far off the guest** are the follow-on lanes' (§5.1): the bare system call and the 1-byte round trip about
+  0.3, `mmap` 0.10 and 0.05, `brk` 0.37 and 0.07, a lookup that misses 0.47, files 0.20 to 0.25. `malloc` of
+  256 KiB (0.20) is a loop that should not enter the kernel on either system. It is not split here and goes to the
+  anonymous-memory lane (R-px108-7) as a question.
+- **TCP.** QEMU's user network does not compare the two kernels, because the NIC models differ (igb's emulated
+  registers against virtio). Across the 30 ms line PAX moves 2.09 MB/s in every round with interrupts: 65,535 bytes
+  every 31 ms, which is the window's own ceiling. The I225's polled path read 1.63 MB/s (§4.3). The guest moves
+  10.07 MB/s (7.33 to 10.99) on the same 16 MiB, slow start included. That is R-px108-5's lane.
+
+**The rig changed during the series**: the guest take's script (the rig's `linux-take.py`, not in the repository;
+PAX's takes were untouched). Round 1's
+guest take hung on `git clone` over the https fixture (the fixture's `input timeout`). It ran out QEMU's 2,400 s
+before its microbenchmarks. Between takes, with no guest take running, the script was replaced:
+
+| takes | `linux-take.py` sha256 | its git rows |
+|---|---|---|
+| `t4-guest-r1` (07:33Z) | `686e71d9…add414c` | git over https, git://, ssh and file:// |
+| none (live 08:15:13Z to 08:15:46Z) | `45a3f4f3…200337b9` | the same, git over https only when asked by name |
+| `t4-guest-tap-r1` (08:17Z) onward: every other guest take | `f8022325…abaddc7` | the same, each git row under busybox's `timeout -s KILL 300` |
+
+The two versions differ only in the git rows' block (one condition, one prefix, a comment). The old file was rebuilt
+from the new one by reversing that diff, and it hashes to `686e71d9…`. Every guest take's run list, ports masked, has
+the same three den clone lines and the same 14 microbenchmark lines (read from the series' log). So the
+measured rows are the same code in both versions:
+- **The guest's clone medians** mix the two versions, and that does not matter: the den rows are identical commands
+  and run before the git rows in both.
+- **The guest's microbenchmark medians** come from rounds 2 to 5 only (round 1 never reached them), so they use one
+  version. The guest's TCP rows across the line all use one version.
+- **The git rows** are not ratio rows, and none ran to completion in round 1.
 
 ### 4.5 The red row, the plant and the gauntlet
 
@@ -199,11 +272,12 @@ it starts from, what this lane measured, and the files it touches.
   path matches the metal target's. The floor is 8 MB/s, almost four times what a 64 KiB window can move in 30 ms. At
   trunk the row reads 1.63 MB/s, so it starts red. A second row, the same transfer with no delay and the controller
   polled, guards the poll's own ceiling (below).
-- *Measured.* 1.63 MB/s at a 30 ms round trip is 65,535 bytes every 40 ms. That fits the window's ceiling at the
-  line's 30 ms (2.18 MB/s) plus up to a 10 ms tick before the polled controller sees the segments and the ACK
-  leaves. With no delay, the same row reads 38.6 to 40.2 MB/s (QEMU's user network, interrupts). pelt's https clone
-  takes 11 s longer across the line (133.8 s against 122.9 s). A 300 MB pack, den's own repository, would spend about
-  three minutes on the wire.
+- *Measured.* Polled, 1.63 MB/s at a 30 ms round trip is 65,535 bytes every 40 ms. With interrupts (the timed series,
+  §4.4) it is 2.09 MB/s in every round, 65,535 bytes every 31 ms: the window's ceiling at the line's 30 ms
+  (2.18 MB/s), with the poll's tick on top on the polled path. The one-vCPU Linux guest moves 10.07 MB/s across the
+  same line, so PAX moves 0.21 of what the guest does. With no delay, the same row reads 38.6 to 40.2 MB/s (QEMU's
+  user network, interrupts). pelt's https clone takes 11 s longer across the line (133.8 s against 122.9 s). A 300 MB
+  pack, den's own repository, would spend about three minutes on the wire.
 - *Files.* `kernel/tcp/tcp.lu`:
   - the options walk reads kind 3 on a SYN and sends it back when the peer sent one (RFC 7323 §2.2), and
     `C_OPT_WSCALE` stops counting it as skipped;
@@ -269,6 +343,9 @@ it starts from, what this lane measured, and the files it touches.
 
   `kernel/sched/sched.lu`'s `note_rss`. The peak's witnesses in `tests/mpx5-forks` (px88's maxrss rows) must read
   the same.
+- *A question for it.* `malloc` of 256 KiB in a loop is 0.20 of the guest's rate (14.5 million a second against 73),
+  though on Linux the loop does not enter the kernel once the allocator's threshold has risen. What PAX's run of the
+  same static binary does differently was not split here.
 
 **4. A context switch and a system call (R-px108-8).**
 
@@ -298,6 +375,7 @@ it starts from, what this lane measured, and the files it touches.
 - [x] Item 3: the per-process split (wall, user, system, switches) on PAX by px88's accounting; the calls by name on
   Linux (`strace -c`); the microbenchmarks on both.
 - [x] Item 4: what dominates is den's, routed; the PAX row far off Linux (the pipe at 64 KiB) fixed here, red first.
-- [ ] Item 5: before and after as ratios to the guest: the timed series (§4.4). The stick leg:
-  `user/console/clone-time.keys`, `notes/px108/stick-leg.txt`.
+- [x] Item 5: before and after as ratios to the guest: the timed series (§4.4), five rounds. The stick leg's keys
+  and sheet (`user/console/clone-time.keys`, `notes/px108/stick-leg.txt`) are committed; the timing waits for a
+  person at the console.
 - [x] Item 6: §5.
