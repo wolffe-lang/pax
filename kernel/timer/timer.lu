@@ -21,8 +21,10 @@
 //! - the local APIC timer is masked one-shot with divide-by-16 (DCR 3)
 //!   and an initial count of 0xffffffff, counted down across 20 ms of
 //!   the clock, and the rate (counts per second) is that difference over
-//!   the elapsed nanoseconds; a count that did not move, or a rate under
-//!   100 Hz, panics by name;
+//!   the elapsed nanoseconds; each end reads the count and then the clock
+//!   back to back (`pair`, px107), after one pair to warm the path, so
+//!   the reads' own time cancels; a count that did not move, or a rate
+//!   under 100 Hz, panics by name;
 //! - the LVT timer is set periodic, vector 32, unmasked, with an initial
 //!   count of rate / 100: one tick every 10 ms;
 //! - one line names the clock and the rate: `timer: LAPIC calibrated by
@@ -145,11 +147,11 @@ pub fn start() {
     apic.write(0x320, (0x10000 | MASTER_BASE) as u32)
     apic.write(0x3e0, 3)
     apic.write(0x380, 0xffffffff)
-    let begin = clock.now_ns()
-    let before = apic.read(0x390)
+    let (_c, _t) = pair() // px107: once first, so both ends run the same code the same way
+    let (before, begin) = pair()
     clock.wait_us(20000)
-    let after = apic.read(0x390)
-    let duration = clock.now_ns() - begin
+    let (after, end) = pair()
+    let duration = end - begin
     if duration == 0 || after >= before { panic.fail("timer: LAPIC calibration did not count", after) }
     let rate = (before - after) * 1000000000 / duration
     if rate < 100 || rate / 100 > 0xffffffff { panic.fail("timer: LAPIC calibration rate", rate) }
@@ -158,6 +160,19 @@ pub fn start() {
     apic.write(0x380, (rate / 100) as u32)
     unsafe { armed_ns = clock.now_ns() }
     report()
+}
+
+/// px107 (pax#308): the local APIC timer's current count and kernel/
+/// clock's nanoseconds, read back to back by the same code. Both ends of
+/// the calibration are a pair, so the time between a pair's two reads is
+/// in both intervals and cancels. Read the old way (the clock, the count;
+/// the count, the clock) it was in the clock's interval alone: under
+/// emulation, where each read is a trip to the emulator, the rate came
+/// out up to 2% low, the tick that much short, and every timeout counted
+/// in ticks that much early (`drift`).
+fn pair() -> (u64, u64) {
+    let c = apic.read(0x390)
+    (c, clock.now_ns())
 }
 
 pub fn report() {
