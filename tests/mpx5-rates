@@ -23,11 +23,14 @@
 #   B1 Linux ran every row, both times, each a line.
 #   B2 PAX ran every row, a line each; init ended with status 0 and
 #      qemu-halt holds the machine halted.
-#   B3 a pipe's 64 KiB round trip: PAX's rate at least half Linux's (the
-#      better of Linux's two runs; one CPU each). Under KVM only: under TCG
-#      every row is QEMU's emulation first, so B3 is SKIPPED by name. Until
-#      px108 PAX moved a system call's bytes one at a time (kernel/uaccess)
-#      and this rate was under a tenth of Linux's.
+#   B3 a pipe's 64 KiB round trip: PAX's rate at least a quarter of
+#      Linux's (the better of Linux's two runs; one CPU each). Under KVM
+#      only: under TCG every row is QEMU's emulation first, so B3 is
+#      SKIPPED by name. Until px108 PAX moved a system call's bytes one at
+#      a time (kernel/uaccess): 0.04 of Linux's rate (hasu, 2026-11-08);
+#      0.55 since. The floor sits between, with room both ways for a
+#      shared runner; what is left of the gap is the two context switches
+#      a round trip makes (the 1-byte row's 0.33).
 #   B4 every row's ratio, PAX's rate to Linux's: printed, `~` lines held to
 #      no floor (the record of where PAX stands; notes/px108-*.md reads it).
 # Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool error.
@@ -56,7 +59,7 @@ need python3
 # The rows, in order; @ is the directory a row may write in.
 ROWS=("syscall" "cpu" "pingpong 1" "pingpong 65536" "files @/bf" "files @/bn nosync" "miss @"
       "mmap 256" "mmap 256 512" "brk 256" "brk 256 512")
-FLOOR_PIPE64=0.5
+FLOOR_PIPE64=0.25
 
 work=$PAX_BUILD/mpx5-rates
 fail=0
