@@ -29,8 +29,10 @@
 # carries, and what trash's own PAX rows run. It is built once in each of
 # two checkouts at paths of their own, and the two checkouts' stripped
 # binaries must agree (exit 1 otherwise). Each is checked static here too
-# (readelf: ET_EXEC, no PT_INTERP, no dynamic section) and asked
-# `--version`. `OUTDIR/sums.txt` gets `NAME <sha256> <bytes>` for the five;
+# (readelf: ET_EXEC, no PT_INTERP, no dynamic section), and each but
+# trash-rm is asked `--version`: trash-rm, as trash-cli's, takes its first
+# word as the pattern to remove from the trash, so it is never run here.
+# `OUTDIR/sums.txt` gets `NAME <sha256> <bytes>` for the five;
 # whether each is the digest user/trash.pin records from trash's own gate
 # is printed (the binary depends on the libc.a it links, so a host's other
 # libc.a is a new digest, not a failure here; tests/distribution holds the
@@ -128,8 +130,10 @@ for n in $NAMES; do
     cp "$w/a/trash/target/static/stripped/$n" "$out/$n"
     chmod 755 "$out/$n"
     static "$out/$n"
-    v=$("$out/$n" --version 2>&1 | head -n 1) || die "$n --version"
-    case $v in "$n (wolffe-lang trash) "*) ;; *) die "$n --version says '$v'" ;; esac
+    if [ "$n" != trash-rm ]; then
+        v=$("$out/$n" --version 2>&1 | head -n 1) || die "$n --version"
+        case $v in "$n (wolffe-lang trash) "*) ;; *) die "$n --version says '$v'" ;; esac
+    fi
     row="$n $one $(wc -c < "$out/$n" | tr -d ' ')"
     printf '%s\n' "$row" | tee -a "$out/sums.txt"
     if grep -Eq "^#   $n +$one " "$pin"; then
