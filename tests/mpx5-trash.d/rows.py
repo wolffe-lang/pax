@@ -30,9 +30,10 @@ def rows(home):
     w = "/tmp/w" + uid
     trash = "/Trash" if home == "/" else home + "/Trash"
     return [
+        # The loop's own line is longer than the console's 80 columns, so
+        # it wraps where the terminal puts it: the row is its answers.
         ("the five commands are found by PATH",
-         ["$ for c in trash trash-list trash-restore trash-rm trash-empty; do command -v $c; done",
-          "/bin/trash", "/bin/trash-list", "/bin/trash-restore", "/bin/trash-rm", "/bin/trash-empty"]),
+         ["/bin/trash", "/bin/trash-list", "/bin/trash-restore", "/bin/trash-rm", "/bin/trash-empty"]),
         ("trash --version", ["$ trash --version", "trash (wolffe-lang trash) 0.1.0-dev"]),
         ("a file trashed", s("trash a.txt", 0)),
         ("the listing names it", ["$ l", "status 0", w + "/a.txt", "[stderr]"]),
