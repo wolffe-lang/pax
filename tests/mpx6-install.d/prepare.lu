@@ -5,6 +5,23 @@ fn main() -> int {
     assert(payload_location_ok("/source", "/payload"))
     assert(payload_location_ok("/source", "/source/usr/share/pax-install"))
     let a = env_args()
+    // px106 (R-px106-6 B3): `groups FILE NAME` prints sudo_member's answer for FILE's text, or
+    // `refused: TAG` and exits 3.
+    if a.len == 3 && a[0] == "groups" {
+        let text = fs_read_text(a[1]) else |_| { return 2 }
+        let out = sudo_member(text, a[2]) else |e| match e {
+            gid_taken => {
+                print("refused: gid_taken")
+                return 3
+            },
+            sudo_gid => {
+                print("refused: sudo_gid")
+                return 3
+            },
+        }
+        print_raw(out)
+        return 0
+    }
     if a.len != 5 { return 2 }
     let t = Target {
         name: "vdb",
