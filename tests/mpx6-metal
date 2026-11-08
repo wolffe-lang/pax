@@ -63,6 +63,17 @@
 # nanoseconds are held here to its ticks times the source's period
 # (exact, or one more for the carried fraction).
 #
+# px107 (pax#308): the tick's calibration under a stall. A boot under KVM
+# calibrated the LAPIC at 89527688 Hz, 1.433 times the rate, and its
+# clock, sleeps and timeouts ran at 0.70 of real time. timer-stall makes
+# the clock stand still 8.6 ms inside the calibration (one reading 8.6 ms
+# ahead, the readings behind it taken as no time passing) and requires
+# the tick timed by the PM timer read directly: 50 ticks in 500 ms within
+# 0.5% (`metal: 50 ticks of 10 ms in <us> us by the PM timer`), and the
+# stalled window set aside by name (`timer: LAPIC calibration: window <k>
+# set aside …`). The rate row every leg has (20 ticks in 150-300 ms) lets
+# a 1.433 times tick through.
+#
 # PAX_METAL_TIER (native, release) and PAX_METAL_FIRMWARE ("bios uefi")
 # choose the build and the firmwares (tests/mpx6-firmware sets both);
 # PAX_METAL_LEGS (px107), when set, the legs, by name (a plant's run, or
@@ -83,18 +94,18 @@ printf '\n    cmdline: metal_x2apic\n' >> "$work/x2apic.conf"
 cp "$PAX_ROOT/boot/limine.conf" "$work/pitonly.conf"
 printf '\n    cmdline: metal_pitonly\n' >> "$work/pitonly.conf"
 "$PAX_ROOT/tools/mkimage" --conf "$work/pitonly.conf" "$work/kmain_metal.elf" "$work/pitonly.iso"
-for word in stall_window stall_edge stall_long hpet_fast hpet_slow clock_behind clock_torn clock_32 clock_pmwrap; do
+for word in stall_window stall_edge stall_long hpet_fast hpet_slow clock_behind clock_torn clock_32 clock_pmwrap timer_stall; do
     cp "$PAX_ROOT/boot/limine.conf" "$work/$word.conf"
     printf '\n    cmdline: metal_%s\n' "$word" >> "$work/$word.conf"
     "$PAX_ROOT/tools/mkimage" --conf "$work/$word.conf" "$work/kmain_metal.elf" "$work/$word.iso"
 done
 fail() { # leg why
-    grep -aE '^(FAIL METAL|PANIC|clock:|timer:)' "$work/$1.log" | tr -d '\r' >&2 || true
+    grep -aE '^(FAIL METAL|PANIC|clock:|timer:|metal: 50 ticks)' "$work/$1.log" | tr -d '\r' >&2 || true
     echo "FAIL METAL firmware $1: $2" >&2
     exit 1
 }
 for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
-    legs='hpet pm pitless pm-pitless ram8 stall-window stall-edge stall-long hpet-fast hpet-slow clock-behind clock-torn clock-32 clock-pmwrap'
+    legs='hpet pm pitless pm-pitless ram8 stall-window stall-edge stall-long hpet-fast hpet-slow clock-behind clock-torn clock-32 clock-pmwrap timer-stall'
     [ "$fw" != uefi ] || legs="$legs pitonly"
     [ "${PAX_METAL_X2APIC:-0}" != 1 ] || legs="$legs x2apic"
     [ -z "${PAX_METAL_LEGS:-}" ] || legs=$PAX_METAL_LEGS
@@ -114,6 +125,7 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
             clock-torn) iso=$work/clock_torn.iso;;
             clock-32) iso=$work/clock_32.iso;;
             clock-pmwrap) iso=$work/clock_pmwrap.iso; args=(--no-hpet); source=PM;;
+            timer-stall) iso=$work/timer_stall.iso;;
         esac
         rc=0
         "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" ${args[@]+"${args[@]}"} "$iso" -- ${qargs[@]+"${qargs[@]}"} || rc=$?
@@ -137,6 +149,10 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
                 || fail "$fw-$leg" "no rollover counted across the window";;
             clock-torn) grep -aqE '^metal: the HPET read across 20000 rollovers of its low word: [0-9]+ read across, 0 torn, ' "$work/$fw-$leg.log" \
                 || fail "$fw-$leg" "a reading of the HPET was torn across a rollover";;
+            timer-stall) grep -aqE '^PASS METAL the tick: 50 in 500 ms within 0.5% by the PM timer' "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "the tick was not timed within 0.5% by the PM timer"
+                grep -aqE '^timer: LAPIC calibration: window [0-9]+ set aside' "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "the calibration did not set the stalled window aside by name";;
         esac
         case $leg in
             clock-behind|clock-32|clock-pmwrap)
