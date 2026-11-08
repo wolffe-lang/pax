@@ -2093,3 +2093,22 @@ source; no kernel's, firmware's or driver's.
 - PAX's own `kernel/timer` (kw10, px76), `kernel/clock`, `kernel/dhcp` (px89, its lease in ticks),
   `tests/mpx4-dhcp`, `tools/pcap-dhcp`.
 - No kernel's, emulator's, firmware's or driver's source.
+
+## px108 — the rates den's clone leans on
+
+- **The Intel SDM, vol. 2**: MOVS and STOS with the REP prefix (the string moves `boot/tree.S` already had, which
+  `kernel/uaccess` now calls) and RDTSC as px88 read it. Nothing else of the processor's.
+- **The man pages** of the calls `user/elf/bench.c` and `ptime.c` make: getppid(2), pipe(2), fork(2), read(2),
+  write(2), open(2), fsync(2), link(2), unlink(2), mkdir(2), stat(2), mmap(2), munmap(2), sbrk(2) (brk(2)),
+  malloc(3), socket(2), connect(2), getrusage(2), wait4(2), clock_gettime(2), sched_getcpu(3) and
+  sched_setaffinity(2), opendir(3) and readdir(3), nanosleep(2).
+- **Linux as a black box**: the probes run natively on the lane's Linux host and in a Linux guest of one vCPU under
+  the same QEMU and KVM (Ubuntu's generic kernel, its binary package only); `strace -f -c` and `-ttt` of den's
+  clones there (`notes/px108/`).
+- **den at `474a926`** and **at `ac2332b`** (the org's own): what a clone does, read to explain the rows (the
+  pack-stream and closure bounds, the loose install at the old pin, the checkout's reads); den's
+  `tools/http-git-test.py` `Server`, loaded and run by the lane's rig, never copied.
+- PAX's own `kernel/uaccess`, `kernel/files` (pipes), `kernel/tree` (the inode table), `kernel/vm` (mmap, brk,
+  the peak), `kernel/sched` (the switch, px88's accounting), `kernel/tcp` (the window), `kernel/gbe` and
+  `kernel/netd` (the polled path), and `tests/mpx5-forks`, `tests/mpx4-console-push`, `tests/mpx4-console-net.d`.
+- No Linux source; no other kernel's, firmware's or driver's source; no Git source.
