@@ -46,7 +46,11 @@
 #   locked, an unknown and a wrong account then a right one; five failures
 #   (then, as pid 1, a new login); the first-boot rule (root with no
 #   password while none is set, then passwd, then `exec /bin/login` asks
-#   it). The same keys run in the Ubuntu 24.04 container twice
+#   it). admin (R-px106-6, B3) is pelt as root, then pax, a member of group
+#   sudo (27), on each side's own shipped policy (Ubuntu's stock
+#   /etc/sudoers, PAX's user/sudo/sudoers): sudo -n refused, the password
+#   asked (wrong, right), the timestamp, -k, three wrong. The same keys run
+#   in the Ubuntu 24.04 container twice
 #   (notes/px106/auth-ct.sh): with PAX's su, sudo, passwd and login in
 #   place of Ubuntu's, and with Ubuntu's own.
 #     P1 the session on PAX is byte-identical to PAX's programs in the
@@ -119,7 +123,7 @@ case $only in ''|build|linux|auth) ;; *) die "--only takes build, linux or auth"
 need readelf python3
 
 SESSIONS="sid sudo"
-TYPED="pw login login-max login-first"
+TYPED="pw login login-max login-first admin"
 ref=$here/mpx5-sudo.d/linux
 work=$PAX_BUILD/mpx5-sudo
 runs=$PAX_BUILD/mpx5-sudo-runs.txt
@@ -181,12 +185,13 @@ auth_ct() {
     rm -rf "$o"; mkdir -p "$o/pax"
     cp "$w/bin/pelt" "$o/pelt"; cp "$PAX_ROOT/tools/linux-tty" "$o/linux-tty"; cp "$PAX_ROOT/notes/px106/auth-ct.sh" "$o/auth-ct.sh"
     cp "$w/pw/shadow.txt" "$w/pw/passwords.txt" "$w/pw/sudoers" "$o/"; cp "$w/pw/"*.keys "$o/"
+    cp "$PAX_ROOT/user/sudo/sudoers" "$o/sudoers.shipped"
     for x in su sudo passwd login; do cp "$w/bin/$x" "$o/pax/$x"; done
     for m in ubuntu pax; do
         "$eng" run --rm --network none --hostname pax -v "$o:/ct" "$img" bash /ct/auth-ct.sh "$m" > "$o/$m.log" 2>&1
         say "  auth-ct $m: exit $?; $(cat "$o/out/$m/"*.run 2>/dev/null | tr '\n' ' ')"
     done
-    for s in pw login login-max login-time; do
+    for s in pw login login-max login-time admin; do
         res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$o/out/ubuntu/$s.tty" "$o/out/pax/$s.tty" --named "$PAX_ROOT/notes/px106/named.txt" "$s" 2>&1); st=$?
         [ "$st" = 0 ] && say "PASS P2 $s: PAX's programs against Ubuntu's: $(printf '%s' "$res" | tail -n 1)" || bad "P2 $s: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
     done
@@ -273,6 +278,9 @@ if [ -z "$images" ]; then
     if [ -x "$work/bin/mkshadow" ]; then r=$("$work/bin/mkshadow" --check 2>&1) || why+=" $r;"; say "  $r"; fi
     printf 'root:x:0:0:root:/root:/bin/pelt\npax:x:1000:1000::/home/pax:/bin/pelt\nlobo:x:990:990::/srv/lobo:/bin/false\nbob:x:1001:1001::/home/bob:/bin/pelt\n' > "$pw/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nbob:x:1001:\npack:x:2000:pax\n' > "$pw/group"
+    # R-px106-6 (B3): the admin session's group file, pax in sudo (27) as Ubuntu's first user is;
+    # sudo's line before pack's, so the supplementary groups come in the container's order.
+    printf 'root:x:0:\nsudo:x:27:pax\npax:x:1000:\nlobo:x:990:\nbob:x:1001:\npack:x:2000:pax\n' > "$pw/group.admin"
     printf 'ENV_SUPATH\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nENV_PATH\tPATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\n' > "$pw/login.defs"
     cp "$here/mpx5-sudo.d/sudoers.pw" "$pw/sudoers"
     # P7's image: the hash at seven costs, on PAX.
@@ -290,9 +298,12 @@ if [ -z "$images" ]; then
         echo "$prog" > "$work/$s.run"
         # /usr/bin/id as well: sudo finds a command on secure_path, where the container's id is
         # /usr/bin/id (Ubuntu's /bin is a link to usr/bin), so the log's COMMAND= is the same on both.
+        grp=$pw/group pol=$pw/sudoers
+        # admin: PAX's shipped policy (user/sudo/sudoers) and pax in group sudo (R-px106-6, B3).
+        [ "$s" != admin ] || { grp=$pw/group.admin pol=$PAX_ROOT/user/sudo/sudoers; }
         files=("/bin/pelt=$work/bin/pelt:755" "/bin/id=$work/bin/id:755" "/usr/bin/id->/bin/id" "/bin/cat=$work/bin/cat:755"
-            "/etc/passwd=$pw/passwd:644" "/etc/group=$pw/group:644" "/etc/login.defs=$pw/login.defs:644"
-            "/etc/sudoers=$pw/sudoers:440" "/etc/sudoers.d/:755" "/var/:755" "/var/log/:755" "/root/:700"
+            "/etc/passwd=$pw/passwd:644" "/etc/group=$grp:644" "/etc/login.defs=$pw/login.defs:644"
+            "/etc/sudoers=$pol:440" "/etc/sudoers.d/:755" "/var/:755" "/var/log/:755" "/root/:700"
             "/home/:755" "/home/pax/:750:1000:1000" "/home/bob/:750:1001:1001" "/srv/:755" "/srv/lobo/:750:990:990")
         for x in su sudo passwd; do [ ! -f "$work/bin/$x" ] || files+=("/bin/$x=$work/bin/$x:4755"); done
         [ ! -f "$work/bin/login" ] || files+=("/bin/login=$work/bin/login:755")
