@@ -37,7 +37,8 @@
 //! - **The password** (px106): `[sudo] password for NAME: ` on /dev/tty
 //!   with the echo off (user/auth/secret.lu), or `-p PROMPT` (`%p` `%u`
 //!   `%U` `%h` `%H` `%%`); three tries, each wrong one followed by 2 s and
-//!   `Sorry, try again.`, then `sudo: 3 incorrect password attempts`; the
+//!   `Sorry, try again.` where the prompt went (the terminal, or standard
+//!   error with `-S`), then `sudo: 3 incorrect password attempts`; the
 //!   end of input: `sudo: no password was provided` and `sudo: a password
 //!   is required` or `N incorrect password attempt(s)`. `-S` reads standard
 //!   input (the prompt on standard error); `-n` refuses at once (`sudo: a
@@ -1960,7 +1961,13 @@ fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) ->
         wrong += 1
         time_sleep_ms(FAIL_DELAY_MS)
         if wrong < TRIES {
-            eprint("Sorry, try again.")
+            // Linux's writes its retry line where it asked: the terminal, or standard error with -S
+            // (measured with standard error a file; the failure lines below are standard error's)
+            if tty >= 0 {
+                secret_put(tty, "Sorry, try again.\n")
+            } else {
+                eprint("Sorry, try again.")
+            }
         }
     }
     close_tty(tty)
