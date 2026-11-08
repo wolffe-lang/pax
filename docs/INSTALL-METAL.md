@@ -162,7 +162,7 @@ pax-install
 
 1. The target page (`03-target-page.png`) numbers every disk and marks the refused ones; only the target can be
    chosen. Type its number and Enter.
-2. Type a user name (uid 1000, no password in this preview).
+2. Type a user name (uid 1000; the installer makes it a member of group `sudo`, gid 27, as Ubuntu's does).
 3. Answer `y` or `n` for the games.
 4. The plan appears (`04-plan.png`): the target, its size, the partitions and the seed, then one summary naming the
    disk, for example:
@@ -177,6 +177,9 @@ pax-install
    target's (the size is in decimal GB or TB, as on the disk's label).
 5. Type `yes` (lowercase) and Enter. Anything else (`y`, `YES`, `q`, an empty line) cancels with nothing written;
    run `pax-install` again.
+6. `Set a password for root now?` and then the same for your user: `y` runs `passwd` for that account (type the
+   password twice; it is never echoed and never written to the log), `n` leaves the account locked. Either answer is
+   fine: with no password for root or your user, root logs in at the console with no password until one is set.
 
 The installer stages the live system, then writes the partition table, zeroes the old disk's bytes where PAX's
 partitions go (`zero-bios`, `zero-esp`, `zero-root`, `zero-gap`: about 6 MiB in all), then writes the EFI
@@ -207,11 +210,19 @@ rehearsal, with the stick gone and nothing chosen, the firmware went to its UEFI
 The login prompt reads (`06-disk-login.png`):
 
 ```text
-PAX: log in as root or as the user pax-install made.
-login:
+pax login:
 ```
 
-**Photo 4: this screen.** Log in as `root`, or as the user you made, and run `ls /home` and `cat /etc/pax-release`.
+**Photo 4: this screen.** If you gave your user a password (step 5's last question), log in as that user and run
+`sudo id`: it asks for your password, then prints `uid=0(root) ...`. If you gave neither root nor your user one, log
+in as `root`: the console says
+
+```text
+PAX: no password is set for root or for group sudo, so root logs in without one; set one with passwd.
+```
+
+and lets root in. Run `passwd NAME` with your user's name, `exit`, and log in as that user: `sudo` asks for your
+password. Run `ls /home` and `cat /etc/pax-release`.
 To check the safety rule from the installed system, `pax-install --check` refuses its own disk as `the running root`.
 Power off with `poweroff` (px87: the reboot program under its second name; `reboot -p` is the same).
 
