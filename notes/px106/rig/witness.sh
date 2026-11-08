@@ -63,7 +63,10 @@ sbuild() (
 sstick() (
     set -euo pipefail
     out=$U/sout-$short
-    export PAX_BUILD=$L/ub-$short PAX_ENGINE=$P PAX_E2FS_IMAGE=localhost/px75-ubuntu:2
+    # The engine by its name, the host's wrapper first on PATH: tools/disktools gives any engine not
+    # named `podman` docker's --user, and rootless podman then refused mkfs.fat the stick (px106).
+    [ "$(command -v podman)" = "$P" ] || { echo "podman on PATH is $(command -v podman), not the host's $P"; exit 3; }
+    export PAX_BUILD=$L/ub-$short PAX_ENGINE=podman PAX_E2FS_IMAGE=localhost/px75-ubuntu:2
     . tools/lib.sh
     SOURCE_DATE_EPOCH=$(cat "$out/source-date-epoch"); export SOURCE_DATE_EPOCH
     [ "$(cat "$out/commit")" = "$SHA" ]
