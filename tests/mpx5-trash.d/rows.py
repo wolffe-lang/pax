@@ -10,7 +10,7 @@ every row held. Exit 0 either way (the caller reads the output), 2 on a
 usage error.
 
 What a row holds, and from where (no row is read from the commands' output
-on either side): trash's README and its oracle rows at trash `90169ed` (the
+on either side): trash's README and its oracle rows at trash `c027df8` (the
 status 74 and the message for a missing operand, `-f`'s silence, the
 listing's `DATE TIME PATH`, the restore's `   N DATE TIME PATH` and its
 prompt, trash-empty's question and its `y`), and what the session typed.
