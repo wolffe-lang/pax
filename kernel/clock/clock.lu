@@ -327,6 +327,18 @@ pub fn check_counts() -> (u64, u64, u64, u64) {
     (unsafe { check_windows }, unsafe { check_long }, unsafe { check_retaken }, unsafe { check_stall_retaken })
 }
 
+/// px107 (pax#308), for kernel/timer's calibration: whether an ACPI PM
+/// timer stands beside the HPET the clock reads (a second counter, on
+/// its own crystal), the PM timer read directly (0 when there is none),
+/// and the nanoseconds from one such reading to another (one wrap at
+/// most: 4.69 s of the 24-bit counter).
+pub fn pm_beside() -> bool { unsafe { source } == 1 && acpi.pm_port() != 0 }
+pub fn pm_now() -> u64 { if acpi.pm_port() == 0 { 0 } else { pm() } }
+pub fn pm_between(a: u64, b: u64) -> u64 { pm_ns(pm_since(a, b)) }
+/// The HPET's period in femtoseconds, 0 when the clock reads another
+/// source (px107: kernel/kmain_metal's timer-stall leg).
+pub fn hpet_period_fs() -> u64 { if unsafe { source } == 1 { unsafe { period } } else { 0 } }
+
 fn begin() { unsafe { previous = raw(); elapsed = 0; fraction = 0 } }
 
 /// The source `start` chose: "HPET", "PM" or "PIT".
