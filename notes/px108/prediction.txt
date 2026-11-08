@@ -1,0 +1,98 @@
+px108 prediction, written 2026-11-08T05:20Z before any change and before the
+first measurement (base pax trunk db516c69). Revised once before commit for
+the second set of metal timings (https 85 s, the same as ssh's 86 s; a local
+file:// clone failing after 48 s with `den: wire: limit` then
+`den: wire: invalid`).
+
+What the metal saw (a stick booting kmain_console; root the in-memory tree;
+den at user/den.pin, ac2332b; burrow at user/burrow.pin, 0d98ce9):
+pelt (12,670 objects, a 4.4 MB pack, 83 refs) cloned over ssh in 86 s and
+over https in 85 s; git on another machine in 2.4 s.
+
+What the pinned den does for a clone (read from den's tree at ac2332b, the
+org's own code): wiregit/fetch.lu's fetch_view reads the whole response,
+decodes the whole pack in memory (wiregit/objects.lu import_pack), then
+installs every object LOOSE through object/store.lu's write_object:
+repository.open (realpath, four probes, the config read and parsed), the
+object's SHA-1, a probe for an existing copy (an open that misses, then a
+look in objects/pack), mkdir -p, deflate, an O_EXCL temporary, write,
+fsync, close, link, unlink, and an fsync of two directories: about 25
+system calls an object. Then closure() reads every reachable object back
+with a bound of 10,000 objects. den trunk since vc23 (474a926) streams the
+pack to disk and indexes it instead (den#61); the 1.32x-git figure on Linux
+is that den, not the stick's.
+
+P1. The dominant cost is den's per-object work at the pin, through PAX's
+    system calls and memory on one CPU. It is transport-independent, which
+    is why https and ssh agree to a second and file:// spends 48 s with no
+    network at all. Not the pipe hand-off (suspect 1), not TCP (2), not
+    crypto (3), not fork (4), not the disk (5: the stick's root is the
+    tree, and fsync of a tree inode answers 0 at once).
+
+P2. The pinned den cannot clone pelt on any kernel: closure()'s
+    `out.len >= 10000` bound fires at the 10,000th of pelt's 12,670
+    reachable objects. Over file:// the serving side (upload-pack's
+    closure) fires it, `den: wire: limit`, and the client reports the cut
+    stream, `den: wire: invalid`: the 860's two lines. Over https and ssh
+    the client's closure after the import fires it, and the failed clone
+    removes its directory. Predicted the same on Linux at this pin; den
+    trunk passes. (If the 860's https clone printed no error, P2 is wrong
+    for https and the 85 s is a whole clone.)
+
+P3. The split for pelt under KVM, PAX on one CPU, the pinned den, https from
+    a loopback fixture (seconds; the Linux 1-vCPU guest in brackets):
+      connect, TLS, ls-refs                      < 0.5      [< 0.2]
+      the pack over TCP, TLS decrypted          0.5 - 3     [< 0.5]
+      the pack decoded in memory (user time)      2 - 6     [1.5 - 5]
+      12,670 loose installs (~320,000 calls)     30 - 50    [2 - 5]
+      closure to the bound (~50,000 calls)       10 - 20    [0.5 - 2]
+      the failed clone's removal                  2 - 5     [< 1]
+    Total 50 - 80 s on PAX, 10 - 20x the Linux guest for the same den.
+    den's own CPU (user + system) at least 85 % of the wall on PAX: it is
+    working, not waiting. System time at least half of den's CPU on PAX,
+    under a fifth on Linux.
+
+P4. Per system call PAX costs 100 - 200 us on that mix against Linux's
+    2 - 10 us. The suspects inside, ranked:
+      (a) memory: anonymous memory zero-filled and mapped at the call
+          (mmap, brk up), where Linux maps lazily, and a walk of the whole
+          user page table before every munmap and brk down (px88's
+          note_peak): paid on each of glibc malloc's map/unmap or
+          grow/trim cycles, which a per-object allocation of 64 KiB and up
+          makes; and the frames given back one by one;
+      (b) path walks and directory records in kernel/tree (realpath's
+          lstat per component, objects/xx lookups), and the open-file
+          table;
+      (c) the system-call path itself (the bracket, the drain after every
+          call, wake_pipes' scan of 64 slots).
+    (a) first.
+
+P5. The microbenchmarks, PAX against the Linux 1-vCPU guest under the
+    same QEMU and KVM:
+      pipe ping-pong, 1 B: PAX within 3x the guest's round trips a second
+        (a blocked reader runs as soon as the writer blocks; no quantum is
+        waited out); 64 KiB: within 3x;
+      TCP from the host into the guest: PAX 10 - 20 MB/s (px89: 15.1 MB/s
+        in over igb) against the guest's 100+; with `netpoll` (the metal
+        I225's polled path) at most 64 KiB a tick, about 6 MB/s;
+      chacha20-poly1305 (burrow) and wolf-std's TLS records in-process:
+        the same on both kernels (user code), 20 - 100 MB/s;
+      small-file create+write+fsync+close: PAX 3 - 10x slower;
+      a malloc/free cycle of 256 KiB (map and unmap): PAX 20x+ slower.
+
+P6. The fix in PAX, if P4 (a) holds: keep the peak without the whole walk
+    (count the pages as they are mapped and unmapped: R-px88-3's B) and
+    give frames back without per-page cost; possibly anonymous memory on
+    first touch. Predicted: the pinned den's pelt work 2 - 4x faster on
+    PAX, still several times the guest, the rest den's own (the loose
+    path), which is den's to change (move the pin to den trunk: a den or
+    pax-pin lane, not this one).
+
+P7. With den trunk (streamed pack, no loose installs) the same clone is
+    5 - 10x faster on PAX than with the pin, and TCP's 64 KiB window (no
+    window scaling) and the polled I225 become the largest PAX share for
+    den's own 311 MB pack ("a few minutes": 311 MB at 2 - 6 MB/s is
+    50 - 150 s).
+
+P8. SMP is not the next lever for pelt: one CPU costs at most 2x here
+    (git's delta resolution is the only parallel stage).
