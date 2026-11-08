@@ -130,3 +130,47 @@ R3. Under KVM with QEMU's user network (its own TCP as the peer, igb on
     delay): there a loss per window, recovered by the peer's retransmission
     timer (PAX has no SACK, and its receive ring is the advertised window),
     is the predicted mechanism: about a second a 64 KiB window.
+
+Revision 2, 2026-11-08T05:42Z: a correction from the orchestrator, before any
+measurement on PAX. The 860's stick does not carry user/den.pin's den: it was
+built by `tools/mkdistribution --latest` at pax 13b95d2e and carries den
+474a926 (den trunk at vc23's merge: the streamed indexer, den#61) and burrow
+0d98ce9. Its https clone of pelt completed in 85 s with no error line; its
+ssh clone left read-only pack files after 86 s; its file:// clone of the
+https clone's pelt printed `den: wire: limit` then `den: wire: invalid` after
+48 s. Revision 1's R1 is withdrawn (its premise was the pinned den, which the
+stick does not run). The pinned den's refusal of pelt (its stream's
+10,000-object bound, on Linux in 1 - 3 s) stays a finding about the old pin.
+The rows from here on run den 474a926 (cc00cd9a is the pin's build; 474a926's
+is 070cc093).
+
+What den 474a926 does for a clone: the response streams to disk as it
+arrives and is indexed there (a pack, its .idx and .rev), the closure checked
+against the received pack (closure_received), then the checkout writes
+pelt's 9,685 files (23 MB) through the index transaction. Its upload-pack
+(PAX's /bin/git-upload-pack runs `den upload-pack`) still walks closure()
+with the 10,000-object bound.
+
+S1. file:// at 474a926: den's own upload-pack refuses pelt on ANY kernel
+    (closure's `out.len >= 10000`: `den: wire: limit` from the server,
+    `den: wire: invalid` from the client), so the 860's file:// failure is
+    den's, to be filed in den. On Linux the same refusal comes in under 5 s;
+    PAX's 48 s is the time its closure walk took to read 10,000 objects
+    out of the https clone's pack: about 4.8 ms an object read.
+S2. The 85 s is dominated by den's file work on PAX, not by the network:
+    reading objects back out of the received pack (indexing, then each of
+    the checkout's 9,685 blobs) and writing the checkout's files, at a
+    per-call cost on PAX of 100 us to several ms against Linux's few us.
+    The same per-object read cost as S1's walk. Split predicted for the
+    860's 85 s: the pack's transfer under 10 s, indexing 10 - 25 s, the
+    checkout 50 - 70 s.
+S3. Under KVM on one CPU with QEMU's user network, den 474a926's https
+    clone of pelt on PAX takes 40 - 90 s (it reproduces: the cost is not the
+    metal's polled I225 or the Internet's round trip); in the 1-vCPU Linux
+    guest 2 - 6 s; ssh within 20 % of https on both; git:// a few seconds
+    less than https on PAX.
+S4. P4's suspect (a) (anonymous memory at the call and the page-table walk
+    before every unmap) and a cost per read or map of a file in kernel/tree
+    are the two candidates for S2's per-object cost; the microbenchmarks and
+    px88's per-process accounting choose between them. The pipe hand-off (P1's
+    suspect 1) is not it: https has no pipe and costs the same as ssh.
