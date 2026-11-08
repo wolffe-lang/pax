@@ -93,6 +93,21 @@ def check(blob):
         assert rows['bin/'+name][1] == data, 'image-burrow-'+name
         assert rows['bin/'+name][0][1] == 0o100755 and rows['bin/'+name][0][2:4] == [0, 0], 'image-burrow-'+name+'-mode'
         assert any(line.split()[:2] == [built, sha(data)] for line in (inputs/'burrow'/'sums.txt').read_text().splitlines()), 'image-burrow-sums-'+name
+    # tb03: trash's five commands, byte for byte as tools/mktrash built them
+    # (stripped by trash's own build, and not again), 0755, root's, each its
+    # builder's sums and the digest and size user/trash.pin names.
+    pinned = {}
+    for line in (ROOT/'user/trash.pin').read_text().splitlines() if (ROOT/'user/trash.pin').exists() else []:
+        words = line.split()
+        if len(words) == 4 and words[0] == '#' and words[1].startswith('trash'):
+            pinned[words[1]] = words[2:4]
+    for name in ('trash', 'trash-list', 'trash-restore', 'trash-rm', 'trash-empty'):
+        assert 'bin/'+name in rows, 'image-trash-missing-'+name
+        fields, data = rows['bin/'+name]
+        assert data == (inputs/'trash'/name).read_bytes(), 'image-trash-'+name
+        assert fields[1] == 0o100755 and fields[2:4] == [0, 0], 'image-trash-mode-'+name
+        assert any(line.split() == [name, sha(data), str(len(data))] for line in (inputs/'trash'/'sums.txt').read_text().splitlines()), 'image-trash-sums-'+name
+        assert pinned.get(name) == [sha(data), str(len(data))], 'image-trash-pin-'+name
     # px104 (R-px104-2): the root set den's TLS reads, tools/mkroots' bytes,
     # 0644, and /etc/shrc naming it; GitHub's published host key for ssh.
     assert rows['etc/ssl/certs/ca-roots.der'][1] == (inputs/'roots'/'ca-roots.der').read_bytes(), 'image-roots'
@@ -125,7 +140,7 @@ def check(blob):
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
