@@ -96,3 +96,37 @@ P7. With den trunk (streamed pack, no loose installs) the same clone is
 
 P8. SMP is not the next lever for pelt: one CPU costs at most 2x here
     (git's delta resolution is the only parallel stage).
+
+Revision 1, 2026-11-08T05:30Z: after the first black-box measurement on Linux
+(hasu 7.2.4, a container on two CPUs, den cc00cd9a at the pin, GitHub over
+https) and before any measurement on PAX. P1-P8 above stand as written, to
+be scored; these are added.
+
+Measured: `den clone https://github.com/wolffe-lang/pelt.git` exits 2 with
+`den: wire: limit` after 3.35 s (user 0.15 s, system 0.05 s); `den clone
+file://…` (git's own upload-pack serving) the same after 1.15 s. git clones
+it in 2.1 s. The bound is den's pack stream's (src/pack/stream.lu:
+`count > 10000 || data.len > 134217728`), read from the pack's header after
+the whole response has arrived, before any object is decoded. pelt's pack
+holds 12,670. So P2 holds in its claim (the pinned den clones pelt on no
+kernel) but not in its place (the stream's bound, not closure's), and P1 is
+wrong for https and ssh: the pinned den never reaches its per-object work.
+
+R1. The metal's 85 s (https) and 86 s (ssh) are the time to RECEIVE pelt's
+    4.4 MB pack on PAX, then the bound: about 50 KB/s, where Linux receives
+    it in under 3 s. They measure PAX's byte transport (TCP, or the wait
+    and wake under it), not den's objects, not the disk.
+R2. The 48 s of file:// is den's own upload-pack (/bin/git-upload-pack runs
+    `den upload-pack`) walking the closure to its 10,000 bound (`den: wire:
+    limit` is the server's line, `den: wire: invalid` the client's), each
+    packed read parsing the pack's index again (vc24's subject): den's own
+    work, CPU-bound, and slow on Linux too. Predicted on Linux with den's
+    upload-pack: 5 - 20 s for the same failure.
+R3. Under KVM with QEMU's user network (its own TCP as the peer, igb on
+    MSI-X), PAX receives the pack in 1 - 5 s (px89: 15 MB/s into PAX over
+    igb), so the metal's 50 KB/s does not reproduce there. With `netpoll`
+    (the I225's polled path) 2 - 10 s. The metal rate needs a Linux TCP peer
+    with an internet round trip (a tap to the container's namespace, with
+    delay): there a loss per window, recovered by the peer's retransmission
+    timer (PAX has no SACK, and its receive ring is the advertised window),
+    is the predicted mechanism: about a second a 64 KiB window.
