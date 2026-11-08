@@ -22,9 +22,13 @@
 //!   and an initial count of 0xffffffff, counted down across 20 ms of
 //!   the clock, and the rate (counts per second) is that difference over
 //!   the elapsed nanoseconds; each end reads the count and then the clock
-//!   back to back (`pair`, px107), after one pair to warm the path, so
-//!   the reads' own time cancels; a count that did not move, or a rate
-//!   under 100 Hz, panics by name;
+//!   back to back (`triple`, px107), after one read to warm the path, so
+//!   the reads' own time cancels; windows are measured until two in a row
+//!   agree within 0.1%, a window whose clock interval is not the PM
+//!   timer's within 0.5% is set aside, each such window and disagreement
+//!   is a `timer: LAPIC calibration: …` line, and after six the median of
+//!   the last three kept is taken (`calibrate`); a count that did not
+//!   move, or a rate under 100 Hz, panics by name;
 //! - the LVT timer is set periodic, vector 32, unmasked, with an initial
 //!   count of rate / 100: one tick every 10 ms;
 //! - one line names the clock and the rate: `timer: LAPIC calibrated by
@@ -147,13 +151,7 @@ pub fn start() {
     apic.write(0x320, (0x10000 | MASTER_BASE) as u32)
     apic.write(0x3e0, 3)
     apic.write(0x380, 0xffffffff)
-    let (_c, _t) = pair() // px107: once first, so both ends run the same code the same way
-    let (before, begin) = pair()
-    clock.wait_us(20000)
-    let (after, end) = pair()
-    let duration = end - begin
-    if duration == 0 || after >= before { panic.fail("timer: LAPIC calibration did not count", after) }
-    let rate = (before - after) * 1000000000 / duration
+    let rate = calibrate()
     if rate < 100 || rate / 100 > 0xffffffff { panic.fail("timer: LAPIC calibration rate", rate) }
     unsafe { measured_hz = rate; lapic_started = true }
     apic.write(0x320, (0x20000 | MASTER_BASE) as u32)
@@ -162,17 +160,92 @@ pub fn start() {
     report()
 }
 
-/// px107 (pax#308): the local APIC timer's current count and kernel/
-/// clock's nanoseconds, read back to back by the same code. Both ends of
-/// the calibration are a pair, so the time between a pair's two reads is
-/// in both intervals and cancels. Read the old way (the clock, the count;
-/// the count, the clock) it was in the clock's interval alone: under
-/// emulation, where each read is a trip to the emulator, the rate came
-/// out up to 2% low, the tick that much short, and every timeout counted
-/// in ticks that much early (`drift`).
-fn pair() -> (u64, u64) {
+/// px107 (pax#308): the local APIC timer's current count, kernel/clock's
+/// nanoseconds and the PM timer read directly (0 when there is none),
+/// back to back by the same code. Both ends of a calibration window are
+/// one, so the time between its reads is in both intervals and cancels.
+/// Read the old way (the clock, the count; the count, the clock) it was in
+/// the clock's interval alone: under emulation, where each read is a trip
+/// to the emulator, the rate came out up to 2% low, the tick that much
+/// short, and every timeout counted in ticks that much early (`drift`).
+fn triple() -> (u64, u64, u64) {
     let c = apic.read(0x390)
-    (c, clock.now_ns())
+    let t = clock.now_ns()
+    (c, t, clock.pm_now())
+}
+
+const WINDOW_US: u64 = 20000 // one calibration window
+const WINDOWS: u64 = 6 // at most, before the median of the last three kept
+
+/// One window: the LAPIC timer's counts, the clock's nanoseconds and,
+/// when a PM timer stands beside the HPET, the PM timer's (else 0).
+fn window() -> (u64, u64, u64) {
+    let (c0, t0, p0) = triple()
+    clock.wait_us(WINDOW_US)
+    let (c1, t1, p1) = triple()
+    if t1 <= t0 || c1 >= c0 { panic.fail("timer: LAPIC calibration did not count", c1) }
+    (c0 - c1, t1 - t0, if clock.pm_beside() { clock.pm_between(p0, p1) } else { 0 })
+}
+
+fn apart(a: u64, b: u64) -> u64 { if a >= b { a - b } else { b - a } }
+
+fn median(a: u64, b: u64, c: u64) -> u64 {
+    if (a <= b && b <= c) || (c <= b && b <= a) { return b }
+    if (b <= a && a <= c) || (c <= a && a <= b) { return a }
+    c
+}
+
+/// px107 (pax#308): the LAPIC timer's counts a second, from 20 ms windows
+/// until two in a row agree within 0.1% (their mean). A window whose clock
+/// interval is not the PM timer's within 0.5% is set aside: one counter
+/// stood still or jumped inside it (a boot under KVM once calibrated at
+/// 1.433 times the rate, and its clock, sleeps and timeouts ran at 0.70
+/// of real time). After six, the median of the last three kept. Every
+/// window set aside and every pair that disagrees is a boot line of its
+/// own, `timer: LAPIC calibration: …`.
+fn calibrate() -> u64 {
+    let (_c, _t, _p) = triple() // once first, so every window's ends run the same code the same way
+    var last: u64 = 0 // the window before's rate, when it was kept
+    var a: u64 = 0
+    var b: u64 = 0
+    var c: u64 = 0
+    var r: u64 = 0
+    var k: u64 = 0
+    var loud = false
+    while k < WINDOWS {
+        k += 1
+        let (counts, ns, pm) = window()
+        r = counts * 1000000000 / ns
+        if pm != 0 && apart(ns, pm) * 200 > ns {
+            log.put("timer: LAPIC calibration: window "); log.dec(k as int); log.put(" set aside: ")
+            log.dec(r as int); log.put(" Hz, the clock "); log.dec((ns / 1000) as int)
+            log.put(" us against the PM timer's "); log.dec((pm / 1000) as int); log.line(" us")
+            last = 0
+            loud = true
+            continue
+        }
+        if last != 0 && apart(r, last) * 1000 <= last {
+            if loud {
+                log.put("timer: LAPIC calibration: windows "); log.dec((k - 1) as int); log.put(" and ")
+                log.dec(k as int); log.put(" of "); log.dec(WINDOWS as int); log.line(" agree")
+            }
+            return (r + last) / 2
+        }
+        if last != 0 {
+            log.put("timer: LAPIC calibration: windows "); log.dec((k - 1) as int); log.put(" and ")
+            log.dec(k as int); log.put(" disagree: "); log.dec(last as int); log.put(" and ")
+            log.dec(r as int); log.line(" Hz")
+            loud = true
+        }
+        a = b
+        b = c
+        c = r
+        last = r
+    }
+    let m = if a != 0 { median(a, b, c) } else { if c != 0 { c } else { r } }
+    log.put("timer: LAPIC calibration: no two windows in a row agreed in "); log.dec(WINDOWS as int)
+    log.put("; took "); log.dec(m as int); log.line(" Hz")
+    m
 }
 
 pub fn report() {
