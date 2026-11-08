@@ -17,6 +17,12 @@
  *   bench tcp ADDR PORT      connect(2), read(2) to the end: MB/s
  *   bench cpu                a user-mode integer loop (no system call)
  *
+ * Every row first pins itself (and so pingpong's child) to the CPU it is
+ * on (sched_getcpu(3), sched_setaffinity(2)): PAX has one CPU, and a
+ * Linux reference on one CPU is the fair comparison. A kernel that answers
+ * neither (PAX at px108: sched_setaffinity is not served) runs unpinned;
+ * the row's line says `cpu <n>` or `cpu -`.
+ *
  * Each row repeats its step in batches until at least a second has passed
  * on CLOCK_MONOTONIC (PAX's moves in 10 ms ticks, pax#299), then prints
  *
@@ -26,7 +32,9 @@
  * RUSAGE_CHILDREN for pingpong's child. Exit 0, 1 on a failed call (named),
  * 2 on a usage error. Written from the man pages of the calls named.
  */
+#define _GNU_SOURCE
 #include <errno.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -68,9 +76,22 @@ static struct usage usage_now(int children) {
     return u;
 }
 
+static int g_cpu = -1;
+
+static void pin(void) {
+    int c = sched_getcpu();
+    if (c < 0) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(c, &set);
+    if (sched_setaffinity(0, sizeof set, &set) == 0) g_cpu = c;
+}
+
 static void report(const char *name, long n, double s, struct usage a, struct usage b) {
-    printf("bench %s: %ld in %.3f s: %.0f /s (%.2f us each); user %.3f sys %.3f vcs %ld ics %ld\n", name, n, s,
-           (double)n / s, s * 1e6 / (double)n, b.user - a.user, b.sys - a.sys, b.vcs - a.vcs, b.ics - a.ics);
+    char cpu[16];
+    if (g_cpu >= 0) snprintf(cpu, sizeof cpu, "%d", g_cpu); else snprintf(cpu, sizeof cpu, "-");
+    printf("bench %s: %ld in %.3f s: %.0f /s (%.2f us each); user %.3f sys %.3f vcs %ld ics %ld cpu %s\n", name, n, s,
+           (double)n / s, s * 1e6 / (double)n, b.user - a.user, b.sys - a.sys, b.vcs - a.vcs, b.ics - a.ics, cpu);
     fflush(stdout);
 }
 
@@ -249,14 +270,15 @@ static int tcp(const char *addr, const char *port) {
     }
     double t = now() - t0;
     struct usage u1 = usage_now(0);
-    printf("bench tcp: %ld bytes in %.3f s: %.2f MB/s; user %.3f sys %.3f vcs %ld ics %ld\n", total, t,
-           (double)total / t / 1e6, u1.user - u0.user, u1.sys - u0.sys, u1.vcs - u0.vcs, u1.ics - u0.ics);
+    printf("bench tcp: %ld bytes in %.3f s: %.2f MB/s; user %.3f sys %.3f vcs %ld ics %ld cpu %d\n", total, t,
+           (double)total / t / 1e6, u1.user - u0.user, u1.sys - u0.sys, u1.vcs - u0.vcs, u1.ics - u0.ics, g_cpu);
     close(fd);
     return 0;
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) goto usage;
+    pin();
     const char *w = argv[1];
     if (strcmp(w, "syscall") == 0) { run("syscall", s_syscall, 1000); return 0; }
     if (strcmp(w, "cpu") == 0) { run("cpu", s_cpu, 1000); return 0; }
