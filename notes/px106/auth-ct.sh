@@ -41,6 +41,9 @@ mkdir -p /srv/lobo; chown 990:990 /srv/lobo
 while IFS=: read -r n f _; do [ "$f" = '!' ] || usermod -p "$f" "$n"; done < "$in/shadow.txt"
 for f in /etc/pam.d/*; do sed -i -E '/pam_(env|umask|limits|mail|motd|lastlog|loginuid|keyinit)\.so/d' "$f"; done
 : > /etc/environment
+# R-px106-6 (B3): the admin session runs on each side's own shipped policy, Ubuntu's stock
+# /etc/sudoers (kept here before the sessions' policy replaces it) and PAX's user/sudo/sudoers.
+cp /etc/sudoers /root/sudoers.stock
 cp "$in/sudoers" /etc/sudoers; chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers
 rm -rf /etc/sudoers.d; mkdir -m 0755 /etc/sudoers.d
 mkdir -p /var/log
@@ -54,6 +57,12 @@ cp /etc/shadow /root/shadow.start
   grep -E '^(root|pax|lobo|bob):' /etc/passwd; } > "$out/setup.txt"
 session() { # name program
     local s=$1 prog=$2
+    # admin (R-px106-6, B3): pax in group sudo, the side's own shipped policy.
+    if [ "$s" = admin ]; then
+        usermod -aG sudo pax
+        if [ "$mode" = pax ]; then cp "$in/sudoers.shipped" /etc/sudoers; else cp /root/sudoers.stock /etc/sudoers; fi
+        chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers
+    fi
     cp /root/shadow.start /etc/shadow; chmod 640 /etc/shadow
     [ "$mode" != pax ] || chmod 600 /etc/shadow
     [ "$s" != login-first ] || rm -f /etc/shadow
@@ -64,12 +73,17 @@ session() { # name program
     stat -c '%a %U:%G' /etc/shadow > "$out/$s.shadow-mode" 2>/dev/null || echo none > "$out/$s.shadow-mode"
     cp /etc/shadow "$out/$s.shadow" 2>/dev/null || : > "$out/$s.shadow"
     cp /var/log/sudo.log "$out/$s.sudo.log" 2>/dev/null || : > "$out/$s.sudo.log"
+    if [ "$s" = admin ]; then
+        gpasswd -d pax sudo > /dev/null
+        cp "$in/sudoers" /etc/sudoers; chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers
+    fi
 }
 session pw /usr/bin/pelt
 session login /usr/bin/login
 session login-max /usr/bin/login
 [ ! -f "$in/login-time.keys" ] || session login-time /usr/bin/login
 [ "$mode" != pax ] || session login-first /usr/bin/login
+session admin /usr/bin/pelt
 # No terminal: sudo -S and su reading standard input (setsid: no controlling terminal).
 cp /root/shadow.start /etc/shadow; [ "$mode" != pax ] || chmod 600 /etc/shadow
 rm -rf /run/sudo /var/run/sudo; rm -f /var/log/sudo.log
