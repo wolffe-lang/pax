@@ -294,7 +294,8 @@ int main(int argc, char **argv) {
         if (mkdir(g_dir, 0777) < 0 && errno != EEXIST) die("mkdir DIR");
         if (w[0] == 'm') { run("miss", s_miss, 100); return 0; }
         g_sync = !(argc >= 4 && strcmp(argv[3], "nosync") == 0);
-        /* At most 6,000 objects a row (two rows: 12,000 and their directories): PAX's file tree holds 16,384 inodes in all
+        /* At most 6,000 objects a row (two rows: 12,000 and their
+         * directories): PAX's file tree holds 16,384 inodes in all
          * (kernel/tree), and the row is a rate, not a capacity. */
         run_capped(g_sync ? "files" : "files nosync", s_files, 64, 6000);
         return 0;
