@@ -239,7 +239,11 @@ export fn kmain() {
     // and timeouts ran at 0.70 of real time (tests/mpx6-metal's
     // timer-stall leg).
     if boot_info.cmdline_has("metal_timer_stall_nopm") { clock.test_no_pm() } // the agreement rule alone
-    if boot_info.cmdline_has("metal_timer_stall") || boot_info.cmdline_has("metal_timer_stall_nopm") {
+    // timer-stall-shared: the PM timer answers from the clock, so it stands
+    // still with it, as one stall of the emulator could hold both reads;
+    // the PM timer cannot tell, and the next window must.
+    if boot_info.cmdline_has("metal_timer_stall_shared") { clock.test_pm_follows_clock() }
+    if boot_info.cmdline_has("metal_timer_stall") || boot_info.cmdline_has("metal_timer_stall_nopm") || boot_info.cmdline_has("metal_timer_stall_shared") {
         let fs = clock.hpet_period_fs()
         check(fs != 0, "the clock reads the HPET")
         clock.test_reading(clock.counter() + 8600000 * 1000000 / fs)
@@ -252,7 +256,7 @@ export fn kmain() {
     if boot_info.cmdline_has("metal_clock_behind") { behind() }
     if boot_info.cmdline_has("metal_clock_torn") { torn() }
     if boot_info.cmdline_has("metal_clock_32") || boot_info.cmdline_has("metal_clock_pmwrap") { rollover() }
-    if boot_info.cmdline_has("metal_timer_stall") || boot_info.cmdline_has("metal_timer_stall_nopm") { tick_rate() }
+    if boot_info.cmdline_has("metal_timer_stall") || boot_info.cmdline_has("metal_timer_stall_nopm") || boot_info.cmdline_has("metal_timer_stall_shared") { tick_rate() }
     check(acpi.tables() > 0, "ACPI checked tables")
     let port = acpi.pm_port()
     check(port != 0, "independent PM rate reference")
