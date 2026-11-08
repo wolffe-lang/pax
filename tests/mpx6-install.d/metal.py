@@ -667,7 +667,7 @@ def main():
         m.type('root\n')
         # px106: /bin/login; every account locked, so root comes in with no password and the console says so.
         t = m.wait(r'^.*[$#] *$', 'M7-disk-login', 120, last=True)
-        need(m.unwrapped(t), 'PAX: no account here has a password, so root logs in without one; set one with passwd.', 'M7-disk-login')
+        need(m.unwrapped(t), 'PAX: no password is set for root or for group sudo, so root logs in without one; set one with passwd.', 'M7-disk-login')
         s = m.command('cat /root/px78-witness', 'M8-witness-read')
         need(s, nonce, 'M8-witness-read')
         s = m.command('ls /home', 'M8-witness-read')

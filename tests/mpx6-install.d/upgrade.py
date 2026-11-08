@@ -495,7 +495,7 @@ def login(m, row, timeout=900, password=None, first_boot=None, user='root', prom
     return s
 
 
-FIRST_BOOT = 'PAX: no account here has a password, so root logs in without one; set one with passwd.'
+FIRST_BOOT = 'PAX: no password is set for root or for group sudo, so root logs in without one; set one with passwd.'
 PW = {'root': secrets.token_hex(6), 'wolf': secrets.token_hex(6), 'wrong': secrets.token_hex(6)}
 
 
