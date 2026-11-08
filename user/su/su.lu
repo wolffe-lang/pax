@@ -392,7 +392,10 @@ fn authenticate(name: str) -> bool {
         }
     } else {
         eprint_raw("Password: ")
-        got = secret_read(0, -1, false, 0) else |_| {
+        // a terminal on standard input but no controlling one: the echo goes off there, so the
+        // line is ended on standard error, as Linux's su ends it (measured: setsid under script(1))
+        let isatty = os_isatty(0) else false
+        got = secret_read(0, if isatty then 2 else -1, false, 0) else |_| {
             ended = true
             ""
         }
