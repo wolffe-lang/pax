@@ -62,6 +62,15 @@
 #   D9 (session) kmain_session: the lease before `run 1:`, netstate's
 #      read, `PAX: init /bin/netstate ended with status 0`.
 #   D10 the end: `halt`, no PANIC, qemu-halt holds the machine halted.
+#   D11 (px107, pax#308) the tick clock: the kernel's last `timer: <n>
+#      ticks of 10 ms in <us> us by <clock> since the mark` line, the
+#      ticks from the lease wait to the end against kernel/clock over the
+#      same time, no more than 0.2% and one tick ahead. kernel/dhcp counts
+#      its lease, T1 and T2 in ticks, so a tick clock ahead runs them
+#      early: 0.83% over a 120 s lease puts the expiry's DISCOVER a second
+#      early (D1). Behind is said, not held: it is a tick too long or
+#      ticks lost while interrupts were off (tests/mpx6-metal's
+#      timer-stall holds the tick's length).
 #
 # The tap ways need ip(8) and dnsmasq(8) and root (as root, or with
 # --sudo-able `sudo -n`): SKIPPED LOUDLY without them unless
@@ -389,6 +398,17 @@ one() { # tier leg way
         say "PASS D10 $L: halted ($(tail -n 1 "$log.verdict" | cut -c1-120))"
     else
         bad "D10 $L: qemu-halt $hrc ($(tail -n 1 "$log.verdict" | cut -c1-160)); $(grep -m1 'PANIC' "$norm")"
+    fi
+
+    # --- D11: the tick clock against kernel/clock (px107, pax#308) ----------------------
+    local dl
+    dl=$(grep -E '^timer: [0-9]+ ticks of 10 ms in [0-9]+ us by ' "$norm" | tail -n 1)
+    if [ -z "$dl" ]; then
+        bad "D11 $L: no 'timer: <n> ticks of 10 ms in <us> us by <clock>' line"
+    elif python3 -c 'import sys; w = sys.argv[1].split(); n, us = int(w[1]), int(w[7]); sys.exit(0 if n * 10000 - us <= us * 0.002 + 10000 else 1)' "$dl"; then
+        say "PASS D11 $L: ${dl#timer: }"
+    else
+        bad "D11 $L: ${dl#timer: }; ahead by more than 0.2% and one tick"
     fi
 }
 
