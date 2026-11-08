@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The clock reads forward (px107, pax#293).** `clock.now_ns` no longer panics
+  `overflow ./clock/clock.lu:313` in a long soak, and no longer jumps 42.9 s
+  ahead first. QEMU's HPET answers one 8-byte load of its 64-bit main counter as
+  two 4-byte reads, the low half first, so a load across a rollover of the low
+  word read 2^32 ticks ahead and the next one 2^32 behind (measured: 14% of
+  forced crossings under TCG, 0.5% under KVM). The clock now reads a 64-bit HPET
+  high, low, high until the highs agree, as IA-PC HPET 1.0a §2.4.7 says; takes a
+  reading of a 64-bit counter below the last as no time passing, counted, while
+  one of a narrower counter still counts forward across its rollover; and bounds every
+  step's arithmetic, so no overflow is left to trap. A session kernel prints one
+  `clock:` line at its end when any reading was refused. Four new legs in
+  `tests/mpx6-metal` (`clock-behind`, `clock-torn`, `clock-32`, `clock-pmwrap`)
+  hold it, each red first where the fix is.
+
 - **Push from the console (px104).** den pushes to GitHub from the console of
   every image, over HTTPS and over SSH. Names resolve: the kernel now answers
   what a C library's resolver asks of a datagram socket (`sendmmsg`, SOL_IP's
