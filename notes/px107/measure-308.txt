@@ -175,3 +175,41 @@ line (tests/mpx3-threads' probes boot, KVM, four boots each, alternating):
   58a2c797 (paired windows)              211, 212, 213, 214 ms  (mean 212.5)
 So it costs 6.25 ms on that boot, less than the 20 ms the second window
 takes. Where the rest went is not measured here.
+
+9. The high boots' trigger, looked for under host I/O (KVM)
+
+The install image's count: 3 of 8 boots of its kernel calibrated far high
+(89,527,688, 73,146,458 and 76,667,915 Hz), each the first boot of a disk
+the host had just rewritten (files written with debugfs, the partition
+copied back) while the host was still writing; 27 suite boots of the same
+sources and 13 of the image before read normal. The shape to look for: the
+emulated counters' reads standing still behind a host I/O stall while the
+in-kernel LAPIC counts on.
+
+  m6a  a 2 GiB write with fsync looping the whole time, the guest's 512 MiB
+       virtio disk rewritten through the page cache before each boot;
+       kmain_metal's plain leg, 12 boots each:
+         584c5313   62,469,491-62,474,570 Hz, none high
+         4f485e76   62,499,618-62,501,014 Hz and one 62,530,171 (+0.05%,
+                    inside the 0.1% agreement, no line)
+  m6b  two such writers, the guest's disk a 64 GiB sparse image on AHCI
+       with 2 GiB rewritten 1 GiB into it before each boot (a partition
+       copied back); stopped after two rounds for the host's free space:
+         584c5313   62,472,345 and 62,473,236 Hz
+         4f485e76   62,526,641 Hz
+
+None high: under these loads the stick's code calibrated normally in 14
+boots, and the trigger is not reproduced. The load did reach the emulated
+counters: a KVM boot run beside m6b had its HPET refused by the clock's
+own check against the PM timer (`no window measured cleanly against the
+PM timer in 3; refused`, 192 brackets taken again), the shape of pax#314.
+
+A stall of the emulator could hold the HPET's read and the PM timer's
+alike, so the PM timer would not see it. timer-stall-shared has the PM
+timer answer from the clock (it stands still with it); the agreement rule
+must catch the stalled window (lt5, at the head):
+  KVM  windows 1 and 2 disagree: 89258253 and 62500293 Hz; 2 and 3 agree;
+       calibrated 62,500,174 Hz; 50 ticks in 499,845 us
+  TCG  windows 1 and 2 disagree: 87394974 and 62500518 Hz; 2 and 3 agree;
+       calibrated 62,501,146 Hz; 50 ticks in 499,443 us
+and timer-stall and timer-stall-nopm green beside it in the same take.
