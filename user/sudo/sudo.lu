@@ -1235,15 +1235,27 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
     var who = copy me
     var gs = copy my_groups
     // px106: the caller's password, unless one of its rules says NOPASSWD (sudoers(5)'s listpw=any)
+    // Linux's names the words as typed after `list` (measured: `list id`, `list /usr/bin/id a b`)
+    let listed = if a.words.len > 0 then "list {str_join(" ", a.words)}" else "list"
     if (os_uid() else 1) != 0 && !any_nopasswd(pol, me, my_groups, group_text) {
-        let why = authenticate(pol, a, me, host, "root")
+        let ruled = has_rule(pol, me, my_groups, group_text)
+        // An account in no rule is asked every time, a timestamp neither read nor written (Linux's
+        // asks twice in a row, measured), and refused after its password as Linux's is.
+        var ask = copy a
+        if !ruled {
+            ask.reset = true
+        }
+        let why = authenticate(pol, ask, me, host, "root")
         if why.len > 0 {
-            let reason = if has_rule(pol, me, my_groups, group_text) then why else "user NOT in sudoers"
+            let reason = if ruled then why else "user NOT in sudoers"
             if !(a.noninter && reason == "user NOT in sudoers") {
-                // Linux's names the words as typed after `list` (measured: `list id`, `list /usr/bin/id a b`)
-                let listed = if a.words.len > 0 then "list {str_join(" ", a.words)}" else "list"
                 let _l = log_line(pol.wrap, me.name, reason, os_cwd() else "/", "root", "", listed, true)
             }
+            return 1
+        }
+        if !ruled && a.other.len == 0 {
+            eprint("Sorry, user {me.name} may not run sudo on {host}.")
+            let _l = log_line(pol.wrap, me.name, "command not allowed", os_cwd() else "/", "root", "", listed, true)
             return 1
         }
     }
