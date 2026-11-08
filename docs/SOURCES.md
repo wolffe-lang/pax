@@ -2053,3 +2053,19 @@ source; no kernel's, firmware's or driver's.
   `tools/install-den`, `tools/distribution-root`, `tests/mpx4-console-net`, `tests/mpx5-den`, `user/install/upgrade.lu`
   (an edited file kept, the new one beside it as `.pax-new`).
 - No Linux source; no C library's, resolver's, ssh implementation's, TLS implementation's or Git's source.
+
+## px107 — the clock reads forward (pax#293)
+
+- **IA-PC HPET 1.0a** (Intel, October 2004; the PDF as fetched 2026-11-07, sha256 `93d98386…dab6`, the same
+  document px76 and px85 cite): §2.3.8 the main counter (rule 1, 32- and 64-bit accesses at 0F0h and 0F4h; rule 2,
+  writes only while halted; rule 4, a 32-bit counter's upper half reads 0; rule 5), §2.3.6 ENABLE_CNF, and §2.4.7
+  "Issues related to 64-bit Timers with 32-bit CPUs": the read of high, low, high again until the highs agree, and
+  its note that "some platforms may break the 64 bit read into two 32 bit reads".
+- **ACPI 6.5** §4.8.3.3 (the PM timer's 24 or 32 bits), as px85 cites it: the PM timer's rollover in `clock-pmwrap`.
+- **QEMU 8.2.2 as a black box**: its HPET's answer to one 8-byte load, two 4-byte reads with the low half first,
+  measured by putting the halted counter 20 us before a rollover of its low word 50,000 times and reading across
+  each (`notes/px107/measure.txt`, `notes/px107/measure.patch`); its PM timer's 24 bits (`acpi: … mask
+  0x0000000000ffffff`).
+- PAX's own `kernel/clock` (px76, px85), `kernel/kmain_metal`, `tests/mpx6-metal`, `tests/mpx5-users` (the rights
+  soak, booted as it boots it).
+- No kernel's, emulator's, firmware's or driver's source.
