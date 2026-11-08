@@ -105,6 +105,15 @@ the first Linux measurement (`e6ac5f45`), once after the orchestrator's correcti
 | den clone file://, git's upload-pack | 255.2 s | 67.2 s | 37.7 s | complete |
 | den clone file://, den's upload-pack | 54.5 s | 35.3 s | 19.1 s | `wire: limit`, `wire: invalid` |
 | git clone file:// | 0.54 s | 0.43 s | 0.11 s | complete |
+| den clone https, a second take on the disk | 294.9 s | 71.8 s | 42.3 s | complete |
+| den clone https into a tmpfs | 102.9 s | 66.3 s | 35.0 s | complete |
+| den clone --bare https into a tmpfs (no checkout) | 3.10 s | 1.73 s | 0.14 s | complete |
+| git clone https into a tmpfs | 2.16 s | 0.42 s | 0.07 s | complete |
+
+**Why the disk row's wall is 2.5 times its CPU:** into a tmpfs the same clone's wall is its CPU (103 s against 101 s),
+so the 190 s more on the disk are waits on the disk: den's 19,636 fsyncs (each checkout file, and its directory, is
+synced before the next). Without a checkout (`--bare`) den's clone is 3.1 s: the transfer, the index and the closure
+together cost about what git's whole clone does, and the checkout is about 100 s of the 103.
 
 `strace -f -c` of den's https clone: about 1.05 million calls, of them `brk` 195,504, `pread64` 257,259, `statx`
 216,264, `openat` 119,164, `close` 103,366, `getdents64` 39,086, `fsync` 19,636, `read` 19,604, `rename` 9,774,
@@ -164,7 +173,8 @@ section takes its table when it is in.
 ## 5. What is left, in order of size
 
 1. **den's own work** (den's): the checkout reads every blob with `object.read_object`, which parses the pack's index
-   again each time (vc24's subject). 70 s of user CPU on Linux for pelt, against git's 0.4 s. And den's upload-pack's
+   again each time (vc24's subject): about 100 s of the clone's 103 s on Linux in a tmpfs (66 s user, 35 s system),
+   against git's 2.2 s; `--bare`, 3.1 s. On a disk, den's 19,636 fsyncs add about 190 s of waiting. And den's upload-pack's
    10,000-object closure bound (den#73).
 2. **TCP's 64 KiB window** (R-px108-5): no window scaling, so a connection moves at most 64 KiB a round trip. 1.63 MB/s
    at 30 ms, and the I225 is polled once a tick on top. A 300 MB pack, den's own repository, spends about three minutes
