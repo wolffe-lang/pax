@@ -240,7 +240,9 @@ fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game], shadow: str
     }
     let accounts = account_table(passwd, p.user, false)?
     replace_config(tree, attrs, "/etc/passwd", accounts)?
-    replace_config(tree, attrs, "/etc/group", account_table(group, p.user, true)?)?
+    // px106 (R-px106-6 B3): the user in group sudo (gid 27), as Ubuntu's installer makes its first user.
+    let groups = sudo_member(account_table(group, p.user, true)?, p.user) else |_| { return invalid }
+    replace_config(tree, attrs, "/etc/group", groups)?
     let shadow_text = if shadow.len > 0 then shadow else locked_shadow(accounts, today())
     if fs_exists("{tree}/etc/shadow") { fs_remove("{tree}/etc/shadow") else |_| { return io } }
     durable_text("{tree}/etc/shadow", shadow_text)?
