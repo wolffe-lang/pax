@@ -28,6 +28,9 @@
 //! - one line names the clock and the rate: `timer: LAPIC calibrated by
 //!   HPET|PM|PIT divide16 <rate> Hz, tick 100 Hz vector 32; PIT IRQ
 //!   masked`.
+//! `drift` (px107, pax#308) prints the tick clock against the clock
+//! since `mark` (else since the tick was armed): what every timeout counted
+//! in ticks is off by.
 //! `tick` (kernel/interrupts, vector 32) counts, samples the clock (so a
 //! PIT-backed clock never misses its 54.9 ms wrap) and sends the local
 //! APIC its end of interrupt. `eoi` acknowledges an 8259 line at the
@@ -102,6 +105,10 @@ fn set_count(v: u64) {
 var spurious_seen: u64 = 0
 var lapic_started: bool = false
 var measured_hz: u64 = 0
+var armed_ns: u64 = 0 // px107: the clock when the periodic tick was armed (`drift`)
+var mark_ns: u64 = 0 // px107: the clock at `mark`, and the ticks then
+var mark_ticks: u64 = 0
+var marked: bool = false
 
 fn out(port: u16, v: u64) {
     // # Safety: io.S's OUT to an 8259 or 8254 port; v < 256.
@@ -149,6 +156,7 @@ pub fn start() {
     unsafe { measured_hz = rate; lapic_started = true }
     apic.write(0x320, (0x20000 | MASTER_BASE) as u32)
     apic.write(0x380, (rate / 100) as u32)
+    unsafe { armed_ns = clock.now_ns() }
     report()
 }
 
@@ -156,6 +164,43 @@ pub fn report() {
     log.put("timer: LAPIC calibrated by "); log.put(clock.name())
     log.put(" divide16 "); log.dec(unsafe { measured_hz } as int)
     log.line(" Hz, tick 100 Hz vector 32; PIT IRQ masked")
+}
+
+/// px107 (pax#308): where `drift` measures from, instead of the tick's
+/// arming: a kernel marks the end of its boot's work. A tick that comes
+/// while interrupts are off waits, and two that come in one such stretch
+/// are one: a boot that keeps them off for more than 10 ms at a time loses
+/// ticks, which is not the tick's rate.
+pub fn mark() {
+    let t = count()
+    let ns = clock.now_ns()
+    unsafe { mark_ticks = t; mark_ns = ns; marked = true }
+}
+
+/// px107 (pax#308): the tick clock against kernel/clock since the mark
+/// (else since the tick was armed), one line: `timer: <n> ticks of 10 ms
+/// in <us> us by HPET|PM|PIT since the mark|since the tick was armed: the
+/// tick clock ahead|behind by <ppm> ppm`. Every timeout counted in ticks
+/// (kernel/dhcp's lease, a sleep) runs that much early or late: ahead is a
+/// tick too short (its calibration), behind a tick too long or ticks lost
+/// with interrupts off. Nothing when the local APIC timer never started.
+pub fn drift() {
+    if !unsafe { lapic_started } { return }
+    let m = unsafe { marked }
+    let n = count() - (if m { unsafe { mark_ticks } } else { 0 })
+    let ns = clock.now_ns() - (if m { unsafe { mark_ns } } else { unsafe { armed_ns } })
+    let ticked = n * 10000000
+    log.put("timer: "); log.dec(n as int)
+    log.put(" ticks of 10 ms in "); log.dec((ns / 1000) as int)
+    log.put(" us by "); log.put(clock.name())
+    log.put(if m { " since the mark" } else { " since the tick was armed" })
+    if ns == 0 { log.line(": no time yet"); return }
+    if ticked >= ns {
+        log.put(": the tick clock ahead by "); log.dec(((ticked - ns) * 1000000 / ns) as int)
+    } else {
+        log.put(": the tick clock behind by "); log.dec(((ns - ticked) * 1000000 / ns) as int)
+    }
+    log.line(" ppm")
 }
 
 /// Unmask master line `line` (px13: kernel/console's 1 and 4): a
