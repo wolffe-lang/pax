@@ -59,7 +59,7 @@ the first Linux measurement (`e6ac5f45`), once after the orchestrator's correcti
 
 ## 4. Evidence index
 
-### 4.1 Rulings (recommended and implemented, not decided)
+### 4.1 Rulings (recommended and implemented; R-px108-5 to 8 decided A)
 
 - **R-px108-1, what dominates (A).** (A) den's own work: route it to den with the numbers (done: den#73 for the
   10,000-object bounds, vc24 for the index parsed again for every blob read); (B) a PAX fix for the clone's time.
@@ -186,6 +186,109 @@ section takes its table when it is in.
 5. **A context switch and a system call** (R-px108-8): about three times Linux's cost each.
 6. **One CPU (SMP).** It is not the lever for pelt: den's clone is one thread's work. It becomes one when den or
    git-style tools resolve deltas on several threads.
+
+### 5.1 The follow-on lanes, drafted
+
+R-px108-5 to 8 were decided A: each is a lane of its own after this one, R-px108-5 first. Each draft gives the red row
+it starts from, what this lane measured, and the files it touches.
+
+**1. TCP's window (R-px108-5).**
+
+- *Red row.* 64 MiB into PAX from a Linux peer across a delay of 15 ms each way: a tap in the container's own namespace
+  and QEMU's dgram netdev, as this lane's takes (the relay becomes a tool under `tools/`). The I225 is polled, so the
+  path matches the metal target's. The floor is 8 MB/s, almost four times what a 64 KiB window can move in 30 ms. At
+  trunk the row reads 1.63 MB/s, so it starts red. A second row, the same transfer with no delay and the controller
+  polled, guards the poll's own ceiling (below).
+- *Measured.* 1.63 MB/s at a 30 ms round trip is 65,535 bytes every 40 ms. That fits the window's ceiling at the
+  line's 30 ms (2.18 MB/s) plus up to a 10 ms tick before the polled controller sees the segments and the ACK
+  leaves. With no delay, the same row reads 38.6 to 40.2 MB/s (QEMU's user network, interrupts). pelt's https clone
+  takes 11 s longer across the line (133.8 s against 122.9 s). A 300 MB pack, den's own repository, would spend about
+  three minutes on the wire.
+- *Files.* `kernel/tcp/tcp.lu`:
+  - the options walk reads kind 3 on a SYN and sends it back when the peer sent one (RFC 7323 §2.2), and
+    `C_OPT_WSCALE` stops counting it as skipped;
+  - `WND_MAX`, the advertised window and `K_MAX_WND`/`K_RCV_ADV` move to scaled units;
+  - the receive buffer grows past `BUF` (65,536) and `BUF_PAGES` (16), so `F_BUFS`' 32 frames per connection
+    become a size per connection, taken on demand, because `CONNS` is 1,024.
+
+  `tests/mpx4-tcp`: T7's `skipped … window-scale` counter, and T6's byte-by-byte capture, whose SYN options change.
+  `tools/paxtcp.py`: it announces 65,535 with no options, so it gains a window-scale option when a test asks for one.
+  `docs/SOURCES.md`: RFC 7323. `kernel/gbe/gbe.lu`'s `RING` (64 descriptors) and the poll once a tick
+  (`kernel/net` `poll`, `kernel/netd`'s clock) make a second ceiling once the window opens: 64 frames of 1,514 bytes
+  a 10 ms tick is about 9.7 MB/s. That figure is computed, not measured, and is the lane's first row to take.
+
+**2. The tree's 16,384 inodes (R-px108-6).**
+
+- *Red row.* `tests/mpx5-rates`' files row at 20,000 objects (this lane caps it at 6,000) in PAX's memory tree,
+  against Linux's tmpfs. At trunk it fails with -ENOSPC near the 16,384th inode, so it starts red. A guard row in
+  `tests/mpx6-ext2` creates the same 20,000 files on an ext2 volume. Read from the source it should already pass, but
+  no suite row has crossed 16,384 files on a volume yet.
+- *Measured.* One pelt checkout is 10,136 inodes. A second clone beside it fails its checkout
+  (`den: wire: Unsupported(clone checkout: io)`), and at trunk the bench's files rows ran out (B2 red).
+- *Where the cap binds* (read from the source). `kernel/tree`'s table holds the memory tree's inodes plus the records
+  of a volume's inodes in use. A volume's records are a cache: once 2,048 (`VOL_KEEP`) are live, `vrec` gives back up
+  to 256 unheld ones, and if the table is full up to 2,048 more, and tries again. Only held records (an open file, a working
+  directory, a mapping, a directory whose entries are loaded) and those looked up in the current call stay. The memory
+  tree's own creators (`make`, `mkdir`, `symlink`, `anon`; a volume's go through `vmake` and `vrec`) evict
+  nothing, so there the cap is a hard limit.
+  - An installed system: the installer writes `/etc/fstab` as `PARTUUID=… / ext2 rw 0 1` and
+    `tmpfs /tmp tmpfs nosuid,nodev 0 0` (`user/install/prepare.lu`'s `fstab_text`), and `/home/<user>` is a
+    directory on that root. `paxext2` lays the root out with no `--inodes`, one inode per 16,384 bytes between
+    512 MiB and 4 TiB (`user/disktools/paxext2/main.lu`). A 500 GB disk therefore gets about 30 million inodes.
+  - Clones into `/home` are bounded by ext2's count, not by the table. Clones into `/tmp`, or into the console stick's
+    memory root, meet the 16,384 cap at the second pelt.
+- *Files.* `kernel/tree/tree.lu`:
+  - `MAX_INODES`, and `IPF`/`iaddr`, today one frame of 512 pointers to frames of 32 inodes, which becomes a frame of
+    such frames;
+  - `inode_new`;
+  - `SIDE_FRAMES` (32, `MAX_INODES / 512`) and the `VF_*` words after `VF_SIDE` (`VF_HASH`, `VF_CURSOR`, `VF_SEQ`
+    move);
+  - the scans bounded by `MAX_INODES` (`vrec`'s and `unhash`'s guards, `evict`'s walk).
+
+  `kernel/files/files.lu`: `nr_inodes=` in the mounts table, and `statfs`' `f_files`/`f_ffree`. `tests/mpx6-root`:
+  `nr_inodes=16384` in its first mounts line. `tests/mpx5-rates` and `user/elf/bench.c`: the files row's cap. Each
+  inode is 128 bytes plus an 8-byte side word, so 65,536 inodes cost 8.5 MiB at most, taken a frame at a time as now.
+
+**3. Anonymous memory (R-px108-7).**
+
+- *Red row.* `tests/mpx5-rates`' `mmap` and `brk` rows with 512 MiB mapped, against Linux, with a floor of a quarter
+  as B3 has. At trunk they read 0.05 and 0.06, so both start red. The same rows at 256 KiB (0.13, 0.38) are the second
+  pair.
+- *Measured.* 256 KiB mapped, touched and unmapped takes 573 µs on PAX against 72 µs (about 9 µs a page against 1.1).
+  With 512 MiB already mapped it takes 1.4 ms against 71 µs. `brk` up 256 KiB, touched and down takes 191 µs against
+  73 µs, and 1.2 ms with 512 MiB mapped. On Linux, den's https clone makes 195,504 `brk` calls. den's upload-pack
+  spends 70.5 s of system time on PAX against 19.1 s on Linux for the same refusal. That is likely this cost, but it
+  has not been split.
+- *Files.* `kernel/vm/vm.lu`:
+  - `note_peak`, called before every lowering (`brk`, `munmap`, a record's or a lazy range's pages, six call sites),
+    walks the whole space through `kernel/paging`'s `user_pages`. Counting pages as they map and unmap removes the
+    walk (px88's R-px88-3 B).
+  - `map_zero` zeroes each frame with 512 volatile stores and maps it with one table walk a page. It becomes
+    `pax_tree_zero`, as `kernel/uaccess` now uses, and one walk a range.
+  - `unmap_range`, `pick`.
+
+  `kernel/sched/sched.lu`'s `note_rss`. The peak's witnesses in `tests/mpx5-forks` (px88's maxrss rows) must read
+  the same.
+
+**4. A context switch and a system call (R-px108-8).**
+
+- *Red row.* `tests/mpx5-rates`' bare system call (`getppid`, 0.31 of Linux's rate), 1-byte pipe round trip (0.33)
+  and missed lookup (0.35), against a floor of a half. All three start red.
+- *Measured.* A system call takes 585 ns against 178 ns. A 1-byte round trip, which is two writes, two reads and two
+  switches, takes 12.0 µs against 4.06 µs. A lookup that misses takes 1.98 µs against 0.68 µs. den's clone makes
+  about 1.05 million calls (Linux's `strace -c`), so at about 0.4 µs more each that is under a second of a 122 s
+  clone. These rows are a ratio to fix, not the clone's lever.
+- *Files.*
+  - `kernel/user/user.lu`'s `syscall` and `serve`: every call runs `trace.syscall_enter`/`syscall_return`,
+    `sched.syscall_begins`/`syscall_ends` (two TSC reads, px88) and `tree.tick`, then a chain of compares to reach
+    its number. That chain becomes a table.
+  - `boot/user.S`'s `pax_syscall_entry` and `boot/isr.S`'s common path: every call goes through `pax_interrupt`.
+  - `kernel/sched/sched.lu`'s `enter_space`, on every switch: a CR3 load with no PCID (the TLB emptied; PCID needs
+    `kernel/paging` and CR4.PCIDE), a `WRMSR` of FS_BASE, and `boot/cpu.S`'s `pax_debug_load`, six moves to debug
+    registers even for a thread with none set.
+  - `run_next`'s `fpu.switch`, an eager save and restore (`kernel/fpu/fpu.lu`), and `account`.
+
+  `tests/mpx5-trace` (its debug-register rows) must read the same.
 
 ## 6. Done-when
 
