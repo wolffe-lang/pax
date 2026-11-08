@@ -20,6 +20,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   `clock:` line at its end when any reading was refused. Four new legs in
   `tests/mpx6-metal` (`clock-behind`, `clock-torn`, `clock-32`, `clock-pmwrap`)
   hold it, each red first where the fix is.
+- **The tick is as long as the clock says (px107, pax#308).** The LAPIC timer's
+  calibration read the clock, then the count, and the count, then the clock, so
+  the time the reads took counted against the clock alone: under TCG the rate
+  came out 0.4% to 2.3% low, the tick that much short, and every timeout counted
+  in ticks that much early, which put `mpx4-dhcp`'s expiry DISCOVER over a second
+  before the lease ran out. Each end now reads the count and the clock back to
+  back after a warming read, so the reads cancel; the windows are taken until two
+  agree within 0.1%, and one whose clock interval is not the PM timer's within
+  0.5% is set aside, by name on the console, so a clock that stands still or a
+  count that jumps inside one window (a boot under KVM once calibrated at 1.433
+  times the rate) no longer sets the tick. `mpx4-dhcp`'s D11 holds the tick clock
+  to the clock over the run, and `tests/mpx6-metal`'s `timer-stall` and
+  `timer-stall-nopm` the tick to the PM timer after a stall in the calibration,
+  each red first where the fix is.
 
 - **Push from the console (px104).** den pushes to GitHub from the console of
   every image, over HTTPS and over SSH. Names resolve: the kernel now answers
