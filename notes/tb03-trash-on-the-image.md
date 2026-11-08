@@ -115,6 +115,39 @@ wolf-lang#1082.
   - The five digests and sizes are the ones trash's own gate printed at
     `c027df8` (its record's `repro` step).
 - **`tools/mktrash`**: its two-checkout agreement check stays.
+- **Measured:** the builder's digests are trash's gate's. In PAX's build
+  image (Ubuntu 24.04, `ld.lld` on `PATH`), `tools/mktrash` builds the five
+  twice and both checkouts agree. Each of the five is the digest
+  `user/trash.pin` quotes from trash's gate (`trash` `f7c2cb3b…`, 1853976
+  bytes, and the other four), all five byte for byte.
+
+## Dev runs, and what they changed
+
+The dev runs used PAX trunk `db516c69`'s native console kernel and the
+staged pelt; boreutils came from `tools/mkboreutils` at its pin. They held:
+- A0, the build and the Linux side;
+- A1, each session byte for byte the container's, 72 lines each;
+- A2, the 17 rows;
+- A3, on the native tier, BIOS and UEFI, both sessions.
+
+The release tier and `tests/distribution` are left to CI: the release
+tier needs a release console kernel, and the distribution check needs the
+whole distribution built. Three things the prediction did not foresee:
+
+- **`trash-rm` is never run by the builder.** As trash-cli's does, it takes
+  its first word as the pattern to remove from the trash, so
+  `trash-rm --version` is a pattern, not a question. It printed nothing and
+  the builder refused it. `tools/mktrash` now asks `--version` of the other
+  four only.
+- **boreutils' `env` and `id` are on the console image.** The user's run
+  line execs `/bin/env`: without it, `as` answered `execve /bin/env: -2`.
+  The keys' `$(id -u)` names each session's scratch directory: without
+  `id`, both sessions shared `/tmp/w`. Root's run made it, and the user's
+  run on PAX could not write in it, where the container, a fresh root for
+  each session, could.
+- **The PATH row holds the loop's answers, not its line.** The line is
+  longer than the console's 80 columns and wraps where the terminal puts
+  it, on PAX and in the container alike.
 
 ## Rulings
 
