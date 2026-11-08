@@ -57,7 +57,9 @@ cp /etc/shadow /root/shadow.start
   grep -E '^(root|pax|lobo|bob):' /etc/passwd; } > "$out/setup.txt"
 session() { # name program
     local s=$1 prog=$2
-    # admin (R-px106-6, B3): pax in group sudo, the side's own shipped policy.
+    # admin (R-px106-6, B3): pax in group sudo, the side's own shipped policy; login-trap
+    # (R-px106-9): pax in sudo too, locked, so only root and sudo's members open the door.
+    [ "$s" != login-trap ] || usermod -aG sudo pax
     if [ "$s" = admin ]; then
         usermod -aG sudo pax
         if [ "$mode" = pax ]; then cp "$in/sudoers.shipped" /etc/sudoers; else cp /root/sudoers.stock /etc/sudoers; fi
@@ -65,7 +67,7 @@ session() { # name program
     fi
     cp /root/shadow.start /etc/shadow; chmod 640 /etc/shadow
     [ "$mode" != pax ] || chmod 600 /etc/shadow
-    [ "$s" != login-first ] || rm -f /etc/shadow
+    [ "$s" != login-first ] && [ "$s" != login-trap ] || rm -f /etc/shadow
     rm -rf /run/sudo /var/run/sudo; rm -f /var/log/sudo.log
     (cd / && python3 "$in/linux-tty" --keys "$in/$s.keys" --prompt '$ ' --times "$out/$s.times" --end-wait 75 \
         "$out/$s.tty" -- "$prog")
@@ -73,6 +75,7 @@ session() { # name program
     stat -c '%a %U:%G' /etc/shadow > "$out/$s.shadow-mode" 2>/dev/null || echo none > "$out/$s.shadow-mode"
     cp /etc/shadow "$out/$s.shadow" 2>/dev/null || : > "$out/$s.shadow"
     cp /var/log/sudo.log "$out/$s.sudo.log" 2>/dev/null || : > "$out/$s.sudo.log"
+    [ "$s" != login-trap ] || gpasswd -d pax sudo > /dev/null
     if [ "$s" = admin ]; then
         gpasswd -d pax sudo > /dev/null
         cp "$in/sudoers" /etc/sudoers; chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers
@@ -83,6 +86,7 @@ session login /usr/bin/login
 session login-max /usr/bin/login
 [ ! -f "$in/login-time.keys" ] || session login-time /usr/bin/login
 [ "$mode" != pax ] || session login-first /usr/bin/login
+[ "$mode" != pax ] || session login-trap /usr/bin/login
 session admin /usr/bin/pelt
 # No terminal: sudo -S and su reading standard input (setsid: no controlling terminal).
 cp /root/shadow.start /etc/shadow; [ "$mode" != pax ] || chmod 600 /etc/shadow
