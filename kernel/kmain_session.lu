@@ -251,7 +251,7 @@ export fn kmain() {
         panic.fail("session: no frame for the stack, frames", stack_frames())
     }
     // # Safety: the addresses of kernel/netd's exports; nothing is read.
-    let (nd, clock) = unsafe { (pax_netd as u64, pax_net_clock as u64) }
+    let (nd, nc) = unsafe { (pax_netd as u64, pax_net_clock as u64) }
     // The clock runs with or without a device (loopback's backstop,
     // TCP's timers); the receiving thread only with one.
     var floor: u64 = 1
@@ -259,7 +259,7 @@ export fn kmain() {
         sched.create(nd, 0)
         floor = 2
     }
-    sched.create(clock, 0)
+    sched.create(nc, 0)
     // px67: the disk, when the machine has one, `/` on it when `root=`
     // says so, and what /etc/fstab mounts; a write-back volume's flusher.
     if block.start(pml4) != 0 {
