@@ -2069,3 +2069,16 @@ source; no kernel's, firmware's or driver's.
 - PAX's own `kernel/clock` (px76, px85), `kernel/kmain_metal`, `tests/mpx6-metal`, `tests/mpx5-users` (the rights
   soak, booted as it boots it).
 - No kernel's, emulator's, firmware's or driver's source.
+
+## px107 — the tick's calibration (pax#308)
+
+- **Intel SDM vol. 3A §11.5.4** ("APIC Timer": the divide configuration, the initial and current counts, one-shot
+  and periodic modes), as px76 cites it: the count read at each end of a window.
+- **ACPI 6.5** §4.8.3.3 (the PM timer at 3.579545 MHz, its 24 or 32 bits): the second counter each window's clock
+  interval is held to.
+- **QEMU 8.2.2 and KVM as black boxes**: the guest's tick against the capture's timestamps in `tests/mpx4-dhcp`'s
+  expiry way (the LAPIC timer's true rate implied by each boot), the calibration under TCG and KVM, and KVM with
+  the vCPU's CPU shared with a busy loop (`notes/px107/measure-308.txt`).
+- PAX's own `kernel/timer` (kw10, px76), `kernel/clock`, `kernel/dhcp` (px89, its lease in ticks),
+  `tests/mpx4-dhcp`, `tools/pcap-dhcp`.
+- No kernel's, emulator's, firmware's or driver's source.
