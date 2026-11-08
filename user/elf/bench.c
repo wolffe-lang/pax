@@ -3,7 +3,8 @@
  *   bench syscall            getppid(2), the bare system call
  *   bench pingpong SIZE      a round trip of SIZE bytes between two processes
  *                            over two pipes (pipe(2), fork(2))
- *   bench files DIR [nosync] den's loose install of a 300-byte object:
+ *   bench files DIR [nosync] den's loose install of a 300-byte object (at
+ *                            most 6,000 of them: PAX's tree holds 16,384 inodes):
  *                            open(O_CREAT|O_EXCL) a temporary, write, fsync,
  *                            close, link it into DIR/<xx>/, unlink it, fsync
  *                            the two directories (open, fsync, close); a
@@ -98,16 +99,20 @@ static void report(const char *name, long n, double s, struct usage a, struct us
 /* Run step(i) in batches of `batch` until a second has passed. */
 typedef void (*step_fn)(long i);
 
-static void run(const char *name, step_fn step, long batch) {
+/* Run step(i) in batches of `batch` until a second has passed, or `cap`
+ * steps (0: none) have run, whichever is first. */
+static void run_capped(const char *name, step_fn step, long batch, long cap) {
     struct usage a = usage_now(0);
     double t0 = now(), t = 0;
     long n = 0;
     do {
         for (long k = 0; k < batch; k++) step(n++);
         t = now() - t0;
-    } while (t < 1.0);
+    } while (t < 1.0 && (cap == 0 || n < cap));
     report(name, n, t, a, usage_now(0));
 }
+
+static void run(const char *name, step_fn step, long batch) { run_capped(name, step, batch, 0); }
 
 static void s_syscall(long i) { (void)i; (void)getppid(); }
 
@@ -289,7 +294,9 @@ int main(int argc, char **argv) {
         if (mkdir(g_dir, 0777) < 0 && errno != EEXIST) die("mkdir DIR");
         if (w[0] == 'm') { run("miss", s_miss, 100); return 0; }
         g_sync = !(argc >= 4 && strcmp(argv[3], "nosync") == 0);
-        run(g_sync ? "files" : "files nosync", s_files, 64);
+        /* At most 6,000 objects a row (two rows: 12,000 and their directories): PAX's file tree holds 16,384 inodes in all
+         * (kernel/tree), and the row is a rate, not a capacity. */
+        run_capped(g_sync ? "files" : "files nosync", s_files, 64, 6000);
         return 0;
     }
     if ((strcmp(w, "mmap") == 0 || strcmp(w, "brk") == 0 || strcmp(w, "malloc") == 0) && argc >= 3) {
