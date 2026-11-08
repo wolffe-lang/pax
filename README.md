@@ -68,36 +68,49 @@ accounts, and all four read one password file:
 **No image ships a password.** The live USB and the dev and release images
 have no `/etc/shadow`, so every account is locked. The dev and release images
 boot to a root shell, as they always have, and the live USB's entry still lets
-`root` in with no password. **An installed system whose accounts are all
-locked lets `root` in at the console with no password, and says so** (`PAX:
-no account here has a password, so root logs in without one; set one with
-passwd.`). An unconfigured system is exactly as open as an installed PAX was
-before passwords, until its owner sets one. The first password set, for any
-account, closes that door: from the next login on, root needs its own password,
-or stays out if it is locked.
+`root` in with no password. **An installed system lets `root` in at the
+console with no password, and says so, while no account that can reach root
+has one** (root itself and every member of group `sudo`): `PAX: no password is
+set for root or for group sudo, so root logs in without one; set one with
+passwd.` An unconfigured system is exactly as open as an installed PAX was
+before passwords, until its owner sets one. A password for root or for a member
+of `sudo` closes that door: from the next login on, root needs its own
+password, or stays out if it is locked. A password for any other account
+(`lobo`'s, say) leaves it open, so the console never ends with no way to root.
 
 **Installing and upgrading.** The guided `pax-install` asks, after the
 confirmation and before it writes anything, `Set a password for root now?` and
 the same for the new account. Each `y` runs `passwd` for that account (the
 password goes to the new system's `/etc/shadow` and never to the install
 log), and each `n` leaves it locked. The scripted install leaves both locked.
-**An upgrade never touches `/etc/shadow`.** An install made before passwords
-has none, and its upgrade makes one with every account locked. On the 860,
-that means: boot the new stick's upgrade entry, run `pax-install --upgrade`,
-type the line it prints, and power off. Boot the disk and log in as `root`
-with no password (the console says why). Run `passwd` to give root a
-password, and `passwd wolf` (your account's name) to give yours one. From
-then on both are asked.
+Either way the new account is made a member of group `sudo` (gid 27), as
+Ubuntu's installer makes its first user. **An upgrade never touches
+`/etc/shadow`.** An install made before passwords has none, and its upgrade
+makes one with every account locked. An upgrade also makes the installer's
+account (uid 1000, by `/etc/passwd`) a member of `sudo` in `/etc/group`: it
+appends `sudo:x:27:NAME` when there is no `sudo` line, adds the name when the
+line lacks it, and changes nothing when it is already there; every other line
+stays byte for byte. An `/etc/group` that gives gid 27 to a group not named
+`sudo`, or has `sudo` at another gid, refuses the upgrade by name before
+anything is written: that file is yours to fix. On the 860, that means: boot
+the new stick's upgrade entry, run `pax-install --upgrade`, type the line it
+prints, and power off. Boot the disk and log in as `root` with no password (the
+console says why). Run `passwd NAME` with your account's name, then log in as
+that account: `sudo` asks for your password. From then on root's door is shut,
+and root at the console needs a password of its own (`sudo passwd root` sets
+one).
 
-**`sudo`'s policy.** The image ships `user/sudo/sudoers`, two rules:
+**`sudo`'s policy.** The image ships `user/sudo/sudoers`, two of Ubuntu's rules:
 
     root ALL=(ALL:ALL) ALL
-    #1000 ALL=(ALL:ALL) NOPASSWD: ALL
+    %sudo ALL=(ALL:ALL) ALL
 
-The second names **uid 1000, not a user name**: the installer's account is
-always uid 1000, whatever it is called, and it needs no password for `sudo`.
-Remove `NOPASSWD:` from it (`sudo yew /etc/sudoers`) to be asked for your own.
-The service account `lobo` (990) has no rule. `sudo -i` gives a root shell,
+The second lets **every member of group `sudo`** (gid 27) run anything as
+anyone after their own password, as on Ubuntu. The installer's account is one,
+and another administrator is made one the same way, by adding their name to
+`/etc/group`'s `sudo` line. Ubuntu's third rule, for a group `admin`, is left
+out: PAX has never had one. The service account `lobo` (990) has no rule.
+`sudo -i` gives a root shell,
 `sudo -u lobo CMD` runs as another user, and `sudo -l` shows what you may run.
 Every use, allowed or refused, appends a line to `/var/log/sudo.log` (root's,
 mode 0600; sudo's format, `Mon DD HH:MM:SS : user : ...`, with the time in
@@ -389,7 +402,7 @@ and writes only after the word `yes` (anything else cancels). It is an explicit 
 - the running root's disk, mounted disks, read-only targets and disks of 4096-byte logical sectors are refused by name;
 - it asks for a user name and whether to install the three games, staged offline with their source and their engine's,
   and, after the confirmation, whether to set root's password and the user's (each a `passwd` run, or the account
-  left locked; [Passwords](#passwords-login-su-and-sudo));
+  left locked), and makes the user a member of group `sudo` ([Passwords](#passwords-login-su-and-sudo));
   neither answer fetches anything; the games answer alone decides the install from the verified payload (the live
   demo's marked Games directory is never copied implicitly), and a custom source tree with a Games directory already
   present is still refused;
