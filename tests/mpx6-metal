@@ -76,6 +76,11 @@
 # PM timer hidden from the calibration (a machine without one): the
 # agreement rule alone must catch it (`windows 1 and 2 disagree`) and the
 # boot must say it had nothing beside the clock to hold windows to.
+# timer-stall-shared has the PM timer answer from the clock, so it stands
+# still with it (one stall of the emulator could hold both reads) and
+# cannot see the stall: the next window's disagreement must (`windows 1
+# and 2 disagree`), and the tick still within 0.5% (timed, in this leg,
+# by the clock through the PM timer's answer).
 #
 # PAX_METAL_TIER (native, release) and PAX_METAL_FIRMWARE ("bios uefi")
 # choose the build and the firmwares (tests/mpx6-firmware sets both);
@@ -97,7 +102,7 @@ printf '\n    cmdline: metal_x2apic\n' >> "$work/x2apic.conf"
 cp "$PAX_ROOT/boot/limine.conf" "$work/pitonly.conf"
 printf '\n    cmdline: metal_pitonly\n' >> "$work/pitonly.conf"
 "$PAX_ROOT/tools/mkimage" --conf "$work/pitonly.conf" "$work/kmain_metal.elf" "$work/pitonly.iso"
-for word in stall_window stall_edge stall_long hpet_fast hpet_slow clock_behind clock_torn clock_32 clock_pmwrap timer_stall timer_stall_nopm; do
+for word in stall_window stall_edge stall_long hpet_fast hpet_slow clock_behind clock_torn clock_32 clock_pmwrap timer_stall timer_stall_nopm timer_stall_shared; do
     cp "$PAX_ROOT/boot/limine.conf" "$work/$word.conf"
     printf '\n    cmdline: metal_%s\n' "$word" >> "$work/$word.conf"
     "$PAX_ROOT/tools/mkimage" --conf "$work/$word.conf" "$work/kmain_metal.elf" "$work/$word.iso"
@@ -108,7 +113,7 @@ fail() { # leg why
     exit 1
 }
 for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
-    legs='hpet pm pitless pm-pitless ram8 stall-window stall-edge stall-long hpet-fast hpet-slow clock-behind clock-torn clock-32 clock-pmwrap timer-stall timer-stall-nopm'
+    legs='hpet pm pitless pm-pitless ram8 stall-window stall-edge stall-long hpet-fast hpet-slow clock-behind clock-torn clock-32 clock-pmwrap timer-stall timer-stall-nopm timer-stall-shared'
     [ "$fw" != uefi ] || legs="$legs pitonly"
     [ "${PAX_METAL_X2APIC:-0}" != 1 ] || legs="$legs x2apic"
     [ -z "${PAX_METAL_LEGS:-}" ] || legs=$PAX_METAL_LEGS
@@ -130,6 +135,7 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
             clock-pmwrap) iso=$work/clock_pmwrap.iso; args=(--no-hpet); source=PM;;
             timer-stall) iso=$work/timer_stall.iso;;
             timer-stall-nopm) iso=$work/timer_stall_nopm.iso;;
+            timer-stall-shared) iso=$work/timer_stall_shared.iso;;
         esac
         rc=0
         "$PAX_ROOT/tools/qemu-run" --timeout 30 --firmware "$fw" --serial "$work/$fw-$leg.log" ${args[@]+"${args[@]}"} "$iso" -- ${qargs[@]+"${qargs[@]}"} || rc=$?
@@ -163,6 +169,10 @@ for fw in ${PAX_METAL_FIRMWARE:-bios uefi}; do
                 || fail "$fw-$leg" "the agreement rule alone did not catch the stalled window"
                 grep -aqE '^timer: LAPIC calibration: no second counter beside the HPET ' "$work/$fw-$leg.log" \
                 || fail "$fw-$leg" "the boot did not say it had nothing beside the clock";;
+            timer-stall-shared) grep -aqE '^PASS METAL the tick: 50 in 500 ms within 0.5% by the PM timer' "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "the tick was not timed within 0.5% by the PM timer"
+                grep -aqE '^timer: LAPIC calibration: windows 1 and 2 disagree: ' "$work/$fw-$leg.log" \
+                || fail "$fw-$leg" "the next window did not catch a stall the PM timer shared";;
         esac
         case $leg in
             clock-behind|clock-32|clock-pmwrap)
