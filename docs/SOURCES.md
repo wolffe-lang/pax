@@ -2115,10 +2115,11 @@ source; no kernel's, firmware's or driver's.
 
 ## tb03 — trash on the image (the pin, the builder, the console session)
 
-- **trash at `90169ed5`** (the org's own, public): its README, `wolf-toolchain.toml` (the wolf archive, its digest,
-  the std it bundles), `tools/build.py` (its static build, the `cc` that adds `-static`, the stripped copies it
-  keeps) and its PAX rows (`tests/pax/`, `tools/pax-rows.py`), read for building it and for what its commands
-  print; its codeload source archive (sha256 `15128cb7…`, read twice). trash's own clean room is the
+- **trash at `c027df83`** (the org's own, public): its README, `wolf-toolchain.toml` (the wolf archive, its digest,
+  the std it bundles), `tools/build.py` (its static build, the `cc` that adds `-static`, no build-id and the
+  system linker, the stripped copies it keeps), `tools/repro.py` (the digests its gate prints) and its PAX rows
+  (`tests/pax/`, `tools/pax-rows.py`), read for building it and for what its commands print; its codeload source
+  archive (sha256 `2bc57c82…`, read twice). trash's own clean room is the
   FreeDesktop.org Trash specification, POSIX and the manual pages, and its oracle trash-cli run only as a program.
 - PAX's own `tools/mkburrow`, `tools/mkscent`, `tools/distribution-root`, `tests/distribution`, `tests/mpx5-scent`
   and `tools/ci-tiers.map`, as the pattern a component on the image follows.
