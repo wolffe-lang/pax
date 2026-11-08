@@ -187,6 +187,21 @@ fn torn() {
     check(spanned >= 18000, "the reads went across the rollovers")
     check(bad == 0, "no reading of the HPET torn across a rollover of its low word")
 }
+// px107 (pax#308): the tick against the PM timer read directly, 50 ticks
+// from one tick's edge to another's, within 0.5% of 500 ms. The rate row
+// below allows 150-300 ms for 20 ticks, which a tick 1.433 times long
+// (286 ms) passes.
+fn tick_rate() {
+    check(acpi.pm_port() != 0, "a PM timer to time the tick by")
+    let t0 = timer.ticks()
+    while timer.ticks() == t0 { timer.wait() }
+    let p0 = clock.pm_now()
+    let first = timer.ticks()
+    while timer.ticks() - first < 50 { timer.wait() }
+    let ns = clock.pm_between(p0, clock.pm_now())
+    log.put("metal: 50 ticks of 10 ms in "); log.dec((ns / 1000) as int); log.line(" us by the PM timer")
+    check(ns >= 497500000 && ns <= 502500000, "the tick: 50 in 500 ms within 0.5% by the PM timer")
+}
 export fn kmain() {
     serial.init()
     frames.start()
@@ -217,6 +232,17 @@ export fn kmain() {
     log.put("metal: the HPET's check measured "); log.dec(windows as int)
     log.put(" window(s), "); log.dec(toolong as int); log.put(" too long, and took ")
     log.dec(retaken as int); log.put(" bracket(s) again, "); log.dec(stalled as int); log.line(" across the stall")
+    // px107 (pax#308): the clock stands still 8.6 ms inside the LAPIC's
+    // calibration (one reading 8.6 ms ahead, then the readings behind it
+    // taken as no time passing), the shape of a boot under KVM that
+    // calibrated at 89527688 Hz, 1.433 times the rate: its clock, sleeps
+    // and timeouts ran at 0.70 of real time (tests/mpx6-metal's
+    // timer-stall leg).
+    if boot_info.cmdline_has("metal_timer_stall") {
+        let fs = clock.hpet_period_fs()
+        check(fs != 0, "the clock reads the HPET")
+        clock.test_reading(clock.counter() + 8600000 * 1000000 / fs)
+    }
     timer.start()
     fb.report()
     if boot_info.cmdline_has("metal_pitonly") {
@@ -225,6 +251,7 @@ export fn kmain() {
     if boot_info.cmdline_has("metal_clock_behind") { behind() }
     if boot_info.cmdline_has("metal_clock_torn") { torn() }
     if boot_info.cmdline_has("metal_clock_32") || boot_info.cmdline_has("metal_clock_pmwrap") { rollover() }
+    if boot_info.cmdline_has("metal_timer_stall") { tick_rate() }
     check(acpi.tables() > 0, "ACPI checked tables")
     let port = acpi.pm_port()
     check(port != 0, "independent PM rate reference")
