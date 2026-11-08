@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A system call's bytes move by the block (px108).** `kernel/uaccess` copied
+  every byte between a process and the kernel one volatile load and store at a
+  time; it now moves each page's part with the string instructions the file
+  tree already used. A pipe's 64 KiB round trip between two processes went from
+  1,569 to 23,232 a second under KVM (0.04 to 0.55 of Linux's rate on one CPU),
+  and every read and write of a pipe, a socket or a signal frame gains the
+  same. A new suite, `tests/mpx5-rates`, times the rates a clone leans on
+  (system calls, a pipe's round trip, the file tree's creates and lookups,
+  anonymous memory) on PAX and on the host's Linux, holds the pipe's to a floor
+  under KVM, and prints every other ratio. The measurements behind it found the
+  console's slow clone of a large repository to be den's own work on one CPU,
+  not the kernel's: `notes/px108-den-on-one-cpu.md`.
+
 - **Passwords (px106).** PAX has passwords: `/etc/shadow`, root's and
   mode 0600, one line an account, locked by default, a password stored as
   wolf-std's scrypt in crypt(5)'s `$7$` form (N = 2^17, r = 8, p = 1). Four
