@@ -238,7 +238,8 @@ export fn kmain() {
     // calibrated at 89527688 Hz, 1.433 times the rate: its clock, sleeps
     // and timeouts ran at 0.70 of real time (tests/mpx6-metal's
     // timer-stall leg).
-    if boot_info.cmdline_has("metal_timer_stall") {
+    if boot_info.cmdline_has("metal_timer_stall_nopm") { clock.test_no_pm() } // the agreement rule alone
+    if boot_info.cmdline_has("metal_timer_stall") || boot_info.cmdline_has("metal_timer_stall_nopm") {
         let fs = clock.hpet_period_fs()
         check(fs != 0, "the clock reads the HPET")
         clock.test_reading(clock.counter() + 8600000 * 1000000 / fs)
@@ -251,7 +252,7 @@ export fn kmain() {
     if boot_info.cmdline_has("metal_clock_behind") { behind() }
     if boot_info.cmdline_has("metal_clock_torn") { torn() }
     if boot_info.cmdline_has("metal_clock_32") || boot_info.cmdline_has("metal_clock_pmwrap") { rollover() }
-    if boot_info.cmdline_has("metal_timer_stall") { tick_rate() }
+    if boot_info.cmdline_has("metal_timer_stall") || boot_info.cmdline_has("metal_timer_stall_nopm") { tick_rate() }
     check(acpi.tables() > 0, "ACPI checked tables")
     let port = acpi.pm_port()
     check(port != 0, "independent PM rate reference")
