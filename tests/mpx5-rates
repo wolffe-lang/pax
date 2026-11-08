@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# tests/mpx5-rates — px108: the rates den's clone leans on, on PAX and on
+# this host's Linux, each on one CPU: a bare system call, a user-mode loop,
+# a pipe's round trip between two processes at 1 byte and at 64 KiB, den's
+# loose-object install (create, write, fsync, link, unlink, the
+# directories' fsync) with and without its fsyncs, a lookup that misses,
+# and anonymous memory mapped, touched and given back (mmap and brk, with
+# and without 512 MiB already mapped). One probe, user/elf/bench.c (tools/
+# mkbench, static glibc), runs each row for a second and prints
+#
+#   bench NAME: N in S s: R /s (U us each); user U sys S vcs V ics I cpu C
+#
+# on PAX (the run list of kmain_console, the shipped kernel, under QEMU)
+# and on Linux (the same binary run here, in a fresh directory, before and
+# after the boots, each row pinning itself to the CPU it starts on).
+#
+#   tests/mpx5-rates [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                    [--tier native|release|both] [--accel auto|kvm|tcg]
+#
+# Assertions, per tier and firmware:
+#   B0 build: kmain_console built; bench static; the image built.
+#   B1 Linux ran every row, both times, each a line.
+#   B2 PAX ran every row, a line each; init ended with status 0 and
+#      qemu-halt holds the machine halted.
+#   B3 a pipe's 64 KiB round trip: PAX's rate at least half Linux's (the
+#      better of Linux's two runs; one CPU each). Under KVM only: under TCG
+#      every row is QEMU's emulation first, so B3 is SKIPPED by name. Until
+#      px108 PAX moved a system call's bytes one at a time (kernel/uaccess)
+#      and this rate was under a tenth of Linux's.
+#   B4 every row's ratio, PAX's rate to Linux's: printed, `~` lines held to
+#      no floor (the record of where PAX stands; notes/px108-*.md reads it).
+# Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 accel=auto
+usage="usage: tests/mpx5-rates [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+need python3
+
+# The rows, in order; @ is the directory a row may write in.
+ROWS=("syscall" "cpu" "pingpong 1" "pingpong 65536" "files @/bf" "files @/bn nosync" "miss @"
+      "mmap 256" "mmap 256 512" "brk 256" "brk 256 512")
+FLOOR_PIPE64=0.5
+
+work=$PAX_BUILD/mpx5-rates
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+
+if [ -z "$images" ]; then
+    need readelf
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin" "$work/root/etc"
+    why=
+    "$PAX_ROOT/tools/mkbench" "$work/bin" > "$work/probes.txt" || why+=" tools/mkbench;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    for r in "${ROWS[@]}"; do printf '/bin/bench %s\n' "${r//@//tmp}"; done > "$work/root/etc/pax-run"
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/rates.cpio" "/bin/bench=$work/bin/bench:755" \
+        "/etc/pax-run=$work/root/etc/pax-run:644" /tmp/:1777 > "$work/initramfs.txt"; then
+        sed 's/^/  initramfs: /' "$work/initramfs.txt" >&2
+    else
+        why+=" tools/mkinitramfs;"
+    fi
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            [ "$elf" = "$work/$tier/kmain_console.elf" ] || cp "$elf" "$work/$tier/kmain_console.elf"
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/rates.cpio" initramfs.cpio \
+                "$work/$tier/kmain_console.elf" "$work/$tier/rates.iso" > /dev/null || why+=" $tier mkimage;"
+            say "built $tier rates: elf $(sha256_of "$work/$tier/kmain_console.elf"), iso $(sha256_of "$work/$tier/rates.iso")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS B0 build: kmain_console ($tiers), bench static, the image a tier" || { bad "B0 build:$why"; exit 1; }
+    images=$work
+    [ "$noboot" = 1 ] && exit 0
+fi
+
+# The Linux side, run here: a fresh directory each time, every row once.
+linux_side() { # tag
+    local d k=0 r
+    d=$(mktemp -d "${TMPDIR:-/tmp}/px108-rates.XXXXXX")
+    for r in "${ROWS[@]}"; do
+        "$images/bin/bench" ${r//@/$d} || echo "bench ${r%% *}: refused"
+        k=$((k + 1))
+    done > "$images/linux-$1.txt" 2>&1
+    rm -rf "$d"
+}
+
+if [ "$accel" = auto ]; then
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+fi
+say "accel: $accel (B3 holds a floor under KVM only)"
+linux_side before
+for tier in $tiers; do
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "B2 $tier uefi: no OVMF"; else say "SKIP B2 $tier uefi reason=no OVMF"; fi
+            continue
+        fi
+        log=$images/$tier/rates-$leg.serial.log
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 --accel "$accel" \
+            --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' --qemu -m --qemu 1024M \
+            "$images/$tier/rates.iso" > "$log.verdict" 2>&1
+        echo $? > "$log.rc"
+    done
+done
+linux_side after
+
+python3 -I - "$images" "$tiers" "$legs" "$accel" "$FLOOR_PIPE64" "${#ROWS[@]}" <<'EOF' || fail=1
+import re, sys
+from pathlib import Path
+images, tiers, legs, accel, floor, nrows = Path(sys.argv[1]), sys.argv[2].split(), sys.argv[3].split(), sys.argv[4], float(sys.argv[5]), int(sys.argv[6])
+LINE = re.compile(r'^bench (.+?): (\d+) in ([0-9.]+) s: (\d+) /s')
+def rows(text):
+    out = {}
+    for l in text.replace('\r', '').splitlines():
+        m = LINE.match(l)
+        if m:
+            name = re.sub(r' /\S+', '', m.group(1))
+            out[name] = int(m.group(4))
+    return out
+fail = 0
+def say(s):
+    print('mpx5-rates: ' + s, flush=True)
+lin = {}
+for tag in ('before', 'after'):
+    r = rows((images / ('linux-%s.txt' % tag)).read_text())
+    if len(r) != nrows:
+        say('FAIL B1 linux %s: %d of %d rows (%s)' % (tag, len(r), nrows, (images / ('linux-%s.txt' % tag)).read_text()[-300:]))
+        fail = 1
+    for k, v in r.items():
+        lin[k] = max(lin.get(k, 0), v)
+if not fail:
+    say('PASS B1 linux: every row twice, the better kept: ' + ', '.join('%s %d/s' % kv for kv in lin.items()))
+for tier in tiers:
+    for leg in legs:
+        log = images / tier / ('rates-%s.serial.log' % leg)
+        if not log.exists():
+            continue
+        text = log.read_text(errors='replace').replace('\r', '')
+        rc = (images / tier / ('rates-%s.serial.log.rc' % leg)).read_text().strip()
+        pax = rows(text)
+        ended = re.search(r'^PAX: init .* ended with status 0', text, re.M) is not None
+        L = '%s %s' % (tier, leg)
+        if len(pax) == nrows and ended and rc == '0':
+            say('PASS B2 %s: every row, init ended with status 0, halted' % L)
+        else:
+            say('FAIL B2 %s: %d of %d rows, init ended 0: %s, qemu-halt %s' % (L, len(pax), nrows, ended, rc))
+            fail = 1
+        p, l = pax.get('pingpong 65536', 0), lin.get('pingpong 65536', 0)
+        if accel != 'kvm':
+            say('SKIP B3 %s reason=%s: the floor is stated under KVM (PAX %d/s, Linux %d/s)' % (L, accel, p, l))
+        elif l and p >= floor * l:
+            say('PASS B3 %s: a pipe\'s 64 KiB round trip, PAX %d/s against Linux %d/s: %.2f, the floor %.2f' % (L, p, l, p / l, floor))
+        else:
+            say('FAIL B3 %s: a pipe\'s 64 KiB round trip, PAX %d/s against Linux %d/s: %.2f, under the floor %.2f' % (L, p, l, (p / l) if l else 0, floor))
+            fail = 1
+        for k in lin:
+            if k in pax:
+                say('~B4 %s %s: PAX %d/s, Linux %d/s, ratio %.3f' % (L, k, pax[k], lin[k], pax[k] / lin[k] if lin[k] else 0))
+sys.exit(fail)
+EOF
+[ "$fail" = 0 ] && say "mpx5-rates: PASS" || say "mpx5-rates: FAIL"
+exit "$fail"
