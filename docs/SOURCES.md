@@ -2112,3 +2112,17 @@ source; no kernel's, firmware's or driver's.
   the peak), `kernel/sched` (the switch, px88's accounting), `kernel/tcp` (the window), `kernel/gbe` and
   `kernel/netd` (the polled path), and `tests/mpx5-forks`, `tests/mpx4-console-push`, `tests/mpx4-console-net.d`.
 - No Linux source; no other kernel's, firmware's or driver's source; no Git source.
+
+## tb03 — trash on the image (the pin, the builder, the console session)
+
+- **trash at `90169ed5`** (the org's own, public): its README, `wolf-toolchain.toml` (the wolf archive, its digest,
+  the std it bundles), `tools/build.py` (its static build, the `cc` that adds `-static`, the stripped copies it
+  keeps) and its PAX rows (`tests/pax/`, `tools/pax-rows.py`), read for building it and for what its commands
+  print; its codeload source archive (sha256 `15128cb7…`, read twice). trash's own clean room is the
+  FreeDesktop.org Trash specification, POSIX and the manual pages, and its oracle trash-cli run only as a program.
+- PAX's own `tools/mkburrow`, `tools/mkscent`, `tools/distribution-root`, `tests/distribution`, `tests/mpx5-scent`
+  and `tools/ci-tiers.map`, as the pattern a component on the image follows.
+- wolf 0.2.38, the release archive for x86_64-unknown-linux-gnu (`8447a579…`, read twice; its bundled std
+  `d4a4d4ca`), run to build trash as trash pins.
+- No other trash implementation's source; no C library's.
+
