@@ -1240,7 +1240,9 @@ fn list_mode(pol: Policy, a: Args, me: users.User, passwd: str, group_text: str,
         if why.len > 0 {
             let reason = if has_rule(pol, me, my_groups, group_text) then why else "user NOT in sudoers"
             if !(a.noninter && reason == "user NOT in sudoers") {
-                let _l = log_line(pol.wrap, me.name, reason, os_cwd() else "/", "root", "", "list", true)
+                // Linux's names the words as typed after `list` (measured: `list id`, `list /usr/bin/id a b`)
+                let listed = if a.words.len > 0 then "list {str_join(" ", a.words)}" else "list"
+                let _l = log_line(pol.wrap, me.name, reason, os_cwd() else "/", "root", "", listed, true)
             }
             return 1
         }
