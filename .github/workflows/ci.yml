@@ -1618,6 +1618,71 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px108: the rates den's clone leans on, PAX against this runner's Linux,
+  # each on one CPU: one static probe (user/elf/bench.c, tools/mkbench), a
+  # second a row, on the console kernel and natively here: tests/mpx5-rates:
+  # the build (B0), every row on both (B1, B2), a pipe's 64 KiB round trip
+  # at least half Linux's rate under KVM (B3; SKIPPED by name under TCG),
+  # every row's ratio printed (B4).
+  mpx5-rates:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-rates')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+          nproc
+          ls -l /dev/kvm || true
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-rates-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the clone's rates, PAX against this runner's Linux; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx5-rates $PAX_LEGS
+
+      - name: keep the probes' sums, both sides' lines, the boots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-rates
+          path: |
+            build/mpx5-rates/probes.txt
+            build/mpx5-rates/linux-*.txt
+            build/mpx5-rates/initramfs.txt
+            build/mpx5-rates/*/kmain_console.elf
+            build/mpx5-rates/*/*.log
+            build/mpx5-rates/*/*.verdict
+            build/mpx5-rates/*/*.halt
+            build/mpx5-rates/*/*.meta
+          retention-days: 14
+          if-no-files-found: warn
+
   # px102: ptrace(2), Linux-compatible. Two no-libc programs (user/elf/trace.c
   # and tracee.S, tools/mktrace) run forty-odd fixed scripts of tracing
   # requests as pid 1 on PAX, as root and as 1000:1000, each held to the
@@ -5563,6 +5628,7 @@ jobs:
       - mpx3-tree
       - mpx3-maps
       - mpx5-forks
+      - mpx5-rates
       - mpx5-trace
       - mpx3-speaker
       - mpx3-sound
