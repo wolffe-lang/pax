@@ -8,7 +8,9 @@
 #   legs-x|legs-d|legs-a   (heavy) one of upgrade.py's three sections against SHA's stick
 #   compare        (light) U14's PAX captures (legs-x's at CAPTURES_SHA, default SHA) against
 #                  tests/mpx6-install.d/sudo-linux.sh in the Ubuntu container, by sudo-compare.py
-# A step's END line carries its exit; a red step stops the chunk.
+# A step's END line carries its exit; a red step stops the chunk. Each step is called plainly (`go`),
+# never under `||`: there bash ignores set -e inside the chunk's functions, and a step went on past
+# its failures to its last command's status (px106: an unreadable stick passed sstick).
 set -uo pipefail
 trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 CHUNK=$1 SHA=$2 CAP=${3:-$2}
@@ -22,6 +24,7 @@ OLD=$U/old/stick-9c88ec8a.img
 DEV=$U/old/stick-dev-8b4e98ae.img
 IN=$U/inputs-$short
 fail() { echo "CHUNK $CHUNK STOPPED at $1"; exit "$2"; }
+go() { local r; step "$@"; r=$?; [ "$r" = 0 ] || fail "$1" "$r"; }
 prep() (
     set -euo pipefail
     : "${INPUTS_SRC:?}" "${SRC_DIR:?}" "${STICK_A:?}" "${STICK_D:?}" "${STICK_A_READ:?}" "${STICK_D_READ:?}" "${ALLOW_SRC:?}"
@@ -109,18 +112,18 @@ case $CHUNK in
     prep)
         # The light helper runs this script again for the chunk, in a child of its own.
         if [ -z "${LIGHT_CPUS:-}" ]; then exec "$LIGHT" "$here/witness.sh" prep "$SHA"; fi
-        step prep prep || fail prep $? ;;
+        go prep prep ;;
     build)
         take || exit 4
-        step auth-inputs auth_inputs || fail auth-inputs $?
-        step sbuild sbuild || fail sbuild $?
-        step sstick sstick || fail sstick $? ;;
-    legs-x) take || exit 4; step legs-x leg x U9,U13f,U14,U10,U11,U12,U15 || fail legs-x $? ;;
-    legs-d) take || exit 4; step legs-d leg d U1d,U2d,U3d,U4d,U6d,U13d || fail legs-d $? ;;
-    legs-a) take || exit 4; step legs-a leg a U1,U2,U0,U8,U3,U4,U6,U7,U13a || fail legs-a $? ;;
+        go auth-inputs auth_inputs
+        go sbuild sbuild
+        go sstick sstick ;;
+    legs-x) take || exit 4; go legs-x leg x U9,U13f,U14,U10,U11,U12,U15 ;;
+    legs-d) take || exit 4; go legs-d leg d U1d,U2d,U3d,U4d,U6d,U13d ;;
+    legs-a) take || exit 4; go legs-a leg a U1,U2,U0,U8,U3,U4,U6,U7,U13a ;;
     compare)
         # The light helper runs this script's compare in a child shell of its own.
         if [ -z "${LIGHT_CPUS:-}" ]; then exec "$LIGHT" "$here/witness.sh" compare "$SHA" "$CAP"; fi
-        step sudo-compare compare || fail sudo-compare $? ;;
+        go sudo-compare compare ;;
     *) echo "unknown chunk $CHUNK"; exit 2 ;;
 esac
