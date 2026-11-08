@@ -64,6 +64,8 @@ session() { # name program
         usermod -aG sudo pax
         if [ "$mode" = pax ]; then cp "$in/sudoers.shipped" /etc/sudoers; else cp /root/sudoers.stock /etc/sudoers; fi
         chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers
+        # the log a file, as on PAX's image (Ubuntu's stock policy logs to syslog): one sudoers.d line
+        printf 'Defaults logfile=/var/log/sudo.log\n' > /etc/sudoers.d/log; chown 0:0 /etc/sudoers.d/log; chmod 0440 /etc/sudoers.d/log
     fi
     cp /root/shadow.start /etc/shadow; chmod 640 /etc/shadow
     [ "$mode" != pax ] || chmod 600 /etc/shadow
@@ -78,7 +80,7 @@ session() { # name program
     [ "$s" != login-trap ] || gpasswd -d pax sudo > /dev/null
     if [ "$s" = admin ]; then
         gpasswd -d pax sudo > /dev/null
-        cp "$in/sudoers" /etc/sudoers; chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers
+        cp "$in/sudoers" /etc/sudoers; chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers; rm -f /etc/sudoers.d/log
     fi
 }
 session pw /usr/bin/pelt
