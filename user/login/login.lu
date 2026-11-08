@@ -26,12 +26,15 @@
 //!   console never says which accounts exist. The fifth failure: `Maximum
 //!   number of tries exceeded (5)`; 60 s from the start: `Login timed out
 //!   after 60 seconds.` (R-px106-3). An empty name asks the name again.
-//! - **The first-boot rule** (R-px106-2): while no account in /etc/shadow
-//!   has a password PAX can check (every line locked, or no file at all),
-//!   the name `root` is let in with no password, and one line says so. An
-//!   unconfigured system is as open as the console was before px106 until
-//!   its owner sets a password (`passwd`); from the first password on, the
-//!   rules above hold for root too.
+//! - **The first-boot rule** (R-px106-2, as R-px106-9 has it): while no
+//!   account that can reach root has a password PAX can check (root itself
+//!   and every member of group `sudo`; every line locked, or no file at
+//!   all), the name `root` is let in with no password, and one line says
+//!   so. A password on any other account (lobo's) leaves the door open, so
+//!   the console never ends with no way to root. An unconfigured system is
+//!   as open as the console was before px106 until its owner sets a
+//!   password (`passwd`) for root or a sudo member; from then on, the rules
+//!   above hold for root too.
 //! - The session: the terminal given to the account (owner the account,
 //!   group its primary group, mode 0600: px98's rule; Ubuntu's group is
 //!   `tty`, which PAX has not), the groups /etc/group gives it, its group
@@ -163,8 +166,9 @@ fn session(first: str) -> int {
         }
         let stext = shadow_text("")
         let ptext = fs_read_text("/etc/passwd") else ""
-        if name == "root" && !shadow_any_usable(stext) {
-            print("PAX: no account here has a password, so root logs in without one; set one with passwd.")
+        let gtext = fs_read_text("/etc/group") else ""
+        if name == "root" && !shadow_root_door_shut(stext, ptext, gtext) {
+            print("PAX: no password is set for root or for group sudo, so root logs in without one; set one with passwd.")
             let r = users.user_named(ptext, "root") else |_| {
                 users.User { name: "root", uid: 0, gid: 0, comment: "", home: "/root", shell: "/bin/sh" }
             }

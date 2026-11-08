@@ -85,14 +85,40 @@ fn shadow_state(field: str) -> str {
     "P"
 }
 
-/// Whether some account has a password PAX can check (the first-boot rule,
-/// R-px106-2: while none has, login admits root with no password).
-fn shadow_any_usable(text: str) -> bool {
-    for line in text.split("\n") {
-        let s = shadow_parse(line) else |_| {
-            continue
+/// The accounts that can reach root (R-px106-9): root itself and every member of group `sudo`
+/// (its /etc/group line's members, and each account /etc/passwd gives sudo's gid as its own).
+fn shadow_root_reachers(ptext: str, gtext: str) -> List[str] {
+    var out = List[str]()
+    (mut out).push("root")
+    var gid = ""
+    for line in gtext.split("\n") {
+        let f = line.split(":")
+        if f.len == 4 && f[0] == "sudo" {
+            gid = f[2]
+            for m in f[3].split(",") {
+                if m.len > 0 {
+                    (mut out).push(m)
+                }
+            }
         }
-        if pw_refusal(s.field).len == 0 {
+    }
+    if gid.len > 0 {
+        for line in ptext.split("\n") {
+            let f = line.split(":")
+            if f.len >= 7 && f[3] == gid {
+                (mut out).push(f[0])
+            }
+        }
+    }
+    out
+}
+
+/// Whether an account that can reach root (shadow_root_reachers) has a password PAX can check: the
+/// first-boot rule (R-px106-2, as R-px106-9 has it): while none has, login admits root with no
+/// password and says so. A password on any other account (lobo's, say) leaves the door open.
+fn shadow_root_door_shut(stext: str, ptext: str, gtext: str) -> bool {
+    for name in shadow_root_reachers(ptext, gtext) {
+        if pw_refusal(shadow_entry(stext, name).field).len == 0 {
             return true
         }
     }
