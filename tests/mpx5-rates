@@ -11,8 +11,9 @@
 #   bench NAME: N in S s: R /s (U us each); user U sys S vcs V ics I cpu C
 #
 # on PAX (the run list of kmain_console, the shipped kernel, under QEMU)
-# and on Linux (the same binary run here, in a fresh directory, before and
-# after the boots, each row pinning itself to the CPU it starts on).
+# and on Linux (the same binary run here, in a fresh directory of a tmpfs,
+# /dev/shm, before and after the boots, each row pinning itself to the CPU
+# it starts on).
 #
 #   tests/mpx5-rates [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                    [--tier native|release|both] [--accel auto|kvm|tcg]
@@ -101,7 +102,13 @@ fi
 # The Linux side, run here: a fresh directory each time, every row once.
 linux_side() { # tag
     local d k=0 r
-    d=$(mktemp -d "${TMPDIR:-/tmp}/px108-rates.XXXXXX")
+    # PAX's tree is memory: Linux's side writes in a tmpfs too (/dev/shm),
+    # so the fsync rows compare memory with memory.
+    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+        d=$(mktemp -d /dev/shm/px108-rates.XXXXXX)
+    else
+        d=$(mktemp -d "${TMPDIR:-/tmp}/px108-rates.XXXXXX")
+    fi
     for r in "${ROWS[@]}"; do
         "$images/bin/bench" ${r//@/$d} || echo "bench ${r%% *}: refused"
         k=$((k + 1))
