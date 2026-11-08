@@ -202,8 +202,15 @@ in-kernel LAPIC counts on.
          584c5313   62,472,345 and 62,473,236 Hz
          4f485e76   62,526,641 Hz
 
-None high: under these loads the stick's code calibrated normally in 14
-boots, and the trigger is not reproduced. The load did reach the emulated
+  m6c  one 1 GiB writer, 1 GiB rewritten into the 64 GiB sparse AHCI image
+       before each boot, at most 2 GB on disk (started at 42 GB free; the
+       guard's 32 GB floor never reached), 12 boots each:
+         584c5313   62,461,574-62,474,382 Hz
+         113332cb   62,499,281-62,500,277 Hz
+
+None high: under these loads the stick's code calibrated normally in 26
+boots (12, 2 and 12), the head within 0.05% of 62.5 MHz in 25, and the
+trigger is not reproduced. The load did reach the emulated
 counters: a KVM boot run beside m6b had its HPET refused by the clock's
 own check against the PM timer (`no window measured cleanly against the
 PM timer in 3; refused`, 192 brackets taken again), the shape of pax#314.
@@ -217,3 +224,29 @@ must catch the stalled window (lt5, at the head):
   TCG  windows 1 and 2 disagree: 87394974 and 62500518 Hz; 2 and 3 agree;
        calibrated 62,501,146 Hz; 50 ticks in 499,443 us
 and timer-stall and timer-stall-nopm green beside it in the same take.
+
+10. The row and the head, every way (mx5) and under equal load again (dh7)
+
+mx5, every tests/mpx4-dhcp way on native BIOS at the D11 row (7b4efc44,
+the old calibration) and at 58a2c797 (the windows, as the head on any
+machine with a PM timer):
+  7b4efc44 TCG   D11 red on backoff, rebind and expiry (ahead 7,305, 6,993
+                 and 7,109 ppm); renew, nak, slirp and session green
+  7b4efc44 KVM   D11 green; D1's expiry red, but not by the clock (below)
+  58a2c797 TCG   every row green; D11 from 199 to 4,072 ppm behind
+  58a2c797 KVM   every row green
+dh7, the dh take again, 7b4efc44 against 58a2c797: D1 red 4 of 9 against
+0 of 9, D11 9 of 9 (ahead 7,146-9,442 ppm) against 0 of 9; calibrations,
+expiry boots, median 62,021,842 against 62,501,121 Hz (62,500,702-
+62,501,574); slirp, median 62,042,945 against 62,501,141.
+
+The KVM expiry boot's D1 red is the capture's reading, not the client's.
+That boot ran beside m6c's write load: dnsmasq answered the first REQUEST
+late, the client asked again 4 s later, and the server ACKed both (frames
+15 and 20, +9.048 and +10.997). The client bound on the first, and its
+lease, T1, T2 and expiry count from it: the DISCOVER at +129.403 is 0.36 s
+after that lease's end (+129.048), late by the ticks lost under the load.
+tools/pcap-dhcp took the lease from the last ACK (+10.997, so +130.997)
+and called the DISCOVER 1.6 s early. RFC 2131 has the client bind on the
+first ACK and drop the rest; the capture's rule should take the lease from
+that one.
