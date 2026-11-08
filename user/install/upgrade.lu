@@ -22,7 +22,9 @@
 //!   when it is as shipped, kept when the user changed it;
 //! - every other path, and /home and /root whole, never touched;
 //! - /etc/passwd and /etc/group stay the user's, with any system account
-//!   the new image adds that they lack appended;
+//!   the new image adds that they lack appended, and (px106, R-px106-6 B3)
+//!   the installer's user (uid 1000) made a member of group sudo (gid 27):
+//!   the line appended, or the name added to its members, or nothing;
 //! - /etc/shadow (px106) is never touched once it is there; an install that
 //!   has none (made before px106) gets one, every account locked, root's,
 //!   0600, written after the texts;
@@ -485,10 +487,32 @@ fn upgrade_main(o: Options, work: str) -> int {
         for u in users { t += "{u}\n" }
         (mut p.texts).push(["/etc/passwd", t, "accounts appended"])
     }
-    if groups.len != 0 {
-        var t = have_group
-        for g in groups { t += "{g}\n" }
-        (mut p.texts).push(["/etc/group", t, "groups appended"])
+    // px106 (R-px106-6 B3): the installer's user, uid 1000 by /etc/passwd, in group sudo (gid 27):
+    // the line appended, or the user added to its members, or nothing when they are one; every other
+    // line as it was. gid 27 held by another group, or a sudo line at another gid, refuses the upgrade
+    // by name (the file is the user's).
+    var group_t = have_group
+    for g in groups { group_t += "{g}\n" }
+    var sudo_user = ""
+    for line in have_passwd.lines() {
+        let f = line.split(":")
+        if f.len >= 7 && f[2] == "{INSTALL_USER_ID}" { sudo_user = f[0] }
+    }
+    var sudo_said = "group: no uid {INSTALL_USER_ID} account in /etc/passwd; group sudo left as it is"
+    if sudo_user.len > 0 {
+        let with_sudo = sudo_member(group_t, sudo_user) else |e| match e {
+            gid_taken => {
+                return stop(mut lg, "pax-install: upgrade refused: {dev}'s /etc/group gives gid 27 to a group not named sudo (the file is yours: free gid 27 or name that group sudo, then upgrade again)")
+            },
+            sudo_gid => {
+                return stop(mut lg, "pax-install: upgrade refused: {dev}'s /etc/group has group sudo at a gid other than 27 (the file is yours: give it gid 27, then upgrade again)")
+            },
+        }
+        sudo_said = if with_sudo == group_t then "group: {sudo_user} already in sudo (gid 27); unchanged" else "group: {sudo_user} added to sudo (gid 27)"
+        group_t = with_sudo
+    }
+    if group_t != have_group {
+        (mut p.texts).push(["/etc/group", group_t, if groups.len != 0 then "groups appended" else "the user in group sudo"])
     }
     // px106: /etc/shadow is never touched once it is there (never read, written or listed: no
     // manifest names it). An install that has none, every install made before px106, gets one,
@@ -544,6 +568,7 @@ fn upgrade_main(o: Options, work: str) -> int {
     for k in p.dropped_kept { say(mut lg, "keep {k} (the new image drops it; you changed it)") }
     for e in p.esp { say(mut lg, "ESP {e[1]} replaced") }
     if users.len + groups.len == 0 { say(mut lg, "accounts: /etc/passwd and /etc/group kept; nothing to append") }
+    say(mut lg, sudo_said)
     if shadow_new.len != 0 {
         say(mut lg, "shadow: /etc/shadow created, every account locked (the install has none); root logs in with no password until one is set")
     } else {
