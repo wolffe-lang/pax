@@ -86,6 +86,7 @@ var test_add: u64 = 0
 var test_narrow: bool = false
 var test_next: u64 = 0
 var test_once: bool = false
+var test_pm_hidden: bool = false // px107: pm_beside() answers false (timer-stall-nopm)
 // What now_ns met (kernel/kmain_metal prints them): the rollovers of a
 // counter narrower than 64 bits, and (px107) the readings it took as no
 // time passing.
@@ -332,7 +333,10 @@ pub fn check_counts() -> (u64, u64, u64, u64) {
 /// its own crystal), the PM timer read directly (0 when there is none),
 /// and the nanoseconds from one such reading to another (one wrap at
 /// most: 4.69 s of the 24-bit counter).
-pub fn pm_beside() -> bool { unsafe { source } == 1 && acpi.pm_port() != 0 }
+pub fn pm_beside() -> bool { unsafe { source } == 1 && acpi.pm_port() != 0 && !unsafe { test_pm_hidden } }
+/// px107's test word: the calibration is told no PM timer stands beside
+/// the HPET (a machine without one), so its agreement rule works alone.
+pub fn test_no_pm() { unsafe { test_pm_hidden = true } }
 pub fn pm_now() -> u64 { if acpi.pm_port() == 0 { 0 } else { pm() } }
 pub fn pm_between(a: u64, b: u64) -> u64 { pm_ns(pm_since(a, b)) }
 /// The HPET's period in femtoseconds, 0 when the clock reads another
