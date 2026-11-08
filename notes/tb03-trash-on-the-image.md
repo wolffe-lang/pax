@@ -11,8 +11,9 @@ part ships them.
 
 ## Prediction (written before any change)
 
-Sources for this section: sniff's unmerged hook (its `tools/mksniff`,
-`user/sniff.pin` and the distribution and CI lines that go with them), PAX's
+Sources for this section: sniff's hook as its own lane wrote it (its
+`tools/mksniff`, `user/sniff.pin` and the distribution and CI lines that go
+with them; not yet in this tree), PAX's
 own `tools/mkburrow`, `tools/mkscent`, `tools/distribution-root`,
 `tests/distribution`, `tests/mpx5-scent` and `tools/ci-tiers.map`, and
 trash's `tools/build.py`, `wolf-toolchain.toml` and its PAX rows (19, green
