@@ -119,8 +119,11 @@ def place_rows(p, root, url, tmp, port):
     p.quiet(r, 'den clone -q --bare %s/src hub.git' % url)
     if tmp:
         b = p.s('ls hub.git', 1, r)
-        if b is not None and (b.status, b.out) != (0, ['HEAD', 'config', 'hooks', 'objects', 'refs']):
-            p.fail(r, '`ls hub.git`: %d %r (a bare repository: HEAD config hooks objects refs)' % (b.status, b.out))
+        # px97e (the stick's tree, whose den is vc25 c628c63 + vc24 28a3fc3): den cd73220 ("Pack a clone's refs,
+        # quote its URL and drop empty hooks on every transport") writes packed-refs and no empty hooks/ in a bare
+        # clone, as on Linux (R1 holds the session byte-identical to the container's).
+        if b is not None and (b.status, b.out) != (0, ['HEAD', 'config', 'objects', 'packed-refs', 'refs']):
+            p.fail(r, '`ls hub.git`: %d %r (a bare repository: HEAD config objects packed-refs refs)' % (b.status, b.out))
     r = 'remote-add-' + p.name
     p.quiet(r, 'den remote add origin %s' % hub)
     b = p.s('den remote -v', 1, r)
