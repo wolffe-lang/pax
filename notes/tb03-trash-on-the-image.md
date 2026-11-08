@@ -90,3 +90,41 @@ been run.
   `trash-rm`'s bytes as `trash-empty`. `tests/mpx5-trash` goes red by name
   at A2 (the empty's question never asked, the trash not emptied), and the
   distribution row at `image-trash-pin-trash-empty`.
+
+## Since the prediction: the pin at trash `c027df8`
+
+Re-reading the first predicted result above (the builder's digests are
+trash's gate's) before any run: at `90169ed` it could not have held. Each
+binary named its modules by their absolute paths, and the link's build-id
+hashed them, so tools/mktrash's two checkouts would have refused each
+other. In PAX's build image, which has an `ld.lld` on `PATH`, wolf 0.2.38
+links through lld, whose bytes are not the system linker's that trash's
+oracle image uses.
+
+trash#5 (merged at `c027df8`) makes the five depend on the commit alone. It
+builds from the tree's root by relative paths, with no build-id, and forces
+the system linker after wolf's own arguments. trash's gate holds this: its
+`repro` row builds the five at two paths and again with an `ld.lld` on
+`PATH` that refuses to link. wolf's silent choice of lld is filed as
+wolf-lang#1082.
+
+- **`user/trash.pin`**:
+  - `TRASH_REV` is now `c027df8`.
+  - The codeload source archive's sha256 is `2bc57c82…`, read twice from
+    two downloads.
+  - The five digests and sizes are the ones trash's own gate printed at
+    `c027df8` (its record's `repro` step).
+- **`tools/mktrash`**: its two-checkout agreement check stays.
+
+## Rulings
+
+- **R-tb03-12, ruled A:** trash's build was made reproducible as a trash
+  follow-up, before this pin moved (trash#5).
+- **R-tb03-13, ruled A:** this hook's footprint is cross-cutting. Its PR
+  opens against the trunk named after px106, px107 and px108.
+- **R-tb03-14 and R-tb03-15:** not ruled on their own. The coordinator
+  decided them inside R-tb03-12's ruling, whose outcome is that every
+  checkout and trash's own gate give the same bytes.
+  - R-tb03-14 is A: the system linker forced, held by `repro-linker`.
+  - R-tb03-15 is B: wolf's silent lld filed as a documentation issue
+    (wolf-lang#1082).
