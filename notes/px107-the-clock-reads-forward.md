@@ -18,11 +18,25 @@ than 64 bits still counts forward across its rollover. Every step's arithmetic i
 fire, and a session kernel prints one line at its end when any reading was refused: `clock: <n> reading(s) of the
 HPET taken as no time passing; the first 0x<current> after 0x<previous>, mask 0x<mask>`.
 
-Footprint: cross-cutting (`kernel/clock`, which every suite reads, and the session kernels' end lines;
-`kernel/kmain_metal`, `tests/mpx6-metal`).
+The tick's length (pax#308, folded in here). The LAPIC timer's calibration read the clock, then the count, and
+the count, then the clock, so the time the reads took counted against the clock alone: under TCG the rate came out
+0.4% to 2.3% low, the tick that much short, and kernel/dhcp's lease, T1 and T2 (counted in ticks) ran that much
+early. Over a 120 s lease 0.83% puts the expiry's DISCOVER more than a second early, which `mpx4-dhcp`'s D1 fails;
+it did, 4 times at 3 commits in three days, 3 of them before this change, and this change's HPET read (three
+device reads where one load was) made it 0.17% worse: 3 red in 9 against 0 in 9 under equal load. Now each end of
+a window reads the count, the clock and the PM timer back to back after a warming read, so the reads cancel
+(D1 0 in 9, the DISCOVER within 52 ms of the lease's end, the rate's median 62,500,747 Hz under TCG
+and 62,499,225-62,500,183 under KVM); windows are taken until two agree within 0.1%; a window whose clock interval is not the PM timer's
+within 0.5% is set aside, by name on the console; and with no PM timer beside the clock a boot line says the
+agreement rule works alone. One boot of this change's kernel under KVM calibrated at 1.433 times the rate and ran
+its clock at 0.70 of real time; that boot is unexplained (§3.2), and either shape it could take is now caught.
 
-This pull request is the lane's first item. The others follow in their own: the T1 `tgkill` probe (pax#306), and
-CI's DHCP intervals under load and the yew jobs' time limits (pax#308, pax#305).
+Footprint: cross-cutting (`kernel/clock`, which every suite reads, and the session kernels' end lines;
+`kernel/timer`, which every suite's tick comes from; `kernel/kmain_metal`, `kernel/kmain_sockets`,
+`kernel/kmain_session`, `tests/mpx6-metal`, `tests/mpx4-dhcp`).
+
+This pull request carries the lane's first and second items. The others follow in their own: the T1 `tgkill`
+probe (pax#306) and the yew jobs' time limits (pax#305).
 
 ## 1. Forbidden, and what was read
 
@@ -110,6 +124,53 @@ By symbol (`nm -S`, base against head):
   It goes up and down with commits that add no call on any path the boot runs, so no one commit causes it; at the
   head, the torn-read row's loop moved into `kmain_metal`, it is back within 9 KB of the base (.text +6,864).
 
+### 3.2 The tick (pax#308)
+
+The measurement is `notes/px107/measure-308.txt`; in short:
+
+- **Which clock.** kernel/dhcp counts in `timer.ticks()`, the LAPIC timer at 100 Hz, its length set once at boot.
+  In five CI expiry boots the guest's lease (120.000 s of its ticks) against the capture's implies one LAPIC rate,
+  62.48-62.49 MHz, whatever each boot calibrated: the tick was short by exactly the calibration's shortfall, and the
+  HPET read true.
+- **Before this change.** 224 native-tier CI boots since 11-05: the runs' medians 0.41% to 0.79% short, and the
+  reds at 2.1% to 2.3%. The release tier, faster code between the reads, was never short by 0.83%.
+- **This change's part.** Under equal load (three TCG boots at once, the commits alternating by slot) D1 red in 0
+  of 9 at the trunk and 3 of 9 with this change; the calibration 0.17% lower (the HPET read is three device reads,
+  one more at each end of the old bracket).
+- **The paired reads.** At the paired commit D1 red in 0 of 9 against 4 of 9 at the row's, D11 in 0 of 9 against
+  9 of 9; the rate 62,498,469-62,506,753 Hz under TCG, 62,499,225-62,500,183 under KVM.
+- **The 1.433 times boot, unexplained.** One boot in 19 of this change's kernel under KVM (the install image's)
+  calibrated at 89,527,688 Hz; its `sleep 5` took 7.168 s by the host. A stall between two reads cannot give that:
+  in the old order the clock's interval holds the LAPIC's, so a stall can only make the rate low, and 20 KVM boots
+  with the vCPU's CPU shared with a busy loop all read 62.472-62.476 MHz. It needs one counter to move unevenly
+  against the other inside the window: the clock standing still, or the LAPIC's count jumping. Which one is not
+  known. `timer-stall` makes the clock stand still 8.6 ms and reproduces it (89,281,777 Hz, 50 ticks in 714 ms under
+  KVM); the windows set that window aside by the PM timer (`window 1 set aside: … the clock 20008 us against the PM
+  timer's 28581 us`), and a count that jumped would disagree with the next window (`windows 1 and 2 disagree`).
+- **No PM timer.** The agreement rule alone still catches one window off (`timer-stall-nopm`: `windows 1 and 2
+  disagree: 87048098 and 62499001 Hz`); the same disturbance alike in two windows in a row would pass, and the
+  boot says so: `timer: LAPIC calibration: no second counter beside the HPET to hold each window to; two windows
+  off alike in a row would pass`.
+- **Real hardware.** Under KVM, where every HPET read is a trip to the emulator, the old bracket was 0.04% short; a
+  hardware read costs no more, so the reads' part is under 0.04% there before this change, and none after it. What
+  remains is the window's resolution (a few ppm) and the two crystals drifting apart, which these takes cannot
+  measure without the metal target.
+- **The cost.** The console kernel's boot, 206.25 ms (mean of 4 under KVM) at the trunk's calibration and 212.5 ms
+  with the windows: 6.25 ms more. By construction the second window takes 20 ms; the difference is not explained
+  here.
+- **D11 measures from the lease wait.** From the tick's arming it read 156-821 ppm behind at the paired commit:
+  ticks lost while the boot keeps interrupts off, which is not the tick's length. So the tick clock is marked at the
+  lease wait and D11 holds only "ahead"; `timer-stall` holds the tick's length.
+
+### 3.3 `kmain_session` did not compile
+
+`584c5313`: kmain_session's `let (nd, clock) = …` (the network clock thread's address) hid the `clock` module from
+the rest of `kmain`, so `clock.report()` read as a method on a u64, which wolf 0.2.35 refuses; CI's `mpx2-frames`
+F1b (every `kernel/kmain*.lu` built and linked), `mpx4-dhcp` D0, `mpx4-session` E0 and `mpx5-jobs` J0 failed by
+it. The local name is now `nc`, as kmain_console names it. The lane's gauntlet built only the kernels its suites
+boot, and none of them boots kmain_session; `mpx2-frames --no-boot --tier native` (F1b) now joins the green
+gauntlet, since any change to a kmain must build every entry.
+
 ## 4. Evidence index
 
 Every take ran on Linux host 1 in the Ubuntu 24.04 container (QEMU 8.2.2), behind a block's two lock names or a light
@@ -123,6 +184,13 @@ slot; the records are kept in the lane's directories.
 | t2 | red at the rows' tip, BIOS and UEFI, KVM and TCG: `clock-behind` and `clock-torn` red, `clock-32` and `clock-pmwrap` green; at the head two more rows' bugs (the behind row's grep against the serial CR; `clock-32` under KVM met pax#314, its HPET refused) | `df3ab92e`, `c799aa59` |
 | t3 | green at the head after both fixes: every clock leg on BIOS and UEFI under KVM and TCG (`clock-torn`: 0 of 20,000 crossings torn under either), F1's other legs, mpx2-interrupts, mpx2-sched, mpx6-nmi release BIOS (`PASS N0 release: every injection point is one symbol in the kernel (7 points)`) | `cec3efda` |
 | sz1, bs1, bs2 | `kmain_console`'s size at the base and the head, and the commit that moves the release tier's inlining (§3.1) | `db516c69`, `c799aa59`; `52fcd86d`, `69c3f2ba`, `3f1f012d`, `576060c8` |
+| f1, ks1 | `mpx2-frames --no-boot --tier native` (F1b, every entry) and the touched entries built: kmain_session red at `2c5236bf`, every entry green at `584c5313` | `2c5236bf`, `584c5313` |
+| dh2 | `mpx4-dhcp` expiry under TCG, 9 boots each under equal load, and 15 slirp calibrations each: D1 red 0 of 9 at the trunk, 3 of 9 with this change (§3.2) | `db516c69`, `584c5313` |
+| dh4 | the same at the row's commit against the paired one: D1 4 of 9 against 0 of 9, D11 9 of 9 against 0 of 9 | the row and paired commits before the mark |
+| m5a | 20 KVM boots each of the session kernel with the vCPU's CPU shared with a busy loop: no high rate | `584c5313`, the paired commit |
+| lt1, lt2 | `timer-stall` red at the row's and the paired commits, green at the windows'; `timer-stall-nopm` green at the head; KVM and TCG | the row, paired and windows commits; the head |
+| bt1 | the console kernel's boot time, 4 boots each under KVM | `584c5313`, the windows commit |
+| mx3, dh5 | every `mpx4-dhcp` way under TCG and KVM at the D11 row and at the windows commit; the dh take between them | the row and windows commits |
 | the final records | red at the rows' tip and the plant red by name; green at the head | the PR's head |
 
 ## 5. Done-when
@@ -153,5 +221,9 @@ slot; the records are kept in the lane's directories.
 - [x] F1's other legs (mpx6-metal) green at the head
 - [x] mpx2-interrupts, mpx2-sched, mpx6-nmi (release, BIOS) green at the head
 - [x] tests/ci-plan
-- [ ] the final records at the head: green, and the plant red by name
+- [x] F1b: every kernel entry builds and links (`mpx2-frames --no-boot --tier native`) at `584c5313`
+- [x] D11 red at its row under TCG, green at the paired commit; D1's expiry 0 of 9 at the paired commit
+- [x] timer-stall red at its row and at the paired commit, green at the windows commit; timer-stall-nopm green
+- [ ] mx3: every `mpx4-dhcp` way at the row and at the head, TCG and KVM; dh5: the dh take, row against head
+- [ ] the final records at the head: green (with `mpx2-frames --no-boot`), and the plant red by name
 - [ ] the PR's tier pr (every suite: `kernel/clock/*` is ALL in `tools/ci-tiers.map`), then `full-matrix`
