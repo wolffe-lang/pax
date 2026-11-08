@@ -206,48 +206,23 @@ pub fn last() -> u64 { unsafe { previous } }
 pub fn mask_of() -> u64 { unsafe { mask } }
 pub fn wrapped() -> u64 { unsafe { wraps } }
 pub fn refused_count() -> u64 { unsafe { refused } }
-/// px107's device row (tests/mpx6-metal's clock-torn): the HPET's main
-/// counter put `lead` ticks before its low word rolls over (halted, written,
-/// enabled again: HPET 1.0a §2.3.8 rule 2) and read by raw() until its high
-/// word has moved on and 16 times more, `n` times over, interrupts masked:
-/// (the crossings read across, the crossings in which a reading was below
-/// the one before, the crossings whose first read came after the rollover).
-/// The clock then goes on from the counter where it is (`previous`
-/// rebased: no step).
-pub fn test_crossings(n: u64, lead: u64) -> (u64, u64, u64) {
-    if unsafe { source } != 1 || unsafe { mask } != 0xffffffffffffffff || lead == 0 || lead > 0xffffffff { return (0, 0, 0) }
-    let a = unsafe { address }
+/// px107's device row (tests/mpx6-metal's clock-torn, which kernel/kmain_metal
+/// runs, so the row's loop lives there and no other kernel carries it): the
+/// register block of a 64-bit HPET the clock reads (0 when the clock's source
+/// is anything else), the clock's own reading of it (raw()), and the clock
+/// going on from the counter where it is after the row rewrote it
+/// (`previous` rebased: no step).
+pub fn hpet_block() -> u64 {
+    if unsafe { source } != 1 || unsafe { mask } != 0xffffffffffffffff { return 0 }
+    unsafe { address }
+}
+pub fn counter() -> u64 { raw() }
+/// Whether the clock reads the HPET (at either width).
+pub fn reads_hpet() -> bool { unsafe { source } == 1 }
+pub fn test_rebase() {
     let flags = sync.irq_save()
-    let cfg = read32(a + 0x10)
-    var spanned: u64 = 0
-    var torn: u64 = 0
-    var late: u64 = 0
-    var i: u64 = 0
-    while i < n {
-        write32(a + 0x10, cfg & !1)
-        write32(a + 0xf0, 0x100000000 - lead)
-        write32(a + 0xf4, 5)
-        write32(a + 0x10, cfg | 1)
-        var last = raw()
-        if (last >> 32) != 5 { late += 1 } else {
-            var bad = false
-            var after: u64 = 0
-            var k: u64 = 0
-            while after < 16 && k < 10000000 {
-                let v = raw()
-                if v < last { bad = true }
-                if (v >> 32) == 6 || after > 0 { after += 1 }
-                last = v
-                k += 1
-            }
-            if after == 16 { spanned += 1 }
-            if bad { torn += 1 }
-        }
-        i += 1
-    }
     unsafe { previous = raw() }
     sync.irq_restore(flags)
-    (spanned, torn, late)
 }
 /// The reading now_ns takes: the source's, or a test word's, once.
 fn reading() -> u64 {

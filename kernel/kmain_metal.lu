@@ -72,6 +72,7 @@ fn step(what: str, before: u64, after: u64, t0: u64, t1: u64) {
     log.put(" mask "); log.hex(clock.mask_of()); log.put(" read as "); log.dec((t1 - t0) as int); log.line(" ns")
 }
 fn behind() {
+    check(clock.hpet_block() != 0, "the clock is the HPET, 64 bits")
     let flags = sync.irq_save()
     let t1 = clock.now_ns()
     let r1 = clock.last()
@@ -99,6 +100,11 @@ fn behind() {
     check(clock.refused_count() == 2, "a skip of 2^40 ticks taken as time")
 }
 fn rollover() {
+    // The source the leg asks for (q35's HPET read as 32 bits, or the PM
+    // timer's 24), by name before anything is measured (pax#314: under KVM
+    // on a loaded host the HPET's check can refuse it).
+    if boot_info.cmdline_has("metal_clock_pmwrap") { check(clock.mask_of() == 0xffffff, "the clock is the PM timer, 24 bits") }
+    else { check(clock.reads_hpet() && clock.mask_of() == 0xffffffff, "the clock is the HPET, read as 32 bits") }
     let wraps = clock.wrapped()
     let port = acpi.pm_port()
     let p0 = unsafe { pax_inl(port as u16) as u64 } & 0xffffff
@@ -130,8 +136,52 @@ fn rollover() {
 // word rolls over, 20000 times, and read across each by the clock's own
 // read: no reading may be below the one before (HPET 1.0a §2.4.7: a 64-bit
 // read may be broken into two 32-bit ones, and QEMU's is).
+fn r32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
+fn w32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile(v as u32) } }
+/// The HPET's main counter put `lead` ticks before its low word rolls over
+/// (halted, written, enabled again: HPET 1.0a §2.3.8 rule 2) and read by the
+/// clock's own read until its high word has moved on and 16 times more, `n`
+/// times over, interrupts masked: (the crossings read across, those in which
+/// a reading was below the one before, those whose first read came after
+/// the rollover). The clock then goes on from the counter where it is.
+fn crossings(n: u64, lead: u64) -> (u64, u64, u64) {
+    let a = clock.hpet_block()
+    if a == 0 || lead == 0 || lead > 0xffffffff { return (0, 0, 0) }
+    let flags = sync.irq_save()
+    let cfg = r32(a + 0x10)
+    var spanned: u64 = 0
+    var torn: u64 = 0
+    var late: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        w32(a + 0x10, cfg & !1)
+        w32(a + 0xf0, 0x100000000 - lead)
+        w32(a + 0xf4, 5)
+        w32(a + 0x10, cfg | 1)
+        var last = clock.counter()
+        if (last >> 32) != 5 { late += 1 } else {
+            var bad = false
+            var after: u64 = 0
+            var k: u64 = 0
+            while after < 16 && k < 10000000 {
+                let v = clock.counter()
+                if v < last { bad = true }
+                if (v >> 32) == 6 || after > 0 { after += 1 }
+                last = v
+                k += 1
+            }
+            if after == 16 { spanned += 1 }
+            if bad { torn += 1 }
+        }
+        i += 1
+    }
+    clock.test_rebase()
+    sync.irq_restore(flags)
+    (spanned, torn, late)
+}
 fn torn() {
-    let (spanned, bad, late) = clock.test_crossings(20000, 5000)
+    check(clock.hpet_block() != 0, "the clock is the HPET, 64 bits")
+    let (spanned, bad, late) = crossings(20000, 5000)
     log.put("metal: the HPET read across 20000 rollovers of its low word: "); log.dec(spanned as int)
     log.put(" read across, "); log.dec(bad as int); log.put(" torn, "); log.dec(late as int); log.line(" first read after the rollover")
     check(spanned >= 18000, "the reads went across the rollovers")
