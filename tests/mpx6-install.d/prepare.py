@@ -27,6 +27,32 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
     (p/'games/pack.engine.source.tar.gz').write_bytes(b'fixture engine source with its licence')
     (p/'games.txt').write_text('pack '+'a'*40+' '+h(p/'games/pack.source.tar.gz')+' pack 0755 '+'b'*40+' '+h(p/'games/pack.engine.source.tar.gz')+'\n')
     (p/'games.sha256').write_text(h(p/'games/pack')+'  pack\n')
+    # px106 (R-px106-6 B3): the installer's user in group sudo (gid 27), the rest of /etc/group byte for byte.
+    def groups(text, name='wolf'):
+        f=w/'group.case'; f.write_text(text)
+        r=subprocess.run([program,'groups',f,name],capture_output=True,text=True)
+        return r.returncode,r.stdout
+    def row(name, ok, what):
+        if not ok: print('FAIL '+name+': '+what); sys.exit(1)
+        print('PASS '+name+': '+what)
+    base='root:x:0:\nwolf:x:1000:\nlobo:x:990:\n'
+    rc,out=groups(base)
+    row('I-sudo-group-append',(rc,out)==(0,base+'sudo:x:27:wolf\n'),'no sudo line: sudo:x:27:wolf appended, every other line as it was ('+repr(out)+')')
+    rc,out=groups('root:x:0:')
+    row('I-sudo-group-no-newline',(rc,out)==(0,'root:x:0:\nsudo:x:27:wolf\n'),'a file with no final newline gets one before the appended line ('+repr(out)+')')
+    rc,out=groups('root:x:0:\nsudo:x:27:alice\nwolf:x:1000:\n')
+    row('I-sudo-group-add',(rc,out)==(0,'root:x:0:\nsudo:x:27:alice,wolf\nwolf:x:1000:\n'),'a sudo line without them: added at the end of its members, in place ('+repr(out)+')')
+    rc,out=groups('root:x:0:\nsudo:x:27:\n')
+    row('I-sudo-group-add-empty',(rc,out)==(0,'root:x:0:\nsudo:x:27:wolf\n'),'an empty member list: wolf the member ('+repr(out)+')')
+    t='root:x:0:\nsudo:x:27:alice,wolf,bob\nwolf:x:1000:\n'
+    rc,out=groups(t)
+    row('I-sudo-group-member',(rc,out)==(0,t),'already a member: the text byte for byte ('+repr(out)+')')
+    rc,once=groups(base); rc2,twice=groups(once)
+    row('I-sudo-group-idempotent',rc==0 and rc2==0 and twice==once,'a second pass changes nothing ('+repr(twice)+')')
+    rc,out=groups('root:x:0:\nwheel:x:27:\nwolf:x:1000:\n')
+    row('I-sudo-group-gid-taken',(rc,out)==(3,'refused: gid_taken\n'),'gid 27 held by a group not named sudo: refused by name, nothing merged ('+repr(out)+')')
+    rc,out=groups('root:x:0:\nsudo:x:28:\nwolf:x:1000:\n')
+    row('I-sudo-group-other-gid',(rc,out)==(3,'refused: sudo_gid\n'),'a sudo line at another gid: refused by name ('+repr(out)+')')
     before={str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}
     for game in ['yes','no']:
         out=w/game
@@ -35,6 +61,9 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
         text=(out/'etc/passwd').read_text()
         assert text.startswith(root) and 'alice:x:1000:1000:alice:/home/alice:/bin/pelt\n' in text and '\npax:' not in text,text
         assert 'service:x:990:990:service:/srv:/bin/false\n' in text
+        grp=(out/'etc/group').read_text()
+        if grp!='root:x:0:\nalice:x:1000:\nsudo:x:27:alice\n':
+            print('FAIL I-sudo-group-fresh: the installed /etc/group is '+repr(grp)); sys.exit(1)
         attrs={r[0]:r[1:] for r in map(shlex.split,Path(str(out)+'.attrs').read_text().splitlines())}
         assert attrs['/home/alice'][:3]==['0755','1000','1000']
         assert list((out/'usr/share/pax-install').iterdir())==[]
@@ -48,7 +77,7 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
         guid=str(uuid.UUID(bytes=hashlib.sha256(b'pax-gpt-part:test:1700000000:2').digest()[:16]))
         assert 'root=PARTUUID='+guid in (out/'boot/limine/limine.conf').read_text()
         assert (out/'etc/fstab').read_text().startswith('PARTUUID='+guid+' / ext2 rw')
-        print('PASS I-account-games-'+game+': named user, uid/gid 1000, root shell unchanged, payload omitted, complete game and engine source on yes')
+        print('PASS I-account-games-'+game+': named user, uid/gid 1000, in group sudo (27), root shell unchanged, payload omitted, complete game and engine source on yes')
     assert {str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}==before
     # gm01: the engine's source is held to its digest like the game's
     good=(p/'games/pack.engine.source.tar.gz').read_bytes()
