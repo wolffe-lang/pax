@@ -87,6 +87,7 @@ var test_narrow: bool = false
 var test_next: u64 = 0
 var test_once: bool = false
 var test_pm_hidden: bool = false // px107: pm_beside() answers false (timer-stall-nopm)
+var test_pm_follow: bool = false // px107: pm_now() answers from the clock (timer-stall-shared)
 // What now_ns met (kernel/kmain_metal prints them): the rollovers of a
 // counter narrower than 64 bits, and (px107) the readings it took as no
 // time passing.
@@ -337,7 +338,15 @@ pub fn pm_beside() -> bool { unsafe { source } == 1 && acpi.pm_port() != 0 && !u
 /// px107's test word: the calibration is told no PM timer stands beside
 /// the HPET (a machine without one), so its agreement rule works alone.
 pub fn test_no_pm() { unsafe { test_pm_hidden = true } }
-pub fn pm_now() -> u64 { if acpi.pm_port() == 0 { 0 } else { pm() } }
+/// px107's test word: pm_now() answers the clock's own time in PM ticks,
+/// so whatever stall the clock meets the PM timer meets alike (one stall
+/// of an emulator holding both reads: timer-stall-shared).
+pub fn test_pm_follows_clock() { unsafe { test_pm_follow = true } }
+pub fn pm_now() -> u64 {
+    if acpi.pm_port() == 0 { return 0 }
+    if unsafe { test_pm_follow } { return (now_ns() / 1000 * 3579545 / 1000000) & acpi.pm_mask() }
+    pm()
+}
 pub fn pm_between(a: u64, b: u64) -> u64 { pm_ns(pm_since(a, b)) }
 /// The HPET's period in femtoseconds, 0 when the clock reads another
 /// source (px107: kernel/kmain_metal's timer-stall leg).
