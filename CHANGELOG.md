@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Passwords (px106).** PAX has passwords: `/etc/shadow`, root's and
+  mode 0600, one line an account, locked by default, a password stored as
+  wolf-std's scrypt in crypt(5)'s `$7$` form (N = 2^17, r = 8, p = 1). Four
+  programs in wolf share `user/auth`: `passwd`, `login` (the installed
+  console, pid 1), `su` (the target's password, one try) and `sudo` (your
+  own, three tries, a 5-minute timestamp a reboot forgets, `-S`, `-n`, `-k`,
+  `-K`, `-v`). The shipped policy is Ubuntu's shape, `%sudo ALL=(ALL:ALL)
+  ALL`: the installer makes its user a member of group `sudo` (gid 27), and
+  an upgrade adds the installer's account to it. No image ships a password;
+  while no account that can reach root (root and the members of `sudo`) has
+  one, the console lets root in with no password and says so. The guided
+  installer asks for root's and the user's passwords; an upgrade never
+  touches `/etc/shadow`. `tests/mpx5-sudo` holds the sessions typed at PAX's
+  console to Ubuntu 24.04's own `login`, `su`, `sudo` and `passwd`, and
+  `tests/mpx6-install` holds the upgrade's group and the first login through
+  sudo. Enforced for honest programs; not a boundary against an attacker.
+
 - **Push from the console (px104).** den pushes to GitHub from the console of
   every image, over HTTPS and over SSH. Names resolve: the kernel now answers
   what a C library's resolver asks of a datagram socket (`sendmmsg`, SOL_IP's
