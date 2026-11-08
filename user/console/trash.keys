@@ -1,0 +1,25 @@
+W=/tmp/w$(id -u); mkdir -p $W/d/e; cd $W
+s() { "$@" >$W.o 2>$W.e; echo "status $?"; while read -r x; do echo "$x"; done <$W.o; echo '[stderr]'; while read -r x; do echo "$x"; done <$W.e; }
+l() { trash-list >$W.o 2>$W.e; echo "status $?"; while read -r d t p; do echo "$p"; done <$W.o; echo '[stderr]'; while read -r x; do echo "$x"; done <$W.e; }
+f() { for x in "$@"; do echo "${x##*/}"; done; }
+for c in trash trash-list trash-restore trash-rm trash-empty; do command -v $c; done
+trash --version
+printf 'one\n' >a.txt; printf 'two\n' >d/e/f; printf 'three\n' >b.log; printf 'four\n' >c.log
+s trash a.txt
+l
+s trash d b.log c.log
+f *
+f $HOME/Trash/files/*
+s trash nosuch
+s trash -f nosuch
+printf '0\n' >$W.0
+trash-restore $W/d <$W.0 >$W.o 2>$W.e; echo "status $?"; while read -r n d t p; do echo "$n $p"; done <$W.o; echo '[stderr]'
+f *
+while read -r x; do echo "$x"; done <d/e/f
+s trash-rm '*.log'
+l
+printf 'y\n' >$W.y
+trash-empty -i <$W.y >$W.o 2>$W.e; echo "status $?"; while read -r x; do echo "$x"; done <$W.o; echo '[stderr]'
+l
+f $HOME/Trash/files/* $HOME/Trash/info/*
+exit
