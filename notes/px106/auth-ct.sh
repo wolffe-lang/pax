@@ -94,6 +94,12 @@ IN=/root/in-right row sudo-S-prompt "sudo -S -k -p 'pw for %p as %U on %h: ' id 
 IN=/root/in-root row su-stdin-right 'su -c "id -u"'
 IN=/root/in-one row su-stdin-wrong 'su -c "id -u"'
 IN=/root/in-empty row su-stdin-eof 'su -c "id -u"'
+# A terminal on standard input and no controlling terminal (setsid inside script(1)'s
+# pseudo-terminal): Linux's su still turns the echo off and ends the prompt's line (measured).
+echo "=== ROW su-tty-no-ctty"
+(sleep 2; printf '%s\r' "$wrong"; sleep 5) | (cd / && env -i HOME=/home/bob TERM=linux PATH=/usr/bin:/bin setpriv --reuid=1001 --regid=1001 --init-groups -- \
+    script -qfec 'setsid -w su -c "id -u"' /dev/null) > /root/o 2>&1; echo "--- rc $?"
+echo "--- the terminal"; tr -d '\r' < /root/o
 } > "$out/stdin.txt" 2>&1
 cp /var/log/sudo.log "$out/stdin.sudo.log" 2>/dev/null || : > "$out/stdin.sudo.log"
 echo "##### done" >> "$out/stdin.txt"
