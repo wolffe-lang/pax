@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# mkbench — build px108's two probes, static x86-64 Linux executables
+# linked against the baseline glibc's libc.a (as den, burrow and the other
+# static programs PAX ships are): `bench` (user/elf/bench.c: the
+# microbenchmarks of den's clone, a second of each) and `ptime`
+# (user/elf/ptime.c: one command timed, wall and wait4's rusage), for
+# tests/mpx5-rates.
+#
+#   tools/mkbench OUTDIR
+#
+# `gcc -static -no-pie -O2`, ET_EXEC with no PT_INTERP, each checked.
+# Prints the compiler's version, then `<name> <sha256> <bytes>` for each.
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu
+# 24.04 container), never on a host whose glibc assumes a newer CPU
+# (px10). Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkbench OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${BENCH_CC:-gcc}
+need "$cc" readelf
+say "cc: $("$cc" --version 2>&1 | head -n 1)"
+# Each source by its whole name: the CI map reads the paths a tool names.
+for src in "$PAX_ROOT/user/elf/bench.c" "$PAX_ROOT/user/elf/ptime.c"; do
+    p=$(basename "$src" .c)
+    "$cc" -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$out/$p" "$src" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
