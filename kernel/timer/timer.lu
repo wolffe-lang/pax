@@ -202,8 +202,18 @@ fn median(a: u64, b: u64, c: u64) -> u64 {
 /// 1.433 times the rate, and its clock, sleeps and timeouts ran at 0.70
 /// of real time). After six, the median of the last three kept. Every
 /// window set aside and every pair that disagrees is a boot line of its
-/// own, `timer: LAPIC calibration: …`.
+/// own, `timer: LAPIC calibration: …`. With no PM timer beside the HPET
+/// (or the clock the PM timer or the PIT) the agreement rule works alone,
+/// and a boot line says so: a stall in one window is caught by the next,
+/// one alike in two windows in a row is not.
 fn calibrate() -> u64 {
+    if !clock.pm_beside() {
+        // px107: the agreement rule alone. A clock that stands still, or a
+        // count that jumps, in one window is caught by the next; alike in
+        // two windows in a row it would pass.
+        log.put("timer: LAPIC calibration: no second counter beside the "); log.put(clock.name())
+        log.line(" to hold each window to; two windows off alike in a row would pass")
+    }
     let (_c, _t, _p) = triple() // once first, so every window's ends run the same code the same way
     var last: u64 = 0 // the window before's rate, when it was kept
     var a: u64 = 0
