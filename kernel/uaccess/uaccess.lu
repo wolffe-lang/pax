@@ -27,11 +27,23 @@
 //! against the user half's top before it is formed (wolf's arithmetic
 //! traps on overflow). No region, no heap. No Linux source; no other
 //! kernel's source.
+//!
+//! px108: the bytes move a page's part at a time through boot/tree.S's
+//! `pax_tree_copy` and `pax_tree_zero` (REP MOVSQ and MOVSB, REP STOSQ and
+//! STOSB, Intel SDM vol. 2), kernel addresses on both sides as before.
+//! Until px108 they moved one volatile byte at a time: a pipe's 64 KiB
+//! round trip took 0.64 ms under KVM, where the copy is a few
+//! microseconds (`notes/px108-den-on-one-cpu.md`). A user page and the
+//! kernel buffer never overlap (the buffer is the kernel's: a pipe's or
+//! socket's ring, a frame, `pax_kbuf`).
 
 use frames
 use paging
 use sched
 use vm
+
+extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
+extern "c" fn pax_tree_zero(dst: u64, n: u64)
 
 const PAGE: u64 = 4096
 
@@ -112,14 +124,11 @@ pub fn copy_out(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
         let room = PAGE - (dst + i) % PAGE
         let k = if n - i < room { n - i } else { room }
         let d = kaddr(pml4, dst + i)
-        var j: u64 = 0
-        while j < k {
-            // # Safety: d is the frame behind a page `writable` checked,
-            // through the HHDM; [d, d + k) stays in that page; src + i + j
-            // is inside the caller's kernel buffer.
-            unsafe { ((d + j) as *u8).write_volatile(((src + i + j) as *u8).read_volatile()) }
-            j += 1
-        }
+        // # Safety: d is the frame behind a page `writable` checked,
+        // through the HHDM; [d, d + k) stays in that page; [src + i,
+        // src + i + k) is inside the caller's kernel buffer; the two do
+        // not overlap.
+        unsafe { pax_tree_copy(d, src + i, k) }
         i += k
     }
     true
@@ -136,12 +145,8 @@ pub fn copy_in(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
         let room = PAGE - (src + i) % PAGE
         let k = if n - i < room { n - i } else { room }
         let s = kaddr(pml4, src + i)
-        var j: u64 = 0
-        while j < k {
-            // # Safety: as copy_out, the other way.
-            unsafe { ((dst + i + j) as *u8).write_volatile(((s + j) as *u8).read_volatile()) }
-            j += 1
-        }
+        // # Safety: as copy_out, the other way.
+        unsafe { pax_tree_copy(dst + i, s, k) }
         i += k
     }
     true
@@ -152,9 +157,12 @@ pub fn copy_in(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
 pub fn zero(pml4: u64, va: u64, n: u64) {
     var i: u64 = 0
     while i < n {
-        // # Safety: a byte of a page the caller checked writable.
-        unsafe { (kaddr(pml4, va + i) as *u8).write_volatile(0) }
-        i += 1
+        let room = PAGE - (va + i) % PAGE
+        let k = if n - i < room { n - i } else { room }
+        // # Safety: [kaddr, kaddr + k) is the part of a page the caller
+        // checked writable, through the HHDM.
+        unsafe { pax_tree_zero(kaddr(pml4, va + i), k) }
+        i += k
     }
 }
 
