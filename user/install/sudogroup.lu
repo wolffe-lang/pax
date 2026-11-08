@@ -9,7 +9,44 @@
 //! the file being the user's: gid 27 held by a group not named `sudo` (`gid_taken`), and a `sudo` line
 //! at another gid (`sudo_gid`). The fresh install (prepare.lu) and the upgrade (upgrade.lu) both use it.
 
-/// Rows first (px106): this answers the text unchanged until the change is written.
+const SUDO_GID: str = "27"
+
 fn sudo_member(text: str, name: str) -> str ! {gid_taken, sudo_gid} {
-    text
+    var out = ""
+    var found = false
+    for line in text.lines() {
+        let f = line.split(":")
+        if f.len == 4 && f[2] == SUDO_GID && f[0] != "sudo" {
+            return gid_taken
+        }
+        if f.len == 4 && f[0] == "sudo" {
+            if f[2] != SUDO_GID {
+                return sudo_gid
+            }
+            found = true
+            if !has_member(f[3], name) {
+                let members = if f[3].len == 0 then name else "{f[3]},{name}"
+                out += "{f[0]}:{f[1]}:{f[2]}:{members}\n"
+                continue
+            }
+        }
+        out += "{line}\n"
+    }
+    if !found {
+        out += "sudo:x:{SUDO_GID}:{name}\n"
+    }
+    // A text the change leaves alone comes back byte for byte (its last newline too, or its lack).
+    if found && out.len == text.len + 1 && !text.ends_with("\n") {
+        return text
+    }
+    out
+}
+
+fn has_member(list: str, name: str) -> bool {
+    for m in list.split(",") {
+        if m == name {
+            return true
+        }
+    }
+    false
 }
