@@ -31,8 +31,9 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   0.5% is set aside, by name on the console, so a clock that stands still or a
   count that jumps inside one window (a boot under KVM once calibrated at 1.433
   times the rate) no longer sets the tick. `mpx4-dhcp`'s D11 holds the tick clock
-  to the clock over the run, and `tests/mpx6-metal`'s `timer-stall` and
-  `timer-stall-nopm` the tick to the PM timer after a stall in the calibration,
+  to the clock over the run, and `tests/mpx6-metal`'s `timer-stall`,
+  `timer-stall-nopm` and `timer-stall-shared` the tick to the PM timer after a stall in the calibration (one the
+  PM timer shares too),
   each red first where the fix is.
 
 - **Push from the console (px104).** den pushes to GitHub from the console of
