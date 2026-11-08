@@ -40,11 +40,17 @@ trap 'chmod -R a+rX "$out" 2>/dev/null' EXIT
 for u in $(awk -F: '$3 == 1000 || $3 == 990 || $3 == 1001 { print $1 }' /etc/passwd); do userdel -r "$u" >/dev/null 2>&1; done
 for g in $(awk -F: '$3 == 1000 || $3 == 990 || $3 == 1001 || $3 == 2000 { print $1 }' /etc/group); do groupdel "$g" >/dev/null 2>&1; done
 cp "$in/pelt" /usr/bin/pelt; chmod 755 /usr/bin/pelt
+# px97e (the stick's tree, whose pelt is pelt's trunk): pelt's trunk starts friendly (pelt ruling #126 R-F-1),
+# drawing `root@pax ~# ` where these sessions wait for `$ `, the prompt px106's recordings hold, and login and su
+# hand the shell no ENV. Invoked under the name sh it starts plain (pelt's friendly_by_default), so every
+# account's shell here, and the pw and admin sessions' program, is pelt as /opt/pelt/sh, the path the PAX
+# images use too (P1 holds the two byte-identical, and the login session prints $SHELL).
+mkdir -p /opt/pelt; cp "$in/pelt" /opt/pelt/sh; chmod 755 /opt/pelt/sh
 groupadd -g 1000 pax; groupadd -g 990 lobo; groupadd -g 1001 bob; groupadd -g 2000 pack
-useradd -u 1000 -g 1000 -G pack -d /home/pax -m -s /bin/pelt pax
+useradd -u 1000 -g 1000 -G pack -d /home/pax -m -s /opt/pelt/sh pax
 useradd -u 990 -g 990 -d /srv/lobo -s /bin/false lobo 2>/dev/null
-useradd -u 1001 -g 1001 -d /home/bob -m -s /bin/pelt bob
-usermod -s /bin/pelt root
+useradd -u 1001 -g 1001 -d /home/bob -m -s /opt/pelt/sh bob
+usermod -s /opt/pelt/sh root
 mkdir -p /srv/lobo; chown 990:990 /srv/lobo
 while IFS=: read -r n f _; do [ "$f" = '!' ] || usermod -p "$f" "$n"; done < "$in/shadow.txt"
 for f in /etc/pam.d/*; do sed -i -E '/pam_(env|umask|limits|mail|motd|lastlog|loginuid|keyinit)\.so/d' "$f"; done
@@ -91,13 +97,13 @@ session() { # name program
         cp "$in/sudoers" /etc/sudoers; chown 0:0 /etc/sudoers; chmod 0440 /etc/sudoers; rm -f /etc/sudoers.d/log
     fi
 }
-session pw /usr/bin/pelt
+session pw /opt/pelt/sh
 session login /usr/bin/login
 session login-max /usr/bin/login
 [ ! -f "$in/login-time.keys" ] || session login-time /usr/bin/login
 [ "$mode" != pax ] || session login-first /usr/bin/login
 [ "$mode" != pax ] || session login-trap /usr/bin/login
-session admin /usr/bin/pelt
+session admin /opt/pelt/sh
 # No terminal: sudo -S and su reading standard input (setsid: no controlling terminal).
 cp /root/shadow.start /etc/shadow; [ "$mode" != pax ] || chmod 600 /etc/shadow
 rm -rf /run/sudo /var/run/sudo; rm -f /var/log/sudo.log
