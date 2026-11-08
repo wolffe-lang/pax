@@ -1,6 +1,7 @@
 # px106 — passwords (P5 U8, the second half)
 
-Base: pax trunk `7e65c2ce`. The claim, here and wherever this lane writes:
+Base: pax trunk `db516c69` (branch `px106b`, rebuilt from `px106`, which
+was first built on `7e65c2ce`, in the order the records need). The claim, here and wherever this lane writes:
 **enforced for honest programs; not a boundary against an attacker**
 (ruling #75 R6). The kernel has never been fuzzed or audited and loads
 programs at fixed addresses. R1 stands: no password in any published image.
@@ -208,8 +209,44 @@ before the fix.
 
 ## 4. What is not done
 
-(filled at the prepared head)
+- **Ubuntu's stock `/etc/sudoers` is not readable by PAX's sudo.** The
+  shipped policy is Ubuntu's two rules for root and `%sudo`, but `Defaults
+  mail_badpass`, `use_pty` and `@includedir` are outside the subset and a
+  parse error, by name (every command denied). PAX sends no mail.
+- **Password aging is written, never enforced.** `passwd` writes Ubuntu's
+  ages (0, 99999, 7), and `-e`, `-i`, `-n`, `-x`, `-w`, `-k` and `--repository`
+  are refused by name. No account's password expires.
+- **No PAM**, so none of its modules: no `pam_faillock`, no `obscure`
+  checks past the length, no `/etc/securetty`, `/etc/nologin`, hushlogin,
+  motd or last-login line at `login`.
+- **sudo's prompt never times out** (`passwd_timeout` is not built), and
+  `passwd_tries` and `lecture` are not in the subset.
+- **The 860.** Nothing here has run on the 860 itself. Its upgrade is the
+  `U13d` row, against the 8b4e98ae dev install it was made from.
+- **The images' own `pax` account** has no password (no image ships one),
+  so it cannot use sudo. The dev and release images boot to root, and the
+  live stick lets root in.
 
 ## 5. Evidence index
 
-(filled at the prepared head)
+The takes ran in the Ubuntu 24.04 build containers on the two Linux build
+hosts. The development takes are on `px106` and the final records on
+`px106b`. Each was run from a commit, with the rig copied per take and its
+sha256s printed in the record.
+
+| take | what | at |
+|---|---|---|
+| P7 | the cost table, on PAX under KVM and TCG, and on Linux | `px106`, R-px106-5's take |
+| cap rows | `mkshadow --check`: a string at the shipped cost passes, one at double N is `over_cap` | `6a58a9cf`, then `f04ad6a1` |
+| the reboot | sudo's records voided by pid 1's `/bin/login` (R-px106-7) | `eff54e23`, `707ef98e` |
+| P4 su-tty-no-ctty | red at the programs, then green | `5743e0a1`, `a2d376f5` |
+| prepare rows | `I-sudo-group-*` red at the stub (`FAIL I-sudo-group-append`), then green; the fresh install's `sudo:x:27:alice` | `ffa90f0a`, `86bfb1cb` |
+| P2 admin, login-first, login-trap | red at the old policy and the old door, then green | `ffa90f0a`, `9f56609f` |
+| the retry line | U13f, U13d and U13a red (`no /^Sorry, try again\./`), then green on the upgrade witness | `d0c8fb55`, `e2a1619e` |
+| bob in no rule | P2 admin red (`User bob is not allowed`), then green | `62591018`, `9f56609f` |
+| U13d | red at the old code (no first-boot line), on the rig's fixed copy | `px106-wred` (`33908f36`) |
+| the rig | its steps stop a chunk at the first failure, red at the stick step's real fault, then green | `24006485`, `d0c8fb55` |
+| U14's log | red at `COMMAND=list`, then green, with U13's five entries dropped by name | `b8c8ef91`, `63400e8b` |
+| the Ubuntu probes | where the retry line goes, the list log's words, no-rule `-l`, and `mail_badpass` | the lane's probe scripts, black-box, in `localhost/px106-auth:1` and `localhost/px103-sudo:1` |
+| the final records | red at the rows tip (px106's rows on trunk, no fix), green at the head (ci-plan, census, fetch-retry-selftest, the install units, mpx5-sudo native on both firmwares, mpx5-accounts, mpx5-users, mpx5-den, mpx6-firmware native both), and the plant `px106-plant-su` red by name on the green head. Their END lines are in the PR | the rows tip and the head of `px106b` on `db516c69` |
+| the upgrade witness | red at the rows tip, then U9 to U15 and the compare green at the head, behind the build host's interactive-use gate | `px106b` |
