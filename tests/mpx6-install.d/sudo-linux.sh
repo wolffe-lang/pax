@@ -11,6 +11,7 @@ for u in $(awk -F: '$3 == 1000 || $3 == 990 { print $1 }' /etc/passwd); do userd
 for g in $(awk -F: '$3 == 1000 || $3 == 990 { print $1 }' /etc/group); do groupdel "$g" >/dev/null 2>&1; done
 groupadd -g 1000 wolf; groupadd -g 990 lobo
 useradd -u 1000 -g 1000 -d /home/wolf -m -s /bin/sh wolf
+usermod -aG sudo wolf  # px106 (R-px106-6 B3): the installer's user is in sudo (27), as the installed system's
 useradd -u 990 -g 990 -d /srv/lobo -s /bin/false lobo
 cp "$sudoers" /etc/sudoers; chown 0:0 /etc/sudoers; chmod 440 /etc/sudoers
 echo 'Defaults logfile="/var/log/sudo.log"' >> /etc/sudoers
