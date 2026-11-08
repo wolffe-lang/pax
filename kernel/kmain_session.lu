@@ -297,6 +297,7 @@ export fn kmain() {
     let usb_saved = sync.irq_save()
     let _usb = block.attach_usb()
     sync.irq_restore(usb_saved)
+    timer.mark() // px107: the boot's work done; the tick clock's drift from here
     if dhcp.on() && dhcp.wait_bound() {
         dhcp.echo_router() // px89: init's list runs over the lease
     }
@@ -374,6 +375,7 @@ export fn kmain() {
     network_lines()
     dhcp.counters() // px89: only when the client ran
     clock.report() // px107: only when a reading was taken as no time passing
+    timer.drift() // px107: the tick clock against kernel/clock over the run
     sync.release(sync.console(), s)
 
     let _off = sync.irq_save()
