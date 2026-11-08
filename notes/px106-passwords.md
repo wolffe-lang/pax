@@ -168,6 +168,13 @@ loses its three password names: PAX's sudo asks now):
   one, with the user in sudo on each side, and the sessions are the same.
 - the first-boot door (R-px106-9): Ubuntu has none (its installer makes the
   first user's password); `login-trap` is held to PAX's own row.
+- an account in no rule refused under `-n` (`a password is required`): Ubuntu
+  logs it only when the policy says `Defaults mail_badpass`, which its stock
+  policy does (measured: PAX's shipped rules alone, then each stock line
+  added; with a terminal or without, with a password or locked, at uid 990
+  or 1502, the logfile line anywhere). PAX's sudo sends no mail and refuses
+  that Default by name, so under any policy it reads the two agree: no
+  entry (U14's lobo).
 - the delays: Ubuntu's are PAM's, spread about their value (measured in
   the same container: su and login 2.77-3.33 s, sudo 1.66-2.61 s); PAX's
   are the nominal 3 s and 2 s every time, so P3's floors (2.9 s, 1.9 s)
