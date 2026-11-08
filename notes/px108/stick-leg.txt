@@ -1,0 +1,45 @@
+px108: the clone's timing leg, for the next stick built from a tree that carries px108.
+
+What it times: den cloning wolffe-lang/pelt (12,670 objects, a 4.4 MB pack, 9,685 files) from GitHub over https and
+over ssh, at the console, with the clock's seconds before and after each. The keys are
+user/console/clone-time.keys; a person types them at the prompt of the stick's live console with the cable in the
+I225-V's port, after the network lines px105's leg names (notes/px105/stick-leg.txt) and, for ssh, a deploy key set
+up as the stick's README says (burrow-keygen, the public line on GitHub).
+
+1. Boot the stick's default entry and wait for the prompt.
+2. Type the lines of user/console/clone-time.keys:
+
+     echo PX108-CLONE=begin
+     den --version
+     date +%s
+     den clone -q https://github.com/wolffe-lang/pelt.git /tmp/px108-https
+     date +%s
+     ls /tmp/px108-https/.git/objects/pack
+     rm -rf /tmp/px108-https
+     date +%s
+     den clone -q git@github.com:wolffe-lang/pelt.git /tmp/px108-ssh
+     date +%s
+     ls /tmp/px108-ssh/.git/objects/pack
+     rm -rf /tmp/px108-ssh
+     date +%s
+     echo PX108-CLONE=end
+
+3. A photograph of everything between PX108-CLONE=begin and PX108-CLONE=end is the record.
+
+What to read in it:
+- Each clone's seconds are the difference of the `date +%s` lines around it. Each `ls` names one pack, its .idx and
+  its .rev: the clone completed. Each `rm -rf` must come back to the prompt with no question asked.
+- With den 474a926 (the stick of 2026-11-07), both clones took 85-86 s. Under KVM on the lane's Linux host the same
+  clone takes about 120 s on PAX and about the same on Linux in a guest of one vCPU (notes/px108-den-on-one-cpu.md,
+  §4.4): den's own work, its checkout reading every blob with the pack's index parsed again.
+- With a den that parses the index once for a checkout (den's lane after vc24), expect a few seconds; the rest is the
+  wire. PAX's TCP moves at most 64 KiB a round trip (no window scaling) and the I225 is polled once a 10 ms tick, so
+  a 4.4 MB pack takes 2-4 s over the Internet's round trip.
+- Clone the second copy only after the first is removed, as the keys do: PAX's file tree holds 16,384 inodes and one
+  pelt checkout is 10,136, so a second checkout beside the first fails with `den: wire: Unsupported(clone checkout: io)`.
+
+What each other answer means:
+- `den: wire: io` before any seconds pass: no name resolved (no lease, or /etc/resolv.conf empty): px105's leg first.
+- `burrow: host_key_unknown` or `host_key_changed`: ~/.ssh/config and /etc/ssh/ssh_known_hosts, as the stick's README
+  says; the https half still counts.
+- `den: wire: Unsupported(TLS …)`: the clock or the root set, as the stick's README says.
