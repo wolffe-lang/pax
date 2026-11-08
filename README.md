@@ -122,6 +122,7 @@ first program it prints how long its boot took and how much of that the console 
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `ac2332bf` (wolf 0.2.36) |
 | burrow | the ssh client in wolf: `/bin/ssh` and `/bin/burrow-keygen` (Ed25519) | `0d98ce92` (wolf 0.2.37) |
+| trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `90169ed5` (wolf 0.2.38) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `2eb9cb9b` |
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
