@@ -26,8 +26,8 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
   B0  the image: /bin/burrowd in it; /etc/shadow made (pax at the shipped
       cost, the others at 2^14); the ISO and the volume
   B1  boot 1: the console's `burrowd: host key 256 SHA256:… (made at this
-      boot)` line before the login prompt; the key the rig's ssh-keyscan is
-      shown has that fingerprint
+      boot)` line before the login prompt; the key the rig's ssh is shown
+      (accepted into a file of its own) has that fingerprint
   B2  publickey: `true`, `echo out; echo err >&2`, `exit 1`: stdout, stderr
       and status equal to the same through the rig's sshd
   B3  password (pax's, at the shipped cost): the same three, held alike
@@ -125,7 +125,7 @@ def rig_missing():
         why.append('not root')
     if not os.path.exists('/dev/net/tun'):
         why.append('no /dev/net/tun')
-    for t in ('ip', 'dnsmasq', 'mke2fs', 'ssh', 'ssh-keygen', 'ssh-keyscan', 'git', 'useradd', 'chpasswd'):
+    for t in ('ip', 'dnsmasq', 'mke2fs', 'ssh', 'ssh-keygen', 'git', 'useradd', 'chpasswd'):
         if not shutil.which(t, path='/usr/sbin:/sbin:/usr/bin:/bin'):
             why.append('no ' + t)
     if not os.path.exists('/usr/sbin/sshd'):
@@ -465,16 +465,24 @@ def first_boot(con, client, linux):
     if not con.wait(r'login: $', 120):
         bad('B1', 'no login prompt after the host key line')
         return fp
-    # The key the rig is shown: ssh-keyscan of port 22, its fingerprint.
+    # The key the rig is shown: the rig's ssh connects, accepts the key into a file of its own and is
+    # refused (no method offered). Not ssh-keyscan: the image's ssh-keyscan offers no strict key
+    # exchange, which burrowd requires of every client (measured: `strict_kex_missing`).
+    seen = client.dir / 'seen_hosts'
     scan = None
     for _ in range(30):
-        r = subprocess.run(['ssh-keyscan', '-T', '5', '-t', 'ed25519', GUEST], capture_output=True, timeout=30)
-        if r.returncode == 0 and r.stdout.strip():
-            scan = r.stdout.decode().strip().splitlines()[0]
+        seen.unlink(missing_ok=True)
+        subprocess.run(['ssh', '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
+                        '-o', 'HashKnownHosts=no', '-o', 'UserKnownHostsFile=%s' % seen, '-o', 'GlobalKnownHostsFile=/dev/null',
+                        '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no',
+                        '-o', 'ConnectTimeout=5', 'nobody@' + GUEST, 'true'], capture_output=True, timeout=30)
+        lines = seen.read_text().splitlines() if seen.exists() else []
+        if lines and lines[0].split()[1:2] == ['ssh-ed25519']:
+            scan = lines[0]
             break
         time.sleep(1)
     if not scan:
-        bad('B1', 'ssh-keyscan %s:22 got no ed25519 key' % GUEST)
+        bad('B1', 'the rig\'s ssh was shown no ed25519 key at %s:22' % GUEST)
         return fp
     client.kh.write_text(scan + '\n' + linux.known())
     pub = client.dir / 'guest.pub'
@@ -483,7 +491,7 @@ def first_boot(con, client, linux):
     if '256 ' + got[1] != fp:
         bad('B1', 'the console says %s; the rig is shown %s' % (fp, got[1]))
     else:
-        ok('B1', 'made at this boot, %s on the console and through ssh-keyscan' % fp)
+        ok('B1', 'made at this boot, %s on the console and shown to the rig\'s ssh' % fp)
     return fp
 
 
