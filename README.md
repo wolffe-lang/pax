@@ -315,7 +315,8 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
 
   A command runs as the account through its shell, with no pty: `ssh pax@ADDRESS ls` works, while `ssh pax@ADDRESS`
   and `ssh -t pax@ADDRESS` end with status 255 after OpenSSH's `PTY allocation request failed on channel 0` (and, for
-  the first, `shell request failed on channel 0`): burrowd refuses a pty and a shell by name until PAX has ptys. git's
+  the first, `shell request failed on channel 0`), and `ssh -T pax@ADDRESS` ends the same way with `shell request
+  failed on channel 0`: burrowd serves commands, and refuses a pty and a shell by name. git's
   `git-upload-pack` and `git-receive-pack` are den's, so `git clone`, `fetch` and `push` work as against a Linux
   host. Passwords are checked against `/etc/shadow` (crypt(5)'s `$7$`, as `passwd` writes them), one at a time.
 - **The log** is `/var/log/burrowd.log`, root's: `sudo cat /var/log/burrowd.log`. One line per connection: the time,
