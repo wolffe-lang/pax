@@ -21,6 +21,19 @@ fn excluded(path: str) -> bool {
         path == "/mnt/target" // px93: the upgrade entry's target, never the live tree's
 }
 
+// px114 (pax#329): what the live system writes while it runs, which no image
+// ships (notes/px114/census.txt). Each is the running machine's own, so neither
+// a fresh install nor an upgrade copies it or lists it in a manifest, and a
+// rewrite while the tree is walked (a lease renewed) is not a change of the
+// source. A directory here is left out with everything under it. An image that
+// ever ships one of these paths must take it off this list first.
+fn runtime_state(path: str) -> bool {
+    path == "/var/lib/dhcp" || // kernel/dhcp: the lease (write_lease) and its directory; the rest of /var/lib is carried
+        path == "/etc/resolv.conf" || // kernel/dhcp: the lease's name servers (write_resolv; take_static for a static address)
+        path == "/var/log/sudo.log" || // sudo: a line for each use, the stick's, never the installed machine's
+        path.starts_with("/.") // root's home is / (/etc/passwd, the console's HOME): pelt's history, lope's store, any dotfile of root's
+}
+
 fn metadata_equal(a: List[int], b: List[int]) -> bool {
     // Reads can advance atime; all other identity/change fields must agree.
     for i in [0, 1, 4, 5, 6, 7, 9, 10, 14, 15, 16, 17] {
@@ -68,6 +81,7 @@ fn source_walk(
     depth: int,
 ) -> () ! {io, invalid, source_changed, recovered_files} {
     if depth > 128 || rows.len > 100000 { return invalid }
+    if runtime_state(path) { return }
     // Distribution images carry runnable demo games, but installation's
     // games yes/no choice must come only from the verified payload. This
     // explicit build marker never changes an unmarked/custom source tree.
