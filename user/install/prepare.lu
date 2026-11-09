@@ -204,6 +204,27 @@ fn installed_login() -> str {
     "exec /bin/login\n"
 }
 
+// px112 (R-px112-9, C): burrowd, the ssh server, listens on the LAN on an
+// installed system and on loopback alone on the stick. The stick ships
+// /etc/burrowd/burrowd_config with `ListenAddress 127.0.0.1`; an install
+// writes the same text with that one line `ListenAddress 0.0.0.0` (a fresh
+// install here, an upgrade through its generated texts). No account can
+// log in until its owner sets a password or lists a key; root never can.
+const BURROWD_CONFIG: str = "/etc/burrowd/burrowd_config"
+
+fn installed_burrowd_config(image: str) -> str {
+    var out = ""
+    for line in image.lines() {
+        let w = line.trim()
+        if w.starts_with("ListenAddress ") || w.starts_with("ListenAddress\t") || w == "ListenAddress" {
+            out += "ListenAddress 0.0.0.0\n"
+        } else {
+            out += "{line}\n"
+        }
+    }
+    out
+}
+
 // px106 (R-px106-1): /etc/shadow, root's, 0600, one line an account of
 // `passwd_text`, every one locked (root `*`, the rest `!`, as Ubuntu's
 // base image and useradd leave them; the ages 0, 99999 and 7); `day` the
@@ -240,6 +261,11 @@ fn configure_tree(p: Plan, tree: str, attrs: str, games: List[Game], shadow: str
     }
     let accounts = account_table(passwd, p.user, false)?
     replace_config(tree, attrs, "/etc/passwd", accounts)?
+    // px112: the installed system's burrowd listens on the LAN.
+    let burrowd = fs_read_text("{tree}{BURROWD_CONFIG}") else |_| { "" }
+    if burrowd.len > 0 {
+        replace_config(tree, attrs, BURROWD_CONFIG, installed_burrowd_config(burrowd))?
+    }
     // px106 (R-px106-6 B3): the user in group sudo (gid 27), as Ubuntu's installer makes its first user.
     let groups = sudo_member(account_table(group, p.user, true)?, p.user) else |_| { return invalid }
     replace_config(tree, attrs, "/etc/group", groups)?
