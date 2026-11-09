@@ -186,20 +186,28 @@ class LinuxSide:
         (self.dir / 'sshd_config').write_text(
             'ListenAddress %s:%d\nHostKey %s\nPidFile %s\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\n'
             'UsePAM no\nPermitRootLogin no\nStrictModes yes\nAcceptEnv GIT_PROTOCOL\nLogLevel VERBOSE\n'
-            'PerSourcePenalties no\nAuthorizedKeysFile .ssh/authorized_keys\n'
+            'AuthorizedKeysFile .ssh/authorized_keys\n'
             % (HOST, SSHD_PORT, self.dir / 'host', self.dir / 'sshd.pid'))
         pathlib.Path('/run/sshd').mkdir(exist_ok=True)
         self.log = open(self.dir / 'sshd.log', 'wb')
         self.p = subprocess.Popen(['/usr/sbin/sshd', '-D', '-e', '-f', self.dir / 'sshd_config'],
                                   stdin=subprocess.DEVNULL, stdout=self.log, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
+        up = False
+        while time.monotonic() < deadline and self.p.poll() is None:
             try:
                 with socket.create_connection((HOST, SSHD_PORT), timeout=0.5) as c:
                     c.recv(64)
+                up = True
                 break
             except OSError:
                 time.sleep(0.1)
+        if not up:
+            # The rig's own failure, named: every held row needs this sshd (the first takes: the image's
+            # OpenSSH 9.6p1 refused PerSourcePenalties, which only later releases know).
+            self.log.flush()
+            raise SystemExit('the rig\'s sshd on %s:%d did not start: %r'
+                             % (HOST, SSHD_PORT, (self.dir / 'sshd.log').read_text()[-400:]))
 
     def known(self):
         algo, blob = (self.dir / 'host.pub').read_text().split()[:2]
@@ -574,6 +582,8 @@ def git_rows(client, work):
             r = subprocess.run(['git', '-c', 'protocol.version=2'] + list(a), cwd=cwd, env=e, capture_output=True,
                                timeout=300)
             steps.append((a[0], r.returncode))
+            # Each step's standard error kept beside the run (the evidence of a red step).
+            (d / ('%02d-%s.err' % (len(steps), a[0]))).write_bytes(r.stderr)
             return r
         c1 = g('clone', '-q', url, d / 'one', trace=True)
         if c1.returncode == 0:
@@ -614,7 +624,8 @@ def console_rows(con, client):
         bad('B8', 'no Password: prompt for root')
         return
     con.type(PASSWORDS['root'], secret=True)
-    if not con.wait(r'# $', 60):
+    # pelt's prompt is `$ ` for root too (the first takes waited for `# `, which PAX never prints).
+    if not con.wait(r'[$#] $', 60):
         bad('B8', 'root did not log in at the console: %r' % con.text()[-300:])
         return
     before = con.command('cat /var/run/burrowd.pid', 1)
