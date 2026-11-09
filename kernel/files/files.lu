@@ -55,6 +55,18 @@
 //! change the tree (px27, below); a hard link, a change of mode, owner
 //! or times are refused by name.
 //!
+//! **Pseudo-terminals** (px111, kernel/pty's): `/dev/ptmx` (devtmpfs'
+//! 5:2, 0666) makes a pty and opens its master (kind K_PTM); `/dev/pts`
+//! is devpts, a file system of its own (0:8): its directory (inode 1,
+//! 0755), its `ptmx` (inode 2, mode 0000, a master too) and, while a
+//! pty's master is open, the pty's number (inode N + 3, 0600, the
+//! opener's ids, 136:N), whose open is the slave (kind K_PTS). `/dev/tty`
+//! opens the caller's controlling terminal's slave when that is a pty
+//! (its own node: 5:0, 0666, link `/dev/tty`); TIOCGPTPEER on a master
+//! opens its slave. Every one is an open file, so the last close of each
+//! end is known (kernel/pty's `master_closed`, `slave_closed`); the node
+//! carries the pty's number.
+//!
 //! **The descriptors** (128 a process since px24; 32 before) are words in the process's area
 //! (kernel/sched's `proc_area`): per descriptor a kind, the node it
 //! names, the open file it shares (px17; 0 for the console and
@@ -215,6 +227,7 @@ use event
 use frames
 use mouse
 use procfs
+use pty
 use sched
 use sound
 use tcp
@@ -321,6 +334,8 @@ const K_SYN: u64 = 14 // px34: a file of /proc or /sys (kernel/procfs's)
 const K_BLK: u64 = 15 // px79: a block device's node opened (kernel/block's device)
 const K_MEM: u64 = 16 // px102: a held /proc/<pid>/mem address-space identity
 const K_MOUSE: u64 = 17 // px109: /dev/mouse0 opened (kernel/mouse's reader is the node's reference)
+const K_PTM: u64 = 18 // px111: a pty's master (kernel/pty's; the node carries its number)
+const K_PTS: u64 = 19 // px111: a pty's slave, by /dev/pts/N, TIOCGPTPEER or /dev/tty
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -351,6 +366,17 @@ const T_UNIX: u64 = 15 // px34: an AF_UNIX path socket; the reference kernel/uni
 const T_SYN: u64 = 16 // px34: a directory or file of /proc or /sys; the reference kernel/procfs's entry
 const T_BLK: u64 = 17 // px79: a block device in /dev; the reference kernel/block's device | its record's generation << 16
 const T_MOUSE: u64 = 18 // px109: /dev/mouse0; the reference kernel/mouse's reader (0 the path's own node)
+// px111: devpts and /dev/ptmx. The reference's bits 20 up say which
+// (PTS_SLAVE /dev/pts/N, PTS_DIR /dev/pts, PTS_DEVPTMX /dev/ptmx,
+// PTS_PTMX /dev/pts/ptmx, PTS_TTY /dev/tty naming a pty), bit 16 a
+// master's descriptor, bits 0-15 the pty's number.
+const T_PTS: u64 = 19
+const PTS_SLAVE: u64 = 0
+const PTS_DIR: u64 = 0x100000
+const PTS_DEVPTMX: u64 = 0x200000
+const PTS_PTMX: u64 = 0x300000
+const PTS_TTY: u64 = 0x400000
+const PTS_MASTER: u64 = 0x10000
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -791,6 +817,12 @@ fn of_drop(o: u64) {
     if k == K_MOUSE {
         mouse.close(rf(n)) // px109: its reader's queue given back
     }
+    if k == K_PTM {
+        pty.master_closed(pts_no(n)) // px111: the slave hung up, the name gone
+    }
+    if k == K_PTS {
+        pty.slave_closed(pts_no(n))
+    }
     if k == K_BLK {
         // px79: the last close of an open block device (an O_EXCL open's hold goes with it)
         block.close_dev(blk_dev(n), excl)
@@ -799,7 +831,7 @@ fn of_drop(o: u64) {
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_MEM || k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK || k == K_MOUSE
+    k == K_MEM || k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK || k == K_MOUSE || k == K_PTM || k == K_PTS
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -893,7 +925,7 @@ pub fn is_open(a: u64, fd: u64) -> bool {
 /// (px17: `pipe_write`), 4 a file of the tree (px27: `file_write`),
 /// 5 an eventfd (px24: `event_write`), 6 an epoll object (px24: -EINVAL), 7
 /// /dev/dsp (px30: kernel/sound's `write`), 9 a block device's node (px79:
-/// `blk_write`); px34: an AF_UNIX path socket
+/// `blk_write`), 10 a pty's master or slave (px111: `pty_write`); px34: an AF_UNIX path socket
 /// is 3 (`pipe_write` answers for a socket that is not connected), a file
 /// of /proc or /sys 6 (-EINVAL, as Linux answered a write to
 /// /proc/self/cgroup).
@@ -928,6 +960,9 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     }
     if k == K_BLK {
         return 9 // px79: `blk_write`
+    }
+    if k == K_PTM || k == K_PTS {
+        return 10 // px111: `pty_write`
     }
     2
 }
@@ -984,6 +1019,51 @@ pub fn close(a: u64, fd: u64) -> u64 {
     }
     of_drop(o)
     0
+}
+
+/// px111: a descriptor of pty `m`'s slave, its node `n` (/dev/pts/N or
+/// /dev/tty's), opened with `flags`: -ENOENT once the name is gone, -EIO
+/// while locked (measured; R-px111-7: a refused open changes nothing),
+/// and without O_NOCTTY the caller's controlling terminal when it leads
+/// a session that has none (kernel/sched's `open_tty_of`).
+fn pty_slave_open(a: u64, m: u64, n: u64, flags: u64) -> u64 {
+    let e = pty.slave_check(m)
+    if e != 0 {
+        return neg(e)
+    }
+    let fd = open_new(a, 0, K_PTS, n, flags)
+    if fd >= 0x8000000000000000 {
+        return fd
+    }
+    pty.slave_opened(m)
+    if flags & O_NOCTTY == 0 {
+        sched.open_tty_of(pty.tty(m))
+    }
+    fd
+}
+
+/// px111: TIOCGPTPEER on pty `m`'s master: a new descriptor of its slave
+/// opened with the flags `arg` gives (O_RDWR, O_NOCTTY, O_NONBLOCK,
+/// O_CLOEXEC), as /dev/pts/N would open, without its name's walk.
+fn pty_peer(a: u64, m: u64, arg: u64) -> u64 {
+    let fl = arg & (O_ACCMODE | O_NOCTTY | O_NONBLOCK | O_CLOEXEC)
+    pty_slave_open(a, m, (T_PTS << T_SHIFT) | PTS_SLAVE | m, fl)
+}
+
+/// px111: `write(fd, buf, len)` on a pty's master or slave (kernel/user,
+/// `write_target` 10): the master's into the slave's input, the slave's
+/// (after its background rule) into the master's.
+pub fn pty_write(a: u64, pml4: u64, fd: u64, buf: u64, len: u64) -> u64 {
+    let n = node_of(a, fd)
+    let nb = status(a, fd) & O_NONBLOCK != 0
+    if kind(a, fd) == K_PTM {
+        return pty.master_write(pts_no(n), pml4, buf, len, nb)
+    }
+    let j = console.job(pty.tty(pts_no(n)), console.J_WRITE)
+    if j != 0 {
+        return j
+    }
+    pty.slave_write(pts_no(n), pml4, buf, len, nb)
 }
 
 /// px30: whether closing `fd` is the last close of /dev/dsp, which
@@ -1685,7 +1765,7 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
         // px49 (pax#76): the background rule, as `write` asks it (a
         // background group's write to its terminal under TOSTOP is
         // SIGTTOU's: measured for sendfile and splice too).
-        let j = console.job(console.J_WRITE)
+        let j = console.job(console.CON, console.J_WRITE)
         if j != 0 {
             return j
         }
@@ -1862,7 +1942,7 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
         }
     }
     if t == 1 {
-        let j = console.job(console.J_WRITE) // px49 (pax#76), as sendfile
+        let j = console.job(console.CON, console.J_WRITE) // px49 (pax#76), as sendfile
         if j != 0 {
             return j
         }
@@ -2354,7 +2434,13 @@ fn node_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
         return (m, adds, takes)
     }
     if k == K_CONSOLE {
-        return (if console.readable() { POLLIN | POLLOUT } else { POLLOUT }, 0, 0)
+        return (if console.readable(console.CON) { POLLIN | POLLOUT } else { POLLOUT }, 0, 0)
+    }
+    if k == K_PTM {
+        return (pty.master_poll(pts_no(n)), 0, 0) // px111 (level only: no counts for an edge)
+    }
+    if k == K_PTS {
+        return (pty.slave_poll(pts_no(n)), 0, 0)
     }
     if k == K_MOUSE {
         // px109: a record waiting; the first count moves with every record
@@ -2992,6 +3078,27 @@ fn rf(n: u64) -> u64 {
     n & REF_MASK
 }
 
+/// px111: which devpts node `n` is (PTS_*), and the pty it names.
+fn pts_what(n: u64) -> u64 {
+    rf(n) & 0xf00000
+}
+
+fn pts_no(n: u64) -> u64 {
+    rf(n) & 0xffff
+}
+
+/// px111: a /dev/pts/N, /dev/ptmx or /dev/pts/ptmx node (not the
+/// directory, not /dev/tty's).
+fn pts_dev(n: u64) -> bool {
+    ty(n) == T_PTS && pts_what(n) != PTS_DIR && pts_what(n) != PTS_TTY
+}
+
+/// px111: whether node `n` is in devpts (its st_dev): the directory, its
+/// ptmx and the slaves; /dev/ptmx and /dev/tty are /dev's.
+fn in_devpts(n: u64) -> bool {
+    ty(n) == T_PTS && (pts_what(n) == PTS_SLAVE || pts_what(n) == PTS_DIR || pts_what(n) == PTS_PTMX)
+}
+
 /// The node of the tree's inode `i` (px27).
 fn ino_node(i: u64) -> u64 {
     (T_INO << T_SHIFT) | i
@@ -3105,7 +3212,7 @@ fn is_proc_exe(pml4: u64, va: u64) -> bool {
 
 fn is_dir_node(n: u64) -> bool {
     let t = ty(n)
-    t == T_DEV || (t == T_INO && tree.is_dir(rf(n))) || (t == T_SYN && procfs.is_dir(rf(n)))
+    t == T_DEV || (t == T_INO && tree.is_dir(rf(n))) || (t == T_SYN && procfs.is_dir(rf(n))) || (t == T_PTS && rf(n) == PTS_DIR)
 }
 
 /// px34: the entry of /proc or /sys named [s, s + n) of pax_kbuf in `d`
@@ -3375,6 +3482,12 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "mouse0") && mouse.started() {
             return T_MOUSE << T_SHIFT // px109: from the first pointer's arrival on (R-px109-3)
         }
+        if comp_is(s, n, "ptmx") {
+            return (T_PTS << T_SHIFT) | PTS_DEVPTMX // px111: devtmpfs' 5:2
+        }
+        if comp_is(s, n, "pts") {
+            return (T_PTS << T_SHIFT) | PTS_DIR // px111: devpts
+        }
         // px79: a disk or a partition kernel/block has, by its name (the
         // nodes devtmpfs would have: made at boot and as a table is read
         // again, never written into an image: R-px79-2)
@@ -3386,6 +3499,26 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
     }
     if ty(d) == T_SYN {
         return syn_child(rf(d), s, n) // px34
+    }
+    if ty(d) == T_PTS {
+        // px111: devpts: `ptmx`, and each pty's number while its master is open
+        if comp_is(s, n, "ptmx") {
+            return (T_PTS << T_SHIFT) | PTS_PTMX
+        }
+        var v: u64 = 0
+        var i: u64 = 0
+        while i < n && i < 4 {
+            let c = kb(s + i)
+            if c < 48 || c > 57 || (i == 0 && c == 48 && n > 1) {
+                return err(ENOENT)
+            }
+            v = v * 10 + c - 48
+            i += 1
+        }
+        if n == 0 || n > 3 || !pty.named(v) {
+            return err(ENOENT)
+        }
+        return (T_PTS << T_SHIFT) | PTS_SLAVE | v
     }
     // px67: at `/`, whichever store it is in: with `/` on a disk these
     // are the memory's trees mounted over the disk's directories of the
@@ -3408,6 +3541,9 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
 fn up(d: u64) -> u64 {
     if ty(d) == T_DEV {
         return root_node()
+    }
+    if ty(d) == T_PTS {
+        return T_DEV << T_SHIFT // px111: /dev/pts's parent
     }
     if ty(d) == T_SYN {
         let p = procfs.parent(rf(d)) // px34
@@ -4114,6 +4250,29 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     if ty(n) == T_BLK {
         return blk_open(a, n, flags, want) // px79
     }
+    if pts_dev(n) {
+        // px111: /dev/ptmx and /dev/pts/ptmx make a pty, /dev/pts/N opens
+        // its slave; each by its mode first (measured: a user is refused
+        // root's slave -EACCES)
+        if flags & O_DIRECTORY != 0 {
+            return neg(ENOTDIR)
+        }
+        if !may(a, cred.FS, n, want) {
+            return neg(EACCES)
+        }
+        if pts_what(n) == PTS_SLAVE {
+            return pty_slave_open(a, pts_no(n), n, flags)
+        }
+        let m = pty.create(a)
+        if m >= pty.PTYS {
+            return neg(ENOSPC) // as Linux past /proc/sys/kernel/pty/max (measured), R-px111-4
+        }
+        let fd = open_new(a, 0, K_PTM, n | PTS_MASTER | m, flags)
+        if fd >= 0x8000000000000000 {
+            pty.master_closed(m)
+        }
+        return fd
+    }
     if ty(n) == T_CONSOLE {
         k = K_CONSOLE
     } else if ty(n) == T_NULL {
@@ -4206,6 +4365,12 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         return neg(EROFS) // px63: a file of a volume mounted read-only (open(2))
     }
     if k == K_CONSOLE && ty(n) == T_CONSOLE && rf(n) == TTY && !sched.self_tty() {
+        let c = sched.self_ctty()
+        if c >= console.PTY0 {
+            // px111: the caller's controlling terminal is a pty's slave:
+            // /dev/tty opens it (its own node, 5:0 0666, link /dev/tty: measured)
+            return pty_slave_open(a, c - console.PTY0, (T_PTS << T_SHIFT) | PTS_TTY | (c - console.PTY0), flags | O_NOCTTY)
+        }
         return neg(ENXIO) // px48: /dev/tty is the caller's controlling terminal, and it has none (measured)
     }
     // px17: a new open file (offset 0), also when an fd/ entry (px50)
@@ -4614,7 +4779,10 @@ fn mnt_of(n: u64) -> u64 {
     if t == T_SYN {
         return 22 + procfs.fs(rf(n))
     }
-    if t == T_DEV || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_STD || t == T_BLK || t == T_MOUSE {
+    if in_devpts(n) {
+        return 20 // px111: devpts' mount
+    }
+    if t == T_DEV || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_STD || t == T_BLK || t == T_MOUSE || t == T_PTS {
         return 24
     }
     if t == T_PIPE {
@@ -4734,14 +4902,37 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         // which it keeps in the thread's own word as `poll` does.
         // px48: a background reader of its controlling terminal is sent
         // SIGTTIN (or told -EIO): kernel/console's `job`.
-        let j = console.job(console.J_READ)
+        let j = console.job(console.CON, console.J_READ)
         if j != 0 {
             return j
         }
-        let (r, u) = console.read(pml4, buf, n, status(a, fd) & O_NONBLOCK != 0, sched.self_until())
+        let (r, u) = console.read(console.CON, pml4, buf, n, status(a, fd) & O_NONBLOCK != 0, sched.self_until())
         sched.set_self_until(u)
         if r == console.TIMED {
             return WAIT
+        }
+        return r
+    }
+    if k == K_PTM {
+        return pty.master_read(pts_no(node_of(a, fd)), pml4, buf, n, status(a, fd) & O_NONBLOCK != 0) // px111
+    }
+    if k == K_PTS {
+        // px111: the console's read on the slave's terminal (its
+        // background rule, VMIN and VTIME), waiting as a pipe's reader
+        // does (any change to a pty wakes it).
+        let pn = pts_no(node_of(a, fd))
+        let t = pty.tty(pn)
+        let j = console.job(t, console.J_READ)
+        if j != 0 {
+            return j
+        }
+        let (r, u) = console.read(t, pml4, buf, n, status(a, fd) & O_NONBLOCK != 0, sched.self_until())
+        sched.set_self_until(u)
+        if r == console.TIMED || r == console.RESTART {
+            return WAIT
+        }
+        if r != 0 && r < 0x8000000000000000 {
+            pty.slave_took(pn)
         }
         return r
     }
@@ -4886,7 +5077,7 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_DSP || k == K_UNIX || k == K_MOUSE {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_DSP || k == K_UNIX || k == K_MOUSE || k == K_PTM || k == K_PTS {
         return neg(ESPIPE)
     }
     if k == K_NULL || k == K_EPOLL || k == K_EVENT {
@@ -5164,7 +5355,19 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         return neg(EBADF)
     }
     if k == K_CONSOLE {
-        return console.ioctl(a, pml4, req, arg)
+        return console.ioctl(console.CON, a, pml4, req, arg)
+    }
+    if k == K_PTM {
+        if req == pty.TIOCGPTPEER {
+            return pty_peer(a, pts_no(node_of(a, fd)), arg) // px111
+        }
+        return pty.master_ioctl(a, pts_no(node_of(a, fd)), pml4, req, arg)
+    }
+    if k == K_PTS {
+        if req == pty.TIOCGPTPEER {
+            return neg(EIO) // px111: measured on a slave
+        }
+        return console.ioctl(pty.tty(pts_no(node_of(a, fd))), a, pml4, req, arg)
     }
     if k == K_BLK {
         return blk_ioctl(a, pml4, fd, req, arg) // px79
@@ -6011,6 +6214,25 @@ fn fd_text(ta: u64, fd: u64, pid: u64, base: u64, cap: u64) -> u64 {
         let k = tstr(base, 0, cap, "/dev/")
         return tstr(base, k, cap, fixed_name(nd))
     }
+    if t == T_PTS {
+        // px111: the path it was opened by (measured: the master's link is
+        // /dev/ptmx, a slave's /dev/pts/N)
+        let w = pts_what(nd)
+        if w == PTS_DEVPTMX {
+            return tstr(base, 0, cap, "/dev/ptmx")
+        }
+        if w == PTS_TTY {
+            return tstr(base, 0, cap, "/dev/tty")
+        }
+        if w == PTS_PTMX {
+            return tstr(base, 0, cap, "/dev/pts/ptmx")
+        }
+        if w == PTS_DIR {
+            return tstr(base, 0, cap, "/dev/pts")
+        }
+        let k = tstr(base, 0, cap, "/dev/pts/")
+        return tdec(base, k, cap, pts_no(nd))
+    }
     if t == T_BLK {
         let k = tstr(base, 0, cap, "/dev/")
         return block.name_into(rf(nd) & 0xffff, base, k, cap) // px79
@@ -6389,7 +6611,7 @@ pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) 
 /// (kernel/procfs's rules, in `syn_open`).
 fn checked(n: u64) -> bool {
     let t = ty(n)
-    t == T_INO || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_BLK || t == T_MOUSE
+    t == T_INO || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_BLK || t == T_MOUSE || (t == T_PTS && rf(n) != PTS_DIR)
 }
 
 // --- the changes after a file is made (px36) ----------------------------------------
@@ -6854,6 +7076,13 @@ fn n_mode(n: u64) -> u64 {
     if t == T_CONSOLE && rf(n) == TTY {
         return MODE_NULL // px45: /dev/tty is anyone's, 0666 (measured)
     }
+    if t == T_PTS {
+        // px111 (measured): /dev/ptmx 0666, devpts' ptmx 0000, its
+        // directory 0755, a slave 0600 (devpts' defaults, R-px111-1),
+        // /dev/tty naming a pty /dev/tty's
+        let w = pts_what(n)
+        return if w == PTS_DIR { MODE_DIR } else if w == PTS_PTMX { MODE_NULL & S_IFMT } else if w == PTS_SLAVE { (MODE_NULL & S_IFMT) | 0x180 } else { MODE_NULL }
+    }
     if t == T_CONSOLE {
         return (MODE_CONSOLE & S_IFMT) | term_perm(n) // px98: its record, 0600 at boot
     }
@@ -6970,6 +7199,12 @@ fn n_ino(n: u64) -> u64 {
     if t == T_BLK {
         return 0x2000 + (rf(n) & 0xffff) // px79: one number per device record
     }
+    if t == T_PTS {
+        // px111 (measured): devpts' directory 1, its ptmx 2, slave N N + 3;
+        // /dev/ptmx and /dev/tty /dev's own
+        let w = pts_what(n)
+        return if w == PTS_DIR { 1 } else if w == PTS_PTMX { 2 } else if w == PTS_SLAVE { pts_no(n) + 3 } else if w == PTS_TTY { 0x15 + TTY } else { 0x1e }
+    }
     3 // the console
 }
 
@@ -6978,7 +7213,7 @@ fn n_nlink(n: u64) -> u64 {
     if t == T_INO {
         return tree.nlink(rf(n))
     }
-    if t == T_DEV || (t == T_SYN && procfs.is_dir(rf(n))) {
+    if t == T_DEV || (t == T_SYN && procfs.is_dir(rf(n))) || (t == T_PTS && rf(n) == PTS_DIR) {
         return 2
     }
     1
@@ -7013,6 +7248,17 @@ fn n_rdev(n: u64, which: int) -> u64 {
         // devices.txt gives local use (60-63; 234-254 are its dynamic ones).
         return if which == 0 { 60 } else { 0 }
     }
+    if t == T_PTS {
+        // px111: ptmx 5:2, slave N 136 + N / 256 : N % 256, /dev/tty 5:0
+        let w = pts_what(n)
+        if w == PTS_SLAVE {
+            return if which == 0 { 136 + pts_no(n) / 256 } else { pts_no(n) % 256 }
+        }
+        if w == PTS_DIR {
+            return 0
+        }
+        return if which == 0 { 5 } else if w == PTS_TTY { 0 } else { 2 }
+    }
     if t == T_BLK {
         let (ma, mi) = block.numbers(rf(n) & 0xffff) // px79: the guest's, 254:N and 259:N
         return if which == 0 { ma } else { mi }
@@ -7031,7 +7277,10 @@ fn n_dev(n: u64) -> u64 {
         let (_ma, mi) = block.numbers(tree.disk_of(rf(n))) // px63
         return mi
     }
-    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP || t == T_BLK || t == T_MOUSE {
+    if in_devpts(n) {
+        return 8 // px111: devpts, a file system of its own (measured)
+    }
+    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP || t == T_BLK || t == T_MOUSE || t == T_PTS {
         return 5
     }
     if t == T_SYN {
@@ -7138,6 +7387,9 @@ fn n_owner(a: u64, n: u64, which: int) -> u64 {
     }
     if is_term(n) {
         return term_owner(n, which) // px98: root's at boot
+    }
+    if ty(n) == T_PTS && pts_what(n) == PTS_SLAVE {
+        return pty.owner(pts_no(n), which) // px111: the opener's file-system ids
     }
     if t == T_PIPE || t == T_SOCK {
         let o = ppw(rf(n) & 0xffff, P_OWNER)
@@ -7283,18 +7535,24 @@ fn dev_child(k: u64) -> u64 {
     if k == 11 || k == 12 {
         return (T_CONSOLE << T_SHIFT) | (k - 8) // px45: tty, ttyS0
     }
-    if k == 13 && sound.up() {
+    if k == 13 {
+        return (T_PTS << T_SHIFT) | PTS_DEVPTMX // px111
+    }
+    if k == 14 {
+        return (T_PTS << T_SHIFT) | PTS_DIR
+    }
+    if k == 15 && sound.up() {
         return T_DSP << T_SHIFT // px30: only with the device
     }
     // px109: mouse0 after dsp, from the first pointer on
     let snd: u64 = if sound.up() { 1 } else { 0 }
     let mice: u64 = if mouse.started() { 1 } else { 0 }
-    if mice == 1 && k == 13 + snd {
+    if mice == 1 && k == 15 + snd {
         return T_MOUSE << T_SHIFT
     }
     // px79: then the block devices, in /proc/partitions' order
-    if k >= 13 + snd + mice {
-        let b = block.nth_dev(k - 13 - snd - mice)
+    if k >= 15 + snd + mice {
+        let b = block.nth_dev(k - 15 - snd - mice)
         if b != block.DEVS {
             return blk_node(b)
         }
@@ -7321,6 +7579,9 @@ fn fixed_name(c: u64) -> str {
     let t = ty(c)
     if t == T_DEV {
         return "dev"
+    }
+    if t == T_PTS {
+        return if pts_what(c) == PTS_DIR { "pts" } else { "ptmx" } // px111 (a slave's digits: `pts_digit`)
     }
     if t == T_NULL {
         let r = rf(c)
@@ -7354,6 +7615,13 @@ fn fixed_len(c: u64) -> u64 {
     if t == T_DEV {
         return 3
     }
+    if t == T_PTS {
+        if pts_what(c) == PTS_SLAVE {
+            let v = pts_no(c)
+            return if v >= 100 { 3 } else if v >= 10 { 2 } else { 1 } // px111
+        }
+        return if pts_what(c) == PTS_DIR { 3 } else { 4 }
+    }
     if t == T_BLK {
         return block.name_len(rf(c) & 0xffff) // px79
     }
@@ -7378,6 +7646,19 @@ fn fixed_len(c: u64) -> u64 {
         return 2 // px55: fd
     }
     6
+}
+
+/// px111: digit `j` of pty slave node `c`'s name (`fixed_len` of them).
+fn pts_digit(c: u64, j: u64) -> u64 {
+    let v = pts_no(c)
+    let l = fixed_len(c)
+    var d = v
+    var k = l - 1 - j
+    while k > 0 {
+        d = d / 10
+        k -= 1
+    }
+    48 + d % 10
 }
 
 fn d_type(c: u64) -> u64 {
@@ -7494,6 +7775,22 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
             } else {
                 nl = fixed_len(c)
             }
+        } else if p >= 2 && ty(d) == T_PTS {
+            // px111: devpts lists `ptmx`, then each pty's number with its
+            // master open (position 3 + N)
+            if p == 2 {
+                c = (T_PTS << T_SHIFT) | PTS_PTMX
+                nl = 4
+            } else {
+                let v = pty.named_from(p - 3)
+                if v == pty.PTYS {
+                    more = false
+                } else {
+                    c = (T_PTS << T_SHIFT) | PTS_SLAVE | v
+                    nl = fixed_len(c)
+                    next = 3 + v + 1
+                }
+            }
         } else if p >= 2 && ty(d) == T_SYN && (procfs.entry(rf(d)) == procfs.PFD || procfs.entry(rf(d)) == procfs.PFDINFO) {
             // px45: /proc/<pid>/fd lists the process's open descriptors;
             // px50: and fdinfo/ the same numbers
@@ -7563,6 +7860,12 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                     var j: u64 = 0
                     while j < nl {
                         uaccess.put(pml4, r + 19 + j, block.name_byte(rf(c) & 0xffff, j), 1) // px79
+                        j += 1
+                    }
+                } else if ty(c) == T_PTS && pts_what(c) == PTS_SLAVE {
+                    var j: u64 = 0
+                    while j < nl {
+                        uaccess.put(pml4, r + 19 + j, pts_digit(c, j), 1) // px111
                         j += 1
                     }
                 } else {
