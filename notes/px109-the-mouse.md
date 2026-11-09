@@ -58,7 +58,7 @@ device's descriptors and every report, logged by the driver with `usbraw`, the r
 | P13 | one queue a reader, 126 records of 32 bytes, at most 8 readers; merge above half, compact when full, an edge never merged | so; the first body put the records 512 bytes into the frame, not 64, and slots 112 on spilled into the next frame: the burst row found it (§4) | right in design; the body had a bug |
 | P14 | a boot mouse by the boot protocol (SET_PROTOCOL 0, SET_IDLE 0), the tablet by its descriptor, a pointer beside a keyboard, hot-plug, two at once | a boot mouse whose descriptor parses is set to the **report** protocol (R-px109-2); no SET_IDLE (mice default to an infinite idle, HID 1.11 §7.2.4); the rest as predicted | wrong on the protocol, by ruling |
 | P15 | `/dev/mouse0` present with an xHCI controller, whole records, waits, POLLIN, root's 0600 | present from the first pointer's arrival (R-px109-3); the rest as predicted | wrong on when |
-| P16 | kmain_console grows 12 to 24 KiB a tier | native 3,537,512 to 3,607,640 bytes, +70,128 (`.text` +48,064); release 2,640,248 to 2,847,808, +207,560 (`.text` +209,248, `.rodata` -5,408). The release growth is spread over functions this lane never touched (`net.report` +10.9 KB, `sound.summary` +9.0 KB, `user.serve` +5.8 KB, …): the release tier's inliner chose differently across the package; the new functions themselves are about 15 KB (`xhci.pointer` 5.8, `xhci.raw_flush` 3.5, `usb_mouse.parse` 3.0, `xhci.configure` +5.3) | wrong: 3 and 8 times the bound |
+| P16 | kmain_console grows 12 to 24 KiB a tier | native 3,537,512 to 3,607,640 bytes, +70,128 (`.text` +48,064); release 2,640,248 to 2,847,808, +207,560 (`.text` +209,248, `.rodata` -5,408). The release growth is spread over functions this lane never touched (`net.report` +10.9 KB, `sound.summary` +9.0 KB, `user.serve` +5.8 KB, …): the release tier's inliner chose differently across the package; the new functions themselves are about 15 KB (`xhci.pointer` 5.8, `xhci.raw_flush` 3.5, `usb_mouse.parse` 3.0, `xhci.configure` +5.3). The same choice makes the release console's cold build 252 s against trunk's 169 (R-px109-8) | wrong: 3 and 8 times the bound |
 | P17 | the 17 invariant rows stay, about 30 join | 17 stay; 39 join (56 PASS lines) | right |
 | P18 | the keyboard rows do not move | every keyboard topology's 18 rows equal the Linux reference on both tiers and firmwares, repeat 250.004 ms then 30 ms as before; the firmware suite's keyboard sessions on MSI and INTx green | right |
 | P19 | on trunk plus the rows every mouse row red by name, the keyboard rows green | the rows tip `f98b5574`: the session's 16 mouse rows red by name (`FAIL mouse-open open=-2` first), keyboard-path green; the invariants red at their first (`FAIL USB mouse boot report buttons and signed motion`) | right |
@@ -76,6 +76,7 @@ Every take ran on Linux host 1 in the container. Records are `gauntlet-record.sh
 | rows red | the session's 16 mouse rows red by name, the keyboard path green | the rows tip `f98b5574` |
 | check red | the invariants red at their first mouse row | the rows tip `f98b5574` |
 | working gauntlet | the judge's selftest, the fixture, `tests/ci-plan`, `tests/mpx6-usb` (three keyboard topologies and the mouse session) on both tiers and firmwares under KVM, the mouse session under TCG on the four, `tests/mpx6-firmware` native on both firmwares (F7 runs the mouse session on MSI and INTx): 12 steps, every one exit 0, 29 minutes | `1f68bbcd` |
+| release time | the release console's cold build, trunk and the head interleaved twice on a held block (169 s and 252 s), and the IR census at trunk, three of this lane's commits and the head: kernel/log's formatters inlined across the cluster cut (`notes/px109/measured/release-time.txt`, R-px109-8) | trunk, `f6c33ac8`, `74f980bd`, `6a1c843f`, `1f68bbcd`/`638ee7ae` |
 | the final records | red at the rows tip (the session's rows and the invariants, two records), green at the head (the gauntlet above, recorded), the plant `px109-plant-burst` red by name at `burst-edges` (compaction folding an edge into the motion after it): their END lines are in the PR | `f98b5574`; the head; the head and one commit |
 
 ## 5. Done-when
@@ -109,6 +110,18 @@ Every take ran on Linux host 1 in the container. Records are `gauntlet-record.sh
 - **R-px109-7, absolute positions: (a), ruled.** Scaled to 0..32767 across the device's logical extents (QEMU's
   tablet is already 0..32767), so the console maps one range to its grid. (b) the device's own units and extents in
   every record.
+- **R-px109-8, the release tier's build time: (a), recommended.** The release console's cold build is 252 s at
+  the head against 169 s at trunk (wolf 0.2.35, both twice, on a held block). The time is the mid-end's loop
+  versioning, which costs a function its loops times its branches squared (wolf-lang#983), and the loops are
+  kernel/log's: at the head `log.dec` (two loops) is inlined at all of its call sites and `log.put` (one loop) at
+  about 1,500 more than at trunk, mostly in functions this lane did not change (`sound.summary` 0 loops to 81). Which
+  sites inline them follows wolf's cluster cut of the whole package, which every change moves: three of this lane's
+  commits in a row gave 1.9, 2.0 and 1.3 times trunk's cost, the head 2.3 (`notes/px109/measured/release-time.txt`).
+  (a) take the time with the mouse; the fix is wolf's (#983, or the cut's import of looping callees). (b) reshape
+  the mouse's code until the cut falls as trunk's did: it falls anew at the next lane's change. (c) a kernel/log
+  whose formatters inline without loops: a change to every kernel's code, and wolf has no attribute that only keeps
+  a function out of line (`#[consttime]` does, with a contract), so it is another lane's if wanted. It is build time
+  alone: the release rows run as before.
 
 ### 5.2 The record
 
@@ -184,8 +197,9 @@ report descriptor of at most 1024 bytes, a report of at most 64; X, Y, the wheel
 top-level Mouse or Pointer collection; 16 pointers and 8 readers at once; 126 records a reader. Not done: horizontal
 scrolling (AC Pan, read past), the Resolution Multiplier (a high-resolution wheel counts one per detent at its
 default), digitizers and touch, a pointer on the PS/2 port, SuperSpeed devices (logged, not driven, as before); the
-console draws no pointer and reads no queue yet (px110). A STALLed request to a pointer resets the default pipe; no
-QEMU device stalls, so that path is not exercised.
+console draws no pointer and reads no queue yet (px110). The release console builds about 80 s slower cold
+(R-px109-8). A STALLed request to a pointer resets the default pipe; no QEMU device stalls, so that path is not
+exercised.
 
 ### 5.6 Checklist
 
@@ -199,6 +213,7 @@ QEMU device stalls, so that path is not exercised.
 - [x] the working gauntlet: every keyboard topology and the mouse session on both tiers and firmwares under KVM, the
   mouse session under TCG, the firmware suite on MSI and INTx
 - [x] tests/ci-plan with the mouse's map lines
+- [x] the release console's build time measured against trunk's, and where it goes (R-px109-8)
 - [ ] the final records: red at the rows tip, green at the head, the plant red by name at `burst-edges`
 - [x] README read and refreshed (the console row, the hardware list, the switches, the USB suites' row); `kernel/README.md`
   and the CHANGELOG
