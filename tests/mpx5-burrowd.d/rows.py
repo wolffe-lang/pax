@@ -454,8 +454,10 @@ def image(work, shadow_text, client, repo):
 # ---------------------------------------------------------------- the boots
 
 def first_boot(con, client, linux):
-    m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) .*?(\(ED25519\))?( \(made at this boot\))?$', 300)
-    if not m or not m.group(3):
+    # The whole line, to its newline: the serial arrives in pieces, and a pattern ending `$` matched a
+    # line cut short (dev-p1: `… SHA256:… pa`).
+    m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) ([^\n]*)\n', 300)
+    if not m or not m.group(2).endswith(b'(made at this boot)'):
         bad('B1', 'no `burrowd: host key … (made at this boot)` line on the console: %r'
             % (m.group(0) if m else con.text()[-600:]))
         return None
@@ -634,11 +636,11 @@ def console_rows(con, client):
 
 
 def second_boot(con, client, fp):
-    m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) .*$', 300)
+    m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) ([^\n]*)\n', 300)
     if not m:
         bad('B10', 'no host key line on the second boot')
         return
-    line = m.group(0).decode()
+    line = m.group(0).decode().rstrip('\n')
     if not con.wait(r'login: $', 120):
         bad('B10', 'no login prompt on the second boot')
         return
@@ -668,7 +670,7 @@ def live_image(work):
 
 
 def stick_rows(con, client):
-    m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) .*\(made at this boot\)$', 300)
+    m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) [^\n]*\(made at this boot\)\n', 300)
     if not m or not con.wait(r'login: $', 120):
         bad('B11', 'the stick shape: no host key line made at boot, or no login prompt: %r' % con.text()[-500:])
         return
@@ -678,7 +680,8 @@ def stick_rows(con, client):
         if b'Connection refused' in r[2]:
             break
         time.sleep(1)
-    lan = r is not None and r[0] == 255 and b'connect to host %s port 22: Connection refused' % GUEST.encode() in r[2]
+    # client.ssh writes the address and port it dialled (GUEST_AT: the guest's port 22) as HOST port PORT.
+    lan = r is not None and r[0] == 255 and b'ssh: connect to host HOST port PORT: Connection refused' in r[2]
     con.type('root')
     con.command('true', 1, 60)
     out = con.command("burrow-keygen -q -t ed25519 -N '' -f /tmp/px112-k && ssh -i /tmp/px112-k -o BatchMode=yes "
