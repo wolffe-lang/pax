@@ -104,7 +104,8 @@ script.write_text(f'/bin/pax-install --install --ext2-preview --target {name} --
                   'echo INSTALL-EXIT-$?\n')
 if guided:
     script.write_text(f'/bin/pax-install --seed {seed} --source /source --payload /payload {allow}\necho INSTALL-EXIT-$?\n')
-    (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\nyes\nno\n')
+    # px106: after the word, the password questions for root and pax, each n (both left locked)
+    (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\nyes\nn\nn\nno\n')
 # px78b (R-P6-confirm): every answer but yes cancels at the one
 # confirmation, the target byte-identical: one boot, one guided run each.
 words=['y','YES','q','',token]
