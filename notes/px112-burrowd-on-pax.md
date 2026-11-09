@@ -96,6 +96,8 @@ R-px112-1 to -6 are burrow's (its note). Here, all as recommended but R-px112-9,
   wait that doubles to five minutes while it refuses to start; `/var/log/burrowd.log`, root's 0600.
 - **R-px112-12, one pin: A.** `user/burrow.pin` for the client and the server; `/bin/ssh` moves with it from
   `0d98ce92` to B5's client (the system known_hosts files by default), held by `tests/mpx4-console-push`.
+- **R-px112-13, the rows' reach: A.** A tap in the rig's network namespace, dnsmasq leasing the guest its address,
+  the rig's ssh and git reaching port 22 as a machine on the LAN would.
 - **R-px112-14, the upgrade witness: B** (asked during the takes). The metal target gets px112 by an upgrade, so
   `tests/mpx6-install.d/upgrade.py`'s U4d holds what an upgrade leaves for burrowd (the configuration's LAN line, the
   account appended once, the host key made at the first boot, its fingerprint the console's, burrowd listening on
@@ -105,8 +107,6 @@ R-px112-1 to -6 are burrow's (its note). Here, all as recommended but R-px112-9,
   list the configuration as installer-written, as `user/install/manifest.lu` does; and the boot hook's `mkdir -p
   /var/run` made a directory on a running stick that the image does not ship, which an upgrade's walk of the stick
   would have copied and listed. The images ship `/var/run` now.
-- **R-px112-13, the rows' reach: A.** A tap in the rig's network namespace, dnsmasq leasing the guest its address,
-  the rig's ssh and git reaching port 22 as a machine on the LAN would.
 
 ### 5.2 The metal target
 
