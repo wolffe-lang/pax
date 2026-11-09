@@ -244,6 +244,17 @@ hosts. The development takes are on `px106` and the final records on
 `px106b`. Each was run from a commit, with the rig copied per take and its
 sha256s printed in the record.
 
+CI's engine is docker; the build hosts' is rootless podman, and the two
+differ in two ways mpx5-sudo can see (pax#324): docker writes no hostname
+line into the container's /etc/hosts, so Ubuntu's sudo says `unable to
+resolve host`, and docker's container root is the host's root, so the
+runner cannot read a 0600 output. `notes/px106/rig/docker-like` is podman
+made to behave that way (`--no-hosts`, and a uid map where container root
+is not the host user); mpx5-sudo's container sides run under it in the
+records from pax#324 on, beside the podman run. Those records also take
+mpx6-install with full rows (so verify.py runs) and mpx6-kasumi, the two
+other suites that went red there.
+
 | take | what | at |
 |---|---|---|
 | P7 | the cost table, on PAX under KVM and TCG, and on Linux | `px106`, R-px106-5's take |
@@ -260,3 +271,6 @@ sha256s printed in the record.
 | the Ubuntu probes | where the retry line goes, the list log's words, no-rule `-l`, and `mail_badpass` | the lane's probe scripts, black-box, in `localhost/px106-auth:1` and `localhost/px103-sudo:1` |
 | the final records | red at the rows tip (px106's rows on trunk, no fix), green at the head (ci-plan, census, fetch-retry-selftest, the install units, mpx5-sudo native on both firmwares, mpx5-accounts, mpx5-users, mpx5-den, mpx6-firmware native both), and the plant `px106-plant-su` red by name on the green head. Their END lines are in the PR | the rows tip and the head of `px106b` on `db516c69` |
 | the upgrade witness | red at the rows tip, then U9 to U15 and the compare green at the head, behind the build host's interactive-use gate | `px106b` |
+| pax#324: docker's engine | P2 pw, P2 admin, P4 and P5 red at `1a9a5ebf` under `docker-like` (`unable to resolve host pax`, `Permission denied` on the 0600 outputs), as on CI, then green | `1a9a5ebf`, `fb563321` |
+| pax#324: I-tree | verify.py red at `1a9a5ebf` on the installed /etc/group's sudo line, as on CI, then green with I-shadow | `1a9a5ebf`, `dff92302` |
+| pax#324: the planner | each account program's sources reaching mpx6-kasumi, red, then green with the map (352 rows) | `d88e0199`, `d407eacc` |
