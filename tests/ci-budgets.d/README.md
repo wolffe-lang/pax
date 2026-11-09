@@ -157,3 +157,46 @@ root and 42 as uid 1000 in 192 s (boots of about 1.5 s each, a build of
 under a minute). Four legs are about 13 minutes plus the apt and wolf
 fetches and `--only linux` (43 containers); the bound leaves more than four
 times that. The first runner observation replaces this paragraph.
+
+## yew at the keyboard: mpx5-yew and mpx5-screen (px113, pax#305)
+
+Both jobs build yew (`tools/mkyew`) and then boot it on four legs. Their
+limit was 75 minutes. Since yew's pin moved to `2eb9cb9b` (`aba55824`),
+yew's build alone has taken 1602-2848 s (median 2403 s), against 1037-1877 s
+(median 1584 s) at `0ccb2c67`. mpx5-yew was then cut at 75 minutes in 10 of
+its 16 all-tier attempts, and mpx5-screen in 4 of 15. The boots did not
+change: each leg is about 5.5 to 6 minutes at both pins. The build's growth
+is pax#327.
+
+`yew-screen.json` holds every completed attempt of the two jobs in the
+runs created 2026-11-01 to 2026-11-09 (121 runs), each phase read from the
+job log's own timestamps: setup, the programs (yew's build is about 95% of
+it), the native and release kernels, Y0/S0, each leg in boot order, and the
+artifact upload. A cancelled attempt's last phase is a lower bound (`cut`);
+an attempt with a FAIL row (`red`) is never a sample. The scripts that read
+the logs are in `notes/px113/measure/`.
+
+The limit is tiered, as mpx6-install's is. The all tier, and a partial
+dispatch (it may name every leg), runs every phase; pr and full run native
+BIOS alone, with no release build. Each phase's floor is its peak over the
+attempts, and a tier's floor is the sum of the phases it runs:
+
+| job | tier | measured sizing floor | bound | margin above floor |
+|---|---|---:|---:|---:|
+| mpx5-yew | all, partial | 5860 s | 8400 s (140 min) | 2540 s |
+| mpx5-yew | pr, full | 4044 s | 5700 s (95 min) | 1656 s |
+| mpx5-screen | all, partial | 5568 s | 7800 s (130 min) | 2232 s |
+| mpx5-screen | pr, full | 3951 s | 5700 s (95 min) | 1749 s |
+
+As multiples of the worst run: mpx5-yew's 140 minutes is 1.87 times its
+worst green all-tier attempt (4494 s), and 1.69 times its worst cut attempt
+completed at the median of the phases it never reached (4967 s);
+mpx5-screen's 130 is 1.85 times 4211 s and 1.63 times 4776 s. The 95
+minutes is 1.55 times mpx5-yew's worst pr or full attempt (3687 s) and
+1.76 times mpx5-screen's (3238 s). The floors carry one apt stall of about
+640 s, seen six times in these runs (635 to 651 s).
+
+A split by leg would not have helped: each job would build yew again, and
+by the same rule one leg alone needs 94 to 112 minutes (mpx5-yew) and 92 to
+108 (mpx5-screen). What would shorten both jobs is building yew once per
+run and handing the binary on by digest; that is a later change.
