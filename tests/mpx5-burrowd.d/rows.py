@@ -7,6 +7,9 @@ DIR is tests/mpx5-burrowd's P0 (files.txt, tools/mkshadow). One leg is two
 boots of one image and one ext2 volume (label px112-keys, mounted on
 /etc/burrowd by the image's fstab, write-through), the guest on a tap in
 the rig's network namespace, leased 192.168.89.20 by dnsmasq for its MAC.
+The volume holds the shipped /etc/burrowd/burrowd_config with its one
+ListenAddress line made `ListenAddress 0.0.0.0`, so the rows reach the
+guest from the LAN whichever default the images ship.
 The rig's own sshd (the image's OpenSSH, on 192.168.89.1 port 2222, an
 account `pax` with the same password line and key) is the Linux side every
 held row is compared with.
@@ -423,7 +426,15 @@ def image(work, shadow_text, client, repo):
     vol.mkdir()
     cfg = ARGS.images / 'root' / 'etc/burrowd/burrowd_config'
     if cfg.exists():
-        shutil.copyfile(cfg, vol / 'burrowd_config')
+        # The rows reach the guest from the LAN whichever default ships: the
+        # shipped file's one ListenAddress line is replaced by the LAN's.
+        lines = cfg.read_text().splitlines()
+        listen = [i for i, l in enumerate(lines) if l.split()[:1] == ['ListenAddress']]
+        if len(listen) != 1:
+            bad('B0', 'the shipped burrowd_config has %d ListenAddress lines, not one' % len(listen))
+        else:
+            lines[listen[0]] = 'ListenAddress 0.0.0.0'
+        (vol / 'burrowd_config').write_text('\n'.join(lines) + '\n')
         os.chmod(vol / 'burrowd_config', 0o644)
     run(['mke2fs', '-q', '-t', 'ext2', '-L', 'px112-keys', '-E', 'root_owner=0:0', '-d', vol, work / 'keys.img', '4M'],
         env=dict(PATH='/usr/sbin:/sbin:/usr/bin:/bin', E2FSPROGS_FAKE_TIME='1700000000'))
