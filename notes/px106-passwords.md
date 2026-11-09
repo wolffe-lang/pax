@@ -179,14 +179,17 @@ loses its three password names: PAX's sudo asks now):
 - the delays: Ubuntu's are Linux-PAM's, documented as the requested delay
   "randomly distributed (by up to 50%) about" it (pam_fail_delay(3)):
   login's stack requests 3 s (pam_faildelay `delay=3000000`), su's, sudo's
-  and passwd's pam_unix's "of the order of two second" (pam_unix(8)).
-  PAX's programs wait their nominal every time (login and su 3 s, sudo 2 s,
-  passwd's current password 1.5 s), each inside Ubuntu's documented band.
-  P3 holds PAX's to their nominal less 0.1 s; P3u holds Ubuntu's to half
-  of theirs less 0.1 s. Both floors come from the documentation, never
-  from a measurement (the first floors, 2.9 s and 1.9 s, were PAX's
-  applied to Ubuntu's as well, and Ubuntu's went under them on CI's
-  runners: pax#324).
+  and passwd's pam_unix's "of the order of two second" (pam_unix(8)); su
+  then waits login.defs' `FAIL_DELAY` as well (su(1)), which Ubuntu's
+  login.defs leaves unset, so su's measured delays (up to 3.6 s) run past
+  pam_unix's band and the band is only ever a floor. PAX's programs wait
+  their nominal every time (login and su 3 s, sudo 2 s, passwd's current
+  password 1.5 s). P3 holds PAX's to their nominal less 0.1 s; P3u holds
+  Ubuntu's to half of theirs less 0.1 s. Both floors come from the
+  documentation, never from a measurement. Before P3u, Ubuntu's delays
+  were printed against PAX's floors (2.9 s and 1.9 s) and never held: the
+  word FAIL on those lines, on hasu and on CI's runners alike (pax#324),
+  never failed the suite.
 - the upgrade (U14): px103's N1 is gone (lobo's two refusals under `-n`
   are Linux's words now, and neither side logs them).
 
