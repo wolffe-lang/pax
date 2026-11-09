@@ -62,6 +62,11 @@ and their sha256s logged.
   `850ff60b…` and `665f815a…`, px93's figures; its built inputs, 325 files, and its sources, 33 files,
   byte-identical), with the two inputs px93's set predates built at the head (`tools/mkburrow`, `tools/mkroots`).
   (The legs' results.)
+- **The walk's run-time state** (pax#329, from px114's census): `user/install/snapshot.lu` leaves `/var/run`'s contents
+  out of an install's and an upgrade's walk, the directory kept, as `/tmp`'s (sudo's `/var/run/sudo/ts`, burrowd's
+  pid), and burrowd's host key, its `.pub` and its log. The snapshot unit's `I-runtime-state` row, on the light CPUs:
+  red at `e0895b1e` (the row before the change: the walk listed `/var/run/sudo`, `/var/run/sudo/ts` and
+  `/var/run/sudo/ts/0`), green at `95e52c0c` with the unit's other five rows.
 - (The head's takes.)
 
 ## 5. Done-when
