@@ -122,6 +122,7 @@ use block
 use cred
 use frames
 use paging
+use pty
 use sched
 use tcp
 use uaccess
@@ -131,9 +132,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 53
+pub const ENTRIES: u64 = 56
 /// No entry.
-pub const NONE: u64 = 53
+pub const NONE: u64 = 56
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -193,6 +194,12 @@ pub const MOUNTSLINK: u64 = 49
 const SYSBLOCK: u64 = 50
 const SYSCLASS: u64 = 51
 const SYSCLASSBLOCK: u64 = 52
+/// px111: `/proc/sys/kernel/pty` and its `nr` (the ptys open, kernel/pty's
+/// count) and `max` (256, PAX's bound: R-px111-4; Linux's is 4096 and
+/// root's to change), fixed entries (R-px111-5).
+const PTYDIR: u64 = 53
+const PTYNR: u64 = 54
+const PTYMAX: u64 = 55
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
@@ -253,6 +260,8 @@ const G_MOUNTS: u64 = 21 // px67: made by kernel/files (`mounts_of`), not by `ma
 const G_MOUNTINFO: u64 = 22
 const G_LINK: u64 = 23 // px67: /proc/mounts, a link kernel/files reads and follows
 const G_BATTR: u64 = 24 // px79: a block device's attribute
+const G_PTYNR: u64 = 26 // px111 (25 is PMEM's mark)
+const G_PTYMAX: u64 = 27
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -326,7 +335,7 @@ fn limit_units(res: u64) -> str {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -561,6 +570,9 @@ pub fn name(e: u64) -> str {
     if e == SSTAT || e == PSTAT { return "stat" }
     if e == KERNEL { return "kernel" } // px55
     if e == CORE_PATTERN { return "core_pattern" }
+    if e == PTYDIR { return "pty" } // px111
+    if e == PTYNR { return "nr" }
+    if e == PTYMAX { return "max" }
     if e == SLIMITS || e == PLIMITS { return "limits" }
     if e == PROTECTED { return "protected_hardlinks" }
     if e == PROTECTED + 1 { return "protected_symlinks" }
@@ -657,7 +669,8 @@ pub fn parent(r: u64) -> u64 {
     if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
-    if e == CORE_PATTERN { return KERNEL }
+    if e == CORE_PATTERN || e == PTYDIR { return KERNEL }
+    if e == PTYNR || e == PTYMAX { return PTYDIR } // px111
     if e == NET { return 4 }
     if e == IPV4 { return NET }
     if e == UNPRIV { return IPV4 }
@@ -694,6 +707,8 @@ fn gen(r: u64) -> u64 {
     if e == SENVIRON || e == PENVIRON { return G_ENVIRON }
     if e == SSTAT || e == PSTAT { return G_STAT }
     if e == CORE_PATTERN { return G_CORE_PATTERN } // px55
+    if e == PTYNR { return G_PTYNR } // px111
+    if e == PTYMAX { return G_PTYMAX }
     if e == SLIMITS || e == PLIMITS { return G_LIMITS }
     if e == PARTITIONS { return G_PARTITIONS } // px66
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
@@ -736,7 +751,7 @@ pub fn mode(r: u64) -> u64 {
         if e == PFDINFO {
             return S_IFDIR | 0x16d // px50: 0555 (measured)
         }
-        if e <= 7 || e == 17 || e == 19 || e == NET || e == IPV4 || e == PIDDIR || e == KERNEL {
+        if e <= 7 || e == 17 || e == 19 || e == NET || e == IPV4 || e == PIDDIR || e == KERNEL || e == PTYDIR {
             return S_IFDIR | 0x16d // 0555: /proc, /proc/self, /proc/sys, /proc/sys/vm, /sys; px45: /proc/sys/net, its ipv4; px55: /proc/sys/kernel
         }
         return S_IFDIR | 0x1ed // 0755
@@ -744,7 +759,7 @@ pub fn mode(r: u64) -> u64 {
     if e == PENVIRON || e == SENVIRON {
         return S_IFREG | 0x100 // px45: 0400 (measured)
     }
-    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || e == UNPRIV || (e >= PROTECTED && e < PROTECTED + 4) || e == CORE_PATTERN {
+    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || e == UNPRIV || (e >= PROTECTED && e < PROTECTED + 4) || e == CORE_PATTERN || e == PTYMAX {
         return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups, px44's protected settings, px45's port setting, px55's core_pattern (measured)
     }
     S_IFREG | 0x124 // 0444
@@ -1308,10 +1323,13 @@ fn stat(base: u64, s: u64, me: bool, area: u64) -> u64 {
     k = put_b(base, k, 32)
     k = put_dec(base, k, sched.proc_word(s, 10))
     k = put_b(base, k, 32)
-    let tty = sched.proc_word(s, 12) == 1
-    k = put_dec(base, k, if tty { 0x440 } else { 0 })
+    // px111: the controlling terminal by its id: the console 4:64
+    // (ttyS0's), pty N's slave 136 + N / 256 : N % 256
+    let ct = sched.proc_word(s, 12)
+    let pn = if ct >= 2 { ct - 2 } else { 0 }
+    k = put_dec(base, k, if ct == 1 { 0x440 } else if ct >= 2 { ((136 + pn / 256) << 8) | (pn % 256) } else { 0 })
     k = put_b(base, k, 32)
-    k = put_sdec(base, k, if tty { sched.tty_pgrp() } else { 0xffffffffffffffff })
+    k = put_sdec(base, k, if ct != 0 { sched.tty_pgrp_of(ct) } else { 0xffffffffffffffff })
     // flags minflt cminflt majflt cmajflt utime stime cutime cstime
     k = put_s(base, k, " 0 0 0 0 0 0 0 0 0 20 0 ")
     k = put_dec(base, k, sched.proc_word(s, 1))
@@ -1514,6 +1532,12 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = battr(base, r) // px79
     } else if g == G_CORE_PATTERN {
         n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
+    } else if g == G_PTYNR {
+        n = put_dec(base, 0, pty.count()) // px111
+        n = put_b(base, n, 10)
+    } else if g == G_PTYMAX {
+        n = put_dec(base, 0, pty.PTYS)
+        n = put_b(base, n, 10)
     } else if g == G_CONTROLLERS {
         n = put_s(base, 0, "cpu\n")
     } else if g == G_CPUMAX {
