@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# mkburrow — build burrow, the ssh client in wolf (wolffe-lang/burrow), as
-# two fully static x86-64 Linux executables, `burrow` and `burrow-keygen`,
-# unmodified, from burrow's own tree, through burrow's own tools/build
-# --static (px104).
+# mkburrow — build burrow, the ssh client and server in wolf
+# (wolffe-lang/burrow), as three fully static x86-64 Linux executables,
+# `burrow`, `burrow-keygen` and (px112) the server `burrowd`, unmodified,
+# from burrow's own tree, through burrow's own tools/build --static (px104).
 #
 #   tools/mkburrow OUTDIR
 #
@@ -30,8 +30,9 @@
 # burrow is built once in each of two checkouts at paths of their own, and
 # the two checkouts' binaries must agree (exit 1 otherwise). Each binary is
 # checked static (readelf: ET_EXEC, no PT_INTERP, no dynamic section).
-# `OUTDIR/sums.txt` gets `burrow <sha256> <bytes>` and `burrow-keygen
-# <sha256> <bytes>`; whether they are the digests user/burrow.pin records
+# `OUTDIR/sums.txt` gets `burrow <sha256> <bytes>`, `burrow-keygen
+# <sha256> <bytes>` and `burrowd <sha256> <bytes>`; whether they are the
+# digests user/burrow.pin records
 # from burrow's own gate is printed (the binary depends on the libc.a it
 # links, so a host's newer libc.a is a new digest, not a failure). Nothing
 # here makes /bin/ssh: tools/install-burrow does.
@@ -144,7 +145,7 @@ static() {
     readelf -dW "$1" | grep -q 'There is no dynamic section' || die "$1 has a dynamic section"
 }
 : > "$out/sums.txt"
-for n in burrow burrow-keygen; do
+for n in burrow burrow-keygen burrowd; do
     one=$(sha256_of "$w/a/burrow/target/static/$n")
     two=$(sha256_of "$w/b/burrow/target/static/$n")
     if [ "$one" != "$two" ]; then
