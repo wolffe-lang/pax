@@ -17,17 +17,36 @@
 //! kernel/ahci's commands are; the SCSI commands are kernel/usb_storage's.
 //! At most four storage devices, found at enumeration; a halted pipe is
 //! reset (Reset Endpoint, Set TR Dequeue Pointer, CLEAR_FEATURE).
+//! px109: HID pointers (USB HID 1.11 §§6.2.1, 7.2.5-7.2.6, appendix B.2;
+//! xHCI 1.2 §§4.14, 6.2.3.6): a device's first boot mouse interface
+//! (class 3, subclass 1, protocol 2), else its first class-3 interface of
+//! subclass 0, gets a second interrupt IN pipe beside a keyboard's (one
+//! device may be both, as a combined receiver is). Its report descriptor
+//! (the HID descriptor's wDescriptorLength, at most 1024 bytes) is read
+//! and given to kernel/usb_mouse; when it parses, the device is read by
+//! it (a boot mouse is set to the report protocol, as appendix B says a
+//! class driver does); a boot mouse whose descriptor is refused, or any
+//! boot mouse when the command line says `hidboot`, is set to the boot
+//! protocol and read by B.2's three bytes. A refused pointer is named on
+//! the log with the reason. Reports go to kernel/mouse (its readers
+//! wake); an unplug sends its GONE record, a held button released.
+//! `usbraw` on the command line logs each pointer's descriptors at
+//! enumeration and every report's bytes (a ring the enumeration thread
+//! prints: nothing is logged from the interrupt).
 use apic
+use boot_info
 use clock
 use console
 use frames
 use log
+use mouse
 use paging
 use pci
 use sched
 use sync
 use timer
 use usb_keys
+use usb_mouse
 use usb_topology
 
 extern "c" fn pax_outb(port: u16, value: u8)
@@ -36,6 +55,14 @@ extern "c" fn pax_inb(port: u16) -> u8
 var first: u64 = 0
 var initialized: u64 = 0
 var held: u64 = 0
+// px109: the command line's `usbraw` and `hidboot`; the raw reports'
+// ring (a page: write count, read count, dropped, then RAWS entries of
+// RAWSIZE bytes: the device's path word, the report's length, its bytes).
+var raw: u64 = 0
+var rawon: u64 = 0
+var bootonly: u64 = 0
+const RAWS: u64 = 48
+const RAWSIZE: u64 = 80
 
 const BASE: u64 = 0xffffb00004000000
 const WINDOW: u64 = 0x100000
@@ -83,7 +110,7 @@ const BUFFER: u64 = 16
 const ENDPOINT: u64 = 17
 const PACKET: u64 = 18
 const INTERVAL: u64 = 19
-const KIND: u64 = 20 // 1 keyboard, 2 USB2 hub, 3 not driven, 4 failed, 5 mass storage (px78), 6 storage gone
+const KIND: u64 = 20 // 1 keyboard, 2 USB2 hub, 3 not driven, 4 failed, 5 mass storage (px78), 6 storage gone, 7 pointer (px109)
 const PREVIOUS: u64 = 21
 const REPEAT: u64 = 22
 const DEADLINE: u64 = 23
@@ -120,6 +147,27 @@ const IFACE: u64 = 48
 const BIADDR: u64 = 49
 const BOADDR: u64 = 50
 const BBURST: u64 = 51 // bulk IN burst << 8 | bulk OUT burst
+// px109: a pointer interface's words. POINTER 0 none, 1 read by the boot
+// report, 2 by its report descriptor; its interrupt IN pipe (DCI, ring,
+// enqueue index and cycle, the TRB its next event names, max packet);
+// the interface; kernel/mouse's number for it; reports read; the
+// interface's subclass << 8 | protocol; the report descriptor's length.
+// From PLAYOUT, kernel/usb_mouse's layout and work area (to word 367).
+// The report lands at BUFFER + PREPORT (64 bytes at most).
+const POINTER: u64 = 52
+const PEP: u64 = 53
+const PRING: u64 = 54
+const PI: u64 = 55
+const PC: u64 = 56
+const PEXPECT: u64 = 57
+const PPACKET: u64 = 58
+const PIFACE: u64 = 59
+const PDEV: u64 = 60
+const PREPORTS: u64 = 61
+const PSUB: u64 = 62
+const PRLEN: u64 = 63
+const PLAYOUT: u64 = 64
+const PREPORT: u64 = 3072
 // px78: the storage devices found (at most four), a page: count at 0,
 // device records from 1.
 var storage: u64 = 0
@@ -251,6 +299,100 @@ fn arm(d: u64) {
     w32(get(c, DB) + get(d, SLOT) * 4, get(d, ENDPOINT))
 }
 
+/// px109: one TD on the pointer's interrupt IN pipe, its report into
+/// BUFFER + PREPORT.
+fn parm(d: u64) {
+    let c = get(d, HOST)
+    let at = enqueue(d, PRING, PI, PC, pa(get(d, BUFFER) + PREPORT), get(d, PPACKET), (1 << 10) | 32 | 4)
+    put(d, PEXPECT, at)
+    w32(get(c, DB) + get(d, SLOT) * 4, get(d, PEP))
+}
+
+/// px109: a device's path as one word (controller, root port, depth,
+/// route), so a report kept for the log names it after the device left.
+fn path_word(d: u64) -> u64 {
+    get(get(d, HOST), NUMBER) | (get(d, ROOT) << 8) | (get(d, DEPTH) << 16) | (get(d, ROUTE) << 24)
+}
+
+fn put_path(w: u64) {
+    log.put("usb"); log.dec((w & 255) as int); log.put("-"); log.dec(((w >> 8) & 255) as int)
+    var i: u64 = 0
+    while i < ((w >> 16) & 255) {
+        log.put("."); log.dec(((w >> (24 + i * 4)) & 15) as int)
+        i += 1
+    }
+}
+
+/// px109: `n` bytes at `a` as hex pairs after a space each.
+fn put_bytes(a: u64, n: u64) {
+    var i: u64 = 0
+    while i < n { log.put(" "); log.hex_n(r8(a + i), 2); i += 1 }
+}
+
+/// px109: a pointer's report of `n` bytes, in the interrupt (IF clear):
+/// decoded, handed to kernel/mouse (its readers woken), kept for the log
+/// under `usbraw`.
+fn pointer_report(d: u64, n: u64) {
+    let r = get(d, BUFFER) + PREPORT
+    put(d, PREPORTS, get(d, PREPORTS) + 1)
+    let ring = unsafe { raw }
+    if ring != 0 {
+        let wrote = get(ring, 0)
+        if wrote - get(ring, 1) < RAWS {
+            let e = ring + 64 + (wrote % RAWS) * RAWSIZE
+            put(e, 0, path_word(d)); put(e, 1, n)
+            var i: u64 = 0
+            while i < 8 { put(e, 2 + i, r64(r + i * 8)); i += 1 }
+            put(ring, 0, wrote + 1)
+        } else {
+            put(ring, 2, get(ring, 2) + 1)
+        }
+    }
+    var ok = false
+    var x: u64 = 0
+    var y: u64 = 0
+    var b: u64 = 0
+    var w: u64 = 0
+    if get(d, POINTER) == 1 {
+        let (o, dx, dy, bb) = usb_mouse.boot(r, n)
+        ok = o; x = dx; y = dy; b = bb
+    } else {
+        let (o, a1, a2, bb, ww) = usb_mouse.decode(r, n, d + PLAYOUT * 8)
+        ok = o; x = a1; y = a2; b = bb; w = ww
+    }
+    if ok && mouse.report(get(d, PDEV), x, y, b, w, timer.ticks() * 10000000) { sched.wake_pipes() }
+}
+
+/// px109: the raw reports kept since the last pass, logged (the
+/// enumeration thread's, never the interrupt's).
+fn raw_flush() {
+    let ring = unsafe { raw }
+    if ring == 0 { return }
+    while true {
+        let s = sync.irq_save()
+        let read = get(ring, 1)
+        if read == get(ring, 0) { sync.irq_restore(s); return }
+        let e = ring + 64 + (read % RAWS) * RAWSIZE
+        var w: u64 = 0
+        let entry = page_scratch()
+        while w < RAWSIZE / 8 { put(entry, w, get(e, w)); w += 1 }
+        put(ring, 1, read + 1)
+        let dropped = get(ring, 2)
+        put(ring, 2, 0)
+        sync.irq_restore(s)
+        let saved = sync.acquire(sync.console())
+        log.put("xhci: report "); put_path(get(entry, 0))
+        let n = get(entry, 1)
+        put_bytes(entry + 16, if n > 64 { 64 } else { n })
+        if dropped != 0 { log.put(" (after "); log.dec(dropped as int); log.put(" not kept)") }
+        log.end()
+        sync.release(sync.console(), saved)
+    }
+}
+
+/// px109: the raw ring's own scratch entry (the page's last RAWSIZE bytes).
+fn page_scratch() -> u64 { unsafe { raw } + 4096 - RAWSIZE }
+
 /// Drain events with IF clear, both from IRQ and command waiter. The ERDP
 /// write clears Event Handler Busy; USBSTS.EINT precedes IMAN.IP (RW1C).
 fn drain(c: u64) {
@@ -281,6 +423,19 @@ fn drain(c: u64) {
                     }
                 } else if get(d, KIND) == 5 && ep == get(d, BEP) && get(d, BDONE) == 0 {
                     bulk_event(d, param & !15, code, status & 0xffffff)
+                } else if get(d, POINTER) != 0 && ep == get(d, PEP) && param & !15 == get(d, PEXPECT) {
+                    // px109: the pointer's report; a halted pipe ends it
+                    // (its GONE record and released buttons at detach).
+                    if code == 1 || code == 13 {
+                        let left = status & 0xffffff
+                        let n = if left <= get(d, PPACKET) { get(d, PPACKET) - left } else { 0 }
+                        if n != 0 { pointer_report(d, n) }
+                        parm(d)
+                    } else {
+                        let _gone = mouse.detach(get(d, PDEV), timer.ticks() * 10000000)
+                        put(d, POINTER, 0)
+                        sched.wake_pipes()
+                    }
                 } else if ep == get(d, ENDPOINT) && param & !15 == get(d, EXPECT) {
                     if get(d, KIND) == 1 && (code == 1 || code == 13) && status & 0xffffff == 0 {
                         report(d, r64(get(d, BUFFER) + 2048))
@@ -447,6 +602,133 @@ fn path(d: u64) {
     }
 }
 
+/// px109: a descriptor's bytes on the log, sixteen to a line (`usbraw`).
+fn log_bytes(d: u64, what: str, a: u64, n: u64) {
+    var at: u64 = 0
+    while at < n {
+        let saved = sync.acquire(sync.console())
+        log.put("xhci: "); path(d); log.put(" "); log.put(what)
+        log.put(" +"); log.dec(at as int); log.put(":")
+        put_bytes(a + at, if n - at > 16 { 16 } else { n - at })
+        log.end()
+        sync.release(sync.console(), saved)
+        at += 16
+    }
+}
+
+/// px109: what a pointer interface's descriptors lack (`configure`'s codes).
+fn pointer_why(code: u64) -> str {
+    match code {
+        1 => "no interrupt IN endpoint",
+        2 => "an endpoint packet outside 3 to 64 bytes",
+        3 => "an endpoint interval of 0",
+        4 => "its endpoint the keyboard's",
+        5 => "no report descriptor",
+        _ => "a report descriptor longer than 1024 bytes",
+    }
+}
+
+/// px109: a pointer interface not driven, and why.
+fn refuse_pointer(d: u64, why: str) {
+    let saved = sync.acquire(sync.console())
+    log.put("xhci: mouse "); path(d); log.put(" refused: "); log.line(why)
+    sync.release(sync.console(), saved)
+}
+
+/// px109: an interrupt endpoint's Interval field (xHCI 1.2 §6.2.3.6):
+/// high speed's bInterval is 2^(n-1) microframes (n 1 to 16); full and
+/// low speed's are frames, the largest power of two in 125 µs units.
+fn interval_exponent(speed: u64, interval: u64) -> (bool, u64) {
+    if speed == 3 {
+        if interval == 0 || interval > 16 { return (false, 0) }
+        return (true, interval - 1)
+    }
+    var exponent: u64 = 3
+    var n: u64 = 1
+    while n * 2 <= interval { n *= 2; exponent += 1 }
+    (true, exponent)
+}
+
+/// px109: the default control pipe after a STALL (xHCI 1.2 §4.10.2.1:
+/// the endpoint halts): Reset Endpoint, then its dequeue at the ring's
+/// enqueue position (§4.6.8, §4.6.10), so the next request runs.
+fn ep0_reset(d: u64) -> bool {
+    let c = get(d, HOST)
+    let slot = get(d, SLOT)
+    let reset = command(c, 0, (14 << 10) | (1 << 16) | (slot << 24))
+    if reset & 255 != 1 && reset & 255 != 19 { return false }
+    let ring = get(d, CTRL)
+    command(c, pa(ring + get(d, TI) * 16) | get(d, TC), (16 << 10) | (1 << 16) | (slot << 24)) & 255 == 1
+}
+
+/// px109: a class request to the pointer's interface; after a STALL the
+/// default pipe is reset, so a refusal costs nothing else.
+fn pointer_request(d: u64, request_type: u64, request: u64, value: u64, length: u64) -> bool {
+    if control(d, request_type, request, value, get(d, PIFACE), length) { return true }
+    if get(d, KIND) != 4 && get(d, COMPLETION) == 6 { let _r = ep0_reset(d) }
+    false
+}
+
+/// px109: the pointer interface whose pipe Configure Endpoint added: its
+/// report descriptor read and parsed (kernel/usb_mouse), its protocol
+/// set when it is a boot mouse, kernel/mouse told, its pipe armed, and a
+/// line on the log. Whether it is driven.
+fn pointer(d: u64, boot: bool) -> bool {
+    let buf = get(d, BUFFER)
+    let rlen = get(d, PRLEN)
+    var code: u64 = usb_mouse.R_NO_POINTER
+    var read = false
+    if rlen != 0 && rlen <= 1024 {
+        read = pointer_request(d, 0x81, 6, 0x2200, rlen) && get(d, ACTUAL) == rlen
+        if read {
+            if unsafe { rawon } != 0 { log_bytes(d, "report descriptor", buf, rlen) }
+            code = usb_mouse.parse(buf, rlen, d + PLAYOUT * 8)
+        }
+    }
+    let force = boot && unsafe { bootonly } != 0
+    let mode: u64 = if code == usb_mouse.OK && !force { 2 } else if boot { 1 } else { 0 }
+    if mode == 0 {
+        refuse_pointer(d, if read { usb_mouse.refusal(code) } else { "its report descriptor unreadable" })
+        return false
+    }
+    // SET_PROTOCOL (§7.2.6): a boot mouse is told which one it speaks.
+    if boot && !pointer_request(d, 0x21, 11, if mode == 1 { 0 } else { 1 }, 0) {
+        refuse_pointer(d, "SET_PROTOCOL failed")
+        return false
+    }
+    let rel = mode == 1 || get(d, PLAYOUT + usb_mouse.L_KIND) == usb_mouse.REL
+    let dev = mouse.attach(if rel { mouse.REL } else { mouse.ABS }, timer.ticks() * 10000000)
+    if dev == 0 { refuse_pointer(d, "kernel/mouse has no room"); return false }
+    let s = sync.irq_save()
+    put(d, PDEV, dev)
+    put(d, POINTER, mode)
+    if get(d, KIND) != 1 { put(d, KIND, 7) }
+    parm(d)
+    sched.wake_pipes()
+    sync.irq_restore(s)
+    let saved = sync.acquire(sync.console())
+    log.put("xhci: mouse "); path(d); log.put(" speed "); log.dec(get(d, SPEED) as int)
+    log.put(" interface "); log.dec(get(d, PIFACE) as int)
+    if mode == 1 {
+        if read && code != usb_mouse.OK { log.put(" report descriptor refused ("); log.put(usb_mouse.refusal(code)); log.put("):") }
+        log.put(" boot protocol, relative")
+    } else {
+        let l = d + PLAYOUT * 8
+        log.put(if boot { " report protocol, " } else { " report descriptor, " })
+        log.put(if rel { "relative" } else { "absolute" })
+        log.put(", "); log.dec(get(l, usb_mouse.L_LEN) as int); log.put("-byte reports")
+        if get(l, usb_mouse.L_ID) != 0 { log.put(", report ID "); log.dec(get(l, usb_mouse.L_ID) as int) }
+        var b: u64 = 0
+        var k: u64 = 0
+        while k < 5 { if get(l, usb_mouse.L_B + k) != 0 { b += 1 }; k += 1 }
+        log.put(", buttons "); log.dec(b as int)
+        log.put(if get(l, usb_mouse.L_W) != 0 { ", wheel" } else { ", no wheel" })
+    }
+    log.put("; pointer "); log.dec(dev as int); log.end()
+    sync.release(sync.console(), saved)
+    true
+}
+
 fn configure(d: u64) -> bool {
     let c = get(d, HOST)
     let buf = get(d, BUFFER)
@@ -462,6 +744,7 @@ fn configure(d: u64) -> bool {
         if command(c, pa(input), (13 << 10) | (get(d, SLOT) << 24)) & 255 != 1 { return false }
     }
     if !control(d, 128, 6, 0x100, 0, 18) || get(d, ACTUAL) < 18 { return false }
+    if unsafe { rawon } != 0 { log_bytes(d, "device descriptor", buf, 18) } // px109
     let device_class = r8(buf + 4)
     let product = r8(buf + 15)
     // String 0 supplies a language, then iProduct is fetched in that
@@ -479,6 +762,7 @@ fn configure(d: u64) -> bool {
     let total = r8(buf + 2) | (r8(buf + 3) << 8)
     if total < 9 || total > 1024 { return false }
     if !control(d, 128, 6, 0x200, 0, total) || get(d, ACTUAL) != total { return false }
+    if unsafe { rawon } != 0 { log_bytes(d, "configuration", buf, total) } // px109
     let config = r8(buf + 5)
     // px78: a mass-storage interface is driven at every speed.
     let (is_storage, iface, ia, im, oa, om, bursts) = storage_interface(buf, total)
@@ -497,18 +781,55 @@ fn configure(d: u64) -> bool {
     var ep: u64 = 0
     var packet: u64 = 0
     var interval: u64 = 0
+    // px109: the pointer interface (a boot mouse first, else the first of
+    // subclass 0), its interrupt IN endpoint and its report descriptor's
+    // length; `inside` 1 within a boot mouse's interface, 2 within a
+    // subclass-0 HID interface.
+    var inside: u64 = 0
+    var pboot: u64 = 0 // 1 the pointer found is a boot mouse
+    var piface: u64 = 0
+    var psub: u64 = 0
+    var pep: u64 = 0
+    var ppacket: u64 = 0
+    var pinterval: u64 = 0
+    var prlen: u64 = 0
+    var pfound = false
     while at + 2 <= total {
         let length = r8(buf + at)
         let dtype = r8(buf + at + 1)
         if length < 2 || at + length > total { return false }
         if dtype == 4 && length >= 9 {
             selected = 0
+            inside = 0
             if r8(buf + at + 3) == 0 {
                 if r8(buf + at + 5) == 9 || device_class == 9 { selected = 2 }
                 if r8(buf + at + 5) == 3 && r8(buf + at + 6) == 1 && r8(buf + at + 7) == 1 { selected = 1 }
                 if selected != 0 && kind == 0 { interface = r8(buf + at + 2) }
+                let hid = r8(buf + at + 5) == 3
+                let bootmouse = hid && r8(buf + at + 6) == 1 && r8(buf + at + 7) == 2
+                // A boot mouse displaces a subclass-0 pointer found before it.
+                if bootmouse && pboot == 0 { inside = 1 }
+                else if hid && r8(buf + at + 6) == 0 && !pfound { inside = 2 }
+                if inside != 0 {
+                    pfound = true
+                    pboot = if inside == 1 { 1 } else { 0 }
+                    piface = r8(buf + at + 2)
+                    psub = (r8(buf + at + 6) << 8) | r8(buf + at + 7)
+                    pep = 0; ppacket = 0; pinterval = 0; prlen = 0
+                }
             }
-        } else if dtype == 5 && length >= 7 && selected != 0 && kind == 0 {
+        } else if dtype == 0x21 && length >= 9 && inside != 0 {
+            // The HID descriptor (§6.2.1): the report descriptor's length.
+            if r8(buf + at + 6) == 0x22 { prlen = r8(buf + at + 7) | (r8(buf + at + 8) << 8) }
+        } else if dtype == 5 && length >= 7 && inside != 0 && pep == 0 {
+            let address = r8(buf + at + 2)
+            if address & 128 != 0 && address & 15 != 0 && r8(buf + at + 3) & 3 == 3 {
+                pep = (address & 15) * 2 + 1
+                ppacket = (r8(buf + at + 4) | (r8(buf + at + 5) << 8)) & 0x7ff
+                pinterval = r8(buf + at + 6)
+            }
+        }
+        if dtype == 5 && length >= 7 && selected != 0 && kind == 0 {
             let address = r8(buf + at + 2)
             if address & 128 != 0 && address & 15 != 0 && r8(buf + at + 3) & 3 == 3 {
                 ep = (address & 15) * 2 + 1
@@ -519,8 +840,20 @@ fn configure(d: u64) -> bool {
         }
         at += length
     }
-    if kind == 0 { put(d, KIND, 3); return true }
-    if interval == 0 || packet == 0 || (kind == 1 && packet < 8) || packet > 1024 { return false }
+    // px109: a pointer is driven beside a keyboard, never beside a hub.
+    var pointing = pfound && kind != 2
+    if pointing {
+        let why: u64 = if pep == 0 { 1 }
+                  else if ppacket < 3 || ppacket > usb_mouse.REPORT_MAX { 2 }
+                  else if pinterval == 0 { 3 }
+                  else if pep == ep { 4 }
+                  else if prlen == 0 && pboot == 0 { 5 }
+                  else if prlen > 1024 && pboot == 0 { 6 }
+                  else { 0 }
+        if why != 0 { refuse_pointer(d, pointer_why(why)); pointing = false }
+    }
+    if kind == 0 && !pointing { put(d, KIND, 3); return true }
+    if kind != 0 && (interval == 0 || packet == 0 || (kind == 1 && packet < 8) || packet > 1024) { return false }
     if !control(d, 0, 9, config, 0, 0) { return false }
     var ports: u64 = 0
     var think: u64 = 0
@@ -535,25 +868,37 @@ fn configure(d: u64) -> bool {
     }
     let input = get(d, INPUT)
     zero(input, 4096)
-    w32(input + 4, 1 | (1 << ep))
-    input_slot(d, ep)
+    // px109: the keyboard's or hub's endpoint and the pointer's, together.
+    let adds: u64 = (if kind != 0 { 1 << ep } else { 0 }) | (if pointing { 1 << pep } else { 0 })
+    w32(input + 4, 1 | adds)
+    input_slot(d, if pointing && pep > ep { pep } else { ep })
     let slot = input + get(c, CSZ)
     if kind == 2 {
         w32(slot, r32(slot) | (1 << 26))
         w32(slot + 4, r32(slot + 4) | (ports << 24))
         if get(d, SPEED) == 3 { w32(slot + 8, r32(slot + 8) | (think << 16)) }
     }
-    var exponent: u64 = 3
-    if get(d, SPEED) == 3 {
-        if interval > 16 { return false }
-        exponent = interval - 1
-    } else {
-        var n: u64 = 1
-        while n * 2 <= interval { n *= 2; exponent += 1 }
+    let (ok, exponent) = interval_exponent(get(d, SPEED), interval)
+    if kind != 0 {
+        if !ok { return false }
+        endpoint(input + (ep + 1) * get(c, CSZ), get(d, INTR), packet, 7, exponent)
     }
-    endpoint(input + (ep + 1) * get(c, CSZ), get(d, INTR), packet, 7, exponent)
+    if pointing {
+        let (pok, pexp) = interval_exponent(get(d, SPEED), pinterval)
+        let ring = page()
+        if !pok || ring == 0 { return false }
+        put(d, PRING, ring); put(d, PI, 0); put(d, PC, 1)
+        endpoint(input + (pep + 1) * get(c, CSZ), ring, ppacket, 7, pexp)
+    }
     if command(c, pa(input), (12 << 10) | (get(d, SLOT) << 24)) & 255 != 1 { return false }
-    put(d, ENDPOINT, ep); put(d, PACKET, packet); put(d, INTERVAL, exponent)
+    if kind != 0 { put(d, ENDPOINT, ep); put(d, PACKET, packet); put(d, INTERVAL, exponent) }
+    if pointing {
+        put(d, PEP, pep); put(d, PPACKET, ppacket); put(d, PIFACE, piface); put(d, PSUB, psub); put(d, PRLEN, prlen)
+        if kind == 0 {
+            if !pointer(d, pboot != 0) { put(d, KIND, 3) }
+            return true
+        }
+    }
     if kind == 1 {
         if !control(d, 0x21, 11, 0, interface, 0) { return false }
         if !control(d, 0x21, 10, 0, interface, 0) { return false }
@@ -565,6 +910,8 @@ fn configure(d: u64) -> bool {
         log.put("xhci: keyboard "); path(d); log.put(" speed ")
         log.dec(get(d, SPEED) as int); log.line(" boot report 8")
         sync.release(sync.console(), saved)
+        // px109: a pointer interface of the same device, after the keyboard.
+        if pointing { let _p = pointer(d, pboot != 0) }
     } else {
         put(d, KIND, 2)
         var p: u64 = 1
@@ -933,6 +1280,7 @@ fn discard_allocations(d: u64) {
         }
         word += 1
     }
+    if get(d, PRING) != 0 { frames.free(pa(get(d, PRING))) } // px109
     frames.free(pa(d))
     sync.irq_restore(saved)
 }
@@ -1026,8 +1374,20 @@ fn detach(d: u64) {
     let saved = sync.irq_save()
     let was_storage = get(d, KIND) == 5
     report(d, 0)
+    // px109: a pointer's departure (its held buttons released).
+    let pointed = get(d, POINTER)
+    if pointed != 0 {
+        let _g = mouse.detach(get(d, PDEV), timer.ticks() * 10000000)
+        put(d, POINTER, 0)
+        sched.wake_pipes()
+    }
     put(d, KIND, if was_storage { 6 } else { 3 })
     sync.irq_restore(saved)
+    if pointed != 0 {
+        let s = sync.acquire(sync.console())
+        log.put("xhci: mouse "); path(d); log.put(" removed; pointer "); log.dec(get(d, PDEV) as int); log.line(" gone")
+        sync.release(sync.console(), s)
+    }
     if was_storage {
         // px78: kernel/usb_storage keeps this record; it refuses I/O now.
         let s = sync.acquire(sync.console())
@@ -1136,6 +1496,7 @@ export fn pax_usbd(_arg: u64) {
             c = get(c, NEXT)
         }
         unsafe { initialized = 1 }
+        raw_flush() // px109
         let _n = sched.sleep(10)
     }
 }
@@ -1277,6 +1638,13 @@ pub fn start(pml4: u64, entry: u64) -> u64 {
         index += 1
     }
     if head() == 0 { unsafe { initialized = 1 }; return 0 }
+    // px109: `usbraw` logs pointers' descriptors and reports; `hidboot`
+    // reads every boot mouse by the boot protocol.
+    if boot_info.cmdline_has("usbraw") {
+        let ring = page()
+        unsafe { raw = ring; rawon = if ring != 0 { 1 } else { 0 } }
+    }
+    if boot_info.cmdline_has("hidboot") { unsafe { bootonly = 1 } }
     let keys = page()
     if keys == 0 { unsafe { initialized = 1 }; return 0 }
     unsafe { held = keys }
