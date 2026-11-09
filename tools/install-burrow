@@ -5,13 +5,15 @@
 # `ssh` from PATH for its ssh:// and scp-like remotes (it reads neither
 # GIT_SSH nor core.sshCommand at its pin), so /bin/ssh is all the wiring
 # den needs; a person types `ssh` and `burrow-keygen` the same way.
+# px112 (R-px112-12): /bin/burrowd, the server, from the same tree, the same
+# way; /etc/pax-boot.d/burrowd starts it (user/pax-boot.d).
 #
 #   tools/install-burrow BURROW-DIR ROOT
 #
 # BURROW-DIR is tools/mkburrow's OUTDIR: each binary refused unless it is
 # its sums.txt line (sha256 and size) and static (ET_EXEC, no PT_INTERP).
-# ROOT/bin is made if it is missing; an existing ROOT/bin/ssh or
-# ROOT/bin/burrow-keygen is refused, never replaced. The image builders
+# ROOT/bin is made if it is missing; an existing ROOT/bin/ssh,
+# ROOT/bin/burrow-keygen or ROOT/bin/burrowd is refused, never replaced. The image builders
 # share it: the distribution's root builder (distribution-root) and
 # tests/mpx4-console-push's image. Exit 0, or 2 on a refusal.
 set -euo pipefail
@@ -20,7 +22,7 @@ set -euo pipefail
 d=$1 r=$2
 need readelf cmp
 mkdir -p "$r/bin"
-for pair in burrow:ssh burrow-keygen:burrow-keygen; do
+for pair in burrow:ssh burrow-keygen:burrow-keygen burrowd:burrowd; do
     from=${pair%%:*} to=${pair#*:}
     row=$(awk -v n="$from" '$1 == n { print }' "$d/sums.txt" 2>/dev/null) || row=
     read -r name sha bytes <<< "$row"
