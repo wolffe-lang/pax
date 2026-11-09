@@ -1216,7 +1216,7 @@ static const char *wsz(int fd) {
 
 static void sec_winsz(void) {
     int m, s;
-    if (pair(&m, &s)) return;
+    if (pair(&m, &s)) { say("W: no pair: %s\n", ename(errno)); return; }
     {
         char a1[64];
         snprintf(a1, sizeof a1, "%s", wsz(s));
@@ -1286,6 +1286,7 @@ static void sec_winsz(void) {
  * leader's pid; *sl a slave descriptor the caller holds (O_NOCTTY). */
 static int hsession(pid_t *ls, int *sl, int *ctl) {
     int m = mopen(0);
+    if (m < 0) return -1;
     unlockpt(m);
     char name[64];
     ptsname_r(m, name, sizeof name);
@@ -1379,6 +1380,7 @@ static void sec_hangup(void) {
     pid_t L;
     int sl, ctl[2];
     int m = hsession(&L, &sl, ctl);
+    if (m < 0) { say("H: no master: %s\n", ename(errno)); return; }
     say("H1 the session's foreground before: %s\n", ask(ctl, 'g'));
     put(m, "unread\n");
     nap(200);
@@ -1594,7 +1596,7 @@ static void fills(void) {
 
 static void sec_poll(void) {
     int m, s;
-    if (pair(&m, &s)) return;
+    if (pair(&m, &s)) { say("P: no pair: %s\n", ename(errno)); return; }
     {
         char a1[64];
         snprintf(a1, sizeof a1, "%s", revents(m, POLLIN | POLLOUT, 0));
