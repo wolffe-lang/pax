@@ -124,3 +124,24 @@ runtime row green.
 The gate: Footprint module (user/install/snapshot.lu, tests/mpx6-install.d, notes). The local
 record: fetch-wolf, then tests/mpx6-install's smoke rows, native, BIOS (which run the six units
 first), at the head. Nothing in CI, the kernel or the image changes.
+
+Revision 1, 2026-11-09T20:26Z, the rulings as given (before any change):
+  R-px114-1 A: runtime_state(path) in px112's shape, each entry commented with its writer.
+  R-px114-2 B, not A: leave out /var/lib/dhcp only (the directory and what is in it). /var/lib
+    is where package state will live (a package manager's database under /var/lib/<name>), so a
+    rule for all of it would drop what a later installer must carry; each /var/lib/<x> gets its
+    own ruling. /var/lib itself is copied: an empty directory on installs made from a stick that
+    took a lease, and the same on an upgrade.
+  R-px114-3 A: every top-level name that starts with a dot. It is safe only while no image
+    ships one, so the follow-on guard names it.
+  R-px114-4 A: /var/log/sudo.log only.
+  R-px114-5 B: the image-side guard is a follow-on issue: no image ships a top-level dot name,
+    /var/lib/dhcp, /etc/resolv.conf or /var/log/sudo.log (image-no-sudo-log's siblings).
+  /var/run's contents are px112's, not here.
+The rows change with R-px114-2:
+  I-runtime-lease      neither /var/lib/dhcp nor its pax.lease in the staged copy or its attrs.
+                       Red at trunk.
+  I-runtime-neighbours also /var/lib and /var/lib/pkg/db (package state) copied and listed.
+                       Green both ways.
+The plant: /var/lib/dhcp's entry taken out of runtime_state; predicted red by name:
+I-runtime-lease and I-runtime-renewal.
