@@ -56,6 +56,16 @@ and their sha256s logged.
 
 - **Red at the rows tip** `687288db` (`tests/mpx5-burrowd --tier native --firmware bios`, 1,372 s): `FAIL B0`,
   `FAIL B1`, `PASS B9-scan` (no password in 70 records), `END tests/mpx5-burrowd exit=1`.
+- **The first take of the pax side** (`dev-p1`, `096ed59b`, block A): `tests/ci-plan`, `tests/census` and the
+  installer's snapshot and prepare units green (the prepare unit's I-burrowd-stick and I-burrowd-lan-yes/no among
+  them); `tests/mpx5-burrowd` exit 1 on all four legs (2,845 s), each by the same two rows, both the rows' own
+  misses, not burrowd's. **B1**: the console printed the host key line whole, but the row's pattern ended `$`, which
+  matched the line while its bytes were still arriving (`… SHA256:… pa`), before `(made at this boot)`; B2-B10 need
+  B1's fingerprint, so the leg ended there. **B11**: everything the stick should do it did (the LAN refused at
+  connect, burrowd answering on loopback with `Permission denied (publickey,password).`, its log `listening on
+  127.0.0.1:22` and the refusal), but the row looked for the address and port the rig's client had already written
+  as `HOST port PORT`. Fixed in `30271e71` (each host key line read to its newline, B10's too, which could have
+  passed on a cut line; the refusal as the client writes it).
 - **The upgrade witness** (R-px112-14, B): `tests/mpx6-install.d/upgrade.py`'s U4d holds burrowd after the upgrade
   of the 8b4e98ae dev install (the metal target's): the LAN's configuration, the account appended, the host key made
   at the first boot. Its inputs are px93's, copied by value into the lane (the two sticks read twice on each side,
