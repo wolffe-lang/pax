@@ -51,6 +51,9 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       no password in the log, the serial transcript or any record
   B10 boot 2, the same volume: the same fingerprint with no `made at this
       boot`, and the rig's known_hosts line from boot 1 still verifies
+  B12 a session without ptys, the client at a terminal: `ssh host` and
+      `ssh -t host` end, refused (a shell and a pty are burrowd's refusals
+      by name), what the client writes recorded; `ssh host COMMAND` runs
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -366,6 +369,41 @@ class Client:
                 .replace(b'@' + host.encode(), b'@HOST').replace(b'\r\n', b'\n'))
 
 
+    def ssh_tty(self, where, args, opts=(), timeout=30):
+        """The client as a person runs it at a terminal: ssh's standard input, output and error a
+        pseudo-terminal of its own (publickey), what it wrote there, and its status; killed after
+        `timeout` seconds (a session that waits for input is named so, never left)."""
+        host, port = where
+        argv = ['ssh', '-F', 'none', '-o', 'UserKnownHostsFile=%s' % self.kh, '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=20', '-o', 'BatchMode=yes',
+                '-o', 'PreferredAuthentications=publickey', '-i', self.key, '-p', str(port), '-l', 'pax']
+        master, slave = os.openpty()
+        p = subprocess.Popen([str(x) for x in argv + list(opts) + [host] + list(args)], stdin=slave, stdout=slave, stderr=slave,
+                             env=dict(self.env(), TERM='xterm'), start_new_session=True)
+        os.close(slave)
+        out, end, waited = b'', time.monotonic() + timeout, False
+        while True:
+            r, _, _ = select.select([master], [], [], 0.2)
+            if r:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    data = b''
+                out += data
+                if not data and p.poll() is not None:
+                    break
+            elif p.poll() is not None:
+                break
+            if time.monotonic() > end:
+                waited = True
+                p.kill()
+                p.wait()
+                break
+        os.close(master)
+        text = out.replace(b'\r\n', b'\n').replace(host.encode() + b' port ' + str(port).encode(), b'HOST port PORT')
+        return (None if waited else p.returncode), text
+
+
 GUEST_AT = (GUEST, 22)
 LINUX_AT = (HOST, SSHD_PORT)
 
@@ -563,6 +601,19 @@ def host_rows(client):
         ok('B6', 'exit 3 is 3; kill -TERM $$ is 255, as sshd\'s on Linux')
     else:
         bad('B6', 'exit 3: %s; TERM through burrowd: %s; through sshd: %s' % (show(r3), show(rt), show(lt)))
+    # B12 a session without ptys (burrowd serves commands; a shell and a pty are refused by name): the
+    # client at a terminal, as a person types `ssh host`, `ssh host COMMAND` and `ssh -t host`.
+    plain = c.ssh_tty(GUEST_AT, [])
+    cmd = c.ssh_tty(GUEST_AT, ['echo pty=$(tty 2>/dev/null || echo none)'])
+    forced = c.ssh_tty(GUEST_AT, [], opts=['-t'])
+    said = lambda r: ' | '.join(l.strip() for l in r[1].decode(errors='replace').splitlines() if l.strip())
+    record_b12 = 'ssh host: status %s: %s\nssh host COMMAND: status %s: %s\nssh -t host: status %s: %s\n' % (
+        plain[0], said(plain), cmd[0], said(cmd), forced[0], said(forced))
+    (c.dir / 'b12.txt').write_text(record_b12)
+    if cmd[0] == 0 and b'pty=' in cmd[1] and plain[0] not in (None, 0) and forced[0] not in (None, 0):
+        ok('B12', 'no ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
+    else:
+        bad('B12', 'a session without ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
 
 
 def git_rows(client, work):
@@ -773,7 +824,7 @@ def main():
             con2.type('root')
             if con2.wait(r'Password: $', 30):
                 con2.type(PASSWORDS['root'], secret=True)
-                if con2.wait(r'# $', 60):
+                if con2.wait(r'[$#] $', 60):
                     con2.type('exit')
         finally:
             con2.quit(120)
