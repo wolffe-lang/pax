@@ -205,6 +205,7 @@ const C_OQ_W: u64 = 43 // bytes put in OQ (the slave's output and the echo)
 const C_STOP: u64 = 44 // 1 while IXON's VSTOP holds the output
 const C_HUNG: u64 = 45 // 1 once the master has closed: reads answer end of file
 const C_BATCH: u64 = 46 // OQ's write count when the current feed began (a signal key's flush)
+const C_OQ_BASE: u64 = 47 // OQ's read count when it last went from empty to not (a read's stretch counts from it)
 pub const C_RINGF: u64 = 48 // the ring's frame (physical)
 pub const C_IQF: u64 = 49 // IQ's four frames, 49 to 52
 pub const C_OQF: u64 = 53 // OQ's five frames, 53 to 57
@@ -428,22 +429,26 @@ fn oq_put(t: u64, b: u64) {
         bump(t, C_DROPPED)
         return
     }
+    if w == sv(t, C_OQ_R) {
+        put_sv(t, C_OQ_BASE, w) // the queue was empty: a new stretch begins here
+    }
     q_put(t, C_OQF, OQ_CAP, w, b)
     put_sv(t, C_OQ_W, w + 1)
 }
 
 /// The master's read: up to `n` bytes of OQ copied to user `buf`, no
-/// further than the end of the 4096-byte stretch the first is in; the
-/// count, or -EFAULT.
+/// further than the end of the 4096-byte stretch the first is in (from
+/// where OQ last filled from empty); the count, or -EFAULT.
 pub fn oq_take(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
     var k = oq_count(t)
     if k > n {
         k = n
     }
     // One read takes at most to the end of the 4096-byte stretch it starts
-    // in (measured: after one byte of a full buffer, a read of 4096 took
-    // 4095).
-    let edge = 4096 - sv(t, C_OQ_R) % 4096
+    // in, the stretches counted from where the queue was last empty
+    // (measured: after one byte of a full buffer, a read of 4096 took
+    // 4095, whatever was read before the buffer filled).
+    let edge = 4096 - (sv(t, C_OQ_R) - sv(t, C_OQ_BASE)) % 4096
     if k > edge {
         k = edge
     }
