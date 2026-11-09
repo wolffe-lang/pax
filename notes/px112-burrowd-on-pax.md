@@ -42,11 +42,11 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx5-burrowd` jo
 
 | predicted | measured | score |
 |---|---|---|
-| burrowd runs unmodified on PAX, no kernel change | (the head's take) | |
-| the images grow by about 17 MB | (burrowd's static size, the pin) | |
-| the first boot's prompt about 0.2 s later, a later boot's about 0.1 s | (B1, B10) | |
-| B1-B10 red at the rows tip, green at the head | at the rows tip `687288db` (native, BIOS): `FAIL B0` by name (no /bin/burrowd, no configuration, no hook in the tree), then `FAIL B1` (no host key line before the prompt), and the leg ends there: B2-B11 need the key B1 reads, so they were not reached rather than red each; B9's scan of every record ran and passed. At the head: (the takes) | red in kind, B2-B10 unreached in form |
-| connect to the first byte through burrowd on PAX, 2x to 6x burrowd on Linux in the same container (publickey) | reported | |
+| burrowd runs unmodified on PAX, no kernel change | burrow built from its pin with its own tools, nothing under `kernel/` changed; every row green on the native BIOS leg (`lb5`-`lb7`) | hit |
+| the images grow by about 17 MB | burrowd static is 16,501,864 bytes; B0's image 246,700,032 bytes against the rows tip's 230,023,168 (+16.7 MB) | hit |
+| the first boot's prompt about 0.2 s later, a later boot's about 0.1 s | not measured: no row times the hooks, and the console's `boot:` line counts to the first program only | unscored |
+| B1-B10 red at the rows tip, green at the head | at the rows tip `687288db` (native, BIOS): `FAIL B0` by name (no /bin/burrowd, no configuration, no hook in the tree), then `FAIL B1` (no host key line before the prompt), and the leg ends there: B2-B11 need the key B1 reads, so they were not reached rather than red each; B9's scan of every record ran and passed. At the head: every row green (`lb5`-`lb7`, native BIOS; the four legs in the PR's record) | red in kind, B2-B10 unreached in form; green |
+| connect to the first byte through burrowd on PAX, 2x to 6x burrowd on Linux in the same container (publickey) | not measured: the rows hold behaviour, not time | unscored |
 
 ## 4. Evidence index
 
@@ -90,6 +90,9 @@ and their sha256s logged.
     failed on channel 0` and `shell request failed on channel 0`; `ssh host COMMAND`: the command's status, no tty
     (`tty` says none); `ssh -t host`: status 255, `PTY allocation request failed on channel 0`. burrowd's log names
     both refusals for each (`refused pty_refused,shell_refused`).
+  - `lb7` (`9538653c`, B12 asks `ssh -T host` too, a shell request with no pty request before it): every row green.
+    `ssh -T host`: status 255, `shell request failed on channel 0`, and the log's line `refused shell_refused`
+    alone: burrowd refuses a shell on its own, not only after a refused pty (B5's rule: commands only).
 - **The upgrade witness** (R-px112-14, B): `tests/mpx6-install.d/upgrade.py`'s U4d holds burrowd after the upgrade
   of the 8b4e98ae dev install (the metal target's): the LAN's configuration, the account appended, the host key made
   at the first boot. Its inputs are px93's, copied by value into the lane (the two sticks read twice on each side,
