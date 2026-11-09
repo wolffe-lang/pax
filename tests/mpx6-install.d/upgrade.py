@@ -35,7 +35,12 @@ name:
                the user's with /etc/shrc.pax-new the new image's, every
                shipped path the new image's, the dropped ones gone, the
                manifest the host tool's, e2fsck -fn clean; the installed
-               system boots with `kernel: <new commit>`
+               system boots with `kernel: <new commit>`; U4d also (px112)
+               burrowd: /etc/burrowd/burrowd_config the new image's with
+               `ListenAddress 0.0.0.0` (root's, 0644), its account appended
+               to /etc/passwd and /etc/group once, and at the first boot the
+               host key made (the console's line, root's 0600 on the disk,
+               the same fingerprint) and burrowd listening on 0.0.0.0:22
   U5 compiler  on the upgraded system, /usr/bin/wolf builds a program that
                prints env_args() and it prints what the same program built
                by wolf on Linux prints (R-px93-D; given as PAX_UPGRADE_LINUX)
@@ -70,6 +75,7 @@ name:
 Every boot: the NVMe, Steam and SanDisk images byte-identical.
 """
 from pathlib import Path
+import base64
 import hashlib
 import json
 import os
@@ -822,13 +828,16 @@ def again(name, row, prev, expect='Nothing to change: /dev/sdc already holds thi
     return rows
 
 
-def boot_after(name, row, den_before, extra=()):
+def boot_after(name, row, den_before, extra=(), screens=None):
     """The upgraded disk booted alone: its kernel line names the new commit,
-    den log is the same, and `extra` commands' outputs saved under /root."""
+    den log is the same, and `extra` commands' outputs saved under /root.
+    `screens`, a list, gets the console as it stood at the login prompt."""
     m = Machine(name, C['sym_new'], None)
     try:
         s = login(m, row)
         need(m.unwrapped(s), f'kernel: {C["new_commit"]}', row)
+        if screens is not None:
+            screens.append(m.unwrapped(s))
         s = m.command('cd /home/wolf/repo && den log > /root/den-log-after.txt; echo den-log=$?; cd /', row)
         need(m.unwrapped(s), 'den-log=0', row)
         for c, want in extra:
@@ -842,6 +851,59 @@ def boot_after(name, row, den_before, extra=()):
     if (work/f'{name}-tree/root/den-log-after.txt').read_text() != den_before:
         fail(row, 'den log differs after the upgrade')
     return rows
+
+
+def tree_text(name, path):
+    """A file of tree(name)'s dump (debugfs rdump, as tree() reads it), as text; '' when absent."""
+    out = work/f'{name}-tree'
+    kids = list(out.iterdir())
+    top = kids[0] if len(kids) == 1 and not (out/'etc').exists() else out
+    p = top/path.lstrip('/')
+    return p.read_text(errors='replace') if p.is_file() else ''
+
+
+BURROWD_ACCOUNT = 'burrowd:x:989:989:burrowd:/nonexistent:/bin/false'
+BURROWD_GROUP = 'burrowd:x:989:'
+
+
+def burrowd_after(upgraded, booted, screen, row):
+    """px112 (R-px112-9, C; R-px112-10; R-px112-8): what an upgrade leaves for burrowd, the ssh
+    server. On the upgraded root (tree `upgraded`): /etc/burrowd/burrowd_config the new image's with
+    its ListenAddress line `ListenAddress 0.0.0.0` (the installer's text: an installed system listens
+    on the LAN), root's 0644; the worker's account appended to /etc/passwd and /etc/group, once
+    each. At the first boot after it (`screen`, the console at the login prompt): the boot hook made
+    the host key (`burrowd: host key 256 SHA256:… (made at this boot)`) and started burrowd; on the
+    disk after that boot (tree `booted`): the key root's 0600 beside its .pub, whose fingerprint is
+    the console's, and burrowd's log (0600) names the key and `listening on 0.0.0.0:22`."""
+    shipped = (repo/'user/burrowd/burrowd_config').read_text()
+    want = ''.join(('ListenAddress 0.0.0.0' if l.split()[:1] == ['ListenAddress'] else l) + '\n' for l in shipped.splitlines())
+    rows = json.loads((work/f'{upgraded}-tree.json').read_text())
+    got = rows.get('/etc/burrowd/burrowd_config')
+    if got != ['f', 0o644, hashlib.sha256(want.encode()).hexdigest()]:
+        fail(row, f'/etc/burrowd/burrowd_config is {got}, not the new image\'s with ListenAddress 0.0.0.0 '
+                  f'({tree_text(upgraded, "/etc/burrowd/burrowd_config")[:300]!r})')
+    for path, line in (('/etc/passwd', BURROWD_ACCOUNT), ('/etc/group', BURROWD_GROUP)):
+        lines = tree_text(upgraded, path).splitlines()
+        if [l for l in lines if l.split(':')[0] == 'burrowd'] != [line]:
+            fail(row, f'{path} has no single appended line {line!r}: {lines[-4:]}')
+    m = re.search(r'^burrowd: host key 256 (SHA256:[A-Za-z0-9+/]{43}) .*\(made at this boot\)$', screen, re.M)
+    if not m:
+        tail = [l for l in screen.splitlines() if 'burrowd' in l]
+        fail(row, f'the first boot after the upgrade printed no host key made at this boot: {tail}')
+    need(screen, 'burrowd: started; its log is /var/log/burrowd.log', row)
+    after = json.loads((work/f'{booted}-tree.json').read_text())
+    key, pub = after.get('/etc/burrowd/ssh_host_ed25519_key'), after.get('/etc/burrowd/ssh_host_ed25519_key.pub')
+    if not key or key[:2] != ['f', 0o600] or not pub or pub[0] != 'f':
+        fail(row, f'the host key after the first boot: {key}, its .pub {pub}')
+    blob = base64.b64decode(tree_text(booted, '/etc/burrowd/ssh_host_ed25519_key.pub').split()[1])
+    fp = 'SHA256:' + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip('=')
+    if fp != m.group(1):
+        fail(row, f'the key on the disk is {fp}; the console said {m.group(1)}')
+    logrow = after.get('/var/log/burrowd.log')
+    text = tree_text(booted, '/var/log/burrowd.log')
+    if not logrow or logrow[:2] != ['f', 0o600] or f'host key 256 {fp}' not in text or 'listening on 0.0.0.0:22' not in text:
+        fail(row, f'/var/log/burrowd.log {logrow}: {text[-400:]!r}')
+    return fp
 
 
 # --- px103: sudo on the installed disk -------------------------------------------
@@ -1208,12 +1270,15 @@ def track_d():
     check_witnesses('U3d-upgrade')
     passed('U3d-upgrade', f'the plan from the 8b4e98ae baseline, the line typed; complete in {secs} s')
     after('u4d', 'U4d-after', before, '8b4e98ae')
+    screens = []
     rows = boot_after('u4d-boot', 'U4d-after', den_before,
-                      [("/home/wolf/args/args one 'two words' > /root/args-after.txt; echo run=$?", 'run=0')])
+                      [("/home/wolf/args/args one 'two words' > /root/args-after.txt; echo run=$?", 'run=0')], screens)
     if (work/'u4d-boot-tree/root/args-after.txt').read_bytes() != ARGS_OUT:
         fail('U4d-after', 'the program built before the upgrade prints otherwise after it')
+    fp = burrowd_after('u4d', 'u4d-boot', screens[0], 'U4d-after')
     passed('U4d-after', f'every user path byte-identical ({len(user_paths(before))}: the program\'s source, binary and output among them), the program still prints its arguments, '
-           f'/etc/shrc yours and /etc/shrc.pax-new the new image\'s, every shipped path the new image\'s, the manifest the host tool\'s, e2fsck -fn clean; booted with kernel: {C["new_commit"][:8]}')
+           f'/etc/shrc yours and /etc/shrc.pax-new the new image\'s, every shipped path the new image\'s, the manifest the host tool\'s, e2fsck -fn clean; booted with kernel: {C["new_commit"][:8]}; '
+           f'burrowd: its configuration the LAN\'s (ListenAddress 0.0.0.0), its account appended, the host key made at the first boot ({fp}, root\'s 0600, the console\'s fingerprint), listening on 0.0.0.0:22')
     again('u6d', 'U6d-again', rows)
     passed('U6d-again', 'the second upgrade of the dev install: "Nothing to change", every path as it was')
     if 'U13d' in ROWS:
