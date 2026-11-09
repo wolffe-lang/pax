@@ -213,6 +213,7 @@ use cred
 use ext2
 use event
 use frames
+use mouse
 use procfs
 use sched
 use sound
@@ -319,6 +320,7 @@ const K_UNIX: u64 = 13 // px34: an AF_UNIX path socket (kernel/unix's record)
 const K_SYN: u64 = 14 // px34: a file of /proc or /sys (kernel/procfs's)
 const K_BLK: u64 = 15 // px79: a block device's node opened (kernel/block's device)
 const K_MEM: u64 = 16 // px102: a held /proc/<pid>/mem address-space identity
+const K_MOUSE: u64 = 17 // px109: /dev/mouse0 opened (kernel/mouse's reader is the node's reference)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -348,6 +350,7 @@ const T_DSP: u64 = 14 // px30: /dev/dsp
 const T_UNIX: u64 = 15 // px34: an AF_UNIX path socket; the reference kernel/unix's record
 const T_SYN: u64 = 16 // px34: a directory or file of /proc or /sys; the reference kernel/procfs's entry
 const T_BLK: u64 = 17 // px79: a block device in /dev; the reference kernel/block's device | its record's generation << 16
+const T_MOUSE: u64 = 18 // px109: /dev/mouse0; the reference kernel/mouse's reader (0 the path's own node)
 const T_ERR: u64 = 0xff // an errno below
 const REF_MASK: u64 = 0x00ffffffffffffff
 
@@ -456,6 +459,7 @@ const MODE_CONSOLE: u64 = 0x2180 // 020600 (020620 before px45): a terminal's at
 const MODE_LINK: u64 = 0xa1ff // 0120777: /dev/std*'s links (px52, measured)
 const MODE_NULL: u64 = 0x21b6 // 020666
 const MODE_DSP: u64 = 0x2180 // 020600 (020666 before px45; px30: one user here)
+const MODE_MOUSE: u64 = 0x2180 // 020600 (px109: root's, as /dev/dsp; the pointer is the console's person's)
 // px79: a block device, devtmpfs's own mode with no udev (measured on
 // Linux 7.3.0: `brw-------`, root's; a distribution's udev gives the
 // disk group 0660 instead, which PAX has no rule for).
@@ -784,6 +788,9 @@ fn of_drop(o: u64) {
     if k == K_DSP {
         sound.release() // px30: the last close of /dev/dsp
     }
+    if k == K_MOUSE {
+        mouse.close(rf(n)) // px109: its reader's queue given back
+    }
     if k == K_BLK {
         // px79: the last close of an open block device (an O_EXCL open's hold goes with it)
         block.close_dev(blk_dev(n), excl)
@@ -792,7 +799,7 @@ fn of_drop(o: u64) {
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_MEM || k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK
+    k == K_MEM || k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK || k == K_MOUSE
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -2190,6 +2197,49 @@ fn event_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     8
 }
 
+/// px109: `read` of /dev/mouse0: whole records (kernel/mouse's RECORD
+/// bytes each, as many as fit), oldest first. A buffer shorter than one
+/// is -EINVAL; with none waiting the read waits (WAIT), or under
+/// O_NONBLOCK answers -EAGAIN.
+fn mouse_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    if n < mouse.RECORD {
+        return neg(EINVAL)
+    }
+    let r = rf(node_of(a, fd))
+    if mouse.pending(r) == 0 {
+        if status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        return WAIT
+    }
+    let want = n / mouse.RECORD
+    if !uaccess.writable(pml4, buf, want * mouse.RECORD) {
+        return neg(EFAULT)
+    }
+    let tmp = mouse_scratch()
+    var got: u64 = 0
+    while got < want && mouse.pull(r, tmp) {
+        var w: u64 = 0
+        while w < 4 {
+            uaccess.put(pml4, buf + got * mouse.RECORD + w * 8, unsafe { ((tmp + w * 8) as *u64).read_volatile() }, 8)
+            w += 1
+        }
+        got += 1
+    }
+    got * mouse.RECORD
+}
+
+var mouse_buf: u64 = 0
+
+/// px109: a page for one record on its way out (taken at the first read).
+fn mouse_scratch() -> u64 {
+    if unsafe { mouse_buf } == 0 {
+        let p = frames.alloc() else 0
+        unsafe { mouse_buf = p + frames.hhdm() }
+    }
+    unsafe { mouse_buf }
+}
+
 /// px24: `write` to an eventfd (kernel/user's `write`): eight bytes
 /// added to the counter. Fewer than eight bytes, or the value
 /// 0xffffffffffffffff, is -EINVAL; a sum past 0xfffffffffffffffe waits
@@ -2305,6 +2355,12 @@ fn node_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
     }
     if k == K_CONSOLE {
         return (if console.readable() { POLLIN | POLLOUT } else { POLLOUT }, 0, 0)
+    }
+    if k == K_MOUSE {
+        // px109: a record waiting; the first count moves with every record
+        // put (a merge too), so an edge-triggered registration sees it.
+        let r = rf(n)
+        return (if mouse.pending(r) != 0 { POLLIN } else { 0 }, mouse.changes(r), 0)
     }
     if k == K_DSP {
         // px30: room to write while a period is free; the room count
@@ -3316,6 +3372,9 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "dsp") && sound.up() {
             return T_DSP << T_SHIFT // px30: only with the device, as Linux without a card
         }
+        if comp_is(s, n, "mouse0") && mouse.started() {
+            return T_MOUSE << T_SHIFT // px109: from the first pointer's arrival on (R-px109-3)
+        }
         // px79: a disk or a partition kernel/block has, by its name (the
         // nodes devtmpfs would have: made at boot and as a table is read
         // again, never written into an image: R-px79-2)
@@ -4059,6 +4118,24 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         k = K_CONSOLE
     } else if ty(n) == T_NULL {
         k = K_NULL
+    } else if ty(n) == T_MOUSE {
+        // px109: read only; each open its own reader (kernel/mouse), its
+        // queue empty at first; every reader taken is -EBUSY.
+        if !may(a, cred.FS, n, want) {
+            return neg(EACCES)
+        }
+        if acc != O_RDONLY {
+            return neg(EINVAL)
+        }
+        let r = mouse.open()
+        if r == 0 {
+            return neg(EBUSY)
+        }
+        let fd = open_new(a, 0, K_MOUSE, (T_MOUSE << T_SHIFT) | r, flags)
+        if fd >= 0x8000000000000000 {
+            mouse.close(r)
+        }
+        return fd
     } else if ty(n) == T_DSP {
         if !may(a, cred.FS, n, want) {
             return neg(EACCES) // px45: 0600, root's (devtmpfs's, measured: a user is told -EACCES)
@@ -4515,7 +4592,7 @@ fn fdinfo_of(ta: u64, fd: u64) -> (u64, u64) {
     if flags_of(ta, fd) & O_CLOEXEC != 0 {
         f = f | O_CLOEXEC
     }
-    if k == K_FILE || k == K_DIR || k == K_CONSOLE || k == K_NULL || k == K_SYN || k == K_MEM || k == K_DSP || k == K_BLK {
+    if k == K_FILE || k == K_DIR || k == K_CONSOLE || k == K_NULL || k == K_SYN || k == K_MEM || k == K_DSP || k == K_BLK || k == K_MOUSE {
         f = f | O_LARGEFILE
     }
     let extra: u64 = if k == K_EVENT { 1 } else if k == K_SOCK || k == K_UNIX { 2 } else { 0 }
@@ -4537,7 +4614,7 @@ fn mnt_of(n: u64) -> u64 {
     if t == T_SYN {
         return 22 + procfs.fs(rf(n))
     }
-    if t == T_DEV || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_STD || t == T_BLK {
+    if t == T_DEV || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_STD || t == T_BLK || t == T_MOUSE {
         return 24
     }
     if t == T_PIPE {
@@ -4685,6 +4762,9 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_EVENT {
         return event_read(a, pml4, fd, buf, n) // px24
     }
+    if k == K_MOUSE {
+        return mouse_read(a, pml4, fd, buf, n) // px109
+    }
     if k == K_EPOLL {
         return neg(EINVAL) // px24: epoll(7): an epoll descriptor is not read
     }
@@ -4806,7 +4886,7 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     if k == K_CLOSED {
         return neg(EBADF)
     }
-    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_DSP || k == K_UNIX {
+    if k == K_CONSOLE || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_DSP || k == K_UNIX || k == K_MOUSE {
         return neg(ESPIPE)
     }
     if k == K_NULL || k == K_EPOLL || k == K_EVENT {
@@ -5927,7 +6007,7 @@ fn fd_text(ta: u64, fd: u64, pid: u64, base: u64, cap: u64) -> u64 {
         let nm = if r == TTY0 { "/dev/tty0" } else if r == CONSOLE { "/dev/console" } else if r == TTY { "/dev/tty" } else { "/dev/ttyS0" }
         return tstr(base, 0, cap, nm)
     }
-    if t == T_NULL || t == T_DSP {
+    if t == T_NULL || t == T_DSP || t == T_MOUSE {
         let k = tstr(base, 0, cap, "/dev/")
         return tstr(base, k, cap, fixed_name(nd))
     }
@@ -6309,7 +6389,7 @@ pub fn faccessat(a: u64, pml4: u64, dirfd: u64, va: u64, mode: u64, flags: u64) 
 /// (kernel/procfs's rules, in `syn_open`).
 fn checked(n: u64) -> bool {
     let t = ty(n)
-    t == T_INO || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_BLK
+    t == T_INO || t == T_NULL || t == T_CONSOLE || t == T_DSP || t == T_BLK || t == T_MOUSE
 }
 
 // --- the changes after a file is made (px36) ----------------------------------------
@@ -6786,6 +6866,9 @@ fn n_mode(n: u64) -> u64 {
     if t == T_DSP {
         return MODE_DSP
     }
+    if t == T_MOUSE {
+        return MODE_MOUSE // px109
+    }
     if t == T_PIPE {
         return MODE_FIFO
     }
@@ -6857,6 +6940,9 @@ fn n_ino(n: u64) -> u64 {
     if t == T_DSP {
         return 7 // px30
     }
+    if t == T_MOUSE {
+        return 0x1e // px109: after /dev/fd's 0x1d
+    }
     if t == T_CONSOLE && (rf(n) == TTY0 || rf(n) == CONSOLE) {
         return 4 + rf(n) // px21a: /dev/tty0 5, /dev/console 6
     }
@@ -6921,6 +7007,11 @@ fn n_rdev(n: u64, which: int) -> u64 {
     if t == T_DSP {
         return if which == 0 { 14 } else { 3 } // px30: OSS's dsp, 14:3
     }
+    if t == T_MOUSE {
+        // px109: PAX's own record, not Linux's input protocol: a number in
+        // the range Linux's devices.txt leaves for local use (240-254).
+        return if which == 0 { 240 } else { 0 }
+    }
     if t == T_BLK {
         let (ma, mi) = block.numbers(rf(n) & 0xffff) // px79: the guest's, 254:N and 259:N
         return if which == 0 { ma } else { mi }
@@ -6939,7 +7030,7 @@ fn n_dev(n: u64) -> u64 {
         let (_ma, mi) = block.numbers(tree.disk_of(rf(n))) // px63
         return mi
     }
-    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP || t == T_BLK {
+    if t == T_DEV || t == T_NULL || t == T_STD || t == T_CONSOLE || t == T_DSP || t == T_BLK || t == T_MOUSE {
         return 5
     }
     if t == T_SYN {
@@ -7194,9 +7285,15 @@ fn dev_child(k: u64) -> u64 {
     if k == 13 && sound.up() {
         return T_DSP << T_SHIFT // px30: only with the device
     }
+    // px109: mouse0 after dsp, from the first pointer on
+    let snd: u64 = if sound.up() { 1 } else { 0 }
+    let mice: u64 = if mouse.started() { 1 } else { 0 }
+    if mice == 1 && k == 13 + snd {
+        return T_MOUSE << T_SHIFT
+    }
     // px79: then the block devices, in /proc/partitions' order
-    if k >= 13 {
-        let b = block.nth_dev(if sound.up() { k - 14 } else { k - 13 })
+    if k >= 13 + snd + mice {
+        let b = block.nth_dev(k - 13 - snd - mice)
         if b != block.DEVS {
             return blk_node(b)
         }
@@ -7231,6 +7328,9 @@ fn fixed_name(c: u64) -> str {
     if t == T_DSP {
         return "dsp" // px30
     }
+    if t == T_MOUSE {
+        return "mouse0" // px109
+    }
     if t == T_CONSOLE {
         let r = rf(c)
         return if r == TTY0 { "tty0" } else if r == TTY { "tty" } else if r == TTYS0 { "ttyS0" } else { "console" }
@@ -7262,6 +7362,9 @@ fn fixed_len(c: u64) -> u64 {
     }
     if t == T_DSP {
         return 3 // px30
+    }
+    if t == T_MOUSE {
+        return 6 // px109
     }
     if t == T_CONSOLE {
         let r = rf(c)
