@@ -1,0 +1,34 @@
+# tests/mpx5-pty.d/ruled.txt — px111: where PAX's pty answers are its own, by ruling. Every other
+# row of every run is held to Linux's recording (tests/mpx5-pty.d/linux/) exactly. The format is
+# tests/mpx5-pty.d/check.py's: `row RUN|* ID<TAB>PAX's line` (or `-` for a row PAX does not print),
+# `refusal IMAGE|*<TAB>the refusal`, one line for each time a run of IMAGE meets it. The rulings
+# are notes/px111-ptys.md's (R-px111-N, each with its options and the recommendation taken).
+
+# R-px111-3: packet mode (TIOCPKT) is refused by name: -ENOTTY and the kernel's refusal line, once
+# in each of the probe image's two runs. Linux answers 0.
+row * O36	O36 TIOCPKT 1 on the master (packet mode): ENOTTY
+refusal probe	refused: tty ioctl 0x5420, -ENOTTY
+refusal probe	refused: tty ioctl 0x5420, -ENOTTY
+
+# R-px111-7: a failed open of a locked slave changes nothing for the slave's descriptors already
+# open. On Linux it does: such a descriptor's next read is -EIO (O40), and the byte written
+# meanwhile waits for a descriptor opened after the unlock (O43).
+row * O40	O40 then the open slave reads: 2 "j\n"
+row * O43	O43 the new descriptor reads: 2 "n\n"
+
+# R-px111-6: each direction holds 20480 bytes nobody has read (the slave's input: 16384 waiting
+# for the line discipline and its 4096; the master's input: 20480), Linux's count for writes of
+# one byte (P10a, P10b: 20480, held to Linux). Linux's count for larger writes moves with the
+# write's size and from run to run (13824 to 22096 measured; P5 read 13824 and 15360 in two
+# recordings of the same binary), and in canonical mode it kept 12 bytes fewer than it took (P10c),
+# so these rows are PAX's own count. What they hold of Linux: the writes are taken until -EAGAIN,
+# poll's POLLOUT is clear while full and back after one byte is read, and every byte taken is read.
+row * P5	P5 the slave writes 4096 at a time, nobody reads: 20480 taken, then EAGAIN
+row * P10	P10 the master reads it all: 20480, the slave polls OUT
+row * P11	P11 the master writes 4096 at a time, nobody reads: 20480 taken, then EAGAIN
+row * P13	P13 the slave reads it all: 20480, the master polls OUT
+row * P10a#2	P10a the slave writes 1000 at a time: 20480 taken, then EAGAIN; the master reads 20480
+row * P10b#2	P10b the master writes 1000 at a time: 20480 taken, then EAGAIN; the slave reads 20480
+row * P10a#3	P10a the slave writes 65536 at a time: 20480 taken, then EAGAIN; the master reads 20480
+row * P10b#3	P10b the master writes 65536 at a time: 20480 taken, then EAGAIN; the slave reads 20480
+row * P10c	P10c canonical, 100-byte lines to the master, nobody reads: 20479 taken, then EAGAIN; the slave reads 20479
