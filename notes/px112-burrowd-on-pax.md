@@ -66,6 +66,20 @@ and their sha256s logged.
   127.0.0.1:22` and the refusal), but the row looked for the address and port the rig's client had already written
   as `HOST port PORT`. Fixed in `30271e71` (each host key line read to its newline, B10's too, which could have
   passed on a cut line; the refusal as the client writes it).
+- **Light boot takes on dev-p1's images** (one KVM leg, native BIOS, the light CPUs; the rows at each fix, the image
+  unchanged), each finding the next row miss, every one the rig's:
+  - `lb1` (`65a25002`): B1 read its line; B11 green; then `ssh-keyscan` was shown no key. Probed black box on Linux:
+    the image's `ssh-keyscan` (OpenSSH 9.6p1) offers no strict key exchange, and burrowd refuses every client
+    without it (`strict_kex_missing`, B5's rule). B1 now learns the key through the rig's ssh (`d1e5579f`).
+  - `lb2` (`d1e5579f`): B1, B4, B10, B11 green, burrowd answering keys and passwords; every held row red because the
+    rig's own sshd never started: 9.6p1 refuses `PerSourcePenalties`, which only later releases know. B8 waited for
+    a `# ` prompt PAX's shell never prints (pelt's is `$ ` for root too). Fixed in `22182d28`, the rig's sshd now
+    named when it is down.
+  - `lb3` (`22182d28`): B0-B6, B8, B9, B10, B11 green. B7: the push into the seeded repository failed, `den: wire:
+    Unsupported(receive-pack hooks)`: git's template put its executable sample hooks in the seed, and den refuses
+    receive-pack into a repository with hooks it cannot run. The push into the one den made over ssh went through.
+    The seed now has no template (`bdd30c45`); the Linux side's `git init --bare` names `main`, as den's does.
+  - `lb4` (`bdd30c45`): (running)
 - **The upgrade witness** (R-px112-14, B): `tests/mpx6-install.d/upgrade.py`'s U4d holds burrowd after the upgrade
   of the 8b4e98ae dev install (the metal target's): the LAN's configuration, the account appended, the host key made
   at the first boot. Its inputs are px93's, copied by value into the lane (the two sticks read twice on each side,
