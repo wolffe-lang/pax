@@ -1,0 +1,49 @@
+px112: burrowd on the stick's console, the metal leg, for the next stick built from a tree that carries px112.
+
+Under QEMU the stick's shape is tests/mpx5-burrowd's B11 (the live entry as pid 1, the shipped configuration, no
+/etc/shadow): burrowd's key made at boot, a connection from the LAN refused, burrowd answering on loopback. The
+stick lane runs that suite beside its own before staging the stick.
+
+On the metal target:
+
+1. The cable in the I225-V's port, as px105's leg has it.
+2. Boot the stick's default entry: the live console.
+3. Before `PAX live medium: log in as root (no password).`, after the network's lines (px105's leg), the console
+   prints, in this order:
+
+     burrowd: host key 256 SHA256:<43 characters> pax (ED25519) (made at this boot)
+     burrowd: started; its log is /var/log/burrowd.log
+
+   (`pax` is the machine's host name; the fingerprint is new at every boot of the stick, since the stick keeps
+   nothing.)
+4. At `login:` type `root`, then the witness:
+
+     echo PX112-BURROWD=begin
+     burrow-keygen -l -f /etc/burrowd/ssh_host_ed25519_key
+     grep ListenAddress /etc/burrowd/burrowd_config
+     burrow-keygen -q -t ed25519 -N '' -f /tmp/px112-k
+     ssh -i /tmp/px112-k -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/px112-kh pax@127.0.0.1 true; echo ssh=$?
+     cat /var/log/burrowd.log
+     echo PX112-BURROWD=end
+
+   The fingerprint is step 3's; the listen line is `ListenAddress 127.0.0.1`; ssh prints
+   `pax@127.0.0.1: Permission denied (publickey,password).` and `ssh=255` (burrowd answered, and refused: the stick
+   has no password and no key for pax); the log's first lines are `host key 256 SHA256:…` and `listening on
+   127.0.0.1:22`, then one line `from UNKNOWN port 0 user pax key SHA256:… outcome auth_key_unlisted status -`
+   (the address reads UNKNOWN on PAX until wolf-std can ask the kernel for a peer's).
+5. From another machine on the LAN, `ssh pax@<the stick's address> true` answers `connect to host … port 22:
+   Connection refused`: the stick listens on loopback alone (R-px112-9, C).
+6. A photograph of the lines in 3 and 4, and the other machine's line in 5, is the record.
+
+What each other answer means:
+- `burrowd: /bin/burrowd or /bin/burrow-keygen is missing; not started`: the stick was built from a tree without
+  px112's tools/mkburrow; nothing else of the leg runs.
+- `burrowd: no host key could be made at …`: burrow-keygen could not write /etc/burrowd; photograph the line before
+  it.
+- No `burrowd:` line at all: the stick's /etc/pax-boot.d is missing, or its live entry is older than px112.
+- ssh's `Connection refused` at step 4: burrowd is not listening; its start refusal is the log's last line
+  (`burrowd: <name>: …`), and the loop tries again after a wait that doubles to five minutes.
+
+An installed system (fresh, or upgraded from such a stick) listens on every address: the installer writes
+`ListenAddress 0.0.0.0` into its /etc/burrowd/burrowd_config. Its first check from another machine is in the note
+(notes/px112-burrowd-on-pax.md, "The metal target").
