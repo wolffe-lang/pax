@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# tests/mpx5-burrowd — burrowd, burrow's ssh server, on PAX, started at boot
+# (px112, burrow's B6), reached from another machine on a LAN: the rig's
+# own network namespace, a tap the guest leases its address on from
+# dnsmasq, and the rig's OpenSSH ssh and git (the image's packages, pinned
+# by its package list), as a machine on the LAN would.
+#
+#   tests/mpx5-burrowd [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                      [--tier native|release|both] [--accel auto|kvm|tcg]
+#
+# P0 builds the image's tree (build/mpx5-burrowd/root, files.txt as
+# tools/mkinitramfs' arguments): kmain_console, the kernel every shipped
+# image boots, with `quiet`; the installed system's run list (/bin/login as
+# pid 1, user/login built by tools/mkauth with /bin/passwd); pelt as /bin/sh;
+# boreutils' cat chmod env id kill ls mkdir rm sleep; den as the images
+# install it (tools/install-den: /bin/git, /bin/git-upload-pack,
+# /bin/git-receive-pack); burrow's three programs (tools/mkburrow,
+# tools/install-burrow: /bin/ssh, /bin/burrow-keygen, /bin/burrowd);
+# /etc/burrowd/burrowd_config and /etc/pax-boot.d/burrowd as the images ship
+# them (user/burrowd, user/pax-boot.d); an /etc/passwd with root, pax, lobo
+# and the worker's account burrowd; /etc/pax-net `dhcp wait=10`; an
+# /etc/fstab that mounts the run's own small ext2 volume (label
+# px112-keys) on /etc/burrowd, write-through, so a second boot of the same
+# volume finds the first boot's host key. A piece the tree cannot build is
+# named at P0 and left out, so the rows that need it fail by name.
+#
+# The rows (tests/mpx5-burrowd.d/rows.py's header has each), on every tier
+# and firmware asked: B0 the image and its /etc/shadow (made at run time:
+# passwords from Python's secrets, hashed by tools/mkauth's mkshadow on its
+# standard input, never written to a file, an argument vector, a log or a
+# record); B1 the first boot's host key, its fingerprint on the console
+# and the key the rig's ssh is shown; B2 commands with pax's key, held byte
+# for byte to the same through the rig's own sshd on Linux; B3 the same
+# with pax's password; B4 `id` in the session; B5 the refusals (a wrong
+# password, root by key and by password, an unlisted key, a locked
+# account, a world-writable ~/.ssh); B6 an exit status and a signal; B7 git
+# clone, push and clone again through burrowd and den, held to the same
+# through sshd and git; B8 the listener killed at the console and a login
+# working again; B9 the log at the console; B10 a second boot keeps the
+# host key.
+#
+# Needs root in the rig (the tap, dnsmasq) or `sudo -n`, /dev/net/tun,
+# ip(8), dnsmasq(8), mke2fs, ssh, ssh-keygen, ssh-keyscan, sshd and git:
+# SKIPPED LOUDLY without them unless PAX_REQUIRE_BURROWD_RIG=1, when it is a
+# failure. The UEFI leg needs OVMF (PAX_REQUIRE_UEFI=1: a failure without
+# it). Exit 0 when every row held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0 accel=auto
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "usage: tests/mpx5-burrowd [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+BORE="cat chmod env id kill ls mkdir rm sleep"
+work=$PAX_BUILD/mpx5-burrowd
+fail=0
+need python3 readelf
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" git
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc/burrowd" "$r/etc/pax-boot.d" "$r/var/log" "$r/var/run" "$r/home/pax" "$work/tools"
+    why= missing=
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" 2>&1 || why+=" tools/mkpelt;"
+    cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null && cp "$work/pelt/pelt" "$r/bin/sh" || why+=" no pelt;"
+    "$PAX_ROOT/tools/mkden" "$work/den" > "$work/den.txt" 2>&1 || why+=" tools/mkden;"
+    "$PAX_ROOT/tools/install-den" "$work/den" "$r" > "$work/install-den.txt" 2>&1 || why+=" tools/install-den;"
+    # shellcheck disable=SC2086 # the utilities' names, one word each
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" 2>&1 || why+=" tools/mkboreutils;"
+    for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    # login and passwd as the installed system has them; mkshadow, the
+    # test helper, beside the tree (never in the image).
+    "$PAX_ROOT/tools/mkauth" "$work/auth" login passwd mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
+    for p in login passwd; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"
+    # burrow: /bin/ssh, /bin/burrow-keygen and, since px112, /bin/burrowd.
+    "$PAX_ROOT/tools/mkburrow" "$work/burrow" > "$work/burrow.txt" 2>&1 || why+=" tools/mkburrow;"
+    "$PAX_ROOT/tools/install-burrow" "$work/burrow" "$r" >> "$work/burrow.txt" 2>&1 || why+=" tools/install-burrow;"
+    [ -x "$r/bin/burrowd" ] || missing+=" /bin/burrowd (tools/mkburrow and tools/install-burrow carry no server)"
+    # The shipped files, from user/, never copied by hand.
+    for f in burrowd/burrowd_config:etc/burrowd/burrowd_config pax-boot.d/burrowd:etc/pax-boot.d/burrowd; do
+        if [ -f "$PAX_ROOT/user/${f%%:*}" ]; then cp -p "$PAX_ROOT/user/${f%%:*}" "$r/${f#*:}"; else missing+=" /${f#*:} (no user/${f%%:*})"; fi
+    done
+    printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\nburrowd:x:989:989:burrowd:/nonexistent:/bin/false\n' > "$r/etc/passwd"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nburrowd:x:989:\n' > "$r/etc/group"
+    printf 'LABEL=px112-keys /etc/burrowd ext2 sync 0 0\n' > "$r/etc/fstab"
+    printf '/bin/login\n' > "$r/etc/pax-run"
+    printf 'dhcp wait=10\n' > "$r/etc/pax-net"
+    printf 'pax\n' > "$r/etc/hostname"
+    "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" 2>&1 || why+=" tools/mkzone;"
+    # The archive's arguments, one a line: the tree, root's unless said
+    # (pax's home and what is in it are pax's).
+    : > "$work/files.txt"
+    printf '%s\n' /tmp/:1777 /root/:700 /run/:755 /home/:755 /home/pax/:755:1000:1000 /var/:755 /var/log/:755 \
+        /var/run/:755 /etc/burrowd/:755 /etc/pax-boot.d/:755 >> "$work/files.txt"
+    (cd "$r" && find . -mindepth 1 \( -type f -o -type l \) | sort) | while IFS= read -r f; do
+        f=${f#./}
+        if [ -L "$r/$f" ]; then
+            printf '/%s->%s\n' "$f" "$(readlink "$r/$f")"
+        else
+            m=644; [ -x "$r/$f" ] && m=755
+            printf '/%s=%s:%s\n' "$f" "$r/$f" "$m"
+        fi
+    done >> "$work/files.txt"
+    for f in "$r"/bin/*; do
+        [ -L "$f" ] && { say "  program: ${f#"$r"/} -> $(readlink "$f")"; continue; }
+        case $(head -c 2 "$f") in '#!') say "  script: ${f#"$r"/} $(sha256_of "$f")"; continue ;; esac
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    for f in etc/burrowd/burrowd_config etc/pax-boot.d/burrowd; do
+        [ -f "$r/$f" ] && say "  file: /$f $(sha256_of "$r/$f") $(wc -c < "$r/$f" | tr -d ' ') bytes"
+    done
+    git -C "$PAX_ROOT" rev-parse HEAD > "$work/tree.commit" 2>/dev/null || true
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            [ "$elf" = "$work/$tier/kmain_console.elf" ] || cp "$elf" "$work/$tier/kmain_console.elf"
+            say "built $tier kmain_console: elf $(sha256_of "$elf"), $(wc -c < "$elf" | tr -d ' ') bytes"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    printf '%s\n' "${missing# }" > "$work/missing.txt"
+    if [ -n "$missing" ]; then
+        say "P0 the tree builds no$missing: left out of the image; the rows that need them fail by name"
+    fi
+    if [ -n "$why" ]; then
+        say "FAIL P0 build:$why"
+        exit 1
+    fi
+    say "P0 PASS build: kmain_console, the image's programs static, the image's tree (build/mpx5-burrowd/files.txt)"
+    images=$work
+fi
+[ "$noboot" = 1 ] && exit 0
+
+out=$PAX_BUILD/mpx5-burrowd-runs
+mkdir -p "$out"
+ran=0 skipped=0
+for tier in $tiers; do
+    elf=$images/$tier/kmain_console.elf
+    [ -f "$elf" ] || { say "FAIL P1 $tier: no $elf"; fail=1; continue; }
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf 2>/dev/null)" ]; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then say "FAIL $tier uefi: no OVMF"; fail=1; else say "SKIPPED LOUDLY $tier uefi: no OVMF"; fi
+            continue
+        fi
+        say "boots: $tier $leg"
+        rc=0
+        python3 -I "$here/mpx5-burrowd.d/rows.py" --images "$images" --elf "$elf" --tier "$tier" --leg "$leg" \
+            --accel "$accel" --out "$out/$tier-$leg" || rc=$?
+        case $rc in
+            0) ran=$((ran + 1)) ;;
+            3)
+                if [ "${PAX_REQUIRE_BURROWD_RIG:-0}" = 1 ]; then
+                    say "FAIL $tier $leg: the rig cannot run here, and PAX_REQUIRE_BURROWD_RIG=1"; fail=1
+                else
+                    say "SKIPPED LOUDLY $tier $leg: the rig cannot run here"; skipped=$((skipped + 1))
+                fi ;;
+            *) fail=1; ran=$((ran + 1)) ;;
+        esac
+    done
+done
+say "mpx5-burrowd: $ran legs, $skipped skipped"
+exit $fail
