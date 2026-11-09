@@ -1,0 +1,104 @@
+px109 — the mouse: the prediction, written before the first change (2026-11-09)
+
+Base: pax trunk db516c699e11. Written from USB HID 1.11 (§6.2.1, §6.2.2,
+§7.2.4, §7.2.6, appendix B.2), HID Usage Tables 1.7 (§4 Generic Desktop,
+§12 Button), xHCI 1.2 (§6.2.3.6, interrupt endpoints) and QEMU's
+documentation (system/devices/usb, the QMP reference's input-send-event,
+InputButton, InputMoveEvent, the monitor's mouse_set and info mice). No
+device model's, driver's or kernel's source. Every P-line below is scored
+in the note against what the measurement and the rows show.
+
+A. What QEMU's devices present (measured over PAX's own xHCI stack, as a
+   black box: the descriptors read by the driver and logged in hex, and,
+   with `usbraw` on the command line, every interrupt report's bytes).
+
+P1  usb-mouse enumerates at full speed (xHCI speed 1) on qemu-xhci, with
+    bMaxPacketSize0 8; its vendor is 0627, its product string names a
+    mouse.
+P2  usb-mouse's configuration has one interface: class 3, subclass 1
+    (boot), protocol 2 (mouse); a HID descriptor (type 21h, bcdHID 0101 or
+    0111) naming one report descriptor (type 22h) of 40 to 80 bytes; one
+    endpoint 81h, interrupt, wMaxPacketSize 4 to 8, bInterval 10 (or a
+    smaller power-of-two-friendly value).
+P3  usb-mouse's report descriptor is the boot mouse of appendix B.2 with
+    a wheel: Generic Desktop Mouse application, Pointer physical, Button
+    usages 1 to 3 (1 bit each, then 5 bits of padding), X, Y and Wheel as
+    8-bit relative fields with logical extents -127..127; no Report ID.
+    Its report is 4 bytes: buttons, dx, dy, wheel.
+P4  usb-tablet enumerates at full speed too, interface class 3, subclass
+    0, protocol 0 (no boot protocol: an absolute device is not a boot
+    mouse).
+P5  usb-tablet's report descriptor: buttons 1 to 3 (and 5 bits of
+    padding), X and Y as 16-bit ABSOLUTE fields with logical extents
+    0..32767, the wheel an 8-bit relative field; no Report ID; a 6-byte
+    report: buttons, x lo, x hi, y lo, y hi, wheel.
+P6  Reports for injected events (QMP input-send-event):
+      rel x +10            usb-mouse 00 0a 00 00
+      rel y +5             usb-mouse 00 00 05 00
+      btn left down/up     01 00 00 00, then 00 00 00 00 (right 02, middle 04)
+      btn wheel-up         wheel +1 (byte 3 = 01); wheel-down -1 (ff)
+      abs x 20000 y 400    usb-tablet 00 20 4e 90 01 00
+    side and extra (buttons 4 and 5) reach neither device: both describe
+    three buttons.
+P7  A relative move larger than 127 in one event is split by the device
+    over several reports (clamped to the field, the rest carried), so the
+    sum of the reports is the sum injected.
+P8  Under the boot protocol (SET_PROTOCOL 0) usb-mouse keeps sending the
+    same 4-byte report (the appendix allows device-specific bytes after
+    the third).
+P9  Routing: rel events reach the usb-mouse, abs events the usb-tablet;
+    btn events reach the mouse `info mice` marks current, and `mouse_set`
+    moves that mark between the two. With two usb-mouse devices, rel
+    events reach only the current one.
+P10 The devices report only on change: no report while nothing moves
+    (no idle repeat after SET_IDLE 0).
+P11 On trunk both devices are addressed and configured far enough to be
+    called "not driven" (no line on the log), and /dev/mouse0 does not
+    exist (open answers -ENOENT).
+
+B. What each change will show.
+
+P12 kernel/usb_mouse (new, pure): the boot report decoded per B.2; a
+    report descriptor parsed only as far as X, Y, Wheel and Buttons 1 to
+    5 need (Usage Page, Usage, Usage Minimum/Maximum, Logical
+    Minimum/Maximum, Report Size/Count/ID, Input, Collection, End
+    Collection; Push, Pop, long items and Delimiter refused by name, as is
+    a descriptor with no X or Y, a field wider than 32 bits, or a report
+    longer than 64 bytes). QEMU's two descriptors parse; so do five
+    synthetic real-mouse shapes (16-bit X/Y with a Report ID, 12-bit
+    packed X/Y, five buttons, a wheel and AC Pan, a keyboard-and-mouse
+    descriptor with two Report IDs).
+P13 kernel/mouse (new): one bounded queue per reader (126 records of 32
+    bytes in one page; at most 8 readers): appended while under half full,
+    motion merged into the tail above half, adjacent motion compacted when
+    full, a button edge never merged; an edge is lost only when the queue
+    holds no two adjacent motion records (a named counter, and a LOST flag
+    on the next record).
+P14 kernel/xhci drives a boot mouse (SET_PROTOCOL 0, SET_IDLE 0) and a
+    report-descriptor pointer (the tablet), a pointer interface beside a
+    keyboard interface on one device, hot-plug and unplug as the keyboard
+    does (an unplug with a button held delivers its release), two or more
+    at once; nothing in the keyboard path changes.
+P15 /dev/mouse0 (kernel/files): present when an xHCI controller is;
+    read takes whole 32-byte records (a shorter buffer -EINVAL), waits
+    when empty (O_NONBLOCK -EAGAIN), poll and epoll POLLIN; root's, 0600.
+P16 kmain_console grows by 12 to 24 KiB per tier (native ELF).
+P17 mpx6-usbcheck's 17 invariant rows stay; about 30 mouse rows join
+    them.
+P18 The existing keyboard rows (mpx6-usb's 12 sessions, the typing
+    replays) do not move.
+
+C. The rows (tools/mouse-session over user/elf/mouseprobe.c; KVM and TCG,
+   BIOS and UEFI, native and release).
+
+P19 On trunk plus the rows, every mouse row is red by name (FAIL
+    mouse-open first: /dev/mouse0 is absent), and the keyboard rows stay
+    green.
+P20 With the driver: moves, each button, a drag and the wheel on both
+    devices green; the burst row (reader stopped for 3 s while about 400
+    motions and 10 clicks arrive) keeps all 20 edges in order with the
+    motion's sum exact and at least one MERGED record; unplug with left
+    held gives a GONE record with buttons 0; a replug gets a new device
+    number; keys typed during motion arrive byte-exact.
+P21 Under TCG the rows take 2 to 4 times as long as under KVM; no row
+    needs a longer deadline than the keyboard's (120 s a boot).
