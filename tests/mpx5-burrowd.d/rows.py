@@ -557,7 +557,9 @@ def host_rows(client):
     r3 = c.ssh(GUEST_AT, ['exit 3'])
     rt = c.ssh(GUEST_AT, ['kill -TERM $$'])
     lt = c.ssh(LINUX_AT, ['kill -TERM $$'])
-    if r3[0] == 3 and rt[0] == lt[0] == 255 and rt[1] == lt[1] == b'':
+    # Held whole (status and both streams): a refused connection is 255 too, and the first takes'
+    # B6 passed so with the rig's sshd down.
+    if r3[0] == 3 and rt == lt and rt[0] == 255 and rt[1] == b'' and b'Connection refused' not in lt[2]:
         ok('B6', 'exit 3 is 3; kill -TERM $$ is 255, as sshd\'s on Linux')
     else:
         bad('B6', 'exit 3: %s; TERM through burrowd: %s; through sshd: %s' % (show(r3), show(rt), show(lt)))
