@@ -1,0 +1,56 @@
+px111 — the rows red before any kernel change (2026-11-09T19:08Z-19:10Z)
+
+Commit caaae2ff (the prediction's head; the kernel is 4d899ea4's), a lane host's heavy take
+(block C, KVM, one leg: native, BIOS), notes/px111/rig/take.sh caaae2ff suite --tier native
+--firmware bios --accel kvm. The take's lines, as the rig printed them:
+
+  START suite 2026-11-09T19:08:11Z
+  END suite exit=1 2026-11-09T19:10:07Z
+
+The suite's verdicts:
+
+  PASS Y0: programs static, the checker's selftest, kernel (native) and both images built, the references there
+  FAIL Y1 native bios kvm probe probe-root: 289 rows differ
+  FAIL Y2 native bios kvm probe probe-user: 289 rows differ
+  FAIL Y4 native bios kvm probe: the refusals are not ruled.txt's ()
+  PASS Y5 native bios kvm probe: init ended, frames back, kernel 8ba8b428…
+  FAIL Y3 native bios kvm session session-root: 30 rows differ
+  FAIL Y3 native bios kvm session session-user: 30 rows differ
+  PASS Y4 native bios kvm session: the kernel's refusals are the ruled ones (0)
+  PASS Y5 native bios kvm session: init ended, frames back, kernel 8ba8b428…
+
+The serial logs' sha256: probe 0166cd5a11af2249120787da510a321dc190bb9b7f1d6ad73a39d98de25044c8,
+session 184746448b98ec59e6dc2b9b27374c49b538f1a4291e8aa70b174562f8f09901.
+
+One row of each count is the extraction's, fixed after this run (the `tree:` line after a run's
+frames line was taken into the run: the suite now stops at the frames line). Held again with that
+cut, the checker says probe-root and probe-user 288 of 291 rows differ, the session's 29 of 29.
+The three probe rows that hold are `ptyprobe:`, `done:` and M3, which holds vacuously (no pair
+opened, so no slave read a wrong byte), as the prediction said (§C).
+
+PAX's probe transcript as root, whole:
+
+  ptyprobe: px111's probe, as root
+  O1 stat /dev/ptmx: ENOENT
+  O2 stat /dev/pts: ENOENT
+  O3 stat /dev/pts/ptmx: ENOENT
+  O4 /dev/pts is a file system of its own: no
+  O5 inodes: ENOENT
+  O6 /dev/pts lists: ENOENT
+  O7 /proc/sys/kernel/pty/nr: ENOENT
+  O8 open /dev/ptmx: ENOENT
+  T: no pair: ENOENT
+  C: no master
+  W: no pair: ENOENT
+  H: no master: ENOENT
+  P: no pair: ENOENT
+  M1 64 pairs at once: all opened no, numbered 0 to 63 in order yes
+  M2 /dev/pts holds -1 names, pty/nr ENOENT
+  M3 each slave reads what its own master wrote: yes
+  M4 all closed: /dev/pts holds -1 names, pty/nr ENOENT
+  M5 1000 rounds of a pair opened, used, closed: all right no, number 0 each time yes
+  M6 after: /dev/pts holds -1 names, pty/nr ENOENT
+  M7 a pair shared with a child that ended, then closed: /dev/pts holds -1 names, pty/nr ENOENT
+  done: R exited 0
+
+and the session's, both runs: `S: no master: ENOENT`, `done: drive exited 1`.
