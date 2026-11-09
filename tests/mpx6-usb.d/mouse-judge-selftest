@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""tests/mpx6-usb.d/mouse-judge-selftest — tools/mouse-session's judge can
+say no, by name (px109). No QEMU: transcripts shaped as user/elf/mouseprobe.c
+prints them, records packed by the note's table.
+
+  J1  a transcript every row passes on passes (and names each row PASS).
+  J2  no /dev/mouse0 (trunk's answer, -ENOENT, and no records): every row
+      but finish FAIL by name, mouse-open first.
+  J3  one burst edge missing: FAIL burst-edges, every other row PASS.
+  J4  a burst with no MERGED record: FAIL burst-edges.
+  J8  a burst whose queue never filled (fewer records than a queue holds):
+      FAIL burst-edges.
+  J5  an unplug that leaves the button held (GONE with buttons 1): FAIL
+      unplug-held.
+  J6  a key lost during motion: FAIL keys-during-motion.
+  J7  a replugged mouse under its old number: FAIL replug.
+Exit 0 when every row held; the first failing row is named.
+"""
+from contextlib import redirect_stdout
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import io
+from pathlib import Path
+import struct
+import sys
+
+sys.dont_write_bytecode = True
+root = Path(__file__).resolve().parents[2]
+loader = SourceFileLoader('mouse_session', str(root / 'tools/mouse-session'))
+ms = module_from_spec(spec_from_loader('mouse_session', loader))
+loader.exec_module(ms)
+EDGE, MERGED, GONE, LOST, NEW = ms.EDGE, ms.MERGED, ms.GONE, ms.LOST, ms.NEW
+
+
+class T:
+    def __init__(self):
+        self.lines = []
+        self.seq = 0
+        self.t = 10_000_000_000
+
+    def ready(self, i, label):
+        self.lines.append(f'MOUSEREADY {i} {label}')
+
+    def rec(self, dev, kind, flags=0, x=0, y=0, buttons=0, wheel=0, reports=1, t=None):
+        self.seq += 1
+        self.t += 10_000_000
+        raw = struct.pack('<QIHBBiiHhI', self.t if t is None else t, self.seq, dev, kind, flags, x, y, buttons, wheel, reports)
+        self.lines.append('MOUSEREC ' + raw.hex())
+
+    def row(self, label, n=0):
+        self.lines.append(f'MOUSEROW {label} {n}')
+
+    def text(self):
+        return '\r\n'.join(self.lines) + '\r\n'
+
+
+def green(burst_edges=2 * ms.BURST_CLICKS, merged=True, gone_buttons=0, typed=b'pax mouse\r', replug_dev=5, api=None,
+          burst_records=ms.QUEUE):
+    t = T()
+    R, A = ms.REL, ms.ABS
+    t.ready(0, 'mouse-open')
+    t.lines.append(api or 'MOUSEAPI open=0 mode=20600 short=-22 empty=-11 poll=0')
+    t.row('mouse-open')
+    t.ready(1, 'mouse-move'); t.rec(1, R, x=10); t.rec(1, R, y=5); t.rec(1, R, x=-7, y=-2); t.row('mouse-move', 3)
+    for i, (name, b) in enumerate((('mouse-left', 1), ('mouse-right', 2), ('mouse-middle', 4))):
+        t.ready(2 + i, name); t.rec(1, R, EDGE, buttons=b); t.rec(1, R, EDGE); t.row(name, 2)
+    t.ready(5, 'mouse-wheel'); t.rec(1, R, wheel=1); t.rec(1, R, wheel=1); t.rec(1, R, wheel=-1); t.row('mouse-wheel', 3)
+    t.ready(6, 'mouse-drag'); t.rec(1, R, EDGE, buttons=1)
+    for _ in range(5):
+        t.rec(1, R, x=20, buttons=1)
+    t.rec(1, R, EDGE); t.row('mouse-drag', 7)
+    t.ready(7, 'tablet-move'); t.rec(2, A, x=16384, y=8192); t.row('tablet-move', 1)
+    t.ready(8, 'tablet-left'); t.rec(2, A, EDGE, x=16384, y=8192, buttons=1); t.rec(2, A, EDGE, x=16384, y=8192); t.row('tablet-left', 2)
+    t.ready(9, 'tablet-wheel'); t.rec(2, A, x=16384, y=8192, wheel=-1); t.row('tablet-wheel', 1)
+    t.ready(10, 'tablet-drag'); t.rec(2, A, x=1000, y=1000); t.rec(2, A, EDGE, x=1000, y=1000, buttons=1)
+    t.rec(2, A, x=3000, y=3000, buttons=1); t.rec(2, A, EDGE, x=5000, y=5000); t.row('tablet-drag', 4)
+    t.ready(11, 'burst-edges')
+    left = ms.BURST_MOTIONS
+    n = 0
+    for e in range(burst_edges):
+        t.rec(1, R, MERGED if merged else 0, x=9, buttons=e % 2, reports=3)
+        t.rec(1, R, EDGE, x=1, buttons=(e + 1) % 2)
+        left -= 10
+        n += 2
+    while n < burst_records - 1:
+        t.rec(1, R, x=0, reports=1)
+        n += 1
+    t.rec(1, R, MERGED if merged else 0, x=left, reports=4)
+    t.row('burst-edges', n + 1)
+    t.ready(12, 'two-mice'); t.rec(1, R, x=3); t.rec(3, R, x=4); t.rec(2, A, x=100, y=200); t.row('two-mice', 3)
+    t.ready(13, 'unplug-held'); t.rec(1, R, EDGE, buttons=1); t.rec(1, R, EDGE | GONE, buttons=gone_buttons, reports=0); t.row('unplug-held', 2)
+    t.ready(14, 'replug'); t.rec(replug_dev, R, NEW, reports=0); t.rec(replug_dev, R, x=9); t.row('replug', 2)
+    t.ready(15, 'keys-during-motion')
+    base = t.t
+    for k, b in enumerate(typed):
+        t.lines.append(f'MOUSEKEY {base + 20_000_000 * (k + 1)} {b:02x}')
+        t.rec(1, R, x=2, t=base + 20_000_000 * (k + 1) + 5_000_000)
+    t.row('keys-during-motion', len(typed))
+    t.ready(16, 'finish'); t.row('finish')
+    t.lines.append('MOUSEDONE')
+    return t.text()
+
+
+def trunk():
+    t = T()
+    labels = ms.ROWS
+    for i, label in enumerate(labels):
+        t.ready(i, label)
+        if i == 0:
+            t.lines.append('MOUSEAPI open=-2 mode=-1 short=0 empty=0 poll=-1')
+        t.row(label)
+    t.lines.append('MOUSEDONE')
+    return t.text()
+
+
+def judge(text):
+    rows, api, keys = ms.parse_rows(text)
+    j = ms.Judge()
+    out = io.StringIO()
+    with redirect_stdout(out):
+        ok = j.judge(rows, api, keys)
+    return ok, j.failed, out.getvalue()
+
+
+failures = []
+
+
+def expect(name, text, red):
+    ok, failed, out = judge(text)
+    want_ok = not red
+    good = ok == want_ok and failed == red
+    for row in red:
+        good = good and any(line.startswith(f'FAIL {row} ') for line in out.splitlines())
+    print(f'{"ok  " if good else "FAIL"} {name}: red {failed}')
+    if not good:
+        print(out)
+        failures.append(name)
+
+
+expect('J1 green', green(), [])
+expect('J2 trunk', trunk(), [r for r in ms.ROWS if r != 'finish'])
+expect('J3 a burst edge lost', green(burst_edges=2 * ms.BURST_CLICKS - 1), ['burst-edges'])
+expect('J4 a burst with no MERGED record', green(merged=False), ['burst-edges'])
+expect('J5 unplug leaves the button held', green(gone_buttons=1), ['unplug-held'])
+expect('J6 a key lost during motion', green(typed=b'pax muse\r'), ['keys-during-motion'])
+expect('J7 a replug under the old number', green(replug_dev=1), ['replug'])
+expect('J8 a burst that never filled the queue', green(burst_records=ms.QUEUE - 30), ['burst-edges'])
+if failures:
+    print('FAIL mouse-judge-selftest: ' + ' '.join(failures))
+    sys.exit(1)
+print('PASS mouse-judge-selftest: 8 rows')
