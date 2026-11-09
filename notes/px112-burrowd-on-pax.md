@@ -79,7 +79,12 @@ and their sha256s logged.
     Unsupported(receive-pack hooks)`: git's template put its executable sample hooks in the seed, and den refuses
     receive-pack into a repository with hooks it cannot run. The push into the one den made over ssh went through.
     The seed now has no template (`bdd30c45`); the Linux side's `git init --bare` names `main`, as den's does.
-  - `lb4` (`bdd30c45`): (running)
+  - B6 had passed in `lb2` with the rig's sshd down (a refused connection is 255 too); it now holds the signal's
+    answer whole to sshd's (`bd0bd8dc`).
+  - `lb5` (`bd0bd8dc`): **every row green**, B0-B11 and B9's scan (no password in 269 records), `exit=0`: keys and
+    pax's password at the shipped cost held byte for byte to sshd on Linux, the refusals, the status and the signal,
+    git's clone, push and clone again through den with protocol v2, the listener killed and a login again in 1.4 s,
+    the log at the console, the key kept across a second boot, and the stick's shape.
 - **The upgrade witness** (R-px112-14, B): `tests/mpx6-install.d/upgrade.py`'s U4d holds burrowd after the upgrade
   of the 8b4e98ae dev install (the metal target's): the LAN's configuration, the account appended, the host key made
   at the first boot. Its inputs are px93's, copied by value into the lane (the two sticks read twice on each side,
