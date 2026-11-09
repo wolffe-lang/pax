@@ -4,7 +4,7 @@
     metal.py REPO INPUTS WORK [build | run]
 
 INPUTS is a finished tests/mpx6-install run's inputs/ (its build/disktools,
-build/full and build/install-gate). WORK is this leg's own directory.
+build/full, build/auth and build/install-gate). WORK is this leg's own directory.
 `build` makes the stick alone (tools/mkdisk --usb runs tools/disktools in
 a container engine); `run` takes WORK/stick.img as built and runs the rest,
 for a host where the engine and QEMU live apart (a lane's container);
@@ -151,6 +151,9 @@ def build_stick():
     progs.update(sh=full/'pelt/pelt', pelt=full/'pelt/pelt', lope=full/'lope/lope', reboot=full/'probe/reboot')
     progs.update({n: dt/'bin'/n for n in ['paxgpt', 'paxfat', 'paxext2']})
     progs.update(limine=dt/'limine/limine', **{'pax-install': inputs/'build/install-gate/bin/pax-install'})
+    # px106: the account programs, as the distribution has them: the installed system's /etc/pax-run is
+    # /bin/login (pax-install writes it), and su, sudo and passwd are set-user-ID root (below).
+    progs.update({n: inputs/'build/auth'/n for n in ['su', 'sudo', 'passwd', 'login']})
     for n, p in progs.items():
         if p.read_bytes()[:4] == b'\x7fELF':
             run(['strip', '-o', LIVE/'bin'/n, p])
@@ -187,6 +190,8 @@ def build_stick():
         uid = gid = 1000 if rel == '/home/pax' else 0
         if rel == '/root':
             mode = 0o700
+        if rel in ['/bin/su', '/bin/sudo', '/bin/passwd']:
+            mode = 0o4755
         if rel == '/tmp':
             mode = 0o1777
         if rel in ['/proc', '/sys']:
