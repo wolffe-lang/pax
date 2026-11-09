@@ -144,7 +144,9 @@ for job in ('mpx5-yew', 'mpx5-screen'):
     for tier, floor in yew_screen_floors(job).items():
         seconds = tier_bound(job, tier)
         ok = seconds * 10 >= floor * 14
-        print('%s CI budget %s (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
-              ('PASS' if ok else 'FAIL', job, tier, seconds, floor, seconds - floor))
+        # one word names the row (budget/<job>/<tier>), so a plant's
+        # record can be held to it by name
+        print('%s budget/%s/%s CI budget %s (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
+              ('PASS' if ok else 'FAIL', job, tier, job, tier, seconds, floor, seconds - floor))
         failed |= not ok
 sys.exit(1 if failed else 0)
