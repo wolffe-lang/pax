@@ -120,7 +120,7 @@ const Q_LOST_EDGES: u64 = 3
 const Q_LOST_MOTION: u64 = 4
 const Q_OWED: u64 = 5
 const Q_CHANGES: u64 = 6
-const Q_RECORDS: u64 = 64
+const Q_RECORDS: u64 = 64 // bytes: the books are words 0 to 7
 
 var state: u64 = 0
 
@@ -188,7 +188,9 @@ pub fn start() -> bool {
 /// first reader opened (kernel/files serves /dev/mouse0 from then on).
 pub fn started() -> bool { st() != 0 }
 
-fn rec(q: u64, i: u64) -> u64 { q + Q_RECORDS * 8 + ((get(q, Q_HEAD) + i) % CAP) * RECORD }
+/// Record `i` (from the oldest) of queue `q`: inside its frame, CAP of
+/// them after the 64 bytes of books (64 + 126 * 32 = 4096).
+fn rec(q: u64, i: u64) -> u64 { q + Q_RECORDS + ((get(q, Q_HEAD) + i) % CAP) * RECORD }
 
 fn flags_of(r: u64) -> u64 { r8(r + R_FLAGS) }
 fn dev_of(r: u64) -> u64 { r32(r + R_DEV) & 0xffff }
