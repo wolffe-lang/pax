@@ -572,8 +572,16 @@ def git_rows(client, work):
             g('commit', '-q', '-m', 'px112: a push', cwd=d / 'one')
             g('push', '-q', 'origin', 'main', cwd=d / 'one')
             g('clone', '-q', url, d / 'two')
+            # The metal target's first push: a bare repository made over ssh
+            # (den's on PAX, git's on Linux), then git push into it.
+            made = client.ssh((host, port), ['den init -q --bare fresh.git' if side == 'pax' else 'git init -q --bare fresh.git'])
+            steps.append(('init --bare', made[0]))
+            g('push', '-q', 'pax@%s:fresh.git' % host, 'main', cwd=d / 'one')
+            g('clone', '-q', 'pax@%s:fresh.git' % host, d / 'three')
         heads = subprocess.run(['git', '-C', d / 'two', 'rev-parse', 'HEAD', 'HEAD^{tree}'], capture_output=True,
                                env=env).stdout.decode()
+        heads += subprocess.run(['git', '-C', d / 'three', 'rev-parse', 'HEAD'], capture_output=True,
+                                env=env).stdout.decode()
         objs = subprocess.run(['git', '-C', d / 'two', 'cat-file', '--batch-all-objects', '--batch-check'],
                               capture_output=True, env=env).stdout.decode()
         fsck = subprocess.run(['git', '-C', d / 'two', 'fsck', '--full'], capture_output=True, env=env).returncode
