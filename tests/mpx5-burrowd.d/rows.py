@@ -51,6 +51,16 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       no password in the log, the serial transcript or any record
   B10 boot 2, the same volume: the same fingerprint with no `made at this
       boot`, and the rig's known_hosts line from boot 1 still verifies
+  B11 the stick's shape (R-px112-9, C): the live entry as pid 1
+      (user/usb-login.sh), the shipped configuration (loopback), no
+      /etc/shadow: its own key made at boot; the rig's ssh refused at
+      connect (`Connection refused`); at the console burrow reaches
+      burrowd on 127.0.0.1, which answers `Permission denied
+      (publickey,password).` and logs it
+B1-B10 are the installed shape: /bin/login as pid 1 and the volume's
+configuration the installer's (the shipped file's ListenAddress line made
+`ListenAddress 0.0.0.0`, as user/install/prepare.lu writes it; the prepare
+unit's I-burrowd-lan holds the installer to that).
 Exit 0 when every row held, 1 otherwise, 3 when the rig cannot run here
 (not root, no /dev/net/tun, ip, dnsmasq, mke2fs, ssh, sshd or git).
 """
@@ -221,7 +231,7 @@ class Console:
         self.seen = b''
         self.cursor = 0
         cmd = [ROOT / 'tools/qemu-run', '--firmware', ARGS.leg, '--accel', ARGS.accel, '--timeout', '1500',
-               '--serial', self.out_fifo, '--serial-input', self.in_fifo, '--drive', drive, iso, '--',
+               '--serial', self.out_fifo, '--serial-input', self.in_fifo] + (['--drive', drive] if drive else []) + [iso, '--',
                '-monitor', 'unix:%s,server=on,wait=off' % self.mon, '-m', '1024M',
                '-netdev', 'tap,id=n0,ifname=%s,script=no,downscript=no' % TAP,
                '-device', 'virtio-net-pci,netdev=n0,mac=' + MAC]
@@ -636,6 +646,46 @@ def second_boot(con, client, fp):
         bad('B10', 'boot 2 says %r (boot 1: %s); ssh %s' % (line, fp, show(r) if r else '-'))
 
 
+def live_image(work):
+    """The stick's shape: the live entry as pid 1, the shipped configuration,
+    no /etc/shadow, no keys volume."""
+    files = [l for l in (ARGS.images / 'files.txt').read_text().splitlines()
+             if l and not l.startswith(('/etc/pax-run=', '/etc/fstab='))]
+    (work / 'live.run').write_text('/bin/pelt /etc/pax-live-login\n')
+    files += ['/etc/pax-run=%s:644' % (work / 'live.run'), '/etc/pax-live-login=%s:644' % (ROOT / 'user/usb-login.sh')]
+    run([ROOT / 'tools/mkinitramfs', work / 'live.cpio'] + files)
+    run([ROOT / 'tools/mkimage', '--conf', ROOT / 'boot/limine-initramfs-quiet.conf', '--add', work / 'live.cpio',
+         'initramfs.cpio', ARGS.elf, work / 'live.iso'])
+    return work / 'live.iso'
+
+
+def stick_rows(con, client):
+    m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) .*\(made at this boot\)$', 300)
+    if not m or not con.wait(r'login: $', 120):
+        bad('B11', 'the stick shape: no host key line made at boot, or no login prompt: %r' % con.text()[-500:])
+        return
+    r = None
+    for _ in range(10):
+        r = client.ssh(GUEST_AT, ['true'], timeout=30)
+        if b'Connection refused' in r[2]:
+            break
+        time.sleep(1)
+    lan = r is not None and r[0] == 255 and b'connect to host %s port 22: Connection refused' % GUEST.encode() in r[2]
+    con.type('root')
+    con.command('true', 1, 60)
+    out = con.command("burrow-keygen -q -t ed25519 -N '' -f /tmp/px112-k && ssh -i /tmp/px112-k -o BatchMode=yes "
+                      "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/tmp/px112-kh pax@127.0.0.1 true; "
+                      "echo ssh=$?", 2, 120) or ''
+    log = con.command('cat /var/log/burrowd.log', 3) or ''
+    con.type('exit')
+    here = 'pax@127.0.0.1: Permission denied (publickey,password).' in out and 'ssh=255' in out
+    listen = 'listening on 127.0.0.1:22' in log and ' user pax ' in log
+    if lan and here and listen:
+        ok('B11', 'the stick: refused from the LAN at connect, answered on loopback (%s), its log names both' % m.group(1).decode())
+    else:
+        bad('B11', 'the stick: from the LAN %s; at the console %r; the log %r' % (show(r) if r else '-', out[-200:], log[-300:]))
+
+
 def main():
     global ARGS
     a = argparse.ArgumentParser()
@@ -690,6 +740,13 @@ def main():
                     con2.type('exit')
         finally:
             con2.quit(120)
+        b3 = out / 'boot3-stick'
+        b3.mkdir()
+        con3 = Console(b3, live_image(work), None)
+        try:
+            stick_rows(con3, client)
+        finally:
+            con3.quit(120)
     finally:
         linux.close()
         net.close()
