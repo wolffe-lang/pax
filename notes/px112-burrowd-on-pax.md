@@ -133,6 +133,10 @@ None filed or closed by this lane. For the orchestrator to consider:
 - A real entropy pool for getrandom, or a way to name the TSC fallback (R-px112-8's gap).
 - The dev and release images' root shell runs no `/etc/pax-boot.d` hook.
 - `/var/log/burrowd.log` is never rotated.
+- Seen while readying the witness, not this lane's: the kernel writes `/var/lib/dhcp/pax.lease` on a stick that got a
+  lease (px105), and `user/install/snapshot.lu` does not leave it out, so an install or an upgrade from a stick
+  booted with a cable copies the stick's lease file to the target and lists it in the manifest. The witness's
+  machine has no network card, so it cannot show this.
 
 ### 5.4 Checklist
 
