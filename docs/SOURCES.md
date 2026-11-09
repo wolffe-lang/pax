@@ -2157,3 +2157,30 @@ source; no kernel's, firmware's or driver's.
   (`wspan`, `rspan`), `user/install` (the upgrade, its record, the allow-list, the log), `user/disktools` (paxfat's
   `replace`, paxgpt's `--dump`) and `user/sudo`.
 - No kernel's, boot loader's, init's, installer's, sudo's or package manager's source from any other project.
+
+## px112 — burrowd on PAX (started at boot, its host key made at the first boot, reached from the LAN)
+
+- **sshd(8)** and **sshd_config(5)** (OpenSSH's manual pages, as published): `ListenAddress`, `PasswordAuthentication`,
+  `AcceptEnv`, `PidFile`, `-D` and `-E`, the host key's file and its mode, AUTHORIZED_KEYS FILE FORMAT and the
+  modes sshd checks on the home, `~/.ssh` and `authorized_keys`, and the rule that a locked account (`!` at the start of
+  its hash) is refused every method; **ssh(1)**'s `SSH_ASKPASS` and `SSH_ASKPASS_REQUIRE`, **ssh_config(5)**'s
+  `BatchMode`, `StrictHostKeyChecking`, `UserKnownHostsFile`, `PreferredAuthentications` and `NumberOfPasswordPrompts`;
+  **ssh-keygen(1)**'s `-l`. No ssh implementation's source.
+- **shadow(5), passwd(5) and group(5)**: the fields `tools/distribution-root` writes for the worker's account and the
+  rows' `/etc/shadow` holds.
+- **burrow at its pin** (the org's own): its README (burrowd's CLI, its configuration's keywords, the log's lines,
+  the refusals by name, password authentication), `tools/build` and `notes/px112-burrowd-passwords.md`. Built
+  unmodified; nothing of it is copied here.
+- **den at its pin** (the org's own): its README's `init --bare`, `upload-pack` and `receive-pack`, and
+  `src/transport/ssh.lu` (the command it sends: `git-upload-pack '<path>'`, `git-receive-pack '<path>'`).
+- **dnsmasq(8)** (`--dhcp-range`, `--dhcp-host`, `--no-daemon`, `--bind-interfaces`), **ip(8)**'s `tuntap` and `netns`,
+  and **QEMU's documentation** (`-netdev tap`, `-device`'s `mac=`, never its source) for the rig's LAN of one machine.
+- **OpenSSH's ssh and sshd** (Ubuntu 24.04's openssh-client and openssh-server) and **git** as black boxes: the rows'
+  client, the same burrowd's numbers on Linux, and git's answers for the push and the clone.
+- PAX's own `user/login` (pid 1 on an installed system), `user/usb-login.sh` (the stick's live entry),
+  `user/install` (`prepare.lu`'s `configure_tree`, `manifest.lu`'s generated paths, `upgrade.lu`'s text steps,
+  `snapshot.lu`'s walk), `kernel/files` and `kernel/process` (getrandom: RDRAND, else the TSC folded and named as not
+  cryptographic), `tools/mkburrow`, `tools/install-burrow`, `tools/distribution-root`, `tools/mkauth`, and
+  `tests/mpx4-console-push`, `tests/mpx5-den`, `tests/mpx5-sudo`, `tests/mpx6-install`.
+- No Linux source; no other kernel's, firmware's or driver's source; no ssh implementation's, PAM's, shadow-utils',
+  C library's, init system's or Git's source.
