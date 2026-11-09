@@ -1,0 +1,112 @@
+//! mouse — pointer events, one bounded queue a reader (px109).
+//!
+//! **The producer** is a pointer driver (kernel/xhci): `attach` gives a
+//! pointer its number (1, 2, … in attach order, never reused in a boot),
+//! `report` hands over one decoded device report, `detach` says it left.
+//! **A reader** (`open`: the console's for px110, each open of
+//! /dev/mouse0 its own) takes the records in order (`pull`), sees how
+//! many wait (`pending`) and how many were lost (`lost`), and gives its
+//! queue back (`close`). Every record goes to every open reader.
+//!
+//! **A record** is RECORD (32) bytes, little-endian, the same in a
+//! reader's queue, through `pull` and through /dev/mouse0:
+//!
+//!     0   u64  time     CLOCK_MONOTONIC's nanoseconds when the report came
+//!     8   u32  seq      the reader's record number, from 1
+//!     12  u16  device   the pointer's number
+//!     14  u8   kind     1 relative, 2 absolute
+//!     15  u8   flags    1 EDGE, 2 MERGED, 4 GONE, 8 LOST, 16 NEW
+//!     16  i32  x        relative: dx, right positive; absolute: x, 0..32767
+//!     20  i32  y        relative: dy, down positive; absolute: y, 0..32767
+//!     24  u16  buttons  bit n-1 is button n (1 primary, 2 secondary, 3 tertiary, 4, 5)
+//!     26  i16  wheel    detents, positive away from the user
+//!     28  u32  reports  the device reports the record carries (0 for NEW and GONE)
+//!
+//! EDGE: the buttons differ from the pointer's previous record. MERGED:
+//! more than one report (their motion summed, or the last position
+//! kept). GONE: the pointer left (its buttons read 0, released; EDGE as
+//! well when any was down). LOST: records were lost before this one.
+//! NEW: the pointer arrived (no motion).
+//!
+//! **The bound** (one frame a reader, CAP records): while a queue is
+//! under half full every report is a record of its own. From half full,
+//! a report with no button change merges into the tail record when that
+//! is the same pointer's motion and not an edge (relative motion and the
+//! wheel summed, an absolute position replaced). A full queue first
+//! compacts: the oldest two adjacent records of one pointer's motion,
+//! neither an edge, become one. A button edge never merges, so it is
+//! lost only when a full queue holds no two such records (every other
+//! record an edge); then it is counted (`lost`) and the next record says
+//! LOST. A reader that keeps up sees every report; one that stops sees
+//! every edge and the motion between them summed.
+//!
+//! Every call runs with IF clear (it saves and restores the flag itself):
+//! the producer from the controller's interrupt, readers from system
+//! calls, all on one CPU. No region, no heap. Written for PAX; no other
+//! kernel's input layer consulted.
+pub const RECORD: u64 = 32
+/// Records a reader's queue holds (a frame, its first 64 bytes the books).
+pub const CAP: u64 = 126
+const HIGH: u64 = 63
+pub const READERS: u64 = 8
+pub const DEVICES: u64 = 16
+
+pub const R_TIME: u64 = 0
+pub const R_SEQ: u64 = 8
+pub const R_DEV: u64 = 12
+pub const R_KIND: u64 = 14
+pub const R_FLAGS: u64 = 15
+pub const R_X: u64 = 16
+pub const R_Y: u64 = 20
+pub const R_BUTTONS: u64 = 24
+pub const R_WHEEL: u64 = 26
+pub const R_REPORTS: u64 = 28
+
+pub const REL: u64 = 1
+pub const ABS: u64 = 2
+pub const EDGE: u64 = 1
+pub const MERGED: u64 = 2
+pub const GONE: u64 = 4
+pub const LOST: u64 = 8
+pub const NEW: u64 = 16
+const FIXED: u64 = 21 // EDGE | GONE | NEW: never merged into, never merged
+
+// The state frame's words: 0..7 the readers' frames (0 free); 8 the next
+// pointer number; 9 reports taken; 10 records made; 11 merges; 12
+// compactions; 13 edges lost; 14 motion lost; 15 pointers attached;
+// from 16 the pointers, four words each: number (0 free), kind, buttons,
+// the last absolute position (x | y << 32).
+const S_NEXT: u64 = 8
+const S_REPORTS: u64 = 9
+const S_RECORDS: u64 = 10
+const S_MERGES: u64 = 11
+const S_COMPACTS: u64 = 12
+const S_LOST_EDGES: u64 = 13
+const S_LOST_MOTION: u64 = 14
+const S_ATTACHED: u64 = 15
+const S_DEVS: u64 = 16
+
+// A reader's frame: words 0 head, 1 count, 2 the last seq, 3 edges
+// lost, 4 motion lost, 5 a LOST owed to the next record; records at 64.
+const Q_HEAD: u64 = 0
+const Q_COUNT: u64 = 1
+const Q_SEQ: u64 = 2
+const Q_LOST_EDGES: u64 = 3
+const Q_LOST_MOTION: u64 = 4
+const Q_OWED: u64 = 5
+const Q_RECORDS: u64 = 64
+
+// px109: the interface first, the bodies (and their imports, kernel/frames
+// and kernel/sync) after the invariant rows.
+pub fn start() -> bool { false }
+pub fn started() -> bool { false }
+pub fn attach(_kind: u64, _now: u64) -> u64 { 0 }
+pub fn detach(_dev: u64, _now: u64) -> bool { false }
+pub fn report(_dev: u64, _x: u64, _y: u64, _buttons: u64, _wheel: u64, _now: u64) -> bool { false }
+pub fn open() -> u64 { 0 }
+pub fn close(_r: u64) {}
+pub fn pull(_r: u64, _out: u64) -> bool { false }
+pub fn pending(_r: u64) -> u64 { 0 }
+pub fn lost(_r: u64) -> (u64, u64) { (0, 0) }
+pub fn readers() -> u64 { 0 }
+pub fn books() -> (u64, u64, u64, u64, u64, u64, u64) { (0, 0, 0, 0, 0, 0, 0) }
