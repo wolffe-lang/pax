@@ -9,6 +9,11 @@ fn main() -> int {
             fs_remove("{a[0]}/z-last") else |_| { return 2 }
         } else if a[3] == "runtime-dir" {
             fs_create_dir_mode("{a[0]}/tmp/new-work", 448) else |_| { return 2 }
+        } else if a[3] == "renewal" {
+            // px114: kernel/dhcp renews the lease while the source is staged (T1
+            // between the two walks): it rewrites the lease and the resolver file.
+            durable_text("{a[0]}/var/lib/dhcp/pax.lease", "state bound\naddress 10.0.2.15\nrenewed\n") else |_| { return 2 }
+            durable_text("{a[0]}/etc/resolv.conf", "nameserver 10.0.2.4\n") else |_| { return 2 }
         } else {
             let name = if a[3] == "bytes" then "/bin/tool" else "/new-file"
             durable_text("{a[0]}{name}", "mutation witness") else |_| { return 2 }
