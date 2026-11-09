@@ -161,3 +161,54 @@ whole distribution built. Three things the prediction did not foresee:
   - R-tb03-14 is A: the system linker forced, held by `repro-linker`.
   - R-tb03-15 is B: wolf's silent lld filed as a documentation issue
     (wolf-lang#1082).
+
+## The rebase onto `4d899ea4`
+
+PAX trunk moved from `db516c69` to `4d899ea4` (px106's passwords, px107's
+clock, px108's block copies). Five of this branch's files met trunk's
+changes, and each keeps both sides:
+- `tests/distribution`'s I0 line;
+- `tools/distribution-root`'s inputs, `auth/` beside `trash/`;
+- `tools/ci-tiers.map`'s `@user` and `tools/mkas` lines;
+- `tests/ci-plan`'s `ASUSER`;
+- `tests/fetch-retry-selftest`'s sites, `tools/mkauth` beside
+  `tools/mktrash`, still 18.
+
+The account programs px106 added (`su`, `sudo`, `passwd`, `login`) go into
+the distribution's root beside trash's five, never over them. Each of
+trash's five is refused if its name is already in the root (`trash would
+replace bin/NAME`), and none of the names meet. The metal leg's live tree
+(`tests/mpx6-install.d/metal.py`) is built from its own list, which trash
+is not on.
+
+More rulings, both decided by the coordinator inside the contract:
+
+- **R-tb03-16 is A: the image holds the pinned digests.** A drift turns
+  `image-trash-pin-*` red by name, and that is what a pin is for.
+  - Where the check runs: `tests/distribution` runs inside
+    `tools/mkdistribution`, where the distribution is built, not in a CI
+    job. CI's `mpx5-trash` builds the five on its runner, and
+    `tools/mktrash` prints whether each is the pin's digest.
+  - The match is proven on two images, both Ubuntu 24.04 with
+    libc6-dev 2.39-0ubuntu8.9, binutils 2.42-4ubuntu2.10 and gcc-13
+    13.3.0-6ubuntu2~24.04.1:
+    - trash's gate image, from the apt snapshot of 2026-11-07;
+    - PAX's build image, the same three with LLD 18.1.3 on `PATH`.
+  - The runner image `ubuntu24/20261101.360` lists the same binutils
+    and gcc 13.3.0. glibc 2.39-0ubuntu8.9 was published on 2026-09-10,
+    before that image.
+  - A build container pinned to a snapshot, for PAX CI's component
+    builds, is later hardening and not part of this change.
+- **R-tb03-17 is A: the plant is one hunk at the end of
+  `tools/mktrash`, after the checks.** It ships `trash-rm`'s bytes as
+  `trash-empty`.
+  - It writes their digest into `sums.txt` as `trash-empty`'s.
+    `tools/distribution-root` refuses a built input that its sums do not
+    name (`built input mismatch`) before `tests/distribution` reads the
+    image. A builder whose sums disagree with its bytes therefore stops
+    there, and `image-trash-sums-trash-empty` cannot be reached from the
+    builder.
+  - Predicted: red by name at A2 (`trash-empty -i asks, and takes y`,
+    since `trash-rm` reads `-i` as a pattern) and at
+    `image-trash-pin-trash-empty`. A1 stays green, since both sides run
+    the same planted binary.
