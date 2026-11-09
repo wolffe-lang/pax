@@ -2,7 +2,9 @@
 """Account and payload policy, with independent expected bytes and metadata."""
 from pathlib import Path
 import hashlib
+import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -78,6 +80,26 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
         assert 'root=PARTUUID='+guid in (out/'boot/limine/limine.conf').read_text()
         assert (out/'etc/fstab').read_text().startswith('PARTUUID='+guid+' / ext2 rw')
         print('PASS I-account-games-'+game+': named user, uid/gid 1000, in group sudo (27), root shell unchanged, payload omitted, complete game and engine source on yes')
+    assert {str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}==before
+    # px114 (pax#329): a source holding what a live system writes while it runs (the census,
+    # notes/px114/census.txt): the prepared tree, its attrs and the manifest it is installed with
+    # hold none of it; package state under /var/lib is carried.
+    runtime=['/var/lib/dhcp/pax.lease','/etc/resolv.conf','/.sh_history','/.local/share/lope/store','/var/log/sudo.log']
+    for rel in runtime+['/var/lib/pkg/db']:
+        (s/rel[1:]).parent.mkdir(parents=True,exist_ok=True); (s/rel[1:]).write_text('run time '+rel+'\n')
+    out=w/'runtime'
+    r=subprocess.run([program,s,p,out,'alice','no'],capture_output=True,text=True)
+    row('I-runtime-install-run',r.returncode==0,'the prepare run on a source holding the census paths (exit '+str(r.returncode)+' '+r.stderr.strip()[-200:]+')')
+    attrs={shlex.split(l)[0] for l in Path(str(out)+'.attrs').read_text().splitlines()}
+    m=(out/'etc/pax-install/manifest').read_text().splitlines()
+    listed={l.split(' ',6)[6] for l in m[6:]}
+    every=runtime+['/var/lib/dhcp','/.local','/.local/share','/.local/share/lope']
+    left=[x for x in every if x in attrs or x in listed or os.path.lexists(str(out)+x)]
+    row('I-runtime-install',not left and '/var/lib/pkg/db' in listed and (out/'var/lib/pkg/db').exists(),
+        'the lease, resolv.conf, root\'s history and lope\'s store, sudo\'s log: none in the tree, its attrs or its manifest; /var/lib/pkg carried'+(' (left: '+', '.join(left)+')' if left else ''))
+    for rel in ['var','.local','.sh_history','etc/resolv.conf']:
+        x=s/rel
+        shutil.rmtree(x) if x.is_dir() else x.unlink()
     assert {str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}==before
     # gm01: the engine's source is held to its digest like the game's
     good=(p/'games/pack.engine.source.tar.gz').read_bytes()
