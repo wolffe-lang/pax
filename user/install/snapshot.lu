@@ -21,6 +21,18 @@ fn excluded(path: str) -> bool {
         path == "/mnt/target" // px93: the upgrade entry's target, never the live tree's
 }
 
+// px112: what burrowd, the ssh server, made or writes while the live system
+// runs (/etc/pax-boot.d/burrowd): its host key, its log and its pid. A
+// machine makes its own key at its own first boot, so neither a fresh
+// install nor an upgrade copies the stick's, and a log written while the
+// tree is walked is not a change of the source.
+fn runtime_state(path: str) -> bool {
+    path == "/etc/burrowd/ssh_host_ed25519_key" ||
+        path == "/etc/burrowd/ssh_host_ed25519_key.pub" ||
+        path == "/var/log/burrowd.log" ||
+        path == "/var/run/burrowd.pid"
+}
+
 fn metadata_equal(a: List[int], b: List[int]) -> bool {
     // Reads can advance atime; all other identity/change fields must agree.
     for i in [0, 1, 4, 5, 6, 7, 9, 10, 14, 15, 16, 17] {
@@ -68,6 +80,7 @@ fn source_walk(
     depth: int,
 ) -> () ! {io, invalid, source_changed, recovered_files} {
     if depth > 128 || rows.len > 100000 { return invalid }
+    if runtime_state(path) { return }
     // Distribution images carry runnable demo games, but installation's
     // games yes/no choice must come only from the verified payload. This
     // explicit build marker never changes an unmarked/custom source tree.
