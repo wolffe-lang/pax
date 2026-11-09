@@ -22,6 +22,16 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     os.link(src/'bin/tool', src/"a ' directory/hard link")
     os.symlink('../bin/tool', src/"a ' directory/symlink")
     (src/'empty').touch()
+    # px112: a running system's state under /var/run (sudo's timestamps, burrowd's pid) and
+    # burrowd's host key and log stay out of the walk; /var/run itself and the configuration stay in.
+    RUNTIME={'/etc/burrowd/ssh_host_ed25519_key','/etc/burrowd/ssh_host_ed25519_key.pub','/var/log/burrowd.log'}
+    for d in ['var/run/sudo/ts','var/log','etc/burrowd']: (src/d).mkdir(parents=True)
+    (src/'var/run/sudo/ts/0').write_text('a timestamp record')
+    (src/'var/run/burrowd.pid').write_text('123\n')
+    (src/'var/log/burrowd.log').write_text('a log line\n')
+    (src/'etc/burrowd/burrowd_config').write_text('ListenAddress 127.0.0.1\n')
+    (src/'etc/burrowd/ssh_host_ed25519_key').write_text('not a key');(src/'etc/burrowd/ssh_host_ed25519_key').chmod(0o600)
+    (src/'etc/burrowd/ssh_host_ed25519_key.pub').write_text('not a key either')
     # The oracle compares one pre-walk metadata set. Under relatime, an old
     # atime would advance when the earlier hard-link alias is hashed, before
     # the later alias is lstat'ed. Keep atime newer than mtime AND ctime so
@@ -31,7 +41,7 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     expected={}
     for p in [src, *sorted(src.rglob('*'))]:
         rel='/' if p==src else '/'+p.relative_to(src).as_posix()
-        if any(rel.startswith('/'+x+'/') for x in ['dev','proc','sys','tmp']): continue
+        if any(rel.startswith('/'+x+'/') for x in ['dev','proc','sys','tmp','var/run']) or rel in RUNTIME: continue
         st=p.lstat()
         expected[rel]=(st.st_mode&0o7777,st.st_uid,st.st_gid,st.st_mtime_ns//1_000_000_000,st.st_atime_ns//1_000_000_000,st.st_ctime_ns//1_000_000_000)
     out=subprocess.run([program,src,w/'copy',w/'attrs'],capture_output=True,text=True)
@@ -48,6 +58,10 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     for d in ['dev','proc','sys','tmp']: assert list((w/'copy'/d).iterdir())==[]
     print('PASS I-metadata: bytes, numeric ids, modes, hard links, symlinks, quoted names, whole-second times')
     print('PASS I-exclusions: mountpoints preserved, runtime contents omitted')
+    assert (w/'copy/var/run').is_dir() and list((w/'copy/var/run').iterdir())==[],list((w/'copy/var/run').iterdir())
+    assert (w/'copy/etc/burrowd/burrowd_config').exists() and (w/'copy/var/log').is_dir()
+    assert not any((w/'copy'/r.lstrip('/')).exists() for r in RUNTIME)
+    print('PASS I-runtime-state: /var/run kept and empty (/var/run/sudo/ts and burrowd.pid left out); burrowd\'s host key, its .pub and its log left out, its configuration copied')
     for mode in ['bytes','tree','runtime-dir']:
         out=subprocess.run([program,src,w/('changed-'+mode),w/('attrs-'+mode),mode],capture_output=True,text=True)
         assert out.returncode==1 and 'source_changed' in out.stderr,(out.stdout,out.stderr)
