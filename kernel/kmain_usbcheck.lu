@@ -342,6 +342,20 @@ fn mouse_rows() {
     var count: u64 = 0
     while mouse.pull(r1, out) { lastx = r32(out + 16); lasty = r32(out + 20); count += 1 }
     check(count == 63 && lastx == 79 && lasty == 89, "mouse queue absolute motion keeps the last position")
+    // A full queue stays inside its own frame: the frame taken next (the
+    // allocator hands frames out in order) keeps its pattern.
+    let rq = mouse.open()
+    let guard = (frames.alloc() else 0) + frames.hhdm()
+    var gw: u64 = 0
+    while gw < 512 { put(guard, gw, 0x5a5a5a5a5a5a5a5a); gw += 1 }
+    i = 0
+    while i < 200 { let _b = mouse.report(t, 300 + i, 400 + i, (i % 2), 0, 2000 + i); i += 1 }
+    var kept = true
+    gw = 0
+    while gw < 512 { if word(guard, gw) != 0x5a5a5a5a5a5a5a5a { kept = false }; gw += 1 }
+    let (nq, _sq, _eq, _mq, _aq, _fq, _rr) = drain(rq, out)
+    check(kept && nq == mouse.CAP, "mouse queue stays inside its frame")
+    mouse.close(rq)
     // Readers are bounded; a closed one is free again.
     var opened: u64 = 2
     while mouse.open() != 0 { opened += 1 }
