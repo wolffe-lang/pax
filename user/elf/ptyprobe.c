@@ -802,6 +802,9 @@ static void sec_termios(void) {
     put(m, "ab");
     nap(200);
     say("T43 VMIN 3, two bytes there: the slave polls %s\n", revents(s, POLLIN, 100));
+    ccset(s, VTIME, 5);
+    say("T43a VMIN 3 VTIME 5, two bytes there: the slave polls %s\n", revents(s, POLLIN, 100));
+    ccset(s, VTIME, 0);
     {
         int fl = fcntl(s, F_GETFL);
         fcntl(s, F_SETFL, fl | O_NONBLOCK);
@@ -932,6 +935,12 @@ static void sec_ctty(void) {
     {
         pid_t g0 = tcgetpgrp(m);
         say("C1 a session leader without a terminal: tcgetpgrp(the master) before %s\n", g0 < 0 ? ename(errno) : g0 == 0 ? "0" : "a group");
+    }
+    {
+        pid_t sid = 0;
+        errno = 0;
+        int r = ioctl(m, TIOCGSID, &sid);
+        say("C1a TIOCGSID on the master before: %s\n", rv(r, errno));
     }
     errno = 0;
     int s = open(name, O_RDWR);
@@ -1506,7 +1515,12 @@ static void sec_hangup(void) {
         for (int i = 0; i < k; i++) if (b[i] == '\n') b[i] = ',';
         say("H26 the session leader ends: its foreground group heard %s\n", k ? b : "-");
         errno = 0;
-        say("H27 the master then: tcgetpgrp %s\n", tcgetpgrp(m) < 0 ? ename(errno) : "a group");
+        pid_t g0 = tcgetpgrp(m);
+        say("H27 the master then: tcgetpgrp %s\n", g0 < 0 ? ename(errno) : g0 == 0 ? "0" : "a group");
+        pid_t sid = 0;
+        errno = 0;
+        int r = ioctl(m, TIOCGSID, &sid);
+        say("H28 TIOCGSID on the master then: %s\n", rv(r, errno));
         close(c2p[0]);
         close(m);
         /* F may be left: it was killed by HUP, or is an orphan; nothing to reap here */
