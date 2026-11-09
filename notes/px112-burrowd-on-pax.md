@@ -85,6 +85,11 @@ and their sha256s logged.
     pax's password at the shipped cost held byte for byte to sshd on Linux, the refusals, the status and the signal,
     git's clone, push and clone again through den with protocol v2, the listener killed and a login again in 1.4 s,
     the log at the console, the key kept across a second boot, and the stick's shape.
+  - `lb6` (`465fb1e3`, B12 added: a session without ptys, the rig's OpenSSH 9.6p1 client run on a pseudo-terminal
+    of its own, as a person at a terminal): every row green again. `ssh host`: status 255, `PTY allocation request
+    failed on channel 0` and `shell request failed on channel 0`; `ssh host COMMAND`: the command's status, no tty
+    (`tty` says none); `ssh -t host`: status 255, `PTY allocation request failed on channel 0`. burrowd's log names
+    both refusals for each (`refused pty_refused,shell_refused`).
 - **The upgrade witness** (R-px112-14, B): `tests/mpx6-install.d/upgrade.py`'s U4d holds burrowd after the upgrade
   of the 8b4e98ae dev install (the metal target's): the LAN's configuration, the account appended, the host key made
   at the first boot. Its inputs are px93's, copied by value into the lane (the two sticks read twice on each side,
