@@ -151,6 +151,21 @@ def main():
     assert sha(roots) == pin['ROOTS_DER_SHA256'], 'the root set is not user/roots.pin\'s'
     put('etc/ssl/certs/ca-roots.der', roots)
     put('etc/ssh/ssh_known_hosts', (ROOT/'user/ssh_known_hosts').read_bytes())
+    # px112: burrowd, the ssh server (burrow's third program, installed above
+    # as /bin/burrowd): its configuration (R-px112-9, root's, 0644), the boot
+    # hook that makes the host key at the first boot and starts it
+    # (R-px112-7, R-px112-8: /etc/pax-boot.d, run by pid 1), and its worker's
+    # account (R-px112-10: burrowd, 989, no home, no shell), appended to the
+    # base payload's passwd and group, which a fresh install copies and an
+    # upgrade appends. No host key ships: each machine makes its own.
+    assert 'bin/burrowd' in rows, 'no /bin/burrowd: tools/mkburrow builds it since px112'
+    put('etc/burrowd/burrowd_config', (ROOT/'user/burrowd/burrowd_config').read_bytes())
+    put('etc/pax-boot.d/burrowd', (ROOT/'user/pax-boot.d/burrowd').read_bytes(), 0o755)
+    for name, line in (('etc/passwd', b'burrowd:x:989:989:burrowd:/nonexistent:/bin/false\n'),
+                       ('etc/group', b'burrowd:x:989:\n')):
+        mode, uid, gid, data = rows[name]
+        assert b'\nburrowd:' not in b'\n' + data and b':989:' not in data, name + ' has a burrowd line or 989 already'
+        rows[name] = (mode, uid, gid, data + (b'' if data.endswith(b'\n') else b'\n') + line)
     # px90 (R-px90-2): the zone database's UTC, the bytes /etc/localtime
     # already has (tools/mkzone): den prints a date only from $TZDIR/$TZ
     # (default /usr/share/zoneinfo), with TZ=UTC or with TZ unset.
