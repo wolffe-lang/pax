@@ -47,6 +47,8 @@ listing=output.getvalue();(work/'target.tree').write_text(listing)
 actual={x.split('\t')[0]:x.split('\t') for x in listing.splitlines()}
 config=f'timeout: 0\nquiet: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={guid} rootfstype=ext2 rw\n'
 changes={'/boot/limine/limine.conf':config.encode(),'/etc/fstab':f'PARTUUID={guid} / ext2 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n'.encode()}
+# px106: the installer makes its user (pax) a member of group sudo, gid 27, appended to the source's lines
+changes['/etc/group']=(source/'etc/group').read_bytes()+b'sudo:x:27:pax\n'
 changed_meta=set(changes)|{'/etc/passwd','/etc/group','/home/pax'}
 expected=set()
 for p in sorted(source.rglob('*')):
@@ -89,6 +91,13 @@ for path,(k,mode,uid,gid,size,digest) in mrows.items():
     if k=='l':assert hashlib.sha256(row[-1][3:].encode()).hexdigest()==digest,(path,row,digest)
 assert {x for x in actual if listed(x)}<=set(mrows),{x for x in actual if listed(x)}-set(mrows)
 allowed|={'/etc/pax-install',mpath}
+# px106: /etc/shadow, root's, mode 0600, every account locked (a scripted install sets no password: root `*`,
+# the others `!`), each line the day of the install and Ubuntu's ages
+allowed.add('/etc/shadow');row=actual['/etc/shadow']
+assert int(row[2],8)==0o600 and row[3:5]==['0','0'],('/etc/shadow',row)
+stext,_e=run('debugfs','-R','cat /etc/shadow',root)
+assert re.fullmatch(r'root:\*:\d+:0:99999:7:::\npax:!:\d+:0:99999:7:::\n',stext.decode()),stext
+print('PASS I-shadow: /etc/shadow 0600 root\'s, root and pax locked; /etc/group\'s sudo line names pax')
 print(f'PASS I-manifest: /etc/pax-install/manifest, {len(mrows)} rows, every listed path of the root with its kind, mode, owner and bytes')
 # gm01: every game of games.txt, its binary, its source and its engine's
 catalog=[r.split() for r in (repo/'user/install/games.txt').read_text().splitlines() if r.strip() and not r.startswith('#')]
