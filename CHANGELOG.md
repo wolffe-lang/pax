@@ -7,6 +7,22 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The mouse (px109).** USB mice and tablets work on PAX's xHCI stack, beside
+  the USB keyboard and on the same device as one, several at once, plugged and
+  unplugged while the system runs. A pointer is read by its report descriptor
+  (X, Y, the wheel and buttons 1 to 5, relative or absolute, Report IDs
+  honoured; what it cannot read it refuses by name on the log), with the boot
+  protocol's three bytes as the fallback and, with `hidboot` on the command line,
+  for every boot mouse. Its events go into `kernel/mouse`, one bounded queue a
+  reader that merges motion when it fills and never drops a button transition
+  while it can merge; unplugging a pointer releases its buttons. `/dev/mouse0`
+  reads the queue as fixed 32-byte records, documented in
+  `notes/px109-the-mouse.md`; the console's own use of it (a pointer, xterm's
+  mouse modes) is the next lane's. `usbraw` on the command line logs each
+  pointer's descriptors and every report. `tests/mpx6-usb` gains a session of
+  QEMU's usb-mouse (twice) and usb-tablet beside the keyboard, judged row by row
+  through `/dev/mouse0`, under KVM and TCG.
+
 - **ssh into PAX (px112).** burrowd, burrow's ssh server, ships on every image
   and starts at boot: `/etc/pax-boot.d`'s hooks run before the first prompt
   (`/bin/login` on an installed system, the live entry on the stick), and
