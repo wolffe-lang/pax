@@ -68,7 +68,7 @@ and their sha256s logged.
 
 ### 5.1 Rulings (answered 2026-11-09)
 
-R-px112-1 to -6 are burrow's (its note). Here, all as recommended but R-px112-9, which was answered (C):
+R-px112-1 to -6 are burrow's (its note). Here, all as recommended but R-px112-9, which was answered (C), and R-px112-14, asked later:
 
 - **R-px112-7, the boot hook: A.** `/etc/pax-boot.d`: pid 1 runs each file there in name order before its first
   prompt (`/bin/login` on an installed system, the live entry on the stick), each in a process group of its own,
@@ -96,6 +96,15 @@ R-px112-1 to -6 are burrow's (its note). Here, all as recommended but R-px112-9,
   wait that doubles to five minutes while it refuses to start; `/var/log/burrowd.log`, root's 0600.
 - **R-px112-12, one pin: A.** `user/burrow.pin` for the client and the server; `/bin/ssh` moves with it from
   `0d98ce92` to B5's client (the system known_hosts files by default), held by `tests/mpx4-console-push`.
+- **R-px112-14, the upgrade witness: B** (asked during the takes). The metal target gets px112 by an upgrade, so
+  `tests/mpx6-install.d/upgrade.py`'s U4d holds what an upgrade leaves for burrowd (the configuration's LAN line, the
+  account appended once, the host key made at the first boot, its fingerprint the console's, burrowd listening on
+  0.0.0.0:22), and px106's witness rig (`notes/px106/rig`) runs its legs-d (U1d-U6d and U13d) at the final head,
+  with px93's inputs and sticks copied into the lane by value. Making the witness ready found two gaps, each fixed
+  before it ran: `tools/install-manifest` (the host's manifest, which the witness and the baselines use) did not
+  list the configuration as installer-written, as `user/install/manifest.lu` does; and the boot hook's `mkdir -p
+  /var/run` made a directory on a running stick that the image does not ship, which an upgrade's walk of the stick
+  would have copied and listed. The images ship `/var/run` now.
 - **R-px112-13, the rows' reach: A.** A tap in the rig's network namespace, dnsmasq leasing the guest its address,
   the rig's ssh and git reaching port 22 as a machine on the LAN would.
 
