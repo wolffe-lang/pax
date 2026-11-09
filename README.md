@@ -23,7 +23,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
-| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
+| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh` and its server `burrowd`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
 What PAX is not: a security boundary. The permission checks hold for honest programs; the kernel has never been fuzzed
 or audited, it loads programs at fixed addresses, the live USB entry accepts `root` with no password, and so does an
@@ -180,7 +180,7 @@ first program it prints how long its boot took and how much of that the console 
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `ac2332bf` (wolf 0.2.36) |
-| burrow | the ssh client in wolf: `/bin/ssh` and `/bin/burrow-keygen` (Ed25519) | `0d98ce92` (wolf 0.2.37) |
+| burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.37) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `2eb9cb9b` |
@@ -272,9 +272,9 @@ published ranges) is the fallback when no DNS server answers.
 - **SSH** goes through burrow, the org's ssh client, installed as `/bin/ssh` with `/bin/burrow-keygen`: den runs
   `ssh` from `PATH` (it reads no `GIT_SSH` or `core.sshCommand`). Make a key on PAX and add its public line to
   GitHub (a deploy key or your account's), or copy a key you have (an unencrypted Ed25519 key in OpenSSH's format,
-  mode 0600). GitHub's published host key is pinned in `/etc/ssh/ssh_known_hosts`; burrow reads known_hosts files
-  only from `~/.ssh`, so name it in `~/.ssh/config`. A server answering for github.com with another key is refused
-  by name (`host_key_changed`).
+  mode 0600). GitHub's published host key is pinned in `/etc/ssh/ssh_known_hosts`, which burrow reads after
+  `~/.ssh`'s own files (an older burrow read only `~/.ssh`'s, hence the `~/.ssh/config` line below, which is now
+  harmless). A server answering for github.com with another key is refused by name (`host_key_changed`).
 
   ```sh
   mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -289,6 +289,42 @@ unless `~` is on a disk. den has no `ls-remote` and no `rev-parse` yet: `den fet
 the far side no longer has. `tests/mpx4-console-push` types these steps at the console against fixtures that answer as
 github.com (den's own HTTPS fixture and OpenSSH's sshd, a DNS server of the suite's own), holds each to Git's
 answers for the same steps on Linux, and, given a repository on GitHub in its environment, pushes there.
+
+## Logging in to PAX over ssh
+
+`burrowd`, burrow's server, starts at every boot: `/etc/pax-boot.d/burrowd`, which pid 1 runs before the first prompt
+(`/bin/login` on an installed system, the live entry on the stick), makes the machine's host key at its first boot
+(`/etc/burrowd/ssh_host_ed25519_key`, from the CPU's RDRAND through `/dev/urandom`; no image ships one), prints its
+fingerprint on the console at every boot, and starts burrowd again a second after it ends. On an installed system it
+listens on every address (the installer writes `ListenAddress 0.0.0.0` into `/etc/burrowd/burrowd_config`), so
+another machine on the LAN reaches it; on the live stick it listens on `127.0.0.1` alone. The machine is behind its
+router, which forwards nothing to it: nothing outside the LAN reaches it.
+
+- **Nobody logs in until the owner says so.** No image ships `/etc/shadow` or an `authorized_keys`. An account logs
+  in with its password (`passwd` sets one) or with a key in its `~/.ssh/authorized_keys` (mode 0600, `~/.ssh` 0700,
+  as `sshd(8)`'s StrictModes has them). An account whose password is locked (`passwd -l`, or the installer's `n` at
+  its password question) is refused every way, a key included, until `passwd` gives it a password. Root is refused
+  always: log in as yourself and use `sudo`.
+- **From another machine,** with `ssh` (OpenSSH 9.6 or later, or burrow): compare the fingerprint the console printed
+  at boot (`burrow-keygen -l -f /etc/burrowd/ssh_host_ed25519_key` prints it again) with the one `ssh` shows, then:
+
+  ```sh
+  ssh pax@ADDRESS ls                                   # the account's password, the first time
+  ssh pax@ADDRESS 'mkdir -p .ssh && chmod 700 .ssh && cat >> .ssh/authorized_keys && chmod 600 .ssh/authorized_keys' < ~/.ssh/id_ed25519.pub
+  ssh pax@ADDRESS 'den init -q --bare repo.git'        # then: git push pax@ADDRESS:repo.git main
+  ```
+
+  A command runs as the account through its shell (no pty yet: no interactive shell over ssh); git's
+  `git-upload-pack` and `git-receive-pack` are den's, so `git clone`, `fetch` and `push` work as against a Linux
+  host. Passwords are checked against `/etc/shadow` (crypt(5)'s `$7$`, as `passwd` writes them), one at a time.
+- **The log** is `/var/log/burrowd.log`, root's: `sudo cat /var/log/burrowd.log`. One line per connection: the time,
+  the user, the key's fingerprint or `key password`, the outcome by name, the exit status. The client's address
+  reads `UNKNOWN` until wolf-std can ask the kernel for it. `kill $(cat /var/run/burrowd.pid)` restarts burrowd with a
+  changed configuration.
+
+`tests/mpx5-burrowd` boots an installed-shaped PAX on a tap the rig leases it an address on, and holds commands, both
+logins, the refusals, git and a restart to the same through OpenSSH's `sshd` on Linux; a second boot keeps the host
+key; the stick's shape is refused from the LAN and answered on loopback.
 
 ## Booting PAX
 
@@ -662,7 +698,7 @@ and `--tier native --firmware bios` picks one leg.
 | The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
-| The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net`, `mpx4-console-push` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), the tick clock held to the clock over the lease, and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes); den pushing from the console over https and through burrow over ssh to fixtures that answer as github.com, names through a DNS server of the suite's own, the resolver's datagram calls against Linux, a scrubbed transcript proven on fake secrets (root, sshd, mke2fs) |
+| The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net`, `mpx4-console-push`, `mpx5-burrowd` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), the tick clock held to the clock over the lease, and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes); den pushing from the console over https and through burrow over ssh to fixtures that answer as github.com, names through a DNS server of the suite's own, the resolver's datagram calls against Linux, a scrubbed transcript proven on fake secrets (root, sshd, mke2fs); burrowd started at boot and reached from a LAN on a tap, held to OpenSSH's sshd on Linux: commands by key and by password, the refusals, git through den, a restart, the host key kept across a reboot, the stick's shape on loopback alone (root, dnsmasq, sshd) |
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-forks`, `mpx5-rates`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, the rates a clone leans on against the host's Linux, each program's typed session against the same binary in a container, the language server's frames both ways |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
