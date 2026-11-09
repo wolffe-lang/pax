@@ -23,6 +23,7 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   console to Ubuntu 24.04's own `login`, `su`, `sudo` and `passwd`, and
   `tests/mpx6-install` holds the upgrade's group and the first login through
   sudo. Enforced for honest programs; not a boundary against an attacker.
+
 - **The clock reads forward (px107, pax#293).** `clock.now_ns` no longer panics
   `overflow ./clock/clock.lu:313` in a long soak, and no longer jumps 42.9 s
   ahead first. QEMU's HPET answers one 8-byte load of its 64-bit main counter as
