@@ -1,0 +1,32 @@
+# px109: the release tier's build time of kmain_console, trunk against this lane's commits.
+#
+# Timing: wolf 0.2.35 `build kmain_console.lu --no-cache --release --target x86_64-unknown-none --emit=obj`,
+# cold, each into a fresh directory, trunk and the head interleaved twice, on six CPUs held for nothing else
+# (a block and its light slot; the build's mid-end is one thread). Wall and the child's user CPU, seconds.
+# The head here is 1f68bbcd, whose kernel is the final head's (the commits after it change tests and notes).
+db516c69 (trunk) run 1  wall 168.1  user 180.3
+1f68bbcd (head)  run 1  wall 250.1  user 264.3
+db516c69 (trunk) run 2  wall 170.0  user 181.8
+1f68bbcd (head)  run 2  wall 253.9  user 268.1
+#
+# Where it goes. The release console's LLVM IR (`--emit=llvm-ir`, the same build), censused per function by
+# notes/px74/performance/ir-census.py: loops, and the proxy (loops times branches squared, summed), which is
+# what wolf-lang#983 measured rangeopt's loop versioning to cost. Then the calls to kernel/log's two looping
+# formatters still left as calls (the rest were inlined, each bringing its loops), and whether log.dec is
+# still a function.
+#
+# commit     functions  loops   proxy        log.dec calls  log.put calls  log.dec defined  sound.summary loops
+db516c69     1620       3105    116,849,388  504            2198           yes              0
+f6c33ac8     1639       5187    217,931,092  155             525           yes              27
+74f980bd     1650       5104    228,311,536  139             774           yes              0
+6a1c843f     1662       4285    156,212,473  461            1047           yes              27
+638ee7ae     1662       5318    270,610,565    0             671           no               81
+#
+# f6c33ac8 is kernel/xhci's pointer, 74f980bd /dev/mouse0, 6a1c843f the books line; 638ee7ae is the head
+# (the queue's fix, e642e1c5, and the device number, c958ed98, come after 6a1c843f). The head adds 42
+# functions and 2,213 loops. At the head log.dec is inlined at every call site (504 were calls at trunk), and
+# 1,527 fewer of log.put's are left as calls: about 2,500 loops brought in by kernel/log's two formatters
+# (log.dec has two loops, log.put one, over the string's bytes), most of them in functions this lane did not
+# change (sound.summary, user.serve, sound.bring_up). Which call sites inline them follows wolf's cluster cut
+# of the whole package, which every change moves: f6c33ac8, 74f980bd and 6a1c843f give 1.9, 2.0 and 1.3
+# times trunk's proxy, the head 2.3 times. The release objects' codegen (clang) is a few seconds of either.
