@@ -163,8 +163,9 @@ times that. The first runner observation replaces this paragraph.
 Both jobs build yew (`tools/mkyew`) and then boot it on four legs. Their
 limit was 75 minutes. Since yew's pin moved to `2eb9cb9b` (`aba55824`),
 yew's build alone has taken 1602-2848 s (median 2403 s), against 1037-1877 s
-(median 1584 s) at `0ccb2c67`. mpx5-yew was then cut at 75 minutes in 10 of
-its 16 all-tier attempts, and mpx5-screen in 4 of 15. The boots did not
+(median 1584 s) at `0ccb2c67`. mpx5-yew was then cut at 75 minutes in 11 of
+its 16 all-tier attempts (one already red from a failed fetch), and
+mpx5-screen in 4 of 15. The boots did not
 change: each leg is about 5.5 to 6 minutes at both pins. The build's growth
 is pax#327.
 
