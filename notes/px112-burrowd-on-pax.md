@@ -76,7 +76,10 @@ R-px112-1 to -6 are burrow's (its note). Here, all as recommended but R-px112-9,
   install left locked (`!`, the `n` at its password question) is refused every way, a key included (burrow's
   R-px112-3, `sshd(8)`'s rule), until it has a password. Root is refused always.
 - **R-px112-10, the worker's account: A.** `burrowd:x:989:989:burrowd:/nonexistent:/bin/false` and `burrowd:x:989:`
-  in the images; a fresh install copies them, an upgrade appends them.
+  in the images; a fresh install copies them (and its `/etc/shadow` locks the account, as every other), an upgrade
+  appends them. An upgrade never touches an `/etc/shadow` that is there (px106's rule), so an upgraded system's has no
+  line for `burrowd`: the account has no password (burrowd refuses it, `auth_password_unset`), no home and no shell,
+  and nothing logs in as it.
 - **R-px112-11, the restart and the log: A.** The hook's loop starts burrowd again a second after it ends, or after a
   wait that doubles to five minutes while it refuses to start; `/var/log/burrowd.log`, root's 0600.
 - **R-px112-12, one pin: A.** `user/burrow.pin` for the client and the server; `/bin/ssh` moves with it from
