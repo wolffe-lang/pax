@@ -1,0 +1,475 @@
+//! pty — pseudo-terminals (px111): `/dev/ptmx` makes a pair, a master
+//! and a slave (`/dev/pts/N`), the slave a terminal like the console
+//! over the console's own line discipline (kernel/console, by terminal
+//! id PTY0 + N), the master the other end of the wire: what the master
+//! writes is typed at the slave, what the slave writes (and its echo)
+//! the master reads.
+//!
+//! **A pty** is a record in boot/console.S's pax_pty_table (256 of them,
+//! R-px111-4) and, while it lives, eleven frames: the slave's state
+//! words, its line discipline's 4096-byte ring, IQ (the master's
+//! writes waiting for the line discipline, 16384 bytes) and OQ (the
+//! slave's output for the master, 20480 bytes): kernel/console's. The
+//! lowest free number is taken at the open of `/dev/ptmx` (or
+//! `/dev/pts/ptmx`); the slave is locked until TIOCSPTLCK 0 (unlockpt),
+//! owned by the opener's file-system ids, 0600 (devpts' defaults with
+//! no options, R-px111-1: PAX has no tty group). The slave's name goes
+//! with the master's last close; the record and its frames when both
+//! ends are closed (`/proc/sys/kernel/pty/nr` counts the records).
+//!
+//! **The ends' answers**, measured on Linux 7.2.4 (notes/px111/
+//! prediction.txt §A): the master's read takes OQ, waits when it is
+//! empty, and answers -EIO once every slave descriptor that was opened
+//! is closed (what is left first; a slave never opened: it waits); the
+//! master's write takes what fits in IQ (20480 bytes with the line
+//! discipline's ring, R-px111-6) and waits or answers -EAGAIN when full;
+//! keys that signal are raised for the slave's foreground group at once.
+//! The slave's write goes through OPOST/ONLCR into OQ, waiting while it
+//! is full or IXON holds it (R-px111-2). The master's last close hangs
+//! the slave up: the controlling process hears SIGHUP and SIGCONT, the
+//! session loses the terminal, the slave reads end of file and every
+//! other call is -EIO (kernel/console's `hang`, kernel/sched's
+//! `hangup_tty`). poll: the master IN with OQ not empty, OUT with room
+//! in IQ, HUP once every slave descriptor opened is closed; the slave
+//! IN by the line discipline's rule, OUT with room in OQ and not held,
+//! and IN OUT ERR HUP once hung up.
+//!
+//! **The master's ioctls**: TIOCGPTN, TIOCSPTLCK, TIOCGPTLCK,
+//! TIOCGPTPEER (kernel/files opens the slave), the slave's termios
+//! (TCGETS, TCSETS*), the window size (TIOCGWINSZ, TIOCSWINSZ: SIGWINCH
+//! for the slave's foreground group), the slave's foreground group and
+//! session (TIOCGPGRP: 0 when none; TIOCSPGRP as on the slave; TIOCGSID:
+//! -ENOTTY when no session holds it), FIONREAD (OQ's bytes), TIOCOUTQ
+//! (0), TCFLSH (TCIFLUSH discards OQ, TCOFLUSH nothing), TCSBRK (0),
+//! TIOCNOTTY and TIOCSCTTY -ENOTTY; everything else refused by name,
+//! packet mode (TIOCPKT) among them (R-px111-3, -8).
+//!
+//! Written from pty(7), pts(4), ioctl_tty(2) and its TIOC*(2const)
+//! pages, termios(3), posix_openpt(3), grantpt(3), unlockpt(3),
+//! ptsname(3) (man-pages 6.7), POSIX.1-2024 XBD chapter 11, and
+//! black-box runs of Linux (user/elf/ptyprobe.c's recordings,
+//! tests/mpx5-pty.d/linux/). No kernel's source of any OS.
+
+use console
+use cred
+use frames
+use sched
+use uaccess
+
+pub const PTYS: u64 = 256
+const PT_USED: u64 = 1 // 1 while the pty lives
+const PT_MASTERS: u64 = 2 // open files of the master
+const PT_SLAVES: u64 = 3 // open files of the slave
+const PT_LOCKED: u64 = 4 // 1 until TIOCSPTLCK 0
+const PT_EVER: u64 = 5 // 1 once a slave descriptor was opened
+const PT_UID: u64 = 6 // the slave's owner and group: the opener's file-system ids
+const PT_GID: u64 = 7
+const PT_GONE: u64 = 8 // 1 once the master has closed: the name is gone
+
+/// kernel/files' answers: wait and run the call again, refused by name.
+pub const WAIT: u64 = 0xfffffffffffffdfe // -514, kernel/files' WAIT
+const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
+const NEG_EIO: u64 = 0xfffffffffffffffb // -5
+const NEG_EINVAL: u64 = 0xffffffffffffffea // -22
+const NEG_EFAULT: u64 = 0xfffffffffffffff2 // -14
+const NEG_ENOTTY: u64 = 0xffffffffffffffe7 // -25
+
+const TCGETS: u64 = 0x5401
+const TCSETS: u64 = 0x5402
+const TCSETSW: u64 = 0x5403
+const TCSETSF: u64 = 0x5404
+const TCSBRK: u64 = 0x5409
+const TCFLSH: u64 = 0x540b
+const TIOCSCTTY: u64 = 0x540e
+const TIOCGPGRP: u64 = 0x540f
+const TIOCSPGRP: u64 = 0x5410
+const TIOCGWINSZ: u64 = 0x5413
+const TIOCSWINSZ: u64 = 0x5414
+const TIOCNOTTY: u64 = 0x5422
+const TIOCGSID: u64 = 0x5429
+const TIOCGPTN: u64 = 0x80045430
+const TIOCSPTLCK: u64 = 0x40045431
+const TIOCGPTLCK: u64 = 0x80045439
+pub const TIOCGPTPEER: u64 = 0x5441
+const TCIFLUSH: u64 = 0
+const TCIOFLUSH: u64 = 2
+
+const POLLIN: u64 = 0x1
+const POLLOUT: u64 = 0x4
+const POLLERR: u64 = 0x8
+const POLLHUP: u64 = 0x10
+
+fn w(n: u64, k: u64) -> u64 {
+    console.pty_word(n, k)
+}
+
+fn put_w(n: u64, k: u64, v: u64) {
+    console.put_pty_word(n, k, v)
+}
+
+/// Pty `n`'s slave's terminal id (kernel/console's, kernel/sched's).
+pub fn tty(n: u64) -> u64 {
+    console.PTY0 + n
+}
+
+/// Whether pty `n` lives.
+pub fn live(n: u64) -> bool {
+    n < PTYS && w(n, PT_USED) == 1
+}
+
+/// Whether `/dev/pts` has pty `n`'s name: it lives and its master is
+/// open (measured: the master's close takes the name away at once).
+pub fn named(n: u64) -> bool {
+    live(n) && w(n, PT_GONE) == 0
+}
+
+/// The slave's owner (`which` 0) or group (1).
+pub fn owner(n: u64, which: int) -> u64 {
+    if !live(n) {
+        return 0
+    }
+    if which == 0 { w(n, PT_UID) } else { w(n, PT_GID) }
+}
+
+/// How many ptys live (`/proc/sys/kernel/pty/nr`).
+pub fn count() -> u64 {
+    var c: u64 = 0
+    var n: u64 = 0
+    while n < PTYS {
+        if live(n) {
+            c += 1
+        }
+        n += 1
+    }
+    c
+}
+
+/// The first live name at or past `from` (`/dev/pts`' listing), PTYS
+/// when none.
+pub fn named_from(from: u64) -> u64 {
+    var n = from
+    while n < PTYS {
+        if named(n) {
+            return n
+        }
+        n += 1
+    }
+    PTYS
+}
+
+fn take_frame() -> u64 {
+    let pa = frames.alloc() else 0
+    pa
+}
+
+/// A new pty for the process whose area is `a` (the open of
+/// `/dev/ptmx`): its number, its master counted open, locked; PTYS when
+/// every number is in use (-ENOSPC, as Linux past pty/max), PTYS + 1
+/// when the frames are not there.
+pub fn create(a: u64) -> u64 {
+    var n: u64 = 0
+    while n < PTYS && w(n, PT_USED) != 0 {
+        n += 1
+    }
+    if n == PTYS {
+        return PTYS
+    }
+    // The eleven frames, in the record's words PT_F0 to PT_F0 + 10: the
+    // state's, the ring's, IQ's four, OQ's five.
+    var k: u64 = 0
+    while k < 11 {
+        let pa = take_frame()
+        if pa == 0 {
+            while k > 0 {
+                k -= 1
+                frames.free(w(n, console.PT_F0 + k))
+                put_w(n, console.PT_F0 + k, 0)
+            }
+            return PTYS + 1
+        }
+        put_w(n, console.PT_F0 + k, pa)
+        k += 1
+    }
+    put_w(n, console.PT_STATE, w(n, console.PT_F0))
+    console.pty_start(tty(n))
+    put_w(n, PT_USED, 1)
+    put_w(n, PT_MASTERS, 1)
+    put_w(n, PT_SLAVES, 0)
+    put_w(n, PT_LOCKED, 1)
+    put_w(n, PT_EVER, 0)
+    put_w(n, PT_GONE, 0)
+    put_w(n, PT_UID, cred.uid(a, cred.FS))
+    put_w(n, PT_GID, cred.gid(a, cred.FS))
+    n
+}
+
+/// Pty `n`'s record and frames given back (both ends closed).
+fn destroy(n: u64) {
+    var k: u64 = 0
+    while k < 11 {
+        frames.free(w(n, console.PT_F0 + k))
+        k += 1
+    }
+    k = 0
+    while k < console.PT_WORDS {
+        put_w(n, k, 0)
+        k += 1
+    }
+}
+
+/// Whether the slave of pty `n` may be opened now: 0, or the errno
+/// (ENOENT 2 when the name is gone, EIO 5 while locked: measured).
+pub fn slave_check(n: u64) -> u64 {
+    if !named(n) {
+        return 2
+    }
+    if w(n, PT_LOCKED) != 0 {
+        return 5
+    }
+    0
+}
+
+/// An open file of pty `n`'s slave made (an open, TIOCGPTPEER, /dev/tty).
+pub fn slave_opened(n: u64) {
+    put_w(n, PT_SLAVES, w(n, PT_SLAVES) + 1)
+    put_w(n, PT_EVER, 1)
+    sched.wake_pipes()
+}
+
+/// The last close of an open file of pty `n`'s slave.
+pub fn slave_closed(n: u64) {
+    if !live(n) {
+        return
+    }
+    let s = w(n, PT_SLAVES)
+    if s > 0 {
+        put_w(n, PT_SLAVES, s - 1)
+    }
+    if w(n, PT_SLAVES) == 0 && w(n, PT_MASTERS) == 0 {
+        destroy(n)
+    }
+    sched.wake_pipes()
+}
+
+/// The last close of pty `n`'s master: the name goes, the slave is hung
+/// up (kernel/console's `hang`, kernel/sched's `hangup_tty`), the pty
+/// goes when no slave is open either.
+pub fn master_closed(n: u64) {
+    if !live(n) {
+        return
+    }
+    let m = w(n, PT_MASTERS)
+    if m > 1 {
+        put_w(n, PT_MASTERS, m - 1)
+        return
+    }
+    put_w(n, PT_MASTERS, 0)
+    put_w(n, PT_GONE, 1)
+    console.hang(tty(n))
+    sched.hangup_tty(tty(n))
+    if w(n, PT_SLAVES) == 0 {
+        destroy(n)
+    }
+    sched.wake_pipes()
+}
+
+/// Whether every slave descriptor that was opened is closed (the
+/// master then reads -EIO once OQ is empty, and polls HUP).
+fn slave_gone(n: u64) -> bool {
+    w(n, PT_EVER) != 0 && w(n, PT_SLAVES) == 0
+}
+
+/// The master's `read`: OQ's bytes, -EIO (`slave_gone`, OQ empty),
+/// -EAGAIN or WAIT.
+pub fn master_read(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64 {
+    let t = tty(n)
+    if console.oq_count(t) == 0 {
+        if slave_gone(n) {
+            return NEG_EIO
+        }
+        return if nonblock { NEG_EAGAIN } else { WAIT }
+    }
+    if len == 0 {
+        return 0
+    }
+    let r = console.oq_take(t, pml4, buf, len)
+    sched.wake_pipes() // a slave writer waiting for room
+    r
+}
+
+/// The master's `write`: the bytes IQ takes (then fed to the line
+/// discipline, their keys' signals raised), -EAGAIN or WAIT when IQ is
+/// full.
+pub fn master_write(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64 {
+    let t = tty(n)
+    if len == 0 {
+        return 0
+    }
+    if console.iq_room(t) == 0 {
+        return if nonblock { NEG_EAGAIN } else { WAIT }
+    }
+    let r = console.master_write(t, pml4, buf, len)
+    console.pty_signals(t)
+    sched.wake_pipes()
+    r
+}
+
+/// The slave's `write` (its background rule asked by the caller): -EIO
+/// when hung up, the bytes OQ takes, -EAGAIN or WAIT when none fit or
+/// IXON holds the output.
+pub fn slave_write(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64 {
+    let t = tty(n)
+    if console.hung(t) {
+        return NEG_EIO
+    }
+    if len == 0 {
+        return 0
+    }
+    let r = console.slave_write(t, pml4, buf, len)
+    if r == 0 {
+        return if nonblock { NEG_EAGAIN } else { WAIT }
+    }
+    sched.wake_pipes()
+    r
+}
+
+/// The slave's read took bytes: what waits in IQ moves on, and a master
+/// writer waiting for room runs again.
+pub fn slave_took(n: u64) {
+    let _m = console.feed(tty(n))
+    sched.wake_pipes()
+}
+
+/// poll's mask for pty `n`'s master.
+pub fn master_poll(n: u64) -> u64 {
+    let t = tty(n)
+    var m: u64 = 0
+    if console.oq_count(t) > 0 {
+        m = m | POLLIN
+    }
+    if console.iq_room(t) > 0 {
+        m = m | POLLOUT
+    }
+    if slave_gone(n) {
+        m = m | POLLHUP
+    }
+    m
+}
+
+/// poll's mask for pty `n`'s slave.
+pub fn slave_poll(n: u64) -> u64 {
+    let t = tty(n)
+    if console.hung(t) {
+        return POLLIN | POLLOUT | POLLERR | POLLHUP
+    }
+    var m: u64 = 0
+    if console.readable(t) {
+        m = m | POLLIN
+    }
+    if console.oq_room(t) > 0 && !console.stopped(t) {
+        m = m | POLLOUT
+    }
+    m
+}
+
+/// An ioctl on pty `n`'s master by the process whose area is `a`: the
+/// result for %rax, or console.REFUSED (TIOCGPTPEER is kernel/files').
+pub fn master_ioctl(a: u64, n: u64, pml4: u64, req: u64, arg: u64) -> u64 {
+    let t = tty(n)
+    if req == TIOCGPTN {
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, n, 4)
+        return 0
+    }
+    if req == TIOCSPTLCK {
+        if !uaccess.readable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        put_w(n, PT_LOCKED, if uaccess.get(pml4, arg, 4) != 0 { 1 } else { 0 })
+        return 0
+    }
+    if req == TIOCGPTLCK {
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, w(n, PT_LOCKED), 4)
+        return 0
+    }
+    if req == TCGETS {
+        return console.termios_out(t, pml4, arg)
+    }
+    if req == TCSETS || req == TCSETSW || req == TCSETSF {
+        let r = console.termios_in(t, pml4, arg, req == TCSETSF)
+        sched.wake_pipes()
+        return r
+    }
+    if req == TIOCGWINSZ {
+        if !uaccess.writable(pml4, arg, 8) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, console.winsz(t), 8)
+        return 0
+    }
+    if req == TIOCSWINSZ {
+        return console.set_winsz(t, pml4, arg)
+    }
+    if req == TIOCGPGRP {
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, sched.tty_pgrp_of(t), 4)
+        return 0
+    }
+    if req == TIOCSPGRP {
+        return console.set_pgrp(t, pml4, arg)
+    }
+    if req == TIOCGSID {
+        let s = sched.tty_session_of(t)
+        if s == 0 {
+            return NEG_ENOTTY
+        }
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, s, 4)
+        return 0
+    }
+    if req == console.FIONREAD {
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, console.oq_count(t), 4)
+        return 0
+    }
+    if req == console.TIOCOUTQ {
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, 0, 4)
+        return 0
+    }
+    if req == TCFLSH {
+        let q = arg & 0xffffffff
+        if q > TCIOFLUSH {
+            return NEG_EINVAL
+        }
+        if q == TCIFLUSH || q == TCIOFLUSH {
+            console.oq_flush(t) // the master's input is the slave's output (measured)
+            sched.wake_pipes()
+        }
+        return 0
+    }
+    if req == TCSBRK {
+        return 0
+    }
+    if req == TIOCNOTTY || req == TIOCSCTTY {
+        return NEG_ENOTTY // measured: the master is nobody's controlling terminal
+    }
+    if (req >> 8) & 0xff == 0x45 {
+        return NEG_ENOTTY // an input device's request, as the console answers
+    }
+    let _who = a
+    console.REFUSED
+}
