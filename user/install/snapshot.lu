@@ -27,12 +27,19 @@ fn excluded(path: str) -> bool {
 // rewrite while the tree is walked (a lease renewed) is not a change of the
 // source. A directory here is left out with everything under it. An image that
 // ever ships one of these paths must take it off this list first.
+// px112: burrowd, the ssh server (/etc/pax-boot.d/burrowd), adds its host key,
+// its log and its pid: a machine makes its own key at its own first boot, so
+// neither a fresh install nor an upgrade copies the stick's.
 fn runtime_state(path: str) -> bool {
     path == "/var/lib/dhcp" || // kernel/dhcp: the lease (write_lease) and its directory; the rest of /var/lib is carried
         path == "/etc/resolv.conf" || // kernel/dhcp: the lease's name servers (write_resolv; take_static for a static address)
         path == "/var/log/sudo.log" || // sudo: a line for each use, the stick's, never the installed machine's
         path == "/Trash" || // trash: root's ~/Trash (root's home is /), what was trashed at the stick
-        path.starts_with("/.") // root's home is / (/etc/passwd, the console's HOME): pelt's history, lope's store, any dotfile of root's
+        path.starts_with("/.") || // root's home is / (/etc/passwd, the console's HOME): pelt's history, lope's store, any dotfile of root's
+        path == "/etc/burrowd/ssh_host_ed25519_key" || // burrowd: its host key, each machine's own
+        path == "/etc/burrowd/ssh_host_ed25519_key.pub" ||
+        path == "/var/log/burrowd.log" || // burrowd: a line for each connection
+        path == "/var/run/burrowd.pid" // burrowd: the listener's pid
 }
 
 fn metadata_equal(a: List[int], b: List[int]) -> bool {
