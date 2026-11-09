@@ -1,0 +1,182 @@
+px111 — ptys on PAX: the prediction, written 2026-11-09 at base 4d899ea4 (pax trunk at launch),
+before the first kernel change. The kernel is unchanged from 4d899ea4 on this branch; what is
+committed before this file is the probe, its build tool, its suite, the checker, the recording rig
+and Linux's recordings.
+
+Sources, the only ones: pty(7), pts(4), ioctl_tty(2) and the TIOC*(2const) pages, termios(3),
+posix_openpt(3), grantpt(3), unlockpt(3), ptsname(3), ttyname(3), credentials(7),
+proc_pid_stat(5), proc_sys_kernel(5) (man-pages 6.7); POSIX.1-2024 XBD chapter 11 and XSH
+posix_openpt, grantpt, unlockpt, ptsname, tcsetpgrp, tcgetsid; black-box runs of Linux 7.2.4 (a
+lane host's installed kernel image, booted under QEMU/KVM with notes/px111/vminit.c as its first
+program: devtmpfs at /dev, devpts at /dev/pts with no options, one CPU, no network, no disk); and
+strace of the probe in a rootless Ubuntu 24.04 container (which calls glibc's pty functions make).
+No kernel's source of any OS, no C library's, no shell's. pelt's own tree (the maintainer's) was
+read for what it does with COLUMNS and SIGWINCH (src/sh/edit.lu, src/sh/signal.lu).
+
+The probe: user/elf/ptyprobe.c (tools/mkpty), static glibc, sections O T C W H P M, and `drive`
+(S). The recordings: tests/mpx5-pty.d/linux/{probe,session}-{root,user}.txt, by
+notes/px111/rig/record.sh from the suite's own archives (the session's pelt, stty, cut and sleep
+are the bytes PAX runs). Two recordings of the same binary (68913eea, 184e9d31) differ only in the
+rows ruled R-px111-6 below.
+
+A. What Linux answers (measured), by section
+
+O  /dev/ptmx is chr 5:2 0666 root's; /dev/pts a file system of its own, dir 0755, inode 1;
+   /dev/pts/ptmx chr 5:2 mode 0000 (devpts' default), inode 2; /dev/pts lists `. .. ptmx`;
+   /proc/sys/kernel/pty/nr counts the ptys open (0, 1, 4, back to 0). A new master: TIOCGPTN 0,
+   ptsname /dev/pts/0, TIOCGPTLCK 1 (locked); its slave chr 136:0, 0600, the opener's
+   file-system uid and gid (0:0 as root, 1000:1000 as a user), inode 3 (N + 3); opening it while
+   locked -EIO; grantpt 0 and changes nothing (no chown on devpts); unlockpt 0, TIOCGPTLCK 0; the
+   slave opens; isatty 1 both; ttyname(slave) /dev/pts/0, ttyname(master) /dev/ptmx (its link);
+   TIOCGPTN and TIOCSPTLCK on a slave -ENOTTY; TIOCGPTPEER opens the slave (136:0), on a slave
+   -EIO; TIOCPKT 0; relocking keeps the open slave reading; numbers are the lowest free (1 2 3,
+   close 2, the next is 2); a master closed under an open slave takes the slave's name away at once
+   (ENOENT) and pty/nr drops when both ends are closed; a user opening root's slave -EACCES;
+   posix_openpt opens /dev/ptmx; /dev/ptmx opened read-only refuses a write -EBADF. Past
+   /proc/sys/kernel/pty/max: -ENOSPC (`ptyprobe max`, Linux only: with max 4, three opened).
+T  A new pty's termios (slave and master read the same): iflag 0x500 (ICRNL|IXON), oflag 0x5,
+   cflag 0xbf, lflag 0x8a3b, c_cc 3 28 127 21 4 0 1 0 17 19 26 0 18 15 23 22 0 0 0, B38400. The
+   console's line discipline's answers throughout (canonical editing, VERASE/VKILL/VWERASE/VEOF,
+   ECHOCTL's ^X, ECHONL, ICRNL/IGNCR/INLCR, OPOST/ONLCR on the slave's output, cfmakeraw, VMIN and
+   VTIME), and: a part of a line is not readable (poll, FIONREAD 0); FIONREAD on the master counts
+   the echo; settings set through the master are the slave's; with VMIN 3 two bytes are not
+   readable under poll with VTIME 0 (they are with VTIME 5), but a non-blocking read takes them; tcflush on the slave of its
+   output does nothing to what the master has not read, on the master of its input discards the
+   slave's unread output, and TCOFLUSH on the master leaves the slave's input; TIOCOUTQ 0; IXON:
+   after ^S a non-blocking write of the slave is -EAGAIN and the master reads nothing, after ^Q
+   writes go through; ^S and ^Q in a line are not part of it.
+C  A session leader with no terminal opening a slave without O_NOCTTY takes it: tcgetsid and
+   tcgetpgrp are its own; tcgetpgrp(master) is the slave's foreground group (0 before any session);
+   TIOCGSID on the master the slave's session (-ENOTTY while no session holds it); /dev/tty opens it (its own node, chr 5:0 0666, link
+   /dev/tty, writes reach the master); /proc stat tty_nr 136:N and tpgid. TIOCSCTTY: its own 0,
+   a second pty by a leader that has one -EPERM, a member that leads nothing -EPERM, another
+   session's terminal -EPERM, root's arg 1 steals it with no signal to anyone (the thief's later
+   TIOCNOTTY hangs up the thief's own group); tcsetpgrp: a child's group 0, a missing group
+   -ESRCH, another session's -EPERM, through the master 0; ^C ^\ ^Z written to the master signal
+   the foreground group (INT, QUIT, TSTP), echo `^C` and flush the line unless NOFLSH; ISIG clear
+   makes them bytes; a background read is SIGTTIN (ignored: -EIO), a background write under TOSTOP
+   and a background tcsetattr are SIGTTOU; TIOCNOTTY by a member loses it alone, by the leader
+   hangs up the foreground group (HUP, CONT) and leaves the tty with no session; TIOCNOTTY on a
+   master -ENOTTY.
+W  A new pty is 0x0; TIOCSWINSZ on the master or the slave sets both sides' size and sends SIGWINCH
+   to the foreground group, nothing when the size is unchanged, a change of the pixel fields alone
+   counts; a bad pointer -EFAULT both ways; a pty no session holds takes a size and signals nobody.
+H  Closing the master hangs up the slave: the controlling process (the session leader) hears HUP
+   and CONT, the foreground group nothing; the slave then reads 0 (EOF, again and again), writes
+   -EIO, polls IN OUT ERR HUP, tcgetpgrp/FIONREAD/tcgetattr -EIO, /dev/tty -ENXIO. Every slave
+   descriptor closed: the master reads what is left, then -EIO, polls OUT HUP, and still takes
+   writes (the slave opened again reads them, the echo comes back); a master whose slave was never
+   opened polls OUT, reads -EAGAIN, takes writes. The session leader's end sends its foreground
+   group SIGHUP (no CONT) and leaves the tty with no session (tcgetpgrp of the master 0, TIOCGSID
+   -ENOTTY).
+P  POLLOUT on both new ends; the echo makes the master readable; a line makes the slave readable;
+   O_NONBLOCK reads -EAGAIN; full buffers: byte at a time, 20480 each way (P10a, P10b), larger
+   writes 13824-22096 (varies, R-px111-6); blocking writers wait and every byte arrives intact
+   (100000 each way); waiting readers and polls are woken by the other side's write; a canonical
+   line holds 4095 bytes and its newline (5000 written, 4096 read).
+M  64 pairs at once, numbered 0-63, each slave reads its own master's bytes, all closed: /dev/pts
+   and pty/nr back to none; 1000 rounds of open/use/close always number 0, nothing left; a pair
+   shared with a child that ended, then closed: nothing left.
+S  pelt (/bin/sh -i) as the session leader of a pty the driver holds the master of: its prompt;
+   `stty size` 0 0, after TIOCSWINSZ 30x100 `30 100`; a WINCH trap that sets COLUMNS from `stty
+   size`, then TIOCSWINSZ 40x120: `echo cols=$COLUMNS` says 120; `sleep 100` becomes the
+   foreground job (tcgetpgrp of the master moves), the byte 0x03 written to the master ends it,
+   pelt has the terminal back and `$?` is 130; the master closed: pelt dies of SIGHUP. As root and
+   as 1000:1000 alike.
+
+B. What PAX will answer: every row of every run Linux's, but for the rows named in
+   tests/mpx5-pty.d/ruled.txt (R-px111-3, -6, -7): packet mode refused by name (O36), a failed
+   locked open leaves open descriptors alone (O40, O43), and the full buffers' counts PAX's own
+   20480 (P5, P10, P11, P13, P10a#2-3, P10b#2-3, P10c 20479). The refusal line `refused: tty ioctl
+   0x5420, -ENOTTY` once in each probe run and no other.
+
+C. What PAX answers today (red, before any change): /dev/ptmx and /dev/pts do not exist, so O1-O3
+   -ENOENT, O4 no, O5-O7 and the open -ENOENT and section O ends at O8; T `no pair`, C `no
+   master`, W `no pair`, H `no master`, P `no pair`; M1 opened no; S `no master`. Every row of
+   sections O (from O1), T, C, W, H, P, S red by name; M's rows red but M3 (vacuous). The run at
+   the prediction's head is in notes/px111/red.txt.
+
+D. The kernel, as it will be built (each a row above):
+ 1. One line discipline, several terminals (kernel/console). The console's state and ring are
+    addressed through a terminal id: 0 the console (boot/console.S's storage, as today), 1 + n
+    pty n's slave (its state and 4096-byte ring in frames the pty holds). Every routine of the
+    discipline (input, echo, erase, the canonical and raw reads, VMIN/VTIME, termios in and out,
+    the background rules, the signal keys) takes the id; echo and output processing go to COM1 for
+    the console and to the pty's output queue for a slave. No second discipline.
+ 2. kernel/pty: 256 ptys (R-px111-4), a table of records in .bss; at the open of /dev/ptmx the
+    lowest free number, 11 frames (state, the discipline's ring, a 16384-byte queue from the
+    master to the discipline, a 20480-byte queue from the slave to the master), locked; the
+    master's and the slave's open counts; given back when both are closed. The master's write
+    queues bytes for the discipline and feeds it while it takes them (raw: room in the ring;
+    canonical: a line still being edited takes bytes, dropped past 4095 as on the console; a full
+    ring of whole lines stops the feed); the slave's read feeds it again. The slave's write goes
+    through OPOST/ONLCR into the master's queue, waits (or -EAGAIN) when it is full or IXON has
+    stopped it (R-px111-2). Signal keys written to the master are raised for that tty's foreground
+    group at once (a system call, not an interrupt).
+ 3. /dev/ptmx (devtmpfs's 5:2 node, 0666) and /dev/pts (its own device number; `.`/`..`/`ptmx`
+    and the open slaves' numbers, inode N + 3, mode 0600, the opener's fsuid/fsgid, rdev 136 +
+    N/256 : N%256), with walk, stat, getdents, readlink of /proc/self/fd/N, access checks by the
+    class rule, /dev/pts/ptmx opening a master too.
+ 4. Sessions: a process's controlling terminal is a terminal id (0 none, the console, a pty), and
+    each terminal's session and foreground group are kernel/ttys' (one small table both
+    kernel/sched and kernel/console use); setsid, TIOCSCTTY (no signal at a steal, R-px111-9),
+    TIOCNOTTY, open without O_NOCTTY, /dev/tty, TIOCGPGRP/TIOCSPGRP/TIOCGSID (on a master: the
+    slave's), the background rules, a leader's exit, /proc/<pid>/stat's tty_nr and tpgid, all per
+    terminal.
+ 5. The ioctls: TCGETS/TCSETS*/TCFLSH/TCSBRK/TIOCSTI as the console's, TIOCGWINSZ/TIOCSWINSZ
+    (SIGWINCH to the foreground group on a change), FIONREAD, TIOCOUTQ (0), TIOCGPTN, TIOCSPTLCK,
+    TIOCGPTLCK, TIOCGPTPEER, TIOCSCTTY, TIOCNOTTY; everything else refused by name (TIOCPKT and the
+    rest: R-px111-3).
+ 6. Hangup: the master's last close hangs the slave up (SIGHUP and SIGCONT to the controlling
+    process, reads 0, writes and ioctls -EIO, poll IN OUT ERR HUP), the session loses the
+    terminal; the slave's last close makes the master read what is left, then -EIO, poll HUP.
+ 7. poll: the masks above for both ends (VMIN under poll with VTIME 0), every wait woken by
+    kernel/sched's pipe wake (`wake_pipes`) after any change to a pty.
+ 8. /proc/sys/kernel/pty/nr and max (R-px111-5).
+
+E. Rulings asked (each implemented as recommended unless ruled otherwise)
+ R-px111-1 devpts' options. A (recommended): Linux's defaults with no options: a slave 0600 owned
+   by the opener's file-system ids, /dev/pts/ptmx 0000 (PAX has no tty group; nothing in its
+   image writes to another's terminal). B: a distribution's gid=5,mode=620,ptmxmode=666, with a
+   `tty` group added to every image.
+ R-px111-2 IXON on a pty. A (recommended): Linux's default iflag 0x500 and IXON honoured on ptys
+   (^S holds the slave's output and its writers, ^Q or IXON cleared releases it, both are taken
+   out of the input); the console keeps px13's IXON clear. B: a pty starts with the console's
+   0x100 and ^S/^Q are bytes (T1, T2, T36, T67-T71 ruled).
+ R-px111-3 packet mode (TIOCPKT). A (recommended): refused by name, -ENOTTY and the kernel's
+   line (no program PAX ships asks it; ssh servers that do are not ported). B: implement it.
+ R-px111-4 how many ptys. A (recommended): 256 at once (11 frames each while open, 11 MiB at
+   most), -ENOSPC past them as Linux past pty/max; /proc/sys/kernel/pty/max reads 256 and is not
+   writable. B: 64. C: 4096 as Linux (44 MiB of frames at most).
+ R-px111-5 /proc/sys/kernel/pty/nr and max served (the leak rows read nr). A (recommended): yes.
+   B: no (M and O's nr rows ruled to ENOENT).
+ R-px111-6 the full buffers' sizes. A (recommended): 20480 bytes each way, Linux's count for
+   byte-at-a-time writes, held to Linux in P10a/P10b; the rows of larger writes, where Linux's
+   count moves with the write size and the run, ruled to PAX's 20480 (and P10c's 20479, where
+   Linux kept 12 bytes fewer than it took). B: any fixed size, every count ruled.
+ R-px111-7 a failed open of a locked slave. A (recommended): it changes nothing for descriptors
+   already open (O40, O43 ruled). B: Linux's: the open descriptors' next read -EIO.
+ R-px111-8 what a pty refuses. A (recommended): by name, every request but section D.5's
+   (TIOCPKT, TIOCSIG, TIOCEXCL/NXCL, TIOCCONS, TIOCSETD/GETD, TIOCVHANGUP, TCXONC, the KD*
+   requests), as the console's REFUSED path does. B: implement TIOCSIG and TCXONC too.
+ R-px111-9 TIOCSCTTY's steal. A (recommended): no signal to anyone at a steal (C58-C63, measured
+   here), for the console too: px48's `take_tty` sent the old foreground group SIGHUP and SIGCONT,
+   from a measurement whose `R:CONT,R:HUP` was the thief's own TIOCNOTTY under a tag it inherited
+   (jobs.c's thief keeps R's tag and handlers), so mpx5-jobs' transcript is unchanged by the fix.
+   B: keep px48's signals (C60 ruled).
+ R-px111-10 the session row's $COLUMNS. pelt sets no COLUMNS of its own (XBD 8.3: it reads COLUMNS
+   as the user's width), so A (recommended): the resize reaches $COLUMNS through a WINCH trap typed
+   in the session (SIGWINCH to the foreground group, the trap, stty's TIOCGWINSZ), as recorded.
+   B: a pelt lane to set COLUMNS on SIGWINCH as bash's checkwinsize does, and the row after it.
+ R-px111-11 the console. A (recommended): the console stays one terminal (ttyS0, tty0, console:
+   one line discipline instance, one session), its answers unchanged; only its state is addressed
+   by id. B: also give the screen and COM1 terminals of their own.
+
+F. The rows (tests/mpx5-pty, Y0-Y5): Y0 build; Y1 the probe as root; Y2 as 1000:1000; Y3 the
+   session as root and as a user; Y4 the refusals; Y5 the machine. Under KVM and TCG (`--accel`),
+   BIOS and UEFI, both tiers. The plant: `px111-plant-winch`, kernel/console's TIOCSWINSZ on a pty
+   sets the size and sends no SIGWINCH: W3, W8, W11, W16 red by name (and S5's `cols=`), every
+   other row green.
+
+G. The 860. Named in the note: what the first metal check looks for (a pty opened on the metal's
+   own console session and ssh over it once burrow's bw05 lands).
