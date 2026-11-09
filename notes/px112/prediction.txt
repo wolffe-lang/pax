@@ -1,0 +1,199 @@
+px112 — burrowd on PAX (burrow's B6): the prediction, written before the first change
+(2026-11-09 18:40Z, at trunk 4d899ea4, branch px112).
+
+The goal: burrowd, burrow's ssh server, runs on PAX, started at boot, with a
+host key made at the first boot and kept, so that from another machine on
+the LAN `ssh pax@<the machine> ls` and `git push <the machine>:repo` work: a
+command over ssh, and den serving git-upload-pack and git-receive-pack.
+burrow's half (password authentication against /etc/shadow with wolf-std's
+`$7$`, burrow's own PR first, its note notes/px112-burrowd-passwords.md in
+burrow) is predicted there; this file is PAX's half.
+
+Read before writing it: the burrow track's B5 and B6, burrow's bw04 note
+(its "For B6" section, which drafted these items) at burrow trunk 84e2978c;
+PAX's kmain_console header (the run list, pid 1, the network's waits before
+the first program), user/login (pid 1 on an installed system),
+user/usb-login.sh (the live entry), tools/distribution-root, user/install's
+prepare.lu and upgrade.lu (accounts, generated texts), user/auth (the shadow
+file, the `$7$` binding), kernel/user and kernel/process (getrandom:
+RDRAND, else the TSC folded), tools/mkburrow and tools/install-burrow (px104),
+tests/mpx4-console-push and tests/mpx4-console-net (the rigs: a typed
+console, a tap and dnsmasq in the container's own network namespace), and
+notes px103 to px106.
+
+What burrowd needs that PAX has, read and not yet run: fork (every page
+copied), execve, wait4, pipes, poll, setresuid/setresgid/setgroups (px103),
+setpgid and setsid, TCP listen and accept on IPv4 (256 connections),
+/proc/<pid>/status, /dev/urandom as getrandom's bytes. What it lacks: a
+peer address (burrowd reads /proc/net/tcp, which PAX has not: the log and
+SSH_CONNECTION say UNKNOWN port 0 until wolf-std's getpeername; named, not
+changed here), and a service manager.
+
+The rulings to recommend (R-px112-1 to -6 are burrow's, in its note):
+
+  R-px112-7  how burrowd starts at boot. (A) an init hook: the executable
+             files of /etc/pax-boot.d, run in name order by pid 1 before
+             its first prompt, each waited for at most 10 s (one still
+             running after that is named and left to run), standard input
+             /dev/null, its output on the console: pid 1's /bin/login on an
+             installed system, and the live entry (user/usb-login.sh) on
+             the stick. The order against the network: kmain_console brings
+             the network up and waits for the lease (bounded by
+             /etc/pax-net's wait=) before it starts pid 1, so every hook
+             runs after that wait; burrowd listens on 0.0.0.0, so a lease
+             that comes later still reaches it. (B) a kernel service list
+             the kernel starts beside pid 1; (C) /etc/pax-run a script that
+             starts burrowd and then execs /bin/login. Recommended: (A): no
+             kernel change, /etc/pax-run unchanged on every install and
+             upgrade, and a directory an upgrade adds files to without
+             editing one of the owner's. The dev and release images' root
+             shell (pelt -i -m as pid 1) runs no hook: named.
+  R-px112-8  the host key. (A) /etc/pax-boot.d/burrowd makes
+             /etc/burrowd/ssh_host_ed25519_key with burrow-keygen (-t
+             ed25519 -N '' -C <hostname>) when there is none, root's, 0600,
+             the directory root's 0755, and prints its fingerprint
+             (burrow-keygen -l) on the console at every boot, "made now" at
+             the first. Its bytes are /dev/urandom's: PAX's getrandom,
+             RDRAND (every PAX host has it; the metal target's CPU does); a
+             CPU without RDRAND gets the TSC folded, which the kernel names
+             as not cryptographic, and a program cannot tell which it got
+             (PAX has no /proc/cpuinfo): named as a gap, for a lane that
+             gives getrandom a real pool. No image ships a key. (B) the installer makes it. Recommended: (A): the live
+             stick and an upgraded install need it too, and neither runs
+             the installer's prepare.
+  R-px112-9  listening on the LAN. (A) the images ship
+             /etc/burrowd/burrowd_config with `ListenAddress 0.0.0.0`,
+             `PasswordAuthentication yes`, `AcceptEnv GIT_PROTOCOL`,
+             `PidFile /run/burrowd.pid`: burrowd answers on the LAN on every
+             PAX that boots a hook (an installed system, the live stick),
+             where no account can log in until its owner sets a password or
+             lists a key (no image ships /etc/shadow or authorized_keys; an
+             install's accounts are locked until a password is chosen; root
+             is refused always); (B) loopback only until the owner adds
+             the line; (C) (A) on installs, (B) on the stick. Recommended:
+             (A). The machine is behind its router, which forwards nothing;
+             the README says so, and how to turn it off (one line,
+             `ListenAddress 127.0.0.1`). An upgrade keeps an owner's edited
+             file and puts the new one beside it, as for any shipped file.
+  R-px112-10 the worker's account. (A) `burrowd:x:989:989:burrowd:/nonexistent:/bin/false`
+             and `burrowd:x:989:` in the images' /etc/passwd and
+             /etc/group (lobo is 990): a fresh install copies them, an
+             upgrade appends them (its new-system-accounts rule), and its
+             /etc/shadow line is the installer's `!`; (B) another id or
+             name. Recommended: (A).
+  R-px112-11 the restart and the log. (A) the hook starts a loop in its own
+             process group (pelt's `set -m`): burrowd -D -E
+             /var/log/burrowd.log, its start refusals appended to the same
+             file, restarted 1 s after it ends, the wait doubling to 60 s
+             while it keeps ending within 10 s of its start. The log file
+             made root's, 0600, before the first start: `sudo cat
+             /var/log/burrowd.log` at the console. (B) no restart.
+             Recommended: (A).
+  R-px112-12 burrowd's pin. (A) user/burrow.pin moves to burrow's PR head
+             (then its merge), and tools/mkburrow builds and
+             tools/install-burrow installs /bin/burrowd beside /bin/ssh and
+             /bin/burrow-keygen: one tree, one pin, three programs; (B) a
+             pin of its own for burrowd. Recommended: (A); /bin/ssh moves
+             with it from 0d98ce92 to B5's client (bw03b: the system
+             known_hosts files by default, the shell with no pty), and
+             tests/mpx4-console-push holds it.
+  R-px112-13 the rows' reach. (A) a tap in the rig container's own network
+             namespace, dnsmasq leasing the guest a fixed address by its
+             MAC, the container's ssh and git (Ubuntu 24.04's OpenSSH
+             9.6p1 and git 2.43.0, pinned by the image's package list)
+             reaching the guest's port 22 as a LAN machine would; (B) QEMU's
+             user network and a hostfwd. Recommended: (A), as px105's
+             quiet way.
+
+What changes, predicted:
+
+  - tools/mkburrow builds burrowd too (burrow's tools/build --static has
+    made target/static/burrowd since B5): three binaries, two checkouts,
+    one digest each; sums.txt has three lines. tools/install-burrow
+    installs /bin/burrowd, 0755. tools/distribution-root: the account and
+    group lines, /etc/burrowd/burrowd_config (0644, root's),
+    /etc/pax-boot.d/burrowd (0755), /etc/burrowd (0755). The images grow by
+    about 17 MB (burrowd static, unstripped as burrow is), the boot by the
+    hook's time.
+  - user/login runs /etc/pax-boot.d as pid 1, after it empties sudo's
+    records and before its first prompt. user/usb-login.sh does the same
+    before its `login:`.
+  - The boot, with the hook, under KVM: the console's prompt about 0.1 s
+    later at a boot that has a key, about 0.2 s later at the first (an
+    Ed25519 key is one scalar multiplication). The console shows, before
+    the prompt:
+        burrowd: host key 256 SHA256:<43> <hostname> (ED25519) (made at this boot)
+        burrowd: started (pid <n>), listening on 0.0.0.0 port 22; log /var/log/burrowd.log
+  - No kernel change. If burrowd asks PAX for a call it does not serve, the
+    call is a kernel row of its own (red first) in this lane, named here as
+    a miss.
+
+The rows: tests/mpx5-burrowd, KVM (TCG in CI), native and release, BIOS and
+UEFI. Its image: kmain_console, the installed shape's run list (/bin/login
+as pid 1), pelt, boreutils' cat env id mkdir chmod ls rm kill sleep, den
+with its two service wrappers, burrow's three programs, /etc/pax-boot.d
+and /etc/burrowd as the images ship them, an /etc/passwd with root, pax,
+lobo and burrowd, and an /etc/shadow made at run time (passwords from
+Python's secrets, hashed by tools/mkauth's mkshadow on its standard input;
+never in a file, an argument vector, a log or a record). /etc/burrowd is a
+small ext2 disk of the run's own, mounted by /etc/fstab, so a second boot
+of the same disk finds the first boot's key. The guest leases
+192.168.89.20 from dnsmasq on the tap; the container's ssh and git reach
+it. The rows, each red at trunk (no burrowd in the tree) and green at the
+head:
+
+  B0  the image: burrowd built and installed, its digest; the shadow made
+  B1  the first boot: the console's `made at this boot` fingerprint line,
+      and the key the container's ssh is shown (ssh-keyscan) is that
+      fingerprint
+  B2  publickey: `ssh pax@guest true`, `echo` to stdout and stderr, exit
+      codes 0, 1 and 127, held byte for byte to the same through the
+      container's sshd on Linux
+  B3  password: the same commands with pax's password (SSH_ASKPASS)
+  B4  `id` in the session: pax's uid, gid and groups
+  B5  refusals: a wrong password (`Permission denied, please try again.`
+      twice, then `Permission denied (publickey,password).`, 255), root
+      with its key and with its password, an unlisted key, a locked account
+      (lobo, `!`), `~/.ssh` 0777 (StrictModes)
+  B6  status and signal: `exit 3` is 3; `kill -TERM $$` is 255 with
+      burrowd's log line `signal TERM`
+  B7  git: the container's git clones a bare repository on PAX through
+      burrowd (den's upload-pack), commits, pushes (den's receive-pack),
+      clones again: the refs and every object equal to the same steps
+      through sshd and git on Linux, `git fsck --full` clean;
+      GIT_PROTOCOL=version=2 reaches den
+  B8  the restart: `kill` of the listener's pid (/run/burrowd.pid) at the
+      console; a login works again within 3 s, a new pid
+  B9  the log at the console: /var/log/burrowd.log 0600 root's, one line per
+      connection of B1-B8, the password logins `key password`, no password
+      in it, in the serial log or in any record (compared in memory)
+  B10 a reboot keeps the host key: the second boot of the same /etc/burrowd
+      disk prints the same fingerprint with no `made at this boot`, and the
+      container's known_hosts line from B1 still verifies
+
+The plant (off the line, its own branch, red by name): the hook makes a new
+key at every boot (its `[ -f ]` test gone): B10 red.
+
+The stick leg (notes/px112/stick-leg.txt, user/console keys): the live
+entry, the console's lease and the burrowd lines before the prompt; at the
+prompt `cat /var/log/burrowd.log` and `ssh -o StrictHostKeyChecking=no -o
+UserKnownHostsFile=/dev/null pax@127.0.0.1 true`, which burrowd refuses
+(no password on the stick): `Permission denied (publickey,password).`, and
+its log line names it. From another machine on the LAN, the same refusal
+answers (no account on the stick can log in), which is what "burrowd
+answers" means there.
+
+The metal target (never run here): the owner's first check from the other
+machine on the LAN, in the note: at the console, `passwd` for pax if
+`passwd -S pax` says L; then `ssh pax@<address> ls`, compare the
+fingerprint with the console's line, append a public key with
+`ssh pax@<address> 'mkdir -p .ssh && chmod 700 .ssh && cat >>
+.ssh/authorized_keys && chmod 600 .ssh/authorized_keys' < key.pub`, then
+`git push <address>:repo.git` into a bare repository den made there.
+
+Measured (reported, not gated): connect to the first byte of `true`
+through burrowd on PAX under KVM, publickey and password, against burrowd
+on Linux in the same container: 2x to 6x for publickey (each connection
+forks four processes, and a PAX fork copies every page of a 17 MB static
+program); for a password, the hash dominates: PAX's own 620-740 ms at the
+shipped cost (px106's table) against about 0.45 s on Linux.
