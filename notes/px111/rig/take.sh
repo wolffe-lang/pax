@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # notes/px111/rig/take.sh SHA WHAT [ARGS…] — one heavy take of tests/mpx5-pty at SHA, run from a
-# checkout of SHA (this file is that commit's): WHAT is `build` (tests/mpx5-pty --only build) or
-# `suite` (the whole suite; ARGS go to it, e.g. --tier native --firmware bios --accel kvm), in a
+# checkout of SHA (this file is that commit's): WHAT is `kernel` (kmain_console alone, its
+# compiler's errors), `build` (tests/mpx5-pty --only build) or `suite` (the whole suite; ARGS go to it, e.g. --tier native --firmware bios --accel kvm), in a
 # container with KVM, under both of the block's locks. PAX_BUILD is $L/pb-<sha8>.
 set -uo pipefail
 trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
@@ -18,6 +18,7 @@ echo "take: $SHA $WHAT $*; uptime: $(uptime)"
 case $WHAT in
     build) step build ctr 1 localhost/px75-ubuntu:2 bash -c 'export PAX_WOLF=$(tools/fetch-wolf) && tests/mpx5-pty --only build "$@"' x "$@" ;;
     suite) step suite ctr 1 localhost/px75-ubuntu:2 bash -c 'export PAX_WOLF=$(tools/fetch-wolf) && tests/mpx5-pty "$@"' x "$@" ;;
+    kernel) step kernel ctr 0 localhost/px75-ubuntu:2 bash -c 'export PAX_WOLF=$(tools/fetch-wolf) && mkdir -p "$PAX_BUILD/k" && tools/build-kernel "$@" --src kernel/kmain_console.lu "$PAX_BUILD/k" > /dev/null' x "$@" ;;
     plant) rawstep plant ctr 1 localhost/px75-ubuntu:2 bash -c 'export PAX_WOLF=$(tools/fetch-wolf) && tests/mpx5-pty "$@"' x "$@" ;;
     *) echo "take: no such thing: $WHAT"; exit 2 ;;
 esac
