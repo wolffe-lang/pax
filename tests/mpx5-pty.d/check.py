@@ -6,9 +6,10 @@ probe to the Linux reference, row by row.
     check.py --refusals IMAGE RULED.txt           the `refused:` lines ruled for IMAGE, sorted
     check.py --selftest
 
-A row's id is its first word (`O8`, `T69a`, `ptyprobe:`, `done:`); the
-session's transcript lines (`S| …`) are numbered in order (`S|1`, `S|2`,
-…). Each Linux row is expected on PAX exactly, unless RULED.txt names
+A row's id is its first word (`O8`, `T69a`, `ptyprobe:`, `done:`), and
+`#2`, `#3`, … after it for the second and later rows of that word
+(`P10a#2`); the session's transcript lines (`S| …`) are numbered in order
+(`S|1`, `S|2`, …). Each Linux row is expected on PAX exactly, unless RULED.txt names
 PAX's own line for that run and row:
 
     # R-px111-N: why (comment lines and blank lines are skipped)
@@ -26,14 +27,17 @@ import sys
 def rows(lines):
     out = []
     n = 0
+    seen = {}
     for ln in lines:
         if not ln.strip():
             continue
         if ln.startswith("S| "):
             n += 1
             out.append(("S|%d" % n, ln))
-        else:
-            out.append((ln.split(" ", 1)[0], ln))
+            continue
+        rid = ln.split(" ", 1)[0]
+        seen[rid] = seen.get(rid, 0) + 1
+        out.append((rid if seen[rid] == 1 else "%s#%d" % (rid, seen[rid]), ln))
     return out
 
 
@@ -103,11 +107,11 @@ def selftest():
     import os
     import tempfile
     d = tempfile.mkdtemp()
-    lin = ["ptyprobe: px111's probe, as root", "O1 stat /dev/ptmx: chr 5:2", "O2 x: 1", "S| \"a\"", "S| \"b\"", "done: R exited 0"]
+    lin = ["ptyprobe: px111's probe, as root", "O1 stat /dev/ptmx: chr 5:2", "O2 x: 1", "S| \"a\"", "S| \"b\"", "R r: 1", "R r: 2", "done: R exited 0"]
     rl = os.path.join(d, "ruled.txt")
     with open(rl, "w") as f:
-        f.write("# a comment\nrow probe-root O2\tO2 x: 2\nrow * S|2\t-\nrefusal probe\trefused: tty ioctl 0x5420, -ENOTTY\n")
-    good = ["ptyprobe: px111's probe, as root", "O1 stat /dev/ptmx: chr 5:2", "O2 x: 2", "S| \"a\"", "done: R exited 0"]
+        f.write("# a comment\nrow probe-root O2\tO2 x: 2\nrow * S|2\t-\nrow * R#2\tR r: 3\nrefusal probe\trefused: tty ioctl 0x5420, -ENOTTY\n")
+    good = ["ptyprobe: px111's probe, as root", "O1 stat /dev/ptmx: chr 5:2", "O2 x: 2", "S| \"a\"", "R r: 1", "R r: 3", "done: R exited 0"]
     o, b = check("probe-root", lin, rl, good)
     assert b == 0, o
     o, b = check("probe-root", lin, rl, good[:1] + ["O1 stat /dev/ptmx: ENOENT"] + good[2:])
@@ -118,9 +122,11 @@ def selftest():
     assert b == 1 and any(x.startswith("FAIL O9: extra") for x in o), o
     o, b = check("probe-user", lin, rl, good)
     assert b == 1 and any(x.startswith("FAIL O2:") for x in o), o
+    o, b = check("probe-root", lin, rl, good[:5] + ["R r: 2"] + good[6:])
+    assert b == 1 and any(x.startswith("FAIL R#2:") for x in o), o
     _, r = ruled(rl, "probe-root")
     assert r == {"probe": ["refused: tty ioctl 0x5420, -ENOTTY"]}, r
-    print("check.py selftest: 5 cases held")
+    print("check.py selftest: 6 cases held")
     return 0
 
 
