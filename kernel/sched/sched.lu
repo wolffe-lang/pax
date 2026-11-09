@@ -232,6 +232,7 @@ extern "c" let pax_idle: *u8
 extern "c" let pax_syscall_state: *u64
 extern "c" let pax_procs: *u64
 extern "c" let pax_siginfo: *u64
+extern "c" let pax_tty_table: *u64
 
 /// One thread's record (boot/sched.S: 64 of them, 512 bytes each; 72
 /// before px09 added `cr3` and `prog`, 88 before px10's four, 120
@@ -283,7 +284,7 @@ struct Thread {
     ss_size: u64, // px24: its size; 0 none (SS_DISABLE)
     pgid: u64, // px48: a leader's: its process's group
     sid: u64, // px48: a leader's: its process's session
-    ctty: u64, // px48: a leader's: 1 when the console is its process's controlling terminal (while its session holds the console)
+    ctty: u64, // px48: a leader's: 1 when the console is its process's controlling terminal (while its session holds the console); px111: the terminal's id (1 the console, 2 + n pty n's slave)
     execd: u64, // px48: a leader's: 1 once its process has called execve since its fork (setpgid's EACCES)
     stopped: u64, // px48: a leader's: 1 while its process is stopped
     wstop: u64, // px48: a leader's: a stop no wait has reported yet: the signal (0 none)
@@ -404,8 +405,8 @@ const S_FSEQ: u64 = 11 // px26: the next futex waiter's place in line
 const S_THREADS: u64 = 12 // px26: threads made by clone since boot
 const S_SIGNALS: u64 = 13 // px26: signals delivered to a handler since boot
 const S_TTY_ON: u64 = 14 // px48: 1 once the console is a terminal (kernel/console's `start`)
-const S_TTY_SID: u64 = 15 // px48: the session the console is the controlling terminal of; 0 none
-const S_TTY_PGRP: u64 = 16 // px48: the console's foreground process group; 0 none
+// words 15 and 16 were px48's console session and foreground group; px111
+// keeps every terminal's in boot/console.S's pax_tty_table (`tsid`, `tpgrp`).
 const S_WAITPID: u64 = 17 // px67: the pid whose end also readies the waiter (`wait_pid_or_down`); 0 none
 const S_ENDING: u64 = 18 // px67: 1 once the end has begun (kmain_console): pid 1 takes signals as any process does
 const S_IN_TSC: u64 = 19 // px88: the TSC when the current thread was switched in
@@ -1073,10 +1074,10 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
         put_field(s, offset_of(Thread, pgid), pid)
         put_field(s, offset_of(Thread, sid), pid)
         born_put(own_area(s), timer.ticks()) // px115: its start
-        if sv(S_TTY_ON) == 1 && sv(S_TTY_SID) == 0 {
-            put_sv(S_TTY_SID, pid)
-            put_sv(S_TTY_PGRP, pid)
-            put_field(s, offset_of(Thread, ctty), 1)
+        if sv(S_TTY_ON) == 1 && tsid(CONSOLE) == 0 {
+            set_tsid(CONSOLE, pid)
+            set_tpgrp(CONSOLE, pid)
+            put_field(s, offset_of(Thread, ctty), CONSOLE)
         }
     }
     put_field(s, offset_of(Thread, lead), s)
@@ -1219,10 +1220,11 @@ fn process_ends(l: u64, st: u64) {
         // px48: a controlling process's end hangs its terminal up: the
         // foreground group is sent SIGHUP (measured: not SIGCONT) and the
         // console belongs to no session (XSH _exit, XBD 11.1.3).
-        if field(l, offset_of(Thread, sid)) == me && sv(S_TTY_SID) == me {
-            let fg = sv(S_TTY_PGRP)
-            tty_leaves(me)
-            hangup_group(fg, false)
+        let ct = field(l, offset_of(Thread, ctty))
+        if field(l, offset_of(Thread, sid)) == me && ct != 0 && tsid(ct) == me {
+            let fg = tpgrp(ct)
+            tty_leaves(ct)
+            hangup_group(fg, false) // px111: a pty's too (measured: F:HUP, the tty then no session's)
         }
         // px48: the groups this end may orphan — its own, and each
         // child's — as they stand before it: `kids` has bit t for a child
@@ -2041,7 +2043,7 @@ pub fn proc_word(s: u64, which: int) -> u64 {
         return field(s, offset_of(Thread, stopped))
     }
     if which == 12 {
-        return if has_tty(s) { 1 } else { 0 }
+        return ctty_of(s) // px111: the terminal's id (1 the console), 0 none
     }
     if which == 13 {
         return field(s, offset_of(Thread, pend)) | field(s, offset_of(Thread, gpend))
@@ -2871,8 +2873,8 @@ pub fn raise_tid(tgid: u64, tid: u64, sig: u64, info: u64) -> bool {
 //
 // A process's group and session are its leader's `pgid` and `sid`; its
 // controlling terminal is the console when its leader's `ctty` is 1 and
-// its session is the one the console belongs to (`S_TTY_SID`), whose
-// foreground group is `S_TTY_PGRP`. A stopped process is its leader's
+// its session is the one the console belongs to, whose foreground group
+// the console's (px111: every terminal's, by its id, in pax_tty_table). A stopped process is its leader's
 // `stopped`; its threads are parked (STOPPED) when next dequeued or when
 // they return to ring 3, and readied when it is continued or killed.
 // `wstop` and `wcont` are the reports a parent's wait has not taken yet.
@@ -3007,17 +3009,65 @@ pub fn setsid() -> u64 {
     p
 }
 
+// px111: every terminal's session and foreground group, by terminal id
+// (1 the console, 2 + n pty n's slave: kernel/console's CON and PTY0): two
+// words each in boot/console.S's pax_tty_table, 0 for none.
+pub const CONSOLE: u64 = 1
+const TTYS: u64 = 258
+
+fn tw(t: u64, w: u64) -> u64 {
+    // # Safety: t < TTYS, w < 2: inside the table's TTYS * 2 words.
+    unsafe { ((pax_tty_table as u64 + (t * 2 + w) * 8) as *u64).read_volatile() }
+}
+
+fn put_tw(t: u64, w: u64, v: u64) {
+    // # Safety: as `tw`.
+    unsafe { ((pax_tty_table as u64 + (t * 2 + w) * 8) as *u64).write_volatile(v) }
+}
+
+fn tsid(t: u64) -> u64 {
+    if t == 0 || t >= TTYS { 0 } else { tw(t, 0) }
+}
+
+fn tpgrp(t: u64) -> u64 {
+    if t == 0 || t >= TTYS { 0 } else { tw(t, 1) }
+}
+
+fn set_tsid(t: u64, v: u64) {
+    put_tw(t, 0, v)
+}
+
+fn set_tpgrp(t: u64, v: u64) {
+    put_tw(t, 1, v)
+}
+
+/// px111: the terminal the process led by slot `l` has as its
+/// controlling terminal (its id), 0 when none: its leader's `ctty`
+/// while that terminal's session is its own.
+pub fn ctty_of(l: u64) -> u64 {
+    let t = field(l, offset_of(Thread, ctty))
+    if t != 0 && tsid(t) != 0 && tsid(t) == field(l, offset_of(Thread, sid)) { t } else { 0 }
+}
+
 /// Whether the process led by slot `l` has the console as its
 /// controlling terminal.
 pub fn has_tty(l: u64) -> bool {
-    let t = sv(S_TTY_SID)
-    t != 0 && field(l, offset_of(Thread, ctty)) == 1 && field(l, offset_of(Thread, sid)) == t
+    ctty_of(l) == CONSOLE
+}
+
+/// px111: the running thread's process's controlling terminal (its id),
+/// 0 when none.
+pub fn self_ctty() -> u64 {
+    if field(cur(), offset_of(Thread, tgid)) == 0 {
+        return 0
+    }
+    ctty_of(field(cur(), offset_of(Thread, lead)))
 }
 
 /// Whether the running thread's process has the console as its
 /// controlling terminal.
 pub fn self_tty() -> bool {
-    field(cur(), offset_of(Thread, tgid)) != 0 && has_tty(field(cur(), offset_of(Thread, lead)))
+    self_ctty() == CONSOLE
 }
 
 /// kernel/console's `start`: the console is a terminal from here, which
@@ -3029,61 +3079,84 @@ pub fn tty_on() {
 /// The console's session (0: no session holds it) and foreground group
 /// (0: none).
 pub fn tty_session() -> u64 {
-    sv(S_TTY_SID)
+    tsid(CONSOLE)
 }
 
 pub fn tty_pgrp() -> u64 {
-    sv(S_TTY_PGRP)
+    tpgrp(CONSOLE)
 }
 
 pub fn set_tty_pgrp(g: u64) {
-    put_sv(S_TTY_PGRP, g)
+    set_tpgrp(CONSOLE, g)
 }
 
-/// The console leaves session `sid`: no process of it has the console
-/// as its controlling terminal any more (XBD 11.1.3).
-fn tty_leaves(sid: u64) {
-    if sv(S_TTY_SID) != sid {
+/// px111: terminal `t`'s session (0 none) and foreground group (0 none).
+pub fn tty_session_of(t: u64) -> u64 {
+    tsid(t)
+}
+
+pub fn tty_pgrp_of(t: u64) -> u64 {
+    tpgrp(t)
+}
+
+pub fn set_tty_pgrp_of(t: u64, g: u64) {
+    if t != 0 && t < TTYS {
+        set_tpgrp(t, g)
+    }
+}
+
+/// Terminal `t` leaves the session that holds it: no process of it has
+/// `t` as its controlling terminal any more (XBD 11.1.3).
+fn tty_leaves(t: u64) {
+    let sid = tsid(t)
+    if sid == 0 {
         return
     }
-    put_sv(S_TTY_SID, 0)
-    put_sv(S_TTY_PGRP, 0)
+    set_tsid(t, 0)
+    set_tpgrp(t, 0)
     var l: u64 = FIRST
     while l < SLOTS {
-        if field(l, offset_of(Thread, sid)) == sid {
+        if field(l, offset_of(Thread, sid)) == sid && field(l, offset_of(Thread, ctty)) == t {
             put_field(l, offset_of(Thread, ctty), 0)
         }
         l += 1
     }
 }
 
-/// TIOCSCTTY by the running thread's process (`steal`: arg 1 by a
-/// privileged caller): 0 or the errno (1 EPERM). A session leader with no
-/// controlling terminal takes the console when no session holds it, or
-/// (`steal`) from the session that does, whose foreground group is sent
-/// SIGHUP and SIGCONT (measured: the group heard SIGHUP); its own group
-/// is the console's foreground group. Its own terminal: 0.
+/// TIOCSCTTY of the console by the running thread's process.
 pub fn take_tty(steal: bool) -> u64 {
+    take_tty_of(CONSOLE, steal)
+}
+
+/// TIOCSCTTY of terminal `t` by the running thread's process (`steal`:
+/// arg 1 by a privileged caller): 0 or the errno (1 EPERM). A session
+/// leader with no controlling terminal takes `t` when no session holds
+/// it, or (`steal`) from the session that does, which loses it; its own
+/// group is `t`'s foreground group. Its own terminal: 0. A process that
+/// leads no session, or has another terminal: EPERM (measured on a pty).
+/// px111 (R-px111-9): a steal signals nobody (measured: the old
+/// session's foreground group and the thief hear nothing; px48 sent the
+/// old group SIGHUP and SIGCONT here, from a recording whose `R:CONT,R:HUP`
+/// was the thief's own TIOCNOTTY, heard under R's inherited tag).
+pub fn take_tty_of(t: u64, steal: bool) -> u64 {
     let me = field(cur(), offset_of(Thread, lead))
     let p = field(me, offset_of(Thread, tgid))
-    if has_tty(me) {
+    let mine = ctty_of(me)
+    if mine == t {
         return 0
     }
-    if field(me, offset_of(Thread, sid)) != p {
+    if field(me, offset_of(Thread, sid)) != p || mine != 0 {
         return 1
     }
-    let old = sv(S_TTY_SID)
-    if old != 0 {
+    if tsid(t) != 0 {
         if !steal {
             return 1
         }
-        let fg = sv(S_TTY_PGRP)
-        tty_leaves(old)
-        hangup_group(fg, true)
+        tty_leaves(t)
     }
-    put_sv(S_TTY_SID, p)
-    put_sv(S_TTY_PGRP, field(me, offset_of(Thread, pgid)))
-    put_field(me, offset_of(Thread, ctty), 1)
+    set_tsid(t, p)
+    set_tpgrp(t, field(me, offset_of(Thread, pgid)))
+    put_field(me, offset_of(Thread, ctty), t)
     0
 }
 
@@ -3091,31 +3164,64 @@ pub fn take_tty(steal: bool) -> u64 {
 /// (without O_NOCTTY, kernel/files): it takes it when no session holds
 /// it (XBD 11.1.3: the first terminal a session leader opens).
 pub fn open_tty() {
-    let me = field(cur(), offset_of(Thread, lead))
-    let p = field(me, offset_of(Thread, tgid))
-    if p != 0 && sv(S_TTY_ON) == 1 && sv(S_TTY_SID) == 0 && field(me, offset_of(Thread, sid)) == p {
-        let _r = take_tty(false)
+    if sv(S_TTY_ON) == 1 {
+        open_tty_of(CONSOLE)
     }
 }
 
-/// TIOCNOTTY by the running thread's process: 0, or 25 (ENOTTY) when
-/// the console is not its controlling terminal. A session leader's
-/// session loses it and the foreground group is sent SIGHUP and
-/// SIGCONT (measured); any other process loses it alone.
-pub fn drop_tty() -> u64 {
+/// px111: the same for terminal `t` (a pty's slave, measured: taken by
+/// a session leader with no terminal, not by one that has one, not
+/// from another session).
+pub fn open_tty_of(t: u64) {
     let me = field(cur(), offset_of(Thread, lead))
-    if !has_tty(me) {
+    let p = field(me, offset_of(Thread, tgid))
+    if p != 0 && tsid(t) == 0 && field(me, offset_of(Thread, sid)) == p && ctty_of(me) == 0 {
+        let _r = take_tty_of(t, false)
+    }
+}
+
+/// TIOCNOTTY of the console by the running thread's process.
+pub fn drop_tty() -> u64 {
+    drop_tty_of(CONSOLE)
+}
+
+/// TIOCNOTTY of terminal `t` by the running thread's process: 0, or 25
+/// (ENOTTY) when `t` is not its controlling terminal. A session
+/// leader's session loses it and the foreground group is sent SIGHUP
+/// and SIGCONT (measured); any other process loses it alone.
+pub fn drop_tty_of(t: u64) -> u64 {
+    let me = field(cur(), offset_of(Thread, lead))
+    if ctty_of(me) != t {
         return 25
     }
     let p = field(me, offset_of(Thread, tgid))
     if field(me, offset_of(Thread, sid)) == p {
-        let fg = sv(S_TTY_PGRP)
-        tty_leaves(p)
+        let fg = tpgrp(t)
+        tty_leaves(t)
         hangup_group(fg, true)
     } else {
         put_field(me, offset_of(Thread, ctty), 0)
     }
     0
+}
+
+/// px111: terminal `t` is hung up (its pty's master's last close): the
+/// controlling process — the leader of the session that holds it — is
+/// sent SIGHUP and SIGCONT, its foreground group nothing (measured:
+/// `L:CONT,L:HUP`, POSIX's controlling process), and the session loses
+/// the terminal.
+pub fn hangup_tty(t: u64) {
+    let sid = tsid(t)
+    if sid == 0 {
+        return
+    }
+    let l = live_slot(sid)
+    tty_leaves(t)
+    if l != SLOTS && live_leader(l) {
+        let info = sig_info(I_KERNEL, 0, 0, 0)
+        raise_group(l, SIGHUP, info)
+        raise_group(l, SIGCONT, info)
+    }
 }
 
 /// SIGHUP, and (`cont`) SIGCONT, for every process of group `g`, from
