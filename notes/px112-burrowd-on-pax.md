@@ -61,7 +61,11 @@ and their sha256s logged.
   at the first boot. Its inputs are px93's, copied by value into the lane (the two sticks read twice on each side,
   `850ff60b…` and `665f815a…`, px93's figures; its built inputs, 325 files, and its sources, 33 files,
   byte-identical), with the two inputs px93's set predates built at the head (`tools/mkburrow`, `tools/mkroots`).
-  (The legs' results.)
+  A development take at `2feadbfd` (block C): `build` (the distribution, the live payload, the upgrade stick) exit 0;
+  `legs-d` exit 0 in 493 s, `PASS` U1d-install, U2d-state, U3d-upgrade (the plan from the 8b4e98ae baseline, 8.3 s),
+  U4d-after, U6d-again, U13d-sudo-upgrade-8b4e98ae. U4d's burrowd part: the configuration the LAN's, the account
+  appended, the host key made at the first boot (root's 0600, the console's fingerprint), and burrowd's log
+  `listening on 0.0.0.0:22` on a machine with no network card. The final head's take is in the PR.
 - **The walk's run-time state** (pax#329, from px114's census): `user/install/snapshot.lu` leaves `/var/run`'s contents
   out of an install's and an upgrade's walk, the directory kept, as `/tmp`'s (sudo's `/var/run/sudo/ts`, burrowd's
   pid), and burrowd's host key, its `.pub` and its log. The snapshot unit's `I-runtime-state` row, on the light CPUs:
