@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **ssh into PAX (px112).** burrowd, burrow's ssh server, ships on every image
+  and starts at boot: `/etc/pax-boot.d`'s hooks run before the first prompt
+  (`/bin/login` on an installed system, the live entry on the stick), and
+  burrowd's makes the host key at the first boot that finds none, prints its
+  fingerprint at every boot, and keeps burrowd running, its log
+  `/var/log/burrowd.log`. An installed system listens on the LAN (the installer
+  writes `ListenAddress 0.0.0.0`); the live stick listens on loopback only.
+  From another machine, `ssh pax@<address> ls` runs a command through the
+  account's shell, and `git push` and `git clone` reach den's receive-pack and
+  upload-pack. Keys and passwords both log in, root never, and an account left
+  locked by the installer logs in neither way until its owner sets a password
+  with `passwd`. A new suite, `tests/mpx5-burrowd`, drives it under KVM from a
+  Linux machine on a tap: `notes/px112-burrowd-on-pax.md`.
+
 - **A system call's bytes move by the block (px108).** `kernel/uaccess` copied
   every byte between a process and the kernel one volatile load and store at a
   time; it now moves each page's part with the string instructions the file
