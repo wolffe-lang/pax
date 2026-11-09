@@ -187,11 +187,12 @@ None filed or closed by this lane. For the orchestrator to consider:
 ### 5.4 Checklist
 
 - [x] The prediction, committed first (`a7a9aa96`).
-- [ ] burrowd on the image, its account, its configuration; started at boot after the network; the host key at the
-  first boot and kept.
-- [ ] `authorized_keys` with sshd's mode checks; den's upload-pack and receive-pack through `exec`; the log at the
-  console.
-- [ ] B0-B11 under KVM, red at the rows tip, green at the head; the plant red by name.
-- [ ] The stick leg (`notes/px112/stick-leg.txt`, B11 under QEMU); the metal target's first check (5.2).
-- [ ] README, docs/SOURCES.md and CHANGELOG; tests/ci-plan and the map; the CI job.
-- [ ] The gauntlet green at the final head, every END line in the PR body; the plant's record; the audit.
+- [x] burrowd on the image, its account, its configuration; started at boot after the network; the host key at the
+  first boot and kept (B0, B1, B10).
+- [x] `authorized_keys` with sshd's mode checks; den's upload-pack and receive-pack through `exec`; the log at the
+  console (B2-B9); a session without ptys, measured (B12).
+- [x] Rows red at the rows tip, every row green on the native BIOS leg (`lb7`); the four legs, the affected suites,
+  the plant (B10) and the upgrade witness at the final head: the PR's records.
+- [x] The stick leg (`notes/px112/stick-leg.txt`, B11 under QEMU); the metal target's first check (5.2).
+- [x] README, docs/SOURCES.md and CHANGELOG; tests/ci-plan and the map; the CI job.
+- [ ] The gauntlet green at the final head, every END line in the PR body; the plant's record; the witness; the audit.
