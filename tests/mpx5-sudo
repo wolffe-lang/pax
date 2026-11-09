@@ -67,10 +67,14 @@
 #        name (notes/px106/named.txt), each with its reason; login-first and
 #        login-max's second login, which have no Ubuntu side, are held to
 #        tests/mpx5-sudo.d/*.pax (PAX's own).
-#     P3 the delays (rate limiting): after each wrong password the next
-#        words come no sooner than sudo 1.9 s, su 2.9 s, login 2.9 s,
-#        passwd 1.4 s (the container's clock, PAX's programs); the caps:
-#        sudo's third, login's fifth.
+#     P3 the delays (rate limiting), PAX's programs: after each wrong
+#        password the next words come no sooner than the program's
+#        nominal less 0.1 s (sudo 2 s, su 3 s, login 3 s, passwd 1.5 s;
+#        the container's clock); the caps: sudo's third, login's fifth.
+#        P3u Ubuntu's, held to Linux-PAM's documented semantics: login's
+#        3 s, su's, sudo's and passwd's pam_unix 2 s, each randomly
+#        distributed by up to 50% about it (pam_fail_delay(3)), so no
+#        sooner than half of it less 0.1 s.
 #     P4 sudo -S, -n and su with no terminal, PAX's against Ubuntu's.
 #     (S0 also runs `mkshadow --check` on the build host: a string at the
 #        shipped cost is within the cap and matches its own password.)
@@ -208,12 +212,19 @@ auth_ct() {
     done
     res=$(python3 -I "$PAX_ROOT/notes/px106/ttydiff.py" "$o/out/ubuntu/stdin.txt" "$o/out/pax/stdin.txt" --named "$PAX_ROOT/notes/px106/named.txt" stdin 2>&1); st=$?
     [ "$st" = 0 ] && say "PASS P4: sudo -S, -n and su with no terminal: $(printf '%s' "$res" | tail -n 1)" || bad "P4: $(printf '%s' "$res" | head -n 16 | cut -c1-200 | tr '\n' '|')"
+    # The delays' floors come from each side's documented semantics, never from a measurement:
+    # PAX's programs wait their nominal every time (login and su 3 s, sudo 2 s, passwd's current
+    # password 1.5 s; spread 0). Ubuntu's are Linux-PAM's: login's stack asks 3 s (pam_faildelay
+    # delay=3000000, the longest kept), su's, sudo's and passwd's pam_unix's "of the order of two
+    # second" (pam_unix(8)), each "randomly distributed (by up to 50%)" about it (pam_fail_delay(3)).
     for m in pax ubuntu; do
         for s in pw login login-max; do
-            res=$(python3 -I "$here/mpx5-sudo.d/session.py" delays "$here/mpx5-sudo.d/$s.keys" "$o/out/$m/$s.tty" "$o/out/$m/$s.times" \
-                'password for bob: =1.9,Password: =2.9,Current password: =1.4' 2>&1); st=$?
-            if [ "$m" = ubuntu ]; then say "  Ubuntu's delays, $s: $(printf '%s' "$res" | sed 's/^PASS //' | tr '\n' ';')"; continue; fi
-            [ "$st" = 0 ] && say "PASS P3 $s: $(printf '%s' "$res" | grep -c '^PASS') delays at their floors: $(printf '%s' "$res" | sed 's/^PASS step [0-9]* //' | tr '\n' ';')" || bad "P3 $s: $(printf '%s' "$res" | grep '^FAIL' | tr '\n' '|')"
+            if [ "$m" = pax ]; then spec='password for bob: =2,Password: =3,Current password: =1.5,spread=0'
+            elif [ "$s" = pw ]; then spec='password for bob: =2,Password: =2,Current password: =2,spread=0.5'
+            else spec='Password: =3,spread=0.5'; fi
+            res=$(python3 -I "$here/mpx5-sudo.d/session.py" delays "$here/mpx5-sudo.d/$s.keys" "$o/out/$m/$s.tty" "$o/out/$m/$s.times" "$spec" 2>&1); st=$?
+            row=P3; [ "$m" = pax ] || row=P3u
+            [ "$st" = 0 ] && say "PASS $row $s: $(printf '%s' "$res" | grep -c '^PASS') delays at their floors ($m): $(printf '%s' "$res" | sed 's/^PASS step [0-9]* //' | tr '\n' ';')" || bad "$row $s ($m): $(printf '%s' "$res" | grep '^FAIL' | tr '\n' '|')"
         done
     done
     st=
