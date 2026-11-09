@@ -43,21 +43,36 @@
 //! report ID, the input bits counted so far (256 words), and the local
 //! usages of the item being read.
 
+/// The layout's words.
 pub const LAYOUT: u64 = 15
+/// `parse`'s area in bytes, the layout's words included.
 pub const WORK: u64 = 4096
+/// Layout: the report ID (0 none).
 pub const L_ID: u64 = 0
+/// Layout: the report's bytes, the ID included.
 pub const L_LEN: u64 = 1
+/// Layout: REL or ABS.
 pub const L_KIND: u64 = 2
+/// Layout: X's field word.
 pub const L_X: u64 = 3
+/// Layout: Y's field word.
 pub const L_Y: u64 = 4
+/// Layout: the wheel's field word (0 none).
 pub const L_W: u64 = 5
+/// Layout: buttons 1 to 5's field words, from here.
 pub const L_B: u64 = 6 // buttons 1 to 5: words 6 to 10
+/// Layout: X's Logical Minimum.
 pub const L_XMIN: u64 = 11
+/// Layout: X's Logical Maximum.
 pub const L_XMAX: u64 = 12
+/// Layout: Y's Logical Minimum.
 pub const L_YMIN: u64 = 13
+/// Layout: Y's Logical Maximum.
 pub const L_YMAX: u64 = 14
 
+/// Relative motion (Input bit 2 set).
 pub const REL: u64 = 1
+/// Absolute position.
 pub const ABS: u64 = 2
 /// Absolute positions are scaled to 0..SCALE across the device's extents.
 pub const SCALE: u64 = 32767
@@ -69,18 +84,31 @@ const F_REL: u64 = 0x2000000
 const F_HERE: u64 = 0x4000000
 
 // Refusals (`refusal` names them).
+/// Parsed.
 pub const OK: u64 = 0
+/// Refused: a long item.
 pub const R_LONG: u64 = 1
+/// Refused: Push or Pop.
 pub const R_PUSH: u64 = 2
+/// Refused: a Delimiter.
 pub const R_DELIMITER: u64 = 3
+/// Refused: no Mouse or Pointer collection.
 pub const R_NO_POINTER: u64 = 4
+/// Refused: no X or no Y.
 pub const R_NO_XY: u64 = 5
+/// Refused: a pointer field wider than 32 bits.
 pub const R_WIDE: u64 = 6
+/// Refused: a report over 64 bytes.
 pub const R_REPORT: u64 = 7
+/// Refused: X and Y in different reports.
 pub const R_SPLIT: u64 = 8
+/// Refused: a truncated item.
 pub const R_TRUNCATED: u64 = 9
+/// Refused: collections too deep or unbalanced.
 pub const R_NESTING: u64 = 10
+/// Refused: X and Y of different kinds.
 pub const R_MIXED: u64 = 11
+/// Refused: an absolute axis with no extent.
 pub const R_EXTENT: u64 = 12
 
 // The work area's words (after the layout's LAYOUT words, at `work`).
@@ -90,12 +118,255 @@ const USAGES: u64 = 16
 
 const SIGN: u64 = 0x8000000000000000
 
-// px109: the interface first, the bodies after the invariant rows.
-pub fn lt(_a: u64, _b: u64) -> bool { false }
-pub fn sext(v: u64, _bits: u64) -> u64 { v }
-pub fn refusal(_code: u64) -> str { "unwritten" }
-pub fn boot(_r: u64, _n: u64) -> (bool, u64, u64, u64) { (false, 0, 0, 0) }
-pub fn parse(_at: u64, _n: u64, _out: u64) -> u64 { R_NO_POINTER }
-pub fn field(_r: u64, _n: u64, _f: u64) -> u64 { 0 }
-pub fn scale(_v: u64, _lo: u64, _hi: u64) -> u64 { 0 }
-pub fn decode(_r: u64, _n: u64, _l: u64) -> (bool, u64, u64, u64, u64) { (false, 0, 0, 0, 0) }
+fn r8(a: u64) -> u64 { unsafe { (a as *u8).read_volatile() as u64 } }
+fn get(a: u64, i: u64) -> u64 { unsafe { ((a + i * 8) as *u64).read_volatile() } }
+fn put(a: u64, i: u64, v: u64) { unsafe { ((a + i * 8) as *u64).write_volatile(v) } }
+
+/// `a < b` as signed 64-bit numbers.
+pub fn lt(a: u64, b: u64) -> bool { (a ^ SIGN) < (b ^ SIGN) }
+
+/// The low `bits` bits of `v` sign-extended (1 to 63 bits).
+pub fn sext(v: u64, bits: u64) -> u64 {
+    if bits == 0 || bits >= 64 { return v }
+    let m: u64 = (1 << bits) - 1
+    let x = v & m
+    if (x >> (bits - 1)) & 1 != 0 { x | !m } else { x }
+}
+
+/// What a refusal says (the driver's log line names it).
+pub fn refusal(code: u64) -> str {
+    match code {
+        0 => "none",
+        1 => "a long item",
+        2 => "Push or Pop",
+        3 => "a Delimiter",
+        4 => "no Mouse or Pointer application collection",
+        5 => "no X or no Y",
+        6 => "a pointer field wider than 32 bits",
+        7 => "a report longer than 64 bytes",
+        8 => "X and Y in different reports",
+        9 => "a truncated item",
+        10 => "collections nested deeper than 8, or unbalanced",
+        11 => "X and Y of different kinds",
+        12 => "an absolute axis with no extent",
+        _ => "an unknown refusal",
+    }
+}
+
+/// The boot report at `r` (`n` bytes, appendix B.2): (whether it is one,
+/// dx, dy, buttons 1 to 3 in bits 0 to 2). dx and dy are two's
+/// complement words.
+pub fn boot(r: u64, n: u64) -> (bool, u64, u64, u64) {
+    if n < 3 { return (false, 0, 0, 0) }
+    (true, sext(r8(r + 1), 8), sext(r8(r + 2), 8), r8(r) & 7)
+}
+
+/// Whether a Report ID item appears in the `n` bytes at `at` (the first
+/// of `parse`'s two passes); a malformed descriptor answers false here
+/// and is refused by the second.
+fn uses_ids(at: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let p = r8(at + i)
+        if p == 0xfe { return false }
+        let size: u64 = if p & 3 == 3 { 4 } else { p & 3 }
+        if (p & 0xfc) == 0x84 { return true }
+        i += 1 + size
+    }
+    false
+}
+
+/// The local usage for field `k` of the item being read: the usages
+/// listed (the last repeats, §6.2.2.8), else the range's (capped at its
+/// maximum), else 0.
+fn usage_for(work: u64, k: u64, listed: u64, umin: u64, umax: u64, ranged: bool) -> u64 {
+    if listed != 0 {
+        let j = if k < listed { k } else { listed - 1 }
+        return get(work, W_USAGES + j)
+    }
+    if ranged {
+        let u = umin + k
+        return if u > umax { umax } else { u }
+    }
+    0
+}
+
+/// Record a field of the pointer collection by its usage, in report
+/// `id`: 0, or a refusal.
+fn claim(out: u64, usage: u64, offset: u64, size: u64, flags: u64, lmin: u64, lmax: u64, id: u64) -> u64 {
+    let rel = flags & 4 != 0
+    let word = offset | (size << 16) | (if lt(lmin, 0) { F_SIGNED } else { 0 }) | (if rel { F_REL } else { 0 }) | F_HERE | (id << 32)
+    let page = usage >> 16
+    let u = usage & 0xffff
+    var slot: u64 = 99
+    if page == 1 && u == 0x30 { slot = L_X }
+    if page == 1 && u == 0x31 { slot = L_Y }
+    if page == 1 && u == 0x38 { slot = L_W }
+    if page == 9 && u >= 1 && u <= 5 { slot = L_B + u - 1 }
+    if slot == 99 || get(out, slot) != 0 { return OK }
+    if size > 32 { return R_WIDE }
+    if slot == L_X || slot == L_Y {
+        // X and Y: in one report (the first named sets it).
+        if get(out, L_KIND) == 0 { put(out, L_ID, id); put(out, L_KIND, if rel { REL } else { ABS }) }
+        else if get(out, L_ID) != id { return R_SPLIT }
+        else if (get(out, L_KIND) == REL) != rel { return R_MIXED }
+        put(out, if slot == L_X { L_XMIN } else { L_YMIN }, lmin)
+        put(out, if slot == L_X { L_XMAX } else { L_YMAX }, lmax)
+    }
+    put(out, slot, word)
+    OK
+}
+
+/// Parse the report descriptor of `n` bytes at `at`; the layout goes to
+/// `out` (LAYOUT words) and `out` + 8 * W_BITS onward is the work area
+/// (WORK bytes in all, `out` included). 0, or a refusal.
+pub fn parse(at: u64, n: u64, out: u64) -> u64 {
+    var w: u64 = 0
+    while w < W_USAGES + USAGES { put(out, w, 0); w += 1 }
+    let ids = uses_ids(at, n)
+    var id: u64 = 0
+    var k: u64 = 0
+    while k < 256 { put(out, W_BITS + k, if ids { 8 } else { 0 }); k += 1 }
+    // Global state; local state; the collections.
+    var page: u64 = 0
+    var lmin: u64 = 0
+    var lmax: u64 = 0
+    var size: u64 = 0
+    var count: u64 = 0
+    var listed: u64 = 0
+    var umin: u64 = 0
+    var umax: u64 = 0
+    var ranged = false
+    var depth: u64 = 0
+    var pointer: u64 = 0 // the depth inside the pointer's collection; 0 outside
+    var done = false
+    var i: u64 = 0
+    while i < n {
+        let p = r8(at + i)
+        if p == 0xfe { return R_LONG }
+        let bytes: u64 = if p & 3 == 3 { 4 } else { p & 3 }
+        if i + 1 + bytes > n { return R_TRUNCATED }
+        var data: u64 = 0
+        var b: u64 = 0
+        while b < bytes { data = data | (r8(at + i + 1 + b) << (b * 8)); b += 1 }
+        let signed = sext(data, bytes * 8)
+        let kind = (p >> 2) & 3
+        let tag = p >> 4
+        i += 1 + bytes
+        if kind == 1 {
+            if tag == 0 { page = data }
+            else if tag == 1 { lmin = signed }
+            else if tag == 2 {
+                // A maximum below the minimum as signed is an unsigned
+                // maximum written in too few bytes (0x25 0xff for 255).
+                lmax = if lt(signed, lmin) { data } else { signed }
+            }
+            else if tag == 7 { size = data }
+            else if tag == 8 { id = data & 255 }
+            else if tag == 9 { count = data }
+            else if tag == 10 || tag == 11 { return R_PUSH }
+        } else if kind == 2 {
+            // A usage of 4 bytes names its page; of fewer, the current one.
+            let full = if bytes == 4 { data } else { (page << 16) | (data & 0xffff) }
+            if tag == 0 {
+                if listed < USAGES { put(out, W_USAGES + listed, full); listed += 1 }
+            } else if tag == 1 { umin = full; ranged = true; if umax < umin { umax = umin } }
+            else if tag == 2 { umax = full; ranged = true }
+            else if tag == 10 { return R_DELIMITER }
+        } else if kind == 0 {
+            if tag == 8 {
+                // Input: its fields, then the report's bits move on.
+                let at_bits = get(out, W_BITS + id)
+                if pointer != 0 && !done && data & 3 == 2 {
+                    var f: u64 = 0
+                    while f < count && f < 64 {
+                        let u = usage_for(out, f, listed, umin, umax, ranged)
+                        let why = claim(out, u, at_bits + f * size, size, data, lmin, lmax, id)
+                        if why != OK { return why }
+                        f += 1
+                    }
+                }
+                put(out, W_BITS + id, at_bits + size * count)
+            } else if tag == 10 {
+                if depth >= 8 { return R_NESTING }
+                let u = usage_for(out, 0, listed, umin, umax, ranged)
+                depth += 1
+                if pointer == 0 && !done && depth == 1 && data == 1 && (u == 0x10001 || u == 0x10002) {
+                    pointer = depth
+                }
+            } else if tag == 12 {
+                if depth == 0 { return R_NESTING }
+                if pointer != 0 && depth == pointer { done = true; pointer = 0 }
+                depth -= 1
+            }
+            // Every main item ends the local items (§6.2.2.8).
+            listed = 0; ranged = false; umin = 0; umax = 0
+        }
+    }
+    if depth != 0 { return R_NESTING }
+    if get(out, L_KIND) == 0 && !done { return R_NO_POINTER }
+    if get(out, L_X) == 0 || get(out, L_Y) == 0 { return R_NO_XY }
+    if ids && get(out, L_ID) == 0 { return R_SPLIT }
+    // A wheel or a button in another report than X and Y is not the
+    // pointer's (the descriptor named it before X said which report).
+    var s = L_W
+    while s < L_B + 5 {
+        if get(out, s) != 0 && (get(out, s) >> 32) & 255 != get(out, L_ID) { put(out, s, 0) }
+        s += 1
+    }
+    let len = (get(out, W_BITS + get(out, L_ID)) + 7) / 8
+    if len > REPORT_MAX { return R_REPORT }
+    put(out, L_LEN, len)
+    if get(out, L_KIND) == ABS {
+        if !lt(get(out, L_XMIN), get(out, L_XMAX)) || !lt(get(out, L_YMIN), get(out, L_YMAX)) { return R_EXTENT }
+    }
+    OK
+}
+
+/// The value of field word `f` in the report at `r` (`n` bytes): its
+/// bits, little-endian from the field's offset, sign-extended when the
+/// field is signed; 0 when the field is absent or past the report's end.
+pub fn field(r: u64, n: u64, f: u64) -> u64 {
+    if f & F_HERE == 0 { return 0 }
+    let off = f & 0xffff
+    let size = (f >> 16) & 0xff
+    if size == 0 || off + size > n * 8 { return 0 }
+    var v: u64 = 0
+    var b: u64 = 0
+    while b < size {
+        let bit = off + b
+        v = v | (((r8(r + bit / 8) >> (bit % 8)) & 1) << b)
+        b += 1
+    }
+    if f & F_SIGNED != 0 { sext(v, size) } else { v }
+}
+
+/// An absolute value scaled from the extents `lo`..`hi` to 0..SCALE.
+pub fn scale(v: u64, lo: u64, hi: u64) -> u64 {
+    if !lt(lo, v) { return 0 }
+    if !lt(v, hi) { return SCALE }
+    ((v - lo) * SCALE) / (hi - lo)
+}
+
+/// The report at `r` (`n` bytes) by layout `l`: (whether it is the
+/// pointer's, dx or x, dy or y, buttons 1 to 5 in bits 0 to 4, the
+/// wheel). Relative values are two's complement words; absolute ones are
+/// scaled to 0..SCALE.
+pub fn decode(r: u64, n: u64, l: u64) -> (bool, u64, u64, u64, u64) {
+    if n == 0 { return (false, 0, 0, 0, 0) }
+    if get(l, L_ID) != 0 && r8(r) != get(l, L_ID) { return (false, 0, 0, 0, 0) }
+    if n * 8 < (get(l, L_Y) & 0xffff) + ((get(l, L_Y) >> 16) & 0xff) { return (false, 0, 0, 0, 0) }
+    var x = field(r, n, get(l, L_X))
+    var y = field(r, n, get(l, L_Y))
+    if get(l, L_KIND) == ABS {
+        x = scale(x, get(l, L_XMIN), get(l, L_XMAX))
+        y = scale(y, get(l, L_YMIN), get(l, L_YMAX))
+    }
+    var buttons: u64 = 0
+    var k: u64 = 0
+    while k < 5 {
+        if field(r, n, get(l, L_B + k)) != 0 { buttons = buttons | (1 << k) }
+        k += 1
+    }
+    (true, x, y, buttons, field(r, n, get(l, L_W)))
+}
