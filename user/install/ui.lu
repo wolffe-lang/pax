@@ -113,15 +113,18 @@ fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
 /// px106: after the confirmation and before any write, the guided install
 /// asks whether to set root's password and the new user's. Each yes runs
 /// the image's /bin/passwd -R on a scratch copy of the accounts the
-/// install will write (its prompts and the typed password go to the
-/// terminal, never to the install log); a no, or a passwd that does not
-/// finish, leaves the account locked. Returns the /etc/shadow text, every
-/// account locked but those set.
-fn guided_passwords(mut lg: Log, user: str, work: str) -> str ! {cancelled, io} {
+/// install will write, made from the source tree's /etc/passwd as
+/// configure_tree makes them (never the running system's, which a rescue
+/// environment need not have: pax#324); its prompts and the typed password
+/// go to the terminal, never to the install log. A no, or a passwd that
+/// does not finish, leaves the account locked. Returns the /etc/shadow
+/// text, every account locked but those set.
+fn guided_passwords(mut lg: Log, user: str, source: str, work: str) -> str ! {cancelled, io} {
     let dir = "{work}/accounts"
     fs_create_dir_all("{dir}/etc") else |_| { return io }
-    let live = fs_read_text("/etc/passwd") else |_| { return io }
-    let accounts = account_table(live, user, false) else |_| { return io }
+    let base = if source == "/" then "" else source
+    let tree = fs_read_text("{base}/etc/passwd") else |_| { return io }
+    let accounts = account_table(tree, user, false) else |_| { return io }
     durable_text("{dir}/etc/passwd", accounts)?
     durable_text("{dir}/etc/shadow", locked_shadow(accounts, today()))?
     for who in ["root", user] {
