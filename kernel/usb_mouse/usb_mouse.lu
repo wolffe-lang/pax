@@ -1,0 +1,101 @@
+//! usb_mouse — a HID pointer's reports (px109). Pure: bytes at kernel
+//! addresses in, words out; no device, no allocation, no other module.
+//! Written from USB HID 1.11 (§6.2.2's items, §7.2, appendix B.2) and the
+//! HID Usage Tables 1.7 (§4 Generic Desktop, §12 Button); no driver's,
+//! kernel's or device model's source consulted.
+//!
+//! **The boot report** (appendix B.2): byte 0 buttons 1 to 3 in bits 0
+//! to 2 (bits 3 to 7 device-specific, not read), bytes 1 and 2 the X and
+//! Y displacements, signed; the bytes after are device-specific and are
+//! not read (`boot`).
+//!
+//! **A report descriptor** is read only as far as a pointer needs
+//! (`parse`): in the first top-level Application collection whose usage
+//! is Generic Desktop Mouse (0x02) or Pointer (0x01), the Input fields
+//! whose usages are X (0x30), Y (0x31), Wheel (0x38) and Buttons 1 to 5
+//! (page 9), each with its bit offset in its report, its size, whether it
+//! is signed (Logical Minimum below 0, §6.2.2.7's remark), relative or
+//! absolute (the Input item's bit 2) and its logical extents. The items
+//! read: Usage Page, Logical Minimum and Maximum, Report Size, Report ID
+//! and Report Count (global); Usage, Usage Minimum and Maximum (local);
+//! Input, Output, Feature, Collection and End Collection (main). Physical
+//! extents, units, designators and strings are skipped. Refused by name
+//! (`refusal`): a long item, Push or Pop, Delimiter, no Mouse or Pointer
+//! collection, no X or no Y, X and Y of different kinds or in different
+//! reports, a pointer field wider than 32 bits, a report longer than 64
+//! bytes, collections nested deeper than 8 or unbalanced, a truncated
+//! item, an absolute axis with no extent.
+//!
+//! **Report IDs** (§6.2.2.7): when a Report ID item appears anywhere, every
+//! report begins with its ID byte; bit offsets count from the report's
+//! first byte, the ID included, so a field after an ID starts at bit 8.
+//! Reports with another ID are not the pointer's (`decode` answers no).
+//!
+//! **The layout** (`LAYOUT` words at the caller's address): the report ID
+//! (0: none), the report's length in bytes, the kind (1 relative, 2
+//! absolute), X, Y and the wheel as field words, buttons 1 to 5 as field
+//! words, then X's and Y's logical extents (two's complement). A field
+//! word is its bit offset | size << 16 | 1 << 24 when signed | 1 << 25
+//! when relative | 1 << 26 (present) | its report ID << 32; 0 is absent.
+//! A wheel or a button in another report than X and Y is dropped.
+//!
+//! `parse` needs a work area of `WORK` bytes beside the layout: per
+//! report ID, the input bits counted so far (256 words), and the local
+//! usages of the item being read.
+
+pub const LAYOUT: u64 = 15
+pub const WORK: u64 = 4096
+pub const L_ID: u64 = 0
+pub const L_LEN: u64 = 1
+pub const L_KIND: u64 = 2
+pub const L_X: u64 = 3
+pub const L_Y: u64 = 4
+pub const L_W: u64 = 5
+pub const L_B: u64 = 6 // buttons 1 to 5: words 6 to 10
+pub const L_XMIN: u64 = 11
+pub const L_XMAX: u64 = 12
+pub const L_YMIN: u64 = 13
+pub const L_YMAX: u64 = 14
+
+pub const REL: u64 = 1
+pub const ABS: u64 = 2
+/// Absolute positions are scaled to 0..SCALE across the device's extents.
+pub const SCALE: u64 = 32767
+/// The longest report read (a full-speed interrupt endpoint's packet).
+pub const REPORT_MAX: u64 = 64
+
+const F_SIGNED: u64 = 0x1000000
+const F_REL: u64 = 0x2000000
+const F_HERE: u64 = 0x4000000
+
+// Refusals (`refusal` names them).
+pub const OK: u64 = 0
+pub const R_LONG: u64 = 1
+pub const R_PUSH: u64 = 2
+pub const R_DELIMITER: u64 = 3
+pub const R_NO_POINTER: u64 = 4
+pub const R_NO_XY: u64 = 5
+pub const R_WIDE: u64 = 6
+pub const R_REPORT: u64 = 7
+pub const R_SPLIT: u64 = 8
+pub const R_TRUNCATED: u64 = 9
+pub const R_NESTING: u64 = 10
+pub const R_MIXED: u64 = 11
+pub const R_EXTENT: u64 = 12
+
+// The work area's words (after the layout's LAYOUT words, at `work`).
+const W_BITS: u64 = 16 // 256 words: input bits so far, per report ID
+const W_USAGES: u64 = 288 // 16 local usages
+const USAGES: u64 = 16
+
+const SIGN: u64 = 0x8000000000000000
+
+// px109: the interface first, the bodies after the invariant rows.
+pub fn lt(_a: u64, _b: u64) -> bool { false }
+pub fn sext(v: u64, _bits: u64) -> u64 { v }
+pub fn refusal(_code: u64) -> str { "unwritten" }
+pub fn boot(_r: u64, _n: u64) -> (bool, u64, u64, u64) { (false, 0, 0, 0) }
+pub fn parse(_at: u64, _n: u64, _out: u64) -> u64 { R_NO_POINTER }
+pub fn field(_r: u64, _n: u64, _f: u64) -> u64 { 0 }
+pub fn scale(_v: u64, _lo: u64, _hi: u64) -> u64 { 0 }
+pub fn decode(_r: u64, _n: u64, _l: u64) -> (bool, u64, u64, u64, u64) { (false, 0, 0, 0, 0) }
