@@ -890,7 +890,13 @@ kinds are refused. A non-empty `lost+found` is refused, never discarded.
 Contents of `/proc`, `/sys`, `/dev`, `/tmp` and the installer payload
 `/usr/share/pax-install` are excluded, with their directories preserved.
 The last exclusion prevents a “no games” answer from copying a hidden game
-payload elsewhere on the target. A later installation from that target
+payload elsewhere on the target. What the running system writes while it
+runs is left out whole, never copied and never in the target's manifest
+(`runtime_state` in `user/install/snapshot.lu`): `/var/lib/dhcp` (the
+kernel's DHCP lease), `/etc/resolv.conf` (written from that lease),
+`/var/log/sudo.log`, and every top-level name that starts with a dot
+(root's home is `/`: the shell's history, lope's store). The installed
+system writes its own; the rest of `/var/lib` is copied. A later installation from that target
 needs a supplied payload again. `--source DIR`, `--payload DIR` and
 `--tool-dir DIR` support rescue layouts; a nonstandard payload directory
 must be outside the source tree. Existing `~/Games` at the chosen home is
