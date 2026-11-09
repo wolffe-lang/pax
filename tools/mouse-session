@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""Drive a black-box USB mouse session; no driver internals consulted (px109).
+
+Boots a probe image (user/elf/mouseprobe.c as its one program) on an xHCI
+controller with a USB keyboard on port 1, QEMU's usb-mouse on port 2, its
+usb-tablet on port 3 and a second usb-mouse on port 4, and drives each of
+the probe's rows through QMP's input-send-event (pointer motion, buttons,
+the wheel, keys), the monitor's `mouse_set` (which pointer the events
+reach), and device_del/device_add (an unplug and a replug).
+
+The probe prints every record /dev/mouse0 gives as hex; this tool decodes
+them by the documented record (notes/px109-the-mouse.md, "The record") and
+judges each row by name: `PASS <row> ...` or `FAIL <row> <why>`, at column
+0. The exit status is 0 only when every row passed.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+ROWS = ['mouse-open', 'mouse-move', 'mouse-left', 'mouse-right', 'mouse-middle',
+        'mouse-wheel', 'mouse-drag', 'tablet-move', 'tablet-left', 'tablet-wheel',
+        'tablet-drag', 'burst-edges', 'two-mice', 'unplug-held', 'replug',
+        'keys-during-motion', 'finish']
+EDGE, MERGED, GONE, LOST, NEW = 1, 2, 4, 8, 16
+REL, ABS = 1, 2
+TYPED = 'pax mouse'
+TYPED_BYTES = TYPED.encode() + b'\r'
+QCODES = {' ': 'spc'}
+# The burst: one x+1 every 6 ms, a button transition every 10 of them, so
+# 25 clicks (50 edges) in 500 motions, about 3 s, while the probe reads
+# nothing for 4.5 s. A reader's queue holds 126 records (kernel/mouse):
+# under half full each report is a record; from half full motion merges
+# into the tail, so each edge costs two records (itself and the motion
+# after it); 63 + 2 x 50 overruns 126, and the first 63 records' 62
+# compactions cover the 37 needed. So the queue fills and compacts, and
+# no edge may be lost.
+BURST_MOTIONS = 500
+BURST_CLICKS = 25
+BURST_EVERY = 10
+QUEUE = 126
+
+
+def decode(hexline):
+    """One 32-byte record, by the note's table."""
+    raw = bytes.fromhex(hexline)
+    if len(raw) != 32:
+        raise ValueError(f'record of {len(raw)} bytes')
+    t, seq, dev, kind, flags, x, y, buttons, wheel, reports = struct.unpack('<QIHBBiiHhI', raw)
+    return dict(t=t, seq=seq, dev=dev, kind=kind, flags=flags, x=x, y=y,
+                buttons=buttons, wheel=wheel, reports=reports)
+
+
+def parse_rows(text):
+    """{label: [records]} and the API line, from the probe's transcript."""
+    rows, current, api, keys = {}, None, None, []
+    for line in text.splitlines():
+        line = line.strip('\r')
+        if line.startswith('MOUSEREADY '):
+            current = line.split()[2]
+            rows[current] = []
+        elif line.startswith('MOUSEREC ') and current is not None:
+            rows[current].append(decode(line.split()[1]))
+        elif line.startswith('MOUSEAPI '):
+            api = dict(kv.split('=', 1) for kv in line.split()[1:])
+        elif line.startswith('MOUSEKEY '):
+            _, t, b = line.split()
+            keys.append((int(t), int(b, 16)))
+        elif line.startswith('MOUSEROW '):
+            current = None
+    return rows, api, keys
+
+
+def edges(recs, dev=None):
+    """The button states the EDGE records name, in order."""
+    return [r['buttons'] for r in recs if r['flags'] & EDGE and (dev is None or r['dev'] == dev)]
+
+
+class Judge:
+    def __init__(self):
+        self.failed = []
+        self.judged = 0
+        self.dev = {}
+
+    def row(self, name, ok, detail):
+        print(f'{"PASS" if ok else "FAIL"} {name} {detail}', flush=True)
+        self.judged += 1
+        if not ok:
+            self.failed.append(name)
+
+    def judge(self, rows, api, keys):
+        if api is None:
+            self.row('mouse-open', False, 'no MOUSEAPI line')
+        else:
+            ok = (api.get('open') == '0' and api.get('mode') == '20600' and api.get('short') == '-22'
+                  and api.get('empty') == '-11' and api.get('poll') == '0')
+            self.row('mouse-open', ok, ' '.join(f'{k}={v}' for k, v in api.items())
+                     + ('' if ok else ' (want open=0 mode=20600 short=-22 empty=-11 poll=0)'))
+        get = lambda name: rows.get(name, [])
+
+        def one_device(name, recs, kind):
+            devs = sorted({r['dev'] for r in recs})
+            if len(devs) != 1:
+                return None, f'records from devices {devs}, want one'
+            if any(r['kind'] != kind for r in recs):
+                return None, f'kind {sorted({r["kind"] for r in recs})}, want {kind}'
+            return devs[0], ''
+
+        recs = get('mouse-move')
+        dev, why = one_device('mouse-move', recs, REL)
+        sx, sy = sum(r['x'] for r in recs), sum(r['y'] for r in recs)
+        ok = dev is not None and (sx, sy) == (3, 3) and all(r['buttons'] == 0 for r in recs) and not edges(recs)
+        self.row('mouse-move', ok, f'{len(recs)} records, sum dx {sx} dy {sy} (want 3 3) {why}'.rstrip())
+        self.dev['mouse'] = dev
+
+        for name, want in (('mouse-left', 1), ('mouse-right', 2), ('mouse-middle', 4)):
+            recs = get(name)
+            got = edges(recs)
+            ok = got == [want, 0] and {r['dev'] for r in recs} == {self.dev['mouse']}
+            self.row(name, ok, f'edges {got} (want {[want, 0]}) from {sorted({r["dev"] for r in recs})}')
+
+        recs = get('mouse-wheel')
+        w = sum(r['wheel'] for r in recs)
+        ok = w == 1 and all(r['buttons'] == 0 for r in recs) and recs and {r['dev'] for r in recs} == {self.dev['mouse']}
+        self.row('mouse-wheel', bool(ok), f'sum wheel {w} (want 1: two up, one down), buttons {sorted({r["buttons"] for r in recs})}')
+
+        recs = get('mouse-drag')
+        got = edges(recs)
+        press = [i for i, r in enumerate(recs) if r['flags'] & EDGE and r['buttons'] == 1]
+        release = [i for i, r in enumerate(recs) if r['flags'] & EDGE and r['buttons'] == 0]
+        held = sum(r['x'] for i, r in enumerate(recs) if press and release and press[0] < i < release[0])
+        stray = [r for i, r in enumerate(recs) if r['x'] and not (press and release and press[0] < i < release[0])]
+        ok = got == [1, 0] and held == 100 and not stray
+        self.row('mouse-drag', ok, f'edges {got} (want [1, 0]), dx while held {held} (want 100), '
+                 f'{len(stray)} moving records outside the hold')
+
+        recs = get('tablet-move')
+        dev, why = one_device('tablet-move', recs, ABS)
+        last = (recs[-1]['x'], recs[-1]['y']) if recs else None
+        ok = dev is not None and dev != self.dev['mouse'] and last == (16384, 8192)
+        self.row('tablet-move', ok, f'{len(recs)} records, last at {last} (want (16384, 8192)) {why}'.rstrip())
+        self.dev['tablet'] = dev
+
+        recs = get('tablet-left')
+        got = edges(recs)
+        ok = got == [1, 0] and {r['dev'] for r in recs} == {self.dev['tablet']}
+        self.row('tablet-left', ok, f'edges {got} (want [1, 0]) from {sorted({r["dev"] for r in recs})}')
+
+        recs = get('tablet-wheel')
+        w = sum(r['wheel'] for r in recs)
+        ok = w == -1 and recs and {r['dev'] for r in recs} == {self.dev['tablet']}
+        self.row('tablet-wheel', bool(ok), f'sum wheel {w} (want -1)')
+
+        recs = get('tablet-drag')
+        e = [(r['buttons'], r['x'], r['y']) for r in recs if r['flags'] & EDGE]
+        ok = e == [(1, 1000, 1000), (0, 5000, 5000)]
+        self.row('tablet-drag', ok, f'edges with positions {e} (want [(1, 1000, 1000), (0, 5000, 5000)])')
+
+        recs = get('burst-edges')
+        got = edges(recs)
+        sx = sum(r['x'] for r in recs)
+        merged = sum(1 for r in recs if r['flags'] & MERGED)
+        lost = sum(1 for r in recs if r['flags'] & LOST)
+        reports = sum(r['reports'] for r in recs)
+        ok = (got == [1, 0] * BURST_CLICKS and sx == BURST_MOTIONS and merged > 0 and lost == 0
+              and len(recs) >= QUEUE)
+        self.row('burst-edges', ok, f'{len(recs)} records (at least {QUEUE}: the queue filled) carrying {reports} reports, '
+                 f'{merged} merged, {lost} lost; '
+                 f'edges {len(got)} {"in order" if got == [1, 0] * BURST_CLICKS else got} '
+                 f'(want {2 * BURST_CLICKS} alternating), sum dx {sx} (want {BURST_MOTIONS})')
+
+        recs = get('two-mice')
+        by = {}
+        for r in recs:
+            by.setdefault(r['dev'], []).append(r)
+        rel = {d: sum(r['x'] for r in rs) for d, rs in by.items() if all(r['kind'] == REL for r in rs)}
+        tab = [rs[-1] for d, rs in by.items() if all(r['kind'] == ABS for r in rs)]
+        ok = sorted(rel.values()) == [3, 4] and len(tab) == 1 and (tab[0]['x'], tab[0]['y']) == (100, 200)
+        self.row('two-mice', ok, f'relative devices {rel} (want two, sums 3 and 4), absolute '
+                 f'{[(t["dev"], t["x"], t["y"]) for t in tab]} (want one at 100, 200)')
+        self.dev['mouse2'] = [d for d in rel if d != self.dev['mouse']]
+
+        recs = get('unplug-held')
+        mine = [r for r in recs if r['dev'] == self.dev['mouse']]
+        e = edges(mine)
+        gone = [r for r in mine if r['flags'] & GONE]
+        ok = e[:1] == [1] and len(gone) == 1 and gone[0]['buttons'] == 0 and mine[-1] is gone[0]
+        self.row('unplug-held', ok, f'edges {e}, GONE records {len(gone)} with buttons '
+                 f'{[g["buttons"] for g in gone]} (want a press, then one GONE with buttons 0, last)')
+
+        recs = get('replug')
+        new = [r for r in recs if r['flags'] & NEW]
+        fresh = {r['dev'] for r in new}
+        known = {self.dev['mouse'], self.dev['tablet'], *self.dev['mouse2']}
+        moved = sum(r['x'] for r in recs if r['dev'] in fresh)
+        ok = len(fresh) == 1 and not (fresh & known) and moved == 9 and all(r['buttons'] == 0 for r in recs)
+        self.row('replug', ok, f'NEW devices {sorted(fresh)} (known {sorted(d for d in known if d)}), '
+                 f'sum dx from it {moved} (want 9), buttons {sorted({r["buttons"] for r in recs})}')
+
+        recs = get('keys-during-motion')
+        typed = bytes(b for _, b in keys)
+        between = [r for r in recs if keys and keys[0][0] <= r['t'] <= keys[-1][0] and r['x']]
+        ok = typed == TYPED_BYTES and len(between) > 0 and sum(r['x'] for r in recs) > 0
+        self.row('keys-during-motion', ok, f'typed {typed!r} (want {TYPED_BYTES!r}), '
+                 f'{len(between)} moving records between the first and last key, {len(recs)} in all')
+        return not self.failed
+
+
+def run(args):
+    out = Path(args.output).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    serial = out / 'serial.log'
+    for stale in (serial, out / 'rows.txt'):
+        stale.unlink(missing_ok=True)
+    # A unix socket's path must fit sockaddr_un (108 bytes with its NUL):
+    # keep it short and say so loudly rather than let QEMU truncate it.
+    sockdir = Path(os.environ.get('TMPDIR') or out)
+    sock = sockdir / f'pxm-{os.getpid()}.sock'
+    if len(str(sock).encode()) > 100:
+        raise RuntimeError(f'QMP socket path is {len(str(sock).encode())} bytes, over 100: {sock}')
+    sock.unlink(missing_ok=True)
+    root = Path(__file__).resolve().parents[1]
+    cmd = [str(root / 'tools/qemu-run'), '--firmware', args.firmware, '--accel', args.accel,
+           '--usb-kbd=root', '--serial', str(serial), '--timeout', '150',
+           str(Path(args.image).resolve()), '--',
+           '-qmp', f'unix:{sock},server=on,wait=off',
+           '-device', 'usb-mouse,id=pax-mouse,bus=pax-usb.0,port=2',
+           '-device', 'usb-tablet,id=pax-tablet,bus=pax-usb.0,port=3',
+           '-device', 'usb-mouse,id=pax-mouse2,bus=pax-usb.0,port=4']
+    with (out / 'runner.log').open('wb') as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        conn = reader = None
+        start = time.monotonic()
+        try:
+            while not sock.exists():
+                if proc.poll() is not None or time.monotonic() - start > 15:
+                    raise RuntimeError('QMP did not start')
+                time.sleep(.02)
+            conn = socket.socket(socket.AF_UNIX)
+            conn.settimeout(10)
+            conn.connect(str(sock))
+            reader = conn.makefile('rb')
+            json.loads(reader.readline())
+
+            def execute(name, arguments=None):
+                payload = {'execute': name}
+                if arguments is not None:
+                    payload['arguments'] = arguments
+                conn.sendall(json.dumps(payload).encode() + b'\n')
+                while True:
+                    reply = json.loads(reader.readline())
+                    if 'error' in reply:
+                        raise RuntimeError(reply)
+                    if 'return' in reply:
+                        return reply['return']
+
+            def hmp(command):
+                return execute('human-monitor-command', {'command-line': command})
+
+            execute('qmp_capabilities')
+
+            def mice():
+                """`info mice`: [(index, name)] in its order."""
+                found = []
+                for line in hmp('info mice').splitlines():
+                    m = re.match(r'^\s*\*?\s*Mouse #(\d+): (.*)$', line)
+                    if m:
+                        found.append((int(m[1]), m[2]))
+                with (out / 'mice.txt').open('a') as f:
+                    f.write(f'{time.monotonic() - start:.3f}\n{hmp("info mice")}--\n')
+                return found
+
+            def select(which):
+                """Point QEMU's pointer events at a device: `mouse`,
+                `mouse2` (the other usb-mouse), `newest` (the usb-mouse made
+                last) or `tablet`. `info mice` names them `QEMU HID Mouse`
+                and `QEMU HID Tablet (absolute)` (measured), not in the
+                order of their numbers; a device made later has a larger
+                number."""
+                found = sorted(mice())
+                usb = [i for i, n in found if 'HID Mouse' in n]
+                tab = [i for i, n in found if 'HID Tablet' in n]
+                pick = {'mouse': usb[:1], 'mouse2': usb[1:2], 'newest': usb[-1:], 'tablet': tab[:1]}[which]
+                if not pick:
+                    # Not fatal: the row's own verdict names what is missing.
+                    print(f'NOTE no {which} in info mice: {found}', flush=True)
+                    return
+                hmp(f'mouse_set {pick[0]}')
+
+            def send(*events):
+                execute('input-send-event', {'events': list(events)})
+
+            def rel(axis, value):
+                return {'type': 'rel', 'data': {'axis': axis, 'value': value}}
+
+            def absolute(axis, value):
+                return {'type': 'abs', 'data': {'axis': axis, 'value': value}}
+
+            def btn(button, down):
+                return {'type': 'btn', 'data': {'down': down, 'button': button}}
+
+            def key(name, down):
+                return {'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': QCODES.get(name, name)}}}
+
+            def click(button, hold=.05):
+                send(btn(button, True)); time.sleep(hold)
+                send(btn(button, False)); time.sleep(.05)
+
+            def inject(label):
+                if label == 'mouse-move':
+                    select('mouse'); time.sleep(.05)
+                    send(rel('x', 10)); time.sleep(.05)
+                    send(rel('y', 5)); time.sleep(.05)
+                    send(rel('x', -7), rel('y', -2))
+                elif label in ('mouse-left', 'mouse-right', 'mouse-middle'):
+                    click(label.split('-')[1])
+                elif label == 'mouse-wheel':
+                    click('wheel-up'); click('wheel-up'); click('wheel-down')
+                elif label == 'mouse-drag':
+                    send(btn('left', True)); time.sleep(.05)
+                    for _ in range(5):
+                        send(rel('x', 20)); time.sleep(.03)
+                    time.sleep(.05)
+                    send(btn('left', False))
+                elif label == 'tablet-move':
+                    select('tablet'); time.sleep(.05)
+                    send(absolute('x', 16384), absolute('y', 8192))
+                elif label == 'tablet-left':
+                    click('left')
+                elif label == 'tablet-wheel':
+                    click('wheel-down')
+                elif label == 'tablet-drag':
+                    send(absolute('x', 1000), absolute('y', 1000)); time.sleep(.05)
+                    send(btn('left', True)); time.sleep(.05)
+                    send(absolute('x', 3000), absolute('y', 3000)); time.sleep(.05)
+                    send(absolute('x', 5000), absolute('y', 5000)); time.sleep(.05)
+                    send(btn('left', False))
+                elif label == 'burst-edges':
+                    # The probe reads nothing for 4.5 s (BURST_* above): a
+                    # left press after every 20th motion's tenth, its release
+                    # after the 20th; transitions 60 ms apart, so the device
+                    # (polled every 8 ms) reports each.
+                    select('mouse'); time.sleep(.02)
+                    for i in range(BURST_MOTIONS):
+                        send(rel('x', 1))
+                        if i % (2 * BURST_EVERY) == BURST_EVERY - 1:
+                            send(btn('left', True))
+                        elif i % (2 * BURST_EVERY) == 2 * BURST_EVERY - 1:
+                            send(btn('left', False))
+                        time.sleep(.006)
+                elif label == 'two-mice':
+                    select('mouse'); time.sleep(.05); send(rel('x', 3)); time.sleep(.1)
+                    select('mouse2'); time.sleep(.05); send(rel('x', 4)); time.sleep(.1)
+                    select('tablet'); time.sleep(.05); send(absolute('x', 100), absolute('y', 200))
+                elif label == 'unplug-held':
+                    select('mouse'); time.sleep(.05)
+                    send(btn('left', True)); time.sleep(.1)
+                    execute('device_del', {'id': 'pax-mouse'})
+                elif label == 'replug':
+                    # device_del completes asynchronously: the id is free
+                    # once QEMU has removed the device.
+                    for attempt in range(20):
+                        try:
+                            execute('device_add', {'driver': 'usb-mouse', 'id': 'pax-mouse', 'bus': 'pax-usb.0', 'port': '2'})
+                            break
+                        except RuntimeError:
+                            if attempt == 19:
+                                raise
+                            time.sleep(.25)
+                    time.sleep(1.2)
+                    select('newest'); time.sleep(.05)
+                    send(rel('x', 9))
+                elif label == 'keys-during-motion':
+                    select('mouse'); time.sleep(.02)
+
+                    def move(n):
+                        for _ in range(n):
+                            send(rel('x', 1)); time.sleep(.005)
+                    move(40)
+                    for ch in list(TYPED) + ['ret']:
+                        for down in (True, False):
+                            send(key(ch, down))
+                            move(6)
+                    move(40)
+
+            sent = 0
+            while time.monotonic() - start < 140:
+                text = serial.read_text(errors='replace') if serial.exists() else ''
+                if 'MOUSEDONE' in text:
+                    break
+                if 'PANIC' in text or proc.poll() is not None:
+                    raise RuntimeError('guest ended before MOUSEDONE')
+                if f'MOUSEREADY {sent} ' in text and sent < len(ROWS):
+                    inject(ROWS[sent])
+                    sent += 1
+                time.sleep(.01)
+            else:
+                raise RuntimeError('mouse session deadline')
+            # Bytes, not text: universal newlines would fold the CR LF.
+            until = time.monotonic() + 8
+            while b'\nhalt\r\n' not in serial.read_bytes() and time.monotonic() < until:
+                time.sleep(.02)
+            if b'\nhalt\r\n' not in serial.read_bytes():
+                raise RuntimeError('PAX did not reach halt')
+            execute('quit')
+            proc.wait(timeout=10)
+        finally:
+            if reader is not None:
+                reader.close()
+            if conn is not None:
+                conn.close()
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+            sock.unlink(missing_ok=True)
+    text = serial.read_text(errors='replace')
+    rows, api, keys = parse_rows(text)
+    (out / 'rows.txt').write_text(''.join(f'{k} {len(v)}\n' for k, v in rows.items()))
+    judge = Judge()
+    ok = judge.judge(rows, api, keys)
+    # The keyboard path stays the keyboard's: no i8042 scancodes, no COM1 bytes.
+    summary = [x for x in text.splitlines() if x.startswith('console: ') and 'scancodes' in x]
+    clean = len(summary) == 1 and '(0 scancodes)' in summary[0] and 'console: 0 bytes from com1,' in summary[0]
+    judge.row('keyboard-path', clean, repr(summary))
+    ok = ok and clean
+    print(f'{"PASS" if ok else "FAIL"} mouse-session {args.firmware} {args.accel}: '
+          f'{judge.judged - len(judge.failed)} of {judge.judged} rows'
+          + (f'; red: {" ".join(judge.failed)}' if judge.failed else ''), flush=True)
+    return 0 if ok else 1
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--firmware', choices=['bios', 'uefi'], default='bios')
+    parser.add_argument('--accel', choices=['auto', 'kvm', 'tcg'], default='auto')
+    parser.add_argument('--judge', help='judge an existing transcript (a serial log) and exit')
+    a = parser.parse_args()
+    if a.judge:
+        r, api, k = parse_rows(Path(a.judge).read_text(errors='replace'))
+        sys.exit(0 if Judge().judge(r, api, k) else 1)
+    try:
+        sys.exit(run(a))
+    except RuntimeError as error:
+        print(f'FAIL mouse-session {a.firmware} {a.accel}: {error}', flush=True)
+        sys.exit(1)
