@@ -44,30 +44,54 @@
 //! the producer from the controller's interrupt, readers from system
 //! calls, all on one CPU. No region, no heap. Written for PAX; no other
 //! kernel's input layer consulted.
+use frames
+use log
+use sync
+
+/// A record's size in bytes (the table above).
 pub const RECORD: u64 = 32
 /// Records a reader's queue holds (a frame, its first 64 bytes the books).
 pub const CAP: u64 = 126
 const HIGH: u64 = 63
+/// Readers at once: the console's and /dev/mouse0's opens together.
 pub const READERS: u64 = 8
+/// Pointers at once.
 pub const DEVICES: u64 = 16
 
+/// A record's time: u64 nanoseconds.
 pub const R_TIME: u64 = 0
+/// A record's seq: u32.
 pub const R_SEQ: u64 = 8
+/// A record's device: u16.
 pub const R_DEV: u64 = 12
+/// A record's kind: u8.
 pub const R_KIND: u64 = 14
+/// A record's flags: u8.
 pub const R_FLAGS: u64 = 15
+/// A record's x: i32.
 pub const R_X: u64 = 16
+/// A record's y: i32.
 pub const R_Y: u64 = 20
+/// A record's buttons: u16.
 pub const R_BUTTONS: u64 = 24
+/// A record's wheel: i16.
 pub const R_WHEEL: u64 = 26
+/// A record's reports: u32.
 pub const R_REPORTS: u64 = 28
 
+/// A relative pointer (a mouse).
 pub const REL: u64 = 1
+/// An absolute pointer (a tablet, a touchscreen).
 pub const ABS: u64 = 2
+/// Flag: the buttons changed.
 pub const EDGE: u64 = 1
+/// Flag: more than one report.
 pub const MERGED: u64 = 2
+/// Flag: the pointer left.
 pub const GONE: u64 = 4
+/// Flag: records were lost before this one.
 pub const LOST: u64 = 8
+/// Flag: the pointer arrived.
 pub const NEW: u64 = 16
 const FIXED: u64 = 21 // EDGE | GONE | NEW: never merged into, never merged
 
@@ -87,26 +111,385 @@ const S_ATTACHED: u64 = 15
 const S_DEVS: u64 = 16
 
 // A reader's frame: words 0 head, 1 count, 2 the last seq, 3 edges
-// lost, 4 motion lost, 5 a LOST owed to the next record; records at 64.
+// lost, 4 motion lost, 5 a LOST owed to the next record, 6 changes (a
+// record made or merged into); records at 64.
 const Q_HEAD: u64 = 0
 const Q_COUNT: u64 = 1
 const Q_SEQ: u64 = 2
 const Q_LOST_EDGES: u64 = 3
 const Q_LOST_MOTION: u64 = 4
 const Q_OWED: u64 = 5
+const Q_CHANGES: u64 = 6
 const Q_RECORDS: u64 = 64
 
-// px109: the interface first, the bodies (and their imports, kernel/frames
-// and kernel/sync) after the invariant rows.
-pub fn start() -> bool { false }
-pub fn started() -> bool { false }
-pub fn attach(_kind: u64, _now: u64) -> u64 { 0 }
-pub fn detach(_dev: u64, _now: u64) -> bool { false }
-pub fn report(_dev: u64, _x: u64, _y: u64, _buttons: u64, _wheel: u64, _now: u64) -> bool { false }
-pub fn open() -> u64 { 0 }
-pub fn close(_r: u64) {}
-pub fn pull(_r: u64, _out: u64) -> bool { false }
-pub fn pending(_r: u64) -> u64 { 0 }
-pub fn lost(_r: u64) -> (u64, u64) { (0, 0) }
-pub fn readers() -> u64 { 0 }
-pub fn books() -> (u64, u64, u64, u64, u64, u64, u64) { (0, 0, 0, 0, 0, 0, 0) }
+var state: u64 = 0
+
+fn r8(a: u64) -> u64 { unsafe { (a as *u8).read_volatile() as u64 } }
+fn r32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
+fn w32(a: u64, v: u64) { unsafe { (a as *u32).write_volatile((v & 0xffffffff) as u32) } }
+fn get(a: u64, i: u64) -> u64 { unsafe { ((a + i * 8) as *u64).read_volatile() } }
+fn put(a: u64, i: u64, v: u64) { unsafe { ((a + i * 8) as *u64).write_volatile(v) } }
+
+fn page() -> u64 {
+    let p = frames.alloc() else 0
+    if p == 0 { return 0 }
+    let a = p + frames.hhdm()
+    var i: u64 = 0
+    while i < 512 { put(a, i, 0); i += 1 }
+    a
+}
+
+fn st() -> u64 { unsafe { state } }
+
+/// `a < b` as signed 64-bit numbers.
+fn lt(a: u64, b: u64) -> bool { (a ^ 0x8000000000000000) < (b ^ 0x8000000000000000) }
+
+/// The low 32 bits of `v` as a signed number (a two's complement word).
+fn s32(v: u64) -> u64 {
+    let x = v & 0xffffffff
+    if x & 0x80000000 != 0 { x | 0xffffffff00000000 } else { x }
+}
+
+/// The low 16 bits of `v` as a signed number.
+fn s16(v: u64) -> u64 {
+    let x = v & 0xffff
+    if x & 0x8000 != 0 { x | 0xffffffffffff0000 } else { x }
+}
+
+/// `a + b` held to `lo` .. `hi` (two's complement words).
+fn clamp_add(a: u64, b: u64, lo: u64, hi: u64) -> u64 {
+    let s = a + b
+    if lt(s, lo) { lo } else if lt(hi, s) { hi } else { s }
+}
+
+/// `a + b` held to an i32's range (relative motion).
+fn add32(a: u64, b: u64) -> u64 { clamp_add(s32(a), s32(b), 0xffffffff80000000, 0x7fffffff) }
+
+/// `a + b` held to an i16's range (the wheel).
+fn add16(a: u64, b: u64) -> u64 { clamp_add(s16(a), s16(b), 0xffffffffffff8000, 0x7fff) }
+
+/// Record `r`'s wheel (a two's complement word).
+fn wheel_of(r: u64) -> u64 { s16(r32(r + R_BUTTONS) >> 16) }
+
+fn set_wheel(r: u64, w: u64) { w32(r + R_BUTTONS, (r32(r + R_BUTTONS) & 0xffff) | ((w & 0xffff) << 16)) }
+
+/// The state, made once (the first pointer or the first reader).
+pub fn start() -> bool {
+    let saved = sync.irq_save()
+    if st() == 0 {
+        let p = page()
+        if p != 0 { put(p, S_NEXT, 1); unsafe { state = p } }
+    }
+    sync.irq_restore(saved)
+    st() != 0
+}
+
+/// Whether the state exists: since the first pointer attached or the
+/// first reader opened (kernel/files serves /dev/mouse0 from then on).
+pub fn started() -> bool { st() != 0 }
+
+fn rec(q: u64, i: u64) -> u64 { q + Q_RECORDS * 8 + ((get(q, Q_HEAD) + i) % CAP) * RECORD }
+
+fn flags_of(r: u64) -> u64 { r8(r + R_FLAGS) }
+fn dev_of(r: u64) -> u64 { r32(r + R_DEV) & 0xffff }
+fn kind_of(r: u64) -> u64 { (r32(r + R_DEV) >> 16) & 0xff }
+
+fn write_rec(r: u64, now: u64, seq: u64, dev: u64, kind: u64, flags: u64, x: u64, y: u64, buttons: u64, wheel: u64, reports: u64) {
+    put(r, 0, now)
+    w32(r + R_SEQ, seq)
+    w32(r + R_DEV, (dev & 0xffff) | ((kind & 0xff) << 16) | ((flags & 0xff) << 24))
+    w32(r + R_X, x)
+    w32(r + R_Y, y)
+    w32(r + R_BUTTONS, (buttons & 0xffff) | ((wheel & 0xffff) << 16))
+    w32(r + R_REPORTS, reports)
+}
+
+fn set_flags(r: u64, f: u64) {
+    w32(r + R_DEV, (r32(r + R_DEV) & 0xffffff) | ((f & 0xff) << 24))
+}
+
+/// Fold report motion into record `r` (relative summed, absolute replaced).
+fn fold(r: u64, now: u64, kind: u64, x: u64, y: u64, wheel: u64, reports: u64) {
+    if kind == REL {
+        w32(r + R_X, add32(r32(r + R_X), x))
+        w32(r + R_Y, add32(r32(r + R_Y), y))
+    } else {
+        w32(r + R_X, x)
+        w32(r + R_Y, y)
+    }
+    set_wheel(r, add16(wheel_of(r), wheel))
+    put(r, 0, now)
+    w32(r + R_REPORTS, r32(r + R_REPORTS) + reports)
+    set_flags(r, flags_of(r) | MERGED)
+    let s = st()
+    put(s, S_MERGES, get(s, S_MERGES) + 1)
+}
+
+/// Whether records `a` and `b` are one pointer's motion and neither an
+/// edge, an arrival or a departure.
+fn motion_pair(a: u64, b: u64) -> bool {
+    dev_of(a) == dev_of(b) && kind_of(a) == kind_of(b) && flags_of(a) & FIXED == 0 && flags_of(b) & FIXED == 0 &&
+        (r32(a + R_BUTTONS) & 0xffff) == (r32(b + R_BUTTONS) & 0xffff)
+}
+
+/// A full queue's room: the oldest two adjacent motion records of one
+/// pointer made one (the older folded into the newer, so no edge moves).
+fn compact(q: u64) -> bool {
+    let n = get(q, Q_COUNT)
+    var i: u64 = 0
+    while i + 1 < n {
+        let a = rec(q, i)
+        let b = rec(q, i + 1)
+        if motion_pair(a, b) {
+            if kind_of(a) == REL {
+                w32(b + R_X, add32(r32(b + R_X), r32(a + R_X)))
+                w32(b + R_Y, add32(r32(b + R_Y), r32(a + R_Y)))
+            }
+            set_wheel(b, add16(wheel_of(b), wheel_of(a)))
+            w32(b + R_REPORTS, r32(b + R_REPORTS) + r32(a + R_REPORTS))
+            set_flags(b, flags_of(b) | MERGED | (flags_of(a) & LOST))
+            // The records before `a` move up one; the head moves past.
+            var j = i
+            while j > 0 {
+                let to = rec(q, j)
+                let from = rec(q, j - 1)
+                var w: u64 = 0
+                while w < 4 { put(to, w, get(from, w)); w += 1 }
+                j -= 1
+            }
+            put(q, Q_HEAD, (get(q, Q_HEAD) + 1) % CAP)
+            put(q, Q_COUNT, n - 1)
+            let s = st()
+            put(s, S_COMPACTS, get(s, S_COMPACTS) + 1)
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+/// One record (or a merge) into reader queue `q`.
+fn put_one(q: u64, now: u64, dev: u64, kind: u64, flags: u64, x: u64, y: u64, buttons: u64, wheel: u64, reports: u64) {
+    let n = get(q, Q_COUNT)
+    let motion = flags & FIXED == 0
+    put(q, Q_CHANGES, get(q, Q_CHANGES) + 1)
+    if motion && n >= HIGH {
+        let t = rec(q, n - 1)
+        if dev_of(t) == dev && kind_of(t) == kind && flags_of(t) & FIXED == 0 && (r32(t + R_BUTTONS) & 0xffff) == buttons {
+            fold(t, now, kind, x, y, wheel, reports)
+            return
+        }
+    }
+    if n >= CAP && !compact(q) {
+        let s = st()
+        if motion {
+            put(q, Q_LOST_MOTION, get(q, Q_LOST_MOTION) + 1)
+            put(s, S_LOST_MOTION, get(s, S_LOST_MOTION) + 1)
+        } else {
+            put(q, Q_LOST_EDGES, get(q, Q_LOST_EDGES) + 1)
+            put(s, S_LOST_EDGES, get(s, S_LOST_EDGES) + 1)
+        }
+        put(q, Q_OWED, 1)
+        return
+    }
+    let seq = get(q, Q_SEQ) + 1
+    put(q, Q_SEQ, seq)
+    let owed = if get(q, Q_OWED) != 0 { LOST } else { 0 }
+    put(q, Q_OWED, 0)
+    write_rec(rec(q, get(q, Q_COUNT)), now, seq, dev, kind, flags | owed, x, y, buttons, wheel, reports)
+    put(q, Q_COUNT, get(q, Q_COUNT) + 1)
+    let s = st()
+    put(s, S_RECORDS, get(s, S_RECORDS) + 1)
+}
+
+/// The record to every open reader; whether any reader has one.
+fn put_all(now: u64, dev: u64, kind: u64, flags: u64, x: u64, y: u64, buttons: u64, wheel: u64, reports: u64) -> bool {
+    let s = st()
+    var any = false
+    var r: u64 = 0
+    while r < READERS {
+        let q = get(s, r)
+        if q != 0 { put_one(q, now, dev, kind, flags, x, y, buttons, wheel, reports); any = true }
+        r += 1
+    }
+    any
+}
+
+/// The pointer table's entry for number `dev`; 0 none.
+fn entry(dev: u64) -> u64 {
+    let s = st()
+    if s == 0 || dev == 0 { return 0 }
+    var k: u64 = 0
+    while k < DEVICES {
+        let e = s + (S_DEVS + k * 4) * 8
+        if get(e, 0) == dev { return e }
+        k += 1
+    }
+    0
+}
+
+/// A pointer of kind `kind` (REL or ABS) arrived: its number, 0 when
+/// the table is full (DEVICES pointers at once) or no frame is left.
+/// Every reader gets a NEW record.
+pub fn attach(kind: u64, now: u64) -> u64 {
+    if !start() { return 0 }
+    let saved = sync.irq_save()
+    let s = st()
+    var k: u64 = 0
+    var e: u64 = 0
+    while k < DEVICES && e == 0 {
+        let at = s + (S_DEVS + k * 4) * 8
+        if get(at, 0) == 0 { e = at }
+        k += 1
+    }
+    if e == 0 { sync.irq_restore(saved); return 0 }
+    let dev = get(s, S_NEXT)
+    put(s, S_NEXT, if dev >= 0xffff { 1 } else { dev + 1 })
+    put(e, 0, dev); put(e, 1, kind); put(e, 2, 0); put(e, 3, 0xffffffffffffffff)
+    put(s, S_ATTACHED, get(s, S_ATTACHED) + 1)
+    let _any = put_all(now, dev, kind, NEW, 0, 0, 0, 0, 0)
+    sync.irq_restore(saved)
+    dev
+}
+
+/// Pointer `dev` left: every reader gets its GONE record, its buttons
+/// released (EDGE too when any was down). Whether any reader got it.
+pub fn detach(dev: u64, now: u64) -> bool {
+    let saved = sync.irq_save()
+    let e = entry(dev)
+    if e == 0 { sync.irq_restore(saved); return false }
+    let held = get(e, 2) != 0
+    let xy = get(e, 3)
+    let kind = get(e, 1)
+    let (x, y) = if kind == ABS && xy != 0xffffffffffffffff { (xy & 0xffffffff, xy >> 32) } else { (0, 0) }
+    let any = put_all(now, dev, kind, GONE | (if held { EDGE } else { 0 }), x, y, 0, 0, 0)
+    put(e, 0, 0)
+    sync.irq_restore(saved)
+    any
+}
+
+/// One device report of pointer `dev`: relative dx, dy or absolute x, y
+/// (two's complement words; absolute 0..32767), buttons 1 to 5 in bits 0
+/// to 4, the wheel; `now` CLOCK_MONOTONIC's nanoseconds. A report that
+/// changes nothing (no motion, no wheel, the same buttons, the same
+/// position) makes no record. Whether any reader got one.
+pub fn report(dev: u64, x: u64, y: u64, buttons: u64, wheel: u64, now: u64) -> bool {
+    let saved = sync.irq_save()
+    let e = entry(dev)
+    if e == 0 { sync.irq_restore(saved); return false }
+    let s = st()
+    put(s, S_REPORTS, get(s, S_REPORTS) + 1)
+    let kind = get(e, 1)
+    let b = buttons & 0x1f
+    let edge = b != get(e, 2)
+    let xy = (x & 0xffffffff) | ((y & 0xffffffff) << 32)
+    let still = if kind == REL { s32(x) == 0 && s32(y) == 0 } else { xy == get(e, 3) }
+    if !edge && still && s32(wheel) == 0 { sync.irq_restore(saved); return false }
+    put(e, 2, b)
+    if kind == ABS { put(e, 3, xy) }
+    let any = put_all(now, dev, kind, if edge { EDGE } else { 0 }, x, y, b, wheel, 1)
+    sync.irq_restore(saved)
+    any
+}
+
+/// A reader: its number (1 to READERS), 0 when every one is taken or no
+/// frame is left. Its queue starts empty.
+pub fn open() -> u64 {
+    if !start() { return 0 }
+    let saved = sync.irq_save()
+    let s = st()
+    var r: u64 = 0
+    while r < READERS {
+        if get(s, r) == 0 {
+            let q = page()
+            if q == 0 { sync.irq_restore(saved); return 0 }
+            put(s, r, q)
+            sync.irq_restore(saved)
+            return r + 1
+        }
+        r += 1
+    }
+    sync.irq_restore(saved)
+    0
+}
+
+fn queue(r: u64) -> u64 {
+    let s = st()
+    if s == 0 || r == 0 || r > READERS { 0 } else { get(s, r - 1) }
+}
+
+/// Reader `r` gives its queue back (what it held is dropped).
+pub fn close(r: u64) {
+    let saved = sync.irq_save()
+    let q = queue(r)
+    if q != 0 {
+        put(st(), r - 1, 0)
+        frames.free(q - frames.hhdm())
+    }
+    sync.irq_restore(saved)
+}
+
+/// The oldest record of reader `r`, copied to kernel address `out`
+/// (RECORD bytes) and taken: whether there was one.
+pub fn pull(r: u64, out: u64) -> bool {
+    let saved = sync.irq_save()
+    let q = queue(r)
+    if q == 0 || get(q, Q_COUNT) == 0 { sync.irq_restore(saved); return false }
+    let src = rec(q, 0)
+    var w: u64 = 0
+    while w < 4 { put(out, w, get(src, w)); w += 1 }
+    put(q, Q_HEAD, (get(q, Q_HEAD) + 1) % CAP)
+    put(q, Q_COUNT, get(q, Q_COUNT) - 1)
+    sync.irq_restore(saved)
+    true
+}
+
+/// How many records reader `r` has waiting.
+pub fn pending(r: u64) -> u64 {
+    let q = queue(r)
+    if q == 0 { 0 } else { get(q, Q_COUNT) }
+}
+
+/// How often reader `r`'s queue changed (a record made or merged into):
+/// what an edge-triggered wait compares.
+pub fn changes(r: u64) -> u64 {
+    let q = queue(r)
+    if q == 0 { 0 } else { get(q, Q_CHANGES) }
+}
+
+/// What reader `r` lost: (edges, motion reports).
+pub fn lost(r: u64) -> (u64, u64) {
+    let q = queue(r)
+    if q == 0 { (0, 0) } else { (get(q, Q_LOST_EDGES), get(q, Q_LOST_MOTION)) }
+}
+
+/// How many readers are open.
+pub fn readers() -> u64 {
+    let s = st()
+    if s == 0 { return 0 }
+    var n: u64 = 0
+    var r: u64 = 0
+    while r < READERS { if get(s, r) != 0 { n += 1 }; r += 1 }
+    n
+}
+
+/// The books: (pointers attached, reports, records, merges,
+/// compactions, edges lost, motion lost), every reader together.
+pub fn books() -> (u64, u64, u64, u64, u64, u64, u64) {
+    let s = st()
+    if s == 0 { return (0, 0, 0, 0, 0, 0, 0) }
+    (get(s, S_ATTACHED), get(s, S_REPORTS), get(s, S_RECORDS), get(s, S_MERGES), get(s, S_COMPACTS),
+     get(s, S_LOST_EDGES), get(s, S_LOST_MOTION))
+}
+
+/// `mouse: <p> pointers, <r> reports, <k> records, <m> merged, <c>
+/// compacted, <e> edges lost, <l> motion lost` — one line at the end of
+/// a run, only when a pointer ever arrived or a reader ever opened.
+pub fn summary() {
+    if st() == 0 { return }
+    let (p, r, k, m, c, e, l) = books()
+    log.put("mouse: "); log.dec(p as int); log.put(" pointers, "); log.dec(r as int); log.put(" reports, ")
+    log.dec(k as int); log.put(" records, "); log.dec(m as int); log.put(" merged, "); log.dec(c as int)
+    log.put(" compacted, "); log.dec(e as int); log.put(" edges lost, "); log.dec(l as int); log.put(" motion lost")
+    log.end()
+}
