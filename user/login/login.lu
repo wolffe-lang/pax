@@ -50,6 +50,14 @@
 //! - As pid 1 it first empties sudo's timestamp records
 //!   (`/var/run/sudo/ts`, user/sudo): Linux's /run is a new tmpfs at each
 //!   boot, an installed PAX's /var is on ext2, and a reboot must void them.
+//! - Then, as pid 1, the boot's hooks (px112, R-px112-7): each file of
+//!   `/etc/pax-boot.d` in name order (a name starting `.` left out), its
+//!   standard input /dev/null, its output on the console, as the leader of
+//!   a process group of its own (so a key typed at the console signals
+//!   none of what it starts), each waited for at most 10 s: one still
+//!   running then is named and left to run. PAX has no service manager;
+//!   this is where a server starts (`/etc/pax-boot.d/burrowd`). The
+//!   kernel's wait for the network comes before pid 1, so before them.
 //!
 //! **What it does not, by name:** as pid 1 it has no getty to start it
 //! again, so after the fifth failure or the timeout it starts over
@@ -62,11 +70,15 @@
 //! not its session's leader stays in its caller's session (PAX's console
 //! login always leads it).
 
+use std.fs
 use std.os.users
+use std.process
 
 const TRIES: int = 5
 const TIMEOUT_MS: int = 60000
 const FAIL_DELAY_MS: int = 3000
+const HOOK_DIR: str = "/etc/pax-boot.d"
+const HOOK_MS: int = 10000
 
 fn main() -> int {
     let args = env_args()
@@ -109,6 +121,7 @@ fn main() -> int {
     let pid1 = os_pid() == 1
     if pid1 {
         boot_clean()
+        boot_hooks()
     }
     loop {
         let r = session(name)
@@ -135,6 +148,96 @@ fn boot_clean() {
         fs_remove("{dir}/{n}") else |_| {
         }
     }
+}
+
+/// As pid 1, the boot's hooks: each file of /etc/pax-boot.d in name order,
+/// in a process group of its own, standard input /dev/null, waited for at
+/// most HOOK_MS. A hook that cannot start, or ends other than 0, is one
+/// line on the console; the login goes on either way.
+fn boot_hooks() {
+    var names = fs_read_dir(HOOK_DIR) else |_| {
+        return
+    }
+    names = hook_order(names)
+    for n in names {
+        let path = "{HOOK_DIR}/{n}"
+        if n.starts_with(".") || !fs_is_file(path) {
+            continue
+        }
+        var c = process.command(path)
+        let null = fs.open("/dev/null") else |_| {
+            print("login: {path}: no /dev/null; not run")
+            continue
+        }
+        process.set_stdin(mut c, null)
+        let ch = process.start_job(c, 0, 0) else |e| {
+            print("login: {path}: not started ({e})")
+            continue
+        }
+        let until = now_ms() + HOOK_MS
+        var ended = false
+        while !ended && now_ms() < until {
+            let got = process.poll() else |_| {
+                ended = true
+                process.Change {
+                    changed: false,
+                    child: process.Child { slot: -1 },
+                    status: process.status_from(0),
+                    live: 0,
+                }
+            }
+            if got.changed && got.child.slot == ch.slot {
+                ended = true
+                let code = process.exit_code(got.status) else -1
+                if code != 0 {
+                    print("login: {path} ended with status {code}")
+                }
+            } else if !ended {
+                time_sleep_ms(20)
+            }
+        }
+        if !ended {
+            print("login: {path} still runs after {HOOK_MS / 1000} s; left running")
+        }
+    }
+}
+
+/// `names` in byte order (a hook directory's few names).
+fn hook_order(names: List[str]) -> List[str] {
+    var out = List[str]()
+    for n in names {
+        var i = 0
+        while i < out.len && !name_before(n, out[i]) {
+            i += 1
+        }
+        var next = List[str]()
+        var k = 0
+        while k < out.len {
+            if k == i {
+                (mut next).push(n)
+            }
+            (mut next).push(out[k])
+            k += 1
+        }
+        if i == out.len {
+            (mut next).push(n)
+        }
+        out = next
+    }
+    out
+}
+
+fn name_before(a: str, b: str) -> bool {
+    let x = a.bytes()
+    let y = b.bytes()
+    var i = 0
+    while i < x.len && i < y.len {
+        if x[i] != y[i] {
+            return (x[i] as int) < (y[i] as int)
+        }
+        i += 1
+    }
+    x.len < y.len
 }
 
 /// One login: up to five tries in 60 s. Returns only when they are spent;
