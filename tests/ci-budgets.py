@@ -27,9 +27,13 @@ def bound(job):
 def tier_bound(job, tier):
     """px84: a limit tiered in the workflow, `${{ needs.plan.outputs.tier
     == 'all' && A || needs.plan.outputs.tier == 'pr' && B || C }}`: the
-    named tier's minutes, else the trailing default's."""
+    named tier's minutes, else the trailing default's. px113: a plain
+    `timeout-minutes: N` is every tier's N."""
     body = text.split('  ' + job + ':\n', 1)[1]
     body = re.split(r'\n  [A-Za-z0-9_-]+:\n', body, maxsplit=1)[0]
+    plain = re.search(r'^    timeout-minutes: (\d+)$', body, re.M)
+    if plain:
+        return int(plain[1]) * 60
     expr = re.search(r'^    timeout-minutes: \$\{\{(.*)\}\}$', body, re.M)[1]
     named = dict(re.findall(r"needs\.plan\.outputs\.tier == '(\w+)' && (\d+)", expr))
     default = re.search(r'\|\|\s*(\d+)\s*$', expr)[1]
@@ -53,6 +57,30 @@ def install_floors():
     print('mpx6-install: phase peaks %s (sum %ds), runner/kasumi %.3f, 500 GB %ds, 4 TB %ds, setup/artifacts=180s' %
           (' '.join('%s=%d' % kv for kv in peak.items()), sum(peak.values()), ratio, big['500gb'], big['4tb']))
     return {'pr': pr, 'full': full, 'all': every}
+
+
+YS_PHASES = ['setup', 'programs', 'native', 'release', 's0',
+             'native bios', 'release bios', 'native uefi', 'release uefi', 'post']
+YS_ONE_LEG = ['setup', 'programs', 'native', 's0', 'native bios', 'post']
+
+
+def yew_screen_floors(job):
+    """px113 (pax#305): mpx5-yew and mpx5-screen, per tier. Each phase's
+    floor is its peak over the job's attempts in yew-screen.json (every
+    completed attempt 2026-11-01 to 2026-11-09, read from the job logs): a
+    green attempt's phases, and a cancelled attempt's phases up to the one
+    it was cut in, that one a lower bound; an attempt with a FAIL row is a
+    red of its own, never a sample. The all tier (and a partial dispatch,
+    which may name every leg) runs every phase; pr and full run one leg,
+    native BIOS, and no release build."""
+    d = json.loads((DATA / 'yew-screen.json').read_text())
+    obs = [r for r in d['ci'] if r['job'] == job and 'red' not in r]
+    peak = {n: max(r['phases'][n] for r in obs if n in r['phases']) for n in YS_PHASES}
+    every = sum(peak.values())
+    one = sum(peak[n] for n in YS_ONE_LEG)
+    print('%s: %d attempts, phase peaks %s (every leg %ds, native BIOS alone %ds)' %
+          (job, len(obs), ' '.join('%s=%d' % (n.replace(' ', '-'), v) for n, v in peak.items()), every, one))
+    return {'all': every, 'partial': every, 'full': one, 'pr': one}
 
 
 def envelope(job, extra):
@@ -111,4 +139,12 @@ for tier, floor in install_floors().items():
     print('%s CI budget mpx6-install (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
           ('PASS' if ok else 'FAIL', tier, seconds, floor, seconds - floor))
     failed |= not ok
+# px113 (pax#305): yew's two jobs, each tier against its floor.
+for job in ('mpx5-yew', 'mpx5-screen'):
+    for tier, floor in yew_screen_floors(job).items():
+        seconds = tier_bound(job, tier)
+        ok = seconds * 10 >= floor * 14
+        print('%s CI budget %s (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
+              ('PASS' if ok else 'FAIL', job, tier, seconds, floor, seconds - floor))
+        failed |= not ok
 sys.exit(1 if failed else 0)
