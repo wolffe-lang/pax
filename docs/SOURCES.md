@@ -2157,3 +2157,23 @@ source; no kernel's, firmware's or driver's.
   (`wspan`, `rspan`), `user/install` (the upgrade, its record, the allow-list, the log), `user/disktools` (paxfat's
   `replace`, paxgpt's `--dump`) and `user/sudo`.
 - No kernel's, boot loader's, init's, installer's, sudo's or package manager's source from any other project.
+
+## px111 — pseudo-terminals
+
+- **The man pages** (man-pages 6.7): pty(7), pts(4), ioctl_tty(2) and the TIOC*(2const) pages it names
+  (TIOCGPTN, TIOCSPTLCK, TIOCGPTLCK, TIOCGPTPEER, TIOCPKT, TIOCSCTTY, TIOCNOTTY, TIOCGPGRP, TIOCSPGRP, TIOCGSID,
+  TIOCGWINSZ, TIOCSWINSZ, FIONREAD, TIOCOUTQ), termios(3), posix_openpt(3), grantpt(3), unlockpt(3), ptsname(3),
+  ttyname(3), credentials(7), proc_pid_stat(5), proc_sys_kernel(5).
+- **POSIX.1-2024**: XBD chapter 11 (the General Terminal Interface: the controlling terminal, job control, the
+  modem disconnect and the controlling process), XSH posix_openpt, grantpt, unlockpt, ptsname, tcsetpgrp,
+  tcgetsid, _exit's consequences.
+- **Linux as a black box**: `user/elf/ptyprobe.c` run as the first program's child of Linux 7.2.4 (a lane host's
+  installed kernel image, booted under QEMU/KVM with `notes/px111/vminit.c` as its first program: devtmpfs at
+  /dev, devpts at /dev/pts with no options), as root and as 1000:1000, and driving the suite's own pelt and
+  boreutils on a pty; `strace -f` of the probe in a rootless Ubuntu 24.04 container for the calls glibc's pty
+  functions make (`notes/px111/prediction.txt`, `tests/mpx5-pty.d/linux/`).
+- **pelt at `4683b3f5`** (the org's own): `src/sh/edit.lu` and `src/sh/signal.lu`, what it does with COLUMNS
+  and SIGWINCH and its cursor query, read to shape the session row.
+- PAX's own `kernel/console` (px13's line discipline, px48's job control), `kernel/sched`, `kernel/files`,
+  `kernel/procfs`, and px48's `user/elf/jobs.c` for the probe's shapes.
+- No kernel's source of any OS; no C library's, shell's or terminal emulator's source.
