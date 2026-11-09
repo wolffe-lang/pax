@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # px74: USB keyboards through real rings, hubs, hotplug and read(0).
+# px109: and USB mice: a session of QEMU's usb-mouse (twice) and
+# usb-tablet beside the keyboard, read through /dev/mouse0
+# (tools/mouse-session over user/elf/mouseprobe.c). `--topology mouse`
+# runs the mouse session alone; `all` runs the keyboard's three and it.
+# `--accel` is the mouse session's accelerator (auto: KVM where usable).
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
-tier=both firmware=both images= linux_kernel= topology=all
+tier=both firmware=both images= linux_kernel= topology=all accel=auto
 while [ $# -gt 0 ]; do
     case $1 in
         --tier) tier=$2; shift 2;;
@@ -10,9 +15,11 @@ while [ $# -gt 0 ]; do
         --images) images=$2; shift 2;;
         --linux-kernel) linux_kernel=$2; shift 2;;
         --topology) topology=$2; shift 2;;
-        *) die 'usage: mpx6-usb [--tier native|release] [--firmware bios|uefi] [--images DIR] [--linux-kernel FILE] [--topology root|hub|nested|all]';;
+        --accel) accel=$2; shift 2;;
+        *) die 'usage: mpx6-usb [--tier native|release] [--firmware bios|uefi] [--images DIR] [--linux-kernel FILE] [--topology root|hub|nested|mouse|all] [--accel auto|kvm|tcg]';;
     esac
 done
+case $accel in auto|kvm|tcg) ;; *) die 'bad accel';; esac
 # One supplied image cannot prove two compiler tiers. Internal firmware
 # reuse always passes a single explicit tier.
 if [ -n "$images" ] && [ "$tier" = both ]; then
@@ -28,7 +35,7 @@ if [ "$tier" = both ] || [ "$firmware" = both ]; then
             extra=()
             [ -z "$reuse" ] || extra+=(--images "$reuse")
             [ -z "$linux_kernel" ] || extra+=(--linux-kernel "$linux_kernel")
-            "$0" --tier "$t" --firmware "$f" --topology "$topology" "${extra[@]}"
+            "$0" --tier "$t" --firmware "$f" --topology "$topology" --accel "$accel" "${extra[@]}"
             [ -n "$reuse" ] || reuse=$PAX_BUILD/mpx6-usb/$t
         done
     done
@@ -39,7 +46,7 @@ case $firmware in bios|uefi) ;; *) die 'bad firmware';; esac
 check_args=()
 [ -z "$images" ] || check_args=(--images "$images/invariants")
 "$PAX_ROOT/tests/mpx6-usbcheck" --tier "$tier" --firmware "$firmware" "${check_args[@]}"
-case $topology in all) topologies='root hub nested';; root|hub|nested) topologies=$topology;; *) die 'bad topology';; esac
+case $topology in all) topologies='root hub nested mouse';; root|hub|nested|mouse) topologies=$topology;; *) die 'bad topology';; esac
 work=$PAX_BUILD/mpx6-usb/$tier
 if [ -z "$images" ]; then
     mkdir -p "$work"
@@ -49,6 +56,11 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/fetch-limine"
     "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work"
     "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/probe.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/probe.iso"
+    # px109: the mouse probe's image, the same kernel.
+    cc -static -O1 -Wall -Wextra -o "$work/mouseprobe" "$PAX_ROOT/user/elf/mouseprobe.c"
+    printf '/bin/mouseprobe\n' > "$work/mouse-run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/mouse.cpio" "/bin/mouseprobe=$work/mouseprobe" "/etc/pax-run=$work/mouse-run"
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/mouse.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/mouse.iso"
     mkdir -p "$work/invariants"
     cp "$PAX_BUILD/mpx6-usbcheck/$tier/check.iso" "$PAX_BUILD/mpx6-usbcheck/$tier/kmain_usbcheck.elf" \
         "$PAX_BUILD/mpx6-usbcheck/$tier/tier.txt" "$work/invariants/"
@@ -62,6 +74,14 @@ if [ -n "$linux_kernel" ]; then
 fi
 [ -s "$reference" ] || die 'missing measured Linux rows'
 for topology in $topologies; do
+    if [ "$topology" = mouse ]; then
+        # px109: the judge can say no first (synthetic transcripts), then
+        # the session's rows, each PASS or FAIL by name.
+        python3 -I "$PAX_ROOT/tests/mpx6-usb.d/mouse-judge-selftest"
+        python3 -I "$PAX_ROOT/tools/mouse-session" --image "$images/mouse.iso" \
+            --output "$work/$firmware-mouse-$accel" --firmware "$firmware" --accel "$accel"
+        continue
+    fi
     python3 -I "$PAX_ROOT/tools/usb-session" --image "$images/probe.iso" --reference "$reference" \
         --output "$work/$firmware-$topology" --topology "$topology" --firmware "$firmware"
 done

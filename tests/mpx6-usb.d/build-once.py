@@ -11,7 +11,7 @@ import tempfile
 root=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else Path(__file__).resolve().parents[2]
 with tempfile.TemporaryDirectory(prefix='pax-usb-build-once-',dir=os.environ.get('TMPDIR')) as tmp:
     tree=Path(tmp)
-    for d in ('tests','tools','notes/px74'):
+    for d in ('tests','tests/mpx6-usb.d','tools','notes/px74'):
         (tree/d).mkdir(parents=True)
     for name in ('mpx6-usb','mpx6-usbcheck'):
         shutil.copy2(root/'tests'/name,tree/'tests'/name)
@@ -37,8 +37,10 @@ elif name=='qemu-run':
     out.write_text(''.join('PASS USB row%d\\n'%i for i in range(16))+'PASS USB invariants\\n')
     sys.exit(33)
 '''
-    for name in ('build-kernel','mkimage','mkinitramfs','fetch-limine','qemu-run','usb-session'):
+    for name in ('build-kernel','mkimage','mkinitramfs','fetch-limine','qemu-run','usb-session','mouse-session'):
         p=tree/'tools'/name; p.write_text(helper); p.chmod(0o755)
+    # px109: the mouse judge's selftest runs before each mouse session.
+    p=tree/'tests/mpx6-usb.d/mouse-judge-selftest'; p.write_text(helper); p.chmod(0o755)
     # The C compiler is a fixture too: no executable under test is produced.
     (tree/'tools/cc').write_text('#!/bin/sh\nexit 0\n'); (tree/'tools/cc').chmod(0o755)
     calls=tree/'calls.jsonl'
@@ -57,7 +59,14 @@ elif name=='qemu-run':
         a[a.index('--firmware')+1],a[a.index('--topology')+1]) for n,a in records if n=='usb-session')
     assert sessions==collections.Counter({(t,f,p):1 for t in ('native','release')
         for f in ('bios','uefi') for p in ('root','hub','nested')}), 'matrix legs were duplicated or dropped'
-    print('PASS USB build-once: four builds, four invariant boots, twelve distinct sessions')
+    # px109: one mouse session a tier and firmware, on that tier's image.
+    mice=collections.Counter((Path(a[a.index('--image')+1]).parent.name,a[a.index('--firmware')+1])
+        for n,a in records if n=='mouse-session')
+    assert mice==collections.Counter({(t,f):1 for t in ('native','release') for f in ('bios','uefi')}), \
+        f'mouse sessions {dict(mice)}, expected one a tier and firmware'
+    assert all(Path(a[a.index('--image')+1]).name=='mouse.iso' for n,a in records if n=='mouse-session'), 'mouse session image'
+    assert sum(n=='mouse-judge-selftest' for n,a in records)==4, 'the mouse judge selftest was dropped'
+    print('PASS USB build-once: four builds, four invariant boots, twelve keyboard and four mouse sessions')
     bundle=tree/'build/mpx6-usb/native'
     (bundle/'invariants/tier.txt').write_text('release\n')
     result=subprocess.run([str(tree/'tests/mpx6-usb'),'--tier','native','--firmware','uefi','--images',str(bundle)],
