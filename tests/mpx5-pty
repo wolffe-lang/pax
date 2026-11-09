@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# tests/mpx5-pty — px111: pseudo-terminals. `/dev/ptmx` and a devpts-like
+# `/dev/pts`, termios over a pty (the console's own line discipline), the
+# controlling terminal and job control on a pty, SIGWINCH and SIGHUP,
+# poll and O_NONBLOCK on both sides and their full buffers, many ptys at
+# once and none left after they close; and pelt driven on a pty from a
+# parent (Ctrl-C to a job, a resize reaching $COLUMNS, a hangup ending
+# the session). One probe (user/elf/ptyprobe.c, tools/mkpty) asks it all;
+# its transcript is held line for line to what a real Linux printed for
+# the same binary (tests/mpx5-pty.d/linux/, recorded on a Linux kernel
+# booted under QEMU with notes/px111/vminit.c as its first program:
+# devtmpfs at /dev, devpts at /dev/pts with no options; observed output,
+# never generated here), each difference named and ruled in
+# tests/mpx5-pty.d/ruled.txt.
+#
+#   tests/mpx5-pty [--no-boot | --only build] [--firmware bios|uefi|both]
+#                  [--tier native|release|both] [--accel auto|kvm|tcg|both]
+#
+# Two images, each kmain_console with an `/etc/pax-run` of its own:
+#   probe    `/bin/ptyprobe`, then `/bin/as 1000 1000 /bin/ptyprobe`
+#            (sections O T C W H P M);
+#   session  `/bin/ptyprobe drive`, then `/bin/as 1000 1000 /bin/ptyprobe
+#            drive` (section S: pelt as /bin/sh with boreutils' stty, cut
+#            and sleep, user/pelt.pin and user/boreutils.pin).
+# The Linux side boots the same archive (notes/px111/rig/record.sh), so
+# the session's programs are the same bytes on both.
+#
+# What is compared: each run's rows, from its `run <k>:` line to the
+# next (the kernel's own `user: …` narration out, and a row's text cut
+# where narration broke into it), by tests/mpx5-pty.d/check.py: every
+# row by its id (`O8`, `S|12`), the Linux reference's line unless
+# ruled.txt names PAX's own for that run and row.
+#
+# Assertions, per tier, firmware and accelerator:
+#   Y0 build: the probe, vminit, as, pelt and the boreutils static; the
+#      checker's selftest; the kernel and both images built; the
+#      references there.
+#   Y1 the probe as root, every row Linux's or its ruled line.
+#   Y2 the probe as 1000:1000, likewise.
+#   Y3 the session as root and as 1000:1000, likewise.
+#   Y4 the kernel's refusals: exactly ruled.txt's `refusal` lines, each
+#      once a run (packet mode, R-px111-3), and no other `refused:` line.
+#   Y5 the machine: no PANIC, init ended with status 0, every frame
+#      back, the booted kernel the one built (its digest).
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+legs=both tiers=both accels=auto noboot=0 only=
+usage="usage: tests/mpx5-pty [--no-boot | --only build] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accels=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $accels in both) accels="kvm tcg" ;; auto|kvm|tcg) ;; *) die "--accel takes auto, kvm, tcg or both" ;; esac
+case $only in ''|build) ;; *) die "--only takes build" ;; esac
+need python3 readelf
+
+IMAGES="probe session"
+BORE="stty cut sleep"
+work=$PAX_BUILD/mpx5-pty
+runs=$PAX_BUILD/mpx5-pty-runs.txt
+ref=$here/mpx5-pty.d
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+image_runs() { # image -> its run list, one command a line
+    case $1 in
+        probe)   printf '/bin/ptyprobe\n/bin/as 1000 1000 /bin/ptyprobe\n' ;;
+        session) printf '/bin/ptyprobe drive\n/bin/as 1000 1000 /bin/ptyprobe drive\n' ;;
+    esac
+}
+run_name() { # image k -> the reference's name
+    case $1-$2 in
+        probe-1) echo probe-root ;; probe-2) echo probe-user ;;
+        session-1) echo session-root ;; session-2) echo session-user ;;
+    esac
+}
+
+wolf=${PAX_WOLF:-wolf}
+need "$wolf" cc
+say "wolf: $("$wolf" --version | head -n 1)"
+"$PAX_ROOT/tools/fetch-limine" || exit 2
+rm -rf "$work"
+mkdir -p "$work/bin"
+why=
+python3 -I "$ref/check.py" --selftest > "$work/selftest.txt" 2>&1 || why+=" the checker's selftest;"
+"$PAX_ROOT/tools/mkpty" "$work/bin" > "$work/programs.txt" || why+=" tools/mkpty;"
+"$PAX_ROOT/tools/mkas" "$work/bin" >> "$work/programs.txt" || why+=" tools/mkas;"
+"$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+"$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+sed 's/^/  program: /' "$work/programs.txt" "$work/pelt/sums.txt" "$work/bore/sums.txt" >&2 2>/dev/null
+for im in $IMAGES; do
+    image_runs "$im" > "$work/$im.run"
+    files=(/bin/ptyprobe="$work/bin/ptyprobe":755 /bin/as="$work/bin/as":755)
+    if [ "$im" = session ]; then
+        files+=(/bin/sh="$work/pelt/pelt":755 /bin/pelt="$work/pelt/pelt":755)
+        for u in $BORE; do files+=("/bin/$u=$work/bore/$u":755); done
+    fi
+    "$PAX_ROOT/tools/mkinitramfs" "$work/$im.cpio" "${files[@]}" /tmp/:1777 "/etc/pax-run=$work/$im.run:644" > "$work/$im.initramfs.txt" \
+        || why+=" tools/mkinitramfs $im;"
+done
+for tier in $tiers; do
+    flag=(); [ "$tier" = release ] && flag=(--release)
+    mkdir -p "$work/$tier"
+    log=$work/$tier/kmain_console.build-kernel.log
+    if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+        cat "$log" >&2
+        for im in $IMAGES; do
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
+                || why+=" $tier $im: mkimage;"
+        done
+        printf '%s\n' "$elf" > "$work/$tier/elf.path"
+        say "built $tier: elf $(sha256_of "$elf")"
+    else
+        cat "$log" >&2
+        why+=" $tier kmain_console: tools/build-kernel;"
+    fi
+done
+if [ "$only" = build ] || [ "$noboot" = 1 ]; then
+    [ -z "$why" ] && say "PASS Y0 (build): programs static, the checker's selftest, kernel ($tiers) and both images built" || bad "Y0 (build):$why"
+    exit "$fail"
+fi
+for f in probe-root probe-user session-root session-user; do
+    [ -s "$ref/linux/$f.txt" ] || why+=" no reference linux/$f.txt;"
+done
+[ -z "$why" ] && say "PASS Y0: programs static, the checker's selftest, kernel ($tiers) and both images built, the references there" || { bad "Y0:$why"; exit 1; }
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        elf=$(cat "$work/$tier/elf.path")
+        digest=$(sha256_of "$elf")
+        for accel in $accels; do
+            for im in ${PAX_PTY_IMAGES:-$IMAGES}; do
+                id="$tier $leg $accel $im"
+                iso=$work/$tier/$im.iso
+                log=$PAX_BUILD/mpx5-pty-$tier-$leg-$accel-$im.serial.log
+                rm -f "$log" "$log.verdict"
+                hrc=0
+                "$PAX_ROOT/tools/qemu-halt" --accel "$accel" --firmware "$leg" --serial "$log" --timeout 1200 --qemu -m --qemu 512M \
+                    --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+                ran=$((ran + 1))
+                printf '%s %s %s %s halt-status=%s serial=%s iso=%s\n' "$tier" "$leg" "$accel" "$im" "$hrc" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+                norm=$log.norm; serial_norm "$log" > "$norm"
+                k=1
+                while [ "$k" -le 2 ]; do
+                    name=$(run_name "$im" "$k")
+                    out=$PAX_BUILD/mpx5-pty-$tier-$leg-$accel-$name.txt
+                    # The run's lines, from `run k:` to the next `run` line or
+                    # the frames line, the kernel's narration out (a line of
+                    # it, or its text where it broke into a row).
+                    awk -v k="$k" '$0 ~ "^run " k ": " { on = 1; next }
+                         on && (/^run [0-9]+: / || /^run: [0-9]+ commands/) { exit }
+                         on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+                    case $k in 1) Y=Y1 ;; *) Y=Y2 ;; esac
+                    [ "$im" = session ] && Y=Y3
+                    gate=$(python3 -I "$ref/check.py" "$name" "$ref/linux/$name.txt" "$ref/ruled.txt" "$out" 2>&1)
+                    if [ $? = 0 ]; then
+                        say "PASS $Y $id $name: $(printf '%s\n' "$gate" | grep -c '^PASS') rows, each Linux's or its ruled line"
+                    else
+                        printf '%s\n' "$gate" | grep '^FAIL' | head -n 400 >&2
+                        bad "$Y $id $name: $(printf '%s\n' "$gate" | grep -c '^FAIL') rows differ: $(printf '%s\n' "$gate" | grep '^FAIL' | head -n 8 | cut -c1-160 | tr '\n' '|')"
+                    fi
+                    k=$((k + 1))
+                done
+                why=
+                want=$(python3 -I "$ref/check.py" --refusals "$im" "$ref/ruled.txt")
+                have=$(grep -o 'refused: .*' "$norm" | sort)
+                [ "$want" = "$have" ] || why+=" the refusals are not ruled.txt's ($(printf '%s' "$have" | tr '\n' '|'));"
+                [ -z "$why" ] && say "PASS Y4 $id: the kernel's refusals are the ruled ones ($(printf '%s\n' "$have" | grep -c .))" || bad "Y4 $id:$why"
+                why=
+                grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
+                grep -q '^PAX: init .* ended with status 0; nothing left to run$' "$norm" || why+=" no 'PAX: init … ended with status 0';"
+                awk '/^user: frames free / { seen++; if ($4 != $10) bad=1 } END { exit seen < 1 || bad }' "$norm" || why+=" frames not all back ($(grep '^user: frames free ' "$norm" | tr '\n' '|'));"
+                grep -q "^kernel: .* sha256 $digest, " "$norm" || why+=" the booted kernel is not the one built;"
+                [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+                [ -z "$why" ] && say "PASS Y5 $id: init ended, frames back, kernel $digest; $(tail -n 1 "$log.verdict")" || bad "Y5 $id:$why"
+            done
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-pty: PASS" || say "mpx5-pty: FAIL"
+exit "$fail"
