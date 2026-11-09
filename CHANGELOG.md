@@ -7,6 +7,17 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **What the stick writes stays on the stick (px114).** An install or an
+  upgrade made from a live stick that had booted with a network cable copied
+  the stick's DHCP lease (`/var/lib/dhcp/pax.lease`) and `/etc/resolv.conf` to
+  the target and listed them in its manifest, and every install carried root's
+  console history and lope's store (root's home is `/`) and `sudo`'s log. The
+  installer's walk of the live tree now leaves all of these out, so the
+  installed system starts with none of the stick's and writes its own, an
+  upgrade no longer leaves `.pax-new` copies of them beside the installed
+  system's, and a lease renewed while the installer stages no longer stops it.
+  The census behind the list: `notes/px114-runtime-state-stays-home.md`.
+
 - **trash on the image (tb03).** The images carry trash, a reversible `rm` in
   wolf: `/bin/trash` moves files into the user's `~/Trash` (the FreeDesktop.org
   Trash specification's layout) instead of removing them, and `trash-list`,
