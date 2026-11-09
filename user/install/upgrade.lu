@@ -28,8 +28,8 @@
 //! - /etc/shadow (px106) is never touched once it is there; an install that
 //!   has none (made before px106) gets one, every account locked, root's,
 //!   0600, written after the texts;
-//! - /etc/fstab, the root's limine.conf, /etc/pax-run and /etc/pax-login,
-//!   the files an install generates: written again when they hold the new
+//! - /etc/fstab, the root's limine.conf, /etc/pax-run, /etc/pax-login and
+//!   (px112) /etc/burrowd/burrowd_config, the files an install generates: written again when they hold the new
 //!   installer's text or one an installer wrote before (R-px93-9: the old
 //!   manifest's row for the path, when that manifest records installers'
 //!   texts, or the stick's `/usr/share/pax-install/baselines/
@@ -530,6 +530,11 @@ fn upgrade_main(o: Options, work: str) -> int {
     text_step(mut p, "/boot/limine/limine.conf", config_text(uuid), "regenerated for PARTUUID={uuid}", known)
     text_step(mut p, "/etc/pax-run", INSTALLED_RUN, "the installed login", known)
     text_step(mut p, "/etc/pax-login", installed_login(), "the installed login", known)
+    // px112 (R-px112-9, C): the installed burrowd's configuration, the stick's with the LAN's ListenAddress.
+    let burrowd = fs_read_text(BURROWD_CONFIG) else |_| ""
+    if burrowd.len > 0 {
+        text_step(mut p, BURROWD_CONFIG, installed_burrowd_config(burrowd), "the installed burrowd, on the LAN", known)
+    }
     let from_esp = ["/boot/pax", "/boot/limine/limine-bios.sys", "/boot/EFI/BOOT/BOOTX64.EFI"]
     let to_esp = ["/boot/pax", "/boot/limine/limine-bios.sys", "/EFI/BOOT/BOOTX64.EFI"]
     for i in 0..from_esp.len {
