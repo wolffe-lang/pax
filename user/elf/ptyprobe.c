@@ -1961,7 +1961,7 @@ static int drive(void) {
     }
     say("S0 pelt on a pty, its session's leader; the driver types at the master\n");
     long mark = 0;
-    int ok = until_seen(m, root ? "# " : "$ ", mark, 30000);
+    int ok = until_seen(m, "$ ", mark, 30000); /* pelt's prompt, root's too */
     say("S1 the first prompt came: %s\n", yesno(ok));
     /* 1: the size as stty reads it */
     mark = tr_len;
