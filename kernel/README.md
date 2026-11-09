@@ -1149,6 +1149,28 @@ to F9); `notes/px76-uefi-on-metal.md` has the measurements.
 | `screen/`, `fb/` (px76 change) | any width, height, pitch and channel shifts Limine reports (an invalid pitch or overlapping masks refused); glyphs doubled above 2560 pixels wide (R-px76-3 B: 240x67 cells at 3840x2160); drawn from `serial.init`'s first line through Limine's own mapping until PAX's paging takes over, then replayed; `fb.report`'s mode line in the console and session kernels |
 | `serial/` (px76 change) | an absent UART (its registers read all ones) is never polled; the lines go to the screen and to a 64 KiB transcript in memory (`boot/io.S`'s `pax_serial_log`) |
 
+## The mouse (px109)
+
+USB HID pointers beside px74's keyboard, on the same xHCI stack, and one
+bounded queue of their events for each reader: the console (px110) and
+each open of `/dev/mouse0`. A boot mouse whose report descriptor parses
+is set to the report protocol and read by it (HID 1.11 appendix B says a
+class driver does), so a real mouse's wheel and buttons 4 and 5 arrive;
+the boot protocol's three bytes are the fallback, and every boot mouse's
+under `hidboot` on the command line. QEMU's usb-mouse sends the same
+bytes under both protocols (`notes/px109/measured/`), so a real mouse is
+the first witness of the difference. `usbraw` logs each pointer's
+descriptors and every report's bytes.
+
+| module or file | what |
+|---|---|
+| `usb_mouse/` (new) | pure: the boot report (appendix B.2: buttons 1 to 3, signed dx and dy); a report descriptor read as far as a pointer needs, the first top-level Mouse or Pointer collection's X, Y, Wheel and Buttons 1 to 5 with their bit offsets, sizes, signs, kinds and extents, Report IDs honoured; refusals named (`refusal`: a long item, Push or Pop, a Delimiter, no pointer collection, no X or Y, a field over 32 bits, a report over 64 bytes, X and Y split or of different kinds, nesting, truncation, an empty extent); `decode` (absolute positions scaled to 0..32767) |
+| `mouse/` (new) | the queue: `attach` (a pointer's number, never reused in a boot; a NEW record), `report` (a record unless nothing changed), `detach` (GONE, a held button released with EDGE); per reader a frame of 126 records of 32 bytes (the table in the module's comment): every report its own record under half full, motion merged into the tail above it, the oldest two adjacent motion records compacted when full, an edge never merged, lost only when nothing can be compacted (counted, the next record LOST); `open`, `pull`, `pending`, `changes`, `lost`, `close` for a reader (px110's console API); `summary`, the `mouse:` line |
+| `xhci/` (px109 change) | a device's first boot mouse interface (3/1/2), else its first class-3 subclass-0 interface, gets a second interrupt IN pipe beside a keyboard's; its report descriptor read and parsed, its protocol set, `mouse.attach`; each report decoded in the interrupt into `mouse.report` (readers woken); an unplug or a halted pipe sends GONE; a STALLed class request resets the default pipe (Reset Endpoint, Set TR Dequeue Pointer); a refused pointer named on the log (`xhci: mouse usb1-6 refused: …`); `usbraw`'s ring printed by the enumeration thread, never in the interrupt |
+| `files/` (px109 change) | `/dev/mouse0` (char 60:0, root's 0600, listed after `dsp` from the first pointer's arrival): read only, each open its own reader; `read` takes whole records (a shorter buffer -EINVAL), waits when empty (O_NONBLOCK -EAGAIN); `poll` and epoll POLLIN, edge-triggered on `changes`; `lseek` -ESPIPE; the last close gives the reader back |
+| `kmain_console.lu` | `mouse: <p> pointers, <r> reports, <k> records, <m> merged, <c> compacted, <e> edges lost, <l> motion lost` at the end, only when a pointer came |
+| `kmain_usbcheck.lu` | 39 more invariants: the parser on appendix B.2's descriptor and five real-mouse shapes, its refusals, and the queue's records, merges, compaction, a lost edge said LOST, and a full queue inside its frame |
+
 ## Tracing stops (px102, in progress)
 
 `ptrace(2)` is being added against the no-libc Linux transcripts in
