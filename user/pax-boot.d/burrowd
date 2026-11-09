@@ -1,0 +1,48 @@
+#!/bin/pelt
+# /etc/pax-boot.d/burrowd — burrowd, the ssh server, started at boot (px112).
+#
+# pid 1 runs each file of /etc/pax-boot.d before its first prompt, after the
+# kernel's wait for the network (/bin/login on an installed system, the live
+# entry on the stick; R-px112-7). This one makes the host key at the first
+# boot, when there is none (R-px112-8: burrow-keygen, from /dev/urandom),
+# shows its fingerprint on the console at every boot, and starts burrowd in
+# a loop that starts it again when it ends: a second later, or, while it
+# refuses to start (exit 1: its reason is the log's last line), after a
+# wait that doubles to five minutes. The log is /var/log/burrowd.log,
+# root's, 0600 (R-px112-11): `sudo cat /var/log/burrowd.log`.
+key=/etc/burrowd/ssh_host_ed25519_key
+log=/var/log/burrowd.log
+if [ ! -x /bin/burrowd ] || [ ! -x /bin/burrow-keygen ]; then
+    echo "burrowd: /bin/burrowd or /bin/burrow-keygen is missing; not started"
+    exit 0
+fi
+mkdir -p /etc/burrowd /var/log /var/run
+made=
+if [ ! -f "$key" ]; then
+    host=$(cat /proc/sys/kernel/hostname 2>/dev/null)
+    if ! /bin/burrow-keygen -q -t ed25519 -N '' -C "${host:-pax}" -f "$key"; then
+        echo "burrowd: no host key could be made at $key; not started"
+        exit 0
+    fi
+    made=' (made at this boot)'
+fi
+echo "burrowd: host key $(/bin/burrow-keygen -l -f "$key")$made"
+if [ ! -f "$log" ]; then
+    : > "$log"
+fi
+chmod 600 "$log"
+(
+    pause=1
+    while :; do
+        /bin/burrowd -D -E "$log" < /dev/null > /dev/null 2>> "$log"
+        if [ "$?" = 1 ]; then
+            sleep "$pause"
+            pause=$((pause * 2))
+            [ "$pause" -le 300 ] || pause=300
+        else
+            pause=1
+            sleep 1
+        fi
+    done
+) < /dev/null > /dev/null 2>&1 &
+echo "burrowd: started; its log is $log"
