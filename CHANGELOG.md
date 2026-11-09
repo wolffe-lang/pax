@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **ssh into PAX (px112).** burrowd, burrow's ssh server, ships on every image
+  and starts at boot: `/etc/pax-boot.d`'s hooks run before the first prompt
+  (`/bin/login` on an installed system, the live entry on the stick), and
+  burrowd's makes the host key at the first boot that finds none, prints its
+  fingerprint at every boot, and keeps burrowd running, its log
+  `/var/log/burrowd.log`. An installed system listens on the LAN (the installer
+  writes `ListenAddress 0.0.0.0`); the live stick listens on loopback only.
+  From another machine, `ssh pax@<address> ls` runs a command through the
+  account's shell, and `git push` and `git clone` reach den's receive-pack and
+  upload-pack. Keys and passwords both log in, root never, and an account left
+  locked by the installer logs in neither way until its owner sets a password
+  with `passwd`. A new suite, `tests/mpx5-burrowd`, drives it under KVM from a
+  Linux machine on a tap: `notes/px112-burrowd-on-pax.md`.
+
 - **The yew jobs fit their limits again (px113, pax#305).** `mpx5-yew` was
   cut at its 75-minute limit in most all-tier runs since yew's pin moved to
   `2eb9cb9b`, and `mpx5-screen` in some. Measured phase by phase in every
