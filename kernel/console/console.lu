@@ -107,6 +107,16 @@
 //! control characters (measured: what TCGETS writes on Linux, and the
 //! names strace gives each bit and index).
 //!
+//! **Terminals** (px111): the line discipline is the console's and every
+//! pty slave's (kernel/pty), each routine taking the terminal's id (`CON`,
+//! or `PTY0` + the pty's number), each terminal's state and ring its own;
+//! a slave's echo and output go into its pty's OQ for the master, and the
+//! master's bytes wait in IQ until the line discipline takes them
+//! (`feed`). A pty starts with Linux's pty's settings, IXON included, and
+//! honours it (R-px111-2); the console keeps IXON clear. Its
+//! foreground group's signals are raised in the master's write
+//! (`pty_signals`); a hung-up slave reads end of file and answers -EIO.
+//!
 //! Before `start` the console is px12's: `read` answers end of file and
 //! every ioctl -ENOTTY (kmain_boreutils and every earlier kernel never
 //! start it, so a batch program's descriptors are not a terminal there,
@@ -128,6 +138,7 @@
 //! not read (§2 of the note). No Linux source; no other kernel's source.
 
 use cred
+use frames
 use log
 use sched
 use screen
@@ -141,6 +152,20 @@ extern "c" fn pax_inb(port: u16) -> u8
 
 extern "c" let pax_con_state: *u64
 extern "c" let pax_con_ring: *u8
+extern "c" let pax_pty_table: *u64
+
+/// px111: the terminals, by the ids kernel/sched's sessions use too: the
+/// console 1, pty n's slave PTY0 + n (n < PTYS; kernel/pty's).
+pub const CON: u64 = 1
+pub const PTY0: u64 = 2
+pub const PTYS: u64 = 256
+/// kernel/pty's record: PT_WORDS words a pty in pax_pty_table; word
+/// PT_STATE the physical address of its state frame (0: no pty), words
+/// PT_F0 to PT_F0 + 10 its eleven frames (the state's, the ring's, IQ's
+/// four, OQ's five).
+pub const PT_WORDS: u64 = 32
+pub const PT_STATE: u64 = 0
+pub const PT_F0: u64 = 16
 
 // The state's words.
 const C_STARTED: u64 = 0
@@ -172,6 +197,17 @@ const C_ANSWERS: u64 = 27 // px59: bytes of the screen's answers typed into the 
 const C_UNANSWERED: u64 = 28 // px59: bytes of the screen's answers dropped (input last from COM1, or none yet)
 
 const C_ENTRY: u64 = 29 // Alt decimal/AltGr hex: bit32 pending, low32 accumulator
+// px111: a pty slave's own words (the console's stay 0)
+const C_IQ_R: u64 = 40 // bytes of IQ the line discipline has taken
+const C_IQ_W: u64 = 41 // bytes the master has written into IQ
+const C_OQ_R: u64 = 42 // bytes of OQ the master has read
+const C_OQ_W: u64 = 43 // bytes put in OQ (the slave's output and the echo)
+const C_STOP: u64 = 44 // 1 while IXON's VSTOP holds the output
+const C_HUNG: u64 = 45 // 1 once the master has closed: reads answer end of file
+const C_BATCH: u64 = 46 // OQ's write count when the current feed began (a signal key's flush)
+pub const C_RINGF: u64 = 48 // the ring's frame (physical)
+pub const C_IQF: u64 = 49 // IQ's four frames, 49 to 52
+pub const C_OQF: u64 = 53 // OQ's five frames, 53 to 57
 
 const RING: u64 = 4096
 const LINE_MAX: u64 = 4095 // bytes before the newline
@@ -179,6 +215,7 @@ const LINE_MAX: u64 = 4095 // bytes before the newline
 // termios bits (black-box: strace's names, notes/px13/bits.strace).
 const IGNCR: u64 = 0x80
 const ICRNL: u64 = 0x100
+const IXON: u64 = 0x400 // px111: a pty's output flow control (the console keeps it clear)
 const INLCR: u64 = 0x40
 const OPOST: u64 = 0x1
 const ONLCR: u64 = 0x4
@@ -196,6 +233,8 @@ const TOSTOP: u64 = 0x100 // px48: a background write is SIGTTOU's
 const VINTR: u64 = 0
 const VQUIT: u64 = 1
 const VSUSP: u64 = 10
+const VSTART: u64 = 8 // px111
+const VSTOP: u64 = 9
 const SIGINT: u64 = 2
 const SIGQUIT: u64 = 3
 const SIGTSTP: u64 = 20
@@ -226,6 +265,8 @@ const TIOCGSID: u64 = 0x5429
 const TCSBRK: u64 = 0x5409 // px49 (pax#74): tcdrain (arg not 0), tcsendbreak (0)
 const TCFLSH: u64 = 0x540b // px49: tcflush
 const TIOCSTI: u64 = 0x5412 // px49: a byte put in the input as if typed
+pub const FIONREAD: u64 = 0x541b // px111
+pub const TIOCOUTQ: u64 = 0x5411 // px111
 const TCIFLUSH: u64 = 0
 const TCIOFLUSH: u64 = 2
 const SIGHUP: u64 = 1
@@ -283,37 +324,325 @@ const K_LALT: u64 = 64 // px59
 const K_RALT: u64 = 128 // AltGr: hexadecimal entry and measured symbol keys
 const K_NUM: u64 = 256 // NumLock, initially off as on the measured VT
 
-fn sv(i: u64) -> u64 {
-    // # Safety: i < 64, inside boot/console.S's 512-byte pax_con_state.
-    unsafe { ((pax_con_state as u64 + i * 8) as *u64).read_volatile() }
+/// px111: where terminal `t`'s state words are: boot/console.S's
+/// pax_con_state for the console, the first frame pty `t - PTY0` holds
+/// (kernel/pty's record's word PT_STATE, a physical address) for a slave.
+fn base(t: u64) -> u64 {
+    if t == CON {
+        // # Safety: the address only.
+        return unsafe { pax_con_state as u64 }
+    }
+    frames.hhdm() + pty_word(t - PTY0, PT_STATE)
 }
 
-fn put_sv(i: u64, v: u64) {
+/// px111: word `w` of pty `n`'s record in boot/console.S's
+/// pax_pty_table (kernel/pty's; the state frame is the word this
+/// module reads).
+pub fn pty_word(n: u64, w: u64) -> u64 {
+    // # Safety: n < PTYS and w < PT_WORDS: inside the table's PTYS * PT_WORDS words.
+    unsafe { ((pax_pty_table as u64 + (n * PT_WORDS + w) * 8) as *u64).read_volatile() }
+}
+
+pub fn put_pty_word(n: u64, w: u64, v: u64) {
+    // # Safety: as `pty_word`.
+    unsafe { ((pax_pty_table as u64 + (n * PT_WORDS + w) * 8) as *u64).write_volatile(v) }
+}
+
+fn sv(t: u64, i: u64) -> u64 {
+    // # Safety: i < 64: inside boot/console.S's 512-byte pax_con_state, or
+    // the first 512 bytes of the pty's state frame (mapped in the HHDM).
+    unsafe { ((base(t) + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sv(t: u64, i: u64, v: u64) {
     // # Safety: as `sv`.
-    unsafe { ((pax_con_state as u64 + i * 8) as *u64).write_volatile(v) }
+    unsafe { ((base(t) + i * 8) as *u64).write_volatile(v) }
 }
 
-fn bump(i: u64) {
-    put_sv(i, sv(i) + 1)
+fn bump(t: u64, i: u64) {
+    put_sv(t, i, sv(t, i) + 1)
 }
 
-fn ring(p: u64) -> u64 {
-    // # Safety: p % RING < 4096, inside boot/console.S's pax_con_ring.
-    unsafe { ((pax_con_ring as u64 + p % RING) as *u8).read_volatile() as u64 }
+/// The address of byte `p` of terminal `t`'s input ring: boot/console.S's
+/// pax_con_ring, or the ring frame a pty holds (its state word C_RINGF).
+fn ring_at(t: u64, p: u64) -> u64 {
+    if t == CON {
+        // # Safety: the address only.
+        return unsafe { pax_con_ring as u64 } + p % RING
+    }
+    frames.hhdm() + sv(t, C_RINGF) + p % RING
 }
 
-fn put_ring(p: u64, b: u64) {
+fn ring(t: u64, p: u64) -> u64 {
+    // # Safety: p % RING < 4096, inside pax_con_ring or the pty's ring frame.
+    unsafe { (ring_at(t, p) as *u8).read_volatile() as u64 }
+}
+
+fn put_ring(t: u64, p: u64, b: u64) {
     // # Safety: as `ring`.
-    unsafe { ((pax_con_ring as u64 + p % RING) as *u8).write_volatile((b & 0xff) as u8) }
+    unsafe { (ring_at(t, p) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+// --- px111: a pty's two queues ---------------------------------------------
+//
+// The master's writes wait in IQ (16384 bytes, four frames) until the line
+// discipline takes them (`feed`); the slave's output, echo included, waits
+// in OQ (20480 bytes, five frames) until the master reads it. Each is a
+// ring over its frames, read and written by counters that only grow
+// (C_IQ_R/C_IQ_W, C_OQ_R/C_OQ_W), the frames' physical addresses in the
+// state words C_IQF.. and C_OQF...
+
+pub const IQ_CAP: u64 = 16384
+pub const OQ_CAP: u64 = 20480
+
+fn q_at(t: u64, fw: u64, cap: u64, p: u64) -> u64 {
+    let o = p % cap
+    frames.hhdm() + sv(t, fw + o / 4096) + o % 4096
+}
+
+fn q_get(t: u64, fw: u64, cap: u64, p: u64) -> u64 {
+    // # Safety: q_at's address is inside one of the queue's frames.
+    unsafe { (q_at(t, fw, cap, p) as *u8).read_volatile() as u64 }
+}
+
+fn q_put(t: u64, fw: u64, cap: u64, p: u64, b: u64) {
+    // # Safety: as `q_get`.
+    unsafe { (q_at(t, fw, cap, p) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+/// Bytes the master has not read yet.
+pub fn oq_count(t: u64) -> u64 {
+    sv(t, C_OQ_W) - sv(t, C_OQ_R)
+}
+
+/// Room left in OQ.
+pub fn oq_room(t: u64) -> u64 {
+    OQ_CAP - oq_count(t)
+}
+
+/// One byte of the slave's output for the master (dropped when OQ is
+/// full: an echo nobody reads).
+fn oq_put(t: u64, b: u64) {
+    let w = sv(t, C_OQ_W)
+    if w - sv(t, C_OQ_R) >= OQ_CAP {
+        bump(t, C_DROPPED)
+        return
+    }
+    q_put(t, C_OQF, OQ_CAP, w, b)
+    put_sv(t, C_OQ_W, w + 1)
+}
+
+/// The master's read: up to `n` bytes of OQ copied to user `buf`, no
+/// further than the end of the 4096-byte stretch the first is in; the
+/// count, or -EFAULT.
+pub fn oq_take(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
+    var k = oq_count(t)
+    if k > n {
+        k = n
+    }
+    // One read takes at most to the end of the 4096-byte stretch it starts
+    // in (measured: after one byte of a full buffer, a read of 4096 took
+    // 4095).
+    let edge = 4096 - sv(t, C_OQ_R) % 4096
+    if k > edge {
+        k = edge
+    }
+    if !uaccess.writable(pml4, buf, k) {
+        return NEG_EFAULT
+    }
+    let r = sv(t, C_OQ_R)
+    var j: u64 = 0
+    while j < k {
+        uaccess.put(pml4, buf + j, q_get(t, C_OQF, OQ_CAP, r + j), 1)
+        j += 1
+    }
+    put_sv(t, C_OQ_R, r + k)
+    k
+}
+
+/// TCIFLUSH on the master: what the slave wrote and the master did not read.
+pub fn oq_flush(t: u64) {
+    put_sv(t, C_OQ_R, sv(t, C_OQ_W))
+}
+
+/// Bytes the master wrote that the line discipline has not taken.
+pub fn iq_count(t: u64) -> u64 {
+    sv(t, C_IQ_W) - sv(t, C_IQ_R)
+}
+
+pub fn iq_room(t: u64) -> u64 {
+    IQ_CAP - iq_count(t)
+}
+
+/// Whether the line discipline takes byte `b` now: in raw mode while
+/// the ring has room; in canonical mode while the line being edited is
+/// under LINE_MAX, a line's end while the ring has room, and any byte
+/// when no whole line waits to be read (the line discipline drops what
+/// is past LINE_MAX, as it does for the console); the keys that edit or
+/// signal, and IXON's, always.
+fn takes(t: u64, b: u64) -> bool {
+    let used = sv(t, C_E) - sv(t, C_R)
+    if b != 0 && ((lflag(t, ISIG) && (b == cc(t, VINTR) || b == cc(t, VQUIT) || b == cc(t, VSUSP))) || (sv(t, C_IFLAG) & IXON != 0 && (b == cc(t, VSTOP) || b == cc(t, VSTART)))) {
+        return true
+    }
+    if !lflag(t, ICANON) {
+        return used < RING
+    }
+    if b != 0 && (b == cc(t, VERASE) || b == cc(t, VKILL) || (b == cc(t, VWERASE) && lflag(t, IEXTEN))) {
+        return true
+    }
+    if used < LINE_MAX {
+        return true
+    }
+    if (b == 10 || b == 13 || (b != 0 && (b == cc(t, VEOL) || b == cc(t, VEOF)))) && used < RING {
+        return true
+    }
+    sv(t, C_C) == sv(t, C_R)
+}
+
+/// Hand what waits in IQ to the line discipline while it takes it; true
+/// when a byte moved.
+pub fn feed(t: u64) -> bool {
+    var moved = false
+    put_sv(t, C_BATCH, sv(t, C_OQ_W)) // where this feed's echo starts
+    while iq_count(t) > 0 {
+        let r = sv(t, C_IQ_R)
+        let b = q_get(t, C_IQF, IQ_CAP, r)
+        if !takes(t, b) {
+            return moved
+        }
+        put_sv(t, C_IQ_R, r + 1)
+        input(t, b)
+        moved = true
+    }
+    moved
+}
+
+/// The master's write: up to `n` bytes of user `buf` into IQ, then fed;
+/// the count taken (0 when IQ is full), or -EFAULT.
+pub fn master_write(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
+    var k = iq_room(t)
+    if k > n {
+        k = n
+    }
+    if !uaccess.readable(pml4, buf, k) {
+        return NEG_EFAULT
+    }
+    let w = sv(t, C_IQ_W)
+    var j: u64 = 0
+    while j < k {
+        q_put(t, C_IQF, IQ_CAP, w + j, uaccess.get(pml4, buf + j, 1))
+        j += 1
+    }
+    put_sv(t, C_IQ_W, w + k)
+    let _m = feed(t)
+    k
+}
+
+/// The slave's write: user `buf`'s bytes through OPOST/ONLCR into OQ
+/// while they fit whole; the count of `buf`'s bytes taken (0: none
+/// fit, or IXON has stopped the output), or -EFAULT.
+pub fn slave_write(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
+    if sv(t, C_STOP) != 0 {
+        return 0
+    }
+    if !uaccess.readable(pml4, buf, n) {
+        return NEG_EFAULT
+    }
+    let nl = onlcr(t)
+    var j: u64 = 0
+    while j < n {
+        let b = uaccess.get(pml4, buf + j, 1)
+        let need: u64 = if b == 10 && nl { 2 } else { 1 }
+        if oq_room(t) < need {
+            return j
+        }
+        if need == 2 {
+            oq_put(t, 13)
+        }
+        oq_put(t, b)
+        j += 1
+    }
+    n
+}
+
+/// Whether IXON has stopped the slave's output (^S).
+pub fn stopped(t: u64) -> bool {
+    sv(t, C_STOP) != 0
+}
+
+/// The master's hangup of the slave (its last close): what was typed
+/// and not read goes, the output stops being held, and every read of
+/// the slave answers end of file from here (`hung`).
+pub fn hang(t: u64) {
+    put_sv(t, C_HUNG, 1)
+    put_sv(t, C_R, sv(t, C_E))
+    put_sv(t, C_C, sv(t, C_E))
+    put_sv(t, C_EOF, 0)
+    put_sv(t, C_IQ_R, sv(t, C_IQ_W))
+    put_sv(t, C_STOP, 0)
+}
+
+pub fn hung(t: u64) -> bool {
+    t != CON && sv(t, C_HUNG) != 0
+}
+
+/// A new pty's slave: its state words zeroed, the frames kernel/pty
+/// took for it (its record's PT_F0 + 1 to PT_F0 + 10) noted, and a Linux
+/// pty's settings (measured: notes/px111/prediction.txt §A, T1): iflag
+/// 0x500 (ICRNL|IXON), oflag 0x5, cflag 0xbf, lflag 0x8a3b, the
+/// console's c_cc, 0 by 0.
+pub fn pty_start(t: u64) {
+    var i: u64 = 0
+    while i < 64 {
+        put_sv(t, i, 0)
+        i += 1
+    }
+    let n = t - PTY0
+    put_sv(t, C_RINGF, pty_word(n, PT_F0 + 1))
+    i = 0
+    while i < 4 {
+        put_sv(t, C_IQF + i, pty_word(n, PT_F0 + 2 + i))
+        i += 1
+    }
+    i = 0
+    while i < 5 {
+        put_sv(t, C_OQF + i, pty_word(n, PT_F0 + 6 + i))
+        i += 1
+    }
+    defaults(t)
+    put_sv(t, C_IFLAG, ICRNL | IXON)
+    put_sv(t, C_STARTED, 1)
+}
+
+/// The settings both the console and a pty start with (the console
+/// clears IXON's bit: px13).
+fn defaults(t: u64) {
+    put_sv(t, C_IFLAG, ICRNL)
+    put_sv(t, C_OFLAG, OPOST | ONLCR)
+    put_sv(t, C_CFLAG, 0xbf)
+    put_sv(t, C_LFLAG, ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN)
+    // c_cc: VINTR ^C, VQUIT ^\, VERASE DEL, VKILL ^U, VEOF ^D, VTIME 0,
+    // VMIN 1, VSWTC 0 | VSTART ^Q, VSTOP ^S, VSUSP ^Z, VEOL 0, VREPRINT
+    // ^R, VDISCARD ^O, VWERASE ^W, VLNEXT ^V | VEOL2 0, two spare.
+    put_sv(t, C_CC, 0x00010004157f1c03)
+    put_sv(t, C_CC + 1, 0x16170f12001a1311)
+    put_sv(t, C_CC + 2, 0)
+}
+
+/// The slave's window size, struct winsize's 8 bytes (kernel/pty's
+/// TIOCGWINSZ on the master).
+pub fn winsz(t: u64) -> u64 {
+    sv(t, C_WINSZ)
 }
 
 /// c_cc[i].
-fn cc(i: u64) -> u64 {
-    (sv(C_CC + i / 8) >> ((i % 8) * 8)) & 0xff
+fn cc(t: u64, i: u64) -> u64 {
+    (sv(t, C_CC + i / 8) >> ((i % 8) * 8)) & 0xff
 }
 
-fn lflag(bit: u64) -> bool {
-    sv(C_LFLAG) & bit != 0
+fn lflag(t: u64, bit: u64) -> bool {
+    sv(t, C_LFLAG) & bit != 0
 }
 
 fn out(port: u16, v: u64) {
@@ -329,28 +658,38 @@ fn inp(port: u16) -> u64 {
 
 // --- output --------------------------------------------------------------
 
-/// Whether a `write` to the console turns NL into CR NL (OPOST and
-/// ONLCR; always before `start`, px09's behaviour).
-pub fn onlcr() -> bool {
-    if sv(C_STARTED) == 0 {
+/// Whether a `write` to terminal `t` turns NL into CR NL (OPOST and
+/// ONLCR; for the console always before `start`, px09's behaviour).
+pub fn onlcr(t: u64) -> bool {
+    if t == CON && sv(t, C_STARTED) == 0 {
         return true
     }
-    let o = sv(C_OFLAG)
+    let o = sv(t, C_OFLAG)
     o & OPOST != 0 && o & ONLCR != 0
 }
 
-/// One byte of echo, with the output processing a `write` gets.
-fn emit(b: u64) {
-    if b == 10 && onlcr() {
-        serial.put(13)
+/// px111: one byte out of terminal `t` as it is: to COM1 (and the
+/// screen) for the console, into OQ for a pty's slave.
+fn raw_out(t: u64, b: u64) {
+    if t == CON {
+        serial.put((b & 0xff) as u8)
+    } else {
+        oq_put(t, b)
     }
-    serial.put((b & 0xff) as u8)
+}
+
+/// One byte of echo, with the output processing a `write` gets.
+fn emit(t: u64, b: u64) {
+    if b == 10 && onlcr(t) {
+        raw_out(t, 13)
+    }
+    raw_out(t, b)
 }
 
 /// px26: the `n` bytes of kernel memory at `src` written to the console
 /// with a `write`'s output processing (kernel/files' `sendfile`).
 pub fn put_kernel(src: u64, n: u64) {
-    let nl = onlcr()
+    let nl = onlcr(CON)
     var i: u64 = 0
     while i < n {
         // # Safety: [src, src + n) is the caller's kernel memory (a
@@ -366,27 +705,27 @@ pub fn put_kernel(src: u64, n: u64) {
 }
 
 /// Whether byte `b` echoes as two columns (`^X`).
-fn wide(b: u64) -> bool {
-    lflag(ECHOCTL) && ((b < 32 && b != 9 && b != 10) || b == 127)
+fn wide(t: u64, b: u64) -> bool {
+    lflag(t, ECHOCTL) && ((b < 32 && b != 9 && b != 10) || b == 127)
 }
 
 /// Echo input byte `b` (ECHO set).
-fn echo(b: u64) {
-    if wide(b) {
-        serial.put(94) // ^
-        serial.put((if b == 127 { 63 } else { b + 64 }) as u8)
+fn echo(t: u64, b: u64) {
+    if wide(t, b) {
+        raw_out(t, 94) // ^
+        raw_out(t, if b == 127 { 63 } else { b + 64 })
     } else {
-        emit(b)
+        emit(t, b)
     }
 }
 
 /// Erase the last queued byte from the screen (ECHO and ECHOE set).
-fn rub(b: u64) {
-    var n: u64 = if wide(b) { 2 } else { 1 }
+fn rub(t: u64, b: u64) {
+    var n: u64 = if wide(t, b) { 2 } else { 1 }
     while n > 0 {
-        serial.put(8)
-        serial.put(32)
-        serial.put(8)
+        raw_out(t, 8)
+        raw_out(t, 32)
+        raw_out(t, 8)
         n -= 1
     }
 }
@@ -394,35 +733,35 @@ fn rub(b: u64) {
 // --- input ---------------------------------------------------------------
 
 /// Hand everything queued to readers.
-fn commit() {
-    put_sv(C_C, sv(C_E))
+fn commit(t: u64) {
+    put_sv(t, C_C, sv(t, C_E))
 }
 
 /// Queue byte `b` if the line has room (`nl`: room for a line end).
-fn queue(b: u64, nl: bool) -> bool {
-    let e = sv(C_E)
-    let used = e - sv(C_R)
+fn queue(t: u64, b: u64, nl: bool) -> bool {
+    let e = sv(t, C_E)
+    let used = e - sv(t, C_R)
     if used >= RING || (!nl && used >= LINE_MAX) {
-        bump(C_DROPPED)
+        bump(t, C_DROPPED)
         return false
     }
-    put_ring(e, b)
-    put_sv(C_E, e + 1)
-    put_sv(C_LAST, timer.ticks()) // px48: VTIME's timer runs from the last byte
+    put_ring(t, e, b)
+    put_sv(t, C_E, e + 1)
+    put_sv(t, C_LAST, timer.ticks()) // px48: VTIME's timer runs from the last byte
     true
 }
 
 /// Remove the last byte of the line being edited, erasing its echo.
 /// False when the line is empty.
-fn erase_one() -> bool {
-    let e = sv(C_E)
-    if e == sv(C_C) {
+fn erase_one(t: u64) -> bool {
+    let e = sv(t, C_E)
+    if e == sv(t, C_C) {
         return false
     }
-    let b = ring(e - 1)
-    put_sv(C_E, e - 1)
-    if lflag(ECHO) && lflag(ECHOE) {
-        rub(b)
+    let b = ring(t, e - 1)
+    put_sv(t, C_E, e - 1)
+    if lflag(t, ECHO) && lflag(t, ECHOE) {
+        rub(t, b)
     }
     true
 }
@@ -432,9 +771,9 @@ fn is_blank(b: u64) -> bool {
 }
 
 /// One input byte through the line discipline.
-fn input(b0: u64) {
+fn input(t: u64, b0: u64) {
     var b = b0 & 0xff
-    let ifl = sv(C_IFLAG)
+    let ifl = sv(t, C_IFLAG)
     if b == 13 {
         if ifl & IGNCR != 0 {
             return
@@ -445,96 +784,109 @@ fn input(b0: u64) {
     } else if b == 10 && ifl & INLCR != 0 {
         b = 13
     }
-    if lflag(ISIG) && b != 0 {
+    if t != CON && ifl & IXON != 0 && b != 0 && (b == cc(t, VSTOP) || b == cc(t, VSTART)) {
+        // px111: a pty's output flow control (measured: ^S and ^Q are
+        // taken out of the input, VSTOP holds the slave's writes, VSTART
+        // lets them go; the console keeps IXON clear, px13).
+        put_sv(t, C_STOP, if b == cc(t, VSTOP) { 1 } else { 0 })
+        return
+    }
+    if lflag(t, ISIG) && b != 0 {
         // px26: the terminal's signals, in either mode.
         var sig: u64 = 0
-        if b == cc(VINTR) {
+        if b == cc(t, VINTR) {
             sig = SIGINT
-        } else if b == cc(VQUIT) {
+        } else if b == cc(t, VQUIT) {
             sig = SIGQUIT
-        } else if b == cc(VSUSP) {
+        } else if b == cc(t, VSUSP) {
             sig = SIGTSTP
         }
         if sig != 0 {
-            if !lflag(NOFLSH) {
-                put_sv(C_R, sv(C_E))
-                put_sv(C_C, sv(C_E))
-                put_sv(C_EOF, 0)
+            if !lflag(t, NOFLSH) {
+                put_sv(t, C_R, sv(t, C_E))
+                put_sv(t, C_C, sv(t, C_E))
+                put_sv(t, C_EOF, 0)
+                if t != CON && sv(t, C_BATCH) >= sv(t, C_OQ_R) {
+                    // px111: and the echo of what the same write typed, not yet
+                    // the master's (measured: `ab^C` in one write echoes `^C`,
+                    // `ab^C` with NOFLSH `ab^C`; a program's output stays)
+                    put_sv(t, C_OQ_W, sv(t, C_BATCH))
+                }
             }
-            if lflag(ECHO) {
-                echo(b)
+            if lflag(t, ECHO) {
+                echo(t, b)
             }
-            put_sv(C_SIGNALS, sv(C_SIGNALS) | (1 << (sig - 1)))
-            put_sv(C_SIG_KEYS, sv(C_SIG_KEYS) + 1)
+            put_sv(t, C_SIGNALS, sv(t, C_SIGNALS) | (1 << (sig - 1)))
+            put_sv(t, C_SIG_KEYS, sv(t, C_SIG_KEYS) + 1)
             return
         }
     }
-    if !lflag(ICANON) {
-        if queue(b, true) {
-            commit()
-            if lflag(ECHO) {
-                echo(b)
+    if !lflag(t, ICANON) {
+        if queue(t, b, true) {
+            commit(t)
+            if lflag(t, ECHO) {
+                echo(t, b)
             }
         }
         return
     }
-    if b != 0 && b == cc(VERASE) {
-        let _e = erase_one()
-        if lflag(ECHO) && !lflag(ECHOE) {
-            echo(b)
+    if b != 0 && b == cc(t, VERASE) {
+        let _e = erase_one(t)
+        if lflag(t, ECHO) && !lflag(t, ECHOE) {
+            echo(t, b)
         }
         return
     }
-    if b != 0 && b == cc(VKILL) {
-        if lflag(ECHO) && lflag(ECHOKE) && lflag(ECHOE) {
-            while erase_one() {}
+    if b != 0 && b == cc(t, VKILL) {
+        if lflag(t, ECHO) && lflag(t, ECHOKE) && lflag(t, ECHOE) {
+            while erase_one(t) {}
             return
         }
-        put_sv(C_E, sv(C_C))
-        if lflag(ECHO) {
-            echo(b)
-            if lflag(ECHOK) {
-                emit(10)
+        put_sv(t, C_E, sv(t, C_C))
+        if lflag(t, ECHO) {
+            echo(t, b)
+            if lflag(t, ECHOK) {
+                emit(t, 10)
             }
         }
         return
     }
-    if b != 0 && b == cc(VWERASE) && lflag(IEXTEN) {
-        while sv(C_E) > sv(C_C) && is_blank(ring(sv(C_E) - 1)) {
-            let _e = erase_one()
+    if b != 0 && b == cc(t, VWERASE) && lflag(t, IEXTEN) {
+        while sv(t, C_E) > sv(t, C_C) && is_blank(ring(t, sv(t, C_E) - 1)) {
+            let _e = erase_one(t)
         }
-        while sv(C_E) > sv(C_C) && !is_blank(ring(sv(C_E) - 1)) {
-            let _e = erase_one()
+        while sv(t, C_E) > sv(t, C_C) && !is_blank(ring(t, sv(t, C_E) - 1)) {
+            let _e = erase_one(t)
         }
         return
     }
-    if b != 0 && b == cc(VEOF) {
-        if sv(C_E) == sv(C_C) {
-            put_sv(C_EOF, sv(C_C) + 1)
+    if b != 0 && b == cc(t, VEOF) {
+        if sv(t, C_E) == sv(t, C_C) {
+            put_sv(t, C_EOF, sv(t, C_C) + 1)
         }
-        commit()
+        commit(t)
         return
     }
-    if b == 10 || (b != 0 && b == cc(VEOL)) {
-        if queue(b, true) {
-            if lflag(ECHO) || (b == 10 && lflag(ECHONL)) {
-                echo(b)
+    if b == 10 || (b != 0 && b == cc(t, VEOL)) {
+        if queue(t, b, true) {
+            if lflag(t, ECHO) || (b == 10 && lflag(t, ECHONL)) {
+                echo(t, b)
             }
-            commit()
+            commit(t)
         }
         return
     }
-    if queue(b, false) && lflag(ECHO) {
-        echo(b)
+    if queue(t, b, false) && lflag(t, ECHO) {
+        echo(t, b)
     }
 }
 
 /// px26: the signals keys have raised since this was last asked (bit
 /// n - 1 for signal n), for kernel/interrupts to hand to kernel/signal.
-pub fn take_signals() -> u64 {
-    let m = sv(C_SIGNALS)
+pub fn take_signals(t: u64) -> u64 {
+    let m = sv(t, C_SIGNALS)
     if m != 0 {
-        put_sv(C_SIGNALS, 0)
+        put_sv(t, C_SIGNALS, 0)
     }
     m
 }
@@ -543,7 +895,7 @@ pub fn take_signals() -> u64 {
 /// Ctrl-\ and Ctrl-Z, through COM1 or the keyboard), whether or not
 /// a process was there to receive it.
 pub fn signal_keys() -> u64 {
-    sv(C_SIG_KEYS)
+    sv(CON, C_SIG_KEYS)
 }
 
 /// px59: the screen's answers to a program's queries (kernel/screen's
@@ -562,12 +914,12 @@ pub fn answered() -> bool {
     var any = false
     var b = screen.answer()
     while b < 256 {
-        if sv(C_STARTED) != 0 && sv(C_SRC) == 2 {
-            input(b)
-            bump(C_ANSWERS)
+        if sv(CON, C_STARTED) != 0 && sv(CON, C_SRC) == 2 {
+            input(CON, b)
+            bump(CON, C_ANSWERS)
             any = true
         } else {
-            bump(C_UNANSWERED)
+            bump(CON, C_UNANSWERED)
         }
         b = screen.answer()
     }
@@ -577,7 +929,7 @@ pub fn answered() -> bool {
 /// px59: the bytes of the screen's answers typed, and dropped, since
 /// boot (`answers <typed> typed, <dropped> dropped`).
 pub fn answers() -> (u64, u64) {
-    (sv(C_ANSWERS), sv(C_UNANSWERED))
+    (sv(CON, C_ANSWERS), sv(CON, C_UNANSWERED))
 }
 
 /// Whether there is something for a `read` to take: data, or a pending
@@ -585,66 +937,84 @@ pub fn answers() -> (u64, u64) {
 /// answers 0 at once, but `poll` and `select` still wait for a byte, as
 /// Linux's terminal does (measured: notes/px46-the-accounts.md §B), and
 /// pelt's editor polls before it reads.
-pub fn readable() -> bool {
-    if sv(C_STARTED) == 0 {
+/// px111: in non-canonical mode with VMIN above 0 and VTIME 0, VMIN
+/// bytes (measured: two bytes with VMIN 3 are not readable under poll,
+/// with VTIME 5 they are); a hung-up slave always (its reads answer end
+/// of file).
+pub fn readable(t: u64) -> bool {
+    if t == CON && sv(t, C_STARTED) == 0 {
         return true
     }
-    let _a = answered()
-    let r = sv(C_R)
-    if sv(C_C) > r {
+    if hung(t) {
         return true
     }
-    sv(C_EOF) == r + 1
+    if t == CON {
+        let _a = answered()
+    }
+    let r = sv(t, C_R)
+    let c = sv(t, C_C)
+    if c > r {
+        if !lflag(t, ICANON) && cc(t, VTIME) == 0 && cc(t, VMIN) > 1 {
+            return c - r >= cc(t, VMIN)
+        }
+        return true
+    }
+    sv(t, C_EOF) == r + 1
 }
 
-/// `read(fd, buf, n)` on the console: the count, 0 at end of file,
+/// `read(fd, buf, n)` on terminal `t`: the count, 0 at end of file,
 /// `RESTART` to wait, -EAGAIN for a non-blocking descriptor with
 /// nothing ready, -EFAULT. px46: `until` is the calling thread's
 /// deadline word (0: this read has not waited yet); the second value is
 /// what that word must hold after the call. With VMIN 0 and VTIME above
 /// 0 and nothing ready, the first run sets a deadline VTIME tenths of a
 /// second away and answers `TIMED`, and a run past it answers 0.
-pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u64) {
-    if sv(C_STARTED) == 0 {
+pub fn read(t: u64, pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u64) {
+    if t == CON && sv(t, C_STARTED) == 0 {
         return (0, 0) // px12: end of file until the console is started
     }
-    let _a = answered()
-    let r = sv(C_R)
-    let c = sv(C_C)
+    if hung(t) {
+        return (0, 0) // px111: a hung-up slave reads end of file (measured, again and again)
+    }
+    if t == CON {
+        let _a = answered()
+    }
+    let r = sv(t, C_R)
+    let c = sv(t, C_C)
     if c == r {
-        if sv(C_EOF) == r + 1 {
-            put_sv(C_EOF, 0)
-            bump(C_READS)
+        if sv(t, C_EOF) == r + 1 {
+            put_sv(t, C_EOF, 0)
+            bump(t, C_READS)
             return (0, 0)
         }
-        if !lflag(ICANON) && cc(VMIN) == 0 {
-            let t = cc(VTIME)
-            if t != 0 && !nonblock {
+        if !lflag(t, ICANON) && cc(t, VMIN) == 0 {
+            let vt = cc(t, VTIME)
+            if vt != 0 && !nonblock {
                 let now = timer.ticks()
                 if until == 0 {
                     // The tick after: a partial tick never shortens a wait.
-                    return (TIMED, now + (t * 100000000 + NS_PER_TICK - 1) / NS_PER_TICK + 1)
+                    return (TIMED, now + (vt * 100000000 + NS_PER_TICK - 1) / NS_PER_TICK + 1)
                 }
                 if now < until {
                     return (TIMED, until)
                 }
             }
-            bump(C_READS)
+            bump(t, C_READS)
             return (0, 0)
         }
         if nonblock {
             return (NEG_EAGAIN, 0)
         }
-        bump(C_WAITS)
+        bump(t, C_WAITS)
         return (RESTART, 0)
     }
     if n == 0 {
         return (0, 0)
     }
     var k = c - r
-    if lflag(ICANON) {
+    if lflag(t, ICANON) {
         var i: u64 = 0
-        while i < k && ring(r + i) != 10 {
+        while i < k && ring(t, r + i) != 10 {
             i += 1
         }
         if i < k {
@@ -655,15 +1025,15 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u6
         // VTIME t above 0, a read that has some answers them once t
         // tenths of a second pass after the last byte came (termios(3),
         // measured: notes/px48-job-control.md §F).
-        let m = cc(VMIN)
+        let m = cc(t, VMIN)
         let want = if m < n { m } else { n }
         if m > 0 && k < want && !nonblock {
-            let t = cc(VTIME)
-            if t == 0 {
-                bump(C_WAITS)
+            let vt = cc(t, VTIME)
+            if vt == 0 {
+                bump(t, C_WAITS)
                 return (RESTART, 0)
             }
-            let end = sv(C_LAST) + (t * 100000000 + NS_PER_TICK - 1) / NS_PER_TICK + 1
+            let end = sv(t, C_LAST) + (vt * 100000000 + NS_PER_TICK - 1) / NS_PER_TICK + 1
             if timer.ticks() < end {
                 return (TIMED, end)
             }
@@ -677,51 +1047,60 @@ pub fn read(pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> (u64, u6
     }
     var j: u64 = 0
     while j < k {
-        uaccess.put(pml4, buf + j, ring(r + j), 1)
+        uaccess.put(pml4, buf + j, ring(t, r + j), 1)
         j += 1
     }
-    put_sv(C_R, r + k)
-    if sv(31) != 0 && sv(32) == 0 { put_sv(32, timer.ticks() + 1) }
-    bump(C_READS)
+    put_sv(t, C_R, r + k)
+    if sv(t, 31) != 0 && sv(t, 32) == 0 { put_sv(t, 32, timer.ticks() + 1) }
+    bump(t, C_READS)
     (k, 0)
 }
 
 // --- the terminal's ioctls ----------------------------------------------
 
-fn termios_out(pml4: u64, arg: u64) -> u64 {
+pub fn termios_out(t: u64, pml4: u64, arg: u64) -> u64 {
     if !uaccess.writable(pml4, arg, TERMIOS_BYTES) {
         return NEG_EFAULT
     }
-    uaccess.put(pml4, arg, sv(C_IFLAG), 4)
-    uaccess.put(pml4, arg + 4, sv(C_OFLAG), 4)
-    uaccess.put(pml4, arg + 8, sv(C_CFLAG), 4)
-    uaccess.put(pml4, arg + 12, sv(C_LFLAG), 4)
-    uaccess.put(pml4, arg + 16, sv(C_LINE), 1)
-    uaccess.put(pml4, arg + 17, sv(C_CC), 8)
-    uaccess.put(pml4, arg + 25, sv(C_CC + 1), 8)
-    uaccess.put(pml4, arg + 33, sv(C_CC + 2), 3)
+    uaccess.put(pml4, arg, sv(t, C_IFLAG), 4)
+    uaccess.put(pml4, arg + 4, sv(t, C_OFLAG), 4)
+    uaccess.put(pml4, arg + 8, sv(t, C_CFLAG), 4)
+    uaccess.put(pml4, arg + 12, sv(t, C_LFLAG), 4)
+    uaccess.put(pml4, arg + 16, sv(t, C_LINE), 1)
+    uaccess.put(pml4, arg + 17, sv(t, C_CC), 8)
+    uaccess.put(pml4, arg + 25, sv(t, C_CC + 1), 8)
+    uaccess.put(pml4, arg + 33, sv(t, C_CC + 2), 3)
     0
 }
 
-fn termios_in(pml4: u64, arg: u64, flush: bool) -> u64 {
+pub fn termios_in(t: u64, pml4: u64, arg: u64, flush: bool) -> u64 {
     if !uaccess.readable(pml4, arg, TERMIOS_BYTES) {
         return NEG_EFAULT
     }
-    let was_canon = lflag(ICANON)
-    put_sv(C_IFLAG, uaccess.get(pml4, arg, 4))
-    put_sv(C_OFLAG, uaccess.get(pml4, arg + 4, 4))
-    put_sv(C_CFLAG, uaccess.get(pml4, arg + 8, 4))
-    put_sv(C_LFLAG, uaccess.get(pml4, arg + 12, 4))
-    put_sv(C_LINE, uaccess.get(pml4, arg + 16, 1))
-    put_sv(C_CC, uaccess.get(pml4, arg + 17, 8))
-    put_sv(C_CC + 1, uaccess.get(pml4, arg + 25, 8))
-    put_sv(C_CC + 2, uaccess.get(pml4, arg + 33, 3))
+    let was_canon = lflag(t, ICANON)
+    put_sv(t, C_IFLAG, uaccess.get(pml4, arg, 4))
+    put_sv(t, C_OFLAG, uaccess.get(pml4, arg + 4, 4))
+    put_sv(t, C_CFLAG, uaccess.get(pml4, arg + 8, 4))
+    put_sv(t, C_LFLAG, uaccess.get(pml4, arg + 12, 4))
+    put_sv(t, C_LINE, uaccess.get(pml4, arg + 16, 1))
+    put_sv(t, C_CC, uaccess.get(pml4, arg + 17, 8))
+    put_sv(t, C_CC + 1, uaccess.get(pml4, arg + 25, 8))
+    put_sv(t, C_CC + 2, uaccess.get(pml4, arg + 33, 3))
     if flush {
-        put_sv(C_R, sv(C_E))
-        put_sv(C_C, sv(C_E))
-        put_sv(C_EOF, 0)
-    } else if was_canon && !lflag(ICANON) {
-        commit() // the line being edited becomes readable bytes
+        put_sv(t, C_R, sv(t, C_E))
+        put_sv(t, C_C, sv(t, C_E))
+        put_sv(t, C_EOF, 0)
+        if t != CON {
+            put_sv(t, C_IQ_R, sv(t, C_IQ_W)) // px111: and what waits for the line discipline
+        }
+    } else if was_canon && !lflag(t, ICANON) {
+        commit(t) // the line being edited becomes readable bytes
+    }
+    if t != CON {
+        if sv(t, C_IFLAG) & IXON == 0 {
+            put_sv(t, C_STOP, 0) // px111: IXON cleared lets held output go
+        }
+        let _m = feed(t)
     }
     0
 }
@@ -751,15 +1130,15 @@ pub const J_READ: u64 = 1
 pub const J_WRITE: u64 = 2
 pub const J_SET: u64 = 3
 
-pub fn job(kind: u64) -> u64 {
-    if sv(C_STARTED) == 0 || !sched.self_tty() {
+pub fn job(t: u64, kind: u64) -> u64 {
+    if (t == CON && sv(t, C_STARTED) == 0) || sched.self_ctty() != t {
         return 0
     }
     let g = sched.self_pgid()
-    if g == sched.tty_pgrp() {
+    if g == sched.tty_pgrp_of(t) {
         return 0
     }
-    if kind == J_WRITE && !lflag(TOSTOP) {
+    if kind == J_WRITE && !lflag(t, TOSTOP) {
         return 0
     }
     let sig = if kind == J_READ { SIGTTIN } else { SIGTTOU }
@@ -782,34 +1161,112 @@ fn int_in(pml4: u64, arg: u64) -> (bool, u64) {
     (true, uaccess.get(pml4, arg, 4))
 }
 
-/// A terminal ioctl on the console by the process whose area is `a`:
-/// the result for %rax, or `REFUSED` for a request PAX does not answer.
-/// -ENOTTY for everything before `start` (px12's console). px48: the
-/// controlling terminal's requests (TIOCSCTTY, TIOCNOTTY, TIOCGPGRP,
-/// TIOCSPGRP, TIOCGSID: -ENOTTY to a process whose controlling terminal
-/// the console is not, but TIOCSCTTY), and the background rule for a
-/// setting (`job`).
-pub fn ioctl(a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
-    if sv(C_STARTED) == 0 {
+/// px111: TIOCSPGRP on terminal `t` by the running process (through
+/// the slave or the master: measured, the same), `arg` its user int:
+/// the result for %rax.
+pub fn set_pgrp(t: u64, pml4: u64, arg: u64) -> u64 {
+    if sched.self_ctty() != t {
         return NEG_ENOTTY
     }
+    let j = job(t, J_SET)
+    if j == NEG_EIO {
+        return NEG_ENOTTY // measured: an orphaned background group is told -ENOTTY
+    }
+    if j != 0 {
+        return j
+    }
+    let (ok, v) = int_in(pml4, arg)
+    if !ok {
+        return NEG_EFAULT
+    }
+    if v >= 0x80000000 {
+        return NEG_EINVAL
+    }
+    if !sched.group_exists(v, 0) {
+        return NEG_ESRCH
+    }
+    if !sched.group_exists(v, sched.tty_session_of(t)) {
+        return NEG_EPERM
+    }
+    sched.set_tty_pgrp_of(t, v)
+    0
+}
+
+/// px111: TIOCSWINSZ on terminal `t` (its slave or its master): the
+/// size from user `arg`; a new one is SIGWINCH for the foreground group
+/// of the session that holds the terminal (px48, measured on a pty: a
+/// change of the pixel fields alone counts, the same size again sends
+/// nothing, a terminal no session holds signals nobody).
+pub fn set_winsz(t: u64, pml4: u64, arg: u64) -> u64 {
+    if !uaccess.readable(pml4, arg, 8) {
+        return NEG_EFAULT
+    }
+    let w = uaccess.get(pml4, arg, 8)
+    let old = sv(t, C_WINSZ)
+    put_sv(t, C_WINSZ, w)
+    let g = sched.tty_pgrp_of(t)
+    if w != old && g != 0 && sched.tty_session_of(t) != 0 {
+        let _n = sched.raise_pgrp(g, SIGWINCH, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+    }
+    0
+}
+
+/// px111: the signals the keys written into pty slave `t` raised, raised
+/// now for its foreground group (a system call's, where the console's
+/// wait for kernel/interrupts' tick: kernel/signal's `tty`).
+pub fn pty_signals(t: u64) {
+    let m = take_signals(t)
+    let g = sched.tty_pgrp_of(t)
+    if m == 0 || g == 0 || sched.tty_session_of(t) == 0 {
+        return
+    }
+    var sig: u64 = 1
+    while sig <= 32 {
+        if m & (1 << (sig - 1)) != 0 {
+            let _n = sched.raise_pgrp(g, sig, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
+        }
+        sig += 1
+    }
+}
+
+/// A terminal ioctl on terminal `t` (the console, or a pty's slave) by
+/// the process whose area is `a`: the result for %rax, or `REFUSED` for
+/// a request PAX does not answer. -ENOTTY for everything before `start`
+/// (px12's console); px111: -EIO for everything on a hung-up slave
+/// (measured). px48: the controlling terminal's requests (TIOCSCTTY,
+/// TIOCNOTTY, TIOCGPGRP, TIOCSPGRP, TIOCGSID: -ENOTTY to a process whose
+/// controlling terminal `t` is not, but TIOCSCTTY), and the background
+/// rule for a setting (`job`).
+pub fn ioctl(t: u64, a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
+    if t == CON && sv(t, C_STARTED) == 0 {
+        return NEG_ENOTTY
+    }
+    if hung(t) {
+        return NEG_EIO
+    }
     if req == TCGETS {
-        return termios_out(pml4, arg)
+        return termios_out(t, pml4, arg)
     }
     if req == TCSETS || req == TCSETSW || req == TCSETSF {
-        let j = job(J_SET)
+        let j = job(t, J_SET)
         if j != 0 {
             return j
         }
-        return termios_in(pml4, arg, req == TCSETSF)
+        let r = termios_in(t, pml4, arg, req == TCSETSF)
+        if t != CON {
+            sched.wake_pipes()
+        }
+        return r
     }
     if req == TCFLSH {
         // px49 (pax#74): tcflush(3). The background rule first (measured:
         // SIGTTOU, as TCSETS); TCIFLUSH and TCIOFLUSH discard what was
-        // typed and not read, the line being edited too; TCOFLUSH has
-        // nothing to discard (the console's output is written as it is
-        // asked for); any other -EINVAL.
-        let j = job(J_SET)
+        // typed and not read, the line being edited too (px111: and on a
+        // pty what waits for the line discipline); TCOFLUSH has nothing
+        // to discard (the console's output is written as it is asked
+        // for; a slave's is the master's once written, measured); any
+        // other -EINVAL.
+        let j = job(t, J_SET)
         if j != 0 {
             return j
         }
@@ -818,9 +1275,13 @@ pub fn ioctl(a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
             return NEG_EINVAL
         }
         if q == TCIFLUSH || q == TCIOFLUSH {
-            put_sv(C_R, sv(C_E))
-            put_sv(C_C, sv(C_E))
-            put_sv(C_EOF, 0)
+            put_sv(t, C_R, sv(t, C_E))
+            put_sv(t, C_C, sv(t, C_E))
+            put_sv(t, C_EOF, 0)
+            if t != CON {
+                put_sv(t, C_IQ_R, sv(t, C_IQ_W))
+                sched.wake_pipes()
+            }
         }
         return 0
     }
@@ -830,10 +1291,28 @@ pub fn ioctl(a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         // be drained (writes are synchronous) and no break is put on
         // COM1 (named: Linux's pseudo-terminal, the reference, answers 0
         // at once too).
-        let j = job(J_SET)
+        let j = job(t, J_SET)
         if j != 0 {
             return j
         }
+        return 0
+    }
+    if req == FIONREAD {
+        // px111: the bytes a read would find (in canonical mode the
+        // whole lines: a line being edited is not counted, measured).
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, sv(t, C_C) - sv(t, C_R), 4)
+        return 0
+    }
+    if req == TIOCOUTQ {
+        // px111: nothing waits to be sent (measured on a pty: 0 with the
+        // master's bytes unread too).
+        if !uaccess.writable(pml4, arg, 4) {
+            return NEG_EFAULT
+        }
+        uaccess.put(pml4, arg, 0, 4)
         return 0
     }
     if req == TIOCSTI {
@@ -843,86 +1322,59 @@ pub fn ioctl(a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         // to anyone not privileged, before anything else; the privileged
         // may put a byte in a terminal that is not their own; a bad
         // pointer -EFAULT. A key that raises a signal is raised at the
-        // next interrupt (named).
+        // next interrupt (named; px111: on a pty at once).
         if !cred.privileged(a) {
             return NEG_EIO
         }
         if !uaccess.readable(pml4, arg, 1) {
             return NEG_EFAULT
         }
-        input(uaccess.get(pml4, arg, 1))
-        if readable() {
+        input(t, uaccess.get(pml4, arg, 1))
+        if t != CON {
+            pty_signals(t)
+            sched.wake_pipes()
+        } else if readable(t) {
             let _n = sched.wake_input()
         }
         return 0
     }
+    if req == 0x80045430 || req == 0x40045431 || req == 0x80045439 {
+        // px111: TIOCGPTN, TIOCSPTLCK, TIOCGPTLCK are a master's: -ENOTTY
+        // on a terminal (measured on a slave), as Linux answers
+        return NEG_ENOTTY
+    }
     if req == TIOCSCTTY {
         // ioctl_tty(2): a session leader with no controlling terminal
         // takes it; another session's, only with arg 1 by the privileged.
-        return if sched.take_tty((arg & 0xffffffff) == 1 && cred.privileged(a)) == 0 { 0 } else { NEG_EPERM }
+        return if sched.take_tty_of(t, (arg & 0xffffffff) == 1 && cred.privileged(a)) == 0 { 0 } else { NEG_EPERM }
     }
     if req == TIOCNOTTY {
-        return if sched.drop_tty() == 0 { 0 } else { NEG_ENOTTY }
+        return if sched.drop_tty_of(t) == 0 { 0 } else { NEG_ENOTTY }
     }
     if req == TIOCGPGRP || req == TIOCGSID {
-        if !sched.self_tty() {
+        if sched.self_ctty() != t {
             return NEG_ENOTTY
         }
         if !uaccess.writable(pml4, arg, 4) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, arg, if req == TIOCGPGRP { sched.tty_pgrp() } else { sched.tty_session() }, 4)
+        uaccess.put(pml4, arg, if req == TIOCGPGRP { sched.tty_pgrp_of(t) } else { sched.tty_session_of(t) }, 4)
         return 0
     }
     if req == TIOCSPGRP {
-        if !sched.self_tty() {
-            return NEG_ENOTTY
-        }
-        let j = job(J_SET)
-        if j == NEG_EIO {
-            return NEG_ENOTTY // measured: an orphaned background group is told -ENOTTY
-        }
-        if j != 0 {
-            return j
-        }
-        let (ok, v) = int_in(pml4, arg)
-        if !ok {
-            return NEG_EFAULT
-        }
-        if v >= 0x80000000 {
-            return NEG_EINVAL
-        }
-        if !sched.group_exists(v, 0) {
-            return NEG_ESRCH
-        }
-        if !sched.group_exists(v, sched.tty_session()) {
-            return NEG_EPERM
-        }
-        sched.set_tty_pgrp(v)
-        return 0
+        return set_pgrp(t, pml4, arg)
     }
     if req == TIOCGWINSZ {
         if !uaccess.writable(pml4, arg, 8) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, arg, sv(C_WINSZ), 8)
+        uaccess.put(pml4, arg, sv(t, C_WINSZ), 8)
         return 0
     }
     if req == TIOCSWINSZ {
-        if !uaccess.readable(pml4, arg, 8) {
-            return NEG_EFAULT
-        }
-        let w = uaccess.get(pml4, arg, 8)
-        let old = sv(C_WINSZ)
-        put_sv(C_WINSZ, w)
-        let g = sched.tty_pgrp()
-        if w != old && g != 0 && sched.tty_session() != 0 {
-            // px48: a new size is SIGWINCH for the foreground group (measured).
-            let _n = sched.raise_pgrp(g, SIGWINCH, sched.sig_info(sched.I_KERNEL, 0, 0, 0))
-        }
-        return 0
+        return set_winsz(t, pml4, arg)
     }
-    if speaker.request(req) {
+    if t == CON && speaker.request(req) {
         // px18: KIOCSOUND and KDMKTONE, the console's speaker (kernel/speaker).
         return speaker.ioctl(req, arg, timer.ticks())
     }
@@ -1104,9 +1556,9 @@ fn fkey_number(k: u64) -> u64 {
 /// `v` (< 100) in decimal through the line discipline.
 fn input_dec(v: u64) {
     if v >= 10 {
-        input(48 + v / 10)
+        input(CON, 48 + v / 10)
     }
-    input(48 + v % 10)
+    input(CON, 48 + v % 10)
 }
 
 /// px59: function key `k` (its make code) with the modifiers held, as
@@ -1124,15 +1576,15 @@ fn function_key(k: u64, keys: u64) {
         n += 10
     }
     let f = fkey(n)
-    bump(C_RX_KBD)
-    input(27)
-    input(91)
+    bump(CON, C_RX_KBD)
+    input(CON, 27)
+    input(CON, 91)
     if f > 0xff {
-        input(91)
-        input(f & 0xff)
+        input(CON, 91)
+        input(CON, f & 0xff)
     } else {
         input_dec(f)
-        input(126)
+        input(CON, 126)
     }
 }
 
@@ -1148,25 +1600,25 @@ fn keypad_digit(k: u64) -> u64 {
 /// Character entry is completed on Alt release, not on a digit's make.
 /// A bounded 32-bit accumulator cannot overflow the kernel's arithmetic.
 fn entry_digit(digit: u64, base: u64) {
-    let value = ((sv(C_ENTRY) & 0xffffffff) * base + digit) & 0xffffffff
-    put_sv(C_ENTRY, value | 0x100000000)
+    let value = ((sv(CON, C_ENTRY) & 0xffffffff) * base + digit) & 0xffffffff
+    put_sv(CON, C_ENTRY, value | 0x100000000)
 }
 
 fn finish_entry() {
-    let pending = sv(C_ENTRY)
-    put_sv(C_ENTRY, 0)
+    let pending = sv(CON, C_ENTRY)
+    put_sv(CON, C_ENTRY, 0)
     if pending & 0x100000000 == 0 { return }
     let cp = pending & 0xffffffff
     if cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) { return }
-    bump(C_RX_KBD)
-    if cp < 0x80 { input(cp) }
+    bump(CON, C_RX_KBD)
+    if cp < 0x80 { input(CON, cp) }
     else if cp < 0x800 {
-        input(0xc0 | (cp >> 6)); input(0x80 | (cp & 63))
+        input(CON, 0xc0 | (cp >> 6)); input(CON, 0x80 | (cp & 63))
     } else if cp < 0x10000 {
-        input(0xe0 | (cp >> 12)); input(0x80 | ((cp >> 6) & 63)); input(0x80 | (cp & 63))
+        input(CON, 0xe0 | (cp >> 12)); input(CON, 0x80 | ((cp >> 6) & 63)); input(CON, 0x80 | (cp & 63))
     } else {
-        input(0xf0 | (cp >> 18)); input(0x80 | ((cp >> 12) & 63))
-        input(0x80 | ((cp >> 6) & 63)); input(0x80 | (cp & 63))
+        input(CON, 0xf0 | (cp >> 18)); input(CON, 0x80 | ((cp >> 12) & 63))
+        input(CON, 0x80 | ((cp >> 6) & 63)); input(CON, 0x80 | (cp & 63))
     }
 }
 
@@ -1184,26 +1636,26 @@ fn navigation_key(k: u64, keys: u64, keypad: bool) {
         m = 1 + (if shift { 1 } else { 0 }) + (if alt { 2 } else { 0 }) + (if ctrl { 4 } else { 0 })
         if m == 3 && (k == 0x4b || k == 0x4d) { return }
     }
-    bump(C_RX_KBD)
-    input(27); input(91)
-    if m > 1 { input(49); input(59); input(48 + m) }
-    input(f & 0xff)
-    if f > 0xff { input(126) }
+    bump(CON, C_RX_KBD)
+    input(CON, 27); input(CON, 91)
+    if m > 1 { input(CON, 49); input(CON, 59); input(CON, 48 + m) }
+    input(CON, f & 0xff)
+    if f > 0xff { input(CON, 126) }
 }
 
 /// One byte from the i8042 (set 1).
 fn scancode(b: u64) {
-    bump(C_SCANCODES)
-    var keys = sv(C_KEYS)
+    bump(CON, C_SCANCODES)
+    var keys = sv(CON, C_KEYS)
     if b == 0xe0 {
-        put_sv(C_KEYS, keys | K_E0)
+        put_sv(CON, C_KEYS, keys | K_E0)
         return
     }
     let ext = keys & K_E0 != 0
     if ext {
         keys = keys - K_E0
     }
-    put_sv(C_KEYS, keys)
+    put_sv(CON, C_KEYS, keys)
     key_event((b & 0x7f) | (if ext { 0x100 } else { 0 }), b & 0x80 == 0, false)
 }
 
@@ -1212,11 +1664,11 @@ fn scancode(b: u64) {
 /// The adapters retain separate modifier state; unplugging USB cannot release
 /// a Shift still held on PS/2. Caller holds IF clear.
 pub fn key_event(code: u64, pressed: bool, usb: bool) {
-    if sv(C_STARTED) == 0 || code == 0 { return }
+    if sv(CON, C_STARTED) == 0 || code == 0 { return }
     typed_at(2)
-    if usb && pressed && sv(31) == 0 { put_sv(31, timer.ticks() + 1) }
+    if usb && pressed && sv(CON, 31) == 0 { put_sv(CON, 31, timer.ticks() + 1) }
     let state = if usb { 30 } else { C_KEYS }
-    var keys = sv(state)
+    var keys = sv(CON, state)
     let ext = code & 0x100 != 0
     let brk = !pressed
     let k = code & 0x7f
@@ -1238,17 +1690,17 @@ pub fn key_event(code: u64, pressed: bool, usb: bool) {
         } else {
             keys = keys | bit
         }
-        put_sv(state, keys)
+        put_sv(CON, state, keys)
         if brk && (bit == K_LALT || bit == K_RALT) { finish_entry() }
         return
     }
-    keys = sv(C_KEYS) | sv(30)
+    keys = sv(CON, C_KEYS) | sv(CON, 30)
     if k == 0x45 && !ext {
-        if !brk { put_sv(C_KEYS, sv(C_KEYS) ^ K_NUM) }
+        if !brk { put_sv(CON, C_KEYS, sv(CON, C_KEYS) ^ K_NUM) }
         return
     }
     if k == 0x3a && !ext {
-        if !brk { put_sv(C_KEYS, sv(C_KEYS) ^ K_CAPS) }
+        if !brk { put_sv(CON, C_KEYS, sv(CON, C_KEYS) ^ K_CAPS) }
         return
     }
     if brk {
@@ -1274,7 +1726,7 @@ pub fn key_event(code: u64, pressed: bool, usb: bool) {
         }
         if digit < 10 || k == 0x53 {
             if keys & K_NUM == 0 { navigation_key(k, keys, true) }
-            else { bump(C_RX_KBD); input(if k == 0x53 { 46 } else { 48 + digit }) }
+            else { bump(CON, C_RX_KBD); input(CON, if k == 0x53 { 46 } else { 48 + digit }) }
             return
         }
         c = key_base(k)
@@ -1326,11 +1778,11 @@ pub fn key_event(code: u64, pressed: bool, usb: bool) {
             c = 127
         }
     }
-    bump(C_RX_KBD)
+    bump(CON, C_RX_KBD)
     if meta {
-        input(27)
+        input(CON, 27)
     }
-    input(c)
+    input(CON, c)
 }
 
 /// Wait for the i8042's input buffer to drain (status bit 1 clear).
@@ -1371,23 +1823,23 @@ fn kbd_flush() {
 fn kbd_start() {
     let st = inp(KBD_CMD)
     if st == 0xff {
-        put_sv(C_KBD_BEFORE, 0x100 + st)
-        put_sv(C_KBD_AFTER, 0x100 + st)
+        put_sv(CON, C_KBD_BEFORE, 0x100 + st)
+        put_sv(CON, C_KBD_AFTER, 0x100 + st)
         return
     }
     kbd_flush()
     if !kbd_wait_in() {
-        put_sv(C_KBD_BEFORE, 0x200)
+        put_sv(CON, C_KBD_BEFORE, 0x200)
         return
     }
     out(KBD_CMD, 0x20) // read the configuration byte
     if !kbd_wait_out() {
-        put_sv(C_KBD_BEFORE, 0x300)
-        put_sv(C_KBD_AFTER, 0x300)
+        put_sv(CON, C_KBD_BEFORE, 0x300)
+        put_sv(CON, C_KBD_AFTER, 0x300)
         return
     }
     let cfg = inp(KBD_DATA)
-    put_sv(C_KBD_BEFORE, cfg)
+    put_sv(CON, C_KBD_BEFORE, cfg)
     // bit 0 on (port 1 interrupt), bit 1 off (port 2 interrupt), bit 4
     // off (port 1 clock enabled), bit 6 on (translation to set 1).
     var want = cfg | 0x41
@@ -1406,9 +1858,9 @@ fn kbd_start() {
     let _w4 = kbd_wait_in()
     out(KBD_CMD, 0x20)
     if kbd_wait_out() {
-        put_sv(C_KBD_AFTER, inp(KBD_DATA))
+        put_sv(CON, C_KBD_AFTER, inp(KBD_DATA))
     } else {
-        put_sv(C_KBD_AFTER, 0x300)
+        put_sv(CON, C_KBD_AFTER, 0x300)
     }
     kbd_flush()
 }
@@ -1423,35 +1875,26 @@ fn kbd_start() {
 pub fn start() {
     var i: u64 = 0
     while i < 64 {
-        put_sv(i, 0)
+        put_sv(CON, i, 0)
         i += 1
     }
-    put_sv(C_IFLAG, ICRNL)
-    put_sv(C_OFLAG, OPOST | ONLCR)
-    put_sv(C_CFLAG, 0xbf)
-    put_sv(C_LFLAG, ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN)
-    // c_cc: VINTR ^C, VQUIT ^\, VERASE DEL, VKILL ^U, VEOF ^D, VTIME 0,
-    // VMIN 1, VSWTC 0 | VSTART ^Q, VSTOP ^S, VSUSP ^Z, VEOL 0, VREPRINT
-    // ^R, VDISCARD ^O, VWERASE ^W, VLNEXT ^V | VEOL2 0, two spare.
-    put_sv(C_CC, 0x00010004157f1c03)
-    put_sv(C_CC + 1, 0x16170f12001a1311)
-    put_sv(C_CC + 2, 0)
+    defaults(CON)
     if screen.on() {
         // px19: struct winsize {ws_row, ws_col, ws_xpixel, ws_ypixel},
         // four little-endian 16-bit words.
-        put_sv(C_WINSZ, screen.rows() | (screen.cols() << 16))
+        put_sv(CON, C_WINSZ, screen.rows() | (screen.cols() << 16))
     }
     serial.receive_on()
     kbd_start()
-    put_sv(C_STARTED, 1)
+    put_sv(CON, C_STARTED, 1)
     sched.tty_on() // px48: the next process the kernel starts takes it as its controlling terminal
     if serial.available() { timer.unmask(COM1_LINE) }
-    if sv(C_KBD_AFTER) < 256 { timer.unmask(KBD_LINE) }
+    if sv(CON, C_KBD_AFTER) < 256 { timer.unmask(KBD_LINE) }
 }
 
 /// Whether `start` has run.
 pub fn started() -> bool {
-    sv(C_STARTED) != 0
+    sv(CON, C_STARTED) != 0
 }
 
 /// COM1's receive vector, 36: the 8259 master's line 4 once kernel/timer
@@ -1473,10 +1916,10 @@ pub fn irq(v: u64) {
         var n: u64 = 0
         while serial.ready() && n < 4096 {
             let b = serial.receive()
-            bump(C_RX_COM1)
-            if sv(C_STARTED) != 0 {
+            bump(CON, C_RX_COM1)
+            if sv(CON, C_STARTED) != 0 {
                 typed_at(1)
-                input(b)
+                input(CON, b)
             }
             n += 1
         }
@@ -1485,7 +1928,7 @@ pub fn irq(v: u64) {
         while inp(KBD_CMD) & KBD_OBF != 0 && n < 64 {
             let st = inp(KBD_CMD)
             let b = inp(KBD_DATA)
-            if st & KBD_AUX == 0 && sv(C_STARTED) != 0 {
+            if st & KBD_AUX == 0 && sv(CON, C_STARTED) != 0 {
                 typed_at(2)
                 scancode(b)
             }
@@ -1507,12 +1950,12 @@ pub fn irq(v: u64) {
 /// person moves to the other device. No SIGWINCH is sent for the move
 /// (named: no program here redraws for it).
 fn typed_at(src: u64) {
-    if sv(C_SRC) == src {
+    if sv(CON, C_SRC) == src {
         return
     }
-    put_sv(C_SRC, src)
+    put_sv(CON, C_SRC, src)
     if screen.on() {
-        put_sv(C_WINSZ, if src == 1 { 0 } else { screen.rows() | (screen.cols() << 16) })
+        put_sv(CON, C_WINSZ, if src == 1 { 0 } else { screen.rows() | (screen.cols() << 16) })
     }
 }
 
@@ -1528,21 +1971,21 @@ pub fn report() {
         log.put("console: com1 absent")
     }
     log.put(", i8042 ")
-    put_hex8(sv(C_KBD_BEFORE))
+    put_hex8(sv(CON, C_KBD_BEFORE))
     log.put(" -> ")
-    put_hex8(sv(C_KBD_AFTER))
+    put_hex8(sv(CON, C_KBD_AFTER))
     log.put(" irq 1 vector ")
     log.dec((kbd_vector()) as int)
     log.put(", 8259 master mask ")
     put_hex8(timer.master_mask())
     log.put("; iflag ")
-    put_hex8(sv(C_IFLAG))
+    put_hex8(sv(CON, C_IFLAG))
     log.put(" oflag ")
-    put_hex8(sv(C_OFLAG))
+    put_hex8(sv(CON, C_OFLAG))
     log.put(" cflag ")
-    put_hex8(sv(C_CFLAG))
+    put_hex8(sv(CON, C_CFLAG))
     log.put(" lflag ")
-    put_hex8(sv(C_LFLAG))
+    put_hex8(sv(CON, C_LFLAG))
     log.end()
 }
 
@@ -1550,22 +1993,22 @@ pub fn report() {
 /// keyboard, <r> reads, <w> waited, <d> dropped`.
 pub fn summary() {
     log.put("console: ")
-    log.dec((sv(C_RX_COM1)) as int)
+    log.dec((sv(CON, C_RX_COM1)) as int)
     log.put(" bytes from com1, ")
-    log.dec((sv(C_RX_KBD)) as int)
+    log.dec((sv(CON, C_RX_KBD)) as int)
     log.put(" keys (")
-    log.dec((sv(C_SCANCODES)) as int)
+    log.dec((sv(CON, C_SCANCODES)) as int)
     log.put(" scancodes) from the keyboard, ")
-    log.dec((sv(C_READS)) as int)
+    log.dec((sv(CON, C_READS)) as int)
     log.put(" reads, ")
-    log.dec((sv(C_WAITS)) as int)
+    log.dec((sv(CON, C_WAITS)) as int)
     log.put(" waited, ")
-    log.dec((sv(C_DROPPED)) as int)
+    log.dec((sv(CON, C_DROPPED)) as int)
     log.put(" dropped")
     log.end()
-    if sv(31) != 0 && sv(32) != 0 {
+    if sv(CON, 31) != 0 && sv(CON, 32) != 0 {
         log.put("console: usb first read latency ")
-        log.dec((sv(32) - sv(31)) as int)
+        log.dec((sv(CON, 32) - sv(CON, 31)) as int)
         log.line(" ticks (10ms resolution)")
     }
 }
