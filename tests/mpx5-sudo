@@ -74,7 +74,8 @@
 #        P3u Ubuntu's, held to Linux-PAM's documented semantics: login's
 #        3 s, su's, sudo's and passwd's pam_unix 2 s, each randomly
 #        distributed by up to 50% about it (pam_fail_delay(3)), so no
-#        sooner than half of it less 0.1 s.
+#        sooner than half of it less 0.1 s (su then adds login.defs'
+#        FAIL_DELAY, su(1): it can only lengthen su's).
 #     P4 sudo -S, -n and su with no terminal, PAX's against Ubuntu's.
 #     (S0 also runs `mkshadow --check` on the build host: a string at the
 #        shipped cost is within the cap and matches its own password.)
@@ -216,7 +217,8 @@ auth_ct() {
     # PAX's programs wait their nominal every time (login and su 3 s, sudo 2 s, passwd's current
     # password 1.5 s; spread 0). Ubuntu's are Linux-PAM's: login's stack asks 3 s (pam_faildelay
     # delay=3000000, the longest kept), su's, sudo's and passwd's pam_unix's "of the order of two
-    # second" (pam_unix(8)), each "randomly distributed (by up to 50%)" about it (pam_fail_delay(3)).
+    # second" (pam_unix(8)), each "randomly distributed (by up to 50%)" about it (pam_fail_delay(3));
+    # su waits login.defs' FAIL_DELAY after that (su(1)), which only lengthens it: a floor still holds.
     for m in pax ubuntu; do
         for s in pw login login-max; do
             if [ "$m" = pax ]; then spec='password for bob: =2,Password: =3,Current password: =1.5,spread=0'
