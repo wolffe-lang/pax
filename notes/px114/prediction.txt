@@ -1,0 +1,126 @@
+px114 prediction (pax#329), written 2026-11-09T20:40Z before any change; base pax trunk 4d899ea4.
+The census it rests on is notes/px114/census.txt.
+
+What trunk does. user/install/snapshot.lu's walk (source_snapshot) leaves out the contents of
+/dev, /proc, /sys, /tmp, /usr/share/pax-install and /mnt/target and nothing else. Both the fresh
+install (execute.lu: the walk, then stage_snapshot, configure_tree, install_manifest) and the
+upgrade entry (upgrade.lu: the walk of "/", then image_manifest) take every other path of the
+live tree. So an install made from a stick that took a lease copies, and lists in its
+/etc/pax-install/manifest:
+  - /var/lib, /var/lib/dhcp and /var/lib/dhcp/pax.lease (the stick's lease: "state bound",
+    the stick's address, router, server and times);
+  - /etc/resolv.conf (the stick's network's name servers);
+and every install, cable or not, copies and lists:
+  - /.sh_history (the commands typed at the stick's console, pax-install's own line among them);
+  - /.local, /.local/share, /.local/share/lope and its store (the directories cd visited);
+  - /var/log/sudo.log (a line for each sudo at the stick).
+
+The installed kernel and a copied lease. It does not read it. kernel/dhcp has no INIT-REBOOT
+("Not yet", dhcp.lu:108): start (dhcp.lu:681) clears its words but the wait, holds 0.0.0.0 and
+starts at INIT with a DISCOVER; nothing in the kernel opens /var/lib/dhcp/pax.lease, and nothing
+reads it but a program (user/wire.sh; a person's cat). The file is only ever written, at a lease
+(dhcp.lu:1211), its loss (:1278) and the router's echo (:1471). So the copied lease is stale text
+until the installed client's first lease rewrites it, and never rewritten on a machine with no
+link, with a `static` /etc/pax-net (the client does not run) or with no network device (start
+returns at once). /etc/resolv.conf is the same: rewritten at the installed system's first lease,
+or by take_static at boot for `static`; with no lease and no device the copied file names the
+stick's network's servers for good.
+
+Two consequences beyond the issue's, predicted from the code (no row of this lane runs them):
+  U1. Every upgrade from a stick also plans the stick's own run-time files as the new image's.
+      Where the installed system has rewritten one (root's history, lope's store, the lease, the
+      resolver file), it is no longer the old manifest's bytes, so plan_paths keeps it as the
+      user's and writes the stick's beside it: /.sh_history.pax-new,
+      /.local/share/lope/store.pax-new, /var/lib/dhcp/pax.lease.pax-new and, when the servers
+      differ, /etc/resolv.conf.pax-new.
+  U2. A lease renewed while the installer stages (T1 falls between its two walks) rewrites the
+      lease file and the resolver file, so same_snapshot fails and the install stops with
+      source_changed. On a network with short leases that is a reachable stop.
+Both end when the walk leaves these paths out.
+
+Rulings, each with the recommendation first; implemented as recommended unless ruled otherwise.
+
+R-px114-1 The shape of the fix.
+  A (recommended): a function runtime_state(path) beside excluded(), the same name, place and
+    hook as px112's on its branch (checked first in source_walk, before a row is made: no row, so
+    no copy, no attrs line, no manifest line, and no source_changed when the file is rewritten
+    during the install). Each entry commented with its writer. px112's rebase onto this lane's
+    merge meets one conflict, both lists in the one function, resolved by keeping both; its hook
+    line is this one's, byte for byte.
+  B: a second function under another name: no conflict, two lists of the same kind.
+
+R-px114-2 The DHCP client's directories, /var/lib and /var/lib/dhcp (the image ships neither).
+  A (recommended): leave out /var/lib whole. Its one writer on PAX is the kernel's DHCP client;
+    /var/lib is state that belongs to the host that wrote it (FHS 3.0, 5.8); the image ships
+    nothing there. An install from a stick that took a lease is then the same, row for row, as
+    one from a stick that did not, and the installed client makes the directories at its own
+    first lease (put_file).
+  B: leave out /var/lib/dhcp whole and copy /var/lib: an empty directory on installs made from a
+    stick that took a lease, and only those.
+  C: ship /var/lib/dhcp in the image (tools/distribution-root) and leave out only the file: an
+    image change, tests/distribution with it, and an image build to see it.
+
+R-px114-3 Root's files at the top of the tree (/.sh_history, /.local and below).
+  A (recommended): leave out every top-level name that starts with a dot. Root's home on PAX is /
+    (/etc/passwd's root line, and the console's HOME=/, kmain_console.lu:122), so these are a
+    home's files, and the manifest already never lists a home (manifest.lu: /home, /root). The
+    image ships none. This also covers the next program that writes a dotfile for root (den,
+    yew, wolf and lupin all run at the console as root).
+  B: leave out exactly /.sh_history and /.local, today's two writers.
+  C: keep them: the stick session's history and lope's store become the installed root's.
+
+R-px114-4 sudo's log, /var/log/sudo.log.
+  A (recommended): leave it out. It records the stick's uses of sudo, never the installed
+    machine's; tests/distribution already holds that no image ships it (image-no-sudo-log).
+    /var/log itself (the image's) is still copied.
+  B: leave out every file under /var/log (the image ships the directory empty), which would
+    also cover burrowd's log on px112's branch; that path is px112's, so not here.
+  C: keep it.
+
+R-px114-5 A row on the image's side (that no image ships a path the walk leaves out).
+  A: a tests/distribution row now. tools/mkdistribution runs tests/distribution on every image,
+    so it would hold at each build, but this lane would have to build an image at its head (and
+    a planted one) to see it red and green: not small, not quick.
+  B (recommended): not in this lane. Each rule's comment says the image ships nothing at the
+    path, the existing image-no-sudo-log row holds one of them, and the row itself is filed as a
+    follow-on issue for the next lane that builds an image.
+
+/etc/resolv.conf and the lease file: left out (the contract's expectation, and the census's).
+
+The rows, red at trunk by name (tests/mpx6-install.d), with every rule as recommended above:
+  snapshot unit (snapshot.py and its witness snapshot.lu), a fixture source that holds each
+  census path:
+    I-runtime-lease      neither /var/lib, /var/lib/dhcp nor pax.lease in the staged copy or
+                         its attrs. Red at trunk: all three copied and listed.
+    I-runtime-resolv     no /etc/resolv.conf in either. Red at trunk.
+    I-runtime-root-home  no /.sh_history, /.local (or below) or /.cache (a second dot name,
+                         for the general rule) in either. Red at trunk.
+    I-runtime-sudo-log   no /var/log/sudo.log in either; /var/log itself in both. Red at trunk.
+    I-runtime-renewal    the lease and the resolver file rewritten between the walk and the
+                         second walk (the witness's new `renewal` mode): the copy completes and
+                         the two walks agree. Red at trunk: source_changed (U2).
+    I-runtime-neighbours what the rules must not take: /var/libx/keep, /etc/resolv.conf.d/keep,
+                         /home/pax/.sh_history (a dot name below the top), /var/log/kept.
+                         Copied and listed at trunk and after: green both ways (it holds the
+                         rules to their exact paths).
+  prepare unit (prepare.py, prepare.lu): prepare.lu writes the install manifest after
+  configure_tree, as execute_plan does (install_manifest).
+    I-runtime-install    a source holding every census path: the prepared tree, its attrs and
+                         its /etc/pax-install/manifest hold none of them. Red at trunk.
+  Every existing row (the units' and the smoke installs') is unchanged: no fixture or install
+  source of theirs holds a census path, and the live shell in an install row writes under its
+  own HOME, never under --source.
+  No mpx6-install row with the network on: the smoke installs walk --source /source, not the
+  live root the client writes, so a networked boot would not reach the walk; the metal leg
+  (metal.py, the full and all tiers) is the one that walks /, and it is not small.
+
+The fix: snapshot.lu's runtime_state, per the rulings above; tests/mpx6-install.d/snapshot.lu
+gains the `renewal` mode, prepare.lu the install_manifest call.
+
+The plant (off the line, on px114-plant-lease): the green head with /var/lib's entry taken out
+of runtime_state. Predicted red by name: I-runtime-lease (and I-runtime-renewal); every other
+runtime row green.
+
+The gate: Footprint module (user/install/snapshot.lu, tests/mpx6-install.d, notes). The local
+record: fetch-wolf, then tests/mpx6-install's smoke rows, native, BIOS (which run the six units
+first), at the head. Nothing in CI, the kernel or the image changes.
