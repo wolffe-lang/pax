@@ -2127,3 +2127,15 @@ source; no kernel's, firmware's or driver's.
   `d4a4d4ca`), run to build trash as trash pins.
 - No other trash implementation's source; no C library's.
 
+## px114 — the live system's run-time state stays home
+
+- **The Filesystem Hierarchy Standard 3.0**, 5.8 (`/var/lib`: state that programs modify while they run), for the
+  ruling that only `/var/lib/dhcp` is left out and the rest of `/var/lib` is carried.
+- **resolv.conf(5)**, as px89 read it: the file the DHCP client writes.
+- **PAX booted as a black box**: the last metal stick's dev image under QEMU and KVM, with a lease and with no network
+  device, its tree listed by boreutils' `ls` (`notes/px114/census.txt`).
+- PAX's own `kernel/dhcp` (what it writes, and that it reads no lease at start), `kernel/kmain_console.lu` (the
+  console's `HOME`), `kernel/fstab` (`/mnt/target`), `user/install` (the walk, the manifest, the upgrade's plan),
+  `user/sudo` (its log and timestamp) and `user/shrc` (lope's store); pelt's `src/sh/hist.lu` (the org's own: the
+  history file is `$HOME/.sh_history`) and boreutils' `ls` options (the org's own).
+- No kernel's, firmware's or driver's source; no other installer's source.
