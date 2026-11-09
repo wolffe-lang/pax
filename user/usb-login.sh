@@ -3,6 +3,18 @@
 # The terminal is root's again first, as login(1) gives a terminal to the
 # account it logs in (px98; a kernel that keeps no owner refuses it, and
 # the login goes on; a medium with no chown skips it).
+# px112 (R-px112-7): the boot's hooks, each file of /etc/pax-boot.d in name
+# order, each a job of its own (so a key typed here signals none of what it
+# starts), its standard input /dev/null, as /bin/login runs them on an
+# installed system: burrowd, the ssh server, among them.
+if [ -d /etc/pax-boot.d ]; then
+    set -m
+    for hook in /etc/pax-boot.d/*; do
+        case ${hook##*/} in .*) continue ;; esac
+        [ -f "$hook" ] && [ -x "$hook" ] && "$hook" < /dev/null
+    done
+    set +m
+fi
 printf 'PAX live medium: log in as root (no password).\n'
 while :; do
     printf 'login: '
