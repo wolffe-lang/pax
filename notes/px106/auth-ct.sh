@@ -29,6 +29,14 @@ mode=$1
 in=/ct
 out=$in/out/$mode
 rm -rf "$out"; mkdir -p "$out"
+# The container's hostname in /etc/hosts as Ubuntu's installer writes it (127.0.1.1), so Ubuntu's sudo
+# resolves it whatever the engine: podman's --hostname writes the line; docker's, with no network, does
+# not, and sudo then prints `unable to resolve host` (pax#324's CI).
+grep -qE "[[:space:]]$(hostname)([[:space:]]|\$)" /etc/hosts || printf '127.0.1.1\t%s\n' "$(hostname)" >> /etc/hosts
+# Every output readable by the host's user, whatever user the engine maps the container's root to
+# (docker: the host's root, so a copy of the 0600 /etc/shadow was unreadable to the runner; rootless
+# podman: the host's user).
+trap 'chmod -R a+rX "$out" 2>/dev/null' EXIT
 for u in $(awk -F: '$3 == 1000 || $3 == 990 || $3 == 1001 { print $1 }' /etc/passwd); do userdel -r "$u" >/dev/null 2>&1; done
 for g in $(awk -F: '$3 == 1000 || $3 == 990 || $3 == 1001 || $3 == 2000 { print $1 }' /etc/group); do groupdel "$g" >/dev/null 2>&1; done
 cp "$in/pelt" /usr/bin/pelt; chmod 755 /usr/bin/pelt
