@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Pseudo-terminals (px111).** PAX has Linux's pty interface: `/dev/ptmx`
+  makes a pair (the lowest free number of 256, locked until `unlockpt`), its
+  slave `/dev/pts/N` (devpts, a file system of its own: 0600, the opener's ids,
+  136:N) is a terminal over the console's own line discipline, now kept per
+  terminal, and the master is the other end of the wire. termios, canonical
+  and raw input, the echo, VMIN and VTIME, OPOST/ONLCR and IXON; the controlling
+  terminal, job control, SIGWINCH and the hangup a master's last close is,
+  per terminal; poll and O_NONBLOCK on both ends, 20480 bytes each way;
+  TIOCGPTN, TIOCSPTLCK, TIOCGPTLCK, TIOCGPTPEER, FIONREAD; packet mode refused
+  by name; `/proc/sys/kernel/pty/nr` and `max`. A steal of a terminal
+  (TIOCSCTTY 1) now signals nobody, the console's too: Linux sends no signal
+  there (px48's SIGHUP was the thief's own hangup, heard under a tag it had
+  inherited). A new suite, `tests/mpx5-pty`, holds a probe's 286 rows as root
+  and as a user, and pelt driven on a pty from its master (Ctrl-C to a job, a
+  resize reaching `$COLUMNS`, a hangup ending the session), to a real Linux's
+  recordings line for line, each difference named:
+  `notes/px111-ptys.md`.
+
 - **The mouse (px109).** USB mice and tablets work on PAX's xHCI stack, beside
   the USB keyboard and on the same device as one, several at once, plugged and
   unplugged while the system runs. A pointer is read by its report descriptor
