@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+# notes/px106/rig/docker-like — rootless podman made to behave as CI's engine, docker, for
+# tests/mpx5-sudo's container sides (pax#324: they went red under docker and green under podman).
+# Put first on PATH as `podman` (PAX_ENGINE=podman), with PODMAN naming the real one. On `run` it
+# adds the two places where the engines differ that the suite can see:
+#   --no-hosts                          docker's --network none writes no hostname line into
+#                                       /etc/hosts; rootless podman writes one
+#   --uidmap/--gidmap 0:1:1 1:0:1 2:2:  docker's container root is the host's root, never the host
+#                                       user who reads the outputs; here container uid 0 is a
+#                                       subordinate id and container uid 1 is the host user, so
+#                                       root still writes the bind-mounted outputs but the host
+#                                       reads a 0600 file only as docker's runner would
+# and, as the rig's own engine does, --memory MEM and `taskset -c CPUS` after the image's name.
+# Every other call passes through unchanged.
+import os
+import sys
+
+args = sys.argv[1:]
+if args and args[0] == 'run':
+    args[1:1] = ['--memory', os.environ.get('MEM', '12g'), '--no-hosts',
+                 '--uidmap', '0:1:1', '--uidmap', '1:0:1', '--uidmap', '2:2:65534',
+                 '--gidmap', '0:1:1', '--gidmap', '1:0:1', '--gidmap', '2:2:65534']
+    for image in ('localhost/px75-ubuntu:2', 'localhost/px106-auth:1', 'localhost/px103-sudo:1'):
+        if image in args:
+            at = args.index(image) + 1
+            args[at:at] = ['taskset', '-c', os.environ['CPUS']]
+            break
+os.execv(os.environ['PODMAN'], ['podman'] + args)
