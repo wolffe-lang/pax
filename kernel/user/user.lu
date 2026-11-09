@@ -723,7 +723,7 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if t == 1 {
         // px48: a background writer of its controlling terminal under
         // TOSTOP is sent SIGTTOU (or told -EIO): kernel/console's `job`.
-        let j = console.job(console.J_WRITE)
+        let j = console.job(console.CON, console.J_WRITE)
         if j != 0 {
             return j
         }
@@ -761,6 +761,9 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if t == 9 {
         return files.blk_write(area(), paging.live(), fd, buf, len) // px79: a block device's node
     }
+    if t == 10 {
+        return files.pty_write(area(), paging.live(), fd, buf, len) // px111: a pty's master or slave
+    }
     if t == 0 || len == 0 {
         return len
     }
@@ -786,7 +789,7 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         // is clear: one CPU, no switch); boot/user.S brackets the read
         // with STAC/CLAC under SMAP.
         let b = unsafe { pax_peek_user(buf + i, smap) }
-        if b == 10 && console.onlcr() {
+        if b == 10 && console.onlcr(console.CON) {
             serial.put(13)
         }
         serial.put((b & 0xff) as u8)
