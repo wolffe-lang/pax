@@ -45,12 +45,24 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx5-burrowd` jo
 | burrowd runs unmodified on PAX, no kernel change | (the head's take) | |
 | the images grow by about 17 MB | (burrowd's static size, the pin) | |
 | the first boot's prompt about 0.2 s later, a later boot's about 0.1 s | (B1, B10) | |
-| B1-B10 red at the rows tip, green at the head | (the takes) | |
+| B1-B10 red at the rows tip, green at the head | at the rows tip `687288db` (native, BIOS): `FAIL B0` by name (no /bin/burrowd, no configuration, no hook in the tree), then `FAIL B1` (no host key line before the prompt), and the leg ends there: B2-B11 need the key B1 reads, so they were not reached rather than red each; B9's scan of every record ran and passed. At the head: (the takes) | red in kind, B2-B10 unreached in form |
 | connect to the first byte through burrowd on PAX, 2x to 6x burrowd on Linux in the same container (publickey) | reported | |
 
 ## 4. Evidence index
 
-(The takes' records, by commit.)
+Every take ran from a commit in a worktree of its own on the Linux host, in the rig's container
+(`localhost/px112-net:1`, image `df1ae8c6e5de`), under a block's two lock names, its rig's files copied there
+and their sha256s logged.
+
+- **Red at the rows tip** `687288db` (`tests/mpx5-burrowd --tier native --firmware bios`, 1,372 s): `FAIL B0`,
+  `FAIL B1`, `PASS B9-scan` (no password in 70 records), `END tests/mpx5-burrowd exit=1`.
+- **The upgrade witness** (R-px112-14, B): `tests/mpx6-install.d/upgrade.py`'s U4d holds burrowd after the upgrade
+  of the 8b4e98ae dev install (the metal target's): the LAN's configuration, the account appended, the host key made
+  at the first boot. Its inputs are px93's, copied by value into the lane (the two sticks read twice on each side,
+  `850ff60b…` and `665f815a…`, px93's figures; its built inputs, 325 files, and its sources, 33 files,
+  byte-identical), with the two inputs px93's set predates built at the head (`tools/mkburrow`, `tools/mkroots`).
+  (The legs' results.)
+- (The head's takes.)
 
 ## 5. Done-when
 
