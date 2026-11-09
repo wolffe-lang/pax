@@ -414,7 +414,10 @@ def seed_repo(work):
     (src / 'README').write_text('px112: a repository on PAX, served by den through burrowd.\n')
     run(['git', '-C', src, 'add', 'README'], env=env)
     run(['git', '-C', src, 'commit', '-q', '-m', 'seed'], env=env)
-    run(['git', 'clone', '-q', '--bare', src, work / 'repo.git'], env=env)
+    # No template: git's sample hooks are executable files under hooks/, and den's receive-pack
+    # refuses a repository with hooks it cannot run (`den: wire: Unsupported(receive-pack hooks)`,
+    # the first takes' B7). A repository made on PAX (den init --bare) has none.
+    run(['git', 'clone', '-q', '--bare', '--template=', src, work / 'repo.git'], env=env)
     return work / 'repo.git'
 
 
@@ -594,7 +597,9 @@ def git_rows(client, work):
             g('clone', '-q', url, d / 'two')
             # The metal target's first push: a bare repository made over ssh
             # (den's on PAX, git's on Linux), then git push into it.
-            made = client.ssh((host, port), ['den init -q --bare fresh.git' if side == 'pax' else 'git init -q --bare fresh.git'])
+            # git's own initial branch is `master` unless told; den's is `main`: the same step on Linux names it.
+            made = client.ssh((host, port), ['den init -q --bare fresh.git' if side == 'pax'
+                                             else 'git init -q --bare --initial-branch=main fresh.git'])
             steps.append(('init --bare', made[0]))
             g('push', '-q', 'pax@%s:fresh.git' % host, 'main', cwd=d / 'one')
             g('clone', '-q', 'pax@%s:fresh.git' % host, d / 'three')
