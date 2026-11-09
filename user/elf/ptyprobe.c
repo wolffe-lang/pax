@@ -1932,7 +1932,12 @@ static int until_seen(int m, const char *want, long from, int ms) {
     }
 }
 
+/* Type `s` at the master, 20 ms a byte, after 0.3 s: pelt leaves raw
+ * mode between its cursor query and its prompt and takes it again to
+ * edit, so a byte typed the moment the prompt shows would be echoed by
+ * the line discipline too, on either system. */
 static void type(int m, const char *s) {
+    nap(300);
     for (const char *p = s; *p; p++) {
         (void)!write(m, p, 1);
         nap(20);
@@ -1970,7 +1975,7 @@ static int drive(void) {
         sigset_t none;
         sigemptyset(&none);
         sigprocmask(SIG_SETMASK, &none, 0);
-        char *envp[] = {"HOME=/", "TERM=linux", "PAX=1", "PATH=/bin", 0};
+        char *envp[] = {"HOME=/", "TERM=linux", "PAX=1", "PATH=/bin", "HISTFILE=/dev/null", 0};
         char *argv[] = {"/bin/sh", "-i", 0};
         execve("/bin/sh", argv, envp);
         _exit(127);
