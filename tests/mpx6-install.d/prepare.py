@@ -53,6 +53,12 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
     row('I-sudo-group-gid-taken',(rc,out)==(3,'refused: gid_taken\n'),'gid 27 held by a group not named sudo: refused by name, nothing merged ('+repr(out)+')')
     rc,out=groups('root:x:0:\nsudo:x:28:\nwolf:x:1000:\n')
     row('I-sudo-group-other-gid',(rc,out)==(3,'refused: sudo_gid\n'),'a sudo line at another gid: refused by name ('+repr(out)+')')
+    # px112 (R-px112-9, C): the stick's burrowd listens on loopback; an install writes the LAN's line.
+    shipped=(Path(__file__).resolve().parents[2]/'user/burrowd/burrowd_config').read_text()
+    (s/'etc/burrowd').mkdir(parents=True,exist_ok=True)
+    (s/'etc/burrowd/burrowd_config').write_text(shipped)
+    want_burrowd=''.join(('ListenAddress 0.0.0.0' if l.split()[:1]==['ListenAddress'] else l)+'\n' for l in shipped.splitlines())
+    row('I-burrowd-stick',[l for l in shipped.splitlines() if l.split()[:1]==['ListenAddress']]==['ListenAddress 127.0.0.1'],'the shipped configuration has one ListenAddress line, loopback')
     before={str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}
     for game in ['yes','no']:
         out=w/game
@@ -77,6 +83,9 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
         guid=str(uuid.UUID(bytes=hashlib.sha256(b'pax-gpt-part:test:1700000000:2').digest()[:16]))
         assert 'root=PARTUUID='+guid in (out/'boot/limine/limine.conf').read_text()
         assert (out/'etc/fstab').read_text().startswith('PARTUUID='+guid+' / ext2 rw')
+        got=(out/'etc/burrowd/burrowd_config').read_text() if (out/'etc/burrowd/burrowd_config').exists() else ''
+        row('I-burrowd-lan-'+game,got==want_burrowd and attrs.get('/etc/burrowd/burrowd_config',[])[:3]==['0644','0','0'],
+            'the installed burrowd_config is the shipped one with `ListenAddress 0.0.0.0`, root\'s, 0644')
         print('PASS I-account-games-'+game+': named user, uid/gid 1000, in group sudo (27), root shell unchanged, payload omitted, complete game and engine source on yes')
     assert {str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}==before
     # gm01: the engine's source is held to its digest like the game's
