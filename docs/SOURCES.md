@@ -2126,8 +2126,9 @@ source; no kernel's, firmware's or driver's.
 - **burrow at its pin** (the org's own): its README (burrowd's CLI, its configuration's keywords, the log's lines,
   the refusals by name, password authentication), `tools/build` and `notes/px112-burrowd-passwords.md`. Built
   unmodified; nothing of it is copied here.
-- **den at its pin** (the org's own): its README's `init --bare`, `upload-pack` and `receive-pack`, and
-  `src/transport/ssh.lu` (the command it sends: `git-upload-pack '<path>'`, `git-receive-pack '<path>'`).
+- **den at its pin** (the org's own): its README's `init --bare`, `upload-pack` and `receive-pack`, and PAX's
+  `tools/install-den`, whose `/bin/git-upload-pack` and `/bin/git-receive-pack` are what an ssh client's git command
+  reaches through the account's shell.
 - **dnsmasq(8)** (`--dhcp-range`, `--dhcp-host`, `--no-daemon`, `--bind-interfaces`), **ip(8)**'s `tuntap` and `netns`,
   and **QEMU's documentation** (`-netdev tap`, `-device`'s `mac=`, never its source) for the rig's LAN of one machine.
 - **OpenSSH's ssh and sshd** (Ubuntu 24.04's openssh-client and openssh-server) and **git** as black boxes: the rows'
