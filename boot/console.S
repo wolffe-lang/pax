@@ -19,6 +19,12 @@
      pax_log_quiet  one eight-byte word (px15): 1 when the kernel command
                     line says `quiet` (kernel/log's `quiet`, set once by
                     kernel/user's `start`), 0 otherwise
+     pax_pty_table  px111: 256 records of 32 eight-byte words, kernel/pty's
+                    ptys (word 0 the physical address of the frame that
+                    holds a pty's state, read by kernel/console too)
+     pax_tty_table  px111: 258 pairs of eight-byte words, each terminal's
+                    session and foreground group by its id (1 the
+                    console, 2 + n pty n): kernel/sched's
 
    No Linux source; no other kernel's source. */
 
@@ -35,5 +41,13 @@ pax_con_ring:
         .globl pax_log_quiet
 pax_log_quiet:
         .zero 8
+        .p2align 6
+        .globl pax_pty_table
+pax_pty_table:
+        .zero 65536
+        .p2align 6
+        .globl pax_tty_table
+pax_tty_table:
+        .zero 4128
 
         .section .note.GNU-stack, "", @progbits
