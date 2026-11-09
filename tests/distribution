@@ -88,7 +88,7 @@ def check(blob):
     assert not any(line.startswith(('export DEN_UPLOAD_PACK=', 'export DEN_RECEIVE_PACK=')) for line in shrc), 'image-shrc-den'
     # px104: burrow as /bin/ssh and /bin/burrow-keygen, byte for byte as
     # tools/mkburrow built them (never stripped), 0755, root's.
-    for name, built in (('ssh', 'burrow'), ('burrow-keygen', 'burrow-keygen')):
+    for name, built in (('ssh', 'burrow'), ('burrow-keygen', 'burrow-keygen'), ('burrowd', 'burrowd')):
         data = (inputs/'burrow'/built).read_bytes()
         assert rows['bin/'+name][1] == data, 'image-burrow-'+name
         assert rows['bin/'+name][0][1] == 0o100755 and rows['bin/'+name][0][2:4] == [0, 0], 'image-burrow-'+name+'-mode'
@@ -108,6 +108,16 @@ def check(blob):
         assert fields[1] == 0o100755 and fields[2:4] == [0, 0], 'image-trash-mode-'+name
         assert any(line.split() == [name, sha(data), str(len(data))] for line in (inputs/'trash'/'sums.txt').read_text().splitlines()), 'image-trash-sums-'+name
         assert pinned.get(name) == [sha(data), str(len(data))], 'image-trash-pin-'+name
+    # px112: burrowd's configuration and boot hook, user/'s bytes, root's
+    # (the hook 0755, the configuration 0644), its worker's account in
+    # passwd and group, and no host key: each machine makes its own.
+    for path, user, mode in (('etc/burrowd/burrowd_config', 'burrowd/burrowd_config', 0o100644),
+                             ('etc/pax-boot.d/burrowd', 'pax-boot.d/burrowd', 0o100755)):
+        assert rows[path][1] == (ROOT/'user'/user).read_bytes(), 'image-'+user
+        assert rows[path][0][1] == mode and rows[path][0][2:4] == [0, 0], 'image-'+user+'-mode'
+    assert b'\nburrowd:x:989:989:burrowd:/nonexistent:/bin/false\n' in b'\n' + rows['etc/passwd'][1], 'image-burrowd-account'
+    assert b'\nburrowd:x:989:\n' in b'\n' + rows['etc/group'][1], 'image-burrowd-group'
+    assert not any(n.startswith('etc/burrowd/ssh_host_') for n in rows), 'image-burrowd-no-host-key'
     # px104 (R-px104-2): the root set den's TLS reads, tools/mkroots' bytes,
     # 0644, and /etc/shrc naming it; GitHub's published host key for ssh.
     assert rows['etc/ssl/certs/ca-roots.der'][1] == (inputs/'roots'/'ca-roots.der').read_bytes(), 'image-roots'
@@ -147,7 +157,7 @@ def check(blob):
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, burrowd and its hook, configuration and account, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
