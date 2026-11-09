@@ -2,7 +2,7 @@
 """session.py — px106: the typed password sessions' run-time data and their delays.
 
     session.py make KEYSDIR OUTDIR     passwords made now, the keys with them put in
-    session.py delays TEMPLATE TTY TIMES FLOORS
+    session.py delays TEMPLATE TTY TIMES SPEC
 
 make: OUTDIR/passwords.txt gets `root PW`, `pax PW`, `bob PW`, `new PW`,
 `wrong PW` and `short PW` (twelve characters of [a-z0-9] from the
@@ -17,8 +17,12 @@ delays: TEMPLATE is the session's key template, TTY and TIMES what
 tools/linux-tty --times wrote. For every step that types @WRONG@ (or an
 empty answer), the time from the step to the first read that shows a
 character other than white space (the program writes the newline at once
-and its failure words after its delay). FLOORS is `TEXT=SECONDS,...`: a
-step gated on TEXT must wait at least SECONDS. Prints one line a step and
+and its failure words after its delay). SPEC is `TEXT=SECONDS,...,spread=S`:
+a step gated on TEXT is a failure the program delays by a nominal SECONDS,
+documented to vary by up to S of it either way (Linux-PAM's pam_fail_delay(3):
+"randomly distributed (by up to 50%) about" the requested delay, so S is 0.5
+for Ubuntu's programs; PAX's are their nominal every time, S 0). Its floor is
+SECONDS * (1 - S) less 0.1 s of measuring. Prints one line a step and
 exits 1 when a floor is not met.
 """
 import secrets
@@ -58,11 +62,17 @@ def delays(template, tty, times, floors):
         f = line.split()
         if len(f) == 3:
             marks.append((float(f[0]), f[1], int(f[2])))
-    floor = {}
+    nominal, spread = {}, None
     for item in floors.split(","):
         if item:
             k, v = item.rsplit("=", 1)
-            floor[k] = float(v)
+            if k == "spread":
+                spread = float(v)
+            else:
+                nominal[k] = float(v)
+    if spread is None:
+        sys.exit("session.py delays: the SPEC names no spread= (the documented variation)")
+    floor = {k: v * (1 - spread) - 0.1 for k, v in nominal.items()}
     bad = 0
     for k, line in enumerate(steps, 1):
         if not line.startswith("^{") or "}" not in line:
@@ -93,7 +103,8 @@ def delays(template, tty, times, floors):
         want = floor.get(gate)
         ok = want is None or d >= want
         bad += 0 if ok else 1
-        print("%s step %d %r: %.2f s%s" % ("PASS" if ok else "FAIL", k, gate, d, "" if want is None else " (floor %.1f)" % want))
+        print("%s step %d %r: %.2f s%s" % ("PASS" if ok else "FAIL", k, gate, d, "" if want is None else
+              " (floor %.2f: %.1f s nominal, spread %.0f%%)" % (want, nominal[gate], spread * 100)))
     return 1 if bad else 0
 
 
