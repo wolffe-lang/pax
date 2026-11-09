@@ -51,9 +51,10 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       no password in the log, the serial transcript or any record
   B10 boot 2, the same volume: the same fingerprint with no `made at this
       boot`, and the rig's known_hosts line from boot 1 still verifies
-  B12 a session without ptys, the client at a terminal: `ssh host` and
-      `ssh -t host` end, refused (a shell and a pty are burrowd's refusals
-      by name), what the client writes recorded; `ssh host COMMAND` runs
+  B12 a session without ptys, the client at a terminal: `ssh host`,
+      `ssh -t host` and `ssh -T host` end, refused (a shell and a pty are
+      burrowd's refusals by name; B9 finds -T's shell refusal alone in the
+      log), what the client writes recorded; `ssh host COMMAND` runs
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -606,11 +607,14 @@ def host_rows(client):
     plain = c.ssh_tty(GUEST_AT, [])
     cmd = c.ssh_tty(GUEST_AT, ['echo pty=$(tty 2>/dev/null || echo none)'])
     forced = c.ssh_tty(GUEST_AT, [], opts=['-t'])
+    # `ssh -T host`: a shell request with no pty request before it (B9 finds its log line alone).
+    bare = c.ssh_tty(GUEST_AT, [], opts=['-T'])
     said = lambda r: ' | '.join(l.strip() for l in r[1].decode(errors='replace').splitlines() if l.strip())
-    record_b12 = 'ssh host: status %s: %s\nssh host COMMAND: status %s: %s\nssh -t host: status %s: %s\n' % (
-        plain[0], said(plain), cmd[0], said(cmd), forced[0], said(forced))
+    record_b12 = ('ssh host: status %s: %s\nssh host COMMAND: status %s: %s\nssh -t host: status %s: %s\n'
+                  'ssh -T host: status %s: %s\n' % (plain[0], said(plain), cmd[0], said(cmd), forced[0], said(forced),
+                                                    bare[0], said(bare)))
     (c.dir / 'b12.txt').write_text(record_b12)
-    if cmd[0] == 0 and b'pty=' in cmd[1] and plain[0] not in (None, 0) and forced[0] not in (None, 0):
+    if cmd[0] == 0 and b'pty=' in cmd[1] and all(r[0] not in (None, 0) for r in (plain, forced, bare)):
         ok('B12', 'no ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
     else:
         bad('B12', 'a session without ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
@@ -703,7 +707,8 @@ def console_rows(con, client):
     mode = con.command('ls -l /var/log/burrowd.log', 3) or ''
     log = con.command('cat /var/log/burrowd.log', 4) or ''
     want = ['key SHA256:', 'key password', 'outcome auth_password_bad', 'outcome auth_root_refused',
-            'outcome auth_account_locked', 'outcome auth_key_unlisted', 'outcome auth_strict_modes', 'signal TERM']
+            'outcome auth_account_locked', 'outcome auth_key_unlisted', 'outcome auth_strict_modes', 'signal TERM',
+            'refused pty_refused,shell_refused', 'refused shell_refused']  # B12: with a pty request, and -T's alone
     missing = [w for w in want if w not in log]
     if not mode.startswith('-rw-------') or ' root ' not in mode or missing:
         bad('B9', 'the log: %r; missing %s' % (mode.strip(), missing))
