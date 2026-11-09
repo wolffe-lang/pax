@@ -62,3 +62,45 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     assert out.returncode==1 and 'recovered_files' in out.stderr,(out.stdout,out.stderr)
     assert not (w/'bad-copy').exists()
     print('PASS I-lost-found: recovered files refused before staging')
+    # px114 (pax#329): what a live system writes while it runs is never an install's. The census
+    # (notes/px114/census.txt): kernel/dhcp's lease in /var/lib/dhcp and /etc/resolv.conf; root's
+    # files at the top of the tree (its home is /: pelt's history, lope's store); sudo's log.
+    # Beside them, the neighbours each rule must leave alone. Each row prints PASS or FAIL by name.
+    rt=w/'runtime'; failed=[]
+    def put(rel,text='x\n'):
+        p=rt/rel.lstrip('/'); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(text)
+    for rel,text in [('/var/lib/dhcp/pax.lease','state bound\naddress 10.0.2.15\n'),('/etc/resolv.conf','nameserver 10.0.2.3\n'),
+                     ('/.sh_history','pax-install\n'),('/.local/share/lope/store','lope-store 1\n'),('/.cache/wolf/entry','cache\n'),
+                     ('/var/log/sudo.log','root : COMMAND=/bin/true\n'),
+                     ('/var/lib/pkg/db','package state\n'),('/var/libx/keep','kept\n'),('/etc/resolv.conf.d/keep','kept\n'),
+                     ('/home/pax/.sh_history','a home below the top\n'),('/var/log/kept','another log\n'),('/bin/tool','tool\n')]:
+        put(rel,text)
+    def take(name,mode=None):
+        out=subprocess.run([program,rt,w/('rt-'+name),w/('rt-'+name+'.attrs')]+([mode] if mode else []),capture_output=True,text=True)
+        attrs=set()
+        if (w/('rt-'+name+'.attrs')).exists():
+            attrs={shlex.split(l)[0] for l in (w/('rt-'+name+'.attrs')).read_text().splitlines()}
+        return out,attrs,w/('rt-'+name)
+    def row(name,ok,what):
+        print(('PASS ' if ok else 'FAIL ')+name+': '+what,flush=True)
+        if not ok: failed.append(name)
+    out,attrs,copy=take('walk')
+    assert out.returncode==0,(out.stdout,out.stderr)
+    def gone(paths):
+        return [p for p in paths if p in attrs or os.path.lexists(str(copy)+p)]
+    left=gone(['/var/lib/dhcp','/var/lib/dhcp/pax.lease'])
+    row('I-runtime-lease',not left,'kernel/dhcp\'s /var/lib/dhcp and its lease neither copied nor listed'+(' (copied or listed: '+', '.join(left)+')' if left else ''))
+    left=gone(['/etc/resolv.conf'])
+    row('I-runtime-resolv',not left,'kernel/dhcp\'s /etc/resolv.conf neither copied nor listed'+(' (copied or listed)' if left else ''))
+    top=sorted({p for p in attrs if p.startswith('/.')}|{'/'+x.name for x in copy.iterdir() if x.name.startswith('.')})
+    row('I-runtime-root-home',not top,'no top-level dot name (root\'s home is /: pelt\'s history, lope\'s store, a cache) copied or listed'+(' ('+', '.join(top)+')' if top else ''))
+    left=gone(['/var/log/sudo.log'])
+    row('I-runtime-sudo-log',not left and '/var/log' in attrs,'sudo\'s log neither copied nor listed; /var/log itself both'+(' (the log copied or listed)' if left else ''))
+    keep=['/var/lib','/var/lib/pkg','/var/lib/pkg/db','/var/libx/keep','/etc/resolv.conf.d/keep','/home/pax/.sh_history','/var/log/kept','/bin/tool']
+    lost=[p for p in keep if p not in attrs or not os.path.lexists(str(copy)+p)]
+    lost+=[p for p in keep if (rt/p.lstrip('/')).is_file() and p not in lost and (copy/p.lstrip('/')).read_bytes()!=(rt/p.lstrip('/')).read_bytes()]
+    row('I-runtime-neighbours',not lost,'package state under /var/lib, /var/libx, /etc/resolv.conf.d, a dot name in a home and another log copied and listed'+(' (lost: '+', '.join(lost)+')' if lost else ''))
+    out,attrs,copy=take('renewal','renewal')
+    ok=out.returncode==0 and not gone(['/var/lib/dhcp/pax.lease','/etc/resolv.conf'])
+    row('I-runtime-renewal',ok,'the lease and resolv.conf rewritten between the two walks (a renewal at T1): the copy completes'+('' if ok else ' (exit '+str(out.returncode)+': '+out.stderr.strip()[-200:]+')'))
+    if failed: sys.exit(1)
