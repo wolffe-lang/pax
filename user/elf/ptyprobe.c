@@ -94,9 +94,8 @@ static const char *yesno(int c) { return c ? "yes" : "no"; }
 static void say(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vprintf(fmt, ap);
+    vprintf(fmt, ap); /* line-buffered: each row reaches the console whole, in one write */
     va_end(ap);
-    fflush(stdout);
 }
 
 static long now_ms(void) {
@@ -523,8 +522,11 @@ static void sec_open(void) {
     errno = 0;
     tn = ttyname(m);
     say("O27 ttyname of the master: %s\n", tn ? tn : ename(errno));
-    say("O28 /proc/self/fd links: master %s", link_of(m));
-    say(", slave %s\n", link_of(s));
+    {
+        char lm[256];
+        snprintf(lm, sizeof lm, "%s", link_of(m));
+        say("O28 /proc/self/fd links: master %s, slave %s\n", lm, link_of(s));
+    }
     n = 99;
     errno = 0;
     r = ioctl(s, TIOCGPTN, &n);
@@ -1215,8 +1217,11 @@ static const char *wsz(int fd) {
 static void sec_winsz(void) {
     int m, s;
     if (pair(&m, &s)) return;
-    say("W1 a new pty: the slave %s", wsz(s));
-    say(", the master %s\n", wsz(m));
+    {
+        char a1[64];
+        snprintf(a1, sizeof a1, "%s", wsz(s));
+        say("W1 a new pty: the slave %s, the master %s\n", a1, wsz(m));
+    }
     ioctl(s, TIOCSCTTY, 0);
     static const int ws[] = {SIGWINCH, 0};
     pid_t A = idle(0, "A", ws);
@@ -1230,8 +1235,11 @@ static void sec_winsz(void) {
     struct winsize w = {24, 80, 0, 0};
     ANS("W2 TIOCSWINSZ 24x80 on the master", ioctl(m, TIOCSWINSZ, &w));
     say("W3 heard %s\n", heard_list(2, 1500));
-    say("W4 the slave %s", wsz(s));
-    say(", the master %s\n", wsz(m));
+    {
+        char a1[64];
+        snprintf(a1, sizeof a1, "%s", wsz(s));
+        say("W4 the slave %s, the master %s\n", a1, wsz(m));
+    }
     ANS("W5 the same size again", ioctl(m, TIOCSWINSZ, &w));
     say("W6 heard %s\n", heard_list(0, 400));
     w.ws_row = 30; w.ws_col = 100;
@@ -1587,12 +1595,18 @@ static void fills(void) {
 static void sec_poll(void) {
     int m, s;
     if (pair(&m, &s)) return;
-    say("P1 a new pair: the master polls %s", revents(m, POLLIN | POLLOUT, 0));
-    say(", the slave %s\n", revents(s, POLLIN | POLLOUT, 0));
+    {
+        char a1[64];
+        snprintf(a1, sizeof a1, "%s", revents(m, POLLIN | POLLOUT, 0));
+        say("P1 a new pair: the master polls %s, the slave %s\n", a1, revents(s, POLLIN | POLLOUT, 0));
+    }
     put(m, "x");
     nap(200);
-    say("P2 x written to the master: the slave polls %s", revents(s, POLLIN | POLLOUT, 0));
-    say(", the master %s\n", revents(m, POLLIN | POLLOUT, 0));
+    {
+        char a1[64];
+        snprintf(a1, sizeof a1, "%s", revents(s, POLLIN | POLLOUT, 0));
+        say("P2 x written to the master: the slave polls %s, the master %s\n", a1, revents(m, POLLIN | POLLOUT, 0));
+    }
     put(m, "\n");
     nap(200);
     say("P3 then a newline: the slave polls %s\n", revents(s, POLLIN | POLLOUT, 0));
@@ -1604,10 +1618,11 @@ static void sec_poll(void) {
         unsigned char b[8];
         errno = 0;
         ssize_t k = read(m, b, sizeof b);
-        say("P4 O_NONBLOCK, nothing there: the master reads %s", rv(k, errno));
+        char a1[32];
+        snprintf(a1, sizeof a1, "%s", rv(k, errno));
         errno = 0;
         k = read(s, b, sizeof b);
-        say(", the slave %s\n", rv(k, errno));
+        say("P4 O_NONBLOCK, nothing there: the master reads %s, the slave %s\n", a1, rv(k, errno));
     }
     raw(s);
     /* the slave's output fills */
@@ -1946,7 +1961,7 @@ static int drive(void) {
     }
     say("S0 pelt on a pty, its session's leader; the driver types at the master\n");
     long mark = 0;
-    int ok = until_seen(m, "# ", mark, 30000) || until_seen(m, "$ ", mark, 1000);
+    int ok = until_seen(m, root ? "# " : "$ ", mark, 30000);
     say("S1 the first prompt came: %s\n", yesno(ok));
     /* 1: the size as stty reads it */
     mark = tr_len;
