@@ -533,55 +533,81 @@ static void sec_open(void) {
     errno = 0;
     r = ioctl(s, TIOCSPTLCK, &lk);
     say("O30 TIOCSPTLCK on the slave: %s\n", rv(r, errno));
-    lk = 1;
-    ANS("O31 TIOCSPTLCK 1 on the master (locked again)", ioctl(m, TIOCSPTLCK, &lk));
-    errno = 0;
-    int s2 = open(name, O_RDWR | O_NOCTTY);
-    say("O32 open the slave while locked again: %s\n", s2 >= 0 ? "a descriptor" : ename(errno));
-    if (s2 >= 0) close(s2);
-    put(m, "k\n");
-    got("O33 the open slave still reads", s, 1000);
-    lk = 0;
-    ANS("O34 TIOCSPTLCK 0", ioctl(m, TIOCSPTLCK, &lk));
     errno = 0;
     int pe = ioctl(m, TIOCGPTPEER, O_RDWR | O_NOCTTY);
-    say("O35 TIOCGPTPEER: %s\n", pe >= 0 ? "a descriptor" : ename(errno));
+    say("O31 TIOCGPTPEER: %s\n", pe >= 0 ? "a descriptor" : ename(errno));
     if (pe >= 0) {
-        fstat_row("O36 fstat of the peer", pe);
+        fstat_row("O32 fstat of the peer", pe);
         tn = ttyname(pe);
-        say("O37 ttyname of the peer: %s\n", tn ? tn : ename(errno));
+        say("O33 ttyname of the peer: %s\n", tn ? tn : ename(errno));
+        put(m, "p\n");
+        got("O34 the peer reads", pe, 1000);
         close(pe);
     }
     errno = 0;
     pe = ioctl(s, TIOCGPTPEER, O_RDWR | O_NOCTTY);
-    say("O38 TIOCGPTPEER on the slave: %s\n", pe >= 0 ? "a descriptor" : ename(errno));
+    say("O35 TIOCGPTPEER on the slave: %s\n", pe >= 0 ? "a descriptor" : ename(errno));
     if (pe >= 0) close(pe);
+    {
+        int one = 1;
+        errno = 0;
+        int r2 = ioctl(m, TIOCPKT, &one);
+        say("O36 TIOCPKT 1 on the master (packet mode): %s\n", rv(r2, errno));
+        one = 0;
+        if (r2 == 0) ioctl(m, TIOCPKT, &one);
+    }
+    (void)settle(m, (unsigned char[4096]){0}, 4096, 200);
+    lk = 1;
+    ANS("O37 TIOCSPTLCK 1 on the master (locked again)", ioctl(m, TIOCSPTLCK, &lk));
+    put(m, "k\n");
+    got("O38 the open slave reads", s, 1000);
+    errno = 0;
+    int s2 = open(name, O_RDWR | O_NOCTTY);
+    say("O39 open the slave while locked again: %s\n", s2 >= 0 ? "a descriptor" : ename(errno));
+    if (s2 >= 0) close(s2);
+    put(m, "j\n");
+    got("O40 then the open slave reads", s, 1000);
+    lk = 0;
+    ANS("O41 TIOCSPTLCK 0", ioctl(m, TIOCSPTLCK, &lk));
+    errno = 0;
+    s2 = open(name, O_RDWR | O_NOCTTY);
+    say("O42 open the slave again: %s\n", s2 >= 0 ? "a descriptor" : ename(errno));
+    if (s2 >= 0) {
+        put(m, "n\n");
+        got("O43 the new descriptor reads", s2, 1000);
+        close(s2);
+    }
+    close(s);
+    s = sopen(m, O_NOCTTY);
+    put(m, "o\n");
+    got("O44 every slave descriptor closed, then one opened: it reads", s, 1000);
+    (void)settle(m, (unsigned char[4096]){0}, 4096, 200);
     /* numbers: the lowest free */
     int x[3];
     for (int i = 0; i < 3; i++) x[i] = mopen(0);
-    say("O39 three more masters: numbers %d %d %d\n", ptn(x[0]), ptn(x[1]), ptn(x[2]));
-    say("O40 /dev/pts lists: %s\n", listing("/dev/pts"));
-    say("O41 /proc/sys/kernel/pty/nr: %s\n", pty_nr());
+    say("O45 three more masters: numbers %d %d %d\n", ptn(x[0]), ptn(x[1]), ptn(x[2]));
+    say("O46 /dev/pts lists: %s\n", listing("/dev/pts"));
+    say("O47 /proc/sys/kernel/pty/nr: %s\n", pty_nr());
     close(x[1]);
-    say("O42 the second closed, /dev/pts lists: %s\n", listing("/dev/pts"));
+    say("O48 the second closed, /dev/pts lists: %s\n", listing("/dev/pts"));
     x[1] = mopen(0);
-    say("O43 a new master's number: %d\n", ptn(x[1]));
+    say("O49 a new master's number: %d\n", ptn(x[1]));
     for (int i = 0; i < 3; i++) close(x[i]);
     /* a master closed under an open slave */
     close(m);
-    say("O44 the master closed, its slave open: /dev/pts lists %s\n", listing("/dev/pts"));
-    stat_row("O45 stat of the slave's name", name);
+    say("O50 the master closed, its slave open: /dev/pts lists %s\n", listing("/dev/pts"));
+    stat_row("O51 stat of the slave's name", name);
     errno = 0;
     s2 = open(name, O_RDWR | O_NOCTTY);
-    say("O46 open the slave's name: %s\n", s2 >= 0 ? "a descriptor" : ename(errno));
+    say("O52 open the slave's name: %s\n", s2 >= 0 ? "a descriptor" : ename(errno));
     if (s2 >= 0) close(s2);
-    say("O47 /proc/sys/kernel/pty/nr: %s\n", pty_nr());
+    say("O53 /proc/sys/kernel/pty/nr: %s\n", pty_nr());
     close(s);
-    say("O48 the slave closed too: /dev/pts lists %s\n", listing("/dev/pts"));
-    say("O49 /proc/sys/kernel/pty/nr: %s\n", pty_nr());
+    say("O54 the slave closed too: /dev/pts lists %s\n", listing("/dev/pts"));
+    say("O55 /proc/sys/kernel/pty/nr: %s\n", pty_nr());
     errno = 0;
     s2 = open(name, O_RDWR | O_NOCTTY);
-    say("O50 open the name now: %s\n", s2 >= 0 ? "a descriptor" : ename(errno));
+    say("O56 open the name now: %s\n", s2 >= 0 ? "a descriptor" : ename(errno));
     if (s2 >= 0) close(s2);
     /* a user, and root's slave */
     if (root) {
@@ -595,14 +621,14 @@ static void sec_open(void) {
                 if (setgid(1000) || setuid(1000)) _exit(9);
                 errno = 0;
                 int f = open(nm, O_RDWR | O_NOCTTY);
-                say("O51 a user opens root's slave: %s\n", f >= 0 ? "a descriptor" : ename(errno));
+                say("O57 a user opens root's slave: %s\n", f >= 0 ? "a descriptor" : ename(errno));
                 errno = 0;
                 f = open("/dev/ptmx", O_RDWR | O_NOCTTY);
-                say("O52 a user opens /dev/ptmx: %s\n", f >= 0 ? "a descriptor" : ename(errno));
+                say("O58 a user opens /dev/ptmx: %s\n", f >= 0 ? "a descriptor" : ename(errno));
                 if (f >= 0) {
                     char un[64];
                     ptsname_r(f, un, sizeof un);
-                    stat_row("O53 stat of the user's slave", un);
+                    stat_row("O59 stat of the user's slave", un);
                 }
                 _exit(0);
             }
@@ -611,24 +637,24 @@ static void sec_open(void) {
             close(m2);
         }
     } else {
-        say("O51 a user opens root's slave: (root's run)\n");
-        say("O52 a user opens /dev/ptmx: (root's run)\n");
-        say("O53 stat of the user's slave: (root's run)\n");
+        say("O57 a user opens root's slave: (root's run)\n");
+        say("O58 a user opens /dev/ptmx: (root's run)\n");
+        say("O59 stat of the user's slave: (root's run)\n");
     }
     errno = 0;
     int po = posix_openpt(O_RDWR | O_NOCTTY);
-    say("O54 posix_openpt: %s, number %d\n", po >= 0 ? "a descriptor" : ename(errno), po >= 0 ? ptn(po) : -1);
+    say("O60 posix_openpt: %s, number %d\n", po >= 0 ? "a descriptor" : ename(errno), po >= 0 ? ptn(po) : -1);
     if (po >= 0) close(po);
     errno = 0;
     int ro = open("/dev/ptmx", O_RDONLY | O_NOCTTY);
-    say("O55 open /dev/ptmx read-only: %s\n", ro >= 0 ? "a descriptor" : ename(errno));
+    say("O61 open /dev/ptmx read-only: %s\n", ro >= 0 ? "a descriptor" : ename(errno));
     if (ro >= 0) {
         errno = 0;
         ssize_t w = write(ro, "x", 1);
-        say("O56 a write to it: %s\n", rv(w, errno));
+        say("O62 a write to it: %s\n", rv(w, errno));
         close(ro);
     }
-    say("O57 at the end: /dev/pts lists %s, pty/nr %s\n", listing("/dev/pts"), pty_nr());
+    say("O63 at the end: /dev/pts lists %s, pty/nr %s\n", listing("/dev/pts"), pty_nr());
 }
 
 /* --- T: termios ------------------------------------------------------------ */
@@ -869,7 +895,11 @@ static void sec_termios(void) {
     fcntl(s, F_SETFL, fcntl(s, F_GETFL) & ~O_NONBLOCK);
     got("T68 the master reads", m, 300);
     put(m, "\x11");
-    got("T69 after ^Q the master reads", m, 1000);
+    nap(200);
+    errno = 0;
+    w = write(s, "go\n", 3);
+    say("T69 after ^Q a write of three: %s\n", rv(w, errno));
+    got("T69a the master reads", m, 1000);
     put(m, "a\x13" "b\x11" "c\n");
     got("T70 ^S and ^Q inside a line: the slave reads", s, 1000);
     got("T71 the echo", m, 1000);
@@ -897,7 +927,10 @@ static void sec_ctty(void) {
     ptsname_r(m, name, sizeof name);
     int n = ptn(m);
     errno = 0;
-    say("C1 a session leader without a terminal: tcgetpgrp(the master) before %s\n", tcgetpgrp(m) < 0 ? ename(errno) : "a group");
+    {
+        pid_t g0 = tcgetpgrp(m);
+        say("C1 a session leader without a terminal: tcgetpgrp(the master) before %s\n", g0 < 0 ? ename(errno) : g0 == 0 ? "0" : "a group");
+    }
     errno = 0;
     int s = open(name, O_RDWR);
     say("C2 it opens the slave without O_NOCTTY: %s\n", s >= 0 ? "a descriptor" : ename(errno));
@@ -1125,7 +1158,10 @@ static void sec_ctty(void) {
     t = open("/dev/tty", O_RDWR);
     say("C54 /dev/tty: %s\n", t >= 0 ? "a descriptor" : ename(errno));
     errno = 0;
-    say("C55 tcgetpgrp(the master) %s\n", tcgetpgrp(m) < 0 ? ename(errno) : "a group");
+    {
+        pid_t g0 = tcgetpgrp(m);
+        say("C55 tcgetpgrp(the master) %s\n", g0 < 0 ? ename(errno) : g0 == 0 ? "0" : "a group");
+    }
     ANS("C56 TIOCSCTTY 0 again by the leader", ioctl(s, TIOCSCTTY, 0));
     errno = 0;
     g = tcgetpgrp(s);
@@ -1142,12 +1178,23 @@ static void sec_ctty(void) {
             errno = 0;
             pid_t gg = tcgetpgrp(f);
             say("C59 then its tcgetpgrp: its own group %s\n", gg < 0 ? ename(errno) : yesno(gg == getpgrp()));
+            if (gg >= 0) {
+                say("C60 heard %s\n", heard_list(2, 1000));
+                on(SIGHUP);
+                on(SIGCONT);
+                ANS("C61 the thief's TIOCNOTTY", ioctl(f, TIOCNOTTY));
+                say("C62 heard %s\n", heard_list(2, 1000));
+            } else {
+                say("C60 heard %s\n", heard_list(0, 400));
+                say("C61 the thief's TIOCNOTTY: (no steal)\n");
+                say("C62 heard -\n");
+            }
             _exit(0);
         }
         waitpid(c, 0, 0);
-        say("C60 heard %s\n", heard_list(root ? 2 : 0, 1500));
+        say("C63 the first leader heard %s\n", heard_list(0, 400));
         errno = 0;
-        say("C61 the first leader's tcgetpgrp %s\n", tcgetpgrp(s) < 0 ? ename(errno) : "a group");
+        say("C64 the first leader's tcgetpgrp %s\n", tcgetpgrp(s) < 0 ? ename(errno) : "a group");
     }
     reap(A); reap(B); reap(C);
     close(s);
@@ -1195,23 +1242,30 @@ static void sec_winsz(void) {
     ANS("W10 the pixel fields only", ioctl(m, TIOCSWINSZ, &w));
     say("W11 heard %s\n", heard_list(2, 1500));
     say("W12 the slave %s\n", wsz(s));
-    errno = 0;
-    say("W13 TIOCSWINSZ with a bad pointer: %s\n", rv(ioctl(m, TIOCSWINSZ, (void *)8), errno));
+    {
+        errno = 0;
+        int r = ioctl(m, TIOCSWINSZ, (void *)8);
+        say("W13 TIOCSWINSZ with a bad pointer: %s\n", rv(r, errno));
+        errno = 0;
+        r = ioctl(m, TIOCGWINSZ, (void *)8);
+        say("W14 TIOCGWINSZ with a bad pointer: %s\n", rv(r, errno));
+    }
     tcsetpgrp(s, getpgrp());
     w.ws_row = 40; w.ws_col = 120;
-    ANS("W14 the leader in the foreground, 40x120", ioctl(m, TIOCSWINSZ, &w));
-    say("W15 heard %s\n", heard_list(1, 1500));
+    ANS("W15 the leader in the foreground, 40x120", ioctl(m, TIOCSWINSZ, &w));
+    say("W16 heard %s\n", heard_list(1, 1500));
     reap(A); reap(B); reap(C);
     {
         int m2, s2;
         if (pair(&m2, &s2) == 0) {
             flush_heard();
-            ANS("W16 a pty nobody's terminal, TIOCSWINSZ", ioctl(m2, TIOCSWINSZ, &w));
-            say("W17 heard %s; the slave %s\n", heard_list(0, 400), wsz(s2));
+            ANS("W17 a pty nobody's terminal, TIOCSWINSZ", ioctl(m2, TIOCSWINSZ, &w));
+            say("W18 heard %s; the slave %s\n", heard_list(0, 400), wsz(s2));
             close(s2);
             close(m2);
         }
     }
+    signal(SIGHUP, SIG_IGN); /* its own terminal's master closes next: H's rows */
     close(s);
     close(m);
 }
@@ -1370,8 +1424,10 @@ static void sec_hangup(void) {
     }
     s = sopen(m, O_NOCTTY);
     say("H20 the slave opened again: %s\n", s >= 0 ? "a descriptor" : ename(errno));
+    nap(300);
     say("H21 the master polls %s\n", revents(m, POLLIN | POLLOUT, 200));
     got("H22 the slave reads what the master wrote", s, 300);
+    got("H22a the master reads", m, 300);
     close(s);
     close(m);
     /* a master never given a slave */
@@ -1436,7 +1492,8 @@ static void sec_hangup(void) {
             else nap(20);
         }
         b[k] = 0;
-        for (int i = 0; i < k; i++) if (b[i] == '\n') b[i] = ' ';
+        while (k > 0 && b[k - 1] == '\n') b[--k] = 0;
+        for (int i = 0; i < k; i++) if (b[i] == '\n') b[i] = ',';
         say("H26 the session leader ends: its foreground group heard %s\n", k ? b : "-");
         errno = 0;
         say("H27 the master then: tcgetpgrp %s\n", tcgetpgrp(m) < 0 ? ename(errno) : "a group");
@@ -1447,6 +1504,85 @@ static void sec_hangup(void) {
 }
 
 /* --- P: poll, O_NONBLOCK, full buffers -------------------------------------- */
+
+/* Write `chunk` bytes at a time to a non-blocking `fd` until it takes no
+ * more (with a pause for the other side's hand-over each time it takes
+ * less): the total and the errno that ended it. */
+static long fill(int fd, int chunk, int *err) {
+    static unsigned char big[65536];
+    memset(big, 'f', sizeof big);
+    long total = 0;
+    int stuck = 0;
+    *err = 0;
+    while (stuck < 2) {
+        errno = 0;
+        ssize_t k = write(fd, big, (size_t)chunk);
+        if (k < 0) {
+            *err = errno;
+            if (errno != EAGAIN) break;
+            stuck++;
+            nap(200);
+            continue;
+        }
+        total += k;
+        stuck = 0;
+    }
+    return total;
+}
+
+/* Read everything `fd` gives (settling): the count. */
+static long drain_all(int fd) {
+    unsigned char b[4096];
+    long n = 0;
+    for (;;) {
+        long k = settle(fd, b, sizeof b, 300);
+        if (k <= 0) break;
+        n += k;
+    }
+    return n;
+}
+
+/* The full buffers by other write sizes, each on a fresh raw pair. */
+static void fills(void) {
+    static const int sizes[] = {1, 1000, 65536, 0};
+    for (const int *z = sizes; *z; z++) {
+        int m, s, e;
+        if (pair(&m, &s)) return;
+        raw(s);
+        fcntl(m, F_SETFL, fcntl(m, F_GETFL) | O_NONBLOCK);
+        fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+        long t = fill(s, *z, &e);
+        say("P10a the slave writes %d at a time: %ld taken, then %s; the master reads %ld\n", *z, t, ename(e), drain_all(m));
+        t = fill(m, *z, &e);
+        say("P10b the master writes %d at a time: %ld taken, then %s; the slave reads %ld\n", *z, t, ename(e), drain_all(s));
+        close(s);
+        close(m);
+    }
+    {
+        /* canonical: whole lines nobody reads */
+        int m, s, e;
+        if (pair(&m, &s)) return;
+        lset(s, 0, ECHO);
+        fcntl(m, F_SETFL, fcntl(m, F_GETFL) | O_NONBLOCK);
+        fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+        static char line[100];
+        memset(line, 'l', sizeof line);
+        line[99] = '\n';
+        long total = 0;
+        int stuck = 0;
+        e = 0;
+        while (stuck < 2 && total < 1000000) {
+            errno = 0;
+            ssize_t k = write(m, line, sizeof line);
+            if (k < 0) { e = errno; if (errno != EAGAIN) break; stuck++; nap(200); continue; }
+            total += k;
+            stuck = 0;
+        }
+        say("P10c canonical, 100-byte lines to the master, nobody reads: %ld taken, then %s; the slave reads %ld\n", total, ename(e), drain_all(s));
+        close(s);
+        close(m);
+    }
+}
 
 static void sec_poll(void) {
     int m, s;
@@ -1535,6 +1671,7 @@ static void sec_poll(void) {
         }
         say("P13 the slave reads it all: %ld, the master polls %s\n", n, revents(m, POLLOUT, 200));
     }
+    fills();
     /* canonical: a line longer than the line discipline holds */
     {
         struct termios t;
@@ -1892,6 +2029,27 @@ static int drive(void) {
     return 0;
 }
 
+/* Linux only (root): the errno past /proc/sys/kernel/pty/max. Not part of
+ * the compared transcript (PAX's bound is its own: R-px111-4). */
+static int max_mode(void) {
+    char old[32] = "";
+    int fd = open("/proc/sys/kernel/pty/max", O_RDWR);
+    if (fd < 0) { say("max: %s\n", ename(errno)); return 1; }
+    ssize_t n = read(fd, old, sizeof old - 1);
+    if (n > 0) old[n] = 0;
+    say("max: pty/max %s", old);
+    lseek(fd, 0, SEEK_SET);
+    (void)!write(fd, "4\n", 2);
+    int m[8], k = 0, e = 0;
+    for (; k < 8; k++) { errno = 0; m[k] = mopen(0); if (m[k] < 0) { e = errno; break; } }
+    say("max: with pty/max 4, opened %d, then %s\n", k, ename(e));
+    for (int i = 0; i < k; i++) close(m[i]);
+    lseek(fd, 0, SEEK_SET);
+    (void)!write(fd, old, strlen(old));
+    close(fd);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, 0, _IOLBF, 0);
     if (pipe(rep) < 0) return 2;
@@ -1900,6 +2058,7 @@ int main(int argc, char **argv) {
     signal(SIGHUP, SIG_IGN);
     (void)ioctl(0, TIOCNOTTY);
     signal(SIGHUP, SIG_DFL);
+    if (argc > 1 && strcmp(argv[1], "max") == 0) return max_mode();
     if (argc > 1 && strcmp(argv[1], "drive") == 0) {
         fflush(stdout);
         pid_t R = fork();
