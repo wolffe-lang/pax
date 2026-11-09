@@ -7,6 +7,16 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The yew jobs fit their limits again (px113, pax#305).** `mpx5-yew` was
+  cut at its 75-minute limit in most all-tier runs since yew's pin moved to
+  `2eb9cb9b`, and `mpx5-screen` in some. Measured phase by phase in every
+  attempt since 2026-11-01, the time is yew's build, which grew about half
+  again (pax#327), not the boots. Both limits are now tiered by the plan's
+  tier, from the measured floors with 40% headroom: 140 minutes (mpx5-yew)
+  and 130 (mpx5-screen) in the all tier and a partial dispatch, 95 in pr
+  and full. `tests/ci-budgets.py` holds them. No suite's rows or legs
+  changed.
+
 - **What the stick writes stays on the stick (px114).** An install or an
   upgrade made from a live stick that had booted with a network cable copied
   the stick's DHCP lease (`/var/lib/dhcp/pax.lease`) and `/etc/resolv.conf` to
