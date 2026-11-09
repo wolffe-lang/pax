@@ -21,16 +21,18 @@ fn excluded(path: str) -> bool {
         path == "/mnt/target" // px93: the upgrade entry's target, never the live tree's
 }
 
-// px112: what burrowd, the ssh server, made or writes while the live system
-// runs (/etc/pax-boot.d/burrowd): its host key, its log and its pid. A
-// machine makes its own key at its own first boot, so neither a fresh
-// install nor an upgrade copies the stick's, and a log written while the
-// tree is walked is not a change of the source.
+// px112: what a running system made or writes, left out of the walk. Under
+// /var/run (shipped since px112), its contents, as /tmp's are, the directory
+// itself kept: sudo's timestamp records (/var/run/sudo/ts) and burrowd's pid
+// among them. burrowd's host key and its log (/etc/pax-boot.d/burrowd): a
+// machine makes its own key at its own first boot, so neither a fresh install
+// nor an upgrade copies the stick's, and a log written while the tree is
+// walked is not a change of the source.
 fn runtime_state(path: str) -> bool {
-    path == "/etc/burrowd/ssh_host_ed25519_key" ||
+    path.starts_with("/var/run/") ||
+        path == "/etc/burrowd/ssh_host_ed25519_key" ||
         path == "/etc/burrowd/ssh_host_ed25519_key.pub" ||
-        path == "/var/log/burrowd.log" ||
-        path == "/var/run/burrowd.pid"
+        path == "/var/log/burrowd.log"
 }
 
 fn metadata_equal(a: List[int], b: List[int]) -> bool {
