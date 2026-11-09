@@ -28,7 +28,7 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx5-rates` job;
 
 | input | identity | read |
 |---|---|---|
-| pax base | trunk `db516c69` (px104's head) | `git log` |
+| pax base | trunk `db516c69` (px104's head) for every take; the branch rebased onto `a25ebab9` (px106's and px107's merges) after them | `git log` |
 | wolf (the kernel's) | 0.2.35, `kernel/wolf.pin`'s archive, `tools/fetch-wolf` by digest | every build |
 | den at the metal target's stick | `474a926` (den trunk at vc23's merge), static `070cc093…`, 17,758,672 bytes, `tools/mkden` with this lane's pin file (`notes/px108/rig/den-trunk.pin`) | four builds, one digest |
 | den at `user/den.pin` | `ac2332b`, static `cc00cd9a…`, 17,696,760 bytes (px104's digest) | four builds, one digest |
@@ -42,9 +42,11 @@ The metal target's stick was built by `tools/mkdistribution --latest`: it carrie
 
 ## 3. Prediction, scored
 
-`notes/px108/prediction.txt`: committed first (`bed81808`), revised twice before any measurement on PAX: once after
-the first Linux measurement (`e6ac5f45`), once after the orchestrator's correction that the stick's den is `474a926`
-(`04bb6437`).
+`notes/px108/prediction.txt`: committed first (`3611d5f0`), revised twice before any measurement on PAX: once after
+the first Linux measurement (`4d3f5141`), once after the orchestrator's correction that the stick's den is `474a926`
+(`56aba5de`). The shas in this note are the branch's after its rebase onto `a25ebab9`; every take ran on `db516c69`'s
+base before it, at the same commits then named `bed81808`, `e6ac5f45`, `04bb6437`, `82b96af4` (the rows' tip),
+`221d66b0` (the fix) and `d0a80c31` (the floor).
 
 | | predicted | measured | |
 |---|---|---|---|
@@ -91,7 +93,7 @@ the first Linux measurement (`e6ac5f45`), once after the orchestrator's correcti
 ### 4.2 The change
 
 - `kernel/uaccess`: `copy_out`, `copy_in` and `zero` move each page's part with `pax_tree_copy` and `pax_tree_zero`
-  (`221d66b0`). The checks are unchanged: every page walked and checked first, so all or nothing, SMAP never relaxed.
+  (`54c1f383`). The checks are unchanged: every page walked and checked first, so all or nothing, SMAP never relaxed.
 - `user/elf/bench.c` and `user/elf/ptime.c` (`tools/mkbench`), `tests/mpx5-rates`, its CI job, its place in
   `@user`, and `tests/ci-plan`'s rows for them.
 
@@ -161,9 +163,9 @@ The files rows ran into the tree's 16,384 inodes at trunk (B2 red): they now sto
 The series (`t4`; a take is named `t4-<what>-r<round>`) ran five rounds on 2026-11-08 between 07:28Z and 09:20Z,
 on one block's six P-core threads, with its two lock names and its light lock held (nothing ran beside it). Each
 round booted six takes in turn under the same KVM and QEMU 8.2.2:
-- PAX at trunk (`db516c69`'s kmain_console), the Linux guest, and PAX at the fix (`221d66b0`). Each one cloned pelt with
-  den `474a926` over https (den's TLS fixture), git:// and ssh (burrow against OpenSSH), removed each clone's tree, then
-  ran the microbenchmarks.
+- PAX at trunk (`db516c69`'s kmain_console), the Linux guest, and PAX at the fix (`54c1f383` on that base). Each
+  one cloned pelt with den `474a926` over https (den's TLS fixture), git:// and ssh (burrow against OpenSSH),
+  removed each clone's tree, then ran the microbenchmarks.
 - The same three, running the microbenchmarks only, with the TCP row taken across a 15 ms delay each way.
 The guest is Ubuntu's 6.8 generic kernel on one vCPU with a tmpfs root. PAX's network is QEMU's igb (MSI-X), the
 guest's is virtio-net. The table gives medians over the rounds that exited 0, with the range in parentheses. A ratio
@@ -237,9 +239,9 @@ measured rows are the same code in both versions:
 
 ### 4.5 The red row, the plant and the gauntlet
 
-- `tests/mpx5-rates` B3 at the rows tip (`82b96af4`): `FAIL B3 native bios: a pipe's 64 KiB round trip, PAX 1569/s
-  against Linux 44111/s: 0.04, under the floor 0.50`; at the fix (`221d66b0`): `PASS B3 … PAX 23232/s against Linux
-  42395/s: 0.55`. The floor is a quarter since `d0a80c31` (R-px108-3).
+- `tests/mpx5-rates` B3 at the rows tip (`0185a063`, on `db516c69`): `FAIL B3 native bios: a pipe's 64 KiB round
+  trip, PAX 1569/s against Linux 44111/s: 0.04, under the floor 0.50`; at the fix (`54c1f383`): `PASS B3 … PAX
+  23232/s against Linux 42395/s: 0.55`. The floor is a quarter since `f9d8c442` (R-px108-3).
 - The plant, `px108-plant-uaccess` (one commit on the green head, one hunk: `copy_in` one byte at a time again),
   red by name at B3, and the gauntlet at the head: their records are the hand-back's.
 
