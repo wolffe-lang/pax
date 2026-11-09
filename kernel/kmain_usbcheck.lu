@@ -1,9 +1,17 @@
 //! member: false
 // px74: specification-derived invariants used by the live driver.
+// px109: and the mouse's: kernel/usb_mouse's boot report and report
+// descriptor reader on the boot mouse of HID 1.11 appendix B.2 and five
+// real-mouse shapes, its refusals by name, and kernel/mouse's queue
+// (records, merges, compaction, a lost edge said LOST). Their memory is
+// two frames of kernel/frames' (the only module this kernel starts).
 use serial
 use log
 use panic
+use frames
+use mouse
 use usb_keys
+use usb_mouse
 use usb_topology
 
 extern "c" fn pax_exit(v: u8)
@@ -15,6 +23,331 @@ export fn pax_interrupt(_frame: u64) -> u64 { panic.halt() }
 export fn pax_trace_resume_syscall(_frame: u64) -> u64 { panic.halt() } // px102: boot/isr.S calls both; nothing here traces
 export fn pax_trace_finish_syscall(_frame: u64) -> u64 { panic.halt() }
 export fn pax_thread_exit() { panic.halt() } // no scheduler is started here
+
+// --- px109: the mouse's invariants -------------------------------------------
+
+fn put(a: u64, i: u64, v: u64) { unsafe { ((a + i * 8) as *u64).write_volatile(v) } }
+fn r8(a: u64) -> u64 { unsafe { (a as *u8).read_volatile() as u64 } }
+fn r32(a: u64) -> u64 { unsafe { (a as *u32).read_volatile() as u64 } }
+fn word(a: u64, i: u64) -> u64 { unsafe { ((a + i * 8) as *u64).read_volatile() } }
+fn s32(v: u64) -> u64 { if v & 0x80000000 != 0 { v | 0xffffffff00000000 } else { v } }
+
+/// boot: 50 bytes
+fn d_boot(at: u64) -> u64 {
+    put(at, 0, 0x010901a102090105)
+    put(at, 1, 0x09050175039500a1)
+    put(at, 2, 0x0125001503290119)
+    put(at, 3, 0x0181057501950281)
+    put(at, 4, 0x3009010502950875)
+    put(at, 5, 0x06817f2581153109)
+    put(at, 6, 0x000000000000c0c0)
+    50
+}
+/// wheel: 52 bytes
+fn d_wheel(at: u64) -> u64 {
+    put(at, 0, 0x010901a102090105)
+    put(at, 1, 0x09050175039500a1)
+    put(at, 2, 0x0125001503290119)
+    put(at, 3, 0x0181057501950281)
+    put(at, 4, 0x3009010503950875)
+    put(at, 5, 0x7f25811538093109)
+    put(at, 6, 0x00000000c0c00681)
+    52
+}
+/// five: 75 bytes
+fn d_five(at: u64) -> u64 {
+    put(at, 0, 0x028501a102090105)
+    put(at, 1, 0x0119090500a10109)
+    put(at, 2, 0x0595012500150529)
+    put(at, 3, 0x0375019502810175)
+    put(at, 4, 0x2680011601050181)
+    put(at, 5, 0x3009029510757fff)
+    put(at, 6, 0x7f25811506813109)
+    put(at, 7, 0x0681380901950875)
+    put(at, 8, 0x81019502380a0c05)
+    put(at, 9, 0x0000000000c0c006)
+    75
+}
+/// packed: 60 bytes
+fn d_packed(at: u64) -> u64 {
+    put(at, 0, 0x028501a102090105)
+    put(at, 1, 0x0119090500a10109)
+    put(at, 2, 0x1095012500151029)
+    put(at, 3, 0x0116010502810175)
+    put(at, 4, 0x02950c7507ff26f8)
+    put(at, 5, 0x8115068131093009)
+    put(at, 6, 0x3809019508757f25)
+    put(at, 7, 0x00000000c0c00681)
+    60
+}
+/// combo: 101 bytes
+fn d_combo(at: u64) -> u64 {
+    put(at, 0, 0x018501a106090105)
+    put(at, 1, 0x0015e729e0190705)
+    put(at, 2, 0x0281089501750125)
+    put(at, 3, 0x0695018108750195)
+    put(at, 4, 0x0705652500150875)
+    put(at, 5, 0x05c0008165290019)
+    put(at, 6, 0x09028501a1020901)
+    put(at, 7, 0x290119090500a101)
+    put(at, 8, 0x7503950125001503)
+    put(at, 9, 0x8105750195028101)
+    put(at, 10, 0x0931093009010501)
+    put(at, 11, 0x9508757f25811538)
+    put(at, 12, 0x000000c0c0068103)
+    101
+}
+/// tablet: 74 bytes
+fn d_tablet(at: u64) -> u64 {
+    put(at, 0, 0x010901a102090105)
+    put(at, 1, 0x03290119090500a1)
+    put(at, 2, 0x0175039501250015)
+    put(at, 3, 0x0181057501950281)
+    put(at, 4, 0x0015310930090105)
+    put(at, 5, 0x7fff4600357fff26)
+    put(at, 6, 0x0105028102951075)
+    put(at, 7, 0x00357f2581153809)
+    put(at, 8, 0x0681019508750045)
+    put(at, 9, 0x000000000000c0c0)
+    74
+}
+/// push: 10 bytes
+fn d_push(at: u64) -> u64 {
+    put(at, 0, 0x09a401a102090105)
+    put(at, 1, 0x000000000000c001)
+    10
+}
+/// long: 7 bytes
+fn d_long(at: u64) -> u64 {
+    put(at, 0, 0x0000000002fe0105)
+    7
+}
+/// noxy: 23 bytes
+fn d_noxy(at: u64) -> u64 {
+    put(at, 0, 0x090501a102090105)
+    put(at, 1, 0x0125001503290119)
+    put(at, 2, 0x00c0028101750395)
+    23
+}
+/// keys: 23 bytes
+fn d_keys(at: u64) -> u64 {
+    put(at, 0, 0x070501a106090105)
+    put(at, 1, 0x01250015e729e019)
+    put(at, 2, 0x00c0028108950175)
+    23
+}
+/// wide: 28 bytes
+fn d_wide(at: u64) -> u64 {
+    put(at, 0, 0x010901a102090105)
+    put(at, 1, 0x7f258115010500a1)
+    put(at, 2, 0x3109300902952175)
+    put(at, 3, 0x00000000c0c00681)
+    28
+}
+/// big: 34 bytes
+fn d_big(at: u64) -> u64 {
+    put(at, 0, 0x010901a102090105)
+    put(at, 1, 0x01814695087500a1)
+    put(at, 2, 0x08757f2581150105)
+    put(at, 3, 0x0681310930090295)
+    put(at, 4, 0x000000000000c0c0)
+    34
+}
+/// trunc: 7 bytes
+fn d_trunc(at: u64) -> u64 {
+    put(at, 0, 0x000501a102090105)
+    7
+}
+/// open: 27 bytes
+fn d_open(at: u64) -> u64 {
+    put(at, 0, 0x010901a102090105)
+    put(at, 1, 0x7f258115010500a1)
+    put(at, 2, 0x3109300902950875)
+    put(at, 3, 0x0000000000c00681)
+    27
+}
+
+/// A descriptor parsed into the layout at `l`: 0, or the refusal.
+fn parsed(d: u64, l: u64, n: u64) -> u64 { usb_mouse.parse(d, n, l) }
+
+/// A field word's offset and size (the rows hold them to the note's table).
+fn at(f: u64) -> u64 { f & 0xffff }
+fn size(f: u64) -> u64 { (f >> 16) & 0xff }
+
+/// Every record reader `r` has: (count, sum of x, EDGE records, MERGED
+/// records, whether the EDGE records alternate press and release starting
+/// with a press, the last record's flags, the last record's reports).
+fn drain(r: u64, out: u64) -> (u64, u64, u64, u64, bool, u64, u64) {
+    var n: u64 = 0
+    var sx: u64 = 0
+    var edges: u64 = 0
+    var merged: u64 = 0
+    var alternate = true
+    var flags: u64 = 0
+    var reports: u64 = 0
+    while mouse.pull(r, out) {
+        n += 1
+        sx += s32(r32(out + 16))
+        flags = r8(out + 15)
+        reports = r32(out + 28)
+        if flags & mouse.MERGED != 0 { merged += 1 }
+        if flags & mouse.EDGE != 0 {
+            let want: u64 = if edges % 2 == 0 { 1 } else { 0 }
+            if r32(out + 24) & 0xffff != want { alternate = false }
+            edges += 1
+        }
+    }
+    (n, sx, edges, merged, alternate, flags, reports)
+}
+
+fn mouse_rows() {
+    let _f = frames.start()
+    let d = (frames.alloc() else 0) + frames.hhdm()
+    let l = (frames.alloc() else 0) + frames.hhdm()
+    let out = (frames.alloc() else 0) + frames.hhdm()
+    // The boot report (appendix B.2): buttons, then signed dx and dy.
+    put(d, 0, 0x01ff07)
+    let (bok, bdx, bdy, bb) = usb_mouse.boot(d, 3)
+    check(bok && bdx == 0xffffffffffffffff && bdy == 1 && bb == 7, "mouse boot report buttons and signed motion")
+    let (short, _x, _y, _b) = usb_mouse.boot(d, 2)
+    check(!short, "mouse boot report shorter than three bytes refused")
+    check(usb_mouse.sext(0xfff, 12) == 0xffffffffffffffff && usb_mouse.sext(0x7ff, 12) == 0x7ff, "mouse signed field of twelve bits")
+    // Appendix B.2's own descriptor: buttons at bits 0-2, X and Y bytes 1 and 2.
+    var n = d_boot(d)
+    check(parsed(d, l, n) == 0 && word(l, usb_mouse.L_ID) == 0 && word(l, usb_mouse.L_LEN) == 3
+          && word(l, usb_mouse.L_KIND) == usb_mouse.REL && at(word(l, usb_mouse.L_X)) == 8 && size(word(l, usb_mouse.L_X)) == 8
+          && at(word(l, usb_mouse.L_Y)) == 16 && word(l, usb_mouse.L_W) == 0 && at(word(l, usb_mouse.L_B + 2)) == 2
+          && word(l, usb_mouse.L_B + 3) == 0, "mouse descriptor of appendix B.2")
+    // B.2 with a wheel byte: a four-byte report.
+    n = d_wheel(d)
+    check(parsed(d, l, n) == 0 && word(l, usb_mouse.L_LEN) == 4 && at(word(l, usb_mouse.L_W)) == 24, "mouse descriptor with a wheel")
+    put(out, 0, 0xfffb0501)
+    let (wok, wx, wy, wb, ww) = usb_mouse.decode(out, 4, l)
+    check(wok && wx == 5 && wy == 0xfffffffffffffffb && wb == 1 && ww == 0xffffffffffffffff, "mouse report with a wheel decoded")
+    // Five buttons, 16-bit X and Y, a wheel and AC Pan, after Report ID 2.
+    n = d_five(d)
+    check(parsed(d, l, n) == 0 && word(l, usb_mouse.L_ID) == 2 && word(l, usb_mouse.L_LEN) == 8 && at(word(l, usb_mouse.L_X)) == 16
+          && size(word(l, usb_mouse.L_X)) == 16 && at(word(l, usb_mouse.L_B + 4)) == 12, "mouse descriptor of five buttons and 16-bit motion")
+    put(out, 0, 0x0002ff0001001f02)
+    let (fok, fx, fy, fb, fw) = usb_mouse.decode(out, 8, l)
+    check(fok && fx == 256 && fy == 0xffffffffffffff00 && fb == 0x1f && fw == 2, "mouse report of five buttons decoded")
+    put(out, 0, 0x0002ff0001001f03)
+    let (other, _ox, _oy, _ob, _ow) = usb_mouse.decode(out, 8, l)
+    check(!other, "mouse report of another Report ID not the pointer's")
+    // Twelve-bit X and Y packed in three bytes, sixteen buttons.
+    n = d_packed(d)
+    check(parsed(d, l, n) == 0 && at(word(l, usb_mouse.L_X)) == 24 && size(word(l, usb_mouse.L_X)) == 12
+          && at(word(l, usb_mouse.L_Y)) == 36 && word(l, usb_mouse.L_LEN) == 7, "mouse descriptor of packed 12-bit motion")
+    put(out, 0, 0x01002fff000102)
+    let (pok, px, py, pb, pw) = usb_mouse.decode(out, 7, l)
+    check(pok && px == 0xffffffffffffffff && py == 2 && pb == 1 && pw == 1, "mouse report of packed 12-bit motion decoded")
+    // A keyboard (Report ID 1) and a mouse (Report ID 2) in one descriptor.
+    n = d_combo(d)
+    check(parsed(d, l, n) == 0 && word(l, usb_mouse.L_ID) == 2 && word(l, usb_mouse.L_LEN) == 5 && at(word(l, usb_mouse.L_W)) == 32,
+          "mouse descriptor beside a keyboard's")
+    put(out, 0, 0x01f60a0202)
+    let (cok, cx, cy, cb, cw) = usb_mouse.decode(out, 5, l)
+    check(cok && cx == 10 && cy == 0xfffffffffffffff6 && cb == 2 && cw == 1, "mouse report beside a keyboard's decoded")
+    put(out, 0, 0x0400000001)
+    let (kok, _kx, _ky, _kb, _kw) = usb_mouse.decode(out, 5, l)
+    check(!kok, "mouse keyboard's report not the pointer's")
+    // An absolute tablet: 16-bit X and Y over 0..32767, scaled.
+    n = d_tablet(d)
+    check(parsed(d, l, n) == 0 && word(l, usb_mouse.L_KIND) == usb_mouse.ABS && word(l, usb_mouse.L_LEN) == 6
+          && word(l, usb_mouse.L_XMAX) == 32767, "mouse descriptor of an absolute tablet")
+    put(out, 0, 0xff2000400001)
+    let (tok, tx, ty, tb, tw) = usb_mouse.decode(out, 6, l)
+    check(tok && tx == 16384 && ty == 8192 && tb == 1 && tw == 0xffffffffffffffff, "mouse report of an absolute tablet decoded")
+    check(usb_mouse.scale(4095, 0, 4095) == 32767 && usb_mouse.scale(0, 0, 4095) == 0 && usb_mouse.scale(2048, 0, 4095) == 16387,
+          "mouse absolute position scaled to 0..32767")
+    // Refusals, by name.
+    n = d_push(d)
+    check(parsed(d, l, n) == usb_mouse.R_PUSH, "mouse descriptor with Push refused")
+    n = d_long(d)
+    check(parsed(d, l, n) == usb_mouse.R_LONG, "mouse descriptor with a long item refused")
+    n = d_noxy(d)
+    check(parsed(d, l, n) == usb_mouse.R_NO_XY, "mouse descriptor without X or Y refused")
+    n = d_keys(d)
+    check(parsed(d, l, n) == usb_mouse.R_NO_POINTER, "mouse descriptor of a keyboard alone refused")
+    n = d_wide(d)
+    check(parsed(d, l, n) == usb_mouse.R_WIDE, "mouse descriptor with a 33-bit axis refused")
+    n = d_big(d)
+    check(parsed(d, l, n) == usb_mouse.R_REPORT, "mouse descriptor of a 72-byte report refused")
+    n = d_trunc(d)
+    check(parsed(d, l, n) == usb_mouse.R_TRUNCATED, "mouse descriptor truncated refused")
+    n = d_open(d)
+    check(parsed(d, l, n) == usb_mouse.R_NESTING, "mouse descriptor with an open collection refused")
+
+    // kernel/mouse: the queue.
+    let r1 = mouse.open()
+    let m = mouse.attach(mouse.REL, 100)
+    check(r1 == 1 && m == 1 && mouse.pull(r1, out) && r8(out + 15) == mouse.NEW && r32(out + 12) & 0xffffff == 0x10001
+          && r32(out + 8) == 1 && r32(out + 28) == 0, "mouse queue reader, pointer and NEW record")
+    let _a = mouse.report(m, 5, 0xfffffffffffffffd, 0, 0, 200)
+    check(mouse.pull(r1, out) && word(out, 0) == 200 && r32(out + 8) == 2 && r32(out + 16) == 5 && r32(out + 20) == 0xfffffffd
+          && r32(out + 24) == 0 && r32(out + 28) == 1 && r8(out + 15) == 0, "mouse queue record layout")
+    check(!mouse.report(m, 0, 0, 0, 0, 300) && mouse.pending(r1) == 0, "mouse queue report that changes nothing makes no record")
+    var i: u64 = 0
+    while i < 10 { let _b = mouse.report(m, 1, 0, 0, 0, 400 + i); i += 1 }
+    let (n1, s1, _e1, m1, _a1, _f1, _r1) = drain(r1, out)
+    check(n1 == 10 && s1 == 10 && m1 == 0, "mouse queue keeps every report under half")
+    i = 0
+    while i < 68 { let _b = mouse.report(m, 1, 0, 0, 0, 500 + i); i += 1 }
+    let (n2, s2, _e2, m2, _a2, f2, r2) = drain(r1, out)
+    check(n2 == 63 && s2 == 68 && m2 == 1 && f2 & mouse.MERGED != 0 && r2 == 6, "mouse queue merges motion above half")
+    i = 0
+    while i < 63 { let _b = mouse.report(m, 1, 0, 0, 0, 600 + i); i += 1 }
+    let _p = mouse.report(m, 0, 0, 1, 0, 700)
+    let _q = mouse.report(m, 2, 0, 1, 0, 701)
+    let _s = mouse.report(m, 3, 0, 1, 0, 702)
+    let _t = mouse.report(m, 0, 0, 0, 0, 703)
+    let (n3, s3, e3, m3, a3, _f3, _r3) = drain(r1, out)
+    check(n3 == 66 && s3 == 68 && e3 == 2 && a3 && m3 == 1, "mouse queue never merges an edge")
+    // A full queue compacts: 63 motion records and 63 edges, then one edge more.
+    i = 0
+    while i < 63 { let _b = mouse.report(m, 1, 0, 0, 0, 800 + i); i += 1 }
+    i = 0
+    while i < 64 { let _b = mouse.report(m, 0, 0, (i + 1) % 2, 0, 900 + i); i += 1 }
+    let (le, lm) = mouse.lost(r1)
+    let (n4, s4, e4, m4, a4, _f4, _r4) = drain(r1, out)
+    check(n4 == 126 && s4 == 63 && e4 == 64 && a4 && m4 == 1 && le == 0 && lm == 0, "mouse queue compacts a full queue and keeps every edge")
+    // A queue of edges alone loses the next edge, counts it and says LOST.
+    i = 0
+    while i < 63 { let _b = mouse.report(m, 1, 0, 0, 0, 1000 + i); i += 1 }
+    i = 0
+    while i < 126 { let _b = mouse.report(m, 0, 0, (i + 1) % 2, 0, 1100 + i); i += 1 }
+    let (le2, _lm2) = mouse.lost(r1)
+    let _one = mouse.pull(r1, out)
+    let _u = mouse.report(m, 0, 0, 1, 0, 1300)
+    let (n5, _s5, _e5, _m5, _a5, f5, _r5) = drain(r1, out)
+    check(le2 == 1 && n5 == 126 && f5 & mouse.LOST != 0, "mouse queue loses an edge only when full of edges, and says LOST")
+    // Every reader gets every record; a departure releases a held button.
+    let r2b = mouse.open()
+    let _v = mouse.report(m, 7, 0, 1, 0, 1400)
+    check(r2b == 2 && mouse.pending(r1) == 1 && mouse.pending(r2b) == 1, "mouse queue every reader gets every record")
+    let _g = mouse.detach(m, 1500)
+    let _first = mouse.pull(r1, out)
+    check(mouse.pull(r1, out) && r8(out + 15) == (mouse.GONE | mouse.EDGE) && r32(out + 24) & 0xffff == 0 && r32(out + 28) == 0,
+          "mouse queue departure releases a held button")
+    let (_n6, _s6, _e6, _m6, _a6, _f6, _r6) = drain(r2b, out)
+    // An absolute pointer: a new number, its last position kept when merged.
+    let t = mouse.attach(mouse.ABS, 1600)
+    let _new = mouse.pull(r1, out)
+    let _same = mouse.report(t, 100, 200, 0, 0, 1601)
+    check(t == 2 && !mouse.report(t, 100, 200, 0, 0, 1602), "mouse queue absolute report at the same place makes no record")
+    i = 0
+    while i < 70 { let _b = mouse.report(t, 10 + i, 20 + i, 0, 0, 1700 + i); i += 1 }
+    var lastx: u64 = 0
+    var lasty: u64 = 0
+    var count: u64 = 0
+    while mouse.pull(r1, out) { lastx = r32(out + 16); lasty = r32(out + 20); count += 1 }
+    check(count == 63 && lastx == 79 && lasty == 89, "mouse queue absolute motion keeps the last position")
+    // Readers are bounded; a closed one is free again.
+    var opened: u64 = 2
+    while mouse.open() != 0 { opened += 1 }
+    mouse.close(r2b)
+    check(opened == mouse.READERS && mouse.open() == r2b, "mouse queue at most eight readers, a closed one free again")
+}
 
 fn check(ok: bool, name: str) {
     if !ok { log.put("FAIL USB "); log.line(name); panic.halt() }
@@ -41,6 +374,7 @@ export fn kmain() {
     check(usb_keys.code(0x52) == 0x148, "usage arrow shares extended key")
     check(usb_keys.code(0xe5) == 0x36, "usage right shift")
     check(usb_keys.code(0) == 0, "usage reserved ignored")
+    mouse_rows()
     log.line("PASS USB invariants")
     unsafe { pax_exit(0x10) }
     panic.halt()
