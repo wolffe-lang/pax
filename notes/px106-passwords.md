@@ -176,10 +176,17 @@ loses its three password names: PAX's sudo asks now):
   or 1502, the logfile line anywhere). PAX's sudo sends no mail and refuses
   that Default by name, so under any policy it reads the two agree: no
   entry (U14's lobo).
-- the delays: Ubuntu's are PAM's, spread about their value (measured in
-  the same container: su and login 2.77-3.33 s, sudo 1.66-2.61 s); PAX's
-  are the nominal 3 s and 2 s every time, so P3's floors (2.9 s, 1.9 s)
-  hold PAX's, and Ubuntu's are printed beside them, never judged.
+- the delays: Ubuntu's are Linux-PAM's, documented as the requested delay
+  "randomly distributed (by up to 50%) about" it (pam_fail_delay(3)):
+  login's stack requests 3 s (pam_faildelay `delay=3000000`), su's, sudo's
+  and passwd's pam_unix's "of the order of two second" (pam_unix(8)).
+  PAX's programs wait their nominal every time (login and su 3 s, sudo 2 s,
+  passwd's current password 1.5 s), each inside Ubuntu's documented band.
+  P3 holds PAX's to their nominal less 0.1 s; P3u holds Ubuntu's to half
+  of theirs less 0.1 s. Both floors come from the documentation, never
+  from a measurement (the first floors, 2.9 s and 1.9 s, were PAX's
+  applied to Ubuntu's as well, and Ubuntu's went under them on CI's
+  runners: pax#324).
 - the upgrade (U14): px103's N1 is gone (lobo's two refusals under `-n`
   are Linux's words now, and neither side logs them).
 
