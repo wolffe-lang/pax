@@ -440,6 +440,51 @@ onto a used 1 TB disk shaped like kasumi's own target. Nothing here is a claim a
 [docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for kasumi. See
 [Guided installation](docs/BOOT.md#guided-installation).
 
+### Upgrading over ssh
+
+An installed PAX that already has `pax-upgrade` (the stick that brings it installs or upgrades as before) takes a
+newer image from another machine on the network and upgrades itself from it at the next boot, the stick staying in the
+drawer. What is sent is the image's archive, `pax-dev-COMMIT.cpio` (or `pax-COMMIT.cpio` for the release image), the
+same bytes a stick from that build carries at `/boot/initramfs.cpio`; its sha256 is in the build's `sha256.txt`. The
+installed root needs about twice the archive's size free. Three commands, from the other machine, as your own account
+(a member of group `sudo` with a password):
+
+    ssh YOU@HOST 'pax-upgrade receive --sha256 DIGEST' < pax-dev-COMMIT.cpio
+    read -s PASSWORD; printf '%s\n' "$PASSWORD" | ssh YOU@HOST "sudo -k -S -p '' pax-upgrade arm --reboot"
+    ssh YOU@HOST pax-upgrade status
+
+- `receive` needs no root. It writes what arrives to `~/.pax-upgrade/`, hashes it as it arrives and again when it
+  reads it back, and keeps it only when both are the digest you gave; anything else keeps nothing, so send it again.
+- `arm` is root's. It moves the archive into `/var/lib/pax-upgrade/` (root's alone), reads it back, and refuses by
+  name before it changes anything: nothing received, a digest that differs, too little space, an image older than the
+  installed one or the same one, an archive with no boot entry of its own, a disk that reports no model or serial,
+  an EFI partition whose `limine.conf` is not the installer's text (an edited one is never merged), a second arm, a
+  caller that is not root. Then it puts the archive's kernel on the EFI partition and makes the archive's own entry,
+  `PAX: upgrade from the staged image`, Limine's default for the next boot, with a five-second menu.
+- The next boot reads the archive from the root, checks its sha256, and upgrades the installed system from it exactly
+  as the stick's upgrade entry does (`pax-install --upgrade`: your files kept, a new version beside each one you
+  changed as `.pax-new`, `/home` and `/root` never touched), with the arm as the confirmation. Then it reboots into the
+  upgraded system, which comes back on the network as before and removes the staged files at its first boot.
+- `status` needs no root: what you received, and the last lines of `/var/log/pax-upgrade.log` (armed, applying,
+  upgraded, refused, stopped, not applied, and why).
+- `sudo -k -S pax-upgrade disarm` takes the arm back before the reboot; `sudo -k -S pax-upgrade clean` removes a
+  staged archive that is no longer wanted. Over ssh always use `sudo -k -S` with the password on standard input: a
+  plain `sudo` there cannot ask you for it.
+
+**When it does not come back.** First wait: the staged boot is tried twice at most. A staged kernel that cannot read
+or check the archive, or a third try, boots the installed system instead; it puts Limine's configuration back,
+writes why to the log, and reboots into its own kernel, so `pax-upgrade status` says what happened. If the screen
+stops instead, go to the console:
+
+- Limine shows `PANIC` and `Press a key to return to menu.`, or the staged kernel stops on a panic (it halts; nothing
+  restarts it): press a key, or power the machine off and on, and in Limine's menu choose `PAX ext2 developer
+  preview` with the arrow keys and Enter. The installed system sees that it booted while armed, disarms and says so
+  (or log in and run `sudo pax-upgrade disarm`). Each power cycle into the staged entry counts as a try, so after two
+  the installed system boots by itself.
+- The installed system does not boot either (an upgrade cut after it began writing): boot the stick. Its entry `PAX:
+  upgrade the installed system` mounts the root, and `pax-install --upgrade` finishes the cut upgrade from its
+  record.
+
 ### The network at the console
 
 The console kernel every image boots brings its network up before the first program: a virtio network device, or
