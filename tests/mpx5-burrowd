@@ -16,9 +16,10 @@
 # install it (tools/install-den: /bin/git, /bin/git-upload-pack,
 # /bin/git-receive-pack); burrow's three programs (tools/mkburrow,
 # tools/install-burrow: /bin/ssh, /bin/burrow-keygen, /bin/burrowd);
-# /etc/burrowd/burrowd_config and /etc/pax-boot.d/burrowd as the images ship
-# them (user/burrowd, user/pax-boot.d); (px116) /etc/shrc as the dev image
-# has it, tools/system-env's, and the dev compiler, /usr/bin/wolf and
+# /etc/pax-boot.d/burrowd as the images ship it (user/pax-boot.d); (px116)
+# /etc/shrc and /etc/burrowd/burrowd_config as the dev image has them,
+# tools/system-env's (the configuration's SetEnv line /etc/shrc's exports),
+# and the dev compiler, /usr/bin/wolf and
 # /usr/share/wolf/compiler-std (tools/mkwolf and tools/mkwolf-std, or
 # PAX_DEV_WOLF_DIR and PAX_DEV_STD_DIR, held to user/wolf.sums and
 # user/wolf.pin); an /etc/passwd with root, pax, lobo
@@ -110,12 +111,15 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/install-burrow" "$work/burrow" "$r" >> "$work/burrow.txt" 2>&1 || why+=" tools/install-burrow;"
     [ -x "$r/bin/burrowd" ] || missing+=" /bin/burrowd (tools/mkburrow and tools/install-burrow carry no server)"
     # The shipped files, from user/, never copied by hand.
-    for f in burrowd/burrowd_config:etc/burrowd/burrowd_config pax-boot.d/burrowd:etc/pax-boot.d/burrowd; do
+    for f in pax-boot.d/burrowd:etc/pax-boot.d/burrowd; do
         if [ -f "$PAX_ROOT/user/${f%%:*}" ]; then cp -p "$PAX_ROOT/user/${f%%:*}" "$r/${f#*:}"; else missing+=" /${f#*:} (no user/${f%%:*})"; fi
     done
-    # px116 (pax#334): /etc/shrc as the dev image has it, from the one list the distribution's
-    # root is written from too (tools/system-env) (B17).
+    # px116 (pax#334): /etc/shrc and burrowd_config as the dev image has them, from the one list
+    # the distribution's root is written from too (tools/system-env): the configuration's SetEnv
+    # line is the variables /etc/shrc exports for the console, every one but PATH (B17).
     python3 -I "$PAX_ROOT/tools/system-env" shrc dev > "$r/etc/shrc" || why+=" tools/system-env shrc;"
+    python3 -I "$PAX_ROOT/tools/system-env" burrowd-config "$r/etc/shrc" > "$r/etc/burrowd/burrowd_config" \
+        || why+=" tools/system-env burrowd-config;"
     # px116: the dev image's compiler and its own std where the distribution's root has them
     # (/usr/bin/wolf and wolf-cimport-worker, held to user/wolf.sums; /usr/share/wolf/compiler-std,
     # its STD-REV user/wolf.pin's), so B17 builds over ssh what the console builds. No native link
