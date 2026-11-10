@@ -314,7 +314,10 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
   ssh pax@ADDRESS 'den init -q --bare repo.git'        # then: git push pax@ADDRESS:repo.git main
   ```
 
-  A command runs as the account through its shell, with no pty: `ssh pax@ADDRESS ls` works. `ssh pax@ADDRESS` gives
+  A command runs as the account through its shell, with no pty: `ssh pax@ADDRESS ls` works. It has the variables
+  `/etc/shrc` exports for the console (`WOLF_STD`, `LUPIN_STD`, `DEN_TLS_ROOTS`): burrowd's configuration sets them
+  with `SetEnv`, a line written from `/etc/shrc` when the image is built, so `ssh pax@ADDRESS wolf build hello.lu`
+  works as at the console. **From this image on, a command over ssh needs no `. /etc/shrc;` before it** (pax#334). `ssh pax@ADDRESS` gives
   the account's login shell, still with no pty: PAX has no ptys yet, so OpenSSH prints `PTY allocation request failed
   on channel 0` and burrowd's next line says the shell runs without a terminal. `ssh -T pax@ADDRESS` asks for no pty
   and goes straight to the shell; `ssh -t pax@ADDRESS` ends with status 255 at the refused pty, as OpenSSH's client
@@ -339,8 +342,9 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
   changed configuration.
 
 `tests/mpx5-burrowd` boots an installed-shaped PAX on a tap the rig leases it an address on, and holds commands, both
-logins, the refusals, git and a restart to the same through OpenSSH's `sshd` on Linux; a second boot keeps the host
-key; the stick's shape is refused from the LAN and answered on loopback.
+logins, the refusals, git and a restart to the same through OpenSSH's `sshd` on Linux; a command's environment (the
+console's variables, held to `sshd` given the same `SetEnv` line) and a `wolf build` over ssh with no prefix; a second
+boot keeps the host key; the stick's shape is refused from the LAN and answered on loopback.
 
 ## Booting PAX
 
