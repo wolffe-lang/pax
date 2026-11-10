@@ -421,7 +421,8 @@ and writes only after the word `yes` (anything else cancels). It is an explicit 
 - it appends its transcript to `/pax/logs/install-<n>.txt` on the stick after every step, ending with the SHA-256 of
   the first MiB of each partition it wrote, for a machine with no serial port;
 - what the stick wrote while it ran stays on the stick: its DHCP lease (`/var/lib/dhcp`), `/etc/resolv.conf`,
-  `sudo`'s log and root's dotfiles (root's home is `/`: the shell's history, lope's store) are never copied to an
+  `sudo`'s log, and root's dotfiles and `/Trash` (root's home is `/`: the shell's history, lope's store, what `trash`
+  put aside) are never copied to an
   install or an upgrade, nor listed in its manifest; the installed system writes its own;
 - an install made from the live stick boots to `/bin/login`, not the stick's passwordless entry: root or the new
   user, with their passwords, or root with none while every account is locked (the first-boot rule above). As
