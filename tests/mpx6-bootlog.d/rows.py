@@ -502,6 +502,31 @@ def rows_installed(fw, cpio):
     img.unlink()
 
 
+def rows_armed(fw, cpio):
+    # U2: an armed disk's configuration as `pax-upgrade arm` writes it (user/install/pax-upgrade's
+    # armed_conf: `timeout: 5`, `default_entry: 1`, the staged entry first, the installed entry after it,
+    # in the installer's new text): the first entry boots with no key. The staged entry is a stand-in
+    # here (the kernel stopped at `root` by its test word); the staged boot itself is tests/mpx6-staged's.
+    head = 'timeout: 5\ndefault_entry: 1\n'
+    img = disk(f'{fw}-U2', cpio, 'pax.bootstop=root', head=head)
+    conf = esp_conf(img)
+    entry = conf[conf.index('/PAX'):]
+    installed = entry.replace('/PAX\n', '/PAX ext2 developer preview\n').replace(' pax.bootstop=root', ' quiet rootfstype=ext2')
+    staged = entry.replace('/PAX\n', '/PAX: upgrade from the staged image\n')
+    esp_conf(img, head + '\n' + staged + '\n' + installed)
+    m = Machine(f'{fw}-U2', fw, disk_media(img))
+    t0 = time.monotonic()
+    t = m.boot(until=r'^bootmark: stopped at root \(pax\.bootstop\)$', timeout=240)
+    secs = time.monotonic() - t0
+    m.quit()
+    if 'bootmark: stopped at root (pax.bootstop)' not in t:
+        fail(f'U2 {fw}', 'the armed configuration\'s first entry did not boot unattended; the last lines: '
+             + ' | '.join(t.strip().split('\n')[-4:]))
+    else:
+        say(f'PASS U2 {fw}: the armed shape (timeout 5, default_entry 1) booted its first entry with no key in {secs:.0f} s')
+    img.unlink()
+
+
 def rows_post(fw, plain):
     # P1: the POST codes (port 0x80) in QEMU's I/O trace: 0x11 … 0x88, the last eight such written.
     m = Machine(f'{fw}-P1', fw, ['-cdrom', plain], reboot_exits=True, trace=True)
@@ -619,7 +644,7 @@ def main():
         steps = [('B', lambda: rows_beeps(fw, plain, quiet)), ('M', lambda: rows_cmos(fw, dump_iso)),
                  ('M', lambda: rows_marks(fw, disk(f'{fw}-M2', cpio, ''))), ('S', lambda: rows_stops(fw, cpio)),
                  ('R', lambda: rows_refused(fw, cpio)), ('L', lambda: rows_log(fw, cpio, cpio_reboot)),
-                 ('N', lambda: rows_absent(fw, cpio)), ('U', lambda: rows_installed(fw, cpio)), ('P', lambda: rows_post(fw, plain)),
+                 ('N', lambda: rows_absent(fw, cpio)), ('U', lambda: rows_installed(fw, cpio)), ('U', lambda: rows_armed(fw, cpio)), ('P', lambda: rows_post(fw, plain)),
                  ('K', lambda: rows_record(fw, cpio_rec) if cpio_rec else fail(f'K0 {fw}', 'no pax-boot-status built (PX118_BOOTSTATUS)'))]
         for key, step in steps:
             if key not in only:
