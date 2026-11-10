@@ -11,7 +11,7 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   upgrade made from a live stick that had booted with a network cable copied
   the stick's DHCP lease (`/var/lib/dhcp/pax.lease`) and `/etc/resolv.conf` to
   the target and listed them in its manifest, and every install carried root's
-  console history and lope's store (root's home is `/`) and `sudo`'s log. The
+  console history, lope's store and trash can (root's home is `/`) and `sudo`'s log. The
   installer's walk of the live tree now leaves all of these out, so the
   installed system starts with none of the stick's and writes its own, an
   upgrade no longer leaves `.pax-new` copies of them beside the installed
