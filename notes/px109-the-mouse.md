@@ -110,7 +110,7 @@ Every take ran on Linux host 1 in the container. Records are `gauntlet-record.sh
 - **R-px109-7, absolute positions: (a), ruled.** Scaled to 0..32767 across the device's logical extents (QEMU's
   tablet is already 0..32767), so the console maps one range to its grid. (b) the device's own units and extents in
   every record.
-- **R-px109-8, the release tier's build time: (a), recommended.** The release console's cold build is 252 s at
+- **R-px109-8, the release tier's build time: (a), ruled.** The release console's cold build is 252 s at
   the head against 169 s at trunk (wolf 0.2.35, both twice, on a held block). The time is the mid-end's loop
   versioning, which costs a function its loops times its branches squared (wolf-lang#983), and the loops are
   kernel/log's: at the head `log.dec` (two loops) is inlined at all of its call sites and `log.put` (one loop) at
