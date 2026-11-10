@@ -125,6 +125,7 @@ pub fn port_b() -> u64 {
 // black.
 const OUT2: u64 = 0x20 // port 0x61 bit 5: channel 2's output, read back
 const BEEP_IDLE: u64 = 65536 // reads of port 0x61 with no edge before a beep gives up
+const GATE: u64 = 1 // port 0x61 bit 0 alone: channel 2 counts, the speaker silent
 
 /// px118: sound count `n` (1-65535) for `halves` half-periods of channel
 /// 2's square wave, then silence; returns the edges of OUT2 seen. The
@@ -139,10 +140,24 @@ const BEEP_IDLE: u64 = 65536 // reads of port 0x61 with no edge before a beep gi
 /// 0x61's bits 2-3 kept as found, bits 0-1 clear at the end. No state,
 /// no region, no heap; IF clear or set.
 pub fn boot_tone(n: u64, halves: u64) -> u64 {
+    timed(n, halves, GATE_AND_DATA)
+}
+
+/// px118: a rest between boot tones, timed as `boot_tone` times a tone:
+/// channel 2 counts `n` with its gate on (port 0x61 bit 0) and the
+/// speaker's data off (bit 1 clear), so OUT2 still turns over and is
+/// read back at bit 5 while nothing sounds (Intel's PCH data sheets,
+/// port 0x61: the counter's gate, the speaker's data enable and OUT2's
+/// status are three bits).
+pub fn boot_rest(n: u64, halves: u64) -> u64 {
+    timed(n, halves, GATE)
+}
+
+fn timed(n: u64, halves: u64, bits: u64) -> u64 {
     out(PIT_CTRL, 0xb6) // channel 2, low then high byte, mode 3, binary
     out(PIT_CH2, n & 0xff)
     out(PIT_CH2, (n >> 8) & 0xff)
-    out(PORT_B, (inp(PORT_B) & 0x0c) | GATE_AND_DATA)
+    out(PORT_B, (inp(PORT_B) & 0x0c) | bits)
     var edges: u64 = 0
     var idle: u64 = 0
     var last = inp(PORT_B) & OUT2
