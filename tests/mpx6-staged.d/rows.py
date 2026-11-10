@@ -206,22 +206,26 @@ def main():
         text, _ = boot(img, fw, f'{fw}-T3')
         got = attempts(img)
         if installed_ok(f'T3 {fw}', text, 'staged: two staged boots began already'):
-            if got != '11000000':
-                fail(f'T3 {fw}', f'the attempts file reads {got!r}, not \'11000000\'')
+            if got != '1100000T':
+                fail(f'T3 {fw}', f'the attempts file reads {got!r}, not \'1100000T\' (the refusal\'s letter last)')
             else:
                 say(f'PASS T3 {fw}: the third staged boot refused by name; / the installed root, its own program run; the file {got}')
         img = make_disk(f'{fw}-b', staged, root, '0' * 64)
         text, _ = boot(img, fw, f'{fw}-T4')
         got = attempts(img)
         if installed_ok(f'T4 {fw}', text, "staged: the archive's sha256 is not pax.staged='s"):
-            if got != '10000000':
-                fail(f'T4 {fw}', f'the attempts file reads {got!r}, not \'10000000\'')
+            if got != '1000000D':
+                fail(f'T4 {fw}', f'the attempts file reads {got!r}, not \'1000000D\' (the refusal\'s letter last)')
             else:
                 say(f'PASS T4 {fw}: another digest refused by name after the attempt was counted ({got}); the installed root')
         img = make_disk(f'{fw}-c', staged, root, digest, with_archive=False)
         text, _ = boot(img, fw, f'{fw}-T5')
+        got = attempts(img)
         if installed_ok(f'T5 {fw}', text, 'staged: no /var/lib/pax-upgrade/staged/archive'):
-            say(f'PASS T5 {fw}: no archive, refused by name; the installed root')
+            if got != '1000000M':
+                fail(f'T5 {fw}', f'the attempts file reads {got!r}, not \'1000000M\' (the refusal\'s letter last)')
+            else:
+                say(f'PASS T5 {fw}: no archive, refused by name after the attempt was counted ({got}); the installed root')
         for f in WORK.glob(f'{fw}-[abc].img'):
             f.unlink()
         # T6: an image-sized archive (PAD_MIB beside the rest): read, mapped and hashed whole, then `/`.
