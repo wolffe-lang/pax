@@ -22,7 +22,8 @@
 # and the dev compiler, /usr/bin/wolf and
 # /usr/share/wolf/compiler-std (tools/mkwolf and tools/mkwolf-std, or
 # PAX_DEV_WOLF_DIR and PAX_DEV_STD_DIR, held to user/wolf.sums and
-# user/wolf.pin); an /etc/passwd with root, pax, lobo
+# user/wolf.pin), and lupin's std at /usr/share/wolf/std (tools/fetch-std,
+# user/std.pin); an /etc/passwd with root, pax, lobo
 # and the worker's account burrowd; /etc/pax-net `dhcp wait=10`; an
 # /etc/fstab that mounts the run's own small ext2 volume (label
 # px112-keys) on /etc/burrowd, write-through, so a second boot of the same
@@ -44,10 +45,10 @@
 # working again; B9 the log at the console; B10 a second boot keeps the
 # host key; B17 (px116, pax#334) a command over ssh has the variables
 # /etc/shrc exports for the console, held to the rig's sshd given the same
-# SetEnv line, and `wolf build` of a one-line program succeeds with no
-# `. /etc/shrc;` before it; B11 the live stick's shape (the live entry as
-# pid 1, the shipped configuration's loopback): a connection from the LAN refused,
-# one on loopback answered. B1-B10 boot the installed shape (/bin/login,
+# SetEnv line, and `wolf build` of a program that calls std.fs succeeds
+# with no `. /etc/shrc;` before it; B11 the live stick's shape (the live
+# entry as pid 1, the shipped configuration's loopback): a connection from
+# the LAN refused, one on loopback answered. B1-B10 boot the installed shape (/bin/login,
 # the volume's configuration the installer's, `ListenAddress 0.0.0.0`).
 #
 # Needs root in the rig (the tap, dnsmasq) or `sudo -n`, /dev/net/tun,
@@ -155,6 +156,14 @@ if [ -z "$images" ]; then
         cp -R "$stddir/." "$r/usr/share/wolf/compiler-std/"
     else
         missing+=" /usr/share/wolf/compiler-std (no std at user/wolf.pin's $wolf_pin in $stddir)"
+    fi
+    # lupin's std where both images have it, /usr/share/wolf/std (user/std.pin's, tools/fetch-std):
+    # the other standard library a compiler run with no WOLF_STD can resolve, as pax#334 found.
+    if "$PAX_ROOT/tools/fetch-std" "$work/base-std" > "$work/base-std.txt" 2>&1; then
+        mkdir -p "$r/usr/share/wolf/std"
+        cp -R "$work/base-std/std/." "$r/usr/share/wolf/std/"
+    else
+        missing+=" /usr/share/wolf/std (tools/fetch-std: $(tail -n 1 "$work/base-std.txt"))"
     fi
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\nburrowd:x:989:989:burrowd:/nonexistent:/bin/false\n' > "$r/etc/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nburrowd:x:989:\nsudo:x:27:pax\n' > "$r/etc/group"
