@@ -418,6 +418,12 @@ const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once cali
 // of the 6144, past kernel/vm's last, 6083): the process's own sums,
 // then those of its children reaped by a wait.
 const A_RU: u64 = 6084
+// px115: the process's start, proc_pid_stat(5)'s starttime: the tick
+// (100 Hz, the clock ticks of sysconf(_SC_CLK_TCK); CLOCK_MONOTONIC's
+// base) it was made at, word 6094, past the usage words. A fork's child
+// takes the tick of its fork (`clone_current`), a process the kernel
+// starts the tick of its start (`start_thread`); exec keeps it.
+const A_BORN: u64 = 6094
 const RU_CPU: u64 = 0 // TSC cycles its threads have run
 const RU_SYS: u64 = 1 // the part of them in system calls
 const RU_PEAK: u64 = 2 // the highest count of its space's mapped pages seen
@@ -1066,6 +1072,7 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
         // is what a getty or `setsid -c` gives a shell there).
         put_field(s, offset_of(Thread, pgid), pid)
         put_field(s, offset_of(Thread, sid), pid)
+        born_put(own_area(s), timer.ticks()) // px115: its start
         if sv(S_TTY_ON) == 1 && sv(S_TTY_SID) == 0 {
             put_sv(S_TTY_SID, pid)
             put_sv(S_TTY_PGRP, pid)
@@ -1793,6 +1800,7 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
         ru_put(to, i, 0)
         i += 1
     }
+    born_put(to, timer.ticks()) // px115: its start, not its parent's (fork(2))
     put_field(s, offset_of(Thread, state), READY)
     enqueue(s)
     s
@@ -3474,6 +3482,19 @@ fn ru_put(a: u64, i: u64, v: u64) {
 
 fn ru_add(a: u64, i: u64, d: u64) {
     ru_put(a, i, ru_get(a, i) + d)
+}
+
+/// px115: the start tick in the process area at `a` (`A_BORN`).
+fn born_put(a: u64, t: u64) {
+    // # Safety: `a` is a process area (PROC_AREA bytes, 6144 words); A_BORN = 6094 < 6144.
+    unsafe { ((a + A_BORN * 8) as *u64).write_volatile(t) }
+}
+
+/// px115: the start tick of the process whose area is at `a`
+/// (kernel/procfs's starttime).
+pub fn born(a: u64) -> u64 {
+    // # Safety: as `born_put`.
+    unsafe { ((a + A_BORN * 8) as *u64).read_volatile() }
 }
 
 /// The switch from slot `from` to slot `to` (`run_next`, IF clear): the
