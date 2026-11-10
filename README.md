@@ -468,17 +468,20 @@ installed root needs about twice the archive's size free. Three commands, from t
 - `status` needs no root: what you received, and the last lines of `/var/log/pax-upgrade.log` (armed, applying,
   upgraded, refused, stopped, not applied, and why).
 - `sudo -k -S pax-upgrade disarm` takes the arm back before the reboot; `sudo -k -S pax-upgrade clean` removes a
-  staged archive that is no longer wanted. Over ssh always use `sudo -k -S` with the password on standard input: a
-  plain `sudo` there cannot ask you for it.
+  staged archive that is no longer wanted.
+- **Over ssh, always `sudo -k -S`, the password on standard input.** A bare `sudo` over ssh is unsafe with the
+  current burrowd: it asks for the password on the machine's own console, not yours, and burrowd stops answering
+  until the machine is powered off and on.
 
 **When it does not come back.** First wait: the staged boot is tried twice at most. A staged kernel that cannot read
 or check the archive, or a third try, boots the installed system instead; it puts Limine's configuration back,
 writes why to the log, and reboots into its own kernel, so `pax-upgrade status` says what happened. If the screen
 stops instead, go to the console:
 
-- Limine shows `PANIC` and `Press a key to return to menu.`, or the staged kernel stops on a panic (it halts; nothing
-  restarts it): press a key, or power the machine off and on, and in Limine's menu choose `PAX ext2 developer
-  preview` with the arrow keys and Enter. The installed system sees that it booted while armed, disarms and says so
+- Limine shows `PANIC` and `Press a key to return to menu.`, or the staged kernel stops on a panic. **A kernel panic
+  in the staged boot halts the machine: nothing restarts it, and a person must choose the installed entry at the
+  console or boot the stick.** Press a key, or power the machine off and on, and in Limine's menu choose `PAX ext2
+  developer preview` with the arrow keys and Enter. The installed system sees that it booted while armed, disarms and says so
   (or log in and run `sudo pax-upgrade disarm`). Each power cycle into the staged entry counts as a try, so after two
   the installed system boots by itself.
 - The installed system does not boot either (an upgrade cut after it began writing): boot the stick. Its entry `PAX:
