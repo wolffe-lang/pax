@@ -41,21 +41,60 @@ then both firmwares; records on the lane host; the final records last, after the
    a power cut during the receive and during the apply. The plant, red by name.
 7. The README section: the three commands, and what to do when it does not come back.
 
-## Where it stands (2026-11-10, phase 2's second hand-back)
+## Where it stands (2026-11-10, phase 2's third hand-back)
 
-Light takes on the lane host (native tier; mpx6-staged on both firmwares), each read by its END lines:
-- Step 1, sudo: red at the old key by name (the witness branch px115-red-sudo, 4409352c: P4 `rc 0` and `0` where
-  Ubuntu's sudo says `a password is required`); green at 8dd84d84 (P4: 82 lines the same). procs' `start` red by
-  name at e853faa5, green at 8dd84d84. mpx3-shell's other reds in this rig are trunk's too (d56fdd98, the same
-  rig): the user sessions want a container engine the rig's container lacks, and two rows read the boreutils the
-  rig passes in. On PAX pids are never reused (kernel/sched's `take_pid`), so the start time changes no PAX answer
-  until they are; it makes PAX's sudo right where the container rows run it, on Linux. The ssh row waits for
-  burrow's change (every ssh command shares the console's session and terminal today).
-- Step 3, the staged boot: tests/mpx6-staged red by name at 231b3ce8 (T1-T5, both firmwares: no `staged:` line),
-  green at 279da789: T1-T6 on BIOS and UEFI, T6 a 402,664,096-byte archive read, hashed and made `/` with the boot
-  to its reboot in 17-18 s. The rows run in a container with sfdisk and a local stand-in for tools/e2fs's engine.
-  77db0019 changed the rows' first program to an ELF of their own (the kernel runs no `#!` script as init) after
-  the red; the red was the kernel's missing lines, which that change does not touch.
-  Not yet: `mount_upgrade` at /mnt/target under the staged word (the leg's AHCI disk will hold it), the suite's
-  CI wiring (tests/ci-plan, the workflow, tools/ci-tiers.map), a panic's reboot under the staged word.
-- Steps 4 to 7: not begun.
+Light takes on the lane host (native tier), each read by its END lines:
+- Step 1, sudo: red and green as the second hand-back said (4409352c red, 8dd84d84 green). The ssh row waits for
+  burrow's session change.
+- Step 3, the staged boot: green at 279da789 (T1-T6, both firmwares). Since then a refusal found after the attempts
+  file writes its letter in the file's last byte (T two attempts, M no archive, E empty, N memory, P unmapped, R a
+  read, D the digest, A no archive PAX reads; 6172829c), for the hook's reason: T3-T5 read it (rows f60379e6, red
+  first). The rows' container must hold sfdisk (tools/mkdisk's oracle): the take image with it, not the net one.
+- Step 4, pax-upgrade: tests/mpx6-install.d/pax-upgrade.py, rows P1-P28 on Linux (an image for the disk, a
+  directory for the root, stand-ins for pax-install and reboot; `tests/mpx6-install --only pax-upgrade`, and in its
+  ci path), red by name against a stub at 20498a98 (P1-P27; P28, pax-install's usage refusals, passes against the
+  old pax-install too, which refuses any unknown option), green at bd875968 and again at the head. The program:
+  user/install/pax-upgrade/main.lu (tools/mkinstall's mode `upgrade`), user/install/armed.lu (the record, both
+  programs), `pax-install --upgrade --armed RECORD` (upgrade.lu), the entry template and the boot hook beside it.
+  Installed as /bin/pax-upgrade (PATH and sudo's secure_path both hold /bin), so the entry's `init=/bin/pax-upgrade`:
+  pid 1 with no arguments is `apply`.
+  Where the design note's words became choices: the verdicts go to /var/log/pax-upgrade.log (0644, one line each),
+  since the stage directory is root's 0700 and `status` needs no root; arm saves the ESP's configuration as it was
+  (limine.conf.installed: every put-back writes those bytes) and the armed one (limine.conf.armed: the hook's re-arm
+  after a cut past the ESP phase); the space check is the root's superblock free count against the archive's size
+  plus 8 MiB (the received archive already holds its own bytes; "about twice the archive" before the send, as the
+  README says); a fallback boot is known by the ESP still armed under the installed root, and reboots only when the
+  kernel's letter says the staged kernel is the one running; a done upgrade with no verdict is known by the running
+  /etc/pax-release being the record's; the ESP's kernel is emptied, not removed, by `clean` (paxfat removes no file).
+- The CI wiring (the staged suite's job and the map; no step of its own above): the mpx6-staged job (needs plan, $PAX_LEGS; the suite takes --tier now), the tier job needs it, the
+  map's lines; tests/ci-plan green at 2f5eac93 and the head. The P2 row "the GPT writer and the disk tools reach
+  ..." lists mpx6-staged now (tools/mkdisk reaches it by the derivation); that changed line names an existing job
+  whose name holds a host name, so the scrub grep counts it: held for a ruling, pushed only to the lane host.
+- Step 5, the images: distribution-root installs /bin/pax-upgrade, /etc/pax-boot.d/pax-upgrade and
+  /usr/share/pax-upgrade/entry (tests/distribution's rows first); mkdistribution builds pax-upgrade beside
+  pax-install and links each archive as pax[-dev]-COMMIT.cpio, its sha256 in sha256.txt. Not yet run (a
+  distribution build is a block take).
+- Step 7, the README section: written (3ddc621e).
+- Not yet: the leg (step 6), mount_upgrade's row under the staged word (step 3's last row; it is the leg's, on its
+  AHCI disk), the final records.
+
+## The leg, as planned for the next session
+
+A suite of its own (tests/mpx6-staged-ssh, or rows beside upgrade.py), in the net rig container (QEMU, OVMF, the
+tap, dnsmasq, OpenSSH: notes/px115/probes/p2-transfer.py's harness is the pattern: wolf's password set by debugfs
+at run time, the client's key in authorized_keys, igb on the tap, dnsmasq's lease):
+1. The disk: a copy of an installed 860-shaped disk on the burrowd image (the probes' disk; burrowd and the
+   /etc/pax-boot.d hooks are px112's, so the leg needs px112 merged, or its image), on ide-hd with the 860's model
+   and a test serial. Onto it, on the host (debugfs, mtools): the head's /bin/pax-upgrade, /bin/pax-install, the
+   hook, the entry, and the head's kernel at the ESP's /boot/pax (the installed system that "has pax-upgrade").
+2. The archive sent: that stick's own archive repacked on the host with the head's kernel at /boot/pax, the head's
+   pax-install, pax-upgrade, hook and entry, a marker file, and /etc/pax-release one second newer than the disk's.
+3. Rows, BIOS and UEFI: receive over ssh (`ssh wolf@HOST 'pax-upgrade receive --sha256 D' < archive`), arm over
+   ssh with `sudo -k -S` and --reboot; the staged boot (its serial lines: `staged: attempt 1 of 2`, `upgrade:
+   ... on /mnt/target`: mount_upgrade's row on the AHCI disk); apply; the reboot; burrowd answers; `pax-upgrade
+   status` says upgraded; the marker is on the root, the user's files kept, the staged files gone.
+4. A failed apply falls back unchanged: the staged archive changed on the host after the arm (the kernel's `D`), the
+   installed system boots, disarms, reboots into its own kernel; status says why; the root byte-identical in its
+   files. A power cut during the receive (QEMU killed mid-send: nothing received, the system unchanged) and during
+   the apply (QEMU killed after the staged boot began writing: the second attempt finishes it).
+5. The plant: e.g. the hook's disarm removed, so the fallback row is red by name.
