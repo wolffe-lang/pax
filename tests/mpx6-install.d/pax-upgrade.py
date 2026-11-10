@@ -306,6 +306,10 @@ def rows():
         r = up(['arm'])
         row(rid, rr.returncode == 0 and r.returncode == 1 and says(r, text) and not (R / STAGE / 'staged/archive').exists() and
             esp(disk, '/boot/limine/limine.conf') == installer_conf, f'exit {r.returncode}: {r.stdout}{r.stderr}')
+        # A refusal that did not happen leaves an arm; taken back, so each row stands alone (a plant is red at its own).
+        if (R / STAGE / 'armed').exists():
+            up(['disarm'])
+            up(['clean'])
     # P14: armed.
     receive('new')
     r = up(['arm'])
