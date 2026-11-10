@@ -57,8 +57,8 @@ if [ ! -f "$store/.unpacked" ]; then
         deb=$store/debs/$f
         if [ ! -f "$deb" ] || [ "$(sha256_of "$deb")" != "$sum" ]; then
             enc=${f//+/%2b}
-            curl -sSfL -o "$deb.part" "http://archive.ubuntu.com/ubuntu/pool/$pool/$enc" \
-                || curl -sSfL -o "$deb.part" "https://launchpad.net/ubuntu/+archive/primary/+files/$enc" \
+            "$PAX_ROOT/tools/net-retry" url "http://archive.ubuntu.com/ubuntu/pool/$pool/$enc" "$deb.part" \
+                || "$PAX_ROOT/tools/net-retry" url "https://launchpad.net/ubuntu/+archive/primary/+files/$enc" "$deb.part" \
                 || die "cannot fetch $f"
             mv "$deb.part" "$deb"
         fi
