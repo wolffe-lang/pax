@@ -75,6 +75,12 @@
 // or no link); e 3000 when an echo is asked for. w is measured by
 // kernel/clock over those three waits alone. With no device, no file and
 // no `quiet` the console's other lines are what they were.
+//
+// px118: a boot that goes black is heard. A high beep at the entry,
+// before any use of the framebuffer, and a low one when the console has
+// drawn its first line (kernel/speaker's `boot_tone`; `pax.nobeep`
+// silences both); no line is printed for either, so every transcript is
+// what it was (tests/mpx6-bootlog holds QEMU's speaker capture).
 use clock
 use apic
 use arp
@@ -463,8 +469,46 @@ fn release_identity() {
     log.end()
 }
 
+// px118: the boot's two beeps (kernel/speaker's `boot_tone`), so a
+// person at a machine whose screen stays black hears how far it came:
+// a high one at the kernel's entry, before any use of the framebuffer,
+// and a low one when the console has drawn its first line. One beep
+// and black: the kernel ran, and either never drew or drew where no one
+// sees. No beep: the kernel never started. `pax.nobeep` on the command
+// line silences both. Each is 210 edges of channel 2's square wave:
+// count 1140 (1046.6 Hz) for about 100 ms, count 2280 (523.3 Hz) for
+// about 200 ms.
+const BEEP_HIGH: u64 = 1140
+const BEEP_LOW: u64 = 2280
+const BEEP_HALVES: u64 = 210
+
+/// px118: whether the low beep has sounded (once a boot).
+var drawn_beep: u64 = 0
+
+fn beep(count: u64) {
+    if boot_info.cmdline_has("pax.nobeep") {
+        return
+    }
+    let _edges = speaker.boot_tone(count, BEEP_HALVES)
+}
+
+/// px118: the low beep, the first time the console is drawn: after the
+/// early screen's first line (Limine's mapping), or after kernel/fb's
+/// attach when the early screen did not attach.
+fn beep_drawn() {
+    // # Safety: a scalar module var, written by kmain alone.
+    let seen = unsafe { drawn_beep }
+    if seen != 0 || !screen.on() {
+        return
+    }
+    // # Safety: as above.
+    unsafe { drawn_beep = 1 }
+    beep(BEEP_LOW)
+}
+
 export fn kmain() {
     identity.mark_entry() // px87 (pax#253): the TSC at the entry, for the boot line
+    beep(BEEP_HIGH) // px118: the kernel ran (before any use of the framebuffer)
     // px77d: with `triage` on the command line, boot/triage.S's IDT,
     // CR4.MCE and band first (box 1), then a numbered box at each step
     // below; without it every triage call returns at once.
@@ -481,6 +525,7 @@ export fn kmain() {
     serial.init()
     triage.step(3) // the early screen attached (or `nofb`)
     log.line("PAX: the console")
+    beep_drawn() // px118: the early screen drew that line (when it attached)
     frames.start()
     identity.report() // px87 (pax#176): the commit and the SHA-256 of the file Limine loaded
     triage.step(4)
@@ -496,6 +541,7 @@ export fn kmain() {
     triage.step(7)
     // px76: its mode on a line (`screen: WxH …` or `screen: off, <why>`), for a photo
     fb.report()
+    beep_drawn() // px118: kernel/fb's attach replayed the console (when the early screen did not draw)
     if initramfs.bytes() != 0 || !fstab.root_asked() {
         initramfs.report() // px67: with `root=` and no module, nothing to say
     }
