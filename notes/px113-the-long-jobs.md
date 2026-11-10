@@ -17,7 +17,9 @@ No kernel's, firmware's or driver's source was read; nothing here touches PAX's 
 One issue was filed, pax#327, naming yew's slower build, as the contract asks of a measured slowdown.
 
 The machines: the build Mac, for git, the API reads and the Python-only rows (`tests/ci-plan`,
-`tests/ci-budgets.py` and the plan job's other selftests), behind its build lock.
+`tests/ci-budgets.py` and the plan job's other selftests), one worker, behind its build lock with its memory read
+first; hasu, for yew's four builds in section 4, inside one block's CPUs with its three locks held (block, then
+slot, then light), in a container with no network and a 12 GB cap.
 
 ## 2. Inputs, verified
 
