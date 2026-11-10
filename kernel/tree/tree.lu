@@ -3177,6 +3177,14 @@ pub fn start() {
     ip(r, I_PARENT, r)
     ip(r, I_NLINK, 2)
     put_st(S_READY, 1)
+    adopt_all()
+    put_st(S_STAMP, 0)
+    put_st(S_BASE, st(S_HELD))
+    put_st(S_BASE_LIVE, st(S_LIVE))
+    put_st(S_BASE_ITABLE, st(S_ITABLE))
+}
+
+fn adopt_all() {
     if initramfs.bytes() != 0 && initramfs.problem() == 0 {
         var e = initramfs.first() else initramfs.END
         while e != initramfs.END {
@@ -3184,6 +3192,14 @@ pub fn start() {
             e = initramfs.next(e) else initramfs.END
         }
     }
+}
+
+/// px115: the staged archive (kernel/fstab's `load_staged`, after the
+/// disks came up) adopted as `/`, as `start` adopts Limine's module; the
+/// tree's base counts taken again after it, before the first program.
+pub fn adopt_staged() {
+    put_st(S_STAMP, 1)
+    adopt_all()
     put_st(S_STAMP, 0)
     put_st(S_BASE, st(S_HELD))
     put_st(S_BASE_LIVE, st(S_LIVE))
