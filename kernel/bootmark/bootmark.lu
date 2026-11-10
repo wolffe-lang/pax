@@ -172,9 +172,17 @@ fn sum7(b: u64) -> u64 {
     (256 - t) & 0xff
 }
 
+/// This boot's eight bytes as one word (byte i at bits 8i), the checksum
+/// byte left 0.
+fn record() -> u64 {
+    // # Safety: module state, written by kmain alone (IF clear at each write).
+    let (b, l, st) = unsafe { (boot, last, set) }
+    MAGIC_P | (MAGIC_X << 8) | ((b & 0xff) << 16) | (((b >> 8) & 0xff) << 24) | (l << 32) | (st << 40) | (VERSION << 48)
+}
+
 /// Write this boot's record whole (the claim, or the entry when held).
 fn write_all() {
-    let rec = MAGIC_P | (MAGIC_X << 8) | ((boot & 0xff) << 16) | (((boot >> 8) & 0xff) << 24) | (last << 32) | (set << 40) | (VERSION << 48)
+    let rec = record()
     let c = sum7(rec)
     var i: u64 = 0
     while i < 7 {
@@ -186,9 +194,9 @@ fn write_all() {
 
 /// Write the last stage, the set and the checksum.
 fn write_stage() {
-    let rec = MAGIC_P | (MAGIC_X << 8) | ((boot & 0xff) << 16) | (((boot >> 8) & 0xff) << 24) | (last << 32) | (set << 40) | (VERSION << 48)
-    put_cmos(BASE + 4, last)
-    put_cmos(BASE + 5, set)
+    let rec = record()
+    put_cmos(BASE + 4, (rec >> 32) & 0xff)
+    put_cmos(BASE + 5, (rec >> 40) & 0xff)
     put_cmos(BASE + 7, sum7(rec))
 }
 
