@@ -23,7 +23,7 @@ case $WHAT in
     gauntlet)
         # The recorder (tools/gauntlet-record.sh of the planning repo, a copy by value at
         # $L/gauntlet-record.sh) on this host, in this checkout; each step a container.
-        export CTR_ENV PX111_HOST GAUNTLET_RECORD=$L/gauntlet-record.sh
+        export CTR_ENV PX111_HOST GAUNTLET_RECORD=$L/gauntlet-record.sh PAX_BUILD=$PB
         mkdir -p "$L/records"
         bash "$GAUNTLET_RECORD" --output "$L/records/green-${SHA:0:8}.log" -- bash notes/px111/rig/gauntlet.sh ;;
     plant)
