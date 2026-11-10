@@ -4,24 +4,28 @@
 # 0.2.36, each wolf with the std its release archive bundles (the std each
 # yew pin names is its compiler's bundled tree). The build is tools/mkyew's:
 # `wolf build --release --no-cache --deny-warnings src/yew.lu` through a `cc`
-# that adds -static, in the baseline Ubuntu 24.04 image (localhost/px88-ubuntu:1),
-# no network, --memory 12g, pinned to the block's CPUs (A 0-5, B 6-11; never C).
+# that adds -static, in a baseline Ubuntu 24.04 image (libc6-dev 2.39), no
+# network, --memory 12g, pinned to six CPUs of the host's own.
 #
 # Inputs staged by digest, each downloaded twice and the two hashed equal:
 # the wolf release archives (the digests yew's own wolf-toolchain.toml names)
 # and yew's codeload source archives (the digests user/yew.pin names).
 #
-# Each cell takes the block's three locks for itself, in the one order
-# (hasu-block-X, hasu-X, hasu-X-light): a measurement holds the light lock
-# too. A cell that will not build is written down as failed, with its error,
-# and is retried once without --deny-warnings, labelled so, never counted as
-# the cell. Detached by the caller (setsid -f); pid file, log, exit marker.
+# Each cell takes the host's three locks for those CPUs for itself, outermost
+# first, so nothing runs beside a measurement. A cell that will not build is
+# written down as failed, with its error, and is retried once without
+# --deny-warnings, labelled so, never counted as the cell. Detached by the
+# caller (setsid -f); pid file, log, exit marker.
+#
+# As it ran, but for the host's own names, which are variables here: the
+# working directory, podman, the image, the CPUs and the three lock files.
+#   SEP_DIR=DIR CPUS=LIST IMG=IMAGE LOCK1=F LOCK2=F LOCK3=F [PODMAN=P] separation.sh
 set -u
-X=${1:?block A or B}
-case $X in A) CPUS=0-5 ;; B) CPUS=6-11 ;; *) echo "block A or B (no timing on C)"; exit 2 ;; esac
-L=/home/mfwolffe/lanes/px113/sep
-P=/home/mfwolffe/lanes/hasu-env/bin/podman
-IMG=localhost/px88-ubuntu:1
+CPUS=${CPUS:?the six CPUs, as taskset takes them}
+L=${SEP_DIR:?a working directory}
+P=${PODMAN:-podman}
+IMG=${IMG:?a baseline Ubuntu 24.04 image}
+LOCK1=${LOCK1:?the outermost lock file} LOCK2=${LOCK2:?the second lock file} LOCK3=${LOCK3:?the innermost lock file}
 MARK=$L/sep.marker
 RES=$L/results.tsv
 echo $$ > "$L/sep.pid"
@@ -31,7 +35,7 @@ trap 'echo 129 > "$MARK"; exit 129' HUP
 say() { echo "$(date -u +%FT%TZ) $*"; }
 
 say "uptime: $(uptime)"
-free=$(df -BG --output=avail /home/mfwolffe/lanes | tail -1 | tr -dc 0-9)
+free=$(df -BG --output=avail "$L" | tail -1 | tr -dc 0-9)
 say "disk free: ${free} GB"
 [ "$free" -ge 35 ] || { say "under 35 GB free: not starting"; echo 3 > "$MARK"; exit 3; }
 
@@ -69,11 +73,11 @@ cell() { # yew-short wolf-version flags
     local src=$L/w/$name
     rm -rf "$src" "$L/w/out-$name"; mkdir -p "$src" "$L/w/out-$name"
     tar -xzf "$L/in/yew-$y.tar.gz" -C "$src" --strip-components=1
-    say "cell $name: waiting on block $X's locks"
+    say "cell $name: waiting on the CPUs' locks"
     local started
-    flock -w 21600 /home/mfwolffe/lanes/hasu-block-$X.lock \
-      flock -w 21600 /home/mfwolffe/lanes/hasu-$X.lock \
-      flock -w 21600 /home/mfwolffe/lanes/hasu-$X-light.lock \
+    flock -w 21600 "$LOCK1" \
+      flock -w 21600 "$LOCK2" \
+      flock -w 21600 "$LOCK3" \
       "$P" run --rm --network none --memory 12g \
         -v "$L/w:/w" -w "/w/$name" "$IMG" bash -c '
           set -u
