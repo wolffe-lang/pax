@@ -479,14 +479,30 @@ fn release_identity() {
 // person at a machine whose screen stays black hears how far it came:
 // a high one at the kernel's entry, before any use of the framebuffer,
 // and a low one when the console has drawn its first line. One beep
-// and black: the kernel ran, and either never drew or drew where no one
-// sees. No beep: the kernel never started. `pax.nobeep` on the command
-// line silences both. Each is 210 edges of channel 2's square wave:
+// and black: the kernel ran, took the framebuffer, and either stopped
+// before its first line or drew where no one sees; the high beep then
+// three pips (below): the framebuffer was refused and the kernel runs
+// blind. No beep: the kernel never started. `pax.nobeep` on the command
+// line silences them all. Each is 210 edges of channel 2's square wave:
 // count 1140 (1046.6 Hz) for about 100 ms, count 2280 (523.3 Hz) for
 // about 200 ms.
 const BEEP_HIGH: u64 = 1140
 const BEEP_LOW: u64 = 2280
 const BEEP_HALVES: u64 = 210
+
+// px118: a screen PAX will not draw on (kernel/fb's `judge`: no
+// framebuffer, or not 32-bit RGB 8:8:8) has a sound of its own, right
+// after the entry's beep, so "ran blind" is heard apart from "stopped
+// before drawing": a rest of about 150 ms, then three pips of about 80
+// ms each with 80 ms between, low, higher, low (count 1808, 659.9 Hz;
+// count 1356, 879.9 Hz), and never the low beep. The rests are timed by
+// the same edges with the speaker's data off (kernel/speaker's
+// `boot_rest`).
+const BEEP_PIP_A: u64 = 1808
+const BEEP_PIP_B: u64 = 1356
+const PIP_A_HALVES: u64 = 106 // 80 ms at 659.9 Hz
+const PIP_B_HALVES: u64 = 141 // 80 ms at 879.9 Hz
+const PIP_LEAD_HALVES: u64 = 198 // 150 ms at 659.9 Hz
 
 /// px118: whether the low beep has sounded (once a boot).
 var drawn_beep: u64 = 0
@@ -496,6 +512,20 @@ fn beep(count: u64) {
         return
     }
     let _edges = speaker.boot_tone(count, BEEP_HALVES)
+}
+
+/// px118: the screen refused (kernel/fb's reason `why`): kernel/bootmark
+/// marks it (once a boot), and the first time the refusal's pips sound.
+fn refused(why: u64) {
+    if !bootmark.refuse(why) || boot_info.cmdline_has("pax.nobeep") {
+        return
+    }
+    let _r0 = speaker.boot_rest(BEEP_PIP_A, PIP_LEAD_HALVES)
+    let _a0 = speaker.boot_tone(BEEP_PIP_A, PIP_A_HALVES)
+    let _r1 = speaker.boot_rest(BEEP_PIP_A, PIP_A_HALVES)
+    let _b0 = speaker.boot_tone(BEEP_PIP_B, PIP_B_HALVES)
+    let _r2 = speaker.boot_rest(BEEP_PIP_B, PIP_B_HALVES)
+    let _a1 = speaker.boot_tone(BEEP_PIP_A, PIP_A_HALVES)
 }
 
 /// px118: the low beep, the first time the console is drawn: after the
@@ -519,6 +549,12 @@ export fn kmain() {
     // px118: the previous boot's marks read, this boot's `entered` recorded
     // (kernel/bootlog's slot in memory, CMOS when it is PAX's, port 0x80).
     bootmark.start(bootlog.start())
+    // px118: a framebuffer PAX will not draw on, said at once (its marks,
+    // port 0x80, the pips), before anything else runs
+    let handed = fb.judge()
+    if !fb.accepted(handed) {
+        refused(handed)
+    }
     // px77d: with `triage` on the command line, boot/triage.S's IDT,
     // CR4.MCE and band first (box 1), then a numbered box at each step
     // below; without it every triage call returns at once.
@@ -554,6 +590,8 @@ export fn kmain() {
     let fb_on = if triage.off("nofb") { false } else { fb.start(pml4) } // px19: the screen, when there is one
     if fb_on {
         bootmark.stage(bootmark.FRAMEBUFFER) // px118
+    } else if !triage.off("nofb") {
+        refused(fb.why_code()) // px118: declined past the entry's judgement (its address, a mapping, the grid)
     }
     triage.step(7)
     // px76: its mode on a line (`screen: WxH …` or `screen: off, <why>`), for a photo
