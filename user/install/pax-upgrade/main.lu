@@ -1,6 +1,805 @@
-//! pax-upgrade (px115): not yet; tests/mpx6-install.d/pax-upgrade.py's rows are red against it.
+//! pax-upgrade (px115): upgrade an installed PAX from an archive sent over ssh
+//! (notes/px115-upgrade-over-ssh.md). tools/mkinstall builds it from
+//! user/install's files with this main in place of pax-install's.
+//!
+//!     ssh YOU@HOST 'pax-upgrade receive --sha256 DIGEST' < pax-COMMIT.cpio
+//!     printf '%s\n' "$PASSWORD" | ssh YOU@HOST "sudo -k -S -p '' pax-upgrade arm --reboot"
+//!     ssh YOU@HOST pax-upgrade status
+//!
+//! - `receive --sha256 D` (no root): standard input to ~/.pax-upgrade/incoming,
+//!   hashed as it arrives, synced, read back and hashed again; renamed to
+//!   `received` (its digest beside it) only when both are D. Anything else
+//!   keeps nothing.
+//! - `arm [--reboot]` (root): the caller's received archive (sudo's
+//!   SUDO_USER's) renamed into /var/lib/pax-upgrade/staged/archive (0700,
+//!   root's; one file system, so a rename), made root's and read back; then
+//!   read as a newc archive for its kernel (/boot/pax), its /etc/pax-release
+//!   and its own boot entry (/usr/share/pax-upgrade/entry, decision 7), and
+//!   refused by name: not root, a second arm, nothing received, a digest
+//!   that differs, too little space (the upgrade's writes beside the
+//!   archive), an older image or the installed one, an ESP configuration
+//!   that is not the installer's text, a disk with no model or serial, an
+//!   archive with no entry. Then, each written and read back: the attempts
+//!   file (eight `0` bytes the staged kernel counts in), the ESP's kernel
+//!   (/pax-upgrade/pax) and targets line (/pax/install-targets), the arm
+//!   record (armed.lu), and last the ESP's limine.conf by paxfat replace:
+//!   the archive's entry, filled, first and the default, the installed entry
+//!   second, a five-second menu.
+//! - `disarm` (root): the ESP's limine.conf as it was before the arm, the
+//!   record and the attempts file removed; the staged archive stays.
+//! - `clean` (root, never while armed): the staged archive and what the arm
+//!   left beside it removed, the ESP's kernel emptied (paxfat removes no file).
+//! - `status` (no root): what the caller received, and the last states of
+//!   /var/log/pax-upgrade.log.
+//! - `apply`: the staged boot's program (the entry's `init=/bin/pax-upgrade`:
+//!   run as pid 1 with no arguments, it is `apply`): `pax-install --upgrade
+//!   --armed` with the record on /mnt/target, then the verdict on the
+//!   target's log. Refused before any write: disarmed. Stopped after writes
+//!   began: still armed, so the next boot runs it again (the kernel's
+//!   attempts bound it).
+//! - `boot`: the installed system's boot hook (/etc/pax-boot.d/pax-upgrade):
+//!   the ESP still armed under the installed root (the staged kernel refused,
+//!   its reason in the attempts file's last byte, or the installed entry was
+//!   chosen at the menu): disarmed, the reason recorded, and a reboot when
+//!   the staged kernel is the one running; an upgrade cut after its ESP
+//!   phase: armed once more; the first boot after a success: the staged
+//!   files removed.
+//!
+//! For the rows only (tests/mpx6-install.d/pax-upgrade.py): `--root DIR`
+//! before the command puts every path under DIR, `--disk FILE --model M
+//! --serial S` stands an image for the installed disk, `--tool-dir DIR`
+//! finds paxfat, paxgpt, pax-install and reboot (/bin's on PAX).
+
+use std.x.crypto.sha2
+
+const ESP_CONF: str = "/boot/limine/limine.conf"
+const ESP_KERNEL_DIR: str = "/pax-upgrade"
+const ESP_KERNEL: str = "/pax-upgrade/pax"
+const ESP_TARGETS: str = "/pax/install-targets"
+const ENTRY: str = "/usr/share/pax-upgrade/entry"
+const ATTEMPTS_ZERO: str = "00000000"
+const UPGRADE_TARGET: str = "/mnt/target"
+const APPLY_RESERVE: int = 8388608
+const STAGED_WORD: str = "pax.staged="
+
+struct Up {
+    root: str,
+    disk: str,
+    model: str,
+    serial: str,
+    tools: str,
+    work: str,
+}
+
+fn usage() -> int {
+    eprint("usage: pax-upgrade receive --sha256 DIGEST < ARCHIVE | arm [--reboot] | disarm | status | clean | apply | boot")
+    2
+}
+
+fn refuse(cmd: str, why: str) -> int {
+    eprint("pax-upgrade: {cmd} refused: {why}")
+    1
+}
+
+fn stage_dir(u: Up) -> str { "{u.root}{STAGE_DIR}" }
+
+fn is_root() -> bool { (os_euid() else 1) == 0 }
+
+fn words_list(xs: List[str]) -> str {
+    var s = ""
+    for x in xs { s += if s.len == 0 then x else ", {x}" }
+    s
+}
+
+/// The work directory, made once (tmpfs on PAX).
+fn work_dir(mut u: Up) -> str ! {io} {
+    if u.work.len != 0 { return u.work }
+    let w = "/tmp/pax-upgrade-{os_pid()}"
+    if !fs_is_dir(w) { fs_create_dir_mode(w, 448) else |_| { return io } }
+    u.work = w
+    w
+}
+
+/// One line on the log every user may read (`base` the root it is on).
+fn up_log(base: str, word: str, text: str) {
+    let path = "{base}{UPGRADE_LOG}"
+    let line = "{time_unix_ms() / 1000} {word} {text}\n"
+    if !fs_exists(path) {
+        let fd = fs_open_perm(path, 4, 420) else |_| { eprint("pax-upgrade: {path} could not be made"); return }
+        fs_close(fd) else |_| {}
+    }
+    let fd = fs_open_mode(path, 2) else |_| { eprint("pax-upgrade: {path} could not be opened"); return }
+    fs_write_chunk(fd, line.bytes()) else |_| { eprint("pax-upgrade: {path}: a write failed") }
+    fs_sync(fd) else |_| {}
+    fs_close(fd) else |_| {}
+}
+
+/// The log's last line's word ("" without one).
+fn last_state(base: str) -> str {
+    let t = fs_read_text("{base}{UPGRADE_LOG}") else |_| { return "" }
+    let l = t.lines()
+    if l.len == 0 { return "" }
+    let w = l[l.len - 1].words()
+    if w.len < 2 then "" else w[1]
+}
+
+/// The caller's receive directory: sudo's SUDO_USER's home under root, else $HOME's.
+fn received_dir(u: Up) -> str {
+    let who = env_get("SUDO_USER") else |_| ""
+    if who.len != 0 && is_root() {
+        let pw = fs_read_text("{u.root}/etc/passwd") else |_| ""
+        for line in pw.lines() {
+            let f = line.split(":")
+            if f.len >= 7 && f[0] == who && f[5].starts_with("/") { return "{u.root}{f[5]}/.pax-upgrade" }
+        }
+    }
+    let home = env_get("HOME") else |_| ""
+    if home.len == 0 then "" else "{home}/.pax-upgrade"
+}
+
+// --- receive ------------------------------------------------------------------------------------
+
+fn receive(u: Up, digest: str) -> int {
+    if !is_digest(digest) {
+        return refuse("receive", "--sha256 takes the archive's sha256: 64 lowercase hex digits, sha256sum's first word")
+    }
+    let dir = received_dir(u)
+    if dir.len == 0 { return refuse("receive", "no HOME to receive into") }
+    if !fs_is_dir(dir) {
+        fs_create_dir_mode(dir, 448) else |_| { return refuse("receive", "{dir} could not be made") }
+    }
+    let incoming = "{dir}/incoming"
+    if fs_exists(incoming) { fs_remove(incoming) else |_| { return refuse("receive", "an earlier {incoming} could not be removed") } }
+    let fd = fs_open_perm(incoming, 4, 384) else |_| { return refuse("receive", "{incoming} could not be made") }
+    var hash = sha2.new256()
+    var n = 0
+    var fail = 0
+    loop {
+        region chunk {
+            let data = fs_read_chunk(0, 1048576) else |e| match e {
+                eof => { break },
+                io => { fail = 1; break },
+            }
+            fs_write_chunk(fd, data) else |_| { fail = 2; break }
+            n += data.len
+            // As snapshot.lu's hash_file: the scratch in this region, the state carried out.
+            var next = copy hash
+            sha2.update256(mut next, data)
+            hash.h0 = next.h0
+            hash.h1 = next.h1
+            hash.h2 = next.h2
+            hash.h3 = next.h3
+            hash.h4 = next.h4
+            hash.h5 = next.h5
+            hash.h6 = next.h6
+            hash.h7 = next.h7
+            hash.total = next.total
+            (mut hash.buf).reset()
+            for b in next.buf { (mut hash.buf).push(b) }
+        }
+    }
+    if fail == 0 { fs_sync(fd) else |_| { fail = 2 } }
+    fs_close(fd) else |_| {}
+    if fail != 0 || n == 0 {
+        fs_remove(incoming) else |_| {}
+        let why = if fail == 1 {
+            "standard input could not be read after {n} bytes"
+        } else if fail == 2 {
+            "writing {incoming} failed after {n} bytes (no space left?)"
+        } else {
+            "nothing arrived on standard input"
+        }
+        return refuse("receive", "{why}; nothing kept")
+    }
+    let got = sha2.to_hex(sha2.final256(take hash))
+    if got != digest {
+        fs_remove(incoming) else |_| {}
+        return refuse("receive", "the {n} bytes that arrived have sha256 {got}, not {digest}; nothing kept: send it again")
+    }
+    let back = hash_file(incoming) else |_| "unreadable"
+    if back != digest {
+        fs_remove(incoming) else |_| {}
+        return refuse("receive", "{incoming} read back has sha256 {back}, not {digest}; nothing kept")
+    }
+    durable_text("{dir}/incoming.sha256", "{digest} {n}\n") else |_| {
+        fs_remove(incoming) else |_| {}
+        return refuse("receive", "{dir}/incoming.sha256 could not be written; nothing kept")
+    }
+    fs_rename(incoming, "{dir}/received") else |_| { return refuse("receive", "{incoming} could not be renamed") }
+    fs_rename("{dir}/incoming.sha256", "{dir}/received.sha256") else |_| { return refuse("receive", "its digest could not be renamed") }
+    fs_sync_dir(dir) else |_| {}
+    print("pax-upgrade: received {n} bytes, sha256 {digest}, read back equal: {dir}/received")
+    print("Next, as root: printf '%s\\n' \"$PASSWORD\" | sudo -k -S -p '' pax-upgrade arm --reboot")
+    0
+}
+
+// --- the disk and its ESP -----------------------------------------------------------------------
+
+/// The installed disk: its node, model and serial; or why not. The disk whose partition 2 holds
+/// `/` (or `point`'s mount), in PAX's install layout.
+fn installed_disk(u: Up, point: str) -> (str, str, str, str) {
+    if u.disk.len != 0 { return (u.disk, u.model, u.serial, "") }
+    let ts = inventory() else |e| { return ("", "", "", "the disks could not be listed ({e})") }
+    let mounts = fs_read_text("/proc/self/mountinfo") else |_| ""
+    var dev_id = ""
+    for line in mounts.lines() {
+        let w = line.words()
+        if w.len >= 5 && w[4] == point { dev_id = w[2] }
+    }
+    if dev_id.len == 0 { return ("", "", "", "nothing is mounted at {point}") }
+    for t in ts {
+        let parts = t.identity.split(";")
+        for k in 1..parts.len {
+            let f = parts[k].split(":")
+            if f.len == 6 && "{f[1]}:{f[2]}" == dev_id {
+                if f[3] != "2" { return ("", "", "", "{point} is /dev/{f[0]}, not a partition 2: not PAX's install layout") }
+                let (_p1, _at, layout) = partitions_of(t)
+                if layout != "PAX's install layout" { return ("", "", "", "/dev/{t.name} holds {layout}, not PAX's install layout") }
+                let (model, serial) = identity_of(t.name)
+                return ("/dev/{t.name}", model, serial, "")
+            }
+        }
+    }
+    ("", "", "", "no disk's partition 2 is mounted at {point}")
+}
+
+fn esp_text(u: Up, dev: str, path: str, name: str) -> (bool, str) {
+    let (status, text) = tool("{u.tools}/paxfat", ["--offset", "{ESP_START}", "cat", dev, path], u.work, name)
+    (status == 0, text)
+}
+
+/// `src`'s bytes at the ESP's `dst` (made, or replaced), read back: "" or why not.
+fn esp_put(u: Up, dev: str, src: str, dst: str, n: int) -> str {
+    let want = file_sha(src)
+    let have = esp_sha(dev, dst, u.tools, u.work, n)
+    if have == want { return "" }
+    let op = if have == "absent" then "copy" else "replace"
+    if have == "absent" {
+        // Its directory, when it is not there yet (an error when it is: ignored, the copy decides).
+        var parent = ""
+        let parts = dst.split("/")
+        for k in 1..parts.len - 1 { parent += "/{parts[k]}" }
+        if parent.len != 0 {
+            let (_s, _t) = tool("{u.tools}/paxfat", ["--offset", "{ESP_START}", "mkdir", dev, parent], u.work, "esp-mkdir")
+        }
+    }
+    let (status, _t) = tool("{u.tools}/paxfat", ["--offset", "{ESP_START}", op, dev, src, dst], u.work, "esp-put")
+    if status != 0 { return "paxfat {op} {dst} exited {status}" }
+    let back = esp_sha(dev, dst, u.tools, u.work, n)
+    if back != want { return "the ESP's {dst} read back has sha256 {short(back)}, not {short(want)}" }
+    ""
+}
+
+/// The ESP's configuration put back as it was before the arm (saved beside the stage), or the
+/// installer's text when nothing was saved: "" or why not.
+fn put_back(u: Up, base: str, dev: str) -> str {
+    let st = "{base}{STAGE_DIR}"
+    var text = fs_read_text("{st}/limine.conf.installed") else |_| ""
+    if text.len == 0 {
+        let uuid = root_partuuid(dev, u.tools, u.work)
+        if uuid.len == 0 { return "the root's PARTUUID could not be read, and no configuration was saved" }
+        text = config_text(uuid)
+    }
+    let src = "{u.work}/limine.conf.back"
+    durable_text(src, text) else |_| { return "{src} could not be written" }
+    esp_put(u, dev, src, ESP_CONF, 20)
+}
+
+// --- the archive --------------------------------------------------------------------------------
+
+fn hex8(b: List[byte], o: int) -> int ! {invalid} {
+    var n = 0
+    for k in 0..8 {
+        let c = b[o + k] as int
+        var d = -1
+        if c >= 48 && c <= 57 { d = c - 48 }
+        if c >= 97 && c <= 102 { d = c - 87 }
+        if c >= 65 && c <= 70 { d = c - 55 }
+        if d < 0 { return invalid }
+        n = n * 16 + d
+    }
+    n
+}
+
+/// Each of `want`'s paths (absolute) found in the newc archive at `path`: its size at the path,
+/// its data's offset at the path with `@` after it.
+fn newc_find(path: str, want: List[str]) -> Map[str, int] ! {io, invalid} {
+    let size = fs_size(path) else |_| { return io }
+    let fd = fs_open(path) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    let magic = "070701".bytes()
+    var found = Map[str, int]()
+    var off = 0
+    loop {
+        if off + 110 > size { return invalid }
+        let h = fs_read_at(fd, off, 110) else |_| { return io }
+        if h.len != 110 { return invalid }
+        for k in 0..6 { if h[k] != magic[k] { return invalid } }
+        let filesize = hex8(h, 54)?
+        let namesize = hex8(h, 94)?
+        if namesize < 2 || namesize > 4096 { return invalid }
+        let nb = fs_read_at(fd, off + 110, namesize) else |_| { return io }
+        if nb.len != namesize { return invalid }
+        var raw = List[byte]()
+        for k in 0..namesize - 1 { (mut raw).push(nb[k]) }
+        var name = str_from_utf8(raw) else |_| { return invalid }
+        let data = (off + 110 + namesize + 3) / 4 * 4
+        if name == "TRAILER!!!" { break }
+        if name.starts_with("./") { name = name[2..] }
+        if name.starts_with("/") { name = name[1..] }
+        for w in want {
+            if w == "/{name}" {
+                found[w] = filesize
+                found["{w}@"] = data
+            }
+        }
+        off = (data + filesize + 3) / 4 * 4
+        if off > size { return invalid }
+    }
+    found
+}
+
+fn copy_range(src: str, off: int, n: int, dest: str) -> () ! {io} {
+    let fd = fs_open(src) else |_| { return io }
+    defer fs_close(fd) else |_| {}
+    let out = fs_open_perm(dest, 1, 384) else |_| { return io }
+    defer fs_close(out) else |_| {}
+    var done = 0
+    while done < n {
+        let want = if n - done < 1048576 then n - done else 1048576
+        let b = fs_read_at(fd, off + done, want) else |_| { return io }
+        if b.len == 0 { return io }
+        fs_write_chunk(out, b) else |_| { return io }
+        done += b.len
+    }
+    fs_sync(out) else |_| { return io }
+}
+
+/// A pax-release text's `source-date-epoch EPOCH -` (-1 without one).
+fn release_epoch(text: str) -> int {
+    for line in text.lines() {
+        let w = line.words()
+        if w.len == 3 && w[0] == "source-date-epoch" { return w[1].to_int() else |_| -1 }
+    }
+    -1
+}
+
+/// The armed configuration: the archive's entry, filled, first and the default; the installed
+/// entry (the installer's text's) second; a five-second menu. Or "" and why not.
+fn armed_conf(template: str, uuid: str, digest: str) -> (str, str) {
+    if !template.contains("@PARTUUID@") || !template.contains("@SHA256@") || !template.starts_with("/") {
+        return ("", "its {ENTRY} is not an entry with @PARTUUID@ and @SHA256@")
+    }
+    var filled = template.replace("@PARTUUID@", uuid).replace("@SHA256@", digest)
+    if !filled.ends_with("\n") { filled += "\n" }
+    if !filled.contains("{STAGED_WORD}{digest}") { return ("", "its {ENTRY} names no {STAGED_WORD}") }
+    let installed = config_text(uuid)
+    let at = installed.find("\n\n") else -1
+    if at < 0 { return ("", "the installer's configuration has no entry") }
+    ("timeout: 5\ndefault_entry: 1\n\n{filled}\n{installed[at + 2..]}", "")
+}
+
+// --- arm ----------------------------------------------------------------------------------------
+
+fn arm(mut u: Up, reboot: bool) -> int {
+    if !is_root() {
+        return refuse("arm", "it needs root: printf '%s\\n' \"$PASSWORD\" | sudo -k -S -p '' pax-upgrade arm")
+    }
+    let st = stage_dir(u)
+    if fs_exists("{st}/armed") {
+        let (a, _w) = read_armed("{st}/armed")
+        return refuse("arm", "an upgrade is armed already (to {a.to}, archive sha256 {a.sha256}): pax-upgrade disarm first")
+    }
+    let work = work_dir(mut u) else |_| { return refuse("arm", "no work directory under /tmp") }
+    // What to stage: the caller's received archive, else one a failed upgrade left staged.
+    let rdir = received_dir(u)
+    var src = ""
+    var sums = ""
+    if rdir.len != 0 && fs_exists("{rdir}/received") {
+        src = "{rdir}/received"
+        sums = "{rdir}/received.sha256"
+    } else if fs_exists("{st}/staged/archive") {
+        src = "{st}/staged/archive"
+        sums = "{st}/staged.sha256"
+    } else {
+        return refuse("arm", "nothing received: first ssh YOU@HOST 'pax-upgrade receive --sha256 DIGEST' < pax-COMMIT.cpio")
+    }
+    let sw = (fs_read_text(sums) else |_| "").words()
+    if sw.len < 1 || !is_digest(sw[0]) { return refuse("arm", "{sums} names no sha256: receive it again") }
+    let digest = sw[0]
+    let size = fs_size(src) else |_| { return refuse("arm", "{src} cannot be read") }
+    // The disk, its root and its ESP.
+    let (dev, model, serial, why) = installed_disk(u, "/")
+    if why.len != 0 { return refuse("arm", "the installed disk: {why}") }
+    if model.len == 0 || serial.len == 0 {
+        return refuse("arm", "{dev} reports no model or no serial, and the staged boot finds its disk by them")
+    }
+    let uuid = root_partuuid(dev, u.tools, work)
+    let fstab = fs_read_text("{u.root}/etc/fstab") else |_| ""
+    if uuid.len == 0 || !fstab.lower().contains("partuuid={uuid}") {
+        return refuse("arm", "{dev}'s partition 2 (PARTUUID={uuid}) is not the root /etc/fstab names")
+    }
+    let (got_conf, conf) = esp_text(u, dev, ESP_CONF, "esp-conf")
+    if !got_conf { return refuse("arm", "the ESP's {ESP_CONF} cannot be read on {dev}") }
+    if conf != config_text(uuid) {
+        return refuse("arm", "the ESP's {ESP_CONF} is not the installer's text (edited?); it is never merged: put the installer's back, or upgrade with the stick")
+    }
+    let fd = fs_open(dev) else |_| { return refuse("arm", "{dev} cannot be read") }
+    let (free, _inodes) = root_free(fd)
+    fs_close(fd) else |_| {}
+    let need = size + APPLY_RESERVE
+    if free < need {
+        return refuse("arm", "too little space on {dev}'s root: the upgrade writes up to {need} bytes beside the {size}-byte archive, and {free} are free")
+    }
+    // Staged: renamed into root's directory, made root's, read back.
+    let staged = "{st}/staged/archive"
+    for d in ["{u.root}/var/lib", st, "{st}/staged"] {
+        if !fs_is_dir(d) { fs_create_dir_mode(d, if d == "{u.root}/var/lib" then 493 else 448) else |_| { return refuse("arm", "{d} could not be made") } }
+    }
+    fs_set_mode(st, 448) else |_| {}
+    if src != staged {
+        fs_rename(src, staged) else |e| match e {
+            cross_device => { return refuse("arm", "{src} is on another file system than {STAGE_DIR}; receive it again under a home on the root") },
+            _ => { return refuse("arm", "{src} could not be renamed to {staged}") },
+        }
+        durable_text("{st}/staged.sha256", "{digest} {size}\n") else |_| { return refuse("arm", "{st}/staged.sha256 could not be written") }
+        fs_remove(sums) else |_| {}
+    }
+    fs_set_owner(staged, 0, 0, false) else |_| { return refuse("arm", "{staged} could not be made root's") }
+    fs_set_mode(staged, 384) else |_| { return refuse("arm", "{staged} could not be made 0600") }
+    let back = hash_file(staged) else |_| "unreadable"
+    if back != digest {
+        fs_remove(staged) else |_| {}
+        fs_remove("{st}/staged.sha256") else |_| {}
+        return refuse("arm", "the staged archive read back has sha256 {back}, not the {digest} it was received with; removed: send it again")
+    }
+    // The archive's own kernel, release and entry.
+    let found = newc_find(staged, ["/boot/pax", "/etc/pax-release", ENTRY]) else |_| {
+        fs_remove(staged) else |_| {}
+        return refuse("arm", "the staged archive is not a newc archive PAX reads; removed")
+    }
+    let kn = found["/boot/pax"] else -1
+    let rn = found["/etc/pax-release"] else -1
+    let en = found[ENTRY] else -1
+    if kn < 0 || rn < 0 {
+        fs_remove(staged) else |_| {}
+        return refuse("arm", "the archive holds no /boot/pax or no /etc/pax-release: not a PAX stick's archive; removed")
+    }
+    if en < 0 {
+        fs_remove(staged) else |_| {}
+        return refuse("arm", "the archive carries no {ENTRY}, so it cannot be booted unattended: upgrade with its stick; removed")
+    }
+    copy_range(staged, found["/etc/pax-release@"] else 0, rn, "{work}/release") else |_| { return refuse("arm", "the archive's /etc/pax-release cannot be read") }
+    copy_range(staged, found["{ENTRY}@"] else 0, en, "{work}/entry") else |_| { return refuse("arm", "the archive's {ENTRY} cannot be read") }
+    copy_range(staged, found["/boot/pax@"] else 0, kn, "{work}/pax") else |_| { return refuse("arm", "the archive's /boot/pax cannot be read") }
+    let new_rel = fs_read_text("{work}/release") else |_| ""
+    let old_rel = fs_read_text("{u.root}/etc/pax-release") else |_| ""
+    let to = release_commit(new_rel)
+    let from = release_commit(old_rel)
+    if new_rel == old_rel {
+        fs_remove(staged) else |_| {}
+        return refuse("arm", "the archive is the image already installed ({to}); nothing to upgrade; removed")
+    }
+    let new_epoch = release_epoch(new_rel)
+    let old_epoch = release_epoch(old_rel)
+    if new_epoch >= 0 && old_epoch >= 0 && new_epoch < old_epoch {
+        fs_remove(staged) else |_| {}
+        return refuse("arm", "an older image: {to} was built at {new_epoch} (source-date-epoch), the installed {from} at {old_epoch}; removed")
+    }
+    if new_epoch < 0 || old_epoch < 0 {
+        print("pax-upgrade: arm: {if old_epoch < 0 then "the installed" else "the archive's"} /etc/pax-release has no source-date-epoch; its age is not checked")
+    }
+    let template = fs_read_text("{work}/entry") else |_| ""
+    let (armed_text_conf, conf_why) = armed_conf(template, uuid, digest)
+    if conf_why.len != 0 {
+        fs_remove(staged) else |_| {}
+        return refuse("arm", "{conf_why}; removed")
+    }
+    // The writes, each read back; the configuration last.
+    let fails = arm_writes(u, st, dev, conf, armed_text_conf, model, serial)
+    if fails.len != 0 { return refuse("arm", "{fails}; not armed") }
+    let rec = Armed {
+        sha256: digest,
+        size: size,
+        release: file_sha("{work}/release"),
+        partuuid: uuid,
+        disk: dev,
+        model: model,
+        serial: serial,
+        from: from,
+        to: to,
+        built: if new_epoch < 0 then "-" else "{new_epoch}",
+        at: time_unix_ms() / 1000,
+    }
+    durable_text("{st}/armed", armed_text(rec)) else |_| { return refuse("arm", "{st}/armed could not be written; not armed") }
+    fs_sync_dir(st) else |_| {}
+    let (back_rec, rec_why) = read_armed("{st}/armed")
+    if rec_why.len != 0 || back_rec.sha256 != digest {
+        fs_remove("{st}/armed") else |_| {}
+        return refuse("arm", "{st}/armed read back is not the record written ({rec_why}); not armed")
+    }
+    let cw = esp_put(u, dev, "{st}/limine.conf.armed", ESP_CONF, 9)
+    if cw.len != 0 {
+        let pb = put_back(u, u.root, dev)
+        fs_remove("{st}/armed") else |_| {}
+        return refuse("arm", "{cw}; the configuration put back{if pb.len == 0 then "" else " failed too: {pb}"}; not armed")
+    }
+    up_log(u.root, "armed", "to {to} from {from}, archive sha256 {digest} ({size} bytes), {dev} PARTUUID={uuid}")
+    print("pax-upgrade: armed: the next boot upgrades {dev} from {from} to {to} (archive sha256 {short(digest)}); pax-upgrade disarm cancels")
+    if reboot {
+        print("pax-upgrade: rebooting")
+        let child = os_spawn(["{u.tools}/reboot"]) else |e| { eprint("pax-upgrade: reboot: {e}"); return 1 }
+        return os_wait(child) else |_| 1
+    }
+    0
+}
+
+/// Everything the arm writes before its record and the configuration: the attempts file, the
+/// configurations saved (the installed one, for a disarm; the armed one, for a re-arm), the ESP's
+/// kernel and targets line. "" or why not.
+fn arm_writes(u: Up, st: str, dev: str, conf: str, armed: str, model: str, serial: str) -> str {
+    durable_text("{st}/attempts", ATTEMPTS_ZERO) else |_| { return "{st}/attempts could not be written" }
+    fs_set_mode("{st}/attempts", 420) else |_| {}
+    durable_text("{st}/limine.conf.installed", conf) else |_| { return "{st}/limine.conf.installed could not be written" }
+    durable_text("{st}/limine.conf.armed", armed) else |_| { return "{st}/limine.conf.armed could not be written" }
+    let kw = esp_put(u, dev, "{u.work}/pax", ESP_KERNEL, 7)
+    if kw.len != 0 { return kw }
+    durable_text("{u.work}/targets", "{allow_line(model, serial)}\n") else |_| { return "{u.work}/targets could not be written" }
+    esp_put(u, dev, "{u.work}/targets", ESP_TARGETS, 8)
+}
+
+// --- disarm, clean, status ----------------------------------------------------------------------
+
+fn disarm(mut u: Up) -> int {
+    if !is_root() { return refuse("disarm", "it needs root: sudo -k -S -p '' pax-upgrade disarm") }
+    let st = stage_dir(u)
+    let _w = work_dir(mut u) else |_| { return refuse("disarm", "no work directory under /tmp") }
+    let (dev, _m, _s, why) = installed_disk(u, "/")
+    if why.len != 0 { return refuse("disarm", "the installed disk: {why}") }
+    let (_got, conf) = esp_text(u, dev, ESP_CONF, "esp-conf")
+    let armed_now = conf.contains(STAGED_WORD)
+    if !armed_now && !fs_exists("{st}/armed") {
+        print("pax-upgrade: nothing is armed")
+        return 0
+    }
+    if armed_now {
+        let pb = put_back(u, u.root, dev)
+        if pb.len != 0 { return refuse("disarm", "{pb}; still armed") }
+    }
+    fs_remove("{st}/armed") else |_| {}
+    fs_remove("{st}/attempts") else |_| {}
+    fs_sync_dir(st) else |_| {}
+    up_log(u.root, "disarmed", "by pax-upgrade disarm; the staged archive stays (pax-upgrade arm again, or pax-upgrade clean)")
+    print("pax-upgrade: disarmed: the next boot is the installed system; the staged archive stays (pax-upgrade clean removes it)")
+    0
+}
+
+/// The staged files removed and the ESP's kernel emptied: what was removed, in words.
+fn remove_staged(u: Up, base: str, dev: str) -> str {
+    let st = "{base}{STAGE_DIR}"
+    var gone = List[str]()
+    for name in ["staged/archive", "staged.sha256", "attempts", "limine.conf.installed", "limine.conf.armed"] {
+        if fs_exists("{st}/{name}") {
+            fs_remove("{st}/{name}") else |_| { continue }
+            (mut gone).push("{STAGE_DIR}/{name}")
+        }
+    }
+    fs_sync_dir(st) else |_| {}
+    if esp_sha(dev, ESP_KERNEL, u.tools, u.work, 11) != "absent" {
+        let empty = "{u.work}/empty"
+        durable_text(empty, "") else |_| {}
+        let (status, _t) = tool("{u.tools}/paxfat", ["--offset", "{ESP_START}", "replace", dev, empty, ESP_KERNEL], u.work, "esp-empty")
+        if status == 0 { (mut gone).push("the ESP's {ESP_KERNEL} (emptied)") }
+    }
+    if gone.len == 0 then "nothing" else words_list(gone)
+}
+
+fn clean(mut u: Up) -> int {
+    if !is_root() { return refuse("clean", "it needs root: sudo -k -S -p '' pax-upgrade clean") }
+    let st = stage_dir(u)
+    let _w = work_dir(mut u) else |_| { return refuse("clean", "no work directory under /tmp") }
+    let (dev, _m, _s, why) = installed_disk(u, "/")
+    if why.len != 0 { return refuse("clean", "the installed disk: {why}") }
+    let (_got, conf) = esp_text(u, dev, ESP_CONF, "esp-conf")
+    if fs_exists("{st}/armed") || conf.contains(STAGED_WORD) {
+        return refuse("clean", "an upgrade is armed: pax-upgrade disarm first")
+    }
+    let gone = remove_staged(u, u.root, dev)
+    up_log(u.root, "cleaned", "removed: {gone}")
+    print("pax-upgrade: removed {gone}")
+    0
+}
+
+fn status(u: Up) -> int {
+    let dir = received_dir(u)
+    let sums = (fs_read_text("{dir}/received.sha256") else |_| "").words()
+    if dir.len != 0 && fs_exists("{dir}/received") && sums.len == 2 {
+        print("received: {dir}/received, {sums[1]} bytes, sha256 {sums[0]}")
+    } else {
+        print("received: nothing in {if dir.len == 0 then "(no HOME)" else dir}")
+    }
+    let log = fs_read_text("{u.root}{UPGRADE_LOG}") else |_| ""
+    let l = log.lines()
+    if l.len == 0 {
+        print("state: no upgrade has been armed here ({UPGRADE_LOG} is empty or not there)")
+        return 0
+    }
+    let first = if l.len > 5 then l.len - 5 else 0
+    print("state: {l[l.len - 1]}")
+    print("the last lines of {UPGRADE_LOG} (Unix seconds, state, what):")
+    for k in first..l.len { print("  {l[k]}") }
+    0
+}
+
+// --- apply: the staged boot's program -----------------------------------------------------------
+
+fn apply(mut u: Up) -> int {
+    let base = "{u.root}{UPGRADE_TARGET}"
+    let st = "{base}{STAGE_DIR}"
+    let rec_path = "{st}/armed"
+    print("pax-upgrade apply: the staged upgrade of the root at {UPGRADE_TARGET}")
+    let _w = work_dir(mut u) else |_| { eprint("pax-upgrade apply: no work directory under /tmp"); return 1 }
+    let (dev, _m, _s, dwhy) = installed_disk(u, UPGRADE_TARGET)
+    let (rec, why) = read_armed(rec_path)
+    if why.len != 0 {
+        // Nothing to confirm with: disarmed, so the next boot is the installed system.
+        var said = "the staged boot's arm record: {why}; nothing written"
+        if dwhy.len == 0 {
+            let pb = put_back(u, base, dev)
+            said += if pb.len == 0 then "; disarmed" else "; the configuration could not be put back: {pb}"
+        }
+        fs_remove(rec_path) else |_| {}
+        up_log(base, "refused", said)
+        eprint("pax-upgrade apply: {said}")
+        return 1
+    }
+    up_log(base, "applying", "to {rec.to} from {rec.from}, archive sha256 {rec.sha256}")
+    let child = os_spawn(["{u.tools}/pax-install", "--upgrade", "--armed", rec_path]) else |e| {
+        up_log(base, "stopped", "pax-install could not be started ({e}); still armed")
+        return 1
+    }
+    let code = os_wait(child) else |_| -1
+    if code == 0 {
+        up_log(base, "upgraded", "to {rec.to} from {rec.from}; its first boot removes the staged files")
+        fs_remove(rec_path) else |_| {}
+        fs_sync_dir(st) else |_| {}
+        // pax-install's ESP phase wrote the installer's configuration; when there was nothing to
+        // change it wrote none, and the arm's is put back here.
+        if dwhy.len == 0 {
+            let (_g, conf) = esp_text(u, dev, ESP_CONF, "esp-conf")
+            if conf.contains(STAGED_WORD) {
+                let pb = put_back(u, base, dev)
+                if pb.len != 0 { up_log(base, "upgraded", "but the armed configuration could not be put back: {pb}") }
+            }
+        }
+        print("pax-upgrade apply: upgraded to {rec.to}; the machine reboots into it")
+        return 0
+    }
+    if !fs_exists("{base}{MANIFEST_DIR}/upgrading") {
+        var said = "pax-install --upgrade exited {code} before any write (the target's {MANIFEST_DIR}/upgrade-<n>.txt has its plan when it opened one)"
+        if dwhy.len == 0 {
+            let pb = put_back(u, base, dev)
+            said += if pb.len == 0 then "; disarmed" else "; the configuration could not be put back: {pb}"
+        } else {
+            said += "; the disk at {UPGRADE_TARGET} was not found ({dwhy})"
+        }
+        fs_remove(rec_path) else |_| {}
+        fs_sync_dir(st) else |_| {}
+        up_log(base, "refused", said)
+        eprint("pax-upgrade apply: {said}")
+        return 1
+    }
+    up_log(base, "stopped", "pax-install --upgrade exited {code} after its writes began; still armed: the next boot runs it again from its record (two staged boots at most)")
+    eprint("pax-upgrade apply: stopped; the next boot tries again")
+    1
+}
+
+// --- boot: the installed system's hook ----------------------------------------------------------
+
+/// What the staged kernel wrote in the attempts file's last byte when it refused (kernel/fstab's
+/// `load_staged`), in words; "" when it wrote none.
+fn kernel_reason(c: int) -> str {
+    if c == 84 { return "two staged boots began and neither finished" } // T
+    if c == 77 { return "the staged kernel found no {STAGE_DIR}/staged/archive" } // M
+    if c == 69 { return "the staged archive was empty" } // E
+    if c == 78 { return "too little memory for the staged archive" } // N
+    if c == 82 { return "the staged archive could not be read" } // R
+    if c == 68 { return "the staged archive's sha256 was not the armed one" } // D
+    if c == 65 { return "the staged archive is no archive PAX reads" } // A
+    if c == 80 { return "the staged archive's range could not be mapped" } // P
+    ""
+}
+
+fn boot_hook(mut u: Up) -> int {
+    let st = stage_dir(u)
+    if !fs_is_dir(st) || !is_root() { return 0 }
+    let _w = work_dir(mut u) else |_| { print("pax-upgrade: boot: no work directory under /tmp"); return 1 }
+    let (dev, _m, _s, why) = installed_disk(u, "/")
+    if why.len != 0 {
+        print("pax-upgrade: boot: the installed disk: {why}")
+        return 1
+    }
+    let (_got, conf) = esp_text(u, dev, ESP_CONF, "esp-conf")
+    let att = fs_read_bytes("{st}/attempts") else |_| List[byte]()
+    let letter = if att.len == 8 then att[7] as int else 48
+    if conf.contains(STAGED_WORD) {
+        // The installed root runs while the ESP is armed: the staged program did not run.
+        let reason = kernel_reason(letter)
+        let pb = put_back(u, u.root, dev)
+        fs_remove("{st}/armed") else |_| {}
+        fs_remove("{st}/attempts") else |_| {}
+        fs_sync_dir(st) else |_| {}
+        let said = "{if reason.len == 0 then "the installed system was booted while armed (chosen at the menu)" else reason}; " +
+            (if pb.len == 0 then "disarmed" else "the configuration could not be put back: {pb}") +
+            "; the staged archive stays: pax-upgrade arm tries again, pax-upgrade clean removes it"
+        up_log(u.root, "not-applied", said)
+        print("pax-upgrade: the armed upgrade was not applied: {said}")
+        if reason.len != 0 && pb.len == 0 {
+            print("pax-upgrade: rebooting into the installed system's own kernel")
+            let child = os_spawn(["{u.tools}/reboot"]) else |e| { print("pax-upgrade: reboot: {e}"); return 1 }
+            return os_wait(child) else |_| 1
+        }
+        return 0
+    }
+    if fs_exists("{st}/armed") {
+        let (rec, rwhy) = read_armed("{st}/armed")
+        if rwhy.len == 0 && file_sha("{u.root}/etc/pax-release") == rec.release {
+            // The upgrade completed and its verdict was cut: written now.
+            fs_remove("{st}/armed") else |_| {}
+            up_log(u.root, "upgraded", "to {rec.to} from {rec.from} (the verdict written at its first boot)")
+        } else if rwhy.len == 0 && fs_exists("{u.root}{MANIFEST_DIR}/upgrading") {
+            let aw = esp_put(u, dev, "{st}/limine.conf.armed", ESP_CONF, 9)
+            if aw.len != 0 {
+                up_log(u.root, "stopped", "an upgrade to {rec.to} was cut after its ESP phase and could not be armed again: {aw}")
+                print("pax-upgrade: the cut upgrade could not be armed again: {aw}")
+                return 1
+            }
+            up_log(u.root, "re-armed", "an upgrade to {rec.to} was cut after its ESP phase; armed again to finish it")
+            print("pax-upgrade: an upgrade to {rec.to} was cut; armed again; rebooting to finish it")
+            let child = os_spawn(["{u.tools}/reboot"]) else |e| { print("pax-upgrade: reboot: {e}"); return 1 }
+            return os_wait(child) else |_| 1
+        } else {
+            fs_remove("{st}/armed") else |_| {}
+            up_log(u.root, "not-applied", "an arm record was left with the configuration disarmed ({if rwhy.len == 0 then "not by pax-upgrade" else rwhy}); removed")
+            return 0
+        }
+    }
+    if last_state(u.root) == "upgraded" && fs_exists("{st}/staged/archive") {
+        let gone = remove_staged(u, u.root, dev)
+        up_log(u.root, "cleaned", "after the upgrade: {gone}")
+        print("pax-upgrade: the upgrade is done; removed {gone}")
+    }
+    0
+}
 
 fn main() -> int {
-    eprint("pax-upgrade: not yet")
-    1
+    let args = env_args()
+    var u = Up { root: "", disk: "", model: "", serial: "", tools: "/bin", work: "" }
+    var i = 0
+    while i + 1 < args.len && (args[i] == "--root" || args[i] == "--disk" || args[i] == "--model" || args[i] == "--serial" || args[i] == "--tool-dir") {
+        let v = args[i + 1]
+        if args[i] == "--root" { u.root = v }
+        if args[i] == "--disk" { u.disk = v }
+        if args[i] == "--model" { u.model = v }
+        if args[i] == "--serial" { u.serial = v }
+        if args[i] == "--tool-dir" { u.tools = v }
+        i += 2
+    }
+    if i == args.len {
+        // The staged entry's init=/bin/pax-upgrade: pid 1, no arguments.
+        if os_pid() == 1 && args.len == 0 { return apply(mut u) }
+        return usage()
+    }
+    let cmd = args[i]
+    let n = args.len - i - 1
+    if cmd == "receive" && n == 2 && args[i + 1] == "--sha256" { return receive(u, args[i + 2].lower()) }
+    if cmd == "arm" && n == 0 { return arm(mut u, false) }
+    if cmd == "arm" && n == 1 && args[i + 1] == "--reboot" { return arm(mut u, true) }
+    if n != 0 { return usage() }
+    if cmd == "disarm" { return disarm(mut u) }
+    if cmd == "clean" { return clean(mut u) }
+    if cmd == "status" { return status(u) }
+    if cmd == "apply" { return apply(mut u) }
+    if cmd == "boot" { return boot_hook(mut u) }
+    usage()
 }
