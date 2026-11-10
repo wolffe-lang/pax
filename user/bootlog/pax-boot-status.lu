@@ -8,14 +8,18 @@
 //!
 //! `record` appends to two files:
 //! - /var/log/boot.log, root's, 0600: a block a boot, `== boot N, TIME`, then how the
-//!   previous boot ended (`previous: boot P stopped at STAGE` or `… completed`), its
-//!   stages, what CMOS was to this boot (the claim of its eight bytes said once, with
-//!   their offsets), and the previous boot's console between two marker lines when the
-//!   kernel found it intact by its checksum (a refused one is named and never printed).
-//!   Past 256 KiB the file is rotated: boot.log.1 … boot.log.4, the oldest dropped;
+//!   previous boot ended (`previous: boot P stopped at STAGE` or `… completed`, then `, its
+//!   screen refused` when it ran blind), its stages, the framebuffer this boot was handed
+//!   (`framebuffer: WxH BPP bpp pitch P rgb … at 0xPHYSICAL`, or `none`) and what PAX made
+//!   of it (`screen: drawn`, or `screen: refused: WHY`), what CMOS was to this boot (the
+//!   claim of its eight bytes said once, with their offsets), and the previous boot's
+//!   console between two marker lines when the kernel found it intact by its checksum (a
+//!   refused one is named and never printed). Past 256 KiB the file is rotated: boot.log.1
+//!   … boot.log.4, the oldest dropped;
 //! - /var/log/boot.summary, 0644, one line a boot, `N TIME previous=P ended=STAGE
-//!   from=cmos|memory|none cmos=claimed|held|refused|off`, kept to its last 100 lines
-//!   once it passes 200.
+//!   from=cmos|memory|none cmos=claimed|held|refused|off screen=S prevscreen=S` (S:
+//!   drawn, refused, undrawn, none or unknown), kept to its last 100 lines once it passes
+//!   200.
 //! Without /proc/pax-boot (a kernel from before px118) it does nothing and exits 0. A
 //! write that fails is said on standard error and never stops the boot (exit 0).
 //!
@@ -150,13 +154,17 @@ fn record(root: str) -> int {
     let logw = fact(f, "log").words()
     var p_n = "none"
     var p_end = "none"
+    let scr = fact(f, "screen")
+    let pscr = fact(f, "prevscreen")
     var said = "previous: none recorded"
     if prev.len == 2 {
         p_n = prev[0]
         p_end = prev[1]
         said = if p_end == "end" then "previous: boot {p_n} completed" else "previous: boot {p_n} stopped at {p_end}"
+        if pscr == "refused" { said += ", its screen refused" }
     }
     var block = "== boot {boot}, {now}\n{said} (marks from {src})\nstages: {fact(f, "stages")}\n"
+    if scr.len > 0 { block += "framebuffer: {fact(f, "framebuffer")}\nscreen: {scr}\n" }
     if mode == "claimed" {
         block += "cmos: {range} claimed for the marks (they read zero; written only while they hold PAX's own)\n"
     } else if mode == "refused" {
@@ -185,11 +193,20 @@ fn record(root: str) -> int {
     let log = "{root}{LOG}"
     rotate(log, data.len)
     if !append(log, data, 384) { eprint("pax-boot-status: {log} could not be written") }
-    let line = "{boot} {now} previous={p_n} ended={p_end} from={src} cmos={mode}\n"
+    let line = "{boot} {now} previous={p_n} ended={p_end} from={src} cmos={mode} screen={token(scr)} prevscreen={token(pscr)}\n"
     let sum = "{root}{SUMMARY}"
     if !append(sum, line.bytes(), 420) { eprint("pax-boot-status: {sum} could not be written") }
     trim_summary(sum)
     0
+}
+
+/// `/proc/pax-boot`'s screen or prevscreen as one word: drawn, refused, undrawn, none,
+/// or unknown (a kernel that does not say).
+fn token(v: str) -> str {
+    if v == "drawn" || v == "none" { return v }
+    if v.starts_with("refused") { return "refused" }
+    if v == "not drawn" { return "undrawn" }
+    "unknown"
 }
 
 fn kv(w: List[str], k: str) -> str {
@@ -210,18 +227,21 @@ fn show(root: str) -> int {
         let p = kv(w, "previous")
         let e = kv(w, "ended")
         let src = kv(w, "from")
+        let blind = if kv(w, "prevscreen") == "refused" then ", its screen refused" else ""
         if p == "none" {
             print("  boot {w[0]} at {w[1]}: no earlier boot recorded")
         } else if e == "end" {
-            print("  boot {p}: completed (found by boot {w[0]} at {w[1]}, from {src})")
+            print("  boot {p}: completed{blind} (found by boot {w[0]} at {w[1]}, from {src})")
         } else {
-            print("  boot {p}: stopped at {e} (found by boot {w[0]} at {w[1]}, from {src})")
+            print("  boot {p}: stopped at {e}{blind} (found by boot {w[0]} at {w[1]}, from {src})")
         }
     }
     let now = fs_read_text(PROC_BOOT) else |_| ""
     if now.len > 0 {
         let f = facts(now)
-        print("  boot {fact(f, "boot")}: this boot, at {fact(f, "stage")}")
+        let scr = fact(f, "screen")
+        let blind = if scr.starts_with("refused") then ", its screen {scr}" else ""
+        print("  boot {fact(f, "boot")}: this boot, at {fact(f, "stage")}{blind}")
     }
     0
 }
