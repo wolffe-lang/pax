@@ -159,7 +159,16 @@ def main():
     # base payload's passwd and group, which a fresh install copies and an
     # upgrade appends. No host key ships: each machine makes its own.
     assert 'bin/burrowd' in rows, 'no /bin/burrowd: tools/mkburrow builds it since px112'
-    put('etc/burrowd/burrowd_config', (ROOT/'user/burrowd/burrowd_config').read_bytes())
+    # px116 (pax#334): /etc/shrc and burrowd's configuration from one list, tools/system-env's:
+    # the configuration's SetEnv line is written from the variables /etc/shrc exports for the
+    # console (every one but PATH), so a command over ssh has them too, and the two cannot drift.
+    shrc = subprocess.run([sys.executable, '-I', str(ROOT/'tools/system-env'), 'shrc', variant],
+                          check=True, capture_output=True).stdout
+    with tempfile.TemporaryDirectory(prefix='px116-env-') as scratch:
+        (Path(scratch)/'shrc').write_bytes(shrc)
+        config = subprocess.run([sys.executable, '-I', str(ROOT/'tools/system-env'), 'burrowd-config',
+                                 str(Path(scratch)/'shrc')], check=True, capture_output=True).stdout
+    put('etc/burrowd/burrowd_config', config)
     put('etc/pax-boot.d/burrowd', (ROOT/'user/pax-boot.d/burrowd').read_bytes(), 0o755)
     for name, line in (('etc/passwd', b'burrowd:x:989:989:burrowd:/nonexistent:/bin/false\n'),
                        ('etc/group', b'burrowd:x:989:\n')):
@@ -221,11 +230,7 @@ def main():
     put('etc/pax-net', (ROOT/'user/pax-net').read_bytes())
     put('etc/pax-release', (identity/'pax-release').read_bytes())
     put('etc/pax-banner', (identity/'pax-banner').read_bytes())
-    # px116 (pax#334): /etc/shrc from tools/system-env, the one list burrowd's configuration is
-    # written from as well (the same bytes as before: user/shrc, and the dev image's two lines).
-    shrc = subprocess.run([sys.executable, '-I', str(ROOT/'tools/system-env'), 'shrc', variant],
-                          check=True, capture_output=True).stdout
-    put('etc/shrc', shrc)
+    put('etc/shrc', shrc)  # px116: tools/system-env's, written above with burrowd's configuration
     put('etc/motd', (f'PAX {variant}: run pax-release for exact pins and image identity.\n'
         'pelt is pid 1; friendly editing: set -o friendly -o suggest -o histsearch\n'
         'yew edits files; yew fl starts the Fletch prompt. Files live in memory.\n'
