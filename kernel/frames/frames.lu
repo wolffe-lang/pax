@@ -65,6 +65,7 @@
 //! Linux source; no other kernel consulted.
 
 use boot_info
+use bootlog
 use log
 use panic
 use triage
@@ -211,6 +212,9 @@ pub fn init() -> u64 ! InitError {
     // The state's place: the first usable run at or above 1 MiB that
     // holds `own` frames (the map is sorted; usable entries are 4 KiB
     // aligned, so the run's start is a frame).
+    // px118: never the boot log's area (kernel/bootlog), which every
+    // frame here withholds too; (0, 0) in a kernel that keeps none.
+    let (apa, alen) = bootlog.area()
     var spa: u64 = 0
     i = 0
     while i < n && spa == 0 {
@@ -219,6 +223,9 @@ pub fn init() -> u64 ! InitError {
             let e = entry_end(i, clip)
             if b < LOW_END {
                 b = LOW_END
+            }
+            if alen != 0 && b < apa + alen && b + own * FRAME > apa {
+                b = apa + alen
             }
             if b < e && e - b >= own * FRAME {
                 spa = b
@@ -262,6 +269,8 @@ pub fn init() -> u64 ! InitError {
                     low += 1
                 } else if f >= s0 && f < s1 {
                     held += 1
+                } else if alen != 0 && f >= apa / FRAME && f < (apa + alen) / FRAME {
+                    // px118: kernel/bootlog's area, never handed out
                 } else {
                     set_bit(fmap, f)
                     free_n += 1
