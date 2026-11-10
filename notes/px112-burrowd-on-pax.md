@@ -135,6 +135,45 @@ and their sha256s logged.
   included (no password in 272 records). `tests/ci-plan` red on seven P2 rows, each with `mpx5-burrowd` beside the
   suites it wanted: the suite's comment on sudo's mode named the distribution's root by its path, and the planner
   reads every path a suite's text names, through each tool's text in turn. Named in prose at `3b19f66e`.
+- **The hosted red: a general-protection fault at the first program.** The PR's first hosted runs at `2dd649f0`
+  (with the label and without) went red on `tests/mpx5-burrowd` alone, B1 and B11 by name: the console printed
+  `run 1:` and then `PANIC general protection vector 13 error 0x0000000000000018 rip 0xffffffff80000481`. That
+  address is the `iretq` at the end of `pax_isr_common` (boot/isr.S), the way back to ring 3 from an interrupt, and
+  the error code is the selector `0x18`, the user data descriptor. Ring 3's SS is meant to be `0x1b`.
+  `pax_enter_user` and `pax_syscall_entry` push `0x1b` themselves; SYSRETQ loads SS from STAR's SYSRET base plus 8,
+  and PAX's base was `0x10`, its privilege bits 0. Intel's SDM (vol. 2, SYSRET) ORs 3 into both selectors whatever
+  the base holds; some processors do not force the privilege bits on SYSRET, and there ring 3 ran on an SS of
+  privilege 0 after the first system call, so the next interrupt taken in ring 3 came back through an IRETQ that
+  refused it. The kernel code is px09's (2026-10-07), older than this branch, which changes nothing under `kernel/`
+  or `boot/`; trunk has the same code.
+- **Why only this job saw it.** `tools/qemu-run` takes KVM when `/dev/kvm` is readable and writable, TCG otherwise,
+  with `-cpu max` either way. On the hosted runner `/dev/kvm` is the kvm group's, so every suite run as the runner
+  boots under TCG, which forces the bits; `tests/mpx5-burrowd`'s boots run as root for the tap, so they are the
+  first hosted boots of PAX under KVM, on the runner's own processor. The build host's processor forces the bits,
+  under KVM and under TCG with an AMD model (`-cpu EPYC-Milan-v1`: B1 green, log `2c2dabe1…`), so the fault could
+  not be seen red here: the hosted runs are its red. The test machine's processor (VT-x, pax's own notes) forces
+  them too; this fault was never possible there.
+- **The change** (`8c147f02`): STAR's SYSRET base is `0x13`, the privilege bits in the base itself, so SYSRETQ
+  yields CS `0x23` and SS `0x1b` on every processor. Every other place that sets ring 3's selectors
+  (`pax_enter_user`, the system call entry's frame, a signal's frame and sigreturn's, fork's child, the tracer's
+  view) writes `0x23` and `0x1b` itself, and nothing compares a saved SS with a literal. `tests/mpx3-user`'s U1
+  holds the new value, red first at `cbe040fb` (`FAIL U1 native kmain_user bios: star 0x0010000800000000, not
+  0x0013000800000000`, the release tier the same; light slot, log `fb8caf4a…`).
+- **B17** (`561cf405`, red first: the hosted runs at `2dd649f0`): `/bin/sysret-ss`, a static program of the
+  suite's own, makes a system call, reads SS and CS, stays in ring 3 for 200 ms across the timer's interrupts (a
+  system call between turns, so each turn starts after a SYSRETQ), and reads them again: `0x1b` and `0x23` both
+  times. On a processor that forces the bits it cannot go red; the hosted job is its only red, and its next run
+  its green.
+- **The transcripts** (`967d7847`): the boots run as root, so the hosted upload could not read their transcripts,
+  and the red runs kept none. The job gives the trees back to the runner before the upload, keeps each boot's
+  accelerator and command line, and prints the runner's `/dev/kvm` and its processor's vendor and model.
+- **Light takes at `8c147f02`** (both tiers, BIOS, the build host's light slots; logs `fb8caf4a…`, `e8e85b5c…`):
+  `tests/mpx3-user` green (U1 `star 0x0013000800000000` on both tiers), `tests/mpx3-loader` and `tests/mpx5-trace`
+  green, `tests/mpx5-burrowd` green on both tiers with B17 `ss 0x1b cs 0x23 after a system call; ss 0x1b cs 0x23
+  after 200 ms in ring 3`. `tests/mpx3-threads` and `tests/mpx5-forks` red only on their Linux side, which this
+  rig cannot make (T0 and K0: `tools/linux-tty` and `tools/linux-tree` need a pid namespace), and red the same way
+  at `2dd649f0` (log `76435e52…`); PAX's own twelve transcripts of the two suites are byte-identical at the two
+  commits. Their Linux comparison is the hosted run's.
 - (The head's takes.)
 
 ## 5. Done-when
@@ -223,6 +262,8 @@ None filed or closed by this lane. For the orchestrator to consider:
 - [x] `authorized_keys` with sshd's mode checks; den's upload-pack and receive-pack through `exec`; the log at the
   console (B2-B9); a session without ptys, the login shell served (B12); a bare `sudo` over ssh leaves burrowd
   answering (B15); `sudo -k -S` over ssh, and a plain `-S`'s shared record measured (B16).
+- [x] The hosted red's general-protection fault: STAR's SYSRET base carries the privilege bits (`8c147f02`); B17
+  and U1 hold it; the hosted job keeps its transcripts and names its processor.
 - [x] Rows red at the rows tip, every row green on the native BIOS leg (`lb7`); the four legs, the affected suites,
   the plant (B10) and the upgrade witness at the final head: the PR's records.
 - [x] The stick leg (`notes/px112/stick-leg.txt`, B11 under QEMU); the metal target's first check (5.2).
