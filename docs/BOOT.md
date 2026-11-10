@@ -894,8 +894,9 @@ payload elsewhere on the target. What the running system writes while it
 runs is left out whole, never copied and never in the target's manifest
 (`runtime_state` in `user/install/snapshot.lu`): `/var/lib/dhcp` (the
 kernel's DHCP lease), `/etc/resolv.conf` (written from that lease),
-`/var/log/sudo.log`, and every top-level name that starts with a dot
-(root's home is `/`: the shell's history, lope's store). The installed
+`/var/log/sudo.log`, and, because root's home is `/`, root's `/Trash` (what
+`trash` put aside) and every top-level name that starts with a dot (the
+shell's history, lope's store). The installed
 system writes its own; the rest of `/var/lib` is copied. A later installation from that target
 needs a supplied payload again. `--source DIR`, `--payload DIR` and
 `--tool-dir DIR` support rescue layouts; a nonstandard payload directory
