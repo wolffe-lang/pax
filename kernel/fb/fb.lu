@@ -136,22 +136,15 @@ fn pat_wc() -> bool {
 /// by every address space made later), before any process. False, and
 /// `why` set, when there is no framebuffer PAX can draw on.
 pub fn start(pml4: u64) -> bool {
-    if boot_info.fb_count() == 0 || boot_info.fb_address() == 0 {
-        set_why(W_NONE)
+    let j = judge()
+    if j != W_OK {
+        set_why(j)
         return false
     }
     let va = boot_info.fb_address()
     let w = boot_info.fb_width()
     let h = boot_info.fb_height()
     let pitch = boot_info.fb_pitch()
-    if boot_info.fb_bpp() != 32 || boot_info.fb_model() != 1 || boot_info.fb_mask(0, false) != 8 || boot_info.fb_mask(1, false) != 8 || boot_info.fb_mask(2, false) != 8 {
-        set_why(W_FORMAT)
-        return false
-    }
-    if w == 0 || h == 0 || w > 32768 || h > 32768 || pitch > 1048576 || pitch < w * 4 || pitch % 4 != 0 {
-        set_why(W_FORMAT)
-        return false
-    }
     let hhdm = frames.hhdm()
     if va < hhdm || va % PAGE != 0 {
         set_why(W_HHDM)
@@ -179,9 +172,45 @@ pub fn start(pml4: u64) -> bool {
     true
 }
 
+/// px118: what `start` makes of the framebuffer Limine handed, judged
+/// from its description alone (nothing mapped, nothing written), so the
+/// kernel's entry can say at once that it will not draw: W_NONE without
+/// one, W_FORMAT when it is not 32-bit RGB 8:8:8 or its geometry is out
+/// of bounds, else W_OK (`start` may still decline it: its address, a
+/// mapping, the grid).
+pub fn judge() -> u64 {
+    if boot_info.fb_count() == 0 || boot_info.fb_address() == 0 {
+        return W_NONE
+    }
+    if boot_info.fb_bpp() != 32 || boot_info.fb_model() != 1 || boot_info.fb_mask(0, false) != 8 || boot_info.fb_mask(1, false) != 8 || boot_info.fb_mask(2, false) != 8 {
+        return W_FORMAT
+    }
+    let w = boot_info.fb_width()
+    let h = boot_info.fb_height()
+    let pitch = boot_info.fb_pitch()
+    if w == 0 || h == 0 || w > 32768 || h > 32768 || pitch > 1048576 || pitch < w * 4 || pitch % 4 != 0 {
+        return W_FORMAT
+    }
+    W_OK
+}
+
+/// px118: whether a reason (`judge`'s, `why_code`'s) is the screen on.
+pub fn accepted(w: u64) -> bool {
+    w == W_OK
+}
+
+/// px118: the reason `start` gave (W_NOT_RUN before it ran).
+pub fn why_code() -> u64 {
+    get_why()
+}
+
 /// The reason `start` gave, as a word.
 fn why_name() -> str {
-    let w = get_why()
+    word(get_why())
+}
+
+/// px118: a reason (`judge`'s, `why_code`'s) as a word.
+pub fn word(w: u64) -> str {
     if w == W_OK {
         return "on"
     }
