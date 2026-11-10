@@ -7,6 +7,17 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A command over ssh has the console's environment (px116, pax#334).**
+  burrowd's configuration on every image carries one `SetEnv` line, written
+  when the image is built from the variables `/etc/shrc` exports for the
+  console (every one but `PATH`; `tools/system-env` writes both texts from
+  the one list), so `WOLF_STD`, `LUPIN_STD` and `DEN_TLS_ROOTS` reach a
+  command over ssh and `ssh HOST wolf build FILE` needs no `. /etc/shrc;`
+  before it. An install and an upgrade keep the line with the LAN's
+  `ListenAddress`. burrow's pin moves to its SetEnv change. B17 in
+  `tests/mpx5-burrowd` holds it, the suite's image now carrying the dev
+  compiler: `notes/px116-setenv.md`.
+
 - **ssh into PAX (px112).** burrowd, burrow's ssh server, ships on every image
   and starts at boot: `/etc/pax-boot.d`'s hooks run before the first prompt
   (`/bin/login` on an installed system, the live entry on the stick), and
