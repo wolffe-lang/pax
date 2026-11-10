@@ -5271,6 +5271,67 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px118: a boot that goes black leaves evidence: the console kernel's two
+  # beeps in QEMU's speaker capture, its stage marks (CMOS 0x78-0x7f, port
+  # 0x80, its console kept in memory) read back by the next boot after a
+  # reset, a stop at each stage, another's CMOS bytes refused, a changed log
+  # refused, pax-boot-status's /var/log/boot.log, the installed and armed
+  # Limine options booting with no key (tests/mpx6-bootlog's header has the rows).
+  mpx6-bootlog:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-bootlog')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev e2fsprogs mtools fdisk
+          qemu-system-x86_64 --version
+          df -h . | tail -n 1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-bootlog-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: the boot's evidence rows; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-bootlog $PAX_LEGS
+
+      - name: keep the serial logs and the boot logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-bootlog
+          path: |
+            build/mpx6-bootlog/**/serial.txt
+            build/mpx6-bootlog/**/boot.log
+            build/mpx6-bootlog/**/boot.summary
+          retention-days: 14
+          if-no-files-found: warn
+
   mpx6-part:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-part')
@@ -5979,6 +6040,7 @@ jobs:
       - mpx6-nvme
       - mpx6-ahci
       - mpx6-staged
+      - mpx6-bootlog
       - mpx6-disktools
       - mpx6-install
       - mpx6-kasumi
