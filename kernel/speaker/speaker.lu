@@ -34,6 +34,10 @@
 //! boot/io.S's `pax_halt` clears the two bits before its `hlt` loop, so
 //! a panic never leaves a note hanging.
 //!
+//! **The boot's beeps** (px118, `boot_tone`): kmain_console sounds one
+//! at the kernel's entry and one when the console has drawn its first
+//! line, each timed by channel 2's own edges, outside the books below.
+//!
 //! Every change (a tone started, the speaker silenced) is logged with
 //! the tick it happened at in boot/speaker.S's `pax_spk_ring`, which a
 //! test reads from the halted machine through QEMU's monitor: the
@@ -115,6 +119,45 @@ fn event(n: u64) {
 /// Port 0x61 as it reads now.
 pub fn port_b() -> u64 {
     inp(PORT_B)
+}
+
+// px118: the boot's beeps, for a person at a machine whose screen stays
+// black.
+const OUT2: u64 = 0x20 // port 0x61 bit 5: channel 2's output, read back
+const BEEP_IDLE: u64 = 65536 // reads of port 0x61 with no edge before a beep gives up
+
+/// px118: sound count `n` (1-65535) for `halves` half-periods of channel
+/// 2's square wave, then silence; returns the edges of OUT2 seen. The
+/// wait is the tone itself: in mode 3 OUT2 turns over every n/2 counts
+/// of the 1193182 Hz clock, and port 0x61 bit 5 reads OUT2 back (the
+/// 8254 data sheet's mode 3; the PC's port 0x61), so the loop counts the
+/// tone's own edges and needs no other clock, before the kernel has one.
+/// A channel that never turns over (an 8254 that does not count, when
+/// no tone sounds either) ends the wait after BEEP_IDLE reads with no
+/// edge. Outside the speaker's books: no tone counted, no ring event, no
+/// owner, so `summary` and the ring see programs' tones only. Port
+/// 0x61's bits 2-3 kept as found, bits 0-1 clear at the end. No state,
+/// no region, no heap; IF clear or set.
+pub fn boot_tone(n: u64, halves: u64) -> u64 {
+    out(PIT_CTRL, 0xb6) // channel 2, low then high byte, mode 3, binary
+    out(PIT_CH2, n & 0xff)
+    out(PIT_CH2, (n >> 8) & 0xff)
+    out(PORT_B, (inp(PORT_B) & 0x0c) | GATE_AND_DATA)
+    var edges: u64 = 0
+    var idle: u64 = 0
+    var last = inp(PORT_B) & OUT2
+    while edges < halves && idle < BEEP_IDLE {
+        let now = inp(PORT_B) & OUT2
+        if now != last {
+            edges += 1
+            idle = 0
+            last = now
+        } else {
+            idle += 1
+        }
+    }
+    out(PORT_B, inp(PORT_B) & 0x0c)
+    edges
 }
 
 /// Sound count `n` (1-65535) until told otherwise.
