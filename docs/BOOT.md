@@ -1119,8 +1119,13 @@ A boot that goes black should still say how far it got (`notes/px118-boot-diagno
   are unchanged.
 - **Two beeps** from the console kernel (kmain_console, kernel/speaker's `boot_tone`): high (count 1140) at the
   entry, before any use of the framebuffer; low (count 2280) when the console has drawn its first line. Each is
-  210 edges of the 8254's channel 2 as port 0x61 bit 5 reads them back, so the wait is the tone. `pax.nobeep`
-  silences both.
+  210 edges of the 8254's channel 2 as port 0x61 bit 5 reads them back, so the wait is the tone.
+- **A refused screen** (kernel/fb's `judge`, at the entry, from the framebuffer's description alone: none handed,
+  or not 32-bit RGB 8:8:8): three pips right after the high beep, a rest of about 150 ms then counts 1808, 1356 and
+  1808 (659.9, 879.9, 659.9 Hz) for about 80 ms each with 80 ms rests (kernel/speaker's `boot_rest` times a rest
+  by the same edges with the speaker's data bit off), and the low beep never; the POST codes from then on carry `E`
+  as their low digit (`0x1E`, `0x3E` … `0x8E`); bit 7 of the last stage's CMOS byte (and its copy in memory) marks
+  it for the next boot. `pax.nobeep` silences every beep.
 - **Stage marks** (kernel/bootmark): `entered`, `drawn` (the early screen's first line), `memory` (PAX's page
   tables live), `framebuffer` (mapped by PAX), `devices`, `root`, `init` (the first program), `end`. Each goes to
   port 0x80 (two equal hex digits, `0x11` to `0x88`), to CMOS bytes 0x78–0x7f (claimed only when all eight read
@@ -1131,9 +1136,11 @@ A boot that goes black should still say how far it got (`notes/px118-boot-diagno
   map lists the range as usable (kernel/frames withholds it): every console byte from the entry to the first
   program, a check word and a running sum, flushed at each line's end; the previous boot's slot is never written.
 - **Read back** by the next boot: one console line before the first program (`marks: boot N; the previous boot, P,
-  stopped at STAGE (CMOS); CMOS 0x78-0x7f held; log M bytes kept`), `/proc/pax-boot` (0444: `boot`, `stage`, `cmos`,
-  `found`, `previous`, `from`, `stages`, `log`) and `/proc/pax-bootlog` (0400: the previous boot's kept console,
-  only when intact by its sums). The first program (`/bin/login` as pid 1; the live login script) runs
+  stopped at STAGE (CMOS); CMOS 0x78-0x7f held; log M bytes kept; framebuffer WxH BPP bpp pitch P rgb R:RS G:GS B:BS
+  at 0xPHYSICAL, drawn`, or `…, refused: WHY`, or `framebuffer none, refused: no framebuffer`; the previous boot's
+  part adds `, its screen refused` when it ran blind), `/proc/pax-boot` (0444: `boot`, `stage`, `cmos`, `found`,
+  `previous`, `from`, `stages`, `log`, `framebuffer`, `screen`, `prevscreen`) and `/proc/pax-bootlog` (0400: the
+  previous boot's kept console, only when intact by its sums). The first program (`/bin/login` as pid 1; the live login script) runs
   `pax-boot-status record`, which appends to `/var/log/boot.log` (0600, rotated past 256 KiB to `.1` … `.4`) and
   `/var/log/boot.summary` (0644, its last 100 lines kept once past 200); `pax-boot-status` lists the last ten boots.
 - Test-only words: `pax.bootstop=STAGE` (halt just after the stage is recorded), `pax.cmosfill=XX`, `pax.logflip`,
