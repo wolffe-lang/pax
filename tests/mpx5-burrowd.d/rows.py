@@ -51,12 +51,14 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       no password in the log, the serial transcript or any record
   B10 boot 2, the same volume: the same fingerprint with no `made at this
       boot`, and the rig's known_hosts line from boot 1 still verifies
-  B12 a session without ptys, the client at a terminal: `ssh host`,
-      `ssh -t host` and `ssh -T host` each run the account's login shell
-      with no pty (burrow's shell, px112), a line typed into it once the
-      session has answered; the pty refused by name, and burrowd's line
-      saying so, for the first two, neither for -T (B9 finds their log
-      lines); `ssh host COMMAND` runs, no tty; what the client writes recorded
+  B12 a session without ptys, the client at a terminal: `ssh host` and
+      `ssh -T host` each run the account's login shell with no pty
+      (burrow's shell, px112), a line typed into it once the session has
+      answered; for `ssh host` the pty refused by name and burrowd's line
+      saying so, for -T neither (B9 finds both log lines); `ssh -t host`
+      ends with status 255 right after the refused pty (OpenSSH's client,
+      told to insist on a pty, measured on Linux too); `ssh host COMMAND`
+      runs, no tty; what the client writes recorded
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -450,7 +452,7 @@ class Client:
                 except OSError:
                     data = b''
                 out += data
-                if typed is not None and after in out:
+                if typed is not None and after is not None and after in out:
                     os.write(master, typed)
                     typed = None
                 if not data and p.poll() is not None:
@@ -685,9 +687,10 @@ def host_rows(client):
     (c.dir / 'b12.txt').write_text(record_b12)
     no_pty = b'burrowd: no pty here: this shell runs without a terminal (no line editing, no job control)'
     ran = lambda r: r[0] == 4 and b'shell ran ' in r[1]  # the typed line's echo holds `shell %s`, never this
-    with_pty = all(ran(r) and refused in r[1] and r[1].count(no_pty) == 1 and r[1].index(refused) < r[1].index(no_pty)
-                   for r in (plain, forced))
-    if cmd[0] == 0 and b'pty=' in cmd[1] and with_pty and ran(bare) and refused not in bare[1] and no_pty not in bare[1]:
+    with_pty = ran(plain) and refused in plain[1] and plain[1].count(no_pty) == 1 and plain[1].index(refused) < plain[1].index(no_pty)
+    insisted = forced[0] == 255 and refused in forced[1] and b'shell ran ' not in forced[1]
+    if (cmd[0] == 0 and b'pty=' in cmd[1] and with_pty and insisted and ran(bare) and refused not in bare[1]
+            and no_pty not in bare[1]):
         ok('B12', 'no ptys, the shell served: %s' % record_b12.replace('\n', '; ').strip('; '))
     else:
         bad('B12', 'a session without ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
