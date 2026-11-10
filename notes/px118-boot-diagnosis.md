@@ -97,92 +97,216 @@ some lines) is not in this table: the photo says where it stopped.
 | h | a panic or hang between `pause_early` and `fb.start` (PAX's paging, the frames) | black, halted | nothing | the first beep, the second only if the early screen drew; no ssh; the marks say `entered` or `drawn (early)`, never `memory` |
 | i | a hang in a driver with the screen dark for another reason | black | nothing | both beeps; the marks name the last stage reached; ssh only if the network came up |
 
-What the report says so far, read against this table and nothing else: **on the stick, a black screen with no menu
-at all means the stop or the dark display began before PAX's kernel ran** (rows a and b), because the stick draws
-Limine's menu for three seconds before the kernel is loaded. On the installed disk, today's `quiet` and `timeout: 0`
-make every row look the same. Whether the stick's black boots really showed no menu at any moment is for the person
-at the machine to confirm; it is the first thing the page in section 8 asks.
+What the report says, read against this table and nothing else. On the stick, a black screen with no menu at all
+would mean the stop began before PAX's kernel ran (rows a and b), because the stick draws Limine's menu for three
+seconds before the kernel is loaded. **Asked, the person at the machine says the stick's menu does show, then the
+screen goes black**: so on the stick rows a and b are ruled out, and the stop or the dark display is at or after
+Limine's hand-off (rows c to i). On the installed disk, `quiet` and `timeout: 0` make every row look the same, so the
+installed disk's black boots say nothing yet. The kernel's early window (the entry, the first use of the
+framebuffer, the pause across the switch to PAX's page tables, a refused framebuffer: rows d to h) is where the
+instrumentation below looks first.
 
 The one test that needs no new image: on a black screen, wait 30 seconds and try ssh from another machine. An
 answer puts the boot in rows b, f, g or i (the system is up, the picture is not); no answer puts it in a, c, d, e or
 h, or a network that did not come up.
 
-## 4. Decision 1: where the stage marks live (item 4)
 
-What the marks must do: record, at each stage (entered, drawn, memory up, framebuffer mapped, console drawn, root
-mounted, first program started, the clean end), how far this boot got; survive a reset **and** a power-off, since a
-person facing a black screen holds the power button as often as they press reset; be written from the kernel's first
-instructions, before any driver; and be read by the next boot before it writes its own. A boot counter beside them
-says how many boots there were, so a failed boot is never invisible.
+## 4. Decisions
 
-**A. CMOS (the real-time clock's battery-backed RAM).**
-- Reached by two port writes a byte (index to 0x70, data at 0x71; a second bank of 128 bytes at 0x72/0x73 on the
-  chipsets that have one), from the kernel's first instruction, under BIOS and UEFI alike, with no driver and no
-  firmware call. PAX already reads it (`kernel/rtc`).
-- Survives a reset and a power-off while the board's battery holds; no flash: **zero flash writes per boot**. A
-  boot writes about 30 bytes of battery-backed RAM (the counter once, then the stage, the stage set and a checksum
-  at each of eight stages).
-- The risk: no specification reserves CMOS bytes for an operating system. Bytes 0x10–0x2D are the AT checksum's,
-  0x0F is the reset-reason byte a firmware reads after a reset, and the rest of both banks belong to the firmware by
-  custom; a firmware that keeps a setting or a checksum in a byte PAX writes may load its defaults at the next
-  power-on. That cannot be ruled out without the firmware's source, which this lane may not read.
-- The guard, so a byte the firmware uses is never overwritten: eight bytes, picked by measurement as bytes neither
-  QEMU's firmware writes; PAX writes them only when it finds them all zero (first use: it claims them with a magic
-  word and a checksum) or holding its own magic with a good checksum. Anything else is another's: PAX writes nothing
-  to CMOS that boot, says so in one line, and keeps the marks in memory only (item 5's area). The word
-  `pax.nomarks` turns CMOS off entirely. Left over: a firmware byte that happens to read zero when PAX first looks.
-- Covered in QEMU (its CMOS is emulated and survives a guest reset; measured before use).
+**Decision 1, where the stage marks live (item 4): CMOS, guarded, with every mark also in memory.** The options as
+put:
 
-**B. An EFI variable.**
-- What PAX has: the EFI system table's address (Limine's EFI system table response), read once for the firmware's
-  vendor string (`kernel/acpi`). It requests no EFI memory map, maps none of the firmware's runtime regions, has no
-  call path in the Microsoft x64 convention, and has never called a runtime service (px115 found the same). A
-  `SetVariable` needs all of that, and the FPU state the firmware may use, before the first stage could be written.
-- UEFI only: a BIOS boot keeps no marks.
-- Each `SetVariable` is a write to the firmware's flash store: **eight flash writes per boot**, plus the store's own
-  reclaim cycles, on firmware whose variable store's behaviour when it fills cannot be tested here.
-- Not recommended.
+- **A. CMOS**, the real-time clock's battery-backed RAM. Two port writes a byte, from the kernel's first
+  instruction, under BIOS and UEFI alike, no driver and no firmware call; it survives a reset and a power-off while
+  the board's battery holds; no flash, so **no flash write at any boot** (a boot writes about thirty bytes of
+  battery-backed RAM). The risk: no specification reserves a CMOS byte for an operating system, so a byte PAX
+  writes may be one a firmware keeps a setting or a checksum in, and such a firmware may load its defaults at the
+  next power-on.
+- **B. An EFI variable.** PAX has only the EFI system table's address (read once, for the vendor's name); it
+  requests no EFI memory map, maps none of the firmware's runtime regions, has no call path in the Microsoft x64
+  convention and has never called a runtime service. UEFI only, and each `SetVariable` is a write to the firmware's
+  flash: eight a boot. Not taken.
+- **C. A reserved sector of the PAX disk.** No firmware state touched, two sector writes a boot; but it can be
+  written only once the disk driver is up, two thirds of the way through the boot, so it never sees the early
+  stages, and a boot that stops before the disk is not even counted. Not taken.
 
-**C. A reserved sector of the PAX disk** (for example in the 1 MiB before the first partition, which the installer
-zeroes and nothing uses past the install log's bytes 65536–131071).
-- No firmware state touched. Flash wear is small: **two sector writes per boot** (the boot begun, the clean end),
-  through the SSD's own wear levelling.
-- But it can be written only once the disk driver is up (`block.start`, two thirds of the way through the boot), so
-  every stage this report is about (before the first line, before PAX's paging, before the framebuffer is mapped)
-  is invisible: a boot that stops before the disk leaves nothing, and the next boot cannot even count it.
-- The stick (read-only, or absent at the next boot) keeps nothing.
+As taken (kernel/bootmark):
 
-**Not an option on its own, but carried with any of them: memory that survives a warm reset** (item 5's early-log
-area). It costs nothing to write and holds every stage and the early log, but a power-off clears it, and whether a
-firmware keeps it across a reset is the firmware's choice (measured in QEMU; unknown on the test machine).
+- **Eight bytes, 0x78 to 0x7f of the lower bank.** Never written by PAX, whatever they hold: 0x00–0x0D (the clock's
+  registers, the MC146818 data sheet), 0x0E (diagnostic status) and 0x0F (the reset reason a firmware reads after a
+  reset), 0x10–0x2D and the checksum over them at 0x2E–0x2F (the PC/AT's configuration bytes), 0x30–0x3F (extended
+  memory, the century at 0x32, and 0x38–0x3F, which an Intel chipset can lock), and the byte the FADT names as the
+  century (checked once ACPI is read; were it among the eight, CMOS writing would stop for the rest of the boot).
+  Measured (M1, both firmwares): on a cold QEMU the bytes past the clock that are set are 0x14–0x18, 0x30–0x32, 0x35,
+  0x37, 0x38 and 0x3d; 0x78–0x7f read zero; QEMU has no upper bank (it reads 0xff).
+- **The claim, once.** At the entry the eight bytes are read before anything is written. All zero: PAX claims them
+  (`P` `X`, a boot number, the stage, the stage set, a version and a checksum), and the boot's first program logs the
+  claim with the offsets in `/var/log/boot.log`. PAX's magic and a good checksum: they are PAX's, and the boot
+  number goes up by one. **Anything else is another's: PAX writes nothing to CMOS that boot** and says what it
+  found (`CMOS 0x78-0x7f refused (found 0x…)`), keeping the marks in memory only (R1 shows the bytes untouched
+  afterwards).
+- **Off:** `pax.nomarks` on the kernel's command line: CMOS is neither read nor written.
+- **Writes a boot:** the eight bytes at the entry, then three (the stage, the set, the checksum) at each of up to
+  seven further stages: at most 29 byte writes of battery-backed RAM; nothing to flash.
+- **Left over:** a firmware byte that happens to read zero the first time PAX looks. Section 9 tells the person at
+  the machine how to see whether the firmware's settings were reset and how to turn the marks off.
 
-**Recommended: A, guarded as above, with every mark also kept in item 5's memory area.** It is the only store that
-sees the early stages, survives the power button, works under both firmwares and wears nothing. The guard bounds the
-firmware risk to a byte that reads zero, and `pax.nomarks` removes it. If no CMOS write is acceptable on the test
-machine at all, C with the memory area is the fallback: it loses the early stages after a power-off, which is the
-case this report is about.
+**Decision 2: a POST code at each stage** (yes, as ruled). Port 0x80 gets the stage as two equal hex digits, 0x11
+(entered) to 0x88 (the end), so a board with a two-digit POST-code display shows the last stage with no screen.
 
-**Decision 2 (proposed beside it): a POST code at each stage.** The same stage number also written to port 0x80,
-the PC's power-on self-test port: on a board with a two-digit POST code display (or a POST card), the display then
-shows the last stage PAX reached, with no screen at all. One port write a stage, nothing stored. Recommended.
-
-**Decision 3 (item 6, chosen, not asked): who may read the boot log.** `/var/log/boot.log` is root's, 0600 (the early
-log can hold anything the kernel printed); a second file, `/var/log/boot.summary`, 0644, holds one line a boot (`boot N:
-previous boot stopped at STAGE` or `completed`, and the time), the last ten of which `pax-boot-status` prints for
-anyone. Both are bounded and rotated by count.
+**Decision 3 (item 6, chosen): who reads the log.** `/var/log/boot.log` is root's, 0600 (it holds the previous
+boot's console); `/var/log/boot.summary` is 0644, one line a boot, and `pax-boot-status` prints its last ten for
+anyone.
 
 ## 5. The beeps (item 2)
 
-(Implementation follows; see the evidence index.)
+kmain_console sounds a **high beep at the entry** (count 1140, 1046.6 Hz, about 100 ms), before any use of the
+framebuffer, and a **low beep the first time the console is drawn** (count 2280, 523.3 Hz, about 200 ms): after the
+early screen's first line, or after kernel/fb's attach when the early screen did not attach. Each lasts 210 edges of
+the 8254's channel 2 output, read back on port 0x61 bit 5, so the wait is the tone itself and needs no clock; a
+channel that never turns over ends the wait after 65,536 reads with no edge. Neither touches the speaker's own books,
+so no transcript moves. `pax.nobeep` silences both.
+
+Measured (B1–B3, both firmwares, KVM): a plain boot's capture holds 1046.8–1051.4 Hz for 103–105 ms, then 522.0–523.4
+Hz for 178–182 ms; `pax.nobeep` none; a machine with no display device the high tone alone (90–91 ms).
+
+| heard | means |
+|---|---|
+| nothing | the kernel never started (or the machine has no speaker, or its 8254 does not count: check on a good boot) |
+| high only | the kernel started and never drew a line (no framebuffer it can draw on, or it stopped before) |
+| high, then low | the kernel drew its console; a black screen then is the display not showing what was drawn |
 
 ## 6. Limine says more (item 3)
 
-(Implementation follows.)
+From Limine's `CONFIG.md` at the pinned v12.9.1 (global options): `timeout` (seconds before the default entry boots;
+`0` boots at once with no menu), `quiet` (suppresses every line but panics and important warnings), `verbose`
+("print additional information during boot") and `serial` ("enable serial I/O for the bootloader").
 
-## 7. Evidence index
+- **The installed disk** (`user/install/prepare.lu`'s `config_text`): `timeout: 5`, `verbose: yes`, `serial: yes`,
+  and no `quiet`. A boot now shows Limine's menu for five seconds and its loading lines, so a black screen before the
+  menu (the firmware, or Limine's own picture) is told apart from one after it (the hand-off, the kernel). An upgrade
+  regenerates a root copy that still holds the earlier quiet text (its digest for the root's PARTUUID is a known
+  installer text).
+- **The stick** (`boot/limine-usb.conf`): the same three options; its menu goes from three seconds to five.
+- Unchanged: the ISO's and the tests' configurations, and the configuration `pax-upgrade arm` writes (`timeout: 5`,
+  `default_entry: 1`).
+- Measured: U1 (both firmwares), the installed options: Limine's lines on the serial port before PAX's first, then
+  the boot to its program with no key; U2 (both firmwares), the armed shape (`timeout: 5`, `default_entry: 1`, a
+  staged stand-in entry first, the installed entry in the new text second): the first entry boots with no key.
 
-(To come.)
+## 7. The marks and the log (items 4–6)
 
-## 8. The page for the person at the machine (item 8)
+- **kernel/bootmark**: the stages, in order, each recorded when reached: `entered` (the first statement), `drawn`
+  (the early screen's first line, through Limine's mapping), `memory` (PAX's frames and page tables live),
+  `framebuffer` (mapped by PAX, the console on it), `devices` (PCI, network, USB and disks up), `root` (the volumes
+  mounted), `init` (the first program started), `end` (the kernel's own end: halt, reboot or power-off). Each goes to
+  port 0x80, to CMOS when it is PAX's, and to the memory area. A test-only `pax.bootstop=STAGE` halts just after a
+  stage is recorded; `pax.cmosfill=XX` and `pax.logflip` are the rows' only other words.
+- **kernel/bootlog**: 128 KiB at physical 64 MiB, two slots of 64 KiB, used when Limine's map lists the range as
+  usable (kernel/frames withholds it). A boot keeps every console byte from its entry to its first program in one
+  slot, with a check word over its header and a running sum over its bytes, flushed to memory at each line's end; the
+  other slot, the previous boot's, is read at the entry and never written. A slot whose sums do not hold is refused
+  and never printed.
+- **The kernel's line**, on the screen before the first program: `marks: boot N; the previous boot, P, stopped at
+  STAGE (CMOS); CMOS 0x78-0x7f held; log M bytes kept`.
+- **/proc/pax-boot** (0444): `boot`, `stage`, `cmos`, `found`, `previous`, `from`, `stages`, `log`, one a line;
+  **/proc/pax-bootlog** (0400): the previous boot's kept console.
+- **user/bootlog's `pax-boot-status`**: `record` (root's) appends a block a boot to `/var/log/boot.log` (how the
+  previous boot ended, its stages, what CMOS was, the claim once, the previous boot's console between markers or
+  "refused by its checksum; not printed"), rotated past 256 KiB to `boot.log.1` … `.4`; and a line to
+  `/var/log/boot.summary`, kept to its last 100 lines once past 200. With no argument, anyone: the last ten boots and
+  how each ended. Who runs `record`: `/bin/login` as pid 1 on an installed system, before its first prompt; the live
+  stick's login script. Both are on the images (`tools/mkbootstatus`, `tools/mkdistribution`).
+- An install never copies the boot log (it is the running machine's own, as sudo's log is: `snapshot.lu`'s runtime
+  state), and an upgrade keeps it (it is in no manifest; `tests/mpx6-install.d/upgrade.py` holds it byte for byte).
 
-(To come, at the end of the lane.)
+What memory does across a reset: QEMU keeps it across the monitor's reset and across the kernel's own (L1, W1, both
+firmwares); a power-off of QEMU clears CMOS too (QEMU keeps no CMOS file), which a board with a battery does not. On
+the test machine's firmware class, whether memory survives a reset is the firmware's choice and was not measured.
+
+## 8. A black hand-off in QEMU (item 9)
+
+`tests/mpx6-bootlog.d/handoff.py` boots the console kernel under one display shape a case and, at the kernel's halt,
+takes QEMU's screendump of what the display scans out:
+
+| shape | firmware | the kernel's screen line | the picture | beeps |
+|---|---|---|---|---|
+| standard VGA | BIOS, UEFI | 1280x800 32 bpp | text | high, low |
+| Limine `resolution: 1024x768x16` | BIOS | `off, not 32-bit RGB 8:8:8` | **black, the kernel ran** | high only |
+| Limine `resolution: 1024x768x24` | BIOS | `off, not 32-bit RGB 8:8:8` | **black, the kernel ran** | high only |
+| the same two | UEFI | 1280x800 32 bpp (the firmware offers 32 only) | text | high, low |
+| cirrus | BIOS | `off, not 32-bit RGB 8:8:8` | **black, the kernel ran** | high only |
+| cirrus | UEFI | 800x600 32 bpp | text | high, low |
+| virtio-gpu-pci (512 MiB and 8 GiB) | UEFI | `off, no framebuffer` | **black, the kernel ran** | high only |
+| VGA without EDID | BIOS, UEFI | 1024x768, 1280x800 | text | high, low |
+| VGA at 3840x2160; and a 2-s menu, then that mode | UEFI | 3840x2160 32 bpp at 2x | text | high, low |
+| Limine `resolution: 1366x768` | BIOS | 1280x800 (Limine fell back) | text | high, low |
+| Limine `resolution: 1366x768` | UEFI | 1366x768, pitch 5464 | text; QEMU's scanout 1360 wide | high, low |
+| bochs-display, ramfb | UEFI | 1280x800, 800x600 | text | high, low |
+| virtio-vga | BIOS | 1024x768 | text | high, low |
+| qxl | UEFI | not run: the test image's QEMU has no QXL | | |
+
+So QEMU does show a black hand-off, of one kind: **Limine hands the kernel a framebuffer PAX does not draw on (16 or
+24 bits a pixel, under BIOS) or none at all (a UEFI display with no framebuffer Limine passes on)**, and the kernel
+runs to its program on a screen that shows nothing it writes. Each is heard as one beep and logged as stages
+without `drawn` and `framebuffer`. None was produced by a mode change, a missing EDID, a large mode or an odd pitch,
+and no case put the framebuffer above 4 GiB. This is not shown to be the test machine's cause: its console has drawn on
+boots that worked (PAX draws only on a 32-bit framebuffer), and nothing here says what its firmware hands Limine on a
+boot that goes black. It is the shape the new image recognises: if the test machine's black boots are one beep and
+their marks stop short of `drawn`, this is the class to chase; if they are two beeps, it is not.
+
+## 9. The page for the person at the machine (item 8)
+
+Nothing here was tried on the test machine; every row above is QEMU. This page says what an image from this branch
+does there, what to look and listen for, and what to send back.
+
+**Once, on a boot that works.**
+1. Limine's menu now shows for five seconds on the installed disk too, with its loading lines under it. Let it
+   count down.
+2. Listen as the menu's countdown ends: **a high beep, then a low one**, a second or two apart. If a boot that
+   works makes no beep at all, this machine cannot sound them (no speaker on the board's speaker header, or the
+   timer that drives it does not run), and on a black screen their silence means nothing: go by the marks.
+3. Just above the login prompt, one line: `marks: boot 1; the previous boot: none; CMOS 0x78-0x7f claimed; log none`
+   on the first boot of the image, then `marks: boot 2; the previous boot, 1, completed (CMOS); …` and so on.
+4. Then check the firmware's settings once (the next part).
+
+**Did the firmware reset its settings?** The marks write eight bytes of the firmware's battery-backed CMOS (offsets
+0x78–0x7f), which no standard reserves for an operating system. PAX writes them only when it finds them all zero or
+holding its own record, never anything else; but a firmware that keeps a setting in a byte that reads zero could
+take PAX's write for corruption. After the first two or three boots of the image:
+- watch the firmware's own screen at power-on for a message that its settings were reset or are bad, or a prompt
+  to press a key to enter setup or load defaults;
+- enter setup (Delete at power-on) and compare with what you set before: the SATA mode (it must stay AHCI), the
+  boot options and their order, Secure Boot, the memory profile and any overclock, the clock's date and time.
+If anything moved, turn the marks off (below) and say so: that ends the CMOS store on this machine.
+
+**Turning the marks or the beeps off.** Words on the kernel's command line: `pax.nomarks` (CMOS neither read nor
+written; port 0x80 and the memory log stay) and `pax.nobeep`. For one boot: at Limine's menu use the edit key its help
+line names on the entry, add the word to the `cmdline:` line, and boot from the editor with the key it names. For
+good: add the word to the `cmdline:` line of `/boot/limine/limine.conf` on the disk's EFI partition from another
+system. An edited `limine.conf` makes `pax-upgrade arm` refuse (it never merges an edited configuration): take the
+word out before an upgrade over ssh, or upgrade from the stick.
+
+**On the next black screen.**
+1. When did it go black: before Limine's menu, during it, or after its countdown ended?
+2. What did you hear: **nothing** (the kernel never started), **one high beep** (the kernel started and never drew
+   its console: section 8's class), or **high then low** (the kernel drew its console; the screen is not showing it)?
+3. If the board has a two-digit POST-code display, what does it read? PAX writes `11` (entered), `22` (drawn), `33`
+   (memory), `44` (framebuffer), `55` (devices), `66` (root), `77` (the first program), `88` (the end). Anything else
+   is the firmware's own code, so the kernel never wrote one.
+4. **Wait 30 seconds and try ssh from another machine** (`ssh YOU@ADDRESS`, the address it had before). An answer:
+   the system is up and only the picture is wrong. Run `pax-boot-status` there and send it. This needs no new image.
+5. Then press the reset button rather than holding the power button: a reset may keep the kernel's console in
+   memory for the next boot to save; the marks survive either.
+
+**After the next good boot.**
+- The `marks:` line above the login prompt: `the previous boot, N, stopped at STAGE` (or `completed`). Photograph it.
+- `pax-boot-status` (any user): the last ten boots and how each ended.
+- `sudo cat /var/log/boot.log` (or as root): this boot's block names the previous boot's end, its stages and, when
+  memory survived the reset, its console between `--- console of boot N ---` and `--- end of the console of boot N
+  ---`. Send the block (or a photo).
+
+What each end means: `entered` or `drawn` (stopped in the kernel's first moments, before PAX's own page tables);
+`memory` (stopped before the framebuffer was mapped); `framebuffer`, `devices` or `root` (the console was up; a hang
+in the drivers or the disks; the console log says which); `init` (the system reached its first program: a black
+screen then is the display); `completed` (shut down cleanly).
