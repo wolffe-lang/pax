@@ -119,6 +119,26 @@ IN=/root/in-empty row sudo-S-eof 'sudo -S -k id -u'
 IN=/root/in-empty row sudo-no-tty 'sudo -k id -u'
 IN=/root/in-empty row sudo-n 'sudo -n -k id -u'
 IN=/root/in-right row sudo-S-prompt "sudo -S -k -p 'pw for %p as %U on %h: ' id -u"
+# px115: a record another holder of the parent's pid left. sudoers_timestamp(5): a record made with no
+# terminal names its parent by pid and by start time. Planted as root in PAX's record format
+# (/var/run/sudo/ts/UID, root's with the caller's group, 0600) for the very parent that then runs
+# `sudo -n` as bob: once with no start time (the kind PAX's sudo wrote before px115), once with a start
+# time a tick before the parent's own. Neither is this parent's, so sudo asks. Ubuntu's sudo keeps its
+# records in a file named for the user, finds none, and asks the same.
+echo "=== ROW sudo-n-pid-reused"
+(cd / && setsid -w /bin/bash -c '
+    p=$$; s=$(cut -d" " -f6 /proc/$$/stat); t=$(cut -d" " -f22 /proc/$$/stat); now=$(( $(date +%s%N) / 1000000 ))
+    mkdir -p /var/run/sudo/ts && chmod 711 /var/run/sudo && chmod 700 /var/run/sudo/ts
+    printf "ppid %s sid %s time %s\nppid %s start %s sid %s time %s\n" "$p" "$s" "$now" "$p" "$((t - 1))" "$s" "$now" > /var/run/sudo/ts/1001
+    chown 0:1001 /var/run/sudo/ts/1001 && chmod 600 /var/run/sudo/ts/1001
+    env -i HOME=/home/bob TERM=linux PATH=/usr/bin:/bin setpriv --reuid=1001 --regid=1001 --init-groups -- sudo -n id -u' < /root/in-empty > /root/o 2> /root/e); echo "--- rc $?"
+echo "--- stdout"; cat /root/o; echo "--- stderr"; cat /root/e
+rm -f /var/run/sudo/ts/1001
+# px115: `sudo -k -S` with a record fresh for the same parent and session still reads the password's
+# line from standard input, and the command gets what follows it byte for byte (the form an ssh
+# client's `printf PASSWORD | ssh HOST "sudo -k -S ..."` relies on).
+printf '%s\n%s\n%s\n' "$bobpw" "$bobpw" 'px115-data-line' > /root/in-twice
+IN=/root/in-twice row sudo-k-S-fresh "sudo -S id -u; sudo -k -S /bin/sh -c 'id -u; cat'"
 IN=/root/in-root row su-stdin-right 'su -c "id -u"'
 IN=/root/in-one row su-stdin-wrong 'su -c "id -u"'
 IN=/root/in-empty row su-stdin-eof 'su -c "id -u"'
