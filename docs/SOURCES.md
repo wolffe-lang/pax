@@ -2139,3 +2139,21 @@ source; no kernel's, firmware's or driver's.
   `user/sudo` (its log and timestamp) and `user/shrc` (lope's store); pelt's `src/sh/hist.lu` (the org's own: the
   history file is `$HOME/.sh_history`) and boreutils' `ls` options (the org's own).
 - No kernel's, firmware's or driver's source; no other installer's source.
+
+## px115 — upgrade PAX over ssh
+
+- **Limine 12.9.1's documentation** (its README and CONFIG.md): the file systems it reads, `timeout`,
+  `default_entry`, `quiet`, `module_path`, `cmdline`, the blake2b hash of a URI, and the Boot Loader Interface's
+  `LoaderEntryOneShot`; and Limine run as a program under QEMU (`notes/px115/probes/`), never read as source.
+- **The newc archive format** as the Linux kernel's `Documentation/driver-api/early-userspace/buffer-format.rst`
+  and cpio(5) describe it (the `070701` header, its thirteen eight-digit hex fields, the name with its NUL, each
+  padded to four bytes, `TRAILER!!!`): `pax-upgrade arm` reads the archive's `/boot/pax`, `/etc/pax-release` and
+  `/usr/share/pax-upgrade/entry` out of it.
+- **sudo(8)** (`-k`, `-S`, `-p`, `SUDO_USER`) and **sha256sum(1)**, for the commands as a person types them; OpenSSH's
+  `ssh` run as a program only.
+- **ext2 as e2fsprogs' `debugfs` and `mke2fs` make and read it**, black boxes, for the rows' disks; mtools' `mtype`
+  and `mcopy` to read the EFI partition back.
+- PAX's own `kernel/fstab` (`mount_upgrade`, the root's mount), `kernel/initramfs`, `kernel/tree`, `kernel/ext2`
+  (`wspan`, `rspan`), `user/install` (the upgrade, its record, the allow-list, the log), `user/disktools` (paxfat's
+  `replace`, paxgpt's `--dump`) and `user/sudo`.
+- No kernel's, boot loader's, init's, installer's, sudo's or package manager's source from any other project.
