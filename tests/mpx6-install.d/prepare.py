@@ -56,7 +56,13 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
     rc,out=groups('root:x:0:\nsudo:x:28:\nwolf:x:1000:\n')
     row('I-sudo-group-other-gid',(rc,out)==(3,'refused: sudo_gid\n'),'a sudo line at another gid: refused by name ('+repr(out)+')')
     # px112 (R-px112-9, C): the stick's burrowd listens on loopback; an install writes the LAN's line.
-    shipped=(Path(__file__).resolve().parents[2]/'user/burrowd/burrowd_config').read_text()
+    # px116 (pax#334): the stick's text as the dev image has it, tools/system-env's, its SetEnv line
+    # /etc/shrc's exports: an install keeps that line, so the installed system's commands over ssh
+    # have the console's variables (I-burrowd-setenv-*).
+    repo=Path(__file__).resolve().parents[2]
+    (w/'shrc').write_text(subprocess.run([sys.executable,'-I',str(repo/'tools/system-env'),'shrc','dev'],check=True,capture_output=True,text=True).stdout)
+    shipped=subprocess.run([sys.executable,'-I',str(repo/'tools/system-env'),'burrowd-config',str(w/'shrc')],check=True,capture_output=True,text=True).stdout
+    setenv=[l for l in shipped.splitlines() if l.startswith('SetEnv ')]
     (s/'etc/burrowd').mkdir(parents=True,exist_ok=True)
     (s/'etc/burrowd/burrowd_config').write_text(shipped)
     want_burrowd=''.join(('ListenAddress 0.0.0.0' if l.split()[:1]==['ListenAddress'] else l)+'\n' for l in shipped.splitlines())
@@ -88,6 +94,9 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
         got=(out/'etc/burrowd/burrowd_config').read_text() if (out/'etc/burrowd/burrowd_config').exists() else ''
         row('I-burrowd-lan-'+game,got==want_burrowd and attrs.get('/etc/burrowd/burrowd_config',[])[:3]==['0644','0','0'],
             'the installed burrowd_config is the shipped one with `ListenAddress 0.0.0.0`, root\'s, 0644')
+        row('I-burrowd-setenv-'+game,len(setenv)==1 and 'WOLF_STD=/usr/share/wolf/compiler-std' in setenv[0].split()
+            and [l for l in got.splitlines() if l.startswith('SetEnv ')]==setenv,
+            'the installed burrowd_config keeps the stick\'s one SetEnv line, /etc/shrc\'s exports ('+repr(setenv)+')')
         print('PASS I-account-games-'+game+': named user, uid/gid 1000, in group sudo (27), root shell unchanged, payload omitted, complete game and engine source on yes')
     assert {str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}==before
     # px114 (pax#329): a source holding what a live system writes while it runs (the census,
