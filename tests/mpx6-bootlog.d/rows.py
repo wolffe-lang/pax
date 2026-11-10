@@ -304,6 +304,15 @@ def rows_beeps(fw, plain, quiet):
     got = tones(m.wav)
     if booted(f'B2 {fw}', text) and beeps(f'B2 {fw}', got, []):
         say(f'PASS B2 {fw}: pax.nobeep, no tone')
+    # B4: a sound card's capture (virtio-sound on its own wav, the speaker bound to nothing, as
+    # tests/mpx3-sound and tests/mpx3-orchestra boot): no boot tone reaches it.
+    m = Machine(f'{fw}-B4', fw, ['-cdrom', plain, '-audiodev', f'wav,id=card,path={WORK / (fw + "-B4.wav")},out.frequency=48000',
+                                 '-device', 'virtio-sound-pci,audiodev=card'], reboot_exits=True)
+    text = m.boot()
+    m.quit()
+    got = tones(WORK / f'{fw}-B4.wav')
+    if booted(f'B4 {fw}', text) and beeps(f'B4 {fw}', got, []):
+        say(f'PASS B4 {fw}: a sound card\'s capture holds no boot tone')
     # B3: no display device (-vga none), so no framebuffer: the high beep alone.
     m = Machine(f'{fw}-B3', fw, ['-cdrom', plain], audio=True, reboot_exits=True, vga=False)
     text = m.boot()
