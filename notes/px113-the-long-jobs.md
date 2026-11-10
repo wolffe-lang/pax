@@ -18,8 +18,8 @@ One issue was filed, pax#327, naming yew's slower build, as the contract asks of
 
 The machines: the build Mac, for git, the API reads and the Python-only rows (`tests/ci-plan`,
 `tests/ci-budgets.py` and the plan job's other selftests), one worker, behind its build lock with its memory read
-first; hasu, for yew's four builds in section 4, inside one block's CPUs with its three locks held (block, then
-slot, then light), in a container with no network and a 12 GB cap.
+first; a Linux build host, for yew's four builds in section 4, on six of its CPUs with nothing else running beside
+them, in a container with no network and a 12 GB cap.
 
 ## 2. Inputs, verified
 
@@ -81,8 +81,8 @@ On trunk alone, mpx5-yew was cut in 8 of 12 runs. At `0ccb2c67` neither job was 
 
 ### yew's build, separated (pax#327)
 
-After the pull request opened, both yew pins were built with both compilers on one host: hasu's block B (CPUs 6-11,
-its three locks held, nothing beside it), in the baseline Ubuntu 24.04 image (`localhost/px88-ubuntu:1`), with no
+After the pull request opened, both yew pins were built with both compilers on one host: a Linux build host, on six
+of its CPUs with nothing else running beside them, in a baseline Ubuntu 24.04 image (libc6-dev 2.39), with no
 network and a 12 GB cap. Each build was `tools/mkyew`'s, `wolf build --release --no-cache --deny-warnings src/yew.lu`
 through a `cc` that adds `-static`. Each wolf used the std its archive bundles; that std is the one the matching
 yew pin names. The inputs were staged by digest: the two wolf release archives and yew's two codeload archives, each
