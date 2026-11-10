@@ -20,11 +20,13 @@
 #      pax_interrupt and still ends `iretq`, and between the two it
 #      compares the frame's vector with PAX_SYSCALL (0x100) and jumps to
 #      pax_sysret, which ends `sysretq`.
-#   U1 setup: `user: syscall star 0x0010000800000000 lstar 0x<L> fmask
+#   U1 setup: `user: syscall star 0x0013000800000000 lstar 0x<L> fmask
 #      0x0000000000044700, efer.sce 1, smep 1, smap 1`, the MSRs read back
 #      after writing them, with L = pax_syscall_entry's address in the
-#      ELF (STAR: SYSCALL's CS 0x08, SYSRET's base 0x10, so CS 0x23 and
-#      SS 0x1b in ring 3; FMASK clears TF IF DF NT AC). SMEP and SMAP are
+#      ELF (STAR: SYSCALL's CS 0x08, SYSRET's base 0x13, so CS 0x23 and
+#      SS 0x1b in ring 3 with the privilege bits in the base itself, as
+#      some processors do not force them on SYSRET (pax#340); FMASK
+#      clears TF IF DF NT AC). SMEP and SMAP are
 #      required on: CI's and kasumi's TCG `-cpu max` emulate both and
 #      hasu's KVM passes the host's.
 #   U2 hello: its address space line,
@@ -290,7 +292,7 @@ for leg in $legs; do
             entry=$(sym "$elf" pax_syscall_entry)
             if [ -z "$l" ]; then why=" no setup line;"; else
                 set -- $l
-                [ "$4" = 0x0010000800000000 ] || why+=" star $4, not 0x0010000800000000;"
+                [ "$4" = 0x0013000800000000 ] || why+=" star $4, not 0x0013000800000000;"
                 [ "$6" = "$entry" ] || why+=" lstar $6, not pax_syscall_entry $entry;"
                 [ "${8%,}" = 0x0000000000044700 ] || why+=" fmask ${8%,}, not 0x0000000000044700;"
                 [ "${10%,}" = 1 ] || why+=" efer.sce ${10%,};"
@@ -298,7 +300,7 @@ for leg in $legs; do
                 [ "${14}" = 1 ] || why+=" smap ${14} (required on);"
             fi
             if [ -z "$why" ]; then
-                say "PASS U1 $tier kmain_user $leg: star 0x0010000800000000, lstar = pax_syscall_entry $entry, fmask 0x44700, EFER.SCE, SMEP and SMAP on"
+                say "PASS U1 $tier kmain_user $leg: star 0x0013000800000000, lstar = pax_syscall_entry $entry, fmask 0x44700, EFER.SCE, SMEP and SMAP on"
             else
                 bad "U1 $tier kmain_user $leg:$why"; grep -E '^user: syscall' "$norm" | sed 's/^/  /' >&2
             fi
