@@ -109,8 +109,10 @@ use block
 use boot_info
 use ext2
 use frames
+use identity
 use initramfs
 use log
+use paging
 use panic
 use sched
 use sync
@@ -136,6 +138,9 @@ pub const FLUSH_TICKS: u64 = 500
 /// write.
 var write_back: u64 = 0
 var flushed: u64 = 0
+// px115: the staged boot's outcome (`load_staged`): 0 not asked, 1 the
+// archive is `/`, 2 asked and refused (the installed root boots instead).
+var staged: u64 = 0
 
 /// Whether a volume is mounted write-back.
 pub fn wants_flusher() -> bool {
@@ -358,6 +363,203 @@ pub fn mount_root() -> u64 {
     ext2.report(v)
     covers()
     1
+}
+
+// --- px115: the staged upgrade's boot ---------------------------------------------------------
+//
+// `pax-upgrade arm` (user/install) writes a Limine entry on the installed ESP that boots the
+// staged kernel with the installed `root=` and `pax.staged=<the archive's sha256>`, beside
+// `pax.upgrade` and the targets module (px93's words). Limine reads FAT and ISO 9660 alone, and
+// the installed ESP is 64 MiB, so the archive stays on the root: once the disks are up, before
+// `mount_root`, `load_staged` mounts the root's volume by itself, counts the attempt in
+// /var/lib/pax-upgrade/attempts (a file the arm made of eight `0` bytes: each staged boot turns
+// the next into `1`, in place, written through), reads /var/lib/pax-upgrade/staged/archive into
+// frames mapped at STAGED_VA as one range, holds its SHA-256 to the word's, unmounts the volume,
+// and has kernel/initramfs serve the range. `/` is then the archive, and `mount_upgrade` mounts
+// the root at /mnt/target as from the stick. Past two attempts, or on any problem (no such file,
+// a short read, too little memory, a digest that differs), one line says why and `/` is the
+// installed root, as `root=` says: the installed system's own boot hook then puts its
+// configuration back (the one-shot's way back, decision 2B in notes/px115-upgrade-over-ssh.md).
+
+const STAGED_VA: u64 = 0xffffe00000000000 // PML4 slot 448, unused by every other mapping
+const STAGED_ROOM: u64 = 268435456 // 256 MiB of frames left free beside the archive
+const ATTEMPTS_MAX: u64 = 2
+const NOVOL: u64 = 0xffffffffffffffff // no volume mounted yet (`staged_no`)
+
+/// px115: `pax.staged=` was on the command line.
+pub fn staged_asked() -> bool {
+    let (_a, n) = boot_info.cmdline_value("pax.staged")
+    n != 0
+}
+
+/// px115: the staged archive is `/`.
+pub fn staged_loaded() -> bool {
+    // # Safety: a scalar module var, written at boot with IF clear.
+    unsafe { staged } == 1
+}
+
+/// px115: the staged boot was asked and refused: the installed root boots.
+pub fn staged_refused() -> bool {
+    // # Safety: as above.
+    unsafe { staged } == 2
+}
+
+fn staged_no(why: str, v: u64) -> bool {
+    if v != NOVOL {
+        let _u = ext2.unmount(v, 0)
+    }
+    log.put("staged: ")
+    log.put(why)
+    log.put("; / is the installed root (root=)")
+    log.end()
+    // # Safety: a scalar module var, written at boot with IF clear.
+    unsafe { staged = 2 }
+    false
+}
+
+/// The inode the absolute path `path` names on volume `v`, from its root (inode 2), or 0; each
+/// name is copied to the scratch frame at `sa` for ext2's lookup.
+fn staged_walk(v: u64, path: str, sa: u64) -> u64 {
+    var d: u64 = 2
+    var len: u64 = 0
+    var first = true
+    for c in path.bytes() {
+        if c as int == 47 {
+            if !first {
+                d = ext2.lookup(v, d, sa, len)
+                if d == 0 {
+                    return 0
+                }
+            }
+            first = false
+            len = 0
+        } else {
+            // # Safety: the scratch frame, through the HHDM; a name is shorter than 4096 bytes.
+            unsafe { ((sa + len) as *u8).write_volatile(c as int as u8) }
+            len += 1
+        }
+    }
+    if len == 0 {
+        return d
+    }
+    ext2.lookup(v, d, sa, len)
+}
+
+/// px115: the staged archive read from the installed root and made `/` (see above): true when
+/// it is; false when not asked, or asked and refused (`staged_refused`, one line why). After
+/// `block.start`, before `mount_root`; `pml4` the kernel's structures.
+pub fn load_staged(pml4: u64) -> bool {
+    let (ha, hn) = boot_info.cmdline_value("pax.staged")
+    if hn == 0 {
+        return false
+    }
+    let (ra, rl) = boot_info.cmdline_value("root")
+    if rl == 0 {
+        return staged_no("no root= beside pax.staged=", NOVOL)
+    }
+    let (d, _named) = spec_device(ra, rl)
+    if d == block.DEVS {
+        return staged_no("root= names no volume", NOVOL)
+    }
+    let v = ext2.mount(d, false, 0)
+    if ext2.failed(v) {
+        return staged_no("the root's volume did not mount", NOVOL)
+    }
+    let scratch = frames.alloc() else |_| { return staged_no("no frame to work in", v) }
+    let sa = scratch + frames.hhdm()
+    // The attempt, counted before anything that can fail.
+    let ai = staged_walk(v, "/var/lib/pax-upgrade/attempts", sa)
+    if ai == 0 || ext2.size(v, ai) < 8 {
+        return staged_no("no /var/lib/pax-upgrade/attempts (eight bytes)", v)
+    }
+    var used: u64 = 0
+    while used < 8 {
+        let (a, l) = ext2.rspan(v, ai, used, 1)
+        if l == 0 {
+            return staged_no("/var/lib/pax-upgrade/attempts could not be read", v)
+        }
+        // # Safety: a block buffer's byte, as rspan gave it.
+        if unsafe { (a as *u8).read_volatile() } as u64 != 49 {
+            break
+        }
+        used += 1
+    }
+    if used >= ATTEMPTS_MAX {
+        return staged_no("two staged boots began already; the third is the installed system's", v)
+    }
+    let (wa, wl, wb) = ext2.wspan(v, ai, used, 1)
+    if wl == 0 {
+        return staged_no("/var/lib/pax-upgrade/attempts could not be written", v)
+    }
+    // # Safety: the block buffer wspan gave, one byte.
+    unsafe { (wa as *u8).write_volatile(49 as u8) }
+    ext2.wrote(v, wb)
+    let _s = ext2.sync(v, 0)
+    log.put("staged: attempt ")
+    log.dec((used + 1) as int)
+    log.put(" of ")
+    log.dec(ATTEMPTS_MAX as int)
+    log.end()
+    // The archive.
+    let fi = staged_walk(v, "/var/lib/pax-upgrade/staged/archive", sa)
+    if fi == 0 {
+        return staged_no("no /var/lib/pax-upgrade/staged/archive", v)
+    }
+    let n = ext2.size(v, fi)
+    if n == 0 {
+        return staged_no("/var/lib/pax-upgrade/staged/archive is empty", v)
+    }
+    if frames.free_count() * 4096 < n + STAGED_ROOM {
+        return staged_no("too little memory for the archive", v)
+    }
+    var off: u64 = 0
+    var mapped: u64 = 0
+    while off < n {
+        while mapped <= off {
+            let pa = frames.alloc() else |_| { return staged_no("too little memory for the archive", v) }
+            let _t = paging.map(pml4, STAGED_VA + mapped, pa, paging.RW | paging.NX) else |_| {
+                return staged_no("the archive's range could not be mapped", v)
+            }
+            mapped += 4096
+        }
+        let room = mapped - off
+        let (a, l) = ext2.rspan(v, fi, off, if n - off < room { n - off } else { room })
+        if l == 0 {
+            return staged_no("/var/lib/pax-upgrade/staged/archive could not be read", v)
+        }
+        var j: u64 = 0
+        while j + 8 <= l {
+            // # Safety: l bytes at a (a block buffer) and at the mapped range from off.
+            unsafe { ((STAGED_VA + off + j) as *u64).write_volatile(((a + j) as *u64).read_volatile()) }
+            j += 8
+        }
+        while j < l {
+            // # Safety: as above, the last bytes.
+            unsafe { ((STAGED_VA + off + j) as *u8).write_volatile(((a + j) as *u8).read_volatile()) }
+            j += 1
+        }
+        off += l
+    }
+    if !identity.sha256_is(sa, STAGED_VA, n, ha, hn) {
+        return staged_no("the archive's sha256 is not pax.staged='s", v)
+    }
+    let _u = ext2.unmount(v, 0)
+    frames.free(scratch)
+    initramfs.use_staged(STAGED_VA, n)
+    if initramfs.problem() != 0 {
+        initramfs.use_staged(0, 0)
+        // # Safety: a scalar module var, written at boot with IF clear.
+        unsafe { staged = 2 }
+        log.line("staged: the archive is no archive PAX reads; / is the installed root (root=)")
+        return false
+    }
+    // # Safety: as above.
+    unsafe { staged = 1 }
+    log.put("staged: / is the staged archive, ")
+    log.dec(n as int)
+    log.put(" bytes, its sha256 the word's")
+    log.end()
+    true
 }
 
 /// px68: how a volume is mounted, in its line: `ext2, read-write,
