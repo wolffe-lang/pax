@@ -417,32 +417,32 @@ fn staged_no(why: str, v: u64) -> bool {
     false
 }
 
-/// The inode the path [0, n) of the scratch frame at `sa` names on volume `v`, from its root
-/// (inode 2), or 0.
+/// The inode the absolute path `path` names on volume `v`, from its root (inode 2), or 0; each
+/// name is copied to the scratch frame at `sa` for ext2's lookup.
 fn staged_walk(v: u64, path: str, sa: u64) -> u64 {
     var d: u64 = 2
-    var k: u64 = 0
-    let bs = path.bytes()
-    let n = bs.len as u64
-    var i: u64 = 1
-    while i <= n {
-        if i == n || bs[i as int] as int == 47 {
-            let len = i - k - 1
-            var j: u64 = 0
-            while j < len {
-                // # Safety: the scratch frame, through the HHDM; len < 4096.
-                unsafe { ((sa + j) as *u8).write_volatile(bs[(k + 1 + j) as int] as int as u8) }
-                j += 1
+    var len: u64 = 0
+    var first = true
+    for c in path.bytes() {
+        if c as int == 47 {
+            if !first {
+                d = ext2.lookup(v, d, sa, len)
+                if d == 0 {
+                    return 0
+                }
             }
-            d = ext2.lookup(v, d, sa, len)
-            if d == 0 {
-                return 0
-            }
-            k = i
+            first = false
+            len = 0
+        } else {
+            // # Safety: the scratch frame, through the HHDM; a name is shorter than 4096 bytes.
+            unsafe { ((sa + len) as *u8).write_volatile(c as int as u8) }
+            len += 1
         }
-        i += 1
     }
-    d
+    if len == 0 {
+        return d
+    }
+    ext2.lookup(v, d, sa, len)
 }
 
 /// px115: the staged archive read from the installed root and made `/` (see above): true when
