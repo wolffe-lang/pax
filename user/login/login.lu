@@ -50,6 +50,10 @@
 //! - As pid 1 it first empties sudo's timestamp records
 //!   (`/var/run/sudo/ts`, user/sudo): Linux's /run is a new tmpfs at each
 //!   boot, an installed PAX's /var is on ext2, and a reboot must void them.
+//!   px118: then, when /bin/pax-boot-status is there, it runs
+//!   `pax-boot-status record` and waits for it: the boot's first program
+//!   writes how the previous boot ended to /var/log/boot.log
+//!   (user/bootlog). Its failure is its own and never stops the login.
 //! - Then, as pid 1, the boot's hooks (px112, R-px112-7): each file of
 //!   `/etc/pax-boot.d` in name order (a name starting `.` left out), its
 //!   standard input /dev/null, its output on the console, as the leader of
@@ -121,6 +125,7 @@ fn main() -> int {
     let pid1 = os_pid() == 1
     if pid1 {
         boot_clean()
+        boot_record()
         boot_hooks()
     }
     loop {
@@ -238,6 +243,19 @@ fn name_before(a: str, b: str) -> bool {
         i += 1
     }
     x.len < y.len
+}
+
+/// px118: as pid 1, `pax-boot-status record` (user/bootlog) when it is
+/// there, waited for; whatever it answers, the login goes on.
+fn boot_record() {
+    let prog = "/bin/pax-boot-status"
+    if !fs_exists(prog) {
+        return
+    }
+    let child = os_spawn([prog, "record"]) else |_| {
+        return
+    }
+    let _st = os_wait(child) else |_| -1
 }
 
 /// One login: up to five tries in 60 s. Returns only when they are spent;
