@@ -380,6 +380,9 @@ pub fn mount_root() -> u64 {
 // a short read, too little memory, a digest that differs), one line says why and `/` is the
 // installed root, as `root=` says: the installed system's own boot hook then puts its
 // configuration back (the one-shot's way back, decision 2B in notes/px115-upgrade-over-ssh.md).
+// A refusal once the attempts file is found also writes its letter in the file's last byte, in
+// place (T two attempts began already, M no archive, E empty, N too little memory, P its range
+// unmapped, R a read failed, D the digest, A no archive PAX reads), so the hook can say why.
 
 const STAGED_VA: u64 = 0xffffe00000000000 // PML4 slot 448, unused by every other mapping
 const STAGED_ROOM: u64 = 268435456 // 256 MiB of frames left free beside the archive
@@ -402,6 +405,19 @@ pub fn staged_loaded() -> bool {
 pub fn staged_refused() -> bool {
     // # Safety: as above.
     unsafe { staged } == 2
+}
+
+/// A refusal with the attempts file at inode `ai` of volume `v` known: its letter `code` in the
+/// file's last byte (written through), then `staged_no`.
+fn staged_no_at(why: str, v: u64, ai: u64, code: u64) -> bool {
+    let (wa, wl, wb) = ext2.wspan(v, ai, 7, 1)
+    if wl != 0 {
+        // # Safety: the block buffer wspan gave, one byte.
+        unsafe { (wa as *u8).write_volatile(code as u8) }
+        ext2.wrote(v, wb)
+        let _s = ext2.sync(v, 0)
+    }
+    staged_no(why, v)
 }
 
 fn staged_no(why: str, v: u64) -> bool {
@@ -485,7 +501,7 @@ pub fn load_staged(pml4: u64) -> bool {
         used += 1
     }
     if used >= ATTEMPTS_MAX {
-        return staged_no("two staged boots began already; the third is the installed system's", v)
+        return staged_no_at("two staged boots began already; the third is the installed system's", v, ai, 84)
     }
     let (wa, wl, wb) = ext2.wspan(v, ai, used, 1)
     if wl == 0 {
@@ -503,29 +519,29 @@ pub fn load_staged(pml4: u64) -> bool {
     // The archive.
     let fi = staged_walk(v, "/var/lib/pax-upgrade/staged/archive", sa)
     if fi == 0 {
-        return staged_no("no /var/lib/pax-upgrade/staged/archive", v)
+        return staged_no_at("no /var/lib/pax-upgrade/staged/archive", v, ai, 77)
     }
     let n = ext2.size(v, fi)
     if n == 0 {
-        return staged_no("/var/lib/pax-upgrade/staged/archive is empty", v)
+        return staged_no_at("/var/lib/pax-upgrade/staged/archive is empty", v, ai, 69)
     }
     if frames.free_count() * 4096 < n + STAGED_ROOM {
-        return staged_no("too little memory for the archive", v)
+        return staged_no_at("too little memory for the archive", v, ai, 78)
     }
     var off: u64 = 0
     var mapped: u64 = 0
     while off < n {
         while mapped <= off {
-            let pa = frames.alloc() else |_| { return staged_no("too little memory for the archive", v) }
+            let pa = frames.alloc() else |_| { return staged_no_at("too little memory for the archive", v, ai, 78) }
             let _t = paging.map(pml4, STAGED_VA + mapped, pa, paging.RW | paging.NX) else |_| {
-                return staged_no("the archive's range could not be mapped", v)
+                return staged_no_at("the archive's range could not be mapped", v, ai, 80)
             }
             mapped += 4096
         }
         let room = mapped - off
         let (a, l) = ext2.rspan(v, fi, off, if n - off < room { n - off } else { room })
         if l == 0 {
-            return staged_no("/var/lib/pax-upgrade/staged/archive could not be read", v)
+            return staged_no_at("/var/lib/pax-upgrade/staged/archive could not be read", v, ai, 82)
         }
         var j: u64 = 0
         while j + 8 <= l {
@@ -541,18 +557,15 @@ pub fn load_staged(pml4: u64) -> bool {
         off += l
     }
     if !identity.sha256_is(sa, STAGED_VA, n, ha, hn) {
-        return staged_no("the archive's sha256 is not pax.staged='s", v)
+        return staged_no_at("the archive's sha256 is not pax.staged='s", v, ai, 68)
     }
-    let _u = ext2.unmount(v, 0)
-    frames.free(scratch)
     initramfs.use_staged(STAGED_VA, n)
     if initramfs.problem() != 0 {
         initramfs.use_staged(0, 0)
-        // # Safety: a scalar module var, written at boot with IF clear.
-        unsafe { staged = 2 }
-        log.line("staged: the archive is no archive PAX reads; / is the installed root (root=)")
-        return false
+        return staged_no_at("the archive is no archive PAX reads", v, ai, 65)
     }
+    let _u = ext2.unmount(v, 0)
+    frames.free(scratch)
     // # Safety: as above.
     unsafe { staged = 1 }
     log.put("staged: / is the staged archive, ")
