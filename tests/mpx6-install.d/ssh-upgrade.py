@@ -428,7 +428,7 @@ def s2(base, pub, archive, digest, commit):
         ok = ("staged: the archive's sha256 is not pax.staged='s" in text and
               "pax-upgrade: rebooting into the installed system's own kernel" in text and
               " not-applied the staged archive's sha256 was not the armed one; disarmed" in st and
-              'px115-marker' not in st.split('state:')[-1].split('\n', 1)[0])
+              '/etc/px115-marker' not in st)
         row('S2', ok, f'the staged kernel refused the changed archive, the installed system disarmed and rebooted; status: '
                       f'{st.strip().splitlines()[:2]}')
     finally:
