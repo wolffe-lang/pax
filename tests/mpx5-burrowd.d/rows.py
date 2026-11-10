@@ -52,9 +52,11 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
   B10 boot 2, the same volume: the same fingerprint with no `made at this
       boot`, and the rig's known_hosts line from boot 1 still verifies
   B12 a session without ptys, the client at a terminal: `ssh host`,
-      `ssh -t host` and `ssh -T host` end, refused (a shell and a pty are
-      burrowd's refusals by name; B9 finds -T's shell refusal alone in the
-      log), what the client writes recorded; `ssh host COMMAND` runs
+      `ssh -t host` and `ssh -T host` each run the account's login shell
+      with no pty (burrow's shell, px112), a line typed into it once the
+      session has answered; the pty refused by name, and burrowd's line
+      saying so, for the first two, neither for -T (B9 finds their log
+      lines); `ssh host COMMAND` runs, no tty; what the client writes recorded
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -423,10 +425,11 @@ class Client:
                 .replace(b'@' + host.encode(), b'@HOST').replace(b'\r\n', b'\n'))
 
 
-    def ssh_tty(self, where, args, opts=(), timeout=30):
+    def ssh_tty(self, where, args, opts=(), timeout=30, typed=None, after=None):
         """The client as a person runs it at a terminal: ssh's standard input, output and error a
         pseudo-terminal of its own (publickey), what it wrote there, and its status; killed after
-        `timeout` seconds (a session that waits for input is named so, never left)."""
+        `timeout` seconds (a session that waits for input is named so, never left). `typed` is written
+        to the terminal once `after` shows there (at once when `after` is None), as a person types."""
         host, port = where
         argv = ['ssh', '-F', 'none', '-o', 'UserKnownHostsFile=%s' % self.kh, '-o', 'StrictHostKeyChecking=yes',
                 '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=20', '-o', 'BatchMode=yes',
@@ -436,6 +439,9 @@ class Client:
                              env=dict(self.env(), TERM='xterm'), start_new_session=True)
         os.close(slave)
         out, end, waited = b'', time.monotonic() + timeout, False
+        if typed is not None and after is None:
+            os.write(master, typed)
+            typed = None
         while True:
             r, _, _ = select.select([master], [], [], 0.2)
             if r:
@@ -444,6 +450,9 @@ class Client:
                 except OSError:
                     data = b''
                 out += data
+                if typed is not None and after in out:
+                    os.write(master, typed)
+                    typed = None
                 if not data and p.poll() is not None:
                     break
             elif p.poll() is not None:
@@ -658,20 +667,28 @@ def host_rows(client):
         ok('B6', 'exit 3 is 3; kill -TERM $$ is 255, as sshd\'s on Linux')
     else:
         bad('B6', 'exit 3: %s; TERM through burrowd: %s; through sshd: %s' % (show(r3), show(rt), show(lt)))
-    # B12 a session without ptys (burrowd serves commands; a shell and a pty are refused by name): the
-    # client at a terminal, as a person types `ssh host`, `ssh host COMMAND` and `ssh -t host`.
-    plain = c.ssh_tty(GUEST_AT, [])
+    # B12 a session without ptys: the client at a terminal, as a person types `ssh host`, `ssh -t host`
+    # and `ssh -T host` (burrow's shell, px112: the account's login shell with no pty; a pty request
+    # refused by name, and burrowd's line saying so), and `ssh host COMMAND`. Into each shell, once the
+    # session has answered, one line: a printf whose output its own echo cannot hold, then `exit 4`.
+    line = b"printf 'shell %s %s\\n' ran \"$0\"; exit 4\n"
+    refused = b'PTY allocation request failed'
+    plain = c.ssh_tty(GUEST_AT, [], typed=line, after=refused, timeout=60)
     cmd = c.ssh_tty(GUEST_AT, ['echo pty=$(tty 2>/dev/null || echo none)'])
-    forced = c.ssh_tty(GUEST_AT, [], opts=['-t'])
-    # `ssh -T host`: a shell request with no pty request before it (B9 finds its log line alone).
-    bare = c.ssh_tty(GUEST_AT, [], opts=['-T'])
+    forced = c.ssh_tty(GUEST_AT, [], opts=['-t'], typed=line, after=refused, timeout=60)
+    # `ssh -T host`: a shell request with no pty request before it (B9 finds its log line).
+    bare = c.ssh_tty(GUEST_AT, [], opts=['-T'], typed=line, timeout=60)
     said = lambda r: ' | '.join(l.strip() for l in r[1].decode(errors='replace').splitlines() if l.strip())
     record_b12 = ('ssh host: status %s: %s\nssh host COMMAND: status %s: %s\nssh -t host: status %s: %s\n'
                   'ssh -T host: status %s: %s\n' % (plain[0], said(plain), cmd[0], said(cmd), forced[0], said(forced),
                                                     bare[0], said(bare)))
     (c.dir / 'b12.txt').write_text(record_b12)
-    if cmd[0] == 0 and b'pty=' in cmd[1] and all(r[0] not in (None, 0) for r in (plain, forced, bare)):
-        ok('B12', 'no ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
+    no_pty = b'burrowd: no pty here: this shell runs without a terminal (no line editing, no job control)'
+    ran = lambda r: r[0] == 4 and b'shell ran ' in r[1]  # the typed line's echo holds `shell %s`, never this
+    with_pty = all(ran(r) and refused in r[1] and r[1].count(no_pty) == 1 and r[1].index(refused) < r[1].index(no_pty)
+                   for r in (plain, forced))
+    if cmd[0] == 0 and b'pty=' in cmd[1] and with_pty and ran(bare) and refused not in bare[1] and no_pty not in bare[1]:
+        ok('B12', 'no ptys, the shell served: %s' % record_b12.replace('\n', '; ').strip('; '))
     else:
         bad('B12', 'a session without ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
 
@@ -764,8 +781,12 @@ def console_rows(con, client):
     log = con.command('cat /var/log/burrowd.log', 4) or ''
     want = ['key SHA256:', 'key password', 'outcome auth_password_bad', 'outcome auth_root_refused',
             'outcome auth_account_locked', 'outcome auth_key_unlisted', 'outcome auth_strict_modes', 'signal TERM',
-            'refused pty_refused,shell_refused', 'refused shell_refused']  # B12: with a pty request, and -T's alone
-    missing = [w for w in want if w not in log]
+            'refused pty_refused']
+    # B12's shells: a line ending with the pty refused (`ssh host`, `ssh -t host`), one ending at the status (-T's).
+    ends = ['outcome ok status 4 refused pty_refused', 'outcome ok status 4']
+    lines = [l.rstrip() for l in log.splitlines()]
+    missing = ([w for w in want if w not in log] + [e for e in ends if not any(l.endswith(e) for l in lines)]
+               + (['no shell_refused'] if 'shell_refused' in log else []))
     if not mode.startswith('-rw-------') or ' root ' not in mode or missing:
         bad('B9', 'the log: %r; missing %s' % (mode.strip(), missing))
     else:
