@@ -14,8 +14,11 @@
 #   jobs-linux     its Linux side on the host (--only linux): tools/linux-tree runs a throwaway
 #                  container of its own, which a step's container has no engine for
 #   jobs           its boots held to both (--images)
-#   console        tests/mpx3-console, native BIOS (the console's line discipline, now by id)
 #   users          tests/mpx5-users, native BIOS (priv.pax's /dev/ptmx rows)
+# Not here: tests/mpx3-console (the console's line discipline, now by id). Its Linux side
+# (tools/linux-tty --pid1) needs real root's pid namespace, which this host does not give a
+# lane, and the suite has no build/linux/boot split; the hosted full-matrix run is its gate
+# (notes/px111-ptys.md §4).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 : "${GAUNTLET_RECORD:?the recorder's path}"
@@ -36,5 +39,4 @@ host() { PATH=$(dirname "$P"):$PATH taskset -c "$CPUS" "$@" < /dev/null; }
 gauntlet_step jobs-build ind suite tests/mpx5-jobs --only build --tier native --firmware bios || exit $?
 gauntlet_step jobs-linux ind host tests/mpx5-jobs --only linux --images "$PAX_BUILD/mpx5-jobs" || exit $?
 gauntlet_step jobs ind suite tests/mpx5-jobs --images "$PAX_BUILD/mpx5-jobs" --tier native --firmware bios || exit $?
-gauntlet_step console ind suite tests/mpx3-console --tier native --firmware bios || exit $?
 gauntlet_step users ind suite tests/mpx5-users --tier native --firmware bios || exit $?
