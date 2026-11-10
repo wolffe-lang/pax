@@ -64,6 +64,14 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       of its own yet), and is stopped there while the client waits; burrowd
       answers the next connection all the same (each session's program in a
       process group of its own)
+  B16 sudo over ssh as the README has it (px112, beside px115's upgrade):
+      `sudo -k -S -p ''` with pax's password on standard input runs as root
+      and remembers nothing, so a second session's `sudo -n` is asked. A
+      plain `sudo -S` remembers the password under its terminal, which for
+      every ssh session is still the console's at this pin: what a second
+      session's `sudo -n` then does is recorded as measured, not held (it is
+      the shared record a session of its own per program ends); `sudo -K`
+      over ssh clears it after
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -415,7 +423,7 @@ class Client:
             e.update(SSH_ASKPASS=str(self.askpass), SSH_ASKPASS_REQUIRE='force', PX112_ANSWER=answer)
         return e
 
-    def ssh(self, where, args, user='pax', key='pax', password=None, prompts=1, timeout=120, kh=None):
+    def ssh(self, where, args, user='pax', key='pax', password=None, prompts=1, timeout=120, kh=None, data=None):
         host, port = where
         argv = ['ssh', '-F', 'none', '-o', 'UserKnownHostsFile=%s' % (kh or self.kh), '-o', 'StrictHostKeyChecking=yes',
                 '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=20', '-p', str(port), '-l', user]
@@ -425,7 +433,8 @@ class Client:
         else:
             argv += ['-o', 'BatchMode=no', '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no',
                      '-o', 'NumberOfPasswordPrompts=%d' % prompts]
-        r = subprocess.run([str(x) for x in argv + [host] + list(args)], stdin=subprocess.DEVNULL,
+        io = dict(stdin=subprocess.DEVNULL) if data is None else dict(input=data)
+        r = subprocess.run([str(x) for x in argv + [host] + list(args)], **io,
                            capture_output=True, timeout=timeout, env=self.env(password))
         port_s = str(port).encode()
         return (r.returncode, r.stdout, r.stderr.replace(host.encode() + b' port ' + port_s, b'HOST port PORT')
@@ -715,6 +724,26 @@ def host_rows(client):
         ok('B15', 'a bare sudo over ssh waits on the console (no session of its own yet); the next connection is answered')
     else:
         bad('B15', 'sudo over ssh: %s; the next connection: %s' % ('waited' if rs is None else show(rs), show(r2)))
+    # B16 sudo over ssh as the README has it: -k -S remembers nothing; a plain -S's record is the
+    # console terminal's, which every ssh session shares at this pin (measured, not held).
+    line = (PASSWORDS['pax'] + '\n').encode()
+    try:
+        k1 = c.ssh(GUEST_AT, ["sudo -k -S -p '' id -u"], data=line, timeout=120)
+        k2 = c.ssh(GUEST_AT, ['sudo -n id -u'], timeout=60)
+        p1 = c.ssh(GUEST_AT, ["sudo -S -p '' id -u"], data=line, timeout=120)
+        p2 = c.ssh(GUEST_AT, ['sudo -n id -u'], timeout=60)
+        kk = c.ssh(GUEST_AT, ['sudo -K'], timeout=60)
+    except subprocess.TimeoutExpired as e:
+        k1 = k2 = p1 = p2 = kk = (None, b'', ('[row: timed out: %s]' % e.cmd[-1]).encode())
+    (c.dir / 'b16.txt').write_text('sudo -k -S: %s\nthen sudo -n: %s\nsudo -S: %s\nthen sudo -n: %s\nsudo -K: %s\n'
+                                   % (show(k1), show(k2), show(p1), show(p2), show(kk)))
+    shared = ('a second session\'s sudo -n ran as root (the console\'s record, shared)' if p2[:2] == (0, b'0\n')
+              else 'a second session\'s sudo -n was asked (%s)' % show(p2))
+    if k1[:2] == (0, b'0\n') and k2[0] not in (0, None) and k2[1] == b'' and p1[:2] == (0, b'0\n') and kk[0] == 0:
+        ok('B16', 'sudo -k -S ran as root and a second session\'s sudo -n was asked; after a plain sudo -S, %s' % shared)
+    else:
+        bad('B16', 'sudo -k -S: %s; then sudo -n: %s; sudo -S: %s; then: %s; sudo -K: %s'
+            % (show(k1), show(k2), show(p1), show(p2), show(kk)))
 
 
 def git_rows(client, work):
