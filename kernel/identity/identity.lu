@@ -261,6 +261,32 @@ fn digest(f: u64, addr: u64, n: u64) {
     }
 }
 
+/// px115: whether the SHA-256 of the `n` bytes at `addr` (4 KiB aligned)
+/// is the 64 lowercase hex digits at [hex, hex + hn): kernel/fstab's
+/// staged archive against its `pax.staged=` word. `f` is a scratch frame
+/// (through the HHDM) the hash is worked in.
+pub fn sha256_is(f: u64, addr: u64, n: u64, hex: u64, hn: u64) -> bool {
+    if hn != 64 {
+        return false
+    }
+    digest(f, addr, n)
+    var i: u64 = 0
+    while i < 32 {
+        let b = rd8(f + HOFF + (i / 4) * 4 + 3 - i % 4)
+        let hi = rd8(hex + i * 2)
+        let lo = rd8(hex + i * 2 + 1)
+        if hi != nib(b >> 4) || lo != nib(b & 15) {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+fn nib(v: u64) -> u64 {
+    if v < 10 { 48 + v } else { 87 + v }
+}
+
 /// Print the commit, to its first NUL (at most 48 bytes; `unknown` if
 /// tools/build-kernel never wrote it).
 fn put_commit() {
