@@ -17,7 +17,11 @@
 # /bin/git-receive-pack); burrow's three programs (tools/mkburrow,
 # tools/install-burrow: /bin/ssh, /bin/burrow-keygen, /bin/burrowd);
 # /etc/burrowd/burrowd_config and /etc/pax-boot.d/burrowd as the images ship
-# them (user/burrowd, user/pax-boot.d); an /etc/passwd with root, pax, lobo
+# them (user/burrowd, user/pax-boot.d); (px116) /etc/shrc as the dev image
+# has it, tools/system-env's, and the dev compiler, /usr/bin/wolf and
+# /usr/share/wolf/compiler-std (tools/mkwolf and tools/mkwolf-std, or
+# PAX_DEV_WOLF_DIR and PAX_DEV_STD_DIR, held to user/wolf.sums and
+# user/wolf.pin); an /etc/passwd with root, pax, lobo
 # and the worker's account burrowd; /etc/pax-net `dhcp wait=10`; an
 # /etc/fstab that mounts the run's own small ext2 volume (label
 # px112-keys) on /etc/burrowd, write-through, so a second boot of the same
@@ -37,8 +41,11 @@
 # clone, push and clone again through burrowd and den, held to the same
 # through sshd and git; B8 the listener killed at the console and a login
 # working again; B9 the log at the console; B10 a second boot keeps the
-# host key; B11 the live stick's shape (the live entry as pid 1, the
-# shipped configuration's loopback): a connection from the LAN refused,
+# host key; B17 (px116, pax#334) a command over ssh has the variables
+# /etc/shrc exports for the console, held to the rig's sshd given the same
+# SetEnv line, and `wolf build` of a one-line program succeeds with no
+# `. /etc/shrc;` before it; B11 the live stick's shape (the live entry as
+# pid 1, the shipped configuration's loopback): a connection from the LAN refused,
 # one on loopback answered. B1-B10 boot the installed shape (/bin/login,
 # the volume's configuration the installer's, `ListenAddress 0.0.0.0`).
 #
@@ -106,6 +113,41 @@ if [ -z "$images" ]; then
     for f in burrowd/burrowd_config:etc/burrowd/burrowd_config pax-boot.d/burrowd:etc/pax-boot.d/burrowd; do
         if [ -f "$PAX_ROOT/user/${f%%:*}" ]; then cp -p "$PAX_ROOT/user/${f%%:*}" "$r/${f#*:}"; else missing+=" /${f#*:} (no user/${f%%:*})"; fi
     done
+    # px116 (pax#334): /etc/shrc as the dev image has it, from the one list the distribution's
+    # root is written from too (tools/system-env) (B17).
+    python3 -I "$PAX_ROOT/tools/system-env" shrc dev > "$r/etc/shrc" || why+=" tools/system-env shrc;"
+    # px116: the dev image's compiler and its own std where the distribution's root has them
+    # (/usr/bin/wolf and wolf-cimport-worker, held to user/wolf.sums; /usr/share/wolf/compiler-std,
+    # its STD-REV user/wolf.pin's), so B17 builds over ssh what the console builds. No native link
+    # stack (the base payload's; the wolf suite's fast root has none either): B17 builds an object.
+    # tools/mkwolf and tools/mkwolf-std make them, or PAX_DEV_WOLF_DIR and PAX_DEV_STD_DIR name
+    # copies already made (each held to the pins here all the same).
+    wolf_pin=$(. "$PAX_ROOT/user/wolf.pin" && printf '%s' "$WOLF_STD_REV")
+    wolfdir=${PAX_DEV_WOLF_DIR:-$work/wolf}
+    if [ -z "${PAX_DEV_WOLF_DIR:-}" ]; then
+        "$PAX_ROOT/tools/mkwolf" "$wolfdir" > "$work/wolf.txt" 2>&1 || say "tools/mkwolf failed: $(tail -n 3 "$work/wolf.txt")"
+    fi
+    held_wolf=1
+    while read -r name digest size; do
+        [ -f "$wolfdir/$name" ] && [ "$(sha256_of "$wolfdir/$name")" = "$digest" ] \
+            && [ "$(wc -c < "$wolfdir/$name" | tr -d ' ')" = "$size" ] || held_wolf=0
+    done < "$PAX_ROOT/user/wolf.sums"
+    if [ "$held_wolf" = 1 ]; then
+        mkdir -p "$r/usr/bin"
+        for f in wolf wolf-cimport-worker; do cp "$wolfdir/$f" "$r/usr/bin/$f" && chmod 755 "$r/usr/bin/$f"; done
+    else
+        missing+=" /usr/bin/wolf (no compiler held to user/wolf.sums in $wolfdir)"
+    fi
+    stddir=${PAX_DEV_STD_DIR:-$work/wolf-std}
+    if [ -z "${PAX_DEV_STD_DIR:-}" ]; then
+        "$PAX_ROOT/tools/mkwolf-std" "$stddir" > "$work/wolf-std.txt" 2>&1 || say "tools/mkwolf-std failed: $(tail -n 3 "$work/wolf-std.txt")"
+    fi
+    if [ "$(cat "$stddir/STD-REV" 2>/dev/null)" = "$wolf_pin" ]; then
+        mkdir -p "$r/usr/share/wolf/compiler-std"
+        cp -R "$stddir/." "$r/usr/share/wolf/compiler-std/"
+    else
+        missing+=" /usr/share/wolf/compiler-std (no std at user/wolf.pin's $wolf_pin in $stddir)"
+    fi
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\nburrowd:x:989:989:burrowd:/nonexistent:/bin/false\n' > "$r/etc/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nburrowd:x:989:\nsudo:x:27:pax\n' > "$r/etc/group"
     printf 'LABEL=px112-keys /etc/burrowd ext2 sync 0 0\n' > "$r/etc/fstab"
@@ -136,7 +178,12 @@ if [ -z "$images" ]; then
         x=$(static_ok "$f") || why+=" $x;"
         say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
     done
-    for f in etc/burrowd/burrowd_config etc/pax-boot.d/burrowd; do
+    for f in usr/bin/wolf usr/bin/wolf-cimport-worker; do
+        [ -f "$r/$f" ] || continue
+        x=$(static_ok "$r/$f") || why+=" $x;"
+        say "  program: $f $(sha256_of "$r/$f") $(wc -c < "$r/$f" | tr -d ' ') bytes"
+    done
+    for f in etc/shrc etc/burrowd/burrowd_config etc/pax-boot.d/burrowd; do
         [ -f "$r/$f" ] && say "  file: /$f $(sha256_of "$r/$f") $(wc -c < "$r/$f" | tr -d ' ') bytes"
     done
     git -C "$PAX_ROOT" rev-parse HEAD > "$work/tree.commit" 2>/dev/null || true
