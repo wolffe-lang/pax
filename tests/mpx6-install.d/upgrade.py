@@ -596,7 +596,8 @@ def manifest_rows(text):
 
 
 def user_paths(rows):
-    return {p: v for p, v in rows.items() if p == '/home' or p.startswith('/home/') or p.startswith('/usr/local') or p == '/etc/mine.conf'}
+    return {p: v for p, v in rows.items() if p == '/home' or p.startswith('/home/') or p.startswith('/usr/local') or p == '/etc/mine.conf'
+            or p == '/var/log/boot.log'}  # px118
 
 
 # --- the leg ---------------------------------------------------------------------
@@ -689,6 +690,8 @@ STATE = ['mkdir -p /home/wolf/notes /usr/local/bin',
          "printf '#!/bin/sh\\necho hello from /usr/local\\n' > /usr/local/bin/hello",
          'chmod 755 /usr/local/bin/hello',
          'rm /etc/motd',
+         # px118: the boot log (user/bootlog) is the machine's own: an upgrade keeps it byte for byte
+         "printf '== boot 7, {nonce}\\nprevious: boot 6 completed\\n' >> /var/log/boot.log",
          'cd /home/wolf',
          'export GIT_AUTHOR_NAME=Wolf GIT_AUTHOR_EMAIL=wolf@pax.invalid GIT_COMMITTER_NAME=Wolf GIT_COMMITTER_EMAIL=wolf@pax.invalid TZ=UTC',
          'den init repo', 'cd repo',
@@ -729,7 +732,7 @@ def state(sym, name, row, wolf_program=False):
     den = (work/f'{name}-tree/root/den-log-before.txt').read_text()
     if den.count('\ncommit ') + den.startswith('commit ') != 3:
         fail(row, 'den log does not show three commits:\n' + den)
-    for p in ('/home/wolf/notes/a.txt', '/home/wolf/den-copy', '/etc/mine.conf', '/usr/local/bin/hello', '/home/wolf/repo/.git') + \
+    for p in ('/home/wolf/notes/a.txt', '/home/wolf/den-copy', '/etc/mine.conf', '/usr/local/bin/hello', '/home/wolf/repo/.git', '/var/log/boot.log') + \
             (('/home/wolf/args/main.lu', '/home/wolf/args/args', '/home/wolf/args/out.txt') if wolf_program else ()):
         if p not in before:
             fail(row, f'{p} is not on the target')
