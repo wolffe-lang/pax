@@ -133,5 +133,6 @@ checked against that digest.
   mpx6-install's expression form (a partial dispatch may name every leg).
 - **R-px113-3** Build yew once per run and hand it on by digest: (a) a later lane, not this change.
 - **R-px113-4** yew's build grew with the pin move: (a) named in a pax issue, pax#327, with the table, both pins and
-  both compilers; the cause is not separated yet.
+  both compilers, then the same-host separation (section 4): mostly yew's own tree, the compiler about 14% on the
+  newer yew only.
 - **R-px113-5** The apt stall (635-651 s, six times): (a) counted in the floors as measured.
