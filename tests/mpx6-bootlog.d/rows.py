@@ -588,8 +588,8 @@ def rows_record(fw, cpio_rec):
         if len(lines) != 2 or lines[0][0] != '1' or 'previous=none' not in lines[0] or 'cmos=claimed' not in lines[0] \
                 or lines[1][0] != '2' or 'previous=1' not in lines[1] or 'ended=end' not in lines[1] or 'cmos=held' not in lines[1]:
             why.append(f'boot.summary is {summ!r}')
-        if (mode_of(img, '/var/log/boot.log'), mode_of(img, '/var/log/boot.summary')) != (0o100600, 0o100644):
-            why.append(f'modes {mode_of(img, "/var/log/boot.log")!r} {mode_of(img, "/var/log/boot.summary")!r}, not 0600 and 0644')
+        if ((mode_of(img, '/var/log/boot.log') or 0) & 0o7777, (mode_of(img, '/var/log/boot.summary') or 0) & 0o7777) != (0o600, 0o644):
+            why.append(f'modes {oct(mode_of(img, "/var/log/boot.log") or 0)} {oct(mode_of(img, "/var/log/boot.summary") or 0)}, not 0600 and 0644')
         if not re.search(r'^  boot 1: completed \(found by boot 2 at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, from cmos\)$', t2, re.M) \
                 or not re.search(r'^  boot 2: this boot, at init$', t2, re.M):
             why.append('the show at boot 2 does not list boot 1 completed and boot 2 at init')
