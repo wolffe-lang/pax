@@ -50,6 +50,10 @@
 //! - As pid 1 it first empties sudo's timestamp records
 //!   (`/var/run/sudo/ts`, user/sudo): Linux's /run is a new tmpfs at each
 //!   boot, an installed PAX's /var is on ext2, and a reboot must void them.
+//!   px118: then, when /bin/pax-boot-status is there, it runs
+//!   `pax-boot-status record` and waits for it: the boot's first program
+//!   writes how the previous boot ended to /var/log/boot.log
+//!   (user/bootlog). Its failure is its own and never stops the login.
 //!
 //! **What it does not, by name:** as pid 1 it has no getty to start it
 //! again, so after the fifth failure or the timeout it starts over
@@ -109,6 +113,7 @@ fn main() -> int {
     let pid1 = os_pid() == 1
     if pid1 {
         boot_clean()
+        boot_record()
     }
     loop {
         let r = session(name)
@@ -135,6 +140,19 @@ fn boot_clean() {
         fs_remove("{dir}/{n}") else |_| {
         }
     }
+}
+
+/// px118: as pid 1, `pax-boot-status record` (user/bootlog) when it is
+/// there, waited for; whatever it answers, the login goes on.
+fn boot_record() {
+    let prog = "/bin/pax-boot-status"
+    if !fs_exists(prog) {
+        return
+    }
+    let child = os_spawn([prog, "record"]) else |_| {
+        return
+    }
+    let _st = os_wait(child) else |_| -1
 }
 
 /// One login: up to five tries in 60 s. Returns only when they are spent;
