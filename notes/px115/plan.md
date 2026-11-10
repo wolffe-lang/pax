@@ -40,3 +40,19 @@ then both firmwares; records on the lane host; the final records last, after the
    verify, arm, apply, back on the network, status; each refusal by name; a failed apply falls back unchanged;
    a power cut during the receive and during the apply. The plant, red by name.
 7. The README section: the three commands, and what to do when it does not come back.
+
+## Where it stands (2026-11-10, the first hand-back of phase 2)
+
+- Step 1: the rows (af66bc8a, e853faa5, c0c959f8, 8dd84d84) and the change (e856a57e, cddede57). procs' `start`
+  seen red by name at e853faa5 (`the parent's set no, the child's set no`); the sudo row's first take passed at the
+  old key because bash exec'd the last command in its own place (8dd84d84 makes it fork). Its red witness is the
+  branch px115-red-sudo (the old key on top of the fixed row; never merged). On PAX itself pids are never reused
+  (kernel/sched's `take_pid`), so the start time changes no PAX answer until they are; it is what makes PAX's sudo
+  right where the container rows run it, on Linux. The ssh row (a second session after the first's `sudo -k -S`)
+  needs burrow's change: today every ssh command shares the console's session and terminal.
+- Step 2: nothing to build (above).
+- Step 3: tests/mpx6-staged (231b3ce8) first, then the kernel (0cd76b45..5301923a); it compiles; its takes are the
+  first runs. Not yet: `mount_upgrade` at /mnt/target under the staged word in a row (tools/mkdisk drops a
+  configuration's module lines: the row must put the targets module back with mtools), the CI job and plan wiring
+  for the new suite, a panic's reboot under the staged word (the attempts file bounds the tries; a panic halts).
+- Steps 4 to 7: not begun.
