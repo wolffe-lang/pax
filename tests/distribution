@@ -126,6 +126,13 @@ def check(blob):
     for name in ('pax-install', 'paxgpt', 'paxfat', 'paxext2', 'limine', 'reboot', 'poweroff'):
         assert rows['bin/'+name][0][1] == 0o100755, 'image-installer-mode-'+name
     assert rows['bin/poweroff'][1] == rows['bin/reboot'][1], 'image-poweroff-is-reboot'  # px87 (pax#243)
+    # px115: pax-upgrade (tools/mkinstall's, its builder's bytes), its boot hook and the archive's own
+    # boot entry for an upgrade sent over ssh, each user/install/pax-upgrade's.
+    assert rows['bin/pax-upgrade'][0][1] == 0o100755, 'image-pax-upgrade-mode'
+    assert rows['bin/pax-upgrade'][1] == (identity/'installer/pax-upgrade').read_bytes(), 'image-pax-upgrade-bytes'
+    for path, source, mode in (('etc/pax-boot.d/pax-upgrade', 'boot-hook', 0o100755), ('usr/share/pax-upgrade/entry', 'entry', 0o100644)):
+        assert rows[path][1] == (ROOT/'user/install/pax-upgrade'/source).read_bytes(), 'image-pax-upgrade-'+source
+        assert rows[path][0][1] == mode and rows[path][0][2:4] == [0, 0], 'image-pax-upgrade-'+source+'-mode'
     for line in rows['usr/share/pax-install/boot.sha256'][1].decode().splitlines():
         digest, path = line.split()
         assert sha(rows[path.lstrip('/')][1]) == digest, 'image-installer-boot-'+path
