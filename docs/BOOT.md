@@ -1083,6 +1083,32 @@ boot 1's variable store with no order went to its UEFI shell), logs in at
 the installed console login and reads the file back. The NVMe and the other SATA images are hashed over
 their allocated extents before and after: identical, or the row fails.
 
+### The staged upgrade's boot (px115)
+
+`pax-upgrade arm` (README, "Upgrading over ssh") makes the archive's own entry Limine's default on the installed
+EFI partition: the archive's kernel at `/pax-upgrade/pax`, the disk's own allow-list line at `/pax/install-targets`
+as a module, and on the command line the installed `root=`, `pax.upgrade`, `pax.staged=<the archive's sha256>` and
+`init=/bin/pax-upgrade`. The archive itself stays on the root partition (Limine reads FAT and ISO 9660 only, and
+the EFI partition is 64 MiB), so under `pax.staged=` the kernel, once the disks are up and before `/` is chosen:
+
+1. mounts the volume `root=` names by itself and counts the attempt in `/var/lib/pax-upgrade/attempts`, a file of
+   eight bytes the arm makes as `00000000`: the first `0` becomes `1`, in place, written through. Two `1`s already
+   there: refused (`T`), and the third boot is the installed system's;
+2. reads `/var/lib/pax-upgrade/staged/archive` into frames mapped as one range, holds its SHA-256 to the word's,
+   and has the archive served as `/` (kernel/initramfs), the volume unmounted again;
+3. then, as from the stick's upgrade entry, mounts the listed disk's root at `/mnt/target`, and runs the one
+   command `init=` names: `pax-upgrade apply`, which runs `pax-install --upgrade --armed` with the arm record. Its
+   end, under the staged word, is a reboot, never a halt.
+
+A refusal says why on one line (`staged: …; / is the installed root (root=)`) and boots the installed root as
+`root=` says, with its own run list (`init=` is ignored). Once the attempts file is found, the refusal also leaves
+its letter in the file's last byte: `T` two attempts began, `M` no archive, `E` an empty one, `N` too little memory,
+`P` its range could not be mapped, `R` a read failed, `D` its sha256 is not the word's, `A` no archive PAX reads.
+The installed system's boot hook (`/etc/pax-boot.d/pax-upgrade`) sees its EFI partition still armed, puts the
+configuration back, writes the reason to `/var/log/pax-upgrade.log`, and reboots into its own kernel when the letter
+says the staged kernel is the one running. `tests/mpx6-staged` holds the kernel's half (T1-T6), and
+`tests/mpx6-install.d/ssh-upgrade.py` the whole path on an 860-shaped disk.
+
 ## Checking a volume from rescue
 
 `tools/mkfsck OUTDIR` builds `OUTDIR/fsck.ext2` from `user/fsck`, using
