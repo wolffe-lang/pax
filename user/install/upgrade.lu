@@ -553,7 +553,9 @@ fn upgrade_main(o: Options, work: str) -> int {
         for u in users { t += "{u}\n" }
         shadow_new = locked_shadow(t, today())
     }
-    let known = known_texts(old, o.payload)
+    var known = known_texts(old, o.payload)
+    // px118: the quiet text px78's to px118's installers wrote, for this root's PARTUUID.
+    (mut known).push("{sha2.to_hex(sha2.sum256(config_text_quiet(uuid).bytes()))} /boot/limine/limine.conf")
     text_step(mut p, "/etc/fstab", fstab_text(uuid), "regenerated for PARTUUID={uuid}", known)
     text_step(mut p, "/boot/limine/limine.conf", config_text(uuid), "regenerated for PARTUUID={uuid}", known)
     text_step(mut p, "/etc/pax-run", INSTALLED_RUN, "the installed login", known)
