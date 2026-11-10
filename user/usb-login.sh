@@ -3,6 +3,9 @@
 # The terminal is root's again first, as login(1) gives a terminal to the
 # account it logs in (px98; a kernel that keeps no owner refuses it, and
 # the login goes on; a medium with no chown skips it).
+# px118: how the previous boot ended, from the kernel's marks, into this
+# boot's /var/log/boot.log (user/bootlog), before the first prompt.
+[ ! -x /bin/pax-boot-status ] || /bin/pax-boot-status record
 printf 'PAX live medium: log in as root (no password).\n'
 while :; do
     printf 'login: '
