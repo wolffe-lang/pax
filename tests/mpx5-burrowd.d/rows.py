@@ -757,8 +757,15 @@ def git_rows(client, work):
 def console_rows(con, client):
     """B8 and B9 at the console, as root (its password, typed, never
     echoed or written)."""
+    # A fresh login prompt first: login ends an exchange 60 s after its prompt, and a password
+    # typed after that would be read, and echoed, as the next login's name (a probe saw it, and
+    # B9's scan caught it).
+    con.type('')
+    if not con.wait(r'login: $', 30):
+        bad('B8', 'no fresh login prompt at the console: %r' % con.text()[-200:])
+        return
     con.type('root')
-    if not con.wait(r'Password: $', 30):
+    if not con.wait(r'Password: $', 10):
         bad('B8', 'no Password: prompt for root')
         return
     con.type(PASSWORDS['root'], secret=True)
