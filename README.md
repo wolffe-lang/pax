@@ -314,10 +314,21 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
   ssh pax@ADDRESS 'den init -q --bare repo.git'        # then: git push pax@ADDRESS:repo.git main
   ```
 
-  A command runs as the account through its shell, with no pty: `ssh pax@ADDRESS ls` works, while `ssh pax@ADDRESS`
-  and `ssh -t pax@ADDRESS` end with status 255 after OpenSSH's `PTY allocation request failed on channel 0` (and, for
-  the first, `shell request failed on channel 0`), and `ssh -T pax@ADDRESS` ends the same way with `shell request
-  failed on channel 0`: burrowd serves commands, and refuses a pty and a shell by name. git's
+  A command runs as the account through its shell, with no pty: `ssh pax@ADDRESS ls` works. `ssh pax@ADDRESS` gives
+  the account's login shell, still with no pty: PAX has no ptys yet, so OpenSSH prints `PTY allocation request failed
+  on channel 0` and burrowd's next line says the shell runs without a terminal. `ssh -T pax@ADDRESS` asks for no pty
+  and goes straight to the shell; `ssh -t pax@ADDRESS` ends with status 255 at the refused pty, as OpenSSH's client
+  does when a terminal was demanded. Type commands and read their output; there is no prompt, no line editing and no
+  job control, ^C does not interrupt a command (it ends only with the session: `~.` at the start of a line), and
+  `exit` ends it.
+
+  **sudo is a console command until the next burrow: never run a bare `sudo` over ssh.** A program run over ssh is
+  still in the console's session, with the console as its terminal (burrow at this pin cannot give it a session of its
+  own yet). So `sudo` over ssh asks for the password on the console, not on your ssh session, and stops there; your
+  ssh session waits until you end it with `~.`. burrowd itself keeps answering other connections, because each
+  program runs in a process group of its own. Every ssh session of an account also shares the terminal that `sudo`
+  remembers a password by, so a `sudo` that succeeded in one session can let another session's `sudo` through for
+  five minutes. To do something as root, log in at the console and use `sudo` there. git's
   `git-upload-pack` and `git-receive-pack` are den's, so `git clone`, `fetch` and `push` work as against a Linux
   host. Passwords are checked against `/etc/shadow` (crypt(5)'s `$7$`, as `passwd` writes them), one at a time.
 - **The log** is `/var/log/burrowd.log`, root's: `sudo cat /var/log/burrowd.log`. One line per connection: the time,
