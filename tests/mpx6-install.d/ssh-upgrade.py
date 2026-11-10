@@ -23,6 +23,16 @@ Rows (ROWS a comma list; all by default), each PASS or FAIL by name, on FIRMWARE
   S3 cut-send  QEMU killed while the archive is being received: booted again, nothing received, the system as it
                was; sent again whole, received
   S4 cut-apply QEMU killed once the staged upgrade has begun writing: booted again, the second attempt finishes it
+  S5 refusals  (px97g, with PAX_SSH_UPGRADE_SAME) over ssh on the disk as it is: the installed image's own archive
+               received and armed: refused as the image already installed; the new archive by a digest that differs:
+               refused, nothing kept; arm with no sudo: refused, it needs root; then nothing armed
+
+px97g: the disk as an upgrade left it, and a built image's archive as it is. PAX_SSH_UPGRADE_DISK_AS_IS=1: DISK
+already has pax-upgrade (an upgrade by a stick that brings it): nothing of the head's is planted (no tool, hook, entry
+or kernel), only wolf's password, the client's key and wolf's file. PAX_SSH_UPGRADE_ARCHIVE=FILE: FILE is sent as
+it is (a build's pax-dev-COMMIT.cpio), not the stick's repacked; the commit the rows hold is its /etc/pax-release's
+kernel line, and the marker the rows look for is that line on the installed root. STICK and BUILD are then unread.
+PAX_SSH_UPGRADE_SAME=FILE: the installed image's own archive, for S5.
 """
 import warnings
 warnings.simplefilter('ignore', DeprecationWarning)
@@ -40,6 +50,9 @@ import time
 from pathlib import Path
 
 REPO, WORK, DISK, STICK, BUILD = map(Path, sys.argv[1:6])
+AS_IS = os.environ.get('PAX_SSH_UPGRADE_DISK_AS_IS') == '1'
+GIVEN = os.environ.get('PAX_SSH_UPGRADE_ARCHIVE', '')
+SAME = os.environ.get('PAX_SSH_UPGRADE_SAME', '')
 FW = sys.argv[6]
 ROWS = sys.argv[7].split(',') if len(sys.argv) > 7 else ['S1', 'S2', 'S3', 'S4']
 ROOT_AT, ESP_AT = 69206016, 2097152
@@ -50,6 +63,7 @@ PW = secrets.token_hex(8)
 OVMF_CODE = Path('/usr/share/OVMF/OVMF_CODE_4M.fd')
 OVMF_VARS = Path('/usr/share/OVMF/OVMF_VARS_4M.fd')
 MARKER = 'px115-ssh-upgrade-marker'
+MARK_FILE = '/etc/px115-marker'
 os.environ['MTOOLS_SKIP_CHECK'] = '1'
 WORK.mkdir(parents=True, exist_ok=True)
 bad = []
@@ -115,9 +129,20 @@ def write_newc(rows, out):
             o.write(b'\0' * (-o.tell() % 4))
 
 
+def kernel_line(archive):
+    """The `kernel COMMIT SHA256` line of an archive's /etc/pax-release."""
+    by = {r[0].lstrip('./'): r for r in read_newc(Path(archive).read_bytes())}
+    return next(l for l in by['etc/pax-release'][4].decode().splitlines() if l.startswith('kernel '))
+
+
 def make_archive(epoch):
     """The stick's own archive with the head's kernel, pax-install, pax-upgrade, hook and entry, the marker, and
-    a pax-release one second newer than the disk's."""
+    a pax-release one second newer than the disk's. px97g: PAX_SSH_UPGRADE_ARCHIVE's file as it is."""
+    if GIVEN:
+        global MARKER, MARK_FILE
+        line = kernel_line(GIVEN)
+        MARKER, MARK_FILE = line, '/etc/pax-release'
+        return Path(GIVEN), sha_file(Path(GIVEN)), line.split()[1]
     src = WORK / 'stick-initramfs.cpio'
     if not src.exists():
         run(['mcopy', '-n', '-i', f'{STICK}@@{ESP_AT}', '::/boot/initramfs.cpio', src])
@@ -196,6 +221,8 @@ def prepare(name, pub):
     os.write(fd, ('\n'.join(lines) + '\n').encode())
     os.close(fd)
     (t / 'keys').write_text(pub)
+    if AS_IS and not exists(img, '/bin/pax-upgrade'):
+        raise RuntimeError('PAX_SSH_UPGRADE_DISK_AS_IS: the disk has no /bin/pax-upgrade')
     cmds = ['rm /etc/shadow', 'cd /etc', f'write {t / "shadow"} shadow', 'sif /etc/shadow mode 0100600',
             'rm /bin/pax-install', 'cd /bin', f'write {t / "pax-install"} pax-install', 'sif /bin/pax-install mode 0100755',
             f'write {t / "pax-upgrade"} pax-upgrade', 'sif /bin/pax-upgrade mode 0100755',
@@ -207,9 +234,17 @@ def prepare(name, pub):
             'sif /home/wolf/.ssh/authorized_keys uid 1000', 'sif /home/wolf/.ssh/authorized_keys gid 1000',
             'cd /home/wolf', f'write {t / "notes"} px115-notes.txt', 'sif /home/wolf/px115-notes.txt uid 1000',
             'sif /home/wolf/px115-notes.txt gid 1000']
+    if AS_IS:
+        # px97g: the disk's own tools, hook, entry and kernel; wolf's password, the key and wolf's file alone.
+        # An upgraded 860 may hold ~/.ssh/authorized_keys already (debugfs's write never replaces a file): removed first.
+        kept = [c for c in cmds if c.startswith(('mkdir /home/wolf/.ssh', 'sif /home/wolf', 'cd /home/wolf'))
+                or c.startswith(f'write {t / "keys"}') or c.startswith(f'write {t / "notes"}')]
+        i = kept.index('cd /home/wolf/.ssh') + 1
+        cmds = cmds[:4] + kept[:i] + ['rm authorized_keys'] + kept[i:]
     debugfs(img, cmds)
     (t / 'shadow').unlink()
-    run(['mcopy', '-o', '-i', f'{img}@@{ESP_AT}', BUILD / 'kernel.elf', '::/boot/pax'])
+    if not AS_IS:
+        run(['mcopy', '-o', '-i', f'{img}@@{ESP_AT}', BUILD / 'kernel.elf', '::/boot/pax'])
     return img
 
 
@@ -334,7 +369,7 @@ def main():
         for r in ROWS:
             t0 = time.monotonic()
             try:
-                {'S1': s1, 'S2': s2, 'S3': s3, 'S4': s4}[r](base, pub, archive, digest, commit)
+                {'S1': s1, 'S2': s2, 'S3': s3, 'S4': s4, 'S5': s5}[r](base, pub, archive, digest, commit)
             except Exception as e:
                 row(r, False, f'stopped: {e!r}')
             log(f'{r} took {time.monotonic() - t0:.0f} s')
@@ -387,7 +422,7 @@ def s1(base, pub, archive, digest, commit, name='S1'):
         if not answers(600):
             return row(name, False, 'burrowd never answered after the upgrade')
         time.sleep(3)
-        st = ssh(base, 'pax-upgrade status; cat /etc/px115-marker; cat /home/wolf/px115-notes.txt').stdout.decode(errors='replace')
+        st = ssh(base, f'pax-upgrade status; cat {MARK_FILE}; cat /home/wolf/px115-notes.txt').stdout.decode(errors='replace')
         ls = root(base, '/bin/pelt -c "ls /var/lib/pax-upgrade /var/lib/pax-upgrade/staged"').stdout.decode(errors='replace')
         ok = (' upgraded to ' + commit in st and ' cleaned after the upgrade' in st and MARKER in st and
               f"wolf's own file s1-{FW}" in st and 'archive' not in ls)
@@ -426,17 +461,17 @@ def s2(base, pub, archive, digest, commit):
         if not answers(300):
             raise RuntimeError('burrowd never answered after the fallback')
         text = m.text()
-        st = ssh(base, 'pax-upgrade status; ls /etc/px115-marker').stdout.decode(errors='replace')
+        st = ssh(base, f'pax-upgrade status; ls {MARK_FILE}' if not GIVEN else 'pax-upgrade status; cat /etc/pax-release').stdout.decode(errors='replace')
         ok = ("staged: the archive's sha256 is not pax.staged='s" in text and
               "pax-upgrade: rebooting into the installed system's own kernel" in text and
               " not-applied the staged archive's sha256 was not the armed one; disarmed" in st and
-              '/etc/px115-marker' not in st)
+              (MARK_FILE not in st if not GIVEN else MARKER not in st))
         row('S2', ok, f'the staged kernel refused the changed archive, the installed system disarmed and rebooted; status: '
                       f'{st.strip().splitlines()[:2]}')
     finally:
         finish(m, base)
     conf = esp_text(img, '/boot/limine/limine.conf') or ''
-    if 'pax.staged=' in conf or exists(img, '/etc/px115-marker'):
+    if 'pax.staged=' in conf or (exists(img, MARK_FILE) if not GIVEN else MARKER in (cat(img, MARK_FILE) or b'').decode(errors='replace')):
         row('S2', False, 'after it: the ESP still armed, or the marker on the root')
     img.unlink()
 
@@ -489,9 +524,42 @@ def s4(base, pub, archive, digest, commit):
         if not answers(600):
             return row('S4', False, 'burrowd never answered after the second attempt')
         time.sleep(5)
-        st = ssh(base, 'pax-upgrade status; cat /etc/px115-marker').stdout.decode(errors='replace')
+        st = ssh(base, f'pax-upgrade status; cat {MARK_FILE}').stdout.decode(errors='replace')
         row('S4', ' upgraded to ' + commit in st and MARKER in st,
             f'cut once the upgrade had written its record; the second staged boot finished it; {st.strip().splitlines()[-3:]}')
+    finally:
+        finish(m, base)
+        img.unlink()
+
+
+def s5(base, pub, archive, digest, commit):
+    """px97g: the refusals over ssh on the disk as it is (PAX_SSH_UPGRADE_SAME: the installed image's own archive)."""
+    if not SAME:
+        return row('S5', False, 'PAX_SSH_UPGRADE_SAME names no archive')
+    img = prepare(f's5-{FW}', pub)
+    m = boot(img, f's5-{FW}')
+    said = []
+    try:
+        same = Path(SAME)
+        r = send(base, same, sha_file(same))
+        a = root(base, 'pax-upgrade arm')
+        t1 = a.stdout.decode(errors='replace') + a.stderr.decode(errors='replace')
+        said.append(t1.strip())
+        ok1 = r.returncode == 0 and 'pax-upgrade: arm refused: the archive is the image already installed' in t1
+        wrong = ('0' if digest[0] != '0' else '1') + digest[1:]
+        r2 = send(base, archive, wrong)
+        t2 = r2.stdout.decode(errors='replace') + r2.stderr.decode(errors='replace')
+        said.append(t2.strip())
+        st2 = ssh(base, 'pax-upgrade status').stdout.decode(errors='replace')
+        ok2 = r2.returncode != 0 and 'pax-upgrade: receive refused: ' in t2 and 'nothing kept' in t2 and 'received: nothing' in st2
+        r3 = send(base, archive, digest)
+        a3 = ssh(base, 'pax-upgrade arm')
+        t3 = a3.stdout.decode(errors='replace') + a3.stderr.decode(errors='replace')
+        said.append(t3.strip())
+        ok3 = r3.returncode == 0 and a3.returncode != 0 and 'pax-upgrade: arm refused: it needs root' in t3
+        st = ssh(base, 'pax-upgrade status').stdout.decode(errors='replace')
+        row('S5', ok1 and ok2 and ok3, f'the installed image\'s own archive refused as the same image; a digest that '
+                                       f'differs refused, nothing kept; arm with no sudo refused; said: {said}; status: {st.strip().splitlines()[:3]}')
     finally:
         finish(m, base)
         img.unlink()
