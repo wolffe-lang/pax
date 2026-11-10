@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
         --rows) rows=$2; shift 2 ;;
         --tier) tier=$2; shift 2 ;;
         --firmware) firmware=$2; shift 2 ;;
-        *) die 'usage: mpx6-install [--only ci|inputs|planner|allow|inventory|snapshot|ui|executor|prepare|noserial|metal] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+        *) die 'usage: mpx6-install [--only ci|inputs|planner|allow|inventory|snapshot|ui|executor|prepare|pax-upgrade|noserial|metal] [--work DIR] [--inputs LANE] [--rows smoke|full] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
     esac
 done
 case $tier in native|release|both) ;; *) die 'bad tier' ;; esac
@@ -35,8 +35,18 @@ unit() {
     if [ "$mode" = planner ] || [ "$mode" = allow ]; then "$work/bin/pax-$mode"
     else python3 -I "$PAX_ROOT/tests/mpx6-install.d/$mode.py" "$work/bin/pax-$mode" "$work/$mode"; fi
 }
+# px115: pax-upgrade's commands and refusals on Linux, an image for the installed disk
+# (tests/mpx6-install.d/pax-upgrade.py, rows P1-P28).
+pax_upgrade_unit() {
+    "$PAX_ROOT/tools/mkinstall" "$work/bin" upgrade
+    "$PAX_ROOT/tools/mkinstall" "$work/bin"
+    "$PAX_ROOT/tools/mkdisktools" "$work/upgrade-disktools" paxgpt paxfat
+    python3 -I "$PAX_ROOT/tests/mpx6-install.d/pax-upgrade.py" "$work/bin/pax-upgrade" "$work/pax-upgrade" \
+        "$work/upgrade-disktools" "$work/bin/pax-install" "$PAX_ROOT"
+}
 case $only in
     planner|allow|snapshot|ui|executor|prepare) unit "$only"; exit ;;
+    pax-upgrade) pax_upgrade_unit; exit ;;
     inventory)
         [ -f "$kernel" ] || die 'inventory needs --kernel ELF'
         "$PAX_ROOT/tools/mkinstall" "$work/bin"
@@ -82,6 +92,7 @@ case $only in
     *) die 'unknown suite selection' ;;
 esac
 [ "$only" = inputs ] || for mode in planner allow ui snapshot executor prepare; do unit "$mode"; done
+[ "$only" = inputs ] || pax_upgrade_unit
 export PAX_WOLF
 PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
 export SOURCE_DATE_EPOCH=1700000000

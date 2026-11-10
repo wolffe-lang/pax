@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Build the Wolf installer or its pure planner witness, static on Ubuntu.
+# px115: `upgrade` builds pax-upgrade, the installer's files with user/install/pax-upgrade's main.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-[ $# -ge 1 ] && [ $# -le 2 ] || die 'usage: mkinstall OUTDIR [planner|snapshot|ui|executor|prepare|allow]'
+[ $# -ge 1 ] && [ $# -le 2 ] || die 'usage: mkinstall OUTDIR [planner|snapshot|ui|executor|prepare|allow|upgrade]'
 out=$1; mode=${2:-install}
-case $mode in install|planner|snapshot|ui|executor|prepare|allow) ;; *) die 'mode is install, planner, snapshot, ui, executor, prepare or allow' ;; esac
+case $mode in install|planner|snapshot|ui|executor|prepare|allow|upgrade) ;; *) die 'mode is install, planner, snapshot, ui, executor, prepare, allow or upgrade' ;; esac
 need cc clang readelf
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
@@ -18,7 +19,9 @@ if [ "$mode" = planner ]; then
     cp "$PAX_ROOT/tests/mpx6-install.d/planner.lu" "$w/src/main.lu"
 else
     cp "$PAX_ROOT/user/install/"*.lu "$PAX_ROOT/user/install/"*.S "$PAX_ROOT/user/install/wolf.pkg" "$w/src/"
-    if [ "$mode" != install ]; then
+    if [ "$mode" = upgrade ]; then
+        cp "$PAX_ROOT/user/install/pax-upgrade/"*.lu "$w/src/"
+    elif [ "$mode" != install ]; then
         cp "$PAX_ROOT/tests/mpx6-install.d/$mode.lu" "$w/src/main.lu"
     fi
 fi
