@@ -217,3 +217,34 @@ exercised.
 - [ ] the final records: red at the rows tip, green at the head, the plant red by name at `burst-edges`
 - [x] README read and refreshed (the console row, the hardware list, the switches, the USB suites' row); `kernel/README.md`
   and the CHANGELOG
+
+### 5.7 The rebase
+
+The branch was rebased from trunk `db516c69` onto `2dd649f0`, the head of pax#340, which reaches trunk first by
+fast-forward. The 27 commits before it are kept on `px109-before-rebase` (head `d7199a4e`); the shas this note
+cites above §5.7 are theirs. Three files conflicted, all prose, and each kept both sides:
+- `docs/SOURCES.md`: px109's section follows the sections trunk added since (px107, px108, tb03, px114, px115, px112);
+- `README.md`: the USB suites' row takes the mouse's rows, the firmware row keeps trunk's new clock rows;
+- `CHANGELOG.md`: the mouse's paragraph heads the Unreleased list, above trunk's newer ones.
+
+`git range-diff` shows every other commit's patch unchanged but for its context lines: `kernel/kmain_console.lu`,
+`tests/ci-plan` and `tools/ci-tiers.map` merged by themselves, beside trunk's new lines. No kernel module this lane changes moved on
+trunk (`kernel/xhci`, `kernel/files`, `kernel/usb_keys` and the USB suites are as at `db516c69`), and `/dev/mouse0`'s
+60:0 and the descriptor kinds 17 and 18 are still free. The cited commits after the rebase:
+
+| before | after | what |
+|---|---|---|
+| `d11b997b` | `21b9b851` | the prediction |
+| `f98b5574` | `d8a0cfd1` | the rows tip: the 38 invariants |
+| `f6c33ac8` | `dd0621e1` | kernel/xhci's pointers |
+| `74f980bd` | `88137dd3` | /dev/mouse0 |
+| `6a1c843f` | `93995e16` | the books line |
+| `28e2caa1` | `a8f4d396` | the frame invariant, red first |
+| `e642e1c5` | `7edaf8c1` | the fix |
+| `1f68bbcd` | `4c790d20` | CHANGELOG.md |
+| `638ee7ae` | `5872f7d2` | the note |
+| `d7199a4e` | `a585dba9` | the note's release-time section |
+
+The release console's build time (§5.1) was measured before the rebase and not again: the cluster cut it
+follows moves with every change, trunk's included. The final records, green at the rebased head and the plant red
+by name at `burst-edges` on one commit over it, are in the PR with their END lines.
