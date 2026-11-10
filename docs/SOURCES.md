@@ -2167,7 +2167,7 @@ source; no kernel's, firmware's or driver's.
 - **POSIX.1-2024**: XBD chapter 11 (the General Terminal Interface: the controlling terminal, job control, the
   modem disconnect and the controlling process), XSH posix_openpt, grantpt, unlockpt, ptsname, tcsetpgrp,
   tcgetsid, _exit's consequences.
-- **Linux as a black box**: `user/elf/ptyprobe.c` run as the first program's child of Linux 7.2.4 (a lane host's
+- **Linux as a black box**: `user/elf/ptyprobe.c` run as the first program's child of Linux 7.2.4 (a test machine's
   installed kernel image, booted under QEMU/KVM with `notes/px111/vminit.c` as its first program: devtmpfs at
   /dev, devpts at /dev/pts with no options), as root and as 1000:1000, and driving the suite's own pelt and
   boreutils on a pty; `strace -f` of the probe in a rootless Ubuntu 24.04 container for the calls glibc's pty
