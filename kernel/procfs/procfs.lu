@@ -119,6 +119,8 @@
 //! its procfs); no other kernel's source.
 
 use block
+use bootlog
+use bootmark
 use cred
 use frames
 use paging
@@ -132,9 +134,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 56
+pub const ENTRIES: u64 = 58
 /// No entry.
-pub const NONE: u64 = 56
+pub const NONE: u64 = 58
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -200,6 +202,12 @@ const SYSCLASSBLOCK: u64 = 52
 const PTYDIR: u64 = 53
 const PTYNR: u64 = 54
 const PTYMAX: u64 = 55
+/// px118: `/proc/pax-boot` (this boot's and the previous boot's marks,
+/// kernel/bootmark) and `/proc/pax-bootlog` (the previous boot's console
+/// bytes, kernel/bootlog's previous slot, made at each read as
+/// /proc/partitions is), both in `/proc`.
+pub const PAXBOOT: u64 = 56
+pub const PAXBOOTLOG: u64 = 57
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
@@ -262,6 +270,8 @@ const G_LINK: u64 = 23 // px67: /proc/mounts, a link kernel/files reads and foll
 const G_BATTR: u64 = 24 // px79: a block device's attribute
 const G_PTYNR: u64 = 26 // px111 (25 is PMEM's mark)
 const G_PTYMAX: u64 = 27
+const G_PAXBOOT: u64 = 28 // px118
+const G_PAXBOOTLOG: u64 = 29 // px118: the length only; kernel/files makes each read's bytes
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -335,7 +345,7 @@ fn limit_units(res: u64) -> str {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -579,6 +589,8 @@ pub fn name(e: u64) -> str {
     if e == PROTECTED + 2 { return "protected_regular" }
     if e == PROTECTED + 3 { return "protected_fifos" }
     if e == PARTITIONS { return "partitions" } // px66
+    if e == PAXBOOT { return "pax-boot" } // px118
+    if e == PAXBOOTLOG { return "pax-bootlog" }
     if e == SMOUNTS || e == PMOUNTS || e == MOUNTSLINK { return "mounts" } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return "mountinfo" }
     if e == SYSBLOCK || e == SYSCLASSBLOCK { return "block" } // px79
@@ -666,7 +678,7 @@ pub fn parent(r: u64) -> u64 {
     }
     if e == BIDENT { return dev_ref(dev_of(r), BDEV) }
     if e >= BATTR && e < BATTR + 9 { return dev_ref(dev_of(r), if e == BATTR + A_MODEL || e == BATTR + A_SERIAL { BIDENT } else { BDEV }) }
-    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK { return 0 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
     if e == CORE_PATTERN || e == PTYDIR { return KERNEL }
@@ -711,6 +723,8 @@ fn gen(r: u64) -> u64 {
     if e == PTYMAX { return G_PTYMAX }
     if e == SLIMITS || e == PLIMITS { return G_LIMITS }
     if e == PARTITIONS { return G_PARTITIONS } // px66
+    if e == PAXBOOT { return G_PAXBOOT } // px118
+    if e == PAXBOOTLOG { return G_PAXBOOTLOG }
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
@@ -756,8 +770,8 @@ pub fn mode(r: u64) -> u64 {
         }
         return S_IFDIR | 0x1ed // 0755
     }
-    if e == PENVIRON || e == SENVIRON {
-        return S_IFREG | 0x100 // px45: 0400 (measured)
+    if e == PENVIRON || e == SENVIRON || e == PAXBOOTLOG {
+        return S_IFREG | 0x100 // px45: 0400 (measured); px118: the previous boot's console, root's alone
     }
     if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || e == UNPRIV || (e >= PROTECTED && e < PROTECTED + 4) || e == CORE_PATTERN || e == PTYMAX {
         return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups, px44's protected settings, px45's port setting, px55's core_pattern (measured)
@@ -923,6 +937,78 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         p = sched.proc_after(p)
     }
     NONE
+}
+
+/// px118: `/proc/pax-boot`'s text at `base`: its length. One fact a
+/// line, a word and its values, for the boot's first program
+/// (user/bootlog) and a person:
+///
+///     boot <this boot's number>
+///     stage <this boot's last stage>
+///     cmos 0x78-0x7f <claimed|held|refused|off>
+///     found <the eight bytes as found at the entry, byte 0 last, hex>
+///     previous <number> <last stage>        or  previous none
+///     from <cmos|memory|none>
+///     stages <the previous boot's stages, by name>
+///     log <intact <bytes>|refused|none|no-area>
+fn paxboot(base: u64) -> u64 {
+    let (b, l) = bootmark.this_boot()
+    var n = put_s(base, 0, "boot ")
+    n = put_dec(base, n, b)
+    n = put_s(base, n, "\nstage ")
+    n = put_s(base, n, bootmark.name(l))
+    n = put_s(base, n, "\ncmos 0x")
+    n = put_hex_w(base, n, bootmark.BASE, 2)
+    n = put_s(base, n, "-0x")
+    n = put_hex_w(base, n, bootmark.BASE + 7, 2)
+    n = put_b(base, n, 32)
+    n = put_s(base, n, bootmark.mode_name())
+    n = put_s(base, n, "\nfound ")
+    n = put_hex16(base, n, bootmark.cmos_found())
+    let (pb, pl, ps, from) = bootmark.previous()
+    if from == 0 {
+        n = put_s(base, n, "\nprevious none\nfrom none\nstages none")
+    } else {
+        n = put_s(base, n, "\nprevious ")
+        n = put_dec(base, n, pb)
+        n = put_b(base, n, 32)
+        n = put_s(base, n, bootmark.name(pl))
+        n = put_s(base, n, if from == 1 { "\nfrom cmos\nstages" } else { "\nfrom memory\nstages" })
+        var s: u64 = 1
+        while s <= bootmark.END {
+            if ((ps >> (s - 1)) & 1) == 1 {
+                n = put_b(base, n, 32)
+                n = put_s(base, n, bootmark.name(s))
+            }
+            s += 1
+        }
+    }
+    n = put_s(base, n, "\nlog ")
+    let st = bootlog.prev_state()
+    if st == bootlog.INTACT {
+        n = put_s(base, n, "intact ")
+        n = put_dec(base, n, bootlog.prev_len())
+    } else if st == bootlog.REFUSED {
+        n = put_s(base, n, "refused")
+    } else if st == bootlog.NO_AREA {
+        n = put_s(base, n, "no-area")
+    } else {
+        n = put_s(base, n, "none")
+    }
+    put_b(base, n, 10)
+}
+
+/// px118: bytes [off, off + k) of the previous boot's console
+/// (`/proc/pax-bootlog`) written at `va`; the count written.
+pub fn bootlog_slice(va: u64, off: u64, k: u64) -> u64 {
+    let len = bootlog.prev_len()
+    var i: u64 = 0
+    while i < k && off + i < len {
+        // # Safety: va is the file's frame (kernel/files), k <= 4096.
+        unsafe { ((va + i) as *u8).write_volatile(bootlog.prev_byte(off + i) as u8) }
+        i += 1
+    }
+    i
 }
 
 /// px79: a block device's attribute file's text at `base`: its length
@@ -1531,6 +1617,10 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = block.partitions_len()
     } else if g == G_BATTR {
         n = battr(base, r) // px79
+    } else if g == G_PAXBOOT {
+        n = paxboot(base) // px118
+    } else if g == G_PAXBOOTLOG {
+        n = bootlog.prev_len() // px118: the length only; kernel/files makes each read's bytes
     } else if g == G_CORE_PATTERN {
         n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
     } else if g == G_PTYNR {
