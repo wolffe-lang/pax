@@ -49,7 +49,7 @@ archive() { # repo rev digest -> path of the verified archive in PAX_CACHE
     local repo=$1 rev=$2 digest=$3 arc
     arc=$PAX_CACHE/$repo-$rev.tar.gz
     if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$digest" ]; then
-        curl -fsSL --retry 3 "https://codeload.github.com/wolffe-lang/$repo/tar.gz/$rev" -o "$arc.part"
+        "$PAX_ROOT/tools/net-retry" url "https://codeload.github.com/wolffe-lang/$repo/tar.gz/$rev" "$arc.part"
         mv "$arc.part" "$arc"
     fi
     [ "$(sha256_of "$arc")" = "$digest" ] || die "$repo $rev: source archive digest mismatch (want $digest)"
