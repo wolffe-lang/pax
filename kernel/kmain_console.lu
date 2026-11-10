@@ -97,6 +97,7 @@ use netd
 use paging
 use panic
 use pci
+use power
 use process
 use sched
 use screen
@@ -539,9 +540,17 @@ export fn kmain() {
     }
     triage.step(20)
     boot_media() // px66: where Limine found the initramfs, when not on an optical disc
-    let _root = fstab.mount_root() // px67: `/` on the disk, when the command line says `root=`
+    // px115: under `pax.staged=` the archive staged on the installed root is `/` (its attempt
+    // counted, its sha256 held to the word's); refused, `/` is the installed root, as root= says.
+    let staged = fstab.load_staged(pml4)
+    if staged {
+        tree.adopt_staged()
+    }
+    let _root = if staged { 0 } else { fstab.mount_root() } // px67: `/` on the disk, when the command line says `root=`
     let _mounted = fstab.mount_all()
-    let _upgrade = fstab.mount_upgrade() // px93: the stick's upgrade entry alone mounts the listed disk's root
+    // px93: the stick's upgrade entry alone mounts the listed disk's root; px115: never over the
+    // installed root a refused staged boot made `/`
+    let _upgrade = if fstab.staged_refused() { 0 } else { fstab.mount_upgrade() }
     network_address() // px105: /etc/pax-net, on the disk when `/` is there
     triage.step(21)
     release_identity() // px82: separate from the boot-medium line
@@ -571,7 +580,8 @@ export fn kmain() {
     // px67: the run list is the tree's (`/` on the disk when it is there,
     // else the initramfs's), read whole into a frame of its own. px68:
     // `init=` names the one command instead.
-    let (ia, il) = boot_info.cmdline_value("init")
+    let (ia, il0) = boot_info.cmdline_value("init")
+    let il = if fstab.staged_refused() { 0 } else { il0 } // px115: a refused staged boot runs the installed system's own list
     var d: u64 = ia
     var size: u64 = il
     if il == 0 {
@@ -665,6 +675,12 @@ export fn kmain() {
     log.put("; nothing left to run")
     log.end()
     timer.stop()
+    if fstab.staged_loaded() {
+        // px115: the staged program ended (its own reboot(2) is the usual end): reboot, never
+        // halt, so the machine comes back by itself; the attempts file bounds the tries
+        log.line("staged: the staged program ended; reboot")
+        power.reboot()
+    }
     log.line("halt")
     panic.halt()
 }

@@ -27,8 +27,9 @@
 //!
 //! Every read is checked against the module's size first, so a
 //! malformed archive is refused by name (`check`'s rows), never read
-//! past. No region, no heap, no module `var`: the module's address and
-//! size are Limine's response, read afresh (kernel/boot_info). No Linux
+//! past. No region, no heap: the module's address and size are Limine's
+//! response, read afresh (kernel/boot_info), save px115's staged archive,
+//! two scalars kernel/fstab sets once (`use_staged`). No Linux
 //! source; no other kernel's source.
 
 use boot_info
@@ -56,10 +57,37 @@ const F_MTIME: u64 = 5
 const F_FILESIZE: u64 = 6
 const F_NAMESIZE: u64 = 11
 
-/// The archive's first byte (a virtual address in the HHDM); 0 without
-/// a module.
+// px115: the staged archive kernel/fstab read from the installed root
+// and mapped at one range (`use_staged`): its address and size, scalars
+// written once at boot with interrupts off. Under `pax.staged=` the
+// archive is that range or none (Limine's first module is then the
+// targets list, never an archive).
+var staged_at: u64 = 0
+var staged_len: u64 = 0
+
+/// px115: serve the archive at [a, a + n) (mapped, read-only to every
+/// reader here) in place of Limine's module.
+pub fn use_staged(a: u64, n: u64) {
+    // # Safety: two scalar module vars, written once at boot, IF clear.
+    unsafe {
+        staged_at = a
+        staged_len = n
+    }
+}
+
+fn staged_word() -> bool {
+    let (_a, n) = boot_info.cmdline_value("pax.staged")
+    n != 0
+}
+
+/// The archive's first byte (a virtual address in the HHDM, or px115's
+/// staged range); 0 without a module.
 fn base() -> u64 {
-    if boot_info.module_count() == 0 {
+    // # Safety: a scalar module var, written at boot.
+    if unsafe { staged_len } != 0 {
+        return unsafe { staged_at }
+    }
+    if boot_info.module_count() == 0 || staged_word() {
         return 0
     }
     boot_info.module_addr(0)
@@ -67,7 +95,11 @@ fn base() -> u64 {
 
 /// The archive's size in bytes (0 without a module).
 pub fn bytes() -> u64 {
-    if boot_info.module_count() == 0 {
+    // # Safety: a scalar module var, written at boot.
+    if unsafe { staged_len } != 0 {
+        return unsafe { staged_len }
+    }
+    if boot_info.module_count() == 0 || staged_word() {
         return 0
     }
     boot_info.module_size(0)
