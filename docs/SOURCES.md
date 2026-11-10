@@ -2220,3 +2220,16 @@ QEMU's. Every download below was fetched twice and its sha256 read twice; the di
 - PAX's own `kernel/console` (px13's line discipline, px48's job control), `kernel/sched`, `kernel/files`,
   `kernel/procfs`, and px48's `user/elf/jobs.c` for the probe's shapes.
 - No kernel's source of any OS; no C library's, shell's or terminal emulator's source.
+
+## px116 — a command over ssh has the console's environment (pax#334)
+
+- **sshd_config(5)**, OpenSSH 10.0p2's page (as burrow's px116 read it, by burrow's SOURCES digest): `SetEnv` (the
+  variables set in every session, over the default environment) and DESCRIPTION's first-value rule.
+- **burrow at the pin** (the org's own): its README's `SetEnv` paragraph and `notes/px116-setenv.md` (the pinned
+  `sshd`'s answers measured black box, which burrowd is held to). Built unmodified.
+- **OpenSSH's sshd** (Ubuntu 24.04's openssh-server 9.6p1) as a black box: the rig's Linux side, given the same
+  `SetEnv` line, for B17's comparison.
+- PAX's own `user/shrc`, `tools/distribution-root`, `user/login` (`ENV=/etc/shrc` at the console),
+  `user/install/prepare.lu` and `upgrade.lu` (`installed_burrowd_config`: every line but `ListenAddress` kept),
+  `tools/mkwolf`, `tools/mkwolf-std` and `tools/mkdev` (the dev compiler's layout), and `tests/mpx5-wolf`.
+- No ssh implementation's source; no Linux, other kernel's, firmware's or driver's source.
