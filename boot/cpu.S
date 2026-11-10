@@ -36,6 +36,7 @@
      pax_cpuid7_ebx() -> u64   CPUID leaf 7 subleaf 0's EBX (SMEP is bit
                                7, SMAP bit 20), or 0 when the CPU's
                                highest basic leaf is below 7
+     pax_clflush(va)           px118: CLFLUSH of va's line, then MFENCE
 
    Each routine reads or writes exactly what it names. They run at CPL
    0 with interrupts off (Limine's entry state, docs/BOOT.md).
@@ -127,6 +128,19 @@ pax_invlpg:
         invlpg  (%rdi)
         ret
         .size pax_invlpg, . - pax_invlpg
+
+        /* px118: CLFLUSH the cache line holding va, then MFENCE, so the
+           line is in memory before a reset can drop the caches (SDM vol. 2,
+           CLFLUSH: ordered against earlier writes to the same line; MFENCE
+           orders it against everything after). kernel/bootlog flushes the
+           log area's lines it wrote, at each line end. */
+        .globl pax_clflush
+        .type pax_clflush, @function
+pax_clflush:
+        clflush (%rdi)
+        mfence
+        ret
+        .size pax_clflush, . - pax_clflush
 
         .globl pax_cpuid_nx
         .type pax_cpuid_nx, @function
