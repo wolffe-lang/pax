@@ -14,7 +14,9 @@
 #      within 2% of its pitch and 40-250 ms long: the high beep at the
 #      kernel's entry, the low one at the first line drawn
 #   B2 `pax.nobeep`: no tone
-#   B3 no display device (`-vga none`): no framebuffer, the high tone alone
+#   B3 no display device (`-vga none`): no framebuffer, the high tone, then
+#      a refused screen's three pips (count 1808, 1356, 1808: 659.9, 879.9,
+#      659.9 Hz), never the low tone
 #   B4 a sound card's capture (virtio-sound, the speaker bound to nothing, as
 #      tests/mpx3-sound boots): no boot tone in it
 #   M1 a cold QEMU's CMOS, dumped by `pax.nomarks pax.cmosdump` (nothing
@@ -52,6 +54,17 @@
 #   P1 port 0x80 through QEMU's isa-debugcon at that port: 0x11 … 0x88, the
 #      stages' POST codes, in order (SKIP, not measured, where QEMU takes no
 #      debug console there)
+#   F1-F5 the display shapes that gave a black hand-off (BIOS: Limine's
+#      `resolution:` at 16 and at 24 bits a pixel, a cirrus card; UEFI:
+#      virtio-gpu, no framebuffer) and a control (UEFI, `resolution:` at 16
+#      bits, where OVMF hands 32), each on a disk booted twice: the marks
+#      line, /proc/pax-boot, boot.log and pax-boot-status name the
+#      framebuffer handed (size, bits a pixel, pitch, colour masks, physical
+#      address) and why it was refused; the capture holds the entry's high
+#      tone then the three pips, never the low one; port 0x80 ends 0x11 0x1E
+#      0x3E 0x5E 0x6E 0x7E 0x8E; the next boot says the previous one ran
+#      with its screen refused. The control: drawn, high then low, 0x11 …
+#      0x88
 #
 #   tests/mpx6-bootlog [--tier native|release|both] [--firmware bios|uefi|both]
 #
@@ -77,7 +90,7 @@ need python3 cc xorriso qemu-system-x86_64 mcopy mtype debugfs
 "$PAX_ROOT/tools/fetch-limine" >&2 || exit 2
 
 worst=0
-# px118: pax-boot-status for the K rows (one build: a hosted program, the same for both kernel tiers).
+# px118: pax-boot-status for the K and F rows (one build: a hosted program, the same for both kernel tiers).
 if "$PAX_ROOT/tools/mkbootstatus" "$PAX_BUILD/mpx6-bootlog/bootstatus" >&2; then
     export PX118_BOOTSTATUS=$PAX_BUILD/mpx6-bootlog/bootstatus/pax-boot-status
 else
