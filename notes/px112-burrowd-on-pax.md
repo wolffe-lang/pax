@@ -3,9 +3,10 @@
 burrowd, burrow's ssh server, serves commands on Linux and macOS since burrow's B5. This lane puts it on PAX, started
 at every boot by a hook pid 1 runs, with a host key the machine makes at its first boot and keeps; on an installed
 system it listens on the LAN, and from another machine `ssh pax@<address> ls` and `git push <address>:repo` work, a
-command through the account's shell and git through den's `upload-pack` and `receive-pack`. burrow's half (password
-authentication against `/etc/shadow` with wolf-std's `$7$`, locked and expired accounts refused by every method) is
-burrow's own PR, merged first; this PR pins it.
+command through the account's shell and git through den's `upload-pack` and `receive-pack`. burrow's halves are
+burrow's own PRs, merged first, and this PR pins their head: password authentication against `/etc/shadow` with
+wolf-std's `$7$` (locked and expired accounts refused by every method), a login shell with no pty, one packet a
+session's turn, and a process group per program.
 
 Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx5-burrowd` job; `tests/ci-plan` and
 `tools/ci-tiers.map`; the pin `user/burrow.pin`; `tools/mkburrow`, `tools/install-burrow`, `tools/distribution-root`;
@@ -31,8 +32,8 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx5-burrowd` jo
 
 | input | identity | read |
 |---|---|---|
-| pax base | trunk `4d899ea4` | `git log` |
-| burrow | `user/burrow.pin`, burrow's PR head (password authentication), wolf 0.2.37 / lupin 0.1.59 / wolf-std `2411d868`: `burrow`, `burrow-keygen` and `burrowd` static, burrow's own gate's digests in the pin | `tools/mkburrow`: two checkouts, one digest each |
+| pax base | trunk `d1270bb0` (after px115's upgrade over ssh and two note files); the branch was rebased from `4d899ea4`, then `d56fdd98`, then `483bfabf`, each earlier branch kept (`px112-before-rebase`, `-rebase2`, `-rebase3`) | `git log` |
+| burrow | `user/burrow.pin`: burrow trunk `9c647a2` (the shell with no pty, one packet a turn, a process group per program), wolf 0.2.37 / lupin 0.1.59 / wolf-std `2411d868`: `burrow`, `burrow-keygen` and `burrowd` static, burrow's own gate's digests in the pin | `tools/mkburrow`: two checkouts, one digest each |
 | den, pelt, boreutils, the account programs | their pins, unchanged | their builders |
 | the rig's image | Ubuntu 24.04, its package list (QEMU 8.2.2, OpenSSH 9.6p1, git 2.43.0, dnsmasq 2.91) | `dpkg-query` in the image |
 
@@ -108,6 +109,32 @@ and their sha256s logged.
   pid), and burrowd's host key, its `.pub` and its log. The snapshot unit's `I-runtime-state` row, on the light CPUs:
   red at `e0895b1e` (the row before the change: the walk listed `/var/run/sudo`, `/var/run/sudo/ts` and
   `/var/run/sudo/ts/0`), green at `95e52c0c` with the unit's other five rows.
+- **burrow's shell, and the stall it found** (burrow's shell with no pty, pinned at `7ea08ba`): B12 and B9 changed
+  first, red at the rows tip `a3345e47` (`lpr1`, light slot, log `ecb75890…`; base `d56fdd98`, branch
+  `px112-before-rebase2`): `FAIL B12` (`shell request failed on channel 0`) and `FAIL B9` (no `outcome ok status 4
+  refused pty_refused`). At the pin's move `a95beb22` (`lpg1`, log `f2211a2a…`), B12 went red another way: `ssh host`
+  typed into never answered. OpenSSH's client sends keystroke-timing PINGs every 20 ms in a session that asked for a
+  pty, and burrowd's session read transport messages until a session message came, so the command's output waited
+  behind them; a capture on the rig's tap showed the pattern. Fixed in burrow (one packet a turn), pinned here.
+- **The console's stop** (found probing B12's shell under QEMU on a light slot, a probe image with sudo added, log
+  `bf443bbf…`): after a bare `sudo` over ssh, every new connection timed out at the banner, and at the console
+  every process of burrowd's process group read `T (stopped)`: a command over ssh is in pid 1's session with the
+  console as its terminal, and `sudo` turning the console's echo off from a background group draws SIGTTOU on the
+  whole group, the listener included. Fixed for burrowd in burrow (each program in a process group of its own, and
+  a stopped program no longer read as an ended one); a session of its own per program waits for a toolchain call.
+  B15 (`9796b6bd`) holds it: red at its own commit, whose pin was still `7ea08ba` (`lred15`, light slot, log `f87f8c91…`: `FAIL B15 sudo over ssh: waited; the next connection: exit 255`, `Connection timed out during banner exchange`, with B12's stall beside it), green at the
+  pin `9c647a2` (`lpin1`, `db7d5709` on `483bfabf`, log `41fba9ba…`; and `lreb1` below).
+- **B16, sudo over ssh as the README has it** (`871fa370`, measured): `sudo -k -S -p ''` with pax's password on
+  standard input runs as root and remembers nothing, so a second session's `sudo -n` is asked; after a plain
+  `sudo -S`, a second session's `sudo -n` ran as root: the record is keyed by the console's terminal, which every
+  ssh session still shares. That is px115's planned row "a second ssh session gets no free sudo after the first's
+  `sudo -S`": red at this pin, as expected, until each program has a session of its own. The README says
+  `sudo -k -S`, never a bare `sudo`, and why, as one story with px115's "Upgrading over ssh".
+- **After the rebase onto `d1270bb0`** (`lreb1`, `a5a2caeb`, light slot, log `315024ab…`): `tests/census`, the
+  installer's units (px115's `pax-upgrade` among them) and `tests/mpx5-burrowd` green, every row, B15 and B16
+  included (no password in 272 records). `tests/ci-plan` red on seven P2 rows, each with `mpx5-burrowd` beside the
+  suites it wanted: the suite's comment on sudo's mode named the distribution's root by its path, and the planner
+  reads every path a suite's text names, through each tool's text in turn. Named in prose at `3b19f66e`.
 - (The head's takes.)
 
 ## 5. Done-when
@@ -179,6 +206,10 @@ None filed or closed by this lane. For the orchestrator to consider:
 - A real entropy pool for getrandom, or a way to name the TSC fallback (R-px112-8's gap).
 - The dev and release images' root shell runs no `/etc/pax-boot.d` hook.
 - `/var/log/burrowd.log` is never rotated.
+- A program run over ssh still has the console as its terminal and pid 1's session (burrow's process groups are not
+  sessions): a bare `sudo` over ssh asks on the console and its client waits until `~.`, and a plain `sudo -S`'s
+  remembered password is every ssh session's for five minutes (B16; px115's planned second-session row). Both wait
+  for a toolchain call that lets burrow start a session per program.
 - Seen while readying the witness, not this lane's: the kernel writes `/var/lib/dhcp/pax.lease` on a stick that got a
   lease (px105), and `user/install/snapshot.lu` does not leave it out, so an install or an upgrade from a stick
   booted with a cable copies the stick's lease file to the target and lists it in the manifest. The witness's
@@ -190,7 +221,8 @@ None filed or closed by this lane. For the orchestrator to consider:
 - [x] burrowd on the image, its account, its configuration; started at boot after the network; the host key at the
   first boot and kept (B0, B1, B10).
 - [x] `authorized_keys` with sshd's mode checks; den's upload-pack and receive-pack through `exec`; the log at the
-  console (B2-B9); a session without ptys, measured (B12).
+  console (B2-B9); a session without ptys, the login shell served (B12); a bare `sudo` over ssh leaves burrowd
+  answering (B15); `sudo -k -S` over ssh, and a plain `-S`'s shared record measured (B16).
 - [x] Rows red at the rows tip, every row green on the native BIOS leg (`lb7`); the four legs, the affected suites,
   the plant (B10) and the upgrade witness at the final head: the PR's records.
 - [x] The stick leg (`notes/px112/stick-leg.txt`, B11 under QEMU); the metal target's first check (5.2).
