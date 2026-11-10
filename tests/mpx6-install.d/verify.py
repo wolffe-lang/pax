@@ -45,7 +45,7 @@ output=io.StringIO()
 with contextlib.redirect_stdout(output): assert mod.main(['e2tree',str(root)])==0
 listing=output.getvalue();(work/'target.tree').write_text(listing)
 actual={x.split('\t')[0]:x.split('\t') for x in listing.splitlines()}
-config=f'timeout: 0\nquiet: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={guid} rootfstype=ext2 rw\n'
+config=f'timeout: 5\nverbose: yes\nserial: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={guid} rootfstype=ext2 rw\n'
 changes={'/boot/limine/limine.conf':config.encode(),'/etc/fstab':f'PARTUUID={guid} / ext2 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n'.encode()}
 # px106: the installer makes its user (pax) a member of group sudo, gid 27, appended to the source's lines
 changes['/etc/group']=(source/'etc/group').read_bytes()+b'sudo:x:27:pax\n'
