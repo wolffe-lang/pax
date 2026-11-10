@@ -25,7 +25,7 @@
 //! this boot writes the other.
 //!
 //! **What is kept.** Every byte `serial.put` writes, from the entry
-//! until the first program starts (`freeze`, kernel/bootmark's `init`
+//! until the first program starts (`seal`, kernel/bootmark's `init`
 //! stage) or the slot is full: the kernel's own boot, never a user's
 //! session. At each line's end the lines written since the last flush
 //! and the header go to memory (cpu.S's `pax_clflush`), so a reset
@@ -197,7 +197,7 @@ fn flush(m: u64, from: u64) {
     unsafe { flushed = n }
 }
 
-/// One byte of the console (kernel/serial's `put`), until `freeze`.
+/// One byte of the console (kernel/serial's `put`), until `seal`.
 pub fn put(b: u8) {
     // # Safety: module state; a kernel that keeps no log, or a frozen
     // one, returns before anything else.
@@ -243,7 +243,7 @@ pub fn mark(boot: u64, last: u64, set: u64) {
 }
 
 /// No more bytes kept: the first program starts.
-pub fn freeze() {
+pub fn seal() {
     // # Safety: as `put`.
     let flags = unsafe { pax_irq_save() }
     unsafe { frozen = 1 }
