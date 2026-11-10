@@ -106,11 +106,27 @@ Every network fetch in PAX's CI and container files, before this pass and after.
 
 ## Evidence
 
-(Filled in when the coordinator says to take records.)
+Local, on an Apple silicon laptop (macOS); the hosted run and the records wait for the coordinator.
+
+- **Red at the rows tip** `1e8c7c7d` (the selftest, no helper): `FAIL N0: tools/net-retry is missing`, exit 1.
+- **The helper alone** `e1d826e2`: N1–N9 PASS, and N10 red by name,
+  `FAIL N10: 211 fetches outside tools/net-retry, the first: tools/census/inside/stage.sh:13: …` (25 `curl` calls,
+  71 × 2 apt lines, 43 `docker pull`s, one `brew install`).
+- **Green at the head** `2c97aa60`: N1–N10 PASS, with `tests/fetch-retry-selftest`, `tests/ci-plan` (65 s),
+  `tests/census` (C1–C6, R0–R3) and the `plan` job's other selftests, every one exit 0.
+- **One live fetch through the helper:** `tools/mkroots` fetched `cacert-2026-10-20.pem` (sha256 `796f1389…`,
+  read twice) and wrote `ca-roots.der` `7a713f23…`, 118 certificates, as before.
+
+Scored against the prediction: the selftest's red and green, `fetch-retry-selftest` and `ci-plan` held as predicted.
+The hosted expectations (apt's lines, a FAIL as a failed step's last words) are open until a run.
+
+**Risk 1 seen before it cost anything:** the branch is pushed, but no pull request is opened from it yet. Opening one
+starts a `tier all` run (every suite on every leg), since `tools/fetch-wolf`, `tools/fetch-limine` and
+`tools/net-retry` are FULL and `.github/*` is ALL.
 
 ## Done-when
 
-- [ ] The prediction, committed first
-- [ ] `tests/net-retry-selftest` red at the rows tip, green at the head
-- [ ] `tests/fetch-retry-selftest` and `tests/ci-plan` green
+- [x] The prediction, committed first (`2bf02a35`)
+- [x] `tests/net-retry-selftest` red at the rows tip, green at the head
+- [x] `tests/fetch-retry-selftest` and `tests/ci-plan` green
 - [ ] A draft PR, its run when the coordinator says
