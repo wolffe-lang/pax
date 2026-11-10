@@ -322,13 +322,15 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
   job control, ^C does not interrupt a command (it ends only with the session: `~.` at the start of a line), and
   `exit` ends it.
 
-  **sudo is a console command until the next burrow: never run a bare `sudo` over ssh.** A program run over ssh is
-  still in the console's session, with the console as its terminal (burrow at this pin cannot give it a session of its
-  own yet). So `sudo` over ssh asks for the password on the console, not on your ssh session, and stops there; your
-  ssh session waits until you end it with `~.`. burrowd itself keeps answering other connections, because each
-  program runs in a process group of its own. Every ssh session of an account also shares the terminal that `sudo`
-  remembers a password by, so a `sudo` that succeeded in one session can let another session's `sudo` through for
-  five minutes. To do something as root, log in at the console and use `sudo` there. git's
+  **A bare `sudo` is a console command until the next burrow: over ssh, never run a bare `sudo`; run `sudo -k -S`,
+  the password on standard input** (as "Upgrading over ssh" below does). A program run over ssh is still in the
+  console's session, with the console as its terminal (burrow at this pin cannot give it a session of its own yet).
+  So a bare `sudo` over ssh asks for the password on the console, not on your ssh session, and stops there; your ssh
+  session waits until you end it with `~.`. burrowd itself keeps answering other connections, because each program
+  runs in a process group of its own. `-S` reads the password from standard input and leaves the terminal alone;
+  `-k` reads and writes no remembered password. Without `-k`, the password `sudo` remembers is keyed by that shared
+  terminal, so a `sudo -S` that succeeded in one ssh session lets another session's `sudo` through for five
+  minutes. At the console, `sudo` works as anywhere. git's
   `git-upload-pack` and `git-receive-pack` are den's, so `git clone`, `fetch` and `push` work as against a Linux
   host. Passwords are checked against `/etc/shadow` (crypt(5)'s `$7$`, as `passwd` writes them), one at a time.
 - **The log** is `/var/log/burrowd.log`, root's: `sudo cat /var/log/burrowd.log`. One line per connection: the time,
@@ -519,9 +521,9 @@ installed root needs about twice the archive's size free. Three commands, from t
   upgraded, refused, stopped, not applied, and why).
 - `sudo -k -S pax-upgrade disarm` takes the arm back before the reboot; `sudo -k -S pax-upgrade clean` removes a
   staged archive that is no longer wanted.
-- **Over ssh, always `sudo -k -S`, the password on standard input.** A bare `sudo` over ssh is unsafe with the
-  current burrowd: it asks for the password on the machine's own console, not yours, and burrowd stops answering
-  until the machine is powered off and on.
+- **Over ssh, always `sudo -k -S`, the password on standard input.** A bare `sudo` over ssh asks for the password
+  on the machine's own console, not yours, and your ssh session waits until you end it with `~.`; without `-k`, the
+  password `sudo` remembers is shared by every ssh session for five minutes ("Logging in to PAX over ssh" above).
 
 **When it does not come back.** First wait: the staged boot is tried twice at most. A staged kernel that cannot read
 or check the archive, or a third try, boots the installed system instead; it puts Limine's configuration back,
