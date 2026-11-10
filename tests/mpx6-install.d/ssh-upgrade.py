@@ -207,10 +207,11 @@ def prepare(name, pub):
     run(['cp', '--sparse=always', DISK, img], timeout=1800)
     t = WORK / 'plant'
     t.mkdir(exist_ok=True)
-    shutil.copy(BUILD / 'pax-upgrade', t / 'pax-upgrade')
-    shutil.copy(BUILD / 'pax-install', t / 'pax-install')
-    shutil.copy(REPO / 'user/install/pax-upgrade/boot-hook', t / 'hook')
-    shutil.copy(REPO / 'user/install/pax-upgrade/entry', t / 'entry')
+    if not AS_IS:  # px97g: the disk's own tools under PAX_SSH_UPGRADE_DISK_AS_IS; BUILD then holds none
+        shutil.copy(BUILD / 'pax-upgrade', t / 'pax-upgrade')
+        shutil.copy(BUILD / 'pax-install', t / 'pax-install')
+        shutil.copy(REPO / 'user/install/pax-upgrade/boot-hook', t / 'hook')
+        shutil.copy(REPO / 'user/install/pax-upgrade/entry', t / 'entry')
     (t / 'notes').write_text(f'wolf\'s own file {name}\n')
     shadow = cat(img, '/etc/shadow').decode()
     salt = ''.join(secrets.choice('./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz') for _ in range(16))
