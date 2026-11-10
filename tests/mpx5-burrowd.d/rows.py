@@ -72,6 +72,14 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       session's `sudo -n` then does is recorded as measured, not held (it is
       the shared record a session of its own per program ends); `sudo -K`
       over ssh clears it after
+  B17 (px116, pax#334) a command over ssh has the console's variables with no
+      `. /etc/shrc;` before it: WOLF_STD, LUPIN_STD and DEN_TLS_ROOTS are the
+      values the image's /etc/shrc exports (the image's burrowd_config's
+      SetEnv line, tools/system-env's), byte for byte as the rig's sshd
+      given the same SetEnv line answers; then `wolf build --no-cache
+      --emit=obj` of a one-line program in pax's home succeeds (the image
+      has the dev compiler and its std, no link stack). The same build with
+      WOLF_STD taken away (`env -u`) is recorded beside it, not held
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -186,7 +194,7 @@ class LinuxSide:
     """The rig's sshd on HOST:2222 serving an account `pax` (uid 1000 if
     free) with the same password line, key and repository as the guest."""
 
-    def __init__(self, out, pax_line, pub, repo):
+    def __init__(self, out, pax_line, pub, repo, setenv=''):
         self.dir = out / 'sshd'
         self.dir.mkdir()
         os.chmod(self.dir, 0o711)
@@ -207,8 +215,8 @@ class LinuxSide:
         (self.dir / 'sshd_config').write_text(
             'ListenAddress %s:%d\nHostKey %s\nPidFile %s\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\n'
             'UsePAM no\nPermitRootLogin no\nStrictModes yes\nAcceptEnv GIT_PROTOCOL\nLogLevel VERBOSE\n'
-            'AuthorizedKeysFile .ssh/authorized_keys\n'
-            % (HOST, SSHD_PORT, self.dir / 'host', self.dir / 'sshd.pid'))
+            'AuthorizedKeysFile .ssh/authorized_keys\n%s'
+            % (HOST, SSHD_PORT, self.dir / 'host', self.dir / 'sshd.pid', (setenv + '\n') if setenv else ''))
         pathlib.Path('/run/sshd').mkdir(exist_ok=True)
         self.log = open(self.dir / 'sshd.log', 'wb')
         self.p = subprocess.Popen(['/usr/sbin/sshd', '-D', '-e', '-f', self.dir / 'sshd_config'],
@@ -746,6 +754,60 @@ def host_rows(client):
             % (show(k1), show(k2), show(p1), show(p2), show(kk)))
 
 
+def image_exports():
+    """The variables the image's /etc/shrc exports for the console, every one but PATH, in order
+    (tools/system-env writes the configuration's SetEnv line from the same lines)."""
+    shrc = ARGS.images / 'root' / 'etc/shrc'
+    out = []
+    for line in shrc.read_text().splitlines() if shrc.exists() else []:
+        m = re.match(r'^export ([A-Za-z_][A-Za-z0-9_]*)=(.*)$', line)
+        if m and m.group(1) != 'PATH':
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
+def image_setenv():
+    """The image's burrowd_config's SetEnv line, '' when it has none."""
+    cfg = ARGS.images / 'root' / 'etc/burrowd/burrowd_config'
+    lines = [l for l in cfg.read_text().splitlines() if l.startswith('SetEnv ')] if cfg.exists() else []
+    return lines[0] if len(lines) == 1 else ''
+
+
+def env_rows(client):
+    """B17 (px116, pax#334): the console's variables over ssh, and wolf building with no prefix."""
+    c = client
+    want = dict(image_exports())
+    names = ('WOLF_STD', 'LUPIN_STD', 'DEN_TLS_ROOTS')
+    missing = [n for n in names if n not in want]
+    probe = ['printf "%s\\n" ' + ' '.join('"${%s-unset}"' % n for n in names)]
+    rb, rs = c.ssh(GUEST_AT, probe), c.ssh(LINUX_AT, probe)
+    expect = ''.join('%s\n' % want.get(n, 'unset') for n in names).encode()
+    prog = 'fn main() { print("px116: built over ssh") }'
+    build = ("cd && printf '%%s\\n' '%s' > px116.lu && wolf build --no-cache --emit=obj px116.lu -o px116.o "
+             "&& [ -s px116.o ] && echo built" % prog)
+    rbuild = c.ssh(GUEST_AT, [build], timeout=600)
+    # Recorded, not held: the same build with WOLF_STD taken away, as a command had it before px116.
+    rbare = c.ssh(GUEST_AT, ['cd && rm -f px116.o && env -u WOLF_STD wolf build --no-cache --emit=obj px116.lu '
+                             '-o px116.o; echo status=$?'], timeout=600)
+    record = ('the image\'s /etc/shrc exports %r\nthe image\'s SetEnv line %r\nprintf over ssh, burrowd on PAX: %s\n'
+              'the same, the rig\'s sshd with that line: %s\nwolf build over ssh, no prefix: %s\n'
+              'the same, WOLF_STD taken away (recorded): %s\n'
+              % (sorted(want.items()), image_setenv(), show(rb), show(rs), show(rbuild), show(rbare)))
+    (c.dir / 'b17.txt').write_text(record)
+    if missing:
+        bad('B17', 'the image\'s /etc/shrc exports no %s' % ', '.join(missing))
+    elif rb[0] != 0 or rb[1] != expect:
+        bad('B17', 'over ssh the variables are %r, the console\'s %r (%s)' % (rb[1], expect, show(rb)))
+    elif not held('B17', 'the variables, against the rig\'s sshd given the same SetEnv line', rb, rs):
+        pass
+    elif rbuild[0] != 0 or not rbuild[1].endswith(b'built\n'):
+        bad('B17', 'wolf build over ssh with no prefix: %s' % show(rbuild))
+    else:
+        tail = rbare[1].decode(errors='replace').strip().splitlines()[-1:] or ['-']
+        ok('B17', '%s over ssh as the console has them (sshd\'s answer too); wolf build of a one-line program, no prefix: '
+           'built; without WOLF_STD: %s' % (', '.join('%s=%s' % (n, want[n]) for n in names), tail[0]))
+
+
 def git_rows(client, work):
     """B7: the same git steps through burrowd on PAX and sshd on Linux."""
     results = {}
@@ -943,7 +1005,7 @@ def main():
     iso, vol = image(work, shadow_text, client, repo)
     ok('B0', 'the image (%d bytes), its /etc/shadow (pax at the shipped cost), the keys volume' % iso.stat().st_size)
     net = Net(out)
-    linux = LinuxSide(out, pax_line, client.pub('pax'), repo)
+    linux = LinuxSide(out, pax_line, client.pub('pax'), repo, image_setenv())
     fp = None
     try:
         b1 = out / 'boot1'
@@ -953,6 +1015,7 @@ def main():
             fp = first_boot(con, client, linux)
             if fp:
                 host_rows(client)
+                env_rows(client)
                 git_rows(client, work)
                 console_rows(con, client)
         finally:
