@@ -1,8 +1,9 @@
 """tests/mpx6-staged.d/rows.py — px115's staged-boot rows (tests/mpx6-staged's header has each).
 
-    rows.py WORK KERNEL.elf PELT CAT FIRMWARE...
+    rows.py WORK KERNEL.elf FIRMWARE...
 
-The archives are tools/mkinitramfs's, the disks tools/mkdisk's, edited by debugfs and mtools (black boxes);
+The archives are tools/mkinitramfs's (each with tests/mpx6-staged.d/init.c, built static here, as its first
+program), the disks tools/mkdisk's, edited by debugfs and mtools (black boxes);
 each disk boots alone under QEMU with -no-reboot, its serial log read to its end (QEMU's exit: a reboot) or to
 the kernel's `halt`. Prints PASS/FAIL lines at column 0; exits 1 when any row failed."""
 import hashlib
@@ -14,8 +15,8 @@ import sys
 import time
 from pathlib import Path
 
-WORK, KERNEL, PELT, CAT = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
-LEGS = sys.argv[5:]
+WORK, KERNEL = Path(sys.argv[1]), Path(sys.argv[2])
+LEGS = sys.argv[3:]
 ROOT = Path(__file__).resolve().parents[2]
 OVMF_CODE = Path('/usr/share/OVMF/OVMF_CODE_4M.fd')
 OVMF_VARS = Path('/usr/share/OVMF/OVMF_VARS_4M.fd')
@@ -40,10 +41,10 @@ def run(argv, **kw):
     return r
 
 
-def script(path, lines):
-    path.write_text('#!/bin/pelt\n' + ''.join(l + '\n' for l in lines))
-    path.chmod(0o755)
-    return path
+def program(who, out):
+    run(['cc', '-static', '-nostdlib', '-ffreestanding', '-fno-pie', '-no-pie', '-fno-stack-protector', '-O1',
+         f'-DWHO="{who}"', '-o', out, Path(__file__).resolve().parent / 'init.c'])
+    return out
 
 
 def archives():
@@ -53,9 +54,9 @@ def archives():
     (a / 'fstab-staged').write_text('tmpfs /tmp tmpfs nosuid,nodev 0 0\n')
     (a / 'fstab-root').write_text('/dev/vda2 / ext2 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n')
     (a / 'pax-run').write_text('/bin/installed-init\n')
-    staged_init = script(a / 'staged-init', ['echo "px115-staged: init ran"', 'cat /etc/px115-staged'])
-    installed_init = script(a / 'installed-init', ['echo "px115-installed: init ran"'])
-    common = [f'/bin/pelt={PELT}', f'/bin/cat={CAT}', '/dev/', '/proc/', '/sys/', '/tmp/:1777', '/mnt/']
+    staged_init = program('px115-staged', a / 'staged-init')
+    installed_init = program('px115-installed', a / 'installed-init')
+    common = ['/dev/', '/proc/', '/sys/', '/tmp/:1777', '/mnt/']
     staged = WORK / 'staged.cpio'
     run([ROOT / 'tools/mkinitramfs', staged, *common, f'/bin/staged-init={staged_init}',
          f'/etc/px115-staged={a / "marker"}', f'/etc/fstab={a / "fstab-staged"}'])

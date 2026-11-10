@@ -23,7 +23,7 @@
 #      refused by name (the digest), the installed root
 #   T5 a fresh disk with no archive: refused by name, the installed root
 #
-#   tests/mpx6-staged [--firmware bios|uefi|both] [--pelt DIR] [--bore DIR]
+#   tests/mpx6-staged [--firmware bios|uefi|both]
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1, when it is a failure. Exit 0 when every row held, 1
@@ -32,31 +32,19 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 
-legs=both peltdir= boredir=
+legs=both
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) legs=$2; shift 2 ;;
-        --pelt)     peltdir=$2; shift 2 ;;
-        --bore)     boredir=$2; shift 2 ;;
-        *)          die "usage: tests/mpx6-staged [--firmware bios|uefi|both] [--pelt DIR] [--bore DIR]" ;;
+        *)          die "usage: tests/mpx6-staged [--firmware bios|uefi|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
-need python3 debugfs mcopy mtype qemu-system-x86_64
+need python3 cc debugfs mcopy mtype qemu-system-x86_64
 
 work=$PAX_BUILD/mpx6-staged
 rm -rf "$work"
 mkdir -p "$work"
 elf=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel") \
     || { say "FAIL T0: tools/build-kernel"; exit 1; }
-if [ -n "$peltdir" ]; then
-    pelt=$peltdir/pelt
-else
-    "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt" || { say "FAIL T0: tools/mkpelt"; exit 1; }
-    pelt=$work/peltbin/pelt
-fi
-if [ -z "$boredir" ]; then
-    "$PAX_ROOT/tools/mkboreutils" "$work/bore" cat > "$work/bore.txt" || { say "FAIL T0: tools/mkboreutils"; exit 1; }
-    boredir=$work/bore
-fi
-python3 -I "$here/mpx6-staged.d/rows.py" "$work" "$elf" "$pelt" "$boredir/cat" $legs
+python3 -I "$here/mpx6-staged.d/rows.py" "$work" "$elf" $legs
