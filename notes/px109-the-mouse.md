@@ -230,21 +230,29 @@ cites above §5.7 are theirs. Three files conflicted, all prose, and each kept b
 `git range-diff` shows every other commit's patch unchanged but for its context lines: `kernel/kmain_console.lu`,
 `tests/ci-plan` and `tools/ci-tiers.map` merged by themselves, beside trunk's new lines. No kernel module this lane changes moved on
 trunk (`kernel/xhci`, `kernel/files`, `kernel/usb_keys` and the USB suites are as at `db516c69`), and `/dev/mouse0`'s
-60:0 and the descriptor kinds 17 and 18 are still free. The cited commits after the rebase:
+60:0 and the descriptor kinds 17 and 18 are still free.
 
-| before | after | what |
-|---|---|---|
-| `d11b997b` | `21b9b851` | the prediction |
-| `f98b5574` | `d8a0cfd1` | the rows tip: the 38 invariants |
-| `f6c33ac8` | `dd0621e1` | kernel/xhci's pointers |
-| `74f980bd` | `88137dd3` | /dev/mouse0 |
-| `6a1c843f` | `93995e16` | the books line |
-| `28e2caa1` | `a8f4d396` | the frame invariant, red first |
-| `e642e1c5` | `7edaf8c1` | the fix |
-| `1f68bbcd` | `4c790d20` | CHANGELOG.md |
-| `638ee7ae` | `5872f7d2` | the note |
-| `d7199a4e` | `a585dba9` | the note's release-time section |
+pax#340's head then moved to `1c0148eb` (kernel/user's STAR: the SYSRET base 0x13, so SS is 0x1b in ring 3 on
+processors that do not force the privilege bits; a row each in `tests/mpx3-user` and `tests/mpx5-burrowd`), and the
+branch was rebased onto it. The 29 commits before that are kept on `px109-before-rebase2` (head `a1c85b41`).
+Nothing conflicted, and `git range-diff` shows all 29 patches unchanged. Nothing in the mouse work assumes STAR's
+value or reads a ring-3 selector: `/dev/mouse0`'s `read` reaches the user's buffer through `kernel/uaccess`'s walk
+of the page tables (`writable`, `put`), the queue and the driver run in the kernel alone, and the probe has no
+assembly. The cited commits after each rebase:
 
-The release console's build time (§5.1) was measured before the rebase and not again: the cluster cut it
-follows moves with every change, trunk's included. The final records, green at the rebased head and the plant red
-by name at `burst-edges` on one commit over it, are in the PR with their END lines.
+| before | after the first | after the second | what |
+|---|---|---|---|
+| `d11b997b` | `21b9b851` | `6a9aa510` | the prediction |
+| `f98b5574` | `d8a0cfd1` | `233a49ed` | the rows tip: the 38 invariants |
+| `f6c33ac8` | `dd0621e1` | `c6e937ab` | kernel/xhci's pointers |
+| `74f980bd` | `88137dd3` | `000a75f5` | /dev/mouse0 |
+| `6a1c843f` | `93995e16` | `02204c4a` | the books line |
+| `28e2caa1` | `a8f4d396` | `0ab83944` | the frame invariant, red first |
+| `e642e1c5` | `7edaf8c1` | `89d1b68f` | the fix |
+| `1f68bbcd` | `4c790d20` | `fe303ad0` | CHANGELOG.md |
+| `638ee7ae` | `5872f7d2` | `731cff9f` | the note |
+| `d7199a4e` | `a585dba9` | `6a77e6ba` | the note's release-time section |
+
+The release console's build time (§5.1) was measured before the rebases and not again: the cluster cut it
+follows moves with every change, trunk's included. The final records, green at the head after the second rebase
+and the plant red by name at `burst-edges` on one commit over it, are in the PR with their END lines.
