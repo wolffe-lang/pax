@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# tests/mpx6-bootlog — px118: a boot that goes black leaves evidence
+# (notes/px118-boot-diagnosis.md).
+#
+# The console kernel (kmain_console) on an ISO with a small archive whose
+# first program writes one line and exits. Each image boots under QEMU with
+# the PC speaker on QEMU's `wav` audio backend (`-audiodev wav,…`,
+# `pcspk-audiodev`), its serial log read to the kernel's `halt`; the capture
+# is measured by tools/wav-notes. The rows, per firmware:
+#   B1 a plain boot: exactly two tones, the first at count 1140 (1046.6 Hz)
+#      and the second at count 2280 (523.3 Hz), each within 2% of its pitch
+#      and 40-250 ms long: the high beep at the kernel's entry, the low one
+#      when the console has drawn its first line; the boot reaches its
+#      program and halts
+#   B2 `pax.nobeep` on the command line: no tone
+#   B3 no display device (`-vga none`): no framebuffer, so the console is
+#      never drawn: the high tone alone, and `screen: off, no framebuffer`
+#
+#   tests/mpx6-bootlog [--tier native|release|both] [--firmware bios|uefi|both]
+#
+# The kernel is tools/build-kernel's, the release tier's with --release.
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1, when it is a failure. Exit 0 when every row held, 1
+# otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+legs=both tiers=both
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx6-bootlog [--tier native|release|both] [--firmware bios|uefi|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need python3 cc xorriso qemu-system-x86_64
+"$PAX_ROOT/tools/fetch-limine" >&2 || exit 2
+
+worst=0
+for tier in $tiers; do
+    work=$PAX_BUILD/mpx6-bootlog/$tier
+    rm -rf "$work"
+    mkdir -p "$work"
+    flags=(); [ "$tier" != release ] || flags=(--release)
+    say "the $tier tier's kernel, firmware $legs"
+    elf=$("$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel") \
+        || { printf 'FAIL B0 %s: tools/build-kernel\n' "$tier"; worst=1; continue; }
+    python3 -I "$here/mpx6-bootlog.d/rows.py" "$work" "$elf" $legs || worst=1
+done
+exit $worst
