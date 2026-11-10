@@ -1,0 +1,317 @@
+//! bootlog — the boot's console bytes kept in memory a warm reset may
+//! leave alone (px118), so the next boot can say how far this one got.
+//!
+//! **The area.** 128 KiB of physical memory at AREA_PA (64 MiB), two
+//! slots of 64 KiB, used only when Limine's memory map lists the whole
+//! range as usable (the HHDM maps it then, under Limine's tables and
+//! PAX's alike) and kernel/frames withholds it (`area`). A boot writes
+//! one slot and leaves the other, the previous boot's, as it found it:
+//! `/proc/pax-bootlog` reads that one (kernel/files, `slice`).
+//!
+//! **A slot.** Eight words, then CAP bytes of the console:
+//!
+//!     0 MAGIC "PAXBOOT1"   1 the boot's number (kernel/bootmark)
+//!     2 the stages: last | set << 8   3 n, the bytes written
+//!     4 the bytes' sums: s1 | s2 << 32, s1 the bytes' sum and s2 the
+//!       sum of each s1, both mod 2^32 (Fletcher's construction)
+//!     5 the check: SALT ^ words 0-4   6, 7 zero
+//!
+//! A slot is the previous boot's when its magic and check hold, n is at
+//! most CAP and its bytes sum to word 4: then `intact`. A slot with the
+//! magic whose check or sums do not hold is `refused` and never read
+//! (a reset in the middle of a write, or memory the firmware or the
+//! loader wrote: a checksum, not a promise). Anything else is `none`.
+//! When both slots hold a boot, the higher number is the previous one;
+//! this boot writes the other.
+//!
+//! **What is kept.** Every byte `serial.put` writes, from the entry
+//! until the first program starts (`freeze`, kernel/bootmark's `init`
+//! stage) or the slot is full: the kernel's own boot, never a user's
+//! session. At each line's end the lines written since the last flush
+//! and the header go to memory (cpu.S's `pax_clflush`), so a reset
+//! that drops the caches loses at most the line being written.
+//!
+//! Whether memory survives a reset is the firmware's choice: QEMU keeps
+//! it across a reset (tests/mpx6-bootlog), a power-off clears it, and a
+//! real firmware may clear or reuse it. The marks that must survive a
+//! power-off are kernel/bootmark's, in CMOS; the slot's words 1 and 2
+//! carry a copy.
+//!
+//! No region, no heap; the state is scalars, written with IF clear.
+//! Written from Limine's PROTOCOL.md (the memory map's usable type, the
+//! HHDM) and the Intel SDM vol. 2 (CLFLUSH, MFENCE). No Linux source;
+//! no other kernel's source.
+
+use boot_info
+
+extern "c" fn pax_clflush(va: u64)
+extern "c" fn pax_irq_save() -> u64
+extern "c" fn pax_irq_restore(flags: u64)
+
+const AREA_PA: u64 = 0x4000000 // 64 MiB
+const SLOT: u64 = 65536
+const AREA_LEN: u64 = 131072
+const HDR: u64 = 64
+/// The bytes a slot keeps.
+pub const CAP: u64 = 65472
+const MAGIC: u64 = 0x31544f4f42584150 // "PAXBOOT1"
+const SALT: u64 = 0x5a3c96e1c3a5f00f
+const USABLE: u64 = 0 // Limine's memory-map type for usable memory
+const LINE: u64 = 64 // a cache line
+
+/// What the previous boot left (`prev_state`).
+pub const NONE: u64 = 0
+pub const INTACT: u64 = 1
+pub const REFUSED: u64 = 2
+pub const NO_AREA: u64 = 3
+
+// Module state: scalars, written at the entry and by `put` with IF clear.
+var area_va: u64 = 0 // the area's HHDM address; 0 when there is none
+var mine: u64 = 0 // this boot's slot's address
+var prev: u64 = 0 // the previous boot's slot's address (0 none)
+var prev_st: u64 = 0
+var frozen: u64 = 0
+var flushed: u64 = 0 // bytes of this boot's slot flushed to memory
+
+fn w(a: u64) -> u64 {
+    // # Safety: a word of the area, mapped by the HHDM (start's checks).
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn put_w(a: u64, v: u64) {
+    // # Safety: as `w`.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn byte(a: u64) -> u64 {
+    // # Safety: as `w`.
+    unsafe { (a as *u8).read_volatile() as u64 }
+}
+
+fn check_of(s: u64) -> u64 {
+    SALT ^ w(s) ^ w(s + 8) ^ w(s + 16) ^ w(s + 24) ^ w(s + 32)
+}
+
+/// Whether slot `s` holds a boot: NONE, INTACT or REFUSED.
+fn judge(s: u64) -> u64 {
+    if w(s) != MAGIC {
+        return NONE
+    }
+    let n = w(s + 24)
+    if w(s + 40) != check_of(s) || n > CAP {
+        return REFUSED
+    }
+    var s1: u64 = 0
+    var s2: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        s1 = (s1 + byte(s + HDR + i)) & 0xffffffff
+        s2 = (s2 + s1) & 0xffffffff
+        i += 1
+    }
+    if (s1 | (s2 << 32)) != w(s + 32) {
+        return REFUSED
+    }
+    INTACT
+}
+
+/// Whether [AREA_PA, AREA_PA + AREA_LEN) lies inside one usable entry.
+fn usable() -> bool {
+    let n = boot_info.memmap_count()
+    var i = 0
+    while i < n {
+        if boot_info.memmap_type(i) == USABLE {
+            let b = boot_info.memmap_base(i)
+            let e = b + boot_info.memmap_length(i)
+            if b <= AREA_PA && AREA_PA + AREA_LEN <= e {
+                return true
+            }
+        }
+        i += 1
+    }
+    false
+}
+
+/// At the entry, before the first byte is written and before
+/// kernel/frames: find the area, judge both slots, pick this boot's.
+/// Returns the previous boot's number (0 when none is intact).
+pub fn start() -> u64 {
+    let hhdm = boot_info.hhdm()
+    if hhdm == 0 || boot_info.memmap_count() <= 0 || !usable() {
+        // # Safety: module state, written at the entry alone.
+        unsafe { prev_st = NO_AREA }
+        return 0
+    }
+    let a = hhdm + AREA_PA
+    let j0 = judge(a)
+    let j1 = judge(a + SLOT)
+    var p: u64 = 0
+    if j0 == INTACT && j1 == INTACT {
+        p = if w(a + 8) >= w(a + SLOT + 8) { a } else { a + SLOT }
+    } else if j0 == INTACT {
+        p = a
+    } else if j1 == INTACT {
+        p = a + SLOT
+    }
+    let st = if p != 0 { INTACT } else if j0 == REFUSED || j1 == REFUSED { REFUSED } else { NONE }
+    let m = if p == a { a + SLOT } else { a }
+    // This boot's slot: empty, its header consistent.
+    put_w(m + 8, 0)
+    put_w(m + 16, 0)
+    put_w(m + 24, 0)
+    put_w(m + 32, 0)
+    put_w(m + 48, 0)
+    put_w(m + 56, 0)
+    put_w(m, MAGIC)
+    put_w(m + 40, check_of(m))
+    // # Safety: module state, written at the entry alone.
+    unsafe {
+        area_va = a
+        mine = m
+        prev = p
+        prev_st = st
+    }
+    flush(m, 0)
+    if p != 0 { w(p + 8) } else { 0 }
+}
+
+/// The area (physical address, length) kernel/frames withholds; (0, 0)
+/// when there is none (and in every kernel that never calls `start`).
+pub fn area() -> (u64, u64) {
+    // # Safety: module state, read after the entry's writes.
+    let a = unsafe { area_va }
+    if a == 0 { (0, 0) } else { (AREA_PA, AREA_LEN) }
+}
+
+/// Flush this boot's header and its bytes from `from` to n.
+fn flush(m: u64, from: u64) {
+    // # Safety: cpu.S's CLFLUSH and MFENCE of the area's own lines.
+    unsafe { pax_clflush(m) }
+    let n = w(m + 24)
+    var off = from - from % LINE
+    while off < n {
+        unsafe { pax_clflush(m + HDR + off) }
+        off += LINE
+    }
+    // # Safety: module state, written with IF clear.
+    unsafe { flushed = n }
+}
+
+/// One byte of the console (kernel/serial's `put`), until `freeze`.
+pub fn put(b: u8) {
+    // # Safety: module state; a kernel that keeps no log, or a frozen
+    // one, returns before anything else.
+    let m0 = unsafe { mine }
+    let fz0 = unsafe { frozen }
+    if m0 == 0 || fz0 != 0 {
+        return
+    }
+    let flags = unsafe { pax_irq_save() }
+    let m = unsafe { mine }
+    let fz = unsafe { frozen }
+    if m != 0 && fz == 0 {
+        let n = w(m + 24)
+        if n < CAP {
+            // # Safety: n < CAP, inside this boot's slot.
+            unsafe { ((m + HDR + n) as *u8).write_volatile(b) }
+            let sums = w(m + 32)
+            let s1 = ((sums & 0xffffffff) + (b as u64)) & 0xffffffff
+            let s2 = ((sums >> 32) + s1) & 0xffffffff
+            put_w(m + 24, n + 1)
+            put_w(m + 32, s1 | (s2 << 32))
+            put_w(m + 40, check_of(m))
+            if b == 10 || n + 1 == CAP {
+                flush(m, unsafe { flushed })
+            }
+        }
+    }
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// The marks' copy (kernel/bootmark): this boot's number and stages.
+pub fn mark(boot: u64, last: u64, set: u64) {
+    // # Safety: as `put`.
+    let flags = unsafe { pax_irq_save() }
+    let m = unsafe { mine }
+    if m != 0 {
+        put_w(m + 8, boot)
+        put_w(m + 16, last | (set << 8))
+        put_w(m + 40, check_of(m))
+        flush(m, unsafe { flushed })
+    }
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// No more bytes kept: the first program starts.
+pub fn freeze() {
+    // # Safety: as `put`.
+    let flags = unsafe { pax_irq_save() }
+    unsafe { frozen = 1 }
+    let m = unsafe { mine }
+    if m != 0 {
+        flush(m, unsafe { flushed })
+    }
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// Test-only: `pax.logflip` (kmain_console's end) turns one byte of this
+/// boot's slot over without its sums, as a firmware or a loader writing
+/// the area would, so the next boot must refuse it (tests/mpx6-bootlog
+/// L2). Never on a real machine.
+pub fn test_flip() {
+    // # Safety: as `put`.
+    let flags = unsafe { pax_irq_save() }
+    let m = unsafe { mine }
+    if m != 0 && w(m + 24) != 0 {
+        // # Safety: byte 0 of this boot's slot's data, written before.
+        unsafe { ((m + HDR) as *u8).write_volatile((byte(m + HDR) ^ 0x20) as u8) }
+        flush(m, 0)
+    }
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// What the previous boot left: NONE, INTACT, REFUSED or NO_AREA.
+pub fn prev_state() -> u64 {
+    // # Safety: module state, written at the entry alone.
+    unsafe { prev_st }
+}
+
+/// The previous boot's number, last stage and stage set (0s unless
+/// INTACT).
+pub fn prev_marks() -> (u64, u64, u64) {
+    // # Safety: as `prev_state`.
+    let p = unsafe { prev }
+    if p == 0 {
+        return (0, 0, 0)
+    }
+    let sw = w(p + 16)
+    (w(p + 8), sw & 0xff, (sw >> 8) & 0xff)
+}
+
+/// The previous boot's kept bytes (0 unless INTACT).
+pub fn prev_len() -> u64 {
+    // # Safety: as `prev_state`.
+    let p = unsafe { prev }
+    if p == 0 { 0 } else { w(p + 24) }
+}
+
+/// The previous boot's byte `i` (< prev_len).
+pub fn prev_byte(i: u64) -> u64 {
+    // # Safety: as `prev_state`; i < prev_len <= CAP.
+    let p = unsafe { prev }
+    byte(p + HDR + i)
+}
+
+/// This boot's kept bytes so far.
+pub fn len() -> u64 {
+    // # Safety: as `prev_state`.
+    let m = unsafe { mine }
+    if m == 0 { 0 } else { w(m + 24) }
+}
+
+/// The area's physical address (for the report), 0 when there is none.
+pub fn area_pa() -> u64 {
+    // # Safety: as `prev_state`.
+    let a = unsafe { area_va }
+    if a == 0 { 0 } else { AREA_PA }
+}
