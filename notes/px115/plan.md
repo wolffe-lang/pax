@@ -83,12 +83,14 @@ Light takes on the lane host (native tier), each read by its END lines:
   burrowd answering, status `upgraded` then `cleaned`); S2 green (the changed archive refused by the kernel, `D`, the
   installed system disarmed and rebooted, status says why); S3 green (QEMU killed 20 s into the send: nothing
   received; sent again whole); S4 green (QEMU killed once the upgrade's record was durable: the second staged boot
-  finished it). The four in 570 s. UEFI: queued behind it on the lane host. The kernel's
+  finished it). The four in 570 s; UEFI the same four, green, in 557 s (light take at ffa47874). The kernel's
   mount line shows the AHCI model cut to 16 characters; the serial names the disk.
-- The plant: px115-plant-age (cc6c1e62, the arm's age refusal taken out), P10 predicted red by name, every other
-  row green; its take waited on a light slot (see the hand-back).
-- Not yet: UEFI's leg, the plant's record, the final records (rebase after the queue, every take again at the
-  final head).
+- The plant: px115-plant-age (the arm's age refusal taken out), predicted P10 red by name and every other row green.
+  First at cc6c1e62: P10 red by name, and seven later rows red after it, since the rows shared the arm it left
+  (predicted wrong); the rows now take back an arm a refusal row did not refuse (069cf95d), and at 70a3a00e (the
+  plant on that) P10 alone is red, 27 of 28 held; the head green, 28 of 28 (853b15d0), the same take.
+- Not yet: the final records (rebase after the queue ahead, every take again at the final head; the records into
+  notes/px115/), a distribution build with the image's new files (a block take), the PR.
 - Held: tests/ci-plan's one changed line names an existing CI job whose name holds a host name, so the public-text
   grep counts it. GitHub's px115 is the branch without that commit (a77d6f35, the history reordered so it is
   last); the lane's clone and the lane host hold it on top (ba974964). It goes up when that is ruled.
