@@ -787,8 +787,8 @@ def env_rows(client):
     # named write_text`): it compiles against the compiler's own std, not against lupin's.
     prog = ('use std.fs\\nfn main() {\\n    fs.write_text(\"px116.txt\", \"px116\\\\n\") else {}\\n'
             '    print(\"px116: built over ssh\")\\n}\\n')
-    build = ("cd && printf '%s' > px116.lu && wolf build --no-cache --emit=obj px116.lu -o px116.o "
-             "&& [ -s px116.o ] && echo built" % prog)
+    build = ("cd && rm -f px116.o && printf '%s' > px116.lu && wolf build --no-cache --emit=obj px116.lu -o px116.o; "
+             "s=$?; ls -l px116.o 2>&1; echo wolf=$s" % prog)
     rbuild = c.ssh(GUEST_AT, [build], timeout=600)
     # Recorded, not held: the same build with WOLF_STD taken away, as a command had it before px116.
     rbare = c.ssh(GUEST_AT, ['cd && rm -f px116.o && env -u WOLF_STD wolf build --no-cache --emit=obj px116.lu '
@@ -804,7 +804,7 @@ def env_rows(client):
         bad('B17', 'over ssh the variables are %r, the console\'s %r (%s)' % (rb[1], expect, show(rb)))
     elif not held('B17', 'the variables, against the rig\'s sshd given the same SetEnv line', rb, rs):
         pass
-    elif rbuild[0] != 0 or not rbuild[1].endswith(b'built\n'):
+    elif rbuild[0] != 0 or not rbuild[1].endswith(b'wolf=0\n') or b' px116.o' not in rbuild[1]:
         bad('B17', 'wolf build over ssh with no prefix: %s' % show(rbuild))
     else:
         tail = rbare[1].decode(errors='replace').strip().splitlines()[-1:] or ['-']
