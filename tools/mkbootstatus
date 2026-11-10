@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# mkbootstatus — build /bin/pax-boot-status (user/bootlog, px118) as a fully
+# static x86-64 Linux executable, with kernel/wolf.pin's wolf.
+#
+#   tools/mkbootstatus OUTDIR
+#
+# pax-boot-status is pax's own program, built as tools/mkplay builds play:
+# pax's own wolf (the release archive kernel/wolf.pin names, tools/fetch-wolf;
+# $PAX_WOLF when set), builtins only (no wolf-std), the release tier
+# (`wolf build --release --deny-warnings`), linked through a `cc` that adds
+# `-static`, checked with readelf (ET_EXEC, no PT_INTERP); `OUTDIR/sums.txt`
+# gets `pax-boot-status <sha256> <bytes>`. Build on a baseline x86-64 glibc
+# (the CI runner's Ubuntu or an Ubuntu container). The release tier needs
+# clang at run time. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkbootstatus OUTDIR"
+out=$1
+need readelf cc clang
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+wolf=${PAX_WOLF:-}
+[ -n "$wolf" ] || wolf=$("$PAX_ROOT/tools/fetch-wolf") || die "tools/fetch-wolf"
+say "$("$wolf" --version | head -n 1)"
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-bootstatus.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+cp -R "$PAX_ROOT/user/bootlog" "$w/bootlog"
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+(cd "$w/bootlog" && PATH="$w/bin:$PATH" \
+    "$wolf" build --release --no-cache --deny-warnings pax-boot-status.lu -o "$out/pax-boot-status") >&2 \
+    || die "wolf build of user/bootlog/pax-boot-status.lu"
+readelf -hW "$out/pax-boot-status" | grep -Eq 'Type: +EXEC' || die "pax-boot-status is not ET_EXEC"
+! readelf -lW "$out/pax-boot-status" | grep -q INTERP || die "pax-boot-status has a PT_INTERP (not static)"
+printf '%s %s %s\n' pax-boot-status "$(sha256_of "$out/pax-boot-status")" "$(wc -c < "$out/pax-boot-status" | tr -d ' ')" | tee "$out/sums.txt"
