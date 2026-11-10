@@ -59,6 +59,11 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       ends with status 255 right after the refused pty (OpenSSH's client,
       told to insist on a pty, measured on Linux too); `ssh host COMMAND`
       runs, no tty; what the client writes recorded
+  B15 a bare `sudo` over ssh (px112): PAX's sudo asks on its controlling
+      terminal, which for a command over ssh is still the console (no session
+      of its own yet), and is stopped there while the client waits; burrowd
+      answers the next connection all the same (each session's program in a
+      process group of its own)
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -694,6 +699,22 @@ def host_rows(client):
         ok('B12', 'no ptys, the shell served: %s' % record_b12.replace('\n', '; ').strip('; '))
     else:
         bad('B12', 'a session without ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
+    # B15 a bare sudo over ssh: its prompt goes to the console, and it is stopped there (SIGTTOU, as
+    # it turns the console's echo off from a background group); the client waits until it is killed.
+    # burrowd keeps answering only if that stop stays in the program's own group.
+    try:
+        rs = c.ssh(GUEST_AT, ['sudo cat /etc/hostname'], timeout=15)
+    except subprocess.TimeoutExpired:
+        rs = None
+    try:
+        r2 = c.ssh(GUEST_AT, ['echo second'], timeout=30)
+    except subprocess.TimeoutExpired:
+        r2 = (None, b'', b'[row: timed out]')
+    (c.dir / 'b15.txt').write_text('sudo: %s\nsecond: %s\n' % ('waited, killed after 15 s' if rs is None else show(rs), show(r2)))
+    if rs is None and r2[0] == 0 and r2[1] == b'second\n':
+        ok('B15', 'a bare sudo over ssh waits on the console (no session of its own yet); the next connection is answered')
+    else:
+        bad('B15', 'sudo over ssh: %s; the next connection: %s' % ('waited' if rs is None else show(rs), show(r2)))
 
 
 def git_rows(client, work):
