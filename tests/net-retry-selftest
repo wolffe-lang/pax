@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# tests/net-retry-selftest — tools/net-retry tries again only what the
+# network or the server dropped, a bounded number of times, each try under
+# its limit, and names the fetch that still failed (tl38). No network: a
+# loopback HTTP server (python3), a fake `apt-get` and `sudo` ahead of the
+# real ones, and the pauses set to 0 s (PAX_FETCH_PAUSES), so the rows hold
+# the tries, the classes and the lines, not the waits.
+#
+#   N1  url: 200: exit 0, the bytes, one request.
+#   N2  url: 503 twice, then 200: exit 0, two retry lines, fetched on try
+#       3 of 3, three requests.
+#   N3  url: always 503: exit 3, `FAIL fetch of URL failed after 3 tries
+#       (last: HTTP 503)`, three requests, neither OUT nor OUT.part left.
+#   N4  url: 404: exit 4, `not retried`, one request.
+#   N5  url: a closed port: exit 3, the class connect.
+#   N6  url: half a body and a stall, under a 2 s limit: exit 3, the class
+#       timeout.
+#   N7  url with SHA256: the right digest fetched; the wrong one refused,
+#       exit 5, one request, no OUT.
+#   N8  apt: the lists fail once and the packages twice, then succeed:
+#       exit 0, three retry lines, the install run once after them with
+#       the packages; the packages failing every try: exit 3, named, no
+#       install.
+#   N9  run: a command failing twice, then succeeding: exit 0; always
+#       failing: exit 3, `(last: exit 1)`.
+#   N10 every fetch goes through it: no `curl` fetch in tools/ or the
+#       census's stage.sh outside tools/net-retry, and in
+#       .github/workflows/ci.yml no `apt-get`, `docker pull` or
+#       `brew install` outside `tools/net-retry`.
+# Exit 0 when every row held; each failing row is named.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/.." && pwd)
+helper=$root/tools/net-retry
+w=$(mktemp -d "${TMPDIR:-/tmp}/net-retry-selftest.XXXXXX")
+server=
+cleanup() {
+    [ -z "$server" ] || { kill "$server" && wait "$server"; } 2>/dev/null
+    rm -rf "$w"
+}
+trap cleanup EXIT
+fail=0
+bad() { echo "FAIL $*"; fail=1; }
+ok() { echo "PASS $*"; }
+[ -x "$helper" ] || { bad "N0: tools/net-retry is missing"; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo 'net-retry-selftest: no python3' >&2; exit 2; }
+
+# The loopback server: /ok 200; /flaky 503 twice, then 200; /down 503;
+# /stall 10 bytes of 100000, then nothing; anything else 404. Each
+# request is counted in $w/hits/<name>.
+mkdir -p "$w/hits"
+python3 -I -c '
+import http.server, os, sys, time
+hits = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        key = self.path.split("?")[0].split("/")[1]
+        p = os.path.join(hits, key)
+        n = int(open(p).read()) + 1 if os.path.exists(p) else 1
+        open(p, "w").write(str(n))
+        if key == "ok" or (key == "flaky" and n > 2):
+            body = (key + "\n").encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body)
+        elif key in ("flaky", "down"):
+            self.send_response(503); self.send_header("Content-Length", "0"); self.end_headers()
+        elif key == "stall":
+            self.send_response(200); self.send_header("Content-Length", "100000"); self.end_headers()
+            self.wfile.write(b"x" * 10); self.wfile.flush(); time.sleep(8)
+        else:
+            self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+s.daemon_threads = True
+open(os.path.join(hits, "..", "port"), "w").write(str(s.server_address[1]))
+s.serve_forever()
+' "$w/hits" &
+server=$!
+for _ in $(seq 50); do [ -s "$w/port" ] && break; sleep 0.1; done
+[ -s "$w/port" ] || { bad "N0: the loopback server did not start"; exit 1; }
+base=http://127.0.0.1:$(cat "$w/port")
+hits() { cat "$w/hits/$1" 2>/dev/null || echo 0; }
+export PAX_FETCH_PAUSES="0 0"
+
+out=$w/n1
+log=$("$helper" url "$base/ok" "$out" 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(cat "$out")" = ok ] && [ "$(hits ok)" = 1 ]; then
+    ok "N1: 200: exit 0, the bytes, one request"
+else bad "N1: exit $rc, $(hits ok) requests: $log"; fi
+
+out=$w/n2
+log=$("$helper" url "$base/flaky" "$out" 2>&1); rc=$?
+retries=$(grep -c 'failed (HTTP 503); again in 0 s' <<<"$log")
+if [ "$rc" = 0 ] && [ "$(cat "$out")" = flaky ] && [ "$retries" = 2 ] && [ "$(hits flaky)" = 3 ] \
+    && grep -qxF "net-retry: $base/flaky: try 1 of 3 failed (HTTP 503); again in 0 s" <<<"$log" \
+    && grep -qxF "net-retry: $base/flaky: fetched on try 3 of 3" <<<"$log"; then
+    ok "N2: 503 twice, then 200: two retry lines, fetched on try 3 of 3, three requests"
+else bad "N2: exit $rc, $retries retry lines, $(hits flaky) requests: $log"; fi
+
+out=$w/n3
+log=$("$helper" url "$base/down" "$out" 2>&1); rc=$?
+if [ "$rc" = 3 ] && [ "$(hits down)" = 3 ] && [ ! -e "$out" ] && [ ! -e "$out.part" ] \
+    && grep -qxF "FAIL fetch of $base/down failed after 3 tries (last: HTTP 503)" <<<"$log"; then
+    ok "N3: always 503: exit 3, named, three requests, nothing left"
+else bad "N3: exit $rc, $(hits down) requests: $log"; fi
+
+out=$w/n4
+log=$("$helper" url "$base/missing" "$out" 2>&1); rc=$?
+if [ "$rc" = 4 ] && [ "$(hits missing)" = 1 ] && [ ! -e "$out" ] \
+    && grep -qxF "FAIL fetch of $base/missing failed (HTTP 404), not retried" <<<"$log"; then
+    ok "N4: 404: exit 4, not retried, one request"
+else bad "N4: exit $rc, $(hits missing) requests: $log"; fi
+
+closed=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+log=$("$helper" url "http://127.0.0.1:$closed/x" "$w/n5" 2>&1); rc=$?
+if [ "$rc" = 3 ] && grep -qxF "FAIL fetch of http://127.0.0.1:$closed/x failed after 3 tries (last: connect)" <<<"$log"; then
+    ok "N5: a closed port: exit 3, connect"
+else bad "N5: exit $rc: $log"; fi
+
+start=$SECONDS
+log=$(PAX_FETCH_MAX_TIME=2 "$helper" url "$base/stall" "$w/n6" 2>&1); rc=$?
+secs=$((SECONDS - start))
+if [ "$rc" = 3 ] && [ "$(hits stall)" = 3 ] && [ "$secs" -lt 30 ] \
+    && grep -qxF "FAIL fetch of $base/stall failed after 3 tries (last: timeout)" <<<"$log"; then
+    ok "N6: a stall under a 2 s limit: exit 3, timeout, three requests, ${secs} s"
+else bad "N6: exit $rc, $(hits stall) requests, ${secs} s: $log"; fi
+
+right=$(printf 'ok\n' | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)
+wrong=0000000000000000000000000000000000000000000000000000000000000000
+log=$("$helper" url "$base/ok" "$w/n7a" "$right" 2>&1); rc=$?
+log2=$("$helper" url "$base/ok" "$w/n7b" "$wrong" 2>&1); rc2=$?
+if [ "$rc" = 0 ] && [ "$(cat "$w/n7a")" = ok ] && [ "$rc2" = 5 ] && [ ! -e "$w/n7b" ] && [ ! -e "$w/n7b.part" ] \
+    && [ "$(hits ok)" = 3 ] && grep -qxF "FAIL fetch of $base/ok: refused: sha256 $right, the pin is $wrong" <<<"$log2"; then
+    ok "N7: the pinned digest fetched; another refused, exit 5, one request"
+else bad "N7: exit $rc and $rc2, $(hits ok) requests: $log $log2"; fi
+
+# The fake apt-get fails `update` FAKE_LISTS times and the
+# `--download-only` install FAKE_DEBS times, and records every call.
+mkdir -p "$w/bin" "$w/apt"
+cat > "$w/bin/apt-get" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$FAKE_APT/calls"
+case " $* " in
+    *" update "*) k=lists; limit=$FAKE_LISTS ;;
+    *" --download-only "*) k=debs; limit=$FAKE_DEBS ;;
+    *) exit 0 ;;
+esac
+n=$(cat "$FAKE_APT/$k" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_APT/$k"
+[ "$n" -gt "$limit" ] || { echo "E: Failed to fetch (fake $k $n)" >&2; exit 100; }
+EOF
+printf '#!/bin/sh\nexec "$@"\n' > "$w/bin/sudo"
+chmod +x "$w/bin/apt-get" "$w/bin/sudo"
+apt() { rm -f "$w/apt/"*; FAKE_APT=$w/apt FAKE_LISTS=$1 FAKE_DEBS=$2 PAX_FETCH_PAUSES="0 0 0" PATH="$w/bin:$PATH" "$helper" apt qemu-system-x86 ovmf 2>&1; }
+log=$(apt 1 2); rc=$?
+last=$(tail -n 1 "$w/apt/calls")
+if [ "$rc" = 0 ] && [ "$(grep -c 'again in 0 s' <<<"$log")" = 3 ] && [ "$(wc -l < "$w/apt/calls" | tr -d ' ')" = 6 ] \
+    && grep -qxF 'net-retry: the packages qemu-system-x86 ovmf: fetched on try 3 of 4' <<<"$log" \
+    && [ "$last" = "-q -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends qemu-system-x86 ovmf" ]; then
+    ok "N8: apt: lists once, packages twice, then installed once with no network"
+else bad "N8: exit $rc, last call '$last': $log"; fi
+log=$(apt 0 9); rc=$?
+if [ "$rc" = 3 ] && ! grep -q 'install -y --no-install-recommends qemu-system-x86 ovmf$' "$w/apt/calls" \
+    && grep -qxF 'FAIL fetch of the packages qemu-system-x86 ovmf failed after 4 tries (last: exit 100)' <<<"$log"; then
+    ok "N8: apt: packages failing every try: exit 3, named, never installed"
+else bad "N8: exit $rc: $log"; fi
+
+count=$w/count
+log=$("$helper" run sh -c "n=\$(cat $count 2>/dev/null || echo 0); n=\$((n + 1)); echo \$n > $count; [ \$n -ge 3 ]" 2>&1); rc=$?
+log2=$("$helper" run false 2>&1); rc2=$?
+if [ "$rc" = 0 ] && [ "$(cat "$count")" = 3 ] && grep -q 'fetched on try 3 of 3$' <<<"$log" \
+    && [ "$rc2" = 3 ] && grep -qxF "FAIL fetch of 'false' failed after 3 tries (last: exit 1)" <<<"$log2"; then
+    ok "N9: run: failing twice, then fetched; always failing, exit 3, named"
+else bad "N9: exit $rc and $rc2: $log $log2"; fi
+
+# N10: no fetch outside the helper. A curl in tools/ that writes a file
+# (-o) is a fetch; the census's traced workloads, its recorded output and
+# the helpers' own comments are not.
+stray=$(cd "$root" && git grep -nE '^[^#]*(^|[^a-zA-Z_-])curl [^#]*(-o |-O)' -- tools ':!tools/net-retry' ':!tools/census/workloads' ':!tools/census/out' 2>/dev/null)
+wf=$root/.github/workflows/ci.yml
+wstray=$(grep -nE '^[^#]*(apt-get|docker pull|brew install)' "$wf" | grep -v 'tools/net-retry')
+apt_steps=$(grep -c 'tools/net-retry apt ' "$wf")
+if [ -z "$stray" ] && [ -z "$wstray" ] && [ "$apt_steps" -gt 0 ]; then
+    ok "N10: every tools/ fetch and every apt, docker pull and brew install in CI goes through tools/net-retry ($apt_steps apt steps)"
+else
+    n=$(printf '%s\n%s\n' "$stray" "$wstray" | grep -c .)
+    bad "N10: $n fetches outside tools/net-retry, the first: $(printf '%s\n%s\n' "$stray" "$wstray" | grep . | head -n 3 | tr '\n' ' ')"
+fi
+
+exit "$fail"
