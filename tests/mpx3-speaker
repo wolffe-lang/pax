@@ -282,13 +282,17 @@ if [ -z "$images" ]; then
     else
         why+=" tools/mkinitramfs;"
     fi
+    # px118: the boot's own two beeps silenced (`pax.nobeep`), so each capture holds the
+    # programs' tones alone; tests/mpx6-bootlog holds the boot's beeps.
+    conf=$work/limine-nobeep.conf
+    { cat "$PAX_ROOT/boot/limine-initramfs.conf"; printf '    cmdline: pax.nobeep\n'; } > "$conf"
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         mkdir -p "$work/$tier"
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+            "$PAX_ROOT/tools/mkimage" --conf "$conf" \
                 --add "$work/speaker.cpio" initramfs.cpio "$elf" "$work/$tier/speaker.iso" >/dev/null \
                 || why+=" $tier: mkimage;"
             say "built $tier speaker: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/speaker.iso"), initramfs $(sha256_of "$work/speaker.cpio")"
