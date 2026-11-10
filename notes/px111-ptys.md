@@ -115,6 +115,17 @@ The prediction (`notes/px111/prediction.txt`), scored:
   (R-px111-8).
 - The Linux side is recorded on a lane host, not re-run on the hosted runner (its references
   are committed; no row needs a fixture staged on a lane host).
+- **mpx3-console in the local gauntlet (a follow-on).** px111 changes the console's line
+  discipline, so mpx3-console guards it, but the local gauntlet leaves it out. Its Linux side,
+  `tools/linux-tty --pid1`, needs real root's pid namespace (`sudo -n` when not root), which
+  the lane's host does not give. The suite also has no `--only build` / `--only linux --images`
+  split like mpx5-jobs': `--no-boot` builds and runs the Linux side in one pass. The hosted
+  full-matrix run is its gate: the plan selects it for this change, and the runner has `sudo -n`.
+  A light take at 78d24921 had every PAX-side row green; only T0, T2 and T5 failed, each from
+  the refused namespace alone. The follow-on is to give mpx3-console mpx5-jobs' split, its Linux
+  side run on the host under `unshare --user --map-root-user` or in `tools/linux-tree`'s
+  throwaway container. That changes how its reference is made, so it needs its own check that the
+  ask and pelt transcripts come out the same.
 
 ## 5. Evidence index
 
