@@ -1,0 +1,62 @@
+px115 prediction, written 2026-11-10 before any feature code, and before the design probes' results were read.
+
+Base: pax trunk d56fdd98. Branch px115. The upgrade this lane reuses: px93's `pax-install --upgrade`
+(the stick's "PAX: upgrade the installed system" entry, `pax.upgrade` plus the stick's /pax/install-targets
+module, the installed root mounted at /mnt/target), as px97's latest sticks and px112's burrowd carry it.
+
+What the tree already says, before any probe:
+- Limine 12.9.1 reads FAT12/16/32 and ISO 9660 only (its README), so nothing it loads can come from the
+  installed root's ext2. The installed ESP is 64 MiB (user/install/plan.lu); the dev image's archive is
+  about 600 MB. The archive cannot be a Limine module from the installed disk: the staged environment needs
+  its kernel on the ESP and its archive read by PAX's own kernel from the root partition.
+- Limine has no one-shot entry on BIOS. CONFIG.md's only one-shot is UEFI's Boot Loader Interface variable
+  (LoaderEntryOneShot), which PAX cannot write (no EFI runtime services). `default_entry` is read from the
+  config file at each boot, so PAX must consume the arm itself.
+- PAX's sudo takes -S and reads the password one byte at a time, so a password line followed by the image
+  on the same standard input leaves the image intact for the command.
+- The kernel halts on a panic; it never reboots by itself.
+
+The probes (QEMU under KVM, a copy of an installed 860-shaped disk, the rig's tap LAN):
+- P1, Limine with a second entry made the default (both firmwares):
+  - `default_entry: 2` boots entry 2 unattended after the timeout; with `timeout: 0` and `quiet: yes`
+    at once, nothing drawn; an entry named by its title works the same.
+  - entry 2's kernel from another file on the ESP (/pax-upgrade/pax) boots.
+  - entry 2's kernel or module missing: Limine stops on an error naming the path and waits for a key.
+    No fallback to entry 1 and no reboot, on either firmware; `quiet` does not hide the error.
+  - a wrong blake2b hash on the path: a panic that waits for a key.
+- P2, `ssh USER@HOST 'cat > FILE' < IMAGE` into burrowd on the installed disk's root, over the tap:
+  - 256 MiB at 8 to 20 MB/s (13 to 32 s): burrowd's ChaCha20-Poly1305 in wolf and one CPU, not the
+    64 KiB window, at the tap's sub-millisecond round trip. A full 1.2 GB image at the same rate, 1 to 2.5
+    minutes, exact (sha256 equal); nothing breaks between 64 MiB and 1.2 GB.
+  - PAX's MemAvailable falls by under 32 MiB during the transfer and comes back after it (the buffer
+    cache is 512 frames; burrowd's channel window is bounded); burrowd's VmHWM under 64 MiB.
+  - With a 5 ms round trip added (netem), at most 13 MB/s, the window's own limit (64 KiB a round trip):
+    on a real LAN the window, not the CPU, sets the time.
+- P3, the archive under gzip (Limine's `$` decompression): still several times the ESP's free space.
+- P4, `sudo -S` over ssh with no terminal: the password's line then data; the command sees the data's
+  exact bytes; a wrong password consumes more lines of the data and refuses after three tries.
+
+What I expect to go wrong when the feature is built (phase 2):
+1. The kernel's archive read from ext2: kernel/initramfs is a view of one physically contiguous module in
+   the HHDM. A 600 MB buffer from free frames is not contiguous: the first take needs a page-list or a
+   mapping of its own, and is either wrong at a page boundary or slow (a lookup per byte).
+2. The boot order: something before block.start reads the archive (initramfs.require, the run list's
+   checks) and panics under the staged word until the archive's load moves after the disks come up.
+3. The archive load is slow on the first take: 600 MB through the 512-buffer cache a block at a time,
+   then SHA-256 in the kernel: tens of seconds under KVM; a large-request path is needed.
+4. Which disk: on the kasumi-shaped rig (five disks), `pax-upgrade arm` finds the root's disk from userland
+   (/proc/self/mounts, sysfs) and names the wrong node or a model string trimmed differently from the
+   kernel's, so the staged boot's mount_upgrade refuses its own targets line by name.
+5. The unattended confirmation: pax-install --upgrade's line (`UPGRADE /dev/sdX <model> <serial> <seed>`)
+   computed by the boot hook mismatches on the first take (the device's letter differs between the
+   installed boot and the staged boot), and the upgrade is cancelled by name, the disk unchanged.
+6. The disarm: the upgrade's own ESP phase regenerates limine.conf, which disarms in the middle of the
+   upgrade. A cut between that phase and the record's removal boots the new installed system with an
+   incomplete record. The first take misses this case; the power-cut row during apply finds it.
+7. A second arm, an arm without root, an unverified image: the refusals are easy; the hard one is a stage
+   cut mid-transfer, which leaves a partial file and a root not cleanly unmounted (PAX runs no fsck): the
+   next boot says so and boots; the partial file is removed by the next stage.
+8. The rows' wall time: each apply row boots the staged environment and then the upgraded disk on top of
+   the 860's install chain; the leg grows by 10 to 20 minutes a firmware.
+9. The footprint is cross-cutting (kernel/fstab, kernel/initramfs, kmain_console, user/install, tools):
+   tier full before merge; the upgrade leg itself runs locally, as px93's and px97's did.
