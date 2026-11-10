@@ -1,7 +1,8 @@
 # px114 — the live system's run-time state stays home (pax#329)
 
-Base: pax trunk `4d899ea4`. The census is `notes/px114/census.txt`, the prediction
-`notes/px114/prediction.txt` (with its revision 1, the rulings as given), the census rig
+Base: pax trunk `68d52145` (written on `4d899ea4`, rebased after pax#331 put trash on the image).
+The census is `notes/px114/census.txt`, the prediction `notes/px114/prediction.txt` (with its
+revision 1, the rulings as given, and revision 2, `/Trash` after the rebase), the census rig
 `notes/px114/rig/`.
 
 ## 1. What this lane does
@@ -24,6 +25,8 @@ time stands out). It found, besides the installer's own scratch in `/tmp` and th
   root's files at the top of the tree because root's home is `/`;
 - `/var/log/sudo.log`, one line for each `sudo`.
 
+After the rebase, trash (on the image since pax#331) adds one more: root's `~/Trash` is `/Trash`.
+
 The fix is one function beside `excluded()`, `runtime_state(path)`, checked before the walk makes
 a row, so a path it names is never copied, never in the attrs, never in a manifest, and never a
 change of the source if it is rewritten during the install. Each entry names its writer:
@@ -31,6 +34,7 @@ change of the source if it is rewritten during the install. Each entry names its
 - `/var/lib/dhcp` (kernel/dhcp's lease and its directory; the rest of `/var/lib` is carried);
 - `/etc/resolv.conf` (kernel/dhcp, from the lease or a static `/etc/pax-net`);
 - `/var/log/sudo.log` (sudo, the stick's uses);
+- `/Trash` (trash: root's trash can, since root's home is `/`);
 - every top-level name that starts with a dot (root's home is `/`).
 
 The installed kernel never reads a copied lease: kernel/dhcp has no INIT-REBOOT
@@ -54,14 +58,16 @@ The installed system makes the directory and both files itself at its first leas
 - **R-px114-5, the image's side: B.** A follow-on issue, not this lane: a `tests/distribution`
   row that no image ships a top-level dot name, `/var/lib/dhcp`, `/etc/resolv.conf` or
   `/var/log/sudo.log` (beside `image-no-sudo-log`), seen red and green at an image build.
+- **R-px114-6, root's `/Trash`: A.** Left out whole, its writer named, red first; it is not a
+  dot name, so the dot-name rule does not reach it.
 - `/var/run`'s contents (sudo's timestamp, burrowd's pid) are px112's, not here.
 
 ## 3. What changes for an install and an upgrade
 
 - A fresh install from a stick that took a lease is the same, path for path, as one from a stick
   that did not, but for an empty `/var/lib` (R-px114-2).
-- Root's console history and lope's directory store from the stick no longer become the installed
-  root's.
+- Root's console history, lope's directory store and trash can from the stick no longer become
+  the installed root's.
 - An upgrade no longer writes the stick's run-time files beside the installed system's own as
   `PATH.pax-new` (`/.sh_history.pax-new`, `/.local/share/lope/store.pax-new`,
   `/var/lib/dhcp/pax.lease.pax-new`, `/etc/resolv.conf.pax-new`): it never plans them.
@@ -84,17 +90,20 @@ The installed system makes the directory and both files itself at its first leas
 ## 5. Evidence index
 
 - The census: `notes/px114/census.txt`, from `notes/px114/rig/census.sh`, `census.keys` and
-  `census-diff.py` at `4225f887`, on a Linux host under KVM.
+  `census-diff.py` at `4225f887` (before the rebase; the rig's files are unchanged by it), on a
+  Linux host under KVM. `/Trash` is from the source, after the rebase (the census image predates
+  trash).
 - The rows, red before the fix (`tests/mpx6-install.d`):
   - `snapshot.py`: I-runtime-lease, I-runtime-resolv, I-runtime-root-home, I-runtime-sudo-log,
-    I-runtime-renewal (the witness's `renewal` mode rewrites the lease and the resolver file
+    I-runtime-root-trash, I-runtime-renewal (the witness's `renewal` mode rewrites the lease and the resolver file
     between the walks), and I-runtime-neighbours (package state under `/var/lib`, `/var/libx`,
     `/etc/resolv.conf.d`, a dot name inside a home and another log: copied and listed, before and
     after);
   - `prepare.py`: I-runtime-install (the prepared tree, its attrs and the manifest
     `install_manifest` writes, which `prepare.lu` now calls after `configure_tree` as
     `execute_plan` does).
-- The records: a red take of the snapshot and prepare units at the rows' head; the green record
+- The records: red takes of the snapshot and prepare units at the rows' heads (before the first
+  fix, and before `/Trash`'s entry); the green record
   at the final head (fetch-wolf, the six units, `tests/mpx6-install`'s smoke inputs and rows,
   native, BIOS); the plant record (`px114-plant-lease`: `/var/lib/dhcp`'s entry taken out,
   I-runtime-lease and I-runtime-renewal red by name). The PR quotes every `END` line.
