@@ -1286,9 +1286,12 @@ fn put_sdec(base: u64, at: u64, v: u64) -> u64 {
 /// terminal's number (the console's 4:64 as `(major << 8) | minor`, 0
 /// when none) and its foreground group (-1 when none), the thread count,
 /// the resident and virtual size, the signal sets (pending, blocked,
-/// ignored, caught), the exit signal 17 (SIGCHLD); every field PAX does
-/// not keep (flags, faults, times, start time, addresses, the scheduling
-/// class, the accounting) reads 0, and priority 20 and nice 0 (named).
+/// ignored, caught), the exit signal 17 (SIGCHLD), and (px115) the start
+/// time, the tick the process was made at (kernel/sched's `born`: clock
+/// ticks at 100 Hz from the timer's start, CLOCK_MONOTONIC's base); every
+/// field PAX does not keep (flags, faults, times, addresses, the
+/// scheduling class, the accounting) reads 0, and priority 20 and nice 0
+/// (named).
 fn stat(base: u64, s: u64, me: bool, area: u64) -> u64 {
     let pid = sched.slot_pid(s)
     var k = put_dec(base, 0, pid)
@@ -1312,7 +1315,9 @@ fn stat(base: u64, s: u64, me: bool, area: u64) -> u64 {
     // flags minflt cminflt majflt cmajflt utime stime cutime cstime
     k = put_s(base, k, " 0 0 0 0 0 0 0 0 0 20 0 ")
     k = put_dec(base, k, sched.proc_word(s, 1))
-    k = put_s(base, k, " 0 0 ")
+    k = put_s(base, k, " 0 ") // itrealvalue
+    k = put_dec(base, k, sched.born(area)) // px115: starttime
+    k = put_b(base, k, 32)
     let space = if me { paging.live() } else { sched.proc_word(s, 3) }
     let pages = if space == 0 { 0 } else { paging.user_pages(space) }
     k = put_dec(base, k, pages * PAGE)
