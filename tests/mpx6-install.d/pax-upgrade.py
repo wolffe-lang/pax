@@ -126,7 +126,7 @@ def newc(rows):
 
 
 def config_text(uuid):
-    return ('timeout: 0\nquiet: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n'
+    return ('timeout: 5\nverbose: yes\nserial: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n'
             f'    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={uuid} rootfstype=ext2 rw\n')
 
 
