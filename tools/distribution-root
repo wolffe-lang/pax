@@ -221,10 +221,11 @@ def main():
     put('etc/pax-net', (ROOT/'user/pax-net').read_bytes())
     put('etc/pax-release', (identity/'pax-release').read_bytes())
     put('etc/pax-banner', (identity/'pax-banner').read_bytes())
-    shrc = (ROOT/'user/shrc').read_text()
-    if variant == 'dev':
-        shrc += '\nexport PATH=/usr/bin:/bin\nexport WOLF_STD=/usr/share/wolf/compiler-std\n'
-    put('etc/shrc', shrc.encode())
+    # px116 (pax#334): /etc/shrc from tools/system-env, the one list burrowd's configuration is
+    # written from as well (the same bytes as before: user/shrc, and the dev image's two lines).
+    shrc = subprocess.run([sys.executable, '-I', str(ROOT/'tools/system-env'), 'shrc', variant],
+                          check=True, capture_output=True).stdout
+    put('etc/shrc', shrc)
     put('etc/motd', (f'PAX {variant}: run pax-release for exact pins and image identity.\n'
         'pelt is pid 1; friendly editing: set -o friendly -o suggest -o histsearch\n'
         'yew edits files; yew fl starts the Fletch prompt. Files live in memory.\n'
