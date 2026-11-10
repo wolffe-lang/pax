@@ -356,7 +356,7 @@ machine is one beep with its stages short of `drawn`, since nothing shows that m
 **Not done.**
 - The test machine itself: section 9 is the page for it.
 - The full tier's upgrade leg (`tests/mpx6-install.d/upgrade.py`, which now also holds `/var/log/boot.log` byte for
-  byte), `tests/usb-stick`, `tests/mpx6-kasumi`, `tests/mpx6-install --rows full` and the over-ssh upgrade leg
+  byte), `tests/usb-stick`, the metal-shaped install leg, `tests/mpx6-install --rows full` and the over-ssh upgrade leg
   (`ssh-upgrade.py`): heavy legs left to CI's full tier. U1 and U2 show the new installed options and the armed
   shape booting with no key.
 - A framebuffer above 4 GiB: no QEMU display device here put one there.
