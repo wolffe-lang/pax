@@ -36,6 +36,13 @@
 #   U1 the installed system's Limine options (`timeout: 5`, `verbose: yes`,
 #      `serial: yes`): Limine's lines on the serial port before PAX's first,
 #      the boot unattended
+#   K1 the boot's first program, `pax-boot-status record` (user/bootlog,
+#      tools/mkbootstatus), writes /var/log/boot.log (0600: the claim of the
+#      CMOS bytes with their offsets at boot 1; boot 1 completed and its
+#      console between markers at boot 2) and /var/log/boot.summary (0644,
+#      one line a boot); `pax-boot-status` lists them
+#   K2 a boot stopped at `devices`: the next boot's record and show say so
+#   K3 a boot.log past 256 KiB: rotated to boot.log.1, a new boot.log begun
 #   P1 port 0x80 in QEMU's I/O trace (`-trace cpu_out`): 0x11 … 0x88, the
 #      stages' POST codes, in order (SKIP, not measured, where QEMU writes
 #      no such trace)
@@ -64,6 +71,12 @@ need python3 cc xorriso qemu-system-x86_64 mcopy mtype debugfs
 "$PAX_ROOT/tools/fetch-limine" >&2 || exit 2
 
 worst=0
+# px118: pax-boot-status for the K rows (one build: a hosted program, the same for both kernel tiers).
+if "$PAX_ROOT/tools/mkbootstatus" "$PAX_BUILD/mpx6-bootlog/bootstatus" >&2; then
+    export PX118_BOOTSTATUS=$PAX_BUILD/mpx6-bootlog/bootstatus/pax-boot-status
+else
+    printf 'FAIL K0: tools/mkbootstatus\n'; worst=1
+fi
 for tier in $tiers; do
     work=$PAX_BUILD/mpx6-bootlog/$tier
     rm -rf "$work"
