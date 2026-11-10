@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# tests/mpx6-staged — px115: the staged upgrade's boot (kernel/fstab's
+# `load_staged`; notes/px115-upgrade-over-ssh.md, decisions 1A and 2B).
+#
+# An installed-shape disk (tools/mkdisk --gpt --no-journal --root: Limine and
+# kmain_console on the ESP, a small installed root on partition 2, ext2) holds
+# a staged archive at /var/lib/pax-upgrade/staged/archive and the attempts
+# file /var/lib/pax-upgrade/attempts (eight `0` bytes), both written on the
+# host by debugfs (a black box). Its Limine configuration's default entry is
+# the staged one: `pax.staged=<the archive's sha256> init=/bin/staged-init`
+# beside the `root=` mkdisk adds; the second entry is the installed system.
+# Each disk boots alone under QEMU (KVM when there is /dev/kvm), with
+# -no-reboot, its serial log read. The rows, per firmware:
+#   T1 the first staged boot: `staged: attempt 1 of 2`, `/` the staged
+#      archive (its init runs and reads the archive's own marker), the
+#      staged program's end a reboot, never a halt; the attempts file
+#      `10000000` on the disk after it
+#   T2 the second: `attempt 2 of 2`, the same, `11000000`
+#   T3 the third: refused by name (two staged boots began already), `/` the
+#      installed root, its own run list's program runs (`init=` ignored),
+#      the file unchanged
+#   T4 a fresh disk whose word names another digest: the attempt counted,
+#      refused by name (the digest), the installed root
+#   T5 a fresh disk with no archive: refused by name, the installed root
+#
+#   tests/mpx6-staged [--firmware bios|uefi|both] [--pelt DIR] [--bore DIR]
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1, when it is a failure. Exit 0 when every row held, 1
+# otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+legs=both peltdir= boredir=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) legs=$2; shift 2 ;;
+        --pelt)     peltdir=$2; shift 2 ;;
+        --bore)     boredir=$2; shift 2 ;;
+        *)          die "usage: tests/mpx6-staged [--firmware bios|uefi|both] [--pelt DIR] [--bore DIR]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+need python3 debugfs mcopy mtype qemu-system-x86_64
+
+work=$PAX_BUILD/mpx6-staged
+rm -rf "$work"
+mkdir -p "$work"
+elf=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel") \
+    || { say "FAIL T0: tools/build-kernel"; exit 1; }
+if [ -n "$peltdir" ]; then
+    pelt=$peltdir/pelt
+else
+    "$PAX_ROOT/tools/mkpelt" "$work/peltbin" > "$work/pelt.txt" || { say "FAIL T0: tools/mkpelt"; exit 1; }
+    pelt=$work/peltbin/pelt
+fi
+if [ -z "$boredir" ]; then
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" cat > "$work/bore.txt" || { say "FAIL T0: tools/mkboreutils"; exit 1; }
+    boredir=$work/bore
+fi
+python3 -I "$here/mpx6-staged.d/rows.py" "$work" "$elf" "$pelt" "$boredir/cat" $legs
