@@ -1,0 +1,103 @@
+//! px115: the arm record, the confirmation of an upgrade staged over ssh
+//! (notes/px115-upgrade-over-ssh.md, decision 5A). `pax-upgrade arm`
+//! (user/install/pax-upgrade) writes it as root on the installed root, at
+//! /var/lib/pax-upgrade/armed (the directory 0700, root's), before it arms
+//! the ESP's configuration; the staged boot's `pax-upgrade apply` runs
+//! `pax-install --upgrade --armed RECORD`, which takes it in place of the
+//! typed line when it names this target exactly: its root's PARTUUID, its
+//! disk's model and serial, and the running image (the sha256 of the
+//! archive's /etc/pax-release, the one `/` now holds), and root wrote it
+//! (owned by uid 0, writable by no one else). Its lines, `key value`:
+//!
+//!     pax-upgrade armed v1
+//!     sha256 <the archive's sha256, the word pax.staged= names>
+//!     size <the archive's bytes>
+//!     release <the sha256 of the archive's /etc/pax-release>
+//!     partuuid <the root's PARTUUID, lowercase>
+//!     disk <the disk's node when armed, e.g. /dev/sda>
+//!     model <its model, as sysfs gives it>
+//!     serial <its serial>
+//!     from <the installed kernel commit>
+//!     to <the archive's kernel commit>
+//!     built <the archive's source-date-epoch, or ->
+//!     at <the arm's time, Unix seconds>
+//!
+//! Both programs compile this file (pax-install's package; tools/mkinstall
+//! builds pax-upgrade from the same files with its own main).
+
+const STAGE_DIR: str = "/var/lib/pax-upgrade"
+
+const ARMED_HEAD: str = "pax-upgrade armed v1"
+
+/// The verdicts and states, one line each, readable by every user
+/// (`pax-upgrade status` needs no root; the stage directory is root's).
+const UPGRADE_LOG: str = "/var/log/pax-upgrade.log"
+
+struct Armed {
+    sha256: str,
+    size: int,
+    release: str,
+    partuuid: str,
+    disk: str,
+    model: str,
+    serial: str,
+    from: str,
+    to: str,
+    built: str,
+    at: int,
+}
+
+fn armed_text(a: Armed) -> str {
+    "{ARMED_HEAD}\nsha256 {a.sha256}\nsize {a.size}\nrelease {a.release}\npartuuid {a.partuuid}\n" +
+        "disk {a.disk}\nmodel {a.model}\nserial {a.serial}\nfrom {a.from}\nto {a.to}\nbuilt {a.built}\nat {a.at}\n"
+}
+
+/// A value after `key ` on its line (the rest of the line: a model may hold spaces).
+fn armed_value(line: str, key: str) -> str ! {invalid} {
+    if line == key { return "" }
+    if !line.starts_with("{key} ") { return invalid }
+    line[key.len + 1..]
+}
+
+/// Whether `s` is 64 lowercase hex digits (a sha256 as the tools print it).
+fn is_digest(s: str) -> bool {
+    if s.len != 64 { return false }
+    for b in s.bytes() {
+        let c = b as int
+        if !(c >= 48 && c <= 57) && !(c >= 97 && c <= 102) { return false }
+    }
+    true
+}
+
+fn parse_armed(text: str) -> Armed ! {invalid} {
+    let l = text.lines()
+    if l.len != 12 || l[0] != ARMED_HEAD { return invalid }
+    let a = Armed {
+        sha256: armed_value(l[1], "sha256")?,
+        size: armed_value(l[2], "size")?.to_int() else |_| { return invalid },
+        release: armed_value(l[3], "release")?,
+        partuuid: armed_value(l[4], "partuuid")?,
+        disk: armed_value(l[5], "disk")?,
+        model: armed_value(l[6], "model")?,
+        serial: armed_value(l[7], "serial")?,
+        from: armed_value(l[8], "from")?,
+        to: armed_value(l[9], "to")?,
+        built: armed_value(l[10], "built")?,
+        at: armed_value(l[11], "at")?.to_int() else |_| { return invalid },
+    }
+    if !is_digest(a.sha256) || !is_digest(a.release) || a.partuuid.len == 0 { return invalid }
+    a
+}
+
+/// The record at `path`, read only when root wrote it: owned by uid 0, a
+/// regular file no group or other may write. ("" and the record, or the
+/// refusal in words.)
+fn read_armed(path: str) -> (Armed, str) {
+    let none = Armed { sha256: "", size: 0, release: "", partuuid: "", disk: "", model: "", serial: "", from: "", to: "", built: "", at: 0 }
+    let st = fs_lstat(path) else |_| { return (none, "{path} is not there") }
+    if st[0] != 0 { return (none, "{path} is not a regular file") }
+    if st[6] != 0 || st[4] & 18 != 0 { return (none, "{path} was not written by root alone (owner {st[6]}, mode {octal_mode(st[4] & 4095)})") }
+    let text = fs_read_text(path) else |_| { return (none, "{path} cannot be read") }
+    let a = parse_armed(text) else |_| { return (none, "{path} is not an arm record ({ARMED_HEAD})") }
+    (a, "")
+}

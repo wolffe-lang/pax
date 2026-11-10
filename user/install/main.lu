@@ -7,6 +7,8 @@
 //! install log records the run.
 //! px93: `--upgrade` puts the running stick's image over the install the
 //! upgrade entry mounted at /mnt/target, the user's files kept (upgrade.lu).
+//! px115: `--upgrade --armed RECORD` is the staged boot's: root's arm record
+//! (armed.lu) stands for the typed line when it names this target exactly.
 
 use std.x.crypto.sha2
 
@@ -23,6 +25,7 @@ fn options(args: List[str]) -> Options ! {invalid} {
         payload: "/usr/share/pax-install",
         tools: "/bin",
         allow: "",
+        armed: "",
     }
     var seen = Map[str, bool]()
     var i = 0
@@ -50,6 +53,7 @@ fn options(args: List[str]) -> Options ! {invalid} {
             "--payload" => { o.payload = value },
             "--tool-dir" => { o.tools = value },
             "--allow-list" => { o.allow = value },
+            "--armed" => { o.armed = value },
             _ => { return invalid },
         }
     }
@@ -67,6 +71,11 @@ fn options(args: List[str]) -> Options ! {invalid} {
         (o.target.len != 0 || o.user.len != 0 || o.games.len != 0 || o.preview || (o.confirm.len == 0) != (o.seed.len == 0)) {
         return invalid
     }
+    // px115: the arm record is the confirmation and names the target itself: no typed line, no
+    // seed and no other list beside it.
+    if o.armed.len != 0 && (o.mode != "--upgrade" || o.confirm.len != 0 || o.seed.len != 0 || o.allow.len != 0) {
+        return invalid
+    }
     o
 }
 
@@ -79,7 +88,7 @@ fn fresh_seed() -> str {
 fn main() -> int {
     let o = options(env_args()) else |_| {
         eprint(
-            "usage: pax-install [--inventory | --check | --dry-run | --install --ext2-preview --confirm TOKEN | --upgrade [--seed TEXT --confirm LINE]] [--target NAME --seed TEXT --user NAME --games yes|no] [--allow-list FILE] [--source DIR --payload DIR --tool-dir DIR]",
+            "usage: pax-install [--inventory | --check | --dry-run | --install --ext2-preview --confirm TOKEN | --upgrade [--seed TEXT --confirm LINE | --armed RECORD]] [--target NAME --seed TEXT --user NAME --games yes|no] [--allow-list FILE] [--source DIR --payload DIR --tool-dir DIR]",
         )
         return 2
     }

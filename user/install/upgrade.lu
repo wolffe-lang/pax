@@ -49,6 +49,15 @@
 //! completed, nothing is left to do and nothing on the target is written.
 //! The log goes to the stick (`/pax/logs/install-<n>.txt`) and to the
 //! target (`/etc/pax-install/upgrade-<n>.txt`), each appended and synced.
+//!
+//! **px115, `--armed RECORD`**: the staged boot's run (no stick; `/` the
+//! archive staged on the target, the target at /mnt/target as the stick's
+//! upgrade entry mounts it). The allow-list is the record's one disk, and
+//! the record stands for the typed line only when root wrote it and it
+//! names this target's PARTUUID, model and serial and the running image's
+//! /etc/pax-release (armed.lu); anything else is refused by name before
+//! any write. The record goes to both logs where the typed line would, and
+//! the run ends without asking to reboot (`pax-upgrade apply` decides).
 
 use std.x.crypto.sha2
 
@@ -439,12 +448,21 @@ fn upgrade_main(o: Options, work: str) -> int {
         denied => { return 1 },
         _ => { eprint("pax-install: inventory: {e}"); return 1 },
     }
-    let (disks, list) = judge_all(ts, o.allow, o.tools, work)
+    // px115: the arm record's one disk is the list (no stick under the staged boot).
+    let armed = o.armed.len != 0
+    var allow = o.allow
+    var (rec, rec_why) = if armed then read_armed(o.armed) else read_armed("")
+    if armed && rec_why.len == 0 {
+        allow = "{work}/armed-targets"
+        durable_text(allow, "{allow_line(rec.model, rec.serial)}\n") else |_| { rec_why = "the scratch list {allow} could not be written" }
+    }
+    let (disks, list) = judge_all(ts, allow, o.tools, work)
     var lg = open_log(disks, o.tools, work)
     note(mut lg, "PAX install log {lg.path}")
     note(mut lg, "release {release_line()}")
-    note(mut lg, "mode --upgrade")
+    note(mut lg, if armed then "mode --upgrade --armed {o.armed}" else "mode --upgrade")
     say(mut lg, "Install log: {log_place(lg)}")
+    if armed && rec_why.len != 0 { return stop(mut lg, "pax-install: upgrade refused: the arm record: {rec_why}") }
     if disks.len == 0 { return stop(mut lg, "pax-install: upgrade refused: no disk") }
     let (d, why) = upgrade_target(disks, list)
     // The page: the upgrade's own target, mounted by the upgrade entry, is
@@ -463,6 +481,15 @@ fn upgrade_main(o: Options, work: str) -> int {
     let fstab = fs_read_text("{TARGET_ROOT}/etc/fstab") else |_| ""
     if uuid.len == 0 || !fstab.lower().contains("partuuid={uuid}") {
         return stop(mut lg, "pax-install: upgrade refused: {dev}'s partition 2 (PARTUUID={uuid}) is not the root its own /etc/fstab names")
+    }
+    if armed {
+        // px115: the record names this target and the image now running, or nothing is written.
+        let running = file_sha("/etc/pax-release")
+        var wrong = ""
+        if rec.partuuid != uuid { wrong = "PARTUUID={rec.partuuid}, not {dev}'s {uuid}" }
+        if rec.model != d.model || rec.serial != d.serial { wrong = "model {rec.model} serial {rec.serial}, not {dev}'s {d.model} {d.serial}" }
+        if rec.release != running { wrong = "an image whose /etc/pax-release is {short(rec.release)}, not the running one ({short(running)})" }
+        if wrong.len != 0 { return stop(mut lg, "pax-install: upgrade refused: the arm record {o.armed} names {wrong}") }
     }
     say(mut lg, "Upgrading {dev}: its root PARTUUID={uuid} at {TARGET_ROOT}; its ESP at byte {ESP_START}")
     flush_log(mut lg)
@@ -594,12 +621,20 @@ fn upgrade_main(o: Options, work: str) -> int {
     let seed = if o.seed.len == 0 then upgrade_seed() else o.seed
     let token = "UPGRADE {dev} {d.model} {d.serial} {seed}"
     say(mut lg, "Upgrade {d.model}, serial {d.serial} ({size_text(d.target.bytes)}, {dev}) from {old.commit} to {new.commit}, keeping your files?")
-    say(mut lg, "To upgrade, type this line exactly; anything else cancels:")
-    say(mut lg, token)
-    flush_log(mut lg)
     var typed = o.confirm
-    if o.confirm.len == 0 {
-        typed = answer(mut lg, "") else |_| ""
+    if armed {
+        // px115 (decision 5A): root's arm record stands for the typed line; it goes to the logs
+        // where the line would.
+        say(mut lg, "Confirmed by the arm record {o.armed} (root's, armed at {rec.at}): archive sha256 {rec.sha256}, PARTUUID={rec.partuuid}, model {rec.model}, serial {rec.serial}")
+        note(mut lg, armed_text(rec))
+        typed = token
+    } else {
+        say(mut lg, "To upgrade, type this line exactly; anything else cancels:")
+        say(mut lg, token)
+        flush_log(mut lg)
+        if o.confirm.len == 0 {
+            typed = answer(mut lg, "") else |_| ""
+        }
     }
     if typed != token {
         return stop(mut lg, "pax-install: upgrade cancelled before writes: the confirmation was not the line above")
@@ -705,6 +740,7 @@ fn upgrade_main(o: Options, work: str) -> int {
     say(mut lg, "phase manifest: durable ({dir}/manifest, {m.rows.len} paths)")
     say(mut lg, "Upgrade complete: {dev} holds {new.commit}; {p.kept.len} of your changed file(s) kept, {besides} new version(s) beside them as .pax-new.")
     flush_up(mut lg, tlog)
+    if armed { return 0 } // px115: pax-upgrade apply records the verdict and the machine reboots
     let s = answer(mut lg, "Type reboot to reboot now or poweroff to power off; anything else leaves the running system up: ") else |_| ""
     flush_up(mut lg, tlog)
     if s == "reboot" || s == "poweroff" {
