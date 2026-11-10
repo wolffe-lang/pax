@@ -1,0 +1,186 @@
+#!/bin/sh
+# tools/net-retry — one network fetch, tried a bounded number of times
+# with growing pauses, each try under a connect and a total time limit,
+# and a failure named by what it fetched (tl38). tools/fetch-retry does
+# the same for a git revision (px85); this is every other fetch of the
+# harness and of CI.
+#
+#   tools/net-retry url URL OUT [SHA256]
+#   tools/net-retry apt PKG...
+#   tools/net-retry run CMD [ARG...]
+#
+# url  curl -q -sS -L --fail --connect-timeout 20 --max-time 600, and a
+#      floor of 1 KiB/s over 60 s so a stalled transfer ends as a
+#      timeout, into OUT.part; OUT only when the fetch succeeded (with
+#      SHA256, only when its sha256 is that: a mismatch is refused at
+#      once and never fetched again). Tried again on curl's 5 and 6
+#      (resolve), 7 (connect), 28 (timeout), 35 (tls), 16, 18, 52, 55,
+#      56 and 92 (reset) and on HTTP 408, 425, 429 and 5xx; any other
+#      HTTP status (a 404: a wrong URL or pin) or curl exit is not.
+#      Every tools/ fetch of a file goes through here, and the census's
+#      stage.sh (tests/net-retry-selftest's N9 holds them).
+# apt  apt-get (through sudo unless root) `update -q`, then
+#      `install -y -q --no-install-recommends PKG...`, each with
+#      Acquire::Retries=5 and a 30 s connect and idle timeout per file.
+#      The lists (300 s a try) and the packages (fetched with
+#      --download-only, 900 s a try) are tried 4 times, 30, 90 and 270 s
+#      apart; the packages are then installed with no network. CI's apt
+#      steps (.github/workflows/ci.yml) go through here.
+# run  any command (CI's `docker pull`s, `brew install`), every failure
+#      tried again, each try under a 900 s limit where timeout(1) exists.
+#
+# url and run: five tries, 5, 15, 45 and 120 s apart. PAX_FETCH_PAUSES
+# (seconds, space-separated; the tries are one more) and
+# PAX_FETCH_MAX_TIME (a try's limit, seconds) are for the selftest.
+#
+# Lines, on stderr:
+#   net-retry: WHAT: try N of T failed (CLASS); again in S s
+#   net-retry: WHAT: fetched on try N of T
+#   FAIL fetch of WHAT failed after T tries (last: CLASS)       exit 3
+#   FAIL fetch of WHAT failed (CLASS), not retried              exit 4
+#   FAIL fetch of URL: refused: sha256 X, the pin is Y          exit 5
+# Exit 0 fetched, 2 usage. POSIX sh (the census container runs it under
+# /bin/sh); it needs curl or apt-get, and sleep.
+set -u
+usage() {
+    echo 'usage: net-retry url URL OUT [SHA256] | apt PKG... | run CMD [ARG...]' >&2
+    exit 2
+}
+say() { echo "net-retry: $*" >&2; }
+fail() { echo "FAIL $*" >&2; }
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+if command -v timeout >/dev/null 2>&1; then has_timeout=yes; else has_timeout=no; fi
+
+# The pause before try N+1 (N counts from 1), and the number of tries.
+pause_after() {
+    i=0
+    for p in $pauses; do
+        i=$((i + 1))
+        [ "$i" = "$1" ] && { echo "$p"; return; }
+    done
+}
+count_tries() {
+    t=1
+    for p in $pauses; do t=$((t + 1)); done
+    echo "$t"
+}
+
+# One try of a command under the limit; on failure sets cls and again.
+try_cmd() {
+    if [ "$has_timeout" = yes ]; then
+        timeout -k 30 "$limit" "$@" && return 0
+    else
+        "$@" && return 0
+    fi
+    rc=$?
+    again=yes
+    if [ "$has_timeout" = yes ] && { [ "$rc" = 124 ] || [ "$rc" = 137 ]; }; then
+        cls="timeout after $limit s"
+    else
+        cls="exit $rc"
+    fi
+    return 1
+}
+
+# One try of curl URL into OUT.part; on failure sets cls and again.
+try_url() {
+    code=$(curl -q -sS -L --fail --connect-timeout 20 --max-time "$limit" --speed-limit 1024 --speed-time 60 \
+        -w '%{http_code}' -o "$2.part" "$1") && return 0
+    rc=$?
+    rm -f "$2.part"
+    again=yes
+    case $rc in
+    22)
+        cls="HTTP $code"
+        case $code in 408 | 425 | 429 | 5??) ;; *) again=no ;; esac
+        ;;
+    5 | 6) cls=resolve ;;
+    7) cls=connect ;;
+    28) cls=timeout ;;
+    35) cls=tls ;;
+    16 | 18 | 52 | 55 | 56 | 92) cls=reset ;;
+    *)
+        cls="curl exit $rc"
+        again=no
+        ;;
+    esac
+    return 1
+}
+
+# tries WHAT FN ARG...: FN until it succeeds, says no retry, or the tries
+# run out.
+tries() {
+    what=$1 fn=$2
+    shift 2
+    total=$(count_tries)
+    n=1
+    while :; do
+        if "$fn" "$@"; then
+            [ "$n" = 1 ] || say "$what: fetched on try $n of $total"
+            return 0
+        fi
+        if [ "$again" != yes ]; then
+            fail "fetch of $what failed ($cls), not retried"
+            return 4
+        fi
+        if [ "$n" -ge "$total" ]; then
+            fail "fetch of $what failed after $total tries (last: $cls)"
+            return 3
+        fi
+        pause=$(pause_after "$n")
+        say "$what: try $n of $total failed ($cls); again in $pause s"
+        sleep "$pause"
+        n=$((n + 1))
+    done
+}
+
+[ $# -ge 1 ] || usage
+form=$1
+shift
+case $form in
+url)
+    [ $# -ge 2 ] && [ $# -le 3 ] || usage
+    url=$1 out=$2 want=${3:-}
+    pauses=${PAX_FETCH_PAUSES-5 15 45 120}
+    limit=${PAX_FETCH_MAX_TIME:-600}
+    tries "$url" try_url "$url" "$out" || exit $?
+    if [ -n "$want" ]; then
+        got=$(sha256_of "$out.part")
+        if [ "$got" != "$want" ]; then
+            rm -f "$out.part"
+            fail "fetch of $url: refused: sha256 $got, the pin is $want"
+            exit 5
+        fi
+    fi
+    mv "$out.part" "$out"
+    ;;
+apt)
+    [ $# -ge 1 ] || usage
+    sudo=
+    [ "$(id -u)" = 0 ] || sudo=sudo
+    aptget="$sudo apt-get -q -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+    pauses=${PAX_FETCH_PAUSES-30 90 270}
+    limit=${PAX_FETCH_MAX_TIME:-300}
+    # shellcheck disable=SC2086
+    tries "the package lists" try_cmd $aptget update || exit $?
+    limit=${PAX_FETCH_MAX_TIME:-900}
+    # shellcheck disable=SC2086
+    tries "the packages $*" try_cmd $aptget install -y --no-install-recommends --download-only "$@" || exit $?
+    # shellcheck disable=SC2086
+    exec $aptget install -y --no-install-recommends "$@"
+    ;;
+run)
+    [ $# -ge 1 ] || usage
+    pauses=${PAX_FETCH_PAUSES-5 15 45 120}
+    limit=${PAX_FETCH_MAX_TIME:-900}
+    tries "'$*'" try_cmd "$@" || exit $?
+    ;;
+*) usage ;;
+esac
+exit 0
