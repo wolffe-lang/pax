@@ -130,9 +130,11 @@ way that matters before anything here ships:
   session's `sudo -n /bin/id` ran as root with no password (P2c), for the timestamp's 5 minutes. The same record
   makes `sudo -S` read no password at all, so the password's line goes to the command as data (P2c: `wc -c` saw
   1017 = 1000 + 17 bytes).
-- `sudo -k -S` is deterministic today: `-k` with a command ignores the records and writes none, `-S` reads the
-  password's line and opens no terminal. P2c: a wrong line alone is refused (`1 incorrect password attempt`), the
-  right one runs as root, and `sudo -n` with no record says `a password is required`.
+- `sudo -k -S` should be deterministic today, by the code: `-k` with a command sets the run's reset, so no record
+  is read and none is written (`authenticate` in `user/sudo/sudo.lu`), and `-S` reads the password's line and opens
+  no terminal. P2c held the parts with no record present (after `sudo -K`): a wrong line alone refused (`1 incorrect
+  password attempt`), the right one run as root, `sudo -n` answered `a password is required`. `-k -S` with a fresh
+  record present is not yet probed: a row of phase 2.
 
 What must stay impossible, and does: root logs in over ssh by no means (P2: `root@` by the user's key, `Permission
 denied (publickey,password)`, status 255; px112's B5 and Y13 by password); nothing here adds a sudoers rule or
