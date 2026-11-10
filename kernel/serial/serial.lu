@@ -12,10 +12,14 @@
 //! draws it once the screen is attached (and keeps it for the replay
 //! before): the serial console and the screen show the same bytes.
 //!
+//! px118: and to kernel/bootlog, which keeps the boot's bytes in memory
+//! a warm reset may leave alone (until the first program starts).
+//!
 //! Written from the PC16550D register map (public datasheet facts:
 //! the register offsets, the DLAB bit, LCR/FCR/MCR/LSR bit meanings, the
 //! 1.8432 MHz clock's divisor 1 for 115200 baud). No Linux source.
 
+use bootlog
 use screen
 
 extern "c" fn pax_outb(port: u16, v: u8)
@@ -119,6 +123,7 @@ pub fn init() -> int {
 /// loses the byte rather than hang the kernel. It never traps.
 pub fn put(b: u8) {
     screen.put(b)
+    bootlog.put(b)
     if !available() {
         let flags = unsafe { pax_irq_save() }
         let n = unsafe { pax_serial_log_count.read_volatile() }
