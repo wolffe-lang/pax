@@ -482,13 +482,16 @@ def rows_log(fw, cpio, cpio_reboot):
 
 
 def rows_absent(fw, cpio):
-    # N1: no memory at the log's area (-m 64M) and `pax.nomarks`: nothing kept, the boot unchanged to its program.
+    # N1: `pax.nomarks`, and under BIOS no memory at the log's area (-m 64): nothing kept, the boot unchanged to
+    # its program. Under UEFI the memory stays 512 MiB (OVMF and Limine do not boot in 64: Limine's allocator
+    # runs out), so the log's area is there and empty.
     img = disk(f'{fw}-N1', cpio, 'pax.nomarks')
-    m = Machine(f'{fw}-N1', fw, disk_media(img), mem='64')
+    m = Machine(f'{fw}-N1', fw, disk_media(img), mem='64' if fw == 'bios' else '512')
     t = m.boot()
     m.quit()
-    if booted(f'N1 {fw}', t) and expect_line(f'N1 {fw}', t, rf'marks: boot 0; the previous boot: none; CMOS {CMOS} off; log no area'):
-        say(f'PASS N1 {fw}: no CMOS, no log area: the boot reached its program and halted')
+    log = 'no area' if fw == 'bios' else 'none'
+    if booted(f'N1 {fw}', t) and expect_line(f'N1 {fw}', t, rf'marks: boot 0; the previous boot: none; CMOS {CMOS} off; log {log}'):
+        say(f'PASS N1 {fw}: CMOS off' + (', no log area (64 MiB)' if fw == 'bios' else '') + ': the boot reached its program and halted')
     img.unlink()
 
 
