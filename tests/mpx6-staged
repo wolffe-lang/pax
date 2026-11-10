@@ -27,7 +27,11 @@
 #   T6 an image-sized archive (384 MiB of random bytes beside the rest):
 #      read, mapped as one range and hashed whole, then `/`; the boot's time
 #
-#   tests/mpx6-staged [--firmware bios|uefi|both]
+#   tests/mpx6-staged [--tier native|release|both] [--firmware bios|uefi|both]
+#
+# The kernel is tools/build-kernel's, the release tier's with --release; each
+# tier runs every row on each firmware asked (both and both by default, CI's
+# legs as $PAX_LEGS).
 #
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1, when it is a failure. Exit 0 when every row held, 1
@@ -36,19 +40,27 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 
-legs=both
+legs=both tiers=both
 while [ $# -gt 0 ]; do
     case $1 in
         --firmware) legs=$2; shift 2 ;;
-        *)          die "usage: tests/mpx6-staged [--firmware bios|uefi|both]" ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx6-staged [--tier native|release|both] [--firmware bios|uefi|both]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need python3 cc debugfs mcopy mtype qemu-system-x86_64
 
-work=$PAX_BUILD/mpx6-staged
-rm -rf "$work"
-mkdir -p "$work"
-elf=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel") \
-    || { say "FAIL T0: tools/build-kernel"; exit 1; }
-python3 -I "$here/mpx6-staged.d/rows.py" "$work" "$elf" $legs
+worst=0
+for tier in $tiers; do
+    work=$PAX_BUILD/mpx6-staged/$tier
+    rm -rf "$work"
+    mkdir -p "$work"
+    flags=(); [ "$tier" != release ] || flags=(--release)
+    say "mpx6-staged: the $tier tier's kernel, firmware $legs"
+    elf=$("$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel") \
+        || { say "FAIL T0 $tier: tools/build-kernel"; worst=1; continue; }
+    python3 -I "$here/mpx6-staged.d/rows.py" "$work" "$elf" $legs || worst=1
+done
+exit $worst
