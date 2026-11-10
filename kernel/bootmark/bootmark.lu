@@ -47,9 +47,20 @@
 //!   thirty byte writes of battery-backed RAM, no flash.
 //!
 //! The eight bytes: 'P' 'X', the boot's number (16 bits, little-endian,
-//! 1 to 65535 and round again), the last stage, the stage set (bit s-1
-//! for stage s), the layout's version 1, and the checksum (the eight sum
-//! to 0 mod 256).
+//! 1 to 65535 and round again), the last stage (bit 7 set once the screen
+//! is refused, below), the stage set (bit s-1 for stage s), the layout's
+//! version 1, and the checksum (the eight sum to 0 mod 256).
+//!
+//! **A refused screen** (`refuse`): when kernel/fb will not draw on the
+//! framebuffer Limine handed (none, or not 32-bit RGB 8:8:8: judged at the
+//! entry, before any use of it), the boot runs blind, and that is marked
+//! apart from a boot that stopped before drawing: bit 7 of the last
+//! stage's byte, in CMOS and in the slot, and port 0x80's code carries E
+//! for its low digit from then on (0x1E at the refusal, then 0x3E … 0x8E
+//! for the stages after it). The report, `/proc/pax-boot` and the first
+//! program's log name the framebuffer handed (its size, bits a pixel,
+//! pitch, colour masks and physical address) and why it was refused; the
+//! next boot says the previous one ran with its screen refused.
 //!
 //! **The previous boot**, read at the entry before this one writes: from
 //! CMOS when held, else from kernel/bootlog's previous slot when intact.
@@ -71,6 +82,7 @@
 use acpi
 use boot_info
 use bootlog
+use fb
 use log
 use panic
 
@@ -113,6 +125,9 @@ var prev_last: u64 = 0
 var prev_set: u64 = 0
 var prev_from: u64 = 0 // 0 none, 1 CMOS, 2 memory
 var stop_at: u64 = 0
+var blind: u64 = 0 // 1 once this boot's screen is refused (`refuse`)
+var blind_why: u64 = 0 // kernel/fb's reason for it
+var prev_blind: u64 = 0 // the previous boot's bit 7
 
 fn cmos(i: u64) -> u64 {
     // # Safety: io.S's OUT and IN on the real-time clock's index and data
@@ -176,8 +191,8 @@ fn sum7(b: u64) -> u64 {
 /// byte left 0.
 fn record() -> u64 {
     // # Safety: module state, written by kmain alone (IF clear at each write).
-    let (b, l, st) = unsafe { (boot, last, set) }
-    MAGIC_P | (MAGIC_X << 8) | ((b & 0xff) << 16) | (((b >> 8) & 0xff) << 24) | (l << 32) | (st << 40) | (VERSION << 48)
+    let (b, l, st, bl) = unsafe { (boot, last, set, blind) }
+    MAGIC_P | (MAGIC_X << 8) | ((b & 0xff) << 16) | (((b >> 8) & 0xff) << 24) | ((l | (bl << 7)) << 32) | (st << 40) | (VERSION << 48)
 }
 
 /// Write this boot's record whole (the claim, or the entry when held).
@@ -267,6 +282,7 @@ pub fn start(mem_prev: u64) {
     var pb: u64 = 0
     var pl: u64 = 0
     var ps: u64 = 0
+    var pbl: u64 = 0
     var from: u64 = 0
     if !boot_info.cmdline_has("pax.nomarks") {
         test_fill()
@@ -280,7 +296,8 @@ pub fn start(mem_prev: u64) {
         } else if (f & 0xffff) == (MAGIC_P | (MAGIC_X << 8)) && ((f >> 48) & 0xff) == VERSION && sum7(f) == ((f >> 56) & 0xff) {
             m = HELD
             pb = (f >> 16) & 0xffff
-            pl = (f >> 32) & 0xff
+            pl = (f >> 32) & 0x7f
+            pbl = (f >> 39) & 1
             ps = (f >> 40) & 0xff
             from = 1
         } else {
@@ -290,7 +307,8 @@ pub fn start(mem_prev: u64) {
     if from == 0 && mem_prev != 0 {
         let (b, l, s) = bootlog.prev_marks()
         pb = b
-        pl = l
+        pl = l & 0x7f
+        pbl = (l >> 7) & 1
         ps = s
         from = 2
     }
@@ -305,6 +323,7 @@ pub fn start(mem_prev: u64) {
         prev_last = pl
         prev_set = ps
         prev_from = from
+        prev_blind = pbl
         last = ENTERED
         set = 1
     }
@@ -316,12 +335,25 @@ pub fn start(mem_prev: u64) {
     post(ENTERED)
 }
 
-fn post(s: u64) {
-    // # Safety: io.S's OUT to port 0x80, the PC's POST-code port.
-    unsafe { pax_outb(POST, ((s << 4) | s) as u8) }
+/// Port 0x80's code for stage `s`: its two equal digits, or its digit
+/// then E once the screen is refused.
+fn code(s: u64) -> u64 {
     // # Safety: module state, read by kmain alone.
-    let (b, l, st) = unsafe { (boot, last, set) }
-    bootlog.mark(b, l, st)
+    let bl = unsafe { blind }
+    (s << 4) | (if bl != 0 { 0xe } else { s })
+}
+
+/// Port 0x80 and the slot's copy, for stage `s`.
+fn post_code(s: u64) {
+    // # Safety: io.S's OUT to port 0x80, the PC's POST-code port.
+    unsafe { pax_outb(POST, code(s) as u8) }
+    // # Safety: module state, read by kmain alone.
+    let (b, l, st, bl) = unsafe { (boot, last, set, blind) }
+    bootlog.mark(b, l | (bl << 7), st)
+}
+
+fn post(s: u64) {
+    post_code(s)
     let at = unsafe { stop_at }
     if at == s {
         if s > ENTERED {
@@ -354,6 +386,126 @@ pub fn stage(s: u64) {
     }
     unsafe { pax_irq_restore(flags) }
     post(s)
+}
+
+/// The screen refused, for kernel/fb's reason `why`: bit 7 of the last
+/// stage's byte in CMOS (when it is PAX's) and in the slot, and port
+/// 0x80's code with E for its low digit from here on, written at once for
+/// the stage the boot is at. Once a boot: true the first time (the caller
+/// sounds the refusal's beeps then), false after.
+pub fn refuse(why: u64) -> bool {
+    // # Safety: module state, written by kmain alone.
+    let already = unsafe { blind }
+    if already != 0 {
+        return false
+    }
+    // # Safety: sched.S's CLI, as `stage`: the CMOS index and data writes
+    // go together.
+    let flags = unsafe { pax_irq_save() }
+    // # Safety: module state, written by kmain alone.
+    unsafe {
+        blind = 1
+        blind_why = why
+    }
+    // # Safety: as above.
+    let m = unsafe { mode }
+    if m == CLAIMED || m == HELD {
+        write_stage()
+    }
+    // # Safety: sched.S's STI when `flags` had IF.
+    unsafe { pax_irq_restore(flags) }
+    // # Safety: module state, read by kmain alone.
+    let l = unsafe { last }
+    post_code(l)
+    true
+}
+
+/// This boot's screen: 2 refused, 1 drawn (the stage `drawn` or
+/// `framebuffer` reached), 0 neither yet (or turned off for triage).
+pub fn screen() -> u64 {
+    // # Safety: module state, read after the entry's writes.
+    let (bl, st) = unsafe { (blind, set) }
+    judged(bl, st)
+}
+
+/// The previous boot's screen, as `screen` says it, from its marks; 0
+/// when there is no previous boot.
+pub fn prev_screen() -> u64 {
+    // # Safety: as `screen`.
+    let (bl, st, from) = unsafe { (prev_blind, prev_set, prev_from) }
+    if from == 0 { 0 } else { judged(bl, st) }
+}
+
+fn judged(bl: u64, st: u64) -> u64 {
+    let one: u64 = 1
+    if bl != 0 {
+        return 2
+    }
+    if (st & ((one << (DRAWN - 1)) | (one << (FRAMEBUFFER - 1)))) != 0 { 1 } else { 0 }
+}
+
+/// Why this boot's screen was refused, as kernel/fb words it.
+pub fn refused_why() -> str {
+    // # Safety: as `screen`.
+    let w = unsafe { blind_why }
+    fb.word(w)
+}
+
+/// The framebuffer's physical address: Limine hands its HHDM address.
+pub fn fb_physical() -> u64 {
+    let va = boot_info.fb_address()
+    let h = boot_info.hhdm()
+    if va >= h { va - h } else { va }
+}
+
+/// The hex digits `v` needs (at least one).
+pub fn digits(v: u64) -> u64 {
+    var n: u64 = 1
+    while n < 16 && (v >> (n * 4)) != 0 {
+        n += 1
+    }
+    n
+}
+
+/// The framebuffer Limine handed, on the log: `<w>x<h> <bpp> bpp pitch
+/// <p> rgb <r>:<rs> <g>:<gs> <b>:<bs> at 0x<physical>`, then ` model <m>`
+/// when its memory model is not RGB and ` (the first of <n>)` when Limine
+/// handed more than one; `none` without one.
+fn put_fb() {
+    if boot_info.fb_count() == 0 || boot_info.fb_address() == 0 {
+        log.put("none")
+        return
+    }
+    log.dec(boot_info.fb_width() as int)
+    log.put("x")
+    log.dec(boot_info.fb_height() as int)
+    log.put(" ")
+    log.dec(boot_info.fb_bpp() as int)
+    log.put(" bpp pitch ")
+    log.dec(boot_info.fb_pitch() as int)
+    log.put(" rgb ")
+    var m: u64 = 0
+    while m < 3 {
+        if m > 0 {
+            log.put(" ")
+        }
+        log.dec(boot_info.fb_mask(m, false) as int)
+        log.put(":")
+        log.dec(boot_info.fb_mask(m, true) as int)
+        m += 1
+    }
+    log.put(" at 0x")
+    let pa = fb_physical()
+    log.hex_n(pa, digits(pa))
+    if boot_info.fb_model() != 1 {
+        log.put(" model ")
+        log.dec(boot_info.fb_model() as int)
+    }
+    if boot_info.fb_count() > 1 {
+        log.put(" (the first of ")
+        log.dec(boot_info.fb_count() as int)
+        log.put(")")
+    }
 }
 
 /// Once ACPI is read: when the FADT names a century byte inside PAX's
@@ -412,7 +564,11 @@ pub fn mode_name() -> str {
 /// says it too:
 ///
 ///     marks: boot <n>; the previous boot <p> stopped at <stage> | completed |
-///     the previous boot: none; CMOS 0x78-0x7f <claimed|held|refused (found …)|off>; log <state>
+///     the previous boot: none; CMOS 0x78-0x7f <claimed|held|refused (found …)|off>; log <state>;
+///     framebuffer <as put_fb>, <drawn | refused: <why> | not drawn>
+///
+/// (the previous boot's part says `, its screen refused` after its end
+/// when its marks say so).
 pub fn report() {
     let (pb, pl, _ps, from) = previous()
     let (n, _l) = this_boot()
@@ -428,6 +584,9 @@ pub fn report() {
         } else {
             log.put(", stopped at ")
             log.put(name_of(pl))
+        }
+        if prev_screen() == 2 {
+            log.put(", its screen refused")
         }
         log.put(if from == 1 { " (CMOS)" } else { " (memory)" })
     }
@@ -454,6 +613,17 @@ pub fn report() {
         log.put("no area")
     } else {
         log.put("none")
+    }
+    log.put("; framebuffer ")
+    put_fb()
+    let sc = screen()
+    if sc == 2 {
+        log.put(", refused: ")
+        log.put(refused_why())
+    } else if sc == 1 {
+        log.put(", drawn")
+    } else {
+        log.put(", not drawn")
     }
     log.end()
     if boot_info.cmdline_has("pax.cmosdump") {
