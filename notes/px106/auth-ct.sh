@@ -124,14 +124,16 @@ IN=/root/in-right row sudo-S-prompt "sudo -S -k -p 'pw for %p as %U on %h: ' id 
 # (/var/run/sudo/ts/UID, root's with the caller's group, 0600) for the very parent that then runs
 # `sudo -n` as bob: once with no start time (the kind PAX's sudo wrote before px115), once with a start
 # time a tick before the parent's own. Neither is this parent's, so sudo asks. Ubuntu's sudo keeps its
-# records in a file named for the user, finds none, and asks the same.
+# records in a file named for the user, finds none, and asks the same. The line after the sudo makes
+# bash fork it (a last command is exec'd in bash's place), so the planted parent is sudo's parent.
 echo "=== ROW sudo-n-pid-reused"
 (cd / && setsid -w /bin/bash -c '
     p=$$; s=$(cut -d" " -f6 /proc/$$/stat); t=$(cut -d" " -f22 /proc/$$/stat); now=$(( $(date +%s%N) / 1000000 ))
     mkdir -p /var/run/sudo/ts && chmod 711 /var/run/sudo && chmod 700 /var/run/sudo/ts
     printf "ppid %s sid %s time %s\nppid %s start %s sid %s time %s\n" "$p" "$s" "$now" "$p" "$((t - 1))" "$s" "$now" > /var/run/sudo/ts/1001
     chown 0:1001 /var/run/sudo/ts/1001 && chmod 600 /var/run/sudo/ts/1001
-    env -i HOME=/home/bob TERM=linux PATH=/usr/bin:/bin setpriv --reuid=1001 --regid=1001 --init-groups -- sudo -n id -u' < /root/in-empty > /root/o 2> /root/e); echo "--- rc $?"
+    env -i HOME=/home/bob TERM=linux PATH=/usr/bin:/bin setpriv --reuid=1001 --regid=1001 --init-groups -- sudo -n id -u
+    st=$?; exit $st' < /root/in-empty > /root/o 2> /root/e); echo "--- rc $?"
 echo "--- stdout"; cat /root/o; echo "--- stderr"; cat /root/e
 rm -f /var/run/sudo/ts/1001
 # px115: `sudo -k -S` with a record fresh for the same parent and session still reads the password's
