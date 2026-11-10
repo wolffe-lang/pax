@@ -17,6 +17,7 @@ elf=$("$PAX_ROOT/tools/build-kernel" --release --src "$PAX_ROOT/kernel/kmain_con
 "$PAX_ROOT/tools/mkpax-release" "$elf" "$out/pax-release"
 # Installer and formatters are built from this same checkout, not the old ISO.
 "$PAX_ROOT/tools/mkinstall" "$out/installer"
+"$PAX_ROOT/tools/mkinstall" "$out/installer" upgrade # px115: pax-upgrade, beside it
 "$PAX_ROOT/tools/mkdisktools" "$out/disktools"
 "$PAX_ROOT/tools/mklimine-static" "$out/limine"
 "$PAX_ROOT/tools/mkdiskprobe" "$out/diskprobe"
@@ -37,6 +38,11 @@ for variant in release dev; do
 done
 [ "$(git -C "$PAX_ROOT" rev-parse HEAD)" = "$head" ] || die 'checkout moved while packing image'
 [ -z "$(git -C "$PAX_ROOT" status --porcelain --untracked-files=no)" ] || die 'tracked inputs changed while packing image'
+# px115 (decision 3B): each archive also under the name an upgrade over ssh sends
+# (`pax-upgrade receive --sha256 DIGEST < pax-dev-COMMIT.cpio`), a hard link: the bytes the ISO
+# and a stick made from it (tools/mkdisk --usb --initramfs) carry, its sha256 in sha256.txt below.
+ln "$out/release.cpio" "$out/pax-${head:0:8}.cpio"
+ln "$out/dev.cpio" "$out/pax-dev-${head:0:8}.cpio"
 printf '%s\n' "$head" > "$out/commit"
 printf '%s\n' "$SOURCE_DATE_EPOCH" > "$out/source-date-epoch"
 sha256sum "$elf" "$out"/*.cpio "$out"/*.iso | tee "$out/sha256.txt"
