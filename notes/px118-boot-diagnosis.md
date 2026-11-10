@@ -310,3 +310,16 @@ What each end means: `entered` or `drawn` (stopped in the kernel's first moments
 `memory` (stopped before the framebuffer was mapped); `framebuffer`, `devices` or `root` (the console was up; a hang
 in the drivers or the disks; the console log says which); `init` (the system reached its first program: a black
 screen then is the display); `completed` (shut down cleanly).
+
+## 10. Prediction, scored
+
+`notes/px118-prediction.txt`, committed before the first change (`d3887d20`):
+
+| predicted | measured |
+|---|---|
+| 1. two tones, high then low; none with `pax.nobeep`; the high alone with no framebuffer; a quarter second longer; the speaker's books unmoved | **right**: 1046.6–1051.4 Hz for 103–105 ms, then 522.0–523.4 Hz for 177–182 ms; none; 1046.6 Hz for 90–91 ms (B1–B3, both firmwares); no `speaker:` line. **Not predicted:** the speaker suite's captures would hold the boot's tones too (its beep row counts two), so `tests/mpx3-speaker` boots with `pax.nobeep`; a sound card's capture holds none (B4) |
+| 2. Limine's menu and loading lines on the serial port before PAX's first line, both firmwares; the suites that read the serial log from PAX's first line unmoved | **right** on the first (U1: 51 lines under BIOS, 3 under UEFI, where the firmware's console carries less); the second is section 11's regression take |
+| 3. QEMU's CMOS kept across a guest reset and the monitor's reset; the bytes picked untouched by either firmware; zero on a cold start | **right** (M1, M2, W1, both firmwares). **Not predicted:** QEMU has no upper bank (0x80–0xff read 0xff) |
+| 4. guest memory kept across both resets; the log intact by its checksum under SeaBIOS and OVMF; none on a cold start | **right** (L1, W1, both firmwares) |
+| 5. each stop leaves its stage; the next boot logs it; a changed log refused; an upgrade keeps boot.log; the stick unchanged when the store is absent or read-only | **right** (S1–S7, K1–K3, L2, R1, N1); the upgrade row is the full tier's upgrade leg, not run here (section 12). **Not predicted:** Limine does not boot under OVMF in 64 MiB, so N1's missing area is shown under BIOS only |
+| 6. no black hand-off in QEMU | **wrong**: four shapes give one (section 8): a 16- or 24-bit framebuffer under BIOS (Limine's `resolution:` with a depth, or a cirrus card) and OVMF with virtio-gpu (no framebuffer at all) |
