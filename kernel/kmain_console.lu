@@ -86,6 +86,8 @@ use apic
 use arp
 use block
 use boot_info
+use bootlog
+use bootmark
 use console
 use dhcp
 use fb
@@ -368,6 +370,11 @@ fn run(k: u64, a: u64, n: u64, last: bool) {
     }
     log.end()
     sync.release(sync.console(), s)
+    if k == 1 {
+        // px118: the first program starts; kernel/bootlog keeps no more
+        bootmark.stage(bootmark.INIT)
+        bootlog.freeze()
+    }
     let saved = sync.irq_save()
     let before = frames.free_count()
     var pl: u64 = 0
@@ -493,8 +500,9 @@ fn beep(count: u64) {
 }
 
 /// px118: the low beep, the first time the console is drawn: after the
-/// early screen's first line (Limine's mapping), or after kernel/fb's
-/// attach when the early screen did not attach.
+/// early screen's first line (Limine's mapping; kernel/bootmark's `drawn`
+/// stage), or after kernel/fb's attach when the early screen did not
+/// attach.
 fn beep_drawn() {
     // # Safety: a scalar module var, written by kmain alone.
     let seen = unsafe { drawn_beep }
@@ -509,6 +517,9 @@ fn beep_drawn() {
 export fn kmain() {
     identity.mark_entry() // px87 (pax#253): the TSC at the entry, for the boot line
     beep(BEEP_HIGH) // px118: the kernel ran (before any use of the framebuffer)
+    // px118: the previous boot's marks read, this boot's `entered` recorded
+    // (kernel/bootlog's slot in memory, CMOS when it is PAX's, port 0x80).
+    bootmark.start(bootlog.start())
     // px77d: with `triage` on the command line, boot/triage.S's IDT,
     // CR4.MCE and band first (box 1), then a numbered box at each step
     // below; without it every triage call returns at once.
@@ -525,6 +536,9 @@ export fn kmain() {
     serial.init()
     triage.step(3) // the early screen attached (or `nofb`)
     log.line("PAX: the console")
+    if screen.on() {
+        bootmark.stage(bootmark.DRAWN) // px118: the early screen drew that line
+    }
     beep_drawn() // px118: the early screen drew that line (when it attached)
     frames.start()
     identity.report() // px87 (pax#176): the commit and the SHA-256 of the file Limine loaded
@@ -535,9 +549,13 @@ export fn kmain() {
     triage.step(5)
     screen.pause_early()
     paging.switch_to(pml4)
+    bootmark.stage(bootmark.MEMORY) // px118
     triage.step(6) // PAX's page tables live
     paging.report(limine, before)
-    let _screen = if triage.off("nofb") { false } else { fb.start(pml4) } // px19: the screen, when there is one
+    let fb_on = if triage.off("nofb") { false } else { fb.start(pml4) } // px19: the screen, when there is one
+    if fb_on {
+        bootmark.stage(bootmark.FRAMEBUFFER) // px118
+    }
     triage.step(7)
     // px76: its mode on a line (`screen: WxH …` or `screen: off, <why>`), for a photo
     fb.report()
@@ -570,6 +588,7 @@ export fn kmain() {
     // px30: the sound device, when the machine has one (`/dev/dsp`);
     // silent when it has none, so no existing session's serial moves.
     clock.start() // bootstrap deadlines also work without a scheduler
+    bootmark.check_century() // px118: the FADT's century byte never among the marks' CMOS bytes
     identity.calibrate() // px87: the TSC's rate against 10 ms of that clock
     triage.step(16)
     let _pci = pci.scan()
@@ -585,6 +604,7 @@ export fn kmain() {
     if !triage.off("noblock") && block.start(pml4) != 0 {
         block.report()
     }
+    bootmark.stage(bootmark.DEVICES) // px118
     triage.step(20)
     boot_media() // px66: where Limine found the initramfs, when not on an optical disc
     // px115: under `pax.staged=` the archive staged on the installed root is `/` (its attempt
@@ -599,6 +619,7 @@ export fn kmain() {
     // installed root a refused staged boot made `/`
     let _upgrade = if fstab.staged_refused() { 0 } else { fstab.mount_upgrade() }
     network_address() // px105: /etc/pax-net, on the disk when `/` is there
+    bootmark.stage(bootmark.ROOT) // px118
     triage.step(21)
     release_identity() // px82: separate from the boot-medium line
     if fstab.wants_flusher() {
@@ -652,6 +673,7 @@ export fn kmain() {
         c = j + 1
     }
     triage.step(26) // the run list read: init next
+    bootmark.report() // px118: `marks: boot <n>; the previous boot …`, on the screen at the prompt
     identity.repeat() // px87 (pax#176): the identity line again, on the screen at the prompt
     identity.report_boot() // px87 (pax#253): `boot: <n> ms … the console drew for <m> ms …`
     var k: u64 = 0
@@ -676,6 +698,7 @@ export fn kmain() {
         i = j + 1
     }
     if user.end_asked() != 0 {
+        bootmark.stage(bootmark.END) // px118: the boot complete
         user.the_end() // px67: root's reboot(2)
     }
 
@@ -723,6 +746,10 @@ export fn kmain() {
     log.put("; nothing left to run")
     log.end()
     timer.stop()
+    bootmark.stage(bootmark.END) // px118: the boot complete
+    if boot_info.cmdline_has("pax.logflip") {
+        bootlog.test_flip() // px118: test-only, the next boot must refuse this log
+    }
     if fstab.staged_loaded() {
         // px115: the staged program ended (its own reboot(2) is the usual end): reboot, never
         // halt, so the machine comes back by itself; the attempts file bounds the tries
