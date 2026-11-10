@@ -37,7 +37,8 @@ name:
                manifest the host tool's, e2fsck -fn clean; the installed
                system boots with `kernel: <new commit>`; U4d also (px112)
                burrowd: /etc/burrowd/burrowd_config the new image's with
-               `ListenAddress 0.0.0.0` (root's, 0644), its account appended
+               `ListenAddress 0.0.0.0` (root's, 0644; px116: its SetEnv line,
+               the dev /etc/shrc's exports, kept), its account appended
                to /etc/passwd and /etc/group once, and at the first boot the
                host key made (the console's line, root's 0600 on the disk,
                the same fingerprint) and burrowd listening on 0.0.0.0:22
@@ -875,7 +876,13 @@ def burrowd_after(upgraded, booted, screen, row):
     the host key (`burrowd: host key 256 SHA256:… (made at this boot)`) and started burrowd; on the
     disk after that boot (tree `booted`): the key root's 0600 beside its .pub, whose fingerprint is
     the console's, and burrowd's log (0600) names the key and `listening on 0.0.0.0:22`."""
-    shipped = (repo/'user/burrowd/burrowd_config').read_text()
+    # px116 (pax#334): the new dev image's text is tools/system-env's, its SetEnv line the dev
+    # /etc/shrc's exports; the upgrade keeps that line with the LAN's ListenAddress.
+    shrc = subprocess.run([sys.executable, '-I', str(repo/'tools/system-env'), 'shrc', 'dev'], check=True,
+                          capture_output=True, text=True).stdout
+    (work/'u4d-shrc').write_text(shrc)
+    shipped = subprocess.run([sys.executable, '-I', str(repo/'tools/system-env'), 'burrowd-config', str(work/'u4d-shrc')],
+                             check=True, capture_output=True, text=True).stdout
     want = ''.join(('ListenAddress 0.0.0.0' if l.split()[:1] == ['ListenAddress'] else l) + '\n' for l in shipped.splitlines())
     rows = json.loads((work/f'{upgraded}-tree.json').read_text())
     got = rows.get('/etc/burrowd/burrowd_config')
