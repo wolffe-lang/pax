@@ -93,8 +93,10 @@ if [ -z "$images" ]; then
     for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
     # login and passwd as the installed system has them; mkshadow, the
     # test helper, beside the tree (never in the image).
-    "$PAX_ROOT/tools/mkauth" "$work/auth" login passwd mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
-    for p in login passwd; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    "$PAX_ROOT/tools/mkauth" "$work/auth" login passwd sudo mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
+    for p in login passwd sudo; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    # sudo and its policy as the images ship them (B15: a bare sudo over ssh), pax in group sudo.
+    cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
     cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"
     # burrow: /bin/ssh, /bin/burrow-keygen and, since px112, /bin/burrowd.
     "$PAX_ROOT/tools/mkburrow" "$work/burrow" > "$work/burrow.txt" 2>&1 || why+=" tools/mkburrow;"
@@ -105,7 +107,7 @@ if [ -z "$images" ]; then
         if [ -f "$PAX_ROOT/user/${f%%:*}" ]; then cp -p "$PAX_ROOT/user/${f%%:*}" "$r/${f#*:}"; else missing+=" /${f#*:} (no user/${f%%:*})"; fi
     done
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\nburrowd:x:989:989:burrowd:/nonexistent:/bin/false\n' > "$r/etc/passwd"
-    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nburrowd:x:989:\n' > "$r/etc/group"
+    printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nburrowd:x:989:\nsudo:x:27:pax\n' > "$r/etc/group"
     printf 'LABEL=px112-keys /etc/burrowd ext2 sync 0 0\n' > "$r/etc/fstab"
     printf '/bin/login\n' > "$r/etc/pax-run"
     printf 'dhcp wait=10\n' > "$r/etc/pax-net"
@@ -125,6 +127,8 @@ if [ -z "$images" ]; then
             printf '/%s=%s:%s\n' "$f" "$r/$f" "$m"
         fi
     done >> "$work/files.txt"
+    # sudo set-user-ID root and its policy root's 0440, as tools/distribution-root has them.
+    sed -i -e 's#^\(/bin/sudo=.*\):755$#\1:4755#' -e 's#^\(/etc/sudoers=.*\):644$#\1:440#' "$work/files.txt"
     for f in "$r"/bin/*; do
         [ -L "$f" ] && { say "  program: ${f#"$r"/} -> $(readlink "$f")"; continue; }
         case $(head -c 2 "$f") in '#!') say "  script: ${f#"$r"/} $(sha256_of "$f")"; continue ;; esac
