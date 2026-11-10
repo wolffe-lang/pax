@@ -449,6 +449,20 @@ exception table, with the NMI and the machine check on stacks of their own, and 
 act, so an NMI arriving during the boot is logged and survived and a machine check is a named panic with its banks,
 never a silent reset (`tests/mpx6-nmi`, F11; `boot/limine-fix.conf` builds the stick that carries it).
 
+**When a boot goes black** (px118, `notes/px118-boot-diagnosis.md`, its last section the page for a person at the
+machine). Limine's menu shows for five seconds on the stick and on an installed disk, with its verbose loading lines
+(and on a serial port where there is one), so a screen black before the menu is told from one black after it. The
+console kernel beeps twice: high at its entry, before it touches the framebuffer, and low when its console has drawn
+its first line; one beep and black means it ran and never drew, none that it never started (`pax.nobeep` silences
+both). At each stage (entered, drawn, memory, framebuffer, devices, root, init, end) it writes the stage to port
+0x80 (a board's POST-code display shows `11` to `88`), to eight bytes of CMOS (0x78-0x7f, claimed only when they
+read zero, never written when they hold another's bytes; `pax.nomarks` turns that off) and to a log of its console
+kept in memory a reset may leave. The next boot says on the screen how the previous one ended (`marks: boot N; the
+previous boot, N-1, stopped at STAGE`), offers it as `/proc/pax-boot` and `/proc/pax-bootlog`, and its first program
+writes it to `/var/log/boot.log` (root's, with the previous boot's console when it survived) and
+`/var/log/boot.summary`; `pax-boot-status` lists the last ten boots for anyone. `tests/mpx6-bootlog` holds all of it
+under QEMU, both firmwares.
+
 ### The guided installer
 
 `pax-install` inventories the real block nodes, shows a read-only plan, names the target by model, serial, size and node,
