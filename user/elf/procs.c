@@ -59,6 +59,13 @@
      socket    socketpair(AF_UNIX): send, receive, the peer's close
                read as 0, the mode (S_IFSOCK|0777)
      fcntl     F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL of the ends
+   and px115's:
+     start     proc_pid_stat(5)'s starttime (field 22, clock ticks since
+               the boot): set in the parent's /proc/self/stat, set in a
+               child's, and the child's not before its parent's (sudo's
+               record with no terminal names its parent by pid and start
+               time, sudoers_timestamp(5)); the values themselves differ
+               between hosts, so only those three answers are printed
    and `kill(getpid(), 0)`, whose answer it does not print (PAX refuses
    it by name; Linux answers 0: the test reads PAX's log line).
 
@@ -178,6 +185,38 @@ static void end(void) {
     if (used < sizeof line) line[used++] = '\n';
     sys(SYS_write, 1, line, used);
     used = 0;
+}
+
+/* px115: field 22 of /proc/self/stat (the start time, clock ticks
+   since the boot), -1 when the file cannot be read or parsed. The
+   fields after the name's `)` are single-space separated; field 3 is
+   the first. */
+static i64 starttime(void) {
+    char b[512];
+    i64 fd = sys(SYS_open, "/proc/self/stat", 0, 0);
+    if (fd < 0) return -1;
+    i64 n = sys(SYS_read, fd, b, sizeof b - 1);
+    sys(SYS_close, fd, 0, 0);
+    if (n <= 0) return -1;
+    i64 close_at = -1;
+    for (i64 i = 0; i < n; i++) if (b[i] == ')') close_at = i;
+    if (close_at < 0) return -1;
+    int field = 2;
+    i64 i = close_at + 1;
+    while (i < n && field < 22) {
+        if (b[i] == ' ') field++;
+        i++;
+    }
+    if (field != 22 || i >= n || b[i] < '0' || b[i] > '9') return -1;
+    i64 v = 0;
+    while (i < n && b[i] >= '0' && b[i] <= '9') v = v * 10 + (b[i++] - '0');
+    return v;
+}
+
+static i64 atoi64(const char *p) {
+    i64 v = 0;
+    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+    return v;
 }
 
 static int same(const char *a, const char *b) {
@@ -343,6 +382,17 @@ static int child(char **argv) {
         put(" '");
         put(b);
         put("'");
+        end();
+        return 0;
+    }
+    if (same(role, "start")) { /* argv[2]: the parent's start time, or -1 */
+        i64 mine = starttime(), theirs = argv[2][0] == '-' ? -1 : atoi64(argv[2]);
+        put("start: the parent's set ");
+        put(theirs > 0 ? "yes" : "no");
+        put(", the child's set ");
+        put(mine > 0 ? "yes" : "no");
+        put(", the child's not before the parent's ");
+        put(mine > 0 && theirs > 0 && mine >= theirs ? "yes" : "no");
         end();
         return 0;
     }
@@ -732,6 +782,26 @@ static int parent(void) {
     }
 
     plumbing(b);
+
+    /* px115: start */
+    {
+        char t[24];
+        i64 v = starttime();
+        int k = 0;
+        if (v < 0) {
+            t[k++] = '-';
+            t[k++] = '1';
+        } else {
+            char r[24];
+            int m = 0;
+            do { r[m++] = (char)('0' + v % 10); v /= 10; } while (v > 0);
+            while (m > 0) t[k++] = r[--m];
+        }
+        t[k] = 0;
+        char *sv[] = { "procs", "start", t, 0 };
+        c = spawn(sv);
+        wait_line("wait4 start", c, 0);
+    }
 
     sys(SYS_kill, sys(SYS_getpid, 0, 0, 0), 0, 0);
     put("procs: done");
