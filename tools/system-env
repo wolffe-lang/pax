@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""system-env — PAX's system-wide environment, one list for the console and for ssh (px116, pax#334).
+
+    tools/system-env shrc dev|release      the image's /etc/shrc, on standard output
+    tools/system-env burrowd-config SHRC   the image's /etc/burrowd/burrowd_config for an image whose
+                                           /etc/shrc is the file SHRC, on standard output
+
+/etc/shrc is user/shrc, and in the dev image two lines more: `export PATH=/usr/bin:/bin` and
+`export WOLF_STD=/usr/share/wolf/compiler-std` (px92: the compiler's own std; lupin's stays at
+/usr/share/wolf/std). The console's shell runs it (ENV=/etc/shrc, from /etc/pax-run or /bin/login), so
+the console has every variable it exports.
+
+A command over ssh never reads /etc/shrc (pax#334): burrowd gives it its own environment. So
+burrowd_config is user/burrowd/burrowd_config with one `SetEnv` line appended (sshd_config(5): the
+variables set in every session, over burrowd's defaults), written here from SHRC's own `export
+NAME=VALUE` lines, every one but PATH (burrowd's default PATH, sshd's, stands): WOLF_STD (dev only),
+LUPIN_STD and DEN_TLS_ROOTS today. Generated from the one text, the two cannot drift: a variable the
+console gains, ssh gains in the same build.
+
+Refused (exit 1, by name): an `export` line of another shape (a value SetEnv would have to quote or
+expand: blanks, quotes, `$`, a backslash, a leading `#`), a name exported twice, a shipped
+burrowd_config that already has a SetEnv line, or no variable at all.
+"""
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+DEV_LINES = 'export PATH=/usr/bin:/bin\nexport WOLF_STD=/usr/share/wolf/compiler-std\n'
+EXPORT = re.compile(r'^export ([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_./:,+=@%-]*)$')
+COMMENT = ('# px116 (pax#334): the variables /etc/shrc exports for the console, every one but PATH, in\n'
+           '# every command and shell over ssh too (sshd_config(5) SetEnv). tools/system-env writes this\n'
+           '# line from /etc/shrc when the image is built: change /etc/shrc, not this line.\n')
+
+
+def die(msg):
+    sys.stderr.write('system-env: %s\n' % msg)
+    sys.exit(1)
+
+
+def shrc(variant):
+    if variant not in ('dev', 'release'):
+        die('shrc takes dev or release, not %r' % variant)
+    text = (ROOT / 'user/shrc').read_text()
+    if variant == 'dev':
+        text += '\n' + DEV_LINES
+    return text
+
+
+def exports(text):
+    """SHRC's `export NAME=VALUE` lines, in order, every one but PATH."""
+    seen, out = set(), []
+    for n, line in enumerate(text.splitlines(), 1):
+        words = line.split()
+        if not words or words[0] != 'export':
+            continue
+        m = EXPORT.match(line)
+        if not m:
+            die('line %d: %r is not `export NAME=VALUE` with a plain value' % (n, line))
+        name, value = m.groups()
+        if name in seen:
+            die('line %d: %s is exported twice' % (n, name))
+        seen.add(name)
+        if name != 'PATH':
+            out.append('%s=%s' % (name, value))
+    if not out:
+        die('the shell file exports no variable but PATH')
+    return out
+
+
+def burrowd_config(shrc_text):
+    shipped = (ROOT / 'user/burrowd/burrowd_config').read_text()
+    if any(l.split()[:1] and l.split()[0].lower().split('=')[0] == 'setenv' for l in shipped.splitlines()):
+        die('user/burrowd/burrowd_config has a SetEnv line already: this tool writes the one line')
+    if not shipped.endswith('\n'):
+        shipped += '\n'
+    return shipped + COMMENT + 'SetEnv ' + ' '.join(exports(shrc_text)) + '\n'
+
+
+def main(argv):
+    if len(argv) == 2 and argv[0] == 'shrc':
+        sys.stdout.write(shrc(argv[1]))
+    elif len(argv) == 2 and argv[0] == 'burrowd-config':
+        sys.stdout.write(burrowd_config(pathlib.Path(argv[1]).read_text()))
+    else:
+        sys.stderr.write('usage: tools/system-env shrc dev|release | tools/system-env burrowd-config SHRC\n')
+        return 2
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
