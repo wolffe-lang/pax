@@ -38,7 +38,7 @@ w=$(mktemp -d "${TMPDIR:-/tmp}/pax-beep.XXXXXX")
 trap 'rm -rf "$w"' EXIT
 for pair in "$ORIG:$ORIG_SHA256" "$DEBIAN:$DEBIAN_SHA256"; do
     f=${pair%%:*}; want=${pair#*:}
-    curl -fsSL --retry 3 -o "$w/$f" "$SOURCE/$f" || die "cannot fetch $SOURCE/$f"
+    "$PAX_ROOT/tools/net-retry" url "$SOURCE/$f" "$w/$f" || die "cannot fetch $SOURCE/$f"
     got=$(sha256_of "$w/$f")
     [ "$got" = "$want" ] || die "digest mismatch for $f: pinned $want, got $got"
 done
