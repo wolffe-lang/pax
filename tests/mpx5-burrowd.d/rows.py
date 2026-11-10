@@ -85,9 +85,10 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       values the image's /etc/shrc exports (the image's burrowd_config's
       SetEnv line, tools/system-env's), byte for byte as the rig's sshd
       given the same SetEnv line answers; then `wolf build --no-cache
-      --emit=obj` of a one-line program in pax's home succeeds (the image
-      has the dev compiler and its std, no link stack). The same build with
-      WOLF_STD taken away (`env -u`) is recorded beside it, not held
+      --emit=obj` of a program calling std.fs.write_text (pax#334's error
+      named it) in pax's home succeeds (the image has the dev compiler, its
+      std and lupin's, no link stack). The same build with WOLF_STD taken
+      away (`env -u`) is recorded beside it, not held
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -800,8 +801,11 @@ def env_rows(client):
     probe = ['printf "%s\\n" ' + ' '.join('"${%s-unset}"' % n for n in names)]
     rb, rs = c.ssh(GUEST_AT, probe), c.ssh(LINUX_AT, probe)
     expect = ''.join('%s\n' % want.get(n, 'unset') for n in names).encode()
-    prog = 'fn main() { print("px116: built over ssh") }'
-    build = ("cd && printf '%%s\\n' '%s' > px116.lu && wolf build --no-cache --emit=obj px116.lu -o px116.o "
+    # The program calls std.fs.write_text, which pax#334's failed build named (`module fs has no item
+    # named write_text`): it compiles against the compiler's own std, not against lupin's.
+    prog = ('use std.fs\\nfn main() {\\n    fs.write_text(\"px116.txt\", \"px116\\\\n\") else {}\\n'
+            '    print(\"px116: built over ssh\")\\n}\\n')
+    build = ("cd && printf '%s' > px116.lu && wolf build --no-cache --emit=obj px116.lu -o px116.o "
              "&& [ -s px116.o ] && echo built" % prog)
     rbuild = c.ssh(GUEST_AT, [build], timeout=600)
     # Recorded, not held: the same build with WOLF_STD taken away, as a command had it before px116.
@@ -822,7 +826,7 @@ def env_rows(client):
         bad('B18', 'wolf build over ssh with no prefix: %s' % show(rbuild))
     else:
         tail = rbare[1].decode(errors='replace').strip().splitlines()[-1:] or ['-']
-        ok('B18', '%s over ssh as the console has them (sshd\'s answer too); wolf build of a one-line program, no prefix: '
+        ok('B18', '%s over ssh as the console has them (sshd\'s answer too); wolf build of a program calling std.fs, no prefix: '
            'built; without WOLF_STD: %s' % (', '.join('%s=%s' % (n, want[n]) for n in names), tail[0]))
 
 
