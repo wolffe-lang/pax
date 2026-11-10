@@ -1,0 +1,473 @@
+//! bootmark — how far a boot got, kept where a reset does not lose it
+//! (px118; notes/px118-boot-diagnosis.md, decision 1).
+//!
+//! **The stages**, in kmain_console's order, each recorded as it is
+//! reached (a stage the boot does not pass through is never recorded):
+//!
+//!     1 entered      kmain's first statement (after the first beep)
+//!     2 drawn        the console's first line drawn through Limine's
+//!                    mapping of the framebuffer (the early screen)
+//!     3 memory       PAX's frames and page tables live
+//!     4 framebuffer  the framebuffer mapped by PAX, the console on it
+//!     5 devices      PCI, the network, USB and the disks brought up
+//!     6 root         `/` and the other volumes mounted
+//!     7 init         the first program started
+//!     8 end          the kernel's own end reached (halt, reboot or
+//!                    power-off), the boot complete
+//!
+//! **Where.** Three places, each written at every stage:
+//! - port 0x80, the PC's power-on self-test port: the stage as two equal
+//!   hex digits (0x11 entered … 0x88 end), so a board with a POST-code
+//!   display shows the last stage with no screen at all;
+//! - kernel/bootlog's slot (words 1 and 2), memory a warm reset may keep;
+//! - eight bytes of CMOS, the real-time clock's battery-backed RAM, which
+//!   survives a reset and a power-off, at BASE .. BASE + 7 of the lower
+//!   bank (ports 0x70/0x71, the index's bit 7 kept set as kernel/rtc
+//!   does). CMOS is not PAX's: no specification reserves a byte of it for
+//!   an operating system. So PAX never writes outside its eight bytes,
+//!   and never these unless they are its own:
+//!     - offsets 0x00-0x0D are the clock's registers (the MC146818 data
+//!       sheet); 0x0E-0x3F are the PC/AT's (diagnostic status 0x0E, the
+//!       reset reason 0x0F, the configuration bytes 0x10-0x2D under the
+//!       checksum at 0x2E-0x2F, extended memory, the century at 0x32), and
+//!       the chipset may lock 0x38-0x3F; none is ever written. The bytes
+//!       picked lie above them, where QEMU's firmware writes nothing
+//!       (measured, tests/mpx6-bootlog M1), and away from the FADT's
+//!       century byte, checked once ACPI is read (`check_century`);
+//!     - at the entry the eight bytes are read before anything is
+//!       written: all zero, PAX claims them (its magic, a boot number, a
+//!       checksum: `claimed`, said once, and the boot's first program logs
+//!       the offsets); PAX's magic with a good checksum, they are its own
+//!       (`held`); anything else is another's (`refused`): nothing is
+//!       written to CMOS this boot, and the report says what was found;
+//!     - `pax.nomarks` on the command line: CMOS is neither read nor
+//!       written (`off`).
+//!   A boot writes the eight bytes at the entry and three of them (the
+//!   last stage, the stage set, the checksum) at each later stage: about
+//!   thirty byte writes of battery-backed RAM, no flash.
+//!
+//! The eight bytes: 'P' 'X', the boot's number (16 bits, little-endian,
+//! 1 to 65535 and round again), the last stage, the stage set (bit s-1
+//! for stage s), the layout's version 1, and the checksum (the eight sum
+//! to 0 mod 256).
+//!
+//! **The previous boot**, read at the entry before this one writes: from
+//! CMOS when held, else from kernel/bootlog's previous slot when intact.
+//! `/proc/pax-boot` (kernel/procfs) says it, for the first program to log
+//! (/var/log/boot.log, user/bootlog); one console line (`report`) says it
+//! on the screen.
+//!
+//! **A test-only stop**: `pax.bootstop=STAGE` (a stage's name) halts the
+//! kernel just after that stage is recorded, with one line
+//! (`bootmark: stopped at STAGE (pax.bootstop)`, from `drawn` on).
+//!
+//! No region, no heap; scalars written by kmain alone, IF clear around
+//! each CMOS access. Written from the MC146818 data sheet (the clock's
+//! registers and its RAM), the IBM PC/AT technical reference (ports 0x70,
+//! 0x71 and 0x80; the CMOS map), Intel's PCH data sheets (the RTC's two
+//! banks and the lockable 0x38-0x3F) and ACPI 6.5 §5.2.9 (the FADT's
+//! CENTURY). No Linux source; no other kernel's source.
+
+use acpi
+use boot_info
+use bootlog
+use log
+use panic
+
+extern "c" fn pax_outb(port: u16, v: u8)
+extern "c" fn pax_inb(port: u16) -> u8
+extern "c" fn pax_irq_save() -> u64
+extern "c" fn pax_irq_restore(flags: u64)
+
+pub const ENTERED: u64 = 1
+pub const DRAWN: u64 = 2
+pub const MEMORY: u64 = 3
+pub const FRAMEBUFFER: u64 = 4
+pub const DEVICES: u64 = 5
+pub const ROOT: u64 = 6
+pub const INIT: u64 = 7
+pub const END: u64 = 8
+
+/// The first of PAX's eight CMOS bytes (lower bank).
+pub const BASE: u64 = 0x78
+const SIZE: u64 = 8
+const MAGIC_P: u64 = 0x50
+const MAGIC_X: u64 = 0x58
+const VERSION: u64 = 1
+const POST: u16 = 0x80
+
+/// What CMOS is to this boot (`mode`).
+pub const OFF: u64 = 0
+pub const CLAIMED: u64 = 1
+pub const HELD: u64 = 2
+pub const REFUSED: u64 = 3
+
+// Module state: scalars, written by kmain alone.
+var mode: u64 = 0
+var found: u64 = 0 // the eight bytes as found at the entry (byte i at bits 8i)
+var boot: u64 = 0 // this boot's number; 0 when nothing counts
+var last: u64 = 0
+var set: u64 = 0
+var prev_boot: u64 = 0
+var prev_last: u64 = 0
+var prev_set: u64 = 0
+var prev_from: u64 = 0 // 0 none, 1 CMOS, 2 memory
+var stop_at: u64 = 0
+
+fn cmos(i: u64) -> u64 {
+    // # Safety: io.S's OUT and IN on the real-time clock's index and data
+    // ports, the index's bit 7 (NMI masked) kept set as kernel/rtc keeps it.
+    unsafe {
+        pax_outb(0x70, ((i | 0x80) & 0xff) as u8)
+        pax_inb(0x71) as u64
+    }
+}
+
+fn put_cmos(i: u64, v: u64) {
+    // # Safety: as `cmos`; i is one of PAX's eight bytes (callers).
+    unsafe {
+        pax_outb(0x70, ((i | 0x80) & 0xff) as u8)
+        pax_outb(0x71, (v & 0xff) as u8)
+    }
+}
+
+/// CMOS byte `i` of either bank as it reads now (`pax.cmosdump`): the
+/// upper bank through ports 0x72/0x73. Reads only.
+fn cmos_any(i: u64) -> u64 {
+    if i < 0x80 {
+        return cmos(i)
+    }
+    // # Safety: io.S's OUT and IN on the upper bank's index and data ports.
+    unsafe {
+        pax_outb(0x72, (i & 0x7f) as u8)
+        pax_inb(0x73) as u64
+    }
+}
+
+fn name_of(s: u64) -> str {
+    if s == ENTERED { return "entered" }
+    if s == DRAWN { return "drawn" }
+    if s == MEMORY { return "memory" }
+    if s == FRAMEBUFFER { return "framebuffer" }
+    if s == DEVICES { return "devices" }
+    if s == ROOT { return "root" }
+    if s == INIT { return "init" }
+    if s == END { return "end" }
+    "none"
+}
+
+/// A stage's name (`/proc/pax-boot`, the report).
+pub fn name(s: u64) -> str {
+    name_of(s)
+}
+
+/// The eight bytes' checksum for bytes 0-6 as given.
+fn sum7(b: u64) -> u64 {
+    var t: u64 = 0
+    var i: u64 = 0
+    while i < 7 {
+        t = (t + ((b >> (8 * i)) & 0xff)) & 0xff
+        i += 1
+    }
+    (256 - t) & 0xff
+}
+
+/// Write this boot's record whole (the claim, or the entry when held).
+fn write_all() {
+    let rec = MAGIC_P | (MAGIC_X << 8) | ((boot & 0xff) << 16) | (((boot >> 8) & 0xff) << 24) | (last << 32) | (set << 40) | (VERSION << 48)
+    let c = sum7(rec)
+    var i: u64 = 0
+    while i < 7 {
+        put_cmos(BASE + i, (rec >> (8 * i)) & 0xff)
+        i += 1
+    }
+    put_cmos(BASE + 7, c)
+}
+
+/// Write the last stage, the set and the checksum.
+fn write_stage() {
+    let rec = MAGIC_P | (MAGIC_X << 8) | ((boot & 0xff) << 16) | (((boot >> 8) & 0xff) << 24) | (last << 32) | (set << 40) | (VERSION << 48)
+    put_cmos(BASE + 4, last)
+    put_cmos(BASE + 5, set)
+    put_cmos(BASE + 7, sum7(rec))
+}
+
+/// The stage `pax.bootstop=` names, 0 without one (or an unknown name).
+fn stop_word() -> u64 {
+    let (a, n) = boot_info.cmdline_value("pax.bootstop")
+    if n == 0 {
+        return 0
+    }
+    var s: u64 = 1
+    while s <= END {
+        let nm = name_of(s)
+        if nm.len as u64 == n {
+            var same = true
+            var i: u64 = 0
+            for b in nm.bytes() {
+                // # Safety: a byte of Limine's command line, inside the
+                // value cmdline_value measured (i < n).
+                let c = unsafe { ((a + i) as *u8).read_volatile() as u64 }
+                if c != (b as int) as u64 {
+                    same = false
+                }
+                i += 1
+            }
+            if same {
+                return s
+            }
+        }
+        s += 1
+    }
+    0
+}
+
+/// Test-only: `pax.cmosfill=XX` (two hex digits) writes XX into the
+/// eight bytes before they are read, so the rows can stand another's
+/// bytes there (tests/mpx6-bootlog R1). Never on a real machine.
+fn test_fill() {
+    let (a, n) = boot_info.cmdline_value("pax.cmosfill")
+    if n != 2 {
+        return
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 2 {
+        // # Safety: a byte of Limine's command line, i < n.
+        let c = unsafe { ((a + i) as *u8).read_volatile() as u64 }
+        let d = if c >= 48 && c <= 57 { c - 48 } else if c >= 97 && c <= 102 { c - 87 } else { 16 }
+        if d == 16 {
+            return
+        }
+        v = v * 16 + d
+        i += 1
+    }
+    var k: u64 = 0
+    while k < SIZE {
+        put_cmos(BASE + k, v)
+        k += 1
+    }
+}
+
+/// At the entry, after kernel/bootlog's `start` (whose previous boot's
+/// number is `mem_prev`, 0 when none): read the eight bytes, decide
+/// what CMOS is to this boot, and record `entered`.
+pub fn start(mem_prev: u64) {
+    let flags = unsafe { pax_irq_save() }
+    var m = OFF
+    var f: u64 = 0
+    var pb: u64 = 0
+    var pl: u64 = 0
+    var ps: u64 = 0
+    var from: u64 = 0
+    if !boot_info.cmdline_has("pax.nomarks") {
+        test_fill()
+        var i: u64 = 0
+        while i < SIZE {
+            f = f | (cmos(BASE + i) << (8 * i))
+            i += 1
+        }
+        if f == 0 {
+            m = CLAIMED
+        } else if (f & 0xffff) == (MAGIC_P | (MAGIC_X << 8)) && ((f >> 48) & 0xff) == VERSION && sum7(f) == ((f >> 56) & 0xff) {
+            m = HELD
+            pb = (f >> 16) & 0xffff
+            pl = (f >> 32) & 0xff
+            ps = (f >> 40) & 0xff
+            from = 1
+        } else {
+            m = REFUSED
+        }
+    }
+    if from == 0 && mem_prev != 0 {
+        let (b, l, s) = bootlog.prev_marks()
+        pb = b
+        pl = l
+        ps = s
+        from = 2
+    }
+    let first: u64 = if m == CLAIMED || m == HELD { 1 } else { 0 }
+    let n: u64 = if pb == 0 { first } else if pb >= 65535 { 1 } else { pb + 1 }
+    // # Safety: module state, written by kmain alone, before any thread.
+    unsafe {
+        mode = m
+        found = f
+        boot = n
+        prev_boot = pb
+        prev_last = pl
+        prev_set = ps
+        prev_from = from
+        last = ENTERED
+        set = 1
+    }
+    if m == CLAIMED || m == HELD {
+        write_all()
+    }
+    unsafe { pax_irq_restore(flags) }
+    unsafe { stop_at = stop_word() }
+    post(ENTERED)
+}
+
+fn post(s: u64) {
+    // # Safety: io.S's OUT to port 0x80, the PC's POST-code port.
+    unsafe { pax_outb(POST, ((s << 4) | s) as u8) }
+    // # Safety: module state, read by kmain alone.
+    let (b, l, st) = unsafe { (boot, last, set) }
+    bootlog.mark(b, l, st)
+    let at = unsafe { stop_at }
+    if at == s {
+        if s > ENTERED {
+            log.put("bootmark: stopped at ")
+            log.put(name_of(s))
+            log.put(" (pax.bootstop)")
+            log.end()
+        }
+        panic.halt()
+    }
+}
+
+/// Stage `s` reached: port 0x80, the slot's copy, and CMOS when it is
+/// PAX's. A stage at or below the last one recorded changes nothing.
+pub fn stage(s: u64) {
+    // # Safety: module state, written by kmain alone.
+    let l = unsafe { last }
+    if s <= l || s > END {
+        return
+    }
+    let flags = unsafe { pax_irq_save() }
+    let one: u64 = 1
+    unsafe {
+        last = s
+        set = set | (one << (s - 1))
+    }
+    let m = unsafe { mode }
+    if m == CLAIMED || m == HELD {
+        write_stage()
+    }
+    unsafe { pax_irq_restore(flags) }
+    post(s)
+}
+
+/// Once ACPI is read: when the FADT names a century byte inside PAX's
+/// eight, CMOS stops being written from here on (and the report says so).
+pub fn check_century() {
+    let f = acpi.fadt_table()
+    if f == 0 || acpi.integer(f + 4, 4) < 109 {
+        return
+    }
+    let c = acpi.byte(f + 108)
+    // # Safety: module state, written by kmain alone.
+    let m = unsafe { mode }
+    if c >= BASE && c < BASE + SIZE && m != OFF {
+        unsafe { mode = REFUSED }
+    }
+}
+
+/// What CMOS is to this boot: OFF, CLAIMED, HELD or REFUSED.
+pub fn cmos_mode() -> u64 {
+    // # Safety: module state, read after the entry's writes.
+    unsafe { mode }
+}
+
+/// The eight bytes as found at the entry.
+pub fn cmos_found() -> u64 {
+    // # Safety: as `cmos_mode`.
+    unsafe { found }
+}
+
+/// This boot's number (0 when nothing counts) and its last stage.
+pub fn this_boot() -> (u64, u64) {
+    // # Safety: as `cmos_mode`.
+    unsafe { (boot, last) }
+}
+
+/// The previous boot: its number, last stage, stage set and where they
+/// came from (0 none, 1 CMOS, 2 memory).
+pub fn previous() -> (u64, u64, u64, u64) {
+    // # Safety: as `cmos_mode`.
+    unsafe { (prev_boot, prev_last, prev_set, prev_from) }
+}
+
+fn mode_word(m: u64) -> str {
+    if m == CLAIMED { return "claimed" }
+    if m == HELD { return "held" }
+    if m == REFUSED { return "refused" }
+    "off"
+}
+
+/// The mode's word (`/proc/pax-boot`).
+pub fn mode_name() -> str {
+    mode_word(cmos_mode())
+}
+
+/// One console line, before the first program, so a photo of the screen
+/// says it too:
+///
+///     marks: boot <n>; the previous boot <p> stopped at <stage> | completed |
+///     the previous boot: none; CMOS 0x78-0x7f <claimed|held|refused (found …)|off>; log <state>
+pub fn report() {
+    let (pb, pl, _ps, from) = previous()
+    let (n, _l) = this_boot()
+    log.put("marks: boot ")
+    log.dec(n as int)
+    if from == 0 {
+        log.put("; the previous boot: none")
+    } else {
+        log.put("; the previous boot, ")
+        log.dec(pb as int)
+        if pl == END {
+            log.put(", completed")
+        } else {
+            log.put(", stopped at ")
+            log.put(name_of(pl))
+        }
+        log.put(if from == 1 { " (CMOS)" } else { " (memory)" })
+    }
+    log.put("; CMOS 0x")
+    log.hex_n(BASE, 2)
+    log.put("-0x")
+    log.hex_n(BASE + SIZE - 1, 2)
+    log.put(" ")
+    let m = cmos_mode()
+    log.put(mode_word(m))
+    if m == REFUSED {
+        log.put(" (found ")
+        log.hex(cmos_found())
+        log.put(")")
+    }
+    log.put("; log ")
+    let st = bootlog.prev_state()
+    if st == bootlog.INTACT {
+        log.dec(bootlog.prev_len() as int)
+        log.put(" bytes kept")
+    } else if st == bootlog.REFUSED {
+        log.put("refused (checksum)")
+    } else if st == bootlog.NO_AREA {
+        log.put("no area")
+    } else {
+        log.put("none")
+    }
+    log.end()
+    if boot_info.cmdline_has("pax.cmosdump") {
+        dump()
+    }
+}
+
+/// `pax.cmosdump` (a measurement): both banks as they read now, 16 bytes
+/// a line, `cmos: 0x00: …`.
+fn dump() {
+    var row: u64 = 0
+    while row < 256 {
+        log.put("cmos: ")
+        log.hex_n(row, 2)
+        log.put(":")
+        var i: u64 = 0
+        while i < 16 {
+            log.put(" ")
+            log.hex_n(cmos_any(row + i), 2)
+            i += 1
+        }
+        log.end()
+        row += 16
+    }
+}
