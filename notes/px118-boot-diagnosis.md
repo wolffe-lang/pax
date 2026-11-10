@@ -323,3 +323,52 @@ screen then is the display); `completed` (shut down cleanly).
 | 4. guest memory kept across both resets; the log intact by its checksum under SeaBIOS and OVMF; none on a cold start | **right** (L1, W1, both firmwares) |
 | 5. each stop leaves its stage; the next boot logs it; a changed log refused; an upgrade keeps boot.log; the stick unchanged when the store is absent or read-only | **right** (S1–S7, K1–K3, L2, R1, N1); the upgrade row is the full tier's upgrade leg, not run here (section 12). **Not predicted:** Limine does not boot under OVMF in 64 MiB, so N1's missing area is shown under BIOS only |
 | 6. no black hand-off in QEMU | **wrong**: four shapes give one (section 8): a 16- or 24-bit framebuffer under BIOS (Limine's `resolution:` with a depth, or a cirrus card) and OVMF with virtio-gpu (no framebuffer at all) |
+
+## 11. Evidence index
+
+Every take ran under KVM on the Linux build host's light slots (two CPUs, 6 GiB, the lane's Ubuntu 24.04 container
+with QEMU 8.2.2 and Ubuntu's OVMF), never on a machine of the kind in the report.
+
+- **The beeps**, red first: `tests/mpx6-bootlog` committed alone at `6160c548`; green at `2fcc5b9d` (B1–B3, both
+  firmwares, 43 s).
+- **The marks, the log, the stops**: `tests/mpx6-bootlog --tier native --firmware both`, rows B1–B4, M1, M2, L1,
+  S1–S7, R1, L2, W1, N1, U1, U2, P1, K1–K3 on each firmware; the takes at `b38a3bf8`, `c6b9eab7` and the head (the
+  first found K1's mode test reading debugfs's permission bits as a whole mode, and N1 asking OVMF to boot in
+  64 MiB; both fixed in the rows, `f8d10113`, `c8213cbf`).
+- **Item 9**: `tests/mpx6-bootlog.d/handoff.py` at `bf210a69`, 20 cases, section 8's table.
+- **The neighbours**: `tests/mpx3-console`, `tests/mpx6-triage`, `tests/mpx3-screen`, `tests/mpx6-staged`,
+  `tests/mpx6-install --only snapshot` and `--only pax-upgrade`, `tests/mpx3-speaker`, each `--tier native
+  --firmware both` where it takes legs: the take that shows the `marks:` line, the beeps and the new Limine options
+  move no other suite's rows.
+- **The plant** (section 12): `px118-plant-guard-final`, one hunk in `kernel/bootmark/bootmark.lu`: another's CMOS
+  bytes taken as free. R1 goes red by name on both firmwares.
+- **The gauntlet** at the final head, through the org's recorder, kept with the lane's evidence outside the tree:
+  `tests/ci-plan`, `tests/mpx6-bootlog`, the two installer units, `tests/mpx6-staged`.
+
+## 12. Done-when
+
+**Decisions** (section 4): 1, CMOS guarded with every mark also in memory, the offsets excluded and the claim logged
+once, as ruled; 2, POST codes at port 0x80, as ruled; 3, `/var/log/boot.log` 0600 and `/var/log/boot.summary` 0644,
+chosen; the Limine options (section 6) and the beeps (section 5), accepted as done. **Proposed, not decided:** draw a
+16- or 24-bit framebuffer (section 8's BIOS cases), or leave it; recommended: leave it until a black boot of the test
+machine is one beep with its stages short of `drawn`, since nothing shows that machine hands PAX such a framebuffer.
+
+**Not done.**
+- The test machine itself: section 9 is the page for it.
+- The full tier's upgrade leg (`tests/mpx6-install.d/upgrade.py`, which now also holds `/var/log/boot.log` byte for
+  byte), `tests/usb-stick`, `tests/mpx6-kasumi`, `tests/mpx6-install --rows full` and the over-ssh upgrade leg
+  (`ssh-upgrade.py`): heavy legs left to CI's full tier. U1 and U2 show the new installed options and the armed
+  shape booting with no key.
+- A framebuffer above 4 GiB: no QEMU display device here put one there.
+- Whether the test machine's firmware keeps memory across a reset, and whether its board has a speaker or a
+  POST-code display: section 9 asks.
+
+**Checklist** (light takes; the gauntlet at the head):
+- [x] `tests/ci-plan`
+- [x] `tests/mpx6-bootlog --tier native --firmware both` (B1–B4, M1, M2, L1, S1–S7, R1, L2, W1, N1, U1, U2, P1, K1–K3)
+- [x] `tests/mpx6-bootlog.d/handoff.py` (item 9's probe)
+- [x] `tests/mpx6-install --only snapshot` (I-runtime-boot-log, red first at `389f933e`)
+- [x] `tests/mpx6-install --only pax-upgrade`
+- [x] `tests/mpx6-staged --tier native --firmware both`
+- [x] `tests/mpx3-console`, `tests/mpx6-triage`, `tests/mpx3-screen`, `tests/mpx3-speaker` (`--tier native --firmware both`)
+- [ ] the full tier's install, stick and upgrade legs (CI)
