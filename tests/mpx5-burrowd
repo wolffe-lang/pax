@@ -77,7 +77,7 @@ static_ok() {
 
 if [ -z "$images" ]; then
     wolf=${PAX_WOLF:-wolf}
-    need "$wolf" git
+    need "$wolf" git gcc
     say "wolf: $("$wolf" --version | head -n 1)"
     "$PAX_ROOT/tools/fetch-limine" || exit 2
     rm -rf "$work"
@@ -98,6 +98,10 @@ if [ -z "$images" ]; then
     # sudo and its policy as the images ship them (B15: a bare sudo over ssh; B16: sudo -k -S, and a plain -S measured), pax in group sudo.
     cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
     cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"
+    # B17 (pax#340): the stack segment ring 3 holds after a system call and
+    # after interrupts taken in ring 3, a static program of the suite's own.
+    gcc -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$r/bin/sysret-ss" "$PAX_ROOT/tests/mpx5-burrowd.d/sysret-ss.c" > "$work/sysret-ss.txt" 2>&1 || why+=" gcc: sysret-ss;"
     # burrow: /bin/ssh, /bin/burrow-keygen and, since px112, /bin/burrowd.
     "$PAX_ROOT/tools/mkburrow" "$work/burrow" > "$work/burrow.txt" 2>&1 || why+=" tools/mkburrow;"
     "$PAX_ROOT/tools/install-burrow" "$work/burrow" "$r" >> "$work/burrow.txt" 2>&1 || why+=" tools/install-burrow;"

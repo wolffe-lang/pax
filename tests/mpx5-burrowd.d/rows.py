@@ -72,6 +72,14 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       session's `sudo -n` then does is recorded as measured, not held (it is
       the shared record a session of its own per program ends); `sudo -K`
       over ssh clears it after
+  B17 the stack segment after a system call (pax#340): `/bin/sysret-ss`
+      (tests/mpx5-burrowd.d/sysret-ss.c) makes a system call, reads SS and
+      CS, stays in ring 3 for 200 ms across the timer's interrupts, and
+      reads them again: 0x1b and 0x23 both times. SYSRETQ's SS comes from
+      STAR's base; a processor that does not force its privilege bits
+      leaves SS at 0x18 in ring 3, and the next interrupt's IRETQ raises
+      #GP. On a processor that forces them this row cannot go red; the
+      hosted job, which boots under KVM on its runner's processor, can
   B11 the stick's shape (R-px112-9, C): the live entry as pid 1
       (user/usb-login.sh), the shipped configuration (loopback), no
       /etc/shadow: its own key made at boot; the rig's ssh refused at
@@ -744,6 +752,16 @@ def host_rows(client):
     else:
         bad('B16', 'sudo -k -S: %s; then sudo -n: %s; sudo -S: %s; then: %s; sudo -K: %s'
             % (show(k1), show(k2), show(p1), show(p2), show(kk)))
+    # B17 the stack segment after a system call, and after interrupts taken in ring 3 (pax#340).
+    try:
+        rq = c.ssh(GUEST_AT, ['/bin/sysret-ss'], timeout=60)
+    except subprocess.TimeoutExpired:
+        rq = (None, b'', b'[row: timed out]')
+    (c.dir / 'b17.txt').write_text('sysret-ss: %s\n' % show(rq))
+    if rq[0] == 0 and rq[1].startswith(b'ok: ss 0x1b cs 0x23 after a system call; ss 0x1b cs 0x23 after '):
+        ok('B17', rq[1].decode(errors='replace').strip()[4:])
+    else:
+        bad('B17', 'sysret-ss: %s' % show(rq))
 
 
 def git_rows(client, work):
