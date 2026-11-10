@@ -41,18 +41,21 @@ then both firmwares; records on the lane host; the final records last, after the
    a power cut during the receive and during the apply. The plant, red by name.
 7. The README section: the three commands, and what to do when it does not come back.
 
-## Where it stands (2026-11-10, the first hand-back of phase 2)
+## Where it stands (2026-11-10, phase 2's second hand-back)
 
-- Step 1: the rows (af66bc8a, e853faa5, c0c959f8, 8dd84d84) and the change (e856a57e, cddede57). procs' `start`
-  seen red by name at e853faa5 (`the parent's set no, the child's set no`); the sudo row's first take passed at the
-  old key because bash exec'd the last command in its own place (8dd84d84 makes it fork). Its red witness is the
-  branch px115-red-sudo (the old key on top of the fixed row; never merged). On PAX itself pids are never reused
-  (kernel/sched's `take_pid`), so the start time changes no PAX answer until they are; it is what makes PAX's sudo
-  right where the container rows run it, on Linux. The ssh row (a second session after the first's `sudo -k -S`)
-  needs burrow's change: today every ssh command shares the console's session and terminal.
-- Step 2: nothing to build (above).
-- Step 3: tests/mpx6-staged (231b3ce8) first, then the kernel (0cd76b45..5301923a); it compiles; its takes are the
-  first runs. Not yet: `mount_upgrade` at /mnt/target under the staged word in a row (tools/mkdisk drops a
-  configuration's module lines: the row must put the targets module back with mtools), the CI job and plan wiring
-  for the new suite, a panic's reboot under the staged word (the attempts file bounds the tries; a panic halts).
+Light takes on the lane host (native tier; mpx6-staged on both firmwares), each read by its END lines:
+- Step 1, sudo: red at the old key by name (the witness branch px115-red-sudo, 4409352c: P4 `rc 0` and `0` where
+  Ubuntu's sudo says `a password is required`); green at 8dd84d84 (P4: 82 lines the same). procs' `start` red by
+  name at e853faa5, green at 8dd84d84. mpx3-shell's other reds in this rig are trunk's too (d56fdd98, the same
+  rig): the user sessions want a container engine the rig's container lacks, and two rows read the boreutils the
+  rig passes in. On PAX pids are never reused (kernel/sched's `take_pid`), so the start time changes no PAX answer
+  until they are; it makes PAX's sudo right where the container rows run it, on Linux. The ssh row waits for
+  burrow's change (every ssh command shares the console's session and terminal today).
+- Step 3, the staged boot: tests/mpx6-staged red by name at 231b3ce8 (T1-T5, both firmwares: no `staged:` line),
+  green at 279da789: T1-T6 on BIOS and UEFI, T6 a 402,664,096-byte archive read, hashed and made `/` with the boot
+  to its reboot in 17-18 s. The rows run in a container with sfdisk and a local stand-in for tools/e2fs's engine.
+  77db0019 changed the rows' first program to an ELF of their own (the kernel runs no `#!` script as init) after
+  the red; the red was the kernel's missing lines, which that change does not touch.
+  Not yet: `mount_upgrade` at /mnt/target under the staged word (the leg's AHCI disk will hold it), the suite's
+  CI wiring (tests/ci-plan, the workflow, tools/ci-tiers.map), a panic's reboot under the staged word.
 - Steps 4 to 7: not begun.
