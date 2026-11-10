@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Upgrade over ssh (px115).** An installed PAX that has `pax-upgrade` takes a
+  newer image's archive from another machine and upgrades itself from it at
+  the next boot: `pax-upgrade receive --sha256 DIGEST` (no root; kept only when
+  what arrived, and what is read back, is that digest), then `sudo -k -S
+  pax-upgrade arm --reboot` (root's: every refusal by name before anything is
+  written, then the archive's kernel and its own boot entry on the EFI
+  partition, the entry Limine's default). The next boot reads the archive from
+  the root, holds it to its sha256 and makes it `/` (kernel/fstab's staged
+  boot, its attempts counted on the root), and the stick's own upgrade,
+  `pax-install --upgrade`, runs with the arm record as its confirmation; then
+  the machine reboots into the upgraded system, which removes the staged files.
+  Two staged boots at most; any problem with the archive boots the installed
+  system, which puts its configuration back and says why in
+  `pax-upgrade status`. `sudo` keys a record with no terminal by its parent's
+  start time too, so a reused process id matches none. The README's
+  "Upgrading over ssh" has the commands and what to do when it does not come
+  back; the design and its measurements are `notes/px115-upgrade-over-ssh.md`.
+
 - **The yew jobs fit their limits again (px113, pax#305).** `mpx5-yew` was
   cut at its 75-minute limit in most all-tier runs since yew's pin moved to
   `2eb9cb9b`, and `mpx5-screen` in some. Measured phase by phase in every
