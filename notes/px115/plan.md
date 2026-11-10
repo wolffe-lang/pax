@@ -75,8 +75,23 @@ Light takes on the lane host (native tier), each read by its END lines:
   pax-install and links each archive as pax[-dev]-COMMIT.cpio, its sha256 in sha256.txt. Not yet run (a
   distribution build is a block take).
 - Step 7, the README section: written (3ddc621e).
-- Not yet: the leg (step 6), mount_upgrade's row under the staged word (step 3's last row; it is the leg's, on its
-  AHCI disk), the final records.
+- Step 6, the leg: tests/mpx6-install.d/ssh-upgrade.py (rows S1-S4, below), in the net rig container on a copy of
+  the probes' installed 860-shaped disk (the burrowd image) and that image's stick's archive repacked. BIOS, light
+  take at ffa47874 (pre-reorder; the tree is the head's but for the held ci-plan line): S1 green (624 MB received
+  in 37 s, armed with `sudo -k -S` over ssh, the staged boot's lines, the root at /mnt/target found by the arm's
+  targets line on the AHCI disk, which is mount_upgrade's row under the staged word, the upgrade, the reboot,
+  burrowd answering, status `upgraded` then `cleaned`); S2 green (the changed archive refused by the kernel, `D`, the
+  installed system disarmed and rebooted, status says why); S3 green (QEMU killed 20 s into the send: nothing
+  received; sent again whole); S4 green (QEMU killed once the upgrade's record was durable: the second staged boot
+  finished it). The four in 570 s. UEFI: queued behind it on the lane host. The kernel's
+  mount line shows the AHCI model cut to 16 characters; the serial names the disk.
+- The plant: px115-plant-age (cc6c1e62, the arm's age refusal taken out), P10 predicted red by name, every other
+  row green; its take waited on a light slot (see the hand-back).
+- Not yet: UEFI's leg, the plant's record, the final records (rebase after the queue, every take again at the
+  final head).
+- Held: tests/ci-plan's one changed line names an existing CI job whose name holds a host name, so the public-text
+  grep counts it. GitHub's px115 is the branch without that commit (a77d6f35, the history reordered so it is
+  last); the lane's clone and the lane host hold it on top (ba974964). It goes up when that is ruled.
 
 ## The leg, as planned for the next session
 
