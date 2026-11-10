@@ -2,19 +2,43 @@
 # tests/mpx6-bootlog — px118: a boot that goes black leaves evidence
 # (notes/px118-boot-diagnosis.md).
 #
-# The console kernel (kmain_console) on an ISO with a small archive whose
-# first program writes one line and exits. Each image boots under QEMU with
-# the PC speaker on QEMU's `wav` audio backend (`-audiodev wav,…`,
-# `pcspk-audiodev`), its serial log read to the kernel's `halt`; the capture
-# is measured by tools/wav-notes. The rows, per firmware:
-#   B1 a plain boot: exactly two tones, the first at count 1140 (1046.6 Hz)
-#      and the second at count 2280 (523.3 Hz), each within 2% of its pitch
-#      and 40-250 ms long: the high beep at the kernel's entry, the low one
-#      when the console has drawn its first line; the boot reaches its
-#      program and halts
-#   B2 `pax.nobeep` on the command line: no tone
-#   B3 no display device (`-vga none`): no framebuffer, so the console is
-#      never drawn: the high tone alone, and `screen: off, no framebuffer`
+# The console kernel (kmain_console) on ISOs (tools/mkimage) and
+# installed-shape disks (tools/mkdisk --gpt --root) whose archive's first
+# program (tests/mpx6-bootlog.d/init.c) prints /proc/pax-boot and
+# /proc/pax-bootlog and exits. One QEMU process boots an image several
+# times: the kernel's halt (or its test-only stop), then the monitor's
+# system_reset, so CMOS and memory carry over as across a reset button.
+# The rows, per firmware (tests/mpx6-bootlog.d/rows.py):
+#   B1 a plain boot: QEMU's PC-speaker capture (`-audiodev wav`) holds two
+#      tones, count 1140 (1046.6 Hz) then count 2280 (523.3 Hz), each
+#      within 2% of its pitch and 40-250 ms long: the high beep at the
+#      kernel's entry, the low one at the first line drawn
+#   B2 `pax.nobeep`: no tone
+#   B3 no display device (`-vga none`): no framebuffer, the high tone alone
+#   M1 a cold QEMU's CMOS, dumped by `pax.nomarks pax.cmosdump` (nothing
+#      written): the marks' bytes 0x78-0x7f read zero; the map is listed
+#   M2 a cold disk boot claims 0x78-0x7f (`marks: boot 1; … claimed`); the
+#      next boot holds them and says the previous boot completed, every
+#      stage set (`/proc/pax-boot`)
+#   L1 that boot's /proc/pax-bootlog is the first boot's console, from its
+#      first line through `run 1:`, byte for byte
+#   S1-S7 `pax.bootstop=STAGE` (test-only) stops the kernel at each stage
+#      from `entered` to `init`; the next boot says the previous boot
+#      stopped there, the stages up to it set
+#   R1 another's bytes in CMOS (`pax.cmosfill=5a`, test-only): refused,
+#      nothing written over them, the boot goes on
+#   L2 a log area changed under its checksum (`pax.logflip`, test-only):
+#      refused at the next boot, nothing of it printed
+#   W1 the kernel's own warm reset (reboot(2)): the next boot finds the
+#      previous one completed, its console kept
+#   N1 `pax.nomarks` and no memory at the log's area (-m 64): nothing kept,
+#      the boot unchanged to its program
+#   U1 the installed system's Limine options (`timeout: 5`, `verbose: yes`,
+#      `serial: yes`): Limine's lines on the serial port before PAX's first,
+#      the boot unattended
+#   P1 port 0x80 in QEMU's I/O trace (`-trace cpu_out`): 0x11 … 0x88, the
+#      stages' POST codes, in order (SKIP, not measured, where QEMU writes
+#      no such trace)
 #
 #   tests/mpx6-bootlog [--tier native|release|both] [--firmware bios|uefi|both]
 #
@@ -36,7 +60,7 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-need python3 cc xorriso qemu-system-x86_64
+need python3 cc xorriso qemu-system-x86_64 mcopy mtype debugfs
 "$PAX_ROOT/tools/fetch-limine" >&2 || exit 2
 
 worst=0
