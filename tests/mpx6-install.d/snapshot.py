@@ -72,6 +72,7 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     for rel,text in [('/var/lib/dhcp/pax.lease','state bound\naddress 10.0.2.15\n'),('/etc/resolv.conf','nameserver 10.0.2.3\n'),
                      ('/.sh_history','pax-install\n'),('/.local/share/lope/store','lope-store 1\n'),('/.cache/wolf/entry','cache\n'),
                      ('/var/log/sudo.log','root : COMMAND=/bin/true\n'),
+                     ('/Trash/files/old-notes','trashed at the stick\n'),('/Trash/info/old-notes.trashinfo','[Trash Info]\nPath=/old-notes\n'),
                      ('/var/lib/pkg/db','package state\n'),('/var/libx/keep','kept\n'),('/etc/resolv.conf.d/keep','kept\n'),
                      ('/home/pax/.sh_history','a home below the top\n'),('/var/log/kept','another log\n'),('/bin/tool','tool\n')]:
         put(rel,text)
@@ -96,6 +97,9 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     row('I-runtime-root-home',not top,'no top-level dot name (root\'s home is /: pelt\'s history, lope\'s store, a cache) copied or listed'+(' ('+', '.join(top)+')' if top else ''))
     left=gone(['/var/log/sudo.log'])
     row('I-runtime-sudo-log',not left and '/var/log' in attrs,'sudo\'s log neither copied nor listed; /var/log itself both'+(' (the log copied or listed)' if left else ''))
+    # pax#331: trash keeps a user's trash in ~/Trash, and root's home is /, so root's is /Trash.
+    left=gone(['/Trash','/Trash/files','/Trash/files/old-notes','/Trash/info','/Trash/info/old-notes.trashinfo'])
+    row('I-runtime-root-trash',not left,'trash\'s /Trash (root\'s ~/Trash, its home /) neither copied nor listed'+(' (copied or listed: '+', '.join(left)+')' if left else ''))
     keep=['/var/lib','/var/lib/pkg','/var/lib/pkg/db','/var/libx/keep','/etc/resolv.conf.d/keep','/home/pax/.sh_history','/var/log/kept','/bin/tool']
     lost=[p for p in keep if p not in attrs or not os.path.lexists(str(copy)+p)]
     lost+=[p for p in keep if (rt/p.lstrip('/')).is_file() and p not in lost and (copy/p.lstrip('/')).read_bytes()!=(rt/p.lstrip('/')).read_bytes()]
