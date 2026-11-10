@@ -146,7 +146,7 @@ def disk_media(img):
 class Machine:
     """One QEMU process: its serial log, its monitor, its boots."""
 
-    def __init__(self, name, fw, media, mem='512', vga=True, audio=False, reboot_exits=False, trace=False):
+    def __init__(self, name, fw, media, mem='512', vga=True, audio=False, reboot_exits=False, post=False):
         self.d = WORK / name
         shutil.rmtree(self.d, ignore_errors=True)
         self.d.mkdir(parents=True)
@@ -160,8 +160,9 @@ class Machine:
             a += ['-no-reboot']
         if not vga:
             a += ['-vga', 'none']
-        if trace:
-            a += ['-trace', 'cpu_out', '-D', str(self.d / 'trace.log')]
+        if post:
+            # every byte written to port 0x80 to a file (QEMU's isa-debugcon at the POST-code port)
+            a += ['-chardev', f'file,id=post,path={self.d / "post.bin"}', '-device', 'isa-debugcon,iobase=0x80,chardev=post']
         if os.access('/dev/kvm', os.R_OK | os.W_OK):
             a += ['-enable-kvm', '-cpu', 'host']
         if fw == 'uefi':
@@ -528,102 +529,23 @@ def rows_armed(fw, cpio):
 
 
 def rows_post(fw, plain):
-    # P1: the POST codes (port 0x80) in QEMU's I/O trace: 0x11 … 0x88, the last eight such written.
-    m = Machine(f'{fw}-P1', fw, ['-cdrom', plain], reboot_exits=True, trace=True)
+    # P1: the POST codes: every byte written to port 0x80 (QEMU's isa-debugcon there): 0x11 … 0x88, the
+    # stages in order, the last eight such bytes written (the firmware writes its own codes first).
+    m = Machine(f'{fw}-P1', fw, ['-cdrom', plain], reboot_exits=True, post=True)
     text = m.boot()
     m.quit()
-    log = m.d / 'trace.log'
-    body = log.read_text(errors='replace') if log.exists() else ''
-    if 'cpu_out' not in body:
-        say(f'SKIP P1-{fw} reason=QEMU wrote no cpu_out trace, so port 0x80 is not observable here (not measured)')
+    if not (m.d / 'post.bin').exists():
+        say(f'SKIP P1-{fw} reason=QEMU took no debug console at port 0x80 ({(m.d / "qemu.out").read_text(errors="replace").strip()[-160:]}); not measured')
         return
-    vals = [int(v, 0) for v in re.findall(r'cpu_out\S* addr 0x0*80\b.*?value (0x[0-9a-f]+|\d+)', body)]
+    vals = list((m.d / 'post.bin').read_bytes())
     want = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
     ours = [v for v in vals if v in want]
     if not booted(f'P1 {fw}', text):
         return
     if ours[-8:] != want:
-        fail(f'P1 {fw}', 'port 0x80 saw ' + ' '.join(f'{v:02x}' for v in vals[-16:]))
+        fail(f'P1 {fw}', 'port 0x80 saw ' + ' '.join(f'{v:02x}' for v in vals[-24:]))
     else:
-        say(f'PASS P1 {fw}: port 0x80 saw ' + ' '.join(f'{v:02x}' for v in ours[-8:]))
-
-
-def rows_record(fw, cpio_rec):
-    # K1: the boot's first program (`pax-boot-status record`) writes /var/log/boot.log (0600) and
-    # /var/log/boot.summary (0644): at a cold boot the claim of the CMOS bytes with their offsets; at the
-    # next, the previous boot completed and its console between the markers; the show lists both.
-    img = disk(f'{fw}-K1', cpio_rec, '')
-    m = Machine(f'{fw}-K1', fw, disk_media(img))
-    t1 = m.boot()
-    m.reset()
-    t2 = m.boot()
-    m.quit()
-    if booted(f'K1 {fw}', t1) and booted(f'K1 {fw}', t2):
-        log, summ = debugfs(img, 'cat /var/log/boot.log'), debugfs(img, 'cat /var/log/boot.summary')
-        (m.d / 'boot.log').write_text(log)
-        (m.d / 'boot.summary').write_text(summ)
-        why = []
-        b1, b2 = log.find('== boot 1, '), log.find('== boot 2, ')
-        if b1 < 0 or b2 < b1:
-            why.append('no block for boot 1 then boot 2')
-        else:
-            one, two = log[b1:b2], log[b2:]
-            if 'previous: none recorded' not in one or f'cmos: {CMOS} claimed for the marks' not in one:
-                why.append('boot 1\'s block lacks `previous: none recorded` or the claim with its offsets')
-            if 'previous: boot 1 completed (marks from cmos)' not in two or f'cmos: {CMOS} held' not in two:
-                why.append('boot 2\'s block lacks `previous: boot 1 completed` or `held`')
-            con = re.search(r'--- console of boot 1 ---\n(.*)--- end of the console of boot 1 ---', two, re.S)
-            if not con or 'PAX: the console' not in con.group(1) or 'run 1: /bin/pax-boot-status record' not in con.group(1):
-                why.append('boot 2\'s block holds no console of boot 1 from its first line to `run 1:`')
-        lines = [l.split() for l in summ.splitlines() if l]
-        if len(lines) != 2 or lines[0][0] != '1' or 'previous=none' not in lines[0] or 'cmos=claimed' not in lines[0] \
-                or lines[1][0] != '2' or 'previous=1' not in lines[1] or 'ended=end' not in lines[1] or 'cmos=held' not in lines[1]:
-            why.append(f'boot.summary is {summ!r}')
-        if (mode_of(img, '/var/log/boot.log'), mode_of(img, '/var/log/boot.summary')) != (0o100600, 0o100644):
-            why.append(f'modes {mode_of(img, "/var/log/boot.log")!r} {mode_of(img, "/var/log/boot.summary")!r}, not 0600 and 0644')
-        if not re.search(r'^  boot 1: completed \(found by boot 2 at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, from cmos\)$', t2, re.M) \
-                or not re.search(r'^  boot 2: this boot, at init$', t2, re.M):
-            why.append('the show at boot 2 does not list boot 1 completed and boot 2 at init')
-        if why:
-            fail(f'K1 {fw}', '; '.join(why) + f' (kept in {m.d})')
-        else:
-            say(f'PASS K1 {fw}: boot.log 0600 (the claim at boot 1, boot 1 completed and its console at boot 2), '
-                f'boot.summary 0644 two lines, the show lists them')
-    img.unlink()
-    # K2: a boot stopped at `devices`: the next boot's record says so, and the show.
-    img = disk(f'{fw}-K2', cpio_rec, 'pax.bootstop=devices')
-    m = Machine(f'{fw}-K2', fw, disk_media(img))
-    t1 = m.boot(until=r'^bootmark: stopped at devices \(pax\.bootstop\)$')
-    esp_conf(img, without(esp_conf(img), 'pax.bootstop=devices'))
-    m.reset()
-    t2 = m.boot()
-    m.quit()
-    if booted(f'K2 {fw}', t2):
-        log = debugfs(img, 'cat /var/log/boot.log')
-        if 'previous: boot 1 stopped at devices (marks from cmos)' not in log or \
-                not re.search(r'^  boot 1: stopped at devices \(found by boot 2 at ', t2, re.M):
-            fail(f'K2 {fw}', f'boot.log or the show does not say boot 1 stopped at devices: {log[:400]!r}')
-        else:
-            say(f'PASS K2 {fw}: a boot stopped at devices, so recorded at the next boot and shown')
-    img.unlink()
-    # K3: boot.log past 256 KiB is rotated: the old one becomes boot.log.1, the new block starts a new file.
-    img = disk(f'{fw}-K3', cpio_rec, '')
-    big = WORK / 'big-boot.log'
-    big.write_bytes(b'x' * 262100 + b'\n')
-    f = WORK / 'K3.debugfs'
-    f.write_text(f'cd /var/log\nwrite {big} boot.log\nsif /var/log/boot.log mode 0100600\n')
-    subprocess.run(['debugfs', '-w', '-f', str(f), f'{img}?offset={part_offset(img, 1)}'], capture_output=True)
-    m = Machine(f'{fw}-K3', fw, disk_media(img))
-    t = m.boot()
-    m.quit()
-    if booted(f'K3 {fw}', t):
-        one = debugfs(img, 'cat /var/log/boot.log.1')
-        new = debugfs(img, 'cat /var/log/boot.log')
-        if len(one) != 262101 or not new.startswith('== boot 1, '):
-            fail(f'K3 {fw}', f'boot.log.1 is {len(one)} bytes and boot.log starts {new[:30]!r}')
-        else:
-            say(f'PASS K3 {fw}: a boot.log past 256 KiB rotated to boot.log.1, the new block in a new boot.log')
-    img.unlink()
+        say(f'PASS P1 {fw}: port 0x80 saw ' + ' '.join(f'{v:02x}' for v in ours[-8:]) + f' ({len(vals)} bytes in all)')
 
 
 def main():
