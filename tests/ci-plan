@@ -62,7 +62,7 @@ MERGE_LEGS = "--tier native --firmware bios"  # tl29: the merge gate's legs
 TIER_LEGS = {"all": "", "full": MERGE_LEGS, "pr": PR_LEGS, "noop": PR_LEGS}
 NIGHTLY_RED = os.path.join(ROOT, "tools", "nightly-red")
 NET = ["mpx4-net", "mpx4-udp", "mpx4-tcp", "mpx4-ready", "mpx4-session", "mpx4-unix", "mpx4-lobo", "mpx5-jobs", "mpx4-dhcp", "mpx4-igb", "mpx5-den", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd"]  # px49: mpx5-jobs (gaps' TCP rows); px89: mpx4-dhcp, mpx4-igb; px100: mpx5-den (den daemon on the remote image's loopback); px105: mpx4-console-net; px104: mpx4-console-push; px112: mpx5-burrowd (burrowd's TCP from the LAN)
-MUSIC = ["mpx3-speaker", "mpx3-sound", "mpx3-orchestra", "mpx4-session", "mpx6-install"]
+MUSIC = ["mpx3-speaker", "mpx3-sound", "mpx3-orchestra", "mpx4-session", "mpx6-install", "mpx6-bootlog"]  # px118: mpx6-bootlog measures the speaker through tools/wav-notes
 fails = 0
 
 
@@ -212,8 +212,8 @@ expect("P2 su reaches every suite whose user run uses it (px47), and mpx5-sudo's
        plan(["user/su/su.lu", "tools/mksu"], **pr), "pr", SUUSER + ["mpx5-sudo", "mpx6-kasumi", "mpx5-burrowd"])  # px112: its login, through tools/mkauth
 expect("P2 the account programs' shared modules and builder reach su's suites, sudo's and the installer's (px106)",
        plan(["user/auth/pwhash.lu", "user/auth/wolf-toolchain.toml", "tools/mkauth"], **pr), "pr", SUUSER + ["mpx5-sudo", "mpx6-kasumi", "mpx5-burrowd"])  # px112: its login, through tools/mkauth
-expect("P2 passwd and login reach su's suites through tools/mkauth, mpx5-sudo and the installer's (px106)",
-       plan(["user/passwd/passwd.lu", "user/login/login.lu"], **pr), "pr", SUUSER + ["mpx5-sudo", "mpx6-kasumi", "mpx5-burrowd"])  # px112: its login, through tools/mkauth
+expect("P2 passwd and login reach su's suites through tools/mkauth, mpx5-sudo and the installer's (px106); login mpx6-bootlog's too (px118: /bin/login runs pax-boot-status record)",
+       plan(["user/passwd/passwd.lu", "user/login/login.lu"], **pr), "pr", SUUSER + ["mpx5-sudo", "mpx6-kasumi", "mpx5-burrowd", "mpx6-bootlog"])  # px112: its login, through tools/mkauth
 # px106 (pax#324's M7): the metal leg's live tree carries su, sudo, passwd and login (tools/mkauth's),
 # and the installed system's /etc/pax-run is /bin/login, so each program's sources reach mpx6-kasumi.
 for p in ["user/su/su.lu", "user/sudo/sudo.lu", "user/passwd/passwd.lu", "user/login/login.lu", "user/auth/pwhash.lu", "tools/mkauth"]:
@@ -364,8 +364,8 @@ expect("P2 the mouse's probe reaches the USB suite (px109; user/elf is mpx5-user
        plan(["user/elf/mouseprobe.c"], **pr), "pr", has=["mpx6-usb"], lacks=["mpx2-heap"])
 expect("P2 kernel/files and kernel/user reach mpx6-nodes beside the user suites (px79)",
        plan(["kernel/files/files.lu", "kernel/user/user.lu"], **pr), "pr", has=["mpx6-nodes", "mpx3-tree", "mpx5-users"], lacks=["mpx6-blk", "mpx2-heap"])
-expect("P2 the GPT writer and the disk tools reach the file-system suites, through tools/mkdisk (px66, px67; px79: mpx6-nodes, which makes its disks with both; px69: mpx6-disktools; px75: mpx6-nvme likewise; px90: mpx5-den's home disk; px115: mpx6-staged's installed-shape disks)",
-       plan(["tools/mkgpt", "tools/disktools", "user/disktools.pin"], **pr), "pr", ["mpx5-den", "mpx6-ext2", "mpx6-part", "mpx6-root", "mpx6-journal", "mpx6-nodes", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-nvme", "mpx6-ahci", "mpx6-kasumi", "mpx6-staged"] + ROOTDISK)
+expect("P2 the GPT writer and the disk tools reach the file-system suites, through tools/mkdisk (px66, px67; px79: mpx6-nodes, which makes its disks with both; px69: mpx6-disktools; px75: mpx6-nvme likewise; px90: mpx5-den's home disk; px115: mpx6-staged's installed-shape disks; px118: mpx6-bootlog's)",
+       plan(["tools/mkgpt", "tools/disktools", "user/disktools.pin"], **pr), "pr", ["mpx5-den", "mpx6-ext2", "mpx6-part", "mpx6-root", "mpx6-journal", "mpx6-nodes", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-nvme", "mpx6-ahci", "mpx6-kasumi", "mpx6-staged", "mpx6-bootlog"] + ROOTDISK)
 expect("P2 disk formatters and their own fixture select disktools (px69)",
        plan(["user/disktools/common/diskio.lu", "user/disktools/paxfat/main.lu", "tools/mkdisktools",
              "tools/mklimine-static", "tests/mpx6-disktools.d/fixture.py"], **pr), "pr", ["mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-kasumi"])
