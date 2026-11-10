@@ -8,7 +8,7 @@ reboot(2) where asked); the images are tools/mkimage's ISOs and tools/mkdisk's i
 (the ESP's limine.conf rewritten between boots with mtools, a black box). One QEMU process boots an
 image several times: a boot ends at the kernel's `halt` (or its `pax.bootstop` stop), then the
 monitor's `system_reset` starts the next, so CMOS and memory carry over as they do across a reset
-button. PX118_ROWS (letters, default `B M S R L N U P`) picks the groups. Prints PASS/FAIL lines at
+button. PX118_ROWS (letters, default `B M S R L N U P K F`) picks the groups. Prints PASS/FAIL lines at
 column 0; exits 1 when any row failed."""
 import os
 import re
@@ -26,6 +26,10 @@ OVMF_CODE = Path('/usr/share/OVMF/OVMF_CODE_4M.fd')
 OVMF_VARS = Path('/usr/share/OVMF/OVMF_VARS_4M.fd')
 PIT_HZ = 1193182
 HIGH, LOW = PIT_HZ / 1140, PIT_HZ / 2280  # kmain_console's BEEP_HIGH and BEEP_LOW counts
+PIP_A, PIP_B = PIT_HZ / 1808, PIT_HZ / 1356  # its BEEP_PIP_A and BEEP_PIP_B: a refused screen's three pips
+REFUSED = [HIGH, PIP_A, PIP_B, PIP_A]  # the entry's beep, then the pips: a screen PAX will not draw on
+FB = r'(\d+)x(\d+) (\d+) bpp pitch (\d+) rgb (\d+):(\d+) (\d+):(\d+) (\d+):(\d+) at 0x([0-9a-f]+)'
+NOT_RGB = 'not 32-bit RGB 8:8:8'
 BASE = 0x78  # kernel/bootmark's BASE: the marks' eight CMOS bytes
 CMOS = '0x78-0x7f'
 STAGES = ['entered', 'drawn', 'memory', 'framebuffer', 'devices', 'root', 'init', 'end']
@@ -80,10 +84,10 @@ def archive(name, reboot=False):
     return out
 
 
-def conf_text(cmdline, head='timeout: 0\nquiet: yes\n', module=True):
+def conf_text(cmdline, head='timeout: 0\nquiet: yes\n', module=True, entry=''):
     return (head + '\n/PAX\n    protocol: limine\n    path: boot():/boot/pax\n'
             + ('    module_path: boot():/boot/initramfs.cpio\n' if module else '')
-            + (f'    cmdline: {cmdline}\n' if cmdline else ''))
+            + (f'    cmdline: {cmdline}\n' if cmdline else '') + entry)
 
 
 def iso(name, cpio, cmdline):
@@ -94,11 +98,12 @@ def iso(name, cpio, cmdline):
     return out
 
 
-def disk(name, cpio, cmdline, head='timeout: 0\nquiet: yes\n'):
+def disk(name, cpio, cmdline, head='timeout: 0\nquiet: yes\n', entry=''):
     """An installed-shape disk: Limine and the kernel on the ESP, the archive as an ext2 root on
-    partition 2 (tools/mkdisk adds `root=PARTUUID=… rw` to the entry's command line)."""
+    partition 2 (tools/mkdisk adds `root=PARTUUID=… rw` to the entry's command line). ENTRY: more
+    lines of the entry (`    resolution: …`)."""
     conf = WORK / f'{name}.conf'
-    conf.write_text(conf_text(cmdline or 'px118', head, module=False))
+    conf.write_text(conf_text(cmdline or 'px118', head, module=False, entry=entry))
     img = WORK / f'{name}.img'
     env = dict(os.environ, SOURCE_DATE_EPOCH=EPOCH)
     r = subprocess.run([str(ROOT / 'tools/mkdisk'), '--gpt', '--no-journal', '--kernel', str(KERNEL), '--root', str(cpio),
@@ -146,7 +151,7 @@ def disk_media(img):
 class Machine:
     """One QEMU process: its serial log, its monitor, its boots."""
 
-    def __init__(self, name, fw, media, mem='512', vga=True, audio=False, reboot_exits=False, post=False):
+    def __init__(self, name, fw, media, mem='512', vga=True, audio=False, reboot_exits=False, post=False, display=()):
         self.d = WORK / name
         shutil.rmtree(self.d, ignore_errors=True)
         self.d.mkdir(parents=True)
@@ -160,6 +165,7 @@ class Machine:
             a += ['-no-reboot']
         if not vga:
             a += ['-vga', 'none']
+        a += list(display)
         if post:
             # every byte written to port 0x80 to a file (QEMU's isa-debugcon at the POST-code port)
             a += ['-chardev', f'file,id=post,path={self.d / "post.bin"}', '-device', 'isa-debugcon,iobase=0x80,chardev=post']
@@ -266,6 +272,13 @@ def marks_line(text):
     return m.group(0) if m else ''
 
 
+def marks_fb(text):
+    """The marks line's last part: the framebuffer Limine handed and what PAX made of it
+    (`<desc>, drawn` or `<desc>, refused: <why>`); '' without one."""
+    got = marks_line(text)
+    return got.split('; framebuffer ', 1)[1] if '; framebuffer ' in got else ''
+
+
 def block(text, name):
     m = re.search(rf'^px118: BEGIN {name}\n(.*?)\npx118: END {name}$', text, re.M | re.S)
     return m.group(1) if m else None
@@ -277,9 +290,10 @@ def facts(text):
 
 
 def expect_line(row, text, want):
+    """The marks line up to its framebuffer part (marks_fb, the F rows') matches WANT whole."""
     got = marks_line(text)
-    if not re.fullmatch(want, got):
-        fail(row, f'the marks line is {got!r}, not /{want}/')
+    if not re.fullmatch(want, got.split('; framebuffer ', 1)[0]):
+        fail(row, f'the marks line is {got!r}, not /{want}/ (then its framebuffer)')
         return False
     return True
 
@@ -313,16 +327,19 @@ def rows_beeps(fw, plain, quiet):
     got = tones(WORK / f'{fw}-B4.wav')
     if booted(f'B4 {fw}', text) and beeps(f'B4 {fw}', got, []):
         say(f'PASS B4 {fw}: a sound card\'s capture holds no boot tone')
-    # B3: no display device (-vga none), so no framebuffer: the high beep alone.
+    # B3: no display device (-vga none), so no framebuffer: the high beep, then a refused screen's
+    # three pips, the low beep never.
     m = Machine(f'{fw}-B3', fw, ['-cdrom', plain], audio=True, reboot_exits=True, vga=False)
     text = m.boot()
     m.quit()
     got = tones(m.wav)
-    if booted(f'B3 {fw}', text) and beeps(f'B3 {fw}', got, [HIGH]):
-        if 'screen: off, no framebuffer' not in text:
-            fail(f'B3 {fw}', 'the kernel did not say `screen: off, no framebuffer`')
+    if booted(f'B3 {fw}', text) and beeps(f'B3 {fw}', got, REFUSED):
+        if 'screen: off, no framebuffer' not in text or marks_fb(text) != 'none, refused: no framebuffer':
+            fail(f'B3 {fw}', f'the kernel did not say `screen: off, no framebuffer` and `framebuffer none, refused: '
+                 f'no framebuffer` (the marks line ends {marks_fb(text)!r})')
         else:
-            say(f'PASS B3 {fw}: no framebuffer, one beep, {got[0][0]:.1f} Hz for {got[0][1]:.0f} ms')
+            say(f'PASS B3 {fw}: no framebuffer: the entry beep, then the pips, '
+                + ', '.join(f'{h:.1f} Hz for {ms:.0f} ms' for h, ms in got))
 
 
 def rows_cmos(fw, dump_iso):
@@ -364,6 +381,12 @@ def rows_marks(fw, img):
         f1 = facts(t1)
         if f1.get('cmos') != f'{CMOS} claimed' or f1.get('previous') != 'none' or f1.get('boot') != '1':
             fail(f'M2 {fw}', f'/proc/pax-boot at the first boot: {f1}')
+            ok = False
+        # Every boot names the framebuffer it was handed and that it drew on it.
+        elif not re.fullmatch(FB.replace(r'(\d+) bpp', '32 bpp') + ', drawn', marks_fb(t1)) \
+                or f1.get('framebuffer') != marks_fb(t1)[:-len(', drawn')] or f1.get('screen') != 'drawn':
+            fail(f'M2 {fw}', f'the marks line\'s framebuffer part is {marks_fb(t1)!r}, /proc/pax-boot\'s '
+                 f'framebuffer {f1.get("framebuffer")!r} screen {f1.get("screen")!r}: not one 32-bit description, drawn')
             ok = False
     m.reset()
     t2 = m.boot()
@@ -638,8 +661,94 @@ def rows_record(fw, cpio_rec):
     img.unlink()
 
 
+# The display shapes that gave a black hand-off in QEMU (notes/px118-boot-diagnosis.md
+# section 8), and one control: (row, what, Limine's resolution line or '', QEMU's display options,
+# what the marks line's framebuffer part must be (a regular expression), refused or not).
+SHAPES = {
+    'bios': [('F1', 'Limine resolution 1024x768x16', '1024x768x16', (),
+              FB.replace(r'(\d+)x(\d+) (\d+) bpp', '1024x768 16 bpp'), NOT_RGB),
+             ('F2', 'Limine resolution 1024x768x24', '1024x768x24', (),
+              FB.replace(r'(\d+)x(\d+) (\d+) bpp', '1024x768 24 bpp'), NOT_RGB),
+             ('F3', 'a cirrus card', '', ('-vga', 'cirrus'),
+              FB.replace(r'(\d+) bpp', r'(?!32 )(\d+) bpp'), NOT_RGB)],
+    'uefi': [('F4', 'virtio-gpu, no framebuffer from the firmware', '', ('-vga', 'none', '-device', 'virtio-gpu-pci'),
+              r'none', 'no framebuffer'),
+             ('F5', 'Limine resolution 1024x768x16 under OVMF (the control: 32 bpp handed)', '1024x768x16', (),
+              FB.replace(r'(\d+) bpp', '32 bpp'), None)],
+}
+
+
+def rows_screen(fw, cpio_rec):
+    # F1-F5: every boot records the framebuffer it was handed (width, height, bits a pixel,
+    # pitch, the colour masks, its physical address) and, when PAX refuses to draw on it, why: in the
+    # marks line, /proc/pax-boot, boot.log and pax-boot-status. A refused screen is heard (the entry's
+    # high beep, then three pips, 659.9, 879.9 and 659.9 Hz, never the low beep) and seen at port 0x80
+    # (each stage's code with E for its low digit: 1E at the refusal, then 3E 5E 6E 7E 8E). The next
+    # boot says the previous one ran with its screen refused. F5 is the control: drawn, two beeps.
+    for row, what, res, display, want_fb, why in SHAPES.get(fw, []):
+        r = f'{row} {fw}'
+        img = disk(f'{fw}-{row}', cpio_rec, '', entry=f'    resolution: {res}\n' if res else '')
+        m = Machine(f'{fw}-{row}', fw, disk_media(img), audio=True, post=True, display=display)
+        t1 = m.boot()
+        m.reset()
+        t2 = m.boot()
+        m.quit()
+        if not booted(r, t1) or not booted(r, t2):
+            continue
+        why_s = 'drawn' if why is None else f'refused: {why}'
+        f1, f2 = facts(t1), facts(t2)
+        part = marks_fb(t1)
+        desc = part[:-len(why_s) - 2] if part.endswith(', ' + why_s) else None
+        bad_here = []
+        if desc is None or not re.fullmatch(want_fb, desc):
+            bad_here.append(f'the marks line\'s framebuffer part is {part!r}, not /{want_fb}/, {why_s}')
+        elif f1.get('framebuffer') != desc or f1.get('screen') != why_s:
+            bad_here.append(f'/proc/pax-boot says framebuffer {f1.get("framebuffer")!r}, screen {f1.get("screen")!r}')
+        want_tones = REFUSED if why else [HIGH, LOW]
+        got = tones(m.wav)
+        if len(got) != 2 * len(want_tones) or any(abs(h - w) > w * .02 for (h, _), w in zip(got, want_tones * 2)) \
+                or any(not 40 <= ms <= 250 for _, ms in got):
+            bad_here.append('the two boots\' capture holds ' + (', '.join(f'{h:.1f} Hz for {ms:.0f} ms' for h, ms in got) or 'no tone')
+                            + ', not ' + ', '.join(f'{w:.1f} Hz' for w in want_tones * 2))
+        codes = [0x11, 0x1e, 0x3e, 0x5e, 0x6e, 0x7e, 0x8e] if why else [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+        vals = list((m.d / 'post.bin').read_bytes()) if (m.d / 'post.bin').exists() else []
+        pax = [v for v in vals if v in codes or v in (0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x1e, 0x3e, 0x5e, 0x6e, 0x7e, 0x8e)]
+        if pax[-len(codes):] != codes:
+            bad_here.append('port 0x80 saw ' + ' '.join(f'{v:02x}' for v in vals[-24:]) + ', not ending '
+                            + ' '.join(f'{v:02x}' for v in codes))
+        prev_head = 'completed, its screen refused' if why else 'completed'
+        if not re.fullmatch(rf'marks: boot 2; the previous boot, 1, {prev_head} \(CMOS\); CMOS {CMOS} held; log \d+ bytes kept',
+                            marks_line(t2).split('; framebuffer ', 1)[0]) \
+                or f2.get('prevscreen') != ('refused' if why else 'drawn'):
+            bad_here.append(f'the second boot\'s marks line is {marks_line(t2)!r}, prevscreen {f2.get("prevscreen")!r}')
+        log, summ = debugfs(img, 'cat /var/log/boot.log'), debugfs(img, 'cat /var/log/boot.summary')
+        (m.d / 'boot.log').write_text(log)
+        (m.d / 'boot.summary').write_text(summ)
+        b2 = log.find('== boot 2, ')
+        one, two = log[:b2], log[b2:]
+        if desc is not None and (f'framebuffer: {desc}\n' not in one or f'screen: {why_s}\n' not in one):
+            bad_here.append(f'boot 1\'s block in boot.log lacks `framebuffer: {desc}` or `screen: {why_s}`')
+        if f'previous: boot 1 {prev_head} (marks from cmos)' not in two:
+            bad_here.append(f'boot 2\'s block lacks `previous: boot 1 {prev_head} (marks from cmos)`')
+        lines = [l.split() for l in summ.splitlines() if l]
+        scr = 'refused' if why else 'drawn'
+        if len(lines) != 2 or f'screen={scr}' not in lines[0] or f'prevscreen={scr}' not in lines[1]:
+            bad_here.append(f'boot.summary is {summ!r}, not screen={scr} then prevscreen={scr}')
+        show_prev = rf'^  boot 1: {prev_head} \(found by boot 2 at \S+, from cmos\)$'
+        show_now = r'^  boot 2: this boot, at init' + (re.escape(f', its screen refused: {why}') if why else '') + '$'
+        if not re.search(show_prev, t2, re.M) or not re.search(show_now, t2, re.M):
+            bad_here.append('the show at boot 2 does not say boot 1 ' + prev_head + ' and boot 2 at init'
+                            + (f', its screen refused: {why}' if why else ''))
+        if bad_here:
+            fail(r, what + ': ' + '; '.join(bad_here) + f' (kept in {m.d})')
+        else:
+            say(f'PASS {r}: {what}: framebuffer {desc}, {why_s}; ' + ', '.join(f'{h:.1f}' for h, _ in got[:len(want_tones)])
+                + ' Hz; port 0x80 ' + ' '.join(f'{v:02x}' for v in codes) + '; the next boot, boot.log and the show say so')
+        img.unlink()
+
+
 def main():
-    only = os.environ.get('PX118_ROWS', 'B M S R L N U P K').split()
+    only = os.environ.get('PX118_ROWS', 'B M S R L N U P K F').split()
     cpio = archive('init')
     cpio_reboot = archive('init-reboot', reboot=True)
     plain, quiet = iso('plain', cpio, ''), iso('nobeep', cpio, 'pax.nobeep')
@@ -657,7 +766,8 @@ def main():
                  ('M', lambda: rows_marks(fw, disk(f'{fw}-M2', cpio, ''))), ('S', lambda: rows_stops(fw, cpio)),
                  ('R', lambda: rows_refused(fw, cpio)), ('L', lambda: rows_log(fw, cpio, cpio_reboot)),
                  ('N', lambda: rows_absent(fw, cpio)), ('U', lambda: rows_installed(fw, cpio)), ('U', lambda: rows_armed(fw, cpio)), ('P', lambda: rows_post(fw, plain)),
-                 ('K', lambda: rows_record(fw, cpio_rec) if cpio_rec else fail(f'K0 {fw}', 'no pax-boot-status built (PX118_BOOTSTATUS)'))]
+                 ('K', lambda: rows_record(fw, cpio_rec) if cpio_rec else fail(f'K0 {fw}', 'no pax-boot-status built (PX118_BOOTSTATUS)')),
+                 ('F', lambda: rows_screen(fw, cpio_rec) if cpio_rec else fail(f'F0 {fw}', 'no pax-boot-status built (PX118_BOOTSTATUS)'))]
         for key, step in steps:
             if key not in only:
                 continue
