@@ -397,12 +397,16 @@ never a silent reset (`tests/mpx6-nmi`, F11; `boot/limine-fix.conf` builds the s
 machine). Limine's menu shows for five seconds on the stick and on an installed disk, with its verbose loading lines
 (and on a serial port where there is one), so a screen black before the menu is told from one black after it. The
 console kernel beeps twice: high at its entry, before it touches the framebuffer, and low when its console has drawn
-its first line; one beep and black means it ran and never drew, none that it never started (`pax.nobeep` silences
-both). At each stage (entered, drawn, memory, framebuffer, devices, root, init, end) it writes the stage to port
-0x80 (a board's POST-code display shows `11` to `88`), to eight bytes of CMOS (0x78-0x7f, claimed only when they
+its first line; one beep and black means it ran and never drew, none that it never started. A framebuffer it will not
+draw on (none, or not 32-bit RGB 8:8:8) is judged at the entry and heard as three pips right after the high beep: the
+kernel then runs blind (`pax.nobeep` silences them all). At each stage (entered, drawn, memory, framebuffer, devices,
+root, init, end) it writes the stage to port 0x80 (a board's POST-code display shows `11` to `88`, or `1E` to `8E`
+when the screen was refused), to eight bytes of CMOS (0x78-0x7f, claimed only when they
 read zero, never written when they hold another's bytes; `pax.nomarks` turns that off) and to a log of its console
-kept in memory a reset may leave. The next boot says on the screen how the previous one ended (`marks: boot N; the
-previous boot, N-1, stopped at STAGE`), offers it as `/proc/pax-boot` and `/proc/pax-bootlog`, and its first program
+kept in memory a reset may leave. Every boot names the framebuffer it was handed (size, bits a pixel, pitch, colour
+masks, physical address) and, when it refused it, why. The next boot says on the screen how the previous one ended
+(`marks: boot N; the previous boot, N-1, stopped at STAGE`, with `, its screen refused` when it ran blind), offers it
+as `/proc/pax-boot` and `/proc/pax-bootlog`, and its first program
 writes it to `/var/log/boot.log` (root's, with the previous boot's console when it survived) and
 `/var/log/boot.summary`; `pax-boot-status` lists the last ten boots for anyone. `tests/mpx6-bootlog` holds all of it
 under QEMU, both firmwares.
