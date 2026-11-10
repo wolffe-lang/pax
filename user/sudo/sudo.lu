@@ -48,12 +48,7 @@
 //! - **The timestamp** (px106): `/var/run/sudo/ts/UID` (Ubuntu's names the
 //!   file by uid too), root's with the caller's group, mode 0600, in PAX's
 //!   own format: one line a terminal and session, `tty NR sid SID time MS`
-//!   (with no terminal, `ppid PPID start TICKS sid SID time MS`), MS the
-//!   wall clock's. px115: TICKS is the parent's start time
-//!   (proc_pid_stat(5)'s starttime), as sudoers_timestamp(5) keeps a record
-//!   made with no terminal by its parent's pid and that parent's start
-//!   time, so a later process given the same pid matches no record (a
-//!   record of the form before px115, with no `start`, matches nothing).
+//!   (with no terminal, `ppid PPID sid SID time MS`), MS the wall clock's.
 //!   A reboot voids every record: Linux's /run is a new tmpfs at each boot,
 //!   and an installed PAX keeps /var on ext2, so the installed system's pid
 //!   1, /bin/login, empties `/var/run/sudo/ts` when it starts (the images
@@ -2019,29 +2014,7 @@ fn ts_key() -> str {
     if nr != 0 {
         return "tty {nr} sid {sid}"
     }
-    let pp = os_ppid() else 0
-    "ppid {pp} start {start_of(pp)} sid {sid}"
-}
-
-/// px115: process `pid`'s start time, proc_pid_stat(5)'s field 22 (clock
-/// ticks since the boot), or -1 when its /proc/PID/stat cannot be read.
-/// The fields after the name's `)` are counted, the state being field 3.
-fn start_of(pid: int) -> int {
-    let s = fs_read_text("/proc/{pid}/stat") else ""
-    let cut = s.rfind(")") else -1
-    if cut < 0 {
-        return -1
-    }
-    var k = 2
-    for w in s[cut + 1..].split(" ") {
-        if w.len > 0 {
-            k += 1
-            if k == 22 {
-                return w.replace("\n", "").to_int() else -1
-            }
-        }
-    }
-    -1
+    "ppid {os_ppid() else 0} sid {sid}"
 }
 
 fn ts_path(uid: int) -> str {
