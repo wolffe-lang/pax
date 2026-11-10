@@ -1109,6 +1109,36 @@ configuration back, writes the reason to `/var/log/pax-upgrade.log`, and reboots
 says the staged kernel is the one running. `tests/mpx6-staged` holds the kernel's half (T1-T6), and
 `tests/mpx6-install.d/ssh-upgrade.py` the whole path on an 860-shaped disk.
 
+## What a boot leaves behind (px118)
+
+A boot that goes black should still say how far it got (`notes/px118-boot-diagnosis.md`). Since px118:
+
+- **Limine** shows its menu for five seconds on the stick (`boot/limine-usb.conf`) and the installed disk
+  (`user/install/prepare.lu`'s `config_text`), with `verbose: yes` and `serial: yes` (Limine's `CONFIG.md`,
+  v12.9.1), so a black screen before the menu is told from one after it. The ISO's and the tests' configurations
+  are unchanged.
+- **Two beeps** from the console kernel (kmain_console, kernel/speaker's `boot_tone`): high (count 1140) at the
+  entry, before any use of the framebuffer; low (count 2280) when the console has drawn its first line. Each is
+  210 edges of the 8254's channel 2 as port 0x61 bit 5 reads them back, so the wait is the tone. `pax.nobeep`
+  silences both.
+- **Stage marks** (kernel/bootmark): `entered`, `drawn` (the early screen's first line), `memory` (PAX's page
+  tables live), `framebuffer` (mapped by PAX), `devices`, `root`, `init` (the first program), `end`. Each goes to
+  port 0x80 (two equal hex digits, `0x11` to `0x88`), to CMOS bytes 0x78–0x7f (claimed only when all eight read
+  zero, kept while they hold PAX's own record `P` `X`, boot number, last stage, stage set, version 1 and a checksum;
+  another's bytes are never written; the RTC registers, the PC/AT configuration and checksum bytes 0x0E–0x3F and the
+  FADT's century byte never; `pax.nomarks` off), and to the memory area below.
+- **The boot's console in memory** (kernel/bootlog): 128 KiB at physical 64 MiB, two 64 KiB slots, when Limine's
+  map lists the range as usable (kernel/frames withholds it): every console byte from the entry to the first
+  program, a check word and a running sum, flushed at each line's end; the previous boot's slot is never written.
+- **Read back** by the next boot: one console line before the first program (`marks: boot N; the previous boot, P,
+  stopped at STAGE (CMOS); CMOS 0x78-0x7f held; log M bytes kept`), `/proc/pax-boot` (0444: `boot`, `stage`, `cmos`,
+  `found`, `previous`, `from`, `stages`, `log`) and `/proc/pax-bootlog` (0400: the previous boot's kept console,
+  only when intact by its sums). The first program (`/bin/login` as pid 1; the live login script) runs
+  `pax-boot-status record`, which appends to `/var/log/boot.log` (0600, rotated past 256 KiB to `.1` … `.4`) and
+  `/var/log/boot.summary` (0644, its last 100 lines kept once past 200); `pax-boot-status` lists the last ten boots.
+- Test-only words: `pax.bootstop=STAGE` (halt just after the stage is recorded), `pax.cmosfill=XX`, `pax.logflip`,
+  `pax.cmosdump`. `tests/mpx6-bootlog` holds every row, BIOS and UEFI.
+
 ## Checking a volume from rescue
 
 `tools/mkfsck OUTDIR` builds `OUTDIR/fsck.ext2` from `user/fsck`, using
