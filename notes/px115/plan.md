@@ -91,9 +91,18 @@ Light takes on the lane host (native tier), each read by its END lines:
   plant on that) P10 alone is red, 27 of 28 held; the head green, 28 of 28 (853b15d0), the same take.
 - Not yet: the final records (rebase after the queue ahead, every take again at the final head; the records into
   notes/px115/), a distribution build with the image's new files (a block take), the PR.
-- Held: tests/ci-plan's one changed line names an existing CI job whose name holds a host name, so the public-text
-  grep counts it. GitHub's px115 is the branch without that commit (a77d6f35, the history reordered so it is
-  last); the lane's clone and the lane host hold it on top (ba974964). It goes up when that is ruled.
+- The held line, ruled: tests/ci-plan's changed expectation names an existing public CI job whose name holds a host
+  name; that is the public-text grep's one match, a false positive. Pushed.
+- Rebased onto trunk 483bfabf (#328 merged; the CHANGELOG's two entries kept, px115's first). This branch goes next
+  in the merge order. The README now says in plain words that a kernel panic in the staged boot halts and needs a
+  person (the installed entry at the console, or the stick), and that a bare `sudo` over ssh is unsafe on the
+  current burrowd.
+- The final takes, at the final head: a light take of the cheap steps first, then the whole gauntlet (the lane
+  host's `rig/gauntlet.sh` under the organization's recorder) in a block take: tests/ci-plan, tests/ci-budgets.py,
+  the pax-upgrade rows, mpx6-staged (both tiers, both firmwares), mpx5-sudo's build and its container rows (sudo's
+  record), the distribution build (tb03's staged inputs copied by value and read back, auth and trash built at the
+  head, tools/mkdistribution with tests/distribution on both variants), and the leg on both firmwares; then the
+  plant's record on px115-plant-age. The take indexes and the leg's serial logs: notes/px115/records/.
 
 ## The leg, as planned for the next session
 
