@@ -375,8 +375,10 @@ def s1(base, pub, archive, digest, commit, name='S1'):
         # The arm's own lines may not reach this side before its reboot; the serial log decides.
         a = root(base, 'pax-upgrade arm --reboot')
         armed = a.stdout.decode(errors='replace') + a.stderr.decode(errors='replace')
-        steps = [r'staged: attempt 1 of 2', r'upgrade: /pax/install-targets names .*' + re.escape(MODEL),
-                 r'staged: / is the staged archive', r'pax-upgrade apply: upgraded to ' + commit,
+        # The kernel's line shows the model cut short; the serial names the disk.
+        steps = [r'staged: attempt 1 of 2', r'staged: / is the staged archive',
+                 r'upgrade: /pax/install-targets names .*serial "' + re.escape(SERIAL) + '"',
+                 r'upgrade: PARTUUID=\S+ \(\w+\) on /mnt/target: ext2, read-write', r'pax-upgrade apply: upgraded to ' + commit,
                  r'pax-upgrade: the upgrade is done; removed']
         for s in steps:
             if not m.wait(s, 1800, after=mark):
