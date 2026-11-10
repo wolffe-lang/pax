@@ -106,12 +106,12 @@ by the suite (`PAX_DEV_WOLF_DIR`, `PAX_DEV_STD_DIR`); CI builds them with `tools
   E0301, `write_text` not found in the module), and the build with no prefix exited 0 but left no `px116.o` (a
   program that imports std, measured at `18d5ae05`, log `757e66cc…`: `wolf=0`, `ls: cannot access 'px116.o'`), so
   B17 held what it should not have. It now holds wolf's own status and records the listing (`79506fb1`).
-- **Green at `79506fb1`** (a boot-only take on `fd938957`'s images, whose tree is unchanged since): B0-B17 and the
+- **Green at `79506fb1`** (log `e8a677bd…`; a boot-only take on `fd938957`'s images, whose tree is unchanged since): B0-B17 and the
   scan, `PASS B17 WOLF_STD=/usr/share/wolf/compiler-std, LUPIN_STD=/usr/share/wolf/std,
   DEN_TLS_ROOTS=/etc/ssl/certs/ca-roots.der over ssh as the console has them (sshd's answer too); wolf build of a
   program calling std.fs, no prefix: status 0; without WOLF_STD: status=2`.
 - **The plant** (`tools/system-env` writes no `SetEnv` line, one line; on `fd938957`, branch
-  `px116-plant-setenv2`, no PR): B17 red by name (log `7e9277c3…`): `FAIL B17 over ssh the variables are
+  `px116-plant-setenv2`, no PR): B17 red by name, alone (log `f664187c…`): `FAIL B17 over ssh the variables are
   b'unset\nunset\nunset\n'`, and the record beside it shows pax#334 whole: `wolf build` over ssh with no prefix
   exits 2, `write_text` `not found in the module` (E0301), the compiler resolving lupin's std.
 
