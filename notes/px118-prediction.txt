@@ -1,0 +1,38 @@
+px118 — a boot that goes black leaves evidence. The prediction, written before the first change.
+
+Every row below is QEMU only (SeaBIOS and OVMF); nothing here is a claim about real hardware.
+
+1. The beeps. A console kernel boot shows two tones in QEMU's PC-speaker capture (the `wav`
+   audio backend) before its first program: the first at the kernel's entry, the second when the
+   console has drawn its first line, each a fixed pitch and length (the first higher and
+   shorter), each timed by the speaker's own counter (port 0x61 bit 5), so the wait is the
+   beep. With `pax.nobeep` on the command line the capture holds no boot tone. With no
+   framebuffer the capture holds the first tone only. A boot gains about a quarter of a second.
+   The speaker's own books (its tones count, its ring) do not move, so no session's transcript
+   gains a `speaker:` line.
+
+2. Limine says more. With `verbose: yes`, `serial: yes` and a five-second menu in the stick's
+   and the installed configuration (no `quiet: yes`), QEMU's serial log shows Limine's menu
+   and its loading lines before PAX's first line, under both firmwares. The suites that boot
+   the stick or an installed disk and read the serial log from PAX's first line still pass;
+   a suite that types before PAX's first prompt is the risk (Limine reads serial input too).
+
+3. The marks' store, measured before it is chosen for good: QEMU's CMOS keeps bytes a guest
+   wrote across a guest reset (port 0xCF9, the FADT's register) and the monitor's
+   system_reset, under both firmwares; neither firmware writes the bytes picked for the marks.
+   A cold start of QEMU begins with them zero.
+
+4. The early log in memory. QEMU keeps guest RAM across a guest reset and system_reset; a
+   fixed physical range the kernel keeps out of its frame allocator is found intact by its
+   checksum on the next boot under SeaBIOS. Under OVMF: also intact, unless the firmware or
+   Limine writes the range, which the checksum then refuses (predicted: intact). A cold start
+   of QEMU finds no log.
+
+5. The stages. A kernel stopped by a test-only word at each stage leaves that stage as its
+   last mark; the next boot's first program appends `boot N: previous boot stopped at STAGE`
+   to /var/log/boot.log, and `completed` after a clean end. A log area with one byte changed
+   is refused by its checksum and not printed. An upgrade keeps /var/log/boot.log. The stick
+   boots and reaches its login unchanged when the store is absent or read-only.
+
+6. A black hand-off in QEMU (OVMF, a GOP mode change, no EDID): predicted NOT reproduced;
+   Limine and PAX draw in every configuration tried.
