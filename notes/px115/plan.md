@@ -15,7 +15,8 @@ then both firmwares; records on the lane host; the final records last, after the
    - change: kernel/sched and kernel/procfs (a process's start tick, field 22); user/sudo (`ppid P start T sid
      S`).
    - and, under burrow's change: a second ssh session gets no free sudo after the first's `sudo -k -S`.
-2. `/etc/pax-release`'s `built <SOURCE_DATE_EPOCH>` line (decision 6): tools/mkpax-release, tests/pax-release.
+2. Decision 6 needs no build change: `/etc/pax-release` has carried `source-date-epoch EPOCH -` since 5c57fc56
+   (2026-10-27, before any install there is); `arm` holds the archive's row to the installed one's.
 3. The staged boot in the kernel (decisions 1A, 2B), under `pax.staged=<sha256>` with the installed `root=`:
    - after the disks come up: the attempts file (`/var/lib/pax-upgrade/attempts`, a fixed-size file the arm
      makes; one byte rewritten in place a boot, through the block layer); past two, the installed root;
