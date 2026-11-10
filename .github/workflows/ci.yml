@@ -5054,6 +5054,65 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px115: the staged upgrade's boot (kernel/fstab's load_staged): an
+  # installed-shape disk whose root holds a staged archive boots it as `/`
+  # under pax.staged=, its attempts counted in a file on the root; a third
+  # attempt, another digest and a missing archive are refused by name into
+  # the installed root, the refusal's letter left in the file
+  # (tests/mpx6-staged's header has the rows).
+  mpx6-staged:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-staged')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev e2fsprogs mtools fdisk
+          qemu-system-x86_64 --version
+          df -h . | tail -n 1
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-staged-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: the staged boot's rows; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-staged $PAX_LEGS
+
+      - name: keep the serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-staged
+          path: |
+            build/mpx6-staged/**/serial.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   mpx6-part:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-part')
@@ -5759,6 +5818,7 @@ jobs:
       - mpx6-nodes
       - mpx6-nvme
       - mpx6-ahci
+      - mpx6-staged
       - mpx6-disktools
       - mpx6-install
       - mpx6-kasumi
