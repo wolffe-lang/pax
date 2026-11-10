@@ -21,7 +21,9 @@ The machines: the build Mac, for git, the API reads and the Python-only rows (`t
 
 ## 2. Inputs, verified
 
-- Base: trunk `4d899ea4`.
+- Base: trunk `d56fdd98` (first `4d899ea4`; rebased onto `d56fdd98` after #331 and #332 merged, the one conflict
+  the CHANGELOG's top, both entries kept). Every sha this note and the prediction cite is the rebased commit's;
+  the prediction's two were moved and nothing else in it.
 - The runs: every run of the ci workflow created 2026-11-01 to 2026-11-09 that had completed when read (121; two
   were still queued or running and are left out), with every attempt's jobs (`filter=all`). 189 attempts of the two
   jobs have a log; an attempt a re-run copied counts once. Four runs' attempts have none: they were cancelled within
@@ -31,7 +33,7 @@ The machines: the build Mac, for git, the API reads and the Python-only rows (`t
 
 ## 3. Prediction, scored
 
-From `notes/px113/prediction.txt`, committed after the measurement and before any change (`5ec2b5f3`).
+From `notes/px113/prediction.txt`, committed after the measurement and before any change (`5568c161`).
 
 - **P1, right:** builds, not boots. yew's build is about 95% of the programs, which are 58-61% of an all-tier attempt
   and 84-87% of a pr one. The four legs' boots are 22 to 23 minutes (mpx5-yew) and 20 (mpx5-screen), the same at
@@ -45,9 +47,9 @@ From `notes/px113/prediction.txt`, committed after the measurement and before an
 - **P2, held:** raise, not split (R-px113-1). The numbers are in the budgets README.
 - **P3, held:** the bounds as predicted: mpx5-yew 140 minutes in the all tier and a partial dispatch, 95 in pr and
   full; mpx5-screen 130 and 95.
-- **P4, held, the names refined:** at `73e59f30` (the check, before the workflow change) all eight new rows were red,
+- **P4, held, the names refined:** at `98f3a4cd` (the check, before the workflow change) all eight new rows were red,
   `FAIL CI budget mpx5-yew (tier all): bound=4500s sizing-floor=5860s margin=-1360s` among them, the pr and full rows
-  too; at `96872133` all eight pass and every older row is unchanged. `a6632f8c` then names each row in one word,
+  too; at `03d8b8a8` all eight pass and every older row is unchanged. `3ee0f254` then names each row in one word,
   `budget/<job>/<tier>`, so the plant's record can be held to it by name. `tests/ci-plan` passes unchanged (356 rows):
   no job was added, so the tier job's needs are the same.
 - **P5:** the plant, below.
@@ -55,15 +57,15 @@ From `notes/px113/prediction.txt`, committed after the measurement and before an
 
 ## 4. Evidence index
 
-- `40390df5` `tests/ci-budgets.d/yew-screen.json`: every attempt, phase by phase, the measurement committed first.
-- `413183f0`, `ef631b58` `notes/px113/measure/`: the scripts that read the API and the logs, the per-attempt table
+- `075db35e` `tests/ci-budgets.d/yew-screen.json`: every attempt, phase by phase, the measurement committed first.
+- `0c449818`, `3aa89d88` `notes/px113/measure/`: the scripts that read the API and the logs, the per-attempt table
   (`table.txt`) and every yew build (`yew-builds.tsv`).
-- `5ec2b5f3` `notes/px113/prediction.txt`.
-- `73e59f30` `tests/ci-budgets.py`: mpx5-yew and mpx5-screen held to their floors, each tier; red at 75 minutes.
-- `96872133` `.github/workflows/ci.yml`: the two limits, tiered in mpx6-install's expression form.
-- `20e6495a`, `561f4488` `tests/ci-budgets.d/README.md`: the floors, the bounds, the multiples of the worst run.
-- `c50fe0f0` CHANGELOG.
-- `a6632f8c` the rows' one-word names.
+- `5568c161` `notes/px113/prediction.txt`.
+- `98f3a4cd` `tests/ci-budgets.py`: mpx5-yew and mpx5-screen held to their floors, each tier; red at 75 minutes.
+- `03d8b8a8` `.github/workflows/ci.yml`: the two limits, tiered in mpx6-install's expression form.
+- `1a4ca47b`, `9f425dc7` `tests/ci-budgets.d/README.md`: the floors, the bounds, the multiples of the worst run.
+- `b7d31add` CHANGELOG.
+- `3ee0f254` the rows' one-word names.
 - The local record at the head and the plant's record are listed in the pull request.
 
 What the jobs were, at `2eb9cb9b`, in the all tier:
@@ -75,6 +77,43 @@ What the jobs were, at `2eb9cb9b`, in the all tier:
 
 On trunk alone, mpx5-yew was cut in 8 of 12 runs. At `0ccb2c67` neither job was cut in 29 all-tier attempts.
 
+### yew's build, separated (pax#327)
+
+After the pull request opened, both yew pins were built with both compilers on one host: hasu's block B (CPUs 6-11,
+its three locks held, nothing beside it), in the baseline Ubuntu 24.04 image (`localhost/px88-ubuntu:1`), with no
+network and a 12 GB cap. Each build was `tools/mkyew`'s, `wolf build --release --no-cache --deny-warnings src/yew.lu`
+through a `cc` that adds `-static`. Each wolf used the std its archive bundles; that std is the one the matching
+yew pin names. The inputs were staged by digest: the two wolf release archives and yew's two codeload archives, each
+read twice. The script is `notes/px113/measure/separation.sh` and its table `notes/px113/measure/separation.tsv`. One
+run per cell, interleaved, 2026-11-09T21:55Z to 2026-11-10T04:42Z:
+
+| yew | wolf 0.2.35 | wolf 0.2.36 |
+|---|---:|---:|
+| `0ccb2c67` | 1198 s (user 1655 s) | 1158 s (user 1566 s) |
+| `2eb9cb9b` | 1822 s (user 2431 s) | 2072 s (user 2791 s) |
+
+The two cells that match CI (each pin with its own compiler) built yew byte for byte as CI did: `35f41aeb…`
+(21,369,544 bytes) and `55cc491d…` (24,828,584 bytes).
+
+What it shows:
+- The newer yew costs 52% more to build under wolf 0.2.35 and 79% more under 0.2.36. Most of the growth is
+  yew's own tree, under either compiler.
+- The compiler adds about 14% on the newer yew only (1822 to 2072 s; user time 15%). On the older yew, 0.2.36 is
+  about 3% faster (5% in user time).
+- On this host the pin move as CI made it, old pin and old compiler to new pin and new compiler, is +73% (1198 to
+  2072 s). CI's medians moved +52% (1584 to 2403 s over 129 and 114 builds); one run per cell can't say whether the
+  difference is the host or the spread.
+
+What it doesn't show: any spread, with one run a cell. A difference of 10% or less here (the compiler on the older yew,
+and maybe its 14% on the newer) is within what one run on a shared host can move. Which part of yew's 243 commits, or
+of 0.2.36, costs the time is also not shown.
+
+The floors don't move for it. They are measured from CI's own attempts at the current pin and compiler, which already
+carry this cost. The separation explains the floors; it adds no CI observation. A later pin move that grows yew's build
+again would need new observations; `tests/ci-budgets.py` reads only what `yew-screen.json` holds. And since a build is
+byte for byte the same on another host, building yew once per run and handing it on by its digest (R-px113-3) can be
+checked against that digest.
+
 ## 5. Done-when
 
 - [x] the measurement committed first, every attempt since 11-01, per leg
@@ -82,7 +121,7 @@ On trunk alone, mpx5-yew was cut in 8 of 12 runs. At `0ccb2c67` neither job was 
 - [x] the budget rows red at the base, green at the change
 - [x] `tests/ci-plan` passes; no job added
 - [x] the plant red by name (the pull request lists its record)
-- [x] pax#327 names yew's slower build; a same-host measurement of both pins with both compilers is owed there
+- [x] pax#327 names yew's slower build, and the same-host separation of both pins with both compilers is added there
 - [ ] the hosted tier full under `full-matrix`, both jobs inside their limits
 - [ ] the audit
 
