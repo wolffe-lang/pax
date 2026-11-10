@@ -84,4 +84,40 @@ as after `. /etc/shrc;`, a path (it starts with `/`); the README's prefix line g
 
 ## 4. Evidence
 
-(The takes.)
+Development takes on the Linux build host, each in the rig's container (`localhost/px116-net:1`, px112's image
+`df1ae8c6e5de` under this lane's tag: Ubuntu 24.04, QEMU 8.2.2, OpenSSH 9.6p1, git 2.43.0, dnsmasq 2.91) with KVM
+and the rig's tap, under a block's two lock names, `tests/mpx5-burrowd --tier native --firmware bios`. The dev
+compiler and its std were px112's copies of the distribution's inputs, held to `user/wolf.sums` and `user/wolf.pin`
+by the suite (`PAX_DEV_WOLF_DIR`, `PAX_DEV_STD_DIR`); CI builds them with `tools/mkwolf` and `tools/mkwolf-std`.
+
+- **Red at the rows tip** `86a8a8fc` (burrow at the old pin, the image's configuration `user/`'s; log sha256
+  `30af766c…`): every row green but `FAIL B17 over ssh the variables are b'unset\nunset\nunset\n', the console's
+  b'/usr/share/wolf/compiler-std\n/usr/share/wolf/std\n/etc/ssl/certs/ca-roots.der\n'`. The rig's sshd answered
+  `unset` alike (no `SetEnv` line in the image to give it). B8 and B9, at the console as root, held with `/etc/shrc`
+  now in the image.
+- **Green at the fix's head** `932657d5` (burrow `16858a5`, burrowd `b35bcd3c…` as the pin records; log
+  `4c7c5cee…`): `tests/ci-plan`, the installer's prepare unit (I-burrowd-setenv-yes/no beside I-burrowd-lan) and
+  every mpx5-burrowd row, B0-B17 and B9's scan (no password in 273 records). **Not predicted:** B17's build of the
+  one-line program also succeeded with `WOLF_STD` taken away (`status=0`): in the suite's image the compiler found
+  a std of its own without the variable, so the build half of the row could not tell the two apart.
+- **The row made to tell them apart** (`fd938957`): the image gains lupin's std at `/usr/share/wolf/std`, as both
+  images have it (`tools/fetch-std`), and the program calls `std.fs.write_text`, the call pax#334's failed build
+  named. At `fd938957` (log `85fd56cf…`): the build with `WOLF_STD` taken away failed as pax#334 did (status 2,
+  E0301, `write_text` not found in the module), and the build with no prefix exited 0 but left no `px116.o` (a
+  program that imports std, measured at `18d5ae05`, log `757e66cc…`: `wolf=0`, `ls: cannot access 'px116.o'`), so
+  B17 held what it should not have. It now holds wolf's own status and records the listing (`79506fb1`).
+- **Green at `79506fb1`** (a boot-only take on `fd938957`'s images, whose tree is unchanged since): B0-B17 and the
+  scan, `PASS B17 WOLF_STD=/usr/share/wolf/compiler-std, LUPIN_STD=/usr/share/wolf/std,
+  DEN_TLS_ROOTS=/etc/ssl/certs/ca-roots.der over ssh as the console has them (sshd's answer too); wolf build of a
+  program calling std.fs, no prefix: status 0; without WOLF_STD: status=2`.
+- **The plant** (`tools/system-env` writes no `SetEnv` line, one line; on `fd938957`, branch
+  `px116-plant-setenv2`, no PR): B17 red by name (log `7e9277c3…`): `FAIL B17 over ssh the variables are
+  b'unset\nunset\nunset\n'`, and the record beside it shows pax#334 whole: `wolf build` over ssh with no prefix
+  exits 2, `write_text` `not found in the module` (E0301), the compiler resolving lupin's std.
+
+**The prediction, scored:** the one list, the configuration's line for each image, nothing changed in the installer
+(I-burrowd-setenv held at the first green take), the pin's move, B17 red at the rows tip and green at the head, and
+the other rows unchanged: as predicted. Not predicted: the one-line program built without the variable in the
+suite's image, which made the row's build half blind until it carried lupin's std and a call into std; and
+`--emit=obj` leaves no object for a program that imports std (recorded, not held). The final records wait for the
+head the merge queue gives.
