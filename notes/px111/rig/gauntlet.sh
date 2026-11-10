@@ -9,8 +9,11 @@
 #   pty-native     tests/mpx5-pty, native tier, BIOS and UEFI, KVM
 #   pty-release    the same, release tier
 #   pty-tcg        native tier, BIOS and UEFI, TCG
-#   jobs           tests/mpx5-jobs, native BIOS (px48's job control on the console, whose
-#                  sessions kernel/sched now keeps per terminal)
+#   jobs-build     tests/mpx5-jobs --only build, native BIOS (px48's job control on the
+#                  console, whose sessions kernel/sched now keeps per terminal)
+#   jobs-linux     its Linux side on the host (--only linux): tools/linux-tree runs a throwaway
+#                  container of its own, which a step's container has no engine for
+#   jobs           its boots held to both (--images)
 #   console        tests/mpx3-console, native BIOS (the console's line discipline, now by id)
 #   users          tests/mpx5-users, native BIOS (priv.pax's /dev/ptmx rows)
 set -uo pipefail
@@ -28,6 +31,10 @@ gauntlet_step check ind ctr 0 localhost/px75-ubuntu:2 python3 -I tests/mpx5-pty.
 gauntlet_step pty-native ind suite tests/mpx5-pty --tier native --firmware both --accel kvm || exit $?
 gauntlet_step pty-release ind suite tests/mpx5-pty --tier release --firmware both --accel kvm || exit $?
 gauntlet_step pty-tcg ind suite tests/mpx5-pty --tier native --firmware both --accel tcg || exit $?
-gauntlet_step jobs ind suite tests/mpx5-jobs --tier native --firmware bios || exit $?
+: "${PAX_BUILD:?take.sh's build directory}"
+host() { PATH=$(dirname "$P"):$PATH taskset -c "$CPUS" "$@" < /dev/null; }
+gauntlet_step jobs-build ind suite tests/mpx5-jobs --only build --tier native --firmware bios || exit $?
+gauntlet_step jobs-linux ind host tests/mpx5-jobs --only linux --images "$PAX_BUILD/mpx5-jobs" || exit $?
+gauntlet_step jobs ind suite tests/mpx5-jobs --images "$PAX_BUILD/mpx5-jobs" --tier native --firmware bios || exit $?
 gauntlet_step console ind suite tests/mpx3-console --tier native --firmware bios || exit $?
 gauntlet_step users ind suite tests/mpx5-users --tier native --firmware bios || exit $?
