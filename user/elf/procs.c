@@ -61,10 +61,12 @@
      fcntl     F_DUPFD_CLOEXEC, F_GETFD, F_SETFD, F_GETFL of the ends
    and px115's:
      start     proc_pid_stat(5)'s starttime (field 22, clock ticks since
-               the boot): set in the parent's /proc/self/stat, set in a
-               child's, and the child's not before its parent's (sudo's
-               record with no terminal names its parent by pid and start
-               time, sudoers_timestamp(5)); the values themselves differ
+               the boot): read in the parent's /proc/self/stat (pid 1 may
+               start in the clock's first tick, so its 0 is an answer),
+               set in a child's (it starts after the earlier cases' naps),
+               and the child's not before its parent's (sudo's record
+               with no terminal names its parent by pid and start time,
+               sudoers_timestamp(5)); the values themselves differ
                between hosts, so only those three answers are printed
    and `kill(getpid(), 0)`, whose answer it does not print (PAX refuses
    it by name; Linux answers 0: the test reads PAX's log line).
@@ -387,12 +389,12 @@ static int child(char **argv) {
     }
     if (same(role, "start")) { /* argv[2]: the parent's start time, or -1 */
         i64 mine = starttime(), theirs = argv[2][0] == '-' ? -1 : atoi64(argv[2]);
-        put("start: the parent's set ");
-        put(theirs > 0 ? "yes" : "no");
+        put("start: the parent's read ");
+        put(theirs >= 0 ? "yes" : "no");
         put(", the child's set ");
         put(mine > 0 ? "yes" : "no");
         put(", the child's not before the parent's ");
-        put(mine > 0 && theirs > 0 && mine >= theirs ? "yes" : "no");
+        put(mine > 0 && theirs >= 0 && mine >= theirs ? "yes" : "no");
         end();
         return 0;
     }
