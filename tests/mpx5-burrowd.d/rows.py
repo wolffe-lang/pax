@@ -225,11 +225,50 @@ class LinuxSide:
 
 # ---------------------------------------------------------------- the console
 
+def tap_holders():
+    """The pids that hold the rig's tap open: tun's fdinfo names the device (`iff:`); the rig's own
+    container sees only its own processes."""
+    held = set()
+    for fd in pathlib.Path('/proc').glob('[0-9]*/fdinfo/*'):
+        try:
+            if ('iff:\t%s\n' % TAP) in fd.read_text():
+                held.add(int(fd.parent.parent.name))
+        except (OSError, ValueError):
+            pass
+    return held
+
+
+def tap_released(timeout=30):
+    """Waits until no process holds the tap; one still holding it after `timeout` s (a QEMU that
+    outlived its wrapper, the rig's own) is killed. Returns what was killed."""
+    end = time.monotonic() + timeout
+    while tap_holders() and time.monotonic() < end:
+        time.sleep(0.1)
+    killed = sorted(tap_holders())
+    for pid in killed:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    end = time.monotonic() + 10
+    while tap_holders() and time.monotonic() < end:
+        time.sleep(0.1)
+    return killed
+
+
 class Console:
     """QEMU through tools/qemu-run, COM1 on two FIFOs: the transcript read
-    as it comes, lines typed a byte every 20 ms."""
+    as it comes, lines typed a byte every 20 ms. Each boot starts with the tap
+    let go by the boot before it, and quit() returns only once QEMU has let go of
+    it: tools/qemu-run, terminated, ends before its QEMU does, and a boot that
+    found the tap still held died at once (`could not configure /dev/net/tun
+    (pxbd0): Device or resource busy`), an empty console."""
 
     def __init__(self, out, iso, drive):
+        self.qlog = out / 'run' / 'com1.out.qemu.log'
+        stale = tap_released()
+        if stale:
+            say('rig: the tap was still held by pid %s before this boot; killed' % stale)
         self.run = out / 'run'
         self.run.mkdir(mode=0o700, exist_ok=True)
         self.out_fifo, self.in_fifo, self.mon = (self.run / n for n in ('com1.out', 'com1.in', 'monitor'))
@@ -249,6 +288,17 @@ class Console:
                '-device', 'virtio-net-pci,netdev=n0,mac=' + MAC]
         self.q = subprocess.Popen([str(x) for x in cmd], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT)
+
+    def silent(self):
+        """'' while the machine has written to its console; else why it never booted (QEMU's own
+        words from tools/qemu-run's log), so a row cannot read an empty console as a missing line."""
+        if self.seen.strip():
+            return ''
+        try:
+            words = self.qlog.read_text(errors='replace').strip()[-300:]
+        except OSError:
+            words = ''
+        return 'the machine never booted (its console is empty; QEMU: %r)' % (words or 'nothing')
 
     def pump(self, wait=0.1):
         r, _, _ = select.select([self.rfd], [], [], wait)
@@ -319,6 +369,9 @@ class Console:
             except subprocess.TimeoutExpired:
                 self.q.terminate()
                 self.q.wait(timeout=30)
+        stale = tap_released()
+        if stale:
+            say('rig: QEMU outlived tools/qemu-run and held the tap; killed pid %s' % stale)
         self.pump(0.2)
         self.log.close()
         os.close(self.rfd)
@@ -507,6 +560,9 @@ def first_boot(con, client, linux):
     # The whole line, to its newline: the serial arrives in pieces, and a pattern ending `$` matched a
     # line cut short (dev-p1: `… SHA256:… pa`).
     m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) ([^\n]*)\n', 300)
+    if not m and con.silent():
+        bad('B1', con.silent())
+        return None
     if not m or not m.group(2).endswith(b'(made at this boot)'):
         bad('B1', 'no `burrowd: host key … (made at this boot)` line on the console: %r'
             % (m.group(0) if m else con.text()[-600:]))
@@ -720,7 +776,7 @@ def console_rows(con, client):
 def second_boot(con, client, fp):
     m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) ([^\n]*)\n', 300)
     if not m:
-        bad('B10', 'no host key line on the second boot')
+        bad('B10', con.silent() or 'no host key line on the second boot')
         return
     line = m.group(0).decode().rstrip('\n')
     if not con.wait(r'login: $', 120):
@@ -754,7 +810,7 @@ def live_image(work):
 def stick_rows(con, client):
     m = con.wait(r'^burrowd: host key (256 SHA256:[A-Za-z0-9+/]{43}) [^\n]*\(made at this boot\)\n', 300)
     if not m or not con.wait(r'login: $', 120):
-        bad('B11', 'the stick shape: no host key line made at boot, or no login prompt: %r' % con.text()[-500:])
+        bad('B11', con.silent() or 'the stick shape: no host key line made at boot, or no login prompt: %r' % con.text()[-500:])
         return
     r = None
     for _ in range(10):
