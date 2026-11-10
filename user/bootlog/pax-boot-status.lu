@@ -1,0 +1,227 @@
+//! pax-boot-status — how the last boots ended (px118; notes/px118-boot-diagnosis.md),
+//! from the marks the kernel keeps (kernel/bootmark: CMOS and memory) and the console a
+//! previous boot left in memory (kernel/bootlog), which the kernel offers as
+//! /proc/pax-boot and /proc/pax-bootlog.
+//!
+//!     pax-boot-status record     (root; the boot's first program runs it, once a boot)
+//!     pax-boot-status            (anyone: the last ten boots and how each ended)
+//!
+//! `record` appends to two files:
+//! - /var/log/boot.log, root's, 0600: a block a boot, `== boot N, TIME`, then how the
+//!   previous boot ended (`previous: boot P stopped at STAGE` or `… completed`), its
+//!   stages, what CMOS was to this boot (the claim of its eight bytes said once, with
+//!   their offsets), and the previous boot's console between two marker lines when the
+//!   kernel found it intact by its checksum (a refused one is named and never printed).
+//!   Past 256 KiB the file is rotated: boot.log.1 … boot.log.4, the oldest dropped;
+//! - /var/log/boot.summary, 0644, one line a boot, `N TIME previous=P ended=STAGE
+//!   from=cmos|memory|none cmos=claimed|held|refused|off`, kept to its last 100 lines
+//!   once it passes 200.
+//! Without /proc/pax-boot (a kernel from before px118) it does nothing and exits 0. A
+//! write that fails is said on standard error and never stops the boot (exit 0).
+//!
+//! The show reads only boot.summary, which every user may read: for each of the last ten
+//! lines, the previous boot's end as that line's boot found it, then this boot's stage.
+//!
+//! Builtins only (fs, env, time); no wolf-std. `--root DIR` before the command puts the
+//! two files under DIR (the rows only).
+
+const PROC_BOOT: str = "/proc/pax-boot"
+const PROC_LOG: str = "/proc/pax-bootlog"
+const LOG: str = "/var/log/boot.log"
+const SUMMARY: str = "/var/log/boot.summary"
+const LOG_MAX: int = 262144
+const LOG_KEEP: int = 4
+const SUMMARY_MAX: int = 200
+const SUMMARY_KEEP: int = 100
+const SHOW: int = 10
+
+fn main() -> int {
+    let args = env_args()
+    var root = ""
+    var cmd = ""
+    var i = 0
+    while i < args.len {
+        if args[i] == "--root" && i + 1 < args.len {
+            root = args[i + 1]
+            i += 2
+            continue
+        }
+        if cmd.len != 0 {
+            eprint("pax-boot-status: one command: record, or none")
+            return 2
+        }
+        cmd = args[i]
+        i += 1
+    }
+    if cmd == "record" { return record(root) }
+    if cmd.len == 0 { return show(root) }
+    eprint("pax-boot-status: usage: pax-boot-status [record]")
+    2
+}
+
+/// `/proc/pax-boot`'s facts: the first word of each line, the rest.
+fn facts(text: str) -> Map[str, str] {
+    var m = Map[str, str]()
+    for line in text.lines() {
+        let at = line.find(" ") else -1
+        if at > 0 { m[line[0..at]] = line[at + 1..] }
+    }
+    m
+}
+
+fn fact(m: Map[str, str], k: str) -> str {
+    m[k] else ""
+}
+
+fn two(n: int) -> str {
+    if n < 10 then "0{n}" else "{n}"
+}
+
+/// The time as `YYYY-MM-DDTHH:MM:SSZ` (UTC: PAX keeps no zone).
+fn stamp(secs: int) -> str {
+    let days = secs / 86400
+    let rem = secs % 86400
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 then mp + 3 else mp - 9
+    let y = yoe + era * 400 + (if m <= 2 then 1 else 0)
+    "{y}-{two(m)}-{two(d)}T{two(rem / 3600)}:{two((rem % 3600) / 60)}:{two(rem % 60)}Z"
+}
+
+/// Append `data` to `path`, making it with `perm` first when it is not there.
+fn append(path: str, data: List[byte], perm: int) -> bool {
+    if !fs_exists(path) {
+        let fd = fs_open_perm(path, 4, perm) else |_| { return false }
+        fs_close(fd) else |_| {}
+    }
+    let fd = fs_open_mode(path, 2) else |_| { return false }
+    var ok = true
+    fs_write_chunk(fd, data) else |_| { ok = false }
+    fs_sync(fd) else |_| { ok = false }
+    fs_close(fd) else |_| {}
+    ok
+}
+
+/// boot.log past LOG_MAX with `more` bytes: .1 … .LOG_KEEP, the oldest dropped.
+fn rotate(path: str, more: int) {
+    let size = fs_size(path) else |_| { return }
+    if size + more <= LOG_MAX { return }
+    fs_remove("{path}.{LOG_KEEP}") else |_| {}
+    var k = LOG_KEEP - 1
+    while k >= 1 {
+        if fs_exists("{path}.{k}") { fs_rename("{path}.{k}", "{path}.{k + 1}") else |_| {} }
+        k -= 1
+    }
+    fs_rename(path, "{path}.1") else |_| {}
+}
+
+/// boot.summary kept to its last SUMMARY_KEEP lines once it passes SUMMARY_MAX.
+fn trim_summary(path: str) {
+    let t = fs_read_text(path) else |_| { return }
+    let l = t.lines()
+    if l.len <= SUMMARY_MAX { return }
+    var out = ""
+    for k in (l.len - SUMMARY_KEEP)..l.len { out += "{l[k]}\n" }
+    let tmp = "{path}.new"
+    fs_remove(tmp) else |_| {}
+    if !append(tmp, out.bytes(), 420) { return }
+    fs_rename(tmp, path) else |_| {}
+}
+
+fn record(root: str) -> int {
+    let text = fs_read_text(PROC_BOOT) else |_| { return 0 }
+    if (os_euid() else 1) != 0 {
+        eprint("pax-boot-status: record is root's")
+        return 1
+    }
+    let f = facts(text)
+    let now = stamp(time_unix_ms() / 1000)
+    let boot = fact(f, "boot")
+    let prev = fact(f, "previous").words()
+    let cmos = fact(f, "cmos").words()
+    let range = if cmos.len >= 1 then cmos[0] else "?"
+    let mode = if cmos.len >= 2 then cmos[1] else "?"
+    let src = fact(f, "from")
+    let logw = fact(f, "log").words()
+    var p_n = "none"
+    var p_end = "none"
+    var said = "previous: none recorded"
+    if prev.len == 2 {
+        p_n = prev[0]
+        p_end = prev[1]
+        said = if p_end == "end" then "previous: boot {p_n} completed" else "previous: boot {p_n} stopped at {p_end}"
+    }
+    var block = "== boot {boot}, {now}\n{said} (marks from {src})\nstages: {fact(f, "stages")}\n"
+    if mode == "claimed" {
+        block += "cmos: {range} claimed for the marks (they read zero; written only while they hold PAX's own)\n"
+    } else if mode == "refused" {
+        block += "cmos: {range} refused: they hold another's bytes ({fact(f, "found")}); none written\n"
+    } else {
+        block += "cmos: {range} {mode}\n"
+    }
+    var tail = List[byte]()
+    if logw.len == 2 && logw[0] == "intact" {
+        let bytes = fs_read_bytes(PROC_LOG) else |_| List[byte]()
+        block += "log: the previous boot's console, {bytes.len} bytes:\n--- console of boot {p_n} ---\n"
+        tail = bytes
+    } else if logw.len >= 1 && logw[0] == "refused" {
+        block += "log: the previous boot's console was refused by its checksum; not printed\n"
+    } else {
+        block += "log: {fact(f, "log")}\n"
+    }
+    var data = block.bytes()
+    if tail.len > 0 {
+        for b in tail { (mut data).push(b) }
+        if (tail[tail.len - 1] as int) != 10 { (mut data).push(10 as byte) }
+        for b in "--- end of the console of boot {p_n} ---\n".bytes() { (mut data).push(b) }
+    }
+    let dir = "{root}/var/log"
+    if !fs_is_dir(dir) { fs_create_dir_all(dir) else |_| {} }
+    let log = "{root}{LOG}"
+    rotate(log, data.len)
+    if !append(log, data, 384) { eprint("pax-boot-status: {log} could not be written") }
+    let line = "{boot} {now} previous={p_n} ended={p_end} from={src} cmos={mode}\n"
+    let sum = "{root}{SUMMARY}"
+    if !append(sum, line.bytes(), 420) { eprint("pax-boot-status: {sum} could not be written") }
+    trim_summary(sum)
+    0
+}
+
+fn kv(w: List[str], k: str) -> str {
+    for x in w {
+        if x.starts_with("{k}=") { return x[k.len + 1..] }
+    }
+    ""
+}
+
+fn show(root: str) -> int {
+    let t = fs_read_text("{root}{SUMMARY}") else |_| ""
+    let l = t.lines()
+    let first = if l.len > SHOW then l.len - SHOW else 0
+    print("the last boots and how each ended ({SUMMARY}, as the next boot found it):")
+    for k in first..l.len {
+        let w = l[k].words()
+        if w.len < 3 { continue }
+        let p = kv(w, "previous")
+        let e = kv(w, "ended")
+        let src = kv(w, "from")
+        if p == "none" {
+            print("  boot {w[0]} at {w[1]}: no earlier boot recorded")
+        } else if e == "end" {
+            print("  boot {p}: completed (found by boot {w[0]} at {w[1]}, from {src})")
+        } else {
+            print("  boot {p}: stopped at {e} (found by boot {w[0]} at {w[1]}, from {src})")
+        }
+    }
+    let now = fs_read_text(PROC_BOOT) else |_| ""
+    if now.len > 0 {
+        let f = facts(now)
+        print("  boot {fact(f, "boot")}: this boot, at {fact(f, "stage")}")
+    }
+    0
+}
