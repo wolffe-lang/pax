@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OVMF_CODE = Path('/usr/share/OVMF/OVMF_CODE_4M.fd')
 OVMF_VARS = Path('/usr/share/OVMF/OVMF_VARS_4M.fd')
 MARKER = 'px115-staged-archive-marker'
+PAD_MIB = 384
 bad = False
 
 
@@ -60,13 +61,22 @@ def archives():
     staged = WORK / 'staged.cpio'
     run([ROOT / 'tools/mkinitramfs', staged, *common, f'/bin/staged-init={staged_init}',
          f'/etc/px115-staged={a / "marker"}', f'/etc/fstab={a / "fstab-staged"}'])
+    # T6's archive: the same with PAD_MIB of random bytes beside it (an image's size, read and hashed whole).
+    pad = a / 'pad'
+    with open(pad, 'wb') as f:
+        for _ in range(PAD_MIB):
+            f.write(os.urandom(1 << 20))
+    big = WORK / 'staged-big.cpio'
+    run([ROOT / 'tools/mkinitramfs', big, *common, f'/bin/staged-init={staged_init}',
+         f'/etc/px115-staged={a / "marker"}', f'/etc/fstab={a / "fstab-staged"}', f'/var/px115-pad={pad}'])
+    pad.unlink()
     root = WORK / 'root.cpio'
     run([ROOT / 'tools/mkinitramfs', root, *common, f'/bin/installed-init={installed_init}',
          f'/etc/pax-run={a / "pax-run"}', f'/etc/fstab={a / "fstab-root"}', '/var/', '/var/lib/'])
-    return staged, root
+    return staged, root, big
 
 
-def make_disk(name, staged, root, digest, with_archive=True):
+def make_disk(name, staged, root, digest, with_archive=True, size='256M'):
     conf = WORK / f'{name}.conf'
     conf.write_text('timeout: 0\nserial: yes\n\n'
                     '/staged\n    protocol: limine\n    path: boot():/boot/pax\n'
@@ -75,7 +85,7 @@ def make_disk(name, staged, root, digest, with_archive=True):
     img = WORK / f'{name}.img'
     env = dict(os.environ, SOURCE_DATE_EPOCH='1794269606')
     r = subprocess.run([str(ROOT / 'tools/mkdisk'), '--gpt', '--no-journal', '--kernel', str(KERNEL), '--root', str(root),
-                        '--conf', str(conf), '--label', 'pax-root', '256M', str(img)], capture_output=True, env=env)
+                        '--conf', str(conf), '--label', 'pax-root', size, str(img)], capture_output=True, env=env)
     if r.returncode:
         raise RuntimeError('tools/mkdisk: ' + r.stderr.decode(errors='replace')[-600:])
     at = root_offset(img)
@@ -172,7 +182,7 @@ def installed_ok(row, text, why):
 
 
 def main():
-    staged, root = archives()
+    staged, root, big = archives()
     digest = hashlib.sha256(staged.read_bytes()).hexdigest()
     say(f'mpx6-staged: the staged archive {staged.stat().st_size} bytes, sha256 {digest}')
     for fw in LEGS:
@@ -212,6 +222,18 @@ def main():
         text, _ = boot(img, fw, f'{fw}-T5')
         if installed_ok(f'T5 {fw}', text, 'staged: no /var/lib/pax-upgrade/staged/archive'):
             say(f'PASS T5 {fw}: no archive, refused by name; the installed root')
+        for f in WORK.glob(f'{fw}-[abc].img'):
+            f.unlink()
+        # T6: an image-sized archive (PAD_MIB beside the rest): read, mapped and hashed whole, then `/`.
+        bigd = hashlib.sha256(big.read_bytes()).hexdigest()
+        img = make_disk(f'{fw}-d', big, root, bigd, size='768M')
+        t0 = time.monotonic()
+        text, exited = boot(img, fw, f'{fw}-T6', timeout=600)
+        secs = time.monotonic() - t0
+        if staged_ok(f'T6 {fw}', text, exited, 1):
+            say(f'PASS T6 {fw}: an archive of {big.stat().st_size} bytes staged, read, held to its digest and made /; '
+                f'the boot to its reboot in {secs:.1f} s')
+        img.unlink()
     say('mpx6-staged: ' + ('FAIL' if bad else 'PASS'))
     sys.exit(1 if bad else 0)
 
