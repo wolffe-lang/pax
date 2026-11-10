@@ -2542,6 +2542,8 @@ jobs:
           git --version
           sudo -n true && echo "sudo -n: yes"
           ls -l /dev/net/tun
+          ls -l /dev/kvm || true
+          grep -m2 -E '^(vendor_id|model name)' /proc/cpuinfo
           python3 --version
           uname -sr
 
@@ -2569,6 +2571,13 @@ jobs:
           PAX_REQUIRE_BURROWD_RIG: "1"
         run: sudo -E env "PATH=$PATH" tests/mpx5-burrowd --images build/mpx5-burrowd $PAX_LEGS
 
+      # The boots ran as root, so their transcripts are root's: the upload
+      # runs as the runner and could not read them (pax#340's first red
+      # kept none). Give the trees back before the upload, red or green.
+      - name: the transcripts the runner's again (the boots ran as root)
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" build/mpx5-burrowd build/mpx5-burrowd-runs || true
+
       - name: keep the transcripts and the logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -2580,6 +2589,7 @@ jobs:
             build/mpx5-burrowd/*.txt
             build/mpx5-burrowd/*/kmain_console.build-kernel.log
             build/mpx5-burrowd-runs/*/boot*/serial.log
+            build/mpx5-burrowd-runs/*/boot*/*.meta
             build/mpx5-burrowd-runs/*/dnsmasq.log
             build/mpx5-burrowd-runs/*/sshd/sshd.log
           retention-days: 14
