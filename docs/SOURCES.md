@@ -2240,7 +2240,8 @@ QEMU's. Every download below was fetched twice and its sha256 read twice; the di
   location, `timeout`, `quiet`, `verbose`, `serial`, `default_entry`, `resolution`, `interface_resolution`,
   `graphics`, `firmware_logo`; and Limine run as a program under QEMU, never read as source.
 - **The Intel 8254 data sheet** (mode 3's square wave, the counter's load) and **the IBM PC/AT technical reference**
-  (port 0x61: bits 0 and 1 gate the speaker, bit 5 reads timer 2's output back; port 0x80, the power-on self-test
+  (port 0x61: bit 0 gates timer 2, bit 1 enables the speaker's data, bit 5 reads timer 2's output back, so a rest
+  between the refused screen's pips is timed with bit 0 alone; port 0x80, the power-on self-test
   code; ports 0x70 and 0x71 and the CMOS map: 0x0E diagnostic status, 0x0F the reset reason, 0x10-0x2D under the
   checksum at 0x2E-0x2F, 0x30-0x3F extended memory, the century at 0x32), for the beeps and the marks.
 - **The Motorola MC146818 data sheet** (registers 0x00-0x0D are the clock's; the rest is battery-backed RAM) and
@@ -2249,6 +2250,9 @@ QEMU's. Every download below was fetched twice and its sha256 read twice; the di
 - **ACPI 6.5 §5.2.9** (the FADT's CENTURY byte, at offset 108), and **UEFI 2.10** (the system table, GOP), for what
   PAX has and what an EFI variable would need.
 - **The Intel SDM vol. 2** (CLFLUSH, MFENCE) for the log's flushes.
+- **kernel/boot_info's framebuffer and HHDM accessors** (an earlier lane's reading of the Limine protocol: address,
+  width, height, pitch, bits a pixel, memory model, colour masks) for the framebuffer each boot names; nothing new
+  read for it.
 - **The uapi `linux/reboot.h`** (reboot(2)'s two magic words and RESTART) and `arch/x86/entry/syscalls/syscall_64.tbl`
   for the rows' first program.
 - **QEMU 8.2 as a black box**: the `wav` audio backend and `pcspk-audiodev`, the monitor's `system_reset`,
