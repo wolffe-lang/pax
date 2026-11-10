@@ -119,6 +119,7 @@
 //! its procfs); no other kernel's source.
 
 use block
+use boot_info
 use bootlog
 use bootmark
 use cred
@@ -951,6 +952,13 @@ pub fn child_at(d: u64, k: u64) -> u64 {
 ///     from <cmos|memory|none>
 ///     stages <the previous boot's stages, by name>
 ///     log <intact <bytes>|refused|none|no-area>
+///     framebuffer <w>x<h> <bpp> bpp pitch <p> rgb <r>:<rs> <g>:<gs> <b>:<bs> at 0x<physical>  or  framebuffer none
+///     screen <drawn|refused: <why>|not drawn>
+///     prevscreen <drawn|refused|not drawn|none>
+///
+/// (the framebuffer as kernel/bootmark's report words it: the one Limine
+/// handed, with ` model <m>` when it is not RGB and ` (the first of <n>)`
+/// when it handed more).
 fn paxboot(base: u64) -> u64 {
     let (b, l) = bootmark.this_boot()
     var n = put_s(base, 0, "boot ")
@@ -995,7 +1003,56 @@ fn paxboot(base: u64) -> u64 {
     } else {
         n = put_s(base, n, "none")
     }
+    n = put_s(base, n, "\nframebuffer ")
+    n = put_fb(base, n)
+    n = put_s(base, n, "\nscreen ")
+    let sc = bootmark.screen()
+    if sc == 2 {
+        n = put_s(base, n, "refused: ")
+        n = put_s(base, n, bootmark.refused_why())
+    } else {
+        n = put_s(base, n, if sc == 1 { "drawn" } else { "not drawn" })
+    }
+    n = put_s(base, n, "\nprevscreen ")
+    let psc = bootmark.prev_screen()
+    n = put_s(base, n, if from == 0 { "none" } else if psc == 2 { "refused" } else if psc == 1 { "drawn" } else { "not drawn" })
     put_b(base, n, 10)
+}
+
+/// px118: the framebuffer Limine handed, as kernel/bootmark's report
+/// words it.
+fn put_fb(base: u64, at: u64) -> u64 {
+    if boot_info.fb_count() == 0 || boot_info.fb_address() == 0 {
+        return put_s(base, at, "none")
+    }
+    var n = put_dec(base, at, boot_info.fb_width())
+    n = put_b(base, n, 120)
+    n = put_dec(base, n, boot_info.fb_height())
+    n = put_b(base, n, 32)
+    n = put_dec(base, n, boot_info.fb_bpp())
+    n = put_s(base, n, " bpp pitch ")
+    n = put_dec(base, n, boot_info.fb_pitch())
+    n = put_s(base, n, " rgb")
+    var m: u64 = 0
+    while m < 3 {
+        n = put_b(base, n, 32)
+        n = put_dec(base, n, boot_info.fb_mask(m, false))
+        n = put_b(base, n, 58)
+        n = put_dec(base, n, boot_info.fb_mask(m, true))
+        m += 1
+    }
+    n = put_s(base, n, " at 0x")
+    n = put_hex_w(base, n, bootmark.fb_physical(), 0)
+    if boot_info.fb_model() != 1 {
+        n = put_s(base, n, " model ")
+        n = put_dec(base, n, boot_info.fb_model())
+    }
+    if boot_info.fb_count() > 1 {
+        n = put_s(base, n, " (the first of ")
+        n = put_dec(base, n, boot_info.fb_count())
+        n = put_b(base, n, 41)
+    }
+    n
 }
 
 /// px118: bytes [off, off + k) of the previous boot's console
