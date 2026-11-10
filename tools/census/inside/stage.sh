@@ -10,7 +10,9 @@ mkdir -p "$S/dl"
 cd "$S"
 
 fetch() { # fetch <url> <sha256> <out>
-    [ -f "$3" ] || curl -sSfL --retry 3 --retry-delay 5 -o "$3" "$1"
+    # tl38: tools/net-retry, mounted by tools/census/census: bounded tries
+    # with backoff, connect and total limits, a failure named by its URL.
+    [ -f "$3" ] || sh /census-tools/net-retry url "$1" "$3"
     have=$(sha256sum "$3" | cut -d' ' -f1)
     if [ "$have" != "$2" ]; then
         echo "stage: REFUSED $3: sha256 $have, pin wants $2" >&2
