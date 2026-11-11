@@ -406,7 +406,12 @@ with QEMU 8.2.2 and Ubuntu's OVMF), never on a machine of the kind in the report
   Limine options move no other suite's rows. `tests/mpx3-console` needs its Linux reference (`tools/linux-tty`) to
   unshare a pid namespace, which the build host's container allows only with that capability added: its first try
   without it ran PAX's side whole but had no Linux session to compare (T0, and T2 and T5 against an empty one).
-- **The plant** (section 12): `px118-plant-guard-2`, one hunk in `kernel/bootmark/bootmark.lu` on the final head:
+- **The assembler seam**: `tests/kernel-as`. The hosted run at the PR's first head found K5 red, the only
+  red job: the pinned clef refused `boot/cpu.S` line 140, `clflush (%rdi)` (`unknown_mnemonic clflush: SDM vol.2
+  instruction set`), and its table has no `mfence` either. `pax_clflush` now writes both as their encodings
+  (`401439cb`), as `cpu.S` already writes the debug-register moves for clef, and the clef kernel is again byte for
+  byte the GNU-as one (K5). The lane's local records had not run this suite.
+- **The plant** (section 12): `px118-plant-guard-4`, one hunk in `kernel/bootmark/bootmark.lu` on the final head:
   another's CMOS bytes taken as free. R1 goes red by name on both firmwares.
 - **The gauntlet** at the final head, through the org's recorder, kept with the lane's evidence outside the tree:
   `tests/ci-plan`, `tests/mpx6-bootlog`, the two installer units, `tests/mpx6-staged`.
@@ -435,6 +440,7 @@ options (section 6) and the beeps (section 5), accepted as done.
 - [x] `tests/ci-plan`
 - [x] `tests/mpx6-bootlog --tier native --firmware both` (B1–B4, M1, M2, L1, S1–S7, R1, L2, W1, N1, U1, U2, P1, K1–K3, F1–F5)
 - [x] `tests/mpx6-bootlog.d/handoff.py` (item 9's probe)
+- [x] `tests/kernel-as --tier native` (K5: the clef kernel byte for byte the GNU-as kernel)
 - [x] `tests/mpx6-install --only snapshot` (I-runtime-boot-log, red first at `389f933e`)
 - [x] `tests/mpx6-install --only pax-upgrade`
 - [x] `tests/mpx6-staged --tier native --firmware both`
