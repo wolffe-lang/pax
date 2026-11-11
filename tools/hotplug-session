@@ -1,0 +1,853 @@
+#!/usr/bin/env python3
+"""Plug USB devices into a running PAX, on two xHCI controllers (px120,
+pax#348); no driver internals consulted.
+
+The machine (tools/qemu-run): q35 with 1536 MiB of memory, 512 MiB of it
+below 4 GiB (`max-ram-below-4g`), so there are frames above 4 GiB as on
+any desktop. Controller 1 is a qemu-xhci with nothing on it at boot (its
+interrupt INTx: QEMU 8.2's qemu-xhci has no MSI); controller 2 a
+nec-usb-xhci (MSI) with a usb-mouse on its first USB 2 port, four usb-hubs
+on the next four and 25 usb-ccid readers on the hubs' ports at boot: 30
+of the 32 device records PAX keeps a controller, the readers held and not
+driven. Each controller has eight USB 2 ports after its four USB 3 ones,
+so QEMU's port N is PAX's root port N + 4 (usb1-6 is QEMU's port 2 of
+controller 1).
+
+The probe (user/elf/hotplugprobe.c) first takes, touches and gives back
+`--churn` MiB, more than the memory below 4 GiB holds, so the kernel's
+frame allocator has moved on past it, as on a system that has run a
+while; then it prints every /dev/mouse0 record and every console byte.
+Every plug below is made after that, through QMP.
+
+Devices: QEMU's usb-mouse and usb-kbd, and two composite HID devices this
+tool plays itself over QEMU's usb-redir (the USB redirection protocol,
+docs/SOURCES.md px120), both at full speed: COMPOSITE_MOUSE, whose first
+interface is a boot mouse (5 buttons, 16-bit X and Y, a wheel), its
+second a boot keyboard and its third vendor-defined (the gaming mouse of
+pax#348); and COMPOSITE_KEYBOARD, whose first interface is a boot
+keyboard, its second a HID interface of subclass 0 with consumer keys and
+an all-keys bitmap (no pointer), its third vendor-defined.
+
+Rows, each `PASS <row> ...` or `FAIL <row> <why>` at column 0; the exit
+status is 0 only when every row passed. The judge reads the serial log
+and the byte offset at which each step began (`steps.txt`), and decodes
+records by notes/px109-the-mouse.md's table.
+
+  churn            the probe gave its memory back before any plug
+  boot-pointer     controller 2's mouse at boot is a pointer (as on the
+                   machine of pax#348)
+  c1-mouse         a usb-mouse plugged into controller 1: one pointer, its
+                   NEW record and a move only it made
+  c1-keyboard      a usb-kbd: its line and the keys typed on it
+  c1-composite-mouse     COMPOSITE_MOUSE: the keyboard and the pointer, at
+                   full speed, its move and its key
+  c1-composite-keyboard  COMPOSITE_KEYBOARD: the keyboard and its key; its
+                   HID interface refused as a pointer once, by name
+  c1-loop          the mouse unplugged, plugged and unplugged LOOPS times
+                   (past the 32 records a controller keeps), plugged: as
+                   many plugs as unplugs, a new pointer number each, the
+                   last one moves
+  c1-composite-loop      COMPOSITE_MOUSE disconnected and connected
+                   COMPOSITE_LOOPS times: both interfaces each time
+  c2-hub-mouse     a usb-mouse behind controller 2's hub (31 records)
+  c2-composite-mouse     COMPOSITE_MOUSE on controller 2 (32 records)
+  c2-refused-once  two usb-mice past the 32 records, one on a hub port and
+                   one on a root port, watched HOLD seconds: one line
+                   each, never a stream
+  c2-free-hold     a record freed (the composite disconnected), watched
+                   HOLD seconds: the refused devices are not tried again,
+                   since their ports did not change
+  c2-replug-taken  the root port's mouse unplugged and plugged: taken
+  c2-loop          it unplugged and plugged LOOPS times at the full 32
+  no-stream        the whole log: the two lines of c2-refused-once, no
+                   line about memory, one pointer refusal
+  keyboard-path    every key came over USB (PAX's summary: 0 scancodes)
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+ROWS = ['churn', 'boot-pointer', 'c1-mouse', 'c1-keyboard', 'c1-composite-mouse', 'c1-composite-keyboard',
+        'c1-loop', 'c1-composite-loop', 'c2-hub-mouse', 'c2-composite-mouse', 'c2-refused-once',
+        'c2-free-hold', 'c2-replug-taken', 'c2-loop', 'no-stream', 'keyboard-path']
+NEW = 16
+REL = 1
+LOOPS = 40          # plug/unplug cycles per controller: past the 32 records a controller keeps
+COMPOSITE_LOOPS = 10
+CHURN = 800         # MiB, above the 512 MiB below 4 GiB
+HOLD = 3.0          # seconds a refused device is watched: about 30 of the enumeration thread's passes
+# Controller 2's readers at boot (QEMU's hub ports): with its mouse and four
+# hubs, 30 records; two plugs later it holds all 32 (kernel/xhci's SLOTS).
+FILLERS = [f'2.{q}' for q in range(2, 9)] + [f'{h}.{q}' for h in (3, 4) for q in range(1, 9)] + ['5.1', '5.2']
+# Each plug's values: a motion only that device makes, a key only it types.
+X = {'c1-mouse': 5, 'c1-composite-mouse': 7, 'c1-loop': 9, 'c1-composite-loop': 11, 'c2-hub-mouse': 13,
+     'c2-loop': 15, 'c2-composite-mouse': 17, 'c2-replug-taken': 21}
+KEYS = {'c1-keyboard': b'kb', 'c1-composite-mouse': b'm', 'c1-composite-keyboard': b'q',
+        'c1-composite-loop': b'r', 'c2-composite-mouse': b'n'}
+
+# --- the devices this tool plays over usb-redir -----------------------------------------------------
+
+def _hid(report):
+    """A HID descriptor (HID 1.11 §6.2.1): bcdHID 1.11, one report descriptor."""
+    return bytes([9, 0x21, 0x11, 0x01, 0, 1, 0x22]) + struct.pack('<H', len(report))
+
+
+def _config(interfaces):
+    """A configuration descriptor (USB 2.0 §9.6.3) with its interfaces, each
+    (number, class, subclass, protocol, report descriptor, endpoint address,
+    max packet, bInterval)."""
+    body = b''
+    for number, cls, sub, proto, report, ep, mps, interval in interfaces:
+        body += bytes([9, 4, number, 0, 1, cls, sub, proto, 0]) + _hid(report)
+        body += bytes([7, 5, ep, 3]) + struct.pack('<H', mps) + bytes([interval])
+    return bytes([9, 2]) + struct.pack('<H', 9 + len(body)) + bytes([len(interfaces), 1, 0, 0xa0, 50]) + body
+
+
+# HID 1.11 appendix B.2's mouse widened as gaming mice are: buttons 1 to 5,
+# X and Y of 16 bits, a wheel; 6-byte reports, no report ID.
+MOUSE_REPORT = bytes.fromhex(
+    '05 01 09 02 a1 01 09 01 a1 00'                        # Generic Desktop, Mouse; Pointer, Physical
+    ' 05 09 19 01 29 05 15 00 25 01 95 05 75 01 81 02'     # buttons 1 to 5, a bit each
+    ' 95 01 75 03 81 01'                                   # 3 bits of padding
+    ' 05 01 09 30 09 31 16 01 80 26 ff 7f 75 10 95 02 81 06'  # X, Y: -32767..32767, 16 bits, relative
+    ' 09 38 15 81 25 7f 75 08 95 01 81 06'                # the wheel: -127..127, 8 bits, relative
+    ' c0 c0')
+# HID 1.11 appendix B.1's boot keyboard: modifiers, a reserved byte, LEDs out, six key slots.
+KEYBOARD_REPORT = bytes.fromhex(
+    '05 01 09 06 a1 01'
+    ' 05 07 19 e0 29 e7 15 00 25 01 75 01 95 08 81 02'
+    ' 95 01 75 08 81 01'
+    ' 95 05 75 01 05 08 19 01 29 05 91 02'
+    ' 95 01 75 03 91 01'
+    ' 95 06 75 08 15 00 25 65 05 07 19 00 29 65 81 00'
+    ' c0')
+# Vendor-defined (usage page FFC0h): 64 bytes in, 64 out.
+VENDOR_REPORT = bytes.fromhex(
+    '06 c0 ff 09 01 a1 01'
+    ' 09 02 15 00 26 ff 00 75 08 95 40 81 02'
+    ' 09 03 15 00 26 ff 00 75 08 95 40 91 02'
+    ' c0')
+# Consumer keys (report 1, one 16-bit usage) and an all-keys bitmap
+# (report 2, 120 bits): no Mouse or Pointer collection.
+CONSUMER_REPORT = bytes.fromhex(
+    '05 0c 09 01 a1 01 85 01 15 00 26 ff 03 19 00 2a ff 03 75 10 95 01 81 00 c0'
+    ' 05 01 09 06 a1 01 85 02 05 07 19 00 29 77 15 00 25 01 75 01 95 78 81 02 c0')
+
+
+def _device(product):
+    """A device descriptor (USB 2.0 §9.6.1): USB 2.0, EP0 of 64 bytes, the
+    pid.codes test vendor 1209 (a test ID, no product's), strings 1 and 2."""
+    return bytes([18, 1, 0x00, 0x02, 0, 0, 0, 64]) + struct.pack('<HHH', 0x1209, product, 0x0100) + bytes([1, 2, 0, 1])
+
+
+COMPOSITE_MOUSE = dict(
+    name='composite mouse', device=_device(0x0001),
+    interfaces=[(0, 3, 1, 2, MOUSE_REPORT, 0x81, 8, 1), (1, 3, 1, 1, KEYBOARD_REPORT, 0x82, 8, 1),
+                (2, 3, 0, 0, VENDOR_REPORT, 0x83, 64, 1)],
+    mouse_ep=0x81, keyboard_ep=0x82)
+COMPOSITE_KEYBOARD = dict(
+    name='composite keyboard', device=_device(0x0002),
+    interfaces=[(0, 3, 1, 1, KEYBOARD_REPORT, 0x81, 8, 1), (1, 3, 0, 0, CONSUMER_REPORT, 0x82, 16, 1),
+                (2, 3, 0, 0, VENDOR_REPORT, 0x83, 64, 1)],
+    mouse_ep=None, keyboard_ep=0x81)
+
+# The USB redirection protocol 0.7's packets, by their list's order (the
+# control packets from 0, the data packets from 100; QEMU's hello arrives
+# as 0 and its first request as 100, measured).
+HELLO, CONNECT, DISCONNECT, RESET, IFACE_INFO, EP_INFO = 0, 1, 2, 3, 4, 5
+SET_CONFIG, GET_CONFIG, CONFIG_STATUS, SET_ALT, GET_ALT, ALT_STATUS = 6, 7, 8, 9, 10, 11
+START_INT, STOP_INT, INT_STATUS = 15, 16, 17
+CANCEL, FILTER_REJECT, FILTER_FILTER, DISCONNECT_ACK = 21, 22, 23, 24
+CONTROL, BULK, ISO, INTERRUPT = 100, 101, 102, 103
+CAP_DEVICE_VERSION, CAP_DISCONNECT_ACK, CAP_EP_MPS, CAP_64BIT_IDS, CAP_32BIT_BULK = 1, 3, 4, 5, 6
+# QEMU's xHCI refuses a usb-redir peer without 64-bit packet ids and 32-bit
+# bulk lengths ("lacks capabilities needed for use with XHCI", measured);
+# this side moves no bulk data, so the second changes nothing here.
+OURS = (1 << CAP_DEVICE_VERSION) | (1 << CAP_DISCONNECT_ACK) | (1 << CAP_EP_MPS) | (1 << CAP_64BIT_IDS) \
+    | (1 << CAP_32BIT_BULK)
+STALL = 4
+
+
+class Redir:
+    """One device played over a usb-redir chardev: this side listens on a
+    unix socket (the chardev connects to it), says hello, connects the
+    device and answers QEMU's requests; `report` sends an interrupt IN
+    packet once QEMU receives on the endpoint. Every request is traced."""
+
+    def __init__(self, shape, path, trace):
+        self.shape = shape
+        self.path = path
+        self.trace = trace
+        self.lock = threading.Lock()
+        self.receiving = set()
+        self.protocol = {}
+        self.config = 0
+        self.both = 0
+        self.sent = 0
+        self.conn = None
+        self.acked = threading.Event()
+        self.hello = threading.Event()
+        self.error = None
+        Path(path).unlink(missing_ok=True)
+        self.listener = socket.socket(socket.AF_UNIX)
+        self.listener.bind(path)
+        self.listener.listen(1)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def log(self, text):
+        with open(self.trace, 'a') as f:
+            f.write(f'{time.monotonic():.3f} {text}\n')
+
+    def header(self):
+        """The header's layout: 64-bit ids once both sides said so (never in hello)."""
+        return '<IIQ' if self.both & (1 << CAP_64BIT_IDS) else '<III'
+
+    def send(self, kind, body=b'', ident=0):
+        with self.lock:
+            self.conn.sendall(struct.pack(self.header(), kind, len(body), ident) + body)
+
+    def recv(self, n):
+        data = b''
+        while len(data) < n:
+            part = self.conn.recv(n - len(data))
+            if not part:
+                raise EOFError
+            data += part
+        return data
+
+    def infos(self):
+        """ep_info, then interface_info (the order the protocol asks)."""
+        types, intervals, ifaces, mps = [255] * 32, [0] * 32, [0] * 32, [0] * 32
+        types[0] = types[16] = 0
+        mps[0] = mps[16] = 64
+        for number, _c, _s, _p, _r, ep, size, interval in self.shape['interfaces']:
+            i = (ep & 15) + (16 if ep & 0x80 else 0)
+            types[i], intervals[i], ifaces[i], mps[i] = 3, interval, number, size
+        body = bytes(types) + bytes(intervals) + bytes(ifaces)
+        if self.both & (1 << CAP_EP_MPS):
+            body += struct.pack('<32H', *mps)
+        self.send(EP_INFO, body)
+        n = len(self.shape['interfaces'])
+        cols = [[i[k] for i in self.shape['interfaces']] + [0] * (32 - n) for k in (0, 1, 2, 3)]
+        self.send(IFACE_INFO, struct.pack('<I', n) + b''.join(bytes(c) for c in cols))
+
+    def connect(self):
+        self.receiving.clear()
+        self.protocol.clear()
+        self.config = 0
+        self.acked.clear()
+        self.infos()
+        d = self.shape['device']
+        body = bytes([1, 0, 0, 0]) + d[8:12]  # full speed, class 0, the vendor and product
+        if self.both & (1 << CAP_DEVICE_VERSION):
+            body += d[12:14]
+        self.send(CONNECT, body)
+        self.log('device_connect')
+
+    def disconnect(self):
+        self.send(DISCONNECT)
+        self.log('device_disconnect')
+        if self.both & (1 << CAP_DISCONNECT_ACK):
+            self.acked.wait(5)
+
+    def string(self, index):
+        if index == 0:
+            return bytes([4, 3, 0x09, 0x04])
+        text = {1: 'PAX test', 2: self.shape['name']}.get(index)
+        if text is None:
+            return None
+        raw = text.encode('utf-16-le')
+        return bytes([2 + len(raw), 3]) + raw
+
+    def answer(self, rtype, request, value, index, length, data):
+        """(status, data) for one control request."""
+        kind = value >> 8
+        if rtype == 0x80 and request == 6:
+            if kind == 1:
+                return 0, self.shape['device']
+            if kind == 2:
+                return 0, _config(self.shape['interfaces'])
+            if kind == 3:
+                s = self.string(value & 255)
+                return (0, s) if s is not None else (STALL, b'')
+            return STALL, b''  # no device qualifier, no BOS: a full-speed USB 2.0 device
+        if rtype == 0x81 and request == 6 and index < len(self.shape['interfaces']):
+            report = self.shape['interfaces'][index][4]
+            if kind == 0x22:
+                return 0, report
+            if kind == 0x21:
+                return 0, _hid(report)
+            return STALL, b''
+        if rtype in (0x80, 0x81, 0x82) and request == 0:
+            return 0, b'\0\0'
+        if rtype == 0x80 and request == 8:
+            return 0, bytes([self.config])
+        if rtype == 0x21 and request == 0x0b:
+            self.protocol[index] = value
+            return 0, b''
+        if rtype == 0xa1 and request == 3:
+            return 0, bytes([self.protocol.get(index, 1)])
+        if rtype == 0x21 and request in (0x09, 0x0a):
+            return 0, b''
+        if rtype == 0xa1 and request == 2:
+            return 0, b'\0'
+        if rtype & 0x80 == 0 and request in (1, 3, 5, 9, 11):
+            if request == 9:
+                self.config = value
+            return 0, b''
+        return STALL, b''
+
+    def serve(self):
+        try:
+            self.conn, _ = self.listener.accept()
+            self.conn.sendall(struct.pack('<III', HELLO, 68, 0) + b'pax hotplug-session'.ljust(64, b'\0')
+                              + struct.pack('<I', OURS))
+            kind, length, _ = struct.unpack('<III', self.recv(12))
+            body = self.recv(length)
+            if kind != HELLO:
+                raise RuntimeError(f'first packet {kind}, not hello')
+            theirs = struct.unpack('<I', body[64:68])[0] if length >= 68 else 0
+            self.both = OURS & theirs
+            self.log(f'hello {body[:64].rstrip(bytes(1)).decode(errors="replace")!r} caps {theirs:#x}')
+            self.hello.set()
+            self.connect()
+            layout = self.header()
+            while True:
+                kind, length, ident = struct.unpack(layout, self.recv(struct.calcsize(layout)))
+                body = self.recv(length)
+                if kind == CONTROL:
+                    ep, request, rtype, _st, value, index, want = struct.unpack('<BBBBHHH', body[:10])
+                    status, data = self.answer(rtype, request, value, index, want, body[10:])
+                    data = data[:want] if rtype & 0x80 else b''
+                    self.log(f'control {rtype:02x} {request:02x} {value:04x} {index:04x} {want} -> {status} {data.hex()}')
+                    self.send(CONTROL, struct.pack('<BBBBHHH', ep, request, rtype, status, value, index,
+                                                   len(data) if rtype & 0x80 else want) + data, ident)
+                elif kind == SET_CONFIG:
+                    self.config = body[0]
+                    self.infos()
+                    self.send(CONFIG_STATUS, bytes([0, self.config]), ident)
+                    self.log(f'set_configuration {body[0]}')
+                elif kind == GET_CONFIG:
+                    self.send(CONFIG_STATUS, bytes([0, self.config]), ident)
+                elif kind == SET_ALT:
+                    self.infos()
+                    self.send(ALT_STATUS, bytes([0, body[0], body[1]]), ident)
+                elif kind == GET_ALT:
+                    self.send(ALT_STATUS, bytes([0, body[0], 0]), ident)
+                elif kind in (START_INT, STOP_INT):
+                    (self.receiving.add if kind == START_INT else self.receiving.discard)(body[0])
+                    self.send(INT_STATUS, bytes([0, body[0]]), ident)
+                    self.log(f'{"start" if kind == START_INT else "stop"} interrupt receiving {body[0]:02x}')
+                elif kind == DISCONNECT_ACK:
+                    self.acked.set()
+                elif kind == RESET:
+                    self.protocol.clear()
+                    self.log('reset')
+                elif kind in (CANCEL, FILTER_REJECT, FILTER_FILTER):
+                    self.log(f'packet {kind} ignored')
+                else:
+                    self.log(f'packet {kind} unanswered ({length} bytes)')
+        except (EOFError, OSError) as e:
+            self.log(f'closed: {e!r}')
+        except Exception as e:  # noqa: BLE001 - the session names it
+            self.error = repr(e)
+            self.log(f'error: {e!r}')
+
+    def report(self, ep, data, wait=5.0):
+        """An interrupt IN packet on `ep` once QEMU receives on it; whether it went."""
+        until = time.monotonic() + wait
+        while ep not in self.receiving:
+            if time.monotonic() > until:
+                self.log(f'report on {ep:02x} not sent: not receiving')
+                return False
+            time.sleep(.02)
+        self.send(INTERRUPT, struct.pack('<BBH', ep, 0, len(data)) + data, self.sent)
+        self.sent += 1
+        self.log(f'report {ep:02x} {data.hex()}')
+        return True
+
+    def move(self, dx):
+        ep = self.shape['mouse_ep']
+        iface = [i[0] for i in self.shape['interfaces'] if i[5] == ep][0]
+        if self.protocol.get(iface, 1) == 0:
+            return self.report(ep, bytes([0, dx & 255, 0, 0]))
+        return self.report(ep, bytes([0]) + struct.pack('<hhb', dx, 0, 0))
+
+    def type(self, text, modifiers=0):
+        ep = self.shape['keyboard_ep']
+        for ch in text:
+            usage = ord(ch) - ord('a') + 4
+            if not self.report(ep, bytes([modifiers, 0, usage, 0, 0, 0, 0, 0])):
+                return False
+            time.sleep(.04)
+            self.report(ep, bytes(8))
+            time.sleep(.04)
+        return True
+
+# --- the judge ------------------------------------------------------------------------------------
+
+ATTACH = re.compile(r'xhci: mouse (usb\d+-[\d.]+) speed (\d+) interface (\d+) (.*); pointer (\d+)')
+KEYBOARD = re.compile(r'xhci: keyboard (usb\d+-[\d.]+) speed (\d+) boot report 8')
+REMOVED = re.compile(r'xhci: mouse (usb\d+-[\d.]+) removed; pointer (\d+) gone')
+REFUSED = re.compile(r'xhci: mouse (usb\d+-[\d.]+) refused: (.*)')
+# kernel/xhci's error lines (`say_error`); a controller's two boot lines are not errors.
+ERROR = re.compile(r'xhci (\d+): (?!BAR0 |ports )(.*)')
+RECORD = re.compile(r'HOTREC ([0-9a-f]{64})')
+KEY = re.compile(r'HOTKEY ([0-9a-f]{2})')
+
+
+def decode(hexline):
+    t, seq, dev, kind, flags, x, y, buttons, wheel, reports = struct.unpack('<QIHBBiiHhI', bytes.fromhex(hexline))
+    return dict(t=t, seq=seq, dev=dev, kind=kind, flags=flags, x=x, y=y, buttons=buttons, wheel=wheel, reports=reports)
+
+
+class Segment:
+    """The kernel's lines, the records and the keys of one step's part of the log."""
+
+    def __init__(self, text):
+        self.text = text
+        self.attach = [(m[1], int(m[2]), int(m[3]), m[4], int(m[5])) for m in ATTACH.finditer(text)]
+        self.keyboards = [(m[1], int(m[2])) for m in KEYBOARD.finditer(text)]
+        self.removed = [(m[1], int(m[2])) for m in REMOVED.finditer(text)]
+        self.refused = [(m[1], m[2]) for m in REFUSED.finditer(text)]
+        self.errors = [(int(m[1]), m[2].strip()) for m in ERROR.finditer(text)]
+        self.records = [decode(m[1]) for m in RECORD.finditer(text)]
+        self.keys = bytes(int(m[1], 16) for m in KEY.finditer(text))
+
+    def pointers(self, path):
+        return [a[4] for a in self.attach if a[0] == path]
+
+    def moved(self, dev, x):
+        return any(r['dev'] == dev and r['kind'] == REL and r['x'] == x for r in self.records)
+
+
+class Judge:
+    def __init__(self):
+        self.failed = []
+        self.judged = 0
+
+    def row(self, name, ok, detail):
+        print(f'{"PASS" if ok else "FAIL"} {name} {detail}', flush=True)
+        self.judged += 1
+        if not ok:
+            self.failed.append(name)
+
+    def judge(self, text, steps, churn=CHURN):
+        """`steps`: [(name, offset)] in order, each step's first byte in `text`."""
+        bounds = {}
+        for i, (name, at) in enumerate(steps):
+            end = steps[i + 1][1] if i + 1 < len(steps) else len(text)
+            bounds[name] = (at, end)
+        seg = lambda name: Segment(text[slice(*bounds[name])]) if name in bounds else Segment('')
+        whole = Segment(text)
+
+        m = re.search(r'HOTCHURNED (\d+)', text)
+        ok = m is not None and int(m[1]) == churn and 'HOTERR' not in text[:m.start()]
+        self.row('churn', ok, f'the probe took and gave back {m[1] if m else "nothing"} MiB (want {churn})')
+
+        start = text.find('HOTSTART')
+        boot = Segment(text[:start]) if start >= 0 else Segment('')
+        ok = boot.pointers('usb2-5') != []
+        self.row('boot-pointer', ok, f'controller 2\'s usb-mouse at boot: pointers {boot.pointers("usb2-5")} (want one)')
+
+        def plugged(name, path, x, speed=None, keyboard=False, keys=b''):
+            s = seg(name)
+            p = s.pointers(path)
+            why = []
+            if len(p) != 1:
+                why.append(f'pointers {p} at {path} (want one)')
+            elif not s.moved(p[0], x):
+                why.append(f'no record of dx {x} from pointer {p[0]}')
+            elif not any(r['dev'] == p[0] and r['flags'] & NEW for r in s.records):
+                why.append(f'no NEW record from pointer {p[0]}')
+            if speed is not None and any(a[1] != speed for a in s.attach if a[0] == path):
+                why.append(f'speed {[a[1] for a in s.attach if a[0] == path]} (want {speed})')
+            k = [kb for kb in s.keyboards if kb[0] == path]
+            if keyboard and len(k) != 1:
+                why.append(f'keyboard lines {len(k)} at {path} (want one)')
+            if keys and s.keys != keys:
+                why.append(f'typed {s.keys!r} (want {keys!r})')
+            if s.errors:
+                why.append(f'errors {s.errors[:3]} ({len(s.errors)} in all)')
+            self.row(name, not why, f'{path}: ' + ('; '.join(why) if why else
+                     f'pointer {p[0]} moved {x}' + (f', typed {keys!r}' if keys else '')))
+
+        plugged('c1-mouse', 'usb1-6', X['c1-mouse'])
+
+        s = seg('c1-keyboard')
+        k = [kb for kb in s.keyboards if kb[0] == 'usb1-7']
+        ok = len(k) == 1 and s.keys == KEYS['c1-keyboard'] and not s.errors
+        self.row('c1-keyboard', ok, f'usb1-7: keyboard lines {len(k)} (want one), typed {s.keys!r} '
+                 f'(want {KEYS["c1-keyboard"]!r}), errors {s.errors[:3]}')
+
+        plugged('c1-composite-mouse', 'usb1-8', X['c1-composite-mouse'], speed=1, keyboard=True,
+                keys=KEYS['c1-composite-mouse'])
+
+        s = seg('c1-composite-keyboard')
+        k = [kb for kb in s.keyboards if kb[0] == 'usb1-9']
+        r = [x for x in s.refused if x[0] == 'usb1-9']
+        ok = len(k) == 1 and k[0][1] == 1 and len(r) == 1 and not s.pointers('usb1-9') \
+            and s.keys == KEYS['c1-composite-keyboard'] and not s.errors
+        self.row('c1-composite-keyboard', ok, f'usb1-9: keyboard lines {k} (want one at speed 1), its HID '
+                 f'interface refused as a pointer {len(r)} time(s) (want one: {r[0][1] if r else "-"}), pointers '
+                 f'{s.pointers("usb1-9")} (want none), typed {s.keys!r} (want {KEYS["c1-composite-keyboard"]!r}), '
+                 f'errors {s.errors[:3]}')
+
+        def loop(name, path, plugs, unplugs, x, keyboard=False, keys=b''):
+            s = seg(name)
+            p = s.pointers(path)
+            gone = [g[1] for g in s.removed if g[0] == path]
+            k = [kb for kb in s.keyboards if kb[0] == path]
+            why = []
+            if len(p) != plugs or len(gone) != unplugs:
+                why.append(f'{len(p)} plugs and {len(gone)} unplugs (want {plugs} and {unplugs})')
+            if len(set(p)) != len(p):
+                why.append('a pointer number came back')
+            if p and not s.moved(p[-1], x):
+                why.append(f'no record of dx {x} from the last pointer {p[-1]}')
+            if keyboard and len(k) != len(p):
+                why.append(f'{len(k)} keyboard lines for {len(p)} plugs')
+            if keys and s.keys != keys:
+                why.append(f'typed {s.keys!r} (want {keys!r})')
+            if s.errors:
+                why.append(f'errors {s.errors[:3]} ({len(s.errors)} in all)')
+            self.row(name, not why, f'{path}: ' + ('; '.join(why) if why else
+                     f'{len(p)} plugs, {len(gone)} unplugs, pointers {p[0]} to {p[-1]}, the last moved {x}'))
+
+        # c1-loop: the first mouse's unplug, then LOOPS plugs and unplugs, then the last plug.
+        loop('c1-loop', 'usb1-6', LOOPS + 1, LOOPS + 1, X['c1-loop'])
+        loop('c1-composite-loop', 'usb1-8', COMPOSITE_LOOPS, COMPOSITE_LOOPS, X['c1-composite-loop'],
+             keyboard=True, keys=KEYS['c1-composite-loop'])
+
+        plugged('c2-hub-mouse', 'usb2-6.1', X['c2-hub-mouse'])
+        plugged('c2-composite-mouse', 'usb2-10', X['c2-composite-mouse'], speed=1, keyboard=True,
+                keys=KEYS['c2-composite-mouse'])
+
+        s = seg('c2-refused-once')
+        slots = [e for e in s.errors if e[0] == 2 and e[1].startswith('enable slot failed')]
+        taken = s.pointers('usb2-9.3') + s.pointers('usb2-11')
+        ok = len(slots) == 2 and len(s.errors) == 2 and not taken
+        self.row('c2-refused-once', ok, f'two devices past controller 2\'s 32 records (a hub port, a root port), '
+                 f'held {HOLD} s: {len(s.errors)} error lines (want 2, one a port), {len(slots)} of them "enable '
+                 f'slot failed"; taken {taken} (want none)')
+
+        s = seg('c2-free-hold')
+        gone = [g for g in s.removed if g[0] == 'usb2-10']
+        quiet = not s.errors and not s.pointers('usb2-11') and not s.pointers('usb2-9.3')
+        self.row('c2-free-hold', len(gone) == 1 and quiet, f'a record freed (usb2-10 unplugged {len(gone)} time(s), '
+                 f'want one), held {HOLD} s with no port change: errors {s.errors[:3]}, pointers at usb2-11 '
+                 f'{s.pointers("usb2-11")}, at usb2-9.3 {s.pointers("usb2-9.3")} (want none: no retry)')
+
+        plugged('c2-replug-taken', 'usb2-11', X['c2-replug-taken'])
+        loop('c2-loop', 'usb2-11', LOOPS, LOOPS, X['c2-loop'])
+
+        memory = [e for e in whole.errors if 'record memory' in e[1] or 'DMA memory' in e[1]]
+        ok = len(whole.errors) == 2 and not memory and len(whole.refused) == 1
+        self.row('no-stream', ok, f'{len(whole.errors)} error lines in the whole log (want 2), {len(memory)} '
+                 f'about memory (want 0), {len(whole.refused)} pointer refusals (want 1)'
+                 + (f'; first {whole.errors[:2]}' if whole.errors else ''))
+
+        summary = [x for x in text.splitlines() if x.startswith('console: ') and 'scancodes' in x]
+        ok = 'HOTDONE' in text and len(summary) == 1 and '(0 scancodes)' in summary[0]
+        self.row('keyboard-path', ok, f'HOTDONE {"seen" if "HOTDONE" in text else "missing"}, {summary!r} '
+                 '(want 0 scancodes: every key came over USB)')
+        return not self.failed
+
+# --- the session ----------------------------------------------------------------------------------
+
+
+def run(args):
+    out = Path(args.output).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    serial, steps_file, trace = out / 'serial.log', out / 'steps.txt', out / 'redir.log'
+    for stale in (serial, steps_file, trace, out / 'mice.txt'):
+        stale.unlink(missing_ok=True)
+    sockdir = Path(os.environ.get('TMPDIR') or out)
+    base = sockdir / f'pxh-{os.getpid()}'
+    for p in (f'{base}.sock', f'{base}-r9.sock'):
+        if len(p.encode()) > 100:
+            raise RuntimeError(f'socket path is {len(p.encode())} bytes, over 100: {p}')
+    sock = Path(f'{base}.sock')
+    sock.unlink(missing_ok=True)
+    root = Path(__file__).resolve().parents[1]
+    cmd = [str(root / 'tools/qemu-run'), '--firmware', args.firmware, '--accel', args.accel,
+           '--serial', str(serial), '--timeout', '420', str(Path(args.image).resolve()), '--',
+           '-qmp', f'unix:{sock},server=on,wait=off', '-m', '1536M', '-machine', 'max-ram-below-4g=512M',
+           '-device', 'qemu-xhci,id=pax-usb,p2=8,p3=4',
+           '-device', 'nec-usb-xhci,id=pax-usb2,p2=8,p3=4',
+           '-device', 'usb-mouse,id=boot-mouse,bus=pax-usb2.0,port=1']
+    for h in (2, 3, 4, 5):
+        cmd += ['-device', f'usb-hub,id=boot-hub{h},bus=pax-usb2.0,port={h}']
+    for i, port in enumerate(FILLERS):
+        cmd += ['-device', f'usb-ccid,id=filler{i},bus=pax-usb2.0,port={port}']
+    steps = []
+    redirs = []
+    with (out / 'runner.log').open('wb') as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        conn = reader = None
+        start = time.monotonic()
+        try:
+            while not sock.exists():
+                if proc.poll() is not None or time.monotonic() - start > 15:
+                    raise RuntimeError('QMP did not start')
+                time.sleep(.02)
+            conn = socket.socket(socket.AF_UNIX)
+            conn.settimeout(15)
+            conn.connect(str(sock))
+            reader = conn.makefile('rb')
+            json.loads(reader.readline())
+
+            def execute(name, arguments=None):
+                payload = {'execute': name}
+                if arguments is not None:
+                    payload['arguments'] = arguments
+                conn.sendall(json.dumps(payload).encode() + b'\n')
+                while True:
+                    reply = json.loads(reader.readline())
+                    if 'error' in reply:
+                        raise RuntimeError(reply)
+                    if 'return' in reply:
+                        return reply['return']
+
+            def hmp(command):
+                return execute('human-monitor-command', {'command-line': command})
+
+            execute('qmp_capabilities')
+
+            def text():
+                return serial.read_text(errors='replace') if serial.exists() else ''
+
+            def mark(name):
+                at = len(text())
+                steps.append((name, at))
+                with steps_file.open('a') as f:
+                    f.write(f'{name} {at}\n')
+                print(f'NOTE step {name} at {time.monotonic() - start:.1f} s', flush=True)
+
+            def wait(pattern, count=1, timeout=6.0):
+                """Whether `pattern` has matched `count` times in the log within `timeout`."""
+                until = time.monotonic() + timeout
+                while True:
+                    if len(re.findall(pattern, text())) >= count:
+                        return True
+                    if proc.poll() is not None:
+                        raise RuntimeError('QEMU ended')
+                    if time.monotonic() > until:
+                        print(f'NOTE waited {timeout} s for {count} x {pattern!r}', flush=True)
+                        return False
+                    time.sleep(.02)
+
+            def plug(driver, ident, bus, port):
+                # device_del completes asynchronously: the id is free once
+                # QEMU has removed the device.
+                for attempt in range(40):
+                    try:
+                        return execute('device_add', {'driver': driver, 'id': ident, 'bus': bus, 'port': port})
+                    except RuntimeError:
+                        if attempt == 39:
+                            raise
+                        time.sleep(.1)
+
+            def unplug(ident):
+                execute('device_del', {'id': ident})
+
+            def newest_mouse():
+                found = []
+                listing = hmp('info mice')
+                with (out / 'mice.txt').open('a') as f:
+                    f.write(f'{time.monotonic() - start:.3f}\n{listing}--\n')
+                for line in listing.splitlines():
+                    m = re.match(r'^\s*\*?\s*Mouse #(\d+): (.*)$', line)
+                    if m and 'HID Mouse' in m[2]:
+                        found.append(int(m[1]))
+                if found:
+                    hmp(f'mouse_set {max(found)}')
+
+            def move(dx):
+                newest_mouse()
+                time.sleep(.05)
+                execute('input-send-event', {'events': [{'type': 'rel', 'data': {'axis': 'x', 'value': dx}}]})
+                time.sleep(.3)
+
+            def type_keys(keys):
+                for ch in keys.decode():
+                    for down in (True, False):
+                        execute('input-send-event', {'events': [{'type': 'key', 'data': {
+                            'down': down, 'key': {'type': 'qcode', 'data': ch}}}]})
+                        time.sleep(.05)
+                time.sleep(.3)
+
+            def redir(shape, ident, bus, port):
+                path = f'{base}-{ident}.sock'
+                r = Redir(shape, path, trace)
+                redirs.append(r)
+                execute('chardev-add', {'id': f'{ident}c', 'backend': {'type': 'socket', 'data': {
+                    'addr': {'type': 'unix', 'data': {'path': path}}, 'server': False}}})
+                execute('device_add', {'driver': 'usb-redir', 'id': ident, 'chardev': f'{ident}c', 'bus': bus, 'port': port})
+                return r
+
+            if not wait(r'HOTCHURNED', 1, 90):
+                raise RuntimeError('the probe never finished its churn')
+            attach = lambda path: rf'xhci: mouse {re.escape(path)} speed .*; pointer'
+            gone = lambda path: rf'xhci: mouse {re.escape(path)} removed'
+            board = lambda path: rf'xhci: keyboard {re.escape(path)} '
+
+            mark('c1-mouse')
+            plug('usb-mouse', 'c1m', 'pax-usb.0', '2')
+            if wait(attach('usb1-6')):
+                move(X['c1-mouse'])
+
+            mark('c1-keyboard')
+            plug('usb-kbd', 'c1k', 'pax-usb.0', '3')
+            if wait(board('usb1-7')):
+                time.sleep(.2)
+                type_keys(KEYS['c1-keyboard'])
+
+            mark('c1-composite-mouse')
+            a = redir(COMPOSITE_MOUSE, 'rA', 'pax-usb.0', '4')
+            if wait(attach('usb1-8')) and wait(board('usb1-8')):
+                a.move(X['c1-composite-mouse'])
+                a.type(KEYS['c1-composite-mouse'].decode())
+                time.sleep(.3)
+
+            mark('c1-composite-keyboard')
+            b = redir(COMPOSITE_KEYBOARD, 'rB', 'pax-usb.0', '5')
+            if wait(board('usb1-9')):
+                wait(r'xhci: mouse usb1-9 refused', 1, 2)
+                b.type(KEYS['c1-composite-keyboard'].decode())
+                time.sleep(.3)
+
+            mark('c1-loop')
+            unplug('c1m')
+            n = 1
+            if wait(gone('usb1-6'), 1):
+                while n <= LOOPS:
+                    plug('usb-mouse', 'c1m', 'pax-usb.0', '2')
+                    if not wait(attach('usb1-6'), n + 1, 6):
+                        break
+                    unplug('c1m')
+                    if not wait(gone('usb1-6'), n + 1, 6):
+                        break
+                    n += 1
+                if n > LOOPS:
+                    plug('usb-mouse', 'c1m', 'pax-usb.0', '2')
+                    if wait(attach('usb1-6'), LOOPS + 2):
+                        move(X['c1-loop'])
+
+            mark('c1-composite-loop')
+            for i in range(1, COMPOSITE_LOOPS + 1):
+                a.disconnect()
+                if not wait(gone('usb1-8'), i, 6):
+                    break
+                a.connect()
+                if not (wait(attach('usb1-8'), i + 1, 8) and wait(board('usb1-8'), i + 1, 4)):
+                    break
+            else:
+                a.move(X['c1-composite-loop'])
+                a.type(KEYS['c1-composite-loop'].decode())
+                time.sleep(.3)
+
+            mark('c2-hub-mouse')
+            plug('usb-mouse', 'c2m', 'pax-usb2.0', '2.1')
+            if wait(attach('usb2-6.1')):
+                move(X['c2-hub-mouse'])
+
+            mark('c2-composite-mouse')
+            c = redir(COMPOSITE_MOUSE, 'rC', 'pax-usb2.0', '6')
+            if wait(attach('usb2-10')) and wait(board('usb2-10')):
+                c.move(X['c2-composite-mouse'])
+                c.type(KEYS['c2-composite-mouse'].decode())
+                time.sleep(.3)
+
+            mark('c2-refused-once')
+            plug('usb-mouse', 'c2r1', 'pax-usb2.0', '5.3')
+            plug('usb-mouse', 'c2r2', 'pax-usb2.0', '7')
+            time.sleep(HOLD)
+
+            mark('c2-free-hold')
+            c.disconnect()
+            wait(gone('usb2-10'), 1, 6)
+            time.sleep(HOLD)
+
+            mark('c2-replug-taken')
+            unplug('c2r2')
+            time.sleep(.3)
+            plug('usb-mouse', 'c2r2', 'pax-usb2.0', '7')
+            if wait(attach('usb2-11')):
+                move(X['c2-replug-taken'])
+
+            mark('c2-loop')
+            n = 1
+            while n <= LOOPS:
+                unplug('c2r2')
+                if not wait(gone('usb2-11'), n, 6):
+                    break
+                plug('usb-mouse', 'c2r2', 'pax-usb2.0', '7')
+                if not wait(attach('usb2-11'), n + 1, 6):
+                    break
+                n += 1
+            if n > LOOPS:
+                move(X['c2-loop'])
+
+            mark('finish')
+            # Ctrl-D (left Control, usage 07h) from the composite mouse's
+            # keyboard interface ends the probe; PAX halts with its summary.
+            a.type('d', modifiers=1)
+            until = time.monotonic() + 15
+            while b'\nhalt\r\n' not in serial.read_bytes() and time.monotonic() < until:
+                time.sleep(.05)
+            execute('quit')
+            proc.wait(timeout=10)
+        finally:
+            if reader is not None:
+                reader.close()
+            if conn is not None:
+                conn.close()
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+            sock.unlink(missing_ok=True)
+            for r in redirs:
+                r.listener.close()
+                Path(r.path).unlink(missing_ok=True)
+    for r in redirs:
+        if r.error:
+            print(f'NOTE usb-redir device {r.shape["name"]}: {r.error}', flush=True)
+    judge = Judge()
+    ok = judge.judge(serial.read_text(errors='replace'), steps, args.churn)
+    print(f'{"PASS" if ok else "FAIL"} hotplug-session {args.firmware} {args.accel}: '
+          f'{judge.judged - len(judge.failed)} of {judge.judged} rows'
+          + (f'; red: {" ".join(judge.failed)}' if judge.failed else ''), flush=True)
+    return 0 if ok else 1
+
+
+def read_steps(path):
+    return [(n, int(a)) for n, a in (line.split() for line in Path(path).read_text().splitlines() if line.strip())]
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image', help='the probe image (tests/mpx6-usb builds it)')
+    parser.add_argument('--output', help='the session directory: serial.log, steps.txt, redir.log')
+    parser.add_argument('--firmware', choices=['bios', 'uefi'], default='bios')
+    parser.add_argument('--accel', choices=['auto', 'kvm', 'tcg'], default='auto')
+    parser.add_argument('--churn', type=int, default=CHURN, help='the MiB the image\'s probe churns (its /etc/pax-run)')
+    parser.add_argument('--judge', nargs=2, metavar=('SERIAL', 'STEPS'), help='judge a serial log and its steps file')
+    a = parser.parse_args()
+    if a.judge:
+        sys.exit(0 if Judge().judge(Path(a.judge[0]).read_text(errors='replace'), read_steps(a.judge[1]), a.churn) else 1)
+    if not a.image or not a.output:
+        parser.error('--image and --output, or --judge')
+    try:
+        sys.exit(run(a))
+    except RuntimeError as error:
+        print(f'FAIL hotplug-session {a.firmware} {a.accel}: {error}', flush=True)
+        sys.exit(1)
