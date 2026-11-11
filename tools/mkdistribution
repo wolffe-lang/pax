@@ -1,20 +1,170 @@
 #!/usr/bin/env bash
 # Build both distribution ISOs at one clean commit; no writes outside OUT.
 # tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT
+# tools/mkdistribution --latest[=OVERLAYS] VERIFIED_BASE.cpio NEW_OUT
+# tools/mkdistribution --latest-step[=OVERLAYS] LATEST [INPUT...]
+# tools/mkdistribution --latest-from LATEST VERIFIED_BASE.cpio NEW_OUT
+#
+# px97: --latest builds the program inputs itself, at what tools/latest-resolve
+# resolves now: every org tree at its repository's trunk head, or at an
+# OVERLAYS line's sha when its green local record is at exactly that sha (an
+# overlay without one is refused by name, before anything is built), lupin at
+# its newest release, wolf at its pin's. Each builder runs from a copy of this
+# commit (git archive, under OUT/latest/tree) whose user/*.pin are the
+# resolution's; the boreutils it builds are user/boreutils.list, and the dev
+# compiler (INPUTS/wolf, never resolved) is user/wolf.pin's, built by
+# tools/mkwolf (Rust with the musl target) or staged from PAX_WOLF_INPUT, an
+# earlier build of it, held either way to user/wolf.sums; its std
+# (INPUTS/wolf-std) is tools/mkwolf-std's at WOLF_STD_REV. OUT/latest/
+# resolution.txt keeps the resolution, and /etc/pax-release stamps each sha
+# and whether it is merged (tools/mkpax-release --latest). Never for CI or a
+# lane's record: a pinned build is reproducible from the pins, a latest one
+# only from its resolution.
+#
+# The same build in chunks, for a host whose holds are shorter than the whole:
+# --latest-step resolves into LATEST (new) the first time, then builds the
+# named inputs (pelt scent den lupin lope aspen lobo games yew base-std bore
+# wolf wolf-std auth burrow roots sniff trash; every one not yet built when
+# none is named), each into
+# INPUT.part, renamed
+# when it is whole; --latest-from assembles NEW_OUT from LATEST once every
+# input is built. Every step runs at the resolution's commit; the assembly at
+# it, or at a later commit of this checkout (a newer trunk merged in) when no
+# builder input differs between them (tools/latest-resolve --at-commit).
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
-[ $# -eq 3 ] || die 'usage: mkdistribution BASE.cpio INPUTS NEW_OUT'
-base=$(realpath "$1"); inputs=$(realpath "$2"); out=$3
-[ ! -e "$out" ] || die 'use a new output directory'
+INPUTS_ALL='pelt scent den lupin lope aspen lobo games yew base-std bore wolf wolf-std auth burrow roots sniff trash'
+built() { # INPUTS NAME: the input is whole (wolf-std is a std tree with its STD-REV, every other one has its sums)
+    case $2 in wolf-std) [ -f "$1/$2/STD-REV" ] ;; *) [ -f "$1/$2/sums.txt" ] ;; esac
+}
+held_wolf() { # TREE DIR: the dev compiler DIR holds is user/wolf.sums', file by file (tools/distribution-root's check)
+    local name digest size
+    while read -r name digest size; do
+        [ -f "$2/$name" ] || { say "wolf input: no $name"; return 1; }
+        [ "$(sha256_of "$2/$name")" = "$digest" ] && [ "$(wc -c < "$2/$name" | tr -d ' ')" = "$size" ] \
+            || { say "wolf input: $name is not user/wolf.sums' ($digest, $size bytes)"; return 1; }
+    done < "$1/user/wolf.sums"
+    say "wolf input: every file is user/wolf.sums'"
+}
+resolve_into() { # LATEST OVERLAYS: the resolution and the copy of this commit its builders run from
+    python3 -I "$PAX_ROOT/tools/latest-resolve" ${2:+--overlays "$2"} "$1/latest" >&2 \
+        || die 'the --latest resolution refused (above): nothing was built'
+    mkdir -p "$1/latest/tree"
+    git -C "$PAX_ROOT" archive HEAD | tar -x -C "$1/latest/tree"
+    cp "$1/latest/pins/"*.pin "$1/latest/tree/user/"
+}
+at_resolution() { # LATEST: this checkout must be the one LATEST was resolved at
+    [ -f "$1/latest/resolution.txt" ] || die "$1 holds no --latest resolution"
+    [ "$(awk '$1 == "pax" { print $2 }' "$1/latest/resolution.txt")" = "$head" ] \
+        || die "$1 was resolved at another commit than this checkout's $head"
+}
+latest_inputs() { # LATEST INPUT...: build the named inputs (every one when none is named) not yet built
+    local lo=$1 b u; shift
+    local tree=$lo/latest/tree inputs=$lo/inputs
+    # The builders share this checkout's build and cache directories, and
+    # take their trees from the resolved pins, never a lane's clone.
+    export PAX_BUILD PAX_CACHE
+    unset PAX_YEW_REPO PAX_DEN_REPO PAX_SCENT_REPO PAX_LOPE_REPO PAX_CLEF_REPO
+    mkdir -p "$inputs"
+    for b in ${*:-$INPUTS_ALL}; do
+        case " $INPUTS_ALL " in *" $b "*) ;; *) die "no input $b ($INPUTS_ALL)" ;; esac
+        if built "$inputs" "$b"; then say "--latest: $b already built"; continue; fi
+        say "--latest: $b at its resolved revision"
+        rm -rf "$inputs/$b.part"
+        case $b in
+            base-std) "$tree/tools/fetch-std" "$inputs/$b.part" >&2 ;;
+            bore)
+                local utilities=()
+                while IFS= read -r u; do case $u in ''|'#'*) ;; *) utilities+=("$u") ;; esac; done < "$PAX_ROOT/user/boreutils.list"
+                "$tree/tools/mkboreutils" "$inputs/$b.part" "${utilities[@]}" >&2 ;;
+            wolf)
+                # The dev compiler is user/wolf.pin's (never resolved): built by
+                # tools/mkwolf, or staged from PAX_WOLF_INPUT (an earlier build of
+                # it), and either way held to user/wolf.sums file by file.
+                if [ -n "${PAX_WOLF_INPUT:-}" ]; then
+                    mkdir -p "$inputs/$b.part"
+                    while read -r u _; do cp "$PAX_WOLF_INPUT/$u" "$inputs/$b.part/$u"; done < "$tree/user/wolf.sums"
+                    cp "$tree/user/wolf.sums" "$inputs/$b.part/sums.txt"
+                    say "wolf input: staged from $PAX_WOLF_INPUT"
+                else
+                    "$tree/tools/mkwolf" "$inputs/$b.part" >&2
+                fi && held_wolf "$tree" "$inputs/$b.part" ;;
+            wolf-std)
+                "$tree/tools/mkwolf-std" "$inputs/$b.part" >&2 \
+                    && [ "$(cat "$inputs/$b.part/STD-REV")" = "$(sed -n 's/^WOLF_STD_REV=//p' "$tree/user/wolf.pin")" ] ;;
+            *) "$tree/tools/mk$b" "$inputs/$b.part" >&2 ;;
+        esac || die "$b at its resolved revision"
+        mv "$inputs/$b.part" "$inputs/$b"
+    done
+}
+mode=pinned overlays=
+case ${1:-} in
+    --latest) mode=latest; shift ;;
+    --latest=*) mode=latest; overlays=${1#--latest=}; shift ;;
+    --latest-step) mode=step; shift ;;
+    --latest-step=*) mode=step; overlays=${1#--latest-step=}; shift ;;
+    --latest-from) mode=from; shift ;;
+esac
+if [ -n "$overlays" ]; then
+    [ -f "$overlays" ] || die "no overlay file $overlays"
+    overlays=$(cd "$(dirname "$overlays")" && pwd)/$(basename "$overlays")
+fi
 [ -z "$(git -C "$PAX_ROOT" status --porcelain --untracked-files=no)" ] || die 'tracked build inputs are dirty'
 head=$(git -C "$PAX_ROOT" rev-parse HEAD)
+case $mode in
+    step)
+        [ $# -ge 1 ] || die 'usage: mkdistribution --latest-step[=OVERLAYS] LATEST [INPUT...]'
+        lo=$1; shift
+        if [ -f "$lo/latest/resolution.txt" ]; then
+            [ -z "$overlays" ] || die "$lo is resolved already: its overlays were fixed at its first step"
+        else
+            [ ! -e "$lo" ] || die "$lo exists and holds no resolution: use a new directory"
+            mkdir -p "$lo"
+            resolve_into "$lo" "$overlays"
+        fi
+        lo=$(cd "$lo" && pwd)
+        at_resolution "$lo"
+        latest_inputs "$lo" "$@"
+        left=
+        for b in $INPUTS_ALL; do built "$lo/inputs" "$b" || left+=" $b"; done
+        say "--latest-step: ${left:+still to build:$left}${left:-every input built; assemble with --latest-from $lo}"
+        exit 0 ;;
+    from)
+        [ $# -eq 3 ] || die 'usage: mkdistribution --latest-from LATEST BASE.cpio NEW_OUT'
+        lo=$(cd "$1" && pwd); base=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); out=$3
+        [ -f "$lo/latest/resolution.txt" ] || die "$lo holds no --latest resolution"
+        [ ! -e "$out" ] || die 'use a new output directory'
+        # A later commit than the resolution's (a newer trunk merged in) only
+        # when no builder input moved (tools/latest-resolve --at-commit).
+        python3 -I "$PAX_ROOT/tools/latest-resolve" --at-commit "$lo/latest/resolution.txt" "$lo/latest/resolution-at-$head.txt" >&2 \
+            || die 'the --latest-from checkout refused (above): nothing was built'
+        for b in $INPUTS_ALL; do built "$lo/inputs" "$b" || die "$lo: $b is not built yet (--latest-step $lo $b)"; done
+        inputs=$lo/inputs ;;
+    latest)
+        [ $# -eq 2 ] || die 'usage: mkdistribution --latest[=OVERLAYS] BASE.cpio NEW_OUT'
+        base=$(cd "$(dirname "$1")" && pwd)/$(basename "$1"); out=$2 ;;
+    pinned)
+        [ $# -eq 3 ] || die 'usage: mkdistribution BASE.cpio INPUTS NEW_OUT'
+        base=$(realpath "$1"); inputs=$(realpath "$2"); out=$3 ;;
+esac
+[ ! -e "$out" ] || die 'use a new output directory'
 mkdir -p "$out"
-out=$(realpath "$out")
+out=$(cd "$out" && pwd)
+release_args=()
+if [ "$mode" = latest ]; then
+    resolve_into "$out" "$overlays"
+    latest_inputs "$out"
+    inputs=$out/inputs lo=$out
+fi
+if [ "$mode" != pinned ]; then
+    [ "$mode" = latest ] || { mkdir -p "$out/latest"; cp "$lo/latest/resolution-at-$head.txt" "$out/latest/resolution.txt"; }
+    release_args=(--latest "$out/latest/resolution.txt")
+fi
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$PAX_ROOT" log -1 --format=%ct)}
 "$PAX_ROOT/tools/fetch-limine" >&2
 elf=$("$PAX_ROOT/tools/build-kernel" --release --src "$PAX_ROOT/kernel/kmain_console.lu" "$out/kernel")
 [ "$(git -C "$PAX_ROOT" rev-parse HEAD)" = "$head" ] || die 'checkout moved while building kernel'
-"$PAX_ROOT/tools/mkpax-release" "$elf" "$out/pax-release"
+"$PAX_ROOT/tools/mkpax-release" ${release_args[@]+"${release_args[@]}"} "$elf" "$out/pax-release"
 # Installer and formatters are built from this same checkout, not the old ISO.
 "$PAX_ROOT/tools/mkinstall" "$out/installer"
 "$PAX_ROOT/tools/mkinstall" "$out/installer" upgrade # px115: pax-upgrade, beside it
