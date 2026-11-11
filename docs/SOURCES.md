@@ -2228,7 +2228,7 @@ QEMU's. Every download below was fetched twice and its sha256 read twice; the di
 - **burrow at the pin** (the org's own): its README's `SetEnv` paragraph and `notes/px116-setenv.md` (the pinned
   `sshd`'s answers measured black box, which burrowd is held to). Built unmodified.
 - **OpenSSH's sshd** (Ubuntu 24.04's openssh-server 9.6p1) as a black box: the rig's Linux side, given the same
-  `SetEnv` line, for B17's comparison.
+  `SetEnv` line, for B18's comparison.
 - PAX's own `user/shrc`, `tools/distribution-root`, `user/login` (`ENV=/etc/shrc` at the console),
   `user/install/prepare.lu` and `upgrade.lu` (`installed_burrowd_config`: every line but `ListenAddress` kept),
   `tools/mkwolf`, `tools/mkwolf-std` and `tools/mkdev` (the dev compiler's layout), and `tests/mpx5-wolf`.
