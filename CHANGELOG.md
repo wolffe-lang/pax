@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The images' pins at what the first --latest image carried, sniff, and
+  --latest on trunk (px123).** The dev compiler moves to wolf 0.2.39, lupin to
+  0.1.61, lupin's std to wolf-std 77cf3210, pelt to b80d6570, yew to 3a9983ee
+  and den to 291011dd, so an image built from the pins carries what the
+  first --latest image did. sniff, the debugger in wolf, ships as
+  `/bin/sniff` (`tools/mksniff`, `user/sniff.pin`). `tools/mkdistribution
+  --latest` (and its chunked `--latest-step` and `--latest-from`) builds the
+  images from every tree's trunk head, lupin's newest release and the dev
+  compiler's pin, an overlay only with a green record or as `ungated`, and
+  `/etc/pax-release` names each sha and whether it is merged
+  (`tools/latest-resolve`, `tests/latest`, census's C7).
+  `tests/mpx6-install.d/ssh-upgrade.py` can send a built archive as it is to a
+  disk as an earlier upgrade left it, and S5 holds the refusals over ssh.
+
 - **mpx3-shell and mpx5-pelt fit their limits again (px122).** Trunk's
   all-tier runs after #344 were cut at these jobs' limits, `mpx3-shell` at
   120 minutes and `mpx5-pelt` at 210, in steps that were passing rows at
