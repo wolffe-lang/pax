@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **sudo's record made on a terminal names the session leader's start time
+  (px119, pax#339).** The timestamp record for a terminal is now `tty NR sid
+  SID start T`, T the session leader's start time (proc_pid_stat(5)'s field
+  22), as sudoers_timestamp(5) keeps it, so a later session on the same
+  terminal number (a pseudo-terminal's comes back as soon as its pair is
+  closed) whose leader has an earlier leader's pid is asked for the password
+  again. A record of the old form matches nothing; when the leader's start
+  time cannot be read, sudo asks and remembers nothing. `tests/mpx5-sudo`'s
+  new `sudotty` image holds it on PAX (P8: asked again on the same pty number
+  with the earlier leader's pid, stubbed, since PAX never reuses a pid; P9: a
+  second sudo in the same session is not asked), and the suite's container
+  rows hold it on Linux (`sudo-n-tty-reused`): `notes/px119-sudo-terminal-key.md`.
+
 - **A command over ssh has the console's environment (px116, pax#334).**
   burrowd's configuration on every image carries one `SetEnv` line, written
   when the image is built from the variables `/etc/shrc` exports for the
