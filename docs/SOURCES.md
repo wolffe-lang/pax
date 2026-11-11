@@ -2263,3 +2263,20 @@ QEMU's. Every download below was fetched twice and its sha256 read twice; the di
   `kernel/paging`, `kernel/procfs`, `kernel/files`, `kernel/rtc`, `kernel/acpi`, `kernel/triage`, `user/login`,
   `user/install` and `user/usb-login.sh`.
 - No kernel's, boot loader's or firmware's source.
+
+## px119 — sudo's record made on a terminal names the session leader's start time (pax#339)
+
+- **sudoers_timestamp(5)** (sudo 1.9.17p2's page, of 2023-11-26): a record made on a terminal (`TS_TTY`) keeps the
+  terminal's device, the session id and the session leader's start time, the start time "to help prevent reuse of
+  a time stamp record after a user has logged out". **sudo(8)** for `-n`, `-k` and the prompt.
+- **proc_pid_stat(5)** (man-pages 6.7): `session` (field 6), `tty_nr` (field 7, the major in bits 15-8, the minor
+  in 31-20 and 7-0) and `starttime` (field 22, clock ticks since the boot), for the key and the probe's reading of
+  it; **pty(7)**, **pts(4)**, **ioctl_tty(2)** (`TIOCSCTTY`, `TIOCGPTN`), **setsid(2)**, **posix_openpt(3)**,
+  **unlockpt(3)**, **ptsname(3)** and **credentials(7)** for the probe's two sessions; **script(1)** (util-linux,
+  as a program) for the container row's terminal.
+- Ubuntu 24.04's sudo as a black box, in the suite's throwaway container (`notes/px106/auth-ct.sh`), for the
+  container row's answer.
+- PAX's own `user/sudo/sudo.lu` (`ts_key`, `start_of`, `ts_valid`, `ts_write`), `user/auth/secret.lu` (the
+  session and terminal read from `/proc/self/stat`, the password's read), `kernel/sched` (`take_pid`: a pid is
+  never reused) and px111's `user/elf/ptyprobe.c` (a session driven from a master).
+- No sudo source, no kernel's source of any OS, no C library's or shell's source.
