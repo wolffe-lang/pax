@@ -170,6 +170,11 @@ const PLAYOUT: u64 = 64
 const PREPORT: u64 = 3072
 // px120: every DMA page lies below this (`page`).
 const LOW_DMA: u64 = 0x100000000
+// px120: a hub's ports whose device was refused (bit p for port p), each
+// tried again only after its port changes. A root port's mark is a byte
+// of the controller's page from RREFUSED (port p at RREFUSED + p).
+const REFUSED: u64 = 368
+const RREFUSED: u64 = 2048
 // px78: the storage devices found (at most four), a page: count at 0,
 // device records from 1.
 var storage: u64 = 0
@@ -1291,12 +1296,36 @@ fn discard_allocations(d: u64) {
     sync.irq_restore(saved)
 }
 
+/// px120: whether the device on `port` (a root port when `parent` is 0,
+/// else a port of hub `parent`) was refused since the port last changed.
+fn refused(c: u64, parent: u64, port: u64) -> bool {
+    if parent == 0 { return port < 256 && r8(c + RREFUSED + port) != 0 }
+    port < 64 && (get(parent, REFUSED) >> port) & 1 != 0
+}
+
+/// px120: mark `port` refused (`on`) or clear its mark.
+fn mark(c: u64, parent: u64, port: u64, on: bool) {
+    if parent == 0 {
+        if port < 256 { w8(c + RREFUSED + port, if on { 1 } else { 0 }) }
+        return
+    }
+    if port >= 64 { return }
+    let one: u64 = 1
+    let bits = get(parent, REFUSED)
+    put(parent, REFUSED, if on { bits | (one << port) } else { bits & !(one << port) })
+}
+
 // Keep diagnostic formatting outside the branch-heavy setup routine. Wolf
 // 0.2.35 inlines each small formatter loop before range analysis (#983).
 // One report site preserves every diagnostic without multiplying those loops.
 fn attach(c: u64, parent: u64, port: u64, speed: u64) {
     let (why, detail) = try_attach(c, parent, port, speed)
     if why == 0 { return }
+    // px120 (pax#348): a device that cannot be taken is not tried again
+    // until its port changes (a connect change, or nothing on it), so it
+    // costs one line a port change; before, every pass of the scan (ten a
+    // second) tried it and said so again.
+    mark(c, parent, port, true)
     let message = match why {
         1 => "hub depth exceeds five",
         2 => "enable slot failed",
@@ -1321,6 +1350,10 @@ fn try_attach(c: u64, parent: u64, port: u64, speed: u64) -> (u64, u64) {
     }
     let result = command(c, 0, 9 << 10)
     let slot = result >> 24
+    // px120: a slot past the ones enabled (CONFIG's MaxSlotsEn, which
+    // QEMU's controllers do not hold Enable Slot to, measured) is given
+    // back, not kept by a refused device until the controller has none.
+    if result & 255 == 1 && slot > get(c, NSLOT) { let _back = command(c, 0, (10 << 10) | (slot << 24)) }
     if result & 255 != 1 || slot == 0 || slot > get(c, NSLOT) { return (2, result) }
     let d = page()
     if d == 0 {
@@ -1419,11 +1452,13 @@ fn root_scan(c: u64) {
         let address = get(c, OP) + 0x400 + (port - 1) * 16
         var status = r32(address)
         let existing = child(c, 0, port)
-        if existing != 0 && (status & 1 == 0 || status & 0x20000 != 0) { detach(existing) }
+        let changed = status & 1 == 0 || status & 0x20000 != 0
+        if existing != 0 && changed { detach(existing) }
+        if changed { mark(c, 0, port, false) } // px120: CCS clear or CSC set
         // PORTSC has mixed RW/RW1C semantics. Preserve PP only; never
         // echo PED=1 (write-one-disable) or a link-state strobe.
         w32(address, (status & 0x200) | (status & 0xfe0000))
-        if status & 1 != 0 && child(c, 0, port) == 0 {
+        if status & 1 != 0 && child(c, 0, port) == 0 && !refused(c, 0, port) {
             let _debounce = sched.sleep(11)
             status = r32(address)
             if status & 1 != 0 {
@@ -1451,7 +1486,9 @@ fn hub_scan(d: u64) {
         if !control(d, 0xa3, 0, 0, port, 4) || get(d, ACTUAL) < 4 { return }
         var status = r32(get(d, BUFFER))
         let existing = child(c, d, port)
-        if existing != 0 && (status & 1 == 0 || status & 0x10000 != 0) { detach(existing) }
+        let changed = status & 1 == 0 || status & 0x10000 != 0
+        if existing != 0 && changed { detach(existing) }
+        if changed { mark(c, d, port, false) } // px120: no connection, or C_PORT_CONNECTION
         var bit: u64 = 0
         while bit < 5 {
             if status & (1 << (bit + 16)) != 0 {
@@ -1459,7 +1496,7 @@ fn hub_scan(d: u64) {
             }
             bit += 1
         }
-        if status & 1 != 0 && child(c, d, port) == 0 {
+        if status & 1 != 0 && child(c, d, port) == 0 && !refused(c, d, port) {
             let _debounce = sched.sleep(11)
             if !control(d, 0x23, 3, 4, port, 0) { return }
             let until = timer.ticks() + 100
