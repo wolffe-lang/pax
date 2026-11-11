@@ -108,6 +108,27 @@
 #     P9 the second sudo in session A, inside the timeout, is not asked;
 #        with T1, T2 (the first one asked) and T4.
 #
+#   sudoppid (px121): sudo with no terminal, `-S` and bob's password on
+#   standard input, from the probe user/elf/sudoppid.c; the run list is two
+#   commands. Init (root) forks session D's leader, which starts a session
+#   of its own and forks two callers; init ends, then the leader, so the
+#   callers have no parent (kernel/sched gives an ending process's children
+#   to nobody once pid 1 has ended: getppid 0, and /proc/0/stat names no
+#   process). They run `sudo -S /bin/id -u` as bob in turn. The second
+#   command (the report, root) reads what they did, then starts session E,
+#   whose two callers' parent is its leader, alive. Held to
+#   tests/mpx5-sudo.d/sudoppid.pax (PAX's own), row by row:
+#     P10 session D's second sudo, inside the timeout, is asked again, and
+#        no record is left: with no terminal and the parent's start time
+#        unreadable sudo keys no record (`ppid 0 start -1 sid SID` would be
+#        every parentless caller's in the session); with T1, T2, T3 (no
+#        terminal, one session, no parent), T4 (the first asked) and T5
+#        (the record after D: none).
+#     P11 session E's second sudo, inside the timeout, its parent the same,
+#        is not asked (px115's key, as before); with T6 (no terminal, one
+#        session, the parent alive), T7 (the first asked), T8 (the record:
+#        ppid, the parent's start time, the session) and T9.
+#
 # Two rows are not run yet and say SKIP by name, at column 0, with their
 # reason: a traced exec of a set-ID file, and a ptrace attach after a
 # set-ID exec. The kernel's traced-exec hook is not done: the exec path
@@ -152,7 +173,7 @@ need readelf python3
 
 SESSIONS="sid sudo"
 TYPED="pw login login-max login-first admin login-trap"
-PROBED="sudotty"
+PROBED="sudotty sudoppid"
 ref=$here/mpx5-sudo.d/linux
 work=$PAX_BUILD/mpx5-sudo
 runs=$PAX_BUILD/mpx5-sudo-runs.txt
@@ -287,6 +308,15 @@ if [ -z "$images" ]; then
     fi
     r=$(static_ok "$work/bin/sudotty") || why+=" $r;"
     say "  program: sudotty $(sha256_of "$work/bin/sudotty") $(wc -c < "$work/bin/sudotty" | tr -d ' ') bytes"
+    # px121: the sudoppid image's probe, the same way
+    if [ -n "$bindir" ] && [ -f "$bindir/sudoppid" ]; then
+        cp "$bindir/sudoppid" "$work/bin/sudoppid" || why+=" no $bindir/sudoppid;"
+    else
+        cc -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function -Wl,--build-id=none -Wl,-z,noexecstack \
+            -o "$work/bin/sudoppid" "$PAX_ROOT/user/elf/sudoppid.c" || why+=" cc sudoppid.c;"
+    fi
+    r=$(static_ok "$work/bin/sudoppid") || why+=" $r;"
+    say "  program: sudoppid $(sha256_of "$work/bin/sudoppid") $(wc -c < "$work/bin/sudoppid" | tr -d ' ') bytes"
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$work/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\npack:x:2000:pax\n' > "$work/group"
     printf 'Defaults secure_path="/bin:/usr/bin"\nroot ALL=(ALL:ALL) ALL\n#1000 ALL=(ALL:ALL) NOPASSWD: ALL\n#includedir /etc/sudoers.d\n' > "$work/sudoers"
@@ -381,6 +411,15 @@ if [ -z "$images" ]; then
         say "  initramfs sudotty: $(tail -n 1 "$work/sudotty.initramfs.txt")"
     else
         why+=" tools/mkinitramfs sudotty;"
+    fi
+    # px121: the sudoppid image, sudotty's files with its own probe; two commands, init and the report.
+    [ -f "$here/mpx5-sudo.d/sudoppid.pax" ] || why+=" no tests/mpx5-sudo.d/sudoppid.pax;"
+    printf '%s\n' /bin/sudoppid '/bin/sudoppid report' > "$work/sudoppid.run"
+    files[0]="/bin/sudoppid=$work/bin/sudoppid:755"
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/sudoppid.cpio" "${files[@]}" "/etc/pax-run=$work/sudoppid.run:644" > "$work/sudoppid.initramfs.txt"; then
+        say "  initramfs sudoppid: $(tail -n 1 "$work/sudoppid.initramfs.txt")"
+    else
+        why+=" tools/mkinitramfs sudoppid;"
     fi
     for s in $SESSIONS; do
         run_of "$s" > "$work/$s.run"
@@ -486,16 +525,17 @@ for leg in $legs; do
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             [ -z "$why" ] && say "PASS S5 $id: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
         done
-        # px119: P8 and P9, sudo's record made on a pseudo-terminal (the sudotty image), each row
-        # held with the lines it stands on to tests/mpx5-sudo.d/sudotty.pax.
+        # px119: P8 and P9, sudo's record made on a pseudo-terminal (the sudotty image); px121: P10
+        # and P11, made with no terminal (the sudoppid image). Each row is held with the lines it
+        # stands on to tests/mpx5-sudo.d/IMAGE.pax.
         for s in $PROBED; do
             id="$tier $leg $s"
+            case $s in sudotty) rows="P9 P8" ;; sudoppid) rows="P10 P11" ;; esac
             log=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.serial.log
             elf=$images/$tier/kmain_console.elf iso=$images/$tier/sudo-$s.iso
             rm -f "$log" "$log.verdict"
             if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
-                bad "P8 $id: no image"
-                bad "P9 $id: no image"
+                for row in $rows; do bad "$row $id: no image"; done
                 continue
             fi
             hrc=0
@@ -504,11 +544,20 @@ for leg in $legs; do
             printf '%s kmain_console %s %s halt-status=%s serial=%s iso=%s\n' "$tier" "$leg" "$s" "$hrc" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
             norm=$log.norm; serial_norm "$log" > "$norm"
             out=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.session
-            awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+            # px121: sudoppid's session runs on past init's end, to the run list's end (`run: N
+            # commands`), the kernel's lines between the commands left out.
+            multi=0; [ "$s" = sudoppid ] && multi=1
+            awk -v multi=$multi '/^user: exec pid 1 / { if (!on) { on = 1; next } }
+                 on && !multi && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on && multi && /^run: [0-9]+ commands$/ { exit }
+                 on && multi && (/^run [0-9]+: / || /^user: frames free / || /^tree: frames /) { next }
                  on { i = match($0, /user: [^ ]+ pid [0-9]+ /); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
             want=$here/mpx5-sudo.d/$s.pax
-            for row in P9 P8; do
-                case $row in P9) parts="T1 T2 P9 T4" ;; P8) parts="T3 T5 T6 P8 T7" ;; esac
+            for row in $rows; do
+                case $row in
+                    P9) parts="T1 T2 P9 T4" ;; P8) parts="T3 T5 T6 P8 T7" ;;
+                    P10) parts="T1 T2 T3 T4 P10 T5" ;; P11) parts="T6 T7 P11 T8 T9" ;;
+                esac
                 w=$(awk -v rows=" $parts " 'index(rows, " " $1 " ")' "$want")
                 g=$(awk -v rows=" $parts " 'index(rows, " " $1 " ")' "$out")
                 if [ -n "$w" ] && [ "$w" = "$g" ]; then
