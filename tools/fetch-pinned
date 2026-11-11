@@ -12,12 +12,13 @@
 #   tools/fetch-pinned --sources  `PIN NAME SHA256 URL...`, the same with
 #                                 each file's sources in order, no network
 #
-# The pins (each read here as NAME, SHA256 and its sources in order):
-#   beep       user/beep.pin: the source package mkbeep builds, two files;
-#              Ubuntu's archive pool, then Launchpad's archive of the
-#              package, then (the upstream tarball, the same file) Debian's.
-#   disktools  user/disktools.pin: the disk tools' seven .debs; Ubuntu's
-#              archive pool, then Launchpad's librarian.
+# The pins, each the file of user/ named for it (beep.pin, disktools.pin),
+# read here as NAME, SHA256 and the file's sources in order:
+#   beep       the source package mkbeep builds, two files; Ubuntu's
+#              archive pool, then Launchpad's archive of the package, then
+#              (the upstream tarball, the same file) Debian's pool.
+#   disktools  the disk tools' seven .debs; Ubuntu's archive pool, then
+#              Launchpad's librarian.
 #
 # The store is $PAX_CACHE/pinned/SHA256/NAME, and CI's cache carries it
 # between runs (.github/actions/apt). A file there is used only after
@@ -43,12 +44,13 @@ set -uo pipefail
 PINS="beep disktools"
 STORE=$PAX_CACHE/pinned
 
-# PIN -> `NAME SHA256 URL...` lines. A pin's variables are read in a
-# subshell, so two pins never see each other's.
+# PIN -> `NAME SHA256 URL...` lines, from the user/ pin of PIN's name. A
+# pin's variables are read in a subshell, so two pins never see each
+# other's.
 entries() {
+    local pin=$PAX_ROOT/user/$1.pin
     case $1 in
         beep) (
-            pin=$PAX_ROOT/user/beep.pin
             [ -f "$pin" ] || die "no $pin"
             # shellcheck disable=SC1090
             . "$pin"
@@ -58,7 +60,6 @@ entries() {
             done
         ) ;;
         disktools) (
-            pin=$PAX_ROOT/user/disktools.pin
             [ -f "$pin" ] || die "no $pin"
             # shellcheck disable=SC1090
             . "$pin"
