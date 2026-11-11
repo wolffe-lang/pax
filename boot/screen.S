@@ -6,11 +6,12 @@
    wolf-lang#598's shape), so its state is bytes here, named by
    kernel/screen with `extern "c" let` and read and written volatile:
 
-     pax_screen_state  69 eight-byte words: the framebuffer's address
+     pax_screen_state  80 eight-byte words: the framebuffer's address
                        and geometry, the grid's size, the cursor, the
                        pending wrap, the colours, the escape parser,
                        the UTF-8 decoder, the palette's 16 pixel values,
-                       the counters kernel/screen reports
+                       the counters kernel/screen reports; (px117) the
+                       mouse modes DECSET chose and the pointer's cell
      pax_screen_cells  two 256 x 128 four-byte grids, main then alternate (the
                        glyph's code point in bits 0-7, the foreground
                        colour in bits 8-11, the background in 12-15),
@@ -59,7 +60,7 @@ pax_fb_fill:
         .p2align 6
         .globl pax_screen_state
 pax_screen_state:
-        .zero 552
+        .zero 640
         .p2align 12
         .globl pax_screen_cells
 pax_screen_cells:
