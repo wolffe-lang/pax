@@ -166,7 +166,8 @@ floors = {
 }
 failed = False
 for job, floor in floors.items():
-    seconds = bound(job)
+    # px122: mpx5-pelt's limit is tiered now; these rows are its all tier's (every leg)
+    seconds = tier_bound(job, 'all')
     ok = seconds * 10 >= floor * 14
     print('%s CI budget %s: bound=%ds sizing-floor=%ds margin=%ds' %
           ('PASS' if ok else 'FAIL', job, seconds, floor, seconds - floor))
