@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# tests/mpx6-pointer — px117: the console's pointer and the mouse reports it
+# types for the foreground program (button-event tracking, 1002, in the SGR
+# encoding, 1006, as the XTerm Control Sequences document gives them), over
+# px109's USB pointers. One image a tier: kmain_console with
+# user/elf/pointerprobe.c as its one program; tools/pointer-session boots it
+# with a USB keyboard, QEMU's usb-tablet and its usb-mouse and drives the
+# probe's steps through QMP, then judges each row by name (PASS or FAIL at
+# column 0): the pointer drawn and erased cell-exact and never copied by a
+# scroll; press, release, drag, wheel and modifiers at known cells, from the
+# tablet and from the relative mouse; nothing before a mode is set, after it
+# is reset or for a mode not served; a mode ended with the process that set
+# it, withheld while that process is not in the foreground group; reports
+# and keys in the order they came; a pty's program served by its master,
+# not by the console; the kernel's books.
+#
+#   tests/mpx6-pointer [--tier native|release|both] [--firmware bios|uefi|both]
+#                      [--images DIR | --only build] [--accel auto|kvm|tcg]
+#
+# The judge says no first (tests/mpx6-pointer.d/judge-selftest), then the
+# session runs a leg at a time. The UEFI leg needs OVMF: SKIPPED LOUDLY
+# without it unless PAX_REQUIRE_UEFI=1. Exit 0 when every row held, 1
+# otherwise, 2 on a usage or tool error.
+set -uo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+tier=both firmware=both images= accel=auto only=
+usage='usage: mpx6-pointer [--tier native|release|both] [--firmware bios|uefi|both] [--images DIR | --only build] [--accel auto|kvm|tcg]'
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tier=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        --images) images=$2; shift 2 ;;
+        --accel) accel=$2; shift 2 ;;
+        --only) only=$2; shift 2 ;;
+        *) die "$usage" ;;
+    esac
+done
+case $tier in both) tiers='native release' ;; native|release) tiers=$tier ;; *) die "$usage" ;; esac
+case $firmware in both) legs='bios uefi' ;; bios|uefi) legs=$firmware ;; *) die "$usage" ;; esac
+case $accel in auto|kvm|tcg) ;; *) die "$usage" ;; esac
+case $only in ''|build) ;; *) die "--only takes build" ;; esac
+[ -z "$only" ] || [ -z "$images" ] || die '--only build builds: no --images'
+need python3
+fail=0
+
+python3 -I "$PAX_ROOT/tests/mpx6-pointer.d/judge-selftest" || fail=1
+
+work=${images:-$PAX_BUILD/mpx6-pointer}
+if [ -z "$images" ]; then
+    need cc
+    mkdir -p "$work"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    cc -static -O1 -Wall -Wextra -o "$work/pointerprobe" "$PAX_ROOT/user/elf/pointerprobe.c" || die 'pointerprobe did not build'
+    printf '/bin/pointerprobe\n' > "$work/run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/probe.cpio" "/bin/pointerprobe=$work/pointerprobe" "/etc/pax-run=$work/run" > /dev/null
+    for t in $tiers; do
+        flags=(); [ "$t" = release ] && flags=(--release)
+        mkdir -p "$work/$t"
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$t" 2> "$work/$t/build-kernel.log"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/probe.cpio" initramfs.cpio \
+                "$elf" "$work/$t/probe.iso" > /dev/null || { say "FAIL build $t: mkimage"; fail=1; }
+            say "built $t: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$t/probe.iso"), probe $(sha256_of "$work/pointerprobe")"
+        else
+            cat "$work/$t/build-kernel.log" >&2
+            say "FAIL build $t: tools/build-kernel"
+            fail=1
+        fi
+    done
+fi
+if [ "$only" = build ]; then
+    exit "$fail"
+fi
+for t in $tiers; do
+    for f in $legs; do
+        iso=$work/$t/probe.iso
+        if [ ! -f "$iso" ]; then
+            say "FAIL pointer-session $f $accel: no $iso (build first)"
+            fail=1
+            continue
+        fi
+        if [ "$f" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+                say "FAIL pointer-session uefi: no OVMF"
+                fail=1
+            else
+                say "SKIPPED LOUDLY: pointer-session uefi (no OVMF)"
+            fi
+            continue
+        fi
+        say "pointer session: $t $f $accel"
+        python3 -I "$PAX_ROOT/tools/pointer-session" --image "$iso" --output "$PAX_BUILD/mpx6-pointer/$t-$f-$accel" \
+            --firmware "$f" --accel "$accel" || fail=1
+    done
+done
+[ "$fail" = 0 ] && say 'mpx6-pointer: PASS' || say 'mpx6-pointer: FAIL'
+exit "$fail"
