@@ -18,8 +18,11 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   (`tests/ci-budgets.py`, `tests/ci-budgets.d/shell-pelt.json`), and a named
   step that no attempt has timed fails the plan job of its own pull request.
   The limits are tiered: `mpx3-shell` 190 minutes and `mpx5-pelt` 350 in the
-  all tier and a partial dispatch, 120 and 210 in pr and full as before. No
-  suite's rows or legs changed: `notes/px122-the-cut-runs.md`.
+  all tier and a partial dispatch, 120 and 210 in pr and full as before. The
+  slower build came from `/proc/pax-boot`'s text growing in one function
+  (kernel/procfs): it is now written through small functions, the text the
+  same byte for byte, and `kmain_console`'s release build is faster than
+  before #344. No suite's rows or legs changed: `notes/px122-the-cut-runs.md`.
 
 - **A USB device plugged in after boot gets a record (px120, pax#348).** On a
   machine with memory above 4 GiB, once the kernel had handed out more frames
