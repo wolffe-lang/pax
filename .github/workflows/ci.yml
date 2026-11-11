@@ -5860,6 +5860,44 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # px117: the console's pointer and the mouse reports it types for the
+  # foreground program (button-event tracking, 1002, in the SGR encoding,
+  # 1006). tests/mpx6-pointer: kmain_console with user/elf/pointerprobe.c,
+  # QEMU's usb-tablet and usb-mouse beside the USB keyboard, driven by
+  # tools/pointer-session through QMP; each row PASS or FAIL by name.
+  mpx6-pointer:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-pointer')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_REQUIRE_UEFI: "1"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU, firmware and baseline compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
+          qemu-system-x86_64 --version
+          ls -l /dev/kvm || true
+      - name: pinned wolf archive
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+      - name: the pointer drawn, the reports typed, the modes' owners and the books
+        run: tests/mpx6-pointer $PAX_LEGS
+      - name: keep the pointer sessions' transcripts and screens
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-pointer
+          path: |
+            build/mpx6-pointer/**/*.log
+            build/mpx6-pointer/**/*.ppm
+          retention-days: 14
+          if-no-files-found: error
+
   # px76: the firmware's machine as kasumi has it. tests/mpx6-firmware:
   # the clocks with and without the HPET and the PIT (F1), COM1 present
   # and absent (F2), the FADT's reset and ACPI S5 (F3), a padded
@@ -5987,6 +6025,7 @@ jobs:
       - mpx6-fsck
       - mpx6-games
       - mpx6-usb
+      - mpx6-pointer
       - mpx6-firmware
     runs-on: ubuntu-latest
     timeout-minutes: 5
