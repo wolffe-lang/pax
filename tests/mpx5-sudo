@@ -110,24 +110,31 @@
 #
 #   sudoppid (px121): sudo with no terminal, `-S` and bob's password on
 #   standard input, from the probe user/elf/sudoppid.c; the run list is two
-#   commands. Init (root) forks session D's leader, which starts a session
-#   of its own and forks two callers; init ends, then the leader, so the
-#   callers have no parent (kernel/sched gives an ending process's children
-#   to nobody once pid 1 has ended: getppid 0, and /proc/0/stat names no
-#   process). They run `sudo -S /bin/id -u` as bob in turn. The second
-#   command (the report, root) reads what they did, then starts session E,
-#   whose two callers' parent is its leader, alive. Held to
-#   tests/mpx5-sudo.d/sudoppid.pax (PAX's own), row by row:
+#   commands. In each session below two callers run `sudo -S /bin/id -u` as
+#   bob in turn. Init (root) first forks session F's leader, which starts a
+#   session of its own, forks two callers and ends, so they are handed to
+#   init, alive (getppid 1); init reaps them. Then it forks session D's
+#   leader the same way and ends, then the leader ends, so D's callers have
+#   no parent (kernel/sched gives an ending process's children to nobody
+#   once pid 1 has ended: getppid 0, and /proc/0/stat names no process).
+#   The second command (the report, root) reads what D's callers did, then
+#   starts session E, whose two callers' parent is its leader, alive. Held
+#   to tests/mpx5-sudo.d/sudoppid.pax (PAX's own), row by row:
+#     P12 session F's second sudo, inside the timeout, is asked again, and
+#        no record of F is left: sudo keys no record when the parent is pid
+#        1 (`ppid 1 start T sid SID` would be every caller's in the session
+#        handed to init); with T1, T2 (no terminal, one session, the parent
+#        init), T3 (the first asked) and T4 (the record after F: none).
 #     P10 session D's second sudo, inside the timeout, is asked again, and
-#        no record is left: with no terminal and the parent's start time
-#        unreadable sudo keys no record (`ppid 0 start -1 sid SID` would be
-#        every parentless caller's in the session); with T1, T2, T3 (no
-#        terminal, one session, no parent), T4 (the first asked) and T5
-#        (the record after D: none).
+#        no record of D is left: with no terminal and the parent's start
+#        time unreadable sudo keys no record (`ppid 0 start -1 sid SID`
+#        would be every parentless caller's in the session); with T5, T6,
+#        T7 (no terminal, one session, no parent), T8 (the first asked) and
+#        T9 (the record after D: none).
 #     P11 session E's second sudo, inside the timeout, its parent the same,
-#        is not asked (px115's key, as before); with T6 (no terminal, one
-#        session, the parent alive), T7 (the first asked), T8 (the record:
-#        ppid, the parent's start time, the session) and T9.
+#        is not asked (px115's key, as before); with T10 (no terminal, one
+#        session, the parent alive), T11 (the first asked), T12 (the
+#        record: ppid, the parent's start time, the session) and T13.
 #
 # Two rows are not run yet and say SKIP by name, at column 0, with their
 # reason: a traced exec of a set-ID file, and a ptrace attach after a
@@ -525,12 +532,12 @@ for leg in $legs; do
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             [ -z "$why" ] && say "PASS S5 $id: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
         done
-        # px119: P8 and P9, sudo's record made on a pseudo-terminal (the sudotty image); px121: P10
-        # and P11, made with no terminal (the sudoppid image). Each row is held with the lines it
+        # px119: P8 and P9, sudo's record made on a pseudo-terminal (the sudotty image); px121: P10,
+        # P11 and P12, made with no terminal (the sudoppid image). Each row is held with the lines it
         # stands on to tests/mpx5-sudo.d/IMAGE.pax.
         for s in $PROBED; do
             id="$tier $leg $s"
-            case $s in sudotty) rows="P9 P8" ;; sudoppid) rows="P10 P11" ;; esac
+            case $s in sudotty) rows="P9 P8" ;; sudoppid) rows="P10 P11 P12" ;; esac
             log=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.serial.log
             elf=$images/$tier/kmain_console.elf iso=$images/$tier/sudo-$s.iso
             rm -f "$log" "$log.verdict"
@@ -556,7 +563,8 @@ for leg in $legs; do
             for row in $rows; do
                 case $row in
                     P9) parts="T1 T2 P9 T4" ;; P8) parts="T3 T5 T6 P8 T7" ;;
-                    P10) parts="T1 T2 T3 T4 P10 T5" ;; P11) parts="T6 T7 P11 T8 T9" ;;
+                    P10) parts="T5 T6 T7 T8 P10 T9" ;; P11) parts="T10 T11 P11 T12 T13" ;;
+                    P12) parts="T1 T2 T3 P12 T4" ;;
                 esac
                 w=$(awk -v rows=" $parts " 'index(rows, " " $1 " ")' "$want")
                 g=$(awk -v rows=" $parts " 'index(rows, " " $1 " ")' "$out")
