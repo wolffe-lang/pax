@@ -25,12 +25,13 @@ BASE_IMAGE_DIGEST=sha256:8185e444e45ba166146b244b41f1cba2d7d91f3eddce533a839cc95
 
 # px81: pelt launch-trunk identity, read twice; tests/census C4 keeps
 # the image pin and this census input together. This is not a live-head gate.
+# px123: pelt trunk b80d6570, read again on 2026-11-11; red (C4) until the pelt pin moves.
 PELT_REPO=https://github.com/wolffe-lang/pelt
-PELT_REV=4683b3f5faf46cd393ec2632f345f8cd483a4f1f
+PELT_REV=b80d6570a4611d7977e4cf489c192849b32a6a7f
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
-# px97: yew trunk 2eb9cb9b, read again on 2026-11-06; red (C5) until the yew pin moves.
-IMAGE_YEW_REV=2eb9cb9b2a8e33d788011aa6a81c3e633241c67c
+# px123: yew trunk 3a9983ee, read again on 2026-11-11; red (C5) until the yew pin moves.
+IMAGE_YEW_REV=3a9983ee20619ca82651471ed0d8ced84e37f196
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
 # px97: boreutils trunk ff5396ad, the sweep's; red (C5) until the boreutils pin moves.
