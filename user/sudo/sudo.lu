@@ -63,7 +63,10 @@
 //!   sudo asks and remembers nothing. px121: so too with no terminal when
 //!   the parent's start time cannot be read (getppid(2)'s 0, a process
 //!   with no parent, or no /proc), where `ppid P start -1` would be shared
-//!   by every caller in the session with that parent pid.
+//!   by every caller in the session with that parent pid, and when the
+//!   parent is pid 1 (a caller handed to init when its own parent ended),
+//!   where `ppid 1 start T` would be shared by every such caller in the
+//!   session while init lives.
 //!   A reboot voids every record: Linux's /run is a new tmpfs at each boot,
 //!   and an installed PAX keeps /var on ext2, so the installed system's pid
 //!   1, /bin/login, empties `/var/run/sudo/ts` when it starts (the images
@@ -2029,7 +2032,11 @@ fn close_tty(fd: int) {
 /// as well with no terminal when the parent's start time cannot be read
 /// (getppid(2)'s 0 for a process with no parent, whose /proc/0/stat names
 /// nothing; or no /proc): `ppid P start -1 sid SID` would be the key of
-/// every caller in that session with that parent pid.
+/// every caller in that session with that parent pid. And "" when the
+/// parent is pid 1: a caller handed to init when its own parent ended
+/// keys `ppid 1 start T sid SID`, every such caller's in that session
+/// while init lives (nothing on PAX runs sudo with no terminal as init's
+/// own child and needs it to remember).
 fn ts_key() -> str {
     let nr = secret_tty_nr()
     let sid = secret_session()
@@ -2043,6 +2050,9 @@ fn ts_key() -> str {
     let pp = os_ppid() else 0
     let ps = start_of(pp)
     if ps < 0 {
+        return ""
+    }
+    if pp == 1 {
         return ""
     }
     "ppid {pp} start {ps} sid {sid}"
