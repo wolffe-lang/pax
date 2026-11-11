@@ -1,7 +1,9 @@
 # px119 — sudo's record made on a terminal names the session leader's start time (pax#339)
 
-Base: pax#344's head `40da7481` (on trunk `1c827734` and pax#343's `3fa24cf5`). The prediction:
-`notes/px119/prediction.txt`, committed before the first change. The rig: `notes/px119/rig/`.
+Base: pax#344's head `40da7481` (on trunk `1c827734` and pax#343's `3fa24cf5`), then rebased onto its next head
+`a04eb7b5` (boot/cpu.S's CLFLUSH and MFENCE as their encodings). The commits this note cites are the branch's before
+that rebase, kept on `px119-before-rebase` (`d1cd86ca`); the records at the rebased head are in the pull request's
+body. The prediction: `notes/px119/prediction.txt`, committed before the first change. The rig: `notes/px119/rig/`.
 
 ## 1. What this lane does
 
