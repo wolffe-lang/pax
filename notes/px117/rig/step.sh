@@ -8,6 +8,7 @@
 #   yew-build ARGS tests/mpx5-yew --only build ARGS: yew, pelt and the session image, in a container
 #   pointer ARGS   tests/mpx6-pointer --images the build ARGS, in a container with KVM
 #   yew ARGS       tests/mpx5-yew --only pointer --images the yew build ARGS (Y9), with KVM
+#   usbcheck ARGS  tests/mpx6-usbcheck ARGS (its own build: kernel/mouse's invariants), with KVM
 #   usb ARGS       tests/mpx6-usb.d/build-once.py (the CI job's first step), then tests/mpx6-usb ARGS
 #                  (its own build: the invariants, the keyboards and the mouse session beside the
 #                  console's new reader), with KVM
@@ -22,7 +23,7 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 # shellcheck disable=SC1091
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
-lift() { "$@" 2>&1 | sed -u -E 's/^(mpx6-pointer|mpx5-yew|mpx6-usb|mpx3-screen): FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
+lift() { "$@" 2>&1 | sed -u -E 's/^(mpx6-pointer|mpx5-yew|mpx6-usb|mpx6-usbcheck|mpx3-screen): FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
 wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && '; }
 what=${1:?}; shift
 case $what in
@@ -37,6 +38,7 @@ case $what in
     yew-build) lift ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx5-yew --only build "$@"; exit $?' x "$@" ;;
     pointer) lift ctr 1 localhost/px75-ubuntu:2 bash -c 'tests/mpx6-pointer --images "$PAX_BUILD/mpx6-pointer" "$@"; exit $?' x "$@" ;;
     yew) lift ctr 1 localhost/px75-ubuntu:2 bash -c 'tests/mpx5-yew --only pointer --images "$PAX_BUILD/mpx5-yew" "$@"; exit $?' x "$@" ;;
+    usbcheck) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-usbcheck "$@"; exit $?' x "$@" ;;
     usb) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'python3 -I tests/mpx6-usb.d/build-once.py && tests/mpx6-usb "$@"; exit $?' x "$@" ;;
     screen) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx3-screen "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
