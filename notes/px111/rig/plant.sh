@@ -4,7 +4,7 @@
 # output unindented so tests/mpx5-pty's `FAIL <row>` lines reach the record at column 0.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-: "${GAUNTLET_RECORD:?the recorder's path}"
+: "${GAUNTLET_RECORD:?the path of the recorder}"
 # shellcheck disable=SC1090
 . "$here/lib.sh"
 CO=$(realpath "$(git -C "$here" rev-parse --show-toplevel)")
