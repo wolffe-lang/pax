@@ -15,6 +15,8 @@
 #   budgets     tests/ci-budgets.py (the long jobs' limits against their measured floors); its rows
 #               print `PASS`/`FAIL` at column 0 themselves
 #   selftests   the plan job's other checks, as its first step runs them
+#   bootlog ARGS tests/mpx6-bootlog ARGS with KVM, its disks' e2fsprogs and disk tools through
+#               engine-local (the container has no engine): /proc/pax-boot's text, line for line
 # A step's output goes through stamped.py: each line `+SECONDS ` (since the step began) first, a
 # `FAIL ` line lifted to column 0 unstamped (the recorder keeps a `FAIL ` line there); a copy goes
 # to $PAX_BUILD/WHAT.stamped for the times step. The step's exit is the suite's.
@@ -24,6 +26,7 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
 stamp() { local w=$1; shift; "$@" 2>&1 | python3 -I "$GAUNTLET_RIG_DIR/stamped.py" stamp "$PAX_BUILD/$w.stamped"; return "${PIPESTATUS[0]}"; }
+lift() { "$@" 2>&1 | sed -u 's/^mpx6-bootlog: FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
 wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && '; }
 what=${1:?}; shift
 case $what in
@@ -42,5 +45,6 @@ case $what in
     budgets) ctr 0 localhost/px75-ubuntu:2 python3 -I tests/ci-budgets.py ;;
     selftests) ctr 0 localhost/px75-ubuntu:2 bash -c 'python3 -I tests/ci-retry.py && python3 -I tests/mpx2-heap.d/budget.py &&
         tests/fetch-retry-selftest && python3 -I tests/usb-session-selftest && python3 -I tests/pipe-shape-selftest; exit $?' ;;
+    bootlog) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'PAX_ENGINE="$0" tests/mpx6-bootlog "$@"; exit $?' "$GAUNTLET_RIG_DIR/engine-local" "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
