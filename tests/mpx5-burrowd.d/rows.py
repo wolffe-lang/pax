@@ -51,27 +51,47 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       no password in the log, the serial transcript or any record
   B10 boot 2, the same volume: the same fingerprint with no `made at this
       boot`, and the rig's known_hosts line from boot 1 still verifies
-  B12 a session without ptys, the client at a terminal: `ssh host` and
-      `ssh -T host` each run the account's login shell with no pty
-      (burrow's shell, px112), a line typed into it once the session has
-      answered; for `ssh host` the pty refused by name and burrowd's line
-      saying so, for -T neither (B9 finds both log lines); `ssh -t host`
-      ends with status 255 right after the refused pty (OpenSSH's client,
-      told to insist on a pty, measured on Linux too); `ssh host COMMAND`
-      runs, no tty; what the client writes recorded
-  B15 a bare `sudo` over ssh (px112): PAX's sudo asks on its controlling
-      terminal, which for a command over ssh is still the console (no session
-      of its own yet), and is stopped there while the client waits; burrowd
-      answers the next connection all the same (each session's program in a
-      process group of its own)
+  B12 the sessions with no pty, the client at a terminal: `ssh -T host`
+      runs the account's login shell with no pty (px112's shell), a line
+      typed into it once the session has answered runs and its `tty` is not
+      a terminal (B9 finds its log line); `ssh host COMMAND` runs, no tty;
+      what the client writes recorded. (Since burrow ab34042 `ssh host` and
+      `ssh -t host` get a pty: B19 on.)
+  B15 a bare `sudo` in a command over ssh (no pty): the command leads a
+      session of its own with no controlling terminal (burrow ab34042), so
+      PAX's sudo finds no terminal and says so at once (`a terminal is
+      required`), instead of stopping on the console as before; burrowd
+      answers the next connection
   B16 sudo over ssh as the README has it (px112, beside px115's upgrade):
       `sudo -k -S -p ''` with pax's password on standard input runs as root
       and remembers nothing, so a second session's `sudo -n` is asked. A
-      plain `sudo -S` remembers the password under its terminal, which for
-      every ssh session is still the console's at this pin: what a second
-      session's `sudo -n` then does is recorded as measured, not held (it is
-      the shared record a session of its own per program ends); `sudo -K`
-      over ssh clears it after
+      plain `sudo -S` with no terminal keeps its record by its parent
+      (sudoers_timestamp(5)), so what a second session's `sudo -n` then does
+      is recorded as measured, not held; `sudo -K` over ssh clears it after
+  B19 a terminal over ssh (burrow ab34042 on PAX's pty, px111): `ssh host`
+      from a terminal gets a pty and the login shell's prompt (pelt's
+      friendly `USER@HOST DIR> ` or a plain `$ `), and a line typed runs;
+      B20-B25 type into that one session
+  B20 `tty` there names /dev/pts/N
+  B21 the window size: `stty size` is the client's (33 97), and after the
+      client's terminal is resized (41 x 120, ssh told by SIGWINCH, the
+      window-change request) `stty size` follows
+  B22 Ctrl-C (0x03) ends a foreground `sleep 30`: `$?` is 130, at once
+  B23 Ctrl-\\ (0x1c) ends a foreground `sleep 30`: `$?` is 131
+  B24 Ctrl-Z (0x1a) stops a foreground `sleep 30`: the shell reports it
+      stopped and `jobs` lists it; `kill -KILL %1` ends it
+  B25 a bare `sudo -k id -u` in the terminal session asks
+      `[sudo] password for pax: ` on that session (not the console);
+      pax's password typed there (no echo) runs it as root (0)
+  B26 every session's pty is given back: /proc/sys/kernel/pty/nr is 0
+      once the terminal session has ended
+  B27 burrowd itself runs with SIGINT and SIGQUIT at their defaults (its
+      /proc/PID/status SigIgn, PID /var/run/burrowd.pid's): the boot hook's
+      loop is an asynchronous list in a shell without job control, which
+      starts its programs with both ignored (POSIX XCU 2.11), so the hook
+      starts burrowd with `env --default-signal=INT,QUIT`. Since burrow
+      7aa182f a session's program starts with its defaults whatever burrowd
+      has, so B22 and B23 hold burrow, and this row the hook
   B17 the stack segment after a system call (pax#340): `/bin/sysret-ss`
       (tests/mpx5-burrowd.d/sysret-ss.c) makes a system call, reads SS and
       CS, stays in ring 3 for 200 ms across the timer's interrupts, and
@@ -111,8 +131,12 @@ import secrets
 import select
 import shutil
 import socket
+import fcntl
+import signal
+import struct
 import subprocess
 import sys
+import termios
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -500,6 +524,82 @@ class Client:
         text = out.replace(b'\r\n', b'\n').replace(host.encode() + b' port ' + str(port).encode(), b'HOST port PORT')
         return (None if waited else p.returncode), text
 
+    def terminal(self, where, rows=33, cols=97):
+        """An interactive `ssh host` on a pseudo-terminal of the row's own, `rows` x `cols` (publickey)."""
+        return Tty(self, where, rows, cols)
+
+
+ANSI = re.compile(rb'\x1b\[[0-9;?<>=]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\x1b\][^\x07]*\x07')
+PROMPT = rb'\S+@\S+ \S+> $|[$#] $'
+
+
+class Tty:
+    """One `ssh host` at a terminal of the row's own: what it shows (escape sequences taken out), the keys a
+    person types, the terminal resized as a person drags its window. Its transcript is saved by the caller."""
+
+    def __init__(self, client, where, rows, cols):
+        host, port = where
+        argv = ['ssh', '-F', 'none', '-o', 'UserKnownHostsFile=%s' % client.kh, '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=20', '-o', 'BatchMode=yes',
+                '-o', 'PreferredAuthentications=publickey', '-i', client.key, '-p', str(port), '-l', 'pax', host]
+        self.master, slave = os.openpty()
+        self.size(rows, cols)
+        self.p = subprocess.Popen([str(x) for x in argv], stdin=slave, stdout=slave, stderr=slave,
+                                  env=dict(client.env(), TERM='xterm'), start_new_session=True)
+        os.close(slave)
+        self.raw = b''
+
+    def size(self, rows, cols):
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+
+    def resize(self, rows, cols):
+        """The terminal's new size, and ssh told (SIGWINCH), as a terminal emulator tells its program."""
+        self.size(rows, cols)
+        os.kill(self.p.pid, signal.SIGWINCH)
+
+    def pump(self, wait):
+        end = time.monotonic() + wait
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            r, _, _ = select.select([self.master], [], [], min(left, 0.2))
+            if r:
+                try:
+                    data = os.read(self.master, 65536)
+                except OSError:
+                    data = b''
+                if not data:
+                    return
+                self.raw += data
+
+    def shown(self, since=0):
+        return ANSI.sub(b'', self.raw[since:]).replace(b'\r', b'')
+
+    def expect(self, pattern, timeout, since=0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            m = re.search(pattern, self.shown(since), re.M)
+            if m:
+                return m
+            self.pump(0.3)
+            if self.p.poll() is not None:
+                self.pump(0.5)
+                return re.search(pattern, self.shown(since), re.M)
+        return None
+
+    def type(self, data):
+        """`data` typed; the transcript's length before it."""
+        at = len(self.raw)
+        os.write(self.master, data)
+        return at
+
+    def close(self):
+        if self.p.poll() is None:
+            self.p.kill()
+        self.p.wait()
+        os.close(self.master)
+
 
 GUEST_AT = (GUEST, 22)
 LINUX_AT = (HOST, SSHD_PORT)
@@ -701,49 +801,44 @@ def host_rows(client):
         ok('B6', 'exit 3 is 3; kill -TERM $$ is 255, as sshd\'s on Linux')
     else:
         bad('B6', 'exit 3: %s; TERM through burrowd: %s; through sshd: %s' % (show(r3), show(rt), show(lt)))
-    # B12 a session without ptys: the client at a terminal, as a person types `ssh host`, `ssh -t host`
-    # and `ssh -T host` (burrow's shell, px112: the account's login shell with no pty; a pty request
-    # refused by name, and burrowd's line saying so), and `ssh host COMMAND`. Into each shell, once the
-    # session has answered, one line: a printf whose output its own echo cannot hold, then `exit 4`.
-    line = b"printf 'shell %s %s\\n' ran \"$0\"; exit 4\n"
-    refused = b'PTY allocation request failed'
-    plain = c.ssh_tty(GUEST_AT, [], typed=line, after=refused, timeout=60)
+    # B12 the sessions with no pty, the client at a terminal: `ssh -T host` (a shell request with no pty
+    # request before it: the account's login shell with no pty, px112's; B9 finds its log line) and `ssh host
+    # COMMAND`. Into the shell, once the session has answered, one line: a printf whose output its own echo
+    # cannot hold, its `tty`, then `exit 4`. `ssh host` and `ssh -t host` get a pty since burrow ab34042 (B19).
+    line = b"printf 'shell %s %s\\n' ran \"$0\"; tty; exit 4\n"
     cmd = c.ssh_tty(GUEST_AT, ['echo pty=$(tty 2>/dev/null || echo none)'])
-    forced = c.ssh_tty(GUEST_AT, [], opts=['-t'], typed=line, after=refused, timeout=60)
-    # `ssh -T host`: a shell request with no pty request before it (B9 finds its log line).
     bare = c.ssh_tty(GUEST_AT, [], opts=['-T'], typed=line, timeout=60)
     said = lambda r: ' | '.join(l.strip() for l in r[1].decode(errors='replace').splitlines() if l.strip())
-    record_b12 = ('ssh host: status %s: %s\nssh host COMMAND: status %s: %s\nssh -t host: status %s: %s\n'
-                  'ssh -T host: status %s: %s\n' % (plain[0], said(plain), cmd[0], said(cmd), forced[0], said(forced),
-                                                    bare[0], said(bare)))
+    record_b12 = 'ssh host COMMAND: status %s: %s\nssh -T host: status %s: %s\n' % (cmd[0], said(cmd), bare[0], said(bare))
     (c.dir / 'b12.txt').write_text(record_b12)
-    no_pty = b'burrowd: no pty here: this shell runs without a terminal (no line editing, no job control)'
-    ran = lambda r: r[0] == 4 and b'shell ran ' in r[1]  # the typed line's echo holds `shell %s`, never this
-    with_pty = ran(plain) and refused in plain[1] and plain[1].count(no_pty) == 1 and plain[1].index(refused) < plain[1].index(no_pty)
-    insisted = forced[0] == 255 and refused in forced[1] and b'shell ran ' not in forced[1]
-    if (cmd[0] == 0 and b'pty=' in cmd[1] and with_pty and insisted and ran(bare) and refused not in bare[1]
-            and no_pty not in bare[1]):
-        ok('B12', 'no ptys, the shell served: %s' % record_b12.replace('\n', '; ').strip('; '))
+    refused = b'PTY allocation request failed'
+    ran = bare[0] == 4 and b'shell ran ' in bare[1] and b'not a tty' in bare[1]  # the typed line's echo holds `shell %s`
+    # tty(1) says `not a tty` on its standard output and exits 1, so the command prints that and `none`.
+    if cmd[0] == 0 and b'pty=not a tty' in cmd[1] and ran and refused not in bare[1] + cmd[1]:
+        ok('B12', 'no pty asked, none given, the shell served: %s' % record_b12.replace('\n', '; ').strip('; '))
     else:
-        bad('B12', 'a session without ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
-    # B15 a bare sudo over ssh: its prompt goes to the console, and it is stopped there (SIGTTOU, as
-    # it turns the console's echo off from a background group); the client waits until it is killed.
-    # burrowd keeps answering only if that stop stays in the program's own group.
+        bad('B12', 'the sessions with no pty: %s' % record_b12.replace('\n', '; ').strip('; '))
+    # B15 a bare sudo in a command over ssh: the command leads a session of its own with no controlling
+    # terminal (burrow ab34042), so sudo finds none and says so at once; before, it asked on the console and
+    # was stopped there while the client waited. burrowd answers the next connection.
+    t0 = time.monotonic()
     try:
         rs = c.ssh(GUEST_AT, ['sudo cat /etc/hostname'], timeout=15)
     except subprocess.TimeoutExpired:
         rs = None
+    took = time.monotonic() - t0
     try:
         r2 = c.ssh(GUEST_AT, ['echo second'], timeout=30)
     except subprocess.TimeoutExpired:
         r2 = (None, b'', b'[row: timed out]')
     (c.dir / 'b15.txt').write_text('sudo: %s\nsecond: %s\n' % ('waited, killed after 15 s' if rs is None else show(rs), show(r2)))
-    if rs is None and r2[0] == 0 and r2[1] == b'second\n':
-        ok('B15', 'a bare sudo over ssh waits on the console (no session of its own yet); the next connection is answered')
+    if rs is not None and rs[0] not in (0, None) and b'a terminal is required' in rs[2] and r2[0] == 0 and r2[1] == b'second\n':
+        ok('B15', 'a bare sudo in a command over ssh finds no terminal and says so (%.1f s, %s); the next connection is answered'
+           % (took, rs[2].decode(errors='replace').strip().splitlines()[0]))
     else:
-        bad('B15', 'sudo over ssh: %s; the next connection: %s' % ('waited' if rs is None else show(rs), show(r2)))
-    # B16 sudo over ssh as the README has it: -k -S remembers nothing; a plain -S's record is the
-    # console terminal's, which every ssh session shares at this pin (measured, not held).
+        bad('B15', 'sudo over ssh: %s; the next connection: %s' % ('waited 15 s' if rs is None else show(rs), show(r2)))
+    # B16 sudo over ssh as the README has it: -k -S remembers nothing; a plain -S with no terminal keeps
+    # its record by its parent (measured, not held).
     line = (PASSWORDS['pax'] + '\n').encode()
     try:
         k1 = c.ssh(GUEST_AT, ["sudo -k -S -p '' id -u"], data=line, timeout=120)
@@ -755,7 +850,7 @@ def host_rows(client):
         k1 = k2 = p1 = p2 = kk = (None, b'', ('[row: timed out: %s]' % e.cmd[-1]).encode())
     (c.dir / 'b16.txt').write_text('sudo -k -S: %s\nthen sudo -n: %s\nsudo -S: %s\nthen sudo -n: %s\nsudo -K: %s\n'
                                    % (show(k1), show(k2), show(p1), show(p2), show(kk)))
-    shared = ('a second session\'s sudo -n ran as root (the console\'s record, shared)' if p2[:2] == (0, b'0\n')
+    shared = ('a second session\'s sudo -n ran as root (a record shared)' if p2[:2] == (0, b'0\n')
               else 'a second session\'s sudo -n was asked (%s)' % show(p2))
     if k1[:2] == (0, b'0\n') and k2[0] not in (0, None) and k2[1] == b'' and p1[:2] == (0, b'0\n') and kk[0] == 0:
         ok('B16', 'sudo -k -S ran as root and a second session\'s sudo -n was asked; after a plain sudo -S, %s' % shared)
@@ -772,6 +867,97 @@ def host_rows(client):
         ok('B17', rq[1].decode(errors='replace').strip()[4:])
     else:
         bad('B17', 'sysret-ss: %s' % show(rq))
+
+
+def tty_rows(client):
+    """B19-B27: a terminal over ssh, one `ssh host` at a pseudo-terminal of the row's own (33 x 97), every
+    step typed as a person types it and read off what the terminal shows (escape sequences taken out)."""
+    c = client
+    t = c.terminal(GUEST_AT, 33, 97)
+    steps = []
+
+    def step(name, data, pattern, timeout=15):
+        at = t.type(data)
+        m = t.expect(pattern, timeout, at)
+        steps.append('%s: %r' % (name, t.shown(at)[-160:].decode(errors='replace')))
+        return m, at
+
+    def prompt(at, timeout=10):
+        return t.expect(PROMPT, timeout, at)
+
+    try:
+        m = t.expect(PROMPT, 30)
+        r, at = step('B19', b'echo B19-$((6*7))\r', rb'^B19-42$')
+        if m and r:
+            ok('B19', 'ssh host at a terminal: a pty, the prompt %r, and a line typed ran: %s'
+               % (m.group(0).decode(errors='replace'), r.group(0).decode()))
+        else:
+            bad('B19', 'ssh host at a terminal: prompt %r, the line: %r' % (m and m.group(0), t.shown()[-200:]))
+        prompt(at)
+        r, at = step('B20', b'tty\r', rb'^/dev/pts/\d+$')
+        (ok if r else bad)('B20', 'tty: %s' % (r.group(0).decode() if r else repr(t.shown(at)[-160:])))
+        prompt(at)
+        r1, at = step('B21a', b'stty size\r', rb'^\d+ \d+$')
+        prompt(at)
+        t.resize(41, 120)
+        t.pump(1.5)
+        r2, at = step('B21b', b'stty size\r', rb'^\d+ \d+$')
+        sizes = (r1.group(0).decode() if r1 else None, r2.group(0).decode() if r2 else None)
+        (ok if sizes == ('33 97', '41 120') else bad)('B21', 'stty size %s at 33 x 97, %s after the resize to 41 x 120' % sizes)
+        prompt(at)
+        for row, key, name, want in (('B22', b'\x03', 'Ctrl-C', '130'), ('B23', b'\x1c', 'Ctrl-\\', '131')):
+            at = t.type(b'sleep 30\r')
+            t.pump(2)
+            t0 = time.monotonic()
+            t.type(key)
+            t.pump(1)
+            # A sleep the key did not end holds this line until its 30 s are up: past the 10 s asked.
+            r, _ = step(row, b'echo %s=$?\r' % row.encode(), rb'^%s=(\d+)$' % row.encode(), 10)
+            took = time.monotonic() - t0
+            (ok if r and r.group(1).decode() == want else bad)(
+                row, '%s to a foreground sleep 30: %s after %.1f s (want %s)'
+                % (name, r.group(0).decode() if r else repr(t.shown(at)[-160:]), took, want))
+            prompt(at)
+        at = t.type(b'sleep 30\r')
+        t.pump(2)
+        t.type(b'\x1a')
+        stopped = t.expect(rb'Stopped', 10, at)
+        prompt(at)
+        r, at2 = step('B24', b'jobs\r', rb'^\[1\] .*Stopped.*sleep 30$')
+        prompt(at2)
+        k, at3 = step('B24k', b'kill -KILL %1; echo B24-done\r', rb'^B24-done$')
+        (ok if stopped and r and k else bad)('B24', 'Ctrl-Z stopped a foreground sleep 30 (%s), jobs: %s, kill -KILL %%1: %s'
+                                             % ('the shell said so' if stopped else 'nothing said',
+                                                r.group(0).decode() if r else repr(t.shown(at2)[-120:]), 'done' if k else 'no'))
+        prompt(at3)
+        r, at = step('B25', b'sudo -k id -u && echo B25-ran\r', rb'\[sudo\] password for pax: $', 20)
+        if r:
+            t.type((PASSWORDS['pax'] + '\r').encode())
+            ran = t.expect(rb'^0\n+B25-ran$', 60, at)
+        else:
+            ran = None
+        (ok if r and ran else bad)('B25', 'a bare sudo in the terminal session asked there (%s) and ran with pax\'s password typed: %s'
+                                    % ('[sudo] password for pax:' if r else 'no prompt: %r' % t.shown(at)[-160:],
+                                       'B25-ran' if ran else 'no'))
+        prompt(at)
+        t.type(b'exit\r')
+        t.pump(3)
+    finally:
+        (c.dir / 'tty.raw').write_bytes(t.raw)
+        (c.dir / 'tty-steps.txt').write_text('\n'.join(steps) + '\n')
+        t.close()
+    time.sleep(2)
+    r = c.ssh(GUEST_AT, ['cat /proc/sys/kernel/pty/nr'])
+    (ok if r[0] == 0 and r[1].strip() == b'0' else bad)('B26', 'after the session: /proc/sys/kernel/pty/nr %s' % show(r))
+    # B27 burrowd's own dispositions: SIGINT (bit 1) and SIGQUIT (bit 2) of SigIgn clear.
+    # (the image has no grep: the whole status file, read here)
+    r = c.ssh(GUEST_AT, ['p=$(cat /var/run/burrowd.pid); echo pid=$p; cat /proc/$p/status'])
+    m = re.search(rb'^SigIgn:\s*([0-9a-f]{16})$', r[1], re.M)
+    ign = int(m.group(1), 16) if m else None
+    (ok if r[0] == 0 and ign is not None and ign & 0x6 == 0 else bad)(
+        'B27', 'burrowd (%s): SigIgn %s, SIGINT %s, SIGQUIT %s'
+        % (r[1].split(b'\n')[0].decode(errors='replace'), m.group(1).decode() if m else show(r),
+           'ignored' if ign is not None and ign & 0x2 else 'default', 'ignored' if ign is not None and ign & 0x4 else 'default'))
 
 
 def image_exports():
@@ -927,10 +1113,9 @@ def console_rows(con, client):
     mode = con.command('ls -l /var/log/burrowd.log', 3) or ''
     log = con.command('cat /var/log/burrowd.log', 4) or ''
     want = ['key SHA256:', 'key password', 'outcome auth_password_bad', 'outcome auth_root_refused',
-            'outcome auth_account_locked', 'outcome auth_key_unlisted', 'outcome auth_strict_modes', 'signal TERM',
-            'refused pty_refused']
-    # B12's shells: a line ending with the pty refused (`ssh host`, `ssh -t host`), one ending at the status (-T's).
-    ends = ['outcome ok status 4 refused pty_refused', 'outcome ok status 4']
+            'outcome auth_account_locked', 'outcome auth_key_unlisted', 'outcome auth_strict_modes', 'signal TERM']
+    # B12's -T shell: a line ending at its status.
+    ends = ['outcome ok status 4']
     lines = [l.rstrip() for l in log.splitlines()]
     missing = ([w for w in want if w not in log] + [e for e in ends if not any(l.endswith(e) for l in lines)]
                + (['no shell_refused'] if 'shell_refused' in log else []))
@@ -1040,6 +1225,7 @@ def main():
             fp = first_boot(con, client, linux)
             if fp:
                 host_rows(client)
+                tty_rows(client)
                 env_rows(client)
                 git_rows(client, work)
                 console_rows(con, client)
