@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **mpx3-shell and mpx5-pelt fit their limits again (px122).** Trunk's
+  all-tier runs after #344 were cut at these jobs' limits, `mpx3-shell` at
+  120 minutes and `mpx5-pelt` at 210, in steps that were passing rows at
+  their usual rate. Both jobs already ran within minutes of their limits on
+  the slower hosted runners; #344 made the release kernel's build about a
+  quarter slower, and that tipped `mpx3-shell` over. `mpx3-shell` had no
+  budget row, and `mpx5-pelt`'s floor left out its USB typing step. Both
+  are now held step by step to their measured floors with 40% headroom
+  (`tests/ci-budgets.py`, `tests/ci-budgets.d/shell-pelt.json`), and a named
+  step that no attempt has timed fails the plan job of its own pull request.
+  The limits are tiered: `mpx3-shell` 190 minutes and `mpx5-pelt` 350 in the
+  all tier and a partial dispatch, 120 and 210 in pr and full as before. No
+  suite's rows or legs changed: `notes/px122-the-cut-runs.md`.
+
 - **The pointer, and the mouse in a terminal program (px117).** The console
   draws a pointer, an arrow over the cell it is on, from the first motion of
   any USB mouse or tablet, and moves it by drawing two cells. A program that
