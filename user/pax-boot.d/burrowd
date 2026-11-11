@@ -10,10 +10,15 @@
 # refuses to start (exit 1: its reason is the log's last line), after a
 # wait that doubles to five minutes. The log is /var/log/burrowd.log,
 # root's, 0600 (R-px112-11): `sudo cat /var/log/burrowd.log`.
+#
+# px123: the loop is an asynchronous list in a shell without job control, so
+# its programs start with SIGINT and SIGQUIT ignored (POSIX XCU 2.11), and
+# burrowd's sessions inherited that: Ctrl-C and Ctrl-\ over `ssh -t` reached
+# nothing. burrowd starts with both at their defaults (env --default-signal).
 key=/etc/burrowd/ssh_host_ed25519_key
 log=/var/log/burrowd.log
-if [ ! -x /bin/burrowd ] || [ ! -x /bin/burrow-keygen ]; then
-    echo "burrowd: /bin/burrowd or /bin/burrow-keygen is missing; not started"
+if [ ! -x /bin/burrowd ] || [ ! -x /bin/burrow-keygen ] || [ ! -x /bin/env ]; then
+    echo "burrowd: /bin/burrowd, /bin/burrow-keygen or /bin/env is missing; not started"
     exit 0
 fi
 mkdir -p /etc/burrowd /var/log /var/run
@@ -34,7 +39,7 @@ chmod 600 "$log"
 (
     pause=1
     while :; do
-        /bin/burrowd -D -E "$log" < /dev/null > /dev/null 2>> "$log"
+        /bin/env --default-signal=INT,QUIT /bin/burrowd -D -E "$log" < /dev/null > /dev/null 2>> "$log"
         if [ "$?" = 1 ]; then
             sleep "$pause"
             pause=$((pause * 2))
