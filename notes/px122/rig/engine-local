@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# notes/px122/rig/engine-local — the container engine as tools/e2fs and tools/disktools call it, inside
+# the take's Ubuntu 24.04 container, which has no engine of its own: the program runs there, in -w DIR,
+# with the -e variables, each `-v SRC:DST` honoured by writing SRC for DST (no mount: the paths are the
+# container's own). A copy by value of the px118 lane's local engine (sha256 6f66a812…).
+set -euo pipefail
+[ "${1:-}" = run ] || { echo "engine-local: only run" >&2; exit 2; }
+shift
+dir=. envs=(PATH="$PATH") maps=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --rm) shift ;;
+        --network|--security-opt|--user) shift 2 ;;
+        -v) m=${2%:ro}; maps+=("${m%%:*}" "${m#*:}"); shift 2 ;;
+        -e) envs+=("$2"); shift 2 ;;
+        -w) dir=$2; shift 2 ;;
+        -*) echo "engine-local: unknown option $1" >&2; exit 2 ;;
+        *) shift; break ;;
+    esac
+done
+sub() { # the value with each mapped DST written as its SRC
+    local v=$1 i
+    for ((i = 0; i < ${#maps[@]}; i += 2)); do
+        [ "${maps[i]}" = "${maps[i + 1]}" ] || v=${v//"${maps[i + 1]}"/"${maps[i]}"}
+    done
+    printf '%s' "$v"
+}
+for ((k = 0; k < ${#envs[@]}; k++)); do envs[k]=$(sub "${envs[k]}"); done
+args=()
+for a in "$@"; do args+=("$(sub "$a")"); done
+cd "$(sub "$dir")"
+exec env "${envs[@]}" "${args[@]}"
