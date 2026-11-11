@@ -3,12 +3,13 @@
 
 Boots a probe image (user/elf/pointerprobe.c as its one program) on an xHCI
 controller with a USB keyboard on port 1, QEMU's usb-tablet on port 2 and
-its usb-mouse on port 3, and drives each step the probe announces
+its usb-mouse on port 3 (the keyboard unplugged before keys-interleaved's
+second step, whose keys the PS/2 keyboard types), and drives each step the probe announces
 (`PTRSTEP <row> <step>`) through QMP: input-send-event (the tablet's
 absolute position, the mouse's motion, buttons, the wheel, keys), the
 monitor's `mouse_set` (which pointer the events reach) and `screendump`.
-Every step ends with the key `.` typed on the USB keyboard, which the
-probe reads as the step's end: the bytes before it are what the step typed.
+Every step ends with the key `.` typed (on the USB keyboard, then the
+PS/2 one), which the probe reads as the step's end: the bytes before it are what the step typed.
 
 The judge holds every step's bytes to the encoding the XTerm Control
 Sequences document gives for button-event tracking (1002) with the SGR
@@ -439,7 +440,16 @@ def run(args):
                     click('left')
                     select('tablet')
                 elif label == 'keys-interleaved':
-                    g = .02 if k == 0 else .002
+                    # Step 0 on the USB keyboard, 20 ms apart (QEMU polls it,
+                    # so closer keys may reach the guest after a later
+                    # tablet report: measured, notes/px117-the-pointer.md);
+                    # step 1 on the PS/2 keyboard, whose bytes interrupt at
+                    # once, 3 ms apart (the tablet is polled every 1 ms), so
+                    # a report and the key after it usually share a tick.
+                    if k == 1:
+                        execute('device_del', {'id': 'pax-usb-kbd'})
+                        time.sleep(1.5)
+                    g = .02 if k == 0 else .003
                     a, b, c, d = 'abcd' if k == 0 else 'efgh'
                     at(HERE, pause=.1)
                     press('left', g); tap(a, g); release('left', g); tap(b, g)
