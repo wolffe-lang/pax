@@ -133,12 +133,15 @@ pax_invlpg:
            line is in memory before a reset can drop the caches (SDM vol. 2,
            CLFLUSH: ordered against earlier writes to the same line; MFENCE
            orders it against everything after). kernel/bootlog flushes the
-           log area's lines it wrote, at each line end. */
+           log area's lines it wrote, at each line end. Both are written as
+           their encodings (SDM vol. 2A, CLFLUSH: NP 0F AE /7, here mod 00
+           and r/m 111, (%rdi); MFENCE: NP 0F AE F0) because the pinned clef
+           has neither mnemonic; GNU as emits these same bytes. */
         .globl pax_clflush
         .type pax_clflush, @function
 pax_clflush:
-        clflush (%rdi)
-        mfence
+        .byte 0x0f, 0xae, 0x3f            /* clflush (%rdi) */
+        .byte 0x0f, 0xae, 0xf0            /* mfence */
         ret
         .size pax_clflush, . - pax_clflush
 
