@@ -24,7 +24,7 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx6-pointer` jo
   enables and parses. `docs/SOURCES.md` (px117) lists every source with its digests.
 - **Hosts.** Linux host 1 (Intel Core i7-12700KF, 20 threads, 46 GB) for every build and boot, in an Ubuntu 24.04
   container (QEMU 8.2.2, OVMF, gcc 13.3, clang, lld 18) with KVM: the smoke runs and the first whole gate on light
-  slots (two CPUs each; the cost per move from one of P-cores), the records on «a block». The build Mac for git and the judge's selftest only (no build: its disk was
+  slots (two CPUs each; the cost per move from one of P-cores), the records on a block of six CPUs. The build Mac for git and the judge's selftest only (no build: its disk was
   under its floor). The metal target was never touched.
 - **Not done:** no label, merge, tag, release or deploy; no issue filed or closed; no attribution trailer.
 
@@ -59,12 +59,12 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx6-pointer` jo
 | P11 | the arrow over one cell, two cells drawn a move, never copied by a scroll | pointer-drawn, pointer-scroll | right |
 | P12 | 1,000 to 5,000 TSC cycles a move under KVM, 10 to 50 times under TCG | the books' line on the light gate's P-cores: native 13,586 and 13,630 a move on average (the cheapest 7,032 and 6,756), release 10,290 and 10,400 (4,210 and 4,426), on BIOS and UEFI; TCG 287,037 (95,832), 21 times native's | wrong under KVM on the mean, about three times the bound (the cheapest moves within it; the spread not explained); right under TCG |
 | P13 | /dev/mouse0 only once a pointer came; every record to its readers | the mouse session green beside the console's reader | right |
-| P14 | no existing transcript or picture changes | «» | «» |
-| P15 | kmain_console grows 8 to 16 KiB | «» | «» |
-| P16 | every row red at the rows' commit, Y9 too | «» | «» |
-| P17 | every row green on both tiers and firmwares under KVM, native BIOS under TCG | «» | «» |
-| P18 | Y9: the document menu after the right click, none before | «» | «» |
-| P19 | the plant red at the rows that click the right button, only those | «» | «» |
+| P14 | no existing transcript or picture changes | locally: the USB suite's keyboard rows equal to its Linux reference and the mouse session green beside the console's reader; the screen suite's pictures pixel-identical on both firmwares; the rest is the hosted run's (`tier full`) | right, as far as the local gate reaches |
+| P15 | kmain_console grows 8 to 16 KiB | native 3,681,760 to 3,698,304 bytes, +16,544 (`.text` 1,819,675 to 1,834,587, +14,912; `.bss` the same: the two state areas' 600 bytes more fit their alignment) | right, at its top |
+| P16 | every row red at the rows' commit, Y9 too | at the rows' commit every one of the session's 15 rows red by name (no report typed, no pointer drawn, no books line), Y9 red (no menu after the click), and the invariants red at the first of the two new rows (the kernel panics: `PANIC overflow ./mouse/mouse.lu:161`) | right |
+| P17 | every row green on both tiers and firmwares under KVM, native BIOS under TCG | so, at the head | right |
+| P18 | Y9: the document menu after the right click, none before | so, on both tiers and firmwares; the menu at the pointer, the arrow over yew's text (`notes/px117/yew-menu.png`) | right |
+| P19 | the plant red at the rows that click the right button, only those | `sgr-buttons`, `drag` and `keys-interleaved` red, the rest green | right |
 | — | not predicted | kernel/mouse's merge and compaction panicked (a checked wrap) on any motion or wheel of negative sign: px109's `a + b` of two's complement words. The console's reader makes that path live on every machine with a pointer once a reader lags; fixed here, with two rows (R-px117-12) | found |
 
 ## 4. Design
@@ -113,7 +113,20 @@ X###XXXX  X#X#X...  XX.X#X..  X..X#X..  ....X#X.  ....X#X.  .....X..  ........
 
 ## 5. Evidence index
 
-«»
+Every take ran on Linux host 1 in the container, by `notes/px117/rig/` (the recorder's steps mode, `--keep-going`
+and `--preflight`). The records' files, sizes, digests and END lines are in the pull request.
+
+| record | what | at |
+|---|---|---|
+| the smoke runs | the suite, its judge and the session on single legs while the kernel was written: the sessions found a checked wrap in the console's own arithmetic (a negative motion and the wheel towards the user, fixed before any record) and the order of USB keys sent 2 ms after a tablet click (P5) | the scratch heads |
+| the light gate | the whole gate on two light CPUs before any block was taken: every step green, the cost per move read from it (P12) | the same code, before the history was put in order |
+| rows red | the rows before the kernel's change: the session's 15 rows red by name, Y9 red, the invariants red (a panic) | the rows' commit |
+| green | the planner's test; both tiers built; the session on four legs under KVM and native BIOS under TCG; yew's session image and Y9 on four legs; the USB suite on native BIOS (the invariants, three keyboard topologies, the mouse session); the screen suite native on both firmwares | the head |
+| the plant | `px117-plant-right-as-left`, one hunk over the head (the right button's report says the left's): red by name at the rows that click it | one commit over the head |
+
+Not in the local gate: the suites whose Linux side needs a container engine on the host or real root (mpx5-yew's
+Y1-Y8, mpx3-console) and every other suite the change reaches (`kernel/interrupts` is the kernel's core, so the plan
+runs every suite): the hosted `tier full` run is their gate.
 
 ## 6. Done-when
 
@@ -192,14 +205,14 @@ in its decoder, which is why PAX does not report buttons 4 and 5 (R-px117-8).
 ### 6.4 Bounds, and what is not done
 
 Bounds: sixteen pointers' buttons at once (kernel/mouse's own bound); eight wheel detents a record; a report of at
-most 22 bytes. Not done: the modes and encodings R-px117-1 leaves out; selection and paste; the pointer on a serial
+most 14 bytes. Not done: the modes and encodings R-px117-1 leaves out; selection and paste; the pointer on a serial
 terminal (it has its own); acceleration; the rest of RIS; a real mouse (QEMU's devices only: the first metal check
 moves a mouse over yew's document and right-clicks it).
 
 ### 6.5 Checklist
 
 - [x] the prediction, committed first; scored
-- [x] the rows first, red by name at the rows' commit: «»
+- [x] the rows first, red by name at the rows' commit: the session's 15, Y9, the invariants (a panic)
 - [x] the pointer drawn and erased cell-exact, never copied by a scroll; press, release, drag, wheel and modifiers at
   known cells from the tablet and the relative mouse; nothing before a mode, after a reset or RIS, or for a mode not
   served; a mode ended with its owner (an exit, a SIGKILL); withheld while the owner is in the background, flowing
@@ -208,6 +221,6 @@ moves a mouse over yew's document and right-clicks it).
 - [x] kernel/mouse's merge and compaction of either sign, two invariant rows red first (a panic), then green
 - [x] yew's right click opens its document menu on PAX's console (Y9), the screen kept
 - [x] tests/ci-plan with the pointer's map lines; the `mpx6-pointer` job in CI's verdict
-- [ ] the final records: green at the head on both tiers and firmwares, the plant `px117-plant-right-as-left` red by
-  name: «»
+- [x] the final records: green at the head on both tiers and firmwares, the plant `px117-plant-right-as-left` red by
+  name at `sgr-buttons`, `drag` and `keys-interleaved`
 - [x] README, `kernel/README.md`, CHANGELOG, `docs/SOURCES.md`
