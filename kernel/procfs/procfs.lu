@@ -960,6 +960,21 @@ pub fn child_at(d: u64, k: u64) -> u64 {
 /// handed, with ` model <m>` when it is not RGB and ` (the first of <n>)`
 /// when it handed more).
 fn paxboot(base: u64) -> u64 {
+    // px122: one function a group of lines, as kernel/tcp's and kernel/block's reports
+    // are: the release tier inlines put_dec's and put_s's loops at every call, and its
+    // range pass costs the square of one function's branches.
+    var n = paxboot_this(base)
+    let (pb, pl, ps, from) = bootmark.previous()
+    n = paxboot_previous(base, n, pb, pl, ps, from)
+    n = paxboot_log(base, n)
+    n = put_s(base, n, "\nframebuffer ")
+    n = put_fb(base, n)
+    n = paxboot_screen(base, n, from)
+    put_b(base, n, 10)
+}
+
+/// px118: `boot`, `stage`, `cmos` and `found`, from the start of the text.
+fn paxboot_this(base: u64) -> u64 {
     let (b, l) = bootmark.this_boot()
     var n = put_s(base, 0, "boot ")
     n = put_dec(base, n, b)
@@ -972,40 +987,46 @@ fn paxboot(base: u64) -> u64 {
     n = put_b(base, n, 32)
     n = put_s(base, n, bootmark.mode_name())
     n = put_s(base, n, "\nfound ")
-    n = put_hex16(base, n, bootmark.cmos_found())
-    let (pb, pl, ps, from) = bootmark.previous()
+    put_hex16(base, n, bootmark.cmos_found())
+}
+
+/// px118: `previous`, `from` and `stages` at `at`.
+fn paxboot_previous(base: u64, at: u64, pb: u64, pl: u64, ps: u64, from: u64) -> u64 {
     if from == 0 {
-        n = put_s(base, n, "\nprevious none\nfrom none\nstages none")
-    } else {
-        n = put_s(base, n, "\nprevious ")
-        n = put_dec(base, n, pb)
-        n = put_b(base, n, 32)
-        n = put_s(base, n, bootmark.name(pl))
-        n = put_s(base, n, if from == 1 { "\nfrom cmos\nstages" } else { "\nfrom memory\nstages" })
-        var s: u64 = 1
-        while s <= bootmark.END {
-            if ((ps >> (s - 1)) & 1) == 1 {
-                n = put_b(base, n, 32)
-                n = put_s(base, n, bootmark.name(s))
-            }
-            s += 1
-        }
+        return put_s(base, at, "\nprevious none\nfrom none\nstages none")
     }
-    n = put_s(base, n, "\nlog ")
+    var n = put_s(base, at, "\nprevious ")
+    n = put_dec(base, n, pb)
+    n = put_b(base, n, 32)
+    n = put_s(base, n, bootmark.name(pl))
+    n = put_s(base, n, if from == 1 { "\nfrom cmos\nstages" } else { "\nfrom memory\nstages" })
+    var s: u64 = 1
+    while s <= bootmark.END {
+        if ((ps >> (s - 1)) & 1) == 1 {
+            n = put_b(base, n, 32)
+            n = put_s(base, n, bootmark.name(s))
+        }
+        s += 1
+    }
+    n
+}
+
+/// px118: `log` at `at`.
+fn paxboot_log(base: u64, at: u64) -> u64 {
+    let n = put_s(base, at, "\nlog ")
     let st = bootlog.prev_state()
     if st == bootlog.INTACT {
-        n = put_s(base, n, "intact ")
-        n = put_dec(base, n, bootlog.prev_len())
-    } else if st == bootlog.REFUSED {
-        n = put_s(base, n, "refused")
-    } else if st == bootlog.NO_AREA {
-        n = put_s(base, n, "no-area")
-    } else {
-        n = put_s(base, n, "none")
+        return put_dec(base, put_s(base, n, "intact "), bootlog.prev_len())
     }
-    n = put_s(base, n, "\nframebuffer ")
-    n = put_fb(base, n)
-    n = put_s(base, n, "\nscreen ")
+    if st == bootlog.REFUSED {
+        return put_s(base, n, "refused")
+    }
+    put_s(base, n, if st == bootlog.NO_AREA { "no-area" } else { "none" })
+}
+
+/// px118: `screen` and `prevscreen` at `at`.
+fn paxboot_screen(base: u64, at: u64, from: u64) -> u64 {
+    var n = put_s(base, at, "\nscreen ")
     let sc = bootmark.screen()
     if sc == 2 {
         n = put_s(base, n, "refused: ")
@@ -1015,8 +1036,7 @@ fn paxboot(base: u64) -> u64 {
     }
     n = put_s(base, n, "\nprevscreen ")
     let psc = bootmark.prev_screen()
-    n = put_s(base, n, if from == 0 { "none" } else if psc == 2 { "refused" } else if psc == 1 { "drawn" } else { "not drawn" })
-    put_b(base, n, 10)
+    put_s(base, n, if from == 0 { "none" } else if psc == 2 { "refused" } else if psc == 1 { "drawn" } else { "not drawn" })
 }
 
 /// px118: the framebuffer Limine handed, as kernel/bootmark's report
@@ -1025,14 +1045,23 @@ fn put_fb(base: u64, at: u64) -> u64 {
     if boot_info.fb_count() == 0 || boot_info.fb_address() == 0 {
         return put_s(base, at, "none")
     }
+    put_fb_tail(base, put_fb_masks(base, put_fb_size(base, at)))
+}
+
+/// px122: `<w>x<h> <bpp> bpp pitch <p>` at `at`.
+fn put_fb_size(base: u64, at: u64) -> u64 {
     var n = put_dec(base, at, boot_info.fb_width())
     n = put_b(base, n, 120)
     n = put_dec(base, n, boot_info.fb_height())
     n = put_b(base, n, 32)
     n = put_dec(base, n, boot_info.fb_bpp())
     n = put_s(base, n, " bpp pitch ")
-    n = put_dec(base, n, boot_info.fb_pitch())
-    n = put_s(base, n, " rgb")
+    put_dec(base, n, boot_info.fb_pitch())
+}
+
+/// px122: ` rgb <r>:<rs> <g>:<gs> <b>:<bs>` at `at`.
+fn put_fb_masks(base: u64, at: u64) -> u64 {
+    var n = put_s(base, at, " rgb")
     var m: u64 = 0
     while m < 3 {
         n = put_b(base, n, 32)
@@ -1041,7 +1070,12 @@ fn put_fb(base: u64, at: u64) -> u64 {
         n = put_dec(base, n, boot_info.fb_mask(m, true))
         m += 1
     }
-    n = put_s(base, n, " at 0x")
+    n
+}
+
+/// px122: ` at 0x<physical>`, then ` model <m>` and ` (the first of <n>)` when they apply, at `at`.
+fn put_fb_tail(base: u64, at: u64) -> u64 {
+    var n = put_s(base, at, " at 0x")
     n = put_hex_w(base, n, bootmark.fb_physical(), 0)
     if boot_info.fb_model() != 1 {
         n = put_s(base, n, " model ")
