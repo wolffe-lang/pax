@@ -173,17 +173,18 @@ first program it prints how long its boot took and how much of that the console 
 | Program | What it is | Pin |
 |---|---|---|
 | wolf | the build compiler (`kernel/wolf.pin`) | 0.2.35 |
-| wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.36, `5adf3d9` |
-| lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.59, `668fb752` |
-| wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `3111d39f` |
-| pelt | the POSIX shell, PID 1 at the console | `4683b3f5` |
+| wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.39, `3fc86f7` |
+| lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.61, `a10cbe57` |
+| wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `77cf3210` |
+| pelt | the POSIX shell, PID 1 at the console | `b80d6570` |
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
-| den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `ac2332bf` (wolf 0.2.36) |
+| den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `291011dd` (wolf 0.2.36) |
 | burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.39) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
-| yew | the editor | `2eb9cb9b` |
+| yew | the editor | `3a9983ee` |
+| sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
@@ -200,8 +201,9 @@ instead of from the pins: every program's tree at its repository's trunk head wh
 newest release, and the dev compiler at its pin's release (a newer wolf release is refused until that pin moves),
 built by `tools/mkwolf` or staged from `PAX_WOLF_INPUT`, held either way to `user/wolf.sums`.
 An OVERLAYS line, `COMPONENT REPOSITORY SHA RECORD`, builds one tree at a sha not yet on its trunk, and only when
-RECORD is a green local gauntlet record of that repository at exactly that sha; any other overlay is refused by
-name before anything is built (`tools/latest-resolve`, held by `tests/latest`). `/etc/pax-release` then names each
+RECORD is a green local gauntlet record of that repository at exactly that sha, or the word `ungated` (a head whose
+gate has not cleared) with `PAX_LATEST_UNGATED=1`, stamped `unmerged`; any other overlay is refused by name before
+anything is built (`tools/latest-resolve`, held by `tests/latest`). `/etc/pax-release` then names each
 such tree as `NAME SHA merged` or `NAME SHA unmerged`, the checkout as `pax COMMIT merged|unmerged`, and the
 resolution itself by its sha256 (`latest resolved …`); the install manifest's `release` line is that file's
 sha256. A latest image is reproducible only from its resolution, never from the pins, so CI and lane records
@@ -688,8 +690,8 @@ The dev variant adds to the base image, which it leaves unchanged:
 
 | Addition | Where | Notes |
 |---|---|---|
-| a musl-static `wolf` | `/usr/bin/wolf` | the v0.2.36 tag built unpatched, so it says the release's own line; the first whose static musl programs read their arguments (wolf-lang#962) |
-| the compiler's paired standard library | `/usr/share/wolf/compiler-std` | the tag's own, `78b9d3cb`; lupin's stays at `/usr/share/wolf/std`; the shell selects it through `WOLF_STD` |
+| a musl-static `wolf` | `/usr/bin/wolf` | the v0.2.39 tag built unpatched, so it says the release's own line (static musl programs read their arguments since v0.2.36, wolf-lang#962) |
+| the compiler's paired standard library | `/usr/share/wolf/compiler-std` | the tag's own, `2411d868`; lupin's stays at `/usr/share/wolf/std`; the shell selects it through `WOLF_STD` |
 | a static `ld.lld` 18.1.8 and a link-only `cc` | `/usr/bin` | built from LLVM's release tarball with zlib and zstd (`notes/px80/build-lld.sh`); not a C or assembly compiler |
 | musl's binary CRT and libc inputs | | recorded in `user/wolf-link.sums` |
 | scent as `grep`, with its fixture | `/usr/share/scent` | `cd /usr/share/scent; grep -n -C1 cat words.txt` |
@@ -706,7 +708,7 @@ wolf build hello.lu
 ./hello
 ```
 
-Three things px65 measured at 0.2.35 (not measured again at 0.2.36): there is no `wolf check` command; `wolf run --checked` is a native build, not the
+Three things px65 measured at 0.2.35 (not measured again since): there is no `wolf check` command; `wolf run --checked` is a native build, not the
 checked machine, and needs the native link step; and `--release` still needs an external clang, which the image does
 not carry. `wolf build --no-cache --emit=obj hello.lu -o hello.o` emits a native object with no linker. The dev ISO is
 tested with 2 GiB of RAM. `tests/mpx5-wolf` holds root and `pax` sessions byte for byte to the same binaries on Linux
