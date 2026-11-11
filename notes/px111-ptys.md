@@ -1,6 +1,7 @@
 # px111 — pseudo-terminals
 
-Contract: the planning repo's `sprints/pax/111-ptys/px111-ptys.md`. Base: pax trunk `4d899ea4`.
+Contract: the planning repo's `sprints/pax/111-ptys/px111-ptys.md`. Base: pax trunk `4d899ea4`, then
+rebased onto `483bfabf`, `d1270bb0` and the mouse's branch (pax#325) at `4247ed3e` (on trunk `1c0148eb`).
 The prediction: `notes/px111/prediction.txt` (committed before the first kernel change); the red
 rows before it: `notes/px111/red.txt`.
 
@@ -129,4 +130,27 @@ The prediction (`notes/px111/prediction.txt`), scored:
 
 ## 5. Evidence index
 
-(filled at the prepared head)
+- **The prediction and the red rows.** `notes/px111/prediction.txt` (before the first kernel
+  change), `notes/px111/red.txt` (the suite at `caaae2ff`, before the kernel: 288 of 291 probe
+  rows and all 29 session rows red).
+- **Linux's side.** `tests/mpx5-pty.d/linux/` (`probe-root`, `probe-user`, `session-root`,
+  `session-user` and `record.meta`): Linux 7.2.4 booted under QEMU/KVM with
+  `notes/px111/vminit.c` as its first program, the suite's own archives, recorded by
+  `notes/px111/rig/record.sh`. Each difference PAX keeps is named in `tests/mpx5-pty.d/ruled.txt`.
+- **The whole matrix before the last fix.** All 16 legs (native and release, BIOS and UEFI, KVM
+  and TCG) at `4f36a026` were green except one row, P9 (a master's read of a full buffer took
+  4092 bytes, Linux's 4095), on every probe leg. Fixed by `kernel/console: a master's read stretch
+  counts from where its queue last filled from empty`: a read's 4096-byte stretch counts from
+  where the output queue was last empty.
+- **Light runs after each rebase.** Native BIOS and release UEFI under KVM green at each new base.
+  At `78d24921` (on `d1270bb0`): mpx5-jobs green with its Linux side run on the host (every J row,
+  the px48 guard), mpx5-users green, and mpx3-console's PAX-side rows green (§4).
+- **The mouse's stack.** The pty's descriptor kinds are 18 (master) and 19 (slave), and devpts'
+  node type is 19, after the mouse's kind 17 and node type 18. `/dev` lists `ptmx` and `pts`
+  before `dsp` and `mouse0`.
+- **The records.** The local gauntlet (`notes/px111/rig/gauntlet.sh`: the plan, the checker,
+  mpx5-pty native and release on both firmwares under KVM and native under TCG, mpx5-jobs with
+  its Linux side on the host, mpx5-users) at this branch's head, and the plant `px111-plant-winch`
+  (one hunk in kernel/console's `set_winsz`: the console alone sends SIGWINCH, red at W3, W8, W11
+  and W16). Their files, sizes and sha256 are in the pull request's body.
+- **The hosted run.** The pull request's full-matrix run, mpx3-console's gate (§4).
