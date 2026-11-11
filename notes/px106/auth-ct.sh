@@ -136,6 +136,26 @@ echo "=== ROW sudo-n-pid-reused"
     st=$?; exit $st' < /root/in-empty > /root/o 2> /root/e); echo "--- rc $?"
 echo "--- stdout"; cat /root/o; echo "--- stderr"; cat /root/e
 rm -f /var/run/sudo/ts/1001
+# px119: a record an earlier session on the same terminal left. sudoers_timestamp(5): a record made on
+# a terminal keeps the session leader's start time. Inside script(1)'s pseudo-terminal (a session of its
+# own, the terminal its controlling one), root plants two records for bob in PAX's format for this very
+# terminal and session: one in the form before px119 (no start time), one with a start time a tick before
+# the leader's own (a reused pid's). Then `sudo -n` runs as bob in that session. Neither record is this
+# session's leader's, so sudo asks; Ubuntu's sudo keeps its records in a file named for the user, finds
+# none, and asks the same. The line after the sudo makes bash fork it, so the leader is not sudo.
+cat > /root/tty-reused.sh <<'EOS'
+nr=$(cut -d" " -f7 /proc/$$/stat); s=$(cut -d" " -f6 /proc/$$/stat); t=$(cut -d" " -f22 /proc/$s/stat)
+now=$(( $(date +%s%N) / 1000000 ))
+mkdir -p /var/run/sudo/ts && chmod 711 /var/run/sudo && chmod 700 /var/run/sudo/ts
+printf "tty %s sid %s time %s\ntty %s sid %s start %s time %s\n" "$nr" "$s" "$now" "$nr" "$s" "$((t - 1))" "$now" > /var/run/sudo/ts/1001
+chown 0:1001 /var/run/sudo/ts/1001 && chmod 600 /var/run/sudo/ts/1001
+env -i HOME=/home/bob TERM=linux PATH=/usr/bin:/bin setpriv --reuid=1001 --regid=1001 --init-groups -- sudo -n id -u
+st=$?; exit $st
+EOS
+echo "=== ROW sudo-n-tty-reused"
+(sleep 2) | (cd / && env -i TERM=linux PATH=/usr/bin:/bin script -qfec '/bin/bash /root/tty-reused.sh' /dev/null) > /root/o 2>&1; echo "--- rc $?"
+echo "--- the terminal"; tr -d '\r' < /root/o
+rm -f /var/run/sudo/ts/1001
 # px115: `sudo -k -S` with a record fresh for the same parent and session still reads the password's
 # line from standard input, and the command gets what follows it byte for byte (the form an ssh
 # client's `printf PASSWORD | ssh HOST "sudo -k -S ..."` relies on).
