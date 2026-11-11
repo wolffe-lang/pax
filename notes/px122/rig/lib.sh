@@ -1,0 +1,33 @@
+# notes/px122/rig/lib.sh — px122's build-host rig (px117's shape), sourced by step.sh through
+# GAUNTLET_RIG_DIR (the recorder runs a stored copy of step.sh, never this tree's). The rig runs from
+# a clean checkout of the commit under test, which need not hold the rig: take.sh runs the rig of
+# another checkout against it. The host's facts are in the file PX122_HOST names (shell assignments
+# kept beside the lane, never in the tree):
+#   L      the lane's directory (everything the rig writes is under it; TMPDIR is $L/tmp)
+#   CPUS   the CPUs the take may use (taskset inside each container)
+#   P      the container engine (rootless podman)
+#   MEM    each container's memory
+# and, read by take.sh alone: LOCKS (the lock files, in the host's one order) and REC (the recorder,
+# a copy by value of the planning repo's tools/gauntlet-record.sh).
+# PAX_BUILD is the build directory every step of one take shares.
+: "${PX122_HOST:?PX122_HOST names the host file}"
+# shellcheck disable=SC1090
+. "$PX122_HOST"
+: "${L:?}" "${CPUS:?}" "${P:?}" "${PAX_BUILD:?the build directory of the take}"
+R=$(realpath "$L")
+export TMPDIR=$L/tmp PAX_CACHE=$L/cache
+mkdir -p "$TMPDIR" "$PAX_CACHE" "$L/home" "$PAX_BUILD"
+CO=$(realpath "$(git rev-parse --show-toplevel)")
+# ctr KVM IMAGE CMD...: a container of IMAGE in the checkout, the take's CPUs inside. KVM 0 leaves
+# /dev/kvm out, so tools/qemu-run's `auto` picks TCG, as on CI's runners (their logs say `accel
+# tcg`). CAPS (a word list) adds capabilities: the Linux side's chroot and pid namespace.
+ctr() {
+    local kvm=$1 img=$2; shift 2
+    local dev=(); [ "$kvm" = 1 ] && dev=(--device /dev/kvm)
+    local caps=(); local c; for c in ${CAPS:-}; do caps+=(--cap-add "$c"); done
+    local mnt=(-v "$L:$L"); [ "$R" = "$L" ] || mnt+=(-v "$R:$R")
+    "$P" run --rm --memory "${MEM:-12g}" --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 "${dev[@]}" "${caps[@]}" "${mnt[@]}" -w "$CO" \
+        -e TMPDIR="$TMPDIR" -e PAX_CACHE="$PAX_CACHE" -e PAX_BUILD="$PAX_BUILD" -e HOME="$L/home" -e PAX_REQUIRE_UEFI=1 \
+        -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' -e GIT_CONFIG_KEY_1=commit.gpgsign -e GIT_CONFIG_VALUE_1=false \
+        "$img" taskset -c "$CPUS" "$@" < /dev/null
+}
