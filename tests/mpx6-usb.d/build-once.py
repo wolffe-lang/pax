@@ -34,7 +34,7 @@ elif name=='mkinitramfs':
     Path(args[0]).write_text('CPIO fixture')
 elif name=='qemu-run':
     out=Path(args[args.index('--serial')+1]); out.parent.mkdir(parents=True,exist_ok=True)
-    out.write_text(''.join('PASS USB row%d\\n'%i for i in range(55))+'PASS USB invariants\\n')
+    out.write_text(''.join('PASS USB row%d\\n'%i for i in range(57))+'PASS USB invariants\\n')
     sys.exit(33)
 '''
     for name in ('build-kernel','mkimage','mkinitramfs','fetch-limine','qemu-run','usb-session','mouse-session'):
