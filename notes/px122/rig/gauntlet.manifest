@@ -1,0 +1,15 @@
+# notes/px122/rig/gauntlet.manifest — px122's green take at the head (take.sh, on a block with its light
+# lock): the plan job's checks (the budgets among them), kmain_console's two tiers built cold and timed
+# (kernel/procfs's change is a build-time one), and tests/mpx6-bootlog on both tiers and firmwares with
+# KVM, which prints /proc/pax-boot's text and holds it line for line.
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px122/rig/lib.sh
+rig stamped.py committed=../../..:HEAD:notes/px122/rig/stamped.py
+rig engine-local committed=../../..:HEAD:notes/px122/rig/engine-local
+rig gauntlet.manifest committed=../../..:HEAD:notes/px122/rig/gauntlet.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3,git script=step.sh -- ci-plan
+step budgets image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- budgets
+step selftests image=localhost/px75-ubuntu:2 tools=python3,bash script=step.sh -- selftests
+step kernel-native image=localhost/px75-ubuntu:2 tools=clang,readelf,python3,git,curl script=step.sh -- kernel native
+step kernel-release image=localhost/px75-ubuntu:2 tools=clang,readelf,python3,git,curl script=step.sh -- kernel release
+step bootlog image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,mke2fs,debugfs script=step.sh -- bootlog --tier both --firmware both
