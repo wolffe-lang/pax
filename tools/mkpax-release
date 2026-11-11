@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write /etc/pax-release and its banner from this image's inputs.
 
-Usage: tools/mkpax-release KERNEL.elf OUT/pax-release
+Usage: tools/mkpax-release [--latest RESOLUTION] KERNEL.elf OUT/pax-release
 Rows are name revision digest. User .pin digests hash the complete pin
 record, including any archive/binary/toolchain digests it names (not a
 claim to hash a built program). Games and their engines use the catalog's
@@ -9,6 +9,15 @@ source-archive digests. The kernel row hashes the actual ELF. The epoch
 row has no digest. The output has no clock-dependent values.
 Run from the same clean commit that built KERNEL.elf; image assembly must
 pass the same SOURCE_DATE_EPOCH to this tool and tools/mkimage.
+
+px97: with --latest, RESOLUTION is tools/latest-resolve's resolution.txt
+(tools/mkdistribution --latest): each tree it resolved (a trunk head, an
+overlay, an ungated overlay or a newest release) is stamped as `name sha merged|unmerged`
+instead of its pin's row, the checkout as `pax <commit> merged|unmerged`,
+each lane head merged into the checkout (source `lane`) as a row of its own,
+`NAME <sha> merged|unmerged`, and `latest resolved <sha256 of RESOLUTION>` names the whole resolution;
+every pinned row (wolf, clef, the games, the packages) stays as it is. The
+resolution's checkout line must be this HEAD.
 """
 from pathlib import Path
 import hashlib
@@ -28,9 +37,12 @@ def git(*args):
     return subprocess.check_output(['git', '-C', str(ROOT), *args], text=True).strip()
 
 def main():
-    if len(sys.argv) != 3:
-        raise ValueError('usage: mkpax-release KERNEL.elf OUT/pax-release')
-    kernel, output = map(Path, sys.argv[1:])
+    argv, resolution = sys.argv[1:], None
+    if len(argv) == 4 and argv[0] == '--latest':
+        resolution, argv = Path(argv[1]), argv[2:]
+    if len(argv) != 2:
+        raise ValueError('usage: mkpax-release [--latest RESOLUTION] KERNEL.elf OUT/pax-release')
+    kernel, output = map(Path, argv)
     commit = git('rev-parse', 'HEAD')
     epoch = os.environ.get('SOURCE_DATE_EPOCH', git('log', '-1', '--format=%ct'))
     if not re.fullmatch(r'[0-9]+', epoch):
@@ -65,6 +77,30 @@ def main():
             if label in rows:
                 raise ValueError('duplicate release identity: ' + label)
             rows[label] = identity
+    if resolution is not None:
+        for line in resolution.read_text().splitlines():
+            name, rev, state, _repo, source = line.split()
+            # the checkout's source is `checkout`, or `after:<sha>` (latest-resolve --at-commit)
+            if not re.fullmatch(r'[0-9a-f]{40}', rev) or state not in ('merged', 'unmerged'):
+                raise ValueError(f'{resolution}: not a resolution line: {line}')
+            if name == 'pax':
+                if rev != commit:
+                    raise ValueError(f'{resolution} resolves checkout {rev}, but HEAD is {commit}')
+                rows['pax'] = (rev, state)
+            elif source in ('trunk', 'ungated') or source.startswith(('overlay:', 'release:')):
+                if name not in rows:
+                    raise ValueError(f'{resolution}: {name} is no pin of this checkout')
+                rows[name] = (rev, state)
+            elif source == 'lane':
+                # a lane head merged into the checkout (latest-resolve --at-commit, PAX_LATEST_LANES): a row of its own
+                if name in rows:
+                    raise ValueError(f'{resolution}: the lane head {name} names a row the release has')
+                rows[name] = (rev, state)
+            elif not source.startswith('pin:'):
+                raise ValueError(f'{resolution}: {name}: unknown source {source}')
+        if 'pax' not in rows:
+            raise ValueError(f'{resolution} has no checkout line')
+        rows['latest'] = ('resolved', sha(resolution))
     data = ''.join(f'{name} {rev} {digest}\n' for name, (rev, digest) in sorted(rows.items()))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(data)
