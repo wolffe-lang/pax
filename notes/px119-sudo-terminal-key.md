@@ -57,8 +57,8 @@ Recommended and implemented; none ruled yet.
   be read). A. leave it (a running sudo's parent is alive, or sudo was given to an init whose stat reads); B. the
   same refusal there. **Recommended: A**, as out of this lane's issue; B is one line if wanted.
 - **R-px119-4 the records' shape.** The local records use the recorder's steps mode with `--keep-going` and
-  `--preflight` (the lane rules of 11-10 for a take that holds a block), not px111's and px116's older
-  `--output … -- CMD` form. **Recommended: steps mode.**
+  `--preflight` (the form for a take that holds a block: every red named in one take, the host checked before the
+  first step), not px111's and px116's older `--output … -- CMD` form. **Recommended: steps mode.**
 
 ## 3. Named differences, and the prediction scored
 
@@ -69,14 +69,15 @@ Every row the suite had before reads as before.
 The prediction (`notes/px119/prediction.txt`), scored:
 
 - Right: §A as read (the old key; `take_pid` never reuses a pid; `/dev/pts/0` back as soon as its pair closed:
-  T5 says the same number on every leg).
+  T5 says the same number).
 - Right: at the rows' commit, before the fix, P9 green and P8 red by name, `not asked, ran as uid 0`, with T3
   showing the record `tty 34816 sid <the leader's pid> time <ms> (no start time)`; the container row red under P4,
   PAX's sudo running id (`--- rc 0`, `0`) where Ubuntu's asked (`--- rc 1`, `sudo: a password is required`).
 - Right: after the fix, P8 asked, P9 not asked, T3 `tty 34816 sid <the leader's pid> start <the leader's start
   time> time <ms>`, T6 B's leader later than A's; the container row the same on both sides (`--- rc 1`,
   `sudo: a password is required`).
-- Right: every other row unchanged (S1, S5, P1 to P7; the pw and admin sessions' second sudo still not asked).
+- Right: every other row unchanged in both takes (S1, S5, P1 to P7; the pw and admin sessions' second sudo still
+  not asked).
 - Right: the image boots in a few seconds under KVM (3 s on native BIOS, far under the 60 predicted).
 - Not predicted: the suite says every verdict through `tools/lib.sh`'s `say` (`mpx5-sudo: FAIL …`), so a FAIL
   line never starts at column 0 by itself; the rig's `step.sh` lifts `mpx5-sudo: FAIL ROW` to `FAIL ROW` so the
@@ -98,15 +99,17 @@ and every other row green.
 - **An honest pid reuse on PAX** (R-px119-1): the kernel has none to reuse.
 - **The leader-unreadable branch** has no row (R-px119-2): unreachable without a stub of /proc.
 - **The console's records** had the same gap in principle (a reused session id alone); the same key covers them.
-- **mpx6-install, mpx5-burrowd and the metal install suite** read user/sudo too (the planner selects them). Their sudo rows
-  run with `-n`, NOPASSWD rules or no terminal, each within one session, where the key is the same from run to run,
-  so the change should not reach their answers. They are the hosted run's, not the local gauntlet's.
+- **mpx6-install, mpx5-burrowd and the metal install suite** read user/sudo too (the planner selects them).
+  Their sudo rows run with `-n`, NOPASSWD rules or no terminal, each within one session, where the key is the same
+  from run to run, so the change should not reach their answers. They are the hosted run's, not the local
+  gauntlet's.
 
 ## 5. Evidence index
 
 - **The prediction.** `notes/px119/prediction.txt` (`4074b116`), before the first change.
-- **The rows before the fix.** The probe (`3acef2eb`), the suite's image and rows (`f9dbf76a`), the tiers map's
-  line (`49ff1f70`), the container row (`20cb128c`), all red first; the fix is `16f45f52`.
+- **The rows before the fix.** The probe (`3acef2eb`, its buffer widened in `00c99262`), the suite's image and
+  rows (`f9dbf76a`), the tiers map's line (`49ff1f70`), the container row (`20cb128c`), all red first; the fix is
+  `16f45f52`.
 - **The rig.** `notes/px119/rig/`: `take.sh` takes the block's two lock names (the block's first) and runs the
   org's recorder in steps mode with `--keep-going` and `--preflight`; `gauntlet.manifest` (ci-plan; the build,
   native and release; the container sides; the boots, native and release, BIOS and UEFI, KVM) and
