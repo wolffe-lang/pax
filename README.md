@@ -781,7 +781,8 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 | linux x86-64 (CI's ubuntu, the pool) | yes: binutils, cc, make, curl, xorriso | yes: `qemu-system-x86_64`; OVMF for UEFI; KVM used when `/dev/kvm` is usable | yes: gdb |
 | macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every push | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
 
-- **CI**: `ubuntu-latest` with QEMU 8.2.2, OVMF and xorriso from apt (TCG); the `macos-run` job boots the same ISO,
+- **CI**: `ubuntu-latest` with QEMU 8.2.2, OVMF and xorriso from apt (TCG), through `.github/actions/apt`, which
+  installs them from CI's cache with no network when it holds them (px118); the `macos-run` job boots the same ISO,
   checked by digest, with Homebrew's QEMU 11.1.1 (TCG).
 - **NixOS**: nothing system-wide is needed. QEMU and xorriso come from a nix-shell and the UEFI firmware from nixpkgs'
   OVMF; use the **combined** `OVMF.fd` with no separate vars file, because the split `OVMF_CODE.fd` + `OVMF_VARS.fd`
