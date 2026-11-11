@@ -9,11 +9,13 @@
    and written volatile (an interrupt handler writes them behind every
    thread's back, wolf-lang#598's shape):
 
-     pax_con_state  64 eight-byte words: the queue's three counters (read,
+     pax_con_state  128 eight-byte words: the queue's three counters (read,
                     committed, edited), the pending end of file, the
                     termios flags and control characters, the window
                     size, the keyboard's shift state, the counters
-                    kernel/console reports
+                    kernel/console reports; (px117, words 64 on) the
+                    pointer: the mouse reader, the position, the buttons
+                    held, the modes' owner, the record being read
      pax_con_ring   4096 bytes: the input queue, a ring indexed by the
                     counters modulo 4096
      pax_log_quiet  one eight-byte word (px15): 1 when the kernel command
@@ -32,7 +34,7 @@
         .p2align 6
         .globl pax_con_state
 pax_con_state:
-        .zero 512
+        .zero 1024
         .p2align 12
         .globl pax_con_ring
 pax_con_ring:
