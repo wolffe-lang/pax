@@ -7,6 +7,22 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **sudo with no terminal keeps no record when the parent cannot be read
+  or is init (px121).** With no terminal, sudo's timestamp record is keyed
+  by its parent's pid, that parent's start time and the session (px115).
+  When the parent's start time could not be read, the key said `start -1`,
+  which every caller in the session with the same parent pid shared: on
+  PAX, every caller with no parent at all (getppid 0). A caller handed to
+  init when its own parent ended keyed `ppid 1` and init's start time,
+  which every such caller in the session shared while init lived. sudo now
+  honours no record and writes none in either case, so it asks every time,
+  as it already did on a terminal whose session leader cannot be read
+  (px119). `tests/mpx5-sudo`'s new `sudoppid` image holds it on PAX (P10:
+  two parentless callers in one session are each asked and leave no record;
+  P12: two callers handed to a live init, the same; P11: two callers with a
+  live parent, the second not asked, as before):
+  `notes/px121-sudo-no-parent.md`.
+
 - **sudo's record made on a terminal names the session leader's start time
   (px119, pax#339).** The timestamp record for a terminal is now `tty NR sid
   SID start T`, T the session leader's start time (proc_pid_stat(5)'s field
