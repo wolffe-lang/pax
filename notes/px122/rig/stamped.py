@@ -6,11 +6,15 @@
   stamped.py times BUILD the rows' time per leg in BUILD/suite.stamped and BUILD/irq.stamped (each
                          boot's `S5` row closes it), and the kernel's own `boot: N ms` lines in the
                          session logs under BUILD, per tier
+  stamped.py timed CMD…  CMD (its output passed through), then one line: its wall seconds, its exit
+                         and the largest resident set of any process under it (getrusage's children)
 
 Nothing here judges: the times step prints numbers for two takes to be compared.
 """
 import re
+import resource
 import statistics
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -78,10 +82,21 @@ def times(build):
               % (tier, len(b), statistics.median(b), min(b), max(b), statistics.median(d)))
 
 
+def timed(cmd):
+    t0 = time.monotonic()
+    rc = subprocess.run(cmd).returncode
+    wall = time.monotonic() - t0
+    rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    print('timed: %.1f s wall, exit %d, peak RSS %d MiB: %s' % (wall, rc, rss // 1024, ' '.join(cmd)), flush=True)
+    return rc
+
+
 if __name__ == '__main__':
-    if len(sys.argv) == 3 and sys.argv[1] == 'stamp':
+    if len(sys.argv) > 2 and sys.argv[1] == 'timed':
+        sys.exit(timed(sys.argv[2:]))
+    elif len(sys.argv) == 3 and sys.argv[1] == 'stamp':
         stamp(sys.argv[2])
     elif len(sys.argv) == 3 and sys.argv[1] == 'times':
         times(sys.argv[2])
     else:
-        sys.exit('usage: stamped.py stamp OUT | times BUILD')
+        sys.exit('usage: stamped.py stamp OUT | times BUILD | timed CMD...')
