@@ -1330,3 +1330,9 @@ as uid 1000, byte-identical.
 | `frames/` (px120 change) | `alloc_below(limit)`: the lowest free frame below a physical address, scanned from frame 0, `alloc`'s next-fit hint left where it is (row `out_of_memory`) |
 | `xhci/` (px120 change) | `page` asks `frames.alloc_below(4 GiB)` (it took `alloc`'s next frame and refused it when high, so once the hint had passed 4 GiB no device plugged in after boot got a record); a device that cannot be taken marks its port (a byte a root port in the controller's page from 2048, a bit a hub port in the hub's record, word 368), and a marked port is not tried again until it reads empty or its connect change bit is set (CSC, C_PORT_CONNECTION): one line a port change; a slot Enable Slot gives past MaxSlotsEn is disabled again |
 | `kmain_frames.lu` | step 6: `alloc_below` under a high hint (`below: …`, `tests/mpx2-frames` F9) |
+
+## px122 — /proc/pax-boot's text in small functions (the release tier's build time)
+
+| module or file | what |
+|---|---|
+| `procfs/` (px122 change) | `paxboot` writes `/proc/pax-boot`'s text through four functions, one a group of lines (`paxboot_this`, `paxboot_previous`, `paxboot_log`, `paxboot_screen`), and `put_fb` through three (`put_fb_size`, `put_fb_masks`, `put_fb_tail`): the same calls in the same order, the text the same byte for byte. As one function, px118's last lines put the release tier's range pass over a loop and thirteen formatter calls more, and `kmain_console`'s release build grew by about a quarter |
