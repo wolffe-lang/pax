@@ -7,7 +7,7 @@
 # live, except where the gap table (notes/px58-yew-on-pax.md §D) names
 # PAX's answer: those rows hold PAX to that answer.
 #
-#   tests/mpx5-yew [--images DIR | --no-boot | --only build | --only linux --images DIR]
+#   tests/mpx5-yew [--images DIR | --no-boot | --only build | --only linux --images DIR | --only pointer --images DIR]
 #                  [--firmware bios|uefi|both] [--tier native|release|both]
 #
 # Two images, kmain_console with the archive:
@@ -70,6 +70,14 @@
 #      A resize under yew is not a VT's: a VT's grid changes only with
 #      its font or mode, which no program here asks; TIOCSWINSZ and
 #      SIGWINCH are Y1's (served).
+#   Y9 (px117) the mouse under yew: the session typed at the USB keyboard
+#      (so the window is the screen's grid), a right press and release on
+#      QEMU's usb-tablet over yew's document (tools/pointer-session --yew):
+#      yew asks for button-event tracking in the SGR encoding (1002, 1006),
+#      the console types its report, and yew's document menu ("Select All",
+#      "Command Palette...") is among the bytes yew writes after the click
+#      and none before; the screen with the menu up kept as menu.ppm.
+#      `--only pointer --images DIR` runs Y9 alone.
 #
 # The session's keys inside yew are `^~` steps (no prompt to wait for):
 # PAX_YEW_PAUSE seconds apart on PAX (default 6: yew's start under TCG,
@@ -84,7 +92,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 grep() { command grep -a "$@"; }
 
 images= legs=both tiers=both noboot=0 only=
-usage="usage: tests/mpx5-yew [--images DIR | --no-boot | --only build | --only linux --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+usage="usage: tests/mpx5-yew [--images DIR | --no-boot | --only build | --only linux --images DIR | --only pointer --images DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -97,8 +105,9 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+case $only in ''|build|linux|pointer) ;; *) die "--only takes build, linux or pointer" ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+[ "$only" != pointer ] || [ -n "$images" ] || die "--only pointer needs --images DIR"
 need readelf python3
 
 PKEYS=$PAX_ROOT/user/console/termwolf.keys
@@ -235,6 +244,34 @@ if [ -z "$images" ]; then
         exit "$fail"
     fi
 fi
+# px117: Y9, a right click on the tablet opens yew's document menu.
+pointer_row() { # tier leg
+    local id="$1 $2 session-pointer" iso=$images/$1/session.iso o=$PAX_BUILD/mpx5-yew-$1-$2-pointer
+    if [ ! -f "$iso" ]; then
+        bad "Y9 $id: no image"
+        return
+    fi
+    ran=$((ran + 1))
+    if python3 -I "$PAX_ROOT/tools/pointer-session" --yew --image "$iso" --firmware "$2" --output "$o" > "$o.txt" 2>&1; then
+        say "PASS Y9 $id: $(sed -n 's/^PASS yew-menu [a-z]* [a-z]*: //p' "$o.txt")"
+    else
+        bad "Y9 $id: $(tail -n 1 "$o.txt")"
+    fi
+}
+if [ "$only" = pointer ]; then
+    mkdir -p "$PAX_BUILD"
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            [ "${PAX_REQUIRE_UEFI:-0}" = 1 ] && bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1" || say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+            continue
+        fi
+        for tier in $tiers; do pointer_row "$tier" "$leg"; done
+    done
+    [ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+    [ "$fail" = 0 ] && say "mpx5-yew (Y9): PASS" || say "mpx5-yew (Y9): FAIL"
+    exit "$fail"
+fi
+
 lx=$images/linux
 for n in probe-0 probe-1 probe-3 session session-tstp session-kbd; do
     [ -f "$lx/$n.tty" ] || bad "Y0 linux $n: no $lx/$n.tty (build first, and run the Linux side)"
@@ -634,6 +671,7 @@ sys.exit(0 if b"$ cat notes.txt\nalpha\nbeta\ngamma\ndelta\n" in d else 1)' "$ou
         else
             bad "Y8 $id: visible feature session"
         fi
+        pointer_row "$tier" "$leg"
     done
 done
 cat "$runs"
