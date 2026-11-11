@@ -2143,10 +2143,14 @@ fn slt(a: u64, b: u64) -> bool {
     (a ^ 0x8000000000000000) < (b ^ 0x8000000000000000)
 }
 
-/// Pixel `p + d` (d a two's complement word) held to 0 .. `n - 1`.
+/// Pixel `p + d` (d a two's complement word, at most 2^31 either way)
+/// held to 0 .. `n - 1`, without a wrap (wolf's arithmetic is checked).
 fn nudge(p: u64, d: u64, n: u64) -> u64 {
-    let q = p + d
-    if slt(q, 0) { 0 } else if slt(n - 1, q) { n - 1 } else { q }
+    if slt(d, 0) {
+        let back = !d + 1
+        return if back >= p { 0 } else { p - back }
+    }
+    if p + d >= n { n - 1 } else { p + d }
 }
 
 /// Pointer `dev`'s buttons are `b` now (`gone`: it left): every pointer's
@@ -2305,7 +2309,7 @@ fn pointer_record() {
     }
     var n: u64 = 0
     let up = !slt(wheel, 0)
-    let detents = if up { wheel } else { 0 - wheel }
+    let detents = if up { wheel } else { !wheel + 1 }
     while n < detents && n < 8 {
         sgr_report(how, (if up { 64 } else { 65 }) + m, col, row, true)
         n += 1
