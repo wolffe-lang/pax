@@ -2311,3 +2311,14 @@ description, which `tools/hotplug-session` speaks to QEMU's `usb-redir` device t
 | xHCI 1.2 (§4.6.3 Enable Slot, §4.6.4 Disable Slot, §5.4.7 CONFIG's MaxSlotsEn, §5.4.8 PORTSC's CCS and CSC), as px74's entries | as px74 | kernel/xhci: a refused port waits for a change; a slot past MaxSlotsEn given back |
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `nec-usb-xhci`, `usb-mouse`, `usb-kbd`, `usb-hub`, `usb-ccid` and `usb-redir`, q35's `max-ram-below-4g` | binary | black box: pax#348 reproduced (`notes/px120-hotplug.md` §2); Enable Slot answers success with slots past CONFIG's MaxSlotsEn (33 and 34 with 32 enabled); `nec-usb-xhci`'s `slots` property leaves HCSPARAMS1's MaxSlots at 64 (read through the monitor's `xp`); usb-redir on an xHCI refuses a peer that announces only the device version, disconnect acks and endpoint packet sizes ("lacks capabilities needed for use with XHCI") and takes one that adds 64-bit ids and 32-bit bulk lengths (which of the two it needs was not separated); the composite devices enumerate at full speed |
 | PAX's own `kernel/frames`, `kernel/xhci`, `kernel/mouse`, `kernel/usb_mouse`, `kernel/triage`, `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx2-frames`, `tests/mpx6-usb` | this tree | read and extended |
+
+## px122 — trunk's cut runs after #344: the two jobs' limits, and /proc/pax-boot in small functions
+
+No kernel's, firmware's or boot loader's source. The change in kernel/procfs follows PAX's own notes on the release
+tier's inlining; the rest is measurement.
+
+| source | version | read, for |
+|---|---|---|
+| PAX's own `kernel/block` (the report's comment, pax#215), `kernel/tcp` ("one function a line"), `kernel/xhci` (`attach`'s comment, wolf#983) | trunk `309036ec` | the release tier inlines each formatter's loop at every call, and its range pass costs the square of one function's branches |
+| GitHub's REST API for the ci workflow's runs, jobs (pages of 30) and job logs; the runs' artifacts | as served 2026-11-11 | each step's seconds and conclusion, the runs' tiers, the kernel's boot lines and the build phases |
+| wolf 0.2.35's `wolf build --release` (`tools/build-kernel --release`) | the pinned archive | black box: `kmain_console`'s release build timed cold at each of #344's kernel commits |
