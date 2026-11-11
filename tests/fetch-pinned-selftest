@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# tests/fetch-pinned-selftest — tools/fetch-pinned takes a pinned file
+# only when its digest is the pin's, from the store or from a source, and
+# says which source failed and how (px118). No network: tools/fetch-pinned
+# and tools/lib.sh copied into a scratch root whose user/beep.pin names
+# files a local HTTP server on 127.0.0.1 serves, beside a closed port that
+# refuses every connection (a source that does not answer).
+#
+#   F1  a file not in the store: fetched from its first source, verified,
+#       stored at PAX_CACHE/pinned/SHA256/NAME, its path printed; exit 0.
+#   F2  the first source refuses the connection: the next one serves the
+#       file; exit 0, the first one named with curl's exit.
+#   F3  a stored file with every source closed (a warm cache in an
+#       outage): read again and used; exit 0, no request reaches a server.
+#   F4  a stored copy altered after: refused, exit 4, the copy left as it
+#       is (never fetched over), no request made.
+#   F5  a source serves other bytes than the pin's digest (a wrong pin):
+#       refused, exit 4, nothing stored, the later sources never asked.
+#   F6  no source answers and the store is empty (a cold cache in an
+#       outage): exit 3, every source named.
+#   F7  a pin's every file (PIN, --all): a PASS or FAIL line per file, the
+#       exit the worst (4 over 3 over 0).
+#   F8  the repository's own pins (--list, --sources; no network): every
+#       file of user/beep.pin and user/disktools.pin with the digest the
+#       pin names, beep's from Ubuntu's pool, Launchpad and (the upstream
+#       tarball) Debian's, disktools' from Ubuntu's pool then Launchpad's
+#       librarian.
+#   F9  the harness takes these files through tools/fetch-pinned only:
+#       tools/mkbeep and tools/disktools call it and run no curl of their
+#       own.
+# Exit 0 when every row held; each failing row is named.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/.." && pwd)
+w=$(mktemp -d "${TMPDIR:-/tmp}/fetch-pinned-selftest.XXXXXX")
+server=
+cleanup() { [ -z "$server" ] || kill "$server" 2>/dev/null; rm -rf "$w"; }
+trap cleanup EXIT
+fail=0
+bad() { echo "FAIL $*"; fail=1; }
+ok() { echo "PASS $*"; }
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+
+# The scratch root: the tool as it is, pins of our own. Its disktools pin
+# names one package whose file F7 places in the store beforehand, so no
+# row reaches Ubuntu's archive.
+mkdir -p "$w/root/tools" "$w/root/user" "$w/served/a" "$w/served/b"
+cp "$root/tools/fetch-pinned" "$root/tools/lib.sh" "$w/root/tools/"
+printf 'the first file\n' > "$w/served/a/one.tar.gz"
+printf 'the second file\n' > "$w/served/b/two.tar.xz"
+printf 'not the first file\n' > "$w/served/b/one.tar.gz"
+printf 'a package\n' > "$w/fake_1_amd64.deb"
+one=$(sha "$w/served/a/one.tar.gz")
+two=$(sha "$w/served/b/two.tar.xz")
+deb=$(sha "$w/fake_1_amd64.deb")
+cat > "$w/root/user/disktools.pin" <<EOF
+DISKTOOLS_DEBS="fake"
+fake_FILE=fake_1_amd64.deb
+fake_POOL=main/f/fake
+fake_SHA256=$deb
+EOF
+
+# A local server: every request logged, its port in a file.
+cat > "$w/serve.py" <<'PY'
+import http.server, os, sys
+d, logf, portf = sys.argv[1:4]
+class H(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *a, **k):
+        super().__init__(*a, directory=d, **k)
+    def log_message(self, fmt, *args):
+        with open(logf, "a") as f:
+            f.write(self.path + "\n")
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+with open(portf + ".part", "w") as f:
+    f.write(str(s.server_address[1]))
+os.rename(portf + ".part", portf)
+s.serve_forever()
+PY
+python3 -I "$w/serve.py" "$w/served" "$w/requests" "$w/port" > /dev/null 2>&1 &
+server=$!
+for _ in $(seq 1 50); do [ -s "$w/port" ] && break; sleep 0.1; done
+[ -s "$w/port" ] || { echo "fetch-pinned-selftest: the local server did not start" >&2; exit 2; }
+port=$(cat "$w/port")
+# A closed port: bound and released, so a connection to it is refused.
+closed=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+up=http://127.0.0.1:$port
+down=http://127.0.0.1:$closed
+
+# pin ONE-URLS TWO-URLS [ONE-SHA]: write the scratch user/beep.pin.
+pin() {
+    cat > "$w/root/user/beep.pin" <<EOF
+BEEP_SOURCES="one two"
+BEEP_one_FILE=one.tar.gz
+BEEP_one_SHA256=${3:-$one}
+BEEP_one_URLS="$1"
+BEEP_two_FILE=two.tar.xz
+BEEP_two_SHA256=$two
+BEEP_two_URLS="$2"
+EOF
+}
+# run ARG...: the scratch tool, its stdout, stderr and exit in $w/out, $w/err, $rc.
+run() {
+    rc=0
+    PAX_CACHE="$w/cache" "$w/root/tools/fetch-pinned" "$@" > "$w/out" 2> "$w/err" || rc=$?
+}
+requests() { [ -f "$w/requests" ] && wc -l < "$w/requests" | tr -d ' ' || echo 0; }
+store1=$w/cache/pinned/$one/one.tar.gz
+
+# F1
+pin "$up/a/one.tar.gz $down/one.tar.gz" "$up/b/two.tar.xz"
+run beep one.tar.gz
+if [ "$rc" = 0 ] && [ "$(cat "$w/out")" = "$store1" ] && [ "$(sha "$store1")" = "$one" ] \
+    && [ "$(stat -c %a "$store1")" = 644 ] && grep -q "fetched from $up/a/one.tar.gz" "$w/err"; then
+    ok "F1 fetched from the first source, verified, stored at pinned/SHA256/NAME"
+else
+    bad "F1 rc=$rc out=$(cat "$w/out") err=$(tr '\n' '|' < "$w/err")"
+fi
+
+# F2
+rm -rf "$w/cache"
+pin "$down/one.tar.gz $up/a/one.tar.gz" "$up/b/two.tar.xz"
+run beep one.tar.gz
+if [ "$rc" = 0 ] && [ "$(sha "$store1")" = "$one" ] \
+    && grep -q "$down/one.tar.gz did not answer (curl exit 7)" "$w/err" \
+    && grep -q "fetched from $up/a/one.tar.gz" "$w/err"; then
+    ok "F2 the first source refused the connection (curl exit 7); the second served the file"
+else
+    bad "F2 rc=$rc err=$(tr '\n' '|' < "$w/err")"
+fi
+
+# F3
+pin "$down/one.tar.gz" "$down/two.tar.xz"
+before=$(requests)
+run beep one.tar.gz
+if [ "$rc" = 0 ] && [ "$(cat "$w/out")" = "$store1" ] && grep -q "the stored copy, read again" "$w/err" \
+    && [ "$(requests)" = "$before" ]; then
+    ok "F3 every source closed: the stored copy read again and used, no request made"
+else
+    bad "F3 rc=$rc err=$(tr '\n' '|' < "$w/err") requests $before -> $(requests)"
+fi
+
+# F4
+pin "$up/a/one.tar.gz" "$up/b/two.tar.xz"
+printf 'altered\n' >> "$store1"
+altered=$(sha "$store1")
+before=$(requests)
+run beep one.tar.gz
+if [ "$rc" = 4 ] && [ ! -s "$w/out" ] && grep -q "has sha256 $altered, the pin says $one: refused" "$w/err" \
+    && [ "$(sha "$store1")" = "$altered" ] && [ "$(requests)" = "$before" ]; then
+    ok "F4 an altered stored copy: refused with exit 4, left as it is, nothing fetched"
+else
+    bad "F4 rc=$rc out=$(cat "$w/out") err=$(tr '\n' '|' < "$w/err")"
+fi
+
+# F5
+rm -rf "$w/cache"
+pin "$up/b/one.tar.gz $up/a/one.tar.gz" "$up/b/two.tar.xz"
+: > "$w/requests"
+run beep one.tar.gz
+wrong=$(sha "$w/served/b/one.tar.gz")
+if [ "$rc" = 4 ] && [ ! -s "$w/out" ] && grep -q "$up/b/one.tar.gz served sha256 $wrong, the pin says $one: refused" "$w/err" \
+    && [ -z "$(find "$w/cache/pinned" -type f 2>/dev/null)" ] && ! grep -q '^/a/one.tar.gz' "$w/requests"; then
+    ok "F5 a source serving other bytes: refused with exit 4, nothing stored, the next source not asked"
+else
+    bad "F5 rc=$rc err=$(tr '\n' '|' < "$w/err") stored=$(find "$w/cache/pinned" -type f 2>/dev/null | tr '\n' ' ') requests=$(tr '\n' ' ' < "$w/requests")"
+fi
+
+# F6
+rm -rf "$w/cache"
+pin "$down/one.tar.gz $down/again/one.tar.gz" "$up/b/two.tar.xz"
+run beep one.tar.gz
+if [ "$rc" = 3 ] && [ ! -s "$w/out" ] && grep -q "not in the store ($store1), and no source answered: $down/one.tar.gz (curl exit 7" "$w/err" \
+    && grep -q "$down/again/one.tar.gz (curl exit 7" "$w/err" && [ ! -e "$store1" ]; then
+    ok "F6 an empty store and no source answering: exit 3, each source named"
+else
+    bad "F6 rc=$rc err=$(tr '\n' '|' < "$w/err")"
+fi
+
+# F7
+run beep
+f7a="$rc $(cut -d' ' -f1,2 "$w/out" | tr '\n' ' ')"
+rm -rf "$w/cache"
+mkdir -p "$w/cache/pinned/$deb"
+cp "$w/fake_1_amd64.deb" "$w/cache/pinned/$deb/"
+pin "$up/b/one.tar.gz" "$down/two.tar.xz"
+run --all
+f7b="$rc $(grep -c '^PASS disktools:' "$w/out") $(grep -E '^(PASS|FAIL) beep:' "$w/out" | cut -d' ' -f1,2 | tr '\n' ' ')"
+if [ "$f7a" = "3 FAIL beep:one.tar.gz PASS beep:two.tar.xz " ] && [ "${f7b#4 }" != "$f7b" ] \
+    && [ "${f7b#* * }" = "FAIL beep:one.tar.gz FAIL beep:two.tar.xz " ]; then
+    ok "F7 a line per file, the exit the worst (3 for no answer; 4 beside a wrong digest)"
+else
+    bad "F7 beep: '$f7a'; --all: '$f7b'"
+fi
+
+# F8
+rc=0
+"$root/tools/fetch-pinned" --list > "$w/list" 2> "$w/err" || rc=$?
+"$root/tools/fetch-pinned" --sources > "$w/sources" 2>> "$w/err" || rc=$((rc + $?))
+want=$( (
+    . "$root/user/beep.pin"
+    for s in $BEEP_SOURCES; do f=BEEP_${s}_FILE h=BEEP_${s}_SHA256; echo "beep ${!f} ${!h}"; done
+    . "$root/user/disktools.pin"
+    for p in $DISKTOOLS_DEBS; do f=${p}_FILE h=${p}_SHA256; echo "disktools ${!f} ${!h}"; done
+) )
+f8=
+[ "$rc" = 0 ] || f8+=" exit $rc: $(tr '\n' '|' < "$w/err");"
+[ "$(cat "$w/list")" = "$want" ] || f8+=" --list differs from the pins;"
+[ "$(wc -l < "$w/list" | tr -d ' ')" = 9 ] || f8+=" not 9 files;"
+grep -Eq '^beep beep_1\.4\.9\.orig\.tar\.gz [0-9a-f]{64} https://archive\.ubuntu\.com/ubuntu/pool/universe/b/beep/[^ ]+ https://launchpad\.net/[^ ]+ https://deb\.debian\.org/debian/pool/[^ ]+$' "$w/sources" || f8+=" beep's upstream tarball's sources;"
+[ "$(grep -c '^disktools .* http://archive\.ubuntu\.com/ubuntu/pool/[^ ]* https://launchpad\.net/ubuntu/+archive/primary/+files/[^ ]*$' "$w/sources")" = 7 ] || f8+=" disktools' sources;"
+grep -q 'libpopt0_1\.19%2bdfsg-1build1_amd64\.deb$' "$w/sources" || f8+=" a + in a file name not written %2b;"
+if [ -z "$f8" ]; then
+    ok "F8 the repository's pins: 9 files, each with its pin's digest and its sources in order"
+else
+    bad "F8$f8"
+fi
+
+# F9
+f9=
+for t in mkbeep disktools; do
+    grep -q 'tools/fetch-pinned' "$root/tools/$t" || f9+=" $t does not call tools/fetch-pinned;"
+    ! grep -Eq '^[^#]*\bcurl\b' "$root/tools/$t" || f9+=" $t runs curl itself;"
+done
+if [ -z "$f9" ]; then
+    ok "F9 tools/mkbeep and tools/disktools take their pinned files through tools/fetch-pinned only"
+else
+    bad "F9$f9"
+fi
+
+[ "$fail" = 0 ] && echo "fetch-pinned-selftest: PASS" || echo "fetch-pinned-selftest: FAIL"
+exit "$fail"
