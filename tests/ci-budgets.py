@@ -118,6 +118,45 @@ def ahci_root_floor():
     return build + leg + 180
 
 
+SP_TIERS = {'all': ('all',), 'partial': ('all', 'partial'), 'full': ('full',), 'pr': ('pr',)}
+
+
+def job_steps(job):
+    """px122: the job's named steps in the workflow, in order (`      - name: …`); the steps GitHub
+    names itself (setup, `uses:` without a name, the post steps) are the 180 s allowance's."""
+    body = text.split('  ' + job + ':\n', 1)[1]
+    body = re.split(r'\n  [A-Za-z0-9_-]+:\n', body, maxsplit=1)[0]
+    return re.findall(r'^      - name: (.+)$', body, re.M)
+
+
+def step_floors(job):
+    """px122 (trunk's cancelled runs of 2026-11-11): mpx3-shell and mpx5-pelt, step by step, per
+    tier, from their attempts in shell-pelt.json (notes/px122/measure/runs.py). Each named step's
+    floor is its peak over the tier's attempts where it completed or was cut at the limit (a cut
+    step is a lower bound, which can only raise the floor); a step that failed is a red of its own,
+    never a sample; a step the tier skips costs nothing. The job's floor is its named steps' sum and
+    180 s for what GitHub runs itself. Also returns the named steps no attempt of the job has ever
+    timed: a new step in a budgeted job is red here, on its pull request, until it is measured."""
+    d = json.loads((DATA / 'shell-pelt.json').read_text())
+    rows = [r for r in d['ci'] if r['job'] == job]
+    steps = job_steps(job)
+    timed = {n for r in rows for n, (_, c) in r['steps'].items() if c in ('success', 'cancelled')}
+    out = {}
+    for tier, kinds in SP_TIERS.items():
+        peak = {}
+        for r in rows:
+            if r['tier'] not in kinds:
+                continue
+            for n, (secs, c) in r['steps'].items():
+                if c in ('success', 'cancelled'):
+                    peak[n] = max(peak.get(n, 0), secs)
+        n_obs = len([r for r in rows if r['tier'] in kinds])
+        out[tier] = sum(peak.get(n, 0) for n in steps) + 180
+        print('%s (tier %s): %d attempts, step peaks %s, setup/post=180s' % (
+            job, tier, n_obs, ' '.join('%d' % peak.get(n, 0) for n in steps)))
+    return out, [n for n in steps if n not in timed]
+
+
 floors = {
     'mpx2-interrupts': max(r['seconds'] for r in interrupts if r['conclusion'] == 'success'),
     'mpx2-heap': max(heap),
@@ -149,4 +188,19 @@ for job in ('mpx5-yew', 'mpx5-screen'):
         print('%s budget/%s/%s CI budget %s (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
               ('PASS' if ok else 'FAIL', job, tier, job, tier, seconds, floor, seconds - floor))
         failed |= not ok
+# px122: mpx3-shell and mpx5-pelt, each tier against its floor, step by step; and every named step
+# of either job timed by some attempt.
+for job in ('mpx3-shell', 'mpx5-pelt'):
+    tiers, untimed = step_floors(job)
+    for tier, floor in tiers.items():
+        seconds = tier_bound(job, tier)
+        ok = seconds * 10 >= floor * 14
+        print('%s budget/%s/%s CI budget %s (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
+              ('PASS' if ok else 'FAIL', job, tier, job, tier, seconds, floor, seconds - floor))
+        failed |= not ok
+    print('%s budget/%s/steps CI budget %s: %s' % (
+        'FAIL' if untimed else 'PASS', job, job,
+        'no attempt has timed ' + '; '.join(repr(n) for n in untimed) if untimed
+        else 'every named step timed by an attempt'))
+    failed |= bool(untimed)
 sys.exit(1 if failed else 0)
