@@ -1,0 +1,17 @@
+# notes/px117/rig/gauntlet.manifest — px117's green take at the final head (take.sh, the recorder's
+# steps mode with --keep-going and --preflight): the planner's test; kmain_console on both tiers with
+# the pointer's probe; the pointer session on every leg under KVM and on native BIOS under TCG; yew's
+# session image and Y9 on every leg; the USB suite on native BIOS (the three keyboard topologies and
+# the mouse session beside the console's new reader); the screen suite native on both firmwares.
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px117/rig/lib.sh
+rig gauntlet.manifest committed=../../..:HEAD:notes/px117/rig/gauntlet.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step build image=localhost/px75-ubuntu:2 tools=cc,clang,readelf,python3,git,curl script=step.sh -- build --tier both
+step pointer-native needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- pointer --tier native --firmware both
+step pointer-release needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- pointer --tier release --firmware both
+step pointer-tcg needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- pointer --tier native --firmware bios --accel tcg
+step yew-build image=localhost/px75-ubuntu:2 tools=cc,clang,readelf,python3,git,curl script=step.sh -- yew-build --tier both
+step yew needs=yew-build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- yew --tier both --firmware both
+step usb image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf script=step.sh -- usb --tier native --firmware bios
+step screen image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf,git,curl script=step.sh -- screen --tier native --firmware both
