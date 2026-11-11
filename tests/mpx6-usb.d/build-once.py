@@ -37,10 +37,13 @@ elif name=='qemu-run':
     out.write_text(''.join('PASS USB row%d\\n'%i for i in range(57))+'PASS USB invariants\\n')
     sys.exit(33)
 '''
-    for name in ('build-kernel','mkimage','mkinitramfs','fetch-limine','qemu-run','usb-session','mouse-session'):
+    for name in ('build-kernel','mkimage','mkinitramfs','fetch-limine','qemu-run','usb-session','mouse-session',
+                 'hotplug-session'):
         p=tree/'tools'/name; p.write_text(helper); p.chmod(0o755)
-    # px109: the mouse judge's selftest runs before each mouse session.
-    p=tree/'tests/mpx6-usb.d/mouse-judge-selftest'; p.write_text(helper); p.chmod(0o755)
+    # px109: the mouse judge's selftest runs before each mouse session;
+    # px120: the hot-plug judge's before each hot-plug session.
+    for name in ('mouse-judge-selftest','hotplug-judge-selftest'):
+        p=tree/'tests/mpx6-usb.d'/name; p.write_text(helper); p.chmod(0o755)
     # The C compiler is a fixture too: no executable under test is produced.
     (tree/'tools/cc').write_text('#!/bin/sh\nexit 0\n'); (tree/'tools/cc').chmod(0o755)
     calls=tree/'calls.jsonl'
@@ -66,7 +69,14 @@ elif name=='qemu-run':
         f'mouse sessions {dict(mice)}, expected one a tier and firmware'
     assert all(Path(a[a.index('--image')+1]).name=='mouse.iso' for n,a in records if n=='mouse-session'), 'mouse session image'
     assert sum(n=='mouse-judge-selftest' for n,a in records)==4, 'the mouse judge selftest was dropped'
-    print('PASS USB build-once: four builds, four invariant boots, twelve keyboard and four mouse sessions')
+    # px120: one hot-plug session a tier and firmware, on that tier's image.
+    hot=collections.Counter((Path(a[a.index('--image')+1]).parent.name,a[a.index('--firmware')+1])
+        for n,a in records if n=='hotplug-session')
+    assert hot==collections.Counter({(t,f):1 for t in ('native','release') for f in ('bios','uefi')}), \
+        f'hot-plug sessions {dict(hot)}, expected one a tier and firmware'
+    assert all(Path(a[a.index('--image')+1]).name=='hotplug.iso' for n,a in records if n=='hotplug-session'), 'hot-plug session image'
+    assert sum(n=='hotplug-judge-selftest' for n,a in records)==4, 'the hot-plug judge selftest was dropped'
+    print('PASS USB build-once: four builds, four invariant boots, twelve keyboard, four mouse and four hot-plug sessions')
     bundle=tree/'build/mpx6-usb/native'
     (bundle/'invariants/tier.txt').write_text('release\n')
     result=subprocess.run([str(tree/'tests/mpx6-usb'),'--tier','native','--firmware','uefi','--images',str(bundle)],

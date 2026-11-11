@@ -4,6 +4,12 @@
 # usb-tablet beside the keyboard, read through /dev/mouse0
 # (tools/mouse-session over user/elf/mouseprobe.c). `--topology mouse`
 # runs the mouse session alone; `all` runs the keyboard's three and it.
+# px120: and hot-plug after boot (pax#348): tools/hotplug-session over
+# user/elf/hotplugprobe.c, two controllers of its own (INTx and MSI),
+# memory above 4 GiB, mice, keyboards and composite devices plugged and
+# unplugged once the probe has churned. `--topology hotplug` runs it
+# alone; `all` runs it last. Under PAX_USB_IRQ (the firmware suite's
+# MSI and INTx legs) it is not run again: it sets its own controllers.
 # `--accel` is the mouse session's accelerator (auto: KVM where usable).
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
@@ -16,7 +22,7 @@ while [ $# -gt 0 ]; do
         --linux-kernel) linux_kernel=$2; shift 2;;
         --topology) topology=$2; shift 2;;
         --accel) accel=$2; shift 2;;
-        *) die 'usage: mpx6-usb [--tier native|release] [--firmware bios|uefi] [--images DIR] [--linux-kernel FILE] [--topology root|hub|nested|mouse|all] [--accel auto|kvm|tcg]';;
+        *) die 'usage: mpx6-usb [--tier native|release] [--firmware bios|uefi] [--images DIR] [--linux-kernel FILE] [--topology root|hub|nested|mouse|hotplug|all] [--accel auto|kvm|tcg]';;
     esac
 done
 case $accel in auto|kvm|tcg) ;; *) die 'bad accel';; esac
@@ -46,7 +52,7 @@ case $firmware in bios|uefi) ;; *) die 'bad firmware';; esac
 check_args=()
 [ -z "$images" ] || check_args=(--images "$images/invariants")
 "$PAX_ROOT/tests/mpx6-usbcheck" --tier "$tier" --firmware "$firmware" "${check_args[@]}"
-case $topology in all) topologies='root hub nested mouse';; root|hub|nested|mouse) topologies=$topology;; *) die 'bad topology';; esac
+case $topology in all) topologies='root hub nested mouse hotplug';; root|hub|nested|mouse|hotplug) topologies=$topology;; *) die 'bad topology';; esac
 work=$PAX_BUILD/mpx6-usb/$tier
 if [ -z "$images" ]; then
     mkdir -p "$work"
@@ -61,6 +67,11 @@ if [ -z "$images" ]; then
     printf '/bin/mouseprobe\n' > "$work/mouse-run"
     "$PAX_ROOT/tools/mkinitramfs" "$work/mouse.cpio" "/bin/mouseprobe=$work/mouseprobe" "/etc/pax-run=$work/mouse-run"
     "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/mouse.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/mouse.iso"
+    # px120: the hot-plug probe's image, the same kernel; it churns 800 MiB.
+    cc -static -O1 -Wall -Wextra -o "$work/hotplugprobe" "$PAX_ROOT/user/elf/hotplugprobe.c"
+    printf '/bin/hotplugprobe 800\n' > "$work/hotplug-run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/hotplug.cpio" "/bin/hotplugprobe=$work/hotplugprobe" "/etc/pax-run=$work/hotplug-run"
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/hotplug.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/hotplug.iso"
     mkdir -p "$work/invariants"
     cp "$PAX_BUILD/mpx6-usbcheck/$tier/check.iso" "$PAX_BUILD/mpx6-usbcheck/$tier/kmain_usbcheck.elf" \
         "$PAX_BUILD/mpx6-usbcheck/$tier/tier.txt" "$work/invariants/"
@@ -80,6 +91,17 @@ for topology in $topologies; do
         python3 -I "$PAX_ROOT/tests/mpx6-usb.d/mouse-judge-selftest"
         python3 -I "$PAX_ROOT/tools/mouse-session" --image "$images/mouse.iso" \
             --output "$work/$firmware-mouse-$accel" --firmware "$firmware" --accel "$accel"
+        continue
+    fi
+    if [ "$topology" = hotplug ]; then
+        if [ -n "${PAX_USB_IRQ:-}" ]; then
+            echo "mpx6-usb: NOTE hotplug not run under PAX_USB_IRQ=$PAX_USB_IRQ: its session sets its own controllers (INTx and MSI)"
+            continue
+        fi
+        # px120: the judge can say no first, then the session's rows.
+        python3 -I "$PAX_ROOT/tests/mpx6-usb.d/hotplug-judge-selftest"
+        python3 -I "$PAX_ROOT/tools/hotplug-session" --image "$images/hotplug.iso" \
+            --output "$work/$firmware-hotplug-$accel" --firmware "$firmware" --accel "$accel"
         continue
     fi
     python3 -I "$PAX_ROOT/tools/usb-session" --image "$images/probe.iso" --reference "$reference" \
