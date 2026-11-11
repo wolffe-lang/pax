@@ -200,6 +200,28 @@ fn drain(r: u64, out: u64) -> (u64, u64, u64, u64, bool, u64, u64) {
     (n, sx, edges, merged, alternate, flags, reports)
 }
 
+/// px117: every record reader `r` has, its motion summed by sign so no
+/// sum wraps: (count, x's positive part, x's negative part, y's negative
+/// part, the wheel's positive part, its negative part).
+fn signed_sums(r: u64, out: u64) -> (u64, u64, u64, u64, u64, u64) {
+    var n: u64 = 0
+    var xp: u64 = 0
+    var xn: u64 = 0
+    var yn: u64 = 0
+    var wp: u64 = 0
+    var wn: u64 = 0
+    while mouse.pull(r, out) {
+        n += 1
+        let x = r32(out + 16)
+        let y = r32(out + 20)
+        let w = r32(out + 24) >> 16
+        if x & 0x80000000 != 0 { xn += 0x100000000 - x } else { xp += x }
+        if y & 0x80000000 != 0 { yn += 0x100000000 - y }
+        if w & 0x8000 != 0 { wn += 0x10000 - w } else { wp += w }
+    }
+    (n, xp, xn, yn, wp, wn)
+}
+
 fn mouse_rows() {
     let _f = frames.start()
     let d = (frames.alloc() else 0) + frames.hhdm()
@@ -295,6 +317,28 @@ fn mouse_rows() {
     while i < 68 { let _b = mouse.report(m, 1, 0, 0, 0, 500 + i); i += 1 }
     let (n2, s2, _e2, m2, _a2, f2, r2) = drain(r1, out)
     check(n2 == 63 && s2 == 68 && m2 == 1 && f2 & mouse.MERGED != 0 && r2 == 6, "mouse queue merges motion above half")
+    // px117: motion and the wheel of either sign merge into the tail, and a
+    // full queue's compaction folds them, without a checked wrap (a
+    // negative word is near 2^64): 63 records of +1, then 40 reports of
+    // -3 and +2 by turns, y -1 and the wheel -1 and +1 by turns; then 63
+    // of -1 and 64 edges, which make the queue compact.
+    i = 0
+    while i < 63 { let _b = mouse.report(m, 1, 0, 0, 0, 3000 + i); i += 1 }
+    i = 0
+    while i < 40 {
+        let back = i % 2 == 0
+        let _b = mouse.report(m, if back { 0xfffffffffffffffd } else { 2 }, 0xffffffffffffffff, 0,
+                              if back { 0xffffffffffffffff } else { 1 }, 3100 + i)
+        i += 1
+    }
+    let (n7, xp7, xn7, yn7, wp7, wn7) = signed_sums(r1, out)
+    check(n7 == 63 && xp7 - xn7 == 43 && yn7 == 40 && wp7 == wn7, "mouse queue merges motion of either sign")
+    i = 0
+    while i < 63 { let _b = mouse.report(m, 0xffffffffffffffff, 0, 0, 0, 3200 + i); i += 1 }
+    i = 0
+    while i < 64 { let _b = mouse.report(m, 0, 0, (i + 1) % 2, 0, 3300 + i); i += 1 }
+    let (n8, xp8, xn8, _yn8, _wp8, _wn8) = signed_sums(r1, out)
+    check(n8 == 126 && xp8 == 0 && xn8 == 63, "mouse queue compacts motion of either sign")
     i = 0
     while i < 63 { let _b = mouse.report(m, 1, 0, 0, 0, 600 + i); i += 1 }
     let _p = mouse.report(m, 0, 0, 1, 0, 700)
