@@ -24,8 +24,9 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx6-pointer` jo
   enables and parses. `docs/SOURCES.md` (px117) lists every source with its digests.
 - **Hosts.** Linux host 1 (Intel Core i7-12700KF, 20 threads, 46 GB) for every build and boot, in an Ubuntu 24.04
   container (QEMU 8.2.2, OVMF, gcc 13.3, clang, lld 18) with KVM: the smoke runs and the first whole gate on light
-  slots (two CPUs each; the cost per move from one of P-cores), the records on a block of six CPUs. The build Mac for git and the judge's selftest only (no build: its disk was
-  under its floor). The metal target was never touched.
+  slots (two CPUs each; the cost per move from one of P-cores), the records on a block of six CPUs. The build Mac
+  for git and the judge's selftest only (no build: its disk was under its floor). The metal target was never
+  touched.
 - **Not done:** no label, merge, tag, release or deploy; no issue filed or closed; no attribution trailer.
 
 ## 2. Inputs, verified
@@ -50,7 +51,7 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx6-pointer` jo
 | P2 | the scroll copies the framebuffer under KVM | `scrolls by copy` on every leg, KVM and TCG (the boot line) | right |
 | P3 | a relative move over 127 in one event is split, its sum kept | not injected: the rows move 100 an event | not measured |
 | P4 | the tablet's 32768 (2c + 1) / 2 cols lands in column c | every row's cell as sent | right |
-| P5 | keys and tablet events in send order 20 ms and 2 ms apart | in order 20 ms apart; 2 ms apart a USB key typed before a tablet click reached the guest after it (QEMU polls the USB keyboard, the tablet every 1 ms); through the PS/2 keyboard 3 ms apart, in order | wrong at 2 ms on USB |
+| P5 | keys and tablet events in send order 20 ms and 2 ms apart | in order 20 ms apart; 2 ms apart a USB key sent before a tablet click reached the guest after it (each device's reports come at its own polling interval; px109 measured the tablet's, 1 ms); through the PS/2 keyboard, which interrupts at once, 3 ms apart, in order | wrong at 2 ms on USB |
 | P6 | SGR reports as the document gives them | as predicted, every row | right |
 | P7 | nothing else served | the unserved row's eight steps type nothing | right |
 | P8 | modes owned by the setter's process, ended with it, withheld while it is in the background | so (owner-exits, owner-background; the books' 2 withheld, 3 ended) | right |
