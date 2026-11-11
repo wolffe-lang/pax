@@ -2280,3 +2280,18 @@ QEMU's. Every download below was fetched twice and its sha256 read twice; the di
   session and terminal read from `/proc/self/stat`, the password's read), `kernel/sched` (`take_pid`: a pid is
   never reused) and px111's `user/elf/ptyprobe.c` (a session driven from a master).
 - No sudo source, no kernel's source of any OS, no C library's or shell's source.
+
+## px121 — sudo with no terminal keeps no record when the parent cannot be read
+
+- **sudoers_timestamp(5)** (sudo 1.9.17p2's page): a record of type `TS_PPID` keeps the parent's
+  pid and the parent's start time; **sudoers(5)**'s `timestamp_type` (`ppid`, and `tty` with no terminal behaving
+  as `ppid`) and its security notes (the parent's start time recorded "on systems where a process's start time can
+  be queried"); **sudo(8)** for `-S`.
+- **getppid(2)**, **setsid(2)**, **proc_pid_stat(5)** (`session`, `tty_nr`, `starttime`) and **credentials(7)**
+  (man-pages 6.7) for the probe's two sessions.
+- PAX's own `user/sudo/sudo.lu` (`ts_key`, `start_of`, `authenticate`), `user/auth/secret.lu` (the session and
+  terminal read from `/proc/self/stat`), `kernel/sched` (`reparent`: an ending process's children go to nobody
+  once pid 1 has ended; `start_thread`: a process the kernel starts has parent 0 and a session of its own),
+  `kernel/kmain_console.lu` (the run list: the next command once every process has ended), `kernel/user` (the
+  run list's init status, the last parentless exit's) and px119's `user/elf/sudotty.c`.
+- No sudo source, no kernel's source of any OS, no C library's source.
