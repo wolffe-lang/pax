@@ -9,6 +9,8 @@
 #   irq ARGS    tests/mpx6-firmware.d/typing-irq mpx3-shell ARGS: CI's all-tier step "the same
 #               typing rows with the xHCI on MSI only, then INTx only"
 #   times       stamped.py's summary of the two steps' rows and the kernel's own boot lines
+#   kernel TIER tools/build-kernel for kmain_console alone on TIER (native or release), timed: wall
+#               seconds and the compiler's peak resident set (stamped.py timed)
 # A step's output goes through stamped.py: each line `+SECONDS ` (since the step began) first, a
 # `FAIL ` line lifted to column 0 unstamped (the recorder keeps a `FAIL ` line there); a copy goes
 # to $PAX_BUILD/WHAT.stamped for the times step. The step's exit is the suite's.
@@ -29,5 +31,8 @@ case $what in
     suite) CAPS=SYS_ADMIN stamp suite ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx3-shell "$@"; exit $?' x "$@" ;;
     irq) stamp irq ctr 0 localhost/px75-ubuntu:2 bash -c 'tests/mpx6-firmware.d/typing-irq mpx3-shell "$@"; exit $?' x "$@" ;;
     times) python3 -I "$GAUNTLET_RIG_DIR/stamped.py" times "$PAX_BUILD" ;;
+    kernel) t=${1:?native or release}; f=(); [ "$t" = release ] && f=(--release)
+        ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'python3 -I "$0" timed tools/build-kernel "$@"; exit $?' \
+            "$GAUNTLET_RIG_DIR/stamped.py" ${f[@]+"${f[@]}"} --src kernel/kmain_console.lu "$PAX_BUILD/kernel-$t" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
