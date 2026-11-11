@@ -47,13 +47,20 @@
 //!   unless every one does (sudoers(5)'s listpw=any and verifypw=all).
 //! - **The timestamp** (px106): `/var/run/sudo/ts/UID` (Ubuntu's names the
 //!   file by uid too), root's with the caller's group, mode 0600, in PAX's
-//!   own format: one line a terminal and session, `tty NR sid SID time MS`
-//!   (with no terminal, `ppid PPID start TICKS sid SID time MS`), MS the
-//!   wall clock's. px115: TICKS is the parent's start time
-//!   (proc_pid_stat(5)'s starttime), as sudoers_timestamp(5) keeps a record
-//!   made with no terminal by its parent's pid and that parent's start
-//!   time, so a later process given the same pid matches no record (a
-//!   record of the form before px115, with no `start`, matches nothing).
+//!   own format: one line a terminal and session, `tty NR sid SID start
+//!   TICKS time MS` (with no terminal, `ppid PPID start TICKS sid SID time
+//!   MS`), MS the wall clock's. px115: with no terminal TICKS is the
+//!   parent's start time (proc_pid_stat(5)'s starttime), as
+//!   sudoers_timestamp(5) keeps a record made with no terminal by its
+//!   parent's pid and that parent's start time, so a later process given
+//!   the same pid matches no record (a record of the form before px115,
+//!   with no `start`, matches nothing). px119: with a terminal TICKS is the
+//!   session leader's start time, as sudoers_timestamp(5) keeps it in a
+//!   terminal's record, so a later session on the same terminal number (a
+//!   pseudo-terminal's comes back once its pair is closed) whose leader has
+//!   an earlier leader's pid matches no record; a record of the form before
+//!   px119 matches nothing. When the leader's start time cannot be read,
+//!   sudo asks and remembers nothing.
 //!   A reboot voids every record: Linux's /run is a new tmpfs at each boot,
 //!   and an installed PAX keeps /var on ext2, so the installed system's pid
 //!   1, /bin/login, empties `/var/run/sudo/ts` when it starts (the images
@@ -1920,7 +1927,7 @@ fn attempts_text(n: int) -> str {
 /// after Linux's words on standard error.
 fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) -> str {
     let key = ts_key()
-    if !a.reset && ts_valid(pol, me.uid, key) {
+    if !a.reset && key.len > 0 && ts_valid(pol, me.uid, key) {
         ts_write(pol, me, key)
         return ""
     }
@@ -1972,7 +1979,7 @@ fn authenticate(pol: Policy, a: Args, me: users.User, host: str, target: str) ->
         }
         if pw_matches(got, stored) {
             close_tty(tty)
-            if !a.reset {
+            if !a.reset && key.len > 0 {
                 ts_write(pol, me, key)
             }
             return ""
@@ -2010,14 +2017,21 @@ fn close_tty(fd: int) {
     }
 }
 
-/// This terminal and session (proc_pid_stat(5)'s tty_nr and session),
-/// or, with no terminal, the parent and the session: a timestamp
-/// record's key.
+/// This terminal and session (proc_pid_stat(5)'s tty_nr and session) and
+/// the session leader's start time, or, with no terminal, the parent and
+/// the session: a timestamp record's key. px119: "" when the leader's
+/// start time cannot be read (its /proc/SID/stat gone or unreadable),
+/// which matches no record and is never written: a key with `start -1`
+/// would match a later session whose leader is unreadable too.
 fn ts_key() -> str {
     let nr = secret_tty_nr()
     let sid = secret_session()
     if nr != 0 {
-        return "tty {nr} sid {sid}"
+        let t = if sid > 0 then start_of(sid) else -1
+        if t < 0 {
+            return ""
+        }
+        return "tty {nr} sid {sid} start {t}"
     }
     let pp = os_ppid() else 0
     "ppid {pp} start {start_of(pp)} sid {sid}"
