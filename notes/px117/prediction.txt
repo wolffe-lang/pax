@@ -1,0 +1,90 @@
+px117 — the pointer: the prediction, written before the first change (2026-11-11)
+
+Base: pax trunk 3fa24cf5. Written from the XTerm Control Sequences
+document as shipped in Ubuntu's xterm 412-1ubuntu1 package (its "Mouse
+Tracking" section: X10 compatibility, normal tracking, wheel mice, other
+buttons, button-event tracking, any-event tracking, extended coordinates
+1005/1006/1015/1016; and the DECSET/DECRST and RIS entries), ECMA-48 (CSI's
+syntax) and USB HID 1.11 / HUT 1.7 (button numbering), with the record
+kernel/mouse gives (notes/px109-the-mouse.md §5.2). No terminal emulator's,
+kernel's or C library's source. Every P-line is scored in the note.
+
+A. The machine the rows run on (QEMU, measured black-box over PAX's own stack)
+
+P1  The screen under QEMU is 1280 x 800 on both firmwares (Limine's and
+    OVMF's GOP mode): 160 columns by 50 rows at scale 1 (8 x 16 cells).
+P2  The scroll's way (px87's probe) chooses the framebuffer copy under KVM
+    (an emulator's framebuffer is host memory), so a scroll moves pixels,
+    and an overlay drawn on the framebuffer moves with them unless it is
+    taken off first.
+P3  A relative move larger than 127 in one input-send-event reaches the
+    guest as several reports whose sum is the move (px109's P7, not
+    measured there).
+P4  The tablet at 32768 * (2c + 1) / (2 * cols) on x (rows likewise) lands
+    in column c exactly: absolute 0..32767 scaled to the grid.
+P5  QMP events sent 20 ms apart to the USB keyboard and the tablet reach
+    the guest in the order sent; 2 ms apart, too (QEMU completes a
+    pending interrupt transfer when the event comes, both devices on one
+    controller).
+
+B. What each change will show
+
+P6  The modes yew asks for (CSI ? 1002 h, CSI ? 1006 h) on the console make
+    the console type SGR reports into its own input, through the line
+    discipline: a press `CSI < b ; x ; y M`, a release `CSI < b ; x ; y m`
+    with the button that was released, x and y 1-based cells; buttons
+    left 0, middle 1, right 2; a drag (motion into another cell with a
+    button held) 32 + the lowest held button; the wheel 64 (away from the
+    user) and 65 (towards); Shift 4, Alt 8, Ctrl 16 added from the
+    keyboard's state.
+P7  Nothing else is served: 1002 without 1006 (the X10 bytes), 1006 without
+    1002, 9, 1000, 1001, 1003, 1005, 1015 and 1016 type nothing; motion with
+    no button held types nothing; buttons 4 and 5 type nothing. Each is
+    named in the note as left out.
+P8  A mode belongs to the process whose write set it. It ends when that
+    process ends (an exit or a signal), on RIS (`ESC c`) and on a DECRST
+    of the selected mode; reports are typed only while that process is in
+    the console's foreground process group (withheld, not queued, while
+    it is not). A shell after a crashed program gets no reports.
+P9  Reports and keys reach the reader in the order the devices sent them:
+    the console takes what its mouse reader holds before every key (USB,
+    i8042, COM1) and on every tick, so a report is never behind a key that
+    came after it.
+P10 A program on a pty gets no report from the console: its DECSET goes to
+    the master's reader unchanged and changes nothing on the console; what
+    the master writes reaches the slave unchanged.
+P11 The pointer is drawn from the first motion of any pointer, whether or
+    not a program asked for reports: an arrow over the cell it is on (an
+    outline in black, a fill in white, 8 x 16 pixels at scale 1), the
+    cell's own pixels elsewhere. Moving it redraws two cells (the old one
+    plainly, the new one with the arrow) and writes nothing else; the cell
+    grid is never written. A framebuffer-copy scroll takes it off first and
+    puts it back after, so it is never copied.
+P12 The cost of a pointer move is about two cell draws: 1,000 to 5,000 TSC
+    cycles under KVM (128 64-bit stores and 32 font rows at scale 1), 10 to
+    50 times that under TCG. The check the draw adds for every other cell
+    (is this the pointer's cell?) costs nothing measurable per byte.
+P13 /dev/mouse0 still appears only once a pointer arrives (px109's R-3): the
+    console opens its reader when the first pointer attaches, not at its
+    start. Every record still reaches /dev/mouse0's readers.
+P14 No existing transcript or picture changes: a boot with no pointer
+    device draws no pointer and types no report (mpx3-screen, mpx5-screen,
+    mpx5-yew Y1-Y7 byte-identical and pixel-identical); the mouse session
+    (mpx6-usb) green with the console's reader beside the probe's.
+P15 kmain_console grows by 8 to 16 KiB (native .text).
+
+C. The rows (tests/mpx6-pointer, tools/pointer-session over
+   user/elf/pointerprobe.c; tests/mpx5-yew's Y8)
+
+P16 On trunk with the rows, every row red by name: no report is typed and
+    no pointer is drawn, and each row that expects nothing in one step
+    expects a report in another (its positive control), so none is green
+    vacuously. Y8 red: yew draws no menu.
+P17 With the change, every row green on native and release, BIOS and UEFI,
+    under KVM, and the session green under TCG on native BIOS.
+P18 Y8: yew under pelt on PAX's console, a right press and release on the
+    tablet over a line of the document: yew draws its document menu at the
+    pointer (its rows "Select All" and "Command Palette..." among the bytes
+    it writes after the click, none before), and the screen shows it.
+P19 The plant (the right button reported as the left) is red at the rows
+    that click the right button by name, and only those.
