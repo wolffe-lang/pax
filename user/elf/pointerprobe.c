@@ -8,9 +8,10 @@
  *
  * The console is put in raw mode. `PTRWIN <rows> <cols>` first, then for
  * each row `PTRREADY <i> <label>`, and for each step of a row `PTRSTEP <i>
- * <k>`: the host does the step's injections, then types `.` on the USB
- * keyboard. Whoever reads for the step reads the console until that `.`
- * (8 s at most) and prints `PTRIN <i> <k> <hex>` (`-` for no byte; `+<hex>`
+ * <k>`: the host does the step's injections, then types `.` (on the USB
+ * keyboard, and from keys-interleaved's second step on the PS/2 one).
+ * Whoever reads for the step reads the console until that `.` (8 s at
+ * most) and prints `PTRIN <i> <k> <hex>` (`-` for no byte; `+<hex>`
  * after it for bytes read past the `.` in the same read; ` TIMEOUT` when no
  * `.` came). `PTRROW <label>` ends a row, `PTRDONE` the run.
  *
@@ -41,8 +42,8 @@
  *                     the probe in the foreground (0); that child given the
  *                     foreground, reading (1); after it ended (2); the
  *                     probe's own (3)
- *   keys-interleaved  clicks, the wheel and keys 20 ms apart (0), 2 ms
- *                     apart (1)
+ *   keys-interleaved  clicks, the wheel and keys 20 ms apart on the USB
+ *                     keyboard (0); 3 ms apart on the PS/2 keyboard (1)
  *   pty               a child on a pty's slave sets the modes there; the
  *                     master's bytes printed; a click on the console (0);
  *                     a report the master writes, read on the slave; then
