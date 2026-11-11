@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A USB device plugged in after boot gets a record (px120, pax#348).** On a
+  machine with memory above 4 GiB, once the kernel had handed out more frames
+  than lie below 4 GiB, every device plugged in after boot was refused with
+  `xhci N: no device record memory`, again on every pass of the scan (about
+  four a second under QEMU): the xHCI driver took the frame allocator's next frame and refused it
+  when it lay above 4 GiB, and the allocator's next-fit hint stays above 4 GiB
+  once it has passed it. kernel/frames now hands out the lowest free frame
+  below a limit (`alloc_below`), which the driver asks for. A device that
+  cannot be taken (no device slot left, say) is said once and not tried again
+  until its port changes, so a refusal is one line a plug, never a stream; a
+  slot the controller gives past the ones enabled is given back.
+  `tests/mpx6-usb`'s new hotplug session plugs mice, a keyboard and two
+  composite HID devices (a mouse with keyboard and vendor interfaces, a keyboard
+  with consumer and vendor interfaces) into two controllers after the probe has
+  churned memory past 4 GiB, unplugs and plugs them 40 times past the 32
+  records a controller keeps, and holds two devices past the records to one line
+  each; `tests/mpx2-frames`' F9 holds `alloc_below`: `notes/px120-hotplug.md`.
+
 - **The pointer, and the mouse in a terminal program (px117).** The console
   draws a pointer, an arrow over the cell it is on, from the first motion of
   any USB mouse or tablet, and moves it by drawing two cells. A program that
