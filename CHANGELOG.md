@@ -7,6 +7,21 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The pointer, and the mouse in a terminal program (px117).** The console
+  draws a pointer, an arrow over the cell it is on, from the first motion of
+  any USB mouse or tablet, and moves it by drawing two cells. A program that
+  asks for button-event tracking in the SGR encoding (`CSI ? 1002 h` and
+  `CSI ? 1006 h`, what yew asks for) reads its clicks, drags, wheel and
+  modifiers as xterm's reports (`CSI < b ; x ; y M`, `m` for a release),
+  typed into the console's input in order with the keys. The modes belong to
+  the process that set them: they end when it ends, so a crashed program
+  leaves no reports flowing into the shell, and they are withheld while it is
+  not in the foreground group; RIS ends them too. A program on a pty is its
+  master's. Other modes and encodings type nothing. kernel/mouse now merges
+  motion of either sign without a checked wrap (a negative merge or
+  compaction panicked). `tests/mpx6-pointer` holds the rows, `tests/mpx5-yew`'s
+  Y9 a right click opening yew's menu: `notes/px117-the-pointer.md`.
+
 - **sudo's record made on a terminal names the session leader's start time
   (px119, pax#339).** The timestamp record for a terminal is now `tty NR sid
   SID start T`, T the session leader's start time (proc_pid_stat(5)'s field
