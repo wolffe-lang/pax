@@ -11,7 +11,7 @@
 : "${PX119_HOST:?PX119_HOST names the host file}"
 # shellcheck disable=SC1090
 . "$PX119_HOST"
-: "${L:?}" "${CPUS:?}" "${P:?}" "${PAX_BUILD:?the take's build directory}"
+: "${L:?}" "${CPUS:?}" "${P:?}" "${PAX_BUILD:?the build directory of the take}"
 R=$(realpath "$L")
 export TMPDIR=$L/tmp PAX_CACHE=$L/cache
 mkdir -p "$TMPDIR" "$PAX_CACHE" "$L/home" "$PAX_BUILD"
