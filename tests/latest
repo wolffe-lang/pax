@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""tests/latest: tools/latest-resolve and tools/mkpax-release --latest, offline (px97).
+
+A --latest build (tools/mkdistribution --latest[=OVERLAYS]) builds every org
+tree at its repository's trunk head, or at an overlay's sha, and stamps each
+resolved sha and whether it is merged into /etc/pax-release. These rows run
+the resolver against fixture repositories and a fixture release API (local
+files: PAX_LATEST_URL_MAP and PAX_LATEST_API), never the network.
+
+  L1  every tree resolves to its trunk head, `merged` (burrow, /bin/ssh,
+      sniff, /bin/sniff, and trash, /bin/trash, among them); the rewritten pins name
+      those revisions and drop the pinned source-archive digests; lobo's wolf
+      archive digest is the release its own toolchain names; lupin is the
+      newest release (the API's digest and the download's agree, the binary's
+      digest from the archive, the version line from the tag's mirror pin);
+      wolf is the pin's release; the checkout's own line is `unmerged`.
+  L2  an overlay with a green record at its exact sha is taken: `unmerged`
+      off trunk, `merged` when trunk already holds it; the record's sha256 is
+      named; the builders' pin fetches from the overlay's repository.
+  L3  an overlay is refused by name, and nothing is written, for: no record;
+      a record at another head; of another repository; of another tree; with
+      a red step; whose footer disagrees with its steps; a plant's record; a
+      sha the repository lacks; an unknown component; a component twice; a
+      malformed line.
+  L4  a newer wolf release than user/wolf.pin's is refused by name; a lupin
+      archive whose bytes are not the API's digest is refused by name.
+  L5  tools/mkpax-release --latest: each resolved tree's row is its sha and
+      state, the checkout's `pax` row, a `latest` row naming the resolution's
+      sha256; every pinned row (wolf, clef, games, packages) as without it;
+      reproducible; a resolution whose checkout line is not HEAD is refused.
+  L6  tools/mkdistribution --latest=OVERLAYS refuses an ineligible overlay
+      before anything is built.
+  L7  the chunked build refuses the same way: --latest-step with an
+      ineligible overlay resolves and builds nothing; --latest-from refuses a
+      directory with no resolution, and a resolution of another commit.
+  L8  tools/latest-resolve --at-commit (the assembly's check): at the
+      resolution's own commit the resolution as it is; at a later commit
+      whose difference no builder reads, the checkout line restamped
+      `pax HEAD unmerged ... after:<the resolution's commit>`; refused by name
+      when a builder input (a pin) moved, or the resolution's commit is not
+      in the history.
+  L9  every input tools/distribution-root reads (the programs, den, the
+      games, the base std, the dev compiler and its std, sudo, burrow, the
+      root set, sniff and trash) is one the --latest path builds or stages.
+  L10 an ungated overlay (RECORD `ungated`) only by PAX_LATEST_UNGATED=1,
+      stamped `unmerged`.
+  L11 lane heads merged into the checkout (PAX_LATEST_LANES: NAME REPOSITORY
+      SHA a line), each ungated, only by PAX_LATEST_UNGATED=1: --at-commit
+      adds `NAME SHA unmerged REPOSITORY lane` for each, refuses by name a
+      head not in the checkout's history or a name the resolution has, and
+      tools/mkpax-release stamps each as its own row.
+Exit 0 when every row held, 1 otherwise.
+"""
+from pathlib import Path
+import hashlib
+import io
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+RESOLVE = ROOT / 'tools/latest-resolve'
+TREES = {'aspen': 'aspen', 'boreutils': 'boreutils', 'burrow': 'burrow', 'den': 'den', 'lobo': 'lobo', 'lope': 'lope',
+         'pelt': 'pelt', 'scent': 'scent', 'sniff': 'sniff', 'std': 'wolf-std', 'trash': 'trash', 'yew': 'yew'}
+REV_KEY = {'aspen': 'ASPEN_REV', 'boreutils': 'BORE_REV', 'burrow': 'BURROW_REV', 'den': 'DEN_REV', 'lobo': 'LOBO_REV',
+           'lope': 'LOPE_REV', 'pelt': 'PELT_REV', 'scent': 'SCENT_REV', 'sniff': 'SNIFF_REV', 'std': 'STD_REV',
+           'trash': 'TRASH_REV', 'yew': 'YEW_REV'}
+failed = []
+
+
+def row(name, ok, detail=''):
+    print(('PASS ' if ok else 'FAIL ') + name + (': ' + detail if detail else ''))
+    if not ok:
+        failed.append(name)
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def git(cwd, *args):
+    env = dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+               GIT_COMMITTER_EMAIL='t@t', GIT_AUTHOR_DATE='1700000000 +0000', GIT_COMMITTER_DATE='1700000000 +0000')
+    return subprocess.run(['git', '-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', '-c', 'init.defaultBranch=trunk',
+                           *args], cwd=cwd, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def commit(repo, files, message):
+    for name, data in files.items():
+        p = repo / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data if isinstance(data, bytes) else data.encode())
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', message)
+    return git(repo, 'rev-parse', 'HEAD')
+
+
+def pin(stem):
+    values = {}
+    for line in (ROOT / 'user' / (stem + '.pin')).read_text().splitlines():
+        if line.strip() and not line.lstrip().startswith('#') and '=' in line:
+            key, value = line.split('=', 1)
+            values[key] = ' '.join(shlex.split(value, comments=True))
+    return values
+
+
+def record(path, repo, head, tree, steps=(('build', 0), ('rows', 0)), worst=None, count=None, plant=False):
+    lines = [f'RECORD repo={repo} head={head} tree={tree} host=fixture boot=b start=2026-11-04T00:00:00Z']
+    if plant:
+        lines += [f'PLANT base={head} branch=x-plant', 'PLANT-ROW D0']
+    for name, code in steps:
+        lines += [f'START {name}', 'output', f'END {name} exit={code} secs=1']
+    w = max(c for _, c in steps) if worst is None else worst
+    lines.append(f'RECORD-END worst={w} steps={len(steps) if count is None else count} end=2026-11-04T00:01:00Z')
+    Path(path).write_text('\n'.join(lines) + '\n')
+    return sha(Path(path).read_bytes())
+
+
+def resolve(env, out, overlays=None):
+    args = [sys.executable, '-I', str(RESOLVE)]
+    if overlays is not None:
+        args += ['--overlays', str(overlays)]
+    return subprocess.run(args + [str(out)], env=env, capture_output=True, text=True)
+
+
+def table(out):
+    rows = {}
+    for line in (out / 'resolution.txt').read_text().splitlines():
+        f = line.split()
+        rows[f[0]] = f
+    return rows
+
+
+def main():
+    scratch = Path(tempfile.mkdtemp(prefix='px97-latest-', dir=os.environ.get('TMPDIR')))
+    fx = scratch / 'repos'
+    api = scratch / 'api'
+    heads, side, older = {}, {}, {}
+    for comp, name in TREES.items():
+        r = fx / name
+        r.mkdir(parents=True)
+        git(r, 'init', '-q')
+        files = {'README': f'{name} one\n'}
+        if comp == 'lobo':
+            files['wolf-toolchain.toml'] = '[wolf]\nversion_line = "wolf 9.9.9 (wolfgang, pin abcdef0)"\n'
+        older[comp] = commit(r, files, 'one')
+        heads[comp] = commit(r, {'README': f'{name} two\n'}, 'two')
+        git(r, 'checkout', '-q', '-b', 'lane', older[comp])
+        side[comp] = commit(r, {'LANE': 'lane work\n'}, 'lane')
+        git(r, 'checkout', '-q', 'trunk')
+    wi = fx / 'wolf-interp'
+    wi.mkdir()
+    git(wi, 'init', '-q')
+    mirror = 'b16353e8ae616ff3a35bd27adc56b727c50df345'
+    tagged = commit(wi, {'vendor/upstream/PIN': mirror + '\n', 'rust-toolchain.toml': '[toolchain]\nchannel = "1.97.1"\n'}, 'release')
+    git(wi, 'tag', '-a', '-m', 'lupin 9.9.1', 'v9.9.1')
+    commit(wi, {'later': 'x\n'}, 'after the release')
+    paxfx = fx / 'pax'
+    paxfx.mkdir()
+    git(paxfx, 'init', '-q')
+    commit(paxfx, {'README': 'unrelated trunk\n'}, 'trunk')
+    # The fixture release API: lupin's newest release and its musl archive;
+    # wolf's newest release (the pin's) and the release lobo's toolchain names.
+    blob = b'\x7fELF fixture lupin\n'
+    tbuf = io.BytesIO()
+    with tarfile.open(fileobj=tbuf, mode='w:gz') as t:
+        info = tarfile.TarInfo('lupin-9.9.1-x86_64-unknown-linux-musl/lupin')
+        info.size, info.mode = len(blob), 0o755
+        t.addfile(info, io.BytesIO(blob))
+    arc = api / 'dl' / 'lupin-9.9.1-x86_64-unknown-linux-musl.tar.gz'
+    arc.parent.mkdir(parents=True)
+    arc.write_bytes(tbuf.getvalue())
+
+    def release(path, tag, assets):
+        p = api / path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({'tag_name': tag, 'assets': assets}))
+
+    def asset(name, digest, url=None):
+        return {'name': name, 'digest': 'sha256:' + digest, 'browser_download_url': url or ('file://' + str(api / 'dl' / name))}
+
+    release('repos/wolffe-lang/wolf-interp/releases/latest', 'v9.9.1',
+            [asset(arc.name, sha(arc.read_bytes()))])
+    wolf_tag = pin('wolf')['WOLF_SRC_TAG']
+    release('repos/wolffe-lang/wolf-lang/releases/latest', wolf_tag, [])
+    lobo_wolf = 'c' * 64
+    release('repos/wolffe-lang/wolf-lang/releases/tags/v9.9.9', 'v9.9.9',
+            [asset('wolf-9.9.9-x86_64-unknown-linux-gnu.tar.gz', lobo_wolf)])
+    env = dict(os.environ, PAX_LATEST_URL_MAP=f'https://github.com/wolffe-lang/={fx}/', PAX_LATEST_API='file://' + str(api))
+
+    # L1
+    out = scratch / 'l1'
+    p = resolve(env, out)
+    ok = p.returncode == 0
+    detail = p.stdout + p.stderr if not ok else ''
+    if ok:
+        t = table(out)
+        for comp in TREES:
+            f = t.get(comp)
+            if not f or f[1] != heads[comp] or f[2] != 'merged' or f[4] != 'trunk':
+                ok, detail = False, f'{comp}: {f}'
+                break
+            text = (out / 'pins' / (comp + '.pin')).read_text()
+            if f'{REV_KEY[comp]}={heads[comp]}' not in text.splitlines() or '_SOURCE_SHA256=' in text:
+                ok, detail = False, f'{comp}.pin: the revision is not rewritten, or a source digest is kept'
+                break
+        lobo = (out / 'pins' / 'lobo.pin').read_text().splitlines() if ok else []
+        if ok and f'LOBO_WOLF_SHA256={lobo_wolf}' not in lobo:
+            ok, detail = False, 'lobo.pin: LOBO_WOLF_SHA256 is not the release lobo\'s toolchain names'
+        if ok:
+            lp = (out / 'pins' / 'lupin.pin').read_text().splitlines()
+            want = [f'LUPIN_SRC_TAG=v9.9.1', f'LUPIN_SRC_REV={tagged}', f'LUPIN_MUSL_SHA256={sha(arc.read_bytes())}',
+                    f'LUPIN_MUSL_BIN_SHA256={sha(blob)}', f'LUPIN_SRC_VERSION_LINE="lupin 9.9.1 (wolf-interp, reference interpreter at pin {mirror[:7]})"']
+            missing = [w for w in want if w not in lp]
+            f = t.get('lupin')
+            if missing or not f or f[1] != tagged or f[4] != 'release:v9.9.1':
+                ok, detail = False, f'lupin: {missing} {f}'
+        if ok:
+            f, w = t.get('wolf'), pin('wolf')
+            if not f or f[1] != w['WOLF_SRC_REV'] or f[4] != 'pin:' + wolf_tag:
+                ok, detail = False, f'wolf: {f}'
+        if ok:
+            f = t.get('pax')
+            here = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+            if not f or f[1] != here or f[2] != 'unmerged' or f[4] != 'checkout' or (out / 'resolution.txt').read_text().split()[0] != 'pax':
+                ok, detail = False, f'pax: {f}'
+    row('L1 every tree at its trunk head, lupin the newest release, wolf the pin\'s, the checkout unmerged', ok, detail)
+    resolution = out / 'resolution.txt'
+
+    # L2
+    den = fx / 'den'
+    tree = git(den, 'rev-parse', side['den'] + '^{tree}')
+    good = scratch / 'den-green.log'
+    digest = record(good, 'den', side['den'], tree)
+    ov = scratch / 'overlays.txt'
+    ov.write_text(f'# a lane head\nden {den} {side["den"]} {good}\n')
+    out = scratch / 'l2'
+    p = resolve(env, out, ov)
+    f = table(out).get('den') if p.returncode == 0 else None
+    ok = bool(f) and f[1:] == [side['den'], 'unmerged', str(den), 'overlay:' + digest]
+    if ok:
+        dp = (out / 'pins' / 'den.pin').read_text().splitlines()
+        ok = f'DEN_REV={side["den"]}' in dp and f'DEN_REPO={den}' in dp
+    good2 = scratch / 'den-older.log'
+    d2 = record(good2, 'den', older['den'], git(den, 'rev-parse', older['den'] + '^{tree}'))
+    ov.write_text(f'den {den} {older["den"]} {good2}\n')
+    p2 = resolve(env, scratch / 'l2b', ov)
+    f2 = table(scratch / 'l2b').get('den') if p2.returncode == 0 else None
+    ok = ok and bool(f2) and f2[1:3] == [older['den'], 'merged'] and f2[4] == 'overlay:' + d2
+    row('L2 an overlay with a green record at its sha is taken (unmerged off trunk, merged in it)', ok,
+        '' if ok else (p.stdout + p.stderr + p2.stdout + p2.stderr)[-600:])
+
+    # L3
+    s = side['den']
+    cases = []
+    def bad(label, line, needle, make=None):
+        cases.append((label, line, needle, make))
+    bad('no record', f'den {den} {s} {scratch}/absent.log', 'no record')
+    bad('another head', f'den {den} {s} R', 'is at head', lambda r: record(r, 'den', older['den'], tree))
+    bad('another repository', f'den {den} {s} R', 'is a record of', lambda r: record(r, 'pelt', s, tree))
+    bad('another tree', f'den {den} {s} R', 'tree', lambda r: record(r, 'den', s, 'e' * 40))
+    bad('a red step', f'den {den} {s} R', 'not green', lambda r: record(r, 'den', s, tree, steps=(('build', 0), ('rows', 1))))
+    bad('a footer that disagrees', f'den {den} {s} R', 'disagrees', lambda r: record(r, 'den', s, tree, count=5))
+    bad('a plant\'s record', f'den {den} {s} R', 'plant', lambda r: record(r, 'den', s, tree, plant=True))
+    bad('a sha the repository lacks', f'den {den} {"d" * 40} R', 'cannot fetch', lambda r: record(r, 'den', 'd' * 40, tree))
+    bad('an unknown component', f'kernel {den} {s} {good}', 'not a tree')
+    bad('a component twice', f'den {den} {s} {good}\nden {den} {s} {good}', 'twice')
+    bad('a malformed line', f'den {den} {s}', 'malformed')
+    held = []
+    for k, (label, line, needle, make) in enumerate(cases):
+        r = scratch / f'bad-{k}.log'
+        if make:
+            make(r)
+        ov.write_text(line.replace(' R', ' ' + str(r)) + '\n')
+        out = scratch / f'l3-{k}'
+        p = resolve(env, out, ov)
+        said = p.stdout + p.stderr
+        if p.returncode != 2 or 'refused' not in said or needle not in said or (out / 'resolution.txt').exists():
+            held.append(f'{label} (exit {p.returncode}: {said.strip()[-200:]})')
+    row('L3 an ineligible overlay is refused by name, nothing written', not held, '; '.join(held))
+
+    # L4
+    release('repos/wolffe-lang/wolf-lang/releases/latest', 'v99.0.0', [])
+    p = resolve(env, scratch / 'l4a')
+    ok = p.returncode == 2 and 'wolf' in p.stderr and 'v99.0.0' in p.stderr and not (scratch / 'l4a' / 'resolution.txt').exists()
+    release('repos/wolffe-lang/wolf-lang/releases/latest', wolf_tag, [])
+    release('repos/wolffe-lang/wolf-interp/releases/latest', 'v9.9.1', [asset(arc.name, 'f' * 64)])
+    p2 = resolve(env, scratch / 'l4b')
+    ok = ok and p2.returncode == 2 and 'lupin' in p2.stderr and 'digest' in p2.stderr
+    release('repos/wolffe-lang/wolf-interp/releases/latest', 'v9.9.1', [asset(arc.name, sha(arc.read_bytes()))])
+    row('L4 a newer wolf than the pin, and a lupin archive not the API\'s digest, refused by name', ok,
+        '' if ok else (p.stderr + p2.stderr)[-400:])
+
+    # L5
+    kernel = scratch / 'kernel.elf'
+    kernel.write_bytes(b'fixture kernel\n')
+    head = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    menv = dict(os.environ, SOURCE_DATE_EPOCH='1234567890')
+    plain, lat = scratch / 'plain' / 'pax-release', scratch / 'lat' / 'pax-release'
+    subprocess.run([str(ROOT / 'tools/mkpax-release'), str(kernel), str(plain)], env=menv, check=True)
+    p = subprocess.run([str(ROOT / 'tools/mkpax-release'), '--latest', str(resolution), str(kernel), str(lat)],
+                       env=menv, capture_output=True, text=True)
+    ok, detail = p.returncode == 0, p.stderr[-300:]
+    if ok:
+        pr = {l.split()[0]: l.split()[1:] for l in plain.read_text().splitlines()}
+        lr = {l.split()[0]: l.split()[1:] for l in lat.read_text().splitlines()}
+        t = {l.split()[0]: l.split() for l in resolution.read_text().splitlines()}
+        for comp in list(TREES) + ['lupin']:
+            if lr.get(comp) != [t[comp][1], t[comp][2]]:
+                ok, detail = False, f'{comp}: {lr.get(comp)}'
+        if ok and lr.get('pax') != [head, 'unmerged']:
+            ok, detail = False, f'pax: {lr.get("pax")}'
+        if ok and lr.get('latest') != ['resolved', sha(resolution.read_bytes())]:
+            ok, detail = False, f'latest: {lr.get("latest")}'
+        kept = [n for n in pr if n not in TREES and n != 'lupin']
+        if ok and any(lr.get(n) != pr[n] for n in kept):
+            ok, detail = False, 'a pinned row moved: ' + ' '.join(n for n in kept if lr.get(n) != pr[n])
+        if ok and set(lr) != set(pr) | {'pax', 'latest'}:
+            ok, detail = False, f'rows: {sorted(set(lr) ^ set(pr))}'
+        first = lat.read_bytes()
+        subprocess.run([str(ROOT / 'tools/mkpax-release'), '--latest', str(resolution), str(kernel), str(lat)], env=menv, check=True)
+        if ok and lat.read_bytes() != first:
+            ok, detail = False, 'not reproducible'
+        moved = scratch / 'moved.txt'
+        moved.write_text(re.sub(r'^pax \S+', 'pax ' + '0' * 40, resolution.read_text(), flags=re.M))
+        p3 = subprocess.run([str(ROOT / 'tools/mkpax-release'), '--latest', str(moved), str(kernel), str(scratch / 'm' / 'pax-release')],
+                            env=menv, capture_output=True, text=True)
+        if ok and (p3.returncode == 0 or 'HEAD' not in p3.stderr):
+            ok, detail = False, 'a resolution of another checkout was stamped'
+    row('L5 mkpax-release --latest stamps every resolved sha and state, the pinned rows unchanged', ok, detail)
+
+    # L6
+    ov.write_text(f'den {den} {s} {scratch}/absent.log\n')
+    (scratch / 'no-base.cpio').write_bytes(b'')
+    out = scratch / 'l6'
+    p = subprocess.run([str(ROOT / 'tools/mkdistribution'), f'--latest={ov}', str(scratch / 'no-base.cpio'), str(out)],
+                       env=env, capture_output=True, text=True)
+    said = p.stdout + p.stderr
+    ok = p.returncode != 0 and 'refused' in said and 'no record' in said and not (out / 'kernel').exists() and not (out / 'inputs').exists()
+    row('L6 mkdistribution --latest refuses an ineligible overlay before it builds', ok, '' if ok else said[-400:])
+
+    # L7: the chunked build's steps refuse as the one-shot build does.
+    held = []
+    step = scratch / 'l7-step'
+    p = subprocess.run([str(ROOT / 'tools/mkdistribution'), f'--latest-step={ov}', str(step), 'pelt'], env=env, capture_output=True, text=True)
+    said = p.stdout + p.stderr
+    if p.returncode == 0 or 'refused' not in said or (step / 'latest' / 'resolution.txt').exists() or (step / 'inputs').exists():
+        held.append('a --latest-step with an ineligible overlay: ' + said[-200:])
+    empty = scratch / 'l7-empty'
+    empty.mkdir()
+    p = subprocess.run([str(ROOT / 'tools/mkdistribution'), '--latest-from', str(empty), str(scratch / 'no-base.cpio'), str(scratch / 'l7-out')],
+                       env=env, capture_output=True, text=True)
+    if p.returncode == 0 or 'no --latest resolution' not in p.stderr or (scratch / 'l7-out').exists():
+        held.append('--latest-from a directory with no resolution: ' + p.stderr[-200:])
+    other = scratch / 'l7-other'
+    (other / 'latest').mkdir(parents=True)
+    (other / 'latest' / 'resolution.txt').write_text(re.sub(r'^pax \S+', 'pax ' + '0' * 40, resolution.read_text(), flags=re.M))
+    p = subprocess.run([str(ROOT / 'tools/mkdistribution'), '--latest-from', str(other), str(scratch / 'no-base.cpio'), str(scratch / 'l7-out')],
+                       env=env, capture_output=True, text=True)
+    if p.returncode == 0 or 'another commit' not in p.stderr or (scratch / 'l7-out').exists():
+        held.append('--latest-from a resolution of another commit: ' + p.stderr[-200:])
+    row('L7 the chunked build (--latest-step, --latest-from) refuses as the one-shot build does', not held, '; '.join(held))
+
+    # L8: the assembly at a later commit (a newer trunk merged in), from a clone of this checkout.
+    held = []
+    clone = scratch / 'clone'
+    git(scratch, 'clone', '-q', '--no-hardlinks', str(ROOT), str(clone))
+    git(clone, 'checkout', '-q', '--detach', head)
+    at = [sys.executable, '-I', str(clone / 'tools/latest-resolve'), '--at-commit', str(resolution)]
+    p = subprocess.run(at + [str(scratch / 'same.txt')], capture_output=True, text=True)
+    if p.returncode != 0 or (scratch / 'same.txt').read_text() != resolution.read_text():
+        held.append('at the resolution\'s own commit: ' + p.stderr[-200:])
+    prose = commit(clone, {'README.md': (clone / 'README.md').read_text() + '\nA later line.\n'}, 'a later prose commit')
+    p = subprocess.run(at + [str(scratch / 'after.txt')], capture_output=True, text=True)
+    want = re.sub(r'^pax (\S+) (\S+) (\S+) checkout$', lambda m: f'pax {prose} unmerged {m[3]} after:{m[1]}',
+                  resolution.read_text(), flags=re.M)
+    if p.returncode != 0 or (scratch / 'after.txt').read_text() != want:
+        held.append('after a prose commit: ' + p.stderr[-200:])
+    commit(clone, {'user/den.pin': (clone / 'user/den.pin').read_text() + '# a later comment\n'}, 'a pin moves')
+    p = subprocess.run(at + [str(scratch / 'pin.txt')], capture_output=True, text=True)
+    if p.returncode != 2 or 'what the builders read differs' not in p.stderr or 'user/den.pin' not in p.stderr or (scratch / 'pin.txt').exists():
+        held.append('after a pin moved: ' + (p.stdout + p.stderr)[-200:])
+    other = scratch / 'other.txt'
+    other.write_text(re.sub(r'^pax \S+', 'pax ' + '0' * 40, resolution.read_text(), flags=re.M))
+    p = subprocess.run(at[:-1] + [str(other), str(scratch / 'o.txt')], capture_output=True, text=True)
+    if p.returncode != 2 or 'another commit' not in p.stderr or (scratch / 'o.txt').exists():
+        held.append('a resolution outside the history: ' + p.stderr[-200:])
+    row('L8 the assembly at a later commit only when no builder input moved, its checkout line restamped', not held, '; '.join(held))
+
+    # L9: every input tools/distribution-root reads, the --latest path builds or stages.
+    dr = (ROOT / 'tools/distribution-root').read_text()
+    reads = set(re.findall(r"inputs ?/ ?'([a-z-]+)[/']", dr))
+    for names in re.findall(r"for project in \(([^)]*)\)", dr):
+        reads |= set(re.findall(r"'([a-z-]+)'", names))
+    m = re.search(r"^INPUTS_ALL='([^']*)'", (ROOT / 'tools/mkdistribution').read_text(), re.M)
+    missing = sorted(reads - set(m[1].split() if m else []))
+    row('L9 every input tools/distribution-root reads, the --latest path builds', bool(reads) and not missing,
+        'not built by --latest: ' + ' '.join(missing))
+
+    # L10: an ungated overlay (RECORD `ungated`, a head whose gate has not cleared) only by PAX_LATEST_UNGATED=1:
+    # refused by name without it, taken with it as source `ungated`, and mkpax-release stamps it as resolved.
+    ov.write_text(f'den {den} {side["den"]} ungated\n')
+    held = []
+    p = resolve(env, scratch / 'l10a', ov)
+    if p.returncode != 2 or 'PAX_LATEST_UNGATED' not in p.stderr or (scratch / 'l10a').exists():
+        held.append('taken without PAX_LATEST_UNGATED: ' + (p.stdout + p.stderr)[-200:])
+    p = resolve(dict(env, PAX_LATEST_UNGATED='1'), scratch / 'l10b', ov)
+    f = table(scratch / 'l10b').get('den') if p.returncode == 0 else None
+    if not f or f[1:] != [side['den'], 'unmerged', str(den), 'ungated']:
+        held.append(f'with PAX_LATEST_UNGATED=1: {f} ' + (p.stdout + p.stderr)[-200:])
+    else:
+        lat10 = scratch / 'l10b-release' / 'pax-release'
+        p = subprocess.run([str(ROOT / 'tools/mkpax-release'), '--latest', str(scratch / 'l10b' / 'resolution.txt'),
+                            str(kernel), str(lat10)], env=menv, capture_output=True, text=True)
+        rows10 = {l.split()[0]: l.split()[1:] for l in lat10.read_text().splitlines()} if p.returncode == 0 else {}
+        if rows10.get('den') != [side['den'], 'unmerged']:
+            held.append(f'mkpax-release: {rows10.get("den")} ' + p.stderr[-200:])
+    row('L10 an ungated overlay only by PAX_LATEST_UNGATED=1, stamped unmerged', not held, '; '.join(held))
+
+    # L11: lane heads merged into the checkout (ungated: no record at the merged sha), named in PAX_LATEST_LANES,
+    # stamped by --at-commit as `NAME SHA unmerged REPOSITORY lane` and by mkpax-release as rows of their own.
+    held = []
+    c11 = scratch / 'clone11'
+    git(scratch, 'clone', '-q', '--no-hardlinks', str(ROOT), str(c11))
+    git(c11, 'checkout', '-q', '--detach', head)
+    git(c11, 'checkout', '-q', '-b', 'lane11')
+    lane = commit(c11, {'notes/lane11.txt': 'a lane head\n'}, 'a lane head')
+    git(c11, 'checkout', '-q', '--detach', head)
+    git(c11, 'merge', '-q', '--no-ff', '-m', 'merge the lane head', lane)
+    merged11 = git(c11, 'rev-parse', 'HEAD')
+    lanes = scratch / 'lanes.txt'
+    paxurl = 'https://github.com/wolffe-lang/pax'
+    lanes.write_text(f'# lane heads\npx999 {paxurl} {lane}\n')
+    at11 = [sys.executable, '-I', str(c11 / 'tools/latest-resolve'), '--at-commit', str(resolution)]
+    e11 = dict(env, PAX_LATEST_LANES=str(lanes))
+    p = subprocess.run(at11 + [str(scratch / 'l11a.txt')], env=e11, capture_output=True, text=True)
+    if p.returncode != 2 or 'PAX_LATEST_UNGATED' not in p.stderr or (scratch / 'l11a.txt').exists():
+        held.append('lane heads taken without PAX_LATEST_UNGATED: ' + (p.stdout + p.stderr)[-200:])
+    p = subprocess.run(at11 + [str(scratch / 'l11b.txt')], env=dict(e11, PAX_LATEST_UNGATED='1'), capture_output=True, text=True)
+    want = re.sub(r'^pax (\S+) (\S+) (\S+) checkout$', lambda m: f'pax {merged11} unmerged {m[3]} after:{m[1]}',
+                  resolution.read_text(), flags=re.M) + f'px999 {lane} unmerged {paxurl} lane\n'
+    got = (scratch / 'l11b.txt').read_text() if (scratch / 'l11b.txt').exists() else None
+    if p.returncode != 0 or got != want:
+        held.append(f'with PAX_LATEST_UNGATED=1: {got!r} ' + (p.stdout + p.stderr)[-200:])
+    else:
+        lat11 = scratch / 'l11-release' / 'pax-release'
+        p = subprocess.run([str(c11 / 'tools/mkpax-release'), '--latest', str(scratch / 'l11b.txt'), str(kernel), str(lat11)],
+                           env=menv, capture_output=True, text=True)
+        rows11 = {l.split()[0]: l.split()[1:] for l in lat11.read_text().splitlines()} if p.returncode == 0 else {}
+        if rows11.get('px999') != [lane, 'unmerged'] or rows11.get('pax') != [merged11, 'unmerged']:
+            held.append(f'mkpax-release: {rows11.get("px999")} {rows11.get("pax")} ' + p.stderr[-200:])
+    for label, text, needle in (('a head not in the history', f'px998 {paxurl} {"1" * 40}\n', 'not in the history'),
+                                ('a name the resolution has', f'den {paxurl} {lane}\n', 'already'),
+                                ('a malformed line', f'px997 {lane}\n', 'malformed')):
+        lanes.write_text(text)
+        out11 = scratch / ('l11-' + label.split()[1] + '.txt')
+        p = subprocess.run(at11 + [str(out11)], env=dict(e11, PAX_LATEST_UNGATED='1'), capture_output=True, text=True)
+        if p.returncode != 2 or needle not in p.stderr or out11.exists():
+            held.append(f'{label}: ' + (p.stdout + p.stderr)[-200:])
+    row('L11 lane heads merged into the checkout, only by PAX_LATEST_UNGATED=1, stamped unmerged by name', not held, '; '.join(held))
+
+    subprocess.run(['rm', '-rf', str(scratch)], check=False)
+    print('tests/latest: ' + ('PASS' if not failed else 'FAIL (%d)' % len(failed)))
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
