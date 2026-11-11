@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""tests/mpx6-pointer.d/judge-selftest — tools/pointer-session's judge can
+say no, by name (px117). No QEMU: transcripts shaped as
+user/elf/pointerprobe.c prints them, screens drawn here as PPM files.
+
+  J1  a transcript and screens every row passes on: every row PASS.
+  J2  trunk's answers (no report typed, no pointer drawn, no books line):
+      every row FAIL by name (each has a step that expects a report or a
+      picture of the pointer).
+  J3  the right button reported as the left: sgr-buttons, drag and
+      keys-interleaved FAIL, every other row PASS.
+  J4  a report typed behind the key that came after it: keys-interleaved
+      FAIL alone.
+  J5  the arrow copied up by a scroll (two arrows): pointer-scroll FAIL alone.
+  J6  the arrow left on its first cell when it moved: pointer-drawn FAIL alone.
+  J7  a dead owner's mode kept (reports after the child's exit and kill, the
+      books' ended 1): owner-exits and books FAIL alone.
+  J8  a background owner's reports typed (withheld 0): owner-background and
+      books FAIL alone.
+  J9  the pty child's modes set on the console (its click typed there):
+      pty FAIL alone.
+Exit 0 when every case held; the first case that did not is named.
+"""
+from contextlib import redirect_stdout
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import io
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+root = Path(__file__).resolve().parents[2]
+loader = SourceFileLoader('pointer_session', str(root / 'tools/pointer-session'))
+ps = module_from_spec(spec_from_loader('pointer_session', loader))
+loader.exec_module(ps)
+
+W, H, ROWS_, COLS = 400, 352, 22, 50
+
+
+def screen(arrows=(), text=True):
+    """A PPM: a few grey 'glyph' pixels in every cell, the arrow over each of
+    `arrows`."""
+    px = bytearray(W * H * 3)
+    if text:
+        for r in range(ROWS_):
+            for c in range(COLS):
+                for dy in (5, 9):
+                    i = ((r * 16 + dy) * W + c * 8 + 3) * 3
+                    px[i:i + 3] = b'\xaa\xaa\xaa'
+    for c, r in arrows:
+        for dy in range(16):
+            for dx in range(8):
+                bit = 0x80 >> dx
+                v = b'\x00\x00\x00' if ps.OUTLINE[dy] & bit else b'\xff\xff\xff' if ps.FILL[dy] & bit else None
+                if v:
+                    i = ((r * 16 + dy) * W + c * 8 + dx) * 3
+                    px[i:i + 3] = v
+    return b'P6\n%d %d\n255\n' % (W, H) + bytes(px)
+
+
+def transcript(override=None, books=True, master=ps.ON, slave=None):
+    e = ps.expected(COLS, ROWS_)
+    if override:
+        e.update(override)
+    lines = [f'PTRWIN {ROWS_} {COLS}']
+    for i, label in enumerate(ps.ROWS):
+        lines.append(f'PTRREADY {i} {label}')
+        if label == 'pty':
+            lines.append('PTRPTY master ' + master.hex())
+            lines.append('PTRPTY slave ' + (slave if slave is not None else ps.sgr(0, (2, 3))).hex())
+        for k in sorted(k for (lb, k) in e if lb == label):
+            lines.append(f'PTRSTEP {i} {k}')
+            v = e[(label, k)]
+            lines.append(f'PTRIN {i} {k} ' + (v.hex() if v else '-'))
+        lines.append(f'PTRROW {label}')
+    lines.append('PTRDONE')
+    if books:
+        b = books if isinstance(books, dict) else {}
+        typed = b.get('typed', ps.reports_in(e))
+        lines.append(f'console: pointer 40 moves, 2100 cycles a move (least 1800), reports {typed} typed, '
+                     f'{b.get("withheld", ps.WITHHELD)} withheld, 0 dropped, modes ended {b.get("ended", ps.ENDED)}')
+    return '\r\n'.join(lines) + '\r\n'
+
+
+def judge(work, text, shots):
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    (work / 'serial.log').write_bytes(text.encode())
+    for name, data in shots.items():
+        (work / f'{name}.ppm').write_bytes(data)
+    pictures = {p.stem: ps.Picture(p) for p in work.glob('*.ppm')}
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        ps.Judge().judge(text, pictures)
+    out = buf.getvalue()
+    red = {l.split()[1] for l in out.splitlines() if l.startswith('FAIL ')}
+    green = {l.split()[1] for l in out.splitlines() if l.startswith('PASS ')}
+    return red, green, out
+
+
+GOOD = {'drawn-a': screen(), 'drawn-b': screen([ps.DRAWN1]), 'drawn-c': screen([ps.DRAWN2]),
+        'scroll-d': screen([ps.SCROLLED])}
+ALL = set(ps.ROWS) | {'books'}
+
+
+def main():
+    base = Path(tempfile.mkdtemp(prefix='pxp-judge-', dir=os.environ.get('TMPDIR')))
+    e = ps.expected(COLS, ROWS_)
+    cases = []
+    cases.append(('J1', transcript(), GOOD, set()))
+    none = {k: b'' for k in e}
+    cases.append(('J2', transcript(none, books=False, master=ps.ON), {n: screen() for n in GOOD}, ALL))
+
+    def swap_right(v):
+        return v.replace(b'<2;', b'<0;').replace(b'<34;', b'<32;')
+    plant = {k: swap_right(v) for k, v in e.items()}
+    cases.append(('J3', transcript(plant), GOOD, {'sgr-buttons', 'drag', 'keys-interleaved'}))
+    late = dict(e)
+    late[('keys-interleaved', 0)] = e[('keys-interleaved', 0)].replace(b'a\x1b[<0;3;3m', b'\x1b[<0;3;3ma')
+    cases.append(('J4', transcript(late), GOOD, {'keys-interleaved'}))
+    cases.append(('J5', transcript(), dict(GOOD, **{'scroll-d': screen([ps.SCROLLED, (20, 9)])}), {'pointer-scroll'}))
+    cases.append(('J6', transcript(), dict(GOOD, **{'drawn-c': screen([ps.DRAWN1, ps.DRAWN2])}), {'pointer-drawn'}))
+    kept = dict(e)
+    kept[('owner-exits', 1)] = kept[('owner-exits', 2)] = ps.click_bytes(0, ps.HERE)
+    cases.append(('J7', transcript(kept, books={'typed': ps.reports_in(kept), 'ended': 1}), GOOD, {'owner-exits', 'books'}))
+    leak = dict(e)
+    leak[('owner-background', 0)] = ps.click_bytes(0, ps.HERE)
+    cases.append(('J8', transcript(leak, books={'typed': ps.reports_in(leak), 'withheld': 0}), GOOD,
+                  {'owner-background', 'books'}))
+    pty = dict(e)
+    pty[('pty', 0)] = ps.click_bytes(0, (4, 4))
+    cases.append(('J9', transcript(pty, books={'typed': ps.reports_in(e)}), GOOD, {'pty'}))
+    ok = True
+    for name, text, shots, want_red in cases:
+        red, green, out = judge(base / name, text, shots)
+        good = red == want_red and green == ALL - want_red
+        print(f'{"PASS" if good else "FAIL"} judge {name}: red {sorted(red) or "none"}'
+              + ('' if good else f' (want {sorted(want_red) or "none"})'), flush=True)
+        if not good:
+            print(out)
+            ok = False
+    shutil.rmtree(base, ignore_errors=True)
+    return 0 if ok else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
