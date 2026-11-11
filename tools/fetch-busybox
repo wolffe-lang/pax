@@ -3,8 +3,10 @@
 #
 #   tools/fetch-busybox OUTDIR
 #
-# user/busybox.pin's .deb from Ubuntu's archive, refused on a sha256
-# mismatch (cached by digest); `usr/bin/busybox` taken out of its data
+# user/busybox.pin's .deb from Ubuntu's archive by digest, through
+# tools/fetch-pinned (px118: its store, read again on every take, or the
+# archive's pool, then Launchpad's librarian; refused on a sha256
+# mismatch); `usr/bin/busybox` taken out of its data
 # archive (ar, then tar: the data member is zstd) in a directory of its
 # own, refused unless its sha256 is the pin's and it is ET_EXEC with no
 # PT_INTERP; copied to OUTDIR/busybox, and kept in the cache by its own
@@ -26,13 +28,10 @@ check() { # file -> dies unless it is the pin's binary
     ! readelf -lW "$1" | grep -q INTERP || die "busybox has a PT_INTERP (not static)"
 }
 if [ ! -f "$bin" ] || [ "$(sha256_of "$bin")" != "$BUSYBOX_SHA256" ]; then
-    need curl ar tar zstd
-    deb=$PAX_CACHE/busybox-$BUSYBOX_DEB_SHA256.deb
-    if [ ! -f "$deb" ] || [ "$(sha256_of "$deb")" != "$BUSYBOX_DEB_SHA256" ]; then
-        curl -sSfL -o "$deb.part" "$BUSYBOX_URL" || die "cannot fetch $BUSYBOX_URL"
-        mv "$deb.part" "$deb"
-    fi
-    [ "$(sha256_of "$deb")" = "$BUSYBOX_DEB_SHA256" ] || die "$BUSYBOX_URL: sha256 $(sha256_of "$deb"), the pin says $BUSYBOX_DEB_SHA256"
+    need ar tar zstd
+    rc=0
+    deb=$("$PAX_ROOT/tools/fetch-pinned" busybox "${BUSYBOX_URL##*/}") || rc=$?
+    [ "$rc" = 0 ] || die "${BUSYBOX_URL##*/}: not had by its digest (tools/fetch-pinned exit $rc, its reason above)"
     w=$(mktemp -d "${TMPDIR:-/tmp}/pax-busybox.XXXXXX")
     trap 'rm -rf "$w"' EXIT
     ( cd "$w" && ar x "$deb" ) || die "ar: $deb"
