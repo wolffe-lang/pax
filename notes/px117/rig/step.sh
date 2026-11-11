@@ -8,7 +8,8 @@
 #   yew-build ARGS tests/mpx5-yew --only build ARGS: yew, pelt and the session image, in a container
 #   pointer ARGS   tests/mpx6-pointer --images the build ARGS, in a container with KVM
 #   yew ARGS       tests/mpx5-yew --only pointer --images the yew build ARGS (Y9), with KVM
-#   usb ARGS       tests/mpx6-usb ARGS (its own build: the keyboards and the mouse session beside the
+#   usb ARGS       tests/mpx6-usb.d/build-once.py (the CI job's first step), then tests/mpx6-usb ARGS
+#                  (its own build: the invariants, the keyboards and the mouse session beside the
 #                  console's new reader), with KVM
 #   screen ARGS    tests/mpx3-screen ARGS (its own build: the screen pixel for pixel, the draw's new
 #                  check and RIS's new branch under every class), with KVM
@@ -36,7 +37,7 @@ case $what in
     yew-build) lift ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx5-yew --only build "$@"; exit $?' x "$@" ;;
     pointer) lift ctr 1 localhost/px75-ubuntu:2 bash -c 'tests/mpx6-pointer --images "$PAX_BUILD/mpx6-pointer" "$@"; exit $?' x "$@" ;;
     yew) lift ctr 1 localhost/px75-ubuntu:2 bash -c 'tests/mpx5-yew --only pointer --images "$PAX_BUILD/mpx5-yew" "$@"; exit $?' x "$@" ;;
-    usb) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-usb "$@"; exit $?' x "$@" ;;
+    usb) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'python3 -I tests/mpx6-usb.d/build-once.py && tests/mpx6-usb "$@"; exit $?' x "$@" ;;
     screen) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx3-screen "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
