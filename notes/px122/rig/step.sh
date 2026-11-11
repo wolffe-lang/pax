@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# notes/px122/rig/step.sh WHAT [ARGS…] — one step of px122's timing takes, run by the recorder
+# (tools/gauntlet-record.sh --steps, a manifest beside this file) from a clean checkout of the commit
+# under test, under take.sh's locks. lib.sh (GAUNTLET_RIG_DIR's) gives the host's facts and `ctr`.
+# Every boot is TCG (no /dev/kvm in the container), as on CI's runners.
+#   preflight   the host has what the steps use: the engine, the image
+#   suite ARGS  tests/mpx3-shell ARGS: CI's step "the shell runs programs" (the build, the Linux
+#               side, every leg's boots)
+#   irq ARGS    tests/mpx6-firmware.d/typing-irq mpx3-shell ARGS: CI's all-tier step "the same
+#               typing rows with the xHCI on MSI only, then INTx only"
+#   times       stamped.py's summary of the two steps' rows and the kernel's own boot lines
+# A step's output goes through stamped.py: each line `+SECONDS ` (since the step began) first, a
+# `FAIL ` line lifted to column 0 unstamped (the recorder keeps a `FAIL ` line there); a copy goes
+# to $PAX_BUILD/WHAT.stamped for the times step. The step's exit is the suite's.
+set -uo pipefail
+trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+# shellcheck disable=SC1091
+. "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
+cd "$CO" || exit 2
+stamp() { local w=$1; shift; "$@" 2>&1 | python3 -I "$GAUNTLET_RIG_DIR/stamped.py" stamp "$PAX_BUILD/$w.stamped"; return "${PIPESTATUS[0]}"; }
+wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && '; }
+what=${1:?}; shift
+case $what in
+    preflight)
+        [ -x "$P" ] || echo "REFUSED no-engine $P"
+        "$P" image inspect localhost/px75-ubuntu:2 > /dev/null 2>&1 || echo "REFUSED no-image localhost/px75-ubuntu:2"
+        echo "preflight: engine and image looked at; the take's CPUs $CPUS; every boot TCG"
+        exit 0 ;;
+    suite) CAPS=SYS_ADMIN stamp suite ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx3-shell "$@"; exit $?' x "$@" ;;
+    irq) stamp irq ctr 0 localhost/px75-ubuntu:2 bash -c 'tests/mpx6-firmware.d/typing-irq mpx3-shell "$@"; exit $?' x "$@" ;;
+    times) python3 -I "$GAUNTLET_RIG_DIR/stamped.py" times "$PAX_BUILD" ;;
+    *) echo "step.sh: no step $what"; exit 2 ;;
+esac
