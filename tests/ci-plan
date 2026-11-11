@@ -27,7 +27,8 @@
       triggers; the dispatch's tier input is all, full or pr, all by
       default; the tier job's last step, on a red nightly only and after
       the verdict, runs tools/nightly-red, and only that job may write
-      issues.
+      issues; every job's packages come through .github/actions/apt
+      after its checkout, none by an apt-get install of its own (px118).
   P6  the verdict (`tools/ci-plan --verdict`, the `tier` job): green for
       an all run whose `legs` output is absent (GitHub drops an empty
       output; run 38344726280 was red on exactly that), a full run on the
@@ -603,6 +604,11 @@ expect("P2 installer fixtures reach their gate only",
        plan(["tests/mpx6-install", "tests/mpx6-install.d/gap.py"], **pr), "pr", ["mpx6-install", "mpx6-ahci", "mpx6-kasumi"])
 
 expect("P2 CI itself: every suite, the pr leg", plan([".github/workflows/ci.yml"], **pr), "pr", SUITES)
+# px118: the action every job installs through, its two tools and their selftests.
+expect("P2 CI's fetches from Ubuntu's archive (px118): every suite, the pr leg",
+       plan([".github/actions/apt/action.yml", "tools/ci-apt", "tests/ci-apt-selftest",
+             "tools/fetch-pinned", "tests/fetch-pinned-selftest"], **pr), "pr", SUITES)
+expect("P2 beep's pin reaches the speaker (px118)", plan(["user/beep.pin"], **pr), "pr", has=["mpx3-speaker"])
 
 # The kernel's core (px40, ruling #76): every suite, on the pr leg.
 CORE = ["serial", "log", "panic", "boot_info", "frames", "paging", "gdt", "idt", "interrupts",
@@ -705,6 +711,24 @@ say(sorted(tn) == sorted(["plan"] + SUITES) and "    if: ${{ !cancelled() }}" in
     "P4 the tier job runs unless cancelled and needs every job (%d of %d)" % (len(tn), len(SUITES) + 1))
 say("        run: tools/ci-plan --verdict\n" in blocks["tier"] and "actions/checkout" in blocks["tier"],
     "P4 the tier job's check is tools/ci-plan --verdict")
+# px118: every job's packages come through .github/actions/apt, after its
+# checkout (a local action is read from the checkout), with a package list;
+# none by an apt-get install of its own. The action keeps one snapshot path
+# under one key for restore and save, as it does for the pinned files.
+apt_jobs = [j for j in JOBS if "uses: ./.github/actions/apt" in blocks[j]]
+apt_bad = [j for j in apt_jobs
+           if not re.search(r"^      - name: .*\n        uses: \./\.github/actions/apt\n        with:\n          packages: [a-z0-9+. -]+\n", blocks[j], re.M)
+           or blocks[j].find("actions/checkout") < 0
+           or blocks[j].find("actions/checkout") > blocks[j].find("uses: ./.github/actions/apt")]
+say("apt-get install" not in wf and len(apt_jobs) >= 70 and not apt_bad,
+    "P4 every job's packages come through .github/actions/apt after its checkout (%d jobs%s), none by an apt-get install of its own"
+    % (len(apt_jobs), "; not so: " + " ".join(apt_bad) if apt_bad else ""))
+act = open(os.path.join(ROOT, ".github/actions/apt/action.yml")).read()
+say(act.count("path: ~/.cache/pax-apt") == 2 and act.count("key: ${{ steps.key.outputs.key }}") == 2
+    and '"$GITHUB_WORKSPACE/tools/ci-apt" install $PACKAGES' in act and "if: steps.install.outputs.save == 'true'" in act
+    and act.count("path: .pax-cache/pinned") == 2 and act.count("key: ${{ steps.pkey.outputs.key }}") == 2
+    and '"$GITHUB_WORKSPACE/tools/fetch-pinned" --all' in act,
+    "P4 .github/actions/apt restores and saves one snapshot path under one key, and the pinned files' store likewise")
 say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 cancel-in-progress for pull requests only")
 group = re.search(r"^concurrency:\n  group: (.*)$", wf, re.M)
 say(group is not None and group.group(1).rstrip().endswith("|| format('ci-{0}-{1}', github.event_name, github.run_id) }}"),
