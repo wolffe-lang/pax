@@ -359,6 +359,46 @@ pub fn alloc() -> u64 ! {out_of_memory} {
     return out_of_memory
 }
 
+/// px120: hand out the lowest free frame below the physical address
+/// `limit`, for a device that reaches only low memory (kernel/xhci's
+/// controllers take their DMA pages below 4 GiB). `alloc` cannot serve
+/// such a caller: its next-fit hint passes 4 GiB once the kernel has
+/// handed out more frames than lie below it (an initramfs, programs, a
+/// while of use) and stays above it until it wraps, so refusing the
+/// frame `alloc` gives refuses the same frame again on every try while
+/// low frames are free (pax#348). The scan starts at frame 0 and leaves
+/// the hint where it is: O(limit / 64) word reads at worst. Row
+/// `out_of_memory` when no frame below `limit` is free.
+pub fn alloc_below(limit: u64) -> u64 ! {out_of_memory} {
+    let h = hdr()
+    // # Safety: the header `init` wrote (`hdr`), mapped by the HHDM.
+    let span = unsafe { h[0].span }
+    let top = if limit / FRAME < span { limit / FRAME } else { span }
+    let fmap = free_map()
+    var w: u64 = 0
+    while w * WORD_BITS < top {
+        let x = rd(fmap + w * WORD_BYTES)
+        if x != 0 {
+            var b: u64 = 0
+            while (x >> b) & 1 == 0 {
+                b += 1
+            }
+            let f = w * WORD_BITS + b
+            // The word's lowest free frame is at or above the limit: no
+            // free frame lies below it.
+            if f >= top {
+                return out_of_memory
+            }
+            clear_bit(fmap, f)
+            // # Safety: as above.
+            unsafe { h[0].free -= 1 }
+            return f * FRAME
+        }
+        w += 1
+    }
+    return out_of_memory
+}
+
 /// Give frame `pa` back. Panics by name (and never returns) on an
 /// address that is not 4 KiB aligned, a frame never usable, a usable
 /// frame the allocator withholds (below 1 MiB, its own state), and a
