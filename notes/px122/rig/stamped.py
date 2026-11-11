@@ -6,8 +6,9 @@
   stamped.py times BUILD the rows' time per leg in BUILD/suite.stamped and BUILD/irq.stamped (each
                          boot's `S5` row closes it), and the kernel's own `boot: N ms` lines in the
                          session logs under BUILD, per tier
-  stamped.py timed CMD…  CMD (its output passed through), then one line: its wall seconds, its exit
-                         and the largest resident set of any process under it (getrusage's children)
+  stamped.py timed CMD…  CMD (its output passed through), then one line: its wall seconds, the CPU
+                         seconds of every process under it (user and system, getrusage's children),
+                         its exit and the largest resident set of any of them
 
 Nothing here judges: the times step prints numbers for two takes to be compared.
 """
@@ -86,8 +87,9 @@ def timed(cmd):
     t0 = time.monotonic()
     rc = subprocess.run(cmd).returncode
     wall = time.monotonic() - t0
-    rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    print('timed: %.1f s wall, exit %d, peak RSS %d MiB: %s' % (wall, rc, rss // 1024, ' '.join(cmd)), flush=True)
+    ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+    print('timed: %.1f s wall, %.1f s CPU (user %.1f, system %.1f), exit %d, peak RSS %d MiB: %s' % (
+        wall, ru.ru_utime + ru.ru_stime, ru.ru_utime, ru.ru_stime, rc, ru.ru_maxrss // 1024, ' '.join(cmd)), flush=True)
     return rc
 
 
