@@ -1,0 +1,13 @@
+# notes/px119/rig/gauntlet.manifest — px119's green take at the final head (take.sh, the recorder's
+# steps mode with --keep-going and --preflight). Every step a container of the CI image's shape but
+# auth, which runs the suite's own throwaway Ubuntu containers from the host. A boot needs only the
+# build: P1 reads the auth step's output and says SKIP by name when there is none.
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px119/rig/lib.sh
+rig gauntlet.manifest committed=../../..:HEAD:notes/px119/rig/gauntlet.manifest
+rig ../../px106/rig/docker-like committed=../../..:HEAD:notes/px106/rig/docker-like
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step build image=localhost/px75-ubuntu:2 tools=cc,clang,readelf,python3,git,curl script=step.sh -- build --tier both
+step auth needs=build tools=python3,taskset,readelf script=step.sh -- auth
+step boot-native needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- boot --tier native --firmware both
+step boot-release needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- boot --tier release --firmware both
