@@ -14,7 +14,7 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   the one list), so `WOLF_STD`, `LUPIN_STD` and `DEN_TLS_ROOTS` reach a
   command over ssh and `ssh HOST wolf build FILE` needs no `. /etc/shrc;`
   before it. An install and an upgrade keep the line with the LAN's
-  `ListenAddress`. burrow's pin moves to its SetEnv change. B17 in
+  `ListenAddress`. burrow's pin moves to its SetEnv change. B18 in
   `tests/mpx5-burrowd` holds it, the suite's image now carrying the dev
   compiler: `notes/px116-setenv.md`.
 
