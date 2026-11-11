@@ -2351,3 +2351,15 @@ tier's inlining; the rest is measurement.
 | PAX's own `kernel/block` (the report's comment, pax#215), `kernel/tcp` ("one function a line"), `kernel/xhci` (`attach`'s comment) | trunk `309036ec` | the release tier inlines each formatter's loop at every call, and its range pass costs the square of one function's branches |
 | GitHub's REST API for the ci workflow's runs, jobs (pages of 30) and job logs; the runs' artifacts | as served 2026-11-11 | each step's seconds and conclusion, the runs' tiers, the kernel's boot lines and the build phases |
 | wolf 0.2.35's `wolf build --release` (`tools/build-kernel --release`) | the pinned archive | black box: `kmain_console`'s release build timed cold at each of #344's kernel commits |
+
+## px123 — the images' pins at the commits the first --latest image carried; sniff; --latest on trunk
+
+- The org's own trees, read where a pin needs them: each one's `wolf-toolchain.toml` at its new pin, and its log
+  since the old one, for the pin's words: pelt `b80d6570`, yew `3a9983ee`, den `291011dd`, sniff `6dd382d4`,
+  wolf-std `77cf3210` (its `vendor/tools.toml`: wolf 0.2.39, lupin 0.1.61), wolf-interp's `v0.1.61`
+  (`vendor/upstream/PIN`, `rust-toolchain.toml`) and wolf-lang's `v0.2.39` (`rust-toolchain.toml`,
+  `crates/wolf_driver/STD-PIN`). The source archives, lupin's musl archive and the dev compiler's build were read by
+  digest, each twice.
+- `tools/latest-resolve`, `tools/mkdistribution --latest` and `tests/latest` are px97's, carried as they were
+  written there (GitHub's REST API for a repository's newest release and its assets' digests).
+- No other implementation's source; no kernel's, firmware's or driver's.
