@@ -1,7 +1,8 @@
 # Long-job budgets
 
 The four long jobs retain every row and compiler/firmware leg. Their
-workflow bounds are interrupts **75 min**, heap **90 min**, pelt **210 min**,
+workflow bounds are interrupts **75 min**, heap **90 min**, pelt **210 min**
+(**350 min** in the all tier and a partial dispatch since px122, below),
 and users **210 min**. `tests/ci-budgets.py` checks at least 40% headroom
 above the measured sizing floors below; heap also retains its separately
 checked, stronger 50% headroom rule.
