@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""tools/latest-resolve: what a --latest build builds (tools/mkdistribution --latest; px97).
+
+    tools/latest-resolve [--overlays FILE] OUTDIR
+    tools/latest-resolve --at-commit RESOLUTION OUTFILE
+
+Each org tree the distribution builds is resolved now to its repository's
+trunk head (`git ls-remote REPO refs/heads/trunk`; REPO is the pin's), unless
+FILE names an overlay for it, one line each (`#` comments, blank lines):
+
+    COMPONENT REPOSITORY SHA RECORD
+
+COMPONENT is a pin's name (aspen boreutils burrow den lobo lope pelt scent
+sniff std trash yew), REPOSITORY a public URL or a local clone (read by fetching from it,
+never written), SHA a full commit, RECORD a local gauntlet record of that
+repository at exactly SHA. An overlay is taken only when its record is green
+at that sha: its first line `RECORD repo=NAME head=SHA tree=TREE ...` names
+the component's repository and SHA's own tree, every step's `END NAME exit=0`,
+its last line `RECORD-END worst=0 steps=N` with N the steps it holds, and no
+`PLANT` line (a plant's record is red by design). Anything else is refused by
+name, exit 2, and nothing is written. RECORD may instead be the word `ungated`:
+a head whose gate has not cleared, taken only when PAX_LATEST_UNGATED=1 (a
+bleeding-edge image asked for as such), its source `ungated`.
+
+lupin resolves to wolf-interp's newest release: its static musl archive, the
+release API's digest and the downloaded bytes' sha256 (which must agree), the
+binary's sha256 from the archive, the version line from the tag's mirror pin
+(vendor/upstream/PIN), the tag's commit. wolf, the dev compiler, stays the
+release user/wolf.pin names (its built bytes are user/wolf.sums'), and a
+newer wolf release is refused by name until that pin moves. lobo's wolf
+archive digest (user/lobo.pin's LOBO_WOLF_SHA256) is read from the release
+API for the version lobo's own wolf-toolchain.toml names at its resolved sha.
+
+OUTDIR (new) gets:
+  resolution.txt  one line a component, the checkout first:
+                    NAME SHA STATE REPOSITORY SOURCE
+                  STATE `merged` (the sha is, or is an ancestor of, its
+                  repository's trunk head) or `unmerged`; SOURCE `checkout`,
+                  `trunk`, `overlay:<the record's sha256>`, `release:<tag>` or
+                  `pin:<tag>`;
+  pins/NAME.pin   each resolved component's pin with its revision (an
+                  overlay's repository too) rewritten and the pinned source
+                  archive's digest dropped, for the builders.
+
+--at-commit lets a chunked build (tools/mkdistribution --latest-from)
+assemble at a later commit of this checkout than the one its inputs were
+resolved at, such as a newer trunk merged in: RESOLUTION's checkout must be
+in HEAD's history, and nothing a builder reads (BUILDER_PATHS) may differ
+between them; OUTFILE is RESOLUTION with its checkout line HEAD's, `unmerged`
+(a local merge is on no trunk), its source `after:<the resolution's commit>`.
+With PAX_LATEST_LANES=FILE (`NAME REPOSITORY SHA` a line: lane heads merged
+into this checkout, ungated, so only with PAX_LATEST_UNGATED=1), each head in
+HEAD's history is added as `NAME SHA merged|unmerged REPOSITORY lane`.
+Anything else is refused by name, exit 2, and OUTFILE is not written.
+
+PAX_LATEST_API (default https://api.github.com) and PAX_LATEST_URL_MAP
+(`PREFIX=REPLACEMENT`, applied to every repository URL) let tests/latest run
+against fixtures, offline.
+"""
+from pathlib import Path
+import hashlib
+import io
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+ROOT = Path(__file__).resolve().parents[1]
+SHA = re.compile(r'[0-9a-f]{40}')
+# pin name -> (repository key, revision key)
+TREES = {'aspen': ('ASPEN_REPO', 'ASPEN_REV'), 'boreutils': ('BORE_REPO', 'BORE_REV'),
+         'burrow': ('BURROW_REPO', 'BURROW_REV'), 'den': ('DEN_REPO', 'DEN_REV'),
+         'lobo': ('LOBO_REPO', 'LOBO_REV'), 'lope': ('LOPE_REPO', 'LOPE_REV'), 'pelt': ('PELT_REPO', 'PELT_REV'),
+         'scent': ('SCENT_REPO', 'SCENT_REV'), 'sniff': ('SNIFF_REPO', 'SNIFF_REV'), 'std': ('STD_REPO', 'STD_REV'),
+         'trash': ('TRASH_REPO', 'TRASH_REV'), 'yew': ('YEW_REPO', 'YEW_REV')}
+HEADER = re.compile(r'RECORD repo=(\S+) head=([0-9a-f]{40}) tree=([0-9a-f]{40}) host=\S+ boot=\S+ start=\S+')
+FOOTER = re.compile(r'RECORD-END worst=(\d+) steps=(\d+) end=\S+')
+END = re.compile(r'END (\S+) exit=(\d+) secs=\S+')
+
+
+# What the builders of a --latest build read from the checkout (tools/mkdistribution's
+# latest_inputs runs them from a copy of the resolution's commit).
+BUILDER_PATHS = ['tools/latest-resolve', 'tools/lib.sh', 'tools/fetch-retry', 'tools/fetch-std', 'tools/mkwolf-std',
+                 'tools/mkpelt', 'tools/mkscent', 'tools/mkden', 'tools/install-den', 'tools/mklupin', 'tools/mklope',
+                 'tools/mkaspen', 'tools/mklobo', 'tools/mkgames', 'tools/mkyew', 'tools/mkboreutils',
+                 'user/*.pin', 'user/boreutils.list', 'user/install/games.txt',
+                 # px106: tools/mkauth builds su, sudo, passwd and login with user/auth (tools/mksudo and
+                 # tools/mksu run it), the auth input tools/distribution-root reads
+                 'tools/mkauth', 'tools/mksudo', 'tools/mksu', 'user/auth', 'user/sudo', 'user/su', 'user/passwd', 'user/login',
+                 'tools/mkburrow', 'tools/install-burrow', 'tools/mkroots', 'tools/mksniff', 'tools/mktrash']
+
+
+class Refused(Exception):
+    pass
+
+
+def at_commit(resolution, outfile):
+    text = Path(resolution).read_text()
+    lines = text.splitlines()
+    pax = [l.split() for l in lines if l.split()[:1] == ['pax']]
+    if len(pax) != 1:
+        raise Refused(f'{resolution} has no single checkout line')
+    was = pax[0][1]
+    head = git('-C', str(ROOT), 'rev-parse', 'HEAD')
+    extra = lane_lines(head, {l.split()[0] for l in lines if l.split()})
+    if head == was:
+        Path(outfile).write_text(text + ''.join(' '.join(l) + '\n' for l in extra))
+        return f'the checkout is the resolution\'s, {head}'
+    if subprocess.run(['git', '-C', str(ROOT), 'merge-base', '--is-ancestor', was, head],
+                      capture_output=True).returncode != 0:
+        raise Refused(f'{resolution} was resolved at another commit ({was}), not in the history of this checkout\'s {head}')
+    moved = git('-C', str(ROOT), 'diff', '--name-only', was, head, '--', *BUILDER_PATHS)
+    if moved:
+        raise Refused(f'what the builders read differs between {was} and {head}: {" ".join(moved.split())}')
+    out = [' '.join(['pax', head, 'unmerged', pax[0][3], 'after:' + was]) if l.split()[:1] == ['pax'] else l for l in lines]
+    Path(outfile).write_text('\n'.join(out + [' '.join(l) for l in extra]) + '\n')
+    return f'the checkout {head} is after the resolution\'s {was}; no builder input differs'
+
+
+def lane_lines(head, taken):
+    """PAX_LATEST_LANES (when set): lane heads merged into this checkout, `NAME REPOSITORY SHA` a line (`#`
+    comments). Each is ungated (no record at the merged commit), so taken only by PAX_LATEST_UNGATED=1; each
+    must be in HEAD's history, its NAME no line the resolution has; its state is whether REPOSITORY's trunk
+    holds it. Returned as resolution lines `NAME SHA STATE REPOSITORY lane`."""
+    path = os.environ.get('PAX_LATEST_LANES')
+    if not path:
+        return []
+    if os.environ.get('PAX_LATEST_UNGATED') != '1':
+        raise Refused(f'lane heads in {path}: ungated, and PAX_LATEST_UNGATED is not 1')
+    out, seen = [], set(taken)
+    for n, raw in enumerate(Path(path).read_text().splitlines(), 1):
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        f = line.split()
+        if len(f) != 3 or not SHA.fullmatch(f[2]):
+            raise Refused(f'{path}:{n}: malformed (NAME REPOSITORY SHA): {raw!r}')
+        name, repo, sha = f
+        if name in seen:
+            raise Refused(f'{path}:{n}: {name} is already a line of the resolution or of {path}')
+        seen.add(name)
+        if subprocess.run(['git', '-C', str(ROOT), 'merge-base', '--is-ancestor', sha, head],
+                          capture_output=True).returncode != 0:
+            raise Refused(f'{path}:{n}: {name} {sha} is not in the history of this checkout\'s {head}')
+        scratch = Path(tempfile.mkdtemp(prefix='pax-lanes-', dir=os.environ.get('TMPDIR')))
+        try:
+            trunk = fetch(scratch, 'lane', repo, '+refs/heads/trunk:refs/heads/trunk')
+            if trunk is None:
+                raise Refused(f'{path}:{n}: cannot read trunk of {repo}')
+            git('-C', str(trunk), 'fetch', '-q', '--no-tags', str(ROOT), f'{sha}:refs/heads/lane')
+            merged = subprocess.run(['git', '-C', str(trunk), 'merge-base', '--is-ancestor', sha, 'trunk']).returncode == 0
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        out.append((name, sha, 'merged' if merged else 'unmerged', canonical(repo), 'lane'))
+    return out
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def pin_values(name):
+    values = {}
+    for line in (ROOT / 'user' / (name + '.pin')).read_text().splitlines():
+        if line.strip() and not line.lstrip().startswith('#') and '=' in line:
+            key, value = line.split('=', 1)
+            values[key.strip()] = ' '.join(shlex.split(value, comments=True))
+    return values
+
+
+def canonical(url):
+    return url[:-4] if url.endswith('.git') else url
+
+
+def mapped(url):
+    rule = os.environ.get('PAX_LATEST_URL_MAP', '')
+    if rule:
+        prefix, _, repl = rule.partition('=')
+        if url.startswith(prefix):
+            return repl + url[len(prefix):]
+    return url
+
+
+def git(*args, cwd=None):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT='0')
+    p = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, env=env)
+    if p.returncode:
+        raise subprocess.CalledProcessError(p.returncode, args, p.stdout, p.stderr)
+    return p.stdout.strip()
+
+
+def ls_remote(url, ref):
+    for _ in range(3):
+        try:
+            out = git('ls-remote', mapped(url), ref)
+            break
+        except subprocess.CalledProcessError:
+            out = None
+    if out is None:
+        raise Refused(f'cannot read {ref} of {url}')
+    lines = [l.split() for l in out.splitlines() if l.strip()]
+    return lines
+
+
+def fetch(scratch, name, url, refspec):
+    """Fetch REFSPEC of URL into a bare repository of NAME's under scratch."""
+    repo = scratch / (name + '.git')
+    if not repo.exists():
+        git('init', '-q', '--bare', str(repo))
+    for _ in range(3):
+        try:
+            git('-C', str(repo), 'fetch', '-q', '--no-tags', mapped(url), refspec)
+            return repo
+        except subprocess.CalledProcessError:
+            continue
+    return None
+
+
+def api(path):
+    base = os.environ.get('PAX_LATEST_API', 'https://api.github.com').rstrip('/')
+    req = urllib.request.Request(base + path, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'pax-latest'})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.load(r)
+
+
+def download(url):
+    req = urllib.request.Request(url, headers={'User-Agent': 'pax-latest'})
+    with urllib.request.urlopen(req, timeout=300) as r:
+        return r.read()
+
+
+def read_record(path, name, sha):
+    """The record's sha256 when it is a green record of NAME at SHA, else Refused (its tree is checked after the fetch)."""
+    p = Path(path)
+    if not p.is_file():
+        raise Refused(f'no record at {path}')
+    text = p.read_bytes()
+    lines = text.decode('utf-8', 'replace').splitlines()
+    if len(lines) < 4:
+        raise Refused(f'{path} is not a gauntlet record (too short)')
+    h, f = HEADER.fullmatch(lines[0]), FOOTER.fullmatch(lines[-1])
+    if not h or not f:
+        raise Refused(f'{path} is not a gauntlet record (its first or last line)')
+    if any(l.startswith('PLANT') for l in lines[1:-1]):
+        raise Refused(f'{path} is a plant\'s record, red by design')
+    if h[1] != name:
+        raise Refused(f'{path} is a record of {h[1]}, not {name}')
+    if h[2] != sha:
+        raise Refused(f'{path} is at head {h[2]}, not {sha}')
+    starts = sum(1 for l in lines if l.startswith('START '))
+    ends = [END.fullmatch(l) for l in lines if l.startswith('END ')]
+    if any(m is None for m in ends) or len(ends) != starts or not ends:
+        raise Refused(f'{path}: its START and END lines do not pair')
+    worst = max(int(m[2]) for m in ends)
+    if int(f[1]) != worst or int(f[2]) != len(ends):
+        raise Refused(f'{path}: its last line (worst={f[1]} steps={f[2]}) disagrees with its {len(ends)} END lines')
+    if worst:
+        raise Refused(f'{path} is not green: worst exit {worst}')
+    return h[3], sha256(text)
+
+
+def overlays_of(path):
+    out = {}
+    for n, raw in enumerate(Path(path).read_text().splitlines(), 1):
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        f = line.split()
+        if len(f) != 4:
+            raise Refused(f'{path}:{n}: malformed (COMPONENT REPOSITORY SHA RECORD): {raw!r}')
+        comp, repo, sha, rec = f
+        if comp not in TREES:
+            raise Refused(f'{path}:{n}: {comp} is not a tree a --latest build resolves ({" ".join(TREES)})')
+        if comp in out:
+            raise Refused(f'{path}:{n}: {comp} is overlaid twice')
+        if not SHA.fullmatch(sha):
+            raise Refused(f'{path}:{n}: {sha} is not a full sha')
+        out[comp] = (repo, sha, rec)
+    return out
+
+
+def rewrite(name, text, changes, drop=()):
+    lines, seen = [], set()
+    for line in text.splitlines():
+        key = line.split('=', 1)[0] if '=' in line and not line.lstrip().startswith('#') else None
+        if key in drop:
+            continue
+        if key in changes:
+            lines.append(f'{key}={changes[key]}')
+            seen.add(key)
+        else:
+            lines.append(line)
+    missing = set(changes) - seen
+    if missing:
+        raise Refused(f'user/{name}.pin has no {" ".join(sorted(missing))}')
+    return ('# tools/latest-resolve: this is a --latest build\'s resolution, not a pin.\n'
+            + '\n'.join(lines) + '\n')
+
+
+def lupin_release(scratch):
+    pv = pin_values('lupin')
+    rel = api('/repos/wolffe-lang/wolf-interp/releases/latest')
+    tag = rel['tag_name']
+    version = tag[1:] if tag.startswith('v') else tag
+    name = f'lupin-{version}-x86_64-unknown-linux-musl.tar.gz'
+    assets = [a for a in rel.get('assets', []) if a.get('name') == name]
+    if not assets or not str(assets[0].get('digest', '')).startswith('sha256:'):
+        raise Refused(f'lupin {tag}: the release has no {name} with a sha256 digest')
+    want = assets[0]['digest'][7:]
+    data = download(assets[0]['browser_download_url'])
+    if sha256(data) != want:
+        raise Refused(f'lupin {tag}: {name} is {sha256(data)}, the release API\'s digest {want}')
+    binary = None
+    with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as t:
+        for m in t.getmembers():
+            if m.isfile() and m.name.endswith('/lupin'):
+                binary = t.extractfile(m).read()
+    if binary is None:
+        raise Refused(f'lupin {tag}: the archive holds no lupin')
+    url = pv['LUPIN_SRC_REPO']
+    peeled = {r[1]: r[0] for r in ls_remote(url, f'refs/tags/{tag}*')}
+    commit = peeled.get(f'refs/tags/{tag}^{{}}') or peeled.get(f'refs/tags/{tag}')
+    if not commit:
+        raise Refused(f'lupin {tag}: {url} has no tag {tag}')
+    repo = fetch(scratch, 'wolf-interp', url, f'+refs/tags/{tag}:refs/tags/{tag}')
+    if repo is None:
+        raise Refused(f'lupin {tag}: cannot fetch the tag from {url}')
+    mirror = git('-C', str(repo), 'show', f'{commit}:vendor/upstream/PIN').split()[0]
+    channel = re.search(r'channel\s*=\s*"([^"]+)"', git('-C', str(repo), 'show', f'{commit}:rust-toolchain.toml'))
+    trunk = fetch(scratch, 'wolf-interp', url, '+refs/heads/trunk:refs/heads/trunk')
+    state = 'merged' if trunk and subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', commit, 'trunk']).returncode == 0 else 'unmerged'
+    changes = {'LUPIN_FROM': 'release',
+               'LUPIN_MUSL_URL': assets[0]['browser_download_url'], 'LUPIN_MUSL_SHA256': want,
+               'LUPIN_MUSL_BIN_SHA256': sha256(binary), 'LUPIN_SRC_TAG': tag, 'LUPIN_SRC_REV': commit,
+               'LUPIN_SRC_VERSION_LINE': f'"lupin {version} (wolf-interp, reference interpreter at pin {mirror[:7]})"'}
+    if channel:
+        changes['LUPIN_SRC_RUST'] = channel[1]
+    text = rewrite('lupin', (ROOT / 'user/lupin.pin').read_text(), changes)
+    return (commit, state, canonical(url), f'release:{tag}'), text
+
+
+def wolf_release():
+    pv = pin_values('wolf')
+    rel = api('/repos/wolffe-lang/wolf-lang/releases/latest')
+    if rel['tag_name'] != pv['WOLF_SRC_TAG']:
+        raise Refused(f'wolf: the newest release is {rel["tag_name"]}, user/wolf.pin names {pv["WOLF_SRC_TAG"]}: '
+                      'move that pin (its built bytes are user/wolf.sums\') before a --latest build')
+    return (pv['WOLF_SRC_REV'], 'merged', canonical(pv['WOLF_SRC_REPO']), 'pin:' + pv['WOLF_SRC_TAG'])
+
+
+def lobo_wolf_digest(repo, sha):
+    toml = git('-C', str(repo), 'show', f'{sha}:wolf-toolchain.toml')
+    m = re.search(r'version_line\s*=\s*"wolf (\d+\.\d+\.\d+) ', toml)
+    if not m:
+        raise Refused(f'lobo {sha}: its wolf-toolchain.toml names no wolf version line')
+    v = m[1]
+    rel = api(f'/repos/wolffe-lang/wolf-lang/releases/tags/v{v}')
+    name = f'wolf-{v}-x86_64-unknown-linux-gnu.tar.gz'
+    a = [x for x in rel.get('assets', []) if x.get('name') == name]
+    if not a or not str(a[0].get('digest', '')).startswith('sha256:'):
+        raise Refused(f'lobo {sha}: wolf v{v} has no {name} with a sha256 digest')
+    return a[0]['digest'][7:]
+
+
+def checkout_line(scratch):
+    head = git('-C', str(ROOT), 'rev-parse', 'HEAD')
+    url = canonical(git('-C', str(ROOT), 'remote', 'get-url', 'origin'))
+    repo = fetch(scratch, 'pax', url, '+refs/heads/trunk:refs/heads/trunk')
+    if repo is None:
+        raise Refused(f'pax: cannot read trunk of {url}')
+    git('-C', str(repo), 'fetch', '-q', '--no-tags', str(ROOT), 'HEAD:refs/heads/checkout')
+    merged = subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', head, 'trunk']).returncode == 0
+    return (head, 'merged' if merged else 'unmerged', url, 'checkout')
+
+
+def main(argv):
+    overlays_file = None
+    if len(argv) == 3 and argv[0] == '--at-commit':
+        try:
+            print('latest: ' + at_commit(argv[1], argv[2]))
+        except Refused as error:
+            print(f'latest-resolve: refused: {error}', file=sys.stderr)
+            return 2
+        return 0
+    if len(argv) == 3 and argv[0] == '--overlays':
+        overlays_file, out = argv[1], Path(argv[2])
+    elif len(argv) == 1:
+        out = Path(argv[0])
+    else:
+        raise SystemExit('usage: latest-resolve [--overlays FILE] OUTDIR')
+    if out.exists():
+        raise SystemExit(f'latest-resolve: {out} exists (a new directory)')
+    scratch = Path(tempfile.mkdtemp(prefix='pax-latest-', dir=os.environ.get('TMPDIR')))
+    try:
+        overlays = overlays_of(overlays_file) if overlays_file else {}
+        # Every overlay's record first, before anything is fetched.
+        checked = {}
+        for comp, (repo, sha, rec) in overlays.items():
+            if rec == 'ungated':
+                if os.environ.get('PAX_LATEST_UNGATED') != '1':
+                    raise Refused(f'overlay {comp} {sha}: ungated, and PAX_LATEST_UNGATED is not 1')
+                checked[comp] = (repo, sha, None, None)
+            else:
+                checked[comp] = (repo, sha, *read_record(rec, Path(canonical(pin_values(comp)[TREES[comp][0]])).name, sha))
+        lines, pins = [('pax', *checkout_line(scratch))], {}
+        for comp, (rkey, vkey) in TREES.items():
+            pv = pin_values(comp)
+            url = pv[rkey]
+            text = (ROOT / 'user' / (comp + '.pin')).read_text()
+            trunk = fetch(scratch, comp, url, '+refs/heads/trunk:refs/heads/trunk')
+            if trunk is None:
+                raise Refused(f'{comp}: cannot read trunk of {url}')
+            changes = {}
+            if comp in checked:
+                repo, sha, tree, digest = checked[comp]
+                if fetch(scratch, comp, repo, sha) is None:
+                    raise Refused(f'overlay {comp} {sha}: cannot fetch it from {repo}')
+                have = git('-C', str(trunk), 'rev-parse', sha + '^{tree}')
+                if tree is not None and have != tree:
+                    raise Refused(f'overlay {comp} {sha}: its record names tree {tree}, the commit\'s tree is {have}')
+                merged = subprocess.run(['git', '-C', str(trunk), 'merge-base', '--is-ancestor', sha, 'trunk']).returncode == 0
+                lines.append((comp, sha, 'merged' if merged else 'unmerged', canonical(repo),
+                              'ungated' if digest is None else 'overlay:' + digest))
+                changes[rkey] = repo
+            else:
+                sha = git('-C', str(trunk), 'rev-parse', 'trunk')
+                lines.append((comp, sha, 'merged', canonical(url), 'trunk'))
+            changes[vkey] = sha
+            if comp == 'lobo':
+                changes['LOBO_WOLF_SHA256'] = lobo_wolf_digest(trunk, sha)
+            drop = {k for k in pv if k.endswith('_SOURCE_SHA256')}
+            pins[comp] = rewrite(comp, text, changes, drop)
+        lupin, pins['lupin'] = lupin_release(scratch)
+        lines.append(('lupin', *lupin))
+        lines.append(('wolf', *wolf_release()))
+    except Refused as error:
+        print(f'latest-resolve: refused: {error}', file=sys.stderr)
+        return 2
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    (out / 'pins').mkdir(parents=True)
+    for comp, text in pins.items():
+        (out / 'pins' / (comp + '.pin')).write_text(text)
+    (out / 'resolution.txt').write_text(''.join(' '.join(l) + '\n' for l in lines))
+    for l in lines:
+        print('latest: ' + ' '.join(l))
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        sys.exit(f'latest-resolve: {error}')
