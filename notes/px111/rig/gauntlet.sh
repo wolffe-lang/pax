@@ -21,7 +21,7 @@
 # (notes/px111-ptys.md §4).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-: "${GAUNTLET_RECORD:?the recorder's path}"
+: "${GAUNTLET_RECORD:?the path of the recorder}"
 # shellcheck disable=SC1090
 . "$here/lib.sh"
 CO=$(realpath "$(git -C "$here" rev-parse --show-toplevel)")
@@ -34,7 +34,7 @@ gauntlet_step check ind ctr 0 localhost/px75-ubuntu:2 python3 -I tests/mpx5-pty.
 gauntlet_step pty-native ind suite tests/mpx5-pty --tier native --firmware both --accel kvm || exit $?
 gauntlet_step pty-release ind suite tests/mpx5-pty --tier release --firmware both --accel kvm || exit $?
 gauntlet_step pty-tcg ind suite tests/mpx5-pty --tier native --firmware both --accel tcg || exit $?
-: "${PAX_BUILD:?take.sh's build directory}"
+: "${PAX_BUILD:?the build directory take.sh names}"
 host() { PATH=$(dirname "$P"):$PATH taskset -c "$CPUS" "$@" < /dev/null; }
 gauntlet_step jobs-build ind suite tests/mpx5-jobs --only build --tier native --firmware bios || exit $?
 gauntlet_step jobs-linux ind host tests/mpx5-jobs --only linux --images "$PAX_BUILD/mpx5-jobs" || exit $?
