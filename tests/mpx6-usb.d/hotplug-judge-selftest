@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""tests/mpx6-usb.d/hotplug-judge-selftest — tools/hotplug-session's judge
+can say no, by name (px120). No QEMU: transcripts shaped as the kernel's
+lines and user/elf/hotplugprobe.c's print them, records packed by
+notes/px109-the-mouse.md's table, each step's offset as the session keeps
+it.
+
+  H1  a transcript every row passes on passes (and names each row PASS).
+  H2  pax#348's stream: after the churn no plug gets a record, each pass
+      says `no device record memory` again: every plug row FAIL, and
+      no-stream, keyboard-path; churn and boot-pointer PASS.
+  H3  a device past the records retried on every pass: FAIL
+      c2-refused-once and no-stream.
+  H4  a refused device taken once a record frees, with no port change:
+      FAIL c2-free-hold.
+  H5  a loop that runs out after 31 plugs: FAIL c1-loop and no-stream.
+  H6  a composite mouse whose keyboard interface is not driven: FAIL
+      c1-composite-mouse.
+  H7  a composite keyboard whose HID interface is refused twice: FAIL
+      c1-composite-keyboard and no-stream.
+  H8  keys that came through the PS/2 port: FAIL keyboard-path.
+  H9  a pointer number that comes back in a loop: FAIL c2-loop.
+Exit 0 when every case held; the first failing case is named.
+"""
+from contextlib import redirect_stdout
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import io
+from pathlib import Path
+import struct
+import sys
+
+sys.dont_write_bytecode = True
+root = Path(__file__).resolve().parents[2]
+loader = SourceFileLoader('hotplug_session', str(root / 'tools/hotplug-session'))
+hs = module_from_spec(spec_from_loader('hotplug_session', loader))
+loader.exec_module(hs)
+X, KEYS, LOOPS, COMPOSITE_LOOPS = hs.X, hs.KEYS, hs.LOOPS, hs.COMPOSITE_LOOPS
+
+
+class T:
+    def __init__(self):
+        self.text = ''
+        self.steps = []
+        self.seq = 0
+        self.ptr = 0
+
+    def line(self, s):
+        self.text += s + '\r\n'
+
+    def mark(self, name):
+        self.steps.append((name, len(self.text)))
+
+    def rec(self, dev, flags=0, x=0):
+        self.seq += 1
+        raw = struct.pack('<QIHBBiiHhI', 10_000_000 * self.seq, self.seq, dev, 1, flags, x, 0, 0, 0, 1)
+        self.line('HOTREC ' + raw.hex())
+
+    def keys(self, b):
+        for c in b:
+            self.line(f'HOTKEY {c:02x}')
+
+    def attach(self, path, speed=3, iface=0, number=None):
+        self.ptr = number if number is not None else self.ptr + 1
+        self.line(f'xhci: mouse {path} speed {speed} interface {iface} report protocol, relative, 4-byte reports, '
+                  f'buttons 5, wheel; pointer {self.ptr}')
+        self.rec(self.ptr, hs.NEW)
+        return self.ptr
+
+    def keyboard(self, path, speed=3):
+        self.line(f'xhci: keyboard {path} speed {speed} boot report 8')
+
+    def removed(self, path, n):
+        self.line(f'xhci: mouse {path} removed; pointer {n} gone')
+
+    def error(self, c, what):
+        self.line(f'xhci {c}: {what}')
+
+
+def transcript(stream=False, retried=0, taken_on_free=False, loop_runs_out=False, composite_board=True,
+               refused_twice=False, scancodes=0, reused=False):
+    t = T()
+    t.line('xhci 1: BAR0 0x00000000febf0000')
+    t.line('xhci 1: ports 12 INTx 11 context 32 legacy absent speeds')
+    t.line('xhci 2: BAR0 0x00000000febf4000')
+    t.line('xhci 2: ports 12 MSI vector 81 context 32 legacy absent speeds 5=3 6=1 7=1 8=1 9=1')
+    t.attach('usb2-5')
+    t.line('HOTSTART churn=800')
+    t.line(f'HOTCHURNED {hs.CHURN}')
+    lost = lambda: t.error(1, 'no device record memory 0x0000000000000001')
+
+    def plug(path, x, speed=3, board=False, keys=b''):
+        if stream:
+            for _ in range(20):
+                lost()
+            return None
+        if board:
+            t.keyboard(path, speed)
+        n = t.attach(path, speed)
+        t.rec(n, x=x)
+        t.keys(keys)
+        return n
+
+    t.mark('c1-mouse'); first = plug('usb1-6', X['c1-mouse'])
+    t.mark('c1-keyboard')
+    if stream:
+        for _ in range(20):
+            lost()
+    else:
+        t.keyboard('usb1-7'); t.keys(KEYS['c1-keyboard'])
+    t.mark('c1-composite-mouse')
+    if stream:
+        plug('usb1-8', 0)
+    else:
+        if composite_board:
+            t.keyboard('usb1-8', 1)
+        n = t.attach('usb1-8', 1)
+        t.rec(n, x=X['c1-composite-mouse'])
+        t.keys(KEYS['c1-composite-mouse'] if composite_board else b'')
+    t.mark('c1-composite-keyboard')
+    if stream:
+        for _ in range(20):
+            lost()
+    else:
+        t.keyboard('usb1-9', 1)
+        for _ in range(2 if refused_twice else 1):
+            t.line('xhci: mouse usb1-9 refused: no Mouse or Pointer application collection')
+        t.keys(KEYS['c1-composite-keyboard'])
+    t.mark('c1-loop')
+    if not stream:
+        t.removed('usb1-6', first)
+        for i in range(LOOPS + 1):
+            if loop_runs_out and i >= 31:
+                lost()
+                continue
+            n = t.attach('usb1-6')
+            if i < LOOPS:
+                t.removed('usb1-6', n)
+        if not loop_runs_out:
+            t.rec(t.ptr, x=X['c1-loop'])
+    else:
+        for _ in range(20):
+            lost()
+    t.mark('c1-composite-loop')
+    if not stream:
+        for i in range(COMPOSITE_LOOPS):
+            t.removed('usb1-8', t.ptr)
+            t.keyboard('usb1-8', 1)
+            t.attach('usb1-8', 1)
+        t.rec(t.ptr, x=X['c1-composite-loop'])
+        t.keys(KEYS['c1-composite-loop'])
+    t.mark('c2-hub-mouse'); plug('usb2-6.1', X['c2-hub-mouse'])
+    t.mark('c2-composite-mouse'); c2 = plug('usb2-10', X['c2-composite-mouse'], 1, True, KEYS['c2-composite-mouse'])
+    t.mark('c2-refused-once')
+    for _ in range(2 + retried):
+        t.error(2, 'enable slot failed 0x0000000021000001')
+    t.mark('c2-free-hold')
+    if c2 is not None:
+        t.removed('usb2-10', c2)
+    if taken_on_free:
+        n = t.attach('usb2-11')
+        t.rec(n, x=1)
+    t.mark('c2-replug-taken')
+    n = plug('usb2-11', X['c2-replug-taken'])
+    t.mark('c2-loop')
+    if n is not None:
+        numbers = []
+        for i in range(LOOPS):
+            t.removed('usb2-11', n)
+            n = t.attach('usb2-11', number=numbers[0] if reused and i == 5 else None)
+            numbers.append(n)
+        t.rec(n, x=X['c2-loop'])
+    t.mark('finish')
+    if not stream:
+        t.line('HOTKEY 04')
+        t.line('HOTDONE')
+        t.line(f'console: 0 bytes from com1, 7 keys ({scancodes} scancodes) from the keyboard, 7 reads, 0 waited, 0 dropped')
+        t.line('halt')
+    return t.text, t.steps
+
+
+def judged(text, steps):
+    out = io.StringIO()
+    with redirect_stdout(out):
+        hs.Judge().judge(text, steps)
+    lines = out.getvalue().splitlines()
+    return {l.split()[1] for l in lines if l.startswith('FAIL ')}, {l.split()[1] for l in lines if l.startswith('PASS ')}
+
+
+plugs = {'c1-mouse', 'c1-keyboard', 'c1-composite-mouse', 'c1-composite-keyboard', 'c1-loop', 'c1-composite-loop',
+         'c2-hub-mouse', 'c2-composite-mouse', 'c2-replug-taken', 'c2-loop'}
+cases = [
+    ('H1 a transcript every row passes on', {}, set()),
+    ("H2 pax#348's stream", dict(stream=True), plugs | {'c2-free-hold', 'no-stream', 'keyboard-path'}),
+    ('H3 a refused device retried on every pass', dict(retried=28), {'c2-refused-once', 'no-stream'}),
+    ('H4 a refused device taken with no port change', dict(taken_on_free=True), {'c2-free-hold'}),
+    ('H5 a loop that runs out after 31 plugs', dict(loop_runs_out=True), {'c1-loop', 'no-stream'}),
+    ("H6 a composite mouse's keyboard not driven", dict(composite_board=False), {'c1-composite-mouse'}),
+    ("H7 a composite keyboard's HID interface refused twice", dict(refused_twice=True),
+     {'c1-composite-keyboard', 'no-stream'}),
+    ('H8 keys through the PS/2 port', dict(scancodes=7), {'keyboard-path'}),
+    ('H9 a pointer number back in a loop', dict(reused=True), {'c2-loop'}),
+]
+ok = True
+for name, kw, want in cases:
+    failed, passed = judged(*transcript(**kw))
+    good = failed == want and passed | failed == set(hs.ROWS)
+    print(f'{"PASS" if good else "FAIL"} {name}: red {sorted(failed)}' + ('' if good else f' (want {sorted(want)})'))
+    ok = ok and good
+print(f'{"PASS" if ok else "FAIL"} hotplug judge selftest')
+sys.exit(0 if ok else 1)
