@@ -104,8 +104,9 @@ every call, and its range pass costs the square of one function's branches (`ker
 ### Trunk at `309036ec`
 
 Run 43094621784 drew a runner of the green one's speed for mpx3-shell: green in 5505 s (the suite 1487 s, the USB
-typing 1214, the MSI and INTx step 2456). mpx5-pelt drew a slow one: its main step took 7677 s and the USB typing step 2508 s, and it was in its root disk leg,
-with 40 minutes left of its 210, when this note was written; the pull request gives its verdict.
+typing 1214, the MSI and INTx step 2456). mpx5-pelt drew a slow one: its main step took 7677 s and the USB typing
+step 2508 s, and it was in its root disk leg, with 40 minutes left of its 210, when this note was written; the pull
+request gives its verdict.
 
 ### On real hardware
 
@@ -189,9 +190,9 @@ From `notes/px122/prediction.txt`, committed before the local takes reported and
 
 ## Decisions
 
-- **D1** Raise or split: raise, tiered by the plan's tier, as px113 did for yew's jobs. mpx5-pelt's 350 minutes is 10 under the hosted
-  runners' ceiling, and its floor can grow 3.5% more before no limit can hold it at 40%: the split the budgets README
-  asks for (the USB typing step and the root disk leg as a job of their own) is due next.
+- **D1** Raise or split: raise, tiered by the plan's tier, as px113 did for yew's jobs. mpx5-pelt's 350 minutes is
+  10 under the hosted runners' ceiling, and its floor can grow 3.5% more before no limit can hold it at 40%: the
+  split the budgets README asks for (the USB typing step and the root disk leg as a job of their own) is due next.
 - **D2** The release build: fixed where it grew (`kernel/procfs`), in this change, not left for a kernel lane. Every
   all-tier job that builds the release kernel gains about four minutes on one host, more on the slower runners.
 - **D3** The local Linux side: the rig's container has no engine for the as-a-user sessions and lists `ls -l` totals
