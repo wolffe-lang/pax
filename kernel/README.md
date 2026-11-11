@@ -1309,3 +1309,16 @@ as uid 1000, byte-identical.
 | `sched/` (px111 change) | each terminal's session and foreground group in boot/console.S's `pax_tty_table` by its id (the console's moved there from `pax_sched_state`'s words 15 and 16); a leader's `ctty` is the id; `ctty_of`, `self_ctty`, `tty_session_of`, `tty_pgrp_of`, `set_tty_pgrp_of`, `take_tty_of` (a process that has another terminal is refused; a steal signals nobody, as on Linux), `open_tty_of`, `drop_tty_of`, `hangup_tty` (the controlling process hears SIGHUP and SIGCONT, the session loses the terminal); a controlling process's end hangs up whichever terminal it holds |
 | `files/` (px111 change) | `/dev/ptmx` and `/dev/pts` (devpts: its own device 0:8, inode 1, `ptmx` inode 2 mode 0000, each live pty's number inode N + 3, 0600, 136:N); kinds K_PTM and K_PTS (an open file each, so the last close is known); `/dev/tty` naming a pty when that is the caller's controlling terminal; TIOCGPTPEER; `pty_write` |
 | `procfs/` (px111 change) | `/proc/sys/kernel/pty/nr` and `max` (256); a process's `stat` names its controlling terminal by id (the console 4:64, pty N 136:N) and that terminal's foreground group |
+
+## px117 — the pointer, and the mouse's reports for the program that asks
+
+| module or file | what |
+|---|---|
+| `screen/` (px117 change) | the mouse modes DECSET selects, as xterm's ctlseqs gives them: the protocol (9, 1000, 1001, 1002, 1003) and the encoding (1005, 1006, 1015, 1016), two sets of mutually exclusive members (a DECRST clears its set only when it names the member selected), RIS (`ESC c`) clearing both; `mouse_protocol`, `mouse_encoding`, `mouse_sets`, `mouse_reset`. The pointer: `pointer(x, y)` puts an arrow (8×16, its outline black, its fill white, the cell's own pixels elsewhere) over a cell, drawing the old cell plainly and the new one with the arrow, counted in `pointer_cost`; `draw` draws the pointer's cell with it whenever it draws that cell; the framebuffer-copy scroll takes it off first and puts it back after |
+| `console/` (px117 change) | a kernel/mouse reader of its own, opened by the first pointer's attach (`pointer_arrived`); `pointer_drain` on every tick and before every key (`key_event`, `irq`): each record moves the one pointer (relative a pixel a count, absolute scaled to the grid's pixels, held to the grid) and, under 1002 with 1006 and while the modes' owner lives and is in the foreground group (`reporting`), types SGR reports through the line discipline whole (a drag into another cell, each button's press or release, a wheel detent, Shift 4, Alt 8, Ctrl 16); `after_write` makes a console write that set a mode its process's; `console: pointer …` at the end of a run once a pointer came |
+| `mouse/` (px117 change) | a merge and a compaction add motion and the wheel of either sign without a checked wrap (`sadd`) |
+| `xhci/` (px117 change) | a pointer's attach opens the console's reader |
+| `interrupts/` (px117 change) | the tick calls `console.pointer_drain` |
+| `user/` (px117 change) | a write to the console calls `console.after_write` |
+| `../boot/screen.S`, `../boot/console.S` | `pax_screen_state` 80 words, `pax_con_state` 128 words |
+| `kmain_usbcheck.lu` | two more invariants: the queue merges and compacts motion of either sign |
