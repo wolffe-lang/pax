@@ -92,6 +92,22 @@
 #        under TCG the table is the emulator's and the row says NOT
 #        MEASURED (every cost must still hash).
 #
+#   sudotty (px119, pax#339): the probe user/elf/sudotty.c, as root, drives
+#   sudo on a pseudo-terminal from the master and types bob's password
+#   (the pw session's /etc/shadow and policy) when the prompt shows.
+#   Session A on /dev/pts/0, its leader bob, runs `sudo /bin/id -u` twice;
+#   it ends, the pair is closed, and session B on the same pty number runs
+#   it once, after the probe has given A's record B's leader's pid (a stub:
+#   PAX never reuses a pid, kernel/sched's take_pid). Held to
+#   tests/mpx5-sudo.d/sudotty.pax (PAX's own), row by row:
+#     P8 session B is asked again: a terminal's record keeps the session
+#        leader's start time (sudoers_timestamp(5)), so a later leader with
+#        the earlier one's pid matches nothing; with T3 (the record's form
+#        after A), T5 (the same pty number), T6 (the stub, B's leader the
+#        later) and T7.
+#     P9 the second sudo in session A, inside the timeout, is not asked;
+#        with T1, T2 (the first one asked) and T4.
+#
 # Two rows are not run yet and say SKIP by name, at column 0, with their
 # reason: a traced exec of a set-ID file, and a ptrace attach after a
 # set-ID exec. The kernel's traced-exec hook is not done: the exec path
@@ -136,6 +152,7 @@ need readelf python3
 
 SESSIONS="sid sudo"
 TYPED="pw login login-max login-first admin login-trap"
+PROBED="sudotty"
 ref=$here/mpx5-sudo.d/linux
 work=$PAX_BUILD/mpx5-sudo
 runs=$PAX_BUILD/mpx5-sudo-runs.txt
@@ -261,6 +278,15 @@ if [ -z "$images" ]; then
     fi
     r=$(static_ok "$work/bin/sid") || why+=" $r;"
     say "  program: sid $(sha256_of "$work/bin/sid") $(wc -c < "$work/bin/sid" | tr -d ' ') bytes"
+    # px119: the sudotty image's probe, built the same way
+    if [ -n "$bindir" ] && [ -f "$bindir/sudotty" ]; then
+        cp "$bindir/sudotty" "$work/bin/sudotty" || why+=" no $bindir/sudotty;"
+    else
+        cc -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function -Wl,--build-id=none -Wl,-z,noexecstack \
+            -o "$work/bin/sudotty" "$PAX_ROOT/user/elf/sudotty.c" || why+=" cc sudotty.c;"
+    fi
+    r=$(static_ok "$work/bin/sudotty") || why+=" $r;"
+    say "  program: sudotty $(sha256_of "$work/bin/sudotty") $(wc -c < "$work/bin/sudotty" | tr -d ' ') bytes"
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$work/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\npack:x:2000:pax\n' > "$work/group"
     printf 'Defaults secure_path="/bin:/usr/bin"\nroot ALL=(ALL:ALL) ALL\n#1000 ALL=(ALL:ALL) NOPASSWD: ALL\n#includedir /etc/sudoers.d\n' > "$work/sudoers"
@@ -341,6 +367,21 @@ if [ -z "$images" ]; then
             why+=" tools/mkinitramfs $s;"
         fi
     done
+    # px119: the sudotty image, the pw session's accounts, shadow and policy, the probe its first
+    # program; bob's password where only root reads it.
+    [ -f "$here/mpx5-sudo.d/sudotty.pax" ] || why+=" no tests/mpx5-sudo.d/sudotty.pax;"
+    echo /bin/sudotty > "$work/sudotty.run"
+    grep '^bob ' "$pw/passwords.txt" > "$pw/sudotty-pw.txt" 2>/dev/null || why+=" no password for bob;"
+    files=("/bin/sudotty=$work/bin/sudotty:755" "/bin/id=$work/bin/id:755" "/usr/bin/id->/bin/id"
+        "/etc/passwd=$pw/passwd:644" "/etc/group=$pw/group:644" "/etc/shadow=$pw/shadow.txt:600" "/etc/sudoers=$pw/sudoers:440"
+        "/etc/sudoers.d/:755" "/var/:755" "/var/log/:755" "/root/:700" "/root/passwords.txt=$pw/sudotty-pw.txt:600"
+        "/home/:755" "/home/bob/:750:1001:1001")
+    [ ! -f "$work/bin/sudo" ] || files+=("/bin/sudo=$work/bin/sudo:4755")
+    if "$PAX_ROOT/tools/mkinitramfs" "$work/sudotty.cpio" "${files[@]}" "/etc/pax-run=$work/sudotty.run:644" > "$work/sudotty.initramfs.txt"; then
+        say "  initramfs sudotty: $(tail -n 1 "$work/sudotty.initramfs.txt")"
+    else
+        why+=" tools/mkinitramfs sudotty;"
+    fi
     for s in $SESSIONS; do
         run_of "$s" > "$work/$s.run"
         if [ "$s" = sid ]; then
@@ -363,18 +404,18 @@ if [ -z "$images" ]; then
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for s in $SESSIONS $TYPED cost; do
+            for s in $SESSIONS $TYPED $PROBED cost; do
                 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                     --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/sudo-$s.iso" >/dev/null \
                     || why+=" $tier sudo-$s: mkimage;"
             done
-            say "built $tier: elf $(sha256_of "$elf"), $(echo $SESSIONS $TYPED | wc -w | tr -d ' ') images"
+            say "built $tier: elf $(sha256_of "$elf"), $(echo $SESSIONS $TYPED $PROBED | wc -w | tr -d ' ') images"
         else
             cat "$log" >&2
             why+=" $tier kmain_console: tools/build-kernel;"
         fi
     done
-    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), sid static, the recordings there, $(echo $SESSIONS $TYPED | wc -w | tr -d ' ') images" || bad "S0:$why"
+    [ -z "$why" ] && say "PASS S0: kmain_console built ($tiers), sid static, the recordings there, $(echo $SESSIONS $TYPED $PROBED | wc -w | tr -d ' ') images" || bad "S0:$why"
     linux_ct "$work/bin"
     auth_ct "$work"
     images=$work
@@ -444,6 +485,46 @@ for leg in $legs; do
             [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             [ -z "$why" ] && say "PASS S5 $id: init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
+        done
+        # px119: P8 and P9, sudo's record made on a pseudo-terminal (the sudotty image), each row
+        # held with the lines it stands on to tests/mpx5-sudo.d/sudotty.pax.
+        for s in $PROBED; do
+            id="$tier $leg $s"
+            log=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.serial.log
+            elf=$images/$tier/kmain_console.elf iso=$images/$tier/sudo-$s.iso
+            rm -f "$log" "$log.verdict"
+            if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+                bad "P8 $id: no image"
+                bad "P9 $id: no image"
+                continue
+            fi
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 --qemu -m --qemu 512M \
+                --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            printf '%s kmain_console %s %s halt-status=%s serial=%s iso=%s\n' "$tier" "$leg" "$s" "$hrc" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            out=$PAX_BUILD/mpx5-sudo-$tier-$leg-$s.session
+            awk '/^user: exec pid 1 / { if (!on) { on = 1; next } } on && /^user: [^ ]+ pid 1 (exit_group|exit) [0-9]+ after / { exit }
+                 on { i = match($0, /user: [^ ]+ pid [0-9]+ /); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+            want=$here/mpx5-sudo.d/$s.pax
+            for row in P9 P8; do
+                case $row in P9) parts="T1 T2 P9 T4" ;; P8) parts="T3 T5 T6 P8 T7" ;; esac
+                w=$(awk -v rows=" $parts " 'index(rows, " " $1 " ")' "$want")
+                g=$(awk -v rows=" $parts " 'index(rows, " " $1 " ")' "$out")
+                if [ -n "$w" ] && [ "$w" = "$g" ]; then
+                    say "PASS $row $id: $(printf '%s\n' "$g" | grep "^$row " | cut -c1-200)"
+                else
+                    bad "$row $id: $(diff <(printf '%s\n' "$w") <(printf '%s\n' "$g") | grep '^[<>]' | head -n 10 | cut -c1-300 | tr '\n' '|')"
+                fi
+            done
+            why=
+            [ "$(head -n 1 "$want")" = "$(head -n 1 "$out")" ] && grep -qx done "$out" || why+=" the probe did not run to its end ($(tail -n 1 "$out" | cut -c1-200));"
+            grep -qx "PAX: init /bin/$s ended with status 0; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/$s ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+            pn=$(grep -m1 '^PANIC ' "$norm")
+            [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+            [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+            [ -z "$why" ] && say "PASS S5 $id: the probe ran to its end, init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
         done
         # px106: P7, the cost table on PAX.
         id="$tier $leg cost"
