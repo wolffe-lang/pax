@@ -6,7 +6,8 @@
  * reads as hex, so tools/pointer-session judges them by the document
  * independently of this program. Results go to stdout (the console).
  *
- * The console is put in raw mode. `PTRWIN <rows> <cols>` first, then for
+ * The console's input is put in raw mode (its output keeps OPOST and ONLCR,
+ * so the screen's lines start at the left). `PTRWIN <rows> <cols>` first, then for
  * each row `PTRREADY <i> <label>`, and for each step of a row `PTRSTEP <i>
  * <k>`: the host does the step's injections, then types `.` (on the USB
  * keyboard, and from keys-interleaved's second step on the PS/2 one).
@@ -249,6 +250,7 @@ int main(void) {
     struct termios raw;
     if (tcgetattr(0, &raw) == 0) {
         cfmakeraw(&raw);
+        raw.c_oflag |= OPOST | ONLCR; /* the screen keeps its lines; the input is raw */
         raw.c_cc[VMIN] = 1;
         raw.c_cc[VTIME] = 0;
         if (tcsetattr(0, TCSANOW, &raw)) printf("PTRNOTE tcsetattr errno=%d\n", errno);
