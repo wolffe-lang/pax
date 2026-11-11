@@ -201,3 +201,58 @@ A split by leg would not have helped: each job would build yew again, and
 by the same rule one leg alone needs 94 to 112 minutes (mpx5-yew) and 92 to
 108 (mpx5-screen). What would shorten both jobs is building yew once per
 run and handing the binary on by digest; that is a later change.
+
+## The shell and pelt, step by step (px122)
+
+Trunk's runs after #344 (`a04eb7b5`) and #345 (`3b6e4b64`) were cut at
+these two jobs' limits: `mpx3-shell` at 120 minutes twice, `mpx5-pelt` at
+210 once. No step hung: each was passing rows at its usual rate when the
+limit came. Both jobs had been running within minutes of their limits on
+the slower of the hosted runners, which take about half of the runs: the
+green all-tier attempts since 2026-11-01 reach 7157 s of mpx3-shell's
+7200 and 12280 s of mpx5-pelt's 12600, and on 2026-11-03 mpx5-pelt was
+cut in four all-tier attempts of three pull requests' runs and
+mpx3-shell in one. mpx3-shell had no budget row. mpx5-pelt's row (above)
+sizes its main step and its root disk leg from runs before the USB typing
+step was added, so that step (up to 2592 s) was never in its floor. #344
+then made the release kernel's build slower, by about a quarter on one
+host and by half again on the slower runners, and that put mpx3-shell's
+slow attempts past 120 minutes (`notes/px122-the-cut-runs.md`).
+
+`shell-pelt.json` holds every completed attempt of the two jobs in the
+runs created from 2026-11-01 to 2026-11-11 (181 runs, 397 attempts), each
+named step's seconds and conclusion as GitHub's API gives them, and the
+run's tier from its verdict job's name (`tier all`, `tier pr`, …); a run
+cancelled before its verdict job was named (a pull request's run that a
+later push replaced) has no tier and is no sample. The reader is
+`notes/px122/measure/runs.py`. A step's floor is its peak over the
+tier's attempts where it completed or was cut at a limit (a cut step a
+lower bound, which can only raise the floor); a step that failed is a red
+of its own and never a sample; a step the tier skips costs nothing. The
+job's floor is its named steps' sum and 180 s for setup and the post
+steps. The steps that set the all tier's floors: for mpx3-shell the
+suite's own step 2261 s, the USB typing step 1704 s, the MSI and INTx
+step 3407 s, the root disk leg 367 s and apt 188 s; for mpx5-pelt the
+main step 8604 s (an attempt with one Linux retry), the USB typing step
+2592 s, the root disk leg 2248 s, apt 965 s (a stall) and an artifact
+upload that GitHub's service answered twice with an error page, 285 s.
+
+| job | tier | measured sizing floor | bound | margin above floor |
+|---|---|---:|---:|---:|
+| mpx3-shell | all, partial | 8125 s | 11400 s (190 min) | 3275 s |
+| mpx3-shell | full | 2446 s | 7200 s (120 min) | 4754 s |
+| mpx3-shell | pr | 1704 s | 7200 s (120 min) | 5496 s |
+| mpx5-pelt | all, partial | 14904 s | 21000 s (350 min) | 6096 s |
+| mpx5-pelt | full | 6532 s | 12600 s (210 min) | 6068 s |
+| mpx5-pelt | pr | 4232 s | 12600 s (210 min) | 8368 s |
+
+A named step of either job that no attempt has timed fails its `steps`
+row (`budget/mpx3-shell/steps`, `budget/mpx5-pelt/steps`), so a new step
+in either job is red in the plan job of its own pull request until an
+attempt has measured it and the data holds it.
+
+350 minutes is 10 below the hosted runners' 6-hour ceiling. At the 40%
+rule mpx5-pelt's all-tier floor can grow by 3.5% (to 15428 s) and still
+fit; past that no bound can hold it, and the split this README's capacity
+section asks for (the USB typing step and the root disk leg as a job of
+their own, the images handed on by digest) is the only way left.
