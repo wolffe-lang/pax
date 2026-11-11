@@ -1,0 +1,18 @@
+# notes/px120/rig/gauntlet.manifest — px120's green take at the head (take.sh, the recorder's steps
+# mode with --keep-going and --preflight): the planner's test; the USB matrix's build-once guard and
+# the hot-plug judge's selftest; the USB suite on both tiers and firmwares under KVM (the invariants,
+# the three keyboard topologies against Linux's rows, the mouse session, the hot-plug session); the
+# hot-plug session under TCG on native BIOS; the frame allocator's suite on both tiers and firmwares
+# (F9, alloc_below); the pointer suite and the console suite native on BIOS (kernel/xhci's other
+# readers: the console's pointer, USB typing and the USB stick).
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px120/rig/lib.sh
+rig gauntlet.manifest committed=../../..:HEAD:notes/px120/rig/gauntlet.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step build-once image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- build-once
+step usb-native image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf script=step.sh -- usb --tier native --firmware both
+step usb-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf script=step.sh -- usb --tier release --firmware both
+step hotplug-tcg image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf script=step.sh -- hotplug --tier native --firmware bios --accel tcg
+step frames image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf script=step.sh -- frames --tier both --firmware both
+step pointer image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf,git,curl script=step.sh -- pointer --tier native --firmware bios
+step console image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf,git,curl script=step.sh -- console --tier native --firmware bios
