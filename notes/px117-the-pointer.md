@@ -23,8 +23,8 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx6-pointer` jo
   events reach the guest were measured as black boxes. yew's public source (the org's own) was read for what it
   enables and parses. `docs/SOURCES.md` (px117) lists every source with its digests.
 - **Hosts.** Linux host 1 (Intel Core i7-12700KF, 20 threads, 46 GB) for every build and boot, in an Ubuntu 24.04
-  container (QEMU 8.2.2, OVMF, gcc 13.3, clang, lld 18) with KVM: the smoke runs and the first gate on a light slot
-  (two CPUs), the records on «a block». The build Mac for git and the judge's selftest only (no build: its disk was
+  container (QEMU 8.2.2, OVMF, gcc 13.3, clang, lld 18) with KVM: the smoke runs and the first whole gate on light
+  slots (two CPUs each; the cost per move from one of P-cores), the records on «a block». The build Mac for git and the judge's selftest only (no build: its disk was
   under its floor). The metal target was never touched.
 - **Not done:** no label, merge, tag, release or deploy; no issue filed or closed; no attribution trailer.
 
@@ -47,7 +47,7 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx6-pointer` jo
 | | predicted | measured | score |
 |---|---|---|---|
 | P1 | 1280 × 800, 160 × 50 cells on both firmwares | `screen: 1280x800 … 160x50 cells` on BIOS and UEFI | right |
-| P2 | the scroll copies the framebuffer under KVM | «» | «» |
+| P2 | the scroll copies the framebuffer under KVM | `scrolls by copy` on every leg, KVM and TCG (the boot line) | right |
 | P3 | a relative move over 127 in one event is split, its sum kept | not injected: the rows move 100 an event | not measured |
 | P4 | the tablet's 32768 (2c + 1) / 2 cols lands in column c | every row's cell as sent | right |
 | P5 | keys and tablet events in send order 20 ms and 2 ms apart | in order 20 ms apart; 2 ms apart a USB key typed before a tablet click reached the guest after it (QEMU polls the USB keyboard, the tablet every 1 ms); through the PS/2 keyboard 3 ms apart, in order | wrong at 2 ms on USB |
@@ -57,7 +57,7 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx6-pointer` jo
 | P9 | reports and keys in the devices' order | so, both steps | right |
 | P10 | a pty's program is its master's | the master read the slave's DECSET unchanged; the console typed nothing; the slave read the master's report | right |
 | P11 | the arrow over one cell, two cells drawn a move, never copied by a scroll | pointer-drawn, pointer-scroll | right |
-| P12 | 1,000 to 5,000 TSC cycles a move under KVM | «» | «» |
+| P12 | 1,000 to 5,000 TSC cycles a move under KVM, 10 to 50 times under TCG | the books' line on the light gate's P-cores: native 13,586 and 13,630 a move on average (the cheapest 7,032 and 6,756), release 10,290 and 10,400 (4,210 and 4,426), on BIOS and UEFI; TCG 287,037 (95,832), 21 times native's | wrong under KVM on the mean, about three times the bound (the cheapest moves within it; the spread not explained); right under TCG |
 | P13 | /dev/mouse0 only once a pointer came; every record to its readers | the mouse session green beside the console's reader | right |
 | P14 | no existing transcript or picture changes | «» | «» |
 | P15 | kmain_console grows 8 to 16 KiB | «» | «» |
