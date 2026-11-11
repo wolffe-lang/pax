@@ -17,6 +17,11 @@
 //      but for that frame, must hand that frame back;
 //   4. frees every frame along the chain: the free count returns to
 //      what `init` left;
+//   6. (px120) with every frame free and `alloc`'s next-fit hint at the
+//      top (step 3's), `alloc_below` under the frame `alloc` gives: the
+//      lowest free frame, none free below it, none below 1 MiB, and
+//      `alloc`'s hint where it was (its next frame the one it would have
+//      given without the call); the three frames given back;
 //   5. allocates until `out_of_memory` again.
 //
 // Volatile accesses for the tags: a write followed by a read of the
@@ -32,6 +37,7 @@
 //     touch: <N> frames written and read back, 0 mismatches
 //     reuse: freed 0x<pa>, alloc returned 0x<pa>
 //     free: <N> frames freed, <F - P> free
+//     below: alloc 0x<h>, alloc_below 0x<l>, none below it, none below 1 MiB, alloc 0x<a> (before: 0x<a>)
 //     again: <N> frames, then out_of_memory
 //     halt
 use boot_info
@@ -105,6 +111,18 @@ fn drain() -> u64 {
 fn is_oom() -> bool {
     let r = frames.alloc() else |e| match e {
         out_of_memory => { 1 },
+    }
+    r == 1
+}
+
+/// px120: whether `alloc_below(limit)` answers `out_of_memory`, by name
+/// (a frame it gives is given back).
+fn below_oom(limit: u64) -> bool {
+    let r = frames.alloc_below(limit) else |e| match e {
+        out_of_memory => { 1 },
+    }
+    if r != 1 {
+        frames.free(r)
     }
     r == 1
 }
@@ -224,6 +242,38 @@ export fn kmain() {
     log.dec(frames.free_count() as int)
     log.put(" free")
     log.end()
+
+    // 6. px120: alloc_below under a high hint (step 3 left it at the top)
+    let h = frames.alloc() else 0
+    let before = frames.alloc() else 0
+    if before != 0 {
+        frames.free(before)
+    }
+    let l = frames.alloc_below(h) else 0
+    let none_below = below_oom(l)
+    let none_low = below_oom(1048576)
+    let after = frames.alloc() else 0
+    log.put("below: alloc ")
+    log.hex(h)
+    log.put(", alloc_below ")
+    log.hex(l)
+    log.put(if none_below { ", none below it" } else { ", ONE below it" })
+    log.put(if none_low { ", none below 1 MiB" } else { ", ONE below 1 MiB" })
+    log.put(", alloc ")
+    log.hex(after)
+    log.put(" (before: ")
+    log.hex(before)
+    log.put(")")
+    log.end()
+    if h != 0 {
+        frames.free(h)
+    }
+    if l != 0 {
+        frames.free(l)
+    }
+    if after != 0 {
+        frames.free(after)
+    }
 
     // 5. exhaust again
     let again = drain()

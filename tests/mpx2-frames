@@ -40,6 +40,13 @@
 #      frame (`reuse: freed 0x<a>, alloc returned 0x<a>`); freeing all
 #      F - P restores `F - P free`; a second exhaust gets F - P again,
 #      then `out_of_memory`.
+#   F9 below (px120): with every frame free and alloc's next-fit hint at
+#      the top, `alloc_below(h)` under alloc's frame h gives the lowest
+#      free frame l (h > l >= 1 MiB), none is free below l nor below
+#      1 MiB, and alloc's next frame is the one it gave before the call
+#      (the hint did not move):
+#        below: alloc 0x<h>, alloc_below 0x<l>, none below it, none below 1 MiB, alloc 0x<a> (before: 0x<a>)
+#      the three frames given back (F5's second exhaust still gets F - P).
 #   F6 double free: kmain_double_free's log ends
 #        free twice: 0x<a>
 #        PANIC frames: double free 0x<a>
@@ -204,6 +211,7 @@ for leg in $legs; do
             'touch: [0-9]+ frames written and read back, 0 mismatches' \
             "reuse: freed $HEX, alloc returned $HEX" \
             'free: [0-9]+ frames freed, [0-9]+ free' \
+            'below: alloc .*' \
             'again: [0-9]+ frames, then out_of_memory' \
             'halt'; then
             T=$(grab "$log" 'frames: \([0-9]*\) usable, .*')
@@ -218,6 +226,9 @@ for leg in $legs; do
             ra=$(grab "$log" 'reuse: freed \(0x[0-9a-f]*\), .*'); rb=$(grab "$log" 'reuse: .*, alloc returned \(0x[0-9a-f]*\)')
             fr=$(grab "$log" 'free: \([0-9]*\) frames freed, .*'); fc=$(grab "$log" 'free: .* freed, \([0-9]*\) free')
             A=$(grab "$log" 'again: \([0-9]*\) frames, .*')
+            bh=$(grab "$log" 'below: alloc \(0x[0-9a-f]*\), .*'); bl=$(grab "$log" 'below: .*, alloc_below \(0x[0-9a-f]*\), .*')
+            bn=$(grab "$log" 'below: .*, alloc_below 0x[0-9a-f]*, \(.*\), alloc 0x.*')
+            b2=$(grab "$log" 'below: .*, alloc \(0x[0-9a-f]*\) (before: .*'); bp=$(grab "$log" 'below: .* (before: \(0x[0-9a-f]*\))')
             [ "$F" = $((T - L - S)) ] && [ "$F" -gt 0 ] && [ "$P" -ge 6 ] && [ "$pa" != "$pb" ] \
                 && say "PASS F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F; on PAX's paging (cr3 $pa -> $pb, P=$P)" \
                 || bad "F2 $tier kmain_frames $leg: T=$T L=$L S=$S F=$F; paging $pa -> $pb, P=$P"
@@ -231,6 +242,10 @@ for leg in $legs; do
             [ "$ra" = "$rb" ] && [ "$fr" = "$F" ] && [ "$fc" = "$F" ] && [ "$A" = "$F" ] \
                 && say "PASS F5 $tier kmain_frames $leg: freed $ra, got $rb back; $fr freed, $fc free; again $A" \
                 || bad "F5 $tier kmain_frames $leg: reuse $ra/$rb, freed $fr, free $fc, again $A, F $F"
+            [ -n "$bh" ] && [ -n "$bl" ] && [ $((bl)) -lt $((bh)) ] && [ $((bl)) -ge 1048576 ] \
+                && [ "$bn" = 'none below it, none below 1 MiB' ] && [ -n "$b2" ] && [ "$b2" = "$bp" ] && [ $((b2)) -ne 0 ] \
+                && say "PASS F9 $tier kmain_frames $leg: alloc_below($bh) gave $bl, the lowest free ($bn); alloc's hint kept ($b2 as before)" \
+                || bad "F9 $tier kmain_frames $leg: alloc $bh, alloc_below $bl, $bn, alloc $b2 (before: $bp)"
         else
             bad "F2-F5 $tier kmain_frames $leg: the transcript"
         fi
