@@ -6,11 +6,12 @@
 #
 # The program is Ubuntu 24.04's beep 1.4.9-1.1ubuntu2: the upstream
 # tarball and Ubuntu's `debian/` tarball, the two files of its source
-# package, fetched from Launchpad's archive of it BY DIGEST (as
-# tools/fetch-limine fetches; refused on a mismatch), the package's one
-# patch applied, its own GNUmakefile run with gcc and one change to the
-# link: `-static`. Nothing in the source is edited, nothing is
-# installed.
+# package, BY DIGEST (user/beep.pin; tools/fetch-pinned takes each from
+# its store, read again, or from Ubuntu's archive pool, Launchpad's
+# archive of the package or Debian's pool, and refuses a mismatch; px118),
+# the package's one patch applied, its own GNUmakefile run with gcc and
+# one change to the link: `-static`. Nothing in the source is edited,
+# nothing is installed.
 #
 # Why a build and not the package's binary: /usr/bin/beep is a PIE with
 # a PT_INTERP (it loads libc.so.6 through ld.so), and PAX loads static
@@ -25,22 +26,19 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 [ $# -eq 1 ] || die "usage: mkbeep OUTDIR"
 out=$1
-VERSION=1.4.9-1.1ubuntu2
-ORIG=beep_1.4.9.orig.tar.gz
-ORIG_SHA256=3b6b03c29a8a9a9f84ace8aa68cd703d8e8a322cd27b04c0dfa62b9f32aba258
-DEBIAN=beep_1.4.9-1.1ubuntu2.debian.tar.xz
-DEBIAN_SHA256=6fe840cbe980417c7ae0b0f710ffcd467b735fbef1bab7eb7d96b4dfa4317172
-SOURCE=https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/beep/$VERSION
-need curl tar python3 git make gcc readelf
+. "$PAX_ROOT/user/beep.pin"
+ORIG=$BEEP_orig_FILE
+DEBIAN=$BEEP_debian_FILE
+need tar python3 git make gcc readelf
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 w=$(mktemp -d "${TMPDIR:-/tmp}/pax-beep.XXXXXX")
 trap 'rm -rf "$w"' EXIT
-for pair in "$ORIG:$ORIG_SHA256" "$DEBIAN:$DEBIAN_SHA256"; do
-    f=${pair%%:*}; want=${pair#*:}
-    curl -fsSL --retry 3 -o "$w/$f" "$SOURCE/$f" || die "cannot fetch $SOURCE/$f"
-    got=$(sha256_of "$w/$f")
-    [ "$got" = "$want" ] || die "digest mismatch for $f: pinned $want, got $got"
+for f in "$ORIG" "$DEBIAN"; do
+    rc=0
+    p=$("$PAX_ROOT/tools/fetch-pinned" beep "$f") || rc=$?
+    [ "$rc" = 0 ] || die "$f: not had by its digest (tools/fetch-pinned exit $rc, its reason above)"
+    cp "$p" "$w/$f"
 done
 tar -xzf "$w/$ORIG" -C "$w"
 src=$w/beep-1.4.9
