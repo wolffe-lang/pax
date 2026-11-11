@@ -1,0 +1,78 @@
+px119 — sudo's terminal record keyed by the session leader's start time: the prediction, written
+2026-11-11 06:14Z at base 40da7481 (pax#344's head, on trunk 1c827734 and pax#343), before the
+first change. Nothing of this lane is committed before this file.
+
+Sources, the only ones: sudoers_timestamp(5) and sudo(8) (sudo 1.9.15p5's manual pages, as
+Ubuntu 24.04 ships them), proc_pid_stat(5), pty(7), pts(4), ioctl_tty(2), setsid(2), credentials(7)
+(man-pages 6.7); this repository's own sudo (user/sudo/sudo.lu: ts_key, start_of, ts_valid), its
+account helpers (user/auth/secret.lu) and kernel/sched's pid allocator (take_pid); px111's probe
+(user/elf/ptyprobe.c) for the shape of a session driven from a master. No kernel's source of any OS,
+no sudo source, no C library's or shell's.
+
+A. What the tree does today (read, not measured)
+
+- A record made with a controlling terminal is keyed `tty NR sid SID`: NR is /proc/self/stat's
+  tty_nr, SID its session. A record made with none is keyed `ppid P start T sid S` (px115).
+- kernel/sched never reuses a pid: take_pid is a counter from 1, never wrapped and never searched.
+  So on PAX a later session can never have an earlier leader's pid, in any time. The pid reuse the
+  issue describes is reachable on Linux (PAX's sudo runs there too, in the suite's Ubuntu
+  container) and would be on PAX the day pids are reused; on PAX the row has to stub it.
+- A pty takes the lowest free number (px111), so /dev/pts/0 comes back as soon as its pair is
+  closed: that half of the issue is real on PAX.
+
+B. The rows, and what each shows
+
+tests/mpx5-sudo gains an image, `sudotty`, whose first program is a new probe
+(user/elf/sudotty.c, root, static glibc) and rows P8 and P9:
+
+- The probe opens /dev/ptmx (pts 0), starts session A on the slave as its controlling terminal
+  (setsid, TIOCSCTTY), A drops to bob (1001, a password rule in tests/mpx5-sudo.d/sudoers.pw), and
+  runs `sudo /bin/id -u` twice. The probe types bob's password at the master when the prompt shows.
+- P9: the second sudo in session A, seconds after the first, is not asked and prints 0.
+  Predicted green before and after the fix (the key is the same within one session either way).
+- Session A ends (its leader exits), the probe closes the master; a new /dev/ptmx is pts 0 again.
+  Session B starts on it the same way. The stub: before B's sudo runs, the probe rewrites the
+  record session A's sudo wrote so that it names B's pid where it named A's, everything else kept
+  (the terminal's number, the start time if there is one, the time). That is the record a reused
+  pid would meet.
+- P8: B's `sudo /bin/id -u` asks for the password again.
+  Predicted RED at the row's commit, by name (`FAIL P8 …`): today's record `tty 34816 sid B time
+  MS` is B's key exactly, so sudo runs id with no prompt and prints 0.
+  Predicted GREEN after the fix: the record reads `tty 34816 sid B start T_A time MS`, B's key is
+  `tty 34816 sid B start T_B`, T_B later than T_A by at least the seconds A's two sudo runs took
+  (100 ticks a second), so nothing matches and sudo asks.
+- The probe also prints the record's form after session A: before the fix `tty NR sid SID time`
+  with no start; after it `tty NR sid SID start T time`, NR 34816 ((136 << 8) | 0), SID A's pid and
+  T A's own start time read from /proc/A/stat while A lives.
+- The other images' rows are unchanged by the fix: the typed pw and admin sessions' second sudo is
+  still not asked (their session's leader, pid 1 on PAX or the container's pty child, lives through
+  the session, so start_of(sid) reads the same number each time), and every P1, P2, P3, P5, S1 line
+  is the same bytes. The no-terminal rows (P4) are untouched.
+
+C. A Linux-side row of the key (the unit-level check; the suite's container, real ptys and pids)
+
+- notes/px106/auth-ct.sh gains `sudo-n-tty-reused`, beside px115's `sudo-n-pid-reused`: inside
+  script(1)'s pseudo-terminal, as a session's leader, root plants two records for bob in PAX's
+  format for that very terminal and session, one in the old form (no start) and one with a start a
+  tick before the leader's own, then `sudo -n id -u` runs as bob under that leader. Ubuntu's sudo
+  keeps its records elsewhere and asks (`sudo: a password is required`, status 1).
+  Predicted at the row's commit: PAX's sudo matches the old-form record and runs id (status 0,
+  `0`), so P4 is red. After the fix: PAX's sudo asks too, P4 green.
+
+D. The choice when the leader's start time cannot be read
+
+- start_of answers -1 when /proc/SID/stat cannot be read (the leader gone). A key with `start -1`
+  would match a later caller whose leader is also unreadable, so such a key matches nothing and is
+  never written: sudo asks, and remembers nothing. Not reachable in a row: a session's leader's end
+  takes the terminal from the session (px111), so a caller with a terminal always has a live or
+  zombie leader whose stat reads. Predicted: no row changes because of it.
+
+E. The plant
+
+- px119-plant-key: on the final head, ts_key's terminal record back to `tty NR sid SID`. Predicted
+  red by name at P8 (FAIL P8 on the leg it boots) and at P4 (the container row), P9 green.
+
+F. Cost
+
+- The sudotty image boots in under 60 s under KVM on each leg (two scrypt checks at the test cost,
+  three sudo runs, two ptys).
