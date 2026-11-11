@@ -2,10 +2,18 @@
 """Stage only an Ubuntu kernel and matching modules for the USB oracle.
 
 fetch-usb-linux OUTDIR
+fetch-usb-linux --key
 Uses the runner's authenticated apt metadata, downloads exactly two .debs
 from archive.ubuntu.com, verifies SHA256/size, and extracts binary files.
 No package is installed and no maintainer script or firmware is fetched.
 Every child has a deadline; CI also bounds this whole step to 12 minutes.
+
+A .deb already in OUTDIR/downloads (CI's cache brings them, px118) is
+read again and used only when its size and SHA256 are apt's record's; a
+copy that differs is refused, never fetched over, since a file reaches
+that name only after it verified. --key prints `key=pax-usb-linux-` and
+16 hex of the two records (package, version, SHA256), from apt's
+metadata alone, no download: CI's cache key for OUTDIR/downloads.
 """
 import hashlib
 import json
@@ -18,7 +26,7 @@ import tempfile
 
 
 def run(argv, seconds=60):
-    print('fetch-usb-linux:', ' '.join(map(str, argv)), flush=True)
+    print('fetch-usb-linux:', ' '.join(map(str, argv)), file=sys.stderr, flush=True)
     return subprocess.run(list(map(str, argv)), check=True, text=True,
                           stdout=subprocess.PIPE, timeout=seconds).stdout
 
@@ -54,7 +62,11 @@ def sha(path):
 def download(record, cache):
     cache.mkdir(parents=True, exist_ok=True)
     dest = cache / (record['SHA256'] + '.deb')
-    if not dest.exists() or dest.stat().st_size != record['Size'] or sha(dest) != record['SHA256']:
+    if dest.exists():
+        if dest.stat().st_size != record['Size'] or sha(dest) != record['SHA256']:
+            raise ValueError('the cached ' + str(dest) + ' is not the record\'s bytes (size/digest): refused; delete it')
+        print('fetch-usb-linux: ' + record['Package'] + ': the cached copy, size and SHA256 read again', file=sys.stderr, flush=True)
+    else:
         part = dest.with_suffix('.part')
         run(['curl', '--fail', '--location', '--silent', '--show-error', '--connect-timeout', '15',
              '--max-time', '240', '--retry', '1', '--retry-max-time', '300',
@@ -65,13 +77,25 @@ def download(record, cache):
     return dest
 
 
+def records_now():
+    names = packages(run(['apt-cache', 'depends', 'linux-image-generic']))
+    return names, [metadata(p, run(['apt-cache', 'show', '--no-all-versions', p])) for p in names]
+
+
+def key(records):
+    text = ''.join('%s %s %s\n' % (r['Package'], r['Version'], r['SHA256']) for r in records)
+    return 'pax-usb-linux-' + hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
 def main():
     if len(sys.argv) != 2:
-        raise ValueError('usage: fetch-usb-linux OUTDIR')
+        raise ValueError('usage: fetch-usb-linux OUTDIR | fetch-usb-linux --key')
+    if sys.argv[1] == '--key':
+        print('key=' + key(records_now()[1]))
+        return
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    names = packages(run(['apt-cache', 'depends', 'linux-image-generic']))
-    records = [metadata(p, run(['apt-cache', 'show', '--no-all-versions', p])) for p in names]
+    names, records = records_now()
     version = names[0].removeprefix('linux-image-')
     # Each downloaded package has its own cache directory; extraction never
     # runs its contents and all host tools run outside the extracted tree.
