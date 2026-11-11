@@ -1,0 +1,90 @@
+# A job's inputs from Ubuntu's archive, from CI's cache when it holds
+# them (px118, notes/px118-ci-fetches.md): every job installs its
+# packages through this action, never with apt-get of its own
+# (tests/ci-plan P4).
+#
+# 1. The packages (tools/ci-apt): the snapshot for these packages on this
+#    runner image, restored by its exact key, is installed with no
+#    network; with none, the archive within bounds (150 s for the index,
+#    300 s for the download), and the snapshot saved at once, whatever
+#    the job does after. An earlier image's snapshot of the same packages
+#    is the last resort when the archive does not answer, with a warning.
+# 2. The pinned source files (tools/fetch-pinned --all: beep's source
+#    package, the disk tools' .debs), each read again by its digest from
+#    the store the cache restores, or fetched; the store saved only when
+#    every file verified. Here a file no source gives is a warning: the
+#    tool that needs it (tools/mkbeep, tools/disktools) fails the job
+#    when it asks, naming the file and each source.
+name: apt
+description: The job's Ubuntu packages and pinned source files, from the cache when it holds them, else the archive within bounds
+inputs:
+  packages:
+    description: the packages (apt-get install's arguments), space-separated
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: the packages' snapshot key (this runner image)
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: '"$GITHUB_WORKSPACE/tools/ci-apt" key $PACKAGES >> "$GITHUB_OUTPUT"'
+
+    - name: the packages' snapshot, from the cache
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/pax-apt
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.prefix }}
+
+    - name: the packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        PAX_APT_HIT: ${{ steps.restore.outputs.cache-hit }}
+        PAX_APT_MATCHED: ${{ steps.restore.outputs.cache-matched-key }}
+      run: '"$GITHUB_WORKSPACE/tools/ci-apt" install $PACKAGES'
+
+    - name: the packages' snapshot, to the cache
+      if: steps.install.outputs.save == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/pax-apt
+        key: ${{ steps.key.outputs.key }}
+
+    - name: the pinned source files' key
+      id: pkey
+      shell: bash
+      run: |
+        list=$("$GITHUB_WORKSPACE/tools/fetch-pinned" --list)
+        echo "key=pax-pinned-1-$(printf '%s\n' "$list" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+    - name: the pinned source files, from the cache
+      id: prestore
+      uses: actions/cache/restore@v4
+      with:
+        path: .pax-cache/pinned
+        key: ${{ steps.pkey.outputs.key }}
+        restore-keys: pax-pinned-1-
+
+    - name: the pinned source files, by digest
+      id: pinned
+      shell: bash
+      run: |
+        rc=0
+        "$GITHUB_WORKSPACE/tools/fetch-pinned" --all || rc=$?
+        case $rc in
+          0) echo "whole=true" >> "$GITHUB_OUTPUT" ;;
+          3) echo "::warning::fetch-pinned: a pinned file is not in the cache and no source gave it (above); a job that needs it fails there" ;;
+          *) echo "::warning::fetch-pinned: exit $rc, a pinned file refused (above); a job that needs it fails there" ;;
+        esac
+
+    - name: the pinned source files, to the cache
+      if: steps.prestore.outputs.cache-hit != 'true' && steps.pinned.outputs.whole == 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: .pax-cache/pinned
+        key: ${{ steps.pkey.outputs.key }}
