@@ -40,7 +40,8 @@ its branch head and the pinned `sshd`'s answers measured there (burrow's note).
 
 ### The rows
 
-- `tests/mpx5-burrowd` **B17**, red at the rows tip, green after: its image gains the dev compiler and its std
+- `tests/mpx5-burrowd` **B18** (B17 until the rebase onto the pty lane's branch, where B17 is pax#340's
+  selector row), red at the rows tip, green after: its image gains the dev compiler and its std
   where the dev image has them (`/usr/bin/wolf`, `/usr/share/wolf/compiler-std`; no native link stack, which is
   the base payload's and which CI does not have) and the dev image's `/etc/shrc`. Over ssh, with no prefix:
   `printf` of the three variables answers the values `/etc/shrc` exports, byte for byte as the rig's `sshd` does
@@ -55,7 +56,7 @@ its branch head and the pinned `sshd`'s answers measured there (burrow's note).
   `ListenAddress`, its `SetEnv` line kept.
 - `tests/ci-plan`: `tools/system-env` and `user/shrc` reach the burrowd suite and the distribution's checks;
   the compiler's pin reaches the burrowd suite.
-- **The plant**, off the line: `tools/system-env` writes no `SetEnv` line. B17 goes red by name (the variables
+- **The plant**, off the line: `tools/system-env` writes no `SetEnv` line. B18 goes red by name (the variables
   unset over ssh).
 
 ### Unchanged
@@ -71,7 +72,7 @@ configuration by one line. The console's `/etc/shrc` bytes, in both images.
 2. **Generate or compare:** (A) generate the configuration's line from `/etc/shrc` when the image is built; (B)
    write the line by hand in `user/burrowd/burrowd_config` and have a test compare the two. Recommended (A): the
    release image exports no `WOLF_STD`, so one hand-written line would be wrong for one of the two images.
-3. **B17's build:** (A) `wolf build --no-cache --emit=obj`, the compile pax#334 broke, in an image with the
+3. **B18's build:** (A) `wolf build --no-cache --emit=obj`, the compile pax#334 broke, in an image with the
    compiler and its std and no link stack; (B) a full `wolf build` and link, which needs the base payload's
    68 MB `ld.lld`, which neither CI nor the suite's image has. Recommended (A).
 
@@ -83,6 +84,9 @@ this change that row turns: `ssh HOST 'printf "%s\n" "${WOLF_STD:-unset}"'` answ
 as after `. /etc/shrc;`, a path (it starts with `/`); the README's prefix line goes.
 
 ## 4. Evidence
+
+The takes below ran before the rebase onto the pty lane's branch (their commits are on `px116-before-rebase`),
+when the row was named B17 (the quoted lines keep the name they printed); the rebased head's takes follow them.
 
 Development takes on the Linux build host, each in the rig's container (`localhost/px116-net:1`, px112's image
 `df1ae8c6e5de` under this lane's tag: Ubuntu 24.04, QEMU 8.2.2, OpenSSH 9.6p1, git 2.43.0, dnsmasq 2.91) with KVM
