@@ -1045,12 +1045,41 @@ jobs:
           python3 tests/usb-tools
           python3 tests/usb-linux-fetch
 
+      # px118: the kernel is the one the archive's indexes name now, as
+      # before; its two packages come from CI's cache when a run took the
+      # same two, read again by apt's SHA256 (tools/fetch-usb-linux).
+      # Indexes the archive does not refresh in 150 s are the runner
+      # image's own, and the image's kernel is in the cache when an
+      # earlier run on the image took it.
+      - name: the USB differential's kernel, named by the archive's indexes (the image's own when the archive does not answer)
+        if: needs.plan.outputs.tier != 'pr'
+        id: usbkey
+        run: |
+          timeout --kill-after=10s 150 sudo apt-get update -q \
+            || echo "::warning::apt-get update failed or ran past 150 s; the runner image's own indexes name the USB differential's kernel"
+          tools/fetch-usb-linux --key >> "$GITHUB_OUTPUT"
+
+      - name: the USB differential's kernel packages, from the cache
+        if: needs.plan.outputs.tier != 'pr'
+        id: usbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/usb-linux/downloads
+          key: ${{ steps.usbkey.outputs.key }}
+
       - name: Linux guest binary and modules for the USB differential
         if: needs.plan.outputs.tier != 'pr'
         timeout-minutes: 12
         run: |
           timeout --kill-after=10s 660 tools/fetch-usb-linux "$PWD/build/usb-linux"
           python3 -I -c 'import json; d=json.load(open("build/usb-linux/inputs.json")); print("PAX_LINUX_KERNEL="+d["kernel"]); print("PAX_LINUX_MODULES="+d["modules"])' >> "$GITHUB_ENV"
+
+      - name: the USB differential's kernel packages, to the cache
+        if: needs.plan.outputs.tier != 'pr' && steps.usbcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/usb-linux/downloads
+          key: ${{ steps.usbkey.outputs.key }}
 
       - name: live USB stick, both firmwares, full console suite and Linux ESP differential
         if: needs.plan.outputs.tier != 'pr'
