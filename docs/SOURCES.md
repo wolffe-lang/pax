@@ -2296,3 +2296,14 @@ distribution ships it.
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `usb-kbd`, `usb-tablet`, `usb-mouse` and the i8042 | binary | black box: the screen's size on both firmwares, the order key and tablet events reach the guest when sent 2 ms apart (the USB keyboard's later than a tablet report sent after it) and 3 ms apart through the PS/2 keyboard (in order), the relative mouse's counts as pixels (`notes/px117-the-pointer.md` §3) |
 | yew at `user/yew.pin`'s commit (the org's own, public): `src/term/input.lu` (`input_enable_blob`: `CSI ? 2004 h`, `CSI ? 1002 h`, `CSI ? 1006 h`, `CSI ? 1004 h`; `input_disable_blob`; `decode_mouse`: SGR's Cb 0-2 press and release, 32-35 motion, 64-67 the wheel, 128-129, the 4/8/16 modifiers, and the X10 form whose release it refuses), `src/edit/mouse.lu` (`press_opens_menu`, `press_menu`, `mouse_release`), `src/edit/ctxrows.lu` (the document menu's rows), and the mouse tests `src/edit_ctxmenu_test.lu`, `src/edit_drag_test.lu` | `2eb9cb9b` | what yew enables and parses; Y9's witness. Built unmodified by `tools/mkyew` |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/mouse`, `kernel/xhci`, `kernel/sched` (`proc_slot`, `proc_word`, `tty_pgrp_of`), `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx5-yew` | this tree | read and extended |
+
+## px122 — trunk's cut runs after #344: the two jobs' limits, and /proc/pax-boot in small functions
+
+No kernel's, firmware's or boot loader's source. The change in kernel/procfs follows PAX's own notes on the release
+tier's inlining; the rest is measurement.
+
+| source | version | read, for |
+|---|---|---|
+| PAX's own `kernel/block` (the report's comment, pax#215), `kernel/tcp` ("one function a line"), `kernel/xhci` (`attach`'s comment, wolf#983) | trunk `309036ec` | the release tier inlines each formatter's loop at every call, and its range pass costs the square of one function's branches |
+| GitHub's REST API for the ci workflow's runs, jobs (pages of 30) and job logs; the runs' artifacts | as served 2026-11-11 | each step's seconds and conclusion, the runs' tiers, the kernel's boot lines and the build phases |
+| wolf 0.2.35's `wolf build --release` (`tools/build-kernel --release`) | the pinned archive | black box: `kmain_console`'s release build timed cold at each of #344's kernel commits |
