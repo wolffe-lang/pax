@@ -11,11 +11,15 @@
 #                  engine through notes/px106/rig/docker-like (docker's shape, as CI runs them)
 #   boot ARGS      tests/mpx5-sudo --images the build ARGS, in a container with KVM (P1, P6, P7, P8,
 #                  P9, S1, S5), held to the auth step's output
+# The suite says each verdict through tools/lib.sh's `say`, `mpx5-sudo: FAIL ROW …`; `lift` puts such a
+# line at column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is named in
+# its record) and changes no other line. The step's exit is the suite's.
 set -uo pipefail
 trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 # shellcheck disable=SC1091
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
+lift() { "$@" 2>&1 | sed -u 's/^mpx5-sudo: FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
 what=${1:?}; shift
 case $what in
     preflight)
@@ -28,9 +32,9 @@ case $what in
         echo "preflight: kvm, engine, images and python3 looked at; the slot's CPUs $CPUS"
         exit 0 ;;
     ci-plan) ctr 0 localhost/px75-ubuntu:2 python3 -I tests/ci-plan ;;
-    build) ctr 0 localhost/px75-ubuntu:2 bash -c 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tests/mpx5-sudo --only build "$@"; exit $?' x "$@" ;;
-    auth) PODMAN=$P MEM=${MEM:-12g} CPUS=$CPUS PAX_ENGINE=$CO/notes/px106/rig/docker-like \
-        taskset -c "$CPUS" tests/mpx5-sudo --only auth --images "$PAX_BUILD/mpx5-sudo" < /dev/null ;;
-    boot) ctr 1 localhost/px75-ubuntu:2 bash -c 'tests/mpx5-sudo --images "$PAX_BUILD/mpx5-sudo" "$@"; exit $?' x "$@" ;;
+    build) lift ctr 0 localhost/px75-ubuntu:2 bash -c 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tests/mpx5-sudo --only build "$@"; exit $?' x "$@" ;;
+    auth) export PODMAN=$P MEM=${MEM:-12g} CPUS PAX_ENGINE=$CO/notes/px106/rig/docker-like
+        lift taskset -c "$CPUS" tests/mpx5-sudo --only auth --images "$PAX_BUILD/mpx5-sudo" < /dev/null ;;
+    boot) lift ctr 1 localhost/px75-ubuntu:2 bash -c 'tests/mpx5-sudo --images "$PAX_BUILD/mpx5-sudo" "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
