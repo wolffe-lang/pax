@@ -21,13 +21,13 @@
 #   F7  a pin's every file (PIN, --all): a PASS or FAIL line per file, the
 #       exit the worst (4 over 3 over 0).
 #   F8  the repository's own pins (--list, --sources; no network): every
-#       file of user/beep.pin and user/disktools.pin with the digest the
-#       pin names, beep's from Ubuntu's pool, Launchpad and (the upstream
-#       tarball) Debian's, disktools' from Ubuntu's pool then Launchpad's
-#       librarian.
+#       file of user/beep.pin, user/busybox.pin and user/disktools.pin
+#       with the digest the pin names, beep's from Ubuntu's pool,
+#       Launchpad and (the upstream tarball) Debian's, busybox's and
+#       disktools' from Ubuntu's pool then Launchpad's librarian.
 #   F9  the harness takes these files through tools/fetch-pinned only:
-#       tools/mkbeep and tools/disktools call it and run no curl of their
-#       own.
+#       tools/mkbeep, tools/fetch-busybox and tools/disktools call it and
+#       run no curl of their own.
 # Exit 0 when every row held; each failing row is named.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -41,18 +41,20 @@ bad() { echo "FAIL $*"; fail=1; }
 ok() { echo "PASS $*"; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 
-# The scratch root: the tool as it is, pins of our own. Its disktools pin
-# names one package whose file F7 places in the store beforehand, so no
-# row reaches Ubuntu's archive.
+# The scratch root: the tool as it is, pins of our own. Its busybox and
+# disktools pins name one package each, whose files F7 places in the
+# store beforehand, so no row reaches Ubuntu's archive.
 mkdir -p "$w/root/tools" "$w/root/user" "$w/served/a" "$w/served/b"
 cp "$root/tools/fetch-pinned" "$root/tools/lib.sh" "$w/root/tools/"
 printf 'the first file\n' > "$w/served/a/one.tar.gz"
 printf 'the second file\n' > "$w/served/b/two.tar.xz"
 printf 'not the first file\n' > "$w/served/b/one.tar.gz"
 printf 'a package\n' > "$w/fake_1_amd64.deb"
+printf 'another package\n' > "$w/box_1_amd64.deb"
 one=$(sha "$w/served/a/one.tar.gz")
 two=$(sha "$w/served/b/two.tar.xz")
 deb=$(sha "$w/fake_1_amd64.deb")
+box=$(sha "$w/box_1_amd64.deb")
 cat > "$w/root/user/disktools.pin" <<EOF
 DISKTOOLS_DEBS="fake"
 fake_FILE=fake_1_amd64.deb
@@ -85,6 +87,7 @@ port=$(cat "$w/port")
 closed=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 up=http://127.0.0.1:$port
 down=http://127.0.0.1:$closed
+printf 'BUSYBOX_URL=%s/box_1_amd64.deb\nBUSYBOX_DEB_SHA256=%s\n' "$down" "$box" > "$w/root/user/busybox.pin"
 
 # pin ONE-URLS TWO-URLS [ONE-SHA]: write the scratch user/beep.pin.
 pin() {
@@ -180,8 +183,9 @@ fi
 run beep
 f7a="$rc $(cut -d' ' -f1,2 "$w/out" | tr '\n' ' ')"
 rm -rf "$w/cache"
-mkdir -p "$w/cache/pinned/$deb"
+mkdir -p "$w/cache/pinned/$deb" "$w/cache/pinned/$box"
 cp "$w/fake_1_amd64.deb" "$w/cache/pinned/$deb/"
+cp "$w/box_1_amd64.deb" "$w/cache/pinned/$box/"
 pin "$up/b/one.tar.gz" "$down/two.tar.xz"
 run --all
 f7b="$rc $(grep -c '^PASS disktools:' "$w/out") $(grep -E '^(PASS|FAIL) beep:' "$w/out" | cut -d' ' -f1,2 | tr '\n' ' ')"
@@ -199,30 +203,32 @@ rc=0
 want=$( (
     . "$root/user/beep.pin"
     for s in $BEEP_SOURCES; do f=BEEP_${s}_FILE h=BEEP_${s}_SHA256; echo "beep ${!f} ${!h}"; done
+    . "$root/user/busybox.pin"
+    echo "busybox ${BUSYBOX_URL##*/} $BUSYBOX_DEB_SHA256"
     . "$root/user/disktools.pin"
     for p in $DISKTOOLS_DEBS; do f=${p}_FILE h=${p}_SHA256; echo "disktools ${!f} ${!h}"; done
 ) )
 f8=
 [ "$rc" = 0 ] || f8+=" exit $rc: $(tr '\n' '|' < "$w/err");"
 [ "$(cat "$w/list")" = "$want" ] || f8+=" --list differs from the pins;"
-[ "$(wc -l < "$w/list" | tr -d ' ')" = 9 ] || f8+=" not 9 files;"
+[ "$(wc -l < "$w/list" | tr -d ' ')" = 10 ] || f8+=" not 10 files;"
 grep -Eq '^beep beep_1\.4\.9\.orig\.tar\.gz [0-9a-f]{64} https://archive\.ubuntu\.com/ubuntu/pool/universe/b/beep/[^ ]+ https://launchpad\.net/[^ ]+ https://deb\.debian\.org/debian/pool/[^ ]+$' "$w/sources" || f8+=" beep's upstream tarball's sources;"
-[ "$(grep -c '^disktools .* http://archive\.ubuntu\.com/ubuntu/pool/[^ ]* https://launchpad\.net/ubuntu/+archive/primary/+files/[^ ]*$' "$w/sources")" = 7 ] || f8+=" disktools' sources;"
+[ "$(grep -c '^\(disktools\|busybox\) .* http://archive\.ubuntu\.com/ubuntu/pool/[^ ]* https://launchpad\.net/ubuntu/+archive/primary/+files/[^ ]*$' "$w/sources")" = 8 ] || f8+=" busybox's and disktools' sources;"
 grep -q 'libpopt0_1\.19%2bdfsg-1build1_amd64\.deb$' "$w/sources" || f8+=" a + in a file name not written %2b;"
 if [ -z "$f8" ]; then
-    ok "F8 the repository's pins: 9 files, each with its pin's digest and its sources in order"
+    ok "F8 the repository's pins: 10 files, each with its pin's digest and its sources in order"
 else
     bad "F8$f8"
 fi
 
 # F9
 f9=
-for t in mkbeep disktools; do
+for t in mkbeep fetch-busybox disktools; do
     grep -q 'tools/fetch-pinned' "$root/tools/$t" || f9+=" $t does not call tools/fetch-pinned;"
     ! grep -Eq '^[^#]*\bcurl\b' "$root/tools/$t" || f9+=" $t runs curl itself;"
 done
 if [ -z "$f9" ]; then
-    ok "F9 tools/mkbeep and tools/disktools take their pinned files through tools/fetch-pinned only"
+    ok "F9 tools/mkbeep, tools/fetch-busybox and tools/disktools take their pinned files through tools/fetch-pinned only"
 else
     bad "F9$f9"
 fi
