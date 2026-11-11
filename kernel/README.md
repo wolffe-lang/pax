@@ -1322,3 +1322,9 @@ as uid 1000, byte-identical.
 | `user/` (px117 change) | a write to the console calls `console.after_write` |
 | `../boot/screen.S`, `../boot/console.S` | `pax_screen_state` 80 words, `pax_con_state` 128 words |
 | `kmain_usbcheck.lu` | two more invariants: the queue merges and compacts motion of either sign |
+
+## px122 — /proc/pax-boot's text in small functions (the release tier's build time)
+
+| module or file | what |
+|---|---|
+| `procfs/` (px122 change) | `paxboot` writes `/proc/pax-boot`'s text through four functions, one a group of lines (`paxboot_this`, `paxboot_previous`, `paxboot_log`, `paxboot_screen`), and `put_fb` through three (`put_fb_size`, `put_fb_masks`, `put_fb_tail`): the same calls in the same order, the text the same byte for byte. As one function, px118's last lines put the release tier's range pass over a loop and thirteen formatter calls more, and `kmain_console`'s release build grew by about a quarter |
