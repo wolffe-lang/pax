@@ -3,25 +3,36 @@
  * run list of tests/mpx5-sudo's `sudoppid` image is two commands, each
  * started by the kernel as root:
  *
- *   /bin/sudoppid          init (pid 1): forks session D's leader, which
- *                          starts a session of its own (no terminal) and
- *                          forks two callers; init then ends, and the
- *                          leader ends after it. The callers have no parent
- *                          from then on: kernel/sched gives an ending
- *                          process's children to nobody once pid 1 has
+ *   /bin/sudoppid          init (pid 1): session F's leader starts a
+ *                          session of its own (no terminal), forks two
+ *                          callers and ends at once, so kernel/sched gives
+ *                          them to init, alive (getppid 1); init reaps
+ *                          them and reports. Then it forks session D's
+ *                          leader, which forks two callers the same way;
+ *                          init ends, and the leader ends after it. D's
+ *                          callers have no parent from then on: an ending
+ *                          process's children go to nobody once pid 1 has
  *                          ended, so getppid(2) says 0, and /proc/0/stat
  *                          names no process. kmain_console runs the next
  *                          command only when every process has ended.
  *   /bin/sudoppid report   what session D's two sudo runs did, then
  *                          session E, whose callers' parent is alive.
  *
- * Session D (P10): the first caller becomes bob and execs
+ * In each session the first caller becomes bob and execs
  * `sudo -S /bin/id -u`; the second waits for that run to end (a pipe's end
- * the first holds through its exec) and does the same. With no terminal
- * and the parent's start time unreadable, sudo has no key for a record
- * (`ppid 0 start -1 sid SID` would be the key of every parentless caller
- * in the session), so it honours none and writes none: both runs are
- * asked, and there is no record file afterwards.
+ * the first holds through its exec) and does the same.
+ *
+ * Session F (P12): the callers' parent is init, which they were handed to
+ * when their own ended. sudo keys no record for a caller whose parent is
+ * pid 1 (`ppid 1 start <init's start time> sid SID` would be the key of
+ * every caller of the session handed to init), so both runs are asked and
+ * no record of the session is left.
+ *
+ * Session D (P10): the callers have no parent. With no terminal and the
+ * parent's start time unreadable, sudo has no key for a record (`ppid 0
+ * start -1 sid SID` would be the key of every parentless caller in the
+ * session), so it honours none and writes none: both runs are asked, and
+ * no record of the session is left.
  *
  * Session E (P11): the report's child starts a session of its own (no
  * terminal) and forks two callers in turn, each `sudo -S /bin/id -u` as
@@ -31,14 +42,15 @@
  * before).
  *
  * Every line is `ROW text`; no pid, time or address is printed unless a row
- * fails, when the evidence is shown. Each caller writes what it saw
- * (getppid, its session, its terminal) to a file under /root/px121 before
+ * fails, when the evidence is shown. Each caller writes what it saw (its
+ * pid, getppid, its session, its terminal) to a file under /root/px121 before
  * its exec, and sudo's standard output and error go to files there, which
  * the report reads.
  *
  * Written from sudoers_timestamp(5), sudo(8), getppid(2), setsid(2),
  * proc_pid_stat(5) and credentials(7) (man-pages 6.7), and PAX's own
- * kernel/sched (reparent) and kernel/kmain_console (the run list); the
+ * kernel/sched (reparent: to pid 1 while it lives, then to nobody) and
+ * kernel/kmain_console (the run list); the
  * shape of px119's user/elf/sudotty.c. No kernel's, C library's or sudo's
  * source. Written for this lane. */
 #define _GNU_SOURCE
@@ -147,20 +159,32 @@ static int put_file(const char *path, const char *text) {
 
 /* --- the callers ---------------------------------------------------------- */
 
-/* Wait, at most `ms`, until this process has no parent (getppid 0). */
-static void orphaned(int ms) {
+/* Wait, at most `ms`, until this process's parent is `want` (0: none;
+ * 1: init, which it was handed to). */
+static void parent_is(pid_t want, int ms) {
     long limit = now_ms() + ms;
-    while (getppid() != 0 && now_ms() < limit) nap(10);
+    while (getppid() != want && now_ms() < limit) nap(10);
 }
 
-/* What caller `k` sees, to HERE/cK.txt: its parent, its session, its
- * terminal (proc_pid_stat(5)'s session and tty_nr), its parent's start. */
+/* Wait, at most `ms`, for the end of file on `fd` (every writer gone). */
+static void wait_eof(int fd, int ms) {
+    long limit = now_ms() + ms;
+    char c;
+    struct pollfd p = {fd, POLLIN, 0};
+    while (now_ms() < limit) {
+        if (poll(&p, 1, 1000) > 0 && read(fd, &c, 1) <= 0) break;
+    }
+    close(fd);
+}
+
+/* What caller `k` sees, to HERE/cK.txt: its pid, its parent, its session,
+ * its terminal (proc_pid_stat(5)'s session and tty_nr), its parent's start. */
 static void facts(int k) {
     char path[64], b[160];
     pid_t pp = getppid();
     snprintf(path, sizeof path, HERE "/c%d.txt", k);
-    snprintf(b, sizeof b, "ppid %d sid %ld tty %ld pstart %ld\n", (int)pp, stat_field("/proc/self/stat", 6),
-             stat_field("/proc/self/stat", 7), start_of(pp));
+    snprintf(b, sizeof b, "pid %d ppid %d sid %ld tty %ld pstart %ld\n", (int)getpid(), (int)pp,
+             stat_field("/proc/self/stat", 6), stat_field("/proc/self/stat", 7), start_of(pp));
     put_file(path, b);
 }
 
@@ -184,10 +208,35 @@ static void run_sudo(int k) {
     _exit(127);
 }
 
-/* Session D's leader: a session of its own, two callers, then (init
- * ended) its own end, after which the callers have no parent. `ready`
- * tells init the session is made, so init's end (its terminal's hangup)
- * reaches none of them. Never returns. */
+/* Session F's leader: a session of its own, two callers (runs 5 and 6),
+ * then its own end at once, so the callers are handed to init, alive.
+ * Never returns. */
+static void session_f(void) {
+    if (setsid() < 0) _exit(90);
+    int g[2];
+    if (pipe(g) != 0) _exit(91);
+    pid_t c5 = fork();
+    if (c5 == 0) {
+        close(g[0]);
+        parent_is(1, 60000);
+        facts(5);
+        run_sudo(5); /* g[1] held through the exec: closed when the run has ended */
+    }
+    pid_t c6 = fork();
+    if (c6 == 0) {
+        close(g[1]);
+        parent_is(1, 60000);
+        wait_eof(g[0], 300000); /* three scrypt checks under TCG at the most */
+        facts(6);
+        run_sudo(6);
+    }
+    _exit(c5 < 0 || c6 < 0 ? 92 : 0);
+}
+
+/* Session D's leader: a session of its own, two callers (runs 1 and 2),
+ * then (init ended) its own end, after which the callers have no parent.
+ * `ready` tells init the session is made, so init's end (its terminal's
+ * hangup) reaches none of them. Never returns. */
 static void session_d(int ready) {
     if (setsid() < 0) _exit(90);
     int g[2];
@@ -196,7 +245,7 @@ static void session_d(int ready) {
     if (c1 == 0) {
         close(ready);
         close(g[0]);
-        orphaned(60000);
+        parent_is(0, 60000);
         facts(1);
         run_sudo(1); /* g[1] held through the exec: closed when the run has ended */
     }
@@ -204,14 +253,8 @@ static void session_d(int ready) {
     if (c2 == 0) {
         close(ready);
         close(g[1]);
-        orphaned(60000);
-        long limit = now_ms() + 300000; /* three scrypt checks under TCG at the most */
-        char c;
-        struct pollfd p = {g[0], POLLIN, 0};
-        while (now_ms() < limit) {
-            if (poll(&p, 1, 1000) > 0 && read(g[0], &c, 1) <= 0) break;
-        }
-        close(g[0]);
+        parent_is(0, 60000);
+        wait_eof(g[0], 300000);
         facts(2);
         run_sudo(2);
     }
@@ -220,7 +263,7 @@ static void session_d(int ready) {
     if (c1 < 0 || c2 < 0) _exit(92);
     (void)!write(ready, "x", 1);
     close(ready);
-    orphaned(60000);
+    parent_is(0, 60000);
     _exit(0);
 }
 
@@ -251,18 +294,28 @@ static const char *told(int k, int st) {
     return b;
 }
 
-static int read_facts(int k, int *pp, long *sid, long *tty, long *pstart, char *raw, long cap) {
+/* What caller `k` wrote (facts): 0, or -1 when it cannot be read. */
+struct seen {
+    int pid, pp;
+    long sid, tty, pstart;
+    char raw[160];
+};
+
+static int read_facts(int k, struct seen *s) {
     char path[64];
+    s->pid = s->pp = -2;
+    s->sid = s->tty = s->pstart = -2;
     snprintf(path, sizeof path, HERE "/c%d.txt", k);
-    if (slurp(path, raw, cap) <= 0) return -1;
-    return sscanf(raw, "ppid %d sid %ld tty %ld pstart %ld", pp, sid, tty, pstart) == 4 ? 0 : -1;
+    if (slurp(path, s->raw, sizeof s->raw) <= 0) return -1;
+    return sscanf(s->raw, "pid %d ppid %d sid %ld tty %ld pstart %ld", &s->pid, &s->pp, &s->sid, &s->tty, &s->pstart) == 5 ? 0 : -1;
 }
 
-/* The record's lines as `ppid <P> start <S> sid <D> time <ms>`, each part
- * named when it is what it should be: `pp`, `ps`, `sid` (`ps` -1: the
- * shared key `start -1`). "none" when there is no record file. Lines of
- * other sessions are left out when `only` is set. */
-static const char *record(pid_t pp, long ps, long sid, int only, const char *pp_name, const char *ps_name) {
+/* The record's lines for session `sid`, as `ppid <P> start <S> sid <D>
+ * time <ms>`, each part named when it is what it should be: `pp`, `ps`
+ * (`ps` -1: the shared key `start -1`). "none" when the file has no line
+ * for the session (or there is no file); other sessions' lines are left
+ * out. */
+static const char *record(pid_t pp, long ps, long sid, const char *pp_name, const char *ps_name) {
     static char b[4600];
     char rec[2048];
     long n = slurp(RECORD, rec, sizeof rec);
@@ -282,7 +335,7 @@ static const char *record(pid_t pp, long ps, long sid, int only, const char *pp_
         long s = -2, d = -2, t = -2;
         char tail[64];
         int mine = sscanf(line, "ppid %d start %ld sid %ld time %ld%63s", &p, &s, &d, &t, tail) == 4 && t > 0;
-        if (only && !(mine && d == sid)) continue;
+        if (!(mine && d == sid)) continue;
         if (mine && p == (int)pp && s == ps && d == sid)
             k += (size_t)snprintf(b + k, sizeof b - k, "%sppid %s start %s sid <the session> time <ms>", k ? "; " : "", pp_name,
                                   ps_name);
@@ -290,26 +343,26 @@ static const char *record(pid_t pp, long ps, long sid, int only, const char *pp_
             k += (size_t)snprintf(b + k, sizeof b - k, "%s%s", k ? "; " : "", esc(line, (long)strlen(line)));
         if (k >= sizeof b - 1) break;
     }
-    if (!b[0]) snprintf(b, sizeof b, only ? "no line for this session: %s" : "an empty file%s", only ? esc(rec, n) : "");
+    if (!b[0]) snprintf(b, sizeof b, "none");
     return b;
 }
 
 static int report(void) {
-    say("T2 the report, after every process of init's run had ended\n");
+    say("T6 the report, after every process of init's run had ended\n");
     /* Session D: the callers had no parent. */
-    int p1 = -2, p2 = -2;
-    long s1 = -2, s2 = -2, t1 = -2, t2 = -2, ps1 = -2, ps2 = -2;
-    char f1[160], f2[160], z[64];
-    int ok1 = read_facts(1, &p1, &s1, &t1, &ps1, f1, sizeof f1) == 0, ok2 = read_facts(2, &p2, &s2, &t2, &ps2, f2, sizeof f2) == 0;
+    struct seen a, b;
+    char z[64];
+    int ok = read_facts(1, &a) == 0 && read_facts(2, &b) == 0;
     int zero_read = slurp("/proc/0/stat", z, sizeof z) >= 0;
-    if (ok1 && ok2 && p1 == 0 && p2 == 0 && s1 > 0 && s1 == s2 && t1 == 0 && t2 == 0 && ps1 == -1 && ps2 == -1 && !zero_read)
-        say("T3 session D's two callers: no terminal, one session, no parent (getppid 0; /proc/0/stat cannot be read)\n");
+    if (ok && a.pp == 0 && b.pp == 0 && a.sid > 0 && a.sid == b.sid && a.tty == 0 && b.tty == 0 && a.pstart == -1 && b.pstart == -1 &&
+        !zero_read)
+        say("T7 session D's two callers: no terminal, one session, no parent (getppid 0; /proc/0/stat cannot be read)\n");
     else
-        say("T3 session D's two callers: %s and %s; /proc/0/stat %s\n", esc(f1, (long)strlen(f1)), esc(f2, (long)strlen(f2)),
+        say("T7 session D's two callers: %s and %s; /proc/0/stat %s\n", esc(a.raw, (long)strlen(a.raw)), esc(b.raw, (long)strlen(b.raw)),
             zero_read ? "read" : "cannot be read");
-    say("T4 the first sudo -S in session D: %s\n", told(1, -1));
+    say("T8 the first sudo -S in session D: %s\n", told(1, -1));
     say("P10 a second sudo -S in session D, inside the timeout, its parent unreadable too: %s\n", told(2, -1));
-    say("T5 the record after session D: %s\n", record(0, -1, s1, 0, "0", "-1"));
+    say("T9 the record after session D: %s\n", record(0, -1, a.sid, "0", "-1"));
 
     /* Session E: the callers' parent alive. */
     fflush(stdout);
@@ -322,7 +375,7 @@ static int report(void) {
         char x;
         if (read(gate[0], &x, 1) != 1) _exit(93); /* the report has read this leader's start */
         close(gate[0]);
-        char path[64], b[32];
+        char path[64], line[32];
         for (int k = 3; k <= 4; k++) {
             pid_t kid = fork();
             if (kid == 0) {
@@ -332,8 +385,8 @@ static int report(void) {
             int st = 0;
             if (kid < 0 || waitpid(kid, &st, 0) != kid) st = 0xff00;
             snprintf(path, sizeof path, HERE "/e%d.st", k);
-            snprintf(b, sizeof b, "%d\n", WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
-            put_file(path, b);
+            snprintf(line, sizeof line, "%d\n", WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
+            put_file(path, line);
         }
         _exit(0);
     }
@@ -343,20 +396,19 @@ static int report(void) {
     close(gate[1]);
     int st = 0;
     if (e < 0 || waitpid(e, &st, 0) != e) st = 0xff00;
-    int p3 = -2, p4 = -2;
-    long s3 = -2, s4 = -2, t3 = -2, t4 = -2, ps3 = -2, ps4 = -2;
-    char f3[160], f4[160], sb[32];
-    int ok3 = read_facts(3, &p3, &s3, &t3, &ps3, f3, sizeof f3) == 0, ok4 = read_facts(4, &p4, &s4, &t4, &ps4, f4, sizeof f4) == 0;
-    if (ok3 && ok4 && p3 == e && p4 == e && s3 == e && s4 == e && t3 == 0 && t4 == 0 && te >= 0 && ps3 == te && ps4 == te)
-        say("T6 session E's two callers: no terminal, one session, the parent its leader, alive (its /proc/PID/stat read)\n");
+    char sb[32];
+    ok = read_facts(3, &a) == 0 && read_facts(4, &b) == 0;
+    if (ok && a.pp == e && b.pp == e && a.sid == e && b.sid == e && a.tty == 0 && b.tty == 0 && te >= 0 && a.pstart == te && b.pstart == te)
+        say("T10 session E's two callers: no terminal, one session, the parent its leader, alive (its /proc/PID/stat read)\n");
     else
-        say("T6 session E's two callers: %s and %s; the leader's start %ld\n", esc(f3, (long)strlen(f3)), esc(f4, (long)strlen(f4)), te);
+        say("T10 session E's two callers: %s and %s; the leader's start %ld\n", esc(a.raw, (long)strlen(a.raw)),
+            esc(b.raw, (long)strlen(b.raw)), te);
     int st3 = slurp(HERE "/e3.st", sb, sizeof sb) > 0 ? atoi(sb) : -2;
     int st4 = slurp(HERE "/e4.st", sb, sizeof sb) > 0 ? atoi(sb) : -2;
-    say("T7 the first sudo -S in session E: %s\n", told(3, st3));
+    say("T11 the first sudo -S in session E: %s\n", told(3, st3));
     say("P11 a second sudo -S in session E, inside the timeout, its parent the same: %s\n", told(4, st4));
-    say("T8 the record after session E: %s\n", record(e, te, e, 1, "<the parent's pid>", "<the parent's start time>"));
-    say("T9 session E ended: its leader exited %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
+    say("T12 the record after session E: %s\n", record(e, te, e, "<the parent's pid>", "<the parent's start time>"));
+    say("T13 session E ended: its leader exited %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
     say("done\n");
     return 0;
 }
@@ -380,6 +432,43 @@ int main(int argc, char **argv) {
         return 1;
     }
     unlink(RECORD);
+
+    /* Session F: the callers handed to init, alive; init reaps every child
+     * (the leader, then the two callers), keeping each one's status. */
+    long ti = start_of(getpid());
+    fflush(stdout);
+    pid_t f = fork();
+    if (f == 0) session_f();
+    int got[8], how[8], n = 0, stf = -2;
+    for (;;) {
+        int st = 0;
+        pid_t w = waitpid(-1, &st, 0);
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0) break;
+        int code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
+        if (w == f) stf = code;
+        else if (n < 8) got[n] = w, how[n++] = code;
+    }
+    say("T1 session F: its leader in a session of its own with two callers, then ended; init lives on: %s\n",
+        stf == 0 ? "made" : "not made");
+    struct seen a, b;
+    int ok = read_facts(5, &a) == 0 && read_facts(6, &b) == 0;
+    int st5 = -2, st6 = -2;
+    for (int i = 0; i < n; i++) {
+        if (ok && got[i] == a.pid) st5 = how[i];
+        if (ok && got[i] == b.pid) st6 = how[i];
+    }
+    if (ok && a.pp == 1 && b.pp == 1 && a.sid > 0 && a.sid == b.sid && a.sid != 1 && a.tty == 0 && b.tty == 0 && ti >= 0 &&
+        a.pstart == ti && b.pstart == ti)
+        say("T2 session F's two callers: no terminal, one session, their parent init (pid 1, alive), handed to it\n");
+    else
+        say("T2 session F's two callers: %s and %s; init's start %ld\n", esc(a.raw, (long)strlen(a.raw)), esc(b.raw, (long)strlen(b.raw)),
+            ti);
+    say("T3 the first sudo -S in session F: %s\n", told(5, st5));
+    say("P12 a second sudo -S in session F, inside the timeout, its parent init too: %s\n", told(6, st6));
+    say("T4 the record after session F: %s\n", record(1, ti, a.sid, "1", "<init's start time>"));
+
+    /* Session D: the callers left with no parent once init has ended. */
     int ready[2];
     if (pipe(ready) != 0) return 1;
     fflush(stdout);
@@ -390,7 +479,7 @@ int main(int argc, char **argv) {
     }
     close(ready[1]);
     char c;
-    int ok = m > 0 && read(ready[0], &c, 1) == 1;
-    say("T1 session D: its leader in a session of its own with two callers; init ends: %s\n", ok ? "made" : "not made");
+    ok = m > 0 && read(ready[0], &c, 1) == 1;
+    say("T5 session D: its leader in a session of its own with two callers; init ends: %s\n", ok ? "made" : "not made");
     return ok ? 0 : 1;
 }
