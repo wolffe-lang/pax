@@ -1322,3 +1322,11 @@ as uid 1000, byte-identical.
 | `user/` (px117 change) | a write to the console calls `console.after_write` |
 | `../boot/screen.S`, `../boot/console.S` | `pax_screen_state` 80 words, `pax_con_state` 128 words |
 | `kmain_usbcheck.lu` | two more invariants: the queue merges and compacts motion of either sign |
+
+## px120 — a USB device plugged in after boot gets a record (pax#348)
+
+| module or file | what |
+|---|---|
+| `frames/` (px120 change) | `alloc_below(limit)`: the lowest free frame below a physical address, scanned from frame 0, `alloc`'s next-fit hint left where it is (row `out_of_memory`) |
+| `xhci/` (px120 change) | `page` asks `frames.alloc_below(4 GiB)` (it took `alloc`'s next frame and refused it when high, so once the hint had passed 4 GiB no device plugged in after boot got a record); a device that cannot be taken marks its port (a byte a root port in the controller's page from 2048, a bit a hub port in the hub's record, word 368), and a marked port is not tried again until it reads empty or its connect change bit is set (CSC, C_PORT_CONNECTION): one line a port change; a slot Enable Slot gives past MaxSlotsEn is disabled again |
+| `kmain_frames.lu` | step 6: `alloc_below` under a high hint (`below: …`, `tests/mpx2-frames` F9) |
