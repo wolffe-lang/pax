@@ -1,0 +1,19 @@
+px122 — prediction, written before the local timing takes report and before trunk 309036ec's mpx3-shell
+and mpx5-pelt jobs finish (2026-11-11, about 21:45Z). Read so far: the hosted logs and artifacts of runs
+42980205707 (3fa24cf5, green), 43013370273 (a04eb7b5) and 43025025659 attempt 3 (3b6e4b64).
+
+P1  Not a hang. Every cancelled step was passing rows at a steady rate until its job's limit: mpx3-shell's
+    xHCI MSI/INTx step was at boot 190 of 192 when cut, mpx5-pelt's root-disk leg 1107 s into a leg that took 1787 s green.
+P2  Not #344's boots in the main. The cut attempts ran on slower runners: wolf builds that have nothing to do
+    with the kernel took 1.6x as long (boreutils 185 s against 307 and 312 s), the screen's own copy timing
+    in each boot line doubled, and mpx3-shell's typing steps took 1.35x as long row for row.
+P3  #344 does add time to every boot: two beeps of about 100 and 200 ms timed by channel 2's edges, plus
+    small change (the marks, the kept console). On one host, the kernel's own `boot: N ms` line rises by
+    0.3 to 0.5 s on both tiers from 3fa24cf5 to 3b6e4b64, and mpx3-shell's typing-irq step (192 boots)
+    by 60 to 120 s, under 5% of it. a04eb7b5 and 3b6e4b64 build the same images for these legs.
+P4  Trunk 309036ec's run, on a runner like the green one's, finishes mpx3-shell inside its 120 minutes
+    (about 95) and mpx5-pelt inside its 210 (about 190), unless its runner is slow again.
+P5  The root cause is the two jobs' limits, not the kernel: mpx3-shell has no budget row and ran at 75% of
+    its limit when green; mpx5-pelt's budget (tests/ci-budgets.py) sizes main + root disk + one Linux
+    retry and leaves out the USB typing step (about 2430 s) added the same day, so a green attempt
+    already uses 89% of 210 minutes, not the 71% the budget claims.
