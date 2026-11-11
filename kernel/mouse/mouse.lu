@@ -156,9 +156,33 @@ fn s16(v: u64) -> u64 {
     if x & 0x8000 != 0 { x | 0xffffffffffff0000 } else { x }
 }
 
+/// The size of two's complement word `v`.
+fn mag(v: u64) -> u64 { if v & 0x8000000000000000 != 0 { !v + 1 } else { v } }
+
+/// `a + b` as two's complement words, each at most 2^32 either way
+/// (sign-extended i32s), without a wrap: wolf's arithmetic is checked, and
+/// a negative word is near 2^64 (px117: px109's `a + b` panicked on a
+/// merge or a compaction with any negative motion or wheel).
+fn sadd(a: u64, b: u64) -> u64 {
+    let na = a & 0x8000000000000000 != 0
+    let nb = b & 0x8000000000000000 != 0
+    if na == nb {
+        let m = mag(a) + mag(b)
+        return if na && m != 0 { !m + 1 } else { m }
+    }
+    let ma = mag(a)
+    let mb = mag(b)
+    if ma >= mb {
+        let m = ma - mb
+        return if na && m != 0 { !m + 1 } else { m }
+    }
+    let m = mb - ma
+    if nb && m != 0 { !m + 1 } else { m }
+}
+
 /// `a + b` held to `lo` .. `hi` (two's complement words).
 fn clamp_add(a: u64, b: u64, lo: u64, hi: u64) -> u64 {
-    let s = a + b
+    let s = sadd(a, b)
     if lt(s, lo) { lo } else if lt(hi, s) { hi } else { s }
 }
 
