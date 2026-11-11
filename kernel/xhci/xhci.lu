@@ -168,6 +168,8 @@ const PSUB: u64 = 62
 const PRLEN: u64 = 63
 const PLAYOUT: u64 = 64
 const PREPORT: u64 = 3072
+// px120: every DMA page lies below this (`page`).
+const LOW_DMA: u64 = 0x100000000
 // px78: the storage devices found (at most four), a page: count at 0,
 // device records from 1.
 var storage: u64 = 0
@@ -188,11 +190,14 @@ fn zero(a: u64, n: u64) {
 }
 fn page() -> u64 {
     let saved = sync.irq_save()
-    let p = frames.alloc() else 0
+    // A common low-DMA allocation policy also covers AC64=0 controllers;
+    // never truncate. px120 (pax#348): the lowest free frame below 4 GiB,
+    // asked for as such. Taking `alloc`'s next frame and refusing it when
+    // high failed every page once the allocator's hint had passed 4 GiB
+    // (a system that has run a while, with memory above 4 GiB), so a
+    // device plugged in after boot never got a record.
+    let p = frames.alloc_below(LOW_DMA) else 0
     if p == 0 { sync.irq_restore(saved); return 0 }
-    // A common low-DMA allocation policy also covers AC64=0 controllers.
-    // The allocator currently hands out low frames first. Never truncate.
-    if p >= 0x100000000 { frames.free(p); sync.irq_restore(saved); return 0 }
     let a = p + frames.hhdm()
     zero(a, 4096)
     sync.irq_restore(saved)
