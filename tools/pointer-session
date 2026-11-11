@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+"""Drive the console's pointer and mouse reports black-box (px117).
+
+Boots a probe image (user/elf/pointerprobe.c as its one program) on an xHCI
+controller with a USB keyboard on port 1, QEMU's usb-tablet on port 2 and
+its usb-mouse on port 3, and drives each step the probe announces
+(`PTRSTEP <row> <step>`) through QMP: input-send-event (the tablet's
+absolute position, the mouse's motion, buttons, the wheel, keys), the
+monitor's `mouse_set` (which pointer the events reach) and `screendump`.
+Every step ends with the key `.` typed on the USB keyboard, which the
+probe reads as the step's end: the bytes before it are what the step typed.
+
+The judge holds every step's bytes to the encoding the XTerm Control
+Sequences document gives for button-event tracking (1002) with the SGR
+encoding (1006): `CSI < Cb ; Cx ; Cy M` for a press or a motion, `m` for a
+release; Cb 0 left, 1 middle, 2 right, 32 + the button for a motion into
+another cell with it held, 64 and 65 the wheel, Shift 4, Meta (Alt) 8,
+Control 16 added; Cx and Cy the 1-based cell. The pointer's rows read the
+screen: the pointer is an arrow over one cell (ARROW below, as
+notes/px117-the-pointer.md draws it), black on its outline and white in its
+fill, the cell's own pixels elsewhere. Each row prints `PASS <row> ...` or
+`FAIL <row> <why>` at column 0; the exit status is 0 only when every row
+passed.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+import time
+
+ROWS = ['pointer-drawn', 'pointer-scroll', 'no-mode', 'sgr-buttons', 'drag', 'wheel', 'modifiers',
+        'relative', 'reset', 'unserved', 'owner-exits', 'owner-background', 'keys-interleaved', 'pty']
+# The arrow, a row of eight pixels a byte (bit 7 the leftmost): its outline
+# and its fill, sixteen rows (the cell's height at scale 1).
+OUTLINE = [0x80, 0xc0, 0xa0, 0x90, 0x88, 0x84, 0x82, 0x81, 0x8f, 0xa8, 0xd4, 0x94, 0x0a, 0x0a, 0x04, 0x00]
+FILL = [0x00, 0x00, 0x40, 0x60, 0x70, 0x78, 0x7c, 0x7e, 0x70, 0x50, 0x08, 0x08, 0x04, 0x04, 0x00, 0x00]
+BLACK, WHITE = (0, 0, 0), (255, 255, 255)
+ON = b'\x1b[?1002h\x1b[?1006h'
+# Where the steps click (column, row; 0-based cells).
+DRAWN1, DRAWN2, SCROLLED = (12, 3), (40, 20), (20, 10)
+HERE = (2, 2)
+# The books line's exact counts: the background row's press and release
+# withheld; three modes ended with their owners (an exit, a SIGKILL, the
+# background child's exit).
+WITHHELD, ENDED = 2, 3
+
+
+def sgr(b, cell, press=True):
+    c, r = cell
+    return f'\x1b[<{b};{c + 1};{r + 1}{"M" if press else "m"}'.encode()
+
+
+def click_bytes(b, cell, mods=0):
+    return sgr(b + mods, cell) + sgr(b + mods, cell, False)
+
+
+def expected(cols, rows):
+    """{(row label, step): the bytes the step types}."""
+    e = {}
+    e[('pointer-drawn', 0)] = b''
+    e[('pointer-scroll', 0)] = b''
+    e[('pointer-scroll', 1)] = b''
+    e[('no-mode', 0)] = b''
+    e[('no-mode', 1)] = click_bytes(0, (5, 5))
+    e[('sgr-buttons', 0)] = click_bytes(0, (10, 5)) + click_bytes(1, (11, 5)) + click_bytes(2, (12, 5))
+    e[('drag', 0)] = sgr(0, (5, 7)) + sgr(32, (6, 7)) + sgr(32, (8, 8)) + sgr(0, (8, 8), False)
+    e[('drag', 1)] = sgr(2, (9, 9)) + sgr(34, (10, 9)) + sgr(2, (10, 9), False)
+    e[('wheel', 0)] = sgr(64, (30, 10)) + sgr(65, (30, 10)) + sgr(64, (30, 10))
+    e[('modifiers', 0)] = (click_bytes(0, (3, 3), 4) + click_bytes(0, (3, 3), 16) + click_bytes(0, (3, 3), 8)
+                           + click_bytes(0, (3, 3), 20) + sgr(80, (3, 3)))
+    e[('relative', 0)] = click_bytes(0, (4, 2))
+    e[('relative', 1)] = click_bytes(0, (cols - 1, rows - 1))
+    for k, v in enumerate([True, False, True, False]):
+        e[('reset', k)] = click_bytes(0, HERE) if v else b''
+    for k in range(8):
+        e[('unserved', k)] = click_bytes(0, HERE) if k in (5, 6) else b''
+    for k, v in enumerate([True, False, False, True]):
+        e[('owner-exits', k)] = click_bytes(0, HERE) if v else b''
+    for k, v in enumerate([False, True, False, True]):
+        e[('owner-background', k)] = click_bytes(0, HERE) if v else b''
+    for k, letters in enumerate(('abcd', 'efgh')):
+        a, b, c, d = (x.encode() for x in letters)
+        e[('keys-interleaved', k)] = (sgr(0, HERE) + a + sgr(0, HERE, False) + b + sgr(64, HERE) + c
+                                      + click_bytes(2, HERE) + d)
+    e[('pty', 0)] = b''
+    e[('pty', 1)] = click_bytes(0, (4, 4))
+    return e
+
+
+def reports_in(e):
+    """How many reports the expected bytes hold (the books' typed count)."""
+    return sum(v.count(b'\x1b[<') for v in e.values())
+
+
+def parse(text):
+    """The probe's lines: the window, each step's bytes, the pty's two sides,
+    the kernel's pointer line."""
+    win, ins, pty, books, notes = None, {}, {}, None, []
+    for line in text.splitlines():
+        line = line.strip('\r')
+        if line.startswith('PTRWIN '):
+            _, r, c = line.split()
+            win = (int(r), int(c))
+        elif line.startswith('PTRIN '):
+            parts = line.split()
+            i, k, h = int(parts[1]), int(parts[2]), parts[3]
+            extra = next((p[1:] for p in parts[4:] if p.startswith('+')), '')
+            ins[(i, k)] = (b'' if h == '-' else bytes.fromhex(h), bytes.fromhex(extra), 'TIMEOUT' in parts[4:])
+        elif line.startswith('PTRPTY '):
+            parts = line.split()
+            pty[parts[1]] = (b'' if parts[2] == '-' else bytes.fromhex(parts[2]), 'TIMEOUT' in parts[3:])
+        elif line.startswith('PTRNOTE '):
+            notes.append(line[8:])
+        else:
+            m = re.match(r'^console: pointer (\d+) moves, (\d+) cycles a move \(least (\d+)\), reports (\d+) typed, '
+                         r'(\d+) withheld, (\d+) dropped, modes ended (\d+)$', line)
+            if m:
+                books = dict(zip(('moves', 'cycles', 'least', 'typed', 'withheld', 'dropped', 'ended'),
+                                 (int(g) for g in m.groups())))
+    return win, ins, pty, books, notes
+
+
+def read_ppm(path):
+    """(width, height, rgb bytes) of a binary PPM (P6, maxval 255)."""
+    data = Path(path).read_bytes()
+    fields, pos = [], 0
+    while len(fields) < 4:
+        while data[pos:pos + 1].isspace():
+            pos += 1
+        if data[pos:pos + 1] == b'#':
+            pos = data.index(b'\n', pos) + 1
+            continue
+        end = pos
+        while not data[end:end + 1].isspace():
+            end += 1
+        fields.append(data[pos:end])
+        pos = end
+    if fields[0] != b'P6' or fields[3] != b'255':
+        raise ValueError(f'{path}: not a P6 PPM of maxval 255')
+    w, h = int(fields[1]), int(fields[2])
+    return w, h, data[pos + 1:pos + 1 + w * h * 3]
+
+
+class Picture:
+    def __init__(self, path):
+        self.w, self.h, self.rgb = read_ppm(path)
+        self.scale = 2 if self.w > 2560 else 1
+        self.cw, self.ch = 8 * self.scale, 16 * self.scale
+
+    def px(self, x, y):
+        i = (y * self.w + x) * 3
+        return tuple(self.rgb[i:i + 3])
+
+    def mask(self, dx, dy):
+        """'o' outline, 'f' fill, None: the arrow at pixel (dx, dy) of a cell."""
+        bit = 0x80 >> (dx // self.scale)
+        r = dy // self.scale
+        return 'o' if OUTLINE[r] & bit else 'f' if FILL[r] & bit else None
+
+    def arrow_at(self, cell):
+        """Whether the cell's box shows the arrow's outline and fill."""
+        c, r = cell
+        for dy in range(self.ch):
+            for dx in range(self.cw):
+                m = self.mask(dx, dy)
+                if m and self.px(c * self.cw + dx, r * self.ch + dy) != (BLACK if m == 'o' else WHITE):
+                    return False
+        return True
+
+
+def pointer_over(before, after, cell):
+    """Why `after` is not `before` with the arrow over `cell` and nothing else
+    changed ('' when it is)."""
+    if (before.w, before.h) != (after.w, after.h):
+        return f'the screen changed size, {before.w}x{before.h} to {after.w}x{after.h}'
+    c0, r0 = cell[0] * after.cw, cell[1] * after.ch
+    stray, wrong, changed = 0, 0, 0
+    line = after.w * 3
+    for y in range(after.h):
+        a, b = after.rgb[y * line:(y + 1) * line], before.rgb[y * line:(y + 1) * line]
+        if a == b:
+            continue
+        for x in range(after.w):
+            if a[x * 3:x * 3 + 3] != b[x * 3:x * 3 + 3]:
+                changed += 1
+                if not (c0 <= x < c0 + after.cw and r0 <= y < r0 + after.ch):
+                    stray += 1
+    for dy in range(after.ch):
+        for dx in range(after.cw):
+            m = after.mask(dx, dy)
+            want = BLACK if m == 'o' else WHITE if m == 'f' else before.px(c0 + dx, r0 + dy)
+            if after.px(c0 + dx, r0 + dy) != want:
+                wrong += 1
+    if changed == 0:
+        return 'no pixel changed: no pointer drawn'
+    if stray or wrong:
+        return f'{stray} pixels changed outside cell {cell}, {wrong} pixels of the cell not the arrow over the cell'
+    return ''
+
+
+class Judge:
+    def __init__(self):
+        self.failed = []
+        self.judged = 0
+
+    def row(self, name, ok, detail):
+        print(f'{"PASS" if ok else "FAIL"} {name} {detail}', flush=True)
+        self.judged += 1
+        if not ok:
+            self.failed.append(name)
+
+    def judge(self, text, pictures):
+        win, ins, pty, books, notes = parse(text)
+        if win is None or win[0] == 0 or win[1] == 0:
+            self.row('window', False, f'no PTRWIN line with a size: {win}')
+            rows, cols = 50, 160
+        else:
+            rows, cols = win
+        e = expected(cols, rows)
+        for i, label in enumerate(ROWS):
+            steps = sorted(k for (lb, k) in e if lb == label)
+            why = []
+            for k in steps:
+                got = ins.get((i, k))
+                if got is None:
+                    why.append(f'step {k}: no PTRIN line')
+                    continue
+                data, extra, timeout = got
+                if timeout:
+                    why.append(f'step {k}: no "." came (the step end was lost or out of order)')
+                if extra:
+                    why.append(f'step {k}: {extra!r} came after the "."')
+                if data != e[(label, k)]:
+                    why.append(f'step {k}: typed {data!r}, want {e[(label, k)]!r}')
+            if label == 'pointer-drawn':
+                for name in ('drawn-a', 'drawn-b', 'drawn-c'):
+                    if name not in pictures:
+                        why.append(f'no screendump {name}')
+                if not why:
+                    a, b, c = (pictures[n] for n in ('drawn-a', 'drawn-b', 'drawn-c'))
+                    for pic, cell, n in ((b, DRAWN1, 'b'), (c, DRAWN2, 'c')):
+                        w = pointer_over(a, pic, cell)
+                        if w:
+                            why.append(f'screen {n}: {w}')
+            if label == 'pointer-scroll':
+                d = pictures.get('scroll-d')
+                if d is None:
+                    why.append('no screendump scroll-d')
+                else:
+                    cells = [(c, r) for r in range(d.h // d.ch) for c in range(d.w // d.cw) if d.arrow_at((c, r))]
+                    if cells != [SCROLLED]:
+                        why.append(f'the arrow on cells {cells[:8]}, want only {SCROLLED}')
+            if label == 'pty':
+                master = pty.get('master', (None, False))[0]
+                slave, stimeout = pty.get('slave', (None, False))
+                if master != ON:
+                    why.append(f'the master read {master!r}, want the slave\'s {ON!r} unchanged')
+                if slave != sgr(0, (2, 3)) or stimeout:
+                    why.append(f'the slave read {slave!r}{" (no .)" if stimeout else ""}, want the master\'s {sgr(0, (2, 3))!r}')
+            self.row(label, not why, '; '.join(why) if why else
+                     f'{len(steps)} steps as the document encodes them' + (' and the screen as drawn' if label.startswith('pointer') else ''))
+        want = reports_in(e)
+        if books is None:
+            self.row('books', False, 'no `console: pointer ...` line at the end')
+        else:
+            ok = (books['moves'] > 0 and books['typed'] == want and books['withheld'] == WITHHELD
+                  and books['dropped'] == 0 and books['ended'] == ENDED)
+            self.row('books', ok, ' '.join(f'{k}={v}' for k, v in books.items())
+                     + ('' if ok else f' (want moves>0 typed={want} withheld={WITHHELD} dropped=0 ended={ENDED})'))
+        for n in notes:
+            print(f'NOTE {n}', flush=True)
+        return not self.failed
+
+
+def run(args):
+    out = Path(args.output).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    serial = out / 'serial.log'
+    for stale in [serial, *out.glob('*.ppm')]:
+        stale.unlink(missing_ok=True)
+    sockdir = Path(os.environ.get('TMPDIR') or out)
+    sock = sockdir / f'pxp-{os.getpid()}.sock'
+    if len(str(sock).encode()) > 100:
+        raise RuntimeError(f'QMP socket path is {len(str(sock).encode())} bytes, over 100: {sock}')
+    sock.unlink(missing_ok=True)
+    root = Path(__file__).resolve().parents[1]
+    cmd = [str(root / 'tools/qemu-run'), '--firmware', args.firmware, '--accel', args.accel,
+           '--usb-kbd=root', '--serial', str(serial), '--timeout', '300',
+           str(Path(args.image).resolve()), '--',
+           '-qmp', f'unix:{sock},server=on,wait=off',
+           '-device', 'usb-tablet,id=pax-tablet,bus=pax-usb.0,port=2',
+           '-device', 'usb-mouse,id=pax-mouse,bus=pax-usb.0,port=3']
+    with (out / 'runner.log').open('wb') as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        conn = reader = None
+        start = time.monotonic()
+        try:
+            while not sock.exists():
+                if proc.poll() is not None or time.monotonic() - start > 15:
+                    raise RuntimeError('QMP did not start')
+                time.sleep(.02)
+            conn = socket.socket(socket.AF_UNIX)
+            conn.settimeout(20)
+            conn.connect(str(sock))
+            reader = conn.makefile('rb')
+            json.loads(reader.readline())
+
+            def execute(name, arguments=None):
+                payload = {'execute': name}
+                if arguments is not None:
+                    payload['arguments'] = arguments
+                conn.sendall(json.dumps(payload).encode() + b'\n')
+                while True:
+                    reply = json.loads(reader.readline())
+                    if 'error' in reply:
+                        raise RuntimeError(reply)
+                    if 'return' in reply:
+                        return reply['return']
+
+            def hmp(command):
+                return execute('human-monitor-command', {'command-line': command})
+
+            execute('qmp_capabilities')
+
+            def select(which):
+                """`mouse_set` to the tablet or the mouse, by `info mice`'s
+                names (`QEMU HID Tablet (absolute)`, `QEMU HID Mouse`)."""
+                found = []
+                for line in hmp('info mice').splitlines():
+                    m = re.match(r'^\s*\*?\s*Mouse #(\d+): (.*)$', line)
+                    if m:
+                        found.append((int(m[1]), m[2]))
+                pick = [i for i, n in found if ('HID Tablet' if which == 'tablet' else 'HID Mouse') in n]
+                if not pick:
+                    print(f'NOTE no {which} in info mice: {found}', flush=True)
+                    return
+                hmp(f'mouse_set {pick[0]}')
+                time.sleep(.05)
+
+            def send(*events):
+                execute('input-send-event', {'events': list(events)})
+
+            def btn(button, down):
+                return {'type': 'btn', 'data': {'down': down, 'button': button}}
+
+            def key(name, down):
+                return {'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': name}}}
+
+            state = {'cols': 160, 'rows': 50}
+
+            def xv(c, n):
+                return 32768 * (2 * c + 1) // (2 * n)
+
+            def at(cell, nudge=0, pause=.05):
+                send({'type': 'abs', 'data': {'axis': 'x', 'value': xv(cell[0], state['cols']) + nudge}},
+                     {'type': 'abs', 'data': {'axis': 'y', 'value': xv(cell[1], state['rows'])}})
+                time.sleep(pause)
+
+            def rel(dx, dy, pause=.008):
+                send({'type': 'rel', 'data': {'axis': 'x', 'value': dx}}, {'type': 'rel', 'data': {'axis': 'y', 'value': dy}})
+                time.sleep(pause)
+
+            def press(b, pause=.05):
+                send(btn(b, True)); time.sleep(pause)
+
+            def release(b, pause=.05):
+                send(btn(b, False)); time.sleep(pause)
+
+            def click(b):
+                press(b); release(b)
+
+            def tap(name, pause=.03):
+                send(key(name, True)); time.sleep(pause)
+                send(key(name, False)); time.sleep(pause)
+
+            def hold(name, down):
+                send(key(name, down)); time.sleep(.05)
+
+            def dump(name):
+                path = out / f'{name}.ppm'
+                execute('screendump', {'filename': str(path)})
+                until = time.monotonic() + 5
+                while (not path.exists() or path.stat().st_size == 0) and time.monotonic() < until:
+                    time.sleep(.02)
+
+            def inject(label, k):
+                if label == 'pointer-drawn':
+                    select('tablet')
+                    time.sleep(.3)
+                    dump('drawn-a')
+                    at(DRAWN1, pause=.3)
+                    dump('drawn-b')
+                    at(DRAWN2, pause=.3)
+                    dump('drawn-c')
+                elif label == 'pointer-scroll':
+                    if k == 0:
+                        at(SCROLLED, pause=.2)
+                    else:
+                        time.sleep(.3)
+                        dump('scroll-d')
+                elif label == 'no-mode':
+                    at((5, 5)); click('left')
+                    if k == 0:
+                        click('wheel-up')
+                elif label == 'sgr-buttons':
+                    at((10, 5)); click('left')
+                    at((11, 5)); click('middle')
+                    at((12, 5)); click('right')
+                elif label == 'drag':
+                    if k == 0:
+                        at((5, 7)); press('left'); at((6, 7)); at((6, 7), nudge=40); at((8, 8)); release('left')
+                    else:
+                        at((9, 9)); press('right'); at((10, 9)); release('right')
+                elif label == 'wheel':
+                    at((30, 10)); click('wheel-up'); click('wheel-down'); click('wheel-up')
+                elif label == 'modifiers':
+                    at((3, 3))
+                    for mods in (['shift'], ['ctrl'], ['alt'], ['shift', 'ctrl']):
+                        for m in mods:
+                            hold(m, True)
+                        click('left')
+                        for m in reversed(mods):
+                            hold(m, False)
+                    hold('ctrl', True); click('wheel-up'); hold('ctrl', False)
+                elif label == 'relative':
+                    select('mouse')
+                    if k == 0:
+                        for _ in range(30):
+                            rel(-100, -100)
+                        rel(35, 37, pause=.1)
+                    else:
+                        for _ in range(40):
+                            rel(100, 100)
+                        time.sleep(.1)
+                    click('left')
+                    select('tablet')
+                elif label == 'keys-interleaved':
+                    g = .02 if k == 0 else .002
+                    a, b, c, d = 'abcd' if k == 0 else 'efgh'
+                    at(HERE, pause=.1)
+                    press('left', g); tap(a, g); release('left', g); tap(b, g)
+                    send(btn('wheel-up', True)); time.sleep(g); send(btn('wheel-up', False)); time.sleep(g)
+                    tap(c, g); press('right', g); release('right', g); tap(d, g)
+                elif label == 'pty':
+                    at((4, 4)); click('left')
+                else:  # reset, unserved, owner-exits, owner-background
+                    at(HERE); click('left')
+
+            handled = set()
+            while time.monotonic() - start < 280:
+                raw = serial.read_bytes() if serial.exists() else b''
+                text = raw.decode(errors='replace')
+                if 'PTRDONE' in text:
+                    break
+                if 'PANIC' in text or proc.poll() is not None:
+                    raise RuntimeError('guest ended before PTRDONE')
+                m = re.search(r'PTRWIN (\d+) (\d+)', text)
+                if m and int(m[1]) and int(m[2]):
+                    state['rows'], state['cols'] = int(m[1]), int(m[2])
+                for s in re.finditer(r'PTRSTEP (\d+) (\d+)\r?\n', text):
+                    i, k = int(s[1]), int(s[2])
+                    if (i, k) in handled or i >= len(ROWS):
+                        continue
+                    handled.add((i, k))
+                    inject(ROWS[i], k)
+                    time.sleep(.15)
+                    tap('dot')
+                time.sleep(.01)
+            else:
+                raise RuntimeError('pointer session deadline')
+            until = time.monotonic() + 10
+            while b'\nhalt\r\n' not in serial.read_bytes() and time.monotonic() < until:
+                time.sleep(.02)
+            if b'\nhalt\r\n' not in serial.read_bytes():
+                raise RuntimeError('PAX did not reach halt')
+            execute('quit')
+            proc.wait(timeout=10)
+        finally:
+            if reader is not None:
+                reader.close()
+            if conn is not None:
+                conn.close()
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+            sock.unlink(missing_ok=True)
+    return judge_dir(out, args)
+
+
+QCODE = {' ': 'spc', '/': 'slash', '.': 'dot', '\r': 'ret', ';': 'semicolon', '-': 'minus', '\x1b': 'esc'}
+SHIFTED = {':': 'semicolon'}
+# yew's document menu (its src/edit/ctxrows.lu): two of its rows.
+YEW_MENU = (b'Select All', b'Command Palette...')
+YEW_AT = (10, 3)
+
+
+def run_yew(args):
+    """tests/mpx5-yew's Y9: yew under pelt on PAX's console, typed at the USB
+    keyboard (so the window is the screen's grid), a right click on the
+    tablet over its document; yew's document menu among the bytes it writes
+    after the click and none before; the screen read with the menu up."""
+    out = Path(args.output).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    serial = out / 'serial.log'
+    for stale in [serial, *out.glob('*.ppm')]:
+        stale.unlink(missing_ok=True)
+    sockdir = Path(os.environ.get('TMPDIR') or out)
+    sock = sockdir / f'pxy-{os.getpid()}.sock'
+    if len(str(sock).encode()) > 100:
+        raise RuntimeError(f'QMP socket path is {len(str(sock).encode())} bytes, over 100: {sock}')
+    sock.unlink(missing_ok=True)
+    root = Path(__file__).resolve().parents[1]
+    cmd = [str(root / 'tools/qemu-run'), '--firmware', args.firmware, '--accel', args.accel,
+           '--usb-kbd=root', '--serial', str(serial), '--timeout', '600',
+           str(Path(args.image).resolve()), '--', '-m', '512M',
+           '-qmp', f'unix:{sock},server=on,wait=off',
+           '-device', 'usb-tablet,id=pax-tablet,bus=pax-usb.0,port=2']
+    why = []
+    with (out / 'runner.log').open('wb') as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        conn = reader = None
+        start = time.monotonic()
+        try:
+            while not sock.exists():
+                if proc.poll() is not None or time.monotonic() - start > 15:
+                    raise RuntimeError('QMP did not start')
+                time.sleep(.02)
+            conn = socket.socket(socket.AF_UNIX)
+            conn.settimeout(20)
+            conn.connect(str(sock))
+            reader = conn.makefile('rb')
+            json.loads(reader.readline())
+
+            def execute(name, arguments=None):
+                payload = {'execute': name}
+                if arguments is not None:
+                    payload['arguments'] = arguments
+                conn.sendall(json.dumps(payload).encode() + b'\n')
+                while True:
+                    reply = json.loads(reader.readline())
+                    if 'error' in reply:
+                        raise RuntimeError(reply)
+                    if 'return' in reply:
+                        return reply['return']
+
+            execute('qmp_capabilities')
+
+            def key(name, down):
+                execute('input-send-event', {'events': [{'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': name}}}]})
+                time.sleep(.03)
+
+            def typed(text):
+                for ch in text:
+                    if ch in SHIFTED:
+                        key('shift', True); key(SHIFTED[ch], True); key(SHIFTED[ch], False); key('shift', False)
+                    else:
+                        q = QCODE.get(ch, ch)
+                        key(q, True); key(q, False)
+
+            def wait_for(pattern, after, limit):
+                until = time.monotonic() + limit
+                while time.monotonic() < until:
+                    data = serial.read_bytes() if serial.exists() else b''
+                    if pattern in data[after:]:
+                        return data
+                    if b'PANIC' in data or proc.poll() is not None:
+                        raise RuntimeError('guest ended early')
+                    time.sleep(.05)
+                raise RuntimeError(f'no {pattern!r} in {limit} s')
+
+            def quiet(seconds, limit):
+                """Until the serial log has not grown for `seconds`."""
+                until = time.monotonic() + limit
+                size, since = -1, time.monotonic()
+                while time.monotonic() < until:
+                    n = serial.stat().st_size
+                    if n != size:
+                        size, since = n, time.monotonic()
+                    elif time.monotonic() - since >= seconds:
+                        return
+                    time.sleep(.05)
+
+            data = wait_for(b'$ ', 0, 240)
+            mark = len(data)
+            typed('cd /home/pax\r')
+            data = wait_for(b'$ ', mark, 60)
+            mark = len(data)
+            typed('yew notes.txt\r')
+            wait_for(b'\x1b[?1002h\x1b[?1006h', mark, 120)
+            quiet(3, 120)
+            before = serial.read_bytes()
+            cols, nrows = 160, 50
+            m = re.search(rb'screen: (\d+)x(\d+) ', before)
+            if m:
+                scale = 2 if int(m[1]) > 2560 else 1
+                cols, nrows = int(m[1]) // (8 * scale), int(m[2]) // (16 * scale)
+            hmp_found = execute('human-monitor-command', {'command-line': 'info mice'})
+            pick = re.search(r'Mouse #(\d+): QEMU HID Tablet', hmp_found)
+            if pick:
+                execute('human-monitor-command', {'command-line': f'mouse_set {pick[1]}'})
+            x = 32768 * (2 * YEW_AT[0] + 1) // (2 * cols)
+            y = 32768 * (2 * YEW_AT[1] + 1) // (2 * nrows)
+            execute('input-send-event', {'events': [{'type': 'abs', 'data': {'axis': 'x', 'value': x}},
+                                                    {'type': 'abs', 'data': {'axis': 'y', 'value': y}}]})
+            time.sleep(.2)
+            clicked = len(serial.read_bytes())
+            for down in (True, False):
+                execute('input-send-event', {'events': [{'type': 'btn', 'data': {'down': down, 'button': 'right'}}]})
+                time.sleep(.1)
+            try:
+                wait_for(YEW_MENU[1], clicked, 30)
+            except RuntimeError as error:
+                why.append(f'after the right click: {error}')
+            quiet(1, 30)
+            execute('screendump', {'filename': str(out / 'menu.ppm')})
+            time.sleep(.5)
+            after = serial.read_bytes()
+            for label in YEW_MENU:
+                if label in after[:clicked]:
+                    why.append(f'{label!r} before the click')
+                if label not in after[clicked:]:
+                    why.append(f'no {label!r} after the click')
+            typed('\x1b')
+            quiet(1, 30)
+            typed(':q\r')
+            wait_for(b'$ ', len(after), 60)
+            typed('exit\r')
+            wait_for(b'\nhalt\r\n', 0, 60)
+            execute('quit')
+            proc.wait(timeout=10)
+        finally:
+            if reader is not None:
+                reader.close()
+            if conn is not None:
+                conn.close()
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+            sock.unlink(missing_ok=True)
+    text = serial.read_bytes()
+    if not (out / 'menu.ppm').exists():
+        why.append('no screendump')
+    if b'PAX: init /bin/as ended with status 0' not in text:
+        why.append('init did not end with status 0')
+    print(f'{"FAIL" if why else "PASS"} yew-menu {args.firmware} {args.accel}: '
+          + ('; '.join(why) if why else f'a right click on the tablet at cell {YEW_AT} opened yew\'s document menu '
+             f'({", ".join(l.decode() for l in YEW_MENU)} written after the click, none before); the screen kept as menu.ppm'),
+          flush=True)
+    return 1 if why else 0
+
+
+def judge_dir(out, args):
+    text = (out / 'serial.log').read_bytes().decode(errors='replace')
+    pictures = {}
+    for p in out.glob('*.ppm'):
+        try:
+            pictures[p.stem] = Picture(p)
+        except (ValueError, IndexError) as error:
+            print(f'NOTE {p.name}: {error}', flush=True)
+    judge = Judge()
+    ok = judge.judge(text, pictures)
+    print(f'{"PASS" if ok else "FAIL"} pointer-session {args.firmware} {args.accel}: '
+          f'{judge.judged - len(judge.failed)} of {judge.judged} rows'
+          + (f'; red: {" ".join(judge.failed)}' if judge.failed else ''), flush=True)
+    return 0 if ok else 1
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image')
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--firmware', choices=['bios', 'uefi'], default='bios')
+    parser.add_argument('--accel', choices=['auto', 'kvm', 'tcg'], default='auto')
+    parser.add_argument('--judge', action='store_true', help='judge the serial log and screendumps already in OUTPUT')
+    parser.add_argument('--yew', action='store_true', help="tests/mpx5-yew's Y9: IMAGE is its session image")
+    a = parser.parse_args()
+    if a.judge:
+        sys.exit(judge_dir(Path(a.output).resolve(), a))
+    if not a.image:
+        parser.error('--image is needed to boot')
+    try:
+        sys.exit(run_yew(a) if a.yew else run(a))
+    except (RuntimeError, OSError) as error:
+        print(f'FAIL {"yew-menu" if a.yew else "pointer-session"} {a.firmware} {a.accel}: {error}', flush=True)
+        sys.exit(1)
