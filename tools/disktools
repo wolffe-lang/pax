@@ -11,13 +11,15 @@
 #
 # DIR is mounted read-write at the same path inside the container and is
 # its working directory; the program's arguments name files in it. The
-# packages are fetched once by digest into $PAX_CACHE (archive.ubuntu.com,
-# then Launchpad's librarian), unpacked by the image's own dpkg-deb into
-# $PAX_CACHE/disktools-<digest of the pin>/root (no package script runs:
-# `dpkg-deb -x` only), and mounted read-only at /opt/pax-disktools, with
+# packages are taken by digest through tools/fetch-pinned (px118: from
+# its store, $PAX_CACHE/pinned, read again on every take, or fetched from
+# archive.ubuntu.com, then Launchpad's librarian), copied into
+# $PAX_CACHE/disktools-<digest of the pin>/debs and unpacked once by the
+# image's own dpkg-deb into its root/ (no package script runs:
+# `dpkg-deb -x` only), mounted read-only at /opt/pax-disktools, with
 # PATH and LD_LIBRARY_PATH pointing there first; blkid is the image's
-# own util-linux. The container has no network (but for the one fetch
-# run, which uses curl on the host) and runs as root inside its own user
+# own util-linux. The container has no network (the fetch is curl on
+# the host, in tools/fetch-pinned) and runs as root inside its own user
 # namespace (rootless podman) or as the caller (CI's Docker).
 # PAX_DISKTOOLS_LOCALE selects the oracle locale (default C); UTF-8 name
 # differentials request C.UTF-8 explicitly.
@@ -47,22 +49,18 @@ else
     opts=(--user "$(id -u):$(id -g)")
 fi
 
-# The packages, fetched and unpacked once.
+# The packages, each taken by digest (tools/fetch-pinned) and unpacked once.
 if [ ! -f "$store/.unpacked" ]; then
-    need curl
+    rm -rf "$store/debs"
     mkdir -p "$store/debs" "$PAX_CACHE"
     for p in $DISKTOOLS_DEBS; do
-        f_var=${p}_FILE; pool_var=${p}_POOL; sum_var=${p}_SHA256
-        f=${!f_var}; pool=${!pool_var}; sum=${!sum_var}
-        deb=$store/debs/$f
-        if [ ! -f "$deb" ] || [ "$(sha256_of "$deb")" != "$sum" ]; then
-            enc=${f//+/%2b}
-            curl -sSfL -o "$deb.part" "http://archive.ubuntu.com/ubuntu/pool/$pool/$enc" \
-                || curl -sSfL -o "$deb.part" "https://launchpad.net/ubuntu/+archive/primary/+files/$enc" \
-                || die "cannot fetch $f"
-            mv "$deb.part" "$deb"
-        fi
-        [ "$(sha256_of "$deb")" = "$sum" ] || die "$f: sha256 $(sha256_of "$deb"), the pin says $sum"
+        f_var=${p}_FILE; sum_var=${p}_SHA256
+        f=${!f_var}; sum=${!sum_var}
+        rc=0
+        deb=$("$PAX_ROOT/tools/fetch-pinned" disktools "$f") || rc=$?
+        [ "$rc" = 0 ] || die "cannot have $f by its digest (tools/fetch-pinned exit $rc, its reason above)"
+        cp "$deb" "$store/debs/$f"
+        [ "$(sha256_of "$store/debs/$f")" = "$sum" ] || die "$f: sha256 $(sha256_of "$store/debs/$f"), the pin says $sum"
     done
     rm -rf "$store/root"
     mkdir -p "$store/root"

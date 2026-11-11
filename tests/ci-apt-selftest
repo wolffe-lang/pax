@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# tests/ci-apt-selftest — tools/ci-apt installs a job's packages from a
+# whole snapshot with no network, from the archive within its bounds when
+# there is none, and never calls a package installed that is not (px118).
+# No network and no root: a fake `apt-get` (every call logged; its
+# update, download and install answer as each row asks), a fake
+# `dpkg-query` over the fake's installed list and a fake `sudo` ahead of
+# the real ones; the real timeout(1) bounds the fake.
+#
+#   A1  cold, the archive answering: update, download, install from the
+#       downloaded files; the snapshot is those files and a MANIFEST (the
+#       package list, each file's sha256); save=true; every package
+#       installed.
+#   A2  warm, an exact hit: installed from the snapshot's files with
+#       --no-download; no update and no download asked; no save.
+#   A3  warm, a file of the snapshot altered: a warning naming it, then
+#       the archive; no save (the key exists).
+#   A4  cold in an outage (the download fails): exit 1, an ::error::
+#       naming the key and the packages; nothing installed, no save.
+#   A5  a hung archive: the update and the download cut at their bounds
+#       (2 s each here); exit 1 well inside the job's own limit.
+#   A6  stale: the download fails and the cache gave an earlier image's
+#       snapshot of the same packages: a warning naming it, installed
+#       from its files, no save.
+#   A7  the install leaves a package out: exit 1, `not installed: NAME`
+#       (a snapshot never turns a missing tool green).
+#   A8  the install fails after a whole download (not the network):
+#       exit 1, and the earlier image's snapshot beside it not tried.
+#   A9  the key: the same packages in any order give one key, another
+#       package another; the runner image's version is in it; the prefix
+#       is the key without that version.
+# Exit 0 when every row held; each failing row is named.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "$here/.." && pwd)
+tool=$root/tools/ci-apt
+w=$(mktemp -d "${TMPDIR:-/tmp}/ci-apt-selftest.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+fail=0
+bad() { echo "FAIL $*"; fail=1; }
+ok() { echo "PASS $*"; }
+
+mkdir -p "$w/bin"
+cat > "$w/bin/sudo" <<'EOF'
+#!/bin/sh
+exec "$@"
+EOF
+cat > "$w/bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+# The fake archive: FAKE_UPDATE, FAKE_FETCH (ok, fail, hang), FAKE_INSTALL
+# (ok, fail), FAKE_DROP (a package the install leaves out).
+echo "$*" >> "$FAKE/calls"
+mode= dl= nodl= arch= files=() pkgs=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        -o) case $2 in Dir::Cache::Archives=*) arch=${2#*=} ;; esac; shift 2 ;;
+        update|install) mode=$1; shift ;;
+        --download-only) dl=1; shift ;;
+        --no-download) nodl=1; shift ;;
+        -*) shift ;;
+        */*) files+=("$1"); shift ;;
+        *) pkgs+=("$1"); shift ;;
+    esac
+done
+case $mode in
+    update)
+        case ${FAKE_UPDATE:-ok} in ok) exit 0 ;; hang) exec sleep 30 ;; *) exit 100 ;; esac ;;
+    install)
+        if [ -n "$dl" ]; then
+            case ${FAKE_FETCH:-ok} in
+                fail) echo "E: Failed to fetch: Temporary failure resolving 'archive.ubuntu.com'"; exit 100 ;;
+                hang) exec sleep 30 ;;
+            esac
+            for p in "${pkgs[@]}"; do printf 'the package %s\n' "$p" > "$arch/${p}_1.0_amd64.deb"; done
+            printf 'a dependency\n' > "$arch/libdep_2.0_amd64.deb"
+            exit 0
+        fi
+        [ -n "$nodl" ] || { echo "the fake answers only --download-only and --no-download"; exit 100; }
+        [ "${FAKE_INSTALL:-ok}" = ok ] || { echo "E: Sub-process /usr/bin/dpkg returned an error code (1)"; exit 100; }
+        if [ "${#files[@]}" -gt 0 ]; then
+            for f in "${files[@]}"; do b=${f##*/}; echo "${b%%_*}" >> "$FAKE/installed"; done
+        else
+            for p in "${pkgs[@]}"; do
+                [ -f "$arch/${p}_1.0_amd64.deb" ] || { echo "E: no file for $p and --no-download"; exit 100; }
+                echo "$p" >> "$FAKE/installed"
+            done
+            echo libdep >> "$FAKE/installed"
+        fi
+        [ -z "${FAKE_DROP:-}" ] || sed -i "/^${FAKE_DROP}\$/d" "$FAKE/installed"
+        exit 0 ;;
+esac
+exit 100
+EOF
+cat > "$w/bin/dpkg-query" <<'EOF'
+#!/usr/bin/env bash
+# The fake status: `ii ` for a package the fake apt-get installed.
+fmt=
+while [ $# -gt 0 ]; do case $1 in -W) shift ;; -f=*) fmt=${1#-f=}; shift ;; -f) fmt=$2; shift 2 ;; *) break ;; esac; done
+rc=0
+for p in "$@"; do
+    if grep -qx "$p" "$FAKE/installed" 2>/dev/null; then
+        case $fmt in *Status-Abbrev*) printf 'ii ' ;; *) printf '%s 1.0, ' "$p" ;; esac
+    else
+        rc=1
+    fi
+done
+exit $rc
+EOF
+chmod +x "$w/bin/"*
+
+PKGS="qemu-system-x86 ovmf xorriso"
+# run NAME ENV...: a fresh fake system (nothing installed), ci-apt install
+# PKGS with ENV; $rc, $secs, and the files out (GITHUB_OUTPUT), log, calls.
+run() {
+    local name=$1 t0
+    shift
+    mkdir -p "$w/$name/tmp"
+    : > "$w/$name/out"; : > "$w/$name/calls"; : > "$w/$name/installed"
+    t0=$SECONDS rc=0
+    # shellcheck disable=SC2086
+    env PATH="$w/bin:$PATH" FAKE="$w/$name" GITHUB_ACTIONS=true GITHUB_OUTPUT="$w/$name/out" \
+        RUNNER_TEMP="$w/$name/tmp" PAX_APT_DIR="$w/snap" ImageOS=ubuntu24 ImageVersion=20261101.1 "$@" \
+        "$tool" install $PKGS > "$w/$name/log" 2>&1 || rc=$?
+    secs=$((SECONDS - t0))
+}
+log() { tr '\n' '|' < "$w/$1/log"; }
+calls() { grep -c "$2" "$w/$1/calls"; }
+installed() { [ "$(sort "$w/$1/installed" | tr '\n' ' ')" = "libdep ovmf qemu-system-x86 xorriso " ]; }
+key=$(env ImageOS=ubuntu24 ImageVersion=20261101.1 "$tool" key $PKGS | sed -n 's/^key=//p')
+
+# A1
+run a1 PAX_APT_HIT=false
+if [ "$rc" = 0 ] && grep -qx 'save=true' "$w/a1/out" && installed a1 \
+    && [ "$(calls a1 '^-q .* update')" = 1 ] && [ "$(calls a1 'install .*--download-only')" = 1 ] \
+    && [ "$(sed -n 2p "$w/snap/MANIFEST")" = "packages: ovmf qemu-system-x86 xorriso" ] \
+    && [ "$(sed -n '4,$p' "$w/snap/MANIFEST" | wc -l | tr -d ' ')" = 4 ] \
+    && (cd "$w/snap" && sed -n '4,$p' MANIFEST | sed 's/ /  /' | sha256sum -c --quiet); then
+    ok "A1 cold: updated, downloaded, installed from the files; a snapshot of 4 files with their digests; save=true"
+else
+    bad "A1 rc=$rc out=$(tr '\n' ' ' < "$w/a1/out") log=$(log a1) manifest=$(tr '\n' '|' < "$w/snap/MANIFEST" 2>/dev/null)"
+fi
+cp -r "$w/snap" "$w/snap.whole"
+
+# A2
+run a2 PAX_APT_HIT=true PAX_APT_MATCHED="$key"
+if [ "$rc" = 0 ] && [ ! -s "$w/a2/out" ] && installed a2 && [ "$(calls a2 'update')" = 0 ] \
+    && [ "$(calls a2 'download-only')" = 0 ] && [ "$(calls a2 'install .*--no-download .*\.deb')" = 1 ] \
+    && grep -q "warm: the snapshot $key: 4 .deb(s)" "$w/a2/log"; then
+    ok "A2 warm: the snapshot's 4 files installed with --no-download; no update, no download, no save"
+else
+    bad "A2 rc=$rc out=$(tr '\n' ' ' < "$w/a2/out") calls=$(tr '\n' '|' < "$w/a2/calls") log=$(log a2)"
+fi
+
+# A3
+printf 'altered\n' >> "$w/snap/ovmf_1.0_amd64.deb"
+run a3 PAX_APT_HIT=true PAX_APT_MATCHED="$key"
+if [ "$rc" = 0 ] && [ ! -s "$w/a3/out" ] && installed a3 && grep -q '^::warning::ci-apt: the snapshot .* is not whole (ovmf_1.0_amd64.deb: sha256 ' "$w/a3/log" \
+    && [ "$(calls a3 'download-only')" = 1 ]; then
+    ok "A3 an altered snapshot file: a warning naming it, the archive instead, no save"
+else
+    bad "A3 rc=$rc out=$(tr '\n' ' ' < "$w/a3/out") log=$(log a3)"
+fi
+
+# A4
+rm -rf "$w/snap"
+run a4 PAX_APT_HIT=false FAKE_UPDATE=fail FAKE_FETCH=fail
+if [ "$rc" = 1 ] && [ ! -s "$w/a4/out" ] && [ ! -s "$w/a4/installed" ] \
+    && grep -q "^::error::ci-apt: the archive did not answer within 150 + 300 s, and CI's cache holds no snapshot of these packages for this runner image ($key): not installed: ovmf qemu-system-x86 xorriso" "$w/a4/log"; then
+    ok "A4 cold in an outage: exit 1, an ::error:: naming the key and the packages, nothing installed"
+else
+    bad "A4 rc=$rc log=$(log a4)"
+fi
+
+# A5
+run a5 PAX_APT_HIT=false FAKE_UPDATE=hang FAKE_FETCH=hang PAX_APT_UPDATE_SECS=2 PAX_APT_FETCH_SECS=2
+if [ "$rc" = 1 ] && [ "$secs" -lt 20 ] && grep -q "apt-get update failed or ran past 2 s (exit 124)" "$w/a5/log" \
+    && grep -q "did not answer within 2 + 2 s" "$w/a5/log"; then
+    ok "A5 a hung archive: the update and the download cut at 2 s each; exit 1 after ${secs} s"
+else
+    bad "A5 rc=$rc secs=$secs log=$(log a5)"
+fi
+
+# A6
+cp -r "$w/snap.whole" "$w/snap"
+run a6 PAX_APT_HIT=false PAX_APT_MATCHED="${key%-*}-20261025.1" FAKE_FETCH=fail
+if [ "$rc" = 0 ] && [ ! -s "$w/a6/out" ] && installed a6 \
+    && grep -q "^::warning::ci-apt: the archive did not answer .*; installing the snapshot ${key%-*}-20261025.1 (an earlier runner image's" "$w/a6/log" \
+    && grep -q '^ci-apt: stale: installed: ' "$w/a6/log"; then
+    ok "A6 stale: the download failed; an earlier image's snapshot installed with a warning, not saved"
+else
+    bad "A6 rc=$rc out=$(tr '\n' ' ' < "$w/a6/out") log=$(log a6)"
+fi
+
+# A7
+run a7 PAX_APT_HIT=true PAX_APT_MATCHED="$key" FAKE_DROP=xorriso
+if [ "$rc" = 1 ] && grep -q '^::error::ci-apt: after the warm install, not installed: xorriso$' "$w/a7/log"; then
+    ok "A7 a package the install left out: exit 1, named"
+else
+    bad "A7 rc=$rc log=$(log a7)"
+fi
+
+# A8
+run a8 PAX_APT_HIT=false PAX_APT_MATCHED="${key%-*}-20261025.1" FAKE_INSTALL=fail
+if [ "$rc" = 1 ] && grep -q '^::error::ci-apt: apt-get install failed with every package downloaded (not the network)' "$w/a8/log" \
+    && ! grep -q 'stale' "$w/a8/log" && [ "$(calls a8 'no-download .*\.deb')" = 0 ]; then
+    ok "A8 the install failing after a whole download: exit 1, the earlier snapshot not tried"
+else
+    bad "A8 rc=$rc log=$(log a8)"
+fi
+
+# A9
+k1=$(env ImageOS=ubuntu24 ImageVersion=20261101.1 "$tool" key xorriso ovmf qemu-system-x86 ovmf)
+k2=$(env ImageOS=ubuntu24 ImageVersion=20261101.1 "$tool" key qemu-system-x86 ovmf xorriso)
+k3=$(env ImageOS=ubuntu24 ImageVersion=20261101.1 "$tool" key qemu-system-x86 ovmf xorriso gdb)
+k4=$(env ImageOS=ubuntu24 ImageVersion=20261108.2 "$tool" key qemu-system-x86 ovmf xorriso)
+kk=$(sed -n 's/^key=//p' <<< "$k2") kp=$(sed -n 's/^prefix=//p' <<< "$k2")
+if [ "$k1" = "$k2" ] && [ "$k2" != "$k3" ] && [ "$(sed -n 's/^prefix=//p' <<< "$k4")" = "$kp" ] \
+    && [[ $kk =~ ^pax-apt-1-[0-9a-f]{16}-ubuntu24-20261101\.1$ ]] && [ "$kk" = "${kp}20261101.1" ]; then
+    ok "A9 the key: one for the same packages in any order, another for another list, the image's version last"
+else
+    bad "A9 $k1 / $k2 / $k3 / $k4"
+fi
+
+[ "$fail" = 0 ] && echo "ci-apt-selftest: PASS" || echo "ci-apt-selftest: FAIL"
+exit "$fail"

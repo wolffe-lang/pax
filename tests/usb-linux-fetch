@@ -48,6 +48,38 @@ class Fetch(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'digest'):
                     self.api.download(record, Path(d))
 
+    def test_cached_copy_is_read_again_and_refused_when_altered(self):
+        with tempfile.TemporaryDirectory() as d:
+            record = {'Package': 'kernel', 'Version': '1', 'Filename': 'pool/kernel.deb',
+                      'Size': 4, 'SHA256': hashlib.sha256(b'good').hexdigest()}
+            dest = Path(d) / (record['SHA256'] + '.deb')
+            dest.write_bytes(b'good')
+            with patch.object(self.api, 'run', side_effect=AssertionError('no download for a whole copy')):
+                self.assertEqual(self.api.download(record, Path(d)), dest)
+            dest.write_bytes(b'evil')
+            with patch.object(self.api, 'run', side_effect=AssertionError('an altered copy is never fetched over')):
+                with self.assertRaisesRegex(ValueError, 'refused'):
+                    self.api.download(record, Path(d))
+            self.assertEqual(dest.read_bytes(), b'evil')
+
+    def test_key_names_both_records_and_nothing_else(self):
+        depends = '  Depends: linux-image-6.8.0-147-generic\n'
+        def show(sha):
+            def fake(argv, **kwargs):
+                if argv[1] == 'depends':
+                    return depends
+                return ('Package: %s\nVersion: 6.8.0-147.147\nFilename: pool/main/l/linux/%s.deb\nSize: 4\nSHA256: %s\n'
+                        % (argv[-1], argv[-1], sha))
+            return fake
+        with patch.object(self.api, 'run', side_effect=show('a' * 64)):
+            one = self.api.key(self.api.records_now()[1])
+            again = self.api.key(self.api.records_now()[1])
+        with patch.object(self.api, 'run', side_effect=show('b' * 64)):
+            other = self.api.key(self.api.records_now()[1])
+        self.assertRegex(one, r'^pax-usb-linux-[0-9a-f]{16}$')
+        self.assertEqual(one, again)
+        self.assertNotEqual(one, other)
+
     def test_timeout_is_not_a_success_or_skip(self):
         with patch.object(self.api.subprocess, 'run', side_effect=subprocess.TimeoutExpired('fixture', 3)):
             with self.assertRaises(subprocess.TimeoutExpired):

@@ -552,7 +552,7 @@ consulted.
 | wolf's CHANGELOG at `v0.2.27` ("Read this before you bump the pin", the `ffi` capability, the ambient pair) and wolf-lang PR #646's text | wolf-lang `0ddda6b7` | wolf's own | read | the pin, the three `capabilities: [ffi]` lines, `kernel/heap`'s `ambient`/`set_ambient`, `kernel/sched`'s save and restore |
 | black-box Linux 7.2.8 (kasumi): `stat` of `/dev/tty0` (character, 4:0), `/dev/console` (5:1), `/dev/ttyS0`, `/dev/null` | — | — | measured | `kernel/files`' device numbers for the two nodes (their mode there is udev's policy, 0660 and 0600; PAX gives both the console's 0620) |
 | black-box Linux: Ubuntu 24.04's packaged `beep` 1.4.9-1.1ubuntu2 (`/usr/bin/beep`, `81b9a8d1…`) in the `px13-ubuntu` container: `readelf -h -l` (type DYN, a `PT_INTERP` naming `/lib64/ld-linux-x86-64.so.2`), and `strace` of `beep -f 440 -l 100` and `beep -e /dev/console …` (`notes/px21a/beep-default.strace`, `beep-console.strace`): it looks for `/dev/tty0`, then `/dev/vc/0`, then the evdev speaker's path | — | — | measured | why the packaged file cannot run on PAX; which device nodes a beep program opens |
-| Ubuntu's `beep` source package, 1.4.9-1.1ubuntu2 (`beep_1.4.9.orig.tar.gz` `3b6b03c2…`, `beep_1.4.9-1.1ubuntu2.debian.tar.xz` `6fe840cb…`, from Launchpad's archive of the package) | 1.4.9-1.1ubuntu2 | GPL-2+ (its `COPYING` and `debian/copyright`); a user program, not a kernel, a libc or a network stack | built, not committed: `tools/mkbeep` runs its own GNUmakefile with `-static` added to the link. Read: `debian/rules` and the GNUmakefile's compiler variables, to build it as the package does. Its C was not read | `/bin/beep` in `tests/mpx3-speaker`'s image |
+| Ubuntu's `beep` source package, 1.4.9-1.1ubuntu2 (`beep_1.4.9.orig.tar.gz` `3b6b03c2…`, `beep_1.4.9-1.1ubuntu2.debian.tar.xz` `6fe840cb…`, from Launchpad's archive of the package; since px118 `user/beep.pin`, from Ubuntu's archive pool, Launchpad or, the upstream tarball, Debian's pool) | 1.4.9-1.1ubuntu2 | GPL-2+ (its `COPYING` and `debian/copyright`); a user program, not a kernel, a libc or a network stack | built, not committed: `tools/mkbeep` runs its own GNUmakefile with `-static` added to the link. Read: `debian/rules` and the GNUmakefile's compiler variables, to build it as the package does. Its C was not read | `/bin/beep` in `tests/mpx3-speaker`'s image |
 | black-box Linux 7.2.8 (kasumi), python3 on a pty: `ioctl(fd, 0x8000451a)` (the request beep's evdev driver asks, as `notes/px18/beep.strace` prints it raw) answers `ENOTTY` on a terminal | — | — | measured | `kernel/console`: a request of type 'E' is plain `-ENOTTY`, not a refusal PAX reports |
 | QEMU's documentation of `-icount shift=N` (one instruction every 2^N ns of virtual time) and a black-box check (two RDTSC reads in a row are 9 ticks apart on the native tier, 7 on release; two runs give one number) | 11.1.1 | GPL-2.0 (a program we run) | read, then measured | the cost of the save and restore per switch (`notes/px21a-the-pin-0227.md`) |
 
@@ -2280,3 +2280,16 @@ QEMU's. Every download below was fetched twice and its sha256 read twice; the di
   session and terminal read from `/proc/self/stat`, the password's read), `kernel/sched` (`take_pid`: a pid is
   never reused) and px111's `user/elf/ptyprobe.c` (a session driven from a master).
 - No sudo source, no kernel's source of any OS, no C library's or shell's source.
+
+## px118 — CI's fetches from Ubuntu's archive, from CI's cache
+
+- **apt-get(8), apt.conf(5) and apt-cache(8)** (apt 2.7, Ubuntu 24.04): `--download-only`, `--no-download`,
+  `Dir::Cache::Archives`, `Acquire::Retries`, `Acquire::http::Timeout`, `DPkg::Lock::Timeout`,
+  `APT::Sandbox::User`, and .deb files named on the command line; **dpkg-query(1)** for `${db:Status-Abbrev}`.
+- **GitHub's documentation** of `actions/cache` (its `restore` and `save` actions, `restore-keys`, a cache's scope by
+  branch, the size limit and the eviction), of composite actions, and of the hosted runner images' `ImageOS` and
+  `ImageVersion` variables.
+- **curl(1)** (`--connect-timeout`, `--max-time`, `--retry`, `--retry-max-time`, its exit codes) and **timeout(1)**.
+- Ubuntu's archive pool, Launchpad's librarian and Debian's pool as black boxes: the paths a pool file and a source
+  package's file have, each file's digest read and compared with the pins.
+- No apt, curl or kernel source.

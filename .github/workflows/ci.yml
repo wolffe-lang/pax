@@ -17,6 +17,15 @@
 # refuses on a mismatch). Every step runs bare and its exit code is read
 # directly: no pipes, so nothing masks a failure.
 #
+# Every job's packages, and the source files the harness pins from
+# Ubuntu's archive (beep's source package, the disk tools' .debs), come
+# through .github/actions/apt (px118, notes/px118-ci-fetches.md): from
+# CI's cache when it holds them, installed and read again by digest with
+# no network, so an outage of Ubuntu's archive or Launchpad does not turn
+# a run red once the cache is warm; from the archive, bounded in minutes,
+# when it does not. No job installs a package by an apt-get of its own
+# (tests/ci-plan P4).
+#
 # THE TIERS (px37, tl29). A run of every suite on every leg is 34 jobs
 # and about 450 job-minutes (the last ten before 2026-10-20's plan
 # change: notes/tl29-the-second-diet.md), and before px37 every push of
@@ -140,6 +149,8 @@ jobs:
           python3 -I tests/mpx2-heap.d/budget.py
           python3 -I tests/ci-budgets.py
           tests/fetch-retry-selftest
+          tests/fetch-pinned-selftest
+          tests/ci-apt-selftest
           python3 -I tests/usb-session-selftest
           python3 -I tests/pipe-shape-selftest
 
@@ -165,9 +176,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, gdb (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso gdb
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso gdb
           qemu-system-x86_64 --version
           xorriso -version 2>&1 | head -n 1
           ls -l /usr/share/OVMF/
@@ -257,9 +271,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -323,9 +340,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -406,9 +426,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -467,9 +490,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -535,9 +561,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -599,9 +628,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -667,9 +699,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -735,9 +770,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -800,9 +838,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -876,9 +917,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -963,9 +1007,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev cpio zstd kmod
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev cpio zstd kmod
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -998,12 +1045,41 @@ jobs:
           python3 tests/usb-tools
           python3 tests/usb-linux-fetch
 
+      # px118: the kernel is the one the archive's indexes name now, as
+      # before; its two packages come from CI's cache when a run took the
+      # same two, read again by apt's SHA256 (tools/fetch-usb-linux).
+      # Indexes the archive does not refresh in 150 s are the runner
+      # image's own, and the image's kernel is in the cache when an
+      # earlier run on the image took it.
+      - name: the USB differential's kernel, named by the archive's indexes (the image's own when the archive does not answer)
+        if: needs.plan.outputs.tier != 'pr'
+        id: usbkey
+        run: |
+          timeout --kill-after=10s 150 sudo apt-get update -q \
+            || echo "::warning::apt-get update failed or ran past 150 s; the runner image's own indexes name the USB differential's kernel"
+          tools/fetch-usb-linux --key >> "$GITHUB_OUTPUT"
+
+      - name: the USB differential's kernel packages, from the cache
+        if: needs.plan.outputs.tier != 'pr'
+        id: usbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/usb-linux/downloads
+          key: ${{ steps.usbkey.outputs.key }}
+
       - name: Linux guest binary and modules for the USB differential
         if: needs.plan.outputs.tier != 'pr'
         timeout-minutes: 12
         run: |
           timeout --kill-after=10s 660 tools/fetch-usb-linux "$PWD/build/usb-linux"
           python3 -I -c 'import json; d=json.load(open("build/usb-linux/inputs.json")); print("PAX_LINUX_KERNEL="+d["kernel"]); print("PAX_LINUX_MODULES="+d["modules"])' >> "$GITHUB_ENV"
+
+      - name: the USB differential's kernel packages, to the cache
+        if: needs.plan.outputs.tier != 'pr' && steps.usbcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/usb-linux/downloads
+          key: ${{ steps.usbkey.outputs.key }}
 
       - name: live USB stick, both firmwares, full console suite and Linux ESP differential
         if: needs.plan.outputs.tier != 'pr'
@@ -1097,9 +1173,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1174,9 +1253,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1286,9 +1368,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1376,9 +1461,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1462,9 +1550,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1554,9 +1645,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, musl-tools (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev musl-tools
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev musl-tools
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1635,9 +1729,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1700,9 +1797,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1781,9 +1881,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, curl (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -1849,9 +1952,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make strace
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make strace
           strace -V | head -n 1
           qemu-system-x86_64 --version
           qemu-system-x86_64 -audiodev help
@@ -1928,9 +2034,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make
           qemu-system-x86_64 --version
           qemu-system-x86_64 -audiodev help
           qemu-system-x86_64 -device help | grep -i -E 'virtio-sound|AC97|hda'
@@ -1995,9 +2104,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev make
           qemu-system-x86_64 --version
           python3 --version
 
@@ -2058,9 +2170,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -2134,9 +2249,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -2223,9 +2341,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -2308,9 +2429,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, dnsmasq (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev dnsmasq-base iproute2
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev dnsmasq-base iproute2
           qemu-system-x86_64 --version
           dnsmasq --version | head -n 1
           python3 --version
@@ -2384,9 +2508,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace, dnsmasq (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace dnsmasq-base iproute2
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace dnsmasq-base iproute2
           qemu-system-x86_64 --version
           qemu-system-x86_64 -device help | grep -F '"igb"'
           dnsmasq --version | head -n 1
@@ -2457,9 +2584,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, dnsmasq (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev dnsmasq-base iproute2
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev dnsmasq-base iproute2
           qemu-system-x86_64 --version
           qemu-system-x86_64 -device help | grep -F '"igb"'
           dnsmasq --version | head -n 1
@@ -2533,9 +2663,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, openssh, e2fsprogs (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev openssh-server openssh-client e2fsprogs openssl git
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev openssh-server openssh-client e2fsprogs openssl git
           qemu-system-x86_64 --version
           qemu-system-x86_64 -device help | grep -F '"igb"'
           /usr/sbin/sshd -V 2>&1 | head -n 1 || true
@@ -2601,9 +2734,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, openssh, git, dnsmasq, iproute2, e2fsprogs (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev openssh-server openssh-client git dnsmasq-base iproute2 e2fsprogs
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev openssh-server openssh-client git dnsmasq-base iproute2 e2fsprogs
           qemu-system-x86_64 --version
           /usr/sbin/sshd -V 2>&1 | head -n 1 || true
           git --version
@@ -2714,9 +2850,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -2816,9 +2955,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -2911,9 +3053,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -3006,9 +3151,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -3090,9 +3238,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -3210,9 +3361,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -3321,9 +3475,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           uname -sr
@@ -3399,9 +3556,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           python3 --version
           docker --version
@@ -3464,9 +3624,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           clang --version
           gcc --version | head -n 1
@@ -3554,9 +3717,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, zstd (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev zstd curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev zstd curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -3661,9 +3827,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -3767,9 +3936,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl zstd
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl zstd
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -3866,9 +4038,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -3949,9 +4124,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           git --version
@@ -4035,9 +4213,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4115,9 +4296,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4194,9 +4378,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4276,9 +4463,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4364,9 +4554,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4469,9 +4662,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4566,9 +4762,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends clang lld binutils gcc libc6-dev curl
           clang --version | head -n 1
           ld.lld --version
           as --version | head -n 1
@@ -4638,9 +4837,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           as --version | head -n 1
@@ -4721,9 +4923,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4807,9 +5012,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -4874,9 +5082,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils
           qemu-system-x86_64 --version
 
       - uses: actions/cache@v4
@@ -4936,9 +5147,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           docker --version
@@ -5009,9 +5223,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           docker --version
@@ -5084,9 +5301,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           docker --version
@@ -5164,9 +5384,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           docker --version
@@ -5229,9 +5452,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev e2fsprogs mtools fdisk
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev e2fsprogs mtools fdisk
           qemu-system-x86_64 --version
           df -h . | tail -n 1
 
@@ -5288,9 +5514,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev e2fsprogs mtools fdisk
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev e2fsprogs mtools fdisk
           qemu-system-x86_64 --version
           df -h . | tail -n 1
 
@@ -5344,9 +5573,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           docker --version
 
@@ -5418,9 +5650,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           docker --version
 
@@ -5491,9 +5726,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
           qemu-system-x86_64 --version
           qemu-system-x86_64 -trace help | grep -c virtio_blk
           docker --version
@@ -5555,9 +5793,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: qemu, firmware, compiler and tracing tools
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace
       - name: lope's pin
         id: lope
         run: |
@@ -5637,9 +5875,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Ubuntu baseline compiler, QEMU, firmware and independent oracles
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace gdisk fdisk dosfstools mtools e2fsprogs
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace gdisk fdisk dosfstools mtools e2fsprogs
       - name: lope's pin
         id: lope
         run: |
@@ -5708,9 +5946,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Ubuntu baseline compiler, QEMU, firmware and independent oracles
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace gdisk fdisk dosfstools mtools e2fsprogs
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace gdisk fdisk dosfstools mtools e2fsprogs
           qemu-system-x86_64 --version
           df -h . | tail -n 1
       - name: the disk tools' image, pinned by digest
@@ -5762,9 +6003,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: qemu, firmware, compiler and tracing tools
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace e2fsprogs
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make strace e2fsprogs
       - name: lope's pin
         id: lope
         run: |
@@ -5832,9 +6073,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -5895,9 +6139,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: QEMU, firmware and baseline compiler
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
       - name: pinned wolf archive
         run: |
           bin=$(tools/fetch-wolf)
@@ -5941,9 +6185,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        uses: ./.github/actions/apt
+        with:
+          packages: qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
+
+      - name: the tools' versions
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
           qemu-system-x86_64 --version
 
       - name: wolf at the pin (the release archive, by digest)

@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **CI survives an outage of Ubuntu's archive and Launchpad once its cache is warm
+  (px118).** Every job's packages come through `.github/actions/apt` (`tools/ci-apt`): the
+  .debs apt downloaded for the same packages on the same runner image, kept in CI's cache with
+  a MANIFEST of their digests, read again and installed with no network; with none cached, the
+  archive within 150 s for the index and 300 s for the download, and the snapshot saved at
+  once; an earlier image's snapshot of the same packages is the last resort, with a warning. A
+  package not installed still fails the job. beep's source package, busybox-static's .deb and
+  the disk tools' .debs come through one store (`tools/fetch-pinned`), cached, read again by
+  digest on every use, each with a second source; a copy that differs is refused, never
+  repaired. mpx3-console's USB kernel packages are cached under apt's records.
+  `tests/ci-apt-selftest`, `tests/fetch-pinned-selftest` and `tests/ci-plan` P4 hold it:
+  `notes/px118-ci-fetches.md`.
+
 - **sudo's record made on a terminal names the session leader's start time
   (px119, pax#339).** The timestamp record for a terminal is now `tty NR sid
   SID start T`, T the session leader's start time (proc_pid_stat(5)'s field

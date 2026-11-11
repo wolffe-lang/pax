@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# fetch-pinned — the files the harness takes from Ubuntu's archive BY
+# DIGEST, through one store that is read again on every use (px118,
+# notes/px118-ci-fetches.md).
+#
+#   tools/fetch-pinned PIN NAME   the path of PIN's file NAME, verified
+#                                 (fetched into the store first if absent)
+#   tools/fetch-pinned PIN...     every file of each PIN, a verdict line each
+#   tools/fetch-pinned --all      every file of every pin, the same way
+#   tools/fetch-pinned --list     `PIN NAME SHA256`, every file of every pin,
+#                                 no network (CI's cache key is its digest)
+#   tools/fetch-pinned --sources  `PIN NAME SHA256 URL...`, the same with
+#                                 each file's sources in order, no network
+#
+# The pins, each the file of user/ named for it (beep.pin, busybox.pin,
+# disktools.pin),
+# read here as NAME, SHA256 and the file's sources in order:
+#   beep       the source package mkbeep builds, two files; Ubuntu's
+#              archive pool, then Launchpad's archive of the package, then
+#              (the upstream tarball, the same file) Debian's pool.
+#   busybox    busybox-static's .deb, fetch-busybox's; Ubuntu's archive
+#              pool, then Launchpad's librarian.
+#   disktools  the disk tools' seven .debs; Ubuntu's archive pool, then
+#              Launchpad's librarian.
+#
+# The store is $PAX_CACHE/pinned/SHA256/NAME, and CI's cache carries it
+# between runs (.github/actions/apt). A file there is used only after
+# its sha256 is read again and equals the pin's, on every use, cached or
+# not. The store writes a file only after its digest matched, so a copy
+# that differs was altered after: it is refused (exit 4), never fetched
+# over or repaired, and the message says to delete it. A file not in the
+# store is fetched from the pin's sources in order (curl: 15 s to
+# connect, 60 s a transfer, two more tries on a transient error within
+# 90 s), the next source when one does not answer. Bytes a source serves
+# whose digest is not the pin's are refused at once (exit 4), whatever
+# the other sources hold. No source answering is exit 3, each source
+# named with how it failed.
+#
+# PIN NAME prints the path on stdout and says on stderr where it came
+# from. The other forms print `PASS PIN:NAME …` or `FAIL PIN:NAME …` per
+# file on stdout and exit with the worst: 4 over 3 over 0.
+#
+# Exit 0; 2 usage or an unreadable pin; 3 not in the store and no source
+# answered; 4 a digest that is not the pin's.
+set -uo pipefail
+. "$(dirname "$0")/lib.sh"
+PINS="beep busybox disktools"
+STORE=$PAX_CACHE/pinned
+
+# PIN -> `NAME SHA256 URL...` lines, from the user/ pin of PIN's name. A
+# pin's variables are read in a subshell, so two pins never see each
+# other's.
+entries() {
+    local pin=$PAX_ROOT/user/$1.pin
+    case $1 in
+        beep) (
+            [ -f "$pin" ] || die "no $pin"
+            # shellcheck disable=SC1090
+            . "$pin"
+            for s in ${BEEP_SOURCES:?$pin sets no BEEP_SOURCES}; do
+                f=BEEP_${s}_FILE h=BEEP_${s}_SHA256 u=BEEP_${s}_URLS
+                printf '%s %s %s\n' "${!f:?}" "${!h:?}" "${!u:?}"
+            done
+        ) ;;
+        busybox) (
+            [ -f "$pin" ] || die "no $pin"
+            # shellcheck disable=SC1090
+            . "$pin"
+            f=${BUSYBOX_URL:?$pin sets no BUSYBOX_URL}; f=${f##*/}
+            printf '%s %s %s %s\n' "$f" "${BUSYBOX_DEB_SHA256:?}" "$BUSYBOX_URL" \
+                "https://launchpad.net/ubuntu/+archive/primary/+files/$f"
+        ) ;;
+        disktools) (
+            [ -f "$pin" ] || die "no $pin"
+            # shellcheck disable=SC1090
+            . "$pin"
+            for p in ${DISKTOOLS_DEBS:?$pin sets no DISKTOOLS_DEBS}; do
+                f=${p}_FILE pool=${p}_POOL h=${p}_SHA256
+                enc=${!f:?}; enc=${enc//+/%2b}
+                printf '%s %s %s %s\n' "${!f}" "${!h:?}" \
+                    "http://archive.ubuntu.com/ubuntu/pool/${!pool:?}/$enc" \
+                    "https://launchpad.net/ubuntu/+archive/primary/+files/$enc"
+            done
+        ) ;;
+        *) die "no pin named $1 (the pins: $PINS)" ;;
+    esac
+}
+
+# One pin's entries, checked: a name a path cannot escape, a full digest.
+checked() {
+    local name sha urls
+    entries "$1" > "$tmp/entries" || exit 2
+    while read -r name sha urls; do
+        [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._+~-]*$ ]] || die "$1: not a file name: $name"
+        [[ $sha =~ ^[0-9a-f]{64}$ ]] || die "$1: $name: not a sha256: $sha"
+        [ -n "$urls" ] || die "$1: $name: no source"
+        printf '%s %s %s\n' "$name" "$sha" "$urls"
+    done < "$tmp/entries"
+}
+
+# NAME SHA256 URL...: the verified path on stdout, or exit 3 or 4.
+fetch() {
+    local name=$1 sha=$2 dir path part url rc got tried=()
+    shift 2
+    dir=$STORE/$sha
+    path=$dir/$name
+    if [ -e "$path" ]; then
+        got=$(sha256_of "$path")
+        if [ "$got" != "$sha" ]; then
+            say "$name: the stored copy $path has sha256 $got, the pin says $sha: refused (the store keeps only bytes whose digest matched, so this copy was altered after; delete it, or the CI cache entry that brought it)"
+            return 4
+        fi
+        say "$name: sha256 $sha, the stored copy, read again"
+        printf '%s\n' "$path"
+        return 0
+    fi
+    need curl
+    mkdir -p "$dir" || return 3
+    part=$(mktemp "$dir/.$name.XXXXXX") || return 3
+    for url in "$@"; do
+        rc=0
+        curl -fsSL --connect-timeout 15 --max-time 60 --retry 2 --retry-delay 5 --retry-max-time 90 \
+            -o "$part" "$url" 2> "$tmp/curl" || rc=$?
+        if [ "$rc" != 0 ]; then
+            tried+=("$url (curl exit $rc: $(tail -n 1 "$tmp/curl"))")
+            say "$name: $url did not answer (curl exit $rc); the next source"
+            continue
+        fi
+        got=$(sha256_of "$part")
+        if [ "$got" != "$sha" ]; then
+            rm -f "$part"
+            say "$name: $url served sha256 $got, the pin says $sha: refused"
+            return 4
+        fi
+        chmod 0644 "$part" && mv -f "$part" "$path" || { rm -f "$part"; return 3; }
+        say "$name: sha256 $sha, fetched from $url"
+        printf '%s\n' "$path"
+        return 0
+    done
+    rm -f "$part"
+    say "$name (sha256 $sha): not in the store ($path), and no source answered: ${tried[*]}"
+    return 3
+}
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/fetch-pinned.XXXXXX") || exit 2
+trap 'rm -rf "$tmp"' EXIT
+
+[ $# -ge 1 ] || die "usage: fetch-pinned PIN NAME | PIN... | --all | --list | --sources"
+if [ "$1" = --list ] || [ "$1" = --sources ]; then
+    [ $# -eq 1 ] || die "usage: fetch-pinned $1"
+    for p in $PINS; do
+        checked "$p" > "$tmp/$p" || exit 2
+        while read -r name sha urls; do
+            if [ "$1" = --list ]; then
+                printf '%s %s %s\n' "$p" "$name" "$sha"
+            else
+                printf '%s %s %s %s\n' "$p" "$name" "$sha" "$urls"
+            fi
+        done < "$tmp/$p"
+    done
+    exit 0
+fi
+if [ $# -eq 2 ] && [ "$1" != --all ] && ! [[ " $PINS " == *" $2 "* ]]; then
+    checked "$1" > "$tmp/pin" || exit 2
+    while read -r name sha urls; do
+        if [ "$name" = "$2" ]; then
+            # shellcheck disable=SC2086
+            fetch "$name" "$sha" $urls
+            exit $?
+        fi
+    done < "$tmp/pin"
+    die "$1 pins no file named $2"
+fi
+pins=("$@")
+if [ "$1" = --all ]; then
+    [ $# -eq 1 ] || die "usage: fetch-pinned --all"
+    read -r -a pins <<< "$PINS"
+fi
+worst=0
+for p in "${pins[@]}"; do
+    checked "$p" > "$tmp/pin" || exit 2
+    while read -r name sha urls; do
+        rc=0
+        # shellcheck disable=SC2086
+        fetch "$name" "$sha" $urls > /dev/null 2> "$tmp/why" || rc=$?
+        cat "$tmp/why" >&2
+        case $rc in
+            0) echo "PASS $p:$name sha256 $sha" ;;
+            *) echo "FAIL $p:$name $(tail -n 1 "$tmp/why" | sed 's/^fetch-pinned: //')"
+               if [ "$rc" = 4 ] || [ "$worst" = 0 ]; then worst=$rc; fi ;;
+        esac
+    done < "$tmp/pin"
+done
+exit "$worst"

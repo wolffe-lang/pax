@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# ci-apt — a CI job's Ubuntu packages: from the snapshot CI's cache holds
+# for them when it holds one, with no network; from Ubuntu's archive,
+# bounded, when it does not (px118, notes/px118-ci-fetches.md).
+#
+#   tools/ci-apt key PACKAGE...       `key=` and `prefix=` lines
+#   tools/ci-apt install PACKAGE...   install; `save=true` to
+#                                     $GITHUB_OUTPUT
+#
+# .github/actions/apt is its one caller: it restores the snapshot
+# directory ($PAX_APT_DIR, default ~/.cache/pax-apt) from actions/cache
+# under `key` (an exact hit, PAX_APT_HIT=true) or else the newest under
+# `prefix` (PAX_APT_MATCHED: an earlier runner image's), runs `install`,
+# and saves the directory under `key` when `install` says save=true.
+#
+# THE KEY: pax-apt-1-<16 hex of the sorted package list>-<ImageOS>-<ImageVersion>.
+# GitHub's hosted runners set ImageOS and ImageVersion; the same packages
+# asked of the same image resolve to the same .debs. A snapshot is those
+# .debs, as apt downloaded and checked them against the archive's signed
+# indexes, and a MANIFEST: the package list and each file's sha256.
+#
+# install takes the first of these that works:
+#   warm   an exact hit whose MANIFEST names these packages and whose
+#          every file's sha256 is read again and equal: apt-get installs
+#          the files (--no-download). No network, no `apt-get update`
+#          (apt's indexes stay the image's own). A snapshot that does not
+#          verify or does not install is a warning, and live runs.
+#   live   `apt-get update` within PAX_APT_UPDATE_SECS (150; a failure is
+#          a warning: the image's indexes stand), the packages downloaded
+#          (--download-only, into a fresh directory) within
+#          PAX_APT_FETCH_SECS (300), each request tried at most twice more
+#          with 30 s timeouts, then installed from those files
+#          (--no-download; the install is never cut short, and its
+#          failure is the job's). Those files and their MANIFEST become
+#          the snapshot; save=true unless the key was an exact hit.
+#   stale  the download failed and the cache gave an earlier image's
+#          snapshot of the same packages: installed as warm is, with a
+#          warning naming it; never saved.
+# Then every package named must be installed (dpkg's status `ii`),
+# whichever path ran, and each one's version is printed: a package
+# missing is a failure, never a skip.
+#
+# Exit 0 installed; 1 not (the reason said, as a GitHub `::error::`
+# under Actions); 2 usage.
+set -uo pipefail
+ci() { [ "${GITHUB_ACTIONS:-}" = true ]; }
+say() { printf 'ci-apt: %s\n' "$*" >&2; }
+warn() { if ci; then printf '::warning::ci-apt: %s\n' "$*"; else say "WARNING: $*"; fi; }
+fail() { if ci; then printf '::error::ci-apt: %s\n' "$*"; else say "ERROR: $*"; fi; exit 1; }
+usage() { say "usage: ci-apt key PACKAGE... | ci-apt install PACKAGE..."; exit 2; }
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+
+[ $# -ge 2 ] || usage
+cmd=$1; shift
+for p in "$@"; do
+    [[ $p =~ ^[a-z0-9][a-z0-9+.-]*$ ]] || { say "not a package name: $p"; exit 2; }
+done
+want=$(printf '%s\n' "$@" | LC_ALL=C sort -u | tr '\n' ' ')
+want=${want% }
+image=${ImageOS:-unknown}-${ImageVersion:-unknown}
+prefix=pax-apt-1-$(printf '%s' "$want" | sha256sum | cut -c1-16)-${ImageOS:-unknown}-
+key=$prefix${ImageVersion:-unknown}
+
+case $cmd in
+    key) printf 'key=%s\nprefix=%s\n' "$key" "$prefix"; exit 0 ;;
+    install) ;;
+    *) usage ;;
+esac
+
+dir=${PAX_APT_DIR:-$HOME/.cache/pax-apt}
+hit=${PAX_APT_HIT:-}
+matched=${PAX_APT_MATCHED:-}
+out=${GITHUB_OUTPUT:-/dev/null}
+sudo=
+[ "$(id -u)" = 0 ] || sudo=sudo
+update_secs=${PAX_APT_UPDATE_SECS:-150}
+fetch_secs=${PAX_APT_FETCH_SECS:-300}
+opts=(-q -o DPkg::Lock::Timeout=120 -o APT::Sandbox::User=root)
+net=(-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+# apt-get as root; bounded SECS: under timeout(1), itself root, so the
+# kill reaches apt-get and not only sudo.
+aptget() { $sudo env DEBIAN_FRONTEND=noninteractive apt-get "${opts[@]}" "$@"; }
+bounded() {
+    local secs=$1
+    shift
+    $sudo timeout --kill-after=10 "$secs" env DEBIAN_FRONTEND=noninteractive apt-get "${opts[@]}" "$@"
+}
+
+# verify DIR: its MANIFEST names these packages and every .deb in DIR,
+# each with its sha256. The reason on stdout when not.
+verify() {
+    local d=$1 line s f n=0
+    [ -f "$d/MANIFEST" ] || { echo "no MANIFEST in $d"; return 1; }
+    { read -r line && [ "$line" = "pax-apt snapshot 1" ]; } < "$d/MANIFEST" || { echo "$d/MANIFEST: not a snapshot"; return 1; }
+    [ "$(sed -n 2p "$d/MANIFEST")" = "packages: $want" ] || { echo "$d/MANIFEST names other packages: $(sed -n 2p "$d/MANIFEST")"; return 1; }
+    while read -r s f; do
+        [ -f "$d/$f" ] || { echo "$f: in the MANIFEST, not in $d"; return 1; }
+        [ "$(sha "$d/$f")" = "$s" ] || { echo "$f: sha256 $(sha "$d/$f"), the MANIFEST says $s"; return 1; }
+        n=$((n + 1))
+    done < <(sed -n '4,$p' "$d/MANIFEST")
+    [ "$n" = "$(find "$d" -maxdepth 1 -name '*.deb' | wc -l)" ] || { echo "$d holds a .deb its MANIFEST does not name"; return 1; }
+}
+
+# from_files DIR: install DIR's .debs, no network.
+from_files() {
+    local d=$1 debs=()
+    mapfile -t debs < <(find "$d" -maxdepth 1 -name '*.deb' | LC_ALL=C sort)
+    [ "${#debs[@]}" -gt 0 ] || return 0
+    mkdir -p "$d/partial" || return 1
+    aptget install -y --no-install-recommends --no-download -o Dir::Cache::Archives="$d" "${debs[@]}"
+}
+
+# live: update, download and install; the snapshot written to $dir.
+# Status 1 when the download failed (the network); a failed install ends
+# the job here.
+live() {
+    local fresh new f debs=()
+    fresh=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pax-apt.XXXXXX") || fail "no scratch directory"
+    mkdir -p "$fresh/partial"
+    say "live: apt-get update, at most ${update_secs} s"
+    bounded "$update_secs" update "${net[@]}" \
+        || warn "apt-get update failed or ran past ${update_secs} s (exit $?); the image's own indexes stand"
+    say "live: downloading $want, at most ${fetch_secs} s"
+    bounded "$fetch_secs" install -y --no-install-recommends --download-only \
+        "${net[@]}" -o Dir::Cache::Archives="$fresh" "$@" || return 1
+    aptget install -y --no-install-recommends --no-download -o Dir::Cache::Archives="$fresh" "$@" \
+        || fail "apt-get install failed with every package downloaded (not the network): $want"
+    mkdir -p "$(dirname "$dir")" && new=$(mktemp -d "$(dirname "$dir")/.pax-apt-new.XXXXXX") \
+        || fail "no room for the snapshot beside $dir"
+    mapfile -t debs < <(find "$fresh" -maxdepth 1 -name '*.deb' | LC_ALL=C sort)
+    for f in "${debs[@]}"; do
+        cp "$f" "$new/" || fail "cannot copy $f into the snapshot"
+    done
+    {
+        echo "pax-apt snapshot 1"
+        echo "packages: $want"
+        echo "image: $image"
+        for f in "${debs[@]}"; do
+            echo "$(sha "$new/${f##*/}") ${f##*/}"
+        done
+    } > "$new/MANIFEST.part" && mv "$new/MANIFEST.part" "$new/MANIFEST" || fail "cannot write the snapshot"
+    rm -rf "$dir" && mv "$new" "$dir" || fail "cannot put the snapshot at $dir"
+    $sudo rm -rf "$fresh"
+    say "live: the snapshot holds ${#debs[@]} .deb(s) for $key"
+}
+
+path= save=
+if [ "$hit" = true ]; then
+    if why=$(verify "$dir"); then
+        say "warm: the snapshot $key: $(($(wc -l < "$dir/MANIFEST") - 3)) .deb(s), each sha256 read again; installing them, no network"
+        if from_files "$dir"; then
+            path=warm
+        else
+            warn "the snapshot $key verified but did not install; from the archive instead"
+        fi
+    else
+        warn "the snapshot $key is not whole ($why); from the archive instead"
+    fi
+fi
+if [ -z "$path" ]; then
+    [ "$hit" = true ] || say "cold: no snapshot for $key${matched:+ (the newest under its prefix: $matched)}"
+    if live "$@"; then
+        path=live
+        [ "$hit" = true ] || save=true
+    elif [ "$hit" != true ] && [ -n "$matched" ] && why=$(verify "$dir"); then
+        warn "the archive did not answer within ${update_secs} + ${fetch_secs} s; installing the snapshot $matched (an earlier runner image's, the same packages) instead"
+        from_files "$dir" || fail "the archive did not answer, and the snapshot $matched did not install on this image: $want"
+        path=stale
+    else
+        fail "the archive did not answer within ${update_secs} + ${fetch_secs} s, and CI's cache holds no snapshot of these packages for this runner image ($key${matched:+; $matched: ${why:-not whole}}): not installed: $want"
+    fi
+fi
+
+missing=()
+for p in "$@"; do
+    s=$(dpkg-query -W -f='${db:Status-Abbrev}' "$p" 2>/dev/null)
+    [[ $s == ii* ]] || missing+=("$p")
+done
+[ "${#missing[@]}" = 0 ] || fail "after the $path install, not installed: ${missing[*]}"
+say "$path: installed: $(dpkg-query -W -f='${Package} ${Version}, ' "$@" | sed 's/, $//')"
+[ "$save" != true ] || echo "save=true" >> "$out"
