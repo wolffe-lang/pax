@@ -2340,3 +2340,14 @@ description, which `tools/hotplug-session` speaks to QEMU's `usb-redir` device t
 - OpenSSH 9.6p1 (Ubuntu's) and 10.2p1 as black boxes: `ssh -tt` on a pseudo-terminal of the rows' own, its window
   changes by SIGWINCH.
 - No kernel's source of any OS, no shell's, no C library's, no sshd's.
+
+## px122 — trunk's cut runs after #344: the two jobs' limits, and /proc/pax-boot in small functions
+
+No kernel's, firmware's or boot loader's source. The change in kernel/procfs follows PAX's own notes on the release
+tier's inlining; the rest is measurement.
+
+| source | version | read, for |
+|---|---|---|
+| PAX's own `kernel/block` (the report's comment, pax#215), `kernel/tcp` ("one function a line"), `kernel/xhci` (`attach`'s comment, wolf#983) | trunk `309036ec` | the release tier inlines each formatter's loop at every call, and its range pass costs the square of one function's branches |
+| GitHub's REST API for the ci workflow's runs, jobs (pages of 30) and job logs; the runs' artifacts | as served 2026-11-11 | each step's seconds and conclusion, the runs' tiers, the kernel's boot lines and the build phases |
+| wolf 0.2.35's `wolf build --release` (`tools/build-kernel --release`) | the pinned archive | black box: `kmain_console`'s release build timed cold at each of #344's kernel commits |
