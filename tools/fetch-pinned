@@ -12,11 +12,14 @@
 #   tools/fetch-pinned --sources  `PIN NAME SHA256 URL...`, the same with
 #                                 each file's sources in order, no network
 #
-# The pins, each the file of user/ named for it (beep.pin, disktools.pin),
+# The pins, each the file of user/ named for it (beep.pin, busybox.pin,
+# disktools.pin),
 # read here as NAME, SHA256 and the file's sources in order:
 #   beep       the source package mkbeep builds, two files; Ubuntu's
 #              archive pool, then Launchpad's archive of the package, then
 #              (the upstream tarball, the same file) Debian's pool.
+#   busybox    busybox-static's .deb, fetch-busybox's; Ubuntu's archive
+#              pool, then Launchpad's librarian.
 #   disktools  the disk tools' seven .debs; Ubuntu's archive pool, then
 #              Launchpad's librarian.
 #
@@ -41,7 +44,7 @@
 # answered; 4 a digest that is not the pin's.
 set -uo pipefail
 . "$(dirname "$0")/lib.sh"
-PINS="beep disktools"
+PINS="beep busybox disktools"
 STORE=$PAX_CACHE/pinned
 
 # PIN -> `NAME SHA256 URL...` lines, from the user/ pin of PIN's name. A
@@ -58,6 +61,14 @@ entries() {
                 f=BEEP_${s}_FILE h=BEEP_${s}_SHA256 u=BEEP_${s}_URLS
                 printf '%s %s %s\n' "${!f:?}" "${!h:?}" "${!u:?}"
             done
+        ) ;;
+        busybox) (
+            [ -f "$pin" ] || die "no $pin"
+            # shellcheck disable=SC1090
+            . "$pin"
+            f=${BUSYBOX_URL:?$pin sets no BUSYBOX_URL}; f=${f##*/}
+            printf '%s %s %s %s\n' "$f" "${BUSYBOX_DEB_SHA256:?}" "$BUSYBOX_URL" \
+                "https://launchpad.net/ubuntu/+archive/primary/+files/$f"
         ) ;;
         disktools) (
             [ -f "$pin" ] || die "no $pin"
