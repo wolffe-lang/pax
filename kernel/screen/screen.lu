@@ -76,6 +76,22 @@
 //! - the cursor is the cell under it drawn inverse (its colours
 //!   swapped), steady (no blink: a picture of the screen is the same
 //!   whenever it is taken), unless hidden (DECTCEM).
+//! - (px117) the mouse modes, as the XTerm Control Sequences document's
+//!   "Mouse Tracking" gives them: its two sets of mutually exclusive
+//!   modes, the protocol (DECSET 9, 1000, 1001, 1002, 1003) and the
+//!   encoding (1005, 1006, 1015, 1016). A DECSET of a member selects it
+//!   (and counts, `mouse_sets`); a DECRST of the selected member clears
+//!   its set, of another changes nothing; RIS (`ESC c`) clears both
+//!   (the rest of RIS is still ignored). kernel/console reads them and
+//!   types the reports; it serves 1002 with 1006 alone.
+//! - (px117) the pointer: an arrow over the cell kernel/console puts it
+//!   on (`pointer`), its outline black and its fill white (ARROW_*), the
+//!   cell's own pixels elsewhere, drawn by `draw` whenever that cell is,
+//!   so a write under it keeps it. Moving it draws two cells, the old
+//!   one plainly and the new one with the arrow, and no cell of the grid
+//!   is written. The scroll that copies the framebuffer (`fbread`'s
+//!   way) takes it off first and puts it back after, so it is never
+//!   copied.
 //!
 //! **The two screens** (px70): two independent 32-bit-cell grids,
 //! each MAX_COLS * MAX_ROWS cells. A cell has glyph bits 0-7, foreground
@@ -183,6 +199,16 @@ const S_END: u64 = 65 // exclusive scroll-region last row
 const S_FORMAT: u64 = 66 // framebuffer channel shifts: red | green<<8 | blue<<16
 const S_SCALE: u64 = 67
 const S_BOOT: u64 = 68 // draw and retain until PAX paging takes over
+// px117: the mouse modes (Mouse Tracking's two sets) and the pointer.
+const S_MPROTO: u64 = 69 // the protocol DECSET selected: 0, 9, 1000, 1001, 1002 or 1003
+const S_MENC: u64 = 70 // the encoding: 0 (X10's bytes), 1005, 1006, 1015 or 1016
+const S_MSETS: u64 = 71 // DECSETs of either set since boot (kernel/console's owner)
+const S_PTR: u64 = 72 // 1 while the pointer is drawn
+const S_PTRX: u64 = 73 // its cell
+const S_PTRY: u64 = 74
+const S_PMOVES: u64 = 75 // the pointer's moves drawn
+const S_PCYCLES: u64 = 76 // the TSC cycles they took
+const S_PLEAST: u64 = 77 // the cheapest one
 const RQ_BYTES: u64 = 32
 
 const MAX_COLS: u64 = 256
@@ -194,7 +220,7 @@ const BLANK: u64 = 0x0720 // a space, foreground 7, background 0
 const QUESTION: u64 = 63
 
 fn sv(i: u64) -> u64 {
-    // # Safety: i < 67, inside boot/screen.S's 536-byte pax_screen_state.
+    // # Safety: i < 80, inside boot/screen.S's 640-byte pax_screen_state.
     unsafe { ((pax_screen_state as u64 + i * 8) as *u64).read_volatile() }
 }
 
@@ -388,8 +414,73 @@ fn hex_digit(b: u64) -> u64 {
 
 // --- drawing ---------------------------------------------------------------
 
-/// Draw cell (x, y) from the grid; `cursor` swaps its colours.
+/// px117: the pointer's arrow, a byte a pixel row (bit 7 the leftmost
+/// pixel, row r's byte at bits 8 * (r % 8)): its outline (black) and its
+/// fill (white), rows 0-7 and 8-15 of a cell (scaled with it).
+///
+///     X.......  XX......  X#X.....  X##X....  X###X...  X####X..
+///     X#####X.  X######X  X###XXXX  X#X#X...  XX.X#X..  X..X#X..
+///     ....X#X.  ....X#X.  .....X..  ........
+const ARROW_LINE_LO: u64 = 0x8182848890a0c080
+const ARROW_LINE_HI: u64 = 0x00040a0a94d4a88f
+const ARROW_FILL_LO: u64 = 0x7e7c787060400000
+const ARROW_FILL_HI: u64 = 0x0000040408085070
+
+fn arrow_row(lo: u64, hi: u64, r: u64) -> u64 {
+    if r < 8 { (lo >> (r * 8)) & 0xff } else { (hi >> ((r - 8) * 8)) & 0xff }
+}
+
+/// px117: whether the cursor is drawn on cell (x, y).
+fn cursor_on(x: u64, y: u64) -> bool {
+    sv(S_CUR) != 0 && sv(S_CURX) == x && sv(S_CURY) == y
+}
+
+/// px117: cell (x, y) drawn with the arrow over it: the outline's pixels
+/// black, the fill's white, the rest the cell's own (`cursor` as `draw`).
+fn draw_arrow(x: u64, y: u64, cursor: bool) {
+    let c = cell(y * sv(S_COLS) + x)
+    let g = (c & 0xff) | ((c >> 12) & 0xff00)
+    var f = (c >> 8) & 15
+    var b = (c >> 12) & 15
+    if cursor {
+        let t = f
+        f = b
+        b = t
+    }
+    let pf = pal(f)
+    let pb = pal(b)
+    let black = pixel(0x000000)
+    let white = pixel(0xffffff)
+    let pitch = sv(S_PITCH)
+    let scale = sv(S_SCALE)
+    let base = sv(S_VA) + y * GH * scale * pitch + x * GW * scale * 4
+    var r: u64 = 0
+    while r < GH * scale {
+        let fr = r / scale
+        let bits = font_row(g, fr)
+        let line = arrow_row(ARROW_LINE_LO, ARROW_LINE_HI, fr)
+        let fill = arrow_row(ARROW_FILL_LO, ARROW_FILL_HI, fr)
+        let row = base + r * pitch
+        var k: u64 = 0
+        while k < 4 * scale {
+            let m0 = 0x80 >> ((2 * k) / scale)
+            let m1 = 0x80 >> ((2 * k + 1) / scale)
+            let lo = if line & m0 != 0 { black } else if fill & m0 != 0 { white } else if bits & m0 != 0 { pf } else { pb }
+            let hi = if line & m1 != 0 { black } else if fill & m1 != 0 { white } else if bits & m1 != 0 { pf } else { pb }
+            store(row + k * 8, lo | (hi << 32))
+            k += 1
+        }
+        r += 1
+    }
+}
+
+/// Draw cell (x, y) from the grid; `cursor` swaps its colours. px117: the
+/// pointer's cell gets its arrow over it (`draw_arrow`).
 fn draw(x: u64, y: u64, cursor: bool) {
+    if sv(S_PTR) != 0 && sv(S_PTRX) == x && sv(S_PTRY) == y {
+        draw_arrow(x, y, cursor)
+        return
+    }
     let c = cell(y * sv(S_COLS) + x)
     let g = (c & 0xff) | ((c >> 12) & 0xff00) // bits 0-7 and 20-27 (gm01)
     var f = (c >> 8) & 15
@@ -621,8 +712,15 @@ fn scroll() {
 }
 
 /// px19's scroll, kept behind `fbread` (see `readback`): pixels, then
-/// cells; it reads the framebuffer back.
+/// cells; it reads the framebuffer back. px117: the pointer's cell is
+/// drawn plainly first, so the copy never carries the arrow up a row, and
+/// with the arrow again after.
 fn scroll_readback() {
+    let arrow = sv(S_PTR) != 0
+    if arrow {
+        put_sv(S_PTR, 0)
+        draw(sv(S_PTRX), sv(S_PTRY), cursor_on(sv(S_PTRX), sv(S_PTRY)))
+    }
     let cols = sv(S_COLS)
     let first = sv(S_TOP)
     let rows = sv(S_END) - first
@@ -647,6 +745,10 @@ fn scroll_readback() {
     while i < cols {
         put_cell(base + (rows - 1) * cols + i, c)
         i += 1
+    }
+    if arrow {
+        put_sv(S_PTR, 1)
+        draw(sv(S_PTRX), sv(S_PTRY), cursor_on(sv(S_PTRX), sv(S_PTRY)))
     }
     bump(S_SCROLLS)
 }
@@ -1032,9 +1134,23 @@ fn alternate(on: bool) {
     }
 }
 
+/// px117: DECSET (`on`) or DECRST of member `m` of the mouse modes' set
+/// kept in word `w` (S_MPROTO, S_MENC): a DECSET selects it, a DECRST
+/// clears the set only when `m` is the member selected ("two sets of
+/// mutually exclusive modes", the document's Mouse Tracking).
+fn mouse_mode(w: u64, m: u64, on: bool) {
+    if on {
+        put_sv(w, m)
+        bump(S_MSETS)
+    } else if sv(w) == m {
+        put_sv(w, 0)
+    }
+}
+
 /// `CSI ? Pm h` and `CSI ? Pm l`: 1049 (the alternate screen) and 25
-/// (DECTCEM, the cursor shown or not); every other mode is read and
-/// ignored, as the measured VT ignores paste, mouse, focus and sync.
+/// (DECTCEM, the cursor shown or not); (px117) the mouse modes, kept for
+/// kernel/console (`mouse_mode`); every other mode is read and ignored,
+/// as the measured VT ignores paste, focus and sync.
 fn private_mode(b: u64) {
     if b == 110 && ps(0) == 6 && sv(S_PI) == 0 {
         answer_cpr() // `CSI ? 6 n`: the measured VT answers it as `CSI 6 n`
@@ -1051,6 +1167,10 @@ fn private_mode(b: u64) {
                 hide()
             }
             put_sv(S_VISIBLE, if b == 104 { 1 } else { 0 })
+        } else if m == 9 || m == 1000 || m == 1001 || m == 1002 || m == 1003 {
+            mouse_mode(S_MPROTO, m, b == 104)
+        } else if m == 1005 || m == 1006 || m == 1015 || m == 1016 {
+            mouse_mode(S_MENC, m, b == 104)
         }
         i += 1
     }
@@ -1195,6 +1315,10 @@ fn feed(b: u64) {
         } else if b == 90 {
             put_sv(S_ESC, 0)
             answer_da1() // DECID, `ESC Z`: DA1's answer (measured)
+        } else if b == 99 {
+            put_sv(S_ESC, 0)
+            put_sv(S_MPROTO, 0) // px117: RIS ends the mouse modes (the rest of RIS is not served)
+            put_sv(S_MENC, 0)
         } else {
             put_sv(S_ESC, 0)
         }
@@ -1322,6 +1446,9 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
     put_sv(S_VISIBLE, 1)
     put_sv(S_SHAPE, 0)
     put_sv(S_REPLY, 0)
+    put_sv(S_PTR, 0) // px117: the clear takes the pointer off; a new terminal has no mouse mode
+    put_sv(S_MPROTO, 0)
+    put_sv(S_MENC, 0)
     save_cursor()
     let p0 = pal(0)
     // # Safety: boot/screen.S's REP STOSQ over the whole framebuffer
@@ -1392,6 +1519,76 @@ pub fn answer() -> u64 {
     // # Safety: as `put`.
     unsafe { pax_irq_restore(flags) }
     b
+}
+
+/// px117: the mouse protocol DECSET selected (0 none, 9, 1000, 1001,
+/// 1002, 1003), the encoding (0 X10's bytes, 1005, 1006, 1015, 1016), and
+/// how many DECSETs of either set there have been (kernel/console takes
+/// the writing process as the modes' owner when this moves in a write).
+pub fn mouse_protocol() -> u64 {
+    sv(S_MPROTO)
+}
+
+pub fn mouse_encoding() -> u64 {
+    sv(S_MENC)
+}
+
+pub fn mouse_sets() -> u64 {
+    sv(S_MSETS)
+}
+
+/// px117: both sets cleared (kernel/console, when the modes' owner ends).
+pub fn mouse_reset() {
+    // # Safety: as `put`.
+    let flags = unsafe { pax_irq_save() }
+    put_sv(S_MPROTO, 0)
+    put_sv(S_MENC, 0)
+    // # Safety: as `put`.
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// px117: the pointer over cell (x, y) (held to the grid): its old cell
+/// drawn plainly, the new one with the arrow; nothing when it is already
+/// there, before the screen is attached or while it draws. Each move's
+/// TSC cycles are counted (`pointer_cost`).
+pub fn pointer(x0: u64, y0: u64) {
+    // # Safety: as `put`.
+    let flags = unsafe { pax_irq_save() }
+    if sv(S_ON) != 0 && sv(S_BOOT) == 0 && sv(S_BUSY) == 0 && sv(S_COLS) != 0 && sv(S_ROWS) != 0 {
+        let x = if x0 < sv(S_COLS) { x0 } else { sv(S_COLS) - 1 }
+        let y = if y0 < sv(S_ROWS) { y0 } else { sv(S_ROWS) - 1 }
+        if sv(S_PTR) == 0 || sv(S_PTRX) != x || sv(S_PTRY) != y {
+            put_sv(S_BUSY, 1)
+            // # Safety: fpu.S's RDTSC.
+            let t0 = unsafe { pax_rdtsc() }
+            let was = sv(S_PTR) != 0
+            let ox = sv(S_PTRX)
+            let oy = sv(S_PTRY)
+            put_sv(S_PTRX, x)
+            put_sv(S_PTRY, y)
+            put_sv(S_PTR, 1)
+            if was {
+                draw(ox, oy, cursor_on(ox, oy))
+            }
+            draw(x, y, cursor_on(x, y))
+            // # Safety: as above.
+            let dt = unsafe { pax_rdtsc() } - t0
+            bump(S_PMOVES)
+            put_sv(S_PCYCLES, sv(S_PCYCLES) + dt)
+            if sv(S_PLEAST) == 0 || dt < sv(S_PLEAST) {
+                put_sv(S_PLEAST, dt)
+            }
+            put_sv(S_BUSY, 0)
+        }
+    }
+    // # Safety: as `put`.
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// px117: the pointer's moves drawn, the TSC cycles they took, and the
+/// cheapest one.
+pub fn pointer_cost() -> (u64, u64, u64) {
+    (sv(S_PMOVES), sv(S_PCYCLES), sv(S_PLEAST))
 }
 
 /// px59: whether the cursor is shown (DECTCEM) and DECSCUSR's last
