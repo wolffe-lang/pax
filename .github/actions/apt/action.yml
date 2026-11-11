@@ -12,9 +12,10 @@
 # 2. The pinned source files (tools/fetch-pinned --all: beep's source
 #    package, the disk tools' .debs), each read again by its digest from
 #    the store the cache restores, or fetched; the store saved only when
-#    every file verified. Here a file no source gives is a warning: the
-#    tool that needs it (tools/mkbeep, tools/disktools) fails the job
-#    when it asks, naming the file and each source.
+#    every file verified. Nothing here fails the job: a file no source
+#    gives, or one refused by its digest, is a warning, and the tool that
+#    needs it (mkbeep, disktools) fails the job when it asks, naming the
+#    file and each source or the digest.
 name: apt
 description: The job's Ubuntu packages and pinned source files, from the cache when it holds them, else the archive within bounds
 inputs:
@@ -59,10 +60,14 @@ runs:
       id: pkey
       shell: bash
       run: |
-        list=$("$GITHUB_WORKSPACE/tools/fetch-pinned" --list)
-        echo "key=pax-pinned-1-$(printf '%s\n' "$list" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        if list=$("$GITHUB_WORKSPACE/tools/fetch-pinned" --list); then
+          echo "key=pax-pinned-1-$(printf '%s\n' "$list" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::fetch-pinned --list failed (above): no pinned files from the cache; a job that needs one fails there"
+        fi
 
     - name: the pinned source files, from the cache
+      if: steps.pkey.outputs.key != ''
       id: prestore
       uses: actions/cache/restore@v4
       with:
@@ -71,6 +76,7 @@ runs:
         restore-keys: pax-pinned-1-
 
     - name: the pinned source files, by digest
+      if: steps.pkey.outputs.key != ''
       id: pinned
       shell: bash
       run: |
@@ -83,7 +89,7 @@ runs:
         esac
 
     - name: the pinned source files, to the cache
-      if: steps.prestore.outputs.cache-hit != 'true' && steps.pinned.outputs.whole == 'true'
+      if: steps.pkey.outputs.key != '' && steps.prestore.outputs.cache-hit != 'true' && steps.pinned.outputs.whole == 'true'
       uses: actions/cache/save@v4
       with:
         path: .pax-cache/pinned
