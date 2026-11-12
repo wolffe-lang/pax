@@ -221,6 +221,13 @@ def main():
     # px118: pax-boot-status (tools/mkbootstatus's), whose `record` the boot's first program runs
     # (/bin/login as pid 1, the live login script) and which anyone may run for the last ten boots.
     put('bin/pax-boot-status', (identity/'bootstatus/pax-boot-status').read_bytes(), 0o755)
+    # px124: /bin/init (tools/mkinit's, held to its sums), an installed system's pid 1: the installer
+    # writes /etc/pax-run as /bin/login, and login as pid 1 execs it. These images' own pid 1 stays the
+    # root shell below, and the live stick's the live login: neither runs /bin/init.
+    name, digest, size = (identity/'init'/'sums.txt').read_text().split()
+    data = (identity/'init'/'init').read_bytes()
+    assert name == 'init' and (sha(data), len(data)) == (digest, int(size)), 'built input mismatch: init'
+    put('bin/init', data, 0o755)
     put('etc/pax-boot.d/pax-upgrade', (ROOT/'user/install/pax-upgrade/boot-hook').read_bytes(), 0o755)
     put('usr/share/pax-upgrade/entry', (ROOT/'user/install/pax-upgrade/entry').read_bytes(), 0o644)
     for tree, prefix in ((identity/'boot', 'boot/'), (identity/'payload', 'usr/share/pax-install/')):
