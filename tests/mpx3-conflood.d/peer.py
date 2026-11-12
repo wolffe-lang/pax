@@ -126,8 +126,8 @@ def main():
             if k in sent and k not in rtts:
                 rtts[k] = (now - sent[k][0]) * 1000.0
         elif proto == 17 and len(body) >= 8:
-            sp, dp = struct.unpack("!HH", body[:4])
-            data = body[8:]
+            sp, dp, ulen = struct.unpack("!HHH", body[:6])
+            data = body[8:ulen]  # a short frame is padded to Ethernet's 60 bytes
             if dp == 9:
                 msg = data.decode("ascii", "replace").strip()
                 if msg.startswith("conflood: "):
