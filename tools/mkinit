@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# mkinit — build /bin/init (user/init, px124), an installed PAX's pid 1, as a
+# fully static x86-64 Linux executable, with kernel/wolf.pin's wolf.
+#
+#   tools/mkinit OUTDIR
+#
+# init is pax's own program, built as tools/mkinstall builds the installer:
+# pax's own wolf (the release archive kernel/wolf.pin names, tools/fetch-wolf;
+# $PAX_WOLF when set) with the std its archive bundles, the package directory
+# user/init (init.lu, and init.S, the system calls wolf has no builtin for,
+# listed under `asm` in its wolf.pkg), the release tier (`wolf build --release
+# --deny-warnings`), linked through a `cc` that adds `-static`, checked with
+# readelf (ET_EXEC, no PT_INTERP), stripped as the distribution's other user
+# programs are; `OUTDIR/sums.txt` gets `init <sha256> <bytes>`. Build on a
+# baseline x86-64 glibc (the CI runner's Ubuntu or an Ubuntu container). The
+# release tier needs clang at run time. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkinit OUTDIR"
+out=$1
+need readelf strip cc clang
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+wolf=${PAX_WOLF:-}
+[ -n "$wolf" ] || wolf=$("$PAX_ROOT/tools/fetch-wolf") || die "tools/fetch-wolf"
+say "$("$wolf" --version | head -n 1)"
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-init.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+cp -R "$PAX_ROOT/user/init" "$w/init"
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+(cd "$w/init" && PATH="$w/bin:$PATH" WOLF_STD="$(dirname "$wolf")/std" \
+    "$wolf" build --release --no-cache --deny-warnings init.lu -o "$out/init") >&2 \
+    || die "wolf build of user/init/init.lu"
+readelf -hW "$out/init" | grep -Eq 'Type: +EXEC' || die "init is not ET_EXEC"
+! readelf -lW "$out/init" | grep -q INTERP || die "init has a PT_INTERP (not static)"
+strip -o "$out/init.stripped" "$out/init" && mv "$out/init.stripped" "$out/init"
+readelf -hW "$out/init" | grep -Eq 'Type: +EXEC' || die "stripped init is not ET_EXEC"
+printf '%s %s %s\n' init "$(sha256_of "$out/init")" "$(wc -c < "$out/init" | tr -d ' ')" | tee "$out/sums.txt"
