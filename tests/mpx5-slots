@@ -17,6 +17,12 @@
 #                      three asked after it EAGAIN too, every thread
 #                      joined; `refused: no free process slot` exactly
 #                      once a time (twice in all).
+#   threads-user (256 MiB)  slots-nproc: the same as 1000:1000 through
+#                      px39's `as`: RLIMIT_NPROC, 512 threads a user other
+#                      than root, so 511 made besides the probe's own,
+#                      each time; the three after it EAGAIN; `refused: a
+#                      user's threads at RLIMIT_NPROC (512)` exactly once
+#                      a time (twice in all).
 #   fill (256 MiB)     slots-fill: children until a fork is refused: at
 #                      least 80 (the old table held 60), the refusal
 #                      EAGAIN or ENOMEM and written once by its name,
@@ -79,11 +85,12 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 case $only in ''|build) ;; *) die "--only takes build" ;; esac
 need python3 readelf
 
-SESSIONS="threads fill forks reuse wolf ptys switch herd"
+SESSIONS="threads threads-user fill forks reuse wolf ptys switch herd"
 BORE="cat"
 run_of() {
     case $1 in
         threads) echo "/bin/slotprobe threads" ;;
+        threads-user) echo "/bin/as 1000 1000 /bin/slotprobe threads" ;;
         fill)    echo "/bin/slotprobe fill" ;;
         forks)   echo "/bin/slotprobe forks 200" ;;
         reuse)   echo "/bin/slotprobe reuse 32 100" ;;
@@ -94,7 +101,7 @@ run_of() {
     esac
 }
 memory_of() {
-    case $1 in threads|fill) echo 256M ;; forks|reuse) echo 1G ;; ptys) echo 2G ;; switch|herd) echo 3G ;; *) echo 4G ;; esac
+    case $1 in threads|threads-user|fill) echo 256M ;; forks|reuse) echo 1G ;; ptys) echo 2G ;; switch|herd) echo 3G ;; *) echo 4G ;; esac
 }
 quiet_of() { case $1 in switch|herd) echo 1 ;; *) echo 0 ;; esac; }
 # A yield among 16 processes, at most this many lone yields (measured,
@@ -105,6 +112,7 @@ SWITCH_ALONE=10
 refusals_of() {
     case $1 in
         threads) echo 'refused: no free process slot, -11|2' ;;
+        threads-user) echo "refused: a user's threads at RLIMIT_NPROC \\(512\\), -11|2" ;;
         fill)    echo 'refused: (no free process slot, -11|no frame for a thread.s kernel stack, -11|no frames for a process.s area, -11|no frames for a copy of the address space, -12)|1' ;;
         *)       echo '|0' ;;
     esac
@@ -126,13 +134,14 @@ if [ -z "$images" ]; then
     mkdir -p "$work/bin"
     why=
     "$PAX_ROOT/tools/mkslots" "$work/bin" > "$work/programs.txt" || why+=" tools/mkslots;"
+    "$PAX_ROOT/tools/mkas" "$work/bin" >> "$work/programs.txt" || why+=" tools/mkas;"
     sessions=${PAX_SLOTS_SESSIONS:-$SESSIONS}
     case " $sessions " in *" wolf "*|*" ptys "*) "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;" ;; esac
     case " $sessions " in *" ptys "*) "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;" ;; esac
     sed 's/^/  program: /' "$work/programs.txt" "$work/pelt/sums.txt" "$work/bore/sums.txt" >&2 2>/dev/null
     for s in $sessions; do
         run_of "$s" > "$work/$s.run"
-        files=(/bin/slotprobe="$work/bin/slotprobe":755)
+        files=(/bin/slotprobe="$work/bin/slotprobe":755 /bin/as="$work/bin/as":755)
         case $s in
             wolf) files+=(/bin/sh="$work/pelt/pelt":755) ;;
             ptys) files+=(/bin/sh="$work/pelt/pelt":755 /bin/cat="$work/bore/cat":755) ;;
@@ -184,6 +193,13 @@ check_session() { # session norm hrc digest id
             prog_lines "$norm" threads | grep -qx "threads: round $r: joined ${n:-x} of ${n:-x}" || why+=" round $r: not all joined ('$(prog_lines "$norm" threads | grep "^threads: round $r: joined" | head -n 1)');"
         done
         [ -z "$why" ] && row_pass "slots-threads $id: $(prog_lines "$norm" threads | grep ' made ' | sed 's/^threads: //' | paste -sd'|' -)" || row_fail "slots-threads $id:$why" ;;
+    threads-user)
+        for r in 1 2; do
+            l=$(prog_lines "$norm" threads | grep "^threads: round $r: made ")
+            [ "$l" = "threads: round $r: made 511, then clone answered EAGAIN; 3 more asked, 3 answered EAGAIN" ] || why+=" round $r: '$l' (511 made besides the probe, then EAGAIN, three more EAGAIN);"
+            prog_lines "$norm" threads | grep -qx "threads: round $r: joined 511 of 511" || why+=" round $r: not all joined;"
+        done
+        [ -z "$why" ] && row_pass "slots-nproc $id: 512 threads for user 1000, the probe's own among them, twice; the rest EAGAIN" || row_fail "slots-nproc $id:$why" ;;
     fill)
         l=$(prog_lines "$norm" fill | grep '^fill: .* children alive at once')
         n=$(printf '%s\n' "$l" | sed -n -E 's/^fill: ([0-9]+) children alive at once, then fork answered (EAGAIN|ENOMEM)$/\1/p')
@@ -232,7 +248,7 @@ check_session() { # session norm hrc digest id
     # The machine.
     why=
     grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
-    grep -q '^PAX: init /bin/slotprobe ended with status 0; nothing left to run$' "$norm" || why+=" no 'PAX: init /bin/slotprobe ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+    grep -Eq '^PAX: init /bin/(slotprobe|as) ended with status 0; nothing left to run$' "$norm" || why+=" no 'PAX: init … ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
     if [ "$(quiet_of "$s")" = 0 ]; then
         awk '/^user: frames free / { seen++; if ($4 != $10) bad=1 } END { exit seen < 1 || bad }' "$norm" || why+=" frames not all back ($(grep '^user: frames free ' "$norm" | tr '\n' '|'));"
     fi
