@@ -22,7 +22,11 @@ logs and artifacts through GitHub's API (pages of 30). No suite's row, leg or im
 
 ## 2. Inputs, verified
 
-- Base: trunk `309036ec` (#346 merged), read from GitHub before the first commit.
+- Base: trunk `309036ec` (#346 merged), read from GitHub before the first commit; rebased onto trunk `48ea81ba`
+  (px120's hot-plug change, #348) once that had merged. Three patches conflicted, each a list both sides added to
+  (the CHANGELOG's top, `kernel/README.md`'s and `docs/SOURCES.md`'s ends), and each keeps both; no other patch
+  changed (`git range-diff`). The shas below are the rebased ones; before the rebase the branch was
+  `px122-before-rebase` (`e3261a5e`), where the measurements and the first records were taken.
 - The runs: every attempt of the two jobs in the ci workflow's runs created 2026-11-01 to 2026-11-11 (181 runs, 397
   attempts; `tests/ci-budgets.d/shell-pelt.json`), and the job logs of the 38 all-tier `mpx3-shell` attempts since
   2026-11-03.
@@ -105,8 +109,8 @@ every call, and its range pass costs the square of one function's branches (`ker
 
 Run 43094621784 drew a runner of the green one's speed for mpx3-shell: green in 5505 s (the suite 1487 s, the USB
 typing 1214, the MSI and INTx step 2456). mpx5-pelt drew a slow one: its main step took 7677 s and the USB typing
-step 2508 s, and it was in its root disk leg, with 40 minutes left of its 210, when this note was written; the pull
-request gives its verdict.
+step 2508 s, and it finished green in 12010 s of its 12600, ten minutes to spare. Ten other jobs of that run were red
+only because GitHub's artifact service failed their upload steps between 20:39 and 20:57Z; their rows passed.
 
 ### On real hardware
 
@@ -157,20 +161,21 @@ From `notes/px122/prediction.txt`, committed before the local takes reported and
 - **P3, right in size, wrong in kind:** the boots grew by about 0.3 s each (the release tier's boot line +304 ms;
   native +61) and the MSI and INTx step by under a minute, as predicted; but the time #344 adds is the release
   build's, not the boots'. `a04eb7b5` and `3b6e4b64` differ only in sudo's files, which these legs do not read.
-- **P4, half scored:** mpx3-shell at `309036ec` finished in 92 minutes, as predicted; mpx5-pelt drew a slow runner,
-  not the green one's (main step 7677 s against 6945), and its verdict came after this note.
+- **P4, right for mpx3-shell, close for mpx5-pelt:** mpx3-shell at `309036ec` finished in 92 minutes, as
+  predicted; mpx5-pelt drew a slow runner, not the green one's (main step 7677 s against 6945), and finished in 200
+  minutes of its 210, not about 190.
 - **P5, right:** the limits are the cause these runs share: mpx3-shell had no row, and mpx5-pelt's floor had no USB
   typing step (a green attempt uses up to 97% of 210 minutes, not 71%).
 
 ## 6. Evidence index
 
-- `18faee15` `notes/px122/prediction.txt`.
-- `a060da74` `notes/px122/measure/runs.py`; `fe020700` `tests/ci-budgets.d/shell-pelt.json`, the measurement
+- `833ab51e` `notes/px122/prediction.txt`.
+- `eaf338f1` `notes/px122/measure/runs.py`; `2bbb162b` `tests/ci-budgets.d/shell-pelt.json`, the measurement
   committed first.
-- `062d5654` `tests/ci-budgets.py`: the rows, red at 120 and 210 minutes; `e3909d76` px83's row reads a tiered limit.
-- `d4b558dc` `.github/workflows/ci.yml`: the two limits, tiered.
-- `94dd88b4` `kernel/procfs`; `0d35def1` `kernel/README.md`; `cc197c3c` `docs/SOURCES.md`.
-- `7ad579ab`, `dc587c32` the budgets README; `807ceefb`, `9f623330` the CHANGELOG.
+- `43e3746f` `tests/ci-budgets.py`: the rows, red at 120 and 210 minutes; `a48bf5fd` px83's row reads a tiered limit.
+- `03dd427e` `.github/workflows/ci.yml`: the two limits, tiered.
+- `32a82bf6` `kernel/procfs`; `1a502aec` `kernel/README.md`; `7845b9e7` `docs/SOURCES.md`.
+- `7594b5fb`, `41d250aa` the budgets README; `6371d429`, `771fcfb0` the CHANGELOG.
 - `notes/px122/rig/`: the local takes (`ab.manifest`, the timing takes; `kernel.manifest`, the kernel built alone;
   `budget.manifest`, the plan's checks; `gauntlet.manifest`, the green take). The records, with their sha256, are in
   the pull request.
