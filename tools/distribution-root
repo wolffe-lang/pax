@@ -2,8 +2,8 @@
 """Assemble px82's distribution payload from verified, built inputs (px90: den).
 Usage: distribution-root BASE.cpio INPUTS IDENTITY_DIR OUT.cpio dev|release
 INPUTS holds auth/ (tools/mkauth's output: su, sudo, passwd, login and sums.txt) beside the other
-programs (px106; px103's sudo/ before it), and trash/ (tools/mktrash's: the five commands and sums.txt)
-(tb03).
+programs (px106; px103's sudo/ before it), trash/ (tools/mktrash's: the five commands and sums.txt)
+(tb03), and ligature/ (tools/mkligature's: ligature and sums.txt; the dev image's only) (px128).
 The old payload supplies only unchanged support files and the pinned native
 compiler/linker bundle. Every current org binary and the base std are replaced.
 """
@@ -88,6 +88,14 @@ def main():
             name = 'usr/share/wolf/compiler-std/' + source.relative_to(inputs/'wolf-std').as_posix()
             rows[name] = (0o40755, 0, 0, b'') if source.is_dir() else (0o100644, 0, 0, source.read_bytes())
         assert rows['usr/share/wolf/compiler-std/STD-REV'][3].strip() == std_rev.encode(), 'compiler std revision'
+        # px128: ligature, the linker in wolf, beside lld: tools/mkligature's stripped static binary,
+        # held to its builder's sums and to user/ligature.pin's digest. lld stays the default (no
+        # WOLF_LD in /etc/shrc); `export WOLF_LD=/usr/bin/ligature` selects it.
+        lig = (inputs/'ligature'/'ligature').read_bytes()
+        assert (inputs/'ligature'/'sums.txt').read_text().split() == ['ligature', sha(lig), str(len(lig))], 'ligature input mismatch'
+        pinned = [l.split()[2:4] for l in (ROOT/'user/ligature.pin').read_text().splitlines() if l.split()[:2] == ['#', 'ligature']]
+        assert pinned == [[sha(lig), str(len(lig))]], 'ligature is not the digest user/ligature.pin records'
+        rows['usr/bin/ligature'] = (0o100755, 0, 0, lig)
     else:
         for name in list(rows):
             if name == 'usr/bin' or name.startswith('usr/bin/') or name == 'usr/lib/wolf-musl' or name.startswith('usr/lib/wolf-musl/'):
