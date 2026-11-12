@@ -25,7 +25,8 @@ def dlig(text):
 
 
 def row(name, ok, detail):
-    print(('PASS ' if ok else 'FAIL ') + name + ': ' + detail)
+    # `FAIL ROW — detail`: the row's name ends at white space, as a record's reader takes it
+    print(('PASS ' if ok else 'FAIL ') + name + ' — ' + detail)
     if not ok:
         failed.append(name)
 
