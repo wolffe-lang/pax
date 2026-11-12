@@ -16,7 +16,8 @@
 # execs init as on an installed system; login and sudo (tools/mkauth; sudo
 # set-user-ID root, its shipped policy), pelt as /bin/sh, boreutils' cat cut id
 # kill ls sleep stat stty touch tr, reboot and poweroff (tools/mkdiskprobe),
-# user/elf/detach.c (a process that calls setsid and lives on); an
+# user/elf/detach.c (a process that calls setsid and lives on) and
+# user/elf/ttymode.c (the console's echo, canonical and signal bits); an
 # /etc/passwd with root, pax (in group sudo), bob and lobo (/bin/false);
 # user/shrc as /etc/shrc without its lope line (no lope in the tree: named);
 # one boot hook of the suite's own, /etc/pax-boot.d/svc, which leaves a
@@ -89,8 +90,10 @@ if [ -z "$images" ]; then
     fi
     "$PAX_ROOT/tools/mkdiskprobe" "$work/diskprobe" > "$work/diskprobe.txt" 2>&1 || why+=" tools/mkdiskprobe;"
     cp "$work/diskprobe/reboot" "$r/bin/reboot" 2>/dev/null && cp "$work/diskprobe/reboot" "$r/bin/poweroff" || why+=" no reboot;"
-    gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
-        -o "$r/bin/detach" "$PAX_ROOT/user/elf/detach.c" > "$work/detach.txt" 2>&1 || why+=" gcc: detach.c;"
+    for c in detach ttymode; do
+        gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
+            -o "$r/bin/$c" "$PAX_ROOT/user/elf/$c.c" > "$work/$c.txt" 2>&1 || why+=" gcc: $c.c;"
+    done
     cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
     # /etc/shrc as the images ship it (user/shrc: `logout` among it), but for lope's hook: no
     # lope in this tree, and its `eval` would print an error at every login.
