@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""px129: run a PAX image under QEMU with no COM1 and read what its screen says at the end.
+"""tests/mpx3-conspeed.d/screen-run.py (px129): run a PAX image under QEMU with no COM1 and read what
+its screen says at the end.
 
     screen-run.py --qemu-run TOOLS/qemu-run --iso ISO --mode WxH --accel kvm|tcg --font BDF
-                  --out PREFIX [--serial FILE] [--timeout SECS] [--every SECS]
+                  --out PREFIX [--firmware bios|uefi] [--serial FILE] [--timeout SECS] [--every SECS]
 
 With no COM1 the kernel keeps only the first 64 KiB of its console in memory, and a timing program
-writes megabytes, so its table is read off the screen instead: tools/qemu-run boots ISO (UEFI, a VGA
+writes megabytes, so its table is read off the screen instead: tools/qemu-run boots ISO (UEFI unless
+--firmware bios, a VGA
 device whose mode is WxH, QEMU's human monitor on a Unix socket), and every --every seconds the
 monitor's `screendump` is taken and read back into text by matching each 8x16 cell (16x32 above
 2560 pixels wide, PAX's scale) against the BDF font's printable ASCII glyphs (either polarity; a cell
@@ -133,6 +135,7 @@ def main():
     ap.add_argument("--iso", required=True)
     ap.add_argument("--mode", required=True)
     ap.add_argument("--accel", required=True)
+    ap.add_argument("--firmware", default="uefi")
     ap.add_argument("--font", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--serial")
@@ -145,7 +148,7 @@ def main():
     if os.path.exists(sock):
         os.unlink(sock)
     ser = ["--serial", a.serial] if a.serial else ["--no-serial"]
-    argv = [a.qemu_run, "--firmware", "uefi", "--accel", a.accel, *ser, "--timeout", str(int(a.timeout) + 60), a.iso,
+    argv = [a.qemu_run, "--firmware", a.firmware, "--accel", a.accel, *ser, "--timeout", str(int(a.timeout) + 60), a.iso,
             "--", "-m", "512M", "-vga", "none", "-device", f"VGA,vgamem_mb=64,xres={w},yres={h}",
             "-monitor", f"unix:{sock},server=on,wait=off"]
     log = open(a.out + ".qemu.log", "wb")
