@@ -1944,6 +1944,25 @@ static void type(int m, const char *s) {
     }
 }
 
+/* After a command's marker (`want`, seen after `from`), pelt's next
+ * prompt, then as long again as type() waits before a key: a resize
+ * the driver sends before pelt is back at its line editor reaches it
+ * while it is still between the command and its prompt, and pelt draws
+ * the prompt once, where after it pelt redraws the prompt for the new
+ * size. Which of the two a driver that resized at the marker saw turned
+ * on timing (pax#382); after the prompt it is the redraw on either
+ * system. 1 when the prompt came. */
+static int prompt_after(int m, const char *want, long from, int ms) {
+    int ok = 0;
+    if (tr_len > from) {
+        tr_buf[tr_len] = 0;
+        unsigned char *p = memmem(tr_buf + from, (size_t)(tr_len - from), want, strlen(want));
+        if (p) ok = until_seen(m, "$ ", (long)(p - tr_buf) + (long)strlen(want), ms);
+    }
+    nap(300);
+    return ok;
+}
+
 /* Whether the foreground group of the master's slave is some group
  * other than `g`, within `ms`. */
 static int fg_moved(int m, pid_t g, int ms) {
@@ -1988,6 +2007,7 @@ static int drive(void) {
     mark = tr_len;
     type(m, "stty size; echo :do''ne1:\r");
     say("S2 stty size, then the marker: %s\n", yesno(until_seen(m, ":done1:", mark, 20000)));
+    (void)prompt_after(m, ":done1:", mark, 20000); /* pax#382 */
     /* 2: a resize stty reads */
     struct winsize w = {30, 100, 0, 0};
     ioctl(m, TIOCSWINSZ, &w);
@@ -1999,6 +2019,7 @@ static int drive(void) {
     mark = tr_len;
     type(m, "trap 'COLUMNS=$(stty size | cut -d\" \" -f2)' WINCH; echo :do''ne3:\r");
     say("S4 a WINCH trap set: %s\n", yesno(until_seen(m, ":done3:", mark, 20000)));
+    (void)prompt_after(m, ":done3:", mark, 20000); /* pax#382 */
     w.ws_row = 40; w.ws_col = 120;
     ioctl(m, TIOCSWINSZ, &w);
     nap(1000);
