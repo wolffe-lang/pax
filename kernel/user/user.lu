@@ -1353,13 +1353,28 @@ fn getrandom(buf: u64, len: u64, flags: u64) -> u64 {
     if !uaccess.writable(pml4, buf, n) {
         return NEG_EFAULT
     }
+    // px131: a page at a time, filled in a frame of the kernel's (CPUID
+    // asked once a page) and copied out whole; a word at a time it was a
+    // VM exit every 8 bytes and a page walk every byte.
+    let stage = frames.alloc() else 0
     var i: u64 = 0
+    if stage == 0 {
+        while i < n {
+            let w = process.random_word(i)
+            let k = if n - i < 8 { n - i } else { 8 }
+            uaccess.put(pml4, buf + i, w, k)
+            i += k
+        }
+        return n
+    }
+    let kva = stage + frames.hhdm()
     while i < n {
-        let w = process.random_word(i)
-        let k = if n - i < 8 { n - i } else { 8 }
-        uaccess.put(pml4, buf + i, w, k)
+        let k = if n - i < PAGE { n - i } else { PAGE }
+        process.random_fill(kva, (k + 7) & !7, i)
+        let _ok = uaccess.copy_out(pml4, buf + i, kva, k)
         i += k
     }
+    frames.free(stage)
     n
 }
 
