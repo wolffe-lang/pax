@@ -1,0 +1,31 @@
+px131, the second part — the clocks from the clock and device-driven wake-ups run at once: the prediction, written
+before the rows and before any change, on the first part's head 24df96ed.
+
+C1  The rule for time today: CLOCK_MONOTONIC, CLOCK_REALTIME, every sleep and every timeout count delivered ticks
+    (kernel/timer's count, one a tick interrupt). A tick due while interrupts are off waits, and every further one in
+    the same stretch is lost, so each clock stands still for the length of a long call less 10 ms.
+C2  Beside 64 KiB console writes (about 0.37 s each with interrupts off, COM1 present) CLOCK_MONOTONIC and
+    CLOCK_REALTIME will keep about 8 % of the time-stamp counter's time over a 3 s window; beside 64 MiB file writes
+    about a quarter. A bound of 2 % will be red by more than tenfold.
+C3  The fix: the tick count follows kernel/clock. Each delivered tick sets the count to the larger of the count plus
+    one and the ticks the clock says are due since the tick was armed; the interrupts themselves stay counted apart
+    (the timer's drift report, the instrument's lost ticks). Every deadline in ticks (sleeps, poll, epoll, a receive's
+    timeout, futexes, TCP, ARP, DHCP, a tone) is then a deadline in real time: a long call makes it late by at most
+    the call, never by the call times the ticks lost. Both clocks then keep the counter's time within one tick
+    (10 ms over 3 s: 0.3 %). A kernel that fakes its clock's readings for its own rows (kmain_metal) counts
+    interrupts as before.
+W1  The rule for wake-ups today: the device's interrupt queues netd at the tail; a switch happens only from idle or
+    after the running thread's two-tick quantum; netd's deliveries queue their readers at the tail again. Beside a
+    process that only computes, a host's ping waits about a quantum a hop: p50 about 27 ms, p99 about 36 ms, against
+    about 1 ms at idle, so a bound of three times idle's p99 will be red by about tenfold.
+W2  The fix: netd, the threads netd wakes and the console's readers go to the head of the queue, and a device's
+    interrupt that lands where the tick could preempt (ring 3, a kernel thread with interrupts on, idle) switches to
+    such a thread at once. The ping beside the hog then costs about what it costs at idle (within three times idle's
+    p99).
+W3  The risk: under a ping flood every frame preempts the hog. Predicted: QEMU's user network delivers at most a few
+    thousand frames a second here, each costing tens of microseconds of netd and the echo, so the hog keeps well
+    over half of the CPU; the row holds it to half of its share beside `spin`. A budget, if a faster flood needs one:
+    an urgent switch at most once a millisecond, or urgent work at most half of each tick, the rest at the tail.
+W4  Nothing else moves: the loopback echo between two user processes stays a quantum a hop beside the hog (their
+    wake-ups are not device-driven); that is the next step's (a woken thread ahead of a preempted one, with a
+    budget).
