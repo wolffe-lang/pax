@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# tests/mpx3-conflood — px129 (R-px129-13): what a console flood leaves the network. kmain_console at
+# 2560x1440 with `fbwrite` and no COM1 (the installed machine's shape, as tests/mpx3-conspeed boots it),
+# user/elf/conflood as init: its UDP echo child on port 7 and, after an idle stretch, the console written
+# back to back for a while, then quiet again. tests/mpx3-conflood.d/peer.py is the whole network (QEMU's
+# socket netdev, tools/net-peer's way, no privilege): it pings the machine (the kernel's own answer,
+# kernel/netd) and times the echo (a process's answer, the path an ssh keystroke takes) every 50 ms
+# through the three phases.
+#
+#   tests/mpx3-conflood [--accel auto|kvm|tcg] [--firmware bios|uefi] [--modes "scroll screen big"]
+#                       [--seconds "IDLE FLOOD AFTER"]
+#
+# The modes are what each console write is (conflood's header): `scroll` ten scrolled lines, `screen` a
+# whole screen of changed text, `big` 256 KiB with an SGR before every character.
+#
+# Rows, per mode:
+#   F0 built: conflood (static), kmain_console native, an image per mode
+#   F1 the run: conflood said its four phases; in the idle phase every ping and echo answered, the 95th
+#      percentile round trip of each at most 20 ms (the rig is sound)
+#   F2 during the flood the network is not starved: of the pings and of the echoes sent while the console
+#      is flooded, at least 95 % answered and the 95th percentile round trip at most 50 ms
+#      (R-px129-13: every system call runs with interrupts off and a console write draws inside its call,
+#      so a process writing the console back to back holds the CPU for about two writes a turn; red at
+#      trunk and at px129's head, which only shrinks a write's drawing)
+#
+# Not in CI's plan: F2 is red until R-px129-13's fix, and the hosted runners have no KVM.
+# Prints `mpx3-conflood: PASS …` or `FAIL …` a row; exit 0 when all pass, 1 otherwise, 2 on a usage error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+D=$here/mpx3-conflood.d
+
+accel=auto leg=bios modes="scroll screen big" seconds="6 12 6"
+usage="usage: tests/mpx3-conflood [--accel auto|kvm|tcg] [--firmware bios|uefi] [--modes LIST] [--seconds \"IDLE FLOOD AFTER\"]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --accel)    accel=$2; shift 2 ;;
+        --firmware) leg=$2; shift 2 ;;
+        --modes)    modes=$2; shift 2 ;;
+        --seconds)  seconds=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+case $leg in bios|uefi) ;; *) die "--firmware takes bios or uefi" ;; esac
+need python3 readelf gcc
+MODE=2560x1440
+work=$PAX_BUILD/mpx3-conflood
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+mkdir -p "$work/bin" "$work/native"
+
+why=
+gcc -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$work/bin/conflood" "$PAX_ROOT/user/elf/conflood.c" 2> "$work/cc.txt" || why+=" cc conflood ($(head -n 3 "$work/cc.txt" | tr '\n' ' '));"
+[ -f "$work/bin/conflood" ] && ! readelf -lW "$work/bin/conflood" | grep -q INTERP || why+=" conflood is not static;"
+if elf=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/native" 2> "$work/native/build-kernel.log"); then
+    :
+else
+    cat "$work/native/build-kernel.log" >&2
+    why+=" tools/build-kernel kmain_console;"
+fi
+cp "$PAX_ROOT/boot/limine-initramfs.conf" "$work/conflood.conf"
+printf '\n    resolution: %s\n    cmdline: fbwrite\n' "$MODE" >> "$work/conflood.conf"
+for m in $modes; do
+    printf '/bin/conflood %s %s\n' "$m" "$seconds" > "$work/$m.run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/$m.cpio" /bin/conflood="$work/bin/conflood":755 /etc/pax-run="$work/$m.run":644 > "$work/$m.initramfs.txt" \
+        || why+=" $m: tools/mkinitramfs;"
+    [ -n "${elf:-}" ] && { "$PAX_ROOT/tools/mkimage" --conf "$work/conflood.conf" --add "$work/$m.cpio" initramfs.cpio "$elf" "$work/native/$m.iso" > /dev/null \
+        || why+=" $m: tools/mkimage;"; }
+done
+if [ -z "$why" ]; then
+    say "PASS F0 built: conflood $(sha256_of "$work/bin/conflood" | cut -c1-16)…, kmain_console $(sha256_of "$elf" | cut -c1-16)…, images: $modes"
+else
+    bad "F0 build:$why"; exit 1
+fi
+
+if [ "$accel" = auto ]; then
+    if [ -c /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+fi
+set -- $seconds
+total=$(( ${1%.*} + ${2%.*} + ${3%.*} ))
+for m in $modes; do
+    id="native $leg $accel $m"
+    out=$PAX_BUILD/mpx3-conflood-$leg-$accel-$m
+    read -r lp qp < <(python3 -I -c 'import socket
+a = []
+for _ in range(2):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); a.append(s)
+print(*[s.getsockname()[1] for s in a])')
+    python3 -I "$D/peer.py" --listen "$lp" --qemu "$qp" --out "$out.json" --timeout $((total + 240)) > "$out.peer.txt" 2>&1 &
+    ppid=$!
+    "$PAX_ROOT/tools/qemu-run" --no-serial --firmware "$leg" --accel "$accel" --timeout $((total + 300)) "$work/native/$m.iso" -- \
+        -m 512M -vga none -device "VGA,vgamem_mb=64,xres=2560,yres=1440" \
+        -netdev "socket,id=n0,udp=127.0.0.1:$lp,localaddr=127.0.0.1:$qp" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56" \
+        > "$out.qemu.txt" 2>&1 &
+    qpid=$!
+    wait "$ppid"; prc=$?
+    kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
+    sed 's/^/  /' "$out.peer.txt" >&2
+    python3 -I "$D/rows.py" "$out.json" > "$out.rows.txt" 2>&1
+    while IFS= read -r ln; do
+        case $ln in
+            PASS*) say "PASS ${ln#PASS } ($id)" ;;
+            FAIL*) bad "${ln#FAIL } ($id)" ;;
+            *) say "$ln" ;;
+        esac
+    done < "$out.rows.txt"
+    [ "$prc" = 0 ] || bad "F1 $id: the peer never saw conflood's end (exit $prc)"
+done
+[ "$fail" = 0 ] && say "mpx3-conflood: PASS" || say "mpx3-conflood: FAIL"
+exit "$fail"
