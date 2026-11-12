@@ -23,10 +23,11 @@ logs and artifacts through GitHub's API (pages of 30). No suite's row, leg or im
 ## 2. Inputs, verified
 
 - Base: trunk `309036ec` (#346 merged), read from GitHub before the first commit; rebased onto trunk `48ea81ba`
-  (px120's hot-plug change, #348) once that had merged. Three patches conflicted, each a list both sides added to
-  (the CHANGELOG's top, `kernel/README.md`'s and `docs/SOURCES.md`'s ends), and each keeps both; no other patch
-  changed (`git range-diff`). The shas below are the rebased ones; before the rebase the branch was
-  `px122-before-rebase` (`e3261a5e`), where the measurements and the first records were taken.
+  (px120's hot-plug change, #348), then onto `9ba58558`, px123's pointer branch on trunk `211e5c7c`, which merges
+  first. Each time the only conflicts were lists both sides added to (the CHANGELOG's top, `kernel/README.md`'s and
+  `docs/SOURCES.md`'s ends), and each keeps both; no other patch changed (`git range-diff`). The shas below are
+  the latest rebase's; before the first rebase the branch was `px122-before-rebase` (`e3261a5e`), where the
+  measurements and the first records were taken.
 - The runs: every attempt of the two jobs in the ci workflow's runs created 2026-11-01 to 2026-11-11 (181 runs, 397
   attempts; `tests/ci-budgets.d/shell-pelt.json`), and the job logs of the 38 all-tier `mpx3-shell` attempts since
   2026-11-03.
@@ -169,13 +170,13 @@ From `notes/px122/prediction.txt`, committed before the local takes reported and
 
 ## 6. Evidence index
 
-- `833ab51e` `notes/px122/prediction.txt`.
-- `eaf338f1` `notes/px122/measure/runs.py`; `2bbb162b` `tests/ci-budgets.d/shell-pelt.json`, the measurement
+- `b8c2d674` `notes/px122/prediction.txt`.
+- `bb1272bb` `notes/px122/measure/runs.py`; `e7841de9` `tests/ci-budgets.d/shell-pelt.json`, the measurement
   committed first.
-- `43e3746f` `tests/ci-budgets.py`: the rows, red at 120 and 210 minutes; `a48bf5fd` px83's row reads a tiered limit.
-- `03dd427e` `.github/workflows/ci.yml`: the two limits, tiered.
-- `32a82bf6` `kernel/procfs`; `1a502aec` `kernel/README.md`; `7845b9e7` `docs/SOURCES.md`.
-- `7594b5fb`, `41d250aa` the budgets README; `6371d429`, `771fcfb0` the CHANGELOG.
+- `ea873879` `tests/ci-budgets.py`: the rows, red at 120 and 210 minutes; `78effef6` px83's row reads a tiered limit.
+- `3325e305` `.github/workflows/ci.yml`: the two limits, tiered.
+- `e8ad9704` `kernel/procfs`; `e91a42a7` `kernel/README.md`; `33cda521` `docs/SOURCES.md`.
+- `55fbbe04`, `d63a57d5` the budgets README; `d10ac43b`, `d3910bb2` the CHANGELOG.
 - `notes/px122/rig/`: the local takes (`ab.manifest`, the timing takes; `kernel.manifest`, the kernel built alone;
   `budget.manifest`, the plan's checks; `gauntlet.manifest`, the green take). The records, with their sha256, are in
   the pull request.
