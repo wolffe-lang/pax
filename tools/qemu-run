@@ -5,7 +5,7 @@
 #                  [--timeout SECS] [--accel auto|kvm|tcg] [--gdb PORT]
 #                  [--no-screen] [--boot-disk | --boot-nvme | --boot-ahci] [--drive FILE[,ro][;DEVOPTS]]...
 #                  [--nvme FILE[,ro][;DEVOPTS]]... [--ahci FILE[,serial=S,model=M]]...
-#                  [--no-serial] [--no-hpet] [--no-pit] [--usb-irq=msi|intx] [--high-bar]
+#                  [--no-serial | --serial-chardev SPEC] [--no-hpet] [--no-pit] [--usb-irq=msi|intx] [--high-bar]
 #                  [--display-mode=WxH] IMAGE [-- QEMU-ARGS...]
 #
 # The machine: q35, 256 MiB, no NIC, `-nographic`, COM1 to FILE (default
@@ -78,6 +78,13 @@
 # (boot/io.S's pax_serial_log, which tools/usb-session reads by QMP).
 # Cannot be combined with --serial-input.
 #
+# --serial-chardev SPEC (px129): COM1 on QEMU's character device SPEC
+# (`-chardev SPEC,id=com1 -serial chardev:com1`), for a COM1 whose far
+# end is not a file: tests/mpx3-conspeed's slow UART is `pipe,path=P`,
+# FIFOs P.in and P.out that a reader drains at 115200 baud, so the
+# emulated 16550 holds THRE clear while P.out is full, as a real UART's
+# transmitter does while it sends. FILE stays empty.
+#
 # --no-hpet, --no-pit: q35's `hpet=off` and `pit=off` (both offered by
 # QEMU 8.2 and 11.1), so kernel/clock falls back to the ACPI PM timer
 # and the tick must not need the 8254. PAX_NO_HPET=1 and PAX_NO_PIT=1 in
@@ -129,6 +136,7 @@ set -euo pipefail
 firmware=bios serial=$PAX_BUILD/serial.log serial_in= timeout=30 accel=auto gdb_port= image= noscreen=0 bootdisk=0 usbstick=0 bootnvme=0 bootahci=0 drives=()
 usbkbd=${PAX_USB_KBD:-} # typing suites keep their exact keystroke stream
 noserial=0 # px76: omit COM1 entirely, not merely its output backend
+serialdev= # px129: COM1 on a character device of the caller's
 usbirq=${PAX_USB_IRQ:-} nohpet=${PAX_NO_HPET:-0} nopit=${PAX_NO_PIT:-0} displaymode=
 highbar=${PAX_HIGH_BAR:-0} memory=256M
 while [ $# -gt 0 ]; do
@@ -141,6 +149,7 @@ while [ $# -gt 0 ]; do
         --gdb)      gdb_port=$2; shift 2 ;;
         --no-screen) noscreen=1; shift ;;
         --no-serial) noserial=1; shift ;;
+        --serial-chardev) serialdev=$2; shift 2 ;;
         --usb-irq=*) usbirq=${1#*=}; shift ;;
         --no-hpet) nohpet=1; shift ;;
         --no-pit) nopit=1; shift ;;
@@ -270,6 +279,9 @@ fi
 if [ "$noserial" = 1 ]; then
     [ -z "$serial_in" ] || die "cannot combine --no-serial and --serial-input"
     cmd+=(-serial none)
+elif [ -n "$serialdev" ]; then
+    [ -z "$serial_in" ] || die "cannot combine --serial-chardev and --serial-input"
+    cmd+=(-chardev "$serialdev,id=com1" -serial chardev:com1)
 elif [ -n "$serial_in" ]; then
     [ -p "$serial_in" ] || die "--serial-input $serial_in is not a FIFO"
     cmd+=(-chardev "file,id=com1,path=$serial,input-path=$serial_in" -serial chardev:com1)
