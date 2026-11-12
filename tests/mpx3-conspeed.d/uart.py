@@ -8,9 +8,14 @@ Makes PATH.in and PATH.out (FIFOs) for QEMU's `-chardev pipe,path=PATH` (tools/q
 second, a little every 10 ms, until it is ended (SIGTERM): the emulated 16550's transmit FIFO then
 fills and its THRE stays clear while the pipe is full, as a real transmitter's does while it sends, so
 a kernel that waits on THRE before each byte waits about 87 us a byte, as on a machine with COM1 at
-115200. PATH.in is held open and never written (no input). Prints `uart: <bytes> bytes read in <s> s`
-when it ends. Written from pipe(7) and fcntl(2) (F_SETPIPE_SZ); QEMU's documentation of its pipe
-character device.
+115200. PATH.in is held open and never written (no input). When it ends it prints
+
+    uart: <bytes> bytes read in <s> s; the longest pause once 65536 were read: <g> s at byte <b>
+
+(or `…; fewer than 65536 read`): the longest time between two reads that found bytes, counted once
+the line has carried 64 KiB, so a kernel's transmit ring (64 KiB) has filled behind it under a flood;
+a ring the THRE interrupt drains keeps the line busy while its writer sleeps (rows.py's C10). Written
+from pipe(7) and fcntl(2) (F_SETPIPE_SZ); QEMU's documentation of its pipe character device.
 """
 import fcntl
 import os
@@ -39,6 +44,8 @@ def main():
     total = 0
     owed = 0.0
     t0 = last = time.monotonic()
+    seen = None  # the last read that found bytes, once 64 KiB were read
+    pause, at = 0.0, 0
     while not done[0]:
         time.sleep(0.01)
         now = time.monotonic()
@@ -51,9 +58,15 @@ def main():
             b = os.read(fout, want)
         except BlockingIOError:
             b = b""
+        if b and total >= 65536:
+            if seen is not None and now - seen > pause:
+                pause, at = now - seen, total
+            seen = now
         total += len(b)
         owed = min(owed - len(b), rate * 0.02)  # nothing banked beyond 20 ms: an idle line does not save up
-    print(f"uart: {total} bytes read in {time.monotonic() - t0:.1f} s", flush=True)
+    said = (f"the longest pause once 65536 were read: {pause:.3f} s at byte {at}" if seen is not None
+            else "fewer than 65536 read")
+    print(f"uart: {total} bytes read in {time.monotonic() - t0:.1f} s; {said}", flush=True)
     os.close(fin)
     os.close(fout)
 
