@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# tests/mpx3-conspeed — px129: what the console costs to draw at the installed machine's mode
+# (2560 x 1440, a 320 x 90 grid), held as ratios on one boot.
+#
+#   tests/mpx3-conspeed [--images DIR | --no-boot] [--accel auto|kvm|tcg]
+#                       [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The build (C0, each tier): kmain_console (px13's console kernel); conspeed, keylat and cpugaps
+# (tools/mkconspeed: user/elf/conspeed.c is the console's timing program, the same binary a person
+# runs at a machine's console); an initramfs with `/bin/conspeed /streams/fuss /streams/fussopen
+# /streams/cub` as init over the recorded streams (tests/mpx3-conspeed.d/streams, their README
+# says what each is); one image whose Limine configuration asks for `resolution: 2560x1440` and
+# puts `fbwrite` on the command line (px87's scroll that never reads the framebuffer, the way a
+# real GPU's framebuffer is scrolled; QEMU's would choose the copy). rows.py's selftest first (the
+# trunk's table fails, the fixed one passes: tests/mpx3-conspeed.d/selftest).
+#
+# The boot, each tier and firmware: QEMU's VGA device with 2560 x 1440 as its mode, and no COM1, the installed
+# machine's shape (with a UART every byte the console writes is also two port accesses, which
+# under KVM costs more than drawing it); KVM when /dev/kvm is usable (--accel auto). With no COM1
+# the kernel keeps only its first 64 KiB of console in memory, so conspeed's table is read off the
+# screen (tests/mpx3-conspeed.d/screen-run.py: the monitor's screendump every 3 s, each cell
+# matched against the BDF font's glyphs) once it says `nothing left to run`.
+#
+# The rows (tests/mpx3-conspeed.d/rows.py, every one a ratio of two `ms least` figures of the
+# boot, `unit` being conspeed's fixed CPU work): C1 the table (every test there); C8 the grid,
+# 320 x 90 (pax#357);
+# C2 (a) plain; C3 (b) sgr; C4 (c) scroll1, and scroll10 against scroll1; C5 (d) clear against
+# plain; C6 the cursor shown, and the same screen written again, against plain; C7 (e) yew's F
+# mode opening, cub's step and yew's keypress. Under TCG the rows against the CPU's unit, and
+# `same`, are SKIPPED by name (rows.py says why), the others hold with TCG's own bounds.
+#
+# Prints `mpx3-conspeed: PASS …` or `FAIL …` a row; exit 0 when all pass, 1 otherwise, 2 on a
+# usage error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+D=$here/mpx3-conspeed.d
+
+images= noboot=0 accel=auto legs=both tiers=both
+usage="usage: tests/mpx3-conspeed [--images DIR | --no-boot] [--accel auto|kvm|tcg] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --accel)    accel=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need python3 readelf
+MODE=2560x1440
+GRID=320x90 # px129: the grid's 320 columns at 2560 pixels (pax#357)
+work=$PAX_BUILD/mpx3-conspeed
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+mkdir -p "$work"
+
+if python3 -I "$D/rows.py" --selftest "$D/selftest" > "$work/rows-selftest.txt" 2>&1; then
+    say "PASS C0 rows.py's selftest: $(tail -n 1 "$work/rows-selftest.txt")"
+else
+    sed 's/^/  /' "$work/rows-selftest.txt" >&2
+    bad "C0 rows.py's selftest: $(tail -n 1 "$work/rows-selftest.txt")"
+fi
+
+if [ -z "$images" ]; then
+    why=
+    "$PAX_ROOT/tools/mkconspeed" "$work/bin" > "$work/mkconspeed.txt" 2>&1 || why+=" tools/mkconspeed;"
+    cat "$work/mkconspeed.txt" >&2
+    files=(/bin/conspeed="$work/bin/conspeed":755 /etc/pax-run="$work/pax-run":644)
+    for f in $(cd "$D/streams" && find . -type f ! -name README.md | sort); do
+        files+=("/streams/${f#./}=$D/streams/${f#./}:644")
+    done
+    printf '%s\n' "/bin/conspeed /streams/fuss /streams/fussopen /streams/cub" > "$work/pax-run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/conspeed.cpio" "${files[@]}" > "$work/initramfs.txt" || why+=" tools/mkinitramfs;"
+    cp "$PAX_ROOT/boot/limine-initramfs.conf" "$work/conspeed.conf"
+    printf '\n    resolution: %s\n    cmdline: fbwrite\n' "$MODE" >> "$work/conspeed.conf"
+    built=
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" \
+                2> "$work/$tier/build-kernel.log"); then
+            "$PAX_ROOT/tools/mkimage" --conf "$work/conspeed.conf" --add "$work/conspeed.cpio" initramfs.cpio "$elf" \
+                "$work/$tier/conspeed.iso" > /dev/null || why+=" $tier: tools/mkimage;"
+            built+=" $tier kmain_console $(sha256_of "$elf" | cut -c1-16)… image $(sha256_of "$work/$tier/conspeed.iso" | cut -c1-16)…;"
+        else
+            cat "$work/$tier/build-kernel.log" >&2
+            why+=" $tier: tools/build-kernel kmain_console;"
+        fi
+    done
+    if [ -z "$why" ]; then
+        say "PASS C0 built: $(grep -o 'conspeed [0-9a-f]*' "$work/mkconspeed.txt" | cut -c1-25)…, the initramfs $(sha256_of "$work/conspeed.cpio" | cut -c1-16)…;$built"
+    else
+        bad "C0 build:$why"
+    fi
+    images=$work
+fi
+[ "$noboot" = 1 ] && { [ "$fail" = 0 ] && say "mpx3-conspeed: PASS (no boot)" || say "mpx3-conspeed: FAIL"; exit "$fail"; }
+
+if [ "$accel" = auto ]; then
+    if [ -c /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+fi
+for tier in $tiers; do
+    for leg in $legs; do
+        id="$tier $leg $accel"
+        iso=$images/$tier/conspeed.iso
+        [ -f "$iso" ] || { bad "C1 $id: no image $iso"; continue; }
+        out=$PAX_BUILD/mpx3-conspeed-$tier-$leg-$accel
+        t0=$SECONDS
+        python3 -I "$D/screen-run.py" --qemu-run "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --iso "$iso" --mode "$MODE" \
+            --accel "$accel" --font "$PAX_ROOT/font/spleen-8x16.bdf" --out "$out" --timeout 1500 > "$out.run.txt" 2>&1
+        rrc=$?
+        cat "$out.run.txt" >&2
+        say "booted $id: screen-run exit $rrc in $((SECONDS - t0)) s; the screen's text $(sha256_of "$out.txt" 2>/dev/null | cut -c1-16)…"
+        grep -A 20 '^conspeed ' "$out.txt" 2>/dev/null | sed 's/^/  /' >&2
+        [ "$rrc" = 0 ] || bad "C1 $id: init's end never on the screen (screen-run exit $rrc; $out.txt)"
+        python3 -I "$D/rows.py" "$out.txt" "$GRID" "$accel" > "$out.rows.txt" 2>&1
+        while IFS= read -r ln; do
+            case $ln in
+                PASS*) say "PASS ${ln#PASS } ($id)" ;;
+                FAIL*) bad "${ln#FAIL } ($id)" ;;
+                SKIP*) say "$ln ($id)" ;;
+                *) say "$ln" ;;
+            esac
+        done < "$out.rows.txt"
+    done
+done
+[ "$fail" = 0 ] && say "mpx3-conspeed: PASS" || say "mpx3-conspeed: FAIL"
+exit "$fail"
