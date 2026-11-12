@@ -2296,3 +2296,16 @@ distribution ships it.
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `usb-kbd`, `usb-tablet`, `usb-mouse` and the i8042 | binary | black box: the screen's size on both firmwares, the order key and tablet events reach the guest when sent 2 ms apart (the USB keyboard's later than a tablet report sent after it) and 3 ms apart through the PS/2 keyboard (in order), the relative mouse's counts as pixels (`notes/px117-the-pointer.md` §3) |
 | yew at `user/yew.pin`'s commit (the org's own, public): `src/term/input.lu` (`input_enable_blob`: `CSI ? 2004 h`, `CSI ? 1002 h`, `CSI ? 1006 h`, `CSI ? 1004 h`; `input_disable_blob`; `decode_mouse`: SGR's Cb 0-2 press and release, 32-35 motion, 64-67 the wheel, 128-129, the 4/8/16 modifiers, and the X10 form whose release it refuses), `src/edit/mouse.lu` (`press_opens_menu`, `press_menu`, `mouse_release`), `src/edit/ctxrows.lu` (the document menu's rows), and the mouse tests `src/edit_ctxmenu_test.lu`, `src/edit_drag_test.lu` | `2eb9cb9b` | what yew enables and parses; Y9's witness. Built unmodified by `tools/mkyew` |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/mouse`, `kernel/xhci`, `kernel/sched` (`proc_slot`, `proc_word`, `tty_pgrp_of`), `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx5-yew` | this tree | read and extended |
+
+## px126 — process slots: 64 to 1024
+
+No kernel's, C library's or shell's source was read: not Linux's, not any BSD's, not glibc's or musl's, not pelt's
+beyond its pin.
+
+| source | version | read, for |
+|---|---|---|
+| The man-pages project: clone(2), fork(2), wait(2), futex(2), pipe(2), sched_yield(2), getrusage(2), clock_gettime(2), getrlimit(2) (RLIMIT_NPROC: a limit on the real user's threads, the privileged exempt), proc_pid_status(5), proc_pid_stat(5), proc_sys_kernel(5) (`threads-max`, `pid_max`), pty(7), posix_openpt(3), unlockpt(3), ptsname(3), ioctl_tty(2) | 6.7 | `user/elf/slotprobe.c`'s calls and what it reads back; `notes/px126-process-slots.md`'s recommendation on RLIMIT_NPROC |
+| POSIX.1-2024: XSH fork, waitpid, setsid, _exit's consequences (orphaned process groups); XBD 3 (orphaned process group), chapter 11 | 2024 | `process_ends`' children set, unchanged in meaning |
+| Intel SDM vol. 3A §4.5 (4-level paging: one page table maps 2 MiB), §4.10.4 (INVLPG) | as px03's entry | the areas' region and its page tables taken at `start` |
+| PAX's own `kernel/sched`, `kernel/fpu`, `kernel/process`, `kernel/procfs`, `kernel/vm`, `kernel/trace_state`, `boot/sched.S`, `boot/fpu.S`, `user/elf/ptyprobe.c` (the pty idioms), `tests/mpx5-pty` and `tests/mpx5-forks` (the suite's shape) | this tree | read and extended |
+| pelt at `user/pelt.pin`'s commit and boreutils' `cat` at `user/boreutils.pin`'s, built unmodified by `tools/mkpelt` and `tools/mkboreutils` | the pins | black box: their thread counts on PAX (`/proc/<pid>/status`), pelt's `-c` |
