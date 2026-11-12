@@ -1,0 +1,13 @@
+printf 'nameserver 10.0.2.2\n' > /etc/resolv.conf; echo PX127-RESOLV=$(cat /etc/resolv.conf)
+mkdir -p /tmp/px127 && cd /tmp/px127 && printf '%s\n' 'use std.net' '' 'fn try(addr: str) {' '    var s = net.connect(addr) else |e| {' '        print("{addr}: {e}")' > dial.lu
+printf '%s\n' '        return' '    }' '    print("{addr}: connected")' '    net.close(take s) else |_| {}' '}' '' >> dial.lu
+printf '%s\n' 'fn main() -> int {' '    for a in env_args() {' '        try(a)' '    }' '    0' '}' >> dial.lu
+wolf build --no-cache dial.lu -o dial; echo PX127-BUILD=$?
+echo PX127-DNS=begin
+./dial github.com:@PORT@ nosuch.test:@PORT@ 10.0.2.2:@PORT@
+echo PX127-DNS=end
+printf '10.0.2.2 hosts.test\n' > /etc/hosts
+echo PX127-HOSTS=begin
+./dial hosts.test:@PORT@
+echo PX127-HOSTS=end
+rm -f /etc/hosts; cd /
