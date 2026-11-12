@@ -313,7 +313,8 @@ worst, each over the same boot's `spin`, at most 3 (SKIPPED by name under TCG); 
 write, a file write of MiB/16, fork of MiB/8) measured the same way and named with the work that will bound them;
 `~L3` every load's figures. CI's job runs it on the plan's legs under TCG (decision 11).
 
-- **Red at the rows' commit** (`6a892cf8`, trunk's kernel paths): see the evidence index.
+- **Red at the rows' commit** (`6a892cf8`, trunk's kernel paths): all three rows on both firmwares, 28 to 141 times
+  `spin` (record sha256 `c7d03d64…`, the evidence index).
 - **Green at the head:** L2 1.00 for munmap of a hole, 1.01 for getrandom, 1.01 for /proc/self/mem (sleeper; the
   echoes 0.89 to 1.04).
 - **The plant** (`px131-plant-*`): the head with `vm.unmap_range` walking every page again; red by name at L2 for
@@ -339,7 +340,7 @@ ten seconds shows the general rule at work, bounded and unable to starve the mac
 | the probe, the suite, the Linux column | `92afa259`, `3aed4c37`, `fa75a076`, `66efb1fe`, `db422e4d`, `792b28a5`, `dbd47988`, `5feeded7` | |
 | the measurement table | the suite with `--loads all --mem 1024,2048 --firmware both --linux` at `792b28a5` (PAX) and `5feeded7` (Linux), the lane's evidence | section 7 |
 | the guard's rows | `cf81dd33`; the rig `6a892cf8` | |
-| **red at the rows' commit** | RED_RECORD | RED_LINES |
+| **red at the rows' commit** | `notes/px131/rig/red.manifest` at `6a892cf8` (trunk's kernel paths, the rows, the rig), a light take, record sha256 `c7d03d6480aa94b6a6ebac4892e0bfdf2cbd442287982ee402efa97d5aad0b22` | six rows red by name, both firmwares: `FAIL L2 native-bios-1024 hole:1024` (the sleeper 141 times `spin`, munmap 4,086 ms with interrupts off), `FAIL L2 … random:8` (124 times; getrandom 1,852 ms), `FAIL L2 … procmem:8` (33 times; pread 500 ms), and the same three on UEFI (110, 121 and 28 times); `END latency exit=1 secs=89` |
 | the fixes | `80cbe96d`, `856c9063`, `42b9f123`, `48cae32b`, `59070c2d`, `fa020c2b` | |
 | CI's job and paths | `b1073dc4`, `7106409a`, `886103ee` | |
 | the takes at the head, native and release, and the plant | `notes/px131/rig/{quick-a,quick-b,release,plant}.manifest` | their records and `END` lines are in the PR |
