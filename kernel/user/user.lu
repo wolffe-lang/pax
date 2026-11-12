@@ -259,6 +259,7 @@ use cred
 use files
 use frames
 use futex
+use kmsg
 use log
 use netd
 use paging
@@ -416,6 +417,16 @@ fn code_pages(p: u64) -> u64 {
 /// (px15, kernel/log).
 pub fn start() {
     log.set_quiet(boot_info.cmdline_has("quiet"))
+    // px130: `loglevel=N` (bootparam(7)): the console level from the start,
+    // one digit, which `quiet` then leaves as it is.
+    let (lv, ll) = boot_info.cmdline_value("loglevel")
+    if ll == 1 {
+        // # Safety: one byte of Limine's command line, inside the word found.
+        let d = unsafe { (lv as *u8).read_volatile() as u64 }
+        if d >= 48 && d <= 57 {
+            log.set_console_level(d - 48)
+        }
+    }
     // # Safety: cpu.S's RDMSR/WRMSR of architectural MSRs every x86-64
     // CPU has; LSTAR is boot/user.S's entry; CR4 gains only the bits
     // CPUID says exist, and nothing the kernel does touches a user page
@@ -550,6 +561,7 @@ pub fn load(p: u64) -> u64 {
 /// `user: <name> pid <id> cr3 0x<c> code 0x<CODE> <n> pages r-x, stack 0x<lo> to 0x<TOP> rw- nx, guard 0x<g>, kernel half <s> of <k> entries shared`.
 pub fn describe(p: u64, id: u64, cr3: u64) {
     let lo = STACK_TOP - STACK_PAGES * PAGE
+    log.at(log.INFO) // px130: a program's ordinary life: kept, off a quiet screen
     log.put("user: ")
     log.put(name(p))
     log.put(" pid ")
@@ -700,6 +712,7 @@ fn remap_line() {
     if c == 0 || log.quiet() {
         return
     }
+    log.at(log.INFO) // px130: a program's ordinary life: kept, off a quiet screen
     who()
     log.put(" mremap: ")
     log.dec(c as int)
@@ -733,6 +746,7 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     }
     if t == 2 {
         if errno_lines() {
+            log.at(log.INFO) // px130
             who()
             log.put(" write fd ")
             num(fd)
@@ -767,11 +781,18 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
     if t == 10 {
         return files.pty_write(area(), paging.live(), fd, buf, len) // px111: a pty's master or slave
     }
+    if t == 11 {
+        return files.kmsg_write(paging.live(), buf, len) // px130: /dev/kmsg, a record
+    }
+    if t == 12 {
+        return files.setting_write(area(), paging.live(), fd, buf, len) // px130: dmesg_restrict, printk
+    }
     if t == 0 || len == 0 {
         return len
     }
     if !readable(buf, len) {
         if errno_lines() {
+            log.at(log.INFO) // px130
             who()
             log.put(" write fd ")
             num(fd)
@@ -848,6 +869,10 @@ fn writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     if files.is_msg(area(), fd) {
         return files.msg_writev(area(), pml4, fd, iov, cnt, sum)
     }
+    // px130: to /dev/kmsg the parts are one record.
+    if files.write_target(area(), fd) == 11 {
+        return files.kmsg_writev(pml4, iov, cnt, sum)
+    }
     // A pipe takes a write of at most PIPE_BUF bytes whole or not at
     // all (pipe(7)), and to a pipe the parts are one write: the sum is
     // what the rule reads.
@@ -910,6 +935,7 @@ const SYS_UNAME: u64 = 63
 const SYS_GETCWD: u64 = 79
 const SYS_GETTIMEOFDAY: u64 = 96
 const SYS_GETUID: u64 = 102
+const SYS_SYSLOG: u64 = 103 // px130
 const SYS_GETGID: u64 = 104
 const SYS_GETEUID: u64 = 107
 const SYS_GETEGID: u64 = 108
@@ -1146,6 +1172,7 @@ fn unknown(nr: u64) {
     if log.quiet() {
         return
     }
+    log.at(log.INFO) // px130: a program's ordinary life: kept, off a quiet screen
     who()
     log.put(" syscall ")
     num(nr)
@@ -1511,6 +1538,7 @@ fn serve(f: u64) -> u64 {
         // has others: the clear-child-tid word zeroed and its futex
         // woken (`set_tid_address(2)`), which is what a join waits for.
         if !log.quiet() && sched.threads_made() <= 4 {
+            log.at(log.INFO) // px130
             who()
             log.put(" thread ")
             log.dec(sched.self_tid() as int)
@@ -1529,6 +1557,7 @@ fn serve(f: u64) -> u64 {
     }
     if nr == SYS_EXIT || nr == SYS_EXIT_GROUP {
         if !log.quiet() { // px15
+            log.at(log.INFO) // px130: a program's ordinary life: kept, off a quiet screen
             who()
             log.put(if nr == SYS_EXIT { " exit " } else { " exit_group " })
             log.dec((a0 & 0xff) as int)
@@ -1737,6 +1766,7 @@ fn unix_lines() {
     if n == 0 || log.quiet() {
         return
     }
+    log.at(log.INFO) // px130: a program's ordinary life: kept, off a quiet screen
     who()
     log.put(" unix: ")
     log.dec(n as int)
@@ -1769,6 +1799,9 @@ fn tree_lines() {
     let full = tree.full_news()
     if log.quiet() || (n == 0 && !full) {
         return
+    }
+    if !full {
+        log.at(log.INFO) // px130: the census alone; a full tree stays a warning
     }
     who()
     if n != 0 {
@@ -2443,6 +2476,9 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_GETRUSAGE {
         return process.getrusage(r0, a1) // px88 (pax#185, #248)
     }
+    if nr == SYS_SYSLOG {
+        return syslog(int32(r0), a1, int32(a2)) // px130
+    }
     if nr == SYS_SETPRIORITY {
         return process.setpriority(r0, a1, a2)
     }
@@ -2589,6 +2625,154 @@ fn ready_calls(nr: u64, a: u64, pml4: u64, a0: u64, a1: u64, a2: u64, a3: u64) -
     NEG_ENOSYS
 }
 
+// --- syslog(2) (px130) -----------------------------------------------------------------
+
+/// `syslog(type, buf, len)` (103), as syslog(2) has it, over kernel/kmsg's
+/// records: 0 and 1 nothing; 2 READ waits for a record and gives the
+/// records not yet read this way, whole while they fit (a first one
+/// longer than `len` cut to it), and they are gone for this reader; 3
+/// READ_ALL the newest records that fit in `len` since the last CLEAR,
+/// left in place; 4 READ_CLEAR the same, then CLEAR; 5 CLEAR; 6
+/// CONSOLE_OFF; 7 CONSOLE_ON; 8 CONSOLE_LEVEL `len` (1-8, else
+/// -EINVAL); 9 SIZE_UNREAD, READ's bytes to come; 10 SIZE_BUFFER, the
+/// ring's bytes. A record reads `<PRI>[SSSSS.UUUUUU] TEXT\n` (kernel/kmsg's
+/// `format_syslog`). Every type but 3 and 10 is root's, and those two
+/// are too while dmesg_restrict is 1 (-EPERM, asked before anything
+/// else); a read with no buffer or a negative length is -EINVAL, one
+/// into memory the caller cannot write -EFAULT; any other type
+/// -EINVAL.
+fn syslog(t: u64, buf: u64, len: u64) -> u64 {
+    let open = t == 3 || t == 10
+    if !cred.privileged(area()) && (!open || kmsg.restricted()) {
+        return NEG_EPERM
+    }
+    if t == 0 || t == 1 {
+        return 0
+    }
+    if t == 2 || t == 3 || t == 4 {
+        if buf == 0 || len >= 0x80000000 {
+            return NEG_EINVAL // a negative int (kernel/user reads the low 32 bits)
+        }
+        if len == 0 {
+            return 0
+        }
+        let pml4 = paging.live()
+        if !uaccess.writable(pml4, buf, len) {
+            return NEG_EFAULT
+        }
+        if t == 2 {
+            return syslog_read(pml4, buf, len)
+        }
+        let r = syslog_all(pml4, buf, len)
+        if t == 4 {
+            kmsg.clear()
+        }
+        return r
+    }
+    if t == 5 {
+        kmsg.clear()
+        return 0
+    }
+    if t == 6 {
+        kmsg.console_off()
+        return 0
+    }
+    if t == 7 {
+        kmsg.console_on()
+        return 0
+    }
+    if t == 8 {
+        if len < 1 || len > 8 {
+            return NEG_EINVAL
+        }
+        kmsg.set_console_level(len)
+        return 0
+    }
+    if t == 9 {
+        var n: u64 = 0
+        var s = kmsg.read_seq()
+        if s < kmsg.next() {
+            var off = kmsg.at(s, 0)
+            while s < kmsg.next() {
+                n += kmsg.syslog_len(off)
+                off = kmsg.next_at(off)
+                s += 1
+            }
+        }
+        return n
+    }
+    if t == 10 {
+        return kmsg.CAP
+    }
+    NEG_EINVAL
+}
+
+/// Record `off` formatted (kernel/kmsg's `pax_kmsg_out`) to user `buf`,
+/// at most `n` bytes of it; the bytes written.
+fn syslog_put(pml4: u64, buf: u64, off: u64, n: u64) -> u64 {
+    let l = kmsg.format_syslog(off)
+    let m = if l < n { l } else { n }
+    var i: u64 = 0
+    while i < m {
+        uaccess.put(pml4, buf + i, kmsg.out_at(i), 1)
+        i += 1
+    }
+    m
+}
+
+/// syslog(2)'s READ: the records after the last one READ gave.
+fn syslog_read(pml4: u64, buf: u64, len: u64) -> u64 {
+    var s = kmsg.read_seq()
+    if s >= kmsg.next() {
+        kmsg.want() // the next record wakes it (kernel/sched's `wake_sleepers`)
+        return files.WAIT
+    }
+    var off = kmsg.at(s, 0)
+    var done: u64 = 0
+    while s < kmsg.next() {
+        let l = kmsg.syslog_len(off)
+        if done + l > len && done > 0 {
+            break
+        }
+        done += syslog_put(pml4, buf + done, off, len - done)
+        off = kmsg.next_at(off)
+        s += 1
+    }
+    kmsg.set_read_seq(s)
+    done
+}
+
+/// syslog(2)'s READ_ALL: the newest records since the last CLEAR that
+/// fit in `len`, oldest first.
+fn syslog_all(pml4: u64, buf: u64, len: u64) -> u64 {
+    let c = kmsg.clear_mark()
+    var s = if c > kmsg.first() { c } else { kmsg.first() }
+    if s >= kmsg.next() {
+        return 0
+    }
+    var off = kmsg.at(s, 0)
+    var total: u64 = 0
+    var t = s
+    var o = off
+    while t < kmsg.next() {
+        total += kmsg.syslog_len(o)
+        o = kmsg.next_at(o)
+        t += 1
+    }
+    while total > len && s < kmsg.next() {
+        total -= kmsg.syslog_len(off)
+        off = kmsg.next_at(off)
+        s += 1
+    }
+    var done: u64 = 0
+    while s < kmsg.next() {
+        done += syslog_put(pml4, buf + done, off, len - done)
+        off = kmsg.next_at(off)
+        s += 1
+    }
+    done
+}
+
 /// An exception in ring 3 (kernel/interrupts; `what` its name): the
 /// program is killed by name and the next thread's frame returned.
 pub fn kill(f: u64, what: str) -> u64 {
@@ -2600,6 +2784,7 @@ pub fn kill(f: u64, what: str) -> u64 {
     if g != 0 {
         return g
     }
+    log.at(log.INFO) // px130: a program's fault ends it, as Linux's segfault line, at info
     who()
     log.put(" killed: ")
     log.put(if bus { "bus error (a mapping's page past its file's end)" } else { what })
