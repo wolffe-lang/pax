@@ -1364,3 +1364,12 @@ pass measures how long, ranks the paths, and makes three of them short.
 | `process/` | `random_fill`: a buffer of random words, CPUID asked once |
 | `user/` | `getrandom` a page at a time through a kernel frame and `uaccess.copy_out`; getrandom(2) gives at most 16 KiB a call (`GETRANDOM_CHUNK`; /dev/urandom's reads stay whole) |
 | `trace_mem/` | `transfer` copies each piece with `uaccess.copy_in`/`copy_out`, not a byte at a time |
+
+### px131, the second part — the clocks from the clock, device-driven wake-ups at once
+
+| module | change |
+|---|---|
+| `timer/` | with `follow_clock` (`kmain_console`, the shipped kernel), `tick` sets the count to the larger of itself plus one and the ticks kernel/clock says are due since the tick was armed, so every deadline counted in ticks (CLOCK_MONOTONIC, CLOCK_REALTIME, sleeps, poll's, epoll's, a receive's and a futex's timeouts, TCP's, ARP's and DHCP's timers) is one in real time; `delivered` counts the interrupts themselves (`drift`, `mark`, kernel/latency's lost ticks). The test kernels count interrupts as before |
+| `sched/` | `wake_urgent`: a thread a device's work woke (`wake_net`, `wake_input`, and `wake_pipes` from the network thread, which `block_net` names) goes to the queue's head marked urgent (`S_URGENT`, a bit a slot); `kick` and `preempt` switch to an urgent head when the running thread is not one; a thread keeps its mark while it runs and loses it when it leaves the CPU |
+| `latency/` | lost ticks from `timer.delivered` |
+| `xhci/` | `command` and `control` look at their completion before their deadline, so a stretch that carries the tick count past it does not quarantine a controller that answered during it |
