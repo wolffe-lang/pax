@@ -40,8 +40,9 @@
 # Linux side boots nothing: `--only linux --images DIR` runs plumb's and
 # wolf's trees in throwaway containers (PAX_TREE_IMAGE, default
 # localhost/px75-ubuntu:2: Ubuntu 24.04 with python3) and writes
-# DIR/linux/IMAGE.txt; `--record` copies them with record.meta into
-# tests/mpx7-mux.d/linux/.
+# DIR/linux/IMAGE.txt, each held row for row to the committed reference
+# (the `~` measurements aside); `--record` copies them with record.meta
+# into tests/mpx7-mux.d/linux/ instead.
 #
 # Assertions, per tier and firmware:
 #   M0 build: the programs static; the checkers' selftests; the kernel and
@@ -124,6 +125,20 @@ if [ "$only" = linux ]; then
         grep -q "^$(last_of "$im")" "$images/linux/$im.txt" || why+=" $im's transcript has no $(last_of "$im")line;"
         say "  linux $im: $(wc -l < "$images/linux/$im.txt" | tr -d ' ') lines, status $(cat "$out.rc" 2>/dev/null)"
     done
+    # without --record, the fresh transcripts are held to the committed
+    # references row for row (a probe changed without a new record, or
+    # Ubuntu answering otherwise, is red here before any boot)
+    if [ "$record" != 1 ] && [ -z "$why" ]; then
+        : > "$images/linux/none.ruled"
+        for im in $PROBES; do
+            if [ -f "$D/linux/$im.txt" ]; then
+                python3 -I "$D/check.py" "$D/linux/$im.txt" "$images/linux/none.ruled" "$images/linux/$im.txt" > "$images/linux/$im.check" \
+                    || why+=" $im: Ubuntu now differs from tests/mpx7-mux.d/linux/$im.txt ($(grep -m1 '^FAIL' "$images/linux/$im.check"));"
+            else
+                why+=" no tests/mpx7-mux.d/linux/$im.txt;"
+            fi
+        done
+    fi
     if [ "$record" = 1 ] && [ -z "$why" ]; then
         mkdir -p "$D/linux"
         {
@@ -139,7 +154,7 @@ if [ "$only" = linux ]; then
         } > "$D/linux/record.meta"
         say "  recorded tests/mpx7-mux.d/linux/{$(echo $PROBES | tr ' ' ,)}.txt"
     fi
-    [ -z "$why" ] && say "PASS M0 (linux): the probes ran on Ubuntu in throwaway containers" || bad "M0 (linux):$why"
+    [ -z "$why" ] && say "PASS M0 (linux): the probes ran on Ubuntu in throwaway containers$([ "$record" = 1 ] && echo ', recorded' || echo ', each row as the committed reference')" || bad "M0 (linux):$why"
     exit "$fail"
 fi
 
