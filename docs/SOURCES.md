@@ -2296,3 +2296,22 @@ distribution ships it.
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `usb-kbd`, `usb-tablet`, `usb-mouse` and the i8042 | binary | black box: the screen's size on both firmwares, the order key and tablet events reach the guest when sent 2 ms apart (the USB keyboard's later than a tablet report sent after it) and 3 ms apart through the PS/2 keyboard (in order), the relative mouse's counts as pixels (`notes/px117-the-pointer.md` §3) |
 | yew at `user/yew.pin`'s commit (the org's own, public): `src/term/input.lu` (`input_enable_blob`: `CSI ? 2004 h`, `CSI ? 1002 h`, `CSI ? 1006 h`, `CSI ? 1004 h`; `input_disable_blob`; `decode_mouse`: SGR's Cb 0-2 press and release, 32-35 motion, 64-67 the wheel, 128-129, the 4/8/16 modifiers, and the X10 form whose release it refuses), `src/edit/mouse.lu` (`press_opens_menu`, `press_menu`, `mouse_release`), `src/edit/ctxrows.lu` (the document menu's rows), and the mouse tests `src/edit_ctxmenu_test.lu`, `src/edit_drag_test.lu` | `2eb9cb9b` | what yew enables and parses; Y9's witness. Built unmodified by `tools/mkyew` |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/mouse`, `kernel/xhci`, `kernel/sched` (`proc_slot`, `proc_word`, `tty_pgrp_of`), `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx5-yew` | this tree | read and extended |
+
+## px123 — a terminal over ssh, and Ctrl-C reaching what runs on it
+
+- **POSIX.1-2024 XCU 2.11, Signals and Error Handling:** an asynchronous list in a shell without job control
+  starts with SIGINT and SIGQUIT ignored, and a program keeps an ignored signal across exec; **XCU 2.9.3.1** for
+  the asynchronous list itself. That is why the boot hook's loop, and burrowd started from it, had both ignored.
+- **proc_pid_status(5)** and **proc_pid_stat(5)** (man-pages 6.7): `SigIgn`, `SigBlk`, `SigCgt`, and the process
+  group, session, `tty_nr` and `tpgid` fields, read on PAX's own `/proc` to find which layer kept Ctrl-C from the
+  foreground program (the pty's line discipline and its foreground group were right; the program had SIGINT
+  ignored).
+- **env(1)** as boreutils documents its `--default-signal` (GNU coreutils' option), the hook's way to start
+  burrowd with both at their defaults.
+- burrow at `user/burrow.pin`'s commit (the org's own, public): its README and `notes/bw06-the-terminal.md` for
+  what burrowd now does with `pty-req`, `window-change` and a command with no terminal; `src/ssession/ssession.lu`
+  for which signals its session children reset. pelt at `user/pelt.pin`'s commit: `src/sh/exec.lu`'s asynchronous
+  lists and `src/sh/edit_prompt.lu`'s prompt (its host, `?` when none is found).
+- OpenSSH 9.6p1 (Ubuntu's) and 10.2p1 as black boxes: `ssh -tt` on a pseudo-terminal of the rows' own, its window
+  changes by SIGWINCH.
+- No kernel's source of any OS, no shell's, no C library's, no sshd's.
