@@ -101,6 +101,22 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       not interactive, so it reads no ENV though ENV is set (the SetEnv
       line's value, or unset): `ssh host COMMAND` prints what it prints, a
       bare `../` changes no directory, and `g` is no function
+  B40 (px130) a writer killed by SIGPIPE over ssh (`yes | head -n 1`,
+      the session's own command): the kernel's line for it on the serial
+      port as it always was, byte for byte (`user: yes pid N killed:
+      SIGPIPE, a write to a pipe with no reader after R runs`), and the
+      console's screen, root logged in at its prompt, the same picture
+      before and after (QEMU's screendump): under `quiet`, past the boot,
+      a program's ordinary end is info, below the console level
+  B41 root at the console reads that line back with `dmesg`: `[SSSSS.UUUUUU]`
+      and the line, the pid the one B40 saw; `dmesg -r -l info` shows it at
+      `<6>`, and `dmesg -l err,warn` leaves it out
+  B42 `dmesg` over ssh as pax is refused (dmesg_restrict is 1): `dmesg:
+      read kernel buffer failed: Operation not permitted` on its standard
+      error, status 1, util-linux's words and status
+  B43 the console level holds both ways: through sudo over ssh, a record
+      written to /dev/kmsg at `<6>` (info) leaves the screen as it was and
+      one at `<4>` (warning) is drawn on it; both on the serial port
   B17 the stack segment after a system call (pax#340): `/bin/sysret-ss`
       (tests/mpx5-burrowd.d/sysret-ss.c) makes a system call, reads SS and
       CS, stays in ring 3 for 200 ms across the timer's interrupts, and
@@ -1107,6 +1123,86 @@ def git_rows(client, work):
             % (p[0], l[0], p[1], l[1], len(p[2].splitlines()), len(l[2].splitlines()), p[3], p[4]))
 
 
+def screen(con, name):
+    """The console's screen now, as QEMU's screendump writes it (P6), its bytes; b'' when it cannot be
+    read. The console settles first: what the serial port has is pumped for a second."""
+    con.pump(1.0)
+    path = con.run / ('%s.ppm' % name)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(str(con.mon))
+        s.sendall(('screendump %s\n' % path).encode())
+        time.sleep(0.5)
+        s.close()
+    except OSError:
+        return b''
+    end = time.monotonic() + 10
+    last = -1
+    while time.monotonic() < end:
+        size = path.stat().st_size if path.exists() else -1
+        if size > 0 and size == last:
+            return path.read_bytes()
+        last = size
+        time.sleep(0.3)
+    return b''
+
+
+def kmsg_rows(con, client):
+    """B40-B43 (px130): the kernel's log at an installed console, root logged in at its prompt."""
+    before = screen(con, 'b40-before')
+    start = len(con.seen)
+    con.cursor = start
+    r = client.ssh(GUEST_AT, ['yes | head -n 1; echo B40-ran'])
+    # The line's place on the serial port is wherever the console's output stood: after root's prompt, unanchored.
+    m = con.wait(r'user: yes pid (\d+) killed: SIGPIPE, a write to a pipe with no reader after \d+ runs$', 30)
+    after = screen(con, 'b40-after')
+    same = bool(before) and before == after
+    if r[0] == 0 and b'B40-ran' in r[1] and m and same:
+        ok('B40', 'yes killed by SIGPIPE over ssh: on the serial port (%r), the console\'s screen the same before and after'
+           % m.group(0).decode(errors='replace'))
+    else:
+        bad('B40', 'the session %s; the serial line %s; the screen %s' % (
+            show(r), repr(m.group(0)) if m else 'missing',
+            'not read' if not before or not after else 'the same' if same else 'CHANGED (the line drawn over the console)'))
+    pid = m.group(1).decode() if m else None
+    out = con.command('dmesg', 41, 60) or ''
+    want = (r'^\[ *\d+\.\d{6}\] user: yes pid %s killed: SIGPIPE, a write to a pipe with no reader after \d+ runs$' % pid) if pid else None
+    line = re.search(want, out, re.M) if want else None
+    # Its level is info: `dmesg -r -l info` shows it with `<6>`, `dmesg -l err,warn` does not.
+    raw = con.command('dmesg -r -l info', 44, 60) or ''
+    info = re.search(r'^<6>\[ *\d+\.\d{6}\] user: yes pid %s killed: SIGPIPE' % pid, raw, re.M) if pid else None
+    worse = con.command('dmesg -l err,warn', 45, 60) or ''
+    kept_out = bool(pid) and ('user: yes pid %s killed' % pid) not in worse
+    (ok if line and info and kept_out else bad)('B41', 'root\'s dmesg at the console: %s; with -r -l info: %s; with -l err,warn: %s' % (
+        repr(line.group(0)) if line else 'no timestamped line for pid %s: %r' % (pid, out[-300:]),
+        repr(info.group(0)) if info else 'NOT at <6>: %r' % raw[-200:], 'not there' if kept_out else 'THERE'))
+    r = client.ssh(GUEST_AT, ['dmesg; echo B42-rc=$?'])
+    refused = b'dmesg: read kernel buffer failed: Operation not permitted\n' in r[2] and r[1].endswith(b'B42-rc=1\n')
+    (ok if r[0] == 0 and refused else bad)('B42', 'dmesg over ssh as pax: %s' % show(r))
+    pw = (PASSWORDS['pax'] + '\n').encode()
+    marks = {}
+    shots = [screen(con, 'b43-0')]
+    for lvl, word in ((6, 'info'), (4, 'warning')):
+        text = 'px130-B43 a line at level %d (%s)' % (lvl, word)
+        r = client.ssh(GUEST_AT, ["sudo -k -S -p '' sh -c 'echo \"<%d>%s\" > /dev/kmsg'; echo B43-rc=$?" % (lvl, text)], data=pw)
+        seen = con.wait(r'%s$' % re.escape(text), 30) # after root's prompt when it stands there
+        marks[word] = (r, bool(seen))
+        shots.append(screen(con, 'b43-%d' % lvl))
+    info_quiet = bool(shots[0]) and shots[0] == shots[1]
+    warn_drawn = bool(shots[2]) and shots[2] != shots[1]
+    ran = all(v[0][0] == 0 and b'B43-rc=0' in v[0][1] and v[1] for v in marks.values())
+    (ok if ran and info_quiet and warn_drawn else bad)(
+        'B43', 'through sudo, /dev/kmsg at <6>: %s, the screen %s; at <4>: %s, the screen %s' % (
+            'on the serial port' if marks['info'][1] else 'NOT on the serial port (%s)' % show(marks['info'][0]),
+            'the same' if info_quiet else 'CHANGED',
+            'on the serial port' if marks['warning'][1] else 'NOT on the serial port (%s)' % show(marks['warning'][0]),
+            'drawn' if warn_drawn else 'NOT drawn'))
+
+
 def console_rows(con, client):
     """B8 and B9 at the console, as root (its password, typed, never
     echoed or written)."""
@@ -1126,6 +1222,7 @@ def console_rows(con, client):
     if not con.wait(r'[$#] $', 60):
         bad('B8', 'root did not log in at the console: %r' % con.text()[-300:])
         return
+    kmsg_rows(con, client) # px130: B40-B43, root at its prompt
     before = con.command('cat /var/run/burrowd.pid', 1)
     con.command('kill $(cat /var/run/burrowd.pid)', 2)
     t0 = time.monotonic()
