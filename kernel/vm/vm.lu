@@ -477,12 +477,14 @@ fn map_zero(pml4: u64, va: u64, flags: u64) -> bool {
 }
 
 /// Unmap and free every mapped page of [lo, hi) (page-aligned); px62:
-/// a borrowed page's frame is its file's, unmapped and left.
+/// a borrowed page's frame is its file's, unmapped and left. px131: only
+/// the pages that are there are visited (`paging.next_leaf`), so the
+/// range's length costs nothing where nothing is mapped.
 fn unmap_range(pml4: u64, lo: u64, hi: u64) {
-    var pg = lo
+    var pg = paging.next_leaf(pml4, lo, hi)
     while pg < hi {
         drop_page(pml4, pg)
-        pg += PAGE
+        pg = paging.next_leaf(pml4, pg + PAGE, hi)
     }
 }
 
@@ -1283,12 +1285,14 @@ pub fn cut_maps(ino: u64, size: u64) {
                     }
                     let hi = mw(a, r, M_HI)
                     let off = mw(a, r, M_OFF)
-                    var pg = lo
+                    // px131: only the record's pages that are there (a file's
+                    // record may span terabytes past its end, none of it mapped)
+                    var pg = paging.next_leaf(pml4, lo, hi)
                     while pg < hi {
                         if off + (pg - lo) >= keep {
                             drop_page(pml4, pg)
                         }
-                        pg += PAGE
+                        pg = paging.next_leaf(pml4, pg + PAGE, hi)
                     }
                 }
                 r += 1
