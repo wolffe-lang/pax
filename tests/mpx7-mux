@@ -52,7 +52,8 @@
 #      `refusal` lines, and no other `refused:` line.
 #   M3 each probe image's end: `PAX: init … ended with status 0`, no PANIC,
 #      every frame back, halted, the booted kernel the one built; for
-#      plumb, what the kernel did with the daemon init left running (A5.4).
+#      plumb, the daemon init left running (A5.4) ended by the kernel's
+#      SIGTERM after init's exit (`PAX: the end: SIGTERM to N process`).
 #   M4 the screen: every line screen.py prints (what the console drew,
 #      answered and sent) as screen.rows has it.
 #   M5 the screen image's end: nothing refused by name, init ended,
@@ -266,9 +267,11 @@ boot_probe() {
     [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
     daemon=
     if [ "$im" = plumb ]; then
-        daemon=$(awk '/^A5.4 /{on=1; next} on && /^user: muxprobe pid [0-9]+ (killed|exit)/{print; exit}' "$norm")
-        [ -n "$daemon" ] || why+=" no line for the daemon init left;"
-        daemon="; the daemon it left: ${daemon#user: }"
+        # after init's own exit (pid 1), the daemon's end, and the kernel's line for it
+        daemon=$(awk '/^A5.4 /{on=1; next} on && /^user: muxprobe pid 1 exit_group /{init=1; next} init && /^user: muxprobe pid [0-9]+ killed: SIGTERM/{print; exit}' "$norm")
+        theend=$(grep -m1 '^PAX: the end: SIGTERM to ' "$norm")
+        [ -n "$daemon" ] && [ -n "$theend" ] || why+=" no SIGTERM for the daemon init left ($(grep -m1 '^PAX: the end' "$norm"));"
+        daemon="; the daemon it left: ${daemon#user: } (${theend#PAX: })"
     fi
     [ -z "$why" ] && say "PASS M3 $id $im: init ended, status 0$daemon; frames back; kernel $digest; $(tail -n 1 "$log.verdict")" || bad "M3 $id $im:$why"
 }
