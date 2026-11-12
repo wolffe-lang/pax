@@ -60,7 +60,7 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx3-conspeed` j
   the terminal inside the alternate screen with the cursor hidden, each frame one `write`, timed with RDTSC (PAX's
   CLOCK_MONOTONIC moves in 10 ms ticks), the TSC's rate taken over an idle second before and after; then it puts the
   terminal back (main screen, cursor, rendition, margins, mouse modes, the palette for TERM=linux) and prints one
-  table: `unit` (a fixed CPU loop, the rows' yardstick), `bytes` (a screen's worth of `ESC [ m`, nothing drawn),
+  table: `unit` (a fixed CPU loop, the yardstick for a test's drawing), `bytes` (a screen's worth of `ESC [ m`, nothing drawn),
   `cell`, `plain` (a), `same`, `sgr` (b), `scroll1` and `scroll10` (c), `clear` (d), `cursor`, and the recorded
   streams (e): `fuss` (yew's Down and Up in F mode), `fussopen` (F mode's opening), `cub` (four steps of cub).
 - **The streams** (`tests/mpx3-conspeed.d/streams`, its README): yew started as `yew .` in a small repository and cub,
@@ -117,6 +117,33 @@ ticks that fall inside it are lost. At trunk the tick clock kept 35 % of the tim
 after px129, the writes being shorter). px125's B7 ("about 10 ms a full screen" at both sizes) read that clock; the
 10 ms was a tick, and the true cost at 256 × 90 was about the same by coincidence (R-px129-6).
 
+**A second host.** The rows were first bounded on one host's tables (a desktop i7-12700KF), each against a test's raw
+`ms least` in units. On a laptop i7-10870H the quick take at this branch's head read the fix's `sgr` at 13.26 units
+(BIOS; 12.43 UEFI) against 11.5, and `cub` at 4.52 against 4.3: red with the fix in. Its BIOS screen is
+`tests/mpx3-conspeed.d/selftest/green-kvm-10870h.txt` (`6edfa215`, screen text sha256 `c8f115c3…`), and rows.py at
+`a6d2a2ac` fails it at C3 and C7. The laptop runs the unit as fast as the desktop (1.72-1.85 ms against 1.79), but a
+byte's parse costs about half as much again (62-66 ns against 43). `sgr` and `cub` are mostly bytes, so a bound on
+their raw figures carried the host's byte cost. The rows against the unit now hold a test's drawing (`731990dc`): its
+`ms least` less its bytes at the same boot's `bytes` rate (`bytes` is 9,600 `ESC [ m`, a parse with nothing drawn). In
+units of each boot's own `unit`:
+
+| a test's drawing | trunk, desktop | trunk, laptop | px129, desktop | px129, laptop (BIOS; UEFI) | bound |
+|---|---|---|---|---|---|
+| plain (C2) | 5.12 | 17.14 | 1.65 | 2.09; 1.93 | 3 |
+| sgr (C3) | 6.65 | 19.35 | 2.76 | 3.85; 3.11 | 5 |
+| scroll1 (C4) | 4.73 | 17.35 | 1.40 | 1.82; 1.77 | 2.8 |
+| fussopen (C7) | 3.88 | 16.04 | 0.97 | 1.34; 1.18 | 2.3 |
+| cub (C7) | 3.23 | 10.49 | 0.97 | 1.57; 1.34 | 2.3 |
+| fuss (C7) | 0.02 | 0.08 | 0.01 | 0.01; 0.01 | 0.05 |
+
+(The selftest's tables: `red-kvm.txt` and `green-kvm.txt` on the desktop, `red-kvm-10870h.txt` and
+`green-kvm-10870h.txt` on the laptop; trunk at 256 columns.) Each bound sits 1.3 times or more from the fix's worst and
+from trunk's best. The laptop's trunk is slower still against its unit (its package read 91-100 °C through the trunk
+boot), so every row but C1 is red there, yew's keypress among them (record sha256 `fa7c961a…`, §8). Under TCG these
+rows are still SKIPPED by name (R-px129-3). No CI leg runs them under KVM: a hosted runner has `/dev/kvm` (root:kvm,
+0660), but the job's user cannot open it, so `--accel auto` takes TCG there, as every other suite's leg does. These
+rows are held by local records only (R-px129-11).
+
 ## 5. The installed machine
 
 A person at the console runs the wrapper's one command; its table is saved beside it. **Not yet run at this writing;**
@@ -160,7 +187,7 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 | F4 | lift the cap to 320 if the storage grows by under 1 MiB | done: about 238 KiB more (the two grids 64 KiB, the front grid 160 KiB, the dirty rows and a run's scratch 13.5 KiB, the state's 16 words) |
 | R1 | a repeated frame at most 1/4 of a changing one | 0.47 under KVM (the parse of the frame's bytes is most of it); the row is 0.7 |
 | R2-R4 | scroll10 <= 3 x scroll1, clear and cursor <= 1.3 x plain | held: 1.64, 1.07, 1.10 (KVM) |
-| R5 | yew's keypress and cub's frame bounded | cub's and F mode's opening red at trunk, green after; yew's keypress green before and after (P7) |
+| R5 | yew's keypress and cub's frame bounded | cub's and F mode's opening red at trunk, green after; yew's keypress green before and after on the desktop (P7), red at trunk on the laptop (§4) |
 | R6 | the existing screen rows pixel-identical | held: mpx3-screen (V2, V5, V9 pixel for pixel, V7 no framebuffer read), mpx5-screen, mpx6-games, mpx6-pointer, mpx3-console in the quick take (§8) |
 
 ## 8. Evidence index
@@ -173,7 +200,10 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 | the fix | `f237ed4e` (boot/screen.S), `acb14394` (kernel/screen), `29e604a8` (kernel/user), `8ee55dd2` (kernel/console), `83c47fdd` (kernel/panic), `8f81580b` (kernel/serial), `e01bdbfa` (320 columns), `8e4e5a8b` (screen-ref and V1) | |
 | green quick take before the rebase | `quick.manifest` (the planner's test; mpx3-conspeed native on both firmwares; mpx3-screen native on both; mpx5-screen, mpx6-games, mpx6-pointer and mpx3-console native BIOS) at `a26a54df`, record sha256 `565ef4f4db1d1bfc999f76dc33904b7fb450ba595a681ceca4216e9e72acec6a` | `END ci-plan exit=0`, `END conspeed exit=0`, `END screen exit=0`, `END vt exit=0`, `END games exit=0`, `END pointer exit=0`, `END console exit=0`; `RECORD-END worst=0 steps=7` |
 | the plant before the rebase | `px129-plant-same` (`6e184d02`): `a26a54df` with one hunk in `kernel/screen`'s `draw_span`, every touched cell drawn, changed or not (`plant.manifest`), record sha256 `dd6c8228f3eb494a7186ea98652fdae42f8ce37d2857714ab48dc50d91359fc9` | red by name and alone: `FAIL C6 the same screen written again: same 4.010 ms least, 1.02 x plain 3.950 ms (bound 0.7)`; `END conspeed exit=1` |
-| the quick take and the plant at this branch's head | the same manifests after the rebase below | their records and `END` lines are in the PR |
+| **red on a second host with the fix in, at the raw-figure rows** | the quick take at `a6d2a2ac` on a laptop i7-10870H; its BIOS screen is `selftest/green-kvm-10870h.txt` (`6edfa215`, screen text sha256 `c8f115c3c95800dbee962223b39cef068317fd858c8183a874e88249bb57eacc`) | `FAIL C3 (b) an SGR before every cell: sgr 22.799 ms least, 13.26 units of 1.719 ms (bound 11.5)`, `FAIL C7 (e) cub's step: cub 7.767 ms least, 4.52 units of 1.719 ms (bound 4.3)`; UEFI `FAIL C3` at 12.43 units; `END conspeed exit=1 secs=65` |
+| the rows restated against a test's drawing | `731990dc` (rows.py), `6edfa215` (the laptop's px129 table), `b38cbdc9` (its trunk table), `2a7c9027` (the suite's header) | the selftest: both hosts' trunk tables fail (10 and 11 rows), both fix tables pass (12 rows each) |
+| **red at trunk on the second host, at the restated rows** | `px129-rows-red-r3` (`d169ba3f`: the rows' commit `fbc47605` with `731990dc` picked onto it), `red.manifest` on the laptop, record sha256 `fa7c961a8a29f24b37192041d614137e79af3c1f91dfd66abdf43d2f3688fc7a` | `FAIL C8 the grid: 256x90 cells (want 320x90)`, `FAIL C2` (plain's drawing 17.14 units, bound 3), `FAIL C3` (sgr's 19.35, bound 5), `FAIL C4` twice (scroll1's 17.35; scroll10 10.02 x scroll1), `FAIL C5` (1.89 x), `FAIL C6` twice (1.94 x; same 1.00 x), `FAIL C7` three times (fussopen's 16.04, cub's 10.49, fuss's 0.08 units); C1 PASS; `END conspeed exit=1 secs=83` |
+| the quick take and the plant at this branch's head | the same manifests at the head, after the rows were restated | their records and `END` lines are in the PR |
 | QEMU's legs, trunk and fix, KVM and TCG, with and without COM1 | the lane's evidence | §4 |
 
 **The rebase.** The work above was done on trunk `211e5c7c`, and every commit this note names before this paragraph
@@ -193,15 +223,17 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
   draw at once as before; (B) every byte, against the front grid only (no hold): keeps the clear's and the cursor's
   double drawing; (C) a timer's refresh (say 60 Hz): a frame could be seen half drawn and a halted kernel's last lines
   would wait for a tick that never comes.
-- **R-px129-2, the rows' yardstick.** (A) ratios of two figures of one boot, against a fixed CPU loop or against
-  another test (implemented): a shared host moves both; (B) absolutes (refused by the contract).
+- **R-px129-2, the rows' yardstick.** (A) ratios of two figures of one boot: a test's drawing (its figure less its bytes
+  at the same boot's `bytes` rate) against a fixed CPU loop, or one test against another (implemented): a shared host
+  moves both; (B) a test's raw figure against the CPU loop (the first version: red with the fix in on a laptop whose
+  byte parse costs half as much again against its loop, §4); (C) absolutes (refused by the contract).
 - **R-px129-3, TCG.** (A) the rows against the CPU's unit, and `same`, SKIPPED by name under TCG (TCG's multiply chain
   runs at the host's speed while the kernel's memory goes through QEMU's software TLB); the other rows with TCG's own
   bounds (implemented); (B) one set of bounds for both: either loose or red under TCG.
 - **R-px129-4, the cap.** (A) 320 columns, which 2560 pixels at scale 1 and 5120 at scale 2 fill (implemented); (B)
   the grid sized at attach from the framebuffer (needs memory before the allocator); (C) leave 256.
 - **R-px129-5, yew's keypress row.** yew already sends only what changes, so its keypress is cheap at trunk under QEMU
-  and cannot be seen red there. (A) keep it as a guard that is green before and after, and say so (implemented);
+  on the desktop and cannot be seen red there (on the laptop it is: 0.08 units, §4). (A) keep it as a guard that is green before and after, and say so (implemented);
   (B) drop it. The contract's "red at trunk" holds for (a)-(d), F mode's opening and cub.
 - **R-px129-6, the clock's lost ticks.** CLOCK_MONOTONIC loses the ticks that fall inside a console write (35 % kept
   at trunk under KVM). (A) an issue for a later lane: read the clock from its counter (HPET, the TSC) rather than
@@ -212,13 +244,17 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
   under KVM: kernel/user's per-byte read, the serial layer, the parser). (A) wait for the installed machine's table:
   if its cells cost far more than its bytes, nothing more is needed; otherwise a block path, a write's bytes copied in
   chunks and fed to the screen in one call (recommended, the next lane's); (B) do it now, unmeasured on the metal.
-- **R-px129-9, C3's bound.** `sgr` is mostly bytes, so its bound (11.5 units) sits 1.27 x from the fix's 8.97 and 1.27
-  x from trunk's 14.55, inside the 1.4 x the other rows keep. (A) keep it and revisit with R-px129-8 (implemented);
-  (B) a looser bound that trunk might pass.
+- **R-px129-9, C3's bound.** Superseded by R-px129-2 (A): `sgr` is mostly bytes, and its raw bound (11.5 units), 1.27 x
+  from the fix and from trunk on the desktop, was red with the fix in on the laptop. Its drawing's bound (5 units) sits
+  1.30 x from the fix's worst (3.85, the laptop) and 1.33 x from trunk's best (6.65, the desktop).
 - **R-px129-10, an orphan on the installed machine.** The first keylat run killed yew by its pid; a child yew had forked
   was reparented to init (pid 1, the console's shell) and remains a zombie there (no memory, one process slot) until the
   next boot. keylat now ends a program by its own keys first. (A) list for an issue: PAX's init should reap orphans
   (recommended); (B) nothing.
+- **R-px129-11, KVM in CI.** (A) every CI leg TCG, as the runner gives it to the job; the rows against the unit are
+  held by local records only, under KVM (implemented); (B) give the job the runner's `/dev/kvm` (a udev rule): the
+  runner's CPU is shared and differs from job to job, and the other suites' legs name TCG for that reason; the drawing
+  rows might hold there, unproven.
 
 ## 10. Done-when
 
@@ -227,5 +263,6 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
 - [x] the cost attributed from the numbers and the code (§4, §6)
 - [x] the rows red at trunk (`1f4f8277…`) and green after, the screen's existing rows unchanged (the quick take)
 - [x] the 256-column cap lifted (C8)
+- [x] the rows hold on a second host: its fix table passes, its trunk table fails every row but C1 (`fa7c961a…`)
 - [x] one plant, red by name
 - [ ] the installed machine's table (a run at its console)
