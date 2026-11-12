@@ -7,23 +7,107 @@
 # user/console/distribution-net.keys types the witness a person reads at
 # the metal target's console: /etc/pax-net, the lease file kernel/dhcp
 # writes and /etc/resolv.conf.
-#   tests/distribution-net IMAGE_DIRECTORY
+#
+# px127: on the dev ISO the same boot then dials names from a program
+# built on the box (tests/distribution-net.d/names.py's rows N2-N4): the
+# console names the router, 10.0.2.2, as its only nameserver, as an
+# installed system's /etc/resolv.conf does, and QEMU hands 10.0.2.2:53 to
+# this host's 127.0.0.1:53, where tools/dns-fixture answers (root, or
+# sudo -n, binds it; without either the rows are SKIPPED LOUDLY, a
+# failure under PAX_REQUIRE_NAMES_FIXTURE=1), and 10.0.2.2:PORT to a
+# listener of this suite's own on an ephemeral port;
+# user/console/distribution-names.keys types the program, builds it with
+# `wolf build` and dials through DNS and through /etc/hosts. VARIANT
+# limits the boots to `release` or `dev` (both by default).
+#   tests/distribution-net IMAGE_DIRECTORY [VARIANT...]
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
-[ $# -eq 1 ] || die 'usage: distribution-net IMAGE_DIRECTORY'
+[ $# -ge 1 ] || die 'usage: distribution-net IMAGE_DIRECTORY [VARIANT...]'
 out=$(realpath "$1")
+shift
+variants=${*:-release dev}
+for v in $variants; do case $v in release|dev) ;; *) die "variant $v: release or dev" ;; esac; done
 head=$(cat "$out/commit")
 MAC=52:54:00:12:34:56
-for variant in release dev; do
+fail=0
+# px127: the DNS fixture binds port 53.
+names_why=
+if [ "$(id -u)" != 0 ] && ! sudo -n true 2>/dev/null; then
+    names_why='the DNS fixture binds 127.0.0.1:53: root, or sudo -n'
+fi
+names_start() { # DIR: the DNS fixture and the listener, each held by a pipe; PORT is set
+    local d=$1 pre=()
+    rm -rf "$d" && mkdir -p "$d"
+    mkfifo "$d/dns.hold" "$d/listen.hold"
+    [ "$(id -u)" = 0 ] || pre=(sudo -n --preserve-env=PATH)
+    "${pre[@]}" python3 -I "$PAX_ROOT/tools/dns-fixture" --bind 127.0.0.1:53 --log "$d/dns.log" --deadline 1800 \
+        github.com=10.0.2.2 < "$d/dns.hold" > "$d/dns.out" 2>&1 &
+    dns_pid=$!
+    exec 8> "$d/dns.hold"
+    python3 -I -c '
+import select, socket, sys, time
+s = socket.socket()
+s.bind(("127.0.0.1", 0)); s.listen(16)
+print("PORT %d" % s.getsockname()[1], flush=True)
+while True:
+    r, _, _ = select.select([s, sys.stdin], [], [], 1800)
+    if not r or sys.stdin in r:
+        break
+    c, a = s.accept()
+    print("ACCEPT %.3f %s:%d" % (time.time(), a[0], a[1]), flush=True)
+    c.close()
+' < "$d/listen.hold" > "$d/listen.log" 2>&1 &
+    listen_pid=$!
+    exec 9> "$d/listen.hold"
+    local k
+    for k in $(seq 100); do
+        grep -q LISTENING "$d/dns.out" 2>/dev/null && grep -q '^PORT ' "$d/listen.log" 2>/dev/null && break
+        sleep 0.1
+    done
+    grep -q LISTENING "$d/dns.out" || { cat "$d/dns.out" >&2; return 1; }
+    PORT=$(sed -n 's/^PORT //p' "$d/listen.log")
+    [ -n "$PORT" ]
+}
+names_stop() {
+    exec 8>&- 9>&-
+    wait "$dns_pid" "$listen_pid" 2>/dev/null || true
+}
+for variant in $variants; do
     name=pax-${head:0:8}.iso
     [ "$variant" = dev ] && name=pax-dev-${head:0:8}.iso
     for firmware in bios uefi; do
         log=$out/$variant-$firmware-net.serial.log
+        keys=$PAX_ROOT/user/console/distribution-net.keys
+        names=0
+        if [ "$variant" = dev ]; then
+            if [ -n "$names_why" ]; then
+                if [ "${PAX_REQUIRE_NAMES_FIXTURE:-0}" = 1 ]; then
+                    say "FAIL N2 dev-$firmware: $names_why, and PAX_REQUIRE_NAMES_FIXTURE=1"; fail=1
+                else
+                    say "SKIPPED LOUDLY N2-N4 dev-$firmware: $names_why"
+                fi
+            else
+                nd=$out/dev-$firmware-names
+                names_start "$nd" || die "dev-$firmware: the DNS fixture or the listener did not start"
+                keys=$nd/session.keys
+                grep -v '^exit 0$' "$PAX_ROOT/user/console/distribution-net.keys" > "$keys"
+                sed "s/@PORT@/$PORT/g" "$PAX_ROOT/user/console/distribution-names.keys" >> "$keys"
+                echo 'exit 0' >> "$keys"
+                names=1
+            fi
+        fi
+        hrc=0
         PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$log" \
             --timeout 600 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
             --qemu -netdev --qemu user,id=n0,ipv6=off --qemu -device --qemu "igb,netdev=n0,mac=$MAC" \
-            --type "$PAX_ROOT/user/console/distribution-net.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
-            "$out/$name" > "$out/$variant-$firmware-net.halt.log" 2>&1
+            --type "$keys" --prompt '$ ' --marker 'halt|PANIC .*' \
+            "$out/$name" > "$out/$variant-$firmware-net.halt.log" 2>&1 || hrc=$?
+        if [ "$names" = 1 ]; then
+            names_stop
+            python3 -I "$PAX_ROOT/tests/distribution-net.d/names.py" "$log" "$nd/dns.log" "$nd/listen.log" "$PORT" \
+                "dev-$firmware" || fail=1
+        fi
+        [ "$hrc" = 0 ] || { tail -n 3 "$out/$variant-$firmware-net.halt.log" >&2; die "$variant-$firmware: qemu-halt exit $hrc"; }
         python3 -I - "$log" "$PAX_ROOT/user/pax-net" "$MAC" <<'PY'
 from pathlib import Path
 import re, sys
@@ -59,3 +143,4 @@ print('N1 PASS', log.name, 'the lease before the prompt (%d ms of a 25000 ms bou
 PY
     done
 done
+exit $fail
