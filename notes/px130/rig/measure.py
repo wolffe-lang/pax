@@ -124,10 +124,22 @@ def session(con, name, work, out, tail=None):
     typed, or 'drop' (the client killed with SIGKILL, so the connection drops)."""
     t = CLIENT.terminal(rows.GUEST_AT, 33, 97)
 
+    answered = [0]
+
+    def answer():
+        # pelt asks the terminal where its cursor is (DSR, `ESC [ 6 n`) before its friendly prompt,
+        # as a terminal emulator answers it (`ESC [ row ; col R`): a pty with nobody answering
+        # leaves pelt plain (`$ `), which is not what a person at a terminal gets.
+        asked = t.raw.count(b'\x1b[6n')
+        while answered[0] < asked:
+            os.write(t.master, b'\x1b[1;1R')
+            answered[0] += 1
+
     def wait_both(pattern, timeout, at):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
             con.pump(0)
+            answer()
             m = re.search(pattern, t.shown(at), re.M)
             if m:
                 return m
@@ -150,6 +162,7 @@ def session(con, name, work, out, tail=None):
                 end = time.monotonic() + wait
                 while time.monotonic() < end:
                     con.pump(0)
+                    answer()
                     t.pump(0.2)
                 m = True
             else:
@@ -166,6 +179,7 @@ def session(con, name, work, out, tail=None):
             end = time.monotonic() + 10
             while time.monotonic() < end and t.p.poll() is None:
                 con.pump(0)
+                answer()
                 t.pump(0.2)
             what = 'exit typed; ssh status %s' % t.p.poll()
         end = time.monotonic() + 4
@@ -300,8 +314,10 @@ def main():
             m = kernel.match(l.strip())
             if not m:
                 continue
-            owner = [s for s in STEPS if s[3] <= t <= s[4] + 1.5]
-            where = ' | '.join('%s:%s' % (s[0], s[1]) for s in owner) or 'none (outside every step)'
+            # The step in progress: the last one typed before the line arrived (a step's window is
+            # typed .. its prompt back, and a line can trail its prompt by the serial port's lag).
+            owner = [s for s in STEPS if s[3] <= t]
+            where = '%s:%s' % (owner[-1][0], owner[-1][1]) if owner else 'none (before every step)'
             f.write('%s\t%s\n' % (where, l.strip()))
     shots = [out / 'screen-0-console-prompt.ppm', out / 'screen-1-after-ssh.ppm']
     same = all(p.exists() for p in shots) and shots[0].read_bytes() == shots[1].read_bytes()
