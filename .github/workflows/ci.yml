@@ -5962,6 +5962,55 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # px129: what the console costs to draw at the installed machine's mode.
+  # tests/mpx3-conspeed: kmain_console at 2560x1440 with `fbwrite`, no
+  # COM1, user/elf/conspeed.c as init over yew's and cub's recorded
+  # streams; its table read off the screen; each row a ratio of two
+  # figures of one boot (C1-C7; the rows against the CPU's unit SKIPPED
+  # by name under TCG).
+  mpx3-conspeed:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-conspeed')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_REQUIRE_UEFI: "1"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: QEMU, firmware and baseline compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make
+          qemu-system-x86_64 --version
+          ls -l /dev/kvm || true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx3-conspeed-${{ hashFiles('boot/limine.pin') }}
+      - name: pinned wolf archive
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+      - name: the console's drawing at 2560x1440, the plan's legs
+        run: tests/mpx3-conspeed $PAX_LEGS
+      - name: keep the screens, their text and the rows
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx3-conspeed
+          path: |
+            build/mpx3-conspeed-*.txt
+            build/mpx3-conspeed-*.ppm
+            build/mpx3-conspeed-*.qemu.log
+            build/mpx3-conspeed/*.txt
+            build/mpx3-conspeed/*/build-kernel.log
+          retention-days: 14
+          if-no-files-found: error
+
   # px76: the firmware's machine as kasumi has it. tests/mpx6-firmware:
   # the clocks with and without the HPET and the PIT (F1), COM1 present
   # and absent (F2), the FADT's reset and ACPI S5 (F3), a padded
@@ -6031,6 +6080,7 @@ jobs:
       - mpx3-boreutils
       - mpx3-console
       - mpx3-screen
+      - mpx3-conspeed
       - mpx3-shell
       - mpx3-threads
       - mpx3-tree
