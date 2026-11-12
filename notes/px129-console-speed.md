@@ -23,18 +23,25 @@ only what changes, once a write.
   172 bytes for Down and Up, about 126 cells). On the installed machine yew answers a key in about 1.3 ms on its own
   pseudo-terminal, and its CPU is idle (§6). A keypress's visible delay at the console can only come from drawing those
   126 cells, which a run of the timing program at the machine's console will price (§5).
+- **The installed machine's own table put the cost elsewhere** (§5, §11): a UART answers at COM1 there, and every
+  console byte waited for it with interrupts off, 86.8 µs a byte (a 115200 line, one byte in flight), so a screen of
+  text took 2 s to write whatever the drawing cost. kernel/serial now sends through a 64 KiB ring that the UART's
+  transmit interrupt drains, and no writer waits on the UART (R-px129-15).
 
 Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx3-conspeed` job; `tools/ci-tiers.map` and
-`tests/ci-plan` its paths; `kernel/serial` and `kernel/panic` are the kernel's core; new `tests/mpx3-conspeed`,
-`tests/mpx3-conspeed.d/`, `tools/mkconspeed`, `user/elf/conspeed.c`, `keylat.c`, `cpugaps.c`; `kernel/screen`,
-`kernel/user`, `kernel/console`, `boot/screen.S`, `tools/screen-ref`, `tests/mpx3-screen`).
+`tests/ci-plan` its paths; `kernel/serial`, `kernel/panic` and `kernel/power` are the kernel's core; new
+`tests/mpx3-conspeed`, `tests/mpx3-conspeed.d/`, `tools/mkconspeed`, `user/elf/conspeed.c`, `keylat.c`, `cpugaps.c`;
+`kernel/screen`, `kernel/user`, `kernel/console`, `kernel/procfs`, `boot/screen.S`, `boot/io.S`, `tools/screen-ref`,
+`tools/qemu-run`, `tests/mpx3-screen`).
 
 ## 1. Forbidden, and what was read
 
 - **The clean room.** No kernel's, terminal emulator's, firmware's, driver's or C library's source was read. The
   drawing is written from kernel/screen as it was and from the Intel SDM's account of write-combining memory; the
   programs' behaviour was measured black-box (their output on a pseudo-terminal, strace of the binaries an image
-  ships). `docs/SOURCES.md` (px129) lists every source.
+  ships). The UART's transmit side is written from the PC16550D data sheet's facts (IER bit 1, the transmitter
+  holding register empty interrupt; LSR bit 5), and the slow UART's far end from pipe(7), fcntl(2) and QEMU's
+  documentation of its pipe character device. `docs/SOURCES.md` (px129) lists every source.
 - **The installed machine.** Only the lane's own directory under the account's home was written there (the timing
   program, its wrapper, the recorded streams, the latency probes and a nine-file repository for them); `/proc`,
   `/sys` and what an ordinary user can see were read. No root, no console input, no reboot.
@@ -109,8 +116,9 @@ What remains in `sgr` and `cub` is mostly the bytes: about 50 ns a byte under KV
 
 **The UART.** With COM1 present (the harness's usual machine) every byte is also two port accesses, which QEMU serves
 in user space: under KVM about 6 µs a byte, which swamps the drawing (a table with COM1, kept in the lane's
-evidence: `bytes` ≈ `plain` ≈ `clear`). The installed machine has no COM1, as px76 recorded for it, so the rows boot
-without one.
+evidence: `bytes` ≈ `plain` ≈ `clear`). px76 recorded no serial port on the installed machine, so the drawing's rows
+boot without one. That record was wrong for this purpose: a UART answers at COM1's address there, and a byte waited on
+it far longer than on QEMU's, which takes a byte as fast as it is written (§11).
 
 **The clock.** PAX's CLOCK_MONOTONIC lost time during the tests: a console write runs with interrupts off, and the
 ticks that fall inside it are lost. At trunk the tick clock kept 35 % of the time the tests took under KVM (84 %
@@ -161,8 +169,9 @@ does), the rig before the fix (`f2524f73`) is red, `session-root differs in 2 of
 
 ## 5. The installed machine
 
-A person at the console runs the wrapper's one command; its table is saved beside it. **Not yet run at this writing;**
-the note's evidence index will name the table when it is in. What is measured from ssh:
+A person at the console runs the wrapper's one command; its table is saved beside it. The table (conspeed 4, on an
+image of trunk's console, 256 × 90 cells, the TSC at 3503.7 MHz) is in §11: every figure is its bytes at 86.8 µs, the
+UART's, and only a scroll's whole-screen redraw shows above them. What is measured from ssh:
 
 - `cpugaps 5`: the spinner had 99.9 % of the CPU, 177 gaps over 20 µs, the longest 0.068 ms, none over 0.1 ms. The
   machine is idle: no thread polls in the background, so a key's interrupt switches to the reader at once (§6).
@@ -188,9 +197,9 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 
 | # | predicted | found |
 |---|---|---|
-| P1 | no COM1 on the installed machine; a byte costs CPU work alone | not measurable from ssh (the boot line is root's); the installed machine's `bytes` row will say. px76 recorded none |
-| P2 | write-combining; a cell 0.5-3 µs on the metal | awaits the installed machine's table |
-| P3 | plain 15-70 ms on the metal; sgr 1.2-2 x plain | metal awaits; under KVM sgr was 2.4 x plain at trunk (the bytes) |
+| P1 | no COM1 on the installed machine; a byte costs CPU work alone | **wrong**: a UART answers at COM1, and every console byte waited 86.8 µs on it (§11) |
+| P2 | write-combining; a cell 0.5-3 µs on the metal | write-combined, faster than predicted: a scroll's whole-screen redraw at trunk is about 5.0 ms, 0.22 µs a cell (§11) |
+| P3 | plain 15-70 ms on the metal; sgr 1.2-2 x plain | **wrong**, for the UART: plain 2054 ms (23,661 bytes), sgr 8.8 x plain (its 208,251 bytes); under KVM sgr was 2.4 x plain at trunk (the bytes) |
 | P4 | a scrolled line about one full screen; scroll10 ten | right: at trunk scroll1 0.79 x plain, scroll10 12 x scroll1 (KVM) |
 | P5 | clear about 2 x plain | right: 1.89 x |
 | P6 | cursor about 2 x plain | right: 2.00 x |
@@ -222,6 +231,13 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 | the session's fix | `9a992b29` (the driver waits for pelt's prompt before a resize), `08a1a31b` (Linux's side recorded again: the session's transcripts unchanged) | |
 | the quick take, the rate and the plant at this branch's head | the same manifests at the head (the quick take now with mpx5-pty, both firmwares, KVM and TCG) | their records and `END` lines are in the PR |
 | QEMU's legs, trunk and fix, KVM and TCG, with and without COM1 | the lane's evidence | §4 |
+| the slow-UART leg and C9, before the UART's fix | `b090aa43` (tools/qemu-run's `--serial-chardev`), `45898fd7` (uart.py, screen-run.py), `59e0a314` (the leg, C9), `7d8a3221` (`uart.manifest`) | |
+| **C9 red before the UART's fix** | `7d8a3221`, `uart.manifest`, record sha256 `2fd7a6f17057db1d6abd5f0e45bb9d63b8a149fb5553f3d9235a5c5b4cc0dee0` | `FAIL C9 (f) a slow UART: bytes 2468.265 ms least for 28800 bytes, 704.01 units of 3.506 ms (bound 3; 85.704 us a byte)`; C1 and C8 PASS; `END conspeed exit=1 secs=69` |
+| the UART's fix | `726f2cc4`, `3383d346` (boot/io.S), `94800de4`, `c0595b88`, `77c0a7e6` (kernel/serial), `b0f2c0fd` (kernel/console), `30231573` (kernel/user), `601ce4b8` (kernel/panic), `f7755c4c` (kernel/procfs), `7de7797c` (kernel/power) | |
+| C10 | `e806939b` (uart.py's pause), `8aa8b9c8` (rows.py), `39e25a64` (the suite), `f07fb22f` (`uart.manifest`) | |
+| **C9 red at trunk's kernel** | `px129-uart-trunk` (`f82e2c4d`: `7d8a3221` with kernel/ and boot/ exactly as trunk `0e2843cf`), `uart.manifest`, record sha256 `7a7bac3059ad88d1661a94a2e48b3a23c592ef239d2bfb045bf1f913f238543c` | `FAIL C9 (f) a slow UART: bytes 1797.172 ms least for 23040 bytes, 540.34 units of 3.326 ms (bound 3; 78.002 us a byte)`, `FAIL C8 the grid: 256x90 cells`; `END conspeed exit=1 secs=78` |
+| **C9 and C10 red at trunk's kernel** | `px129-uart-trunk` (`7fd1f794`: `f82e2c4d` with C10's commits picked onto it), `uart.manifest`, record sha256 `c1caf246865e31bb1ef965c13fd3e7df5eeefec69ea07fdd38566559e637292e` | `FAIL C9 … 542.85 units … (78.388 us a byte)`, `FAIL C10 (g) COM1's backlog: the line paused at most 0.809 s once 64 KiB were sent (bound 0.5; at byte 725892 of 728127 in 71.7 s)`, `FAIL C8`; `END conspeed exit=1 secs=79` |
+| the slow-UART take, the quick take and C10's plant at this branch's head | `uart.manifest`, `quick.manifest` (mpx3-conspeed's two legs on both firmwares, and every suite there reads COM1), the plant `px129-plant-*` (COM1's interrupt leaves the ring alone) | their records and `END` lines are in the PR |
 
 **The rebase.** The work above was done on trunk `211e5c7c`, and every commit this note names before this paragraph
 is on the branch `px129-before-rebase` (its head `a26a54df`). The branch was then rebased, unchanged but for the
@@ -276,6 +292,16 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
   Linux's side is recorded again with that probe (implemented): the row sees the redraw on both systems, every time;
   (B) ruled.txt accepts either form of `S|4`: the race stays, and the row could no longer see a redraw that went
   missing.
+- **R-px129-15, a console write and the UART (§11).** (A) a program's terminal output kept off COM1 on an installed
+  system by default, mirrored with a command-line word, the kernel's own lines still on COM1; (B) a transmit ring
+  the UART's transmit interrupt drains, the FIFO filled 16 bytes at a time, a full ring dropping and counting, no
+  writer ever waiting; (C) both. Implemented: B, and A's word, `pax.serial=log`, which keeps a program's output off
+  COM1; mirroring stays the default everywhere, the installer's boot entry included. B alone already means no
+  writer waits on the UART. Writing the word into the installer's boot entry is a follow-up with the suites that
+  read an installed system over COM1: tests/mpx6-install's `metal.py` (its live login and M7, `login:` on COM1),
+  `session.py`, `den.py` and `root-nvme.py` (each boots an installed disk with COM1 on its standard output and reads
+  it); each must boot with mirroring kept, and an upgrade must take an install's current boot entry as an earlier
+  installer's text (`known_texts`).
 
 ## 10. Done-when
 
@@ -286,4 +312,94 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
 - [x] the 256-column cap lifted (C8)
 - [x] the rows hold on a second host: its fix table passes, its trunk table fails every row but C1 (`fa7c961a…`)
 - [x] one plant, red by name
-- [ ] the installed machine's table (a run at its console)
+- [x] the installed machine's table (a run at its console, §11)
+- [x] no console write waits on the UART: C9 red at trunk's kernel (`7a7bac30…`, `c1caf246…`) and before the fix
+  (`2fd7a6f1…`), green after (the PR's records)
+- [x] COM1's backlog drained by its interrupt: C10 red at trunk's kernel (`c1caf246…`); green at the head and red by
+  name at its plant (the PR's records)
+
+## 11. COM1: a console write waited on the UART
+
+**The installed machine's table.** The timing program (version 4) at the installed machine's console, on an image of
+trunk's console: 256 × 90 cells, the TSC at 3503.7 MHz, the tests 93.4 s. A frame's mean in ms, beside its bytes at
+the `bytes` test's rate (2000.255 ms for 23,040 bytes: 86.82 µs a byte):
+
+| test | frames | bytes | cells | ms | its bytes at 86.82 µs |
+|---|---|---|---|---|---|
+| unit | 100 | 0 | 0 | 1.750 | |
+| bytes | 1 | 23,040 | 0 | 2000.255 | 2000.3 |
+| cell | 100 | 9 | 1 | 0.782 | 0.78 |
+| plain | 1 | 23,661 | 23,040 | 2054.110 | 2054.2 |
+| same | 1 | 23,661 | 23,040 | 2054.036 | 2054.2 |
+| sgr | 1 | 208,251 | 23,040 | 18079.073 | 18079.9 |
+| scroll1 | 100 | 265 | 256 | 28.032 | 23.0 |
+| scroll10 | 14 | 2,587 | 2,560 | 275.458 | 224.6 |
+| clear | 1 | 23,668 | 23,040 | 2058.869 | 2054.8 |
+| cursor | 1 | 23,673 | 23,040 | 2054.992 | 2055.2 |
+| fuss | 100 | 170 | 126 | 14.880 | 14.76 |
+| fussopen | 1 | 13,435 | 11,648 | 2336.339 | 1166.4 |
+| cub | 1 | 81,550 | 13,996 | 7132.486 | 7080.0 |
+
+86.8 µs is ten bits at 115200 baud: a byte's time on a serial line. Every row is its bytes at that rate, give or take
+what draws in one span. trunk draws a cell when its byte is written, and the CPU draws one byte's cell while the UART
+sends the byte before it, so `plain`'s 23,040 cells hide inside the bytes' time. A scroll redraws the whole screen in
+one span after its line feed, so it shows above the bytes: `scroll1` 5.0 ms, `scroll10` 5.1 ms a line, about 0.22 µs
+a cell, write-combined (P2), and `clear`'s fill 4 ms. `fussopen` took twice its bytes' time; what drew in the other
+1.17 s is not in the table (QEMU's trunk boot drew the same stream in 7.8 ms, §4), and a run on an image with this
+section's fix will show it without the bytes in front of it.
+
+**Why.** kernel/serial's `init` programs COM1 at 0x3f8 (115200 8N1, divisor 1, FIFOs on, no UART interrupt) and calls
+it present when the scratch register keeps 0x5a and then 0xa5 and a byte sent in loopback comes back; a port with
+nothing behind it reads all ones and fails both. Every console byte, a program's write among them (kernel/user's
+`write` hands its bytes to `serial.put` one at a time, interrupts off since SYSCALL), went to the screen, then the
+boot log, then the UART: `put` polled LSR until bit 5 was set (the transmit FIFO empty) and wrote the one byte. So one
+byte was ever in flight, 86.8 µs each with interrupts off, whatever the screen cost; the poll's bound (2^20 reads)
+only kept a dead UART from hanging the kernel. QEMU's UART takes a byte as fast as it is written, which is why no
+QEMU table showed it (§4's had no COM1 by choice); and the first account of this machine's run, which assumed no UART
+and blamed the drawing, was wrong. On the image the machine ran, nothing turns it off: the console kernel reads no
+word about the serial port on its command line and /proc has no switch. Turning the serial port off in the
+firmware's setup makes `init`'s checks fail, so `put` never waits; turning it back on undoes that.
+
+**The fix (R-px129-15).** kernel/serial keeps a 64 KiB transmit ring (boot/io.S's `pax_serial_tx`, about 5.7 s of a
+115200 line). From kernel/console's start, once COM1's 8259 line is unmasked (`tx_irq_on`), `put` adds a byte to the
+ring and never waits:
+- when the ring was idle, it moves what the transmit FIFO takes (LSR bit 5: up to 16 bytes) at once and arms the
+  THRE interrupt (IER bit 1) while bytes wait;
+- while that interrupt is armed, a byte is a store and no port access, and COM1's vector (36, the receiver's already)
+  refills the FIFO 16 bytes at a time (`tx_irq`), disarming it when the ring is empty;
+- a full ring drops the byte and counts it, and tries the FIFO, so an interrupt that never comes cannot stop COM1 for
+  good; `/proc/pax-boot` has a new line, `serial present|absent tty mirrored|log dropped <n>`;
+- kernel/panic's halt and kernel/power's reboot and power-off send what the ring holds first, waiting (`drain`), so a
+  kernel's last lines still reach the wire before it stops.
+
+Before the console starts, the kernel's early lines wait per byte as before, and kernels that never start the
+console (every test kernel but the console's and the session's) are unchanged. `pax.serial=log` on the command line
+keeps a program's terminal output (kernel/user's console `write`, kernel/console's output, its echo, and `sendfile`
+to the console) off COM1, which then carries the kernel's own lines alone. Nothing writes the word yet: mirroring
+stays the default, the installed system's boot entry included (R-px129-15 says what writing it there must touch).
+
+**The suites that read COM1.** No suite's command line changes. Under QEMU the UART's FIFO empties as it is written
+unless the far end pushes back, so `put` finds the ring idle and moves each byte at once: COM1's bytes are what they
+were, in order, none dropped. A far end that stops reading now loses the bytes past 64 KiB of backlog where the
+kernel used to wait up to 2^20 polls a byte. The quick record's suites (the screen, the VT, the games, the pointer,
+the typed console sessions, the pseudo-terminals) all read COM1 and are taken at the head.
+
+**The rows.** mpx3-conspeed has a second leg (`--uart slow`; both legs by default) with COM1 on QEMU's pipe character
+device (tools/qemu-run's `--serial-chardev`). Its far end, tests/mpx3-conspeed.d/uart.py, shrinks the pipe to one page
+and reads it at 11,520 bytes a second, so the emulated UART's FIFO fills and THRE stays clear as a real 115200 line's
+would. That leg holds C1 and C8 and two rows of its own, stated under KVM and SKIPPED by name under TCG:
+- C9: `bytes`' write is at most 3 units of the CPU loop (about 0.7 with no COM1);
+- C10: COM1's backlog drains while its writer sleeps. Once the line has carried 64 KiB, it never pauses more than
+  0.5 s: through conspeed's idle second after the tests, the ring still holds bytes, and only the THRE interrupt moves
+  them. A kernel that waits per byte has no backlog, so its line pauses when the writer does.
+
+At trunk's kernel C9 is red at 78 µs a byte (the pipe's page and the FIFO give a little slack against the metal's
+86.8), and C10 at a 0.81 s pause (records `7a7bac30…` and `c1caf246…`, §8). Before the fix on this branch C9 is red at
+85.7 µs a byte (`2fd7a6f1…`). The head's records and the plant, which leaves the ring to the writer's next byte, are
+in the PR.
+
+**The timing program, version 5.** Version 4 bounded the run at 60 s by the TSC, but a frame already started is
+finished, and on that machine `sgr`'s one frame took 18 s; the tests took 93 s. Version 5 also bounds by bytes:
+before the tests, a probe of 512 bytes of `ESC [ m` (the least of three writes) gives a byte's cost, and a test whose
+largest write would outrun its budget at that cost is skipped, its line saying so. With the UART's fix in, a byte's
+cost is the parse's again, and nothing is skipped.
