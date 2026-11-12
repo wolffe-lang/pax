@@ -42,9 +42,11 @@ IR against `start`'s 300), one symbol in both tiers at both heads.
 
 ## 3. Evidence and done-when
 
-The records are the pull request's: red at `d5924c9d` (N0's row at column 0, the point unmoved), green at the
-head (release and native tiers, both firmwares), and the plant `px127-plant-nmi-start` red by name; each record's
-sha256 and every `END` line are in the body. Footprint: cross-cutting (`tests/mpx6-nmi`, which the tier-all run's
+The records are the pull request's: red with N0's row at column 0 and the point unmoved, on trunk `9ba58558`
+(`d5924c9d`) and on the base this branch is stacked on (`8f8db3fe`); green at the head (the release and native
+tiers of mpx6-nmi on both firmwares, and the release tier of mpx6-firmware, whose F11 is the row the tier-all run
+caught); and the plant `px127-plant-nmi-r3` (N2 names `frames.start` and `pci.scan`, two points the release tier
+has inlined) red by name. Each record's sha256 and every `END` line are in the body. Footprint: cross-cutting (`tests/mpx6-nmi`, which the tier-all run's
 `mpx6-firmware` runs as F11).
 
 - **R-px127-8, where the fix belongs: the suite.** (a) The row names `frames.init`, as it named `pci.scan_bus`
