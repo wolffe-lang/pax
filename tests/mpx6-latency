@@ -39,6 +39,13 @@
 #      share), at most rows.py's bound; under TCG SKIPPED by name.
 #   L3 every load's figures, printed as `~` lines (the table), held to
 #      nothing.
+#   L4 the clocks: CLOCK_MONOTONIC and CLOCK_REALTIME keep the time-stamp
+#      counter's time within 2 % across the loads that hold interrupts off
+#      longest (rows.py's `clocked`).
+#   L5 beside `spin`, the host's ping's p99 at most 3 times its p99 at
+#      `idle` (KVM only).
+#   L6 under a ping flood (`flood`), a CPU-bound process keeps at least half
+#      of its share beside `spin` (KVM only).
 # Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool error.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -76,7 +83,7 @@ loads_for() { # mib
     local m=$1
     case $loads in
         guard) python3 -I "$D/rows.py" --guard-loads "$m" ;;
-        all) echo "idle spin console:65536 pty:16384 write:$((m / 16)) fork:$((m / 8)) exec mmap:$((m / 8)) hole:1024 procmem:8 random:8 pipe:65536 tcplo:65536 dir:4000 poll:1000" ;;
+        all) echo "idle spin flood console:65536 pty:16384 write:$((m / 16)) fork:$((m / 8)) exec mmap:$((m / 8)) hole:1024 procmem:8 random:8 pipe:65536 tcplo:65536 dir:4000 poll:1000" ;;
         *) echo "$loads" ;;
     esac
 }
