@@ -55,7 +55,7 @@
 #      normalized), the page's bytes, the written file, the census flat
 #      across the load's rounds, no request lost across a reload, the
 #      control and signal rows
-#   L4 the end: `PAX: init /bin/pelt ended with status 0`, `halt`
+#   L4 the end: `PAX: init /bin/env ended with status 0`, `halt`
 # serve, hands and serve-user run on every leg (BIOS 256 MiB, UEFI 512 MiB, both
 # tiers); load, diff and control on BIOS, both tiers; serve-release on
 # native BIOS. The boots stop at the first session whose steps did not
@@ -84,7 +84,7 @@ case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware is bios
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier is native, release or both" ;; esac
 need readelf python3
 
-BORE="cat echo ls mkdir rm sleep id" # px47: id, for serve-user
+BORE="cat echo ls mkdir rm sleep id env" # px47: id, for serve-user; env, init (pelt b80d657 below)
 work=$PAX_BUILD/mpx4-lobo
 fail=0
 bad() { say "FAIL $*"; fail=1; }
@@ -133,7 +133,11 @@ if [ -z "$images" ]; then
             printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$r/etc/login.defs"
         fi
         "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
-        echo /bin/pelt > "$r/etc/pax-run"
+        # pelt b80d657 starts friendly at a terminal unless invoked as sh, and the session waits for `$ `:
+        # init is `/bin/env ENV=/etc/pelt-plain /bin/pelt`, so pelt and serve-user's `su -s /bin/pelt lobo`
+        # (su keeps ENV) read /etc/pelt-plain, `set +o friendly`, before their first prompt.
+        printf 'set +o friendly\n' > "$r/etc/pelt-plain"
+        echo /bin/env ENV=/etc/pelt-plain /bin/pelt > "$r/etc/pax-run"
         cp -R "$PAX_ROOT/user/lobo/srv" "$r/srv"
         # 300,000 bytes: a numbered line of 50 bytes, 6,000 times
         python3 -c 'import sys; sys.stdout.write("".join("line %06d of the three-hundred-kilobyte file.\n" % i for i in range(6000)))' > "$r/srv/html/big.txt"
@@ -303,7 +307,7 @@ for leg in $legs; do
                 bad "L3 $id: no Linux side to compare"
             fi
             why=
-            command grep -aq '^PAX: init /bin/pelt ended with status 0; nothing left to run$' "$norm" || why+=" init's end;"
+            command grep -aq '^PAX: init /bin/env ended with status 0; nothing left to run$' "$norm" || why+=" init's end;"
             command grep -aq '^halt$' "$norm" || why+=" no halt;"
             [ -z "$why" ] && say "PASS L4 $id: init ended with status 0, halt" || bad "L4 $id:$why"
             if [ "$stop" = 1 ]; then
