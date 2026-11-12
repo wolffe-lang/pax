@@ -26,17 +26,18 @@
 //! (`dropped`). Before that, at boot, `put` waits per byte as it always
 //! has (the kernel's own early lines, never a program's). `drain`
 //! (kernel/panic's halt, kernel/power's reboot and power-off) sends what
-//! the ring holds, waiting. A
-//! user program's terminal output (`put_tty`: kernel/user's console
-//! `write`, kernel/console's output and echo) is mirrored to COM1 unless
-//! the command line says `pax.serial=log`, an installed system's: then
-//! COM1 carries the kernel's own lines alone. On QEMU the FIFO empties as
-//! it is written, so the ring stays empty and COM1's bytes are what they
-//! were, in order, none dropped.
+//! the ring holds, waiting. A user program's terminal output (`put_tty`:
+//! kernel/user's console `write`, kernel/console's output and echo) is
+//! mirrored to COM1 unless the command line says `pax.serial=log`: then
+//! COM1 carries the kernel's own lines alone. Under QEMU the FIFO empties
+//! as it is written unless the far end pushes back, so the ring stays
+//! empty and COM1's bytes are what they were, in order, none dropped.
 //!
 //! Written from the PC16550D register map (public datasheet facts:
 //! the register offsets, the DLAB bit, LCR/FCR/MCR/LSR bit meanings, the
-//! 1.8432 MHz clock's divisor 1 for 115200 baud). No Linux source.
+//! 1.8432 MHz clock's divisor 1 for 115200 baud; px129: IER bit 1, the
+//! transmitter holding register empty interrupt, raised when the FIFO
+//! empties with it enabled and cleared by a write to THR). No Linux source.
 
 use boot_info
 use bootlog
@@ -146,9 +147,11 @@ pub fn init() -> int {
         status = status + 2
     }
     out(MCR, MCR_NORMAL)
+    let mirrored = !boot_info.cmdline_has("pax.serial=log") // px129: programs' output kept off COM1
+    // # Safety: module flags, written here alone, before anything reads them.
     unsafe {
         present = status == 3
-        tty = !boot_info.cmdline_has("pax.serial=log") // px129: an installed system's word
+        tty = mirrored
     }
     status
 }
@@ -172,9 +175,17 @@ fn set_ier(v: int) {
     out(IER, v)
 }
 
-fn get_ier() -> int {
+/// What IER holds (`set_ier` the only writer).
+fn ier_held() -> int {
     // # Safety: as `set_ier`.
     unsafe { ier }
+}
+
+/// px129: the ring's counts, (sent, queued) since boot: it holds their
+/// difference.
+fn ring() -> (u64, u64) {
+    // # Safety: module words, touched only with IF clear (every caller).
+    unsafe { (tx_head, tx_tail) }
 }
 
 /// px129: from here `put` queues (kernel/console's `start`, once COM1's
@@ -188,12 +199,11 @@ pub fn tx_irq_on() {
 /// px129: what the transmit FIFO takes, from the ring, when LSR says it
 /// is empty: up to 16 bytes. IF clear.
 fn kick() {
-    // # Safety: module words, IF clear (the callers).
-    var h = unsafe { tx_head }
-    let t = unsafe { tx_tail }
-    if h == t || inp(LSR) & LSR_THR_EMPTY == 0 {
+    let (h0, t) = ring()
+    if h0 == t || inp(LSR) & LSR_THR_EMPTY == 0 {
         return
     }
+    var h = h0
     var n: u64 = 0
     while n < TX_FIFO && h != t {
         // # Safety: h % TX_SIZE lies inside pax_serial_tx (TX_SIZE bytes);
@@ -202,7 +212,7 @@ fn kick() {
         h += 1
         n += 1
     }
-    // # Safety: as above.
+    // # Safety: a module word, IF clear (the callers).
     unsafe { tx_head = h }
 }
 
@@ -212,25 +222,29 @@ fn kick() {
 /// the interrupt armed while bytes wait. A full ring also tries the FIFO
 /// (a lost interrupt never stops COM1 for good). Never waits.
 fn queue(b: u8) {
+    // # Safety: io.S's pushfq and cli; restored below.
     let flags = unsafe { pax_irq_save() }
-    // # Safety: module words, IF clear.
-    let t = unsafe { tx_tail }
-    let full = t - unsafe { tx_head } >= TX_SIZE
+    let (h, t) = ring()
+    let full = t - h >= TX_SIZE
     if full {
+        // # Safety: a module word, IF clear.
         unsafe { tx_dropped = tx_dropped + 1 }
     } else {
-        // # Safety: t % TX_SIZE lies inside pax_serial_tx.
+        // # Safety: t % TX_SIZE lies inside pax_serial_tx; a module word,
+        // IF clear.
         unsafe {
             ((pax_serial_tx as u64 + t % TX_SIZE) as *u8).write_volatile(b)
             tx_tail = t + 1
         }
     }
-    if full || get_ier() & IER_TX == 0 {
+    if full || ier_held() & IER_TX == 0 {
         kick()
-        if unsafe { tx_tail != tx_head } && get_ier() & IER_TX == 0 {
-            set_ier(get_ier() | IER_TX)
+        let (h2, t2) = ring()
+        if h2 != t2 && ier_held() & IER_TX == 0 {
+            set_ier(ier_held() | IER_TX)
         }
     }
+    // # Safety: the flags pax_irq_save gave above.
     unsafe { pax_irq_restore(flags) }
 }
 
@@ -239,21 +253,23 @@ fn queue(b: u8) {
 pub fn tx_irq() {
     if !available() { return }
     kick()
-    // # Safety: module words, IF clear.
-    if unsafe { tx_tail == tx_head } && get_ier() & IER_TX != 0 {
-        set_ier(get_ier() & !IER_TX)
+    let (h, t) = ring()
+    if h == t && ier_held() & IER_TX != 0 {
+        set_ier(ier_held() & !IER_TX)
     }
 }
 
 /// px129: every byte the ring holds sent, waiting on THRE (each wait
-/// bounded as `put`'s was): the halt's, so a kernel's last lines reach
-/// the wire before it stops.
+/// bounded as `put`'s was): the halt's, the reboot's and the power-off's,
+/// so a kernel's last lines reach the wire before it stops.
 pub fn drain() {
     if !available() { return }
+    // # Safety: io.S's pushfq and cli; restored below.
     let flags = unsafe { pax_irq_save() }
     var guard: u64 = 0
-    // # Safety: module words, IF clear.
-    while unsafe { tx_tail != tx_head } && guard < TX_SIZE {
+    while guard < TX_SIZE {
+        let (h, t) = ring()
+        if h == t { break }
         var spins = 0
         while inp(LSR) & LSR_THR_EMPTY == 0 && spins < POLLS {
             spins = spins + 1
@@ -262,6 +278,7 @@ pub fn drain() {
         kick()
         guard += 1
     }
+    // # Safety: the flags pax_irq_save gave above.
     unsafe { pax_irq_restore(flags) }
 }
 
@@ -348,7 +365,7 @@ pub fn receive_on() {
         let _b = inp(THR) // RBR: whatever arrived before
         n += 1
     }
-    set_ier(IER_RX | (get_ier() & IER_TX)) // px129: a transmit interrupt armed stays armed
+    set_ier(IER_RX | (ier_held() & IER_TX)) // px129: a transmit interrupt armed stays armed
 }
 
 /// Whether a received byte is waiting (LSR bit 0).
