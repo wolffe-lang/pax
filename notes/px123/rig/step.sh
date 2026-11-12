@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# notes/px123/rig/step.sh WHAT [ARGS…] — one step of px123's local gauntlet, run by the recorder
+# (gauntlet-record.sh --steps, a manifest beside this file) from a clean checkout of the commit under
+# test, under take.sh's locks. lib.sh (GAUNTLET_RIG_DIR's) gives the host's facts and `ctr`.
+#   preflight      the host has what the steps use: KVM, the tap device, the engine, both images, the
+#                  dev compiler and its std
+#   ci-plan        tests/ci-plan
+#   census         tests/census (the pins against the image's inside: burrow's)
+#   install-units  tests/mpx6-install's units (planner, allow, ui, snapshot, executor, prepare,
+#                  pax-upgrade), in the burrowd rig's image
+#   burrowd ARGS   tests/mpx5-burrowd ARGS in the burrowd rig's image (its own build: the image with
+#                  burrowd and its hook, the rows B0-B27 against sshd on Linux)
+#   push ARGS      tests/mpx4-console-push ARGS in the burrowd rig's image (the moved pin's /bin/ssh
+#                  pushing to OpenSSH's sshd posing as github.com), its fixtures required
+#   usb ARGS       tests/mpx6-usb ARGS after build-once (docs/SOURCES.md's usbredir row is its input)
+# A suite says a red row as `<suite>: FAIL ROW …` or as the rows' own `FAIL ROW …`; `lift` puts the
+# first at column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is
+# named in its record) and changes no other line. The step's exit is the suite's.
+set -uo pipefail
+trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+# shellcheck disable=SC1091
+. "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
+cd "$CO" || exit 2
+lift() { "$@" 2>&1 | sed -u -E 's/^(mpx5-burrowd|mpx4-console-push|mpx6-install|mpx6-usb|census): FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
+wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && '; }
+img=localhost/px75-ubuntu:2
+what=${1:?}; shift
+case $what in
+    preflight)
+        [ -c /dev/kvm ] && [ -w /dev/kvm ] || echo "REFUSED no-kvm /dev/kvm is not usable"
+        [ -c /dev/net/tun ] || echo "REFUSED no-tun /dev/net/tun is missing"
+        [ -x "$P" ] || echo "REFUSED no-engine $P"
+        for i in $img "$NETIMG"; do "$P" image inspect "$i" > /dev/null 2>&1 || echo "REFUSED no-image $i"; done
+        [ -x "$DEVWOLF/wolf" ] || echo "REFUSED no-dev-wolf $DEVWOLF"
+        [ -d "$DEVSTD" ] || echo "REFUSED no-dev-std $DEVSTD"
+        echo "preflight: kvm, tun, engine, images and the dev compiler looked at; the take's CPUs $CPUS"
+        exit 0 ;;
+    ci-plan) ctr 0 $img python3 -I tests/ci-plan ;;
+    census) lift ctr 0 $img tests/census ;;
+    install-units) lift ctr 0 "$NETIMG" bash -c 'for m in planner allow ui snapshot executor prepare pax-upgrade; do tests/mpx6-install --only $m || exit 1; done' ;;
+    burrowd) lift ctr net "$NETIMG" bash -c "$(wolfed)"'tests/mpx5-burrowd "$@"; exit $?' x "$@" ;;
+    push) lift ctr net "$NETIMG" bash -c "$(wolfed)"'PAX_REQUIRE_PUSH_FIXTURES=1 tests/mpx4-console-push "$@"; exit $?' x "$@" ;;
+    usb) lift ctr 1 $img bash -c "$(wolfed)"'python3 -I tests/mpx6-usb.d/build-once.py && tests/mpx6-usb "$@"; exit $?' x "$@" ;;
+    *) echo "step.sh: no step $what"; exit 2 ;;
+esac
