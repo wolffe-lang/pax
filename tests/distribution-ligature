@@ -8,16 +8,18 @@
 # have (tests/distribution-ligature.d/overlay.py): the session (session.sh), ldtime (ldtime.c, a
 # measuring WOLF_LD built here with `cc -static`, never shipped) and the sources of the programs built
 # on the machine: hello and netproc (this suite's own, the second using std.net and std.process), and
-# pelt, ligature and the largest program at the commits the image's own /etc/pax-release names
-# (ligature at user/ligature.pin's when the image names none), fetched through tools/fetch-retry. The
-# largest is yew (`src/yew.lu`, about 150,000 lines): the largest of the image's own wolf programs.
+# pelt (about 30,000 lines), den (about 38,000), ligature and yew at the commits the image's own
+# /etc/pax-release names (ligature at user/ligature.pin's when the image names none), fetched through
+# tools/fetch-retry. yew (`src/yew.lu`, about 150,000 lines) is the largest of the image's own wolf
+# programs; its compile does not fit the 2048 MiB guest (the compiler stops for memory), so den is the
+# largest that guest builds.
 #
 # Two boots of the image's own console kernel, each a session typed at the console as root:
 #   small  PAX_LIGATURE_SMALL_MIB (2048, the dev image's tested size): pelt first, by ligature and by
-#          lld; the largest program by lld; the default build; the opt-in; hello, netproc and the
-#          self-link by both; a refusal.
-#   big    PAX_LIGATURE_BIG_MIB (4096): pelt and the largest program, by both. ligature links pelt
-#          from 2560 MiB; the largest program's link peaked at 1.54 GiB on Linux.
+#          lld; den by lld; the default build; the opt-in; hello, netproc and the self-link by both; a
+#          refusal.
+#   big    PAX_LIGATURE_BIG_MIB (4096): pelt, den and yew, by both. ligature links pelt from 2560 MiB;
+#          yew's link peaked at 1.54 GiB on Linux.
 # The rows (tests/distribution-ligature.d/judge.py):
 #   L0  ligature in the image: `ligature --version`, its /etc/pax-release line
 #   L1  the default is lld: no WOLF_LD in the console's environment, and a plain `wolf build` gives
@@ -31,8 +33,7 @@
 #   L7  pelt at the small size: lld links it and it runs; ligature's link is an EXPECTED REFUSAL while
 #       ligature#35 is open (non-zero, the selected linker named, no output, no fallback); the day
 #       ligature links pelt there, this row fails and says so, so it flips with the issue
-#   L8  pelt and the largest program at the big size: by both, the same output; the largest program
-#       by lld at the small size too
+#   L8  pelt, den and yew at the big size: by both, the same output; den by lld at the small size
 #   L9  every link above measured by ldtime from the kernel's wait4: wall, CPU, peak (MEASURE lines)
 #   L10 each boot clean: the session's end, init's status 0, no panic, the halt proven
 # Exit 0 when every row passed, 1 otherwise, 2 on a usage or tool error.
@@ -88,8 +89,10 @@ fetch() { # name repo rev
 }
 fetch pelt https://github.com/wolffe-lang/pelt "$(rev pelt)"
 fetch ligature https://github.com/wolffe-lang/ligature "$lig_rev"
+fetch den https://github.com/wolffe-lang/den "$(rev den)"
 fetch largest https://github.com/wolffe-lang/yew "$(rev yew)"
 printf 'src/pelt.lu\n' > "$work/src/pelt/ENTRY"
+printf 'src/den.lu\n' > "$work/src/den/ENTRY"
 printf 'src/yew.lu\n' > "$work/src/largest/ENTRY"
 cp -R "$here/distribution-ligature.d/progs/hello" "$here/distribution-ligature.d/progs/netproc" "$work/src/"
 cc -static -O2 -Wall -o "$work/ldtime" "$here/distribution-ligature.d/ldtime.c"
