@@ -31,7 +31,8 @@ build() {
     rc=$?
     if [ -f $5 ]; then have=yes; else have=no; fi
     echo "DLIG build $1 $2 rc=$rc output=$have"
-    grep -e 'selected linker' -e 'ligature:' -e 'memory allocation' -e 'killed' $T/$1-$2.build | head -n 3 | cut -c1-200 | sed "s/^/DLIG why $1-$2: /"
+    grep -e 'selected linker' -e 'ligature' -e 'memory allocation' $T/$1-$2.build | head -n 3 | cut -c1-200 |
+        while IFS= read -r l; do echo "DLIG why $1-$2: $l"; done
 }
 # run NAME LINKER OUT ARGS...: the program's own output and status, digested
 run() {
@@ -90,7 +91,8 @@ if [ "$mode" = small ]; then
     rc=$?
     if [ -e $T/hello.refused ]; then have=yes; else have=no; fi
     echo "DLIG refused rc=$rc output=$have"
-    grep -e 'selected linker' -e 'ligature' -e 'no-sysroot' $T/refused.build | head -n 3 | cut -c1-200 | sed 's/^/DLIG why refused: /'
+    grep -e 'selected linker' -e 'ligature' -e 'no-sysroot' $T/refused.build | head -n 3 | cut -c1-200 |
+        while IFS= read -r l; do echo "DLIG why refused: $l"; done
 else
     for p in pelt den; do
         entry=$(cat $T/$p/ENTRY)
@@ -106,5 +108,6 @@ else
         rm -rf $T/$p.lig $T/$p.lld $T/$p
     done
 fi
-sed 's/^/DLIG /' $T/ldtime.log
+# (the image has no sed: the shell's own loop prefixes each line)
+[ -f $T/ldtime.log ] && while IFS= read -r l; do echo "DLIG $l"; done < $T/ldtime.log
 echo "DLIG end $mode"
