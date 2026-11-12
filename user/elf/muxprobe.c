@@ -8,9 +8,11 @@
  * stale socket, descriptor passing); non-blocking writes and the timers
  * a loop has; termios raw and back, and after a client's SIGKILL.
  *
- *   muxprobe            every section: A1 A6 A2 A3 A4 A5 A7 A8, as init
+ *   muxprobe            every section: A1 A6 A2 A3 A4, A1.9, A5 A6 A7 A8, as init
  *   muxprobe flood N    (a pane's program) N bytes of the stream on its
  *                       terminal put raw, after a header
+ *   muxprobe pane       (a pane's program, one thread) a line at a time:
+ *                       `echo TEXT` writes TEXT, `exec PROG ARG...` runs it
  *   muxprobe spew       (a pane's program) writes 1 KiB blocks for ever
  *   muxprobe hold       (a pane's program) its terminal raw, reads nothing
  *   muxprobe winch      (a pane's program) `winch ROWS COLS` at its start
@@ -244,6 +246,41 @@ static int mode_flood(long n) {
     return 0;
 }
 
+/* A pane's program in one thread (a shell would take two on PAX: a
+ * wolf program's runtime starts a thread beside main): reads a line at a
+ * time on its terminal; `echo TEXT` writes TEXT, `exec PROG ARG...` runs
+ * PROG in its place. */
+static int mode_pane(void) {
+    char line[4096];
+    size_t n = 0;
+    for (;;) {
+        ssize_t r = read(0, line + n, sizeof line - 1 - n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return 0;
+        n += (size_t)r;
+        char *nl;
+        while ((nl = memchr(line, '\n', n)) != 0) {
+            *nl = 0;
+            if (strncmp(line, "echo ", 5) == 0) {
+                char out[4200];
+                snprintf(out, sizeof out, "%s\n", line + 5);
+                puts_fd(1, out);
+            } else if (strncmp(line, "exec ", 5) == 0) {
+                char *av[16];
+                int ac = 0;
+                for (char *w = strtok(line + 5, " "); w && ac < 15; w = strtok(0, " ")) av[ac++] = w;
+                av[ac] = 0;
+                if (ac) execv(av[0], av);
+                puts_fd(1, "exec failed\n");
+            }
+            size_t used = (size_t)(nl - line) + 1;
+            memmove(line, line + used, n - used);
+            n -= used;
+        }
+        if (n == sizeof line - 1) n = 0;
+    }
+}
+
 static int mode_spew(void) {
     static char buf[1024];
     memset(buf, 'x', sizeof buf);
@@ -390,6 +427,7 @@ struct pane {
 static struct pane P[MAXP];
 static long flood_done_ms = -1; /* when the flood's last byte was checked */
 static char *SH[] = {"/bin/sh", "-c", LOOP, 0};
+static char *PANE[] = {"/bin/muxprobe", "pane", 0};
 #define NEED(k, row) do { if ((k) < 0) { say("%s no pane: %s\n", row, ename(errno)); fflush(stdout); return; } } while (0)
 static int np;
 static int ep = -1;
@@ -445,7 +483,7 @@ static int pane_start(char *const argv[], int ign, int addloop) {
     }
     if (c < 0) { close(p->m); return -1; }
     p->pid = c;
-    p->shell = argv == SH;
+    p->shell = argv == SH || argv == PANE;
     nonblock(p->m);
     np++;
     if (addloop) pane_add(k);
@@ -624,13 +662,13 @@ static void sec_a1(void) {
     }
     say("A1.1 %d ptys open at once in one process, %s numbers\n", nheld, consecutive ? "consecutive" : "scattered");
     for (int i = 0; i < nheld; i++) close(held[i]);
-    /* a shell on each, one at a time: each answers a line before the next
-     * starts, so its threads are made (pelt, a wolf program, has two) */
+    /* a program on each, in a session of its own: one thread each (pelt's
+     * second thread is A1.9's question) */
     char cmd[64], want[32];
-    int made = 0, twothreads = 0, degraded = 0, forkfail = 0, ferr = 0, silent = 0, threads = -1;
+    int made = 0, forkfail = 0, ferr = 0, silent = 0;
     int alive[PANES], nalive = 0;
     for (int i = 0; i < PANES; i++) {
-        int k = pane_start(SH, 0, 1);
+        int k = pane_start(PANE, 0, 1);
         if (k < 0) { forkfail++; ferr = errno; continue; }
         made++;
         snprintf(cmd, sizeof cmd, "echo pong %d\n", k);
@@ -638,26 +676,13 @@ static void sec_a1(void) {
         type(k, cmd);
         if (!until(k, want, 10000)) { silent++; continue; }
         forget(k);
-        int th = threads_of(P[k].pid);
-        if (threads < 0) threads = th;
-        if (th == threads) { twothreads++; alive[nalive++] = k; continue; }
-        /* fewer threads than the first shell had: its runtime's thread was
-         * refused; it ends on its own later (exit 71): end it now */
-        degraded++;
-        kill(P[k].pid, SIGKILL);
-        pane_settle(k, 3000);
-        pane_del(k);
-        close(P[k].m);
-        P[k].m = -1;
+        alive[nalive++] = k;
     }
     say("A1.2 %d children each lead a session of their own, their slave its controlling terminal, their group its foreground\n",
         reports_ok(made, 5000));
-    say("A1.2 a shell on each of 32 ptys, one at a time: %d run whole, %d without a thread their runtime asked for, %d not forked%s%s\n",
-        twothreads, degraded, forkfail, forkfail ? ", fork " : "", forkfail ? ename(ferr) : "");
-    if (silent) say("A1.2 %d shells never answered\n", silent);
+    say("A1.2 %d of 32 panes' programs answered a typed line%s%s\n", nalive, forkfail ? "; fork " : "", forkfail ? ename(ferr) : "");
+    if (silent) say("A1.2 %d never answered\n", silent);
     say("A1.3 one epoll object holds the %d masters\n", nalive);
-    say("A1.4 a pane's shell (pelt) runs %s\n", threads == 1 ? "one thread" : threads > 1 ? "more than one thread" : threads == -2 ? "(no Threads line)" : "(no status)");
-    say("~A1.4 a pane's shell runs %d threads\n", threads);
     fflush(stdout);
     /* every running pane answers again, all typed at once */
     for (int j = 0; j < nalive; j++) {
@@ -675,7 +700,7 @@ static void sec_a1(void) {
         }
         if (answered == nalive) break;
     }
-    say("A1.4 typed at once, every running pane answered through the one loop: %s\n", answered == nalive ? "yes" : "NO");
+    say("A1.4 typed at once, every pane answered through the one loop: %s\n", answered == nalive ? "yes" : "NO");
     for (int k = 0; k < np; k++) forget(k);
     fflush(stdout);
     /* the flood through pane 0, the others pinged while it runs */
@@ -1087,6 +1112,51 @@ static void sec_a4(void) {
             mode == 1 ? "SIGINT and SIGQUIT ignored by the parent and inherited across exec"
                       : "ignored by the parent, reset to the default in the child before exec",
             what[0], what[1]);
+    }
+    fflush(stdout);
+}
+
+/* --- A1.9: 32 pelt shells at once, idle between their lines ------------------- */
+
+static void sec_a19(void) {
+    char cmd[64], want[48];
+    int ks[PANES], started = 0, once = 0, again = 0, ended = 0, forkfail = 0, ferr = 0;
+    char ends[256] = "";
+    for (int i = 0; i < PANES; i++) {
+        int k = pane_start(SH, 0, 1);
+        if (k < 0) { forkfail++; ferr = errno; continue; }
+        ks[started++] = k;
+        long idle = now_ms() + 100; /* a pane's shell waits for its line */
+        while (now_ms() < idle) turn(20);
+        snprintf(cmd, sizeof cmd, "echo pong %d\n", k);
+        snprintf(want, sizeof want, "pong %d\r\n", k);
+        type(k, cmd);
+        if (until(k, want, 10000)) once++;
+        forget(k);
+    }
+    int th = started ? threads_of(P[ks[0]].pid) : -1;
+    long end = now_ms() + 5000;
+    while (now_ms() < end) turn(50);
+    for (int j = 0; j < started; j++) {
+        int k = ks[j];
+        snprintf(cmd, sizeof cmd, "echo pong again %d\n", k);
+        snprintf(want, sizeof want, "pong again %d\r\n", k);
+        type(k, cmd);
+        if (until(k, want, 5000)) { again++; continue; }
+        const char *h = pane_settle(k, 1000);
+        ended++;
+        if (strlen(ends) < 200) { strcat(ends, " "); strcat(ends, h); }
+    }
+    say("A1.9 32 pelt shells at once, each idle between its lines: %s\n", again == PANES ? "every one answered twice" : "NOT every one answered twice");
+    say("~A1.9 %d started (fork %s for %d), %d answered once, %d again after 5 s idle; %d did not:%s; the first shell's Threads line %d\n",
+        started, forkfail ? ename(ferr) : "-", forkfail, once, again, ended, ends, th);
+    for (int j = 0; j < started; j++) {
+        int k = ks[j];
+        if (P[k].m >= 0) { pane_del(k); close(P[k].m); P[k].m = -1; }
+    }
+    for (int j = 0; j < started; j++) {
+        int k = ks[j];
+        if (!P[k].reaped) { const char *h = pane_settle(k, 5000); if (strncmp(h, "running", 7) == 0) { kill(P[k].pid, SIGKILL); pane_settle(k, 2000); } }
     }
     fflush(stdout);
 }
@@ -1553,6 +1623,7 @@ int main(int argc, char **argv) {
     if (argc > 1) {
         if (strcmp(argv[1], "flood") == 0) return mode_flood(argc > 2 ? atol(argv[2]) : FLOOD_BYTES);
         if (strcmp(argv[1], "spew") == 0) return mode_spew();
+        if (strcmp(argv[1], "pane") == 0) return mode_pane();
         if (strcmp(argv[1], "hold") == 0) return mode_hold();
         if (strcmp(argv[1], "winch") == 0) return mode_winch();
         if (strcmp(argv[1], "relay") == 0) return mode_relay();
@@ -1577,6 +1648,7 @@ int main(int argc, char **argv) {
     sec_a3();
     sec_a4();
     close_all();
+    sec_a19();
     sec_a5();
     sec_a6();
     sec_a7();
