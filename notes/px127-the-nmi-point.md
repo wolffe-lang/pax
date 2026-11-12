@@ -39,3 +39,16 @@ IR against `start`'s 300), one symbol in both tiers at both heads.
 - **Green.** At the head, release and native: N0 PASS (seven points), every N1 row survives and every N2 row is a
   named machine-check panic on both firmwares, under KVM.
 - **The plant** (`frames.start` named again in N2): `FAIL N0 release … frames.start(0)` by name.
+
+## 3. Evidence and done-when
+
+The records are the pull request's: red at `d5924c9d` (N0's row at column 0, the point unmoved), green at the
+head (release and native tiers, both firmwares), and the plant `px127-plant-nmi-start` red by name; each record's
+sha256 and every `END` line are in the body. Footprint: cross-cutting (`tests/mpx6-nmi`, which the tier-all run's
+`mpx6-firmware` runs as F11).
+
+- **R-px127-8, where the fix belongs: the suite.** (a) The row names `frames.init`, as it named `pci.scan_bus`
+  after pax#252, recommended and done; (b) keep `frames.start` out of line in the kernel: wolf has no attribute for
+  it, and `#[consttime]`'s barrier would bind a contract the function does not mean; (c) change wolf's inliner: it
+  works as designed. The other single-call points (`serial.init`, `paging.switch_to`, `fb.start`,
+  `initramfs.report`, `apic.start`) stayed functions at both heads; N0 names any that a later partition inlines.
