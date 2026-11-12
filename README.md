@@ -180,7 +180,7 @@ first program it prints how long its boot took and how much of that the console 
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `ac2332bf` (wolf 0.2.36) |
-| burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.37) |
+| burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.39) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `2eb9cb9b` |
@@ -314,26 +314,29 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
   ssh pax@ADDRESS 'den init -q --bare repo.git'        # then: git push pax@ADDRESS:repo.git main
   ```
 
-  A command runs as the account through its shell, with no pty: `ssh pax@ADDRESS ls` works. It has the variables
-  `/etc/shrc` exports for the console (`WOLF_STD`, `LUPIN_STD`, `DEN_TLS_ROOTS`): burrowd's configuration sets them
-  with `SetEnv`, a line written from `/etc/shrc` when the image is built, so `ssh pax@ADDRESS wolf build hello.lu`
-  works as at the console. **From this image on, a command over ssh needs no `. /etc/shrc;` before it** (pax#334). `ssh pax@ADDRESS` gives
-  the account's login shell, still with no pty: PAX has no ptys yet, so OpenSSH prints `PTY allocation request failed
-  on channel 0` and burrowd's next line says the shell runs without a terminal. `ssh -T pax@ADDRESS` asks for no pty
-  and goes straight to the shell; `ssh -t pax@ADDRESS` ends with status 255 at the refused pty, as OpenSSH's client
-  does when a terminal was demanded. Type commands and read their output; there is no prompt, no line editing and no
-  job control, ^C does not interrupt a command (it ends only with the session: `~.` at the start of a line), and
-  `exit` ends it.
+  A command runs as the account through its shell: `ssh pax@ADDRESS ls` works. It has the variables `/etc/shrc`
+  exports for the console (`WOLF_STD`, `LUPIN_STD`, `DEN_TLS_ROOTS`): burrowd's configuration sets them with
+  `SetEnv`, a line written from `/etc/shrc` when the image is built, so `ssh pax@ADDRESS wolf build hello.lu` works
+  as at the console, with no `. /etc/shrc;` before it (pax#334).
 
-  **A bare `sudo` is a console command until the next burrow: over ssh, never run a bare `sudo`; run `sudo -k -S`,
-  the password on standard input** (as "Upgrading over ssh" below does). A program run over ssh is still in the
-  console's session, with the console as its terminal (burrow at this pin cannot give it a session of its own yet).
-  So a bare `sudo` over ssh asks for the password on the console, not on your ssh session, and stops there; your ssh
-  session waits until you end it with `~.`. burrowd itself keeps answering other connections, because each program
-  runs in a process group of its own. `-S` reads the password from standard input and leaves the terminal alone;
-  `-k` reads and writes no remembered password. Without `-k`, the password `sudo` remembers is keyed by that shared
-  terminal, so a `sudo -S` that succeeded in one ssh session lets another session's `sudo` through for five
-  minutes. At the console, `sudo` works as anywhere. git's
+  **A terminal over ssh.** `ssh pax@ADDRESS` from a terminal gives the account's login shell on a pseudo-terminal of
+  its own (`tty` names `/dev/pts/N`): pelt's prompt and line editing, job control (Ctrl-Z stops the foreground
+  program and `jobs` lists it), Ctrl-C and Ctrl-\ end the foreground program, and the window size is your
+  terminal's and follows it when you resize the window (`stty size`). A bare `sudo` in that session asks for your
+  password there. `ssh -T pax@ADDRESS`
+  asks for no terminal: the shell then has no prompt and no line editing, and `exit` ends it.
+
+  **A command with no terminal** (`ssh pax@ADDRESS COMMAND`, no `-t`) runs in a session of its own with no
+  controlling terminal: `tty` says `not a tty`, and a bare `sudo` there finds no terminal to ask on and says so
+  (`a terminal is required to read the password`). For a command, run `sudo -k -S` with the password on standard
+  input (as "Upgrading over ssh" below does), or `ssh -t` and type it. `-S` reads the password from standard input;
+  `-k` reads and writes no remembered password. Without `-k`, `sudo` remembers a password for five minutes, keyed
+  by the terminal and its session, or with no terminal by the program that ran it.
+
+  Not yet: PAX names no host, so pelt's prompt shows `?` where the host name goes (pax#351); PAX's own `ssh`
+  (burrow's client) asks for no terminal, so from PAX to another machine a session has none.
+
+  At the console, `sudo` works as anywhere. git's
   `git-upload-pack` and `git-receive-pack` are den's, so `git clone`, `fetch` and `push` work as against a Linux
   host. Passwords are checked against `/etc/shadow` (crypt(5)'s `$7$`, as `passwd` writes them), one at a time.
 - **The log** is `/var/log/burrowd.log`, root's: `sudo cat /var/log/burrowd.log`. One line per connection: the time,
@@ -344,7 +347,10 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
 `tests/mpx5-burrowd` boots an installed-shaped PAX on a tap the rig leases it an address on, and holds commands, both
 logins, the refusals, git and a restart to the same through OpenSSH's `sshd` on Linux; a command's environment (the
 console's variables, held to `sshd` given the same `SetEnv` line) and a `wolf build` over ssh with no prefix; a second
-boot keeps the host key; the stick's shape is refused from the LAN and answered on loopback.
+boot keeps the host key; a terminal over ssh (B19-B27: the prompt, `tty`, the window size and a resize, Ctrl-C,
+Ctrl-\ and Ctrl-Z reaching the foreground program, a bare `sudo` asking on the session, the pty given back, burrowd
+with SIGINT and SIGQUIT at their defaults); the
+stick's shape is refused from the LAN and answered on loopback.
 
 ## Booting PAX
 
@@ -543,9 +549,9 @@ installed root needs about twice the archive's size free. Three commands, from t
   upgraded, refused, stopped, not applied, and why).
 - `sudo -k -S pax-upgrade disarm` takes the arm back before the reboot; `sudo -k -S pax-upgrade clean` removes a
   staged archive that is no longer wanted.
-- **Over ssh, always `sudo -k -S`, the password on standard input.** A bare `sudo` over ssh asks for the password
-  on the machine's own console, not yours, and your ssh session waits until you end it with `~.`; without `-k`, the
-  password `sudo` remembers is shared by every ssh session for five minutes ("Logging in to PAX over ssh" above).
+- **For a command over ssh, `sudo -k -S`, the password on standard input.** A command with no terminal has none
+  for a bare `sudo` to ask on, so it says so and stops; `-k` keeps the password from being remembered for the next
+  command. In an `ssh` session with a terminal a bare `sudo` asks there ("Logging in to PAX over ssh" above).
 
 **When it does not come back.** First wait: the staged boot is tried twice at most. A staged kernel that cannot read
 or check the archive, or a third try, boots the installed system instead; it puts Limine's configuration back,
