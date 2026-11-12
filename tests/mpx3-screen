@@ -177,7 +177,8 @@ if [ -z "$images" ]; then
         [ -f "$f" ] || { why+=" no bin/$p;"; continue; }
         r=$(static_ok "$f") || why+=" $r;"
         say "  program: bin/$p $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
-        case $p in ask) echo "/bin/ask tty" ;; *) echo "/bin/pelt" ;; esac > "$work/$p/root/etc/pax-run"
+        # pelt b80d657 starts friendly at a terminal unless invoked as sh; V5 holds the plain `$ `.
+        case $p in ask) echo "/bin/ask tty" ;; *) echo "/bin/pelt +o friendly" ;; esac > "$work/$p/root/etc/pax-run"
         if "$PAX_ROOT/tools/mkinitramfs" "$work/$p.cpio" "/bin/$p=$f" "/etc/pax-run=$work/$p/root/etc/pax-run" > "$work/$p.initramfs.txt"; then
             sed "s/^/  initramfs $p: /" "$work/$p.initramfs.txt" >&2
         else
