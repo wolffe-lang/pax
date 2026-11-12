@@ -57,6 +57,9 @@
 #      answered and sent) as screen.rows has it.
 #   M5 the screen image's end: nothing refused by name, init ended,
 #      status 0, halted.
+#   M6 B7 at the 860's mode (its 2560 x 1440 display): Limine's
+#      framebuffer that size, `muxprobe paint`'s line (its grid and its
+#      repaint times, a measurement), init ended, halted.
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
 # every assertion held, 1 otherwise, 2 on a usage or tool error.
@@ -89,6 +92,7 @@ need python3 readelf
 D=$here/mpx7-mux.d
 BORE="stty sleep"
 PAINT=100
+MODE860=2560x1440
 PROBES="plumb wolf"
 work=$PAX_BUILD/mpx7-mux
 runs=$PAX_BUILD/mpx7-mux-runs.txt
@@ -177,14 +181,23 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/mkinitramfs" "$work/screen.cpio" /bin/vtcases="$work/bin/vtcases":755 /bin/muxprobe="$work/bin/muxprobe":755 \
         /etc/vtcases="$work/screen.rec":644 /etc/pax-run="$work/screen.run":644 > "$work/screen.initramfs.txt" \
         || why+=" tools/mkinitramfs screen;"
+    # B7 at the 860's console (its display gives 2560 x 1440): the repaint
+    # alone, Limine asked for that mode.
+    printf '%s\n' "/bin/muxprobe paint $PAINT" > "$work/paint.run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/paint.cpio" /bin/muxprobe="$work/bin/muxprobe":755 /etc/pax-run="$work/paint.run":644 \
+        > "$work/paint.initramfs.txt" || why+=" tools/mkinitramfs paint;"
+    cp "$PAX_ROOT/boot/limine-initramfs.conf" "$work/paint.conf"
+    printf '\n    resolution: %s\n' "$MODE860" >> "$work/paint.conf"
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         mkdir -p "$work/$tier"
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            for im in $PROBES screen; do
-                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+            for im in $PROBES screen paint; do
+                conf=$PAX_ROOT/boot/limine-initramfs.conf
+                [ "$im" = paint ] && conf=$work/paint.conf
+                "$PAX_ROOT/tools/mkimage" --conf "$conf" \
                     --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
                     || why+=" $tier $im: mkimage;"
                 say "built $tier $im: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/$im.iso"), initramfs $(sha256_of "$work/$im.cpio")"
@@ -315,6 +328,29 @@ for leg in $legs; do
         grep -Eqx 'PAX: init /bin/[a-z]+ ended with status 0; nothing left to run' "$norm" || why+=" no 'PAX: init … ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
         [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
         [ -z "$why" ] && say "PASS M5 $id: the screen image: nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "M5 $id:$why"
+
+        # --- B7 at the 860's mode: a VGA device whose largest mode is it ---
+        iso=$images/$tier/paint.iso
+        log=$PAX_BUILD/mpx7-mux-$tier-$leg-paint.serial.log
+        rm -f "$log" "$log.verdict"
+        hrc=0
+        t0=$SECONDS
+        "$PAX_ROOT/tools/qemu-halt" --accel "$accels" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 512M \
+            --qemu -vga --qemu none --qemu -device --qemu "VGA,vgamem_mb=64,xres=${MODE860%x*},yres=${MODE860#*x}" \
+            --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        ran=$((ran + 1))
+        printf '%s %s %s paint halt-status=%s secs=%s serial=%s iso=%s\n' "$tier" "$leg" "$accels" "$hrc" "$((SECONDS - t0))" \
+            "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        why=
+        fb=$(grep -m1 -o 'framebuffer [0-9]*x[0-9]* ' "$norm")
+        pl=$(grep -m1 -o 'paint: [0-9]* x [0-9]*.*' "$norm")
+        [ "$fb" = "framebuffer $MODE860 " ] || why+=" the framebuffer is '$fb', not $MODE860;"
+        [ -n "$pl" ] || why+=" no paint line;"
+        grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
+        grep -Eqx 'PAX: init /bin/muxprobe ended with status 0; nothing left to run' "$norm" || why+=" no 'PAX: init /bin/muxprobe ended with status 0';"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS M6 $id: the 860's mode, $fb: $pl" || bad "M6 $id:$why"
     done
 done
 cat "$runs"
