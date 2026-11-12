@@ -268,9 +268,13 @@ fn write_pat(v: u64) {
     }
 }
 
-/// px129: the leaf bits that map the framebuffer write-combining, from
-/// whatever IA32_PAT holds: an entry 4-7 already WC is used as handed;
-/// else uncached (entry 3). `pax.patdefault` (a test word) first puts
+/// px129: the leaf bits that map the framebuffer write-combining, whatever
+/// IA32_PAT holds: an entry 4-7 already WC is used as handed; else entry 5
+/// is programmed to WC here (`write_pat`), which changes no other mapping:
+/// the kernel's other leaves select entry 0 (WB) or 3 (PCD and PWT, UC),
+/// never the PAT bit; and if WC does not read back, uncached (entry 3).
+/// Without the PAT, uncached (the MTRRs are left as the firmware set
+/// them; `mtrr_cover` reports them). `pax.patdefault` (a test word) first puts
 /// IA32_PAT to its power-on value, which holds no WC entry, as a
 /// bootloader that never programmed it would leave it. Sets `pat`, the
 /// choice and `wc`.
@@ -296,9 +300,19 @@ fn choose() -> u64 {
         e += 1
     }
     if e == 8 {
-        set_choice(HOW_NO_WC, 3, 0)
-        set_wc(0)
-        return PCD | PWT
+        let held = pat_type(p, 5)
+        write_pat((p & !(0xff << 40)) | (PAT_WC << 40))
+        // # Safety: as above.
+        let q = unsafe { pax_rdmsr(IA32_PAT) }
+        set_pat(q)
+        if pat_type(q, 5) != PAT_WC {
+            set_choice(HOW_REFUSED, 3, held)
+            set_wc(0)
+            return PCD | PWT
+        }
+        set_choice(HOW_PROGRAMMED, 5, held)
+        set_wc(1)
+        return bits_of(5)
     }
     set_choice(HOW_HANDED, e, 0)
     set_wc(1)
