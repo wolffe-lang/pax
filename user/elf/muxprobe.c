@@ -611,53 +611,73 @@ static int threads_of(pid_t p) {
 
 static void sec_a1(void) {
     nr0 = pty_nr();
-    int made = 0, first = -1, consecutive = 1;
+    /* 32 ptys at once, held by this process alone */
+    int held[PANES], nheld = 0, first = -1, consecutive = 1;
+    for (int i = 0; i < PANES; i++) {
+        int m = posix_openpt(O_RDWR | O_NOCTTY);
+        if (m < 0) break;
+        unsigned n = 0;
+        ioctl(m, TIOCGPTN, &n);
+        if (first < 0) first = (int)n;
+        else if ((int)n != first + i) consecutive = 0;
+        held[nheld++] = m;
+    }
+    say("A1.1 %d ptys open at once in one process, %s numbers\n", nheld, consecutive ? "consecutive" : "scattered");
+    for (int i = 0; i < nheld; i++) close(held[i]);
+    /* a shell on each, one at a time: each answers a line before the next
+     * starts, so its threads are made (pelt, a wolf program, has two) */
+    char cmd[64], want[32];
+    int made = 0, twothreads = 0, degraded = 0, forkfail = 0, ferr = 0, silent = 0, threads = -1;
+    int alive[PANES], nalive = 0;
     for (int i = 0; i < PANES; i++) {
         int k = pane_start(SH, 0, 1);
-        if (k < 0) break;
-        if (first < 0) first = P[k].num;
-        else if (P[k].num != first + i) consecutive = 0;
+        if (k < 0) { forkfail++; ferr = errno; continue; }
         made++;
+        snprintf(cmd, sizeof cmd, "echo pong %d\n", k);
+        snprintf(want, sizeof want, "pong %d\r\n", k);
+        type(k, cmd);
+        if (!until(k, want, 10000)) { silent++; continue; }
+        forget(k);
+        int th = threads_of(P[k].pid);
+        if (threads < 0) threads = th;
+        if (th == threads) { twothreads++; alive[nalive++] = k; continue; }
+        /* fewer threads than the first shell had: its runtime's thread was
+         * refused; it ends on its own later (exit 71): end it now */
+        degraded++;
+        kill(P[k].pid, SIGKILL);
+        pane_settle(k, 3000);
+        pane_del(k);
+        close(P[k].m);
+        P[k].m = -1;
     }
-    say("A1.1 %d ptys open at once in one process, %s numbers\n", made, consecutive ? "consecutive" : "scattered");
     say("A1.2 %d children each lead a session of their own, their slave its controlling terminal, their group its foreground\n",
         reports_ok(made, 5000));
-    say("A1.3 one epoll object holds the %d masters\n", made);
+    say("A1.2 a shell on each of 32 ptys, one at a time: %d run whole, %d without a thread their runtime asked for, %d not forked%s%s\n",
+        twothreads, degraded, forkfail, forkfail ? ", fork " : "", forkfail ? ename(ferr) : "");
+    if (silent) say("A1.2 %d shells never answered\n", silent);
+    say("A1.3 one epoll object holds the %d masters\n", nalive);
+    say("A1.4 a pane's shell (pelt) runs %s\n", threads == 1 ? "one thread" : threads > 1 ? "more than one thread" : threads == -2 ? "(no Threads line)" : "(no status)");
+    say("~A1.4 a pane's shell runs %d threads\n", threads);
     fflush(stdout);
-    /* every pane answers a typed line */
-    char cmd[64], want[32];
-    for (int k = 0; k < made; k++) {
-        snprintf(cmd, sizeof cmd, "echo pong %d\n", k);
-        type(k, cmd);
+    /* every running pane answers again, all typed at once */
+    for (int j = 0; j < nalive; j++) {
+        snprintf(cmd, sizeof cmd, "echo pong again %d\n", alive[j]);
+        type(alive[j], cmd);
     }
     long end = now_ms() + 20000;
     int answered = 0;
     while (now_ms() < end) {
         turn(20);
         answered = 0;
-        for (int k = 0; k < made; k++) {
-            snprintf(want, sizeof want, "pong %d\r\n", k);
-            if (has(k, want)) answered++;
+        for (int j = 0; j < nalive; j++) {
+            snprintf(want, sizeof want, "pong again %d\r\n", alive[j]);
+            if (has(alive[j], want)) answered++;
         }
-        if (answered == made) break;
+        if (answered == nalive) break;
     }
-    say("A1.4 %d of %d panes answered a typed line, each its own\n", answered, made);
-    int alive[PANES], nalive = 0, early = 0;
-    char ends[256] = "";
-    for (int k = 0; k < made; k++) {
-        snprintf(want, sizeof want, "pong %d\r\n", k);
-        if (has(k, want)) { alive[nalive++] = k; continue; }
-        const char *h = pane_settle(k, 100);
-        early++;
-        if (strlen(ends) < 200) { strcat(ends, " "); strcat(ends, h); }
-    }
-    if (early) say("A1.4 %d shells ended before they answered:%s\n", early, ends);
-    int th = threads_of(P[1].pid);
-    say("A1.4 a pane's shell (pelt) runs %s\n", th == 1 ? "one thread" : th > 1 ? "more than one thread" : th == -2 ? "(no Threads line)" : "(no status)");
-    say("~A1.4 a pane's shell runs %d threads\n", th);
-    for (int k = 0; k < made; k++) forget(k);
+    say("A1.4 typed at once, every running pane answered through the one loop: %s\n", answered == nalive ? "yes" : "NO");
+    for (int k = 0; k < np; k++) forget(k);
     fflush(stdout);
-
     /* the flood through pane 0, the others pinged while it runs */
     struct termios t;
     tcgetattr(P[0].m, &t);
@@ -706,15 +726,15 @@ static void sec_a1(void) {
     /* the flood's pane ends with its program */
     say("A1.7 the flood's program: %s\n", pane_settle(0, 5000));
     /* half the panes closed: their shells hear the hangup */
-    int hup = 0, odd = 0;
-    for (int k = PANES / 2; k < made; k++) { close(P[k].m); P[k].m = -1; }
+    int hup = 0, odd = 0, shut = 0;
+    for (int k = PANES / 2; k < made; k++) if (P[k].m >= 0) { close(P[k].m); P[k].m = -1; shut++; }
     for (int k = PANES / 2; k < made; k++) {
         if (P[k].reaped) continue;
         const char *h = pane_settle(k, 5000);
         if (strcmp(h, "killed by HUP") == 0) hup++;
         else { odd++; say("~A1.7 pane %d's shell: %s\n", k, h); }
     }
-    say("A1.7 %d masters closed: their %d running shells ended by SIGHUP%s\n", made - PANES / 2, hup, odd ? ", and OTHERS otherwise" : "");
+    say("A1.7 the last %d panes' masters closed: their %d running shells ended by SIGHUP%s\n", shut, hup, odd ? ", and OTHERS otherwise" : "");
     fflush(stdout);
 }
 
@@ -1454,8 +1474,7 @@ static void close_all(void) {
     say("A1.8 %d masters closed: %d shells ended by SIGHUP, %d otherwise, %d left running\n", open_, hup, other_, left);
     if (other_) say("~A1.8 the other ends:%s\n", odd);
     int nr = pty_nr();
-    say("A1.8 the pty count back where it began: %s\n", nr == nr0 ? "yes" : "NO");
-    say("~A1.8 pty nr %d, at the start %d\n", nr, nr0);
+    say("~A1.8 the pty count moved by %d (%d at the start; Linux's counts every pty on the host)\n", nr - nr0, nr0);
 }
 
 /* --- the console's own modes: B5's keys, B7's paint ---------------------------- */
@@ -1491,6 +1510,14 @@ static int mode_paint(int reps) {
     size_t cap = (size_t)R * (size_t)C * 24 + 64;
     char *b = malloc(cap);
     long res[3];
+    /* one cell a write, a thousand writes: what one write costs */
+    long w0 = now_ms();
+    for (int i = 0; i < 1000; i++) {
+        char one[32];
+        int n1 = snprintf(one, sizeof one, "\033[%d;%dH%c", 1 + i % R, 1 + (i * 7) % (C - 1), 'a' + i % 26);
+        (void)putall(1, one, (size_t)n1);
+    }
+    long w1 = now_ms() - w0;
     for (int way = 0; way < 3; way++) {
         long t0 = now_ms();
         for (int rep_ = 0; rep_ < reps; rep_++) {
@@ -1512,8 +1539,8 @@ static int mode_paint(int reps) {
         res[way] = now_ms() - t0;
     }
     char line[256];
-    snprintf(line, sizeof line, "\033[0m\033[2J\033[Hpaint: %d x %d, %d screens each: cells %ld ms, runs %ld ms, coloured %ld ms\r\n", C, R,
-             reps, res[0], res[1], res[2]);
+    snprintf(line, sizeof line, "\033[0m\033[2J\033[Hpaint: %d x %d, %d screens each: cells %ld ms, runs %ld ms, coloured %ld ms; 1000 one-cell writes %ld ms\r\n", C, R,
+             reps, res[0], res[1], res[2], w1);
     puts_fd(1, line);
     free(b);
     return 0;

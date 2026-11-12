@@ -71,6 +71,25 @@ fn read_until(mut m: fs.File, want: str, turns: int) -> str {
     got
 }
 
+// Read what master `m` holds until 50 ms pass with nothing more.
+fn drain(mut m: fs.File) {
+    var k = 0
+    while k < 50 {
+        var watched = List[fs.File]()
+        (mut watched).push(m)
+        let w = signal.wait_fds(watched, signal.child(), 50) else |_| {
+            return
+        }
+        if w.ready != 0 {
+            return
+        }
+        let _chunk = fs.read_chunk(mut m, 4096) else |_| {
+            return
+        }
+        k = k + 1
+    }
+}
+
 fn type_line(mut m: fs.File, s: str) -> int {
     fs.write_some(mut m, bytes_of(s)) else 0 - 1
 }
@@ -167,6 +186,12 @@ fn panes() -> !int {
     k = 0
     while k < ps.len {
         (mut all).push(copy ps[k].m)
+        k = k + 1
+    }
+    k = 0
+    while k < ps.len {
+        var mk = copy ps[k].m
+        drain(mut mk)
         k = k + 1
     }
     let w0 = signal.wait_fds(all, signal.child(), 0)?
