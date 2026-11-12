@@ -187,6 +187,7 @@ first program it prints how long its boot took and how much of that the console 
 | sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
+| ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `32ec7f43` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
 
 Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
@@ -696,6 +697,7 @@ The dev variant adds to the base image, which it leaves unchanged:
 | musl's binary CRT and libc inputs | | recorded in `user/wolf-link.sums` |
 | scent as `grep`, with its fixture | `/usr/share/scent` | `cd /usr/share/scent; grep -n -C1 cat words.txt` |
 | clef, the assembler in wolf (opt-in, `tools/mkdev --clef DIR`) | `/usr/bin/clef` | `clef --64 -o x.o x.S`, `clef --expand x.S` |
+| ligature, the linker in wolf (an opt-in beside lld) | `/usr/bin/ligature` | `export WOLF_LD=/usr/bin/ligature`, then `wolf build` as below |
 
 At the dev console, write a program in your home directory and use:
 
@@ -714,6 +716,31 @@ not carry. `wolf build --no-cache --emit=obj hello.lu -o hello.o` emits a native
 tested with 2 GiB of RAM. `tests/mpx5-wolf` holds root and `pax` sessions byte for byte to the same binaries on Linux
 and checks independent command and verdict witnesses, so agreement on a broken compiler cannot pass; its fast CI root
 omits the link bundle on purpose and checks the missing-tool errors.
+
+**Linking with ligature.** `wolf build` links through `/usr/bin/ld.lld` by default, and wolf 0.2.39 and later
+say so on every build (`wolf build: note: linking through /usr/bin/ld.lld found on PATH …`). ligature, the linker
+written in wolf, is on the dev image beside it. To link with ligature, set `WOLF_LD`. Setting it also silences
+the note:
+
+```sh
+export WOLF_LD=/usr/bin/ligature    # every wolf build in this shell links with ligature
+wolf build hello.lu && ./hello
+WOLF_LD=cc wolf build hello.lu      # this one build with lld again (the image's cc runs ld.lld)
+```
+
+A program ligature links behaves as lld's link of it does. ligature's link is deterministic: the same inputs
+give the same bytes. The binary is larger, because it carries ligature's provenance manifest. ligature does
+not yet fit everywhere lld does:
+
+- **Memory.** A pelt-sized program (about 30,000 lines) needs about 750 MiB for its link. The 2 GiB guest the dev
+  image is tested with does not have that much to spare, so there ligature stops with `memory allocation of …
+  failed`. `wolf build` then fails, naming the linker, and no program is written. Nothing falls back to lld:
+  run the build again with `WOLF_LD=cc`. With 2560 MiB of guest memory, pelt links with ligature
+  ([ligature#35](https://github.com/wolffe-lang/ligature/issues/35)).
+- **Time.** A link takes ligature about 10 s, where lld takes a second.
+
+This is why lld stays the default. `tests/distribution-ligature` holds the image to both linkers. Every row
+links with each linker, runs the program, and measures the link with the kernel's own `wait4` usage.
 
 `wolf lsp`, the compiler's language server, runs on PAX unchanged: it speaks the Language Server Protocol on its
 standard input and output, so an editor starts it as a child on pipes. `tests/mpx5-lsp` starts it that way from a
