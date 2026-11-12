@@ -18,13 +18,18 @@
  * off, so it is short across the tests: the `kept` figure).
  *
  * The run is bounded by the TSC, at the rate the idle second before the
- * tests gave (version 4, after version 3 ran for many minutes at a real
+ * tests gave (version 4; version 5 bounds it by bytes as well, below; after version 3 ran for many minutes at a real
  * machine's console: its bound was CLOCK_MONOTONIC's, which the long
  * console writes starved): the whole run at most -T SECONDS (default 60)
  * of tests, each test at most -t SECONDS (default 4) and its share of
  * what is left. A test's first frame is timed alone; it then runs as many
  * frames as fit its budget, at most REPS (default 100), at least the one.
- * A test that no time is left for is skipped (0 frames). Between frames it
+ * A test that no time is left for is skipped (0 frames). A frame cannot be
+ * cut short, so the run is bounded by bytes too: before the tests a probe
+ * of 512 bytes of `ESC [ m` (three writes, the least) gives a byte's cost
+ * (a console that mirrors to a UART at 115200 baud pays about 87 us), and
+ * a test whose largest write (its setup or a frame) would take longer
+ * than its budget at that cost is skipped, its line saying why. Between frames it
  * sleeps -g MS (default 10; 0 for none), so other processes and the
  * network get the CPU between two writes (a console write runs with
  * interrupts off). With -r FILE each test's line is written to FILE as
@@ -86,7 +91,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "conspeed 4 (px129)"
+#define VERSION "conspeed 5 (px129)"
 #define MAXREPS 100000
 
 static int g_fd = -1;
@@ -473,6 +478,14 @@ static int test_line(char *o, size_t cap, struct test *t, double per_ms) {
                     t->ms_min, t->mbps, uc);
 }
 
+/* px129: the largest write a test makes: its setup or a frame. */
+static size_t largest_write(const struct test *t) {
+    size_t m = t->setup.n;
+    for (int i = 0; i < t->nframes; i++)
+        if (t->frames[i].n > m) m = t->frames[i].n;
+    return m;
+}
+
 static void res_put(const char *p, int n) {
     if (g_res < 0 || n <= 0) return;
     ssize_t r = write(g_res, p, (size_t)n);
@@ -645,11 +658,47 @@ int main(int argc, char **argv) {
     uint64_t run0 = stamp();
     g_entered = 1;
     write_all("\033[?1049h\033[?25l\033[0m", 18);
+    /* px129: a byte's cost, from three writes of a 512-byte probe that
+     * draws nothing: the bound by bytes below. */
+    double byte_s = 0;
+    {
+        char probe[513];
+        for (int i = 0; i < 512; i += 3) memcpy(probe + i, "\033[m", (size_t)(512 - i < 3 ? 512 - i : 3));
+        uint64_t least_p = UINT64_MAX;
+        for (int k = 0; k < 3; k++) {
+            uint64_t a = stamp();
+            write_all(probe, 512);
+            uint64_t b = stamp();
+            if (b - a < least_p) least_p = b - a;
+            gap(gap_ms);
+        }
+        byte_s = (double)least_p / g_stamps_per_s / 512.0;
+        char l[200];
+        res_put(l, snprintf(l, sizeof l, "a byte's cost (a 512-byte probe, the least of three): %.3f us\n", byte_s * 1e6));
+    }
     struct test *t_bytes = NULL, *t_plain = NULL;
     char verdict[512] = "";
+    char skipped[2048] = "";
+    size_t skipped_n = 0;
     for (int i = 0; i < g_ntests; i++) {
         double left = total - since(run0), share = left / (double)(g_ntests - i);
-        run_test(&g_tests[i], reps, share < secs ? share : secs, gap_ms, samples);
+        double budget = share < secs ? share : secs;
+        if (!g_tests[i].unit) {
+            double one = (double)largest_write(&g_tests[i]) * byte_s;
+            if (one > budget) {
+                char l[256];
+                int n = snprintf(l, sizeof l, "skipped %s: a write of %zu bytes would take %.1f s at %.3f us a byte (its budget %.1f s)\n",
+                                 g_tests[i].name, largest_write(&g_tests[i]), one, byte_s * 1e6, budget);
+                res_put(l, n);
+                if (n > 0 && skipped_n + (size_t)n < sizeof skipped) {
+                    memcpy(skipped + skipped_n, l, (size_t)n);
+                    skipped_n += (size_t)n;
+                    skipped[skipped_n] = 0;
+                }
+                budget = 0;
+            }
+        }
+        run_test(&g_tests[i], reps, budget, gap_ms, samples);
         char l[256];
         res_put(l, test_line(l, sizeof l, &g_tests[i], before));
         if (strcmp(g_tests[i].name, "bytes") == 0) t_bytes = &g_tests[i];
@@ -700,6 +749,8 @@ int main(int argc, char **argv) {
                cell_us > 0 ? px / cell_us : 0, (int)px);
     }
     if (verdict[0]) fputs(verdict, stdout);
+    if (skipped[0]) fputs(skipped, stdout);
+    printf("a byte's cost (a 512-byte probe, the least of three): %.3f us\n", byte_s * 1e6);
     {
         char e[256];
         double tests_s = g_tsc ? (double)(c1 - c0) / per_ms / 1e3 : (double)(m1 - m0) / 1e9;
