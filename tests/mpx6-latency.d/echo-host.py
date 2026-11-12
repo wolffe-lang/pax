@@ -15,8 +15,11 @@
 #
 #   hostnet LOAD: n N p50 U p99 U max U lost K
 #
-# (U in microseconds; lost: no answer within 10 s; one still in flight at
-# the window's end is neither). Prints `echo-host: port PORT` once bound, `echo-host: busy` and
+# (U in microseconds; lost: no answer within 10 s, 1 s in a flood; one still in flight at
+# the window's end is neither). In the window of a load named `flood` it
+# pings as fast as the guest answers, FLIGHT datagrams in flight at once
+# (the CPU-bound process's share under a stream of device wake-ups is the
+# row's; each round trip is counted from when it was sent). Prints `echo-host: port PORT` once bound, `echo-host: busy` and
 # exit 1 when the port is taken; runs until killed. Written from QEMU's
 # documentation of `-netdev user` and RFC 862.
 import selectors
@@ -39,6 +42,8 @@ sel = selectors.DefaultSelector()
 sel.register(rep, selectors.EVENT_READ, 'rep')
 sel.register(cli, selectors.EVENT_READ, 'cli')
 STEP = 0.005
+FLIGHT = 16
+flood = False
 pinging = False
 due = 0.0
 seq = 0
@@ -61,6 +66,8 @@ with open(report, 'ab', buffering=0) as out:
     while True:
         now = time.monotonic()
         timeout = max(0.0, due - now) if pinging else None
+        if flood and len(sent) < FLIGHT:
+            timeout = 0.0
         for key, _ in sel.select(timeout):
             if key.data == 'rep':
                 data, _peer = rep.recvfrom(65536)
@@ -73,9 +80,11 @@ with open(report, 'ab', buffering=0) as out:
                     pinging, due = True, t
                 elif line.startswith('latprobe-begin '):
                     window = (line.split()[1], t)
+                    flood = window[0] == 'flood'
                 elif window and line.startswith('latprobe %s:' % window[0]):
                     out.write(summary(window[0], window[1], t).encode())
                     window = None
+                    flood = False
                     done = [x for x in done if x[0] >= t - 1]
             else:
                 try:
@@ -88,6 +97,13 @@ with open(report, 'ab', buffering=0) as out:
                     if d is not None:
                         done.append((d, time.monotonic() - d))
         now = time.monotonic()
+        while flood and len(sent) < FLIGHT:
+            seq += 1
+            sent[seq] = now
+            try:
+                cli.send(struct.pack('<Q', seq))
+            except OSError:
+                pass
         if pinging and now >= due:
             seq += 1
             sent[seq] = due
@@ -98,5 +114,5 @@ with open(report, 'ab', buffering=0) as out:
             due += STEP
             if due < now:
                 due = now + STEP
-            for k in [k for k, d in sent.items() if now - d > 10]:
+            for k in [k for k, d in sent.items() if now - d > (1 if flood else 10)]:
                 done.append((sent.pop(k), None))
