@@ -131,7 +131,13 @@
 //! **The network thread** (px20): a kernel thread may also wait for the
 //! network device (`block_net`, in thread context like `sleep`); the
 //! device's interrupt makes it ready (`wake_net`) and `kick` runs it
-//! at once when the CPU was idle.
+//! at once when the CPU was idle. px131: and at once whatever ran, where the
+//! tick could have preempted it: the network thread, the readers its
+//! deliveries wake (`wake_pipes` from it) and the console's readers
+//! (`wake_input`) go to the queue's head marked urgent (`wake_urgent`), and
+//! `kick` switches to an urgent head. A flood of frames can then take the
+//! CPU from a process that only computes for as long as it lasts; the
+//! flood row of tests/mpx6-latency holds a hog to half its share.
 //!
 //! **Threads** (px26): a process is a GROUP of slots with one leader.
 //! A thread's `lead` names its leader's slot, whose process area and
@@ -415,6 +421,8 @@ const S_TSC0: u64 = 20 // px88: the TSC at `start` (0: not taken)
 const S_NS0: u64 = 21 // px88: kernel/clock's nanoseconds at `start`
 const S_TICK0: u64 = 22 // px88: the tick at `start`
 const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once calibrated (0: not yet)
+const S_URGENT: u64 = 24 // px131: a bit a slot: woken by a device's work, at the queue's head (`wake_urgent`)
+const S_NETD: u64 = 25 // px131: slot + 1 of the network thread (the one that waits in `block_net`); 0 none yet
 
 // px88: the process area's usage words (kernel/sched's; words 6084-6093
 // of the 6144, past kernel/vm's last, 6083): the process's own sums,
@@ -492,6 +500,29 @@ fn enqueue(s: u64) {
         put_field(t - 1, offset_of(Thread, next), s + 1)
     }
     put_sv(S_TAIL, s + 1)
+}
+
+/// px131: put slot `s` at the queue's head.
+fn enqueue_front(s: u64) {
+    let h = sv(S_HEAD) // #598
+    put_field(s, offset_of(Thread, next), h)
+    put_sv(S_HEAD, s + 1)
+    if h == 0 {
+        put_sv(S_TAIL, s + 1)
+    }
+}
+
+/// px131: make slot `s` ready at the queue's head, marked urgent: woken by
+/// a device's work (the network thread by its device's interrupt, what the
+/// network thread delivers to, a console reader by a key), so `kick` runs
+/// it at once where the tick could preempt. Before, it went to the tail and
+/// waited out every thread ahead of it, a quantum each: beside one process
+/// that only computes, a ping's round trip was 27 ms in the median, a
+/// quantum a hop (notes/px131-long-kernel-paths.md). IF clear.
+fn wake_urgent(s: u64) {
+    put_field(s, offset_of(Thread, state), READY)
+    enqueue_front(s)
+    put_sv(S_URGENT, sv(S_URGENT) | (1 << s))
 }
 
 /// The queue's head (slot + 1), removed; 0 when it is empty.
@@ -578,6 +609,7 @@ fn run_next() -> u64 {
         n = dequeue()
     }
     let s = if n == 0 { IDLE } else { n - 1 }
+    put_sv(S_URGENT, sv(S_URGENT) & !(1 << s)) // px131: it runs now
     account(from, s) // px88
     if s != from {
         fpu.switch(from, s) // px10: a no-op before fpu.start
@@ -904,8 +936,7 @@ pub fn wake_input() -> u64 {
         // console too; it waits as a pipe's reader does (PIPE).
         let st = field(s, offset_of(Thread, state))
         if st == INPUT || st == PIPE {
-            put_field(s, offset_of(Thread, state), READY)
-            enqueue(s)
+            wake_urgent(s) // px131: a key's reader runs at once
             n += 1
         }
         s += 1
@@ -921,10 +952,26 @@ pub fn kick(f: u64) -> u64 {
         return f
     }
     latency.sched_point(f, who(cur())) // px131: a chance to choose
-    if cur() != IDLE || sv(S_HEAD) == 0 {
+    let h = sv(S_HEAD) // #598
+    if h == 0 {
         return f
     }
-    put_field(IDLE, offset_of(Thread, frame), f)
+    let c = cur()
+    if c == IDLE {
+        put_field(IDLE, offset_of(Thread, frame), f)
+        return run_next()
+    }
+    // px131: a thread a device's work woke (`wake_urgent`) runs now: the
+    // interrupt landed where the tick could have preempted (it was taken,
+    // so IF was set: ring 3, a kernel thread outside its locks), and the
+    // running thread goes to the tail as `preempt` would send it.
+    let u = sv(S_URGENT)
+    if u & (1 << (h - 1)) == 0 || u & (1 << c) != 0 {
+        return f
+    }
+    put_field(c, offset_of(Thread, frame), f)
+    put_field(c, offset_of(Thread, state), READY)
+    enqueue(c)
     run_next()
 }
 
@@ -952,6 +999,8 @@ pub fn start(pml4: u64) {
     put_sv(S_LIVE, 0)
     put_sv(S_WAITER, 0)
     put_sv(S_FLOOR, 0)
+    put_sv(S_URGENT, 0) // px131
+    put_sv(S_NETD, 0)
     put_sv(S_SLICE, timer.ticks())
     // px88: the bases the TSC's cycles are converted against.
     // # Safety: boot/fpu.S's RDTSC, which every x86-64 CPU has.
@@ -2334,11 +2383,17 @@ pub fn set_self_altstack(sp: u64, size: u64) {
 /// Make every thread waiting on a pipe or socket ready (px17: some pipe
 /// changed; each runs its call again). IF clear.
 pub fn wake_pipes() {
+    // px131: what the network thread delivers wakes its readers urgently
+    let net = sv(S_NETD) != 0 && cur() == sv(S_NETD) - 1
     var s: u64 = FIRST
     while s < SLOTS {
         if field(s, offset_of(Thread, state)) == PIPE {
-            put_field(s, offset_of(Thread, state), READY)
-            enqueue(s)
+            if net {
+                wake_urgent(s)
+            } else {
+                put_field(s, offset_of(Thread, state), READY)
+                enqueue(s)
+            }
         }
         s += 1
     }
@@ -2350,6 +2405,7 @@ pub fn wake_pipes() {
 /// cannot fall between its look and this wait. Returns when woken.
 pub fn block_net() {
     let saved = sync.irq_save()
+    put_sv(S_NETD, cur() + 1) // px131: `wake_pipes` knows the network thread's deliveries by it
     put_field(cur(), offset_of(Thread, state), NET)
     // # Safety: as `yield`.
     unsafe { pax_switch() }
@@ -2363,8 +2419,7 @@ pub fn wake_net() -> u64 {
     var s: u64 = FIRST
     while s < SLOTS {
         if field(s, offset_of(Thread, state)) == NET {
-            put_field(s, offset_of(Thread, state), READY)
-            enqueue(s)
+            wake_urgent(s) // px131: the device's frames are read at once
             n += 1
         }
         s += 1
