@@ -146,8 +146,8 @@ installer has written it, and login, run as pid 1, execs `/bin/init`. At each bo
   own (`HOST login:`), waits, and starts it again.
 
 **`exit`, `logout` or Ctrl-D at an empty prompt** ends the login shell, and so the session: `HOST login:` comes
-back within a second or two, and the machine keeps running. What the session left behind is hung up as Linux hangs
-up a terminal's session: every process still in it gets SIGHUP (and SIGCONT, so a stopped job hears it), and one
+back at once (2 seconds later when something in the session ignores SIGHUP), and the machine keeps running. What
+the session left behind is hung up, as logind ends a session's processes: every process still in it gets SIGHUP (and SIGCONT, so a stopped job hears it), and one
 still there 2 seconds later gets SIGKILL, which init says in one line (`init: the session of pid N: SIGKILL to 1 of 2
 …`). A process that left the session first, with `setsid` as a server does, is not touched: it goes on, init's child
 once its parent has ended, and init reaps it when it ends. What the boot hooks started (burrowd) is in pid 1's own
