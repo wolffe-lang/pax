@@ -34,8 +34,10 @@
 //!
 //! **Lost ticks.** The tick is periodic at 100 Hz; a tick due while
 //! interrupts are off waits, and a second due in the same stretch is
-//! lost. `ticks` compares the ticks delivered with those the clock
-//! (kernel/clock) says were due, since `start` and since the last read.
+//! lost. `ticks` compares the tick interrupts delivered (kernel/timer's
+//! `delivered`, not its count, which follows the clock) with those the
+//! clock (kernel/clock) says were due, since `start` and since the last
+//! read.
 //!
 //! The text is `/proc/pax-latency` (kernel/procfs); opening it reads the
 //! window and starts the next (`restart`). No Linux source; no other
@@ -130,7 +132,7 @@ pub fn start(close: u64) {
     put(HOOK, close)
     let t = tsc()
     let ns = clock.now_ns()
-    let k = timer.ticks()
+    let k = timer.delivered()
     put(TSC0, t)
     put(NS0, ns)
     put(TICKS0, k)
@@ -293,7 +295,7 @@ pub fn slot_longest(s: u64) -> u64 {
 /// Ticks delivered and ticks due by the clock: (since start, since the
 /// last read), each (delivered, due).
 pub fn ticks() -> (u64, u64, u64, u64) {
-    let k = timer.ticks()
+    let k = timer.delivered()
     let ns = clock.now_ns()
     (k - w(TICKS0), (ns - w(NS0)) / NS_PER_TICK, k - w(TICKSW), (ns - w(NSW)) / NS_PER_TICK)
 }
@@ -305,7 +307,7 @@ pub fn restart() {
     put(S_WIN, 0); put(S_WIN + 1, 0); put(S_WIN + 2, 0)
     put(TSCW, tsc())
     put(NSW, clock.now_ns())
-    put(TICKSW, timer.ticks())
+    put(TICKSW, timer.delivered())
     // # Safety: the addresses of boot/isr.S's tables; each index bounded.
     let (s, v, t) = unsafe { (pax_lat_sys as u64, pax_lat_vec as u64, pax_lat_slot as u64) }
     var i: u64 = 0
