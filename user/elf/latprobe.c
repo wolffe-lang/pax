@@ -25,16 +25,22 @@
  *
  *   latprobe LOAD:ARG: wake n N p50 U p99 U max U; lo n N p50 U max U lost K;
  *     net -; ops N max U; irqoff U vector V nr N;
- *     schedgap U; ticks D of E; sys NR:U NR:U NR:U
+ *     schedgap U; ticks D of E; sys NR:U NR:U NR:U; clocks mono U real U tsc U
  *
  * (one line, also sent as a datagram to -r's ADDR:PORT when given, for a
- * machine whose console nobody reads; U in microseconds; the kernel's fields
+ * machine whose console nobody reads; U in microseconds; `clocks` the time
+ * CLOCK_MONOTONIC, CLOCK_REALTIME and the time-stamp counter each say
+ * passed over the window, for a clock that loses the time a long call
+ * takes; the kernel's fields
  * `-` where /proc/pax-latency is absent or off; `sys` the three system
  * calls with the longest interrupts-off interval in the window).
  *
  * The loads (ARG a size; the defaults in brackets):
  *   idle            nothing (the baseline)
  *   spin            a user-mode loop, no system call
+ *   flood           the same loop, while the host's probe pings as fast as
+ *                   the guest answers (echo-host.py's flood): a CPU-bound
+ *                   process beside a stream of device wake-ups
  *   console:N       write(1) of N bytes of 80-column lines [65536]
  *   pty:N           write of N bytes to a pseudo-terminal's slave, a child
  *                   reading its master [16384]
@@ -250,7 +256,7 @@ struct load {
  * returns 0, or -1 with a word on stderr. */
 static int setup(struct load *L) {
     const char *k = L->name;
-    if (!strcmp(k, "idle") || !strcmp(k, "spin") || !strcmp(k, "exec")) return 0;
+    if (!strcmp(k, "idle") || !strcmp(k, "spin") || !strcmp(k, "flood") || !strcmp(k, "exec")) return 0;
     if (!strcmp(k, "console")) { L->n = arg_or(L->arg, 65536); return (L->buf = filled(L->n, 1)) ? 0 : -1; }
     if (!strcmp(k, "pty")) {
         L->n = arg_or(L->arg, 16384);
@@ -342,7 +348,7 @@ static int setup(struct load *L) {
 static void op(struct load *L) {
     const char *k = L->name;
     if (!strcmp(k, "idle")) { sleep_us(100000); return; }
-    if (!strcmp(k, "spin")) { uint64_t e = tsc() + 1000 * per_us; while (tsc() < e) {} return; }
+    if (!strcmp(k, "spin") || !strcmp(k, "flood")) { uint64_t e = tsc() + 1000 * per_us; while (tsc() < e) {} return; }
     if (!strcmp(k, "console") || !strcmp(k, "pty") || !strcmp(k, "pipe") || !strcmp(k, "tcplo")) {
         size_t done = 0;
         while (done < L->n) {
@@ -515,6 +521,10 @@ static int measure(const char *spec) {
     snprintf(begin, sizeof begin, "latprobe-begin %s\n", spec);
     if (have_report) report_quiet(begin);
     (void)read_window(); /* the window starts here */
+    struct timespec m0, r0;
+    clock_gettime(CLOCK_MONOTONIC, &m0);
+    clock_gettime(CLOCK_REALTIME, &r0);
+    uint64_t c0 = tsc();
     struct sockaddr_in lo = {.sin_family = AF_INET, .sin_port = htons((uint16_t)lo_port)};
     lo.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     int rw = -1, rl = -1;
@@ -527,7 +537,13 @@ static int measure(const char *spec) {
     waitpid(load, NULL, 0);
     sleep_us(100000);
     struct sum sw = collect(pw, rw), sl = collect(pl, rl);
+    struct timespec m1, r1;
+    clock_gettime(CLOCK_MONOTONIC, &m1);
+    clock_gettime(CLOCK_REALTIME, &r1);
+    uint64_t c1 = tsc();
     struct kwin k = read_window();
+    long long mono = ((long long)(m1.tv_sec - m0.tv_sec) * 1000000000LL + (m1.tv_nsec - m0.tv_nsec)) / 1000;
+    long long real = ((long long)(r1.tv_sec - r0.tv_sec) * 1000000000LL + (r1.tv_nsec - r0.tv_nsec)) / 1000;
     char line[1024];
     int at = snprintf(line, sizeof line, "latprobe %s: wake n %llu p50 %llu p99 %llu max %llu; lo n %llu p50 %llu max %llu lost %llu; ", spec,
                       (unsigned long long)sw.n, (unsigned long long)sw.p50, (unsigned long long)sw.p99, (unsigned long long)sw.max,
@@ -541,6 +557,9 @@ static int measure(const char *spec) {
                  (unsigned long long)k.sys[1][0], (unsigned long long)k.sys[1][1], (unsigned long long)k.sys[2][0], (unsigned long long)k.sys[2][1]);
     else
         snprintf(line + at, sizeof line - (size_t)at, "irqoff -; schedgap -; ticks -; sys -\n");
+    size_t len = strlen(line);
+    if (len && line[len - 1] == '\n') line[--len] = 0;
+    snprintf(line + len, sizeof line - len, "; clocks mono %lld real %lld tsc %llu\n", mono, real, (unsigned long long)us_of(c1 - c0));
     report(line);
     fflush(stdout);
     close(lp[0]);
