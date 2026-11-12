@@ -4,9 +4,9 @@ A Linux-compatible operating system written in wolf: a kernel that runs Linux's 
 userspace built in wolf.
 
 PAX is a clean-room implementation of Linux's userspace ABI. It contains, translates and derives from no Linux kernel
-source; `CLAUDE.md` states the rule and `docs/SOURCES.md` lists what each part was written from. Every behaviour claim
-below is a scripted QEMU test that CI runs, and where the behaviour is Linux's, the test holds PAX byte for byte to a
-real Linux booted the same way.
+source; `CONTRIBUTING.md` states the rule and `docs/SOURCES.md` lists what each part was written from. Every behaviour
+claim below is a scripted QEMU test that CI runs, and where the behaviour is Linux's, the test holds PAX byte for byte
+to a real Linux booted the same way.
 
 Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA`).
 
