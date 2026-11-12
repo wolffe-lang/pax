@@ -519,13 +519,18 @@ fn command(c: u64, parameter: u64, control: u64) -> u64 {
     w32(get(c, DB), 0)
     sync.irq_restore(saved)
     let until = timer.ticks() + 200
-    while timer.ticks() < until {
+    while true {
         let s = sync.irq_save()
         drain(c)
         let done = get(c, DONE)
         let result = get(c, RESULT)
         sync.irq_restore(s)
         if done != 0 { return result }
+        // px131: the deadline after the look, never before it: the tick
+        // count follows the clock (kernel/timer), so a stretch with
+        // interrupts off can carry it past `until` in one tick, and a
+        // completion that came during the stretch is still seen
+        if timer.ticks() >= until { break }
         let _n = sched.sleep(1)
     }
     // Stop submissions on a command timeout: a late completion must never
@@ -557,7 +562,7 @@ fn control(d: u64, request_type: u64, request: u64, value: u64, index: u64, leng
     let until = timer.ticks() + 200
     var completed = false
     var completion: u64 = 0
-    while timer.ticks() < until {
+    while true {
         let s = sync.irq_save()
         drain(c)
         let done = get(d, TDONE)
@@ -568,6 +573,7 @@ fn control(d: u64, request_type: u64, request: u64, value: u64, index: u64, leng
             completion = code
             break
         }
+        if timer.ticks() >= until { break } // px131: after the look, as `command`
         let _n = sched.sleep(1)
     }
     if completed {
