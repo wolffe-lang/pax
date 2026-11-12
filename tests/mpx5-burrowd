@@ -12,7 +12,8 @@
 # tools/mkinitramfs' arguments): kmain_console, the kernel every shipped
 # image boots, with `quiet`; the installed system's run list (/bin/login as
 # pid 1, user/login built by tools/mkauth with /bin/passwd); pelt as /bin/sh;
-# boreutils' cat chmod env id kill ls mkdir rm sleep stty tty; den as the images
+# boreutils' cat chmod env head id kill ls mkdir rm sleep stty tty yes (head
+# and yes for px130's B40); den as the images
 # install it (tools/install-den: /bin/git, /bin/git-upload-pack,
 # /bin/git-receive-pack); burrow's three programs (tools/mkburrow,
 # tools/install-burrow: /bin/ssh, /bin/burrow-keygen, /bin/burrowd);
@@ -50,7 +51,12 @@
 # `ssh host` at a terminal gets a pty and the prompt, `tty` a /dev/pts/N, the
 # window size and a resize, Ctrl-C, Ctrl-\ and Ctrl-Z reaching a foreground
 # program, a bare sudo asking on that session, the pty given back after, and
-# burrowd itself with SIGINT and SIGQUIT at their defaults; B28 (pax#368)
+# burrowd itself with SIGINT and SIGQUIT at their defaults; B40-B43 (px130)
+# the kernel's log at an installed console: a writer killed by SIGPIPE over
+# ssh leaves the console's screen as it was and its line on the serial port
+# and in the ring, root's dmesg shows it with its time, pax's is refused,
+# and a warning written to /dev/kmsg is still drawn while an info line is
+# not; B28 (pax#368)
 # that session ran /etc/shrc (lope's hook: autocd takes a bare `../`, `g`
 # is a function); B29 a command over ssh still reads no ENV (not
 # interactive); B11 the live stick's shape (the live
@@ -81,7 +87,7 @@ done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 
-BORE="cat chmod env id kill ls mkdir rm sleep stty tty"
+BORE="cat chmod env head id kill ls mkdir rm sleep stty tty yes"
 work=$PAX_BUILD/mpx5-burrowd
 fail=0
 need python3 readelf
@@ -114,6 +120,13 @@ if [ -z "$images" ]; then
     # login and passwd as the installed system has them; mkshadow, the
     # test helper, beside the tree (never in the image).
     "$PAX_ROOT/tools/mkauth" "$work/auth" login passwd sudo mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
+    # px130: dmesg as the images ship it (tools/mkdmesg; B41, B42). A tree without it names it
+    # missing, and the rows that read the log fail by name.
+    if [ -x "$PAX_ROOT/tools/mkdmesg" ] && "$PAX_ROOT/tools/mkdmesg" "$work/dmesg" > "$work/dmesg.txt" 2>&1; then
+        cp "$work/dmesg/dmesg" "$r/bin/dmesg" || why+=" no dmesg;"
+    else
+        missing+=" /bin/dmesg (tools/mkdmesg)"
+    fi
     for p in login passwd sudo; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
     # sudo and its policy as the images ship them (B15: a bare sudo over ssh; B16: sudo -k -S, and a plain -S measured), pax in group sudo.
     cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
