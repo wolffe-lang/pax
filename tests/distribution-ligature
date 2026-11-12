@@ -14,12 +14,10 @@
 # image: yew (about 150,000 lines) is larger, but its compile stops for memory on a 2048 and on a 4096
 # MiB guest (the compiler, before any link: notes/px128-ligature-on-the-image.md).
 #
-# Two boots of the image's own console kernel, each a session typed at the console as root:
-#   small  PAX_LIGATURE_SMALL_MIB (2048, the dev image's tested size): pelt first, by ligature and by
-#          lld; den by lld; the default build; the opt-in; hello, netproc and the self-link by both; a
-#          refusal.
-#   big    PAX_LIGATURE_BIG_MIB (3072): pelt and den, by both. ligature links pelt from 2560 MiB; den's
-#          link by ligature stopped for memory at 2560 (a peak of 819 MiB, wait4's).
+# One boot of the image's own console kernel at PAX_LIGATURE_MIB (2048, the dev image's tested size),
+# a session typed at the console as root: pelt and den first, by ligature and by lld; the default build;
+# the opt-in; hello, netproc and the self-link by both; a refusal. (Before ligature#36, ligature's pelt
+# link stopped for memory at 2048 MiB and a second boot at 3072 linked pelt and den.)
 # The rows (tests/distribution-ligature.d/judge.py):
 #   L0  ligature in the image: `ligature --version`, its /etc/pax-release line
 #   L1  the default is lld: no WOLF_LD in the console's environment, and a plain `wolf build` gives
@@ -30,12 +28,10 @@
 #   L5  ligature compiled and linked by itself on PAX runs, and links hello to the shipped one's bytes
 #   L6  a refusal (no musl start files where ligature is told to look): a named error from ligature,
 #       a non-zero `wolf build`, no output, no fallback to lld
-#   L7  pelt at the small size: lld links it and it runs; ligature's link is an EXPECTED REFUSAL while
-#       ligature#35 is open (non-zero, the selected linker named, no output, no fallback); the day
-#       ligature links pelt there, this row fails and says so, so it flips with the issue
-#   L8  pelt and den at the big size: by both, the same output; den by lld at the small size
+#   L7  pelt by both, the same output
+#   L8  den by both, the same output
 #   L9  every link above measured by ldtime from the kernel's wait4: wall, CPU, peak (MEASURE lines)
-#   L10 each boot clean: the session's end, init's status 0, no panic, the halt proven
+#   L10 the boot clean: the session's end, init's status 0, no panic, the halt proven
 # Exit 0 when every row passed, 1 otherwise, 2 on a usage or tool error.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -51,7 +47,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 need python3 qemu-system-x86_64 cc git
-small=${PAX_LIGATURE_SMALL_MIB:-2048} big=${PAX_LIGATURE_BIG_MIB:-3072}
+mib=${PAX_LIGATURE_MIB:-2048}
 head=$(cat "$out/commit")
 archive=$out/pax-dev-${head:0:8}.cpio
 elf=$out/kernel/kmain_console.elf
@@ -99,16 +95,10 @@ python3 -I "$here/distribution-ligature.d/overlay.py" "$archive" "$work/test.cpi
 "$PAX_ROOT/tools/fetch-limine" >&2
 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs-quiet.conf" --add "$work/test.cpio" initramfs.cpio \
     "$elf" "$work/test.iso" > /dev/null
-halt=()
-for mode in small big; do
-    mib=$small; [ "$mode" = big ] && mib=$big
-    printf 'sh /usr/share/distribution-ligature/session.sh %s\nexit 0\n' "$mode" > "$work/$mode.keys"
-    rc=0
-    PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --accel "$accel" --firmware "$firmware" --serial "$work/$mode.serial.log" \
-        --timeout 5400 --qemu -m --qemu "${mib}M" --elf "$elf" --type "$work/$mode.keys" --prompt '$ ' \
-        --marker 'halt|PANIC .*' "$work/test.iso" > "$work/$mode.halt.log" 2>&1 || rc=$?
-    say "boot $mode: ${mib} MiB, qemu-halt exit $rc"
-    halt+=("$rc")
-done
-python3 -I "$here/distribution-ligature.d/judge.py" "$work/small.serial.log" "$work/big.serial.log" "$small" "$big" \
-    "${halt[0]}" "${halt[1]}"
+printf 'sh /usr/share/distribution-ligature/session.sh\nexit 0\n' > "$work/session.keys"
+rc=0
+PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --accel "$accel" --firmware "$firmware" --serial "$work/session.serial.log" \
+    --timeout 5400 --qemu -m --qemu "${mib}M" --elf "$elf" --type "$work/session.keys" --prompt '$ ' \
+    --marker 'halt|PANIC .*' "$work/test.iso" > "$work/session.halt.log" 2>&1 || rc=$?
+say "boot: ${mib} MiB, qemu-halt exit $rc"
+python3 -I "$here/distribution-ligature.d/judge.py" "$work/session.serial.log" "$mib" "$rc"
