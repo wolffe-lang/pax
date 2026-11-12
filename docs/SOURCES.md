@@ -2394,3 +2394,13 @@ code; Linux was run as a black box in a virtual machine (its own kernel and modu
 | QEMU's documentation of `-netdev user` (`hostfwd`, the gateway's address) and RFC 862 | QEMU 8.2 | the host's pings to the guest's echo, the guest's report to the host |
 | Linux 7.2.4 (the build host's kernel, `CONFIG_PREEMPT_LAZY`, `CONFIG_HZ=1000`) and its virtio modules | binaries | black box: the comparison column (`notes/px131-long-kernel-paths.md` §7) |
 | PAX's own `boot/isr.S`, `boot/sched.S`, `boot/user.S`, `kernel/interrupts`, `kernel/sched`, `kernel/user`, `kernel/vm`, `kernel/paging`, `kernel/process`, `kernel/trace_mem`, `kernel/procfs`, `kernel/netd`, the drivers | this tree | read for the rule and the inventory; extended |
+
+### px131, the second part — the clocks from the clock, device-driven wake-ups at once
+
+| source | version | read, for |
+|---|---|---|
+| Intel SDM vol. 3A §11.5.4 (the APIC timer), §11.8.3-§11.8.4 (a pending interrupt held in the IRR, a second at the same vector lost) | the current edition | why a stretch with interrupts off delivers one tick |
+| IA-PC HPET 1.0a §2.3 and §2.4, ACPI 6.5 §4.8.3.3 (the PM timer) | as named | the counters `kernel/clock` reads and their wraps |
+| clock_gettime(2), nanosleep(2), poll(2) (the Linux man-pages) and POSIX.1-2024's `clock_gettime`, `nanosleep`, `poll` | 6.9; 2024 | a timeout is a minimum and lateness is allowed; what CLOCK_MONOTONIC and CLOCK_REALTIME promise |
+| QEMU's documentation of `-mem-prealloc` | QEMU 8.2 | the guest's memory backed before boot in the guard |
+| PAX's own `kernel/timer`, `kernel/clock`, `kernel/sched`, `kernel/interrupts`, `kernel/netd`, `kernel/user`, `kernel/ready`, `kernel/socket`, `kernel/futex`, `kernel/tcp`, `kernel/arp`, `kernel/dhcp`, `kernel/xhci` | this tree | every tick-counted deadline and every wake-up, read; extended |
