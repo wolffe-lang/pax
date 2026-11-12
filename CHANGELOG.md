@@ -7,6 +7,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A program built on PAX finds a host by name (px127).** A wolf program
+  `wolf build` makes on the dev image is linked against musl, whose resolver
+  reads its DNS answers with `recvmsg`, which PAX answered -ENOSYS: the
+  answers came and stayed unread, and `net.connect("github.com:443")` failed
+  with `io` after five seconds while an address connected and den (glibc)
+  resolved the same name. The kernel now serves `recvmsg` on an AF_INET
+  datagram socket, held to Linux case by case (`tests/mpx4-console-push` N1),
+  through musl's resolver (N3), and on the dev image itself
+  (`tests/distribution-net` N2-N4, a program built on the box dialling through
+  a DNS server behind the router and through `/etc/hosts`). On an image
+  without it, a name listed in `/etc/hosts` resolves.
+
 - **A USB device plugged in after boot gets a record (px120, pax#348).** On a
   machine with memory above 4 GiB, once the kernel had handed out more frames
   than lie below 4 GiB, every device plugged in after boot was refused with
