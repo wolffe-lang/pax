@@ -1,0 +1,492 @@
+//! init — an installed PAX's pid 1 (px124, pax#352; notes/px124-pid-1.md).
+//!
+//! The kernel runs /etc/pax-run's one command as pid 1, the leader of the
+//! console's session with the console as its terminal (kernel/sched); an
+//! installed system's is /bin/init (user/install's INSTALLED_RUN). It does
+//! once a boot what /bin/login did as pid 1 from px106 on, and then stays,
+//! so the console has a logout and a server can outlive the shell that
+//! started it:
+//!
+//! 1. **/run**: a tmpfs mounted over it (0755, empty at every boot, as
+//!    Linux's /run is; one already mounted, by an /etc/fstab line, is
+//!    kept), /run/user (0755, root's), and /run/user/UID (0700, the
+//!    account's, as pam_systemd(8) makes it) for every account of
+//!    /etc/passwd whose shell is not a `…/false` or `…/nologin`: the
+//!    runtime directory the XDG Base Directory Specification names
+//!    (XDG_RUNTIME_DIR, which /bin/login sets), there for an ssh session
+//!    too.
+//! 2. sudo's timestamp records emptied (`/var/run/sudo/ts`, user/sudo): an
+//!    installed PAX's /var is on ext2, and a reboot must void them.
+//! 3. `pax-boot-status record` when /bin/pax-boot-status is there, waited
+//!    for (px118, user/bootlog). Its failure is its own.
+//! 4. The boot's hooks (px112): each file of /etc/pax-boot.d in name order
+//!    (a name starting `.` left out), standard input /dev/null, its output
+//!    on the console, the leader of a process group of its own, each
+//!    waited for at most 10 s; one still running then is named and left to
+//!    run. What they start stays in pid 1's session, which no console
+//!    session's end reaches (burrowd is neither restarted nor ended).
+//! 5. The console leaves pid 1's session (TIOCNOTTY): from here no key,
+//!    hangup or stop at the console reaches pid 1 or what the hooks left.
+//! 6. Then, for ever: the console's modes put back as the boot left them
+//!    (TCSETSW of the termios read at the start), its owner root and its
+//!    mode 0600 again (kernel/files' boot record: /bin/login gives it to
+//!    the account), and the session's program (/bin/login, or the words
+//!    init was given) started in a child that leads a new session and
+//!    takes the console as its controlling terminal (setsid, TIOCSCTTY);
+//!    init waits, and reaps every other child handed to it as it ends.
+//!    When the session's leader ends, the session is hung up: every
+//!    process still in it (by /proc/PID/stat's session field; a zombie
+//!    left out) gets SIGHUP and SIGCONT, and SIGKILL if it is still in it
+//!    2000 ms later (the kernel's own end's grace, kernel/user); one line
+//!    says so when any needed SIGKILL. A process that left the session
+//!    (setsid(2), as a server does) is not touched; it is init's child
+//!    once its parent ends, and init reaps it when it ends. Then the loop
+//!    starts again: `HOST login:`.
+//!
+//! A session that ends within 2 s of its start makes the next start wait,
+//! 1 s doubling to 60 s, with one line (a missing /bin/login never spins
+//! the console); a longer one starts the next at once.
+//!
+//! **What it does not, by name:** no runlevels, inittab, service manager
+//! or getty (login prompts by itself); no shutdown of its own: `reboot`
+//! and `poweroff` are reboot(2), whose end is the kernel's (kernel/user's
+//! `end_processes`: SIGTERM and SIGCONT to every process, init among them,
+//! SIGKILL 2000 ms later, then the volumes); no screen reset and no input
+//! flush between sessions; no hook started again. As any pid but 1 it
+//! refuses, by name.
+//!
+//! References consulted: init(8), getty(8), login(1), setsid(2),
+//! ioctl_tty(2), wait4(2), kill(2), mount(2), termios(3), POSIX XBD 11.1
+//! (sessions, controlling terminals, the controlling process) and XSH
+//! _exit, the XDG Base Directory Specification (XDG_RUNTIME_DIR),
+//! pam_systemd(8) and logind.conf(5) (the runtime directory's owner and
+//! mode; KillUserProcesses), and black-box runs of Ubuntu 24.04 in a
+//! container. No init's, getty's, systemd's or any kernel's source.
+
+extern "c" fn init_setsid() -> int
+extern "c" fn init_ioctl(fd: int, req: int, arg: int) -> int
+extern "c" fn init_kill(pid: int, sig: int) -> int
+extern "c" fn init_wait(pid: int, options: int) -> int
+extern "c" fn init_status() -> int
+extern "c" fn init_tcsave(fd: int) -> int
+extern "c" fn init_tcrestore(fd: int) -> int
+extern "c" fn init_mount_run() -> int
+
+const LOGIN: str = "/bin/login"
+const HOOK_DIR: str = "/etc/pax-boot.d"
+const HOOK_MS: int = 10000
+const HANGUP_MS: int = 2000
+const KILL_MS: int = 5000
+const QUICK_MS: int = 2000
+const PAUSE_MAX_MS: int = 60000
+const TIOCSCTTY: int = 0x540e
+const TIOCNOTTY: int = 0x5422
+const WNOHANG: int = 1
+const SIGHUP: int = 1
+const SIGKILL: int = 9
+const SIGCONT: int = 18
+const ECHILD: int = 10
+
+// The membrane's calls (init.S): each is one system call with integers
+// for arguments; what they read or write besides (the saved termios, the
+// status word, the mount's strings) is init.S's own, in .bss and
+// .rodata: no memory of wolf's is passed.
+fn setsid() -> int {
+    // # Safety: as above.
+    unsafe { init_setsid() }
+}
+
+fn ioctl(fd: int, req: int, arg: int) -> int {
+    // # Safety: as above; `arg` is an integer for the requests init makes.
+    unsafe { init_ioctl(fd, req, arg) }
+}
+
+fn kill(pid: int, sig: int) -> int {
+    // # Safety: as above.
+    unsafe { init_kill(pid, sig) }
+}
+
+fn wait(pid: int, options: int) -> int {
+    // # Safety: as above; the status goes to init.S's own word.
+    unsafe { init_wait(pid, options) }
+}
+
+fn status() -> int {
+    // # Safety: as above.
+    unsafe { init_status() }
+}
+
+fn tc_save(fd: int) -> int {
+    // # Safety: as above; the termios goes to init.S's own buffer.
+    unsafe { init_tcsave(fd) }
+}
+
+fn tc_restore(fd: int) -> int {
+    // # Safety: as above; the termios comes from init.S's own buffer.
+    unsafe { init_tcrestore(fd) }
+}
+
+fn mount_run() -> int {
+    // # Safety: as above; the mount's strings are init.S's own.
+    unsafe { init_mount_run() }
+}
+
+fn main() -> int {
+    let me = os_pid()
+    if me != 1 {
+        eprint("init: pid 1 only (this is pid {me})")
+        return 1
+    }
+    var prog = env_args()
+    if prog.len == 0 {
+        prog = [LOGIN]
+    }
+    let saved = tc_save(0) == 0
+    run_dirs()
+    boot_clean()
+    boot_record()
+    boot_hooks()
+    let _dropped = ioctl(0, TIOCNOTTY, 0)
+    var pause = 0
+    loop {
+        console_back(saved)
+        let t0 = now_ms()
+        let leader = start(prog)
+        if leader > 0 {
+            wait_for(leader)
+            hang_up(leader)
+        }
+        if now_ms() - t0 < QUICK_MS {
+            pause = if pause == 0 then 1000 else pause * 2
+            if pause > PAUSE_MAX_MS {
+                pause = PAUSE_MAX_MS
+            }
+            print("init: {prog[0]} ended within {QUICK_MS / 1000} s of its start; again in {pause / 1000} s")
+            nap(pause)
+        } else {
+            pause = 0
+        }
+    }
+}
+
+fn now_ms() -> int {
+    os_clock_ns() / 1000000
+}
+
+/// Sleep `ms`, reaping what ends meanwhile.
+fn nap(ms: int) {
+    let until = now_ms() + ms
+    while now_ms() < until {
+        reap()
+        time_sleep_ms(50)
+    }
+}
+
+/// Every child that has ended, reaped (an orphan handed to pid 1 among
+/// them); returns when none is left to reap now.
+fn reap() {
+    loop {
+        let p = wait(-1, WNOHANG)
+        if p <= 0 {
+            return
+        }
+    }
+}
+
+/// `s` as a decimal number, or -1 when it is not one.
+fn number(s: str) -> int {
+    if s.len == 0 {
+        return -1
+    }
+    var v = 0
+    for b in s.bytes() {
+        let d = (b as int) - 48
+        if d < 0 || d > 9 {
+            return -1
+        }
+        v = v * 10 + d
+    }
+    v
+}
+
+/// Whether /proc/self/mounts has a mount at `path`.
+fn mounted(path: str) -> bool {
+    let m = fs_read_text("/proc/self/mounts") else ""
+    for line in m.lines() {
+        let f = line.split(" ")
+        if f.len > 1 && f[1] == path {
+            return true
+        }
+    }
+    false
+}
+
+/// /run, /run/user and each account's runtime directory (the module's 1).
+fn run_dirs() {
+    if !mounted("/run") {
+        if !fs_is_dir("/run") {
+            fs_create_dir("/run") else |_| {
+            }
+        }
+        let r = mount_run()
+        if r != 0 {
+            print("init: /run: no tmpfs ({0 - r}); its directories are made on /")
+        }
+    }
+    fs_set_mode("/run", 0o755) else |_| {
+    }
+    if !fs_is_dir("/run/user") {
+        fs_create_dir("/run/user") else |_| {
+            print("init: /run/user cannot be made; no runtime directories")
+            return
+        }
+    }
+    fs_set_owner("/run/user", 0, 0, false) else |_| {
+    }
+    fs_set_mode("/run/user", 0o755) else |_| {
+    }
+    let ptext = fs_read_text("/etc/passwd") else ""
+    for line in ptext.lines() {
+        let f = line.split(":")
+        if f.len < 7 || f[6].ends_with("/false") || f[6].ends_with("/nologin") {
+            continue
+        }
+        let uid = number(f[2])
+        let gid = number(f[3])
+        if uid >= 0 && gid >= 0 {
+            user_dir(uid, gid)
+        }
+    }
+}
+
+/// /run/user/UID, the account's, 0700: made when it is not there, its
+/// owner and mode set either way.
+fn user_dir(uid: int, gid: int) {
+    let d = "/run/user/{uid}"
+    if !fs_is_dir(d) {
+        fs_create_dir(d) else |_| {
+            return
+        }
+    }
+    fs_set_owner(d, uid, gid, false) else |_| {
+    }
+    fs_set_mode(d, 0o700) else |_| {
+    }
+}
+
+/// sudo's timestamp records emptied (`/var/run/sudo/ts`), as Linux's /run
+/// is a new tmpfs at each boot, so a reboot voids every record.
+fn boot_clean() {
+    let dir = "/var/run/sudo/ts"
+    let names = fs_read_dir(dir) else |_| {
+        return
+    }
+    for n in names {
+        fs_remove("{dir}/{n}") else |_| {
+        }
+    }
+}
+
+/// px118: `pax-boot-status record` (user/bootlog) when it is there, waited
+/// for; whatever it answers, the boot goes on.
+fn boot_record() {
+    let prog = "/bin/pax-boot-status"
+    if !fs_exists(prog) {
+        return
+    }
+    let child = os_spawn([prog, "record"]) else |_| {
+        return
+    }
+    let _st = os_wait(child) else |_| -1
+}
+
+/// The boot's hooks: each file of /etc/pax-boot.d in name order, in a
+/// process group of its own, standard input /dev/null, waited for at most
+/// HOOK_MS. A hook that cannot start, or ends other than 0, is one line on
+/// the console; the boot goes on either way.
+fn boot_hooks() {
+    var names = fs_read_dir(HOOK_DIR) else |_| {
+        return
+    }
+    names = hook_order(names)
+    for n in names {
+        let path = "{HOOK_DIR}/{n}"
+        if n.starts_with(".") || !fs_is_file(path) {
+            continue
+        }
+        let null = fs_open("/dev/null") else |_| {
+            print("init: {path}: no /dev/null; not run")
+            continue
+        }
+        let h = os_spawn_job(path, List[str](), [0, null], 0, -1, 0) else |e| {
+            fs_close(null) else |_| {
+            }
+            print("init: {path}: not started ({e})")
+            continue
+        }
+        fs_close(null) else |_| {
+        }
+        let pid = os_proc_pid(h) else -1
+        let until = now_ms() + HOOK_MS
+        var ended = pid <= 0
+        while !ended && now_ms() < until {
+            let p = wait(pid, WNOHANG)
+            if p == pid {
+                ended = true
+                let st = status()
+                let code = if (st & 0x7f) == 0 then (st >> 8) & 0xff else 128 + (st & 0x7f)
+                if code != 0 {
+                    print("init: {path} ended with status {code}")
+                }
+            } else if p < 0 {
+                ended = true
+            } else {
+                time_sleep_ms(20)
+            }
+        }
+        if !ended {
+            print("init: {path} still runs after {HOOK_MS / 1000} s; left running")
+        }
+    }
+}
+
+/// `names` in byte order (a hook directory's few names).
+fn hook_order(names: List[str]) -> List[str] {
+    var out = List[str]()
+    for n in names {
+        var i = 0
+        while i < out.len && !name_before(n, out[i]) {
+            i += 1
+        }
+        var next = List[str]()
+        var k = 0
+        while k < out.len {
+            if k == i {
+                (mut next).push(n)
+            }
+            (mut next).push(out[k])
+            k += 1
+        }
+        if i == out.len {
+            (mut next).push(n)
+        }
+        out = next
+    }
+    out
+}
+
+fn name_before(a: str, b: str) -> bool {
+    let x = a.bytes()
+    let y = b.bytes()
+    var i = 0
+    while i < x.len && i < y.len {
+        if x[i] != y[i] {
+            return (x[i] as int) < (y[i] as int)
+        }
+        i += 1
+    }
+    x.len < y.len
+}
+
+/// The console as the next session should find it: its modes as the boot
+/// left them (when they could be read), root's, 0600.
+fn console_back(saved: bool) {
+    if saved {
+        let _r = tc_restore(0)
+    }
+    fs_set_owner("/dev/stdin", 0, 0, true) else |_| {
+    }
+    fs_set_mode("/dev/stdin", 0o600) else |_| {
+    }
+}
+
+/// The session's program in a child that leads a new session with the
+/// console as its controlling terminal: the child's pid, or -1.
+fn start(prog: List[str]) -> int {
+    let (pid, _h) = os_fork() else |e| {
+        print("init: {prog[0]}: no fork ({e})")
+        return -1
+    }
+    if pid == 0 {
+        let _s = setsid()
+        let _t = ioctl(0, TIOCSCTTY, 0)
+        os_exec(prog[0], prog, env_vars(), List[int]()) else |e| {
+            eprint("init: {prog[0]}: not run ({e})")
+        }
+        os_exit(127)
+    }
+    pid
+}
+
+/// Wait until `leader` ends, reaping every other child as it ends.
+fn wait_for(leader: int) {
+    loop {
+        let p = wait(-1, 0)
+        if p == leader || p == 0 - ECHILD {
+            return
+        }
+        if p < 0 {
+            time_sleep_ms(100)
+        }
+    }
+}
+
+/// The processes in session `sid` that have not ended (/proc/PID/stat's
+/// sixth field; a zombie left out).
+fn members(sid: int) -> List[int] {
+    var out = List[int]()
+    let names = fs_read_dir("/proc") else |_| {
+        return out
+    }
+    for n in names {
+        let pid = number(n)
+        if pid <= 1 {
+            continue
+        }
+        let st = fs_read_text("/proc/{n}/stat") else ""
+        let at = st.rfind(")") else -1
+        if at < 0 || at + 2 >= st.len {
+            continue
+        }
+        let f = st[at + 2..].split(" ")
+        if f.len < 4 || f[0] == "Z" {
+            continue
+        }
+        if number(f[3]) == sid {
+            (mut out).push(pid)
+        }
+    }
+    out
+}
+
+/// The end of session `sid`: SIGHUP and SIGCONT to every process still in
+/// it; SIGKILL, HANGUP_MS later, to any still there (one line then).
+fn hang_up(sid: int) {
+    let first = members(sid)
+    if first.len == 0 {
+        return
+    }
+    for p in first {
+        let _h = kill(p, SIGHUP)
+        let _c = kill(p, SIGCONT)
+    }
+    let until = now_ms() + HANGUP_MS
+    while now_ms() < until {
+        reap()
+        if members(sid).len == 0 {
+            return
+        }
+        time_sleep_ms(20)
+    }
+    let left = members(sid)
+    for p in left {
+        let _k = kill(p, SIGKILL)
+    }
+    let gone = now_ms() + KILL_MS
+    while now_ms() < gone && members(sid).len != 0 {
+        reap()
+        time_sleep_ms(20)
+    }
+    reap()
+    print("init: the session of pid {sid}: SIGKILL to {left.len} of {first.len} still there {HANGUP_MS} ms after its SIGHUP")
+}
