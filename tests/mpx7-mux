@@ -68,6 +68,7 @@ need python3 readelf
 
 D=$here/mpx7-mux.d
 BORE="stty sleep"
+PAINT=5
 work=$PAX_BUILD/mpx7-mux
 runs=$PAX_BUILD/mpx7-mux-runs.txt
 fail=0 ran=0
@@ -133,17 +134,28 @@ if [ -z "$images" ]; then
     for f in "$r"/bin/*; do files+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/plumb.cpio" "${files[@]}" /tmp/:1777 "/etc/pax-run=$r/etc/pax-run:644" \
         > "$work/plumb.initramfs.txt" || why+=" tools/mkinitramfs plumb;"
+    # The screen image (section B): px59's player with cases.py's records,
+    # then `muxprobe keys` and `muxprobe paint`.
+    "$PAX_ROOT/tools/mkvtcases" "$work/bin" > "$work/vtcases.txt" || why+=" tools/mkvtcases;"
+    python3 -I "$D/cases.py" "$work/screen.rec" "$work/screen.keys" || why+=" cases.py;"
+    printf '%s\n' /bin/vtcases "/bin/muxprobe keys" "/bin/muxprobe paint $PAINT" > "$work/screen.run"
+    x=$(static_ok "$work/bin/vtcases") || why+=" $x;"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/screen.cpio" /bin/vtcases="$work/bin/vtcases":755 /bin/muxprobe="$work/bin/muxprobe":755 \
+        /etc/vtcases="$work/screen.rec":644 /etc/pax-run="$work/screen.run":644 > "$work/screen.initramfs.txt" \
+        || why+=" tools/mkinitramfs screen;"
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         mkdir -p "$work/$tier"
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
-            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
-                --add "$work/plumb.cpio" initramfs.cpio "$elf" "$work/$tier/plumb.iso" >/dev/null \
-                || why+=" $tier plumb: mkimage;"
+            for im in plumb screen; do
+                "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                    --add "$work/$im.cpio" initramfs.cpio "$elf" "$work/$tier/$im.iso" >/dev/null \
+                    || why+=" $tier $im: mkimage;"
+            done
             printf '%s\n' "$elf" > "$work/$tier/elf.path"
-            say "built $tier: elf $(sha256_of "$elf"), plumb.iso $(sha256_of "$work/$tier/plumb.iso")"
+            say "built $tier: elf $(sha256_of "$elf"), plumb.iso $(sha256_of "$work/$tier/plumb.iso"), screen.iso $(sha256_of "$work/$tier/screen.iso")"
         else
             cat "$log" >&2
             why+=" $tier kmain_console: tools/build-kernel;"
@@ -221,6 +233,44 @@ for leg in $legs; do
         daemon=$(awk '/^A5.4 /{on=1; next} on && /^user: muxprobe pid [0-9]+ (killed|exit)/{print; exit}' "$norm")
         [ -n "$daemon" ] || why+=" no line for the daemon init left;"
         [ -z "$why" ] && say "PASS M3 $id: init ended, status 0; the daemon it left: ${daemon#user: }; frames back; kernel $digest; $(tail -n 1 "$log.verdict")" || bad "M3 $id:$why"
+
+        # --- the screen (section B): typed at the PS/2 keyboard, the screens taken ---
+        iso=$images/$tier/screen.iso
+        log=$PAX_BUILD/mpx7-mux-$tier-$leg-screen.serial.log
+        sdir=$PAX_BUILD/mpx7-mux-$tier-$leg-screen
+        sock=$PAX_BUILD/mpx7-mux-$tier-$leg.mon2
+        rm -rf "$log" "$log.verdict" "$sdir" "$sock"
+        mkdir -p "$sdir"
+        hrc=0 krc=0
+        python3 "$PAX_ROOT/tools/ps2-session" --serial "$log" --monitor "$sock" --keys "$images/screen.keys" --out "$sdir" --gap 0.1 \
+            > "$sdir/session.out" 2>&1 &
+        kp=$!
+        t0=$SECONDS
+        "$PAX_ROOT/tools/qemu-halt" --accel "$accels" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 512M \
+            --qemu -monitor --qemu "unix:$sock,server=on,wait=off" --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        wait "$kp" || krc=$?
+        ran=$((ran + 1))
+        printf '%s %s %s screen halt-status=%s secs=%s serial=%s iso=%s\n' "$tier" "$leg" "$accels" "$hrc" "$((SECONDS - t0))" \
+            "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        why=
+        [ "$krc" = 0 ] || why+=" the keys: $(tail -n 1 "$sdir/session.out");"
+        gate=$(python3 -I "$D/screen.py" judge "$log" "$sdir" "$D/screen.rows" 2>&1)
+        grc=$?
+        printf '%s\n' "$gate" > "$sdir/verdicts.txt"
+        grep '^~' <<< "$gate" | sed 's/^/  measured: /'
+        if [ "$grc" != 0 ]; then
+            printf '%s\n' "$gate" | grep '^FAIL' | sed 's/^FAIL /FAIL M4 /' | head -n 80
+            why+=" $(printf '%s\n' "$gate" | grep -c '^FAIL') of the screen's lines differ from tests/mpx7-mux.d/screen.rows;"
+        fi
+        [ -z "$why" ] && say "PASS M4 $id: $(printf '%s\n' "$gate" | grep -c '^PASS') lines of what the console drew, answered and sent, each as screen.rows has it" || bad "M4 $id:$why"
+        why=
+        rf=$(grep -c ': refused: ' "$norm")
+        [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+        grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
+        grep -Eqx 'PAX: init /bin/[a-z]+ ended with status 0; nothing left to run' "$norm" || why+=" no 'PAX: init … ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS M5 $id: the screen image: nothing refused by name; init ended, status 0; $(tail -n 1 "$log.verdict")" || bad "M5 $id:$why"
     done
 done
 cat "$runs"
