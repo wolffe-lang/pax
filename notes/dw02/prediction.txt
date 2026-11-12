@@ -1,0 +1,63 @@
+dw02 — the entropy contract: the prediction, written before the probe ran and before any change.
+
+Base: px131's head 4b3ab3c0 (pax#385, unmerged), which already fills getrandom a page at a time and gives at
+most 16 KiB a call. Read from the code there: kernel/process's random_word and random_fill take a word from
+boot/fpu.S's pax_rdrand (RDRAND, up to 16 tries, 0 when none came) when CPUID.1:ECX bit 30 is set, and
+otherwise, or when the word is 0, the time-stamp counter folded on itself (t ^ t>>17 ^ t>>31, plus a
+counter). getrandom reads its flags only to refuse bad ones; /dev/random and /dev/urandom are getrandom with
+flags 0; AT_RANDOM is two such words. Nothing records which source answered.
+
+The measurement (tests/mpx6-entropy at the rows' commit, the kernel unchanged): one static C probe as the
+first program, a wolf program calling os_random second, the probe's own child two seconds later. The statistic
+that tells the sources apart: of a request's 8-byte words, how many have the same top 32 bits as the word
+before (`hirep`). RDRAND's words are independent (0 expected). The fold's top bits are the counter's, which
+moves by a few thousand between two words, so nearly every word repeats them.
+
+M1 present (-cpu max): CPUID rdrand 1 under KVM on the build host and under TCG (QEMU emulates RDRAND);
+   rdseed 1 under KVM, 0 under TCG. Every valid flag set (0, NONBLOCK, RANDOM, RANDOM|NONBLOCK, INSECURE,
+   INSECURE|NONBLOCK) answers 32 for 32 bytes, hirep 0; RANDOM|INSECURE and an unknown bit EINVAL;
+   /dev/random and /dev/urandom answer 4096 for 4096, hirep 0; AT_RANDOM nonzero, its halves' top 32 bits
+   different. /proc/pax-random absent.
+M2 masked (-cpu max,-rdrand): CPUID rdrand 0. Every valid flag set still answers 32 for 32, and the devices
+   4096: no call fails and none differs from another. hirep 3 of 3 words at 32 bytes and at least 500 of 511
+   at 4096; AT_RANDOM's halves share their top 32 bits. A program cannot tell M2 from M1 but by that.
+M3 QEMU's own default CPU model (no -cpu, as mpx6-staged and mpx6-bootlog boot under TCG): rdrand 0, so M2's
+   answers. Under KVM the default model passes no RDRAND either.
+M4 early and later: the first program's first calls and a process started two seconds later answer alike.
+   There is no readiness state to change.
+M5 sizes: n 0 answers 0; 1, 7, 256 and 16384 answer n; 65536 and 1 MiB answer 16384 (px131's cap); a
+   /dev/urandom read of 1 MiB answers 1 MiB whole.
+M6 the test words pax.rdrand_fail=N and pax.rdrand_stuck are unknown to this kernel: those boots answer as M1.
+M7 the wolf program's os_random(32) gives 32 bytes in every configuration, masked included.
+M8 glibc's static start-up (its malloc key, getrandom 8 bytes GRND_NONBLOCK) runs in every configuration.
+
+The contract, as recommended to the orchestrator before building (R-dw02-1 A, strict): flags 0, RANDOM,
+NONBLOCK and the two devices answer RDRAND words, each draw's carry flag checked, at most 10 tries a word
+(Intel's DRNG guide, section 5.2.1), 0, all ones and a repeat of the word before refused as a draw (AMD's
+SB-7055 says to treat a zero as CF=0), or a named errno: EAGAIN when the machine has no qualified source,
+EIO when RDRAND failed (a draw that used up its tries, or the boot's check of eight draws). GRND_INSECURE,
+AT_RANDOM and the kernel's own words keep today's bytes (RDRAND when it answers, else the fold).
+/proc/pax-random says `ready yes|no` and why. The rows after the change:
+
+E1 present: every valid flag set and both devices answer n, hirep 0; capability `ready yes`, `source rdrand`.
+   Red at the rows' commit (no capability).
+E2 masked: flags 0, NONBLOCK, RANDOM, RANDOM|NONBLOCK and both devices -1 EAGAIN; capability `ready no`,
+   `reason no-rdrand`. Red at the rows' commit (each answers 32).
+E3 masked, the insecure path unchanged: INSECURE and INSECURE|NONBLOCK answer 32 (hirep high: the fold);
+   AT_RANDOM nonzero; the C probe ran at all (glibc's own NONBLOCK draw got EAGAIN and its start-up went on).
+   Green at both commits.
+E4 retry (pax.rdrand_fail=9): every strict call answers n; the capability counts 9 retried executions, 0
+   failed draws, `ready yes`. Red at the rows' commit (no capability).
+E5 fail (pax.rdrand_fail=1000000): the first draw after the boot's check uses its 10 tries and fails; the
+   source is latched failed; strict calls -1 EIO (NONBLOCK EAGAIN); INSECURE answers 32; capability
+   `ready no`, `reason failed`. Red at the rows' commit.
+E6 stuck (pax.rdrand_stuck, every RDRAND all ones with CF set): the boot's check refuses the source;
+   strict calls -1 EIO; INSECURE answers 32; capability `reason stuck`. Red at the rows' commit.
+E7 sizes: as M5 when ready; 0 answers 0 even when not ready. Green at both commits where M5 holds.
+E8 early and later answer alike in every configuration. Green at both commits.
+E9 wolf: present, os_random(32) gives 32; masked, the program ends by its trap (non-zero), never printing
+   the count. Red at the rows' commit (masked gives 32).
+E10 EINVAL for RANDOM|INSECURE and an unknown bit in every configuration (px24's). Green at both.
+
+Costs predicted: a strict draw is one RDRAND a word, as today, plus a compare; no row's time moves. The
+kernel suites that run under -cpu max on every leg see no change in what they print.
