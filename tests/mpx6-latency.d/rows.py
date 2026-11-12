@@ -36,6 +36,10 @@ def parse(text):
     out = {}
     host = {}
     for l in text.replace('\r', '').splitlines():
+        # a serial log's line may follow a console flood's bytes
+        i = l.find('latprobe ')
+        if i > 0 and not l.startswith('hostnet'):
+            l = l[i:]
         h = HOST.match(l.strip())
         if h:
             host[h.group(1)] = [int(x) for x in h.groups()[1:]]
