@@ -74,16 +74,6 @@ root, docker or podman, or KVM says so and stops.
   [wolffe-lang/wolf-lang](https://github.com/wolffe-lang/wolf-lang) with a
   small program that shows it, and named in the code where a reader meets it.
 
-Two rules of the kernel's own:
-
-- Assembly is whole routines in `boot/`, reached through `extern "c" fn` and
-  listed under `asm` in `kernel/wolf.pkg`, never more.
-- A `region` may stay open across a yield, a preemption or a wait, but an
-  interrupt handler allocates nothing, and a system call's handler holds no
-  `region` open where it gives up its kernel stack for good (a wait that runs
-  the call again, `clock_nanosleep`'s sleep, an exit, `execve`): the code
-  after that point never runs, so the region would never be left.
-
 The repository is public: no secret or credential goes in it.
 
 ## Commits
