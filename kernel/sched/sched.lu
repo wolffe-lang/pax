@@ -209,6 +209,7 @@ use fpu
 use frames
 use gdt
 use heap
+use latency
 use log
 use paging
 use panic
@@ -557,10 +558,18 @@ fn enter_space(s: u64) {
     }
 }
 
+/// px131: slot `s` as kernel/latency names a thread: its pid, or its
+/// slot with bit 32 set for a kernel thread.
+fn who(s: u64) -> u64 {
+    let p = field(s, offset_of(Thread, pid))
+    if p != 0 { p } else { s | 0x100000000 }
+}
+
 /// Switch in the queue's head (the idle thread if it is empty): count
 /// its run, start its quantum, make its space live, return its frame.
 fn run_next() -> u64 {
     let from = cur()
+    latency.sched_point(0, who(from)) // px131: the scheduler chooses
     var n = dequeue()
     // px48: a thread of a stopped process runs nothing: it is parked
     // (STOPPED), its frame kept, until the process is continued.
@@ -593,6 +602,7 @@ pub fn preempt(f: u64) -> u64 {
     if sv(S_STARTED) == 0 {
         return f
     }
+    latency.sched_point(f, who(cur())) // px131: a chance to choose
     if sv(S_MULT) == 0 {
         calibrate() // px88: once, a second of ticks after `start`
     }
@@ -907,7 +917,11 @@ pub fn wake_input() -> u64 {
 /// and a thread is now ready, switch to it at once rather than at the
 /// next tick; otherwise resume `f`. IF clear.
 pub fn kick(f: u64) -> u64 {
-    if sv(S_STARTED) == 0 || cur() != IDLE || sv(S_HEAD) == 0 {
+    if sv(S_STARTED) == 0 {
+        return f
+    }
+    latency.sched_point(f, who(cur())) // px131: a chance to choose
+    if cur() != IDLE || sv(S_HEAD) == 0 {
         return f
     }
     put_field(IDLE, offset_of(Thread, frame), f)
