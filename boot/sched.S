@@ -53,8 +53,14 @@
                          interrupt (SDM vol. 2 HLT).
    pax_pause()           PAUSE (SDM vol. 2): a spin-wait hint; also an
                          opaque call, so a polling loop rereads memory.
-   pax_irq_save()        RFLAGS (the caller's IF in bit 9), then CLI.
-   pax_irq_restore(fl)   STI if bit 9 of fl is set (then NOP, STI's
+   pax_irq_save()        RFLAGS (the caller's IF in bit 9), then CLI;
+                         px131: with kernel/latency on and IF set before,
+                         an interrupts-off interval opens (boot/isr.S's
+                         pax_lat_open), tagged 0x200 with the running
+                         thread's slot.
+   pax_irq_restore(fl)   px131: with kernel/latency on and bit 9 set, the
+                         interval closes first (pax_lat_close). Then
+                         STI if bit 9 of fl is set (then NOP, STI's
                          one-instruction shadow, then PAUSE); otherwise
                          nothing. The PAUSE is for QEMU 8.2's TCG (pax
                          CI's): measured in CI run 37522542792, a tick
@@ -167,7 +173,17 @@ pax_irq_save:
         pushfq
         popq    %rax
         cli
-        ret
+        testl   $0x200, %eax            /* px131: IF was set: an interval opens */
+        jz      1f
+        testq   $1, pax_lat(%rip)
+        jz      1f
+        pushq   %rax
+        movq    8(%rsp), %rdi           /* where: our caller */
+        movq    $0x200, %rsi            /* tag: an irq_save */
+        movq    pax_sched_state+8(%rip), %rdx /* the running thread's slot */
+        call    pax_lat_open
+        popq    %rax
+1:      ret
         .size pax_irq_save, . - pax_irq_save
 
         .globl pax_irq_restore
@@ -175,7 +191,12 @@ pax_irq_save:
 pax_irq_restore:
         testl   $0x200, %edi
         jz      1f
-        sti
+        testq   $1, pax_lat(%rip)       /* px131: IF set again closes it */
+        jz      2f
+        pushq   %rbx                    /* %rsp 16-aligned for the call */
+        call    pax_lat_close
+        popq    %rbx
+2:      sti
         nop                             /* STI's shadow */
         pause                           /* QEMU 8.2 TCG: see above */
 1:      ret
