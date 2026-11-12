@@ -42,11 +42,15 @@ IR against `start`'s 300), one symbol in both tiers at both heads.
 
 ## 3. Evidence and done-when
 
-The records are the pull request's: red with N0's row at column 0 and the point unmoved, on trunk `9ba58558`
-(`d5924c9d`) and on the base this branch is stacked on (`8f8db3fe`); green at the head (the release and native
-tiers of mpx6-nmi on both firmwares, and the release tier of mpx6-firmware, whose F11 is the row the tier-all run
-caught); and the plant `px127-plant-nmi-r3` (N2 names `frames.start` and `pci.scan`, two points the release tier
-has inlined) red by name. Each record's sha256 and every `END` line are in the body. Footprint: cross-cutting (`tests/mpx6-nmi`, which the tier-all run's
+The records are the pull request's. Red with N0's row at column 0 and the point unmoved, on trunk `9ba58558`
+(`d5924c9d`): `FAIL N0 release … frames.start(0)`, the tier-all run's row. On the base this branch is stacked on
+(`8f8db3fe`, whose only kernel change is in `kernel/procfs`) the same row is green: the release kernel is 2,909,024
+bytes and keeps `frames.start`, and `pci.scan` too, so the partition moved back. That is the instability itself,
+not a fix of it. Green at the head: the release and native tiers of mpx6-nmi on both firmwares, and the release
+tier of mpx6-firmware, whose F11 is the row the tier-all run caught. The plant `px127-plant-nmi-r5` names
+`apic.read`, which the head's release kernel inlines at every call, and is red by name; a plant naming
+`frames.start` and `pci.scan` (`px127-plant-nmi-r3`) was green at this base for the reason above. Each record's
+sha256 and every `END` line are in the body. Footprint: cross-cutting (`tests/mpx6-nmi`, which the tier-all run's
 `mpx6-firmware` runs as F11).
 
 - **R-px127-8, where the fix belongs: the suite.** (a) The row names `frames.init`, as it named `pci.scan_bus`
