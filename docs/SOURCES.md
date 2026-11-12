@@ -2398,3 +2398,16 @@ was and from the Intel SDM's account of write-combining memory; the measurements
 | yew (`/bin/yew`, sha256 `edcca94a…cdb14bb4`) and cub (sha256 `8056dfd4…cdb1045f`), the binaries an installed image ships, run unmodified on a Linux pseudo-terminal of 256×90 with TERM=linux | as installed | black box: their output a keypress or a step, recorded as tests/mpx3-conspeed.d/streams; strace(1) of each for its writes, yew's child processes and the files it writes |
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with its VGA device at 2560×1440, KVM and TCG, no COM1 and with one | binary | black box: the console's costs before and after; a byte's cost with a UART under KVM (two port accesses, about 6 µs); the screendump the table is read from |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/user`, `kernel/serial`, `kernel/panic`, `kernel/sched` (`wake_input`, `kick`), `kernel/interrupts`, `kernel/xhci`, `boot/screen.S`, `tools/screen-ref`, `tests/mpx3-screen`, px125's `user/elf/muxprobe.c` and `tests/mpx7-mux` (B7) | this tree, and px125's branch | read and extended |
+
+## px131 — what the kernel holds too long
+
+No kernel's, driver's or C library's source was read. The rule and the inventory are read from this tree's own
+code; Linux was run as a black box in a virtual machine (its own kernel and modules, booted, never read).
+
+| source | version | read, for |
+|---|---|---|
+| Intel SDM vol. 3A §6.8.1, §6.10-§6.14; vol. 3B §18.17; vol. 2 (CLI, STI, RDTSC, RDRAND, CPUID, SYSCALL, SYSRET, IRETQ) | the current edition | the instrument's interval (IF set to clear and back), what a gate and SYSCALL do to IF, the time-stamp counter, RDRAND and CPUID's cost under a hypervisor |
+| getrandom(2), proc_pid_mem(5), munmap(2), clock_nanosleep(2), netdevice(7), init's duties in boot(7) | the Linux man-pages 6.9 | getrandom's short count above 256 bytes, /proc/<pid>/mem's reads, munmap of a range with nothing in it, the probe's sleeps, the Linux guest's interfaces (`user/elf/latinit.c`) |
+| QEMU's documentation of `-netdev user` (`hostfwd`, the gateway's address) and RFC 862 | QEMU 8.2 | the host's pings to the guest's echo, the guest's report to the host |
+| Linux 7.2.4 (the build host's kernel, `CONFIG_PREEMPT_LAZY`, `CONFIG_HZ=1000`) and its virtio modules | binaries | black box: the comparison column (`notes/px131-long-kernel-paths.md` §7) |
+| PAX's own `boot/isr.S`, `boot/sched.S`, `boot/user.S`, `kernel/interrupts`, `kernel/sched`, `kernel/user`, `kernel/vm`, `kernel/paging`, `kernel/process`, `kernel/trace_mem`, `kernel/procfs`, `kernel/netd`, the drivers | this tree | read for the rule and the inventory; extended |
