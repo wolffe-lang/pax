@@ -202,3 +202,49 @@ Recommended and implemented; none ruled yet.
 - No Linux-side row: a logout's effect on Ubuntu needs logind and a real login session, which the suites' containers
   do not have; the rows hold PAX to the documents (§2) and to its own expectations.
 - The dev and release images' and the stick's pid 1 are unchanged (no logout there).
+
+## 4. Seen red
+
+- **The rows' tip** (`21e8ec4a`, branch `px124-rows`: the prediction, the probe, the rig and the rows, no init; the
+  rows' reading fixed there as on the branch): `quick-21e8ec4a.log`, worst 1 (`END build exit=0`, `END boot
+  exit=1`). As §0 predicted: I1 red (`pid 1 '-sh'`: the shell), I2 red (no `/run` mount, no variable), I3 green (a
+  typed sudo remembered in its session), I4 red (`PAX: init /bin/login ended with status 0; nothing left to run`,
+  `halt`), I5-I12 red as not reached. I13 was red by the rig (its first disk too small), so it says nothing there.
+- **Reds the rows found on the way**, each fixed in a commit of its own: the console wraps a long typed line, which
+  broke the rows' first reading (`adff5dc7`); pelt at its pin names itself `pelt` in `$0` whatever its argv[0], so
+  `logout`'s first test refused the login shell (I9, `cd28afec`); boreutils' `stty` at its pin reports no modes
+  (I7 reads them with `user/elf/ttymode.c`, `c9ab99aa`); I13's disk wanted directory modes for `/`, its tree's size,
+  and `rw` on the command line (`d49b0ebf`, `1b174ae4`, `7d86edc4`); I12 waited for a second `login:` after the
+  Ctrl-D row had read the first, and passed at `7d86edc4` only because login's own 60 s timeout printed one
+  (`d70a3e0a`; the first plant take showed it red).
+- **The plant** `px124-plant-nokill` (`559fe020`, one hunk of `user/init/init.lu` on `d70a3e0a`: the SIGKILL after the
+  hangup's bound sends signal 0 instead): `plant-559fe020.log`, red at I5 alone and by name (`FAIL I5 native bios:
+  ended [17] of sleep 17 and 18; init said 'init: the session of pid 5: SIGKILL to 1 of 2 still there 2000 ms after
+  its SIGHUP'`): the line is printed but the SIGHUP-ignoring `sleep 18` lives on. I1-I4 and I6-I13 green beside it; at
+  I12 the kernel's end found the leftover and killed it (`SIGKILL to 1 after the 2000 ms grace`). Its base,
+  `d70a3e0a`, is green in `quick-d70a3e0a.log`.
+
+## 5. Evidence index
+
+Every take: the recorder's steps mode with `--keep-going` and `--preflight` (`notes/px124/rig/`, px119's shape),
+under a block's two lock names, one long flock each, on the Linux build host, KVM, from a clean worktree of the head.
+
+| record | head | manifest | bytes | sha256 | worst | END lines |
+|---|---|---|---|---|---|---|
+| `quick-21e8ec4a.log` | `21e8ec4a` (the rows' tip) | quick | 5574 | `b98c0334eb244f2cd324f180cb7fef157dbba5f5fe054fae4b31092b8286a4ac` | 1 | build 0, boot 1 |
+| `quick-d70a3e0a.log` | `d70a3e0a` | quick | 5887 | `a283e91e0d68a10938832a609371eaab7cdb6043efc1601b9ef194e7c07e5a97` | 0 | build 0, boot 0 (I1-I13) |
+| `burrowd-5e0f4e06.log` | `5e0f4e06` | burrowd | 7793 | `95f7687a4fa68cc7aaeb9cc167ffe724ae6553d321497e836dc5a8c557566701` | 0 | burrowd 0 (B0-B18, B30-B32) |
+| `sudo-5e0f4e06.log` | `5e0f4e06` | sudo | 16033 | `4f7828e22d5d506a85b01717c2813734f15feece3fff9ee6a2958dcf7a3d96b1` | 0 | build 0, auth 0, boot 0 |
+| `plant-559fe020.log` | `559fe020` (plant on `d70a3e0a`, row I5) | quick | 5934 | `a96bb73b1296e55e6246476fd80933dec9de3857124fc713225321a9aa9aa75a` | 1 | build 0, boot 1 (FAIL I5 alone) |
+
+`5e0f4e06` to `d70a3e0a` changes mpx5-init's rows (I13's `rw`, I12's prompt), a comment in `tests/mpx5-init` and the
+README only, so the burrowd and sudo records stand for the head. Records that are not evidence: one at `ada6b1fe`
+voided (the rows' first reading stopped with a traceback, not a verdict); takes at `adff5dc7`, `355ec5b4` and
+`5e0f4e06` red only where their rows' own reading was being fixed (I7, I9, I13 above); `quick-7d86edc4.log` (sha256
+`5e2bf6d09777a4f4e96cc67912953a1203a6922d984b3ebd686ae27a6c030be4`), green, but its I12 green by login's timeout; a
+plant take at `d367005e` that the recorder refused before any step (a plant take needs its checkout on the plant's
+branch); burrowd and sudo takes at `355ec5b4` the recorder refused for an untracked file (a Python cache the rows'
+import left in the worktree); and `plant-a373f2c3.log` (sha256
+`dded5add4ab84f205a41716cd4e5e11f2653917aa38254cf3287a6dd1995c8cd`, the same hunk on `7d86edc4`), red at I5 by name as
+planted but red at I12 too, by the row fixed in `d70a3e0a`. `tests/ci-plan` passed at the head's tree (a light run,
+not recorded).
