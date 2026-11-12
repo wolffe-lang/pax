@@ -278,6 +278,7 @@ const G_PAXBOOTLOG: u64 = 29 // px118: the length only; kernel/files makes each 
 const RLIMIT_STACK: u64 = 3
 const RLIMIT_CORE: u64 = 4
 const RLIMIT_NOFILE: u64 = 7
+const RLIMIT_NPROC: u64 = 6 // px126
 pub const RLIM_NLIMITS: u64 = 16
 pub const RLIM_INFINITY: u64 = 0xffffffffffffffff
 /// One policy for the eagerly mapped initial ELF stack and RLIMIT_STACK.
@@ -297,7 +298,8 @@ const S_IFREG: u64 = 0x8000
 /// is the stack PAX gives, the descriptors' the table's; the core
 /// file's soft limit 0 and its hard one unlimited, Linux's boot default
 /// (measured, px53): PAX writes no core and sets no wait status's core
-/// bit, and 0 says so; every other unlimited. None can be set.
+/// bit, and 0 says so; px126: the processes' (RLIMIT_NPROC) `sched.NPROC`,
+/// a user's threads (root exempt); every other unlimited. None can be set.
 pub fn rlimit(res: u64, fds: u64) -> (u64, u64) {
     if res == RLIMIT_STACK {
         return (STACK_LIMIT, STACK_LIMIT)
@@ -307,6 +309,9 @@ pub fn rlimit(res: u64, fds: u64) -> (u64, u64) {
     }
     if res == RLIMIT_CORE {
         return (0, RLIM_INFINITY)
+    }
+    if res == RLIMIT_NPROC {
+        return (sched.NPROC, sched.NPROC) // px126: a user's threads, root exempt (kernel/process)
     }
     (RLIM_INFINITY, RLIM_INFINITY)
 }
