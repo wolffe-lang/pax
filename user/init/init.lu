@@ -32,8 +32,9 @@
 //!    mode 0600 again (kernel/files' boot record: /bin/login gives it to
 //!    the account), and the session's program (/bin/login, or the words
 //!    init was given) started in a child that leads a new session and
-//!    takes the console as its controlling terminal (setsid, TIOCSCTTY);
-//!    init waits, and reaps every other child handed to it as it ends.
+//!    takes the console as its controlling terminal (setsid, TIOCSCTTY
+//!    with 1: taken from a session that opened it after leaving the last
+//!    one, as root may, so the login always has its terminal); init waits, and reaps every other child handed to it as it ends.
 //!    When the session's leader ends, the session is hung up: every
 //!    process still in it (by /proc/PID/stat's session field; a zombie
 //!    left out) gets SIGHUP and SIGCONT, and SIGKILL if it is still in it
@@ -409,7 +410,7 @@ fn start(prog: List[str]) -> int {
     }
     if pid == 0 {
         let _s = setsid()
-        let _t = ioctl(0, TIOCSCTTY, 0)
+        let _t = ioctl(0, TIOCSCTTY, 1)
         os_exec(prog[0], prog, env_vars(), List[int]()) else |e| {
             eprint("init: {prog[0]}: not run ({e})")
         }
