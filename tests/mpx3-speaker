@@ -87,7 +87,7 @@
 #      speaker silent at init's end); t = 9 for speaker (hold's one,
 #      the scale's eight), 2 for beep.
 #   K5 the end: no `refused:` line, -ENOSYS only for 273 and 334
-#      (glibc's start-up), `PAX: init /bin/pelt ended with status 0;
+#      (glibc's start-up), `PAX: init /bin/env ended with status 0;
 #      nothing left to run`, `halt`, and qemu-halt holds it halted.
 #   K6 the tunes (tunes): the kernel's timeline starts exactly one tone
 #      a note of the two files, every onset within 30 ms of its place in
@@ -247,7 +247,11 @@ if [ -z "$images" ]; then
     fi
     cp "$PAX_ROOT"/user/tunes/* "$r/usr/share/tunes/"
     cp "$PAX_ROOT"/user/play/refused/* "$r/etc/refused/"
-    echo /bin/pelt > "$r/etc/pax-run"
+    # pelt b80d657 starts friendly at a terminal unless invoked as sh, and the sessions hold `$ `: init is
+    # `/bin/env ENV=/etc/pelt-plain /bin/pelt`, so pelt and the shell `su pax` starts (su keeps ENV) read
+    # /etc/pelt-plain, `set +o friendly`, before their first prompt.
+    printf 'set +o friendly\n' > "$r/etc/pelt-plain"
+    echo /bin/env ENV=/etc/pelt-plain /bin/pelt > "$r/etc/pax-run"
     # px47: the user sessions' accounts, `su` and `id`.
     if [ -n "$sudir" ]; then
         cp "$sudir/su" "$r/bin/su" || why+=" no $sudir/su;"
@@ -258,10 +262,11 @@ if [ -z "$images" ]; then
         why+=" tools/mksu;"
     fi
     if [ -z "$boredir" ]; then
-        "$PAX_ROOT/tools/mkboreutils" "$work/bore" id > "$work/bore.txt" || why+=" tools/mkboreutils;"
+        "$PAX_ROOT/tools/mkboreutils" "$work/bore" id env > "$work/bore.txt" || why+=" tools/mkboreutils;"
         boredir=$work/bore
     fi
     cp "$boredir/id" "$r/bin/id" || why+=" no $boredir/id;"
+    cp "$boredir/env" "$r/bin/env" || why+=" no $boredir/env;"
     mkdir -p "$r/home/pax"
     printf 'root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$r/etc/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$r/etc/group"
@@ -599,8 +604,8 @@ PY
             [ "$ns" = "273 334" ] || why+=" -ENOSYS for '$ns', not '273 334';"
             rf=$(grep ': refused: ' "$norm" | paste -sd'|' -)
             [ -z "$rf" ] || why+=" refusals '$rf';"
-            grep -qx "PAX: init /bin/pelt ended with status 0; nothing left to run" "$norm" \
-                || why+=" no 'PAX: init /bin/pelt ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+            grep -qx "PAX: init /bin/env ended with status 0; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/env ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
             "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
                 || why+=" the log does not end with the init line and halt;"
