@@ -459,3 +459,19 @@ record at 2048 MiB and the pin record at 3072.
 The peaks fell four to five times and the times about six. A link by ligature still takes 29 to 34 times lld's
 time, and peaks at 1.4 to 1.6 times lld's memory. Two links of hello by ligature are byte-identical, and the
 ligature compiled and linked on PAX links hello to the same bytes as the shipped one (L3, L5).
+
+## 12. The second rebase
+
+The stack under this branch moved. The terminal-over-ssh work's second pull request was done again, on
+`px123-latest-r3` (head `1d6558b5`, stacked on pax#376 and pax#367). Its pelt pin makes friendly mode the default
+at a terminal, and seven suites that waited for `$ ` needed it turned off. This branch, `px128-r3`, carries
+`px128-r2`'s 56 commits onto `1d6558b5`, each applied as it was. `notes/px128/r3-shamap.txt` maps each one; §11
+cites `px128-r2`'s, which stay on `px128-r2-before-rebase`.
+
+- **The image stays valid.** The two bases differ in 15 files: the suites' sessions, `tests/mpx6-nmi`, the notes,
+  and `user/console/shell-long.expect`, which only `tests/mpx3-shell` reads. No image input moved, so
+  `pax-dev-642e4b72.cpio` (§11) is what a pinned build at this head gives, and the rows run on it again.
+- **This suite needs no friendly-mode change.** It waits for `$ ` once, at the dev image's own console. That
+  console's shell prompts `$ ` with pelt `b80d657` on the image, as the pin, flip and final takes show:
+  `$ sh /usr/share/distribution-ligature/session.sh` in each serial log. The session runs pelt only
+  non-interactively (`-c`).
