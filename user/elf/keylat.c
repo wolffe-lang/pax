@@ -1,7 +1,7 @@
 /* px129: keylat -- how long a full-screen program takes from a key to its
  * frame, on a pseudo-terminal of the system it runs on.
  *
- *   keylat [-n KEYS] [-q QUIET_MS] [-r ROWS] [-c COLS] [-k HEX]... -- PROGRAM [ARG...]
+ *   keylat [-n KEYS] [-q QUIET_MS] [-r ROWS] [-c COLS] [-k HEX]... [-x HEX]... -- PROGRAM [ARG...]
  *
  * Opens a pseudo-terminal (posix_openpt(3)), gives it ROWS x COLS (default
  * 90 x 256, the console's grid at 2560 x 1440), and runs PROGRAM on its
@@ -20,8 +20,10 @@
  *
  * `last` is when the frame was all written (its last byte read here
  * within the quiet window), so it is the program's whole turn plus the
- * pseudo-terminal's two crossings. The program is killed (its pid) at
- * the end. Exit 0; 1 on a failed call (named); 2 on a usage error.
+ * pseudo-terminal's two crossings. At the end each -x (hex bytes) is
+ * typed, half a second apart, to end the program as a person would (yew
+ * in F mode: `1b71` then `71`, Alt-q and q), so it reaps its own
+ * children; what is still running two seconds later is killed (its pid). Exit 0; 1 on a failed call (named); 2 on a usage error.
  *
  * Written from the man pages of the calls named (posix_openpt(3),
  * ptsname(3), setsid(2), TIOCSCTTY and TIOCSWINSZ in ioctl_tty(2)),
@@ -139,11 +141,11 @@ static void summary(const char *what, double *v, int n) {
 
 int main(int argc, char **argv) {
     int keys_n = 40, quiet = 300, rows = 90, cols = 256;
-    char keys[16][64];
-    size_t keylen[16];
-    int nkeys = 0;
+    char keys[16][64], ends[8][64];
+    size_t keylen[16], endlen[8];
+    int nkeys = 0, nends = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "n:q:r:c:k:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:q:r:c:k:x:")) != -1) {
         if (opt == 'n') keys_n = atoi(optarg);
         else if (opt == 'q') quiet = atoi(optarg);
         else if (opt == 'r') rows = atoi(optarg);
@@ -157,13 +159,22 @@ int main(int argc, char **argv) {
                 keys[nkeys][i] = (char)v;
             }
             keylen[nkeys++] = L;
+        } else if (opt == 'x' && nends < 8) {
+            size_t L = strlen(optarg) / 2;
+            if (L == 0 || L > 63) { fprintf(stderr, "keylat: -x takes hex bytes\n"); return 2; }
+            for (size_t i = 0; i < L; i++) {
+                unsigned v;
+                if (sscanf(optarg + 2 * i, "%2x", &v) != 1) { fprintf(stderr, "keylat: -x takes hex bytes\n"); return 2; }
+                ends[nends][i] = (char)v;
+            }
+            endlen[nends++] = L;
         } else {
-            fprintf(stderr, "usage: keylat [-n KEYS] [-q QUIET_MS] [-r ROWS] [-c COLS] [-k HEX]... -- PROGRAM [ARG...]\n");
+            fprintf(stderr, "usage: keylat [-n KEYS] [-q QUIET_MS] [-r ROWS] [-c COLS] [-k HEX]... [-x HEX]... -- PROGRAM [ARG...]\n");
             return 2;
         }
     }
     if (optind >= argc || keys_n < 1 || keys_n > 10000) {
-        fprintf(stderr, "usage: keylat [-n KEYS] [-q QUIET_MS] [-r ROWS] [-c COLS] [-k HEX]... -- PROGRAM [ARG...]\n");
+        fprintf(stderr, "usage: keylat [-n KEYS] [-q QUIET_MS] [-r ROWS] [-c COLS] [-k HEX]... [-x HEX]... -- PROGRAM [ARG...]\n");
         return 2;
     }
     if (nkeys == 0) {
@@ -213,7 +224,19 @@ int main(int argc, char **argv) {
     printf("keylat: %d keys, %d answered:", keys_n, got);
     if (got) { summary("first", fv, got); summary("last", lv, got); }
     printf("\n");
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
+    for (int i = 0; i < nends; i++) {
+        if (write(g_m, ends[i], endlen[i]) != (ssize_t)endlen[i]) break;
+        drain(500, &f, &l);
+    }
+    int st = 0, gone = 0;
+    for (int i = 0; i < 20 && !gone; i++) {
+        if (waitpid(pid, &st, WNOHANG) == pid) gone = 1;
+        else drain(100, &f, &l);
+    }
+    if (!gone) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &st, 0);
+    }
+    printf("keylat: the program %s\n", gone ? "ended by its keys" : "was killed");
     return 0;
 }
