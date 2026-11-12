@@ -23,8 +23,8 @@ an installer writes it; login as pid 1 execs /bin/init.
       the logout, pid 1's child in a session of its own, and is gone (reaped,
       no zombie) once its 20 s are up.
   I7  the console's modes back: pax's session ends `stty -echo; exit`, and in
-      bob's session `stty -a` says `echo` (login echoes a name itself, so
-      the prompt shows nothing either way).
+      bob's session ttymode (user/elf/ttymode.c) reads `echo` and `icanon`
+      (login echoes a name itself, so its prompt shows nothing either way).
   I8  a second account, bob, logs in after the logout: `id -un`, its runtime
       directory /run/user/1001, 0700 bob's.
   I11 the boot hook's service (/run/svc.pid) has its pid and pid 1's session
@@ -408,11 +408,11 @@ def boot1(con):
         bad('I6', 'detach %s after the logout: %s; after its %d s: %s' % (dt_pid, st[:5] if st else None, DETACH_S,
                                                                           st2[:5] if st2 else 'gone'))
     # I7
-    modes = (con.command('stty -a', 15) or '').split()
-    if 'echo' in modes and '-echo' not in modes:
-        ok('I7', 'the console\'s modes put back: pax left it `-echo`; in bob\'s session `stty -a` says echo')
+    modes = (con.command('ttymode', 15) or '').split()
+    if modes[:1] == ['lflag'] and 'echo' in modes and 'icanon' in modes:
+        ok('I7', 'the console\'s modes put back: pax left it `-echo`; in bob\'s session %s' % ' '.join(modes))
     else:
-        bad('I7', 'in bob\'s session stty -a has echo %s, -echo %s: %r' % ('echo' in modes, '-echo' in modes, ' '.join(modes)[:300]))
+        bad('I7', 'in bob\'s session the console\'s modes: %r' % ' '.join(modes)[:300])
     # I8
     out = con.command("id -un; echo X=$XDG_RUNTIME_DIR; stat -c '%u %g %a' $XDG_RUNTIME_DIR", 16) or ''
     got = [l.strip() for l in out.splitlines()]
