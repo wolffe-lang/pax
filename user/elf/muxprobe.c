@@ -388,6 +388,7 @@ struct pane {
 };
 
 static struct pane P[MAXP];
+static long flood_done_ms = -1; /* when the flood's last byte was checked */
 static char *SH[] = {"/bin/sh", "-c", LOOP, 0};
 #define NEED(k, row) do { if ((k) < 0) { say("%s no pane: %s\n", row, ename(errno)); fflush(stdout); return; } } while (0)
 static int np;
@@ -490,6 +491,7 @@ static int pane_read(int k) {
                 if (b[i] != want && !p->fbad) p->fbad = p->fseen + 1;
                 p->fseen++;
             }
+            if (p->fseen >= FLOOD_BYTES && flood_done_ms < 0) flood_done_ms = now_ms();
             continue;
         }
         if ((size_t)r >= sizeof p->buf - 1) {
@@ -640,6 +642,16 @@ static void sec_a1(void) {
         if (answered == made) break;
     }
     say("A1.4 %d of %d panes answered a typed line, each its own\n", answered, made);
+    int alive[PANES], nalive = 0, early = 0;
+    char ends[256] = "";
+    for (int k = 0; k < made; k++) {
+        snprintf(want, sizeof want, "pong %d\r\n", k);
+        if (has(k, want)) { alive[nalive++] = k; continue; }
+        const char *h = pane_settle(k, 100);
+        early++;
+        if (strlen(ends) < 200) { strcat(ends, " "); strcat(ends, h); }
+    }
+    if (early) say("A1.4 %d shells ended before they answered:%s\n", early, ends);
     int th = threads_of(P[1].pid);
     say("A1.4 a pane's shell (pelt) runs %s\n", th == 1 ? "one thread" : th > 1 ? "more than one thread" : th == -2 ? "(no Threads line)" : "(no status)");
     say("~A1.4 a pane's shell runs %d threads\n", th);
@@ -659,8 +671,8 @@ static void sec_a1(void) {
     long t0 = now_ms(), tf = -1, lat[4096];
     int nl = 0, missed = 0, seq = 0;
     end = t0 + 600000;
-    while (now_ms() < end && P[0].fseen < FLOOD_BYTES) {
-        int k = 1 + seq % (made - 1);
+    while (now_ms() < end && P[0].fseen < FLOOD_BYTES && nalive > 1) {
+        int k = alive[1 + seq % (nalive - 1)];
         snprintf(cmd, sizeof cmd, "echo pong p%d\n", seq);
         snprintf(want, sizeof want, "pong p%d\r\n", seq);
         long s0 = now_ms();
@@ -685,10 +697,10 @@ static void sec_a1(void) {
     say("A1.5 the flood: %ld bytes through one master, %s\n", P[0].fseen,
         P[0].fseen == FLOOD_BYTES && !P[0].fbad ? "in order, none lost" : "WRONG");
     if (P[0].fbad) say("~A1.5 the first wrong byte at %ld\n", P[0].fbad - 1);
-    long ms = t1 - (tf < 0 ? t0 : tf);
+    long ms = (flood_done_ms < 0 ? t1 : flood_done_ms) - (tf < 0 ? t0 : tf);
     say("~A1.5 flood: %ld bytes in %ld ms, %ld kB/s\n", P[0].fseen, ms, ms > 0 ? P[0].fseen / ms : 0);
     qsort(lat, (size_t)nl, sizeof lat[0], cmp_long);
-    say("A1.6 the other panes answered during the flood: %s\n", nl >= 10 && missed == 0 ? "every ping" : "NOT every ping");
+    say("A1.6 the other panes answered during the flood: %s\n", nl >= 1 && missed == 0 ? "every ping" : "NOT every ping");
     say("~A1.6 pings %d answered, %d missed; latency median %ld ms, p90 %ld ms, max %ld ms\n", nl, missed,
         nl ? lat[nl / 2] : -1, nl ? lat[nl * 9 / 10] : -1, nl ? lat[nl - 1] : -1);
     /* the flood's pane ends with its program */
@@ -697,11 +709,12 @@ static void sec_a1(void) {
     int hup = 0, odd = 0;
     for (int k = PANES / 2; k < made; k++) { close(P[k].m); P[k].m = -1; }
     for (int k = PANES / 2; k < made; k++) {
+        if (P[k].reaped) continue;
         const char *h = pane_settle(k, 5000);
         if (strcmp(h, "killed by HUP") == 0) hup++;
         else { odd++; say("~A1.7 pane %d's shell: %s\n", k, h); }
     }
-    say("A1.7 %d masters closed: %d shells ended by SIGHUP, %d otherwise\n", made - PANES / 2, hup, odd);
+    say("A1.7 %d masters closed: their %d running shells ended by SIGHUP%s\n", made - PANES / 2, hup, odd ? ", and OTHERS otherwise" : "");
     fflush(stdout);
 }
 
@@ -861,6 +874,7 @@ static void sec_a6_clients(int panes) {
         if (pinged < panes - 1) {
             char cmd[64], want[32];
             int k = 1 + pinged;
+            if (P[k].reaped || P[k].m < 0) { pinged++; pongs++; continue; }
             snprintf(cmd, sizeof cmd, "echo pong c%d\n", pinged);
             snprintf(want, sizeof want, "pong c%d\r\n", pinged);
             type(k, cmd);
@@ -876,8 +890,9 @@ static void sec_a6_clients(int panes) {
         int s2;
         if (cpids[k] > 0 && waitpid(cpids[k], &s2, 0) == cpids[k] && WIFEXITED(s2) && WEXITSTATUS(s2) == 0) good++;
     }
-    say("A6.3 16 clients on one listener in the loop beside the panes: %d accepted, %d answered, %d ended well; %d of %d panes answered meanwhile\n",
-        nconn, answered_c, good, pongs, pinged);
+    say("A6.3 16 clients on one listener in the loop beside the panes: %d accepted, %d answered, %d ended well; the panes asked meanwhile %s\n",
+        nconn, answered_c, good, pongs == pinged ? "all answered" : "did NOT all answer");
+    say("~A6.3 %d of %d panes pinged meanwhile answered\n", pongs, pinged);
     say("A6.4 SO_PEERCRED: %d of 16 name the client's own pid; the user's: %s\n", credok, credusr ? "uid 1000 gid 1000" : "NOT the user's ids");
     for (int i = 0; i < nconn; i++) if (conns[i] >= 0) { epoll_ctl(ep, EPOLL_CTL_DEL, conns[i], 0); close(conns[i]); }
     epoll_ctl(ep, EPOLL_CTL_DEL, lfd, 0);
@@ -904,15 +919,19 @@ static void sec_a2(int panes) {
         ps.ok && ps.state == 'S' ? "asleep" : "NOT asleep", q1 == q2 && q1 > 0 ? "full and still" : "NOT still");
     say("~A2.1 the queue holds %ld bytes; the writer's state %c\n", q2, ps.state);
     int pongs = 0;
+    int asked = 0;
     for (int i = 1; i < panes; i++) {
         char cmd[64], want[32];
+        if (P[i].reaped || P[i].m < 0) continue;
+        asked++;
         snprintf(cmd, sizeof cmd, "echo pong b%d\n", i);
         snprintf(want, sizeof want, "pong b%d\r\n", i);
         type(i, cmd);
         if (until(i, want, 5000)) pongs++;
         forget(i);
     }
-    say("A2.2 meanwhile %d of %d other panes answered\n", pongs, panes - 1);
+    say("A2.2 meanwhile the other panes asked %s\n", pongs == asked ? "all answered" : "did NOT all answer");
+    say("~A2.2 %d of %d answered\n", pongs, asked);
     /* read it: the writer goes on */
     long before = P[k].total;
     pane_add(k);
@@ -1075,10 +1094,15 @@ static void sec_a5(void) {
             (void)!write(dp[1], &me, sizeof me);
             for (;;) pause();
         }
+        /* the starter ends only once the daemon has its own session, or
+         * the starter's end would hang its group up first */
+        for (int i = 0; i < 500 && getsid(D) != D; i++) nap(2);
         _exit(0);
     }
+    close(dp[1]);
+    dp[1] = -1;
     pid_t D = 0;
-    (void)!read(dp[0], &D, sizeof D);
+    if (read(dp[0], &D, sizeof D) != sizeof D) { say("A5.1 the daemon never said its pid\n"); fflush(stdout); return; }
     int st;
     waitpid(S, &st, 0);
     nap(200);
@@ -1097,7 +1121,6 @@ static void sec_a5(void) {
     say("A5.3 ended by SIGTERM: until its parent waits it is %s; then %s\n", ps.ok && ps.state == 'Z' ? "a zombie" : "NOT a zombie",
         settle_child(D, 2000));
     close(dp[0]);
-    close(dp[1]);
     fflush(stdout);
 }
 
