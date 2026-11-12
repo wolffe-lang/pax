@@ -2,7 +2,8 @@
  * comparison column: a Linux kernel booted under QEMU with an initramfs of
  * this program, latprobe and latbig, and the modules its network needs.
  *
- * It mounts proc at /proc, a tmpfs at /tmp and devtmpfs at /dev; loads each
+ * It mounts proc at /proc, a tmpfs at /tmp, devtmpfs at /dev and devpts at
+ * /dev/pts (the `pty` load's terminal); loads each
  * module named in /lib/modules/order (one name a line, /lib/modules/NAME.ko,
  * finit_module(2)); brings lo up and eth0 up at 10.0.2.15/24 (QEMU's user
  * network; SIOCSIFADDR, SIOCSIFNETMASK, SIOCSIFFLAGS); runs /bin/latprobe
@@ -25,6 +26,7 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -55,6 +57,8 @@ int main(void) {
     mount("proc", "/proc", "proc", 0, NULL);
     mount("tmpfs", "/tmp", "tmpfs", 0, "mode=1777");
     mount("dev", "/dev", "devtmpfs", 0, NULL);
+    mkdir("/dev/pts", 0755);
+    mount("devpts", "/dev/pts", "devpts", 0, "ptmxmode=0666");
     FILE *o = fopen("/lib/modules/order", "r");
     char name[128], path[256];
     while (o && fgets(name, sizeof name, o)) {
