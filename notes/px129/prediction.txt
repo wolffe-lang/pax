@@ -1,0 +1,79 @@
+px129 — the console draws full-screen programs slowly on the installed machine: the prediction,
+written before the instrument, before any change (2026-11-12).
+
+What is known before measuring
+- The installed machine: a 2560 x 1440 UEFI GOP framebuffer, 32 bpp, pitch 16384, at physical
+  0x4000000000 (its /proc/pax-boot, read as an ordinary user). The grid is 256 x 90 cells at scale 1
+  (the screen doubles glyphs only above 2560 pixels wide), so a full screen is 23,040 cells.
+- A cell is 8 x 16 pixels of 4 bytes: 512 bytes of framebuffer a cell, 11.8 MB a full screen. The
+  screen draws a cell as 16 pixel rows of four 64-bit stores, each row a different framebuffer line
+  (pitch apart); it never reads the framebuffer (px87).
+- Every byte a program writes to the console goes through serial.put one byte at a time: the
+  screen's put (interrupts off, two RDTSCs, the parser, then the cursor drawn again when shown), the
+  boot log's copy, then COM1 when a UART answered at boot (a poll of LSR before each byte).
+- Every cell a write touches is drawn, whether or not its pixels change: a program that rewrites
+  the whole screen for one keypress draws every cell it rewrites. ED 2 draws every cell blank, then
+  the repaint draws them again. A scroll on the metal (px87's redraw way) draws every cell whose
+  value moved, which for a screen of text is nearly every cell: one scrolled line costs about one
+  full screen. With the cursor shown, a printed character draws two cells (itself and the cursor
+  after it).
+- kernel/fb maps the framebuffer write-combining when the CPU has the PAT and IA32_PAT entry 5 is
+  WC (Limine's layout), else uncached. The boot's `screen:` line says which; it is root's to read on
+  the installed machine.
+- px125 measured about 10 ms a full screen under KVM at 160 x 50 and 256 x 90 alike, timed on
+  CLOCK_MONOTONIC, which moves in 10 ms ticks on PAX (pax#299): the number is one tick, not a cost.
+
+The instrument (user/elf/conspeed.c): one command at the console, a table on stdout. Tests: bytes
+(parse only, nothing drawn), cell (one cell a write), plain (a), sgr (b), scroll1 and scroll10 (c),
+clear (d), cursor (plain with the cursor shown), and the recorded streams (e): yew's F mode
+keypresses and cub's frames. Timed with RDTSC against CLOCK_MONOTONIC over the whole run.
+
+Predictions for the installed machine (P1-P8)
+P1 Its COM1: absent (the shape px76 and px87 recorded for this machine). The bytes test's cost a
+   byte is CPU work alone, under 1 us (not the 87 us a byte a polled 16550 at 115200 baud costs).
+P2 The framebuffer is write-combining (kernel/fb's choice holds on this CPU). The cost a cell drawn,
+   plain less its bytes, is 0.5-3 us, about 170-1000 MB/s of pixels. If it is uncached instead, a
+   cell costs 5 us or more (under 100 MB/s) and that alone is the slowness.
+P3 plain (a): 15-70 ms a full screen; sgr (b) 1.2-2x plain (nine bytes a cell to parse, the same
+   cells drawn).
+P4 scroll1 (c): within 0.7-1.3x plain a line (every cell of a text screen moves); scroll10 ten times
+   that. This is the worst case a person sees (cat of a file, a shell's output) and a scroll of a
+   screenful costs about rows x plain: seconds.
+P5 clear (d): about 2x plain (every cell drawn blank, then drawn again).
+P6 cursor: about 2x plain (two cells drawn a character).
+P7 yew's F mode keypress (e): it rewrites most of the screen for one moved selection, so it costs
+   about a full screen of plain or sgr, tens of ms, where the cells that change are a few hundred:
+   about 20-100x more drawing than the keypress needs. cub's frame: a full coloured screen, about
+   sgr's cost.
+P8 QEMU under KVM (the framebuffer is host memory, written back cached): the cost a cell is the
+   CPU's alone, 3-20x less than the metal's; plain under 10 ms at 256 x 90. With COM1 present (the
+   harness's serial log), every byte is two port accesses QEMU serves in user space, so the bytes
+   test and every test with it are dominated by the UART under KVM: the comparison with the metal
+   is made with COM1 absent.
+
+What the fix is predicted to be (to be confirmed or replaced by the numbers)
+F1 Draw only cells whose drawn value changes: the grid is already the shadow; a second grid of what
+   the framebuffer shows lets a write draw a cell only when it differs. yew's keypress and cub's
+   frame drop to the cells that change (P7's 20-100x), clear plus repaint to one pass, a repeated
+   identical frame to nothing.
+F2 Draw at the end of the write, not per byte: a write updates the grid and the cursor in RAM and
+   draws the changed cells once when it ends (and the kernel's own lines likewise). A scroll of ten
+   lines in one write draws its final screen once (scroll10 drops by about ten), the cursor's
+   per-character redraw disappears (cursor drops to plain).
+F3 A cell drawn row-major and branch-free: a pixel row of a run of changed cells at a time (whole
+   64-byte write-combining lines, sequential), each glyph row expanded through a 256-entry table of
+   eight pixels' masks rather than a division and two tests a pixel pair. plain and sgr drop by the
+   CPU's share (P8's QEMU number) and by the write-combining gain on the metal.
+F4 The 256-column cap: the grid's storage is fixed at 256 x 128 cells a screen; lifting it to 320
+   needs larger static grids (and a second, drawn, grid for F1). Predicted cheap enough to lift with
+   F1 if the storage grows by under 1 MiB.
+
+Rows (red at trunk, green after; ratios on one boot, never absolutes)
+R1 a repeated identical full frame costs at most 1/4 of a changing one (red at trunk: about 1).
+R2 scroll10 costs at most 3x scroll1 (red at trunk: about 10x).
+R3 clear plus repaint costs at most 1.3x the repaint alone (red at trunk: about 2x).
+R4 cursor shown costs at most 1.3x hidden (red at trunk: about 2x).
+R5 yew's recorded F mode keypress and cub's frame each cost at most a bound set from the cells
+   they change (red at trunk: the cells they write).
+R6 every existing screen row (tools/screen-ref, mpx3-screen, mpx5-screen, mpx6-games, mpx3-console)
+   draws byte-identical pixels.
