@@ -15,16 +15,16 @@ def valid(text):
     if len(rows) != 1 or 'FAIL T-trace-layout' in text:
         return False
     thread, thread_cap, trace, trace_cap, slots = map(int, rows[0])
-    return thread == thread_cap == 512 and 0 < trace <= trace_cap == 256 and trace % 8 == 0 and slots == 64
+    return thread == thread_cap == 512 and 0 < trace <= trace_cap == 256 and trace % 8 == 0 and slots == 1024  # px126: 1024 slots (64 before)
 
 
 def selftest():
-    good = 'trace-layout: Thread=512 thread-capacity=512 TraceState=112 trace-capacity=256 slots=64\n'
+    good = 'trace-layout: Thread=512 thread-capacity=512 TraceState=112 trace-capacity=256 slots=1024\n'
     assert valid(good)
     assert valid(good.replace('TraceState=112', 'TraceState=256'))
     for old, new in (('Thread=512', 'Thread=520'), ('TraceState=112', 'TraceState=264'),
                      ('thread-capacity=512', 'thread-capacity=520'),
-                     ('trace-capacity=256', 'trace-capacity=264'), ('slots=64', 'slots=65')):
+                     ('trace-capacity=256', 'trace-capacity=264'), ('slots=1024', 'slots=1025'), ('slots=1024', 'slots=64')):
         assert not valid(good.replace(old, new)), (old, new)
     assert not valid('')
     assert not valid(good * 2)
