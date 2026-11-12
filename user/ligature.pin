@@ -1,0 +1,29 @@
+# The ligature tree PAX carries as /usr/bin/ligature in the dev image
+# (px128; tools/mkligature builds it).
+#
+# ligature is the linker in wolf (wolffe-lang/ligature, the linker track):
+# static x86-64 ELF for Linux and PAX, refusal-first, a byte-and-patch
+# provenance manifest in every output. Its cc front end takes the link
+# line `wolf build` gives a selected linker (`WOLF_LD`, `--linker`) and
+# reads musl's start files and libc from /usr/lib/wolf-musl, where the dev
+# image keeps them (user/wolf-link.sums). Its clean room is the ELF gABI,
+# the x86-64 psABI and the linkers' manuals; PAX reads no more of its tree
+# than building it needs.
+#
+# On the dev image ligature is an opt-in beside lld, never the default:
+# `export WOLF_LD=/usr/bin/ligature` selects it (and silences wolf's note
+# naming lld). A pelt-sized link needs about 750 MiB resident today, more
+# than the 2 GiB guest the dev image is tested with leaves (ligature#35);
+# it links at 2560 MiB.
+#
+# ligature trunk 32ec7f4 (2026-11-10): the wolf 0.2.38 pin and its link
+# bundle (ligature#34), the link's memory bounded (ligature#33). Pinned in
+# its own wolf-toolchain.toml at wolf 0.2.38 / lupin 0.1.60 / wolf-std
+# d4a4d4ca (the std the wolf archive bundles). tools/mkligature builds it
+# with THAT toolchain, as ligature's tools/build does, through a cc that
+# adds -static and no build-id and links with GNU ld, in two checkouts,
+# refusing two digests, and ships the stripped copy. The digest below is
+# the one mkligature prints on an Ubuntu 24.04 container (glibc 2.39), and
+# tests/distribution holds the image to it (recorded below once built).
+LIGATURE_REPO=https://github.com/wolffe-lang/ligature
+LIGATURE_REV=32ec7f435fe45e6e7f7fae921b1bbd180762f6d3
