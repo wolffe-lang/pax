@@ -8,7 +8,7 @@
 #
 # L1 every load's line, with samples; the end line; the instrument on.
 # L2 each GUARD load: the sleeper's worst lateness, the loopback echo's
-#    and the network echo's worst round trip, each over the same boot's
+#    and the host's network echo's worst round trip, each over the same boot's
 #    `spin` (the CPU's hog with no system call), at most BOUND; under TCG
 #    SKIPPED by name (TCG's timings are the emulator's first).
 # L3 `~` lines: every load's figures (the measurement table's rows).
@@ -29,9 +29,17 @@ LINE = re.compile(r'^latprobe (\S+): wake n (\d+) p50 (\d+) p99 (\d+) max (\d+);
                   r'(?:irqoff (\d+) vector 0x([0-9a-f]+) nr (\d+); schedgap (\d+); ticks (\d+) of (\d+); sys (.*)|irqoff -.*)$')
 
 
+HOST = re.compile(r'^hostnet (\S+): n (\d+) p50 (\d+) p99 (\d+) max (\d+) lost (\d+)$')
+
+
 def parse(text):
     out = {}
+    host = {}
     for l in text.replace('\r', '').splitlines():
+        h = HOST.match(l.strip())
+        if h:
+            host[h.group(1)] = [int(x) for x in h.groups()[1:]]
+            continue
         m = LINE.match(l.strip())
         if not m:
             continue
@@ -40,6 +48,9 @@ def parse(text):
         out[g[0]] = dict(wn=num(1), w50=num(2), w99=num(3), wmax=num(4), ln=num(5), l50=num(6), lmax=num(7), llost=num(8),
                          nn=num(9), n50=num(10), nmax=num(11), nlost=num(12), ops=num(13), opmax=num(14),
                          irq=num(15), vec=g[16], nr=num(17), gap=num(18), td=num(19), te=num(20), sys=g[21])
+    for k, (n, p50, p99, mx, lost) in host.items():
+        if k in out:
+            out[k].update(nn=n, n50=p50, nmax=mx, nlost=lost)
     return out
 
 
@@ -68,15 +79,16 @@ def main(argv):
         rc = (b / 'rc').read_text().strip() if (b / 'rc').exists() else '?'
         missing = [w for w in want if w not in rows]
         thin = [k for k, r in rows.items() if r['wn'] == 0 or r['ln'] == 0]
-        instr = all(r['irq'] is not None for r in rows.values()) and rows
+        instr = tier == 'linux' or (all(r['irq'] is not None for r in rows.values()) and rows)
         if missing or thin or not ended or not instr:
-            say('FAIL L1 %s: lines %d of %d (missing %s), no samples %s, end line %s, instrument %s, qemu-halt %s'
+            say('FAIL L1 %s: lines %d of %d (missing %s), no samples %s, end line %s, instrument %s, exit %s'
                 % (boot, len(rows), len(want), ' '.join(missing) or '-', ' '.join(thin) or '-', ended, 'on' if instr else 'off', rc))
             fail = 1
         else:
-            say('PASS L1 %s: %d loads, each with samples, the end line, the instrument on (qemu-halt %s)' % (boot, len(rows), rc))
+            say('PASS L1 %s: %d loads, each with samples, the end line%s (exit %s)'
+                % (boot, len(rows), '' if tier == 'linux' else ', the instrument on', rc))
         base = rows.get('spin')
-        for g in guard(int(mib)):
+        for g in ([] if tier == 'linux' else guard(int(mib))):
             r = rows.get(g)
             if r is None or base is None:
                 if g in want:
