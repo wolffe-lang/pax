@@ -2311,3 +2311,19 @@ description, which `tools/hotplug-session` speaks to QEMU's `usb-redir` device t
 | xHCI 1.2 (§4.6.3 Enable Slot, §4.6.4 Disable Slot, §5.4.7 CONFIG's MaxSlotsEn, §5.4.8 PORTSC's CCS and CSC), as px74's entries | as px74 | kernel/xhci: a refused port waits for a change; a slot past MaxSlotsEn given back |
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `nec-usb-xhci`, `usb-mouse`, `usb-kbd`, `usb-hub`, `usb-ccid` and `usb-redir`, q35's `max-ram-below-4g` | binary | black box: pax#348 reproduced (`notes/px120-hotplug.md` §2); Enable Slot answers success with slots past CONFIG's MaxSlotsEn (33 and 34 with 32 enabled); `nec-usb-xhci`'s `slots` property leaves HCSPARAMS1's MaxSlots at 64 (read through the monitor's `xp`); usb-redir on an xHCI refuses a peer that announces only the device version, disconnect acks and endpoint packet sizes ("lacks capabilities needed for use with XHCI") and takes one that adds 64-bit ids and 32-bit bulk lengths (which of the two it needs was not separated); the composite devices enumerate at full speed |
 | PAX's own `kernel/frames`, `kernel/xhci`, `kernel/mouse`, `kernel/usb_mouse`, `kernel/triage`, `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx2-frames`, `tests/mpx6-usb` | this tree | read and extended |
+
+## px128 — ligature on the dev image, beside lld
+
+No linker's, C library's or kernel's source was read: not lld's, GNU ld's or any other linker's, not musl's or
+glibc's, not Linux's. ligature's own tree was read only as far as building it and its documentation (its
+README, `wolf-toolchain.toml` and the cc front end's documented argument subset). wolf-lang was read only for
+its documented `--linker` and `WOLF_LD` clause (`wolf build --help`) and the link line it gives a selected
+linker.
+
+| source | version | read, for |
+|---|---|---|
+| ligature's README and `wolf-toolchain.toml` (`wolffe-lang/ligature`) | `32ec7f43` | how it is built (its own pinned wolf 0.2.38 archive, `wolf build --deny-warnings src/ligature.lu`), its cc front end (the link line `wolf build` gives a selected linker; `/usr/lib/wolf-musl` unless `LIGATURE_SYSROOT`), its link bundle's contents and digests |
+| wolf-lang's `wolf build --help` text on `--linker` and `WOLF_LD` | 0.2.39 | the selection (the command line over `WOLF_LD` over the platform's cc, which asks for lld when an `ld.lld` is on `PATH`), the link line, a selected linker's failure final, and the note naming lld |
+| `getrusage(2)`, `wait4(2)`, `clock_gettime(2)` (the Linux man-pages) | 6.9 | `tests/distribution-ligature.d/ldtime.c`: a child's wall time, CPU time and peak resident set |
+| ligature 0.0.2, ld.lld 18.1.8 and the image's link-only cc | binaries | black box: each links the same programs on PAX and on Linux (`notes/px128-ligature-on-the-image.md` §2) |
+| PAX's own `tools/mktrash`, `tools/mkclef`, `tools/distribution-root`, `tools/system-env`, `tests/distribution`, `tests/distribution-boot`, and `kernel/process`'s `wait4` and `getrusage` | this tree | read and extended |
