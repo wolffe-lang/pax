@@ -4873,14 +4873,20 @@ pub fn is_console(a: u64, fd: u64) -> bool {
 
 /// px45: whether a read of descriptor `fd` is /dev/random's or
 /// /dev/urandom's (`random(4)`): kernel/user answers it as `getrandom`
-/// does, from PAX's one pool (RDRAND when the CPU has it), and neither
-/// ever blocks, as Linux's do once their pool is ready.
+/// with flags 0 does (dw02: kernel/random's strict path, RDRAND words or a
+/// named refusal), and neither ever blocks.
 pub fn is_random(a: u64, fd: u64) -> bool {
     if kind(a, fd) != K_NULL || access(a, fd) == O_WRONLY {
         return false
     }
     let r = rf(node_of(a, fd))
     r == RANDOM || r == URANDOM
+}
+
+/// dw02: whether descriptor `fd`'s status flags hold O_NONBLOCK (a random
+/// device's read then refuses as GRND_NONBLOCK does).
+pub fn nonblocking(a: u64, fd: u64) -> bool {
+    status(a, fd) & O_NONBLOCK != 0
 }
 
 /// `read(fd, buf, n)`.
