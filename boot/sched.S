@@ -74,7 +74,7 @@
                          changes what the kernel does.
 
    Storage (.bss, zero until kernel/sched writes it):
-     pax_threads       64 thread slots (16 before px24), 512 bytes each (kernel/sched's
+     pax_threads       1024 thread slots (64 before px126, 16 before px24), 512 bytes each (kernel/sched's
                        #[repr(c)] Thread, 512 bytes since px102's six tracing words;
                        464 bytes of it since px88's
                        five usage words, 424 since px62's
@@ -87,17 +87,22 @@
                        vparent, zombie and sigmask; 256-byte slots
                        before px26's fifteen words for threads, futexes
                        and signals)
-     pax_procs         64 process areas, 49152 bytes each (px62: 192
-                       mapping records after px34's 40960: 1024
-                       descriptors and 256 reservations; 8192 before, 2048 before
-                       px14, 4096 before px24's 128 descriptors), one
-                       per slot (px12): the words kernel/vm,
-                       kernel/files, kernel/user and kernel/process keep
-                       for an ELF process (the break, the mmap cursor,
-                       the descriptor table, the system calls already
-                       logged, px14's signal records); kernel/sched zeroes
-                       a slot's area whenever it clears the slot, and a
-                       zeroed area is a fresh process's
+     (pax_procs, px12 to px126: a 49152-byte process area per slot, here.
+                       px126 moved the areas out of .bss: kernel/sched
+                       maps a slot's area from 12 frames while the slot
+                       leads a process, in PML4 slot 416 beside the
+                       stacks, and gives them back with the slot; 3 MiB
+                       of .bss at 64 slots, 48 MiB it would have been at
+                       1024)
+     pax_slot_words    px126: two words a slot, kernel/sched's own: 1
+                       while the slot has a process area mapped; the mark
+                       an ending process puts on each child whose group
+                       it may orphan (a 64-bit mask before, wrong past
+                       slot 63)
+     pax_pid_hint      px126: 4096 words, `pid mod 4096` to the slot
+                       that last took that pid or tid, plus one: a hint
+                       kernel/sched checks, walking the slots only when
+                       it misses
      pax_siginfo       per slot, two sets of 64 words (px26): where each
                        signal pending for the thread, and for the
                        process it leads, came from (kernel/sched's
@@ -185,17 +190,21 @@ pax_irq_restore:
         .p2align 6
         .globl pax_threads
 pax_threads:
-        .zero 64 * 512
+        .zero 1024 * 512
         .globl pax_threads_end
 pax_threads_end:
         .p2align 6
-        .globl pax_procs
-pax_procs:
-        .zero 64 * 49152
+        .globl pax_slot_words
+pax_slot_words:
+        .zero 1024 * 2 * 8
+        .p2align 6
+        .globl pax_pid_hint
+pax_pid_hint:
+        .zero 4096 * 8
         .p2align 6
         .globl pax_siginfo
 pax_siginfo:
-        .zero 64 * 2 * 64 * 8
+        .zero 1024 * 2 * 64 * 8
         .p2align 6
         .globl pax_sched_locks
 pax_sched_locks:
@@ -204,16 +213,16 @@ pax_sched_locks:
         .globl pax_sched_state
 pax_sched_state:
         .zero 256
-        /* px102: per-thread virtual DR0-DR7, 8 words in each of 64 slots. */
+        /* px102: per-thread virtual DR0-DR7, 8 words in each of 1024 slots (64 before px126). */
         .p2align 6
         .globl pax_debugregs
 pax_debugregs:
-        .zero 64 * 64
+        .zero 1024 * 64
         /* px102: options/events/restart state, independent of Thread's stride. */
         .p2align 6
         .globl pax_trace_state
 pax_trace_state:
-        .zero 64 * 256
+        .zero 1024 * 256
         .globl pax_trace_state_end
 pax_trace_state_end:
 
