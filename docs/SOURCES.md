@@ -2366,16 +2366,17 @@ tier's inlining; the rest is measurement.
 
 ## px128 — ligature on the dev image, beside lld
 
-No linker's, C library's or kernel's source was read: not lld's, GNU ld's or any other linker's, not musl's or
-glibc's, not Linux's. ligature's own tree was read only as far as building it and its documentation (its
-README, `wolf-toolchain.toml` and the cc front end's documented argument subset). wolf-lang was read only for
-its documented `--linker` and `WOLF_LD` clause (`wolf build --help`) and the link line it gives a selected
-linker.
+No third-party linker's, C library's or kernel's source was read: not lld's, GNU ld's or any other linker's,
+not musl's or glibc's, not Linux's. Of ligature, the org's own linker, the lane read its documentation (README,
+`wolf-toolchain.toml`) and searched its cc front end (`src/front/front.lu`, `src/ligature.lu`) for the
+arguments it accepts and the directory it reads musl's inputs from; nothing of it was changed here. Of
+wolf-lang, the lane read the `--linker` and `WOLF_LD` clause of `wolf build --help` and the driver's link path
+(`crates/wolf_driver/src/link.rs`, and in `main.rs` the platform link and the note that names lld).
 
 | source | version | read, for |
 |---|---|---|
-| ligature's README and `wolf-toolchain.toml` (`wolffe-lang/ligature`) | `32ec7f43` | how it is built (its own pinned wolf 0.2.38 archive, `wolf build --deny-warnings src/ligature.lu`), its cc front end (the link line `wolf build` gives a selected linker; `/usr/lib/wolf-musl` unless `LIGATURE_SYSROOT`), its link bundle's contents and digests |
-| wolf-lang's `wolf build --help` text on `--linker` and `WOLF_LD` | 0.2.39 | the selection (the command line over `WOLF_LD` over the platform's cc, which asks for lld when an `ld.lld` is on `PATH`), the link line, a selected linker's failure final, and the note naming lld |
+| ligature's README, `wolf-toolchain.toml` and cc front end (`wolffe-lang/ligature`) | `32ec7f43` | how it is built (its own pinned wolf 0.2.38 archive, `wolf build --deny-warnings src/ligature.lu`), its cc front end (the link line `wolf build` gives a selected linker; `/usr/lib/wolf-musl` unless `LIGATURE_SYSROOT`), its link bundle's contents and digests |
+| wolf-lang's `wolf build --help` text on `--linker` and `WOLF_LD`, and the driver's link path | 0.2.39 (`3fc86f77`) | the selection (the command line over `WOLF_LD` over the platform's cc, which asks for lld when an `ld.lld` is on `PATH`), the link line, a selected linker's failure final, and the note naming lld |
 | `getrusage(2)`, `wait4(2)`, `clock_gettime(2)` (the Linux man-pages) | 6.9 | `tests/distribution-ligature.d/ldtime.c`: a child's wall time, CPU time and peak resident set |
 | ligature 0.0.2, ld.lld 18.1.8 and the image's link-only cc | binaries | black box: each links the same programs on PAX and on Linux (`notes/px128-ligature-on-the-image.md` §2) |
 | PAX's own `tools/mktrash`, `tools/mkclef`, `tools/distribution-root`, `tools/system-env`, `tests/distribution`, `tests/distribution-boot`, and `kernel/process`'s `wait4` and `getrusage` | this tree | read and extended |
