@@ -17,6 +17,7 @@
 
 use log
 use screen
+use serial
 use triage
 
 extern "c" fn pax_halt() -> never
@@ -41,6 +42,7 @@ pub fn kind_name(kind: int) -> str {
 /// Halt the CPU for good: interrupts off, `hlt`, forever (io.S).
 pub fn halt() -> never {
     screen.release() // px129: a write's held drawing, the panic's lines with it
+    serial.drain() // px129: what COM1's transmit ring holds, before the halt
     triage.halted() // px77d: in triage mode the band says where, then it halts
     // # Safety: io.S's `cli; hlt` loop; it never returns.
     unsafe { pax_halt() }
