@@ -130,3 +130,18 @@ that image carried and lands the tools that built it:
   an earlier upgrade left it (`PAX_SSH_UPGRADE_DISK_AS_IS`), and S5 holds the refusals over ssh with the installed
   image's own archive (`PAX_SSH_UPGRADE_SAME`). That is how the first latest image was checked before it was sent:
   S1-S5 green on both firmwares from a disk installed at the image before it.
+
+### 6.1 pelt's friendly default and the suites that wait for `$ `
+
+pelt b80d657, which this branch pins, starts `friendly` on at a terminal unless invoked as `sh` (its README;
+`user/pelt.pin`: a session that wants `$ ` turns it off). The hosted `tier full` run at `e87b480b` was red in the
+seven suites that start pelt by that name and wait for `$ `: mpx3-screen (V5 `NOT HALTED: prompt 1 ('$ ') did not
+come`), mpx3-console, mpx3-shell, mpx3-tree, mpx4-session, mpx3-speaker and mpx4-lobo (each a first prompt such as
+`?@? ~# ` where `$ ` was waited for, on PAX and on the Linux side alike). A local take at `e87b480b` saw mpx3-screen
+(V5, then V6's boots refused) and mpx3-console (T1-T7) red the same way. Each suite now asks for the plain prompt:
+where pelt is init and no session starts another shell, it runs `/bin/pelt +o friendly` on both sides
+(mpx3-screen, mpx3-console, mpx4-session, mpx3-shell's and mpx3-tree's shell images); where a session's `su`
+starts the user's login shell, init is `/bin/env ENV=/etc/pelt-plain /bin/pelt` and `/etc/pelt-plain` holds `set
++o friendly`, which su keeps in ENV for the shell it starts (mpx3-speaker, mpx4-lobo, and the user images of
+mpx3-shell and mpx3-tree), as mpx5-accounts already did. The other suites that wait for `$ ` start their shell as
+`/bin/sh` (friendly off by default), run no shell at the prompt, or were adapted with the pins.
