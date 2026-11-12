@@ -251,6 +251,12 @@ Every row was seen red on trunk's kernel before any kernel change, by name, at t
   row's bound was twice then; 5.5 times), log sha256
   `1713309e801d62dda113746051b66e1c0bdd5953571c15e1fe65cfc55710ffa3`.
 
+An existing suite found one more: `tests/mpx5-trace`'s `clone-event` script at `36963e2f` panicked by name, `PANIC
+sched: no process area for slot 0x0000000000000005`: a tracer's wait collected a traced thread's death, and
+`child_usage` asked the thread's own area, which a thread no longer has (before, a zeroed static area answered
+zeros). Fixed at `daa298ba`: a slot with no area reports no usage of its own, as before. Every other `own_area`
+was read again for the same mistake: each is asked of a leader, MAIN, or a slot whose area it checks first.
+
 The plant, `px126-plant-area-leak` (pushed, never merged): `free_area` unmaps a process area's twelve pages and
 gives none back, so every non-quiet session's `slots-machine` row says `frames not all back`. Its record is the
 pull request's.
