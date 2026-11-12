@@ -17,7 +17,8 @@
 # that waits, in wolf's runtime, on px24's epoll) and one C witness,
 # resolve. One initramfs: those in /bin, /usr/share/tunes, and
 # /etc/motd, /etc/passwd, /etc/group, /etc/localtime (tools/mkzone),
-# /etc/pax-run `/bin/pelt`. Three sessions, typed on COM1:
+# /etc/pax-run `/bin/pelt +o friendly` (pelt b80d657 starts friendly at a
+# terminal unless invoked as sh; the transcripts hold `$ `). Three sessions, typed on COM1:
 #   session-shell  user/console/session-shell.keys: cat /etc/motd,
 #                  ls -l /bin, sleep 30 and Ctrl-C two seconds later,
 #                  echo $?, tcpwolf (wolf's TCP over loopback),
@@ -50,7 +51,7 @@
 #      Linux ran session-shell.
 #   E1 quiet: one `user: quiet` line and no `user: exec pid`, exit,
 #      -ENOSYS or frames line; no refusal by name; no PANIC.
-#   E2 session-shell and session-files, differential: every line after `run 1: /bin/pelt`
+#   E2 session-shell and session-files, differential: every line after `run 1: /bin/pelt +o friendly`
 #      up to `run: 1 commands`, the kernel's own `user: … killed:` lines
 #      cut out (a kill is not quiet: it follows the terminal's `^C` on
 #      the same line), byte-identical (CRs removed) to Linux's
@@ -145,7 +146,7 @@ static_ok() { # file -> reason on failure
 linux_files() { # dir
     mkdir -p "$1/linux"
     "$PAX_ROOT/tools/linux-tree" --root "$1/root" --keys "$PAX_ROOT/user/console/session-files.keys" --prompt "$PROMPT" \
-        --argv0 /bin/pelt --size 512m "$1/linux/session-files.tty" -- /bin/pelt || return 1
+        --argv0 /bin/pelt --size 512m "$1/linux/session-files.tty" -- /bin/pelt +o friendly || return 1
     say "  linux session-files: $(wc -c < "$1/linux/session-files.tty" | tr -d ' ') bytes, status $(cat "$1/linux/session-files.tty.rc"), $(wc -l < "$1/linux/session-files.tty.after" | tr -d ' ') names left"
 }
 if [ -n "$filesonly" ]; then
@@ -267,7 +268,7 @@ if [ -z "$images" ]; then
     printf 'root:x:0:0:root:/:/bin/pelt\n' > "$r/etc/passwd"
     printf 'root:x:0:\n' > "$r/etc/group"
     "$PAX_ROOT/tools/mkzone" "$r/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
-    echo /bin/pelt > "$r/etc/pax-run"
+    echo /bin/pelt +o friendly > "$r/etc/pax-run"
     for f in "$r"/bin/*; do
         x=$(static_ok "$f") || why+=" $x;"
         say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
@@ -308,7 +309,7 @@ if [ -z "$images" ]; then
         find "$r" -exec ${asroot[@]+"${asroot[@]}"} touch -h -d @0 {} + || why+=" touch;"
         if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --root "$r" --pid1 \
             --keys "$PAX_ROOT/user/console/session-shell.keys" --prompt "$PROMPT" --argv0 /bin/pelt \
-            "$work/linux/session-shell.tty" -- /bin/pelt; then
+            "$work/linux/session-shell.tty" -- /bin/pelt +o friendly; then
             say "  linux session-shell: $(wc -c < "$work/linux/session-shell.tty" | tr -d ' ') bytes, status $(cat "$work/linux/session-shell.tty.rc")"
         else
             why+=" tools/linux-tty session-shell;"
@@ -411,10 +412,10 @@ for leg in $legs; do
             note_run "$tier" "$leg" "$s" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"
             out=$PAX_BUILD/mpx4-session-$tier-$leg-$s.session
-            # The session: after `run 1: /bin/pelt`, up to `run: 1 commands`;
+            # The session: after `run 1: /bin/pelt +o friendly`, up to `run: 1 commands`;
             # a kernel line that lands after an echoed `^C` is cut out with
             # its newline, and the line goes on (tests/mpx3-shell's rule).
-            awk '$0 == "run 1: /bin/pelt" { on = 1; next } on && /^run: [0-9]+ commands$/ { exit }
+            awk '$0 == "run 1: /bin/pelt +o friendly" { on = 1; next } on && /^run: [0-9]+ commands$/ { exit }
                  on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
 
             # E1: quiet.
