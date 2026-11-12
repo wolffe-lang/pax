@@ -242,6 +242,11 @@ def prepare(name, pub):
                 or c.startswith(f'write {t / "keys"}') or c.startswith(f'write {t / "notes"}')]
         i = kept.index('cd /home/wolf/.ssh') + 1
         cmds = cmds[:4] + kept[:i] + ['rm authorized_keys'] + kept[i:]
+        # A disk an earlier S1 upgraded holds that row's px115-notes.txt, which this write would leave in place
+        # (the other leg's name in it, so this leg's S1 reads it as wolf's file lost): removed first too
+        # (debugfs's rm of an absent file is no error here).
+        j = cmds.index(f'write {t / "notes"} px115-notes.txt')
+        cmds = cmds[:j] + ['rm px115-notes.txt'] + cmds[j:]
     debugfs(img, cmds)
     (t / 'shadow').unlink()
     if not AS_IS:
