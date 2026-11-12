@@ -192,7 +192,11 @@ SESSIONS="probes soak speed shell-tree shell-tree-ps2 shell-changes shell-change
 LINUX_SESSIONS="probes soak speed shell-tree shell-changes probes-user soak-user shell-tree-user shell-changes-user shell-inout shell-inout-user"
 image_of() { case $1 in shell-*-user) echo shell-user ;; shell-*) echo shell ;; *) echo "$1" ;; esac; }
 init_of() { case $1 in shell-*) echo pelt ;; *-user) echo as ;; *) echo tree ;; esac; }
-args_of() { case $1 in soak|speed) echo "$1" ;; probes-user) echo "1000 1000 /bin/tree" ;; soak-user) echo "1000 1000 /bin/tree soak" ;; *) echo ;; esac; }
+# pelt b80d657 starts friendly at a terminal unless invoked as sh, and the shell sessions hold `$ `: the
+# shell's image starts `/bin/pelt +o friendly`, the user's `/bin/env ENV=/etc/pelt-plain /bin/pelt` (the
+# shell `su pax` starts reads /etc/pelt-plain, `set +o friendly`, as su keeps ENV).
+initpath_of() { case $1 in shell-*-user) echo env ;; *) init_of "$1" ;; esac; } # pid 1's file, as the kernel names it
+args_of() { case $1 in shell-*-user) echo "ENV=/etc/pelt-plain /bin/pelt" ;; shell-*) echo "+o friendly" ;; soak|speed) echo "$1" ;; probes-user) echo "1000 1000 /bin/tree" ;; soak-user) echo "1000 1000 /bin/tree soak" ;; *) echo ;; esac; }
 user_of() { case $1 in *-user) echo 1 ;; *) echo 0 ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
 linux_of() { case $1 in *-ps2) echo "${1%-ps2}" ;; *) echo "$1" ;; esac; }
@@ -232,13 +236,13 @@ linux_side() { # dir -> reasons on stdout
     local s p i a size
     mkdir -p "$1/linux"
     for s in $LINUX_SESSIONS; do
-        p=$(image_of "$s") i=$(init_of "$s") a=$(args_of "$s")
+        p=$(image_of "$s") i=$(init_of "$s") a=$(args_of "$s") ip=$(initpath_of "$s")
         keys=$1/none.keys; [ "$i" = pelt ] && keys=$(keys_of "$s")
         size=64m; [ "$i" = pelt ] && size=512m
         own=(); [ -f "$1/$p.owners" ] && own=(--owners "$1/$p.owners") # px47: the user's images
         # shellcheck disable=SC2086
-        if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$keys" --prompt "$PROMPT" --argv0 "/bin/$i" --size "$size" \
-            ${own[@]+"${own[@]}"} "$1/linux/$s.tty" -- "/bin/$i" $a; then
+        if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$keys" --prompt "$PROMPT" --argv0 "/bin/$ip" --size "$size" \
+            ${own[@]+"${own[@]}"} "$1/linux/$s.tty" -- "/bin/$ip" $a; then
             say "  linux $s: $(wc -c < "$1/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$1/linux/$s.tty.rc"), $(wc -l < "$1/linux/$s.tty.after" | tr -d ' ') names left"
         else
             printf ' tools/linux-tree %s;' "$s"
@@ -292,7 +296,7 @@ if [ -z "$images" ]; then
     printf 'root:x:0:0:root:/:/bin/pelt\n' > "$sh/etc/passwd"
     printf 'root:x:0:\n' > "$sh/etc/group"
     "$PAX_ROOT/tools/mkzone" "$sh/etc/localtime" > "$work/zone.txt" || why+=" tools/mkzone;"
-    echo /bin/pelt > "$sh/etc/pax-run"
+    echo "/bin/pelt $(args_of shell-tree)" > "$sh/etc/pax-run"
     : > "$work/none.keys"
     for s in probes soak speed; do
         r=$work/$s/root
@@ -324,6 +328,8 @@ if [ -z "$images" ]; then
     printf 'root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$su_/etc/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$su_/etc/group"
     printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$su_/etc/login.defs"
+    printf 'set +o friendly\n' > "$su_/etc/pelt-plain"
+    echo "/bin/env $(args_of shell-tree-user)" > "$su_/etc/pax-run"
     printf '/home 755 0 0\n/home/pax 755 1000 1000\n' > "$work/shell-user.owners"
     for f in "$sh"/bin/* "$su_"/bin/su "$su_"/bin/chown "$su_"/bin/chgrp "$work/bin/tree" "$work/cred/as"; do
         r=$(static_ok "$f") || why+=" $r;"
@@ -417,7 +423,7 @@ for leg in $legs; do
     for tier in $tiers; do
         [ -z "$stopped" ] || break
         for s in $SESSIONS; do
-            p=$(image_of "$s") i=$(init_of "$s") kb=$(kbd_of "$s") ls=$(linux_of "$s")
+            p=$(image_of "$s") i=$(init_of "$s") kb=$(kbd_of "$s") ls=$(linux_of "$s") ip=$(initpath_of "$s")
             id="$tier $leg $s"
             before=$fail
             log=$PAX_BUILD/mpx3-tree-$tier-$leg-$s.serial.log
@@ -573,8 +579,8 @@ for leg in $legs; do
 
             # T8
             why=
-            grep -qx "PAX: init /bin/$i ended with status $lst; nothing left to run" "$norm" \
-                || why+=" no 'PAX: init /bin/$i ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
+            grep -qx "PAX: init /bin/$ip ended with status $lst; nothing left to run" "$norm" \
+                || why+=" no 'PAX: init /bin/$ip ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
             pn=$(grep -m1 '^PANIC ' "$norm")
             [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
