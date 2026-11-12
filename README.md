@@ -604,12 +604,21 @@ shell image is typed into from the window while COM1 still gets every byte. With
 where nobody sees it; `-vga none` (`tools/qemu-run --no-screen`) boots a machine with no display at all.
 
 The framebuffer uses the firmware's width, height, row pitch and RGB masks. It draws before the allocator starts, even
-without COM1. Spleen's 8×16 glyphs give 160×50 cells at 1280×800; above 2560 pixels wide they are doubled, giving
-240×67 cells at 3840×2160. Its cell grid in RAM is the screen's shadow. Where reading the framebuffer is slow (a GPU's
-write-combining mapping: such reads are the slowest thing a user would see), a scroll redraws only the cells that
-changed and never reads it; where reading is cheap (an emulator's framebuffer is host memory) it copies the framebuffer
-onto itself. The screen times framebuffer reads against writes once, when it attaches, to choose, and the boot line
-names the way and why.
+without COM1. Spleen's 8×16 glyphs give 160×50 cells at 1280×800 and 320×90 at 2560×1440; above 2560 pixels wide
+they are doubled, giving 240×67 cells at 3840×2160 (the grid is at most 320×128). Its cell grid in RAM is the screen's
+shadow. Where reading the framebuffer is slow (a GPU's write-combining mapping: such reads are the slowest thing a user
+would see), a scroll redraws only the cells that changed and never reads it; where reading is cheap (an emulator's
+framebuffer is host memory) it copies the framebuffer onto itself. The screen times framebuffer reads against writes
+once, when it attaches, to choose, and the boot line names the way and why.
+
+The screen draws only what changes, and a program's write once (px129). It keeps a second grid of what each cell of
+the framebuffer shows; a write updates the cell grid in RAM, and when the write ends each cell that now differs from
+what it shows is drawn, a run of neighbouring cells a pixel row at a time. So a program that rewrites its whole screen
+for one keypress draws only the cells that changed, a clear followed by a repaint draws the screen once, ten lines
+scrolled in one write draw the final screen once, and the cursor is drawn where the write left it. What the screen
+shows after each write is unchanged. `user/elf/conspeed.c` measures it at any terminal (`tools/mkconspeed` builds it):
+one command prints how long a full screen, colours, a scroll, a clear and the recorded frames of yew and cub take to
+draw; `tests/mpx3-conspeed` holds those figures to rows at 2560×1440.
 The console supports:
 
 - the Linux VT's colour renditions (dim, italic, underline, RGB mapped to its small palette), `OSC P` and `OSC R` for
@@ -750,7 +759,7 @@ and `--tier native --firmware bios` picks one leg.
 |---|---|---|
 | The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
-| Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
+| Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-conspeed`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the console's drawing cost at 2560×1440 as ratios on one boot (its table read off the screen), the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net`, `mpx4-console-push`, `mpx5-burrowd` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), the tick clock held to the clock over the lease, and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes); den pushing from the console over https and through burrow over ssh to fixtures that answer as github.com, names through a DNS server of the suite's own, the resolver's datagram calls against Linux, a scrubbed transcript proven on fake secrets (root, sshd, mke2fs); burrowd started at boot and reached from a LAN on a tap, held to OpenSSH's sshd on Linux: commands by key and by password, the refusals, git through den, a restart, the host key kept across a reboot, the stick's shape on loopback alone (root, dnsmasq, sshd) |
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pty`, `mpx5-forks`, `mpx5-rates`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, the rates a clone leans on against the host's Linux, each program's typed session against the same binary in a container, the language server's frames both ways |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
