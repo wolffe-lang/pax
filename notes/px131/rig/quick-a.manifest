@@ -1,0 +1,13 @@
+# notes/px131/rig/quick-a.manifest — px131's take at the head, first half: the planner's test; the
+# guard (mpx6-latency) native on both firmwares at 1 GiB and on BIOS at 2 GiB under KVM, and on BIOS
+# under TCG (CI's leg: L2 SKIPPED by name there); the scheduler's and the interrupts' suites (the
+# entry paths and kernel/sched carry the instrument's calls), native BIOS.
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px131/rig/lib.sh
+rig quick-a.manifest committed=../../..:HEAD:notes/px131/rig/quick-a.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step latency image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier native --firmware both --mem 1024 --accel kvm
+step latency-2g image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier native --firmware bios --mem 2048 --accel kvm
+step latency-tcg image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier native --firmware bios --mem 1024 --accel tcg
+step sched image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-sched --tier native --firmware bios
+step interrupts image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-interrupts --tier native --firmware bios

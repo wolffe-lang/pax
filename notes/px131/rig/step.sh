@@ -6,7 +6,7 @@
 #   suite NAME ARGS
 #                  tests/NAME ARGS in the px75-ubuntu image with KVM (NAME one of the suites this
 #                  lane's change can reach: mpx6-latency, mpx2-interrupts, mpx2-sched, mpx3-user,
-#                  mpx3-maps, mpx3-tree, mpx5-trace, mpx5-forks, mpx5-users, mpx5-rates, mpx6-part,
+#                  mpx3-maps, mpx3-tree, mpx5-trace, mpx5-users, mpx5-rates, mpx6-part,
 #                  mpx3-boreutils, mpx4-udp, mpx3-console)
 #   ci-plan        tests/ci-plan (the tiers map, the wiring of the new suite's job)
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
@@ -31,10 +31,10 @@ case $what in
     suite)
         name=${1:?a suite}; shift
         case $name in
-            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-forks|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console) ;;
+            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console) ;;
             *) echo "step.sh: no suite $name in this rig"; exit 2 ;;
         esac
-        caps=; [ "$name" = mpx3-console ] || [ "$name" = mpx3-boreutils ] || [ "$name" = mpx3-tree ] || [ "$name" = mpx5-users ] && caps=SYS_ADMIN
+        caps=SYS_ADMIN; [ "$name" = mpx6-latency ] && caps= # the Linux sides mount inside the container
         CTR_CAPS=$caps lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/'"$name"' "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
