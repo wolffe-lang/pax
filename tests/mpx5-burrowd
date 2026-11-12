@@ -11,7 +11,9 @@
 # P0 builds the image's tree (build/mpx5-burrowd/root, files.txt as
 # tools/mkinitramfs' arguments): kmain_console, the kernel every shipped
 # image boots, with `quiet`; the installed system's run list (/bin/login as
-# pid 1, user/login built by tools/mkauth with /bin/passwd); pelt as /bin/sh;
+# pid 1, user/login built by tools/mkauth with /bin/passwd; px124: login
+# execs /bin/init, tools/mkinit's, which runs the hooks and starts login in
+# a session of its own); /bin/poweroff (tools/mkdiskprobe); pelt as /bin/sh;
 # boreutils' cat chmod env id kill ls mkdir rm sleep; den as the images
 # install it (tools/install-den: /bin/git, /bin/git-upload-pack,
 # /bin/git-receive-pack); burrow's three programs (tools/mkburrow,
@@ -48,7 +50,10 @@
 # SetEnv line, and `wolf build` of a program that calls std.fs succeeds
 # with no `. /etc/shrc;` before it; B11 the live stick's shape (the live
 # entry as pid 1, the shipped configuration's loopback): a connection from
-# the LAN refused, one on loopback answered. B1-B10 boot the installed shape (/bin/login,
+# the LAN refused, one on loopback answered; (px124) B30 an ssh command
+# running across a console logout ends with its own output and status, and
+# burrowd keeps its pid; B31 the account's runtime directory is there over
+# ssh; B32 `sudo -k -S poweroff` over ssh ends the machine. B1-B10 boot the installed shape (/bin/login,
 # the volume's configuration the installer's, `ListenAddress 0.0.0.0`).
 #
 # Needs root in the rig (the tap, dnsmasq) or `sudo -n`, /dev/net/tun,
@@ -104,6 +109,11 @@ if [ -z "$images" ]; then
     # test helper, beside the tree (never in the image).
     "$PAX_ROOT/tools/mkauth" "$work/auth" login passwd sudo mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
     for p in login passwd sudo; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    # px124: /bin/init, which login as pid 1 execs (the installed shape since px124: init runs the
+    # boot hooks and starts login in a session of its own); /bin/poweroff (B32, over ssh).
+    "$PAX_ROOT/tools/mkinit" "$work/init" > "$work/init.txt" 2>&1 && cp "$work/init/init" "$r/bin/init" || why+=" tools/mkinit;"
+    "$PAX_ROOT/tools/mkdiskprobe" "$work/diskprobe" > "$work/diskprobe.txt" 2>&1 || why+=" tools/mkdiskprobe;"
+    cp "$work/diskprobe/reboot" "$r/bin/poweroff" 2>/dev/null || why+=" no poweroff;"
     # sudo and its policy as the images ship them (B15: a bare sudo over ssh; B16: sudo -k -S, and a plain -S measured), pax in group sudo.
     cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
     cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"

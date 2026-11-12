@@ -2296,3 +2296,29 @@ distribution ships it.
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `usb-kbd`, `usb-tablet`, `usb-mouse` and the i8042 | binary | black box: the screen's size on both firmwares, the order key and tablet events reach the guest when sent 2 ms apart (the USB keyboard's later than a tablet report sent after it) and 3 ms apart through the PS/2 keyboard (in order), the relative mouse's counts as pixels (`notes/px117-the-pointer.md` §3) |
 | yew at `user/yew.pin`'s commit (the org's own, public): `src/term/input.lu` (`input_enable_blob`: `CSI ? 2004 h`, `CSI ? 1002 h`, `CSI ? 1006 h`, `CSI ? 1004 h`; `input_disable_blob`; `decode_mouse`: SGR's Cb 0-2 press and release, 32-35 motion, 64-67 the wheel, 128-129, the 4/8/16 modifiers, and the X10 form whose release it refuses), `src/edit/mouse.lu` (`press_opens_menu`, `press_menu`, `mouse_release`), `src/edit/ctxrows.lu` (the document menu's rows), and the mouse tests `src/edit_ctxmenu_test.lu`, `src/edit_drag_test.lu` | `2eb9cb9b` | what yew enables and parses; Y9's witness. Built unmodified by `tools/mkyew` |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/mouse`, `kernel/xhci`, `kernel/sched` (`proc_slot`, `proc_word`, `tty_pgrp_of`), `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx5-yew` | this tree | read and extended |
+
+## px124 — pid 1 stays: a logout at the console, and a runtime directory for each account (pax#352)
+
+No init's, getty's, login's, systemd's or any kernel's source was read, and no C library's or shell's. What was:
+
+- **init(8)**, **getty(8)** and **login(1)** (Ubuntu 24.04's manual pages): what pid 1 and the console's login are
+  to each other, a login started again when it ends.
+- **setsid(2)**, **ioctl_tty(2)** (`TIOCSCTTY`, `TIOCNOTTY`: a session leader that gives its terminal up sends its
+  foreground group SIGHUP and SIGCONT; `TCGETS`, `TCSETSW`), **termios(3)**, **wait4(2)**, **kill(2)**,
+  **mount(2)** and **proc_pid_stat(5)** (`session`, field 6; `tty_nr`, field 7) (man-pages 6.7), and the x86-64
+  psABI and the syscall table's numbers for `user/init/init.S`.
+- **POSIX.1-2024** XBD 11.1 (sessions, controlling terminals, the controlling process and its terminal's hangup)
+  and XSH `_exit` (an ending controlling process's foreground group sent SIGHUP; orphaned groups).
+- **The XDG Base Directory Specification** (0.8): `$XDG_RUNTIME_DIR`, owned by the user alone, mode 0700, its
+  lifetime bound to the user's logins; **pam_systemd(8)**, **logind.conf(5)** and **loginctl(1)** (`/run/user/$UID`,
+  its owner and mode, `KillUserProcesses`: a session's processes ended when it ends; `enable-linger`: a user's
+  directory and services kept past the last logout) as published text, for the directory's place, its lifetime
+  (PAX keeps it from boot to shutdown, as lingering does: notes/px124-pid-1.md) and the hangup's shape.
+- **bash(1)**'s `logout` builtin ("Exit a login shell"), as a page.
+- PAX's own `user/login/login.lu` (its boot duties, moved), `user/auth/secret.lu`, `user/sudo/sudo.lu` (`ts_key`:
+  the terminal's record names the session leader's start time), `kernel/sched` (`setsid`, `take_tty_of`,
+  `drop_tty_of`, `tty_leaves`, `reparent`, `process_ends`), `kernel/signal` (pid 1 spared a default action),
+  `kernel/user` (`end_processes`, `the_end`), `kernel/files` (mount(2)'s tmpfs, the console terminals' owner and
+  mode), `kernel/procfs` (`/proc/PID/stat`), `kernel/kmain_console.lu` (the run list, init's end),
+  `user/termwolf/tio.S` and `user/install/raw.S` (the membrane's shape), and the wolf runtime's `os_fork` (the
+  org's own, wolf-lang's `crates/wolf_rt/src/fork.rs`: the child's table, why a raw fork would be unsound).

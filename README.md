@@ -23,7 +23,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; USB mice and tablets, their events in `/dev/mouse0`, a pointer on the screen and xterm's SGR mouse reports for the program that asks; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
-| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh` and its server `burrowd`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
+| Shipped programs | init (an installed system's PID 1), pelt (the shell; PID 1 of the dev and release images and the stick), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh` and its server `burrowd`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
 What PAX is not: a security boundary. The permission checks hold for honest programs; the kernel has never been fuzzed
 or audited, it loads programs at fixed addresses, the live USB entry accepts `root` with no password, and so does an
@@ -53,7 +53,8 @@ accounts, and all four read one password file:
   then `Password: ` with no echo. A failure waits 3 seconds and says `Login
   incorrect`, the same words for a wrong password, a locked account and one
   that does not exist; five failures end the try, and 60 seconds end an
-  unfinished one. Then it starts again, since nothing else would.
+  unfinished one. Then `/bin/init` starts it again, as it does after every
+  logout (below).
 - **`su`** (set-user-ID root) asks for the target's password, once. A wrong
   one waits 3 seconds and says `su: Authentication failure`. Root is never
   asked.
@@ -132,6 +133,43 @@ All of this is **enforced for honest programs; not a boundary against an
 attacker**: the kernel has never been fuzzed or audited and loads programs at
 fixed addresses.
 
+## Logging out: pid 1 on an installed system
+
+An installed PAX's pid 1 is `/bin/init` (`user/init`, in wolf). Its `/etc/pax-run` names `/bin/login`, as every
+installer has written it, and login, run as pid 1, execs `/bin/init`. At each boot init does, once:
+
+- `/run`: a fresh tmpfs, 0755, so it is empty at every boot (`/` itself is on the disk); `/run/user` 0755, root's;
+  and `/run/user/UID`, 0700, the account's own, for every account whose shell is not a `…/false` or `…/nologin`;
+- what the boot's first program did before: sudo's records emptied, `pax-boot-status record`, the hooks of
+  `/etc/pax-boot.d` (burrowd's among them) in a process group each;
+- then it gives the console up and, for as long as the machine runs, starts `/bin/login` on it in a session of its
+  own (`HOST login:`), waits, and starts it again.
+
+**`exit`, `logout` or Ctrl-D at an empty prompt** ends the login shell, and so the session: `HOST login:` comes
+back at once (2 seconds later when something in the session ignores SIGHUP), and the machine keeps running. What
+the session left behind is hung up, as logind ends a session's processes: every process still in it gets SIGHUP (and SIGCONT, so a stopped job hears it), and one
+still there 2 seconds later gets SIGKILL, which init says in one line (`init: the session of pid N: SIGKILL to 1 of 2
+…`). A process that left the session first, with `setsid` as a server does, is not touched: it goes on, init's child
+once its parent has ended, and init reaps it when it ends. What the boot hooks started (burrowd) is in pid 1's own
+session and never hung up, and an ssh session open across a console logout goes on. The console's terminal modes are
+put back as the boot left them (a program that left it raw or with echo off does not reach the next login), and the
+console is root's 0600 again until the next login gives it to its account. sudo's remembered password does not
+reach the next session: its record names the session's leader, a new process at every login.
+
+**The runtime directory.** login sets `XDG_RUNTIME_DIR=/run/user/UID` (the XDG Base Directory Specification's),
+making the directory when it is not there (an account added since the boot). It is where a per-user server puts its
+socket: it is the account's alone, and empty after every boot. Over ssh the directory is there but the variable is
+not set (burrowd sets the same variables for every account).
+
+**Shutting down** is as before: `sudo poweroff`, `sudo reboot`, or `sudo reboot -h` to halt. The kernel ends every
+process, init too (SIGTERM and SIGCONT, then SIGKILL after 2 seconds), writes the volumes and resets, halts or
+powers off.
+
+**Where pid 1 is not init.** The dev and release images boot to a root shell, pid 1
+`/bin/env ENV=/etc/shrc /bin/sh -i -m` (pelt), and the live stick to its live login script (pelt): on both, `exit`
+ends pid 1, writes `/` and halts, as it always has, and there is no `/run` tmpfs or runtime directory.
+`tests/mpx5-init` holds all of it at the console of an installed-shaped image, and `tests/mpx5-burrowd` the ssh side.
+
 ## Quick start
 
 On a Linux x86-64 host with binutils, cc, make, curl, xorriso and `qemu-system-x86_64` (the Hosts table below says what
@@ -176,7 +214,7 @@ first program it prints how long its boot took and how much of that the console 
 | wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.36, `5adf3d9` |
 | lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.59, `668fb752` |
 | wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `3111d39f` |
-| pelt | the POSIX shell, PID 1 at the console | `4683b3f5` |
+| pelt | the POSIX shell, PID 1 at the dev and release images' console | `4683b3f5` |
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `ac2332bf` (wolf 0.2.36) |
@@ -293,7 +331,7 @@ answers for the same steps on Linux, and, given a repository on GitHub in its en
 ## Logging in to PAX over ssh
 
 `burrowd`, burrow's server, starts at every boot: `/etc/pax-boot.d/burrowd`, which pid 1 runs before the first prompt
-(`/bin/login` on an installed system, the live entry on the stick), makes the machine's host key at its first boot
+(`/bin/init` on an installed system, the live entry on the stick), makes the machine's host key at its first boot
 (`/etc/burrowd/ssh_host_ed25519_key`, from the CPU's RDRAND through `/dev/urandom`; no image ships one), prints its
 fingerprint on the console at every boot, and starts burrowd again a second after it ends. On an installed system it
 listens on every address (the installer writes `ListenAddress 0.0.0.0` into `/etc/burrowd/burrowd_config`), so
@@ -325,15 +363,13 @@ router, which forwards nothing to it: nothing outside the LAN reaches it.
   job control, ^C does not interrupt a command (it ends only with the session: `~.` at the start of a line), and
   `exit` ends it.
 
-  **A bare `sudo` is a console command until the next burrow: over ssh, never run a bare `sudo`; run `sudo -k -S`,
-  the password on standard input** (as "Upgrading over ssh" below does). A program run over ssh is still in the
-  console's session, with the console as its terminal (burrow at this pin cannot give it a session of its own yet).
-  So a bare `sudo` over ssh asks for the password on the console, not on your ssh session, and stops there; your ssh
-  session waits until you end it with `~.`. burrowd itself keeps answering other connections, because each program
-  runs in a process group of its own. `-S` reads the password from standard input and leaves the terminal alone;
-  `-k` reads and writes no remembered password. Without `-k`, the password `sudo` remembers is keyed by that shared
-  terminal, so a `sudo -S` that succeeded in one ssh session lets another session's `sudo` through for five
-  minutes. At the console, `sudo` works as anywhere. git's
+  **Over ssh, run `sudo -k -S`, the password on standard input** (as "Upgrading over ssh" below does). A program
+  run over ssh is in pid 1's session, which has no terminal (burrow at this pin cannot give it a session or a
+  terminal of its own yet, and `/bin/init` gives the console up before the first login), so a bare `sudo` over ssh
+  is refused at once: `sudo: a terminal is required to read the password; …`. `-S` reads the password from
+  standard input; `-k` reads and writes no remembered password. Without `-k`, the password `sudo` remembers with
+  no terminal is keyed by its parent, your session's own shell, so another ssh session is asked again. At the
+  console, `sudo` works as anywhere. git's
   `git-upload-pack` and `git-receive-pack` are den's, so `git clone`, `fetch` and `push` work as against a Linux
   host. Passwords are checked against `/etc/shadow` (crypt(5)'s `$7$`, as `passwd` writes them), one at a time.
 - **The log** is `/var/log/burrowd.log`, root's: `sudo cat /var/log/burrowd.log`. One line per connection: the time,
@@ -498,7 +534,8 @@ and writes only after the word `yes` (anything else cancels). It is an explicit 
   `sudo`'s log, and root's dotfiles and `/Trash` (root's home is `/`: the shell's history, lope's store, what `trash`
   put aside) are never copied to an
   install or an upgrade, nor listed in its manifest; the installed system writes its own;
-- an install made from the live stick boots to `/bin/login`, not the stick's passwordless entry: root or the new
+- an install made from the live stick boots to the console's login (`/bin/login`, which execs `/bin/init`, so
+  `exit` logs out: "Logging out" above), not the stick's passwordless entry: root or the new
   user, with their passwords, or root with none while every account is locked (the first-boot rule above). As
   Linux's `login` does, the login gives the terminal to the account it logs in (its user, its primary group, mode
   0600), so what the user opens by name, such as `/dev/stdout` or `/dev/stderr`, is theirs to open.
@@ -543,9 +580,8 @@ installed root needs about twice the archive's size free. Three commands, from t
   upgraded, refused, stopped, not applied, and why).
 - `sudo -k -S pax-upgrade disarm` takes the arm back before the reboot; `sudo -k -S pax-upgrade clean` removes a
   staged archive that is no longer wanted.
-- **Over ssh, always `sudo -k -S`, the password on standard input.** A bare `sudo` over ssh asks for the password
-  on the machine's own console, not yours, and your ssh session waits until you end it with `~.`; without `-k`, the
-  password `sudo` remembers is shared by every ssh session for five minutes ("Logging in to PAX over ssh" above).
+- **Over ssh, always `sudo -k -S`, the password on standard input.** A bare `sudo` over ssh has no terminal to ask
+  on and is refused ("Logging in to PAX over ssh" above).
 
 **When it does not come back.** First wait: the staged boot is tried twice at most. A staged kernel that cannot read
 or check the archive, or a third try, boots the installed system instead; it puts Limine's configuration back,

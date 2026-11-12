@@ -7,6 +7,26 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A logout at the console: pid 1 stays (px124, pax#352).** An installed
+  PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
+  names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs
+  on `/run`, makes `/run/user/UID` (0700, the account's) for every account
+  with a login shell, runs what login ran as pid 1 (sudo's records emptied,
+  `pax-boot-status record`, the boot hooks), gives the console up, and then
+  starts `/bin/login` on it in a session of its own, again after each session
+  ends. So `exit`, `logout` (a function of `/etc/shrc`) and Ctrl-D at an
+  empty prompt give `HOST login:` again instead of halting the machine. What
+  the session left is hung up: SIGHUP and SIGCONT to each process still in
+  it, SIGKILL 2 s later to one still there (one line on the console); a
+  process that called setsid goes on and is reaped by init when it ends; the
+  hooks' services (burrowd) and ssh sessions are untouched; the console's
+  modes are put back and it is root's 0600 between sessions. login sets
+  `XDG_RUNTIME_DIR`. A bare `sudo` over ssh is now refused for want of a
+  terminal rather than asking on the console. The dev and release images and
+  the live stick keep their root-shell pid 1. `tests/mpx5-init` holds the
+  console's rows, `tests/mpx5-burrowd` B30-B32 the ssh side:
+  `notes/px124-pid-1.md`.
+
 - **The pointer, and the mouse in a terminal program (px117).** The console
   draws a pointer, an arrow over the cell it is on, from the first motion of
   any USB mouse or tablet, and moves it by drawing two cells. A program that
