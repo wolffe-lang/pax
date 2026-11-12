@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# mkmux — build px125's multiplexer probe (user/elf/muxprobe.c), a static
+# x86-64 Linux executable (tests/mpx7-mux).
+#
+#   tools/mkmux OUTDIR
+#
+# tools/mkpty's compiler line (`cc -static -no-pie -O1`, ET_EXEC with no
+# PT_INTERP, checked). Build on a baseline x86-64 glibc (the CI runner's
+# Ubuntu; an Ubuntu container on a lane host), never on a host whose
+# glibc's start-up needs a newer CPU (px10). Prints `<name> <sha256>
+# <bytes>`. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkmux OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+for src in "$PAX_ROOT/user/elf/muxprobe.c"; do
+    p=$(basename "$src" .c)
+    "$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+        -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$src" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
