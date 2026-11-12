@@ -20,7 +20,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
 | Disks | Up to eight disks: virtio (four), NVMe (`nvme0n1`, major 259), SATA AHCI (`sda`, major 8, LBA48; a controller in RAID mode named and left alone), or USB mass storage (`sdX`, Bulk-Only Transport), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on every bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
 | Network | virtio-net, and Intel's 82576 (by MSI-X) and I225/I226 (polled) on one ring model; ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections; a DHCP client (RFC 2131) when `/etc/pax-net` says `dhcp`, with `/etc/resolv.conf` from the lease, or a static address when it says `static`; the console every image boots takes its address so, bounded: a missing device, a cable with no link or a server that never answers never stops the boot; names resolve through the C library's resolver as on Linux (`/etc/hosts`, then DNS) | Linux in a namespace, captures rebuilt byte by byte, and dnsmasq as a black box for every lease event |
-| Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; USB mice and tablets, their events in `/dev/mouse0`, a pointer on the screen and xterm's SGR mouse reports for the program that asks; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
+| Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; USB mice and tablets, their events in `/dev/mouse0`, a pointer on the screen and xterm's SGR mouse reports for the program that asks; a firmware-sized framebuffer with the Linux VT's colours and 690 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
 | Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh` and its server `burrowd`, yew, lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
@@ -613,8 +613,10 @@ The console supports:
 
 - the Linux VT's colour renditions (dim, italic, underline, RGB mapped to its small palette), `OSC P` and `OSC R` for
   the palette, sixteen CSI parameters, scroll margins, character and line insertion and deletion;
-- 560 glyphs: every braille pattern, the block elements and the other code points the wolf games use
-  (`font/extent.txt`); anything else above U+00FF is `?`;
+- 690 glyphs: every braille pattern, the block elements, the code points the wolf games use and (px125) the whole
+  box-drawing block, the four arrows U+2190-U+2193 and the powerline separators U+E0A0-U+E0A2 and U+E0B0-U+E0B3
+  (`font/extent.txt`); anything else above U+00FF is `?`. Every code point takes one cell, a wide or combining
+  character too;
 - the keypad's navigation with NumLock off and digits with it on, decimal entry with Alt and hexadecimal with AltGr;
 - Ctrl with a letter or one of `@[\]^_` types its control character, and (px125) Ctrl-Space NUL, as xterm sends it:
   a terminal multiplexer's usual prefix key;
