@@ -292,6 +292,20 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
   Linux's side is recorded again with that probe (implemented): the row sees the redraw on both systems, every time;
   (B) ruled.txt accepts either form of `S|4`: the race stays, and the row could no longer see a redraw that went
   missing.
+- **R-px129-13, a console write and the rest of the machine (§12).** (A) the drawing moves to a kernel thread that
+  draws from the shadow grid with interrupts on, a write only parses its bytes into the cell grid, in chunks of at
+  most 4 KiB with an interrupt window between chunks, and a console write lock keeps two writers' sequences whole
+  (recommended): every span with interrupts off is one chunk's parse, about 0.2 ms, whatever the framebuffer costs,
+  and a flood is drawn at the thread's pace, its frames coalesced; (B) the same chunked parse, the flush in slices of
+  a few rows with an interrupt window between slices: no thread, but the writer still pays for every frame's
+  drawing, and on an uncached framebuffer a slice of eight rows is tens of milliseconds with interrupts off; (C) a
+  woken network thread preempting at once: the interrupts-off span itself is untouched. Not built; its row is
+  tests/mpx3-conflood's F2, red now.
+- **R-px129-14, the framebuffer's mapping on record (§12).** (A) kernel/fb's choice (`wc` or `uc`), IA32_PAT as read
+  back, and kernel/screen's scroll way (redraw or copy, how it was decided, the probe's read and write costs) on
+  /proc/pax-boot's framebuffer line, so the boot log keeps them, with a row in mpx3-screen holding the line there
+  to the console's `screen:` line (recommended); (B) the console line only, as now: on the installed machine nothing
+  an ordinary user or root can read after boot says whether the framebuffer is write-combined. Not built.
 - **R-px129-15, a console write and the UART (§11).** (A) a program's terminal output kept off COM1 on an installed
   system by default, mirrored with a command-line word, the kernel's own lines still on COM1; (B) a transmit ring
   the UART's transmit interrupt drains, the FIFO filled 16 bytes at a time, a full ring dropping and counting, no
@@ -403,3 +417,54 @@ finished, and on that machine `sgr`'s one frame took 18 s; the tests took 93 s. 
 before the tests, a probe of 512 bytes of `ESC [ m` (the least of three writes) gives a byte's cost, and a test whose
 largest write would outrun its budget at that cost is skipped, its line saying so. With the UART's fix in, a byte's
 cost is the parse's again, and nothing is skipped.
+
+## 12. The installed machine's run: a console flood and the rest of the machine
+
+**What happened.** The timing program (version 3) was run at the installed machine's console on an image of trunk's
+console. It drew for about 20 minutes where its wrapper promised a minute or two; ssh sessions froze, ping round
+trips reached 2 s, a new ssh connection timed out at the banner, its results file stayed empty, and the wall clock
+fell 20 minutes behind and stayed there (pax#384). The person at the console saw each new line start a repaint that
+travelled down the screen row by row, slowly enough to watch.
+
+**Why the program ran so long.** Version 3 bounded each test by 8 s of CLOCK_MONOTONIC, the clock that loses the
+ticks a console write's interrupts-off span swallows (#370, R-px129-6); under TCG at trunk's drawing the clock kept
+29 % of the time the tests took, and on the metal less still, so the bound never came and every test ran its 100
+frames. Version 4 bounds the run by the TSC at the idle second's rate: 60 s of tests, 4 s a test, frames fitted to
+the first frame's cost, 10 ms asleep between frames, each test's line written to a file as it ends, Ctrl-C leaving
+those lines (`1909d4de`); its first line says what the kernel's records say about the framebuffer's caching, and
+right after `plain` it infers it from a full screen drawn: about 10 ms means write-combined, 100 ms or more uncached
+(`e5fcf3f1`, `d4574d95`). Under TCG at trunk's drawing it ended in 42 s where version 3 would run for many minutes.
+
+**Why the machine starved.** Every system call runs with interrupts off: SYSCALL's FMASK, 0x44700, clears IF
+(kernel/user's header), and nothing inside a console write sets it again. A write's bytes go to `serial.put` and
+`screen.put` one at a time, and with no UART there is nothing to wait on, so a write is one span with interrupts
+off: no tick (its time lost), no network interrupt, no switch. After the write the pending tick switches away only
+when the writer's quantum, two delivered ticks, is used; the device's interrupt only queues kernel/netd at the run
+queue's tail. A process that writes the console back to back therefore holds the CPU for about two writes a turn,
+and every hop of a reply (netd for a ping; netd, the server, netd for an ssh keystroke) waits about that long. At
+trunk a scroll redraws every cell whose value changed, top row to bottom, straight to the framebuffer (`scroll`,
+the redraw way px87 chose for a GPU): with text on the screen that is the whole screen, about 14.7 MB of stores a
+line at 2560 × 1440, and the travelling repaint the person saw. The CPU's share is about 0.5 µs a cell; a pass slow
+enough to watch means each 8-byte store costs a bus round trip, which is what an uncached mapping does, and nothing
+on the machine records whether kernel/fb mapped it write-combined (R-px129-14). px129's head draws each changed
+cell once a write, never reading the framebuffer, so a ten-line write is one pass, not ten; a one-line write that
+scrolls is still one full pass, still with interrupts off.
+
+**Measured in QEMU** (tests/mpx3-conflood, `3cd49a6c` and `bf78b054`: user/elf/conflood as init, its UDP echo
+child, 6 s idle, a 12 s flood, 6 s idle; tests/mpx3-conflood.d/peer.py the whole network, pinging the machine and
+timing a process's echo every 50 ms; KVM, native BIOS, 2560 × 1440 with `fbwrite`, no COM1, on the laptop). Every
+request was answered; idle, both took under 0.5 ms. During the flood (p95, ms):
+
+| a write | trunk: writes, ping, echo | px129's head: writes, ping, echo |
+|---|---|---|
+| ten scrolled lines | 42 (about 288 ms each), 605, 1242 | 3848, 19.5, 39.2 |
+| a whole screen of changed text | 184 (65 ms), 120, 258 | 3542, 20.0, 38.3 |
+| 256 KiB, an SGR before every character | 3 (about 5 s), 10237, 14294 | 217 (55 ms), 108, 217 |
+
+The echo waits about two or three writes, the ping about one. F2 (ping and echo each at least 95 % answered, p95 at
+most 50 ms during the flood) is red at trunk in every mode and at px129's head for large writes: px129 shrinks the
+starvation and bounds none of it, and on the metal, where a pass of stores costs more, its small writes would cost
+more too. R-px129-13 is the fix's design. F2's record at `d4092dee` (`notes/px129/rig/flood.manifest`, record
+sha256 `a43adc490ecea58356f5322b9d7f05ae98404450f75ecfab4b616b50d2bb9cb3`): `FAIL F2 ping during the flood: 119 of 119
+answered (100%, at least 95%), p95 104.032 ms` and `FAIL F2 echo during the flood: … p95 212.351 ms` for the large
+writes, the other two modes passing; `END flood exit=1 secs=83`.
