@@ -16,6 +16,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 PAX_WOLF=$(tools/fetch-wolf | tail -n 1) || exit 2
 export PAX_WOLF
+tools/fetch-limine > /dev/null || exit 2
 elf=$(tools/build-kernel --src kernel/kmain_console.lu "$out/k" 2> "$out/build-kernel.log") || { cat "$out/build-kernel.log"; exit 2; }
 echo "kernel: $elf $(sha256sum < "$elf" | cut -c1-64)"
 tools/mkconspeed "$out/bin" || exit 2
