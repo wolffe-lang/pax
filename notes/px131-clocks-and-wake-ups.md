@@ -31,7 +31,7 @@ of one vector is held, further ones at the same vector are lost), the IA-PC HPET
 
 ## 2. The prediction, scored
 
-Committed first (`e5a975d2`, `notes/px131/prediction-2.txt`), before the rows and any change:
+Committed first (`0d9cb2f5`, `notes/px131/prediction-2.txt`), before the rows and any change:
 
 - **C1** (the clocks count delivered ticks and stand still through a stretch): held.
 - **C2** (beside console writes the clocks keep about 8 %, beside file writes about a quarter; a 2 % bound red by more
@@ -114,8 +114,10 @@ host a page fault, and a fork's or an mmap's fresh frames showed those as stretc
 trunk's kernel as on this one; with the network's wake-ups at once, `spin`'s worst ping fell to a few milliseconds and
 such a stretch alone could fail L2.
 
-Under KVM at 1 GiB, BIOS and UEFI (and BIOS at 2 GiB), red at the rows' commit `736f0830` (the first part's kernel) and
-green at `96986862` (record sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7`):
+Under KVM at 1 GiB, BIOS and UEFI (and BIOS at 2 GiB), red at the rows' commit and green with the fixes and the backed
+memory (records at `736f0830` and `96986862`, the same commits before this part was replayed onto the first part's link
+fix, kept as `px131-clocks-wake-before-rebase`; green record sha256
+`f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7`):
 
 | row | before | after |
 |---|---|---|
@@ -150,13 +152,13 @@ still); a device's wake-up changes only the order in which ready threads run. At
 
 | what | where | result |
 |---|---|---|
-| the prediction | `e5a975d2` | before the rows |
-| the rows: the probe's clocks and `flood`, the host's flood, L4 to L6 | `903d6872`, `aef2d6a8`, `e73183ab`; the rig `736f0830` | |
-| **red at the rows' commit** | `notes/px131/rig/red-2.manifest` at `736f0830` (the first part's kernel), a light take, record sha256 `106be51c03ef7b2675231122ccc2919065663c08be1a7db52927b97e9a155805` | `FAIL L4 native-bios-1024 console:65536` (both clocks 0.071 of the counter's time), `FAIL L4 … write:64` (0.399), `FAIL L5 native-bios-1024` (the ping beside `spin` p99 40,147 us, at idle 1,357: 29.59 times), and the same three on UEFI (0.073, 0.309, 26.30 times); L6 held (1.00); `END latency exit=1 secs=93` |
-| the clocks | `39515cc9`, `01ec0fa6`, `5101bba6`, `812b5544` | |
-| the wake-ups | `17b78f90`, `26d75f4d` | |
-| the guest's memory backed | `96986862` | |
-| green at `96986862`, the guard and the scheduler | `notes/px131/rig/green-2a.manifest`, a light take, sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7` | section 5's table; `END ci-plan exit=0 secs=111`, `END latency exit=0 secs=88`, `END latency-2g exit=0 secs=45`, `END latency-tcg exit=0 secs=50`, `END sched exit=0 secs=17`, `END interrupts exit=0 secs=41` |
+| the prediction | `0d9cb2f5` | before the rows |
+| the rows: the probe's clocks and `flood`, the host's flood, L4 to L6 | `29999578`, `9f69596a`, `a7090a7b`; the rig `01a729ba` | |
+| **red at the rows' commit** | `notes/px131/rig/red-2.manifest` at `736f0830` (before the replay; `01a729ba` after it): the first part's kernel without its link fix, a light take, record sha256 `106be51c03ef7b2675231122ccc2919065663c08be1a7db52927b97e9a155805` | `FAIL L4 native-bios-1024 console:65536` (both clocks 0.071 of the counter's time), `FAIL L4 … write:64` (0.399), `FAIL L5 native-bios-1024` (the ping beside `spin` p99 40,147 us, at idle 1,357: 29.59 times), and the same three on UEFI (0.073, 0.309, 26.30 times); L6 held (1.00); `END latency exit=1 secs=93` |
+| the clocks | `fefe6ca9`, `ac814904`, `3aca7b48`, `8b46fc76` | |
+| the wake-ups | `05bf0fa3`, `5005d5cc` | |
+| the guest's memory backed | `4bf2f55c` | |
+| green at `96986862` (before the replay; `4bf2f55c` after it), the guard and the scheduler | `notes/px131/rig/green-2a.manifest`, a light take, sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7` | section 5's table; `END ci-plan exit=0 secs=111`, `END latency exit=0 secs=88`, `END latency-2g exit=0 secs=45`, `END latency-tcg exit=0 secs=50`, `END sched exit=0 secs=17`, `END interrupts exit=0 secs=41` |
 | the takes at the head, native and release, and the plant | `notes/px131/rig/{green-2a,green-2b,release-2,plant-2}.manifest` | their records and `END` lines are in the PR |
 
 ## 8. Decisions
