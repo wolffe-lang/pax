@@ -475,7 +475,7 @@ def boot1(con):
 
 def boot_disk(work, img):
     """I13: two boots of one disk whose volume is `/`."""
-    the_iso = iso(work, 'disk', 'quiet root=/dev/vda')
+    the_iso = iso(work, 'disk', 'quiet root=/dev/vda rw')  # rw: without it / mounts read-only, as Linux's
     a = Console(ARGS.out / 'boot2-disk', the_iso, str(img))
     try:
         if not login(a, 'pax', 'I13'):
