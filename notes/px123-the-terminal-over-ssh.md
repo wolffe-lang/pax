@@ -83,3 +83,17 @@ B22 and B23 hold burrow's layer and pass with the hook as it was; B27, burrowd's
 The diagnosis in §1 and the check of the fix in §2 ran on a copy of an installed disk upgraded over ssh to the first
 image that carried burrowd's terminal, booted under KVM with OpenSSH 10.2p1 as the client; the rows above are the
 suite's own image.
+
+## 5. The rebase
+
+The branch was rebased from trunk `309036ec` onto `48ea81ba`, the head of pax#349 (a USB device plugged in after
+boot gets a record), which reached trunk first. The seven commits before it are kept on `px123-before-rebase` (head
+`d10ae117`), and the plant take's commit with its parent on `px123-plant-before-rebase` (head `75102b90`, on
+`662bd69f`, whose tree is `d10ae117`'s but for this note's §4); the shas §4 cites are theirs. Two files conflicted,
+both prose, and each kept both sides:
+- `CHANGELOG.md`: the terminal's paragraph heads the Unreleased list, above pax#349's;
+- `docs/SOURCES.md`: px123's section follows px120's.
+
+`git range-diff` shows the other five patches unchanged. pax#349 changes the kernel's frame allocator and xHCI
+driver, which the burrowd suite's image carries, so the records at this branch's head are taken afresh, not carried
+from §4.
