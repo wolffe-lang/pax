@@ -11,9 +11,11 @@
  * nothing else. Ctrl-C puts the terminal back too.
  *
  * Every frame is one write(2) (repeated until all of it is taken), timed
- * with RDTSC, whose rate is measured against CLOCK_MONOTONIC from the
- * first frame to the last (PAX's CLOCK_MONOTONIC moves in 10 ms ticks,
- * pax#299, so it alone cannot time a frame). Each test runs REPS frames
+ * with RDTSC, whose rate is measured against CLOCK_MONOTONIC over an idle
+ * second spun before the tests and another after (PAX's CLOCK_MONOTONIC
+ * moves in 10 ms ticks, pax#299, so it alone cannot time a frame, and it
+ * loses the ticks that arrive while a console write runs with interrupts
+ * off, so it is short across the tests: the `kept` figure). Each test runs REPS frames
  * (default 100) or until SECONDS (default 8) have passed, whichever is
  * first, and at least one. The tests, the grid being the terminal's
  * TIOCGWINSZ (COLS x ROWS):
@@ -69,7 +71,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "conspeed 1 (px129)"
+#define VERSION "conspeed 2 (px129)"
 #define MAXREPS 100000
 
 static int g_fd = -1;
@@ -142,6 +144,15 @@ static void edge(uint64_t *ns, uint64_t *tsc) {
     do { m = mono_ns(); } while (m == m0);
     *ns = m;
     *tsc = g_tsc ? rdtsc() : 0;
+}
+
+/* A second of CLOCK_MONOTONIC spun in user mode, edge to edge, and the
+ * TSC at both edges. */
+static void idle_rate(uint64_t *n0, uint64_t *t0, uint64_t *n1, uint64_t *t1) {
+    edge(n0, t0);
+    uint64_t m;
+    do { m = mono_ns(); } while (m - *n0 < 1000000000ull);
+    edge(n1, t1);
 }
 
 /* A stamp: the TSC when it runs, else nanoseconds. */
@@ -456,23 +467,40 @@ int main(int argc, char **argv) {
     signal(SIGHUP, on_signal);
     signal(SIGQUIT, on_signal);
 
-    uint64_t m0, c0, m1, c1;
-    edge(&m0, &c0);
+    /* The TSC's rate is measured while nothing else runs: a second of
+     * CLOCK_MONOTONIC spun in user mode before the tests and another after
+     * (a console write runs with interrupts off, and ticks that arrive then
+     * are lost: the clock is short across the tests themselves, which the
+     * `kept` figure shows). */
+    uint64_t a0, ac0, a1, ac1, b0, bc0, b1, bc1, m0, c0, m1, c1;
+    idle_rate(&a0, &ac0, &a1, &ac1);
+    m0 = mono_ns();
+    c0 = g_tsc ? rdtsc() : 0;
     g_entered = 1;
     write_all("\033[?1049h\033[?25l\033[0m", 18);
     for (int i = 0; i < g_ntests; i++) run_test(&g_tests[i], reps, secs, samples);
     write_all(RESTORE, g_restore_n);
     g_entered = 0;
     tcflush(g_fd, TCIFLUSH);
-    edge(&m1, &c1);
+    m1 = mono_ns();
+    c1 = g_tsc ? rdtsc() : 0;
+    idle_rate(&b0, &bc0, &b1, &bc1);
 
     /* Ticks a millisecond: TSC cycles, or nanoseconds without it. */
-    double per_ms = g_tsc ? (double)(c1 - c0) / ((double)(m1 - m0) / 1e6) : 1e6;
+    double before = g_tsc ? (double)(ac1 - ac0) / ((double)(a1 - a0) / 1e6) : 1e6;
+    double after = g_tsc ? (double)(bc1 - bc0) / ((double)(b1 - b0) / 1e6) : 1e6;
+    double per_ms = (before + after) / 2;
     printf("%s: frames to %s, %dx%d cells%s, TERM=%s\n", VERSION, ttyname_, g_cols, g_rows,
            sized ? "" : " (no TIOCGWINSZ: assumed)", term ? term : "(unset)");
     if (fb[0]) printf("%s\n", fb);
-    if (g_tsc) printf("clock: TSC at %.1f MHz against CLOCK_MONOTONIC over %.2f s\n", per_ms / 1e3, (double)(m1 - m0) / 1e9);
-    else printf("clock: CLOCK_MONOTONIC alone (RDTSC refused), %.2f s\n", (double)(m1 - m0) / 1e9);
+    if (g_tsc) {
+        double tests_ms = (double)(c1 - c0) / per_ms;
+        printf("clock: TSC at %.1f MHz (idle second before %.1f, after %.1f); the tests took %.2f s, of which "
+               "CLOCK_MONOTONIC kept %.0f%%\n", per_ms / 1e3, before / 1e3, after / 1e3, tests_ms / 1e3,
+               100.0 * ((double)(m1 - m0) / 1e6) / tests_ms);
+    } else {
+        printf("clock: CLOCK_MONOTONIC alone (RDTSC refused), %.2f s\n", (double)(m1 - m0) / 1e9);
+    }
     printf("%-10s %6s %9s %7s %10s %10s %8s %8s\n", "test", "frames", "bytes", "cells", "ms mean", "ms least", "MB/s", "us/cell");
     double byte_us = -1, plain_ms = -1;
     size_t plain_bytes = 0, plain_cells = 0;
