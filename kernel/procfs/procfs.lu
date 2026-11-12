@@ -124,6 +124,7 @@ use bootlog
 use bootmark
 use cred
 use frames
+use kmsg
 use paging
 use pty
 use sched
@@ -135,7 +136,7 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 58
+pub const ENTRIES: u64 = 60
 /// No entry.
 pub const NONE: u64 = 58
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
@@ -209,6 +210,13 @@ const PTYMAX: u64 = 55
 /// /proc/partitions is), both in `/proc`.
 pub const PAXBOOT: u64 = 56
 pub const PAXBOOTLOG: u64 = 57
+/// px130: `/proc/sys/kernel/dmesg_restrict` (1 at boot: the log is
+/// root's to read; root may write 0 or 1) and `/proc/sys/kernel/printk`
+/// (console_loglevel, default_message_loglevel, minimum_console_loglevel
+/// and default_console_loglevel, tab-separated: kernel/kmsg's; root may
+/// write the first), fixed entries of `/proc/sys/kernel`, both 0644.
+pub const DMESG_RESTRICT: u64 = 58
+pub const PRINTK: u64 = 59
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
@@ -273,6 +281,8 @@ const G_PTYNR: u64 = 26 // px111 (25 is PMEM's mark)
 const G_PTYMAX: u64 = 27
 const G_PAXBOOT: u64 = 28 // px118
 const G_PAXBOOTLOG: u64 = 29 // px118: the length only; kernel/files makes each read's bytes
+const G_DMESG: u64 = 30 // px130
+const G_PRINTK: u64 = 31
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -342,11 +352,37 @@ fn limit_units(res: u64) -> str {
     "bytes"
 }
 
+/// px130: whether reference `r` is a setting root may write (kernel/files'
+/// `setting_write`): dmesg_restrict and printk.
+pub fn setting(r: u64) -> bool {
+    let e = entry(r)
+    e == DMESG_RESTRICT || e == PRINTK
+}
+
+/// px130: setting `r` written with the number `v`: dmesg_restrict takes 0
+/// or 1, printk's first value is the console level (1-8, kernel/kmsg
+/// holds it there). False for a value it does not take.
+pub fn set(r: u64, v: u64) -> bool {
+    let e = entry(r)
+    if e == DMESG_RESTRICT {
+        if v > 1 {
+            return false
+        }
+        kmsg.set_restricted(v == 1)
+        return true
+    }
+    if e == PRINTK {
+        kmsg.set_console_level(v)
+        return true
+    }
+    false
+}
+
 /// Whether `e` is a fixed entry (one a name finds in its directory, and
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == DMESG_RESTRICT || e == PRINTK
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -582,6 +618,8 @@ pub fn name(e: u64) -> str {
     if e == KERNEL { return "kernel" } // px55
     if e == CORE_PATTERN { return "core_pattern" }
     if e == PTYDIR { return "pty" } // px111
+    if e == DMESG_RESTRICT { return "dmesg_restrict" } // px130
+    if e == PRINTK { return "printk" }
     if e == PTYNR { return "nr" }
     if e == PTYMAX { return "max" }
     if e == SLIMITS || e == PLIMITS { return "limits" }
@@ -682,7 +720,7 @@ pub fn parent(r: u64) -> u64 {
     if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
-    if e == CORE_PATTERN || e == PTYDIR { return KERNEL }
+    if e == CORE_PATTERN || e == PTYDIR || e == DMESG_RESTRICT || e == PRINTK { return KERNEL } // px130: dmesg_restrict, printk
     if e == PTYNR || e == PTYMAX { return PTYDIR } // px111
     if e == NET { return 4 }
     if e == IPV4 { return NET }
@@ -722,6 +760,8 @@ fn gen(r: u64) -> u64 {
     if e == CORE_PATTERN { return G_CORE_PATTERN } // px55
     if e == PTYNR { return G_PTYNR } // px111
     if e == PTYMAX { return G_PTYMAX }
+    if e == DMESG_RESTRICT { return G_DMESG } // px130
+    if e == PRINTK { return G_PRINTK }
     if e == SLIMITS || e == PLIMITS { return G_LIMITS }
     if e == PARTITIONS { return G_PARTITIONS } // px66
     if e == PAXBOOT { return G_PAXBOOT } // px118
@@ -774,8 +814,8 @@ pub fn mode(r: u64) -> u64 {
     if e == PENVIRON || e == SENVIRON || e == PAXBOOTLOG {
         return S_IFREG | 0x100 // px45: 0400 (measured); px118: the previous boot's console, root's alone
     }
-    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || e == UNPRIV || (e >= PROTECTED && e < PROTECTED + 4) || e == CORE_PATTERN || e == PTYMAX {
-        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups, px44's protected settings, px45's port setting, px55's core_pattern (measured)
+    if e == 6 || e == 11 || e == 21 || e == PSETGROUPS || e == UNPRIV || (e >= PROTECTED && e < PROTECTED + 4) || e == CORE_PATTERN || e == PTYMAX || e == DMESG_RESTRICT || e == PRINTK {
+        return S_IFREG | 0x1a4 // 0644: overcommit_memory, cpu.max, setgroups, px44's protected settings, px45's port setting, px55's core_pattern (measured); px130's dmesg_restrict and printk
     }
     S_IFREG | 0x124 // 0444
 }
@@ -1719,6 +1759,19 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = put_b(base, n, 10)
     } else if g == G_PTYMAX {
         n = put_dec(base, 0, pty.PTYS)
+        n = put_b(base, n, 10)
+    } else if g == G_DMESG {
+        n = put_s(base, 0, if kmsg.restricted() { "1\n" } else { "0\n" }) // px130
+    } else if g == G_PRINTK {
+        // px130: console_loglevel, default_message_loglevel,
+        // minimum_console_loglevel, default_console_loglevel
+        n = put_dec(base, 0, kmsg.console_level())
+        n = put_b(base, n, 9)
+        n = put_dec(base, n, kmsg.DEFAULT)
+        n = put_b(base, n, 9)
+        n = put_dec(base, n, kmsg.MIN_LEVEL)
+        n = put_b(base, n, 9)
+        n = put_dec(base, n, kmsg.ALL_LEVEL)
         n = put_b(base, n, 10)
     } else if g == G_CONTROLLERS {
         n = put_s(base, 0, "cpu\n")
