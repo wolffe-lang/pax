@@ -533,7 +533,7 @@ step toward M-PX4.
 | module or file | what |
 |---|---|
 | `udp/` | RFC 768: `input` (from `netd`, for protocol 17: `short`, `length`, `checksum` — zero is "none made" — `port-zero`, then the socket that takes the datagram or `no-port`, or `full` when its queue has no room), the pseudo-header checksum, `send` (the caller's bytes behind a header in the module's frame, then `ip.send`), loopback (a datagram for the station's own address or 127/8 goes to the receiving side in the same call), 16 sockets in `boot/net.S`'s `pax_udp_socks` — local address and port, peer, receive timeout, a 65,536-byte ring in 16 frames taken at `open` and freed at `close` — which are the port table too (`bind`: `EADDRINUSE` for the same port on the same address or on every address; ephemeral ports 32768-60999, sequential from a start the time-stamp counter picks), counters by cause |
-| `socket/` | the calls: `socket`, `bind`, `connect` (and AF_UNSPEC), `sendto`, `recvfrom` (`MSG_DONTWAIT`, `MSG_PEEK`, `MSG_TRUNC`; px104: `MSG_ERRQUEUE`, -EAGAIN, the error queue always empty), `getname` (both), `setsockopt` and `getsockopt` (`SO_RCVTIMEO_OLD`; `SO_TYPE`, `SO_ERROR`; px104: SOL_IP's `IP_RECVERR`, kept and read back), px104's `sendmmsg` (a vector of datagrams, each its iovecs gathered and sent as `sendto` sends one, its `msg_len` written; ancillary data refused by name) and FIONREAD on a datagram socket (`fionread`: the next datagram's length), what a C library's resolver asks; `no_connections` (`listen`, `accept`, `accept4`: -EOPNOTSUPP); `struct sockaddr_in` read and written through `uaccess`; each refusal's errno as Linux gave the witness, and the ones PAX names logged once a process (`why`, `detail`) |
+| `socket/` | the calls: `socket`, `bind`, `connect` (and AF_UNSPEC), `sendto`, `recvfrom` (`MSG_DONTWAIT`, `MSG_PEEK`, `MSG_TRUNC`; px104: `MSG_ERRQUEUE`, -EAGAIN, the error queue always empty), `getname` (both), `setsockopt` and `getsockopt` (`SO_RCVTIMEO_OLD`; `SO_TYPE`, `SO_ERROR`; px104: SOL_IP's `IP_RECVERR`, kept and read back), px104's `sendmmsg` (a vector of datagrams, each its iovecs gathered and sent as `sendto` sends one, its `msg_len` written; ancillary data refused by name) and FIONREAD on a datagram socket (`fionread`: the next datagram's length), what a C library's resolver asks; px127's `recvmsg` on a datagram socket (the datagram scattered over the iovecs, the sender cut to `msg_namelen`, which then says 16, `msg_controllen` 0, `msg_flags` MSG_TRUNC for a short buffer; recvfrom's flags and waits; a stream socket's refused by name), what musl's resolver reads its answers with, so a program `wolf build` makes on PAX finds a host; `no_connections` (`listen`, `accept`, `accept4`: -EOPNOTSUPP); `struct sockaddr_in` read and written through `uaccess`; each refusal's errno as Linux gave the witness, and the ones PAX names logged once a process (`why`, `detail`) |
 | `files/` | kind `K_INET`: a descriptor on an open file whose node is `udp`'s socket number; the last close calls `udp.close`; `sock_kind`, `inet_open`, `inet_sock`, `nonblocking`; `open_files`, `pipes_held` for the books |
 | `user/` | the dispatch (41-45, 49-52, 54, 55, 288; px104: 307, and `ioctl` FIONREAD on a datagram socket); `read` and `write` on a socket; a waiting receive parks through `sched.block_pipe_until` when the socket has a timeout |
 | `sched/` | `block_pipe_until(f, tick)`: a pipe wait the timer ends too; `wait_down_to(n)`: `wait_all` for a kernel whose own threads never exit |
@@ -558,7 +558,7 @@ step toward M-PX4.
   `push`) or its deadline comes. No close can reach a socket a receive
   is parked on: a process has one thread, and its own reference keeps
   the socket.
-- Not yet: `sendmsg`, `recvmsg`, `shutdown`; `poll`, `select`, `epoll`;
+- Not yet: `sendmsg`, `shutdown`; `poll`, `select`, `epoll`;
   any option but the three; a datagram over 1472 bytes (nothing
   fragments) or to a broadcast address; an ICMP error delivered to a
   socket (a connected socket never sees ECONNREFUSED); loopback below
@@ -604,7 +604,8 @@ programs that open AF_INET stream sockets (`tests/mpx4-tcp`,
   call run again finds its handshake and not a second one.
 - Not yet (px23; `poll`, `epoll` and `eventfd` are px24's, below, and
   threads and `futex` px26's): `select`; `sendmsg`,
-  `recvmsg`; `SO_LINGER`, `SO_KEEPALIVE`, `SO_RCVBUF`/`SO_SNDBUF`,
+  `recvmsg` (refused by name on a stream socket; px127 serves it on a
+  datagram socket); `SO_LINGER`, `SO_KEEPALIVE`, `SO_RCVBUF`/`SO_SNDBUF`,
   `SO_RCVTIMEO` on a stream, `TCP_CORK`, `MSG_WAITALL`, `MSG_OOB`;
   window scaling, SACK, timestamps and PAWS, NewReno's partial-ACK
   rule, a delayed ACK, path MTU discovery, keep-alives; an ICMP error
