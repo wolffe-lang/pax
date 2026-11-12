@@ -26,8 +26,10 @@ ctr() {
     local dev=(); [ "$kvm" = 1 ] && dev=(--device /dev/kvm)
     # sys (px123's): a suite whose Linux side runs in a throwaway container (tools/linux-tree) gets
     # engine-ns, which runs that container's command in a fresh mount namespace of this one
-    [ "$kvm" = sys ] && dev=(--device /dev/kvm --cap-add SYS_ADMIN --security-opt systempaths=unconfined
-                            -e PAX_ENGINE="$(realpath "${GAUNTLET_RIG_DIR:?}")/engine-ns")
+    # (its fresh network namespace sets the unprivileged-port sysctl: NET_ADMIN, as px123's had)
+    [ "$kvm" = sys ] && dev=(--device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN
+                            --security-opt systempaths=unconfined
+                            -e PAX_ENGINE="$(realpath "${GAUNTLET_RIG_DIR:?}")/engine-ns" -e PAX_REQUIRE_QEMU=1)
     local mnt=(-v "$L:$L"); [ "$R" = "$L" ] || mnt+=(-v "$R:$R")
     local lin=(); [ -n "${LK:-}" ] && lin=(-v /nix/store:/nix/store:ro -e "PAX_LINUX_KERNEL=$LK" -e "PAX_LINUX_MODULES=${LM:-}")
     local caps=(); for c in ${CTR_CAPS:-}; do caps+=(--cap-add "$c"); done
