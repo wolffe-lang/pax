@@ -136,3 +136,23 @@ Reading: the musl resolver sends its A and AAAA questions with sendto and reads 
 recvmsg (47). PAX answers recvmsg -ENOSYS, so no answer is ever read: the resolver asks again after
 2.5 s, gives up after 5 s, and net.connect answers io. den (glibc) reads with recvfrom and resolves.
 A name /etc/hosts holds is answered before any socket is made.
+
+## Probe 3: a truncated answer (after the fix's rows; on Linux, black box)
+
+A UDP server on 127.0.0.1:53 that answers every question with TC set and no records, and a TCP server on the
+same port that answers big.test's A question with 10.0.2.2 (RFC 1035 4.1.1 and 4.2.2). Both musl builds were
+asked for big.test: user/net/gai.c linked by Ubuntu's musl-gcc (musl 1.2.4), and the dialer the dev image's
+own compiler built (probe 1's). Both asked again over TCP, and both resolved (`gai big.test: inet
+10.0.2.2:443`; the dialer then found no route, its container having no network). The calls after the
+truncated UDP answers, the same for both:
+
+    socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 4
+    setsockopt(4, SOL_TCP, TCP_FASTOPEN_CONNECT, [1], 4) = 0
+    sendmsg(4, {msg_name={sa_family=AF_INET, sin_port=htons(53), ...}, msg_namelen=16, msg_iov=[{"\0\32", 2}, {<the question>, 26}], ...)
+    sendmsg(4, {msg_name=NULL, msg_namelen=0, msg_iov=[{"\0\32", 2}, {<the question>, 26}], msg_iovlen=2, ...})
+    recvmsg(4, {msg_name=NULL, msg_namelen=0, msg_iov=[{"\0*", 2}, {<the answer>, ...}], msg_iovlen=2, ...})
+
+So an answer too long for one UDP datagram (over 512 bytes: musl asks with no EDNS) needs, on a stream socket,
+TCP_FASTOPEN_CONNECT, `sendmsg` with and without a destination, and `recvmsg`, none of which PAX serves. A
+short answer, such as github.com's, never reaches this path. Left for a lane of its own (notes/px127-names.md,
+R-px127-3).
