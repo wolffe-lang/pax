@@ -250,7 +250,9 @@ def disk(work):
             attrs[key] = ((0o040755 if p.is_dir() else 0o100644), 0, 0)
     img = work / 'root.img'
     env = dict(PATH='/usr/sbin:/sbin:/usr/bin:/bin', E2FSPROGS_FAKE_TIME='1700000000')
-    run(['mke2fs', '-q', '-F', '-t', 'ext2', '-L', 'px124-root', '-d', stage, img, '96M'], env=env)
+    size = sum(f.stat().st_size for f in stage.rglob('*') if f.is_file())
+    mib = (size * 3 // 2) // (1 << 20) + 64  # the tree, half again for ext2's own, room to write
+    run(['mke2fs', '-q', '-F', '-t', 'ext2', '-L', 'px124-root', '-d', stage, img, '%dM' % mib], env=env)
     cmds = ''
     for path, (mode, uid, gid) in sorted(attrs.items()):
         cmds += 'sif %s mode 0%o\nsif %s uid %d\nsif %s gid %d\n' % (path, mode, path, uid, path, gid)
