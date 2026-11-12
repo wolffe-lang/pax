@@ -298,6 +298,23 @@ def main():
             session(con, 's2', [('sleep 100 &', b'sleep 100 &\r', P), ('jobs', b'jobs\r', P)], out, 'exit')
             session(con, 's3', [('sleep 100 (foreground)', b'sleep 100\r', 1.5)], out, 'drop')
             session(con, 's4', [('cd w (den repo)', b'cd /home/pax/w\r', P), ('ls', b'ls\r', P)], out, 'drop')
+            # A repository of some size: the friendly prompt's `den status --porcelain` has 50 ms (pelt's
+            # docs/FRIENDLY.md) and takes longer here.
+            work5 = [
+                ('make 400 files', b'mkdir -p /home/pax/big && cd /home/pax/big && for i in $(seq 1 400); do echo $i > f$i; done\r', P),
+                ('den init (big)', b'den init\r', P),
+                ('den add (big)', b'den add .\r', P),
+                ('den commit (big)', b'den commit -m many\r', P),
+                ('change 60 files', b'for i in $(seq 1 60); do echo x >> f$i; done\r', P),
+                ('ls | head (big)', b'ls | head -n 2\r', P),
+                ('pwd (big)', b'pwd\r', P),
+                ('den status (big)', b'den status\r', P),
+                ('true (big)', b'true\r', P),
+                ('echo (big)', b'echo hi\r', P),
+                ('den diff | head (big)', b'den diff | head -n 3\r', P),
+                ('den log | head (big)', b'den log | head -n 2\r', P),
+            ]
+            session(con, 's5', work5, out, 'exit')
             end = time.monotonic() + 5
             while time.monotonic() < end:
                 con.pump(0.1)
