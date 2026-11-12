@@ -26,7 +26,10 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   off the screen of a machine with no COM1. Under KVM a row holds a test's
   drawing (its bytes' parse taken off) against a CPU loop of the same boot, so
   it holds on a desktop and a laptop alike; CI's runners boot under TCG, where
-  those rows are skipped by name, so local records hold them.
+  those rows are skipped by name, so local records hold them. mpx5-pty's
+  session driver now waits for pelt's prompt before it resizes the pty
+  (pax#382): it resized the moment a command's marker came, and whether pelt
+  redrew its prompt turned on timing, which the cheaper console writes moved.
 
 - **ligature, the linker in wolf, on the dev image beside lld (px128).** The dev image carries
   `/usr/bin/ligature`, built static from ligature's pinned commit (`user/ligature.pin`, `tools/mkligature`)
