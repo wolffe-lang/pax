@@ -192,6 +192,25 @@ static int putall(int fd, const void *p, size_t n) {
 
 static void puts_fd(int fd, const char *s) { (void)putall(fd, s, strlen(s)); }
 
+/* Bytes as a quoted C-like string, the last 160 at most. */
+static const char *esc(const unsigned char *b, long n) {
+    static char o[1024];
+    size_t k = 0;
+    long i = n > 160 ? n - 160 : 0;
+    o[k++] = '"';
+    for (; i < n && k < sizeof o - 8; i++) {
+        unsigned c = b[i];
+        if (c == '\r') { o[k++] = '\\'; o[k++] = 'r'; }
+        else if (c == '\n') { o[k++] = '\\'; o[k++] = 'n'; }
+        else if (c == '"' || c == '\\') { o[k++] = '\\'; o[k++] = (char)c; }
+        else if (c < 32 || c >= 127) k += (size_t)snprintf(o + k, 8, "\\x%02x", c);
+        else o[k++] = (char)c;
+    }
+    o[k++] = '"';
+    o[k] = 0;
+    return o;
+}
+
 /* --- the flood's stream: xorshift64*, eight bytes a step ------------------ */
 
 struct stream { uint64_t x; uint64_t w; int left; };
@@ -370,6 +389,7 @@ struct pane {
 
 static struct pane P[MAXP];
 static char *SH[] = {"/bin/sh", "-c", LOOP, 0};
+#define NEED(k, row) do { if ((k) < 0) { say("%s no pane: %s\n", row, ename(errno)); fflush(stdout); return; } } while (0)
 static int np;
 static int ep = -1;
 static int rep[2]; /* children's reports before exec: one line each */
@@ -551,6 +571,42 @@ static int cmp_long(const void *a, const void *b) {
 
 static int nr0;
 
+/* How many processes can be at once: children that wait on a pipe until
+ * a fork fails or 100 are made. */
+static void sec_a10(void) {
+    int gate[2];
+    if (pipe2(gate, O_CLOEXEC) < 0) return;
+    pid_t kids[100];
+    int n = 0, e = 0;
+    fflush(stdout);
+    while (n < 100) {
+        pid_t c = fork();
+        if (c == 0) { char b; close(gate[1]); (void)!read(gate[0], &b, 1); _exit(0); }
+        if (c < 0) { e = errno; break; }
+        kids[n++] = c;
+    }
+    close(gate[1]);
+    for (int i = 0; i < n; i++) { int st; waitpid(kids[i], &st, 0); }
+    close(gate[0]);
+    if (n == 100) say("A1.0 100 processes at once besides this one: yes\n");
+    else say("A1.0 100 processes at once besides this one: NO, fork %s after %d\n", ename(e), n);
+    say("~A1.0 processes made at once: %d%s\n", n, n == 100 ? " (the most asked)" : "");
+}
+
+/* /proc/<pid>/status's Threads line. */
+static int threads_of(pid_t p) {
+    char path[64], b[4096];
+    snprintf(path, sizeof path, "/proc/%d/status", (int)p);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    b[n] = 0;
+    char *t = strstr(b, "\nThreads:");
+    return t ? atoi(t + 9) : -2;
+}
+
 static void sec_a1(void) {
     nr0 = pty_nr();
     int made = 0, first = -1, consecutive = 1;
@@ -584,6 +640,9 @@ static void sec_a1(void) {
         if (answered == made) break;
     }
     say("A1.4 %d of %d panes answered a typed line, each its own\n", answered, made);
+    int th = threads_of(P[1].pid);
+    say("A1.4 a pane's shell (pelt) runs %s\n", th == 1 ? "one thread" : th > 1 ? "more than one thread" : th == -2 ? "(no Threads line)" : "(no status)");
+    say("~A1.4 a pane's shell runs %d threads\n", th);
     for (int k = 0; k < made; k++) forget(k);
     fflush(stdout);
 
@@ -607,7 +666,15 @@ static void sec_a1(void) {
         long s0 = now_ms();
         type(k, cmd);
         if (until(k, want, 10000)) { if (nl < 4096) lat[nl++] = now_ms() - s0; }
-        else missed++;
+        else {
+            missed++;
+            struct pstat ps = pstat_of(P[k].pid);
+            say("~A1.6 missed: pane %d ping %d after 10 s; its shell's state %c; the master shows %ld bytes: %s\n", k, seq,
+                ps.state, (long)P[k].len, esc((unsigned char *)P[k].buf, (long)P[k].len));
+            int late = until(k, want, 20000);
+            say("~A1.6 then: %s after %ld ms in all\n", late ? "answered" : "still no answer", now_ms() - s0);
+            fflush(stdout);
+        }
         forget(k);
         seq++;
         long pause_end = now_ms() + 20;
@@ -626,6 +693,15 @@ static void sec_a1(void) {
         nl ? lat[nl / 2] : -1, nl ? lat[nl * 9 / 10] : -1, nl ? lat[nl - 1] : -1);
     /* the flood's pane ends with its program */
     say("A1.7 the flood's program: %s\n", pane_settle(0, 5000));
+    /* half the panes closed: their shells hear the hangup */
+    int hup = 0, odd = 0;
+    for (int k = PANES / 2; k < made; k++) { close(P[k].m); P[k].m = -1; }
+    for (int k = PANES / 2; k < made; k++) {
+        const char *h = pane_settle(k, 5000);
+        if (strcmp(h, "killed by HUP") == 0) hup++;
+        else { odd++; say("~A1.7 pane %d's shell: %s\n", k, h); }
+    }
+    say("A1.7 %d masters closed: %d shells ended by SIGHUP, %d otherwise\n", made - PANES / 2, hup, odd);
     fflush(stdout);
 }
 
@@ -636,7 +712,7 @@ static void sec_a1(void) {
 #define TAG_CONN 2000u
 
 static int lfd = -1;
-static int conns[32], nconn, answered_c, credok, credusr;
+static int conns[32], nconn, answered_c, credok, credusr, forkfail, forkerr;
 static pid_t cpids[32];
 static char cbuf[32][128];
 static size_t clen[32];
@@ -775,11 +851,13 @@ static void sec_a6_clients(int panes) {
             _exit(strcmp(a, w) == 0 ? 0 : 5);
         }
         cpids[k] = c;
+        if (c < 0) { forkfail++; forkerr = errno; }
     }
+    if (forkfail) say("~A6.3 %d clients not made: fork %s\n", forkfail, ename(forkerr));
     /* the loop serves them while the panes still answer */
     long end = now_ms() + 20000;
     int pinged = 0, pongs = 0;
-    while (now_ms() < end && answered_c < 16) {
+    while (now_ms() < end && answered_c < 16 - forkfail) {
         if (pinged < panes - 1) {
             char cmd[64], want[32];
             int k = 1 + pinged;
@@ -796,7 +874,7 @@ static void sec_a6_clients(int panes) {
     int good = 0;
     for (int k = 0; k < 16; k++) {
         int s2;
-        if (waitpid(cpids[k], &s2, 0) == cpids[k] && WIFEXITED(s2) && WEXITSTATUS(s2) == 0) good++;
+        if (cpids[k] > 0 && waitpid(cpids[k], &s2, 0) == cpids[k] && WIFEXITED(s2) && WEXITSTATUS(s2) == 0) good++;
     }
     say("A6.3 16 clients on one listener in the loop beside the panes: %d accepted, %d answered, %d ended well; %d of %d panes answered meanwhile\n",
         nconn, answered_c, good, pongs, pinged);
@@ -816,7 +894,7 @@ static long fionread(int fd) { int n = -1; if (ioctl(fd, FIONREAD, &n) != 0) ret
 static void sec_a2(int panes) {
     char *spew[] = {"/bin/muxprobe", "spew", 0};
     int k = pane_start(spew, 0, 0); /* not in the loop: nobody reads it */
-    if (k < 0) { say("A2.1 no pane: %s\n", ename(errno)); return; }
+    NEED(k, "A2.1");
     nap(300);
     long q1 = fionread(P[k].m);
     nap(300);
@@ -849,6 +927,7 @@ static void sec_a2(int panes) {
     /* the other way: a master written faster than its program reads */
     char *hold[] = {"/bin/muxprobe", "hold", 0};
     int h = pane_start(hold, 0, 0);
+    NEED(h, "A2.4");
     nap(300);
     static char chunk[1000];
     memset(chunk, 'a', sizeof chunk);
@@ -883,7 +962,10 @@ static void setsize(int m, int r, int c) {
 
 static void sec_a3(void) {
     char *wi[] = {"/bin/muxprobe", "winch", 0};
-    int a = pane_start(wi, 0, 1), b = pane_start(wi, 0, 1);
+    int a = pane_start(wi, 0, 1);
+    NEED(a, "A3.1");
+    int b = pane_start(wi, 0, 1);
+    NEED(b, "A3.1");
     until(a, "winch 0 0", 3000);
     until(b, "winch 0 0", 3000);
     forget(a);
@@ -898,12 +980,14 @@ static void sec_a3(void) {
     type(b, "\004");
     /* stty in a shell pane */
     int s = pane_start(SH, 0, 1);
+    NEED(s, "A3.2");
     setsize(P[s].m, 33, 97);
     type(s, "stty size\n");
     say("A3.2 stty size in a shell pane sized 33 x 97: %s\n", until(s, "33 97\r\n", 5000) ? "33 97" : "NOT 33 97");
     /* a pty inside a pty */
     char *re[] = {"/bin/muxprobe", "relay", 0};
     int r = pane_start(re, 0, 1);
+    NEED(r, "A3.3");
     until(r, "winch 0 0", 5000);
     forget(r);
     setsize(P[r].m, 33, 97);
@@ -923,6 +1007,7 @@ static void sec_a3(void) {
 static void sec_a4(void) {
     char *sg[] = {"/bin/muxprobe", "sig", 0};
     int k = pane_start(sg, 0, 1);
+    NEED(k, "A4.1");
     until(k, "sig: ready", 3000);
     type(k, "\003");
     int i = until(k, "heard INT", 3000);
@@ -939,6 +1024,7 @@ static void sec_a4(void) {
     const char key[3] = {3, 0x1c, 0x1a};
     for (int j = 0; j < 3; j++) {
         int p = pane_start(sl, 0, 1);
+        NEED(p, "A4.2");
         nap(200);
         char c[2] = {key[j], 0};
         type(p, c);
@@ -950,6 +1036,7 @@ static void sec_a4(void) {
     for (int mode = 1; mode <= 2; mode++) {
         for (int j = 0; j < 2; j++) {
             int p = pane_start(sl, mode, 1);
+            NEED(p, "A4.3");
             nap(200);
             char c[2] = {key[j], 0};
             type(p, c);
@@ -1268,6 +1355,7 @@ static void sec_a8(void) {
     /* a client killed by SIGKILL leaves its terminal raw; the master's holder puts it back */
     char *rk[] = {"/bin/muxprobe", "rawkill", 0};
     int k = pane_start(rk, 0, 1);
+    NEED(k, "A8.2");
     struct termios before = saved; /* a new pty's settings: what the client found */
     until(k, "raw: set", 3000);
     kill(P[k].pid, SIGKILL);
@@ -1411,9 +1499,10 @@ int main(int argc, char **argv) {
     fcntl(rep[0], F_SETFL, O_NONBLOCK);
     ep = epoll_create1(EPOLL_CLOEXEC);
     if (ep < 0) { say("A1 epoll_create1: %s\n", ename(errno)); return 1; }
+    sec_a10();
     sec_a1();
-    sec_a6_clients(PANES);
-    sec_a2(PANES);
+    sec_a6_clients(PANES / 2);
+    sec_a2(PANES / 2);
     sec_a3();
     sec_a4();
     close_all();
