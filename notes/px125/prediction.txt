@@ -1,0 +1,121 @@
+px125 — the multiplexer readiness probe: the prediction, written before the first change (2026-11-12)
+
+Base: pax trunk 309036ec. Written from pty(7), unix(7), epoll(7), signal(7),
+termios(3), credentials(7), POSIX.1-2024's General Terminal Interface, the
+XTerm Control Sequences document as packaged with Ubuntu's xterm (docs/SOURCES.md
+names it by digest), ECMA-48, and PAX's own notes and module headers (px24 ready,
+px34/px45 unix, px59 the VT, px87 the console on metal, px111 ptys, px117 the
+pointer). No terminal emulator's, multiplexer's, kernel's or C library's source.
+Every P-line is scored in notes/px125-multiplexer-readiness.md.
+
+The probe: a C program (user/elf/muxprobe.c) as the first program of a PAX
+console image, and the same static binary as pid 1 on a pseudo-terminal in a
+throwaway Ubuntu container (tools/linux-tree); a wolf program (user/muxwolf) that
+does the server's work with wolf-std 77cf3210 under wolf 0.2.39 alone; and a
+screen image whose cases are played on the console and read back cell by cell.
+
+A. The plumbing a server needs
+
+P1  32 ptys open at once in one process (PAX serves 256), each with pelt in a
+    session of its own whose controlling terminal is its slave, the child's
+    group in the foreground; one epoll object holds all 32 masters (PAX: 256
+    registrations an object, 16 objects).
+P2  A child writing 50 MB to its slave arrives whole and in order through one
+    master: no byte lost, none reordered, on both systems.
+P3  While the flood runs, the other panes answer a typed line: every ping
+    answered. PAX's clock moves in 10 ms steps (#299), so its latencies read
+    in steps of 10 ms; the median under 30 ms and the worst under 250 ms
+    under KVM. The flood's rate on PAX is a small fraction of Linux's: every
+    change wakes every waiter (kernel/ready), and 31 idle shells wait.
+P4  A pane nobody reads stops its writer when the master's queue holds 20480
+    bytes (PAX; Linux's count moves with the write size), the writer asleep,
+    and the other panes still answer; the writer resumes when read. A master
+    written non-blocking takes 20480 bytes (16384 for the line discipline and
+    its 4096 on PAX), then EAGAIN, POLLOUT clear, the others writable.
+P5  TIOCSWINSZ on a master sends SIGWINCH to that pty's foreground group and
+    `stty size` reads the new size; a relay that holds a pty inside a pty
+    (the client's terminal itself a pty) passes a resize through to the inner
+    program end to end.
+P6  0x03, 0x1c and 0x1a written to a master reach the foreground group as
+    SIGINT, SIGQUIT and SIGTSTP. A child whose parent ignored SIGINT and
+    SIGQUIT (burrowd's start before px123's hook) inherits the ignore across
+    exec and 0x03 and 0x1c then do nothing; a child that resets them to the
+    default before exec is killed by them. So the server must reset its
+    panes' dispositions itself; wolf-std's process.start_session takes the
+    set to reset.
+P7  A child that calls setsid and outlives its starter is reparented to pid
+    1, keeps running through the starter's session's hangup, and is reaped
+    only by pid 1's wait. Today pid 1 is the console's program (an installed
+    system's login shell), and when pid 1 ends the kernel ends everything it
+    left: a server cannot outlive the console session (px124 changes this).
+P8  Unix stream sockets at a path: the file's mode follows the umask, a user
+    who may not write it is refused (EACCES) and its owner is honoured; 16
+    clients on one listener in the same epoll loop as 32 masters, every one
+    answered; SO_PEERCRED gives the client's pid, uid and gid. A server that
+    dies leaves its file: connect ECONNREFUSED, bind EADDRINUSE, and unlink
+    then bind is the recovery. SCM_RIGHTS does not exist on PAX: sendmsg and
+    recvmsg are -ENOSYS (Linux passes the descriptor). Abstract names and
+    datagram or seqpacket sockets at a path are refused by name.
+P9  Non-blocking: a write larger than a unix stream's room is partial, then
+    EAGAIN; EPOLLOUT comes back when the peer drains. timerfd_create,
+    signalfd, ppoll and pselect6 are -ENOSYS on PAX; epoll_wait's timeout
+    and eventfd are the timer and the wake-up, and a SIGCHLD self-pipe wakes
+    the loop.
+P10 termios: cfmakeraw's flags and back read back as set on a pty and on the
+    console (the console's IXON clear, named); a client killed by SIGKILL
+    leaves its terminal raw on both systems, and the holder of the master
+    puts it back from the master side.
+P11 wolf-std 77cf3210 does the server's pty and socket work on PAX as on
+    Linux. What it lacks: a peer's credentials on a unix socket, an epoll
+    (or a wait answering every ready descriptor beside the signals:
+    signal.wait_fds answers the lowest ready index alone, so a flooding
+    pane listed first starves the rest unless the loop rotates), and
+    descriptor passing (not needed by ruling).
+
+B. What the console draws
+
+P12 The alternate screen (?1049), save/restore (ESC 7/8), scroll regions,
+    insert/delete line and character, and erase in display and line draw as
+    xterm's; CSI s/u, ECH, REP, SU/SD, DECOM and IRM are xterm's where the
+    Linux VT has them and ignored where it does not (each named).
+P13 SGR: the 16 colours exact; 256-colour and true colour mapped to the 16
+    (approximated); bold drawn as the bright colour; dim, italic and
+    underline as the VT's colours (approximated); underline styles (4:3),
+    strikethrough (9), overline and underline colour ignored; reverse
+    exact; blink steady.
+P14 Glyphs: braille and the block elements draw; box drawing U+2500-257F
+    only where font/extent.txt names it (nine light lines and corners, the
+    games' set), the rest `?`: no ┬ ┴ ┼ ━ ═ ╭, which a split's borders
+    need; powerline separators (U+E0B0-E0B3) `?`. Spleen 2.2.0, already
+    vendored, has the whole box block and the powerline glyphs, so the
+    fix is the extent's lines (a small fix). A wide (CJK) character one
+    `?` cell, the cursor one column on (xterm: two); a combining character
+    a `?` of its own cell (xterm: none). An unknown code point is `?`,
+    one cell wide.
+P15 DECSCUSR consumed with no change; ?25l/h hide and show; CSI 6n and DA1
+    answered as the VT (`ESC [ ? 6 c`); DA2 (CSI > c) and DECRQM unanswered.
+P16 Input: no bracketed paste or focus event is ever sent (the console has
+    no paste and no focus); SGR mouse is 1002 with 1006 only (px117), 1000
+    and 1003 send nothing; arrows with Shift, Alt and Ctrl send the VT's
+    `ESC [ 1 ; m X`, function keys the VT's; **Ctrl-Space sends a space, not
+    NUL**: warren's default prefix does not reach it. A small fix in
+    kernel/console's Ctrl map.
+P17 OSC 0/2 and OSC 52 and an unknown OSC are swallowed whole (nothing
+    drawn); a DCS string is not: ESC P drops two bytes and the rest is drawn
+    as text. A small fix in kernel/screen's parser (swallow DCS, SOS, PM and
+    APC to ST).
+P18 A full repaint of the 2560 x 1440 console (the 860's) under KVM is
+    tens of milliseconds whether cell by cell or as runs; the number on the
+    metal (write-combining) is not measured here.
+P19 Through burrow in an ssh -t session the bytes are carried unaltered
+    both ways (8-bit clean once the far end is raw; ONLCR is the pty's,
+    as on Linux).
+
+C. The changes
+
+P20 Small fixes made here, each with its row red first: Ctrl-Space as NUL,
+    the box-drawing block and the powerline glyphs from Spleen, and
+    DCS/SOS/PM/APC strings swallowed. Everything larger is an issue:
+    sendmsg/recvmsg with SCM_RIGHTS (pax), timerfd (pax, low: the epoll
+    timeout serves), DA2/DECRQM answers if they are more than a few lines,
+    and wolf-std's peer credentials and all-ready wait.
