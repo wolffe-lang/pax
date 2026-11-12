@@ -39,6 +39,14 @@ use screen
 
 extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
 extern "c" fn pax_rdmsr(msr: u64) -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
+extern "c" fn pax_cr0() -> u64
+extern "c" fn pax_set_cr0(v: u64)
+extern "c" fn pax_cr3() -> u64
+extern "c" fn pax_set_cr3(v: u64)
+extern "c" fn pax_cr4() -> u64
+extern "c" fn pax_set_cr4(v: u64)
+extern "c" fn pax_wbinvd()
 
 const PAGE: u64 = 4096
 const PWT: u64 = 0x8
@@ -47,6 +55,32 @@ const PAT_4K: u64 = 0x80 // a 4 KiB leaf's PAT bit (bit 7)
 const IA32_PAT: u64 = 0x277
 const PAT_WC: u64 = 0x01
 const CPUID_PAT: u64 = 0x10000 // CPUID.01H:EDX bit 16
+// px129: the MTRRs (SDM vol. 3A §11.11: IA32_MTRRCAP's VCNT in bits 7:0;
+// IA32_MTRR_DEF_TYPE's type in bits 7:0 and E, bit 11; a variable pair's
+// PHYSBASE type in bits 7:0 and PHYSMASK's V, bit 11, both addresses in
+// bits 51:12), and the power-on IA32_PAT (§11.12.4, Table 11-12: WB WT
+// UC- UC WB WT UC- UC, entries 0 to 7).
+const CPUID_MTRR: u64 = 0x1000 // CPUID.01H:EDX bit 12
+const IA32_MTRRCAP: u64 = 0xfe
+const IA32_MTRR_DEF_TYPE: u64 = 0x2ff
+const IA32_MTRR_PHYSBASE0: u64 = 0x200 // PHYSMASKn is PHYSBASEn + 1, the pairs 2 apart
+const MTRR_ON: u64 = 0x800 // DEF_TYPE.E, PHYSMASK.V (bit 11)
+const MTRR_ADDR: u64 = 0x000ffffffffff000 // bits 51:12
+const PAT_POWER_ON: u64 = 0x0007040600070406
+const CR0_NW: u64 = 0x20000000 // CR0 bit 29
+const CR0_CD: u64 = 0x40000000 // CR0 bit 30
+const CR4_PGE: u64 = 0x80 // CR4 bit 7
+// px129: how the framebuffer's PAT entry was had (`how`).
+const HOW_HANDED: u64 = 0 // an entry 4-7 already held WC
+const HOW_PROGRAMMED: u64 = 1 // entry 5 programmed to WC here
+const HOW_NO_WC: u64 = 2 // no entry held WC, none programmed: uncached
+const HOW_NO_PAT: u64 = 3 // the CPU has no PAT: uncached
+const HOW_REFUSED: u64 = 4 // entry 5 written, WC not read back: uncached
+// px129: where the MTRR type came from (`mtrr` >> 8).
+const MT_NONE: u64 = 0 // the CPU has no MTRRs
+const MT_OFF: u64 = 1 // DEF_TYPE.E clear: every range uncached
+const MT_DEFAULT: u64 = 2 // no variable range covers it: the default type
+const MT_VARIABLE: u64 = 3 // variable range n is MT_VARIABLE + n
 
 // Why `start` declined (`why`), 0 when it attached.
 const W_OK: u64 = 0
@@ -65,6 +99,13 @@ var wc: u64 = 0 // 1 write-combining (PAT entry 5), 0 uncached (entry 3)
 var pat: u64 = 0 // IA32_PAT as read (0 without the PAT)
 var pages: u64 = 0 // 4 KiB pages mapped
 var tables: u64 = 0 // table frames those took
+// px129: the mapping's facts, for `report` and /proc/pax-boot.
+var how: u64 = 3 // HOW_*
+var was: u64 = 0 // entry 5's type before it was programmed
+var entry_n: u64 = 3 // the PAT entry the mapping selects
+var leaf_bits: u64 = 0 // the first page's leaf as read back: PAT, PCD, PWT bits
+var reset: u64 = 0 // 1 when `pax.patdefault` put IA32_PAT to its power-on value first
+var mtrr: u64 = 0 // the MTRR type covering the framebuffer | where it came from << 8, | 0x10000 when only its start
 
 fn get_why() -> u64 {
     // # Safety: module state, touched only at boot (see above).
@@ -116,19 +157,189 @@ fn set_tables(v: u64) {
     unsafe { tables = v }
 }
 
-/// Whether the CPU has the PAT and IA32_PAT's entry 5 is WC; reads the
-/// MSR into `pat`.
-fn pat_wc() -> bool {
+fn get_how() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { how }
+}
+
+fn get_was() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { was }
+}
+
+fn get_entry() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { entry_n }
+}
+
+fn get_leaf_bits() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { leaf_bits }
+}
+
+fn get_reset() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { reset }
+}
+
+fn get_mtrr() -> u64 {
+    // # Safety: as `get_why`.
+    unsafe { mtrr }
+}
+
+/// px129: set the mapping's choice: how it was had, the entry, and (for a
+/// programmed entry) what it held before.
+fn set_choice(h: u64, e: u64, w: u64) {
+    // # Safety: as `get_why`.
+    unsafe {
+        how = h
+        entry_n = e
+        was = w
+    }
+}
+
+/// px129: IA32_PAT entry `e`'s memory type (Table 11-11's encodings).
+fn pat_type(p: u64, e: u64) -> u64 {
+    (p >> (e * 8)) & 0xff
+}
+
+/// px129: a 4 KiB leaf's PAT, PCD and PWT bits selecting entry `e`
+/// (§4.5: PAT * 4 + PCD * 2 + PWT).
+fn bits_of(e: u64) -> u64 {
+    (if e >= 4 { PAT_4K } else { 0 }) | (if e & 2 != 0 { PCD } else { 0 }) | (if e & 1 != 0 { PWT } else { 0 })
+}
+
+/// px129: the entry a leaf's PAT, PCD and PWT bits select.
+fn entry_of(bits: u64) -> u64 {
+    (if bits & PAT_4K != 0 { 4 } else { 0 }) + (if bits & PCD != 0 { 2 } else { 0 }) + (if bits & PWT != 0 { 1 } else { 0 })
+}
+
+/// px129: the name of a memory type.
+pub fn type_name(t: u64) -> str {
+    if t == 0 { return "uc" }
+    if t == 1 { return "wc" }
+    if t == 4 { return "wt" }
+    if t == 5 { return "wp" }
+    if t == 6 { return "wb" }
+    if t == 7 { return "uc-" }
+    "?"
+}
+
+/// px129: the TLBs flushed, global entries too: CR4.PGE cleared when it
+/// is set (a write that changes PGE flushes every entry), else CR3
+/// reloaded.
+fn flush_tlbs(cr4: u64) {
+    // # Safety: cpu.S's moves to CR4 and CR3, at CPL 0 with IF clear;
+    // CR3 is written back with the value it holds.
+    unsafe {
+        if cr4 & CR4_PGE != 0 && pax_cr4() & CR4_PGE != 0 {
+            pax_set_cr4(cr4 & !CR4_PGE)
+        } else {
+            pax_set_cr3(pax_cr3())
+        }
+    }
+}
+
+/// px129: write IA32_PAT as SDM vol. 3A §11.12.4 asks, by §11.11.8's
+/// procedure for a change of memory types (one CPU here, IF clear at
+/// `start`): no-fill cache mode (CR0.CD set, NW clear), the caches
+/// written back and invalidated, the TLBs flushed; the write; the caches
+/// and TLBs again; normal cache mode; CR4.PGE as it was.
+fn write_pat(v: u64) {
+    // # Safety: fpu.S's and cpu.S's control-register moves, WBINVD and
+    // WRMSR of IA32_PAT (present: the caller checked CPUID's PAT bit), at
+    // CPL 0 with IF clear; CR0 and CR4 end as they were but for CD and NW,
+    // which end clear (normal cache mode).
+    let cr0 = unsafe { pax_cr0() }
+    let cr4 = unsafe { pax_cr4() }
+    unsafe {
+        pax_set_cr0((cr0 | CR0_CD) & !CR0_NW)
+        pax_wbinvd()
+    }
+    flush_tlbs(cr4)
+    unsafe {
+        pax_wrmsr(IA32_PAT, v)
+        pax_wbinvd()
+        pax_set_cr3(pax_cr3())
+        pax_set_cr0(cr0 & !(CR0_CD | CR0_NW))
+        if cr4 & CR4_PGE != 0 {
+            pax_set_cr4(cr4)
+        }
+    }
+}
+
+/// px129: the leaf bits that map the framebuffer write-combining, from
+/// whatever IA32_PAT holds: an entry 4-7 already WC is used as handed;
+/// else uncached (entry 3). `pax.patdefault` (a test word) first puts
+/// IA32_PAT to its power-on value, which holds no WC entry, as a
+/// bootloader that never programmed it would leave it. Sets `pat`, the
+/// choice and `wc`.
+fn choose() -> u64 {
     // # Safety: fpu.S's CPUID, leaf 1, EDX.
     let edx = unsafe { pax_cpuid(1, 0, 3) }
     if edx & CPUID_PAT == 0 {
         set_pat(0)
-        return false
+        set_choice(HOW_NO_PAT, 3, 0)
+        set_wc(0)
+        return PCD | PWT
+    }
+    if boot_info.cmdline_has("pax.patdefault") {
+        write_pat(PAT_POWER_ON)
+        // # Safety: as `get_why`.
+        unsafe { reset = 1 }
     }
     // # Safety: cpu.S's RDMSR of IA32_PAT, present when CPUID says PAT.
     let p = unsafe { pax_rdmsr(IA32_PAT) }
     set_pat(p)
-    (p >> 40) & 0xff == PAT_WC
+    var e: u64 = 4
+    while e < 8 && pat_type(p, e) != PAT_WC {
+        e += 1
+    }
+    if e == 8 {
+        set_choice(HOW_NO_WC, 3, 0)
+        set_wc(0)
+        return PCD | PWT
+    }
+    set_choice(HOW_HANDED, e, 0)
+    set_wc(1)
+    bits_of(e)
+}
+
+/// px129: the MTRR type that covers [pa, pa + size) and where it came
+/// from (`mtrr`'s encoding): the first valid variable range that holds
+/// pa (| 0x10000 when it does not hold the range's last byte), else the
+/// default type, or MT_OFF, or MT_NONE. A report: PAX does not change
+/// the MTRRs (under a WC PAT entry the memory type is WC whatever they
+/// say: §11.12.4, Table 11-7).
+fn mtrr_cover(pa: u64, size: u64) -> u64 {
+    // # Safety: fpu.S's CPUID, leaf 1, EDX.
+    let edx = unsafe { pax_cpuid(1, 0, 3) }
+    if edx & CPUID_MTRR == 0 {
+        return MT_NONE << 8
+    }
+    // # Safety: cpu.S's RDMSR of the MTRR registers CPUID says exist.
+    let def = unsafe { pax_rdmsr(IA32_MTRR_DEF_TYPE) }
+    if def & MTRR_ON == 0 {
+        return MT_OFF << 8
+    }
+    // # Safety: as above.
+    let vcnt = unsafe { pax_rdmsr(IA32_MTRRCAP) } & 0xff
+    let last = pa + size - 1
+    var n: u64 = 0
+    while n < vcnt {
+        // # Safety: as above: pair n of the VCNT the CPU reports.
+        let base = unsafe { pax_rdmsr(IA32_MTRR_PHYSBASE0 + 2 * n) }
+        let mask = unsafe { pax_rdmsr(IA32_MTRR_PHYSBASE0 + 2 * n + 1) }
+        if mask & MTRR_ON != 0 {
+            let m = mask & MTRR_ADDR
+            if pa & m == base & m {
+                let part: u64 = if last & m == base & m { 0 } else { 0x10000 }
+                return (base & 0xff) | ((MT_VARIABLE + n) << 8) | part
+            }
+        }
+        n += 1
+    }
+    (def & 0xff) | (MT_DEFAULT << 8)
 }
 
 /// Map the framebuffer in the kernel's structures at `pml4` and attach
@@ -150,8 +361,7 @@ pub fn start(pml4: u64) -> bool {
         set_why(W_HHDM)
         return false
     }
-    let cache = if pat_wc() { PAT_4K | PWT } else { PCD | PWT }
-    set_wc(if cache == PAT_4K | PWT { 1 } else { 0 })
+    let cache = choose()
     let bytes = pitch * h
     var off: u64 = 0
     while off < bytes {
@@ -163,6 +373,14 @@ pub fn start(pml4: u64) -> bool {
         set_tables(get_tables() + r)
         set_pages(get_pages() + 1)
         off += PAGE
+    }
+    // px129: what the first page's leaf selects, as read back, and the
+    // MTRRs over the framebuffer's physical range.
+    let l = paging.kernel_leaf(pml4, va)
+    // # Safety: as `get_why`.
+    unsafe {
+        leaf_bits = l & (PAT_4K | PCD | PWT)
+        mtrr = mtrr_cover(va - hhdm, bytes)
     }
     if !screen.attach(va, w, h, pitch, boot_info.fb_mask(0, true), boot_info.fb_mask(1, true), boot_info.fb_mask(2, true)) {
         set_why(W_GRID)
@@ -280,6 +498,120 @@ pub fn report() {
     log.dec(screen.lost() as int)
     log.put(" lost")
     log.end()
+    report_map()
+}
+
+/// px129: the mapping's facts on one console line after `screen:`:
+///
+///     fbmap: <wc|uc> by PAT entry <e> (<as handed | programmed, it held <t> | no entry held wc |
+///     the CPU has no PAT | entry 5 written, wc not read back>); IA32_PAT 0x<p>[ (reset to its power-on
+///     value first: pax.patdefault)]; the first page's leaf selects entry <k> (<t>); MTRR <none |
+///     off | default <t> | variable <n> <t>[, the range's start only]>; scroll <redraw|copy> (<the probe:
+///     read R, write W cycles | fbwrite | fbread>)
+fn report_map() {
+    let h = get_how()
+    log.put("fbmap: ")
+    log.put(if get_wc() == 1 { "wc by PAT entry " } else { "uc by PAT entry " })
+    log.dec(get_entry() as int)
+    log.put(" (")
+    log.put(how_words(h))
+    if h == HOW_PROGRAMMED {
+        log.put(type_name(get_was()))
+    }
+    log.put("); IA32_PAT ")
+    log.hex(get_pat())
+    if get_reset() == 1 {
+        log.put(" (reset to its power-on value first: pax.patdefault)")
+    }
+    let k = entry_of(get_leaf_bits())
+    log.put("; the first page's leaf selects entry ")
+    log.dec(k as int)
+    log.put(" (")
+    log.put(if get_pat() == 0 { if k == 3 { "uc" } else { "?" } } else { type_name(pat_type(get_pat(), k)) })
+    log.put("); MTRR ")
+    let m = get_mtrr()
+    let src = (m >> 8) & 0xff
+    if src == MT_NONE {
+        log.put("none")
+    } else if src == MT_OFF {
+        log.put("off (every range uc)")
+    } else if src == MT_DEFAULT {
+        log.put("default ")
+        log.put(type_name(m & 0xff))
+    } else {
+        log.put("variable ")
+        log.dec((src - MT_VARIABLE) as int)
+        log.put(" ")
+        log.put(type_name(m & 0xff))
+        if m & 0x10000 != 0 {
+            log.put(", the range's start only")
+        }
+    }
+    log.put("; scroll ")
+    log.put(scroll_word())
+    let f = screen.scroll_forced()
+    if f == 1 {
+        log.put(" (fbread)")
+    } else if f == 2 {
+        log.put(" (fbwrite)")
+    } else {
+        log.put(" (the probe: read ")
+        log.dec(screen.probe_read_cycles() as int)
+        log.put(", write ")
+        log.dec(screen.probe_write_cycles() as int)
+        log.put(" cycles)")
+    }
+    log.end()
+}
+
+/// px129: how the entry was had, in words (`report_map`, procfs).
+pub fn how_words(h: u64) -> str {
+    if h == HOW_HANDED { return "as handed" }
+    if h == HOW_PROGRAMMED { return "programmed, it held " }
+    if h == HOW_NO_WC { return "no entry held wc" }
+    if h == HOW_NO_PAT { return "the CPU has no PAT" }
+    "entry 5 written, wc not read back"
+}
+
+/// px129: the scroll's way: `copy` (it reads the framebuffer back), `redraw`
+/// (it never does), or `undecided` (no screen attached).
+pub fn scroll_word() -> str {
+    if !screen.scroll_decided() { return "undecided" }
+    if screen.copy_scroll() { "copy" } else { "redraw" }
+}
+
+/// px129: how the entry was had, one word (/proc/pax-boot).
+pub fn how_word(h: u64) -> str {
+    if h == HOW_HANDED { return "handed" }
+    if h == HOW_PROGRAMMED { return "programmed" }
+    if h == HOW_NO_WC { return "no-wc" }
+    if h == HOW_NO_PAT { return "no-pat" }
+    "refused"
+}
+
+/// px129: whether `how` says the entry was programmed here.
+pub fn how_programmed(h: u64) -> bool {
+    h == HOW_PROGRAMMED
+}
+
+/// px129: the scroll's way as decided: (forced: 0 the probe, 1 `fbread`,
+/// 2 `fbwrite`; the probe's read cycles; its write cycles).
+pub fn scroll_how() -> (u64, u64, u64) {
+    (screen.scroll_forced(), screen.probe_read_cycles(), screen.probe_write_cycles())
+}
+
+/// px129: the mapping's facts for /proc/pax-boot (kernel/procfs words them):
+/// (wc, the entry, how, the type it held before, IA32_PAT, reset) ...
+pub fn map_facts() -> (u64, u64, u64, u64, u64, u64) {
+    (get_wc(), get_entry(), get_how(), get_was(), get_pat(), get_reset())
+}
+
+/// px129: ... and (the entry the first page's leaf selects, its type,
+/// the MTRR encoding: type | source << 8 | 0x10000 for the start only).
+pub fn map_leaf() -> (u64, u64, u64) {
+    let k = entry_of(get_leaf_bits())
+    let t = if get_pat() == 0 { if k == 3 { 0 } else { 0xff } } else { pat_type(get_pat(), k) }
+    (k, t, get_mtrr())
 }
 
 /// Whether the framebuffer is mapped write-combining.
