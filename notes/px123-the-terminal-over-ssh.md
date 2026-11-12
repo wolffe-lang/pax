@@ -104,3 +104,29 @@ and that head's plant on `px123-plant-sigint` (`1770cd82`). One file conflicted,
 both sides: the terminal's paragraph heads the Unreleased list, above px127's. `git range-diff` shows the other
 eight patches unchanged. pax#362 changes the kernel's sockets and the push suite (N3, names through musl's
 resolver), both of which this branch's records run, so the records are taken afresh at this head.
+
+## 6. The second half: the pins at the first --latest image's commits, sniff, and --latest on trunk
+
+The first image built with `tools/mkdistribution --latest` (every tree at its trunk head, burrow at burrow#24's head,
+the dev compiler at wolf 0.2.39, lupin at 0.1.61) is the one the installed machine runs now. Trunk's pins trailed it,
+so an image built from the pins would have moved several tools backwards. This half brings the pins to the commits
+that image carried and lands the tools that built it:
+
+- **The pins:** the dev compiler wolf 0.2.39 (`user/wolf.sums` its `tools/mkwolf` build, the std its STD-PIN names,
+  2411d868), lupin 0.1.61, lupin's std wolf-std 77cf3210 (whose own tool pins are wolf 0.2.39 and lupin 0.1.61),
+  pelt b80d6570, yew 3a9983ee, den 291011dd; census's pelt and yew snapshots first (C4 and C5 red until the pins
+  move). Every other tree's pin was already the image's commit. The suites' adaptations to those heads are px97's,
+  carried: pelt's friendly prompt by default (`tests/mpx5-accounts`, `mpx5-den`, `mpx5-sudo`), den's bare clone
+  layout (`mpx5-den.d/remote.py`), wolf's erased progress lines since 0.2.37 (`mpx5-wolf`, `distribution-boot`)
+  and the language server's version from `user/wolf.pin` (`mpx5-lsp.d`). `tests/mpx5-wolf.d/test_rows.py` reads the
+  dev compiler's two PAX sessions at the new pin (`notes/px123/wolf-pax-{root,user}.tty`, cut from
+  `tests/mpx5-wolf` itself at this branch, as px92 cut the 0.2.36 ones; W2 passes on both).
+- **sniff** ships as `/bin/sniff` (`tools/mksniff`, `user/sniff.pin` at sniff trunk 6dd382d4), stripped like the
+  other org tools; `tests/distribution` holds its mode.
+- **`--latest`** (`tools/latest-resolve`, `tools/mkdistribution --latest`, `--latest-step`, `--latest-from`,
+  `tools/mkpax-release --latest`, `user/boreutils.list`), px97's, with its rows (`tests/latest`, census's C7). An
+  overlay is taken with a green record at its sha, or as `ungated` with `PAX_LATEST_UNGATED=1`.
+- **`tests/mpx6-install.d/ssh-upgrade.py`** sends a built archive as it is (`PAX_SSH_UPGRADE_ARCHIVE`) to a disk as
+  an earlier upgrade left it (`PAX_SSH_UPGRADE_DISK_AS_IS`), and S5 holds the refusals over ssh with the installed
+  image's own archive (`PAX_SSH_UPGRADE_SAME`). That is how the first latest image was checked before it was sent:
+  S1-S5 green on both firmwares from a disk installed at the image before it.
