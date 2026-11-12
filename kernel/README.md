@@ -1337,3 +1337,19 @@ as uid 1000, byte-identical.
 | module or file | what |
 |---|---|
 | `procfs/` (px122 change) | `paxboot` writes `/proc/pax-boot`'s text through four functions, one a group of lines (`paxboot_this`, `paxboot_previous`, `paxboot_log`, `paxboot_screen`), and `put_fb` through three (`put_fb_size`, `put_fb_masks`, `put_fb_tail`): the same calls in the same order, the text the same byte for byte. As one function, px118's last lines put the release tier's range pass over a loop and thirteen formatter calls more, and `kmain_console`'s release build grew by about a quarter |
+
+## px131 — what the kernel holds too long
+
+Every system call and handler runs with IF clear until it returns (`notes/px131-long-kernel-paths.md` §3), so this
+pass measures how long, ranks the paths, and makes three of them short.
+
+| module | change |
+|---|---|
+| `latency/` (new) | the instrument, on only with `latency` on the command line (`start`, from `kmain_console` before interrupts go on): boot/isr.S's common path opens an interrupts-off interval on entry from IF set (its RIP, vector and %rax) and closes it on resuming a frame with IF set; `pax_irq_save`/`pax_irq_restore`, `pax_wait` and `pax_enter_user` likewise; `pax_lat_close` keeps the longest since boot and since the last read, a histogram by the cycles' highest bit, and since the last read the longest per system call number, vector and thread slot's irq_save sections; `sched_point` the longest gap between the scheduler's chances; `ticks` delivered against due by kernel/clock; `restart` ends the window |
+| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 59): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
+| `sched/` | `latency.sched_point` in `preempt`, `kick` and `run_next`; `who` names a thread for it |
+| `paging/` | `next_leaf`: the next present 4 KiB leaf in a range, an absent table stepped over whole |
+| `vm/` | `unmap_range` and `cut_maps` visit only the leaves `next_leaf` finds (munmap of 1 TiB of nothing: 3 s to under 0.3 ms) |
+| `process/` | `random_fill`: a buffer of random words, CPUID asked once |
+| `user/` | `getrandom` a page at a time through a kernel frame and `uaccess.copy_out`; getrandom(2) gives at most 16 KiB a call (`GETRANDOM_CHUNK`; /dev/urandom's reads stay whole) |
+| `trace_mem/` | `transfer` copies each piece with `uaccess.copy_in`/`copy_out`, not a byte at a time |
