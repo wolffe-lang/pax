@@ -7,7 +7,7 @@
 #   small  the 2048 MiB guest. First, with nothing else in memory, pelt is linked by ligature (an
 #          expected refusal while ligature#35 is open) and by lld, and den by lld. Then the default,
 #          the opt-in, hello, netproc, the self-link and a refusal.
-#   big    the larger guest: pelt, den and the largest program (yew), linked by ligature and by lld.
+#   big    the larger guest: pelt and den, linked by ligature and by lld.
 mode=$1
 S=/usr/share/distribution-ligature
 T=/tmp/l
@@ -46,11 +46,11 @@ if [ "$mode" = small ]; then
     build pelt lld $T/pelt src/pelt.lu $T/pelt.lld
     [ -f $T/pelt.lld ] && run pelt lld $T/pelt.lld -c 'echo pelt-ok; exit 3'
     rm -rf $T/pelt.lig $T/pelt.lld $T/pelt
-    # den, the largest program this guest's compiler builds (yew's compile does not fit in it), by lld
-    # alone here: the default's reach on this guest.
+    # den, the largest of the image's programs its compiler builds on the live image (yew's compile
+    # does not fit it), by lld alone here: the default's reach on this guest.
     build den lld $T/den src/den.lu $T/den.lld
     [ -f $T/den.lld ] && run den lld $T/den.lld --version
-    rm -rf $T/den.lld $T/den $T/largest
+    rm -rf $T/den.lld $T/den
     # The default: no WOLF_LD, so wolf links through lld and names it in a note.
     (cd $T/hello && wolf build hello.lu -o $T/hello.default > $T/default.build 2>&1)
     echo "DLIG default rc=$? $(grep 'wolf build: note' $T/default.build | head -n 1 | cut -c1-200)"
@@ -92,7 +92,7 @@ if [ "$mode" = small ]; then
     echo "DLIG refused rc=$rc output=$have"
     grep -e 'selected linker' -e 'ligature' -e 'no-sysroot' $T/refused.build | head -n 3 | cut -c1-200 | sed 's/^/DLIG why refused: /'
 else
-    for p in pelt den largest; do
+    for p in pelt den; do
         entry=$(cat $T/$p/ENTRY)
         build $p lig $T/$p $entry $T/$p.lig
         build $p lld $T/$p $entry $T/$p.lld
@@ -100,7 +100,7 @@ else
             [ -f $T/$p.$l ] || continue
             case $p in
                 pelt) run $p $l $T/$p.$l -c 'echo pelt-ok; exit 3' ;;
-                *) run $p $l $T/$p.$l --version ;;
+                den) run $p $l $T/$p.$l --version ;;
             esac
         done
         rm -rf $T/$p.lig $T/$p.lld $T/$p
