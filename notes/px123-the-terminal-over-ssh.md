@@ -97,3 +97,10 @@ both prose, and each kept both sides:
 `git range-diff` shows the other five patches unchanged. pax#349 changes the kernel's frame allocator and xHCI
 driver, which the burrowd suite's image carries, so the records at this branch's head are taken afresh, not carried
 from §4.
+
+pax#362 (recvmsg on a datagram socket) then reached trunk first as `211e5c7c`, and the branch was rebased onto
+it. The nine commits before that are kept on `px123` (head `6c23074f`, pax#360's, whose records are taken there),
+and that head's plant on `px123-plant-sigint` (`1770cd82`). One file conflicted, `CHANGELOG.md`, prose, and kept
+both sides: the terminal's paragraph heads the Unreleased list, above px127's. `git range-diff` shows the other
+eight patches unchanged. pax#362 changes the kernel's sockets and the push suite (N3, names through musl's
+resolver), both of which this branch's records run, so the records are taken afresh at this head.
