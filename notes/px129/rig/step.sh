@@ -12,6 +12,9 @@
 #   console ARGS   tests/mpx3-console ARGS (the console's typed sessions), with KVM and SYS_ADMIN
 #   games ARGS     tests/mpx6-games ARGS (the games' glyphs and frames), with KVM
 #   pointer ARGS   tests/mpx6-pointer ARGS (the arrow drawn over a cell, the reports), with KVM
+#   pty ARGS       tests/mpx5-pty ARGS (pseudo-terminals, the probe and pelt's session against Linux's)
+#   ptyrate N ACCEL FIRMWARE
+#                  pty-rate.sh: mpx5-pty's session image booted N times, each run checked (pax#382)
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
 # column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is named in its
 # record) and changes no other line. The step's exit is the suite's.
@@ -20,7 +23,7 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 # shellcheck disable=SC1091
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
-lift() { "$@" 2>&1 | sed -u -E 's/^(mpx3-conspeed|mpx3-screen|mpx5-screen|mpx3-console|mpx6-games|mpx6-pointer): +FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
+lift() { "$@" 2>&1 | sed -u -E 's/^(mpx3-conspeed|mpx3-screen|mpx5-screen|mpx3-console|mpx6-games|mpx6-pointer|mpx5-pty): +FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
 wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tools/fetch-limine > /dev/null && '; }
 what=${1:?}; shift
 case $what in
@@ -37,5 +40,7 @@ case $what in
     console) CTR_CAPS=SYS_ADMIN lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx3-console "$@"; exit $?' x "$@" ;;
     games) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-games "$@"; exit $?' x "$@" ;;
     pointer) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-pointer "$@"; exit $?' x "$@" ;;
+    pty) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx5-pty "$@"; exit $?' x "$@" ;;
+    ptyrate) ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'bash notes/px129/rig/pty-rate.sh "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
