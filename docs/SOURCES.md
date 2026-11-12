@@ -2513,3 +2513,16 @@ physical KVM were available. The fixture is synthetic, not a claim about that de
 | PAX’s `tools/hotplug-session` | this tree | the existing USB-redirection protocol fixture, device and HID descriptor helpers; reused without changing that tool |
 | PAX’s `kernel/xhci`, `kernel/log`, `kernel/kmsg` | this tree | live pointer records, existing line levels and the quiet framebuffer threshold; no change to descriptor selection or enumeration |
 | PAX’s `user/login`, `user/sudo`, `user/dmesg` | this tree | the real login and privileged log read used by the end-to-end regression |
+
+## px126 — process slots: 64 to 1024
+
+No kernel's, C library's or shell's source was read: not Linux's, not any BSD's, not glibc's or musl's, not pelt's
+beyond its pin.
+
+| source | version | read, for |
+|---|---|---|
+| The man-pages project: clone(2), fork(2), wait(2), futex(2), pipe(2), sched_yield(2), getrusage(2), clock_gettime(2), getrlimit(2) (RLIMIT_NPROC: a limit on the real user's threads, the privileged exempt), proc_pid_status(5), proc_pid_stat(5), proc_sys_kernel(5) (`threads-max`, `pid_max`), pty(7), posix_openpt(3), unlockpt(3), ptsname(3), ioctl_tty(2) | 6.7 | `user/elf/slotprobe.c`'s calls and what it reads back; `notes/px126-process-slots.md`'s recommendation on RLIMIT_NPROC |
+| POSIX.1-2024: XSH fork, waitpid, setsid, _exit's consequences (orphaned process groups); XBD 3 (orphaned process group), chapter 11 | 2024 | `process_ends`' children set, unchanged in meaning |
+| Intel SDM vol. 3A §4.5 (4-level paging: one page table maps 2 MiB), §4.10.4 (INVLPG) | as px03's entry | the areas' region and its page tables taken at `start` |
+| PAX's own `kernel/sched`, `kernel/fpu`, `kernel/process`, `kernel/procfs`, `kernel/vm`, `kernel/trace_state`, `boot/sched.S`, `boot/fpu.S`, `user/elf/ptyprobe.c` (the pty idioms), `tests/mpx5-pty` and `tests/mpx5-forks` (the suite's shape) | this tree | read and extended |
+| pelt at `user/pelt.pin`'s commit and boreutils' `cat` at `user/boreutils.pin`'s, built unmodified by `tools/mkpelt` and `tools/mkboreutils` | the pins | black box: their thread counts on PAX (`/proc/<pid>/status`), pelt's `-c` |
