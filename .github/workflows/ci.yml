@@ -2521,7 +2521,9 @@ jobs:
   # DNS server of the suite's own on 127.0.0.1:53 (sudo -n binds it);
   # the resolver's datagram calls held to this runner's Linux; every
   # transcript scrubbed in memory and scanned, proven on fake secrets.
-  # The live way (the GitHub fixture) never runs here.
+  # The live way (the GitHub fixture) never runs here. px127: musl-tools
+  # links gai against musl (N3), the C library of a program `wolf build`
+  # makes on the box.
   mpx4-console-push:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-console-push')
@@ -2532,12 +2534,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, openssh, e2fsprogs (apt)
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, musl-tools, openssh, e2fsprogs (apt)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev openssh-server openssh-client e2fsprogs openssl git
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev musl-tools openssh-server openssh-client e2fsprogs openssl git
           qemu-system-x86_64 --version
           qemu-system-x86_64 -device help | grep -F '"igb"'
+          musl-gcc -v 2>&1 | tail -n 1
           /usr/sbin/sshd -V 2>&1 | head -n 1 || true
           mke2fs -V 2>&1 | head -n 1
           sudo -n true && echo "sudo -n: yes"
