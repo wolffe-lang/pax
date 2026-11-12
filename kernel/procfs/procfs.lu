@@ -124,6 +124,7 @@ use bootlog
 use bootmark
 use cred
 use frames
+use latency
 use paging
 use pty
 use sched
@@ -135,9 +136,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 58
+pub const ENTRIES: u64 = 59
 /// No entry.
-pub const NONE: u64 = 58
+pub const NONE: u64 = 59
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -209,6 +210,11 @@ const PTYMAX: u64 = 55
 /// /proc/partitions is), both in `/proc`.
 pub const PAXBOOT: u64 = 56
 pub const PAXBOOTLOG: u64 = 57
+/// px131: `/proc/pax-latency` (kernel/latency's instrument: how long the
+/// kernel kept interrupts off and the scheduler went without a chance to
+/// choose; `latency off` unless the command line has `latency`).
+/// Opening it ends kernel/latency's window (`take`).
+pub const PAXLAT: u64 = 58
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
@@ -273,6 +279,7 @@ const G_PTYNR: u64 = 26 // px111 (25 is PMEM's mark)
 const G_PTYMAX: u64 = 27
 const G_PAXBOOT: u64 = 28 // px118
 const G_PAXBOOTLOG: u64 = 29 // px118: the length only; kernel/files makes each read's bytes
+const G_PAXLAT: u64 = 30 // px131
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -346,7 +353,7 @@ fn limit_units(res: u64) -> str {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -592,6 +599,7 @@ pub fn name(e: u64) -> str {
     if e == PARTITIONS { return "partitions" } // px66
     if e == PAXBOOT { return "pax-boot" } // px118
     if e == PAXBOOTLOG { return "pax-bootlog" }
+    if e == PAXLAT { return "pax-latency" } // px131
     if e == SMOUNTS || e == PMOUNTS || e == MOUNTSLINK { return "mounts" } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return "mountinfo" }
     if e == SYSBLOCK || e == SYSCLASSBLOCK { return "block" } // px79
@@ -679,7 +687,7 @@ pub fn parent(r: u64) -> u64 {
     }
     if e == BIDENT { return dev_ref(dev_of(r), BDEV) }
     if e >= BATTR && e < BATTR + 9 { return dev_ref(dev_of(r), if e == BATTR + A_MODEL || e == BATTR + A_SERIAL { BIDENT } else { BDEV }) }
-    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG { return 0 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
     if e == CORE_PATTERN || e == PTYDIR { return KERNEL }
@@ -726,6 +734,7 @@ fn gen(r: u64) -> u64 {
     if e == PARTITIONS { return G_PARTITIONS } // px66
     if e == PAXBOOT { return G_PAXBOOT } // px118
     if e == PAXBOOTLOG { return G_PAXBOOTLOG }
+    if e == PAXLAT { return G_PAXLAT } // px131
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
@@ -938,6 +947,154 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         p = sched.proc_after(p)
     }
     NONE
+}
+
+/// px131: `/proc/pax-latency`'s text at `base`: its length; then
+/// kernel/latency's window starts again. Microseconds against
+/// kernel/clock; `since the last read` is since the last open.
+///
+///     latency on|off
+///     tsc <cycles> per us
+///     irqoff <us> us vector 0x<v> nr <n> rip 0x<r> since boot
+///     irqoff <us> us vector 0x<v> nr <n> rip 0x<r> since the last read
+///     schedgap <us> us thread 0x<t> vector 0x<v> since boot
+///     schedgap <us> us thread 0x<t> vector 0x<v> since the last read
+///     ticks <delivered> of <due> since boot
+///     ticks <delivered> of <due> since the last read
+///     intervals <n>
+///     hist <us> <n>          (each power of two of cycles with any)
+///     sys <nr> <us> us       (each system call over 0 since the last read)
+///     vec 0x<v> <us> us      (each vector over 0)
+///     slot <s> <us> us       (each thread slot's irq_save sections)
+///
+/// `vector` is a vector, 0x100 a system call (`nr` its number), 0x200 an
+/// irq_save section (`nr` the thread's slot) or 0x201 a HLT's wait; a
+/// thread is its pid, or 0x1000000nn for kernel slot nn.
+fn paxlat(base: u64) -> u64 {
+    if !latency.on() {
+        return put_s(base, 0, "latency off\n")
+    }
+    let per = latency.per_us()
+    var n = put_s(base, 0, "latency on\ntsc ")
+    n = put_dec(base, n, per)
+    n = put_s(base, n, " per us\n")
+    let (c0, r0, t0, k0) = latency.longest()
+    n = paxlat_irq(base, n, per, c0, r0, t0, k0, "since boot\n")
+    let (c1, r1, t1, k1) = latency.window()
+    n = paxlat_irq(base, n, per, c1, r1, t1, k1, "since the last read\n")
+    let (g0, w0, v0) = latency.gap_longest()
+    n = paxlat_gap(base, n, per, g0, w0, v0, "since boot\n")
+    let (g1, w1, v1) = latency.gap_window()
+    n = paxlat_gap(base, n, per, g1, w1, v1, "since the last read\n")
+    n = paxlat_ticks(base, n)
+    n = paxlat_hist(base, n, per)
+    n = paxlat_tables(base, n, per)
+    latency.take()
+    n
+}
+
+/// px131: one `irqoff` line.
+fn paxlat_irq(base: u64, at: u64, per: u64, c: u64, rip: u64, tag: u64, nr: u64, tail: str) -> u64 {
+    var n = put_s(base, at, "irqoff ")
+    n = put_dec(base, n, latency.us(c, per))
+    n = put_s(base, n, " us vector 0x")
+    n = put_hex_w(base, n, tag, 0)
+    n = put_s(base, n, " nr ")
+    n = put_dec(base, n, nr)
+    n = put_s(base, n, " rip 0x")
+    n = put_hex_w(base, n, rip, 0)
+    n = put_b(base, n, 32)
+    put_s(base, n, tail)
+}
+
+/// px131: one `schedgap` line.
+fn paxlat_gap(base: u64, at: u64, per: u64, c: u64, who: u64, v: u64, tail: str) -> u64 {
+    var n = put_s(base, at, "schedgap ")
+    n = put_dec(base, n, latency.us(c, per))
+    n = put_s(base, n, " us thread 0x")
+    n = put_hex_w(base, n, who, 0)
+    n = put_s(base, n, " vector 0x")
+    n = put_hex_w(base, n, v, 0)
+    n = put_b(base, n, 32)
+    put_s(base, n, tail)
+}
+
+/// px131: the two `ticks` lines and `intervals`.
+fn paxlat_ticks(base: u64, at: u64) -> u64 {
+    let (d0, e0, d1, e1) = latency.ticks()
+    var n = put_s(base, at, "ticks ")
+    n = put_dec(base, n, d0)
+    n = put_s(base, n, " of ")
+    n = put_dec(base, n, e0)
+    n = put_s(base, n, " since boot\nticks ")
+    n = put_dec(base, n, d1)
+    n = put_s(base, n, " of ")
+    n = put_dec(base, n, e1)
+    n = put_s(base, n, " since the last read\nintervals ")
+    n = put_dec(base, n, latency.closed())
+    put_b(base, n, 10)
+}
+
+/// px131: the histogram, a line for each power of two of cycles with an
+/// interval in it (its lower bound in microseconds).
+fn paxlat_hist(base: u64, at: u64, per: u64) -> u64 {
+    var n = at
+    var b: u64 = 0
+    while b < latency.BUCKETS {
+        let k = latency.bucket(b)
+        if k != 0 {
+            n = put_s(base, n, "hist ")
+            n = put_dec(base, n, latency.us(1 << b, per))
+            n = put_b(base, n, 32)
+            n = put_dec(base, n, k)
+            n = put_b(base, n, 10)
+        }
+        b += 1
+    }
+    n
+}
+
+/// px131: the longest since the last read for each system call, vector
+/// and thread slot that had one.
+fn paxlat_tables(base: u64, at: u64, per: u64) -> u64 {
+    var n = at
+    var i: u64 = 0
+    while i < latency.SYSCALLS {
+        let c = latency.sys_longest(i)
+        if c != 0 {
+            n = put_s(base, n, "sys ")
+            n = put_dec(base, n, i)
+            n = put_b(base, n, 32)
+            n = put_dec(base, n, latency.us(c, per))
+            n = put_s(base, n, " us\n")
+        }
+        i += 1
+    }
+    i = 0
+    while i < latency.VECTORS {
+        let c = latency.vec_longest(i)
+        if c != 0 {
+            n = put_s(base, n, "vec 0x")
+            n = put_hex_w(base, n, i, 0)
+            n = put_b(base, n, 32)
+            n = put_dec(base, n, latency.us(c, per))
+            n = put_s(base, n, " us\n")
+        }
+        i += 1
+    }
+    i = 0
+    while i < latency.SLOTS {
+        let c = latency.slot_longest(i)
+        if c != 0 {
+            n = put_s(base, n, "slot ")
+            n = put_dec(base, n, i)
+            n = put_b(base, n, 32)
+            n = put_dec(base, n, latency.us(c, per))
+            n = put_s(base, n, " us\n")
+        }
+        i += 1
+    }
+    n
 }
 
 /// px118: `/proc/pax-boot`'s text at `base`: its length. One fact a
@@ -1712,6 +1869,8 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = paxboot(base) // px118
     } else if g == G_PAXBOOTLOG {
         n = bootlog.prev_len() // px118: the length only; kernel/files makes each read's bytes
+    } else if g == G_PAXLAT {
+        n = paxlat(base) // px131
     } else if g == G_CORE_PATTERN {
         n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
     } else if g == G_PTYNR {
