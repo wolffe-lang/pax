@@ -70,7 +70,7 @@
 #include <unistd.h>
 
 #define PANES 32
-#define MAXP 48
+#define MAXP 128 /* every pane the run makes, never reused: A1's 32, the later sections', A1.9's 32 */
 #define LOOP "while read -r l; do eval \"$l\"; done"
 #define FLOOD_BYTES 50000000L
 #define HEADER "<<px125 flood>>"
@@ -448,7 +448,7 @@ static void pane_del(int k) { epoll_ctl(ep, EPOLL_CTL_DEL, P[k].m, 0); }
  * them to the default (2), as a server that resets its panes would. */
 static int pane_start(char *const argv[], int ign, int addloop) {
     int k = np;
-    if (k >= MAXP) return -1;
+    if (k >= MAXP) { errno = ENOSPC; return -1; } /* the probe's own table, not the system's */
     struct pane *p = &P[k];
     memset(p, 0, sizeof *p);
     p->m = posix_openpt(O_RDWR | O_NOCTTY);
@@ -1124,7 +1124,7 @@ static void sec_a19(void) {
     char ends[256] = "";
     for (int i = 0; i < PANES; i++) {
         int k = pane_start(SH, 0, 1);
-        if (k < 0) { forkfail++; ferr = errno; continue; }
+        if (k < 0) { forkfail++; ferr = errno; break; } /* as A1.0: the first refusal ends the count */
         ks[started++] = k;
         long idle = now_ms() + 100; /* a pane's shell waits for its line */
         while (now_ms() < idle) turn(20);
@@ -1148,8 +1148,8 @@ static void sec_a19(void) {
         if (strlen(ends) < 200) { strcat(ends, " "); strcat(ends, h); }
     }
     say("A1.9 32 pelt shells at once, each idle between its lines: %s\n", again == PANES ? "every one answered twice" : "NOT every one answered twice");
-    say("~A1.9 %d started (fork %s for %d), %d answered once, %d again after 5 s idle; %d did not:%s; the first shell's Threads line %d\n",
-        started, forkfail ? ename(ferr) : "-", forkfail, once, again, ended, ends, th);
+    say("~A1.9 started %d of %d (then %s), answered %d once and %d again after 5 s idle; %d did not:%s; the first shell's Threads line %d\n",
+        started, PANES, forkfail ? ename(ferr) : "none refused", once, again, ended, ends, th);
     for (int j = 0; j < started; j++) {
         int k = ks[j];
         if (P[k].m >= 0) { pane_del(k); close(P[k].m); P[k].m = -1; }
