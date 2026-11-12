@@ -113,16 +113,16 @@ def main():
             f'at {small_mib} MiB ligature refuses by name, no output, no fallback (ligature#35): {pw[:2]!r}; '
             f'lld links pelt and it prints {sr.get(("pelt", "lld"))!r}')
 
-    for p, want in (('pelt', PELT), (largest, None)):
-        key = 'pelt' if p == 'pelt' else 'largest'
+    for p, want in (('pelt', PELT), ('den', None), (largest, None)):
+        key = p if p in ('pelt', 'den') else 'largest'
         got = (br.get((key, 'lig')), br.get((key, 'lld')))
         row(f'L8-{key}-at-big', bb.get((key, 'lig')) == (0, True) and bb.get((key, 'lld')) == (0, True)
             and got[0] is not None and got[0] == got[1] and (want is None or got[0] == want),
             f'{p} at {big_mib} MiB: ligature {bb.get((key, "lig"))}, lld {bb.get((key, "lld"))}; {got[0]!r} and {got[1]!r}')
 
-    row('L8-largest-by-lld-at-small', sb.get(('largest', 'lld')) == (0, True)
-        and sr.get(('largest', 'lld')) is not None and sr.get(('largest', 'lld')) == br.get(('largest', 'lld')),
-        f'{largest} at {small_mib} MiB by lld: {sb.get(("largest", "lld"))}, {sr.get(("largest", "lld"))!r}')
+    row('L8-den-by-lld-at-small', sb.get(('den', 'lld')) == (0, True)
+        and sr.get(('den', 'lld')) is not None and sr.get(('den', 'lld')) == br.get(('den', 'lld')),
+        f'den at {small_mib} MiB by lld: {sb.get(("den", "lld"))}, {sr.get(("den", "lld"))!r}')
 
     meas = []
     for text, mib in ((s, small_mib), (b, big_mib)):
@@ -133,7 +133,7 @@ def main():
     for mib, label, wall, cpu, rss, st in meas:
         print(f'MEASURE guest={mib}MiB {label} wall_ms={wall} cpu_ms={cpu} peak_mib={rss / 1024:.0f} status={st}')
     want = {(small_mib, f'{n}-{l}') for n in ('hello', 'netproc', 'ligature') for l in ('lig', 'lld')} | \
-           {(big_mib, f'{n}-{l}') for n in ('pelt', 'largest') for l in ('lig', 'lld')} | {(small_mib, 'pelt-lld'), (small_mib, 'largest-lld')}
+           {(big_mib, f'{n}-{l}') for n in ('pelt', 'den', 'largest') for l in ('lig', 'lld')} | {(small_mib, 'pelt-lld'), (small_mib, 'den-lld')}
     have = {(mib, label) for mib, label, wall, cpu, rss, st in meas if rss > 0 and st == 0}
     row('L9-measured', want <= have, f'{len(meas)} links measured (wait4: wall, CPU, peak); missing or empty: {sorted(want - have)}')
 
