@@ -1,0 +1,13 @@
+# notes/px131/rig/link.manifest — the kernels that do not link kernel/latency (kmain_usbcheck, the metal
+# kernels) link at both tiers against the entry paths' calls to pax_lat_close (boot/isr.S's weak one),
+# and their suites pass, native BIOS; kmain_console and kmain_sched beside them (kernel/latency's own).
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px131/rig/lib.sh
+rig engine-ns committed=../../..:HEAD:notes/px131/rig/engine-ns
+rig link.manifest committed=../../..:HEAD:notes/px131/rig/link.manifest
+step kernels-native image=localhost/px75-ubuntu:2 tools=python3,readelf,curl,xorriso script=step.sh -- kernels native kmain_usbcheck kmain_metal_msi kmain_metal_panic kmain_metal_power kmain_metal_screen kmain_metal_serial kmain_console kmain_sched
+step kernels-release image=localhost/px75-ubuntu:2 tools=python3,readelf,curl,xorriso script=step.sh -- kernels release kmain_usbcheck kmain_metal_msi kmain_metal_panic kmain_metal_power kmain_metal_screen kmain_metal_serial
+step usbcheck image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx6-usbcheck --tier native --firmware bios
+step usbcheck-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx6-usbcheck --tier release --firmware bios
+step metal-power image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx6-metal-power
+step metal-serial image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx6-metal-serial
