@@ -2363,3 +2363,19 @@ tier's inlining; the rest is measurement.
 - `tools/latest-resolve`, `tools/mkdistribution --latest` and `tests/latest` are px97's, carried as they were
   written there (GitHub's REST API for a repository's newest release and its assets' digests).
 - No other implementation's source; no kernel's, firmware's or driver's.
+
+## px128 — ligature on the dev image, beside lld
+
+No linker's, C library's or kernel's source was read: not lld's, GNU ld's or any other linker's, not musl's or
+glibc's, not Linux's. ligature's own tree was read only as far as building it and its documentation (its
+README, `wolf-toolchain.toml` and the cc front end's documented argument subset). wolf-lang was read only for
+its documented `--linker` and `WOLF_LD` clause (`wolf build --help`) and the link line it gives a selected
+linker.
+
+| source | version | read, for |
+|---|---|---|
+| ligature's README and `wolf-toolchain.toml` (`wolffe-lang/ligature`) | `32ec7f43` | how it is built (its own pinned wolf 0.2.38 archive, `wolf build --deny-warnings src/ligature.lu`), its cc front end (the link line `wolf build` gives a selected linker; `/usr/lib/wolf-musl` unless `LIGATURE_SYSROOT`), its link bundle's contents and digests |
+| wolf-lang's `wolf build --help` text on `--linker` and `WOLF_LD` | 0.2.39 | the selection (the command line over `WOLF_LD` over the platform's cc, which asks for lld when an `ld.lld` is on `PATH`), the link line, a selected linker's failure final, and the note naming lld |
+| `getrusage(2)`, `wait4(2)`, `clock_gettime(2)` (the Linux man-pages) | 6.9 | `tests/distribution-ligature.d/ldtime.c`: a child's wall time, CPU time and peak resident set |
+| ligature 0.0.2, ld.lld 18.1.8 and the image's link-only cc | binaries | black box: each links the same programs on PAX and on Linux (`notes/px128-ligature-on-the-image.md` §2) |
+| PAX's own `tools/mktrash`, `tools/mkclef`, `tools/distribution-root`, `tools/system-env`, `tests/distribution`, `tests/distribution-boot`, and `kernel/process`'s `wait4` and `getrusage` | this tree | read and extended |
