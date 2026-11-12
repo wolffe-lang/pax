@@ -2,8 +2,10 @@
 """tests/mpx3-conspeed.d/rows.py (px129): hold conspeed's table, read off the screen of one boot, to
 its rows.
 
-    rows.py TABLE.txt GRID ACCEL [uart]  (GRID: the cells conspeed must report, e.g. 256x90; ACCEL kvm or tcg;
-                                          `uart`: the slow-UART leg, which holds C1, C8 and C9 alone)
+    rows.py TABLE.txt GRID ACCEL [uart UART.txt]
+                                    (GRID: the cells conspeed must report, e.g. 256x90; ACCEL kvm or tcg;
+                                     `uart`: the slow-UART leg, which holds C1, C8, C9 and C10 alone,
+                                     UART.txt its far end's summary line, uart.py's)
     rows.py --selftest DIR          (each DIR/red-ACCEL[-HOST].txt must fail, each green-… pass)
 
 Every row compares two `ms least` figures of the same boot (the least of a test's frames: a frame
@@ -34,6 +36,11 @@ against 2.8), so a bound on the raw figure held on one host and not the next.
      waits for it, a byte costs about 87 us: bytes about 2.5 s, some 1,400 units). Only that leg holds it;
      there the other rows are SKIPPED by name (a slow UART slows every write, and conspeed skips a test
      whose write would outrun its budget).
+  C10 (g) the same leg: COM1's backlog drains while its writer sleeps: once the line has carried 64 KiB,
+     it never pauses more than 0.5 s (uart.py's longest pause between reads that found bytes). A kernel
+     whose ring only the writer's next byte moves leaves the line idle through conspeed's idle second
+     after the tests, as does one that waits per byte (nothing is left to send when the writer stops).
+     C9 and C10 are stated under KVM and SKIPPED by name under TCG.
 
 The bounds sit between the trunk the rows were written at and the fix they hold, on both hosts'
 tables (selftest/, notes/px129-console-speed.md): each about 1.3 times or more from both under KVM.
@@ -64,10 +71,10 @@ def parse(text):
     return (head.group(2) if head else None), rows
 
 
-def check(text, grid, accel, out, uart=False):
+def check(text, grid, accel, out, uart=False, line=""):
     got, rows = parse(text)
     if uart:
-        return check_uart(got, rows, grid, accel, out)
+        return check_uart(got, rows, grid, accel, out, line)
     fail = 0
 
     def row(name, ok, what):
@@ -131,7 +138,7 @@ def check(text, grid, accel, out, uart=False):
     return fail
 
 
-def check_uart(got, rows, grid, accel, out):
+def check_uart(got, rows, grid, accel, out, line=""):
     fail = 0
 
     def row(name, ok, what):
@@ -145,17 +152,25 @@ def check_uart(got, rows, grid, accel, out):
         f"the table: {'a header' if got else 'no header'}; " + ("unit and bytes, each with frames" if len(have) == 2 else "no unit or no bytes"))
     row("C8", got == grid, f"the grid: {got or 'none'} cells (want {grid})")
     for r in ("C2", "C3", "C4", "C5", "C6", "C7"):
-        out.append(f"SKIP {r} reason=uart: the slow-UART leg holds C9 alone")
+        out.append(f"SKIP {r} reason=uart: the slow-UART leg holds C9 and C10 alone")
     if len(have) < 2 or rows["unit"]["least"] <= 0:
         return 1
     if accel != "kvm":
         out.append("SKIP C9 reason=tcg: (f) a slow UART: its bound is stated under KVM")
+        out.append("SKIP C10 reason=tcg: (g) COM1's backlog: its bound is stated under KVM")
         return fail
     u = rows["unit"]["least"]
     b = rows["bytes"]["least"]
     v = b / u
     row("C9", v <= 3, f"(f) a slow UART: bytes {b:.3f} ms least for {rows['bytes']['bytes']} bytes, {v:.2f} units of {u:.3f} ms "
         f"(bound 3; {b * 1e3 / max(rows['bytes']['bytes'], 1):.3f} us a byte)")
+    m = re.search(r"uart: (\d+) bytes read in ([\d.]+) s; the longest pause once 65536 were read: ([\d.]+) s at byte (\d+)", line)
+    if m:
+        g = float(m.group(3))
+        row("C10", g <= 0.5, f"(g) COM1's backlog: the line paused at most {g:.3f} s once 64 KiB were sent (bound 0.5; "
+            f"at byte {m.group(4)} of {m.group(1)} in {m.group(2)} s)")
+    else:
+        row("C10", False, f"(g) COM1's backlog: no pause figure from the line's far end ({line.strip()[:120] or 'nothing'})")
     return fail
 
 
@@ -182,11 +197,17 @@ def main():
                     said.append(f"no {want}-{accel}.txt")
         print(f"{'PASS' if ok else 'FAIL'} selftest: " + "; ".join(said))
         sys.exit(0 if ok else 1)
-    if len(sys.argv) not in (4, 5) or sys.argv[3] not in ("kvm", "tcg") or (len(sys.argv) == 5 and sys.argv[4] != "uart"):
+    if len(sys.argv) not in (4, 6) or sys.argv[3] not in ("kvm", "tcg") or (len(sys.argv) == 6 and sys.argv[4] != "uart"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         sys.exit(2)
     out = []
-    rc = check(open(sys.argv[1]).read(), sys.argv[2], sys.argv[3], out, uart=len(sys.argv) == 5)
+    line = ""
+    if len(sys.argv) == 6:
+        try:
+            line = "".join(ln for ln in open(sys.argv[5], errors="replace") if ln.startswith("uart: "))
+        except OSError:
+            pass
+    rc = check(open(sys.argv[1]).read(), sys.argv[2], sys.argv[3], out, uart=len(sys.argv) == 6, line=line)
     print("\n".join(out))
     sys.exit(rc)
 
