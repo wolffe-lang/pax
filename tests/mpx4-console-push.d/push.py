@@ -6,7 +6,7 @@
 
 DIR (--images) is what tests/mpx4-console-push built: root/ (the image's
 tree), hermetic.pax-net, live.pax-net, den-src/ (den's tree at user/den.pin,
-for its smart-HTTP fixture), linux/ (dgramopts and gai for this host), and
+for its smart-HTTP fixture), linux/ (dgramopts, gai and gai-musl for this host), and
 present.txt (the pieces the tree could build). Each boot gets its own
 initramfs and ISO under OUT, a secrets carrier and its fixtures; the session
 is typed by console.py, whose transcript is scrubbed before it is written.
@@ -32,6 +32,10 @@ Ways and rows (each printed `PASS <row> …` or `FAIL <row> …` at column 0):
        address, /etc/hosts' address, EAI_NONAME, the literal; the fixture
        saw the guest's A and AAAA questions for github.com and none for
        hosts.test.
+    N3 (px127) the same four names through musl's resolver (gai-musl,
+       user/net/gai.c linked static against musl, as a program `wolf
+       build` makes on the box is): the same four answers; musl reads
+       its answers with recvmsg(2).
   https  the same network; den's own smart-HTTP fixture (its
          tools/http-git-test.py Server: OpenSSL's s_server and
          git-http-backend, black boxes) with a leaf for DNS:github.com from a
@@ -349,6 +353,7 @@ def way_names(out, images, c):
         keys = PRELUDE.splitlines() + [
             'echo ROW N1; s /bin/dgramopts',
             'echo ROW N2; s /bin/gai github.com hosts.test nosuch.test 10.0.2.2',
+            'echo ROW N3; s /bin/gai-musl github.com hosts.test nosuch.test 10.0.2.2',
         ] + CANARY.splitlines()
         iso = image(images, out, 'names', {}, 'hermetic.pax-net')
         log = boot(out, iso, keys, c, user_net(), {})
@@ -380,6 +385,21 @@ def way_names(out, images, c):
         bad('N2', 'hosts.test was asked of DNS: /etc/hosts was not read first (%s)' % asked)
     else:
         ok('N2', 'github.com from the DNS fixture (%s), hosts.test from /etc/hosts alone, nosuch.test EAI_NONAME' % ', '.join(sorted(set(asked))))
+    # px127: musl's resolver, as an on-box build links it. Its questions go
+    # to the same fixture after N2's, so N2's and N3's together ask
+    # github.com's A at least twice, and neither asks hosts.test.
+    got = (b.get('N3') or [None])[0]
+    if got is None:
+        bad('N3', 'no gai-musl block in the transcript')
+    elif got[1] != want2 or got[0] != 0:
+        bad('N3', 'gai-musl at the console: status %d, %s (glibc\'s gai, N2: %s)' % (got[0], got[1], want2))
+    elif asked.count('A github.com -> 10.0.2.2') < 2:
+        bad('N3', 'the DNS fixture answered github.com\'s A question %d times, not once for each resolver: %s'
+            % (asked.count('A github.com -> 10.0.2.2'), asked))
+    elif any('hosts.test' in q for q in asked):
+        bad('N3', 'hosts.test was asked of DNS: /etc/hosts was not read first (%s)' % asked)
+    else:
+        ok('N3', 'musl\'s resolver: github.com from the DNS fixture, hosts.test from /etc/hosts alone, nosuch.test EAI_NONAME, the literal')
     return log
 
 
