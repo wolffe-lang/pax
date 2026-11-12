@@ -427,9 +427,10 @@ def rows_fbmap(fw, cpio):
     # back, selects that wc entry. A2: `pax.patdefault` (test-only) puts IA32_PAT to its power-on value,
     # which holds no wc entry, as a bootloader that never programmed it leaves it: the kernel programs
     # entry 5 to wc itself and maps the framebuffer with it (before px129: uncached, entry 3).
+    # An ISO each (no ext2 volume: the rows read /proc/pax-boot and the console only).
     for row, word in (('A1', ''), ('A2', 'pax.patdefault')):
-        img = disk(f'{fw}-{row}', cpio, word)
-        m = Machine(f'{fw}-{row}', fw, disk_media(img))
+        img = iso(f'{fw}-{row}', cpio, word)
+        m = Machine(f'{fw}-{row}', fw, ['-cdrom', img], reboot_exits=True)
         t = m.boot()
         m.quit()
         if not booted(f'{row} {fw}', t):
