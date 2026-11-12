@@ -144,6 +144,21 @@ rows are still SKIPPED by name (R-px129-3). No CI leg runs them under KVM: a hos
 0660), but the job's user cannot open it, so `--accel auto` takes TCG there, as every other suite's leg does. These
 rows are held by local records only (R-px129-11).
 
+**mpx5-pty's session (pax#382).** At `4f3b30f6` the hosted mpx5-pty leg (TCG) went red in two attempts of two at
+Y3 session-root, `S|4`: one `$ ` where Linux's reference has two before `stty size; echo :do''ne2:`. The session's
+driver (user/elf/ptyprobe.c) resized the pty the moment the command's marker `:done1:` came. Whether pelt redrew its
+prompt for the new size turned on how far pelt had got from the command to its prompt: before the prompt, pelt draws
+it once; after it, pelt redraws it. The race is trunk's. In ten session boots under TCG it failed once at the base
+`0e2843cf` and twice at `4f3b30f6`, and none of ten under KVM at either. Between the marker and the resize, the
+driver's only work is one console line, which this branch makes cheaper, so the branch moves the odds; on the hosted
+runners it moved them far enough to fail the row. The driver now waits for pelt's prompt after the marker, then as long
+again as it waits before typing a key, before each of its two resizes (`9a992b29`). Linux's side was recorded again
+with that probe, on the same kernel and QEMU (`08a1a31b`). The session's transcripts came out byte for byte the
+reference's; the probe's matched too, but for P10b#2, a row that R-px111-6 rules. As a rate
+(`notes/px129/rig/pty-rate.manifest`: the session image booted 20 times under TCG, each run checked as the suite
+does), the rig before the fix (`f2524f73`) is red, `session-root differs in 2 of 20 boots` (record sha256
+`e6f49c7a…`, §8); the head's rate is in the PR's records.
+
 ## 5. The installed machine
 
 A person at the console runs the wrapper's one command; its table is saved beside it. **Not yet run at this writing;**
@@ -203,7 +218,9 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 | **red on a second host with the fix in, at the raw-figure rows** | the quick take at `a6d2a2ac` on a laptop i7-10870H; its BIOS screen is `selftest/green-kvm-10870h.txt` (`6edfa215`, screen text sha256 `c8f115c3c95800dbee962223b39cef068317fd858c8183a874e88249bb57eacc`) | `FAIL C3 (b) an SGR before every cell: sgr 22.799 ms least, 13.26 units of 1.719 ms (bound 11.5)`, `FAIL C7 (e) cub's step: cub 7.767 ms least, 4.52 units of 1.719 ms (bound 4.3)`; UEFI `FAIL C3` at 12.43 units; `END conspeed exit=1 secs=65` |
 | the rows restated against a test's drawing | `731990dc` (rows.py), `6edfa215` (the laptop's px129 table), `b38cbdc9` (its trunk table), `2a7c9027` (the suite's header) | the selftest: both hosts' trunk tables fail (10 and 11 rows), both fix tables pass (12 rows each) |
 | **red at trunk on the second host, at the restated rows** | `px129-rows-red-r3` (`d169ba3f`: the rows' commit `fbc47605` with `731990dc` picked onto it), `red.manifest` on the laptop, record sha256 `fa7c961a8a29f24b37192041d614137e79af3c1f91dfd66abdf43d2f3688fc7a` | `FAIL C8 the grid: 256x90 cells (want 320x90)`, `FAIL C2` (plain's drawing 17.14 units, bound 3), `FAIL C3` (sgr's 19.35, bound 5), `FAIL C4` twice (scroll1's 17.35; scroll10 10.02 x scroll1), `FAIL C5` (1.89 x), `FAIL C6` twice (1.94 x; same 1.00 x), `FAIL C7` three times (fussopen's 16.04, cub's 10.49, fuss's 0.08 units); C1 PASS; `END conspeed exit=1 secs=83` |
-| the quick take and the plant at this branch's head | the same manifests at the head, after the rows were restated | their records and `END` lines are in the PR |
+| **mpx5-pty's session, red as a rate before the fix** | `px129-pty-red` (`f2524f73`: the rig `ce8e4740` and `f2524f73`, before the fix), `pty-rate.manifest`, record sha256 `e6f49c7af0b50dbb863201bdb10ece3c53d44ecf884692c86db660cc2b12b09c` | `FAIL Y3 native bios tcg session: session-root differs in 2 of 20 boots, session-user in 0, 0 not ended; rows: 2 session-root/S|4`; `END ptyrate exit=1 secs=654` |
+| the session's fix | `9a992b29` (the driver waits for pelt's prompt before a resize), `08a1a31b` (Linux's side recorded again: the session's transcripts unchanged) | |
+| the quick take, the rate and the plant at this branch's head | the same manifests at the head (the quick take now with mpx5-pty, both firmwares, KVM and TCG) | their records and `END` lines are in the PR |
 | QEMU's legs, trunk and fix, KVM and TCG, with and without COM1 | the lane's evidence | §4 |
 
 **The rebase.** The work above was done on trunk `211e5c7c`, and every commit this note names before this paragraph
@@ -255,6 +272,10 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
   held by local records only, under KVM (implemented); (B) give the job the runner's `/dev/kvm` (a udev rule): the
   runner's CPU is shared and differs from job to job, and the other suites' legs name TCG for that reason; the drawing
   rows might hold there, unproven.
+- **R-px129-12, mpx5-pty's session race (pax#382).** (A) the driver waits for pelt's prompt before each resize, and
+  Linux's side is recorded again with that probe (implemented): the row sees the redraw on both systems, every time;
+  (B) ruled.txt accepts either form of `S|4`: the race stays, and the row could no longer see a redraw that went
+  missing.
 
 ## 10. Done-when
 
