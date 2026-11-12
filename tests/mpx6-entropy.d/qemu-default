@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# tests/mpx6-entropy.d/qemu-default — dw02: QEMU with every `-cpu MODEL` pair
+# dropped, so the machine has QEMU's own default CPU model, the one a suite
+# that passes no -cpu boots under TCG (mpx6-staged, mpx6-bootlog). Used as
+# PAX_QEMU by tests/mpx6-entropy's `default` configuration; the real QEMU is
+# PAX_QEMU_REAL (default qemu-system-x86_64). Every other argument passes as
+# it came.
+set -uo pipefail
+args=()
+while [ $# -gt 0 ]; do
+    if [ "$1" = -cpu ] && [ $# -ge 2 ]; then
+        shift 2
+        continue
+    fi
+    args+=("$1")
+    shift
+done
+exec "${PAX_QEMU_REAL:-qemu-system-x86_64}" ${args[@]+"${args[@]}"}
