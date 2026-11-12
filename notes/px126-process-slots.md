@@ -157,7 +157,8 @@ differences:
 - **The switch row** also measures a yield with nobody else to run (the call, no switch) and holds the yield
   among 16 to at most `SWITCH_ALONE` such yields: a walk of every slot at every switch (raising the table alone)
   breaks it, which the ratio of 1,000 to 16 alone cannot see (§7). Among 64 within 1.5 times the 16's, among
-  1,000 within 3 times (2 in §5: measured 1.94, too near for another host).
+  1,000 within 4 times (2 in §5: measured 1.94, too near for another host; 3 next, until a take with the host's
+  other blocks busy measured 2.80; the variant it must catch measures 5.5).
 - **A session as a user**, `threads-user` (`slots-nproc`), for D10.
 - **The fill row** wants 80 children at least (the old table held 60).
 - **Three existing pins move, each with what it counts:** `tests/mpx3-user`'s U6 (a process of kmain_user's
@@ -211,8 +212,10 @@ the walk of 1,024 records, about 3.3 ns a slot. Bounding the walks by the high w
 trunk and makes 1,000 5.5 times 16. With the next deadline, a yield among 16 and 64 costs less than trunk's (no
 walk at all; trunk walked 64), and among 1,000 about twice the 16's, which is caches and the TLB (a thousand
 address spaces, records, stacks and FPU areas), not walks. The row holds a yield among 16 to at most 10 lone
-yields (5.7 here, 21.9 with the walks unbounded), among 64 to 1.5 times the 16's (1.05), among 1,000 to 3 times
-(1.80 here; 1.94 and 2.18 in two earlier takes of the same kernel).
+yields (5.7 here, 21.9 with the walks unbounded), among 64 to 1.5 times the 16's (1.05), among 1,000 to 4 times
+(1.80 here; 1.94 and 2.18 in two earlier takes of the same kernel; 2.80, 1,126 and 3,156 ns, in the recorded take
+at `73b10e0a`, with the build host's other blocks busy: a thousand processes' working set shares their caches;
+5.5 with no deadline skip).
 
 **The wake-everyone rule** (`slots-herd`, measured): a one-byte ping-pong between two processes over two pipes,
 with W other processes parked in a read of one more pipe, round trips for a second.
@@ -240,7 +243,9 @@ Every row was seen red on trunk's kernel before any kernel change, by name, at t
 - at `ba6b087c` (the wolf row on pelt, the herd timed), log 8,805 bytes, sha256
   `4a337eb470b8ce96c7a293cbdcd1347a5faac4691602343c5c6e9ff1c59f4aa4`: the same rows, `slots-wolf` now 24 pelts
   at once and then EAGAIN, `slots-ptys` 25 made, 17 through;
-- `slots-nproc` at `4bf82c8f` (the row, before RLIMIT_NPROC): the pull request's; and at `36963e2f`, before
+- `slots-nproc` at `4bf82c8f` (the row, before RLIMIT_NPROC): user 1000 made 1,020 threads where 512 are its
+  limit, and `slots-machine` saw `no free process slot` where the row asks for RLIMIT_NPROC's refusal, log 4,344
+  bytes, sha256 `ad8a54e5c41f2ffbee1708f4b5d706b6b317fb886173467166a8c53fb1e99518`; and at `36963e2f`, before
   `8c45ad86`, its second round red by name (`made 0`, §7), log sha256
   `4e6765d3bd53eaa78805457a295a834907fcc842174271fa2adc4993fdeecd5c`;
 - `slots-switch`'s two bounds each red on the variant that breaks it, each a patch in `notes/px126/`
@@ -249,7 +254,8 @@ Every row was seen red on trunk's kernel before any kernel change, by name, at t
   yield's 207 ns`, log sha256 `a9ab39760294f8e35b8123a3b0fd9ca587290f93317fa1a5d57f1bd9dee09aed`; the walks to the
   high water with no deadline skip, `a yield among 1,000 costs 6810 ns, more than twice the 16's 1234 ns` (the
   row's bound was twice then; 5.5 times), log sha256
-  `1713309e801d62dda113746051b66e1c0bdd5953571c15e1fe65cfc55710ffa3`.
+  `1713309e801d62dda113746051b66e1c0bdd5953571c15e1fe65cfc55710ffa3`; again at the bound of four times, on this
+  head's kernel, in the pull request.
 
 An existing suite found one more: `tests/mpx5-trace`'s `clone-event` script at `36963e2f` panicked by name, `PANIC
 sched: no process area for slot 0x0000000000000005`: a tracer's wait collected a traced thread's death, and
@@ -257,9 +263,13 @@ sched: no process area for slot 0x0000000000000005`: a tracer's wait collected a
 zeros). Fixed at `daa298ba`: a slot with no area reports no usage of its own, as before. Every other `own_area`
 was read again for the same mistake: each is asked of a leader, MAIN, or a slot whose area it checks first.
 
-The plant, `px126-plant-area-leak` (pushed, never merged): `free_area` unmaps a process area's twelve pages and
-gives none back, so every non-quiet session's `slots-machine` row says `frames not all back`. Its record is the
-pull request's.
+`tests/ci-plan` found one in the rows: the `threads-user` session runs the probe through `/bin/as`, so `as` and
+`tools/mkas` now select `tests/mpx5-slots`, and the two expectations that list the suites they reach did not name
+it (`FAIL (2)` in the recorded take at `73b10e0a`). The list names it now.
+
+The plant, `px126-plant-area-leak-2` (pushed, never merged; `px126-plant-area-leak` is the same break on
+`73b10e0a`): `free_area` unmaps a process area's twelve pages and gives none back, so every non-quiet session's
+`slots-machine` row says `frames not all back`. Its record is the pull request's.
 
 ## 9. Not measured
 
