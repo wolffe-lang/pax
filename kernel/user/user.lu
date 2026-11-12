@@ -1110,6 +1110,7 @@ const NS_PER_SEC: u64 = 1000000000
 // tick; CLOCK_* read the tick count, so they advance 10 ms at a time.
 const NS_PER_TICK: u64 = 10000151
 const GETRANDOM_MAX: u64 = 0x1ffffff // Linux's per-call cap, 33554431
+const GETRANDOM_CHUNK: u64 = 16384 // px131: getrandom(2)'s bytes a call
 
 // The area's words kernel/user keeps: the calls already logged (one bit
 // each for 0-511), and the refusal word kernel/vm and kernel/files set.
@@ -2296,7 +2297,10 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
         return prlimit(a0, a1, a2, a3)
     }
     if nr == SYS_GETRANDOM {
-        return getrandom(a0, a1, int32(a2))
+        // px131: getrandom(2) returns at most GETRANDOM_CHUNK a call, as the
+        // call may above 256 bytes (getrandom(2)), so one call's interrupts-off
+        // stretch stays near a millisecond; /dev/urandom's reads stay whole.
+        return getrandom(a0, if a1 > GETRANDOM_CHUNK { GETRANDOM_CHUNK } else { a1 }, int32(a2))
     }
     if nr == SYS_CLOCK_GETTIME {
         return clock_gettime(a0, a1)
