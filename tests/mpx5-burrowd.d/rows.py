@@ -1025,14 +1025,14 @@ def poweroff_row(con, client):
         r = client.ssh(GUEST_AT, ["sudo -k -S -p '' /bin/poweroff"], data=line, timeout=120)
     except subprocess.TimeoutExpired:
         r = (None, b'', b'[row: timed out]')
-    end = con.wait(r'^user: poweroff pid \d+ reboot\(2\): the volumes written and marked clean[^\n]*$', 60)
+    end = con.wait(r'^user: poweroff pid \d+ reboot\(2\): the volumes written and marked clean[^\n]*\n', 60)
     try:
         rc = con.q.wait(timeout=120)
     except subprocess.TimeoutExpired:
         rc = None
     (client.dir / 'b32.txt').write_text('ssh: %s\nend: %r\nQEMU: %s\n' % (show(r), end.group(0) if end else None, rc))
     if end and rc == 0:
-        ok('B32', 'sudo -k -S poweroff over ssh: %s; QEMU 0' % end.group(0).decode())
+        ok('B32', 'sudo -k -S poweroff over ssh: %s; QEMU 0' % end.group(0).decode().strip())
     else:
         bad('B32', 'poweroff over ssh: %s; the end line %r; QEMU %s' % (show(r), end.group(0) if end else None, rc))
 
