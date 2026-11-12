@@ -8,7 +8,9 @@ rows on the machine beside lld. lld stays the default for builds on the machine,
 (`export WOLF_LD=/usr/bin/ligature`, which also silences the note). The reason is memory: on the 2 GiB guest the
 dev image is tested with, ligature cannot yet link a pelt-sized program (ligature#35).
 
-Footprint: to be stated with the PR (the image's contents, `tools/`, `tests/`).
+Footprint: cross-cutting (the dev image's contents and a new pin, `user/ligature.pin`; `tools/mkligature`,
+`tools/distribution-root`; `tests/distribution`, the new `tests/distribution-ligature`; `tools/ci-tiers.map` and
+`tests/ci-plan`).
 
 ## 1. The trace
 
@@ -164,3 +166,209 @@ The memory and the output size are filed against ligature as ligature#35.
    `/etc/pax-release` line. A row on the upgraded disk links hello with ligature, and the program runs.
 6. **One plant**, on the final head: the image without ligature (`distribution-root` skipping it), red by
    name in `tests/distribution` and in the suite's first row.
+
+## 4. What was done
+
+The branch is based on trunk `48ea81ba`. Commits in order:
+
+- `053d5d86`: this note: the trace, the measurements and the prediction, before any change.
+- `cb6a4f27`, `fb6cccb8`: `user/ligature.pin` at ligature `32ec7f43`, and later the digest the builder made.
+- `6be3b40a`: `tools/mkligature`, the clef and trash builders' twin. It builds from the tree's own
+  `wolf-toolchain.toml` (the wolf 0.2.38 gnu archive, read twice, its bundled std checked against the pin)
+  through a `cc` that adds `-static -Wl,--build-id=none` and ends with `-fuse-ld=bfd`. It builds in two
+  checkouts at paths of different lengths, compares the stripped binaries, checks the result is static and
+  runs `--version`. Its output is `ligature 625caa40…, 2,073,816 bytes`, the same from both checkouts.
+- `adef7a9a`, red first: `tests/distribution` requires `/usr/bin/ligature` in the dev image (0755, root's,
+  the builder's sums, the pin's digest), none in the release image, and a `ligature` line in
+  `/etc/pax-release`. It also requires that no image's `/etc/shrc` exports `WOLF_LD`.
+- `ef62d5a9` … `2ddaf553`, red first: the new suite `tests/distribution-ligature` (§5). Its rows came before
+  the change that installs ligature.
+- `aef2bcd7`: `tools/distribution-root` puts `/usr/bin/ligature` in the dev image, held to its sums and
+  the pin's digest.
+- `551cf80c`: `tests/fetch-retry-selftest` counts mkligature among the source fetches that go through
+  `tools/fetch-retry`.
+- `5f5ded46`, then `d05a8f63`: the planner's expectation, then `tools/ci-tiers.map`. The pin and the
+  builder reach `census` and `mpx6-install`, as trash's and the distribution's paths do. The suite falls under
+  `tests/distribution*`.
+- `6f825d2a`, `646b7a91`, `72c57eee`, `803f05be`: the README (the dev image's tables, the opt-in, why lld
+  stays the default), the CHANGELOG, and `docs/SOURCES.md`.
+- `19a445ca`, `02151eff`, `f5b3ffa1`: `notes/px128/rig/`, this lane's record rig (px123's shape): the quick
+  checks, the rows seen red, the rows on an image with ligature, and the plant.
+- `503d99e5`, `77931d18`, `dea161f0`, then `fdf1b20c` and the two before it: den beside pelt in the suite, and
+  yew out of it, after the first red take showed yew's compile fits neither guest.
+
+## 5. The rows
+
+`tests/distribution-ligature IMAGE_DIRECTORY` takes `tools/mkdistribution`'s output and boots the dev
+archive as it is, plus one addition under paths the image does not have:
+
+- the session;
+- `ldtime`, a measuring `WOLF_LD` built on the host with `cc -static`, never shipped. It runs the named
+  linker as its one child and logs wall time, plus CPU time and peak memory from the kernel's `wait4` usage;
+- the programs' sources: hello and netproc, which are the suite's own, and pelt, den and ligature at the
+  commits the image's own `/etc/pax-release` names.
+
+It boots the image's own console kernel twice and types one session each time as root, with the console's
+environment.
+
+| row | holds |
+|---|---|
+| L0 | `/usr/bin/ligature` runs (`ligature 0.0.2 …`), and `/etc/pax-release` names it |
+| L1 | the default is lld: no `WOLF_LD` in the console's environment; a plain `wolf build`'s program is byte-identical to lld's link and not ligature's; from wolf 0.2.39 the note names `/usr/bin/ld.lld` |
+| L2 | the opt-in: `WOLF_LD=/usr/bin/ligature wolf build` prints no note, and its program runs |
+| L3 | hello by both linkers, the same output; two ligature links byte-identical |
+| L4 | netproc (`std.net`, `std.process`) by both, the same output |
+| L5 | ligature compiled and linked by itself on PAX runs (`--version`), and links hello to the shipped ligature's bytes |
+| L6 | a refusal (`LIGATURE_SYSROOT` naming an empty directory): ligature's named error, a non-zero `wolf build`, no output, no fallback |
+| L7 | pelt at 2048 MiB: lld links it and it runs; ligature's link is an expected refusal while ligature#35 is open. The row fails, and says so, the day ligature links pelt there |
+| L8 | den by lld at 2048 MiB; pelt and den by both at 2560 MiB (the README's floor), each pair the same output |
+| L9 | every link above measured (wall, CPU, peak), each with a non-zero peak |
+| L10 | each boot clean: the session's end, init's status 0, no panic, the halt proven by `tools/qemu-halt` |
+
+yew is the largest of the image's wolf programs, about 150,000 lines. The first red take showed its compile does
+not fit the live image at either 2048 or 4096 MiB: `user: wolf pid N killed: SIGABRT` both times, before any link,
+with lld as with ligature. So den, about 38,000 lines, is the largest of the image's programs that its compiler
+builds there. On Linux, with the image's own compiler, ligature links yew in 20.8 s at a 1.54 GiB peak, and lld in
+0.13 s at 341 MiB.
+
+## 6. Decisions (each open to review)
+
+1. **What the default is on the 2 GiB guest.** The options were:
+   - (A) flip it now, with pelt-sized programs at 2 GiB a named red row that `WOLF_LD=cc` gets past;
+   - (B) ship ligature and its rows now, and keep lld the default until a pelt-sized link fits that guest;
+   - (C) flip it, and run the rows at a larger guest.
+
+   **B, decided before the first change.** A default that fails pelt-sized builds on the configuration the dev
+   image is tested with would be a regression for anyone at the machine. The memory is ligature#35.
+2. **How the image's ligature is built.** The options were:
+   - (A) as clef and trash are: the tree's own pinned wolf release, `cc -static`, two checkouts, stripped;
+   - (B) linked by ligature itself against the image's musl inputs;
+   - (C) a published binary.
+
+   **A.** It is the image's one way of building a wolf tool, it is reproducible from the pin alone, and it
+   needs no publication. B is a good later step toward an image whose linker is linked by itself. The rows
+   already hold the self-link on PAX (L5).
+3. **Where an opt-in or a later default lives.** The options were:
+   - (A) `/etc/shrc`, through `tools/system-env`, which reaches ssh through burrowd's `SetEnv`;
+   - (B) a wolf-lang change, so that `wolf build` finds ligature by itself or reads a configuration file;
+   - (C) replacing the image's `cc` with ligature's front end.
+
+   **A when the default flips**, which is one line. Today the README documents the opt-in for a person's own
+   shell. B needs no change now, because wolf already reads `WOLF_LD`. C would leave wolf's note naming lld
+   while lld no longer links. One caveat, for the flip: an upgrade keeps an `/etc/shrc` its owner changed (the
+   new one is written as `/etc/shrc.pax-new`), so a changed `/etc/shrc` would not get the default.
+4. **Where the rows live.** The options were:
+   - (A) a new image-directory suite beside `tests/distribution-boot`, on the actual dev image;
+   - (B) `tests/mpx5-wolf` in CI;
+   - (C) more lines in `user/console/distribution.keys`.
+
+   **A.** The rows need the real dev image, a 2 GiB guest and minutes of compiling, and CI's `mpx5-wolf`
+   leaves out the musl link inputs on purpose. ligature's licensed link bundle carries the same five musl
+   inputs byte for byte, so a later CI row could fetch them from it.
+5. **The largest program.** yew's compile fits neither the 2048 nor the 4096 MiB live image. The rows use den,
+   the largest of the image's programs its compiler builds there, and record yew's links on Linux.
+6. **The plant.** The options were:
+   - (A) `tools/mkligature` keeping the build-id, so the two checkouts differ;
+   - (B) `tools/distribution-root` leaving ligature out.
+
+   **A.** It is red by name at this head with no image to build. B needs a dev image assembled from inputs
+   built at this branch's pins. The rows' red take on the machine's image (§8) shows what B would show:
+   `L0-package` and every ligature row FAIL by name.
+7. **When the 0.2.39 pin lands on trunk** (the terminal-over-ssh work's second pull request), `--latest` builds
+   need ligature among their inputs: `ligature` in `tools/mkdistribution`'s `INPUTS_ALL`, and
+   `tools/mkligature` in `tools/latest-resolve`'s `BUILDER_PATHS`. That is two lines, tried on this lane's
+   integration image (§8) and to be carried by this branch's rebase onto that pin, as a new branch and pull
+   request. Nothing else here depends on the compiler's version. Before 0.2.39, wolf 0.2.36 prints no note at
+   all, so `L1` holds the default by bytes alone.
+
+## 7. For the person at the machine
+
+On an image built with this branch:
+
+```sh
+ligature --version                     # ligature 0.0.2 (static ELF; x86-64, AArch64 subset)
+grep '^ligature ' /etc/pax-release
+wolf build hello.lu                    # as before: lld, and wolf's note naming /usr/bin/ld.lld
+export WOLF_LD=/usr/bin/ligature
+wolf build hello.lu && ./hello         # no note; the link takes about 10 s
+WOLF_LD=cc wolf build hello.lu         # lld again, for this one build
+```
+
+The real machine has far more memory than the 2 GiB guest, and its root is on a disk, not in memory. So
+`export WOLF_LD=/usr/bin/ligature` should link pelt-sized programs there too. That is a prediction, not a
+measurement: this lane never touched a real machine.
+
+## 8. Evidence index
+
+Records are taken by the steps recorder through `notes/px128/rig/` (light takes on the Linux build host,
+both-lock takes on the second Linux host). Each is cited by sha256. The integration image is lane-local and
+never pushed: it is px117's image branch (`bf1e38db`, the 0.2.39 pins and `--latest`) with this branch's image
+commits, ligature among the `--latest` inputs, and the pin-parse fix. It was built at `87137d71`, from a fresh
+resolution at `928b2be9`. Every input whose resolved revision equalled the machine's image's was copied by value
+from that build; the std moved to `be1d10fa` and was fetched.
+
+| what | where | result |
+|---|---|---|
+| quick checks at `19a445ca` (ci-plan, census, fetch-retry, mkligature) | `quick-19a445caf147.record`, sha256 `4c4d4bc748b5fd4bbb01c042c6daa88ef7089e780403d47b885e816976ba0f67` | worst=0, steps=4; mkligature `625caa40…`, the pin's |
+| the rows seen red on the machine's image (65d972ac, no ligature), at `19a445ca` | `red-19a445caf147.record`, sha256 `514e9ae108c24e0280582e23d24b522bdaf094a7cb1fb025d5cd86478c4e7d85` | `FAIL L0-package`, L2 to L9 FAIL by name; L1 and L10 PASS; yew's compile `killed: SIGABRT` at 2048 and 4096 MiB |
+| the same at `fdf1b20c` (pelt and den) | `red-fdf1b20ccf0d.record`, sha256 `4057436f9a073d4e6cd335944b6f36b711d0ee680ddd84057551b4dd2efdd2c2` | `FAIL L0-package`, L2 to L9 FAIL by name; L1, L8 (den by lld at 2048) and L10 PASS. Found: the image has no `sed`, so the session's `why` and `ldtime` lines were lost (fixed in `092acbe7`, the row tightened to ligature's own error) |
+| the integration image's assembly at `928b2be9` | the build's log | `tools/distribution-root` refused its own input: `ligature is not the digest user/ligature.pin records`. The pin parse read the pin's prose lines that start with "ligature" too (fixed in `16d5eac6`, `30d4d005`) |
+| the integration image at `87137d71` | `pax-dev-87137d71.cpio`, sha256 `ea0d394a0af22b8b61d165e0cc42d82c40973058f9175ab894c83b9c1caeb9c0` | `tests/distribution` I0 and I1 PASS for both variants; `/etc/pax-release`: `ligature 32ec7f43… aa5e6f35…` |
+| the rows on it at `87d46c9f` | `green-87d46c9fff07.record`, sha256 `76323d340c45ecd97fa7189b82f09339bea30eca00b55a5a66b904c37ce4bdb6` | every row PASS but `L8-den-at-big`: ligature's link of den stopped for memory at 2560 MiB (peak 819 MiB). The larger guest moved to 3072 (`a8d97cdb`) |
+| the rows on it at `a8d97cdb` (the larger guest at 3072 MiB) | `green-a8d97cdbda51.record`, sha256 `44dd366c15095509e0cf3d2af1efd98185f3112d2650fbb43581f9ad6e63bf61` | worst=0, steps=1: L0 to L10 PASS, 13 links measured |
+| the upgrade from the machine's image | px117's over-ssh leg (copied by value, `fac31ec0…`) and this lane's `upgrade-rows.py` (`f6b365e8…`), log sha256 `da3693523aff87409e9386363de83acab220a8026f71b514061d8ab30be96931` | the 860-shaped disk running 65d972ac (`25a93538…`) is sent the integration archive over ssh, armed, and upgraded by the staged boot (S1 PASS: 642,754,220 bytes received in 78 s). On the upgraded disk: `/usr/bin/ligature` 0755 and `/etc/pax-release` the archive's, with its ligature line (U1); no `WOLF_LD`, so a plain `wolf build` names lld and runs (U2); `WOLF_LD=/usr/bin/ligature` builds with no note and the program prints the same line (U3); the two outputs differ and `ligature verify` reads ligature's back (U4) |
+
+**Link time and peak memory on PAX**, from the kernel's `wait4` usage (`ldtime`). The record is
+`green-a8d97cdbda51.record`, under KVM on one vCPU. PAX's `ru_maxrss` is the peak of the process's mapped
+pages, so it reads above Linux's resident peak.
+
+| guest | program | ligature: wall, CPU, peak | lld (the image's cc): wall, CPU, peak |
+|---|---|---|---|
+| 2048 MiB | hello | 12.73 s, 12.73 s, 793 MiB | 0.07 s, 0.09 s, 123 MiB |
+| 2048 MiB | netproc | 13.45 s, 13.44 s, 825 MiB | 0.08 s, 0.09 s, 125 MiB |
+| 2048 MiB | ligature | 13.38 s, 13.38 s, 828 MiB | 0.08 s, 0.09 s, 126 MiB |
+| 2048 MiB | pelt | stopped at 12.08 s, peak 888 MiB, status 134 (ligature#35) | 0.09 s, 0.10 s, 143 MiB |
+| 2048 MiB | den | not run (larger than pelt) | 0.09 s, 0.11 s, 144 MiB |
+| 3072 MiB | pelt | 16.48 s, 16.50 s, 944 MiB | 0.08 s, 0.10 s, 143 MiB |
+| 3072 MiB | den | 16.40 s, 16.38 s, 925 MiB | 0.09 s, 0.10 s, 144 MiB |
+
+At 2560 MiB, pelt's link took 16.40 s at a peak of 944 MiB, and den's stopped at a peak of 819 MiB
+(`green-87d46c9fff07.record`). On Linux, with the image's compiler and the same inputs, the linker's resident
+peaks were ligature 640 to 773 MiB (yew 1.54 GiB) and lld 110 to 341 MiB (§2; yew, den and lobo measured too:
+ligature 20.8 s, 10.2 s and 9.5 s; lld 0.06 to 0.13 s).
+
+## 9. Prediction, scored
+
+1. The package: **as predicted.** The two checkouts give one stripped digest, `625caa40…` (2,073,816 bytes),
+   in every take.
+2. The image: **as predicted, after one fix.** The first assembly refused its own input: the pin parse also read
+   the pin's prose lines that start with "ligature". That was fixed in both readers (`16d5eac6`, `30d4d005`).
+   The release image carries no ligature, and `/etc/pax-release` has the line.
+3. The default: as decided. `L1` and `U2` hold it on the live image and on an upgraded disk.
+4. The rows:
+   - The suite is `tests/distribution-ligature`, not the `tests/mpx5-ligature` predicted. It sits beside the other
+     image-directory suites and under their plan rule.
+   - **Missed: the largest program.** yew's compile fits neither a 2048 nor a 4096 MiB live image, so den stands
+     in for the largest. ligature's den link needs 3072 MiB, not the 2560 that pelt needs.
+   - **Missed: the times and peaks on PAX.** 12.7 to 16.5 s, against the 10 to 12 s predicted; 793 to 944 MiB,
+     against the 640 to 750 predicted. The predicted ranges were Linux's; PAX counts mapped pages, on one vCPU.
+     lld was 0.07 to 0.09 s and 123 to 144 MiB, not about 1 s.
+   - **Found on the way:** the image has no `sed`. The session prefixes lines with the shell's own loop.
+5. The upgrade: **as predicted** (U1 to U4).
+6. The plant: **changed.** It is mkligature keeping the build-id (§6, decision 6), not `distribution-root`
+   leaving ligature out. The red take on the machine's image shows what that one would.
+
+## 10. Bounds, and what is not done
+
+- **Not shipped by this lane:** no image, release, tag or asset. The integration image of §8 is lane-local and
+  never pushed; it shows the branch is fit for an image. ligature's link bundle is not needed for that.
+- **lld and the link-only `cc` stay on the image,** and lld stays the default. Removing them, and flipping the
+  default, wait for ligature#35. The flip is one line in `tools/system-env` (§6, decision 3).
+- **The 0.2.39 line.** This branch is based on trunk, whose dev compiler is 0.2.36. Its rows ran on the
+  0.2.39 integration image. On a trunk-pinned image, ligature links 0.2.36's objects and runtime: ligature's
+  own gate linked that runtime when it pinned 0.2.36, but no row here has run it on PAX. When the 0.2.39 pin
+  lands, this branch's rebase adds ligature to `--latest` (§6, decision 7).
+- **yew** cannot be compiled on the live dev image at 2 or 4 GiB. The compiler stops for memory before any link,
+  with either linker. That is a finding about the compiler on a live image, not about either linker.
+- **The real machine** was never touched. §7's commands are what a person there would try.
+- **The plant** is in the hand-back with its record. It is pushed without a pull request, never merged.
