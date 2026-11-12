@@ -15,13 +15,13 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   back, and reports the result, IA32_PAT and the MTRR over the framebuffer, on
   the console (`fbmap: …`), in /proc/pax-boot (`fbmap`, and `scroll`: how the
   screen scrolls) and in /var/log/boot.log. At scale 1 the screen's runs now
-  fill whole 64-byte lines. The console timing program, version 4, is bounded
-  (about 65 s, by the CPU's own clock), keeps each test's line in a file as it
-  ends, pauses between frames, and infers the framebuffer's caching from a full
-  screen drawn. `tests/mpx3-conflood` times ping and a process's echo while the
-  console is flooded: a console write runs with interrupts off and draws inside
-  its call, so a flood starves the network (R-px129-13, the fix designed, not
-  built).
+  fill whole 64-byte lines. The console timing program is bounded (60 s of
+  tests by the CPU's own clock, and by bytes), keeps each test's line in a file
+  as it ends, pauses between frames, and infers the framebuffer's caching from a
+  full screen drawn. `tests/mpx3-conflood` times ping and a process's echo while
+  the console is flooded, with no COM1 and with one at 115200 baud: a console
+  write runs with interrupts off and draws inside its call, so a flood starves
+  the network (R-px129-13, the fix designed, not built).
 
 - **The console draws only what changes, once a write (px129).** At a real
   machine's console, full-screen programs drew visibly slowly while the same
