@@ -13,6 +13,11 @@
 #   push ARGS      tests/mpx4-console-push ARGS in the burrowd rig's image (the moved pin's /bin/ssh
 #                  pushing to OpenSSH's sshd posing as github.com), its fixtures required
 #   usb ARGS       tests/mpx6-usb ARGS after build-once (docs/SOURCES.md's usbredir row is its input)
+#   pelt SUITE ARGS  tests/SUITE ARGS for a suite that types into pelt and waits for `$ ` (mpx3-screen,
+#                  mpx3-console, mpx3-shell, mpx3-tree, mpx4-session, mpx3-speaker, mpx4-lobo): pelt
+#                  b80d657 starts friendly unless asked not to, and each suite asks; their Linux sides
+#                  run in the take's container (ctr sys: linux-tty's pid namespace, linux-tree through
+#                  engine-ns)
 # A suite says a red row as `<suite>: FAIL ROW …` or as the rows' own `FAIL ROW …`; `lift` puts the
 # first at column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is
 # named in its record) and changes no other line. The step's exit is the suite's.
@@ -21,7 +26,7 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 # shellcheck disable=SC1091
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
-lift() { "$@" 2>&1 | sed -u -E 's/^(mpx5-burrowd|mpx4-console-push|mpx6-install|mpx6-usb|census): FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
+lift() { "$@" 2>&1 | sed -u -E 's/^(mpx5-burrowd|mpx4-console-push|mpx6-install|mpx6-usb|census|mpx3-screen|mpx3-console|mpx3-shell|mpx3-tree|mpx4-session|mpx3-speaker|mpx4-lobo): FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
 wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && '; }
 img=localhost/px75-ubuntu:2
 what=${1:?}; shift
@@ -41,5 +46,8 @@ case $what in
     burrowd) lift ctr net "$NETIMG" bash -c "$(wolfed)"'tests/mpx5-burrowd "$@"; exit $?' x "$@" ;;
     push) lift ctr net "$NETIMG" bash -c "$(wolfed)"'PAX_REQUIRE_PUSH_FIXTURES=1 tests/mpx4-console-push "$@"; exit $?' x "$@" ;;
     usb) lift ctr 1 $img bash -c "$(wolfed)"'python3 -I tests/mpx6-usb.d/build-once.py && tests/mpx6-usb "$@"; exit $?' x "$@" ;;
+    pelt) s=${1:?a suite}; shift
+        case $s in mpx3-screen|mpx3-console|mpx3-shell|mpx3-tree|mpx4-session|mpx3-speaker|mpx4-lobo) ;; *) echo "step.sh: pelt takes no $s"; exit 2 ;; esac
+        lift ctr sys $img bash -c "$(wolfed)"'tools/fetch-limine > /dev/null && s=$1 && shift && tests/$s "$@"; exit $?' x "$s" "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac

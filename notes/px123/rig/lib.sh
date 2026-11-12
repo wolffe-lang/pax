@@ -24,13 +24,18 @@ mkdir -p "$TMPDIR" "$PAX_CACHE" "$L/home" "$PAX_BUILD"
 CO=$(realpath "$(git rev-parse --show-toplevel)")
 # ctr KIND IMAGE CMD...: a container of IMAGE in the checkout, the take's CPUs inside. KIND 0: no
 # devices; 1: KVM; net: KVM, /dev/net/tun, NET_ADMIN and NET_RAW (the burrowd rig's tap and dnsmasq,
-# the push suite's fixtures).
+# the push suite's fixtures); sys: net's and SYS_ADMIN, /proc/sys writable (linux-tree's script sets a
+# sysctl in its own network namespace), with PAX_ENGINE this directory's engine-ns (a suite's Linux side:
+# tools/linux-tty --pid1 unshares a pid namespace, tools/linux-tree a container).
 ctr() {
     local kind=$1 img=$2; shift 2
     local dev=()
     case $kind in
         1) dev=(--device /dev/kvm) ;;
         net) dev=(--device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW) ;;
+        sys) dev=(--device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN
+                  --security-opt systempaths=unconfined
+                  -e PAX_ENGINE="$(realpath "${GAUNTLET_RIG_DIR:?}")/engine-ns" -e PAX_REQUIRE_QEMU=1) ;;
     esac
     local mnt=(-v "$L:$L"); [ "$R" = "$L" ] || mnt+=(-v "$R:$R")
     "$P" run --rm --memory "${MEM:-12g}" --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 "${dev[@]}" "${mnt[@]}" \
