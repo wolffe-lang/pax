@@ -125,6 +125,13 @@ pub fn put(b: u8) {
     screen.put(b)
     bootlog.put(b)
     if !available() {
+        // px129: the transcript keeps its first 64 KiB; past them a byte
+        // costs nothing more here (the count stops at 65537).
+        // # Safety: io.S's eight-byte count, read alone (a stale read only
+        // sends this byte on to the locked path below).
+        if unsafe { pax_serial_log_count.read_volatile() } > 65536 {
+            return
+        }
         let flags = unsafe { pax_irq_save() }
         let n = unsafe { pax_serial_log_count.read_volatile() }
         if n < 65536 {
