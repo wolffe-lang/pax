@@ -19,7 +19,8 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
 img=localhost/px75-ubuntu:2
-lift() { "$@" 2>&1 | sed -u -E 's/^AssertionError: (image-[A-Za-z0-9-]+)$/FAIL \1/; s/^mkligature: REFUSED: (.*)$/FAIL mkligature-reproducible: \1/'; return "${PIPESTATUS[0]}"; }
+# A row's name is followed by a space: the recorder reads `FAIL ROW` up to white space.
+lift() { "$@" 2>&1 | sed -u -E 's/^AssertionError: (image-[A-Za-z0-9-]+)$/FAIL \1/; s/^mkligature: REFUSED: (.*)$/FAIL mkligature-reproducible — \1/'; return "${PIPESTATUS[0]}"; }
 what=${1:?}; shift
 case $what in
     preflight)
@@ -37,7 +38,7 @@ case $what in
         lift ctr 0 $img tools/mkligature "$PAX_BUILD/ligature" || exit $?
         row=$(cat "$PAX_BUILD/ligature/sums.txt")
         if grep -qx "#   $row" user/ligature.pin; then echo "mkligature: $row, the digest user/ligature.pin records"
-        else echo "FAIL mkligature-pin: built $row, user/ligature.pin records $(grep '^#   ligature ' user/ligature.pin)"; exit 1; fi ;;
+        else echo "FAIL mkligature-pin — built $row, user/ligature.pin records $(grep '^#   ligature ' user/ligature.pin)"; exit 1; fi ;;
     rows)
         d=$(copy "$1") || { echo "FAIL rows-image: no image directory $IMAGES/$1"; exit 2; }
         shift
