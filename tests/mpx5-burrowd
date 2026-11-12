@@ -50,7 +50,10 @@
 # `ssh host` at a terminal gets a pty and the prompt, `tty` a /dev/pts/N, the
 # window size and a resize, Ctrl-C, Ctrl-\ and Ctrl-Z reaching a foreground
 # program, a bare sudo asking on that session, the pty given back after, and
-# burrowd itself with SIGINT and SIGQUIT at their defaults; B11 the live stick's shape (the live
+# burrowd itself with SIGINT and SIGQUIT at their defaults; B28 (pax#368)
+# that session ran /etc/shrc (lope's hook: autocd takes a bare `../`, `g`
+# is a function); B29 a command over ssh still reads no ENV (not
+# interactive); B11 the live stick's shape (the live
 # entry as pid 1, the shipped configuration's loopback): a connection from
 # the LAN refused, one on loopback answered. B1-B10 boot the installed shape (/bin/login,
 # the volume's configuration the installer's, `ListenAddress 0.0.0.0`).
@@ -99,6 +102,10 @@ if [ -z "$images" ]; then
     why= missing=
     "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" 2>&1 || why+=" tools/mkpelt;"
     cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null && cp "$work/pelt/pelt" "$r/bin/sh" || why+=" no pelt;"
+    # pax#368: lope as the dev image has it (user/lope.pin, tools/mklope): /etc/shrc's hook, which a
+    # session over ssh at a terminal runs (B28).
+    "$PAX_ROOT/tools/mklope" "$work/lope" > "$work/lope.txt" 2>&1 || why+=" tools/mklope;"
+    cp "$work/lope/lope" "$r/bin/lope" 2>/dev/null || why+=" no lope;"
     "$PAX_ROOT/tools/mkden" "$work/den" > "$work/den.txt" 2>&1 || why+=" tools/mkden;"
     "$PAX_ROOT/tools/install-den" "$work/den" "$r" > "$work/install-den.txt" 2>&1 || why+=" tools/install-den;"
     # shellcheck disable=SC2086 # the utilities' names, one word each
