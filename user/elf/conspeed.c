@@ -20,17 +20,20 @@
  * first, and at least one. The tests, the grid being the terminal's
  * TIOCGWINSZ (COLS x ROWS):
  *
+ *   unit    no write: 2^21 dependent multiply-adds in user mode, the unit
+ *           the rows compare the console's costs with on one boot
  *   bytes   COLS*ROWS bytes of `ESC [ m` that draw nothing (the parse
  *           and the write path alone)
  *   cell    one cell: a cursor position and one character, one write
  *   plain   (a) the whole grid: a cursor position a row and the row's
  *           characters; every frame shifts the text by one, so every cell
  *           changes every frame
- *   same    `plain`'s first frame again and again: nothing changes
+ *   same    `plain`'s first frame again and again over itself: nothing
+ *           changes
  *   sgr     (b) the same with an SGR foreground and background before
  *           every cell (`ESC [ 3f ; 4b m`), shifted likewise
  *   scroll1 (c) one full-width line and CR LF at the bottom row: one
- *           scroll a frame
+ *           scroll a frame, from a screen full of text
  *   scroll10 (c) ten such lines in one write: ten scrolls a frame
  *   clear   (d) `ESC [ H ESC [ 2 J` and then `plain`'s frame
  *   cursor  `plain` with the cursor shown during the write
@@ -71,7 +74,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "conspeed 2 (px129)"
+#define VERSION "conspeed 3 (px129)"
 #define MAXREPS 100000
 
 static int g_fd = -1;
@@ -222,6 +225,7 @@ struct test {
     struct buf *frames;    /* replayed in rotation */
     int nframes;
     size_t bytes, cells;   /* of the first frame (the mean over a rotation for streams) */
+    int unit;              /* the CPU's unit of work, no write */
     long reps;
     double ms_mean, ms_min, mbps, us_cell;
     uint64_t total, least;
@@ -276,6 +280,8 @@ static struct test *add_test(const char *name, int nframes) {
 
 static void build_synthetic(void) {
     struct test *t;
+    t = add_test("unit", 1);
+    t->unit = 1;
     t = add_test("bytes", 1);
     for (int i = 0; i < g_cols * g_rows / 3; i++) puts_(&t->frames[0], "\033[m");
     t = add_test("cell", 64);
@@ -289,17 +295,25 @@ static void build_synthetic(void) {
     frame_plain(&t->frames[0], 0);
     frame_plain(&t->frames[1], 1);
     t = add_test("same", 1);
+    puts_(&t->setup, "\033[H\033[2J");
+    frame_plain(&t->setup, 0);
     frame_plain(&t->frames[0], 0);
     t = add_test("sgr", 2);
     frame_sgr(&t->frames[0], 0);
     frame_sgr(&t->frames[1], 1);
+    /* The scrolls start from a full screen of text, so every line they
+     * scroll moves every cell from the first frame on. */
     t = add_test("scroll1", 2);
+    puts_(&t->setup, "\033[H\033[2J");
+    frame_plain(&t->setup, 50);
     for (int k = 0; k < 2; k++) {
         putf(&t->frames[k], "\033[%d;%dH", g_rows, 1);
         text_row(&t->frames[k], k, k);
         puts_(&t->frames[k], "\r\n");
     }
     t = add_test("scroll10", 2);
+    puts_(&t->setup, "\033[H\033[2J");
+    frame_plain(&t->setup, 50);
     for (int k = 0; k < 2; k++) {
         putf(&t->frames[k], "\033[%d;%dH", g_rows, 1);
         for (int l = 0; l < 10; l++) {
@@ -361,7 +375,35 @@ static void load_stream(const char *dir) {
     }
 }
 
+/* The unit of work every console cost is compared with on one boot: a
+ * chain of 2^21 dependent multiply-adds in user mode, no system call. */
+static volatile uint64_t g_sink;
+
+static void unit_work(void) {
+    uint64_t x = g_sink | 1;
+    for (int i = 0; i < (1 << 21); i++) x = x * 6364136223846793005ull + 1442695040888963407ull;
+    g_sink = x;
+}
+
 static void run_test(struct test *t, long reps, double secs, uint64_t *samples) {
+    if (t->unit) {
+        long k = 0;
+        uint64_t start = mono_ns(), limit = (uint64_t)(secs * 1e9);
+        do {
+            uint64_t a = stamp();
+            unit_work();
+            uint64_t b = stamp();
+            samples[k++] = b - a;
+        } while (k < reps && mono_ns() - start < limit);
+        t->reps = k;
+        t->total = 0;
+        t->least = UINT64_MAX;
+        for (long i = 0; i < k; i++) {
+            t->total += samples[i];
+            if (samples[i] < t->least) t->least = samples[i];
+        }
+        return;
+    }
     if (t->setup.n) write_all(t->setup.p, t->setup.n);
     else write_all("\033[H\033[2J", 7);
     uint64_t start = mono_ns(), limit = (uint64_t)(secs * 1e9);
