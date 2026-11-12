@@ -616,6 +616,8 @@ The console supports:
 - 560 glyphs: every braille pattern, the block elements and the other code points the wolf games use
   (`font/extent.txt`); anything else above U+00FF is `?`;
 - the keypad's navigation with NumLock off and digits with it on, decimal entry with Alt and hexadecimal with AltGr;
+- Ctrl with a letter or one of `@[\]^_` types its control character, and (px125) Ctrl-Space NUL, as xterm sends it:
+  a terminal multiplexer's usual prefix key;
 - USB keyboards over xHCI, directly or behind hubs, sharing the PS/2 keyboard's mapping; unplugging one releases its
   held keys, and a replacement can be attached while the system runs; repeat at 250 ms then 33 ms, as measured on Linux.
 - USB mice and tablets over xHCI, several at once, beside a keyboard or on the same device as one: motion, buttons 1
