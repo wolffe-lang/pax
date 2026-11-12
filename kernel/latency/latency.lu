@@ -38,7 +38,7 @@
 //! (kernel/clock) says were due, since `start` and since the last read.
 //!
 //! The text is `/proc/pax-latency` (kernel/procfs); opening it reads the
-//! window and starts the next (`take`). No Linux source; no other
+//! window and starts the next (`restart`). No Linux source; no other
 //! kernel's source: the Intel SDM vol. 3A §6.8.1 (IF, CLI, STI), vol. 2
 //! (RDTSC), vol. 3B §18.17 (the time-stamp counter).
 
@@ -73,12 +73,20 @@ const TSCW: u64 = 24 // the same three at the last read
 const NSW: u64 = 25
 const TICKSW: u64 = 26
 
+/// The tables' sizes: system call numbers, vectors, thread slots, and
+/// the histogram's buckets (a bucket a bit of a 64-bit count of cycles).
 pub const SYSCALLS: u64 = 512
+/// See `SYSCALLS`.
 pub const VECTORS: u64 = 256
+/// See `SYSCALLS`.
 pub const SLOTS: u64 = 64
+/// See `SYSCALLS`.
 pub const BUCKETS: u64 = 64
+/// An interval's tag: a system call (boot/user.S's vector 0x100).
 pub const SYSCALL: u64 = 0x100
+/// An interval's tag: an irq_save section (boot/sched.S).
 pub const IRQ_SAVE: u64 = 0x200
+/// An interval's tag: after `pax_wait`'s HLT (boot/isr.S).
 pub const WAIT: u64 = 0x201
 
 const NS_PER_TICK: u64 = 10000000
@@ -128,6 +136,7 @@ pub fn start() {
     put(ON, 1)
 }
 
+/// Whether the instrument is on (`start` found the word).
 pub fn on() -> bool {
     w(ON) & 1 != 0
 }
@@ -285,7 +294,7 @@ pub fn ticks() -> (u64, u64, u64, u64) {
 
 /// The window ends: every "since the last read" figure starts again.
 /// kernel/procfs, after it has made the text. IF clear.
-pub fn take() {
+pub fn restart() {
     put(WIN, 0); put(WIN + 1, 0); put(WIN + 2, 0); put(WIN + 3, 0)
     put(S_WIN, 0); put(S_WIN + 1, 0); put(S_WIN + 2, 0)
     put(TSCW, tsc())
