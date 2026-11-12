@@ -1,30 +1,34 @@
 /* px131: latprobe -- how late the kernel lets a process run while another
  * process makes long system calls, on PAX and on Linux.
  *
- *   latprobe [-d SECONDS] [-n ADDR:PORT] [-r ADDR:PORT] [-p PORT] LOAD[:ARG] ...
+ *   latprobe [-d SECONDS] [-e PORT] [-r ADDR:PORT] [-p PORT] LOAD[:ARG] ...
  *   latprobe true             exit 0 at once (the `exec` load's program)
  *
  * For each LOAD in turn: the load's child makes its setup and says it is
  * ready; the kernel's window is read and so started again
  * (/proc/pax-latency, PAX's instrument; absent on Linux); then for
- * SECONDS (3) three probes run beside the load:
+ * SECONDS (3) two probes run beside the load:
  *   wake   a process that sleeps 1 ms (clock_nanosleep) in a loop and
  *          records how much longer than 1 ms each sleep took;
- *   lo     a UDP echo over loopback, a datagram every 5 ms to a child
- *          bound to 127.0.0.1:PORT (7171), the round trip of each;
- *   net    with -n, the same to ADDR:PORT through the network device (a
- *          host's echo: QEMU's user network forwards 10.0.2.2 to it).
+ *   lo     a UDP echo over loopback: a datagram due every 5 ms to a child
+ *          bound to 127.0.0.1:PORT (7171), each round trip counted from
+ *          when the datagram was due, so a client kept from sending is
+ *          late by as much (no stall hides between two samples).
+ * With -e, a child echoes UDP on PORT of every address for the whole run:
+ * the other end of a host's own probe through the network device
+ * (tests/mpx6-latency.d/echo-host.py), which a datagram `latprobe-begin
+ * LOAD` to -r's address marks the start of each load for.
  * Every time is the time-stamp counter's (RDTSC; PAX's CLOCK_MONOTONIC
  * moves in 10 ms ticks and loses the ticks a long call keeps out),
  * calibrated against CLOCK_MONOTONIC over an idle second first. Then the
  * kernel's window is read again and one line printed per load:
  *
  *   latprobe LOAD:ARG: wake n N p50 U p99 U max U; lo n N p50 U max U lost K;
- *     net n N p50 U max U lost K; ops N max U; irqoff U vector V nr N;
+ *     net -; ops N max U; irqoff U vector V nr N;
  *     schedgap U; ticks D of E; sys NR:U NR:U NR:U
  *
  * (one line, also sent as a datagram to -r's ADDR:PORT when given, for a
- * machine whose console nobody reads; U in microseconds; `net -` without -n; the kernel's fields
+ * machine whose console nobody reads; U in microseconds; the kernel's fields
  * `-` where /proc/pax-latency is absent or off; `sys` the three system
  * calls with the longest interrupts-off interval in the window).
  *
@@ -55,7 +59,9 @@
  * on a usage error. Written from the man pages of the calls named and the
  * Intel SDM vol. 2 (RDTSC); no kernel's source.
  */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -91,9 +97,9 @@ __attribute__((used)) static const unsigned char pad[PAD] = {1, 2, 3, 4};
 
 static uint64_t per_us = 1; /* TSC cycles per microsecond */
 static int seconds = 3;
-static int lo_port = 7171;
-static struct sockaddr_in net_to, report_to;
-static int have_net, have_report;
+static int lo_port = 7171, net_port;
+static struct sockaddr_in report_to;
+static int have_report;
 static volatile sig_atomic_t stop;
 
 static uint64_t tsc(void) { return __rdtsc(); }
@@ -159,11 +165,12 @@ static void probe_wake(int out) {
     _exit(0);
 }
 
-/* lo's other end: an echo on 127.0.0.1:lo_port until killed. */
-static void echo_server(int ready) {
+/* An echo on ADDR:PORT until killed: lo's other end (127.0.0.1), and
+ * -e's for the host's probe (every address). */
+static void echo_server(int ready, uint32_t addr, int port) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)lo_port)};
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
+    a.sin_addr.s_addr = htonl(addr);
     char ok = fd >= 0 && bind(fd, (struct sockaddr *)&a, sizeof a) == 0 ? 'y' : 'n';
     if (write(ready, &ok, 1) != 1 || ok != 'y') _exit(1);
     char b[64];
@@ -175,8 +182,8 @@ static void echo_server(int ready) {
     }
 }
 
-/* lo and net: a datagram every 5 ms to `to`, its round trip; 1 s and
- * it is lost. */
+/* lo: a datagram due every 5 ms to `to`; its round trip counted from
+ * when it was due; 1 s without its answer and it is lost. */
 static void probe_echo(int out, struct sockaddr_in to) {
     static uint32_t s[MAXS];
     uint64_t n = 0, lost = 0, seq = 0;
@@ -187,21 +194,25 @@ static void probe_echo(int out, struct sockaddr_in to) {
         send_sum(out, (struct sum){0, 0, 0, 0, ~0ull});
         _exit(1);
     }
+    uint64_t step = 5000 * per_us, due = tsc() + step;
     while (!stop) {
+        uint64_t now = tsc();
+        if (now < due) { sleep_us((long)us_of(due - now)); continue; }
         seq++;
-        uint64_t a = tsc();
-        if (send(fd, &seq, sizeof seq, 0) != (ssize_t)sizeof seq) { lost++; sleep_us(5000); continue; }
         int got = 0;
-        while (!stop) {
-            uint64_t v = 0;
-            ssize_t k = recv(fd, &v, sizeof v, 0);
-            if (k == (ssize_t)sizeof v && v == seq) { got = 1; break; }
-            if (k < 0) break; /* the timeout, or a signal */
-            if (us_of(tsc() - a) > 1000000) break;
+        if (send(fd, &seq, sizeof seq, 0) == (ssize_t)sizeof seq) {
+            while (!stop) {
+                uint64_t v = 0;
+                ssize_t k = recv(fd, &v, sizeof v, 0);
+                if (k == (ssize_t)sizeof v && v == seq) { got = 1; break; }
+                if (k < 0) break; /* the timeout, or a signal */
+                if (us_of(tsc() - due) > 1000000) break;
+            }
         }
         uint64_t b = tsc();
-        if (got) { if (n < MAXS) s[n++] = (uint32_t)us_of(b - a); } else if (!stop) lost++;
-        sleep_us(5000);
+        if (got) { if (n < MAXS) s[n++] = (uint32_t)us_of(b - due); } else if (!stop) lost++;
+        due += step;
+        if (due < b) due = b + step; /* the next one due after this answer */
     }
     send_sum(out, summarize(s, n, lost));
     _exit(0);
@@ -435,6 +446,14 @@ static struct kwin read_window(void) {
 
 /* ---- one load, measured ----------------------------------------- */
 
+/* A line to -r's address alone. */
+static void report_quiet(const char *line) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return;
+    sendto(fd, line, strlen(line), 0, (struct sockaddr *)&report_to, sizeof report_to);
+    close(fd);
+}
+
 /* A line to stdout, and to -r's address when given. */
 static void report(const char *line) {
     fputs(line, stdout);
@@ -492,30 +511,28 @@ static int measure(const char *spec) {
         waitpid(load, NULL, 0);
         return -1;
     }
+    char begin[256];
+    snprintf(begin, sizeof begin, "latprobe-begin %s\n", spec);
+    if (have_report) report_quiet(begin);
     (void)read_window(); /* the window starts here */
     struct sockaddr_in lo = {.sin_family = AF_INET, .sin_port = htons((uint16_t)lo_port)};
     lo.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    int rw, rl, rn = -1;
+    int rw = -1, rl = -1;
     pid_t pw = spawn(&rw, NULL, lo, probe_wake);
     pid_t pl = spawn(&rl, probe_echo, lo, NULL);
-    pid_t pn = have_net ? spawn(&rn, probe_echo, net_to, NULL) : 0;
     sleep_us(100000);
     if (write(gp[1], "g", 1) != 1) return -1;
     struct sum ls = {0, 0, 0, 0, 0};
     if (read(lp[0], &ls, sizeof ls) != (ssize_t)sizeof ls) memset(&ls, 0, sizeof ls);
     waitpid(load, NULL, 0);
     sleep_us(100000);
-    struct sum sw = collect(pw, rw), sl = collect(pl, rl), sn = collect(pn, rn);
+    struct sum sw = collect(pw, rw), sl = collect(pl, rl);
     struct kwin k = read_window();
     char line[1024];
     int at = snprintf(line, sizeof line, "latprobe %s: wake n %llu p50 %llu p99 %llu max %llu; lo n %llu p50 %llu max %llu lost %llu; ", spec,
                       (unsigned long long)sw.n, (unsigned long long)sw.p50, (unsigned long long)sw.p99, (unsigned long long)sw.max,
                       (unsigned long long)sl.n, (unsigned long long)sl.p50, (unsigned long long)sl.max, (unsigned long long)sl.lost);
-    if (have_net)
-        at += snprintf(line + at, sizeof line - (size_t)at, "net n %llu p50 %llu max %llu lost %llu; ", (unsigned long long)sn.n,
-                       (unsigned long long)sn.p50, (unsigned long long)sn.max, (unsigned long long)sn.lost);
-    else
-        at += snprintf(line + at, sizeof line - (size_t)at, "net -; ");
+    at += snprintf(line + at, sizeof line - (size_t)at, "net -; ");
     at += snprintf(line + at, sizeof line - (size_t)at, "ops %llu max %llu; ", (unsigned long long)ls.n, (unsigned long long)ls.max);
     if (k.have)
         snprintf(line + at, sizeof line - (size_t)at, "irqoff %llu vector 0x%llx nr %llu; schedgap %llu; ticks %llu of %llu; sys %llu:%llu %llu:%llu %llu:%llu\n",
@@ -538,15 +555,15 @@ int main(int argc, char **argv) {
         if (i + 1 >= argc) goto usage;
         if (!strcmp(argv[i], "-d")) seconds = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "-p")) lo_port = atoi(argv[i + 1]);
-        else if (!strcmp(argv[i], "-n") || !strcmp(argv[i], "-r")) {
-            struct sockaddr_in *to = argv[i][1] == 'n' ? &net_to : &report_to;
+        else if (!strcmp(argv[i], "-e")) net_port = atoi(argv[i + 1]);
+        else if (!strcmp(argv[i], "-r")) {
             char *h = strdup(argv[i + 1]), *p = strrchr(h, ':');
             if (!p) goto usage;
             *p = 0;
-            to->sin_family = AF_INET;
-            to->sin_port = htons((uint16_t)atoi(p + 1));
-            if (inet_pton(AF_INET, h, &to->sin_addr) != 1) goto usage;
-            if (argv[i][1] == 'n') have_net = 1; else have_report = 1;
+            report_to.sin_family = AF_INET;
+            report_to.sin_port = htons((uint16_t)atoi(p + 1));
+            if (inet_pton(AF_INET, h, &report_to.sin_addr) != 1) goto usage;
+            have_report = 1;
         } else goto usage;
     }
     if (i >= argc || seconds < 1) goto usage;
@@ -555,21 +572,28 @@ int main(int argc, char **argv) {
     int rp[2];
     if (pipe(rp)) return 1;
     pid_t srv = fork();
-    if (srv == 0) { close(rp[0]); echo_server(rp[1]); }
-    close(rp[1]);
+    if (srv == 0) { close(rp[0]); echo_server(rp[1], INADDR_LOOPBACK, lo_port); }
     char ok = 0;
     if (read(rp[0], &ok, 1) != 1 || ok != 'y') { printf("latprobe: the loopback echo did not bind port %d\n", lo_port); return 1; }
+    pid_t nsrv = 0;
+    if (net_port) {
+        nsrv = fork();
+        if (nsrv == 0) { close(rp[0]); echo_server(rp[1], INADDR_ANY, net_port); }
+        if (read(rp[0], &ok, 1) != 1 || ok != 'y') { printf("latprobe: the network echo did not bind port %d\n", net_port); return 1; }
+    }
+    close(rp[1]);
     char head[128];
-    snprintf(head, sizeof head, "latprobe: tsc %llu per us, %d s a load%s\n", (unsigned long long)per_us, seconds, have_net ? ", net echo" : "");
+    snprintf(head, sizeof head, "latprobe: tsc %llu per us, %d s a load%s\n", (unsigned long long)per_us, seconds, net_port ? ", the network's echo up" : "");
     report(head);
     int bad = 0;
     for (; i < argc; i++)
         if (measure(argv[i])) bad = 1;
     kill(srv, SIGKILL);
     waitpid(srv, NULL, 0);
+    if (nsrv > 0) { kill(nsrv, SIGKILL); waitpid(nsrv, NULL, 0); }
     report(bad ? "latprobe: end (a load refused)\n" : "latprobe: end\n");
     return bad;
 usage:
-    fprintf(stderr, "usage: latprobe [-d SECONDS] [-n ADDR:PORT] [-r ADDR:PORT] [-p PORT] LOAD[:ARG] ...\n");
+    fprintf(stderr, "usage: latprobe [-d SECONDS] [-e PORT] [-r ADDR:PORT] [-p PORT] LOAD[:ARG] ...\n");
     return 2;
 }
