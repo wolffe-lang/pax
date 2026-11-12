@@ -230,7 +230,13 @@ def judge_log(log):
     keys = re.search(r"^keys: ready$(.*?)^keys: done$", data, re.M | re.S)
     stream = " ".join(g.strip() for g in re.findall(r"^key((?: [0-9a-f]{2})+)$", keys.group(1), re.M)) if keys else ""
     # each key is typed, then `z` (7a): the bytes between two 7a are one key's
-    got = [g.strip() for g in (" " + stream + " ").split(" 7a ")]
+    got = [[]]
+    for t in stream.split():
+        if t == "7a":
+            got.append([])
+        else:
+            got[-1].append(t)
+    got = [" ".join(g) for g in got]
     for i, (name, _) in enumerate(cases["KEYS"]):
         out.append("B5 %s: %s" % (name, (got[i] or "nothing") if i < len(got) - 1 else "nothing"))
     if len(got) - 1 > len(cases["KEYS"]):
