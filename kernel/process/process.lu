@@ -333,6 +333,7 @@ const R_REBOOT: u64 = 45
 const R_HOSTNAME: u64 = 46
 const R_CLOCK: u64 = 47
 const R_MOUNT: u64 = 48
+const R_AREA: u64 = 49 // px126
 
 /// A refusal code's name ("" when not this module's).
 pub fn why(r: u64) -> str {
@@ -356,6 +357,9 @@ pub fn why(r: u64) -> str {
     }
     if r == R_STACK {
         return "no frame for a thread's kernel stack"
+    }
+    if r == R_AREA {
+        return "no frames for a process's area"
     }
     if r == R_NOT_ELF {
         return "not a static x86-64 ELF executable PAX runs"
@@ -446,6 +450,29 @@ pub fn blob_name(p: u64) -> str {
 fn refuse_with(code: u64, r: u64) -> u64 {
     aput(area(), A_REFUSAL, code)
     r
+}
+
+/// px126: a clone that kernel/sched answered with no slot, no frame for
+/// a stack, or none for an area: -EAGAIN, by name. No free slot is said
+/// once a run (`sched.first_refusal`): a caller that asks again while
+/// the table is full gets -EAGAIN and no line, until a slot is found
+/// free.
+fn refuse_clone(s: u64) -> u64 {
+    if s == sched.NO_STACK {
+        return refuse_with(R_STACK, NEG_EAGAIN)
+    }
+    if s == sched.NO_AREA {
+        return refuse_with(R_AREA, NEG_EAGAIN)
+    }
+    if sched.first_refusal() {
+        return refuse_with(R_SLOTS, NEG_EAGAIN)
+    }
+    NEG_EAGAIN
+}
+
+/// px126: whether `s` is kernel/sched's answer of no new slot.
+fn refused_slot(s: u64) -> bool {
+    s == sched.SLOTS || s == sched.NO_STACK || s == sched.NO_AREA
 }
 
 // --- the image (px10, px12; moved from kernel/user) -----------------------------
@@ -1397,8 +1424,8 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u6
         return f
     }
     let s = sched.clone_current(f, usp, 0)
-    if s == sched.SLOTS || s == sched.NO_STACK {
-        put_word(f, W_RAX, refuse_with(if s == sched.NO_STACK { R_STACK } else { R_SLOTS }, NEG_EAGAIN))
+    if refused_slot(s) {
+        put_word(f, W_RAX, refuse_clone(s))
         return f
     }
     files.inherit(sched.proc_area(s)) // px17: shared open files
@@ -1432,9 +1459,9 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
         return f
     }
     let s = sched.clone_current(f, usp, space)
-    if s == sched.SLOTS || s == sched.NO_STACK {
+    if refused_slot(s) {
         let _freed = paging.free_user(space)
-        put_word(f, W_RAX, refuse_with(if s == sched.NO_STACK { R_STACK } else { R_SLOTS }, NEG_EAGAIN))
+        put_word(f, W_RAX, refuse_clone(s))
         return f
     }
     let a = sched.proc_area(s)
@@ -1482,8 +1509,8 @@ fn thread(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
         return f
     }
     let s = sched.clone_thread(f, usp, flags & CLONE_SETTLS != 0, tls, if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 })
-    if s == sched.SLOTS || s == sched.NO_STACK {
-        put_word(f, W_RAX, refuse_with(if s == sched.NO_STACK { R_STACK } else { R_SLOTS }, NEG_EAGAIN))
+    if refused_slot(s) {
+        put_word(f, W_RAX, refuse_clone(s))
         return f
     }
     let t = sched.slot_pid(s)
