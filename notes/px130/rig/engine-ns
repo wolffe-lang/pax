@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# notes/px123/rig/engine-ns — the container engine a suite's Linux side calls (PAX_ENGINE), inside the
+# take's own container, which has no engine of its own: tools/linux-tree's `ENGINE run --rm --network none
+# --privileged --ulimit core=0:0 -v STAGE:/x IMAGE sh /x/run.sh SIZE`, and tools/lobo-session's `ENGINE run
+# --rm -i --name NAME --privileged --network host -v STAGE:/stage:ro -e PATH=… IMAGE bash -c INIT` and
+# `ENGINE rm -f NAME`. The command runs in a fresh mount namespace of the take's container (CAP_SYS_ADMIN)
+# with each -v bound at its path, and in a fresh network namespace for `--network none` (the host's, the
+# take container's, for `--network host`), so its mounts, its chroot and its pid namespace stay inside and
+# go when it ends. IMAGE is not used: the take's image has python3 and bash, which those commands need.
+# `rm -f` has nothing to remove (nothing outlives its command). Any other option is refused by name.
+set -euo pipefail
+case ${1:-} in
+    run) shift ;;
+    rm) exit 0 ;;
+    *) echo "engine-ns: only run and rm" >&2; exit 2 ;;
+esac
+binds=() envs=() net=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --rm|--privileged|-i) shift ;;
+        --name|--ulimit) shift 2 ;;
+        --network) case $2 in none) net=(--net) ;; host) net=() ;; *) echo "engine-ns: --network $2" >&2; exit 2 ;; esac; shift 2 ;;
+        -v) m=${2%:ro}; binds+=("${m%%:*}" "${m#*:}"); shift 2 ;;
+        -e) envs+=("$2"); shift 2 ;;
+        -*) echo "engine-ns: unknown option $1" >&2; exit 2 ;;
+        *) shift; break ;;
+    esac
+done
+[ $# -gt 0 ] || { echo "engine-ns: no command" >&2; exit 2; }
+# linux-tree's script makes /r and mounts its tmpfs there: an empty /r left by an earlier run goes first.
+[ ! -d /r ] || rmdir /r || { echo "engine-ns: /r is left from an earlier run and not empty" >&2; exit 2; }
+for ((k = 1; k < ${#binds[@]}; k += 2)); do mkdir -p "${binds[k]}"; done
+# shellcheck disable=SC2016 # expanded by the inner bash
+exec unshare --mount ${net[@]+"${net[@]}"} --propagation private bash -c '
+    n=$1; shift
+    while [ "$n" -gt 0 ]; do mount --bind "$1" "$2" || exit 2; shift 2; n=$((n - 1)); done
+    e=$1; shift; envs=("${@:1:$e}"); shift "$e"
+    ulimit -c 0
+    exec env ${envs[@]+"${envs[@]}"} "$@"' engine-ns "$(( ${#binds[@]} / 2 ))" ${binds[@]+"${binds[@]}"} "${#envs[@]}" ${envs[@]+"${envs[@]}"} "$@"
