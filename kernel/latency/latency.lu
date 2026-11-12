@@ -1,0 +1,311 @@
+//! latency — px131: how long the kernel keeps interrupts off, and how
+//! long the scheduler goes without a chance to choose. Off unless the
+//! kernel's command line has the word `latency` (`start`); off, each
+//! place below costs one test of a word.
+//!
+//! **Interrupts off.** The kernel runs with IF clear in every system
+//! call and every handler (kernel/user, kernel/interrupts), and kernel
+//! threads clear it inside `sync.irq_save` and `sync.acquire`. An
+//! interval opens where IF goes from set to clear and closes where it is
+//! set again, each measured with the time-stamp counter:
+//! - boot/isr.S's common path opens one on entry from a context whose
+//!   saved RFLAGS has IF set (ring 3 always; a kernel thread, a voluntary
+//!   switch), recording the interrupted RIP, the vector (0x100 a system
+//!   call, 0x81 a switch) and the frame's %rax (a call's number); it
+//!   closes on resuming any frame whose RFLAGS has IF set (the same
+//!   thread's, or another's after a switch);
+//! - boot/sched.S's `pax_irq_save` opens one when IF was set (tag 0x200,
+//!   the running thread's slot, the caller's return address) and
+//!   `pax_irq_restore` closes it before its STI; boot/isr.S's `pax_wait`
+//!   closes before its STI and opens after its CLI (tag 0x201);
+//!   boot/user.S's `pax_enter_user` closes before IRETQ to ring 3.
+//! `pax_lat_close` keeps: the longest interval since boot and since the
+//! last read, each with where it began; a histogram by the interval's
+//! cycles' highest bit; and, since the last read, the longest for each
+//! system call number (512), each vector (256) and each thread slot's
+//! irq_save sections (64).
+//!
+//! **Scheduler opportunities.** kernel/sched calls `sched_point` where
+//! the scheduler may choose (the tick's `preempt`, a device's `kick`,
+//! every `run_next`); the longest gap between two is kept, since boot
+//! and since the last read, with the running thread and the vector that
+//! ended it. A gap is at least a tick while one thread runs; anything
+//! longer is a stretch with interrupts off, ticks lost in it.
+//!
+//! **Lost ticks.** The tick is periodic at 100 Hz; a tick due while
+//! interrupts are off waits, and a second due in the same stretch is
+//! lost. `ticks` compares the ticks delivered with those the clock
+//! (kernel/clock) says were due, since `start` and since the last read.
+//!
+//! The text is `/proc/pax-latency` (kernel/procfs); opening it reads the
+//! window and starts the next (`take`). No Linux source; no other
+//! kernel's source: the Intel SDM vol. 3A §6.8.1 (IF, CLI, STI), vol. 2
+//! (RDTSC), vol. 3B §18.17 (the time-stamp counter).
+
+use boot_info
+use clock
+use timer
+
+extern "c" fn pax_rdtsc() -> u64
+
+extern "c" let pax_lat: *u64
+extern "c" let pax_lat_hist: *u64
+extern "c" let pax_lat_sys: *u64
+extern "c" let pax_lat_vec: *u64
+extern "c" let pax_lat_slot: *u64
+
+// boot/isr.S's pax_lat words: 0-4 are the assembly's.
+const ON: u64 = 0
+const OPEN: u64 = 1
+const RIP: u64 = 2
+const TAG: u64 = 3
+const NR: u64 = 4
+const MAX: u64 = 5 // the longest since boot: cycles, then RIP, tag, number
+const WIN: u64 = 9 // the longest since the last read: the same four
+const CLOSED: u64 = 13 // intervals closed since boot
+const S_LAST: u64 = 14 // the TSC at the last scheduler opportunity
+const S_MAX: u64 = 15 // the longest gap since boot: cycles, thread, vector
+const S_WIN: u64 = 18 // since the last read: the same three
+const TSC0: u64 = 21 // the TSC, the clock's ns and the ticks at `start`
+const NS0: u64 = 22
+const TICKS0: u64 = 23
+const TSCW: u64 = 24 // the same three at the last read
+const NSW: u64 = 25
+const TICKSW: u64 = 26
+
+pub const SYSCALLS: u64 = 512
+pub const VECTORS: u64 = 256
+pub const SLOTS: u64 = 64
+pub const BUCKETS: u64 = 64
+pub const SYSCALL: u64 = 0x100
+pub const IRQ_SAVE: u64 = 0x200
+pub const WAIT: u64 = 0x201
+
+const NS_PER_TICK: u64 = 10000000
+
+fn w(i: u64) -> u64 {
+    // # Safety: word i (< 32) of boot/isr.S's pax_lat.
+    unsafe { ((pax_lat as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put(i: u64, v: u64) {
+    // # Safety: as `w`.
+    unsafe { ((pax_lat as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn at(table: u64, i: u64) -> u64 {
+    // # Safety: word i of one of boot/isr.S's tables; callers bound i.
+    unsafe { ((table + i * 8) as *u64).read_volatile() }
+}
+
+fn put_at(table: u64, i: u64, v: u64) {
+    // # Safety: as `at`.
+    unsafe { ((table + i * 8) as *u64).write_volatile(v) }
+}
+
+fn tsc() -> u64 {
+    // # Safety: boot/fpu.S's RDTSC, which every x86-64 CPU has.
+    unsafe { pax_rdtsc() }
+}
+
+/// On when the command line has `latency`, and the clock has a source
+/// (the cycles are turned into microseconds against it). IF clear.
+pub fn start() {
+    if !boot_info.cmdline_has("latency") || !clock.started() {
+        return
+    }
+    let t = tsc()
+    let ns = clock.now_ns()
+    let k = timer.ticks()
+    put(TSC0, t)
+    put(NS0, ns)
+    put(TICKS0, k)
+    put(TSCW, t)
+    put(NSW, ns)
+    put(TICKSW, k)
+    put(OPEN, 0)
+    put(S_LAST, 0)
+    put(ON, 1)
+}
+
+pub fn on() -> bool {
+    w(ON) & 1 != 0
+}
+
+fn top_bit(v: u64) -> u64 {
+    var b: u64 = 0
+    var x = v
+    while x > 1 {
+        x = x >> 1
+        b += 1
+    }
+    b
+}
+
+/// boot/isr.S, boot/sched.S and boot/user.S call this where IF is to be
+/// set again: the open interval, if any, is measured and kept. IF clear;
+/// it calls nothing that touches IF.
+export fn pax_lat_close() {
+    let t0 = w(OPEN)
+    if t0 == 0 {
+        return
+    }
+    put(OPEN, 0)
+    let now = tsc()
+    if now <= t0 {
+        return
+    }
+    let d = now - t0
+    put(CLOSED, w(CLOSED) + 1)
+    // # Safety: the address of boot/isr.S's table; nothing is read.
+    let hist = unsafe { pax_lat_hist as u64 }
+    let b = top_bit(d)
+    put_at(hist, b, at(hist, b) + 1)
+    let rip = w(RIP)
+    let tag = w(TAG)
+    let nr = w(NR)
+    if d > w(MAX) {
+        put(MAX, d); put(MAX + 1, rip); put(MAX + 2, tag); put(MAX + 3, nr)
+    }
+    if d > w(WIN) {
+        put(WIN, d); put(WIN + 1, rip); put(WIN + 2, tag); put(WIN + 3, nr)
+    }
+    if tag == SYSCALL {
+        if nr < SYSCALLS {
+            // # Safety: as `hist`.
+            let t = unsafe { pax_lat_sys as u64 }
+            if d > at(t, nr) { put_at(t, nr, d) }
+        }
+    } else if tag < VECTORS {
+        // # Safety: as `hist`.
+        let t = unsafe { pax_lat_vec as u64 }
+        if d > at(t, tag) { put_at(t, tag, d) }
+    } else if nr < SLOTS {
+        // # Safety: as `hist`.
+        let t = unsafe { pax_lat_slot as u64 }
+        if d > at(t, nr) { put_at(t, nr, d) }
+    }
+}
+
+/// kernel/sched: the scheduler may choose now. `f` is the frame it was
+/// entered with (0 for none) and `who` the running thread (its pid, or
+/// its slot with bit 32 set for a kernel thread). IF clear.
+pub fn sched_point(f: u64, who: u64) {
+    if !on() {
+        return
+    }
+    let now = tsc()
+    let last = w(S_LAST)
+    put(S_LAST, now)
+    if last == 0 || now <= last {
+        return
+    }
+    let gap = now - last
+    // # Safety: word 15 of a frame kernel/interrupts was handed (its vector).
+    let v = if f == 0 { 0 } else { unsafe { ((f + 120) as *u64).read_volatile() } }
+    if gap > w(S_MAX) {
+        put(S_MAX, gap); put(S_MAX + 1, who); put(S_MAX + 2, v)
+    }
+    if gap > w(S_WIN) {
+        put(S_WIN, gap); put(S_WIN + 1, who); put(S_WIN + 2, v)
+    }
+}
+
+/// Cycles per microsecond since `start`, against kernel/clock (0 when no
+/// microsecond has passed).
+pub fn per_us() -> u64 {
+    let dns = clock.now_ns() - w(NS0)
+    if dns < 1000 {
+        return 0
+    }
+    (tsc() - w(TSC0)) / (dns / 1000)
+}
+
+/// Microseconds in `c` cycles at `per` cycles a microsecond.
+pub fn us(c: u64, per: u64) -> u64 {
+    if per == 0 { c } else { c / per }
+}
+
+/// The longest interval since boot: (cycles, RIP, tag, number).
+pub fn longest() -> (u64, u64, u64, u64) {
+    (w(MAX), w(MAX + 1), w(MAX + 2), w(MAX + 3))
+}
+
+/// The longest since the last read: (cycles, RIP, tag, number).
+pub fn window() -> (u64, u64, u64, u64) {
+    (w(WIN), w(WIN + 1), w(WIN + 2), w(WIN + 3))
+}
+
+/// The longest scheduler gap since boot: (cycles, thread, vector).
+pub fn gap_longest() -> (u64, u64, u64) {
+    (w(S_MAX), w(S_MAX + 1), w(S_MAX + 2))
+}
+
+/// The same since the last read.
+pub fn gap_window() -> (u64, u64, u64) {
+    (w(S_WIN), w(S_WIN + 1), w(S_WIN + 2))
+}
+
+/// Intervals closed since boot.
+pub fn closed() -> u64 {
+    w(CLOSED)
+}
+
+/// Intervals whose cycles' highest bit is `b`, since boot.
+pub fn bucket(b: u64) -> u64 {
+    // # Safety: as in `pax_lat_close`; b < BUCKETS.
+    if b < BUCKETS { at(unsafe { pax_lat_hist as u64 }, b) } else { 0 }
+}
+
+/// The longest interval of system call `nr` since the last read.
+pub fn sys_longest(nr: u64) -> u64 {
+    // # Safety: as above; nr < SYSCALLS.
+    if nr < SYSCALLS { at(unsafe { pax_lat_sys as u64 }, nr) } else { 0 }
+}
+
+/// The longest interval begun at vector `v` since the last read.
+pub fn vec_longest(v: u64) -> u64 {
+    // # Safety: as above; v < VECTORS.
+    if v < VECTORS { at(unsafe { pax_lat_vec as u64 }, v) } else { 0 }
+}
+
+/// The longest irq_save section of thread slot `s` since the last read.
+pub fn slot_longest(s: u64) -> u64 {
+    // # Safety: as above; s < SLOTS.
+    if s < SLOTS { at(unsafe { pax_lat_slot as u64 }, s) } else { 0 }
+}
+
+/// Ticks delivered and ticks due by the clock: (since start, since the
+/// last read), each (delivered, due).
+pub fn ticks() -> (u64, u64, u64, u64) {
+    let k = timer.ticks()
+    let ns = clock.now_ns()
+    (k - w(TICKS0), (ns - w(NS0)) / NS_PER_TICK, k - w(TICKSW), (ns - w(NSW)) / NS_PER_TICK)
+}
+
+/// The window ends: every "since the last read" figure starts again.
+/// kernel/procfs, after it has made the text. IF clear.
+pub fn take() {
+    put(WIN, 0); put(WIN + 1, 0); put(WIN + 2, 0); put(WIN + 3, 0)
+    put(S_WIN, 0); put(S_WIN + 1, 0); put(S_WIN + 2, 0)
+    put(TSCW, tsc())
+    put(NSW, clock.now_ns())
+    put(TICKSW, timer.ticks())
+    // # Safety: the addresses of boot/isr.S's tables; each index bounded.
+    let (s, v, t) = unsafe { (pax_lat_sys as u64, pax_lat_vec as u64, pax_lat_slot as u64) }
+    var i: u64 = 0
+    while i < SYSCALLS {
+        put_at(s, i, 0)
+        i += 1
+    }
+    i = 0
+    while i < VECTORS {
+        put_at(v, i, 0)
+        i += 1
+    }
+    i = 0
+    while i < SLOTS {
+        put_at(t, i, 0)
+        i += 1
+    }
+}
