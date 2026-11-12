@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# tests/mpx7-mux — px125: what PAX already does for a terminal multiplexer
+# (one server per user holding every pty, its clients over a Unix-domain
+# socket). One probe (user/elf/muxprobe.c, tools/mkmux) asks the kernel
+# what such a server asks: 32 ptys under one epoll loop with a shell of
+# its own session on each, a 50 MB flood through one while the others
+# answer, a pane nobody reads, the window's size and a pty inside a pty,
+# the keys' signals through a master (with SIGINT and SIGQUIT inherited
+# ignored, as burrowd's children had them, and reset), a setsid child
+# that outlives its starter, Unix sockets (owner and mode, sixteen
+# clients beside the panes, SO_PEERCRED, a stale file, SCM_RIGHTS),
+# non-blocking writes and the loop's timers, termios raw and back. Its
+# transcript is held line for line to the same static binary's on Ubuntu
+# 24.04 (tests/mpx7-mux.d/linux/, recorded by `--only linux` as pid 1 of
+# a fresh pid namespace on a pseudo-terminal in a throwaway container,
+# tools/linux-tree), each difference named in tests/mpx7-mux.d/ruled.txt;
+# a `~` line is a measurement, held to ruled.txt's bounds.
+#
+#   tests/mpx7-mux [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]]
+#                  [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]
+#
+# One image a tier, kmain_console with the archive: /bin/muxprobe, pelt as
+# /bin/sh, boreutils' stty and sleep, /tmp; its run list `/bin/muxprobe`
+# (init, as root). The Linux side boots nothing: `--only linux --images
+# DIR` runs the same tree in a throwaway container (PAX_TREE_IMAGE, an
+# Ubuntu 24.04 image with python3; tools/linux-tree --nsproc) and writes
+# DIR/linux/plumb.txt; `--record` copies it with record.meta into
+# tests/mpx7-mux.d/linux/.
+#
+# Assertions, per tier and firmware:
+#   M0 build: muxprobe, pelt, stty and sleep static; the checker's
+#      selftest; the kernel and the image built; the reference there.
+#   M1 the probe on PAX, every row Ubuntu's or its ruled line (check.py),
+#      and every bound on a `~` line held.
+#   M2 the kernel's refusals: exactly ruled.txt's `refusal` lines, and no
+#      other `refused:` line.
+#   M3 init's end with a daemon running (A5.4): `PAX: init /bin/muxprobe
+#      ended with status 0`, what the kernel says it did with the daemon,
+#      no PANIC, every frame back, halted, the booted kernel the one built.
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both accels=auto noboot=0 only= record=0
+usage="usage: tests/mpx7-mux [--images DIR | --no-boot | --only build | --only linux --images DIR [--record]] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --record)   record=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accels=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $accels in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+case $only in ''|build|linux) ;; *) die "--only takes build or linux" ;; esac
+[ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
+need python3 readelf
+
+D=$here/mpx7-mux.d
+BORE="stty sleep"
+work=$PAX_BUILD/mpx7-mux
+runs=$PAX_BUILD/mpx7-mux-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+# The Linux side: the plumb image's tree as pid 1 on a pseudo-terminal in
+# a throwaway Ubuntu container.
+if [ "$only" = linux ]; then
+    mkdir -p "$images/linux"
+    : > "$images/none.keys"
+    out=$images/linux/plumb.tty
+    why=
+    PAX_TREE_IMAGE=${PAX_TREE_IMAGE:-localhost/px75-ubuntu:2} "$PAX_ROOT/tools/linux-tree" --root "$images/plumb/root" \
+        --keys "$images/none.keys" --prompt '$ ' --argv0 /bin/muxprobe --size 256m --nsproc "$out" -- /bin/muxprobe \
+        || why+=" tools/linux-tree;"
+    tr -d '\r' < "$out" | awk '/^muxprobe: /{on=1} on' > "$images/linux/plumb.txt"
+    grep -q '^A5.4 ' "$images/linux/plumb.txt" || why+=" the transcript has no A5.4 line;"
+    say "  linux plumb: $(wc -l < "$images/linux/plumb.txt" | tr -d ' ') lines, status $(cat "$out.rc" 2>/dev/null)"
+    if [ "$record" = 1 ] && [ -z "$why" ]; then
+        mkdir -p "$D/linux"
+        cp "$images/linux/plumb.txt" "$D/linux/plumb.txt"
+        {
+            echo "image: ${PAX_TREE_IMAGE:-localhost/px75-ubuntu:2}"
+            echo "kernel: $(uname -sr)"
+            echo "muxprobe: $(sha256_of "$images/plumb/root/bin/muxprobe")"
+            echo "pelt: $(sha256_of "$images/plumb/root/bin/sh")"
+            echo "plumb.txt: $(wc -l < "$D/linux/plumb.txt" | tr -d ' ') lines, $(sha256_of "$D/linux/plumb.txt")"
+        } > "$D/linux/record.meta"
+        say "  recorded tests/mpx7-mux.d/linux/plumb.txt"
+    fi
+    [ -z "$why" ] && say "PASS M0 (linux): the probe ran on Ubuntu in a throwaway container" || bad "M0 (linux):$why"
+    exit "$fail"
+fi
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" cc
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    python3 -I "$D/check.py" --selftest > "$work/selftest.txt" 2>&1 || why+=" the checker's selftest;"
+    "$PAX_ROOT/tools/mkmux" "$work/bin" > "$work/programs.txt" || why+=" tools/mkmux;"
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
+    r=$work/plumb/root
+    mkdir -p "$r/bin" "$r/etc" "$r/tmp"
+    cp "$work/bin/muxprobe" "$r/bin/muxprobe" 2>/dev/null || why+=" no muxprobe;"
+    cp "$work/pelt/pelt" "$r/bin/sh" 2>/dev/null || why+=" no pelt;"
+    for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    echo /bin/muxprobe > "$r/etc/pax-run"
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$work"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    files=()
+    for f in "$r"/bin/*; do files+=("/bin/${f##*/}=$f:755"); done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/plumb.cpio" "${files[@]}" /tmp/:1777 "/etc/pax-run=$r/etc/pax-run:644" \
+        > "$work/plumb.initramfs.txt" || why+=" tools/mkinitramfs plumb;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/plumb.cpio" initramfs.cpio "$elf" "$work/$tier/plumb.iso" >/dev/null \
+                || why+=" $tier plumb: mkimage;"
+            printf '%s\n' "$elf" > "$work/$tier/elf.path"
+            say "built $tier: elf $(sha256_of "$elf"), plumb.iso $(sha256_of "$work/$tier/plumb.iso")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    if [ "$only" = build ] || [ "$noboot" = 1 ]; then
+        [ -z "$why" ] && say "PASS M0 (build): the programs static, the checker's selftest, kernel ($tiers) and the image built" || bad "M0 (build):$why"
+        exit "$fail"
+    fi
+    images=$work
+fi
+ref=$D/linux/plumb.txt
+[ -s "$ref" ] || { bad "M0: no reference $ref (tests/mpx7-mux --only linux --images DIR --record)"; exit 1; }
+say "PASS M0: the images in $images, the reference there ($(wc -l < "$ref" | tr -d ' ') lines)"
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        elf=$(cat "$images/$tier/elf.path" 2>/dev/null)
+        iso=$images/$tier/plumb.iso
+        id="$tier $leg $accels"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            for t in M1 M2 M3; do bad "$t $id: no image"; done
+            continue
+        fi
+        digest=$(sha256_of "$elf")
+        log=$PAX_BUILD/mpx7-mux-$tier-$leg-plumb.serial.log
+        rm -f "$log" "$log.verdict"
+        hrc=0
+        t0=$SECONDS
+        "$PAX_ROOT/tools/qemu-halt" --accel "$accels" --firmware "$leg" --serial "$log" --timeout 1800 --qemu -m --qemu 1024M \
+            --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        ran=$((ran + 1))
+        printf '%s %s %s plumb halt-status=%s secs=%s serial=%s iso=%s\n' "$tier" "$leg" "$accels" "$hrc" "$((SECONDS - t0))" \
+            "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        out=$PAX_BUILD/mpx7-mux-$tier-$leg-plumb.txt
+        # The probe's lines, the kernel's own `user: …` narration out (a
+        # line of it, or the rest of a line it broke into).
+        awk '/^muxprobe: /{on=1} on && /^user: frames free /{exit}
+             on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s\n", substr($0, 1, i - 1); next } print }' "$norm" > "$out"
+        gate=$(python3 -I "$D/check.py" "$ref" "$D/ruled.txt" "$out" 2>&1)
+        if [ $? = 0 ]; then
+            say "PASS M1 $id: $(printf '%s\n' "$gate" | grep -c '^PASS') rows and bounds, each Ubuntu's, its ruled line or within its bound"
+        else
+            printf '%s\n' "$gate" | grep '^FAIL' | head -n 60 >&2
+            printf '%s\n' "$gate" | grep '^FAIL' | sed 's/^FAIL /FAIL M1 /' | head -n 60
+            bad "M1 $id: $(printf '%s\n' "$gate" | grep -c '^FAIL') rows differ"
+        fi
+        grep '^~' "$out" | sed 's/^/  measured: /'
+        why=
+        want=$(python3 -I "$D/check.py" --refusals "$D/ruled.txt")
+        have=$(grep -o 'refused: .*' "$norm" | sort)
+        [ "$want" = "$have" ] || why+=" the refusals are not ruled.txt's ($(printf '%s' "$have" | tr '\n' '|'));"
+        [ -z "$why" ] && say "PASS M2 $id: the kernel's refusals are the ruled ones ($(printf '%s\n' "$have" | grep -c .))" || bad "M2 $id:$why"
+        why=
+        grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
+        grep -q '^PAX: init /bin/muxprobe ended with status 0; nothing left to run$' "$norm" || why+=" no 'PAX: init /bin/muxprobe ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+        awk '/^user: frames free / { seen++; if ($4 != $10) bad=1 } END { exit seen < 1 || bad }' "$norm" || why+=" frames not all back ($(grep '^user: frames free ' "$norm" | tr '\n' '|'));"
+        grep -q "^kernel: .* sha256 $digest, " "$norm" || why+=" the booted kernel is not the one built;"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        daemon=$(awk '/^A5.4 /{on=1; next} on && /^user: muxprobe pid [0-9]+ (killed|exit)/{print; exit}' "$norm")
+        [ -n "$daemon" ] || why+=" no line for the daemon init left;"
+        [ -z "$why" ] && say "PASS M3 $id: init ended, status 0; the daemon it left: ${daemon#user: }; frames back; kernel $digest; $(tail -n 1 "$log.verdict")" || bad "M3 $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx7-mux: PASS" || say "mpx7-mux: FAIL"
+exit "$fail"

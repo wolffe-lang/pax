@@ -44,6 +44,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -235,6 +236,7 @@ static int mode_spew(void) {
 static int mode_hold(void) {
     raw_fd(0);
     for (;;) pause();
+    return 0;
 }
 
 static volatile sig_atomic_t winched;
@@ -291,6 +293,7 @@ static int mode_rawkill(void) {
     raw_fd(0);
     puts_fd(1, "raw: set\r\n");
     for (;;) pause();
+    return 0;
 }
 
 /* A pty in a pty: the inner program on a pty this one holds, its output
