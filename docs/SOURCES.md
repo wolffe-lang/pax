@@ -2025,6 +2025,16 @@ source; no kernel's, firmware's or driver's.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no DHCP, HTTP or TLS
   implementation's source; no Git source.
 
+## px127 — names from an on-box build (recvmsg on a datagram socket)
+
+- **recvmsg(2), udp(7), socket(7)** (the Linux man-pages project's text, as published): `struct msghdr`, the
+  value-result `msg_namelen`, `msg_controllen` and `msg_flags`' MSG_TRUNC, the iovec cap. What Linux answers in each
+  case was measured black box with `user/net/dgramopts.c`'s recvmsg rows, run on Linux; what musl's resolver asks of
+  the kernel, by strace of a program the dev image's own compiler built, on Linux (`notes/px127/probes.txt`). No C
+  library's source, no kernel's source.
+- **hosts(5)**: the workaround's line; measured black box on Linux and on PAX that both C libraries read the file
+  before DNS and make no socket for a name it holds.
+
 ## px104 — push from the console (burrow as ssh, the root set, the resolver's calls)
 
 - **ip(7), udp(7), sendmmsg(2), socket(7)** (the Linux man-pages project's text, as published): IP_RECVERR's
