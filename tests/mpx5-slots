@@ -2,9 +2,8 @@
 # tests/mpx5-slots — px126: how many processes and threads PAX holds at
 # once, and what running among many costs. One probe
 # (user/elf/slotprobe.c, tools/mkslots) as the first program of
-# kmain_console, one image a session; pelt (/bin/sh) and boreutils'
-# sha256sum and cat beside it where a session runs them (user/pelt.pin,
-# user/boreutils.pin). PAX's own limits, so no Linux side: each row is
+# kmain_console, one image a session; pelt (/bin/sh) and boreutils' cat
+# beside it where a session runs them (user/pelt.pin, user/boreutils.pin). PAX's own limits, so no Linux side: each row is
 # held to what PAX must do, by name.
 #
 #   tests/mpx5-slots [--images DIR | --no-boot | --only build]
@@ -27,10 +26,12 @@
 #   reuse (1 GiB)      slots-reuse: 32 rounds of 100 forks alive at once
 #                      and 32 of 100 threads: 3,200 of each, every one
 #                      reaped or joined, no round short, pids rising.
-#   wolf (2 GiB)       slots-wolf: 100 wolf programs (sha256sum, each on
-#                      a pipe of its own) running at once with two
-#                      threads or more each; each fed 64 KiB; every digest
-#                      the right one; every one reaped with status 0.
+#   wolf (4 GiB)       slots-wolf: 100 wolf programs running at once with
+#                      two threads or more each: pelt, each summing 1 to
+#                      300 in a loop, then reading a line from a pipe of
+#                      its own; every one's `45150 go`; every one reaped
+#                      with status 0. (boreutils' sha256sum and cat run
+#                      one thread on PAX; pelt's runtime starts a second.)
 #   ptys (2 GiB)       slots-ptys: 32 ptys, each a session whose leader is
 #                      pelt (`sh -c 'cat; echo bye<i>'`) with cat in its
 #                      foreground: a line through each cat, each session
@@ -73,7 +74,7 @@ case $only in ''|build) ;; *) die "--only takes build" ;; esac
 need python3 readelf
 
 SESSIONS="threads fill forks reuse wolf ptys switch herd"
-BORE="sha256sum cat"
+BORE="cat"
 run_of() {
     case $1 in
         threads) echo "/bin/slotprobe threads" ;;
@@ -87,7 +88,7 @@ run_of() {
     esac
 }
 memory_of() {
-    case $1 in threads|fill) echo 256M ;; forks|reuse) echo 1G ;; wolf|ptys) echo 2G ;; *) echo 3G ;; esac
+    case $1 in threads|fill) echo 256M ;; forks|reuse) echo 1G ;; ptys) echo 2G ;; switch|herd) echo 3G ;; *) echo 4G ;; esac
 }
 quiet_of() { case $1 in switch|herd) echo 1 ;; *) echo 0 ;; esac; }
 # What a session's refusals may be: a pattern every `refused:` line must
@@ -117,14 +118,14 @@ if [ -z "$images" ]; then
     why=
     "$PAX_ROOT/tools/mkslots" "$work/bin" > "$work/programs.txt" || why+=" tools/mkslots;"
     sessions=${PAX_SLOTS_SESSIONS:-$SESSIONS}
-    case " $sessions " in *" ptys "*) "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;" ;; esac
-    case " $sessions " in *" wolf "*|*" ptys "*) "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;" ;; esac
+    case " $sessions " in *" wolf "*|*" ptys "*) "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;" ;; esac
+    case " $sessions " in *" ptys "*) "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;" ;; esac
     sed 's/^/  program: /' "$work/programs.txt" "$work/pelt/sums.txt" "$work/bore/sums.txt" >&2 2>/dev/null
     for s in $sessions; do
         run_of "$s" > "$work/$s.run"
         files=(/bin/slotprobe="$work/bin/slotprobe":755)
         case $s in
-            wolf) files+=(/bin/sha256sum="$work/bore/sha256sum":755) ;;
+            wolf) files+=(/bin/sh="$work/pelt/pelt":755) ;;
             ptys) files+=(/bin/sh="$work/pelt/pelt":755 /bin/cat="$work/bore/cat":755) ;;
         esac
         "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${files[@]}" /tmp/:1777 "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt" \
@@ -162,8 +163,6 @@ prog_lines() { # norm prefix
     awk -v p="$2" '{ i = index($0, "user: "); if (i > 1) $0 = substr($0, 1, i - 1); else if (i == 1) next }
                    index($0, p ": ") == 1 { print }' "$1"
 }
-# The 64 KiB the wolf row feeds each program, as its digest.
-wolf_digest() { python3 -I -c 'import hashlib; print(hashlib.sha256(bytes(j % 251 for j in range(65536))).hexdigest())'; }
 
 check_session() { # session norm hrc digest id
     local s=$1 norm=$2 hrc=$3 digest=$4 id=$5 why= l n
@@ -193,12 +192,12 @@ check_session() { # session norm hrc digest id
         [ "$l2" = 'reuse: threads 3200 in 32 rounds of 100 (0 rounds short), 3200 joined' ] || why+=" '$l2';"
         [ -z "$why" ] && row_pass "slots-reuse $id: ${l#reuse: }; ${l2#reuse: }" || row_fail "slots-reuse $id:$why" ;;
     wolf)
-        l=$(prog_lines "$norm" wolf | grep '^wolf: .* asked running sha256sum')
-        printf '%s\n' "$l" | grep -Eqx 'wolf: 100 of 100 asked running sha256sum at once \(none ended\), threads ([2-9]|[1-9][0-9]+) to [0-9]+ each, [0-9]+ in all' || why+=" '$l' (100 at once, two threads or more each);"
-        l2=$(prog_lines "$norm" wolf | grep '^wolf: .* digests')
-        [ "$l2" = "wolf: 100 digests, all the same: $(wolf_digest)  -" ] || why+=" '$l2' (100 digests, each $(wolf_digest));"
+        l=$(prog_lines "$norm" wolf | grep '^wolf: .* asked running pelt')
+        printf '%s\n' "$l" | grep -Eqx 'wolf: 100 of 100 asked running pelt at once \(none ended\), threads ([2-9]|[1-9][0-9]+) to [0-9]+ each, [0-9]+ in all' || why+=" '$l' (100 at once, two threads or more each);"
+        l2=$(prog_lines "$norm" wolf | grep '^wolf: .* lines')
+        [ "$l2" = "wolf: 100 lines, all the same: 45150 go" ] || why+=" '$l2' (100 lines, each '45150 go');"
         prog_lines "$norm" wolf | grep -qx 'wolf: 100 of 100 reaped with status 0' || why+=" not every one reaped with status 0;"
-        [ -z "$why" ] && row_pass "slots-wolf $id: ${l#wolf: }; every digest right" || row_fail "slots-wolf $id:$why" ;;
+        [ -z "$why" ] && row_pass "slots-wolf $id: ${l#wolf: }; every sum right" || row_fail "slots-wolf $id:$why" ;;
     ptys)
         l=$(prog_lines "$norm" ptys | grep '^ptys: .* asked')
         printf '%s\n' "$l" | grep -Eqx 'ptys: 32 of 32 asked, each a session: 32 with a line through its cat, 32 with a shell and a child \([0-9]+ processes, [0-9]+ threads in them\)' || why+=" '$l';"
