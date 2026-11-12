@@ -7,7 +7,10 @@
 //! `setsockopt` (54), `getsockopt` (55), `accept4` (288), and `read`
 //! and `write` on a socket. glibc 2.39's `send` and `recv` are `sendto`
 //! and `recvfrom` with no address; nothing the witnesses link calls
-//! `sendmsg`, `recvmsg` or `shutdown`, which stay -ENOSYS.
+//! `sendmsg`, which stays -ENOSYS. px127: musl's resolver (the C library
+//! of a program `wolf build` makes on PAX) reads its answers with
+//! `recvmsg` (47), served on a datagram socket and refused by name on a
+//! stream socket.
 //!
 //! **A socket descriptor** is a descriptor of kernel/files whose open
 //! file names one of kernel/udp's sockets: `dup` and a child's copy of
@@ -150,6 +153,7 @@ const SOL_IP: u64 = 0 // px104: ip(7)'s level
 const IP_RECVERR: u64 = 11 // px104: uapi linux/in.h
 const UIO_MAXIOV: u64 = 1024 // px104: sendmmsg's vector, and a message's iovecs, at most
 const MMSG: u64 = 64 // px104: sizeof(struct mmsghdr) (a 56-byte msghdr, msg_len, padding)
+const MSGHDR: u64 = 56 // px127: sizeof(struct msghdr) on x86-64
 const SO_REUSEADDR: u64 = 2
 const TCP_NODELAY: u64 = 1 // uapi linux/tcp.h
 const TCP_SYNCNT: u64 = 7
@@ -211,6 +215,7 @@ const R_SHUTDOWN: u64 = 72
 const R_OOB: u64 = 73
 const R_CONTROL: u64 = 74 // px104
 const R_MMSG: u64 = 75 // px104
+const R_MSG: u64 = 76 // px127
 
 /// The first refusal code that is this module's.
 pub const REFUSALS: u64 = 64
@@ -269,6 +274,9 @@ pub fn why(r: u64) -> str {
     }
     if r == R_MMSG {
         return "sendmmsg on a stream socket (PAX's is a datagram socket's): call"
+    }
+    if r == R_MSG {
+        return "recvmsg on a stream socket (PAX's is a datagram socket's): call"
     }
     ""
 }
@@ -724,22 +732,7 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
     }
     let (got, src, sport, whole) = udp.recv(s, pml4, buf, n, flags & MSG_PEEK != 0)
     if got == udp.EMPTY {
-        if flags & MSG_DONTWAIT != 0 || files.nonblocking(a, fd) {
-            sched.set_self_until(0)
-            return neg(EAGAIN)
-        }
-        let t = udp.timeout(s)
-        if t != 0 {
-            let d = sched.self_until()
-            let now = timer.ticks()
-            if d == 0 {
-                sched.set_self_until(now + t)
-            } else if now >= d {
-                sched.set_self_until(0)
-                return neg(EAGAIN)
-            }
-        }
-        return files.WAIT
+        return nothing_yet(a, fd, s, flags)
     }
     sched.set_self_until(0)
     if got >= 0x8000000000000000 {
@@ -749,6 +742,115 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
         addr_out(pml4, addr, lenp, src, sport)
     }
     if flags & MSG_TRUNC != 0 { whole } else { got }
+}
+
+/// What a datagram receive on socket `s` (descriptor `fd`) that found
+/// nothing queued answers: -EAGAIN under MSG_DONTWAIT or O_NONBLOCK, or
+/// once the receive timeout's deadline has passed; else `files.WAIT`,
+/// the deadline written at the first wait.
+fn nothing_yet(a: u64, fd: u64, s: u64, flags: u64) -> u64 {
+    if flags & MSG_DONTWAIT != 0 || files.nonblocking(a, fd) {
+        sched.set_self_until(0)
+        return neg(EAGAIN)
+    }
+    let t = udp.timeout(s)
+    if t != 0 {
+        let d = sched.self_until()
+        let now = timer.ticks()
+        if d == 0 {
+            sched.set_self_until(now + t)
+        } else if now >= d {
+            sched.set_self_until(0)
+            return neg(EAGAIN)
+        }
+    }
+    files.WAIT
+}
+
+/// px127: `recvmsg(fd, msg, flags)` (recvmsg(2), udp(7)) on an AF_INET
+/// datagram socket, what musl's resolver reads its answers with: the
+/// oldest datagram scattered over `msg_iov`'s iovecs in order; its
+/// sender at `msg_name`, cut to `msg_namelen`, which then says 16 (a
+/// null `msg_name` leaves `msg_namelen` as it was); `msg_controllen` 0
+/// (PAX queues no ancillary data); `msg_flags` MSG_TRUNC when the
+/// datagram was longer than the iovecs, else 0. The bytes copied, or the
+/// datagram's whole length under MSG_TRUNC. `flags` and the waits are
+/// recvfrom's. Before anything is taken, as Linux answered
+/// user/net/dgramopts.c (notes/px127/): a header the caller cannot read
+/// and write -EFAULT, more than UIO_MAXIOV iovecs -EMSGSIZE, an iovec
+/// array it cannot read -EFAULT, a length past the signed range -EINVAL,
+/// a negative `msg_namelen` -EINVAL. A stream socket's recvmsg is refused
+/// by name, -EOPNOTSUPP.
+pub fn recvmsg(a: u64, pml4: u64, fd: u64, msg: u64, flags: u64) -> u64 {
+    if is_stream(a, fd) {
+        return refuse(a, R_MSG, EOPNOTSUPP, 47, 0)
+    }
+    let (e, s) = sock(a, fd, 47)
+    if e != 0 {
+        return e
+    }
+    let (r, cap) = header_ok(pml4, msg)
+    if r != 0 {
+        sched.set_self_until(0)
+        return r
+    }
+    if flags & MSG_ERRQUEUE != 0 {
+        return neg(EAGAIN) // px104's error queue, always empty
+    }
+    let name = uaccess.get64(pml4, msg)
+    if name != 0 {
+        let ar = addr_room(pml4, name, msg + 8)
+        if ar != 0 {
+            sched.set_self_until(0)
+            return ar
+        }
+    }
+    let iov = uaccess.get64(pml4, msg + 16)
+    let parts = uaccess.get64(pml4, msg + 24)
+    let (got, src, sport, whole) = udp.recv_vec(s, pml4, iov, parts, cap, flags & MSG_PEEK != 0)
+    if got == udp.EMPTY {
+        return nothing_yet(a, fd, s, flags)
+    }
+    sched.set_self_until(0)
+    if got >= 0x8000000000000000 {
+        return got
+    }
+    if name != 0 {
+        addr_out(pml4, name, msg + 8, src, sport)
+    }
+    uaccess.put(pml4, msg + 40, 0, 8)
+    uaccess.put(pml4, msg + 48, if whole > got { MSG_TRUNC } else { 0 }, 4)
+    if flags & MSG_TRUNC != 0 { whole } else { got }
+}
+
+/// px127: recvmsg's header at user `msg`: `(0, the iovecs' total)`, or
+/// `(-errno, 0)` before anything is taken: -EFAULT when its 56 bytes
+/// cannot be read and written or its iovec array cannot be read,
+/// -EMSGSIZE for more than UIO_MAXIOV iovecs, -EINVAL for a length or a
+/// total past the signed range.
+fn header_ok(pml4: u64, msg: u64) -> (u64, u64) {
+    if !uaccess.readable(pml4, msg, MSGHDR) || !uaccess.writable(pml4, msg, MSGHDR) {
+        return (neg(EFAULT), 0)
+    }
+    let iov = uaccess.get64(pml4, msg + 16)
+    let parts = uaccess.get64(pml4, msg + 24)
+    if parts > UIO_MAXIOV {
+        return (neg(EMSGSIZE), 0)
+    }
+    if parts > 0 && !uaccess.readable(pml4, iov, parts * 16) {
+        return (neg(EFAULT), 0)
+    }
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < parts {
+        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        if l >= 0x8000000000000000 || sum + l >= 0x8000000000000000 {
+            return (neg(EINVAL), 0)
+        }
+        sum += l
+        i += 1
+    }
+    (0, sum)
 }
 
 /// `getsockname(fd, addr, lenp)` (`peer` false) and `getpeername`.
