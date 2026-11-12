@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tests/mpx3-conflood — px129 (R-px129-13): what a console flood leaves the network. kmain_console at
-# 2560x1440 with `fbwrite` and no COM1 (the installed machine's shape, as tests/mpx3-conspeed boots it),
+# 2560x1440 with `fbwrite`, with no COM1 and again with a slow one (as tests/mpx3-conspeed boots it),
 # user/elf/conflood as init: its UDP echo child on port 7 and, after an idle stretch, the console written
 # back to back for a while, then quiet again. tests/mpx3-conflood.d/peer.py is the whole network (QEMU's
 # socket netdev, tools/net-peer's way, no privilege): it pings the machine (the kernel's own answer,
@@ -8,7 +8,11 @@
 # through the three phases.
 #
 #   tests/mpx3-conflood [--accel auto|kvm|tcg] [--firmware bios|uefi] [--modes "scroll screen big"]
-#                       [--seconds "IDLE FLOOD AFTER"]
+#                       [--seconds "IDLE FLOOD AFTER"] [--uart none|slow|both]
+#
+# px129 (R-px129-15): each mode boots twice by default, with no COM1 and with COM1 a UART at a real line's
+# speed (`slow`: QEMU's pipe character device drained at 115200 baud by tests/mpx3-conspeed.d/uart.py), the
+# installed machine's shape, where a kernel that waits on the UART holds interrupts off for 86.8 us a byte.
 #
 # The modes are what each console write is (conflood's header): `scroll` ten scrolled lines, `screen` a
 # whole screen of changed text, `big` 256 KiB with an SGR before every character.
@@ -30,19 +34,21 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 D=$here/mpx3-conflood.d
 
-accel=auto leg=bios modes="scroll screen big" seconds="6 12 6"
-usage="usage: tests/mpx3-conflood [--accel auto|kvm|tcg] [--firmware bios|uefi] [--modes LIST] [--seconds \"IDLE FLOOD AFTER\"]"
+accel=auto leg=bios modes="scroll screen big" seconds="6 12 6" uarts=both
+usage="usage: tests/mpx3-conflood [--accel auto|kvm|tcg] [--firmware bios|uefi] [--modes LIST] [--seconds \"IDLE FLOOD AFTER\"] [--uart none|slow|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --accel)    accel=$2; shift 2 ;;
         --firmware) leg=$2; shift 2 ;;
         --modes)    modes=$2; shift 2 ;;
         --seconds)  seconds=$2; shift 2 ;;
+        --uart)     uarts=$2; shift 2 ;;
         *)          die "$usage" ;;
     esac
 done
 case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
 case $leg in bios|uefi) ;; *) die "--firmware takes bios or uefi" ;; esac
+case $uarts in both) uarts="none slow" ;; none|slow) ;; *) die "--uart takes none, slow or both" ;; esac
 need python3 readelf gcc
 MODE=2560x1440
 work=$PAX_BUILD/mpx3-conflood
@@ -81,8 +87,20 @@ fi
 set -- $seconds
 total=$(( ${1%.*} + ${2%.*} + ${3%.*} ))
 for m in $modes; do
+  for uart in $uarts; do
     id="native $leg $accel $m"
     out=$PAX_BUILD/mpx3-conflood-$leg-$accel-$m
+    ser=(--no-serial) upid=
+    if [ "$uart" = slow ]; then
+        # px129 (R-px129-15): COM1 drained at 115200 baud, as the installed machine's sends.
+        id="$id slow-uart"
+        out=$out-uart
+        rm -f "$out.uart.in" "$out.uart.out"
+        python3 -I "$here/mpx3-conspeed.d/uart.py" "$out.uart" 115200 > "$out.uart.txt" 2>&1 &
+        upid=$!
+        for _ in $(seq 1 50); do [ -p "$out.uart.out" ] && break; sleep 0.1; done
+        ser=(--serial-chardev "pipe,path=$out.uart")
+    fi
     read -r lp qp < <(python3 -I -c 'import socket
 a = []
 for _ in range(2):
@@ -90,13 +108,14 @@ for _ in range(2):
 print(*[s.getsockname()[1] for s in a])')
     python3 -I "$D/peer.py" --listen "$lp" --qemu "$qp" --out "$out.json" --timeout $((total + 240)) > "$out.peer.txt" 2>&1 &
     ppid=$!
-    "$PAX_ROOT/tools/qemu-run" --no-serial --firmware "$leg" --accel "$accel" --timeout $((total + 300)) "$work/native/$m.iso" -- \
+    "$PAX_ROOT/tools/qemu-run" "${ser[@]}" --firmware "$leg" --accel "$accel" --timeout $((total + 300)) "$work/native/$m.iso" -- \
         -m 512M -vga none -device "VGA,vgamem_mb=64,xres=2560,yres=1440" \
         -netdev "socket,id=n0,udp=127.0.0.1:$lp,localaddr=127.0.0.1:$qp" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56" \
         > "$out.qemu.txt" 2>&1 &
     qpid=$!
     wait "$ppid"; prc=$?
     kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
+    if [ -n "$upid" ]; then kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null; sed 's/^/  /' "$out.uart.txt" >&2; fi
     sed 's/^/  /' "$out.peer.txt" >&2
     python3 -I "$D/rows.py" "$out.json" > "$out.rows.txt" 2>&1
     while IFS= read -r ln; do
@@ -107,6 +126,7 @@ print(*[s.getsockname()[1] for s in a])')
         esac
     done < "$out.rows.txt"
     [ "$prc" = 0 ] || bad "F1 $id: the peer never saw conflood's end (exit $prc)"
+  done
 done
 [ "$fail" = 0 ] && say "mpx3-conflood: PASS" || say "mpx3-conflood: FAIL"
 exit "$fail"
