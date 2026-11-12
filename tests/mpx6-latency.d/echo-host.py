@@ -15,8 +15,8 @@
 #
 #   hostnet LOAD: n N p50 U p99 U max U lost K
 #
-# (U in microseconds; lost: no answer within 10 s, or none by the window's
-# end). Prints `echo-host: port PORT` once bound, `echo-host: busy` and
+# (U in microseconds; lost: no answer within 10 s; one still in flight at
+# the window's end is neither). Prints `echo-host: port PORT` once bound, `echo-host: busy` and
 # exit 1 when the port is taken; runs until killed. Written from QEMU's
 # documentation of `-netdev user` and RFC 862.
 import selectors
@@ -49,7 +49,7 @@ window = None   # (load, when it began)
 
 def summary(load, t0, t1):
     rtts = sorted(r for d, r in done if t0 <= d < t1 and r is not None)
-    lost = sum(1 for d, r in done if t0 <= d < t1 and r is None) + sum(1 for d in sent.values() if t0 <= d < t1)
+    lost = sum(1 for d, r in done if t0 <= d < t1 and r is None)
     if not rtts:
         return 'hostnet %s: n 0 p50 0 p99 0 max 0 lost %d\n' % (load, lost)
     us = lambda v: int(v * 1e6)
