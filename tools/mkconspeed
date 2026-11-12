@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# mkconspeed — build px129's two probes, static x86-64 Linux executables
+# mkconspeed — build px129's three probes, static x86-64 Linux executables
 # linked against the baseline glibc's libc.a (as tools/mkbench builds
 # px108's): `conspeed` (user/elf/conspeed.c: how fast the terminal it runs
 # on draws; a table on stdout) and `keylat` (user/elf/keylat.c: a key to a
-# full-screen program's frame on a pseudo-terminal).
+# full-screen program's frame on a pseudo-terminal) and `cpugaps`
+# (user/elf/cpugaps.c: the CPU a spinning program gets, and the gaps).
 #
 #   tools/mkconspeed OUTDIR
 #
@@ -21,7 +22,7 @@ cc=${CONSPEED_CC:-gcc}
 need "$cc" readelf
 say "cc: $("$cc" --version 2>&1 | head -n 1)"
 # Each source by its whole name: the CI map reads the paths a tool names.
-for src in "$PAX_ROOT/user/elf/conspeed.c" "$PAX_ROOT/user/elf/keylat.c"; do
+for src in "$PAX_ROOT/user/elf/conspeed.c" "$PAX_ROOT/user/elf/keylat.c" "$PAX_ROOT/user/elf/cpugaps.c"; do
     p=$(basename "$src" .c)
     "$cc" -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$out/$p" "$src" || die "cc: $p"
