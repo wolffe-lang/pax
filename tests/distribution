@@ -170,11 +170,26 @@ def check(blob):
     assert ('usr/bin/wolf' in rows) == (variant == 'dev'), 'image-variant'
     if variant == 'dev':
         assert 'usr/bin/ld.lld' in rows and 'usr/share/wolf/compiler-std/STD-REV' in rows, 'image-dev-stack'
+    # px128: ligature, the linker in wolf, in the dev image beside lld: /usr/bin/ligature, byte for byte as
+    # tools/mkligature built it (the stripped copy), 0755, root's, its builder's sums and the digest and
+    # size user/ligature.pin names, and a ligature line in /etc/pax-release; none in the release image.
+    # lld stays the default: no image's /etc/shrc exports WOLF_LD.
+    assert ('usr/bin/ligature' in rows) == (variant == 'dev'), 'image-ligature-' + ('missing' if variant == 'dev' else 'in-release')
+    assert 'ligature' in release_rows and release_rows['ligature'][0] == next(
+        l.split('=', 1)[1] for l in (ROOT/'user/ligature.pin').read_text().splitlines() if l.startswith('LIGATURE_REV=')), 'image-ligature-release-line'
+    if variant == 'dev':
+        fields, data = rows['usr/bin/ligature']
+        assert data == (inputs/'ligature'/'ligature').read_bytes(), 'image-ligature-bytes'
+        assert fields[1] == 0o100755 and fields[2:4] == [0, 0], 'image-ligature-mode'
+        assert (inputs/'ligature'/'sums.txt').read_text().split() == ['ligature', sha(data), str(len(data))], 'image-ligature-sums'
+        pinned = [l.split()[2:4] for l in (ROOT/'user/ligature.pin').read_text().splitlines() if l.split()[:2] == ['#', 'ligature']]
+        assert pinned == [[sha(data), str(len(data))]], 'image-ligature-pin'
+    assert not any(l.startswith('export WOLF_LD=') for l in shrc), 'image-shrc-wolf-ld'
     return release, len(listed)
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, burrowd and its hook, configuration (its SetEnv line /etc/shrc's exports) and account, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, burrowd and its hook, configuration (its SetEnv line /etc/shrc's exports) and account, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, ligature at its pinned digest (dev) with lld still the default, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
