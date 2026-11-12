@@ -421,7 +421,7 @@ const S_TSC0: u64 = 20 // px88: the TSC at `start` (0: not taken)
 const S_NS0: u64 = 21 // px88: kernel/clock's nanoseconds at `start`
 const S_TICK0: u64 = 22 // px88: the tick at `start`
 const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once calibrated (0: not yet)
-const S_URGENT: u64 = 24 // px131: a bit a slot: woken by a device's work, at the queue's head (`wake_urgent`)
+const S_URGENT: u64 = 24 // px131: a bit a slot (SLOTS is 64: one word): woken by a device's work, at the queue's head (`wake_urgent`)
 const S_NETD: u64 = 25 // px131: slot + 1 of the network thread (the one that waits in `block_net`); 0 none yet
 
 // px88: the process area's usage words (kernel/sched's; words 6084-6093
@@ -525,6 +525,14 @@ fn wake_urgent(s: u64) {
     put_sv(S_URGENT, sv(S_URGENT) | (1 << s))
 }
 
+/// px131: the queue's head is a thread a device's work woke and `c`, the
+/// running thread, is not one (`kick` and `preempt` switch to it at once).
+fn urgent_waits(c: u64) -> bool {
+    let h = sv(S_HEAD) // #598
+    let u = sv(S_URGENT)
+    h != 0 && u & (1 << (h - 1)) != 0 && u & (1 << c) == 0
+}
+
 /// The queue's head (slot + 1), removed; 0 when it is empty.
 fn dequeue() -> u64 {
     let h = sv(S_HEAD) // #598
@@ -609,7 +617,10 @@ fn run_next() -> u64 {
         n = dequeue()
     }
     let s = if n == 0 { IDLE } else { n - 1 }
-    put_sv(S_URGENT, sv(S_URGENT) & !(1 << s)) // px131: it runs now
+    // px131: the thread leaving has had its urgent turn; the one starting
+    // keeps its mark while it runs, so `kick` gives the CPU to no other
+    // urgent thread before it blocks or the tick preempts it
+    put_sv(S_URGENT, sv(S_URGENT) & !(1 << from))
     account(from, s) // px88
     if s != from {
         fpu.switch(from, s) // px10: a no-op before fpu.start
@@ -644,7 +655,7 @@ pub fn preempt(f: u64) -> u64 {
     if sv(S_HEAD) == 0 {
         return f
     }
-    if c != IDLE && timer.ticks() - sv(S_SLICE) < QUANTUM {
+    if c != IDLE && timer.ticks() - sv(S_SLICE) < QUANTUM && !urgent_waits(c) {
         return f
     }
     put_field(c, offset_of(Thread, frame), f)
@@ -946,7 +957,9 @@ pub fn wake_input() -> u64 {
 
 /// After a device's interrupt (px13): when the idle thread was running
 /// and a thread is now ready, switch to it at once rather than at the
-/// next tick; otherwise resume `f`. IF clear.
+/// next tick; px131: and so when the queue's head is a thread the device's
+/// work woke (`wake_urgent`) and the running one is not; otherwise resume
+/// `f`. IF clear.
 pub fn kick(f: u64) -> u64 {
     if sv(S_STARTED) == 0 {
         return f
@@ -965,8 +978,7 @@ pub fn kick(f: u64) -> u64 {
     // interrupt landed where the tick could have preempted (it was taken,
     // so IF was set: ring 3, a kernel thread outside its locks), and the
     // running thread goes to the tail as `preempt` would send it.
-    let u = sv(S_URGENT)
-    if u & (1 << (h - 1)) == 0 || u & (1 << c) != 0 {
+    if !urgent_waits(c) {
         return f
     }
     put_field(c, offset_of(Thread, frame), f)
