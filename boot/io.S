@@ -173,10 +173,10 @@ pax_serial_log:
 /* px129 (R-px129-15): COM1's transmit ring, kernel/serial's: `put` adds a
    byte and moves what the UART's FIFO takes; the THRE interrupt moves the
    rest; a full ring drops (counted). Its head and tail are kernel/serial's
-   module words. */
+   module words. 64 KiB: about 5.7 s of a 115200 line. */
         .p2align 6
         .globl pax_serial_tx
 pax_serial_tx:
-        .zero 16384
+        .zero 65536
 
         .section .note.GNU-stack, "", @progbits
