@@ -59,19 +59,21 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       ends with status 255 right after the refused pty (OpenSSH's client,
       told to insist on a pty, measured on Linux too); `ssh host COMMAND`
       runs, no tty; what the client writes recorded
-  B15 a bare `sudo` over ssh (px112): PAX's sudo asks on its controlling
-      terminal, which for a command over ssh is still the console (no session
-      of its own yet), and is stopped there while the client waits; burrowd
-      answers the next connection all the same (each session's program in a
-      process group of its own)
+  B15 a bare `sudo` over ssh (px112, px124): since px124 the console is no
+      terminal of pid 1's session (/bin/init gives it up before the first
+      login), so a command over ssh, in that session at this burrow pin, has
+      no controlling terminal: PAX's sudo refuses at once by name (`a terminal
+      is required to read the password`, status 1) and burrowd answers the
+      next connection. Until px124 sudo asked on the console and was stopped
+      there while the client waited.
   B16 sudo over ssh as the README has it (px112, beside px115's upgrade):
       `sudo -k -S -p ''` with pax's password on standard input runs as root
       and remembers nothing, so a second session's `sudo -n` is asked. A
-      plain `sudo -S` remembers the password under its terminal, which for
-      every ssh session is still the console's at this pin: what a second
-      session's `sudo -n` then does is recorded as measured, not held (it is
-      the shared record a session of its own per program ends); `sudo -K`
-      over ssh clears it after
+      plain `sudo -S` with no terminal remembers the password under its
+      parent (px115's key), which is each ssh session's own shell: what a
+      second session's `sudo -n` then does is recorded as measured, not held
+      (until px124 the record was the console terminal's, every session's);
+      `sudo -K` over ssh clears it after
   B17 the stack segment after a system call (pax#340): `/bin/sysret-ss`
       (tests/mpx5-burrowd.d/sysret-ss.c) makes a system call, reads SS and
       CS, stays in ring 3 for 200 ms across the timer's interrupts, and
@@ -96,7 +98,18 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       connect (`Connection refused`); at the console burrow reaches
       burrowd on 127.0.0.1, which answers `Permission denied
       (publickey,password).` and logs it
-B1-B10 are the installed shape: /bin/login as pid 1 and the volume's
+  B30 (px124) an ssh session open across the console's logout: a command
+      over ssh that prints, sleeps 12 s and prints again is running when root
+      types `exit` at the console; the console asks `login:` again, the
+      command ends with both lines and status 0, and burrowd's pid is the one
+      it had before the logout (init hangs up the console's session alone)
+  B31 (px124) pax's runtime directory, /run/user/1000, is there over ssh, 0700
+      pax's (init made it at boot); XDG_RUNTIME_DIR over ssh is recorded, not
+      held (burrowd's SetEnv line is one text for every account: unset)
+  B32 (px124) `sudo -k -S -p '' /bin/poweroff` over ssh, pax's password on its
+      standard input, ends boot 2: the console's end line, QEMU's status 0
+B1-B10 are the installed shape: /bin/login as pid 1 (px124: it execs
+/bin/init, which runs the hooks and starts the console's login) and the volume's
 configuration the installer's (the shipped file's ListenAddress line made
 `ListenAddress 0.0.0.0`, as user/install/prepare.lu writes it; the prepare
 unit's I-burrowd-lan holds the installer to that).
@@ -459,6 +472,15 @@ class Client:
                 .replace(b'@' + host.encode(), b'@HOST').replace(b'\r\n', b'\n'))
 
 
+    def ssh_start(self, where, args):
+        """px124: `ssh` with pax's key, started and not waited for: the Popen (its output piped)."""
+        host, port = where
+        argv = ['ssh', '-F', 'none', '-o', 'UserKnownHostsFile=%s' % self.kh, '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=20', '-o', 'BatchMode=yes',
+                '-o', 'PreferredAuthentications=publickey', '-i', self.key, '-p', str(port), '-l', 'pax']
+        return subprocess.Popen([str(x) for x in argv + [host] + list(args)], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env())
+
     def ssh_tty(self, where, args, opts=(), timeout=30, typed=None, after=None):
         """The client as a person runs it at a terminal: ssh's standard input, output and error a
         pseudo-terminal of its own (publickey), what it wrote there, and its status; killed after
@@ -726,9 +748,8 @@ def host_rows(client):
         ok('B12', 'no ptys, the shell served: %s' % record_b12.replace('\n', '; ').strip('; '))
     else:
         bad('B12', 'a session without ptys: %s' % record_b12.replace('\n', '; ').strip('; '))
-    # B15 a bare sudo over ssh: its prompt goes to the console, and it is stopped there (SIGTTOU, as
-    # it turns the console's echo off from a background group); the client waits until it is killed.
-    # burrowd keeps answering only if that stop stays in the program's own group.
+    # B15 a bare sudo over ssh: no controlling terminal since px124 (init gives the console up before
+    # the first login), so sudo refuses by name at once; burrowd answers the next connection.
     try:
         rs = c.ssh(GUEST_AT, ['sudo cat /etc/hostname'], timeout=15)
     except subprocess.TimeoutExpired:
@@ -738,12 +759,13 @@ def host_rows(client):
     except subprocess.TimeoutExpired:
         r2 = (None, b'', b'[row: timed out]')
     (c.dir / 'b15.txt').write_text('sudo: %s\nsecond: %s\n' % ('waited, killed after 15 s' if rs is None else show(rs), show(r2)))
-    if rs is None and r2[0] == 0 and r2[1] == b'second\n':
-        ok('B15', 'a bare sudo over ssh waits on the console (no session of its own yet); the next connection is answered')
+    if rs is not None and rs[0] == 1 and b'a terminal is required to read the password' in rs[2] and r2[0] == 0 and r2[1] == b'second\n':
+        ok('B15', 'a bare sudo over ssh has no terminal (the console is no terminal of pid 1\'s session): refused at once by name; '
+           'the next connection is answered')
     else:
         bad('B15', 'sudo over ssh: %s; the next connection: %s' % ('waited' if rs is None else show(rs), show(r2)))
-    # B16 sudo over ssh as the README has it: -k -S remembers nothing; a plain -S's record is the
-    # console terminal's, which every ssh session shares at this pin (measured, not held).
+    # B16 sudo over ssh as the README has it: -k -S remembers nothing; a plain -S's record is keyed by
+    # its parent, each session's own shell, since px124 (measured, not held).
     line = (PASSWORDS['pax'] + '\n').encode()
     try:
         k1 = c.ssh(GUEST_AT, ["sudo -k -S -p '' id -u"], data=line, timeout=120)
@@ -938,7 +960,41 @@ def console_rows(con, client):
         bad('B9', 'the log: %r; missing %s' % (mode.strip(), missing))
     else:
         ok('B9', 'the log at the console, root\'s 0600, every kind of line (%d lines)' % len(log.splitlines()))
+    logout_rows(con, client)
+
+
+def logout_rows(con, client):
+    """B30 and B31 (px124): the console's logout with an ssh command running, and the runtime
+    directory over ssh."""
+    before = client.ssh(GUEST_AT, ['cat /var/run/burrowd.pid'], timeout=30)
+    p = client.ssh_start(GUEST_AT, ['echo begun; sleep 12; echo still'])
+    time.sleep(4)
     con.type('exit')
+    back = con.wait(r'login: $', 20)
+    try:
+        out, err = p.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = p.communicate()
+        err += b'[row: killed after 90 s]'
+    after = client.ssh(GUEST_AT, ['cat /var/run/burrowd.pid'], timeout=30)
+    (client.dir / 'b30.txt').write_text('ssh across the logout: %s %r %r\nburrowd before %s, after %s\nconsole: %s\n'
+                                        % (p.returncode, out, err, show(before), show(after), 'login: again' if back else 'no login:'))
+    if (back and p.returncode == 0 and out == b'begun\nstill\n' and before[0] == 0 and after[0] == 0
+            and before[1] == after[1]):
+        ok('B30', 'root\'s `exit` at the console gave `login:` again while an ssh command ran on: it ended 0 with both '
+           'lines; burrowd kept pid %s' % before[1].decode().strip())
+    else:
+        bad('B30', 'console %s; the ssh command %s %r %r; burrowd %s then %s'
+            % ('login: again' if back else 'no login: (%r)' % con.text()[-200:], p.returncode, out, err[-200:], show(before), show(after)))
+    r = client.ssh(GUEST_AT, ['ls -ldn /run/user/1000; echo X=$XDG_RUNTIME_DIR'], timeout=60)
+    (client.dir / 'b31.txt').write_text('%s\n' % show(r))
+    f = r[1].decode(errors='replace').split()
+    if r[0] == 0 and len(f) > 4 and f[0].startswith('drwx------') and f[2:4] == ['1000', '1000']:
+        ok('B31', 'pax\'s runtime directory over ssh: %s; XDG_RUNTIME_DIR over ssh %r (measured: burrowd sets no '
+           'per-account variable)' % (' '.join(f[:4]), r[1].decode(errors='replace').split('X=', 1)[-1].strip()))
+    else:
+        bad('B31', 'the runtime directory over ssh: %s' % show(r))
 
 
 def second_boot(con, client, fp):
@@ -960,6 +1016,25 @@ def second_boot(con, client, fp):
         ok('B10', 'the same key, %s, kept; boot 1\'s known_hosts verifies it' % fp)
     else:
         bad('B10', 'boot 2 says %r (boot 1: %s); ssh %s' % (line, fp, show(r) if r else '-'))
+
+
+def poweroff_row(con, client):
+    """B32 (px124): `sudo -k -S poweroff` over ssh ends the machine."""
+    line = (PASSWORDS['pax'] + '\n').encode()
+    try:
+        r = client.ssh(GUEST_AT, ["sudo -k -S -p '' /bin/poweroff"], data=line, timeout=120)
+    except subprocess.TimeoutExpired:
+        r = (None, b'', b'[row: timed out]')
+    end = con.wait(r'^user: poweroff pid \d+ reboot\(2\): the volumes written and marked clean[^\n]*$', 60)
+    try:
+        rc = con.q.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        rc = None
+    (client.dir / 'b32.txt').write_text('ssh: %s\nend: %r\nQEMU: %s\n' % (show(r), end.group(0) if end else None, rc))
+    if end and rc == 0:
+        ok('B32', 'sudo -k -S poweroff over ssh: %s; QEMU 0' % end.group(0).decode())
+    else:
+        bad('B32', 'poweroff over ssh: %s; the end line %r; QEMU %s' % (show(r), end.group(0) if end else None, rc))
 
 
 def live_image(work):
@@ -1044,20 +1119,16 @@ def main():
                 git_rows(client, work)
                 console_rows(con, client)
         finally:
-            con.quit(120)
+            con.quit(5)  # px124: the console asks `login:` again after its logout; nothing halts
         b2 = out / 'boot2'
         b2.mkdir()
         con2 = Console(b2, iso, vol)
         try:
             if fp:
                 second_boot(con2, client, fp)
-            con2.type('root')
-            if con2.wait(r'Password: $', 30):
-                con2.type(PASSWORDS['root'], secret=True)
-                if con2.wait(r'[$#] $', 60):
-                    con2.type('exit')
+            poweroff_row(con2, client)
         finally:
-            con2.quit(120)
+            con2.quit(5)
         b3 = out / 'boot3-stick'
         b3.mkdir()
         con3 = Console(b3, live_image(work), None)
