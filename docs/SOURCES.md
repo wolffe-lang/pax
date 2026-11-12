@@ -2381,3 +2381,16 @@ wolf-lang, the lane read the `--linker` and `WOLF_LD` clause of `wolf build --he
 | `getrusage(2)`, `wait4(2)`, `clock_gettime(2)` (the Linux man-pages) | 6.9 | `tests/distribution-ligature.d/ldtime.c`: a child's wall time, CPU time and peak resident set |
 | ligature 0.0.2, ld.lld 18.1.8 and the image's link-only cc | binaries | black box: each links the same programs on PAX and on Linux (`notes/px128-ligature-on-the-image.md` §2) |
 | PAX's own `tools/mktrash`, `tools/mkclef`, `tools/distribution-root`, `tools/system-env`, `tests/distribution`, `tests/distribution-boot`, and `kernel/process`'s `wait4` and `getrusage` | this tree | read and extended |
+
+## px131 — what the kernel holds too long
+
+No kernel's, driver's or C library's source was read. The rule and the inventory are read from this tree's own
+code; Linux was run as a black box in a virtual machine (its own kernel and modules, booted, never read).
+
+| source | version | read, for |
+|---|---|---|
+| Intel SDM vol. 3A §6.8.1, §6.10-§6.14; vol. 3B §18.17; vol. 2 (CLI, STI, RDTSC, RDRAND, CPUID, SYSCALL, SYSRET, IRETQ) | the current edition | the instrument's interval (IF set to clear and back), what a gate and SYSCALL do to IF, the time-stamp counter, RDRAND and CPUID's cost under a hypervisor |
+| getrandom(2), proc_pid_mem(5), munmap(2), clock_nanosleep(2), netdevice(7), init's duties in boot(7) | the Linux man-pages 6.9 | getrandom's short count above 256 bytes, /proc/<pid>/mem's reads, munmap of a range with nothing in it, the probe's sleeps, the Linux guest's interfaces (`user/elf/latinit.c`) |
+| QEMU's documentation of `-netdev user` (`hostfwd`, the gateway's address) and RFC 862 | QEMU 8.2 | the host's pings to the guest's echo, the guest's report to the host |
+| Linux 7.2.4 (the build host's kernel, `CONFIG_PREEMPT_LAZY`, `CONFIG_HZ=1000`) and its virtio modules | binaries | black box: the comparison column (`notes/px131-long-kernel-paths.md` §7) |
+| PAX's own `boot/isr.S`, `boot/sched.S`, `boot/user.S`, `kernel/interrupts`, `kernel/sched`, `kernel/user`, `kernel/vm`, `kernel/paging`, `kernel/process`, `kernel/trace_mem`, `kernel/procfs`, `kernel/netd`, the drivers | this tree | read for the rule and the inventory; extended |
