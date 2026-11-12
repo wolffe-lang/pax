@@ -2174,12 +2174,15 @@ fn free_slot() -> u64 {
 /// px126: how many slots hold a thread (a zombie included) of a process
 /// whose real user id is `uid`: what RLIMIT_NPROC counts (getrlimit(2):
 /// "the number of extant process (or, more precisely on Linux, threads)
-/// for the real user ID"). A walk to the high water.
+/// for the real user ID"). A thread that has ended and waits only for
+/// `reap` (DEAD) is no longer extant: it is not counted. A walk to the
+/// high water.
 pub fn user_threads(uid: u64) -> u64 {
     var n: u64 = 0
     var s: u64 = FIRST
     while s < top() {
-        if field(s, offset_of(Thread, state)) != FREE && field(s, offset_of(Thread, tgid)) != 0 {
+        let st = field(s, offset_of(Thread, state))
+        if st != FREE && st != DEAD && field(s, offset_of(Thread, tgid)) != 0 {
             let l = field(s, offset_of(Thread, lead))
             if has_area(l) && real_uid(l) == uid {
                 n += 1
