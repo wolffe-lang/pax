@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# tests/mpx5-slots — px126: how many processes and threads PAX holds at
+# once, and what running among many costs. One probe
+# (user/elf/slotprobe.c, tools/mkslots) as the first program of
+# kmain_console, one image a session; pelt (/bin/sh) and boreutils'
+# sha256sum and cat beside it where a session runs them (user/pelt.pin,
+# user/boreutils.pin). PAX's own limits, so no Linux side: each row is
+# held to what PAX must do, by name.
+#
+#   tests/mpx5-slots [--images DIR | --no-boot | --only build]
+#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# The sessions (PAX_SLOTS_SESSIONS names some; all by default), each its
+# guest memory, and the rows they hold:
+#   threads (256 MiB)  slots-threads: one process makes threads (raw
+#                      clone, 8 KiB stacks) until one is refused, twice:
+#                      at least 1,000 each time, the refusal EAGAIN, the
+#                      three asked after it EAGAIN too, every thread
+#                      joined; `refused: no free process slot` exactly
+#                      once a time (twice in all).
+#   fill (256 MiB)     slots-fill: children until a fork is refused: at
+#                      least 80 (the old table held 60), the refusal
+#                      EAGAIN or ENOMEM and written once by its name,
+#                      every child reaped with its status.
+#   forks (1 GiB)      slots-forks: 200 children alive at once, each
+#                      reaped with its status.
+#   reuse (1 GiB)      slots-reuse: 32 rounds of 100 forks alive at once
+#                      and 32 of 100 threads: 3,200 of each, every one
+#                      reaped or joined, no round short, pids rising.
+#   wolf (2 GiB)       slots-wolf: 100 wolf programs (sha256sum, each on
+#                      a pipe of its own) running at once with two
+#                      threads or more each; each fed 64 KiB; every digest
+#                      the right one; every one reaped with status 0.
+#   ptys (2 GiB)       slots-ptys: 32 ptys, each a session whose leader is
+#                      pelt (`sh -c 'cat; echo bye<i>'`) with cat in its
+#                      foreground: a line through each cat, each session
+#                      a shell and a child at once, then end of file,
+#                      each `bye<i>`, every shell reaped with status 0.
+#   switch (3 GiB)     slots-switch: N processes yielding, N = 16, 64 and
+#                      1,000, three interleaved rounds: the least CPU a
+#                      yield of the three; the 1,000's within twice the
+#                      16's. Booted quiet (no line a process's exit).
+#   herd (3 GiB)       slots-herd, measured: a pipe ping-pong's round trip
+#                      with 0, 64 and 1,000 processes parked in a pipe
+#                      read. Booted quiet.
+# Every session also holds (slots-machine): no PANIC; init ended with
+# status 0; the booted kernel the one built; every frame back (the frames
+# line, not printed quiet); no `refused:` line but the rows' own.
+# Each row's verdict is a `PASS <row> …` or `FAIL <row> …` line at column
+# 0 of stdout. The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
+# every row held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx5-slots [--images DIR | --no-boot | --only build] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build) ;; *) die "--only takes build" ;; esac
+need python3 readelf
+
+SESSIONS="threads fill forks reuse wolf ptys switch herd"
+BORE="sha256sum cat"
+run_of() {
+    case $1 in
+        threads) echo "/bin/slotprobe threads" ;;
+        fill)    echo "/bin/slotprobe fill" ;;
+        forks)   echo "/bin/slotprobe forks 200" ;;
+        reuse)   echo "/bin/slotprobe reuse 32 100" ;;
+        wolf)    echo "/bin/slotprobe wolf 100" ;;
+        ptys)    echo "/bin/slotprobe ptys 32" ;;
+        switch)  echo "/bin/slotprobe switch 1000" ;;
+        herd)    echo "/bin/slotprobe herd 1000" ;;
+    esac
+}
+memory_of() {
+    case $1 in threads|fill) echo 256M ;; forks|reuse) echo 1G ;; wolf|ptys) echo 2G ;; *) echo 3G ;; esac
+}
+quiet_of() { case $1 in switch|herd) echo 1 ;; *) echo 0 ;; esac; }
+# What a session's refusals may be: a pattern every `refused:` line must
+# match, and how many there must be ("" none).
+refusals_of() {
+    case $1 in
+        threads) echo 'refused: no free process slot, -11|2' ;;
+        fill)    echo 'refused: (no free process slot, -11|no frame for a thread.s kernel stack, -11|no frames for a process.s area, -11|no frames for a copy of the address space, -12)|1' ;;
+        *)       echo '|0' ;;
+    esac
+}
+
+work=$PAX_BUILD/mpx5-slots
+runs=$PAX_BUILD/mpx5-slots-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+row_pass() { printf 'PASS %s\n' "$*"; }
+row_fail() { printf 'FAIL %s\n' "$*"; fail=1; }
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" cc
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mkslots" "$work/bin" > "$work/programs.txt" || why+=" tools/mkslots;"
+    sessions=${PAX_SLOTS_SESSIONS:-$SESSIONS}
+    case " $sessions " in *" ptys "*) "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;" ;; esac
+    case " $sessions " in *" wolf "*|*" ptys "*) "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;" ;; esac
+    sed 's/^/  program: /' "$work/programs.txt" "$work/pelt/sums.txt" "$work/bore/sums.txt" >&2 2>/dev/null
+    for s in $sessions; do
+        run_of "$s" > "$work/$s.run"
+        files=(/bin/slotprobe="$work/bin/slotprobe":755)
+        case $s in
+            wolf) files+=(/bin/sha256sum="$work/bore/sha256sum":755) ;;
+            ptys) files+=(/bin/sh="$work/pelt/pelt":755 /bin/cat="$work/bore/cat":755) ;;
+        esac
+        "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "${files[@]}" /tmp/:1777 "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt" \
+            || why+=" tools/mkinitramfs $s;"
+    done
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            for s in $sessions; do
+                conf=$PAX_ROOT/boot/limine-initramfs.conf
+                [ "$(quiet_of "$s")" = 1 ] && conf=$PAX_ROOT/boot/limine-initramfs-quiet.conf
+                "$PAX_ROOT/tools/mkimage" --conf "$conf" --add "$work/$s.cpio" initramfs.cpio "$elf" "$work/$tier/$s.iso" >/dev/null \
+                    || why+=" $tier $s: mkimage;"
+            done
+            printf '%s\n' "$elf" > "$work/$tier/elf.path"
+            say "built $tier: elf $(sha256_of "$elf")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS build: the probe static, kernel ($tiers) and every session's image built" || bad "build:$why"
+    images=$work
+    if [ "$only" = build ] || [ "$noboot" = 1 ]; then
+        exit "$fail"
+    fi
+    [ "$fail" = 0 ] || exit 1
+fi
+
+# The program's lines (a kernel line that broke into one cut out).
+prog_lines() { # norm prefix
+    awk -v p="$2" '{ i = index($0, "user: "); if (i > 1) $0 = substr($0, 1, i - 1); else if (i == 1) next }
+                   index($0, p ": ") == 1 { print }' "$1"
+}
+# The 64 KiB the wolf row feeds each program, as its digest.
+wolf_digest() { python3 -I -c 'import hashlib; print(hashlib.sha256(bytes(j % 251 for j in range(65536))).hexdigest())'; }
+
+check_session() { # session norm hrc digest id
+    local s=$1 norm=$2 hrc=$3 digest=$4 id=$5 why= l n
+    case $s in
+    threads)
+        for r in 1 2; do
+            l=$(prog_lines "$norm" threads | grep "^threads: round $r: made ")
+            n=$(printf '%s\n' "$l" | sed -n -E 's/^threads: round [0-9]: made ([0-9]+), then clone answered EAGAIN; 3 more asked, 3 answered EAGAIN$/\1/p')
+            { [ -n "$n" ] && [ "$n" -ge 1000 ]; } || why+=" round $r: '$l' (at least 1,000 made, then EAGAIN, three more EAGAIN);"
+            prog_lines "$norm" threads | grep -qx "threads: round $r: joined ${n:-x} of ${n:-x}" || why+=" round $r: not all joined ('$(prog_lines "$norm" threads | grep "^threads: round $r: joined" | head -n 1)');"
+        done
+        [ -z "$why" ] && row_pass "slots-threads $id: $(prog_lines "$norm" threads | grep ' made ' | sed 's/^threads: //' | paste -sd'|' -)" || row_fail "slots-threads $id:$why" ;;
+    fill)
+        l=$(prog_lines "$norm" fill | grep '^fill: .* children alive at once')
+        n=$(printf '%s\n' "$l" | sed -n -E 's/^fill: ([0-9]+) children alive at once, then fork answered (EAGAIN|ENOMEM)$/\1/p')
+        { [ -n "$n" ] && [ "$n" -ge 80 ]; } || why+=" '$l' (at least 80, then EAGAIN or ENOMEM);"
+        prog_lines "$norm" fill | grep -qx "fill: released; ${n:-x} of ${n:-x} reaped with their own status" || why+=" not every child reaped with its status;"
+        [ -z "$why" ] && row_pass "slots-fill $id: $l; $(grep -o 'refused: .*' "$norm" | head -n 1)" || row_fail "slots-fill $id:$why" ;;
+    forks)
+        prog_lines "$norm" forks | grep -qx 'forks: 200 of 200 asked alive at once (none ended)' || why+=" '$(prog_lines "$norm" forks | head -n 1)';"
+        prog_lines "$norm" forks | grep -qx 'forks: released; 200 of 200 reaped with their own status' || why+=" '$(prog_lines "$norm" forks | sed -n 2p)';"
+        [ -z "$why" ] && row_pass "slots-forks $id: 200 children alive at once, every one reaped with its status" || row_fail "slots-forks $id:$why" ;;
+    reuse)
+        l=$(prog_lines "$norm" reuse | grep '^reuse: forks ')
+        printf '%s\n' "$l" | grep -Eqx 'reuse: forks 3200 in 32 rounds of 100 \(0 rounds short\), 3200 reaped with their own status, pids rising from [0-9]+ to [0-9]+' || why+=" '$l';"
+        l2=$(prog_lines "$norm" reuse | grep '^reuse: threads ')
+        [ "$l2" = 'reuse: threads 3200 in 32 rounds of 100 (0 rounds short), 3200 joined' ] || why+=" '$l2';"
+        [ -z "$why" ] && row_pass "slots-reuse $id: ${l#reuse: }; ${l2#reuse: }" || row_fail "slots-reuse $id:$why" ;;
+    wolf)
+        l=$(prog_lines "$norm" wolf | grep '^wolf: .* asked running sha256sum')
+        printf '%s\n' "$l" | grep -Eqx 'wolf: 100 of 100 asked running sha256sum at once \(none ended\), threads ([2-9]|[1-9][0-9]+) to [0-9]+ each, [0-9]+ in all' || why+=" '$l' (100 at once, two threads or more each);"
+        l2=$(prog_lines "$norm" wolf | grep '^wolf: .* digests')
+        [ "$l2" = "wolf: 100 digests, all the same: $(wolf_digest)  -" ] || why+=" '$l2' (100 digests, each $(wolf_digest));"
+        prog_lines "$norm" wolf | grep -qx 'wolf: 100 of 100 reaped with status 0' || why+=" not every one reaped with status 0;"
+        [ -z "$why" ] && row_pass "slots-wolf $id: ${l#wolf: }; every digest right" || row_fail "slots-wolf $id:$why" ;;
+    ptys)
+        l=$(prog_lines "$norm" ptys | grep '^ptys: .* asked')
+        printf '%s\n' "$l" | grep -Eqx 'ptys: 32 of 32 asked, each a session: 32 with a line through its cat, 32 with a shell and a child \([0-9]+ processes, [0-9]+ threads in them\)' || why+=" '$l';"
+        prog_lines "$norm" ptys | grep -qx 'ptys: 32 byes; 32 of 32 shells reaped with status 0' || why+=" '$(prog_lines "$norm" ptys | grep byes)';"
+        [ -z "$why" ] && row_pass "slots-ptys $id: ${l#ptys: }" || row_fail "slots-ptys $id:$why" ;;
+    switch)
+        prog_lines "$norm" switch | grep ' round ' | sed 's/^/  /' >&2
+        l=$(prog_lines "$norm" switch | grep '^switch: least cpu a yield: ')
+        set -- $(printf '%s\n' "$l" | sed -n -E 's/^switch: least cpu a yield: N=16 ([0-9]+) ns, N=64 ([0-9]+) ns, N=1000 ([0-9]+) ns$/\1 \2 \3/p')
+        if [ $# -ne 3 ]; then
+            why+=" '$l' (every N measured);"
+        elif [ "$3" -gt $(($1 * 2)) ]; then
+            why+=" a yield among 1,000 costs $3 ns, more than twice the 16's $1 ns;"
+        fi
+        [ -z "$why" ] && row_pass "slots-switch $id: ${l#switch: }" || row_fail "slots-switch $id:$why" ;;
+    herd)
+        l=$(prog_lines "$norm" herd | grep '^herd: W=' | sed 's/^herd: //' | paste -sd'|' -)
+        [ "$(prog_lines "$norm" herd | grep -c '^herd: W=')" = 3 ] || why+=" '$l' (three widths);"
+        [ -z "$why" ] && row_pass "slots-herd $id (measured): $l" || row_fail "slots-herd $id:$why" ;;
+    esac
+    # The machine.
+    why=
+    grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
+    grep -q '^PAX: init /bin/slotprobe ended with status 0; nothing left to run$' "$norm" || why+=" no 'PAX: init /bin/slotprobe ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+    if [ "$(quiet_of "$s")" = 0 ]; then
+        awk '/^user: frames free / { seen++; if ($4 != $10) bad=1 } END { exit seen < 1 || bad }' "$norm" || why+=" frames not all back ($(grep '^user: frames free ' "$norm" | tr '\n' '|'));"
+    fi
+    grep -q "^kernel: .* sha256 $digest, " "$norm" || why+=" the booted kernel is not the one built;"
+    [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+    local want=$(refusals_of "$s") pat cnt have
+    pat=${want%|*}; cnt=${want##*|}
+    have=$(grep -c 'refused: ' "$norm")
+    [ "$have" = "$cnt" ] || why+=" $have refusals, not $cnt ($(grep -o 'refused: .*' "$norm" | sort | uniq -c | head -n 5 | tr '\n' '|'));"
+    if [ -n "$pat" ] && [ "$have" -gt 0 ]; then
+        grep -o 'refused: .*' "$norm" | grep -Evx "$pat" > "$norm.odd" && why+=" a refusal not the row's: $(head -n 2 "$norm.odd" | tr '\n' '|');"
+    fi
+    [ -z "$why" ] && row_pass "slots-machine $id: init ended, kernel $digest${cnt:+, $have refusals as asked}; $(tail -n 1 "$log.verdict")" || row_fail "slots-machine $id:$why"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        elf=$(cat "$images/$tier/elf.path" 2>/dev/null)
+        [ -f "$elf" ] || { bad "$tier: no kernel in $images/$tier"; continue; }
+        digest=$(sha256_of "$elf")
+        for s in ${PAX_SLOTS_SESSIONS:-$SESSIONS}; do
+            id="$tier $leg $s"
+            iso=$images/$tier/$s.iso
+            log=$PAX_BUILD/mpx5-slots-$tier-$leg-$s.serial.log
+            rm -f "$log" "$log.verdict"
+            [ -f "$iso" ] || { row_fail "slots-machine $id: no image"; continue; }
+            hrc=0
+            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 2400 --qemu -m --qemu "$(memory_of "$s")" \
+                --elf "$elf" --marker 'halt|PANIC .*' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+            ran=$((ran + 1))
+            printf '%s %s %s memory=%s halt-status=%s accel=%s serial=%s iso=%s\n' "$tier" "$leg" "$s" "$(memory_of "$s")" "$hrc" \
+                "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+            norm=$log.norm; serial_norm "$log" > "$norm"
+            check_session "$s" "$norm" "$hrc" "$digest" "$id"
+        done
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-slots: PASS" || say "mpx5-slots: FAIL"
+exit "$fail"
