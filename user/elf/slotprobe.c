@@ -26,7 +26,9 @@
  *                              then end of file; every leader reaped
  *   slotprobe switch M         N processes yielding, N = 16, 64 and M,
  *                              three interleaved rounds: the children's
- *                              CPU time (getrusage) a yield
+ *                              CPU time (getrusage) a yield; and a yield
+ *                              with nobody else to run (no switch), this
+ *                              process's own CPU time a yield
  *   slotprobe herd M           a pipe ping-pong's round trip with W
  *                              processes parked in a pipe read, W = 0, 64
  *                              and M (measured: round trips for a second
@@ -632,10 +634,24 @@ static int yield_round(int n, long *cpu, long *wall) {
     return 0;
 }
 
+/* This process's own CPU time so far (getrusage RUSAGE_SELF), ns. */
+static long self_cpu_ns(void) {
+    struct rusage u;
+    getrusage(RUSAGE_SELF, &u);
+    return (u.ru_utime.tv_sec + u.ru_stime.tv_sec) * 1000000000L + (u.ru_utime.tv_usec + u.ru_stime.tv_usec) * 1000L;
+}
+
 static int switch_mode(int big) {
     int ns[3] = {16, 64, big};
     long best[3] = {-1, -1, -1};
+    long alone = -1;
     for (int round = 1; round <= 3; round++) {
+        /* A yield with nobody else to run: the call, and no switch. */
+        long c0 = self_cpu_ns();
+        for (int j = 0; j < SWITCH_TOTAL; j++) sched_yield();
+        long a = (self_cpu_ns() - c0) / SWITCH_TOTAL;
+        say("switch: round %d: alone: %ld ns cpu a yield\n", round, a);
+        if (alone < 0 || a < alone) alone = a;
         for (int j = 0; j < 3; j++) {
             long cpu = 0, wall = 0;
             if (yield_round(ns[j], &cpu, &wall) < 0) {
@@ -646,7 +662,7 @@ static int switch_mode(int big) {
             if (best[j] < 0 || cpu < best[j]) best[j] = cpu;
         }
     }
-    say("switch: least cpu a yield: N=16 %ld ns, N=64 %ld ns, N=%d %ld ns\n", best[0], best[1], big, best[2]);
+    say("switch: least cpu a yield: alone %ld ns, N=16 %ld ns, N=64 %ld ns, N=%d %ld ns\n", alone, best[0], best[1], big, best[2]);
     return 0;
 }
 
