@@ -4,15 +4,16 @@
 # One probe, user/elf/latprobe.c (tools/mklatprobe, static glibc), runs as
 # kmain_console's one program with `latency` on the command line (kernel/
 # latency's instrument, /proc/pax-latency) and measures each load in turn:
-# a 1 ms sleeper's lateness, a UDP echo over loopback and one through the
-# network device to this host (tests/mpx6-latency.d/echo-host.py, through
-# QEMU's user network), beside the load, for SECONDS each. Every line also
-# reaches this host as a datagram, so a boot with no COM1 reports too.
+# a 1 ms sleeper's lateness and a UDP echo over loopback, beside the load,
+# for SECONDS each; and this host pings the guest's echo through the network
+# device every 5 ms (tests/mpx6-latency.d/echo-host.py, through QEMU's user
+# network), as keystrokes over ssh would come. Every line also reaches this
+# host as a datagram, so a boot with no COM1 reports too.
 #
 #   tests/mpx6-latency [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                      [--tier native|release|both] [--accel auto|kvm|tcg]
 #                      [--mem MIB[,MIB…]] [--loads guard|all|'LOAD …']
-#                      [--seconds N] [--screen WxH] [--no-com1]
+#                      [--seconds N] [--screen WxH] [--no-com1] [--linux]
 #
 # --loads guard (the default) runs the rows' loads: idle, spin and the
 # guarded loads (tests/mpx6-latency.d/rows.py's GUARD); all runs every load
@@ -20,6 +21,11 @@
 # notes/px131-long-kernel-paths.md); or a list of latprobe's LOAD[:ARG].
 # --screen boots at that framebuffer mode, and --no-com1 with no serial port
 # (the installed machine's shape: every console byte drawn, none sent).
+# --linux also boots Linux at each memory size, the same probe and loads,
+# the comparison column (black box): the kernel PAX_LINUX_KERNEL (default
+# /run/current-system/kernel) with the modules of PAX_LINUX_MODULES (the
+# kernel's lib/modules/<version>) its virtio network needs, on q35 with one
+# CPU under the same accelerator, user/elf/latinit.c as its init.
 #
 # Assertions, per tier, firmware and memory:
 #   L0 build: kmain_console built; latprobe and latbig static; the image.
@@ -39,7 +45,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 D=$here/mpx6-latency.d
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=native noboot=0 accel=auto mems=1024 loads=guard seconds=3 screen= com1=1
+images= legs=both tiers=native noboot=0 accel=auto mems=1024 loads=guard seconds=3 screen= com1=1 linux=0
 usage="usage: tests/mpx6-latency [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--mem MIB[,MIB...]] [--loads guard|all|'LOAD ...'] [--seconds N] [--screen WxH] [--no-com1]"
 while [ $# -gt 0 ]; do
     case $1 in
@@ -53,6 +59,7 @@ while [ $# -gt 0 ]; do
         --seconds)  seconds=$2; shift 2 ;;
         --screen)   screen=$2; shift 2 ;;
         --no-com1)  com1=0; shift ;;
+        --linux)    linux=1; shift ;;
         *)          die "$usage" ;;
     esac
 done
@@ -127,9 +134,10 @@ for tier in $tiers; do
             b=$images/$tier/$name
             mkdir -p "$b"
             port=$(free_port)
+            fwd=$(free_port)
             report=$b/report.txt
             : > "$report"
-            python3 -I "$D/echo-host.py" "$port" "$report" > "$b/echo-host.log" 2>&1 &
+            python3 -I "$D/echo-host.py" "$port" "$fwd" "$report" > "$b/echo-host.log" 2>&1 &
             epid=$!
             w=0
             while [ "$w" -lt 50 ] && ! grep -q '^echo-host: ' "$b/echo-host.log" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
@@ -139,7 +147,7 @@ for tier in $tiers; do
                 continue
             fi
             # shellcheck disable=SC2046
-            printf '/bin/latprobe -d %s -n 10.0.2.2:%s -r 10.0.2.2:%s %s\n' "$seconds" "$port" "$port" "$(loads_for "$mem")" > "$b/pax-run"
+            printf '/bin/latprobe -d %s -e 7 -r 10.0.2.2:%s %s\n' "$seconds" "$port" "$(loads_for "$mem")" > "$b/pax-run"
             "$PAX_ROOT/tools/mkinitramfs" "$b/lat.cpio" "/bin/latprobe=$images/bin/latprobe:755" "/bin/latbig=$images/bin/latbig:755" \
                 "/etc/pax-run=$b/pax-run:644" /tmp/:1777 > "$b/initramfs.txt" || { bad "L0 $name: tools/mkinitramfs"; kill "$epid"; wait "$epid" 2>/dev/null; continue; }
             cp "$PAX_ROOT/boot/limine-initramfs.conf" "$b/limine.conf"
@@ -151,7 +159,7 @@ for tier in $tiers; do
             budget=$((nload * (seconds + 12) + 240))
             scr=(); [ -z "$screen" ] && scr=(--no-screen)
             say "boot $name: $nload loads, port $port, budget ${budget}s$([ "$com1" = 0 ] && echo ', no COM1')"
-            net=(-m "${mem}M" -netdev "user,id=n0,ipv6=off" -device "virtio-net-pci,netdev=n0")
+            net=(-m "${mem}M" -netdev "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$fwd-:7" -device "virtio-net-pci,netdev=n0")
             if [ "$com1" = 1 ]; then
                 q=(); for a in "${net[@]}"; do q+=(--qemu "$a"); done
                 "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$b/serial.log" ${scr[@]+"${scr[@]}"} --timeout "$budget" --accel "$accel" \
@@ -177,6 +185,62 @@ for tier in $tiers; do
     done
 done
 
-python3 -I "$D/rows.py" --accel "$accel" --images "$images" --com1 "$com1" $(for t in $tiers; do for l in $legs; do for m in $mems; do printf '%s ' "$t-$l-$m"; done; done; done) || fail=1
+# The comparison column: Linux, one boot a memory size.
+if [ "$linux" = 1 ]; then
+    lk=${PAX_LINUX_KERNEL:-/run/current-system/kernel}
+    lm=${PAX_LINUX_MODULES:-}
+    for mem in $mems; do
+        name=linux-direct-$mem
+        b=$images/linux/$name
+        mkdir -p "$b/mods"
+        why=
+        [ -r "$lk" ] || why+=" no kernel $lk;"
+        : > "$b/mods/order"
+        files=(/init="$images/bin/latinit":755 /bin/latprobe="$images/bin/latprobe":755 /bin/latbig="$images/bin/latbig":755
+               /proc/:555 /tmp/:1777 /dev/:755 /lib/modules/order="$b/mods/order":644)
+        # virtio's network as modules where the kernel has them so, in modules.dep's order
+        for m in virtio virtio_ring virtio_pci_legacy_dev virtio_pci_modern_dev virtio_pci failover net_failover virtio_net; do
+            f=$(command grep -oE "^[^:]*/$m\.ko(\.xz|\.zst|\.gz)?:" "$lm/modules.dep" 2>/dev/null | head -n 1 | tr -d :)
+            [ -n "$f" ] || continue
+            case $f in
+                *.xz) xz -d -c "$lm/$f" > "$b/mods/$m.ko" ;;
+                *.zst) zstd -q -d -c "$lm/$f" > "$b/mods/$m.ko" ;;
+                *.gz) gzip -d -c "$lm/$f" > "$b/mods/$m.ko" ;;
+                *) cp "$lm/$f" "$b/mods/$m.ko" ;;
+            esac || why+=" module $m;"
+            echo "$m" >> "$b/mods/order"
+            files+=(/lib/modules/$m.ko="$b/mods/$m.ko":644)
+        done
+        port=$(free_port); fwd=$(free_port)
+        report=$b/report.txt
+        : > "$report"
+        loadlist=$(loads_for "$mem")
+        printf '%s
+' "-d $seconds -e 7 -r 10.0.2.2:$port $loadlist" > "$b/latprobe-args"
+        printf '/bin/latprobe -d %s -e 7 -r 10.0.2.2:%s %s
+' "$seconds" "$port" "$loadlist" > "$b/pax-run"
+        files+=(/etc/latprobe-args="$b/latprobe-args":644)
+        "$PAX_ROOT/tools/mkinitramfs" "$b/linux.cpio" "${files[@]}" > "$b/initramfs.txt" || why+=" tools/mkinitramfs;"
+        if [ -n "$why" ]; then bad "L1 $name:$why"; continue; fi
+        python3 -I "$D/echo-host.py" "$port" "$fwd" "$report" > "$b/echo-host.log" 2>&1 &
+        epid=$!
+        w=0
+        while [ "$w" -lt 50 ] && ! grep -q '^echo-host: ' "$b/echo-host.log" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
+        nload=$(wc -w < "$b/pax-run"); nload=$((nload - 7))
+        acc=(-accel tcg -cpu max); [ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
+        say "boot $name: $nload loads, port $port, Linux $(basename "$(readlink -f "$lk")")"
+        timeout $((nload * (seconds + 12) + 240)) qemu-system-x86_64 -machine q35 "${acc[@]}" -smp 1 -m "${mem}M" -nographic -no-reboot \
+            -kernel "$lk" -initrd "$b/linux.cpio" -append "console=ttyS0 quiet loglevel=3 panic=-1" \
+            -netdev "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$fwd-:7" -device "virtio-net-pci,netdev=n0" \
+            > "$b/serial.log" 2>&1 < /dev/null
+        echo $? > "$b/rc"
+        sleep 0.5
+        kill "$epid" 2>/dev/null; wait "$epid" 2>/dev/null
+        printf 'linux direct %s %s qemu=%s report=%s lines=%s\n' "$mem" "$accel" "$(cat "$b/rc")" "$(sha256_of "$report")" "$(grep -c '^latprobe ' "$report")" >> "$runs"
+    done
+fi
+
+python3 -I "$D/rows.py" --accel "$accel" --images "$images" --com1 "$com1" $(for t in $tiers; do for l in $legs; do for m in $mems; do printf '%s ' "$t-$l-$m"; done; done; done) \
+    $([ "$linux" = 1 ] && for m in $mems; do printf 'linux-direct-%s ' "$m"; done) || fail=1
 [ "$fail" = 0 ] && say "mpx6-latency: PASS" || say "mpx6-latency: FAIL"
 exit "$fail"
