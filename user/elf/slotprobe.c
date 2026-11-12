@@ -385,6 +385,7 @@ static int wolf_mode(int n) {
             dup2(in[i][0], 0);
             dup2(out[1], 1);
             for (int fd = 3; fd < 2 * n + 8; fd++) close(fd);
+            signal(SIGPIPE, SIG_DFL);
             char *argv[] = {"sha256sum", 0};
             char *envp[] = {"PATH=/bin", 0};
             execve("/bin/sha256sum", argv, envp);
@@ -526,6 +527,7 @@ static int ptys_mode(int n) {
             dup2(s, 1);
             dup2(s, 2);
             for (int fd = 3; fd < 3 * n + 8; fd++) close(fd);
+            signal(SIGPIPE, SIG_DFL);
             char cmd[64];
             snprintf(cmd, sizeof cmd, "cat; echo bye%d", i);
             char *argv[] = {"sh", "-c", cmd, 0};
@@ -675,6 +677,15 @@ static int herd_mode(int big) {
         }
         close(a[0]);
         close(b[1]);
+        if (echo < 0) {
+            close(a[1]);
+            close(b[0]);
+            close(park[1]);
+            reap_kids(n);
+            close(park[0]);
+            say("herd: W=%d parked (%d made): the echo's fork answered %s\n", w, n, ename(errno));
+            continue;
+        }
         int trips = w >= 500 ? 40 : 400;
         long t0 = now_ns();
         int done = 0;
@@ -701,6 +712,7 @@ int main(int argc, char **argv) {
     int a = argc > 2 ? atoi(argv[2]) : 0;
     int b = argc > 3 ? atoi(argv[3]) : 0;
     setvbuf(stdout, 0, _IOLBF, 0);
+    signal(SIGPIPE, SIG_IGN); /* a reader that died is an answer (EPIPE), not this probe's end */
     if (strcmp(m, "threads") == 0) return threads_mode();
     if (strcmp(m, "forks") == 0) return forks_mode(a, 0);
     if (strcmp(m, "fill") == 0) return forks_mode(1 << 30, 1);
