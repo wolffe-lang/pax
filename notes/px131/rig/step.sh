@@ -7,8 +7,10 @@
 #                  tests/NAME ARGS in the px75-ubuntu image with KVM (NAME one of the suites this
 #                  lane's change can reach: mpx6-latency, mpx2-interrupts, mpx2-sched, mpx3-user,
 #                  mpx3-maps, mpx3-tree, mpx5-trace, mpx5-users, mpx5-rates, mpx6-part,
-#                  mpx3-boreutils, mpx4-udp, mpx3-console)
+#                  mpx3-boreutils, mpx4-udp, mpx3-console, mpx6-usbcheck, mpx6-metal-power,
+#                  mpx6-metal-serial)
 #   ci-plan        tests/ci-plan (the tiers map, the wiring of the new suite's job)
+#   kernels TIER K…  tools/build-kernel for kernel/K.lu at TIER (native, release), each
 # The suites with a Linux side reach a container engine through engine-ns (lib.sh's `ctr sys`, px123's).
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
 # column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is named in its
@@ -29,10 +31,20 @@ case $what in
         echo "preflight: kvm, engine and image looked at; the take's CPUs $CPUS"
         exit 0 ;;
     ci-plan) ctr 0 localhost/px75-ubuntu:2 python3 -I tests/ci-plan ;;
+    kernels)
+        # tools/build-kernel for each named kernel at a tier (native or release): the link and its
+        # assertions, for kernels no suite of this rig builds
+        tier=${1:?a tier}; shift
+        lift ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'t=$1; shift; r=(); [ "$t" = release ] && r=(--release); rc=0
+            for k in "$@"; do
+                o=$PAX_BUILD/kernels-$t/$k; mkdir -p "$o"
+                if tools/build-kernel ${r[@]+"${r[@]}"} --src "kernel/$k.lu" "$o" > "$o.txt" 2>&1; then echo "kernels: ok $t $k"
+                else echo "kernels: FAIL $t $k"; tail -n 5 "$o.txt"; rc=1; fi
+            done; exit $rc' x "$tier" "$@" ;;
     suite)
         name=${1:?a suite}; shift
         case $name in
-            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console) ;;
+            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console|mpx6-usbcheck|mpx6-metal-power|mpx6-metal-serial) ;;
             *) echo "step.sh: no suite $name in this rig"; exit 2 ;;
         esac
         # the suites with a Linux side run with engine-ns (sys); the guard needs only KVM
