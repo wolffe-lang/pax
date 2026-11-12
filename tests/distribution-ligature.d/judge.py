@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""tests/distribution-ligature.d/judge.py SMALL.log BIG.log SMALL_MIB BIG_MIB HALT_SMALL HALT_BIG
+"""tests/distribution-ligature.d/judge.py SERIAL.log MIB HALT
 
-The rows of tests/distribution-ligature, from the two typed sessions' serial logs (session.sh's `DLIG `
-lines, ldtime's measurements among them). Prints `PASS <row>: …` or `FAIL <row>: …` at column 0 for each,
-a MEASURE line per measured link, and exits 1 if any row failed. HALT_* are qemu-halt's exit codes."""
+The rows of tests/distribution-ligature, from the typed session's serial log (session.sh's `DLIG ` lines,
+ldtime's measurements among them). Prints `PASS <row> — …` or `FAIL <row> — …` at column 0 for each, a
+MEASURE line per measured link, and exits 1 if any row failed. HALT is qemu-halt's exit code."""
 import re
 import sys
 from pathlib import Path
@@ -58,10 +58,10 @@ def first(d, prefix):
 
 
 def main():
-    small_log, big_log, small_mib, big_mib, halt_small, halt_big = sys.argv[1:7]
-    s_text, b_text = lines(small_log), lines(big_log)
-    s, b = dlig(s_text), dlig(b_text)
-    sb, sr, bb, br = builds(s), runs(s), builds(b), runs(b)
+    log, mib, halt = sys.argv[1:4]
+    s_text = lines(log)
+    s = dlig(s_text)
+    sb, sr = builds(s), runs(s)
 
     v = first(s, 'version ')
     rel = first(s, 'release ')
@@ -104,48 +104,30 @@ def main():
         and any('selected linker' in w for w in rw) and any('no-sysroot' in w for w in rw),
         f'{r!r}; {rw[:3]!r}')
 
-    lig, lld = sb.get(('pelt', 'lig')), sb.get(('pelt', 'lld'))
-    pw = why(s, 'pelt-lig')
-    if lig is not None and lig[0] == 0:
-        row('L7-pelt-at-small', False, f'ligature linked pelt at {small_mib} MiB: ligature#35 looks fixed, so this '
-            'expected refusal must become a link row (and the default can be reconsidered)')
-    else:
-        # the expected refusal is ligature's own, for memory, not a linker that never ran
-        row('L7-pelt-at-small', lig is not None and lig[1] is False and any('selected linker' in w for w in pw)
-            and any('memory allocation' in w for w in pw) and lld == (0, True) and sr.get(('pelt', 'lld')) == PELT,
-            f'at {small_mib} MiB ligature refuses by name, no output, no fallback (ligature#35): {pw[:2]!r}; '
-            f'lld links pelt and it prints {sr.get(("pelt", "lld"))!r}')
-
-    for key, want in (('pelt', PELT), ('den', None)):
-        got = (br.get((key, 'lig')), br.get((key, 'lld')))
-        row(f'L8-{key}-at-big', bb.get((key, 'lig')) == (0, True) and bb.get((key, 'lld')) == (0, True)
+    # pelt and den, the largest program the image's compiler builds on the live image, by both linkers on
+    # the tested guest (ligature#35, fixed by ligature#36: until then ligature's pelt link stopped there)
+    for n, key, want in (('L7', 'pelt', PELT), ('L8', 'den', None)):
+        got = (sr.get((key, 'lig')), sr.get((key, 'lld')))
+        row(f'{n}-{key}', sb.get((key, 'lig')) == (0, True) and sb.get((key, 'lld')) == (0, True)
             and got[0] is not None and got[0] == got[1] and (want is None or got[0] == want),
-            f'{key} at {big_mib} MiB: ligature {bb.get((key, "lig"))}, lld {bb.get((key, "lld"))}; {got[0]!r} and {got[1]!r}')
-
-    row('L8-den-by-lld-at-small', sb.get(('den', 'lld')) == (0, True)
-        and sr.get(('den', 'lld')) is not None and sr.get(('den', 'lld')) == br.get(('den', 'lld')),
-        f'den at {small_mib} MiB by lld: {sb.get(("den", "lld"))}, {sr.get(("den", "lld"))!r}')
+            f'{key} at {mib} MiB: ligature {sb.get((key, "lig"))}, lld {sb.get((key, "lld"))}; {got[0]!r} and {got[1]!r}; '
+            f'ligature\'s why-lines {why(s, key + "-lig")[:2]!r}')
 
     meas = []
-    for text, mib in ((s, small_mib), (b, big_mib)):
-        for l in text:
-            m = re.match(r'ldtime (\S+) wall_ms=(\d+) user_ms=(\d+) sys_ms=(\d+) maxrss_kib=(\d+) status=(\d+)$', l)
-            if m:
-                meas.append((mib, m[1], int(m[2]), int(m[3]) + int(m[4]), int(m[5]), int(m[6])))
-    for mib, label, wall, cpu, rss, st in meas:
+    for l in s:
+        m = re.match(r'ldtime (\S+) wall_ms=(\d+) user_ms=(\d+) sys_ms=(\d+) maxrss_kib=(\d+) status=(\d+)$', l)
+        if m:
+            meas.append((m[1], int(m[2]), int(m[3]) + int(m[4]), int(m[5]), int(m[6])))
+    for label, wall, cpu, rss, st in meas:
         print(f'MEASURE guest={mib}MiB {label} wall_ms={wall} cpu_ms={cpu} peak_mib={rss / 1024:.0f} status={st}')
-    want = {(small_mib, f'{n}-{l}') for n in ('hello', 'netproc', 'ligature') for l in ('lig', 'lld')} | \
-           {(big_mib, f'{n}-{l}') for n in ('pelt', 'den') for l in ('lig', 'lld')} | {(small_mib, 'pelt-lld'), (small_mib, 'den-lld')}
-    have = {(mib, label) for mib, label, wall, cpu, rss, st in meas if rss > 0 and st == 0}
+    want = {f'{n}-{l}' for n in ('pelt', 'den', 'hello', 'netproc', 'ligature') for l in ('lig', 'lld')}
+    have = {label for label, wall, cpu, rss, st in meas if rss > 0 and st == 0}
     row('L9-measured', want <= have, f'{len(meas)} links measured (wait4: wall, CPU, peak); missing or empty: {sorted(want - have)}')
 
-    clean = []
-    for name, text, halt in (('small', s_text, halt_small), ('big', b_text, halt_big)):
-        joined = '\n'.join(text)
-        ok = halt == '0' and 'PAX: init /bin/env ended with status 0; nothing left to run' in joined \
-            and not re.search(r'^PANIC ', joined, re.M) and f'end {name}' in dlig(text)
-        clean.append(ok)
-        row(f'L10-clean-{name}', ok, f'halt={halt}, the session reached its end, init ended with status 0, no panic')
+    joined = '\n'.join(s_text)
+    row('L10-clean', halt == '0' and 'PAX: init /bin/env ended with status 0; nothing left to run' in joined
+        and not re.search(r'^PANIC ', joined, re.M) and 'end session' in s,
+        f'halt={halt}, the session reached its end, init ended with status 0, no panic')
     sys.exit(1 if failed else 0)
 
 
