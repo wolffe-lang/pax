@@ -209,6 +209,7 @@ use fpu
 use frames
 use gdt
 use heap
+use kmsg
 use log
 use paging
 use panic
@@ -508,8 +509,14 @@ fn dequeue() -> u64 {
     s + 1
 }
 
-/// Make every sleeper whose tick has come ready, in slot order.
+/// Make every sleeper whose tick has come ready, in slot order. px130:
+/// and, when a kernel line came while a reader of the log waited
+/// (kernel/kmsg's `take_due`), every thread waiting on a pipe, which
+/// runs its call again (a reader of /dev/kmsg or syslog(2) among them).
 fn wake_sleepers() {
+    if kmsg.take_due() {
+        wake_pipes()
+    }
     let now = timer.ticks()
     var s: u64 = FIRST
     while s < SLOTS {
