@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# tests/mpx5-init — px124 (pax#352): an installed PAX's pid 1 stays. /bin/init
+# (user/init) runs the boot's duties once, then starts /bin/login in a session
+# of its own on the console, again after each session ends: `exit` is a
+# logout, the session's leftovers are hung up, a process that left the
+# session outlives it, and each account has a runtime directory on /run's
+# tmpfs (notes/px124-pid-1.md).
+#
+#   tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                   [--tier native|release|both] [--accel auto|kvm|tcg]
+#
+# P0 builds the image's tree (build/mpx5-init/root, files.txt as
+# tools/mkinitramfs' arguments): kmain_console, the kernel every shipped image
+# boots, with `quiet`; the installed system's run list, `/bin/login` (the
+# installer's text), with /bin/init beside it (tools/mkinit), so login as pid 1
+# execs init as on an installed system; login and sudo (tools/mkauth; sudo
+# set-user-ID root, its shipped policy), pelt as /bin/sh, boreutils' cat cut id
+# kill ls sleep stat stty touch tr, reboot and poweroff (tools/mkdiskprobe),
+# user/elf/detach.c (a process that calls setsid and lives on); an
+# /etc/passwd with root, pax (in group sudo), bob and lobo (/bin/false);
+# user/shrc as /etc/shrc without its lope line (no lope in the tree: named);
+# one boot hook of the suite's own, /etc/pax-boot.d/svc, which leaves a
+# process running in pid 1's session (as burrowd's loop is) and writes its pid
+# to /run/svc.pid. mkshadow (tools/mkauth's) beside the tree, never in it. A
+# piece the tree cannot build is named at P0 and left out, so the rows that
+# need it fail by name.
+#
+# The rows (tests/mpx5-init.d/rows.py's header has each), on every tier and
+# firmware asked: I1-I12 on the image booted from an ISO (the tree in memory),
+# I13 with `/` on an ext2 disk (root=/dev/vda), two boots of one disk. The
+# passwords are made at run time (Python's secrets, hashed by mkshadow on its
+# standard input), never written to the tree, an argument vector, a log or a
+# record.
+#
+# The UEFI leg needs OVMF (PAX_REQUIRE_UEFI=1: a failure without it). I13
+# needs mke2fs and debugfs on the host: SKIPPED LOUDLY without them. Exit 0
+# when every row held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+images= legs=both tiers=both noboot=0 accel=auto
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "usage: tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+
+BORE="cat cut id kill ls sleep stat stty touch tr"
+work=$PAX_BUILD/mpx5-init
+fail=0
+need python3 readelf
+
+static_ok() {
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf" gcc
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc/pax-boot.d" "$r/etc/sudoers.d" "$work/tools"
+    why= missing=
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" 2>&1 || why+=" tools/mkpelt;"
+    cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null && cp "$work/pelt/pelt" "$r/bin/sh" || why+=" no pelt;"
+    # shellcheck disable=SC2086 # the utilities' names, one word each
+    "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" 2>&1 || why+=" tools/mkboreutils;"
+    for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
+    "$PAX_ROOT/tools/mkauth" "$work/auth" login sudo mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
+    for p in login sudo; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"
+    # /bin/init, as the images carry it; a tree from before px124 has no tools/mkinit, and then
+    # the image boots login as pid 1 (the rows say so by name).
+    if [ -x "$PAX_ROOT/tools/mkinit" ]; then
+        "$PAX_ROOT/tools/mkinit" "$work/init" > "$work/init.txt" 2>&1 && cp "$work/init/init" "$r/bin/init" || why+=" tools/mkinit;"
+    else
+        missing+=" /bin/init (no tools/mkinit in this tree)"
+    fi
+    "$PAX_ROOT/tools/mkdiskprobe" "$work/diskprobe" > "$work/diskprobe.txt" 2>&1 || why+=" tools/mkdiskprobe;"
+    cp "$work/diskprobe/reboot" "$r/bin/reboot" 2>/dev/null && cp "$work/diskprobe/reboot" "$r/bin/poweroff" || why+=" no reboot;"
+    gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$r/bin/detach" "$PAX_ROOT/user/elf/detach.c" > "$work/detach.txt" 2>&1 || why+=" gcc: detach.c;"
+    cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
+    # /etc/shrc as the images ship it (user/shrc: `logout` among it), but for lope's hook: no
+    # lope in this tree, and its `eval` would print an error at every login.
+    grep -v 'lope init pelt' "$PAX_ROOT/user/shrc" > "$r/etc/shrc" || why+=" no user/shrc;"
+    cat > "$r/etc/pax-boot.d/svc" <<'HOOK'
+#!/bin/pelt
+# tests/mpx5-init's boot hook: a process left running in pid 1's session, as
+# burrowd's loop is; I11 reads it across every logout.
+/bin/sleep 100000 < /dev/null > /dev/null 2>&1 &
+echo $! > /run/svc.pid
+echo "svc: started"
+HOOK
+    chmod 755 "$r/etc/pax-boot.d/svc"
+    printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nbob:x:1001:1001:bob:/home/bob:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$r/etc/passwd"
+    printf 'root:x:0:\nsudo:x:27:pax\npax:x:1000:\nbob:x:1001:\nlobo:x:990:\n' > "$r/etc/group"
+    printf '/bin/login\n' > "$r/etc/pax-run"
+    : > "$work/files.txt"
+    printf '%s\n' /tmp/:1777 /root/:700 /run/:755 /home/:755 /home/pax/:750:1000:1000 /home/bob/:750:1001:1001 \
+        /srv/:755 /srv/lobo/:750:990:990 /var/:755 /var/log/:755 /var/run/:755 /etc/sudoers.d/:755 >> "$work/files.txt"
+    (cd "$r" && find . -mindepth 1 -type f | sort) | while IFS= read -r f; do
+        f=${f#./}
+        m=644; [ -x "$r/$f" ] && m=755
+        case $f in bin/sudo) m=4755 ;; etc/sudoers) m=440 ;; esac
+        printf '/%s=%s:%s\n' "$f" "$r/$f" "$m"
+    done >> "$work/files.txt"
+    for f in "$r"/bin/*; do
+        case $(head -c 2 "$f") in '#!') say "  script: ${f#"$r"/} $(sha256_of "$f")"; continue ;; esac
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    git -C "$PAX_ROOT" rev-parse HEAD > "$work/tree.commit" 2>/dev/null || true
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            [ "$elf" = "$work/$tier/kmain_console.elf" ] || cp "$elf" "$work/$tier/kmain_console.elf"
+            say "built $tier kmain_console: elf $(sha256_of "$elf"), $(wc -c < "$elf" | tr -d ' ') bytes"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    printf '%s\n' "${missing# }" > "$work/missing.txt"
+    [ -z "$missing" ] || say "P0 the tree builds no$missing: left out of the image; the rows that need them fail by name"
+    if [ -n "$why" ]; then
+        say "FAIL P0 build:$why"
+        exit 1
+    fi
+    say "P0 PASS build: kmain_console, the image's programs static, the image's tree (build/mpx5-init/files.txt)"
+    images=$work
+fi
+[ "$noboot" = 1 ] && exit 0
+
+out=$PAX_BUILD/mpx5-init-runs
+mkdir -p "$out"
+ran=0
+for tier in $tiers; do
+    elf=$images/$tier/kmain_console.elf
+    [ -f "$elf" ] || { say "FAIL P1 $tier: no $elf"; fail=1; continue; }
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf 2>/dev/null)" ]; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then say "FAIL $tier uefi: no OVMF"; fail=1; else say "SKIPPED LOUDLY $tier uefi: no OVMF"; fi
+            continue
+        fi
+        say "boots: $tier $leg"
+        rc=0
+        python3 -I "$here/mpx5-init.d/rows.py" --images "$images" --elf "$elf" --tier "$tier" --leg "$leg" \
+            --accel "$accel" --out "$out/$tier-$leg" || rc=$?
+        [ "$rc" = 0 ] || fail=1
+        ran=$((ran + 1))
+    done
+done
+say "mpx5-init: $ran legs; $([ "$fail" = 0 ] && echo PASS || echo FAIL)"
+exit $fail
