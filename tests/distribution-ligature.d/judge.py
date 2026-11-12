@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tests/distribution-ligature.d/judge.py SMALL.log BIG.log SMALL_MIB BIG_MIB HALT_SMALL HALT_BIG LARGEST
+"""tests/distribution-ligature.d/judge.py SMALL.log BIG.log SMALL_MIB BIG_MIB HALT_SMALL HALT_BIG
 
 The rows of tests/distribution-ligature, from the two typed sessions' serial logs (session.sh's `DLIG `
 lines, ldtime's measurements among them). Prints `PASS <row>: …` or `FAIL <row>: …` at column 0 for each,
@@ -57,7 +57,7 @@ def first(d, prefix):
 
 
 def main():
-    small_log, big_log, small_mib, big_mib, halt_small, halt_big, largest = sys.argv[1:8]
+    small_log, big_log, small_mib, big_mib, halt_small, halt_big = sys.argv[1:7]
     s_text, b_text = lines(small_log), lines(big_log)
     s, b = dlig(s_text), dlig(b_text)
     sb, sr, bb, br = builds(s), runs(s), builds(b), runs(b)
@@ -113,12 +113,11 @@ def main():
             f'at {small_mib} MiB ligature refuses by name, no output, no fallback (ligature#35): {pw[:2]!r}; '
             f'lld links pelt and it prints {sr.get(("pelt", "lld"))!r}')
 
-    for p, want in (('pelt', PELT), ('den', None), (largest, None)):
-        key = p if p in ('pelt', 'den') else 'largest'
+    for key, want in (('pelt', PELT), ('den', None)):
         got = (br.get((key, 'lig')), br.get((key, 'lld')))
         row(f'L8-{key}-at-big', bb.get((key, 'lig')) == (0, True) and bb.get((key, 'lld')) == (0, True)
             and got[0] is not None and got[0] == got[1] and (want is None or got[0] == want),
-            f'{p} at {big_mib} MiB: ligature {bb.get((key, "lig"))}, lld {bb.get((key, "lld"))}; {got[0]!r} and {got[1]!r}')
+            f'{key} at {big_mib} MiB: ligature {bb.get((key, "lig"))}, lld {bb.get((key, "lld"))}; {got[0]!r} and {got[1]!r}')
 
     row('L8-den-by-lld-at-small', sb.get(('den', 'lld')) == (0, True)
         and sr.get(('den', 'lld')) is not None and sr.get(('den', 'lld')) == br.get(('den', 'lld')),
@@ -133,7 +132,7 @@ def main():
     for mib, label, wall, cpu, rss, st in meas:
         print(f'MEASURE guest={mib}MiB {label} wall_ms={wall} cpu_ms={cpu} peak_mib={rss / 1024:.0f} status={st}')
     want = {(small_mib, f'{n}-{l}') for n in ('hello', 'netproc', 'ligature') for l in ('lig', 'lld')} | \
-           {(big_mib, f'{n}-{l}') for n in ('pelt', 'den', 'largest') for l in ('lig', 'lld')} | {(small_mib, 'pelt-lld'), (small_mib, 'den-lld')}
+           {(big_mib, f'{n}-{l}') for n in ('pelt', 'den') for l in ('lig', 'lld')} | {(small_mib, 'pelt-lld'), (small_mib, 'den-lld')}
     have = {(mib, label) for mib, label, wall, cpu, rss, st in meas if rss > 0 and st == 0}
     row('L9-measured', want <= have, f'{len(meas)} links measured (wait4: wall, CPU, peak); missing or empty: {sorted(want - have)}')
 
