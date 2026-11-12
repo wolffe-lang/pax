@@ -732,15 +732,17 @@ A program ligature links behaves as lld's link of it does. ligature's link is de
 give the same bytes. The binary is larger, because it carries ligature's provenance manifest. ligature does
 not yet fit everywhere lld does:
 
-- **Memory.** A pelt-sized program (about 30,000 lines) needs about 750 MiB for its link. The 2 GiB guest the dev
-  image is tested with does not have that much to spare, so there ligature stops with `memory allocation of …
-  failed`. `wolf build` then fails, naming the linker, and no program is written. Nothing falls back to lld:
-  run the build again with `WOLF_LD=cc`. With 2560 MiB of guest memory, pelt links with ligature
-  ([ligature#35](https://github.com/wolffe-lang/ligature/issues/35)).
-- **Time.** A link takes ligature about 10 s, where lld takes a second.
+- **Memory.** On PAX a link by ligature peaks at about 800 MiB for hello and about 940 MiB for pelt (about 30,000
+  lines). lld's peak is about 125 MiB. The 2 GiB guest the dev image is tested with keeps the live image's files
+  in memory, so it does not have that much to spare for pelt. There ligature stops with `memory allocation of …
+  failed`, `wolf build` fails naming the linker, and no program is written. Nothing falls back to lld: run the
+  build again with `WOLF_LD=cc`. ligature links pelt from a 2560 MiB guest and den (about 38,000 lines) from 3072
+  MiB ([ligature#35](https://github.com/wolffe-lang/ligature/issues/35)).
+- **Time.** A link takes ligature 12 to 17 s on that guest, where lld takes under a tenth of a second.
 
 This is why lld stays the default. `tests/distribution-ligature` holds the image to both linkers. Every row
-links with each linker, runs the program, and measures the link with the kernel's own `wait4` usage.
+links with each linker, runs the program, and measures the link with the kernel's own `wait4` usage. The pelt
+row at 2 GiB expects ligature's refusal, and it fails, saying so, the day ligature links pelt there.
 
 `wolf lsp`, the compiler's language server, runs on PAX unchanged: it speaks the Language Server Protocol on its
 standard input and output, so an editor starts it as a child on pipes. `tests/mpx5-lsp` starts it that way from a
