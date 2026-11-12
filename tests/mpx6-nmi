@@ -65,7 +65,10 @@ for at in $n1 $n2; do
     n=$(nm "$elf" | grep -c -E " _W$(printf '%s' "$at" | sed 's/\./\\./g')\\\$[0-9a-f]+$" || true)
     [ "$n" = 1 ] || missing="$missing $at($n)"
 done
-[ -z "$missing" ] || die "FAIL N0 $tier: injection points that are not one symbol in $elf:$missing"
+if [ -n "$missing" ]; then
+    echo "FAIL N0 $tier: injection points that are not one symbol in $elf:$missing"
+    exit 1
+fi
 echo "PASS N0 $tier: every injection point is one symbol in the kernel ($(printf '%s\n' $n1 $n2 | sort -u | wc -l | tr -d ' ') points)"
 row() { # firmware kind function expect
     python3 -I "$PAX_ROOT/tests/mpx6-nmi.d/inject.py" --image "$work/nmi.iso" --elf "$elf" \
