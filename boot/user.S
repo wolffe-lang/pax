@@ -36,7 +36,9 @@
                          SWAPGS and a per-CPU area.
    pax_enter_user(rip, rsp)
                          a kernel thread's way into ring 3, never
-                         returning: CLI, then on the current stack the
+                         returning: CLI (px131: and kernel/latency's
+                         interval closed, when it is on), then on the
+                         current stack the
                          frame IRETQ pops for a change to CPL 3 — SS 0x1b,
                          RSP, RFLAGS 0x202 (IF and the always-one bit;
                          IOPL 0, so CLI, HLT, IN and OUT fault in ring
@@ -121,6 +123,16 @@ pax_syscall_entry:
         .type pax_enter_user, @function
 pax_enter_user:
         cli
+        testq   $1, pax_lat(%rip)       /* px131: ring 3 runs with IF set: */
+        jz      1f                      /* kernel/latency's interval closes */
+        pushq   %rdi
+        pushq   %rsi
+        pushq   %rbx                    /* %rsp 16-aligned for the call */
+        call    pax_lat_close
+        popq    %rbx
+        popq    %rsi
+        popq    %rdi
+1:
         pushq   $0x1b                   /* SS: user data, RPL 3 */
         pushq   %rsi                    /* RSP */
         pushq   $0x202                  /* RFLAGS: IF */
