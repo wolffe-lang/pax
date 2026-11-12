@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A terminal over ssh (px123).** burrow moves to 7aa182f (burrow#24 and
+  burrow#26): `ssh host` from a terminal gives the login shell on a
+  pseudo-terminal of its own,
+  with pelt's prompt and line editing, job control, the window size and its
+  changes, and a bare `sudo` asking on that session; a command with no terminal
+  runs in a session of its own with none. The boot hook now starts burrowd with
+  SIGINT and SIGQUIT at their defaults: started from an asynchronous list in a
+  shell without job control it had both ignored (POSIX XCU 2.11), and every
+  program run over ssh inherited that, so Ctrl-C and Ctrl-\ reached nothing;
+  burrow now starts a session's program with every signal at its default as
+  well. `tests/mpx5-burrowd` B19-B27 hold the terminal and burrowd's own
+  dispositions; B12, B15 and B9 say what sessions without one now do.
+
 - **The pointer, and the mouse in a terminal program (px117).** The console
   draws a pointer, an arrow over the cell it is on, from the first motion of
   any USB mouse or tablet, and moves it by drawing two cells. A program that
