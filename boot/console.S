@@ -27,6 +27,16 @@
      pax_tty_table  px111: 258 pairs of eight-byte words, each terminal's
                     session and foreground group by its id (1 the
                     console, 2 + n pty n): kernel/sched's
+     pax_log_line   px130: two eight-byte words, kernel/log's line being
+                    written (its level + 1, 0 for none given; whether its
+                    bytes reach the screen, decided at its first byte)
+     pax_kmsg_state px130: 32 eight-byte words, kernel/kmsg's ring (the
+                    oldest record, the next, the readers' marks, the
+                    console level, dmesg_restrict)
+     pax_kmsg_buf   px130: 131072 bytes, the ring of records
+     pax_kmsg_line  px130: 1024 bytes, the kernel line being staged
+     pax_kmsg_user  px130: 1024 bytes, a write to /dev/kmsg being staged
+     pax_kmsg_out   px130: 4160 bytes, one record formatted for a reader
 
    No Linux source; no other kernel's source. */
 
@@ -51,5 +61,27 @@ pax_pty_table:
         .globl pax_tty_table
 pax_tty_table:
         .zero 4128
+        .p2align 3
+        .globl pax_log_line
+pax_log_line:
+        .zero 16
+        .p2align 6
+        .globl pax_kmsg_state
+pax_kmsg_state:
+        .zero 256
+        .p2align 12
+        .globl pax_kmsg_buf
+pax_kmsg_buf:
+        .zero 131072
+        .p2align 6
+        .globl pax_kmsg_line
+pax_kmsg_line:
+        .zero 1024
+        .globl pax_kmsg_user
+pax_kmsg_user:
+        .zero 1024
+        .globl pax_kmsg_out
+pax_kmsg_out:
+        .zero 4160
 
         .section .note.GNU-stack, "", @progbits
