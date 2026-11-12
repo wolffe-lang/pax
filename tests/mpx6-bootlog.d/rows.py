@@ -8,7 +8,7 @@ reboot(2) where asked); the images are tools/mkimage's ISOs and tools/mkdisk's i
 (the ESP's limine.conf rewritten between boots with mtools, a black box). One QEMU process boots an
 image several times: a boot ends at the kernel's `halt` (or its `pax.bootstop` stop), then the
 monitor's `system_reset` starts the next, so CMOS and memory carry over as they do across a reset
-button. PX118_ROWS (letters, default `B M S R L N U P K F`) picks the groups. Prints PASS/FAIL lines at
+button. PX118_ROWS (letters, default `B M S R L N U P K F A`) picks the groups. Prints PASS/FAIL lines at
 column 0; exits 1 when any row failed."""
 import os
 import re
@@ -416,6 +416,56 @@ def rows_marks(fw, img):
             f'/proc/pax-boot: log {f2.get("log")})')
 
 
+FBMAP = r'(wc|uc) entry (\d) (handed|programmed|no-wc|no-pat|refused)(?: was (\S+))? pat 0x([0-9a-f]{16})( reset)? leaf (\d) (\S+) mtrr (.+)'
+SCROLL = r'(redraw|copy) (probe read \d+ write \d+|fbread|fbwrite)'
+
+
+def rows_fbmap(fw, cpio):
+    # A1 (px129, R-px129-14): how the kernel mapped the framebuffer is on record where a user reads it
+    # after boot: the console's `fbmap:` line and /proc/pax-boot's `fbmap` and `scroll` facts say the
+    # same; QEMU's CPU has the PAT, so the framebuffer is write-combining and the first page's leaf, read
+    # back, selects that wc entry. A2: `pax.patdefault` (test-only) puts IA32_PAT to its power-on value,
+    # which holds no wc entry, as a bootloader that never programmed it leaves it: the kernel programs
+    # entry 5 to wc itself and maps the framebuffer with it (before px129: uncached, entry 3).
+    for row, word in (('A1', ''), ('A2', 'pax.patdefault')):
+        img = disk(f'{fw}-{row}', cpio, word)
+        m = Machine(f'{fw}-{row}', fw, disk_media(img))
+        t = m.boot()
+        m.quit()
+        if not booted(f'{row} {fw}', t):
+            img.unlink()
+            continue
+        f = facts(t)
+        con = re.search(r'^fbmap: (.*)$', t, re.M)
+        fm, sc = f.get('fbmap', ''), f.get('scroll', '')
+        why = []
+        if not con:
+            why.append('no `fbmap:` line on the console')
+        mm = re.fullmatch(FBMAP, fm)
+        if not mm:
+            why.append(f'/proc/pax-boot fbmap {fm!r} is not `wc|uc entry E HOW [was T] pat 0x… [reset] leaf K T mtrr …`')
+        else:
+            kind, e, how, was, pat, reset, leaf, ltype, _mt = mm.groups()
+            want_how = 'programmed' if word else 'handed'
+            if kind != 'wc' or ltype != 'wc' or leaf != e or how != want_how:
+                why.append(f'fbmap {fm!r}: not wc by an entry {want_how}, the leaf selecting it')
+            elif (int(pat, 16) >> (8 * int(e))) & 0xff != 1:
+                why.append(f'IA32_PAT 0x{pat} holds no wc in entry {e}')
+            if word and (not reset or was != 'wt' or e != '5'):
+                why.append(f'fbmap {fm!r}: not reset to the power-on PAT and entry 5 programmed from wt')
+            if con and not con.group(1).startswith(f'{kind} by PAT entry {e} ('):
+                why.append(f'the console says {con.group(1)!r}')
+        if not re.fullmatch(SCROLL, sc):
+            why.append(f'/proc/pax-boot scroll {sc!r} is not `redraw|copy probe read R write W|fbread|fbwrite`')
+        elif con and f'; scroll {sc.split()[0]} (' not in con.group(1):
+            why.append(f'the console\'s scroll part disagrees with {sc!r}')
+        if why:
+            fail(f'{row} {fw}', '; '.join(why) + f' (kept in {m.d})')
+        else:
+            say(f'PASS {row} {fw}: {"pax.patdefault: " if word else ""}fbmap {fm}; scroll {sc}; the console says the same')
+        img.unlink()
+
+
 def rows_stops(fw, cpio):
     # S1-S7: a kernel stopped at each stage by `pax.bootstop=STAGE` leaves that stage; the next boot says so.
     for i, st in enumerate(STAGES[:-1]):
@@ -607,6 +657,8 @@ def rows_record(fw, cpio_rec):
                 why.append('boot 1\'s block lacks `previous: none recorded` or the claim with its offsets')
             if 'previous: boot 1 completed (marks from cmos)' not in two or f'cmos: {CMOS} held' not in two:
                 why.append('boot 2\'s block lacks `previous: boot 1 completed` or `held`')
+            if not re.search(r'^fbmap: ' + FBMAP + '$', one, re.M) or not re.search(r'^scroll: ' + SCROLL + '$', one, re.M):
+                why.append('boot 1\'s block lacks `fbmap: …` or `scroll: …` (px129)')
             con = re.search(r'--- console of boot 1 ---\n(.*)--- end of the console of boot 1 ---', two, re.S)
             if not con or 'PAX: the console' not in con.group(1) or 'run 1: /bin/pax-boot-status record' not in con.group(1):
                 why.append('boot 2\'s block holds no console of boot 1 from its first line to `run 1:`')
@@ -748,7 +800,7 @@ def rows_screen(fw, cpio_rec):
 
 
 def main():
-    only = os.environ.get('PX118_ROWS', 'B M S R L N U P K F').split()
+    only = os.environ.get('PX118_ROWS', 'B M S R L N U P K F A').split()
     cpio = archive('init')
     cpio_reboot = archive('init-reboot', reboot=True)
     plain, quiet = iso('plain', cpio, ''), iso('nobeep', cpio, 'pax.nobeep')
@@ -767,7 +819,8 @@ def main():
                  ('R', lambda: rows_refused(fw, cpio)), ('L', lambda: rows_log(fw, cpio, cpio_reboot)),
                  ('N', lambda: rows_absent(fw, cpio)), ('U', lambda: rows_installed(fw, cpio)), ('U', lambda: rows_armed(fw, cpio)), ('P', lambda: rows_post(fw, plain)),
                  ('K', lambda: rows_record(fw, cpio_rec) if cpio_rec else fail(f'K0 {fw}', 'no pax-boot-status built (PX118_BOOTSTATUS)')),
-                 ('F', lambda: rows_screen(fw, cpio_rec) if cpio_rec else fail(f'F0 {fw}', 'no pax-boot-status built (PX118_BOOTSTATUS)'))]
+                 ('F', lambda: rows_screen(fw, cpio_rec) if cpio_rec else fail(f'F0 {fw}', 'no pax-boot-status built (PX118_BOOTSTATUS)')),
+                 ('A', lambda: rows_fbmap(fw, cpio))]
         for key, step in steps:
             if key not in only:
                 continue
