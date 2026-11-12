@@ -3,7 +3,7 @@
 # of the commit under test, inside the px75-ubuntu image (QEMU, OVMF, gcc; KVM passed in): build the
 # console kernel (kmain_console, native tier), conspeed (tools/mkconspeed) and one image a mode and
 # scroll way, with conspeed as init over the committed streams (tests/mpx3-conspeed.d/streams), then
-# boot each LEG and read its table off the screen (screen-run.py beside this file).
+# boot each LEG and read its table off the screen (tests/mpx3-conspeed.d/screen-run.py).
 #   LEG  ACCEL:WxH:WAY[:serial]   ACCEL kvm or tcg; WAY fbwrite (the metal's scroll: redraw) or probe
 #        (the kernel's own choice at attach; QEMU's framebuffer reads cheap, so it copies);
 #        `serial` boots with COM1 to a file (the harness's machine) instead of none (the metal's)
@@ -41,7 +41,7 @@ for leg in "$@"; do
     fi
     ser=(); [ "$com" = serial ] && ser=(--serial "$out/$name.serial.log")
     t0=$SECONDS
-    python3 -I "$here/screen-run.py" --qemu-run tools/qemu-run --iso "$iso" --mode "$mode" --accel "$accel" \
+    python3 -I "$here/../../../tests/mpx3-conspeed.d/screen-run.py" --qemu-run tools/qemu-run --iso "$iso" --mode "$mode" --accel "$accel" \
         --font font/spleen-8x16.bdf --out "$out/$name" --timeout 1500 ${ser[@]+"${ser[@]}"}
     lrc=$?
     [ "$lrc" = 0 ] || rc=1
