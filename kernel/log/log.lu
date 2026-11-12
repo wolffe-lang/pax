@@ -11,10 +11,42 @@
 //! command line asked for no narration of a program's ordinary life.
 //! The callers that narrate ask it; this module writes every line it is
 //! given.
+//!
+//! px130: **every line is kept, at a level, and the screen may be
+//! spared it.** Each byte of a line is staged in kernel/kmsg too, and
+//! `end` makes the line a record there with its level and the time
+//! (syslog(2) and /dev/kmsg read them back). A line's level is set
+//! before its first byte (`at`: syslog's 0 emerg to 7 debug); a line
+//! written without one is at 4, warning (Linux's default for a line
+//! with no level), and `end` puts the next line back to that. A line
+//! whose level is at or above the console level (kernel/kmsg's
+//! `console_level`, 8 until something lowers it) goes to the serial port
+//! and the ring alone, never to the screen (`serial.put_wire`): the
+//! serial port keeps every byte it had before px130. The lines of a
+//! program's ordinary life (an exec, an exit, a death by a signal's
+//! default action or by a fault, the counts after a run) are written
+//! at 6, info: under `quiet`, once the first program starts, they stay
+//! off the screen while warnings and worse still draw.
+//!
+//! The level of the line being written is one word in kernel/kmsg's
+//! state: a thread writes with IF clear or under `sync.console()`, so
+//! one line is written at a time (an NMI's line mixed into another
+//! takes that line's level, as its bytes mix on the wire).
 
+use kmsg
 use serial
 
 extern "c" let pax_log_quiet: *u64
+
+/// The levels a caller gives `at` (syslog(2)'s).
+pub const EMERG: u64 = 0
+pub const ALERT: u64 = 1
+pub const CRIT: u64 = 2
+pub const ERR: u64 = 3
+pub const WARNING: u64 = 4
+pub const NOTICE: u64 = 5
+pub const INFO: u64 = 6
+pub const DEBUG: u64 = 7
 
 /// Whether the console is quiet (px15): the kernel command line said
 /// `quiet`. The narrating callers (kernel/process's exec line,
@@ -27,23 +59,84 @@ pub fn quiet() -> bool {
     unsafe { (pax_log_quiet as u64 as *u64).read_volatile() != 0 }
 }
 
-/// Set `quiet` (kernel/user's `start`, from the command line).
+/// Set `quiet` (kernel/user's `start`, from the command line). px130:
+/// with it the console level drops to warnings and worse when the first
+/// program starts (kernel/kmsg's `past_boot`).
 pub fn set_quiet(on: bool) {
     // # Safety: as `quiet`.
     unsafe { (pax_log_quiet as u64 as *u64).write_volatile(if on { 1 } else { 0 }) }
+    if on {
+        kmsg.quiet_at_first_program()
+    }
+}
+
+// The line being written: its level + 1 (0: none given, so DEFAULT),
+// and whether its bytes reach the screen (1) or the wire alone (2),
+// decided at its first byte (0: no byte yet). boot/console.S's words
+// after `pax_log_quiet`.
+extern "c" let pax_log_line: *u64
+
+fn lw(i: u64) -> u64 {
+    // # Safety: boot/console.S's two words after pax_log_quiet; i < 2.
+    unsafe { ((pax_log_line as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_lw(i: u64, v: u64) {
+    // # Safety: as `lw`.
+    unsafe { ((pax_log_line as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// The level of the line about to be written (before its first byte).
+pub fn at(level: u64) {
+    put_lw(0, (level & 7) + 1)
+}
+
+fn level() -> u64 {
+    let l = lw(0)
+    if l == 0 { kmsg.DEFAULT } else { l - 1 }
+}
+
+/// One byte of the line: staged for the record, and to the screen and
+/// the wire, or the wire alone, by the line's level against the console
+/// level at its first byte.
+fn emit(b: u8) {
+    var how = lw(1)
+    if how == 0 {
+        how = if level() < kmsg.console_level() { 1 } else { 2 }
+        put_lw(1, how)
+    }
+    kmsg.stage(b as u64)
+    if how == 1 {
+        serial.put(b)
+    } else {
+        serial.put_wire(b)
+    }
 }
 
 /// Write the bytes of `s`, with no line end.
 pub fn put(s: str) {
     for b in s.bytes() {
-        serial.put(b as int as u8)
+        emit(b as int as u8)
     }
 }
 
-/// End the current line (CR LF).
+/// End the current line (CR LF): it becomes a record (kernel/kmsg), and
+/// the next line is at the default level until `at` says otherwise.
 pub fn end() {
-    serial.put(13)
-    serial.put(10)
+    var how = lw(1)
+    if how == 0 {
+        how = if level() < kmsg.console_level() { 1 } else { 2 }
+    }
+    if how == 1 {
+        serial.put(13)
+        serial.put(10)
+    } else {
+        serial.put_wire(13)
+        serial.put_wire(10)
+    }
+    kmsg.commit(level(), kmsg.KERN)
+    put_lw(0, 0)
+    put_lw(1, 0)
 }
 
 /// Write `s` as a whole line.
@@ -55,7 +148,7 @@ pub fn line(s: str) {
 /// Write one byte, given as an int in 0..=255 (a narrowing cast traps
 /// otherwise).
 pub fn put_byte(b: int) {
-    serial.put(b as u8)
+    emit(b as u8)
 }
 
 /// Write `v` in decimal, with a `-` when it is negative. `int`'s least
@@ -63,7 +156,7 @@ pub fn put_byte(b: int) {
 pub fn dec(v: int) {
     var n = v
     if n < 0 {
-        serial.put(45)
+        emit(45)
         n = 0 - n
     }
     var p = 1
@@ -71,7 +164,7 @@ pub fn dec(v: int) {
         p = p * 10
     }
     while p > 0 {
-        serial.put((n / p % 10 + 48) as u8)
+        emit((n / p % 10 + 48) as u8)
         p = p / 10
     }
 }
@@ -84,9 +177,9 @@ pub fn hex(v: u64) {
         shift = shift - 4
         let d = (v >> shift) & 15
         if d < 10 {
-            serial.put((d + 48) as u8)
+            emit((d + 48) as u8)
         } else {
-            serial.put((d + 87) as u8)
+            emit((d + 87) as u8)
         }
     }
 }
@@ -99,9 +192,42 @@ pub fn hex_n(v: u64, digits: u64) {
         shift = shift - 4
         let d = (v >> shift) & 15
         if d < 10 {
-            serial.put((d + 48) as u8)
+            emit((d + 48) as u8)
         } else {
-            serial.put((d + 87) as u8)
+            emit((d + 87) as u8)
         }
     }
+}
+
+/// px130: the first program starts (kmain_console): under `quiet` the
+/// console level drops to warnings and worse (kernel/kmsg).
+pub fn past_boot() {
+    kmsg.past_boot()
+}
+
+/// px130: the console level (`loglevel=N`, syslog(2)'s CONSOLE_LEVEL).
+pub fn set_console_level(v: u64) {
+    kmsg.set_console_level(v)
+}
+
+/// px130: a write to /dev/kmsg (kernel/files), its `n` bytes from `from`
+/// staged in kernel/kmsg (`user_byte`): a record at `level` of
+/// `facility`, and a line on the console as a kernel line at that level
+/// is. A line of the kernel's own being written is left as it is.
+pub fn inject(level: u64, facility: u64, from: u64, n: u64) {
+    let shown = level < kmsg.console_level()
+    var i: u64 = 0
+    while i < n {
+        let b = kmsg.user_at(from + i) as u8
+        if shown { serial.put(b) } else { serial.put_wire(b) }
+        i += 1
+    }
+    if shown {
+        serial.put(13)
+        serial.put(10)
+    } else {
+        serial.put_wire(13)
+        serial.put_wire(10)
+    }
+    kmsg.inject(level, facility, from, n)
 }
