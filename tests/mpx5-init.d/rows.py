@@ -82,7 +82,8 @@ def bad(row, why):
 def run(argv, data=b'', timeout=300, env=None):
     r = subprocess.run([str(a) for a in argv], input=data, capture_output=True, timeout=timeout, env=env)
     if r.returncode != 0:
-        raise RuntimeError('%s: exit %d: %s' % (argv[0], r.returncode, r.stderr.decode(errors='replace')[-400:]))
+        raise RuntimeError('%s: exit %d: %s %s' % (argv[0], r.returncode, r.stdout.decode(errors='replace')[-300:],
+                                                  r.stderr.decode(errors='replace')[-300:]))
     return r
 
 
@@ -224,10 +225,10 @@ def disk(work):
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir()
-    attrs = {'/': (0o755, 0, 0)}
+    attrs = {'/': (0o040755, 0, 0)}  # debugfs's `sif … mode` takes the whole mode, the type's bits too
     for d in ('dev', 'proc', 'sys'):
         (stage / d).mkdir()
-        attrs['/' + d] = (0o755, 0, 0)
+        attrs['/' + d] = (0o040755, 0, 0)
     for line in files(work):
         if '=' in line:
             path, rest = line.split('=', 1)
@@ -464,10 +465,10 @@ def boot1(con):
     if not login(con, 'root', 'I12'):
         return
     con.type('reboot -h')
-    end = con.wait(r'^PAX: the end: [^\n]*$', 60)
+    end = con.wait(r'^PAX: the end: [^\n]*\n', 60)
     halt = con.wait(r'^halt$', 60)
     if end and halt:
-        ok('I12', 'reboot -h: %s; halt' % end.group(0).decode())
+        ok('I12', 'reboot -h: %s; halt' % end.group(0).decode().strip())
     else:
         bad('I12', 'reboot -h: the end %r, halt %s: %r' % (end.group(0) if end else None, bool(halt), con.text(400)))
 
