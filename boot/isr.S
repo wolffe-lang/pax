@@ -361,6 +361,17 @@ pax_lat_open:
         ret
         .size pax_lat_open, . - pax_lat_open
 
+/* px131: pax_lat_close for a kernel that does not link kernel/latency
+   (kmain_usbcheck, the metal kernels): there the instrument is never on,
+   so nothing calls it, but the paths above name it. kernel/latency's
+   own pax_lat_close, a strong definition, takes this one's place
+   wherever it is linked. */
+        .weak pax_lat_close
+        .type pax_lat_close, @function
+pax_lat_close:
+        ret
+        .size pax_lat_close, . - pax_lat_close
+
         .globl pax_int3
         .type pax_int3, @function
 pax_int3:
