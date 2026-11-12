@@ -5,6 +5,8 @@
 #   L      the lane's directory (everything the rig writes is under it; TMPDIR is $L/tmp)
 #   CPUS   the slot's CPUs (taskset inside each container)
 #   P      the container engine (rootless podman)
+#   DEVW   (burrowd's step) the dev compiler and its std, copied by value (PAX_DEV_WOLF_DIR and
+#          PAX_DEV_STD_DIR: the suite holds them to user/wolf.sums and user/wolf.pin)
 # and, read by take.sh alone: LOCK1 LOCK2 (the block's two lock names, the block's first) and REC
 # (the recorder, a copy by value of the planning repo's tools/gauntlet-record.sh).
 # PAX_BUILD is the build directory every step of one take shares.
@@ -23,6 +25,18 @@ ctr() {
     local mnt=(-v "$L:$L"); [ "$R" = "$L" ] || mnt+=(-v "$R:$R")
     "$P" run --rm --memory "${MEM:-12g}" --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 "${dev[@]}" "${mnt[@]}" -w "$CO" \
         -e TMPDIR="$TMPDIR" -e PAX_CACHE="$PAX_CACHE" -e PAX_BUILD="$PAX_BUILD" -e HOME="$L/home" -e PAX_REQUIRE_UEFI=1 \
+        -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' -e GIT_CONFIG_KEY_1=commit.gpgsign -e GIT_CONFIG_VALUE_1=false \
+        "$img" taskset -c "$CPUS" "$@" < /dev/null
+}
+# ctrnet IMAGE CMD...: ctr's container with KVM, /dev/net/tun and NET_ADMIN in its own network namespace
+# (tests/mpx5-burrowd's tap and dnsmasq), the rig required (PAX_REQUIRE_BURROWD_RIG=1).
+ctrnet() {
+    local img=$1; shift
+    local mnt=(-v "$L:$L"); [ "$R" = "$L" ] || mnt+=(-v "$R:$R")
+    "$P" run --rm --memory "${MEM:-12g}" --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 \
+        --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW "${mnt[@]}" -w "$CO" \
+        -e TMPDIR="$TMPDIR" -e PAX_CACHE="$PAX_CACHE" -e PAX_BUILD="$PAX_BUILD" -e HOME="$L/home" -e PAX_REQUIRE_UEFI=1 \
+        -e PAX_REQUIRE_BURROWD_RIG=1 -e PAX_DEV_WOLF_DIR="${DEVW:?}/wolf" -e PAX_DEV_STD_DIR="$DEVW/wolf-std" \
         -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' -e GIT_CONFIG_KEY_1=commit.gpgsign -e GIT_CONFIG_VALUE_1=false \
         "$img" taskset -c "$CPUS" "$@" < /dev/null
 }
