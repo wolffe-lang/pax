@@ -171,9 +171,18 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 | the rows, before the fix | `5c724c46` (the screen reader), `99f65fe7` (rows.py and its selftest), `f63dea6a` (the suite), `bdd13a2d` (the rig), `18761431` (CI's job and paths) | |
 | **red at the rows' commit** | record `red-18761431.log`, sha256 `1f4f827764e4fbefb0ea119fa8983b7a0efeaf5bd313f6e3bad7b059f2456a8a` (`notes/px129/rig/red.manifest`) | `FAIL C8 the grid: 256x90 cells (want 320x90)`, `FAIL C2` (plain 5.94 units), `FAIL C3` (sgr 14.55), `FAIL C4` twice (scroll1 4.70 units; scroll10 12.09 x scroll1), `FAIL C5` (clear 1.89 x plain), `FAIL C6` twice (cursor 2.00 x; same 1.01 x), `FAIL C7` twice (fussopen 4.37, cub 6.24 units); C1 and yew's keypress PASS; `END conspeed exit=1 secs=39` |
 | the fix | `f237ed4e` (boot/screen.S), `acb14394` (kernel/screen), `29e604a8` (kernel/user), `8ee55dd2` (kernel/console), `83c47fdd` (kernel/panic), `8f81580b` (kernel/serial), `e01bdbfa` (320 columns), `8e4e5a8b` (screen-ref and V1) | |
-| green quick take at the head | the rig's `quick.manifest` (the planner's test; mpx3-conspeed native on both firmwares; mpx3-screen native on both; mpx5-screen, mpx6-games, mpx6-pointer and mpx3-console native BIOS) at the PR's head | its record's sha256 and every `END` line are in the lane's hand-back and the PR |
-| the plant | the PR's head with one hunk in `kernel/screen`'s `draw_span`: every touched cell drawn, changed or not (`plant.manifest`) | red by name: `FAIL C6 the same screen written again`; its record in the hand-back |
+| green quick take before the rebase | `quick.manifest` (the planner's test; mpx3-conspeed native on both firmwares; mpx3-screen native on both; mpx5-screen, mpx6-games, mpx6-pointer and mpx3-console native BIOS) at `a26a54df`, record sha256 `565ef4f4db1d1bfc999f76dc33904b7fb450ba595a681ceca4216e9e72acec6a` | `END ci-plan exit=0`, `END conspeed exit=0`, `END screen exit=0`, `END vt exit=0`, `END games exit=0`, `END pointer exit=0`, `END console exit=0`; `RECORD-END worst=0 steps=7` |
+| the plant before the rebase | `px129-plant-same` (`6e184d02`): `a26a54df` with one hunk in `kernel/screen`'s `draw_span`, every touched cell drawn, changed or not (`plant.manifest`), record sha256 `dd6c8228f3eb494a7186ea98652fdae42f8ce37d2857714ab48dc50d91359fc9` | red by name and alone: `FAIL C6 the same screen written again: same 4.010 ms least, 1.02 x plain 3.950 ms (bound 0.7)`; `END conspeed exit=1` |
+| the quick take and the plant at this branch's head | the same manifests after the rebase below | their records and `END` lines are in the PR |
 | QEMU's legs, trunk and fix, KVM and TCG, with and without COM1 | the lane's evidence | §4 |
+
+**The rebase.** The work above was done on trunk `211e5c7c`, and every commit this note names before this paragraph
+is on the branch `px129-before-rebase` (its head `a26a54df`). The branch was then rebased, unchanged but for the
+CHANGELOG's, docs/SOURCES.md's and kernel/README.md's neighbouring entries, onto the queue ahead of it (px122's,
+px123's and px128's, at `2656e9d7`). There the same commits are: the prediction `051f9deb`; the rows `7bd18d7d`,
+`873cfe52`, `02b20d58`, `75b9da83` and `faf01b10` (the red record's `18761431`); the fix `cd892629`
+(boot/screen.S), `7ed30ac7` (kernel/screen), `56acfae2` (kernel/user), `003e75b9` (kernel/console), `0cf0f486`
+(kernel/panic), `09b3de5c` (kernel/serial), `3092212e` (320 columns), `d9a0fcac` (screen-ref and V1).
 
 ## 9. Decisions
 
