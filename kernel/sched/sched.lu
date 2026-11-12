@@ -443,6 +443,7 @@ const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once cali
 const S_TOP: u64 = 24 // px126: one past the highest slot that is not free; every walk stops there
 const S_WAKE_AT: u64 = 25 // px126: no waiting thread's deadline falls before this tick (NEVER: none has one)
 const S_REFUSED: u64 = 26 // px126: clones refused for want of a slot since one was last found free
+const S_NPROC_REFUSED: u64 = 27 // px126: clones refused at a user's RLIMIT_NPROC since a slot was last taken
 
 // px88: the process area's usage words (kernel/sched's; words 6084-6093
 // of the 6144, past kernel/vm's last, 6083): the process's own sums,
@@ -803,6 +804,12 @@ pub const NO_STACK: u64 = SLOTS + 1
 /// px126: `clone_current`'s answer when no frame is left for the new
 /// process's area (kernel/process: -EAGAIN, by name).
 pub const NO_AREA: u64 = SLOTS + 2
+
+/// px126: RLIMIT_NPROC, soft and hard: the threads a real user other
+/// than root may hold at once (getrlimit(2): Linux's default is half of
+/// threads-max, proc_sys_kernel(5)), half the table, so no user takes
+/// the slots root needs to log in and end what a user started.
+pub const NPROC: u64 = SLOTS / 2
 
 /// Unmap slot `s`'s stack and give its frames back.
 fn free_stack(s: u64) {
@@ -2159,8 +2166,37 @@ fn free_slot() -> u64 {
         return SLOTS
     }
     put_sv(S_REFUSED, 0)
+    put_sv(S_NPROC_REFUSED, 0)
     raise_top(s)
     s
+}
+
+/// px126: how many slots hold a thread (a zombie included) of a process
+/// whose real user id is `uid`: what RLIMIT_NPROC counts (getrlimit(2):
+/// "the number of extant process (or, more precisely on Linux, threads)
+/// for the real user ID"). A walk to the high water.
+pub fn user_threads(uid: u64) -> u64 {
+    var n: u64 = 0
+    var s: u64 = FIRST
+    while s < top() {
+        if field(s, offset_of(Thread, state)) != FREE && field(s, offset_of(Thread, tgid)) != 0 {
+            let l = field(s, offset_of(Thread, lead))
+            if has_area(l) && real_uid(l) == uid {
+                n += 1
+            }
+        }
+        s += 1
+    }
+    n
+}
+
+/// px126: a clone refused at a user's RLIMIT_NPROC: whether it is the
+/// first of its run (kernel/process writes that one's line); a slot
+/// taken ends the run.
+pub fn nproc_refusal() -> bool {
+    let n = sv(S_NPROC_REFUSED) + 1
+    put_sv(S_NPROC_REFUSED, n)
+    n == 1
 }
 
 /// px126: whether the clone just refused for want of a slot is the
