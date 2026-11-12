@@ -98,9 +98,10 @@ def main():
 
     r = first(s, 'refused ')
     rw = why(s, 'refused')
+    # ligature's own refusal names the directory it was told to read (wolf's message never does)
     row('L6-refusal', r is not None and re.match(r'refused rc=[1-9]\d* output=no$', r) is not None
-        and any('selected linker' in w for w in rw) and any('ligature' in w for w in rw),
-        f'{r!r}; {rw[:2]!r}')
+        and any('selected linker' in w for w in rw) and any('no-sysroot' in w for w in rw),
+        f'{r!r}; {rw[:3]!r}')
 
     lig, lld = sb.get(('pelt', 'lig')), sb.get(('pelt', 'lld'))
     pw = why(s, 'pelt-lig')
@@ -108,8 +109,9 @@ def main():
         row('L7-pelt-at-small', False, f'ligature linked pelt at {small_mib} MiB: ligature#35 looks fixed, so this '
             'expected refusal must become a link row (and the default can be reconsidered)')
     else:
+        # the expected refusal is ligature's own, for memory, not a linker that never ran
         row('L7-pelt-at-small', lig is not None and lig[1] is False and any('selected linker' in w for w in pw)
-            and lld == (0, True) and sr.get(('pelt', 'lld')) == PELT,
+            and any('memory allocation' in w for w in pw) and lld == (0, True) and sr.get(('pelt', 'lld')) == PELT,
             f'at {small_mib} MiB ligature refuses by name, no output, no fallback (ligature#35): {pw[:2]!r}; '
             f'lld links pelt and it prints {sr.get(("pelt", "lld"))!r}')
 
