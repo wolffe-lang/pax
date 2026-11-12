@@ -13,14 +13,14 @@
                        the counters kernel/screen reports; (px117) the
                        mouse modes DECSET chose and the pointer's cell;
                        (px129) the batch depth and the dirty rows' range
-     pax_screen_cells  two 256 x 128 four-byte grids, main then alternate (the
+     pax_screen_cells  two 320 x 128 four-byte grids, main then alternate (the
                        glyph's code point in bits 0-7, the foreground
                        colour in bits 8-11, the background in 12-15),
                        bit 16 records blink; each grid is row-major,
                        `cols` cells a row
      pax_screen_early  16384 bytes: what the kernel wrote before the
                        screen was attached, replayed onto it at attach
-     pax_screen_front  (px129) one 256 x 128 four-byte grid: what each
+     pax_screen_front  (px129) one 320 x 128 four-byte grid: what each
                        cell of the framebuffer shows, the cell's word as
                        drawn with the cursor's bit (30) and the arrow's
                        (31), or all ones when nothing is known
@@ -28,7 +28,7 @@
                        first and last column touched since the row was
                        last drawn (first | last << 32; none: first above
                        last)
-     pax_screen_run    (px129) 256 five-word records: a run of cells
+     pax_screen_run    (px129) 320 five-word records: a run of cells
                        being drawn, each its glyph's address in the font
                        and its four pixel pairs (or two doubled pixels)
 
@@ -76,7 +76,7 @@ pax_screen_state:
         .p2align 12
         .globl pax_screen_cells
 pax_screen_cells:
-        .zero 2 * 256 * 128 * 4
+        .zero 2 * 320 * 128 * 4
         .p2align 12
         .globl pax_screen_early
 pax_screen_early:
@@ -84,7 +84,7 @@ pax_screen_early:
         .p2align 12
         .globl pax_screen_front
 pax_screen_front:
-        .zero 256 * 128 * 4
+        .zero 320 * 128 * 4
         .p2align 6
         .globl pax_screen_dirty
 pax_screen_dirty:
@@ -92,6 +92,6 @@ pax_screen_dirty:
         .p2align 6
         .globl pax_screen_run
 pax_screen_run:
-        .zero 256 * 40
+        .zero 320 * 40
 
         .section .note.GNU-stack, "", @progbits
