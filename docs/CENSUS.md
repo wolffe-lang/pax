@@ -870,6 +870,25 @@ the suite's own (N2: `user/net/gai.c`).
 | 307 | `sendmmsg` | on an AF_INET datagram socket, the first `vlen` (at most 1024) messages, each one datagram to its msg_name or the connected peer, its iovecs (at most 1024) gathered; each sent one's msg_len written; the count sent, or the first message's -errno when none went (-EDESTADDRREQ, -EMSGSIZE, -EINVAL, -EFAULT, sendto's); -EBADF, -ENOTSOCK | ancillary data (msg_control), -EINVAL; a stream socket, -EOPNOTSUPP; a datagram over 1472 bytes, as sendto refuses it |
 | 16 | `ioctl` FIONREAD on an AF_INET datagram socket | the length of the next queued datagram, 0 when none (and 0 for an empty datagram first in the queue) | |
 
+## Served since px04: musl's resolver (px127)
+
+A program `wolf build` makes on PAX is linked static against the dev image's
+musl, not glibc, and musl's resolver asks something else: it reads
+/etc/hosts and /etc/resolv.conf, opens a non-blocking datagram socket, binds
+it to port 0, sends its A and AAAA questions with two `sendto` calls, polls
+and reads each answer with `recvmsg` (measured black box, strace of the
+image's own build on Linux: `notes/px127/probes.txt`). PAX answered
+`recvmsg` -ENOSYS, so the answers stayed queued unread: the resolver asked
+again after 2.5 s, gave up after 5, and std.net's `connect` answered `io`.
+px127 serves it, held to Linux by `user/net/dgramopts.c`'s recvmsg cases
+(`tests/mpx4-console-push` N1) and through the resolver itself (N3: gai
+linked against musl; `tests/distribution-net` N3 and N4: a program built on
+the dev image).
+
+| nr | call | served | refused by name |
+|---:|---|---|---|
+| 47 | `recvmsg` | on an AF_INET datagram socket: the oldest datagram scattered over `msg_iov` (at most 1024 iovecs), its sender at `msg_name` cut to `msg_namelen`, which then says 16 (a null `msg_name` leaves it), `msg_controllen` 0, `msg_flags` MSG_TRUNC when the iovecs were short; the bytes copied, the whole length under MSG_TRUNC; MSG_DONTWAIT, MSG_PEEK, MSG_ERRQUEUE (-EAGAIN), O_NONBLOCK, a wait and SO_RCVTIMEO as recvfrom's; -EMSGSIZE, -EINVAL (a negative `msg_namelen` or length), -EFAULT, -EBADF, -ENOTSOCK | a stream socket, -EOPNOTSUPP |
+
 ## Disk formatters and Limine (px69)
 
 Linux strace of the static binaries records 26 distinct calls for paxgpt
