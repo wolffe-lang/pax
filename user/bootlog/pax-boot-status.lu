@@ -11,7 +11,9 @@
 //!   previous boot ended (`previous: boot P stopped at STAGE` or `… completed`, then `, its
 //!   screen refused` when it ran blind), its stages, the framebuffer this boot was handed
 //!   (`framebuffer: WxH BPP bpp pitch P rgb … at 0xPHYSICAL`, or `none`) and what PAX made
-//!   of it (`screen: drawn`, or `screen: refused: WHY`), what CMOS was to this boot (the
+//!   of it (`screen: drawn`, or `screen: refused: WHY`; px129: then, when the kernel says
+//!   them, `fbmap: …`, how it mapped the framebuffer, IA32_PAT and the MTRRs over it, and
+//!   `scroll: …`, how the screen scrolls), what CMOS was to this boot (the
 //!   claim of its eight bytes said once, with their offsets), and the previous boot's
 //!   console between two marker lines when the kernel found it intact by its checksum (a
 //!   refused one is named and never printed). Past 256 KiB the file is rotated: boot.log.1
@@ -165,6 +167,10 @@ fn record(root: str) -> int {
     }
     var block = "== boot {boot}, {now}\n{said} (marks from {src})\nstages: {fact(f, "stages")}\n"
     if scr.len > 0 { block += "framebuffer: {fact(f, "framebuffer")}\nscreen: {scr}\n" }
+    let fbmap = fact(f, "fbmap")
+    if fbmap.len > 0 { block += "fbmap: {fbmap}\n" }
+    let scroll = fact(f, "scroll")
+    if scroll.len > 0 { block += "scroll: {scroll}\n" }
     if mode == "claimed" {
         block += "cmos: {range} claimed for the marks (they read zero; written only while they hold PAX's own)\n"
     } else if mode == "refused" {
