@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The clocks keep real time through long calls, and the network's and the keyboard's wake-ups run at once
+  (px131).** A tick due while interrupts were off waited, and every further one in the same stretch was lost,
+  so CLOCK_MONOTONIC, CLOCK_REALTIME and every sleep and timeout ran slow beside a long call (6 to 9 % of real
+  time kept beside the worst loads). The tick count now follows the kernel's clock (the HPET, else the ACPI PM
+  timer): a stretch with interrupts off makes a deadline late by at most the stretch, never
+  wrong, and both clocks keep the clock's time. And a device's work no longer waits behind a busy process: the
+  network thread, the readers it wakes and the console's readers go to the head of the queue and run at once,
+  so a host's ping beside a CPU-bound process costs about what it costs at idle (0.7 ms in the median, 27 ms
+  before: a quantum a hop). `tests/mpx6-latency` holds both (its clock, wake-up and flood rows), and a hog still keeps
+  its share under a ping flood (82 to 85 % of it). USB's command and transfer waits look at their completion
+  before their deadline. Closes pax#384 (the wall clock stood still during a console flood).
+  `notes/px131-clocks-and-wake-ups.md`.
+
 - **What the kernel holds too long, measured; three long calls made short (px131).** Every system call
   runs with interrupts off until it returns, so the longest call a program can make is how long the tick,
   the network and every other process wait. `latency` on the kernel's command line turns on an instrument
