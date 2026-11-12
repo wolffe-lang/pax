@@ -123,6 +123,7 @@ use boot_info
 use bootlog
 use bootmark
 use cred
+use fb
 use frames
 use paging
 use pty
@@ -953,8 +954,14 @@ pub fn child_at(d: u64, k: u64) -> u64 {
 ///     stages <the previous boot's stages, by name>
 ///     log <intact <bytes>|refused|none|no-area>
 ///     framebuffer <w>x<h> <bpp> bpp pitch <p> rgb <r>:<rs> <g>:<gs> <b>:<bs> at 0x<physical>  or  framebuffer none
+///     fbmap <wc|uc> entry <e> <handed|programmed was <t>|no-wc|no-pat|refused> pat 0x<IA32_PAT>[ reset] leaf <k> <t> mtrr <none|off|default <t>|variable <n> <t>[ start-only]>
+///     scroll <redraw|copy|undecided> <probe read <r> write <w>|fbread|fbwrite>
 ///     screen <drawn|refused: <why>|not drawn>
 ///     prevscreen <drawn|refused|not drawn|none>
+///
+/// (px129: `fbmap` and `scroll` say how kernel/fb mapped the framebuffer,
+/// IA32_PAT as read back after, the PAT entry the first page's leaf selects
+/// and its type, the MTRR range over it, and how kernel/screen scrolls.)
 ///
 /// (the framebuffer as kernel/bootmark's report words it: the one Limine
 /// handed, with ` model <m>` when it is not RGB and ` (the first of <n>)`
@@ -969,6 +976,8 @@ fn paxboot(base: u64) -> u64 {
     n = paxboot_log(base, n)
     n = put_s(base, n, "\nframebuffer ")
     n = put_fb(base, n)
+    n = paxboot_fbmap(base, n)
+    n = paxboot_scroll(base, n)
     n = paxboot_screen(base, n, from)
     put_b(base, n, 10)
 }
@@ -1022,6 +1031,65 @@ fn paxboot_log(base: u64, at: u64) -> u64 {
         return put_s(base, n, "refused")
     }
     put_s(base, n, if st == bootlog.NO_AREA { "no-area" } else { "none" })
+}
+
+/// px129: `fbmap` at `at` (kernel/fb's `map_facts` and `map_leaf`).
+fn paxboot_fbmap(base: u64, at: u64) -> u64 {
+    let (wc, e, how, was, pat, reset) = fb.map_facts()
+    let (k, t, m) = fb.map_leaf()
+    var n = put_s(base, at, if wc == 1 { "\nfbmap wc entry " } else { "\nfbmap uc entry " })
+    n = put_dec(base, n, e)
+    n = put_b(base, n, 32)
+    n = put_s(base, n, fb.how_word(how))
+    if fb.how_programmed(how) {
+        n = put_s(base, n, " was ")
+        n = put_s(base, n, fb.type_name(was))
+    }
+    n = put_s(base, n, " pat 0x")
+    n = put_hex16(base, n, pat)
+    if reset == 1 {
+        n = put_s(base, n, " reset")
+    }
+    n = put_s(base, n, " leaf ")
+    n = put_dec(base, n, k)
+    n = put_b(base, n, 32)
+    n = put_s(base, n, fb.type_name(t))
+    n = put_s(base, n, " mtrr ")
+    let src = (m >> 8) & 0xff
+    if src == 0 {
+        return put_s(base, n, "none")
+    }
+    if src == 1 {
+        return put_s(base, n, "off")
+    }
+    if src == 2 {
+        return put_s(base, put_s(base, n, "default "), fb.type_name(m & 0xff))
+    }
+    n = put_s(base, n, "variable ")
+    n = put_dec(base, n, src - 3)
+    n = put_b(base, n, 32)
+    n = put_s(base, n, fb.type_name(m & 0xff))
+    if m & 0x10000 != 0 {
+        n = put_s(base, n, " start-only")
+    }
+    n
+}
+
+/// px129: `scroll` at `at` (kernel/screen's way, through kernel/fb).
+fn paxboot_scroll(base: u64, at: u64) -> u64 {
+    var n = put_s(base, at, "\nscroll ")
+    n = put_s(base, n, fb.scroll_word())
+    let (f, r, w) = fb.scroll_how()
+    if f == 1 {
+        return put_s(base, n, " fbread")
+    }
+    if f == 2 {
+        return put_s(base, n, " fbwrite")
+    }
+    n = put_s(base, n, " probe read ")
+    n = put_dec(base, n, r)
+    n = put_s(base, n, " write ")
+    put_dec(base, n, w)
 }
 
 /// px118: `screen` and `prevscreen` at `at`.
