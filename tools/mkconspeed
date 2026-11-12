@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# mkconspeed — build px129's console timing program, a static x86-64
+# Linux executable linked against the baseline glibc's libc.a (as
+# tools/mkbench builds px108's): `conspeed` (user/elf/conspeed.c: how fast
+# the terminal it runs on draws; a table on stdout).
+#
+#   tools/mkconspeed OUTDIR
+#
+# `gcc -static -no-pie -O2`, ET_EXEC with no PT_INTERP, checked. Prints
+# the compiler's version, then `conspeed <sha256> <bytes>`. Build on a
+# baseline x86-64 glibc (an Ubuntu 24.04 container). Exit 0, or 2 on a
+# tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkconspeed OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CONSPEED_CC:-gcc}
+need "$cc" readelf
+say "cc: $("$cc" --version 2>&1 | head -n 1)"
+src=$PAX_ROOT/user/elf/conspeed.c
+"$cc" -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/conspeed" "$src" || die "cc: conspeed"
+readelf -hW "$out/conspeed" | grep -Eq 'Type: +EXEC' || die "conspeed is not ET_EXEC"
+! readelf -lW "$out/conspeed" | grep -q INTERP || die "conspeed has a PT_INTERP (not static)"
+printf 'conspeed %s %s\n' "$(sha256_of "$out/conspeed")" "$(wc -c < "$out/conspeed" | tr -d ' ')"
