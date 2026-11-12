@@ -17,7 +17,6 @@ use frames
 use log
 use paging
 use pci
-use serial
 use sync
 
 extern "c" fn pax_tree_zero(dst: u64, n: u64)
@@ -235,7 +234,7 @@ fn print_string(p: u64, w: u64, n: u64) {
     var k: u64 = 0
     while k < len {
         let b = byte(p + w * 8 + k)
-        serial.put((if b >= 32 && b <= 126 { b } else { 63 }) as u8)
+        log.put_byte((if b >= 32 && b <= 126 { b } else { 63 }) as int)
         k += 1
     }
 }
@@ -625,7 +624,7 @@ pub fn report(u: u64) {
     let p = disk(u)
     if p == 0 { return }
     port_tag(p)
-    log.put(": sd"); serial.put((97 + u) as u8)
+    log.put(": sd"); log.put_byte((97 + u) as int)
     log.put(" model \""); print_string(p, P_MN, 40)
     log.put("\" serial \""); print_string(p, P_SN, 20)
     log.put("\" firmware \""); print_string(p, P_FW, 8)
