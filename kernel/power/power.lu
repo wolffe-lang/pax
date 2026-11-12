@@ -7,6 +7,7 @@ use log
 use paging
 use panic
 use pci
+use serial
 extern "c" fn pax_outb(port: u16, value: u8)
 extern "c" fn pax_inw(port: u16) -> u16
 extern "c" fn pax_outw(port: u16, value: u16)
@@ -48,15 +49,18 @@ pub fn reboot() -> never { reboot_from(0) }
 pub fn reboot_from(step: u64) -> never {
     if step == 0 {
         log.line("reboot: FADT reset register")
+        serial.drain() // px129: COM1's ring on the wire before each try
         let _sent = reset_register()
         clock.wait_us(100000)
     }
     if step <= 1 {
         log.line("reboot: port 0xCF9")
+        serial.drain()
         out(0xcf9, 2); out(0xcf9, 6)
         clock.wait_us(100000)
     }
     log.line("reboot: triple fault")
+    serial.drain()
     unsafe { pax_triple_fault() }
     panic.halt()
 }
@@ -130,6 +134,7 @@ pub fn power_off() -> never {
         if control(pa) & 1 == 0 { log.line("poweroff: ACPI enable timeout"); panic.halt() }
     }
     log.put("poweroff: ACPI S5 types "); log.dec(a as int); log.put("/"); log.dec(b as int); log.end()
+    serial.drain() // px129: COM1's ring on the wire before the power goes
     put_control(pa, (control(pa) & !0x3c00) | (a << 10) | 0x2000)
     if pb != 0 { put_control(pb, (control(pb) & !0x3c00) | (b << 10) | 0x2000) }
     clock.wait_us(100000)
