@@ -304,8 +304,14 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
 - **R-px129-14, the framebuffer's mapping on record (§12).** (A) kernel/fb's choice (`wc` or `uc`), IA32_PAT as read
   back, and kernel/screen's scroll way (redraw or copy, how it was decided, the probe's read and write costs) on
   /proc/pax-boot's framebuffer line, so the boot log keeps them, with a row in mpx3-screen holding the line there
-  to the console's `screen:` line (recommended); (B) the console line only, as now: on the installed machine nothing
-  an ordinary user or root can read after boot says whether the framebuffer is write-combined. Not built.
+  to the console's `screen:` line (recommended); (B) the console line only, as before: on the installed machine nothing
+  an ordinary user or root can read after boot says whether the framebuffer is write-combined. Built as (A), with
+  more: kernel/fb no longer depends on the bootloader's IA32_PAT. When no entry 4-7 holds WC it programs entry 5 to
+  WC by the SDM's procedure for a change of memory types and maps the framebuffer with it. The console's `fbmap:` line
+  and /proc/pax-boot's `fbmap` and `scroll` lines (kept in /var/log/boot.log) say what it did. mpx6-bootlog's A1
+  holds the console's line and /proc/pax-boot's to each other, and A2 (`pax.patdefault`, IA32_PAT at its power-on
+  value) fails if the framebuffer is mapped uncached where WC can be had. At scale 1 the screen's runs fill whole
+  64-byte lines. The installed machine's table later showed its framebuffer write-combined already (§11).
 - **R-px129-15, a console write and the UART (§11).** (A) a program's terminal output kept off COM1 on an installed
   system by default, mirrored with a command-line word, the kernel's own lines still on COM1; (B) a transmit ring
   the UART's transmit interrupt drains, the FIFO filled 16 bytes at a time, a full ring dropping and counting, no
@@ -436,19 +442,25 @@ right after `plain` it infers it from a full screen drawn: about 10 ms means wri
 (`e5fcf3f1`, `d4574d95`). Under TCG at trunk's drawing it ended in 42 s where version 3 would run for many minutes.
 
 **Why the machine starved.** Every system call runs with interrupts off: SYSCALL's FMASK, 0x44700, clears IF
-(kernel/user's header), and nothing inside a console write sets it again. A write's bytes go to `serial.put` and
-`screen.put` one at a time, and with no UART there is nothing to wait on, so a write is one span with interrupts
-off: no tick (its time lost), no network interrupt, no switch. After the write the pending tick switches away only
-when the writer's quantum, two delivered ticks, is used; the device's interrupt only queues kernel/netd at the run
-queue's tail. A process that writes the console back to back therefore holds the CPU for about two writes a turn,
-and every hop of a reply (netd for a ping; netd, the server, netd for an ssh keystroke) waits about that long. At
-trunk a scroll redraws every cell whose value changed, top row to bottom, straight to the framebuffer (`scroll`,
-the redraw way px87 chose for a GPU): with text on the screen that is the whole screen, about 14.7 MB of stores a
-line at 2560 × 1440, and the travelling repaint the person saw. The CPU's share is about 0.5 µs a cell; a pass slow
-enough to watch means each 8-byte store costs a bus round trip, which is what an uncached mapping does, and nothing
-on the machine records whether kernel/fb mapped it write-combined (R-px129-14). px129's head draws each changed
-cell once a write, never reading the framebuffer, so a ten-line write is one pass, not ten; a one-line write that
-scrolls is still one full pass, still with interrupts off.
+(kernel/user's header), and nothing inside a console write sets it again. A write's bytes go to `serial.put` one at
+a time, which draws each on the screen and then, on that machine, waited for COM1's UART to send the byte before it
+(§11): 86.8 µs a byte. So a write was one span with interrupts off as long as its bytes at 115200 baud: no tick (its
+time lost), no network interrupt, no switch. Version 3's frames were a screen of text or more (`plain`'s 23,661
+bytes, 2.05 s; `sgr`'s 208,251, 18 s), so the machine answered nothing for seconds at a time, and its clock lost
+those seconds, 20 minutes of them. After a write the pending tick switches away only when the writer's quantum, two
+delivered ticks, is used; the device's interrupt only queues kernel/netd at the run queue's tail. A process that
+writes the console back to back therefore holds the CPU for about two writes a turn, and every hop of a reply (netd
+for a ping; netd, the server, netd for an ssh keystroke) waits about that long.
+
+The travelling repaint was the same wait, seen on the screen. Trunk draws a cell as its byte is written, so with each
+byte paced at 86.8 µs a screen of text filled at about 11,500 cells a second: a 256-cell row every 22 ms, 90 rows in
+2 s. The first version of this section put the repaint down to scrolling through an uncached framebuffer. The
+machine's own table says otherwise: a scroll's whole-screen redraw there takes about 5 ms, write-combined (§11).
+
+With the UART's fix (R-px129-15) a write never waits on COM1, and what remains of the span is the drawing's. px129's
+head draws each changed cell once a write, never reading the framebuffer, so a ten-line write is one pass, not ten;
+a one-line write that scrolls is still one full pass, still with interrupts off. R-px129-13 is the design that ends
+that.
 
 **Measured in QEMU** (tests/mpx3-conflood, `3cd49a6c` and `bf78b054`: user/elf/conflood as init, its UDP echo
 child, 6 s idle, a 12 s flood, 6 s idle; tests/mpx3-conflood.d/peer.py the whole network, pinging the machine and
@@ -463,8 +475,31 @@ request was answered; idle, both took under 0.5 ms. During the flood (p95, ms):
 
 The echo waits about two or three writes, the ping about one. F2 (ping and echo each at least 95 % answered, p95 at
 most 50 ms during the flood) is red at trunk in every mode and at px129's head for large writes: px129 shrinks the
-starvation and bounds none of it, and on the metal, where a pass of stores costs more, its small writes would cost
-more too. R-px129-13 is the fix's design. F2's record at `d4092dee` (`notes/px129/rig/flood.manifest`, record
+starvation and bounds none of it. On the metal a whole-screen pass costs about 5 ms (§11), about what it costs
+under KVM, so once the UART no longer waits its small writes would sit near these figures. R-px129-13 is the fix's
+design.
+
+These figures are the drawing's share alone. The rig had no COM1, and that hid the larger cost: on the installed
+machine each of these writes also waited its bytes at 86.8 µs with interrupts off, ten scrolled lines (2,587 bytes)
+225 ms, a screen of text 2.05 s, the 256 KiB write 22.8 s. mpx3-conflood now runs each mode a second time with COM1
+drained at 115200 baud (`--uart slow`; both legs by default, the same far end as mpx3-conspeed's slow leg). F2's record at `d4092dee` (`notes/px129/rig/flood.manifest`, record
 sha256 `a43adc490ecea58356f5322b9d7f05ae98404450f75ecfab4b616b50d2bb9cb3`): `FAIL F2 ping during the flood: 119 of 119
 answered (100%, at least 95%), p95 104.032 ms` and `FAIL F2 echo during the flood: … p95 212.351 ms` for the large
 writes, the other two modes passing; `END flood exit=1 secs=83`.
+
+**The mapping's records.** On the first branch: A2 red at `f8e34a85` (the rows and the ISO boot, before kernel/fb
+programs the PAT; record sha256 `19e0e84bf2b5c9504aee5bdd7fb13e36d19bbe798fda67d6cf8314a0b3152f84`) and green at
+`02a06757` (record sha256 `3cc781b96e9cd3c15bb5d0a97de54ef1623434a3bedba936261cffa026e794b2`), mpx6-bootlog's group A
+by `notes/px129/rig/fbmap.manifest`.
+
+**This branch's rebase.** The flood and the mapping were first stacked on #379's head as `px129-flood` (head
+`4f2da403`); they now sit on the UART's fix, unchanged but for the neighbouring entries of this note,
+kernel/README.md and kernel/procfs (`/proc/pax-boot`'s `serial` line beside `fbmap` and `scroll`). Version 4 of the
+timing program (`1909d4de`, `e5fcf3f1`, `d4574d95`) came in with the UART's branch as `9053ab3f`, `10d397bc`,
+`a5e3fca7`. The rest, first branch → this one: `3cd49a6c` → `301f95ea` (conflood.c), `bf78b054` → `5d98f72e`
+(mpx3-conflood), `12e3d1e4` → `7b4e204b` (peer.py), `d4092dee` → `c62debce` (the flood rig), `25895813` →
+`a4027060` (this section), `036cd371` → `d5212d74` (pax_wbinvd), `46e05a7d` → `c01177e3` (kernel_leaf), `9b3e9de3` →
+`10bd2e86` (kernel/fb's record), `f9ef3a65` → `59516f1d` (procfs), `78d4ab10` → `a1c41b39` (boot.log), `6e8743ce` →
+`971849fe` (A1, A2, K1), `ba056104` → `7e46760b` (the fbmap rig), `af91d852` → `f70b6f97` (the PAT programmed),
+`a81aa1c9` → `99b8f479` (whole lines), `02a06757` → `8e0404c3` (A1 and A2 on an ISO), `02eb9494` → `78fd9eec`,
+`cfb7e16e` → `b6368873`, `0d73919d` → `56d4d023` (README, SOURCES, CHANGELOG), `4f2da403` → `61eef8cd` (V4).
