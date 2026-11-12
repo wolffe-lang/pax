@@ -1236,6 +1236,7 @@ static void sec_a6(void) {
     a = socket(AF_UNIX, SOCK_DGRAM, 0);
     say("A6.8 a SOCK_DGRAM socket for a path: %s\n", a >= 0 ? "made" : ename(errno));
     if (a >= 0) close(a);
+    rmdir(SOCKDIR); /* the tree as it was made */
     fflush(stdout);
 }
 
@@ -1340,6 +1341,24 @@ static void sec_a7(void) {
 
 /* --- A8: termios ------------------------------------------------------------- */
 
+/* Which of termios' fields two settings differ in ("every field as
+ * saved" when none): the four flag words, the line discipline, each of
+ * the 19 control characters a kernel keeps, the speeds. */
+static const char *tdiff(const struct termios *a, const struct termios *b) {
+    static char out[256];
+    out[0] = 0;
+    if (a->c_iflag != b->c_iflag) strcat(out, " iflag");
+    if (a->c_oflag != b->c_oflag) strcat(out, " oflag");
+    if (a->c_cflag != b->c_cflag) strcat(out, " cflag");
+    if (a->c_lflag != b->c_lflag) strcat(out, " lflag");
+    if (a->c_line != b->c_line) strcat(out, " c_line");
+    for (int i = 0; i < 19; i++)
+        if (a->c_cc[i] != b->c_cc[i]) { char t[32]; snprintf(t, sizeof t, " c_cc[%d] %u->%u", i, a->c_cc[i], b->c_cc[i]); strcat(out, t); }
+    if (cfgetispeed(a) != cfgetispeed(b)) strcat(out, " ispeed");
+    if (cfgetospeed(a) != cfgetospeed(b)) strcat(out, " ospeed");
+    return out[0] ? out + 1 : "every field as saved";
+}
+
 static void flags_row(const char *row, int fd) {
     struct termios t;
     if (tcgetattr(fd, &t) != 0) { say("%s %s\n", row, ename(errno)); return; }
@@ -1374,7 +1393,7 @@ static void sec_a8(void) {
     flags_row("A8.1 a pty raw:", s);
     tcsetattr(s, TCSANOW, &saved);
     tcgetattr(s, &back);
-    say("A8.1 a pty put back: %s\n", memcmp(&saved, &back, sizeof saved) == 0 ? "every field as saved" : "DIFFERENT");
+    say("A8.1 a pty put back: %s\n", tdiff(&saved, &back));
     close(s);
     close(m);
     /* a client killed by SIGKILL leaves its terminal raw; the master's holder puts it back */
@@ -1402,7 +1421,7 @@ static void sec_a8(void) {
         flags_row("A8.3 the console raw:", 0);
         tcsetattr(0, TCSANOW, &saved);
         tcgetattr(0, &back);
-        say("A8.3 the console put back: %s\n", memcmp(&saved, &back, sizeof saved) == 0 ? "every field as saved" : "DIFFERENT");
+        say("A8.3 the console put back: %s\n", tdiff(&saved, &back));
     } else {
         say("A8.3 the console: %s\n", ename(errno));
     }
