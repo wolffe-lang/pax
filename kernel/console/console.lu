@@ -723,7 +723,7 @@ pub fn onlcr(t: u64) -> bool {
 /// screen) for the console, into OQ for a pty's slave.
 fn raw_out(t: u64, b: u64) {
     if t == CON {
-        serial.put((b & 0xff) as u8)
+        serial.put_tty((b & 0xff) as u8) // px129: a program's output, COM1 only while mirrored
     } else {
         oq_put(t, b)
     }
@@ -748,9 +748,9 @@ pub fn put_kernel(src: u64, n: u64) {
         // file's bytes in the initramfs, mapped read-only in the HHDM).
         let b = unsafe { ((src + i) as *u8).read_volatile() }
         if b as u64 == 10 && nl {
-            serial.put(13)
+            serial.put_tty(13)
         }
-        serial.put(b)
+        serial.put_tty(b) // px129: a program's output (sendfile), COM1 only while mirrored
         i += 1
     }
     screen.batch_end()
@@ -1943,7 +1943,10 @@ pub fn start() {
     kbd_start()
     put_sv(CON, C_STARTED, 1)
     sched.tty_on() // px48: the next process the kernel starts takes it as its controlling terminal
-    if serial.available() { timer.unmask(COM1_LINE) }
+    if serial.available() {
+        timer.unmask(COM1_LINE)
+        serial.tx_irq_on() // px129: from here a write queues for COM1, never waits
+    }
     if sv(CON, C_KBD_AFTER) < 256 { timer.unmask(KBD_LINE) }
 }
 
@@ -1979,6 +1982,7 @@ pub fn irq(v: u64) {
             }
             n += 1
         }
+        serial.tx_irq() // px129: the transmit FIFO refilled from the ring
     } else {
         var n: u64 = 0
         while inp(KBD_CMD) & KBD_OBF != 0 && n < 64 {
