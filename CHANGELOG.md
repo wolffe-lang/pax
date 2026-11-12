@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The console draws only what changes, once a write (px129).** At a real
+  machine's console, full-screen programs drew visibly slowly while the same
+  programs over ssh did not: the screen drew every cell a program wrote, at once
+  and byte by byte, whether or not its pixels changed, so a clear and a repaint
+  drew the screen twice, a scrolled line drew every cell of a screen of text,
+  and with the cursor shown every character drew two cells. The screen now keeps
+  a second grid of what the framebuffer shows: a write updates the cell grid,
+  and its end draws each cell that differs, a run of neighbouring cells a pixel
+  row at a time with no division a pixel. Under KVM at 2560×1440 (QEMU's
+  framebuffer is host memory, so this is the CPU's share alone) a full screen
+  went from 10.6 to 4.2 ms, ten scrolled lines from 101 to 4.1 ms, a clear and a
+  repaint from 20 to 4.5 ms, yew's F mode opening from 7.8 to 2.3 ms and a step
+  of cub from 11.2 to 5.2 ms; the pictures are pixel for pixel what they were.
+  The grid is now up to 320 columns, so a 2560-pixel display shows a whole grid
+  (pax#357). `user/elf/conspeed.c` measures any terminal in one command, and
+  `tests/mpx3-conspeed` holds the figures to rows at 2560×1440, its table read
+  off the screen of a machine with no COM1.
+
 - **ligature, the linker in wolf, on the dev image beside lld (px128).** The dev image carries
   `/usr/bin/ligature`, built static from ligature's pinned commit (`user/ligature.pin`, `tools/mkligature`)
   as clef and trash are, and `/etc/pax-release` names it. lld stays the default for `wolf build` on the
