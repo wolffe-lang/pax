@@ -15,7 +15,9 @@ burrowd_config is user/burrowd/burrowd_config with one `SetEnv` line appended (s
 variables set in every session, over burrowd's defaults), written here from SHRC's own `export
 NAME=VALUE` lines, every one but PATH (burrowd's default PATH, sshd's, stands): WOLF_STD (dev only),
 LUPIN_STD and DEN_TLS_ROOTS today. Generated from the one text, the two cannot drift: a variable the
-console gains, ssh gains in the same build.
+console gains, ssh gains in the same build. Last on the line, ENV=/etc/shrc (pax#368), as /etc/pax-run
+and /bin/login give the console's shell: a shell over ssh at a terminal is interactive and runs the file
+(lope's hook, autocd, `g`), as the console's does; a command over ssh is not, and reads no ENV.
 
 Refused (exit 1, by name): an `export` line of another shape (a value SetEnv would have to quote or
 expand: blanks, quotes, `$`, a backslash, a leading `#`), a name exported twice, a shipped
@@ -27,10 +29,12 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEV_LINES = 'export PATH=/usr/bin:/bin\nexport WOLF_STD=/usr/share/wolf/compiler-std\n'
+SESSION_ENV = 'ENV=/etc/shrc'
 EXPORT = re.compile(r'^export ([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_./:,+=@%-]*)$')
 COMMENT = ('# px116 (pax#334): the variables /etc/shrc exports for the console, every one but PATH, in\n'
            '# every command and shell over ssh too (sshd_config(5) SetEnv). tools/system-env writes this\n'
-           '# line from /etc/shrc when the image is built: change /etc/shrc, not this line.\n')
+           '# line from /etc/shrc when the image is built: change /etc/shrc, not this line. ENV, last\n'
+           '# (pax#368), makes a shell at a terminal over ssh run /etc/shrc, as the console\'s does.\n')
 
 
 def die(msg):
@@ -74,7 +78,7 @@ def burrowd_config(shrc_text):
         die('user/burrowd/burrowd_config has a SetEnv line already: this tool writes the one line')
     if not shipped.endswith('\n'):
         shipped += '\n'
-    return shipped + COMMENT + 'SetEnv ' + ' '.join(exports(shrc_text)) + '\n'
+    return shipped + COMMENT + 'SetEnv ' + ' '.join(exports(shrc_text) + [SESSION_ENV]) + '\n'
 
 
 def main(argv):

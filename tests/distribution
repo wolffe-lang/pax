@@ -121,7 +121,8 @@ def check(blob):
             # /etc/shrc exports, every one but PATH, so a command over ssh has the console's.
             exported = [l[len('export '):] for l in shrc if l.startswith('export ') and not l.startswith('export PATH=')]
             setenv = [l for l in rows[path][1].decode().splitlines() if l.startswith('SetEnv ')]
-            assert setenv == ['SetEnv ' + ' '.join(exported)], 'image-burrowd-setenv'
+            # pax#368: and last, ENV=/etc/shrc, so a shell at a terminal over ssh runs it as the console's does.
+            assert setenv == ['SetEnv ' + ' '.join(exported + ['ENV=/etc/shrc'])], 'image-burrowd-setenv'
             assert {e.split('=')[0] for e in exported} >= {'LUPIN_STD', 'DEN_TLS_ROOTS'} | ({'WOLF_STD'} if variant == 'dev' else set()), 'image-burrowd-setenv-names'
             assert rows[path][1].startswith(want), 'image-'+user
         else:

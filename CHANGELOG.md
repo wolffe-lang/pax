@@ -7,6 +7,14 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A shell over ssh at a terminal runs /etc/shrc (px123, pax#368).** burrowd
+  gave its sessions no ENV, so the login shell of `ssh host` never ran
+  /etc/shrc: no lope hook, no autocd (a bare `../` answered `permission
+  denied`), no `g` or `gi`. burrowd_config's SetEnv line (tools/system-env)
+  now ends with ENV=/etc/shrc, as the console's shell is started with; a
+  command over ssh is not interactive and still reads no ENV.
+  `tests/mpx5-burrowd` B28 holds the terminal session, B29 the command.
+
 - **The images' pins at what the first --latest image carried, sniff, and
   --latest on trunk (px123).** The dev compiler moves to wolf 0.2.39, lupin to
   0.1.61, lupin's std to wolf-std 77cf3210, pelt to b80d6570, yew to 3a9983ee
