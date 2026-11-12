@@ -6,8 +6,8 @@
 #   ci-plan        tests/ci-plan (the tiers map, the suite's lines)
 #   build ARGS     tests/mpx7-mux --only build ARGS (the checkers' selftests first), in a container
 #   linux          tests/mpx7-mux --only linux: both probes as pid 1 on a pseudo-terminal in throwaway
-#                  Ubuntu containers (the host's engine, ENGINE), each row held to the committed
-#                  references
+#                  Ubuntu containers (the host's engine through engine.sh, the take's CPUs inside),
+#                  each row held to the committed references
 #   boot ARGS      tests/mpx7-mux --images the build ARGS, in a container with KVM
 #   screen ARGS    tests/mpx3-screen ARGS (its own build: the screen pixel for pixel against
 #                  tools/screen-ref, which reads the font's new rows), with KVM
@@ -30,13 +30,13 @@ case $what in
     preflight)
         [ -c /dev/kvm ] && [ -w /dev/kvm ] || echo "REFUSED no-kvm /dev/kvm is not usable"
         [ -x "$P" ] || echo "REFUSED no-engine $P"
-        [ -x "$ENGINE" ] || echo "REFUSED no-engine-wrapper $ENGINE"
         "$P" image inspect localhost/px75-ubuntu:2 > /dev/null 2>&1 || echo "REFUSED no-image localhost/px75-ubuntu:2"
         echo "preflight: kvm, engine and image looked at; the take's CPUs $CPUS"
         exit 0 ;;
     ci-plan) ctr 0 localhost/px75-ubuntu:2 python3 -I tests/ci-plan ;;
     build) lift ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx7-mux --only build "$@"; exit $?' x "$@" ;;
-    linux) lift env PAX_ENGINE="$ENGINE" ENGINE_CPUS="$CPUS" tests/mpx7-mux --only linux --images "$PAX_BUILD/mpx7-mux" ;;
+    linux) lift env PAX_ENGINE="$GAUNTLET_RIG_DIR/engine.sh" ENGINE_P="$P" ENGINE_MEM="${MEM:-12g}" ENGINE_CPUS="$CPUS" \
+        tests/mpx7-mux --only linux --images "$PAX_BUILD/mpx7-mux" ;;
     boot) lift ctr 1 localhost/px75-ubuntu:2 bash -c 'tests/mpx7-mux --images "$PAX_BUILD/mpx7-mux" "$@"; exit $?' x "$@" ;;
     screen) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx3-screen "$@"; exit $?' x "$@" ;;
     vt) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx5-screen "$@"; exit $?' x "$@" ;;

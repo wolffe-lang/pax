@@ -5,8 +5,6 @@
 #   L       the lane's directory (everything the rig writes is under it; TMPDIR is $L/tmp)
 #   CPUS    the CPUs the take may use (taskset inside each container)
 #   P       the container engine (rootless podman)
-#   ENGINE  the engine as tools/linux-tree calls it (PAX_ENGINE: P with the take's memory, process
-#           limit and CPUs added to each `run`)
 #   MEM     each container's memory (12g on a block, the light slot's 6g)
 # and, read by take.sh alone: LOCKS (the lock files, in the host's one order) and REC (the recorder,
 # a copy by value of the planning repo's tools/gauntlet-record.sh).
@@ -14,7 +12,7 @@
 : "${PX125_HOST:?PX125_HOST names the host file}"
 # shellcheck disable=SC1090
 . "$PX125_HOST"
-: "${L:?}" "${CPUS:?}" "${P:?}" "${ENGINE:?}" "${PAX_BUILD:?the build directory of the take}"
+: "${L:?}" "${CPUS:?}" "${P:?}" "${PAX_BUILD:?the build directory of the take}"
 R=$(realpath "$L")
 export TMPDIR=$L/tmp PAX_CACHE=$L/cache
 mkdir -p "$TMPDIR" "$PAX_CACHE" "$L/home" "$PAX_BUILD"
