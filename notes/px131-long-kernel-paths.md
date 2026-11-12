@@ -214,13 +214,16 @@ sleeper's worst and its ping's worst.
   beside a hog. With N runnable hogs, each of these multiplies by N.
 - **Ticks.** Beside the worst loads the tick clock kept 6 to 9 % of real time: a 3 s munmap is 1 tick. CLOCK_MONOTONIC
   stood still for the whole of each long call.
+- **The scheduler's longest gap** between two chances to choose was, beside every load whose calls run long, that
+  load's longest stretch with interrupts off plus a few microseconds (a 370,456 µs console write, a 370,484 µs gap),
+  and beside the others about a tick: the scheduler has no chance at all inside a call, and one every tick outside.
 - **Two oddities, measured and left:** fork of 256 MiB at 2 GiB took 0.46 s on one boot and 1.05 s on another, where
   128 MiB took 40 ms: the frame allocator's next-fit search when the free frames are spread (`frames.alloc`); exec of
   the same binary took 22 ms on three boots and 171 ms on one, after the file-write load had freed 64 MiB.
 - **Linux** keeps every load within 2 ms but for two single outliers (a console write and a 128 MiB file write); it
   keeps interrupts on in system calls and preempts a call at its reschedule points.
 - **Under TCG** (CI's leg) every figure is the emulator's first: the sleeper's worst beside `spin` is 75 ms; the
-  console's write costs less than under KVM against it (QEMU's UART is the same code either way).
+  console's write costs less there than under KVM, where each byte's two port accesses leave the guest for QEMU.
 
 ## 8. Lost ticks: what the clocks and timeouts do
 
@@ -355,8 +358,8 @@ ten seconds shows the general rule at work, bounded and unable to starve the mac
 3. **The clocks.** (A) user clocks, sleeps and timeouts from `kernel/clock` as deadlines (recommended, next; with the
    console's lane's same recommendation); (B) keep ticks and shorten every stretch below 10 ms first.
 4. **Device-driven wake-ups.** (A) `netd`, the readers it wakes and the console's readers to the queue's head, and a
-   device's interrupt switches to them where the tick could (recommended, next; not built here, by the coordinator's
-   word); (B) leave the FIFO.
+   device's interrupt switches to them where the tick could (recommended, next; not built here: it waits for its
+   ruling); (B) leave the FIFO.
 5. **Deferred work.** (A) a kernel worker thread for teardown, frame zeroing and writeback (recommended, after 3 and 4);
    (B) keep teardown in the calls.
 6. **Block I/O.** (A) completion interrupts, blocking waits, resets on timeout (recommended, with 5); (B) polling with
