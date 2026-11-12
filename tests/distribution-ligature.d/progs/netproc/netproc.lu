@@ -1,0 +1,26 @@
+// px128: a program that uses std.net and std.process, built on the box.
+use std.net
+use std.process
+
+fn main() -> !int {
+    var srv = net.listen(net.loopback(0))?
+    let p = net.port(srv)?
+    var cli = net.connect(net.loopback(p))?
+    net.write(mut cli, "ping")?
+    var conn = net.accept(mut srv)?
+    let msg = net.read(mut conn, 16)?
+    print("got: {msg}")
+    net.write(mut conn, "pong")?
+    let reply = net.read(mut cli, 16)?
+    print("reply: {reply}")
+    net.close(take cli)?
+    net.close(take conn)?
+    net.close_listener(take srv)?
+    var c = process.command("/bin/echo")
+    process.push_arg(mut c, "child: hello from echo")
+    let ch = process.start(c)?
+    let st = process.wait_status(take ch)?
+    let code = process.shell_code(process.status_from(st))
+    print("child status: {code}")
+    0
+}
