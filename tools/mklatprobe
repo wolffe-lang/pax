@@ -3,8 +3,9 @@
 # against the baseline glibc's libc.a (as mkbench's are): `latprobe`
 # (user/elf/latprobe.c: how late a process runs beside a load of long
 # system calls, on PAX and on Linux) and `latbig` (the same source with a
-# loaded segment of LATBIG_MIB MiB, the `exec` load's program), for
-# tests/mpx6-latency.
+# loaded segment of LATBIG_MIB MiB, the `exec` load's program), and
+# `latinit` (user/elf/latinit.c: the init of the suite's Linux guest, the
+# comparison column), for tests/mpx6-latency.
 #
 #   tools/mklatprobe OUTDIR
 #
@@ -25,10 +26,11 @@ mib=${LATBIG_MIB:-32}
 need "$cc" readelf
 say "cc: $("$cc" --version 2>&1 | head -n 1)"
 src=$PAX_ROOT/user/elf/latprobe.c
-for p in latprobe latbig; do
+for p in latprobe latbig latinit; do
     def=(); [ "$p" = latbig ] && def=(-DLATBIG_MIB="$mib")
+    s=$src; [ "$p" = latinit ] && s=$PAX_ROOT/user/elf/latinit.c
     "$cc" -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE ${def[@]+"${def[@]}"} -Wl,--build-id=none -Wl,-z,noexecstack \
-        -o "$out/$p" "$src" || die "cc: $p"
+        -o "$out/$p" "$s" || die "cc: $p"
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
     ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
     printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
