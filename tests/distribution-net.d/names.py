@@ -52,8 +52,10 @@ def block(begin, end):
 asked = [l.split(' ', 3)[3] for l in (dns.read_text().splitlines() if dns.exists() else []) if l.startswith('QUERY ')]
 accepts = [l for l in (listen.read_text().splitlines() if listen.exists() else []) if l.startswith('ACCEPT ')]
 
-row('N2', 'PX127-BUILD=0' in lines,
-    'wolf build of the dialer at the console: %s' % ([l for l in lines if l.startswith('PX127-BUILD=')] or ['no PX127-BUILD line'])[0])
+# wolf build's progress line has no newline of its own at a console, so the
+# status may follow it on the same line; the typed command says `=$?`.
+built = [m.group(1) for l in lines if not l.startswith('$ ') for m in [re.search(r'PX127-BUILD=([0-9]+)$', l)] if m]
+row('N2', built == ['0'], 'wolf build of the dialer at the console: exit %s' % (built or 'not seen'))
 
 want = ['github.com:%s: connected' % port, 'nosuch.test:%s: io' % port, '10.0.2.2:%s: connected' % port]
 got = block('PX127-DNS=begin', 'PX127-DNS=end')
