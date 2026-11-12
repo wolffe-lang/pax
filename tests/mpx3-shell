@@ -23,7 +23,9 @@
 # `mv` and `cp` are in /bin too, and tests/mpx3-tree types them), procs
 # (tools/mkuser). Every program in
 # the shell's /bin is built by wolf. Two initramfs: the shell's (those
-# in /bin, /etc/motd, /etc/words, /etc/pax-run `/bin/pelt`, and px26's
+# in /bin, /etc/motd, /etc/words, /etc/pax-run `/bin/pelt +o friendly`
+# (pelt b80d657 starts friendly at a terminal unless invoked as sh; these
+# sessions hold the plain `$ `), and px26's
 # /etc/passwd, /etc/group and /etc/localtime — the UTC zone,
 # tools/mkzone — which `ls -l` and `stat` read) and procs' (/bin/procs,
 # /etc/motd, /etc/script — a text file with execute bits — /etc/pax-run
@@ -185,7 +187,10 @@ LINUX_SESSIONS="shell-serial shell-ps2 shell-howl shell-plumb shell-long shell-s
 USER_SESSIONS="shell-user procs-user" # px47: their Linux side is tools/linux-tree --owners
 image_of() { case $1 in procs) echo procs ;; procs-quiet) echo procs-quiet ;; *-quiet) echo shell-quiet ;; *-user) echo "$1" ;; *) echo shell ;; esac; }
 init_of() { case $1 in procs*) echo procs ;; *) echo pelt ;; esac; }
-initpath_of() { case $1 in procs-user) echo as ;; *) init_of "$1" ;; esac; } # px47: pid 1's file, as the kernel names it
+initpath_of() { case $1 in procs-user) echo as ;; shell-user) echo env ;; *) init_of "$1" ;; esac; } # px47: pid 1's file, as the kernel names it
+# pelt b80d657: the shell's image starts `/bin/pelt +o friendly`; shell-user's `/bin/env ENV=/etc/pelt-plain
+# /bin/pelt`, so the shell `su pax` starts reads /etc/pelt-plain (`set +o friendly`) too, as su keeps ENV.
+pelt_args() { case $1 in shell-user) echo /bin/env ENV=/etc/pelt-plain /bin/pelt ;; procs-user) echo /bin/as 1000 1000 /bin/procs ;; *) echo "/bin/$(init_of "$1")$([ "$(init_of "$1")" = pelt ] && echo ' +o friendly')" ;; esac; }
 keys_of() { case $1 in shell-user) echo "$PAX_ROOT/user/console/shell-user.keys" ;; shell-serial) echo "$PAX_ROOT/user/console/shell.keys" ;; shell-ps2) echo "$PAX_ROOT/user/console/shell-ps2.keys" ;; shell-howl*) echo "$PAX_ROOT/user/console/shell-howl.keys" ;; shell-plumb) echo "$PAX_ROOT/user/console/shell-plumb.keys" ;; shell-long) echo "$PAX_ROOT/user/console/shell-long.keys" ;; shell-sigs*) echo "$PAX_ROOT/user/console/shell-sigs.keys" ;; *) echo "$images/procs.keys" ;; esac; }
 kbd_of() { case $1 in *-ps2) echo ps2 ;; *) echo serial ;; esac; }
 linux_of() { case $1 in *-quiet) echo "${1%-quiet}" ;; shell-sigs-ps2) echo shell-sigs ;; *) echo "$1" ;; esac; }
@@ -212,7 +217,7 @@ linux_user_side() { # dir -> reasons on stdout
     for s in $USER_SESSIONS; do
         p=$(image_of "$s") ip=$(initpath_of "$s")
         own=(); [ -f "$1/$p.owners" ] && own=(--owners "$1/$p.owners")
-        args=("/bin/$ip"); [ "$s" = procs-user ] && args=(/bin/as 1000 1000 /bin/procs)
+        read -r -a args <<< "$(pelt_args "$s")"
         # --rdev: shell-user writes /dev/null, which a rootless engine's
         # container has only through a bind of the host's node.
         if "$PAX_ROOT/tools/linux-tree" --root "$1/$p/root" --keys "$(images=$1 keys_of "$s")" --prompt "$PROMPT" --argv0 "/bin/$ip" --size 512m --rdev \
@@ -285,7 +290,7 @@ if [ -z "$images" ]; then
     printf '%s\n' "$MOTD" > "$pr/etc/motd"
     printf 'echo this file is text with execute bits, not a program PAX or Linux can run\n' > "$pr/etc/script"
     chmod 755 "$pr/etc/script"
-    echo /bin/pelt > "$sh/etc/pax-run"
+    echo /bin/pelt +o friendly > "$sh/etc/pax-run"
     echo /bin/procs > "$pr/etc/pax-run"
     : > "$work/procs.keys"
     # px47: the user's images. The shell's tree with su, the accounts
@@ -300,6 +305,8 @@ if [ -z "$images" ]; then
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\n' > "$su_/etc/group"
     printf 'ENV_PATH\tPATH=/bin\nENV_SUPATH\tPATH=/bin\n' > "$su_/etc/login.defs"
     printf 'root only: 0600\n' > "$su_/etc/secret"
+    printf 'set +o friendly\n' > "$su_/etc/pelt-plain"
+    pelt_args shell-user > "$su_/etc/pax-run"
     printf '/etc/secret 600 0 0\n/home 755 0 0\n/home/pax 755 1000 1000\n' > "$work/shell-user.owners"
     cp -R "$pr/." "$pu/"
     cp "$work/cred/as" "$pu/bin/as" || why+=" no as;"
@@ -372,7 +379,7 @@ if [ -z "$images" ]; then
         for s in $LINUX_SESSIONS; do
             p=$(image_of "$s") i=$(init_of "$s")
             if ${asroot[@]+"${asroot[@]}"} python3 "$PAX_ROOT/tools/linux-tty" --root "$work/$p/root" --pid1 \
-                --keys "$(keys_of "$s")" --prompt "$PROMPT" --argv0 "/bin/$i" "$work/linux/$s.tty" -- "/bin/$i"; then
+                --keys "$(keys_of "$s")" --prompt "$PROMPT" --argv0 "/bin/$i" "$work/linux/$s.tty" -- $(pelt_args "$s"); then
                 say "  linux $s: $(wc -c < "$work/linux/$s.tty" | tr -d ' ') bytes, status $(cat "$work/linux/$s.tty.rc")"
             else
                 why+=" tools/linux-tty $s;"
