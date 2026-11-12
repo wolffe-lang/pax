@@ -7,6 +7,9 @@
 #   build SUITE ARGS   tests/SUITE --no-boot ARGS in a container (its P0/S0 build)
 #   boot SUITE ARGS    tests/SUITE --images the build ARGS, in a container with KVM
 #   burrowd ARGS   tests/mpx5-burrowd ARGS whole (its tree, then its boots) in the rig's network image
+#   sudo-build ARGS    tests/mpx5-sudo --only build ARGS in a container (no engine there)
+#   sudo-auth      tests/mpx5-sudo --only auth on the host: its container sides through
+#                  notes/px106/rig/docker-like (docker's shape, as CI runs them)
 # A suite says each verdict through tools/lib.sh's `say` (`SUITE: FAIL ROW …`) or at column 0
 # (`FAIL ROW …`, the rows' own); `lift` puts the first kind at column 0 as `FAIL ROW …` (the recorder
 # keeps a `FAIL ` line there, so a plant's row is named in its record) and changes no other line. The
@@ -22,7 +25,7 @@ case $what in
     preflight)
         [ -c /dev/kvm ] && [ -w /dev/kvm ] || echo "REFUSED no-kvm /dev/kvm is not usable"
         [ -x "$P" ] || echo "REFUSED no-engine $P"
-        for i in localhost/px75-ubuntu:2 localhost/px124-net:1; do
+        for i in localhost/px75-ubuntu:2 localhost/px124-net:1 localhost/px103-sudo:1 localhost/px106-auth:1; do
             "$P" image inspect "$i" > /dev/null 2>&1 || echo "REFUSED no-image $i"
         done
         [ -c /dev/net/tun ] || echo "REFUSED no-tun /dev/net/tun"
@@ -33,6 +36,10 @@ case $what in
         lift ctr 0 localhost/px75-ubuntu:2 bash -c 's=$1; shift; export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tests/$s --no-boot "$@"; exit $?' x "$s" "$@" ;;
     boot) s=$1; shift
         lift ctr 1 localhost/px75-ubuntu:2 bash -c 's=$1; shift; tests/$s --images "$PAX_BUILD/$s" "$@"; exit $?' x "$s" "$@" ;;
+    sudo-build)
+        lift ctr 0 localhost/px75-ubuntu:2 bash -c 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tests/mpx5-sudo --only build "$@"; exit $?' x "$@" ;;
+    sudo-auth) export PODMAN=$P MEM=${MEM:-12g} CPUS PAX_ENGINE=$CO/notes/px106/rig/docker-like
+        lift taskset -c "$CPUS" tests/mpx5-sudo --only auth --images "$PAX_BUILD/mpx5-sudo" < /dev/null ;;
     burrowd)
         lift ctrnet localhost/px124-net:1 bash -c 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tests/mpx5-burrowd "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
