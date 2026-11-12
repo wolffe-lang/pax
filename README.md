@@ -187,7 +187,7 @@ first program it prints how long its boot took and how much of that the console 
 | sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
-| ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `32ec7f43` |
+| ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `8594073c` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
 
 Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
