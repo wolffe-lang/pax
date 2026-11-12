@@ -203,7 +203,14 @@ fn panes() -> !int {
     var m6 = copy ps[6].m
     let _b = type_line(mut m6, "echo six\n")
     let _c = type_line(mut m3, "echo three\n")
-    let _d = read_until(mut m6, "", 3)
+    // both ready before the one wait over all 8 (on Linux a typed line's
+    // echo can come a moment after the write returns); nothing is read
+    var only3 = List[fs.File]()
+    (mut only3).push(copy ps[3].m)
+    var only6 = List[fs.File]()
+    (mut only6).push(copy ps[6].m)
+    let _s3 = signal.wait_fds(only3, signal.child(), 3000)?
+    let _s6 = signal.wait_fds(only6, signal.child(), 3000)?
     let w2 = signal.wait_fds(all, signal.child(), 3000)?
     let _r3 = read_until(mut m3, "three\r\n", 10)
     let _r6 = read_until(mut m6, "six\r\n", 10)
