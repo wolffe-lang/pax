@@ -18,15 +18,20 @@ R=$(realpath "$L")
 export TMPDIR=$L/tmp PAX_CACHE=$L/cache
 mkdir -p "$TMPDIR" "$PAX_CACHE" "$L/home" "$PAX_BUILD"
 CO=$(realpath "$(git rev-parse --show-toplevel)")
-# ctr KVM IMAGE CMD...: a container of IMAGE in the checkout, the take's CPUs inside. CTR_CAPS adds
-# capabilities (a suite's Linux side that mounts inside its container: SYS_ADMIN, rootless).
+# ctr KVM IMAGE CMD...: a container of IMAGE in the checkout, the take's CPUs inside; KVM is 1 (KVM),
+# 0 (none) or sys (KVM and engine-ns, below). CTR_CAPS adds capabilities (a suite's Linux side that
+# mounts inside its container: SYS_ADMIN, rootless).
 ctr() {
     local kvm=$1 img=$2; shift 2
     local dev=(); [ "$kvm" = 1 ] && dev=(--device /dev/kvm)
+    # sys (px123's): a suite whose Linux side runs in a throwaway container (tools/linux-tree) gets
+    # engine-ns, which runs that container's command in a fresh mount namespace of this one
+    [ "$kvm" = sys ] && dev=(--device /dev/kvm --cap-add SYS_ADMIN --security-opt systempaths=unconfined
+                            -e PAX_ENGINE="$(realpath "${GAUNTLET_RIG_DIR:?}")/engine-ns")
     local mnt=(-v "$L:$L"); [ "$R" = "$L" ] || mnt+=(-v "$R:$R")
     local lin=(); [ -n "${LK:-}" ] && lin=(-v /nix/store:/nix/store:ro -e "PAX_LINUX_KERNEL=$LK" -e "PAX_LINUX_MODULES=${LM:-}")
     local caps=(); for c in ${CTR_CAPS:-}; do caps+=(--cap-add "$c"); done
-    "$P" run --rm --memory "${MEM:-12g}" --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 "${dev[@]}" "${mnt[@]}" ${lin[@]+"${lin[@]}"} ${caps[@]+"${caps[@]}"} -w "$CO" \
+    "$P" run --rm --memory "${MEM:-12g}" --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 "${dev[@]}" "${mnt[@]}" ${lin[@]+"${lin[@]}"} ${caps[@]+"${caps[@]}"} --security-opt label=disable -w "$CO" \
         -e TMPDIR="$TMPDIR" -e PAX_CACHE="$PAX_CACHE" -e PAX_BUILD="$PAX_BUILD" -e HOME="$L/home" -e PAX_REQUIRE_UEFI=1 \
         -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' -e GIT_CONFIG_KEY_1=commit.gpgsign -e GIT_CONFIG_VALUE_1=false \
         "$img" taskset -c "$CPUS" "$@" < /dev/null

@@ -9,6 +9,7 @@
 #                  mpx3-maps, mpx3-tree, mpx5-trace, mpx5-users, mpx5-rates, mpx6-part,
 #                  mpx3-boreutils, mpx4-udp, mpx3-console)
 #   ci-plan        tests/ci-plan (the tiers map, the wiring of the new suite's job)
+# The suites with a Linux side reach a container engine through engine-ns (lib.sh's `ctr sys`, px123's).
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
 # column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is named in its
 # record) and changes no other line. The step's exit is the suite's.
@@ -34,7 +35,8 @@ case $what in
             mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console) ;;
             *) echo "step.sh: no suite $name in this rig"; exit 2 ;;
         esac
-        caps=SYS_ADMIN; [ "$name" = mpx6-latency ] && caps= # the Linux sides mount inside the container
-        CTR_CAPS=$caps lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/'"$name"' "$@"; exit $?' x "$@" ;;
+        # the suites with a Linux side run with engine-ns (sys); the guard needs only KVM
+        kind=sys; [ "$name" = mpx6-latency ] && kind=1
+        lift ctr $kind localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/'"$name"' "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
