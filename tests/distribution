@@ -4,6 +4,7 @@ Usage: tests/distribution INITRAMFS KERNEL INPUTS IDENTITY_DIRECTORY dev|release
 """
 from pathlib import Path
 import hashlib
+import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,7 +180,8 @@ def check(blob):
         assert data == (inputs/'ligature'/'ligature').read_bytes(), 'image-ligature-bytes'
         assert fields[1] == 0o100755 and fields[2:4] == [0, 0], 'image-ligature-mode'
         assert (inputs/'ligature'/'sums.txt').read_text().split() == ['ligature', sha(data), str(len(data))], 'image-ligature-sums'
-        pinned = [l.split()[2:4] for l in (ROOT/'user/ligature.pin').read_text().splitlines() if l.split()[:2] == ['#', 'ligature']]
+        pinned = [l.split()[2:4] for l in (ROOT/'user/ligature.pin').read_text().splitlines()
+                  if len(l.split()) == 4 and l.split()[:2] == ['#', 'ligature'] and re.fullmatch(r'[0-9a-f]{64}', l.split()[2])]
         assert pinned == [[sha(data), str(len(data))]], 'image-ligature-pin'
     assert not any(l.startswith('export WOLF_LD=') for l in shrc), 'image-shrc-wolf-ld'
     return release, len(listed)
