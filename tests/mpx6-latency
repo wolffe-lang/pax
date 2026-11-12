@@ -8,7 +8,11 @@
 # for SECONDS each; and this host pings the guest's echo through the network
 # device every 5 ms (tests/mpx6-latency.d/echo-host.py, through QEMU's user
 # network), as keystrokes over ssh would come. Every line also reaches this
-# host as a datagram, so a boot with no COM1 reports too.
+# host as a datagram, so a boot with no COM1 reports too. The guest's memory
+# is backed before it boots (-mem-prealloc), PAX's and Linux's alike: a
+# first touch of a guest frame otherwise costs the host a page fault, and
+# a call that fills fresh frames (a fork, an mmap's zeroing) showed the
+# host's faults as stretches of 30 to 150 ms now and then.
 #
 #   tests/mpx6-latency [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                      [--tier native|release|both] [--accel auto|kvm|tcg]
@@ -162,7 +166,7 @@ for tier in ${tiers_boot-$tiers}; do
             budget=$((nload * (seconds + 12) + 240))
             scr=(); [ -z "$screen" ] && scr=(--no-screen)
             say "boot $name: $nload loads, port $port, budget ${budget}s$([ "$com1" = 0 ] && echo ', no COM1')"
-            net=(-m "${mem}M" -netdev "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$fwd-:7" -device "virtio-net-pci,netdev=n0")
+            net=(-m "${mem}M" -mem-prealloc -netdev "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$fwd-:7" -device "virtio-net-pci,netdev=n0")
             if [ "$com1" = 1 ]; then
                 q=(); for a in "${net[@]}"; do q+=(--qemu "$a"); done
                 "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$b/serial.log" ${scr[@]+"${scr[@]}"} --timeout "$budget" --accel "$accel" \
@@ -232,7 +236,7 @@ if [ "$linux" = 1 ]; then
         nload=$(wc -w < "$b/pax-run"); nload=$((nload - 7))
         acc=(-accel tcg -cpu max); [ "$accel" = kvm ] && acc=(-accel kvm -cpu host)
         say "boot $name: $nload loads, port $port, Linux $(basename "$(readlink -f "$lk")")"
-        timeout $((nload * (seconds + 12) + 240)) qemu-system-x86_64 -machine q35 "${acc[@]}" -smp 1 -m "${mem}M" -nographic -no-reboot \
+        timeout $((nload * (seconds + 12) + 240)) qemu-system-x86_64 -machine q35 "${acc[@]}" -smp 1 -m "${mem}M" -mem-prealloc -nographic -no-reboot \
             -kernel "$lk" -initrd "$b/linux.cpio" -append "console=ttyS0 quiet loglevel=3 panic=-1" \
             -netdev "user,id=n0,ipv6=off,hostfwd=udp:127.0.0.1:$fwd-:7" -device "virtio-net-pci,netdev=n0" \
             > "$b/serial.log" 2>&1 < /dev/null
