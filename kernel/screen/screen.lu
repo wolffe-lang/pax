@@ -614,6 +614,12 @@ fn flush() {
 }
 
 /// Cells lo to hi of row y, those that differ from what they show.
+/// px129: at scale 1 a cell's pixel row is 32 bytes, half a 64-byte line,
+/// so a run that would start or end in the middle of a line takes its
+/// neighbour too, redrawn as the front grid says it shows (`widen`): every
+/// pixel row of a run is then whole write-combining lines (with the
+/// framebuffer's address and pitch multiples of 64), stores that fill a
+/// line and leave it, never half of one.
 fn draw_span(y: u64, lo: u64, hi: u64, cur: u64, ptr: u64) {
     let row = y * sv(S_COLS)
     let scale = sv(S_SCALE)
@@ -625,7 +631,7 @@ fn draw_span(y: u64, lo: u64, hi: u64, cur: u64, ptr: u64) {
         let want = cell(row + x) | (if at == cur { CUR_BIT } else { 0 }) | (if at == ptr { PTR_BIT } else { 0 })
         let same = want == front(row + x)
         if n > 0 && (same || at == ptr) {
-            blit(start, y, n)
+            blit(start, y, close_run(row, start, n, scale))
             n = 0
         }
         if !same {
@@ -634,6 +640,11 @@ fn draw_span(y: u64, lo: u64, hi: u64, cur: u64, ptr: u64) {
             } else {
                 if n == 0 {
                     start = x
+                    if scale == 1 && x % 2 == 1 && widen(row + x - 1) {
+                        prepare(0, front(row + x - 1), scale)
+                        start = x - 1
+                        n = 1
+                    }
                 }
                 prepare(n, want, scale)
                 n += 1
@@ -643,8 +654,28 @@ fn draw_span(y: u64, lo: u64, hi: u64, cur: u64, ptr: u64) {
         x += 1
     }
     if n > 0 {
-        blit(start, y, n)
+        blit(start, y, close_run(row, start, n, scale))
     }
+}
+
+/// px129: whether the cell at grid index i may be redrawn as the front grid
+/// says it shows, to fill a line (`draw_span`): its front word known and not
+/// the pointer's arrow (which only `draw_arrow` draws).
+fn widen(i: u64) -> bool {
+    let f = front(i)
+    f != UNKNOWN && f & PTR_BIT == 0
+}
+
+/// px129: a run of n cells from `start` that ends in the middle of a line at
+/// scale 1 takes the next cell as it shows, when there is one (`widen`).
+/// The run's length to blit.
+fn close_run(row: u64, start: u64, n: u64, scale: u64) -> u64 {
+    let e = start + n
+    if scale == 1 && e % 2 == 1 && e < sv(S_COLS) && widen(row + e) {
+        prepare(n, front(row + e), scale)
+        return n + 1
+    }
+    n
 }
 
 /// Slot n of the run: the address of the glyph front word `w` shows, and
