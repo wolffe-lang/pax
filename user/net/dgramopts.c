@@ -10,15 +10,25 @@
        fails, a bad descriptor and a descriptor that is no socket;
      - FIONREAD on a datagram socket (udp(7)): the next datagram's length,
        0 with none queued;
-     - a receive with MSG_ERRQUEUE: the error queue, empty.
+     - a receive with MSG_ERRQUEUE: the error queue, empty;
+     - px127: recvmsg(2), what musl's resolver reads its answers with: the
+       sender's address cut to msg_namelen (which then says 16), the
+       datagram scattered over two iovecs, msg_controllen and msg_flags as
+       the call leaves them (MSG_TRUNC for a short buffer), MSG_TRUNC and
+       MSG_PEEK asked, no name buffer, no iovec, an empty datagram, nothing
+       queued, the error queue, the receive timeout, more iovecs than
+       UIO_MAXIOV, a header the caller cannot read, a bad descriptor and a
+       descriptor that is no socket.
    Every datagram is read back with its source address and bytes. */
 #define _GNU_SOURCE
 #include "say.h"
 #include <fcntl.h>
 #include <netinet/ip.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 
 static char rb[64];
+static struct iovec many[1025];
 
 static void opt(int fd, const char *what)
 {
@@ -53,6 +63,51 @@ static void take(int fd, const char *what)
         return;
     }
     say("%s: recvfrom %ld bytes '%.*s' from %s\n", what, r, (int)r, b, aname(&from, an, sizeof an));
+}
+
+/* px127: one recvmsg(2) on `fd` with `flags`: `iovs` iovecs of `l0` and
+   `l1` bytes, a name buffer of `namelen` bytes (none when `named` is 0),
+   a 64-byte control buffer when `control`; msg_flags starts at 0x7f, so a
+   call that leaves it is seen. Prints what the call answered and what it
+   left in the header. */
+static void rmsg(int fd, int flags, int iovs, size_t l0, size_t l1, int named, socklen_t namelen, int control,
+                 const char *what)
+{
+    char p0[64], p1[64], ctl[64];
+    unsigned char nb[32];
+    struct iovec iov[2] = {{p0, l0}, {p1, l1}};
+    struct msghdr h;
+    memset(&h, 0, sizeof h);
+    memset(p0, '.', sizeof p0);
+    memset(p1, '.', sizeof p1);
+    memset(nb, 0xee, sizeof nb);
+    h.msg_name = named ? nb : 0;
+    h.msg_namelen = namelen;
+    h.msg_iov = iovs ? iov : 0;
+    h.msg_iovlen = iovs;
+    h.msg_control = control ? ctl : 0;
+    h.msg_controllen = control ? sizeof ctl : 0;
+    h.msg_flags = 0x7f;
+    long r = recvmsg(fd, &h, flags);
+    if (r < 0) {
+        say("%s: recvmsg %s\n", what, res(r, rb, sizeof rb, 0));
+        return;
+    }
+    char nm[96];
+    if (named && h.msg_namelen >= sizeof(struct sockaddr_in) && namelen >= sizeof(struct sockaddr_in))
+        aname((struct sockaddr_in *)nb, nm, sizeof nm);
+    else
+        snprintf(nm, sizeof nm, "%02x %02x %02x %02x", nb[0], nb[1], nb[2], nb[3]);
+    int k0 = r < (long)l0 ? (int)r : (int)l0;
+    int k1 = iovs > 1 && r > (long)l0 ? (int)(r - (long)l0 < (long)l1 ? r - (long)l0 : (long)l1) : 0;
+    say("%s: recvmsg %ld, msg_namelen %d, name %s, msg_controllen %zu, msg_flags %#x, iov '%.*s' '%.*s'\n", what, r,
+        (int)h.msg_namelen, nm, (size_t)h.msg_controllen, h.msg_flags, k0, p0, k1, p1);
+}
+
+static void put(int fd, const char *s, const char *what)
+{
+    long r = send(fd, s, strlen(s), 0);
+    say("%s: send '%s' %s\n", what, s, res(r, rb, sizeof rb, 1));
 }
 
 int main(void)
@@ -164,6 +219,59 @@ int main(void)
     say("recv(b, MSG_ERRQUEUE|MSG_DONTWAIT) %s\n", res(r, rb, sizeof rb, 1));
     pending(b, "b, one queued");
     take(b, "b");
+
+    /* px127: recvmsg(2) on b, each datagram from a (connected to b). */
+    put(a, "answer", "a");
+    rmsg(b, 0, 1, 64, 0, 1, sizeof(struct sockaddr_in), 1, "b, a name and a control buffer");
+    put(a, "scattered!", "a");
+    rmsg(b, 0, 2, 3, 64, 1, sizeof(struct sockaddr_in), 0, "b, two iovecs of 3 and 64");
+    put(a, "truncated!", "a");
+    rmsg(b, 0, 1, 4, 0, 1, sizeof(struct sockaddr_in), 0, "b, one iovec of 4");
+    put(a, "whole", "a");
+    rmsg(b, MSG_TRUNC, 1, 2, 0, 1, sizeof(struct sockaddr_in), 0, "b, MSG_TRUNC, one iovec of 2");
+    put(a, "peek", "a");
+    rmsg(b, MSG_PEEK, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, MSG_PEEK");
+    rmsg(b, 0, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, after the peek");
+    put(a, "noname", "a");
+    rmsg(b, 0, 1, 64, 0, 0, sizeof(struct sockaddr_in), 0, "b, no name buffer, msg_namelen 16");
+    put(a, "nolen", "a");
+    rmsg(b, 0, 1, 64, 0, 0, 0, 0, "b, no name buffer, msg_namelen 0");
+    put(a, "zero", "a");
+    rmsg(b, 0, 1, 64, 0, 1, 0, 0, "b, a name buffer, msg_namelen 0");
+    put(a, "minus", "a");
+    rmsg(b, 0, 1, 64, 0, 1, (socklen_t)-1, 0, "b, a name buffer, msg_namelen -1");
+    rmsg(b, 0, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, after msg_namelen -1");
+    put(a, "short", "a");
+    rmsg(b, 0, 1, 64, 0, 1, 2, 0, "b, a name buffer of 2");
+    put(a, "", "a");
+    rmsg(b, 0, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, an empty datagram");
+    put(a, "none", "a");
+    rmsg(b, 0, 0, 0, 0, 1, sizeof(struct sockaddr_in), 0, "b, no iovec");
+    rmsg(b, MSG_DONTWAIT, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, MSG_DONTWAIT, nothing queued");
+    rmsg(a, 0, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "a (O_NONBLOCK), nothing queued");
+    rmsg(b, MSG_ERRQUEUE | MSG_DONTWAIT, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, MSG_ERRQUEUE|MSG_DONTWAIT");
+    struct timeval tv = {0, 100000};
+    say("setsockopt(b, SO_RCVTIMEO, 0.1 s) %s\n", res(setsockopt(b, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv), rb, sizeof rb, 0));
+    rmsg(b, 0, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, nothing queued, the timeout");
+    put(a, "late", "a");
+    rmsg(b, 0, 1, 64, 0, 1, sizeof(struct sockaddr_in), 0, "b, after the timeout");
+    struct msghdr mh;
+    memset(&mh, 0, sizeof mh);
+    char one[8];
+    for (int i = 0; i < 1025; i++)
+        many[i] = (struct iovec){one, 1};
+    mh.msg_iov = many;
+    mh.msg_iovlen = 1025;
+    say("recvmsg(b, 1025 iovecs) %s\n", res(recvmsg(b, &mh, MSG_DONTWAIT), rb, sizeof rb, 1));
+    mh.msg_iovlen = 1024;
+    say("recvmsg(b, 1024 iovecs, nothing queued) %s\n", res(recvmsg(b, &mh, MSG_DONTWAIT), rb, sizeof rb, 1));
+    say("recvmsg(b, a header at address 8) %s\n", res(recvmsg(b, (struct msghdr *)8, MSG_DONTWAIT), rb, sizeof rb, 1));
+    say("recvmsg(-1) %s\n", res(recvmsg(-1, &mh, MSG_DONTWAIT), rb, sizeof rb, 1));
+    if (pipe(p) == 0) {
+        say("recvmsg(a pipe) %s\n", res(recvmsg(p[0], &mh, MSG_DONTWAIT), rb, sizeof rb, 1));
+        close(p[0]);
+        close(p[1]);
+    }
     close(a);
     close(b);
     close(c);
