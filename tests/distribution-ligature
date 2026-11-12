@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# tests/distribution-ligature — ligature, the linker in wolf, on the actual dev image, beside lld (px128).
+#
+#   tests/distribution-ligature IMAGE_DIRECTORY [--accel kvm|tcg|auto] [--firmware bios|uefi]
+#
+# IMAGE_DIRECTORY is tools/mkdistribution's OUT (its commit, kernel/kmain_console.elf and
+# pax-dev-COMMIT.cpio). The dev archive is booted as it is, with one addition under paths it does not
+# have (tests/distribution-ligature.d/overlay.py): the session (session.sh), ldtime (ldtime.c, a
+# measuring WOLF_LD built here with `cc -static`, never shipped) and the sources of the programs built
+# on the machine: hello and netproc (this suite's own, the second using std.net and std.process), and
+# pelt, ligature and the largest program at the commits the image's own /etc/pax-release names
+# (ligature at user/ligature.pin's when the image names none), fetched through tools/fetch-retry. The
+# largest is yew (`src/yew.lu`, about 150,000 lines): the largest of the image's own wolf programs.
+#
+# Two boots of the image's own console kernel, each a session typed at the console as root:
+#   small  PAX_LIGATURE_SMALL_MIB (2048, the dev image's tested size): pelt first, by ligature and by
+#          lld; the largest program by lld; the default build; the opt-in; hello, netproc and the
+#          self-link by both; a refusal.
+#   big    PAX_LIGATURE_BIG_MIB (4096): pelt and the largest program, by both. ligature links pelt
+#          from 2560 MiB; the largest program's link peaked at 1.54 GiB on Linux.
+# The rows (tests/distribution-ligature.d/judge.py):
+#   L0  ligature in the image: `ligature --version`, its /etc/pax-release line
+#   L1  the default is lld: no WOLF_LD in the console's environment, and a plain `wolf build` gives
+#       lld's bytes, not ligature's (and, from wolf 0.2.39, the note naming /usr/bin/ld.lld)
+#   L2  the opt-in: WOLF_LD=/usr/bin/ligature builds hello with no note, and it runs
+#   L3  hello by both, the same output; two ligature links byte-identical
+#   L4  netproc (std.net, std.process) by both, the same output
+#   L5  ligature compiled and linked by itself on PAX runs, and links hello to the shipped one's bytes
+#   L6  a refusal (no musl start files where ligature is told to look): a named error from ligature,
+#       a non-zero `wolf build`, no output, no fallback to lld
+#   L7  pelt at the small size: lld links it and it runs; ligature's link is an EXPECTED REFUSAL while
+#       ligature#35 is open (non-zero, the selected linker named, no output, no fallback); the day
+#       ligature links pelt there, this row fails and says so, so it flips with the issue
+#   L8  pelt and the largest program at the big size: by both, the same output; the largest program
+#       by lld at the small size too
+#   L9  every link above measured by ldtime from the kernel's wait4: wall, CPU, peak (MEASURE lines)
+#   L10 each boot clean: the session's end, init's status 0, no panic, the halt proven
+# Exit 0 when every row passed, 1 otherwise, 2 on a usage or tool error.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+accel=auto firmware=bios
+[ $# -ge 1 ] || die 'usage: distribution-ligature IMAGE_DIRECTORY [--accel kvm|tcg|auto] [--firmware bios|uefi]'
+out=$(realpath "$1"); shift
+while [ $# -gt 0 ]; do
+    case $1 in
+        --accel) accel=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        *) die "unknown option $1" ;;
+    esac
+done
+need python3 qemu-system-x86_64 cc git
+small=${PAX_LIGATURE_SMALL_MIB:-2048} big=${PAX_LIGATURE_BIG_MIB:-4096}
+head=$(cat "$out/commit")
+archive=$out/pax-dev-${head:0:8}.cpio
+elf=$out/kernel/kmain_console.elf
+[ -f "$archive" ] && [ -f "$elf" ] || die "$out has no pax-dev-${head:0:8}.cpio or kernel/kmain_console.elf"
+work=$out/ligature
+[ ! -e "$work" ] || die "$work exists: use a fresh image directory copy"
+mkdir -p "$work/src"
+say "image $head: $(sha256_of "$archive") $(basename "$archive"); kernel $(sha256_of "$elf")"
+
+# The commits the image itself names (its /etc/pax-release), read from the archive.
+release=$(python3 -I - "$archive" <<'PY'
+import sys
+blob = open(sys.argv[1], 'rb').read(); off = 0
+while True:
+    h = blob[off:off+110]; f = [int(h[i:i+8], 16) for i in range(6, 110, 8)]
+    name = blob[off+110:off+110+f[11]-1].decode(); start = (off+110+f[11]+3) & ~3
+    if name == 'etc/pax-release':
+        sys.stdout.write(blob[start:start+f[6]].decode()); break
+    assert name != 'TRAILER!!!', 'no etc/pax-release'
+    off = (start+f[6]+3) & ~3
+PY
+)
+rev() { printf '%s\n' "$release" | awk -v n="$1" '$1 == n { print $2 }'; }
+. "$PAX_ROOT/user/ligature.pin"
+lig_rev=$(rev ligature); lig_rev=${lig_rev:-$LIGATURE_REV}
+fetch() { # name repo rev
+    mkdir -p "$work/git/$1"
+    git -C "$work/git/$1" init -q
+    "$PAX_ROOT/tools/fetch-retry" "$work/git/$1" "$2" "$3" "$3" || die "cannot fetch $2 at $3"
+    git -C "$work/git/$1" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$work/git/$1" rev-parse HEAD)" = "$3" ] || die "$2: HEAD is not $3"
+    mkdir -p "$work/src/$1"
+    cp -R "$work/git/$1/src" "$work/src/$1/src"
+    say "$1 at $3"
+}
+fetch pelt https://github.com/wolffe-lang/pelt "$(rev pelt)"
+fetch ligature https://github.com/wolffe-lang/ligature "$lig_rev"
+fetch largest https://github.com/wolffe-lang/yew "$(rev yew)"
+printf 'src/pelt.lu\n' > "$work/src/pelt/ENTRY"
+printf 'src/yew.lu\n' > "$work/src/largest/ENTRY"
+cp -R "$here/distribution-ligature.d/progs/hello" "$here/distribution-ligature.d/progs/netproc" "$work/src/"
+cc -static -O2 -Wall -o "$work/ldtime" "$here/distribution-ligature.d/ldtime.c"
+python3 -I "$here/distribution-ligature.d/overlay.py" "$archive" "$work/test.cpio" "$work/src" "$work/ldtime" \
+    "$here/distribution-ligature.d/session.sh"
+"$PAX_ROOT/tools/fetch-limine" >&2
+"$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs-quiet.conf" --add "$work/test.cpio" initramfs.cpio \
+    "$elf" "$work/test.iso" > /dev/null
+halt=()
+for mode in small big; do
+    mib=$small; [ "$mode" = big ] && mib=$big
+    printf 'sh /usr/share/distribution-ligature/session.sh %s\nexit 0\n' "$mode" > "$work/$mode.keys"
+    rc=0
+    PAX_TYPE_PAUSE=2 "$PAX_ROOT/tools/qemu-halt" --accel "$accel" --firmware "$firmware" --serial "$work/$mode.serial.log" \
+        --timeout 5400 --qemu -m --qemu "${mib}M" --elf "$elf" --type "$work/$mode.keys" --prompt '$ ' \
+        --marker 'halt|PANIC .*' "$work/test.iso" > "$work/$mode.halt.log" 2>&1 || rc=$?
+    say "boot $mode: ${mib} MiB, qemu-halt exit $rc"
+    halt+=("$rc")
+done
+python3 -I "$here/distribution-ligature.d/judge.py" "$work/small.serial.log" "$work/big.serial.log" "$small" "$big" \
+    "${halt[0]}" "${halt[1]}" yew
