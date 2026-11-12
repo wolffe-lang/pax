@@ -38,9 +38,15 @@
 #                      a shell and a child at once, then end of file,
 #                      each `bye<i>`, every shell reaped with status 0.
 #   switch (3 GiB)     slots-switch: N processes yielding, N = 16, 64 and
-#                      1,000, three interleaved rounds: the least CPU a
-#                      yield of the three; the 1,000's within twice the
-#                      16's. Booted quiet (no line a process's exit).
+#                      1,000, three interleaved rounds, and a yield with
+#                      nobody else to run (the call, no switch): the least
+#                      CPU a yield of the three. A yield among 16 within
+#                      SWITCH_ALONE times the lone one (a walk of every
+#                      slot at every switch, raising the table alone,
+#                      breaks it); among 64 within 1.5 times and among
+#                      1,000 within 3 times the 16's (a walk of every live
+#                      slot at every switch breaks it). Booted quiet (no
+#                      line a process's exit).
 #   herd (3 GiB)       slots-herd, measured: a pipe ping-pong's round trip
 #                      with 0, 64 and 1,000 processes parked in a pipe
 #                      read. Booted quiet.
@@ -91,6 +97,9 @@ memory_of() {
     case $1 in threads|fill) echo 256M ;; forks|reuse) echo 1G ;; ptys) echo 2G ;; switch|herd) echo 3G ;; *) echo 4G ;; esac
 }
 quiet_of() { case $1 in switch|herd) echo 1 ;; *) echo 0 ;; esac; }
+# A yield among 16 processes, at most this many lone yields (measured,
+# notes/px126-process-slots.md §6).
+SWITCH_ALONE=10
 # What a session's refusals may be: a pattern every `refused:` line must
 # match, and how many there must be ("" none).
 refusals_of() {
@@ -206,11 +215,13 @@ check_session() { # session norm hrc digest id
     switch)
         prog_lines "$norm" switch | grep ' round ' | sed 's/^/  /' >&2
         l=$(prog_lines "$norm" switch | grep '^switch: least cpu a yield: ')
-        set -- $(printf '%s\n' "$l" | sed -n -E 's/^switch: least cpu a yield: N=16 ([0-9]+) ns, N=64 ([0-9]+) ns, N=1000 ([0-9]+) ns$/\1 \2 \3/p')
-        if [ $# -ne 3 ]; then
+        set -- $(printf '%s\n' "$l" | sed -n -E 's/^switch: least cpu a yield: alone ([0-9]+) ns, N=16 ([0-9]+) ns, N=64 ([0-9]+) ns, N=1000 ([0-9]+) ns$/\1 \2 \3 \4/p')
+        if [ $# -ne 4 ] || [ "$1" -le 0 ]; then
             why+=" '$l' (every N measured);"
-        elif [ "$3" -gt $(($1 * 2)) ]; then
-            why+=" a yield among 1,000 costs $3 ns, more than twice the 16's $1 ns;"
+        else
+            [ "$2" -le $(($1 * SWITCH_ALONE)) ] || why+=" a yield among 16 costs $2 ns, more than $SWITCH_ALONE times a lone yield's $1 ns;"
+            [ $(($3 * 2)) -le $(($2 * 3)) ] || why+=" a yield among 64 costs $3 ns, more than 1.5 times the 16's $2 ns;"
+            [ "$4" -le $(($2 * 3)) ] || why+=" a yield among 1,000 costs $4 ns, more than three times the 16's $2 ns;"
         fi
         [ -z "$why" ] && row_pass "slots-switch $id: ${l#switch: }" || row_fail "slots-switch $id:$why" ;;
     herd)
