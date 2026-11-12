@@ -24,6 +24,7 @@
  *   plain   (a) the whole grid: a cursor position a row and the row's
  *           characters; every frame shifts the text by one, so every cell
  *           changes every frame
+ *   same    `plain`'s first frame again and again: nothing changes
  *   sgr     (b) the same with an SGR foreground and background before
  *           every cell (`ESC [ 3f ; 4b m`), shifted likewise
  *   scroll1 (c) one full-width line and CR LF at the bottom row: one
@@ -50,7 +51,9 @@
  * Written from the man pages of the calls named, console_codes(4) and
  * ECMA-48 for the sequences, and the Intel SDM vol. 2 for RDTSC.
  */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -274,6 +277,8 @@ static void build_synthetic(void) {
     t = add_test("plain", 2);
     frame_plain(&t->frames[0], 0);
     frame_plain(&t->frames[1], 1);
+    t = add_test("same", 1);
+    frame_plain(&t->frames[0], 0);
     t = add_test("sgr", 2);
     frame_sgr(&t->frames[0], 0);
     frame_sgr(&t->frames[1], 1);
@@ -424,10 +429,13 @@ int main(int argc, char **argv) {
     }
     struct winsize ws;
     int sized = 0;
-    if (ioctl(g_fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
-        g_cols = ws.ws_col;
-        g_rows = ws.ws_row;
-        sized = 1;
+    int asks[4] = {g_fd, 0, 1, 2};
+    for (int i = 0; i < 4 && !sized; i++) {
+        if (ioctl(asks[i], TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+            g_cols = ws.ws_col;
+            g_rows = ws.ws_row;
+            sized = 1;
+        }
     }
     if (g_cols > 1000) g_cols = 1000;
     char fb[512];
