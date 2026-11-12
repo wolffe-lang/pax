@@ -7,6 +7,22 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Process slots: 64 to 1,024 (px126).** PAX held 64 threads system-wide,
+  about 28 wolf programs; it now holds 1,024. A slot costs memory only while it
+  lives: a thread its kernel stack and FPU area, a process its 48 KiB area,
+  mapped from frames instead of kept in `.bss` for every slot, so the table
+  takes 1.9 MiB where 64 slots took 3.1 MiB and a 256 MiB machine starts with
+  1.2 MiB more free. Every walk of the slots stops at the highest one in use,
+  the tick and the switch walk only when a deadline has come, and a pid finds
+  its slot by a hint, so a yield among 16 or 64 processes costs less than
+  before and among 1,000 about twice that. When the table is full, `fork`,
+  `clone` and `clone3` still answer EAGAIN, and the log says `no free process
+  slot` once a run instead of once a call. A user other than root holds at
+  most 512 threads (RLIMIT_NPROC, which `prlimit64` and `/proc/<pid>/limits`
+  now report), so no user takes the slots root needs. The wake-everyone rule
+  for pipes is measured, not changed. `tests/mpx5-slots` holds the rows:
+  `notes/px126-process-slots.md`.
+
 - **A spare USB pointer interface no longer writes over the quiet login prompt (pax#402).** Its
   refusal keeps the same wording in `sudo dmesg` at informational level while another pointer is
   driven. If none is working, including after the last one is unplugged, the refusal remains visible
