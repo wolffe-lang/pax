@@ -3,7 +3,7 @@
 its screen says at the end.
 
     screen-run.py --qemu-run TOOLS/qemu-run --iso ISO --mode WxH --accel kvm|tcg --font BDF
-                  --out PREFIX [--firmware bios|uefi] [--serial FILE] [--timeout SECS] [--every SECS]
+                  --out PREFIX [--firmware bios|uefi] [--serial FILE | --serial-chardev SPEC] [--timeout SECS] [--every SECS]
 
 With no COM1 the kernel keeps only the first 64 KiB of its console in memory, and a timing program
 writes megabytes, so its table is read off the screen instead: tools/qemu-run boots ISO (UEFI unless
@@ -14,7 +14,8 @@ monitor's `screendump` is taken and read back into text by matching each 8x16 ce
 of one colour is a space, a cell that matches nothing `?`). When the text says `nothing left to run`
 (init ended), `PANIC` or `NOT HALTED`, or at --timeout, the last picture and its text are kept as
 PREFIX.ppm and PREFIX.txt, QEMU is told `quit`, and the exit is 0 (init ended) or 1.
---serial FILE boots with COM1 to FILE instead (the harness's usual machine).
+--serial FILE boots with COM1 to FILE instead (the harness's usual machine); --serial-chardev SPEC with COM1 on
+QEMU's character device SPEC (px129: tests/mpx3-conspeed.d/uart.py's slow UART).
 """
 import argparse
 import os
@@ -139,6 +140,7 @@ def main():
     ap.add_argument("--font", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--serial")
+    ap.add_argument("--serial-chardev")  # px129: COM1 on a character device (tools/qemu-run's option)
     ap.add_argument("--timeout", type=float, default=1500)
     ap.add_argument("--every", type=float, default=3)
     a = ap.parse_args()
@@ -147,7 +149,7 @@ def main():
     sock = a.out + ".mon"
     if os.path.exists(sock):
         os.unlink(sock)
-    ser = ["--serial", a.serial] if a.serial else ["--no-serial"]
+    ser = ["--serial", a.serial] if a.serial else ["--serial-chardev", a.serial_chardev] if a.serial_chardev else ["--no-serial"]
     argv = [a.qemu_run, "--firmware", a.firmware, "--accel", a.accel, *ser, "--timeout", str(int(a.timeout) + 60), a.iso,
             "--", "-m", "512M", "-vga", "none", "-device", f"VGA,vgamem_mb=64,xres={w},yres={h}",
             "-monitor", f"unix:{sock},server=on,wait=off"]
