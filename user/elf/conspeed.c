@@ -496,6 +496,34 @@ static void fb_line(char *out, size_t cap, long *fb_w) {
     fclose(f);
 }
 
+/* What the kernel said about the framebuffer's caching, if this process
+ * may read it: kernel/screen's `screen:` line (`wc (pat …)` or not) is
+ * printed on the console at boot, and kernel/bootlog keeps the previous
+ * boot's console bytes in /proc/pax-bootlog, which is root's. */
+static void caching_line(char *out, size_t cap) {
+    int f = open("/proc/pax-bootlog", O_RDONLY);
+    if (f < 0) {
+        snprintf(out, cap, "framebuffer caching: unknown here (/proc/pax-bootlog, where the previous boot's `screen:` line is: %s)",
+                 strerror(errno));
+        return;
+    }
+    static char b[262144];
+    size_t n = 0;
+    ssize_t k;
+    while (n < sizeof b - 1 && (k = read(f, b + n, sizeof b - 1 - n)) > 0) n += (size_t)k;
+    close(f);
+    b[n] = 0;
+    for (size_t i = 0; i < n; i++) {
+        if ((i == 0 || b[i - 1] == '\n') && strncmp(b + i, "screen: ", 8) == 0) {
+            size_t e = i;
+            while (e < n && b[e] != '\n' && b[e] != '\r') e++;
+            snprintf(out, cap, "framebuffer caching (the previous boot's console, /proc/pax-bootlog): %.*s", (int)(e - i), b + i);
+            return;
+        }
+    }
+    snprintf(out, cap, "framebuffer caching: no `screen:` line in /proc/pax-bootlog (%zu bytes)", n);
+}
+
 static void usage(void) {
     fprintf(stderr, "usage: conspeed [-q] [-n REPS] [-t SECONDS] [-T SECONDS] [-g MS] [-r FILE] [-o TTY] [DIR...]\n");
     exit(2);
@@ -552,6 +580,10 @@ int main(int argc, char **argv) {
     fb_line(fb, sizeof fb, &fb_w);
     const char *term = getenv("TERM");
     set_restore(term);
+    char caching[600];
+    caching_line(caching, sizeof caching);
+    printf("%s: %s\n", VERSION, caching);
+    fflush(stdout);
 
     build_synthetic();
     for (int i = optind; i < argc; i++) load_stream(argv[i]);
@@ -576,10 +608,10 @@ int main(int argc, char **argv) {
     double before = g_tsc ? (double)(ac1 - ac0) / ((double)(a1 - a0) / 1e6) : 1e6;
     g_stamps_per_s = before * 1e3;
     {
-        char h[1024];
-        int n = snprintf(h, sizeof h, "%s: frames to %s, %dx%d cells%s, TERM=%s\n%s%s"
+        char h[2048];
+        int n = snprintf(h, sizeof h, "%s: %s\n%s: frames to %s, %dx%d cells%s, TERM=%s\n%s%s"
                          "clock: %s %.1f MHz (the idle second before); bounds: the run %.0f s, a test %.1f s, %d ms between frames\n"
-                         "%-10s %6s %9s %7s %10s %10s %8s %8s\n", VERSION, ttyname_, g_cols, g_rows,
+                         "%-10s %6s %9s %7s %10s %10s %8s %8s\n", VERSION, caching, VERSION, ttyname_, g_cols, g_rows,
                          sized ? "" : " (no TIOCGWINSZ: assumed)", term ? term : "(unset)", fb, fb[0] ? "\n" : "",
                          g_tsc ? "TSC at" : "CLOCK_MONOTONIC alone (RDTSC refused), nominal", before / 1e3, total, secs, gap_ms,
                          "test", "frames", "bytes", "cells", "ms mean", "ms least", "MB/s", "us/cell");
