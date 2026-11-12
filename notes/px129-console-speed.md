@@ -22,7 +22,7 @@ only what changes, once a write.
 - **yew's F mode keypress is cheap to draw** before and after: yew already sends only the cells that change (169 and
   172 bytes for Down and Up, about 126 cells). On the installed machine yew answers a key in about 1.3 ms on its own
   pseudo-terminal, and its CPU is idle (§6). A keypress's visible delay at the console can only come from drawing those
-  126 cells, which the owner's run of the timing program will price (§5).
+  126 cells, which a run of the timing program at the machine's console will price (§5).
 
 Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx3-conspeed` job; `tools/ci-tiers.map` and
 `tests/ci-plan` its paths; `kernel/serial` and `kernel/panic` are the kernel's core; new `tests/mpx3-conspeed`,
@@ -66,8 +66,8 @@ Footprint: cross-cutting (`.github/workflows/ci.yml` gains the `mpx3-conspeed` j
 - **The streams** (`tests/mpx3-conspeed.d/streams`, its README): yew started as `yew .` in a small repository and cub,
   each the binary the image ships, on a Linux pseudo-terminal of 256 × 90 with TERM=linux; cub's writes taken one by
   one under strace.
-- **On the installed machine:** `sh ~/lanes/px129/run` at the console (the wrapper runs conspeed over the three
-  streams and saves the table beside it). Over ssh, two probes: `keylat` (a full-screen program on a pseudo-terminal of
+- **On the installed machine:** one command at the console (a two-line wrapper outside the tree runs conspeed over
+  the three streams and saves the table beside it). Over ssh, two probes: `keylat` (a full-screen program on a pseudo-terminal of
   its own, a key typed and the time to the frame's first and last byte) and `cpugaps` (how much of the CPU a spinning
   program gets).
 - **In QEMU:** `tests/mpx3-conspeed` boots kmain_console at 2560 × 1440 with `fbwrite` (the metal's scroll) and no
@@ -119,7 +119,7 @@ after px129, the writes being shorter). px125's B7 ("about 10 ms a full screen" 
 
 ## 5. The installed machine
 
-The owner runs `sh ~/lanes/px129/run` at the console; its table is saved beside it. **Not yet run at this writing;**
+A person at the console runs the wrapper's one command; its table is saved beside it. **Not yet run at this writing;**
 the note's evidence index will name the table when it is in. What is measured from ssh:
 
 - `cpugaps 5`: the spinner had 99.9 % of the CPU, 177 gaps over 20 µs, the longest 0.068 ms, none over 0.1 ms. The
@@ -133,7 +133,7 @@ the note's evidence index will name the table when it is in. What is measured fr
 |---|---|---|
 | key to read | the USB keyboard's report (its own polling interval, 1-8 ms, as on any system); xHCI's MSI interrupt; `console.key_event` queues all of `ESC [ B` through the line discipline in one handler run; `sched.wake_input`, then `sched.kick`, which switches to the reader at once when the CPU is idle (kernel/interrupts, the USB branch). Nothing on this path waits for a tick. yew's lone-ESC timeout (25 ms, `src/term/input.lu`) is armed only when ESC ends a read, and the console delivers the whole sequence in one read | by reading; the CPU idle (§5) |
 | read to write | yew's turn: decode, dispatch, one render, one write. On some keys yew first refreshes its git status, forking `git status --porcelain=v2` and `git ls-files --others --ignored` before it renders | on the installed machine, its own pseudo-terminal at 256 × 90: median 1.28 ms, least 1.13 ms over 16 keys; 2 of 16 at about 40 ms (the git refresh) |
-| write to pixels | 161 to 172 bytes, about 126 cells (two rows of 63) | QEMU KVM: 0.055 ms at trunk, 0.021 ms after; the installed machine: the owner's `fuss` row |
+| write to pixels | 161 to 172 bytes, about 126 cells (two rows of 63) | QEMU KVM: 0.055 ms at trunk, 0.021 ms after; the installed machine: its table's `fuss` row |
 
 So a single keypress's budget is about the keyboard's interval plus 1.3 ms plus the drawing of 126 cells, or about
 40 ms when yew refreshes git. The full-screen frames are where the drawing's cost lives: F mode's opening (26,856
@@ -146,8 +146,8 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 
 | # | predicted | found |
 |---|---|---|
-| P1 | no COM1 on the installed machine; a byte costs CPU work alone | not measurable from ssh (the boot line is root's); the owner's `bytes` row will say. px76 recorded none |
-| P2 | write-combining; a cell 0.5-3 µs on the metal | awaits the owner's table |
+| P1 | no COM1 on the installed machine; a byte costs CPU work alone | not measurable from ssh (the boot line is root's); the installed machine's `bytes` row will say. px76 recorded none |
+| P2 | write-combining; a cell 0.5-3 µs on the metal | awaits the installed machine's table |
 | P3 | plain 15-70 ms on the metal; sgr 1.2-2 x plain | metal awaits; under KVM sgr was 2.4 x plain at trunk (the bytes) |
 | P4 | a scrolled line about one full screen; scroll10 ten | right: at trunk scroll1 0.79 x plain, scroll10 12 x scroll1 (KVM) |
 | P5 | clear about 2 x plain | right: 1.89 x |
@@ -211,10 +211,10 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 
 ## 10. Done-when
 
-- [x] a timing program for the console, one command, on the installed machine with its streams (`sh ~/lanes/px129/run`)
+- [x] a timing program for the console, one command, on the installed machine with its streams
 - [x] the same program in QEMU at 2560 × 1440, KVM and TCG, with and without COM1, and at 1280 × 800
 - [x] the cost attributed from the numbers and the code (§4, §6)
 - [x] the rows red at trunk (`1f4f8277…`) and green after, the screen's existing rows unchanged (the quick take)
 - [x] the 256-column cap lifted (C8)
 - [x] one plant, red by name
-- [ ] the installed machine's table (the owner's run)
+- [ ] the installed machine's table (a run at its console)
