@@ -15,7 +15,8 @@
 # /etc/ssl/certs/ca-roots.der (tools/mkroots, user/roots.pin),
 # /etc/ssh/ssh_known_hosts and /etc/shrc's exports (the shipped files'
 # bytes, from user/), boreutils' cat env mkdir chmod cp rm ls,
-# user/net's dgramopts and gai, /etc/hosts naming hosts.test, and an
+# user/net's dgramopts and gai, gai again linked against musl (px127),
+# /etc/hosts naming hosts.test, and an
 # /etc/fstab that mounts the carrier disk (label px104-live) read-only at
 # /run/live, or nothing without it. A piece the tree cannot build is named
 # at P0 and left out, so the rows that need it fail by name.
@@ -23,7 +24,8 @@
 # The ways (tests/mpx4-console-push.d/push.py's header has every row):
 #   names  N1 the resolver's datagram calls (dgramopts) byte-identical to
 #          Linux; N2 getaddrinfo through a DNS fixture of the suite's own
-#          (tools/dns-fixture) and /etc/hosts
+#          (tools/dns-fixture) and /etc/hosts; N3 the same through musl's
+#          resolver (px127)
 #   https  den against den's own smart-HTTP fixture posing as github.com:
 #          H8 the wrong root refused by name; H1-H7 clone, commit, push,
 #          the console's witness and this host's ls-remote, the deletion,
@@ -106,6 +108,16 @@ if [ -z "$images" ]; then
     for p in dgramopts gai; do
         if cp "$work/net/$p" "$r/bin/$p" 2>/dev/null; then cp "$work/net/$p" "$work/linux/$p"; else missing+=" user/net/$p (tools/mknet)"; fi
     done
+    # px127: gai linked static against musl (Ubuntu's musl-gcc, as
+    # tools/mkforks builds), the C library a program `wolf build` makes on
+    # the box carries: N3.
+    if command -v musl-gcc > /dev/null 2>&1 \
+        && musl-gcc -O1 -Wall -Wextra -static -no-pie -Wl,--build-id=none -Wl,-z,noexecstack \
+            -o "$work/net/gai-musl" "$PAX_ROOT/user/net/gai.c" > "$work/gai-musl.txt" 2>&1; then
+        cp "$work/net/gai-musl" "$r/bin/gai-musl" && cp "$work/net/gai-musl" "$work/linux/gai-musl"
+    else
+        missing+=" /bin/gai-musl (musl-gcc, user/net/gai.c)"
+    fi
     # burrow, the root set and the shipped files: each named when the tree
     # has none, and left out.
     if [ -x "$PAX_ROOT/tools/mkburrow" ] && [ -x "$PAX_ROOT/tools/install-burrow" ]; then
