@@ -1,0 +1,10 @@
+# notes/px126/rig/quick.manifest — the quick take (take.sh) before trunk settles, and the plant's: the
+# CI plan, the slot suite built and booted (native, BIOS), and the scheduler's suite.
+# A row's FAIL line reaches the record at column 0 (the recorder leaves `FAIL ` lines there).
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px126/rig/lib.sh
+rig quick.manifest committed=../../..:HEAD:notes/px126/rig/quick.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step build image=localhost/px75-ubuntu:2 tools=cc,clang,readelf,python3,git,curl script=step.sh -- build --tier native
+step slots needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- slots --tier native --firmware bios
+step sched image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,nm script=step.sh -- suite mpx2-sched --tier native --firmware bios
