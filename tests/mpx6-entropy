@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# tests/mpx6-entropy — dw02: what PAX's random source answers a program, and
+# whether a program that must not guess can get cryptographically ready bytes
+# or a named refusal (notes/dw02-the-entropy-contract.md).
+#
+#   tests/mpx6-entropy [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                      [--tier native|release|both] [--accel auto|kvm|tcg]
+#                      [--configs 'CONFIG ...']
+#
+# kmain_console runs two programs (tools/mkentropy): user/elf/entropy.c, the
+# boot's first program, which asks getrandom with every flag set and size,
+# reads /dev/random and /dev/urandom, reads AT_RANDOM, CPUID and
+# /proc/pax-random, and two seconds on runs itself again (`later`); then
+# user/elf/wolf_entropy.lu, whose os_random(32) is wolf's one call. Neither
+# prints a random byte: a request's words are judged by how many repeat the
+# top half of the word before (`hirep`), which tells RDRAND's independent
+# words from a counter's. One boot a configuration (the default list):
+#   present  -cpu max (RDRAND, as every leg of every suite boots)
+#   masked   -cpu max,-rdrand (CPUID says no RDRAND)
+#   default  QEMU's own default model (no -cpu at all, as mpx6-staged and
+#            mpx6-bootlog boot under TCG; tests/mpx6-entropy.d/qemu-default)
+#   retry    present, `pax.rdrand_fail=9` on the command line (the next nine
+#            RDRAND executions after the boot's check report no value)
+#   fail     present, `pax.rdrand_fail=1000000` (every one does)
+#   stuck    present, `pax.rdrand_stuck` (each reports all ones and success:
+#            the published fault shape)
+#
+# Rows (tests/mpx6-entropy.d/rows.py; the contract's own words in the note):
+#   E0 build: kmain_console, entropy (static glibc) and wolf-entropy (static,
+#      the pinned wolf) built; every boot halts with the probe's end line.
+#   E1 ready (present, retry; default when its CPU has RDRAND): every valid
+#      flag set and both devices answer what was asked, hirep 0;
+#      /proc/pax-random says `ready yes` and `source rdrand`.
+#   E2 no source (masked; default without RDRAND): flags 0, NONBLOCK, RANDOM,
+#      RANDOM|NONBLOCK and both devices answer -1 EAGAIN; the capability
+#      `ready no`, `reason no-rdrand`.
+#   E3 the insecure path, whatever the source: INSECURE and
+#      INSECURE|NONBLOCK answer what was asked; AT_RANDOM is nonzero; the
+#      static glibc probe started and allocated (glibc's own early draw).
+#   E4 retry: the strict calls answer as E1, and the capability counts at
+#      least nine retried executions and no failed draw.
+#   E5 fail: strict calls -1 EIO (NONBLOCK's EAGAIN); `reason failed`.
+#   E6 stuck: the same with `reason stuck`.
+#   E7 sizes: n 0 answers 0; ready, 1, 7, 256 and 16384 answer n, 65536 and
+#      1 MiB 16384 (a call's cap), a /dev/urandom read of 1 MiB 1 MiB.
+#   E8 early and later: the boot's first call and a process two seconds on
+#      answer as the probe's own rows did.
+#   E9 wolf: ready, os_random(32) gives 32 and exits 0; not ready, it never
+#      prints its count and ends by wolf's trap (exit 134).
+#   E10 EINVAL for RANDOM|INSECURE and an unknown bit, every configuration.
+# Every line the probes print is shown as a `~` line, the measurement table.
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1. Exit 0 when every row held, 1 otherwise, 2 on a usage
+# or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+D=$here/mpx6-entropy.d
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=native noboot=0 accel=auto configs="present masked default retry fail stuck"
+usage="usage: tests/mpx6-entropy [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--configs 'CONFIG ...']"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        --configs)  configs=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+for c in $configs; do
+    case $c in present|masked|default|retry|fail|stuck) ;; *) die "no configuration $c" ;; esac
+done
+need python3
+
+work=$PAX_BUILD/mpx6-entropy
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+
+if [ -z "$images" ]; then
+    need readelf
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    mkdir -p "$work/bin"
+    rm -f "$work/bin/entropy" "$work/bin/wolf-entropy"
+    why=
+    PAX_WOLF=$wolf "$PAX_ROOT/tools/mkentropy" "$work/bin" > "$work/probes.txt" || why+=" tools/mkentropy;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        rm -f "$work/$tier/kmain_console.elf"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            [ "$elf" = "$work/$tier/kmain_console.elf" ] || cp "$elf" "$work/$tier/kmain_console.elf"
+            say "built $tier kmain_console: elf $(sha256_of "$work/$tier/kmain_console.elf")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS E0 build: kmain_console ($tiers), entropy and wolf-entropy static" || { bad "E0 build:$why"; exit 1; }
+    images=$work
+    [ "$noboot" = 1 ] && exit 0
+fi
+
+if [ "$accel" = auto ]; then
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+fi
+say "accel: $accel; configurations: $configs"
+
+# The command line each configuration adds (none for present, masked, default).
+words_of() {
+    case $1 in
+        retry) echo "pax.rdrand_fail=9" ;;
+        fail)  echo "pax.rdrand_fail=1000000" ;;
+        stuck) echo "pax.rdrand_stuck" ;;
+        *)     echo "" ;;
+    esac
+}
+
+names=()
+for tier in $tiers; do
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "E0 $tier uefi: no OVMF"; else say "SKIP E0 $tier uefi reason=no OVMF"; fi
+            continue
+        fi
+        for cfg in $configs; do
+            name=$tier-$leg-$accel-$cfg
+            b=$images/boots/$name
+            rm -rf "$b"
+            mkdir -p "$b"
+            printf '/bin/entropy\n/bin/wolf-entropy\n' > "$b/pax-run"
+            "$PAX_ROOT/tools/mkinitramfs" "$b/entropy.cpio" "/bin/entropy=$images/bin/entropy:755" \
+                "/bin/wolf-entropy=$images/bin/wolf-entropy:755" "/etc/pax-run=$b/pax-run:644" /tmp/:1777 \
+                > "$b/initramfs.txt" || { bad "E0 $name: tools/mkinitramfs"; continue; }
+            cp "$PAX_ROOT/boot/limine-initramfs.conf" "$b/limine.conf"
+            words=$(words_of "$cfg")
+            [ -z "$words" ] || printf '\n    cmdline: %s\n' "$words" >> "$b/limine.conf"
+            "$PAX_ROOT/tools/mkimage" --conf "$b/limine.conf" --add "$b/entropy.cpio" initramfs.cpio \
+                "$images/$tier/kmain_console.elf" "$b/entropy.iso" > /dev/null || { bad "E0 $name: tools/mkimage"; continue; }
+            q=()
+            [ "$cfg" = masked ] && q=(--qemu -cpu --qemu max,-rdrand)
+            qemu=${PAX_QEMU:-qemu-system-x86_64}
+            [ "$cfg" = default ] && qemu=$D/qemu-default
+            say "boot $name${words:+ ($words)}"
+            PAX_QEMU=$qemu PAX_QEMU_REAL=${PAX_QEMU:-qemu-system-x86_64} "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" \
+                --serial "$b/serial.log" --no-screen --timeout 300 --accel "$accel" \
+                --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' ${q[@]+"${q[@]}"} \
+                "$b/entropy.iso" > "$b/verdict.txt" 2>&1
+            echo $? > "$b/rc"
+            names+=("$name")
+        done
+    done
+done
+
+[ "${#names[@]}" -gt 0 ] || { bad "E0 no boot ran"; exit 1; }
+python3 -I "$D/rows.py" --images "$images" "${names[@]}" || fail=1
+[ "$fail" = 0 ] && say "mpx6-entropy: PASS" || say "mpx6-entropy: FAIL"
+exit "$fail"
