@@ -256,8 +256,9 @@ export DEN_RECEIVE_PACK=/usr/libexec/den/receive-pack
 
 **Pushing to GitHub.** den pushes over HTTPS and over SSH from the console, through the network it starts (below).
 Names resolve as on Linux: the lease (or `/etc/pax-net`'s static line) writes `/etc/resolv.conf`, and the C
-library reads `/etc/hosts` first, so a line there (`140.82.112.3 github.com`, an address of GitHub's
-published ranges) is the fallback when no DNS server answers.
+library (glibc's in den and burrow, musl's in a program `wolf build` makes on the box) reads `/etc/hosts` first, so
+a line there (`140.82.112.3 github.com`, an address of GitHub's published ranges) is the fallback when no DNS server
+answers.
 
 - **HTTPS** checks the server against `/etc/ssl/certs/ca-roots.der`, Mozilla's root store as curl publishes it
   (dated 2026-10-20, 118 certificates; the Mozilla Public License 2.0; `user/roots.pin`), which `/etc/shrc` names
@@ -577,10 +578,10 @@ static <a.b.c.d>/<prefix> [gateway <a.b.c.d>] [dns <a.b.c.d>]...   # this addres
 Without the file the address is 10.0.2.15/24, gateway 10.0.2.2 (QEMU's user network). The lease or the static
 address is on the console before the prompt (`dhcp: … bound …`, or `net: static …`), with the router's answer to
 the kernel's echo, and `/var/lib/dhcp/pax.lease` and `/etc/resolv.conf` say the same to any program; a program's
-resolver reads them (and `/etc/hosts` first), so den and burrow reach a host by name. A missing or
-silent network never stops the boot: the console waits for the first lease at most `wait` seconds, not at all when
-the cable has no link (the client goes on asking), and an Intel controller's own start at most 12 s; one line,
-`net: the console waited <w> ms for the network (bound <b> ms: …)`, says how long it took and the bound it held.
+resolver reads them (and `/etc/hosts` first), so den, burrow and a program built on the box reach a host by name.
+A missing or silent network never stops the boot: the console waits for the first lease at most `wait` seconds, not
+at all when the cable has no link (the client goes on asking), and an Intel controller's own start at most 12 s; one
+line, `net: the console waited <w> ms for the network (bound <b> ms: …)`, says how long it took and the bound it held.
 Under `quiet` (every shipped image boots with it) a renewal prints nothing. `nonet` on the kernel command line
 starts no device at all. To try it under QEMU, give the ISO a NIC:
 
