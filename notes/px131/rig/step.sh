@@ -7,7 +7,7 @@
 #                  tests/NAME ARGS in the px75-ubuntu image with KVM (NAME one of the suites this
 #                  lane's change can reach: mpx6-latency, mpx2-interrupts, mpx2-sched, mpx3-user,
 #                  mpx3-maps, mpx3-tree, mpx5-trace, mpx5-users, mpx5-rates, mpx6-part,
-#                  mpx3-boreutils, mpx4-udp, mpx3-console)
+#                  mpx3-boreutils, mpx4-udp, mpx3-console, mpx3-threads, mpx5-pty)
 #   ci-plan        tests/ci-plan (the tiers map, the wiring of the new suite's job)
 # The suites with a Linux side reach a container engine through engine-ns (lib.sh's `ctr sys`, px123's).
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
@@ -32,7 +32,7 @@ case $what in
     suite)
         name=${1:?a suite}; shift
         case $name in
-            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console) ;;
+            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console|mpx3-threads|mpx5-pty) ;;
             *) echo "step.sh: no suite $name in this rig"; exit 2 ;;
         esac
         # the suites with a Linux side run with engine-ns (sys); the guard needs only KVM
