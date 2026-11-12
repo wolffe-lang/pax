@@ -11,11 +11,12 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   `/usr/bin/ligature`, built static from ligature's pinned commit (`user/ligature.pin`, `tools/mkligature`)
   as clef and trash are, and `/etc/pax-release` names it. lld stays the default for `wolf build` on the
   machine. `export WOLF_LD=/usr/bin/ligature` selects ligature, which also silences wolf's note naming lld,
-  and `WOLF_LD=cc` brings lld back for one build. On the 2 GiB guest the image is tested with, ligature links
-  hello, a program using `std.net` and `std.process`, and itself (compiled and linked on PAX). pelt needs a
-  2560 MiB guest and den 3072 today (ligature#35); with less, the build fails by name and nothing falls back to
-  lld. `tests/distribution-ligature` holds both linkers to the same behaviour on the image and measures each
-  link; `tests/distribution` holds the image to the pinned binary: `notes/px128-ligature-on-the-image.md`.
+  and `WOLF_LD=cc` brings lld back for one build. On the 2 GiB guest the image is tested with, ligature
+  `8594073c` links hello, a program using `std.net` and `std.process`, itself (compiled and linked on PAX),
+  pelt and den, in 2.2 to 2.8 s at peaks of 174 to 234 MiB (lld: under 0.1 s, 123 to 143 MiB). If it fails,
+  the build fails by name and nothing falls back to lld. `tests/distribution-ligature` holds both linkers to
+  the same behaviour on the image and measures each link; `tests/distribution` holds the image to the pinned
+  binary: `notes/px128-ligature-on-the-image.md`.
 
 - **A shell over ssh at a terminal runs /etc/shrc (px123, pax#368).** burrowd
   gave its sessions no ENV, so the login shell of `ssh host` never ran
