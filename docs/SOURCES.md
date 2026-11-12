@@ -2321,3 +2321,20 @@ description, which `tools/hotplug-session` speaks to QEMU's `usb-redir` device t
 | xHCI 1.2 (§4.6.3 Enable Slot, §4.6.4 Disable Slot, §5.4.7 CONFIG's MaxSlotsEn, §5.4.8 PORTSC's CCS and CSC), as px74's entries | as px74 | kernel/xhci: a refused port waits for a change; a slot past MaxSlotsEn given back |
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `nec-usb-xhci`, `usb-mouse`, `usb-kbd`, `usb-hub`, `usb-ccid` and `usb-redir`, q35's `max-ram-below-4g` | binary | black box: pax#348 reproduced (`notes/px120-hotplug.md` §2); Enable Slot answers success with slots past CONFIG's MaxSlotsEn (33 and 34 with 32 enabled); `nec-usb-xhci`'s `slots` property leaves HCSPARAMS1's MaxSlots at 64 (read through the monitor's `xp`); usb-redir on an xHCI refuses a peer that announces only the device version, disconnect acks and endpoint packet sizes ("lacks capabilities needed for use with XHCI") and takes one that adds 64-bit ids and 32-bit bulk lengths (which of the two it needs was not separated); the composite devices enumerate at full speed |
 | PAX's own `kernel/frames`, `kernel/xhci`, `kernel/mouse`, `kernel/usb_mouse`, `kernel/triage`, `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx2-frames`, `tests/mpx6-usb` | this tree | read and extended |
+
+## px129 — the console draws only what changes, once a write
+
+No kernel's, terminal emulator's, firmware's, driver's or C library's source was read: not Linux's, not any BSD's,
+not xterm's or any other terminal's, not QEMU's. The screen's new drawing is written from what kernel/screen already
+was and from the Intel SDM's account of write-combining memory; the measurements are black-box runs.
+
+| source | version | read, for |
+|---|---|---|
+| Intel SDM vol. 3A §11.3 (the memory types; WC: writes combined in buffers and written out in bursts, a partial line written as smaller transactions), §11.3.1 (WC buffering), §11.12 (the PAT), as px19's and kernel/fb's entries | as kernel/fb | why `blit` writes a run of cells a pixel row at a time, left to right: whole 64-byte lines, in order, rather than 32 bytes of sixteen lines a cell |
+| Intel SDM vol. 2 (RDTSC) | as px87 | conspeed's, keylat's and cpugaps' clocks |
+| console_codes(4), ECMA-48 (CUP, ED, SGR, DECTCEM), as px59's entries | as px59 | the sequences conspeed writes; the answers keylat gives as the console gives them |
+| the man pages of `posix_openpt(3)`, `ptsname(3)`, `setsid(2)`, `ioctl_tty(2)` (TIOCSCTTY, TIOCSWINSZ, TIOCGWINSZ), `clock_gettime(2)`, `tcflush(3)`, `poll(2)`, `readlink(2)` on `/proc/self/fd` | the man-pages project | user/elf/conspeed.c, keylat.c, cpugaps.c |
+| yew's public source (the org's own) at `user/yew.pin`'s commit: `src/edit/loop.lu` (one wait over the terminal and the jobs with the earliest deadline, one render a turn), `src/term/input.lu` (`ESC_TIMEOUT_MS`, 25 ms, armed only for an ESC at a read's end), `src/edit/keys.lu` (F mode's keys) | `user/yew.pin` | what yew waits on between a key and its frame (notes/px129-console-speed.md §6) |
+| yew (`/bin/yew`, sha256 `edcca94a…cdb14bb4`) and cub (sha256 `8056dfd4…cdb1045f`), the binaries an installed image ships, run unmodified on a Linux pseudo-terminal of 256×90 with TERM=linux | as installed | black box: their output a keypress or a step, recorded as tests/mpx3-conspeed.d/streams; strace(1) of each for its writes, yew's child processes and the files it writes |
+| QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with its VGA device at 2560×1440, KVM and TCG, no COM1 and with one | binary | black box: the console's costs before and after; a byte's cost with a UART under KVM (two port accesses, about 6 µs); the screendump the table is read from |
+| PAX's own `kernel/screen`, `kernel/console`, `kernel/user`, `kernel/serial`, `kernel/panic`, `kernel/sched` (`wake_input`, `kick`), `kernel/interrupts`, `kernel/xhci`, `boot/screen.S`, `tools/screen-ref`, `tests/mpx3-screen`, px125's `user/elf/muxprobe.c` and `tests/mpx7-mux` (B7) | this tree, and px125's branch | read and extended |
