@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **What PAX can do for a terminal multiplexer, measured (px125).** A new suite,
+  `tests/mpx7-mux`, asks PAX every question a multiplexer's server and client
+  ask of their system, row by row against Ubuntu 24.04 running the same
+  static programs: 32 ptys in one epoll loop, a 50 MB flood with every byte
+  in order and the other panes answering within a tick, back-pressure,
+  SIGWINCH through a pty inside a pty, the signal keys, a daemon that
+  outlives its starter, Unix sockets (mode, owner, 16 clients, peer
+  credentials, a stale file), non-blocking I/O and the loop's timers, termios
+  raw and back, the same work through wolf-std alone, and on the console what
+  a client draws, asks and types. Two small fixes: Ctrl-Space types NUL, as
+  xterm sends it (a multiplexer's usual prefix key), and the console draws
+  Spleen's whole box-drawing block, the four arrows and the powerline
+  separators (690 glyphs, was 560). The gaps are issues: the 64 thread slots,
+  a Unix stream's 4096 bytes, the loop calls PAX lacks (sendmsg/recvmsg,
+  timerfd, signalfd, ppoll), the console's subset, and two wolf-std calls:
+  `notes/px125-multiplexer-readiness.md`.
+
 - **The pointer, and the mouse in a terminal program (px117).** The console
   draws a pointer, an arrow over the cell it is on, from the first motion of
   any USB mouse or tablet, and moves it by drawing two cells. A program that

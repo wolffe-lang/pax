@@ -16,7 +16,9 @@
 //! the second port, dropped). Set 1 is decoded for a US layout: make
 //! codes below 0x80, the same with bit 7 set on release, 0xe0 before an
 //! extended key; both shifts, both controls and Caps Lock are tracked;
-//! Ctrl with a letter or one of `@[\]^_` gives the control character;
+//! Ctrl with a letter or one of `@[\]^_` gives the control character,
+//! and (px125) Ctrl with Space NUL (0x00), as Ctrl-@ does and as xterm
+//! sends it (a terminal multiplexer's usual prefix key);
 //! Backspace gives DEL (0x7f, the erase character), Enter CR (0x0d),
 //! keypad Enter CR and keypad `/ * - +` their characters; (px58) the
 //! cursor and editing block (the E0-prefixed arrows, Home, End, PgUp,
@@ -1829,6 +1831,8 @@ pub fn key_event(code: u64, pressed: bool, usb: bool) {
             c = c - 64
         } else if c == 63 {
             c = 127
+        } else if c == 32 {
+            c = 0 // px125: Ctrl-Space is NUL, as Ctrl-@
         }
     }
     bump(CON, C_RX_KBD)
