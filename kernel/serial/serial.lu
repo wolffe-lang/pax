@@ -15,10 +15,27 @@
 //! px118: and to kernel/bootlog, which keeps the boot's bytes in memory
 //! a warm reset may leave alone (until the first program starts).
 //!
+//! px129 (R-px129-15): a writer never waits on the UART. Once kernel/console
+//! has started (`tx_irq_on`), `put` adds the byte to a transmit ring
+//! (boot/io.S's pax_serial_tx, 16 KiB) and moves what the transmit FIFO
+//! takes when it is empty (LSR bit 5: up to 16 bytes), and COM1's THRE
+//! interrupt (IER bit 1, while the ring holds bytes; kernel/console's
+//! vector 36 calls `tx_irq`) moves the rest; a full ring drops the byte
+//! and counts it (`dropped`). Before that, at boot, `put` waits per byte
+//! as it always has (the kernel's own early lines, never a program's).
+//! `drain` (kernel/panic's halt) sends what the ring holds, waiting. A
+//! user program's terminal output (`put_tty`: kernel/user's console
+//! `write`, kernel/console's output and echo) is mirrored to COM1 unless
+//! the command line says `pax.serial=log`, an installed system's: then
+//! COM1 carries the kernel's own lines alone. On QEMU the FIFO empties as
+//! it is written, so the ring stays empty and COM1's bytes are what they
+//! were, in order, none dropped.
+//!
 //! Written from the PC16550D register map (public datasheet facts:
 //! the register offsets, the DLAB bit, LCR/FCR/MCR/LSR bit meanings, the
 //! 1.8432 MHz clock's divisor 1 for 115200 baud). No Linux source.
 
+use boot_info
 use bootlog
 use screen
 
@@ -28,6 +45,7 @@ extern "c" fn pax_irq_save() -> u64
 extern "c" fn pax_irq_restore(flags: u64)
 extern "c" let pax_serial_log_count: *u64
 extern "c" let pax_serial_log: *u8
+extern "c" let pax_serial_tx: *u8
 
 // COM1's I/O base and its registers, as offsets from it (PC16550D).
 // Module `const`s since px05 (wolf 0.2.23; 0.2.22 refused them,
@@ -66,6 +84,21 @@ const POLLS: int = 1048576
 // Absent hardware reads all ones. Never poll it as a ready UART.
 var present: bool = false
 pub fn available() -> bool { unsafe { present } }
+
+// px129: the transmit ring (pax_serial_tx): `tx_tail` bytes queued and
+// `tx_head` sent since boot, so the ring holds tx_tail - tx_head; `dropped`
+// the bytes a full ring refused; `irq_tx` whether `put` queues (after
+// kernel/console's start) or waits; `ier` what IER holds; `tty` whether a
+// program's terminal output goes to COM1. Touched with IF clear.
+const TX_SIZE: u64 = 16384
+const TX_FIFO: u64 = 16 // the 16550's transmit FIFO
+const IER_TX: int = 0x02 // transmit holding register empty
+var tx_head: u64 = 0
+var tx_tail: u64 = 0
+var tx_dropped: u64 = 0
+var irq_tx: bool = false
+var ier: int = 0
+var tty: bool = true
 
 fn out(reg: int, v: int) {
     // # Safety: io.S's `outb` on a COM1 register; the port and the value
@@ -110,12 +143,124 @@ pub fn init() -> int {
         status = status + 2
     }
     out(MCR, MCR_NORMAL)
-    unsafe { present = status == 3 }
+    unsafe {
+        present = status == 3
+        tty = !boot_info.cmdline_has("pax.serial=log") // px129: an installed system's word
+    }
     status
 }
 
-/// Write one byte to the screen (px19, kernel/screen), then to COM1 once
-/// the transmit holding register is empty. The screen first: when a
+/// px129: whether a program's terminal output is mirrored to COM1 (no
+/// `pax.serial=log` on the command line).
+pub fn tty_mirrored() -> bool {
+    // # Safety: a module flag written once by `init`.
+    unsafe { tty }
+}
+
+/// px129: the bytes a full transmit ring refused since boot.
+pub fn dropped() -> u64 {
+    // # Safety: a module word, read alone.
+    unsafe { tx_dropped }
+}
+
+fn set_ier(v: int) {
+    // # Safety: a module word, written with IF clear (its callers).
+    unsafe { ier = v }
+    out(IER, v)
+}
+
+fn get_ier() -> int {
+    // # Safety: as `set_ier`.
+    unsafe { ier }
+}
+
+/// px129: from here `put` queues (kernel/console's `start`, once COM1's
+/// interrupt is unmasked): a writer never waits on the UART again.
+pub fn tx_irq_on() {
+    if !available() { return }
+    // # Safety: a module flag, written with IF clear (kernel/console's start).
+    unsafe { irq_tx = true }
+}
+
+/// px129: what the transmit FIFO takes, from the ring, when LSR says it
+/// is empty: up to 16 bytes. IF clear.
+fn kick() {
+    // # Safety: module words, IF clear (the callers).
+    var h = unsafe { tx_head }
+    let t = unsafe { tx_tail }
+    if h == t || inp(LSR) & LSR_THR_EMPTY == 0 {
+        return
+    }
+    var n: u64 = 0
+    while n < TX_FIFO && h != t {
+        // # Safety: h % TX_SIZE lies inside pax_serial_tx (TX_SIZE bytes);
+        // io.S's `outb` on COM1's THR.
+        unsafe { pax_outb((COM1 + THR) as u16, ((pax_serial_tx as u64 + h % TX_SIZE) as *u8).read_volatile()) }
+        h += 1
+        n += 1
+    }
+    // # Safety: as above.
+    unsafe { tx_head = h }
+}
+
+/// px129: one byte into the ring (dropped and counted when it is full),
+/// what the FIFO takes moved at once, and the THRE interrupt asked for
+/// while bytes wait. Never waits.
+fn queue(b: u8) {
+    let flags = unsafe { pax_irq_save() }
+    // # Safety: module words, IF clear.
+    let t = unsafe { tx_tail }
+    if t - unsafe { tx_head } >= TX_SIZE {
+        unsafe { tx_dropped = tx_dropped + 1 }
+    } else {
+        // # Safety: t % TX_SIZE lies inside pax_serial_tx.
+        unsafe {
+            ((pax_serial_tx as u64 + t % TX_SIZE) as *u8).write_volatile(b)
+            tx_tail = t + 1
+        }
+    }
+    kick()
+    let waiting = unsafe { tx_tail != tx_head }
+    if waiting && get_ier() & IER_TX == 0 {
+        set_ier(get_ier() | IER_TX)
+    }
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// px129: COM1's interrupt (kernel/console's vector 36, IF clear): the
+/// FIFO refilled from the ring; the THRE interrupt off once it is empty.
+pub fn tx_irq() {
+    if !available() { return }
+    kick()
+    // # Safety: module words, IF clear.
+    if unsafe { tx_tail == tx_head } && get_ier() & IER_TX != 0 {
+        set_ier(get_ier() & !IER_TX)
+    }
+}
+
+/// px129: every byte the ring holds sent, waiting on THRE (each wait
+/// bounded as `put`'s was): the halt's, so a kernel's last lines reach
+/// the wire before it stops.
+pub fn drain() {
+    if !available() { return }
+    let flags = unsafe { pax_irq_save() }
+    var guard: u64 = 0
+    // # Safety: module words, IF clear.
+    while unsafe { tx_tail != tx_head } && guard < TX_SIZE {
+        var spins = 0
+        while inp(LSR) & LSR_THR_EMPTY == 0 && spins < POLLS {
+            spins = spins + 1
+        }
+        if spins >= POLLS { break }
+        kick()
+        guard += 1
+    }
+    unsafe { pax_irq_restore(flags) }
+}
+
+/// Write one byte to the screen (px19, kernel/screen), then to COM1: into
+/// the transmit ring once kernel/console has started (px129: `wire`),
+/// before that once the transmit holding register is empty. The screen first: when a
 /// byte has reached the wire, the screen has already drawn it, so a
 /// harness that sees a kernel's last line on the serial port and then
 /// finds the machine halted (tools/qemu-halt) never catches the screen
@@ -124,6 +269,22 @@ pub fn init() -> int {
 pub fn put(b: u8) {
     screen.put(b)
     bootlog.put(b)
+    wire(b, true)
+}
+
+/// px129: a user program's terminal output (kernel/user's console `write`,
+/// kernel/console's output and echo): as `put`, but to COM1 only while
+/// `tty_mirrored`.
+pub fn put_tty(b: u8) {
+    screen.put(b)
+    bootlog.put(b)
+    wire(b, tty_mirrored())
+}
+
+/// COM1's part of `put`: the in-memory transcript without a UART; with
+/// one, the ring (px129) once kernel/console has started, else the wait
+/// on THRE per byte as before; nothing when `to_uart` is false.
+fn wire(b: u8, to_uart: bool) {
     if !available() {
         // px129: the transcript keeps its first 64 KiB; past them a byte
         // costs nothing more here (the count stops at 65537).
@@ -139,6 +300,14 @@ pub fn put(b: u8) {
         }
         if n <= 65536 { unsafe { pax_serial_log_count.write_volatile(n + 1) } }
         unsafe { pax_irq_restore(flags) }
+        return
+    }
+    if !to_uart {
+        return
+    }
+    // # Safety: a module flag written once with IF clear.
+    if unsafe { irq_tx } {
+        queue(b)
         return
     }
     var spins = 0
@@ -172,7 +341,7 @@ pub fn receive_on() {
         let _b = inp(THR) // RBR: whatever arrived before
         n += 1
     }
-    out(IER, IER_RX)
+    set_ier(IER_RX)
 }
 
 /// Whether a received byte is waiting (LSR bit 0).
