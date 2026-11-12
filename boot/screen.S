@@ -6,31 +6,19 @@
    wolf-lang#598's shape), so its state is bytes here, named by
    kernel/screen with `extern "c" let` and read and written volatile:
 
-     pax_screen_state  96 eight-byte words: the framebuffer's address
+     pax_screen_state  80 eight-byte words: the framebuffer's address
                        and geometry, the grid's size, the cursor, the
                        pending wrap, the colours, the escape parser,
                        the UTF-8 decoder, the palette's 16 pixel values,
                        the counters kernel/screen reports; (px117) the
-                       mouse modes DECSET chose and the pointer's cell;
-                       (px129) the batch depth and the dirty rows' range
-     pax_screen_cells  two 320 x 128 four-byte grids, main then alternate (the
+                       mouse modes DECSET chose and the pointer's cell
+     pax_screen_cells  two 256 x 128 four-byte grids, main then alternate (the
                        glyph's code point in bits 0-7, the foreground
                        colour in bits 8-11, the background in 12-15),
                        bit 16 records blink; each grid is row-major,
                        `cols` cells a row
      pax_screen_early  16384 bytes: what the kernel wrote before the
                        screen was attached, replayed onto it at attach
-     pax_screen_front  (px129) one 320 x 128 four-byte grid: what each
-                       cell of the framebuffer shows, the cell's word as
-                       drawn with the cursor's bit (30) and the arrow's
-                       (31), or all ones when nothing is known
-     pax_screen_dirty  (px129) 128 eight-byte words, one a row: the
-                       first and last column touched since the row was
-                       last drawn (first | last << 32; none: first above
-                       last)
-     pax_screen_run    (px129) 320 five-word records: a run of cells
-                       being drawn, each its glyph's address in the font
-                       and its four pixel pairs (or two doubled pixels)
 
    The routines (System V: arguments in %rdi, %rsi, %rdx):
 
@@ -72,26 +60,14 @@ pax_fb_fill:
         .p2align 6
         .globl pax_screen_state
 pax_screen_state:
-        .zero 768
+        .zero 640
         .p2align 12
         .globl pax_screen_cells
 pax_screen_cells:
-        .zero 2 * 320 * 128 * 4
+        .zero 2 * 256 * 128 * 4
         .p2align 12
         .globl pax_screen_early
 pax_screen_early:
         .zero 16384
-        .p2align 12
-        .globl pax_screen_front
-pax_screen_front:
-        .zero 320 * 128 * 4
-        .p2align 6
-        .globl pax_screen_dirty
-pax_screen_dirty:
-        .zero 128 * 8
-        .p2align 6
-        .globl pax_screen_run
-pax_screen_run:
-        .zero 320 * 40
 
         .section .note.GNU-stack, "", @progbits

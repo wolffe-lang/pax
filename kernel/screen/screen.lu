@@ -86,8 +86,7 @@
 //!   types the reports; it serves 1002 with 1006 alone.
 //! - (px117) the pointer: an arrow over the cell kernel/console puts it
 //!   on (`pointer`), its outline black and its fill white (ARROW_*), the
-//!   cell's own pixels elsewhere, drawn whenever that cell is (px129: the
-//!   arrow's bit is part of what the front grid says the cell shows),
+//!   cell's own pixels elsewhere, drawn by `draw` whenever that cell is,
 //!   so a write under it keeps it. Moving it draws two cells, the old
 //!   one plainly and the new one with the arrow, and no cell of the grid
 //!   is written. The scroll that copies the framebuffer (`fbread`'s
@@ -95,12 +94,11 @@
 //!   copied.
 //!
 //! **The two screens** (px70): two independent 32-bit-cell grids,
-//! each MAX_COLS * MAX_ROWS cells (px129: 320 x 128). A cell has glyph bits 0-7, foreground
+//! each MAX_COLS * MAX_ROWS cells. A cell has glyph bits 0-7, foreground
 //! 8-11, background 12-15, recorded blink bit 16 and (gm01) the glyph
 //! number's high byte in bits 20-27, for the font's rows above U+00FF
-//! (glyph numbers 256 and up). Together 320 KiB
-//! (80 frames; 256 KiB at px70's 256 columns), the same as the
-//! packed32+32 layout required by blink.
+//! (glyph numbers 256 and up). Together 256 KiB
+//! (64 frames), the same as the packed32+32 layout required by blink.
 //! The alternate grid follows the main grid; scrolling uses a bulk copy
 //! confined to the active grid. Paired TCG measurements decide item 7.
 //!
@@ -115,23 +113,13 @@
 //! (px87, pax#253: reads through a GPU's write-combining mapping cost
 //! about 23 MB of uncached loads a scrolled line on kasumi's 4090): the
 //! cell grid is its shadow in RAM, and a scroll moves the cells up and
-//! touches only the cells whose value changed (`scroll`). (px129) No cell
-//! is drawn when it is written: a writer `touch`es it, and `flush` draws
-//! each touched cell whose word differs from what boot/screen.S's front
-//! grid says the framebuffer shows, a run of neighbouring cells a pixel
-//! row at a time (whole write-combining lines, in order; a glyph row's
-//! stores picked from the cell's four pixel pairs, no division a pixel).
-//! `put` flushes after each byte, except inside a console write
-//! (kernel/user's, `batch_begin`/`batch_end`), whose end draws what the
-//! write left once: a clear and a repaint, ten scrolled lines, a cursor
-//! moved through a whole frame, each draw only the screen they leave. px19's scroll,
+//! draws only the cells whose value changed (`scroll`). px19's scroll,
 //! which moved the pixel rows up with boot/screen.S's `pax_fb_copy`
 //! (REP MOVSQ of the framebuffer onto itself), runs only under the
 //! command-line word `fbread`, for measurements. The framebuffer is
 //! mapped by kernel/fb (write-combining where the PAT allows). The grid
-//! is at most 320 columns by 128 rows (px129: 256 before, which left the
-//! right 512 pixels of a 2560-pixel display blank, pax#357); pixels right
-//! of and below it stay background (px87: a scroll no longer moves them).
+//! is at most 256 columns by 128 rows; pixels right of and below it stay
+//! background (px87: a scroll no longer moves them).
 //!
 //! **Interrupts.** `put` runs with IF clear (sched.S's `pax_irq_save`
 //! and `pax_irq_restore`), so a timer switch cannot interleave two
@@ -160,9 +148,6 @@ extern "c" fn pax_rdtsc() -> u64
 extern "c" let pax_screen_state: *u64
 extern "c" let pax_screen_cells: *u32
 extern "c" let pax_screen_early: *u8
-extern "c" let pax_screen_front: *u32
-extern "c" let pax_screen_dirty: *u64
-extern "c" let pax_screen_run: *u64
 extern "c" let pax_font: *u8
 extern "c" let pax_font_ranges: *u32
 extern "c" let pax_font_glyphs: *u32
@@ -224,14 +209,9 @@ const S_PTRY: u64 = 74
 const S_PMOVES: u64 = 75 // the pointer's moves drawn
 const S_PCYCLES: u64 = 76 // the TSC cycles they took
 const S_PLEAST: u64 = 77 // the cheapest one
-// px129: the drawing deferred to one pass (`flush`).
-const S_BATCH: u64 = 78 // writes holding the drawing back (`batch_begin`)
-const S_DLO: u64 = 79 // the first and last rows touched since the last pass
-const S_DHI: u64 = 80 // (none: S_DLO above S_DHI)
-const S_BT0: u64 = 81 // the TSC when the outermost hold began (its cycles go to `cycles`)
 const RQ_BYTES: u64 = 32
 
-const MAX_COLS: u64 = 320 // px129: 2560 pixels at scale 1 (pax#357); was 256
+const MAX_COLS: u64 = 256
 const MAX_ROWS: u64 = 128
 const EARLY: u64 = 16384
 const GW: u64 = 8 // a cell's width in pixels
@@ -240,7 +220,7 @@ const BLANK: u64 = 0x0720 // a space, foreground 7, background 0
 const QUESTION: u64 = 63
 
 fn sv(i: u64) -> u64 {
-    // # Safety: i < 96, inside boot/screen.S's 768-byte pax_screen_state.
+    // # Safety: i < 80, inside boot/screen.S's 640-byte pax_screen_state.
     unsafe { ((pax_screen_state as u64 + i * 8) as *u64).read_volatile() }
 }
 
@@ -401,8 +381,6 @@ fn pixel(c: u64) -> u64 {
 }
 
 /// Palette changes also recolour cells written before the OSC, as on the VT.
-/// px129: every cell is drawn again at the next pass (its front word
-/// unknown); the fill recolours the pixels outside the grid.
 fn repaint_palette() {
     hide()
     let p = pal(0)
@@ -410,10 +388,9 @@ fn repaint_palette() {
     unsafe { pax_fb_fill(sv(S_VA), p | (p << 32), sv(S_PITCH) * sv(S_H) / 8) }
     var i: u64 = 0
     while i < sv(S_COLS) * sv(S_ROWS) {
-        put_front(i, UNKNOWN)
+        draw(i % sv(S_COLS), i / sv(S_COLS), false)
         i += 1
     }
-    touch_all()
 }
 
 fn reset_palette() {
@@ -453,9 +430,13 @@ fn arrow_row(lo: u64, hi: u64, r: u64) -> u64 {
     if r < 8 { (lo >> (r * 8)) & 0xff } else { (hi >> ((r - 8) * 8)) & 0xff }
 }
 
+/// px117: whether the cursor is drawn on cell (x, y).
+fn cursor_on(x: u64, y: u64) -> bool {
+    sv(S_CUR) != 0 && sv(S_CURX) == x && sv(S_CURY) == y
+}
+
 /// px117: cell (x, y) drawn with the arrow over it: the outline's pixels
-/// black, the fill's white, the rest the cell's own (`cursor` swaps its
-/// colours, as the run's cells do in `prepare`).
+/// black, the fill's white, the rest the cell's own (`cursor` as `draw`).
 fn draw_arrow(x: u64, y: u64, cursor: bool) {
     let c = cell(y * sv(S_COLS) + x)
     let g = (c & 0xff) | ((c >> 12) & 0xff00)
@@ -493,232 +474,37 @@ fn draw_arrow(x: u64, y: u64, cursor: bool) {
     }
 }
 
-// --- what the framebuffer shows (px129) -----------------------------------
-//
-// A cell is no longer drawn when it is written. Every writer of a cell,
-// of the cursor or of the arrow `touch`es it; `flush` then draws, in one
-// pass, each touched cell whose word (with the cursor's and the arrow's
-// bits) differs from what boot/screen.S's front grid says the
-// framebuffer shows, a run of neighbouring cells a pixel row at a time.
-// `put` flushes after every byte, unless a write holds the drawing back
-// (`batch_begin`, kernel/user's `write`): then the write's last byte
-// flushes, so a scroll of ten lines, a clear and a repaint, or a cursor
-// moved a thousand times in one write draw the screen it leaves once.
-// What a person sees after a write is the same picture as before px129;
-// what it passed through on the way is never drawn.
-
-const CUR_BIT: u64 = 0x40000000 // the front word's cursor (cells use bits 0-27)
-const PTR_BIT: u64 = 0x80000000 // and its arrow
-const UNKNOWN: u64 = 0xffffffff // a front word no cell's equals: drawn at the next pass
-const CLEAN: u64 = 0xffffffff // a row's dirty word with nothing touched (first above last)
-const NONE: u64 = 0xffffffffffffffff // no cursor or arrow (`flush`)
-const RUN: u64 = 40 // bytes a cell of pax_screen_run: its glyph's address, four pairs
-
-fn front(i: u64) -> u64 {
-    // # Safety: i < cols * rows <= MAX_COLS * MAX_ROWS, boot/screen.S's
-    // pax_screen_front.
-    unsafe { ((pax_screen_front as u64 + i * 4) as *u32).read_volatile() as u64 }
-}
-
-fn put_front(i: u64, v: u64) {
-    // # Safety: as `front`.
-    unsafe { ((pax_screen_front as u64 + i * 4) as *u32).write_volatile(v as u32) }
-}
-
-fn dirty(y: u64) -> u64 {
-    // # Safety: y < rows <= MAX_ROWS, boot/screen.S's pax_screen_dirty.
-    unsafe { ((pax_screen_dirty as u64 + y * 8) as *u64).read_volatile() }
-}
-
-fn put_dirty(y: u64, v: u64) {
-    // # Safety: as `dirty`.
-    unsafe { ((pax_screen_dirty as u64 + y * 8) as *u64).write_volatile(v) }
-}
-
-/// Cell (x, y) may show something else now: the next `flush` looks at it.
-fn touch(x: u64, y: u64) {
-    let d = dirty(y)
-    let lo = d & 0xffffffff
-    let hi = d >> 32
-    if x < lo || x > hi {
-        put_dirty(y, (if x < lo { x } else { lo }) | ((if x > hi { x } else { hi }) << 32))
-    }
-    if y < sv(S_DLO) {
-        put_sv(S_DLO, y)
-    }
-    if y > sv(S_DHI) {
-        put_sv(S_DHI, y)
-    }
-}
-
-/// Every cell of the grid, as `touch` each.
-fn touch_all() {
-    let cols = sv(S_COLS)
-    let rows = sv(S_ROWS)
-    var y: u64 = 0
-    while y < rows {
-        put_dirty(y, (cols - 1) << 32)
-        y += 1
-    }
-    put_sv(S_DLO, 0)
-    put_sv(S_DHI, rows - 1)
-}
-
-/// Nothing touched, and the front grid's every cell `v` (attach's clear:
-/// BLANK when the cleared framebuffer shows one; UNKNOWN to draw them all).
-fn front_reset(v: u64) {
-    var i: u64 = 0
-    while i < sv(S_COLS) * sv(S_ROWS) {
-        put_front(i, v)
-        i += 1
-    }
-    var y: u64 = 0
-    while y < sv(S_ROWS) {
-        put_dirty(y, CLEAN)
-        y += 1
-    }
-    put_sv(S_DLO, CLEAN)
-    put_sv(S_DHI, 0)
-}
-
-/// Draw every touched cell whose word differs from what it shows: the
-/// grid's word, with CUR_BIT where the cursor is drawn and PTR_BIT where
-/// the arrow is. A run of such cells is drawn a pixel row at a time
-/// (`blit`); the arrow's cell alone (`draw_arrow`).
-fn flush() {
-    let first = sv(S_DLO)
-    let last = sv(S_DHI)
-    if first > last {
+/// Draw cell (x, y) from the grid; `cursor` swaps its colours. px117: the
+/// pointer's cell gets its arrow over it (`draw_arrow`).
+fn draw(x: u64, y: u64, cursor: bool) {
+    if sv(S_PTR) != 0 && sv(S_PTRX) == x && sv(S_PTRY) == y {
+        draw_arrow(x, y, cursor)
         return
     }
-    put_sv(S_DLO, CLEAN)
-    put_sv(S_DHI, 0)
-    let rows = sv(S_ROWS)
-    let cols = sv(S_COLS)
-    let cur = if sv(S_CUR) != 0 { sv(S_CURX) | (sv(S_CURY) << 32) } else { NONE }
-    let ptr = if sv(S_PTR) != 0 { sv(S_PTRX) | (sv(S_PTRY) << 32) } else { NONE }
-    var y = first
-    while y <= last && y < rows {
-        let d = dirty(y)
-        let lo = d & 0xffffffff
-        var hi = d >> 32
-        if lo <= hi {
-            put_dirty(y, CLEAN)
-            if hi >= cols {
-                hi = cols - 1
-            }
-            draw_span(y, lo, hi, cur, ptr)
-        }
-        y += 1
-    }
-}
-
-/// Cells lo to hi of row y, those that differ from what they show.
-fn draw_span(y: u64, lo: u64, hi: u64, cur: u64, ptr: u64) {
-    let row = y * sv(S_COLS)
-    let scale = sv(S_SCALE)
-    var start: u64 = 0
-    var n: u64 = 0
-    var x = lo
-    while x <= hi {
-        let at = x | (y << 32)
-        let want = cell(row + x) | (if at == cur { CUR_BIT } else { 0 }) | (if at == ptr { PTR_BIT } else { 0 })
-        let same = want == front(row + x)
-        if n > 0 && (same || at == ptr) {
-            blit(start, y, n)
-            n = 0
-        }
-        if !same {
-            if at == ptr {
-                draw_arrow(x, y, at == cur)
-            } else {
-                if n == 0 {
-                    start = x
-                }
-                prepare(n, want, scale)
-                n += 1
-            }
-            put_front(row + x, want)
-        }
-        x += 1
-    }
-    if n > 0 {
-        blit(start, y, n)
-    }
-}
-
-/// Slot n of the run: the address of the glyph front word `w` shows, and
-/// its pixel pairs: at scale 1 the 64-bit store for each two pixels of a
-/// glyph row, by those two bits (left pixel the high one: 00, 01, 10,
-/// 11); at scale 2 the store for one pixel doubled (unset, set).
-fn prepare(n: u64, w: u64, scale: u64) {
-    let g = (w & 0xff) | ((w >> 12) & 0xff00) // bits 0-7 and 20-27 (gm01)
-    var f = (w >> 8) & 15
-    var b = (w >> 12) & 15
-    if w & CUR_BIT != 0 {
+    let c = cell(y * sv(S_COLS) + x)
+    let g = (c & 0xff) | ((c >> 12) & 0xff00) // bits 0-7 and 20-27 (gm01)
+    var f = (c >> 8) & 15
+    var b = (c >> 12) & 15
+    if cursor {
         let t = f
         f = b
         b = t
     }
     let pf = pal(f)
     let pb = pal(b)
-    // # Safety: n < cols <= MAX_COLS, so the slot's five words lie inside
-    // boot/screen.S's pax_screen_run (MAX_COLS * 40 bytes); g is
-    // `glyph_of`'s, inside boot/font.S's pax_font (as `font_row`).
-    unsafe {
-        let at = pax_screen_run as u64 + n * RUN
-        (at as *u64).write_volatile(pax_font as u64 + g * GH)
-        if scale == 1 {
-            ((at + 8) as *u64).write_volatile(pb | (pb << 32))
-            ((at + 16) as *u64).write_volatile(pb | (pf << 32))
-            ((at + 24) as *u64).write_volatile(pf | (pb << 32))
-            ((at + 32) as *u64).write_volatile(pf | (pf << 32))
-        } else {
-            ((at + 8) as *u64).write_volatile(pb | (pb << 32))
-            ((at + 16) as *u64).write_volatile(pf | (pf << 32))
-        }
-    }
-}
-
-/// Draw the n cells `prepare` put in the run, from cell (x0, y)
-/// rightwards: each pixel row of the run in turn, left to right, so the
-/// framebuffer is written in whole write-combining lines, in order. A
-/// glyph row's byte picks each store from the cell's pairs (a shift and
-/// a mask; no division, no branch a pixel).
-fn blit(x0: u64, y: u64, n: u64) {
     let pitch = sv(S_PITCH)
     let scale = sv(S_SCALE)
-    // # Safety: the run's address; `prepare` wrote its first n slots.
-    let run = unsafe { pax_screen_run as u64 }
-    let end = run + n * RUN
-    let base = sv(S_VA) + y * GH * scale * pitch + x0 * GW * scale * 4
+    let base = sv(S_VA) + y * GH * scale * pitch + x * GW * scale * 4
     var r: u64 = 0
     while r < GH * scale {
-        var a = base + r * pitch
-        var s = run
-        let fr = if scale == 1 { r } else { r >> 1 }
-        while s < end {
-            // # Safety: s is a slot `prepare` wrote (below `end`), its first
-            // word a glyph's address in pax_font and fr < 16; `a` lies in
-            // the framebuffer kernel/fb mapped, inside row y's band of
-            // cells x0 to x0 + n - 1 (as `draw_arrow`'s stores).
-            unsafe {
-                let bits = ((((s as *u64).read_volatile()) + fr) as *u8).read_volatile() as u64
-                if scale == 1 {
-                    (a as *u64).write_volatile(((s + 8 + ((bits >> 3) & 0x18)) as *u64).read_volatile())
-                    ((a + 8) as *u64).write_volatile(((s + 8 + ((bits >> 1) & 0x18)) as *u64).read_volatile())
-                    ((a + 16) as *u64).write_volatile(((s + 8 + ((bits << 1) & 0x18)) as *u64).read_volatile())
-                    ((a + 24) as *u64).write_volatile(((s + 8 + ((bits << 3) & 0x18)) as *u64).read_volatile())
-                } else {
-                    var k: u64 = 0
-                    while k < 8 {
-                        ((a + k * 8) as *u64).write_volatile(((s + 8 + (((bits >> (7 - k)) & 1) << 3)) as *u64).read_volatile())
-                        k += 1
-                    }
-                }
-            }
-            a += GW * scale * 4
-            s += RUN
+        let bits = font_row(g, r / scale)
+        let row = base + r * pitch
+        var k: u64 = 0
+        while k < 4 * scale {
+            let lo = if bits & (0x80 >> ((2 * k) / scale)) != 0 { pf } else { pb }
+            let hi = if bits & (0x80 >> ((2 * k + 1) / scale)) != 0 { pf } else { pb }
+            store(row + k * 8, lo | (hi << 32))
+            k += 1
         }
         r += 1
     }
@@ -737,24 +523,23 @@ fn space_empty() -> bool {
     true
 }
 
-/// Take the cursor off the screen (its cell drawn plainly at the next
-/// pass).
+/// Take the cursor off the screen (redraw its cell plainly).
 fn hide() {
     if sv(S_CUR) != 0 {
+        draw(sv(S_CURX), sv(S_CURY), false)
         put_sv(S_CUR, 0)
-        touch(sv(S_CURX), sv(S_CURY))
     }
 }
 
-/// Put the cursor on the screen at (cx, cy) (drawn at the next pass).
+/// Put the cursor on the screen at (cx, cy).
 fn show() {
     if sv(S_CUR) == 0 && sv(S_VISIBLE) != 0 {
         let x = sv(S_CX)
         let y = sv(S_CY)
+        draw(x, y, true)
         put_sv(S_CURX, x)
         put_sv(S_CURY, y)
         put_sv(S_CUR, 1)
-        touch(x, y)
     }
 }
 
@@ -884,10 +669,12 @@ fn add_spent(c: u64) {
 /// The grid up one row; the last row blank.
 ///
 /// px87 (pax#253): the framebuffer is never read. The cell grid is the
-/// screen's shadow in RAM; the scroll moves the cells up in RAM and
-/// touches only the cells whose value changed, and the next pass (px129:
-/// `flush`, against the front grid) draws those whose pixels differ: a
-/// cell that already shows what moves into it is left alone.
+/// screen's shadow in RAM: the framebuffer shows each cell of the active
+/// grid as `draw` draws it (every writer of a cell draws it; `attach` and
+/// `repaint_palette` clear and draw the whole grid), but for the cursor's
+/// cell while the cursor is shown, and the cursor is hidden first. So the
+/// scroll moves the cells up in RAM and draws only the cells whose value
+/// changed: a cell that already shows what moves into it is left alone.
 /// px19's pixel copy (REP MOVSQ of the framebuffer onto itself, about
 /// 23 MB of reads a line through the write-combining mapping of kasumi's
 /// GPU) runs only under the `fbread` word.
@@ -915,7 +702,7 @@ fn scroll() {
             let v = if y < bottom { unsafe { ((at + cols * 4) as *u32).read_volatile() as u64 } } else { c }
             if unsafe { (at as *u32).read_volatile() as u64 } != v {
                 unsafe { (at as *u32).write_volatile(v as u32) }
-                touch(x, y)
+                draw(x, y, false)
             }
             x += 1
         }
@@ -932,11 +719,8 @@ fn scroll_readback() {
     let arrow = sv(S_PTR) != 0
     if arrow {
         put_sv(S_PTR, 0)
-        touch(sv(S_PTRX), sv(S_PTRY))
+        draw(sv(S_PTRX), sv(S_PTRY), cursor_on(sv(S_PTRX), sv(S_PTRY)))
     }
-    // px129: the pixels about to move show the grid first (the caller hid
-    // the cursor; the arrow is off), so the front grid can move with them.
-    flush()
     let cols = sv(S_COLS)
     let first = sv(S_TOP)
     let rows = sv(S_END) - first
@@ -957,24 +741,14 @@ fn scroll_readback() {
     // MOVSQ permits unaligned addresses; the helper copies a byte remainder.
     let grid = cells_base() + base * 4
     unsafe { pax_fb_copy(grid, grid + cols * 4, (rows - 1) * cols * 4) }
-    // # Safety: the same rows of boot/screen.S's pax_screen_front, moved up
-    // one row as the grid's are (an overlapping upward copy).
-    unsafe {
-        let shown = pax_screen_front as u64 + base * 4
-        pax_fb_copy(shown, shown + cols * 4, (rows - 1) * cols * 4)
-    }
     var i: u64 = 0
     while i < cols {
         put_cell(base + (rows - 1) * cols + i, c)
-        put_front(base + (rows - 1) * cols + i, if space_empty() { c } else { UNKNOWN })
-        if !space_empty() {
-            touch(i, first + rows - 1)
-        }
         i += 1
     }
     if arrow {
         put_sv(S_PTR, 1)
-        touch(sv(S_PTRX), sv(S_PTRY))
+        draw(sv(S_PTRX), sv(S_PTRY), cursor_on(sv(S_PTRX), sv(S_PTRY)))
     }
     bump(S_SCROLLS)
 }
@@ -1006,7 +780,7 @@ fn glyph(cp: u64) {
         hide()
     }
     put_cell(y * sv(S_COLS) + x, (blank() & !0xff) | (g & 0xff) | ((g >> 8) << 20))
-    touch(x, y)
+    draw(x, y, false)
     if x + 1 == sv(S_COLS) {
         put_sv(S_WRAP, 1)
     } else {
@@ -1213,7 +987,7 @@ fn erase(first: u64, end: u64) {
     var i = first
     while i < end {
         put_cell(i, c)
-        touch(i % sv(S_COLS), i / sv(S_COLS))
+        draw(i % sv(S_COLS), i / sv(S_COLS), false)
         i += 1
     }
 }
@@ -1253,7 +1027,7 @@ fn edit_chars(insert: bool, requested: u64) {
         while i < cols { put_cell(base + i, blank()); i += 1 }
     }
     var i = x
-    while i < cols { touch(i, sv(S_CY)); i += 1 }
+    while i < cols { draw(i, sv(S_CY), false); i += 1 }
 }
 
 /// The measured VT ignores the top margin for IL/DL, but stops before
@@ -1279,7 +1053,7 @@ fn edit_lines(insert: bool, requested: u64) {
         while i < last { put_cell(i, blank()); i += 1 }
     }
     var i = first
-    while i < last { touch(i % sv(S_COLS), i / sv(S_COLS)); i += 1 }
+    while i < last { draw(i % sv(S_COLS), i / sv(S_COLS), false); i += 1 }
 }
 
 fn dispatch(b: u64) {
@@ -1352,7 +1126,11 @@ fn alternate(on: bool) {
     } else {
         put_sv(S_ALT, 0)
         restore_from(S_MAIN_POS, S_MAIN_ATTR)
-        touch_all()
+        var i: u64 = 0
+        while i < sv(S_COLS) * sv(S_ROWS) {
+            draw(i % sv(S_COLS), i / sv(S_COLS), false)
+            i += 1
+        }
     }
 }
 
@@ -1595,18 +1373,6 @@ pub fn put(b: u8) {
         }
         if sv(S_ON) == 0 { return }
     }
-    if sv(S_BATCH) != 0 {
-        // px129: inside a held write (kernel/user's, which runs with IF
-        // clear): fed with no pass, no clock read and no IF to save;
-        // `batch_end` counts the write's cycles and draws what it left.
-        if sv(S_BUSY) == 0 {
-            put_sv(S_BUSY, 1)
-            feed(b as u64)
-            show()
-            put_sv(S_BUSY, 0)
-        }
-        return
-    }
     // # Safety: sched.S's PUSHFQ/POP/CLI; restored below.
     let flags = unsafe { pax_irq_save() }
     if sv(S_BUSY) == 0 {
@@ -1615,64 +1381,11 @@ pub fn put(b: u8) {
         let t0 = unsafe { pax_rdtsc() }
         feed(b as u64)
         show()
-        flush() // px129: the byte's pass (a held write's is at its end)
         add_spent(unsafe { pax_rdtsc() } - t0)
         put_sv(S_BUSY, 0)
     }
     // # Safety: sched.S's STI when `flags` had IF.
     unsafe { pax_irq_restore(flags) }
-}
-
-/// px129: hold the drawing back until `batch_end` (kernel/user's `write`
-/// and kernel/console's `put_kernel`, around their bytes): what the bytes
-/// leave on the screen is drawn once, at the end. Nested holds count.
-pub fn batch_begin() {
-    // # Safety: as `put`.
-    let flags = unsafe { pax_irq_save() }
-    if sv(S_BATCH) == 0 {
-        // # Safety: fpu.S's RDTSC (px87's `cycles`).
-        put_sv(S_BT0, unsafe { pax_rdtsc() })
-    }
-    put_sv(S_BATCH, sv(S_BATCH) + 1)
-    // # Safety: as `put`.
-    unsafe { pax_irq_restore(flags) }
-}
-
-/// px129: the hold's end; the last one draws what the bytes left.
-pub fn batch_end() {
-    // # Safety: as `put`.
-    let flags = unsafe { pax_irq_save() }
-    if sv(S_BATCH) > 0 {
-        put_sv(S_BATCH, sv(S_BATCH) - 1)
-        if sv(S_BATCH) == 0 {
-            drain()
-            // # Safety: fpu.S's RDTSC: the held write's feeding and its pass.
-            add_spent(unsafe { pax_rdtsc() } - sv(S_BT0))
-        }
-    }
-    // # Safety: as `put`.
-    unsafe { pax_irq_restore(flags) }
-}
-
-/// px129: from the panic path before it halts: every hold dropped and what
-/// the screen's grid holds drawn, so a panic inside a held write is seen.
-/// Nothing when the panic came from inside the screen (`put` busy).
-pub fn release() {
-    // # Safety: as `put`.
-    let flags = unsafe { pax_irq_save() }
-    put_sv(S_BATCH, 0)
-    drain()
-    // # Safety: as `put`.
-    unsafe { pax_irq_restore(flags) }
-}
-
-/// The pass, when the screen is attached and not already drawing. IF clear.
-fn drain() {
-    if sv(S_ON) != 0 && sv(S_BUSY) == 0 {
-        put_sv(S_BUSY, 1)
-        flush()
-        put_sv(S_BUSY, 0)
-    }
 }
 
 /// Attach the screen to a framebuffer kernel/fb has mapped at `va`:
@@ -1762,14 +1475,15 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
         put_cell(i, BLANK)
         i += 1
     }
-    // px87, px129: the cleared framebuffer shows every BLANK cell when the
-    // font's space is empty (Spleen's is); otherwise every cell is drawn.
-    put_sv(S_BATCH, 0)
-    put_sv(S_DLO, CLEAN)
-    put_sv(S_DHI, 0)
-    front_reset(if space_empty() { BLANK } else { UNKNOWN })
+    // px87: `scroll` draws only the cells that change, so the cleared
+    // framebuffer must already show every BLANK cell: it does when the
+    // font's space is empty (Spleen's is); otherwise the grid is drawn.
     if !space_empty() {
-        touch_all()
+        i = 0
+        while i < cols * rows {
+            draw(i % cols, i / cols, false)
+            i += 1
+        }
     }
     put_sv(S_ON, 1)
     let n = sv(S_EARLY)
@@ -1782,7 +1496,6 @@ pub fn attach(va: u64, w: u64, full_h: u64, pitch: u64, rs: u64, gs: u64, bs: u6
     }
     put_sv(S_REPLAYED, n)
     show()
-    flush()
     add_spent(unsafe { pax_rdtsc() } - t0)
     put_sv(S_BUSY, 0)
     // # Safety: as `put`.
@@ -1855,11 +1568,9 @@ pub fn pointer(x0: u64, y0: u64) {
             put_sv(S_PTRY, y)
             put_sv(S_PTR, 1)
             if was {
-                touch(ox, oy)
+                draw(ox, oy, cursor_on(ox, oy))
             }
-            touch(x, y)
-            flush() // px129: the two cells, and whatever a write left
-
+            draw(x, y, cursor_on(x, y))
             // # Safety: as above.
             let dt = unsafe { pax_rdtsc() } - t0
             bump(S_PMOVES)

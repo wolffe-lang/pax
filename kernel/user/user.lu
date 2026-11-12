@@ -269,7 +269,6 @@ use procfs
 use ready
 use rtc
 use sched
-use screen
 use serial
 use signal
 use socket
@@ -785,10 +784,6 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         return NEG_EFAULT
     }
     let smap = state(U_SMAP)
-    // px129: the screen draws what the write leaves once, at its end; the
-    // output processing is read once (nothing changes it inside the write).
-    screen.batch_begin()
-    let nl = console.onlcr(console.CON)
     var i: u64 = 0
     while i < len {
         // # Safety: buf + i lies in a page `readable` found present and
@@ -796,13 +791,12 @@ fn write(fd: u64, buf: u64, len: u64) -> u64 {
         // is clear: one CPU, no switch); boot/user.S brackets the read
         // with STAC/CLAC under SMAP.
         let b = unsafe { pax_peek_user(buf + i, smap) }
-        if b == 10 && nl {
+        if b == 10 && console.onlcr(console.CON) {
             serial.put(13)
         }
         serial.put((b & 0xff) as u8)
         i += 1
     }
-    screen.batch_end()
     console.after_write() // px117: a mouse mode set here is this process's
     // px59: a query among the bytes (DA1, the cursor's position) has
     // the screen's answer typed now, as a Linux VT answers inside the
