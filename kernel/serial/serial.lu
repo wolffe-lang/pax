@@ -17,13 +17,16 @@
 //!
 //! px129 (R-px129-15): a writer never waits on the UART. Once kernel/console
 //! has started (`tx_irq_on`), `put` adds the byte to a transmit ring
-//! (boot/io.S's pax_serial_tx, 16 KiB) and moves what the transmit FIFO
-//! takes when it is empty (LSR bit 5: up to 16 bytes), and COM1's THRE
-//! interrupt (IER bit 1, while the ring holds bytes; kernel/console's
-//! vector 36 calls `tx_irq`) moves the rest; a full ring drops the byte
-//! and counts it (`dropped`). Before that, at boot, `put` waits per byte
-//! as it always has (the kernel's own early lines, never a program's).
-//! `drain` (kernel/panic's halt) sends what the ring holds, waiting. A
+//! (boot/io.S's pax_serial_tx, 64 KiB, about 5.7 s of a 115200 line).
+//! When the ring was idle it moves what the transmit FIFO takes (LSR bit
+//! 5, the FIFO empty: up to 16 bytes); COM1's THRE interrupt (IER bit 1,
+//! armed while the ring holds bytes; kernel/console's vector 36 calls
+//! `tx_irq`) moves the rest, so while it is armed a byte costs a store
+//! and no port access. A full ring drops the byte and counts it
+//! (`dropped`). Before that, at boot, `put` waits per byte as it always
+//! has (the kernel's own early lines, never a program's). `drain`
+//! (kernel/panic's halt, kernel/power's reboot and power-off) sends what
+//! the ring holds, waiting. A
 //! user program's terminal output (`put_tty`: kernel/user's console
 //! `write`, kernel/console's output and echo) is mirrored to COM1 unless
 //! the command line says `pax.serial=log`, an installed system's: then
@@ -90,7 +93,7 @@ pub fn available() -> bool { unsafe { present } }
 // the bytes a full ring refused; `irq_tx` whether `put` queues (after
 // kernel/console's start) or waits; `ier` what IER holds; `tty` whether a
 // program's terminal output goes to COM1. Touched with IF clear.
-const TX_SIZE: u64 = 16384
+const TX_SIZE: u64 = 65536
 const TX_FIFO: u64 = 16 // the 16550's transmit FIFO
 const IER_TX: int = 0x02 // transmit holding register empty
 var tx_head: u64 = 0
@@ -203,14 +206,17 @@ fn kick() {
     unsafe { tx_head = h }
 }
 
-/// px129: one byte into the ring (dropped and counted when it is full),
-/// what the FIFO takes moved at once, and the THRE interrupt asked for
-/// while bytes wait. Never waits.
+/// px129: one byte into the ring (dropped and counted when it is full).
+/// While the THRE interrupt is armed it moves the ring and a byte costs a
+/// store, no port access; else what the FIFO takes is moved at once and
+/// the interrupt armed while bytes wait. A full ring also tries the FIFO
+/// (a lost interrupt never stops COM1 for good). Never waits.
 fn queue(b: u8) {
     let flags = unsafe { pax_irq_save() }
     // # Safety: module words, IF clear.
     let t = unsafe { tx_tail }
-    if t - unsafe { tx_head } >= TX_SIZE {
+    let full = t - unsafe { tx_head } >= TX_SIZE
+    if full {
         unsafe { tx_dropped = tx_dropped + 1 }
     } else {
         // # Safety: t % TX_SIZE lies inside pax_serial_tx.
@@ -219,10 +225,11 @@ fn queue(b: u8) {
             tx_tail = t + 1
         }
     }
-    kick()
-    let waiting = unsafe { tx_tail != tx_head }
-    if waiting && get_ier() & IER_TX == 0 {
-        set_ier(get_ier() | IER_TX)
+    if full || get_ier() & IER_TX == 0 {
+        kick()
+        if unsafe { tx_tail != tx_head } && get_ier() & IER_TX == 0 {
+            set_ier(get_ier() | IER_TX)
+        }
     }
     unsafe { pax_irq_restore(flags) }
 }
@@ -341,7 +348,7 @@ pub fn receive_on() {
         let _b = inp(THR) // RBR: whatever arrived before
         n += 1
     }
-    set_ier(IER_RX)
+    set_ier(IER_RX | (get_ier() & IER_TX)) // px129: a transmit interrupt armed stays armed
 }
 
 /// Whether a received byte is waiting (LSR bit 0).
