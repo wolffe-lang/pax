@@ -43,6 +43,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   (pax#382): it resized the moment a command's marker came, and whether pelt
   redrew its prompt turned on timing, which the cheaper console writes moved.
 
+- **A console write never waits on the serial port (px129).** On a machine
+  with a UART at COM1, every byte written to the console waited for the UART to
+  send the one before it, 86.8 µs at 115200 baud with interrupts off, so a
+  screen of text took 2 s to write and the rest of the machine waited with it.
+  The kernel now sends COM1's bytes through a 64 KiB ring that the UART's
+  transmit interrupt drains, 16 bytes at a time into its FIFO; a writer only
+  stores a byte, and a full ring drops bytes and counts them
+  (`/proc/pax-boot`'s `serial` line). Halt, reboot and power-off send what the
+  ring holds first. `pax.serial=log` on the kernel command line keeps programs'
+  terminal output off COM1, leaving the kernel's own lines; programs' output
+  is still mirrored by default. Under QEMU, whose UART sends as fast as it is
+  written, COM1's bytes are unchanged. `tests/mpx3-conspeed` boots a second
+  time with COM1 drained at 115200 baud and holds a console write's time (C9)
+  and the backlog's drain while programs sleep (C10). `conspeed` 5 bounds its
+  run by bytes as well as time, so no single frame can outrun it:
+  `notes/px129-console-speed.md` §11.
+
 - **ligature, the linker in wolf, on the dev image beside lld (px128).** The dev image carries
   `/usr/bin/ligature`, built static from ligature's pinned commit (`user/ligature.pin`, `tools/mkligature`)
   as clef and trash are, and `/etc/pax-release` names it. lld stays the default for `wolf build` on the
