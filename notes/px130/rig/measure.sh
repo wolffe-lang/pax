@@ -8,8 +8,12 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 PAX_WOLF=$(tools/fetch-wolf | tail -n 1) || exit 2
 export PAX_WOLF
 echo "measure: P0 at $(git rev-parse HEAD) $(date -u +%FT%TZ)"
-tests/mpx5-burrowd --no-boot --tier native 2>&1 | sed -u 's/^/  /'
-[ "${PIPESTATUS[0]}" = 0 ] || { echo "measure: P0 red"; exit 1; }
+if [ -n "${PX130_KEEP_P0:-}" ] && [ -f "$PAX_BUILD/mpx5-burrowd/files.txt" ]; then
+    echo "measure: P0 kept from the take before (PX130_KEEP_P0): $(cat "$PAX_BUILD/mpx5-burrowd/tree.commit")"
+else
+    tests/mpx5-burrowd --no-boot --tier native 2>&1 | sed -u 's/^/  /'
+    [ "${PIPESTATUS[0]}" = 0 ] || { echo "measure: P0 red"; exit 1; }
+fi
 extra=$PAX_BUILD/px130-bore
 if [ ! -f "$extra/sums.txt" ]; then
     tools/mkboreutils "$extra" head tail seq yes wc sort uniq tr true false printf cut tee date uname pwd 2>&1 | sed -u 's/^/  /'
