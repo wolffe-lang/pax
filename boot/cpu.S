@@ -37,6 +37,8 @@
                                7, SMAP bit 20), or 0 when the CPU's
                                highest basic leaf is below 7
      pax_clflush(va)           px118: CLFLUSH of va's line, then MFENCE
+     pax_wbinvd()              px129: WBINVD, every cache written back and
+                               invalidated (kernel/fb's change of IA32_PAT)
 
    Each routine reads or writes exactly what it names. They run at CPL
    0 with interrupts off (Limine's entry state, docs/BOOT.md).
@@ -144,6 +146,17 @@ pax_clflush:
         .byte 0x0f, 0xae, 0xf0            /* mfence */
         ret
         .size pax_clflush, . - pax_clflush
+
+/* px129: WBINVD (SDM vol. 2B: 0F 09), written as its encoding as
+   pax_clflush's are: the caches written back and invalidated, the step
+   SDM vol. 3A §11.11.8 takes on each side of a change to the memory
+   types, which §11.12.4 says a change of IA32_PAT follows. */
+        .globl pax_wbinvd
+        .type pax_wbinvd, @function
+pax_wbinvd:
+        .byte 0x0f, 0x09                  /* wbinvd */
+        ret
+        .size pax_wbinvd, . - pax_wbinvd
 
         .globl pax_cpuid_nx
         .type pax_cpuid_nx, @function
