@@ -127,6 +127,7 @@ use frames
 use latency
 use paging
 use pty
+use serial
 use sched
 use tcp
 use uaccess
@@ -1112,6 +1113,11 @@ fn paxlat_tables(base: u64, at: u64, per: u64) -> u64 {
 ///     framebuffer <w>x<h> <bpp> bpp pitch <p> rgb <r>:<rs> <g>:<gs> <b>:<bs> at 0x<physical>  or  framebuffer none
 ///     screen <drawn|refused: <why>|not drawn>
 ///     prevscreen <drawn|refused|not drawn|none>
+///     serial <absent|present> tty <mirrored|log> dropped <n>
+///
+/// (px129: `serial` says whether COM1 answered, whether programs' terminal
+/// output goes to it (`log`: `pax.serial=log`, the kernel's own lines only)
+/// and the bytes its transmit ring refused, full, since boot.)
 ///
 /// (the framebuffer as kernel/bootmark's report words it: the one Limine
 /// handed, with ` model <m>` when it is not RGB and ` (the first of <n>)`
@@ -1127,6 +1133,7 @@ fn paxboot(base: u64) -> u64 {
     n = put_s(base, n, "\nframebuffer ")
     n = put_fb(base, n)
     n = paxboot_screen(base, n, from)
+    n = paxboot_serial(base, n)
     put_b(base, n, 10)
 }
 
@@ -1179,6 +1186,13 @@ fn paxboot_log(base: u64, at: u64) -> u64 {
         return put_s(base, n, "refused")
     }
     put_s(base, n, if st == bootlog.NO_AREA { "no-area" } else { "none" })
+}
+
+/// px129: `serial` at `at` (kernel/serial).
+fn paxboot_serial(base: u64, at: u64) -> u64 {
+    var n = put_s(base, at, if serial.available() { "\nserial present tty " } else { "\nserial absent tty " })
+    n = put_s(base, n, if serial.tty_mirrored() { "mirrored dropped " } else { "log dropped " })
+    put_dec(base, n, serial.dropped())
 }
 
 /// px118: `screen` and `prevscreen` at `at`.
