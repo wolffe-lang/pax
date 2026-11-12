@@ -1,6 +1,6 @@
 /* px129: conspeed -- how fast the terminal this runs on draws.
  *
- *   conspeed [-q] [-n REPS] [-t SECONDS] [-o TTY] [DIR...]
+ *   conspeed [-q] [-n REPS] [-t SECONDS] [-T SECONDS] [-g MS] [-r FILE] [-o TTY] [DIR...]
  *
  * Writes test frames to the terminal (TTY, default /dev/tty, else
  * standard error when it is a terminal) inside the alternate screen
@@ -15,10 +15,22 @@
  * second spun before the tests and another after (PAX's CLOCK_MONOTONIC
  * moves in 10 ms ticks, pax#299, so it alone cannot time a frame, and it
  * loses the ticks that arrive while a console write runs with interrupts
- * off, so it is short across the tests: the `kept` figure). Each test runs REPS frames
- * (default 100) or until SECONDS (default 8) have passed, whichever is
- * first, and at least one. The tests, the grid being the terminal's
- * TIOCGWINSZ (COLS x ROWS):
+ * off, so it is short across the tests: the `kept` figure).
+ *
+ * The run is bounded by the TSC, at the rate the idle second before the
+ * tests gave (version 4, after version 3 ran for many minutes at a real
+ * machine's console: its bound was CLOCK_MONOTONIC's, which the long
+ * console writes starved): the whole run at most -T SECONDS (default 60)
+ * of tests, each test at most -t SECONDS (default 4) and its share of
+ * what is left. A test's first frame is timed alone; it then runs as many
+ * frames as fit its budget, at most REPS (default 100), at least the one.
+ * A test that no time is left for is skipped (0 frames). Between frames it
+ * sleeps -g MS (default 10; 0 for none), so other processes and the
+ * network get the CPU between two writes (a console write runs with
+ * interrupts off). With -r FILE each test's line is written to FILE as
+ * the test ends, the header first; an interrupted run leaves the tests
+ * that ended there, and a line saying so. The tests, the grid being the
+ * terminal's TIOCGWINSZ (COLS x ROWS):
  *
  *   unit    no write: 2^21 dependent multiply-adds in user mode, the unit
  *           the rows compare the console's costs with on one boot
@@ -74,7 +86,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "conspeed 3 (px129)"
+#define VERSION "conspeed 4 (px129)"
 #define MAXREPS 100000
 
 static int g_fd = -1;
@@ -99,8 +111,15 @@ static void die(const char *what) {
     exit(1);
 }
 
+static int g_res = -1; /* -r FILE */
+
 static void on_signal(int sig) {
     if (g_entered && g_fd >= 0) { ssize_t r = write(g_fd, RESTORE, g_restore_n); (void)r; }
+    if (g_res >= 0) {
+        static const char m[] = "conspeed: interrupted by a signal; the tests above are those that ended\n";
+        ssize_t r = write(g_res, m, sizeof m - 1);
+        (void)r;
+    }
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -385,50 +404,79 @@ static void unit_work(void) {
     g_sink = x;
 }
 
-static void run_test(struct test *t, long reps, double secs, uint64_t *samples) {
-    if (t->unit) {
-        long k = 0;
-        uint64_t start = mono_ns(), limit = (uint64_t)(secs * 1e9);
-        do {
-            uint64_t a = stamp();
-            unit_work();
-            uint64_t b = stamp();
-            samples[k++] = b - a;
-        } while (k < reps && mono_ns() - start < limit);
-        t->reps = k;
-        t->total = 0;
-        t->least = UINT64_MAX;
-        for (long i = 0; i < k; i++) {
-            t->total += samples[i];
-            if (samples[i] < t->least) t->least = samples[i];
-        }
-        return;
+/* Seconds since `from` (a stamp): by the TSC at the idle second's rate,
+ * else CLOCK_MONOTONIC. */
+static double g_stamps_per_s = 1e9;
+
+static double since(uint64_t from) { return (double)(stamp() - from) / g_stamps_per_s; }
+
+static void gap(int ms) {
+    if (ms <= 0) return;
+    struct timespec t = {ms / 1000, (long)(ms % 1000) * 1000000L};
+    while (nanosleep(&t, &t) < 0 && errno == EINTR) {
     }
-    if (t->setup.n) write_all(t->setup.p, t->setup.n);
-    else write_all("\033[H\033[2J", 7);
-    uint64_t start = mono_ns(), limit = (uint64_t)(secs * 1e9);
-    long k = 0;
+}
+
+/* One test: its first frame alone, then as many as fit `budget` seconds,
+ * at most `reps`, `gap_ms` asleep between frames. */
+static void run_test(struct test *t, long reps, double budget, int gap_ms, uint64_t *samples) {
     size_t bytes = 0, cells = 0;
-    for (int i = 0; i < t->nframes; i++) {
-        bytes += t->frames[i].n;
-        cells += cells_of(t->frames[i].p, t->frames[i].n);
+    if (!t->unit) {
+        for (int i = 0; i < t->nframes; i++) {
+            bytes += t->frames[i].n;
+            cells += cells_of(t->frames[i].p, t->frames[i].n);
+        }
+        t->bytes = bytes / (size_t)t->nframes;
+        t->cells = cells / (size_t)t->nframes;
     }
-    t->bytes = bytes / (size_t)t->nframes;
-    t->cells = cells / (size_t)t->nframes;
-    do {
-        struct buf *f = &t->frames[k % t->nframes];
-        uint64_t a = stamp();
-        write_all(f->p, f->n);
-        uint64_t b = stamp();
-        samples[k++] = b - a;
-    } while (k < reps && mono_ns() - start < limit);
-    t->reps = k;
+    t->reps = 0;
     t->total = 0;
     t->least = UINT64_MAX;
+    if (budget <= 0) return;
+    if (!t->unit) {
+        if (t->setup.n) write_all(t->setup.p, t->setup.n);
+        else write_all("\033[H\033[2J", 7);
+    }
+    uint64_t start = stamp();
+    long k = 0, target = reps;
+    do {
+        uint64_t a = stamp();
+        if (t->unit) unit_work();
+        else write_all(t->frames[k % t->nframes].p, t->frames[k % t->nframes].n);
+        uint64_t b = stamp();
+        samples[k++] = b - a;
+        int pause = t->unit ? 0 : gap_ms;
+        if (k == 1) {
+            double one = (double)(b - a) / g_stamps_per_s + pause / 1000.0;
+            long fit = one > 0 ? (long)(budget / one) : reps;
+            if (fit < 1) fit = 1;
+            if (fit < target) target = fit;
+        }
+        if (k < target) gap(pause);
+    } while (k < target && since(start) < budget);
+    t->reps = k;
     for (long i = 0; i < k; i++) {
         t->total += samples[i];
         if (samples[i] < t->least) t->least = samples[i];
     }
+}
+
+/* A test's line of the table, `per_ms` stamps a millisecond. */
+static int test_line(char *o, size_t cap, struct test *t, double per_ms) {
+    t->ms_mean = t->reps ? (double)t->total / (double)t->reps / per_ms : 0;
+    t->ms_min = t->reps ? (double)t->least / per_ms : 0;
+    t->mbps = t->ms_mean > 0 ? (double)t->bytes / (t->ms_mean * 1e3) : 0;
+    t->us_cell = t->cells ? t->ms_mean * 1e3 / (double)t->cells : 0;
+    char uc[32];
+    if (t->cells && t->reps) snprintf(uc, sizeof uc, "%.3f", t->us_cell); else snprintf(uc, sizeof uc, "-");
+    return snprintf(o, cap, "%-10s %6ld %9zu %7zu %10.3f %10.3f %8.2f %8s\n", t->name, t->reps, t->bytes, t->cells, t->ms_mean,
+                    t->ms_min, t->mbps, uc);
+}
+
+static void res_put(const char *p, int n) {
+    if (g_res < 0 || n <= 0) return;
+    ssize_t r = write(g_res, p, (size_t)n);
+    (void)r;
 }
 
 static void fb_line(char *out, size_t cap, long *fb_w) {
@@ -449,21 +497,29 @@ static void fb_line(char *out, size_t cap, long *fb_w) {
 }
 
 static void usage(void) {
-    fprintf(stderr, "usage: conspeed [-q] [-n REPS] [-t SECONDS] [-o TTY] [DIR...]\n");
+    fprintf(stderr, "usage: conspeed [-q] [-n REPS] [-t SECONDS] [-T SECONDS] [-g MS] [-r FILE] [-o TTY] [DIR...]\n");
     exit(2);
 }
 
 int main(int argc, char **argv) {
     long reps = 100;
-    double secs = 8;
-    const char *out = NULL;
+    double secs = 4, total = 60;
+    int gap_ms = 10;
+    const char *out = NULL, *res = NULL;
     int opt;
-    while ((opt = getopt(argc, argv, "qn:t:o:")) != -1) {
+    while ((opt = getopt(argc, argv, "qn:t:T:g:r:o:")) != -1) {
         if (opt == 'q') { reps = 3; secs = 1; }
         else if (opt == 'n') { reps = strtol(optarg, NULL, 10); if (reps < 1 || reps > MAXREPS) usage(); }
         else if (opt == 't') { secs = strtod(optarg, NULL); if (!(secs > 0)) usage(); }
+        else if (opt == 'T') { total = strtod(optarg, NULL); if (!(total > 0)) usage(); }
+        else if (opt == 'g') { gap_ms = (int)strtol(optarg, NULL, 10); if (gap_ms < 0 || gap_ms > 1000) usage(); }
+        else if (opt == 'r') res = optarg;
         else if (opt == 'o') out = optarg;
         else usage();
+    }
+    if (res) {
+        g_res = open(res, O_WRONLY | O_CREAT | O_TRUNC | O_NOCTTY, 0644);
+        if (g_res < 0) die(res);
     }
     if (out) {
         g_fd = open(out, O_WRONLY | O_NOCTTY);
@@ -516,11 +572,30 @@ int main(int argc, char **argv) {
      * `kept` figure shows). */
     uint64_t a0, ac0, a1, ac1, b0, bc0, b1, bc1, m0, c0, m1, c1;
     idle_rate(&a0, &ac0, &a1, &ac1);
+    /* The stamps a second, from the idle second before: the bound on the run. */
+    double before = g_tsc ? (double)(ac1 - ac0) / ((double)(a1 - a0) / 1e6) : 1e6;
+    g_stamps_per_s = before * 1e3;
+    {
+        char h[1024];
+        int n = snprintf(h, sizeof h, "%s: frames to %s, %dx%d cells%s, TERM=%s\n%s%s"
+                         "clock: %s %.1f MHz (the idle second before); bounds: the run %.0f s, a test %.1f s, %d ms between frames\n"
+                         "%-10s %6s %9s %7s %10s %10s %8s %8s\n", VERSION, ttyname_, g_cols, g_rows,
+                         sized ? "" : " (no TIOCGWINSZ: assumed)", term ? term : "(unset)", fb, fb[0] ? "\n" : "",
+                         g_tsc ? "TSC at" : "CLOCK_MONOTONIC alone (RDTSC refused), nominal", before / 1e3, total, secs, gap_ms,
+                         "test", "frames", "bytes", "cells", "ms mean", "ms least", "MB/s", "us/cell");
+        res_put(h, n);
+    }
     m0 = mono_ns();
     c0 = g_tsc ? rdtsc() : 0;
+    uint64_t run0 = stamp();
     g_entered = 1;
     write_all("\033[?1049h\033[?25l\033[0m", 18);
-    for (int i = 0; i < g_ntests; i++) run_test(&g_tests[i], reps, secs, samples);
+    for (int i = 0; i < g_ntests; i++) {
+        double left = total - since(run0), share = left / (double)(g_ntests - i);
+        run_test(&g_tests[i], reps, share < secs ? share : secs, gap_ms, samples);
+        char l[256];
+        res_put(l, test_line(l, sizeof l, &g_tests[i], before));
+    }
     write_all(RESTORE, g_restore_n);
     g_entered = 0;
     tcflush(g_fd, TCIFLUSH);
@@ -529,7 +604,6 @@ int main(int argc, char **argv) {
     idle_rate(&b0, &bc0, &b1, &bc1);
 
     /* Ticks a millisecond: TSC cycles, or nanoseconds without it. */
-    double before = g_tsc ? (double)(ac1 - ac0) / ((double)(a1 - a0) / 1e6) : 1e6;
     double after = g_tsc ? (double)(bc1 - bc0) / ((double)(b1 - b0) / 1e6) : 1e6;
     double per_ms = (before + after) / 2;
     printf("%s: frames to %s, %dx%d cells%s, TERM=%s\n", VERSION, ttyname_, g_cols, g_rows,
@@ -548,14 +622,10 @@ int main(int argc, char **argv) {
     size_t plain_bytes = 0, plain_cells = 0;
     for (int i = 0; i < g_ntests; i++) {
         struct test *t = &g_tests[i];
-        t->ms_mean = (double)t->total / (double)t->reps / per_ms;
-        t->ms_min = (double)t->least / per_ms;
-        t->mbps = t->ms_mean > 0 ? (double)t->bytes / (t->ms_mean * 1e3) : 0;
-        t->us_cell = t->cells ? t->ms_mean * 1e3 / (double)t->cells : 0;
-        char uc[32];
-        if (t->cells) snprintf(uc, sizeof uc, "%.3f", t->us_cell); else snprintf(uc, sizeof uc, "-");
-        printf("%-10s %6ld %9zu %7zu %10.3f %10.3f %8.2f %8s\n", t->name, t->reps, t->bytes, t->cells, t->ms_mean,
-               t->ms_min, t->mbps, uc);
+        char l[256];
+        test_line(l, sizeof l, t, per_ms);
+        fputs(l, stdout);
+        if (!t->reps) continue;
         if (strcmp(t->name, "bytes") == 0) byte_us = t->ms_mean * 1e3 / (double)t->bytes;
         if (strcmp(t->name, "plain") == 0) { plain_ms = t->ms_mean; plain_bytes = t->bytes; plain_cells = t->cells; }
     }
@@ -566,6 +636,13 @@ int main(int argc, char **argv) {
         double px = 8.0 * 16 * 4 * scale * scale;
         printf("a cell drawn (plain less its bytes): %.3f us, %.0f MB/s of %d-byte cells\n", cell_us,
                cell_us > 0 ? px / cell_us : 0, (int)px);
+    }
+    {
+        char e[256];
+        double tests_s = g_tsc ? (double)(c1 - c0) / per_ms / 1e3 : (double)(m1 - m0) / 1e9;
+        int n = snprintf(e, sizeof e, "the tests took %.2f s (the TSC at %.1f MHz the idle second after); conspeed: done\n",
+                         tests_s, after / 1e3);
+        res_put(e, n);
     }
     return 0;
 }
