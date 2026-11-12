@@ -434,6 +434,54 @@ pub fn leaf(pml4: u64, va: u64) -> u64 {
     e1
 }
 
+/// px131: the first page at or above `from` (page-aligned) and below `hi`
+/// whose 4 KiB leaf is present in the structures at `pml4` (as `leaf`
+/// finds one), or `hi` when there is none. A table that is not there is
+/// stepped over whole (512 GiB, 1 GiB or 2 MiB at a time), so a range of
+/// address space with nothing in it costs a few reads, not one walk a
+/// page: munmap of a terabyte of nothing took seconds with interrupts off
+/// when every page was asked (notes/px131-long-kernel-paths.md). Only
+/// read, through the HHDM.
+pub fn next_leaf(pml4: u64, from: u64, hi: u64) -> u64 {
+    let top = if hi > USER_TOP { USER_TOP } else { hi }
+    var va = from
+    while va < top {
+        let e4 = entry(pml4, index(va, 4))
+        if e4 & P == 0 {
+            va = past(va, 4)
+            continue
+        }
+        let e3 = entry(e4 & ADDR, index(va, 3))
+        if e3 & P == 0 || e3 & PS != 0 {
+            va = past(va, 3)
+            continue
+        }
+        let e2 = entry(e3 & ADDR, index(va, 2))
+        if e2 & P == 0 || e2 & PS != 0 {
+            va = past(va, 2)
+            continue
+        }
+        let t = e2 & ADDR
+        var i = index(va, 1)
+        while i < ENTRIES {
+            if entry(t, i) & P != 0 {
+                let at = (va & !(PAGE * ENTRIES - 1)) + i * PAGE
+                return if at < top { at } else { hi }
+            }
+            i += 1
+        }
+        va = past(va, 2)
+    }
+    hi
+}
+
+/// px131: the first address past the level-`level` table entry's span
+/// that `va` lies in (4: 512 GiB, 3: 1 GiB, 2: 2 MiB).
+fn past(va: u64, level: u64) -> u64 {
+    let span: u64 = 1 << (PAGE_SHIFT + INDEX_BITS * (level - 1))
+    (va | (span - 1)) + 1
+}
+
 /// Unmap the 4 KiB page at `va`: clear its entry and, when `pml4` is
 /// the live structure or `va` is in the kernel half (whose tables every
 /// space shares, px14), INVLPG it, so no stale translation survives.
