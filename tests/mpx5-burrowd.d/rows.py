@@ -92,6 +92,15 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       starts burrowd with `env --default-signal=INT,QUIT`. Since burrow
       7aa182f a session's program starts with its defaults whatever burrowd
       has, so B22 and B23 hold burrow, and this row the hook
+  B28 (pax#368) the terminal session's shell ran /etc/shrc, as the
+      console's does: burrowd_config's SetEnv gives it ENV=/etc/shrc, and an
+      interactive pelt runs the file $ENV names (POSIX XCU 2.5.3). So lope's
+      hook is there: `../` typed alone at /home/pax leaves the shell at /home
+      (pelt's autocd, which the hook turns on), and `type g` names a function
+  B29 (pax#368) a command over ssh (no terminal) is as before: its shell is
+      not interactive, so it reads no ENV though ENV is set (the SetEnv
+      line's value, or unset): `ssh host COMMAND` prints what it prints, a
+      bare `../` changes no directory, and `g` is no function
   B17 the stack segment after a system call (pax#340): `/bin/sysret-ss`
       (tests/mpx5-burrowd.d/sysret-ss.c) makes a system call, reads SS and
       CS, stays in ring 3 for 200 ms across the timer's interrupts, and
@@ -940,6 +949,20 @@ def tty_rows(client):
                                     % ('[sudo] password for pax:' if r else 'no prompt: %r' % t.shown(at)[-160:],
                                        'B25-ran' if ran else 'no'))
         prompt(at)
+        # B28 (pax#368): the session's shell ran /etc/shrc: lope's hook (autocd, g).
+        at = t.type(b'cd /home/pax\r')
+        prompt(at)
+        at = t.type(b'../\r')
+        prompt(at)
+        r, at = step('B28', b'echo B28-$(pwd)\r', rb'^B28-(\S*)$')
+        prompt(at)
+        g, at = step('B28g', b'type g\r', rb'^(type: )?g\b.*$')
+        prompt(at)
+        where = r.group(1).decode() if r else None
+        isfn = bool(g and b'function' in g.group(0))
+        (ok if where == '/home' and isfn else bad)(
+            'B28', 'the session ran /etc/shrc: `../` typed alone at /home/pax left the shell at %s (want /home); '
+            'type g: %s' % (where, g.group(0).decode(errors='replace') if g else repr(t.shown(at)[-120:])))
         t.type(b'exit\r')
         t.pump(3)
     finally:
@@ -958,6 +981,13 @@ def tty_rows(client):
         'B27', 'burrowd (%s): SigIgn %s, SIGINT %s, SIGQUIT %s'
         % (r[1].split(b'\n')[0].decode(errors='replace'), m.group(1).decode() if m else show(r),
            'ignored' if ign is not None and ign & 0x2 else 'default', 'ignored' if ign is not None and ign & 0x4 else 'default'))
+    # B29 (pax#368): a command over ssh reads no ENV (its shell is not interactive), whatever the SetEnv line sets.
+    env_want = dict(kv.split('=', 1) for kv in image_setenv().split()[1:] if '=' in kv).get('ENV', 'unset')
+    r = c.ssh(GUEST_AT, ['echo B29-$((6*7)); echo "env=${ENV-unset}"; cd /home/pax && ../ 2>/dev/null; echo "pwd=$(pwd)"; '
+                         'if type g > /dev/null 2>&1; then echo g=function; else echo g=none; fi'])
+    want = ('B29-42\nenv=%s\npwd=/home/pax\ng=none\n' % env_want).encode()
+    (ok if r[0] == 0 and r[1] == want else bad)(
+        'B29', 'ssh host COMMAND, no terminal: %s (want ENV %s seen and not read: no autocd, no g)' % (show(r), env_want))
 
 
 def image_exports():
