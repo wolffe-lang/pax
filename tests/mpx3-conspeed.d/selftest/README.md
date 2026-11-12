@@ -14,6 +14,9 @@ the four without a host:
   parse costs about half as much again against the CPU's unit (screen text sha256 `c8f115c3…`). It
   must pass. The rows that bounded a test's raw figure in units failed it (C3's `sgr` 13.26 units
   against 11.5, C7's `cub` 4.52 against 4.3), which is why those rows now bound a test's drawing.
+- `red-kvm-10870h.txt`: the trunk kernel, UEFI, under KVM on that laptop (screen text sha256
+  `64f61bf8…`). It must fail: every row but C1, yew's keypress among them (its drawing 0.08 units
+  there, against 0.02 on the desktop).
 
 They are the rows' own proof that they can fail and can pass, as tests/expect-serial-selftest is
 the harness's.
