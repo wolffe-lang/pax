@@ -136,3 +136,172 @@ must do, by name.
 
 Every session also asks: no PANIC, init ended with status 0, the frames line back to its start, the booted kernel
 the one built. Each row prints `PASS <row>` or `FAIL <row>: why` at column 0 of the suite's output.
+
+## 6. As built, and where it differs from §4 and §5
+
+§1–§5 are the prediction as committed before the first change (`04c5069e`). Built as §4 says, with these
+differences:
+
+- **Two scheduler words a slot**, not three: `W_AREA` and `W_MARK` (16 bytes a slot).
+- **D10. RLIMIT_NPROC** (R-px126-5), added: a real user other than root (and not privileged by its effective id,
+  which stands for the capabilities getrlimit(2) names) may hold 512 threads at once, half the table, the probe's
+  own among them; a zombie counts, as getrlimit(2)'s "extant" says. `fork`, `vfork`, `clone` and `clone3` ask
+  before any work (no address space copied for a refusal) and answer -EAGAIN, `refused: a user's threads at
+  RLIMIT_NPROC (512)`, written once a run as D9's is. `prlimit64` and `/proc/<pid>/limits` say 512, soft and
+  hard (unlimited before); none can be set, as before. `tests/mpx3-tree.d`'s two pinned `Max processes` lines
+  move with it.
+- **The wolf row's worker is pelt.** boreutils' `sha256sum` and `cat` run one thread on PAX (measured on trunk:
+  `threads 1 to 1 each`); pelt's runtime starts a second before its first prompt (user/pelt.pin, px26). So
+  "every wolf program runs two threads" holds for pelt, not for every wolf program (R-px126-8). The row runs
+  100 pelts (`sh -c`, a loop summing 1 to 300, then a line read from a pipe of its own) at 4 GiB.
+- **The switch row** also measures a yield with nobody else to run (the call, no switch) and holds the yield
+  among 16 to at most `SWITCH_ALONE` such yields: a walk of every slot at every switch (raising the table alone)
+  breaks it, which the ratio of 1,000 to 16 alone cannot see (§7). Among 64 within 1.5 times the 16's, among
+  1,000 within 3 times (2 in §5: measured 1.94, too near for another host).
+- **A session as a user**, `threads-user` (`slots-nproc`), for D10.
+- **The fill row** wants 80 children at least (the old table held 60).
+- **Three existing pins move, each with what it counts:** `tests/mpx3-user`'s U6 (a process of kmain_user's
+  batches now takes 28 frames while it lives, not 16: its area's twelve, which were `.bss` before);
+  `tests/mpx5-trace.d/layout.py` (the trace layout line says `slots=1024`); `tests/mpx3-tree.d`'s two
+  `Max processes` lines (D10). Nothing else in those suites changes.
+
+## 7. What was measured
+
+Every number here is from a lane host under KVM, native kernels, BIOS, the suite's own sessions; each run's
+log is named by its sha256 in §8. The CPU times are getrusage(2)'s (PAX counts them from the TSC), the least of
+three interleaved rounds.
+
+**What a slot costs.**
+
+| | trunk `309036ec` (64 slots) | this head (1,024 slots) |
+|---|---:|---:|
+| static `.bss` sized by the table | 3,265,600 bytes (51,016 a slot and the FPU words) | 1,957,952 bytes (1,872 a slot, the pid hint, the FPU words) |
+| frames taken at `start` for slots | 64 FPU areas and one page table | 64 page tables, MAIN's area (12) and FPU area (1) |
+| frames free when the first program starts, 256 MiB, the same image | 61,676 | 61,977 (301 more, 1.2 MiB) |
+| a thread, while it lives | 4 frames (its stack) | 5 (its stack and FPU area) |
+| a process's leader, while it lives | 4 frames, its area static | 17 (and its area mapped), the probe's process 578 frames in all where trunk's took 565 |
+
+**What 256 MiB holds** (the `fill` and `threads` sessions). One process's threads with 8 KiB stacks: 1,020, the
+table's limit (1,024 less main, idle, the network's clock thread and the probe), twice, every one joined and every
+frame back. Forked children of the probe, each blocked on a pipe: 100, then `fork` answered ENOMEM with
+`refused: no frames for a copy of the address space` (each child about 610 frames, 2.4 MiB: the probe's present
+pages, its eagerly mapped 1 MiB initial stack among them, copied by the fork); 99 with `as` in the image too.
+So on a 256 MiB machine processes run out of memory long before slots; threads reach the table. Trunk's 64 slots
+stopped both at 60.
+
+**What the rows found** (at `36963e2f`, this branch but for this note and RLIMIT_NPROC's last fix): 1,020 threads
+twice; 200 children at once; 3,200 forks and 3,200 threads in rounds of 100, pids rising from 2 to 3201, every
+frame back; 100 pelts at once, two threads each (200), each `45150 go`; 32 ptys, each a session of pelt and cat
+(64 processes, 96 threads), a line through each cat, `bye<i>` from each shell, every leader reaped with status 0.
+As user 1000 the first round made 511 threads besides the probe and was refused, but the second made none: the
+first round's threads, ended and not yet reaped, were still counted (`slots-nproc` red; fixed at `8c45ad86`, a
+thread that has ended and waits only for its reap is not counted).
+
+**A yield among N processes** (`slots-switch`: N processes released at once, each yielding 200,000 / N times).
+
+| kernel | a lone yield | N = 16 | N = 64 | N = 1,000 |
+|---|---:|---:|---:|---:|
+| trunk `309036ec` | | 1,328 ns | (60 slots) | (60 slots) |
+| the walks unbounded (`notes/px126/variant-unbounded.py`: every walk to 1,024, the tick and every switch walking; what raising SLOTS alone leaves) | 207 ns | 4,525 ns | 4,623 ns | 5,859 ns |
+| the walks to the high water, but every switch walking (`notes/px126/variant-noskip.py`) | | 1,234 ns | 1,503 ns | 6,810 ns |
+| this branch (`36963e2f`) | 199 ns | 1,128 ns | 1,187 ns | 2,028 ns |
+
+Raising the table alone makes every yield 3.4 times trunk's, at 16 processes as at 1,000 (§3 predicted 2–3):
+the walk of 1,024 records, about 3.3 ns a slot. Bounding the walks by the high water alone keeps 16 and 64 near
+trunk and makes 1,000 5.5 times 16. With the next deadline, a yield among 16 and 64 costs less than trunk's (no
+walk at all; trunk walked 64), and among 1,000 about twice the 16's, which is caches and the TLB (a thousand
+address spaces, records, stacks and FPU areas), not walks. The row holds a yield among 16 to at most 10 lone
+yields (5.7 here, 21.9 with the walks unbounded), among 64 to 1.5 times the 16's (1.05), among 1,000 to 3 times
+(1.80 here; 1.94 and 2.18 in two earlier takes of the same kernel).
+
+**The wake-everyone rule** (`slots-herd`, measured): a one-byte ping-pong between two processes over two pipes,
+with W other processes parked in a read of one more pipe, round trips for a second.
+
+| W parked | 0 | 64 | 1,000 |
+|---|---:|---:|---:|
+| this branch (`36963e2f`) | 6,426 ns | 99,603 ns (15 times) | 2,061,886 ns (321 times) |
+| trunk | 7,205 ns | (60 slots) | (60 slots) |
+
+Every change to any pipe makes every thread parked on any pipe, socket, pty or poll run its call again
+(`wake_pipes`, px17 and px24). The walk is bounded now; the wakes are not, and they cost a system call and two
+switches each. 64 waiters were reachable before (60 slots) and cost 15 times already; 1,000 are reachable now
+(265 to 321 times in two takes).
+Not changed here (R-px126-6).
+
+## 8. Seen red, and the plant
+
+Every row was seen red on trunk's kernel before any kernel change, by name, at the rows' commits:
+
+- at `1506c6b5` (the rows' first form), log 10,408 bytes, sha256
+  `a9bb69a20d499f317f9bfa1d630312e8cc9e7e5332493f686781ea5565b32647`: `slots-threads` (made 60), `slots-fill`
+  (60, EAGAIN), `slots-forks` (60 of 200), `slots-reuse` (60 a round), `slots-wolf` (60, one thread each),
+  `slots-ptys` (24 made, 18 through), `slots-switch` (N=64 and N=1,000 not made), `slots-machine` (8 refusal lines
+  where 2 are asked; the others' refusals);
+- at `ba6b087c` (the wolf row on pelt, the herd timed), log 8,805 bytes, sha256
+  `4a337eb470b8ce96c7a293cbdcd1347a5faac4691602343c5c6e9ff1c59f4aa4`: the same rows, `slots-wolf` now 24 pelts
+  at once and then EAGAIN, `slots-ptys` 25 made, 17 through;
+- `slots-nproc` at `4bf82c8f` (the row, before RLIMIT_NPROC): the pull request's; and at `36963e2f`, before
+  `8c45ad86`, its second round red by name (`made 0`, §7), log sha256
+  `4e6765d3bd53eaa78805457a295a834907fcc842174271fa2adc4993fdeecd5c`;
+- `slots-switch`'s two bounds each red on the variant that breaks it, each a patch in `notes/px126/`
+  (`variant-unbounded.py`, `variant-noskip.py`) applied to this branch's kernel before RLIMIT_NPROC (`9d535928`'s
+  `kernel/`), never merged: the walks unbounded, `a yield among 16 costs 4525 ns, more than 10 times a lone
+  yield's 207 ns`, log sha256 `a9ab39760294f8e35b8123a3b0fd9ca587290f93317fa1a5d57f1bd9dee09aed`; the walks to the
+  high water with no deadline skip, `a yield among 1,000 costs 6810 ns, more than twice the 16's 1234 ns` (the
+  row's bound was twice then; 5.5 times), log sha256
+  `1713309e801d62dda113746051b66e1c0bdd5953571c15e1fe65cfc55710ffa3`.
+
+The plant, `px126-plant-area-leak` (pushed, never merged): `free_area` unmaps a process area's twelve pages and
+gives none back, so every non-quiet session's `slots-machine` row says `frames not all back`. Its record is the
+pull request's.
+
+## 9. Not measured
+
+- UEFI and the release tier: CI's legs. Every number in §7 is native BIOS under KVM.
+- TCG: none of these rows was run under TCG here (CI's runners have KVM).
+- `tests/mpx5-forks`: built with musl-gcc, which no image with QEMU on the build host has; CI runs it.
+- RLIMIT_NPROC against Linux: the value is PAX's own (Linux's default is half of threads-max, memory-dependent).
+- A real machine: never; QEMU only.
+
+## 10. Rulings (recommended and implemented)
+
+- **R-px126-1 the number.** A. 1,024 static records (the record, signal origins, debug and trace words: 1.9 MiB of
+  `.bss`, less than 64 slots took); B. a table that grows on demand (records mapped as the high water rises: no
+  static cost and any ceiling, but every slot taken can fail for a frame, and the frames line needs the growth
+  given back); C. 4,096 static (7.6 MiB, 3% of a 256 MiB machine, and four times the walks). A process costs at
+  least 2 MiB of memory today (R-px126-7), so 1,024 threads is where 2–4 GiB machines meet the table, and a
+  256 MiB machine pays less for it than for trunk's 64. **Recommended: A.**
+- **R-px126-2 the process areas.** A. mapped per leader from frames while it lives (48 KiB, a guard above); B.
+  static per slot (48 MiB of `.bss` at 1,024); C. from the kernel heap (its size classes stop at 2 KiB, its pages
+  at 128 MiB). **Recommended: A.**
+- **R-px126-3 the refusal said once.** A. the first of a run of refused clones writes its line, the rest are
+  counted and silent, a slot taken ends the run; B. every refusal a line (trunk: a shell retrying a fork floods
+  the log); C. once a boot. **Recommended: A**, for no free slot and for RLIMIT_NPROC alike.
+- **R-px126-4 guest memory a row.** The rows set the guest's memory they need (256 MiB to 4 GiB, `--qemu -m`);
+  `tools/qemu-run`'s default (256 MiB) is unchanged. **Recommended.**
+- **R-px126-5 RLIMIT_NPROC.** PAX reported it unlimited and kept no count: one user could take every slot,
+  root's login and an ssh session among them. A. Linux's rule (getrlimit(2)): a real user other than root holds at
+  most RLIMIT_NPROC threads, root and the privileged exempt, 512 (half the table, as Linux's default is half of
+  threads-max), reported by `prlimit64` and `/proc/<pid>/limits`, not settable; B. a reserve of slots for root
+  only (no Linux ABI says it); C. nothing. **Recommended and implemented: A** (small: a walk at each clone of a
+  user other than root).
+- **R-px126-6 the wake-everyone rule.** Its walk is bounded now; its wakes are one a waiter at every change, about
+  300 times a round trip's cost with 1,000 parked readers (§7). A. wait queues by object (a waiter keyed to the pipe,
+  pty or socket it waits on, `poll` and `epoll_wait` registered on each of theirs): a readiness redesign across
+  kernel/files, pty, tcp, udp, event and ready, a lane of its own with `slots-herd` as its red row; B. keys for
+  plain pipe and pty reads only (poll's waiters, a shell at its prompt among them, still woken by everything); C.
+  leave it. **Recommended: A, as the next lane.** Not done here.
+- **R-px126-7 what a process costs.** The 1 MiB initial stack is mapped eagerly (px82) and a fork copies every
+  present page (px17), so a forked C process costs about 2.4 MiB and a 256 MiB machine holds about 100. A stack
+  backed on touch and copy-on-write fork would make the slots, not memory, the limit there. **Recommended as a
+  later lane;** not this one's.
+- **R-px126-8 wolf programs' threads.** boreutils' utilities run one thread on PAX; pelt two (its runtime's signal
+  thread). The wolf row runs pelt. **Recorded.**
+
+## 11. Done when
+
+- `tests/mpx5-slots` green on every leg (CI's all tier), and its plant red by name;
+- the scheduler, threads and signals, job control and sessions, ptrace, pty and fork suites green, unchanged but
+  for the three pins of §6;
+- the frames lines balanced in every suite (the page tables taken at `start`);
+- a pull request at the settled head with its records.
