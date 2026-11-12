@@ -33,9 +33,6 @@
                                   decides the tries, and asks only when
                                   CPUID.1:ECX bit 30 says the instruction
                                   exists
-     pax_rdrand() -> u64          RDRAND into %rax, retried while CF says
-                                  no value was ready (at most 16 tries),
-                                  0 when none came
 
    Written from: the Intel SDM vol. 1 §10.5 (FXSAVE's area), ch. 13
    (XSAVE: §13.2 enumeration by CPUID leaf 0DH, §13.3 enabling with
@@ -157,18 +154,6 @@ pax_rdrand_step:
 1:      movl    $1, %eax
         ret
         .size pax_rdrand_step, . - pax_rdrand_step
-
-        .globl pax_rdrand
-        .type pax_rdrand, @function
-pax_rdrand:
-        movl    $16, %ecx
-1:      rdrand  %rax
-        jc      2f
-        decl    %ecx
-        jnz     1b
-        xorl    %eax, %eax
-2:      ret
-        .size pax_rdrand, . - pax_rdrand
 
 /* kernel/fpu's words, read and written volatile (#598's rule: state a
    switch reads lives in storage words): 0 the mode (0 off, 1 XSAVE, 2
