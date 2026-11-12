@@ -2428,3 +2428,21 @@ answer the pages leave open is Linux's, run as a black box.
 | the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
 | boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
 | PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
+
+## px130 — the kernel's log, a quiet console, dmesg
+
+No kernel's, log daemon's, journald's, util-linux's, busybox's or C library's source was read. The record's form,
+its seeks, -EPIPE and -EAGAIN are the kernel's documentation's; every answer the probe asks was then held to a
+real Linux's own under QEMU (the lane host's installed kernel image, booted and never read).
+
+| source | version | read, for |
+|---|---|---|
+| `Documentation/ABI/testing/dev-kmsg` (kernel.org, the uapi-adjacent ABI document) | trunk of 2026-11 | /dev/kmsg: one record a read, `PRI,SEQ,USEC,FLAGS;TEXT\n`, the escapes, -EAGAIN, -EPIPE and the reader moved on, SEEK_SET/SEEK_END/SEEK_DATA and -ESPIPE/-EINVAL, the `<N>` prefix's level and facility, LOG_USER for none or for the kernel's |
+| `Documentation/admin-guide/sysctl/kernel.rst` | trunk of 2026-11 | `printk`'s four values, `dmesg_restrict` |
+| `Documentation/core-api/printk-basics.rst` | trunk of 2026-11 | the levels' names and the default level of a line with none |
+| syslog(2) | man-pages 6.19 | the actions 0-10, who may ask which, READ_ALL's "last len bytes since the last clear", CONSOLE_OFF/ON's save and restore, CONSOLE_LEVEL's 1-8, the errors |
+| dmesg(1) | util-linux 2.39.3's manual (man7.org) | the options PAX's dmesg takes and their meanings |
+| util-linux 2.39.3's dmesg | Ubuntu 24.04's, black box in a container (strace of each option) | its words and statuses when refused (`read kernel buffer failed`, `klogctl failed`, `clear kernel buffer failed`: Operation not permitted, exit 1), /dev/kmsg opened O_RDONLY\|O_NONBLOCK (O_RDONLY for -w), syslog(10) and syslog(3) when it cannot be, `-n err` sending 4 (a name's number + 1) |
+| Linux 7.2.4 (the lane host's installed image) | black box under QEMU/KVM, `printk.devkmsg=on` | `tests/mpx5-kmsg.d/linux/`: every row of the probe as root and as 1000:1000 |
+| pelt's README and docs/FRIENDLY.md (`wolffe-lang/pelt`) | `b80d6570` | the measurement: pelt friendly unless invoked as `sh`, and its friendly prompt's `den status --porcelain` with a 50 ms deadline |
+| bootparam(7), kernel-parameters (kernel.org) | trunk of 2026-11 | `loglevel=`, `quiet`, `printk.devkmsg=` |
