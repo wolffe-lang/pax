@@ -1,16 +1,16 @@
 //! sched — preemptive kernel threads on one CPU (px07, M-PX2's
 //! scheduler).
 //!
-//! **A thread** is a record in boot/sched.S's `pax_threads` (64 slots since px24, 16 before;
+//! **A thread** is a record in boot/sched.S's `pax_threads` (1024 slots since px126, 64 since px24, 16 before;
 //! module state holds scalars only, [mem.static.3]), a stack, and, while
 //! it is not running, the frame it resumes from. Slot 0 is the kernel's
 //! own first context (kmain on Limine's stack), adopted by `start` as
 //! thread 0; slot 1 is the idle thread (boot/sched.S's `pax_idle`, HLT
 //! with IF set), run only when no other thread is ready and never
-//! queued; slots 2-63 are spawned threads. Ids are 0 (main), 1 (idle),
+//! queued; slots 2-1023 are spawned threads. Ids are 0 (main), 1 (idle),
 //! then 2, 3, … in spawn order, never reused; slots are.
 //!
-//! **A stack** (slots 1-63): slot s owns the 64 KiB of virtual space at
+//! **A stack** (slots 1-1023): slot s owns the 64 KiB of virtual space at
 //! `STACKS + s * SPAN`, PML4 slot 416 (0xffffd00000000000, free since
 //! px03: PAX maps 256, 320, 352 and 511). Its low 48 KiB are never
 //! mapped — the guard — and its high 16 KiB are four frames from
@@ -87,7 +87,7 @@
 //! IA32_FS_BASE (MSR 0xC0000100) at every switch in (`enter_space`),
 //! so each thread finds its own; CR4.FSGSBASE stays clear, so ring 3
 //! cannot change FS behind the kernel (WRFSBASE is #UD). And each slot
-//! owns a process area in boot/sched.S's `pax_procs` (2048 bytes, the
+//! owns a process area (boot/sched.S's `pax_procs` until px126, which maps it from frames; 2048 bytes, the
 //! words kernel/vm, kernel/files and kernel/user keep for the process
 //! in it), zeroed whenever the slot is cleared: a zeroed area is a fresh
 //! process (no break yet, the console on descriptors 0-2). A system
@@ -194,6 +194,23 @@
 //! RDTSC and vol. 3B §18.17 (the time-stamp counter), and black-box
 //! Linux; no kernel's source.
 //!
+//! **How many** (px126): 1024 slots, from 64. What a slot costs is paid
+//! while it lives, not by the table: a thread's kernel stack (four
+//! frames) and its FPU area (one, kernel/fpu's `area_new` and `area_free`), and
+//! a process's area (`own_area`: 48 KiB, twelve frames mapped while the
+//! slot leads a process, at `AREAS + s * ASPAN` in PML4 slot 416 beside
+//! the stacks, the top 16 KiB of each span never mapped; a thread uses
+//! its leader's, a kernel thread has none). The static part is the
+//! record, the signal origins, the debug registers and the trace record,
+//! 1,856 bytes a slot. Every walk of the slots stops at the high water
+//! (`top`, one past the highest slot that is not free: slots are taken
+//! lowest first, so it follows the live count); the tick and the switch
+//! walk only when a deadline has come (`S_WAKE_AT`); a pid finds its slot
+//! through `pax_pid_hint` before any walk. When no slot is free a
+//! `clone` answers SLOTS, as before; the first of a run of such answers
+//! is the one kernel/process says (`first_refusal`). Measured in
+//! notes/px126-process-slots.md.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`, volatile (`field`/`put_field`): wolf 0.2.26 stores a
 //! field of a raw element in place (wolf-lang#577), but as an ordinary
@@ -230,11 +247,12 @@ extern "c" let pax_sched_state: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_syscall_state: *u64
-extern "c" let pax_procs: *u64
+extern "c" let pax_slot_words: *u64 // px126: two words a slot (W_AREA, W_MARK)
+extern "c" let pax_pid_hint: *u64 // px126: pid mod HINTS to slot + 1
 extern "c" let pax_siginfo: *u64
 extern "c" let pax_tty_table: *u64
 
-/// One thread's record (boot/sched.S: 64 of them, 512 bytes each; 72
+/// One thread's record (boot/sched.S: 1024 of them, 512 bytes each; 72
 /// before px09 added `cr3` and `prog`, 88 before px10's four, 120
 /// before px12's `fs`, 128 bytes a slot before px14's seven; px21a's
 /// `amb` is the 24th word).
@@ -308,7 +326,7 @@ struct Thread {
 
 /// How many slots there are (px14: `clone_current` and `child_ended`
 /// answer SLOTS for none).
-pub const SLOTS: u64 = 64 // px24: sixteen before; wolf's hosted runtime runs a thread a parked task
+pub const SLOTS: u64 = 1024 // px126: 64 before (px24: sixteen before that; wolf's hosted runtime runs a thread a parked task)
 const MAIN: u64 = 0
 const IDLE: u64 = 1
 const FIRST: u64 = 2 // the first spawnable slot
@@ -357,7 +375,15 @@ const GUARD: u64 = 49152 // its low part, never mapped
 const STACK: u64 = 16384 // its high part, mapped
 const PAGE: u64 = 4096
 const PAGES: u64 = 4
-const PROC_AREA: u64 = 49152 // px12: each slot's bytes of boot/sched.S's pax_procs (px62: 192 mapping records and mremap's census after px34's words; 40960 since px34's 1024 descriptors and 256 reservations, 8192 before, 4096 before px24, 2048 before px14)
+const PROC_AREA: u64 = 49152 // px12: a process area's bytes (px62: 192 mapping records and mremap's census after px34's words; 40960 since px34's 1024 descriptors and 256 reservations, 8192 before, 4096 before px24, 2048 before px14); px126: mapped from frames, no longer boot/sched.S's pax_procs
+const AREAS: u64 = 0xffffd04000000000 // px126: PML4 slot 416's second region, the process areas
+const ASPAN: u64 = 65536 // px126: each slot's span there: the area's 48 KiB, then 16 KiB never mapped
+const APAGES: u64 = 12 // PROC_AREA / PAGE
+const CHUNK: u64 = 2097152 // px126: what one page table maps
+const HINTS: u64 = 4096 // px126: pax_pid_hint's words
+const W_AREA: u64 = 0 // px126: slot word: 1 while the slot has its process area mapped
+const W_MARK: u64 = 1 // px126: slot word: process_ends' mark on a child whose group it may orphan
+const NEVER: u64 = 0xffffffffffffffff
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
@@ -414,6 +440,9 @@ const S_TSC0: u64 = 20 // px88: the TSC at `start` (0: not taken)
 const S_NS0: u64 = 21 // px88: kernel/clock's nanoseconds at `start`
 const S_TICK0: u64 = 22 // px88: the tick at `start`
 const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once calibrated (0: not yet)
+const S_TOP: u64 = 24 // px126: one past the highest slot that is not free; every walk stops there
+const S_WAKE_AT: u64 = 25 // px126: no waiting thread's deadline falls before this tick (NEVER: none has one)
+const S_REFUSED: u64 = 26 // px126: clones refused for want of a slot since one was last found free
 
 // px88: the process area's usage words (kernel/sched's; words 6084-6093
 // of the 6144, past kernel/vm's last, 6083): the process's own sums,
@@ -477,6 +506,62 @@ fn cur() -> u64 {
     sv(S_CURRENT) // #598: reread after every switch
 }
 
+/// px126: one past the highest slot that is not free: every slot from
+/// here on is free, so a walk stops here.
+pub fn top() -> u64 {
+    sv(S_TOP)
+}
+
+/// px126: slot `s` is being taken: the high water covers it.
+fn raise_top(s: u64) {
+    if s + 1 > sv(S_TOP) {
+        put_sv(S_TOP, s + 1)
+    }
+}
+
+/// px126: the high water lowered past the free slots at its top.
+fn lower_top() {
+    var t = sv(S_TOP)
+    while t > FIRST && field(t - 1, offset_of(Thread, state)) == FREE {
+        t -= 1
+    }
+    put_sv(S_TOP, t)
+}
+
+/// px126: slot `s`'s scheduler word `i` (W_AREA, W_MARK).
+fn slot_word(s: u64, i: u64) -> u64 {
+    // # Safety: s < SLOTS, i < 2: inside boot/sched.S's pax_slot_words.
+    unsafe { ((pax_slot_words as u64 + (s * 2 + i) * 8) as *u64).read_volatile() }
+}
+
+fn put_slot_word(s: u64, i: u64, v: u64) {
+    // # Safety: as `slot_word`.
+    unsafe { ((pax_slot_words as u64 + (s * 2 + i) * 8) as *u64).write_volatile(v) }
+}
+
+/// px126: pid (or tid) `p` now names slot `s`.
+fn hint_put(p: u64, s: u64) {
+    if p != 0 {
+        // # Safety: p % HINTS < HINTS, inside boot/sched.S's pax_pid_hint.
+        unsafe { ((pax_pid_hint as u64 + (p % HINTS) * 8) as *u64).write_volatile(s + 1) }
+    }
+}
+
+/// px126: the slot pid (or tid) `p` named when it was last given, if
+/// that slot still holds it (a pid is in one slot's `pid` at a time);
+/// SLOTS when the hint has nothing to say and a walk must decide.
+fn hinted(p: u64) -> u64 {
+    if p == 0 {
+        return SLOTS
+    }
+    // # Safety: as `hint_put`.
+    let h = unsafe { ((pax_pid_hint as u64 + (p % HINTS) * 8) as *u64).read_volatile() }
+    if h == 0 || h > SLOTS || field(h - 1, offset_of(Thread, pid)) != p {
+        return SLOTS
+    }
+    h - 1
+}
+
 /// Slot `s`'s virtual space: [base, base + SPAN).
 fn base_of(s: u64) -> u64 {
     STACKS + s * SPAN
@@ -508,29 +593,55 @@ fn dequeue() -> u64 {
     s + 1
 }
 
-/// Make every sleeper whose tick has come ready, in slot order.
+/// Make every sleeper whose tick has come ready, in slot order. px126:
+/// nothing to do, and no walk, before `S_WAKE_AT`'s tick; a walk sets it
+/// to the earliest deadline still to come.
 fn wake_sleepers() {
     let now = timer.ticks()
+    if now < sv(S_WAKE_AT) {
+        return
+    }
+    var next = NEVER
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         let st = field(s, offset_of(Thread, state))
         let at = field(s, offset_of(Thread, wake))
         // px22: a pipe or socket wait with a deadline (`at` not 0) ends
         // at its tick too.
         // px26: and a futex wait with one (its -ETIMEDOUT is in its frame).
-        if (st == SLEEPING || ((st == PIPE || st == FUTEX) && at != 0)) && at <= now {
-            if st != PIPE {
-                put_field(s, offset_of(Thread, rst), W_NONE) // the wait is over: no signal ends it now
+        if st == SLEEPING || ((st == PIPE || st == FUTEX) && at != 0) {
+            if at <= now {
+                if st != PIPE {
+                    put_field(s, offset_of(Thread, rst), W_NONE) // the wait is over: no signal ends it now
+                }
+                put_field(s, offset_of(Thread, state), READY)
+                enqueue(s)
+            } else if at < next {
+                next = at
             }
-            put_field(s, offset_of(Thread, state), READY)
-            enqueue(s)
         }
         s += 1
     }
     let w = field(MAIN, offset_of(Thread, state))
-    if w == SLEEPING && field(MAIN, offset_of(Thread, wake)) <= now {
-        put_field(MAIN, offset_of(Thread, state), READY)
-        enqueue(MAIN)
+    if w == SLEEPING {
+        let at = field(MAIN, offset_of(Thread, wake))
+        if at <= now {
+            put_field(MAIN, offset_of(Thread, state), READY)
+            enqueue(MAIN)
+        } else if at < next {
+            next = at
+        }
+    }
+    put_sv(S_WAKE_AT, next)
+}
+
+/// px126: thread `c` waits until tick `at` (`sleeps`: a sleep, which
+/// `at` 0 ends at once; otherwise a pipe's or a futex's wait, which `at`
+/// 0 leaves with no deadline): its word, and `S_WAKE_AT` no later.
+fn set_wake(c: u64, at: u64, sleeps: bool) {
+    put_field(c, offset_of(Thread, wake), at)
+    if (sleeps || at != 0) && at < sv(S_WAKE_AT) {
+        put_sv(S_WAKE_AT, at)
     }
 }
 
@@ -641,6 +752,11 @@ pub fn switched(f: u64) -> u64 {
 fn make_stack(s: u64) -> bool {
     let pml4 = sv(S_PML4)
     let lo = base_of(s) + GUARD
+    // px126: the slot's FPU area comes with its stack (none before
+    // kernel/fpu's start, or in a kernel that never starts it).
+    if !fpu.area_new(s) {
+        return false
+    }
     var k: u64 = 0
     while k < PAGES {
         let pa = frames.alloc() else 0
@@ -652,6 +768,7 @@ fn make_stack(s: u64) -> bool {
                     frames.free(f)
                 }
             }
+            fpu.area_free(s)
             return false
         }
         let v = pa + frames.hhdm()
@@ -683,6 +800,9 @@ fn make_stack_or_die(s: u64) {
 /// px34: `clone_current`'s and `clone_thread`'s answer when no frame is
 /// left for the new thread's kernel stack (kernel/process: -EAGAIN).
 pub const NO_STACK: u64 = SLOTS + 1
+/// px126: `clone_current`'s answer when no frame is left for the new
+/// process's area (kernel/process: -EAGAIN, by name).
+pub const NO_AREA: u64 = SLOTS + 2
 
 /// Unmap slot `s`'s stack and give its frames back.
 fn free_stack(s: u64) {
@@ -697,6 +817,97 @@ fn free_stack(s: u64) {
         frames.free(pa)
         k += 1
     }
+    fpu.area_free(s) // px126: its FPU area goes with it
+}
+
+/// px126: slot `s`'s process area, twelve zeroed frames mapped at
+/// `AREAS + s * ASPAN` (the span's top 16 KiB stays unmapped: an overrun
+/// faults instead of writing the next slot's area). False, nothing kept,
+/// when the frames are not to be had. Thread context, IF clear.
+fn make_area(s: u64) -> bool {
+    if slot_word(s, W_AREA) != 0 {
+        return true
+    }
+    let pml4 = sv(S_PML4)
+    let lo = AREAS + s * ASPAN
+    var k: u64 = 0
+    while k < APAGES {
+        let pa = frames.alloc() else 0
+        if pa == 0 {
+            while k > 0 {
+                k -= 1
+                let f = paging.unmap(pml4, lo + k * PAGE) else 0
+                if f != 0 {
+                    frames.free(f)
+                }
+            }
+            return false
+        }
+        let v = pa + frames.hhdm()
+        var i: u64 = 0
+        while i < PAGE / 8 {
+            // # Safety: the frame just taken, through the HHDM.
+            unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+            i += 1
+        }
+        let n = paging.map(pml4, lo + k * PAGE, pa, paging.RW | paging.NX) else 99
+        if n == 99 {
+            panic.fail("sched: area map refused at", lo + k * PAGE)
+        }
+        k += 1
+    }
+    put_slot_word(s, W_AREA, 1)
+    true
+}
+
+/// px126: slot `s`'s process area unmapped and its frames given back,
+/// if it has one.
+fn free_area(s: u64) {
+    if slot_word(s, W_AREA) == 0 {
+        return
+    }
+    let pml4 = sv(S_PML4)
+    let lo = AREAS + s * ASPAN
+    var k: u64 = 0
+    while k < APAGES {
+        let pa = paging.unmap(pml4, lo + k * PAGE) else 0
+        if pa == 0 {
+            panic.fail("sched: an area page was not mapped", lo + k * PAGE)
+        }
+        frames.free(pa)
+        k += 1
+    }
+    put_slot_word(s, W_AREA, 0)
+}
+
+/// px126: slot `from`'s process area becomes slot `to`'s, its twelve
+/// frames moved, not copied (`exec_alone`): nothing taken, so nothing
+/// can fail. `to` has none. IF clear.
+fn move_area(from: u64, to: u64) {
+    free_area(to)
+    let pml4 = sv(S_PML4)
+    let a = AREAS + from * ASPAN
+    let b = AREAS + to * ASPAN
+    var k: u64 = 0
+    while k < APAGES {
+        let pa = paging.unmap(pml4, a + k * PAGE) else 0
+        if pa == 0 {
+            panic.fail("sched: an area page was not mapped", a + k * PAGE)
+        }
+        let n = paging.map(pml4, b + k * PAGE, pa, paging.RW | paging.NX) else 99
+        if n == 99 {
+            panic.fail("sched: area map refused at", b + k * PAGE)
+        }
+        k += 1
+    }
+    put_slot_word(from, W_AREA, 0)
+    put_slot_word(to, W_AREA, 1)
+}
+
+/// px126: whether slot `s` has a process area (MAIN and a process's
+/// leader do; a thread of a group and a kernel thread do not).
+fn has_area(s: u64) -> bool {
+    s < SLOTS && slot_word(s, W_AREA) != 0
 }
 
 /// Write slot `s`'s first frame at its stack's top: it resumes in
@@ -792,26 +1003,27 @@ fn clear(s: u64) {
         trace_set_dr(s, dr, if dr == 6 { 0xffff0ff0 } else { 0 })
         dr += 1
     }
-    let a = own_area(s)
-    var i: u64 = 0
-    while i < PROC_AREA / 8 {
-        // # Safety: slot s's area, inside boot/sched.S's pax_procs (s < SLOTS).
-        unsafe { ((a + i * 8) as *u64).write_volatile(0) }
-        i += 1
+    // px126: the area goes (a new process's is mapped zeroed), and the
+    // high water falls past the free slots at its top.
+    free_area(s)
+    put_slot_word(s, W_MARK, 0)
+    if s + 1 == sv(S_TOP) {
+        lower_top()
     }
 }
 
-/// Slot `s`'s own area, whichever group it is in (px26).
+/// Slot `s`'s own area, whichever group it is in (px26). px126: mapped
+/// while the slot leads a process (and for MAIN); asked of a slot that
+/// has none, a named panic.
 fn own_area(s: u64) -> u64 {
-    if s >= SLOTS {
+    if !has_area(s) {
         panic.fail("sched: no process area for slot", s)
     }
-    // # Safety: the address only; s < SLOTS keeps it inside pax_procs.
-    unsafe { pax_procs as u64 + s * PROC_AREA }
+    AREAS + s * ASPAN
 }
 
-/// Slot `s`'s process area (px12): PROC_AREA bytes of boot/sched.S's
-/// `pax_procs`, zero for a fresh process. px26: the area of the thread's
+/// Slot `s`'s process area (px12): PROC_AREA bytes, zero for a fresh
+/// process (px126: mapped from frames, `own_area`). px26: the area of the thread's
 /// process, which is its leader's slot's — every thread of a group
 /// reads and writes the same descriptors, working directory, break and
 /// signal actions.
@@ -853,7 +1065,7 @@ pub fn set_self_fs(v: u64) {
 pub fn sleep_current(f: u64, wake: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
-    put_field(c, offset_of(Thread, wake), wake)
+    set_wake(c, wake, true)
     put_field(c, offset_of(Thread, state), SLEEPING)
     put_field(c, offset_of(Thread, rst), W_SLEEP) // px26: a signal ends it with -EINTR
     trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
@@ -889,7 +1101,7 @@ pub fn block_input(f: u64) -> u64 {
 pub fn wake_input() -> u64 {
     var n: u64 = 0
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         // px24: a thread in `poll` or `epoll_wait` may be watching the
         // console too; it waits as a pipe's reader does (PIPE).
         let st = field(s, offset_of(Thread, state))
@@ -923,11 +1135,17 @@ pub fn start(pml4: u64) {
     // # Safety: linker bounds of the assembly's complete thread reservation.
     let thread_bytes = unsafe { pax_threads_end as u64 - pax_threads as u64 }
     trace_state.check_layout(size_of(Thread) as u64, thread_bytes, SLOTS)
+    if fpu.slots() != SLOTS {
+        panic.fail("sched: kernel/fpu's slot count is not this module's", fpu.slots())
+    }
     var s: u64 = 0
     while s < SLOTS {
         clear(s)
         s += 1
     }
+    put_sv(S_TOP, FIRST) // px126: MAIN and IDLE sit below every walk's start
+    put_sv(S_WAKE_AT, NEVER)
+    put_sv(S_REFUSED, 0)
     put_sv(S_STARTED, 0)
     put_sv(S_PML4, pml4)
     put_sv(S_CURRENT, MAIN)
@@ -950,15 +1168,17 @@ pub fn start(pml4: u64) {
     put_field(MAIN, offset_of(Thread, state), RUNNING)
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
+    // px126: every page table the stacks and the areas will need (32
+    // each: 1024 slots of 64 KiB), taken now, by mapping a frame at each
+    // 2 MiB of both regions and unmapping it, so the first use of a high
+    // slot never takes a table frame nobody gives back (px24 took its
+    // second table so, by the last slot's stack).
+    tables(pml4, STACKS, SLOTS * SPAN)
+    tables(pml4, AREAS, SLOTS * ASPAN)
     make_stack_or_die(IDLE)
-    // px24: sixty-four slots' stacks span two page tables (2 MiB each);
-    // the second is taken now, by mapping and unmapping the last slot's
-    // stack, so the first process to run more than thirty threads does
-    // not leave the count of free frames one short for good.
-    make_stack_or_die(SLOTS - 1)
-    free_stack(SLOTS - 1)
-    put_field(SLOTS - 1, offset_of(Thread, stack_lo), 0)
-    put_field(SLOTS - 1, offset_of(Thread, stack_hi), 0)
+    if !make_area(MAIN) {
+        panic.fail("sched: no frame for the kernel's own process area", 0)
+    }
     fpu.reset(IDLE)
     // # Safety: the address of boot/sched.S's idle loop; nothing is read.
     first_frame(IDLE, unsafe { pax_idle as u64 }, 0, 0)
@@ -968,6 +1188,29 @@ pub fn start(pml4: u64) {
     sync.irq_restore(saved)
 }
 
+/// px126: the page tables that map [`base`, `base + n`), made now (the
+/// region's every 2 MiB mapped with one frame, then unmapped; the frame
+/// given back, the tables kept).
+fn tables(pml4: u64, base: u64, n: u64) {
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        panic.fail("sched: no frame to make the slots' page tables", base)
+    }
+    var at = base
+    while at < base + n {
+        let m = paging.map(pml4, at, pa, paging.RW | paging.NX) else 99
+        if m == 99 {
+            panic.fail("sched: table map refused at", at)
+        }
+        let back = paging.unmap(pml4, at) else 0
+        if back != pa {
+            panic.fail("sched: table unmap gave back another frame at", at)
+        }
+        at += CHUNK
+    }
+    frames.free(pa)
+}
+
 /// Reap every dead thread but the running one: its stack unmapped, its
 /// frames freed, its slot free — or, for a process a parent will wait
 /// for (px14), its slot kept as a ZOMBIE holding its pid and status.
@@ -975,7 +1218,7 @@ pub fn start(pml4: u64) {
 /// thread's own stack: it is not the running one).
 fn reap() {
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if s != cur() && field(s, offset_of(Thread, state)) == DEAD {
             if field(s, offset_of(Thread, stack_lo)) != 0 { // px26: a held leader's went at its own end
                 free_stack(s)
@@ -1050,7 +1293,13 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
     if s == SLOTS {
         panic.fail("sched: no free thread slot, live", live_count())
     }
+    raise_top(s) // px126
     make_stack_or_die(s)
+    // px126: a process the kernel starts has an area of its own; a
+    // kernel thread has none.
+    if prog != 0 && !make_area(s) {
+        panic.fail("sched: no frame for a process area, slot", s)
+    }
     fpu.reset(s)
     // # Safety: the address of boot/sched.S's entry; nothing is read.
     first_frame(s, unsafe { pax_thread_entry as u64 }, body, arg)
@@ -1064,6 +1313,7 @@ fn start_thread(body: u64, arg: u64, cr3: u64, prog: u64) -> u64 {
     if prog != 0 {
         let pid = take_pid()
         put_field(s, offset_of(Thread, pid), pid) // px14: a process, started by the kernel (ppid 0)
+        hint_put(pid, s) // px126
         put_field(s, offset_of(Thread, tgid), pid) // px26: a group of one, its own leader
         put_field(s, offset_of(Thread, threads), 1)
         // px48: it leads a session and a process group of its own, and
@@ -1113,7 +1363,7 @@ pub fn sleep(n: u64) -> (u64, u64) {
     let saved = sync.irq_save()
     let c = cur()
     let from = timer.ticks()
-    put_field(c, offset_of(Thread, wake), from + n)
+    set_wake(c, from + n, true)
     put_field(c, offset_of(Thread, state), SLEEPING)
     // # Safety: as `yield`.
     unsafe { pax_switch() }
@@ -1231,11 +1481,14 @@ fn process_ends(l: u64, st: u64) {
         // in slot t whose group is not orphaned yet.
         let own = field(l, offset_of(Thread, pgid))
         let own_was = own != 0 && !orphaned_but(own, SLOTS)
+        // px126: each such child marked (W_MARK; px48's 64-bit mask, bit
+        // t for slot t, was wrong past slot 63), `kids` counting them.
         var kids: u64 = 0
         var t: u64 = FIRST
-        while t < SLOTS {
+        while t < top() {
             if t != l && live_leader(t) && field(t, offset_of(Thread, ppid)) == me && !orphaned_but(field(t, offset_of(Thread, pgid)), SLOTS) {
-                kids = kids | (1 << t)
+                put_slot_word(t, W_MARK, 1)
+                kids += 1
             }
             t += 1
         }
@@ -1245,15 +1498,18 @@ fn process_ends(l: u64, st: u64) {
         if own_was && orphaned_but(own, l) && has_stopped(own) {
             hangup_group(own, true)
         }
+        // Each marked child's group, once, at its first marked child in
+        // slot order: every marked child of the group unmarked there.
         t = FIRST
-        while t < SLOTS {
-            if kids & (1 << t) != 0 {
+        while kids > 0 && t < top() {
+            if slot_word(t, W_MARK) == 1 {
                 let g = field(t, offset_of(Thread, pgid))
-                var first = g != own || !own_was
-                var u: u64 = FIRST
-                while u < t {
-                    if kids & (1 << u) != 0 && field(u, offset_of(Thread, pgid)) == g {
-                        first = false
+                let first = g != own || !own_was
+                var u = t
+                while u < top() {
+                    if slot_word(u, W_MARK) == 1 && field(u, offset_of(Thread, pgid)) == g {
+                        put_slot_word(u, W_MARK, 0)
+                        kids -= 1
                     }
                     u += 1
                 }
@@ -1308,8 +1564,12 @@ fn running_state(s: u64) -> bool {
 /// The leader's slot of the process `pid` that has not ended; SLOTS if
 /// none.
 fn live_slot(pid: u64) -> u64 {
+    let h = hinted(pid) // px126: the slot that holds `pid`, when the hint knows it
+    if h != SLOTS {
+        return if field(h, offset_of(Thread, tgid)) == pid && running_state(h) { h } else { SLOTS }
+    }
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, pid)) == pid && field(s, offset_of(Thread, tgid)) == pid && running_state(s) {
             return s
         }
@@ -1323,7 +1583,7 @@ fn live_slot(pid: u64) -> u64 {
 /// again and finds what changed.
 fn wake_waiter(pid: u64) {
     var p: u64 = FIRST
-    while p < SLOTS {
+    while p < top() {
         if field(p, offset_of(Thread, tgid)) == pid && field(p, offset_of(Thread, state)) == WAITING {
             put_field(p, offset_of(Thread, state), READY)
             enqueue(p)
@@ -1364,7 +1624,7 @@ fn unqueue(s: u64) {
 /// IF clear.
 fn end_others(l: u64, keep: u64, status: u64) {
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         let st = field(t, offset_of(Thread, state))
         let held = trace_state.exit_pending(t) == 3 && tracer_of(keep) == 0 // px102: parked in EVENT_EXIT for its tracer
         if t != keep && !held && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 {
@@ -1400,7 +1660,7 @@ fn end_others(l: u64, keep: u64, status: u64) {
 fn own_borrowed(l: u64) -> bool {
     let c = field(l, offset_of(Thread, cr3))
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         let vp = field(t, offset_of(Thread, vparent))
         if vp != 0 && field(t, offset_of(Thread, state)) != FREE && field(t, offset_of(Thread, cr3)) == c && field(t, offset_of(Thread, owns)) == 0 && field(vp - 1, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, lead)) != l {
             put_field(t, offset_of(Thread, owns), 1)
@@ -1448,7 +1708,7 @@ fn release_vfork(c: u64) {
 fn reparent(c: u64, me: u64) {
     let heir = if me != 1 && live_slot(1) != SLOTS { 1 } else { 0 }
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         let st = field(t, offset_of(Thread, state))
         if t != c && st != FREE && field(t, offset_of(Thread, ppid)) == me {
             put_field(t, offset_of(Thread, ppid), heir)
@@ -1618,7 +1878,7 @@ pub fn live_count() -> u64 {
 /// The slot of the live thread with id `id`; SLOTS if none.
 fn slot_of(id: u64) -> u64 {
     var s: u64 = IDLE
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, state)) != FREE && field(s, offset_of(Thread, id)) == id {
             return s
         }
@@ -1726,15 +1986,22 @@ pub fn set_self_sigmask(v: u64) {
 pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     let p = cur()
     reap()
-    var s: u64 = FIRST
-    while s < SLOTS && field(s, offset_of(Thread, state)) != FREE {
-        s += 1
-    }
+    let s = free_slot()
     if s == SLOTS {
         return SLOTS
     }
     if !make_stack(s) {
+        lower_top()
         return NO_STACK // px34
+    }
+    // px126: a process's area, mapped now (zeroed; the caller's is copied
+    // into it below).
+    if !make_area(s) {
+        free_stack(s)
+        put_field(s, offset_of(Thread, stack_lo), 0)
+        put_field(s, offset_of(Thread, stack_hi), 0)
+        lower_top()
+        return NO_AREA
     }
     fpu.fork(p, s)
     let hi = field(s, offset_of(Thread, stack_hi))
@@ -1772,6 +2039,7 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     put_field(s, offset_of(Thread, ss_size), field(p, offset_of(Thread, ss_size)))
     let pid = take_pid()
     put_field(s, offset_of(Thread, pid), pid)
+    hint_put(pid, s) // px126
     put_field(s, offset_of(Thread, tgid), pid) // px26: a new process, a group of one
     put_field(s, offset_of(Thread, lead), s)
     put_field(s, offset_of(Thread, threads), 1)
@@ -1791,7 +2059,7 @@ pub fn clone_current(f: u64, usp: u64, cr3: u64) -> u64 {
     let to = own_area(s)
     i = 0
     while i < PROC_AREA / 8 {
-        // # Safety: two slots' areas inside boot/sched.S's pax_procs.
+        // # Safety: two slots' areas, each PROC_AREA bytes mapped (px126).
         unsafe { ((to + i * 8) as *u64).write_volatile(((from + i * 8) as *u64).read_volatile()) }
         i += 1
     }
@@ -1822,14 +2090,12 @@ pub fn clone_thread(f: u64, usp: u64, settls: bool, tls: u64, ctid: u64) -> u64 
     let p = cur()
     let l = field(p, offset_of(Thread, lead))
     reap()
-    var s: u64 = FIRST
-    while s < SLOTS && field(s, offset_of(Thread, state)) != FREE {
-        s += 1
-    }
+    let s = free_slot()
     if s == SLOTS {
         return SLOTS
     }
     if !make_stack(s) {
+        lower_top()
         return NO_STACK // px34
     }
     fpu.fork(p, s)
@@ -1864,6 +2130,7 @@ pub fn clone_thread(f: u64, usp: u64, settls: bool, tls: u64, ctid: u64) -> u64 
     put_field(s, offset_of(Thread, fs), if settls { tls } else { field(p, offset_of(Thread, fs)) })
     put_field(s, offset_of(Thread, sigmask), field(p, offset_of(Thread, sigmask)))
     put_field(s, offset_of(Thread, pid), take_pid())
+    hint_put(field(s, offset_of(Thread, pid)), s) // px126
     put_field(s, offset_of(Thread, tgid), field(l, offset_of(Thread, tgid)))
     put_field(s, offset_of(Thread, lead), l)
     put_field(s, offset_of(Thread, ppid), 0) // a thread is nobody's child: wait4 sees processes
@@ -1878,6 +2145,31 @@ pub fn clone_thread(f: u64, usp: u64, settls: bool, tls: u64, ctid: u64) -> u64 
     s
 }
 
+/// px126: the lowest free slot, its high water raised, or SLOTS when
+/// none is free. A run of SLOTS answers is counted (`S_REFUSED`): the
+/// first is the one kernel/process says (`first_refusal`); a slot found
+/// free ends the run.
+fn free_slot() -> u64 {
+    var s: u64 = FIRST
+    while s < SLOTS && field(s, offset_of(Thread, state)) != FREE {
+        s += 1
+    }
+    if s == SLOTS {
+        put_sv(S_REFUSED, sv(S_REFUSED) + 1)
+        return SLOTS
+    }
+    put_sv(S_REFUSED, 0)
+    raise_top(s)
+    s
+}
+
+/// px126: whether the clone just refused for want of a slot is the
+/// first of its run (kernel/process writes that one's line, not the
+/// rest: the log says it once).
+pub fn first_refusal() -> bool {
+    sv(S_REFUSED) == 1
+}
+
 /// px26: threads made by `clone` since boot (kernel/process's census
 /// line every 2500th).
 pub fn threads_made() -> u64 {
@@ -1888,7 +2180,7 @@ pub fn threads_made() -> u64 {
 pub fn slots_busy() -> u64 {
     var n: u64 = 0
     var s: u64 = 0
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, state)) != FREE {
             n += 1
         }
@@ -1913,15 +2205,8 @@ pub fn exec_alone() {
     }
     end_others(l, c, 0)
     if l != c {
-        let from = own_area(l)
-        let to = own_area(c)
+        move_area(l, c) // px126: the leader's frames become the caller's area; nothing copied
         var i: u64 = 0
-        while i < PROC_AREA / 8 {
-            // # Safety: two slots' areas inside boot/sched.S's pax_procs.
-            unsafe { ((to + i * 8) as *u64).write_volatile(((from + i * 8) as *u64).read_volatile()) }
-            i += 1
-        }
-        i = 0
         while i < NSIG {
             put_info(c, 1, i + 1, info_of(l, 1, i + 1))
             i += 1
@@ -1929,11 +2214,12 @@ pub fn exec_alone() {
         // px102: the caller's own tracees follow it to its new thread id.
         let old_tid = field(c, offset_of(Thread, pid))
         var u: u64 = FIRST
-        while u < SLOTS {
+        while u < top() {
             if field(u, offset_of(Thread, tracer)) == old_tid { put_field(u, offset_of(Thread, tracer), field(l, offset_of(Thread, tgid))) }
             u += 1
         }
         put_field(c, offset_of(Thread, pid), field(l, offset_of(Thread, tgid)))
+        hint_put(field(l, offset_of(Thread, tgid)), c) // px126
         put_field(c, offset_of(Thread, ppid), field(l, offset_of(Thread, ppid)))
         put_field(c, offset_of(Thread, owns), field(l, offset_of(Thread, owns)))
         put_field(c, offset_of(Thread, vparent), field(l, offset_of(Thread, vparent)))
@@ -1997,8 +2283,12 @@ pub fn proc_slot(pid: u64) -> u64 {
     if pid == 0 {
         return SLOTS
     }
+    let h = hinted(pid) // px126
+    if h != SLOTS {
+        return if is_proc(h) { h } else { SLOTS }
+    }
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if is_proc(s) && field(s, offset_of(Thread, pid)) == pid {
             return s
         }
@@ -2012,7 +2302,7 @@ pub fn proc_slot(pid: u64) -> u64 {
 pub fn proc_after(after: u64) -> u64 {
     var best: u64 = 0
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if is_proc(s) {
             let p = field(s, offset_of(Thread, pid))
             if p > after && (best == 0 || p < best) {
@@ -2167,7 +2457,7 @@ pub const W_TRACED: u64 = 8 // px102: reported even without WUNTRACED
 fn threads_unreported(l: u64) -> bool {
     if field(l, offset_of(Thread, pid)) != field(l, offset_of(Thread, tgid)) { return false }
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         let st = field(t, offset_of(Thread, state))
         if t != l && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, zombie)) == 1 && (st == ZOMBIE || st == DEAD) { return true }
         if t != l && field(t, offset_of(Thread, lead)) == l && trace_state.exit_pending(t) == 3 && tracer_of(t) != 0 && st != FREE && st != DEAD { return true } // parked in EVENT_EXIT
@@ -2181,7 +2471,7 @@ pub fn wait_find(how: u64, sel: u64, want: u64) -> (bool, u64, u64) {
     let me = field(cur(), offset_of(Thread, tgid)) // px26: the caller's process
     var any = false
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         let st = field(s, offset_of(Thread, state))
         let ok = how == 0 || (how == 1 && field(s, offset_of(Thread, pid)) == sel) || (how == 2 && field(s, offset_of(Thread, pgid)) == sel)
         let tr = tracer_of(s)
@@ -2272,7 +2562,7 @@ pub fn block_pipe(f: u64) -> u64 {
 pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
-    put_field(c, offset_of(Thread, wake), wake)
+    set_wake(c, wake, false)
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_REWOUND } else { W_TIMED_REWOUND }) // px26
     wake_sleepers()
@@ -2285,7 +2575,7 @@ pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
 pub fn block_pipe_eintr(f: u64, wake: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
-    put_field(c, offset_of(Thread, wake), wake)
+    set_wake(c, wake, false)
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), W_TIMED_REWOUND)
     wake_sleepers()
@@ -2321,7 +2611,7 @@ pub fn set_self_altstack(sp: u64, size: u64) {
 /// changed; each runs its call again). IF clear.
 pub fn wake_pipes() {
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, state)) == PIPE {
             put_field(s, offset_of(Thread, state), READY)
             enqueue(s)
@@ -2347,7 +2637,7 @@ pub fn block_net() {
 pub fn wake_net() -> u64 {
     var n: u64 = 0
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, state)) == NET {
             put_field(s, offset_of(Thread, state), READY)
             enqueue(s)
@@ -2468,7 +2758,7 @@ pub fn set_self_fifo(v: u64) {
 pub fn take_group_fifo() -> u64 {
     let l = field(cur(), offset_of(Thread, lead))
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, state)) != FREE && field(s, offset_of(Thread, lead)) == l {
             let w = field(s, offset_of(Thread, fifo))
             if w != 0 {
@@ -2529,7 +2819,7 @@ pub fn yield_current(f: u64) -> u64 {
 // whose slot names the word it waits on (its physical address: threads
 // of one process meet on it, and PAX shares no frame between address
 // spaces), the bitset it waits with and its place in line. A wake walks
-// the sixteen slots. A system call runs with IF clear from entry to the
+// the slots up to the high water (px126; sixteen of them once). A system call runs with IF clear from entry to the
 // switch, so no waker runs between the caller's look at the word
 // (kernel/process) and this wait.
 
@@ -2548,7 +2838,7 @@ pub fn futex_wait(f: u64, key: u64, bits: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, fkey), key)
     put_field(c, offset_of(Thread, fbits), bits)
     put_field(c, offset_of(Thread, fseq), q)
-    put_field(c, offset_of(Thread, wake), wake)
+    set_wake(c, wake, false)
     put_field(c, offset_of(Thread, state), FUTEX)
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_FUTEX } else { W_TIMED })
     trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
@@ -2564,7 +2854,7 @@ pub fn futex_wake(key: u64, bits: u64, n: u64) -> u64 {
     while woke < n {
         var best: u64 = SLOTS
         var s: u64 = FIRST
-        while s < SLOTS {
+        while s < top() {
             if field(s, offset_of(Thread, state)) == FUTEX && field(s, offset_of(Thread, fkey)) == key && field(s, offset_of(Thread, fbits)) & bits != 0 {
                 if best == SLOTS || field(s, offset_of(Thread, fseq)) < field(best, offset_of(Thread, fseq)) {
                     best = s
@@ -2591,7 +2881,7 @@ pub fn futex_wake(key: u64, bits: u64, n: u64) -> u64 {
 pub fn futex_waiters() -> u64 {
     var n: u64 = 0
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, state)) == FUTEX {
             n += 1
         }
@@ -2646,12 +2936,15 @@ pub fn info_parts(info: u64) -> (u64, u64, u64, u64) {
 /// C_UID; read here by its place, since kernel/cred imports what imports
 /// this module and wolf refuses an import cycle).
 fn real_uid(l: u64) -> u64 {
+    if !has_area(l) {
+        return 0 // px126: a kernel thread (no area): root's, as the zeroed area it had said
+    }
     // # Safety: the leader's own area, word 160 < 512.
     unsafe { ((own_area(l) + 160 * 8) as *u64).read_volatile() }
 }
 
 fn info_of(s: u64, group: u64, sig: u64) -> u64 {
-    // # Safety: s < SLOTS, group < 2, 1 <= sig <= 64: inside the 16 * 2 *
+    // # Safety: s < SLOTS, group < 2, 1 <= sig <= 64: inside the SLOTS * 2 *
     // 64 words of boot/sched.S's pax_siginfo.
     unsafe { ((pax_siginfo as u64 + ((s * 2 + group) * NSIG + sig - 1) * 8) as *u64).read_volatile() }
 }
@@ -2668,6 +2961,9 @@ fn bit(sig: u64) -> u64 {
 /// The action's handler word of signal `sig` in the process led by `l`
 /// (the area's signal words, kernel/process's `rt_sigaction`).
 fn handler_of(l: u64, sig: u64) -> u64 {
+    if !has_area(l) {
+        return SIG_DFL // px126: a kernel thread (no area): no handler, as the zeroed area it had said
+    }
     // # Safety: the leader's area, word SIG_WORDS + (sig - 1) * 4 < 512.
     unsafe { ((own_area(l) + (SIG_WORDS + (sig - 1) * 4) * 8) as *u64).read_volatile() }
 }
@@ -2727,7 +3023,7 @@ fn taker(l: u64, sig: u64) -> u64 {
     }
     var best: u64 = SLOTS
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         if t != l && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 && takes(t) && field(t, offset_of(Thread, sigmask)) & bit(sig) == 0 {
             if best == SLOTS || field(t, offset_of(Thread, pid)) < field(best, offset_of(Thread, pid)) {
                 best = t
@@ -2778,7 +3074,7 @@ fn interrupt(t: u64) {
 /// IF clear.
 fn poke(l: u64) {
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         if field(t, offset_of(Thread, lead)) == l && takes(t) && field(t, offset_of(Thread, state)) != READY && field(t, offset_of(Thread, state)) != RUNNING {
             // Any of its deliverable signals that is not inert wakes it.
             let m = field(t, offset_of(Thread, sigmask))
@@ -2857,7 +3153,7 @@ pub fn raise_pid(pid: u64, sig: u64, info: u64) -> bool {
 /// 0 for `tkill`: any process's): false when there is no such thread.
 pub fn raise_tid(tgid: u64, tid: u64, sig: u64, info: u64) -> bool {
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         if takes(t) && field(t, offset_of(Thread, pid)) == tid && field(t, offset_of(Thread, tgid)) != 0 && (tgid == 0 || field(t, offset_of(Thread, tgid)) == tgid) {
             if sig != 0 {
                 raise_thread(t, sig, info)
@@ -2939,7 +3235,7 @@ pub fn group_exists(g: u64, sid: u64) -> bool {
         return false
     }
     var l: u64 = FIRST
-    while l < SLOTS {
+    while l < top() {
         if is_proc(l) && field(l, offset_of(Thread, pgid)) == g && (sid == 0 || field(l, offset_of(Thread, sid)) == sid) {
             return true
         }
@@ -2953,7 +3249,7 @@ pub fn group_exists(g: u64, sid: u64) -> bool {
 pub fn member_after(g: u64, after: u64) -> u64 {
     var best: u64 = 0
     var l: u64 = FIRST
-    while l < SLOTS {
+    while l < top() {
         if is_proc(l) && field(l, offset_of(Thread, pgid)) == g {
             let p = field(l, offset_of(Thread, pid))
             if p > after && (best == 0 || p < best) {
@@ -3115,7 +3411,7 @@ fn tty_leaves(t: u64) {
     set_tsid(t, 0)
     set_tpgrp(t, 0)
     var l: u64 = FIRST
-    while l < SLOTS {
+    while l < top() {
         if field(l, offset_of(Thread, sid)) == sid && field(l, offset_of(Thread, ctty)) == t {
             put_field(l, offset_of(Thread, ctty), 0)
         }
@@ -3242,7 +3538,7 @@ fn hangup_group(g: u64, cont: bool) {
 pub fn raise_pgrp(g: u64, sig: u64, info: u64) -> u64 {
     var n: u64 = 0
     var l: u64 = FIRST
-    while l < SLOTS {
+    while l < top() {
         if live_leader(l) && field(l, offset_of(Thread, pgid)) == g {
             n += 1
             if sig != 0 {
@@ -3259,7 +3555,7 @@ pub fn raise_pgrp(g: u64, sig: u64, info: u64) -> u64 {
 /// of the same session. A group with no live member is orphaned.
 fn orphaned_but(g: u64, skip: u64) -> bool {
     var l: u64 = FIRST
-    while l < SLOTS {
+    while l < top() {
         if l != skip && live_leader(l) && field(l, offset_of(Thread, pgid)) == g {
             let pp = field(l, offset_of(Thread, ppid))
             let ps = if pp != 0 { live_slot(pp) } else { SLOTS }
@@ -3280,7 +3576,7 @@ pub fn self_orphaned() -> bool {
 /// Whether group `g` has a stopped live member.
 fn has_stopped(g: u64) -> bool {
     var l: u64 = FIRST
-    while l < SLOTS {
+    while l < top() {
         if live_leader(l) && field(l, offset_of(Thread, pgid)) == g && field(l, offset_of(Thread, stopped)) == 1 {
             return true
         }
@@ -3331,7 +3627,7 @@ fn stop_proc(l: u64, sig: u64) {
 /// Every parked thread of the process led by `l` made ready.
 fn unpark(l: u64) {
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         if field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, state)) == STOPPED {
             put_field(t, offset_of(Thread, state), READY)
             enqueue(t)
@@ -3347,7 +3643,7 @@ fn discard(l: u64, cont: bool) {
     let m = if cont { bit(SIGCONT) } else { STOPS }
     put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) & !m)
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         if field(t, offset_of(Thread, lead)) == l && takes(t) {
             put_field(t, offset_of(Thread, pend), field(t, offset_of(Thread, pend)) & !m)
         }
@@ -3370,7 +3666,7 @@ fn job_signal(l: u64, sig: u64, blocked: bool) -> bool {
     }
     if sig == SIGKILL {
         var t: u64 = FIRST
-        while t < SLOTS {
+        while t < top() {
             if field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, state)) == TRACED {
                 trace_resume(t)
             }
@@ -3508,12 +3804,10 @@ pub fn resuspend(f: u64) -> u64 {
 /// The session of the process whose area is `a` (a leader's own area,
 /// `proc_area`'s; kernel/signal's `may_signal` has areas).
 pub fn sid_of_area(a: u64) -> u64 {
-    // # Safety: the address only.
-    let base = unsafe { pax_procs as u64 }
-    if a < base || a >= base + SLOTS * PROC_AREA {
+    if a < AREAS || a >= AREAS + SLOTS * ASPAN {
         return 0
     }
-    field((a - base) / PROC_AREA, offset_of(Thread, sid))
+    field((a - AREAS) / ASPAN, offset_of(Thread, sid))
 }
 
 /// Whether the running thread has a signal to take now (kernel/signal
@@ -3769,7 +4063,7 @@ pub fn usage(which: u64) -> (u64, u64, u64, u64, u64) {
 }
 
 /// The scheduler's line:
-/// `sched: main 0, idle 1, 64 slots, stacks 16 KiB above a 48 KiB guard from 0x<STACKS>, quantum 2 ticks`.
+/// `sched: main 0, idle 1, 1024 slots, stacks 16 KiB above a 48 KiB guard from 0x<STACKS>, quantum 2 ticks`.
 pub fn report() {
     log.put("sched: main 0, idle 1, ")
     log.dec(SLOTS as int)
@@ -3824,8 +4118,12 @@ pub fn trace_me() -> bool {
 /// or SLOTS. A held leader (its own thread has exited) is not live.
 fn tid_slot(tid: u64) -> u64 {
     if tid == 0 { return SLOTS }
+    let h = hinted(tid) // px126
+    if h != SLOTS {
+        return if field(h, offset_of(Thread, tgid)) != 0 && running_state(h) && field(h, offset_of(Thread, state)) != HELD { h } else { SLOTS }
+    }
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, pid)) == tid && field(s, offset_of(Thread, tgid)) != 0 && running_state(s) && field(s, offset_of(Thread, state)) != HELD { return s }
         s += 1
     }
@@ -3836,7 +4134,7 @@ fn tid_slot(tid: u64) -> u64 {
 fn group_tid(pid: u64) -> u64 {
     if tid_slot(pid) != SLOTS { return pid }
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, tgid)) == pid && tid_slot(field(s, offset_of(Thread, pid))) == s { return field(s, offset_of(Thread, pid)) }
         s += 1
     }
@@ -3847,7 +4145,7 @@ fn group_tid(pid: u64) -> u64 {
 /// mistake an untraced job-control stop for a ptrace stop.
 pub fn trace_target(tid: u64) -> u64 {
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if field(s, offset_of(Thread, pid)) == tid && tracer_of(s) == self_tid() && field(s, offset_of(Thread, state)) == TRACED {
             return s
         }
@@ -3921,7 +4219,7 @@ pub fn trace_resume(s: u64) {
 fn trace_release_owned(tid: u64) {
     if tid == 0 { return }
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if tracer_of(s) == tid {
             put_field(s, offset_of(Thread, tracer), 0)
             if field(s, offset_of(Thread, state)) == ZOMBIE {
@@ -3966,7 +4264,7 @@ pub fn trace_set_fs(s: u64, value: u64) { put_field(s, offset_of(Thread, fs), va
 
 pub fn trace_dr(s: u64, n: u64) -> u64 {
     if s >= SLOTS || n >= 8 { return 0 }
-    // # Safety: 64 slots, each 8 words, reserved by boot/sched.S.
+    // # Safety: SLOTS slots, each 8 words, reserved by boot/sched.S.
     unsafe { ((pax_debugregs as u64 + s * 64 + n * 8) as *u64).read_volatile() }
 }
 
@@ -4011,7 +4309,7 @@ pub fn thread_tid(s: u64, pid: u64) -> u64 {
 
 fn trace_group(l: u64) -> bool {
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if takes(s) && field(s, offset_of(Thread, lead)) == l && tracer_of(s) != 0 { return true }
         s += 1
     }
@@ -4086,8 +4384,12 @@ fn trace_real_parent(s: u64) -> bool {
 
 /// A live user tid, whether or not it is already traced.
 pub fn trace_live(tid: u64) -> u64 {
+    let h = hinted(tid) // px126
+    if h != SLOTS {
+        return if takes(h) && field(h, offset_of(Thread, tgid)) != 0 { h } else { SLOTS }
+    }
     var s: u64 = FIRST
-    while s < SLOTS {
+    while s < top() {
         if takes(s) && field(s, offset_of(Thread, pid)) == tid && field(s, offset_of(Thread, tgid)) != 0 { return s }
         s += 1
     }
@@ -4143,7 +4445,7 @@ pub fn trace_group_exit(status: u64) {
     let c = cur()
     let l = field(c, offset_of(Thread, lead))
     var t: u64 = FIRST
-    while t < SLOTS {
+    while t < top() {
         let st = field(t, offset_of(Thread, state))
         if t != c && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && tracer_of(t) != 0 && trace_state.options(t) & 0x40 != 0 && trace_state.exit_pending(t) == 0 {
             trace_state.set_exit_pending(t, 3)
