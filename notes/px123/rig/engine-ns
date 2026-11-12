@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# notes/px123/rig/engine-ns — the container engine tools/linux-tree calls (PAX_ENGINE), inside the take's
+# own container, which has no engine of its own. linux-tree runs `ENGINE run --rm --network none --privileged
+# --ulimit core=0:0 -v STAGE:/x IMAGE sh /x/run.sh SIZE`; here the command runs in fresh mount and network
+# namespaces of the take's container (CAP_SYS_ADMIN), with STAGE bound at /x, so its tmpfs at /r, its chroot
+# and its pid namespace stay inside them and go when it ends. IMAGE is not used: the take's image has
+# python3, which run.sh needs. Only those options are taken; any other is refused by name.
+set -euo pipefail
+[ "${1:-}" = run ] || { echo "engine-ns: only run" >&2; exit 2; }
+shift
+stage=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --rm|--privileged) shift ;;
+        --network|--ulimit) shift 2 ;;
+        -v) [ "${2#*:}" = /x ] || { echo "engine-ns: only -v STAGE:/x, not $2" >&2; exit 2; }; stage=${2%%:*}; shift 2 ;;
+        -*) echo "engine-ns: unknown option $1" >&2; exit 2 ;;
+        *) shift; break ;;
+    esac
+done
+[ -n "$stage" ] && [ -d "$stage" ] || { echo "engine-ns: no stage directory" >&2; exit 2; }
+mkdir -p /x
+[ ! -d /r ] || rmdir /r || { echo "engine-ns: /r is left from an earlier run and not empty" >&2; exit 2; }
+# shellcheck disable=SC2016 # expanded by the inner shell
+exec unshare --mount --net --propagation private sh -c 'mount --bind "$0" /x && ulimit -c 0 && "$@"; rc=$?; rmdir /r 2>/dev/null; exit $rc' "$stage" "$@"
