@@ -524,6 +524,29 @@ static void caching_line(char *out, size_t cap) {
     snprintf(out, cap, "framebuffer caching: no `screen:` line in /proc/pax-bootlog (%zu bytes)", n);
 }
 
+/* The framebuffer's caching inferred from a measured full screen: `plain`'s
+ * least frame less its bytes at `bytes`' rate is the drawing of every cell
+ * once (8x16 pixels of 4 bytes, doubled each way when the framebuffer is
+ * wider than 2560). The CPU's share of a cell is well under a microsecond
+ * (px129: 0.11-0.5 us under KVM); a write-combined mapping adds little to
+ * it, while an uncached one makes every 8-byte store a bus round trip, a
+ * cell several microseconds: about 10 ms a full screen means
+ * write-combined, 100 ms or more uncached. */
+static int verdict_line(char *o, size_t cap, struct test *bytes, struct test *plain, double per_ms, long fb_w) {
+    if (!bytes || !plain || !bytes->reps || !plain->reps || !bytes->bytes || !plain->cells) return 0;
+    double byte_ms = (double)bytes->least / per_ms / (double)bytes->bytes;
+    double draw_ms = (double)plain->least / per_ms - byte_ms * (double)plain->bytes;
+    double cell_us = draw_ms * 1e3 / (double)plain->cells;
+    int scale = fb_w > 2560 ? 2 : 1;
+    double px = 8.0 * 16 * 4 * scale * scale;
+    const char *v = cell_us < 1.4 ? "write-combined (the stores are cheap; the CPU's drawing sets the pace)"
+                  : cell_us > 2.8 ? "UNCACHED (every pixel store pays a bus round trip)"
+                  : "unclear (between write-combined and uncached)";
+    return snprintf(o, cap, "framebuffer caching inferred: a full screen of %zu cells drawn in %.1f ms (%.2f us a cell, %.0f MB/s of "
+                    "pixels): %s; about 10 ms means write-combined, 100 ms or more uncached\n",
+                    plain->cells, draw_ms, cell_us, cell_us > 0 ? px / cell_us : 0, v);
+}
+
 static void usage(void) {
     fprintf(stderr, "usage: conspeed [-q] [-n REPS] [-t SECONDS] [-T SECONDS] [-g MS] [-r FILE] [-o TTY] [DIR...]\n");
     exit(2);
@@ -622,11 +645,18 @@ int main(int argc, char **argv) {
     uint64_t run0 = stamp();
     g_entered = 1;
     write_all("\033[?1049h\033[?25l\033[0m", 18);
+    struct test *t_bytes = NULL, *t_plain = NULL;
+    char verdict[512] = "";
     for (int i = 0; i < g_ntests; i++) {
         double left = total - since(run0), share = left / (double)(g_ntests - i);
         run_test(&g_tests[i], reps, share < secs ? share : secs, gap_ms, samples);
         char l[256];
         res_put(l, test_line(l, sizeof l, &g_tests[i], before));
+        if (strcmp(g_tests[i].name, "bytes") == 0) t_bytes = &g_tests[i];
+        if (strcmp(g_tests[i].name, "plain") == 0) {
+            t_plain = &g_tests[i];
+            res_put(verdict, verdict_line(verdict, sizeof verdict, t_bytes, t_plain, before, fb_w));
+        }
     }
     write_all(RESTORE, g_restore_n);
     g_entered = 0;
@@ -669,6 +699,7 @@ int main(int argc, char **argv) {
         printf("a cell drawn (plain less its bytes): %.3f us, %.0f MB/s of %d-byte cells\n", cell_us,
                cell_us > 0 ? px / cell_us : 0, (int)px);
     }
+    if (verdict[0]) fputs(verdict, stdout);
     {
         char e[256];
         double tests_s = g_tsc ? (double)(c1 - c0) / per_ms / 1e3 : (double)(m1 - m0) / 1e9;
