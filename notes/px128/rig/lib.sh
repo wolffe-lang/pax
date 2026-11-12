@@ -15,6 +15,7 @@
 # shellcheck disable=SC1090
 . "$PX128_HOST"
 : "${L:?}" "${CPUS:?}" "${P:?}" "${IMAGES:?}" "${PAX_BUILD:?the build directory of the take}"
+R=$(realpath "$L")
 export TMPDIR=$L/tmp PAX_CACHE=$L/cache
 mkdir -p "$TMPDIR" "$PAX_CACHE" "$L/home" "$PAX_BUILD"
 CO=$(realpath "$(git rev-parse --show-toplevel)")
@@ -22,10 +23,11 @@ CO=$(realpath "$(git rev-parse --show-toplevel)")
 # devices; 1: KVM.
 ctr() {
     local kind=$1 img=$2; shift 2
-    local dev=()
+    local dev=() mnt=(-v "$L:$L")
     [ "$kind" = 1 ] && dev=(--device /dev/kvm)
+    [ "$R" = "$L" ] || mnt+=(-v "$R:$R")  # a lane directory behind a symbolic link: both spellings
     "$P" run --rm --memory "${MEM:-12g}" --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 "${dev[@]}" \
-        -v "$L:$L" -v "$IMAGES:$IMAGES:ro" --security-opt label=disable -w "$CO" \
+        "${mnt[@]}" -v "$IMAGES:$IMAGES:ro" --security-opt label=disable -w "$CO" \
         -e TMPDIR="$TMPDIR" -e PAX_CACHE="$PAX_CACHE" -e PAX_BUILD="$PAX_BUILD" -e HOME="$L/home" -e PYTHONUNBUFFERED=1 \
         -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' -e GIT_CONFIG_KEY_1=commit.gpgsign -e GIT_CONFIG_VALUE_1=false \
         "$img" "${TASKSET:-taskset}" -c "$CPUS" "$@" < /dev/null
