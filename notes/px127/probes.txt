@@ -1,0 +1,138 @@
+# px127 probes: a program built on PAX cannot dial a host name
+
+Both probes ran before notes/px127-names.md's prediction was written; they found the cause.
+
+## Probe 1: the image's compiler on Linux, the program under strace (black box)
+
+The dev image 65d972ac's own /usr/bin/wolf (0.2.39), ld.lld and /usr/lib/wolf-musl, run in the image's
+root on Linux (an overlay), built the contract's probe and an argv dialer (the probe's try() over
+env_args()), with the default ld.lld link and with WOLF_LD=cc: both link the same musl libc.a. Each
+binary is static (no PT_INTERP). In a bare chroot holding only the program and /etc/resolv.conf
+(nameserver 127.0.0.1, tools/dns-fixture there, github.com -> 127.0.0.1, a listener on :443), on Linux:
+
+    github.com:443: connected
+    hosts.test:443: io            (no /etc/hosts; NXDOMAIN)
+    nosuch.test:443: io
+    127.0.0.1:443: connected
+
+The calls the program made after its exec, for github.com (strace -f; the address strings are
+strace's, the answers' bytes elided):
+
+    open("/etc/hosts", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+    open("/etc/resolv.conf", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+    fcntl(3, F_SETFD, FD_CLOEXEC) = 0
+    read(3, "nameserver 127.0.0.1\n", 248) = 21
+    read(3, "", 248)  = 0
+    close(3)          = 0
+    socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 3
+    bind(3, {sa_family=AF_INET, sin_port=htons(0), sin_addr=inet_addr("0.0.0.0")}, 16) = 0
+    sendto(3, "\265c\1\0\0\1\0\0\0\0\0\0\6github\3com\0\0\1\0\1", 28, MSG_NOSIGNAL, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.1")}, 16) = 28
+    sendto(3, "\266\1\1\0\0\1\0\0\0\0\0\0\6github\3com\0\0\34\0\1", 28, MSG_NOSIGNAL, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.1")}, 16) = 28
+    poll([{fd=-1}, {fd=-1}, {fd=3, events=POLLIN}], 3, 2500) = 1 ([{fd=3, revents=POLLIN}])
+    recvmsg(3, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.1")}, msg_namelen=16, msg_iov=[{iov_base=..., iov_len=4800}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 44
+    recvmsg(3, {msg_name={sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.1")}, msg_namelen=16, msg_iov=[{iov_base=..., iov_len=4800}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 28
+    close(3)          = 0
+    socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_IP) = 3
+    connect(3, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("127.0.0.1")}, 16) = 0
+    ioctl(3, FIONBIO, [1]) = 0
+
+den, the image's own (static glibc), for the same name in the same chroot asks what px104 served:
+
+    socket(AF_INET, SOCK_DGRAM|SOCK_CLOEXEC|SOCK_NONBLOCK, IPPROTO_IP) = 5
+    setsockopt(5, SOL_IP, IP_RECVERR, [1], 4) = 0
+    connect(5, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.1")}, 16) = 0
+    sendmmsg(5, [{msg_hdr={msg_name=NULL, msg_namelen=0, msg_iov=[{iov_base="\206\311\1\0\0\1\0\0\0\0\0\0\6github\3com\0\0\1\0\1", iov_len=28}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, msg_len=28}, 
+    ioctl(5, FIONREAD, [44])          = 0
+    recvfrom(5, "\206\311\205\200\0\1\0\1\0\0\0\0\6github\3com\0\0\1\0\1\300\f\0\1"..., 2048, 0, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.1")}, [28 => 16]) = 44
+    ioctl(5, FIONREAD, [28])          = 0
+    recvfrom(5, "\363\313\205\200\0\1\0\0\0\0\0\0\6github\3com\0\0\34\0\1", 65536, 0, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.1")}, [28 => 16]) = 28
+
+With /etc/hosts naming hosts.test, the dialer read the file and connected with no socket of DNS's:
+
+    open("/etc/hosts", O_RDONLY|O_LARGEFILE|O_CLOEXEC) = 3
+    read(3, "127.0.0.1 localhost\n127.0.0.1 ho"..., 1024) = 41
+    read(3, "", 1024) = 0
+    socket(AF_INET, SOCK_STREAM|SOCK_CLOEXEC, IPPROTO_IP) = 3
+    connect(3, {sa_family=AF_INET, sin_port=htons(443), sin_addr=inet_addr("127.0.0.1")}, 16) = 0
+    write(1, "hosts.test:443: connected\n", 26) = 26
+
+## Probe 2: the image itself under QEMU (KVM, native BIOS, igb, QEMU's user network)
+
+The image's kernel (kmain_console.elf dce9a270...) and root archive (dev.cpio 5a8cc4d4...), each digest read
+twice; tools/mkimage with boot/limine-initramfs-quiet.conf gives the image's own ISO (ac0dfe60..., the
+digest its build recorded). For the calls, the same two files with boot/limine-initramfs.conf (no
+`quiet`, so kernel/user prints a call PAX lacks). DHCP as the image ships it, then at the console
+/etc/resolv.conf names the router, 10.0.2.2, as the real machine's names its router: QEMU hands the
+guest's 10.0.2.2:53 to tools/dns-fixture (github.com -> 10.0.2.2) and 10.0.2.2:443 to a listener
+that records each connection's first bytes. The probe and the dialer are typed in and built by
+`wolf build --no-cache` on the box. The transcript (exec lines and the base's 273/334 lines left out):
+
+    $ wolf build --no-cache probe.lu -o probe; echo PX127-BUILD=$?; sha256sum probe
+    PX127-BUILD=0
+    $ echo PX127-T0=$(date +%s); ./probe; echo PX127-PROBE=$?; echo PX127-T1=$(date 
+    PX127-T0=1794449741
+    user: probe pid 23 syscall 47: -ENOSYS
+    github.com:443: io
+    140.82.112.6:443: io
+    user: probe pid 23 exit_group 0 after 209 runs
+    PX127-PROBE=0
+    PX127-T1=1794449746
+    $ wolf build --no-cache dial.lu -o dial; echo PX127-BUILD-DIAL=$?; sha256sum dia
+    PX127-BUILD-DIAL=0
+    $ ./dial github.com:443 10.0.2.2:443 nosuch.test:443 hosts.test:443; echo PX127-
+    user: dial pid 35 syscall 47: -ENOSYS
+    github.com:443: io
+    10.0.2.2:443: connected
+    nosuch.test:443: io
+    hosts.test:443: io
+    user: dial pid 35 exit_group 0 after 710 runs
+    PX127-DIAL=0
+    $ echo PX127-DEN=begin; git ls-remote https://github.com/octocat/Hello-World; ec
+    ho PX127-DEN=$?
+    PX127-DEN=begin
+    den: wire: Unsupported(TLS closed)
+    user: git pid 36 exit_group 2 after 5 runs
+    PX127-DEN=2
+    $ printf '10.0.2.2 hosts.test\n10.0.2.2 github.com\n' > /etc/hosts; ./dial githu
+    b.com:443 hosts.test:443 nosuch.test:443; echo PX127-DIAL-HOSTS=$?
+    github.com:443: connected
+    hosts.test:443: connected
+    user: dial pid 38 syscall 47: -ENOSYS
+    nosuch.test:443: io
+    user: dial pid 38 exit_group 0 after 256 runs
+    PX127-DIAL-HOSTS=0
+    $ echo PX127=end
+    PX127=end
+
+The DNS fixture's log for that boot (seconds since the epoch, source as QEMU forwards it):
+
+    QUERY 1794449745.061 127.0.0.1:45042 A github.com -> 10.0.2.2
+    QUERY 1794449745.061 127.0.0.1:45042 AAAA github.com -> NODATA
+    QUERY 1794449747.557 127.0.0.1:45042 A github.com -> 10.0.2.2
+    QUERY 1794449747.557 127.0.0.1:45042 AAAA github.com -> NODATA
+    QUERY 1794449763.881 127.0.0.1:60881 A github.com -> 10.0.2.2
+    QUERY 1794449763.881 127.0.0.1:60881 AAAA github.com -> NODATA
+    QUERY 1794449766.375 127.0.0.1:60881 A github.com -> 10.0.2.2
+    QUERY 1794449766.375 127.0.0.1:60881 AAAA github.com -> NODATA
+    QUERY 1794449768.893 127.0.0.1:38282 A nosuch.test -> NXDOMAIN
+    QUERY 1794449768.893 127.0.0.1:38282 AAAA nosuch.test -> NXDOMAIN
+    QUERY 1794449771.385 127.0.0.1:38282 A nosuch.test -> NXDOMAIN
+    QUERY 1794449771.385 127.0.0.1:38282 AAAA nosuch.test -> NXDOMAIN
+    QUERY 1794449773.886 127.0.0.1:37976 A hosts.test -> NXDOMAIN
+    QUERY 1794449773.886 127.0.0.1:37976 AAAA hosts.test -> NXDOMAIN
+    QUERY 1794449776.385 127.0.0.1:37976 A hosts.test -> NXDOMAIN
+    QUERY 1794449776.385 127.0.0.1:37976 AAAA hosts.test -> NXDOMAIN
+    QUERY 1794449781.155 127.0.0.1:52308 A github.com -> 10.0.2.2
+    QUERY 1794449781.155 127.0.0.1:52308 AAAA github.com -> NODATA
+    QUERY 1794449785.377 127.0.0.1:43267 A nosuch.test -> NXDOMAIN
+    QUERY 1794449785.377 127.0.0.1:43267 AAAA nosuch.test -> NXDOMAIN
+    QUERY 1794449787.869 127.0.0.1:43267 A nosuch.test -> NXDOMAIN
+    QUERY 1794449787.869 127.0.0.1:43267 AAAA nosuch.test -> NXDOMAIN
+
+The listener: four connections. The dialer's 10.0.2.2:443 at 1794449768.893; den's at 1794449782.067,
+146 bytes, a TLS ClientHello naming github.com (SNI); then the /etc/hosts pass's github.com and hosts.test.
+
+Reading: the musl resolver sends its A and AAAA questions with sendto and reads the answers with
+recvmsg (47). PAX answers recvmsg -ENOSYS, so no answer is ever read: the resolver asks again after
+2.5 s, gives up after 5 s, and net.connect answers io. den (glibc) reads with recvfrom and resolves.
+A name /etc/hosts holds is answered before any socket is made.
