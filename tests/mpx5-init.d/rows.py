@@ -155,15 +155,17 @@ class Console:
         self.raw(line.encode() + b'\r')
 
     def command(self, line, n, timeout=120):
-        """`line; echo MARK$((n+0))`: the output between the line's echo and the
-        mark (MARK<n>, never its echo), or None."""
-        start = len(self.seen)
-        self.type('%s; echo %s$((%d+0))' % (line, MARK, n))
-        m = self.wait(r'^%s%d$' % (MARK, n), timeout)
-        if not m:
+        """`echo MARKB$((n+0)); line; echo MARKE$((n+0))`: what `line` wrote, the
+        lines between the two marks as printed (never their echo, which the
+        console may wrap anywhere), or None."""
+        self.type('echo %sB$((%d+0)); %s; echo %sE$((%d+0))' % (MARK, n, line, MARK, n))
+        b = self.wait(r'^%sB%d\n' % (MARK, n), timeout)
+        if not b:
             return None
-        body = self.seen[start:m.start()].decode(errors='replace')
-        return body.split('\n', 1)[1] if '\n' in body else ''
+        e = self.wait(r'^%sE%d$' % (MARK, n), timeout)
+        if not e:
+            return None
+        return self.seen[b.end():e.start()].decode(errors='replace')
 
     def running(self):
         return self.q.poll() is None
@@ -276,17 +278,19 @@ def login(con, who, row):
 
 
 def asked_sudo(con, n, who):
-    """`sudo id -u` typed, `who`'s password at its prompt: (asked, output)."""
-    start = len(con.seen)
-    con.type('sudo id -u; echo %s$((%d+0))' % (MARK, n))
-    m = con.wait(r'\[sudo\] password for %s: $|^%s%d$' % (who, MARK, n), 60)
+    """`sudo id -u` typed, `who`'s password at its prompt: (asked, the lines
+    after the prompt, or all it wrote when it asked nothing)."""
+    con.type('echo %sB$((%d+0)); sudo id -u; echo %sE$((%d+0))' % (MARK, n, MARK, n))
+    b = con.wait(r'^%sB%d\n' % (MARK, n), 60)
+    if not b:
+        return False, ''
+    m = con.wait(r'\[sudo\] password for %s: $|^%sE%d$' % (who, MARK, n), 60)
     if m and m.group(0).startswith(b'[sudo]'):
+        at = m.end()
         con.type(PASSWORDS[who])
-        m2 = con.wait(r'^%s%d$' % (MARK, n), 60)
-        body = con.seen[start:m2.start()].decode(errors='replace') if m2 else ''
-        return True, body
-    body = con.seen[start:m.start()].decode(errors='replace') if m else ''
-    return False, body
+        m2 = con.wait(r'^%sE%d$' % (MARK, n), 60)
+        return True, con.seen[at:m2.start()].decode(errors='replace') if m2 else ''
+    return False, con.seen[b.end():m.start()].decode(errors='replace') if m else ''
 
 
 def stat_of(con, pid, n):
@@ -320,7 +324,7 @@ def boot1(con):
     out = con.command("tr '\\0' ' ' < /proc/1/cmdline; echo; cut -d' ' -f4,6,7 /proc/$$/stat; echo $$; cut -d' ' -f7 /proc/1/stat", 1) or ''
     lines = [l.strip() for l in out.strip().splitlines()]
     shell = None
-    if len(lines) >= 4:
+    if len(lines) >= 4 and len(lines[1].split()) == 3:
         init_cmd, (ppid, sid, tty), me, init_tty = lines[0], lines[1].split(), lines[2], lines[3]
         shell = int(me) if me.isdigit() else None
         if init_cmd == '/bin/init' and ppid == '1' and sid == me and tty == '1088' and init_tty == '0':
@@ -344,7 +348,7 @@ def boot1(con):
     # I3
     a1, b1 = asked_sudo(con, 3, 'pax')
     out = con.command('sudo -n id -u 2>&1', 4) or ''
-    if a1 and b1.splitlines()[-1:] == ['0'] and out.strip() == '0':
+    if a1 and b1.split() == ['0'] and out.strip() == '0':
         ok('I3', 'sudo asked pax once; sudo -n inside the session ran as uid 0 (the terminal\'s record)')
     else:
         bad('I3', 'first sudo asked=%s %r; sudo -n %r' % (a1, b1[-200:], out))
@@ -534,6 +538,8 @@ def main():
     con = Console(ARGS.out / 'boot1', the_iso)
     try:
         boot1(con)
+    except Exception as e:  # a row's reading that broke is that run's red, never a silent pass
+        bad('I0', 'boot 1 stopped at %s: %s; the console: %r' % (type(e).__name__, e, con.text(300)))
     finally:
         con.quit()
     if shutil.which('mke2fs') and shutil.which('debugfs') and shutil.which('e2fsck'):
@@ -542,7 +548,10 @@ def main():
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
             bad('I13', 'the disk could not be made: %s' % e)
         else:
-            boot_disk(work, img)
+            try:
+                boot_disk(work, img)
+            except Exception as e:
+                bad('I13', 'the disk\'s boots stopped at %s: %s' % (type(e).__name__, e))
     else:
         say('SKIPPED LOUDLY I13: no mke2fs, debugfs or e2fsck on this host')
     for p in sorted(ARGS.out.rglob('*')):
