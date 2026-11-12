@@ -263,10 +263,11 @@ def disk(work):
     return img
 
 
-def login(con, who, row):
-    """`who` logs in at `pax login:`; the shell's prompt. False (and the row
-    red) when a prompt does not come."""
-    if not con.wait(r'login: $', 60):
+def login(con, who, row, prompted=False):
+    """`who` logs in at `pax login:` (already read when `prompted`: a logout's
+    row waited for it); the shell's prompt. False (and the row red) when a
+    prompt does not come."""
+    if not prompted and not con.wait(r'login: $', 60):
         bad(row, 'no `login:` prompt for %s: %r' % (who, con.text(400)))
         return False
     con.type(who)
@@ -461,8 +462,8 @@ def boot1(con):
     else:
         bad('I12', 'not reached: Ctrl-D gave no login prompt')
         return
-    # I12: root's reboot -h, the kernel's end.
-    if not login(con, 'root', 'I12'):
+    # I12: root's reboot -h, the kernel's end (the prompt Ctrl-D gave, read above).
+    if not login(con, 'root', 'I12', prompted=True):
         return
     con.type('reboot -h')
     end = con.wait(r'^PAX: the end: [^\n]*\n', 60)
