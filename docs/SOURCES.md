@@ -2321,3 +2321,22 @@ description, which `tools/hotplug-session` speaks to QEMU's `usb-redir` device t
 | xHCI 1.2 (§4.6.3 Enable Slot, §4.6.4 Disable Slot, §5.4.7 CONFIG's MaxSlotsEn, §5.4.8 PORTSC's CCS and CSC), as px74's entries | as px74 | kernel/xhci: a refused port waits for a change; a slot past MaxSlotsEn given back |
 | QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `nec-usb-xhci`, `usb-mouse`, `usb-kbd`, `usb-hub`, `usb-ccid` and `usb-redir`, q35's `max-ram-below-4g` | binary | black box: pax#348 reproduced (`notes/px120-hotplug.md` §2); Enable Slot answers success with slots past CONFIG's MaxSlotsEn (33 and 34 with 32 enabled); `nec-usb-xhci`'s `slots` property leaves HCSPARAMS1's MaxSlots at 64 (read through the monitor's `xp`); usb-redir on an xHCI refuses a peer that announces only the device version, disconnect acks and endpoint packet sizes ("lacks capabilities needed for use with XHCI") and takes one that adds 64-bit ids and 32-bit bulk lengths (which of the two it needs was not separated); the composite devices enumerate at full speed |
 | PAX's own `kernel/frames`, `kernel/xhci`, `kernel/mouse`, `kernel/usb_mouse`, `kernel/triage`, `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx2-frames`, `tests/mpx6-usb` | this tree | read and extended |
+
+## px123 — a terminal over ssh, and Ctrl-C reaching what runs on it
+
+- **POSIX.1-2024 XCU 2.11, Signals and Error Handling:** an asynchronous list in a shell without job control
+  starts with SIGINT and SIGQUIT ignored, and a program keeps an ignored signal across exec; **XCU 2.9.3.1** for
+  the asynchronous list itself. That is why the boot hook's loop, and burrowd started from it, had both ignored.
+- **proc_pid_status(5)** and **proc_pid_stat(5)** (man-pages 6.7): `SigIgn`, `SigBlk`, `SigCgt`, and the process
+  group, session, `tty_nr` and `tpgid` fields, read on PAX's own `/proc` to find which layer kept Ctrl-C from the
+  foreground program (the pty's line discipline and its foreground group were right; the program had SIGINT
+  ignored).
+- **env(1)** as boreutils documents its `--default-signal` (GNU coreutils' option), the hook's way to start
+  burrowd with both at their defaults.
+- burrow at `user/burrow.pin`'s commit (the org's own, public): its README and `notes/bw06-the-terminal.md` for
+  what burrowd now does with `pty-req`, `window-change` and a command with no terminal; `src/ssession/ssession.lu`
+  for which signals its session children reset. pelt at `user/pelt.pin`'s commit: `src/sh/exec.lu`'s asynchronous
+  lists and `src/sh/edit_prompt.lu`'s prompt (its host, `?` when none is found).
+- OpenSSH 9.6p1 (Ubuntu's) and 10.2p1 as black boxes: `ssh -tt` on a pseudo-terminal of the rows' own, its window
+  changes by SIGWINCH.
+- No kernel's source of any OS, no shell's, no C library's, no sshd's.
