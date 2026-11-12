@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# mkligature — build ligature, the linker in wolf (wolffe-lang/ligature: static
+# x86-64 ELF for Linux and PAX, refusal-first, a byte-and-patch provenance
+# manifest in every output), as one fully static x86-64 Linux executable,
+# unmodified, from ligature's own tree (px128).
+#
+#   tools/mkligature OUTDIR
+#
+# trash's builder's twin. The tree is user/ligature.pin's commit of
+# wolffe-lang/ligature (public), fetched from PAX_LIGATURE_REPO when it is
+# set (a local clone or cache that holds the commit) and from LIGATURE_REPO
+# otherwise, through tools/fetch-retry; HEAD is refused unless it is
+# LIGATURE_REV. Nothing of ligature's tree is kept: the build directory is
+# removed at the end.
+#
+# The toolchain is the one THAT tree pins in its wolf-toolchain.toml: the
+# whole wolf release archive for x86_64-unknown-linux-gnu, its sha256 read
+# twice and refused unless both reads are the pin's, its `wolf --version`
+# refused unless it names the pin's version, the runtime (`libwolf_rt.a`)
+# beside `wolf`, as the archive lays it out, and the std the archive
+# bundles, refused unless it is the pin's `[std] rev`. The archive is cached
+# in PAX_CACHE by digest, under the name trash's, burrow's and den's
+# builders cache it by. ligature's manifest names no dependency.
+#
+# The build is ligature's own line (its tools/build: `wolf build
+# --deny-warnings src/ligature.lu -o target/ligature`, the native tier)
+# with the user tools' differences, as trash's reproducible static build
+# makes them: `--no-cache`, and a `cc` first on PATH that adds `-static`
+# (wolf has no --static) and `-Wl,--build-id=none`, and ends the line with
+# `-fuse-ld=bfd`, so the link is GNU ld's whether or not an ld.lld is on
+# PATH (wolf asks for lld when it sees one). It is built in two checkouts
+# at paths of different lengths, and the two STRIPPED binaries must be the
+# same bytes (exit 1 otherwise): the native tier's DWARF names the
+# directory it was built in, so the unstripped ones differ, and the
+# stripped one is what PAX carries. It is checked static (readelf: ET_EXEC,
+# no PT_INTERP, no dynamic section) and asked `--version`.
+# `OUTDIR/sums.txt` gets `ligature <sha256> <bytes>`; whether that is the
+# digest user/ligature.pin records is printed (the binary depends on the
+# libc.a it links, so another host's libc.a is a new digest, not a failure
+# here; tests/distribution holds the image to the pin's).
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu 24.04
+# container), never on a newer host glibc (px10). Exit 0, 1 when the two
+# builds differ, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkligature OUTDIR"
+out=$1
+need git curl tar readelf strip cc
+pin=$PAX_ROOT/user/ligature.pin
+. "$pin"
+[ -n "${LIGATURE_REPO:-}" ] && printf '%s' "${LIGATURE_REV:-}" | grep -Eq '^[0-9a-f]{40}$' \
+    || die "$pin must set LIGATURE_REPO and LIGATURE_REV (a full 40-hex sha, never a branch)"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-ligature.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repo rev dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    "$PAX_ROOT/tools/fetch-retry" "$3" "$1" "$2" "$2" || die "cannot fetch $1 at $2"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+
+tree "${PAX_LIGATURE_REPO:-$LIGATURE_REPO}" "$LIGATURE_REV" "$w/a/ligature"
+toml=$w/a/ligature/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+srev=$(key std rev)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srev" ] \
+    || die "cannot read wolf version/digest and std rev from ligature's wolf-toolchain.toml"
+if grep -Eq '^[[:space:]]*deps[[:space:]]*:' "$w/a/ligature/src/wolf.pkg"; then
+    die "ligature's src/wolf.pkg names dependencies; this builder stages none"
+fi
+say "ligature $LIGATURE_REV pins wolf $wv (${wsha:0:8}…), wolf-std $srev"
+
+arc=$PAX_CACHE/wolf-$wv-x86_64-unknown-linux-gnu-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" \
+        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
+        || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+for k in 1 2; do
+    have=$(sha256_of "$arc")
+    [ "$have" = "$wsha" ] || die "wolf $wv archive, read $k: sha256 $have, ligature pins $wsha"
+done
+say "wolf $wv archive: sha256 $wsha, read twice"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+[ -x "$wolf" ] || die "the wolf $wv archive has no wolf"
+[ -f "$w/wolf/libwolf_rt.a" ] || die "the wolf $wv archive has no libwolf_rt.a beside wolf"
+have=$("$wolf" --version | head -n 1)
+case $have in "wolf $wv "*|"wolf $wv") ;; *) die "wolf --version says '$have'; ligature pins $wv" ;; esac
+bundled=$(tr -d '[:space:]' < "$w/wolf/std/STD-REV" 2>/dev/null || true)
+[ "$bundled" = "$srev" ] || die "the wolf $wv archive bundles std '${bundled:-none}'; ligature pins $srev"
+say "$have; libwolf_rt.a beside it; the std it bundles, $srev, the pin's"
+
+# The static cc, trash's: -static, no build-id, GNU ld whatever else is installed.
+real=$(command -v cc)
+mkdir -p "$w/bin"
+printf '#!/bin/sh\nexec %s -static -Wl,--build-id=none "$@" -fuse-ld=bfd\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+# Two checkouts at paths of different lengths; the second is fetched from
+# the first (the pinned commit either way, checked).
+tree "$w/a/ligature" "$LIGATURE_REV" "$w/bb/ligature"
+for k in a bb; do
+    rc=0
+    (cd "$w/$k/ligature" && mkdir -p target && PATH="$w/bin:$PATH" TMPDIR=$w/$k HOME=$w/$k \
+        WOLF_STD="$w/wolf/std" "$wolf" build --no-cache --deny-warnings src/ligature.lu -o target/ligature) \
+        > "$w/$k.log" 2>&1 || rc=$?
+    cat "$w/$k.log" >&2
+    [ "$rc" = 0 ] || die "wolf build of src/ligature.lu (checkout $k) exited $rc"
+    strip -o "$w/$k.stripped" "$w/$k/ligature/target/ligature"
+done
+one=$(sha256_of "$w/a.stripped")
+two=$(sha256_of "$w/bb.stripped")
+if [ "$one" != "$two" ]; then
+    say "REFUSED: the two checkouts' stripped ligature differ: $one, then $two"
+    exit 1
+fi
+bin=$out/ligature
+cp "$w/a.stripped" "$bin"
+chmod 755 "$bin"
+readelf -hW "$bin" | grep -Eq 'Type: +EXEC' || die "ligature is not ET_EXEC"
+! readelf -lW "$bin" | grep -q INTERP || die "ligature has a PT_INTERP (not static)"
+readelf -dW "$bin" | grep -q 'There is no dynamic section' || die "ligature has a dynamic section"
+v=$("$bin" --version 2>&1 | head -n 1) || die "ligature --version"
+case $v in "ligature "*) ;; *) die "ligature --version says '$v'" ;; esac
+row="ligature $one $(wc -c < "$bin" | tr -d ' ')"
+printf '%s\n' "$row" > "$out/sums.txt"
+printf '%s\n' "$row"
+if grep -Eq "^#   ligature +$one " "$pin"; then
+    say "ligature: the digest user/ligature.pin records"
+else
+    say "ligature: not the digest user/ligature.pin records (this host's libc.a): $one"
+fi
+printf 'ligature built twice (two checkouts), the same stripped digest; %s; linked against: %s\n' \
+    "$v" "$("$real" -print-file-name=libc.a)"
