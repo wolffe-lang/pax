@@ -2,7 +2,8 @@
 """tests/mpx3-conspeed.d/rows.py (px129): hold conspeed's table, read off the screen of one boot, to
 its rows.
 
-    rows.py TABLE.txt GRID ACCEL    (GRID: the cells conspeed must report, e.g. 256x90; ACCEL kvm or tcg)
+    rows.py TABLE.txt GRID ACCEL [uart]  (GRID: the cells conspeed must report, e.g. 256x90; ACCEL kvm or tcg;
+                                          `uart`: the slow-UART leg, which holds C1, C8 and C9 alone)
     rows.py --selftest DIR          (each DIR/red-ACCEL[-HOST].txt must fail, each green-… pass)
 
 Every row compares two `ms least` figures of the same boot (the least of a test's frames: a frame
@@ -27,6 +28,12 @@ against 2.8), so a bound on the raw figure held on one host and not the next.
   C7 (e) yew's F mode opening, as a frame:                    fussopen's drawing <= 2.3 units
          cub's step (about 81 KB, 14,000 cells):              cub's drawing      <= 2.3 units
          yew's Down or Up in F mode (about 170 bytes):        fuss's drawing     <= 0.05 units
+  C9 (f) a slow UART (px129, R-px129-15: COM1's far end drained at 115200 baud, tests/mpx3-conspeed.d/uart.py):
+         a write of 28,800 bytes that draw nothing:            bytes             <= 3 units
+     a console write never waits on the UART (with a UART that sends one byte at a time and a kernel that
+     waits for it, a byte costs about 87 us: bytes about 2.5 s, some 1,400 units). Only that leg holds it;
+     there the other rows are SKIPPED by name (a slow UART slows every write, and conspeed skips a test
+     whose write would outrun its budget).
 
 The bounds sit between the trunk the rows were written at and the fix they hold, on both hosts'
 tables (selftest/, notes/px129-console-speed.md): each about 1.3 times or more from both under KVM.
@@ -57,8 +64,10 @@ def parse(text):
     return (head.group(2) if head else None), rows
 
 
-def check(text, grid, accel, out):
+def check(text, grid, accel, out, uart=False):
     got, rows = parse(text)
+    if uart:
+        return check_uart(got, rows, grid, accel, out)
     fail = 0
 
     def row(name, ok, what):
@@ -122,6 +131,34 @@ def check(text, grid, accel, out):
     return fail
 
 
+def check_uart(got, rows, grid, accel, out):
+    fail = 0
+
+    def row(name, ok, what):
+        nonlocal fail
+        out.append(f"{'PASS' if ok else 'FAIL'} {name} {what}")
+        if not ok:
+            fail = 1
+
+    have = [t for t in ("unit", "bytes") if t in rows and rows[t]["frames"] >= 1]
+    row("C1", got is not None and len(have) == 2,
+        f"the table: {'a header' if got else 'no header'}; " + ("unit and bytes, each with frames" if len(have) == 2 else "no unit or no bytes"))
+    row("C8", got == grid, f"the grid: {got or 'none'} cells (want {grid})")
+    for r in ("C2", "C3", "C4", "C5", "C6", "C7"):
+        out.append(f"SKIP {r} reason=uart: the slow-UART leg holds C9 alone")
+    if len(have) < 2 or rows["unit"]["least"] <= 0:
+        return 1
+    if accel != "kvm":
+        out.append("SKIP C9 reason=tcg: (f) a slow UART: its bound is stated under KVM")
+        return fail
+    u = rows["unit"]["least"]
+    b = rows["bytes"]["least"]
+    v = b / u
+    row("C9", v <= 3, f"(f) a slow UART: bytes {b:.3f} ms least for {rows['bytes']['bytes']} bytes, {v:.2f} units of {u:.3f} ms "
+        f"(bound 3; {b * 1e3 / max(rows['bytes']['bytes'], 1):.3f} us a byte)")
+    return fail
+
+
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
         d = sys.argv[2]
@@ -145,11 +182,11 @@ def main():
                     said.append(f"no {want}-{accel}.txt")
         print(f"{'PASS' if ok else 'FAIL'} selftest: " + "; ".join(said))
         sys.exit(0 if ok else 1)
-    if len(sys.argv) != 4 or sys.argv[3] not in ("kvm", "tcg"):
+    if len(sys.argv) not in (4, 5) or sys.argv[3] not in ("kvm", "tcg") or (len(sys.argv) == 5 and sys.argv[4] != "uart"):
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         sys.exit(2)
     out = []
-    rc = check(open(sys.argv[1]).read(), sys.argv[2], sys.argv[3], out)
+    rc = check(open(sys.argv[1]).read(), sys.argv[2], sys.argv[3], out, uart=len(sys.argv) == 5)
     print("\n".join(out))
     sys.exit(rc)
 

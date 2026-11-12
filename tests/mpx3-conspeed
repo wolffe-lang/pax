@@ -3,7 +3,7 @@
 # (2560 x 1440, a 320 x 90 grid), held as ratios on one boot.
 #
 #   tests/mpx3-conspeed [--images DIR | --no-boot] [--accel auto|kvm|tcg]
-#                       [--firmware bios|uefi|both] [--tier native|release|both]
+#                       [--firmware bios|uefi|both] [--tier native|release|both] [--uart none|slow|both]
 #
 # The build (C0, each tier): kmain_console (px13's console kernel); conspeed, keylat and cpugaps
 # (tools/mkconspeed: user/elf/conspeed.c is the console's timing program, the same binary a person
@@ -14,9 +14,13 @@
 # real GPU's framebuffer is scrolled; QEMU's would choose the copy). rows.py's selftest first (the
 # trunk's table fails, the fixed one passes: tests/mpx3-conspeed.d/selftest).
 #
-# The boot, each tier and firmware: QEMU's VGA device with 2560 x 1440 as its mode, and no COM1, the installed
-# machine's shape (with a UART every byte the console writes is also two port accesses, which
-# under KVM costs more than drawing it); KVM when /dev/kvm is usable (--accel auto). With no COM1
+# The boot, each tier and firmware: QEMU's VGA device with 2560 x 1440 as its mode, and no COM1
+# (with a UART every byte the console writes is also two port accesses, which under KVM costs
+# more than drawing it); KVM when /dev/kvm is usable (--accel auto). px129 (R-px129-15): and a
+# second boot with COM1 a slow UART (`--uart slow`; both by default), its far end
+# tests/mpx3-conspeed.d/uart.py draining QEMU's pipe character device at 115200 baud, as the
+# installed machine's COM1 sends (its console waited about 87 us a byte for it): that leg holds
+# C9, a console write that never waits on the UART. With no COM1
 # the kernel keeps only its first 64 KiB of console in memory, so conspeed's table is read off the
 # screen (tests/mpx3-conspeed.d/screen-run.py: the monitor's screendump every 3 s, each cell
 # matched against the BDF font's glyphs) once it says `nothing left to run`.
@@ -40,8 +44,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 D=$here/mpx3-conspeed.d
 
-images= noboot=0 accel=auto legs=both tiers=both
-usage="usage: tests/mpx3-conspeed [--images DIR | --no-boot] [--accel auto|kvm|tcg] [--firmware bios|uefi|both] [--tier native|release|both]"
+images= noboot=0 accel=auto legs=both tiers=both uarts=both
+usage="usage: tests/mpx3-conspeed [--images DIR | --no-boot] [--accel auto|kvm|tcg] [--firmware bios|uefi|both] [--tier native|release|both] [--uart none|slow|both]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -49,12 +53,14 @@ while [ $# -gt 0 ]; do
         --accel)    accel=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
+        --uart)     uarts=$2; shift 2 ;;
         *)          die "$usage" ;;
     esac
 done
 case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $uarts in both) uarts="none slow" ;; none|slow) ;; *) die "--uart takes none, slow or both" ;; esac
 need python3 readelf
 MODE=2560x1440
 GRID=320x90 # px129: the grid's 320 columns at 2560 pixels (pax#357)
@@ -110,19 +116,32 @@ if [ "$accel" = auto ]; then
 fi
 for tier in $tiers; do
     for leg in $legs; do
+      for uart in $uarts; do
         id="$tier $leg $accel"
         iso=$images/$tier/conspeed.iso
         [ -f "$iso" ] || { bad "C1 $id: no image $iso"; continue; }
         out=$PAX_BUILD/mpx3-conspeed-$tier-$leg-$accel
+        ser=() upid=
+        if [ "$uart" = slow ]; then
+            # px129 (R-px129-15): COM1 drained at 115200 baud by uart.py; the leg holds C9.
+            id="$id slow-uart"
+            out=$out-uart
+            rm -f "$out.uart.in" "$out.uart.out"
+            python3 -I "$D/uart.py" "$out.uart" 115200 > "$out.uart.txt" 2>&1 &
+            upid=$!
+            for _ in $(seq 1 50); do [ -p "$out.uart.out" ] && break; sleep 0.1; done
+            ser=(--serial-chardev "pipe,path=$out.uart")
+        fi
         t0=$SECONDS
         python3 -I "$D/screen-run.py" --qemu-run "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --iso "$iso" --mode "$MODE" \
-            --accel "$accel" --font "$PAX_ROOT/font/spleen-8x16.bdf" --out "$out" --timeout 1500 > "$out.run.txt" 2>&1
+            --accel "$accel" --font "$PAX_ROOT/font/spleen-8x16.bdf" --out "$out" --timeout 1500 ${ser[@]+"${ser[@]}"} > "$out.run.txt" 2>&1
         rrc=$?
+        if [ -n "$upid" ]; then kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null; cat "$out.uart.txt" >&2; fi
         cat "$out.run.txt" >&2
         say "booted $id: screen-run exit $rrc in $((SECONDS - t0)) s; the screen's text $(sha256_of "$out.txt" 2>/dev/null | cut -c1-16)…"
-        grep -A 20 '^conspeed ' "$out.txt" 2>/dev/null | sed 's/^/  /' >&2
+        grep -A 24 '^conspeed ' "$out.txt" 2>/dev/null | sed 's/^/  /' >&2
         [ "$rrc" = 0 ] || bad "C1 $id: init's end never on the screen (screen-run exit $rrc; $out.txt)"
-        python3 -I "$D/rows.py" "$out.txt" "$GRID" "$accel" > "$out.rows.txt" 2>&1
+        python3 -I "$D/rows.py" "$out.txt" "$GRID" "$accel" $([ "$uart" = slow ] && echo uart) > "$out.rows.txt" 2>&1
         while IFS= read -r ln; do
             case $ln in
                 PASS*) say "PASS ${ln#PASS } ($id)" ;;
@@ -131,6 +150,7 @@ for tier in $tiers; do
                 *) say "$ln" ;;
             esac
         done < "$out.rows.txt"
+      done
     done
 done
 [ "$fail" = 0 ] && say "mpx3-conspeed: PASS" || say "mpx3-conspeed: FAIL"
