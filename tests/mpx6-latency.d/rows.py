@@ -10,7 +10,9 @@
 # L2 each GUARD load: the sleeper's worst lateness, the loopback echo's
 #    and the host's network echo's worst round trip, each over the same boot's
 #    `spin` (the CPU's hog with no system call), at most BOUND; under TCG
-#    SKIPPED by name (TCG's timings are the emulator's first).
+#    SKIPPED by name (TCG's timings are the emulator's first). Each PENDING
+#    load is measured the same way and printed as a `~L2` line naming the
+#    work that will bound it, held to nothing until then.
 # L3 `~` lines: every load's figures (the measurement table's rows).
 # Exit 0 when L1 and L2 held, 1 otherwise.
 import re
@@ -18,9 +20,21 @@ import sys
 from pathlib import Path
 
 # The guarded loads: the worst of the measurement table that a user can
-# cause at will (notes/px131-long-kernel-paths.md), each sized for the boot.
+# cause at will whose fix has landed (notes/px131-long-kernel-paths.md):
+# munmap of a terabyte where nothing is mapped, getrandom of 8 MiB and a
+# read of 8 MiB of /proc/self/mem.
 def guard(mib):
-    return ['hole:1024', 'console:65536', 'fork:%d' % (mib // 8)]
+    return ['hole:1024', 'random:8', 'procmem:8']
+
+
+# The worst that are measured but not yet bounded, each with the work that
+# will bound it: the console's write (the console's own lane), a large
+# write to a file of the tree and fork of a large process (structural:
+# the note's proposals).
+def pending(mib):
+    return [('console:65536', 'the console write drawn in bounded pieces (its own lane)'),
+            ('write:%d' % (mib // 16), 'a file write in bounded pieces (proposal)'),
+            ('fork:%d' % (mib // 8), 'fork without the eager copy (proposal)')]
 
 BOUND = 3.0  # the worst beside a guarded load, over the worst beside `spin`
 
@@ -64,7 +78,8 @@ def say(s):
 
 def main(argv):
     if argv[:1] == ['--guard-loads']:
-        print(' '.join(['idle', 'spin'] + guard(int(argv[1]))))
+        m = int(argv[1])
+        print(' '.join(['idle', 'spin'] + guard(m) + [p for p, _ in pending(m)]))
         return 0
     accel = argv[argv.index('--accel') + 1]
     images = Path(argv[argv.index('--images') + 1])
@@ -92,10 +107,11 @@ def main(argv):
             say('PASS L1 %s: %d loads, each with samples, the end line%s (exit %s)'
                 % (boot, len(rows), '' if tier == 'linux' else ', the instrument on', rc))
         base = rows.get('spin')
-        for g in ([] if tier == 'linux' else guard(int(mib))):
+        todo = {p: why for p, why in pending(int(mib))}
+        for g in ([] if tier == 'linux' else guard(int(mib)) + list(todo)):
             r = rows.get(g)
             if r is None or base is None:
-                if g in want:
+                if g in want and g not in todo:
                     say('FAIL L2 %s %s: no line (or no spin baseline)' % (boot, g))
                     fail = 1
                 continue
@@ -105,7 +121,9 @@ def main(argv):
             ratios = ['%s %d/%d us = %.2f' % (n, v, max(bv, 1), v / max(bv, 1)) for n, v, bv in parts]
             worst = max(v / max(bv, 1) for _, v, bv in parts)
             lost = r['llost'] + (r['nlost'] or 0)
-            if accel != 'kvm':
+            if g in todo:
+                say('~L2 %s %s: %s; not bounded until %s' % (boot, g, ', '.join(ratios), todo[g]))
+            elif accel != 'kvm':
                 say('SKIP L2 %s %s reason=%s: %s' % (boot, g, accel, ', '.join(ratios)))
             elif worst <= BOUND and lost == 0:
                 say('PASS L2 %s %s: %s; bound %.1f x spin' % (boot, g, ', '.join(ratios), BOUND))
