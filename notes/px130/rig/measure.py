@@ -81,6 +81,12 @@ def screendump(con, path):
 def image(work, conf, extra):
     files = [l for l in (rows.ARGS.images / 'files.txt').read_text().splitlines() if l]
     files.append('/etc/shadow=%s:600' % (work / 'shadow'))
+    # pax's login shell /bin/pelt, as the guided installer writes an account (user/install/prepare.lu):
+    # invoked by that name pelt starts friendly (its prompt runs `den status --porcelain`); as `sh`
+    # (the suite's /etc/passwd) it does not.
+    pw = work / 'passwd'
+    pw.write_text((rows.ARGS.images / 'root/etc/passwd').read_text().replace(':/home/pax:/bin/sh', ':/home/pax:/bin/pelt'))
+    files = [l for l in files if not l.startswith('/etc/passwd=')] + ['/etc/passwd=%s:644' % pw]
     ssh = work / 'pax-ssh'
     ssh.mkdir()
     (ssh / 'authorized_keys').write_text(CLIENT.pub('pax'))
@@ -116,13 +122,16 @@ class NoLinux:
 
 
 STEPS = []  # (session, name, typed, t0, t1, shown)
+# A prompt: a line that ends in `> ` (pelt's friendly `user@host dir> `, its den segment before it) or in `$ `
+# or `# ` (plain), at the end of what the terminal shows.
+PROMPT = rb'[^\n]*(> |[$#] )$'
 
 
 def session(con, name, work, out, tail=None):
     """One `ssh host` at a terminal (33 x 97): `work` is [(name, bytes typed, wait)], wait 'prompt' (the prompt
     back), a float (seconds, then the key in the next item), or 'none'. `tail` is how the session ends: 'exit'
     typed, or 'drop' (the client killed with SIGKILL, so the connection drops)."""
-    t = CLIENT.terminal(rows.GUEST_AT, 33, 97)
+    t = CLIENT.terminal(rows.GUEST_AT, 33, 120) # wide enough for the friendly prompt's segments
 
     answered = [0]
 
@@ -151,13 +160,13 @@ def session(con, name, work, out, tail=None):
 
     try:
         t0 = time.monotonic()
-        m = wait_both(rows.PROMPT, 40, 0)
+        m = wait_both(PROMPT, 40, 0)
         STEPS.append((name, 'login', '', t0, time.monotonic(), (m.group(0) if m else t.shown()[-120:]).decode(errors='replace')))
         for step, typed, wait in work:
             t0 = time.monotonic()
             at = t.type(typed)
             if wait == 'prompt':
-                m = wait_both(rows.PROMPT, 120, at)
+                m = wait_both(PROMPT, 120, at)
             elif isinstance(wait, float):
                 end = time.monotonic() + wait
                 while time.monotonic() < end:
