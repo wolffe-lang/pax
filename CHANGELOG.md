@@ -12,8 +12,8 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   as clef and trash are, and `/etc/pax-release` names it. lld stays the default for `wolf build` on the
   machine. `export WOLF_LD=/usr/bin/ligature` selects ligature, which also silences wolf's note naming lld,
   and `WOLF_LD=cc` brings lld back for one build. On the 2 GiB guest the image is tested with, ligature links
-  hello, a program using `std.net` and `std.process`, and itself (compiled and linked on PAX). A pelt-sized
-  program needs 2560 MiB today (ligature#35); with less, the build fails by name and nothing falls back to
+  hello, a program using `std.net` and `std.process`, and itself (compiled and linked on PAX). pelt needs a
+  2560 MiB guest and den 3072 today (ligature#35); with less, the build fails by name and nothing falls back to
   lld. `tests/distribution-ligature` holds both linkers to the same behaviour on the image and measures each
   link; `tests/distribution` holds the image to the pinned binary: `notes/px128-ligature-on-the-image.md`.
 
