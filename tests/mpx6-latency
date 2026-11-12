@@ -13,7 +13,7 @@
 #   tests/mpx6-latency [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                      [--tier native|release|both] [--accel auto|kvm|tcg]
 #                      [--mem MIB[,MIB…]] [--loads guard|all|'LOAD …']
-#                      [--seconds N] [--screen WxH] [--no-com1] [--linux]
+#                      [--seconds N] [--screen WxH] [--no-com1] [--linux [--no-pax]]
 #
 # --loads guard (the default) runs the rows' loads: idle, spin and the
 # guarded loads (tests/mpx6-latency.d/rows.py's GUARD); all runs every load
@@ -25,7 +25,8 @@
 # the comparison column (black box): the kernel PAX_LINUX_KERNEL (default
 # /run/current-system/kernel) with the modules of PAX_LINUX_MODULES (the
 # kernel's lib/modules/<version>) its virtio network needs, on q35 with one
-# CPU under the same accelerator, user/elf/latinit.c as its init.
+# CPU under the same accelerator, user/elf/latinit.c as its init; with
+# --no-pax, Linux's boots alone.
 #
 # Assertions, per tier, firmware and memory:
 #   L0 build: kmain_console built; latprobe and latbig static; the image.
@@ -45,7 +46,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 D=$here/mpx6-latency.d
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=native noboot=0 accel=auto mems=1024 loads=guard seconds=3 screen= com1=1 linux=0
+images= legs=both tiers=native noboot=0 accel=auto mems=1024 loads=guard seconds=3 screen= com1=1 linux=0 pax=1
 usage="usage: tests/mpx6-latency [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--mem MIB[,MIB...]] [--loads guard|all|'LOAD ...'] [--seconds N] [--screen WxH] [--no-com1]"
 while [ $# -gt 0 ]; do
     case $1 in
@@ -60,6 +61,7 @@ while [ $# -gt 0 ]; do
         --screen)   screen=$2; shift 2 ;;
         --no-com1)  com1=0; shift ;;
         --linux)    linux=1; shift ;;
+        --no-pax)   pax=0; shift ;;
         *)          die "$usage" ;;
     esac
 done
@@ -123,7 +125,8 @@ free_port() {
 
 runs=$images/runs.txt
 : > "$runs"
-for tier in $tiers; do
+[ "$pax" = 1 ] || tiers_boot=
+for tier in ${tiers_boot-$tiers}; do
     for leg in $legs; do
         if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
             if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "L1 $tier uefi: no OVMF"; else say "SKIP L1 $tier uefi reason=no OVMF"; fi
@@ -199,7 +202,7 @@ if [ "$linux" = 1 ]; then
         files=(/init="$images/bin/latinit":755 /bin/latprobe="$images/bin/latprobe":755 /bin/latbig="$images/bin/latbig":755
                /proc/:555 /tmp/:1777 /dev/:755 /lib/modules/order="$b/mods/order":644)
         # virtio's network as modules where the kernel has them so, in modules.dep's order
-        for m in virtio virtio_ring virtio_pci_legacy_dev virtio_pci_modern_dev virtio_pci failover net_failover virtio_net; do
+        for m in virtio_ring virtio virtio_pci_legacy_dev virtio_pci_modern_dev virtio_pci failover net_failover virtio_net; do
             f=$(command grep -oE "^[^:]*/$m\.ko(\.xz|\.zst|\.gz)?:" "$lm/modules.dep" 2>/dev/null | head -n 1 | tr -d :)
             [ -n "$f" ] || continue
             case $f in
@@ -240,7 +243,7 @@ if [ "$linux" = 1 ]; then
     done
 fi
 
-python3 -I "$D/rows.py" --accel "$accel" --images "$images" --com1 "$com1" $(for t in $tiers; do for l in $legs; do for m in $mems; do printf '%s ' "$t-$l-$m"; done; done; done) \
+python3 -I "$D/rows.py" --accel "$accel" --images "$images" --com1 "$com1" $(for t in ${tiers_boot-$tiers}; do for l in $legs; do for m in $mems; do printf '%s ' "$t-$l-$m"; done; done; done) \
     $([ "$linux" = 1 ] && for m in $mems; do printf 'linux-direct-%s ' "$m"; done) || fail=1
 [ "$fail" = 0 ] && say "mpx6-latency: PASS" || say "mpx6-latency: FAIL"
 exit "$fail"
