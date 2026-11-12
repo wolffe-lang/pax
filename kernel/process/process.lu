@@ -334,6 +334,7 @@ const R_HOSTNAME: u64 = 46
 const R_CLOCK: u64 = 47
 const R_MOUNT: u64 = 48
 const R_AREA: u64 = 49 // px126
+const R_NPROC: u64 = 50 // px126
 
 /// A refusal code's name ("" when not this module's).
 pub fn why(r: u64) -> str {
@@ -360,6 +361,9 @@ pub fn why(r: u64) -> str {
     }
     if r == R_AREA {
         return "no frames for a process's area"
+    }
+    if r == R_NPROC {
+        return "a user's threads at RLIMIT_NPROC (512)"
     }
     if r == R_NOT_ELF {
         return "not a static x86-64 ELF executable PAX runs"
@@ -466,6 +470,25 @@ fn refuse_clone(s: u64) -> u64 {
     }
     if sched.first_refusal() {
         return refuse_with(R_SLOTS, NEG_EAGAIN)
+    }
+    NEG_EAGAIN
+}
+
+/// px126: whether the caller, not root by its real or effective user id,
+/// already holds RLIMIT_NPROC threads (getrlimit(2): the limit is not
+/// enforced for a process with real user id 0, or the capabilities PAX's
+/// privilege stands for). Asked before any work of a clone.
+fn at_nproc() -> bool {
+    let a = area()
+    let uid = cred.uid(a, cred.REAL)
+    uid != 0 && !cred.privileged(a) && sched.user_threads(uid) >= sched.NPROC
+}
+
+/// px126: a clone refused at RLIMIT_NPROC: -EAGAIN (fork(2), clone(2)),
+/// by name, said once a run (`sched.nproc_refusal`).
+fn refuse_nproc() -> u64 {
+    if sched.nproc_refusal() {
+        return refuse_with(R_NPROC, NEG_EAGAIN)
     }
     NEG_EAGAIN
 }
@@ -1423,6 +1446,10 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u6
         put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL))
         return f
     }
+    if at_nproc() {
+        put_word(f, W_RAX, refuse_nproc())
+        return f
+    }
     let s = sched.clone_current(f, usp, 0)
     if refused_slot(s) {
         put_word(f, W_RAX, refuse_clone(s))
@@ -1451,6 +1478,10 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
     let pml4 = paging.live()
     if flags & CLONE_PARENT_SETTID != 0 && !uaccess.writable(pml4, ptid, 4) {
         put_word(f, W_RAX, NEG_EFAULT)
+        return f
+    }
+    if at_nproc() {
+        put_word(f, W_RAX, refuse_nproc())
         return f
     }
     let space = paging.copy_user(pml4, sched.pml4())
@@ -1506,6 +1537,10 @@ fn thread(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
     }
     if (flags & CLONE_PARENT_SETTID != 0 && !uaccess.writable(pml4, ptid, 4)) || (flags & CLONE_CHILD_SETTID != 0 && !uaccess.writable(pml4, ctid, 4)) {
         put_word(f, W_RAX, NEG_EFAULT)
+        return f
+    }
+    if at_nproc() {
+        put_word(f, W_RAX, refuse_nproc())
         return f
     }
     let s = sched.clone_thread(f, usp, flags & CLONE_SETTLS != 0, tls, if flags & CLONE_CHILD_CLEARTID != 0 { ctid } else { 0 })
