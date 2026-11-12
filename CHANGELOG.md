@@ -23,7 +23,10 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   The grid is now up to 320 columns, so a 2560-pixel display shows a whole grid
   (pax#357). `user/elf/conspeed.c` measures any terminal in one command, and
   `tests/mpx3-conspeed` holds the figures to rows at 2560×1440, its table read
-  off the screen of a machine with no COM1.
+  off the screen of a machine with no COM1. Under KVM a row holds a test's
+  drawing (its bytes' parse taken off) against a CPU loop of the same boot, so
+  it holds on a desktop and a laptop alike; CI's runners boot under TCG, where
+  those rows are skipped by name, so local records hold them.
 
 - **ligature, the linker in wolf, on the dev image beside lld (px128).** The dev image carries
   `/usr/bin/ligature`, built static from ligature's pinned commit (`user/ligature.pin`, `tools/mkligature`)
