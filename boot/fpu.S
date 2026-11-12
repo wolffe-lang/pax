@@ -156,12 +156,14 @@ pax_rdrand:
    switch reads lives in storage words): 0 the mode (0 off, 1 XSAVE, 2
    FXSAVE), 1 the area's size, 2 XCR0, 3 the template's address, 4
    MXCSR's writable bits (px26: for a state a signal frame hands back),
-   8–71 each thread slot's area (an HHDM address of a frame of its own;
-   sixteen slots at words 4–19 before px24). */
+   8–1031 each thread slot's area (an HHDM address of a frame of its own,
+   0 while the slot has none: px126 takes it with the slot's kernel stack
+   and gives it back with it; 64 slots at words 8–71, every one taken at
+   start, before px126; sixteen slots at words 4–19 before px24). */
         .section .bss
         .p2align 6
         .globl pax_fpu_state
 pax_fpu_state:
-        .zero 72 * 8
+        .zero 1032 * 8
 
         .section .note.GNU-stack, "", @progbits
