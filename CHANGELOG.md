@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A terminal over ssh (px123).** burrow moves to 7aa182f (burrow#24 and
+  burrow#26): `ssh host` from a terminal gives the login shell on a
+  pseudo-terminal of its own,
+  with pelt's prompt and line editing, job control, the window size and its
+  changes, and a bare `sudo` asking on that session; a command with no terminal
+  runs in a session of its own with none. The boot hook now starts burrowd with
+  SIGINT and SIGQUIT at their defaults: started from an asynchronous list in a
+  shell without job control it had both ignored (POSIX XCU 2.11), and every
+  program run over ssh inherited that, so Ctrl-C and Ctrl-\ reached nothing;
+  burrow now starts a session's program with every signal at its default as
+  well. `tests/mpx5-burrowd` B19-B27 hold the terminal and burrowd's own
+  dispositions; B12, B15 and B9 say what sessions without one now do.
+
 - **A program built on PAX finds a host by name (px127).** A wolf program
   `wolf build` makes on the dev image is linked against musl, whose resolver
   reads its DNS answers with `recvmsg`, which PAX answered -ENOSYS: the
