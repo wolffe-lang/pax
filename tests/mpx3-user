@@ -70,8 +70,9 @@
 #   U6 after: `after` (hello's blob under another name) prints its hello
 #      line and exits 0 after every fault above: the kernel survived.
 #      Every batch's `user: frames free <A> before, <B> with <n>
-#      processes, <C> after` has B = A - 16n (twelve frames for the
-#      address space, four for the kernel stack) and C = A; the log
+#      processes, <C> after` has B = A - 28n (twelve frames for the
+#      address space, four for the kernel stack, and px126: twelve for
+#      the process area, static .bss before) and C = A; the log
 #      ends `halt` and qemu-halt holds the machine halted.
 #   U7 smap: kmain_user_smap reads a user byte in ring 0 without STAC:
 #      `smap: ring 0 reads user 0x0000000000400000 without stac` then
@@ -251,13 +252,13 @@ fault_case() {
     echo "$name: $exc error $err rip $rip${cr2:+ cr2 $cr2}"
 }
 
-# U6's frames lines: every one has B = A - 16n and C = A. Prints a
+# U6's frames lines: every one has B = A - 28n and C = A. Prints a
 # summary or the reason.
 frames_check() { # norm
     awk '
         /^user: frames free [0-9]+ before, [0-9]+ with [0-9]+ processes, [0-9]+ after$/ {
             n++; a = $4; b = $6; k = $8; c = $10
-            if (b != a - 16 * k) why = why " batch " n ": " b " with " k " processes, not " a " - " 16 * k ";"
+            if (b != a - 28 * k) why = why " batch " n ": " b " with " k " processes, not " a " - " 28 * k ";"
             if (c != a) why = why " batch " n ": " c " after, not " a ";"
             got = got " " a "/" b "/" c
         }
