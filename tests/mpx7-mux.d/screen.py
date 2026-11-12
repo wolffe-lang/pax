@@ -103,6 +103,23 @@ def read_cells(w, h, px, glyphs):
     return out
 
 
+def cell_bits(w, px, r, c, fgv, bgv):
+    """Cell (r, c)'s 16 rows as bytes, a bit set where the pixel is fgv;
+    None when a pixel is neither fgv nor bgv."""
+    rows = []
+    for y in range(16):
+        o = ((r * 16 + y) * w + c * 8) * 3
+        b = 0
+        for x in range(8):
+            v = (px[o + x * 3] << 16) | (px[o + x * 3 + 1] << 8) | px[o + x * 3 + 2]
+            if v == fgv:
+                b |= 0x80 >> x
+            elif v != bgv:
+                return None
+        rows.append(b)
+    return rows
+
+
 def text(row, n):
     s = ""
     for cp, _, _ in row[:n]:
@@ -164,10 +181,12 @@ def judge_screens(d, glyphs):
                 verdict = "hidden" if cp == 32 else "garbled"
             elif label in SGR_INTENT:
                 verdict = "exact" if (fg, bg) == SGR_INTENT[label] else "not xterm's"
+            elif label in SGR_COLOUR:
+                verdict = "approximated (one of the 16)"
             elif (fg, bg) == plain:
                 verdict = "ignored"
-            elif label in SGR_STYLE or label in SGR_COLOUR:
-                verdict = "approximated"
+            elif label in SGR_STYLE:
+                verdict = "approximated (a colour)"
             else:
                 verdict = "?"
             out.append("B2 %s: %s, %s" % (label, seen, verdict))
@@ -178,9 +197,14 @@ def judge_screens(d, glyphs):
     if ppm.exists():
         w, h, px = ref["read_ppm"](str(ppm))
         cells = read_cells(w, h, px, glyphs)
+        font = ref["font_glyphs"]()
+        fgv, bgv = PALETTE[7], PALETTE[0]
         for r, (label, cps) in enumerate(cases["GLYPH"]):
-            got = [cells[r][11 + i][0] for i in range(len(cps))]
-            miss = [c for c, g in zip(cps, got) if g != c]
+            miss = []
+            for i, c in enumerate(cps):
+                bits = cell_bits(w, px, r, 11 + i, fgv, bgv)
+                if c not in font or bits != list(font[c]):
+                    miss.append(c)
             out.append("B3 %s: %d of %d drawn%s" % (label, len(cps) - len(miss), len(cps),
                                                     "" if not miss else " (not: %s)" % " ".join("U+%04X" % c for c in miss[:12]) + (" …" if len(miss) > 12 else "")))
     else:
@@ -191,8 +215,9 @@ def judge_screens(d, glyphs):
 def judge_log(log):
     out = []
     data = pathlib.Path(log).read_bytes().replace(b"\r", b"").decode("utf-8", "replace")
+    data = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", data)
     answers = {}
-    for m in re.finditer(r"^QUERY (\S+)((?: [0-9a-f]{2})*| none)$", data, re.M):
+    for m in re.finditer(r"QUERY (\S+)((?: [0-9a-f]{2})*| none)$", data, re.M):
         answers[m.group(1)] = m.group(2).strip()
     for name, _ in cases["ANSWER"]:
         a = answers.get(name)
@@ -203,12 +228,14 @@ def judge_log(log):
         else:
             out.append("B4 %s: %s" % (name, "no answer" if a in (None, "none") else "answered %s" % a))
     keys = re.search(r"^keys: ready$(.*?)^keys: done$", data, re.M | re.S)
-    got = re.findall(r"^key((?: [0-9a-f]{2})+)$", keys.group(1), re.M) if keys else []
+    stream = " ".join(g.strip() for g in re.findall(r"^key((?: [0-9a-f]{2})+)$", keys.group(1), re.M)) if keys else ""
+    # each key is typed, then `z` (7a): the bytes between two 7a are one key's
+    got = [g.strip() for g in (" " + stream + " ").split(" 7a ")]
     for i, (name, _) in enumerate(cases["KEYS"]):
-        out.append("B5 %s: %s" % (name, got[i].strip() if i < len(got) else "nothing"))
-    if len(got) > len(cases["KEYS"]):
-        out.append("B5 extra: %s" % " | ".join(g.strip() for g in got[len(cases["KEYS"]):]))
-    m = re.search(r"^paint: (.*)$", data, re.M)
+        out.append("B5 %s: %s" % (name, (got[i] or "nothing") if i < len(got) - 1 else "nothing"))
+    if len(got) - 1 > len(cases["KEYS"]):
+        out.append("B5 extra: %s" % " | ".join(got[len(cases["KEYS"]):]))
+    m = re.search(r"paint: (\d+ x \d+.*)$", data, re.M)
     out.append("~B7 paint: %s" % (m.group(1) if m else "no line"))
     return out
 

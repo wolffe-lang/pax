@@ -33,7 +33,7 @@ def lines(*rows):
 
 SCREEN = [
     # B1: the alternate screen, saving the cursor, regions, insert and delete, erase.
-    ("b1-alt-on", "main" + CSI + "?1049h" + "alt", ["alt"], CSI + "?1049l"),
+    ("b1-alt-on", "main" + CSI + "?1049h" + "alt", ["    alt"], CSI + "?1049l"),
     ("b1-alt-off", "main" + CSI + "?1049h" + "alt" + CSI + "?1049l" + "!", ["main!"]),
     ("b1-alt-47", "main" + CSI + "?47h" + "alt" + CSI + "?47l", ["main"], CSI + "?47l" + CSI + "?1049l"),
     ("b1-decsc", "abc" + E + "7" + CSI + "3;5H" + "X" + E + "8" + "d", ["abcd", "", "    X"]),
@@ -187,7 +187,7 @@ def steps():
         out += ["prompt 1 \\x1b]px59;%s\\x07" % name, "dump %s 0.5" % name, "key ret"]
     out += ["prompt 1 vtcases: done", "prompt 1 keys: ready", "pause 1"]
     for _, key in KEYS:
-        out += ["key %s" % key, "pause 0.4"]
+        out += ["key %s" % key, "pause 0.3", "key z", "pause 0.3"]
     out += ["key shift-q", "prompt 1 keys: done", "prompt 1 paint: "]
     return out
 
