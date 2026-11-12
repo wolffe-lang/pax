@@ -464,6 +464,11 @@ pub fn entry(r: u64) -> u64 {
     r & EMASK
 }
 
+/// px126: a task's slot + 1 in a reference, from bit 40: sixteen bits
+/// (seven, 127, before: the table had 64 slots), below kernel/files'
+/// node type at bit 56.
+const SLOT_MASK: u64 = 0xffff
+
 /// px25: the pid a reference carries (0: none, a fixed entry). px79: 24
 /// bits (a block device's references carry the device from bit 40).
 pub fn pid_of(r: u64) -> u64 {
@@ -846,7 +851,7 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
     if d != ROOT && entry(d) == PTASK {
         var sl: u64 = 0
-        while sl < sched.SLOTS {
+        while sl < sched.top() { // px126: the slots in use, not the table
             if sched.thread_tid(sl, pid_of(d)) != 0 {
                 if seen == k { return (pid_of(d) << 16) | ((sl + 1) << 40) | PTID }
                 seen += 1
@@ -1642,7 +1647,7 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
     if g == G_STATUS {
         n = status(base, sched.SLOTS, 0, area, umask, fds, sched.SLOTS)
     } else if g == G_PSTATUS {
-        n = status(base, slot, pid_of(r), area, umask, fds, if entry(r) == TSTATUS { ((r >> 40) & 127) - 1 } else { sched.SLOTS })
+        n = status(base, slot, pid_of(r), area, umask, fds, if entry(r) == TSTATUS { ((r >> 40) & SLOT_MASK) - 1 } else { sched.SLOTS })
     } else if g == G_STAT {
         n = stat(base, if slot == sched.SLOTS { sched.proc_slot(sched.self_pid()) } else { slot }, slot == sched.SLOTS, area)
     } else if g == G_MEMINFO {
@@ -1699,7 +1704,7 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
 
 pub fn is_mem(r: u64) -> bool { entry(r) == PMEM || entry(r) == TMEM }
 fn task_tid(r: u64) -> u64 {
-    let slot = (r >> 40) & 127
+    let slot = (r >> 40) & SLOT_MASK
     if slot == 0 { return 0 }
     sched.thread_tid(slot - 1, pid_of(r))
 }
@@ -1708,7 +1713,7 @@ pub fn trace_dir(r: u64) -> bool { entry(r) == PTASK || entry(r) == PTID }
 /// A dynamic task-directory child named by the caller's kernel buffer.
 pub fn trace_child(r: u64, a: u64, n: u64) -> u64 {
     var k: u64 = 0
-    while k <= sched.SLOTS {
+    while k <= sched.top() { // px126: a group has no more threads than slots in use
         let c = child_at(r, k)
         if c == NONE { return NONE }
         if name_len(c) == n {
