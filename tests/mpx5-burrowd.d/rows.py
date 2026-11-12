@@ -141,7 +141,18 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       connect (`Connection refused`); at the console burrow reaches
       burrowd on 127.0.0.1, which answers `Permission denied
       (publickey,password).` and logs it
-B1-B10 are the installed shape: /bin/login as pid 1 and the volume's
+  B30 (px124) an ssh session open across the console's logout: a command
+      over ssh that prints, sleeps 12 s and prints again is running when root
+      types `exit` at the console; the console asks `login:` again, the
+      command ends with both lines and status 0, and burrowd's pid is the one
+      it had before the logout (init hangs up the console's session alone)
+  B31 (px124) pax's runtime directory, /run/user/1000, is there over ssh, 0700
+      pax's (init made it at boot); XDG_RUNTIME_DIR over ssh is recorded, not
+      held (burrowd's SetEnv line is one text for every account: unset)
+  B32 (px124) `sudo -k -S -p '' /bin/poweroff` over ssh, pax's password on its
+      standard input, ends boot 2: the console's end line, QEMU's status 0
+B1-B10 are the installed shape: /bin/login as pid 1 (px124: it execs
+/bin/init, which runs the hooks and starts the console's login) and the volume's
 configuration the installer's (the shipped file's ListenAddress line made
 `ListenAddress 0.0.0.0`, as user/install/prepare.lu writes it; the prepare
 unit's I-burrowd-lan holds the installer to that).
@@ -507,6 +518,15 @@ class Client:
         return (r.returncode, r.stdout, r.stderr.replace(host.encode() + b' port ' + port_s, b'HOST port PORT')
                 .replace(b'@' + host.encode(), b'@HOST').replace(b'\r\n', b'\n'))
 
+
+    def ssh_start(self, where, args):
+        """px124: `ssh` with pax's key, started and not waited for: the Popen (its output piped)."""
+        host, port = where
+        argv = ['ssh', '-F', 'none', '-o', 'UserKnownHostsFile=%s' % self.kh, '-o', 'StrictHostKeyChecking=yes',
+                '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=20', '-o', 'BatchMode=yes',
+                '-o', 'PreferredAuthentications=publickey', '-i', self.key, '-p', str(port), '-l', 'pax']
+        return subprocess.Popen([str(x) for x in argv + [host] + list(args)], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env())
 
     def ssh_tty(self, where, args, opts=(), timeout=30, typed=None, after=None):
         """The client as a person runs it at a terminal: ssh's standard input, output and error a
@@ -1250,7 +1270,41 @@ def console_rows(con, client):
         bad('B9', 'the log: %r; missing %s' % (mode.strip(), missing))
     else:
         ok('B9', 'the log at the console, root\'s 0600, every kind of line (%d lines)' % len(log.splitlines()))
+    logout_rows(con, client)
+
+
+def logout_rows(con, client):
+    """B30 and B31 (px124): the console's logout with an ssh command running, and the runtime
+    directory over ssh."""
+    before = client.ssh(GUEST_AT, ['cat /var/run/burrowd.pid'], timeout=30)
+    p = client.ssh_start(GUEST_AT, ['echo begun; sleep 12; echo still'])
+    time.sleep(4)
     con.type('exit')
+    back = con.wait(r'login: $', 20)
+    try:
+        out, err = p.communicate(timeout=90)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = p.communicate()
+        err += b'[row: killed after 90 s]'
+    after = client.ssh(GUEST_AT, ['cat /var/run/burrowd.pid'], timeout=30)
+    (client.dir / 'b30.txt').write_text('ssh across the logout: %s %r %r\nburrowd before %s, after %s\nconsole: %s\n'
+                                        % (p.returncode, out, err, show(before), show(after), 'login: again' if back else 'no login:'))
+    if (back and p.returncode == 0 and out == b'begun\nstill\n' and before[0] == 0 and after[0] == 0
+            and before[1] == after[1]):
+        ok('B30', 'root\'s `exit` at the console gave `login:` again while an ssh command ran on: it ended 0 with both '
+           'lines; burrowd kept pid %s' % before[1].decode().strip())
+    else:
+        bad('B30', 'console %s; the ssh command %s %r %r; burrowd %s then %s'
+            % ('login: again' if back else 'no login: (%r)' % con.text()[-200:], p.returncode, out, err[-200:], show(before), show(after)))
+    r = client.ssh(GUEST_AT, ['ls -ldn /run/user/1000; echo X=$XDG_RUNTIME_DIR'], timeout=60)
+    (client.dir / 'b31.txt').write_text('%s\n' % show(r))
+    f = r[1].decode(errors='replace').split()
+    if r[0] == 0 and len(f) > 4 and f[0].startswith('drwx------') and f[2:4] == ['1000', '1000']:
+        ok('B31', 'pax\'s runtime directory over ssh: %s; XDG_RUNTIME_DIR over ssh %r (measured: burrowd sets no '
+           'per-account variable)' % (' '.join(f[:4]), r[1].decode(errors='replace').split('X=', 1)[-1].strip()))
+    else:
+        bad('B31', 'the runtime directory over ssh: %s' % show(r))
 
 
 def second_boot(con, client, fp):
@@ -1272,6 +1326,25 @@ def second_boot(con, client, fp):
         ok('B10', 'the same key, %s, kept; boot 1\'s known_hosts verifies it' % fp)
     else:
         bad('B10', 'boot 2 says %r (boot 1: %s); ssh %s' % (line, fp, show(r) if r else '-'))
+
+
+def poweroff_row(con, client):
+    """B32 (px124): `sudo -k -S poweroff` over ssh ends the machine."""
+    line = (PASSWORDS['pax'] + '\n').encode()
+    try:
+        r = client.ssh(GUEST_AT, ["sudo -k -S -p '' /bin/poweroff"], data=line, timeout=120)
+    except subprocess.TimeoutExpired:
+        r = (None, b'', b'[row: timed out]')
+    end = con.wait(r'^user: poweroff pid \d+ reboot\(2\): the volumes written and marked clean[^\n]*$', 60)
+    try:
+        rc = con.q.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        rc = None
+    (client.dir / 'b32.txt').write_text('ssh: %s\nend: %r\nQEMU: %s\n' % (show(r), end.group(0) if end else None, rc))
+    if end and rc == 0:
+        ok('B32', 'sudo -k -S poweroff over ssh: %s; QEMU 0' % end.group(0).decode())
+    else:
+        bad('B32', 'poweroff over ssh: %s; the end line %r; QEMU %s' % (show(r), end.group(0) if end else None, rc))
 
 
 def live_image(work):
@@ -1357,20 +1430,16 @@ def main():
                 git_rows(client, work)
                 console_rows(con, client)
         finally:
-            con.quit(120)
+            con.quit(5)  # px124: the console asks `login:` again after its logout; nothing halts
         b2 = out / 'boot2'
         b2.mkdir()
         con2 = Console(b2, iso, vol)
         try:
             if fp:
                 second_boot(con2, client, fp)
-            con2.type('root')
-            if con2.wait(r'Password: $', 30):
-                con2.type(PASSWORDS['root'], secret=True)
-                if con2.wait(r'[$#] $', 60):
-                    con2.type('exit')
+            poweroff_row(con2, client)
         finally:
-            con2.quit(120)
+            con2.quit(5)
         b3 = out / 'boot3-stick'
         b3.mkdir()
         con3 = Console(b3, live_image(work), None)
