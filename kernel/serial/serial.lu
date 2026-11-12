@@ -33,6 +33,10 @@
 //! as it is written unless the far end pushes back, so the ring stays
 //! empty and COM1's bytes are what they were, in order, none dropped.
 //!
+//! px130: `put_wire` is `put` without the screen: kernel/log's lines
+//! below the console level (kernel/kmsg) reach the wire and the boot's
+//! record, never the screen.
+//!
 //! Written from the PC16550D register map (public datasheet facts:
 //! the register offsets, the DLAB bit, LCR/FCR/MCR/LSR bit meanings, the
 //! 1.8432 MHz clock's divisor 1 for 115200 baud; px129: IER bit 1, the
@@ -310,6 +314,49 @@ pub fn drain() {
 /// back edges against 2900.
 pub fn put(b: u8) {
     screen.put(b)
+    bootlog.put(b)
+    if !available() {
+        // px129: the transcript keeps its first 64 KiB; past them a byte
+        // costs nothing more here (the count stops at 65537).
+        // # Safety: io.S's eight-byte count, read alone (a stale read only
+        // sends this byte on to the locked path below).
+        if unsafe { pax_serial_log_count.read_volatile() } > 65536 {
+            return
+        }
+        let flags = unsafe { pax_irq_save() }
+        let n = unsafe { pax_serial_log_count.read_volatile() }
+        if n < 65536 {
+            unsafe { ((pax_serial_log as u64 + n) as *u8).write_volatile(b) }
+        }
+        if n <= 65536 { unsafe { pax_serial_log_count.write_volatile(n + 1) } }
+        unsafe { pax_irq_restore(flags) }
+        return
+    }
+    // # Safety: a module flag written once with IF clear.
+    if unsafe { irq_tx } {
+        queue(b)
+        return
+    }
+    var spins = 0
+    while spins < POLLS {
+        let lsr = inp(LSR)
+        if lsr & LSR_THR_EMPTY != 0 {
+            // # Safety: io.S's `outb` on COM1's THR.
+            unsafe { pax_outb((COM1 + THR) as u16, b) }
+            return
+        }
+        spins = spins + 1
+    }
+}
+
+/// px130: `put` without the screen: the boot's record (kernel/bootlog),
+/// then COM1 (or the transcript kept when there is no UART). kernel/log
+/// sends a line below the console level here, so the serial port keeps
+/// every line and the screen only those at the console level or above.
+/// Its body is `put`'s after the screen, written out again rather than
+/// shared, for px129's reason above: a `put` that only called a helper
+/// would be small enough to inline into kernel/log's writers.
+pub fn put_wire(b: u8) {
     bootlog.put(b)
     if !available() {
         // px129: the transcript keeps its first 64 KiB; past them a byte
