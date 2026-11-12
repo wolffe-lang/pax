@@ -1322,3 +1322,16 @@ as uid 1000, byte-identical.
 | `user/` (px117 change) | a write to the console calls `console.after_write` |
 | `../boot/screen.S`, `../boot/console.S` | `pax_screen_state` 80 words, `pax_con_state` 128 words |
 | `kmain_usbcheck.lu` | two more invariants: the queue merges and compacts motion of either sign |
+
+## px126 — process slots: 64 to 1024
+
+| module or file | what |
+|---|---|
+| `sched/` (px126 change) | 1024 slots (64 before); a slot costs what it holds while it lives: a thread its kernel stack (four frames) and its FPU area (one), a process its area too (twelve frames, mapped at `0xffffd04000000000 + s * 64 KiB` in PML4 slot 416 while the slot leads a process, the span's top 16 KiB never mapped; MAIN's at `start`; a thread of a group and a kernel thread have none, and asking one's is a named panic; `exec_alone` moves the leader's frames to the caller's span instead of copying 48 KiB); every page table both regions need taken at `start` (32 each, so the frames line stays balanced); every walk of the slots stops at `top` (one past the highest slot not free); the tick and every switch walk only when a deadline has come (`S_WAKE_AT`, lowered by each wait that gets one); `pax_pid_hint` (`pid mod 4096` to the slot) before any walk in `live_slot`, `proc_slot`, `tid_slot`, `trace_live`; `process_ends` marks the children whose groups it may orphan in a slot word (the 64-bit mask it kept was wrong past slot 63); `first_refusal`: the first of a run of clones refused for want of a slot; `NO_AREA` |
+| `fpu/` (px126 change) | an area per live slot, taken with the slot's kernel stack and given back with it (`area_new`, `area_free`); `start` takes the template's and slot 0's (64 frames, every slot's, before); a slot switched or asked with no area is a named panic; `slots` for sched's check |
+| `process/` (px126 change) | a fork whose area finds no frames is refused by name (`no frames for a process's area`, -EAGAIN); `no free process slot` is written for the first refused clone of a run and not for the ones after it until a slot is free again (each still -EAGAIN) |
+| `procfs/` (px126 change) | a task reference's slot in sixteen bits (seven before); the task walks stop at `sched.top()` |
+| `vm/` (px126 change) | `cut_maps` walks to `sched.top()` |
+| `trace_state/` (px126 change) | 1024 slots |
+| `../boot/sched.S` | `pax_threads`, `pax_siginfo`, `pax_debugregs` and `pax_trace_state` for 1024 slots; `pax_procs` gone (3 MiB at 64 slots); `pax_slot_words` (two a slot) and `pax_pid_hint` (4096 words): 1.9 MiB of `.bss` in all where 64 slots took 3.1 MiB |
+| `../boot/fpu.S` | `pax_fpu_state` 1032 words |
