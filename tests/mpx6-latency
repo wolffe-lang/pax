@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# tests/mpx6-latency — px131: how late PAX lets a process run while another
+# makes long system calls, and how long it keeps interrupts off doing so.
+# One probe, user/elf/latprobe.c (tools/mklatprobe, static glibc), runs as
+# kmain_console's one program with `latency` on the command line (kernel/
+# latency's instrument, /proc/pax-latency) and measures each load in turn:
+# a 1 ms sleeper's lateness, a UDP echo over loopback and one through the
+# network device to this host (tests/mpx6-latency.d/echo-host.py, through
+# QEMU's user network), beside the load, for SECONDS each. Every line also
+# reaches this host as a datagram, so a boot with no COM1 reports too.
+#
+#   tests/mpx6-latency [--images DIR | --no-boot] [--firmware bios|uefi|both]
+#                      [--tier native|release|both] [--accel auto|kvm|tcg]
+#                      [--mem MIB[,MIB…]] [--loads guard|all|'LOAD …']
+#                      [--seconds N] [--screen WxH] [--no-com1]
+#
+# --loads guard (the default) runs the rows' loads: idle, spin and the
+# guarded loads (tests/mpx6-latency.d/rows.py's GUARD); all runs every load
+# latprobe has, at sizes for the boot's memory (the measurement table,
+# notes/px131-long-kernel-paths.md); or a list of latprobe's LOAD[:ARG].
+# --screen boots at that framebuffer mode, and --no-com1 with no serial port
+# (the installed machine's shape: every console byte drawn, none sent).
+#
+# Assertions, per tier, firmware and memory:
+#   L0 build: kmain_console built; latprobe and latbig static; the image.
+#   L1 every load reported a line (through the network), each with its
+#      sleeper's and its loopback echo's samples; latprobe's end line; the
+#      kernel's instrument on.
+#   L2 the guarded loads (rows.py): the sleeper's worst lateness and each
+#      echo's worst round trip beside the load, as a ratio to the same
+#      boot's `spin` (a hog that makes no system call: the scheduler's own
+#      share), at most rows.py's bound; under TCG SKIPPED by name.
+#   L3 every load's figures, printed as `~` lines (the table), held to
+#      nothing.
+# Exit 0 when every assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+D=$here/mpx6-latency.d
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=native noboot=0 accel=auto mems=1024 loads=guard seconds=3 screen= com1=1
+usage="usage: tests/mpx6-latency [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--mem MIB[,MIB...]] [--loads guard|all|'LOAD ...'] [--seconds N] [--screen WxH] [--no-com1]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        --mem)      mems=$2; shift 2 ;;
+        --loads)    loads=$2; shift 2 ;;
+        --seconds)  seconds=$2; shift 2 ;;
+        --screen)   screen=$2; shift 2 ;;
+        --no-com1)  com1=0; shift ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+mems=${mems//,/ }
+need python3
+
+# The loads for a boot of MIB MiB.
+loads_for() { # mib
+    local m=$1
+    case $loads in
+        guard) python3 -I "$D/rows.py" --guard-loads "$m" ;;
+        all) echo "idle spin console:65536 pty:16384 write:$((m / 16)) fork:$((m / 8)) exec mmap:$((m / 8)) hole:1024 procmem:8 random:8 pipe:65536 tcplo:65536 dir:4000 poll:1000" ;;
+        *) echo "$loads" ;;
+    esac
+}
+
+work=$PAX_BUILD/mpx6-latency
+fail=0
+bad() { say "FAIL $*"; fail=1; }
+
+if [ -z "$images" ]; then
+    need readelf
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    mkdir -p "$work/bin"
+    why=
+    "$PAX_ROOT/tools/mklatprobe" "$work/bin" > "$work/probes.txt" || why+=" tools/mklatprobe;"
+    sed 's/^/  program: /' "$work/probes.txt" >&2
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            [ "$elf" = "$work/$tier/kmain_console.elf" ] || cp "$elf" "$work/$tier/kmain_console.elf"
+            say "built $tier kmain_console: elf $(sha256_of "$work/$tier/kmain_console.elf")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+    done
+    [ -z "$why" ] && say "PASS L0 build: kmain_console ($tiers), latprobe and latbig static" || { bad "L0 build:$why"; exit 1; }
+    images=$work
+    [ "$noboot" = 1 ] && exit 0
+fi
+
+if [ "$accel" = auto ]; then
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+fi
+say "accel: $accel (L2 holds its bound under KVM only)"
+
+# A free UDP port on this host's loopback.
+free_port() {
+    python3 -I -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+
+runs=$images/runs.txt
+: > "$runs"
+for tier in $tiers; do
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "L1 $tier uefi: no OVMF"; else say "SKIP L1 $tier uefi reason=no OVMF"; fi
+            continue
+        fi
+        for mem in $mems; do
+            name=$tier-$leg-$mem
+            b=$images/$tier/$name
+            mkdir -p "$b"
+            port=$(free_port)
+            report=$b/report.txt
+            : > "$report"
+            python3 -I "$D/echo-host.py" "$port" "$report" > "$b/echo-host.log" 2>&1 &
+            epid=$!
+            w=0
+            while [ "$w" -lt 50 ] && ! grep -q '^echo-host: ' "$b/echo-host.log" 2>/dev/null; do sleep 0.1; w=$((w + 1)); done
+            if ! grep -q '^echo-host: port' "$b/echo-host.log"; then
+                bad "L1 $name: the host's echo did not bind ($(cat "$b/echo-host.log"))"
+                kill "$epid" 2>/dev/null; wait "$epid" 2>/dev/null
+                continue
+            fi
+            # shellcheck disable=SC2046
+            printf '/bin/latprobe -d %s -n 10.0.2.2:%s -r 10.0.2.2:%s %s\n' "$seconds" "$port" "$port" "$(loads_for "$mem")" > "$b/pax-run"
+            "$PAX_ROOT/tools/mkinitramfs" "$b/lat.cpio" "/bin/latprobe=$images/bin/latprobe:755" "/bin/latbig=$images/bin/latbig:755" \
+                "/etc/pax-run=$b/pax-run:644" /tmp/:1777 > "$b/initramfs.txt" || { bad "L0 $name: tools/mkinitramfs"; kill "$epid"; wait "$epid" 2>/dev/null; continue; }
+            cp "$PAX_ROOT/boot/limine-initramfs.conf" "$b/limine.conf"
+            [ -n "$screen" ] && printf '\n    resolution: %s\n' "$screen" >> "$b/limine.conf"
+            printf '\n    cmdline: latency%s\n' "$([ -n "$screen" ] && echo ' fbwrite')" >> "$b/limine.conf"
+            "$PAX_ROOT/tools/mkimage" --conf "$b/limine.conf" --add "$b/lat.cpio" initramfs.cpio \
+                "$images/$tier/kmain_console.elf" "$b/lat.iso" > /dev/null || { bad "L0 $name: tools/mkimage"; kill "$epid"; wait "$epid" 2>/dev/null; continue; }
+            nload=$(wc -w < "$b/pax-run"); nload=$((nload - 7))
+            budget=$((nload * (seconds + 12) + 240))
+            scr=(); [ -z "$screen" ] && scr=(--no-screen)
+            say "boot $name: $nload loads, port $port, budget ${budget}s$([ "$com1" = 0 ] && echo ', no COM1')"
+            net=(-m "${mem}M" -netdev "user,id=n0,ipv6=off" -device "virtio-net-pci,netdev=n0")
+            if [ "$com1" = 1 ]; then
+                q=(); for a in "${net[@]}"; do q+=(--qemu "$a"); done
+                "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$b/serial.log" ${scr[@]+"${scr[@]}"} --timeout "$budget" --accel "$accel" \
+                    --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' "${q[@]}" "$b/lat.iso" > "$b/verdict.txt" 2>&1
+                rc=$?
+            else
+                # No COM1, so no halt marker to wait for: the report's end line
+                # (the probe's last datagram) ends the boot.
+                "$PAX_ROOT/tools/qemu-run" --firmware "$leg" --no-serial ${scr[@]+"${scr[@]}"} ${screen:+--display-mode=$screen} --timeout "$budget" --accel "$accel" \
+                    "$b/lat.iso" -- "${net[@]}" > "$b/verdict.txt" 2>&1 &
+                qpid=$!
+                while kill -0 "$qpid" 2>/dev/null && ! grep -q '^latprobe: end' "$report"; do sleep 1; done
+                sleep 1
+                kill "$qpid" 2>/dev/null
+                wait "$qpid" 2>/dev/null
+                rc=0; grep -q '^latprobe: end' "$report" || rc=1
+            fi
+            sleep 0.5
+            kill "$epid" 2>/dev/null; wait "$epid" 2>/dev/null
+            echo "$rc" > "$b/rc"
+            printf '%s %s %s %s halt=%s report=%s lines=%s\n' "$tier" "$leg" "$mem" "$accel" "$rc" "$(sha256_of "$report")" "$(grep -c '^latprobe ' "$report")" >> "$runs"
+        done
+    done
+done
+
+python3 -I "$D/rows.py" --accel "$accel" --images "$images" --com1 "$com1" $(for t in $tiers; do for l in $legs; do for m in $mems; do printf '%s ' "$t-$l-$m"; done; done; done) || fail=1
+[ "$fail" = 0 ] && say "mpx6-latency: PASS" || say "mpx6-latency: FAIL"
+exit "$fail"
