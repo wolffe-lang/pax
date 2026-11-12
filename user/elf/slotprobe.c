@@ -15,9 +15,11 @@
  *   slotprobe reuse R B        R rounds of B forks alive at once, then R
  *                              rounds of B threads: each reaped or joined;
  *                              pids never reused
- *   slotprobe wolf N           N wolf programs (/bin/sha256sum) alive at
- *                              once, each on its own pipe; each fed 64 KiB;
- *                              every digest read and every one reaped
+ *   slotprobe wolf N           N wolf programs alive at once: pelt
+ *                              (/bin/sh, two threads), each summing 1 to
+ *                              300 in a loop, then reading a line from its
+ *                              own pipe; every sum and line read back and
+ *                              every one reaped
  *   slotprobe ptys N           N ptys, each a session whose leader is pelt
  *                              (/bin/sh -c 'cat; echo bye<i>') with cat in
  *                              its foreground; a line through each cat,
@@ -27,7 +29,9 @@
  *                              CPU time (getrusage) a yield
  *   slotprobe herd M           a pipe ping-pong's round trip with W
  *                              processes parked in a pipe read, W = 0, 64
- *                              and M (measured)
+ *                              and M (measured: round trips for a second
+ *                              of CLOCK_MONOTONIC, whose grain on PAX is
+ *                              the 10 ms tick)
  *
  * Every result line starts with its mode's name and a colon. No time is
  * asserted by the probe: tests/mpx5-slots reads the numbers.
@@ -364,7 +368,8 @@ static int session_of(pid_t pid) {
 
 /* --- wolf ------------------------------------------------------------------- */
 
-#define WOLF_BYTES 65536
+/* pelt's work: the sum of 1 to 300 by a loop, then a line from its pipe. */
+#define WOLF_SCRIPT "i=0; s=0; while [ $i -lt 300 ]; do i=$((i+1)); s=$((s+i)); done; read x; echo \"$s $x\""
 
 static int wolf_mode(int n) {
     static int in[512][2];
@@ -386,9 +391,9 @@ static int wolf_mode(int n) {
             dup2(out[1], 1);
             for (int fd = 3; fd < 2 * n + 8; fd++) close(fd);
             signal(SIGPIPE, SIG_DFL);
-            char *argv[] = {"sha256sum", 0};
-            char *envp[] = {"PATH=/bin", 0};
-            execve("/bin/sha256sum", argv, envp);
+            char *argv[] = {"sh", "-c", WOLF_SCRIPT, 0};
+            char *envp[] = {"HOME=/", "PATH=/bin", "HISTFILE=/dev/null", 0};
+            execve("/bin/sh", argv, envp);
             _exit(127);
         }
         if (p < 0) {
@@ -401,9 +406,9 @@ static int wolf_mode(int n) {
         kids[made++] = p;
     }
     close(out[1]);
-    /* Every one running sha256sum, blocked on its pipe, with its threads. */
+    /* Every one running pelt, blocked on its pipe, with its threads. */
     int ready = 0, tmin = INT_MAX, tmax = 0, tsum = 0;
-    long end = now_ns() + 120000000000L;
+    long end = now_ns() + 300000000000L;
     while (now_ns() < end) {
         ready = 0;
         tmin = INT_MAX;
@@ -412,7 +417,7 @@ static int wolf_mode(int n) {
         for (int i = 0; i < made; i++) {
             char name[32];
             int t = threads_of(kids[i], name, sizeof name);
-            if (t > 0 && strcmp(name, "sha256sum") == 0) {
+            if (t > 0 && strcmp(name, "sh") == 0) {
                 ready++;
                 if (t < tmin) tmin = t;
                 if (t > tmax) tmax = t;
@@ -423,23 +428,14 @@ static int wolf_mode(int n) {
         nap(200);
     }
     int alive = all_alive(made);
-    say("wolf: %d of %d asked running sha256sum at once (%s), threads %d to %d each, %d in all%s%s\n", ready, n,
+    say("wolf: %d of %d asked running pelt at once (%s), threads %d to %d each, %d in all%s%s\n", ready, n,
         alive ? "none ended" : "some ended", ready ? tmin : 0, tmax, tsum, err ? "; then answered " : "",
         err ? ename(err) : "");
-    /* The work: 64 KiB each, byte j being j mod 251, then end of file. */
-    static unsigned char data[WOLF_BYTES];
-    for (int j = 0; j < WOLF_BYTES; j++) data[j] = (unsigned char)(j % 251);
     for (int i = 0; i < made; i++) {
-        size_t off = 0;
-        while (off < WOLF_BYTES) {
-            ssize_t k = write(in[i][1], data + off, WOLF_BYTES - off);
-            if (k < 0 && errno == EINTR) continue;
-            if (k <= 0) break;
-            off += (size_t)k;
-        }
+        (void)!write(in[i][1], "go\n", 3);
         close(in[i][1]);
     }
-    /* Each digest line, 64 hex digits, two spaces, `-`. */
+    /* Each one's line: the sum, then the line it read. */
     static char buf[512 * 80];
     size_t len = 0;
     for (;;) {
@@ -456,7 +452,7 @@ static int wolf_mode(int n) {
         char *e = strchr(l, '\n');
         if (!e) break;
         *e = 0;
-        if (lines == 0) snprintf(first, sizeof first, "%s", l);
+        if (lines == 0) snprintf(first, sizeof first, "%.79s", l);
         else if (strcmp(l, first) != 0) same = 0;
         lines++;
         l = e + 1;
@@ -468,7 +464,7 @@ static int wolf_mode(int n) {
         while ((r = waitpid(kids[i], &st, 0)) < 0 && errno == EINTR) {}
         if (r == kids[i] && WIFEXITED(st) && WEXITSTATUS(st) == 0) right++;
     }
-    say("wolf: %d digests, %s: %s\n", lines, same ? "all the same" : "NOT all the same", first);
+    say("wolf: %d lines, %s: %s\n", lines, same ? "all the same" : "NOT all the same", first);
     say("wolf: %d of %d reaped with status 0\n", right, made);
     return 0;
 }
@@ -686,15 +682,16 @@ static int herd_mode(int big) {
             say("herd: W=%d parked (%d made): the echo's fork answered %s\n", w, n, ename(errno));
             continue;
         }
-        int trips = w >= 500 ? 40 : 400;
-        long t0 = now_ns();
+        /* Round trips until a second of the clock has passed (its grain
+         * is the tick), ten at least. */
+        long t0 = now_ns(), t1 = t0;
         int done = 0;
-        for (int i = 0; i < trips; i++) {
+        while (done < 10 || t1 - t0 < 1000000000L) {
             char c = 'x';
             if (write(a[1], &c, 1) != 1 || read(b[0], &c, 1) != 1) break;
             done++;
+            t1 = now_ns();
         }
-        long t1 = now_ns();
         close(a[1]);
         close(b[0]);
         int st;
