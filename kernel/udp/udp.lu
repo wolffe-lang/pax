@@ -644,6 +644,20 @@ fn push(s: u64, src: u64, sport: u64, data: u64, len: u64) -> bool {
 /// when nothing waits, and -EFAULT's value when `buf` is not the
 /// caller's to write (the datagram stays).
 pub fn recv(s: u64, pml4: u64, buf: u64, cap: u64, peek: bool) -> (u64, u64, u64, u64) {
+    dequeue(s, pml4, buf, cap, 0, peek)
+}
+
+/// px127: `recv` scattered over `parts` user iovecs (an array at `iov`
+/// of {base, len} pairs, `cap` bytes in all: the caller's sum, of an
+/// array it checked readable), each filled in order up to its length:
+/// recvmsg's datagrams (kernel/socket). -EFAULT's value, the datagram
+/// staying, when a part the datagram reaches is not the caller's to
+/// write.
+pub fn recv_vec(s: u64, pml4: u64, iov: u64, parts: u64, cap: u64, peek: bool) -> (u64, u64, u64, u64) {
+    dequeue(s, pml4, iov, cap, parts, peek)
+}
+
+fn dequeue(s: u64, pml4: u64, buf: u64, cap: u64, parts: u64, peek: bool) -> (u64, u64, u64, u64) {
     let saved = sync.acquire(sync.udp())
     if sw(s, S_COUNT) == 0 {
         sync.release(sync.udp(), saved)
@@ -657,16 +671,22 @@ pub fn recv(s: u64, pml4: u64, buf: u64, cap: u64, peek: bool) -> (u64, u64, u64
     let sport = (head >> 16) & 0xffff
     let src = head >> 32
     let n = if len < cap { len } else { cap }
-    if !uaccess.writable(pml4, buf, n) {
+    if !room_for(pml4, buf, n, parts) {
         sync.release(sync.udp(), saved)
         return (0xffffffffffffffff - EFAULT + 1, 0, 0, 0)
     }
-    var done: u64 = 0
-    while done < n {
-        let (d, room) = ring_at(s, at + 8 + done)
-        let k = if n - done < room { n - done } else { room }
-        let _ok = uaccess.copy_out(pml4, buf + done, d, k)
-        done += k
+    if parts == 0 {
+        ring_out(s, pml4, at, 0, buf, n)
+    } else {
+        var done: u64 = 0
+        var i: u64 = 0
+        while done < n && i < parts {
+            let l = uaccess.get64(pml4, buf + i * 16 + 8)
+            let k = if n - done < l { n - done } else { l }
+            ring_out(s, pml4, at, done, uaccess.get64(pml4, buf + i * 16), k)
+            done += k
+            i += 1
+        }
     }
     if !peek {
         put_sw(s, S_RD, at + 8 + ((len + 7) & !7))
@@ -675,6 +695,39 @@ pub fn recv(s: u64, pml4: u64, buf: u64, cap: u64, peek: bool) -> (u64, u64, u64
     }
     sync.release(sync.udp(), saved)
     (n, src, sport, len)
+}
+
+/// px127: whether the first `n` bytes of a datagram can be written where
+/// they go: user `buf`'s `n` bytes, or with `parts` iovecs at `buf`,
+/// each iovec's share of them, in order.
+fn room_for(pml4: u64, buf: u64, n: u64, parts: u64) -> bool {
+    if parts == 0 {
+        return uaccess.writable(pml4, buf, n)
+    }
+    var left = n
+    var i: u64 = 0
+    while left > 0 && i < parts {
+        let l = uaccess.get64(pml4, buf + i * 16 + 8)
+        let k = if left < l { left } else { l }
+        if !uaccess.writable(pml4, uaccess.get64(pml4, buf + i * 16), k) {
+            return false
+        }
+        left -= k
+        i += 1
+    }
+    true
+}
+
+/// Copy `k` bytes of the datagram whose head is at ring byte `at`, from
+/// its data byte `from`, to user `dst` (checked writable).
+fn ring_out(s: u64, pml4: u64, at: u64, from: u64, dst: u64, k: u64) {
+    var done: u64 = 0
+    while done < k {
+        let (d, room) = ring_at(s, at + 8 + from + done)
+        let c = if k - done < room { k - done } else { room }
+        let _ok = uaccess.copy_out(pml4, dst + done, d, c)
+        done += c
+    }
 }
 
 // --- receiving ----------------------------------------------------------------------
