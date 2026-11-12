@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# mkentropy — build dw02's probes for tests/mpx6-entropy: `entropy`
+# (user/elf/entropy.c: what getrandom, /dev/random, /dev/urandom, AT_RANDOM
+# and /proc/pax-random answer a program), a static x86-64 Linux executable
+# linked against the baseline glibc's libc.a as mklatprobe's are, and
+# `wolf-entropy` (user/elf/wolf_entropy.lu: what wolf's os_random gets),
+# built with $PAX_WOLF as tools/mkwolf-hello builds wolf-hello (`wolf build
+# --release`, linked through a `cc` that adds `-static`).
+#
+#   tools/mkentropy OUTDIR
+#
+# Each is checked ET_EXEC with no PT_INTERP. Prints the compiler's version,
+# then `<name> <sha256> <bytes>` for each. Build on a baseline x86-64 glibc
+# (the CI runner's Ubuntu; an Ubuntu 24.04 container), never on a host whose
+# glibc assumes a newer CPU (px10). Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkentropy OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${ENTROPY_CC:-gcc}
+wolf=${PAX_WOLF:-wolf}
+need "$cc" "$wolf" cc readelf
+say "cc: $("$cc" --version 2>&1 | head -n 1)"
+say "wolf: $("$wolf" --version 2>&1 | head -n 1)"
+"$cc" -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE -Wl,--build-id=none -Wl,-z,noexecstack \
+    -o "$out/entropy" "$PAX_ROOT/user/elf/entropy.c" || die "cc: entropy"
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-entropy.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+cp "$PAX_ROOT/user/elf/wolf_entropy.lu" "$w/wolf_entropy.lu"
+(cd "$w" && PATH="$w/bin:$PATH" "$wolf" build --release --no-cache wolf_entropy.lu -o "$out/wolf-entropy") >&2 \
+    || die "wolf build of wolf_entropy.lu"
+for p in entropy wolf-entropy; do
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
