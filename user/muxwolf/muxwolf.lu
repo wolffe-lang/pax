@@ -153,7 +153,7 @@ fn panes() -> !int {
     var answered = 0
     k = 0
     while k < ps.len {
-        var m = ps[k].m
+        var m = copy ps[k].m
         let _n = type_line(mut m, "echo pong {k}\n")
         let got = read_until(mut m, "pong {k}\r\n", 25)
         if str.contains(got, "pong {k}\r\n") {
@@ -164,15 +164,17 @@ fn panes() -> !int {
     print("W2 {answered} of {ps.len} panes answered a typed line through fs.write_some and fs.read_chunk")
     // One wait over every master: which does it say?
     var all = List[fs.File]()
-    for pane in ps {
-        (mut all).push(pane.m)
+    k = 0
+    while k < ps.len {
+        (mut all).push(copy ps[k].m)
+        k = k + 1
     }
-    var m7 = ps[7].m
+    var m7 = copy ps[7].m
     let _a = type_line(mut m7, "echo seven\n")
     let w1 = signal.wait_fds(all, signal.child(), 3000)?
     let _r1 = read_until(mut m7, "seven\r\n", 10)
-    var m3 = ps[3].m
-    var m6 = ps[6].m
+    var m3 = copy ps[3].m
+    var m6 = copy ps[6].m
     let _b = type_line(mut m6, "echo six\n")
     let _c = type_line(mut m3, "echo three\n")
     let _d = read_until(mut m6, "", 3)
@@ -181,14 +183,14 @@ fn panes() -> !int {
     let _r6 = read_until(mut m6, "six\r\n", 10)
     print("W3 signal.wait_fds over the 8 masters: pane 7 alone ready answers {w1.ready}; panes 3 and 6 ready answer {w2.ready}, one index a call")
     // The window's size.
-    var m0 = ps[0].m
+    var m0 = copy ps[0].m
     term.set_size(m0, term.Size { rows: 40, columns: 120 }, 0, 0)?
     let _s = type_line(mut m0, "stty size\n")
     let sz = read_until(mut m0, "40 120\r\n", 25)
     let sized = str.contains(sz, "40 120\r\n")
     print("W4 term.set_size on a master, then stty size in its shell: {if sized { "40 120" } else { "not 40 120" }}")
     // The interrupt key through a master, at the default.
-    var m1 = ps[1].m
+    var m1 = copy ps[1].m
     let _e = type_line(mut m1, "exec sleep 30\n")
     let _f = read_until(mut m1, "never", 3)
     let _g = fs.write_some(mut m1, one_byte(3))?
@@ -199,12 +201,12 @@ fn panes() -> !int {
     k = 0
     while k < ps.len {
         if k != 1 {
-            var mk = ps[k].m
+            var mk = copy ps[k].m
             fs.close(take mk)?
             let st = status_of(ps[k].slot)
             if ended(st) == "ended by the hangup" { hup = hup + 1 } else { other = other + 1 }
         } else {
-            var mk = ps[k].m
+            var mk = copy ps[k].m
             fs.close(take mk)?
         }
         k = k + 1
@@ -311,7 +313,7 @@ fn sockets() -> !int {
     var conn = net.accept(mut srv)?
     net.write(mut cli, "x")?
     var mixed = List[fs.File]()
-    (mut mixed).push(p.master)
+    (mut mixed).push(copy p.master)
     (mut mixed).push(fs.File { fd: conn.fd })
     var fs_takes = "yes"
     let w = signal.wait_fds(mixed, signal.child(), 1000) else |e| {
