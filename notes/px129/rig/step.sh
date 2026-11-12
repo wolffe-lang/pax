@@ -15,6 +15,8 @@
 #   pty ARGS       tests/mpx5-pty ARGS (pseudo-terminals, the probe and pelt's session against Linux's)
 #   ptyrate N ACCEL FIRMWARE
 #                  pty-rate.sh: mpx5-pty's session image booted N times, each run checked (pax#382)
+#   flood ARGS     tests/mpx3-conflood ARGS (ping and a process's echo while the console is flooded,
+#                  R-px129-13), with KVM
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
 # column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is named in its
 # record) and changes no other line. The step's exit is the suite's.
@@ -23,7 +25,7 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 # shellcheck disable=SC1091
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
-lift() { "$@" 2>&1 | sed -u -E 's/^(mpx3-conspeed|mpx3-screen|mpx5-screen|mpx3-console|mpx6-games|mpx6-pointer|mpx5-pty): +FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
+lift() { "$@" 2>&1 | sed -u -E 's/^(mpx3-conspeed|mpx3-screen|mpx5-screen|mpx3-console|mpx6-games|mpx6-pointer|mpx5-pty|mpx3-conflood): +FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
 wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tools/fetch-limine > /dev/null && '; }
 what=${1:?}; shift
 case $what in
@@ -41,6 +43,7 @@ case $what in
     games) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-games "$@"; exit $?' x "$@" ;;
     pointer) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-pointer "$@"; exit $?' x "$@" ;;
     pty) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx5-pty "$@"; exit $?' x "$@" ;;
+    flood) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx3-conflood "$@"; exit $?' x "$@" ;;
     ptyrate) ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'bash notes/px129/rig/pty-rate.sh "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
