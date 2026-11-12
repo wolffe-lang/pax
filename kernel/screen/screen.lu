@@ -95,11 +95,12 @@
 //!   copied.
 //!
 //! **The two screens** (px70): two independent 32-bit-cell grids,
-//! each MAX_COLS * MAX_ROWS cells. A cell has glyph bits 0-7, foreground
+//! each MAX_COLS * MAX_ROWS cells (px129: 320 x 128). A cell has glyph bits 0-7, foreground
 //! 8-11, background 12-15, recorded blink bit 16 and (gm01) the glyph
 //! number's high byte in bits 20-27, for the font's rows above U+00FF
-//! (glyph numbers 256 and up). Together 256 KiB
-//! (64 frames), the same as the packed32+32 layout required by blink.
+//! (glyph numbers 256 and up). Together 320 KiB
+//! (80 frames; 256 KiB at px70's 256 columns), the same as the
+//! packed32+32 layout required by blink.
 //! The alternate grid follows the main grid; scrolling uses a bulk copy
 //! confined to the active grid. Paired TCG measurements decide item 7.
 //!
@@ -128,8 +129,9 @@
 //! (REP MOVSQ of the framebuffer onto itself), runs only under the
 //! command-line word `fbread`, for measurements. The framebuffer is
 //! mapped by kernel/fb (write-combining where the PAT allows). The grid
-//! is at most 256 columns by 128 rows; pixels right of and below it stay
-//! background (px87: a scroll no longer moves them).
+//! is at most 320 columns by 128 rows (px129: 256 before, which left the
+//! right 512 pixels of a 2560-pixel display blank, pax#357); pixels right
+//! of and below it stay background (px87: a scroll no longer moves them).
 //!
 //! **Interrupts.** `put` runs with IF clear (sched.S's `pax_irq_save`
 //! and `pax_irq_restore`), so a timer switch cannot interleave two
@@ -229,7 +231,7 @@ const S_DHI: u64 = 80 // (none: S_DLO above S_DHI)
 const S_BT0: u64 = 81 // the TSC when the outermost hold began (its cycles go to `cycles`)
 const RQ_BYTES: u64 = 32
 
-const MAX_COLS: u64 = 256
+const MAX_COLS: u64 = 320 // px129: 2560 pixels at scale 1 (pax#357); was 256
 const MAX_ROWS: u64 = 128
 const EARLY: u64 = 16384
 const GW: u64 = 8 // a cell's width in pixels
