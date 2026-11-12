@@ -729,20 +729,17 @@ WOLF_LD=cc wolf build hello.lu      # this one build with lld again (the image's
 ```
 
 A program ligature links behaves as lld's link of it does. ligature's link is deterministic: the same inputs
-give the same bytes. The binary is larger, because it carries ligature's provenance manifest. ligature does
-not yet fit everywhere lld does:
+give the same bytes. The binary is larger, because it carries ligature's provenance manifest. Measured on the 2 GiB
+guest the dev image is tested with, from the kernel's own `wait4` usage:
 
-- **Memory.** On PAX a link by ligature peaks at about 800 MiB for hello and about 940 MiB for pelt (about 30,000
-  lines). lld's peak is about 125 MiB. The 2 GiB guest the dev image is tested with keeps the live image's files
-  in memory, so it does not have that much to spare for pelt. There ligature stops with `memory allocation of …
-  failed`, `wolf build` fails naming the linker, and no program is written. Nothing falls back to lld: run the
-  build again with `WOLF_LD=cc`. ligature links pelt from a 2560 MiB guest and den (about 38,000 lines) from 3072
-  MiB ([ligature#35](https://github.com/wolffe-lang/ligature/issues/35)).
-- **Time.** A link takes ligature 12 to 17 s on that guest, where lld takes under a tenth of a second.
+- **Memory.** A link by ligature peaks at about 175 MiB for hello and 235 MiB for den (about 38,000 lines), the
+  largest program the image's compiler builds on the live image. lld's peak is 123 to 143 MiB. Both link pelt and
+  den on that guest.
+- **Time.** A link takes ligature 2.2 to 2.8 s, where lld takes under a tenth of a second.
 
-This is why lld stays the default. `tests/distribution-ligature` holds the image to both linkers. Every row
-links with each linker, runs the program, and measures the link with the kernel's own `wait4` usage. The pelt
-row at 2 GiB expects ligature's refusal, and it fails, saying so, the day ligature links pelt there.
+If ligature fails, `wolf build` fails naming the linker and no program is written. Nothing falls back to lld: run
+the build again with `WOLF_LD=cc`. lld stays the default. `tests/distribution-ligature` holds the image to both
+linkers: every row links with each linker, runs the program, and measures the link.
 
 `wolf lsp`, the compiler's language server, runs on PAX unchanged: it speaks the Language Server Protocol on its
 standard input and output, so an editor starts it as a child on pipes. `tests/mpx5-lsp` starts it that way from a
