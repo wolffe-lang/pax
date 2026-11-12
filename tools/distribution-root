@@ -9,6 +9,7 @@ compiler/linker bundle. Every current org binary and the base std are replaced.
 """
 from pathlib import Path
 import hashlib
+import re
 import os
 import subprocess
 import sys
@@ -93,7 +94,8 @@ def main():
         # WOLF_LD in /etc/shrc); `export WOLF_LD=/usr/bin/ligature` selects it.
         lig = (inputs/'ligature'/'ligature').read_bytes()
         assert (inputs/'ligature'/'sums.txt').read_text().split() == ['ligature', sha(lig), str(len(lig))], 'ligature input mismatch'
-        pinned = [l.split()[2:4] for l in (ROOT/'user/ligature.pin').read_text().splitlines() if l.split()[:2] == ['#', 'ligature']]
+        pinned = [l.split()[2:4] for l in (ROOT/'user/ligature.pin').read_text().splitlines()
+                  if len(l.split()) == 4 and l.split()[:2] == ['#', 'ligature'] and re.fullmatch(r'[0-9a-f]{64}', l.split()[2])]
         assert pinned == [[sha(lig), str(len(lig))]], 'ligature is not the digest user/ligature.pin records'
         rows['usr/bin/ligature'] = (0o100755, 0, 0, lig)
     else:
