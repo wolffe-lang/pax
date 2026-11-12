@@ -1304,6 +1304,8 @@ static void sec_a7(void) {
     if (c == 0) { nap(50); uint64_t one = 1; (void)!write(efd, &one, sizeof one); _exit(0); }
     w = epoll_wait(e3, got, 4, 3000);
     say("A7.5 an eventfd another process writes wakes the loop: %s\n", w == 1 && got[0].data.u32 == 7 ? "yes" : "NO");
+    uint64_t drained;
+    (void)!read(efd, &drained, sizeof drained);
     int st;
     waitpid(c, &st, 0);
     /* SIGCHLD through a self-pipe */
@@ -1325,8 +1327,8 @@ static void sec_a7(void) {
         if (w < 0 && errno == EINTR) continue;
         break;
     }
-    int byp = w >= 1;
-    for (int i = 0; i < w; i++) if (got[i].data.u32 != 8) byp = 0;
+    int byp = 0;
+    for (int i = 0; i < w; i++) if (got[i].data.u32 == 8) byp = 1;
     say("A7.6 SIGCHLD through a self-pipe wakes the loop: %s\n", byp ? "yes" : "NO");
     waitpid(c, &st, 0);
     signal(SIGCHLD, SIG_DFL);

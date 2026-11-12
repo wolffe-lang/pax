@@ -169,6 +169,7 @@ fn panes() -> !int {
         (mut all).push(copy ps[k].m)
         k = k + 1
     }
+    let w0 = signal.wait_fds(all, signal.child(), 0)?
     var m7 = copy ps[7].m
     let _a = type_line(mut m7, "echo seven\n")
     let w1 = signal.wait_fds(all, signal.child(), 3000)?
@@ -181,7 +182,7 @@ fn panes() -> !int {
     let w2 = signal.wait_fds(all, signal.child(), 3000)?
     let _r3 = read_until(mut m3, "three\r\n", 10)
     let _r6 = read_until(mut m6, "six\r\n", 10)
-    print("W3 signal.wait_fds over the 8 masters: pane 7 alone ready answers {w1.ready}; panes 3 and 6 ready answer {w2.ready}, one index a call")
+    print("W3 signal.wait_fds over the 8 masters: none ready answers {w0.ready}; pane 7 alone ready answers {w1.ready}; panes 3 and 6 ready answer {w2.ready}, one index a call")
     // The window's size.
     var m0 = copy ps[0].m
     term.set_size(m0, term.Size { rows: 40, columns: 120 }, 0, 0)?
@@ -349,18 +350,33 @@ fn sockets() -> !int {
     print("W8 the listener closed: its file {if fs.exists(path) { "stays" } else { "is gone (net.close_listener unlinks it)" }}")
     // A server that dies: its file stays.
     let stale = "/tmp/wstale.sock"
+    let zp = process.pipe()?
+    var zr = zp.read
+    var zw = zp.write
     let z = process.fork()?
     if process.is_child(z) {
         var l = unix.listen(stale) else |_| {
             process.exit(3)
             return 1
         }
-        signal.raise(signal.kill()) else |_| {}
+        fs.write(mut zw, "r\n") else |_| {}
+        var forever = 0
+        while forever < 1000 {
+            let _w = signal.wait_fds(List[fs.File](), signal.child(), 1000) else |_| {
+                signal.Wake { meaning: 0, ready: 0 - 1 }
+            }
+            forever = forever + 1
+        }
         net.close_listener(take l) else |_| {}
         process.exit(4)
         return 1
     }
-    let zs = status_of(z.child.slot)
+    fs.close(take zw)?
+    let _zr = fs.read(mut zr, 2)?
+    fs.close(take zr)?
+    var zc = process.Child { slot: z.child.slot }
+    process.kill(mut zc)?
+    let zs = process.wait_status(take zc) else 0 - 999
     var dial = "connected"
     var d = unix.connect(stale) else |e| {
         dial = match e {
@@ -389,7 +405,7 @@ fn sockets() -> !int {
     if bind == "bound" {
         net.close_listener(take again)?
     }
-    fs.remove(stale)?
+    fs.remove(stale) else |_| {}
     var fresh = unix.listen(stale)?
     net.close_listener(take fresh)?
     print("W10 a server {ended(zs)}: unix.connect {dial}, unix.listen {bind}; fs.remove, then unix.listen binds")
