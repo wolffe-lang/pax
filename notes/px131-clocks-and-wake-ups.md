@@ -19,6 +19,14 @@ under the guard.
 - **The risk named:** under a ping flood every frame takes the processor from the hog. Measured: the hog kept 82 to 85 % of its share while the host sent 99,000 to 103,000 pings in 3 s. A budget, if a
   faster flood needs one, is described in section 4.
 
+**Rebased with the first part onto trunk `bbe91e16`** (the console's lane's drawing). The commits this note names
+are those of `px131-clocks-wake3` (`be83835c`), replayed unchanged; the records before the rebase are for that code.
+At the rebased head the guard holds on BIOS at 1 GiB under KVM (record sha256
+`e3b269fe68e9815337fee1d33de9d1a68f6b7db364ceb38217a33ba6cc4ff090`, at `fcad7eef`): both clocks 0.992 and 0.994 of
+the counter's time beside console and file writes, the ping beside `spin` 1.42 times idle's, and the hog under the flood
+0.61 of its share (0.81 to 0.90 before the rebase, with 80,561 pings in the window against 98,000 to 129,000: one boot;
+the head's take says more). The console's write with COM1 is as before (1.17 s for 64 KiB), so L4's load is unchanged.
+
 Footprint: cross-cutting (`kernel/timer`, `kernel/sched`, `kernel/latency`, `kernel/xhci`, `kernel/kmain_console.lu`;
 `tests/mpx6-latency` and its probe and host side gain the clock, wake-up and flood rows).
 
