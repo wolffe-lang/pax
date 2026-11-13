@@ -253,7 +253,7 @@ and `pax.fbprobe=slow` feeds five `1000`s, each with five writes of `100`;
 these replace costs in the same selector, not the actual framebuffer I/O.
 The line names `injected outlier` or `injected slow`, so these are never
 reported as measured throughput. Forced ways bypass injection and the probe.
-`tests/mpx3-screen-probe` checks all these cases in QEMU on both firmwares.
+`tests/mpx6-triage.d/probe.sh` checks all these cases in QEMU on both firmwares.
 
 `tests/usb-stick` runs inside the console CI job in full/all tiers and
 explicit partial dispatches. It requires both SeaBIOS and OVMF, replays all

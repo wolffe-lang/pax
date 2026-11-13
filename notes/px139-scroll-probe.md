@@ -49,7 +49,9 @@ The rows were committed without implementation at `8272a56a`. The recorder's red
 
 At `0259dac1`, all six rows passed on BIOS and UEFI (`END probe-native exit=0 secs=37`). The ordinary probe's recorded windows in that KVM check were 10,330 cycles / 2 us on BIOS and 4,474 / 1 us on UEFI. These are different runs under a different accelerator, not estimates of the historical TCG window.
 
-The mask's selftest holds meaningful differences apart: statistic, sample shape, units, injection and overrides. The deterministic boots also validate that the printed minima are computed from the printed samples. The plant changes only the loop bound from five samples to one, on a separate branch. Its named row is `P-outlier`; its record and the final green record are linked from the pull request.
+The mask's selftest holds meaningful differences apart: statistic, sample shape, units, injection and overrides. The deterministic boots also validate that the printed minima are computed from the printed samples. The first whole-suite take's planner warned that the standalone probe script and checker were unknown paths, which would expand a pull request's CI run unnecessarily. They now live under the existing `mpx6-triage.d/` suite; no shared planner or map changed. A new full record is required at that relocation's head.
+
+The plant changes only the loop bound from five samples to one, on a separate branch. Its named row is `P-outlier`; its record and the final green record are linked from the pull request.
 
 ## 5. Completion targets
 

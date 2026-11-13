@@ -7,7 +7,7 @@ mkdir -p "$TMPDIR" "$PAX_CACHE" "$PAX_BUILD" "$PX139_ROOT/home"
 co=$(git rev-parse --show-toplevel)
 what=${1:?}; shift
 case $what in
-    probe) cmd='export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); bash tests/mpx3-screen-probe "$@"';;
+    probe) cmd='export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); bash tests/mpx6-triage.d/probe.sh "$@"';;
     triage) cmd='export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); bash tests/mpx6-triage "$@"';;
     norms) cmd='python3 -I tests/mpx6-triage.d/probe-mask-test.py';;
     screen) cmd='export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); bash tests/mpx3-screen "$@"';;

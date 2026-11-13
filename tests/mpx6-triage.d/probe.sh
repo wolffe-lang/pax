@@ -5,7 +5,7 @@
 # Called by mpx6-triage with its already-built console kernel; standalone
 # builds that same kernel. --case outlier is the single-sample plant's row.
 set -euo pipefail
-. "$(dirname "$0")/../tools/lib.sh"
+. "$(dirname "$0")/../../tools/lib.sh"
 tier=native firmware=both elf= only=all
 while [ $# -gt 0 ]; do
     case $1 in
@@ -53,7 +53,7 @@ for fw in $legs; do
             fail=1
             continue
         fi
-        python3 -I "$PAX_ROOT/tests/mpx3-screen-probe.d/check.py" "$c" "$log" "$tier" "$fw" || fail=1
+        python3 -I "$PAX_ROOT/tests/mpx6-triage.d/probe-check.py" "$c" "$log" "$tier" "$fw" || fail=1
     done
 done
 exit "$fail"
