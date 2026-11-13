@@ -52,6 +52,7 @@ flags=(); [ "$tier" != release ] || flags=(--release)
 work=$PAX_BUILD/mpx6-triage/$tier
 mkdir -p "$work"
 d=$PAX_ROOT/tests/mpx6-triage.d
+python3 -I "$d/probe-mask-test.py" || die 'FAIL P-mask: detailed probe mask selftest'
 
 # T0: the stick's entries use only words kernel/triage and boot/triage.S read.
 for conf in limine-triage.conf limine-bisect.conf limine-fix.conf; do
@@ -78,6 +79,9 @@ done
 
 "$PAX_ROOT/tools/fetch-limine"
 elf=$("$PAX_ROOT/tools/build-kernel" ${flags[@]+"${flags[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work")
+# Reuse the same ELF: all costs on the boot line, deterministic outlier and
+# sustained slowness, overrides and the no-display case (both firmwares).
+bash "$PAX_ROOT/tests/mpx6-triage.d/probe.sh" --tier "$tier" --firmware "$firmware" --elf "$elf"
 printf '# px77d: no command; the boot runs every box and halts\n' > "$work/pax-run"
 "$PAX_ROOT/tools/mkinitramfs" "$work/triage.cpio" "/etc/pax-run=$work/pax-run" > "$work/initramfs.txt"
 image() { # name words... -> $work/name.iso
@@ -110,7 +114,8 @@ mask() { # the transcript without the screen's line, numbers masked where Limine
     tr -d '\r' < "$1" | sed -E 's/\x1b\[[0-9;=?]*[A-Za-z]//g' | sed -n '/PAX: the console/,$p' | sed -E '1s/.*(PAX: the console)/\1/' \
         | grep -av '^screen: ' | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g' \
         | sed -E '/^boot: [0-9]+ ms /s/[0-9]+/N/g' \
-        | sed -E '/^net: the console waited [0-9]+ ms /s/waited [0-9]+ ms/waited N ms/'
+        | sed -E '/^net: the console waited [0-9]+ ms /s/waited [0-9]+ ms/waited N ms/' \
+        | bash "$d/probe-mask"
 }
 for fw in $legs; do
     leg "$fw" plain plain

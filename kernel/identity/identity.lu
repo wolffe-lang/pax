@@ -340,6 +340,16 @@ pub fn calibrate() {
     }
 }
 
+// Print retained costs only: reporting never probes the framebuffer again.
+fn put_probe_samples(write: bool) {
+    var i: u64 = 0
+    while i < screen.probe_samples() {
+        if i != 0 { log.put(",") }
+        log.dec(screen.probe_sample(i, write) as int)
+        i += 1
+    }
+}
+
 /// `boot: <n> ms from the kernel's entry to its first program; the
 /// console drew for <m> ms of it (<s> scrolls, <b> bytes)`.
 pub fn report_boot() {
@@ -382,7 +392,21 @@ pub fn report_boot() {
         log.dec(screen.probe_write_cycles() as int)
         log.put(" cycles; copy when read <= ")
         log.dec(screen.copy_max() as int)
-        log.put(" x write")
+        log.put(" x write; minimum of ")
+        log.dec(screen.probe_samples() as int)
+        log.put(" samples; reads [")
+        put_probe_samples(false)
+        log.put("]; writes [")
+        put_probe_samples(true)
+        log.put("]; window ")
+        let window = screen.probe_window_cycles()
+        log.dec(window as int)
+        log.put(" cycles, ")
+        log.dec((window * 1000000 / hz) as int)
+        log.put(" us")
+        let injected = screen.probe_injection()
+        if injected == 1 { log.put("; injected outlier") }
+        else if injected == 2 { log.put("; injected slow") }
     }
     log.put("), ")
     log.dec(screen.bytes() as int)

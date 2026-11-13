@@ -74,8 +74,10 @@
 #      firmware's clock; the screen's own cycles): a measurement for the
 #      metal stick's A/B, no bound. <why> is how kernel/screen's attach
 #      chose the way, once: `fbread` or `fbwrite` (forced), or the probe's
-#      `read <r>, write <w> cycles; copy when read <= <k> x write`, and the
-#      way is what that rule gives for those numbers; a session with no
+#      `read <r>, write <w> cycles; copy when read <= <k> x write`, or
+#      that prefix followed by the complete minimum-of-five sample and
+#      window report. The declared minima must match the retained costs,
+#      and the way is what the rule gives; a session with no
 #      screen attached says `by none (no screen)`.
 #      T6 and T7 find that line by its own words (`boot: <n> ms from`):
 #      a boot from a disk (--usb-stick) prints the medium's `boot:
@@ -114,6 +116,7 @@ fi
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need readelf python3
+python3 -I "$here/mpx3-console.d/scroll-reason-test.py" || exit 1
 
 SESSIONS="ask-serial ask-ps2 pelt-serial pelt-eof-serial pelt-eof-ps2"
 image_of() { case $1 in ask-*) echo ask ;; *) echo pelt ;; esac; }
@@ -339,16 +342,10 @@ for leg in $legs; do
             if [[ $bl =~ ^boot:\ ([0-9]+)\ ms\ from\ the\ kernel\'s\ entry\ to\ its\ first\ program\;\ the\ console\ drew\ for\ ([0-9]+)\ ms\ of\ it\ \(([0-9]+)\ scrolls\ by\ (copy|redraw|none)\ \(([^\)]*)\),\ ([0-9]+)\ bytes\)$ ]]; then
                 [ "${BASH_REMATCH[2]}" -le "${BASH_REMATCH[1]}" ] || why+=" the console's share is more than the whole;"
                 way=${BASH_REMATCH[4]} how=${BASH_REMATCH[5]}
-                if [[ $how =~ ^read\ ([0-9]+),\ write\ ([0-9]+)\ cycles\;\ copy\ when\ read\ \<=\ ([0-9]+)\ x\ write$ ]]; then
-                    rule=redraw; [ "${BASH_REMATCH[1]}" -le $(( ${BASH_REMATCH[3]} * ${BASH_REMATCH[2]} )) ] && rule=copy
-                    [ "$way" = "$rule" ] || why+=" by $way, but its probe's numbers say $rule ('$how');"
-                elif [ "$how" = 'no screen' ]; then
-                    [ "$way" = none ] || why+=" by $way with no screen;"
-                elif [ "$how" = fbread ] || [ "$how" = fbwrite ]; then
-                    want=copy; [ "$how" = fbwrite ] && want=redraw
-                    [ "$way" = "$want" ] || why+=" by $way, though $how forces $want;"
+                if r=$(python3 -I "$here/mpx3-console.d/scroll-reason.py" "$way" "$how"); then
+                    :
                 else
-                    why+=" the way's reason is neither the probe's numbers nor fbread or fbwrite ('$how');"
+                    why+=" $r;"
                 fi
                 bn=$(grep -n -m1 -E "$timing" "$norm" | cut -d: -f1); rn=$(grep -n -m1 '^run 1: ' "$norm" | cut -d: -f1)
                 [ -n "$rn" ] && [ "$bn" -lt "$rn" ] || why+=" not before 'run 1:';"

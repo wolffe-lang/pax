@@ -229,7 +229,13 @@ program it times its own boot: `boot: <n> ms from the kernel's entry to
 its first program; the console drew for <m> ms of it (<s> scrolls by
 copy|redraw (<why>), <b> bytes)` (the TSC, its rate measured against 10 ms
 of the HPET or the PM timer), <why> being the word that forced the way or
-the probe's `read <r>, write <w> cycles; copy when read <= 4 x write`. A scroll either redraws, from the cell grid (the
+the probe's `read <r>, write <w> cycles; copy when read <= 4 x write; minimum of 5 samples; reads [r0,r1,r2,r3,r4]; writes [w0,w1,w2,w3,w4]; window <cycles> cycles, <us> us`.
+The read and write values before the rule are the independent minima; all ten
+samples follow in acquisition order. The window spans the five timed pairs and
+bookkeeping, not the warm-up, and microseconds use the boot's calibrated TSC
+rate (rounded down). It is measured once at the first attach, through the boot
+loader's mapping, and retained even when PAX later remaps the framebuffer.
+A scroll either redraws, from the cell grid (the
 screen's shadow in RAM), only the cells that changed, never reading the
 framebuffer, or copies the framebuffer onto itself as px19's scroll did.
 When the screen first attaches it times a 16 KiB read of the framebuffer
@@ -240,6 +246,14 @@ uncached and far dearer (pax#253: kasumi's GPU), so the scroll redraws;
 an emulator's framebuffer is ordinary host memory, where the copy is the
 cheaper way. The command-line words `fbread` (copy) and `fbwrite`
 (redraw) force either way (the metal A/B; `tests/mpx3-screen` V7 and V8).
+The minimum rejects isolated added delays without making a majority of samples
+wait out a stall; it does not protect against all five reads being slow.
+Test-only `pax.fbprobe=outlier` feeds read costs `[1000,100,100,100,100]`
+and `pax.fbprobe=slow` feeds five `1000`s, each with five writes of `100`;
+these replace costs in the same selector, not the actual framebuffer I/O.
+The line names `injected outlier` or `injected slow`, so these are never
+reported as measured throughput. Forced ways bypass injection and the probe.
+`tests/mpx6-triage.d/probe.sh` checks all these cases in QEMU on both firmwares.
 
 `tests/usb-stick` runs inside the console CI job in full/all tiers and
 explicit partial dispatches. It requires both SeaBIOS and OVMF, replays all
