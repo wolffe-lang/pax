@@ -77,8 +77,12 @@ for command,answer in [('cat /etc/motd','\nhello\n'),('lope list','/usr/share/tu
 check=work/('session-'+firmware+'-root.img')
 with image.open('rb') as f,check.open('wb') as o:
     f.seek(69206016);left=467644416
+    o.truncate(left);offset=0
     while left:
-        b=f.read(min(left,1048576));assert b;o.write(b);left-=len(b)
+        b=f.read(min(left,1048576));assert b
+        # Preserve logical bytes without allocating the partition's zero extents.
+        if b.count(0)!=len(b):o.seek(offset);o.write(b)
+        offset+=len(b);left-=len(b)
 r=subprocess.run(['e2fsck','-fn',check],capture_output=True);(work/('session-'+firmware+'.fsck')).write_bytes(r.stdout+r.stderr)
 assert r.returncode==0 and b'WARNING' not in r.stdout+r.stderr,(r.stdout,r.stderr)
 r=subprocess.run(['dumpe2fs','-h',check],capture_output=True,check=True)
