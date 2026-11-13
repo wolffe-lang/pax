@@ -7,6 +7,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **What the kernel holds too long, measured; three long calls made short (px131).** Every system call
+  runs with interrupts off until it returns, so the longest call a program can make is how long the tick,
+  the network and every other process wait. `latency` on the kernel's command line turns on an instrument
+  (`/proc/pax-latency`: the longest stretch with interrupts off and the call that made it, the scheduler's
+  longest gap, the ticks lost), and `tests/mpx6-latency` measures a sleeper, a loopback echo and a host's
+  pings beside each load, against Linux in a virtual machine of the same shape. Three calls a user could
+  make long are short now: munmap of a range with nothing mapped (3 s for 1 TiB, now under 0.3 ms), getrandom
+  (1.5 s for 8 MiB; it fills a page at a time and gives at most 16 KiB a call, as getrandom(2) allows) and
+  reads of /proc/<pid>/mem (0.4 s for 8 MiB, now 1.6 ms). The console's write, a large file write and fork
+  of a large process still hold interrupts off for their length: `notes/px131-long-kernel-paths.md` ranks
+  every long path and proposes the general rule.
+
 - **The console draws only what changes, once a write (px129).** At a real
   machine's console, full-screen programs drew visibly slowly while the same
   programs over ssh did not: the screen drew every cell a program wrote, at once

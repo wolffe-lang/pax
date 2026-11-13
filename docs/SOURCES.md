@@ -2402,3 +2402,16 @@ was and from the Intel SDM's account of write-combining memory; the measurements
 | QEMU's documentation of its character devices (`-chardev pipe,path=…`: `path.in` and `path.out`) and of `-serial chardev:` | QEMU 8.2 | tools/qemu-run's `--serial-chardev`, the slow UART's far end |
 | QEMU 8.2.2's 16550 with COM1 on a pipe drained at 11,520 bytes a second | binary | black box: a kernel that waits on THRE per byte waits 78-86 µs a byte, as the installed machine's did |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/user`, `kernel/serial`, `kernel/panic`, `kernel/power`, `kernel/procfs`, `kernel/sched` (`wake_input`, `kick`), `kernel/interrupts`, `kernel/xhci`, `boot/screen.S`, `boot/io.S`, `tools/screen-ref`, `tools/qemu-run`, `tests/mpx3-screen`, px125's `user/elf/muxprobe.c` and `tests/mpx7-mux` (B7) | this tree, and px125's branch | read and extended |
+
+## px131 — what the kernel holds too long
+
+No kernel's, driver's or C library's source was read. The rule and the inventory are read from this tree's own
+code; Linux was run as a black box in a virtual machine (its own kernel and modules, booted, never read).
+
+| source | version | read, for |
+|---|---|---|
+| Intel SDM vol. 3A §6.8.1, §6.10-§6.14; vol. 3B §18.17; vol. 2 (CLI, STI, RDTSC, RDRAND, CPUID, SYSCALL, SYSRET, IRETQ) | the current edition | the instrument's interval (IF set to clear and back), what a gate and SYSCALL do to IF, the time-stamp counter, RDRAND and CPUID's cost under a hypervisor |
+| getrandom(2), proc_pid_mem(5), munmap(2), clock_nanosleep(2), netdevice(7), init's duties in boot(7) | the Linux man-pages 6.9 | getrandom's short count above 256 bytes, /proc/<pid>/mem's reads, munmap of a range with nothing in it, the probe's sleeps, the Linux guest's interfaces (`user/elf/latinit.c`) |
+| QEMU's documentation of `-netdev user` (`hostfwd`, the gateway's address) and RFC 862 | QEMU 8.2 | the host's pings to the guest's echo, the guest's report to the host |
+| Linux 7.2.4 (the build host's kernel, `CONFIG_PREEMPT_LAZY`, `CONFIG_HZ=1000`) and its virtio modules | binaries | black box: the comparison column (`notes/px131-long-kernel-paths.md` §7) |
+| PAX's own `boot/isr.S`, `boot/sched.S`, `boot/user.S`, `kernel/interrupts`, `kernel/sched`, `kernel/user`, `kernel/vm`, `kernel/paging`, `kernel/process`, `kernel/trace_mem`, `kernel/procfs`, `kernel/netd`, the drivers | this tree | read for the rule and the inventory; extended |

@@ -1,0 +1,36 @@
+px131 — what the kernel holds too long: the prediction, written before the instrument and before any change.
+
+The rule as read from the code at 0e2843cf (notes/px131-long-kernel-paths.md, section 1, says it in full):
+every system call runs with interrupts off from SYSCALL to SYSRET; every interrupt handler runs with them
+off; kernel threads run with them on except inside sync.irq_save and sync.acquire. A system call gives the
+processor up only where it blocks. So the interrupts-off time of a call is its whole running time, and the
+longest such time is the longest call a process can make.
+
+P1  The five worst paths a user can cause, by worst interrupts-off time in one call (QEMU, KVM):
+    1. a console write on the framebuffer, uncapped by size: about 50 ns a byte to parse plus the drawing; a
+       flood of short lines on trunk's drawing redraws a whole screen a line (about 8 ms at 2560 x 1440);
+       with COM1 present, about 6 us a byte more under QEMU. One 1 MiB write: seconds.
+    2. fork of a process with much memory touched: an eager copy of every page, 1 GiB about 0.3 to 1 s.
+    3. a write of a large buffer to a file of the in-memory tree (frames taken and filled in the call):
+       256 MiB about 50 to 200 ms; its truncate or unlink, frames given back: tens of ms.
+    4. exit, munmap or exec of a process with much memory: tens to hundreds of ms a GiB.
+    5. a sync or fsync of an ext2 volume on a block device whose driver polls for completion: tens of ms
+       per MiB written, so seconds for a large dirty file.
+    Outside the user's reach: a device's polling wait or reset (AHCI, xHCI enumeration) inside an
+    interrupt or a call, bounded by its timeout: 100 ms to seconds.
+P2  The probe's wake-up lateness under each load is about the load's longest call plus up to two
+    quanta (20 ms): the hog is ahead of the sleeper in the run queue and keeps its quantum.
+P3  An echo over loopback under a hog that makes long calls waits about two of the hog's calls a hop;
+    over the network device, the receiving thread queued at the tail waits the same (px129's finding,
+    generalized).
+P4  Lost ticks: CLOCK_MONOTONIC, CLOCK_REALTIME, every sleep, every timeout counted in ticks (TCP's
+    timers, ARP's ageing, DHCP's retransmission and lease) run slow by the time interrupts were off
+    beyond one tick; the wall clock falls behind for good.
+P5  Linux in a VM of the same shape: wake-up lateness under every load within a few ms of idle; an echo
+    within a few ms; no load moves its clock.
+P6  Fixes cheap and local enough for this lane: a long loop inside one call that can stop and return a
+    short count (a console write cut into pieces that return what they wrote, as a write may) or a loop
+    whose state allows a reschedule between pieces. Anything that needs a call to keep its state across
+    a switch (fork's copy, a sync) is structural and a proposal.
+P7  The guard's worst three loads at trunk: the console flood, a large fork and a large file write; each
+    red against the same boot's idle baseline.
