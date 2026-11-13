@@ -5,7 +5,7 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 : "${PXG_CHECKPOINT_OUT:?set an owned output directory}"
 engine=${PXG_CHECKPOINT_ENGINE:-podman}
-image=6bab9e961bed5df88a060156f7e9967a8868c255eb396b5f48aa0fb6a9452f23
+image=f9e7da2acd85cb0e5d0aabae4ad12bb7c3500ed1079d4433aa3a42f3750f02df
 cpus=${PXG_CHECKPOINT_CPUS:?set allocated CPUs}
 mode=${1:-}
 case $mode in preflight|policy|inputs|installed) ;; *) printf 'usage: take preflight|policy|inputs|installed\n' >&2; exit 2 ;; esac
@@ -22,7 +22,7 @@ r=$1; mode=$2; out=$PXG_CHECKPOINT_OUT
 case $mode in
 preflight)
     for tool in git curl tar cc strip readelf python3 qemu-system-x86_64 xorriso cpio \
-                mke2fs debugfs dumpe2fs e2fsck sgdisk sfdisk fsck.fat make nm objcopy ld; do
+                mke2fs debugfs dumpe2fs e2fsck sgdisk sfdisk fsck.fat mtype make nm objcopy ld clang taskset; do
         command -v "$tool" >/dev/null || { printf 'REFUSED missing-tool=%s\n' "$tool"; exit 75; }
     done
     [ -f "$(cc -print-file-name=libc.a)" ] || { printf 'REFUSED static-libc-missing\n'; exit 75; }
@@ -44,7 +44,7 @@ PY
     bash -n tools/mkpxg tests/mpx6-install tests/distribution-install notes/pxg-image/take
     ;;
 policy)
-    printf 'baseline-image=%s\n' 6bab9e961bed5df88a060156f7e9967a8868c255eb396b5f48aa0fb6a9452f23
+    printf 'baseline-image=%s\n' f9e7da2acd85cb0e5d0aabae4ad12bb7c3500ed1079d4433aa3a42f3750f02df
     python3 -I tests/pax-release
     python3 -I tests/latest
     python3 -I tests/ci-plan
