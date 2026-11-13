@@ -279,6 +279,9 @@ still); a device's wake-up changes only the order in which ready threads run. At
 | green at `96986862` (before the replay), the guard and the scheduler | `notes/px131/rig/green-2a.manifest`, a light take, sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7` | section 5's table; `END ci-plan exit=0 secs=111`, `END latency exit=0 secs=88`, `END latency-2g exit=0 secs=45`, `END latency-tcg exit=0 secs=50`, `END sched exit=0 secs=17`, `END interrupts exit=0 secs=41` |
 | the delivered count by name | `tests/usb-session-selftest` U14 at `ec9c38a8`, red there; `d65baee7`, `b3ee7a36`, `b77b7548` | `FAIL U14: boot/isr.S lacks '.globl pax_tick_delivered'`, then `PASS U14` |
 | unmeasured, its own verdict | `tests/usb-session-selftest` U15 to U18 at `4bedc6b5`, red there; `7b0ebdef` | `FAIL U15: tools/usb-session has no Unmeasured verdict …`, then `PASS U15` to `PASS U18` |
+| the flood's rate is the host's | the six-CPU take at `a7a69460`, record sha256 `9e2e7499a73c0890fc161467af113921d242a1f902e1f6bf5667afdb53795bb8`, and its plant `5b8047f2`, `23471f62d7a659b107402b6c23950ce2173b74470a98f73834f1c0ec13761d7d`; the paired measurement (section 4) | `FAIL L6` on every native boot at 50,400 to 55,000 answered a second (0.35, 0.45, 0.35; the plant 0.29), the release tier 0.94 and 0.95; L2's one `FAIL` 7,575/2,453 us with interrupts off at most 1.9 ms |
+| L2's floor, L6's offered rate, unmeasured and its holds, seen red | `tests/mpx6-latency.d/rows-selftest` at `f577949c` | `rows-selftest: FAIL S1: rows.py has no l2_parts`; S1 to S5 pass from `8eb61778` |
+| the offered flood | `2064251d`, `37467a66`, `bb57f45a`, `86fa9f30`, `ffe2c55a`; the light-slot check at `28344b2f` | offered 3,999 to 4,001 a second, the hog 0.99 |
 | the takes at the head, native and release, and the plant | `notes/px131/rig/{green-2a,green-2b,release-2,plant-2,final-2}.manifest` | their records and `END` lines are in the PR |
 
 ## 8. Decisions
