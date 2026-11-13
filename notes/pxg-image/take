@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Targeted source-pin/image-policy/installed-ext2 checkpoint, no hardware.
+# Run preflight alone before allocating a build; repeat it for the record.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+: "${PXG_CHECKPOINT_OUT:?set an owned output directory}"
+engine=${PXG_CHECKPOINT_ENGINE:-podman}
+image=6bab9e961bed5df88a060156f7e9967a8868c255eb396b5f48aa0fb6a9452f23
+cpus=${PXG_CHECKPOINT_CPUS:?set allocated CPUs}
+mode=${1:-}
+case $mode in preflight|policy|inputs|installed) ;; *) printf 'usage: take preflight|policy|inputs|installed\n' >&2; exit 2 ;; esac
+mkdir -p "$PXG_CHECKPOINT_OUT/tmp" "$PXG_CHECKPOINT_OUT/cache"
+"$engine" run --rm -i --memory 12g \
+    -v "$root:$root" -v "$PXG_CHECKPOINT_OUT:$PXG_CHECKPOINT_OUT" \
+    -e TMPDIR="$PXG_CHECKPOINT_OUT/tmp" -e PAX_BUILD="$PXG_CHECKPOINT_OUT/build" \
+    -e PAX_CACHE="$PXG_CHECKPOINT_OUT/cache" -e PXG_CHECKPOINT_OUT -e CARGO_BUILD_JOBS=2 \
+    -e SOURCE_DATE_EPOCH=1700000000 \
+    "$image" taskset -c "$cpus" bash -s -- "$root" "$mode" <<'INNER'
+set -euo pipefail
+cd "$1"
+r=$1; mode=$2; out=$PXG_CHECKPOINT_OUT
+case $mode in
+preflight)
+    for tool in git curl tar cc strip readelf python3 qemu-system-x86_64 xorriso cpio \
+                mke2fs debugfs dumpe2fs e2fsck sgdisk sfdisk fsck.fat make nm objcopy ld; do
+        command -v "$tool" >/dev/null || { printf 'REFUSED missing-tool=%s\n' "$tool"; exit 75; }
+    done
+    [ -f "$(cc -print-file-name=libc.a)" ] || { printf 'REFUSED static-libc-missing\n'; exit 75; }
+    [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ] || { printf 'REFUSED uefi-firmware-missing\n'; exit 75; }
+    python3 -I - "$r" <<'PY'
+from pathlib import Path
+import ast, shutil, subprocess, sys
+r=Path(sys.argv[1])
+assert shutil.disk_usage(r).free > 35*1024**3, 'free-space-floor-35-GiB'
+changed=subprocess.check_output(['git','-C',str(r),'diff','--name-only','bbe91e1671f7f8101268ad758816cff5398337c3'],text=True).splitlines()
+for name in changed:
+    p=r/name
+    if p.is_file() and p.read_bytes().startswith(b'#!/usr/bin/env python3'):
+        ast.parse(p.read_text(),filename=name)
+for name in ('tests/mpx6-install.d/install.py','tests/mpx6-install.d/session.py','tests/mpx6-install.d/pxg-rows.py'):
+    ast.parse((r/name).read_text(),filename=name)
+print('preflight: source scripts parse, baseline tools and 35 GiB floor hold')
+PY
+    bash -n tools/mkpxg tests/mpx6-install tests/distribution-install notes/pxg-image/take
+    ;;
+policy)
+    printf 'baseline-image=%s\n' 6bab9e961bed5df88a060156f7e9967a8868c255eb396b5f48aa0fb6a9452f23
+    python3 -I tests/pax-release
+    python3 -I tests/latest
+    python3 -I tests/ci-plan
+    ;;
+inputs)
+    tests/mpx6-install --only inputs --rows smoke --tier native --firmware bios \
+        --work "$out/input-work" --inputs "$out/inputs"
+    ;;
+installed)
+    export PAX_INSTALL_TIER=native
+    PAX_WOLF=$(tools/fetch-wolf); export PAX_WOLF
+    d=$r/tests/mpx6-install.d
+    casework=$out/installed-ext2
+    [ ! -e "$casework" ] || { printf 'REFUSED existing-installed-fixture\n'; exit 75; }
+    python3 -I "$d/install.py" "$r" "$out/inputs" "$casework" no vdb
+    python3 -I "$d/verify.py" "$r" "$casework" no vdb
+    python3 -I "$d/gap.py" "$casework" "$out/inputs/build/disktools/limine/limine"
+    for firmware in bios uefi; do
+        python3 -I "$d/session.py" "$casework" "$firmware" "$casework/log-last.img"
+    done
+    ;;
+esac
+INNER
