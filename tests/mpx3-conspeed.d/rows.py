@@ -4,7 +4,7 @@ its rows.
 
     rows.py TABLE.txt GRID ACCEL [uart UART.txt]
                                     (GRID: the cells conspeed must report, e.g. 256x90; ACCEL kvm or tcg;
-                                     `uart`: the slow-UART leg, which holds C1, C8, C9 and C10 alone,
+                                     `uart`: the slow-UART leg, which holds C1, C8, C9, C10 and C11 alone,
                                      UART.txt its far end's summary line, uart.py's)
     rows.py --selftest DIR          (each DIR/red-ACCEL[-HOST].txt must fail, each green-… pass)
 
@@ -40,7 +40,12 @@ against 2.8), so a bound on the raw figure held on one host and not the next.
      it never pauses more than 0.5 s (uart.py's longest pause between reads that found bytes). A kernel
      whose ring only the writer's next byte moves leaves the line idle through conspeed's idle second
      after the tests, as does one that waits per byte (nothing is left to send when the writer stops).
-     C9 and C10 are stated under KVM and SKIPPED by name under TCG.
+  C11 (h) the same leg: a write into a full ring costs no more:     bytes' mean    <= 3 units
+     `bytes` runs its frames 10 ms apart and the line takes 115 bytes in 10 ms, so after its first frames
+     each of its 28,800 bytes finds COM1's ring (64 KiB) full: a kernel that touches the UART for a
+     byte it drops pays a port access a byte (about 2 us under KVM: 60 ms a frame), one that waits
+     87 us. C9 holds the least frame, which the empty ring serves.
+     C9, C10 and C11 are stated under KVM and SKIPPED by name under TCG.
 
 The bounds sit between the trunk the rows were written at and the fix they hold, on both hosts'
 tables (selftest/, notes/px129-console-speed.md): each about 1.3 times or more from both under KVM.
@@ -152,12 +157,13 @@ def check_uart(got, rows, grid, accel, out, line=""):
         f"the table: {'a header' if got else 'no header'}; " + ("unit and bytes, each with frames" if len(have) == 2 else "no unit or no bytes"))
     row("C8", got == grid, f"the grid: {got or 'none'} cells (want {grid})")
     for r in ("C2", "C3", "C4", "C5", "C6", "C7"):
-        out.append(f"SKIP {r} reason=uart: the slow-UART leg holds C9 and C10 alone")
+        out.append(f"SKIP {r} reason=uart: the slow-UART leg holds C9, C10 and C11 alone")
     if len(have) < 2 or rows["unit"]["least"] <= 0:
         return 1
     if accel != "kvm":
         out.append("SKIP C9 reason=tcg: (f) a slow UART: its bound is stated under KVM")
         out.append("SKIP C10 reason=tcg: (g) COM1's backlog: its bound is stated under KVM")
+        out.append("SKIP C11 reason=tcg: (h) a full ring: its bound is stated under KVM")
         return fail
     u = rows["unit"]["least"]
     b = rows["bytes"]["least"]
@@ -171,6 +177,9 @@ def check_uart(got, rows, grid, accel, out, line=""):
             f"at byte {m.group(4)} of {m.group(1)} in {m.group(2)} s)")
     else:
         row("C10", False, f"(g) COM1's backlog: no pause figure from the line's far end ({line.strip()[:120] or 'nothing'})")
+    bm = rows["bytes"]["mean"]
+    row("C11", bm / u <= 3, f"(h) a full ring: bytes {bm:.3f} ms mean over {rows['bytes']['frames']} frames, {bm / u:.2f} units "
+        f"of {u:.3f} ms (bound 3; {bm * 1e3 / max(rows['bytes']['bytes'], 1):.3f} us a byte)")
     return fail
 
 
