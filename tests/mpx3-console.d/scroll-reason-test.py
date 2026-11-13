@@ -2,6 +2,10 @@
 """T7's reason decoder: real detailed costs, old images, and near misses."""
 import importlib.util
 from pathlib import Path
+import sys
+
+# The suite may run from a pinned, clean snapshot shared by several steps.
+sys.dont_write_bytecode = True
 
 spec = importlib.util.spec_from_file_location('scroll_reason', Path(__file__).with_name('scroll-reason.py'))
 module = importlib.util.module_from_spec(spec)
