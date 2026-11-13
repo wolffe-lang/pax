@@ -169,7 +169,7 @@ def l6_verdict(spin, fl):
         return 'unmeasured', 'flood:%d %d ops of 1 ms, spin %d: %.2f; the host counted no offered datagrams' % (
             FLOOD_RATE, fl['ops'], spin['ops'], share)
     offered, answered = sent / secs, (fl.get('nn') or 0) / secs
-    text = 'flood:%d %d ops of 1 ms, spin %d: %.2f; offered %.0f a second, answered %.0f, lost %s, p50 %s us' % (
+    text = 'flood:%d %d ops of 1 ms, spin %d: %.2f; offered %.0f a second, answered %.0f (the 5 ms pings too), lost %s, p50 %s us' % (
         FLOOD_RATE, fl['ops'], spin['ops'], share, offered, answered, fl.get('nlost'), fl.get('n50'))
     if offered < OFFER_MIN * FLOOD_RATE:
         return 'unmeasured', text + '; the host offered under %.0f %% of %d a second' % (OFFER_MIN * 100, FLOOD_RATE)
