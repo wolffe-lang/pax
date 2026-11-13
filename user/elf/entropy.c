@@ -34,7 +34,9 @@
  * every getrandom the new image makes, as its entry and exit stops read it
  * (PTRACE_GETREGS: orig_rax 318, rsi the size, rdx the flags, rax the
  * answer, -11 for EAGAIN): the C library's own start-up draw, and what the
- * program did after it (its exit status).
+ * program did after it (its exit status). A stop is an entry when rax holds
+ * -ENOSYS (ptrace(2)'s syscall-entry-stop), so the order of execve's own
+ * stops cannot shift the count; a getrandom never answers -ENOSYS here.
  *
  * Exit 0 when every line was printed, 1 when a call the probe needs to go on
  * failed (named). Written from getrandom(2), random(4), getauxval(3) and the
@@ -211,7 +213,7 @@ static void startup_rows(const char *self) {
         execl(self, "entropy", "alloc", (char *)0);
         _exit(127);
     }
-    int st = 0, calls = 0, entry = 1, execd = 0, options = 0;
+    int st = 0, calls = 0, options = 0;
     unsigned long long nr = 0, size = 0, flags = 0;
     for (;;) {
         if (waitpid(c, &st, 0) != c) {
@@ -232,26 +234,20 @@ static void startup_rows(const char *self) {
         } else if (sig == (SIGTRAP | 0x80)) {
             struct user_regs_struct r;
             if (ptrace(PTRACE_GETREGS, c, 0, &r) == 0) {
-                if (entry) {
+                if ((long long)r.rax == -ENOSYS) {
                     nr = r.orig_rax;
                     size = r.rsi;
                     flags = r.rdx;
-                } else {
-                    if (nr == 59 && (long long)r.rax == 0)
-                        execd = 1;
-                    if (execd && nr == SYS_getrandom) {
-                        calls++;
-                        printf("entropy: %s startup getrandom n %llu flags %s ret %lld\n", phase, size,
-                               fname((unsigned)flags), (long long)r.rax);
-                    }
+                } else if (r.orig_rax == SYS_getrandom && nr == SYS_getrandom) {
+                    /* the forked child draws nothing before its execve, so every
+                       getrandom here is the new image's */
+                    calls++;
+                    printf("entropy: %s startup getrandom n %llu flags %s ret %lld\n", phase, size,
+                           fname((unsigned)flags), (long long)r.rax);
+                    nr = 0;
                 }
             }
-            entry = !entry;
-        } else if (sig == SIGTRAP) {
-            /* execve's own SIGTRAP (no PTRACE_O_TRACEEXEC): the new image starts at an entry */
-            execd = 1;
-            entry = 1;
-        } else if (sig != SIGSTOP) {
+        } else if (sig != SIGTRAP && sig != SIGSTOP) {
             deliver = sig;
         }
         ptrace(PTRACE_SYSCALL, c, 0, (void *)(long)deliver);
