@@ -52,6 +52,10 @@
      pax_tick_count kernel/timer's tick count (px07): written by the
                     handler, polled by threads, so it is a word read
                     volatile, not a module `var` (wolf-lang#598)
+     pax_tick_delivered
+                    kernel/timer's count of tick interrupts taken (px131):
+                    the same kind of word; pax_tick_count follows the
+                    clock, so a host reads this one for the ticks lost
 
    Routines:
      pax_load_gdt(gdtr)   LGDT, then CS = 0x08 (a far return), DS, ES, SS,
@@ -419,6 +423,9 @@ pax_idtr:
         .zero 16
         .globl pax_tick_count
 pax_tick_count:
+        .zero 8
+        .globl pax_tick_delivered
+pax_tick_delivered:
         .zero 8
         /* px131: kernel/latency's words (32): 0 on, 1 the open interval's
            TSC (0 none), 2 its RIP, 3 its vector or tag, 4 its number or
