@@ -203,7 +203,8 @@ pax_isr_common:
         movq    %rsp, %rbx
         andq    $-16, %rsp
         cld
-        call    pax_lat_close
+        movq    pax_lat+248(%rip), %rax /* kernel/latency's close, through its word 31 */
+        callq   *%rax
         movq    %rbx, %rsp
 2:
         cmpq    $0x102, 120(%rsp)       /* px102: stopped syscall's kernel continuation */
@@ -327,7 +328,8 @@ pax_wait:
         testq   $1, pax_lat(%rip)       /* px131: IF set for the HLT closes */
         jz      1f
         pushq   %rbx                    /* %rsp 16-aligned for the call */
-        call    pax_lat_close
+        movq    pax_lat+248(%rip), %rax /* kernel/latency's close (word 31) */
+        callq   *%rax
         popq    %rbx
 1:      sti
         hlt
@@ -361,16 +363,6 @@ pax_lat_open:
         ret
         .size pax_lat_open, . - pax_lat_open
 
-/* px131: pax_lat_close for a kernel that does not link kernel/latency
-   (kmain_usbcheck, the metal kernels): there the instrument is never on,
-   so nothing calls it, but the paths above name it. kernel/latency's
-   own pax_lat_close, a strong definition, takes this one's place
-   wherever it is linked. */
-        .weak pax_lat_close
-        .type pax_lat_close, @function
-pax_lat_close:
-        ret
-        .size pax_lat_close, . - pax_lat_close
 
         .globl pax_int3
         .type pax_int3, @function
@@ -428,12 +420,16 @@ pax_idtr:
         .globl pax_tick_count
 pax_tick_count:
         .zero 8
-        /* px131: kernel/latency's words: 0 on, 1 the open interval's TSC
-           (0 none), 2 its RIP, 3 its vector or tag, 4 its number or
-           slot, then kernel/latency's own (32 words); its histogram (64
-           words, by the interval's TSC cycles' highest bit); the longest
-           since the last read for each system call number (512), each
-           vector (256) and each thread slot's irq_save sections (64). */
+        /* px131: kernel/latency's words (32): 0 on, 1 the open interval's
+           TSC (0 none), 2 its RIP, 3 its vector or tag, 4 its number or
+           slot, then kernel/latency's own, and 31 the address of its
+           pax_lat_close, written before word 0 turns on: the paths here
+           call it through that word, so the assembly names no wolf
+           function and a kernel without kernel/latency links as before.
+           Then its histogram (64 words, by the interval's TSC cycles'
+           highest bit); the longest since the last read for each system
+           call number (512), each vector (256) and each thread slot's
+           irq_save sections (64). */
         .p2align 6
         .globl pax_lat
 pax_lat:
