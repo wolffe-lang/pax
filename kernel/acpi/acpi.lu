@@ -2,6 +2,7 @@
 //! Only physical ranges Limine maps as ACPI/reclaimable/reserved-mapped are
 //! dereferenced. Every SDT is length-bounded and checksummed before parsing.
 use boot_info
+use cpus
 use log
 
 var started: bool = false
@@ -98,6 +99,7 @@ fn madt_entry(a: u64, kind: u64, n: u64) {
     }
 }
 fn madt(a: u64, n: u64) {
+    cpus.observe(a, n)
     if n < 44 { return }
     var off: u64 = 44
     while off + 2 <= n {
@@ -153,6 +155,10 @@ fn parse(a: u64) {
 pub fn start() {
     if unsafe { started } { return }
     unsafe { started = true }
+    discover()
+    cpus.report()
+}
+fn discover() {
     platform_report()
     let h = boot_info.hhdm()
     let r = hhdm_pointer(boot_info.rsdp())
