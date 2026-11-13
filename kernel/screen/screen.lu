@@ -790,6 +790,64 @@ const PROBE_SAMPLES: u64 = 5
 var probe_read: u64 = 0
 var probe_write: u64 = 0
 
+// The costs actually compared, retained until identity's boot line. No
+// serial output or delay inside the timed window. Module state, written
+// with IF clear at the first attach, only read thereafter.
+var probe_r0: u64 = 0
+var probe_r1: u64 = 0
+var probe_r2: u64 = 0
+var probe_r3: u64 = 0
+var probe_r4: u64 = 0
+var probe_w0: u64 = 0
+var probe_w1: u64 = 0
+var probe_w2: u64 = 0
+var probe_w3: u64 = 0
+var probe_w4: u64 = 0
+var probe_window: u64 = 0
+var probe_injected: u64 = 0
+
+fn keep_probe_sample(i: u64, r: u64, w: u64) {
+    // # Safety: module state, first attach's IF clear; i < PROBE_SAMPLES.
+    unsafe {
+        if i == 0 { probe_r0 = r
+            probe_w0 = w }
+        else if i == 1 { probe_r1 = r
+            probe_w1 = w }
+        else if i == 2 { probe_r2 = r
+            probe_w2 = w }
+        else if i == 3 { probe_r3 = r
+            probe_w3 = w }
+        else { probe_r4 = r
+            probe_w4 = w }
+    }
+}
+
+/// The five retained costs, never a new measurement. An out-of-range
+/// index returns zero; the reporter visits exactly PROBE_SAMPLES.
+pub fn probe_sample(i: u64, write: bool) -> u64 {
+    // # Safety: as `probe_read_cycles`.
+    unsafe {
+        if i == 0 { if write { probe_w0 } else { probe_r0 } }
+        else if i == 1 { if write { probe_w1 } else { probe_r1 } }
+        else if i == 2 { if write { probe_w2 } else { probe_r2 } }
+        else if i == 3 { if write { probe_w3 } else { probe_r3 } }
+        else if i == 4 { if write { probe_w4 } else { probe_r4 } }
+        else { 0 }
+    }
+}
+
+pub fn probe_samples() -> u64 { PROBE_SAMPLES }
+pub fn probe_window_cycles() -> u64 {
+    // # Safety: as `probe_read_cycles`.
+    unsafe { probe_window }
+}
+
+/// 0: measured; 1 or 2: deterministic test-only costs (named in the log).
+pub fn probe_injection() -> u64 {
+    // # Safety: as `probe_read_cycles`.
+    unsafe { probe_injected }
+}
+
 /// px87: how the way was decided: 0 the probe, 1 `fbread`, 2 `fbwrite`;
 /// and whether it was (once, at the first attach: no retry, no second
 /// probe, the way kept for the boot).
@@ -835,27 +893,42 @@ fn probe_copy(va: u64, bytes: u64, room: u64, v: u64) -> bool {
         pax_fb_copy(pax_screen_cells as u64, va, n)
         pax_fb_fill(va, v, n / 8)
     }
+    // Test-only deterministic costs enter the same selector as measured
+    // ones; the actual I/O still runs and the boot line names injection.
+    let injected: u64 = if boot_info.cmdline_has("pax.fbprobe=outlier") { 1 }
+        else if boot_info.cmdline_has("pax.fbprobe=slow") { 2 } else { 0 }
     var r: u64 = 0xffffffffffffffff
     var w: u64 = 0xffffffffffffffff
     var i: u64 = 0
+    let begin = unsafe { pax_rdtsc() }
     while i < PROBE_SAMPLES {
         let t0 = unsafe { pax_rdtsc() }
         unsafe { pax_fb_copy(pax_screen_cells as u64, va, n) }
         let t1 = unsafe { pax_rdtsc() }
         unsafe { pax_fb_fill(va, v, n / 8) }
         let t2 = unsafe { pax_rdtsc() }
-        if t1 - t0 < r {
-            r = t1 - t0
+        var read = t1 - t0
+        var write = t2 - t1
+        if injected != 0 {
+            read = if injected == 2 || i == 0 { 1000 } else { 100 }
+            write = 100
         }
-        if t2 - t1 < w {
-            w = t2 - t1
+        keep_probe_sample(i, read, write)
+        if read < r {
+            r = read
+        }
+        if write < w {
+            w = write
         }
         i += 1
     }
+    let end = unsafe { pax_rdtsc() }
     // # Safety: module state, written here with IF clear (attach).
     unsafe {
         probe_read = r
         probe_write = w
+        probe_window = end - begin
+        probe_injected = injected
     }
     r <= COPY_MAX * w
 }
