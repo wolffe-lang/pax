@@ -182,6 +182,7 @@ first program it prints how long its boot took and how much of that the console 
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `291011dd` (wolf 0.2.36) |
 | burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.39) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
+| pxg | the package manager, `/bin/pxg`; selected readers only on PAX, transactions refused | `a497e373` (its own wolf 0.2.38 pin) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `3a9983ee` |
 | sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
@@ -189,6 +190,13 @@ first program it prints how long its boot took and how much of that the console 
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
 | ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `8594073c` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
+
+`tools/mkpxg OUTDIR` builds the package manager from `user/pxg.pin` using its source tree's own toolchain,
+not the image's compiler. Two separate source checkouts must produce identical static bytes. Both images carry
+only the production `/bin/pxg`, never its failpoint or qualification probes. `pxg version` and `pxg compare`
+work on PAX, but this is not package-update support: live-root mutations report `live-root-is-pm05`, and
+initialising an alternate root on the installer's plain ext2 reports `unqualified-filesystem ext2-family
+(journal not qualified on PAX)`. The installer suite and `tests/distribution-install` hold these refusals.
 
 Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
 each. `tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT` assembles both image variants at one clean
