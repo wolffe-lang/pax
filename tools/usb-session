@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import time
 
 KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
@@ -32,6 +33,16 @@ KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
 # CLEAN_INTERVALS must be left.
 HOLD_TICKS = 100
 CLEAN_INTERVALS = 8
+# px131: a host can stall the guest through a hold past measuring the repeat
+# at all (fewer than CLEAN_INTERVALS clean intervals): that is `repeat
+# unmeasured`, neither the kernel's pass nor its failure. The session is
+# then held again, each time a fresh boot, at most HOLDS times in all; a
+# measured result, a pass or a failure, is final at once and never held
+# again. HOLDS unmeasured holds are a red under their own name
+# (`FAIL R-unmeasured …`, exit UNMEASURED_EXIT), told apart from a failing
+# kernel (exit 1).
+HOLDS = 3
+UNMEASURED_EXIT = 3
 NS_PER_TICK = 10000151 # PAX's CLOCK_MONOTONIC: kernel/user's ticks times this
 HOLD_WALL_SECONDS = 30
 MIN_REPORTS = 15
@@ -63,6 +74,11 @@ def repeat_verdict(row, hold):
     return values
 
 
+class Unmeasured(RuntimeError):
+    """px131: the host stalled the guest through the hold past measuring
+    the repeat: neither a pass nor a failure of the kernel's."""
+
+
 def repeat_period(stamps, t0, samples):
     """px131: the repeat's delay and period from the probe's stamps (ns after
     its first read, which was at `t0` ns of the guest's CLOCK_MONOTONIC, or
@@ -88,7 +104,7 @@ def repeat_period(stamps, t0, samples):
     intervals = [(b - a) / 1e6 for i, (a, b) in enumerate(zip(stamps[1:], stamps[2:])) if not stalled(i + 1)]
     left_out = len(stamps) - 2 - len(intervals)
     if len(intervals) < CLEAN_INTERVALS:
-        raise RuntimeError(f'repeat unmeasured: {left_out} of {len(stamps) - 2} intervals span ticks the guest lost '
+        raise Unmeasured(f'repeat unmeasured: {left_out} of {len(stamps) - 2} intervals span ticks the guest lost '
                            f'({len(lost)} losses in the hold), {len(intervals)} left')
     median = sorted(intervals)[len(intervals) // 2]
     mean = sum(intervals) / len(intervals)
@@ -349,6 +365,47 @@ def run(args):
     print(f'PASS USB {args.topology} {args.firmware}: {len(rows)} rows, delay {delay:.3f}ms, period {median:.3f}ms', flush=True)
 
 
+def session(args, run_once=None):
+    """px131: `run` up to HOLDS times while the repeat is unmeasured, each
+    hold a fresh boot in its own directory (OUTPUT, then OUTPUT-hold2,
+    OUTPUT-hold3) and each printed; a measured result is final at once (a
+    failure raises). OUTPUT/holds.txt lists every hold. Returns 0, or
+    UNMEASURED_EXIT after HOLDS unmeasured holds."""
+    run_once = run_once or run
+    first = Path(args.output).resolve()
+    first.mkdir(parents=True, exist_ok=True)
+    (first / 'holds.txt').unlink(missing_ok=True)
+    seen = []
+    for hold in range(1, HOLDS + 1):
+        out = first if hold == 1 else first.with_name(f'{first.name}-hold{hold}')
+        error = None
+        try:
+            run_once(argparse.Namespace(**{**vars(args), 'output': str(out)}))
+        except Unmeasured as unmeasured:
+            error = unmeasured # (an `as` name is unbound after its block)
+        except RuntimeError as failure:
+            with (first / 'holds.txt').open('a') as log:
+                log.write(f'{hold} failed {out.name} {failure}\n')
+            raise
+        if error is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / 'repeat.txt').write_text(f'verdict unmeasured\nhold {hold} of {HOLDS}\nreason {error}\n')
+            seen.append(f'hold {hold}: {error}')
+            with (first / 'holds.txt').open('a') as log:
+                log.write(f'{hold} unmeasured {out.name} {error}\n')
+            print(f'NOTE USB {args.topology} {args.firmware}: {error} (hold {hold} of {HOLDS})'
+                  + ('; held again, a fresh boot' if hold < HOLDS else ''), flush=True)
+            continue
+        with (out / 'repeat.txt').open('a') as result:
+            result.write(f'verdict measured\nhold {hold} of {HOLDS}\n')
+        with (first / 'holds.txt').open('a') as log:
+            log.write(f'{hold} measured {out.name}\n')
+        return 0
+    print(f'FAIL R-unmeasured {args.firmware}-{args.topology}: the host stalled the guest past measuring the repeat '
+          f'in {HOLDS} of {HOLDS} holds ({"; ".join(seen)})', flush=True)
+    return UNMEASURED_EXIT
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--image', required=True)
@@ -362,4 +419,4 @@ if __name__ == '__main__':
     parser.add_argument('--qemu', action='append', default=[], help='one extra QEMU argument, repeatable')
     parser.add_argument('--flag', action='append', default=[], help='one tools/qemu-run flag, repeatable (px76)')
     parser.add_argument('--elf', help='--no-serial: the kernel whose symbols place the transcript (default: kmain_console.elf beside the image)')
-    run(parser.parse_args())
+    sys.exit(session(parser.parse_args()))
