@@ -1,0 +1,18 @@
+# notes/dw02/rig/final.manifest — dw02's take at the head, native: the planner's test; the kernels that
+# link kernel/random and run programs, built; mpx6-entropy's six configurations on both firmwares under
+# KVM and on BIOS under TCG; then the suites whose programs the change reaches, BIOS: the loader's
+# AT_RANDOM (mpx3-loader), the system calls (mpx3-user), the latency guard's getrandom load (mpx6-latency,
+# KVM), the devices' rights and reads (mpx5-users), and the utilities' draws (mpx3-boreutils).
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/dw02/rig/lib.sh
+rig engine-ns committed=../../..:HEAD:notes/dw02/rig/engine-ns
+rig final.manifest committed=../../..:HEAD:notes/dw02/rig/final.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step kernels-native image=localhost/px75-ubuntu:2 tools=python3,readelf,curl,xorriso script=step.sh -- kernels native kmain_console kmain_session kmain_user kmain_loader kmain_boreutils kmain_sockets kmain_net kmain_usbcheck kmain_tour
+step entropy-kvm image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,clang,readelf,curl,xorriso script=step.sh -- suite mpx6-entropy --tier native --firmware both --accel kvm
+step entropy-tcg image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,xorriso script=step.sh -- again mpx6-entropy --tier native --firmware bios --accel tcg
+step loader image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx3-loader --tier native --firmware bios
+step user image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx3-user --tier native --firmware bios
+step latency image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier native --firmware bios --mem 1024 --accel kvm
+step users image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx5-users --tier native --firmware bios
+step boreutils image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx3-boreutils --tier native --firmware bios
