@@ -77,6 +77,18 @@ def value(text, name):
     return tuple(map(int, m.groups())) if m else None
 
 
+def flush_error_rule(target):
+    if target < 1:
+        raise RuntimeError("a flush fault needs a measured backing-flush ordinal")
+    stages = []
+    for state in range(1, target):
+        stages.append('[set-state]\nevent = "flush_to_disk"\n'
+                      f'state = "{state}"\nnew_state = "{state + 1}"\n')
+    stages.append('[inject-error]\nevent = "flush_to_disk"\niotype = "flush"\n'
+                  f'state = "{target}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+    return "\n".join(stages)
+
+
 class Rows:
     def __init__(self, args):
         self.a = args
@@ -121,7 +133,7 @@ class Rows:
             raise RuntimeError("incomplete virtio request trace: " + name)
         return events
 
-    def fault(self, name, disk, kind, sector, stage):
+    def fault(self, name, disk, kind, sector, stage, sequence=1, descriptor=None, prior_sequence=None):
         events = self.requests(name)
         errors = [(i, e) for i, e in enumerate(events) if e[3] != 0]
         valid = len(errors) == 1
@@ -132,10 +144,18 @@ class Rows:
             valid = event[0] == kind and event[3] == 1 and (sector is None or event[1] == sector)
             _, journal = geometry(disk)
             commit_sectors = {(journal + j) * 8 for j in range(1, 64)
-                              if at(disk, (journal + j) * 4096, 12) == struct.pack(">III", 0xC03B3998, 2, 1)}
+                              if at(disk, (journal + j) * 4096, 12) == struct.pack(">III", 0xC03B3998, 2, sequence)}
             before = events[:index]
             commits = [i for i, e in enumerate(before) if e[0] == "write" and e[1] in commit_sectors and e[3] == 0]
-            descriptors = [i for i, e in enumerate(before) if e[0] == "write" and e[1] == (journal + 1) * 8 and e[3] == 0]
+            descriptor_sector = (journal + (1 if descriptor is None else descriptor)) * 8
+            descriptors = [i for i, e in enumerate(before) if e[0] == "write" and e[1] == descriptor_sector and e[3] == 0]
+            if prior_sequence is not None:
+                prior = {(journal + j) * 8 for j in range(1, 64)
+                         if at(disk, (journal + j) * 4096, 12) == struct.pack(">III", 0xC03B3998, 2, prior_sequence)}
+                preceding = [i for i, e in enumerate(before) if e[0] == "write" and e[1] in prior and e[3] == 0]
+                durable = bool(preceding) and any(e[0] == "flush" and e[3] == 0 for e in before[preceding[-1] + 1:])
+                detail += f" earlier-commit-durable={durable}"
+                valid = valid and durable
             if stage == "pre-mount":
                 valid = valid and any(e[0] == "write" and e[1] == 64 * 1024 * 1024 // 512 and e[3] == 0 for e in before)
                 valid = valid and not any(e[0] == "write" and e[1] < 64 * 1024 * 1024 // 512 for e in before)
@@ -234,13 +254,7 @@ class Rows:
         cfg = self.out / (name + ".cfg")
         if sector.startswith("flush-"):
             target = int(sector.split("-", 1)[1])
-            stages = []
-            for state in range(1, target):
-                stages.append('[set-state]\nevent = "flush_to_disk"\n'
-                              f'state = "{state}"\nnew_state = "{state + 1}"\n')
-            stages.append('[inject-error]\nevent = "flush_to_disk"\niotype = "flush"\n'
-                          f'state = "{target}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
-            cfg.write_text("\n".join(stages))
+            cfg.write_text(flush_error_rule(target))
         else:
             selected = (journal + 1) * 8 if sector == "log" else bb * 8
             cfg.write_text('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
@@ -313,6 +327,101 @@ class Rows:
                  and value(text, "mount-after") == (-1, 16),
                  "a failed mounted-state write/barrier refuses mount and retains its device claim")
 
+    def incomplete(self):
+        control = self.image("prefix-control")
+        text = self.boot("prefix-control", control, "prefix-control")
+        _, journal = geometry(control)
+        def positions(kind, sequence):
+            return [j for j in range(1, 64) if at(control, (journal + j) * 4096, 12)
+                    == struct.pack(">III", 0xC03B3998, kind, sequence)]
+        descriptors, commits = positions(1, 2), positions(2, 2)
+        events = self.requests("prefix-control")
+        check = process(["e2fsck", "-fn", control], capture_output=True, text=True)
+        (self.out / "prefix-control.fsck.txt").write_text(check.stdout + check.stderr)
+        layout = (len(descriptors) == 1 and len(commits) == 1 and bool(positions(2, 1))
+                  and value(text, "anchor-fsync") == (0, 0) and value(text, "fsync") == (0, 0)
+                  and value(text, "unmount") == (0, 0) and check.returncode == 0
+                  and all(e[3] == 0 for e in events))
+        self.row("JF-prefix-control", layout,
+                 "two healthy transactions define the measured descriptor and barrier positions")
+        if not layout:
+            raise RuntimeError("no measured two-transaction layout for incomplete-log rows")
+        descriptor, commit = descriptors[0], commits[0]
+        dindex = next(i for i, e in enumerate(events) if e[0] == "write" and e[1] == (journal + descriptor) * 8)
+        cindex = next(i for i, e in enumerate(events) if e[0] == "write" and e[1] == (journal + commit) * 8)
+        barriers = [i for i in range(dindex + 1, cindex) if events[i][0] == "flush"]
+        if len(barriers) != 1:
+            raise RuntimeError("the measured second transaction has no unique precommit barrier")
+        backing, dirty = 0, False
+        for event in events[:barriers[0] + 1]:
+            if event[0] == "write":
+                dirty = True
+            elif event[0] == "flush":
+                if dirty:
+                    backing += 1
+                dirty = False
+        for kind in ("log", "flush"):
+            name = "JF-incomplete-" + kind + "-EIO"
+            disk = self.image(name)
+            cfg = self.out / (name + ".cfg")
+            sector = (journal + descriptor) * 8
+            if kind == "log":
+                cfg.write_text('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
+                               f'sector = "{sector}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+            else:
+                cfg.write_text(flush_error_rule(backing))
+            text = self.boot(name, disk, "prefix-failure", cfg=cfg)
+            fault_ok = self.fault(name, disk, "write" if kind == "log" else "flush",
+                                  sector if kind == "log" else None,
+                                  "descriptor" if kind == "log" else "precommit",
+                                  sequence=2, descriptor=descriptor, prior_sequence=1)
+            published = any(at(disk, (journal + j) * 4096, 12) == struct.pack(">III", 0xC03B3998, 2, 2)
+                            for j in range(1, 64))
+            after = [value(text, key) for key in ("write-after", "fsync-after", "open-after")]
+            self.row(name, fault_ok and value(text, "anchor-fsync") == (0, 0)
+                     and value(text, "fsync") == (-1, 5) and not published
+                     and all(v is not None and v[0] == -1 for v in after),
+                     "a failed second transaction keeps the earlier committed transaction durable")
+            recovered = self.boot(name + "-recover", disk, "prefix-recover")
+            check = process(["e2fsck", "-fn", disk], capture_output=True, text=True)
+            (self.out / (name + ".fsck.txt")).write_text(check.stdout + check.stderr)
+            self.row(name + "-replay", fault_ok and "JF anchor-bytes=1" in recovered
+                     and value(recovered, "uncommitted-open") == (-1, 2)
+                     and value(recovered, "later-open") == (-1, 2)
+                     and value(recovered, "unmount") == (0, 0) and check.returncode == 0,
+                     "reboot replays only the earlier full transaction; incomplete names absent and fsck clean")
+
+    def no_flush_boundaries(self):
+        extra = ["-global", "virtio-blk-pci.config-wce=off", "-global", "virtio-blk-pci.write-cache=off"]
+        disk = self.image("no-flush-ro")
+        before = sha(disk)
+        text = self.boot("no-flush-ro", disk, "ro-control", extra=extra)
+        self.row("JF-no-flush-read-only", value(text, "mount") == (0, 0)
+                 and "JF old-bytes=1" in text and value(text, "unmount") == (0, 0)
+                 and sha(disk) == before and not any(e[0] == "write" for e in self.requests("no-flush-ro")),
+                 "a clean journal can be read-only without a barrier, with no filesystem write")
+        disk = self.image("no-flush-remount")
+        before = sha(disk)
+        text = self.boot("no-flush-remount", disk, "ro-remount", extra=extra)
+        self.row("JF-no-flush-remount", value(text, "mount") == (0, 0)
+                 and value(text, "remount") == (-1, 5) and "flush barrier" in text
+                 and sha(disk) == before and not any(e[0] == "write" for e in self.requests("no-flush-remount")),
+                 "writable remount is refused by name before writes when its barrier is absent")
+        disk = self.image("no-flush-replay")
+        prepared = self.boot("no-flush-replay-prepare", disk, "committed-cut")
+        _, journal = geometry(disk)
+        start = struct.unpack(">I", at(disk, journal * 4096 + 28, 4))[0]
+        committed = any(at(disk, (journal + j) * 4096, 12) == struct.pack(">III", 0xC03B3998, 2, 1)
+                        for j in range(1, 64))
+        self.row("JF-no-flush-replay-fixture", value(prepared, "fsync") == (0, 0) and start != 0 and committed
+                 and all(e[3] == 0 for e in self.requests("no-flush-replay-prepare")),
+                 "a healthy cut leaves a committed transaction for the read-only replay refusal")
+        before = sha(disk)
+        text = self.boot("no-flush-replay", disk, "ro-replay-refuse", extra=extra)
+        self.row("JF-no-flush-replay", value(text, "mount") == (-1, 5) and "flush barrier" in text
+                 and sha(disk) == before and not any(e[0] == "write" for e in self.requests("no-flush-replay")),
+                 "even a read-only mount refuses needed replay without a barrier, before home or journal writes")
+
     def plain(self):
         disk = self.out / "plain-no-flush.img"
         with disk.open("wb") as f:
@@ -360,6 +469,8 @@ class Rows:
         high = int(re.search(r"old_block=(\d+)", facts)[1])
         group = int(re.search(r"old_group=(\d+)", facts)[1])
         disk = fixture / "full.img"
+        committed_disk = fixture / "after-commit.img"
+        run(["cp", "--reflink=auto", "--sparse=always", disk, committed_disk])
         _, journal = geometry(disk)
         text = self.boot("large-reuse", disk, "reuse")
         start = struct.unpack(">I", at(disk, journal * 4096 + 28, 4))[0]
@@ -373,8 +484,26 @@ class Rows:
                  and "JF old-bytes=1" in recovered and value(recovered, "unmount") == (0, 0)
                  and check.returncode == 0,
                  f"group {group}: freed block not reused before commit; cut/reboot keeps old bytes and clean fsck")
+        text = self.boot("large-reuse-committed", committed_disk, "reuse-commit")
+        start = struct.unpack(">I", at(committed_disk, journal * 4096 + 28, 4))[0]
+        reused = at(committed_disk, high * 4096, 4096)
+        recovered = self.boot("large-committed-recover", committed_disk, "recover-reuse")
+        check = process(["e2fsck", "-fn", committed_disk], capture_output=True, text=True)
+        (fixture / "after-commit.fsck.txt").write_text(check.stdout + check.stderr)
+        self.row("JF-large-reuse-after-commit", group > 511 and value(text, "unlink-old") == (0, 0)
+                 and value(text, "free-fsync") == (0, 0) and value(text, "reuse-write") == (4096, 0)
+                 and value(text, "reuse-fsync") == (0, 0) and start != 0 and reused == b"N" * 4096
+                 and "JF recovered-bytes=1" in recovered and value(recovered, "old-after") == (-1, 2)
+                 and value(recovered, "unmount") == (0, 0) and check.returncode == 0,
+                 f"group {group}: commit releases reuse guard; a cut after the new commit preserves new bytes and clean fsck")
 
     def main(self):
+        if self.a.only == "boundaries":
+            self.incomplete()
+            self.no_flush_boundaries()
+            if self.a.large:
+                self.large()
+            return 1 if self.failed else 0
         if self.a.only == "large":
             self.large()
             return 1 if self.failed else 0
@@ -416,6 +545,8 @@ class Rows:
         self.eio("JF-checkpoint-EIO", "checkpoint", "home")
         self.eio("JF-checkpoint-flush-EIO", "checkpoint-barrier", "flush-4")
         self.eio("JF-cache-EIO", "cache-error", "home")
+        self.incomplete()
+        self.no_flush_boundaries()
         if self.a.guard_kernel:
             self.exhaustion()
         if self.a.large:
@@ -429,7 +560,7 @@ if __name__ == "__main__":
     p.add_argument("--guard-kernel", type=Path)
     p.add_argument("--firmware", choices=("bios", "uefi"), default="bios")
     p.add_argument("--large", action="store_true")
-    p.add_argument("--only", choices=("large", "plain", "no-flush"))
+    p.add_argument("--only", choices=("large", "plain", "no-flush", "boundaries"))
     p.add_argument("out", type=Path)
     args = p.parse_args()
     try:
