@@ -4,8 +4,18 @@
 # another file, so Limine places its tables and the module elsewhere: `paging: limine cr3`, `initramfs: module`,
 # the map's usable bytes, the frame counts). The firmware's and Limine's own bytes before PAX's first line,
 # escape sequences among them, vary: from it on.
+# px129: two things a host's timing decides are read as the measurements they are. kernel/timer's calibration
+# prints a line for each window it set aside and each pair of windows that disagreed, and when it has printed
+# one, the pair that then agreed, or that none did (its header names them `timer: LAPIC calibration: …`): those
+# four forms, whole lines and nothing else, are left out; the line naming the clock and the rate the
+# calibration took stays (its numbers masked). And kernel/screen's attach probe times a framebuffer read and a
+# write and chooses the scroll's way from them (`copy when read <= N x write`): the boot line's way is masked
+# where the probe chose it, never where a word forced it (`fbread`, `fbwrite`).
 set -u
+calibration='^timer: LAPIC calibration: (window [0-9]+ set aside: [0-9]+ Hz, the clock [0-9]+ us against the PM timer'"'"'s [0-9]+ us|windows [0-9]+ and [0-9]+ disagree: [0-9]+ and [0-9]+ Hz|windows [0-9]+ and [0-9]+ of [0-9]+ agree|no two windows in a row agreed in [0-9]+; took [0-9]+ Hz)$'
 tr -d '\r' < "$1" | sed -E 's/\x1b\[[0-9;=?]*[A-Za-z]//g' | sed -n '/PAX: the console/,$p' | sed -E '1s/.*(PAX: the console)/\1/' \
-    | grep -av '^screen: ' | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g' \
+    | grep -av '^screen: ' | grep -avE "$calibration" \
+    | sed -E '/^(timer|clock|paging|memory|frames|initramfs: module|user: frames)/s/(0x)?[0-9a-f]*[0-9][0-9a-f]*/N/g' \
     | sed -E '/^boot: [0-9]+ ms /s/[0-9]+/N/g' \
+    | sed -E '/^boot: N ms /s/ scrolls by (copy|redraw) \(read N, write N cycles; copy when read <= N x write\)/ scrolls by the probe'"'"'s way (read N, write N cycles; copy when read <= N x write)/' \
     | sed -E '/^net: the console waited [0-9]+ ms /s/waited [0-9]+ ms/waited N ms/'
