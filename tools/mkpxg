@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Build the production pxg from user/pxg.pin with that tree's own toolchain.
+# Two independent checkouts, equal stripped bytes, ELF64 x86-64 ET_EXEC,
+# no interpreter or dynamic segment. Only pxg and its sums.txt leave the build.
+# PAX_PXG_REPO may name a local source cache holding the exact pinned commit.
+# Build on baseline x86-64 Linux with a static glibc toolchain.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die 'usage: mkpxg OUTDIR'
+[ "$(uname -s):$(uname -m)" = Linux:x86_64 ] || die 'mkpxg needs Linux x86-64'
+need git curl tar readelf strip cc
+. "$PAX_ROOT/user/pxg.pin"
+[ -n "${PXG_REPO:-}" ] && printf '%s' "${PXG_REV:-}" | grep -Eq '^[0-9a-f]{40}$' \
+    || die 'user/pxg.pin must name a repository and a full source commit'
+mkdir -p "$1" "$PAX_CACHE"
+out=$(cd "$1" && pwd)
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-pxg.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repository revision directory
+    mkdir -p "$3"
+    git -C "$3" init -q
+    "$PAX_ROOT/tools/fetch-retry" "$3" "$1" "$2" "$2" || die "cannot fetch $1 at $2"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+tree "${PAX_PXG_REPO:-$PXG_REPO}" "$PXG_REV" "$w/a/pxg"
+toml=$w/a/pxg/wolf-toolchain.toml
+key() { # section key, the same pin format the source builder verifies
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version); wsha=$(key wolf x86_64-unknown-linux-gnu); wline=$(key wolf version_line)
+lv=$(key lupin version); lsha=$(key lupin x86_64-unknown-linux-gnu); lline=$(key lupin version_line)
+srepo=$(key std repo); srev=$(key std rev)
+for value in "$wv" "$wsha" "$wline" "$lv" "$lsha" "$lline" "$srepo" "$srev"; do
+    [ -n "$value" ] || die 'incomplete pxg wolf-toolchain.toml'
+done
+for digest in "$wsha" "$lsha"; do
+    printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$' || die 'invalid toolchain archive digest'
+done
+printf '%s' "$srev" | grep -Eq '^[0-9a-f]{40}$' || die 'invalid std revision'
+say "pxg $PXG_REV: wolf $wv, lupin $lv, std $srev (the source tree's own pin)"
+archive() { # name version digest repository -> cached path, digest checked twice
+    local arc=$PAX_CACHE/$1-$2-x86_64-unknown-linux-gnu-$3.tar.gz k
+    if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$3" ]; then
+        curl -sSfL --retry 3 -o "$arc.part" \
+            "https://github.com/wolffe-lang/$4/releases/download/v$2/$1-$2-x86_64-unknown-linux-gnu.tar.gz" \
+            || die "cannot download $1 $2"
+        mv "$arc.part" "$arc"
+    fi
+    for k in 1 2; do
+        [ "$(sha256_of "$arc")" = "$3" ] || die "$1 $2 archive digest mismatch on read $k"
+    done
+    say "$1 $2 archive: sha256 $3, read twice"
+    printf '%s\n' "$arc"
+}
+arc=$(archive wolf "$wv" "$wsha" wolf-lang)
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+[ -x "$wolf" ] && [ -f "$w/wolf/libwolf_rt.a" ] || die 'wolf archive lacks compiler or runtime'
+[ "$("$wolf" --version | head -n 1)" = "$wline" ] || die 'wolf version line mismatch'
+arc=$(archive lupin "$lv" "$lsha" wolf-interp)
+mkdir -p "$w/lupin"
+tar -xzf "$arc" -C "$w/lupin" --strip-components=1
+lupin=$w/lupin/lupin
+[ -x "$lupin" ] && [ "$("$lupin" --version | head -n 1)" = "$lline" ] || die 'lupin version line mismatch'
+std=$w/wolf/std
+bundled=$(tr -d '[:space:]' < "$std/STD-REV" 2>/dev/null || true)
+if [ "$bundled" != "$srev" ]; then
+    tree "https://github.com/$srepo" "$srev" "$w/std-src"
+    mkdir -p "$w/std"
+    git -C "$w/std-src" archive HEAD std | tar -x -C "$w"
+    std=$w/std
+    printf '%s\n' "$srev" > "$std/STD-REV"
+fi
+# Each checkout invokes the public source's static builder unmodified. It
+# also makes test executables; neither those nor its short symlink are copied.
+tree "$w/a/pxg" "$PXG_REV" "$w/b/pxg"
+for k in a b; do
+    (cd "$w/$k/pxg" && WOLF_BIN=$wolf LUPIN_BIN=$lupin WOLF_STD=$std TMPDIR=$w/$k \
+        sh tools/build --static) >&2
+done
+one=$(sha256_of "$w/a/pxg/target/static/paxage")
+two=$(sha256_of "$w/b/pxg/target/static/paxage")
+[ "$one" = "$two" ] || { say "REFUSED: pxg checkout builds differ: $one, then $two"; exit 1; }
+bin=$out/pxg
+cp "$w/a/pxg/target/static/paxage" "$bin"
+chmod 755 "$bin"
+readelf -hW "$bin" | grep -Eq 'Class: +ELF64' || die 'pxg is not ELF64'
+readelf -hW "$bin" | grep -Eq 'Machine: +Advanced Micro Devices X86-64' || die 'pxg is not x86-64'
+readelf -hW "$bin" | grep -Eq 'Type: +EXEC' || die 'pxg is not ET_EXEC'
+! readelf -lW "$bin" | grep -Eq 'INTERP|DYNAMIC' || die 'pxg has an interpreter or dynamic segment'
+"$bin" version >&2 || die 'pxg version'
+[ "$("$bin" compare '1~rc-1' '1-1')" = -1 ] || die 'pxg version comparison'
+printf 'pxg %s %s\n' "$one" "$(wc -c < "$bin" | tr -d ' ')" | tee "$out/sums.txt"
+say "pxg built in two independent checkouts, identical bytes: $one"
