@@ -53,10 +53,23 @@ policy)
 inputs)
     tests/mpx6-install --only inputs --rows smoke --tier native --firmware bios \
         --work "$out/input-work" --inputs "$out/inputs"
+    # No compiler runs during the installed-disk rows. Keep only their boot
+    # loader, not rebuildable compiler archives and toolchains, in the cache.
+    python3 -I - "$out/cache" <<'PY'
+from pathlib import Path
+import shutil, sys
+for p in Path(sys.argv[1]).iterdir():
+    if p.name == 'limine-12.9.1':
+        continue
+    if p.is_dir() and not p.is_symlink():
+        shutil.rmtree(p)
+    else:
+        p.unlink()
+print('checkpoint: discarded rebuildable compiler cache before disk fixtures')
+PY
     ;;
 installed)
     export PAX_INSTALL_TIER=native
-    PAX_WOLF=$(tools/fetch-wolf); export PAX_WOLF
     d=$r/tests/mpx6-install.d
     casework=$out/installed-ext2
     [ ! -e "$casework" ] || { printf 'REFUSED existing-installed-fixture\n'; exit 75; }
