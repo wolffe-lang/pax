@@ -40,13 +40,18 @@
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
 tier=${PAX_TRIAGE_TIER:-native} firmware=${PAX_TRIAGE_FIRMWARE:-both}
+only_selftest=0
 while [ $# -gt 0 ]; do
     case $1 in
         --tier) tier=$2; shift 2;;
         --firmware) firmware=$2; shift 2;;
-        *) die 'usage: mpx6-triage [--tier native|release] [--firmware bios|uefi|both]';;
+        --selftest) only_selftest=1; shift;;
+        *) die 'usage: mpx6-triage [--tier native|release] [--firmware bios|uefi|both] [--selftest]';;
     esac
 done
+# T2's mask against its fixtures first (tests/mpx6-triage.d/selftest/README.md); --selftest stops there.
+"$PAX_ROOT/tests/mpx6-triage.d/selftest.sh" || die "FAIL T2: the mask's selftest"
+[ "$only_selftest" = 0 ] || exit 0
 case $firmware in both) legs='bios uefi';; bios|uefi) legs=$firmware;; *) die 'bad firmware';; esac
 flags=(); [ "$tier" != release ] || flags=(--release)
 work=$PAX_BUILD/mpx6-triage/$tier
