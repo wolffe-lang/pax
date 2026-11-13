@@ -955,6 +955,23 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     NONE
 }
 
+/// Available firmware processors are distinct from the one active processor.
+fn paxcpus(base: u64) -> u64 {
+    var n = put_s(base, 0, "available ")
+    if cpus.valid() { n = put_dec(base, n, cpus.available()) }
+    else { n = put_s(base, n, "unknown") }
+    n = put_s(base, n, "\nactive ")
+    n = put_dec(base, n, cpus.active())
+    if cpus.valid() {
+        n = put_s(base, n, "\nsource ACPI MADT\nonline-capable ")
+        n = put_dec(base, n, cpus.online_capable())
+        n = put_s(base, n, "\ndisabled ")
+        n = put_dec(base, n, cpus.disabled_entries())
+        return put_b(base, n, 10)
+    }
+    put_s(base, n, "\nsource unavailable\n")
+}
+
 /// px131: `/proc/pax-latency`'s text at `base`: its length; then
 /// kernel/latency's window starts again. Microseconds against
 /// kernel/clock; `since the last read` is since the last open.
@@ -976,22 +993,6 @@ pub fn child_at(d: u64, k: u64) -> u64 {
 /// `vector` is a vector, 0x100 a system call (`nr` its number), 0x200 an
 /// irq_save section (`nr` the thread's slot) or 0x201 a HLT's wait; a
 /// thread is its pid, or 0x1000000nn for kernel slot nn.
-fn paxcpus(base: u64) -> u64 {
-    var n = put_s(base, 0, "available ")
-    if cpus.valid() { n = put_dec(base, n, cpus.available()) }
-    else { n = put_s(base, n, "unknown") }
-    n = put_s(base, n, "\nactive ")
-    n = put_dec(base, n, cpus.active())
-    if cpus.valid() {
-        n = put_s(base, n, "\nsource ACPI MADT\nonline-capable ")
-        n = put_dec(base, n, cpus.online_capable())
-        n = put_s(base, n, "\ndisabled ")
-        n = put_dec(base, n, cpus.disabled_entries())
-        return put_b(base, n, 10)
-    }
-    put_s(base, n, "\nsource unavailable\n")
-}
-
 fn paxlat(base: u64) -> u64 {
     if !latency.on() {
         return put_s(base, 0, "latency off\n")
