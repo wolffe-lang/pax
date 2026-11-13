@@ -31,7 +31,7 @@ of one vector is held, further ones at the same vector are lost), the IA-PC HPET
 
 ## 2. The prediction, scored
 
-Committed first (`e5a975d2`, `notes/px131/prediction-2.txt`), before the rows and any change:
+Committed first (`73357a24`, `notes/px131/prediction-2.txt`), before the rows and any change:
 
 - **C1** (the clocks count delivered ticks and stand still through a stretch): held.
 - **C2** (beside console writes the clocks keep about 8 %, beside file writes about a quarter; a 2 % bound red by more
@@ -109,13 +109,15 @@ from the fourth on are for that.
 - **L5 the network's wake-ups:** beside `spin`, the host's ping's p99 at most three times its p99 at `idle`. KVM only.
 - **L6 a hog under a ping flood:** `flood`'s ops (1 ms of CPU each) at least half of `spin`'s. KVM only.
 
-And the guest's memory is backed before it boots (`-mem-prealloc`): a first touch of a guest frame otherwise costs the
-host a page fault, and a fork's or an mmap's fresh frames showed those as stretches of 30 to 150 ms now and then, on
-trunk's kernel as on this one; with the network's wake-ups at once, `spin`'s worst ping fell to a few milliseconds and
-such a stretch alone could fail L2.
+And the guest's memory is backed before it boots (`-mem-prealloc`, found here and moved into the first part,
+`1e5d8fd6`): a first touch of a guest frame otherwise costs the host a page fault, and a fork's, an mmap's or an exit's
+frames showed those as stretches of 30 to 150 ms now and then, on trunk's kernel as on this one; with the network's
+wake-ups at once, `spin`'s worst ping fell to a few milliseconds and such a stretch alone could fail L2.
 
-Under KVM at 1 GiB, BIOS and UEFI (and BIOS at 2 GiB), red at the rows' commit `736f0830` (the first part's kernel) and
-green at `96986862` (record sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7`):
+Under KVM at 1 GiB, BIOS and UEFI (and BIOS at 2 GiB), red at the rows' commit and green with the fixes and the backed
+memory. Both records were taken before this part was replayed onto the first part's later commits (a link fix, the
+backed memory): at `736f0830` and `96986862`, kept as `px131-clocks-wake-before-rebase`; the green record's sha256
+`f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7`:
 
 | row | before | after |
 |---|---|---|
@@ -150,13 +152,13 @@ still); a device's wake-up changes only the order in which ready threads run. At
 
 | what | where | result |
 |---|---|---|
-| the prediction | `e5a975d2` | before the rows |
-| the rows: the probe's clocks and `flood`, the host's flood, L4 to L6 | `903d6872`, `aef2d6a8`, `e73183ab`; the rig `736f0830` | |
-| **red at the rows' commit** | `notes/px131/rig/red-2.manifest` at `736f0830` (the first part's kernel), a light take, record sha256 `106be51c03ef7b2675231122ccc2919065663c08be1a7db52927b97e9a155805` | `FAIL L4 native-bios-1024 console:65536` (both clocks 0.071 of the counter's time), `FAIL L4 … write:64` (0.399), `FAIL L5 native-bios-1024` (the ping beside `spin` p99 40,147 us, at idle 1,357: 29.59 times), and the same three on UEFI (0.073, 0.309, 26.30 times); L6 held (1.00); `END latency exit=1 secs=93` |
-| the clocks | `39515cc9`, `01ec0fa6`, `5101bba6`, `812b5544` | |
-| the wake-ups | `17b78f90`, `26d75f4d` | |
-| the guest's memory backed | `96986862` | |
-| green at `96986862`, the guard and the scheduler | `notes/px131/rig/green-2a.manifest`, a light take, sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7` | section 5's table; `END ci-plan exit=0 secs=111`, `END latency exit=0 secs=88`, `END latency-2g exit=0 secs=45`, `END latency-tcg exit=0 secs=50`, `END sched exit=0 secs=17`, `END interrupts exit=0 secs=41` |
+| the prediction | `73357a24` | before the rows |
+| the rows: the probe's clocks and `flood`, the host's flood, L4 to L6 | `f5a02ace`, `08109412`, `e2709ab5`; the rig `d29d7121` | |
+| **red at the rows' commit** | `notes/px131/rig/red-2.manifest` at `736f0830` (before the replay; `d29d7121` after it): the first part's kernel, a light take, record sha256 `106be51c03ef7b2675231122ccc2919065663c08be1a7db52927b97e9a155805` | `FAIL L4 native-bios-1024 console:65536` (both clocks 0.071 of the counter's time), `FAIL L4 … write:64` (0.399), `FAIL L5 native-bios-1024` (the ping beside `spin` p99 40,147 us, at idle 1,357: 29.59 times), and the same three on UEFI (0.073, 0.309, 26.30 times); L6 held (1.00); `END latency exit=1 secs=93` |
+| the clocks | `6d30b0ff`, `68a8ca9b`, `ccffc6b2`, `490cc70d` | |
+| the wake-ups | `b03a6d12`, `3b68baee` | |
+| the guest's memory backed | `1e5d8fd6` (the first part's) | |
+| green at `96986862` (before the replay), the guard and the scheduler | `notes/px131/rig/green-2a.manifest`, a light take, sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7` | section 5's table; `END ci-plan exit=0 secs=111`, `END latency exit=0 secs=88`, `END latency-2g exit=0 secs=45`, `END latency-tcg exit=0 secs=50`, `END sched exit=0 secs=17`, `END interrupts exit=0 secs=41` |
 | the takes at the head, native and release, and the plant | `notes/px131/rig/{green-2a,green-2b,release-2,plant-2}.manifest` | their records and `END` lines are in the PR |
 
 ## 8. Decisions
@@ -180,6 +182,6 @@ processor) is the plan.
     answered); (B) leave them: a stretch of 2 s in a USB command's wait is rare.
 16. **The flood's budget.** (A) none until a flood is seen to starve a process: the row holds the hog's share and will
     be red first (recommended); (B) the budget of section 4 now.
-17. **The guest's memory in the guard.** (A) backed before boot, PAX's and Linux's alike (implemented, recommended: the
-    host's page faults are not the guest's stretches); (B) left to fault: the yardstick of L2 is now a few milliseconds,
+17. **The guest's memory in the guard.** (A) backed before boot, PAX's and Linux's alike (implemented in the first
+    part, recommended: the host's page faults are not the guest's stretches); (B) left to fault: the yardstick of L2 is now a few milliseconds,
     so a fault of the host's could fail it.
