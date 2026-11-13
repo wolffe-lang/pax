@@ -3,6 +3,7 @@
  *
  *   entropy           the measurement, then `entropy later` run two seconds on
  *   entropy later     the later process's part
+ *   entropy alloc     allocate, print one line, exit 0 (the traced child below)
  *
  * One line a fact on standard output, each `entropy: <phase> ...`, phase
  * `early` (the boot's first program, before anything else draws) or `later`:
@@ -14,6 +15,8 @@
  *   entropy: early getrandom flags F n N ret R errno E words W hirep H
  *   entropy: early read PATH [nonblock] n N ret R errno E words W hirep H
  *   entropy: early malloc ok
+ *   entropy: early startup getrandom n N flags F ret R
+ *   entropy: early startup exit S getrandom-calls K
  *   entropy: early child status S
  *   entropy: early end
  *
@@ -26,18 +29,30 @@
  * without printing a byte. `hieq` is the same test on AT_RANDOM's two halves.
  * No random byte is ever printed.
  *
+ * `startup`: the probe runs itself as `entropy alloc` under ptrace(2)
+ * (PTRACE_TRACEME, then PTRACE_SYSCALL with PTRACE_O_TRACESYSGOOD) and prints
+ * every getrandom the new image makes, as its entry and exit stops read it
+ * (PTRACE_GETREGS: orig_rax 318, rsi the size, rdx the flags, rax the
+ * answer, -11 for EAGAIN): the C library's own start-up draw, and what the
+ * program did after it (its exit status).
+ *
  * Exit 0 when every line was printed, 1 when a call the probe needs to go on
  * failed (named). Written from getrandom(2), random(4), getauxval(3) and the
  * Intel SDM vol. 2 (CPUID); no kernel's or C library's source.
  */
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include <sys/auxv.h>
+#include <sys/ptrace.h>
+#include <sys/user.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -181,6 +196,70 @@ static void cap_rows(void) {
     fclose(f);
 }
 
+/* The C library's start-up draw, watched: `entropy alloc` traced to its end. */
+static void startup_rows(const char *self) {
+    fflush(stdout);
+    pid_t c = fork();
+    if (c < 0) {
+        printf("entropy: %s startup fork FAILED errno %s\n", phase, ename(errno));
+        return;
+    }
+    if (c == 0) {
+        if (ptrace(PTRACE_TRACEME, 0, 0, 0) != 0)
+            _exit(126);
+        raise(SIGSTOP);
+        execl(self, "entropy", "alloc", (char *)0);
+        _exit(127);
+    }
+    int st = 0, calls = 0, entry = 1, execd = 0, options = 0;
+    unsigned long long nr = 0, size = 0, flags = 0;
+    for (;;) {
+        if (waitpid(c, &st, 0) != c) {
+            printf("entropy: %s startup wait FAILED errno %s\n", phase, ename(errno));
+            return;
+        }
+        if (WIFEXITED(st) || WIFSIGNALED(st))
+            break;
+        int sig = WIFSTOPPED(st) ? WSTOPSIG(st) : 0;
+        int deliver = 0;
+        if (!options) {
+            /* the child's own SIGSTOP: from here every system call stops twice */
+            if (ptrace(PTRACE_SETOPTIONS, c, 0, PTRACE_O_TRACESYSGOOD) != 0) {
+                printf("entropy: %s startup options FAILED errno %s\n", phase, ename(errno));
+                ptrace(PTRACE_KILL, c, 0, 0);
+            }
+            options = 1;
+        } else if (sig == (SIGTRAP | 0x80)) {
+            struct user_regs_struct r;
+            if (ptrace(PTRACE_GETREGS, c, 0, &r) == 0) {
+                if (entry) {
+                    nr = r.orig_rax;
+                    size = r.rsi;
+                    flags = r.rdx;
+                } else {
+                    if (nr == 59 && (long long)r.rax == 0)
+                        execd = 1;
+                    if (execd && nr == SYS_getrandom) {
+                        calls++;
+                        printf("entropy: %s startup getrandom n %llu flags %s ret %lld\n", phase, size,
+                               fname((unsigned)flags), (long long)r.rax);
+                    }
+                }
+            }
+            entry = !entry;
+        } else if (sig == SIGTRAP) {
+            /* execve's own SIGTRAP (no PTRACE_O_TRACEEXEC): the new image starts at an entry */
+            execd = 1;
+            entry = 1;
+        } else if (sig != SIGSTOP) {
+            deliver = sig;
+        }
+        ptrace(PTRACE_SYSCALL, c, 0, (void *)(long)deliver);
+    }
+    printf("entropy: %s startup exit %d getrandom-calls %d\n", phase, WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st),
+           calls);
+}
+
 static const unsigned FLAGS[] = {
     0, GRND_NONBLOCK, GRND_RANDOM, GRND_RANDOM | GRND_NONBLOCK, GRND_INSECURE, GRND_INSECURE | GRND_NONBLOCK,
     GRND_RANDOM | GRND_INSECURE, 0x8,
@@ -188,6 +267,16 @@ static const unsigned FLAGS[] = {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (argc > 1 && strcmp(argv[1], "alloc") == 0) {
+        /* volatile: the allocation is the point, so the compiler may not drop it */
+        char *volatile p = malloc(4096);
+        if (!p)
+            return 1;
+        p[0] = 7;
+        free(p);
+        printf("entropy: alloc ok\n");
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "later") == 0)
         phase = "later";
     /* The very first thing: a strict and an insecure draw, before the probe's
@@ -232,6 +321,7 @@ int main(int argc, char **argv) {
     memset(m, 1, 100000);
     free(m);
     printf("entropy: %s malloc ok\n", phase);
+    startup_rows(argv[0][0] == '/' ? argv[0] : "/bin/entropy");
     cap_rows();
     fflush(stdout);
     sleep(2);
