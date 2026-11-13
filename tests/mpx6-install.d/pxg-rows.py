@@ -2,6 +2,7 @@
 """Judge pxg's selected readers and named refusals on installer-created ext2."""
 from pathlib import Path
 import re
+import shlex
 import sys
 
 EXPECTED = {
@@ -28,6 +29,12 @@ def judge(text, release):
 
 
 def selftest():
+    # init resolves its repository directory before filesystem qualification.
+    # Both installer fixtures create /home/pax; only the trust root is absent.
+    keys = Path(__file__).with_name('pxg.keys').read_text().splitlines()
+    init = next(line for line in keys if line.startswith('echo PXG-INIT-BEGIN;'))
+    args = shlex.split(init.split(';')[1])
+    assert args[args.index('--repo') + 1] == 'file:///home/pax', 'I-pxg-fixture-repository-missing'
     release = 'pxg ' + 'a' * 40 + ' ' + 'b' * 64
     text = ''.join(f'PXG-{n}-BEGIN\n{b}\nPXG-{n}-END={s}\n' for n, (s, b) in EXPECTED.items())
     text += 'PXG-NO-STATE=0\n' + release + '\n'
