@@ -164,7 +164,24 @@ fast as the host can send, so the row measured the host as much as the kernel:
 | 6 | release | 128,000 to 137,000 | 0.94 to 0.95 | 21 to 22 ms |
 
 (35 rows of the second part's records under KVM; the same kernel and probe gave the two- and six-CPU rows of the head
-before the offered flood, `a33caad0` and `a7a69460`.) The share the hog loses over the answered rate is the guest's
+before the offered flood, `a33caad0` and `a7a69460`.)
+
+The same kernel, probe and host side, then measured in one block held whole, alternating six CPUs (6 to 11) and two
+(6 and 7) for the guest and its host side, five boots of each, both firmwares, 1 GiB, at `a7a69460` (the host's load
+average 4.4 to 5.6 and the package at 64 to 70 C before each boot):
+
+| host CPUs | boots | answered a second | the hog's share | the sleeper's worst | L6 at half |
+|---|---|---|---|---|---|
+| 6 | 10 | 21,800 to 62,600 (median 46,600) | 0.21 to 0.78 (median 0.47) | 211 to 658 ms | 4 of 10 |
+| 2 | 10 | 7,800 to 25,000 (median 15,200) | 0.61 to 0.96 (median 0.81) | 34 to 110 ms | 10 of 10 |
+
+Within each set the share falls as the rate rises: the one six-CPU boot that held both firmwares (the fourth) ran the
+slowest floods of its set, 21,800 and 35,300 a second, and kept 0.78 and 0.61; the six-CPU low, 0.21, came with its
+fastest, 62,600. The same boots' L2 host pings: 30 rows on six CPUs, median 0.91 of `spin`'s, at most 1.82; 30 on two,
+median 1.27, at most 2.00 (`spin`'s worst 1.8 to 3.7 ms); none over three times `spin`'s, so none near the floor.
+The offered flood, on a light slot of two CPUs beside heavy jobs (block C's, three boots at `28344b2f`, both firmwares):
+offered 3,999 to 4,001 a second in all six, the hog at 0.99 of its share; the saturating flood beside it answered 26,000
+to 29,000 a second, the hog at 0.63 to 0.75. The share the hog loses over the answered rate is the guest's
 cost a frame: 5 to 16 us on the native tier (11 to 13 us at six CPUs), 0.3 to 0.7 us on the release tier (one older
 take 2.7 us). So a stream of about 50,000 frames a second takes over half of the native kernel's processor; a real
 network device can deliver more than QEMU's user network does.
@@ -175,7 +192,7 @@ the hog at 0.29 under the six-CPU flood, no better than the head. Under a flood 
 thread is always runnable and every frame's interrupt is taken whoever runs, so taking the mark away would not hold the
 hog at half. What would: a budget on the network thread's own work a tick, or fewer interrupts a frame (polling the
 device's ring while frames keep coming, its interrupt re-armed when the ring is empty); and the native tier's cost a
-frame is the other half. That is its own work, filed apart (decision 17).
+frame is the other half. That is its own work, pax#408 (decision 17).
 
 **L6 now** holds the hog to half its share at a flood the host offers at a fixed rate, 4,000 datagrams a second, each on
 its own schedule whatever the answers (`flood:4000`; decision 21). Every take so far answered at least 8,300 a second on
@@ -284,7 +301,7 @@ processor) is the plan.
     deadline (implemented, recommended: with real-time deadlines a stretch could otherwise quarantine a controller that
     answered); (B) leave them: a stretch of 2 s in a USB command's wait is rare.
 17. **The flood's budget.** (A) none until a flood is seen to starve a process (taken; the six-CPU flood has now
-    starved the native kernel's hog, filed as its own work); (B) a budget now. The budget once sketched here (a thread
+    starved the native kernel's hog: pax#408); (B) a budget now. The budget once sketched here (a thread
     loses its urgent mark after half a tick) would not do: the plant, with no urgent mark at all, kept the hog at 0.29
     under the same flood. The work is a budget on the network thread's own work a tick or fewer interrupts a frame, and
     the native tier's cost a frame (section 4).
