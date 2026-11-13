@@ -123,6 +123,7 @@ use boot_info
 use bootlog
 use bootmark
 use cred
+use cpus
 use frames
 use latency
 use paging
@@ -136,9 +137,9 @@ use unix
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 59
+pub const ENTRIES: u64 = 60
 /// No entry.
-pub const NONE: u64 = 59
+pub const NONE: u64 = 60
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -215,6 +216,8 @@ pub const PAXBOOTLOG: u64 = 57
 /// choose; `latency off` unless the command line has `latency`).
 /// Opening it ends kernel/latency's window (`restart`).
 pub const PAXLAT: u64 = 58
+/// Firmware's available processors, separate from the one PAX uses.
+pub const PAXCPUS: u64 = 59
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
@@ -280,6 +283,7 @@ const G_PTYMAX: u64 = 27
 const G_PAXBOOT: u64 = 28 // px118
 const G_PAXBOOTLOG: u64 = 29 // px118: the length only; kernel/files makes each read's bytes
 const G_PAXLAT: u64 = 30 // px131
+const G_PAXCPUS: u64 = 31
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -353,7 +357,7 @@ fn limit_units(res: u64) -> str {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXCPUS
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -600,6 +604,7 @@ pub fn name(e: u64) -> str {
     if e == PAXBOOT { return "pax-boot" } // px118
     if e == PAXBOOTLOG { return "pax-bootlog" }
     if e == PAXLAT { return "pax-latency" } // px131
+    if e == PAXCPUS { return "pax-cpus" }
     if e == SMOUNTS || e == PMOUNTS || e == MOUNTSLINK { return "mounts" } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return "mountinfo" }
     if e == SYSBLOCK || e == SYSCLASSBLOCK { return "block" } // px79
@@ -687,7 +692,7 @@ pub fn parent(r: u64) -> u64 {
     }
     if e == BIDENT { return dev_ref(dev_of(r), BDEV) }
     if e >= BATTR && e < BATTR + 9 { return dev_ref(dev_of(r), if e == BATTR + A_MODEL || e == BATTR + A_SERIAL { BIDENT } else { BDEV }) }
-    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT { return 0 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXCPUS { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
     if e == CORE_PATTERN || e == PTYDIR { return KERNEL }
@@ -735,6 +740,7 @@ fn gen(r: u64) -> u64 {
     if e == PAXBOOT { return G_PAXBOOT } // px118
     if e == PAXBOOTLOG { return G_PAXBOOTLOG }
     if e == PAXLAT { return G_PAXLAT } // px131
+    if e == PAXCPUS { return G_PAXCPUS }
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
@@ -947,6 +953,23 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         p = sched.proc_after(p)
     }
     NONE
+}
+
+/// Available firmware processors are distinct from the one active processor.
+fn paxcpus(base: u64) -> u64 {
+    var n = put_s(base, 0, "available ")
+    if cpus.valid() { n = put_dec(base, n, cpus.available()) }
+    else { n = put_s(base, n, "unknown") }
+    n = put_s(base, n, "\nactive ")
+    n = put_dec(base, n, cpus.active())
+    if cpus.valid() {
+        n = put_s(base, n, "\nsource ACPI MADT\nonline-capable ")
+        n = put_dec(base, n, cpus.online_capable())
+        n = put_s(base, n, "\ndisabled ")
+        n = put_dec(base, n, cpus.disabled_entries())
+        return put_b(base, n, 10)
+    }
+    put_s(base, n, "\nsource unavailable\n")
 }
 
 /// px131: `/proc/pax-latency`'s text at `base`: its length; then
@@ -1869,6 +1892,8 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = paxboot(base) // px118
     } else if g == G_PAXBOOTLOG {
         n = bootlog.prev_len() // px118: the length only; kernel/files makes each read's bytes
+    } else if g == G_PAXCPUS {
+        n = paxcpus(base)
     } else if g == G_PAXLAT {
         n = paxlat(base) // px131
     } else if g == G_CORE_PATTERN {
