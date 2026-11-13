@@ -25,11 +25,14 @@
                                   area 16-byte aligned; mode 0: nothing
      pax_fpu_restore(area, mode)  XRSTOR64 or FXRSTOR64 likewise
      pax_rdtsc() -> u64           RDTSC: EDX:EAX
-     pax_rdrand() -> u64          RDRAND into %rax, retried while CF says
-                                  no value was ready (at most 16 tries;
-                                  the caller asks only when CPUID.1:ECX
-                                  bit 30 says the instruction exists),
-                                  0 when none came
+     pax_rdrand_step() -> u64     dw02: one RDRAND, its value into
+                                  pax_rand's word 0 and 1 returned when
+                                  CF said the value is one, else 0 (the
+                                  carry flag alone says so: a zero
+                                  register is no sign); kernel/random
+                                  decides the tries, and asks only when
+                                  CPUID.1:ECX bit 30 says the instruction
+                                  exists
 
    Written from: the Intel SDM vol. 1 §10.5 (FXSAVE's area), ch. 13
    (XSAVE: §13.2 enumeration by CPUID leaf 0DH, §13.3 enabling with
@@ -140,17 +143,17 @@ pax_rdtsc:
         ret
         .size pax_rdtsc, . - pax_rdtsc
 
-        .globl pax_rdrand
-        .type pax_rdrand, @function
-pax_rdrand:
-        movl    $16, %ecx
-1:      rdrand  %rax
-        jc      2f
-        decl    %ecx
-        jnz     1b
+        .globl pax_rdrand_step
+        .type pax_rdrand_step, @function
+pax_rdrand_step:
+        rdrand  %rax
+        movq    %rax, pax_rand(%rip)    /* MOV leaves CF as RDRAND set it */
+        jc      1f
         xorl    %eax, %eax
-2:      ret
-        .size pax_rdrand, . - pax_rdrand
+        ret
+1:      movl    $1, %eax
+        ret
+        .size pax_rdrand_step, . - pax_rdrand_step
 
 /* kernel/fpu's words, read and written volatile (#598's rule: state a
    switch reads lives in storage words): 0 the mode (0 off, 1 XSAVE, 2
@@ -163,5 +166,13 @@ pax_rdrand:
         .globl pax_fpu_state
 pax_fpu_state:
         .zero 72 * 8
+
+/* dw02: kernel/random's words, read and written volatile: 0 the last
+   RDRAND's value (pax_rdrand_step), 1-15 kernel/random's state and
+   counts. */
+        .p2align 3
+        .globl pax_rand
+pax_rand:
+        .zero 16 * 8
 
         .section .note.GNU-stack, "", @progbits

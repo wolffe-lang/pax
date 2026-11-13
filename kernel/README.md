@@ -1364,3 +1364,17 @@ pass measures how long, ranks the paths, and makes three of them short.
 | `process/` | `random_fill`: a buffer of random words, CPUID asked once |
 | `user/` | `getrandom` a page at a time through a kernel frame and `uaccess.copy_out`; getrandom(2) gives at most 16 KiB a call (`GETRANDOM_CHUNK`; /dev/urandom's reads stay whole) |
 | `trace_mem/` | `transfer` copies each piece with `uaccess.copy_in`/`copy_out`, not a byte at a time |
+
+## dw02 — the entropy contract
+
+getrandom's strict calls and the random devices answer RDRAND words or a refusal by name; the insecure path keeps
+the old answer (`notes/dw02-the-entropy-contract.md`).
+
+| module or file | change |
+|---|---|
+| `random/` (new) | the source's state, decided at the boot's first draw: `READY` (RDRAND, eight draws checked), `NONE` (no RDRAND), `STUCK` (the check refused its values), `FAILED` (a draw used its tries; latched for the boot); a draw is up to ten RDRAND executions, no carry, 0, all ones and a repeat refused; `strict_errno` (the one place a strict request consults readiness: 0, `EAGAIN` or `EIO`), `strict_word`, `strict_fill`; `insecure_word`, `insecure_fill` (RDRAND when ready, else the TSC's `fold`); the test words `pax.rdrand_fail=N` (armed after the check) and `pax.rdrand_stuck` |
+| `../boot/fpu.S` | `pax_rdrand_step`: one RDRAND, the value into `pax_rand`'s word 0, the carry flag returned; `pax_rand`, kernel/random's sixteen words; `pax_rdrand` goes |
+| `process/` | `random_word` and `random_fill` are kernel/random's insecure path (AT_RANDOM, TCP's and DHCP's words, `GRND_INSECURE`) |
+| `user/` | `getrandom`: flags 0, `GRND_RANDOM` and `GRND_NONBLOCK` from the strict path (`-EAGAIN`, `-EIO`; `-EAGAIN` for `GRND_NONBLOCK`), `GRND_INSECURE` from the insecure path, 0 bytes answers 0, the staging frame zeroed; a random device's read is getrandom with `GRND_NONBLOCK` when its descriptor has `O_NONBLOCK` |
+| `files/` | `is_random`'s contract restated; a random device's read takes `nonblocking` (px23's) for its `O_NONBLOCK` |
+| `procfs/` | `/proc/pax-random` (entry 59; `ENTRIES` 60): `ready`, `source`, `reason`, `errno`, `rdrand`, `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test` |
