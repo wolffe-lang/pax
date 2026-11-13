@@ -291,7 +291,10 @@ def main(argv):
         images = Path(argv[argv.index('--images') + 1])
         for boot in argv[argv.index('--images') + 2:]:
             tier = boot.split('-')[0]
-            if tier != 'linux' and (images / tier / boot).exists() and l6_again(l6_results(images, tier, boot)):
+            run = images / tier / boot / 'pax-run'
+            # only a boot that ran the offered flood (a run list of other loads has no L6)
+            if tier != 'linux' and run.exists() and 'flood:%d' % FLOOD_RATE in run.read_text().split()[7:] \
+                    and l6_again(l6_results(images, tier, boot)):
                 print(boot)
         return 0
     accel = argv[argv.index('--accel') + 1]
