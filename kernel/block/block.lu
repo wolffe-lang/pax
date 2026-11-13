@@ -1170,9 +1170,9 @@ fn request(d: u64, op: u64, sector: u64, n: u64, pa: u64, list: u64, most: u64) 
     0
 }
 
-/// A FLUSH to device `d`'s disk (when it takes one: 0 at once when it
-/// does not, its writes are then on the medium when they complete),
-/// waited for: 0 or -EIO.
+/// A FLUSH to device `d`'s disk, waited for: 0 or -EIO. Legacy callers
+/// without F_FLUSH still get 0; this is not a barrier or a durability
+/// guarantee. Journalled callers must qualify the device separately.
 pub fn flush(d: u64) -> u64 {
     if !present(d) {
         return neg(EIO)
@@ -2160,8 +2160,9 @@ fn write_slot(s: u64) -> u64 {
     let per = bsize / 512
     let r = rw(d, vblk.T_OUT, blk * per, per, hw(s, H_PA))
     kbump(K_WRITES, 1)
-    if hw(s, H_FLAGS) & B_DIRTY != 0 {
-        // px68: a committed block written home has had its checkpoint
+    if r == 0 && hw(s, H_FLAGS) & B_DIRTY != 0 {
+        // Only a successful home write retires its dirty metadata. A failed
+        // slot remains dirty, so the clock hand cannot later evict it as clean.
         put_hw(s, H_FLAGS, hw(s, H_FLAGS) & !(B_DIRTY | B_JMETA))
         put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) - 1)
     }
@@ -2289,16 +2290,18 @@ pub fn dirty(d: u64, blk: u64, bsize: u64) -> u64 {
     if s == NB {
         return neg(ENOSPC)
     }
-    if st(S_POLICY) == WRITE_THROUGH && hw(s, H_FLAGS) & B_JRUN == 0 {
-        return write_slot(s)
-    }
     let f = hw(s, H_FLAGS)
     if f & B_DIRTY != 0 {
         kbump(K_REDIRTY, 1)
-        return 0
+    } else {
+        // Mark the attempted change dirty even in write-through mode. A
+        // failed write must remain represented until a real successful retry.
+        put_hw(s, H_FLAGS, f | B_DIRTY)
+        put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) + 1)
     }
-    put_hw(s, H_FLAGS, f | B_DIRTY)
-    put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) + 1)
+    if st(S_POLICY) == WRITE_THROUGH && f & B_JRUN == 0 {
+        return write_slot(s)
+    }
     0
 }
 
