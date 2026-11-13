@@ -1354,3 +1354,28 @@ as uid 1000, byte-identical.
 | `procfs/` (px129) | `/proc/pax-boot`'s `serial <present\|absent> tty <mirrored\|log> dropped <n>` line |
 | `../boot/io.S` (px129) | `pax_serial_tx`, COM1's 64 KiB transmit ring |
 | `../boot/screen.S` | `pax_screen_state` 96 words; `pax_screen_cells` two 320×128 grids; `pax_screen_front` one 320×128 grid; `pax_screen_dirty` 128 words; `pax_screen_run` 320 five-word records |
+
+## px131 — what the kernel holds too long
+
+Every system call and handler runs with IF clear until it returns (`notes/px131-long-kernel-paths.md` §3), so this
+pass measures how long, ranks the paths, and makes three of them short.
+
+| module | change |
+|---|---|
+| `latency/` (new) | the instrument, on only with `latency` on the command line (`start`, from `kmain_console` before interrupts go on): boot/isr.S's common path opens an interrupts-off interval on entry from IF set (its RIP, vector and %rax) and closes it on resuming a frame with IF set; `pax_irq_save`/`pax_irq_restore`, `pax_wait` and `pax_enter_user` likewise; `pax_lat_close` keeps the longest since boot and since the last read, a histogram by the cycles' highest bit, and since the last read the longest per system call number, vector and thread slot's irq_save sections; `sched_point` the longest gap between the scheduler's chances; `ticks` delivered against due by kernel/clock; `restart` ends the window |
+| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 59): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
+| `sched/` | `latency.sched_point` in `preempt`, `kick` and `run_next`; `who` names a thread for it |
+| `paging/` | `next_leaf`: the next present 4 KiB leaf in a range, an absent table stepped over whole |
+| `vm/` | `unmap_range` and `cut_maps` visit only the leaves `next_leaf` finds (munmap of 1 TiB of nothing: 3 s to under 0.3 ms) |
+| `process/` | `random_fill`: a buffer of random words, CPUID asked once |
+| `user/` | `getrandom` a page at a time through a kernel frame and `uaccess.copy_out`; getrandom(2) gives at most 16 KiB a call (`GETRANDOM_CHUNK`; /dev/urandom's reads stay whole) |
+| `trace_mem/` | `transfer` copies each piece with `uaccess.copy_in`/`copy_out`, not a byte at a time |
+
+### px131, the second part — the clocks from the clock, device-driven wake-ups at once
+
+| module | change |
+|---|---|
+| `timer/` | with `follow_clock` (`kmain_console`, the shipped kernel), `tick` sets the count to the larger of itself plus one and the ticks kernel/clock says are due since the tick was armed, so every deadline counted in ticks (CLOCK_MONOTONIC, CLOCK_REALTIME, sleeps, poll's, epoll's, a receive's and a futex's timeouts, TCP's, ARP's and DHCP's timers) is one in real time; `delivered` counts the interrupts themselves (`drift`, `mark`, kernel/latency's lost ticks). The test kernels count interrupts as before |
+| `sched/` | `wake_urgent`: a thread a device's work woke (`wake_net`, `wake_input`, and `wake_pipes` from the network thread, which `block_net` names) goes to the queue's head marked urgent (`S_URGENT`, a bit a slot); `kick` and `preempt` switch to an urgent head when the running thread is not one; a thread keeps its mark while it runs and loses it when it leaves the CPU |
+| `latency/` | lost ticks from `timer.delivered` |
+| `xhci/` | `command` and `control` look at their completion before their deadline, so a stretch that carries the tick count past it does not quarantine a controller that answered during it |

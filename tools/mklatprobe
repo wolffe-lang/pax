@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# mklatprobe — build px131's probe, static x86-64 Linux executables linked
+# against the baseline glibc's libc.a (as mkbench's are): `latprobe`
+# (user/elf/latprobe.c: how late a process runs beside a load of long
+# system calls, on PAX and on Linux) and `latbig` (the same source with a
+# loaded segment of LATBIG_MIB MiB, the `exec` load's program), and
+# `latinit` (user/elf/latinit.c: the init of the suite's Linux guest, the
+# comparison column), for tests/mpx6-latency.
+#
+#   tools/mklatprobe OUTDIR
+#
+# `gcc -static -no-pie -O2`, ET_EXEC with no PT_INTERP, each checked;
+# latbig's largest PT_LOAD holds at least LATBIG_MIB MiB of file bytes.
+# Prints the compiler's version, then `<name> <sha256> <bytes>` for each.
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu 24.04
+# container), never on a host whose glibc assumes a newer CPU (px10). Exit
+# 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mklatprobe OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${LATPROBE_CC:-gcc}
+mib=${LATBIG_MIB:-32}
+need "$cc" readelf
+say "cc: $("$cc" --version 2>&1 | head -n 1)"
+src=$PAX_ROOT/user/elf/latprobe.c
+for p in latprobe latbig latinit; do
+    def=(); [ "$p" = latbig ] && def=(-DLATBIG_MIB="$mib")
+    s=$src; [ "$p" = latinit ] && s=$PAX_ROOT/user/elf/latinit.c
+    "$cc" -static -no-pie -O2 -Wall -Wextra -D_GNU_SOURCE ${def[@]+"${def[@]}"} -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$out/$p" "$s" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
+big=0
+while read -r kind _off _va _pa filesz _rest; do
+    [ "$kind" = LOAD ] && [ $((filesz)) -gt "$big" ] && big=$((filesz))
+done < <(readelf -lW "$out/latbig")
+[ "$big" -ge $((mib * 1048576)) ] || die "latbig's largest PT_LOAD holds $big bytes of the file, under $mib MiB"

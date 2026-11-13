@@ -99,6 +99,7 @@ use identity
 use initramfs
 use interrupts
 use ip
+use latency
 use log
 use mouse
 use net
@@ -610,6 +611,7 @@ export fn kmain() {
     apic.start(pml4)
     triage.step(10)
     timer.start()
+    timer.follow_clock() // px131: lost ticks cost the clocks and every timeout timeliness only
     triage.step(11)
     fpu.start()
     fpu.report()
@@ -667,6 +669,7 @@ export fn kmain() {
         add_kthreads(1)
     }
     triage.step(22)
+    latency.start() // px131: with `latency` on the command line, /proc/pax-latency's instrument
     sync.enable()
     triage.step(23) // interrupts on
     if usb {

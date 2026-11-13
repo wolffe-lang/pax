@@ -173,12 +173,39 @@ pax_isr_common:
         pushq   %r13
         pushq   %r14
         pushq   %r15
+        /* px131: kernel/latency's instrument, on with `latency` on the
+           command line: an entry from a context with IF set opens an
+           interrupts-off interval, begun at the interrupted RIP, for the
+           vector, with %rax (a system call's number). */
+        testq   $1, pax_lat(%rip)
+        jz      1f
+        testq   $0x200, 152(%rsp)
+        jz      1f
+        movq    136(%rsp), %rdi
+        movq    120(%rsp), %rsi
+        movq    112(%rsp), %rdx
+        cld
+        call    pax_lat_open
+1:
         movq    %rsp, %rdi              /* the frame */
         andq    $-16, %rsp
         cld
         call    pax_interrupt
 .Lpax_resume_frame:
         movq    %rax, %rsp              /* the frame to resume (px07) */
+        /* px131: a frame resumed with IF set closes the interval (its
+           registers are all restored from the frame below, so the call
+           may clobber any; %rbx keeps %rsp across it). */
+        testq   $1, pax_lat(%rip)
+        jz      2f
+        testq   $0x200, 152(%rsp)
+        jz      2f
+        movq    %rsp, %rbx
+        andq    $-16, %rsp
+        cld
+        call    pax_lat_close
+        movq    %rbx, %rsp
+2:
         cmpq    $0x102, 120(%rsp)       /* px102: stopped syscall's kernel continuation */
         je      .Lpax_trace_syscall
         cmpq    $0x103, 120(%rsp)       /* px102: finish a completed clone/vfork/exec call */
@@ -297,11 +324,53 @@ pax_lidt:
         .globl pax_wait
         .type pax_wait, @function
 pax_wait:
-        sti
+        testq   $1, pax_lat(%rip)       /* px131: IF set for the HLT closes */
+        jz      1f
+        pushq   %rbx                    /* %rsp 16-aligned for the call */
+        call    pax_lat_close
+        popq    %rbx
+1:      sti
         hlt
         cli
-        ret
+        testq   $1, pax_lat(%rip)       /* and the CLI opens again */
+        jz      2f
+        movq    (%rsp), %rdi            /* our caller */
+        movq    $0x201, %rsi
+        xorl    %edx, %edx
+        call    pax_lat_open
+2:      ret
         .size pax_wait, . - pax_wait
+
+/* px131: pax_lat_open(rip, tag, nr): the TSC now, as the start of an
+   interrupts-off interval, with where it began (%rdi), its vector or tag
+   (%rsi: a vector, 0x200 an irq_save, 0x201 pax_wait) and %rdx (a system
+   call's number, or the running thread's slot); kernel/latency reads
+   them. Clobbers %rax, %rcx and %rdx only, so the paths that call it
+   keep their registers. IF is clear. */
+        .globl pax_lat_open
+        .type pax_lat_open, @function
+pax_lat_open:
+        movq    %rdx, %rcx
+        rdtsc
+        shlq    $32, %rdx
+        orq     %rdx, %rax
+        movq    %rax, pax_lat+8(%rip)
+        movq    %rdi, pax_lat+16(%rip)
+        movq    %rsi, pax_lat+24(%rip)
+        movq    %rcx, pax_lat+32(%rip)
+        ret
+        .size pax_lat_open, . - pax_lat_open
+
+/* px131: pax_lat_close for a kernel that does not link kernel/latency
+   (kmain_usbcheck, the metal kernels): there the instrument is never on,
+   so nothing calls it, but the paths above name it. kernel/latency's
+   own pax_lat_close, a strong definition, takes this one's place
+   wherever it is linked. */
+        .weak pax_lat_close
+        .type pax_lat_close, @function
+pax_lat_close:
+        ret
+        .size pax_lat_close, . - pax_lat_close
 
         .globl pax_int3
         .type pax_int3, @function
@@ -359,6 +428,28 @@ pax_idtr:
         .globl pax_tick_count
 pax_tick_count:
         .zero 8
+        /* px131: kernel/latency's words: 0 on, 1 the open interval's TSC
+           (0 none), 2 its RIP, 3 its vector or tag, 4 its number or
+           slot, then kernel/latency's own (32 words); its histogram (64
+           words, by the interval's TSC cycles' highest bit); the longest
+           since the last read for each system call number (512), each
+           vector (256) and each thread slot's irq_save sections (64). */
+        .p2align 6
+        .globl pax_lat
+pax_lat:
+        .zero 32 * 8
+        .globl pax_lat_hist
+pax_lat_hist:
+        .zero 64 * 8
+        .globl pax_lat_sys
+pax_lat_sys:
+        .zero 512 * 8
+        .globl pax_lat_vec
+pax_lat_vec:
+        .zero 256 * 8
+        .globl pax_lat_slot
+pax_lat_slot:
+        .zero 64 * 8
         .p2align 4
         .globl pax_ist1_stack
 pax_ist1_stack:

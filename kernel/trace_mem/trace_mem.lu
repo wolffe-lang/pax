@@ -62,19 +62,11 @@ pub fn transfer(s: u64, pml4: u64, buf: u64, n: u64, addr: u64, write: bool) -> 
         if pa == 0 { return if done == 0 { EIO } else { done } }
         let page_left = 4096 - (at & 4095)
         let bytes = if count - done < page_left { count - done } else { page_left }
-        var k: u64 = 0
-        while k < bytes {
-            if write {
-                let b = uaccess.get(pml4, buf + done + k, 1)
-                // # Safety: bytes stays inside the prepared user page.
-                unsafe { ((pa + frames.hhdm() + k) as *u8).write_volatile(b as u8) }
-            } else {
-                // # Safety: same checked user page; caller's buffer was checked above.
-                let b = unsafe { ((pa + frames.hhdm() + k) as *u8).read_volatile() as u64 }
-                uaccess.put(pml4, buf + done + k, b, 1)
-            }
-            k += 1
-        }
+        // px131: the piece in one block copy each way (the caller's buffer
+        // was checked whole above, the target's page prepared); a byte at a
+        // time it was a page walk a byte, and 8 MiB held interrupts off for
+        // 0.4 s (notes/px131-long-kernel-paths.md).
+        let _ok = if write { uaccess.copy_in(pml4, pa + frames.hhdm(), buf + done, bytes) } else { uaccess.copy_out(pml4, buf + done, pa + frames.hhdm(), bytes) }
         done += bytes
     }
     done

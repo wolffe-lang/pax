@@ -589,6 +589,28 @@ pub fn random_word(k: u64) -> u64 {
     (t ^ (t >> 17) ^ (t >> 31)) + k
 }
 
+/// px131: `n` bytes (a multiple of 8) of `random_word`'s at kernel address
+/// `kva` (8-aligned), CPUID asked once for them all: asked a word at a
+/// time it was a VM exit every 8 bytes, and getrandom of 8 MiB held
+/// interrupts off for 1.5 s under KVM (notes/px131-long-kernel-paths.md).
+pub fn random_fill(kva: u64, n: u64, k: u64) {
+    // # Safety: CPUID reads nothing and writes only its registers.
+    let has = unsafe { pax_cpuid(1, 0, 2) } & CPUID1_RDRAND != 0
+    var i: u64 = 0
+    while i < n {
+        // # Safety: RDRAND exists (CPUID.1:ECX bit 30) when `has`.
+        var w: u64 = if has { unsafe { pax_rdrand() } } else { 0 }
+        if w == 0 {
+            // # Safety: RDTSC reads the time-stamp counter, nothing else.
+            let t = unsafe { pax_rdtsc() }
+            w = (t ^ (t >> 17) ^ (t >> 31)) + k + i
+        }
+        // # Safety: the caller's kernel buffer holds [kva, kva + n).
+        unsafe { ((kva + i) as *u64).write_volatile(w) }
+        i += 8
+    }
+}
+
 /// A frame, zeroed through the HHDM; 0 when there is none.
 fn fresh() -> u64 {
     let pa = frames.alloc() else 0
