@@ -16,8 +16,12 @@ under the guard.
 - **The wake-ups.** A host's ping beside a process that only computes waited a quantum a hop: 27 to 30 ms in the median,
   37 to 40 ms at the 99th percentile, against under 1.5 ms at idle. Now the network thread, the readers it wakes and
   the console's readers go to the head of the queue and run at once: 0.72 to 0.75 ms in the median and 1.9 to 2.0 ms at the 99th percentile, 1.40 to 1.45 times idle's.
-- **The risk named:** under a ping flood every frame takes the processor from the hog. Measured: the hog kept 82 to 85 % of its share while the host sent 99,000 to 103,000 pings in 3 s. A budget, if a
-  faster flood needs one, is described in section 4.
+- **The risk named:** under a ping flood every frame takes the processor from the hog, and how much depends on the
+  flood's rate, which the host's CPUs set. On the native tier the hog kept 0.92 to 0.96 of its share at 8,300 to 11,100
+  answered pings a second, 0.61 to 0.85 at 17,000 to 32,600 (two host CPUs), and 0.29 to 0.45 at 50,000 to 55,000 (six),
+  where a 1 ms sleeper waited up to 1.42 s. L6 now holds the hog to half its share at an offered 4,000 datagrams a second
+  and prints the saturating flood's curve on every boot; the native kernel under the saturating flood is its own work
+  (section 4), and the urgent mark is not its lever.
 
 **Rebased with the first part onto trunk `bbe91e16`** (the console's lane's drawing). The commits this note names
 are those of `px131-clocks-wake3` (`be83835c`), replayed unchanged; the records before the rebase are for that code.
@@ -143,12 +147,41 @@ was taken, so with IF set: in ring 3, or in a kernel thread outside its locks, w
 already. A thread keeps its mark while it runs and loses it when it leaves the processor, so an urgent thread is not
 taken off the processor for another urgent one.
 
-**The risk: a flood.** Each frame now preempts a hog. The flood row (L6) runs `flood`, the hog's loop, while the host
-sends pings as fast as the guest answers (16 in flight), and holds the hog to half of its share beside `spin`:
-`flood` kept 82 to 85 % of `spin`'s ops while the host sent 99,000 to 103,000 pings in the 3 s window (33,000 a second, p50 0.44 ms, none lost); before the change the old wake-ups let through 8,000 to 9,300. QEMU's user network is the limit here, at about 33,000 pings a second; a real network device can
-deliver more. **A budget, if one is needed** (not built; decision 17): a thread loses its urgent mark when urgent
-work has had more than half of the current tick, or an urgent switch happens at most once a millisecond; the rest go
-to the tail as before. Either keeps a hog at half its share under any flood, and costs a ping at most a quantum.
+**The risk: a flood.** Each frame now preempts a hog. The first form of the flood row ran `flood`, the hog's loop,
+while the host sent pings as fast as the guest answered (16 in flight), and held the hog to half of its share beside
+`spin`. Every take of it ran in a light slot of two host CPUs, where the hog kept 0.61 to 0.96 of its share; the first
+take on a whole block (six host CPUs) failed it on every native boot. A flood as fast as the guest answers runs as
+fast as the host can send, so the row measured the host as much as the kernel:
+
+| host CPUs | tier | answered pings a second (over the window's real length) | the hog's share | the 1 ms sleeper's worst |
+|---|---|---|---|---|
+| 2 | native, wake-ups not urgent (the plants) | 3,500 to 7,700 | 0.94 to 1.00 | 29 to 37 ms |
+| 2 | native | 8,300 to 11,100 | 0.92 to 0.96 | 31 to 50 ms |
+| 2 | native | 17,200 to 32,600 | 0.61 to 0.85 | 22 to 51 ms |
+| 2 | release | 39,500 to 74,500 | 0.89 to 0.98 | 20 to 26 ms |
+| 6 | native, wake-ups not urgent (the plant) | 53,100 | 0.29 | 338 ms |
+| 6 | native | 50,400 to 55,000 | 0.35 to 0.45 | 503 to 1,419 ms |
+| 6 | release | 128,000 to 137,000 | 0.94 to 0.95 | 21 to 22 ms |
+
+(35 rows of the second part's records under KVM; the same kernel and probe gave the two- and six-CPU rows of the head
+before the offered flood, `a33caad0` and `a7a69460`.) The share the hog loses over the answered rate is the guest's
+cost a frame: 5 to 16 us on the native tier (11 to 13 us at six CPUs), 0.3 to 0.7 us on the release tier (one older
+take 2.7 us). So a stream of about 50,000 frames a second takes over half of the native kernel's processor; a real
+network device can deliver more than QEMU's user network does.
+
+**The urgent mark is not the lever.** A budget was sketched here before: a thread loses its urgent mark when urgent work
+has had more than half of the current tick. The plant (device wake-ups not marked urgent, the quantum's wait back) kept
+the hog at 0.29 under the six-CPU flood, no better than the head. Under a flood that keeps the network thread busy the
+thread is always runnable and every frame's interrupt is taken whoever runs, so taking the mark away would not hold the
+hog at half. What would: a budget on the network thread's own work a tick, or fewer interrupts a frame (polling the
+device's ring while frames keep coming, its interrupt re-armed when the ring is empty); and the native tier's cost a
+frame is the other half. That is its own work, filed apart (decision 17).
+
+**L6 now** holds the hog to half its share at a flood the host offers at a fixed rate, 4,000 datagrams a second, each on
+its own schedule whatever the answers (`flood:4000`; decision 21). Every take so far answered at least 8,300 a second on
+two CPUs beside heavy jobs, so any slot offers 4,000 with room; the native kernel's hog keeps about 0.95 there. The
+saturating flood stays on every boot as `~L6`, bounded by nothing: its answered rate, the hog's share and the sleeper's
+worst, so the curve above goes on in every record.
 
 **What it does not do** (prediction W4). Two processes that talk over a pipe or loopback still wait behind a hog's
 quantum a hop: their wake-ups are not a device's. The next step (the first part's section 10) is a woken thread ahead
@@ -157,12 +190,25 @@ from the fourth on are for that.
 
 ## 5. The rows
 
-`tests/mpx6-latency` gains three rows; its guard run adds `flood` to `idle` and `spin`.
+`tests/mpx6-latency` gains three rows and a curve; its guard run adds the offered flood (`flood:4000`) and the
+saturating one (`flood`) to `idle` and `spin`.
 
 - **L4 the clocks:** over each clocked load's window (the console's write of 64 KiB, a file write of MiB/16), the time
   CLOCK_MONOTONIC and CLOCK_REALTIME say passed, each within 2 % of the time-stamp counter's. Under TCG too.
 - **L5 the network's wake-ups:** beside `spin`, the host's ping's p99 at most three times its p99 at `idle`. KVM only.
-- **L6 a hog under a ping flood:** `flood`'s ops (1 ms of CPU each) at least half of `spin`'s. KVM only.
+- **L6 a hog under an offered ping flood:** the host offers 4,000 datagrams a second; the hog's ops (1 ms of CPU each)
+  at least half of `spin`'s, the offered and answered rates printed. A host that offered under 90 % of the rate is
+  unmeasured, neither a pass nor a failure: that boot's L6 is held again, a fresh boot of `spin` and the offered flood,
+  at most three holds, each printed; a measured result is final at once; three unmeasured holds are
+  `FAIL L6-unmeasured`, a red under its own name, and the suite exits 3 when that is its only red. KVM only.
+- **~L6 the saturating flood:** as fast as the guest answers; its rate, the hog's share and the sleeper's worst, bounded
+  by nothing, on both tiers.
+- **L2's host ping** (the first part's row): within the larger of three times `spin`'s worst and `spin`'s worst plus
+  10 ms, the 10 ms being the bound's own figure for anything (decision 22), with the instrument's longest
+  interrupts-off stretch printed beside it. Since device wake-ups run at once `spin`'s worst ping is 1.5 to 6.5 ms, and
+  three times that is within a host's own stall: the first six-CPU take failed it once, 7,575 us beside munmap of a
+  hole over 2,453 us beside `spin` (3.09 times), with interrupts off at most 1.9 ms in that window.
+- **S0:** `tests/mpx6-latency.d/rows-selftest`, first: the floor's arithmetic, the offered rate, unmeasured and its holds.
 
 And the guest's memory is backed before it boots (`-mem-prealloc`, found here and moved into the first part,
 `1e5d8fd6`): a first touch of a guest frame otherwise costs the host a page fault, and a fork's, an mmap's or an exit's
@@ -237,8 +283,11 @@ processor) is the plan.
 16. **A wait's deadline after its event.** (A) the two `kernel/xhci` loops look at their completion before their
     deadline (implemented, recommended: with real-time deadlines a stretch could otherwise quarantine a controller that
     answered); (B) leave them: a stretch of 2 s in a USB command's wait is rare.
-17. **The flood's budget.** (A) none until a flood is seen to starve a process: the row holds the hog's share and will
-    be red first (recommended); (B) the budget of section 4 now.
+17. **The flood's budget.** (A) none until a flood is seen to starve a process (taken; the six-CPU flood has now
+    starved the native kernel's hog, filed as its own work); (B) a budget now. The budget once sketched here (a thread
+    loses its urgent mark after half a tick) would not do: the plant, with no urgent mark at all, kept the hog at 0.29
+    under the same flood. The work is a budget on the network thread's own work a tick or fewer interrupts a frame, and
+    the native tier's cost a frame (section 4).
 18. **The guest's memory in the guard.** (A) backed before boot, PAX's and Linux's alike (implemented in the first
     part, recommended: the host's page faults are not the guest's stretches); (B) left to fault: the yardstick of L2 is now a few milliseconds,
     so a fault of the host's could fail it.
@@ -250,3 +299,12 @@ processor) is the plan.
     times with a fresh boot each, a measured result final at once, three unmeasured holds a red named `R-unmeasured`
     with exit 3 (implemented, recommended); (B) a named SKIP: wrong for a required row; (C) exit 1 as any failure: a
     stalled host reads as a failing kernel.
+21. **The flood row's form.** (A) the host offers a fixed rate, 4,000 datagrams a second, the hog held to half its share
+    there on both tiers, a host that did not offer it unmeasured and held again as the USB row is, and the saturating
+    flood kept as an unbounded `~L6` curve (implemented, recommended); (B) the saturating flood bounded, the rig pinned
+    to two CPUs: two-CPU takes already ranged from 8,300 to 32,600 answered a second; (C) the budget first: its own
+    work (decision 17).
+22. **L2's host ping.** (A) within the larger of three times `spin`'s and `spin`'s plus 10 ms, the bound's own figure
+    for anything, the instrument's interrupts-off stretch printed beside it (implemented, recommended); (B) a breach
+    counted only when the instrument puts a stretch over the bound in that window; (C) four times `spin`'s: a bound
+    with no reason.
