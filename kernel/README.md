@@ -1365,7 +1365,7 @@ pass measures how long, ranks the paths, and makes three of them short.
 | module | change |
 |---|---|
 | `latency/` (new) | the instrument, on only with `latency` on the command line (`start`, from `kmain_console` before interrupts go on): boot/isr.S's common path opens an interrupts-off interval on entry from IF set (its RIP, vector and %rax) and closes it on resuming a frame with IF set; `pax_irq_save`/`pax_irq_restore`, `pax_wait` and `pax_enter_user` likewise; `pax_lat_close` keeps the longest since boot and since the last read, a histogram by the cycles' highest bit, and since the last read the longest per system call number, vector and thread slot's irq_save sections; `sched_point` the longest gap between the scheduler's chances; `ticks` delivered against due by kernel/clock; `restart` ends the window |
-| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 59): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
+| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 60 since the processor census): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
 | `sched/` | `latency.sched_point` in `preempt`, `kick` and `run_next`; `who` names a thread for it |
 | `paging/` | `next_leaf`: the next present 4 KiB leaf in a range, an absent table stepped over whole |
 | `vm/` | `unmap_range` and `cut_maps` visit only the leaves `next_leaf` finds (munmap of 1 TiB of nothing: 3 s to under 0.3 ms) |
