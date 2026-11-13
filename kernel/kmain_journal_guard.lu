@@ -1,0 +1,66 @@
+//! member: false
+// Exhaust this QEMU guest's frame allocator after a journal mount, then
+// truncate a preloaded one-block file. The first bitmap snapshot cannot
+// allocate; the journal must abort instead of silently freeing its block.
+use block
+use clock
+use ext2
+use frames
+use interrupts
+use log
+use paging
+use panic
+use pci
+use serial
+
+fn answer(name: str, ok: bool) {
+    log.put("JG ")
+    log.put(name)
+    log.put(if ok { "=1" } else { "=0" })
+    log.end()
+}
+
+export fn kmain() {
+    serial.init()
+    interrupts.start()
+    frames.start()
+    let pml4 = paging.start()
+    clock.start()
+    let _pci = pci.scan()
+    if block.start(pml4) == 0 { panic.fail("journal guard: no test disk", 0) }
+    let v = ext2.mount(0, false, 1700000000)
+    if v >= ext2.VOLS { panic.fail("journal guard: mount failed", v) }
+    let name = frames.alloc() else 0
+    if name == 0 { panic.fail("journal guard: no name frame", 0) }
+    let address = name + frames.hhdm()
+    // # Safety: bytes of the frame just taken, through the HHDM.
+    unsafe {
+        (address as *u8).write_volatile(111)
+        ((address + 1) as *u8).write_volatile(108)
+        ((address + 2) as *u8).write_volatile(100)
+    }
+    let ino = ext2.lookup(v, 2, address, 3)
+    if ino == 0 || ext2.size(v, ino) != 4096 { panic.fail("journal guard: no one-block old file", ino) }
+    let gd = block.get(0, 1, 4096)
+    if gd == 0 { panic.fail("journal guard: no descriptors", 0) }
+    // # Safety: the cached first group's descriptor's 32-bit bitmap number.
+    let bm = unsafe { (gd as *u32).read_volatile() } as u64
+    if block.get(0, bm, 4096) == 0 { panic.fail("journal guard: no bitmap", bm) }
+    var last: u64 = 0
+    var held: u64 = 0
+    while true {
+        let pa = frames.alloc() else 0
+        if pa == 0 { break }
+        last = pa
+        held += 1
+    }
+    answer("exhausted", frames.free_count() == 0 && held > 0)
+    let _cut = ext2.truncate(v, ino, 0)
+    // Give sync its scratch capacity back only after the failed snapshot.
+    if last != 0 { frames.free(last) }
+    answer("read-only", ext2.read_only(v) != 0)
+    let sync = ext2.sync(v, 1700000000000000000)
+    answer("sync-EIO", sync == 0xfffffffffffffffb)
+    log.line("JG DONE")
+    panic.halt()
+}
