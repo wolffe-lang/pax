@@ -97,6 +97,7 @@ pub fn available() -> bool { unsafe { present } }
 const TX_SIZE: u64 = 65536
 const TX_FIFO: u64 = 16 // the 16550's transmit FIFO
 const IER_TX: int = 0x02 // transmit holding register empty
+const DROP_TRY: u64 = 256 // a full ring tries the FIFO once in this many drops
 var tx_head: u64 = 0
 var tx_tail: u64 = 0
 var tx_dropped: u64 = 0
@@ -219,16 +220,24 @@ fn kick() {
 /// px129: one byte into the ring (dropped and counted when it is full).
 /// While the THRE interrupt is armed it moves the ring and a byte costs a
 /// store, no port access; else what the FIFO takes is moved at once and
-/// the interrupt armed while bytes wait. A full ring also tries the FIFO
-/// (a lost interrupt never stops COM1 for good). Never waits.
+/// the interrupt armed while bytes wait. A full ring tries the FIFO at its
+/// first drop and every 256th after (a lost interrupt never stops COM1
+/// for good). Never waits; every byte refused is counted.
 fn queue(b: u8) {
     // # Safety: io.S's pushfq and cli; restored below.
     let flags = unsafe { pax_irq_save() }
     let (h, t) = ring()
     let full = t - h >= TX_SIZE
+    var try_fifo = false
     if full {
         // # Safety: a module word, IF clear.
-        unsafe { tx_dropped = tx_dropped + 1 }
+        let d = unsafe { tx_dropped } + 1
+        // # Safety: as above.
+        unsafe { tx_dropped = d }
+        // A lost interrupt never stops COM1 for good: the FIFO is tried at
+        // the first drop and every 256th after it, so a flood into a full
+        // ring costs a port read per 256 bytes, not one a byte (C11).
+        try_fifo = d % DROP_TRY == 1
     } else {
         // # Safety: t % TX_SIZE lies inside pax_serial_tx; a module word,
         // IF clear.
@@ -236,8 +245,9 @@ fn queue(b: u8) {
             ((pax_serial_tx as u64 + t % TX_SIZE) as *u8).write_volatile(b)
             tx_tail = t + 1
         }
+        try_fifo = ier_held() & IER_TX == 0
     }
-    if full || ier_held() & IER_TX == 0 {
+    if try_fifo {
         kick()
         let (h2, t2) = ring()
         if h2 != t2 && ier_held() & IER_TX == 0 {
