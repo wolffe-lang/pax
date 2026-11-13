@@ -194,7 +194,8 @@ pax_irq_restore:
         testq   $1, pax_lat(%rip)       /* px131: IF set again closes it */
         jz      2f
         pushq   %rbx                    /* %rsp 16-aligned for the call */
-        call    pax_lat_close
+        movq    pax_lat+248(%rip), %rax /* kernel/latency's close (word 31) */
+        callq   *%rax
         popq    %rbx
 2:      sti
         nop                             /* STI's shadow */
