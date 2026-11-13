@@ -38,9 +38,11 @@
  * The loads (ARG a size; the defaults in brackets):
  *   idle            nothing (the baseline)
  *   spin            a user-mode loop, no system call
- *   flood           the same loop, while the host's probe pings as fast as
- *                   the guest answers (echo-host.py's flood): a CPU-bound
- *                   process beside a stream of device wake-ups
+ *   flood[:R]       the same loop, while the host's probe pings as fast as
+ *                   the guest answers (echo-host.py's flood), or offers R
+ *                   datagrams a second (the host reads R from the window's
+ *                   name; the probe ignores it): a CPU-bound process beside
+ *                   a stream of device wake-ups
  *   console:N       write(1) of N bytes of 80-column lines [65536]
  *   pty:N           write of N bytes to a pseudo-terminal's slave, a child
  *                   reading its master [16384]
