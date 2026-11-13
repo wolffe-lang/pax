@@ -234,7 +234,11 @@ model), `retry` (`pax.rdrand_fail=9`), `fail` (`pax.rdrand_fail=1000000`), `stuc
   Record in section 12.
 - **E3 strengthened on review** (`62fa320a`): the probe runs itself under ptrace and holds the C library's own
   start-up draw, a `GRND_NONBLOCK` getrandom of 8 bytes, to its answer (in full when ready, `-EAGAIN` when not) and
-  the program's run after it. At the rows' commit that draw answered 8 everywhere (the measured `NONBLOCK` row).
+  the program's run after it. At the rows' commit that draw answered 8 everywhere (the measured `NONBLOCK` row). The
+  first tracer told a stop's entry from its exit by alternation; on PAX execve's syscall-exit stop comes after its
+  SIGTRAP, so the count shifted by one and E3 read the entry's `-ENOSYS` as the answer in every configuration (the
+  plant's take at `0d89dfc0`, record sha256 `5a82145130559b0cf3f170c00eddea1ceef900b13c074a4d50b0ce1f243d9efb`);
+  from `b9e823e7` a stop is an entry when `rax` holds `-ENOSYS`, as ptrace(2) has it.
 - **Green at the head**, native (KVM both firmwares, TCG BIOS) and release: the records are cited in the pull request.
 
 ## 10. For std and denward
@@ -281,7 +285,7 @@ machines refuse by name, as section 5 lists.
 | **the measurement and red at the rows' commit** | `notes/dw02/rig/red.manifest` at `437db920` (px131's kernel), a block take on the build host, record sha256 `1dd5cdcb4276febc8748d382aef3976726cac95b16614dc80662c6fed60e44c3` | `END ci-plan exit=0 secs=73`, `END entropy-kvm exit=1 secs=670`, `END entropy-tcg exit=1 secs=336`; red by name on BIOS and UEFI under KVM and on BIOS under TCG: `FAIL E1 … present` and `… retry`, `FAIL E2 … masked`, `FAIL E4 … retry`, `FAIL E5 … fail`, `FAIL E6 … stuck`, `FAIL E7 … masked`, `… fail`, `… stuck`, `FAIL E9 … masked`, `… fail`, `… stuck`; `FAIL E0 … default` the suite's wrapper (section 4) |
 | the suite's fix for the default model | `507bb74f`, `a81d861f` | |
 | the kernel change | `76e0d172`, `23573a2e`, `e6802324`, `d90e60d2`, `f8d4c4fc` (its second `nonblocking` dropped at `3886b705`), `3cc7552c`, `ba3addb2`, `d3a52496`; CI paths `77c74089`, `c59c6c40` | |
-| E3's start-up witness | `efb047a9`, `62fa320a` | |
+| E3's start-up witness | `efb047a9`, `62fa320a`; the tracer's fix `b9e823e7` | |
 | the takes at the head (native, release) and the plant | `notes/dw02/rig/{final,release,plant}.manifest` | their records and `END` lines are in the pull request |
 
 ## 13. Decisions
