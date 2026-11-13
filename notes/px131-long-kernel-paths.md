@@ -24,6 +24,26 @@ general question: is that a sign the kernel cannot handle much at once? It is, a
   run at once, deferred work as a kernel service, interrupt-driven block I/O, reschedule points inside long calls, and,
   with the second processor, interrupts on in system calls; in that order.
 
+**Rebased onto trunk `bbe91e16`**, which brought the console's lane's drawing (the screen draws only what changed,
+once a write; the serial transcript's cost past 64 KiB without a UART). The commits this note names are those of
+`px131-before-rebase` (`abd18857`), replayed onto that trunk unchanged; the records taken before the rebase are for
+that code. What the rebase changed in the figures, under KVM on BIOS at 1 GiB, the same probe:
+
+| the console's write, interrupts off | before (`abd18857`) | after (`px131b`) |
+|---|---|---|
+| 64 KiB with COM1 and no screen (the guard's shape) | 1,151 ms | 1,201 ms |
+| 64 KiB at a 2560x1440 screen with no COM1 (the installed machine's shape) | 3,666 ms | 120 ms |
+| 4 KiB at that screen | 246 ms | 8.5 ms |
+
+With COM1 a console write's cost is the UART's port accesses, which the rebase left as they were; at the screen it was
+the drawing, which it cut thirtyfold. A 64 KiB write at the screen still holds interrupts off twelve times the
+10 ms bound, and the console's write stays a pending row. The guard's rows did not move (L2 1.00 to 1.04 before and
+after); a 64 MiB file write (63 and 83 ms) and fork of 128 MiB (44 ms both) are within the host's noise. Records:
+before, sha256 `fa966d797f9ace54b3de26c46ea49be9992add3ce4cf9daff0e2ff5d6201c184` (quick-a at `abd18857`) and
+`3b989f293e365e0aa44bfcfa51454477f2b5296f9056e324d20d46f1e1e14e88` (`notes/px131/rig/screen.manifest` at `abd18857`
+with that manifest, `fe0478cf`); after, `167c8eaba629f7f6fdd71784d7f00c2f73b21f6cec165c7d349b3f99823cdb1d` (the guard
+at `eb590bac`) and `356e8576c5bdfddd7496993a55635ea6f544dbd9a1b62288b8d810062f3ee93c` (the screen at `1d50cde9`).
+
 Footprint: cross-cutting (the entry paths `boot/isr.S`, `boot/sched.S`, `boot/user.S`; `kernel/sched`,
 `kernel/paging`, a new `kernel/latency`; `kernel/vm`, `kernel/user`, `kernel/process`, `kernel/trace_mem`,
 `kernel/procfs`, `kernel/kmain_console.lu`; `.github/workflows/ci.yml` gains the `mpx6-latency` job,
