@@ -79,6 +79,14 @@
 #       the killed disk gives. A replay that empties the log before its
 #       blocks are home leaves half a replay that nothing will finish.
 #
+#   J11 failure qualification: fail-closed.py boots the same tier's kernel
+#       with write/flush EIO, absent barriers, unsupported journal feature
+#       words and identities, cache pressure, real frame exhaustion, and
+#       (--rows all) a sparse 65 GiB volume whose freed block is in group 519.
+#       Repeated calls must stay failed after an abort; recovery logs stay
+#       available, reboot preserves the committed tree and e2fsck -fn is clean.
+#       Plain ext2 keeps its existing no-flush answers with an explicit warning.
+#
 # The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1). QEMU's trace needs its log backend (Ubuntu's and
 # kasumi's QEMU have it); a QEMU without one fails J2 and J4 by name.
@@ -227,6 +235,14 @@ if [ -z "$images" ]; then
         else
             cat "$log" >&2
             why+=" $tier kmain_console: tools/build-kernel;"
+        fi
+        log=$work/$tier/kmain_journal_guard.build-kernel.log
+        if guard=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_journal_guard.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            say "built $tier journal guard probe: elf $(sha256_of "$guard")"
+        else
+            cat "$log" >&2
+            why+=" $tier kmain_journal_guard: tools/build-kernel;"
         fi
     done
     if [ "$only" = build ]; then
@@ -616,6 +632,15 @@ if txs and "commit at" in txs[0]:
         sgrep -q '/ stays the initramfs in memory' || why+=" / did not stay the initramfs's (journal feature);"
         rm -f "$disk"
         [ -z "$why" ] && say "PASS J5 $id: 'unsupported optional features (80000000)' (the guest's words) and an unknown journal feature (CSUM_V3) refused by name; / the initramfs's both times" || bad "J5 $id:$why"
+
+        # --- J11: fail-closed journal operations -------------------------------------
+        failures=$PAX_BUILD/mpx6-journal-failures-$tier-$leg
+        rm -rf "$failures"
+        fc=(); [ "$rows" != all ] || fc=(--large)
+        frc=0
+        python3 -I "$D/fail-closed.py" --kernel "$elf" --guard-kernel "$images/$tier/kmain_journal_guard.elf" \
+            --firmware "$leg" ${fc[@]+"${fc[@]}"} "$failures" || frc=$?
+        [ "$frc" = 0 ] && say "PASS J11 $id: journal failure, refusal and recovery rows" || bad "J11 $id: failure rows exit $frc"
 
         # --- J7: the crash row -------------------------------------------------------------
         why=
