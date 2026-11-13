@@ -21,7 +21,8 @@
 # tests/mpx3-conspeed.d/uart.py draining QEMU's pipe character device at 115200 baud, as the
 # installed machine's COM1 sends (its console waited about 87 us a byte for it): that leg holds
 # C9, a console write that never waits on the UART, and C10, COM1's backlog drained while its writer
-# sleeps (the line never pauses more than 0.5 s once it has carried 64 KiB). With no COM1
+# sleeps (the line never pauses more than 0.5 s once it has carried 64 KiB), and C11, a write into a
+# full ring costing no more (`bytes`' mean frame, most of whose bytes find the ring full). With no COM1
 # the kernel keeps only its first 64 KiB of console in memory, so conspeed's table is read off the
 # screen (tests/mpx3-conspeed.d/screen-run.py: the monitor's screendump every 3 s, each cell
 # matched against the BDF font's glyphs) once it says `nothing left to run`.
@@ -124,7 +125,7 @@ for tier in $tiers; do
         out=$PAX_BUILD/mpx3-conspeed-$tier-$leg-$accel
         ser=() upid=
         if [ "$uart" = slow ]; then
-            # px129 (R-px129-15): COM1 drained at 115200 baud by uart.py; the leg holds C9 and C10.
+            # px129 (R-px129-15): COM1 drained at 115200 baud by uart.py; the leg holds C9, C10 and C11.
             id="$id slow-uart"
             out=$out-uart
             rm -f "$out.uart.in" "$out.uart.out"
@@ -143,7 +144,7 @@ for tier in $tiers; do
         grep -A 24 '^conspeed ' "$out.txt" 2>/dev/null | sed 's/^/  /' >&2
         [ "$rrc" = 0 ] || bad "C1 $id: init's end never on the screen (screen-run exit $rrc; $out.txt)"
         ua=()
-        [ "$uart" = slow ] && ua=(uart "$out.uart.txt") # px129: C9 and C10, with the far end's summary
+        [ "$uart" = slow ] && ua=(uart "$out.uart.txt") # px129: C9, C10 and C11, with the far end's summary
         python3 -I "$D/rows.py" "$out.txt" "$GRID" "$accel" ${ua[@]+"${ua[@]}"} > "$out.rows.txt" 2>&1
         while IFS= read -r ln; do
             case $ln in
