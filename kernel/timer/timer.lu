@@ -73,6 +73,7 @@ extern "c" fn pax_inb(port: u16) -> u8
 extern "c" fn pax_wait()
 
 extern "c" let pax_tick_count: *u64
+extern "c" let pax_tick_delivered: *u64 // px131: the interrupts taken, a word a host can read by name
 
 const MASTER_CMD: u16 = 0x20
 const MASTER_DATA: u16 = 0x21
@@ -107,6 +108,19 @@ fn set_count(v: u64) {
     unsafe { pax_tick_count.write_volatile(v) }
 }
 
+// px131: tick interrupts taken since `start`: boot/isr.S's
+// `pax_tick_delivered`, read and written as `count` is, so a host (the USB
+// session's hold) reads it by that name.
+fn delivered_word() -> u64 {
+    // # Safety: boot/isr.S's 8-byte word, written only by `start` and `tick`.
+    unsafe { pax_tick_delivered.read_volatile() }
+}
+
+fn set_delivered(v: u64) {
+    // # Safety: as `delivered_word`.
+    unsafe { pax_tick_delivered.write_volatile(v) }
+}
+
 /// Spurious requests seen (vectors 39 and 47).
 var spurious_seen: u64 = 0
 var lapic_started: bool = false
@@ -115,7 +129,6 @@ var armed_ns: u64 = 0 // px107: the clock when the periodic tick was armed (`dri
 var mark_ns: u64 = 0 // px107: the clock at `mark`, and the ticks then
 var mark_ticks: u64 = 0
 var marked: bool = false
-var delivered_count: u64 = 0 // px131: tick interrupts delivered (`drift`, kernel/latency)
 var follow: bool = false // px131: the count follows kernel/clock (`follow_clock`)
 const PERIOD_NS: u64 = 10000000 // px131: the tick's period, as `start` arms it (100 Hz)
 
@@ -134,7 +147,7 @@ fn inp(port: u16) -> u64 {
 /// kernel/clock, tick at 100 Hz on vector 32 and say so.
 pub fn start() {
     set_count(0) // #598
-    unsafe { delivered_count = 0 }
+    set_delivered(0)
     // # Safety: the counter is touched with interrupts off.
     unsafe {
         spurious_seen = 0
@@ -384,7 +397,7 @@ pub fn stop() {
 /// timers all read `ticks`. The interrupts themselves are counted apart
 /// (`delivered`).
 pub fn tick() {
-    unsafe { delivered_count += 1 }
+    set_delivered(delivered_word() + 1)
     let now = clock.now_ns() // sample wrapping counters at every tick
     var next = count() + 1 // #598
     let armed = unsafe { armed_ns }
@@ -415,7 +428,7 @@ pub fn ticks() -> u64 {
 /// px131: tick interrupts delivered since `start`, whatever `ticks` says:
 /// a stretch with interrupts off longer than a tick delivers one.
 pub fn delivered() -> u64 {
-    unsafe { delivered_count }
+    delivered_word()
 }
 
 /// Spurious requests seen since `start`.
