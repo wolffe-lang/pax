@@ -408,6 +408,18 @@ installed onto partition 2 at build time, every mode, owner and time from the ar
 mounts it as `/` from `root=` on Limine's command line (`/dev/vda2`, `PARTUUID=`, `UUID=`, `ro`, `rw`, in Linux's
 spellings) with no initramfs. The root is ext3 by default since the journal was added; `--no-journal` makes an ext2 one.
 
+A writable journalled mount, writable remount or journal replay requires a successful device flush barrier before
+its first write. The internal journal must be version 2, belong to this filesystem's UUID and have one user; only
+its revoke feature is supported. Unsupported feature words, external-journal identifiers and a recorded journal
+error are refused by name, without falling back to plain writes.
+
+A journal write, barrier, checkpoint or bitmap-snapshot failure aborts that journal for the rest of the boot.
+Later syncs return `EIO`, further mutation is refused, and a failed unmount keeps ownership of its recovery state.
+Reboot recovery is needed before writes can resume. Ordered data does not roll back an unsynced overwrite of an
+already allocated file block, and the `ext3` mount label alone is not a descriptor-bound journal-health answer.
+Plain ext2 keeps its existing behavior on a device without flush support, but its mount warns that successful sync
+is not a durability guarantee.
+
 ```sh
 tools/mkdisk --gpt --kernel K.elf --root I.cpio 512M pax-disk.img
 ```
