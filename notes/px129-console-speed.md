@@ -357,16 +357,18 @@ the `bytes` test's rate (2000.255 ms for 23,040 bytes: 86.82 µs a byte):
 | clear | 1 | 23,668 | 23,040 | 2058.869 | 2054.8 |
 | cursor | 1 | 23,673 | 23,040 | 2054.992 | 2055.2 |
 | fuss | 100 | 170 | 126 | 14.880 | 14.76 |
-| fussopen | 1 | 13,435 | 11,648 | 2336.339 | 1166.4 |
+| fussopen | 1 | 13,435 (26,863 ran) | 11,648 | 2336.339 | 2332.2 |
 | cub | 1 | 81,550 | 13,996 | 7132.486 | 7080.0 |
 
 86.8 µs is ten bits at 115200 baud: a byte's time on a serial line. Every row is its bytes at that rate, give or take
 what draws in one span. trunk draws a cell when its byte is written, and the CPU draws one byte's cell while the UART
 sends the byte before it, so `plain`'s 23,040 cells hide inside the bytes' time. A scroll redraws the whole screen in
 one span after its line feed, so it shows above the bytes: `scroll1` 5.0 ms, `scroll10` 5.1 ms a line, about 0.22 µs
-a cell, write-combined (P2), and `clear`'s fill 4 ms. `fussopen` took twice its bytes' time; what drew in the other
-1.17 s is not in the table (QEMU's trunk boot drew the same stream in 7.8 ms, §4), and a run on an image with this
-section's fix will show it without the bytes in front of it.
+a cell, write-combined (P2), and `clear`'s fill 4 ms. `fussopen` only seems to take twice its bytes' time: a stream's
+`bytes` and `cells` are the means over its rotation's frames, and `fussopen` has two (F mode's opening, 26,863 bytes,
+and a 7-byte cursor move), so the table says 13,435, while its one frame was the first. Its 2336 ms are those 26,863
+bytes at the UART's rate and about 4 ms of drawing, the same clear as `clear`'s. Nothing in the table is
+unexplained.
 
 **Why.** kernel/serial's `init` programs COM1 at 0x3f8 (115200 8N1, divisor 1, FIFOs on, no UART interrupt) and calls
 it present when the scratch register keeps 0x5a and then 0xa5 and a byte sent in loopback comes back; a port with
