@@ -213,7 +213,8 @@ knows every draw between was RDRAND's.
   `-EAGAIN` or `-EIO` (`-EAGAIN` for `GRND_NONBLOCK`); a request for no bytes answers 0; a page that fails fails the
   call; the staging frame is zeroed before it goes back. A read of `/dev/random` or `/dev/urandom` is getrandom with
   `GRND_NONBLOCK` when the descriptor has `O_NONBLOCK`, else flags 0.
-- `kernel/files`: `nonblocking`, a descriptor's `O_NONBLOCK`.
+- `kernel/files`: `is_random`'s contract restated (a random device's read takes px23's `nonblocking` for its
+  `O_NONBLOCK`).
 - `kernel/procfs`: `/proc/pax-random` (entry 59; `ENTRIES` 60): `ready`, `source`, `reason`, `errno`, `rdrand`,
   `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test`.
 - `tests/mpx6-entropy`, `tests/mpx6-entropy.d/` (rows, the default model's wrapper), `tools/mkentropy`,
@@ -278,7 +279,7 @@ machines refuse by name, as section 5 lists.
 | the probes, the builder, the suite, CI's job and paths | `e01dde26`, `9a6de5b3`, `e52cfb2f`, `c93c69d9`, `d6f2a59a`, `f31ce346`, `f881e580`; the rig `437db920` | |
 | **the measurement and red at the rows' commit** | `notes/dw02/rig/red.manifest` at `437db920` (px131's kernel), a block take on the build host, record sha256 `1dd5cdcb4276febc8748d382aef3976726cac95b16614dc80662c6fed60e44c3` | `END ci-plan exit=0 secs=73`, `END entropy-kvm exit=1 secs=670`, `END entropy-tcg exit=1 secs=336`; red by name on BIOS and UEFI under KVM and on BIOS under TCG: `FAIL E1 … present` and `… retry`, `FAIL E2 … masked`, `FAIL E4 … retry`, `FAIL E5 … fail`, `FAIL E6 … stuck`, `FAIL E7 … masked`, `… fail`, `… stuck`, `FAIL E9 … masked`, `… fail`, `… stuck`; `FAIL E0 … default` the suite's wrapper (section 4) |
 | the suite's fix for the default model | `507bb74f`, `a81d861f` | |
-| the kernel change | `76e0d172`, `23573a2e`, `e6802324`, `d90e60d2`, `f8d4c4fc`, `3cc7552c`, `ba3addb2`, `d3a52496`; CI paths `77c74089`, `c59c6c40` | |
+| the kernel change | `76e0d172`, `23573a2e`, `e6802324`, `d90e60d2`, `f8d4c4fc` (its second `nonblocking` dropped at `3886b705`), `3cc7552c`, `ba3addb2`, `d3a52496`; CI paths `77c74089`, `c59c6c40` | |
 | E3's start-up witness | `efb047a9`, `62fa320a` | |
 | the takes at the head (native, release) and the plant | `notes/dw02/rig/{final,release,plant}.manifest` | their records and `END` lines are in the pull request |
 
