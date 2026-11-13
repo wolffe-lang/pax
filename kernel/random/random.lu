@@ -212,7 +212,10 @@ pub fn ready() -> bool {
 }
 
 /// 0 when the strict path can serve; else its errno: EAGAIN with no
-/// qualified source, EIO when RDRAND failed.
+/// qualified source, EIO when RDRAND failed. The one place a strict request
+/// consults the source's readiness (`strict_word` asks it again after a
+/// failed draw): a policy for machines without RDRAND would be decided here
+/// and nowhere else.
 pub fn strict_errno() -> u64 {
     let s = state()
     if s == READY { 0 } else if s == NONE { EAGAIN } else { EIO }
@@ -228,7 +231,7 @@ pub fn strict_word() -> (u64, u64) {
     let (ok, v) = draw()
     if !ok {
         put(STATE, FAILED)
-        return (EIO, 0)
+        return (strict_errno(), 0)
     }
     (0, v)
 }
