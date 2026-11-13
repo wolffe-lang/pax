@@ -88,7 +88,7 @@ notes/px24, notes/px26), and what it does on a machine with no qualified source,
 |---|---|---|---|---|
 | every static glibc program (every wolf program on the image: pelt, den, burrow, boreutils, yew, scent, trash, aspen, lope, sniff, clef, ligature, lobo; PAX's own login, passwd, su, sudo, the installer; the C probes) | `getrandom(8, GRND_NONBLOCK)`, glibc's allocator's key (straces: notes/px10, notes/px26) | the first allocation | the fold | `-EAGAIN`, as Linux answers before its pool is ready; glibc goes on (row E3: the C probe allocates and runs) |
 | Rust's standard library in wolf's runtime threads and in lupin | `getrandom(16, GRND_INSECURE)` (the strace of notes/px24) | a hash map's keys | the fold | unchanged: the insecure path |
-| wolf's `os_random(n)` (wolf's runtime: getrandom flags 0, `EINTR` retried, any other failure a trap, exit 134) | pelt: a here-document's and `fc`'s temporary names (12 and 10 bytes); yew: every buffer's identity (7 bytes, so at start-up), and its temporary names; boreutils: `mktemp`, `shuf`, `sort`'s temporary files, `shred`; the installer's seed (32 bytes) and the upgrade's (4); login, passwd, su and sudo: a new password's salt (16); lobo: TLS and ACME keys | on request; yew at start | the fold, silently: lobo's TLS keys from the counter | the trap: each of these stops at that point, by name (`trap: assert`), never with weak bytes |
+| wolf's `os_random(n)` (wolf's runtime: getrandom flags 0, `EINTR` retried, any other failure a trap, exit 134) | pelt: a here-document's and `fc`'s temporary names (12 and 10 bytes); yew: every buffer's identity (7 bytes, so at start-up), and its temporary names; boreutils: `mktemp`, `shuf`, `sort`'s temporary files, `shred`; the installer's seed (32 bytes) and the upgrade's (4); login, passwd, su and sudo: a new password's salt (16); lobo: TLS and ACME keys | on request; yew at start | the fold, silently: lobo's TLS keys from the counter | the trap: each of these stops at that point, with `wolf-trap: assert` on standard error, never with weak bytes |
 | burrow (`/dev/urandom` in 4 KiB refills: the key exchange's cookie, the X25519 secret, padding; burrow-keygen's host key at the first boot; mkpw's salt) | `read` | each connection; the first boot | the fold, silently: an ssh key exchange and host key from the counter | refused by burrow's own name, `entropy_unavailable`: no host key is made, so burrowd does not start, and the boot hook says so |
 | den's TLS (64 bytes of `/dev/urandom` a handshake) | `read` | each HTTPS fetch | the fold, silently | refused by den's own name, `TLS host entropy unavailable` |
 | yew's shell-session nonce (16 bytes of `/dev/urandom`, its own fallback the clock and pid) | `read` | a shell session | the fold | yew's own fallback (its choice, outside PAX's reach) |
@@ -103,7 +103,7 @@ These stop, and how:
 | `burrowd` (the ssh server) | at boot | its hook's `burrow-keygen` cannot make a host key (`entropy_unavailable`), so burrowd is not started; the hook prints `burrowd: no host key could be made at … ; not started` |
 | `burrow` (the ssh client), `burrow-keygen`, `mkpw` | at each use | refused by name: `entropy_unavailable` |
 | `den` fetching over HTTPS | each fetch | refused by name: `TLS host entropy unavailable` |
-| `lobo` serving TLS, its ACME client | at the handshake, at key generation | wolf's trap (`trap: assert`, exit 134) |
+| `lobo` serving TLS, its ACME client | at the handshake, at key generation | wolf's trap (`wolf-trap: assert`, exit 134) |
 | `yew` | at start (every buffer draws an identity) | wolf's trap |
 | `pelt` | at a here-document (`<<`) or `fc` | wolf's trap: the shell itself ends |
 | `mktemp`, `shuf`, `sort` (its temporary files), `shred` (boreutils) | at the draw | wolf's trap |
@@ -117,8 +117,9 @@ Everything else runs: each static program's start-up draw (glibc's, `GRND_NONBLO
 `tests/mpx6-staged` and `tests/mpx6-bootlog` pass `-cpu host` under KVM and nothing under TCG, so on the CI runner
 (which boots everything under TCG but mpx5-burrowd) they run QEMU's own default model. Their programs are small C
 inits (`tests/mpx6-staged.d/init.c`, `tests/mpx6-bootlog.d/init.c`) whose only draw is glibc's `GRND_NONBLOCK` one:
-row E3's case. Measured in section 4: TCG's `-cpu max` (QEMU 8.2.2, the runner's) has RDRAND and RDSEED; the default model is measured at the head
-(section 9), and E3 there shows glibc's start-up draw getting `EAGAIN` and its program running on.
+row E3's case. Measured in section 4: TCG's `-cpu max` (QEMU 8.2.2, the runner's) has RDRAND and RDSEED; the
+default model is measured at the head (section 9), and E3 there shows glibc's start-up draw getting `EAGAIN` and its
+program running on.
 
 **Linux, which these programs are written to.** getrandom(2): flags 0 blocks until the pool is initialized and never
 fails after; `GRND_NONBLOCK` returns `EAGAIN` instead of blocking; `GRND_INSECURE` (uapi `linux/random.h`) returns
@@ -241,7 +242,7 @@ model), `retry` (`pax.rdrand_fail=9`), `fail` (`pax.rdrand_fail=1000000`), `stuc
 **The call a wolf program makes** is `os_random(n)`, as wolf's spec has it (`[os.random]`): one getrandom(2) with
 flags 0, `EINTR` retried, short reads continued, any other failure a trap. On PAX after this change it gives `n`
 RDRAND bytes, or the call fails (`EAGAIN` with no RDRAND, `EIO` when RDRAND failed) and the program traps (exit 134,
-`trap: assert`). It never gives weak bytes. **To refuse by name instead of trapping**, a program reads
+`wolf-trap: assert`). It never gives weak bytes. **To refuse by name instead of trapping**, a program reads
 `/proc/pax-random` first: `ready yes` means draw; `ready no` with `reason no-rdrand` means `entropy_unqualified`;
 `ready no` with `reason failed` or `stuck` means `entropy_unavailable`. Reading `ready` again after the draws costs
 little and closes the window: the state never returns to `yes` within a boot. Where the file is absent (Linux, macOS),
