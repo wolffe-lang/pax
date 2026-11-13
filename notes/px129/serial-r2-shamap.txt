@@ -1,0 +1,39 @@
+# notes/px129/serial-r2-shamap.txt — each of the 36 commits of px129-serial (pax#389, on bbe91e16, head 673303b0) and
+# the same change on px129-serial-r2 (on 4007eaa0), in order: OLD NEW SUBJECT. Every commit applied as it was;
+# docs/SOURCES.md keeps px129's rows in px129's section, above px131's, which the base added.
+9053ab3f df2c9666 user/elf/conspeed.c: version 4, the run bounded by the TSC (60 s, 4 s a test), frames fitted to the first, a pause between them, each test's line written as it ends
+10d397bc ae9f487f user/elf/conspeed.c: say first what the kernel said about the framebuffer's caching, where this process may read it
+a5e3fca7 1d05d29f user/elf/conspeed.c: infer the framebuffer's caching from a full screen drawn, said as soon as plain ends
+764e7784 f97414dd user/elf/conspeed.c: version 5, bounded by bytes too: a probe gives a byte's cost, a test whose write would outrun its budget skipped by name
+b090aa43 b9b95d9a tools/qemu-run: --serial-chardev, COM1 on a character device of the caller's
+45898fd7 43c1bea0 tests/mpx3-conspeed.d: uart.py, a UART's far end at 115200 baud; screen-run.py passes COM1's character device
+59e0a314 cd3d69de tests/mpx3-conspeed: a slow-UART leg and C9, a console write that never waits on the UART (R-px129-15)
+7d8a3221 73c0c22a notes/px129/rig/uart.manifest: mpx3-conspeed's slow-UART leg (R-px129-15)
+726f2cc4 42ceec01 boot/io.S: pax_serial_tx, COM1's 16 KiB transmit ring (R-px129-15)
+94800de4 5cb3a762 kernel/serial: a writer never waits on COM1: a transmit ring the FIFO and THRE interrupt drain, a full one dropping and counting; put_tty, and pax.serial=log for the kernel's lines alone (R-px129-15)
+b0f2c0fd 8bdb39f2 kernel/console: COM1's transmit interrupt refills the FIFO; the console's output and echo go through put_tty
+30231573 7fb6fc46 kernel/user: a console write's bytes go through put_tty, never waiting on COM1
+601ce4b8 60b183bb kernel/panic: halt sends what COM1's ring holds first
+f7755c4c 5ffaef4b kernel/procfs: /proc/pax-boot's serial line: present, mirrored or log, the bytes dropped
+3383d346 19c17624 boot/io.S: COM1's transmit ring is 64 KiB, about 5.7 s of a 115200 line
+c0595b88 a31b0681 kernel/serial: while the THRE interrupt is armed a queued byte is a store, no port access; a full ring still tries the FIFO; receive_on keeps the transmit interrupt
+7de7797c 126bee7f kernel/power: COM1's ring on the wire before each reboot try and the power-off
+77c0a7e6 50f92965 kernel/serial: one reader of the ring's counts, a safety note on every unsafe block, ier_held for get_ier
+e806939b 856b7563 tests/mpx3-conspeed.d/uart.py: the line's longest pause once it has carried 64 KiB
+8aa8b9c8 09d098d8 tests/mpx3-conspeed.d/rows.py: C10, COM1's backlog drained while its writer sleeps: no pause over 0.5 s once 64 KiB are sent
+39e25a64 2bf68c4a tests/mpx3-conspeed: the slow-UART leg hands uart.py's summary to rows.py (C10)
+f07fb22f 009b7397 notes/px129/rig/uart.manifest: C10 in the slow-UART take
+e6c2e202 28a48d21 notes/px129-console-speed.md: the installed machine's table, COM1's wait, the ring, C9 and C10 red at trunk's kernel, R-px129-15
+414d7d13 eb4efa7e kernel/README.md: px129's UART rows: the transmit ring, put_tty, the drains, the serial fact
+b1ce9bc9 d48e65e0 CHANGELOG.md: a console write never waits on the serial port (px129)
+6a36ac73 089f9bc4 docs/SOURCES.md: px129's UART sources: the PC16550D's transmit interrupt, pipe(7), fcntl(2), QEMU's pipe device
+92a060b9 d406dafb notes/px129/rig/release.manifest: the quick take's suites on the release tier
+311e49ae 0bb84652 notes/px129-console-speed.md: fussopen's table bytes are its two frames' mean; its one frame ran 26,863 bytes at the UART's rate
+90dbb61d 40097c3f tests/mpx3-conspeed.d/rows.py: C11, a write into COM1's full ring costs no more: bytes' mean frame at most 3 units
+6d3b1d4c 897f8c22 tests/mpx3-conspeed: C11 in the slow-UART leg
+01071708 48c4b5c9 notes/px129/rig/uart.manifest: C11 in the slow-UART take
+d943ed7e 4bd79bc0 kernel/serial: a full ring tries the FIFO at its first drop and every 256th, not at every byte (C11)
+ea27570b 73c4cc94 kernel/README.md: a full ring tries the FIFO once in 256 drops
+9892709c d3b24d20 notes/px129-console-speed.md: C11, a flood's cost a byte on the metal with the ring full, the dropped count exact, C11 red at trunk's kernel and at the first fix
+256b959c f467b704 CHANGELOG.md: C11, a write into COM1's full ring
+673303b0 6cec3786 tests/mpx5-wolf: a progress frame the kernel's own line ends goes as progress whatever its width (wolf cuts a frame at 77 columns)
