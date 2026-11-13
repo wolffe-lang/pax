@@ -16,6 +16,28 @@ as the probe prints them.
   U9  the hold is the guest's: tools/usb-session's row 10 is held for
       HOLD_TICKS = 100 guest ticks read from pax_tick_count, with a
       wall-clock bound that fails by name (`repeat hold: …`).
+  U10 px131: the period from stamps the guest lost no ticks under: a
+      hosted run's 25 reports (250 ms, then 30 and 40 ms) pass.
+  U11 the same hold with two stalls of the host's at its end (a hosted
+      run of #395: 820, 960 and 1090 ms, mean 44 ms): the two intervals
+      that span ticks the guest lost (and a neighbour, a tick either side)
+      are left out and the rest pass; with
+      no delivered counter to show the losses, the same stamps are refused.
+  U12 a hold that lost ticks in most intervals is `repeat unmeasured`.
+  U13 a repeat that is slow with no loss (every 50 ms) is still refused.
+  U14 the hold counts the kernel's tick interrupts by a stable name:
+      boot/isr.S exports pax_tick_delivered beside pax_tick_count,
+      kernel/timer writes it at each tick, tools/usb-session reads it.
+  U15 an unmeasured repeat is its own verdict: repeat_period raises
+      `Unmeasured` (a RuntimeError), and three unmeasured holds exit 3,
+      neither 0 nor a failing kernel's 1.
+  U16 an unmeasured hold is held again, a fresh boot each time: two
+      unmeasured then a measured pass is a pass on hold 3, each printed,
+      in OUTPUT, OUTPUT-hold2 and OUTPUT-hold3, holds.txt listing them.
+  U17 three unmeasured holds are a red under their own name:
+      `FAIL R-unmeasured FIRMWARE-TOPOLOGY … 3 of 3 holds`, exit 3.
+  U18 a measured failure is final at once: raised on hold 1, never held
+      again.
 Exit 0 when every row held; the first failing row is named.
 """
 from importlib.machinery import SourceFileLoader
@@ -64,4 +86,96 @@ for need in ("elif sent == 10 and not args.linux_kernel:", "hold, hold_wall = ho
 if (session.HOLD_TICKS, session.MIN_REPORTS) != (100, 15):
     sys.exit(f'FAIL U9: HOLD_TICKS {session.HOLD_TICKS}, MIN_REPORTS {session.MIN_REPORTS}; 100 and 15 wanted')
 print('PASS U9: row 10 held for 100 guest ticks (pax_tick_count), bounded by the wall clock by name')
+
+# px131: the period, with the losses the hold's polls show left out
+NS = session.NS_PER_TICK
+clean = [0, 250003775, 290004379, 320004832, 350005285, 390005889, 420006342, 450006795, 490007399, 520007852,
+         550008305, 580008758, 620009362, 650009815, 680010268, 720010872, 750011325, 780011778, 820012382,
+         850012835, 880013288, 910013741, 950014345, 980014798, 1010015251]
+delay, median, mean, lost, out = session.repeat_period(clean, 1000 * NS, [])
+if round(delay) != 250 or round(median) != 30 or not 33 <= mean <= 34 or out:
+    sys.exit(f'FAIL U10: {delay=} {median=} {mean=} {out=}')
+print(f'PASS U10: delay {delay:.0f} ms, period {median:.0f} ms, mean {mean:.1f} ms, nothing left out')
+
+def period_refused(name, stamps, t0, samples, want):
+    try:
+        session.repeat_period(stamps, t0, samples)
+    except RuntimeError as error:
+        if not str(error).startswith(want + ':'):
+            sys.exit(f'FAIL {name}: refused as {str(error)!r}, not as {want!r}')
+        print(f'PASS {name}: {error}')
+        return
+    sys.exit(f'FAIL {name}: passed; {want!r} wanted')
+
+stalls = clean[:19] + [960014496, 1090016459]
+# the hold's polls (count, delivered): steady until the count's tick 1082,
+# then two stretches the guest took fewer interrupts than its clock ticked
+polls = [(1000 + k, 990 + k) for k in range(0, 83, 1)] + [(1095, 1074), (1096, 1075), (1109, 1078), (1110, 1079)]
+delay, median, mean, lost, out = session.repeat_period(stalls, 1000 * NS, polls)
+if not 2 <= out <= 3 or len(lost) != 2 or round(median) != 30 or not 31 <= mean <= 37:
+    sys.exit(f'FAIL U11: {lost=} {out=} {median=} {mean=}')
+print(f'PASS U11: {len(lost)} losses, {out} intervals left out, period {median:.0f} ms, mean {mean:.1f} ms')
+period_refused('U11', stalls, 1000 * NS, [], 'repeat outside measured tolerance')
+choppy = [0] + [250000000 + 33000000 * k for k in range(24)]
+lossy = [(1000 + 3 * k, 1000 + 2 * k) for k in range(40)]
+period_refused('U12', choppy, 1000 * NS, lossy, 'repeat unmeasured')
+slow = [0] + [250003775 + 50000755 * k for k in range(15)]
+period_refused('U13', slow, 1000 * NS, [], 'repeat outside measured tolerance')
+isr = (root / 'boot/isr.S').read_text()
+timer = (root / 'kernel/timer/timer.lu').read_text()
+for need, text, where in (('.globl pax_tick_delivered', isr, 'boot/isr.S'),
+                          ('pax_tick_delivered.write_volatile', timer, 'kernel/timer/timer.lu'),
+                          ("'pax_tick_delivered'", source, 'tools/usb-session')):
+    if need not in text:
+        sys.exit(f'FAIL U14: {where} lacks {need!r}')
+print("PASS U14: the hold counts boot/isr.S's pax_tick_delivered, written by kernel/timer at each tick")
+# px131: unmeasured, its own verdict; held again at most HOLDS times
+import argparse, contextlib, io, tempfile
+if not issubclass(getattr(session, 'Unmeasured', type(None)), RuntimeError) or getattr(session, 'UNMEASURED_EXIT', None) not in range(2, 126) \
+        or getattr(session, 'HOLDS', None) != 3 or not hasattr(session, 'session'):
+    sys.exit('FAIL U15: tools/usb-session has no Unmeasured verdict (a RuntimeError), UNMEASURED_EXIT, HOLDS = 3 and session()')
+try:
+    session.repeat_period(choppy, 1000 * NS, lossy)
+    sys.exit('FAIL U15: an unmeasured hold passed')
+except session.Unmeasured as error:
+    print(f'PASS U15: {error} is Unmeasured, exit {session.UNMEASURED_EXIT} after {session.HOLDS} holds')
+
+def held(outcomes):
+    # session() over a fake session: each hold's outcome in turn (None a pass)
+    calls = []
+    def fake(args):
+        calls.append(Path(args.output).name)
+        Path(args.output).mkdir(parents=True, exist_ok=True)
+        outcome = outcomes[len(calls) - 1]
+        if outcome is not None:
+            raise outcome
+        (Path(args.output) / 'repeat.txt').write_text('delay_ms 250.000\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        args = argparse.Namespace(output=str(Path(tmp) / 'bios-root'), firmware='bios', topology='root')
+        printed = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(printed):
+                code = session.session(args, fake)
+        except RuntimeError as error:
+            code = error
+        holds = (Path(tmp) / 'bios-root' / 'holds.txt').read_text() if (Path(tmp) / 'bios-root' / 'holds.txt').exists() else ''
+        last = Path(tmp) / calls[-1] / 'repeat.txt'
+        return code, calls, printed.getvalue(), holds, last.read_text() if last.exists() else ''
+
+U = session.Unmeasured
+code, calls, printed, holds, last = held([U('repeat unmeasured: 1'), U('repeat unmeasured: 2'), None])
+if code != 0 or calls != ['bios-root', 'bios-root-hold2', 'bios-root-hold3'] or printed.count('NOTE USB root bios: repeat unmeasured') != 2 \
+        or holds.split('\n')[2:3] != ['3 measured bios-root-hold3'] or 'verdict measured\nhold 3 of 3' not in last:
+    sys.exit(f'FAIL U16: {code=} {calls=} {printed=!r} {holds=!r} {last=!r}')
+print('PASS U16: two unmeasured holds, then measured on hold 3 of 3: a pass, each hold printed and listed')
+code, calls, printed, holds, last = held([U('repeat unmeasured: a'), U('repeat unmeasured: b'), U('repeat unmeasured: c')])
+if code != session.UNMEASURED_EXIT or len(calls) != 3 or 'FAIL R-unmeasured bios-root: ' not in printed or '3 of 3 holds' not in printed \
+        or 'verdict unmeasured\nhold 3 of 3' not in last:
+    sys.exit(f'FAIL U17: {code=} {calls=} {printed=!r} {last=!r}')
+print(f'PASS U17: three unmeasured holds: exit {code}, ' + [l for l in printed.splitlines() if l.startswith('FAIL ')][0][:60] + '…')
+failure = RuntimeError('repeat outside measured tolerance: delay=330')
+code, calls, printed, holds, last = held([failure, None, None])
+if code is not failure or calls != ['bios-root'] or not holds.startswith('1 failed bios-root '):
+    sys.exit(f'FAIL U18: {code=} {calls=} {holds=!r}')
+print('PASS U18: a measured failure on hold 1 is raised at once, never held again')
 print('PASS usb-session-selftest')

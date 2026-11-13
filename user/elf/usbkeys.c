@@ -76,6 +76,8 @@ int main(void) {
             dprintf(output,"USBTIMES");
             for(unsigned i=0;i<n;i++) dprintf(output," %lld",times[i]-times[0]);
             dprintf(output,"\n");
+            /* px131: the first read's own time, so the host can place each stamp on the guest's ticks */
+            dprintf(output,"USBT0 %lld\n",n?times[0]:0LL);
         }
     }
     dprintf(output,"USBDONE\n");

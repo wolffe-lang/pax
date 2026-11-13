@@ -387,15 +387,16 @@ ten seconds shows the general rule at work, bounded and unable to starve the mac
 ## 15. Decisions
 
 1. **The bound.** (A) a path a user can drive keeps interrupts off at most 1 ms, anything at most 10 ms, a wake-up at
-   most three times the same boot's `spin` (recommended); (B) 10 ms everywhere as a first milestone.
+   most three times the same boot's `spin` (recommended; taken); (B) 10 ms everywhere as a first milestone.
 2. **Per-unit fixes now.** (A) build the clearly local ones here, red first, and list the rest as small follow-ups
    (implemented for munmap and truncate's cut, getrandom, /proc/<pid>/mem; recommended); (B) leave every path to the
    general rule.
 3. **The clocks.** (A) user clocks, sleeps and timeouts from `kernel/clock` as deadlines (recommended, next; with the
-   console's lane's same recommendation); (B) keep ticks and shorten every stretch below 10 ms first.
+   console's lane's same recommendation; taken, and built in the second part, `notes/px131-clocks-and-wake-ups.md`);
+   (B) keep ticks and shorten every stretch below 10 ms first.
 4. **Device-driven wake-ups.** (A) `netd`, the readers it wakes and the console's readers to the queue's head, and a
-   device's interrupt switches to them where the tick could (recommended, next; not built here: it waits for its
-   ruling); (B) leave the FIFO.
+   device's interrupt switches to them where the tick could (recommended, next; taken, and built in the second part
+   with the flood's row); (B) leave the FIFO.
 5. **Deferred work.** (A) a kernel worker thread for teardown, frame zeroing and writeback (recommended, after 3 and 4);
    (B) keep teardown in the calls.
 6. **Block I/O.** (A) completion interrupts, blocking waits, resets on timeout (recommended, with 5); (B) polling with

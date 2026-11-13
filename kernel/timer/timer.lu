@@ -73,6 +73,7 @@ extern "c" fn pax_inb(port: u16) -> u8
 extern "c" fn pax_wait()
 
 extern "c" let pax_tick_count: *u64
+extern "c" let pax_tick_delivered: *u64 // px131: the interrupts taken, a word a host can read by name
 
 const MASTER_CMD: u16 = 0x20
 const MASTER_DATA: u16 = 0x21
@@ -107,6 +108,19 @@ fn set_count(v: u64) {
     unsafe { pax_tick_count.write_volatile(v) }
 }
 
+// px131: tick interrupts taken since `start`: boot/isr.S's
+// `pax_tick_delivered`, read and written as `count` is, so a host (the USB
+// session's hold) reads it by that name.
+fn delivered_word() -> u64 {
+    // # Safety: boot/isr.S's 8-byte word, written only by `start` and `tick`.
+    unsafe { pax_tick_delivered.read_volatile() }
+}
+
+fn set_delivered(v: u64) {
+    // # Safety: as `delivered_word`.
+    unsafe { pax_tick_delivered.write_volatile(v) }
+}
+
 /// Spurious requests seen (vectors 39 and 47).
 var spurious_seen: u64 = 0
 var lapic_started: bool = false
@@ -115,6 +129,8 @@ var armed_ns: u64 = 0 // px107: the clock when the periodic tick was armed (`dri
 var mark_ns: u64 = 0 // px107: the clock at `mark`, and the ticks then
 var mark_ticks: u64 = 0
 var marked: bool = false
+var follow: bool = false // px131: the count follows kernel/clock (`follow_clock`)
+const PERIOD_NS: u64 = 10000000 // px131: the tick's period, as `start` arms it (100 Hz)
 
 fn out(port: u16, v: u64) {
     // # Safety: io.S's OUT to an 8259 or 8254 port; v < 256.
@@ -131,6 +147,7 @@ fn inp(port: u16) -> u64 {
 /// kernel/clock, tick at 100 Hz on vector 32 and say so.
 pub fn start() {
     set_count(0) // #598
+    set_delivered(0)
     // # Safety: the counter is touched with interrupts off.
     unsafe {
         spurious_seen = 0
@@ -275,7 +292,7 @@ pub fn report() {
 /// are one: a boot that keeps them off for more than 10 ms at a time loses
 /// ticks, which is not the tick's rate.
 pub fn mark() {
-    let t = count()
+    let t = delivered()
     let ns = clock.now_ns()
     unsafe { mark_ticks = t; mark_ns = ns; marked = true }
 }
@@ -290,7 +307,7 @@ pub fn mark() {
 pub fn drift() {
     if !unsafe { lapic_started } { return }
     let m = unsafe { marked }
-    let n = count() - (if m { unsafe { mark_ticks } } else { 0 })
+    let n = delivered() - (if m { unsafe { mark_ticks } } else { 0 })
     let ns = clock.now_ns() - (if m { unsafe { mark_ns } } else { unsafe { armed_ns } })
     let ticked = n * 10000000
     log.put("timer: "); log.dec(n as int)
@@ -371,15 +388,47 @@ pub fn stop() {
 }
 
 /// Vector 32: count the tick and acknowledge it (non-specific EOI).
+/// px131: with `follow_clock`, the count is the larger of itself plus one
+/// and the ticks kernel/clock says are due since the tick was armed, so a
+/// stretch with interrupts off longer than a tick (whose further ticks the
+/// APIC drops) costs every deadline counted in ticks its timeliness only,
+/// never its correctness: CLOCK_MONOTONIC and CLOCK_REALTIME, sleeps, poll's,
+/// epoll's, a receive's and a futex's timeouts, TCP's, ARP's and DHCP's
+/// timers all read `ticks`. The interrupts themselves are counted apart
+/// (`delivered`).
 pub fn tick() {
-    set_count(count() + 1) // #598
-    let _now = clock.now_ns() // sample wrapping counters at every tick
+    set_delivered(delivered_word() + 1)
+    let now = clock.now_ns() // sample wrapping counters at every tick
+    var next = count() + 1 // #598
+    let armed = unsafe { armed_ns }
+    if unsafe { follow && lapic_started } && now > armed {
+        let due = (now - armed) / PERIOD_NS
+        if due > next {
+            next = due
+        }
+    }
+    set_count(next)
     apic.write(0xb0, 0)
 }
 
-/// Timer interrupts handled since `start`.
+/// px131: the count follows kernel/clock from now on (`tick`). The shipped
+/// kernel asks for it (kmain_console); the timer's and the scheduler's own
+/// test kernels count interrupts, as their rows do, and so does a kernel
+/// that fakes its clock's readings for its rows (kmain_metal).
+pub fn follow_clock() {
+    unsafe { follow = true }
+}
+
+/// Timer interrupts handled since `start` (px131: with `follow_clock`,
+/// the ticks kernel/clock says have passed, at least).
 pub fn ticks() -> u64 {
     count() // #598: a volatile read, never a value from before a call
+}
+
+/// px131: tick interrupts delivered since `start`, whatever `ticks` says:
+/// a stretch with interrupts off longer than a tick delivers one.
+pub fn delivered() -> u64 {
+    delivered_word()
 }
 
 /// Spurious requests seen since `start`.
