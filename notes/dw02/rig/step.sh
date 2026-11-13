@@ -11,6 +11,9 @@
 #                  the same with `--images $PAX_BUILD/NAME`: the boots of what an earlier step of
 #                  the same take built (mpx6-entropy's TCG leg after its KVM leg)
 #   kernels TIER K…  tools/build-kernel for kernel/K.lu at TIER (native, release), each
+#   kernel-as ARGS tests/kernel-as ARGS: the kernel's assembly (boot/fpu.S's RDRAND among it) through the
+#                  stock driver, GNU as and clef (tools/mkclef, built in the step); the seam wolf is the
+#                  host file's SEAM, a build of tests/kernel-as.d/wolf.pin's commit kept beside the lane
 # The suites with a Linux side reach a container engine through engine-ns (lib.sh's `ctr sys`).
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
 # column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is named in its
@@ -40,6 +43,9 @@ case $what in
                 if tools/build-kernel ${r[@]+"${r[@]}"} --src "kernel/$k.lu" "$o" > "$o.txt" 2>&1; then echo "kernels: ok $t $k"
                 else echo "kernels: FAIL $t $k"; tail -n 5 "$o.txt"; rc=1; fi
             done; exit $rc' x "$tier" "$@" ;;
+    kernel-as)
+        : "${SEAM:?the host file names the seam wolf (SEAM)}"
+        lift ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'export PAX_SEAM_WOLF=$1; shift; tests/kernel-as "$@"; exit $?' x "$SEAM" "$@" ;;
     suite|again)
         name=${1:?a suite}; shift
         case " $SUITES " in *" $name "*) ;; *) echo "step.sh: no suite $name in this rig"; exit 2 ;; esac
