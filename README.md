@@ -632,7 +632,9 @@ they are doubled, giving 240×67 cells at 3840×2160 (the grid is at most 320×1
 shadow. Where reading the framebuffer is slow (a GPU's write-combining mapping: such reads are the slowest thing a user
 would see), a scroll redraws only the cells that changed and never reads it; where reading is cheap (an emulator's
 framebuffer is host memory) it copies the framebuffer onto itself. The screen times framebuffer reads against writes
-once, when it attaches, to choose, and the boot line names the way and why.
+once, when it first attaches, to choose: one warm-up pair, then the minimum of five samples of each. The boot line
+names the way and rule, all ten samples, and the measured window in cycles and microseconds. The minimum rejects an
+isolated stall, not a whole window of slow reads. `fbread` and `fbwrite` still force either way.
 
 The screen draws only what changes, and a program's write once (px129). It keeps a second grid of what each cell of
 the framebuffer shows; a write updates the cell grid in RAM, and when the write ends each cell that now differs from
