@@ -13,6 +13,8 @@
 #   games ARGS     tests/mpx6-games ARGS (the games' glyphs and frames), with KVM
 #   pointer ARGS   tests/mpx6-pointer ARGS (the arrow drawn over a cell, the reports), with KVM
 #   pty ARGS       tests/mpx5-pty ARGS (pseudo-terminals, the probe and pelt's session against Linux's)
+#   norms          tests/mpx6-triage --selftest and tests/mpx3-screen --selftest: T2's mask and V4's strip
+#                  held to their fixtures (pairs from hosted runs' logs), no boot
 #   ptyrate N ACCEL FIRMWARE
 #                  pty-rate.sh: mpx5-pty's session image booted N times, each run checked (pax#382)
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
@@ -41,6 +43,7 @@ case $what in
     games) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-games "$@"; exit $?' x "$@" ;;
     pointer) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx6-pointer "$@"; exit $?' x "$@" ;;
     pty) lift ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'tests/mpx5-pty "$@"; exit $?' x "$@" ;;
+    norms) lift ctr 0 localhost/px75-ubuntu:2 bash -c 'r=0; tests/mpx6-triage --selftest || r=1; tests/mpx3-screen --selftest || r=1; exit $r' ;;
     ptyrate) ctr 1 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'bash notes/px129/rig/pty-rate.sh "$@"; exit $?' x "$@" ;;
     *) echo "step.sh: no step $what"; exit 2 ;;
 esac
