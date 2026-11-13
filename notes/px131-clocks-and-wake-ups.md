@@ -31,6 +31,17 @@ the head's take says more). The console's write with COM1 is as before (1.17 s f
 needs no `.weak`, which clef does not take): the same commits replayed unchanged once more, `px131b-clocks-wake`
 (`a56d9948`) the code before it. On top, the delivered-tick count moves from a module variable to a word with a stable
 name, `boot/isr.S`'s `pax_tick_delivered` beside `pax_tick_count`, and the USB session reads it by that name (section 3).
+The first part merged as it stood (trunk `4007eaa0`), so these commits sit on trunk unchanged.
+
+**A host too stalled to measure.** The restacked head's one take ran the USB session in a light slot beside heavy jobs:
+32 of the hold's 32 intervals spanned ticks the guest lost (17 losses in the hold), and the session refused, `repeat
+unmeasured`. That is the session doing its job (it neither passed nor failed the kernel on stamps it could not
+trust), but a record cannot tell it from a failing kernel when both are exit 1. So `repeat unmeasured` is now its own
+verdict: the session is held again, each time a fresh boot, at most three holds in all, each printed (`NOTE USB …
+(hold N of 3)`) and listed in `OUTPUT/holds.txt`; a measured result, a pass or a failure, is final at once and never
+held again; three unmeasured holds are a red under their own name, `FAIL R-unmeasured FIRMWARE-TOPOLOGY: the host
+stalled the guest past measuring the repeat in 3 of 3 holds`, exit 3 (a failing kernel's is 1). U15 to U18 hold it.
+The take that measures the repeat runs on a whole block, never in a light slot.
 
 Footprint: cross-cutting (`kernel/timer`, `kernel/sched`, `kernel/latency`, `kernel/xhci`, `kernel/kmain_console.lu`,
 `boot/isr.S`'s `pax_tick_delivered`;
@@ -108,7 +119,8 @@ count is), so a stall lengthens the hold as
 it used to, and leaves out of the period's figures every interval that spans ticks the guest lost (the probe prints
 its first read's time, `USBT0`, to place the stamps on the ticks); at least 8 intervals must be left
 (`tests/usb-session-selftest` U10 to U13: CI's failing stamps are refused without the losses and pass with them; U14:
-the hold reads the word by its name). `repeat.txt` says which word the hold counted (`hold_counts`).
+the hold reads the word by its name). `repeat.txt` says which word the hold counted (`hold_counts`) and the verdict
+(`verdict measured` or `verdict unmeasured`, with the hold's number).
 
 **What it does not do.** The resolution stays a tick (10 ms): reading CLOCK_MONOTONIC from `kernel/clock`'s nanoseconds
 directly is a later choice (decision 14). A clock counter that wraps inside one stretch loses its wraps: `kernel/clock`
@@ -203,6 +215,7 @@ still); a device's wake-up changes only the order in which ready threads run. At
 | the guest's memory backed | `1e5d8fd6` (the first part's) | |
 | green at `96986862` (before the replay), the guard and the scheduler | `notes/px131/rig/green-2a.manifest`, a light take, sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7` | section 5's table; `END ci-plan exit=0 secs=111`, `END latency exit=0 secs=88`, `END latency-2g exit=0 secs=45`, `END latency-tcg exit=0 secs=50`, `END sched exit=0 secs=17`, `END interrupts exit=0 secs=41` |
 | the delivered count by name | `tests/usb-session-selftest` U14 at `ec9c38a8`, red there; `d65baee7`, `b3ee7a36`, `b77b7548` | `FAIL U14: boot/isr.S lacks '.globl pax_tick_delivered'`, then `PASS U14` |
+| unmeasured, its own verdict | `tests/usb-session-selftest` U15 to U18 at `4bedc6b5`, red there; `7b0ebdef` | `FAIL U15: tools/usb-session has no Unmeasured verdict …`, then `PASS U15` to `PASS U18` |
 | the takes at the head, native and release, and the plant | `notes/px131/rig/{green-2a,green-2b,release-2,plant-2,final-2}.manifest` | their records and `END` lines are in the PR |
 
 ## 8. Decisions
@@ -233,3 +246,7 @@ processor) is the plan.
     ticks it lost, a slow or uneven repeat with no loss still refused (implemented, recommended); (B) widen the bounds:
     a repeat broken slow would pass; (C) keep the repeat's deadlines on the interrupts taken: the stamps are the
     clock's now, so the stall would still show.
+20. **A hold the host stalled past measuring.** (A) `repeat unmeasured` its own verdict, held again at most three
+    times with a fresh boot each, a measured result final at once, three unmeasured holds a red named `R-unmeasured`
+    with exit 3 (implemented, recommended); (B) a named SKIP: wrong for a required row; (C) exit 1 as any failure: a
+    stalled host reads as a failing kernel.
