@@ -120,7 +120,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 peltdir=
+images= legs=both tiers=both noboot=0 peltdir= only_selftest=0
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -128,7 +128,8 @@ while [ $# -gt 0 ]; do
         --pelt)     peltdir=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
-        *)          die "usage: tests/mpx3-screen [--images DIR | --no-boot] [--pelt DIR] [--firmware bios|uefi|both] [--tier native|release|both]" ;;
+        --selftest) only_selftest=1; shift ;;
+        *)          die "usage: tests/mpx3-screen [--images DIR | --no-boot] [--pelt DIR] [--firmware bios|uefi|both] [--tier native|release|both] [--selftest]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
@@ -139,6 +140,9 @@ work=$PAX_BUILD/mpx3-screen
 runs=$PAX_BUILD/mpx3-screen-runs.txt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
+# V4's strip against its fixtures first (tests/mpx3-screen.d/selftest/README.md); --selftest stops there.
+while IFS= read -r ln; do say "$ln"; case $ln in FAIL*) fail=1 ;; esac; done < <("$here/mpx3-screen.d/v4-selftest.sh")
+if [ "$only_selftest" = 1 ]; then [ "$fail" = 0 ] && say "mpx3-screen: PASS (selftest)" || say "mpx3-screen: FAIL (selftest)"; exit "$fail"; fi
 HEX='0x[0-9a-f]+'
 
 static_ok() { # file -> reason on failure
