@@ -17,13 +17,16 @@ cannot give them. This lane measured what the kernel did, chose a contract, and 
 - **Built** (section 8): `kernel/random`, one RDRAND execution in `boot/fpu.S`, getrandom and the devices on the strict
   path, `/proc/pax-random`, and two test words on the command line that make RDRAND fail. Rows red first at the rows'
   commit, green at the head (section 9).
-- **Not built:** an entropy pool or a generator (section 11). A machine without RDRAND has no qualified source until
-  that work exists, and its strict calls refuse.
+- **Not built:** an entropy pool or a generator; a pool is planned. Until then a machine without RDRAND has no
+  qualified source, and its strict calls refuse.
 
 Footprint: cross-cutting (`boot/fpu.S`, a new `kernel/random`; `kernel/process`, `kernel/user`, `kernel/files`,
 `kernel/procfs`; `.github/workflows/ci.yml` gains the `mpx6-entropy` job, `tools/ci-tiers.map` and `tests/ci-plan` its
 paths; new `tests/mpx6-entropy`, `tests/mpx6-entropy.d/`, `tools/mkentropy`, `user/elf/entropy.c`,
 `user/elf/wolf_entropy.lu`).
+
+The commit shas in this note are those of the branch as measured, before its rebase onto px131b (section 13), kept
+as `dw02-before-rebase`; `notes/dw02/shamap.txt` pairs each with its rebased commit.
 
 ## 1. Forbidden, and what was read
 
@@ -42,7 +45,7 @@ paths; new `tests/mpx6-entropy`, `tests/mpx6-entropy.d/`, `tools/mkentropy`, `us
 
 | input | identity | read |
 |---|---|---|
-| pax base | `px131` at `4b3ab3c0` (pax#385, unmerged): it rewrote getrandom's fill and added `random_fill`, the functions this lane changes | the fresh clone's `git rev-parse` |
+| pax base | `px131b` at `65902280` (pax#394, on trunk `bbe91e16`), the first part of px131's work, which rewrote getrandom's fill and added `random_fill`, the functions this lane changes. The lane was written and measured on `px131` at `4b3ab3c0` (now frozen) and rebased (section 13, "The base") | the fresh clone's `git rev-parse` |
 | wolf | 0.2.35 (`kernel/wolf.pin`) | `tools/fetch-wolf`, by digest |
 | Limine | 12.9.1 | `tools/fetch-limine`, by digest |
 | the image's programs | `user/*.pin` (boreutils `ff5396ad`, pelt `b80d6570`, yew `3a9983ee`, burrow `7aa182f8`, den `291011dd`, lobo `39788b86`, wolf-std `77cf3210`, wolf-lang v0.2.39 `3fc86f77`) | shallow clones at the pins, read for their draws |
@@ -158,9 +161,10 @@ instead.
 
 ## 7. The contract
 
-One shape was chosen from three, after the census above (section 13 has every choice with its options):
+One shape of three was chosen after the census above: A, strict, with no boot word that restores the old bytes (section
+13 has every choice with its options):
 
-- **A, strict (built).** getrandom with flags 0, `GRND_RANDOM` or `GRND_NONBLOCK`, and a read of `/dev/random` or
+- **A, strict (built, chosen).** getrandom with flags 0, `GRND_RANDOM` or `GRND_NONBLOCK`, and a read of `/dev/random` or
   `/dev/urandom`, are served from RDRAND or refused: `EAGAIN` when the machine has no qualified source (the CPU has no
   RDRAND), `EIO` when RDRAND failed (a draw used its ten tries, or the boot's check refused it); a call or a read that
   may not wait (`GRND_NONBLOCK`, an `O_NONBLOCK` descriptor) gets `EAGAIN` either way, the one errno getrandom(2)
@@ -172,8 +176,8 @@ One shape was chosen from three, after the census above (section 13 has every ch
   wolf program could use neither without a change to wolf's runtime, and burrow's key exchange and host key, den's
   and lobo's TLS keep drawing the fold, silently, on a machine without RDRAND.
 - **C, A with a boot word that restores the fold for strict calls** (`/proc/pax-random` would still say `ready no`),
-  for a machine without RDRAND whose owner accepts that, or a test leg without it. Not built: no leg needs it
-  (section 5), and it would make every key on such a machine weak again with one word.
+  for a machine without RDRAND whose owner accepts that, or a test leg without it. Not chosen, and not built: no leg
+  needs it (section 5), and it would make every key on such a machine weak again with one word.
 
 **Why A.** A key exchange whose secret scalar is the time-stamp counter folded on itself is not a weaker key
 exchange: anyone who can bound the machine's uptime to a few seconds searches it. On a machine without RDRAND, A stops
@@ -263,20 +267,13 @@ anything.
 draw the file key (16 bytes), the payload nonce (16) and each recipient's ephemeral secret (32) with `os_random`, and
 read the status once more before writing the header; any change refuses `entropy_unavailable` and writes nothing.
 
-## 11. Later work: a pool and a generator
+## 11. Later work
 
-No entropy pool and no generator were built. That later work would be: a pool fed by more than one source (RDSEED
-where present; interrupt and timer jitter, assessed as NIST SP 800-90B asks), conditioned, seeding an SP 800-90A
-generator (Hash_DRBG or CTR_DRBG) that reseeds on a schedule and after a virtual machine's restore (a VM generation
-id), with getrandom served from it once the pool's estimate says it is ready.
-
-What it unblocks: a qualified source on machines without RDRAND (Intel before Ivy Bridge, AMD before 2015, virtual
-machines whose CPU model hides it, such as QEMU's own default), so the strict calls there are served rather than
-refused; independence from one hardware generator (a faulty or untrusted DRNG mixed with other inputs instead of
-used alone); and cheaper large requests where SRBDS's microcode makes each RDRAND slow. Until it exists, those
-machines refuse by name, as section 5 lists.
+No entropy pool and no generator were built here. A pool is planned.
 
 ## 12. Evidence index
+
+The takes at the rebased head are cited in the pull request.
 
 | what | where | result |
 |---|---|---|
@@ -294,9 +291,9 @@ Each with its options; the one built is marked.
 
 - **R-dw02-1, the shape.** (A) strict: flags 0, `GRND_RANDOM`, `GRND_NONBLOCK` and both devices served from RDRAND or
   refused by name; `GRND_INSECURE`, `AT_RANDOM` and the kernel's words unchanged; `/proc/pax-random` (built,
-  recommended); (B) today's calls unchanged, an opt-in strict flag or device, and `/proc/pax-random`; (C) A with a boot
-  word that restores the fold for strict calls on a machine without RDRAND. A against C decides what PAX does on such
-  machines and is the owner's ruling; `strict_errno` is the one place C would be read, so it stays cheap to add.
+  recommended, and chosen: strict, with no boot word that restores the old bytes); (B) today's calls unchanged, an
+  opt-in strict flag or device, and `/proc/pax-random`; (C) A with a boot word that restores the fold for strict calls
+  on a machine without RDRAND (not chosen). `strict_errno` is the one place a strict request consults readiness.
 - **R-dw02-2, the errno.** (A) `EAGAIN` with no qualified source (Linux's errno for "not ready"), `EIO` when RDRAND
   failed, `EAGAIN` for a call that may not wait either way (built, recommended); (B) block for good, as Linux's
   unready pool would, never a named refusal; (C) `EIO` for both: one name, and no program that retries on `EAGAIN`
@@ -320,15 +317,19 @@ Each with its options; the one built is marked.
 - **R-dw02-9, the legs.** (A) leave `tests/mpx6-staged` and `tests/mpx6-bootlog` as they are (QEMU's default model
   under TCG; their inits draw only glibc's `GRND_NONBLOCK`, E3's case) (recommended); (B) give them `-cpu max` under
   TCG as every other suite has.
-- **The base.** px131's branch (`4b3ab3c0`, unmerged): it rewrote the getrandom fill and added `random_fill`, the
-  functions this lane changes; this branch rebases onto trunk as a new branch once px131 merges.
+- **The base.** Written and measured on `px131` (`4b3ab3c0`, unmerged, since frozen), which rewrote the getrandom
+  fill and added `random_fill`, the functions this lane changes; rebased as a new branch onto `px131b` (`65902280`,
+  pax#394, on trunk `bbe91e16`), px131's first part. The lane's own patch came over unchanged but for
+  `tools/ci-tiers.map`'s `@user` line, where px131b had added `mpx3-conspeed`; the kernel under it did change (the
+  console's batched drawing, px129, in `kernel/screen`, `kernel/serial`, `kernel/console`, `kernel/panic` and
+  `kernel/user`'s `write`), so the takes were made again at the rebased head.
 
 ## 14. Done-when
 
 - [x] the measurement, the prediction first and scored (section 4)
 - [x] the census of who draws and what each does with no qualified source (section 5)
 - [x] the hardware and its published faults (section 6)
-- [x] the contract with its options (sections 7, 13); the choice between A and C is the owner's
+- [x] the contract with its options (sections 7, 13): strict, with no boot word that restores the old bytes
 - [x] built, rows red at the rows' commit and green at the head (sections 8, 9)
-- [x] the paragraph for std and denward (section 10); later work named (section 11)
+- [x] the paragraph for std and denward (section 10); a pool is planned (section 11)
 - [x] one plant, red by name (the pull request)
