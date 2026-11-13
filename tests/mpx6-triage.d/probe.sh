@@ -13,7 +13,7 @@ while [ $# -gt 0 ]; do
         --firmware) firmware=$2; shift 2;;
         --elf) elf=$2; shift 2;;
         --case) only=$2; shift 2;;
-        *) die 'usage: mpx3-screen-probe [--tier native|release] [--firmware bios|uefi|both] [--elf ELF] [--case all|outlier]';;
+        *) die 'usage: tests/mpx6-triage.d/probe.sh [--tier native|release] [--firmware bios|uefi|both] [--elf ELF] [--case all|outlier]';;
     esac
 done
 case $tier in native|release) ;; *) die 'bad tier';; esac
