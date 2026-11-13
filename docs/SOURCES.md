@@ -2448,3 +2448,23 @@ answer the pages leave open is Linux's, run as a black box.
 | the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
 | boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
 | PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
+
+## dw02 — the entropy contract
+
+No kernel's, firmware's or C library's source was read. The image's programs were read at their pins for their
+draws (the org's own repositories); C libraries were seen only as black boxes (recorded straces, and the probe's
+ptrace of its own child).
+
+| source | version | read, for |
+|---|---|---|
+| Intel Digital Random Number Generator (DRNG) Software Implementation Guide | rev. 2.1, 2018-10-17 | RDRAND and RDSEED's CPUID bits; the carry flag as the only sign of a value (5.2); ten retries (5.2.1); RDSEED's failures (5.3.1); the self tests and health tests (3.2.6, 3.2.7) |
+| Intel SDM vol. 2 (CPUID, RDRAND, RDSEED) | the current edition | the instructions, the carry flag, the register zeroed on failure |
+| AMD-SB-7055, "RDSEED Failure on AMD Zen 5 Processors" (CVE-2025-62626) | as published | a zero returned with the carry set; "treat RDSEED returning 0 equivalent to when CF=0" |
+| INTEL-SA-00320 (CVE-2020-0543, SRBDS) | as published | RDRAND and RDSEED values sampled across cores; the microcode's mitigation |
+| getrandom(2), random(4), random(7) | the Linux man-pages (man7.org, read 2026-11-12) | blocking until initialized, `EAGAIN` for `GRND_NONBLOCK`, `/dev/urandom` before initialization |
+| uapi `include/uapi/linux/random.h` | Linux's uapi tree | `GRND_NONBLOCK`, `GRND_RANDOM` ("No effect"), `GRND_INSECURE` ("Return non-cryptographic random bytes") |
+| wolf's specification `spec/11-os.md` §2 (`[os.random]`) and wolf's runtime `crates/wolf_rt/src/random.rs` | wolf-lang v0.2.39 (`3fc86f77`) | `os_random`'s one call (flags 0, `EINTR` retried) and its trap (exit 134) |
+| boreutils, pelt, yew, burrow, den, lobo, wolf-std at `user/*.pin`'s revisions; PAX's own `user/` | the pins | which programs draw, how, and what each does on a failed draw (`notes/dw02-the-entropy-contract.md` §5) |
+| ptrace(2) (`PTRACE_TRACEME`, `PTRACE_SYSCALL`, `PTRACE_O_TRACESYSGOOD`, `PTRACE_GETREGS`) | the Linux man-pages 6.9 | the probe's watch of the C library's start-up draw |
+| QEMU's `-cpu` models (`max`, `max,-rdrand`, the default) | QEMU 8.2.2 | black box: CPUID read in the guest |
+| the Intel Core i9-11900K's family (Rocket Lake): its published instruction-set extensions | Wikipedia's "Rocket Lake" and "RDRAND", read 2026-11-12 | RDRAND (Ivy Bridge and later) and RDSEED (Broadwell and later) |
