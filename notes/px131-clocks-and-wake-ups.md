@@ -75,6 +75,33 @@ a receive, a futex) look at their event first each time they run again, `kernel/
 deadline itself, and TCP's, ARP's and DHCP's timers are deadlines. Two loops looked first at the deadline: `kernel/xhci`'s
 command and control-transfer waits, where a timeout quarantines the controller. They look at the completion first now.
 
+**A harness that leaned on lost ticks: the USB keyboard's repeat.** `tools/usb-session` holds `a` for 100 of the
+guest's ticks and judges the repeat from the probe's CLOCK_MONOTONIC stamps (`user/elf/usbkeys.c`): a 250 ms delay
+(220 to 320), then a 33 ms period (median 20 to 45, mean 31 to 37). Its own note said why it read the guest's ticks:
+a stalled vCPU loses ticks while the host's clock runs on, and the repeat, the poll timeout and CLOCK_MONOTONIC all
+counted those ticks, so a stall cost the stamps nothing. With the count following the clock, a stall's lost ticks
+come back as a jump, and the stamps show the stall. Measured on the build host, the same session at each part's head:
+
+- **five boots each, the session as it stands:** the first part's stamps were the same in all five (250 ms, then 30
+  and 40 ms, mean 33.2); this part's in three, one tick early in one (240 ms), and uneven in one (280 ms, then 10 to
+  50 ms, mean 32.2, inside the bounds); the head's take met one worse (300 ms, median 50 ms, mean 42.4).
+- **four boots each, the hold's polls logged** (the count and the interrupts taken, from an instrumented copy of the
+  session): the first part's count never stood still for more than 12 to 23 ms; in one of this part's boots the
+  host's own polls came 57 ms apart, the guest took 3 interrupts where 6 were due, the count caught them up at the next
+  one, and the intervals around it were 50 and 20 ms; the other three were as the first part's.
+- **CI's runners** (the same suite, one run each): the first part's root session took 1.257 s of wall clock for its
+  100 ticks (about 26 ticks lost), with stamps as even as ever; this part's had two stalls at the hold's end, intervals
+  of 140 and 130 ms, mean 44.2 ms, and failed.
+
+So the kernel's repeat did not change; what changed is what the stamps can hide. At a real keyboard nothing moves
+while interrupts stay on: 250 ms, then 30 and 40 ms in turn. After a stretch with interrupts off (a 64 KiB console
+write at the screen is 120 ms), the reports due inside it are dropped, as before (never a burst), and the next comes
+on the clock's schedule rather than as if no time had passed: a tick's difference at most. The session now holds for
+the interrupts the guest took (`timer.delivered_count`, read as the tick count is), so a stall lengthens the hold as
+it used to, and leaves out of the period's figures every interval that spans ticks the guest lost (the probe prints
+its first read's time, `USBT0`, to place the stamps on the ticks); at least 8 intervals must be left
+(`tests/usb-session-selftest` U10 to U13: CI's failing stamps are refused without the losses and pass with them).
+
 **What it does not do.** The resolution stays a tick (10 ms): reading CLOCK_MONOTONIC from `kernel/clock`'s nanoseconds
 directly is a later choice (decision 13). A clock counter that wraps inside one stretch loses its wraps: `kernel/clock`
 reads the HPET where there is one (32 or 64 bits), else the ACPI PM timer (24 bits wrap after 4.7 s, longer than any
@@ -193,3 +220,7 @@ processor) is the plan.
 17. **The guest's memory in the guard.** (A) backed before boot, PAX's and Linux's alike (implemented in the first
     part, recommended: the host's page faults are not the guest's stretches); (B) left to fault: the yardstick of L2 is now a few milliseconds,
     so a fault of the host's could fail it.
+18. **The USB session's repeat row.** (A) hold for the interrupts the guest took and leave out the intervals that span
+    ticks it lost, a slow or uneven repeat with no loss still refused (implemented, recommended); (B) widen the bounds:
+    a repeat broken slow would pass; (C) keep the repeat's deadlines on the interrupts taken: the stamps are the
+    clock's now, so the stall would still show.
