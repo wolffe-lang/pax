@@ -225,6 +225,8 @@ use cred
 use ext2
 use event
 use frames
+use kmsg
+use log
 use mouse
 use procfs
 use pty
@@ -336,6 +338,7 @@ const K_MEM: u64 = 16 // px102: a held /proc/<pid>/mem address-space identity
 const K_MOUSE: u64 = 17 // px109: /dev/mouse0 opened (kernel/mouse's reader is the node's reference)
 const K_PTM: u64 = 18 // px111: a pty's master (kernel/pty's; the node carries its number)
 const K_PTS: u64 = 19 // px111: a pty's slave, by /dev/pts/N, TIOCGPTPEER or /dev/tty
+const K_KMSG: u64 = 20 // px130: /dev/kmsg opened (its open file's offset the reader's record: `kmsg_read`)
 
 // Nodes: a type in the top byte, a reference below (an entry's offset).
 const T_SHIFT: u64 = 56
@@ -349,6 +352,7 @@ const ZERO: u64 = 1
 const FULL: u64 = 2
 const RANDOM: u64 = 3
 const URANDOM: u64 = 4
+const KMSG: u64 = 5 // px130: /dev/kmsg, mem's minor 11 (kernel/kmsg's records)
 const T_DEV: u64 = 2
 const T_CONSOLE: u64 = 4 // the reference: 0 the console as 0-2 name it, TTY0, CONSOLE
 const T_NULL: u64 = 5
@@ -401,6 +405,7 @@ const ESOCKTNOSUPPORT: u64 = 94 // px17
 const EISCONN: u64 = 106 // px17
 const ENOTTY: u64 = 25
 const ESPIPE: u64 = 29
+const EPIPE: u64 = 32 // px130: a /dev/kmsg reader whose record was overwritten
 const ENODEV: u64 = 19 // px44: fallocate of what is not a file
 const EFBIG: u64 = 27 // px44
 const EROFS: u64 = 30
@@ -486,6 +491,7 @@ const MODE_LINK: u64 = 0xa1ff // 0120777: /dev/std*'s links (px52, measured)
 const MODE_NULL: u64 = 0x21b6 // 020666
 const MODE_DSP: u64 = 0x2180 // 020600 (020666 before px45; px30: one user here)
 const MODE_MOUSE: u64 = 0x2180 // 020600 (px109: root's, as /dev/dsp; the pointer is the console's person's)
+const MODE_KMSG: u64 = 0x21a4 // 020644 (px130: devtmpfs's /dev/kmsg; root writes, a reader is held to dmesg_restrict)
 // px79: a block device, devtmpfs's own mode with no udev (measured on
 // Linux 7.3.0: `brw-------`, root's; a distribution's udev gives the
 // disk group 0660 instead, which PAX has no rule for).
@@ -831,7 +837,7 @@ fn of_drop(o: u64) {
 
 /// Whether a kind keeps an open file (an offset, a pipe end).
 fn has_of(k: u64) -> bool {
-    k == K_MEM || k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK || k == K_MOUSE || k == K_PTM || k == K_PTS
+    k == K_MEM || k == K_FILE || k == K_DIR || k == K_PIPE || k == K_SOCK || k == K_INET || k == K_TCP || k == K_EVENT || k == K_EPOLL || k == K_DSP || k == K_UNIX || k == K_SYN || k == K_BLK || k == K_MOUSE || k == K_PTM || k == K_PTS || k == K_KMSG
 }
 
 // --- descriptors -------------------------------------------------------------
@@ -947,7 +953,7 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
         return 4
     }
     if k == K_SYN {
-        return 6
+        return if procfs.setting(rf(node_of(a, fd))) { 12 } else { 6 } // px130: dmesg_restrict, printk
     }
     if k == K_EVENT {
         return 5
@@ -963,6 +969,9 @@ pub fn write_target(a: u64, fd: u64) -> u64 {
     }
     if k == K_PTM || k == K_PTS {
         return 10 // px111: `pty_write`
+    }
+    if k == K_KMSG {
+        return 11 // px130: `kmsg_write`
     }
     2
 }
@@ -2320,6 +2329,193 @@ fn mouse_scratch() -> u64 {
     unsafe { mouse_buf }
 }
 
+// --- /dev/kmsg (px130) ---------------------------------------------------------------
+//
+// The kernel's records (kernel/kmsg) as the kmsg document has them
+// (Documentation/ABI/testing/dev-kmsg): one record a read, from the
+// oldest at open; a reader that has read them all waits for the next
+// (-EAGAIN with O_NONBLOCK); a reader whose next record was overwritten
+// gets -EPIPE once and goes on from the oldest; a write is a record. The
+// reader's place is its open file's offset word (shared by its
+// duplicates, as Linux's is the open file's): the record's number << 16
+// | its offset in the ring / 8, which spares a walk for the next read.
+
+/// Open /dev/kmsg: its mode first (0644, root's: a user's write is
+/// -EACCES), then a reader held to dmesg_restrict (-EPERM to an
+/// unprivileged reader while it is 1, as syslog(2)'s READ_ALL is).
+fn kmsg_open(a: u64, n: u64, acc: u64, flags: u64, want: u64) -> u64 {
+    if flags & O_DIRECTORY != 0 {
+        return neg(ENOTDIR)
+    }
+    if !may(a, cred.FS, n, want) {
+        return neg(EACCES)
+    }
+    if acc != O_WRONLY && kmsg.restricted() && !cred.privileged(a) {
+        return neg(EPERM)
+    }
+    let fd = open_new(a, 0, K_KMSG, n, flags)
+    if fd < 0x8000000000000000 {
+        set_pos(a, fd, kmsg.first() << 16)
+    }
+    fd
+}
+
+/// A read of /dev/kmsg: the reader's next record, `PRI,SEQ,USEC,-;TEXT\n`
+/// (kernel/kmsg's `format_kmsg`), whole: -EINVAL when `n` cannot hold it.
+fn kmsg_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
+    let p = pos(a, fd)
+    let s = p >> 16
+    if s < kmsg.first() {
+        set_pos(a, fd, kmsg.first() << 16)
+        return neg(EPIPE)
+    }
+    if s >= kmsg.next() {
+        if status(a, fd) & O_NONBLOCK != 0 {
+            return neg(EAGAIN)
+        }
+        kmsg.want() // the next record wakes it (kernel/sched's `wake_sleepers`)
+        return WAIT
+    }
+    let off = kmsg.at(s, (p & 0xffff) * 8)
+    let len = kmsg.format_kmsg(off)
+    if n < len {
+        return neg(EINVAL)
+    }
+    if !uaccess.writable(pml4, buf, len) {
+        return neg(EFAULT)
+    }
+    var i: u64 = 0
+    while i < len {
+        uaccess.put(pml4, buf + i, kmsg.out_at(i), 1)
+        i += 1
+    }
+    set_pos(a, fd, ((s + 1) << 16) | (kmsg.next_at(off) / 8))
+    len
+}
+
+/// `lseek` on /dev/kmsg: SEEK_SET the oldest record, SEEK_END past the
+/// newest, SEEK_DATA (3) the first after syslog(2)'s last CLEAR; any
+/// offset but 0 -ESPIPE, any other whence -EINVAL (the kmsg document's
+/// values). 0.
+fn kmsg_seek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
+    if off != 0 {
+        return neg(ESPIPE)
+    }
+    if whence == 0 {
+        set_pos(a, fd, kmsg.first() << 16)
+    } else if whence == 2 {
+        set_pos(a, fd, kmsg.next() << 16)
+    } else if whence == 3 {
+        let c = kmsg.clear_mark()
+        set_pos(a, fd, (if c > kmsg.first() { c } else { kmsg.first() }) << 16)
+    } else {
+        return neg(EINVAL)
+    }
+    0
+}
+
+/// px130: a write to /dev/kmsg (kernel/user's `write`): one record of
+/// the bytes, at the level and facility a leading `<N>` names (N's low
+/// three bits and the bits above; the kernel's facility, 0, is taken as
+/// LOG_USER, 1), else at the default level of LOG_USER; one trailing
+/// newline is the line's end. At most kernel/kmsg's LINE_CAP bytes are
+/// kept; the whole write is answered.
+pub fn kmsg_write(pml4: u64, buf: u64, len: u64) -> u64 {
+    if len == 0 {
+        return 0
+    }
+    let kept = if len > kmsg.LINE_CAP { kmsg.LINE_CAP } else { len }
+    if !uaccess.readable(pml4, buf, kept) {
+        return neg(EFAULT)
+    }
+    var i: u64 = 0
+    while i < kept {
+        let _ok = kmsg.user_byte(i, uaccess.get(pml4, buf + i, 1))
+        i += 1
+    }
+    kmsg_finish(kept)
+    len
+}
+
+/// px130: `writev` to /dev/kmsg: the parts are one record, as Linux's
+/// (the caller found every part readable; `sum` their lengths).
+pub fn kmsg_writev(pml4: u64, iov: u64, cnt: u64, sum: u64) -> u64 {
+    var at: u64 = 0
+    var p: u64 = 0
+    while p < cnt {
+        let base = uaccess.get64(pml4, iov + p * 16)
+        let l = uaccess.get64(pml4, iov + p * 16 + 8)
+        var i: u64 = 0
+        while i < l && at < kmsg.LINE_CAP {
+            let _ok = kmsg.user_byte(at, uaccess.get(pml4, base + i, 1))
+            at += 1
+            i += 1
+        }
+        p += 1
+    }
+    if sum == 0 {
+        return 0
+    }
+    kmsg_finish(at)
+    sum
+}
+
+/// The `kept` bytes staged (kernel/kmsg's `user_byte`) become a record.
+fn kmsg_finish(kept: u64) {
+    var level = kmsg.DEFAULT
+    var fac = kmsg.USER
+    var from: u64 = 0
+    if kept >= 3 && kmsg.user_at(0) == 60 {
+        var v: u64 = 0
+        var j: u64 = 1
+        while j < kept && j < 12 && kmsg.user_at(j) >= 48 && kmsg.user_at(j) <= 57 {
+            v = v * 10 + kmsg.user_at(j) - 48
+            j += 1
+        }
+        if j > 1 && j < kept && kmsg.user_at(j) == 62 {
+            level = v & 7
+            let f = (v >> 3) & 0xff
+            fac = if f == kmsg.KERN { kmsg.USER } else { f }
+            from = j + 1
+        }
+    }
+    var end = kept
+    if end > from && kmsg.user_at(end - 1) == 10 {
+        end -= 1
+    }
+    log.inject(level, fac, from, end - from)
+}
+
+/// px130: a write to a setting of /proc/sys/kernel (dmesg_restrict,
+/// printk; kernel/user's `write`): its first number, spaces before it
+/// skipped, ends at the first byte that is not a digit; none, or a value
+/// the setting refuses, is -EINVAL (as Linux's proc_dointvec answers).
+/// The whole write is answered.
+pub fn setting_write(a: u64, pml4: u64, fd: u64, buf: u64, len: u64) -> u64 {
+    if len == 0 {
+        return 0
+    }
+    let kept = if len > 24 { 24 } else { len }
+    if !uaccess.readable(pml4, buf, kept) {
+        return neg(EFAULT)
+    }
+    var i: u64 = 0
+    while i < kept && (uaccess.get(pml4, buf + i, 1) == 32 || uaccess.get(pml4, buf + i, 1) == 9) {
+        i += 1
+    }
+    var v: u64 = 0
+    var digits: u64 = 0
+    while i < kept && uaccess.get(pml4, buf + i, 1) >= 48 && uaccess.get(pml4, buf + i, 1) <= 57 && digits < 9 {
+        v = v * 10 + uaccess.get(pml4, buf + i, 1) - 48
+        digits += 1
+        i += 1
+    }
+    if digits == 0 || !procfs.set(rf(node_of(a, fd)), v) {
+        return neg(EINVAL)
+    }
+    len
+}
+
 /// px24: `write` to an eventfd (kernel/user's `write`): eight bytes
 /// added to the counter. Fewer than eight bytes, or the value
 /// 0xffffffffffffffff, is -EINVAL; a sum past 0xfffffffffffffffe waits
@@ -2459,12 +2655,27 @@ fn node_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
 
 /// px24: `poll`'s answer for descriptor `fd` (open): `node_poll`'s.
 pub fn poll(a: u64, fd: u64) -> (u64, u64, u64) {
+    if kind(a, fd) == K_KMSG {
+        return kmsg_poll(pos(a, fd)) // px130: the reader's record is its open file's
+    }
     node_poll(kind(a, fd), node_of(a, fd), access(a, fd))
+}
+
+/// px130: /dev/kmsg's readiness for a reader at offset word `p`
+/// (`kmsg_read`'s): a record to read, or one lost (the read answers
+/// -EPIPE); the first count is the next record's number, which every
+/// record moves, so an edge-triggered registration sees each.
+fn kmsg_poll(p: u64) -> (u64, u64, u64) {
+    let s = p >> 16
+    (if s < kmsg.next() { POLLIN } else { 0 }, kmsg.next(), 0)
 }
 
 /// px24: the same for open file `o` (index + 1, in use): what an epoll
 /// registration watches.
 pub fn poll_of(o: u64) -> (u64, u64, u64) {
+    if ofw(o - 1, O_KIND) == K_KMSG {
+        return kmsg_poll(ofw(o - 1, O_POS)) // px130
+    }
     node_poll(ofw(o - 1, O_KIND), ofw(o - 1, O_NODE), ofw(o - 1, O_FLAGS) & O_ACCMODE)
 }
 
@@ -3455,6 +3666,9 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
         if comp_is(s, n, "zero") {
             return (T_NULL << T_SHIFT) | ZERO // px45
         }
+        if comp_is(s, n, "kmsg") {
+            return (T_NULL << T_SHIFT) | KMSG // px130
+        }
         if comp_is(s, n, "full") {
             return (T_NULL << T_SHIFT) | FULL
         }
@@ -4273,6 +4487,9 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
         }
         return fd
     }
+    if ty(n) == T_NULL && rf(n) == KMSG {
+        return kmsg_open(a, n, acc, flags, want) // px130
+    }
     if ty(n) == T_CONSOLE {
         k = K_CONSOLE
     } else if ty(n) == T_NULL {
@@ -4957,6 +5174,9 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if k == K_MOUSE {
         return mouse_read(a, pml4, fd, buf, n) // px109
     }
+    if k == K_KMSG {
+        return kmsg_read(a, pml4, fd, buf, n) // px130
+    }
     if k == K_EPOLL {
         return neg(EINVAL) // px24: epoll(7): an epoll descriptor is not read
     }
@@ -5086,6 +5306,9 @@ pub fn lseek(a: u64, fd: u64, off: u64, whence: u64) -> u64 {
     }
     if k == K_BLK {
         return blk_seek(a, fd, off, whence) // px79
+    }
+    if k == K_KMSG {
+        return kmsg_seek(a, fd, off, whence) // px130
     }
     var base: u64 = 0
     if whence == 1 {
@@ -7091,7 +7314,7 @@ fn n_mode(n: u64) -> u64 {
         return MODE_LINK // px52: /dev/std*, links
     }
     if t == T_NULL {
-        return MODE_NULL
+        return if rf(n) == KMSG { MODE_KMSG } else { MODE_NULL } // px130: /dev/kmsg 0644
     }
     if t == T_DSP {
         return MODE_DSP
@@ -7165,7 +7388,7 @@ fn n_ino(n: u64) -> u64 {
         return 1
     }
     if t == T_NULL {
-        return if rf(n) == 0 { 4 } else { 0x10 + rf(n) } // px45: zero 0x11 to urandom 0x14
+        return if rf(n) == 0 { 4 } else { 0x10 + rf(n) } // px45: zero 0x11 to urandom 0x14; px130: kmsg 0x15
     }
     if t == T_DSP {
         return 7 // px30
@@ -7238,7 +7461,7 @@ fn n_rdev(n: u64, which: int) -> u64 {
     if t == T_NULL {
         // px45: mem's minors (Linux's numbers, measured): null 3, zero 5, full 7, random 8, urandom 9
         let r = rf(n)
-        return if which == 0 { 1 } else if r == ZERO { 5 } else if r == FULL { 7 } else if r == RANDOM { 8 } else if r == URANDOM { 9 } else { 3 }
+        return if which == 0 { 1 } else if r == ZERO { 5 } else if r == FULL { 7 } else if r == RANDOM { 8 } else if r == URANDOM { 9 } else if r == KMSG { 11 } else { 3 } // px130: kmsg 11
     }
     if t == T_DSP {
         return if which == 0 { 14 } else { 3 } // px30: OSS's dsp, 14:3
@@ -7586,7 +7809,7 @@ fn fixed_name(c: u64) -> str {
     }
     if t == T_NULL {
         let r = rf(c)
-        return if r == ZERO { "zero" } else if r == FULL { "full" } else if r == RANDOM { "random" } else if r == URANDOM { "urandom" } else { "null" }
+        return if r == ZERO { "zero" } else if r == FULL { "full" } else if r == RANDOM { "random" } else if r == URANDOM { "urandom" } else if r == KMSG { "kmsg" } else { "null" }
     }
     if t == T_DSP {
         return "dsp" // px30
@@ -7628,7 +7851,7 @@ fn fixed_len(c: u64) -> u64 {
     }
     if t == T_NULL {
         let r = rf(c)
-        return if r == ZERO || r == FULL { 4 } else if r == RANDOM { 6 } else if r == URANDOM { 7 } else { 4 }
+        return if r == ZERO || r == FULL || r == KMSG { 4 } else if r == RANDOM { 6 } else if r == URANDOM { 7 } else { 4 }
     }
     if t == T_DSP {
         return 3 // px30

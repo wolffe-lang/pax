@@ -15,6 +15,10 @@
 //! px118: and to kernel/bootlog, which keeps the boot's bytes in memory
 //! a warm reset may leave alone (until the first program starts).
 //!
+//! px130: `put_wire` is `put` without the screen: kernel/log's lines
+//! below the console level (kernel/kmsg) reach the wire and the boot's
+//! record, never the screen.
+//!
 //! Written from the PC16550D register map (public datasheet facts:
 //! the register offsets, the DLAB bit, LCR/FCR/MCR/LSR bit meanings, the
 //! 1.8432 MHz clock's divisor 1 for 115200 baud). No Linux source.
@@ -123,6 +127,14 @@ pub fn init() -> int {
 /// loses the byte rather than hang the kernel. It never traps.
 pub fn put(b: u8) {
     screen.put(b)
+    put_wire(b)
+}
+
+/// px130: `put` without the screen: the boot's record (kernel/bootlog),
+/// then COM1 (or the transcript kept when there is no UART). kernel/log
+/// sends a line below the console level here, so the serial port keeps
+/// every line and the screen only those at the console level or above.
+pub fn put_wire(b: u8) {
     bootlog.put(b)
     if !available() {
         // px129: the transcript keeps its first 64 KiB; past them a byte

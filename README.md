@@ -612,6 +612,33 @@ starts no device at all. To try it under QEMU, give the ISO a NIC:
 tools/qemu-run --firmware uefi pax.iso -- -netdev user,id=n0 -device igb,netdev=n0
 ```
 
+## The kernel's log
+
+The kernel writes a line for what it does and for what happens to programs: a device found, a lease taken, a
+program ended by a signal (`user: yes pid 41 killed: SIGPIPE, a write to a pipe with no reader after 3 runs`).
+Every line goes to the serial port as it always has, and into a ring of 128 KiB in memory, each with a level
+(syslog's: 0 emerg to 7 debug) and its time since boot. The newest lines push out the oldest, and the ring starts
+empty at every boot (the boot's own console is kept apart: [When a boot goes black](#the-live-usb-stick)).
+
+- **`dmesg`** prints the ring, one line a record: `[   12.340124] user: yes pid 41 killed: SIGPIPE, …`. `dmesg -w`
+  waits for new lines, `-l warn,err` keeps those levels, `-r` shows each line's `<level>`, `-c` clears after
+  printing and `-C` clears. The log is root's to read while `/proc/sys/kernel/dmesg_restrict` is 1, as it is at
+  boot: `sudo dmesg`. Anyone else is told `dmesg: read kernel buffer failed: Operation not permitted`, as a
+  distribution's dmesg says it.
+- **Programs** read the same records from `/dev/kmsg` (one record a read, `PRI,SEQ,USEC,-;TEXT`) and `syslog(2)`,
+  as on Linux, and root may add one: `echo '<4>a warning' | sudo tee /dev/kmsg`.
+- **What reaches the screen.** With `quiet` on the kernel command line (every shipped image and every installed
+  system boots with it), once the first program has started only warnings and worse are drawn on the screen. A
+  program's ordinary life (its exit, its end by a signal such as a pipeline's SIGPIPE or Ctrl-C's SIGINT, its
+  fault) is information, level 6, and stays off it, so work over ssh no longer draws over the console's prompt;
+  the serial port and `dmesg` still have every line. `sudo dmesg -n 8` draws every line again until the next
+  boot, `loglevel=N` on the kernel command line sets the level from the start, and `/proc/sys/kernel/printk`
+  shows it.
+
+`tests/mpx5-kmsg` holds `/dev/kmsg` and `syslog(2)` to a real Linux's answers for the same probe, root and user;
+`tests/mpx5-burrowd` B40-B43 hold the installed shape: a pipeline's SIGPIPE over ssh leaves the console's screen
+as it was, root's `dmesg` shows the line with its time, pax's `dmesg` is refused, and a warning is still drawn.
+
 ## Seeing the screen
 
 The harness boots headless. To see PAX's screen, give QEMU a window; on macOS (Homebrew's QEMU, TCG):
@@ -809,7 +836,7 @@ and `--tier native --firmware bios` picks one leg.
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-conspeed`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the console's drawing cost at 2560×1440 as ratios on one boot (its table read off the screen), the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net`, `mpx4-console-push`, `mpx5-burrowd` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), the tick clock held to the clock over the lease, and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes); den pushing from the console over https and through burrow over ssh to fixtures that answer as github.com, names through a DNS server of the suite's own, the resolver's datagram calls against Linux, a scrubbed transcript proven on fake secrets (root, sshd, mke2fs); burrowd started at boot and reached from a LAN on a tap, held to OpenSSH's sshd on Linux: commands by key and by password, the refusals, git through den, a restart, the host key kept across a reboot, the stick's shape on loopback alone (root, dnsmasq, sshd) |
-| Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pty`, `mpx5-forks`, `mpx5-rates`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, static musl programs that fork and ask `getrusage`, the rates a clone leans on against the host's Linux, each program's typed session against the same binary in a container, the language server's frames both ways |
+| Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pty`, `mpx5-kmsg`, `mpx5-forks`, `mpx5-rates`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, the kernel's log through `/dev/kmsg` and `syslog(2)` against Linux's, static musl programs that fork and ask `getrusage`, the rates a clone leans on against the host's Linux, each program's typed session against the same binary in a container, the language server's frames both ways |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `mpx6-pointer`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; two mice and a tablet through `/dev/mouse0`'s records (moves, each button, a drag, the wheel, a burst that fills the queue with no edge lost, unplug and replug, typing during motion), under KVM and TCG; (px117) the pointer drawn and erased cell-exact and never copied by a scroll, SGR reports of each button, drags, the wheel and the modifiers from the tablet and the mouse, none without a mode or for a mode not served, the modes' owner ending or in the background, reports and keys in order, a pty's program served by its master; (px120) hot-plug after the probe has churned memory past 4 GiB, on two controllers (INTx and MSI): mice, a keyboard and two composite HID devices played over usb-redir, 40 plugs and unplugs past the 32 records a controller keeps, two devices past them said once each; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
 | Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the clock's answers to a reading behind the last, a torn read of the HPET and the rollovers of a 32-bit HPET and of the PM timer, the tick timed by the PM timer after a stall inside its calibration (with the PM timer beside the clock, without it, and standing still with it), the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine, the metal triage's boxes, fault screens and words, an NMI survived and a machine check named anywhere in the boot (`tests/mpx6-nmi`) |
