@@ -150,10 +150,13 @@ for tier in $tiers; do
                 "$images/$tier/kmain_console.elf" "$b/entropy.iso" > /dev/null || { bad "E0 $name: tools/mkimage"; continue; }
             q=()
             [ "$cfg" = masked ] && q=(--qemu -cpu --qemu max,-rdrand)
-            qemu=${PAX_QEMU:-qemu-system-x86_64}
+            # The real QEMU first: an assignment on the command line below
+            # sees the one before it, so PAX_QEMU_REAL may not read PAX_QEMU.
+            real=${PAX_QEMU:-qemu-system-x86_64}
+            qemu=$real
             [ "$cfg" = default ] && qemu=$D/qemu-default
             say "boot $name${words:+ ($words)}"
-            PAX_QEMU=$qemu PAX_QEMU_REAL=${PAX_QEMU:-qemu-system-x86_64} "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" \
+            PAX_QEMU=$qemu PAX_QEMU_REAL=$real "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" \
                 --serial "$b/serial.log" --no-screen --timeout 300 --accel "$accel" \
                 --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' ${q[@]+"${q[@]}"} \
                 "$b/entropy.iso" > "$b/verdict.txt" 2>&1
