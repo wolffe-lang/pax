@@ -16,8 +16,8 @@ case $what in
 esac
 podman run --rm --memory 12g --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 \
     --device /dev/kvm -v "$PX139_ROOT:$PX139_ROOT" -w "$co" \
-    -e TMPDIR -e PAX_CACHE -e PAX_BUILD -e HOME="$PX139_ROOT/home" -e PAX_REQUIRE_UEFI=1 \
+    -e TMPDIR -e PAX_CACHE -e PAX_BUILD -e PX139_CPUS -e HOME="$PX139_ROOT/home" -e PAX_REQUIRE_UEFI=1 \
     -e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' \
     -e GIT_CONFIG_KEY_1=commit.gpgsign -e GIT_CONFIG_VALUE_1=false \
     localhost/px75-ubuntu:2 /usr/bin/taskset -c "$PX139_CPUS" bash -c \
-    'set -euo pipefail; taskset -pc $$; cmd=$1; shift; eval "$cmd"' x "$cmd" "$@"
+    'set -euo pipefail; taskset -pc $$; python3 -I -c '\''import os; a,b=map(int,os.environ["PX139_CPUS"].split("-")); assert os.sched_getaffinity(0)==set(range(a,b+1)), "unexpected CPU affinity"'\''; cmd=$1; shift; eval "$cmd"' x "$cmd" "$@"
