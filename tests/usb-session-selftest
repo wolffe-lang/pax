@@ -28,6 +28,16 @@ as the probe prints them.
   U14 the hold counts the kernel's tick interrupts by a stable name:
       boot/isr.S exports pax_tick_delivered beside pax_tick_count,
       kernel/timer writes it at each tick, tools/usb-session reads it.
+  U15 an unmeasured repeat is its own verdict: repeat_period raises
+      `Unmeasured` (a RuntimeError), and three unmeasured holds exit 3,
+      neither 0 nor a failing kernel's 1.
+  U16 an unmeasured hold is held again, a fresh boot each time: two
+      unmeasured then a measured pass is a pass on hold 3, each printed,
+      in OUTPUT, OUTPUT-hold2 and OUTPUT-hold3, holds.txt listing them.
+  U17 three unmeasured holds are a red under their own name:
+      `FAIL R-unmeasured FIRMWARE-TOPOLOGY … 3 of 3 holds`, exit 3.
+  U18 a measured failure is final at once: raised on hold 1, never held
+      again.
 Exit 0 when every row held; the first failing row is named.
 """
 from importlib.machinery import SourceFileLoader
@@ -119,4 +129,53 @@ for need, text, where in (('.globl pax_tick_delivered', isr, 'boot/isr.S'),
     if need not in text:
         sys.exit(f'FAIL U14: {where} lacks {need!r}')
 print("PASS U14: the hold counts boot/isr.S's pax_tick_delivered, written by kernel/timer at each tick")
+# px131: unmeasured, its own verdict; held again at most HOLDS times
+import argparse, contextlib, io, tempfile
+if not issubclass(getattr(session, 'Unmeasured', type(None)), RuntimeError) or getattr(session, 'UNMEASURED_EXIT', None) not in range(2, 126) \
+        or getattr(session, 'HOLDS', None) != 3 or not hasattr(session, 'session'):
+    sys.exit('FAIL U15: tools/usb-session has no Unmeasured verdict (a RuntimeError), UNMEASURED_EXIT, HOLDS = 3 and session()')
+try:
+    session.repeat_period(choppy, 1000 * NS, lossy)
+    sys.exit('FAIL U15: an unmeasured hold passed')
+except session.Unmeasured as error:
+    print(f'PASS U15: {error} is Unmeasured, exit {session.UNMEASURED_EXIT} after {session.HOLDS} holds')
+
+def held(outcomes):
+    # session() over a fake session: each hold's outcome in turn (None a pass)
+    calls = []
+    def fake(args):
+        calls.append(Path(args.output).name)
+        Path(args.output).mkdir(parents=True, exist_ok=True)
+        outcome = outcomes[len(calls) - 1]
+        if outcome is not None:
+            raise outcome
+        (Path(args.output) / 'repeat.txt').write_text('delay_ms 250.000\n')
+    with tempfile.TemporaryDirectory() as tmp:
+        args = argparse.Namespace(output=str(Path(tmp) / 'bios-root'), firmware='bios', topology='root')
+        printed = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(printed):
+                code = session.session(args, fake)
+        except RuntimeError as error:
+            code = error
+        holds = (Path(tmp) / 'bios-root' / 'holds.txt').read_text() if (Path(tmp) / 'bios-root' / 'holds.txt').exists() else ''
+        last = Path(tmp) / calls[-1] / 'repeat.txt'
+        return code, calls, printed.getvalue(), holds, last.read_text() if last.exists() else ''
+
+U = session.Unmeasured
+code, calls, printed, holds, last = held([U('repeat unmeasured: 1'), U('repeat unmeasured: 2'), None])
+if code != 0 or calls != ['bios-root', 'bios-root-hold2', 'bios-root-hold3'] or printed.count('NOTE USB root bios: repeat unmeasured') != 2 \
+        or holds.split('\n')[2:3] != ['3 measured bios-root-hold3'] or 'verdict measured\nhold 3 of 3' not in last:
+    sys.exit(f'FAIL U16: {code=} {calls=} {printed=!r} {holds=!r} {last=!r}')
+print('PASS U16: two unmeasured holds, then measured on hold 3 of 3: a pass, each hold printed and listed')
+code, calls, printed, holds, last = held([U('repeat unmeasured: a'), U('repeat unmeasured: b'), U('repeat unmeasured: c')])
+if code != session.UNMEASURED_EXIT or len(calls) != 3 or 'FAIL R-unmeasured bios-root: ' not in printed or '3 of 3 holds' not in printed \
+        or 'verdict unmeasured\nhold 3 of 3' not in last:
+    sys.exit(f'FAIL U17: {code=} {calls=} {printed=!r} {last=!r}')
+print(f'PASS U17: three unmeasured holds: exit {code}, ' + [l for l in printed.splitlines() if l.startswith('FAIL ')][0][:60] + '…')
+failure = RuntimeError('repeat outside measured tolerance: delay=330')
+code, calls, printed, holds, last = held([failure, None, None])
+if code is not failure or calls != ['bios-root'] or not holds.startswith('1 failed bios-root '):
+    sys.exit(f'FAIL U18: {code=} {calls=} {holds=!r}')
+print('PASS U18: a measured failure on hold 1 is raised at once, never held again')
 print('PASS usb-session-selftest')
