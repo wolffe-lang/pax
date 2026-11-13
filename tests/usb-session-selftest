@@ -25,6 +25,9 @@ as the probe prints them.
       no delivered counter to show the losses, the same stamps are refused.
   U12 a hold that lost ticks in most intervals is `repeat unmeasured`.
   U13 a repeat that is slow with no loss (every 50 ms) is still refused.
+  U14 the hold counts the kernel's tick interrupts by a stable name:
+      boot/isr.S exports pax_tick_delivered beside pax_tick_count,
+      kernel/timer writes it at each tick, tools/usb-session reads it.
 Exit 0 when every row held; the first failing row is named.
 """
 from importlib.machinery import SourceFileLoader
@@ -108,4 +111,12 @@ lossy = [(1000 + 3 * k, 1000 + 2 * k) for k in range(40)]
 period_refused('U12', choppy, 1000 * NS, lossy, 'repeat unmeasured')
 slow = [0] + [250003775 + 50000755 * k for k in range(15)]
 period_refused('U13', slow, 1000 * NS, [], 'repeat outside measured tolerance')
+isr = (root / 'boot/isr.S').read_text()
+timer = (root / 'kernel/timer/timer.lu').read_text()
+for need, text, where in (('.globl pax_tick_delivered', isr, 'boot/isr.S'),
+                          ('pax_tick_delivered.write_volatile', timer, 'kernel/timer/timer.lu'),
+                          ("'pax_tick_delivered'", source, 'tools/usb-session')):
+    if need not in text:
+        sys.exit(f'FAIL U14: {where} lacks {need!r}')
+print("PASS U14: the hold counts boot/isr.S's pax_tick_delivered, written by kernel/timer at each tick")
 print('PASS usb-session-selftest')
