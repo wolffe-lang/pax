@@ -550,7 +550,7 @@ pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
         return c
     }
     let r = mount_claimed(v, dev, ro, now)
-    if failed(r) {
+    if failed(r) && vw(v, V_USED) == 0 {
         block.release(dev)
     }
     r
@@ -705,6 +705,7 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
             w32(s + SB_MTIME, now)
             put_vw(v, V_MNT, r16(s + SB_MNT_COUNT))
             sb_dirty(v)
+            if vw(v, V_JNL) != 0 && journal.failed(v) { return neg(EIO) }
             // px66: the mounted state on the disk now, and flushed, before
             // any other block of the volume is written (write-back would
             // keep it in the cache until the flusher's first turn, and a
@@ -712,7 +713,13 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
             // that was mounted: tests/mpx6-part P10, seen red). px68: the
             // journal's log is empty here (replayed, or clean), so the
             // superblock goes home directly, and the journal begins after.
-            let _w = block.sync(dev)
+            let w = block.sync(dev)
+            // An uncertain mount-state write is not a mounted filesystem.
+            // Keep its device claimed until reboot rather than reuse dirty buffers.
+            if w != 0 { return w }
+            if vw(v, V_JNL) != 0 && journal.failed(v) { return neg(EIO) }
+        } else {
+            return neg(EIO)
         }
         if vw(v, V_JNL) != 0 {
             journal.begin(v)
@@ -720,6 +727,7 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     } else if vw(v, V_JNL) != 0 {
         put_vw(v, V_MNT, r16(sb(v) + SB_MNT_COUNT))
     }
+    if why == 0 && !has_j && block.flags(dev) & block.F_FLUSH == 0 { log.put("ext2: "); block.put_name(dev); log.put(": no flush barrier; sync is not a durability guarantee"); log.end() }
     v
 }
 
@@ -781,6 +789,19 @@ fn refuse_features(bits: u64) -> u64 {
     neg(EINVAL)
 }
 
+/// A writable journal or a replay needs an actual successful barrier before
+/// its first write, not just an advertised feature. Plain ext2 is unchanged.
+fn journal_barrier(dev: u64) -> u64 {
+    let supported = block.flags(dev) & block.F_FLUSH != 0
+    let e = if supported { block.flush(dev) } else { neg(EIO) }
+    if e == 0 { return 0 }
+    log.put("ext2: refused: ")
+    block.put_name(dev)
+    log.put(if supported { ": journal device flush barrier failed before writes" } else { ": journal requires a device flush barrier before writes" })
+    log.end()
+    neg(EIO)
+}
+
 /// px68: volume `v`'s journal (inode `jino`) mapped, its superblock
 /// checked and its log replayed when it has transactions (`fi`, the
 /// incompatible features found, says whether needs_recovery was set): 0,
@@ -817,8 +838,28 @@ fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
         }
         j += 1
     }
-    let r = journal.load(v, dev, b, n)
+    let s = sb(v)
+    if s == 0 { return neg(EIO) }
+    if r32(s + 0xe4) != 0 {
+        return refuse("an internal journal with an external journal device:", r32(s + 0xe4))
+    }
+    if r32(s + 0xd0) != 0 || r32(s + 0xd4) != 0 || r32(s + 0xd8) != 0 || r32(s + 0xdc) != 0 {
+        return refuse("an external journal UUID on an internal journal: inode", jino)
+    }
+    let uuid0 = r32(s + SB_UUID) | (r32(s + SB_UUID + 4) << 32)
+    let uuid1 = r32(s + SB_UUID + 8) | (r32(s + SB_UUID + 12) << 32)
+    let r = journal.load(v, dev, b, n, uuid0, uuid1)
     if r != journal.R_OK {
+        if r == journal.R_COMPAT {
+            return refuse("the journal's compatible features are unsupported:", journal.refused_bits(v))
+        }
+        if r == journal.R_ROCOMPAT {
+            return refuse("the journal's read-only-compatible features are unsupported:", journal.refused_bits(v))
+        }
+        if r == journal.R_UUID { return refuse("journal UUID does not match the filesystem: inode", jino) }
+        if r == journal.R_ABORTED { return refuse("journal records an error and needs offline recovery: inode", jino) }
+        if r == journal.R_VERSION { return refuse("journal version without a qualified UUID: inode", jino) }
+        if r == journal.R_USERS { return refuse("journal is not private to one filesystem: inode", jino) }
         if r == journal.R_FEAT {
             log.put("ext2: refused: ")
             block.put_name(dev)
@@ -829,6 +870,10 @@ fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
             return neg(EINVAL)
         }
         return refuse(if r == journal.R_IO { "the journal's superblock could not be read: inode" } else if r == journal.R_MAGIC { "no journal superblock (jbd2's magic) at the journal's first block: inode" } else if r == journal.R_BSIZE { "a journal whose block size is not the volume's: inode" } else if r == journal.R_LEN { "a journal whose s_maxlen or s_first is out of its inode's blocks: inode" } else if r == journal.R_SMALL { "a journal smaller than the largest transaction (the cache's 512 buffers and their descriptors): inode" } else { "no frame for the journal's state: inode" }, jino)
+    }
+    if vw(v, V_RO) == 0 || journal.start_found(v) != 0 {
+        let barrier = journal_barrier(dev)
+        if barrier != 0 { return barrier }
     }
     if journal.start_found(v) != 0 || fi & INCOMPAT_RECOVER != 0 {
         if journal.start_found(v) != 0 && block.flags(dev) & block.F_RO != 0 {
@@ -924,6 +969,7 @@ pub fn unmount(v: u64, now: u64) -> u64 {
         // last commit, its checkpoint and the log emptied first, then
         // needs_recovery cleared.
         r0 = close_journal(v, now)
+        if r0 != 0 { return r0 } // Keep the failed mount and its protected buffers owned.
         let s = sb(v)
         if s != 0 {
             if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 && r0 == 0 {
@@ -937,8 +983,9 @@ pub fn unmount(v: u64, now: u64) -> u64 {
             sb_dirty(v)
         }
     }
-    let r1 = block.sync(dev)
+    let r1 = if vw(v, V_RO) == 0 { block.sync(dev) } else { 0 }
     let r = if r0 != 0 { r0 } else { r1 }
+    if r != 0 { return r }
     block.forget(dev)
     block.release(dev)
     put_vw(v, V_USED, 0)
@@ -951,6 +998,7 @@ pub fn unmount(v: u64, now: u64) -> u64 {
 /// flushed. 0 or -EIO.
 fn close_journal(v: u64, now: u64) -> u64 {
     let dev = vw(v, V_DEV)
+    if vw(v, V_JNL) != 0 && journal.failed(v) { return neg(EIO) }
     if !journal.active(v) {
         return block.sync(dev)
     }
@@ -978,6 +1026,7 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
     if v >= VOLS || vw(v, V_USED) == 0 {
         return neg(EINVAL)
     }
+    if vw(v, V_JNL) != 0 && journal.failed(v) { return neg(EIO) }
     let dev = vw(v, V_DEV)
     let was = vw(v, V_RO)
     if ro {
@@ -985,6 +1034,7 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
             return 0
         }
         let r0 = close_journal(v, now)
+        if r0 != 0 { return r0 }
         let s = sb(v)
         if s != 0 {
             if vw(v, V_CLEAN) == 1 && vw(v, V_ERRS) == 0 && r0 == 0 {
@@ -1006,6 +1056,10 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
     }
     if was >= 2 || block.flags(dev) & block.F_RO != 0 {
         return neg(EROFS)
+    }
+    if vw(v, V_JNL) != 0 {
+        let barrier = journal_barrier(dev)
+        if barrier != 0 { return barrier }
     }
     let s = sb(v)
     if s == 0 {
@@ -1037,6 +1091,7 @@ pub fn sync(v: u64, now: u64) -> u64 {
     if v >= VOLS || vw(v, V_USED) == 0 {
         return 0
     }
+    if vw(v, V_JNL) != 0 && journal.failed(v) { return neg(EIO) }
     if journal.active(v) {
         return journal.commit(v, now)
     }
@@ -1159,9 +1214,9 @@ pub fn mounted(v: u64) -> bool {
 }
 
 /// Why volume `v` is read-only: 0 it is not; 1 the mount asked; 2 a
-/// feature; 3 the disk is.
+/// feature; 3 the disk is; 4 its journal failed and needs a fresh boot.
 pub fn read_only(v: u64) -> u64 {
-    vw(v, V_RO)
+    if vw(v, V_JNL) != 0 && journal.failed(v) { 4 } else { vw(v, V_RO) }
 }
 
 /// Its block size.
@@ -1514,6 +1569,7 @@ fn take_bit(v: u64, bm: u64, from: u64, n: u64, guard: u64) -> u64 {
 /// A free block, near the group of inode `ino` (the cursor first): its
 /// number, or 0 when the volume is full.
 fn balloc(v: u64, ino: u64) -> u64 {
+    if read_only(v) != 0 { return 0 }
     let groups = vw(v, V_GROUPS)
     let cur = vw(v, V_CURSOR)
     var g = (ino - 1) / vw(v, V_IPG)
@@ -1576,7 +1632,7 @@ fn bfree(v: u64, b: u64) {
         // px68: the group's bitmap as it was, kept until the commit (no
         // reuse before it), and the block out of the running transaction
         // and revoked when it was logged since the last checkpoint.
-        journal.protect(v, g, a)
+        if !journal.protect(v, g, a) { return }
         journal.freed(v, b)
     }
     w8(a + k / 8, byte & !(1 << (k % 8)))
@@ -1589,7 +1645,7 @@ fn bfree(v: u64, b: u64) {
 /// near directory `dir`'s group, every time `t`, no link yet: its number,
 /// or -ENOSPC, -EROFS.
 pub fn ialloc(v: u64, dir: u64, m: u64, uid: u64, gid: u64, t: u64) -> u64 {
-    if vw(v, V_RO) != 0 {
+    if read_only(v) != 0 {
         return neg(EROFS)
     }
     let groups = vw(v, V_GROUPS)
@@ -1643,7 +1699,7 @@ pub fn ialloc(v: u64, dir: u64, m: u64, uid: u64, gid: u64, t: u64) -> u64 {
 /// blocks freed, `i_dtime` set to `t` (seconds), its bit cleared and the
 /// counts moved.
 pub fn ifree(v: u64, ino: u64, t: u64) {
-    if vw(v, V_RO) != 0 {
+    if read_only(v) != 0 {
         return
     }
     let m = mode(v, ino)
@@ -1921,7 +1977,7 @@ fn cut_tree(v: u64, ino: u64, blk: u64, lvl: u64, first: u64, span: u64, keep: u
 /// given back, an indirect block with its last pointer, the tail of the
 /// block that stays zeroed; its size set. 0, or -EIO.
 pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
-    if vw(v, V_RO) != 0 {
+    if read_only(v) != 0 {
         return neg(EROFS)
     }
     let b = bs(v)
@@ -1988,7 +2044,7 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
 /// FALLOC_FL_PUNCH_HOLE: the blocks are kept, as kernel/tree keeps a
 /// frame).
 pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) {
-    if vw(v, V_RO) != 0 {
+    if read_only(v) != 0 {
         return
     }
     let b = bs(v)
