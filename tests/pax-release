@@ -89,3 +89,48 @@ with tempfile.TemporaryDirectory(prefix='px82-cpio-') as tmp:
     else:
         raise AssertionError('distribution-newc-short-archive-accepted')
     print('R3 PASS distribution archive modes, owners, links, bytes and truncation refusal')
+
+# pxg is a source-built production input in both variants, never a test tool.
+pin = ROOT / 'user/pxg.pin'
+assert pin.is_file(), 'image-pxg-pin-missing'
+values = dict(line.split('=', 1) for line in pin.read_text().splitlines()
+              if line and not line.startswith('#') and '=' in line)
+import re
+assert values.get('PXG_REPO') == 'https://github.com/wolffe-lang/paxage', 'image-pxg-source'
+assert re.fullmatch(r'[0-9a-f]{40}', values.get('PXG_REV', '')), 'image-pxg-revision'
+assert callable(codec.get('install_pxg')), 'image-pxg-installer-missing'
+with tempfile.TemporaryDirectory(prefix='pxg-image-') as tmp:
+    inputs = Path(tmp)
+    (inputs / 'pxg').mkdir()
+    data = b'production input fixture\n'
+    (inputs / 'pxg/pxg').write_bytes(data)
+    sums = f'pxg {sha(data)} {len(data)}\n'
+    (inputs / 'pxg/sums.txt').write_text(sums)
+    for name in ('paxage-failpoint', 'qualify-probe'):
+        (inputs / 'pxg' / name).write_bytes(b'never installed\n')
+    rows = {'bin': (0o40755, 0, 0, b'')}
+    codec['install_pxg'](rows, inputs)
+    assert rows == {'bin': (0o40755, 0, 0, b''),
+                    'bin/pxg': (0o100755, 0, 0, data)}, 'image-pxg-production-only'
+    path = inputs / 'fixture.cpio'
+    codec['write_cpio'](rows, path)
+    assert codec['read_cpio'](path.read_bytes()) == rows, 'image-pxg-packed-bytes'
+    print('R4 PASS pxg source pin, production-only image bytes, mode and owner')
+    for label, replacement in [('digest', f'pxg {"0" * 64} {len(data)}\n'),
+                               ('size', f'pxg {sha(data)} {len(data) + 1}\n'),
+                               ('extra', sums + 'qualify-probe unused 1\n')]:
+        (inputs / 'pxg/sums.txt').write_text(replacement)
+        try:
+            codec['install_pxg']({}, inputs)
+        except AssertionError as error:
+            assert str(error) == 'image-pxg-input-mismatch', error
+        else:
+            raise AssertionError('image-pxg-' + label + '-accepted')
+    (inputs / 'pxg/sums.txt').write_text(sums)
+    try:
+        codec['install_pxg'](rows, inputs)
+    except AssertionError as error:
+        assert str(error) == 'image-pxg-collision', error
+    else:
+        raise AssertionError('image-pxg-collision-accepted')
+    print('R5 PASS pxg digest, size, extra-input and image-collision refusals')
