@@ -44,7 +44,7 @@ accounts, and all four read one password file:
   stored as scrypt in crypt(5)'s `$7$` form (N = 2^17, r = 8, p = 1: 128 MiB
   and about 0.6-0.7 s a check on PAX on a laptop i7 under KVM), the
   string Ubuntu's own crypt reads, made with a fresh 16-byte salt from the
-  kernel's random source. `/etc/passwd`'s second field stays `x`.
+  kernel's random source (RDRAND: a machine without it cannot set a password). `/etc/passwd`'s second field stays `x`.
 - **`passwd`** (`user/passwd`, set-user-ID root) sets a password: root
   anyone's, a user only their own after the current one. `passwd -S` shows the
   state (`L`, `NP` or `P`), and root can lock (`-l`), unlock (`-u`) or empty
@@ -312,7 +312,8 @@ answers for the same steps on Linux, and, given a repository on GitHub in its en
 
 `burrowd`, burrow's server, starts at every boot: `/etc/pax-boot.d/burrowd`, which pid 1 runs before the first prompt
 (`/bin/login` on an installed system, the live entry on the stick), makes the machine's host key at its first boot
-(`/etc/burrowd/ssh_host_ed25519_key`, from the CPU's RDRAND through `/dev/urandom`; no image ships one), prints its
+(`/etc/burrowd/ssh_host_ed25519_key`, from the CPU's RDRAND through `/dev/urandom`, and none on a machine without
+RDRAND, where `/dev/urandom` refuses: `/proc/pax-random`; no image ships one), prints its
 fingerprint on the console at every boot, and starts burrowd again a second after it ends. On an installed system it
 listens on every address (the installer writes `ListenAddress 0.0.0.0` into `/etc/burrowd/burrowd_config`), so
 another machine on the LAN reaches it; on the live stick it listens on `127.0.0.1` alone. The machine is behind its
