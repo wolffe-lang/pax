@@ -55,8 +55,9 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   terminal output off COM1, leaving the kernel's own lines; programs' output
   is still mirrored by default. Under QEMU, whose UART sends as fast as it is
   written, COM1's bytes are unchanged. `tests/mpx3-conspeed` boots a second
-  time with COM1 drained at 115200 baud and holds a console write's time (C9)
-  and the backlog's drain while programs sleep (C10). `conspeed` 5 bounds its
+  time with COM1 drained at 115200 baud and holds a console write's time (C9),
+  the backlog's drain while programs sleep (C10) and a write into a full ring
+  (C11: a dropped byte touches the UART once in 256). `conspeed` 5 bounds its
   run by bytes as well as time, so no single frame can outrun it:
   `notes/px129-console-speed.md` §11.
 
