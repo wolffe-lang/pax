@@ -237,6 +237,10 @@ The prediction (`notes/px129/prediction.txt`, `e91d6ce7`) was committed before t
 | C10 | `e806939b` (uart.py's pause), `8aa8b9c8` (rows.py), `39e25a64` (the suite), `f07fb22f` (`uart.manifest`) | |
 | **C9 red at trunk's kernel** | `px129-uart-trunk` (`f82e2c4d`: `7d8a3221` with kernel/ and boot/ exactly as trunk `0e2843cf`), `uart.manifest`, record sha256 `7a7bac3059ad88d1661a94a2e48b3a23c592ef239d2bfb045bf1f913f238543c` | `FAIL C9 (f) a slow UART: bytes 1797.172 ms least for 23040 bytes, 540.34 units of 3.326 ms (bound 3; 78.002 us a byte)`, `FAIL C8 the grid: 256x90 cells`; `END conspeed exit=1 secs=78` |
 | **C9 and C10 red at trunk's kernel** | `px129-uart-trunk` (`7fd1f794`: `f82e2c4d` with C10's commits picked onto it), `uart.manifest`, record sha256 `c1caf246865e31bb1ef965c13fd3e7df5eeefec69ea07fdd38566559e637292e` | `FAIL C9 … 542.85 units … (78.388 us a byte)`, `FAIL C10 (g) COM1's backlog: the line paused at most 0.809 s once 64 KiB were sent (bound 0.5; at byte 725892 of 728127 in 71.7 s)`, `FAIL C8`; `END conspeed exit=1 secs=79` |
+| C11, before its fix | `90dbb61d` (rows.py), `6d3b1d4c` (the suite), `01071708` (`uart.manifest`) | |
+| **C11 red at the first version of the fix** | `01071708`, `uart.manifest`, record sha256 `29888513f55fff9f4962b28589bee303c08faabb9348767b84b1af2a5e584e26` | `FAIL C11 (h) a full ring: bytes 63.909 ms mean over 50 frames, 36.11 units of 1.770 ms (bound 3; 2.219 us a byte)`; C9 and C10 PASS; `END conspeed exit=1 secs=60` |
+| **C11 red at trunk's kernel** | `px129-uart-trunk` (`8bdc62f3`: `7fd1f794` with C11's commits), `uart.manifest`, record sha256 `d9f4bef88be34c463984cff6d0076b0f4d889983c11998ea8f0c5acff392fcc5` | `FAIL C11 (h) a full ring: bytes 1942.220 ms mean over 2 frames, 1087.47 units of 1.786 ms (bound 3; 84.298 us a byte)`; C9, C10 and C8 red as at `7fd1f794` |
+| C11's fix | `d943ed7e` (kernel/serial: a full ring tries the FIFO at its first drop and every 256th), `ea27570b` (kernel/README.md) | |
 | the slow-UART take, the quick take and C10's plant at this branch's head | `uart.manifest`, `quick.manifest` (mpx3-conspeed's two legs on both firmwares, and every suite there reads COM1), the plant `px129-plant-*` (COM1's interrupt leaves the ring alone) | their records and `END` lines are in the PR |
 
 **The rebase.** The work above was done on trunk `211e5c7c`, and every commit this note names before this paragraph
@@ -317,6 +321,8 @@ prediction `d3478ba3`; the rows `feda806e`, `80b9a8c4`, `2c23daa7`, `2a1daf62` a
   (`2fd7a6f1…`), green after (the PR's records)
 - [x] COM1's backlog drained by its interrupt: C10 red at trunk's kernel (`c1caf246…`); green at the head and red by
   name at its plant (the PR's records)
+- [x] a write into a full ring costs no more: C11 red at trunk's kernel (`d9f4bef8…`) and at the first version of the
+  fix (`29888513…`), green after (the PR's records)
 
 ## 11. COM1: a console write waited on the UART
 
@@ -369,10 +375,27 @@ ring and never waits:
   THRE interrupt (IER bit 1) while bytes wait;
 - while that interrupt is armed, a byte is a store and no port access, and COM1's vector (36, the receiver's already)
   refills the FIFO 16 bytes at a time (`tx_irq`), disarming it when the ring is empty;
-- a full ring drops the byte and counts it, and tries the FIFO, so an interrupt that never comes cannot stop COM1 for
-  good; `/proc/pax-boot` has a new line, `serial present|absent tty mirrored|log dropped <n>`;
+- a full ring drops the byte and counts it; at its first drop and every 256th after, it also tries the FIFO, so an
+  interrupt that never comes cannot stop COM1 for good; `/proc/pax-boot` has a new line,
+  `serial present|absent tty mirrored|log dropped <n>`;
 - kernel/panic's halt and kernel/power's reboot and power-off send what the ring holds first, waiting (`drain`), so a
   kernel's last lines still reach the wire before it stops.
+
+**A flood on the metal.** When a writer outpaces the line, the ring fills its 64 KiB and stays full. A byte written
+then costs the store path alone: the interrupt flag saved and cleared, the ring's counts read, the drop counted, the
+flag restored. That is a few tens of nanoseconds and no port access. At one byte in 256 it adds a read of LSR, and,
+when the FIFO has emptied, up to 16 writes to THR; during a long write with interrupts off, these tries are what keep
+the line moving. A port access to an LPC UART is on the order of a microsecond (not measured on the installed
+machine), so the read adds about 4 ns a byte, and a try that refills the FIFO about 70 ns a byte. The FIFO empties
+once every 1.4 ms at 115200, so few tries refill it. While interrupts are on, the line costs one THRE interrupt per 16
+bytes sent, 720 a second, each a read of LSR and 16 writes: about 1 % of a CPU while the line is busy, whoever writes.
+The dropped count is exact: every byte `queue` refuses is counted, with interrupts off, in a 64-bit word. A byte that
+`pax.serial=log` keeps off COM1 is never offered, so it is not counted.
+
+The first version of the fix tried the FIFO at every dropped byte, one read of LSR a byte, about 2.2 µs under KVM. In a
+flood that was most of a write's cost: `bytes`' mean frame was 36 units, `sgr`'s 613 ms against 25 without COM1, and
+tests/mpx3-conflood's slow-UART leg answered pings at 251 ms (p95) during a screen-sized flood against 20 ms with no
+COM1. C9 holds `bytes`' least frame, which the empty ring serves, so it could not see that; C11 does.
 
 Before the console starts, the kernel's early lines wait per byte as before, and kernels that never start the
 console (every test kernel but the console's and the session's) are unchanged. `pax.serial=log` on the command line
@@ -389,16 +412,19 @@ the typed console sessions, the pseudo-terminals) all read COM1 and are taken at
 **The rows.** mpx3-conspeed has a second leg (`--uart slow`; both legs by default) with COM1 on QEMU's pipe character
 device (tools/qemu-run's `--serial-chardev`). Its far end, tests/mpx3-conspeed.d/uart.py, shrinks the pipe to one page
 and reads it at 11,520 bytes a second, so the emulated UART's FIFO fills and THRE stays clear as a real 115200 line's
-would. That leg holds C1 and C8 and two rows of its own, stated under KVM and SKIPPED by name under TCG:
+would. That leg holds C1 and C8 and three rows of its own, stated under KVM and SKIPPED by name under TCG:
 - C9: `bytes`' write is at most 3 units of the CPU loop (about 0.7 with no COM1);
 - C10: COM1's backlog drains while its writer sleeps. Once the line has carried 64 KiB, it never pauses more than
   0.5 s: through conspeed's idle second after the tests, the ring still holds bytes, and only the THRE interrupt moves
   them. A kernel that waits per byte has no backlog, so its line pauses when the writer does.
+- C11: a write into a full ring costs no more: `bytes`' mean frame is at most 3 units. Its frames run 10 ms apart, and
+  the line takes 115 bytes in that time, so after the first frames each of its 28,800 bytes finds the ring full.
 
 At trunk's kernel C9 is red at 78 µs a byte (the pipe's page and the FIFO give a little slack against the metal's
 86.8), and C10 at a 0.81 s pause (records `7a7bac30…` and `c1caf246…`, §8). Before the fix on this branch C9 is red at
-85.7 µs a byte (`2fd7a6f1…`). The head's records and the plant, which leaves the ring to the writer's next byte, are
-in the PR.
+85.7 µs a byte (`2fd7a6f1…`). C11 is red at trunk's kernel (record `d9f4bef8…`) and at the first version of the fix
+(`01071708`: 36.11 units, 2.219 µs a byte, record `29888513…`). The head's records and the plant, which leaves the
+ring to the writer's next byte, are in the PR.
 
 **The timing program, version 5.** Version 4 bounded the run at 60 s by the TSC, but a frame already started is
 finished, and on that machine `sgr`'s one frame took 18 s; the tests took 93 s. Version 5 also bounds by bytes:
