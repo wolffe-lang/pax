@@ -182,9 +182,10 @@ page a read), USB enumeration (a kernel thread that sleeps between its polls, no
   where it began, a histogram, the longest per system call number, per vector and per thread slot's `irq_save`
   sections, the longest gap between two chances the scheduler had (`preempt`, `kick`, `run_next`), and the ticks
   delivered against the ticks the clock says were due. `/proc/pax-latency` shows it; opening it starts the next
-  window. (The kernel log ring is not merged, so procfs is the only reader.) A kernel that does not link
-  `kernel/latency` (`kmain_usbcheck`, the metal kernels) links `boot/isr.S`'s weak `pax_lat_close`, which does
-  nothing: there the instrument is never on.
+  window. (The kernel log ring is not merged, so procfs is the only reader.) The paths call its close through
+  word 31 of its words, which `latency.start` fills with `pax_lat_close`'s address before word 0 turns on, so the
+  assembly names no wolf function: a kernel that does not link `kernel/latency` (`kmain_usbcheck`, the metal kernels)
+  links as before, its word 0 never set, and the assembly needs no `.weak`, which clef does not take (section 12).
 - **`user/elf/latprobe.c`** (`tools/mklatprobe`, static glibc; the same binary on PAX and Linux) measures each load in
   turn: the load's child sets up and says ready; the window starts; for 3 s a 1 ms sleeper records how late each
   sleep ends, a loopback UDP echo is sent every 5 ms and timed from when it was due, and the **host pings the
