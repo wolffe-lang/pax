@@ -1,8 +1,9 @@
 # notes/px131/rig/final.manifest — the first part's one take at its head: quick-a's (the planner, the guard on both
 # firmwares at 1 GiB and BIOS at 2 GiB under KVM and BIOS under TCG, the scheduler, the interrupts), link's (the
 # kernels without kernel/latency at both tiers, the USB check, the metal suites), the console at the installed
-# machine's shape, quick-b's (the user suites against Linux), and the release tier (the guard on both firmwares,
-# the scheduler, the interrupts, mappings, /proc/<pid>/mem).
+# machine's shape, quick-b's (the user suites against Linux), the release tier (the guard on both firmwares,
+# the scheduler, the interrupts, mappings, /proc/<pid>/mem), and tests/kernel-as at both tiers (the
+# kernel's assembly through GNU as and clef).
 floor 35
 rig lib.sh committed=../../..:HEAD:notes/px131/rig/lib.sh
 rig engine-ns committed=../../..:HEAD:notes/px131/rig/engine-ns
@@ -15,6 +16,7 @@ step sched image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readel
 step interrupts image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-interrupts --tier native --firmware bios
 step kernels-native image=localhost/px75-ubuntu:2 tools=python3,readelf,curl,xorriso script=step.sh -- kernels native kmain_usbcheck kmain_metal_msi kmain_metal_panic kmain_metal_power kmain_metal_screen kmain_metal_serial
 step kernels-release image=localhost/px75-ubuntu:2 tools=python3,readelf,curl,xorriso script=step.sh -- kernels release kmain_usbcheck kmain_metal_msi kmain_metal_panic kmain_metal_power kmain_metal_screen kmain_metal_serial
+step kernel-as image=localhost/px75-ubuntu:2 tools=cc,clang,as,ld.lld,nm,objdump,git,curl,strip,readelf,tar script=step.sh -- kernel-as --tier native
 step usbcheck image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx6-usbcheck --tier native --firmware bios
 step metal-power image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx6-metal-power
 step metal-serial image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx6-metal-serial
@@ -30,3 +32,4 @@ step sched-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python
 step interrupts-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-interrupts --tier release --firmware bios
 step maps-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx3-maps --tier release --firmware bios
 step trace-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx5-trace --tier release --firmware bios
+step kernel-as-release image=localhost/px75-ubuntu:2 tools=cc,clang,as,ld.lld,nm,objdump,git,curl,strip,readelf,tar script=step.sh -- kernel-as --tier release
