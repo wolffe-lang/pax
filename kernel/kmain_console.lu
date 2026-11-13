@@ -129,6 +129,7 @@ extern "c" let pax_flushd: *u8 // px63: kernel/fstab's flusher
 extern "c" let pax_netd: *u8 // px105: kernel/netd's receiving thread
 extern "c" let pax_net_clock: *u8 // px105: the network's clock
 extern "c" let pax_dhcpd: *u8 // px105: kernel/dhcp's thread
+extern "c" let pax_lat_close: *u8 // px131: kernel/latency's close, which the entry paths call through its word
 
 const ENV: str = "HOME=/ TERM=linux PAX=1 PATH=/bin" // px14: PATH, for a shell's commands
 const RUN_LIST: str = "/etc/pax-run"
@@ -668,7 +669,8 @@ export fn kmain() {
         add_kthreads(1)
     }
     triage.step(22)
-    latency.start() // px131: with `latency` on the command line, /proc/pax-latency's instrument
+    // # Safety: the address of kernel/latency's export; nothing is read.
+    latency.start(unsafe { pax_lat_close as u64 }) // px131: with `latency` on the command line, /proc/pax-latency's instrument
     sync.enable()
     triage.step(23) // interrupts on
     if usb {

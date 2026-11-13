@@ -72,6 +72,7 @@ const TICKS0: u64 = 23
 const TSCW: u64 = 24 // the same three at the last read
 const NSW: u64 = 25
 const TICKSW: u64 = 26
+const HOOK: u64 = 31 // the address of `pax_lat_close`: the assembly calls the close through it
 
 /// The tables' sizes: system call numbers, vectors, thread slots, and
 /// the histogram's buckets (a bucket a bit of a 64-bit count of cycles).
@@ -117,11 +118,16 @@ fn tsc() -> u64 {
 }
 
 /// On when the command line has `latency`, and the clock has a source
-/// (the cycles are turned into microseconds against it). IF clear.
-pub fn start() {
-    if !boot_info.cmdline_has("latency") || !clock.started() {
+/// (the cycles are turned into microseconds against it). `close` is
+/// `pax_lat_close`'s address (the kernel's own extern word): boot/isr.S,
+/// boot/sched.S and boot/user.S call the close through word 31, written
+/// here before word 0 turns on, so their assembly names no wolf function
+/// and a kernel without this module links as before. IF clear.
+pub fn start(close: u64) {
+    if !boot_info.cmdline_has("latency") || !clock.started() || close == 0 {
         return
     }
+    put(HOOK, close)
     let t = tsc()
     let ns = clock.now_ns()
     let k = timer.ticks()
