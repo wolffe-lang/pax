@@ -35,6 +35,8 @@ RD = re.compile(r'entropy: (early|later) read (\S+)( nonblock)? n (\d+) ret (-?\
 CP = re.compile(r'entropy: (early|later) cap (.*)$')
 CPUID = re.compile(r'entropy: early cpuid vendor (\S+) rdrand (\d) rdseed (\d)$')
 AUX = re.compile(r'entropy: (early|later) auxv at_random (\d) nonzero (\d) hieq (\d)$')
+SU_GR = re.compile(r'entropy: early startup getrandom n (\d+) flags (\S+) ret (-?\d+)$')
+SU_END = re.compile(r'entropy: early startup exit (-?\d+) getrandom-calls (\d+)$')
 WOLF_GAVE = re.compile(r'wolf-entropy: os_random 32 gave (\d+)$')
 WOLF_END = re.compile(r'user: wolf-entropy pid \d+ (exit_group (\d+)|killed: .*)')
 
@@ -68,8 +70,14 @@ class Boot:
         self.aux = {}
         self.wolf_gave = None
         self.wolf_end = None
+        self.startup = []      # (n, flags, ret): the traced child's getrandom calls
+        self.startup_end = None  # (exit, calls)
         for ln in self.lines:
-            if m := GR.search(ln):
+            if m := SU_GR.search(ln):
+                self.startup.append((int(m[1]), m[2], int(m[3])))
+            elif m := SU_END.search(ln):
+                self.startup_end = (int(m[1]), int(m[2]))
+            elif m := GR.search(ln):
                 self.gr[(m[1], bool(m[2]), m[3], int(m[4]))] = (int(m[5]), m[6], int(m[7]), int(m[8]))
             elif m := RD.search(ln):
                 w = (int(m[7]), int(m[8])) if m[7] is not None else (0, 0)
@@ -216,6 +224,21 @@ def check(b):
     why.append(f'AT_RANDOM {"present nonzero" if a and a[0] and a[1] else a} hieq {a[2] if a else "-"}')
     ok &= b.has('entropy: early malloc ok')
     why.append('static glibc started and allocated' if b.has('entropy: early malloc ok') else 'no `malloc ok`')
+    # The C library's own start-up draw, watched under ptrace: it was made, it got
+    # what the contract gives a call that may not wait (n, or -EAGAIN), and the
+    # program allocated, printed and exited 0 after it.
+    nb = [g for g in b.startup if 'NONBLOCK' in g[1]]
+    if st == 'ready':
+        drew = any(g[2] == g[0] for g in nb)
+        want = 'answered in full'
+    else:
+        drew = any(g[2] == -11 for g in nb)
+        want = '-EAGAIN'
+    se = b.startup_end
+    ran = se is not None and se[0] == 0 and b.has('entropy: alloc ok')
+    ok &= drew and ran
+    why.append(f'glibc start-up draws {b.startup or "none seen"}, want a GRND_NONBLOCK one {want}; '
+               f'then the traced program exit {se[0] if se else "?"}, `alloc ok` {"seen" if b.has("entropy: alloc ok") else "missing"}')
     row(ok, 'E3', n, '; '.join(why))
 
     # E4: retry's counts.
