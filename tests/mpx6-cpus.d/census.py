@@ -4,8 +4,8 @@
 Emit every explicit irq-save/lock site, top-level mutable scalar, assembly
 storage label, and TLB invalidation/free-user call. Comments and strings are
 removed before matching; source lines and containing wolf functions survive.
-Implicit exclusion of entire syscalls and handlers needs the accompanying
-manual census. The generated inventory is intentionally exhaustive, including
+Implicit exclusion of entire syscalls and handlers still needs manual review.
+The generated inventory is intentionally exhaustive, including
 boot-only state and test kernels, rather than silently judging them safe.
 """
 import argparse

@@ -1,5 +1,13 @@
 # kernel/
 
+PAX currently runs on one logical processor. At boot it counts the enabled
+processors in the ACPI MADT and reports how many are available and that one
+is active; it starts no secondary processor. `/proc/pax-cpus` reports the same
+counts, with online-capable-only and disabled entries separate. Missing or
+unusable firmware data means `available unknown`, not an invented count.
+The parser and boot/proc agreement are tested by `tests/mpx6-cpus`.
+
+
 The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.35 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair; px36 to 0.2.28; px51 to 0.2.32; px53 to 0.2.33 and px57 to 0.2.34, each with no source change and no section's size moved: notes/px53-the-pins-0233.md §J, notes/px57-the-pins-0234.md §J; px65 to 0.2.35, no source change, every kernel's `.text` 80 bytes longer and no other section moved, all of it the freestanding runtime's new `__wolf_rt_list_reserve`: notes/px65-the-pins-0235.md). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
