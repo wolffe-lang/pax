@@ -293,32 +293,24 @@ pub fn drain() {
 }
 
 /// Write one byte to the screen (px19, kernel/screen), then to COM1: into
-/// the transmit ring once kernel/console has started (px129: `wire`),
-/// before that once the transmit holding register is empty. The screen first: when a
+/// the transmit ring once kernel/console has started (px129: `queue`),
+/// before that once the transmit holding register is empty; without a
+/// UART, into the in-memory transcript. The screen first: when a
 /// byte has reached the wire, the screen has already drawn it, so a
 /// harness that sees a kernel's last line on the serial port and then
 /// finds the machine halted (tools/qemu-halt) never catches the screen
 /// still drawing that line. A UART that stays busy for 1048576 polls
 /// loses the byte rather than hang the kernel. It never traps.
+///
+/// px129: the whole body stays here, not behind a helper. A `put` of three
+/// calls is small enough for wolf's release tier to inline into kernel/log's
+/// `put` and `dec`, which it then inlines, loop and all, at every call
+/// (wolf-lang#1104, #983): with `put` split that way the release build of
+/// kmain_heap_fault took 603 s against trunk's 488 on one core, its IR 3312
+/// back edges against 2900.
 pub fn put(b: u8) {
     screen.put(b)
     bootlog.put(b)
-    wire(b, true)
-}
-
-/// px129: a user program's terminal output (kernel/user's console `write`,
-/// kernel/console's output and echo): as `put`, but to COM1 only while
-/// `tty_mirrored`.
-pub fn put_tty(b: u8) {
-    screen.put(b)
-    bootlog.put(b)
-    wire(b, tty_mirrored())
-}
-
-/// COM1's part of `put`: the in-memory transcript without a UART; with
-/// one, the ring (px129) once kernel/console has started, else the wait
-/// on THRE per byte as before; nothing when `to_uart` is false.
-fn wire(b: u8, to_uart: bool) {
     if !available() {
         // px129: the transcript keeps its first 64 KiB; past them a byte
         // costs nothing more here (the count stops at 65537).
@@ -336,9 +328,6 @@ fn wire(b: u8, to_uart: bool) {
         unsafe { pax_irq_restore(flags) }
         return
     }
-    if !to_uart {
-        return
-    }
     // # Safety: a module flag written once with IF clear.
     if unsafe { irq_tx } {
         queue(b)
@@ -354,6 +343,18 @@ fn wire(b: u8, to_uart: bool) {
         }
         spins = spins + 1
     }
+}
+
+/// px129: a user program's terminal output (kernel/user's console `write`,
+/// kernel/console's output and echo): as `put`, but to COM1 only while
+/// `tty_mirrored` (without a UART, the transcript as `put`).
+pub fn put_tty(b: u8) {
+    if tty_mirrored() || !available() {
+        put(b)
+        return
+    }
+    screen.put(b)
+    bootlog.put(b)
 }
 
 // --- receiving (px13) ----------------------------------------------------
