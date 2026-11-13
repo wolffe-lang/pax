@@ -351,6 +351,11 @@ the load's own calls under 1 ms; record sha256 `47218c246c1254af6762228fe5be46d4
   echoes 0.89 to 1.04).
 - **The plant** (`px131-plant-*`): the head with `vm.unmap_range` walking every page again; red by name at L2 for
   munmap of a hole.
+- **Through clef.** `tests/kernel-as` builds the kernel with its assembly through GNU as and through clef (K4, K5).
+  An earlier head gave the kernels without `kernel/latency` a weak `pax_lat_close` in `boot/isr.S`; clef has no
+  `.weak` (`unknown_directive .weak: GNU as §7`), so K5 was red in the hosted job (run 43347017438) and in a local
+  take at `8795ce38` (record sha256 `c3cc29bc…`, the evidence index). The paths now call the close through
+  `kernel/latency`'s word 31 (section 6), and the final take runs `tests/kernel-as` at both tiers.
 
 ## 13. Fit for an image, and what to try at the machine
 
@@ -375,7 +380,9 @@ ten seconds shows the general rule at work, bounded and unable to starve the mac
 | **red at the rows' commit** | `notes/px131/rig/red.manifest` at `6a892cf8` (trunk's kernel paths, the rows, the rig), a light take, record sha256 `c7d03d6480aa94b6a6ebac4892e0bfdf2cbd442287982ee402efa97d5aad0b22` | six rows red by name, both firmwares: `FAIL L2 native-bios-1024 hole:1024` (the sleeper 141 times `spin`, munmap 4,086 ms with interrupts off), `FAIL L2 … random:8` (124 times; getrandom 1,852 ms), `FAIL L2 … procmem:8` (33 times; pread 500 ms), and the same three on UEFI (110, 121 and 28 times); `END latency exit=1 secs=89` |
 | the fixes | `80cbe96d`, `856c9063`, `42b9f123`, `48cae32b`, `59070c2d`, `fa020c2b` | |
 | CI's job and paths | `b1073dc4`, `7106409a`, `886103ee` | |
-| the takes at the head, native and release, and the plant | `notes/px131/rig/{quick-a,quick-b,release,plant}.manifest` | their records and `END` lines are in the PR |
+| **red through clef** | `notes/px131/rig/kas.manifest` at `8795ce38` (the weak `pax_lat_close`, the rig's `kernel-as` step), a light take, record sha256 `c3cc29bc5b89847f06425fa5f1bc647898949784e6b53a290b2744d54c0aab31`; the hosted job, run 43347017438 | `FAIL K5 native: the clef build failed`, clef's `unknown_directive .weak: GNU as §7` at `boot/isr.S` line 369; K0 to K4 and K6 to K9 pass; `END kernel-as exit=1 secs=44` |
+| the close through word 31 | `d5964d9e`, `a9f4d8f6`, `9c5a51e6`, `a3ccd4a2` | |
+| the takes at the head, native and release, and the plant | `notes/px131/rig/{quick-a,quick-b,release,plant,final}.manifest` | their records and `END` lines are in the PR |
 
 ## 15. Decisions
 
@@ -411,6 +418,10 @@ ten seconds shows the general rule at work, bounded and unable to starve the mac
 12. **The network probe.** (A) the host pings the guest every 5 ms and times each from when it was due (implemented,
    recommended: a person's keystrokes do not wait for the machine); (B) the guest pings the host, which hides a stall
    between two pings.
+13. **The close's call from the assembly.** (A) through a word `kernel/latency` fills before it turns on, so the
+   assembly names no wolf function and every assembler the kernel is built with takes it (implemented,
+   recommended); (B) a weak definition in `boot/isr.S`: GNU as takes it, clef does not, and a clef issue asks for
+   `.weak`; (C) link `kernel/latency` into every kernel.
 
 ## 16. Done-when
 
