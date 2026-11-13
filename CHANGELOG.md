@@ -7,6 +7,16 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Random bytes a program can trust, or a refusal by name (dw02).** getrandom with flags 0, `GRND_RANDOM` or
+  `GRND_NONBLOCK`, and reads of `/dev/random` and `/dev/urandom`, now answer RDRAND words, each draw's carry flag
+  checked and a zero, all ones or a repeated word refused, or fail: `EAGAIN` when the processor has no RDRAND, `EIO`
+  when RDRAND failed. Before, a machine without RDRAND got a fold of the time-stamp counter from every one of them,
+  silently, and a stuck RDRAND that reported all ones was taken as random. `GRND_INSECURE`, `AT_RANDOM` and the
+  kernel's own words keep the old answer. `/proc/pax-random` says whether the strict calls are served (`ready yes` or
+  `ready no`, and why), and the command line's `pax.rdrand_fail=N` and `pax.rdrand_stuck` make RDRAND fail for tests.
+  On a machine without RDRAND, ssh, TLS, setting a password, the installer, yew and a few utilities stop by name or
+  by wolf's trap: `notes/dw02-the-entropy-contract.md` lists them. `tests/mpx6-entropy` holds it.
+
 - **What the kernel holds too long, measured; three long calls made short (px131).** Every system call
   runs with interrupts off until it returns, so the longest call a program can make is how long the tick,
   the network and every other process wait. `latency` on the kernel's command line turns on an instrument
