@@ -25,8 +25,8 @@ Footprint: cross-cutting (`boot/fpu.S`, a new `kernel/random`; `kernel/process`,
 paths; new `tests/mpx6-entropy`, `tests/mpx6-entropy.d/`, `tools/mkentropy`, `user/elf/entropy.c`,
 `user/elf/wolf_entropy.lu`).
 
-The commit shas in this note are those of the branch as measured, before its rebase onto px131b (section 13), kept
-as `dw02-before-rebase`; `notes/dw02/shamap.txt` pairs each with its rebased commit.
+The commit shas in this note are those of the branch as first measured, before its rebases (section 13), kept as
+`dw02-before-rebase`; `notes/dw02/shamap.txt` sets each beside its commit on each later cut.
 
 ## 1. Forbidden, and what was read
 
@@ -37,7 +37,8 @@ as `dw02-before-rebase`; `notes/dw02/shamap.txt` pairs each with its rebased com
   runtime (`crates/wolf_rt/src/random.rs` at the image's wolf); the image's programs at their pins (section 5).
   `docs/SOURCES.md` (dw02) lists them.
 - **Hosts.** A Linux build host (Intel Core i7-12700KF) for every build and boot, in an Ubuntu 24.04 container (QEMU
-  8.2.2, the CI runner's version; OVMF; gcc 13.3) under KVM and under TCG; the build Mac for git and for reading.
+  8.2.2, the CI runner's version; OVMF; gcc 13.3) under KVM and under TCG; the build Mac for git, for reading and
+  for a compile check before each take.
   QEMU only.
 - **Not done:** no label, merge, tag, release or deploy; no issue filed or closed; no attribution trailer.
 
@@ -45,7 +46,7 @@ as `dw02-before-rebase`; `notes/dw02/shamap.txt` pairs each with its rebased com
 
 | input | identity | read |
 |---|---|---|
-| pax base | `px131b` at `65902280` (pax#394, on trunk `bbe91e16`), the first part of px131's work, which rewrote getrandom's fill and added `random_fill`, the functions this lane changes. The lane was written and measured on `px131` at `4b3ab3c0` (now frozen) and rebased (section 13, "The base") | the fresh clone's `git rev-parse` |
+| pax base | trunk at `4007eaa0` (pax#399 merged), which holds px131's work: getrandom's fill rewritten and `random_fill` added, the functions this lane changes. The lane was written and measured on `px131` at `4b3ab3c0` (now frozen), rebased onto `px131b` at `65902280` (pax#394, since closed; its commits are in trunk) and then onto trunk (section 13, "The base") | the fresh clone's `git rev-parse` |
 | wolf | 0.2.35 (`kernel/wolf.pin`) | `tools/fetch-wolf`, by digest |
 | Limine | 12.9.1 | `tools/fetch-limine`, by digest |
 | the image's programs | `user/*.pin` (boreutils `ff5396ad`, pelt `b80d6570`, yew `3a9983ee`, burrow `7aa182f8`, den `291011dd`, lobo `39788b86`, wolf-std `77cf3210`, wolf-lang v0.2.39 `3fc86f77`) | shallow clones at the pins, read for their draws |
@@ -322,7 +323,13 @@ Each with its options; the one built is marked.
   pax#394, on trunk `bbe91e16`), px131's first part. The lane's own patch came over unchanged but for
   `tools/ci-tiers.map`'s `@user` line, where px131b had added `mpx3-conspeed`; the kernel under it did change (the
   console's batched drawing, px129, in `kernel/screen`, `kernel/serial`, `kernel/console`, `kernel/panic` and
-  `kernel/user`'s `write`), so the takes were made again at the rebased head.
+  `kernel/user`'s `write`), so the takes were made again at the rebased head. Rebased again, as a new branch, onto
+  trunk at `4007eaa0` (pax#399 merged; pax#394 closed), which adds to px131b's commits the latency close called
+  through `pax_lat`'s word 31 from `boot/isr.S`, `boot/sched.S` and `boot/user.S` (`kernel/latency`,
+  `kernel/kmain_console`) and drops a weak stub the org's assembler, clef, cannot assemble. The lane's patch came over
+  unchanged (the same patch id, no conflict); the kernel under it changed again, so the takes were made again at this
+  head, and since `boot/fpu.S` is the lane's assembly, `tests/kernel-as` (every `boot/*.S` through GNU as and clef) is
+  a step of the native and release takes.
 
 ## 14. Done-when
 
