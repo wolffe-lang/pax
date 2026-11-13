@@ -11,6 +11,9 @@
 #                  mpx6-metal-serial)
 #   ci-plan        tests/ci-plan (the tiers map, the wiring of the new suite's job)
 #   kernels TIER K…  tools/build-kernel for kernel/K.lu at TIER (native, release), each
+#   kernel-as ARGS tests/kernel-as ARGS: the kernel's assembly through the stock driver, GNU as and
+#                  clef (tools/mkclef, built in the step); the seam wolf is the host file's SEAM, a
+#                  build of tests/kernel-as.d/wolf.pin's commit kept beside the lane
 # The suites with a Linux side reach a container engine through engine-ns (lib.sh's `ctr sys`, px123's).
 # A suite says a red row as `<suite>: FAIL ROW …` (tools/lib.sh's `say`); `lift` puts such a line at
 # column 0 as `FAIL ROW …` (the recorder keeps a `FAIL ` line there, so a plant's row is named in its
@@ -20,7 +23,7 @@ trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 # shellcheck disable=SC1091
 . "${GAUNTLET_RIG_DIR:?run by the recorder}/lib.sh"
 cd "$CO" || exit 2
-lift() { "$@" 2>&1 | sed -u -E 's/^(mpx[0-9]-[a-z0-9-]+): +FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
+lift() { "$@" 2>&1 | sed -u -E 's/^(mpx[0-9]-[a-z0-9-]+|kernel-as): +FAIL /FAIL /'; return "${PIPESTATUS[0]}"; }
 wolfed() { printf '%s' 'export PAX_WOLF=$(tools/fetch-wolf | tail -n 1) && tools/fetch-limine > /dev/null && '; }
 what=${1:?}; shift
 case $what in
@@ -41,6 +44,9 @@ case $what in
                 if tools/build-kernel ${r[@]+"${r[@]}"} --src "kernel/$k.lu" "$o" > "$o.txt" 2>&1; then echo "kernels: ok $t $k"
                 else echo "kernels: FAIL $t $k"; tail -n 5 "$o.txt"; rc=1; fi
             done; exit $rc' x "$tier" "$@" ;;
+    kernel-as)
+        : "${SEAM:?the host file names the seam wolf (SEAM)}"
+        lift ctr 0 localhost/px75-ubuntu:2 bash -c "$(wolfed)"'export PAX_SEAM_WOLF=$1; shift; tests/kernel-as "$@"; exit $?' x "$SEAM" "$@" ;;
     suite)
         name=${1:?a suite}; shift
         case $name in
