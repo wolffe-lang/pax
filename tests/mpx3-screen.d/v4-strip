@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# tests/mpx3-screen.d/v4-strip FILE — V4's view of a boot's serial log (tests/mpx3-screen): every line from `PAX:
+# the screen` on but those that say what the display device changed (`screen:` and `scroll:`, the screen's own
+# report; `paging:`, Limine's own page tables sit elsewhere when it sets a display mode; the pattern's two
+# full-width rows), with the firmware's description of the machine folded where the display device is part of
+# it (R-px76-9 A): the root table's and the DSDT's lengths and the memory map's numbers become <n>, and UEFI's
+# boot graphics table (BGRT) is left out.
+set -u
+awk '/^PAX: the screen$/ { on = 1 } on && !/^screen: / && !/^scroll: / && !/^paging: / && !/^acpi: BGRT / && !/^\[=+\]$/ && !/^-+\+.?Z$/ { sub(/ divide16 [0-9]+ Hz,/, " divide16 <rate> Hz,"); if ($0 ~ /^acpi: (RSDT|XSDT|DSDT) OEM .* length [0-9]+$/) sub(/ length [0-9]+$/, " length <n>"); if ($0 ~ /^memory: /) gsub(/[0-9]+/, "<n>"); print }' "$1"
