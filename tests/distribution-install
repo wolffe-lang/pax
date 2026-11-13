@@ -54,12 +54,14 @@ with source.open('rb') as f:
             out.write(chunk);remaining-=len(chunk)
 PY
 e2fsck -fn "$out/installed-root.img" > "$out/installed-root.fsck.log" 2>&1
-printf 'pax-release\nls /home/pax/Games\nexit 0\n' > "$out/installed.keys"
+cat "$PAX_ROOT/tests/mpx6-install.d/pxg.keys" > "$out/installed.keys"
+printf 'pax-release\nls /home/pax/Games\nexit 0\n' >> "$out/installed.keys"
 for firmware in bios uefi; do
     "$PAX_ROOT/tools/qemu-halt" --boot-disk --firmware "$firmware" --serial "$out/installed-$firmware.serial.log" \
         --timeout 300 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
         --type "$out/installed.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
         "$disk" > "$out/installed-$firmware.halt.log" 2>&1
+    python3 -I "$PAX_ROOT/tests/mpx6-install.d/pxg-rows.py" "$out/installed-$firmware.serial.log" "$out/pax-release"
     python3 -I - "$out/installed-$firmware.serial.log" "$out/pax-release" <<'PY'
 from pathlib import Path
 import re,sys
