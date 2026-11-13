@@ -184,7 +184,10 @@ page a read), USB enumeration (a kernel thread that sleeps between its polls, no
 
 QEMU 8.2.2 with KVM, COM1 present (the harness's machine), virtio-net; the worst of four boots (BIOS and UEFI, 1 and
 2 GiB) unless the row names its memory; milliseconds. "net" is the host's ping, its median and worst. Linux is its
-sleeper's worst and its ping's worst.
+sleeper's worst and its ping's worst. These boots left the guest's memory to the host's first-touch faults, so the
+calls that fill fresh frames (a file write, fork, mmap's zeroing) include some of the host's time: with the memory
+backed before boot, as the guard now runs, a 64 MiB file write held interrupts off about 60 ms
+(`notes/px131-clocks-and-wake-ups.md` §5). The ranking stands.
 
 | load | worst interrupts-off (call) | sleeper's worst | net p50 / worst | ticks kept | Linux: sleeper / net |
 |---|---|---|---|---|---|
@@ -316,7 +319,10 @@ native kmain_console with `latency`, under KVM. Rows: L0 the build; L1 every loa
 the instrument on; **L2** for each guarded load, the sleeper's worst, the loopback echo's worst and the host's ping's
 worst, each over the same boot's `spin`, at most 3 (SKIPPED by name under TCG); `~L2` the pending loads (the console's
 write, a file write of MiB/16, fork of MiB/8) measured the same way and named with the work that will bound them;
-`~L3` every load's figures. CI's job runs it on the plan's legs under TCG (decision 11).
+`~L3` every load's figures. CI's job runs it on the plan's legs under TCG (decision 11). The guest's memory is
+backed before it boots (`-mem-prealloc`): without it a host's page faults showed now and then as a 30 to 150 ms
+stretch in a fork, an mmap or an exit, and once failed L2 for munmap of a hole at `4b3ab3c0` (an exit_group of 114 ms,
+the load's own calls under 1 ms; record sha256 `47218c246c1254af6762228fe5be46d48ad9abaa8435e1fc51f66a28623a739c`).
 
 - **Red at the rows' commit** (`6a892cf8`, trunk's kernel paths): all three rows on both firmwares, 28 to 141 times
   `spin` (record sha256 `c7d03d64…`, the evidence index).
