@@ -27,7 +27,13 @@ the counter's time beside console and file writes, the ping beside `spin` 1.42 t
 0.61 of its share (0.81 to 0.90 before the rebase, with 80,561 pings in the window against 98,000 to 129,000: one boot;
 the head's take says more). The console's write with COM1 is as before (1.17 s for 64 KiB), so L4's load is unchanged.
 
-Footprint: cross-cutting (`kernel/timer`, `kernel/sched`, `kernel/latency`, `kernel/xhci`, `kernel/kmain_console.lu`;
+**Restacked on the first part's fix for clef** (its entry paths call the latency close through a word, so the assembly
+needs no `.weak`, which clef does not take): the same commits replayed unchanged once more, `px131b-clocks-wake`
+(`a56d9948`) the code before it. On top, the delivered-tick count moves from a module variable to a word with a stable
+name, `boot/isr.S`'s `pax_tick_delivered` beside `pax_tick_count`, and the USB session reads it by that name (section 3).
+
+Footprint: cross-cutting (`kernel/timer`, `kernel/sched`, `kernel/latency`, `kernel/xhci`, `kernel/kmain_console.lu`,
+`boot/isr.S`'s `pax_tick_delivered`;
 `tests/mpx6-latency` and its probe and host side gain the clock, wake-up and flood rows).
 
 ## 1. Forbidden, and what was read
@@ -97,13 +103,15 @@ So the kernel's repeat did not change; what changed is what the stamps can hide.
 while interrupts stay on: 250 ms, then 30 and 40 ms in turn. After a stretch with interrupts off (a 64 KiB console
 write at the screen is 120 ms), the reports due inside it are dropped, as before (never a burst), and the next comes
 on the clock's schedule rather than as if no time had passed: a tick's difference at most. The session now holds for
-the interrupts the guest took (`timer.delivered_count`, read as the tick count is), so a stall lengthens the hold as
+the interrupts the guest took (`boot/isr.S`'s `pax_tick_delivered`, written by `kernel/timer` and read as the tick
+count is), so a stall lengthens the hold as
 it used to, and leaves out of the period's figures every interval that spans ticks the guest lost (the probe prints
 its first read's time, `USBT0`, to place the stamps on the ticks); at least 8 intervals must be left
-(`tests/usb-session-selftest` U10 to U13: CI's failing stamps are refused without the losses and pass with them).
+(`tests/usb-session-selftest` U10 to U13: CI's failing stamps are refused without the losses and pass with them; U14:
+the hold reads the word by its name). `repeat.txt` says which word the hold counted (`hold_counts`).
 
 **What it does not do.** The resolution stays a tick (10 ms): reading CLOCK_MONOTONIC from `kernel/clock`'s nanoseconds
-directly is a later choice (decision 13). A clock counter that wraps inside one stretch loses its wraps: `kernel/clock`
+directly is a later choice (decision 14). A clock counter that wraps inside one stretch loses its wraps: `kernel/clock`
 reads the HPET where there is one (32 or 64 bits), else the ACPI PM timer (24 bits wrap after 4.7 s, longer than any
 stretch the first part measured once its three fixes landed), else the PIT, whose 54.9 ms wrap any long call outlasts:
 on a machine with neither of the others the clocks still lose time through a stretch, as before. CLOCK_REALTIME still starts from the RTC with no NTP: it now keeps the clock's rate, not the world's.
@@ -126,7 +134,7 @@ taken off the processor for another urgent one.
 **The risk: a flood.** Each frame now preempts a hog. The flood row (L6) runs `flood`, the hog's loop, while the host
 sends pings as fast as the guest answers (16 in flight), and holds the hog to half of its share beside `spin`:
 `flood` kept 82 to 85 % of `spin`'s ops while the host sent 99,000 to 103,000 pings in the 3 s window (33,000 a second, p50 0.44 ms, none lost); before the change the old wake-ups let through 8,000 to 9,300. QEMU's user network is the limit here, at about 33,000 pings a second; a real network device can
-deliver more. **A budget, if one is needed** (not built; decision 16): a thread loses its urgent mark when urgent
+deliver more. **A budget, if one is needed** (not built; decision 17): a thread loses its urgent mark when urgent
 work has had more than half of the current tick, or an urgent switch happens at most once a millisecond; the rest go
 to the tail as before. Either keeps a hog at half its share under any flood, and costs a ping at most a quantum.
 
@@ -194,7 +202,8 @@ still); a device's wake-up changes only the order in which ready threads run. At
 | the wake-ups | `b03a6d12`, `3b68baee` | |
 | the guest's memory backed | `1e5d8fd6` (the first part's) | |
 | green at `96986862` (before the replay), the guard and the scheduler | `notes/px131/rig/green-2a.manifest`, a light take, sha256 `f394c8f7385ff802038c6a22aead9831532bad065a30fff66f670f7c0c595af7` | section 5's table; `END ci-plan exit=0 secs=111`, `END latency exit=0 secs=88`, `END latency-2g exit=0 secs=45`, `END latency-tcg exit=0 secs=50`, `END sched exit=0 secs=17`, `END interrupts exit=0 secs=41` |
-| the takes at the head, native and release, and the plant | `notes/px131/rig/{green-2a,green-2b,release-2,plant-2}.manifest` | their records and `END` lines are in the PR |
+| the delivered count by name | `tests/usb-session-selftest` U14 at `ec9c38a8`, red there; `d65baee7`, `b3ee7a36`, `b77b7548` | `FAIL U14: boot/isr.S lacks '.globl pax_tick_delivered'`, then `PASS U14` |
+| the takes at the head, native and release, and the plant | `notes/px131/rig/{green-2a,green-2b,release-2,plant-2,final-2}.manifest` | their records and `END` lines are in the PR |
 
 ## 8. Decisions
 
@@ -204,23 +213,23 @@ and device-driven wake-ups at once with the flood named and held by a row. Its o
 interrupt-driven block I/O, then reschedule points in long calls, then interrupts on in calls with the second
 processor) is the plan.
 
-13. **The clocks' form.** (A) the tick count follows `kernel/clock`, so every deadline already counted in ticks is one
+14. **The clocks' form.** (A) the tick count follows `kernel/clock`, so every deadline already counted in ticks is one
     in real time at the tick's resolution, with no caller changed (implemented, recommended: cheap, local, certain);
     (B) CLOCK_MONOTONIC and CLOCK_REALTIME read `kernel/clock`'s nanoseconds at each call, and sleeps and timeouts
     become deadlines in nanoseconds: finer, but every caller changes and every clock read becomes a counter read.
     (B) can follow (A) at any time.
-14. **Who is urgent.** (A) the network thread, the readers its deliveries wake, and the console's readers; the switch
+15. **Who is urgent.** (A) the network thread, the readers its deliveries wake, and the console's readers; the switch
     at a device's interrupt and at the tick (implemented, recommended); (B) every thread a wake-up makes ready: that is
     the next step's, and needs its budget first.
-15. **A wait's deadline after its event.** (A) the two `kernel/xhci` loops look at their completion before their
+16. **A wait's deadline after its event.** (A) the two `kernel/xhci` loops look at their completion before their
     deadline (implemented, recommended: with real-time deadlines a stretch could otherwise quarantine a controller that
     answered); (B) leave them: a stretch of 2 s in a USB command's wait is rare.
-16. **The flood's budget.** (A) none until a flood is seen to starve a process: the row holds the hog's share and will
+17. **The flood's budget.** (A) none until a flood is seen to starve a process: the row holds the hog's share and will
     be red first (recommended); (B) the budget of section 4 now.
-17. **The guest's memory in the guard.** (A) backed before boot, PAX's and Linux's alike (implemented in the first
+18. **The guest's memory in the guard.** (A) backed before boot, PAX's and Linux's alike (implemented in the first
     part, recommended: the host's page faults are not the guest's stretches); (B) left to fault: the yardstick of L2 is now a few milliseconds,
     so a fault of the host's could fail it.
-18. **The USB session's repeat row.** (A) hold for the interrupts the guest took and leave out the intervals that span
+19. **The USB session's repeat row.** (A) hold for the interrupts the guest took and leave out the intervals that span
     ticks it lost, a slow or uneven repeat with no loss still refused (implemented, recommended); (B) widen the bounds:
     a repeat broken slow would pass; (C) keep the repeat's deadlines on the interrupts taken: the stamps are the
     clock's now, so the stall would still show.
