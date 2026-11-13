@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""tests/mpx6-latency.d/rows-selftest — rows.py's arithmetic can say no, and
+says why (px131). No boot: the verdicts alone, on rows shaped as parse()
+gives them. tests/mpx6-latency runs it first (S0).
+
+  S1 L2's host ping holds within max(3 x spin's worst, spin's worst +
+     10 ms) (decision 1's 10 ms): 7575 us beside a load over 2453 us
+     beside spin (3.09 times) is within 12453 us and passes; 12454 us
+     fails; with spin at 6000 us the limit is 18000 us (three times).
+     The sleeper and the loopback echo keep three times spin's, no floor.
+  S2 L6 at the paced flood: offered at least 90 % of FLOOD_RATE a second,
+     the hog's ops at least half of spin's pass; under half fail.
+  S3 a host that offered under 90 % of FLOOD_RATE is `unmeasured`: neither
+     a pass nor a failure.
+  S4 the holds: an unmeasured hold then a measured pass is a pass, the
+     first printed; three unmeasured holds are `L6-unmeasured`, a red under
+     its own name; a measured failure is final on its hold, and the suite
+     is asked to hold again only where every hold so far is unmeasured.
+  S5 the guard's run list has the paced flood (`flood:R`) and the
+     saturating one (`flood`), and `~L6` prints the saturating flood's
+     rate, the hog's share and the sleeper's worst, bounded by nothing.
+Exit 0 when every row held; the first failing row is named.
+"""
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+here = Path(__file__).resolve().parent
+loader = SourceFileLoader('rows', str(here / 'rows.py'))
+rows = module_from_spec(spec_from_loader('rows', loader))
+loader.exec_module(rows)
+
+
+def bad(row, why):
+    sys.exit(f'rows-selftest: FAIL {row}: {why}')
+
+
+for name in ('l2_parts', 'l2_holds', 'l6_verdict', 'l6_holds', 'l6_again', 'guard_loads', 'flood_curve', 'FLOOD_RATE', 'NET_SLACK_US', 'OFFER_MIN', 'HOLDS'):
+    if not hasattr(rows, name):
+        bad('S1' if name.startswith(('l2', 'NET')) else 'S2', f'rows.py has no {name}')
+
+
+def row(**k):
+    base = dict(wn=300, w50=19000, w99=19500, wmax=20000, ln=600, l50=25000, lmax=26000, llost=0,
+                nn=600, n50=650, n99=1200, nmax=2453, nlost=0, ops=3000, opmax=1100, irq=1906, nr=231,
+                sent=None, secs=None)
+    base.update(k)
+    return base
+
+
+spin = row()
+# S1: the floor
+for v, want in ((7575, True), (12453, True), (12454, False)):
+    if rows.l2_holds(rows.l2_parts(row(nmax=v), spin)) != want:
+        bad('S1', f'net {v} us beside spin 2453 us: wanted {"a pass" if want else "a failure"}')
+if rows.l2_holds(rows.l2_parts(row(nmax=18001), row(nmax=6000))) or not rows.l2_holds(rows.l2_parts(row(nmax=18000), row(nmax=6000))):
+    bad('S1', 'with spin at 6000 us the limit is three times it, 18000 us')
+if rows.l2_holds(rows.l2_parts(row(wmax=60001), spin)) or rows.l2_holds(rows.l2_parts(row(lmax=78001), spin)):
+    bad('S1', 'the sleeper and the loopback echo keep three times spin\'s, with no floor')
+print('rows-selftest: PASS S1 net within max(3 x spin, spin + 10 ms): 7575/2453 passes, 12454/2453 fails; '
+      'the sleeper and the loopback echo at 3 x')
+
+R = rows.FLOOD_RATE
+secs = 3.2
+ok = row(ops=2850, sent=int(R * secs), secs=secs, nn=int(R * secs))
+state, text = rows.l6_verdict(spin, ok)
+if state != 'pass' or 'offered' not in text:
+    bad('S2', f'{state}: {text}')
+state, text = rows.l6_verdict(spin, row(ops=1400, sent=int(R * secs), secs=secs))
+if state != 'fail':
+    bad('S2', f'a hog at 0.47 of spin\'s at the offered rate: {state}: {text}')
+print(f'rows-selftest: PASS S2 at {R} a second offered: 0.95 of spin\'s passes, 0.47 fails ({text})')
+
+state, text = rows.l6_verdict(spin, row(ops=2900, sent=int(0.85 * R * secs), secs=secs))
+if state != 'unmeasured':
+    bad('S3', f'the host offered 85 % of {R} a second: {state}: {text}')
+print(f'rows-selftest: PASS S3 offered under {rows.OFFER_MIN:.0%}: unmeasured ({text})')
+
+U = ('unmeasured', 'offered 3000 a second')
+P = ('pass', 'flood:R 2850 ops')
+F = ('fail', 'flood:R 1400 ops')
+verdict, lines = rows.l6_holds('native-bios-1024', [U, P])
+if verdict != 'pass' or not any('unmeasured' in l and 'hold 1 of 3' in l for l in lines):
+    bad('S4', f'unmeasured then a pass: {verdict} {lines}')
+verdict, lines = rows.l6_holds('native-bios-1024', [U, U, U])
+if verdict != 'unmeasured' or not any(l.startswith('FAIL L6-unmeasured native-bios-1024: ') and '3 of 3 holds' in l for l in lines):
+    bad('S4', f'three unmeasured holds: {verdict} {lines}')
+verdict, lines = rows.l6_holds('native-bios-1024', [F])
+if verdict != 'fail' or not any(l.startswith('FAIL L6 native-bios-1024: ') for l in lines):
+    bad('S4', f'a measured failure: {verdict} {lines}')
+if rows.l6_again([F]) or rows.l6_again([U, P]) or not rows.l6_again([U]) or not rows.l6_again([U, U]) or rows.l6_again([U, U, U]):
+    bad('S4', 'hold again only while every hold so far is unmeasured, and at most three')
+print('rows-selftest: PASS S4 unmeasured then measured: the measured verdict; three unmeasured: FAIL L6-unmeasured; '
+      'a measured failure final')
+
+loads = rows.guard_loads(1024)
+if 'flood:%d' % R not in loads or 'flood' not in loads:
+    bad('S5', f'the run list {loads}')
+curve = rows.flood_curve('native-bios-1024', spin, row(ops=1110, nn=250450, sent=250460, secs=4.55, wmax=1418941))
+if not curve.startswith('~L6 native-bios-1024 flood: ') or 'a second' not in curve or '0.37' not in curve or '1418941' not in curve:
+    bad('S5', curve)
+print(f'rows-selftest: PASS S5 the run list has flood:{R} and flood; {curve}')
+print('rows-selftest: PASS')
