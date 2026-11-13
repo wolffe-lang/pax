@@ -15,4 +15,9 @@ while [ $# -gt 0 ]; do
     args+=("$1")
     shift
 done
-exec "${PAX_QEMU_REAL:-qemu-system-x86_64}" ${args[@]+"${args[@]}"}
+real=${PAX_QEMU_REAL:-qemu-system-x86_64}
+# Never itself: a loop of execs is a boot that never starts.
+case $(command -v "$real" 2>/dev/null) in
+    "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")") echo "qemu-default: PAX_QEMU_REAL names this wrapper" >&2; exit 2 ;;
+esac
+exec "$real" ${args[@]+"${args[@]}"}
