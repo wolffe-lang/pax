@@ -9,7 +9,9 @@ what=${1:?}; shift
 case $what in
     probe) cmd='export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); bash tests/mpx3-screen-probe "$@"';;
     triage) cmd='export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); bash tests/mpx6-triage "$@"';;
-    norms) cmd='bash tests/mpx6-triage --selftest';;
+    norms) cmd='python3 -I tests/mpx6-triage.d/probe-mask-test.py';;
+    screen) cmd='export PAX_WOLF=$(tools/fetch-wolf | tail -n 1); bash tests/mpx3-screen "$@"';;
+    ci-plan) cmd='python3 -I tests/ci-plan';;
     *) exit 2;;
 esac
 podman run --rm --memory 12g --pids-limit 16384 --ulimit nproc=32768:32768 --ulimit core=0:0 \
