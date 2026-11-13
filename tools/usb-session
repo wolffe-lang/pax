@@ -25,7 +25,7 @@ KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
 # follow_clock), CLOCK_MONOTONIC, the repeat's deadlines and the poll
 # timeout keep real time: a stalled vCPU's lost ticks no longer stop them,
 # they jump. The hold counts the tick interrupts the guest took instead
-# (kernel/timer's delivered counter, where the kernel has one), so a stall
+# (boot/isr.S's pax_tick_delivered, where the kernel has it), so a stall
 # still lengthens it; and a repeat interval that spans ticks the guest lost
 # (its count ran ahead of its interrupts there) is left out of the period's
 # figures, as a stall the host made, not the repeat's timing. At least
@@ -123,12 +123,11 @@ def run(args):
         symbols=subprocess.check_output(['nm',str(elf)],text=True)
         addresses={name:int(address,16)-(1<<64) for address,kind,name in
                    (line.split() for line in symbols.splitlines() if len(line.split())==3)
-                   if name in ('pax_serial_log_count','pax_serial_log','pax_tick_count')
-                   or name.startswith('_Wtimer.delivered_count.')}
-        # px131: kernel/timer's count of tick interrupts taken, under its
-        # module-qualified name (absent from kernels before px131)
-        for name in [k for k in addresses if k.startswith('_Wtimer.delivered_count.')]:
-            addresses['delivered'] = addresses.pop(name)
+                   if name in ('pax_serial_log_count','pax_serial_log','pax_tick_count','pax_tick_delivered')}
+        # px131: kernel/timer's count of tick interrupts taken (absent from
+        # kernels before px131)
+        if 'pax_tick_delivered' in addresses:
+            addresses['delivered'] = addresses.pop('pax_tick_delivered')
         if 'pax_tick_count' not in addresses:
             raise RuntimeError(f'no pax_tick_count in {elf}: the repeat row is held for the guest\'s ticks (--elf)')
     if args.no_serial:
@@ -339,7 +338,8 @@ def run(args):
     t0 = [line for line in lines if line.startswith('USBT0 ')]
     delay, median, mean, lost, left_out = repeat_period(stamps, int(t0[0].split()[1]) if len(t0) == 1 else None, samples)
     (out / 'rows.txt').write_text('\n'.join(normalized)+'\n')
-    held = f'hold_ticks {hold}\nhold_wall_s {hold_wall:.3f}\n' if hold is not None else 'hold_wall_ms 1000\n'
+    word = 'pax_tick_delivered' if 'delivered' in addresses else 'pax_tick_count' # px131: the word the hold counted
+    held = f'hold_ticks {hold}\nhold_counts {word}\nhold_wall_s {hold_wall:.3f}\n' if hold is not None else 'hold_wall_ms 1000\n'
     (out / 'repeat.txt').write_text(f'delay_ms {delay:.3f}\nmedian_period_ms {median:.3f}\nmean_period_ms {mean:.3f}\nreports {len(repeat)}\n{held}'
                                     f'lost_spans {len(lost)}\nintervals_left_out {left_out}\n')
     if args.reference:
