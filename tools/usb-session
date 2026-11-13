@@ -217,7 +217,13 @@ def run(args):
                     execute('input-send-event', {'events':[{'type':'key', 'data':{
                         'down':down, 'key':{'type':'qcode','data':'a'}}}]})
                 held = 'delivered' if 'delivered' in addresses else 'pax_tick_count'
+                count0 = guest_ticks() # the count first, as at every poll
                 first = guest_ticks(held)
+                # the polls, kept beside the transcript: seconds into the hold, the count, the interrupts taken
+                hold_log = (out / 'hold.txt').open('w')
+                if held == 'delivered':
+                    samples.append((count0, first)) # before the press: a loss there counts too
+                    hold_log.write(f'0 {count0} {first}\n')
                 began = time.monotonic()
                 key(True)
                 until = began + HOLD_WALL_SECONDS
@@ -225,6 +231,7 @@ def run(args):
                     now = guest_ticks(held)
                     if held == 'delivered':
                         samples.append((guest_ticks(), now))
+                        hold_log.write(f'{time.monotonic() - began:.4f} {samples[-1][0]} {now}\n')
                     if now - first >= HOLD_TICKS:
                         break
                     if time.monotonic() > until:
