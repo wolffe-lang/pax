@@ -8,7 +8,7 @@
 #                  lane's change can reach: mpx6-latency, mpx2-interrupts, mpx2-sched, mpx3-user,
 #                  mpx3-maps, mpx3-tree, mpx5-trace, mpx5-users, mpx5-rates, mpx6-part,
 #                  mpx3-boreutils, mpx4-udp, mpx3-console, mpx6-usbcheck, mpx6-metal-power,
-#                  mpx6-metal-serial, mpx3-threads, mpx5-pty, mpx6-usb)
+#                  mpx6-metal-serial, mpx3-threads, mpx5-pty, mpx6-usb, usb-session-selftest)
 #   ci-plan        tests/ci-plan (the tiers map, the wiring of the new suite's job)
 #   kernels TIER K…  tools/build-kernel for kernel/K.lu at TIER (native, release), each
 # The suites with a Linux side reach a container engine through engine-ns (lib.sh's `ctr sys`, px123's).
@@ -44,7 +44,7 @@ case $what in
     suite)
         name=${1:?a suite}; shift
         case $name in
-            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console|mpx6-usbcheck|mpx6-metal-power|mpx6-metal-serial|mpx3-threads|mpx5-pty|mpx6-usb) ;;
+            mpx6-latency|mpx2-interrupts|mpx2-sched|mpx3-user|mpx3-maps|mpx3-tree|mpx5-trace|mpx5-users|mpx5-rates|mpx6-part|mpx3-boreutils|mpx4-udp|mpx3-console|mpx6-usbcheck|mpx6-metal-power|mpx6-metal-serial|mpx3-threads|mpx5-pty|mpx6-usb|usb-session-selftest) ;;
             *) echo "step.sh: no suite $name in this rig"; exit 2 ;;
         esac
         # the suites with a Linux side run with engine-ns (sys); the guard needs only KVM
