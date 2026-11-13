@@ -6,6 +6,7 @@
 #   CPUS    the CPUs the take may use (taskset inside each container)
 #   P       the container engine (rootless podman)
 #   MEM     each container's memory (12g on a block, the light slot's 6g)
+#   SEAM    (the kernel-as step) the seam wolf, tests/kernel-as.d/wolf.pin's commit built once, under L
 # and, read by take.sh alone: LOCKS (the lock files, in the host's one order) and REC (the recorder,
 # a copy by value of the planning repo's tools/gauntlet-record.sh).
 # PAX_BUILD is the build directory every step of one take shares.
