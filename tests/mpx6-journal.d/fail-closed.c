@@ -36,14 +36,54 @@ int main(void) {
             close(raw); /* No fsync: make the backend dirty outside the filesystem. */
         }
     }
-    int mounted = mount("/dev/vda", "/volume", !strcmp(which, "plain-control") ? "ext2" : "ext3", 0, NULL);
+    unsigned long flags = !strncmp(which, "ro-", 3) ? MS_RDONLY : 0;
+    int mounted = mount("/dev/vda", "/volume", !strcmp(which, "plain-control") ? "ext2" : "ext3", flags, NULL);
     result("mount", mounted);
     if (mounted < 0 && (!strcmp(which, "mount-error") || !strcmp(which, "mount-state-flush"))) {
         result("mount-after", mount("/dev/vda", "/volume", "ext3", 0, NULL));
     }
     if (mounted < 0 || !strncmp(which, "refuse", 6) || !strcmp(which, "pre-mount-barrier")
-        || !strcmp(which, "mount-error") || !strcmp(which, "mount-state-flush")) done();
-    if (!strcmp(which, "reuse-recover")) {
+        || !strcmp(which, "mount-error") || !strcmp(which, "mount-state-flush")
+        || !strcmp(which, "ro-replay-refuse")) done();
+    if (!strcmp(which, "ro-remount")) {
+        result("remount", mount(NULL, "/volume", "ext3", MS_REMOUNT, NULL));
+        done();
+    }
+    if (!strcmp(which, "prefix-recover")) {
+        int anchor = open("/volume/anchor", O_RDONLY), good = 0;
+        result("anchor-open", anchor);
+        if (anchor >= 0) {
+            ssize_t n = read(anchor, data, sizeof(data));
+            good = n == (ssize_t)sizeof(data);
+            for (int i=0; i<n; ++i) if (data[i] != 'A') good = 0;
+            close(anchor);
+        }
+        printf("JF anchor-bytes=%d\n", good);
+        int later = open("/volume/new", O_RDONLY);
+        result("uncommitted-open", later);
+        if (later >= 0) close(later);
+        later = open("/volume/later", O_RDONLY);
+        result("later-open", later);
+        if (later >= 0) close(later);
+        result("unmount", umount("/volume"));
+        done();
+    }
+    if (!strcmp(which, "reuse-commit")) {
+        result("unlink-old", unlink("/volume/old"));
+        int directory = open("/volume", O_RDONLY|O_DIRECTORY);
+        result("free-fsync", fsync(directory));
+        if (directory >= 0) close(directory);
+        int fd = open("/volume/new", O_CREAT|O_WRONLY|O_EXCL, 0600);
+        result("open", fd);
+        memset(data, 'N', sizeof(data));
+        if (fd >= 0) {
+            result("reuse-write", write(fd, data, sizeof(data)));
+            result("reuse-fsync", fsync(fd));
+            close(fd);
+        }
+        done();
+    }
+    if (!strcmp(which, "reuse-recover") || !strcmp(which, "ro-control")) {
         int fd = open("/volume/old", O_RDONLY);
         result("old-open", fd);
         int good = 0;
@@ -89,8 +129,22 @@ int main(void) {
             printf("JF recovered-bytes=%d\n", good);
             close(fd);
         }
+        if (!strcmp(which, "recover-reuse")) {
+            int old = open("/volume/old", O_RDONLY);
+            result("old-after", old);
+            if (old >= 0) close(old);
+        }
         result("unmount", umount("/volume"));
         done();
+    }
+    if (!strncmp(which, "prefix-", 7)) {
+        memset(data, 'A', sizeof(data));
+        int anchor = open("/volume/anchor", O_CREAT|O_WRONLY|O_EXCL, 0600);
+        result("anchor-open", anchor);
+        if (anchor < 0) done();
+        result("anchor-write", write(anchor, data, sizeof(data)));
+        result("anchor-fsync", fsync(anchor));
+        close(anchor);
     }
     memset(data, 'N', sizeof(data));
     int fd = open("/volume/new", O_CREAT|O_WRONLY|O_EXCL, 0600);
@@ -103,6 +157,10 @@ int main(void) {
         done();
     }
     result("fsync", fsync(fd));
+    if (!strcmp(which, "committed-cut")) {
+        close(fd);
+        done();
+    }
     if (!strcmp(which, "cache-error")) {
         int pressure = open("/volume/pressure", O_RDONLY);
         result("pressure-open", pressure);
@@ -124,7 +182,7 @@ int main(void) {
         result("unmount", umount("/volume"));
         done();
     }
-    if (!strncmp(which, "checkpoint", 10) || !strncmp(which, "control", 7) || !strcmp(which, "plain-control")) {
+    if (!strncmp(which, "checkpoint", 10) || !strncmp(which, "control", 7) || !strcmp(which, "plain-control") || !strcmp(which, "prefix-control")) {
         close(fd);
         result("unmount", umount("/volume"));
         done();
