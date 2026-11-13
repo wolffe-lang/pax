@@ -56,6 +56,9 @@
 #      so an NMI injected at seven points from the first step to the PCI
 #      scan is survived and a machine check at three is a named panic with
 #      its bank, never a reset (TCG: QEMU's gdb stub and QMP).
+#   F12 processor discovery only (tests/mpx6-cpus): 1, 2, 4 and 16 CPUs
+#      in the MADT, one active; disabled entries and missing ACPI kept distinct;
+#      boot and /proc agree and secondary instruction pointers stay outside PAX.
 # F5 and F8 are UEFI whatever --firmware says (the mode is OVMF's GOP,
 # the window OVMF's), once per tier. Exit 0 when every row held.
 set -euo pipefail
@@ -76,6 +79,8 @@ for t in $tiers; do
     export PAX_BUILD=$base/firmware/$t PAX_METAL_TIER=$t PAX_METAL_FIRMWARE=$legs
     flags=(); [ "$t" != release ] || flags=(--release)
 
+    CPUS_TIER=$t CPUS_FIRMWARE="$legs" "$PAX_ROOT/tests/mpx6-cpus"
+    row "F12 $t: processors discovered, one active on $legs"
     "$PAX_ROOT/tests/mpx6-metal"; row "F1 $t: clocks on $legs"
     "$PAX_ROOT/tests/mpx6-metal-serial"; row "F2 $t: COM1 present and absent on $legs"
     "$PAX_ROOT/tests/mpx6-metal-power"; row "F3 $t: reboot and power-off on $legs"
