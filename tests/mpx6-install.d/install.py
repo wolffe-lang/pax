@@ -36,14 +36,15 @@ for d in ['bin','boot/EFI/BOOT','boot/limine','etc','root','home/pax','dev','pro
 programs={n:dt/'bore'/n for n in ['cat','cp','env','ls']}
 programs.update(sh=full/'pelt/pelt',pelt=full/'pelt/pelt',lope=full/'lope/lope',reboot=full/'probe/reboot')
 programs.update({n:dt/'bin'/n for n in ['paxgpt','paxfat','paxext2']})
-programs.update(limine=dt/'limine/limine',**{'pax-install':lane/'build/install-gate/bin/pax-install'})
+programs.update(limine=dt/'limine/limine',pxg=lane/'build/pxg/pxg',**{'pax-install':lane/'build/install-gate/bin/pax-install'})
+assert (lane/'build/pxg/sums.txt').read_text().split() == ['pxg', sha(programs['pxg']), str(programs['pxg'].stat().st_size)], 'I-pxg-input-mismatch'
 if full_tree:
     programs.update({p.name:p for p in (full/'bore').iterdir() if p.is_file() and os.access(p,os.X_OK)})
     for n in ['aspen','yew','su','play','lupin']: programs[n]=full/n/n
     for n in ['scent','egrep','fgrep']: programs[n]=full/'scent'/n
     programs['as']=full/'bin/as'
 for n,p in programs.items():
-    if p.read_bytes()[:4]==b'\x7fELF':run(['strip','-o',source/'bin'/n,p])
+    if n != 'pxg' and p.read_bytes()[:4]==b'\x7fELF':run(['strip','-o',source/'bin'/n,p])
     else:shutil.copyfile(p,source/'bin'/n)
     (source/'bin'/n).chmod(0o755)
 if full_tree:
@@ -59,6 +60,7 @@ for src,dst in [('BOOTX64.EFI','boot/EFI/BOOT/BOOTX64.EFI'),('limine-bios.sys','
 (source/'etc/passwd').write_text('root:x:0:0:root:/:/bin/pelt\npax:x:1000:1000:pax:/home/pax:/bin/pelt\n')
 (source/'etc/group').write_text('root:x:0:\npax:x:1000:\n')
 (source/'etc/motd').write_text('PAX installer test source\n')
+run([repo/'tools/mkpax-release',kernel,source/'etc/pax-release'])
 (source/'etc/shrc').write_text((repo/'user/shrc').read_text()+'\ncd\n')
 (source/'etc/pax-run').write_text('/bin/env HOME=/home/pax ENV=/etc/shrc /bin/sh -i -m\n')
 shutil.copyfile(repo/'user/fstab-root',source/'etc/fstab')

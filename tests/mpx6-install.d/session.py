@@ -44,7 +44,8 @@ def send(s,enter=True):
 try:
     # px78: the running root is refused before the allow-list is read,
     # even when the list names it (px78-plant-root lets the list win).
-    commands=["echo 'model= serial=PX71-ROOT' > /tmp/allow",
+    pxg_commands=(Path(__file__).with_name('pxg.keys')).read_text().splitlines()
+    commands=pxg_commands+["echo 'model= serial=PX71-ROOT' > /tmp/allow",
               'pax-install --dry-run --target vda --seed test --user pax --games no --allow-list /tmp/allow','echo hello > /etc/motd','lope add /usr/share/tunes','lope list','cd',
               'echo written on PAX, before the reboot > notes.txt','echo root wrote this in /root > /root/note','reboot']
     for i,line in enumerate(commands,1):prompt(1,i);send(line)
@@ -76,11 +77,17 @@ for command,answer in [('cat /etc/motd','\nhello\n'),('lope list','/usr/share/tu
 check=work/('session-'+firmware+'-root.img')
 with image.open('rb') as f,check.open('wb') as o:
     f.seek(69206016);left=467644416
+    o.truncate(left);offset=0
     while left:
-        b=f.read(min(left,1048576));assert b;o.write(b);left-=len(b)
+        b=f.read(min(left,1048576));assert b
+        # Preserve logical bytes without allocating the partition's zero extents.
+        if b.count(0)!=len(b):o.seek(offset);o.write(b)
+        offset+=len(b);left-=len(b)
 r=subprocess.run(['e2fsck','-fn',check],capture_output=True);(work/('session-'+firmware+'.fsck')).write_bytes(r.stdout+r.stderr)
 assert r.returncode==0 and b'WARNING' not in r.stdout+r.stderr,(r.stdout,r.stderr)
 r=subprocess.run(['dumpe2fs','-h',check],capture_output=True,check=True)
 assert re.search(rb'^Filesystem state:\s+clean$',r.stdout,re.M) and re.search(rb'^Mount count:\s+2$',r.stdout,re.M),r.stdout
+subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('pxg-rows.py')),
+                str(logpath),str(work/'source/etc/pax-release')],check=True)
 image.unlink();check.unlink()
 print(f'PASS I-session-{firmware}: target alone, motd/home/root/lope persisted across reboot, ext2 clean and mount count 2')

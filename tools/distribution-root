@@ -49,6 +49,14 @@ def write_cpio(rows, output):
             out.write(data)
             out.write(b'\0' * (-out.tell() % 4))
 
+def install_pxg(rows, inputs):
+    """The production executable only, byte-for-byte as tools/mkpxg built it."""
+    data = (inputs/'pxg/pxg').read_bytes()
+    assert (inputs/'pxg/sums.txt').read_text().split() == ['pxg', sha(data), str(len(data))], 'image-pxg-input-mismatch'
+    assert 'bin/pxg' not in rows, 'image-pxg-collision'
+    rows['bin/pxg'] = (0o100755, 0, 0, data)
+
+
 def main():
     base, inputs, identity, output = map(Path, sys.argv[1:5])
     variant = sys.argv[5]
@@ -153,6 +161,8 @@ def main():
         assert (sha(data), len(data)) == (digest, int(size)), 'built input mismatch: '+name
         assert 'bin/'+name not in rows, 'trash would replace bin/'+name
         put('bin/'+name, data, 0o755)
+    # pxg is in both variants. The test-only failpoint and qualification tools never ship.
+    install_pxg(rows, inputs)
     # px104 (R-px104-2): the root set den's TLS reads (tools/mkroots, held
     # to user/roots.pin's digests here as well), /etc/shrc exporting
     # DEN_TLS_ROOTS; (R-px104-6) GitHub's published host key.

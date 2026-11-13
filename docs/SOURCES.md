@@ -1,5 +1,20 @@
 # SOURCES — what each change was written from
 
+## pxg image integration (2026-11-13)
+
+- PAX's own `tools/mkden`, `tools/mkdistribution`, `tools/distribution-root`,
+  `tools/mkpax-release` and installer suites at `bbe91e16`: read and reused
+  for the source pin, static builder, image input, identity and installed-root rows.
+- The package manager's public source at `a497e373`, specifically
+  `tools/build`, `tools/lib-toolchain.sh`, its toolchain pin and reader/refusal
+  tests: read to invoke its static build unmodified, with its own compiler,
+  interpreter and std, and to assert its existing diagnostics. Only its
+  production executable is an image input.
+- Wolf and Lupin release archives, binutils, the C compiler and static C
+  runtime, QEMU, OVMF and filesystem checkers: binary build/test tools only.
+  No other package manager's, kernel's, libc's, archiver's, compressor's,
+  TLS library's or HTTP library's implementation was read.
+
 The clean-room rule (`CLAUDE.md`) requires this log. Every lane adds its
 entries: what it consulted, at which version, for which file, and how
 (read, black-box run, or the author's own knowledge with no text copied).
