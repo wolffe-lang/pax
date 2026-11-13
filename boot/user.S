@@ -128,7 +128,8 @@ pax_enter_user:
         pushq   %rdi
         pushq   %rsi
         pushq   %rbx                    /* %rsp 16-aligned for the call */
-        call    pax_lat_close
+        movq    pax_lat+248(%rip), %rax /* kernel/latency's close (word 31) */
+        callq   *%rax
         popq    %rbx
         popq    %rsi
         popq    %rdi
