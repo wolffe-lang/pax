@@ -27,7 +27,7 @@ int main(void) {
     close(c);
     if (received <= 0) return 2;
     mkdir("/volume", 0755);
-    if (!strcmp(which, "pre-mount-barrier")) {
+    if (!strcmp(which, "pre-mount-barrier") || !strcmp(which, "rw-barrier-error")) {
         memset(data, 'Q', sizeof(data));
         int raw = open("/dev/vda", O_WRONLY);
         result("prime-open", raw);
@@ -37,7 +37,8 @@ int main(void) {
             close(raw); /* No fsync: make the backend dirty outside the filesystem. */
         }
     }
-    unsigned long flags = (!strncmp(which, "ro-", 3) || !strncmp(which, "late-rw-", 8)) ? MS_RDONLY : 0;
+    unsigned long flags = (!strncmp(which, "ro-", 3) || !strncmp(which, "late-rw-", 8)
+                           || !strcmp(which, "rw-barrier-error")) ? MS_RDONLY : 0;
     int mounted = mount("/dev/vda", "/volume", !strcmp(which, "plain-control") ? "ext2" : "ext3", flags, NULL);
     result("mount", mounted);
     if (mounted < 0 && (!strcmp(which, "mount-error") || !strcmp(which, "mount-state-flush"))) {
@@ -46,6 +47,28 @@ int main(void) {
     if (mounted < 0 || !strncmp(which, "refuse", 6) || !strcmp(which, "pre-mount-barrier")
         || !strcmp(which, "mount-error") || !strcmp(which, "mount-state-flush")
         || !strcmp(which, "ro-replay-refuse")) done();
+    if (!strcmp(which, "rw-barrier-error")) {
+        /* A writable remount's qualification barrier fails before any write:
+           the volume stays read-only, can be let go, and the next mount
+           qualifies its own barrier before its first write. */
+        result("barrier-remount", mount(NULL, "/volume", "ext3", MS_REMOUNT, NULL));
+        int fd = open("/volume/late", O_CREAT|O_WRONLY|O_EXCL, 0600);
+        result("barrier-create-after", fd);
+        if (fd >= 0) close(fd);
+        result("barrier-unmount", umount("/volume"));
+        int excl = open("/dev/vda", O_RDONLY|O_EXCL);
+        result("barrier-excl-after", excl);
+        if (excl >= 0) close(excl);
+        result("barrier-mount-new", mount("/dev/vda", "/volume", "ext3", 0, NULL));
+        fd = open("/volume/late", O_CREAT|O_WRONLY|O_EXCL, 0600);
+        result("barrier-create-new", fd);
+        if (fd >= 0) {
+            result("barrier-fsync-new", fsync(fd));
+            close(fd);
+        }
+        result("barrier-unmount-new", umount("/volume"));
+        done();
+    }
     if (!strncmp(which, "late-", 5)) {
         int ro = !strncmp(which, "late-ro-", 8);
         int unmounting = !strncmp(which, "late-unmount-", 13);
