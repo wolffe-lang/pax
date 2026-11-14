@@ -5187,7 +5187,10 @@ pub fn fallocate(a: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64 {
         return neg(EFBIG)
     }
     if m == FALLOC_KEEP | FALLOC_PUNCH {
-        tree.punch(i, off, len)
+        let r = tree.punch(i, off, len)
+        if r != 0 {
+            return r // a volume that failed under the punch
+        }
     } else if m == 0 && off + len > tree.bytes(i) {
         let r = tree.truncate(i, off + len)
         if r != 0 {
