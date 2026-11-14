@@ -986,6 +986,10 @@ pub fn unmount(v: u64, now: u64) -> u64 {
     let r1 = if vw(v, V_RO) == 0 { block.sync(dev) } else { 0 }
     let r = if r0 != 0 { r0 } else { r1 }
     if r != 0 { return r }
+    // A device error after the journal closed (its last superblock write,
+    // even when the sync's retry of it succeeded) is the journal's failure
+    // too: the unmount answers it and keeps the volume and its device.
+    if vw(v, V_RO) == 0 && vw(v, V_JNL) != 0 && journal.failed(v) { return neg(EIO) }
     block.forget(dev)
     block.release(dev)
     put_vw(v, V_USED, 0)
@@ -1048,6 +1052,13 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
             sb_dirty(v)
         }
         let r1 = block.sync(dev)
+        if vw(v, V_JNL) != 0 && journal.failed(v) {
+            // Its last superblock write or barrier failed on the device (even
+            // when the sync's retry succeeded): the volume stays writable and
+            // failed, so a later unmount refuses it and keeps its device,
+            // never a read-only volume let go and mounted again this boot.
+            return if r1 != 0 { r1 } else { neg(EIO) }
+        }
         put_vw(v, V_RO, 1)
         return if r0 != 0 { r0 } else { r1 }
     }
@@ -1078,7 +1089,10 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
     put_vw(v, V_RO, 0)
     let r = block.sync(dev)
     if vw(v, V_JNL) != 0 {
+        // begin refuses a journal whose device failed during this remount (a
+        // mounted-state write the sync then retried): that is no success.
         journal.begin(v)
+        if r == 0 && !journal.active(v) { return neg(EIO) }
     }
     r
 }
