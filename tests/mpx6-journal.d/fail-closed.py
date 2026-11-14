@@ -229,6 +229,11 @@ class Rows:
                     valid = valid and retries > 0
             elif stage != "descriptor":
                 raise RuntimeError("unknown fault stage")
+            if stage in ("late-superblock", "remount-rw-state") and kind == "write":
+                # The call's own sync retried the failed superblock write successfully.
+                retries = sum(e[0] == "write" and e[1] == event[1] and e[3] == 0 for e in events[index + 1:])
+                detail += f" successful-retries={retries}"
+                valid = valid and retries > 0
         detail += " stage=" + stage + " verified=" + str(bool(valid))
         (self.out / name / "fault.txt").write_text(detail + "\n")
         print("FAULT " + name + " " + detail, flush=True)
@@ -531,9 +536,12 @@ class Rows:
             self.row(name, fault_ok and value(text, "late-operation") == (-1, 5)
                      and value(text, "late-unmount-after") == (-1, 5)
                      and value(text, "late-rw-after") == (-1, 5)
+                     and value(text, "late-excl-after") == (-1, 16)
                      and value(text, "late-mount-after") == (-1, 16)
                      and value(text, "late-create-after") is None,
-                     words + " fails with EIO even after a successful retry; the volume stays failed and claimed")
+                     words + (" fails with EIO although the sync's retry of it succeeded" if fault_kind == "write"
+                              else " fails with EIO")
+                     + "; the volume stays failed, its device claimed against an exclusive open and a second mount")
 
     def overwrite(self):
         control = self.image("overwrite-control")

@@ -55,10 +55,15 @@ int main(void) {
             /* After a device error the volume stays failed and its device claimed. */
             result("late-unmount-after", umount("/volume"));
             result("late-rw-after", mount(NULL, "/volume", "ext3", MS_REMOUNT, NULL));
-            int again = mount("/dev/vda", "/volume", "ext3", 0, NULL);
+            /* The block layer's own claim: an exclusive open, not the covered mount point. */
+            int excl = open("/dev/vda", O_RDONLY|O_EXCL);
+            result("late-excl-after", excl);
+            if (excl >= 0) close(excl);
+            mkdir("/again", 0755);
+            int again = mount("/dev/vda", "/again", "ext3", 0, NULL);
             result("late-mount-after", again);
             if (again == 0) {
-                int fd = open("/volume/late", O_CREAT|O_WRONLY|O_EXCL, 0600);
+                int fd = open("/again/late", O_CREAT|O_WRONLY|O_EXCL, 0600);
                 result("late-create-after", fd);
                 if (fd >= 0) {
                     result("late-fsync-after", fsync(fd));
