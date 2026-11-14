@@ -4384,7 +4384,13 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     }
     if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO {
         if tree.bytes(rf(n)) != 0 {
-            let _t = resize(rf(n), 0)
+            let t = resize(rf(n), 0)
+            if t != 0 {
+                // The truncate failed (a read-only volume was refused above,
+                // so its journal failed under it): its error, no descriptor.
+                let _c = close(a, fd)
+                return t
+            }
         }
         wrote(a, rf(n)) // px44: O_TRUNC takes the set-ID bits, as a write does
     }
