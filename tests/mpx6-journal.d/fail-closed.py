@@ -575,6 +575,39 @@ class Rows:
                  and not later and at(disk, blocks[1] * 4096, 4096) == b"A" * 4096,
                  "a failed first data block fails the write with EIO; nothing, the second block included, is written after it")
 
+    def punch(self):
+        control = self.image("punch-control")
+        blocks = file_blocks(control, b"two")
+        if len(blocks) != 2:
+            raise RuntimeError("the punch fixture is not two blocks")
+        sectors = [b * 8 for b in blocks]
+        text = self.boot("punch-control", control, "punch-control")
+        events = self.requests("punch-control")
+        check = process(["e2fsck", "-fn", str(control)], capture_output=True, text=True)
+        (self.out / "punch-control.fsck.txt").write_text(check.stdout + check.stderr)
+        data = [e[1] for e in events if e[0] == "write" and e[1] in sectors]
+        self.row("JF-punch-control", value(text, "punch") == (0, 0)
+                 and value(text, "punch-sync") == (0, 0) and value(text, "unmount") == (0, 0)
+                 and data[:2] == sectors and all(at(control, b * 4096, 4096) == bytes(4096) for b in blocks)
+                 and check.returncode == 0 and all(e[3] == 0 for e in events),
+                 "a healthy write-through punch over two allocated blocks zeroes both in order; fsck clean")
+        name = "JF-punch-EIO"
+        disk = self.image(name)
+        cfg = self.out / (name + ".cfg")
+        cfg.write_text('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
+                       f'sector = "{sectors[0]}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+        text = self.boot(name, disk, "punch-error", cfg=cfg)
+        fault_ok = self.fault(name, disk, "write", sectors[0], "data-overwrite")
+        events = self.requests(name)
+        failed = [i for i, e in enumerate(events) if e[3] != 0]
+        later = bool(failed) and any(e[0] == "write" for e in events[failed[0] + 1:])
+        after = value(text, "punch-after")
+        self.row(name, fault_ok and value(text, "punch") == (-1, 5)
+                 and after is not None and after[0] == -1 and value(text, "punch-sync") == (-1, 5)
+                 and not later and at(disk, blocks[1] * 4096, 4096) == b"A" * 4096,
+                 "a failed first punched block fails fallocate with EIO; nothing, the second block included, "
+                 "is written after it, and a later punch fails")
+
     def plain(self):
         disk = self.out / "plain-no-flush.img"
         with disk.open("wb") as f:
@@ -669,6 +702,7 @@ class Rows:
         if self.a.only == "late":
             self.late()
             self.overwrite()
+            self.punch()
             if self.a.guard_kernel:
                 self.exhaustion()
             return 1 if self.failed else 0
@@ -708,6 +742,7 @@ class Rows:
         self.no_flush_boundaries()
         self.late()
         self.overwrite()
+        self.punch()
         if self.a.guard_kernel:
             self.exhaustion()
         if self.a.large:
