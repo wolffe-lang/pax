@@ -212,11 +212,21 @@ def check(blob):
                   if len(l.split()) == 4 and l.split()[:2] == ['#', 'ligature'] and re.fullmatch(r'[0-9a-f]{64}', l.split()[2])]
         assert pinned == [[sha(data), str(len(data))]], 'image-ligature-pin'
     assert not any(l.startswith('export WOLF_LD=') for l in shrc), 'image-shrc-wolf-ld'
+    # px142: warren, the terminal multiplexer in wolf, at /usr/bin/warren in the dev image, byte for byte as
+    # tools/mkwarren built it (its stripped copy), 0755, root's, its builder's sums, and a warren line in
+    # /etc/pax-release; none in the release image.
+    assert ('usr/bin/warren' in rows) == (variant == 'dev'), 'image-warren-' + ('missing' if variant == 'dev' else 'in-release')
+    assert 'warren' in release_rows, 'image-warren-release-line'
+    if variant == 'dev':
+        fields, data = rows['usr/bin/warren']
+        assert data == (inputs/'warren'/'warren').read_bytes(), 'image-warren-bytes'
+        assert fields[1] == 0o100755 and fields[2:4] == [0, 0], 'image-warren-mode'
+        assert (inputs/'warren'/'sums.txt').read_text().split() == ['warren', sha(data), str(len(data))], 'image-warren-sums'
     return release, len(listed)
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, burrowd and its hook, configuration (its SetEnv line /etc/shrc's exports) and account, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, ligature at its pinned digest (dev) with lld still the default, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, burrowd and its hook, configuration (its SetEnv line /etc/shrc's exports) and account, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, ligature at its pinned digest (dev) with lld still the default, warren (dev), and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
