@@ -89,6 +89,18 @@ def flush_error_rule(target):
     return "\n".join(stages)
 
 
+def write_error_rule(target, sector):
+    if target < 1:
+        raise RuntimeError("a write fault needs a measured write ordinal")
+    stages = []
+    for state in range(1, target):
+        stages.append('[set-state]\nevent = "write_aio"\n'
+                      f'state = "{state}"\nnew_state = "{state + 1}"\n')
+    stages.append('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
+                  f'state = "{target}"\nsector = "{sector}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+    return "\n".join(stages)
+
+
 class Rows:
     def __init__(self, args):
         self.a = args
@@ -163,6 +175,18 @@ class Rows:
                 valid = valid and not descriptors and not commits
                 if stage == "mount-state":
                     valid = valid and any(e[0] == "write" and e[1] == 0 and e[3] == 0 for e in before)
+            elif stage in ("late-superblock", "late-final-barrier"):
+                clears = [i for i, e in enumerate(before) if e[0] == "write" and e[1] == journal * 8 and e[3] == 0]
+                superblocks = [i for i, e in enumerate(before) if e[0] == "write" and e[1] == 0 and e[3] == 0]
+                closed = bool(clears) and any(e[0] == "flush" and e[3] == 0 for e in before[clears[-1] + 1:])
+                valid = valid and closed and not descriptors and bool(superblocks)
+                if stage == "late-final-barrier":
+                    valid = valid and len(superblocks) >= 2 and clears[-1] < superblocks[-1]
+                    valid = valid and bool(before) and before[-1][0:2] == ("write", 0)
+                detail += f" journal-close-barrier={closed}"
+            elif stage == "remount-rw-state":
+                valid = valid and not any(e[0] == "write" for e in before)
+                valid = valid and any(e[0] == "flush" and e[3] == 0 for e in before)
             elif stage == "precommit":
                 valid = valid and bool(descriptors) and not commits
             elif stage in ("checkpoint", "cache-home"):
@@ -422,6 +446,69 @@ class Rows:
                  and sha(disk) == before and not any(e[0] == "write" for e in self.requests("no-flush-replay")),
                  "even a read-only mount refuses needed replay without a barrier, before home or journal writes")
 
+    def late_layout(self, kind):
+        """A healthy write-through late operation: the write ordinal of its
+        superblock write and the backing-flush ordinal of the barrier after it."""
+        name = "JF-late-" + kind + "-control"
+        disk = self.image(name)
+        text = self.boot(name, disk, "late-" + kind + "-control")
+        events = self.requests(name)
+        check = process(["e2fsck", "-fn", str(disk)], capture_output=True, text=True)
+        (self.out / (name + ".fsck.txt")).write_text(check.stdout + check.stderr)
+        _, journal = geometry(disk)
+        writes = [i for i, e in enumerate(events) if e[0] == "write"]
+        clears = [i for i in writes if events[i][1] == journal * 8]
+        if kind == "rw":
+            # The read-only mount writes nothing: the remount's first write is its mounted state.
+            targets = [i for i in writes if events[i][1] == 0]
+        else:
+            # The superblock written after the journal's emptied superblock.
+            targets = [i for i in writes if events[i][1] == 0 and clears and i > clears[-1]]
+        barriers = [i for i in range(targets[0] + 1, len(events)) if events[i][0] == "flush"] if targets else []
+        ok = (value(text, "mount") == (0, 0) and value(text, "late-operation") == (0, 0)
+              and (kind == "unmount" or value(text, "late-cleanup") == (0, 0))
+              and check.returncode == 0 and all(e[3] == 0 for e in events)
+              and bool(targets) and bool(barriers))
+        self.row(name, ok, "a healthy " + {"unmount": "unmount", "ro": "read-only remount",
+                                            "rw": "writable remount"}[kind]
+                 + " measures its late superblock write and barrier; fsck clean")
+        if not ok:
+            return None
+        backing, dirty = 0, False
+        for event in events[:barriers[0] + 1]:
+            if event[0] == "write":
+                dirty = True
+            elif event[0] == "flush":
+                if dirty:
+                    backing += 1
+                dirty = False
+        return sum(1 for i in writes if i <= targets[0]), backing
+
+    def late(self):
+        layouts = {kind: self.late_layout(kind) for kind in ("unmount", "ro", "rw")}
+        for kind, fault_kind, stage, words in (
+                ("unmount", "write", "late-superblock", "an unmount's final superblock write"),
+                ("ro", "write", "late-superblock", "a read-only remount's final superblock write"),
+                ("rw", "write", "remount-rw-state", "a writable remount's mounted-state write"),
+                ("ro", "flush", "late-final-barrier", "a read-only remount's final barrier")):
+            name = "JF-late-" + kind + ("-barrier-EIO" if fault_kind == "flush" else "-superblock-EIO")
+            layout = layouts[kind]
+            if layout is None:
+                self.row(name, False, "needs its healthy control's measured layout")
+                continue
+            disk = self.image(name)
+            cfg = self.out / (name + ".cfg")
+            cfg.write_text(write_error_rule(layout[0], 0) if fault_kind == "write" else flush_error_rule(layout[1]))
+            case = "late-" + kind + ("-flush" if fault_kind == "flush" else "") + "-error"
+            text = self.boot(name, disk, case, cfg=cfg)
+            fault_ok = self.fault(name, disk, fault_kind, 0 if fault_kind == "write" else None, stage)
+            self.row(name, fault_ok and value(text, "late-operation") == (-1, 5)
+                     and value(text, "late-unmount-after") == (-1, 5)
+                     and value(text, "late-rw-after") == (-1, 5)
+                     and value(text, "late-mount-after") == (-1, 16)
+                     and value(text, "late-create-after") is None,
+                     words + " fails with EIO even after a successful retry; the volume stays failed and claimed")
+
     def plain(self):
         disk = self.out / "plain-no-flush.img"
         with disk.open("wb") as f:
@@ -513,6 +600,11 @@ class Rows:
         if self.a.only == "plain":
             self.plain()
             return 1 if self.failed else 0
+        if self.a.only == "late":
+            self.late()
+            if self.a.guard_kernel:
+                self.exhaustion()
+            return 1 if self.failed else 0
         self.plain()
         for name, features in (("JF-control", 0), ("JF-revoke-control", 1)):
             disk = self.image(name)
@@ -547,6 +639,7 @@ class Rows:
         self.eio("JF-cache-EIO", "cache-error", "home")
         self.incomplete()
         self.no_flush_boundaries()
+        self.late()
         if self.a.guard_kernel:
             self.exhaustion()
         if self.a.large:
@@ -560,7 +653,7 @@ if __name__ == "__main__":
     p.add_argument("--guard-kernel", type=Path)
     p.add_argument("--firmware", choices=("bios", "uefi"), default="bios")
     p.add_argument("--large", action="store_true")
-    p.add_argument("--only", choices=("large", "plain", "no-flush", "boundaries"))
+    p.add_argument("--only", choices=("large", "plain", "no-flush", "boundaries", "late"))
     p.add_argument("out", type=Path)
     args = p.parse_args()
     try:

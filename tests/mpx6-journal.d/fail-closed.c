@@ -36,7 +36,7 @@ int main(void) {
             close(raw); /* No fsync: make the backend dirty outside the filesystem. */
         }
     }
-    unsigned long flags = !strncmp(which, "ro-", 3) ? MS_RDONLY : 0;
+    unsigned long flags = (!strncmp(which, "ro-", 3) || !strncmp(which, "late-rw-", 8)) ? MS_RDONLY : 0;
     int mounted = mount("/dev/vda", "/volume", !strcmp(which, "plain-control") ? "ext2" : "ext3", flags, NULL);
     result("mount", mounted);
     if (mounted < 0 && (!strcmp(which, "mount-error") || !strcmp(which, "mount-state-flush"))) {
@@ -45,6 +45,31 @@ int main(void) {
     if (mounted < 0 || !strncmp(which, "refuse", 6) || !strcmp(which, "pre-mount-barrier")
         || !strcmp(which, "mount-error") || !strcmp(which, "mount-state-flush")
         || !strcmp(which, "ro-replay-refuse")) done();
+    if (!strncmp(which, "late-", 5)) {
+        int ro = !strncmp(which, "late-ro-", 8);
+        int unmounting = !strncmp(which, "late-unmount-", 13);
+        int operation = unmounting ? umount("/volume")
+            : mount(NULL, "/volume", "ext3", MS_REMOUNT | (ro ? MS_RDONLY : 0), NULL);
+        result("late-operation", operation);
+        if (strstr(which, "-error")) {
+            /* After a device error the volume stays failed and its device claimed. */
+            result("late-unmount-after", umount("/volume"));
+            result("late-rw-after", mount(NULL, "/volume", "ext3", MS_REMOUNT, NULL));
+            int again = mount("/dev/vda", "/volume", "ext3", 0, NULL);
+            result("late-mount-after", again);
+            if (again == 0) {
+                int fd = open("/volume/late", O_CREAT|O_WRONLY|O_EXCL, 0600);
+                result("late-create-after", fd);
+                if (fd >= 0) {
+                    result("late-fsync-after", fsync(fd));
+                    close(fd);
+                }
+            }
+        } else if (!unmounting) {
+            result("late-cleanup", umount("/volume"));
+        }
+        done();
+    }
     if (!strcmp(which, "ro-remount")) {
         result("remount", mount(NULL, "/volume", "ext3", MS_REMOUNT, NULL));
         done();
