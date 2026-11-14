@@ -408,6 +408,27 @@ installed onto partition 2 at build time, every mode, owner and time from the ar
 mounts it as `/` from `root=` on Limine's command line (`/dev/vda2`, `PARTUUID=`, `UUID=`, `ro`, `rw`, in Linux's
 spellings) with no initramfs. The root is ext3 by default since the journal was added; `--no-journal` makes an ext2 one.
 
+A writable journalled mount, writable remount or journal replay requires a successful device flush barrier before
+its first write. The internal journal must be version 2, belong to this filesystem's UUID and have one user; only
+its revoke feature is supported. Unsupported feature words, external-journal identifiers and a recorded journal
+error are refused by name, without falling back to plain writes.
+
+On a volume mounted or remounted writable, a journal write, barrier, checkpoint or bitmap-snapshot failure aborts that
+journal. Later syncs return `EIO`, further mutation is refused, and a failed unmount keeps ownership of its recovery state.
+Any device error on the journalled volume's disk while it is writable counts, including an unmount's or remount's last
+superblock write or barrier after the journal has closed, even when a retry of that write succeeds: the call returns
+`EIO` and the volume stays mounted and claimed, so it cannot be mounted again in the same boot. A write, hole punch,
+truncate or `O_TRUNC` open in progress when the journal aborts returns `EIO` (a write that had already written earlier
+blocks returns their count), and nothing more is written. Reboot recovery is needed before writes can resume.
+
+A barrier that fails before anything is written is a refusal, not a failed writable volume: a writable mount, or a
+writable remount of a read-only volume, returns `EIO` and writes nothing. A read-only volume stays read-only, refuses
+syncs from then on, and can still be unmounted, since it has nothing unwritten; a later mount must pass its own barrier
+before its first write. Ordered data does not roll back an unsynced overwrite of an
+already allocated file block, and the `ext3` mount label alone is not a descriptor-bound journal-health answer.
+Plain ext2 keeps its existing behavior on a device without flush support, but its mount warns that successful sync
+is not a durability guarantee.
+
 ```sh
 tools/mkdisk --gpt --kernel K.elf --root I.cpio 512M pax-disk.img
 ```

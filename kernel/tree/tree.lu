@@ -1062,18 +1062,33 @@ pub fn truncate(i: u64, size: u64) -> u64 {
 /// lie inside its size read as zero afterwards; the size is kept. A
 /// page with no frame is a hole already; the frames under the range are
 /// kept, zeroed (named: tmpfs gives a whole page back, so `st_blocks`
-/// is not Linux's after a punch).
-pub fn punch(i: u64, off: u64, len: u64) {
+/// is not Linux's after a punch). 0, or kernel/ext2's -EROFS or -EIO for
+/// a volume that failed: then only the frames over the bytes it had
+/// already zeroed are zeroed (the page cache stays what the volume's
+/// buffers hold), and no time moves.
+pub fn punch(i: u64, off: u64, len: u64) -> u64 {
     let size = bytes(i)
     if on_volume(i) && off < size {
         let end = if len < size - off { off + len } else { size }
-        ext2.zero_range(vol(i), vino(i), off, end - off) // px63: the blocks kept, zeroed
+        let (r, done) = ext2.zero_range(vol(i), vino(i), off, end - off) // px63: the blocks kept, zeroed
+        if r != 0 {
+            zero_frames(i, off, off + done)
+            return r
+        }
     }
     if off >= size {
         touch_change(i)
-        return
+        return 0
     }
     let end = if len < size - off { off + len } else { size }
+    zero_frames(i, off, end)
+    touch_change(i)
+    0
+}
+
+/// The bytes of file `i` in [off, end) zeroed in the frames that hold
+/// them (a page with no frame reads from elsewhere).
+fn zero_frames(i: u64, off: u64, end: u64) {
     var p = off
     while p < end {
         let po = p % PAGE
@@ -1084,7 +1099,6 @@ pub fn punch(i: u64, off: u64, len: u64) {
         }
         p += c
     }
-    touch_change(i)
 }
 
 // --- directories -----------------------------------------------------------------
@@ -2114,12 +2128,16 @@ pub fn writeback(i: u64) {
             let end = if sz - pg * PAGE < PAGE { sz - pg * PAGE } else { PAGE }
             var o: u64 = 0
             while o < end {
+                // A volume that failed during this writeback takes no more.
+                if ext2.read_only(vol(i)) != 0 {
+                    return
+                }
                 let (dst, c, blk) = ext2.wspan(vol(i), vino(i), pg * PAGE + o, end - o)
                 if c == 0 {
                     return
                 }
                 bcopy(dst, pa + hh() + o, c)
-                ext2.wrote(vol(i), blk)
+                let _w = ext2.wrote(vol(i), blk) // a plain volume's sync retries it
                 o += c
             }
         }
@@ -2143,6 +2161,11 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
     let k = if n < max - off { n } else { max - off }
     var done: u64 = 0
     while done < k {
+        // A device error in an earlier span fails a journalled volume: write
+        // nothing more (wspan does not ask about blocks already allocated).
+        if ext2.read_only(v) != 0 {
+            break
+        }
         let (dst, c, blk) = ext2.wspan(v, ino, off + done, k - done)
         if c == 0 {
             break
@@ -2156,7 +2179,16 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
         if pa != 0 {
             bcopy(pa + hh() + (off + done) % PAGE, dst, c)
         }
-        ext2.wrote(v, blk)
+        let w = ext2.wrote(v, blk)
+        if w != 0 && ext2.read_only(v) != 0 {
+            // The device refused this block and failed its journalled volume
+            // (a plain volume keeps it dirty for its sync's retry, as before):
+            // the count is what went before it; with nothing before, the error.
+            if done == 0 {
+                return w
+            }
+            break
+        }
         done += c
     }
     if done == 0 {
@@ -2875,6 +2907,7 @@ pub fn unmount(m: u64) -> u64 {
         writeback(r)
         cut(r, 0)
         e = ext2.unmount(v, now_s())
+        if e != 0 { return e } // A failed journal still owns this mount and its buffers.
         unhash(r)
         put_side(r, 0)
         ip(r, I_MODE, 0)

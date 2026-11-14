@@ -108,7 +108,7 @@ const SETF: u64 = 8
 const LISTN: u64 = 1024 // the running list's slots (u64), 2 frames
 const REVN: u64 = 4096 // revocations a transaction (u32), 4 frames
 const RUNMAX: u64 = 64 // the journal inode's runs (3 words each)
-const COPIES: u64 = 512 // groups a copy may be kept for
+const COPIES: u64 = 512 // simultaneous group snapshots, keyed by any group number
 
 const MAGIC: u64 = 0xc03b3998
 const T_DESC: u64 = 1
@@ -140,6 +140,18 @@ pub const R_FEAT: u64 = 5
 pub const R_SMALL: u64 = 6
 /// No frame for the journal's state.
 pub const R_FRAMES: u64 = 7
+/// Unsupported compatible journal feature bits.
+pub const R_COMPAT: u64 = 8
+/// Unsupported read-only-compatible journal feature bits.
+pub const R_ROCOMPAT: u64 = 9
+/// The internal journal belongs to another filesystem UUID.
+pub const R_UUID: u64 = 10
+/// A persistent journal error requires offline recovery.
+pub const R_ABORTED: u64 = 11
+/// A journal version without the supported identity fields.
+pub const R_VERSION: u64 = 12
+/// The internal journal is not private to one filesystem.
+pub const R_USERS: u64 = 13
 
 // A record's words.
 const J_USED: u64 = 0
@@ -163,14 +175,17 @@ const J_START: u64 = 17 // s_start as found at the mount
 const J_FOUNDSEQ: u64 = 18 // s_sequence as found
 const J_UUID: u64 = 19 // 2 words: s_uuid's 16 bytes
 const J_BAD: u64 = 21 // the refused feature bits
+const J_ABORT: u64 = 22 // sticky failure until a fresh mount resets this record
+const J_DEVICE_ERRS: u64 = 23 // physical device's error count when the journal was loaded
 const J_FR_SB: u64 = 24 // frames (physical): the superblock's copy
 const J_FR_SCR: u64 = 25 // the descriptor, revocation and commit blocks made here
 const J_FR_ESC: u64 = 26 // an escaped block's copy; the replay's reads
 const J_FR_RUNS: u64 = 27
-const J_FR_COPIES: u64 = 28 // per group: a copy's frame | 1 while valid in the running transaction
+const J_FR_COPIES: u64 = 28 // snapshot frames, retained across transactions and mounts
 const J_FR_LIST: u64 = 29 // 2 frames
 const J_FR_REV: u64 = 31 // 4 frames
 const J_FR_SET: u64 = 35 // 8 frames
+const J_FR_CGROUPS: u64 = 43 // snapshot hash keys: group + 1, or 0 when empty
 // The books.
 const J_COMMITS: u64 = 48
 const J_LOGGED: u64 = 49 // blocks logged
@@ -322,7 +337,7 @@ fn frame_at(v: u64, w: u64) -> u64 {
 
 fn frames_ready(v: u64) -> bool {
     var ok = frame_at(v, J_FR_SB) != 0 && frame_at(v, J_FR_SCR) != 0 && frame_at(v, J_FR_ESC) != 0
-    ok = ok && frame_at(v, J_FR_RUNS) != 0 && frame_at(v, J_FR_COPIES) != 0
+    ok = ok && frame_at(v, J_FR_RUNS) != 0 && frame_at(v, J_FR_COPIES) != 0 && frame_at(v, J_FR_CGROUPS) != 0
     var k: u64 = 0
     while k < 2 {
         ok = ok && frame_at(v, J_FR_LIST + k) != 0
@@ -351,7 +366,7 @@ pub fn reset(v: u64) {
     }
     var w: u64 = 0
     while w < JW {
-        if w < J_FR_SB || w >= J_FR_SET + SETF {
+        if w < J_FR_SB || (w >= J_FR_SET + SETF && w != J_FR_CGROUPS) {
             put_jw(v, w, 0)
         }
         w += 1
@@ -440,6 +455,7 @@ fn home(v: u64, b: u64, pa: u64) -> u64 {
 }
 
 fn flush(v: u64) -> u64 {
+    if block.flags(jw(v, J_DEV)) & block.F_FLUSH == 0 { return neg(EIO) }
     bump(v, J_FLUSHES, 1)
     block.flush(jw(v, J_DEV))
 }
@@ -483,11 +499,12 @@ fn reserve(bs: u64) -> u64 {
 /// Read the journal's superblock and check it (the volume's device
 /// `dev`, its block size `bs`, the journal inode's blocks `nblocks`,
 /// mapped already by `add_run`): R_OK or why not.
-pub fn load(v: u64, dev: u64, bs: u64, nblocks: u64) -> u64 {
+pub fn load(v: u64, dev: u64, bs: u64, nblocks: u64, uuid0: u64, uuid1: u64) -> u64 {
     if !ready() || v >= JVOLS || !frames_ready(v) {
         return R_FRAMES
     }
     put_jw(v, J_DEV, dev)
+    put_jw(v, J_DEVICE_ERRS, block.books(block.disk_of(dev), 3))
     put_jw(v, J_BS, bs)
     let sb = jw(v, J_FR_SB)
     if blocks_mapped(v) != nblocks || io(v, vblk.T_IN, 0, sb) != 0 {
@@ -506,7 +523,19 @@ pub fn load(v: u64, dev: u64, bs: u64, nblocks: u64) -> u64 {
     if maxlen > nblocks || first == 0 || first >= maxlen {
         return R_LEN
     }
-    let feat = if t == T_SB2 { be32(a + 0x28) } else { 0 }
+    if t != T_SB2 { return R_VERSION }
+    if be32(a + 0x20) != 0 { return R_ABORTED }
+    if be32(a + 0x24) != 0 {
+        put_jw(v, J_BAD, be32(a + 0x24))
+        return R_COMPAT
+    }
+    if be32(a + 0x2c) != 0 {
+        put_jw(v, J_BAD, be32(a + 0x2c))
+        return R_ROCOMPAT
+    }
+    if rd(a + 0x30) != uuid0 || rd(a + 0x38) != uuid1 { return R_UUID }
+    if be32(a + 0x40) != 1 { return R_USERS }
+    let feat = be32(a + 0x28)
     if feat & !INCOMPAT_REVOKE != 0 {
         put_jw(v, J_BAD, feat & !INCOMPAT_REVOKE)
         return R_FEAT
@@ -623,7 +652,7 @@ fn rev_slot(v: u64, i: u64) -> u64 {
 /// Begin writing through the journal (a read-write mount, after any
 /// replay): the log empty, the next transaction s_sequence's at s_first.
 pub fn begin(v: u64) {
-    if v >= JVOLS || jw(v, J_USED) == 0 {
+    if v >= JVOLS || jw(v, J_USED) == 0 || failed(v) {
         return
     }
     put_jw(v, J_HEAD, jw(v, J_FIRST))
@@ -634,13 +663,36 @@ pub fn begin(v: u64) {
     put_jw(v, J_NREV, 0)
     put_jw(v, J_FULL, 0)
     set_clear(v)
-    zero(jw(v, J_FR_COPIES) + hh(), PAGE)
+    unguard(v)
     put_jw(v, J_ACTIVE, 1)
 }
 
 /// Whether volume `v` writes through its journal.
 pub fn active(v: u64) -> bool {
     base() != 0 && v < JVOLS && jw(v, J_ACTIVE) != 0
+}
+
+/// Latch failure without dropping B_JRUN protection or clearing the log.
+fn abort(v: u64) -> u64 {
+    if jw(v, J_ABORT) == 0 {
+        put_jw(v, J_ABORT, 1)
+        log.put("journal: ")
+        block.put_name(jw(v, J_DEV))
+        log.put(": aborted after an I/O or resource failure; writes refused")
+        log.end()
+    }
+    neg(EIO)
+}
+
+/// A cache eviction can fail outside commit. Its device error is sticky too.
+pub fn failed(v: u64) -> bool {
+    if base() == 0 || v >= JVOLS || jw(v, J_USED) == 0 {
+        return false
+    }
+    if jw(v, J_ABORT) == 0 && block.books(block.disk_of(jw(v, J_DEV)), 3) != jw(v, J_DEVICE_ERRS) {
+        let _e = abort(v)
+    }
+    jw(v, J_ABORT) != 0
 }
 
 /// Blocks in the running transaction.
@@ -679,6 +731,8 @@ fn unrevoke(v: u64, b: u64) {
 /// metadata the running transaction holds: 0, or -ENOSPC when the cache
 /// does not hold it (a caller that broke the buffer rule).
 pub fn meta(v: u64, b: u64) -> u64 {
+    // Even an operation already in flight at an abort must pin its changed
+    // metadata, never leave it eligible for an unjournalled home write.
     let r = block.jdirty(jw(v, J_DEV), b, jw(v, J_BS))
     if r != 1 {
         return if r == 0 { 0 } else { r }
@@ -699,6 +753,7 @@ pub fn meta(v: u64, b: u64) -> u64 {
 /// Block `b` is freed by the running transaction: out of it when it was
 /// in it, and revoked when it was logged since the last checkpoint.
 pub fn freed(v: u64, b: u64) {
+    if failed(v) { return }
     if block.jforget(jw(v, J_DEV), b, jw(v, J_BS)) {
         var i: u64 = 0
         while i < jw(v, J_NLIST) {
@@ -721,49 +776,62 @@ pub fn freed(v: u64, b: u64) {
     }
 }
 
-/// Group `g`'s block bitmap, at buffer address `bm` (before the running
-/// transaction's first free in it changes it): kept, so allocation
-/// passes over what this transaction freed until it commits.
-pub fn protect(v: u64, g: u64, bm: u64) {
-    if g >= COPIES {
-        return
+/// Find group `g`'s slot, or the first unused slot; COPIES if full. Keys
+/// belong to this transaction only; snapshot frames survive their reuse.
+fn group_slot(v: u64, g: u64) -> u64 {
+    let keys = jw(v, J_FR_CGROUPS) + hh()
+    var i = hash(g) % COPIES
+    var n: u64 = 0
+    while n < COPIES {
+        let key = rd(keys + i * 8)
+        if key == g + 1 || key == 0 { return i }
+        i = (i + 1) % COPIES
+        n += 1
     }
-    let t = jw(v, J_FR_COPIES) + hh() + g * 8
-    let c = rd(t)
-    if c & 1 != 0 {
-        return
+    COPIES
+}
+
+/// Group `g`'s block bitmap before this transaction's first free. Any
+/// group number fits; bounded table or frame exhaustion aborts before a
+/// block is made free, never silently drops the reuse guard.
+pub fn protect(v: u64, g: u64, bm: u64) -> bool {
+    if failed(v) { return false }
+    let i = group_slot(v, g)
+    if i == COPIES {
+        let _e = abort(v)
+        return false
     }
-    var f = c & !1
+    let key = jw(v, J_FR_CGROUPS) + hh() + i * 8
+    if rd(key) == g + 1 { return true }
+    let slot = jw(v, J_FR_COPIES) + hh() + i * 8
+    var f = rd(slot)
     if f == 0 {
         f = zeroed()
         if f == 0 {
-            return
+            let _e = abort(v)
+            return false
         }
+        wr(slot, f)
     }
     copy_bytes(f + hh(), bm, jw(v, J_BS))
-    wr(t, f | 1)
+    wr(key, g + 1)
+    true
 }
 
-/// The kept bitmap of group `g` (its address, through the HHDM) while the
-/// running transaction has freed blocks there, else 0.
+/// The kept bitmap of group `g` while this transaction has freed blocks
+/// there, else 0. The active journal remains active after an abort so no
+/// caller can mistake it for permission to write without journalling.
 pub fn guard(v: u64, g: u64) -> u64 {
-    if g >= COPIES || !active(v) {
+    if !active(v) { return 0 }
+    let i = group_slot(v, g)
+    if i == COPIES || rd(jw(v, J_FR_CGROUPS) + hh() + i * 8) != g + 1 {
         return 0
     }
-    let c = rd(jw(v, J_FR_COPIES) + hh() + g * 8)
-    if c & 1 == 0 { 0 } else { (c & !1) + hh() }
+    rd(jw(v, J_FR_COPIES) + hh() + i * 8) + hh()
 }
 
 fn unguard(v: u64) {
-    let t = jw(v, J_FR_COPIES) + hh()
-    var g: u64 = 0
-    while g < COPIES {
-        let c = rd(t + g * 8)
-        if c & 1 != 0 {
-            wr(t + g * 8, c & !1)
-        }
-        g += 1
-    }
+    zero(jw(v, J_FR_CGROUPS) + hh(), PAGE)
 }
 
 // --- commit and checkpoint -------------------------------------------------------------
@@ -779,22 +847,25 @@ fn header(a: u64, t: u64, seq: u64) {
 /// each behind a FLUSH; then the checkpoint when it is due. 0 or the
 /// first -EIO.
 pub fn commit(v: u64, now: u64) -> u64 {
+    if failed(v) {
+        return neg(EIO)
+    }
     if !active(v) {
         return 0
     }
     let dev = jw(v, J_DEV)
     let bs = jw(v, J_BS)
-    let w0 = block.counter(block.K_WRITES)
-    var err = block.write_data(dev)
+    let err = block.write_data(dev)
+    if err != 0 { return abort(v) }
     if jw(v, J_RUN) == 0 && jw(v, J_NREV) == 0 {
+        // Data may have reached the device through eviction before this call.
+        // A sync still needs its barrier even when write_data wrote nothing.
+        let f = flush(v)
+        if f != 0 { return abort(v) }
         put_jw(v, J_NLIST, 0)
         unguard(v)
         bump(v, J_EMPTY, 1)
-        if block.counter(block.K_WRITES) == w0 {
-            return err // nothing written: nothing to FLUSH
-        }
-        let f = flush(v)
-        return if err != 0 { err } else { f }
+        return 0
     }
     bump(v, J_DATA, 1)
     let seq = jw(v, J_SEQ)
@@ -802,7 +873,7 @@ pub fn commit(v: u64, now: u64) -> u64 {
         put_jw(v, J_FEAT, jw(v, J_FEAT) | INCOMPAT_REVOKE)
         if jw(v, J_TAIL) != 0 {
             let e = write_sb(v, jw(v, J_TAILSEQ), jw(v, J_TAIL))
-            if err == 0 { err = e }
+            if e != 0 { return abort(v) }
         }
     }
     if jw(v, J_TAIL) == 0 {
@@ -810,7 +881,7 @@ pub fn commit(v: u64, now: u64) -> u64 {
         put_jw(v, J_TAIL, jw(v, J_HEAD))
         put_jw(v, J_TAILSEQ, seq)
         let e = write_sb(v, seq, jw(v, J_HEAD))
-        if err == 0 { err = e }
+        if e != 0 { return abort(v) }
     }
     compact(v)
     var pos = jw(v, J_HEAD)
@@ -849,7 +920,7 @@ pub fn commit(v: u64, now: u64) -> u64 {
             t += 1
         }
         let e0 = io(v, vblk.T_OUT, pos, scr)
-        if err == 0 { err = e0 }
+        if e0 != 0 { return abort(v) }
         bump(v, J_DESCS, 1)
         pos = next(v, pos)
         t = 0
@@ -867,7 +938,7 @@ pub fn commit(v: u64, now: u64) -> u64 {
             } else {
                 e = io(v, vblk.T_OUT, pos, pa)
             }
-            if err == 0 { err = e }
+            if e != 0 { return abort(v) }
             pos = next(v, pos)
             t += 1
         }
@@ -889,12 +960,12 @@ pub fn commit(v: u64, now: u64) -> u64 {
             t += 1
         }
         let e = io(v, vblk.T_OUT, pos, scr)
-        if err == 0 { err = e }
+        if e != 0 { return abort(v) }
         pos = next(v, pos)
         i += k
     }
     let f1 = flush(v) // the data, the log and the superblock on the medium before the commit
-    if err == 0 { err = f1 }
+    if f1 != 0 { return abort(v) }
     let c = scr + hh()
     zero(c, bs)
     header(c, T_COMMIT, seq)
@@ -902,10 +973,10 @@ pub fn commit(v: u64, now: u64) -> u64 {
     put_be32(c + 0x34, now / 1000000000)
     put_be32(c + 0x38, now % 1000000000)
     let e1 = io(v, vblk.T_OUT, pos, scr)
-    if err == 0 { err = e1 }
+    if e1 != 0 { return abort(v) }
     pos = next(v, pos)
     let f2 = flush(v)
-    if err == 0 { err = f2 }
+    if f2 != 0 { return abort(v) }
     // Committed: the blocks await their checkpoint; the set learns them.
     i = 0
     while i < n {
@@ -930,7 +1001,7 @@ pub fn commit(v: u64, now: u64) -> u64 {
     unguard(v)
     if jw(v, J_FULL) != 0 || used(v) + reserve(bs) > span(v) || jw(v, J_NSET) > LIVE {
         let e = checkpoint(v)
-        if err == 0 { err = e }
+        if e != 0 { return abort(v) }
     }
     err
 }
@@ -939,19 +1010,21 @@ pub fn commit(v: u64, now: u64) -> u64 {
 /// superblock's s_start 0), FLUSHed. Only between transactions (none
 /// running). 0 or the first -EIO.
 fn checkpoint(v: u64) -> u64 {
-    var err = block.checkpoint(jw(v, J_DEV))
+    if failed(v) { return neg(EIO) }
+    let err = block.checkpoint(jw(v, J_DEV))
+    if err != 0 { return abort(v) }
     let f = flush(v)
-    if err == 0 { err = f }
+    if f != 0 { return abort(v) }
+    let e = write_sb(v, jw(v, J_SEQ), 0)
+    if e != 0 { return abort(v) }
+    let f2 = flush(v)
+    if f2 != 0 { return abort(v) }
     put_jw(v, J_TAIL, 0)
     put_jw(v, J_TAILSEQ, jw(v, J_SEQ))
-    let e = write_sb(v, jw(v, J_SEQ), 0)
-    if err == 0 { err = e }
-    let f2 = flush(v)
-    if err == 0 { err = f2 }
     set_clear(v)
     put_jw(v, J_FULL, 0)
     bump(v, J_CKPTS, 1)
-    err
+    0
 }
 
 /// A call's start (kernel/tree's `tick`): commit when the running
@@ -969,11 +1042,12 @@ pub fn close(v: u64, now: u64) -> u64 {
     if !active(v) {
         return 0
     }
-    var err = commit(v, now)
+    let err = commit(v, now)
+    if err != 0 { return err }
     let e = checkpoint(v)
-    if err == 0 { err = e }
+    if e != 0 { return e }
     put_jw(v, J_ACTIVE, 0)
-    err
+    0
 }
 
 // --- the replay --------------------------------------------------------------------------
@@ -1135,6 +1209,10 @@ pub fn replay(v: u64, vblocks: u64) -> u64 {
     if v >= JVOLS || jw(v, J_USED) == 0 || jw(v, J_START) == 0 {
         return 0
     }
+    if flush(v) != 0 {
+        put_jw(v, J_RP_ERR, RP_IO)
+        return abort(v)
+    }
     set_clear(v)
     let first = jw(v, J_FOUNDSEQ)
     let end = walk(v, W_SCAN, 0, vblocks)
@@ -1151,16 +1229,19 @@ pub fn replay(v: u64, vblocks: u64) -> u64 {
     if jw(v, J_RP_ERR) != 0 {
         return neg(EIO)
     }
-    var err = flush(v)
-    // As e2fsck leaves a log it replayed (measured): s_start 0, s_sequence
-    // one past the end's.
-    put_jw(v, J_SEQ, end + 1)
+    let err = flush(v)
+    if err != 0 {
+        put_jw(v, J_RP_ERR, RP_IO)
+        return abort(v)
+    }
+    // Empty the log only after every replayed home block is durable.
     let e = write_sb(v, end + 1, 0)
-    if err == 0 { err = e }
+    if e != 0 { return abort(v) }
     let f = flush(v)
-    if err == 0 { err = f }
+    if f != 0 { return abort(v) }
+    put_jw(v, J_SEQ, end + 1)
     put_jw(v, J_START, 0)
-    err
+    0
 }
 
 /// The replay's books: 0 transactions, 1 blocks written home, 2 tags

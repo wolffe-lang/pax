@@ -4384,7 +4384,13 @@ pub fn openat(a: u64, pml4: u64, dirfd: u64, va: u64, flags: u64, mode: u64) -> 
     }
     if fd < 0x8000000000000000 && k == K_FILE && !made && flags & O_TRUNC != 0 && ty(n) == T_INO {
         if tree.bytes(rf(n)) != 0 {
-            let _t = resize(rf(n), 0)
+            let t = resize(rf(n), 0)
+            if t != 0 {
+                // The truncate failed (a read-only volume was refused above,
+                // so its journal failed under it): its error, no descriptor.
+                let _c = close(a, fd)
+                return t
+            }
         }
         wrote(a, rf(n)) // px44: O_TRUNC takes the set-ID bits, as a write does
     }
@@ -5186,8 +5192,17 @@ pub fn fallocate(a: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64 {
     if len > 0x7fffffffffffffff - off {
         return neg(EFBIG)
     }
+    if tree.read_only(i) {
+        // Only a failed journal makes a file open for writing read-only:
+        // every mode is refused, a punch past the end or of an empty file
+        // included, as further mutation is.
+        return neg(EROFS)
+    }
     if m == FALLOC_KEEP | FALLOC_PUNCH {
-        tree.punch(i, off, len)
+        let r = tree.punch(i, off, len)
+        if r != 0 {
+            return r // a volume that failed under the punch
+        }
     } else if m == 0 && off + len > tree.bytes(i) {
         let r = tree.truncate(i, off + len)
         if r != 0 {
