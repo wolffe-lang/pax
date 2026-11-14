@@ -173,7 +173,7 @@ first program it prints how long its boot took and how much of that the console 
 | Program | What it is | Pin |
 |---|---|---|
 | wolf | the build compiler (`kernel/wolf.pin`) | 0.2.35 |
-| wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.39, `3fc86f7` |
+| wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.40, `b333b9d` |
 | lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.61, `a10cbe57` |
 | wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `77cf3210` |
 | pelt | the POSIX shell, PID 1 at the console | `b80d6570` |
@@ -188,6 +188,7 @@ first program it prints how long its boot took and how much of that the console 
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
 | ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `8594073c` |
+| warren | the terminal multiplexer in wolf, `/usr/bin/warren` of the dev image: `warren` attaches to the default session, starting it; behind Ctrl-Space, `\|` and `-` split, `h j k l` move the focus, `d` detaches; `warren attach -t NAME` comes back | `user/warren.pin`, `7376a939` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
 
 Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
@@ -721,13 +722,14 @@ The dev variant adds to the base image, which it leaves unchanged:
 
 | Addition | Where | Notes |
 |---|---|---|
-| a musl-static `wolf` | `/usr/bin/wolf` | the v0.2.39 tag built unpatched, so it says the release's own line (static musl programs read their arguments since v0.2.36, wolf-lang#962) |
-| the compiler's paired standard library | `/usr/share/wolf/compiler-std` | the tag's own, `2411d868`; lupin's stays at `/usr/share/wolf/std`; the shell selects it through `WOLF_STD` |
+| a musl-static `wolf` | `/usr/bin/wolf` | the v0.2.40 tag built unpatched, so it says the release's own line (static musl programs read their arguments since v0.2.36, wolf-lang#962) |
+| the compiler's paired standard library | `/usr/share/wolf/compiler-std` | the tag's own, `be1d10fa`; lupin's stays at `/usr/share/wolf/std`; the shell selects it through `WOLF_STD` |
 | a static `ld.lld` 18.1.8 and a link-only `cc` | `/usr/bin` | built from LLVM's release tarball with zlib and zstd (`notes/px80/build-lld.sh`); not a C or assembly compiler |
 | musl's binary CRT and libc inputs | | recorded in `user/wolf-link.sums` |
 | scent as `grep`, with its fixture | `/usr/share/scent` | `cd /usr/share/scent; grep -n -C1 cat words.txt` |
 | clef, the assembler in wolf (opt-in, `tools/mkdev --clef DIR`) | `/usr/bin/clef` | `clef --64 -o x.o x.S`, `clef --expand x.S` |
 | ligature, the linker in wolf (an opt-in beside lld) | `/usr/bin/ligature` | `export WOLF_LD=/usr/bin/ligature`, then `wolf build` as below |
+| warren, the terminal multiplexer in wolf | `/usr/bin/warren` | built static by `tools/mkwarren` with the wolf and std its own tree pins |
 
 At the dev console, write a program in your home directory and use:
 
