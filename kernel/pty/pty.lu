@@ -301,6 +301,16 @@ pub fn master_read(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64
 /// discipline, their keys' signals raised), -EAGAIN or WAIT when IQ is
 /// full.
 pub fn master_write(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64 {
+    master_in(n, pml4, buf, len, nonblock, false)
+}
+
+/// px141: `master_write` of `len` bytes of kernel memory at `src`
+/// (kernel/files' `sendfile` and `splice`), by the same rules.
+pub fn master_put(n: u64, src: u64, len: u64, nonblock: bool) -> u64 {
+    master_in(n, 0, src, len, nonblock, true)
+}
+
+fn master_in(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool, kernel: bool) -> u64 {
     let t = tty(n)
     if len == 0 {
         return 0
@@ -308,7 +318,7 @@ pub fn master_write(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u6
     if console.iq_room(t) == 0 {
         return if nonblock { NEG_EAGAIN } else { WAIT }
     }
-    let r = console.master_write(t, pml4, buf, len)
+    let r = if kernel { console.master_put_kernel(t, buf, len) } else { console.master_write(t, pml4, buf, len) }
     console.pty_signals(t)
     sched.wake_pipes()
     r
@@ -318,6 +328,18 @@ pub fn master_write(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u6
 /// when hung up, the bytes OQ takes, -EAGAIN or WAIT when none fit or
 /// IXON holds the output.
 pub fn slave_write(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64 {
+    slave_in(n, pml4, buf, len, nonblock, false)
+}
+
+/// px141: `slave_write` of `len` bytes of kernel memory at `src`
+/// (kernel/files' `sendfile` and `splice`), by the same rules; the
+/// caller has asked the background rule, and answers a slave hung up
+/// itself (those calls' -EINVAL, measured).
+pub fn slave_put(n: u64, src: u64, len: u64, nonblock: bool) -> u64 {
+    slave_in(n, 0, src, len, nonblock, true)
+}
+
+fn slave_in(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool, kernel: bool) -> u64 {
     let t = tty(n)
     if console.hung(t) {
         return NEG_EIO
@@ -325,7 +347,7 @@ pub fn slave_write(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64
     if len == 0 {
         return 0
     }
-    let r = console.slave_write(t, pml4, buf, len)
+    let r = if kernel { console.slave_put_kernel(t, buf, len) } else { console.slave_write(t, pml4, buf, len) }
     if r == 0 {
         return if nonblock { NEG_EAGAIN } else { WAIT }
     }
