@@ -192,7 +192,7 @@ class Rows:
                 durable = bool(preceding) and any(e[0] == "flush" and e[3] == 0 for e in before[preceding[-1] + 1:])
                 detail += f" earlier-commit-durable={durable}"
                 valid = valid and durable
-            if stage == "pre-mount":
+            if stage in ("pre-mount", "remount-barrier"):
                 valid = valid and any(e[0] == "write" and e[1] == 64 * 1024 * 1024 // 512 and e[3] == 0 for e in before)
                 valid = valid and not any(e[0] == "write" and e[1] < 64 * 1024 * 1024 // 512 for e in before)
             elif stage in ("mount-state", "mount-write"):
@@ -646,6 +646,39 @@ class Rows:
                  and not later,
                  "an O_TRUNC open whose truncate meets a device error answers EIO, no descriptor; nothing is written after")
 
+    def remount_barrier(self):
+        name = "JF-remount-barrier-EIO"
+        disk = self.image(name)
+        length = disk.stat().st_size
+        # Prime the backend outside the filesystem, as the pre-mount row does,
+        # so the remount's qualification flush reaches blkdebug.
+        with disk.open("r+b") as f:
+            f.truncate(length + 4096)
+        cfg = self.out / (name + ".cfg")
+        cfg.write_text('[inject-error]\nevent = "flush_to_disk"\niotype = "flush"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+        text = self.boot(name, disk, "rw-barrier-error", cfg=cfg)
+        fault_ok = self.fault(name, disk, "flush", None, "remount-barrier")
+        events = self.requests(name)
+        failed = [i for i, e in enumerate(events) if e[3] != 0]
+        limit = length // 512
+        fs_writes = [i for i, e in enumerate(events) if e[0] == "write" and e[1] < limit]
+        requalified = [i for i, e in enumerate(events) if e[0] == "flush" and e[3] == 0 and failed and i > failed[0]]
+        check = process(["e2fsck", "-fn", str(disk)], capture_output=True, text=True)
+        (self.out / (name + ".fsck.txt")).write_text(check.stdout + check.stderr)
+        created = value(text, "barrier-create-after")
+        excl = value(text, "barrier-excl-after")
+        fresh = value(text, "barrier-create-new")
+        self.row(name, fault_ok and value(text, "prime-write") == (4096, 0) and value(text, "mount") == (0, 0)
+                 and value(text, "barrier-remount") == (-1, 5) and "flush barrier" in text
+                 and created is not None and created[0] == -1
+                 and value(text, "barrier-unmount") == (0, 0) and excl is not None and excl[0] >= 0
+                 and value(text, "barrier-mount-new") == (0, 0) and fresh is not None and fresh[0] >= 0
+                 and value(text, "barrier-fsync-new") == (0, 0) and value(text, "barrier-unmount-new") == (0, 0)
+                 and bool(fs_writes) and bool(requalified) and fs_writes[0] > requalified[0]
+                 and check.returncode == 0,
+                 "a writable remount's failed qualification barrier writes nothing and leaves the volume read-only "
+                 "and releasable; the next mount writes only after its own barrier; fsck clean")
+
     def plain(self):
         disk = self.out / "plain-no-flush.img"
         with disk.open("wb") as f:
@@ -742,6 +775,7 @@ class Rows:
             self.overwrite()
             self.punch()
             self.otrunc()
+            self.remount_barrier()
             if self.a.guard_kernel:
                 self.exhaustion()
             return 1 if self.failed else 0
@@ -783,6 +817,7 @@ class Rows:
         self.overwrite()
         self.punch()
         self.otrunc()
+        self.remount_barrier()
         if self.a.guard_kernel:
             self.exhaustion()
         if self.a.large:
