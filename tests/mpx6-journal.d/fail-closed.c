@@ -104,6 +104,28 @@ int main(void) {
         if (!strcmp(which, "punch-control")) result("unmount", umount("/volume"));
         done();
     }
+    if (!strncmp(which, "otrunc-", 7)) {
+        int fd = open("/volume/old", O_WRONLY|O_TRUNC);
+        result("otrunc-open", fd);
+        if (fd >= 0) {
+            result("otrunc-fsync", fsync(fd));
+            close(fd);
+        }
+        if (!strcmp(which, "otrunc-control")) {
+            result("unmount", umount("/volume"));
+            done();
+        }
+        int dir = open("/volume", O_RDONLY|O_DIRECTORY);
+        result("otrunc-dir", dir);
+        if (dir >= 0) {
+            result("otrunc-syncfs-after", fsync(dir));
+            close(dir);
+        }
+        int later = open("/volume/later", O_CREAT|O_WRONLY|O_EXCL, 0600);
+        result("otrunc-create-after", later);
+        if (later >= 0) close(later);
+        done();
+    }
     if (!strcmp(which, "ro-remount")) {
         result("remount", mount(NULL, "/volume", "ext3", MS_REMOUNT, NULL));
         done();
