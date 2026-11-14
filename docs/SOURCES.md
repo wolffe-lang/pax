@@ -2428,3 +2428,13 @@ answer the pages leave open is Linux's, run as a black box.
 | the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
 | boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
 | PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
+
+### px131, the second part — the clocks from the clock, device-driven wake-ups at once
+
+| source | version | read, for |
+|---|---|---|
+| Intel SDM vol. 3A §11.5.4 (the APIC timer), §11.8.3-§11.8.4 (a pending interrupt held in the IRR, a second at the same vector lost) | the current edition | why a stretch with interrupts off delivers one tick |
+| IA-PC HPET 1.0a §2.3 and §2.4, ACPI 6.5 §4.8.3.3 (the PM timer) | as named | the counters `kernel/clock` reads and their wraps |
+| clock_gettime(2), nanosleep(2), poll(2) (the Linux man-pages) and POSIX.1-2024's `clock_gettime`, `nanosleep`, `poll` | 6.9; 2024 | a timeout is a minimum and lateness is allowed; what CLOCK_MONOTONIC and CLOCK_REALTIME promise |
+| QEMU's documentation of `-mem-prealloc` | QEMU 8.2 | the guest's memory backed before boot in the guard |
+| PAX's own `kernel/timer`, `kernel/clock`, `kernel/sched`, `kernel/interrupts`, `kernel/netd`, `kernel/user`, `kernel/ready`, `kernel/socket`, `kernel/futex`, `kernel/tcp`, `kernel/arp`, `kernel/dhcp`, `kernel/xhci` | this tree | every tick-counted deadline and every wake-up, read; extended |
