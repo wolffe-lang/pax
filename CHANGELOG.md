@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **`cat FILE` prints on a terminal again: sendfile and splice write to a pty (px141, pax#422).** A
+  pty's master and slave were outputs `write` served and `sendfile` and `splice` did not: their copy
+  loop counted the bytes, moved the input's offset and wrote nothing. boreutils' `cat` copies with
+  `copy_file_range`, then `sendfile`, then `splice`, so `cat FILE`, `cat < FILE` and `cat FILE | cat`
+  printed nothing and exited 0 when the output was a pseudo-terminal, an ssh session's among them
+  (`cat -n` and `head`, which read and write, printed). Both calls now write to either end of a pty by
+  its own write's rules: a slave's NL as CR NL under ONLCR, what its queue takes and a short count once
+  it fills, a full one waiting or -EAGAIN by the descriptor's O_NONBLOCK, the background rule under
+  TOSTOP. Every other output now has a branch of its own in both calls, and the ones they do not write
+  (an eventfd, an epoll descriptor, a file of /proc or /sys, /dev/dsp, /dev/full, a slave whose master
+  has closed) answer -EINVAL with nothing moved, as Linux 7.2.4 answered each; /dev/full's `sendfile`
+  answered -ENOSPC, and the others fell into the same counting loop. `tests/mpx5-pty` boots a third
+  image, `ptyprobe copy`: the calls onto both ends, `cat` in its three shapes onto a slave read back
+  from the master byte for byte (a 150,000-byte file, larger than the pty's buffer, among them) and the
+  refused outputs, held to Linux's transcript as root and as a user; `tests/mpx3-sound`'s dspprobe asks
+  the two calls of /dev/dsp.
+
 - **What the kernel holds too long, measured; three long calls made short (px131).** Every system call
   runs with interrupts off until it returns, so the longest call a program can make is how long the tick,
   the network and every other process wait. `latency` on the kernel's command line turns on an instrument
