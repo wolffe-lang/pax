@@ -1,7 +1,8 @@
 //! member: false
 // Exhaust this QEMU guest's frame allocator after a journal mount, then
 // truncate a preloaded one-block file. The first bitmap snapshot cannot
-// allocate; the journal must abort instead of silently freeing its block.
+// allocate; the journal must abort instead of silently freeing its block,
+// and the truncate itself must answer EIO rather than success.
 use block
 use clock
 use ext2
@@ -55,7 +56,8 @@ export fn kmain() {
         held += 1
     }
     answer("exhausted", frames.free_count() == 0 && held > 0)
-    let _cut = ext2.truncate(v, ino, 0)
+    let cut = ext2.truncate(v, ino, 0)
+    answer("truncate-EIO", cut == 0xfffffffffffffffb)
     // Give sync its scratch capacity back only after the failed snapshot.
     if last != 0 { frames.free(last) }
     answer("read-only", ext2.read_only(v) != 0)

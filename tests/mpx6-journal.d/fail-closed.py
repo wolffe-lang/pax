@@ -452,9 +452,9 @@ class Rows:
              "--qemu", "-device", "--qemu", "virtio-blk-pci,drive=d0", iso])
         text = serial.read_text(errors="replace").replace("\r", "")
         self.row("JF-guard-exhaustion", all("JG " + item + "=1" in text
-                 for item in ("exhausted", "read-only", "sync-EIO"))
+                 for item in ("exhausted", "truncate-EIO", "read-only", "sync-EIO"))
                  and "aborted" in text,
-                 "real frame exhaustion aborts before a block loses its reuse guard")
+                 "real frame exhaustion aborts before a block loses its reuse guard; the truncate answers EIO")
         recovered = self.boot("guard-exhaustion-recover", disk, "reuse-recover")
         check = process(["e2fsck", "-fn", str(disk)], capture_output=True, text=True)
         (work / "after.fsck.txt").write_text(check.stdout + check.stderr)
