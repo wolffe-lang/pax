@@ -2114,12 +2114,16 @@ pub fn writeback(i: u64) {
             let end = if sz - pg * PAGE < PAGE { sz - pg * PAGE } else { PAGE }
             var o: u64 = 0
             while o < end {
+                // A volume that failed during this writeback takes no more.
+                if ext2.read_only(vol(i)) != 0 {
+                    return
+                }
                 let (dst, c, blk) = ext2.wspan(vol(i), vino(i), pg * PAGE + o, end - o)
                 if c == 0 {
                     return
                 }
                 bcopy(dst, pa + hh() + o, c)
-                ext2.wrote(vol(i), blk)
+                let _w = ext2.wrote(vol(i), blk) // a plain volume's sync retries it
                 o += c
             }
         }
@@ -2143,6 +2147,11 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
     let k = if n < max - off { n } else { max - off }
     var done: u64 = 0
     while done < k {
+        // A device error in an earlier span fails a journalled volume: write
+        // nothing more (wspan does not ask about blocks already allocated).
+        if ext2.read_only(v) != 0 {
+            break
+        }
         let (dst, c, blk) = ext2.wspan(v, ino, off + done, k - done)
         if c == 0 {
             break
@@ -2156,7 +2165,16 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
         if pa != 0 {
             bcopy(pa + hh() + (off + done) % PAGE, dst, c)
         }
-        ext2.wrote(v, blk)
+        let w = ext2.wrote(v, blk)
+        if w != 0 && ext2.read_only(v) != 0 {
+            // The device refused this block and failed its journalled volume
+            // (a plain volume keeps it dirty for its sync's retry, as before):
+            // the count is what went before it; with nothing before, the error.
+            if done == 0 {
+                return w
+            }
+            break
+        }
         done += c
     }
     if done == 0 {
