@@ -619,6 +619,10 @@ class Rows:
                  and not later and at(disk, blocks[1] * 4096, 4096) == b"A" * 4096,
                  "a failed first punched block fails fallocate with EIO; nothing, the second block included, "
                  "is written after it, and a later punch fails")
+        opened, at_eof, empty = (value(text, k) for k in ("punch-empty-open", "punch-at-eof", "punch-empty"))
+        self.row("JF-punch-failed-bounds", fault_ok and opened is not None and opened[0] >= 0
+                 and at_eof is not None and at_eof[0] == -1 and empty is not None and empty[0] == -1,
+                 "on the failed volume, a punch at the end of the file and one of an empty file are refused too")
 
     def punch_map(self):
         control = self.image("punchmap-control")
