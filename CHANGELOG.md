@@ -61,6 +61,13 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   threads get their turns: a hog beside the flood keeps 0.89 to 0.94 of its share instead of 0.29 to 0.67. The
   release tier answers 125,000 to 134,000 a second before and after.
 
+- **warren on the dev image (px142).** The terminal multiplexer in wolf at `/usr/bin/warren`, built static by
+  `tools/mkwarren` from warren's own tree with the wolf and std that tree pins, twice from fresh checkouts that
+  must agree, stripped, held to its builder's sums by `tools/distribution-root` and `tests/distribution`; a
+  `--latest` build resolves it as it resolves the other trees.
+- **The dev image's compiler is wolf 0.2.40 (px142).** `user/wolf.pin` at v0.2.40 with its std `be1d10fa`;
+  `user/wolf.sums` are two `tools/mkwolf` builds that agree. A `--latest` build refuses a pin older than wolf's
+  newest release.
 - **`cat FILE` prints on a terminal again: sendfile and splice write to a pty (px141, pax#422).** A
   pty's master and slave were outputs `write` served and `sendfile` and `splice` did not: their copy
   loop counted the bytes, moved the input's offset and wrote nothing. boreutils' `cat` copies with
