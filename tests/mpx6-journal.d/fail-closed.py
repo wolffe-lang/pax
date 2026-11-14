@@ -213,6 +213,12 @@ class Rows:
                 valid = valid and any(e[0] == "flush" and e[3] == 0 for e in before)
             elif stage == "data-overwrite":
                 valid = valid and not descriptors and not commits
+            elif stage == "otrunc-bitmap":
+                # The mount finished (its mounted-state write), and this is the
+                # bitmap's first read: the truncate's, nothing earlier.
+                valid = valid and not descriptors and not commits
+                valid = valid and any(e[0] == "write" and e[1] == 0 and e[3] == 0 for e in before)
+                valid = valid and not any(e[0] == "read" and e[1] == event[1] for e in before)
             elif stage == "precommit":
                 valid = valid and bool(descriptors) and not commits
             elif stage in ("checkpoint", "cache-home"):
@@ -608,6 +614,38 @@ class Rows:
                  "a failed first punched block fails fallocate with EIO; nothing, the second block included, "
                  "is written after it, and a later punch fails")
 
+    def otrunc(self):
+        control = self.image("otrunc-control")
+        bb, _ = geometry(control)
+        text = self.boot("otrunc-control", control, "otrunc-control")
+        events = self.requests("otrunc-control")
+        check = process(["e2fsck", "-fn", str(control)], capture_output=True, text=True)
+        (self.out / "otrunc-control.fsck.txt").write_text(check.stdout + check.stderr)
+        mounted = [i for i, e in enumerate(events) if e[0] == "write" and e[1] == 0]
+        bitmap = [i for i, e in enumerate(events) if e[0] == "read" and e[1] == bb * 8]
+        opened = value(text, "otrunc-open")
+        self.row("JF-otrunc-control", opened is not None and opened[0] >= 0
+                 and value(text, "otrunc-fsync") == (0, 0) and value(text, "unmount") == (0, 0)
+                 and bool(mounted) and bool(bitmap) and bitmap[0] > mounted[0]
+                 and file_blocks(control, b"old") == []
+                 and check.returncode == 0 and all(e[3] == 0 for e in events),
+                 "a healthy O_TRUNC open frees the file's block; the bitmap is first read by that truncate; fsck clean")
+        name = "JF-otrunc-EIO"
+        disk = self.image(name)
+        cfg = self.out / (name + ".cfg")
+        cfg.write_text('[inject-error]\nevent = "read_aio"\niotype = "read"\n'
+                       f'sector = "{bb * 8}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+        text = self.boot(name, disk, "otrunc-error", cfg=cfg)
+        fault_ok = self.fault(name, disk, "read", bb * 8, "otrunc-bitmap")
+        events = self.requests(name)
+        failed = [i for i, e in enumerate(events) if e[3] != 0]
+        later = bool(failed) and any(e[0] == "write" for e in events[failed[0] + 1:])
+        create = value(text, "otrunc-create-after")
+        self.row(name, fault_ok and value(text, "mount") == (0, 0) and value(text, "otrunc-open") == (-1, 5)
+                 and value(text, "otrunc-syncfs-after") == (-1, 5) and create is not None and create[0] == -1
+                 and not later,
+                 "an O_TRUNC open whose truncate meets a device error answers EIO, no descriptor; nothing is written after")
+
     def plain(self):
         disk = self.out / "plain-no-flush.img"
         with disk.open("wb") as f:
@@ -703,6 +741,7 @@ class Rows:
             self.late()
             self.overwrite()
             self.punch()
+            self.otrunc()
             if self.a.guard_kernel:
                 self.exhaustion()
             return 1 if self.failed else 0
@@ -743,6 +782,7 @@ class Rows:
         self.late()
         self.overwrite()
         self.punch()
+        self.otrunc()
         if self.a.guard_kernel:
             self.exhaustion()
         if self.a.large:
