@@ -1370,3 +1370,11 @@ pass measures how long, ranks the paths, and makes three of them short.
 | `process/` | `random_fill`: a buffer of random words, CPUID asked once |
 | `user/` | `getrandom` a page at a time through a kernel frame and `uaccess.copy_out`; getrandom(2) gives at most 16 KiB a call (`GETRANDOM_CHUNK`; /dev/urandom's reads stay whole) |
 | `trace_mem/` | `transfer` copies each piece with `uaccess.copy_in`/`copy_out`, not a byte at a time |
+
+## px141 — sendfile and splice onto a pty (pax#422)
+
+| module | change |
+|---|---|
+| `files/` | `sendfile` and `splice` have a branch for every `write_target` value. A pty's master or slave (10) is written by its own `write`'s rules (`pty_put_kernel`): each span of the file's frames or the pipe's ring goes to `pty.master_put` or `pty.slave_put`, what the other end's queue takes is counted, a short count once it fills, WAIT or -EAGAIN (the pty descriptor's O_NONBLOCK; SPLICE_F_NONBLOCK does not reach a pty, measured) when nothing fits; a slave asks the background rule first (`copy_job`, the console's px49 rule). `copies_to` names what the calls write: /dev/null, the console, a pipe or socket, a file, a block device's node, a pty; an eventfd, an epoll object, a file of /proc or /sys, /dev/dsp, /dev/full and a hung-up slave answer -EINVAL with the input's offset and the pipe's bytes untouched (a count of 0 and the end of the file answer 0 first; `splice` of 0 bytes answers 0), as Linux 7.2.4 answered each. /dev/full's `sendfile` was -ENOSPC and its `splice` a counted copy; the other refused targets, and a pty, fell through to a loop that counted the bytes, moved the input and wrote nothing. `splice` with an output offset onto a pty or a refused target is -EINVAL (Linux's; it was -ESPIPE) |
+| `pty/` | `master_put` and `slave_put`: the master's and the slave's `write` with the bytes in kernel memory, by the same rules (`master_in`, `slave_in`) |
+| `console/` | `master_put_kernel` and `slave_put_kernel`: IQ's and OQ's writes from kernel memory (`master_in`, `slave_out`; `byte_in` reads a byte of either memory) |

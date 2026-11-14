@@ -569,20 +569,44 @@ pub fn feed(t: u64) -> bool {
     moved
 }
 
+/// Byte `va` of what a write hands a pty: user memory of `pml4` (the
+/// caller found it readable), or with `kernel` the kernel's own (px141:
+/// kernel/files' `sendfile` and `splice`, a file's frames or a pipe's
+/// ring through the HHDM).
+fn byte_in(pml4: u64, va: u64, kernel: bool) -> u64 {
+    if kernel {
+        // # Safety: [va, va + 1) lies in the caller's kernel span, which
+        // stays mapped for the call (IF is clear: one CPU, no switch).
+        let b = unsafe { (va as *u8).read_volatile() }
+        return b as u64
+    }
+    uaccess.get(pml4, va, 1)
+}
+
 /// The master's write: up to `n` bytes of user `buf` into IQ, then fed;
 /// the count taken (0 when IQ is full), or -EFAULT.
 pub fn master_write(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
+    master_in(t, pml4, buf, n, false)
+}
+
+/// px141: `master_write` of `n` bytes of kernel memory at `src`
+/// (kernel/files' `sendfile` and `splice`): the count taken.
+pub fn master_put_kernel(t: u64, src: u64, n: u64) -> u64 {
+    master_in(t, 0, src, n, true)
+}
+
+fn master_in(t: u64, pml4: u64, buf: u64, n: u64, kernel: bool) -> u64 {
     var k = iq_room(t)
     if k > n {
         k = n
     }
-    if !uaccess.readable(pml4, buf, k) {
+    if !kernel && !uaccess.readable(pml4, buf, k) {
         return NEG_EFAULT
     }
     let w = sv(t, C_IQ_W)
     var j: u64 = 0
     while j < k {
-        q_put(t, C_IQF, IQ_CAP, w + j, uaccess.get(pml4, buf + j, 1))
+        q_put(t, C_IQF, IQ_CAP, w + j, byte_in(pml4, buf + j, kernel))
         j += 1
     }
     put_sv(t, C_IQ_W, w + k)
@@ -594,16 +618,26 @@ pub fn master_write(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
 /// while they fit whole; the count of `buf`'s bytes taken (0: none
 /// fit, or IXON has stopped the output), or -EFAULT.
 pub fn slave_write(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
+    slave_out(t, pml4, buf, n, false)
+}
+
+/// px141: `slave_write` of `n` bytes of kernel memory at `src`
+/// (kernel/files' `sendfile` and `splice`): the count taken.
+pub fn slave_put_kernel(t: u64, src: u64, n: u64) -> u64 {
+    slave_out(t, 0, src, n, true)
+}
+
+fn slave_out(t: u64, pml4: u64, buf: u64, n: u64, kernel: bool) -> u64 {
     if sv(t, C_STOP) != 0 {
         return 0
     }
-    if !uaccess.readable(pml4, buf, n) {
+    if !kernel && !uaccess.readable(pml4, buf, n) {
         return NEG_EFAULT
     }
     let nl = onlcr(t)
     var j: u64 = 0
     while j < n {
-        let b = uaccess.get(pml4, buf + j, 1)
+        let b = byte_in(pml4, buf + j, kernel)
         let need: u64 = if b == 10 && nl { 2 } else { 1 }
         if oq_room(t) < need {
             return j

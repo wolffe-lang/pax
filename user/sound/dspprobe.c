@@ -11,9 +11,11 @@
  * Exit 0 when it ran to its end, 1 when /dev/dsp cannot be opened.
  *
  * Written from the uapi `linux/soundcard.h` (through glibc's
- * <sys/soundcard.h>), open(2), ioctl(2), poll(2) and the OSS
- * programmer's guide; no kernel's or library's source.
+ * <sys/soundcard.h>), open(2), ioctl(2), poll(2), sendfile(2),
+ * splice(2) and the OSS programmer's guide; no kernel's or library's
+ * source.
  */
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -21,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/sendfile.h>
 #include <sys/soundcard.h>
 #include <unistd.h>
 
@@ -182,6 +185,31 @@ int main(int argc, char **argv)
     say("read on a playback open: %s\n", r < 0 ? ename(errno) : "data");
     off_t o = lseek(fd, 0, SEEK_SET);
     say("lseek: %s\n", o < 0 ? ename(errno) : "ok");
+
+    /* px141: the kernel's copy calls onto the device, from this program's
+     * own file and from a pipe: the answer, and what each source holds
+     * after (the file's offset, the pipe's bytes read back) */
+    int src = open("/bin/dspprobe", O_RDONLY);
+    errno = 0;
+    ssize_t sf = sendfile(fd, src, NULL, 4096);
+    int sfe = errno;
+    say("sendfile a file onto it: %s, the file at %ld\n", sf < 0 ? ename(sfe) : (sf == 4096 ? "4096" : "short"),
+        (long)lseek(src, 0, SEEK_CUR));
+    close(src);
+    int q[2];
+    if (pipe(q) == 0) {
+        (void)!write(q[1], sil, 64);
+        errno = 0;
+        ssize_t sp = splice(q[0], NULL, fd, NULL, 64, 0);
+        int spe = errno;
+        char left[64];
+        fcntl(q[0], F_SETFL, O_NONBLOCK);
+        ssize_t k = read(q[0], left, sizeof left);
+        say("splice a pipe onto it: %s, the pipe holds %ld\n", sp < 0 ? ename(spe) : (sp == 64 ? "64" : "short"),
+            k < 0 ? 0L : (long)k);
+        close(q[0]);
+        close(q[1]);
+    }
     say("close: %s\n", close(fd) < 0 ? ename(errno) : "ok");
     say("end\n");
     return 0;

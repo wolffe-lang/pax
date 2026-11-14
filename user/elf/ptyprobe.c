@@ -14,6 +14,11 @@
  *   ptyprobe          every section: O T C W H P M
  *   ptyprobe drive    the session row: pelt (/bin/sh -i) on a pty this
  *                     program drives from the master side (S)
+ *   ptyprobe copy     px141: sendfile and splice onto either end of a
+ *                     pty, and /bin/cat (boreutils', which copies with
+ *                     them) onto a slave, its output read back from the
+ *                     master byte for byte; the outputs the two calls
+ *                     refuse (K)
  *
  * The program as started ignores SIGHUP, gives up whatever terminal it
  * was started with (TIOCNOTTY; PAX's first programs have the console,
@@ -32,8 +37,9 @@
  * ttyname(3), credentials(7), proc_pid_stat(5), proc_sys_kernel(5)
  * (man-pages 6.7) and POSIX.1-2024's General Terminal Interface (XBD
  * chapter 11), XSH posix_openpt, grantpt, unlockpt, ptsname, tcsetpgrp,
- * tcgetsid; the shapes of px48's user/elf/jobs.c. No C library's,
- * kernel's or shell's source was read. Written for this lane. */
+ * tcgetsid; the shapes of px48's user/elf/jobs.c; px141's K rows from
+ * sendfile(2), splice(2), eventfd(2) and epoll_create(2). No C
+ * library's, kernel's or shell's source was read. Written for this lane. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -45,7 +51,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <stdint.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
+#include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
@@ -1905,6 +1915,331 @@ static void sec_many(void) {
     say("M7 a pair shared with a child that ended, then closed: /dev/pts holds %d names, pty/nr %s\n", pts_count(), pty_nr());
 }
 
+/* --- K: the kernel's copy calls onto a pty, and the outputs they refuse (px141) -- */
+
+#define K_SMALL "K: a line\none\twith a tab\n\x01\x1b[1m\x7f\xfe\xff and no newline at its end"
+#define K_BIG 150000
+
+static unsigned char k_big[K_BIG];
+static unsigned char k_out[2 * K_BIG + 4096];
+static unsigned char k_want[2 * K_BIG];
+
+/* The big file's bytes: lines of 0 to 100 bytes, most ended by NL, some
+ * by a tab, some holding control bytes and bytes past 0x7f, cut at
+ * K_BIG wherever that falls. */
+static void k_fill(void) {
+    long i = 0;
+    for (long line = 0; i < K_BIG; line++) {
+        int len = (int)((line * 37) % 101);
+        for (int j = 0; j < len && i < K_BIG; j++) {
+            int c = ' ' + (int)((line + j) % 95);
+            if (line % 17 == 3 && j % 5 == 1) c = (int)((line + j) % 32 == 10 ? 11 : (line + j) % 32);
+            if (line % 19 == 7 && j % 7 == 2) c = 0x80 + (int)((line * 3 + j) % 128);
+            k_big[i++] = (unsigned char)c;
+        }
+        if (i < K_BIG) k_big[i++] = line % 13 == 5 ? '\t' : '\n';
+    }
+}
+
+/* What a slave with OPOST|ONLCR (a pty's settings) hands the master for
+ * `n` bytes: each NL as CR NL. The count. */
+static long k_onlcr(const unsigned char *in, long n, unsigned char *out) {
+    long k = 0;
+    for (long i = 0; i < n; i++) {
+        if (in[i] == '\n') out[k++] = '\r';
+        out[k++] = in[i];
+    }
+    return k;
+}
+
+static int k_file(const char *path, const void *b, long n) {
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+    (void)!write(fd, b, (size_t)n);
+    lseek(fd, 0, SEEK_SET);
+    return fd;
+}
+
+/* What the master gives until every slave descriptor is closed and its
+ * output read (-EIO), or nothing comes for `quiet` ms: the count. */
+static long k_collect(int m, unsigned char *buf, long cap, int quiet) {
+    long n = 0;
+    while (n < cap) {
+        struct pollfd p = {m, POLLIN, 0};
+        if (poll(&p, 1, quiet) <= 0) break;
+        long want = cap - n > 65536 ? 65536 : cap - n;
+        ssize_t k = read(m, buf + n, (size_t)want);
+        if (k <= 0) break;
+        n += k;
+    }
+    return n;
+}
+
+/* `sendfile(out, in, NULL, n)` from offset 0: its answer and where the
+ * file's offset then stands. */
+static const char *k_sf(int out, int in, size_t n) {
+    static char b[96];
+    lseek(in, 0, SEEK_SET);
+    errno = 0;
+    long r = (long)sendfile(out, in, NULL, n);
+    int e = errno;
+    snprintf(b, sizeof b, "sendfile %s, the file at %ld", rv(r, e), (long)lseek(in, 0, SEEK_CUR));
+    return b;
+}
+
+/* `splice` of a pipe holding `bytes` onto `out` (len `len`, `off` the
+ * output's offset pointer): its answer and how many bytes the pipe
+ * still holds (read back, O_NONBLOCK). */
+static const char *k_sp(int out, const char *bytes, size_t len, loff_t *off) {
+    static char b[96];
+    int p[2];
+    if (pipe(p) < 0) return ename(errno);
+    (void)!write(p[1], bytes, strlen(bytes));
+    errno = 0;
+    long r = (long)splice(p[0], NULL, out, off, len, 0);
+    int e = errno;
+    char left[64];
+    fcntl(p[0], F_SETFL, O_NONBLOCK);
+    ssize_t k = read(p[0], left, sizeof left);
+    snprintf(b, sizeof b, "splice %s, the pipe holds %ld", rv(r, e), k < 0 ? 0L : (long)k);
+    close(p[0]);
+    close(p[1]);
+    return b;
+}
+
+/* The answers with nothing to send: sendfile of 0 bytes, splice of 0
+ * bytes from a pipe that holds some, and from an empty pipe with no
+ * writer. */
+static const char *k_none(int out, int in) {
+    static char b[256];
+    lseek(in, 0, SEEK_SET);
+    errno = 0;
+    long r1 = (long)sendfile(out, in, NULL, 0);
+    int e1 = errno;
+    int p[2];
+    (void)!pipe(p);
+    (void)!write(p[1], "zz", 2);
+    errno = 0;
+    long r2 = (long)splice(p[0], NULL, out, NULL, 0, 0);
+    int e2 = errno;
+    close(p[1]);
+    (void)!read(p[0], b, 2);
+    errno = 0;
+    long r3 = (long)splice(p[0], NULL, out, NULL, 64, 0);
+    int e3 = errno;
+    close(p[0]);
+    char s1[32];
+    snprintf(s1, sizeof s1, "%s", rv(r1, e1));
+    char s2[32];
+    snprintf(s2, sizeof s2, "%s", rv(r2, e2));
+    snprintf(b, sizeof b, "sendfile of 0 %s; splice of 0 %s; splice from an empty pipe with no writer %s", s1, s2, rv(r3, e3));
+    return b;
+}
+
+/* A child running /bin/cat (`args`, NULL-ended) with `in` as its standard
+ * input when not -1 and `out` as its standard output; every other
+ * descriptor this program holds is closed in it. */
+static pid_t k_cat(char *const args[], int in, int out) {
+    fflush(stdout);
+    pid_t c = fork();
+    if (c == 0) {
+        if (in >= 0) dup2(in, 0);
+        dup2(out, 1);
+        for (int fd = 3; fd < 64; fd++) close(fd);
+        execv("/bin/cat", args);
+        _exit(127);
+    }
+    return c;
+}
+
+/* One row of cat onto a fresh pair's slave: `mode` 0 `cat F`, 1 `cat <
+ * F`, 2 `cat F | cat`; the master reads every byte, held to the file's
+ * with NL as CR NL. */
+static void k_cat_row(const char *id, const char *what, const char *path, const unsigned char *bytes, long n, int mode) {
+    int m, s;
+    if (pair(&m, &s)) { say("%s %s: no pair: %s\n", id, what, ename(errno)); return; }
+    char *one[] = {"cat", (char *)path, NULL};
+    char *none[] = {"cat", NULL};
+    pid_t a = -1, b = -1;
+    if (mode == 0) {
+        a = k_cat(one, -1, s);
+    } else if (mode == 1) {
+        int f = open(path, O_RDONLY);
+        a = k_cat(none, f, s);
+        close(f);
+    } else {
+        int p[2];
+        (void)!pipe(p);
+        a = k_cat(one, -1, p[1]);
+        b = k_cat(none, p[0], s);
+        close(p[0]);
+        close(p[1]);
+    }
+    close(s);
+    long got_n = k_collect(m, k_out, (long)sizeof k_out, 5000);
+    int st = 0;
+    pid_t w = waitpid(a, &st, 0);
+    char ends[96];
+    snprintf(ends, sizeof ends, "%s", how(w, st));
+    if (b > 0) {
+        int st2 = 0;
+        pid_t w2 = waitpid(b, &st2, 0);
+        size_t l = strlen(ends);
+        snprintf(ends + l, sizeof ends - l, ", then %s", how(w2, st2));
+    }
+    long want_n = k_onlcr(bytes, n, k_want);
+    int same = got_n == want_n && memcmp(k_out, k_want, (size_t)want_n) == 0;
+    say("%s %s (%ld bytes): cat %s; the master read %ld bytes, the file's with NL as CR NL: %s\n", id, what, n, ends, got_n,
+        yesno(same));
+    close(m);
+}
+
+static void sec_copy(void) {
+    k_fill();
+    int small = k_file("/tmp/k.small", K_SMALL, (long)strlen(K_SMALL));
+    int big = k_file("/tmp/k.big", k_big, K_BIG);
+    say("K0 the files: %s %ld bytes, %s %d bytes\n", small < 0 ? ename(errno) : "small", (long)strlen(K_SMALL),
+        big < 0 ? ename(errno) : "big", K_BIG);
+    int m, s;
+    if (pair(&m, &s)) { say("K: no pair: %s\n", ename(errno)); return; }
+    /* Onto the slave: through its output processing to the master. */
+    say("K1 onto the slave: %s\n", k_sf(s, small, 4096));
+    got("K2 the master reads", m, 1000);
+    {
+        loff_t o = 5;
+        lseek(small, 0, SEEK_SET);
+        errno = 0;
+        long r = (long)sendfile(s, small, &o, 10);
+        int e = errno;
+        say("K3 onto the slave from offset 5, 10 bytes: sendfile %s, the offset %ld, the file at %ld\n", rv(r, e), (long)o,
+            (long)lseek(small, 0, SEEK_CUR));
+    }
+    got("K4 the master reads", m, 1000);
+    say("K5 a pipe onto the slave: %s\n", k_sp(s, "piped\nbytes\n", 64, NULL));
+    got("K6 the master reads", m, 1000);
+    {
+        loff_t o = 0;
+        say("K7 a pipe onto the slave at an offset: %s\n", k_sp(s, "at\n", 3, &o));
+    }
+    say("K8 onto the slave, nothing to send: %s\n", k_none(s, small));
+    got("K9 the master reads", m, 300);
+    /* Onto the master: typed at the slave, echoed back. */
+    {
+        int line = k_file("/tmp/k.line", "typed\n", 6);
+        say("K10 onto the master: %s\n", k_sf(m, line, 64));
+        got("K11 the slave reads", s, 1000);
+        got("K12 the master reads the echo", m, 1000);
+        say("K13 a pipe onto the master: %s\n", k_sp(m, "spliced\n", 64, NULL));
+        got("K14 the slave reads", s, 1000);
+        got("K15 the master reads the echo", m, 1000);
+        close(line);
+    }
+    /* A full slave and a full master, O_NONBLOCK: nothing moves. */
+    {
+        int e;
+        fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+        (void)fill(s, 4096, &e);
+        say("K16 onto a full slave, O_NONBLOCK: %s; %s\n", k_sf(s, small, 64), k_sp(s, "full\n", 64, NULL));
+        (void)drain_all(m);
+        fcntl(s, F_SETFL, fcntl(s, F_GETFL) & ~O_NONBLOCK);
+        raw(s);
+        fcntl(m, F_SETFL, fcntl(m, F_GETFL) | O_NONBLOCK);
+        /* a byte at a time: Linux's master then holds what PAX's does
+         * (P10b), where a larger write leaves room a smaller one takes */
+        (void)fill(m, 1, &e);
+        say("K17 onto a full master, O_NONBLOCK: %s; %s\n", k_sf(m, small, 64), k_sp(m, "full\n", 64, NULL));
+        (void)drain_all(s);
+        fcntl(m, F_SETFL, fcntl(m, F_GETFL) & ~O_NONBLOCK);
+    }
+    close(s);
+    close(m);
+    /* A slave hung up: the master's last close. */
+    if (pair(&m, &s) == 0) {
+        close(m);
+        say("K18 onto a slave hung up: %s; %s\n", k_sf(s, small, 64), k_sp(s, "hup\n", 64, NULL));
+        say("K19 onto it, nothing to send: %s\n", k_none(s, small));
+        ANS("K20 its write", write(s, "x", 1));
+        close(s);
+    }
+    /* cat, boreutils' (copy_file_range, then sendfile, then splice). */
+    k_cat_row("K21", "cat F", "/tmp/k.small", (const unsigned char *)K_SMALL, (long)strlen(K_SMALL), 0);
+    k_cat_row("K22", "cat F", "/tmp/k.big", k_big, K_BIG, 0);
+    k_cat_row("K23", "cat < F", "/tmp/k.big", k_big, K_BIG, 1);
+    k_cat_row("K24", "cat F | cat", "/tmp/k.big", k_big, K_BIG, 2);
+    /* The outputs the calls do not write: nothing moves. */
+    {
+        int fd = open("/dev/null", O_WRONLY);
+        say("K25 onto /dev/null: %s; %s\n", k_sf(fd, small, 64), k_sp(fd, "null\n", 64, NULL));
+        close(fd);
+        fd = open("/dev/full", O_WRONLY);
+        say("K26 onto /dev/full: %s; %s\n", k_sf(fd, small, 64), k_sp(fd, "full\n", 64, NULL));
+        ANS("K27 its write", write(fd, "x", 1));
+        close(fd);
+        fd = eventfd(0, EFD_NONBLOCK);
+        say("K28 onto an eventfd: %s; %s\n", k_sf(fd, small, 64), k_sp(fd, "12345678", 8, NULL));
+        uint64_t v = 0;
+        ANS("K29 its counter's read", read(fd, &v, 8));
+        say("K30 onto it, nothing to send: %s\n", k_none(fd, small));
+        lseek(small, 0, SEEK_END);
+        ANS("K31 onto it from the end of the file: sendfile", sendfile(fd, small, NULL, 64));
+        {
+            loff_t o = 0;
+            say("K32 onto it at an offset: %s\n", k_sp(fd, "off\n", 4, &o));
+        }
+        close(fd);
+        fd = epoll_create1(0);
+        say("K33 onto an epoll descriptor: %s; %s\n", k_sf(fd, small, 64), k_sp(fd, "epoll\n", 64, NULL));
+        close(fd);
+        errno = 0;
+        fd = open("/proc/self/cgroup", O_WRONLY);
+        if (fd < 0) say("K34 onto /proc/self/cgroup: its open %s\n", ename(errno));
+        else say("K34 onto /proc/self/cgroup: %s; %s\n", k_sf(fd, small, 64), k_sp(fd, "proc\n", 64, NULL));
+        if (fd >= 0) close(fd);
+    }
+    close(small);
+    close(big);
+    unlink("/tmp/k.line");
+}
+
+/* The background rule on a copy onto a pty: the slave this session's
+ * terminal, the writer in a group of its own, TOSTOP set. */
+static void sec_copy_bg(void) {
+    int small = open("/tmp/k.small", O_RDONLY);
+    int m, s;
+    if (small < 0 || pair(&m, &s)) { say("K: no file or pair: %s\n", ename(errno)); return; }
+    ANS("K35 TIOCSCTTY", ioctl(s, TIOCSCTTY, 0));
+    lset(s, TOSTOP, 0);
+    static const char *const ids[] = {"K36", "K37", "K38", "K39"};
+    static const char *const what[] = {"a background sendfile", "a background splice",
+                                       "a background sendfile, SIGTTOU ignored", "a background splice, SIGTTOU ignored"};
+    for (int op = 0; op < 4; op++) {
+        fflush(stdout);
+        pid_t c = fork();
+        if (c == 0) {
+            setpgid(0, 0);
+            signal(SIGTTOU, op >= 2 ? SIG_IGN : SIG_DFL);
+            const char *r = op % 2 == 0 ? k_sf(s, small, 9) : k_sp(s, "bg\n", 64, NULL);
+            if (op >= 2) say("%s %s: %s\n", ids[op], what[op], r);
+            _exit(0);
+        }
+        int st = 0;
+        pid_t w = waitpid(c, &st, WUNTRACED);
+        if (op < 2) say("%s %s: %s, the file at %ld\n", ids[op], what[op], how(w, st), (long)lseek(small, 0, SEEK_CUR));
+        kill(c, SIGKILL);
+        waitpid(c, 0, 0);
+        char id[64];
+        snprintf(id, sizeof id, "%sm the master reads", ids[op]);
+        got(id, m, 500);
+    }
+    lset(s, 0, TOSTOP);
+    signal(SIGHUP, SIG_IGN); /* this session's terminal hangs up at the master's close */
+    close(s);
+    close(m);
+    close(small);
+    unlink("/tmp/k.small");
+    unlink("/tmp/k.big");
+}
+
 /* --- S: the session row: pelt on a pty, driven from the master ---------------- */
 
 static unsigned char tr_buf[262144];
@@ -2116,6 +2451,22 @@ int main(int argc, char **argv) {
     (void)ioctl(0, TIOCNOTTY);
     signal(SIGHUP, SIG_DFL);
     if (argc > 1 && strcmp(argv[1], "max") == 0) return max_mode();
+    if (argc > 1 && strcmp(argv[1], "copy") == 0) {
+        say("ptyprobe: px141's copy rows, as %s\n", root ? "root" : "a user");
+        fflush(stdout);
+        pid_t R = fork();
+        if (R == 0) {
+            setsid();
+            section(sec_copy);
+            section(sec_copy_bg);
+            fflush(stdout);
+            _exit(0);
+        }
+        int st;
+        waitpid(R, &st, 0);
+        say("done: R %s\n", how(R, st));
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "drive") == 0) {
         fflush(stdout);
         pid_t R = fork();

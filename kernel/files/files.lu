@@ -1066,6 +1066,50 @@ pub fn pty_write(a: u64, pml4: u64, fd: u64, buf: u64, len: u64) -> u64 {
     pty.slave_write(pts_no(n), pml4, buf, len, nb)
 }
 
+/// px141: `n` bytes of kernel memory at `src` (a span of a file's
+/// frames, of a pipe's ring) written to pty descriptor `fd` by `sendfile`
+/// or `splice`, by its `write`'s rules (kernel/pty): what the other end's
+/// queue takes (a slave's NL as CR NL under ONLCR), WAIT or -EAGAIN
+/// (the descriptor's O_NONBLOCK) when nothing fits or IXON holds the
+/// output. The caller has asked `copies_to` and `copy_job`.
+fn pty_put_kernel(a: u64, fd: u64, src: u64, n: u64) -> u64 {
+    let p = pts_no(node_of(a, fd))
+    let nb = status(a, fd) & O_NONBLOCK != 0
+    if kind(a, fd) == K_PTM {
+        return pty.master_put(p, src, n, nb)
+    }
+    pty.slave_put(p, src, n, nb)
+}
+
+/// px141: whether `sendfile` and `splice` write to descriptor `fd`,
+/// whose `write_target` is `t`. They write to /dev/null (0), the console
+/// (1), a pipe or socket (3), a file (4), a block device's node (9) and a
+/// pty's master or slave (10). Every other target answers -EINVAL before
+/// a byte moves, the input's offset and a pipe's bytes left as they
+/// were, as Linux 7.2.4 answered each (measured, user/elf/ptyprobe.c's K
+/// rows and user/sound/dspprobe.c): an eventfd (5), an epoll object or a
+/// file of /proc or /sys (6), /dev/dsp (7), /dev/full (8, whose `write`
+/// is -ENOSPC), and a pty's slave hung up (whose `write` is -EIO).
+fn copies_to(a: u64, t: u64, fd: u64) -> bool {
+    if t == 10 {
+        return kind(a, fd) == K_PTM || !console.hung(pty.tty(pts_no(node_of(a, fd))))
+    }
+    t == 0 || t == 1 || t == 3 || t == 4 || t == 9
+}
+
+/// px141: the background rule a copy onto descriptor `fd` (target `t`)
+/// asks before a byte moves, as `write` asks it: the console's (px49,
+/// pax#76) or a pty slave's; 0 to go on.
+fn copy_job(a: u64, t: u64, fd: u64) -> u64 {
+    if t == 1 {
+        return console.job(console.CON, console.J_WRITE)
+    }
+    if t == 10 && kind(a, fd) == K_PTS {
+        return console.job(pty.tty(pts_no(node_of(a, fd))), console.J_WRITE)
+    }
+    0
+}
+
 /// px30: whether closing `fd` is the last close of /dev/dsp, which
 /// waits for the device to play what is queued (its last reference,
 /// O_NONBLOCK or not: Linux's close drains either way, measured):
@@ -1722,12 +1766,15 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
 /// a pipe, a socketpair, or (px27) another file at its offset, which
 /// moves (-EINVAL when that file was opened with O_APPEND: measured,
 /// `cat f >> g`), or (px79) a block device's node at its offset, which
-/// moves (`cat disk.img > /dev/vdb`: raw writes). boreutils' `cat` copies a file to its output this
-/// way (after `copy_file_range`). The count written, which may be less
-/// than asked: a pipe takes what it has room for, and a full one waits
-/// (WAIT) or answers -EAGAIN (O_NONBLOCK); -EPIPE with no reader
-/// (`EPIPE_R`; kernel/user raises SIGPIPE). One call sends at most
-/// 0x7ffff000 bytes, as Linux.
+/// moves (`cat disk.img > /dev/vdb`: raw writes), or (px141) a pty's
+/// master or slave, by its `write`'s rules. boreutils' `cat` copies a
+/// file to its output this way (after `copy_file_range`). The count
+/// written, which may be less than asked: a pipe or a pty takes what it
+/// has room for, and a full one waits (WAIT) or answers -EAGAIN
+/// (O_NONBLOCK); -EPIPE with no reader (`EPIPE_R`; kernel/user raises
+/// SIGPIPE). px141: every other target is -EINVAL (`copies_to`), past
+/// the checks of the count and the end of the file, which answer 0
+/// first (measured). One call sends at most 0x7ffff000 bytes, as Linux.
 pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) -> u64 {
     if kind(a, inf) == K_CLOSED || access(a, inf) == O_WRONLY {
         return neg(EBADF)
@@ -1735,9 +1782,6 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
     let t = write_target(a, out)
     if t == 2 {
         return neg(EBADF)
-    }
-    if t == 8 {
-        return neg(ENOSPC) // px45: /dev/full
     }
     if kind(a, inf) != K_FILE {
         return neg(EINVAL)
@@ -1757,18 +1801,20 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
     if off >= size || count == 0 {
         return 0
     }
+    if !copies_to(a, t, out) {
+        return neg(EINVAL)
+    }
     var k = if count < size - off { count } else { size - off }
     if k > 0x7ffff000 {
         k = 0x7ffff000
     }
-    if t == 1 {
-        // px49 (pax#76): the background rule, as `write` asks it (a
-        // background group's write to its terminal under TOSTOP is
-        // SIGTTOU's: measured for sendfile and splice too).
-        let j = console.job(console.CON, console.J_WRITE)
-        if j != 0 {
-            return j
-        }
+    // px49 (pax#76): the background rule, as `write` asks it (a
+    // background group's write to its terminal under TOSTOP is
+    // SIGTTOU's: measured for sendfile and splice too); px141: a pty's
+    // slave's as the console's.
+    let j = copy_job(a, t, out)
+    if j != 0 {
+        return j
     }
     var done: u64 = 0
     if t == 4 {
@@ -1780,16 +1826,18 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
         set_pos(a, out, q + r)
         wrote(a, rf(node_of(a, out))) // px44
         done = r
-    } else if t == 9 {
+    } else if t == 9 || t == 10 {
         // px79: onto a block device's node at its offset (a disk image
-        // copied by `cat`), each span of the file's frames written raw
+        // copied by `cat`), each span of the file's frames written raw;
+        // px141: onto a pty, what its queue takes of each span, a short
+        // count once it is full.
         var stop = false
         while done < k && !stop {
             let (src, c) = tree.span(i, off + done, k - done)
-            let r = blk_put_kernel(a, out, src, c)
+            let r = if t == 9 { blk_put_kernel(a, out, src, c) } else { pty_put_kernel(a, out, src, c) }
             if r >= 0x8000000000000000 {
                 if done == 0 {
-                    return r
+                    return r // nothing taken: WAIT, -EAGAIN or -errno
                 }
                 stop = true
             } else {
@@ -1797,35 +1845,42 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
                 stop = r < c
             }
         }
-    } else {
-        if t == 3 {
-            let p = tx_of(a, out)
-            if ppw(p, P_READERS) == 0 {
-                return EPIPE_R
+    } else if t == 3 {
+        let p = tx_of(a, out)
+        if ppw(p, P_READERS) == 0 {
+            return EPIPE_R
+        }
+        let space = ppw(p, P_PAGES) * PAGE - (ppw(p, P_WR) - ppw(p, P_RD))
+        if space == 0 {
+            if status(a, out) & O_NONBLOCK != 0 {
+                return neg(EAGAIN)
             }
-            let space = ppw(p, P_PAGES) * PAGE - (ppw(p, P_WR) - ppw(p, P_RD))
-            if space == 0 {
-                if status(a, out) & O_NONBLOCK != 0 {
-                    return neg(EAGAIN)
-                }
-                return WAIT
-            }
-            if k > space {
-                k = space
-            }
+            return WAIT
+        }
+        if k > space {
+            k = space
         }
         while done < k {
             let (src, c) = tree.span(i, off + done, k - done)
-            if t == 1 {
-                console.put_kernel(src, c)
-            } else if t == 3 {
-                ring_put(tx_of(a, out), src, c)
-            }
+            ring_put(p, src, c)
             done += c
         }
-        if t == 3 {
-            sched.wake_pipes()
+        sched.wake_pipes()
+    } else if t == 1 {
+        while done < k {
+            let (src, c) = tree.span(i, off + done, k - done)
+            console.put_kernel(src, c)
+            done += c
         }
+    } else if t == 0 {
+        // /dev/null: the file's bytes are read and swallowed, as its
+        // `write` takes them.
+        while done < k {
+            let (_src, c) = tree.span(i, off + done, k - done)
+            done += c
+        }
+    } else {
+        return neg(EINVAL) // no other target is written (`copies_to`)
     }
     tree.touch_read(i)
     if offp != 0 {
@@ -1887,9 +1942,14 @@ fn ring_put(p: u64, src: u64, k: u64) {
 /// file (after `copy_file_range` and `sendfile` have said so). From a
 /// pipe: what it holds, up to `len`, to the console, `/dev/null`,
 /// another pipe, (px27) a file or (px79) a block device's node at its
-/// offset; 0 at end of file; an empty pipe with a writer waits
-/// (WAIT), or answers -EAGAIN under SPLICE_F_NONBLOCK (2) or
-/// O_NONBLOCK. Into a pipe from a file of the initramfs: `sendfile`'s
+/// offset, or (px141) a pty's master or slave by its `write`'s rules;
+/// 0 at end of file; an empty pipe with a writer waits (WAIT), or
+/// answers -EAGAIN under SPLICE_F_NONBLOCK (2) or O_NONBLOCK; a full
+/// pty waits or answers -EAGAIN by its own O_NONBLOCK alone (measured:
+/// SPLICE_F_NONBLOCK waits there). px141: every other target is -EINVAL
+/// with the pipe's bytes left in it, a `len` of 0 answering 0 first
+/// (`copies_to`, measured), and so is an offset given for a pty or for
+/// such a target. Into a pipe from a file of the initramfs: `sendfile`'s
 /// way. The count moved; -EPIPE (`EPIPE_R`) into a pipe with no reader.
 pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, len: u64, flags: u64) -> u64 {
     if kind(a, inf) == K_CLOSED || access(a, inf) == O_WRONLY {
@@ -1904,11 +1964,17 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
     if !from_pipe && t != 3 {
         return neg(EINVAL)
     }
-    if (from_pipe && offin != 0) || (t == 3 && offout != 0) || offout != 0 {
+    if from_pipe && offin != 0 {
         return neg(ESPIPE)
+    }
+    if offout != 0 {
+        return neg(if t == 10 || !copies_to(a, t, out) { EINVAL } else { ESPIPE })
     }
     if !from_pipe {
         return sendfile(a, pml4, out, inf, offin, len)
+    }
+    if !copies_to(a, t, out) {
+        return if len == 0 { 0 } else { neg(EINVAL) }
     }
     let p = rx_of(a, inf)
     let avail = ppw(p, P_WR) - ppw(p, P_RD)
@@ -1941,11 +2007,9 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
             k = space
         }
     }
-    if t == 1 {
-        let j = console.job(console.CON, console.J_WRITE) // px49 (pax#76), as sendfile
-        if j != 0 {
-            return j
-        }
+    let j = copy_job(a, t, out) // px49 (pax#76), as sendfile
+    if j != 0 {
+        return j
     }
     var done: u64 = 0
     var full = false
@@ -1956,12 +2020,13 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
             console.put_kernel(src, c)
         } else if t == 3 {
             ring_put(tx_of(a, out), src, c)
-        } else if t == 9 {
-            // px79: onto a block device's node, at its offset
-            let r = blk_put_kernel(a, out, src, c)
+        } else if t == 9 || t == 10 {
+            // px79: onto a block device's node, at its offset; px141:
+            // onto a pty, what its queue takes.
+            let r = if t == 9 { blk_put_kernel(a, out, src, c) } else { pty_put_kernel(a, out, src, c) }
             if r >= 0x8000000000000000 {
                 if done == 0 {
-                    return r
+                    return r // nothing taken from the pipe: WAIT, -EAGAIN or -errno
                 }
                 c = 0
                 full = true
@@ -1985,6 +2050,13 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
                 full = r < c
                 c = r
             }
+        } else if t == 0 {
+            // /dev/null swallows what it is given: all of it taken.
+        } else {
+            // No other target is written (`copies_to` refused it above):
+            // nothing is taken.
+            c = 0
+            full = true
         }
         done += c
     }
