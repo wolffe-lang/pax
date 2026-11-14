@@ -72,6 +72,29 @@ def geometry(path):
     return bb, journal
 
 
+def file_blocks(path, name):
+    """The direct block numbers of a root-directory file in the 4 KiB fixture."""
+    sb = at(path, 1024, 1024)
+    per_group = struct.unpack_from("<I", sb, 40)[0]
+    isize = struct.unpack_from("<H", sb, 88)[0]
+
+    def inode(number):
+        group, index = divmod(number - 1, per_group)
+        table = struct.unpack_from("<I", at(path, 4096 + group * 32, 32), 8)[0]
+        return at(path, table * 4096 + index * isize, isize)
+
+    directory = at(path, struct.unpack_from("<I", inode(2), 40)[0] * 4096, 4096)
+    offset = 0
+    while offset < 4096:
+        number, length, size = struct.unpack_from("<IHB", directory, offset)
+        if length == 0:
+            break
+        if number and directory[offset + 8:offset + 8 + size] == name:
+            return [b for b in struct.unpack_from("<12I", inode(number), 40) if b]
+        offset += length
+    raise RuntimeError("fixture file not found: " + name.decode())
+
+
 def value(text, name):
     m = re.search(r"^JF " + re.escape(name) + r" rc=(-?\d+) errno=(\d+)$", text, re.M)
     return tuple(map(int, m.groups())) if m else None
@@ -118,6 +141,7 @@ class Rows:
         seed.mkdir()
         (seed / "pressure").write_bytes(b"P" * (16 * 1024 * 1024))
         (seed / "old").write_bytes(b"A" * 4096)
+        (seed / "two").write_bytes(b"A" * 8192)
         run(["mke2fs", "-q", "-F", "-t", "ext3", "-b", "4096", "-J", "size=16", "-d", seed, self.base])
         (self.out / "oracle-versions.txt").write_text(run(["dumpe2fs", "-h", self.base]))
 
@@ -187,6 +211,8 @@ class Rows:
             elif stage == "remount-rw-state":
                 valid = valid and not any(e[0] == "write" for e in before)
                 valid = valid and any(e[0] == "flush" and e[3] == 0 for e in before)
+            elif stage == "data-overwrite":
+                valid = valid and not descriptors and not commits
             elif stage == "precommit":
                 valid = valid and bool(descriptors) and not commits
             elif stage in ("checkpoint", "cache-home"):
@@ -509,6 +535,38 @@ class Rows:
                      and value(text, "late-create-after") is None,
                      words + " fails with EIO even after a successful retry; the volume stays failed and claimed")
 
+    def overwrite(self):
+        control = self.image("overwrite-control")
+        blocks = file_blocks(control, b"two")
+        if len(blocks) != 2:
+            raise RuntimeError("the overwrite fixture is not two blocks")
+        sectors = [b * 8 for b in blocks]
+        text = self.boot("overwrite-control", control, "overwrite-control")
+        events = self.requests("overwrite-control")
+        check = process(["e2fsck", "-fn", str(control)], capture_output=True, text=True)
+        (self.out / "overwrite-control.fsck.txt").write_text(check.stdout + check.stderr)
+        data = [e[1] for e in events if e[0] == "write" and e[1] in sectors]
+        self.row("JF-overwrite-control", value(text, "overwrite-write") == (8192, 0)
+                 and value(text, "overwrite-sync") == (0, 0) and value(text, "unmount") == (0, 0)
+                 and data[:2] == sectors and all(at(control, b * 4096, 4096) == b"N" * 4096 for b in blocks)
+                 and check.returncode == 0 and all(e[3] == 0 for e in events),
+                 "a healthy write-through overwrite writes both allocated blocks in order; fsck clean")
+        name = "JF-overwrite-EIO"
+        disk = self.image(name)
+        cfg = self.out / (name + ".cfg")
+        cfg.write_text('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
+                       f'sector = "{sectors[0]}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+        text = self.boot(name, disk, "overwrite-error", cfg=cfg)
+        fault_ok = self.fault(name, disk, "write", sectors[0], "data-overwrite")
+        events = self.requests(name)
+        failed = [i for i, e in enumerate(events) if e[3] != 0]
+        later = bool(failed) and any(e[0] == "write" for e in events[failed[0] + 1:])
+        after = value(text, "overwrite-after")
+        self.row(name, fault_ok and value(text, "overwrite-write") == (-1, 5)
+                 and after is not None and after[0] == -1 and value(text, "overwrite-sync") == (-1, 5)
+                 and not later and at(disk, blocks[1] * 4096, 4096) == b"A" * 4096,
+                 "a failed first data block fails the write with EIO; nothing, the second block included, is written after it")
+
     def plain(self):
         disk = self.out / "plain-no-flush.img"
         with disk.open("wb") as f:
@@ -602,6 +660,7 @@ class Rows:
             return 1 if self.failed else 0
         if self.a.only == "late":
             self.late()
+            self.overwrite()
             if self.a.guard_kernel:
                 self.exhaustion()
             return 1 if self.failed else 0
@@ -640,6 +699,7 @@ class Rows:
         self.incomplete()
         self.no_flush_boundaries()
         self.late()
+        self.overwrite()
         if self.a.guard_kernel:
             self.exhaustion()
         if self.a.large:
