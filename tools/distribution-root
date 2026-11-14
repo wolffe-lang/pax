@@ -3,7 +3,8 @@
 Usage: distribution-root BASE.cpio INPUTS IDENTITY_DIR OUT.cpio dev|release
 INPUTS holds auth/ (tools/mkauth's output: su, sudo, passwd, login and sums.txt) beside the other
 programs (px106; px103's sudo/ before it), trash/ (tools/mktrash's: the five commands and sums.txt)
-(tb03), and ligature/ (tools/mkligature's: ligature and sums.txt; the dev image's only) (px128).
+(tb03), ligature/ (tools/mkligature's: ligature and sums.txt; the dev image's only) (px128), and warren/
+(tools/mkwarren's: warren and sums.txt; the dev image's only) (px142).
 The old payload supplies only unchanged support files and the pinned native
 compiler/linker bundle. Every current org binary and the base std are replaced.
 """
@@ -106,6 +107,11 @@ def main():
                   if len(l.split()) == 4 and l.split()[:2] == ['#', 'ligature'] and re.fullmatch(r'[0-9a-f]{64}', l.split()[2])]
         assert pinned == [[sha(lig), str(len(lig))]], 'ligature is not the digest user/ligature.pin records'
         rows['usr/bin/ligature'] = (0o100755, 0, 0, lig)
+        # px142: warren, the terminal multiplexer in wolf, at /usr/bin/warren (the dev image's PATH has /usr/bin):
+        # tools/mkwarren's stripped static binary, 0755, root's, held to its builder's sums.
+        war = (inputs/'warren'/'warren').read_bytes()
+        assert (inputs/'warren'/'sums.txt').read_text().split() == ['warren', sha(war), str(len(war))], 'warren input mismatch'
+        rows['usr/bin/warren'] = (0o100755, 0, 0, war)
     else:
         for name in list(rows):
             if name == 'usr/bin' or name.startswith('usr/bin/') or name == 'usr/lib/wolf-musl' or name.startswith('usr/lib/wolf-musl/'):
