@@ -5,6 +5,7 @@
 #include <linux/falloc.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -125,6 +126,39 @@ int main(void) {
         result("punch-sync", fsync(fd));
         close(fd);
         if (!strcmp(which, "punch-control")) result("unmount", umount("/volume"));
+        done();
+    }
+    if (!strncmp(which, "punchmap-", 9)) {
+        /* Both pages in the tree's page cache through a shared mapping, then
+           a punch whose second block fails: reads must match what the
+           block cache holds where the punch zeroed it. */
+        int fd = open("/volume/two", O_RDWR);
+        result("punchmap-open", fd);
+        if (fd < 0) done();
+        char *map = mmap(NULL, 8192, PROT_READ, MAP_SHARED, fd, 0);
+        result("punchmap-mmap", map == MAP_FAILED ? -1 : 0);
+        if (map == MAP_FAILED) done();
+        printf("JF punchmap-cached=%d\n", map[0] == 'A' && map[4096] == 'A');
+        result("punchmap-punch", fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 8192));
+        char back[8192];
+        result("punchmap-read", pread(fd, back, sizeof(back), 0));
+        int read_first = 1, map_first = 1, read_second = 1, coherent = 1;
+        for (int i = 0; i < 8192; ++i) {
+            if (back[i] != map[i]) coherent = 0;
+            if (i < 4096 && back[i]) read_first = 0;
+            if (i < 4096 && map[i]) map_first = 0;
+            if (i >= 4096 && back[i]) read_second = 0;
+        }
+        printf("JF punchmap-read-first-zero=%d\nJF punchmap-map-first-zero=%d\n"
+               "JF punchmap-read-second-zero=%d\nJF punchmap-coherent=%d\n",
+               read_first, map_first, read_second, coherent);
+        fflush(stdout);
+        munmap(map, 8192);
+        if (!strcmp(which, "punchmap-control")) {
+            result("punchmap-sync", fsync(fd));
+            close(fd);
+            result("unmount", umount("/volume"));
+        }
         done();
     }
     if (!strncmp(which, "otrunc-", 7)) {
