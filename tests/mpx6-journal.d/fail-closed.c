@@ -70,6 +70,21 @@ int main(void) {
         }
         done();
     }
+    if (!strncmp(which, "overwrite-", 10)) {
+        char pair[8192];
+        memset(pair, 'N', sizeof(pair));
+        int fd = open("/volume/two", O_WRONLY);
+        result("overwrite-open", fd);
+        if (fd < 0) done();
+        result("overwrite-write", write(fd, pair, sizeof(pair)));
+        if (!strcmp(which, "overwrite-error")) {
+            result("overwrite-after", write(fd, pair, sizeof(data)));
+        }
+        result("overwrite-sync", fsync(fd));
+        close(fd);
+        if (!strcmp(which, "overwrite-control")) result("unmount", umount("/volume"));
+        done();
+    }
     if (!strcmp(which, "ro-remount")) {
         result("remount", mount(NULL, "/volume", "ext3", MS_REMOUNT, NULL));
         done();
