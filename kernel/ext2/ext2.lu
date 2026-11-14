@@ -2009,6 +2009,10 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
             w32(a + I_BLOCK + k * 4, 0)
             idirty(v, ino)
             bfree(v, e)
+            // A journal that aborted here (its bitmap snapshot could not be
+            // kept, so the block stayed allocated) never commits this
+            // truncate: the abort is the answer, not a size set over it.
+            if read_only(v) != 0 { return neg(EIO) }
             add_blocks(v, ino, false)
         }
         k += 1
@@ -2027,6 +2031,7 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
         let covers = span * p
         if top != 0 && keep < first + covers {
             cut_tree(v, ino, top, lvl, first, span, keep)
+            if read_only(v) != 0 { return neg(EIO) } // as above
             if keep <= first {
                 let a2 = inode(v, ino)
                 if a2 != 0 {
@@ -2049,6 +2054,7 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
             }
         }
     }
+    if read_only(v) != 0 { return neg(EIO) } // a write above failed the journal
     set_size(v, ino, n)
     0
 }
