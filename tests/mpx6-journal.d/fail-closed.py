@@ -620,6 +620,47 @@ class Rows:
                  "a failed first punched block fails fallocate with EIO; nothing, the second block included, "
                  "is written after it, and a later punch fails")
 
+    def punch_map(self):
+        control = self.image("punchmap-control")
+        blocks = file_blocks(control, b"two")
+        if len(blocks) != 2:
+            raise RuntimeError("the mapped punch fixture is not two blocks")
+        sectors = [b * 8 for b in blocks]
+
+        def flag(text, name):
+            m = re.search(r"^JF " + re.escape(name) + r"=(\d+)$", text, re.M)
+            return m is not None and m[1] == "1"
+
+        text = self.boot("punchmap-control", control, "punchmap-control")
+        events = self.requests("punchmap-control")
+        check = process(["e2fsck", "-fn", str(control)], capture_output=True, text=True)
+        (self.out / "punchmap-control.fsck.txt").write_text(check.stdout + check.stderr)
+        self.row("JF-punch-map-control", flag(text, "punchmap-cached") and value(text, "punchmap-punch") == (0, 0)
+                 and value(text, "punchmap-read") == (8192, 0)
+                 and all(flag(text, "punchmap-" + k) for k in ("read-first-zero", "map-first-zero",
+                                                                "read-second-zero", "coherent"))
+                 and value(text, "punchmap-sync") == (0, 0) and value(text, "unmount") == (0, 0)
+                 and all(at(control, b * 4096, 4096) == bytes(4096) for b in blocks)
+                 and check.returncode == 0 and all(e[3] == 0 for e in events),
+                 "a healthy punch of two mapped, page-cached blocks reads back zeros through read and the mapping; fsck clean")
+        name = "JF-punch-map-EIO"
+        disk = self.image(name)
+        cfg = self.out / (name + ".cfg")
+        cfg.write_text('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
+                       f'sector = "{sectors[1]}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+        text = self.boot(name, disk, "punchmap-error", cfg=cfg)
+        fault_ok = self.fault(name, disk, "write", sectors[1], "data-overwrite")
+        events = self.requests(name)
+        failed = [i for i, e in enumerate(events) if e[3] != 0]
+        first = bool(failed) and any(e[0] == "write" and e[1] == sectors[0] and e[3] == 0 for e in events[:failed[0]])
+        self.row(name, fault_ok and first and flag(text, "punchmap-cached")
+                 and value(text, "punchmap-punch") == (-1, 5) and value(text, "punchmap-read") == (8192, 0)
+                 and all(flag(text, "punchmap-" + k) for k in ("read-first-zero", "map-first-zero",
+                                                                "read-second-zero", "coherent"))
+                 and at(disk, blocks[0] * 4096, 4096) == bytes(4096) and at(disk, blocks[1] * 4096, 4096) == b"A" * 4096,
+                 "a punch whose second block fails after the first reached the disk answers EIO; the page cache "
+                 "then matches the block cache: zeros through read and the mapping where the punch zeroed")
+
     def otrunc(self):
         control = self.image("otrunc-control")
         bb, _ = geometry(control)
@@ -786,6 +827,7 @@ class Rows:
             self.late()
             self.overwrite()
             self.punch()
+            self.punch_map()
             self.otrunc()
             self.remount_barrier()
             if self.a.guard_kernel:
@@ -828,6 +870,7 @@ class Rows:
         self.late()
         self.overwrite()
         self.punch()
+        self.punch_map()
         self.otrunc()
         self.remount_barrier()
         if self.a.guard_kernel:
