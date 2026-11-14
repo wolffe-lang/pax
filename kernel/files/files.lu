@@ -934,7 +934,8 @@ pub fn is_open(a: u64, fd: u64) -> bool {
 /// `blk_write`), 10 a pty's master or slave (px111: `pty_write`); px34: an AF_UNIX path socket
 /// is 3 (`pipe_write` answers for a socket that is not connected), a file
 /// of /proc or /sys 6 (-EINVAL, as Linux answered a write to
-/// /proc/self/cgroup).
+/// /proc/self/cgroup); px130: 11 /dev/kmsg (`kmsg_write`), 12 a setting
+/// of /proc/sys/kernel root may write (`setting_write`).
 pub fn write_target(a: u64, fd: u64) -> u64 {
     let k = kind(a, fd)
     if k == K_CLOSED || access(a, fd) == O_RDONLY {
@@ -1099,6 +1100,9 @@ fn pty_put_kernel(a: u64, fd: u64, src: u64, n: u64) -> u64 {
 /// rows and user/sound/dspprobe.c): an eventfd (5), an epoll object or a
 /// file of /proc or /sys (6), /dev/dsp (7), /dev/full (8, whose `write`
 /// is -ENOSPC), and a pty's slave hung up (whose `write` is -EIO).
+/// px130's /dev/kmsg (11) and settings of /proc/sys/kernel (12) are
+/// among them too, by this rule; Linux's answer for those two is not
+/// measured.
 fn copies_to(a: u64, t: u64, fd: u64) -> bool {
     if t == 10 {
         return kind(a, fd) == K_PTM || !console.hung(pty.tty(pts_no(node_of(a, fd))))
