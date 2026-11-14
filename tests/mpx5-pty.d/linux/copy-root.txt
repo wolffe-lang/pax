@@ -1,0 +1,46 @@
+ptyprobe: px141's copy rows, as root
+K0 the files: small 59 bytes, big 150000 bytes
+K1 onto the slave: sendfile 59, the file at 59
+K2 the master reads: 61 "K: a line\r\none\twith a tab\r\n\x01\x1b[1m\x7f\xfe\xff and no newline at its end"
+K3 onto the slave from offset 5, 10 bytes: sendfile 10, the offset 15, the file at 0
+K4 the master reads: 11 "line\r\none\tw"
+K5 a pipe onto the slave: splice 12, the pipe holds 0
+K6 the master reads: 14 "piped\r\nbytes\r\n"
+K7 a pipe onto the slave at an offset: splice EINVAL, the pipe holds 3
+K8 onto the slave, nothing to send: sendfile of 0 0; splice of 0 0; splice from an empty pipe with no writer 0
+K9 the master reads: 0 ""
+K10 onto the master: sendfile 6, the file at 6
+K11 the slave reads: 6 "typed\n"
+K12 the master reads the echo: 7 "typed\r\n"
+K13 a pipe onto the master: splice 8, the pipe holds 0
+K14 the slave reads: 8 "spliced\n"
+K15 the master reads the echo: 9 "spliced\r\n"
+K16 onto a full slave, O_NONBLOCK: sendfile EAGAIN, the file at 0; splice EAGAIN, the pipe holds 5
+K17 onto a full master, O_NONBLOCK: sendfile EAGAIN, the file at 0; splice EAGAIN, the pipe holds 5
+K18 onto a slave hung up: sendfile EINVAL, the file at 0; splice EINVAL, the pipe holds 4
+K19 onto it, nothing to send: sendfile of 0 0; splice of 0 0; splice from an empty pipe with no writer EINVAL
+K20 its write: EIO
+K21 cat F (59 bytes): cat exited 0; the master read 61 bytes, the file's with NL as CR NL: yes
+K22 cat F (150000 bytes): cat exited 0; the master read 152716 bytes, the file's with NL as CR NL: yes
+K23 cat < F (150000 bytes): cat exited 0; the master read 152716 bytes, the file's with NL as CR NL: yes
+K24 cat F | cat (150000 bytes): cat exited 0, then exited 0; the master read 152716 bytes, the file's with NL as CR NL: yes
+K25 onto /dev/null: sendfile 59, the file at 59; splice 5, the pipe holds 0
+K26 onto /dev/full: sendfile EINVAL, the file at 0; splice EINVAL, the pipe holds 5
+K27 its write: ENOSPC
+K28 onto an eventfd: sendfile EINVAL, the file at 0; splice EINVAL, the pipe holds 8
+K29 its counter's read: EAGAIN
+K30 onto it, nothing to send: sendfile of 0 0; splice of 0 0; splice from an empty pipe with no writer EINVAL
+K31 onto it from the end of the file: sendfile: 0
+K32 onto it at an offset: splice EINVAL, the pipe holds 4
+K33 onto an epoll descriptor: sendfile EINVAL, the file at 0; splice EINVAL, the pipe holds 6
+K34 onto /proc/self/cgroup: sendfile EINVAL, the file at 0; splice EINVAL, the pipe holds 5
+K35 TIOCSCTTY: 0
+K36 a background sendfile: stopped by TTOU, the file at 0
+K36m the master reads: 0 ""
+K37 a background splice: stopped by TTOU, the file at 0
+K37m the master reads: 0 ""
+K38 a background sendfile, SIGTTOU ignored: sendfile 9, the file at 9
+K38m the master reads: 9 "K: a line"
+K39 a background splice, SIGTTOU ignored: splice 3, the pipe holds 0
+K39m the master reads: 4 "bg\r\n"
+done: R exited 0
