@@ -889,6 +889,20 @@ the dev image).
 |---:|---|---|---|
 | 47 | `recvmsg` | on an AF_INET datagram socket: the oldest datagram scattered over `msg_iov` (at most 1024 iovecs), its sender at `msg_name` cut to `msg_namelen`, which then says 16 (a null `msg_name` leaves it), `msg_controllen` 0, `msg_flags` MSG_TRUNC when the iovecs were short; the bytes copied, the whole length under MSG_TRUNC; MSG_DONTWAIT, MSG_PEEK, MSG_ERRQUEUE (-EAGAIN), O_NONBLOCK, a wait and SO_RCVTIMEO as recvfrom's; -EMSGSIZE, -EINVAL (a negative `msg_namelen` or length), -EFAULT, -EBADF, -ENOTSOCK | a stream socket, -EOPNOTSUPP |
 
+## Served since px04: the copy calls onto a pty (px141)
+
+boreutils' `cat` copies a file with `copy_file_range`, then `sendfile`, then
+`splice`, falling to `read` and `write` only when all three refuse the pair.
+px111's ptys were outputs `write` served and these two calls did not: their
+loop counted the bytes and wrote none, so `cat FILE` on an ssh session's
+terminal printed nothing (pax#422). Held to Linux 7.2.4 by
+`user/elf/ptyprobe.c`'s K rows (`tests/mpx5-pty`'s copy image) and
+`user/sound/dspprobe.c` (`tests/mpx3-sound`).
+
+| nr | call | served | refused |
+|---:|---|---|---|
+| 40, 275 | `sendfile`, `splice` | onto a pty's master or slave, by its `write`'s rules: what the other end's queue takes (a slave's NL as CR NL under ONLCR), a short count once it fills, WAIT or -EAGAIN by the pty descriptor's O_NONBLOCK (SPLICE_F_NONBLOCK does not reach the pty, measured), the background rule under TOSTOP | onto an eventfd, an epoll descriptor, a file of /proc or /sys, /dev/dsp, /dev/full and a slave hung up: -EINVAL, the file's offset and the pipe's bytes left (a count of 0, the end of the file and a `splice` of 0 bytes answer 0 first), as Linux's; an output offset onto a pty or one of these: -EINVAL |
+
 ## Disk formatters and Limine (px69)
 
 Linux strace of the static binaries records 26 distinct calls for paxgpt
