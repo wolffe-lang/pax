@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/falloc.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
@@ -88,6 +89,19 @@ int main(void) {
         result("overwrite-sync", fsync(fd));
         close(fd);
         if (!strcmp(which, "overwrite-control")) result("unmount", umount("/volume"));
+        done();
+    }
+    if (!strncmp(which, "punch-", 6)) {
+        int fd = open("/volume/two", O_WRONLY);
+        result("punch-open", fd);
+        if (fd < 0) done();
+        result("punch", fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 8192));
+        if (!strcmp(which, "punch-error")) {
+            result("punch-after", fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096));
+        }
+        result("punch-sync", fsync(fd));
+        close(fd);
+        if (!strcmp(which, "punch-control")) result("unmount", umount("/volume"));
         done();
     }
     if (!strcmp(which, "ro-remount")) {
