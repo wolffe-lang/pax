@@ -5192,6 +5192,12 @@ pub fn fallocate(a: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64 {
     if len > 0x7fffffffffffffff - off {
         return neg(EFBIG)
     }
+    if tree.read_only(i) {
+        // Only a failed journal makes a file open for writing read-only:
+        // every mode is refused, a punch past the end or of an empty file
+        // included, as further mutation is.
+        return neg(EROFS)
+    }
     if m == FALLOC_KEEP | FALLOC_PUNCH {
         let r = tree.punch(i, off, len)
         if r != 0 {
