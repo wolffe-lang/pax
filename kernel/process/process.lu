@@ -171,15 +171,12 @@ use log
 use paging
 use panic
 use procfs
+use random
 use sched
 use tree
 use trace
 use uaccess
 use vm
-
-extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
-extern "c" fn pax_rdtsc() -> u64
-extern "c" fn pax_rdrand() -> u64
 
 extern "c" let pax_execbuf: *u8
 extern "c" let pax_argbuf: *u8
@@ -188,7 +185,6 @@ const PAGE: u64 = 4096
 const STACK_TOP: u64 = 0x00007ffffffff000
 // wolf 0.2.35 cannot resolve an imported const at comptime.
 fn elf_stack_pages() -> u64 { procfs.user_stack_pages() }
-const CPUID1_RDRAND: u64 = 0x40000000 // ECX bit 30
 
 // pax_argbuf: the strings at [0, ARG_BYTES), the path at [PATH_AT, +4096).
 const ARG_BYTES: u64 = 65536
@@ -570,45 +566,23 @@ fn put_aux(pml4: u64, a: u64, t: u64, v: u64) -> u64 {
     a + 16
 }
 
-/// Eight bytes for AT_RANDOM and getrandom: RDRAND when the CPU has it
-/// (every PAX host: QEMU's `-cpu max` and the KVM hosts), else the TSC
-/// folded on itself (named, not cryptographic: a CPU without RDRAND gets
-/// bytes that differ per boot and per word, nothing more).
+/// Eight bytes for AT_RANDOM and the kernel's own words (TCP's initial
+/// sequence numbers, DHCP's transaction id): kernel/random's insecure path,
+/// an RDRAND draw when the source is ready, else the time-stamp counter
+/// folded on itself (named, not cryptographic; dw02: never what a strict
+/// getrandom gives).
 pub fn random_word(k: u64) -> u64 {
-    // # Safety: CPUID reads nothing and writes only its registers.
-    let has = unsafe { pax_cpuid(1, 0, 2) } & CPUID1_RDRAND != 0
-    if has {
-        // # Safety: RDRAND exists (CPUID.1:ECX bit 30).
-        let r = unsafe { pax_rdrand() }
-        if r != 0 {
-            return r
-        }
-    }
-    // # Safety: RDTSC reads the time-stamp counter, nothing else.
-    let t = unsafe { pax_rdtsc() }
-    (t ^ (t >> 17) ^ (t >> 31)) + k
+    random.insecure_word(k)
 }
 
 /// px131: `n` bytes (a multiple of 8) of `random_word`'s at kernel address
-/// `kva` (8-aligned), CPUID asked once for them all: asked a word at a
-/// time it was a VM exit every 8 bytes, and getrandom of 8 MiB held
-/// interrupts off for 1.5 s under KVM (notes/px131-long-kernel-paths.md).
+/// `kva` (8-aligned), the fold's counter from `k`: getrandom's
+/// GRND_INSECURE (dw02; kernel/random's `insecure_fill`). The source's state
+/// is decided once a boot (kernel/random), so a page of words asks CPUID no
+/// more (getrandom of 8 MiB held interrupts off for 1.5 s under KVM asked a
+/// word at a time: notes/px131-long-kernel-paths.md).
 pub fn random_fill(kva: u64, n: u64, k: u64) {
-    // # Safety: CPUID reads nothing and writes only its registers.
-    let has = unsafe { pax_cpuid(1, 0, 2) } & CPUID1_RDRAND != 0
-    var i: u64 = 0
-    while i < n {
-        // # Safety: RDRAND exists (CPUID.1:ECX bit 30) when `has`.
-        var w: u64 = if has { unsafe { pax_rdrand() } } else { 0 }
-        if w == 0 {
-            // # Safety: RDTSC reads the time-stamp counter, nothing else.
-            let t = unsafe { pax_rdtsc() }
-            w = (t ^ (t >> 17) ^ (t >> 31)) + k + i
-        }
-        // # Safety: the caller's kernel buffer holds [kva, kva + n).
-        unsafe { ((kva + i) as *u64).write_volatile(w) }
-        i += 8
-    }
+    random.insecure_fill(kva, n, k)
 }
 
 /// A frame, zeroed through the HHDM; 0 when there is none.

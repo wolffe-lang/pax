@@ -79,7 +79,8 @@
 //!   `getcwd` (79, "/"), `readlinkat`
 //!   (267, nothing is a link); `write` (1) goes to the console for the
 //!   console's descriptors, nowhere for `/dev/null`, -EBADF otherwise;
-//! - the rest: `getrandom` (318, RDRAND, else the TSC mix), `clock_
+//! - the rest: `getrandom` (318; dw02: RDRAND or a named refusal,
+//!   GRND_INSECURE RDRAND else the TSC's fold: kernel/random), `clock_
 //!   gettime` (228), `time` (201), `gettimeofday` (96) (the PIT's tick
 //!   count: PAX has no wall clock and no vDSO), `clock_nanosleep` (230)
 //!   and `nanosleep` (35) (the thread sleeps until the tick after the
@@ -219,8 +220,8 @@
 //! psABI §3.4.1 puts on a process's initial stack, from the top down:
 //! eight zero bytes; the strings (argv's, envp's, then the path,
 //! AT_EXECFN's), each with its NUL; sixteen random bytes (AT_RANDOM:
-//! RDRAND when CPUID.1:ECX bit 30 says the CPU has it, else a mix of
-//! the TSC: named, not cryptographic); then, 16-aligned at the bottom,
+//! kernel/random's insecure path, RDRAND when the source is ready, else a
+//! fold of the TSC: named, not cryptographic); then, 16-aligned at the bottom,
 //! argc, the argv pointers and a NULL, the envp pointers and a NULL,
 //! and the auxiliary vector's pairs (uapi `linux/auxvec.h`): AT_PHDR,
 //! AT_PHENT, AT_PHNUM, AT_PAGESZ (4096), AT_BASE (0: no interpreter),
@@ -266,6 +267,7 @@ use power
 use panic
 use process
 use procfs
+use random
 use ready
 use rtc
 use sched
@@ -1094,6 +1096,7 @@ const NEG_EAGAIN: u64 = 0xfffffffffffffff5 // -11
 const GRND_NONBLOCK: u64 = 1 // uapi linux/random.h
 const GRND_RANDOM: u64 = 2
 const GRND_INSECURE: u64 = 4
+const NEG_EIO: u64 = 0xfffffffffffffffb // -5 (dw02: RDRAND failed)
 
 const NEG_EPERM: u64 = 0xffffffffffffffff // -1
 const NEG_ENOSPC: u64 = 0xffffffffffffffe4 // -28 (px45: /dev/full)
@@ -1346,12 +1349,20 @@ fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
     0
 }
 
-/// `getrandom(buf, len, flags)`: len bytes (at most Linux's cap) from
-/// RDRAND, or the TSC mix on a CPU without it (`random_word`).
+/// `getrandom(buf, len, flags)`: len bytes (at most Linux's cap).
+/// dw02: flags 0, GRND_RANDOM and GRND_NONBLOCK (and /dev/random and
+/// /dev/urandom, through `read`) are kernel/random's strict path: RDRAND
+/// words, or -EAGAIN when the machine has no qualified source and -EIO when
+/// RDRAND failed (-EAGAIN for GRND_NONBLOCK either way, the one errno
+/// getrandom(2) gives a call that may not wait). PAX's "uninitialized" never
+/// ends where there is no RDRAND, so the strict call names it instead of
+/// blocking for good. GRND_INSECURE (uapi linux/random.h: "non-cryptographic
+/// random bytes") is the insecure path: RDRAND when it answers, else the
+/// time-stamp counter's fold. A request whose draw fails part way fails
+/// whole. A request for no bytes answers 0.
 fn getrandom(buf: u64, len: u64, flags: u64) -> u64 {
     // px24: the flags are read (getrandom(2)): an unknown bit, or
-    // GRND_RANDOM with GRND_INSECURE, is -EINVAL. PAX's source never
-    // waits, so GRND_NONBLOCK changes nothing.
+    // GRND_RANDOM with GRND_INSECURE, is -EINVAL.
     if flags & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0 || flags & (GRND_RANDOM | GRND_INSECURE) == (GRND_RANDOM | GRND_INSECURE) {
         return NEG_EINVAL
     }
@@ -1360,14 +1371,34 @@ fn getrandom(buf: u64, len: u64, flags: u64) -> u64 {
     if !uaccess.writable(pml4, buf, n) {
         return NEG_EFAULT
     }
-    // px131: a page at a time, filled in a frame of the kernel's (CPUID
-    // asked once a page) and copied out whole; a word at a time it was a
-    // VM exit every 8 bytes and a page walk every byte.
+    if n == 0 {
+        return 0
+    }
+    let strict = flags & GRND_INSECURE == 0
+    let nonblock = flags & GRND_NONBLOCK != 0
+    if strict {
+        let e = random.strict_errno()
+        if e != 0 {
+            return random_refusal(e, nonblock)
+        }
+    }
+    // px131: a page at a time, filled in a frame of the kernel's and copied
+    // out whole; a word at a time it was a VM exit every 8 bytes and a page
+    // walk every byte.
     let stage = frames.alloc() else 0
     var i: u64 = 0
     if stage == 0 {
         while i < n {
-            let w = process.random_word(i)
+            var w: u64 = 0
+            if strict {
+                let (e, v) = random.strict_word()
+                if e != 0 {
+                    return random_refusal(e, nonblock)
+                }
+                w = v
+            } else {
+                w = process.random_word(i)
+            }
             let k = if n - i < 8 { n - i } else { 8 }
             uaccess.put(pml4, buf + i, w, k)
             i += k
@@ -1375,14 +1406,37 @@ fn getrandom(buf: u64, len: u64, flags: u64) -> u64 {
         return n
     }
     let kva = stage + frames.hhdm()
-    while i < n {
+    var e: u64 = 0
+    while i < n && e == 0 {
         let k = if n - i < PAGE { n - i } else { PAGE }
-        process.random_fill(kva, (k + 7) & !7, i)
-        let _ok = uaccess.copy_out(pml4, buf + i, kva, k)
-        i += k
+        if strict {
+            e = random.strict_fill(kva, (k + 7) & !7)
+        } else {
+            process.random_fill(kva, (k + 7) & !7, i)
+        }
+        if e == 0 {
+            let _ok = uaccess.copy_out(pml4, buf + i, kva, k)
+            i += k
+        }
+    }
+    // dw02: the words leave no copy in a frame the kernel hands out again.
+    var z: u64 = 0
+    while z < PAGE {
+        // # Safety: the stage frame, through the HHDM.
+        unsafe { ((kva + z) as *u64).write_volatile(0) }
+        z += 8
     }
     frames.free(stage)
+    if e != 0 {
+        return random_refusal(e, nonblock)
+    }
     n
+}
+
+/// dw02: a strict request's refusal: -EAGAIN when it may not wait or when
+/// there is no qualified source (kernel/random's EAGAIN), else -EIO.
+fn random_refusal(e: u64, nonblock: bool) -> u64 {
+    if nonblock || e == random.EAGAIN { NEG_EAGAIN } else { NEG_EIO }
 }
 
 /// Nanoseconds since the timer started (CLOCK_MONOTONIC and its
@@ -2102,7 +2156,9 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
             return socket.recvfrom(a, pml4, a0, a1, a2, 0, 0, 0) // px22
         }
         if files.is_random(a, a0) {
-            return getrandom(a1, a2, 0) // px45: /dev/random, /dev/urandom
+            // px45: /dev/random, /dev/urandom; dw02: the strict path, an
+            // O_NONBLOCK descriptor as GRND_NONBLOCK
+            return getrandom(a1, a2, if files.nonblocking(a, a0) { GRND_NONBLOCK } else { 0 })
         }
         return files.read(a, pml4, a0, a1, a2)
     }
