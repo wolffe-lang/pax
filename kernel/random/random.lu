@@ -1,0 +1,316 @@
+//! random — dw02: PAX's random source, and what it promises a program.
+//!
+//! **The source.** RDRAND (CPUID.1:ECX bit 30), one 64-bit word an
+//! execution, its carry flag the only sign a value came (the Intel DRNG
+//! Software Implementation Guide, rev. 2.1, section 5.2: a zero register is
+//! no sign). A **draw** is one word: up to `TRIES` (10, the guide's section
+//! 5.2.1) executions, each refused when its carry flag is clear, and each
+//! value refused when it is 0 or all ones (AMD's bulletin SB-7055: treat a
+//! zero as CF=0; a processor whose RDRAND reported all ones with CF set has
+//! been published) or the same as the draw before (a repeat of a 64-bit
+//! word is a stuck source, never chance). A draw that uses its ten tries
+//! fails.
+//!
+//! **The states**, decided once, at the first draw of the boot (`start`):
+//! - `NONE`: the CPU has no RDRAND; there is no qualified source.
+//! - `READY`: RDRAND, and the boot's check drew `CHECK` (8) words.
+//! - `STUCK`: the check refused values (zeros, all ones or repeats) until a
+//!   draw failed.
+//! - `FAILED`: a draw failed, at the check or later. The state never goes
+//!   back to `READY` before the next boot.
+//!
+//! **Two paths.** The strict path (`strict_errno`, `strict_fill`,
+//! `strict_word`) gives RDRAND words or nothing: `EAGAIN` (11) when the
+//! state is `NONE`, `EIO` (5) when it is `STUCK` or `FAILED`; a request
+//! whose draw fails mid-way fails whole. kernel/user's getrandom serves
+//! flags 0, GRND_RANDOM and GRND_NONBLOCK, and /dev/random and /dev/urandom,
+//! from it. The insecure path (`insecure_word`, `insecure_fill`): a draw
+//! when the state is `READY`, else, or when that draw fails, the time-stamp
+//! counter folded on itself (`fold`: named, never cryptographic), which is
+//! what every word was before dw02. GRND_INSECURE, AT_RANDOM and the
+//! kernel's own words (TCP's initial sequence numbers, DHCP's transaction
+//! id) take it.
+//!
+//! **The test words.** `pax.rdrand_fail=N` on the command line makes the
+//! next N executions after the boot's check report no value;
+//! `pax.rdrand_stuck` makes every execution report all ones with its carry
+//! flag set. Each can only take words away, never add one, so neither can
+//! make a weak word pass for a strong one.
+//!
+//! `/proc/pax-random` (kernel/procfs) reads the state and the counts. No
+//! entropy pool and no generator here: RDRAND's own SP 800-90A generator is
+//! the one in use. No Linux source; no other kernel's source: the Intel DRNG
+//! Software Implementation Guide rev. 2.1 (sections 3.2, 5.2, 5.3), the
+//! Intel SDM vol. 2 (CPUID, RDRAND), AMD-SB-7055, getrandom(2), random(4),
+//! random(7) and the uapi header linux/random.h.
+
+use boot_info
+
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_rdtsc() -> u64
+extern "c" fn pax_rdrand_step() -> u64
+
+extern "c" let pax_rand: *u64
+
+// boot/fpu.S's pax_rand words: 0 is the assembly's.
+const OUT: u64 = 0 // the last RDRAND's value
+const STATE: u64 = 1 // 0 until `start`
+const LAST: u64 = 2 // the last word a draw gave
+const DRAWS: u64 = 3 // words drawn
+const RETRIED: u64 = 4 // executions that gave no value
+const REJECTED: u64 = 5 // values refused: 0, all ones, a repeat
+const FAILS: u64 = 6 // draws that used their tries
+const FOLDS: u64 = 7 // words the insecure path took from the fold
+const HOOK: u64 = 8 // pax.rdrand_fail=N: executions still to fail
+const STUCKW: u64 = 9 // pax.rdrand_stuck: 1
+const HAS: u64 = 10 // CPUID.1:ECX bit 30
+const SEED: u64 = 11 // CPUID.(7,0):EBX bit 18
+const ASKED: u64 = 12 // pax.rdrand_fail's N as the command line gave it
+
+/// The source is RDRAND and passed the boot's check.
+pub const READY: u64 = 1
+/// The CPU has no RDRAND.
+pub const NONE: u64 = 2
+/// The boot's check refused RDRAND's values.
+pub const STUCK: u64 = 3
+/// A draw used its tries.
+pub const FAILED: u64 = 4
+/// The executions a draw may take (the DRNG guide's 5.2.1).
+pub const TRIES: u64 = 10
+/// The words the boot's check draws.
+pub const CHECK: u64 = 8
+/// errno for a strict request with no qualified source.
+pub const EAGAIN: u64 = 11
+/// errno for a strict request when RDRAND failed.
+pub const EIO: u64 = 5
+
+const ALL_ONES: u64 = 0xffffffffffffffff
+const CPUID1_RDRAND: u64 = 0x40000000 // ECX bit 30
+const CPUID7_RDSEED: u64 = 0x40000 // EBX bit 18
+
+fn w(i: u64) -> u64 {
+    // # Safety: word i (< 16) of boot/fpu.S's 128-byte pax_rand.
+    unsafe { ((pax_rand as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put(i: u64, v: u64) {
+    // # Safety: as `w`.
+    unsafe { ((pax_rand as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn bump(i: u64) {
+    put(i, w(i) + 1)
+}
+
+fn cpuid(leaf: u64, sub: u64, reg: u64) -> u64 {
+    // # Safety: CPUID reads nothing and writes only its four registers.
+    unsafe { pax_cpuid(leaf, sub, reg) }
+}
+
+/// The decimal value of `key=` on the command line, 0 without one (up to
+/// nine digits; anything else is 0).
+fn number(key: str) -> u64 {
+    let (a, n) = boot_info.cmdline_value(key)
+    if n == 0 || n > 9 {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        // # Safety: inside the command line's word (`cmdline_value`), which
+        // the kernel keeps mapped.
+        let b = unsafe { ((a + i) as *u8).read_volatile() as u64 }
+        if b < 48 || b > 57 {
+            return 0
+        }
+        v = v * 10 + (b - 48)
+        i += 1
+    }
+    v
+}
+
+/// One RDRAND execution: whether a value came, and the value. The test
+/// words act here: a pending `pax.rdrand_fail` reports none, and
+/// `pax.rdrand_stuck` all ones as a success.
+fn execute() -> (bool, u64) {
+    let left = w(HOOK)
+    if left != 0 {
+        put(HOOK, left - 1)
+        return (false, 0)
+    }
+    if w(STUCKW) != 0 {
+        return (true, ALL_ONES)
+    }
+    // # Safety: called only when CPUID.1:ECX bit 30 said RDRAND exists.
+    let cf = unsafe { pax_rdrand_step() }
+    (cf == 1, w(OUT))
+}
+
+/// One draw: up to TRIES executions; a value with no carry, 0, all ones
+/// or the last draw's word is refused and tried again. False when every
+/// try was refused (the caller decides what a failure means).
+fn draw() -> (bool, u64) {
+    var t: u64 = 0
+    while t < TRIES {
+        let (ok, v) = execute()
+        t += 1
+        if !ok {
+            bump(RETRIED)
+            continue
+        }
+        if v == 0 || v == ALL_ONES || (w(DRAWS) != 0 && v == w(LAST)) {
+            bump(REJECTED)
+            continue
+        }
+        put(LAST, v)
+        bump(DRAWS)
+        return (true, v)
+    }
+    bump(FAILS)
+    (false, 0)
+}
+
+/// The state, deciding it at the boot's first call: no RDRAND is `NONE`;
+/// otherwise CHECK draws, `READY` when all came, else `STUCK` when values
+/// were refused and `FAILED` when none came. The test word
+/// `pax.rdrand_fail=N` is armed after the check, so the check itself is
+/// honest; `pax.rdrand_stuck` acts from the first execution. IF clear (a
+/// system call, or the kernel's start).
+pub fn state() -> u64 {
+    let s = w(STATE)
+    if s != 0 {
+        return s
+    }
+    let has = cpuid(1, 0, 2) & CPUID1_RDRAND != 0
+    put(HAS, if has { 1 } else { 0 })
+    let seed = cpuid(0, 0, 0) >= 7 && cpuid(7, 0, 1) & CPUID7_RDSEED != 0
+    put(SEED, if seed { 1 } else { 0 })
+    put(STUCKW, if boot_info.cmdline_has("pax.rdrand_stuck") { 1 } else { 0 })
+    if !has {
+        put(STATE, NONE)
+        return NONE
+    }
+    var k: u64 = 0
+    var st = READY
+    while k < CHECK && st == READY {
+        let (ok, _v) = draw()
+        if !ok {
+            st = if w(REJECTED) != 0 { STUCK } else { FAILED }
+        }
+        k += 1
+    }
+    let n = number("pax.rdrand_fail")
+    put(ASKED, n)
+    put(HOOK, n)
+    put(STATE, st)
+    st
+}
+
+/// Whether a strict request would be served now.
+pub fn ready() -> bool {
+    state() == READY
+}
+
+/// 0 when the strict path can serve; else its errno: EAGAIN with no
+/// qualified source, EIO when RDRAND failed. The one place a strict request
+/// consults the source's readiness (`strict_word` asks it again after a
+/// failed draw): a policy for machines without RDRAND would be decided here
+/// and nowhere else.
+pub fn strict_errno() -> u64 {
+    let s = state()
+    if s == READY { 0 } else if s == NONE { EAGAIN } else { EIO }
+}
+
+/// One strict word: (0, the word), or (the errno, 0); a failed draw marks
+/// the source `FAILED` for the rest of the boot.
+pub fn strict_word() -> (u64, u64) {
+    let e = strict_errno()
+    if e != 0 {
+        return (e, 0)
+    }
+    let (ok, v) = draw()
+    if !ok {
+        put(STATE, FAILED)
+        return (strict_errno(), 0)
+    }
+    (0, v)
+}
+
+/// `n` bytes (a multiple of 8) of strict words at kernel address `kva`
+/// (8-aligned): 0, or the errno (`strict_word`'s) with what was written
+/// to be thrown away whole.
+pub fn strict_fill(kva: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        let (e, v) = strict_word()
+        if e != 0 {
+            return e
+        }
+        // # Safety: the caller's kernel buffer holds [kva, kva + n).
+        unsafe { ((kva + i) as *u64).write_volatile(v) }
+        i += 8
+    }
+    0
+}
+
+/// The time-stamp counter folded on itself, plus `k`: what every word was
+/// before dw02 on a CPU without RDRAND. Named, never cryptographic: its
+/// top half is the counter's, so a word repeats it from the word before.
+pub fn fold(k: u64) -> u64 {
+    // # Safety: RDTSC reads the time-stamp counter, nothing else.
+    let t = unsafe { pax_rdtsc() }
+    (t ^ (t >> 17) ^ (t >> 31)) + k
+}
+
+/// One insecure word: a draw when the state is `READY` (a failed one
+/// marks it `FAILED`), else the fold.
+pub fn insecure_word(k: u64) -> u64 {
+    if state() == READY {
+        let (ok, v) = draw()
+        if ok {
+            return v
+        }
+        put(STATE, FAILED)
+    }
+    bump(FOLDS)
+    fold(k)
+}
+
+/// `n` bytes (a multiple of 8) of insecure words at kernel address `kva`
+/// (8-aligned), the fold's counter starting at `k`.
+pub fn insecure_fill(kva: u64, n: u64, k: u64) {
+    var i: u64 = 0
+    while i < n {
+        let v = insecure_word(k + i)
+        // # Safety: the caller's kernel buffer holds [kva, kva + n).
+        unsafe { ((kva + i) as *u64).write_volatile(v) }
+        i += 8
+    }
+}
+
+/// Whether CPUID says RDRAND (decided with the state).
+pub fn has_rdrand() -> bool {
+    let _s = state()
+    w(HAS) == 1
+}
+
+/// Whether CPUID says RDSEED (reported, never drawn: no generator here to
+/// seed).
+pub fn has_rdseed() -> bool {
+    let _s = state()
+    w(SEED) == 1
+}
+
+/// The counts: words drawn, executions retried, values refused, draws
+/// failed, words folded.
+pub fn counts() -> (u64, u64, u64, u64, u64) {
+    let _s = state()
+    (w(DRAWS), w(RETRIED), w(REJECTED), w(FAILS), w(FOLDS))
+}
+
+/// The test words: `pax.rdrand_fail`'s N (0 without it) and whether
+/// `pax.rdrand_stuck` is on.
+pub fn test_words() -> (u64, bool) {
+    let _s = state()
+    (w(ASKED), w(STUCKW) == 1)
+}
