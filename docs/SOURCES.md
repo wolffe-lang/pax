@@ -2411,3 +2411,16 @@ code; Linux was run as a black box in a virtual machine (its own kernel and modu
 | QEMU's documentation of `-netdev user` (`hostfwd`, the gateway's address) and RFC 862 | QEMU 8.2 | the host's pings to the guest's echo, the guest's report to the host |
 | Linux 7.2.4 (the build host's kernel, `CONFIG_PREEMPT_LAZY`, `CONFIG_HZ=1000`) and its virtio modules | binaries | black box: the comparison column (`notes/px131-long-kernel-paths.md` §7) |
 | PAX's own `boot/isr.S`, `boot/sched.S`, `boot/user.S`, `kernel/interrupts`, `kernel/sched`, `kernel/user`, `kernel/vm`, `kernel/paging`, `kernel/process`, `kernel/trace_mem`, `kernel/procfs`, `kernel/netd`, the drivers | this tree | read for the rule and the inventory; extended |
+
+## px141 — sendfile and splice onto a pty
+
+No kernel's source of any OS and no C library's source was read. The calls' rules are the man pages'; every
+answer the pages leave open is Linux's, run as a black box.
+
+| source | version | read, for |
+|---|---|---|
+| sendfile(2), splice(2), copy_file_range(2), eventfd(2), epoll_create(2), pty(7), termios(3) (OPOST, ONLCR, TOSTOP) | man-pages 6.x | the calls' arguments and errors; what a slave's output processing does to the bytes |
+| Linux 7.2.4 (a test machine's installed kernel image), run as a user on the host and booted under QEMU/KVM with `notes/px111/vminit.c` as its first program, `user/elf/ptyprobe.c`'s K rows as root and as 1000:1000 (`tests/mpx5-pty.d/linux/copy-*.txt`) | binary | black box: what `sendfile` and `splice` answer onto a pty's master and slave (the bytes the other end reads, a full end with O_NONBLOCK, SPLICE_F_NONBLOCK onto a full blocking slave, an output offset, a slave hung up, the background rule), onto /dev/null, /dev/full, an eventfd, an epoll descriptor and /proc/self/cgroup, with a count of 0, at the end of the file and from an empty pipe with no writer; boreutils' `cat` onto a slave |
+| the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
+| boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
+| PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
