@@ -410,12 +410,14 @@ fn dirty(v: u64, blk: u64) {
 }
 
 /// px68: a file's data block changed in its buffer: never journalled
-/// (data=ordered: written before the commit that names it).
-fn ddirty(v: u64, blk: u64) {
+/// (data=ordered: written before the commit that names it). 0, or the
+/// error of its write-through.
+fn ddirty(v: u64, blk: u64) -> u64 {
     let r = block.dirty(vw(v, V_DEV), blk, bs(v))
     if r != 0 {
         corrupt(v, "an I/O error writing block", blk)
     }
+    r
 }
 
 fn corrupt(v: u64, what: str, n: u64) {
@@ -1910,8 +1912,10 @@ pub fn wspan(v: u64, ino: u64, off: u64, want: u64) -> (u64, u64, u64) {
 }
 
 /// The bytes `wspan` gave the address of are written: the block dirty
-/// (a file's data: px68, never journalled).
-pub fn wrote(v: u64, blk: u64) {
+/// (a file's data: px68, never journalled). 0, or -EIO when writing it
+/// through failed; when that failed the volume (`read_only` 4), the
+/// caller writes nothing after it.
+pub fn wrote(v: u64, blk: u64) -> u64 {
     ddirty(v, blk)
 }
 
@@ -2050,7 +2054,7 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
             let a = get(v, blk)
             if a != 0 {
                 zero_bytes(a + n % b, b - n % b)
-                ddirty(v, blk) // px68: a regular file's last block: data
+                let _d = ddirty(v, blk) // px68: a regular file's last block: data
             }
         }
     }
@@ -2078,7 +2082,7 @@ pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) {
             let a = get(v, blk)
             if a != 0 {
                 zero_bytes(a + o, c)
-                ddirty(v, blk) // px68: data
+                let _d = ddirty(v, blk) // px68: data
             }
         }
         p += c
