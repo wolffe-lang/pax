@@ -1,0 +1,30 @@
+# notes/px131/rig/final-2.manifest — the second part's one take at its head: green-2a's (the planner, the guard with
+# the clock, wake-up and flood rows on both firmwares at 1 GiB and BIOS at 2 GiB under KVM and BIOS under TCG, the
+# scheduler, the interrupts), green-2b's (the suites whose waits the change reaches, against Linux where they have
+# a side), the release tier (the guard on both firmwares, the scheduler, the interrupts), the USB session's
+# selftest, the kernels without kernel/latency at both tiers (kernel/timer's word in boot/isr.S), and
+# tests/kernel-as at both tiers (the kernel's assembly through GNU as and clef).
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px131/rig/lib.sh
+rig engine-ns committed=../../..:HEAD:notes/px131/rig/engine-ns
+rig final-2.manifest committed=../../..:HEAD:notes/px131/rig/final-2.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step latency image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier native --firmware both --mem 1024 --accel kvm
+step latency-2g image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier native --firmware bios --mem 2048 --accel kvm
+step latency-tcg image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier native --firmware bios --mem 1024 --accel tcg
+step sched image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-sched --tier native --firmware bios
+step interrupts image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-interrupts --tier native --firmware bios
+step user image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx3-user --tier native --firmware bios
+step threads image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx3-threads --tier native --firmware bios
+step console image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx3-console --tier native --firmware bios
+step pty image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx5-pty --tier native --firmware bios
+step udp image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx4-udp --tier native --firmware bios
+step usb-session-selftest image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- suite usb-session-selftest
+step usb image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,readelf,curl,xorriso script=step.sh -- suite mpx6-usb --tier native --firmware bios
+step latency-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,gcc,readelf,curl,xorriso script=step.sh -- suite mpx6-latency --tier release --firmware both --mem 1024 --accel kvm
+step sched-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-sched --tier release --firmware bios
+step interrupts-release image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,readelf,curl,xorriso script=step.sh -- suite mpx2-interrupts --tier release --firmware bios
+step kernels-native image=localhost/px75-ubuntu:2 tools=python3,readelf,curl,xorriso script=step.sh -- kernels native kmain_usbcheck kmain_metal_msi kmain_metal_panic kmain_metal_power kmain_metal_screen kmain_metal_serial
+step kernels-release image=localhost/px75-ubuntu:2 tools=python3,readelf,curl,xorriso script=step.sh -- kernels release kmain_usbcheck kmain_metal_msi kmain_metal_panic kmain_metal_power kmain_metal_screen kmain_metal_serial
+step kernel-as image=localhost/px75-ubuntu:2 tools=cc,clang,as,ld.lld,nm,objdump,git,curl,strip,readelf,tar script=step.sh -- kernel-as --tier native
+step kernel-as-release image=localhost/px75-ubuntu:2 tools=cc,clang,as,ld.lld,nm,objdump,git,curl,strip,readelf,tar script=step.sh -- kernel-as --tier release

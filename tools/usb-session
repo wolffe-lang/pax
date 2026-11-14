@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import time
 
 KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
@@ -21,7 +22,28 @@ KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
 # hold the guest saw (run 41153232393 attempt 2: 6 reports). At 250 ms
 # then 33 ms a report, 100 ticks give 24 or 25; at least 15 are wanted.
 # The Linux guest (no symbols to read) keeps the 1000 ms wall-clock hold.
+# px131: since PAX's tick count follows its clock (kernel/timer's
+# follow_clock), CLOCK_MONOTONIC, the repeat's deadlines and the poll
+# timeout keep real time: a stalled vCPU's lost ticks no longer stop them,
+# they jump. The hold counts the tick interrupts the guest took instead
+# (boot/isr.S's pax_tick_delivered, where the kernel has it), so a stall
+# still lengthens it; and a repeat interval that spans ticks the guest lost
+# (its count ran ahead of its interrupts there) is left out of the period's
+# figures, as a stall the host made, not the repeat's timing. At least
+# CLEAN_INTERVALS must be left.
 HOLD_TICKS = 100
+CLEAN_INTERVALS = 8
+# px131: a host can stall the guest through a hold past measuring the repeat
+# at all (fewer than CLEAN_INTERVALS clean intervals): that is `repeat
+# unmeasured`, neither the kernel's pass nor its failure. The session is
+# then held again, each time a fresh boot, at most HOLDS times in all; a
+# measured result, a pass or a failure, is final at once and never held
+# again. HOLDS unmeasured holds are a red under their own name
+# (`FAIL R-unmeasured …`, exit UNMEASURED_EXIT), told apart from a failing
+# kernel (exit 1).
+HOLDS = 3
+UNMEASURED_EXIT = 3
+NS_PER_TICK = 10000151 # PAX's CLOCK_MONOTONIC: kernel/user's ticks times this
 HOLD_WALL_SECONDS = 30
 MIN_REPORTS = 15
 # Bytes that are `a` with a modifier still applied (the console's own
@@ -52,6 +74,45 @@ def repeat_verdict(row, hold):
     return values
 
 
+class Unmeasured(RuntimeError):
+    """px131: the host stalled the guest through the hold past measuring
+    the repeat: neither a pass nor a failure of the kernel's."""
+
+
+def repeat_period(stamps, t0, samples):
+    """px131: the repeat's delay and period from the probe's stamps (ns after
+    its first read, which was at `t0` ns of the guest's CLOCK_MONOTONIC, or
+    None), leaving out every interval that spans ticks the guest lost.
+    `samples` are (count, delivered) pairs polled through the hold, empty
+    where the kernel has no delivered counter. Returns (delay, median,
+    mean, losses, intervals left out); raises RuntimeError by name."""
+    # the losses, as count ranges (lo, hi]: where the count ran ahead of
+    # the interrupts by more than it had before (the count is read first,
+    # so a tick between the two reads only ever puts the interrupts ahead)
+    lost = []
+    ahead = None
+    for (c0, _d0), (c1, d1) in zip(samples, samples[1:]):
+        gap = c1 - d1
+        if ahead is not None and gap > ahead:
+            lost.append((c0, c1))
+        ahead = gap if ahead is None else max(ahead, gap)
+    ticks = [(t0 + a) // NS_PER_TICK for a in stamps] if lost and t0 is not None else None
+    def stalled(i):
+        # stamps i and i+1 (their ticks, one either side) hold a loss
+        return ticks is not None and any(lo < ticks[i + 1] + 1 and hi > ticks[i] - 1 for lo, hi in lost)
+    delay = stamps[1] / 1e6
+    intervals = [(b - a) / 1e6 for i, (a, b) in enumerate(zip(stamps[1:], stamps[2:])) if not stalled(i + 1)]
+    left_out = len(stamps) - 2 - len(intervals)
+    if len(intervals) < CLEAN_INTERVALS:
+        raise Unmeasured(f'repeat unmeasured: {left_out} of {len(stamps) - 2} intervals span ticks the guest lost '
+                           f'({len(lost)} losses in the hold), {len(intervals)} left')
+    median = sorted(intervals)[len(intervals) // 2]
+    mean = sum(intervals) / len(intervals)
+    if not (stalled(0) or 220 <= delay <= 320) or not 20 <= median <= 45 or not 31 <= mean <= 37:
+        raise RuntimeError(f'repeat outside measured tolerance: {delay=} {median=} {mean=} ({left_out} intervals left out)')
+    return delay, median, mean, lost, left_out
+
+
 def run(args):
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -78,7 +139,11 @@ def run(args):
         symbols=subprocess.check_output(['nm',str(elf)],text=True)
         addresses={name:int(address,16)-(1<<64) for address,kind,name in
                    (line.split() for line in symbols.splitlines() if len(line.split())==3)
-                   if name in ('pax_serial_log_count','pax_serial_log','pax_tick_count')}
+                   if name in ('pax_serial_log_count','pax_serial_log','pax_tick_count','pax_tick_delivered')}
+        # px131: kernel/timer's count of tick interrupts taken (absent from
+        # kernels before px131)
+        if 'pax_tick_delivered' in addresses:
+            addresses['delivered'] = addresses.pop('pax_tick_delivered')
         if 'pax_tick_count' not in addresses:
             raise RuntimeError(f'no pax_tick_count in {elf}: the repeat row is held for the guest\'s ticks (--elf)')
     if args.no_serial:
@@ -152,9 +217,12 @@ def run(args):
                 serial.write_bytes(data)
                 return data
 
-            def guest_ticks():
-                execute('memsave', {'val':addresses['pax_tick_count'],'size':8,'filename':str(out/'ticks.bin')})
+            def guest_ticks(word='pax_tick_count'):
+                where = addresses['pax_tick_count'] if word == 'pax_tick_count' else addresses[word]
+                execute('memsave', {'val':where,'size':8,'filename':str(out/'ticks.bin')})
                 return int.from_bytes((out/'ticks.bin').read_bytes(),'little')
+            # px131: (count, delivered) at each poll of the hold
+            samples = []
 
             def hold_for_ticks(execute):
                 # px85 (pax#261): press, wait for HOLD_TICKS of the guest's
@@ -163,12 +231,22 @@ def run(args):
                 def key(down):
                     execute('input-send-event', {'events':[{'type':'key', 'data':{
                         'down':down, 'key':{'type':'qcode','data':'a'}}}]})
-                first = guest_ticks()
+                held = 'delivered' if 'delivered' in addresses else 'pax_tick_count'
+                count0 = guest_ticks() # the count first, as at every poll
+                first = guest_ticks(held)
+                # the polls, kept beside the transcript: seconds into the hold, the count, the interrupts taken
+                hold_log = (out / 'hold.txt').open('w')
+                if held == 'delivered':
+                    samples.append((count0, first)) # before the press: a loss there counts too
+                    hold_log.write(f'0 {count0} {first}\n')
                 began = time.monotonic()
                 key(True)
                 until = began + HOLD_WALL_SECONDS
                 while True:
-                    now = guest_ticks()
+                    now = guest_ticks(held)
+                    if held == 'delivered':
+                        samples.append((guest_ticks(), now))
+                        hold_log.write(f'{time.monotonic() - began:.4f} {samples[-1][0]} {now}\n')
                     if now - first >= HOLD_TICKS:
                         break
                     if time.monotonic() > until:
@@ -273,20 +351,59 @@ def run(args):
     stamps = list(map(int, times[0].split()[1:]))
     if len(stamps) != len(repeat) or stamps[0] != 0:
         raise RuntimeError('repeat timestamp shape')
-    delay = stamps[1] / 1e6
-    intervals = [(b-a)/1e6 for a,b in zip(stamps[1:], stamps[2:])]
-    median = sorted(intervals)[len(intervals)//2]
-    mean = sum(intervals)/len(intervals)
-    if not 220 <= delay <= 320 or not 20 <= median <= 45 or not 31 <= mean <= 37:
-        raise RuntimeError(f'repeat outside measured tolerance: {delay=} {median=} {mean=}')
+    t0 = [line for line in lines if line.startswith('USBT0 ')]
+    delay, median, mean, lost, left_out = repeat_period(stamps, int(t0[0].split()[1]) if len(t0) == 1 else None, samples)
     (out / 'rows.txt').write_text('\n'.join(normalized)+'\n')
-    held = f'hold_ticks {hold}\nhold_wall_s {hold_wall:.3f}\n' if hold is not None else 'hold_wall_ms 1000\n'
-    (out / 'repeat.txt').write_text(f'delay_ms {delay:.3f}\nmedian_period_ms {median:.3f}\nmean_period_ms {mean:.3f}\nreports {len(repeat)}\n{held}')
+    word = 'pax_tick_delivered' if 'delivered' in addresses else 'pax_tick_count' # px131: the word the hold counted
+    held = f'hold_ticks {hold}\nhold_counts {word}\nhold_wall_s {hold_wall:.3f}\n' if hold is not None else 'hold_wall_ms 1000\n'
+    (out / 'repeat.txt').write_text(f'delay_ms {delay:.3f}\nmedian_period_ms {median:.3f}\nmean_period_ms {mean:.3f}\nreports {len(repeat)}\n{held}'
+                                    f'lost_spans {len(lost)}\nintervals_left_out {left_out}\n')
     if args.reference:
         expected = Path(args.reference).read_text().splitlines()
         if normalized != expected:
             raise RuntimeError(f'Linux differential mismatch\nexpected={expected!r}\nactual={normalized!r}')
     print(f'PASS USB {args.topology} {args.firmware}: {len(rows)} rows, delay {delay:.3f}ms, period {median:.3f}ms', flush=True)
+
+
+def session(args, run_once=None):
+    """px131: `run` up to HOLDS times while the repeat is unmeasured, each
+    hold a fresh boot in its own directory (OUTPUT, then OUTPUT-hold2,
+    OUTPUT-hold3) and each printed; a measured result is final at once (a
+    failure raises). OUTPUT/holds.txt lists every hold. Returns 0, or
+    UNMEASURED_EXIT after HOLDS unmeasured holds."""
+    run_once = run_once or run
+    first = Path(args.output).resolve()
+    first.mkdir(parents=True, exist_ok=True)
+    (first / 'holds.txt').unlink(missing_ok=True)
+    seen = []
+    for hold in range(1, HOLDS + 1):
+        out = first if hold == 1 else first.with_name(f'{first.name}-hold{hold}')
+        error = None
+        try:
+            run_once(argparse.Namespace(**{**vars(args), 'output': str(out)}))
+        except Unmeasured as unmeasured:
+            error = unmeasured # (an `as` name is unbound after its block)
+        except RuntimeError as failure:
+            with (first / 'holds.txt').open('a') as log:
+                log.write(f'{hold} failed {out.name} {failure}\n')
+            raise
+        if error is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / 'repeat.txt').write_text(f'verdict unmeasured\nhold {hold} of {HOLDS}\nreason {error}\n')
+            seen.append(f'hold {hold}: {error}')
+            with (first / 'holds.txt').open('a') as log:
+                log.write(f'{hold} unmeasured {out.name} {error}\n')
+            print(f'NOTE USB {args.topology} {args.firmware}: {error} (hold {hold} of {HOLDS})'
+                  + ('; held again, a fresh boot' if hold < HOLDS else ''), flush=True)
+            continue
+        with (out / 'repeat.txt').open('a') as result:
+            result.write(f'verdict measured\nhold {hold} of {HOLDS}\n')
+        with (first / 'holds.txt').open('a') as log:
+            log.write(f'{hold} measured {out.name}\n')
+        return 0
+    print(f'FAIL R-unmeasured {args.firmware}-{args.topology}: the host stalled the guest past measuring the repeat '
+          f'in {HOLDS} of {HOLDS} holds ({"; ".join(seen)})', flush=True)
+    return UNMEASURED_EXIT
 
 
 if __name__ == '__main__':
@@ -302,4 +419,4 @@ if __name__ == '__main__':
     parser.add_argument('--qemu', action='append', default=[], help='one extra QEMU argument, repeatable')
     parser.add_argument('--flag', action='append', default=[], help='one tools/qemu-run flag, repeatable (px76)')
     parser.add_argument('--elf', help='--no-serial: the kernel whose symbols place the transcript (default: kmain_console.elf beside the image)')
-    run(parser.parse_args())
+    sys.exit(session(parser.parse_args()))
