@@ -1063,13 +1063,16 @@ pub fn truncate(i: u64, size: u64) -> u64 {
 /// page with no frame is a hole already; the frames under the range are
 /// kept, zeroed (named: tmpfs gives a whole page back, so `st_blocks`
 /// is not Linux's after a punch). 0, or kernel/ext2's -EROFS or -EIO for
-/// a volume that failed: then no frame is zeroed and no time moves.
+/// a volume that failed: then only the frames over the bytes it had
+/// already zeroed are zeroed (the page cache stays what the volume's
+/// buffers hold), and no time moves.
 pub fn punch(i: u64, off: u64, len: u64) -> u64 {
     let size = bytes(i)
     if on_volume(i) && off < size {
         let end = if len < size - off { off + len } else { size }
-        let r = ext2.zero_range(vol(i), vino(i), off, end - off) // px63: the blocks kept, zeroed
+        let (r, done) = ext2.zero_range(vol(i), vino(i), off, end - off) // px63: the blocks kept, zeroed
         if r != 0 {
+            zero_frames(i, off, off + done)
             return r
         }
     }
@@ -1078,6 +1081,14 @@ pub fn punch(i: u64, off: u64, len: u64) -> u64 {
         return 0
     }
     let end = if len < size - off { off + len } else { size }
+    zero_frames(i, off, end)
+    touch_change(i)
+    0
+}
+
+/// The bytes of file `i` in [off, end) zeroed in the frames that hold
+/// them (a page with no frame reads from elsewhere).
+fn zero_frames(i: u64, off: u64, end: u64) {
     var p = off
     while p < end {
         let po = p % PAGE
@@ -1088,8 +1099,6 @@ pub fn punch(i: u64, off: u64, len: u64) -> u64 {
         }
         p += c
     }
-    touch_change(i)
-    0
 }
 
 // --- directories -----------------------------------------------------------------
