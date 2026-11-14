@@ -119,9 +119,20 @@ int main(void) {
         int fd = open("/volume/two", O_WRONLY);
         result("punch-open", fd);
         if (fd < 0) done();
+        int empty = -1;
+        if (!strcmp(which, "punch-error")) {
+            empty = open("/volume/empty", O_CREAT|O_RDWR|O_EXCL, 0600);
+            result("punch-empty-open", empty);
+        }
         result("punch", fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 8192));
         if (!strcmp(which, "punch-error")) {
             result("punch-after", fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096));
+            /* The failed volume refuses a punch that reaches no block too. */
+            result("punch-at-eof", fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 8192, 4096));
+            if (empty >= 0) {
+                result("punch-empty", fallocate(empty, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096));
+                close(empty);
+            }
         }
         result("punch-sync", fsync(fd));
         close(fd);
