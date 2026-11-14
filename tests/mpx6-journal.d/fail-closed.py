@@ -113,13 +113,18 @@ def flush_error_rule(target):
 
 
 def write_error_rule(target, sector):
+    return access_error_rule("write", target, sector)
+
+
+def access_error_rule(kind, target, sector):
+    """Fail the target-th guest request of `kind` (read or write) at `sector`."""
     if target < 1:
-        raise RuntimeError("a write fault needs a measured write ordinal")
+        raise RuntimeError("a " + kind + " fault needs a measured " + kind + " ordinal")
     stages = []
     for state in range(1, target):
-        stages.append('[set-state]\nevent = "write_aio"\n'
+        stages.append(f'[set-state]\nevent = "{kind}_aio"\n'
                       f'state = "{state}"\nnew_state = "{state + 1}"\n')
-    stages.append('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
+    stages.append(f'[inject-error]\nevent = "{kind}_aio"\niotype = "{kind}"\n'
                   f'state = "{target}"\nsector = "{sector}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
     return "\n".join(stages)
 
@@ -215,10 +220,11 @@ class Rows:
                 valid = valid and not descriptors and not commits
             elif stage == "otrunc-bitmap":
                 # The mount finished (its mounted-state write), and this is the
-                # bitmap's first read: the truncate's, nothing earlier.
+                # bitmap's first read since: the truncate's (boot and mount read it earlier).
                 valid = valid and not descriptors and not commits
-                valid = valid and any(e[0] == "write" and e[1] == 0 and e[3] == 0 for e in before)
-                valid = valid and not any(e[0] == "read" and e[1] == event[1] for e in before)
+                mounted = [i for i, e in enumerate(before) if e[0] == "write" and e[1] == 0 and e[3] == 0]
+                valid = valid and bool(mounted) and not any(e[0] == "read" and e[1] == event[1]
+                                                            for e in before[mounted[0] + 1:])
             elif stage == "precommit":
                 valid = valid and bool(descriptors) and not commits
             elif stage in ("checkpoint", "cache-home"):
@@ -621,20 +627,26 @@ class Rows:
         events = self.requests("otrunc-control")
         check = process(["e2fsck", "-fn", str(control)], capture_output=True, text=True)
         (self.out / "otrunc-control.fsck.txt").write_text(check.stdout + check.stderr)
+        # Boot and mount read the bitmap's block too; the truncate's read is the
+        # first after the mount's mounted-state write. Measure its read ordinal.
         mounted = [i for i, e in enumerate(events) if e[0] == "write" and e[1] == 0]
-        bitmap = [i for i, e in enumerate(events) if e[0] == "read" and e[1] == bb * 8]
+        bitmap = [i for i, e in enumerate(events) if e[0] == "read" and e[1] == bb * 8
+                  and mounted and i > mounted[0]]
         opened = value(text, "otrunc-open")
-        self.row("JF-otrunc-control", opened is not None and opened[0] >= 0
-                 and value(text, "otrunc-fsync") == (0, 0) and value(text, "unmount") == (0, 0)
-                 and bool(mounted) and bool(bitmap) and bitmap[0] > mounted[0]
-                 and file_blocks(control, b"old") == []
-                 and check.returncode == 0 and all(e[3] == 0 for e in events),
-                 "a healthy O_TRUNC open frees the file's block; the bitmap is first read by that truncate; fsck clean")
+        ok = (opened is not None and opened[0] >= 0
+              and value(text, "otrunc-fsync") == (0, 0) and value(text, "unmount") == (0, 0)
+              and bool(bitmap) and file_blocks(control, b"old") == []
+              and check.returncode == 0 and all(e[3] == 0 for e in events))
+        self.row("JF-otrunc-control", ok,
+                 "a healthy O_TRUNC open frees the file's block, reading the bitmap after the mount; fsck clean")
         name = "JF-otrunc-EIO"
+        if not ok:
+            self.row(name, False, "needs its healthy control's measured read")
+            return
+        ordinal = sum(1 for e in events[:bitmap[0] + 1] if e[0] == "read")
         disk = self.image(name)
         cfg = self.out / (name + ".cfg")
-        cfg.write_text('[inject-error]\nevent = "read_aio"\niotype = "read"\n'
-                       f'sector = "{bb * 8}"\nerrno = "5"\nonce = "on"\nimmediately = "off"\n')
+        cfg.write_text(access_error_rule("read", ordinal, bb * 8))
         text = self.boot(name, disk, "otrunc-error", cfg=cfg)
         fault_ok = self.fault(name, disk, "read", bb * 8, "otrunc-bitmap")
         events = self.requests(name)
