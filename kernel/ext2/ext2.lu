@@ -2066,15 +2066,21 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
 /// The `n` bytes of inode `ino` from `off` read as zeros: zeroed in the
 /// blocks that hold them, holes left holes (fallocate's
 /// FALLOC_FL_PUNCH_HOLE: the blocks are kept, as kernel/tree keeps a
-/// frame).
-pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) {
+/// frame). 0; -EROFS on a volume that takes no writes; -EIO when a
+/// device error during it failed the volume (no block after it zeroed).
+pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) -> u64 {
     if read_only(v) != 0 {
-        return
+        return neg(EROFS)
     }
     let b = bs(v)
     var p = off
     let end = off + n
     while p < end {
+        // A block's failed write-through fails a journalled volume: stop
+        // there (a plain volume's dirty block waits for its sync's retry).
+        if read_only(v) != 0 {
+            return neg(EIO)
+        }
         let o = p % b
         let c = if end - p < b - o { end - p } else { b - o }
         let (blk, _m) = bmap(v, ino, p / b, false)
@@ -2082,11 +2088,12 @@ pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) {
             let a = get(v, blk)
             if a != 0 {
                 zero_bytes(a + o, c)
-                let _d = ddirty(v, blk) // px68: data
+                let _d = ddirty(v, blk) // px68: data; its failure is read_only's
             }
         }
         p += c
     }
+    if read_only(v) != 0 { neg(EIO) } else { 0 }
 }
 
 // --- symbolic links ----------------------------------------------------------------
