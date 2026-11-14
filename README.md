@@ -413,13 +413,18 @@ its first write. The internal journal must be version 2, belong to this filesyst
 its revoke feature is supported. Unsupported feature words, external-journal identifiers and a recorded journal
 error are refused by name, without falling back to plain writes.
 
-On a mounted volume, a journal write, barrier, checkpoint or bitmap-snapshot failure aborts that journal for the rest
-of the boot. Later syncs return `EIO`, further mutation is refused, and a failed unmount keeps ownership of its recovery state.
-Any device error on the journalled volume's disk counts, including an unmount's or remount's last superblock write or
-barrier after the journal has closed, even when a retry of that write succeeds: the call returns `EIO` and the volume
-stays mounted and claimed, so it cannot be mounted again in the same boot. A write or truncate in progress when the
-journal aborts returns `EIO` (a write that had already written earlier blocks returns their count) and writes nothing more.
-Reboot recovery is needed before writes can resume. Ordered data does not roll back an unsynced overwrite of an
+On a volume mounted or remounted writable, a journal write, barrier, checkpoint or bitmap-snapshot failure aborts that
+journal. Later syncs return `EIO`, further mutation is refused, and a failed unmount keeps ownership of its recovery state.
+Any device error on the journalled volume's disk while it is writable counts, including an unmount's or remount's last
+superblock write or barrier after the journal has closed, even when a retry of that write succeeds: the call returns
+`EIO` and the volume stays mounted and claimed, so it cannot be mounted again in the same boot. A write, hole punch,
+truncate or `O_TRUNC` open in progress when the journal aborts returns `EIO` (a write that had already written earlier
+blocks returns their count), and nothing more is written. Reboot recovery is needed before writes can resume.
+
+A barrier that fails before anything is written is a refusal, not a failed writable volume: a writable mount, or a
+writable remount of a read-only volume, returns `EIO` and writes nothing. A read-only volume stays read-only, refuses
+syncs from then on, and can still be unmounted, since it has nothing unwritten; a later mount must pass its own barrier
+before its first write. Ordered data does not roll back an unsynced overwrite of an
 already allocated file block, and the `ext3` mount label alone is not a descriptor-bound journal-health answer.
 Plain ext2 keeps its existing behavior on a device without flush support, but its mount warns that successful sync
 is not a durability guarantee.
