@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# mklogd — build /bin/logd (user/logd) and /bin/last (user/last), px133's programs of the system's
+# logs, as fully static x86-64 Linux executables, with kernel/wolf.pin's wolf.
+#
+#   tools/mklogd OUTDIR
+#
+# Built as /bin/dmesg is (tools/mkdmesg, px130): pax's own wolf (the release archive kernel/wolf.pin
+# names, tools/fetch-wolf; $PAX_WOLF when set), builtins only (no wolf-std), each program's directory
+# with user/auth/utmp.lu beside its main file (wolf compiles a directory's files together: the login
+# records' layout is one file for login, logd and last), logd's raw.S membrane, the release tier
+# (`wolf build --release --deny-warnings`), linked through a `cc` that adds `-static`, checked with
+# readelf (ET_EXEC, no PT_INTERP); `OUTDIR/sums.txt` gets `NAME <sha256> <bytes>` of each. /bin/lastb
+# is a link to last (tools/distribution-root), as util-linux installs it. Build on a baseline x86-64
+# glibc (the CI runner's Ubuntu or an Ubuntu container). The release tier needs clang at run time.
+# Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mklogd OUTDIR"
+out=$1
+need readelf cc clang
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+wolf=${PAX_WOLF:-}
+[ -n "$wolf" ] || wolf=$("$PAX_ROOT/tools/fetch-wolf") || die "tools/fetch-wolf"
+say "$("$wolf" --version | head -n 1)"
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-logd.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+mkdir -p "$w/bin"
+real=$(command -v cc)
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$real" > "$w/bin/cc"
+chmod +x "$w/bin/cc"
+
+: > "$out/sums.txt"
+for p in logd last; do
+    cp -R "$PAX_ROOT/user/$p" "$w/$p"
+    cp "$PAX_ROOT/user/auth/utmp.lu" "$w/$p/utmp.lu"
+    (cd "$w/$p" && PATH="$w/bin:$PATH" \
+        "$wolf" build --release --no-cache --deny-warnings "$p.lu" -o "$out/$p") >&2 \
+        || die "wolf build of user/$p/$p.lu (with user/auth/utmp.lu)"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')" | tee -a "$out/sums.txt"
+done
