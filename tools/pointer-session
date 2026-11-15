@@ -556,10 +556,40 @@ def validate_qcodes(names, allowed):
 
 
 def qkeycode_values(schema):
-    entry = next((s for s in schema if s.get('name') == 'QKeyCode' and s.get('meta-type') == 'enum'), None)
-    if entry is None:
-        raise HarnessError('QEMU schema has no QKeyCode enum')
-    return {m['name'] for m in entry.get('members', [])} | set(entry.get('values', []))
+    """Follow QMP's wire fields; introspection type IDs are opaque."""
+    types = {entry['name']: entry for entry in schema}
+
+    def node(ref, kind):
+        value = types.get(ref)
+        if value is None or value.get('meta-type') != kind:
+            raise HarnessError(f'QMP schema reference {ref!r} is not a {kind}')
+        return value
+
+    def member(value, name, kind):
+        found = [m for m in value.get('members', []) if m['name'] == name]
+        if len(found) != 1:
+            raise HarnessError(f'QMP schema {value["name"]!r} has no unique member {name!r}')
+        return node(found[0]['type'], kind)
+
+    def variant(value, case):
+        found = [v for v in value.get('variants', []) if v['case'] == case]
+        if len(found) != 1:
+            raise HarnessError(f'QMP schema {value["name"]!r} has no unique variant {case!r}')
+        return node(found[0]['type'], 'object')
+
+    command = node('input-send-event', 'command')
+    arguments = node(command['arg-type'], 'object')
+    events = member(arguments, 'events', 'array')
+    event = node(events['element-type'], 'object')
+    key_event = member(variant(event, 'key'), 'data', 'object')
+    key_value = member(key_event, 'key', 'object')
+    enum = member(variant(key_value, 'qcode'), 'data', 'enum')
+    values = enum.get('values')
+    if values is None:
+        values = [m['name'] for m in enum.get('members', [])]
+    if not isinstance(values, list) or not values or any(not isinstance(v, str) for v in values):
+        raise HarnessError('QMP qcode enum has no valid values')
+    return set(values)
 
 
 def check_yew_keys(out):
