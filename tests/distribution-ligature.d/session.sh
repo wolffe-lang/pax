@@ -11,19 +11,19 @@ T=/tmp/l
 rm -rf $T && mkdir -p $T && cd $T || exit 1
 cp -R $S/src/. $T/ || exit 1
 LX=/usr/libexec/distribution-ligature/ldtime
-# px142's L8 probe (never shipped): free memory and every process above 16 MiB resident, before each build
-# and at each link (ldtime runs linkmem.sh, which reads them and then execs the real linker).
+# px142's L8 probe (never shipped): free memory and every process above 4 MiB resident, before each build
+# and at each link (ldtime runs linkmem.sh, which reads them into mem.log, printed at the end, then execs the linker).
 cat > $T/memfn.sh <<'MEM'
 mem() {
     echo "DLIG mem $1 $(grep MemFree /proc/meminfo | tr -s ' ')"
     for d in /proc/[0-9]*; do
         r=$(grep '^VmRSS' $d/status 2>/dev/null | tr -s ' ' | cut -d ' ' -f 2)
-        [ -n "$r" ] && [ "$r" -gt 16384 ] && echo "DLIG mem $1 proc $(grep '^Name' $d/status 2>/dev/null | cut -f 2) ${d#/proc/} $r kB"
+        [ -n "$r" ] && [ "$r" -gt 4096 ] && echo "DLIG mem $1 proc $(grep '^Name' $d/status 2>/dev/null | cut -f 2) ${d#/proc/} $r kB"
     done
 }
 MEM
 . $T/memfn.sh
-printf '#!/bin/sh\n. %s/memfn.sh\nmem "link-$LDTIME_LABEL"\nexec "$LINKMEM_REAL" "$@"\n' $T > $T/linkmem.sh
+printf '#!/bin/sh\n. %s/memfn.sh\nmem "link-$LDTIME_LABEL" >> %s/mem.log 2>&1\nexec "$LINKMEM_REAL" "$@"\n' $T $T > $T/linkmem.sh
 chmod 755 $T/linkmem.sh
 mem start
 echo "DLIG env WOLF_LD=[${WOLF_LD-unset}]"
@@ -112,4 +112,5 @@ grep -e 'selected linker' -e 'ligature' -e 'no-sysroot' $T/refused.build | head 
     while IFS= read -r l; do echo "DLIG why refused: $l"; done
 # (the image has no sed: the shell's own loop prefixes each line)
 [ -f $T/ldtime.log ] && while IFS= read -r l; do echo "DLIG $l"; done < $T/ldtime.log
+[ -f $T/mem.log ] && cat $T/mem.log
 echo "DLIG end session"
