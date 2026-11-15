@@ -1,0 +1,583 @@
+//! kmsg — the kernel's lines kept (px130): every line kernel/log writes,
+//! as a record in a ring of fixed size, for syslog(2) and /dev/kmsg
+//! (kernel/user, kernel/files) to read back; and the console level
+//! kernel/log asks before a line reaches the screen.
+//!
+//! **The ring.** CAP bytes (128 KiB) of boot/console.S's storage
+//! (`pax_kmsg_buf`). A record is three words and its text, padded to a
+//! word: its sequence number (0 for the boot's first line, one more for
+//! each line after), its time in microseconds (the tick count, the clock
+//! CLOCK_MONOTONIC reads: 0 until the tick starts, then steps of 10 ms)
+//! and `level | facility << 3 | length << 16`, then up to LINE_CAP bytes
+//! of text (a longer line is cut there; the serial port still has it
+//! whole). Records follow one another; one that does not fit before the
+//! ring's end goes to its start, a WRAP word left where it would have
+//! begun. A record that needs room drops the oldest records, whole, as
+//! many as it takes: the ring holds the newest lines and their sequence
+//! numbers run on, so a reader can tell how many it lost. Nothing
+//! survives a reboot: the storage is .bss, zeroed by every boot (the
+//! boot's own bytes are kernel/bootlog's, px118).
+//!
+//! **A line** is staged byte by byte (`stage`, kernel/log's every byte
+//! but a line's CR LF) and becomes a record at its end (`commit`, with
+//! its level and facility). The kernel writes with IF clear, and a
+//! thread that writes with it set holds `sync.console()` across its line
+//! (kernel/log), so one line is staged at a time; an NMI's line written
+//! in the middle of another would be mixed into it, as it is on the
+//! serial port. A write to /dev/kmsg is staged apart (`user_byte`,
+//! `inject`), never into a kernel line.
+//!
+//! **Levels** are syslog's (syslog(2), `/proc/sys/kernel/printk`): 0
+//! emerg to 7 debug, 4 (warning) for a line written without one (Linux's
+//! default_message_loglevel). The console level is console_loglevel: a
+//! line whose level is below it reaches the screen. It is 8 (every line)
+//! until something lowers it: `quiet` on the kernel command line, once
+//! the first program starts (`past_boot`: 5, so warnings and worse still
+//! show), `loglevel=N` from the start, syslog(2)'s actions 6-8 (`dmesg
+//! -n`) at any time (kernel/log and kernel/user). Kept as `8 - level` so
+//! the zeroed storage reads 8.
+//!
+//! **Readers.** A reader holds a sequence number; `at` finds its record
+//! (a walk from the oldest, the reader's last offset tried first), and
+//! `format` writes one record into `pax_kmsg_out` in /dev/kmsg's form
+//! (`PRI,SEQ,USEC,-;TEXT\n`, every byte below 0x20, above 0x7e and `\`
+//! as `\xNN`) or syslog(2)'s (`<PRI>[SSSSS.UUUUUU] TEXT\n`). A reader
+//! that waits sets `want`; the next record sets `due`, and kernel/sched's
+//! `wake_sleepers` takes it (`take_due`) and makes every waiting pipe
+//! reader ready, which runs its read again. This module calls nothing:
+//! kernel/log, kernel/files, kernel/user, kernel/procfs and kernel/sched
+//! all sit above it.
+//!
+//! Written from the kernel's documentation (Documentation/ABI/testing/
+//! dev-kmsg: the record format, the seek rules, -EPIPE and -EAGAIN; the
+//! admin guide's sysctl/kernel.rst: printk's four values,
+//! dmesg_restrict) and syslog(2). No Linux source; no other kernel's
+//! source.
+
+extern "c" let pax_kmsg_state: *u64
+extern "c" let pax_kmsg_buf: *u8
+extern "c" let pax_kmsg_line: *u8
+extern "c" let pax_kmsg_user: *u8
+extern "c" let pax_kmsg_out: *u8
+extern "c" let pax_tick_count: *u64
+extern "c" fn pax_irq_save() -> u64
+extern "c" fn pax_irq_restore(flags: u64)
+
+/// The ring's bytes (syslog(2)'s SIZE_BUFFER).
+pub const CAP: u64 = 131072
+/// The text a record keeps of one line.
+pub const LINE_CAP: u64 = 992
+/// `pax_kmsg_out`'s bytes: the longest record formatted (every text byte
+/// escaped as four) and its prefix.
+pub const OUT_CAP: u64 = 4160
+const HDR: u64 = 24
+const WRAP: u64 = 0xffffffffffffffff
+/// kernel/user's tick, in nanoseconds (CLOCK_MONOTONIC's step).
+const NS_PER_TICK: u64 = 10000151
+
+/// The levels (syslog(2)).
+pub const EMERG: u64 = 0
+pub const ERR: u64 = 3
+pub const WARNING: u64 = 4
+pub const NOTICE: u64 = 5
+pub const INFO: u64 = 6
+pub const DEBUG: u64 = 7
+/// A line written without a level (default_message_loglevel).
+pub const DEFAULT: u64 = 4
+/// The console level `quiet` sets once the first program starts:
+/// warnings and worse still reach the screen.
+pub const QUIET_LEVEL: u64 = 5
+/// minimum_console_loglevel and default_console_loglevel.
+pub const MIN_LEVEL: u64 = 1
+pub const ALL_LEVEL: u64 = 8
+/// The facilities a record can carry: the kernel's, and a write's
+/// default (LOG_USER).
+pub const KERN: u64 = 0
+pub const USER: u64 = 1
+
+// The state words (`pax_kmsg_state`).
+const S_HEAD_OFF: u64 = 0 // the oldest record's offset
+const S_HEAD_SEQ: u64 = 1 // its sequence number
+const S_TAIL_OFF: u64 = 2 // where the next record goes
+const S_NEXT_SEQ: u64 = 3 // the next record's sequence number (empty: HEAD_SEQ)
+const S_CLEAR_SEQ: u64 = 4 // syslog(2)'s CLEAR: READ_ALL starts here
+const S_LINE_LEN: u64 = 5 // the bytes staged for the line being written
+const S_CON: u64 = 6 // 8 - the console level
+const S_SAVED: u64 = 7 // CONSOLE_OFF's saved level, 0 none
+const S_WANT: u64 = 8 // a reader waits
+const S_DUE: u64 = 9 // a record came while one waited
+const S_READ_SEQ: u64 = 10 // syslog(2)'s READ: the next record it reads
+const S_OPEN: u64 = 11 // 1: dmesg_restrict is 0
+const S_DROPPED: u64 = 12 // records overwritten
+const S_QUIET: u64 = 13 // 1: `quiet`, the level drops at the first program
+const S_SET: u64 = 14 // 1: the level was set (loglevel=, syslog(2)): `quiet` leaves it
+const S_CUT: u64 = 15 // lines cut at LINE_CAP
+const S_USER_LEN: u64 = 16 // a write's bytes staged
+const S_PAST: u64 = 17 // 1: the first program has started
+
+fn sv(i: u64) -> u64 {
+    // # Safety: boot/console.S's 32 words; i < 32 by construction.
+    unsafe { ((pax_kmsg_state as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_sv(i: u64, v: u64) {
+    // # Safety: as `sv`.
+    unsafe { ((pax_kmsg_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+fn w(off: u64) -> u64 {
+    // # Safety: a word of the ring; off + 8 <= CAP by construction.
+    unsafe { ((pax_kmsg_buf as u64 + off) as *u64).read_volatile() }
+}
+
+fn put_w(off: u64, v: u64) {
+    // # Safety: as `w`.
+    unsafe { ((pax_kmsg_buf as u64 + off) as *u64).write_volatile(v) }
+}
+
+fn rb(off: u64) -> u64 {
+    // # Safety: a byte of the ring; off < CAP.
+    unsafe { ((pax_kmsg_buf as u64 + off) as *u8).read_volatile() as u64 }
+}
+
+fn put_rb(off: u64, b: u64) {
+    // # Safety: as `rb`.
+    unsafe { ((pax_kmsg_buf as u64 + off) as *u8).write_volatile((b & 0xff) as u8) }
+}
+
+fn up8(n: u64) -> u64 {
+    (n + 7) & !7
+}
+
+// --- writing ---------------------------------------------------------------------
+
+/// One byte of the kernel line being written (kernel/log).
+pub fn stage(b: u64) {
+    let n = sv(S_LINE_LEN)
+    if n < LINE_CAP {
+        // # Safety: boot/console.S's 1024-byte line; n < LINE_CAP.
+        unsafe { ((pax_kmsg_line as u64 + n) as *u8).write_volatile((b & 0xff) as u8) }
+    }
+    if n <= LINE_CAP {
+        put_sv(S_LINE_LEN, n + 1) // one past LINE_CAP says the line was cut
+    }
+}
+
+/// The line staged becomes a record at `level` of `facility`.
+pub fn commit(level: u64, facility: u64) {
+    let n = sv(S_LINE_LEN)
+    let len = if n > LINE_CAP { LINE_CAP } else { n }
+    if n > LINE_CAP {
+        put_sv(S_CUT, sv(S_CUT) + 1)
+    }
+    put_sv(S_LINE_LEN, 0)
+    // # Safety: the address of boot/console.S's line buffer; nothing is read through it here.
+    let src = unsafe { pax_kmsg_line as u64 }
+    append(level, facility, src, len)
+}
+
+/// One byte of a write to /dev/kmsg, at `i` (kernel/files), before
+/// `inject`; false past LINE_CAP.
+pub fn user_byte(i: u64, b: u64) -> bool {
+    if i >= LINE_CAP {
+        return false
+    }
+    // # Safety: boot/console.S's 1024-byte write buffer; i < LINE_CAP.
+    unsafe { ((pax_kmsg_user as u64 + i) as *u8).write_volatile((b & 0xff) as u8) }
+    true
+}
+
+/// The write's byte `i` (`user_byte`'s), for kernel/log to send on.
+pub fn user_at(i: u64) -> u64 {
+    // # Safety: as `user_byte`.
+    unsafe { ((pax_kmsg_user as u64 + i) as *u8).read_volatile() as u64 }
+}
+
+/// The write's `n` bytes from `from` become a record.
+pub fn inject(level: u64, facility: u64, from: u64, n: u64) {
+    let len = if n > LINE_CAP { LINE_CAP } else { n }
+    // # Safety: the address of boot/console.S's write buffer; from + len <= LINE_CAP.
+    let src = unsafe { pax_kmsg_user as u64 }
+    append(level, facility, src + from, len)
+}
+
+/// The time now, in microseconds: the tick count's (kernel/user's
+/// CLOCK_MONOTONIC).
+pub fn now_us() -> u64 {
+    // # Safety: boot/isr.S's tick count, read volatile (kernel/timer's).
+    let t = unsafe { pax_tick_count.read_volatile() }
+    t * NS_PER_TICK / 1000
+}
+
+/// Whether the ring holds no record.
+fn empty() -> bool {
+    sv(S_HEAD_SEQ) == sv(S_NEXT_SEQ)
+}
+
+/// Drop the oldest record (the ring is not empty).
+fn drop_head() {
+    let off = sv(S_HEAD_OFF)
+    var next = off + rec_size(off)
+    put_sv(S_HEAD_SEQ, sv(S_HEAD_SEQ) + 1)
+    put_sv(S_DROPPED, sv(S_DROPPED) + 1)
+    if next + HDR > CAP || (!empty() && w(next) == WRAP) {
+        next = 0
+    }
+    put_sv(S_HEAD_OFF, next)
+}
+
+/// Drop records while the oldest begins in [from, to).
+fn make_room(from: u64, to: u64) {
+    while !empty() && sv(S_HEAD_OFF) >= from && sv(S_HEAD_OFF) < to {
+        drop_head()
+    }
+}
+
+/// `len` bytes at kernel address `src` become a record.
+fn append(level: u64, facility: u64, src: u64, len: u64) {
+    // # Safety: boot/sched.S's PUSHF; POP; CLI, undone at the end.
+    let flags = unsafe { pax_irq_save() }
+    let size = HDR + up8(len)
+    var at = sv(S_TAIL_OFF)
+    if at + size > CAP {
+        // It goes to the ring's start; nothing may begin where the WRAP
+        // word and the space after it are.
+        make_room(at, CAP)
+        if at + 8 <= CAP {
+            put_w(at, WRAP)
+        }
+        at = 0
+        if empty() {
+            put_sv(S_HEAD_OFF, 0)
+        }
+    }
+    make_room(at, at + size)
+    if empty() {
+        put_sv(S_HEAD_OFF, at)
+    }
+    let seq = sv(S_NEXT_SEQ)
+    put_w(at, seq)
+    put_w(at + 8, now_us())
+    put_w(at + 16, (level & 7) | ((facility & 0xff) << 3) | (len << 16))
+    var i: u64 = 0
+    while i < len {
+        // # Safety: the caller's staging buffer, len <= LINE_CAP bytes.
+        let b = unsafe { ((src + i) as *u8).read_volatile() as u64 }
+        put_rb(at + HDR + i, b)
+        i += 1
+    }
+    var tail = at + size
+    if tail + HDR > CAP {
+        tail = 0
+    }
+    put_sv(S_TAIL_OFF, tail)
+    put_sv(S_NEXT_SEQ, seq + 1)
+    if sv(S_WANT) != 0 {
+        put_sv(S_DUE, 1)
+    }
+    // # Safety: IF as `pax_irq_save` found it.
+    unsafe { pax_irq_restore(flags) }
+}
+
+// --- reading ---------------------------------------------------------------------
+
+/// The oldest record's sequence number.
+pub fn first() -> u64 {
+    sv(S_HEAD_SEQ)
+}
+
+/// The next record's sequence number (one past the newest).
+pub fn next() -> u64 {
+    sv(S_NEXT_SEQ)
+}
+
+/// Records lost to the ring's size since boot.
+pub fn dropped() -> u64 {
+    sv(S_DROPPED)
+}
+
+/// Lines cut at LINE_CAP since boot.
+pub fn cut() -> u64 {
+    sv(S_CUT)
+}
+
+fn rec_size(off: u64) -> u64 {
+    HDR + up8((w(off + 16) >> 16) & 0xffff)
+}
+
+/// The offset of the record after the one at `off`.
+fn after(off: u64) -> u64 {
+    let n = off + rec_size(off)
+    if n + HDR > CAP || w(n) == WRAP {
+        return 0
+    }
+    n
+}
+
+/// The offset of record `seq` (first() <= seq < next()); `hint` an
+/// offset it may be at (a reader's last), tried first.
+pub fn at(seq: u64, hint: u64) -> u64 {
+    if hint + HDR <= CAP && hint % 8 == 0 && w(hint) == seq {
+        return hint
+    }
+    var off = sv(S_HEAD_OFF)
+    var s = sv(S_HEAD_SEQ)
+    while s < seq {
+        off = after(off)
+        s += 1
+    }
+    off
+}
+
+/// The offset of the record after record `seq` at `off`.
+pub fn next_at(off: u64) -> u64 {
+    after(off)
+}
+
+/// The level of the record at `off`.
+pub fn level_at(off: u64) -> u64 {
+    w(off + 16) & 7
+}
+
+/// The facility of the record at `off`.
+pub fn facility_at(off: u64) -> u64 {
+    (w(off + 16) >> 3) & 0xff
+}
+
+/// The time of the record at `off`, in microseconds.
+pub fn us_at(off: u64) -> u64 {
+    w(off + 8)
+}
+
+/// The text length of the record at `off`.
+pub fn len_at(off: u64) -> u64 {
+    (w(off + 16) >> 16) & 0xffff
+}
+
+/// Byte `i` of the text of the record at `off`.
+pub fn byte_at(off: u64, i: u64) -> u64 {
+    rb(off + HDR + i)
+}
+
+// --- formatting ------------------------------------------------------------------
+
+fn out(at: u64, b: u64) -> u64 {
+    if at >= OUT_CAP {
+        return at
+    }
+    // # Safety: boot/console.S's OUT_CAP bytes; at < OUT_CAP.
+    unsafe { ((pax_kmsg_out as u64 + at) as *u8).write_volatile((b & 0xff) as u8) }
+    at + 1
+}
+
+fn out_dec(at: u64, v: u64) -> u64 {
+    var d: u64 = 1
+    while v / d >= 10 {
+        d *= 10
+    }
+    var k = at
+    while d > 0 {
+        k = out(k, 48 + (v / d) % 10)
+        d /= 10
+    }
+    k
+}
+
+fn out_hex2(at: u64, b: u64) -> u64 {
+    let h = (b >> 4) & 15
+    let l = b & 15
+    let k = out(at, if h < 10 { 48 + h } else { 87 + h })
+    out(k, if l < 10 { 48 + l } else { 87 + l })
+}
+
+/// The formatted record's byte `i` (`format`'s).
+pub fn out_at(i: u64) -> u64 {
+    // # Safety: as `out`; i < OUT_CAP.
+    unsafe { ((pax_kmsg_out as u64 + i) as *u8).read_volatile() as u64 }
+}
+
+/// /dev/kmsg's form: `PRI,SEQ,USEC,-;TEXT\n` (the dev-kmsg document),
+/// the record at `off`; its length.
+pub fn format_kmsg(off: u64) -> u64 {
+    var k = out_dec(0, (w(off + 16) & 7) | (facility_at(off) << 3))
+    k = out(k, 44)
+    k = out_dec(k, w(off))
+    k = out(k, 44)
+    k = out_dec(k, us_at(off))
+    k = out(k, 44)
+    k = out(k, 45)
+    k = out(k, 59)
+    let n = len_at(off)
+    var i: u64 = 0
+    while i < n {
+        let b = byte_at(off, i)
+        if b < 32 || b > 126 || b == 92 {
+            k = out(k, 92)
+            k = out(k, 120)
+            k = out_hex2(k, b)
+        } else {
+            k = out(k, b)
+        }
+        i += 1
+    }
+    out(k, 10)
+}
+
+/// syslog(2)'s form: `<PRI>[SSSSS.UUUUUU] TEXT\n`, the record at `off`;
+/// its length.
+pub fn format_syslog(off: u64) -> u64 {
+    var k = out(0, 60)
+    k = out_dec(k, (w(off + 16) & 7) | (facility_at(off) << 3))
+    k = out(k, 62)
+    k = out(k, 91)
+    let us = us_at(off)
+    let s = us / 1000000
+    var width: u64 = 1
+    var t = s
+    while t >= 10 {
+        t /= 10
+        width += 1
+    }
+    while width < 5 {
+        k = out(k, 32)
+        width += 1
+    }
+    k = out_dec(k, s)
+    k = out(k, 46)
+    let frac = us % 1000000
+    var d: u64 = 100000
+    while d > 0 {
+        k = out(k, 48 + (frac / d) % 10)
+        d /= 10
+    }
+    k = out(k, 93)
+    k = out(k, 32)
+    let n = len_at(off)
+    var i: u64 = 0
+    while i < n {
+        k = out(k, byte_at(off, i))
+        i += 1
+    }
+    out(k, 10)
+}
+
+/// syslog(2)'s length of the record at `off` (`format_syslog`'s, without
+/// writing it).
+pub fn syslog_len(off: u64) -> u64 {
+    let s = us_at(off) / 1000000
+    var width: u64 = 1
+    var t = s
+    while t >= 10 {
+        t /= 10
+        width += 1
+    }
+    let pri = (w(off + 16) & 7) | (facility_at(off) << 3)
+    let plen: u64 = if pri >= 100 { 3 } else if pri >= 10 { 2 } else { 1 }
+    (if width < 5 { 5 } else { width }) + plen + len_at(off) + 13
+}
+
+// --- the readers' state --------------------------------------------------------------
+
+/// syslog(2)'s CLEAR mark.
+pub fn clear_mark() -> u64 {
+    sv(S_CLEAR_SEQ)
+}
+
+/// syslog(2)'s CLEAR: READ_ALL starts after the newest record now.
+pub fn clear() {
+    put_sv(S_CLEAR_SEQ, sv(S_NEXT_SEQ))
+}
+
+/// syslog(2)'s READ position (action 2): the next record it gives.
+pub fn read_seq() -> u64 {
+    let s = sv(S_READ_SEQ)
+    if s < sv(S_HEAD_SEQ) { sv(S_HEAD_SEQ) } else { s }
+}
+
+/// syslog(2)'s READ has given every record before `s`.
+pub fn set_read_seq(s: u64) {
+    put_sv(S_READ_SEQ, s)
+}
+
+/// A reader is about to wait for a record.
+pub fn want() {
+    put_sv(S_WANT, 1)
+}
+
+/// Whether a record came while a reader waited (taken once; kernel/sched).
+pub fn take_due() -> bool {
+    if sv(S_DUE) == 0 {
+        return false
+    }
+    put_sv(S_DUE, 0)
+    put_sv(S_WANT, 0)
+    true
+}
+
+// --- the settings -----------------------------------------------------------------
+
+/// dmesg_restrict: 1 (reading is root's) unless set to 0.
+pub fn restricted() -> bool {
+    sv(S_OPEN) == 0
+}
+
+/// dmesg_restrict set (`/proc/sys/kernel/dmesg_restrict`).
+pub fn set_restricted(on: bool) {
+    put_sv(S_OPEN, if on { 0 } else { 1 })
+}
+
+/// The console level (console_loglevel): a line below it reaches the
+/// screen.
+pub fn console_level() -> u64 {
+    8 - sv(S_CON)
+}
+
+fn put_level(v: u64) {
+    let l = if v < MIN_LEVEL { MIN_LEVEL } else if v > ALL_LEVEL { ALL_LEVEL } else { v }
+    put_sv(S_CON, 8 - l)
+}
+
+/// The console level set (syslog(2)'s CONSOLE_LEVEL, `loglevel=`):
+/// `quiet` leaves it as set; CONSOLE_OFF's saved level is forgotten.
+pub fn set_console_level(v: u64) {
+    put_level(v)
+    put_sv(S_SET, 1)
+    put_sv(S_SAVED, 0)
+}
+
+/// syslog(2)'s CONSOLE_OFF: the level saved, then the minimum.
+pub fn console_off() {
+    if sv(S_SAVED) == 0 {
+        put_sv(S_SAVED, console_level())
+    }
+    put_level(MIN_LEVEL)
+}
+
+/// syslog(2)'s CONSOLE_ON: the saved level back, if one was saved.
+pub fn console_on() {
+    let s = sv(S_SAVED)
+    if s != 0 {
+        put_level(s)
+        put_sv(S_SAVED, 0)
+    }
+}
+
+/// `quiet` on the command line (kernel/user's `start`): the level drops
+/// to QUIET_LEVEL when the first program starts.
+pub fn quiet_at_first_program() {
+    put_sv(S_QUIET, 1)
+}
+
+/// The first program starts (kmain_console): under `quiet`, unless the
+/// level was set, warnings and worse alone reach the screen from now on.
+pub fn past_boot() {
+    put_sv(S_PAST, 1)
+    if sv(S_QUIET) != 0 && sv(S_SET) == 0 {
+        put_level(QUIET_LEVEL)
+    }
+}
+
+/// Whether the first program has started.
+pub fn is_past_boot() -> bool {
+    sv(S_PAST) != 0
+}

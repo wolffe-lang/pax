@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# tests/mpx5-kmsg — px130: the kernel's log as a program reads it.
+# /dev/kmsg (its node; one record a read in the dev-kmsg document's form;
+# a reader's place, -EAGAIN at the end, a reader that waits and is woken
+# by a record written later, poll; the seeks and their errors; a write's
+# `<N>` level and facility, LOG_USER for the kernel's own facility and for
+# none; the escapes; a reader the ring overtakes: -EPIPE once, then on
+# from the oldest, the newest whole) and syslog(2) (SIZE_BUFFER,
+# READ_ALL's lines, a short buffer, CLEAR, SIZE_UNREAD, the console level
+# and its bounds, CONSOLE_OFF and ON), /proc/sys/kernel/printk and
+# dmesg_restrict; and, as 1000:1000, every refusal. One probe
+# (user/elf/kmsgprobe.c, tools/mkkmsg) asks it all; its transcript is held
+# line for line to what a real Linux printed for the same binary
+# (tests/mpx5-kmsg.d/linux/, recorded on a Linux kernel booted under QEMU
+# with notes/px111/vminit.c as its first program: /proc, a devtmpfs at
+# /dev; observed output, never generated here), each difference named and
+# ruled in tests/mpx5-kmsg.d/ruled.txt.
+#
+#   tests/mpx5-kmsg [--no-boot | --only build] [--firmware bios|uefi|both]
+#                   [--tier native|release|both] [--accel auto|kvm|tcg]
+#
+# The image: kmain_console with `/etc/pax-run` `/bin/kmsgprobe`, then
+# `/bin/as 1000 1000 /bin/kmsgprobe user`. A run's rows are its `K<n>: `
+# lines between its `run <k>:` line and the next (the kernel's console
+# copies of the probe's own records, which start `kmsgprobe `, and its
+# narration are not rows).
+#
+# Assertions, per tier and firmware:
+#   M0 build: the probe, vminit and as static; the kernel and the image
+#      built; the references there.
+#   M1 the probe as root: every row Linux's or its ruled line.
+#   M2 the probe as 1000:1000: likewise.
+#   M3 the machine: no PANIC, init ended with status 0, the booted kernel
+#      the one built (its digest).
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1, when it is a failure. Exit 0 when every assertion
+# held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+legs=both tiers=both accel=auto noboot=0 only=
+usage="usage: tests/mpx5-kmsg [--no-boot | --only build] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        --accel)    accel=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $accel in auto|kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
+case $only in ''|build) ;; *) die "--only takes build" ;; esac
+need python3 readelf
+
+work=$PAX_BUILD/mpx5-kmsg
+ref=$here/mpx5-kmsg.d
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+wolf=${PAX_WOLF:-wolf}
+need "$wolf" cc
+say "wolf: $("$wolf" --version | head -n 1)"
+"$PAX_ROOT/tools/fetch-limine" || exit 2
+rm -rf "$work"
+mkdir -p "$work/bin"
+why=
+"$PAX_ROOT/tools/mkkmsg" "$work/bin" > "$work/programs.txt" || why+=" tools/mkkmsg;"
+"$PAX_ROOT/tools/mkas" "$work/bin" >> "$work/programs.txt" || why+=" tools/mkas;"
+sed 's/^/  program: /' "$work/programs.txt" >&2
+printf '/bin/kmsgprobe\n/bin/as 1000 1000 /bin/kmsgprobe user\n' > "$work/probe.run"
+"$PAX_ROOT/tools/mkinitramfs" "$work/probe.cpio" /bin/kmsgprobe="$work/bin/kmsgprobe":755 /bin/as="$work/bin/as":755 \
+    /tmp/:1777 "/etc/pax-run=$work/probe.run:644" > "$work/probe.initramfs.txt" || why+=" tools/mkinitramfs;"
+for tier in $tiers; do
+    flag=(); [ "$tier" = release ] && flag=(--release)
+    mkdir -p "$work/$tier"
+    log=$work/$tier/kmain_console.build-kernel.log
+    if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+            --add "$work/probe.cpio" initramfs.cpio "$elf" "$work/$tier/probe.iso" >/dev/null || why+=" $tier: mkimage;"
+        printf '%s\n' "$elf" > "$work/$tier/elf.path"
+        say "built $tier: elf $(sha256_of "$elf")"
+    else
+        cat "$log" >&2
+        why+=" $tier kmain_console: tools/build-kernel;"
+    fi
+done
+if [ "$only" = build ] || [ "$noboot" = 1 ]; then
+    [ -z "$why" ] && say "PASS M0 (build): programs static, kernel ($tiers) and the image built" || bad "M0 (build):$why"
+    exit "$fail"
+fi
+for f in probe-root probe-user; do
+    [ -s "$ref/linux/$f.txt" ] || why+=" no reference linux/$f.txt;"
+done
+[ -z "$why" ] && say "PASS M0: programs static, kernel ($tiers) and the image built, the references there" || { bad "M0:$why"; exit 1; }
+
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else say "SKIPPED LOUDLY uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"; fi
+        continue
+    fi
+    for tier in $tiers; do
+        elf=$(cat "$work/$tier/elf.path")
+        digest=$(sha256_of "$elf")
+        id="$tier $leg $accel"
+        log=$PAX_BUILD/mpx5-kmsg-$tier-$leg.serial.log
+        rm -f "$log" "$log.verdict"
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --accel "$accel" --firmware "$leg" --serial "$log" --timeout 1200 --qemu -m --qemu 512M \
+            --elf "$elf" --marker 'halt|PANIC .*' "$work/$tier/probe.iso" > "$log.verdict" 2>&1 || hrc=$?
+        ran=$((ran + 1))
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        for k in 1 2; do
+            name=probe-root; Y=M1; [ "$k" = 2 ] && { name=probe-user; Y=M2; }
+            out=$PAX_BUILD/mpx5-kmsg-$tier-$leg-$name.txt
+            awk -v k="$k" '$0 ~ "^run " k ": " { on = 1; next } on && (/^run [0-9]+: / || /^run: [0-9]+ commands/) { exit }
+                 on && /^K[0-9]+: / { print }' "$norm" > "$out"
+            gate=$(python3 -I "$ref/check.py" "$name" "$ref/linux/$name.txt" "$ref/ruled.txt" "$out" 2>&1)
+            if [ $? = 0 ]; then
+                say "PASS $Y $id $name: $(printf '%s\n' "$gate" | grep -c '^PASS') rows, each Linux's or its ruled line"
+            else
+                printf '%s\n' "$gate" | grep '^FAIL' | head -n 60 >&2
+                bad "$Y $id $name: $(printf '%s\n' "$gate" | grep -c '^FAIL') rows differ: $(printf '%s\n' "$gate" | grep '^FAIL' | head -n 6 | cut -c1-200 | tr '\n' '|')"
+            fi
+        done
+        why=
+        grep -q '^PANIC ' "$norm" && why+=" $(grep -m1 '^PANIC ' "$norm");"
+        grep -q '^PAX: init .* ended with status 0; nothing left to run$' "$norm" || why+=" no 'PAX: init … ended with status 0';"
+        grep -q "^kernel: .* sha256 $digest, " "$norm" || why+=" the booted kernel is not the one built;"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS M3 $id: init ended, kernel $digest; $(tail -n 1 "$log.verdict")" || bad "M3 $id:$why"
+    done
+done
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx5-kmsg: PASS" || say "mpx5-kmsg: FAIL"
+exit "$fail"

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# mkkmsg — build px130's kernel-log probe (user/elf/kmsgprobe.c) and the Linux
+# guest's first program that records it (px111's notes/px111/vminit.c:
+# /proc and a devtmpfs at /dev mounted), static x86-64 Linux executables.
+#
+#   tools/mkkmsg OUTDIR
+#
+# The compiler line the other probes' builders use (`cc -static -no-pie
+# -O1`, ET_EXEC with no PT_INTERP, checked). Build on a baseline x86-64 glibc (the CI
+# runner's Ubuntu; an Ubuntu container on a lane host), never on a
+# host whose glibc's start-up needs a newer CPU (px10). Prints `<name>
+# <sha256> <bytes>` for each. Exit 0, or 2 on a tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkkmsg OUTDIR"
+out=$1
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cc=${CC:-cc}
+need "$cc" readelf
+# Each source named whole (the CI plan derives the paths a suite reads
+# from the names its tools write out).
+for src in "$PAX_ROOT/user/elf/kmsgprobe.c" "$PAX_ROOT/notes/px111/vminit.c"; do
+    p=$(basename "$src" .c)
+    "$cc" -static -no-pie -O1 -Wall -Wextra -Wno-unused-result -Wno-unused-function \
+        -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$src" || die "cc: $p"
+    readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
+    ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
+    printf '%s %s %s\n' "$p" "$(sha256_of "$out/$p")" "$(wc -c < "$out/$p" | tr -d ' ')"
+done
