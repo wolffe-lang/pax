@@ -44,5 +44,17 @@ class Verdicts(unittest.TestCase):
         self.assertFalse(rows.evaluate("credentials", text.replace("result -1", "result 0"))["attach-after-setid"])
 
 
+    def test_signals(self):
+        text = "".join(f"security: W{mode} child status {status}\n"
+                       for mode, status in ((3, 11), (4, 5632), (5, 5632), (6, 139), (0, 0)))
+        self.assertTrue(all(rows.evaluate("signals", text).values()))
+        for mode in (3, 4, 5, 6):
+            line = next(line for line in text.splitlines(True) if line.startswith(f"security: W{mode} "))
+            for wrong in (text.replace(line, ""), text + line,
+                          text.replace(line, f"security: W{mode} child status 0\n"),
+                          text + "PANIC overflow\n", text.replace("W0 child status 0", "W0 child status 99")):
+                self.assertFalse(rows.evaluate("signals", wrong)[f"W{mode}"])
+
+
 if __name__ == "__main__":
     unittest.main()

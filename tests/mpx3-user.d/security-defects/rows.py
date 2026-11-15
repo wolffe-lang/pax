@@ -14,8 +14,9 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-GROUPS = {"socket": ("udp",), "credentials": ("setid",)}
-ROWS = {"socket": ("W1",), "credentials": ("W2", "traced-exec-setid", "attach-after-setid")}
+GROUPS = {"socket": ("udp",), "credentials": ("setid",), "signals": ("3", "4", "5", "6", "0")}
+ROWS = {"socket": ("W1",), "credentials": ("W2", "traced-exec-setid", "attach-after-setid"),
+        "signals": ("W3", "W4", "W5", "W6")}
 
 
 def evaluate(group, text):
@@ -35,6 +36,14 @@ def evaluate(group, text):
         traced = clean and ids == expected and stops == [("1", "1407", "0"), ("3", "1407", "0")] and exits == [(str(m), "0") for m in range(4)]
         attach = clean and re.findall(r"^security: attach-after-setid result (-?\d+)$", text, re.M) == ["-1"]
         return {"W2": traced, "traced-exec-setid": traced, "attach-after-setid": attach}
+    if group == "signals":
+        statuses = re.findall(r"^security: W([0-6]) child status (\d+)$", text, re.M)
+        control = statuses.count(("0", "0")) == 1
+        allowed = {"3": ("11", "139"), "4": ("11", "139", "5632"),
+                   "5": ("5632",), "6": ("11", "139", "5632")}
+        return {"W" + mode: clean and control and len([s for m, s in statuses if m == mode]) == 1
+                and next((s for m, s in statuses if m == mode), "") in expected
+                for mode, expected in allowed.items()}
     raise ValueError(group)
 
 
