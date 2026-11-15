@@ -790,7 +790,9 @@ jobs:
   # (L2), the segments (L3), six refusals by name (L4), the FPU state per
   # thread (L5), the frames (L6), the halt (L7), and a wolf program
   # linked static against the runner's glibc run until PAX lacks what it
-  # asks for (L8, the gap census); both tiers, BIOS and UEFI.
+  # asks for (L8, the gap census); px145: Arch's own loader and bash,
+  # fetched by digest from the Arch Linux Archive (zstd unpacks them),
+  # refused naming the interpreter (L10); both tiers, BIOS and UEFI.
   mpx3-loader:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-loader')
@@ -801,10 +803,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace, zstd (apt)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev strace zstd
           qemu-system-x86_64 --version
           clang --version
           ld.lld --version
@@ -816,7 +818,8 @@ jobs:
         with:
           path: |
             .pax-cache/limine-*
-          key: mpx3-loader-${{ hashFiles('boot/limine.pin') }}
+            .pax-cache/arch
+          key: mpx3-loader-${{ hashFiles('boot/limine.pin', 'tests/mpx3-loader.d/arch.pins') }}
 
       - name: wolf at the pin (the release archive, by digest)
         run: |
