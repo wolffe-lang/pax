@@ -38,8 +38,17 @@
 #    flight): its answered rate, the hog's share and the sleeper's worst,
 #    bounded by nothing (the rate is the host's: its CPUs set it), so every
 #    record carries the curve, on both tiers.
+# L7 px131e: under the saturating flood (`flood`), the 1 ms sleeper's worst
+#    wake at most STARVE_BOUND_US: a thread that the timer, not a device,
+#    makes ready must not wait behind device wake-ups for as long as the
+#    stream lasts. Under TCG SKIPPED by name.
+# L8 px131e: under the same flood (`ctl`, echo-host.py floods its window
+#    too), a command's round trip over a unix socket to a process that
+#    answers it at most STARVE_BOUND_US: a control socket's command to a
+#    server under its load (lobo's reload under mpx4-lobo's load). Under TCG
+#    SKIPPED by name.
 # L3 `~` lines: every load's figures (the measurement table's rows).
-# Exit 0 when L1, L2, L4, L5 and L6 held; 3 when the only red is
+# Exit 0 when L1, L2, L4, L5, L6, L7 and L8 held; 3 when the only red is
 # L6-unmeasured; 1 otherwise.
 import re
 import sys
@@ -82,12 +91,17 @@ FLOOD_SHARE = 0.5  # L6: the paced flood's ops over `spin`'s
 FLOOD_RATE = 4000
 OFFER_MIN = 0.9  # L6: below this share of FLOOD_RATE offered, the rig did not deliver it: unmeasured
 HOLDS = 3        # L6: holds at most, while unmeasured
+# L7, L8 (px131e): the worst a thread that is not a device's may wait beside
+# the saturating flood. A thread the tick or another process makes ready waits
+# at most a quantum (20 ms) before urgent wake-ups stop going ahead of it, then
+# its turn among those ready: a few quanta; 100 ms is five.
+STARVE_BOUND_US = 100000
 
 
 def guard_loads(mib):
     """The guard's run list: idle, spin, the paced and the saturating
     floods, the guarded and the pending loads."""
-    return ['idle', 'spin', 'flood:%d' % FLOOD_RATE, 'flood'] + guard(mib) + [p for p, _ in pending(mib)]
+    return ['idle', 'spin', 'flood:%d' % FLOOD_RATE, 'flood', 'ctl'] + guard(mib) + [p for p, _ in pending(mib)]
 
 LINE = re.compile(r'^latprobe (\S+): wake n (\d+) p50 (\d+) p99 (\d+) max (\d+); lo n (\d+) p50 (\d+) max (\d+) lost (\d+); '
                   r'(?:net n (\d+) p50 (\d+) max (\d+) lost (\d+)|net -); ops (\d+) max (\d+); '
@@ -208,6 +222,29 @@ def flood_curve(boot, spin, fl):
     return ('~L6 %s flood: answered %s, the hog %.2f of spin\'s ops (%d of %d), the sleeper\'s worst %d us, lost %s; '
             'bounded by nothing (the saturating flood: the host sets its rate)'
             % (boot, rate, fl['ops'] / max(spin['ops'], 1), fl['ops'], spin['ops'], fl['wmax'], fl.get('nlost')))
+
+
+def starve_rows(boot, accel, rows, want):
+    """L7: the sleeper's worst wake beside the saturating flood; L8: the
+    `ctl` load's worst round trip beside it. Returns (fail, lines)."""
+    fail, lines = 0, []
+    for row, load, key, what in (('L7', 'flood', 'wmax', 'the 1 ms sleeper\'s worst wake'),
+                                 ('L8', 'ctl', 'opmax', 'a command\'s worst round trip over a unix socket')):
+        r = rows.get(load)
+        if r is None:
+            if load in want:
+                lines.append('FAIL %s %s: no %s line' % (row, boot, load))
+                fail = 1
+            continue
+        text = '%s beside the saturating flood %d us (%s ops)' % (what, r[key], r['ops'])
+        if accel != 'kvm':
+            lines.append('SKIP %s %s reason=%s: %s' % (row, boot, accel, text))
+        elif r[key] <= STARVE_BOUND_US:
+            lines.append('PASS %s %s: %s; bound %d us' % (row, boot, text, STARVE_BOUND_US))
+        else:
+            lines.append('FAIL %s %s: %s; bound %d us' % (row, boot, text, STARVE_BOUND_US))
+            fail = 1
+    return fail, lines
 
 
 def clock_rows(boot, tier, mib, rows, want):
@@ -349,6 +386,11 @@ def main(argv):
         f, u = wake_rows(boot, tier, accel, rows, want, images)
         fail |= f
         unmeasured |= u
+        if tier != 'linux':
+            f, lines = starve_rows(boot, accel, rows, want)
+            for line in lines:
+                say(line)
+            fail |= f
         for k, r in rows.items():
             say('~L3 %s %s: wake p50 %s p99 %s max %s; lo p50 %s max %s lost %s; net p50 %s max %s lost %s; ops %s max %s; '
                 'irqoff %s vec 0x%s nr %s; schedgap %s; ticks %s of %s; sys %s; clocks mono %s real %s tsc %s'
