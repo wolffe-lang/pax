@@ -703,14 +703,23 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bo
     // Top down: the extended state (and its closing word), 64-aligned;
     // then siginfo, ucontext and the return address, with (rsp + 8) % 16
     // == 0 at the handler's first instruction.
-    var sp = word(f, W_RSP) - RED_ZONE
+    // A bad user handler must never reach IRETQ in ring 0.
+    if handler >= paging.USER_TOP {
+        return false
+    }
+    let rsp = word(f, W_RSP)
+    var sp: u64 = 0
     // px24: a handler installed with SA_ONSTACK runs on the thread's
     // alternate stack, from its top, unless the thread is on it already
     // (sigaltstack(2)).
     let (asp, asz) = sched.self_altstack()
     let on_alt = asz != 0 && word(f, W_RSP) > asp && word(f, W_RSP) - asp <= asz
     if flags & SA_ONSTACK != 0 && asz != 0 && !on_alt {
+        if !uaccess.in_user(asp, asz) { return false }
         sp = asp + asz
+    } else {
+        if rsp < RED_ZONE || rsp >= paging.USER_TOP { return false }
+        sp = rsp - RED_ZONE
     }
     var fp: u64 = 0
     if fb != 0 {
@@ -867,6 +876,9 @@ pub fn sigaltstack(f: u64, ss: u64, old: u64) -> u64 {
                 return NEG_ENOMEM
             }
             nsp = uaccess.get64(pml4, ss)
+            if !uaccess.in_user(nsp, nsz) {
+                return NEG_EINVAL
+            }
         }
     }
     if old != 0 {
