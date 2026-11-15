@@ -352,7 +352,7 @@ pub fn sigprocmask(how: u64, set: u64, oldset: u64, size: u64) -> u64 {
         if !uaccess.readable(pml4, set, 8) {
             return NEG_EFAULT
         }
-        let v = uaccess.get64(pml4, set)
+        let v = (uaccess.get64(pml4, set) else |_| { return NEG_EFAULT })
         let h = how & 0xffffffff
         if h == SIG_BLOCK {
             m = m | v
@@ -369,7 +369,7 @@ pub fn sigprocmask(how: u64, set: u64, oldset: u64, size: u64) -> u64 {
         if !uaccess.writable(pml4, oldset, 8) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, oldset, old, 8)
+        let _stored1 = uaccess.put(pml4, oldset, old, 8) else |_| { return NEG_EFAULT }
     }
     if m != old {
         sched.set_self_sigmask(m)
@@ -398,14 +398,14 @@ pub fn sigaction(sig: u64, act: u64, oldact: u64, size: u64) -> u64 {
         }
         var i: u64 = 0
         while i < 4 {
-            uaccess.put(pml4, oldact + i * 8, aget(a, w + i), 8)
+            let _stored2 = uaccess.put(pml4, oldact + i * 8, aget(a, w + i), 8) else |_| { return NEG_EFAULT }
             i += 1
         }
     }
     if act != 0 {
         var i: u64 = 0
         while i < 4 {
-            aput(a, w + i, uaccess.get64(pml4, act + i * 8))
+            aput(a, w + i, (uaccess.get64(pml4, act + i * 8) else |_| { return NEG_EFAULT }))
             i += 1
         }
         aput(a, w + 3, aget(a, w + 3) & !UNBLOCKABLE)
@@ -424,7 +424,7 @@ pub fn sigpending(set: u64, size: u64) -> u64 {
     if !uaccess.writable(pml4, set, 8) {
         return NEG_EFAULT
     }
-    uaccess.put(pml4, set, sched.self_pending() & sched.self_sigmask(), 8)
+    let _stored3 = uaccess.put(pml4, set, sched.self_pending() & sched.self_sigmask(), 8) else |_| { return NEG_EFAULT }
     0
 }
 
@@ -619,17 +619,18 @@ fn die(f: u64, sig: u64, why: str) -> u64 {
 /// The siginfo at user `si` for signal `sig` with origin word `info`
 /// (kernel/sched's `sig_info`); `addr` is a fault's address. px45:
 /// `si_uid` (at 20) the sender's, or the child's, real user id.
-fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, addr: u64, fault: bool) {
-    uaccess.zero(pml4, si, SIGINFO_BYTES)
-    uaccess.put(pml4, si, sig, 4)
-    uaccess.put(pml4, si + 8, code, 4)
-    if fault {
-        uaccess.put(pml4, si + 16, addr, 8)
+fn put_siginfo(pml4: u64, si: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, addr: u64, is_fault: bool) -> u64 ! {fault} {
+    let _stored4 = uaccess.zero(pml4, si, SIGINFO_BYTES) else |_| { return fault }
+    let _stored5 = uaccess.put(pml4, si, sig, 4) else |_| { return fault }
+    let _stored6 = uaccess.put(pml4, si + 8, code, 4) else |_| { return fault }
+    if is_fault {
+        let _stored7 = uaccess.put(pml4, si + 16, addr, 8) else |_| { return fault }
     } else {
-        uaccess.put(pml4, si + 16, pid, 4)
-        uaccess.put(pml4, si + 20, uid, 4)
-        uaccess.put(pml4, si + 24, status, 4)
+        let _stored8 = uaccess.put(pml4, si + 16, pid, 4) else |_| { return fault }
+        let _stored9 = uaccess.put(pml4, si + 20, uid, 4) else |_| { return fault }
+        let _stored10 = uaccess.put(pml4, si + 24, status, 4) else |_| { return fault }
     }
+    0
 }
 
 /// When the thread came out of a waiting system call (kernel/sched's
@@ -678,8 +679,8 @@ fn settle_wait(f: u64, restart: bool) {
                 let end = sched.self_wake()
                 let now = timer.ticks()
                 let left = if end > now { (end - now) * NS_PER_TICK } else { 0 }
-                uaccess.put(pml4, arg, left / NS_PER_SEC, 8)
-                uaccess.put(pml4, arg + 8, left % NS_PER_SEC, 8)
+                let _stored11 = uaccess.put(pml4, arg, left / NS_PER_SEC, 8) else |_| { put_word(f, W_RAX, NEG_EFAULT); return }
+                let _stored12 = uaccess.put(pml4, arg + 8, left % NS_PER_SEC, 8) else |_| { put_word(f, W_RAX, NEG_EFAULT); return }
             }
         }
     }
@@ -744,55 +745,55 @@ fn enter(f: u64, sig: u64, code: u64, pid: u64, uid: u64, status: u64, fault: bo
         let src = fpu.capture(s)
         let _ok = uaccess.copy_out(pml4, fp, src, fb)
         if xs {
-            uaccess.zero(pml4, fp + 464, 48)
-            uaccess.put(pml4, fp + 464, MAGIC1, 4)
-            uaccess.put(pml4, fp + 468, fb + 4, 4)
-            uaccess.put(pml4, fp + 472, fpu.features(), 8)
-            uaccess.put(pml4, fp + 480, fb, 4)
-            uaccess.put(pml4, fp + fb, MAGIC2, 4)
+            let _stored13 = uaccess.zero(pml4, fp + 464, 48) else |_| { return false }
+            let _stored14 = uaccess.put(pml4, fp + 464, MAGIC1, 4) else |_| { return false }
+            let _stored15 = uaccess.put(pml4, fp + 468, fb + 4, 4) else |_| { return false }
+            let _stored16 = uaccess.put(pml4, fp + 472, fpu.features(), 8) else |_| { return false }
+            let _stored17 = uaccess.put(pml4, fp + 480, fb, 4) else |_| { return false }
+            let _stored18 = uaccess.put(pml4, fp + fb, MAGIC2, 4) else |_| { return false }
         }
     }
-    put_siginfo(pml4, si, sig, code, pid, uid, status, addr, fault)
+    let _copied1 = put_siginfo(pml4, si, sig, code, pid, uid, status, addr, fault) else |_| { return false }
     // px48: `saved` is the mask the frame gives back at `rt_sigreturn`
     // (the thread's own, or the one `rt_sigsuspend` replaced); the
     // handler runs with the thread's mask now and the action's.
     let old = saved
     let now = sched.self_sigmask()
-    uaccess.zero(pml4, uc, UC_BYTES)
-    uaccess.put(pml4, uc, if xs { UC_FLAGS_XSTATE } else { UC_FLAGS_PLAIN }, 8)
+    let _stored19 = uaccess.zero(pml4, uc, UC_BYTES) else |_| { return false }
+    let _stored20 = uaccess.put(pml4, uc, if xs { UC_FLAGS_XSTATE } else { UC_FLAGS_PLAIN }, 8) else |_| { return false }
     if asz != 0 {
         // px24: uc_stack, the alternate stack as the interrupted code had it.
-        uaccess.put(pml4, uc + 16, asp, 8)
-        uaccess.put(pml4, uc + 24, if on_alt { SS_ONSTACK } else { 0 }, 4)
-        uaccess.put(pml4, uc + 32, asz, 8)
+        let _stored21 = uaccess.put(pml4, uc + 16, asp, 8) else |_| { return false }
+        let _stored22 = uaccess.put(pml4, uc + 24, if on_alt { SS_ONSTACK } else { 0 }, 4) else |_| { return false }
+        let _stored23 = uaccess.put(pml4, uc + 32, asz, 8) else |_| { return false }
     }
     let m = uc + UC_MCONTEXT
-    uaccess.put(pml4, m, word(f, W_R8), 8)
-    uaccess.put(pml4, m + 8, word(f, W_R9), 8)
-    uaccess.put(pml4, m + 16, word(f, W_R10), 8)
-    uaccess.put(pml4, m + 24, word(f, W_R11), 8)
-    uaccess.put(pml4, m + 32, word(f, W_R12), 8)
-    uaccess.put(pml4, m + 40, word(f, W_R13), 8)
-    uaccess.put(pml4, m + 48, word(f, W_R14), 8)
-    uaccess.put(pml4, m + 56, word(f, W_R15), 8)
-    uaccess.put(pml4, m + 64, word(f, W_RDI), 8)
-    uaccess.put(pml4, m + 72, word(f, W_RSI), 8)
-    uaccess.put(pml4, m + 80, word(f, W_RBP), 8)
-    uaccess.put(pml4, m + 88, word(f, W_RBX), 8)
-    uaccess.put(pml4, m + 96, word(f, W_RDX), 8)
-    uaccess.put(pml4, m + 104, word(f, W_RAX), 8)
-    uaccess.put(pml4, m + 112, word(f, W_RCX), 8)
-    uaccess.put(pml4, m + 120, word(f, W_RSP), 8)
-    uaccess.put(pml4, m + 128, word(f, W_RIP), 8)
-    uaccess.put(pml4, m + 136, word(f, W_RFLAGS), 8)
-    uaccess.put(pml4, m + 144, USER_CS | (USER_SS << 48), 8) // cs, gs, fs, ss
-    uaccess.put(pml4, m + 152, err, 8)
-    uaccess.put(pml4, m + 160, trapno, 8)
-    uaccess.put(pml4, m + 168, old, 8) // oldmask
-    uaccess.put(pml4, m + 176, if fault { addr } else { 0 }, 8) // cr2
-    uaccess.put(pml4, m + 184, fp, 8) // fpstate
-    uaccess.put(pml4, uc + UC_SIGMASK, old, 8)
-    uaccess.put(pml4, fr, restorer, 8)
+    let _stored24 = uaccess.put(pml4, m, word(f, W_R8), 8) else |_| { return false }
+    let _stored25 = uaccess.put(pml4, m + 8, word(f, W_R9), 8) else |_| { return false }
+    let _stored26 = uaccess.put(pml4, m + 16, word(f, W_R10), 8) else |_| { return false }
+    let _stored27 = uaccess.put(pml4, m + 24, word(f, W_R11), 8) else |_| { return false }
+    let _stored28 = uaccess.put(pml4, m + 32, word(f, W_R12), 8) else |_| { return false }
+    let _stored29 = uaccess.put(pml4, m + 40, word(f, W_R13), 8) else |_| { return false }
+    let _stored30 = uaccess.put(pml4, m + 48, word(f, W_R14), 8) else |_| { return false }
+    let _stored31 = uaccess.put(pml4, m + 56, word(f, W_R15), 8) else |_| { return false }
+    let _stored32 = uaccess.put(pml4, m + 64, word(f, W_RDI), 8) else |_| { return false }
+    let _stored33 = uaccess.put(pml4, m + 72, word(f, W_RSI), 8) else |_| { return false }
+    let _stored34 = uaccess.put(pml4, m + 80, word(f, W_RBP), 8) else |_| { return false }
+    let _stored35 = uaccess.put(pml4, m + 88, word(f, W_RBX), 8) else |_| { return false }
+    let _stored36 = uaccess.put(pml4, m + 96, word(f, W_RDX), 8) else |_| { return false }
+    let _stored37 = uaccess.put(pml4, m + 104, word(f, W_RAX), 8) else |_| { return false }
+    let _stored38 = uaccess.put(pml4, m + 112, word(f, W_RCX), 8) else |_| { return false }
+    let _stored39 = uaccess.put(pml4, m + 120, word(f, W_RSP), 8) else |_| { return false }
+    let _stored40 = uaccess.put(pml4, m + 128, word(f, W_RIP), 8) else |_| { return false }
+    let _stored41 = uaccess.put(pml4, m + 136, word(f, W_RFLAGS), 8) else |_| { return false }
+    let _stored42 = uaccess.put(pml4, m + 144, USER_CS | (USER_SS << 48), 8) else |_| { return false } // cs, gs, fs, ss
+    let _stored43 = uaccess.put(pml4, m + 152, err, 8) else |_| { return false }
+    let _stored44 = uaccess.put(pml4, m + 160, trapno, 8) else |_| { return false }
+    let _stored45 = uaccess.put(pml4, m + 168, old, 8) else |_| { return false } // oldmask
+    let _stored46 = uaccess.put(pml4, m + 176, if fault { addr } else { 0 }, 8) else |_| { return false } // cr2
+    let _stored47 = uaccess.put(pml4, m + 184, fp, 8) else |_| { return false } // fpstate
+    let _stored48 = uaccess.put(pml4, uc + UC_SIGMASK, old, 8) else |_| { return false }
+    let _stored49 = uaccess.put(pml4, fr, restorer, 8) else |_| { return false }
     // The handler's first instruction.
     var nm = now | amask
     if flags & SA_NODEFER == 0 {
@@ -860,7 +861,7 @@ pub fn sigaltstack(f: u64, ss: u64, old: u64) -> u64 {
         if on {
             return NEG_EPERM
         }
-        let fl = uaccess.get(pml4, ss + 8, 4)
+        let fl = (uaccess.get(pml4, ss + 8, 4) else |_| { return NEG_EFAULT })
         if fl & !SS_DISABLE != 0 {
             if fl == 0x80000000 || fl == 0x80000002 {
                 aput(area(), A_REFUSAL, R_ALTSTACK)
@@ -871,21 +872,21 @@ pub fn sigaltstack(f: u64, ss: u64, old: u64) -> u64 {
             nsp = 0
             nsz = 0
         } else {
-            nsz = uaccess.get64(pml4, ss + 16)
+            nsz = (uaccess.get64(pml4, ss + 16) else |_| { return NEG_EFAULT })
             if nsz < MINSIGSTKSZ {
                 return NEG_ENOMEM
             }
-            nsp = uaccess.get64(pml4, ss)
+            nsp = (uaccess.get64(pml4, ss) else |_| { return NEG_EFAULT })
             if !uaccess.in_user(nsp, nsz) {
                 return NEG_EINVAL
             }
         }
     }
     if old != 0 {
-        uaccess.zero(pml4, old, 24)
-        uaccess.put(pml4, old, asp, 8)
-        uaccess.put(pml4, old + 8, if asz == 0 { SS_DISABLE } else if on { SS_ONSTACK } else { 0 }, 4)
-        uaccess.put(pml4, old + 16, asz, 8)
+        let _stored50 = uaccess.zero(pml4, old, 24) else |_| { return NEG_EFAULT }
+        let _stored51 = uaccess.put(pml4, old, asp, 8) else |_| { return NEG_EFAULT }
+        let _stored52 = uaccess.put(pml4, old + 8, if asz == 0 { SS_DISABLE } else if on { SS_ONSTACK } else { 0 }, 4) else |_| { return NEG_EFAULT }
+        let _stored53 = uaccess.put(pml4, old + 16, asz, 8) else |_| { return NEG_EFAULT }
     }
     sched.set_self_altstack(nsp, nsz)
     0
@@ -1038,12 +1039,12 @@ pub fn sigreturn(f: u64) -> u64 {
         return die(f, SIGSEGV, ", rt_sigreturn with no frame to read")
     }
     let m = uc + UC_MCONTEXT
-    let rip = uaccess.get64(pml4, m + 128)
-    let rsp = uaccess.get64(pml4, m + 120)
+    let rip = (uaccess.get64(pml4, m + 128) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") })
+    let rsp = (uaccess.get64(pml4, m + 120) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") })
     if rip >= paging.USER_TOP || rsp >= paging.USER_TOP {
         return die(f, SIGSEGV, ", rt_sigreturn to an address outside the user half")
     }
-    let fp = uaccess.get64(pml4, m + 184)
+    let fp = (uaccess.get64(pml4, m + 184) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") })
     let fb = fpu.frame_bytes()
     if fp != 0 && fb != 0 {
         let s = sched.self_slot()
@@ -1053,28 +1054,28 @@ pub fn sigreturn(f: u64) -> u64 {
             return die(f, SIGSEGV, ", rt_sigreturn with an extended state that cannot be loaded")
         }
     }
-    put_word(f, W_R8, uaccess.get64(pml4, m))
-    put_word(f, W_R9, uaccess.get64(pml4, m + 8))
-    put_word(f, W_R10, uaccess.get64(pml4, m + 16))
-    put_word(f, W_R11, uaccess.get64(pml4, m + 24))
-    put_word(f, W_R12, uaccess.get64(pml4, m + 32))
-    put_word(f, W_R13, uaccess.get64(pml4, m + 40))
-    put_word(f, W_R14, uaccess.get64(pml4, m + 48))
-    put_word(f, W_R15, uaccess.get64(pml4, m + 56))
-    put_word(f, W_RDI, uaccess.get64(pml4, m + 64))
-    put_word(f, W_RSI, uaccess.get64(pml4, m + 72))
-    put_word(f, W_RBP, uaccess.get64(pml4, m + 80))
-    put_word(f, W_RBX, uaccess.get64(pml4, m + 88))
-    put_word(f, W_RDX, uaccess.get64(pml4, m + 96))
-    put_word(f, W_RAX, uaccess.get64(pml4, m + 104))
-    put_word(f, W_RCX, uaccess.get64(pml4, m + 112))
+    put_word(f, W_R8, (uaccess.get64(pml4, m) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_R9, (uaccess.get64(pml4, m + 8) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_R10, (uaccess.get64(pml4, m + 16) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_R11, (uaccess.get64(pml4, m + 24) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_R12, (uaccess.get64(pml4, m + 32) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_R13, (uaccess.get64(pml4, m + 40) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_R14, (uaccess.get64(pml4, m + 48) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_R15, (uaccess.get64(pml4, m + 56) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_RDI, (uaccess.get64(pml4, m + 64) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_RSI, (uaccess.get64(pml4, m + 72) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_RBP, (uaccess.get64(pml4, m + 80) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_RBX, (uaccess.get64(pml4, m + 88) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_RDX, (uaccess.get64(pml4, m + 96) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_RAX, (uaccess.get64(pml4, m + 104) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
+    put_word(f, W_RCX, (uaccess.get64(pml4, m + 112) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }))
     put_word(f, W_RSP, rsp)
     put_word(f, W_RIP, rip)
-    put_word(f, W_RFLAGS, (uaccess.get64(pml4, m + 136) & FLAGS_USER) | FLAGS_FIXED)
+    put_word(f, W_RFLAGS, ((uaccess.get64(pml4, m + 136) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }) & FLAGS_USER) | FLAGS_FIXED)
     put_word(f, W_CS, USER_CS)
     put_word(f, W_SS, USER_SS)
     put_word(f, W_VECTOR, SIGNAL_VECTOR)
-    let mask = uaccess.get64(pml4, uc + UC_SIGMASK) & !UNBLOCKABLE
+    let mask = (uaccess.get64(pml4, uc + UC_SIGMASK) else |_| { return die(f, SIGSEGV, ", unreadable signal frame") }) & !UNBLOCKABLE
     sched.set_self_sigmask(mask)
     sched.masks_changed()
     f
@@ -1206,8 +1207,8 @@ fn restart_handler(f: u64, restart: bool) -> bool {
             let end = trace_state.restart_wake(s)
             let now = timer.ticks()
             let left = if end > now { (end - now) * NS_PER_TICK } else { 0 }
-            uaccess.put(pml4, rem, left / NS_PER_SEC, 8)
-            uaccess.put(pml4, rem + 8, left % NS_PER_SEC, 8)
+            let _stored54 = uaccess.put(pml4, rem, left / NS_PER_SEC, 8) else |_| { put_word(f, W_RAX, NEG_EFAULT); return true }
+            let _stored55 = uaccess.put(pml4, rem + 8, left % NS_PER_SEC, 8) else |_| { put_word(f, W_RAX, NEG_EFAULT); return true }
         }
     }
     true

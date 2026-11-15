@@ -681,9 +681,9 @@ fn dequeue(s: u64, pml4: u64, buf: u64, cap: u64, parts: u64, peek: bool) -> (u6
         var done: u64 = 0
         var i: u64 = 0
         while done < n && i < parts {
-            let l = uaccess.get64(pml4, buf + i * 16 + 8)
+            let l = (uaccess.get64(pml4, buf + i * 16 + 8) else |_| { sync.release(sync.udp(), saved); return (0xfffffffffffffff2, 0, 0, 0) })
             let k = if n - done < l { n - done } else { l }
-            ring_out(s, pml4, at, done, uaccess.get64(pml4, buf + i * 16), k)
+            ring_out(s, pml4, at, done, (uaccess.get64(pml4, buf + i * 16) else |_| { sync.release(sync.udp(), saved); return (0xfffffffffffffff2, 0, 0, 0) }), k)
             done += k
             i += 1
         }
@@ -707,9 +707,9 @@ fn room_for(pml4: u64, buf: u64, n: u64, parts: u64) -> bool {
     var left = n
     var i: u64 = 0
     while left > 0 && i < parts {
-        let l = uaccess.get64(pml4, buf + i * 16 + 8)
+        let l = (uaccess.get64(pml4, buf + i * 16 + 8) else |_| { return false })
         let k = if left < l { left } else { l }
-        if !uaccess.writable(pml4, uaccess.get64(pml4, buf + i * 16), k) {
+        if !uaccess.writable(pml4, (uaccess.get64(pml4, buf + i * 16) else |_| { return false }), k) {
             return false
         }
         left -= k
@@ -870,8 +870,8 @@ fn send_locked(s: u64, pml4: u64, buf: u64, len: u64, parts: u64, named: bool, d
         var at: u64 = 0
         var i: u64 = 0
         while i < parts {
-            let base = uaccess.get64(pml4, buf + i * 16)
-            let n = uaccess.get64(pml4, buf + i * 16 + 8)
+            let base = (uaccess.get64(pml4, buf + i * 16) else |_| { return EFAULT })
+            let n = (uaccess.get64(pml4, buf + i * 16 + 8) else |_| { return EFAULT })
             if n > 0 && !uaccess.copy_in(pml4, f + 8 + at, base, n) {
                 return EFAULT
             }

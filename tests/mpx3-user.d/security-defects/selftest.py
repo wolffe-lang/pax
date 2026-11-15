@@ -55,6 +55,20 @@ class Verdicts(unittest.TestCase):
                           text + "PANIC overflow\n", text.replace("W0 child status 0", "W0 child status 99")):
                 self.assertFalse(rows.evaluate("signals", wrong)[f"W{mode}"])
 
+    def test_helper_parser(self):
+        spec = importlib.util.spec_from_file_location("helper_rows", path.with_name("helper_rows.py"))
+        helpers = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helpers)
+        lines = ["PASS " + row + "\n" for row in helpers.ROWS]
+        text = "".join(lines)
+        self.assertTrue(helpers.evaluate(text))
+        for line in lines:
+            self.assertFalse(helpers.evaluate(text.replace(line, "")))
+            self.assertFalse(helpers.evaluate(text + line))
+        for wrong in ("", text + "PANIC page fault\n", text + "FAIL other\n"):
+            self.assertFalse(helpers.evaluate(wrong))
+        self.assertFalse(helpers.checked_api("pub fn put(p: u64) {}"))
+
 
 if __name__ == "__main__":
     unittest.main()

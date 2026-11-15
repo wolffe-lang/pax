@@ -1329,8 +1329,8 @@ pub fn pipe2(a: u64, pml4: u64, va: u64, flags: u64) -> u64 {
         let _c = close(a, fr)
         return fw
     }
-    uaccess.put(pml4, va, fr, 4)
-    uaccess.put(pml4, va + 4, fw, 4)
+    let _stored1 = uaccess.put(pml4, va, fr, 4) else |_| { return neg(EFAULT) }
+    let _stored2 = uaccess.put(pml4, va + 4, fw, 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -1397,8 +1397,8 @@ pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) 
         let _c = close(a, f0)
         return f1
     }
-    uaccess.put(pml4, sv, f0, 4)
-    uaccess.put(pml4, sv + 4, f1, 4)
+    let _stored3 = uaccess.put(pml4, sv, f0, 4) else |_| { return neg(EFAULT) }
+    let _stored4 = uaccess.put(pml4, sv + 4, f1, 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -1585,7 +1585,7 @@ fn msg_fits(p: u64, m: u64) -> bool {
 /// array at user `iov` (`cnt` 0: the `m` bytes at `buf`), `m` bytes in
 /// all, the length word first. The caller checked the room and the
 /// parts.
-fn msg_put(p: u64, pml4: u64, buf: u64, iov: u64, cnt: u64, m: u64) {
+fn msg_put(p: u64, pml4: u64, buf: u64, iov: u64, cnt: u64, m: u64) -> u64 ! {fault} {
     let at = ppw(p, P_WR)
     var i: u64 = 0
     while i < 8 {
@@ -1598,14 +1598,15 @@ fn msg_put(p: u64, pml4: u64, buf: u64, iov: u64, cnt: u64, m: u64) {
         var w = at + 8
         var j: u64 = 0
         while j < cnt {
-            let l = uaccess.get64(pml4, iov + j * 16 + 8)
-            ring_in(p, pml4, w, uaccess.get64(pml4, iov + j * 16), l)
+            let l = (uaccess.get64(pml4, iov + j * 16 + 8) else |_| { return fault })
+            ring_in(p, pml4, w, (uaccess.get64(pml4, iov + j * 16) else |_| { return fault }), l)
             w += l
             j += 1
         }
     }
     put_ppw(p, P_WR, at + 8 + m)
     sched.wake_pipes()
+    0
 }
 
 /// px34: `n` bytes from user `src` into buffer `p` from byte `at` on.
@@ -1637,7 +1638,7 @@ pub fn msg_writev(a: u64, pml4: u64, fd: u64, iov: u64, cnt: u64, m: u64) -> u64
         }
         return WAIT
     }
-    msg_put(p, pml4, 0, iov, cnt, m)
+    let _copied1 = msg_put(p, pml4, 0, iov, cnt, m) else |_| { return neg(EFAULT) }
     m
 }
 
@@ -1712,7 +1713,7 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
             }
             return WAIT
         }
-        msg_put(p, pml4, buf, 0, 0, n)
+        let _copied2 = msg_put(p, pml4, buf, 0, 0, n) else |_| { return neg(EFAULT) }
         return n
     }
     let done = sched.self_done()
@@ -1794,7 +1795,7 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
         if !uaccess.readable(pml4, offp, 8) || !uaccess.writable(pml4, offp, 8) {
             return neg(EFAULT)
         }
-        off = uaccess.get64(pml4, offp)
+        off = (uaccess.get64(pml4, offp) else |_| { return neg(EFAULT) })
     }
     let i = rf(node_of(a, inf))
     let size = tree.bytes(i)
@@ -1884,7 +1885,7 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
     }
     tree.touch_read(i)
     if offp != 0 {
-        uaccess.put(pml4, offp, off + done, 8)
+        let _stored5 = uaccess.put(pml4, offp, off + done, 8) else |_| { return neg(EFAULT) }
     } else {
         set_pos(a, inf, off + done)
     }
@@ -2098,13 +2099,13 @@ pub fn copy_file_range(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout
         if !uaccess.readable(pml4, offin, 8) || !uaccess.writable(pml4, offin, 8) {
             return neg(EFAULT)
         }
-        off = uaccess.get64(pml4, offin)
+        off = (uaccess.get64(pml4, offin) else |_| { return neg(EFAULT) })
     }
     if offout != 0 {
         if !uaccess.readable(pml4, offout, 8) || !uaccess.writable(pml4, offout, 8) {
             return neg(EFAULT)
         }
-        q = uaccess.get64(pml4, offout)
+        q = (uaccess.get64(pml4, offout) else |_| { return neg(EFAULT) })
     }
     if off >= 0x8000000000000000 || q >= 0x8000000000000000 {
         return neg(EINVAL)
@@ -2129,12 +2130,12 @@ pub fn copy_file_range(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout
     wrote(a, j) // px44
     tree.touch_read(i)
     if offin != 0 {
-        uaccess.put(pml4, offin, off + r, 8)
+        let _stored6 = uaccess.put(pml4, offin, off + r, 8) else |_| { return neg(EFAULT) }
     } else {
         set_pos(a, inf, off + r)
     }
     if offout != 0 {
-        uaccess.put(pml4, offout, q + r, 8)
+        let _stored7 = uaccess.put(pml4, offout, q + r, 8) else |_| { return neg(EFAULT) }
     } else {
         set_pos(a, out, q + r)
     }
@@ -2156,7 +2157,7 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
         if !uaccess.writable(pml4, alen, 4) {
             return neg(EFAULT)
         }
-        uaccess.put(pml4, alen, 0, 4)
+        let _stored8 = uaccess.put(pml4, alen, 0, 4) else |_| { return neg(EFAULT) }
     }
     // px34: MSG_PEEK, MSG_TRUNC and MSG_DONTWAIT read; a path socket's too.
     pipe_recv(a, pml4, fd, buf, n, flags & (MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT))
@@ -2344,7 +2345,7 @@ fn event_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, buf, 8) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, buf, event.ev_take(v), 8)
+    let _stored9 = uaccess.put(pml4, buf, event.ev_take(v), 8) else |_| { return neg(EFAULT) }
     sched.wake_pipes()
     8
 }
@@ -2373,7 +2374,7 @@ fn mouse_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     while got < want && mouse.pull(r, tmp) {
         var w: u64 = 0
         while w < 4 {
-            uaccess.put(pml4, buf + got * mouse.RECORD + w * 8, unsafe { ((tmp + w * 8) as *u64).read_volatile() }, 8)
+            let _stored10 = uaccess.put(pml4, buf + got * mouse.RECORD + w * 8, unsafe { ((tmp + w * 8) as *u64).read_volatile() }, 8) else |_| { return neg(EFAULT) }
             w += 1
         }
         got += 1
@@ -2403,7 +2404,7 @@ pub fn event_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if !uaccess.readable(pml4, buf, 8) {
         return neg(EFAULT)
     }
-    let x = uaccess.get64(pml4, buf)
+    let x = (uaccess.get64(pml4, buf) else |_| { return neg(EFAULT) })
     if x == 0xffffffffffffffff {
         return neg(EINVAL)
     }
@@ -2749,17 +2750,17 @@ fn un_path(a: u64, pml4: u64, addr: u64, len: u64) -> (u64, u64) {
     if !uaccess.readable(pml4, addr, len) {
         return (neg(EFAULT), 0)
     }
-    if uaccess.get(pml4, addr, 2) != AF_UNIX {
+    if (uaccess.get(pml4, addr, 2) else |_| { return (neg(EFAULT), 0) }) != AF_UNIX {
         return (neg(EINVAL), 0)
     }
-    if len == 2 || uaccess.get(pml4, addr + 2, 1) == 0 {
+    if len == 2 || (uaccess.get(pml4, addr + 2, 1) else |_| { return (neg(EFAULT), 0) }) == 0 {
         put(a, A_REFUSAL, unix.R_ABSTRACT)
         unix.refuse()
         return (neg(EINVAL), 0)
     }
     var l: u64 = 0
-    while l < len - 2 && uaccess.get(pml4, addr + 2 + l, 1) != 0 {
-        put_kb(l, uaccess.get(pml4, addr + 2 + l, 1))
+    while l < len - 2 && (uaccess.get(pml4, addr + 2 + l, 1) else |_| { return (neg(EFAULT), 0) }) != 0 {
+        put_kb(l, (uaccess.get(pml4, addr + 2 + l, 1) else |_| { return (neg(EFAULT), 0) }))
         l += 1
     }
     put_kb(l, 0)
@@ -2919,7 +2920,7 @@ fn un_out(pml4: u64, addr: u64, lenp: u64, who: u64) -> u64 {
     if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
         return neg(EFAULT)
     }
-    let cap = uaccess.get(pml4, lenp, 4)
+    let cap = (uaccess.get(pml4, lenp, 4) else |_| { return neg(EFAULT) })
     if cap >= 0x80000000 {
         return neg(EINVAL)
     }
@@ -2937,10 +2938,10 @@ fn un_out(pml4: u64, addr: u64, lenp: u64, who: u64) -> u64 {
         } else if i >= 2 && i - 2 < nl {
             b = unix.name_byte(who, i - 2)
         }
-        uaccess.put(pml4, addr + i, b, 1)
+        let _stored11 = uaccess.put(pml4, addr + i, b, 1) else |_| { return neg(EFAULT) }
         i += 1
     }
-    uaccess.put(pml4, lenp, full, 4)
+    let _stored12 = uaccess.put(pml4, lenp, full, 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -3005,7 +3006,7 @@ pub fn unix_getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, valu
     if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
         return neg(EFAULT)
     }
-    let cap = uaccess.get(pml4, lenp, 4)
+    let cap = (uaccess.get(pml4, lenp, 4) else |_| { return neg(EFAULT) })
     if cap >= 0x80000000 {
         return neg(EINVAL)
     }
@@ -3022,8 +3023,8 @@ pub fn unix_getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, valu
         v = unix.err(r)
         unix.set_err(r, 0)
     }
-    uaccess.put(pml4, value, v, k)
-    uaccess.put(pml4, lenp, k, 4)
+    let _stored13 = uaccess.put(pml4, value, v, k) else |_| { return neg(EFAULT) }
+    let _stored14 = uaccess.put(pml4, lenp, k, 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -3047,7 +3048,7 @@ pub fn peercred(a: u64, pml4: u64, fd: u64, value: u64, lenp: u64) -> u64 {
     if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
         return neg(EFAULT)
     }
-    let cap = uaccess.get(pml4, lenp, 4)
+    let cap = (uaccess.get(pml4, lenp, 4) else |_| { return neg(EFAULT) })
     if cap >= 0x80000000 {
         return neg(EINVAL)
     }
@@ -3077,10 +3078,10 @@ pub fn peercred(a: u64, pml4: u64, fd: u64, value: u64, lenp: u64) -> u64 {
     var i: u64 = 0
     while i < n {
         let word = if i < 4 { pid } else if i < 8 { uid } else { gid }
-        uaccess.put(pml4, value + i, (word >> ((i % 4) * 8)) & 0xff, 1)
+        let _stored15 = uaccess.put(pml4, value + i, (word >> ((i % 4) * 8)) & 0xff, 1) else |_| { return neg(EFAULT) }
         i += 1
     }
-    uaccess.put(pml4, lenp, n, 4)
+    let _stored16 = uaccess.put(pml4, lenp, n, 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -4939,7 +4940,7 @@ fn dev_read(pml4: u64, r: u64, buf: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, buf, n) {
         return neg(EFAULT)
     }
-    uaccess.zero(pml4, buf, n)
+    let _stored17 = uaccess.zero(pml4, buf, n) else |_| { return neg(EFAULT) }
     n
 }
 
@@ -5374,42 +5375,42 @@ fn put_statfs(pml4: u64, buf: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, buf, 120) {
         return neg(EFAULT)
     }
-    uaccess.zero(pml4, buf, 120)
+    let _stored18 = uaccess.zero(pml4, buf, 120) else |_| { return neg(EFAULT) }
     var flags = ST_VALID | ST_RELATIME
     if ty(n) == T_INO && tree.on_volume(rf(n)) {
         let i = rf(n)
-        uaccess.put(pml4, buf, EXT2_SUPER_MAGIC, 8)
-        uaccess.put(pml4, buf + 8, tree.vol_statfs(i, 0), 8)
-        uaccess.put(pml4, buf + 16, tree.vol_statfs(i, 1), 8)
-        uaccess.put(pml4, buf + 24, tree.vol_statfs(i, 2), 8)
-        uaccess.put(pml4, buf + 32, tree.vol_statfs(i, 3), 8)
-        uaccess.put(pml4, buf + 40, tree.vol_statfs(i, 4), 8)
-        uaccess.put(pml4, buf + 48, tree.vol_statfs(i, 5), 8)
-        uaccess.put(pml4, buf + 56, tree.vol_statfs(i, 6), 4)
-        uaccess.put(pml4, buf + 60, tree.vol_statfs(i, 7), 4)
-        uaccess.put(pml4, buf + 72, tree.vol_statfs(i, 0), 8)
+        let _stored19 = uaccess.put(pml4, buf, EXT2_SUPER_MAGIC, 8) else |_| { return neg(EFAULT) }
+        let _stored20 = uaccess.put(pml4, buf + 8, tree.vol_statfs(i, 0), 8) else |_| { return neg(EFAULT) }
+        let _stored21 = uaccess.put(pml4, buf + 16, tree.vol_statfs(i, 1), 8) else |_| { return neg(EFAULT) }
+        let _stored22 = uaccess.put(pml4, buf + 24, tree.vol_statfs(i, 2), 8) else |_| { return neg(EFAULT) }
+        let _stored23 = uaccess.put(pml4, buf + 32, tree.vol_statfs(i, 3), 8) else |_| { return neg(EFAULT) }
+        let _stored24 = uaccess.put(pml4, buf + 40, tree.vol_statfs(i, 4), 8) else |_| { return neg(EFAULT) }
+        let _stored25 = uaccess.put(pml4, buf + 48, tree.vol_statfs(i, 5), 8) else |_| { return neg(EFAULT) }
+        let _stored26 = uaccess.put(pml4, buf + 56, tree.vol_statfs(i, 6), 4) else |_| { return neg(EFAULT) }
+        let _stored27 = uaccess.put(pml4, buf + 60, tree.vol_statfs(i, 7), 4) else |_| { return neg(EFAULT) }
+        let _stored28 = uaccess.put(pml4, buf + 72, tree.vol_statfs(i, 0), 8) else |_| { return neg(EFAULT) }
         if tree.read_only(i) {
             flags = flags | ST_RDONLY
         }
     } else if ty(n) == T_INO {
         let cap = tree.cap()
         let held = tree.held()
-        uaccess.put(pml4, buf, TMPFS_MAGIC, 8)
-        uaccess.put(pml4, buf + 8, PAGE, 8)
-        uaccess.put(pml4, buf + 16, cap, 8)
-        uaccess.put(pml4, buf + 24, if cap > held { cap - held } else { 0 }, 8)
-        uaccess.put(pml4, buf + 32, if cap > held { cap - held } else { 0 }, 8)
-        uaccess.put(pml4, buf + 40, tree.MAX_INODES, 8)
-        uaccess.put(pml4, buf + 48, tree.MAX_INODES - tree.live(), 8)
-        uaccess.put(pml4, buf + 72, PAGE, 8)
+        let _stored29 = uaccess.put(pml4, buf, TMPFS_MAGIC, 8) else |_| { return neg(EFAULT) }
+        let _stored30 = uaccess.put(pml4, buf + 8, PAGE, 8) else |_| { return neg(EFAULT) }
+        let _stored31 = uaccess.put(pml4, buf + 16, cap, 8) else |_| { return neg(EFAULT) }
+        let _stored32 = uaccess.put(pml4, buf + 24, if cap > held { cap - held } else { 0 }, 8) else |_| { return neg(EFAULT) }
+        let _stored33 = uaccess.put(pml4, buf + 32, if cap > held { cap - held } else { 0 }, 8) else |_| { return neg(EFAULT) }
+        let _stored34 = uaccess.put(pml4, buf + 40, tree.MAX_INODES, 8) else |_| { return neg(EFAULT) }
+        let _stored35 = uaccess.put(pml4, buf + 48, tree.MAX_INODES - tree.live(), 8) else |_| { return neg(EFAULT) }
+        let _stored36 = uaccess.put(pml4, buf + 72, PAGE, 8) else |_| { return neg(EFAULT) }
     } else {
         let t = ty(n)
-        uaccess.put(pml4, buf, if t == T_SYN { if procfs.fs(rf(n)) == 0 { PROC_SUPER_MAGIC } else { SYSFS_MAGIC } } else { TMPFS_MAGIC }, 8)
-        uaccess.put(pml4, buf + 8, PAGE, 8)
-        uaccess.put(pml4, buf + 72, PAGE, 8)
+        let _stored37 = uaccess.put(pml4, buf, if t == T_SYN { if procfs.fs(rf(n)) == 0 { PROC_SUPER_MAGIC } else { SYSFS_MAGIC } } else { TMPFS_MAGIC }, 8) else |_| { return neg(EFAULT) }
+        let _stored38 = uaccess.put(pml4, buf + 8, PAGE, 8) else |_| { return neg(EFAULT) }
+        let _stored39 = uaccess.put(pml4, buf + 72, PAGE, 8) else |_| { return neg(EFAULT) }
     }
-    uaccess.put(pml4, buf + 64, 255, 8) // f_namelen
-    uaccess.put(pml4, buf + 80, flags, 8)
+    let _stored40 = uaccess.put(pml4, buf + 64, 255, 8) else |_| { return neg(EFAULT) } // f_namelen
+    let _stored41 = uaccess.put(pml4, buf + 80, flags, 8) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -5474,7 +5475,7 @@ pub fn ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.readable(pml4, arg, 4) {
             return neg(EFAULT)
         }
-        set_nonblocking(a, fd, uaccess.get(pml4, arg, 4) != 0)
+        set_nonblocking(a, fd, (uaccess.get(pml4, arg, 4) else |_| { return neg(EFAULT) }) != 0)
         return 0
     }
     neg(ENOTTY)
@@ -5766,7 +5767,7 @@ pub fn getcwd(a: u64, pml4: u64, buf: u64, size: u64) -> u64 {
     if !uaccess.writable(pml4, buf + l, 1) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, buf + l, 0, 1)
+    let _stored42 = uaccess.put(pml4, buf + l, 0, 1) else |_| { return neg(EFAULT) }
     l + 1
 }
 
@@ -6958,8 +6959,8 @@ pub fn fchownat(a: u64, pml4: u64, dirfd: u64, va: u64, owner: u64, group: u64, 
 /// second count past what 64 bits of nanoseconds hold (1677 to 2262) is
 /// held at that end: named drift (tmpfs keeps it).
 fn timespec_in(pml4: u64, ts: u64) -> (bool, u64, u64) {
-    let sec = uaccess.get(pml4, ts, 8)
-    let ns = uaccess.get(pml4, ts + 8, 8)
+    let sec = (uaccess.get(pml4, ts, 8) else |_| { return (false, 0, EFAULT) })
+    let ns = (uaccess.get(pml4, ts + 8, 8) else |_| { return (false, 0, EFAULT) })
     if ns == UTIME_OMIT {
         return (false, 0, 0)
     }
@@ -7013,7 +7014,7 @@ pub fn utimensat(a: u64, pml4: u64, dirfd: u64, va: u64, times: u64, flags: u64)
         which = (if sa { 1 } else { 0 }) | (if sm { 2 } else { 0 })
         at = ta
         mt = tm
-        now2 = uaccess.get(pml4, times + 8, 8) == UTIME_NOW && uaccess.get(pml4, times + 24, 8) == UTIME_NOW
+        now2 = (uaccess.get(pml4, times + 8, 8) else |_| { return neg(EFAULT) }) == UTIME_NOW && (uaccess.get(pml4, times + 24, 8) else |_| { return neg(EFAULT) }) == UTIME_NOW
     }
     var n: u64 = 0
     if va == 0 {
@@ -7506,23 +7507,23 @@ fn put_stat(a: u64, pml4: u64, st: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, st, 144) {
         return neg(EFAULT)
     }
-    uaccess.zero(pml4, st, 144)
-    uaccess.put(pml4, st, dev_t(n_major(n), n_dev(n)), 8) // st_dev (px63: a volume's disk)
-    uaccess.put(pml4, st + 8, n_ino(n), 8) // st_ino
-    uaccess.put(pml4, st + 16, n_nlink(n), 8) // st_nlink
-    uaccess.put(pml4, st + 24, n_mode(n), 4) // st_mode
-    uaccess.put(pml4, st + 28, n_owner(a, n, 0), 4) // st_uid (px42)
-    uaccess.put(pml4, st + 32, n_owner(a, n, 1), 4) // st_gid
-    uaccess.put(pml4, st + 40, dev_t(n_rdev(n, 0), n_rdev(n, 1)), 8) // st_rdev
-    uaccess.put(pml4, st + 48, n_size(n), 8) // st_size
-    uaccess.put(pml4, st + 56, n_blksize(n), 8) // st_blksize (px63: a volume's block size)
-    uaccess.put(pml4, st + 64, n_blocks(n), 8) // st_blocks
-    uaccess.put(pml4, st + 72, tsec(n_time(n, 0)), 8) // st_atim (px36: signed)
-    uaccess.put(pml4, st + 80, tnsec(n_time(n, 0)), 8)
-    uaccess.put(pml4, st + 88, tsec(n_time(n, 1)), 8) // st_mtim
-    uaccess.put(pml4, st + 96, tnsec(n_time(n, 1)), 8)
-    uaccess.put(pml4, st + 104, tsec(n_time(n, 2)), 8) // st_ctim
-    uaccess.put(pml4, st + 112, tnsec(n_time(n, 2)), 8)
+    let _stored43 = uaccess.zero(pml4, st, 144) else |_| { return neg(EFAULT) }
+    let _stored44 = uaccess.put(pml4, st, dev_t(n_major(n), n_dev(n)), 8) else |_| { return neg(EFAULT) } // st_dev (px63: a volume's disk)
+    let _stored45 = uaccess.put(pml4, st + 8, n_ino(n), 8) else |_| { return neg(EFAULT) } // st_ino
+    let _stored46 = uaccess.put(pml4, st + 16, n_nlink(n), 8) else |_| { return neg(EFAULT) } // st_nlink
+    let _stored47 = uaccess.put(pml4, st + 24, n_mode(n), 4) else |_| { return neg(EFAULT) } // st_mode
+    let _stored48 = uaccess.put(pml4, st + 28, n_owner(a, n, 0), 4) else |_| { return neg(EFAULT) } // st_uid (px42)
+    let _stored49 = uaccess.put(pml4, st + 32, n_owner(a, n, 1), 4) else |_| { return neg(EFAULT) } // st_gid
+    let _stored50 = uaccess.put(pml4, st + 40, dev_t(n_rdev(n, 0), n_rdev(n, 1)), 8) else |_| { return neg(EFAULT) } // st_rdev
+    let _stored51 = uaccess.put(pml4, st + 48, n_size(n), 8) else |_| { return neg(EFAULT) } // st_size
+    let _stored52 = uaccess.put(pml4, st + 56, n_blksize(n), 8) else |_| { return neg(EFAULT) } // st_blksize (px63: a volume's block size)
+    let _stored53 = uaccess.put(pml4, st + 64, n_blocks(n), 8) else |_| { return neg(EFAULT) } // st_blocks
+    let _stored54 = uaccess.put(pml4, st + 72, tsec(n_time(n, 0)), 8) else |_| { return neg(EFAULT) } // st_atim (px36: signed)
+    let _stored55 = uaccess.put(pml4, st + 80, tnsec(n_time(n, 0)), 8) else |_| { return neg(EFAULT) }
+    let _stored56 = uaccess.put(pml4, st + 88, tsec(n_time(n, 1)), 8) else |_| { return neg(EFAULT) } // st_mtim
+    let _stored57 = uaccess.put(pml4, st + 96, tnsec(n_time(n, 1)), 8) else |_| { return neg(EFAULT) }
+    let _stored58 = uaccess.put(pml4, st + 104, tsec(n_time(n, 2)), 8) else |_| { return neg(EFAULT) } // st_ctim
+    let _stored59 = uaccess.put(pml4, st + 112, tnsec(n_time(n, 2)), 8) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -7531,29 +7532,29 @@ fn put_statx(a: u64, pml4: u64, sx: u64, n: u64) -> u64 {
     if !uaccess.writable(pml4, sx, 256) {
         return neg(EFAULT)
     }
-    uaccess.zero(pml4, sx, 256)
+    let _stored60 = uaccess.zero(pml4, sx, 256) else |_| { return neg(EFAULT) }
     // stx_mask: STATX_BASIC_STATS, and STATX_BTIME for an inode (px27).
-    uaccess.put(pml4, sx, if ty(n) == T_INO { 0xfff } else { 0x7ff }, 4)
-    uaccess.put(pml4, sx + 4, n_blksize(n), 4) // stx_blksize
-    uaccess.put(pml4, sx + 16, n_nlink(n), 4) // stx_nlink
-    uaccess.put(pml4, sx + 20, n_owner(a, n, 0), 4) // stx_uid (px42)
-    uaccess.put(pml4, sx + 24, n_owner(a, n, 1), 4) // stx_gid
-    uaccess.put(pml4, sx + 28, n_mode(n), 2) // stx_mode
-    uaccess.put(pml4, sx + 32, n_ino(n), 8) // stx_ino
-    uaccess.put(pml4, sx + 40, n_size(n), 8) // stx_size
-    uaccess.put(pml4, sx + 48, n_blocks(n), 8) // stx_blocks
-    uaccess.put(pml4, sx + 64, tsec(n_time(n, 0)), 8) // stx_atime (px36: signed)
-    uaccess.put(pml4, sx + 72, tnsec(n_time(n, 0)), 4)
-    uaccess.put(pml4, sx + 80, tsec(n_time(n, 3)), 8) // stx_btime
-    uaccess.put(pml4, sx + 88, tnsec(n_time(n, 3)), 4)
-    uaccess.put(pml4, sx + 96, tsec(n_time(n, 2)), 8) // stx_ctime
-    uaccess.put(pml4, sx + 104, tnsec(n_time(n, 2)), 4)
-    uaccess.put(pml4, sx + 112, tsec(n_time(n, 1)), 8) // stx_mtime
-    uaccess.put(pml4, sx + 120, tnsec(n_time(n, 1)), 4)
-    uaccess.put(pml4, sx + 128, n_rdev(n, 0), 4) // stx_rdev_major
-    uaccess.put(pml4, sx + 132, n_rdev(n, 1), 4) // stx_rdev_minor
-    uaccess.put(pml4, sx + 136, n_major(n), 4) // stx_dev_major (px63: 254 for a volume's disk)
-    uaccess.put(pml4, sx + 140, n_dev(n), 4) // stx_dev_minor (0:1, /dev 0:5)
+    let _stored61 = uaccess.put(pml4, sx, if ty(n) == T_INO { 0xfff } else { 0x7ff }, 4) else |_| { return neg(EFAULT) }
+    let _stored62 = uaccess.put(pml4, sx + 4, n_blksize(n), 4) else |_| { return neg(EFAULT) } // stx_blksize
+    let _stored63 = uaccess.put(pml4, sx + 16, n_nlink(n), 4) else |_| { return neg(EFAULT) } // stx_nlink
+    let _stored64 = uaccess.put(pml4, sx + 20, n_owner(a, n, 0), 4) else |_| { return neg(EFAULT) } // stx_uid (px42)
+    let _stored65 = uaccess.put(pml4, sx + 24, n_owner(a, n, 1), 4) else |_| { return neg(EFAULT) } // stx_gid
+    let _stored66 = uaccess.put(pml4, sx + 28, n_mode(n), 2) else |_| { return neg(EFAULT) } // stx_mode
+    let _stored67 = uaccess.put(pml4, sx + 32, n_ino(n), 8) else |_| { return neg(EFAULT) } // stx_ino
+    let _stored68 = uaccess.put(pml4, sx + 40, n_size(n), 8) else |_| { return neg(EFAULT) } // stx_size
+    let _stored69 = uaccess.put(pml4, sx + 48, n_blocks(n), 8) else |_| { return neg(EFAULT) } // stx_blocks
+    let _stored70 = uaccess.put(pml4, sx + 64, tsec(n_time(n, 0)), 8) else |_| { return neg(EFAULT) } // stx_atime (px36: signed)
+    let _stored71 = uaccess.put(pml4, sx + 72, tnsec(n_time(n, 0)), 4) else |_| { return neg(EFAULT) }
+    let _stored72 = uaccess.put(pml4, sx + 80, tsec(n_time(n, 3)), 8) else |_| { return neg(EFAULT) } // stx_btime
+    let _stored73 = uaccess.put(pml4, sx + 88, tnsec(n_time(n, 3)), 4) else |_| { return neg(EFAULT) }
+    let _stored74 = uaccess.put(pml4, sx + 96, tsec(n_time(n, 2)), 8) else |_| { return neg(EFAULT) } // stx_ctime
+    let _stored75 = uaccess.put(pml4, sx + 104, tnsec(n_time(n, 2)), 4) else |_| { return neg(EFAULT) }
+    let _stored76 = uaccess.put(pml4, sx + 112, tsec(n_time(n, 1)), 8) else |_| { return neg(EFAULT) } // stx_mtime
+    let _stored77 = uaccess.put(pml4, sx + 120, tnsec(n_time(n, 1)), 4) else |_| { return neg(EFAULT) }
+    let _stored78 = uaccess.put(pml4, sx + 128, n_rdev(n, 0), 4) else |_| { return neg(EFAULT) } // stx_rdev_major
+    let _stored79 = uaccess.put(pml4, sx + 132, n_rdev(n, 1), 4) else |_| { return neg(EFAULT) } // stx_rdev_minor
+    let _stored80 = uaccess.put(pml4, sx + 136, n_major(n), 4) else |_| { return neg(EFAULT) } // stx_dev_major (px63: 254 for a volume's disk)
+    let _stored81 = uaccess.put(pml4, sx + 140, n_dev(n), 4) else |_| { return neg(EFAULT) } // stx_dev_minor (0:1, /dev 0:5)
     0
 }
 
@@ -7926,40 +7927,40 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
                 more = false
             } else {
                 let r = buf + used
-                uaccess.zero(pml4, r, rec)
-                uaccess.put(pml4, r, if dino != 0 { dino } else { n_ino(c) }, 8)
-                uaccess.put(pml4, r + 8, next, 8)
-                uaccess.put(pml4, r + 16, rec, 2)
-                uaccess.put(pml4, r + 18, if dino != 0 { dtyp } else { d_type(c) }, 1)
+                let _stored82 = uaccess.zero(pml4, r, rec) else |_| { return neg(EFAULT) }
+                let _stored83 = uaccess.put(pml4, r, if dino != 0 { dino } else { n_ino(c) }, 8) else |_| { return neg(EFAULT) }
+                let _stored84 = uaccess.put(pml4, r + 8, next, 8) else |_| { return neg(EFAULT) }
+                let _stored85 = uaccess.put(pml4, r + 16, rec, 2) else |_| { return neg(EFAULT) }
+                let _stored86 = uaccess.put(pml4, r + 18, if dino != 0 { dtyp } else { d_type(c) }, 1) else |_| { return neg(EFAULT) }
                 if p == 0 {
-                    uaccess.put(pml4, r + 19, 46, 1)
+                    let _stored87 = uaccess.put(pml4, r + 19, 46, 1) else |_| { return neg(EFAULT) }
                 } else if p == 1 {
-                    uaccess.put(pml4, r + 19, 46, 1)
-                    uaccess.put(pml4, r + 20, 46, 1)
+                    let _stored88 = uaccess.put(pml4, r + 19, 46, 1) else |_| { return neg(EFAULT) }
+                    let _stored89 = uaccess.put(pml4, r + 20, 46, 1) else |_| { return neg(EFAULT) }
                 } else if na != 0 {
                     let _ok = uaccess.copy_out(pml4, r + 19, na, nl)
                 } else if ty(c) == T_SYN {
                     var j: u64 = 0
                     while j < nl {
-                        uaccess.put(pml4, r + 19 + j, procfs.name_byte(rf(c), j), 1) // px25: a pid's digits too
+                        let _stored90 = uaccess.put(pml4, r + 19 + j, procfs.name_byte(rf(c), j), 1) else |_| { return neg(EFAULT) } // px25: a pid's digits too
                         j += 1
                     }
                 } else if ty(c) == T_BLK {
                     var j: u64 = 0
                     while j < nl {
-                        uaccess.put(pml4, r + 19 + j, block.name_byte(rf(c) & 0xffff, j), 1) // px79
+                        let _stored91 = uaccess.put(pml4, r + 19 + j, block.name_byte(rf(c) & 0xffff, j), 1) else |_| { return neg(EFAULT) } // px79
                         j += 1
                     }
                 } else if ty(c) == T_PTS && pts_what(c) == PTS_SLAVE {
                     var j: u64 = 0
                     while j < nl {
-                        uaccess.put(pml4, r + 19 + j, pts_digit(c, j), 1) // px111
+                        let _stored92 = uaccess.put(pml4, r + 19 + j, pts_digit(c, j), 1) else |_| { return neg(EFAULT) } // px111
                         j += 1
                     }
                 } else {
                     var j: u64 = 0
                     for b in fixed_name(c).bytes() {
-                        uaccess.put(pml4, r + 19 + j, b as int as u64, 1)
+                        let _stored93 = uaccess.put(pml4, r + 19 + j, b as int as u64, 1) else |_| { return neg(EFAULT) }
                         j += 1
                     }
                 }
@@ -8280,7 +8281,7 @@ fn put_arg(pml4: u64, arg: u64, v: u64, width: u64) -> u64 {
     if !uaccess.writable(pml4, arg, width) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, arg, v, width)
+    let _stored94 = uaccess.put(pml4, arg, v, width) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -8343,11 +8344,11 @@ fn blk_ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.writable(pml4, arg, 16) {
             return neg(EFAULT)
         }
-        uaccess.zero(pml4, arg, 16)
-        uaccess.put(pml4, arg, h, 1)
-        uaccess.put(pml4, arg + 1, sp, 1)
-        uaccess.put(pml4, arg + 2, c & 0xffff, 2)
-        uaccess.put(pml4, arg + 8, block.start_of(d), 8)
+        let _stored95 = uaccess.zero(pml4, arg, 16) else |_| { return neg(EFAULT) }
+        let _stored96 = uaccess.put(pml4, arg, h, 1) else |_| { return neg(EFAULT) }
+        let _stored97 = uaccess.put(pml4, arg + 1, sp, 1) else |_| { return neg(EFAULT) }
+        let _stored98 = uaccess.put(pml4, arg + 2, c & 0xffff, 2) else |_| { return neg(EFAULT) }
+        let _stored99 = uaccess.put(pml4, arg + 8, block.start_of(d), 8) else |_| { return neg(EFAULT) }
         return 0
     }
     if req == BLKFLSBUF || req == BLKRRPART || req == BLKPG {
@@ -8367,14 +8368,14 @@ fn blk_ioctl(a: u64, pml4: u64, fd: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.readable(pml4, arg, 24) {
             return neg(EFAULT)
         }
-        let op = uaccess.get(pml4, arg, 4)
-        let data = uaccess.get64(pml4, arg + 16)
+        let op = (uaccess.get(pml4, arg, 4) else |_| { return neg(EFAULT) })
+        let data = (uaccess.get64(pml4, arg + 16) else |_| { return neg(EFAULT) })
         if !uaccess.readable(pml4, data, 20) {
             return neg(EFAULT)
         }
-        let start = uaccess.get64(pml4, data)
-        let len = uaccess.get64(pml4, data + 8)
-        let pno = uaccess.get(pml4, data + 16, 4)
+        let start = (uaccess.get64(pml4, data) else |_| { return neg(EFAULT) })
+        let len = (uaccess.get64(pml4, data + 8) else |_| { return neg(EFAULT) })
+        let pno = (uaccess.get(pml4, data + 16, 4) else |_| { return neg(EFAULT) })
         if op == BLKPG_ADD_PARTITION {
             return block.blkpg_add(d, if pno >= 0x80000000 { 0 } else { pno }, start, len)
         }

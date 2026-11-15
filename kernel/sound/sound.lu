@@ -1001,7 +1001,7 @@ fn put_int(pml4: u64, va: u64, v: u64) -> bool {
     if !uaccess.writable(pml4, va, 4) {
         return false
     }
-    uaccess.put(pml4, va, v, 4)
+    let _stored1 = uaccess.put(pml4, va, v, 4) else |_| { return false }
     true
 }
 
@@ -1009,7 +1009,7 @@ fn get_int(pml4: u64, va: u64) -> u64 ! {fault} {
     if !uaccess.readable(pml4, va, 4) {
         return fault
     }
-    uaccess.get(pml4, va, 4)
+    (uaccess.get(pml4, va, 4) else |_| { return fault })
 }
 
 /// A changed parameter: the next write settles it with the device. A
@@ -1150,10 +1150,10 @@ fn ioctl_selected(pml4: u64, req: u64, arg: u64) -> u64 {
             return neg(EFAULT)
         }
         let free = PERIODS - sw(W_INFLIGHT) - (if sw(W_FILL) > 0 { 1 } else { 0 })
-        uaccess.put(pml4, arg, free, 4)
-        uaccess.put(pml4, arg + 4, PERIODS, 4)
-        uaccess.put(pml4, arg + 8, PERIOD, 4)
-        uaccess.put(pml4, arg + 12, (PERIODS - sw(W_INFLIGHT)) * PERIOD - sw(W_FILL), 4)
+        let _stored2 = uaccess.put(pml4, arg, free, 4) else |_| { return neg(EFAULT) }
+        let _stored3 = uaccess.put(pml4, arg + 4, PERIODS, 4) else |_| { return neg(EFAULT) }
+        let _stored4 = uaccess.put(pml4, arg + 8, PERIOD, 4) else |_| { return neg(EFAULT) }
+        let _stored5 = uaccess.put(pml4, arg + 12, (PERIODS - sw(W_INFLIGHT)) * PERIOD - sw(W_FILL), 4) else |_| { return neg(EFAULT) }
         return 0
     }
     if req == DSP_GETOPTR {
@@ -1161,9 +1161,9 @@ fn ioctl_selected(pml4: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.writable(pml4, arg, 12) {
             return neg(EFAULT)
         }
-        uaccess.put(pml4, arg, sw(W_PLAYED) & 0x7fffffff, 4)
-        uaccess.put(pml4, arg + 4, sw(W_BLOCKS), 4)
-        uaccess.put(pml4, arg + 8, sw(W_HEAD) * PERIOD, 4)
+        let _stored6 = uaccess.put(pml4, arg, sw(W_PLAYED) & 0x7fffffff, 4) else |_| { return neg(EFAULT) }
+        let _stored7 = uaccess.put(pml4, arg + 4, sw(W_BLOCKS), 4) else |_| { return neg(EFAULT) }
+        let _stored8 = uaccess.put(pml4, arg + 8, sw(W_HEAD) * PERIOD, 4) else |_| { return neg(EFAULT) }
         put_sw(W_BLOCKS, 0)
         return 0
     }

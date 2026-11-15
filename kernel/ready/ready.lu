@@ -285,9 +285,9 @@ fn any_due(e: u64) -> bool {
 
 /// One `pollfd` entry at user `at`: its revents written; 1 when it is
 /// not zero.
-fn poll_one(a: u64, pml4: u64, at: u64) -> u64 {
-    let fd = uaccess.get(pml4, at, 4)
-    let asked = uaccess.get(pml4, at + 4, 2)
+fn poll_one(a: u64, pml4: u64, at: u64) -> u64 ! {fault} {
+    let fd = (uaccess.get(pml4, at, 4) else |_| { return fault })
+    let asked = (uaccess.get(pml4, at + 4, 2) else |_| { return fault })
     var rev: u64 = 0
     if fd < 0x80000000 {
         let (w, v) = files.watch(a, fd)
@@ -300,7 +300,7 @@ fn poll_one(a: u64, pml4: u64, at: u64) -> u64 {
             rev = m & (asked | POLLERR | POLLHUP)
         }
     }
-    uaccess.put(pml4, at + 6, rev, 2)
+    let _stored1 = uaccess.put(pml4, at + 6, rev, 2) else |_| { return fault }
     if rev != 0 { 1 } else { 0 }
 }
 
@@ -318,7 +318,7 @@ pub fn poll(a: u64, pml4: u64, fds: u64, nfds: u64, timeout: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
     while i < nfds {
-        n += poll_one(a, pml4, fds + i * 8)
+        n += (poll_one(a, pml4, fds + i * 8) else |_| { sched.set_self_until(0); return neg(EFAULT) })
         i += 1
     }
     if n > 0 || timeout == 0 {
@@ -364,8 +364,8 @@ pub fn epoll_ctl(a: u64, pml4: u64, ep: u64, op: u64, fd: u64, evp: u64) -> u64 
         if !uaccess.readable(pml4, evp, EVENT_BYTES) {
             return neg(EFAULT)
         }
-        ev = uaccess.get(pml4, evp, 4)
-        data = uaccess.get64(pml4, evp + 4)
+        ev = (uaccess.get(pml4, evp, 4) else |_| { return neg(EFAULT) })
+        data = (uaccess.get64(pml4, evp + 4) else |_| { return neg(EFAULT) })
     }
     let (we, _ve) = files.watch(a, ep)
     let (wf, of) = files.watch(a, fd)
@@ -426,13 +426,14 @@ pub fn epoll_ctl(a: u64, pml4: u64, ep: u64, op: u64, fd: u64, evp: u64) -> u64 
 
 /// Hand out registration `r`'s event `got` at user `at`, and mark the
 /// registration answered (spent, for a one-shot).
-fn hand(e: u64, r: u64, pml4: u64, at: u64, got: u64, gin: u64, gout: u64) {
-    uaccess.put(pml4, at, got, 4)
-    uaccess.put(pml4, at + 4, event.reg(e, r, event.R_DATA), 8)
+fn hand(e: u64, r: u64, pml4: u64, at: u64, got: u64, gin: u64, gout: u64) -> u64 ! {fault} {
+    let _stored2 = uaccess.put(pml4, at, got, 4) else |_| { return fault }
+    let _stored3 = uaccess.put(pml4, at + 4, event.reg(e, r, event.R_DATA), 8) else |_| { return fault }
     event.put_reg(e, r, event.R_SEEN_IN, gin)
     event.put_reg(e, r, event.R_SEEN_OUT, gout)
     event.put_reg(e, r, event.R_STATE, if event.reg(e, r, event.R_EVENTS) & EPOLLONESHOT != 0 { event.SPENT } else { event.ANSWERED })
     event.bump(event.C_EVENTS)
+    0
 }
 
 /// `epoll_wait(ep, events, max, timeout)`: how many events were handed
@@ -457,7 +458,7 @@ pub fn epoll_wait(a: u64, pml4: u64, ep: u64, evs: u64, max: u64, timeout: u64) 
             if !uaccess.writable(pml4, at, EVENT_BYTES) {
                 bad = true
             } else {
-                hand(e, r, pml4, at, got, gin, gout)
+                let _copied1 = hand(e, r, pml4, at, got, gin, gout) else |_| { return neg(EFAULT) }
                 n += 1
                 event.set_ep_next(e, r + 1)
             }
@@ -502,7 +503,7 @@ pub fn sched_getaffinity(pml4: u64, pid: u64, len: u64, mask: u64) -> u64 {
     if !uaccess.writable(pml4, mask, 8) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, mask, 1, 8)
+    let _stored4 = uaccess.put(pml4, mask, 1, 8) else |_| { return neg(EFAULT) }
     8
 }
 

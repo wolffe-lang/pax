@@ -108,8 +108,8 @@ pub fn writable(pml4: u64, va: u64, len: u64) -> bool {
 
 /// The kernel (HHDM) address of user byte `va`, whose page the caller
 /// has checked.
-fn kaddr(pml4: u64, va: u64) -> u64 {
-    let pa = paging.translate(pml4, va) else 0
+fn kaddr(pml4: u64, va: u64) -> u64 ! {fault} {
+    let pa = paging.translate(pml4, va) else |_| { return fault }
     pa + frames.hhdm()
 }
 
@@ -123,7 +123,7 @@ pub fn copy_out(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
     while i < n {
         let room = PAGE - (dst + i) % PAGE
         let k = if n - i < room { n - i } else { room }
-        let d = kaddr(pml4, dst + i)
+        let d = kaddr(pml4, dst + i) else |_| { return false }
         // # Safety: d is the frame behind a page `writable` checked,
         // through the HHDM; [d, d + k) stays in that page; [src + i,
         // src + i + k) is inside the caller's kernel buffer; the two do
@@ -144,7 +144,7 @@ pub fn copy_in(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
     while i < n {
         let room = PAGE - (src + i) % PAGE
         let k = if n - i < room { n - i } else { room }
-        let s = kaddr(pml4, src + i)
+        let s = kaddr(pml4, src + i) else |_| { return false }
         // # Safety: as copy_out, the other way.
         unsafe { pax_tree_copy(dst + i, s, k) }
         i += k
@@ -152,57 +152,67 @@ pub fn copy_in(pml4: u64, dst: u64, src: u64, n: u64) -> bool {
     true
 }
 
-/// Write `n` zero bytes at user address `va` (checked by the caller with
-/// `writable`).
-pub fn zero(pml4: u64, va: u64, n: u64) {
+/// Write `n` zero bytes at user address `va`. Refuse an inaccessible
+/// range with `fault` (the syscall caller maps it to EFAULT).
+pub fn zero(pml4: u64, va: u64, n: u64) -> u64 ! {fault} {
+    if !writable(pml4, va, n) { return fault }
     var i: u64 = 0
     while i < n {
         let room = PAGE - (va + i) % PAGE
         let k = if n - i < room { n - i } else { room }
         // # Safety: [kaddr, kaddr + k) is the part of a page the caller
         // checked writable, through the HHDM.
-        unsafe { pax_tree_zero(kaddr(pml4, va + i), k) }
+        let dst = kaddr(pml4, va + i) else |_| { return fault }
+        unsafe { pax_tree_zero(dst, k) }
         i += k
     }
+    0
 }
 
 /// Write the low `width` bytes of `v` little-endian at user address `va`
-/// (checked by the caller with `writable`; the bytes may cross a page).
-pub fn put(pml4: u64, va: u64, v: u64, width: u64) {
+/// (the bytes may cross a page). Refuse unless the whole range is writable.
+pub fn put(pml4: u64, va: u64, v: u64, width: u64) -> u64 ! {fault} {
+    if width > 8 || !writable(pml4, va, width) { return fault }
     var i: u64 = 0
     var x = v
     while i < width {
         // # Safety: as `zero`.
-        unsafe { (kaddr(pml4, va + i) as *u8).write_volatile((x & 0xff) as u8) }
+        let dst = kaddr(pml4, va + i) else |_| { return fault }
+        unsafe { (dst as *u8).write_volatile((x & 0xff) as u8) }
         x = x >> 8
         i += 1
     }
+    0
 }
 
-/// The 8-byte little-endian word at user address `va` (checked by the
-/// caller with `readable`).
-pub fn get64(pml4: u64, va: u64) -> u64 {
+/// The 8-byte little-endian word at user address `va`, or `fault`
+/// unless the whole range is readable.
+pub fn get64(pml4: u64, va: u64) -> u64 ! {fault} {
+    if !readable(pml4, va, 8) { return fault }
     var v: u64 = 0
     var i: u64 = 8
     while i > 0 {
         i -= 1
         // # Safety: a byte of a page the caller checked readable.
-        let b = unsafe { (kaddr(pml4, va + i) as *u8).read_volatile() }
+        let src = kaddr(pml4, va + i) else |_| { return fault }
+        let b = unsafe { (src as *u8).read_volatile() }
         v = (v << 8) | b as u64
     }
     v
 }
 
 /// The `width` bytes (1-8) at user address `va`, little-endian (checked
-/// by the caller with `readable`; the bytes may cross a page). px13's
+/// internally; the bytes may cross a page). px13's
 /// TCSETS reads `struct termios` this way.
-pub fn get(pml4: u64, va: u64, width: u64) -> u64 {
+pub fn get(pml4: u64, va: u64, width: u64) -> u64 ! {fault} {
+    if width > 8 || !readable(pml4, va, width) { return fault }
     var v: u64 = 0
     var i: u64 = width
     while i > 0 {
         i -= 1
         // # Safety: a byte of a page the caller checked readable.
-        let b = unsafe { (kaddr(pml4, va + i) as *u8).read_volatile() }
+        let src = kaddr(pml4, va + i) else |_| { return fault }
+        let b = unsafe { (src as *u8).read_volatile() }
         v = (v << 8) | b as u64
     }
     v
@@ -228,7 +238,7 @@ pub fn string_in(pml4: u64, va: u64, dst: u64, max: u64) -> u64 {
                 return max + 2
             }
             page = pg
-            base = kaddr(pml4, pg)
+            base = kaddr(pml4, pg) else |_| { return max + 2 }
         }
         // # Safety: the byte's page was checked readable just above.
         let b = unsafe { ((base + a % PAGE) as *u8).read_volatile() }

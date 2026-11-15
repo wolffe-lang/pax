@@ -504,7 +504,7 @@ pub fn oq_take(t: u64, pml4: u64, buf: u64, n: u64) -> u64 {
     let r = sv(t, C_OQ_R)
     var j: u64 = 0
     while j < k {
-        uaccess.put(pml4, buf + j, q_get(t, C_OQF, OQ_CAP, r + j), 1)
+        let _stored1 = uaccess.put(pml4, buf + j, q_get(t, C_OQF, OQ_CAP, r + j), 1) else |_| { return NEG_EFAULT }
         j += 1
     }
     put_sv(t, C_OQ_R, r + k)
@@ -573,14 +573,14 @@ pub fn feed(t: u64) -> bool {
 /// caller found it readable), or with `kernel` the kernel's own (px141:
 /// kernel/files' `sendfile` and `splice`, a file's frames or a pipe's
 /// ring through the HHDM).
-fn byte_in(pml4: u64, va: u64, kernel: bool) -> u64 {
+fn byte_in(pml4: u64, va: u64, kernel: bool) -> u64 ! {fault} {
     if kernel {
         // # Safety: [va, va + 1) lies in the caller's kernel span, which
         // stays mapped for the call (IF is clear: one CPU, no switch).
         let b = unsafe { (va as *u8).read_volatile() }
         return b as u64
     }
-    uaccess.get(pml4, va, 1)
+    (uaccess.get(pml4, va, 1) else |_| { return fault })
 }
 
 /// The master's write: up to `n` bytes of user `buf` into IQ, then fed;
@@ -606,7 +606,7 @@ fn master_in(t: u64, pml4: u64, buf: u64, n: u64, kernel: bool) -> u64 {
     let w = sv(t, C_IQ_W)
     var j: u64 = 0
     while j < k {
-        q_put(t, C_IQF, IQ_CAP, w + j, byte_in(pml4, buf + j, kernel))
+        q_put(t, C_IQF, IQ_CAP, w + j, (byte_in(pml4, buf + j, kernel) else |_| { return NEG_EFAULT }))
         j += 1
     }
     put_sv(t, C_IQ_W, w + k)
@@ -637,7 +637,7 @@ fn slave_out(t: u64, pml4: u64, buf: u64, n: u64, kernel: bool) -> u64 {
     let nl = onlcr(t)
     var j: u64 = 0
     while j < n {
-        let b = byte_in(pml4, buf + j, kernel)
+        let b = (byte_in(pml4, buf + j, kernel) else |_| { return NEG_EFAULT })
         let need: u64 = if b == 10 && nl { 2 } else { 1 }
         if oq_room(t) < need {
             return j
@@ -1135,7 +1135,7 @@ pub fn read(t: u64, pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> 
     }
     var j: u64 = 0
     while j < k {
-        uaccess.put(pml4, buf + j, ring(t, r + j), 1)
+        let _stored2 = uaccess.put(pml4, buf + j, ring(t, r + j), 1) else |_| { return (NEG_EFAULT, 0) }
         j += 1
     }
     put_sv(t, C_R, r + k)
@@ -1150,14 +1150,14 @@ pub fn termios_out(t: u64, pml4: u64, arg: u64) -> u64 {
     if !uaccess.writable(pml4, arg, TERMIOS_BYTES) {
         return NEG_EFAULT
     }
-    uaccess.put(pml4, arg, sv(t, C_IFLAG), 4)
-    uaccess.put(pml4, arg + 4, sv(t, C_OFLAG), 4)
-    uaccess.put(pml4, arg + 8, sv(t, C_CFLAG), 4)
-    uaccess.put(pml4, arg + 12, sv(t, C_LFLAG), 4)
-    uaccess.put(pml4, arg + 16, sv(t, C_LINE), 1)
-    uaccess.put(pml4, arg + 17, sv(t, C_CC), 8)
-    uaccess.put(pml4, arg + 25, sv(t, C_CC + 1), 8)
-    uaccess.put(pml4, arg + 33, sv(t, C_CC + 2), 3)
+    let _stored3 = uaccess.put(pml4, arg, sv(t, C_IFLAG), 4) else |_| { return NEG_EFAULT }
+    let _stored4 = uaccess.put(pml4, arg + 4, sv(t, C_OFLAG), 4) else |_| { return NEG_EFAULT }
+    let _stored5 = uaccess.put(pml4, arg + 8, sv(t, C_CFLAG), 4) else |_| { return NEG_EFAULT }
+    let _stored6 = uaccess.put(pml4, arg + 12, sv(t, C_LFLAG), 4) else |_| { return NEG_EFAULT }
+    let _stored7 = uaccess.put(pml4, arg + 16, sv(t, C_LINE), 1) else |_| { return NEG_EFAULT }
+    let _stored8 = uaccess.put(pml4, arg + 17, sv(t, C_CC), 8) else |_| { return NEG_EFAULT }
+    let _stored9 = uaccess.put(pml4, arg + 25, sv(t, C_CC + 1), 8) else |_| { return NEG_EFAULT }
+    let _stored10 = uaccess.put(pml4, arg + 33, sv(t, C_CC + 2), 3) else |_| { return NEG_EFAULT }
     0
 }
 
@@ -1166,14 +1166,14 @@ pub fn termios_in(t: u64, pml4: u64, arg: u64, flush: bool) -> u64 {
         return NEG_EFAULT
     }
     let was_canon = lflag(t, ICANON)
-    put_sv(t, C_IFLAG, uaccess.get(pml4, arg, 4))
-    put_sv(t, C_OFLAG, uaccess.get(pml4, arg + 4, 4))
-    put_sv(t, C_CFLAG, uaccess.get(pml4, arg + 8, 4))
-    put_sv(t, C_LFLAG, uaccess.get(pml4, arg + 12, 4))
-    put_sv(t, C_LINE, uaccess.get(pml4, arg + 16, 1))
-    put_sv(t, C_CC, uaccess.get(pml4, arg + 17, 8))
-    put_sv(t, C_CC + 1, uaccess.get(pml4, arg + 25, 8))
-    put_sv(t, C_CC + 2, uaccess.get(pml4, arg + 33, 3))
+    put_sv(t, C_IFLAG, (uaccess.get(pml4, arg, 4) else |_| { return NEG_EFAULT }))
+    put_sv(t, C_OFLAG, (uaccess.get(pml4, arg + 4, 4) else |_| { return NEG_EFAULT }))
+    put_sv(t, C_CFLAG, (uaccess.get(pml4, arg + 8, 4) else |_| { return NEG_EFAULT }))
+    put_sv(t, C_LFLAG, (uaccess.get(pml4, arg + 12, 4) else |_| { return NEG_EFAULT }))
+    put_sv(t, C_LINE, (uaccess.get(pml4, arg + 16, 1) else |_| { return NEG_EFAULT }))
+    put_sv(t, C_CC, (uaccess.get(pml4, arg + 17, 8) else |_| { return NEG_EFAULT }))
+    put_sv(t, C_CC + 1, (uaccess.get(pml4, arg + 25, 8) else |_| { return NEG_EFAULT }))
+    put_sv(t, C_CC + 2, (uaccess.get(pml4, arg + 33, 3) else |_| { return NEG_EFAULT }))
     if flush {
         put_sv(t, C_R, sv(t, C_E))
         put_sv(t, C_C, sv(t, C_E))
@@ -1246,7 +1246,7 @@ fn int_in(pml4: u64, arg: u64) -> (bool, u64) {
     if !uaccess.readable(pml4, arg, 4) {
         return (false, 0)
     }
-    (true, uaccess.get(pml4, arg, 4))
+    (true, (uaccess.get(pml4, arg, 4) else |_| { return (false, 0) }))
 }
 
 /// px111: TIOCSPGRP on terminal `t` by the running process (through
@@ -1289,7 +1289,7 @@ pub fn set_winsz(t: u64, pml4: u64, arg: u64) -> u64 {
     if !uaccess.readable(pml4, arg, 8) {
         return NEG_EFAULT
     }
-    let w = uaccess.get(pml4, arg, 8)
+    let w = (uaccess.get(pml4, arg, 8) else |_| { return NEG_EFAULT })
     let old = sv(t, C_WINSZ)
     put_sv(t, C_WINSZ, w)
     let g = sched.tty_pgrp_of(t)
@@ -1391,7 +1391,7 @@ pub fn ioctl(t: u64, a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.writable(pml4, arg, 4) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, arg, sv(t, C_C) - sv(t, C_R), 4)
+        let _stored11 = uaccess.put(pml4, arg, sv(t, C_C) - sv(t, C_R), 4) else |_| { return NEG_EFAULT }
         return 0
     }
     if req == TIOCOUTQ {
@@ -1400,7 +1400,7 @@ pub fn ioctl(t: u64, a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.writable(pml4, arg, 4) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, arg, 0, 4)
+        let _stored12 = uaccess.put(pml4, arg, 0, 4) else |_| { return NEG_EFAULT }
         return 0
     }
     if req == TIOCSTI {
@@ -1417,7 +1417,7 @@ pub fn ioctl(t: u64, a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.readable(pml4, arg, 1) {
             return NEG_EFAULT
         }
-        input(t, uaccess.get(pml4, arg, 1))
+        input(t, (uaccess.get(pml4, arg, 1) else |_| { return NEG_EFAULT }))
         if t != CON {
             pty_signals(t)
             sched.wake_pipes()
@@ -1446,7 +1446,7 @@ pub fn ioctl(t: u64, a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.writable(pml4, arg, 4) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, arg, if req == TIOCGPGRP { sched.tty_pgrp_of(t) } else { sched.tty_session_of(t) }, 4)
+        let _stored13 = uaccess.put(pml4, arg, if req == TIOCGPGRP { sched.tty_pgrp_of(t) } else { sched.tty_session_of(t) }, 4) else |_| { return NEG_EFAULT }
         return 0
     }
     if req == TIOCSPGRP {
@@ -1456,7 +1456,7 @@ pub fn ioctl(t: u64, a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         if !uaccess.writable(pml4, arg, 8) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, arg, sv(t, C_WINSZ), 8)
+        let _stored14 = uaccess.put(pml4, arg, sv(t, C_WINSZ), 8) else |_| { return NEG_EFAULT }
         return 0
     }
     if req == TIOCSWINSZ {

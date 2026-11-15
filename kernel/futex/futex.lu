@@ -145,8 +145,8 @@ pub fn call(f: u64, uaddr: u64, op: u64, val: u64, utime: u64, val3: u64, wall_n
         if !uaccess.readable(pml4, utime, 16) {
             return answer(f, NEG_EFAULT)
         }
-        let sec = uaccess.get64(pml4, utime)
-        let nsec = uaccess.get64(pml4, utime + 8)
+        let sec = (uaccess.get64(pml4, utime) else |_| { return answer(f, NEG_EFAULT) })
+        let nsec = (uaccess.get64(pml4, utime + 8) else |_| { return answer(f, NEG_EFAULT) })
         if nsec >= NS_PER_SEC || sec >= 0x8000000000000000 {
             return answer(f, NEG_EINVAL)
         }
@@ -174,7 +174,7 @@ pub fn call(f: u64, uaddr: u64, op: u64, val: u64, utime: u64, val3: u64, wall_n
     if !uaccess.readable(pml4, uaddr, 4) {
         return answer(f, NEG_EFAULT)
     }
-    if uaccess.get(pml4, uaddr, 4) != val & 0xffffffff {
+    if (uaccess.get(pml4, uaddr, 4) else |_| { return answer(f, NEG_EFAULT) }) != val & 0xffffffff {
         return answer(f, NEG_EAGAIN)
     }
     if passed {
