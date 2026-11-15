@@ -2426,6 +2426,16 @@ code; Linux was run as a black box in a virtual machine (its own kernel and modu
 | QEMU's documentation of `-mem-prealloc` | QEMU 8.2 | the guest's memory backed before boot in the guard |
 | PAX's own `kernel/timer`, `kernel/clock`, `kernel/sched`, `kernel/interrupts`, `kernel/netd`, `kernel/user`, `kernel/ready`, `kernel/socket`, `kernel/futex`, `kernel/tcp`, `kernel/arp`, `kernel/dhcp`, `kernel/xhci` | this tree | every tick-counted deadline and every wake-up, read; extended |
 
+### px131e — urgency gives way after a quantum's wait
+
+No kernel's or C library's source was read.
+
+| source | version | read, for |
+|---|---|---|
+| socketpair(2) and unix(7) (the Linux man-pages) | 6.9 | the guard's `ctl` load: a byte each way over an AF_UNIX stream pair |
+| lobo's `docs/CONTROL.md` and `src/main.lu` | the release rev in `user/lobo.pin` (`91b76133`) | how long the control client waits for the master's reply (2 s) |
+| PAX's own `kernel/sched`, `kernel/socket`, `kernel/unix`, `kernel/netd` | this tree | the run queue, the urgent mark and who wakes a socket's reader; extended (`kernel/sched`) |
+
 ## px141 — sendfile and splice onto a pty
 
 No kernel's source of any OS and no C library's source was read. The calls' rules are the man pages'; every
