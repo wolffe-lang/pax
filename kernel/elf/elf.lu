@@ -22,12 +22,17 @@
 //! **What it refuses, by name, before anything is mapped** (`ElfError`,
 //! `why`): a file too small for its header, no `\x7fELF`, a 32-bit or
 //! big-endian file, a version other than 1, a machine other than
-//! x86-64, `ET_DYN` (a PIE or a shared object: PIE is later, it needs a
-//! load bias), any other type than `ET_EXEC`, a program-header size
-//! other than 56 or a table outside the file (or more than 64 entries),
-//! no `PT_LOAD`, a `PT_INTERP` (a dynamic program: it needs `ld.so`,
-//! M-PX4's), a segment whose `p_vaddr` and `p_offset` disagree modulo
-//! the page size, `p_filesz > p_memsz`, file bytes past the file's end,
+//! x86-64, a type other than `ET_EXEC` and `ET_DYN`, a program-header
+//! size other than 56 or a table outside the file (or more than 64
+//! entries); then **a dynamic program** (px145), each `dynamic program,
+//! not yet supported: <interp>`: one with a `PT_INTERP` (`interp`; the
+//! line names the interpreter, the segment's string, `interp_span`) or
+//! an `ET_DYN` without one (`pie`, `<interp>` `none (ET_DYN with no
+//! PT_INTERP)`: a static PIE, or a loader run as a program). A PIE needs
+//! a load bias and a program with an interpreter needs it mapped beside
+//! it; PAX does neither yet. Then no `PT_LOAD`, a segment whose
+//! `p_vaddr` and `p_offset` disagree modulo the page size,
+//! `p_filesz > p_memsz`, file bytes past the file's end,
 //! memory below 64 KiB (Linux's default `vm.mmap_min_addr`, a black-box
 //! fact) or past 0x7f0000000000 (PAX keeps the top of the user half for
 //! the stack), two segments that share a page with different
@@ -66,6 +71,13 @@ const MAX_PHNUM: u64 = 64
 const PAGE: u64 = 4096
 const LOW: u64 = 0x10000 // 64 KiB: Linux's default vm.mmap_min_addr
 const HIGH: u64 = 0x00007f0000000000 // the stack lives above
+
+/// `refusal`'s code for a program with a `PT_INTERP`: its line names
+/// the interpreter (`why` gives the words before it, `interp_span` the
+/// string).
+pub const R_INTERP: u64 = 11
+/// The most of an interpreter's name a refusal line shows.
+const INTERP_MAX: u64 = 255
 
 const ET_EXEC: u64 = 2
 const ET_DYN: u64 = 3
@@ -140,10 +152,7 @@ pub fn check(f: u64, size: u64) -> u64 ! ElfError {
         return not_x86_64
     }
     let t = le(f, 16, 2)
-    if t == ET_DYN {
-        return pie
-    }
-    if t != ET_EXEC {
+    if t != ET_EXEC && t != ET_DYN {
         return not_exec
     }
     let phoff = le(f, 32, 8)
@@ -152,13 +161,23 @@ pub fn check(f: u64, size: u64) -> u64 ! ElfError {
     if phentsize != PHENT || phnum == 0 || phnum > MAX_PHNUM || phoff > size || phnum * PHENT > size - phoff {
         return bad_phdrs
     }
+    // px145: a dynamic program is refused before its segments are
+    // judged (a PIE's first PT_LOAD is at 0, below 64 KiB), so the line
+    // can name what it needs: the interpreter, else ET_DYN alone.
+    var d: u64 = 0
+    while d < phnum {
+        if ph(f, d, 0, 4) == PT_INTERP {
+            return interp
+        }
+        d += 1
+    }
+    if t == ET_DYN {
+        return pie
+    }
     var loads: u64 = 0
     var i: u64 = 0
     while i < phnum {
         let pt = ph(f, i, 0, 4)
-        if pt == PT_INTERP {
-            return interp
-        }
         if pt == PT_LOAD {
             loads += 1
             let pf = ph(f, i, 4, 4)
@@ -342,6 +361,43 @@ pub fn aux(f: u64, which: int) -> u64 {
     0
 }
 
+/// px145: the interpreter a dynamic program names, for its refusal
+/// line: the first `PT_INTERP`'s string as (file offset, length), its
+/// NUL and anything after it left out, at most INTERP_MAX bytes, cut at
+/// the file's end; (0, 0) when there is none. File `f` (`size` bytes)
+/// has passed `check`'s header and program-header tests.
+pub fn interp_span(f: u64, size: u64) -> (u64, u64) {
+    let phnum = le(f, 56, 2)
+    var i: u64 = 0
+    while i < phnum {
+        if ph(f, i, 0, 4) == PT_INTERP {
+            let off = ph(f, i, 8, 8)
+            var n = ph(f, i, 32, 8)
+            if off >= size {
+                return (0, 0)
+            }
+            if n > size - off {
+                n = size - off
+            }
+            if n > INTERP_MAX {
+                n = INTERP_MAX
+            }
+            var k: u64 = 0
+            while k < n && le(f, off + k, 1) != 0 {
+                k += 1
+            }
+            return (off, k)
+        }
+        i += 1
+    }
+    (0, 0)
+}
+
+/// Byte `o` of file `f` (the caller has checked o < its size).
+pub fn byte(f: u64, o: u64) -> u64 {
+    le(f, o, 1)
+}
+
 /// The segments' line for the log: `<n> PT_LOAD: <va>-<end> <rwx> …`,
 /// written by the caller piece by piece (`seg`).
 pub fn loads(f: u64) -> u64 {
@@ -430,7 +486,7 @@ pub fn why(c: u64) -> str {
         return "not for x86-64 (e_machine)"
     }
     if c == 7 {
-        return "ET_DYN: a PIE or shared object (PIE is later)"
+        return "dynamic program, not yet supported: none (ET_DYN with no PT_INTERP)"
     }
     if c == 8 {
         return "not ET_EXEC"
@@ -441,8 +497,8 @@ pub fn why(c: u64) -> str {
     if c == 10 {
         return "no PT_LOAD"
     }
-    if c == 11 {
-        return "PT_INTERP: a dynamic program (needs ld.so)"
+    if c == R_INTERP {
+        return "dynamic program, not yet supported: " // the interpreter follows (`interp_span`)
     }
     if c == 12 {
         return "a PT_LOAD whose p_vaddr and p_offset disagree modulo the page"
