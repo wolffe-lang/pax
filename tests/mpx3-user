@@ -90,6 +90,12 @@
 #      `killed:` lines, as U3 has them (a fault that ends a process still
 #      prints); no -ENOSYS line and no exit line (px15's); the log ends
 #      `halt` and qemu-halt holds the machine halted.
+#   U11 the protections (px146): tests/mpx12-security on the same tiers and
+#      firmware, its rows S1-S9 (tests/mpx12-security.d/rows.py, its probe
+#      tests/mpx12-security.d/probe.c: /proc/pax-security held to the halted
+#      machine's registers, CPUID and a ring-3 witness for each protection a
+#      program can observe); not run with --images or --no-boot, which build
+#      no console kernel.
 #
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR
 # holds <tier>/<kernel>.{iso,elf} and <tier>/kmain_user-quiet.iso): any
@@ -456,6 +462,19 @@ for leg in $legs; do
         done
     done
 done
+
+# --- U11: the protections (px146, tests/mpx12-security) ----------------------
+if [ -z "$images" ] && [ "$noboot" = 0 ]; then
+    st=$tiers; [ "$st" != "native release" ] || st=both
+    sl=$legs; [ "$sl" != "bios uefi" ] || sl=both
+    src=0
+    "$PAX_ROOT/tests/mpx12-security" --tier "$st" --firmware "$sl" || src=$?
+    if [ "$src" = 0 ]; then
+        say "PASS U11 $st $sl: tests/mpx12-security's rows"
+    else
+        bad "U11 $st $sl: tests/mpx12-security exit $src (its FAIL lines above name the rows)"
+    fi
+fi
 cat "$runs"
 [ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
 [ "$fail" = 0 ] && say "mpx3-user: PASS" || say "mpx3-user: FAIL"
