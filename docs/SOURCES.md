@@ -2446,3 +2446,24 @@ real Linux's own under QEMU (the lane host's installed kernel image, booted and 
 | Linux 7.2.4 (the lane host's installed image) | black box under QEMU/KVM, `printk.devkmsg=on` | `tests/mpx5-kmsg.d/linux/`: every row of the probe as root and as 1000:1000 |
 | pelt's README and docs/FRIENDLY.md (`wolffe-lang/pelt`) | `b80d6570` | the measurement: pelt friendly unless invoked as `sh`, and its friendly prompt's `den status --porcelain` with a 50 ms deadline |
 | bootparam(7), kernel-parameters (kernel.org) | trunk of 2026-11 | `loglevel=`, `quiet`, `printk.devkmsg=` |
+
+## px133 — logd, the kernel's log on disk; the login records; last and lastb
+
+No log daemon's, logrotate's, init's, login's, sshd's, util-linux's or C library's source was read. The records'
+layout is utmp(5)'s; how Linux's own programs fill it and how util-linux's last and lastb print it were measured
+black box in a container of Ubuntu 24.04.5, on records those programs wrote and on records written by hand.
+
+| source | version | read, for |
+|---|---|---|
+| utmp(5), wtmp | man-pages 6.19 | the record (x86-64: 384 bytes, 32-bit time and session), its kinds, `~` with `reboot` and `shutdown`, a logout as DEAD_PROCESS with no user, utmp's slots |
+| last(1), lastb | util-linux 2.39.3's manual (man7.org) | the options, the readers' columns, `crash`, `down`, `still logged in`, `gone - no logout` |
+| who(1), lastlog(8) | man-pages 6.19, shadow 4.13's manual | who reads utmp; what lastlog is (not built) |
+| login.defs(5) | shadow 4.13's manual | FTMP_FILE, LOG_UNKFAIL_ENAB (a name no account has kept as `UNKNOWN`) |
+| syslog(3), syslog.conf(5) | man-pages 6.19, rsyslog's manual | the facilities' and levels' names a kern.log line uses |
+| logrotate(8) | logrotate 3.21's manual | rotation by size, `.1` to `.N`, a new file with the old one's mode |
+| dev-kmsg (`Documentation/ABI/testing/dev-kmsg`) | trunk of 2026-11 | the record logd reads, -EPIPE when the ring overtook a reader, -EAGAIN at the end |
+| fsync(2), poll(2), sigaction(2), clock_gettime(2), uname(2) | man-pages 6.19 | logd's flush, its wait, the SIGTERM's sender (si_code SI_KERNEL, si_pid), the boot's start on the wall clock, the kernel's release |
+| the Filesystem Hierarchy Standard | 3.0 | /var/log, /var/run (/run) |
+| Ubuntu 24.04's login (`login` 1:4.13+dfsg1-4ubuntu3.2) | black box on a pseudo-terminal in a container, px106's bare PAM | its utmp record, its btmp records for a refused try (USER_PROCESS, `UNKNOWN` for a name no account has), no wtmp record |
+| OpenSSH 9.6p1's sshd (Ubuntu's `openssh-server` 1:9.6p1-3ubuntu13.20) | black box on loopback in a container | a pty session's USER_PROCESS and DEAD_PROCESS in wtmp and utmp, nothing for a command with no pty, a refused password's LOGIN_PROCESS on `ssh:notty` in btmp |
+| util-linux 2.39.3's last and lastb (Ubuntu's `util-linux` 2.39.3-9ubuntu6.6) | black box in a container, 87 runs on hand-written files and a calibration | every column, the end column's forms, the lengths, `FILE begins`, a session whose process started after its record `gone - no logout`, the refusals' words and statuses |
