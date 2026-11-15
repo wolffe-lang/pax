@@ -1387,3 +1387,22 @@ pass measures how long, ranks the paths, and makes three of them short.
 | `files/` | `sendfile` and `splice` have a branch for every `write_target` value. A pty's master or slave (10) is written by its own `write`'s rules (`pty_put_kernel`): each span of the file's frames or the pipe's ring goes to `pty.master_put` or `pty.slave_put`, what the other end's queue takes is counted, a short count once it fills, WAIT or -EAGAIN (the pty descriptor's O_NONBLOCK; SPLICE_F_NONBLOCK does not reach a pty, measured) when nothing fits; a slave asks the background rule first (`copy_job`, the console's px49 rule). `copies_to` names what the calls write: /dev/null, the console, a pipe or socket, a file, a block device's node, a pty; an eventfd, an epoll object, a file of /proc or /sys, /dev/dsp, /dev/full and a hung-up slave answer -EINVAL with the input's offset and the pipe's bytes untouched (a count of 0 and the end of the file answer 0 first; `splice` of 0 bytes answers 0), as Linux 7.2.4 answered each. /dev/full's `sendfile` was -ENOSPC and its `splice` a counted copy; the other refused targets, and a pty, fell through to a loop that counted the bytes, moved the input and wrote nothing. `splice` with an output offset onto a pty or a refused target is -EINVAL (Linux's; it was -ESPIPE) |
 | `pty/` | `master_put` and `slave_put`: the master's and the slave's `write` with the bytes in kernel memory, by the same rules (`master_in`, `slave_in`) |
 | `console/` | `master_put_kernel` and `slave_put_kernel`: IQ's and OQ's writes from kernel memory (`master_in`, `slave_out`; `byte_in` reads a byte of either memory) |
+
+## px146 — /proc/pax-security: each protection and its state
+
+What stands between PAX's kernel and a security boundary, read at each open
+from the registers and the live page tables where it can be measured, and from
+the kernel's fixed policy where it is policy. Nothing here turns a protection on
+or off; the file only says where each stands.
+
+| module | change |
+|---|---|
+| `procfs/` | `/proc/pax-security` (entry 59; `ENTRIES` 60), 0444: one `name state` line a protection, `on` when it holds: `nx` (IA32_EFER.NXE), `wp` (CR0.WP), `smep`, `smap` and `umip` (CR4; `absent` when CPUID has none), `kernel-wx` (no leaf of the kernel half both writable and executable, walked in the reader's tables), `kstack-guard` (the reading thread's kernel stack mapped and its guard below unmapped), `ist-guard` (an unmapped page below each IST stack), `kpti` (the reader's tables carry none of the kernel half), `ibrs` (IA32_SPEC_CTRL.IBRS where leaf 7 enumerates it), `arch-capabilities` (IA32_ARCH_CAPABILITIES as the CPU reports it, or `absent`), then the fixed policy: `aslr`, `user-wx` (no user mapping both writable and executable), `stack-nx` and `null-page` (`paxsec`, one function a group of lines) |
+
+`tests/mpx12-security` (run by `tests/mpx3-user` as U11) holds the file to what
+can be seen from outside it, per tier and firmware, under KVM with `-cpu host`,
+TCG with `-cpu max` and TCG with `-cpu qemu64`: the halted machine's EFER, CR0
+and CR4 and its `info tlb`, CPUID read in ring 3, the image's symbols, and a
+ring-3 witness for each protection a program can observe (a call into a
+read-write page and onto the stack, SGDT, an RWX mapping, a mapping at address
+0, two runs' addresses).
