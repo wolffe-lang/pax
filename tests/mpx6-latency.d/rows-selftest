@@ -19,6 +19,13 @@ gives them. tests/mpx6-latency runs it first (S0).
   S5 the guard's run list has the paced flood (`flood:R`) and the
      saturating one (`flood`), and `~L6` prints the saturating flood's
      rate, the hog's share and the sleeper's worst, bounded by nothing.
+  S6 px131e: what a device's urgent wake-ups may cost a thread that a
+     process, not a device, wakes. L7: under the saturating flood the 1 ms
+     sleeper's worst wake at most STARVE_BOUND_US (100 ms) passes, one
+     microsecond more fails; L8: under the same flood a command's round
+     trip over a unix socket (`ctl`) the same; under TCG both SKIPPED by
+     name; no `ctl` line where the run list has it fails; the guard's run
+     list has `ctl` after the saturating flood.
 Exit 0 when every row held; the first failing row is named.
 """
 from importlib.machinery import SourceFileLoader
@@ -102,4 +109,37 @@ curve = rows.flood_curve('native-bios-1024', spin, row(ops=1110, nn=250450, sent
 if not curve.startswith('~L6 native-bios-1024 flood: ') or 'a second' not in curve or '0.37' not in curve or '1418941' not in curve:
     bad('S5', curve)
 print(f'rows-selftest: PASS S5 the run list has flood:{R} and flood; {curve}')
+
+# S6: L7 and L8, a thread that a process wakes, beside the saturating flood
+for name in ('starve_rows', 'STARVE_BOUND_US'):
+    if not hasattr(rows, name):
+        bad('S6', f'rows.py has no {name}')
+B = rows.STARVE_BOUND_US
+if B != 100000:
+    bad('S6', f'the bound is {B} us, not 100 ms')
+want = ['flood', 'ctl']
+def verdicts(accel, flood_wmax, ctl_opmax, have_ctl=True):
+    rs = {'flood': row(wmax=flood_wmax)}
+    if have_ctl:
+        rs['ctl'] = row(opmax=ctl_opmax)
+    return rows.starve_rows('native-bios-1024', accel, rs, want)
+fail, lines = verdicts('kvm', B, B)
+if fail or not (lines[0].startswith('PASS L7 native-bios-1024') and lines[1].startswith('PASS L8 native-bios-1024')):
+    bad('S6', f'at the bound: {fail} {lines}')
+fail, lines = verdicts('kvm', B + 1, B)
+if not fail or not lines[0].startswith('FAIL L7 native-bios-1024') or not lines[1].startswith('PASS L8'):
+    bad('S6', f'the sleeper 1 us over the bound: {fail} {lines}')
+fail, lines = verdicts('kvm', B, B + 1)
+if not fail or not lines[1].startswith('FAIL L8 native-bios-1024'):
+    bad('S6', f'the round trip 1 us over the bound: {fail} {lines}')
+fail, lines = verdicts('tcg', 10 * B, 10 * B)
+if fail or not (lines[0].startswith('SKIP L7 native-bios-1024 reason=tcg') and lines[1].startswith('SKIP L8 native-bios-1024 reason=tcg')):
+    bad('S6', f'under TCG: {fail} {lines}')
+fail, lines = verdicts('kvm', B, B, have_ctl=False)
+if not fail or not any(l.startswith('FAIL L8 native-bios-1024') for l in lines):
+    bad('S6', f'no ctl line: {fail} {lines}')
+loads = rows.guard_loads(1024)
+if 'ctl' not in loads or loads.index('ctl') != loads.index('flood') + 1:
+    bad('S6', f'the run list {loads}')
+print(f'rows-selftest: PASS S6 L7 and L8 at {B} us pass, {B + 1} us fails, SKIPPED under TCG, no ctl line fails; the run list has ctl after flood')
 print('rows-selftest: PASS')
