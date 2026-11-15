@@ -1308,7 +1308,22 @@ fn run_file(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> 
     // bits were passed over with the script), AT_SECURE and AT_EUID
     // from them, the point of no return below applies them.
     let (smode, suid, sgid, nosuid) = files.exec_setid(o)
-    let (eu, eg) = cred.exec_ids(a, smode, suid, sgid, nosuid)
+    let (wanted_u, wanted_g) = cred.exec_ids(a, smode, suid, sgid, nosuid)
+    // execve(2): an unprivileged tracer must not retain control over
+    // credentials it could not trace. Keep the trace, ignore the set-ID
+    // bits instead. A privileged tracer may trace the new credentials.
+    let tracer = sched.tracer_of(sched.self_slot())
+    var traced_ids = false
+    if tracer != 0 {
+        let ts = sched.trace_live(tracer)
+        if ts == sched.SLOTS {
+            traced_ids = true
+        } else {
+            let ta = sched.proc_area(ts)
+            traced_ids = !cred.privileged(ta) && (cred.uid(ta, cred.REAL) != wanted_u || cred.gid(ta, cred.REAL) != wanted_g || cred.uid(a, cred.REAL) != wanted_u || cred.gid(a, cred.REAL) != wanted_g)
+        }
+    }
+    let (eu, eg) = cred.exec_ids(a, smode, suid, sgid, nosuid || traced_ids)
     let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, pl, a, eu, eg)
     let (w0, w1, nl) = if itself { files.exe_name(o) } else { comm_of(pa, pl) }
     // The point of no return. px26: every other thread of the process
