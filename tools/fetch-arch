@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# fetch-arch — stage files from pinned Arch Linux packages (px145): the
+# foreign programs a row runs PAX against, at Arch's own paths.
+#
+#   tools/fetch-arch PINS OUTDIR
+#
+# PINS holds one package a line, `NAME VERSION SHA256 BYTES MEMBER...`;
+# blank lines and lines starting `#` are skipped. Each package is the Arch
+# Linux Archive's x86_64 build,
+#   https://archive.archlinux.org/packages/<first letter>/NAME/NAME-VERSION-x86_64.pkg.tar.zst
+# (a `+` in VERSION sent as %2B), fetched once into $PAX_CACHE/arch/ and
+# refused on a size or sha256 mismatch; a verified copy is reused. Only
+# the named MEMBERs (paths inside the package, `usr/bin/bash`) are
+# extracted, into OUTDIR at the same paths. Nothing is installed, no
+# package script runs, and the host never executes an extracted file.
+# Prints `<member> <sha256> <bytes>` for each file. Exit 0, or 2 on a
+# usage, network, digest or tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 2 ] || die "usage: fetch-arch PINS OUTDIR"
+pins=$1 out=$2
+[ -f "$pins" ] || die "no pins file $pins"
+need curl tar zstd
+mkdir -p "$PAX_CACHE/arch" "$out"
+out=$(cd "$out" && pwd)
+while read -r name version sum bytes members; do
+    case $name in ''|'#'*) continue ;; esac
+    [[ $sum =~ ^[0-9a-f]{64}$ ]] || die "$name: '$sum' is not a sha256"
+    [[ $bytes =~ ^[0-9]+$ ]] || die "$name: '$bytes' is not a size"
+    [ -n "$members" ] || die "$name: no member named"
+    pkg=$PAX_CACHE/arch/$sum.pkg.tar.zst
+    if [ ! -f "$pkg" ] || [ "$(wc -c < "$pkg" | tr -d ' ')" != "$bytes" ] || [ "$(sha256_of "$pkg")" != "$sum" ]; then
+        url="https://archive.archlinux.org/packages/${name:0:1}/$name/$name-${version//+/%2B}-x86_64.pkg.tar.zst"
+        part=$pkg.part
+        curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "$part" "$url" || die "$name: fetching $url"
+        got=$(sha256_of "$part") size=$(wc -c < "$part" | tr -d ' ')
+        if [ "$got" != "$sum" ] || [ "$size" != "$bytes" ]; then
+            rm -f "$part"
+            die "$name $version: pinned sha256 $sum ($bytes bytes), got $got ($size bytes)"
+        fi
+        mv "$part" "$pkg"
+        say "fetched $name $version ($bytes bytes, sha256 $sum)"
+    fi
+    # shellcheck disable=SC2086 # the members are words
+    tar --zstd -xf "$pkg" -C "$out" $members || die "$name: extracting $members"
+    for m in $members; do
+        [ -f "$out/$m" ] && [ ! -L "$out/$m" ] || die "$name: $m is not a regular file of the package"
+        printf '%s %s %s\n' "$m" "$(sha256_of "$out/$m")" "$(wc -c < "$out/$m" | tr -d ' ')"
+    done
+done < "$pins"
