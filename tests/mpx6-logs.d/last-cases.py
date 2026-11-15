@@ -77,7 +77,8 @@ FILES = {
              rec(6, 117, 'ssh:notty', '', 'nosuch', '192.168.89.1', T0 + 62, addr=A)],
 }
 
-OPTS = [[], ['-x'], ['-F'], ['-i'], ['-w'], ['-a'], ['-n', '2'], ['-3'], ['-x', '-F'], ['-w', '-x'], ['-R']]
+OPTS = [[], ['-x'], ['-F'], ['-i'], ['-w'], ['-a'], ['-n', '2'], ['-3'], ['-x', '-F'], ['-w', '-x'], ['-R'],
+        ['-a', '-F'], ['-a', '-i'], ['--time-format', 'iso'], ['-a', '--time-format', 'iso'], ['--time-format', 'full']]
 
 
 def main():
@@ -99,7 +100,6 @@ def main():
         path = os.path.join(OUT, name)
         with open(path, 'wb') as f:
             f.write(b''.join(recs))
-        os.utime(path, (T0, T0))  # an empty file's `begins` line is its time: the same for both
         prog = 'lastb' if name == 'btmp' else 'last'
         for opts in OPTS:
             argv = opts + ['-f', path]
