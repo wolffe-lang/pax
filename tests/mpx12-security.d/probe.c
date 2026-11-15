@@ -42,10 +42,19 @@ static void outn(const char *s, i64 n) {
     }
 }
 
+/* A line is written whole, with one write, at its newline: a child that dies or exits while the
+   parent waits makes the kernel write its own line, which must not land inside one of ours. */
+static char line[512];
+static i64 used;
+
 static void out(const char *s) {
-    i64 n = 0;
-    while (s[n]) n++;
-    outn(s, n);
+    for (i64 i = 0; s[i]; i++) {
+        if (used < (i64)sizeof line) line[used++] = s[i];
+        if (s[i] == '\n') {
+            outn(line, used);
+            used = 0;
+        }
+    }
 }
 
 static void hex(u64 v) {
@@ -131,9 +140,9 @@ static void witness(const char *name, int what) {
         }
         sys(SYS_EXIT_GROUP, 0, 0, 0);
     }
-    out("px146: witness ");
-    out(name);
     if (pid < 0) {
+        out("px146: witness ");
+        out(name);
         out(" fork ");
         dec(pid);
         out("\n");
@@ -141,6 +150,8 @@ static void witness(const char *name, int what) {
     }
     int status = 0;
     i64 w = sys6(SYS_WAIT4, pid, (i64)&status, 0, 0, 0, 0);
+    out("px146: witness ");
+    out(name);
     if (w != pid) {
         out(" wait ");
         dec(w);
