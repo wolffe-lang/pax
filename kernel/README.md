@@ -1380,6 +1380,12 @@ pass measures how long, ranks the paths, and makes three of them short.
 | `latency/` | lost ticks from `timer.delivered` |
 | `xhci/` | `command` and `control` look at their completion before their deadline, so a stretch that carries the tick count past it does not quarantine a controller that answered during it |
 
+### px131e — urgency gives way after a quantum's wait
+
+| module | change |
+|---|---|
+| `sched/` | `S_QUEUED` (a bit a slot: in the run queue) and `S_STARVE` (the tick since which the queue's threads that are not urgent have waited with none of them run), kept by `enqueue`, `enqueue_front`, `dequeue`, `unqueue`, `run_next` and `start`. `starved` is true once that wait reaches `QUANTUM`; then `wake_urgent` puts the thread at the tail without its mark, and `urgent_waits` (what `kick` and `preempt` ask) answers no. `unqueue` also clears an ended thread's urgent mark, which would otherwise pass to the slot's next thread |
+
 ## px141 — sendfile and splice onto a pty (pax#422)
 
 | module | change |
