@@ -16,7 +16,8 @@
 #   hostnet LOAD: n N p50 U p99 U max U lost K
 #
 # (U in microseconds; lost: no answer within 10 s, 1 s in a flood; one still in flight at
-# the window's end is neither). In the window of a load named `flood` it
+# the window's end is neither). In the window of a load named `flood` (and of `ctl`, px131e: a
+# command over a unix socket beside the same stream) it
 # pings as fast as the guest answers, FLIGHT datagrams in flight at once
 # (the CPU-bound process's share under a stream of device wake-ups is the
 # row's; each round trip is counted from when it was sent): the saturating
@@ -95,7 +96,7 @@ with open(report, 'ab', buffering=0) as out:
                     pinging, due = True, t
                 elif line.startswith('latprobe-begin '):
                     window = (line.split()[1], t)
-                    flood = window[0] == 'flood'
+                    flood = window[0] in ('flood', 'ctl')
                     pace = int(window[0][6:]) if window[0].startswith('flood:') and window[0][6:].isdigit() else 0
                     pdue, fsent = t, 0
                 elif window and line.startswith('latprobe %s:' % window[0]):
