@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# tests/mpx12-security — what stands between PAX and a security boundary, read
+# from /proc/pax-security and held to what can be observed from outside it.
+#
+# The console kernel (kmain_console) on an ISO whose archive runs
+# tests/mpx12-security.d/probe.c three times: twice as `secprobe addr` (where
+# its stack, a fresh mapping, its break and its code are), then once in full
+# (/proc/pax-security read twice, CPUID's protection bits as ring 3 sees them,
+# and one witness for each protection a program can observe). Each image is
+# booted per firmware in three CPU modes: KVM with `-cpu host` (where /dev/kvm
+# is usable; a loud SKIP elsewhere unless PAX_REQUIRE_KVM=1), TCG with
+# `-cpu max`, and TCG with `-cpu qemu64` (a CPU without SMEP, SMAP or UMIP).
+# tools/qemu-halt proves the halt and keeps the halted machine's registers and
+# `info tlb`. The rows (tests/mpx12-security.d/rows.py), per tier, firmware and
+# mode:
+#   S1 the file: read whole twice in seven-byte reads, the same fifteen
+#      `name state` lines in order (nx, wp, smep, smap, umip, kernel-wx,
+#      kstack-guard, ist-guard, kpti, ibrs, arch-capabilities, aslr, user-wx,
+#      stack-nx, null-page), each state on or off, absent where the CPU may
+#      lack it, and arch-capabilities a 64-bit value or absent
+#   S2 nx, wp, smep, smap and umip agree with the halted machine's EFER, CR0
+#      and CR4 (the monitor's `info registers`) and with CPUID read in ring 3,
+#      and with the kernel's own `user: syscall …` boot line; ibrs and
+#      arch-capabilities are absent exactly when CPUID says so
+#   S3 nx: a call into a read-write page dies by SIGSEGV exactly when nx is on
+#   S4 umip: SGDT in ring 3 dies by SIGSEGV exactly when umip is on
+#   S5 user-wx: mmap and mprotect of PROT_READ|PROT_WRITE|PROT_EXEC succeed
+#      exactly when user-wx is off
+#   S6 null-page: mmap MAP_FIXED of address 0 is refused exactly when
+#      null-page is on
+#   S7 aslr: two runs place the stack, a mapping, the break and the code at
+#      the same addresses exactly when aslr is off
+#   S8 stack-nx: a call onto the stack dies by SIGSEGV exactly when stack-nx
+#      is on
+#   S9 kernel-wx agrees with the halted machine's `info tlb` (no kernel page
+#      both writable and executable); ist-guard with the image's symbols (the
+#      page below each IST stack inside the mapped image means no guard);
+#      kstack-guard and kpti hold the census's measured state
+#
+#   tests/mpx12-security [--tier native|release|both] [--firmware bios|uefi|both]
+#
+# The kernel is tools/build-kernel's, the release tier's with --release. The
+# UEFI leg needs OVMF: SKIPPED LOUDLY without it unless PAX_REQUIRE_UEFI=1,
+# when it is a failure. Exit 0 when every row held, 1 otherwise, 2 on a usage
+# or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+
+legs=both tiers=both
+while [ $# -gt 0 ]; do
+    case $1 in
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "usage: tests/mpx12-security [--tier native|release|both] [--firmware bios|uefi|both]" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+need python3 cc nm xorriso qemu-system-x86_64
+"$PAX_ROOT/tools/fetch-limine" >&2 || exit 2
+
+worst=0
+for tier in $tiers; do
+    work=$PAX_BUILD/mpx12-security/$tier
+    rm -rf "$work"
+    mkdir -p "$work"
+    flags=(); [ "$tier" != release ] || flags=(--release)
+    say "the $tier tier's console kernel, firmware $legs"
+    elf=$("$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel") \
+        || { printf 'FAIL S0 %s: tools/build-kernel\n' "$tier"; worst=1; continue; }
+    use=
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && ! find_ovmf >/dev/null 2>&1; then
+            [ "${PAX_REQUIRE_UEFI:-0}" = 1 ] && { printf 'FAIL S0 %s uefi: no OVMF and PAX_REQUIRE_UEFI=1\n' "$tier"; worst=1; continue; }
+            printf 'SKIP S-uefi %s reason=no-ovmf (not measured)\n' "$tier"
+            continue
+        fi
+        use+=" $leg"
+    done
+    [ -n "$use" ] || continue
+    # shellcheck disable=SC2086
+    python3 -I "$here/mpx12-security.d/rows.py" "$work" "$elf" "$tier" $use || worst=1
+done
+exit $worst
