@@ -501,7 +501,7 @@ def run(args):
     return judge_dir(out, args)
 
 
-QCODE = {' ': 'spc', '/': 'slash', '.': 'dot', '\r': 'ret', ';': 'semicolon', '-': 'minus', '\x1b': 'esc'}
+QCODE = {' ': 'spc', '/': 'slash', '.': 'dot', '\r': 'ret', ';': 'semicolon', '-': 'minus', '=': 'equal', '\x1b': 'esc'}
 SHIFTED = {':': 'semicolon'}
 # yew's document menu (its src/edit/ctxrows.lu): two of its rows.
 YEW_MENU = (b'Select All', b'Command Palette...')
@@ -599,7 +599,7 @@ def run_yew(args):
             typed('cd /home/pax\r')
             data = wait_for(b'$ ', mark, 60)
             mark = len(data)
-            typed('yew notes.txt\r')
+            typed('export HOME=/home/pax/menu-test SHELL=/bin/sh; mkdir -p /home/pax/menu-test; yew notes.txt\r')
             wait_for(b'\x1b[?1002h\x1b[?1006h', mark, 120)
             quiet(3, 120)
             before = serial.read_bytes()
@@ -634,6 +634,52 @@ def run_yew(args):
                     why.append(f'{label!r} before the click')
                 if label not in after[clicked:]:
                     why.append(f'no {label!r} after the click')
+            # Opening a context menu changes 1002 to 1003. PAX must keep
+            # reporting clicks and report no-button motion in that mode.
+            # Locate Select All from its emitted row, rather than assuming
+            # a box origin: the menu is clamped and can shed optional rows.
+            menu_bytes = after[clicked:]
+            armed = b'\x1b[?1002l\x1b[?1003h' in menu_bytes
+            # A strip chevron may already have armed 1003 before opening.
+            armed = armed or b'\x1b[?1002l\x1b[?1003h' in before
+            label_at = menu_bytes.find(b'Select All')
+            positions = list(re.finditer(rb'\x1b\[(\d+);(\d+)H', menu_bytes[:label_at])) if label_at >= 0 else []
+            hover_ok = click_ok = False
+            if armed and positions:
+                row = int(positions[-1][1]) - 1
+                col = YEW_AT[0] + 2
+                hx = 32768 * (2 * col + 1) // (2 * cols)
+                hy = 32768 * (2 * row + 1) // (2 * nrows)
+                mark = len(serial.read_bytes())
+                execute('input-send-event', {'events': [
+                    {'type': 'abs', 'data': {'axis': 'x', 'value': hx}},
+                    {'type': 'abs', 'data': {'axis': 'y', 'value': hy}}]})
+                time.sleep(1)
+                quiet(.5, 10)
+                frame = serial.read_bytes()[mark:]
+                (out / 'menu-hover.raw').write_bytes(frame)
+                # A repaint naming this enabled row is the highlight,
+                # not just the framebuffer's pointer moving by itself.
+                hover_ok = b'Select All' in frame
+                execute('screendump', {'filename': str(out / 'menu-hover.ppm')})
+                mark = len(serial.read_bytes())
+                for down in (True, False):
+                    execute('input-send-event', {'events': [
+                        {'type': 'btn', 'data': {'down': down, 'button': 'left'}}]})
+                    time.sleep(.1)
+                time.sleep(1)
+                quiet(.5, 10)
+                frame = serial.read_bytes()[mark:]
+                (out / 'menu-click.raw').write_bytes(frame)
+                # Select All enters highlight mode; the chip may include
+                # the character-selection suffix H·C.
+                click_ok = re.search(rb' H(?:\xc2\xb7C)? ', frame) is not None
+                execute('screendump', {'filename': str(out / 'menu-click.ppm')})
+            for name, ok in [('yew-menu-hover-1003', hover_ok), ('yew-menu-click-1003', click_ok)]:
+                print(f'{"PASS" if ok else "FAIL"} {name}: '
+                      f'1003={armed}, Select All located={bool(positions)}', flush=True)
+                if not ok:
+                    why.append(name)
             typed('\x1b')
             quiet(1, 30)
             typed(':q\r')
