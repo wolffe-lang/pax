@@ -43,6 +43,10 @@
  *                     the probe in the foreground (0); that child given the
  *                     foreground, reading (1); after it ended (2); the
  *                     probe's own (3)
+ *   tracking-modes    1000 clicks only (0), 1002 held motion (1), 1003
+ *                     held and buttonless motion (2), all in SGR 1006
+ *   alt-arrows        Alt+Left/Right, then Alt+F1 and Ctrl+Alt+F1 (still
+ *                     silent), then the Linux-console F1-F5 byte spellings
  *   keys-interleaved  clicks, the wheel and keys 20 ms apart on the USB
  *                     keyboard (0); 3 ms apart on the PS/2 keyboard (1)
  *   pty               a child on a pty's slave sets the modes there; the
@@ -67,11 +71,11 @@
 static const char *labels[] = {
     "pointer-drawn", "pointer-scroll", "no-mode", "sgr-buttons", "drag", "wheel",
     "modifiers", "relative", "reset", "unserved", "owner-exits", "owner-background",
-    "keys-interleaved", "pty"
+    "tracking-modes", "alt-arrows", "keys-interleaved", "pty"
 };
 enum {
     DRAWN, SCROLL, NOMODE, BUTTONS, DRAG, WHEEL, MODS, REL, RESET, UNSERVED,
-    EXITS, BACKGROUND, KEYS, PTY, ROWS
+    EXITS, BACKGROUND, TRACKING, ALT, KEYS, PTY, ROWS
 };
 
 #define ON "\033[?1002h\033[?1006h"
@@ -310,6 +314,15 @@ int main(void) {
             break;
         case BACKGROUND:
             row_background(row);
+            break;
+        case TRACKING:
+            own(row, 0, ALLOFF "\033[?1000h\033[?1006h");
+            own(row, 1, ALLOFF "\033[?1002h\033[?1006h");
+            own(row, 2, ALLOFF "\033[?1003h\033[?1006h");
+            out(1, ALLOFF);
+            break;
+        case ALT:
+            own(row, 0, ALLOFF);
             break;
         case KEYS:
             own(row, 0, ON);
