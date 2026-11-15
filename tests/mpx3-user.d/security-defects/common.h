@@ -13,7 +13,19 @@ static i64 sys6(i64 n, i64 a, i64 b, i64 c, i64 d, i64 e, i64 f) {
     return r;
 }
 #define sys(n, a, b, c) sys6(n, a, b, c, 0, 0, 0)
-static void out(const char *s) { i64 n = 0; while (s[n]) n++; sys(1, 1, (i64)s, n); }
+/* A verdict is one write, so child and tracer output cannot splice lines. */
+static char output_line[512];
+static i64 output_used;
+static void out(const char *s) {
+    while (*s) {
+        if (output_used == (i64)sizeof(output_line)) { sys(231, 99, 0, 0); for (;;) {} }
+        output_line[output_used++] = *s;
+        if (*s++ == '\n') {
+            sys(1, 1, (i64)output_line, output_used);
+            output_used = 0;
+        }
+    }
+}
 static void dec(i64 v) {
     char b[24]; int i = 23; int neg = v < 0; u64 u = neg ? 0UL - (u64)v : (u64)v;
     b[i] = 0;
