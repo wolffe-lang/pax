@@ -33,10 +33,11 @@
 #   L3 the image: the exec line names the PT_LOAD segments readelf finds
 #      in hello, at their addresses with their permissions (r--, r-x,
 #      r--, rw-), none both w and x, and the entry readelf names.
-#   L4 refusals: hello-pie `ET_DYN: a PIE or shared object (PIE is
-#      later)`, hello-dyn `PT_INTERP: a dynamic program (needs ld.so)`,
-#      hello32 `not ELFCLASS64 (a 32-bit file)`, hello-arm `not for
-#      x86-64 (e_machine)`, /etc/motd `not an ELF file`, /bin/nothing
+#   L4 refusals: hello-pie `dynamic program, not yet supported: none
+#      (ET_DYN with no PT_INTERP)`, hello-dyn `dynamic program, not yet
+#      supported: /lib64/ld-linux-x86-64.so.2` (px145: the interpreter
+#      named), hello32 `not ELFCLASS64 (a 32-bit file)`, hello-arm `not
+#      for x86-64 (e_machine)`, /etc/motd `not an ELF file`, /bin/nothing
 #      `no such file`: each `user: exec <path>: refused: <why>`, then
 #      its batch's frames line with 0 processes and nothing taken.
 #   L5 the FPU per thread: `fpu: xsave 1, xcr0 0x0000000000000007, area
@@ -56,6 +57,21 @@
 #      killed by name, the kernel goes on to `halt`; its `-ENOSYS` lines
 #      (the system calls it made that PAX lacks, in order) are written
 #      to build/mpx3-loader-<tier>-<leg>.census.
+#
+#   L10 (px145) Arch's own dynamic programs, fetched by digest from the
+#      Arch Linux Archive (tools/fetch-arch, mpx3-loader.d/arch.pins) and
+#      put in the initramfs at Arch's paths: the kernel refuses its
+#      loader, /usr/lib/ld-linux-x86-64.so.2 (ET_DYN, no PT_INTERP),
+#      `dynamic program, not yet supported: none (ET_DYN with no
+#      PT_INTERP)`, and /usr/bin/bash (ET_DYN with PT_INTERP) naming
+#      /lib64/ld-linux-x86-64.so.2, each followed by a frames line with 0
+#      processes; then /bin/execdyn (user/elf/execdyn.c) execve's bash,
+#      the loader, hello-dyn and hello-pie: each call the kernel's line
+#      with the interpreter named, `user: execdyn pid <p> syscall 59:
+#      refused: not a static x86-64 ELF executable PAX runs, -8` and the
+#      program's `execdyn: <path>: errno 8` (ENOEXEC), in that order, then
+#      `execdyn: done` and exit_group 0; and the old wordings (`PIE is
+#      later`, `needs ld.so`) appear nowhere.
 #
 # --images DIR boots ISOs and ELFs built earlier by this script (DIR
 # holds <tier>/kmain_loader.{iso,elf} and user/): any host with QEMU,
@@ -85,6 +101,7 @@ done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 need nm objdump readelf python3
+pins=$here/mpx3-loader.d/arch.pins
 [ -z "$wolfhello" ] || [ -f "$wolfhello" ] || die "--wolf-hello: no file $wolfhello"
 
 work=$PAX_BUILD/mpx3-loader
@@ -115,7 +132,9 @@ loader_ok() { # elf
 ramfs_args() { # userdir
     local u=$1
     printf '%s\n' "/bin/hello=$u/hello" "/bin/hello-pie=$u/hello-pie" "/bin/hello-dyn=$u/hello-dyn" \
-        "/bin/hello32=$u/hello32" "/bin/hello-arm=$u/hello-arm" "/etc/motd=$u/motd" "/bin/stack-probe=$u/stack-probe"
+        "/bin/hello32=$u/hello32" "/bin/hello-arm=$u/hello-arm" "/etc/motd=$u/motd" "/bin/stack-probe=$u/stack-probe" \
+        "/bin/execdyn=$u/execdyn" "/usr/lib/ld-linux-x86-64.so.2=$u/arch/usr/lib/ld-linux-x86-64.so.2" \
+        "/usr/bin/bash=$u/arch/usr/bin/bash"
     [ -z "$wolfhello" ] || printf '%s\n' "/bin/wolf-hello=$u/wolf-hello"
 }
 
@@ -134,6 +153,12 @@ if [ -z "$images" ]; then
     # Not an ELF, and longer than an ELF header, so the magic is what
     # refuses it.
     printf 'PAX: this is /etc/motd, a text file in the initramfs, and not an ELF executable.\n' > "$work/user/motd"
+    # px145: Arch's own loader and bash, by digest (L10).
+    if "$PAX_ROOT/tools/fetch-arch" "$pins" "$work/user/arch" > "$work/user/arch.txt"; then
+        sed 's/^/  arch: /' "$work/user/arch.txt" >&2
+    else
+        bad "L0: tools/fetch-arch"
+    fi
     [ -z "$wolfhello" ] || cp "$wolfhello" "$work/user/wolf-hello"
     mapfile -t pairs < <(ramfs_args "$work/user")
     if "$PAX_ROOT/tools/mkinitramfs" "$work/user/initramfs.cpio" "${pairs[@]}" > "$work/user/initramfs.txt"; then
@@ -267,7 +292,7 @@ for leg in $legs; do
         elf=$images/$tier/kmain_loader.elf iso=$images/$tier/kmain_loader.iso
         rm -f "$log" "$log.verdict"
         if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
-            for s in L1 L2 L3 L4 L5 L6 L7; do bad "$s $id: no image"; done
+            for s in L1 L2 L3 L4 L5 L6 L7 L10; do bad "$s $id: no image"; done
             continue
         fi
         hrc=0
@@ -336,8 +361,8 @@ ELF
 
         # L4
         why=
-        for c in "/bin/hello-pie|ET_DYN: a PIE or shared object (PIE is later)" \
-                 "/bin/hello-dyn|PT_INTERP: a dynamic program (needs ld.so)" \
+        for c in "/bin/hello-pie|dynamic program, not yet supported: none (ET_DYN with no PT_INTERP)" \
+                 "/bin/hello-dyn|dynamic program, not yet supported: /lib64/ld-linux-x86-64.so.2" \
                  "/bin/hello32|not ELFCLASS64 (a 32-bit file)" \
                  "/bin/hello-arm|not for x86-64 (e_machine)" \
                  "/etc/motd|not an ELF file" \
@@ -351,6 +376,40 @@ ELF
             fi
         done
         [ -z "$why" ] && say "PASS L4 $id: six refusals by name (ET_DYN, PT_INTERP, ELFCLASS32, e_machine, not an ELF, no such file), nothing taken" || bad "L4 $id:$why"
+
+        # L10 (px145)
+        why=
+        none='dynamic program, not yet supported: none (ET_DYN with no PT_INTERP)'
+        lib64='dynamic program, not yet supported: /lib64/ld-linux-x86-64.so.2'
+        for c in "/usr/lib/ld-linux-x86-64.so.2|$none" "/usr/bin/bash|$lib64"; do
+            IFS='|' read -r p r <<<"$c"
+            nxt=$(awk -v l="user: exec $p: refused: $r" '$0 == l { getline; print; exit }' "$norm")
+            if [ -z "$nxt" ]; then
+                why+=" no 'user: exec $p: refused: $r';"
+            elif ! printf '%s\n' "$nxt" | grep -Eqx 'user: frames free ([0-9]+) before, \1 with 0 processes, \1 after'; then
+                why+=" $p's batch: '$nxt';"
+            fi
+        done
+        epid=$(sed -n -E 's/^user: exec pid ([0-9]+) cr3 0x[0-9a-f]+ entry 0x[0-9a-f]+ rsp 0x[0-9a-f]+ argc 5 envc 3, .*/\1/p' "$norm" | head -n 1)
+        if [ -z "$epid" ]; then
+            why+=" no exec line for /bin/execdyn;"
+        else
+            got=$(awk -v p="$epid" '$0 ~ "^user: exec pid " p " " { on = 1; next } on && $0 ~ "^user: execdyn pid " p " exit_group" { print; exit } on && ($0 ~ "^user: exec /" || $0 ~ "^user: execdyn pid " p " syscall 59: refused" || $0 ~ "^execdyn: ") { print }' "$norm")
+            want=
+            for c in "/usr/bin/bash|$lib64" "/usr/lib/ld-linux-x86-64.so.2|$none" \
+                     "/bin/hello-dyn|$lib64" "/bin/hello-pie|$none"; do
+                IFS='|' read -r p r <<<"$c"
+                want+="user: exec $p: refused: $r"$'\n'
+                want+="user: execdyn pid $epid syscall 59: refused: not a static x86-64 ELF executable PAX runs, -8"$'\n'
+                want+="execdyn: $p: errno 8"$'\n'
+            done
+            want+="execdyn: done"$'\n'
+            want+=$(grep -Ex "user: execdyn pid $epid exit_group 0 after [0-9]+ runs" "$norm" | head -n 1)
+            [ "$got" = "${want%$'\n'}" ] || why+=" execdyn's lines differ: $(diff <(printf '%s\n' "${want%$'\n'}") <(printf '%s\n' "$got") | head -n 8 | tr '\n' '|');"
+            grep -Eqx "user: execdyn pid $epid exit_group 0 after [0-9]+ runs" "$norm" || why+=" execdyn did not exit_group 0;"
+        fi
+        ! grep -Eq 'PIE is later|needs ld\.so' "$norm" || why+=" an old wording: '$(grep -Em1 'PIE is later|needs ld\.so' "$norm")';"
+        [ -z "$why" ] && say "PASS L10 $id: Arch's loader and bash refused by name with the interpreter named, at exec and through execve (ENOEXEC), nothing taken" || bad "L10 $id:$why"
 
         # L5
         why=
