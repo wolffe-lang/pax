@@ -135,7 +135,9 @@ fn boot_start_us() -> int {
     while tries < 20 {
         // # Safety: clock_gettime into raw.S's timespec, one call at a time.
         let m1 = unsafe { logd_clock(1) }
+        // # Safety: as above, CLOCK_REALTIME.
         let r = unsafe { logd_clock(0) }
+        // # Safety: as above, CLOCK_MONOTONIC again.
         let m2 = unsafe { logd_clock(1) }
         if m1 >= 0 && r >= 0 && m2 - m1 < 1000 {
             return r - m1
@@ -154,6 +156,7 @@ fn kernel_release() -> str {
     var b = List[byte]()
     var i = 0
     while i < 64 {
+        // # Safety: i < 64, inside utsname's 65-byte release field.
         let c = unsafe { logd_uname_byte(i) }
         if c == 0 {
             break
@@ -643,6 +646,7 @@ fn main() -> int {
         }
         // # Safety: the descriptor opened above; the ring is read again from its oldest.
         let _c = unsafe { logd_close(fd) }
+        // # Safety: open(2) of /dev/kmsg again, non-blocking.
         fd = unsafe { logd_kmsg_open(O_RDONLY | O_NONBLOCK) }
         if fd < 0 {
             complain("/dev/kmsg cannot be read again (-{0 - fd}); logd stops")
@@ -737,6 +741,7 @@ fn finish(mut l: Log, fd: int) -> int {
     }
     // # Safety: raw.S's copies of the SIGTERM's si_code and si_pid.
     let code = unsafe { logd_term_code() }
+    // # Safety: as above, the si_pid copy.
     let pid = unsafe { logd_term_pid() }
     let kernel_end = code == SI_KERNEL || pid == 1
     if kernel_end {
