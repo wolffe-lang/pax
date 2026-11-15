@@ -1,0 +1,301 @@
+//! dmesg — the kernel's log (px130; notes/px130-the-system-log.md): the records the kernel keeps
+//! (kernel/kmsg), read from /dev/kmsg, as util-linux's dmesg prints them.
+//!
+//!     dmesg [-r] [-t] [-l LEVELS] [-w | -W]     the records, `[SSSSS.UUUUUU] TEXT` a line
+//!     dmesg -c                                  the same, then the buffer cleared (root)
+//!     dmesg -C                                  the buffer cleared (root)
+//!     dmesg -n LEVEL | -D | -E                  the console level set, off, on again (root)
+//!
+//! `-r` keeps each record's `<PRI>` (the level, and the facility above it); `-t` leaves the
+//! time out; `-l` takes a comma-separated list of emerg, alert, crit, err, warn, notice, info
+//! and debug; `-w` waits for new records after the old ones, `-W` prints only new ones. `-n`
+//! takes a number (1-8, console_loglevel: a record below it reaches the screen) or a level's
+//! name, which means that level and worse (its number + 1, as util-linux 2.39 sends it).
+//!
+//! The log is root's to read while /proc/sys/kernel/dmesg_restrict is 1 (PAX's default, as a
+//! distribution's): anyone else is told `dmesg: read kernel buffer failed: Operation not
+//! permitted` and dmesg exits 1, util-linux's words and status (measured, 2.39.3). Without
+//! /dev/kmsg it reads syslog(2)'s READ_ALL (the last 8 KiB) as util-linux falls back to it.
+//!
+//! The system calls are raw.S's, one each; this file reads its buffer a byte at a time and
+//! writes each line with one write(2) to standard output. Written from dmesg(1) (util-linux
+//! 2.39.3's manual), the kernel's dev-kmsg document (the record's form) and syslog(2), and
+//! black-box runs of util-linux's dmesg; no util-linux source.
+
+extern "c" fn dmesg_open(flags: int) -> int
+extern "c" fn dmesg_read(fd: int) -> int
+extern "c" fn dmesg_byte(i: int) -> int
+extern "c" fn dmesg_seek(fd: int, whence: int) -> int
+extern "c" fn dmesg_close(fd: int) -> int
+extern "c" fn dmesg_klog(t: int, len: int) -> int
+
+const O_RDONLY: int = 0
+const O_NONBLOCK: int = 2048
+const EAGAIN: int = 11
+const EPIPE: int = 32
+const EINTR: int = 4
+
+const LEVELS: str = "emerg alert crit err warn notice info debug"
+
+/// errno's text, as glibc's strerror gives the few dmesg can meet.
+fn why(e: int) -> str {
+    if e == 1 { return "Operation not permitted" }
+    if e == 2 { return "No such file or directory" }
+    if e == 13 { return "Permission denied" }
+    if e == 22 { return "Invalid argument" }
+    if e == 38 { return "Function not implemented" }
+    if e == 14 { return "Bad address" }
+    "Unknown error {e}"
+}
+
+fn level_of(name: str) -> int {
+    var k = 0
+    for w in LEVELS.words() {
+        if w == name { return k }
+        k += 1
+    }
+    -1
+}
+
+fn usage() -> int {
+    eprint("usage: dmesg [-r] [-t] [-l LEVELS] [-w|-W] [-c] | -C | -n LEVEL | -D | -E")
+    1
+}
+
+struct Opts {
+    raw: bool,
+    notime: bool,
+    follow: int, // 0 no, 1 -w, 2 -W
+    mask: int, // the levels printed, bit per level
+    clear_after: bool,
+}
+
+fn main() -> int {
+    let args = env_args()
+    var o = Opts { raw: false, notime: false, follow: 0, mask: 255, clear_after: false }
+    var i = 0
+    while i < args.len {
+        let a = args[i]
+        if a == "-r" || a == "--raw" {
+            o.raw = true
+        } else if a == "-t" || a == "--notime" {
+            o.notime = true
+        } else if a == "-w" || a == "--follow" {
+            o.follow = 1
+        } else if a == "-W" || a == "--follow-new" {
+            o.follow = 2
+        } else if a == "-c" || a == "--read-clear" {
+            o.clear_after = true
+        } else if a == "-C" || a == "--clear" {
+            return klog(5, 0, "clear kernel buffer failed")
+        } else if a == "-D" || a == "--console-off" {
+            return klog(6, 0, "klogctl failed")
+        } else if a == "-E" || a == "--console-on" {
+            return klog(7, 0, "klogctl failed")
+        } else if (a == "-n" || a == "--console-level") && i + 1 < args.len {
+            let v = args[i + 1]
+            var n = level_of(v) + 1
+            if n == 0 && v.len == 1 {
+                n = digit(v.bytes()[0] as int)
+            }
+            if n < 1 || n > 8 {
+                eprint("dmesg: unknown level '{v}'")
+                return 1
+            }
+            return klog(8, n, "klogctl failed")
+        } else if (a == "-l" || a == "--level") && i + 1 < args.len {
+            o.mask = 0
+            for name in args[i + 1].split(",") {
+                let l = level_of(name)
+                if l < 0 {
+                    eprint("dmesg: unknown level '{name}'")
+                    return 1
+                }
+                o.mask = o.mask | (1 << l)
+            }
+            i += 1
+        } else {
+            return usage()
+        }
+        i += 1
+    }
+    let flags = if o.follow == 0 then O_RDONLY | O_NONBLOCK else O_RDONLY
+    // # Safety: raw.S's open of its own path; the answer is a descriptor or -errno.
+    let fd = unsafe { dmesg_open(flags) }
+    if fd < 0 {
+        if fd == -2 && o.follow == 0 {
+            return from_syslog(o)
+        }
+        eprint("dmesg: read kernel buffer failed: {why(0 - fd)}")
+        return 1
+    }
+    if o.follow == 2 {
+        // # Safety: lseek(fd, 0, SEEK_END) on the descriptor just opened.
+        let _end = unsafe { dmesg_seek(fd, 2) }
+    }
+    var rc = 0
+    while true {
+        // # Safety: read(2) into raw.S's 8 KiB buffer.
+        let n = unsafe { dmesg_read(fd) }
+        if n == 0 - EAGAIN { break }
+        if n == 0 - EPIPE || n == 0 - EINTR { continue } // records overwritten while read: the next is the oldest
+        if n < 0 {
+            eprint("dmesg: read kernel buffer failed: {why(0 - n)}")
+            rc = 1
+            break
+        }
+        if n == 0 { break }
+        if !record(o, n) { break }
+    }
+    // # Safety: the descriptor dmesg_open gave.
+    let _c = unsafe { dmesg_close(fd) }
+    if rc == 0 && o.clear_after {
+        return klog(5, 0, "clear kernel buffer failed")
+    }
+    rc
+}
+
+/// syslog(2) `t` with `len`; `what` and the errno's text on a refusal (exit 1).
+fn klog(t: int, len: int, what: str) -> int {
+    // # Safety: syslog(2) into raw.S's 8 KiB buffer, len at most 8.
+    let r = unsafe { dmesg_klog(t, len) }
+    if r < 0 {
+        eprint("dmesg: {what}: {why(0 - r)}")
+        return 1
+    }
+    0
+}
+
+/// A digit's value, or -1.
+fn digit(b: int) -> int {
+    if b >= 48 && b <= 57 then b - 48 else -1
+}
+
+fn push_dec(mut out: List[byte], v: int, width: int) {
+    var d = 1
+    var w = 1
+    while v / d >= 10 {
+        d = d * 10
+        w += 1
+    }
+    while w < width {
+        (mut out).push(32 as byte)
+        w += 1
+    }
+    while d > 0 {
+        (mut out).push((48 + (v / d) % 10) as byte)
+        d = d / 10
+    }
+}
+
+fn push_time(mut out: List[byte], us: int) {
+    (mut out).push(91 as byte)
+    push_dec(mut out, us / 1000000, 5)
+    (mut out).push(46 as byte)
+    var d = 100000
+    while d > 0 {
+        (mut out).push((48 + (us % 1000000 / d) % 10) as byte)
+        d = d / 10
+    }
+    (mut out).push(93 as byte)
+    (mut out).push(32 as byte)
+}
+
+/// One /dev/kmsg record of `n` bytes in raw.S's buffer (`PRI,SEQ,USEC,FLAGS;TEXT\n`)
+/// printed; false when standard output is gone.
+fn record(o: Opts, n: int) -> bool {
+    var i = 0
+    var pri = 0
+    while i < n && digit(dmesg_at(i)) >= 0 {
+        pri = pri * 10 + digit(dmesg_at(i))
+        i += 1
+    }
+    i += 1 // ','
+    while i < n && dmesg_at(i) != 44 { i += 1 } // the sequence number
+    i += 1
+    var us = 0
+    while i < n && digit(dmesg_at(i)) >= 0 {
+        us = us * 10 + digit(dmesg_at(i))
+        i += 1
+    }
+    while i < n && dmesg_at(i) != 59 { i += 1 } // to ';'
+    i += 1
+    if (o.mask >> (pri & 7)) & 1 == 0 { return true }
+    var line = List[byte]()
+    if o.raw {
+        (mut line).push(60 as byte)
+        push_dec(mut line, pri, 1)
+        (mut line).push(62 as byte)
+    }
+    if !o.notime { push_time(mut line, us) }
+    // The text to its newline; the record's `\x5c` is a backslash again (its other escapes
+    // stay as the kernel wrote them: dmesg shows what cannot be printed escaped).
+    while i < n && dmesg_at(i) != 10 {
+        let b = dmesg_at(i)
+        if b == 92 && i + 3 < n && dmesg_at(i + 1) == 120 && dmesg_at(i + 2) == 53 && (dmesg_at(i + 3) == 99 || dmesg_at(i + 3) == 67) {
+            (mut line).push(92 as byte)
+            i += 4
+            continue
+        }
+        (mut line).push(b as byte)
+        i += 1
+    }
+    (mut line).push(10 as byte)
+    fs_write_chunk(1, line) else |_| { return false }
+    true
+}
+
+fn dmesg_at(i: int) -> int {
+    // # Safety: i < the count read(2) put in raw.S's 8 KiB buffer.
+    unsafe { dmesg_byte(i) }
+}
+
+/// util-linux's fallback without /dev/kmsg: syslog(2)'s READ_ALL, `<PRI>[time] TEXT` lines,
+/// printed as asked.
+fn from_syslog(o: Opts) -> int {
+    // # Safety: READ_ALL into raw.S's 8192-byte buffer.
+    let n = unsafe { dmesg_klog(3, 8192) }
+    if n < 0 {
+        eprint("dmesg: read kernel buffer failed: {why(0 - n)}")
+        return 1
+    }
+    var i = 0
+    while i < n {
+        var pri = 6
+        var j = i
+        if dmesg_at(j) == 60 {
+            pri = 0
+            j += 1
+            while j < n && digit(dmesg_at(j)) >= 0 {
+                pri = pri * 10 + digit(dmesg_at(j))
+                j += 1
+            }
+            j += 1
+        }
+        var line = List[byte]()
+        if o.raw {
+            var k = i
+            while k < j {
+                (mut line).push(dmesg_at(k) as byte)
+                k += 1
+            }
+        }
+        if o.notime && j < n && dmesg_at(j) == 91 {
+            while j < n && dmesg_at(j) != 93 { j += 1 }
+            j += 2
+        }
+        while j < n && dmesg_at(j) != 10 {
+            (mut line).push(dmesg_at(j) as byte)
+            j += 1
+        }
+        (mut line).push(10 as byte)
+        if (o.mask >> (pri & 7)) & 1 != 0 {
+            fs_write_chunk(1, line) else |_| { return 0 }
+        }
+        i = j + 1
+    }
+    if o.clear_after {
+        return klog(5, 0, "clear kernel buffer failed")
+    }
+    0
+}

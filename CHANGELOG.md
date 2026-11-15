@@ -40,6 +40,16 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   `ready no`, and why), and the command line's `pax.rdrand_fail=N` and `pax.rdrand_stuck` make RDRAND fail for tests.
   On a machine without RDRAND, ssh, TLS, setting a password, the installer, yew and a few utilities stop by name or
   by wolf's trap: `notes/dw02-the-entropy-contract.md` lists them. `tests/mpx6-entropy` holds it.
+- **The kernel's log kept and read back; a quiet console's screen spared a program's ordinary end (px130,
+  pax#383).** Every kernel line goes into a ring of 128 KiB with a level and its time since boot, as well as
+  to the serial port as before. `dmesg` (new on every image) prints it for root; `/dev/kmsg` and `syslog(2)`
+  read it as on Linux, held row for row to a real Linux's answers by `tests/mpx5-kmsg`, and
+  `/proc/sys/kernel/dmesg_restrict` (1) keeps it root's. Under `quiet` (every shipped image and installed
+  system), once the first program starts, lines below a warning stay off the screen: a pipeline's SIGPIPE, a
+  Ctrl-C or a session's hangup over ssh no longer draws over the console's prompt. `sudo dmesg -n 8` or
+  `loglevel=8` draws everything again. `tests/mpx5-burrowd` B40-B43 hold the installed shape:
+  `notes/px130-the-system-log.md`, which also measures which programs die by which signals in ordinary work
+  over ssh and proposes a log service for user space.
 
 - **`cat FILE` prints on a terminal again: sendfile and splice write to a pty (px141, pax#422).** A
   pty's master and slave were outputs `write` served and `sendfile` and `splice` did not: their copy
