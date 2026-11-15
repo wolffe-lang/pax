@@ -761,6 +761,37 @@ fn refuse_line(p: u64, n: u64, why: str) {
     log.end()
 }
 
+/// The loader's refusal `r` of file `f` (`size` bytes) as `refuse_line`
+/// writes it. px145: a program with a PT_INTERP is refused naming its
+/// interpreter, the segment's string from the file (a byte outside
+/// printable ASCII written `?`): `user: exec <path>: refused: dynamic
+/// program, not yet supported: /lib64/ld-linux-x86-64.so.2`.
+fn refuse_elf(pa: u64, pl: u64, f: u64, size: u64, r: u64) {
+    if r != elf.R_INTERP {
+        refuse_line(pa, pl, elf.why(r))
+        return
+    }
+    log.put("user: exec ")
+    put_bytes(pa, pl)
+    log.put(": refused: ")
+    log.put(elf.why(r))
+    let (o, n) = elf.interp_span(f, size)
+    if n == 0 {
+        log.put("(an empty PT_INTERP)")
+    }
+    var i: u64 = 0
+    while i < n {
+        let b = elf.byte(f, o + i)
+        var c: int = 63
+        if b >= 32 && b < 127 {
+            c = b as int
+        }
+        log.put_byte(c)
+        i += 1
+    }
+    log.end()
+}
+
 /// Copy `s` into `pax_execbuf` at `off` (at most `cap` bytes); its
 /// length.
 fn stage(s: str, off: u64, cap: u64) -> u64 {
@@ -818,7 +849,7 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
     let size = tree.bytes(file)
     let r = elf.refusal(file, size)
     if r != 0 {
-        refuse_line(pa, pl, elf.why(r))
+        refuse_elf(pa, pl, file, size, r)
         files.exec_drop(o)
         return 0
     }
@@ -1285,11 +1316,12 @@ fn run_file(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> 
     let size = tree.bytes(file)
     let rc = elf.refusal(file, size)
     if rc != 0 {
-        files.exec_drop(o)
         if rc == 1 || rc == 2 {
+            files.exec_drop(o)
             return NEG_ENOEXEC // shorter than an ELF header, or no ELF magic: Linux's own answer, no refusal
         }
-        refuse_line(pa, pl, elf.why(rc))
+        refuse_elf(pa, pl, file, size, rc) // px145: reads the file, so before the drop
+        files.exec_drop(o)
         return refuse_with(R_NOT_ELF, NEG_ENOEXEC)
     }
     let space = paging.new_space(sched.pml4())
