@@ -89,16 +89,23 @@ const EINTR: int = 4
 const SI_KERNEL: int = 128
 const CLOCK_SET: int = 946684800
 
-/// Every other file of /var/log logd holds to a cap: its name, the cap in bytes and
-/// its mode. Each is rotated to `.1` (one kept). boot.log and boot.summary are
-/// pax-boot-status's own (256 KiB, four kept; 200 lines, cut to 100).
-fn caps() -> List[(str, int, int)] {
-    var c = List[(str, int, int)]()
-    (mut c).push(("wtmp", 1048576, 420))
-    (mut c).push(("btmp", 1048576, 384))
-    (mut c).push(("sudo.log", 1048576, 384))
-    (mut c).push(("burrowd.log", 1048576, 384))
-    (mut c).push(("pax-upgrade.log", 262144, 420))
+/// A file of /var/log logd holds to a cap: its name, the cap in bytes and its mode.
+struct Cap {
+    name: str,
+    max: int,
+    mode: int,
+}
+
+/// Every other file of /var/log logd holds to a cap, each rotated to `.1` (one kept).
+/// boot.log and boot.summary are pax-boot-status's own (256 KiB, four kept; 200 lines,
+/// cut to 100).
+fn caps() -> List[Cap] {
+    var c = List[Cap]()
+    (mut c).push(Cap { name: "wtmp", max: 1048576, mode: 420 })
+    (mut c).push(Cap { name: "btmp", max: 1048576, mode: 384 })
+    (mut c).push(Cap { name: "sudo.log", max: 1048576, mode: 384 })
+    (mut c).push(Cap { name: "burrowd.log", max: 1048576, mode: 384 })
+    (mut c).push(Cap { name: "pax-upgrade.log", max: 262144, mode: 420 })
     c
 }
 
@@ -543,12 +550,11 @@ fn take(mut l: Log, r: Rec, why: str) {
 /// one left with its mode.
 fn hold_caps() {
     for c in caps() {
-        let (name, cap, mode) = c
-        let path = "{DIR}/{name}"
+        let path = "{DIR}/{c.name}"
         let size = fs_size(path) else |_| {
             continue
         }
-        if size <= cap {
+        if size <= c.max {
             continue
         }
         fs_remove("{path}.1") else |_| {
@@ -556,7 +562,7 @@ fn hold_caps() {
         fs_rename(path, "{path}.1") else |_| {
             continue
         }
-        let fd = fs_open_perm(path, 4, mode) else |_| {
+        let fd = fs_open_perm(path, 4, c.mode) else |_| {
             continue
         }
         fs_close(fd) else |_| {
