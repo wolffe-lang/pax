@@ -1450,3 +1450,22 @@ after a quantum when a non-urgent thread is waiting.
 | `trace_state/` (px126 change) | 1024 slots |
 | `../boot/sched.S` | `pax_threads`, `pax_siginfo`, `pax_debugregs` and `pax_trace_state` for 1024 slots; `pax_procs` gone (3 MiB at 64 slots); `pax_slot_words` (two a slot) and `pax_pid_hint` (4096 words): 1.9 MiB of `.bss` in all where 64 slots took 3.1 MiB |
 | `../boot/fpu.S` | `pax_fpu_state` 1032 words |
+
+## px146 — /proc/pax-security: each protection and its state
+
+What stands between PAX's kernel and a security boundary, read at each open
+from the registers and the live page tables where it can be measured, and from
+the kernel's fixed policy where it is policy. Nothing here turns a protection on
+or off; the file only says where each stands.
+
+| module | change |
+|---|---|
+| `procfs/` | `/proc/pax-security` (entry 59; `ENTRIES` 60), 0444: one `name state` line a protection, `on` when it holds: `nx` (IA32_EFER.NXE), `wp` (CR0.WP), `smep`, `smap` and `umip` (CR4; `absent` when CPUID has none), `kernel-wx` (no leaf of the kernel half both writable and executable, walked in the reader's tables), `kstack-guard` (the reading thread's kernel stack mapped and its guard below unmapped), `ist-guard` (an unmapped page below each IST stack), `kpti` (the reader's tables carry none of the kernel half), `ibrs` (IA32_SPEC_CTRL.IBRS where leaf 7 enumerates it), `arch-capabilities` (IA32_ARCH_CAPABILITIES as the CPU reports it, or `absent`), then the fixed policy: `aslr`, `user-wx` (no user mapping both writable and executable), `stack-nx` and `null-page` (`paxsec`, one function a group of lines) |
+
+`tests/mpx12-security` (run by `tests/mpx3-user` as U11) holds the file to what
+can be seen from outside it, per tier and firmware, under KVM with `-cpu host`,
+TCG with `-cpu max` and TCG with `-cpu qemu64`: the halted machine's EFER, CR0
+and CR4 and its `info tlb`, CPUID read in ring 3, the image's symbols, and a
+ring-3 witness for each protection a program can observe (a call into a
+read-write page and onto the stack, SGDT, an RWX mapping, a mapping at address
+0, two runs' addresses).
