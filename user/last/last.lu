@@ -75,7 +75,7 @@ fn day_text(d: int) -> str {
 
 /// A time as util-linux's last prints it: `short` is `Sun Nov 15 19:49`, `full`
 /// `Sun Nov 15 19:49:49 2026`, `iso` `2026-11-15T19:49:49+00:00`.
-fn when(secs: int, fmt: int) -> str {
+fn stamp(secs: int, fmt: int) -> str {
     let days = (if secs >= 0 then secs else secs - 86399) / 86400
     let rem = secs - days * 86400
     let (y, m, d) = ymd(days)
@@ -97,7 +97,7 @@ fn when_out(secs: int, fmt: int) -> str {
         let rem = secs - days * 86400
         return "{two(rem / 3600)}:{two(rem / 60 % 60)}"
     }
-    when(secs, fmt)
+    stamp(secs, fmt)
 }
 
 /// `(HH:MM)` or `(D+HH:MM)` of a session `secs` long. A negative length (a shutdown with no boot
@@ -429,7 +429,7 @@ fn line(o: Opts, user: str, tty: str, host: str, start: int, tail: str, how: str
     if !o.nohost && !o.hostlast {
         out += padded(if o.wide then host else cut(host, 16), 16) + " "
     }
-    let body = when(start, o.timefmt) + tail
+    let body = stamp(start, o.timefmt) + tail
     if o.hostlast && !o.nohost && host.len > 0 {
         out += padded(body, if o.timefmt == 2 then 64 else if o.timefmt == 3 then 66 else 37) + " " + host
     } else {
@@ -538,7 +538,8 @@ fn show(o: Opts) -> int {
     // util-linux's answer for a file with no record: the time now (measured).
     let first = if recs.len > 0 then recs[0].secs else time_unix_ms() / 1000
     print("")
-    print("{base_name(o.file)} begins {when(first, if o.timefmt == 3 then 3 else 2)}")
+    let fmt = if o.timefmt == 3 then 3 else 2
+    print("{base_name(o.file)} begins {stamp(first, fmt)}")
     0
 }
 
