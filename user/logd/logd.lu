@@ -533,7 +533,7 @@ fn lost(mut l: Log, from: int, to: int, why: str) {
 }
 
 /// One record: a gap before it named, then its line.
-fn take(mut l: Log, r: Rec, why: str) {
+fn keep(mut l: Log, r: Rec, why: str) {
     if r.seq < l.next {
         return
     }
@@ -667,7 +667,7 @@ fn main() -> int {
         // # Safety: read(2) of one record into raw.S's buffer.
         let n = unsafe { logd_read(fd) }
         if n > 0 {
-            take(mut l, parse(n), why)
+            keep(mut l, parse(n), why)
             why = "the ring overtook logd"
             if l.out.len >= BATCH {
                 if !flush(mut l) {
@@ -729,7 +729,7 @@ fn finish(mut l: Log, fd: int) -> int {
         // # Safety: read(2) of one record into raw.S's buffer.
         let n = unsafe { logd_read(fd) }
         if n > 0 {
-            take(mut l, parse(n), "the ring overtook logd")
+            keep(mut l, parse(n), "the ring overtook logd")
         } else if n != 0 - EPIPE && n != 0 - EINTR {
             break
         }
