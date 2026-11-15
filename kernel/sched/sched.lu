@@ -138,6 +138,13 @@
 //! `kick` switches to an urgent head. A flood of frames can then take the
 //! CPU from a process that only computes for as long as it lasts; the
 //! flood row of tests/mpx6-latency holds a hog to half its share.
+//! px131e: and urgency is bounded. Once a thread that is not urgent has
+//! waited in the queue a quantum with none of its kind run (`starved`), an
+//! urgent wake joins the tail like any other and the tick and `kick` switch
+//! to no urgent head, until one of them runs. Without that, a stream of
+//! frames kept every thread that the tick or another process made ready
+//! waiting for as long as the stream lasted (lobo's reload under its load:
+//! 20 s; tests/mpx6-latency's L7 and L8).
 //!
 //! **Threads** (px26): a process is a GROUP of slots with one leader.
 //! A thread's `lead` names its leader's slot, whose process area and
@@ -423,6 +430,8 @@ const S_TICK0: u64 = 22 // px88: the tick at `start`
 const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once calibrated (0: not yet)
 const S_URGENT: u64 = 24 // px131: a bit a slot (SLOTS is 64: one word): woken by a device's work, at the queue's head (`wake_urgent`)
 const S_NETD: u64 = 25 // px131: slot + 1 of the network thread (the one that waits in `block_net`); 0 none yet
+const S_QUEUED: u64 = 26 // px131e: a bit a slot (SLOTS is 64: one word): in the run queue
+const S_STARVE: u64 = 27 // px131e: the tick since which the queue's threads that are not urgent have waited with none of them run
 
 // px88: the process area's usage words (kernel/sched's; words 6084-6093
 // of the 6144, past kernel/vm's last, 6083): the process's own sums,
@@ -500,6 +509,13 @@ fn enqueue(s: u64) {
         put_field(t - 1, offset_of(Thread, next), s + 1)
     }
     put_sv(S_TAIL, s + 1)
+    // px131e: the first thread that is not urgent to wait starts the wait
+    // that bounds urgency (`starved`)
+    let q = sv(S_QUEUED)
+    if q & !sv(S_URGENT) == 0 {
+        put_sv(S_STARVE, timer.ticks())
+    }
+    put_sv(S_QUEUED, q | (1 << s))
 }
 
 /// px131: put slot `s` at the queue's head.
@@ -510,6 +526,14 @@ fn enqueue_front(s: u64) {
     if h == 0 {
         put_sv(S_TAIL, s + 1)
     }
+    put_sv(S_QUEUED, sv(S_QUEUED) | (1 << s)) // px131e
+}
+
+/// px131e: a thread that is not urgent has waited in the queue a quantum
+/// with none of its kind run: urgency yields to it (`wake_urgent` joins the
+/// tail, `urgent_waits` is false) until one of them runs.
+fn starved() -> bool {
+    sv(S_QUEUED) & !sv(S_URGENT) != 0 && timer.ticks() - sv(S_STARVE) >= QUANTUM
 }
 
 /// px131: make slot `s` ready at the queue's head, marked urgent: woken by
@@ -521,6 +545,10 @@ fn enqueue_front(s: u64) {
 /// quantum a hop (notes/px131-long-kernel-paths.md). IF clear.
 fn wake_urgent(s: u64) {
     put_field(s, offset_of(Thread, state), READY)
+    if starved() {
+        enqueue(s) // px131e: a thread that is not urgent has waited a quantum; this one waits its turn
+        return
+    }
     enqueue_front(s)
     put_sv(S_URGENT, sv(S_URGENT) | (1 << s))
 }
@@ -530,7 +558,7 @@ fn wake_urgent(s: u64) {
 fn urgent_waits(c: u64) -> bool {
     let h = sv(S_HEAD) // #598
     let u = sv(S_URGENT)
-    h != 0 && u & (1 << (h - 1)) != 0 && u & (1 << c) == 0
+    h != 0 && u & (1 << (h - 1)) != 0 && u & (1 << c) == 0 && !starved() // px131e
 }
 
 /// The queue's head (slot + 1), removed; 0 when it is empty.
@@ -545,6 +573,7 @@ fn dequeue() -> u64 {
     if n == 0 {
         put_sv(S_TAIL, 0)
     }
+    put_sv(S_QUEUED, sv(S_QUEUED) & !(1 << s)) // px131e
     s + 1
 }
 
@@ -621,6 +650,11 @@ fn run_next() -> u64 {
     // keeps its mark while it runs, so `kick` gives the CPU to no other
     // urgent thread before it blocks or the tick preempts it
     put_sv(S_URGENT, sv(S_URGENT) & !(1 << from))
+    // px131e: a thread that is not urgent runs: the wait that bounds urgency
+    // starts again
+    if s != IDLE && sv(S_URGENT) & (1 << s) == 0 {
+        put_sv(S_STARVE, timer.ticks())
+    }
     account(from, s) // px88
     if s != from {
         fpu.switch(from, s) // px10: a no-op before fpu.start
@@ -1013,6 +1047,8 @@ pub fn start(pml4: u64) {
     put_sv(S_FLOOR, 0)
     put_sv(S_URGENT, 0) // px131
     put_sv(S_NETD, 0)
+    put_sv(S_QUEUED, 0) // px131e
+    put_sv(S_STARVE, 0)
     put_sv(S_SLICE, timer.ticks())
     // px88: the bases the TSC's cycles are converted against.
     // # Safety: boot/fpu.S's RDTSC, which every x86-64 CPU has.
@@ -1424,6 +1460,10 @@ fn unqueue(s: u64) {
                 put_sv(S_TAIL, prev)
             }
             put_field(s, offset_of(Thread, next), 0)
+            // px131e: out of the queue, and no longer urgent (the mark
+            // would pass to the slot's next thread)
+            put_sv(S_QUEUED, sv(S_QUEUED) & !(1 << s))
+            put_sv(S_URGENT, sv(S_URGENT) & !(1 << s))
             return
         }
         prev = h
