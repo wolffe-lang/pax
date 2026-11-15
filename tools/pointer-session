@@ -555,6 +555,13 @@ def validate_qcodes(names, allowed):
         raise HarnessError(f'unknown QKeyCode names: {wrong}')
 
 
+def qkeycode_values(schema):
+    entry = next((s for s in schema if s.get('name') == 'QKeyCode' and s.get('meta-type') == 'enum'), None)
+    if entry is None:
+        raise HarnessError('QEMU schema has no QKeyCode enum')
+    return {m['name'] for m in entry.get('members', [])} | set(entry.get('values', []))
+
+
 def check_yew_keys(out):
     """Query QEMU's own enum without a guest, firmware, CPU or boot disk."""
     commands = ''.join(json.dumps(m) + '\n' for m in [
@@ -581,10 +588,7 @@ def check_yew_keys(out):
     schema = next((r.get('return') for r in replies if r.get('id') == 2), None)
     if proc.returncode or not isinstance(schema, list):
         raise HarnessError(f'QKeyCode schema query failed: exit={proc.returncode}, replies={replies[:3]}')
-    entry = next((s for s in schema if s.get('name') == 'QKeyCode' and s.get('meta-type') == 'enum'), None)
-    if entry is None:
-        raise HarnessError('QEMU schema has no QKeyCode enum')
-    allowed = {m['name'] for m in entry.get('members', [])} | set(entry.get('values', []))
+    allowed = qkeycode_values(schema)
     plans = {name: yew_key_plan(text) for name, text in YEW_COMMANDS.items()}
     names = {q for plan in plans.values() for q, _ in plan}
     validate_qcodes(names, allowed)
