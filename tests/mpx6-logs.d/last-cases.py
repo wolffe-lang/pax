@@ -4,7 +4,7 @@
 out (x86-64: 384 bytes, 32-bit time) in the shapes Ubuntu's login and OpenSSH's sshd write (measured
 in a container, px133's notes): a boot, the console, an ssh logout, a dropped session, a clean
 shutdown, a session open at a power cut, one open at a shutdown, a session over a day, names and hosts
-past their columns, an empty file, refused logins. Each file is read with each option set by both;
+past their columns, refused logins. Each file is read with each option set by both;
 every difference is `FAIL L1 …` at column 0. Exit 0, 1, or 3 when this host has no util-linux last.
 `still logged in` against `gone - no logout` turns on whether a record's pid lives on THIS host (pid 1
 does, 4000000 does not), the same question for both programs."""
@@ -69,7 +69,8 @@ FILES = {
     # names past the columns' widths, an empty host, an IPv6 address
     'wide': [boot(T0), login(T0 + 5, 141, 'pts/10', 'averyveryverylongname', 'host.with.a.long.name.example',
                              bytes([192, 168, 89, 77])), logout(T0 + 6, 141, 'pts/10')],
-    'empty': [],
+    # (a file with no record says `FILE begins` with the time now: held by G5's run on the guest's files,
+    # not here, where two programs' `now` can differ by a second)
     # failed logins (lastb): console and ssh, as Ubuntu's login and sshd wrote them
     'btmp': [rec(7, 43, 'console', 'cons', 'UNKNOWN', '', T0 + 1), rec(7, 43, 'console', 'cons', 'pax', '', T0 + 5),
              rec(6, 113, 'ssh:notty', '', 'pax', '192.168.89.1', T0 + 60, addr=A),

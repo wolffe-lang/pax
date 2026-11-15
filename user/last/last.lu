@@ -35,7 +35,7 @@ struct Opts {
     wide: bool,
     system: bool,
     ended: bool,
-    timefmt: int, // 0 notime, 1 short, 2 full, 3 iso
+    timefmt: int, // 1 short, 2 full (-F), 3 iso
     names: List[str],
     btmp: bool,
 }
@@ -236,7 +236,11 @@ fn main() -> int {
         }
         if a == "--time-format" && i + 1 < args.len {
             let f = args[i + 1]
-            o.timefmt = if f == "notime" then 0 else if f == "short" then 1 else if f == "full" then 2 else if f == "iso" then 3 else -1
+            if f == "notime" {
+                eprint("{name}: --time-format notime: not built in PAX's last (px133)")
+                return 1
+            }
+            o.timefmt = if f == "short" then 1 else if f == "full" then 2 else if f == "iso" then 3 else -1
             if o.timefmt < 0 {
                 eprint("{name}: unknown time format: {f}")
                 return 1
@@ -356,41 +360,38 @@ fn wanted(o: Opts, u: Utmp) -> bool {
     false
 }
 
-/// Whether `pid` lives and started no later than `since` (seconds since 1970): its start from
-/// /proc/PID/stat's starttime and /proc/stat's btime where the host has both (Linux); on a host with
-/// no btime (PAX), its being there.
-fn process_lives(pid: int, since: int) -> bool {
+/// Whether `user`'s session with `pid` is still on: the process lives, and where the host keeps a
+/// process's login uid (/proc/PID/loginuid, Linux's) it is `user`'s uid by /etc/passwd, so a pid used
+/// again by another process, or a process with no login session, is `gone - no logout` (util-linux's
+/// answer, measured: px133's notes). PAX keeps no login uid: a live process is its session's.
+fn process_lives(pid: int, user: str) -> bool {
     if pid <= 0 || !fs_exists("/proc/{pid}") {
         return false
     }
-    let stat = fs_read_text("/proc/stat") else ""
-    var btime = -1
-    for l in stat.split("\n") {
-        if l.starts_with("btime ") {
-            btime = number(l[6..])
+    let lu = fs_read_text("/proc/{pid}/loginuid") else |_| {
+        return true
+    }
+    let want = uid_of(user)
+    if want < 0 {
+        return false
+    }
+    var digits = ""
+    for w in lu.words() {
+        digits = w
+    }
+    number(digits) == want
+}
+
+/// `user`'s uid in /etc/passwd, or -1.
+fn uid_of(user: str) -> int {
+    let t = fs_read_text("/etc/passwd") else ""
+    for line in t.split("\n") {
+        let f = line.split(":")
+        if f.len >= 3 && f[0] == user {
+            return number(f[2])
         }
     }
-    if btime < 0 {
-        return true
-    }
-    let ps = fs_read_text("/proc/{pid}/stat") else ""
-    let close = ps.rfind(")") else -1
-    if close < 0 {
-        return true
-    }
-    var k = 0
-    var ticks = -1
-    for w in ps[close + 1..].words() {
-        // the fields after the name: state is the 3rd of stat(5), starttime the 22nd
-        if k == 19 {
-            ticks = number(w)
-        }
-        k += 1
-    }
-    if ticks < 0 {
-        return true
-    }
-    btime + ticks / 100 <= since
+    -1
 }
 
 /// The width of a logout's time in the end column: `HH:MM`, or a whole time with `-F`.
@@ -428,9 +429,9 @@ fn line(o: Opts, user: str, tty: str, host: str, start: int, tail: str, how: str
     if !o.nohost && !o.hostlast {
         out += padded(if o.wide then host else cut(host, 16), 16) + " "
     }
-    let body = if o.timefmt == 0 then tail else when(start, o.timefmt) + tail
+    let body = when(start, o.timefmt) + tail
     if o.hostlast && !o.nohost && host.len > 0 {
-        out += padded(body, if o.timefmt == 2 then 61 else if o.timefmt == 3 then 63 else 37) + " " + host
+        out += padded(body, if o.timefmt == 2 then 64 else if o.timefmt == 3 then 66 else 37) + " " + host
     } else {
         out += body
     }
@@ -444,7 +445,7 @@ fn line(o: Opts, user: str, tty: str, host: str, start: int, tail: str, how: str
 /// started no later than the record (a pid used again is not the session's), else `gone - no
 /// logout`.
 fn open_end(o: Opts, u: Utmp) -> (str, str) {
-    if process_lives(u.pid, u.secs) {
+    if process_lives(u.pid, u.user) {
         return ("   still logged in", "still logged in")
     }
     (if o.timefmt == 1 then "    gone - no logout" else "   gone - no logout", "gone")
@@ -534,7 +535,8 @@ fn show(o: Opts) -> int {
     for l in out {
         print(l)
     }
-    let first = if recs.len > 0 then recs[0].secs else file_time(o.file)
+    // util-linux's answer for a file with no record: the time now (measured).
+    let first = if recs.len > 0 then recs[0].secs else time_unix_ms() / 1000
     print("")
     print("{base_name(o.file)} begins {when(first, if o.timefmt == 3 then 3 else 2)}")
     0
@@ -550,11 +552,6 @@ fn wanted_system(o: Opts, user: str) -> bool {
         }
     }
     false
-}
-
-fn file_time(path: str) -> int {
-    let ms = fs_modified_ms(path) else 0
-    ms / 1000
 }
 
 fn find(lines: List[str], l: str) -> int {
