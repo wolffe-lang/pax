@@ -100,19 +100,23 @@ fn when_out(secs: int, fmt: int) -> str {
     when(secs, fmt)
 }
 
-/// `(HH:MM)` or `(D+HH:MM)` of a session `secs` long.
+/// `(HH:MM)` or `(D+HH:MM)` of a session `secs` long. A negative length (a shutdown with no boot
+/// after it is measured to the epoch, as util-linux measures it) keeps its sign in the days alone.
 fn length(secs: int) -> str {
-    var s = secs
-    if s < 0 {
-        s = 0
-    }
-    let mins = s / 60
+    let mins = secs / 60
     let days = mins / 1440
-    let hm = "{two(mins / 60 % 24)}:{two(mins % 60)}"
-    if days > 0 {
-        return "({days}+{hm})"
+    var h = mins / 60 % 24
+    var m = mins % 60
+    if h < 0 {
+        h = 0 - h
     }
-    "({hm})"
+    if m < 0 {
+        m = 0 - m
+    }
+    if days != 0 {
+        return "({days}+{two(h)}:{two(m)})"
+    }
+    "({two(h)}:{two(m)})"
 }
 
 fn padded(s: str, width: int) -> str {
@@ -352,31 +356,83 @@ fn wanted(o: Opts, u: Utmp) -> bool {
     false
 }
 
-fn process_lives(pid: int) -> bool {
-    pid > 0 && fs_exists("/proc/{pid}")
-}
-
-/// The columns of one line: user, line, host, start, end, length.
-fn line(o: Opts, user: str, tty: str, host: str, start: int, end: str, len_text: str, how: str) -> str {
-    let uw = if o.wide then (if user.len > 8 then user.len else 8) else 8
-    let u = padded(if o.wide then user else cut(user, 8), uw)
-    let t = padded(cut(tty, 12), 12)
-    let h = padded(if o.wide then host else cut(host, 16), 16)
-    let s = if o.timefmt == 0 then "" else when(start, o.timefmt)
-    var out = ""
-    if o.nohost || o.hostlast {
-        out = "{u} {t} {s}"
-    } else {
-        out = "{u} {t} {h} {s}"
+/// Whether `pid` lives and started no later than `since` (seconds since 1970): its start from
+/// /proc/PID/stat's starttime and /proc/stat's btime where the host has both (Linux); on a host with
+/// no btime (PAX), its being there.
+fn process_lives(pid: int, since: int) -> bool {
+    if pid <= 0 || !fs_exists("/proc/{pid}") {
+        return false
     }
-    if o.timefmt != 0 {
-        out += end
-        if len_text.len > 0 {
-            out += len_text
+    let stat = fs_read_text("/proc/stat") else ""
+    var btime = -1
+    for l in stat.split("\n") {
+        if l.starts_with("btime ") {
+            btime = number(l[6..])
         }
     }
-    if o.hostlast && !o.nohost {
-        out = padded(out, 54) + " " + host
+    if btime < 0 {
+        return true
+    }
+    let ps = fs_read_text("/proc/{pid}/stat") else ""
+    let close = ps.rfind(")") else -1
+    if close < 0 {
+        return true
+    }
+    var k = 0
+    var ticks = -1
+    for w in ps[close + 1..].words() {
+        // the fields after the name: state is the 3rd of stat(5), starttime the 22nd
+        if k == 19 {
+            ticks = number(w)
+        }
+        k += 1
+    }
+    if ticks < 0 {
+        return true
+    }
+    btime + ticks / 100 <= since
+}
+
+/// The width of a logout's time in the end column: `HH:MM`, or a whole time with `-F`.
+fn out_width(o: Opts) -> int {
+    if o.timefmt == 3 {
+        return 25
+    }
+    if o.timefmt == 2 {
+        return 24
+    }
+    5
+}
+
+/// `text` right-aligned in `width` (none cut).
+fn right(text: str, width: int) -> str {
+    var out = text
+    while out.len < width {
+        out = " " + out
+    }
+    out
+}
+
+/// A session's end column: ` - TIME  (LEN)`, ` - down   (LEN)`, ` - crash  (LEN)`.
+fn ended_at(o: Opts, word: str, secs: int, len_secs: int) -> str {
+    let w = if word.len > 0 then padded(word, out_width(o)) else when_out(secs, o.timefmt)
+    " - {w} {right(length(len_secs), 8)}"
+}
+
+/// One line: the user, the terminal, the host (unless -R or -a), the start and `tail`, the end
+/// column; with -a the host after it, the two padded to util-linux's width.
+fn line(o: Opts, user: str, tty: str, host: str, start: int, tail: str, how: str) -> str {
+    let u = padded(if o.wide then user else cut(user, 8), 8)
+    let t = padded(cut(tty, 12), 12)
+    var out = "{u} {t} "
+    if !o.nohost && !o.hostlast {
+        out += padded(if o.wide then host else cut(host, 16), 16) + " "
+    }
+    let body = if o.timefmt == 0 then tail else when(start, o.timefmt) + tail
+    if o.hostlast && !o.nohost && host.len > 0 {
+        out += padded(body, if o.timefmt == 2 then 61 else if o.timefmt == 3 then 63 else 37) + " " + host
+    } else {
+        out += body
     }
     if o.ended && how.len > 0 {
         out += "  [" + how + "]"
@@ -384,18 +440,26 @@ fn line(o: Opts, user: str, tty: str, host: str, start: int, end: str, len_text:
     out
 }
 
+/// The end column of a session with no logout: `still logged in` while its process lives and
+/// started no later than the record (a pid used again is not the session's), else `gone - no
+/// logout`.
+fn open_end(o: Opts, u: Utmp) -> (str, str) {
+    if process_lives(u.pid, u.secs) {
+        return ("   still logged in", "still logged in")
+    }
+    (if o.timefmt == 1 then "    gone - no logout" else "   gone - no logout", "gone")
+}
+
 fn show(o: Opts) -> int {
     let recs = ut_read(o.file)
     var out = List[str]()
-    // Going back in time: each terminal's logout seen so far, and the system's last event (a
-    // shutdown, `down`, or a boot with none before it, `crash`) after the records still to come.
+    // Going back in time: each terminal's logout seen so far (its time and how it ended), and the
+    // first boot and the first shutdown after the records still to come.
     var lines = List[str]()
     var outs = List[int]()
     var hows = List[str]()
-    var event = ""
-    var event_at = 0
-    var boot_after = -1 // the time of the boot after the records still to come, -1 none
-    var down_after = -1 // the time of the shutdown after them, -1 none
+    var boot_after = -1
+    var down_after = -1
     var shown = 0
     var k = recs.len - 1
     while k >= 0 {
@@ -404,52 +468,34 @@ fn show(o: Opts) -> int {
         if o.limit >= 0 && shown >= o.limit {
             break
         }
-        let is_boot = u.kind == UT_BOOT_TIME || (u.line == "~" && u.user == "reboot")
-        let is_down = !is_boot && u.line == "~" && u.user == "shutdown"
+        let is_boot = !o.btmp && (u.kind == UT_BOOT_TIME || (u.line == "~" && u.user == "reboot"))
+        let is_down = !o.btmp && !is_boot && u.line == "~" && u.user == "shutdown"
         if is_boot || is_down {
-            let label_user = if is_boot then "reboot" else "shutdown"
-            let label_tty = if is_boot then "system boot" else "system down"
-            if is_boot || o.system {
-                if o.names.len == 0 || wanted(o, u) {
-                    var end = ""
-                    var lt = ""
-                    if is_boot {
-                        if down_after >= 0 && (boot_after < 0 || down_after < boot_after) {
-                            end = " - {when_out(down_after, o.timefmt)}"
-                            lt = "  {length(down_after - u.secs)}"
-                        } else if boot_after >= 0 {
-                            end = " - crash"
-                            lt = "  {length(boot_after - u.secs)}"
-                        } else {
-                            end = "   still running"
-                        }
-                    } else {
-                        if boot_after >= 0 {
-                            end = " - {when_out(boot_after, o.timefmt)}"
-                            lt = "  {length(boot_after - u.secs)}"
-                        } else {
-                            end = "   still running"
-                        }
-                    }
-                    (mut out).push(line(o, label_user, label_tty, u.host, u.secs, end, lt, ""))
-                    shown += 1
+            let host = if o.ip then address(u) else u.host
+            if is_boot && wanted_system(o, "reboot") {
+                var tail = "   still running"
+                if down_after >= 0 && (boot_after < 0 || down_after <= boot_after) {
+                    tail = ended_at(o, "", down_after, down_after - u.secs)
                 }
+                (mut out).push(line(o, "reboot", "system boot", host, u.secs, tail, ""))
+                shown += 1
+            } else if is_down && o.system && wanted_system(o, "shutdown") {
+                let next = if boot_after >= 0 then boot_after else 0
+                (mut out).push(line(o, "shutdown", "system down", host, u.secs, ended_at(o, "", next, next - u.secs), ""))
+                shown += 1
             }
             if is_boot {
                 boot_after = u.secs
-                event = "crash"
-                event_at = u.secs
+                down_after = -1
             } else {
                 down_after = u.secs
-                event = "down"
-                event_at = u.secs
             }
             lines = List[str]()
             outs = List[int]()
             hows = List[str]()
             continue
         }
-        if u.kind == UT_DEAD_PROCESS || (u.kind == UT_USER_PROCESS && u.user.len == 0) {
+        if !o.btmp && (u.kind == UT_DEAD_PROCESS || (u.kind == UT_USER_PROCESS && u.user.len == 0)) {
             set_out(mut lines, mut outs, mut hows, u.line, u.secs, how_of(u))
             continue
         }
@@ -460,33 +506,26 @@ fn show(o: Opts) -> int {
             continue
         }
         let host = if o.ip then address(u) else u.host
-        var end = ""
-        var lt = ""
+        var tail = ""
         var how = ""
         let at = find(lines, u.line)
         if o.btmp {
-            end = " - {when_out(u.secs, o.timefmt)}"
-            lt = "  {length(0)}"
+            tail = ended_at(o, "", u.secs, 0)
         } else if at >= 0 {
-            end = " - {when_out(outs[at], o.timefmt)}"
-            lt = "  {length(outs[at] - u.secs)}"
+            tail = ended_at(o, "", outs[at], outs[at] - u.secs)
             how = hows[at]
-        } else if event == "down" {
-            end = " - down "
-            lt = "  {length(event_at - u.secs)}"
+        } else if down_after >= 0 && (boot_after < 0 || down_after <= boot_after) {
+            tail = ended_at(o, "down", 0, down_after - u.secs)
             how = "down"
-        } else if event == "crash" {
-            end = " - crash"
-            lt = "  {length(event_at - u.secs)}"
+        } else if boot_after >= 0 {
+            tail = ended_at(o, "crash", 0, boot_after - u.secs)
             how = "crash"
-        } else if process_lives(u.pid) {
-            end = "   still logged in"
-            how = "still logged in"
         } else {
-            end = "   gone - no logout"
-            how = "gone"
+            let (t, h) = open_end(o, u)
+            tail = t
+            how = h
         }
-        (mut out).push(line(o, u.user, u.line, host, u.secs, end, lt, how))
+        (mut out).push(line(o, u.user, u.line, host, u.secs, tail, how))
         shown += 1
         if !o.btmp {
             set_out(mut lines, mut outs, mut hows, u.line, u.secs, "logout")
@@ -499,6 +538,18 @@ fn show(o: Opts) -> int {
     print("")
     print("{base_name(o.file)} begins {when(first, if o.timefmt == 3 then 3 else 2)}")
     0
+}
+
+fn wanted_system(o: Opts, user: str) -> bool {
+    if o.names.len == 0 {
+        return true
+    }
+    for n in o.names {
+        if n == user {
+            return true
+        }
+    }
+    false
 }
 
 fn file_time(path: str) -> int {
