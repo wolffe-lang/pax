@@ -11,6 +11,21 @@ T=/tmp/l
 rm -rf $T && mkdir -p $T && cd $T || exit 1
 cp -R $S/src/. $T/ || exit 1
 LX=/usr/libexec/distribution-ligature/ldtime
+# px142's L8 probe (never shipped): free memory and every process above 16 MiB resident, before each build
+# and at each link (ldtime runs linkmem.sh, which reads them and then execs the real linker).
+cat > $T/memfn.sh <<'MEM'
+mem() {
+    echo "DLIG mem $1 $(grep MemFree /proc/meminfo | tr -s ' ')"
+    for d in /proc/[0-9]*; do
+        r=$(grep '^VmRSS' $d/status 2>/dev/null | tr -s ' ' | cut -d ' ' -f 2)
+        [ -n "$r" ] && [ "$r" -gt 16384 ] && echo "DLIG mem $1 proc $(grep '^Name' $d/status 2>/dev/null | cut -f 2) ${d#/proc/} $r kB"
+    done
+}
+MEM
+. $T/memfn.sh
+printf '#!/bin/sh\n. %s/memfn.sh\nmem "link-$LDTIME_LABEL"\nexec "$LINKMEM_REAL" "$@"\n' $T > $T/linkmem.sh
+chmod 755 $T/linkmem.sh
+mem start
 echo "DLIG env WOLF_LD=[${WOLF_LD-unset}]"
 if [ -x /usr/bin/ligature ]; then
     echo "DLIG version $(/usr/bin/ligature --version 2>&1 | head -n 1)"
@@ -23,7 +38,8 @@ echo "DLIG release $(grep '^ligature ' /etc/pax-release | cut -d ' ' -f 1-2)"
 build() {
     case $2 in lig) real=/usr/bin/ligature ;; lld) real=/usr/bin/cc ;; esac
     rm -f $5
-    (cd $3 && LDTIME_REAL=$real LDTIME_LOG=$T/ldtime.log LDTIME_LABEL="$1-$2" WOLF_LD=$LX \
+    mem "before-$1-$2"
+    (cd $3 && LDTIME_REAL=$T/linkmem.sh LINKMEM_REAL=$real LDTIME_LOG=$T/ldtime.log LDTIME_LABEL="$1-$2" WOLF_LD=$LX \
         wolf build $4 -o $5 > $T/$1-$2.build 2>&1)
     rc=$?
     if [ -f $5 ]; then have=yes; else have=no; fi
