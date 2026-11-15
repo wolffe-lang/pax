@@ -521,6 +521,86 @@ def run(args):
 
 QCODE = {' ': 'spc', '/': 'slash', '.': 'dot', '\r': 'ret', ';': 'semicolon', '-': 'minus', '=': 'equal', '\x1b': 'esc'}
 SHIFTED = {':': 'semicolon'}
+YEW_COMMANDS = {
+    'cd': 'cd /home/pax\r',
+    'launch': 'export HOME=/home/pax/menu-test SHELL=/bin/sh; mkdir -p /home/pax/menu-test; yew notes.txt\r',
+    'escape': '\x1b',
+    'quit': ':q\r',
+    'exit': 'exit\r',
+}
+
+
+class HarnessError(RuntimeError):
+    """A driver/preflight failure, never a guest behavioral red."""
+
+
+def yew_key_plan(text):
+    """QKeyCode names and modifier transitions, not character names."""
+    plan = []
+    for ch in text:
+        shifted = ch in SHIFTED or 'A' <= ch <= 'Z'
+        base = ch.lower() if 'A' <= ch <= 'Z' else ch
+        name = SHIFTED[ch] if ch in SHIFTED else QCODE.get(base, base)
+        if shifted:
+            plan.append(('shift', True))
+        plan.extend(((name, True), (name, False)))
+        if shifted:
+            plan.append(('shift', False))
+    return plan
+
+
+def validate_qcodes(names, allowed):
+    wrong = sorted(set(names) - allowed)
+    if wrong:
+        raise HarnessError(f'unknown QKeyCode names: {wrong}')
+
+
+def check_yew_keys(out):
+    """Query QEMU's own enum without a guest, firmware, CPU or boot disk."""
+    commands = ''.join(json.dumps(m) + '\n' for m in [
+        {'execute': 'qmp_capabilities', 'id': 1},
+        {'execute': 'query-qmp-schema', 'id': 2},
+        {'execute': 'quit', 'id': 3},
+    ])
+    cmd = [os.environ.get('PAX_QEMU', 'qemu-system-x86_64'), '-machine', 'none',
+           '-nodefaults', '-no-user-config', '-display', 'none', '-S', '-m', '32M', '-qmp', 'stdio']
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    (out / 'qkeycode-preflight.pid').write_text(str(proc.pid) + '\n')
+    try:
+        stdout, stderr = proc.communicate(commands, timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=5)
+        (out / 'qkeycode-preflight.log').write_text(stdout + stderr)
+        raise HarnessError('QKeyCode schema preflight exceeded 15 seconds')
+    (out / 'qkeycode-preflight.log').write_text(stdout + stderr)
+    try:
+        replies = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    except ValueError as error:
+        raise HarnessError(f'invalid QMP schema response: {error}')
+    schema = next((r.get('return') for r in replies if r.get('id') == 2), None)
+    if proc.returncode or not isinstance(schema, list):
+        raise HarnessError(f'QKeyCode schema query failed: exit={proc.returncode}, replies={replies[:3]}')
+    entry = next((s for s in schema if s.get('name') == 'QKeyCode' and s.get('meta-type') == 'enum'), None)
+    if entry is None:
+        raise HarnessError('QEMU schema has no QKeyCode enum')
+    allowed = {m['name'] for m in entry.get('members', [])} | set(entry.get('values', []))
+    plans = {name: yew_key_plan(text) for name, text in YEW_COMMANDS.items()}
+    names = {q for plan in plans.values() for q, _ in plan}
+    validate_qcodes(names, allowed)
+    if yew_key_plan('H') != [('shift', True), ('h', True), ('h', False), ('shift', False)]:
+        raise HarnessError('uppercase key-plan selftest failed')
+    try:
+        validate_qcodes(['H'], allowed)
+    except HarnessError:
+        pass
+    else:
+        raise HarnessError('invalid uppercase QKeyCode was not rejected by the dry check')
+    (out / 'qkeycode-plan.json').write_text(json.dumps(plans, indent=2) + '\n')
+    print(f'PASS yew-keycode-preflight: {len(names)} names checked against QEMU QKeyCode; uppercase-H rejection passed', flush=True)
+    return plans, allowed
+
+
 # yew's document menu (its src/edit/ctxrows.lu): two of its rows.
 YEW_MENU = (b'Select All', b'Command Palette...')
 YEW_AT = (10, 3)
@@ -533,6 +613,7 @@ def run_yew(args):
     after the click and none before; the screen read with the menu up."""
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    plans, allowed_qcodes = check_yew_keys(out)
     serial = out / 'serial.log'
     for stale in [serial, *out.glob('*.ppm')]:
         stale.unlink(missing_ok=True)
@@ -543,17 +624,31 @@ def run_yew(args):
     sock.unlink(missing_ok=True)
     root = Path(__file__).resolve().parents[1]
     cmd = [str(root / 'tools/qemu-run'), '--firmware', args.firmware, '--accel', args.accel,
-           '--usb-kbd=root', '--serial', str(serial), '--timeout', '600',
+           '--usb-kbd=root', '--serial', str(serial), '--timeout', str(args.yew_timeout + 15),
            str(Path(args.image).resolve()), '--', '-m', args.yew_memory,
            '-qmp', f'unix:{sock},server=on,wait=off',
            '-device', 'usb-tablet,id=pax-tablet,bus=pax-usb.0,port=2']
     why = []
+    start = time.monotonic()
+    deadline = start + args.yew_timeout
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise HarnessError(f'yew driver exceeded its {args.yew_timeout}s active runtime budget')
+        return left
+
+    def phase(name):
+        print(f'PHASE yew-menu {name} elapsed={time.monotonic() - start:.3f}s budget={args.yew_timeout}s', flush=True)
+
+    phase('guest-launch')
     with (out / 'runner.log').open('wb') as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        (out / 'runner.pid').write_text(str(proc.pid) + '\n')
         conn = reader = None
-        start = time.monotonic()
         try:
             while not sock.exists():
+                remaining()
                 if proc.poll() is not None or time.monotonic() - start > 15:
                     raise RuntimeError('QMP did not start')
                 time.sleep(.02)
@@ -564,34 +659,40 @@ def run_yew(args):
             json.loads(reader.readline())
 
             def execute(name, arguments=None):
+                conn.settimeout(max(.01, min(20, remaining())))
                 payload = {'execute': name}
                 if arguments is not None:
                     payload['arguments'] = arguments
                 conn.sendall(json.dumps(payload).encode() + b'\n')
                 while True:
-                    reply = json.loads(reader.readline())
+                    remaining()
+                    try:
+                        raw = reader.readline()
+                    except socket.timeout:
+                        raise HarnessError(f'QMP command timed out: {name}')
+                    if not raw:
+                        raise HarnessError(f'QMP closed during: {name}')
+                    reply = json.loads(raw)
                     if 'error' in reply:
-                        raise RuntimeError(reply)
+                        raise HarnessError(reply)
                     if 'return' in reply:
                         return reply['return']
 
             execute('qmp_capabilities')
 
             def key(name, down):
+                validate_qcodes([name], allowed_qcodes)
                 execute('input-send-event', {'events': [{'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': name}}}]})
                 time.sleep(.03)
 
-            def typed(text):
-                for ch in text:
-                    if ch in SHIFTED:
-                        key('shift', True); key(SHIFTED[ch], True); key(SHIFTED[ch], False); key('shift', False)
-                    else:
-                        q = QCODE.get(ch, ch)
-                        key(q, True); key(q, False)
+            def typed(name):
+                for qcode, down in plans[name]:
+                    key(qcode, down)
 
             def wait_for(pattern, after, limit):
                 until = time.monotonic() + limit
                 while time.monotonic() < until:
+                    remaining()
                     data = serial.read_bytes() if serial.exists() else b''
                     if pattern in data[after:]:
                         return data
@@ -605,6 +706,7 @@ def run_yew(args):
                 until = time.monotonic() + limit
                 size, since = -1, time.monotonic()
                 while time.monotonic() < until:
+                    remaining()
                     n = serial.stat().st_size
                     if n != size:
                         size, since = n, time.monotonic()
@@ -612,12 +714,14 @@ def run_yew(args):
                         return
                     time.sleep(.05)
 
+            phase('await-shell')
             data = wait_for(b'$ ', 0, 240)
             mark = len(data)
-            typed('cd /home/pax\r')
+            typed('cd')
             data = wait_for(b'$ ', mark, 60)
             mark = len(data)
-            typed('export HOME=/home/pax/menu-test SHELL=/bin/sh; mkdir -p /home/pax/menu-test; yew notes.txt\r')
+            phase('launch-editor')
+            typed('launch')
             wait_for(b'\x1b[?1002h\x1b[?1006h', mark, 120)
             quiet(3, 120)
             before = serial.read_bytes()
@@ -635,6 +739,7 @@ def run_yew(args):
             execute('input-send-event', {'events': [{'type': 'abs', 'data': {'axis': 'x', 'value': x}},
                                                     {'type': 'abs', 'data': {'axis': 'y', 'value': y}}]})
             time.sleep(.2)
+            phase('open-context-menu')
             clicked = len(serial.read_bytes())
             for down in (True, False):
                 execute('input-send-event', {'events': [{'type': 'btn', 'data': {'down': down, 'button': 'right'}}]})
@@ -664,6 +769,7 @@ def run_yew(args):
             positions = list(re.finditer(rb'\x1b\[(\d+);(\d+)H', menu_bytes[:label_at])) if label_at >= 0 else []
             hover_ok = click_ok = False
             if armed and positions:
+                phase('hover-select-all')
                 row = int(positions[-1][1]) - 1
                 col = YEW_AT[0] + 2
                 hx = 32768 * (2 * col + 1) // (2 * cols)
@@ -680,6 +786,7 @@ def run_yew(args):
                 # not just the framebuffer's pointer moving by itself.
                 hover_ok = b'Select All' in frame
                 execute('screendump', {'filename': str(out / 'menu-hover.ppm')})
+                phase('click-select-all')
                 mark = len(serial.read_bytes())
                 for down in (True, False):
                     execute('input-send-event', {'events': [
@@ -698,22 +805,33 @@ def run_yew(args):
                       f'1003={armed}, Select All located={bool(positions)}', flush=True)
                 if not ok:
                     why.append(name)
-            typed('\x1b')
+            phase('quit-editor')
+            typed('escape')
             quiet(1, 30)
-            typed(':q\r')
+            typed('quit')
             wait_for(b'$ ', len(after), 60)
-            typed('exit\r')
+            typed('exit')
             wait_for(b'\nhalt\r\n', 0, 60)
             execute('quit')
             proc.wait(timeout=10)
         finally:
+            if proc.poll() is None and conn is not None:
+                try:
+                    conn.sendall(b'{"execute":"quit"}\n')
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
             if reader is not None:
                 reader.close()
             if conn is not None:
                 conn.close()
             if proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=10)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
             sock.unlink(missing_ok=True)
     text = serial.read_bytes()
     if not (out / 'menu.ppm').exists():
@@ -752,13 +870,25 @@ if __name__ == '__main__':
     parser.add_argument('--judge', action='store_true', help='judge the serial log and screendumps already in OUTPUT')
     parser.add_argument('--yew', action='store_true', help="tests/mpx5-yew's Y9: IMAGE is its session image")
     parser.add_argument('--yew-memory', default='512M', help='QEMU memory for --yew; use 2048M for a full live image')
+    parser.add_argument('--yew-timeout', type=int, default=600, help='total active guest/driver budget, 1..600 seconds')
+    parser.add_argument('--check-yew-keys', action='store_true', help='validate every planned key against QEMU QKeyCode without booting')
     a = parser.parse_args()
+    if not 1 <= a.yew_timeout <= 600:
+        parser.error('--yew-timeout must be 1..600 seconds')
     if a.judge:
         sys.exit(judge_dir(Path(a.output).resolve(), a))
-    if not a.image:
+    if not a.image and not a.check_yew_keys:
         parser.error('--image is needed to boot')
     try:
+        if a.check_yew_keys:
+            out = Path(a.output).resolve()
+            out.mkdir(parents=True, exist_ok=True)
+            check_yew_keys(out)
+            sys.exit(0)
         sys.exit(run_yew(a) if a.yew else run(a))
+    except (HarnessError, subprocess.TimeoutExpired) as error:
+        print(f'INFRA yew-menu: {error}', flush=True)
+        sys.exit(75)
     except (RuntimeError, OSError) as error:
         print(f'FAIL {"yew-menu" if a.yew else "pointer-session"} {a.firmware} {a.accel}: {error}', flush=True)
         sys.exit(1)
