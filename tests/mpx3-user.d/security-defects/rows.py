@@ -14,8 +14,8 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-GROUPS = {"socket": ("udp",)}
-ROWS = {"socket": ("W1",)}
+GROUPS = {"socket": ("udp",), "credentials": ("setid",)}
+ROWS = {"socket": ("W1",), "credentials": ("W2", "traced-exec-setid", "attach-after-setid")}
 
 
 def evaluate(group, text):
@@ -26,6 +26,15 @@ def evaluate(group, text):
         expected = [(call, str(cap), "4", "16", "1")
                     for call in ("recvfrom", "recvmsg") for cap in (0, 1, 8, 16)]
         return {"W1": clean and got == expected}
+    if group == "credentials":
+        ids = re.findall(r"^security: W2 ids mode ([0-3]) uid (\d+) euid (\d+) gid (\d+) egid (\d+) nnp ([01])$", text, re.M)
+        expected = [(str(mode), "1000", "0" if mode == 0 else "1000", "1000",
+                     "42" if mode == 0 else "1000", str(int(bool(mode & 2)))) for mode in range(4)]
+        stops = re.findall(r"^security: W2 trace mode ([0-3]) stop (\d+) continue (-?\d+)$", text, re.M)
+        exits = re.findall(r"^security: W2 exit mode ([0-3]) status (\d+)$", text, re.M)
+        traced = clean and ids == expected and stops == [("1", "1407", "0"), ("3", "1407", "0")] and exits == [(str(m), "0") for m in range(4)]
+        attach = clean and re.findall(r"^security: attach-after-setid result (-?\d+)$", text, re.M) == ["-1"]
+        return {"W2": traced, "traced-exec-setid": traced, "attach-after-setid": attach}
     raise ValueError(group)
 
 

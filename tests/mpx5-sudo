@@ -108,10 +108,10 @@
 #     P9 the second sudo in session A, inside the timeout, is not asked;
 #        with T1, T2 (the first one asked) and T4.
 #
-# Two rows are not run yet and say SKIP by name, at column 0, with their
-# reason: a traced exec of a set-ID file, and a ptrace attach after a
-# set-ID exec. The kernel's traced-exec hook is not done: the exec path
-# (process.lu) consults no tracer when it asks which ids a program gets.
+# W2 and traced-exec-setid run the set-ID credential witness, with the
+# untraced and no_new_privs controls. attach-after-setid proves the original
+# user's attach is refused after the untraced privileged exec.
+# The runner is tests/mpx3-user.d/security-defects/rows.py.
 #
 # Assertions, per tier, firmware and session:
 #   S0 build: kmain_console built, the programs static, the images made.
@@ -441,9 +441,9 @@ if [ "$only" = auth ]; then
     exit "$fail"
 fi
 
-# Not run yet: the kernel's traced-exec hook, a tracer driver in user/elf/sid.c and a Linux re-record of sid.txt.
-say "SKIP traced-exec-setid reason=the kernel's traced-exec hook is not done (the exec path consults no tracer): a traced exec of a set-ID file stays unprivileged"
-say "SKIP attach-after-setid reason=the kernel's traced-exec hook is not done (the exec path consults no tracer): an owner's attach to a process that ran a set-ID file is refused"
+# The former traced-exec-setid and attach-after-setid skips are real rows.
+python3 -I "$here/mpx3-user.d/security-defects/selftest.py" || bad "W-parser"
+python3 -I "$here/mpx3-user.d/security-defects/rows.py" --rows credentials --tiers $tiers --firmwares $legs || fail=1
 
 mkdir -p "$PAX_BUILD"
 : > "$runs"
