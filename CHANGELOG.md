@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A device's wake-ups no longer hold everything else off: urgency gives way after a quantum's wait (px131e).**
+  px131 put the threads a device's work wakes at the head of the run queue, marked urgent, and the tick did not
+  switch away from an urgent thread. Under a stream of frames that never paused, the network thread and the readers
+  it woke were urgent again before anything else ran, so a thread that was not urgent waited until the stream
+  stopped. lobo's master, woken by its control client over a unix socket, answered a reload under load in up to
+  7.6 s instead of 0.3 s, and on a slower CI runner in 20 s or not within a minute (the client gives it 2 s). A 1 ms
+  sleeper beside a saturating ping flood woke up to 0.8 s late. Now, once a thread that is not urgent has waited in
+  the queue for a whole quantum (two ticks) with none of its kind run, an urgent wake joins the queue's tail without
+  its mark, and neither the tick nor a device's interrupt switches to an urgent head until one of those threads has
+  run. `tests/mpx6-latency` holds it with two rows under KVM, each bounded at 100 ms. L7 is the sleeper's worst wake
+  beside the saturating flood: 0.48 to 0.80 s before, 39 to 56 ms after on the native tier, 19 ms on release. L8 is
+  the worst round trip of a byte over a unix socket beside the same flood, lobo's control in small: 0.37 to 0.77 s
+  before, 16 to 20 ms after on the native tier, under 1 ms on release. L5 and L6 hold as before. At saturation the
+  native tier now answers fewer frames, 11,000 to 15,000 a second instead of 43,000 to 63,000, because the other
+  threads get their turns: a hog beside the flood keeps 0.89 to 0.94 of its share instead of 0.29 to 0.67. The
+  release tier answers 125,000 to 134,000 a second before and after.
+
 - **`cat FILE` prints on a terminal again: sendfile and splice write to a pty (px141, pax#422).** A
   pty's master and slave were outputs `write` served and `sendfile` and `splice` did not: their copy
   loop counted the bytes, moved the input's offset and wrote nothing. boreutils' `cat` copies with
