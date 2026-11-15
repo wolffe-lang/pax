@@ -1,0 +1,83 @@
+//! member: false
+// Direct user-copy API contract, on pages owned only by this test.
+use frames
+use interrupts
+use log
+use paging
+use panic
+use serial
+use uaccess
+
+const VA: u64 = 0x400000
+
+fn expect(row: str, ok: bool) {
+    log.put(if ok { "PASS " } else { "FAIL " })
+    log.line(row)
+}
+
+fn refused_put(p: u64, va: u64, n: u64) -> bool {
+    let _v = uaccess.put(p, va, 0, n) else |_| { return true }
+    false
+}
+fn refused_zero(p: u64, va: u64, n: u64) -> bool {
+    let _v = uaccess.zero(p, va, n) else |_| { return true }
+    false
+}
+fn refused_get(p: u64, va: u64, n: u64) -> bool {
+    let _v = uaccess.get(p, va, n) else |_| { return true }
+    false
+}
+fn refused_get64(p: u64, va: u64) -> bool {
+    let _v = uaccess.get64(p, va) else |_| { return true }
+    false
+}
+
+export fn kmain() {
+    serial.init()
+    frames.start()
+    let live = paging.start()
+    interrupts.start()
+    let p = paging.new_space(live)
+    let pa = frames.alloc() else |_| { panic.fail("uaccess test: no frame", 0) }
+    // # Safety: the test owns the allocated frame, reached through HHDM.
+    unsafe { ((pa + frames.hhdm()) as *u64).write_volatile(0x1122334455667788) }
+    let _mapped = paging.map(p, VA, pa, paging.US | paging.RW | paging.NX) else |_| { panic.fail("uaccess test: map", 0) }
+    let pos_put = uaccess.put(p, VA + 8, 42, 8) else |_| { panic.fail("uaccess test: positive put", 0) }
+    let pos_zero = uaccess.zero(p, VA + 16, 8) else |_| { panic.fail("uaccess test: positive zero", 0) }
+    let value = uaccess.get(p, VA + 8, 8) else |_| { panic.fail("uaccess test: positive get", 0) }
+    let value64 = uaccess.get64(p, VA + 16) else |_| { panic.fail("uaccess test: positive get64", 0) }
+    expect("UACCESS-positive", pos_put == 0 && pos_zero == 0 && value == 42 && value64 == 0)
+    // Each direction refuses the kernel half, noncanonical addresses,
+    // unmapped pages and a range that crosses into an unmapped page.
+    var puts = true
+    var zeros = true
+    var gets = true
+    var gets64 = true
+    var i: u64 = 0
+    while i < 4 {
+        let va = if i == 0 { pa + frames.hhdm() } else if i == 1 { 0x8000000000000000 } else if i == 2 { VA + 4096 } else { VA + 4092 }
+        puts = refused_put(p, va, 8) && puts
+        zeros = refused_zero(p, va, 8) && zeros
+        gets = refused_get(p, va, 8) && gets
+        gets64 = refused_get64(p, va) && gets64
+        i += 1
+    }
+    // A present read-only leaf, then a present supervisor-only leaf.
+    if !paging.protect_user(p, VA, paging.US | paging.NX) { panic.fail("uaccess test: protect", 0) }
+    puts = refused_put(p, VA, 8) && puts
+    zeros = refused_zero(p, VA, 8) && zeros
+    let read_ro = uaccess.get64(p, VA) else |_| { panic.fail("uaccess test: read-only read", 0) }
+    if !paging.protect_user(p, VA, paging.NX) { panic.fail("uaccess test: protect none", 0) }
+    puts = refused_put(p, VA, 8) && puts
+    zeros = refused_zero(p, VA, 8) && zeros
+    gets = refused_get(p, VA, 8) && gets
+    gets64 = refused_get64(p, VA) && gets64
+    // # Safety: the same owned test frame, never freed while inspected.
+    let intact = unsafe { ((pa + frames.hhdm()) as *u64).read_volatile() == 0x1122334455667788 }
+    expect("UACCESS-put-refusal", puts && intact)
+    expect("UACCESS-zero-refusal", zeros && intact)
+    expect("UACCESS-get-refusal", gets && read_ro == 0x1122334455667788)
+    expect("UACCESS-get64-refusal", gets64)
+    log.line("halt")
+    panic.halt()
+}

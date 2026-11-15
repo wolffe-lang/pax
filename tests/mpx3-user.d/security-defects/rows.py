@@ -141,6 +141,10 @@ def main():
                     ok &= boot_ok
                     print(f"{'PASS' if ok else 'FAIL'} {row} {tier} {firmware} {group}", flush=True)
                     bad |= not ok
+    if args.rows in ("all", "signals"):
+        helpers = subprocess.run([sys.executable, "-I", str(HERE / "helper_rows.py"),
+                                  "--tiers", *args.tiers, "--firmwares", *args.firmwares])
+        bad |= helpers.returncode != 0
     return int(bad)
 
 
