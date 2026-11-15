@@ -43,6 +43,13 @@
  *                   datagrams a second (the host reads R from the window's
  *                   name; the probe ignores it): a CPU-bound process beside
  *                   a stream of device wake-ups
+ *   ctl             a round trip of one byte over an AF_UNIX stream
+ *                   socketpair to a child that answers it, each an op,
+ *                   while the host's probe pings as fast as the guest
+ *                   answers (echo-host.py floods a window of this name
+ *                   too): a command to a process that a process, not a
+ *                   device, wakes, beside a stream of device wake-ups
+ *                   (a control socket's command under a server's load)
  *   console:N       write(1) of N bytes of 80-column lines [65536]
  *   pty:N           write of N bytes to a pseudo-terminal's slave, a child
  *                   reading its master [16384]
@@ -294,6 +301,20 @@ static int setup(struct load *L) {
         return L->buf && L->mem ? (memset(L->mem, 1, L->n), 0) : -1;
     }
     if (!strcmp(k, "random")) { L->n = arg_or(L->arg, 8) << 20; L->buf = malloc(L->n); return L->buf ? (memset(L->buf, 0, L->n), 0) : -1; }
+    if (!strcmp(k, "ctl")) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv)) { perror("latprobe: socketpair"); return -1; }
+        if ((L->helper = fork()) == 0) {
+            close(sv[0]);
+            char c;
+            while (read(sv[1], &c, 1) == 1)
+                if (write(sv[1], &c, 1) != 1) break;
+            _exit(0);
+        }
+        close(sv[1]);
+        L->fd = sv[0];
+        return L->helper > 0 ? 0 : -1;
+    }
     if (!strcmp(k, "pipe")) {
         L->n = arg_or(L->arg, 65536);
         int p[2];
@@ -392,6 +413,11 @@ static void op(struct load *L) {
         return;
     }
     if (!strcmp(k, "poll")) { poll(L->pfds, L->n, 0); return; }
+    if (!strcmp(k, "ctl")) {
+        char c = 'c';
+        if (write(L->fd, &c, 1) != 1 || read(L->fd, &c, 1) != 1) perror("latprobe: ctl");
+        return;
+    }
 }
 
 /* The load's child: setup, `r` to the parent, wait for `g`, ops until the
