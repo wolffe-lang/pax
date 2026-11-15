@@ -192,12 +192,6 @@ fn why(path: str) -> str {
     "Permission denied"
 }
 
-fn usage(prog: str) -> int {
-    eprint("{prog}: bad usage")
-    eprint("Try '{prog} --help' for more information.")
-    1
-}
-
 fn main() -> int {
     let args = env_args()
     var o = Opts {
@@ -232,7 +226,9 @@ fn main() -> int {
         }
         if a == "-n" || a == "--limit" {
             if i + 1 >= args.len {
-                return usage(name)
+                eprint("{name}: option requires an argument -- 'n'")
+                eprint("Try '{name} --help' for more information.")
+                return 1
             }
             o.limit = number(args[i + 1])
             i += 2
@@ -296,8 +292,12 @@ fn main() -> int {
                     o.system = true
                 } else if c == 101 {
                     o.ended = true
-                } else {
+                } else if c == 100 || c == 115 || c == 116 || c == 112 {
                     eprint("{name}: -{a[k..k + 1]}: not built in PAX's last (px133)")
+                    return 1
+                } else {
+                    eprint("{name}: invalid option -- '{a[k..k + 1]}'")
+                    eprint("Try '{name} --help' for more information.")
                     return 1
                 }
                 k += 1
