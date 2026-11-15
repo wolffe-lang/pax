@@ -72,6 +72,20 @@ def check(blob):
     assert rows['etc/sudoers'][1] == (ROOT/'user/sudo/sudoers').read_bytes(), 'image-sudoers-bytes'
     assert 'var/log' in rows and rows['var/log'][0][1] == 0o40755 and rows['var/log'][0][2:4] == [0, 0], 'image-var-log'
     assert 'var/log/sudo.log' not in rows, 'image-no-sudo-log'
+    # pxg is the production input in both variants; no test executable ships.
+    assert 'bin/pxg' in rows, 'image-pxg-missing'
+    fields, data = rows['bin/pxg']
+    assert data == (inputs/'pxg/pxg').read_bytes(), 'image-pxg-bytes'
+    assert fields[1] == 0o100755 and fields[2:4] == [0, 0], 'image-pxg-mode'
+    assert (inputs/'pxg/sums.txt').read_text().split() == ['pxg', sha(data), str(len(data))], 'image-pxg-sums'
+    assert not any(n.rsplit('/', 1)[-1] in ('paxage-failpoint', 'qualify-probe') for n in rows), 'image-pxg-test-tool'
+    resolution = identity/'latest/resolution.txt'
+    if resolution.is_file():
+        pxg_identity = next(l.split()[1:3] for l in resolution.read_text().splitlines() if l.startswith('pxg '))
+    else:
+        pxg_identity = [next(l.split('=', 1)[1] for l in (ROOT/'user/pxg.pin').read_text().splitlines() if l.startswith('PXG_REV=')),
+                        sha((ROOT/'user/pxg.pin').read_bytes())]
+    assert release_rows.get('pxg') == pxg_identity, 'image-pxg-release-line'
     # px90: den byte for byte as tools/mkden built it (never stripped), 0755,
     # and git a symbolic link to it, not a copy.
     den = inputs/'den'/'den'
