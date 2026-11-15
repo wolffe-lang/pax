@@ -2,7 +2,7 @@
 """last-cases.py PAX_LAST OUT — px133's L1: PAX's last and lastb held byte for byte to util-linux's
 (this host's /usr/bin/last and lastb) on files of utmp(5) records written here as utmp(5) lays them
 out (x86-64: 384 bytes, 32-bit time) in the shapes Ubuntu's login and OpenSSH's sshd write (measured
-in a container, px133's notes): a boot, the console, an ssh logout, a dropped session, a clean
+in a container: docs/SOURCES.md, px133): a boot, the console, an ssh logout, a dropped session, a clean
 shutdown, a session open at a power cut, one open at a shutdown, a session over a day, names and hosts
 past their columns, refused logins. Each file is read with each option set by both;
 every difference is `FAIL L1 …` at column 0. Exit 0, 1, or 3 when this host has no util-linux last.
