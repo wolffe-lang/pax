@@ -43,7 +43,8 @@
 #      monitor's RSP on the halted machine inside IST1 too; halted.
 #   I5 timer: kmain_timer's log ends
 #        apic: 0x00000000fee00000 at 0xffffb00000000000, id 0, svr 0x<s>, lint0 0x<old> -> 0x0000000000008700
-#        timer: pit divisor 11932 (99.998 Hz), 8259 at 32 and 40, line 0 unmasked
+#        [documented timer: LAPIC calibration: diagnostics, when retried]
+#        timer: LAPIC calibrated by HPET|PM|PIT divide16 <rate> Hz, tick 100 Hz vector 32; PIT IRQ masked
 #        timer: 20 ticks on vector 32, 0 spurious
 #        halt
 #      and the machine is halted with IF clear (the ticks stopped
@@ -78,7 +79,7 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-need nm objdump
+need nm objdump python3
 
 kernels="kmain_text_write kmain_ud2 kmain_int3 kmain_double_fault kmain_timer"
 work=$PAX_BUILD/mpx2-interrupts
@@ -322,7 +323,7 @@ for leg in $legs; do
             why=
             [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
             python3 -I "$here/mpx2-interrupts.d/timer-tail.py" "$log" >/dev/null \
-                || why+=" the log does not end apic …, timer: pit …, timer: 20 ticks on vector 32, 0 spurious, halt;"
+                || why+=" the log does not end with APIC, documented calibration diagnostics, successful calibration, 20 ticks without spurious interrupts, halt;"
             if [ -z "$why" ]; then
                 say "PASS I5 $tier kmain_timer $leg: $(grab "$log" '\(apic: .*\)'); 20 ticks on vector 32; $(halted)"
             else
