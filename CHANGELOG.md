@@ -7,6 +7,13 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A spare USB pointer interface no longer writes over the quiet login prompt (pax#402).** Its
+  refusal keeps the same wording in `sudo dmesg` at informational level while another pointer is
+  driven. If none is working, including after the last one is unplugged, the refusal remains visible
+  at error level; enumeration failures are errors too. USB selection and enumeration are unchanged.
+  `tests/mpx6-usb --topology refusal` checks the framebuffer and the log with a nested composite HID
+  fixture, real login and sudo; the fixture does not identify the physical device’s descriptors.
+
 - **The kernel's log kept and read back; a quiet console's screen spared a program's ordinary end (px130,
   pax#383).** Every kernel line goes into a ring of 128 KiB with a level and its time since boot, as well as
   to the serial port as before. `dmesg` (new on every image) prints it for root; `/dev/kmsg` and `syslog(2)`
