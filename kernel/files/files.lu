@@ -3606,6 +3606,9 @@ fn child_named(d: u64, s: u64, n: u64) -> u64 {
     if i == tree.NONE {
         return err(ENOENT)
     }
+    if tree.failed(i) {
+        return i
+    }
     ino_node(i)
 }
 
@@ -5661,7 +5664,7 @@ pub fn exec_kernel(pa: u64, pl: u64) -> (u64, u64) {
             return (0, 1)
         }
         let c = tree.lookup(d, pa + s, i - s)
-        if c == tree.NONE {
+        if c == tree.NONE || tree.failed(c) {
             return (0, 1)
         }
         var j = i
