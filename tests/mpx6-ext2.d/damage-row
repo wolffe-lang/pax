@@ -59,6 +59,12 @@ run)
         else
             echo "PASS damage-$case-$firmware"
         fi
+        if ! grep -q 'pax-install: cannot inspect temporary path /mnt/bin/burrowd.pax-tmp: filesystem damage or I/O error; stop retrying, power off, boot recovery media, leave the target root partition unmounted and run e2fsck -f on it, then retry the upgrade' "$log.norm"; then
+            echo "FAIL temporary-diagnostic-$case-$firmware: missing exact repair instruction"
+            failed=1
+        else
+            echo "PASS temporary-diagnostic-$case-$firmware"
+        fi
         debugfs -R 'ls -l /bin' "$fixture/$case.img" > "$fixture/$case.after.txt" 2>&1
         count=$(grep -c 'burrowd.pax-tmp' "$fixture/$case.after.txt" || true)
         if [ "$count" != 1 ]; then
