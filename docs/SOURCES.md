@@ -2486,3 +2486,15 @@ real Linux's own under QEMU (the lane host's installed kernel image, booted and 
 | Linux 7.2.4 (the lane host's installed image) | black box under QEMU/KVM, `printk.devkmsg=on` | `tests/mpx5-kmsg.d/linux/`: every row of the probe as root and as 1000:1000 |
 | pelt's README and docs/FRIENDLY.md (`wolffe-lang/pelt`) | `b80d6570` | the measurement: pelt friendly unless invoked as `sh`, and its friendly prompt's `den status --porcelain` with a 50 ms deadline |
 | bootparam(7), kernel-parameters (kernel.org) | trunk of 2026-11 | `loglevel=`, `quiet`, `printk.devkmsg=` |
+
+## USB refusal routing at login (pax#402)
+
+This change reuses PAX’s own USB-redirection fixture and its documented USB 2.0/HID 1.11
+descriptor layout. No external implementation source was read, and no descriptor bytes from the
+physical KVM were available. The fixture is synthetic, not a claim about that device.
+
+| source | version | read, for |
+|---|---|---|
+| PAX’s `tools/hotplug-session` | this tree | the existing USB-redirection protocol fixture, device and HID descriptor helpers; reused without changing that tool |
+| PAX’s `kernel/xhci`, `kernel/log`, `kernel/kmsg` | this tree | live pointer records, existing line levels and the quiet framebuffer threshold; no change to descriptor selection or enumeration |
+| PAX’s `user/login`, `user/sudo`, `user/dmesg` | this tree | the real login and privileged log read used by the end-to-end regression |
