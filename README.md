@@ -675,6 +675,58 @@ empty at every boot (the boot's own console is kept apart: [When a boot goes bla
 `tests/mpx5-burrowd` B40-B43 hold the installed shape: a pipeline's SIGPIPE over ssh leaves the console's screen
 as it was, root's `dmesg` shows the line with its time, pax's `dmesg` is refused, and a warning is still drawn.
 
+## The system's logs
+
+The kernel's log survives a reboot, and every login is recorded. Four commands answer "what happened on
+this machine, and when":
+
+```sh
+sudo dmesg                       # this boot's kernel lines, from memory (dmesg -w to follow)
+sudo less /var/log/kern.log      # every boot's kernel lines, kept on disk (and kern.log.1 to .4)
+last                             # who logged in, from where, and how each session ended
+sudo lastb                       # refused logins
+```
+
+- **`/var/log/kern.log`** (root's, mode 0600) is written by `logd`, which the boot hook
+  `/etc/pax-boot.d/logd` starts before the first login prompt and starts again a second after it ends. It
+  reads `/dev/kmsg` from the oldest record and appends one line a record: the wall time (UTC) when the clock
+  is set, the time since boot as `dmesg` prints it, the facility and level as syslog names them, the record's
+  sequence number, and its text:
+
+  ```
+  2026-11-15T19:44:26.120000Z [  812.340124] kern.info #2210 user: yes pid 412 killed: SIGPIPE, a write to a pipe with no reader after 3 runs
+  ```
+
+  Each boot starts with a line naming it (`== boot N started TIME`), and that line says so when the boot
+  before it ended without logd's own end line: a power cut, a reset or a panic. A clean end (`reboot`,
+  `poweroff`, `exit` at the console) is logd's last line, `== end of boot …`. logd keeps its place in
+  `kern.log` itself, so a restart writes no line twice; records the ring dropped before logd read them (the
+  ring holds 128 KiB) are counted in one line, `logd: N records lost (sequence A to B)`, never skipped
+  silently. A line is on the disk at most a second after the kernel wrote it, so a power cut loses at most
+  the last second. What the kernel says after the end's SIGTERM (the volumes' last lines) and a panic's lines
+  are not in `kern.log`: the serial port has them, and the next boot's `/var/log/boot.log` keeps the previous
+  boot's console.
+- **The login records** are utmp(5)'s, the files `last`, `lastb` and `who` read on Linux: `/var/run/utmp`
+  (who is on now), `/var/log/wtmp` (every login, logout, boot and shutdown) and `/var/log/btmp` (refused
+  logins, root's, mode 0600). `login` writes a session's start at the console and each refused try (the
+  name typed, or `UNKNOWN` for a name no account has, so a password typed as a name is never kept); burrowd
+  writes an ssh session with a terminal, its end and a refused password; pid 1 writes each boot, and logd
+  each clean shutdown. `last` prints them as util-linux's `last` does, newest first: a logout's time, `crash`
+  when the machine booted again first, `down` when it was shut down first, `still logged in`. `last -e`, PAX's
+  own, adds how each session ended: `logout`, `dropped` (the connection went), `down` or `crash`. The client's
+  address of an ssh login is not yet known on PAX, so its host column is empty, and a boot's record has
+  no kernel release while boreutils' `uname -r` cannot read it on PAX. boreutils' `who` and `users` read
+  utmp on Linux alone for now, so they do not answer on PAX yet; `last` shows who is still logged in.
+- **Nothing in `/var/log` grows without bound.** `kern.log` is rotated at 1 MiB with four kept
+  (`kern.log.1` to `kern.log.4`); logd holds `wtmp`, `btmp`, `sudo.log` and `burrowd.log` to 1 MiB and
+  `pax-upgrade.log` to 256 KiB, each with one `.1` kept; `boot.log` is rotated by its own writer at 256 KiB
+  with four kept, and `boot.summary` keeps its last 100 lines. All of `/var/log` stays under about 16 MiB.
+
+`tests/mpx6-logs` boots an installed-shaped PAX eight times on one log volume and holds all of it: a kernel
+line after a reboot, logd killed and started again, the ring wrapped while logd was held, five power cuts,
+the login records of the console and of ssh, and every cap; PAX's `last` and `lastb` are held byte for byte
+to util-linux's on the same files.
+
 ## Seeing the screen
 
 The harness boots headless. To see PAX's screen, give QEMU a window; on macOS (Homebrew's QEMU, TCG):
