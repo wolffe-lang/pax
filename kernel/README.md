@@ -1384,7 +1384,7 @@ pass measures how long, ranks the paths, and makes three of them short.
 | module | change |
 |---|---|
 | `timer/` | with `follow_clock` (`kmain_console`, the shipped kernel), `tick` sets the count to the larger of itself plus one and the ticks kernel/clock says are due since the tick was armed, so every deadline counted in ticks (CLOCK_MONOTONIC, CLOCK_REALTIME, sleeps, poll's, epoll's, a receive's and a futex's timeouts, TCP's, ARP's and DHCP's timers) is one in real time; `delivered` counts the interrupts themselves (`drift`, `mark`, kernel/latency's lost ticks). The test kernels count interrupts as before |
-| `sched/` | `wake_urgent`: a thread a device's work woke (`wake_net`, `wake_input`, and `wake_pipes` from the network thread, which `block_net` names) goes to the queue's head marked urgent (`S_URGENT`, a bit a slot); `kick` and `preempt` switch to an urgent head when the running thread is not one; a thread keeps its mark while it runs and loses it when it leaves the CPU |
+| `sched/` | `wake_urgent`: a thread a device's work woke (`wake_net`, `wake_input`, and `wake_pipes` from the network thread, which `block_net` names) goes to the queue's head marked urgent (`B_URGENT`, a bit a slot); `kick` and `preempt` switch to an urgent head when the running thread is not one; a thread keeps its mark while it runs and loses it when it leaves the CPU |
 | `latency/` | lost ticks from `timer.delivered` |
 | `xhci/` | `command` and `control` look at their completion before their deadline, so a stretch that carries the tick count past it does not quarantine a controller that answered during it |
 
@@ -1392,7 +1392,7 @@ pass measures how long, ranks the paths, and makes three of them short.
 
 | module | change |
 |---|---|
-| `sched/` | `S_QUEUED` (a bit a slot: in the run queue) and `S_STARVE` (the tick since which the queue's threads that are not urgent have waited with none of them run), kept by `enqueue`, `enqueue_front`, `dequeue`, `unqueue`, `run_next` and `start`. `starved` is true once that wait reaches `QUANTUM`; then `wake_urgent` puts the thread at the tail without its mark, and `urgent_waits` (what `kick` and `preempt` ask) answers no. `unqueue` also clears an ended thread's urgent mark, which would otherwise pass to the slot's next thread |
+| `sched/` | `B_QUEUED` (a bit a slot: in the run queue) and `S_STARVE` (the tick since which the queue's threads that are not urgent have waited with none of them run), kept by `enqueue`, `enqueue_front`, `dequeue`, `unqueue`, `run_next` and `start`. `starved` is true once that wait reaches `QUANTUM`; then `wake_urgent` puts the thread at the tail without its mark, and `urgent_waits` (what `kick` and `preempt` ask) answers no. `unqueue` also clears an ended thread's urgent mark, which would otherwise pass to the slot's next thread |
 
 ## px141 — sendfile and splice onto a pty (pax#422)
 
@@ -1433,6 +1433,11 @@ the old answer (`notes/dw02-the-entropy-contract.md`).
 | `../boot/console.S` (px130 change) | `pax_log_line` (2 words), `pax_kmsg_state` (32 words), `pax_kmsg_buf` (128 KiB), `pax_kmsg_line`, `pax_kmsg_user`, `pax_kmsg_out` |
 
 ## px126 — process slots: 64 to 1024
+
+The urgent and queued flags each occupy sixteen 64-bit words, separate from the scalar state.
+A slot selects its word and bit independently, so slots above 63 do not alias lower slots.
+The high-water, deadline and refusal counters use distinct scalar words; urgency still yields
+after a quantum when a non-urgent thread is waiting.
 
 | module or file | what |
 |---|---|
