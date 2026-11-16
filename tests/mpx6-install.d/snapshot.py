@@ -25,10 +25,15 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     # px112: a running system's state under /var/run (sudo's timestamps, burrowd's pid) and
     # burrowd's host key and log stay out of the walk; /var/run itself and the configuration stay in.
     RUNTIME={'/etc/burrowd/ssh_host_ed25519_key','/etc/burrowd/ssh_host_ed25519_key.pub','/var/log/burrowd.log'}
+    # px133: logd's kern.log and its rotations, the login records and the logs logd rotates.
+    LOGS=['kern.log','kern.log.1','kern.log.4','wtmp','wtmp.1','btmp','btmp.1','sudo.log.1','burrowd.log.1',
+          'pax-upgrade.log.1']
+    RUNTIME|={'/var/log/'+n for n in LOGS}
     for d in ['var/run/sudo/ts','var/log','etc/burrowd']: (src/d).mkdir(parents=True)
     (src/'var/run/sudo/ts/0').write_text('a timestamp record')
     (src/'var/run/burrowd.pid').write_text('123\n')
     (src/'var/log/burrowd.log').write_text('a log line\n')
+    for n in LOGS: (src/'var/log'/n).write_text('px133: a running system\'s log\n')
     (src/'etc/burrowd/burrowd_config').write_text('ListenAddress 127.0.0.1\n')
     (src/'etc/burrowd/ssh_host_ed25519_key').write_text('not a key');(src/'etc/burrowd/ssh_host_ed25519_key').chmod(0o600)
     (src/'etc/burrowd/ssh_host_ed25519_key.pub').write_text('not a key either')
@@ -61,7 +66,7 @@ with tempfile.TemporaryDirectory(dir=work, prefix='snapshot-') as tmp:
     assert (w/'copy/var/run').is_dir() and list((w/'copy/var/run').iterdir())==[],list((w/'copy/var/run').iterdir())
     assert (w/'copy/etc/burrowd/burrowd_config').exists() and (w/'copy/var/log').is_dir()
     assert not any((w/'copy'/r.lstrip('/')).exists() for r in RUNTIME)
-    print('PASS I-runtime-state: /var/run kept and empty (/var/run/sudo/ts and burrowd.pid left out); burrowd\'s host key, its .pub and its log left out, its configuration copied')
+    print('PASS I-runtime-state: /var/run kept and empty (/var/run/sudo/ts and burrowd.pid left out); burrowd\'s host key, its .pub and its log left out, its configuration copied; logd\'s kern.log and rotations, wtmp, btmp and the rotated logs left out (px133)')
     for mode in ['bytes','tree','runtime-dir']:
         out=subprocess.run([program,src,w/('changed-'+mode),w/('attrs-'+mode),mode],capture_output=True,text=True)
         assert out.returncode==1 and 'source_changed' in out.stderr,(out.stdout,out.stderr)
