@@ -69,6 +69,21 @@
 #      mount count one more; clean again after.
 #   E8 the books: `block: vda: … 0 errors …`.
 #   E9 the end: `PAX: init /bin/sh ended …`, halted, no PANIC.
+#   E10 (pax#442, every tier of rows) damage: on two small images made by
+#      mke2fs and damaged by debugfs (a name whose inode is all zero, as a
+#      power cut left one; a name whose inode's bit is clear), lookup
+#      answers EIO by name, never ENOENT; create makes no second entry; the
+#      installer's own tmp_of stops with its exact instruction
+#      (tests/mpx6-ext2.d/damage-row).
+#   E11 (pax#442, every tier of rows) the power cut: the installer's real
+#      put_file replacing /bin/burrowd, cut by a hardware breakpoint inside
+#      ext2.wspan at 6 MiB of its temporary (never a line or a timer), then
+#      booted again to resume the same put_file: no name of an inode that is
+#      not live and no name twice, at the cut and after; the resume finishes
+#      or stops with its exact message; `e2fsck -fn` finds leaks at most,
+#      `-fy` then `-fn` clean on a copy; the unclean state kept
+#      (tests/mpx6-ext2.d/write-cut-row). E10 and E11 run on the first
+#      tier's kernel, each leg.
 #
 # The UEFI leg needs OVMF (SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1). Exit 0 when every assertion held, 1 otherwise, 2
@@ -419,6 +434,36 @@ for leg in $legs; do
         rm -f "$disk" "$disk".fsck*
     done
 done
+# --- pax#442: damage (E10) and the power cut (E11) ----------------------------
+cut_tier=$(echo $tiers | cut -d' ' -f1)
+k=$images/$cut_tier/kmain_console.elf
+dw=$PAX_BUILD/mpx6-ext2-damage cw=$PAX_BUILD/mpx6-ext2-cut
+rm -rf "$dw" "$cw"
+if [ ! -f "$k" ]; then
+    bad "E10/E11: no $cut_tier kernel at $k"
+elif ! bash "$D/damage-row" build "$dw" "$k" > "$dw.build.log" 2>&1; then
+    bad "E10 build: $(tail -n 3 "$dw.build.log" | tr '\n' '|')"
+elif ! bash "$D/write-cut-row" build "$cw" "$k" > "$cw.build.log" 2>&1; then
+    bad "E11 build: $(tail -n 3 "$cw.build.log" | tr '\n' '|')"
+else
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            [ "${PAX_REQUIRE_UEFI:-0}" = 1 ] && bad "E10/E11 uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1" || say "SKIP E10/E11 uefi: no OVMF firmware found on this host"
+            continue
+        fi
+        if bash "$D/damage-row" run "$dw" "$leg"; then
+            say "PASS E10 $cut_tier $leg: zero and unused inode names refused by name (EIO), no duplicate made, tmp_of's exact instruction"
+        else
+            bad "E10 $cut_tier $leg: damage-row (its named rows above)"
+        fi
+        if bash "$D/write-cut-row" run "$cw" "$leg"; then
+            say "PASS E11 $cut_tier $leg: cut inside put_file's write at 6 MiB; no dangling or duplicate name, leaks at most, the resume finished, repairable, still unclean"
+        else
+            bad "E11 $cut_tier $leg: write-cut-row (its named rows above)"
+        fi
+    done
+fi
+
 cat "$runs"
 [ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
 [ "$fail" = 0 ] && say "mpx6-ext2: PASS" || say "mpx6-ext2: FAIL"
