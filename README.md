@@ -641,7 +641,7 @@ as it was, root's `dmesg` shows the line with its time, pax's `dmesg` is refused
 
 ## The system's logs
 
-The kernel's log survives a reboot, and every login is recorded. Five commands answer "what happened on
+The kernel's log survives a reboot, and every login is recorded. Four commands answer "what happened on
 this machine, and when":
 
 ```sh
@@ -649,7 +649,6 @@ sudo dmesg                       # this boot's kernel lines, from memory (dmesg 
 sudo less /var/log/kern.log      # every boot's kernel lines, kept on disk (and kern.log.1 to .4)
 last                             # who logged in, from where, and how each session ended
 sudo lastb                       # refused logins
-who                              # who is logged in now
 ```
 
 - **`/var/log/kern.log`** (root's, mode 0600) is written by `logd`, which the boot hook
@@ -679,7 +678,9 @@ who                              # who is logged in now
   each clean shutdown. `last` prints them as util-linux's `last` does, newest first: a logout's time, `crash`
   when the machine booted again first, `down` when it was shut down first, `still logged in`. `last -e`, PAX's
   own, adds how each session ended: `logout`, `dropped` (the connection went), `down` or `crash`. The client's
-  address of an ssh login is not yet known on PAX, so its host column is empty.
+  address of an ssh login is not yet known on PAX, so its host column is empty, and a boot's record has
+  no kernel release while boreutils' `uname -r` cannot read it on PAX. boreutils' `who` and `users` read
+  utmp on Linux alone for now, so they do not answer on PAX yet; `last` shows who is still logged in.
 - **Nothing in `/var/log` grows without bound.** `kern.log` is rotated at 1 MiB with four kept
   (`kern.log.1` to `kern.log.4`); logd holds `wtmp`, `btmp`, `sudo.log` and `burrowd.log` to 1 MiB and
   `pax-upgrade.log` to 256 KiB, each with one `.1` kept; `boot.log` is rotated by its own writer at 256 KiB
