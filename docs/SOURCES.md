@@ -2608,3 +2608,24 @@ No kernel's source was read: not Linux's `fs/jbd2`, `fs/proc` or `drivers/base`.
 | `Documentation/ABI/testing/sysfs-dev` | Linux's master, read 2026-11-18 | `/sys/dev/block` holds links named `<major>:<minor>`, from stat(2)'s numbers, to the device's sysfs directory |
 | black-box Linux 7.2.14-arch1-1 on QEMU 8.2.2 (q35, TCG), an ext3 disk and an ext2 disk, `notes/px162/jbd2look.c` as init (`notes/px162/jbd2.sh`; the record `notes/px162/linux-jbd2.txt`) | 7.2.14 | run, never read: `/proc/fs/jbd2` (0555) is there with no journal; a read-write ext3 mount of `vda` adds the directory `vda-8` (the device's name, the journal's inode) holding `info` (0444, jbd2's statistics, not PAX's lines); plain ext2 adds nothing; the unmount takes it away; `/sys/dev` is 0755 and each `/sys/dev/block/<major>:<minor>` a 0777 link into `/sys/devices/…/block/<name>`. Two answers PAX does not copy: Linux lists a read-only ext3 mount's journal, and keeps an aborted journal listed (the `abort` remount option of `Documentation/admin-guide/ext4.rst`) until the unmount. PAX lists a journal only while a sync on its volume is journalled (read-write, not failed), which is what the entry is taken as proof of |
 | PAX's own `kernel/procfs`, `kernel/files`, `kernel/ext2`, `kernel/journal`, `tests/mpx6-journal.d` | this tree | read and extended: the fixed entries, a device's dynamic references (px79's), the link `/proc/mounts` already is (px67's), the J11 probe and its QEMU fault injection |
+
+## px133 — logd, the kernel's log on disk; the login records; last and lastb
+
+No log daemon's, logrotate's, init's, login's, sshd's, util-linux's or C library's source was read. The records'
+layout is utmp(5)'s; how Linux's own programs fill it and how util-linux's last and lastb print it were measured
+black box in a container of Ubuntu 24.04.5, on records those programs wrote and on records written by hand.
+
+| source | version | read, for |
+|---|---|---|
+| utmp(5), wtmp | man-pages 6.19 | the record (x86-64: 384 bytes, 32-bit time and session), its kinds, `~` with `reboot` and `shutdown`, a logout as DEAD_PROCESS with no user, utmp's slots |
+| last(1), lastb | util-linux 2.39.3's manual (man7.org) | the options, the readers' columns, `crash`, `down`, `still logged in`, `gone - no logout` |
+| who(1), lastlog(8) | man-pages 6.19, shadow 4.13's manual | who reads utmp; what lastlog is (not built) |
+| login.defs(5) | shadow 4.13's manual | FTMP_FILE, LOG_UNKFAIL_ENAB (a name no account has kept as `UNKNOWN`) |
+| syslog(3), syslog.conf(5) | man-pages 6.19, rsyslog's manual | the facilities' and levels' names a kern.log line uses |
+| logrotate(8) | logrotate 3.21's manual | rotation by size, `.1` to `.N`, a new file with the old one's mode |
+| dev-kmsg (`Documentation/ABI/testing/dev-kmsg`) | trunk of 2026-11 | the record logd reads, -EPIPE when the ring overtook a reader, -EAGAIN at the end |
+| fsync(2), poll(2), sigaction(2), clock_gettime(2), uname(2) | man-pages 6.19 | logd's flush, its wait, the SIGTERM's sender (si_code SI_KERNEL, si_pid), the boot's start on the wall clock, the kernel's release |
+| the Filesystem Hierarchy Standard | 3.0 | /var/log, /var/run (/run) |
+| Ubuntu 24.04's login (`login` 1:4.13+dfsg1-4ubuntu3.2) | black box on a pseudo-terminal in a container, px106's bare PAM | its utmp record, its btmp records for a refused try (USER_PROCESS, `UNKNOWN` for a name no account has), no wtmp record |
+| OpenSSH 9.6p1's sshd (Ubuntu's `openssh-server` 1:9.6p1-3ubuntu13.20) | black box on loopback in a container | a pty session's USER_PROCESS and DEAD_PROCESS in wtmp and utmp, nothing for a command with no pty, a refused password's LOGIN_PROCESS on `ssh:notty` in btmp |
+| util-linux 2.39.3's last and lastb (Ubuntu's `util-linux` 2.39.3-9ubuntu6.6) | black box in a container, 87 runs on hand-written files and a calibration | every column, the end column's forms, the lengths, `FILE begins`, a session whose process started after its record `gone - no logout`, the refusals' words and statuses |
