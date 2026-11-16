@@ -21,6 +21,7 @@
  * sysctl/kernel.rst (printk, dmesg_restrict) and syslog(2) (man-pages
  * 6.19). No C library's or kernel's source was read. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -344,8 +345,51 @@ static void user_rows(void)
     out("K36: printk opened to read %s\n", err(f < 0 ? -errno : 0));
 }
 
+/* PAX-only coexistence row: these paths must not dispatch to one another's
+ * generators. The ordinary K rows remain held to the unchanged Linux record. */
+static long read_text(const char *path, char *buf, size_t size)
+{
+    buf[0] = 0;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    long n = read(fd, buf, size - 1);
+    close(fd);
+    if (n >= 0) buf[n] = 0;
+    return n;
+}
+
+static int proc_slots(void)
+{
+    char random[4096], restrict_text[128], printk[128];
+    long rn = read_text("/proc/pax-random", random, sizeof random);
+    long dn = read_text("/proc/sys/kernel/dmesg_restrict", restrict_text, sizeof restrict_text);
+    long pn = read_text("/proc/sys/kernel/printk", printk, sizeof printk);
+    int ready = rn > 0 && (!strncmp(random, "ready yes\n", 10) || !strncmp(random, "ready no\n", 9))
+        && strstr(random, "\nsource ") && strstr(random, "\nreason ");
+    int restricted = dn == 2 && (!strcmp(restrict_text, "0\n") || !strcmp(restrict_text, "1\n"));
+    int a = -1, b = -1, c = -1, d = -1, used = 0;
+    int fields = pn > 0 ? sscanf(printk, "%d\t%d\t%d\t%d\n%n", &a, &b, &c, &d, &used) : 0;
+    int levels = fields == 4 && used == pn && a >= 1 && a <= 8 && b == 4 && c == 1 && d == 8;
+    int seen_dmesg = 0, seen_printk = 0;
+    DIR *dir = opendir("/proc/sys/kernel");
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir))) {
+            if (!strcmp(entry->d_name, "dmesg_restrict")) seen_dmesg++;
+            if (!strcmp(entry->d_name, "printk")) seen_printk++;
+        }
+        closedir(dir);
+    }
+    out("PS1: %s random state\n", ready ? "PASS" : "FAIL");
+    out("PS2: %s dmesg_restrict boolean\n", restricted ? "PASS" : "FAIL");
+    out("PS3: %s printk levels\n", levels ? "PASS" : "FAIL");
+    out("PS4: %s both settings listed once\n", seen_dmesg == 1 && seen_printk == 1 ? "PASS" : "FAIL");
+    return !(ready && restricted && levels && seen_dmesg == 1 && seen_printk == 1);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "proc-slots")) return proc_slots();
     if (argc > 1 && !strcmp(argv[1], "user")) user_rows();
     else root_rows();
     out("K99: done\n");
