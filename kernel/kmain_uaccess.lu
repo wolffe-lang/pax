@@ -38,10 +38,11 @@ export fn kmain() {
     let live = paging.start()
     interrupts.start()
     let p = paging.new_space(live)
+    if p == 0 { panic.fail("uaccess test: no space", 0) }
     let pa = frames.alloc() else |_| { panic.fail("uaccess test: no frame", 0) }
     // # Safety: the test owns the allocated frame, reached through HHDM.
     unsafe { ((pa + frames.hhdm()) as *u64).write_volatile(0x1122334455667788) }
-    let _mapped = paging.map(p, VA, pa, paging.US | paging.RW | paging.NX) else |_| { panic.fail("uaccess test: map", 0) }
+    let _mapped = paging.map_user(p, VA, pa, paging.RW | paging.NX) else |_| { panic.fail("uaccess test: map", 0) }
     let pos_put = uaccess.put(p, VA + 8, 42, 8) else |_| { panic.fail("uaccess test: positive put", 0) }
     let pos_zero = uaccess.zero(p, VA + 16, 8) else |_| { panic.fail("uaccess test: positive zero", 0) }
     let value = uaccess.get(p, VA + 8, 8) else |_| { panic.fail("uaccess test: positive get", 0) }
