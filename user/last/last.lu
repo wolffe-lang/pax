@@ -9,7 +9,8 @@
 //! for a logout, `- crash` when the machine booted again first (a power cut, a reset), `- down` when
 //! it was shut down first, `still logged in` for a session of this boot whose process lives, `gone -
 //! no logout` for one whose process does not. A boot is the user `reboot` on `system boot` (the
-//! kernel's release in the host's place), `still running` for this boot; `-x` adds each shutdown
+//! kernel's release in the host's place), ending at the newest shutdown after it (power cuts between
+//! do not end it), `still running` when no shutdown follows; `-x` adds each shutdown
 //! (`shutdown system down`). The last line names the file and its first record's time (`wtmp
 //! begins …`). Every time is UTC (PAX keeps no zone). `-NUM`/`-n` keep that many lines, `-a` puts the
 //! host last, `-F` prints whole times, `-i` the address's numbers, `-R` no host, `-w` whole names.
@@ -460,6 +461,9 @@ fn show(o: Opts) -> int {
     var hows = List[str]()
     var boot_after = -1
     var down_after = -1
+    // The last shutdown seen going back (the newest before the records still to come), never cleared at a
+    // boot: a boot's line ends there, as util-linux's does, though boots with no shutdown came between.
+    var last_down = -1
     var shown = 0
     var k = recs.len - 1
     while k >= 0 {
@@ -474,8 +478,8 @@ fn show(o: Opts) -> int {
             let host = if o.ip then address(u) else u.host
             if is_boot && wanted_system(o, "reboot") {
                 var tail = "   still running"
-                if down_after >= 0 && (boot_after < 0 || down_after <= boot_after) {
-                    tail = ended_at(o, "", down_after, down_after - u.secs)
+                if last_down >= 0 {
+                    tail = ended_at(o, "", last_down, last_down - u.secs)
                 }
                 (mut out).push(line(o, "reboot", "system boot", host, u.secs, tail, ""))
                 shown += 1
@@ -489,6 +493,7 @@ fn show(o: Opts) -> int {
                 down_after = -1
             } else {
                 down_after = u.secs
+                last_down = u.secs
             }
             lines = List[str]()
             outs = List[int]()
