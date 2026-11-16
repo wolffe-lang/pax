@@ -19,8 +19,9 @@ KEYS = ['a', 'shift-a', 'shift-up', 'ctrl-left', 'a-b-c-d-e-f',
 # not for a second of the host's: PAX's software repeat, its poll timeout
 # and its CLOCK_MONOTONIC all count those ticks, and a stalled vCPU loses
 # ticks while the host's clock runs on, so a wall-clock hold shortened the
-# hold the guest saw (run 41153232393 attempt 2: 6 reports). At 250 ms
-# then 33 ms a report, 100 ticks give 24 or 25; at least 15 are wanted.
+# hold the guest saw (run 41153232393 attempt 2: 6 reports). At PAX's
+# 500 ms initial delay then 33 ms a report, 100 ticks give 16 or 17;
+# at least 15 are wanted. Linux retains its measured 250 ms delay.
 # The Linux guest (no symbols to read) keeps the 1000 ms wall-clock hold.
 # px131: since PAX's tick count follows its clock (kernel/timer's
 # follow_clock), CLOCK_MONOTONIC, the repeat's deadlines and the poll
@@ -79,7 +80,7 @@ class Unmeasured(RuntimeError):
     the repeat: neither a pass nor a failure of the kernel's."""
 
 
-def repeat_period(stamps, t0, samples):
+def repeat_period(stamps, t0, samples, initial_delay=250):
     """px131: the repeat's delay and period from the probe's stamps (ns after
     its first read, which was at `t0` ns of the guest's CLOCK_MONOTONIC, or
     None), leaving out every interval that spans ticks the guest lost.
@@ -108,7 +109,7 @@ def repeat_period(stamps, t0, samples):
                            f'({len(lost)} losses in the hold), {len(intervals)} left')
     median = sorted(intervals)[len(intervals) // 2]
     mean = sum(intervals) / len(intervals)
-    if not (stalled(0) or 220 <= delay <= 320) or not 20 <= median <= 45 or not 31 <= mean <= 37:
+    if not (stalled(0) or initial_delay - 30 <= delay <= initial_delay + 70) or not 20 <= median <= 45 or not 31 <= mean <= 37:
         raise RuntimeError(f'repeat outside measured tolerance: {delay=} {median=} {mean=} ({left_out} intervals left out)')
     return delay, median, mean, lost, left_out
 
@@ -352,7 +353,8 @@ def run(args):
     if len(stamps) != len(repeat) or stamps[0] != 0:
         raise RuntimeError('repeat timestamp shape')
     t0 = [line for line in lines if line.startswith('USBT0 ')]
-    delay, median, mean, lost, left_out = repeat_period(stamps, int(t0[0].split()[1]) if len(t0) == 1 else None, samples)
+    delay, median, mean, lost, left_out = repeat_period(stamps, int(t0[0].split()[1]) if len(t0) == 1 else None, samples,
+                                                       initial_delay=250 if args.linux_kernel else 500)
     (out / 'rows.txt').write_text('\n'.join(normalized)+'\n')
     word = 'pax_tick_delivered' if 'delivered' in addresses else 'pax_tick_count' # px131: the word the hold counted
     held = f'hold_ticks {hold}\nhold_counts {word}\nhold_wall_s {hold_wall:.3f}\n' if hold is not None else 'hold_wall_ms 1000\n'
