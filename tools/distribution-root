@@ -240,6 +240,13 @@ def main():
     # px130: dmesg (tools/mkdmesg's), the kernel's log from /dev/kmsg; root's to read while
     # /proc/sys/kernel/dmesg_restrict is 1, as the kernel boots it.
     put('bin/dmesg', (identity/'dmesg/dmesg').read_bytes(), 0o755)
+    # px133: logd (tools/mklogd's), the kernel's log on disk (/var/log/kern.log), started at boot by its
+    # hook from /etc/pax-boot.d; last and lastb, a symbolic link to it as util-linux installs it, the login
+    # records of /var/log/wtmp and btmp.
+    put('bin/logd', (identity/'logd/logd').read_bytes(), 0o755)
+    put('bin/last', (identity/'logd/last').read_bytes(), 0o755)
+    rows['bin/lastb'] = (0o120777, 0, 0, b'last')
+    put('etc/pax-boot.d/logd', (ROOT/'user/pax-boot.d/logd').read_bytes(), 0o755)
     put('etc/pax-boot.d/pax-upgrade', (ROOT/'user/install/pax-upgrade/boot-hook').read_bytes(), 0o755)
     put('usr/share/pax-upgrade/entry', (ROOT/'user/install/pax-upgrade/entry').read_bytes(), 0o644)
     for tree, prefix in ((identity/'boot', 'boot/'), (identity/'payload', 'usr/share/pax-install/')):
