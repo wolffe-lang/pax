@@ -42,7 +42,20 @@ fn runtime_state(path: str) -> bool {
         path.starts_with("/var/run/") || // /var/run's contents: sudo's timestamps, burrowd's pid; the directory is carried
         path == "/etc/burrowd/ssh_host_ed25519_key" || // burrowd: its host key, each machine's own
         path == "/etc/burrowd/ssh_host_ed25519_key.pub" ||
-        path == "/var/log/burrowd.log" // burrowd: a line for each connection
+        path == "/var/log/burrowd.log" || // burrowd: a line for each connection
+        logs_state(path) // px133: logd's and the login records', and every rotated log
+}
+
+// px133: what logd and the login records write while a system runs (user/logd, user/auth/utmp.lu):
+// the kernel's log and its rotations, the login records (wtmp, btmp and their rotations; utmp is
+// under /var/run, above), and the `.1` logd rotates sudo's, burrowd's and pax-upgrade's logs to. The
+// stick's own, never an install's or an upgrade's: an installed system starts its own.
+fn logs_state(path: str) -> bool {
+    path == "/var/log/kern.log" || path.starts_with("/var/log/kern.log.") ||
+        path == "/var/log/wtmp" || path == "/var/log/wtmp.1" ||
+        path == "/var/log/btmp" || path == "/var/log/btmp.1" ||
+        path == "/var/log/sudo.log.1" || path == "/var/log/burrowd.log.1" ||
+        path == "/var/log/pax-upgrade.log.1"
 }
 
 fn metadata_equal(a: List[int], b: List[int]) -> bool {
