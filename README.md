@@ -35,8 +35,9 @@ installed console until its owner sets a password.
 PAX honours the set-user-ID and set-group-ID bits of a program as Linux does
 (`execve(2)`: the file's owner becomes the effective user id; a set-group-ID
 file needs group execute; a script's own bits are ignored; a `nosuid` mount
-and `no_new_privs` switch them off). Four programs, written in wolf, keep the
-accounts, and all four read one password file:
+and `no_new_privs` switch them off). A traced exec also ignores the bits when
+the tracer could not trace the new credentials; the trace continues. Four
+programs, written in wolf, keep the accounts, and all four read one password file:
 
 - **`/etc/shadow`**, root's, mode 0600 (Ubuntu's is 0640 with a `shadow`
   group, read by helpers PAX does not have; every reader here is root). One
