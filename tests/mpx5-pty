@@ -77,7 +77,7 @@ case $accels in both) accels="kvm tcg" ;; auto|kvm|tcg) ;; *) die "--accel takes
 case $only in ''|build) ;; *) die "--only takes build" ;; esac
 need python3 readelf
 
-IMAGES="probe session copy"
+IMAGES="probe session copy termios2 termios2-console"
 BORE="stty cut sleep"
 work=$PAX_BUILD/mpx5-pty
 runs=$PAX_BUILD/mpx5-pty-runs.txt
@@ -89,6 +89,8 @@ image_runs() { # image -> its run list, one command a line
         probe)   printf '/bin/ptyprobe\n/bin/as 1000 1000 /bin/ptyprobe\n' ;;
         session) printf '/bin/ptyprobe drive\n/bin/as 1000 1000 /bin/ptyprobe drive\n' ;;
         copy)    printf '/bin/ptyprobe copy\n/bin/as 1000 1000 /bin/ptyprobe copy\n' ;;
+        termios2) printf '/bin/termios2probe\n/bin/as 1000 1000 /bin/termios2probe\n' ;;
+        termios2-console) printf '/bin/termios2probe console\n/bin/as 1000 1000 /bin/termios2probe console\n' ;;
     esac
 }
 run_name() { # image k -> the reference's name
@@ -96,6 +98,8 @@ run_name() { # image k -> the reference's name
         probe-1) echo probe-root ;; probe-2) echo probe-user ;;
         session-1) echo session-root ;; session-2) echo session-user ;;
         copy-1) echo copy-root ;; copy-2) echo copy-user ;;
+        termios2-1|termios2-2) echo termios2 ;;
+        termios2-console-1|termios2-console-2) echo termios2-console ;;
     esac
 }
 
@@ -114,7 +118,8 @@ python3 -I "$ref/check.py" --selftest > "$work/selftest.txt" 2>&1 || why+=" the 
 sed 's/^/  program: /' "$work/programs.txt" "$work/pelt/sums.txt" "$work/bore/sums.txt" >&2 2>/dev/null
 for im in $IMAGES; do
     image_runs "$im" > "$work/$im.run"
-    files=(/bin/ptyprobe="$work/bin/ptyprobe":755 /bin/as="$work/bin/as":755)
+    files=(/bin/ptyprobe="$work/bin/ptyprobe":755 /bin/as="$work/bin/as":755
+           /bin/termios2probe="${PAX_TERMIOS2_PROBE:-$work/bin/termios2probe}":755)
     if [ "$im" = session ]; then
         files+=(/bin/sh="$work/pelt/pelt":755 /bin/pelt="$work/pelt/pelt":755)
         for u in $BORE; do files+=("/bin/$u=$work/bore/$u":755); done
@@ -145,7 +150,7 @@ if [ "$only" = build ] || [ "$noboot" = 1 ]; then
     [ -z "$why" ] && say "PASS Y0 (build): programs static, the checker's selftest, kernel ($tiers) and the images built" || bad "Y0 (build):$why"
     exit "$fail"
 fi
-for f in probe-root probe-user session-root session-user copy-root copy-user; do
+for f in probe-root probe-user session-root session-user copy-root copy-user termios2 termios2-console; do
     [ -s "$ref/linux/$f.txt" ] || why+=" no reference linux/$f.txt;"
 done
 [ -z "$why" ] && say "PASS Y0: programs static, the checker's selftest, kernel ($tiers) and the images built, the references there" || { bad "Y0:$why"; exit 1; }
