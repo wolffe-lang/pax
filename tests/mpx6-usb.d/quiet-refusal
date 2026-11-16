@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# USB interface refusals after login: framebuffer plus real sudo dmesg.
+# Invoked by mpx6-usb; also runnable alone for the focused regression.
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+tier=native firmware=bios accel=auto kernel= build_only=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tier=$2; shift 2;;
+        --firmware) firmware=$2; shift 2;;
+        --accel) accel=$2; shift 2;;
+        --kernel) kernel=$2; shift 2;;
+        --build-only) build_only=1; shift;;
+        *) die 'usage: quiet-refusal [--tier native|release] [--firmware bios|uefi] [--accel auto|kvm|tcg] [--kernel ELF] [--build-only]';;
+    esac
+done
+case $tier in native) flags=();; release) flags=(--release);; *) die 'bad tier';; esac
+case $firmware in bios|uefi) ;; *) die 'bad firmware';; esac
+case $accel in auto|kvm|tcg) ;; *) die 'bad accelerator';; esac
+need python3 cc
+work=$PAX_BUILD/quiet-refusal/$tier
+mkdir -p "$work/bin"
+python3 -I "$PAX_ROOT/tests/mpx6-usb.d/quiet-refusal.py" --selftest
+"$PAX_ROOT/tools/mkauth" "$work/bin" login sudo
+"$PAX_ROOT/tools/mkdmesg" "$work/bin"
+cc -static -O1 -Wall -Wextra -Werror -o "$work/bin/refusal-shell" "$PAX_ROOT/tests/mpx6-usb.d/refusal-shell.c"
+printf '/bin/login\n' > "$work/run"
+printf 'root:x:0:0:root:/root:/bin/refusal-shell\n' > "$work/passwd"
+printf 'root:x:0:\n' > "$work/group"
+printf 'root ALL=(ALL:ALL) NOPASSWD: ALL\n' > "$work/sudoers"
+"$PAX_ROOT/tools/mkinitramfs" "$work/refusal.cpio" \
+    "/bin/login=$work/bin/login:755" "/bin/sudo=$work/bin/sudo:4755" \
+    "/bin/dmesg=$work/bin/dmesg:755" "/bin/refusal-shell=$work/bin/refusal-shell:755" \
+    "/etc/pax-run=$work/run:644" "/etc/passwd=$work/passwd:644" "/etc/group=$work/group:644" \
+    "/etc/sudoers=$work/sudoers:440" /root/:700 /var/:755 /var/log/:755 /var/run/:755
+if [ -z "$kernel" ]; then
+    kernel=$("$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work")
+fi
+# Explicit quiet is essential: it lowers the framebuffer threshold at init.
+cp "$PAX_ROOT/boot/limine-initramfs.conf" "$work/limine.conf"
+printf '    cmdline: quiet pax.nobeep\n' >> "$work/limine.conf"
+"$PAX_ROOT/tools/fetch-limine"
+"$PAX_ROOT/tools/mkimage" --conf "$work/limine.conf" --add "$work/refusal.cpio" initramfs.cpio \
+    "$kernel" "$work/refusal.iso"
+printf '%s\n' "$(sha256_of "$kernel")" > "$work/kernel.sha256"
+[ "$build_only" = 0 ] || exit 0
+python3 -I "$PAX_ROOT/tests/mpx6-usb.d/quiet-refusal.py" --image "$work/refusal.iso" \
+    --output "$work/$firmware-$accel" --firmware "$firmware" --accel "$accel"
