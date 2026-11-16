@@ -1,0 +1,32 @@
+#!/bin/pelt
+# /etc/pax-boot.d/logd — logd, the kernel's log on disk, started at boot (px133).
+#
+# pid 1 runs each file of /etc/pax-boot.d before its first prompt (/bin/login on an
+# installed system, the live entry on the stick; R-px112-7). This one starts logd
+# (user/logd), which appends every record of the kernel's log to /var/log/kern.log
+# (root's, 0600: `sudo less /var/log/kern.log`), rotates it at 1 MiB with four kept,
+# and holds the other files of /var/log to their caps. logd keeps its place in
+# kern.log itself, so the loop below starts it again a second after it ends without
+# a record written twice: after a refusal (exit 1: it says why on the console, at the
+# kernel's error level) the wait doubles to five minutes. Its pid is
+# /var/run/logd.pid.
+if [ ! -x /bin/logd ]; then
+    echo "logd: /bin/logd is missing; not started"
+    exit 0
+fi
+mkdir -p /var/log /var/run
+(
+    pause=1
+    while :; do
+        /bin/logd < /dev/null > /dev/null 2>&1
+        if [ "$?" = 1 ]; then
+            sleep "$pause"
+            pause=$((pause * 2))
+            [ "$pause" -le 300 ] || pause=300
+        else
+            pause=1
+            sleep 1
+        fi
+    done
+) < /dev/null > /dev/null 2>&1 &
+echo "logd: started; the kernel's log is /var/log/kern.log"
