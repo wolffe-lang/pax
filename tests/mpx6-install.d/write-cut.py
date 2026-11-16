@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Cut inside ext2.wspan for the real installer's burrowd.pax-tmp.
 
-Capture the exact volume/inode from ext2.add, then break at a multi-MiB
-write offset, never on serial output or a timer. Resume the same put_file
+Capture the exact volume/inode from ext2.add, then break at the first
+ext2.wspan of that inode at or past CUT_AT (6 MiB, inside the double
+indirect blocks), never on serial output or a timer. Resume the same put_file
 operation after reboot. All filesystem inspection before the resume is
 read-only. Repair is tested only afterwards, on a separate scratch copy.
 """
@@ -23,6 +24,7 @@ assert firmware in ('bios', 'uefi')
 leg = work / ('cut-' + firmware)
 leg.mkdir(exist_ok=False)
 failed = []
+CUT_AT = 6 * 1024 * 1024
 
 
 def run(args, **kw):
@@ -45,16 +47,18 @@ def debug(image, command, write=False):
 def fsck(image, name):
     p = run(['e2fsck', '-fn', image])
     (leg / (name + '.fsck')).write_text(p.stdout)
-    # Fail closed: every substantive diagnostic must be a leak or an
-    # allocation/free-count discrepancy. In particular no directory-entry,
-    # duplicate-name, link-count, i_blocks, or multiply-claimed-block errors.
+    # Fail closed: every substantive diagnostic must be a leak: a block or
+    # inode marked in use that nothing holds ("-" in a bitmap difference),
+    # an orphan inode, or a free count. A "+" difference (in use, marked
+    # free), i_blocks, i_size, a directory entry, a duplicate name, a link
+    # count or a multiply-claimed block is damage, never a leak.
     allowed = [r'e2fsck .*', r'Pass [1-5]: .*',
                r'\S+: \d+/\d+ files .*', r'\S+: \d+/\d+ files, .*',
                r'.*: \*+ WARNING: Filesystem still has errors \*+',
-               r'(Block|Inode) bitmap differences: [ +()\-0-9]+',
+               r'(Block|Inode) bitmap differences:( +-(\d+|\(\d+--\d+\)))+',
                r'Free (blocks|inodes) count wrong( for group #\d+)? \(\d+, counted=\d+\)\.',
-               r'Fix\? no', r'Unattached( zero-length)? inode \d+',
-               r'Connect to /lost\+found\? no', r'Clear\? no']
+               r'Fix\? no', r'Unattached inode \d+',
+               r'Connect to /lost\+found\? no', r'Unattached zero-length inode \d+\.  Clear\? no']
     unexpected = [l for l in p.stdout.splitlines() if l.strip() and
                   not any(re.fullmatch(a, l) for a in allowed)]
     row('write-cut-' + name + '-leaks-only', p.returncode in (0, 4) and not unexpected,
@@ -134,7 +138,7 @@ def reg(name): return int(gdb.parse_and_eval('$' + name)) & ((1 << 64) - 1)
 class Write(gdb.Breakpoint):
     def stop(self):
         # Native wolf puts the tuple's hidden result pointer last (r8).
-        if captured and reg('rdi') == captured['volume'] and reg('rsi') == captured['inode'] and reg('rdx') >= 4 * 1024 * 1024:
+        if captured and reg('rdi') == captured['volume'] and reg('rsi') == captured['inode'] and reg('rdx') >= %d:
             captured['offset'] = reg('rdx')
             captured['pc'] = reg('rip')
             Path(%r).write_text(json.dumps(captured))
@@ -142,9 +146,10 @@ class Write(gdb.Breakpoint):
         return False
 class Add(gdb.Breakpoint):
     def stop(self):
-        if reg('rcx') == len(wanted) and bytes(gdb.selected_inferior().read_memory(reg('rdx'), len(wanted))) == wanted:
+        # gdb forbids changing breakpoints inside stop(): the first capture
+        # holds, later adds are passed over.
+        if not captured and reg('rcx') == len(wanted) and bytes(gdb.selected_inferior().read_memory(reg('rdx'), len(wanted))) == wanted:
             captured.update(volume=reg('rdi'), inode=reg('r8'), name=wanted.decode())
-            self.enabled = False
         return False
 Write('*0x%x', type=gdb.BP_HARDWARE_BREAKPOINT)
 Add('*0x%x', type=gdb.BP_HARDWARE_BREAKPOINT)
@@ -156,7 +161,7 @@ python
 while not Path(%r).exists(): time.sleep(.1)
 end
 quit
-''' % (work / 'kernel.elf', port, str(trigger), symbol('wspan'), symbol('add'), str(done)))
+''' % (work / 'kernel.elf', port, CUT_AT, str(trigger), symbol('wspan'), symbol('add'), str(done)))
 qlog = (leg / 'runner.log').open('wb')
 glog = (leg / 'gdb.log').open('wb')
 q = subprocess.Popen([str(x) for x in args], stdout=qlog, stderr=subprocess.STDOUT)
@@ -175,11 +180,11 @@ try:
         assert q.poll() is None and g.poll() is None, 'runner/debugger stopped before the write trigger'
         assert time.monotonic() < deadline, 'write breakpoint timeout'
         if time.monotonic() >= next_note:
-            print('write-cut: waiting for burrowd.pax-tmp ext2.wspan at 4 MiB', flush=True)
+            print('write-cut: waiting for burrowd.pax-tmp ext2.wspan at %d bytes' % CUT_AT, flush=True)
             next_note = time.monotonic() + 20
         time.sleep(.1)
     observed = json.loads(trigger.read_text())
-    assert observed['name'] == 'burrowd.pax-tmp' and observed['offset'] >= 4194304
+    assert observed['name'] == 'burrowd.pax-tmp' and observed['offset'] >= CUT_AT
     # Only this row's QEMU, recorded in its own pidfile at launch.
     qemu_pid = int(pidfile.read_text())
     os.kill(qemu_pid, signal.SIGKILL)
