@@ -13,7 +13,7 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   ring dropped counted, never more than a second's lines lost to a power cut, rotated at 1 MiB with four
   kept. The login records are utmp(5)'s: `login`, burrowd and pid 1 write `/var/run/utmp`, `/var/log/wtmp`
   and `/var/log/btmp`, and the new `last` and `lastb` read them as util-linux's do (`last -e` adds how each
-  session ended); `who` answers. logd also holds every other file of `/var/log` to a cap. Held by
+  session ended; boreutils' `who` reads utmp on Linux alone for now). logd also holds every other file of `/var/log` to a cap. Held by
   `tests/mpx6-logs` over eight boots of one log volume, power cuts among them.
 
 - **The kernel's log kept and read back; a quiet console's screen spared a program's ordinary end (px130,
