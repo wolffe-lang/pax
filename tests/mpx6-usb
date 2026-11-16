@@ -62,6 +62,11 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/fetch-limine"
     "$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work"
     "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/probe.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/probe.iso"
+    # Raw console press/hold/release policy, independent of the typing probe.
+    cc -static -O1 -Wall -Wextra -Werror -o "$work/typematic" "$PAX_ROOT/tests/mpx6-usb.d/typematic.c"
+    printf '/bin/typematic\n' > "$work/typematic-run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/typematic.cpio" "/bin/typematic=$work/typematic" "/etc/pax-run=$work/typematic-run"
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$work/typematic.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/typematic.iso"
     # px109: the mouse probe's image, the same kernel.
     cc -static -O1 -Wall -Wextra -o "$work/mouseprobe" "$PAX_ROOT/user/elf/mouseprobe.c"
     printf '/bin/mouseprobe\n' > "$work/mouse-run"
@@ -84,6 +89,13 @@ if [ -n "$linux_kernel" ]; then
     reference=$work/linux/rows.txt
 fi
 [ -s "$reference" ] || die 'missing measured Linux rows'
+if [ "$topology" = all ] || [ "$topology" = root ]; then
+    python3 -I "$PAX_ROOT/tests/mpx6-usb.d/typematic-judge-selftest"
+    for keyboard in usb ps2; do
+        python3 -I "$PAX_ROOT/tests/mpx6-usb.d/typematic-session" --image "$images/typematic.iso" \
+            --output "$work/$firmware-typematic-$keyboard" --firmware "$firmware" --accel "$accel" --keyboard "$keyboard"
+    done
+fi
 for topology in $topologies; do
     if [ "$topology" = mouse ]; then
         # px109: the judge can say no first (synthetic transcripts), then
