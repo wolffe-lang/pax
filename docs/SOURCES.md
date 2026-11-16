@@ -2438,3 +2438,17 @@ answer the pages leave open is Linux's, run as a black box.
 | the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
 | boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
 | PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
+
+## px147 — checked user copies, traced exec and bounded signal values
+
+No kernel's or C library's source was read. The syscall rules come from the
+published manual pages and POSIX; the implementation and regression probes
+extend PAX's own code. Security witnesses report only ids, bounded copies,
+error returns and child status.
+
+| source | version | read, for |
+|---|---|---|
+| execve(2), ptrace(2) | Linux man-pages 6.x | suppression of set-ID credentials under tracing and no_new_privs; the trace retained across exec |
+| recvfrom(2), recvmsg(2); POSIX.1-2024 recvfrom, recvmsg | published interfaces | truncating the source address to the supplied capacity and reporting its full size; EFAULT for inaccessible memory |
+| sigaltstack(2), sigaction(2), clone(2) (clone3); POSIX.1-2024 signal interfaces | Linux man-pages 6.x; POSIX.1-2024 | stack ranges, signal delivery, process faults and invalid arguments |
+| PAX's own kernel/uaccess, socket, process, cred, signal, paging and the helper callers; the W1-W6 witnesses | this tree and the preceding security review | checked copies and explicit fault propagation; regression rows promoted into the UDP, sudo and user suites |
