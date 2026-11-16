@@ -2547,3 +2547,14 @@ deterministic by holding the guest's disk to a few writes a second from QEMU, wh
 |---|---|---|
 | QEMU's `-drive` throttling options (`throttling.iops-write`) and HMP's `block_set_io_throttle` and `info blockstats` (qemu.org documentation) | QEMU 8.2.2 and 11.1.2, run | a disk that takes each write at most N times a second, set from boot by `-set drive.d0.throttling.iops-write=N` (checked: `info block` says `iops_wr=N`) or at a moment from the monitor |
 | fsync(2), sigaction(2), nanosleep(2) | man-pages 6.19 | the probe's late daemon: its writes synced, its SIGTERM handler, its 100 ms step |
+## termios2 terminal attributes
+
+No kernel's or C library's implementation source was read. The layout and requests are Linux's x86-64 ABI;
+speed conversion, PTY flag normalization, master/slave sharing and fault behavior were measured as a black box.
+
+| source | version | read, for |
+|---|---|---|
+| TCGETS(2const), TCSETS(2const), termios(3) | Linux man-pages 6.19 | the 44-byte termios2 layout, BOTHER and numeric speeds, the three set actions, and libc's terminal functions |
+| Linux 7.2.4, run with static probes in containers | binary | `user/elf/termios2probe.c`: every input/output baud encoding, BOTHER, legacy interoperation, the master's setters, short and read-only buffers, flushing, `tcgetattr`, `tcsetattr`, `cfgetispeed`, `isatty` and window-size-based column layout; observed references in `tests/mpx5-pty.d/linux/termios2*.txt` |
+| glibc 2.44 and GCC 16.2.1; pelt at `00c12d72abf0d2783afbb43c91c901abd4eb4083` | binaries and the project's own shell | the same C probe linked statically against glibc 2.44, and an unmodified static pelt reaching its interactive prompt |
+| PAX's own `kernel/console`, `kernel/pty`, `user/elf/ptyprobe.c`, `tests/mpx5-pty` | this tree | the shared terminal state, job-control and flush rules, and the existing terminal regression rows |
