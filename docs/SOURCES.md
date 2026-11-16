@@ -2448,3 +2448,15 @@ answer the pages leave open is Linux's, run as a black box.
 | the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
 | boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
 | PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
+
+## termios2 terminal attributes
+
+No kernel's or C library's implementation source was read. The layout and requests are Linux's x86-64 ABI;
+speed conversion, PTY flag normalization, master/slave sharing and fault behavior were measured as a black box.
+
+| source | version | read, for |
+|---|---|---|
+| TCGETS(2const), TCSETS(2const), termios(3) | Linux man-pages 6.19 | the 44-byte termios2 layout, BOTHER and numeric speeds, the three set actions, and libc's terminal functions |
+| Linux 7.2.4, run with static probes in containers | binary | `user/elf/termios2probe.c`: every input/output baud encoding, BOTHER, legacy interoperation, the master's setters, short and read-only buffers, flushing, `tcgetattr`, `tcsetattr`, `cfgetispeed`, `isatty` and window-size-based column layout; observed references in `tests/mpx5-pty.d/linux/termios2*.txt` |
+| glibc 2.44 and GCC 16.2.1; pelt at `00c12d72abf0d2783afbb43c91c901abd4eb4083` | binaries and the project's own shell | the same C probe linked statically against glibc 2.44, and an unmodified static pelt reaching its interactive prompt |
+| PAX's own `kernel/console`, `kernel/pty`, `user/elf/ptyprobe.c`, `tests/mpx5-pty` | this tree | the shared terminal state, job-control and flush rules, and the existing terminal regression rows |
