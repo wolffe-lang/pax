@@ -7,6 +7,36 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A power cut no longer leaves a name of an inode that is not there, and an upgrade cut that way resumes (px151, pax#442).**
+  An upgrade cut by power while it wrote `/bin/burrowd.pax-tmp` left the temporary's directory entry and its
+  inode's bitmap bit on the disk, but not the inode: under write-back the buffer cache's clock hand had written the
+  directory block and the bitmap, which no later change touched, and kept the inode's table block, which every write
+  touched. On the next boot the lookup found the name, read the zero inode as no file, and the create added a second
+  entry with the same name; the step then stopped at `io`, and the root needed `e2fsck`. Three changes:
+  - **Damage is refused by name.** A lookup that finds a directory entry naming an inode that is zero, unused or
+    without links answers EIO, never ENOENT, and says so once; ext2 never adds a second entry for a name its
+    directory holds, dangling or not (EEXIST, checked before anything is allocated). The installer's `tmp_of` tells damage from absence: on
+    EIO it stops with what to do (power off, boot other media, `e2fsck -f` the unmounted root, retry).
+  - **Writes reach the disk in order.** A plain ext2 volume marks each metadata block with an order class (the
+    bitmaps, group descriptors and superblock; the indirect blocks by level and a symbolic link's block; the inode
+    tables; the directory blocks), and kernel/block writes them class by class, FLUSHing between. Under write-back
+    the clock hand no longer takes dirty metadata: it reaches the disk at a sync (the flusher's every five seconds)
+    or at an ordered write, so an inode, its bit and every block it points at are on the disk before any name of it.
+    The other direction is kept too: a name's removal is written in order at once, before the inode loses a link;
+    a freed block or inode keeps its bit until an ordered write has put the pointers to it, and its name, off the
+    disk; a directory block just made is written before the pointer to it. A cut leaves leaks at most. A sync of a
+    write-back volume FLUSHes once a class instead of once (11 FLUSHes instead of 5 in the cut row's resumed boot).
+    Write-through mounts and journalled volumes are unchanged.
+  - **Rows.** `tests/mpx6-ext2` E10: two images damaged by debugfs (a zero inode, as the cut left; an unused one):
+    lookup EIO, no duplicate made by four creates, `tmp_of`'s exact instruction. E11: the installer's real `put_file`
+    replacing `/bin/burrowd`, cut by a hardware breakpoint inside `ext2.wspan` at 6 MiB of the temporary, then booted
+    again to resume the same `put_file`. Before: the cut root failed `e2fsck -fn` with `i_size is 2031616, should be
+    4243456`, `i_blocks is 4048, should be 8296` and `Block bitmap differences: +(1035--2071)`. After: clean at the
+    cut and after the resume, on BIOS and UEFI, the unclean state kept; a valid leftover temporary is removed and the
+    replace finishes clean.
+  Not covered (ext2 has no journal): a cut in the middle of a sync can still leave a file's block count or size
+  behind its blocks, and a rename across directories two names or none for a moment; `e2fsck -fy` mends both.
+
 - **A device's wake-ups no longer hold everything else off: urgency gives way after a quantum's wait (px131e).**
   px131 put the threads a device's work wakes at the head of the run queue, marked urgent, and the tick did not
   switch away from an urgent thread. Under a stream of frames that never paused, the network thread and the readers
