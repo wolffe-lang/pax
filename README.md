@@ -634,6 +634,12 @@ empty at every boot (the boot's own console is kept apart: [When a boot goes bla
   the serial port and `dmesg` still have every line. `sudo dmesg -n 8` draws every line again until the next
   boot, `loglevel=N` on the kernel command line sets the level from the start, and `/proc/sys/kernel/printk`
   shows it.
+- **USB interface refusals.** When another pointer is already working, a refused pointer interface is
+  information, level 6: `sudo dmesg` keeps the unchanged reason without drawing over a quiet console login.
+  With no working pointer, the refusal is an error, level 3; device enumeration failures are errors too.
+  `tests/mpx6-usb --topology refusal` checks a nested composite HID fixture, the framebuffer prompt and
+  `sudo dmesg`, including removal of the last working pointer. The physical device’s descriptors are not
+  inferred from that synthetic fixture.
 
 `tests/mpx5-kmsg` holds `/dev/kmsg` and `syslog(2)` to a real Linux's answers for the same probe, root and user;
 `tests/mpx5-burrowd` B40-B43 hold the installed shape: a pipeline's SIGPIPE over ssh leaves the console's screen
