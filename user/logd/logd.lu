@@ -1,0 +1,773 @@
+//! logd — the kernel's log on disk (px133; the system log's first step, after
+//! px130's ring): every record of /dev/kmsg appended to /var/log/kern.log, kept
+//! across reboots, rotated, and the files of /var/log held to their caps.
+//!
+//!     logd        (root; started at boot by /etc/pax-boot.d/logd, in a loop that
+//!                  starts it again a second after it ends)
+//!
+//! **kern.log** (root's, 0600, as the ring is root's to read): one line a record,
+//!
+//!     2026-11-15T19:30:55.120000Z [   12.340124] kern.info #417 user: yes pid 41 killed: SIGPIPE, …
+//!
+//! the wall time (UTC: the boot's start on the wall clock plus the record's own
+//! time), or `-` when the clock was never set (the boot's start before 2000); the
+//! record's time since boot as dmesg prints it; its facility and level as syslog
+//! names them; its sequence number; its text, escaped as /dev/kmsg escapes it (so a
+//! record cannot make or split a line). logd's own lines start `WALL == ` (a boot's
+//! marker, a restart, the end) or `WALL [MONO] logd: ` (records lost):
+//!
+//!     2026-11-15T19:30:54.000000Z == boot 12 started 2026-11-15T19:30:54Z
+//!     … == boot 12 started …; the previous boot's log ends without logd's end line (a power cut, a reset or a panic)
+//!     … == logd started again in boot 12 started …, after sequence 416
+//!     … [   19.880000] logd: 1873 records lost (sequence 418 to 2290): the ring overtook logd
+//!     … == end of boot 12 started …: SIGTERM from the kernel's end; this logd wrote 2210 records
+//!     … == logd stopped by SIGTERM from pid 77; this logd wrote 12 records
+//!
+//! **A boot's identity** is its number in /proc/pax-boot (`-` without one) and its
+//! start on the wall clock to the second (CLOCK_REALTIME less CLOCK_MONOTONIC, the
+//! same for the whole boot on PAX, which sets no clock). logd keeps no state of its
+//! own: at its start it reads kern.log (and kern.log.1 when kern.log has no marker),
+//! and when the last marker is this boot's it goes on after the last sequence number
+//! written there; else it writes this boot's marker and starts at the ring's oldest
+//! record. So a restart, a SIGKILL included, writes no record twice and loses none
+//! the ring still holds. Should two boots share an identity (an unset clock and no
+//! boot number), the record the log names last is looked for in the ring: when the
+//! ring has its sequence number with another time, it is another boot after all.
+//!
+//! **Lost records** are counted, never skipped silently: a jump in the sequence
+//! numbers (the ring overtook logd, which /dev/kmsg says with EPIPE; or the records
+//! went while logd was not running, or before it started) is one `logd:` line naming
+//! how many and which.
+//!
+//! **Flushing**: a batch of records is one write(2) as soon as the ring has no more,
+//! and fsync(2) follows at most FLUSH_MS (1 s) after the first unsynced write. So a
+//! power cut loses at most the last second's records and an fsync's time.
+//! **The end**: a SIGTERM's sender is read (raw.S): from the kernel's end of the run
+//! (si_code SI_KERNEL, or pid 1), logd reads the ring to its end, writes its end line
+//! and the shutdown record to /var/log/wtmp (user/auth/utmp.lu), syncs both and exits
+//! 0, inside the end's 2000 ms grace; from anyone else it writes `logd stopped` and
+//! exits 0 (its loop starts it again). What the kernel says after the end's SIGTERM is
+//! not in kern.log (logd is gone): the serial port and the ring keep it.
+//!
+//! **Rotation**: kern.log past KERN_MAX (1 MiB) goes to kern.log.1 … kern.log.4, the
+//! oldest dropped, and the new file starts with the boot's marker, `(continued)`.
+//! At logd's start and every CHECK_MS (60 s) the other files of /var/log are held to
+//! their caps (CAPS below) by rename to `.1`, an empty file left in their place with
+//! their mode (every writer opens them by path for each line).
+//!
+//! Builtins only (env, exec, fs) and raw.S's calls; user/auth/utmp.lu for the
+//! shutdown record. Written from the kernel's dev-kmsg document (the record's form),
+//! syslog(3) and syslog.conf's names, utmp(5), logrotate(8)'s behaviour as its manual
+//! describes it, and fsync(2); no log daemon's source.
+
+extern "c" fn logd_kmsg_open(flags: int) -> int
+extern "c" fn logd_read(fd: int) -> int
+extern "c" fn logd_byte(i: int) -> int
+extern "c" fn logd_close(fd: int) -> int
+extern "c" fn logd_poll(fd: int, ms: int) -> int
+extern "c" fn logd_term_setup() -> int
+extern "c" fn logd_term_flag() -> int
+extern "c" fn logd_term_code() -> int
+extern "c" fn logd_term_pid() -> int
+extern "c" fn logd_clock(id: int) -> int
+extern "c" fn logd_uname() -> int
+extern "c" fn logd_uname_byte(i: int) -> int
+
+const DIR: str = "/var/log"
+const KERN: str = "/var/log/kern.log"
+const PIDFILE: str = "/var/run/logd.pid"
+const KERN_MAX: int = 1048576
+const KERN_KEEP: int = 4
+const FLUSH_MS: int = 1000
+const CHECK_MS: int = 60000
+const BATCH: int = 32768
+const O_RDONLY: int = 0
+const O_NONBLOCK: int = 2048
+const EAGAIN: int = 11
+const EPIPE: int = 32
+const EINTR: int = 4
+const SI_KERNEL: int = 128
+const CLOCK_SET: int = 946684800
+
+/// A file of /var/log logd holds to a cap: its name, the cap in bytes and its mode.
+struct Cap {
+    name: str,
+    max: int,
+    mode: int,
+}
+
+/// Every other file of /var/log logd holds to a cap, each rotated to `.1` (one kept).
+/// boot.log and boot.summary are pax-boot-status's own (256 KiB, four kept; 200 lines,
+/// cut to 100).
+fn caps() -> List[Cap] {
+    var c = List[Cap]()
+    (mut c).push(Cap { name: "wtmp", max: 1048576, mode: 420 })
+    (mut c).push(Cap { name: "btmp", max: 1048576, mode: 384 })
+    (mut c).push(Cap { name: "sudo.log", max: 1048576, mode: 384 })
+    (mut c).push(Cap { name: "burrowd.log", max: 1048576, mode: 384 })
+    (mut c).push(Cap { name: "pax-upgrade.log", max: 262144, mode: 420 })
+    c
+}
+
+struct Log {
+    fd: int,
+    size: int,
+    boot: str,
+    start_us: int,
+    clock_set: bool,
+    next: int,
+    written: int,
+    dirty_since: int,
+    out: List[byte],
+    release: str,
+}
+
+fn mono_ms() -> int {
+    // # Safety: clock_gettime(CLOCK_MONOTONIC) into raw.S's own timespec.
+    let us = unsafe { logd_clock(1) }
+    if us < 0 then 0 else us / 1000
+}
+
+/// The boot's start on the wall clock in microseconds: CLOCK_REALTIME less
+/// CLOCK_MONOTONIC, read until no tick falls between the two readings.
+fn boot_start_us() -> int {
+    var tries = 0
+    while tries < 20 {
+        // # Safety: clock_gettime into raw.S's timespec, one call at a time.
+        let m1 = unsafe { logd_clock(1) }
+        // # Safety: as above, CLOCK_REALTIME.
+        let r = unsafe { logd_clock(0) }
+        // # Safety: as above, CLOCK_MONOTONIC again.
+        let m2 = unsafe { logd_clock(1) }
+        if m1 >= 0 && r >= 0 && m2 - m1 < 1000 {
+            return r - m1
+        }
+        tries += 1
+    }
+    0
+}
+
+fn kernel_release() -> str {
+    // # Safety: uname(2) into raw.S's utsname, then its release field read.
+    let got = unsafe { logd_uname() }
+    if got != 0 {
+        return ""
+    }
+    var b = List[byte]()
+    var i = 0
+    while i < 64 {
+        // # Safety: i < 64, inside utsname's 65-byte release field.
+        let c = unsafe { logd_uname_byte(i) }
+        if c == 0 {
+            break
+        }
+        (mut b).push(c as byte)
+        i += 1
+    }
+    str_from_utf8(b) else ""
+}
+
+fn two(n: int) -> str {
+    if n < 10 then "0{n}" else "{n}"
+}
+
+fn pad(n: int, width: int, fill: str) -> str {
+    var s = "{n}"
+    while s.len < width {
+        s = fill + s
+    }
+    s
+}
+
+/// `YYYY-MM-DDTHH:MM:SS` of `secs` since 1970 (the civil calendar, proleptic).
+fn civil(secs: int) -> str {
+    let days = secs / 86400
+    let rem = secs % 86400
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 then mp + 3 else mp - 9
+    let year = if m <= 2 then y + 1 else y
+    "{year}-{two(m)}-{two(d)}T{two(rem / 3600)}:{two(rem / 60 % 60)}:{two(rem % 60)}"
+}
+
+/// The wall time of `us` microseconds since 1970: `…T19:30:55.120000Z`.
+fn wall(us: int) -> str {
+    "{civil(us / 1000000)}.{pad(us % 1000000, 6, "0")}Z"
+}
+
+/// The wall time of a moment `mono_us` after the boot, or `-` without a clock.
+fn wall_of(l: Log, mono_us: int) -> str {
+    if !l.clock_set {
+        return "-"
+    }
+    wall(l.start_us + mono_us)
+}
+
+/// dmesg's `[SSSSS.UUUUUU]`.
+fn mono_text(us: int) -> str {
+    "[{pad(us / 1000000, 5, " ")}.{pad(us % 1000000, 6, "0")}]"
+}
+
+fn now_wall(l: Log) -> str {
+    // # Safety: clock_gettime(CLOCK_REALTIME).
+    let r = unsafe { logd_clock(0) }
+    if !l.clock_set || r < 0 {
+        return "-"
+    }
+    wall(r)
+}
+
+fn now_mono_us() -> int {
+    // # Safety: clock_gettime(CLOCK_MONOTONIC).
+    let m = unsafe { logd_clock(1) }
+    if m < 0 then 0 else m
+}
+
+const LEVELS: str = "emerg alert crit err warning notice info debug"
+const FACILITIES: str = "kern user mail daemon auth syslog lpr news uucp cron authpriv ftp ntp security console solaris-cron"
+
+fn word_at(text: str, k: int) -> str {
+    var i = 0
+    for w in text.words() {
+        if i == k {
+            return w
+        }
+        i += 1
+    }
+    ""
+}
+
+/// syslog's `facility.level` for a record's PRI.
+fn selector(pri: int) -> str {
+    let f = pri / 8
+    let fac = if f < 16 then word_at(FACILITIES, f) else if f < 24 then "local{f - 16}" else "fac{f}"
+    "{fac}.{word_at(LEVELS, pri % 8)}"
+}
+
+/// This boot's number from /proc/pax-boot's `boot N` line, or `-`.
+fn boot_number() -> str {
+    let t = fs_read_text("/proc/pax-boot") else ""
+    for line in t.split("\n") {
+        if line.starts_with("boot ") {
+            let n = line[5..]
+            if n.len > 0 {
+                return n
+            }
+        }
+    }
+    "-"
+}
+
+/// To the kernel's log, at error level (drawn on the console): logd's own trouble.
+fn complain(text: str) {
+    let fd = fs_open_mode("/dev/kmsg", 2) else |_| {
+        eprint("logd: {text}")
+        return
+    }
+    fs_write_chunk(fd, "<3>logd: {text}".bytes()) else |_| {
+        eprint("logd: {text}")
+    }
+    fs_close(fd) else |_| {
+    }
+}
+
+// ---------------------------------------------------------------- kern.log
+
+/// kern.log opened to append (made root's 0600 when missing), its size read.
+fn open_kern(mut l: Log) -> bool {
+    if !fs_exists(KERN) {
+        let fd = fs_open_perm(KERN, 4, 384) else |_| {
+            return false
+        }
+        fs_close(fd) else |_| {
+        }
+    }
+    fs_set_mode(KERN, 384) else |_| {
+    }
+    let fd = fs_open_mode(KERN, 2) else |_| {
+        return false
+    }
+    l.fd = fd
+    l.size = fs_size(KERN) else 0
+    true
+}
+
+fn sync_now(mut l: Log) {
+    if l.dirty_since >= 0 && l.fd >= 0 {
+        fs_sync(l.fd) else |_| {
+        }
+    }
+    l.dirty_since = -1
+}
+
+/// kern.log to kern.log.1 (and on, the oldest dropped), a new kern.log with the
+/// boot's marker `(continued)`.
+fn rotate_kern(mut l: Log) {
+    sync_now(mut l)
+    if l.fd >= 0 {
+        fs_close(l.fd) else |_| {
+        }
+        l.fd = -1
+    }
+    fs_remove("{KERN}.{KERN_KEEP}") else |_| {
+    }
+    var k = KERN_KEEP - 1
+    while k >= 1 {
+        if fs_exists("{KERN}.{k}") {
+            fs_rename("{KERN}.{k}", "{KERN}.{k + 1}") else |_| {
+            }
+        }
+        k -= 1
+    }
+    fs_rename(KERN, "{KERN}.1") else |_| {
+    }
+    if !open_kern(mut l) {
+        complain("{KERN} could not be made again after its rotation")
+        return
+    }
+    let marker = "{now_wall(l)} == {l.boot} (continued from kern.log.1)\n".bytes()
+    fs_write_chunk(l.fd, marker) else |_| {
+    }
+    l.size += marker.len
+    l.dirty_since = mono_ms()
+}
+
+/// The batch written: one write(2), after a rotation when it would take kern.log
+/// past its cap. False when kern.log could not be written.
+fn flush(mut l: Log) -> bool {
+    if l.out.len == 0 {
+        return true
+    }
+    if l.size > 0 && l.size + l.out.len > KERN_MAX {
+        rotate_kern(mut l)
+    }
+    if l.fd < 0 {
+        return false
+    }
+    var ok = true
+    fs_write_chunk(l.fd, l.out) else |_| {
+        ok = false
+    }
+    if ok {
+        l.size += l.out.len
+        if l.dirty_since < 0 {
+            l.dirty_since = mono_ms()
+        }
+    }
+    l.out = List[byte]()
+    ok
+}
+
+fn add(mut l: Log, line: str) {
+    for b in line.bytes() {
+        (mut l.out).push(b)
+    }
+    (mut l.out).push(10 as byte)
+}
+
+// ---------------------------------------------------------------- what kern.log holds
+
+struct Seen {
+    boot: str,
+    ended: bool,
+    any: bool,
+    seq: int,
+    us: int,
+}
+
+/// The digits of `s` from `at`, and where they end.
+fn digits_at(s: str, at: int) -> (int, int) {
+    var n = 0
+    var i = at
+    let b = s.bytes()
+    while i < b.len && (b[i] as int) >= 48 && (b[i] as int) <= 57 {
+        n = n * 10 + (b[i] as int) - 48
+        i += 1
+    }
+    (n, i)
+}
+
+/// What a kern.log's text says of its last boot: the last marker's identity,
+/// whether an end line follows it, and the last record written after it.
+fn seen_in(text: str) -> Seen {
+    var s = Seen { boot: "", ended: false, any: false, seq: -1, us: 0 }
+    for line in text.split("\n") {
+        let sp = line.find(" ") else -1
+        if sp < 0 {
+            continue
+        }
+        let rest = line[sp + 1..]
+        if rest.starts_with("== boot ") {
+            var id = rest[3..]
+            let semi = id.find(";") else -1
+            if semi >= 0 {
+                id = id[0..semi]
+            }
+            let par = id.find(" (continued") else -1
+            if par >= 0 {
+                id = id[0..par]
+            }
+            if id != s.boot {
+                s.seq = -1
+                s.us = 0
+            }
+            s.boot = id
+            s.ended = false
+            s.any = true
+            continue
+        }
+        if rest.starts_with("== logd started again in ") {
+            let tail = rest[25..]
+            let comma = tail.find(", after") else -1
+            if comma >= 0 {
+                s.boot = tail[0..comma]
+            }
+            s.ended = false
+            s.any = true
+            continue
+        }
+        if rest.starts_with("== end of ") {
+            s.ended = true
+            continue
+        }
+        // A record: `[ MONO] fac.level #SEQ text`.
+        if !rest.starts_with("[") {
+            continue
+        }
+        let close = rest.find("] ") else -1
+        if close < 0 {
+            continue
+        }
+        let after = rest[close + 2..]
+        let hash = after.find(" #") else -1
+        let first_sp = after.find(" ") else -1
+        if hash < 0 || hash != first_sp {
+            continue
+        }
+        let (seq, end) = digits_at(after, hash + 2)
+        if end == hash + 2 {
+            continue
+        }
+        let mono = rest[1..close]
+        let dot = mono.find(".") else -1
+        if dot < 0 {
+            continue
+        }
+        var lead = 0
+        while lead < dot && mono[lead..lead + 1] == " " {
+            lead += 1
+        }
+        let (secs, _e1) = digits_at(mono, lead)
+        let (micro, _e2) = digits_at(mono, dot + 1)
+        s.seq = seq
+        s.us = secs * 1000000 + micro
+    }
+    s
+}
+
+fn seen() -> Seen {
+    let a = seen_in(fs_read_text(KERN) else "")
+    if a.any {
+        return a
+    }
+    seen_in(fs_read_text("{KERN}.1") else "")
+}
+
+// ---------------------------------------------------------------- the records
+
+struct Rec {
+    pri: int,
+    seq: int,
+    us: int,
+    text: str,
+}
+
+fn at(i: int) -> int {
+    // # Safety: i < the count read(2) put in raw.S's 8 KiB buffer.
+    unsafe { logd_byte(i) }
+}
+
+fn digit(b: int) -> int {
+    if b >= 48 && b <= 57 then b - 48 else -1
+}
+
+/// The record of `n` bytes in raw.S's buffer: `PRI,SEQ,USEC,FLAGS;TEXT\n`.
+fn parse(n: int) -> Rec {
+    var i = 0
+    var pri = 0
+    while i < n && digit(at(i)) >= 0 {
+        pri = pri * 10 + digit(at(i))
+        i += 1
+    }
+    i += 1
+    var seq = 0
+    while i < n && digit(at(i)) >= 0 {
+        seq = seq * 10 + digit(at(i))
+        i += 1
+    }
+    i += 1
+    var us = 0
+    while i < n && digit(at(i)) >= 0 {
+        us = us * 10 + digit(at(i))
+        i += 1
+    }
+    while i < n && at(i) != 59 {
+        i += 1
+    }
+    i += 1
+    var t = List[byte]()
+    while i < n && at(i) != 10 {
+        (mut t).push(at(i) as byte)
+        i += 1
+    }
+    Rec { pri: pri, seq: seq, us: us, text: str_from_utf8(t) else "(a record that is not UTF-8)" }
+}
+
+fn lost(mut l: Log, from: int, to: int, why: str) {
+    let n = to - from + 1
+    let us = now_mono_us()
+    add(mut l, "{wall_of(l, us)} {mono_text(us)} logd: {n} record{if n == 1 then "" else "s"} lost (sequence {from} to {to}): {why}")
+}
+
+/// One record: a gap before it named, then its line.
+fn keep(mut l: Log, r: Rec, why: str) {
+    if r.seq < l.next {
+        return
+    }
+    if r.seq > l.next {
+        lost(mut l, l.next, r.seq - 1, why)
+    }
+    add(mut l, "{wall_of(l, r.us)} {mono_text(r.us)} {selector(r.pri)} #{r.seq} {r.text}")
+    l.next = r.seq + 1
+    l.written += 1
+}
+
+// ---------------------------------------------------------------- the other files
+
+/// Each file of CAPS past its cap renamed to `.1` (the old `.1` dropped), an empty
+/// one left with its mode.
+fn hold_caps() {
+    for c in caps() {
+        let path = "{DIR}/{c.name}"
+        let size = fs_size(path) else |_| {
+            continue
+        }
+        if size <= c.max {
+            continue
+        }
+        fs_remove("{path}.1") else |_| {
+        }
+        fs_rename(path, "{path}.1") else |_| {
+            continue
+        }
+        let fd = fs_open_perm(path, 4, c.mode) else |_| {
+            continue
+        }
+        fs_close(fd) else |_| {
+        }
+    }
+}
+
+// ---------------------------------------------------------------- main
+
+fn main() -> int {
+    let args = env_args()
+    if args.len > 0 {
+        eprint("usage: logd (no arguments: it is started at boot by /etc/pax-boot.d/logd)")
+        return 2
+    }
+    // # Safety: raw.S's pipe and SIGTERM handler, installed once before anything waits.
+    let ts = unsafe { logd_term_setup() }
+    if ts < 0 {
+        complain("SIGTERM's handler could not be installed (-{0 - ts}); the end will not be recorded")
+    }
+    fs_write_text(PIDFILE, "{os_pid()}\n") else |_| {
+    }
+    let start_us = boot_start_us()
+    let start_s = (start_us + 500000) / 1000000
+    var l = Log {
+        fd: -1,
+        size: 0,
+        boot: "boot {boot_number()} started {civil(start_s)}Z",
+        start_us: start_s * 1000000,
+        clock_set: start_s >= CLOCK_SET,
+        next: 0,
+        written: 0,
+        dirty_since: -1,
+        out: List[byte](),
+        release: kernel_release(),
+    }
+    if !fs_is_dir(DIR) {
+        fs_create_dir_all(DIR) else |_| {
+        }
+    }
+    hold_caps()
+    if !open_kern(mut l) {
+        complain("{KERN} cannot be opened to append; logd stops")
+        return 1
+    }
+    let s = seen()
+    var resume = s.any && s.boot == l.boot && s.seq >= 0
+    // # Safety: open(2) of /dev/kmsg, non-blocking.
+    var fd = unsafe { logd_kmsg_open(O_RDONLY | O_NONBLOCK) }
+    if fd < 0 {
+        complain("/dev/kmsg cannot be read (-{0 - fd}); logd stops")
+        return 1
+    }
+    if resume {
+        // The record the log names last, looked for in the ring: another time at its
+        // number is another boot with the same identity.
+        var checked = false
+        while !checked {
+            // # Safety: read(2) of one record into raw.S's buffer.
+            let n = unsafe { logd_read(fd) }
+            if n == 0 - EPIPE || n == 0 - EINTR {
+                continue
+            }
+            if n <= 0 {
+                // The ring's newest is older than the record the log names last: in
+                // this boot it never is, so the log's last boot is another one.
+                resume = false
+                break
+            }
+            let r = parse(n)
+            if r.seq >= s.seq {
+                if r.seq == s.seq && r.us != s.us {
+                    resume = false
+                }
+                checked = true
+            }
+        }
+        // # Safety: the descriptor opened above; the ring is read again from its oldest.
+        let _c = unsafe { logd_close(fd) }
+        // # Safety: open(2) of /dev/kmsg again, non-blocking.
+        fd = unsafe { logd_kmsg_open(O_RDONLY | O_NONBLOCK) }
+        if fd < 0 {
+            complain("/dev/kmsg cannot be read again (-{0 - fd}); logd stops")
+            return 1
+        }
+    }
+    let why_first = if resume then "while logd was not running" else "before logd started"
+    if resume {
+        l.next = s.seq + 1
+        add(mut l, "{now_wall(l)} == logd started again in {l.boot}, after sequence {s.seq}")
+    } else {
+        var marker = "{now_wall(l)} == {l.boot}"
+        if s.any && !s.ended {
+            marker += "; the previous boot's log ends without logd's end line (a power cut, a reset or a panic)"
+        }
+        add(mut l, marker)
+        l.next = 0
+    }
+    var why = why_first
+    var next_check = mono_ms() + CHECK_MS
+    loop {
+        // # Safety: read(2) of one record into raw.S's buffer.
+        let n = unsafe { logd_read(fd) }
+        if n > 0 {
+            keep(mut l, parse(n), why)
+            why = "the ring overtook logd"
+            if l.out.len >= BATCH {
+                if !flush(mut l) {
+                    complain("{KERN} could not be written; logd stops")
+                    return 1
+                }
+            }
+        } else if n == 0 - EPIPE {
+            why = "the ring overtook logd"
+        } else if n == 0 - EAGAIN || n == 0 {
+            if !flush(mut l) {
+                complain("{KERN} could not be written; logd stops")
+                return 1
+            }
+            let now = mono_ms()
+            var wait = next_check - now
+            if l.dirty_since >= 0 {
+                let left = l.dirty_since + FLUSH_MS - now
+                if left < wait {
+                    wait = left
+                }
+            }
+            if wait < 0 {
+                wait = 0
+            }
+            // # Safety: poll(2) of /dev/kmsg and the SIGTERM pipe.
+            let p = unsafe { logd_poll(fd, wait) }
+            let t = mono_ms()
+            if l.dirty_since >= 0 && t - l.dirty_since >= FLUSH_MS {
+                sync_now(mut l)
+            }
+            if t >= next_check {
+                hold_caps()
+                next_check = t + CHECK_MS
+            }
+            if p > 0 && (p & 2) != 0 {
+                return finish(mut l, fd)
+            }
+        } else if n != 0 - EINTR {
+            complain("/dev/kmsg: read failed (-{0 - n}); logd stops")
+            let _f = flush(mut l)
+            sync_now(mut l)
+            return 1
+        }
+        // # Safety: raw.S's flag, set by its SIGTERM handler.
+        let termed = unsafe { logd_term_flag() }
+        if termed != 0 {
+            return finish(mut l, fd)
+        }
+    }
+    0
+}
+
+/// The end: the ring read to its end, the end line (and at the kernel's end the
+/// shutdown record), both synced.
+fn finish(mut l: Log, fd: int) -> int {
+    var guard = 0
+    while guard < 100000 {
+        // # Safety: read(2) of one record into raw.S's buffer.
+        let n = unsafe { logd_read(fd) }
+        if n > 0 {
+            keep(mut l, parse(n), "the ring overtook logd")
+        } else if n != 0 - EPIPE && n != 0 - EINTR {
+            break
+        }
+        guard += 1
+    }
+    // # Safety: raw.S's copies of the SIGTERM's si_code and si_pid.
+    let code = unsafe { logd_term_code() }
+    // # Safety: as above, the si_pid copy.
+    let pid = unsafe { logd_term_pid() }
+    let kernel_end = code == SI_KERNEL || pid == 1
+    if kernel_end {
+        add(mut l, "{now_wall(l)} == end of {l.boot}: SIGTERM from the kernel's end; this logd wrote {l.written} records")
+    } else {
+        add(mut l, "{now_wall(l)} == logd stopped by SIGTERM from pid {pid}; this logd wrote {l.written} records")
+    }
+    let _f = flush(mut l)
+    l.dirty_since = mono_ms()
+    sync_now(mut l)
+    if kernel_end {
+        if ut_shutdown(l.release) {
+            let w = fs_open_mode(WTMP_PATH, 2) else -1
+            if w >= 0 {
+                fs_sync(w) else |_| {
+                }
+                fs_close(w) else |_| {
+                }
+            }
+        }
+    }
+    if l.fd >= 0 {
+        fs_close(l.fd) else |_| {
+        }
+    }
+    // # Safety: the descriptor of /dev/kmsg.
+    let _c = unsafe { logd_close(fd) }
+    0
+}
