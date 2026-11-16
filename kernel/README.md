@@ -1372,7 +1372,7 @@ pass measures how long, ranks the paths, and makes three of them short.
 | module | change |
 |---|---|
 | `latency/` (new) | the instrument, on only with `latency` on the command line (`start`, from `kmain_console` before interrupts go on): boot/isr.S's common path opens an interrupts-off interval on entry from IF set (its RIP, vector and %rax) and closes it on resuming a frame with IF set; `pax_irq_save`/`pax_irq_restore`, `pax_wait` and `pax_enter_user` likewise; `pax_lat_close` keeps the longest since boot and since the last read, a histogram by the cycles' highest bit, and since the last read the longest per system call number, vector and thread slot's irq_save sections; `sched_point` the longest gap between the scheduler's chances; `ticks` delivered against due by kernel/clock; `restart` ends the window |
-| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 63 with the accumulated proc reports): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
+| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 64 with the accumulated proc reports): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
 | `sched/` | `latency.sched_point` in `preempt`, `kick` and `run_next`; `who` names a thread for it |
 | `paging/` | `next_leaf`: the next present 4 KiB leaf in a range, an absent table stepped over whole |
 | `vm/` | `unmap_range` and `cut_maps` visit only the leaves `next_leaf` finds (munmap of 1 TiB of nothing: 3 s to under 0.3 ms) |
@@ -1415,7 +1415,7 @@ the old answer (`notes/dw02-the-entropy-contract.md`).
 | `process/` | `random_word` and `random_fill` are kernel/random's insecure path (AT_RANDOM, TCP's and DHCP's words, `GRND_INSECURE`) |
 | `user/` | `getrandom`: flags 0, `GRND_RANDOM` and `GRND_NONBLOCK` from the strict path (`-EAGAIN`, `-EIO`; `-EAGAIN` for `GRND_NONBLOCK`), `GRND_INSECURE` from the insecure path, 0 bytes answers 0, the staging frame zeroed; a random device's read is getrandom with `GRND_NONBLOCK` when its descriptor has `O_NONBLOCK` |
 | `files/` | `is_random`'s contract restated; a random device's read takes `nonblocking` (px23's) for its `O_NONBLOCK` |
-| `procfs/` | `/proc/pax-random` (entry 59; `ENTRIES` and `NONE` 63): `ready`, `source`, `reason`, `errno`, `rdrand`, `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test` |
+| `procfs/` | `/proc/pax-random` (entry 59; `ENTRIES` and `NONE` 64): `ready`, `source`, `reason`, `errno`, `rdrand`, `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test` |
 
 ## px130 — the kernel's lines kept, read back, and spared the screen
 
@@ -1427,7 +1427,7 @@ the old answer (`notes/dw02-the-entropy-contract.md`).
 | `signal/`, `user/`, `process/` (px130 change) | a program's ordinary life at `log.INFO`: a death by a signal's default action, a death by a fault, an exec, an exit and a thread's, an `execve` that ended threads, the -ENOSYS, -EBADF and -EFAULT lines, the census lines (a full tree stays a warning) |
 | `user/` (px130 change) | `syslog(2)` (103): actions 0-10 as syslog(2) gives them, every one but READ_ALL and SIZE_BUFFER root's and those two too while dmesg_restrict is 1 (asked first); READ waits as a pipe's reader does; `loglevel=N` read at `start`; a write to /dev/kmsg (target 11) and to a setting of /proc/sys/kernel (target 12); a writev to /dev/kmsg is one record |
 | `files/` (px130 change) | `/dev/kmsg` (mem's 1:11, 0644, inode 0x15): kind K_KMSG, its open file's offset word the reader's record number and ring offset; a reader held to dmesg_restrict at open (-EPERM), a user's write to the mode (-EACCES); one record a read (-EINVAL for a buffer it does not fit), -EAGAIN or a wait at the end, -EPIPE once for a reader the ring overtook; SEEK_SET, SEEK_END and SEEK_DATA with offset 0 (-ESPIPE for another offset, -EINVAL for another whence); poll; a write a record at its `<N>`'s level and facility (LOG_USER for none or for the kernel's); `setting_write` |
-| `procfs/` (px130 change) | `/proc/sys/kernel/dmesg_restrict` and `/proc/sys/kernel/printk` (four tab-separated numbers), both 0644 and root's to write (entries 60 and 61; `ENTRIES` and `NONE` 63) |
+| `procfs/` (px130 change) | `/proc/sys/kernel/dmesg_restrict` and `/proc/sys/kernel/printk` (four tab-separated numbers), both 0644 and root's to write (entries 60 and 61; `ENTRIES` and `NONE` 64) |
 | `sched/` (px130 change) | `wake_sleepers` makes every pipe waiter ready when a record came while a log reader waited |
 | `console/`, `ahci/` (px130 change) | the bytes they wrote to COM1 inside a kernel line go through `log.put_byte` |
 | `kmain_console.lu` (px130 change) | `log.past_boot()` as the first program starts |
@@ -1460,7 +1460,7 @@ or off; the file only says where each stands.
 
 | module | change |
 |---|---|
-| `procfs/` | `/proc/pax-security` (entry 59; `ENTRIES` 60), 0444: one `name state` line a protection, `on` when it holds: `nx` (IA32_EFER.NXE), `wp` (CR0.WP), `smep`, `smap` and `umip` (CR4; `absent` when CPUID has none), `kernel-wx` (no leaf of the kernel half both writable and executable, walked in the reader's tables), `kstack-guard` (the reading thread's kernel stack mapped and its guard below unmapped), `ist-guard` (an unmapped page below each IST stack), `kpti` (the reader's tables carry none of the kernel half), `ibrs` (IA32_SPEC_CTRL.IBRS where leaf 7 enumerates it), `arch-capabilities` (IA32_ARCH_CAPABILITIES as the CPU reports it, or `absent`), then the fixed policy: `aslr`, `user-wx` (no user mapping both writable and executable), `stack-nx` and `null-page` (`paxsec`, one function a group of lines) |
+| `procfs/` | `/proc/pax-security` (entry 63; `ENTRIES` and `NONE` 64), 0444: one `name state` line a protection, `on` when it holds: `nx` (IA32_EFER.NXE), `wp` (CR0.WP), `smep`, `smap` and `umip` (CR4; `absent` when CPUID has none), `kernel-wx` (no leaf of the kernel half both writable and executable, walked in the reader's tables), `kstack-guard` (the reading thread's kernel stack mapped and its guard below unmapped), `ist-guard` (an unmapped page below each IST stack), `kpti` (the reader's tables carry none of the kernel half), `ibrs` (IA32_SPEC_CTRL.IBRS where leaf 7 enumerates it), `arch-capabilities` (IA32_ARCH_CAPABILITIES as the CPU reports it, or `absent`), then the fixed policy: `aslr`, `user-wx` (no user mapping both writable and executable), `stack-nx` and `null-page` (`paxsec`, one function a group of lines) |
 
 `tests/mpx12-security` (run by `tests/mpx3-user` as U11) holds the file to what
 can be seen from outside it, per tier and firmware, under KVM with `-cpu host`,
