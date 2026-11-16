@@ -215,6 +215,7 @@ fn device(c: u64, slot: u64) -> u64 {
 }
 fn say_error(c: u64, why: str, detail: u64) {
     let s = sync.acquire(sync.console())
+    log.at(log.ERR)
     log.put("xhci "); log.dec(get(c, NUMBER) as int)
     log.put(": "); log.put(why); log.put(" "); log.hex(detail); log.end()
     sync.release(sync.console(), s)
@@ -644,9 +645,31 @@ fn pointer_why(code: u64) -> str {
     }
 }
 
-/// px109: a pointer interface not driven, and why.
+/// Whether a pointer is already driven, on any live controller. Called
+/// under sync.console (IF clear): detach and a halted pipe cannot race
+/// this look. Historical attachments do not count, nor quarantined hosts.
+fn has_pointer() -> bool {
+    var c = head()
+    while c != 0 {
+        if get(c, LIVE) != 0 {
+            var slot: u64 = 1
+            while slot <= get(c, NSLOT) {
+                let d = device(c, slot)
+                if d != 0 && get(d, ACTIVE) != 0 && get(d, POINTER) != 0 { return true }
+                slot += 1
+            }
+        }
+        c = get(c, NEXT)
+    }
+    false
+}
+
+/// A pointer interface not driven, and why. With another pointer already
+/// usable this is information, kept in dmesg and on COM1, not drawn over
+/// a quiet console's login prompt. Without one the refusal is an error.
 fn refuse_pointer(d: u64, why: str) {
     let saved = sync.acquire(sync.console())
+    log.at(if has_pointer() { log.INFO } else { log.ERR })
     log.put("xhci: mouse "); path(d); log.put(" refused: "); log.line(why)
     sync.release(sync.console(), saved)
 }
