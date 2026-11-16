@@ -36,7 +36,7 @@
 //!
 //! **The master's ioctls**: TIOCGPTN, TIOCSPTLCK, TIOCGPTLCK,
 //! TIOCGPTPEER (kernel/files opens the slave), the slave's termios
-//! (TCGETS, TCSETS*), the window size (TIOCGWINSZ, TIOCSWINSZ: SIGWINCH
+//! (TCGETS/TCGETS2, TCSETS*/TCSETS*2), the window size (TIOCGWINSZ, TIOCSWINSZ: SIGWINCH
 //! for the slave's foreground group), the slave's foreground group and
 //! session (TIOCGPGRP: 0 when none; TIOCSPGRP as on the slave; TIOCGSID:
 //! -ENOTTY when no session holds it), FIONREAD (OQ's bytes), TIOCOUTQ
@@ -429,11 +429,12 @@ pub fn master_ioctl(a: u64, n: u64, pml4: u64, req: u64, arg: u64) -> u64 {
         uaccess.put(pml4, arg, w(n, PT_LOCKED), 4)
         return 0
     }
-    if req == TCGETS {
-        return console.termios_out(t, pml4, arg)
+    if req == TCGETS || req == console.TCGETS2 {
+        return console.termios_out(t, pml4, arg, req == console.TCGETS2)
     }
-    if req == TCSETS || req == TCSETSW || req == TCSETSF {
-        let r = console.termios_in(t, pml4, arg, req == TCSETSF)
+    if req == TCSETS || req == TCSETSW || req == TCSETSF || req == console.TCSETS2 || req == console.TCSETSW2 || req == console.TCSETSF2 {
+        let extended = req == console.TCSETS2 || req == console.TCSETSW2 || req == console.TCSETSF2
+        let r = console.termios_in(t, pml4, arg, req == TCSETSF || req == console.TCSETSF2, extended)
         sched.wake_pipes()
         return r
     }
