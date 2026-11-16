@@ -1406,7 +1406,7 @@ the old answer (`notes/dw02-the-entropy-contract.md`).
 | `process/` | `random_word` and `random_fill` are kernel/random's insecure path (AT_RANDOM, TCP's and DHCP's words, `GRND_INSECURE`) |
 | `user/` | `getrandom`: flags 0, `GRND_RANDOM` and `GRND_NONBLOCK` from the strict path (`-EAGAIN`, `-EIO`; `-EAGAIN` for `GRND_NONBLOCK`), `GRND_INSECURE` from the insecure path, 0 bytes answers 0, the staging frame zeroed; a random device's read is getrandom with `GRND_NONBLOCK` when its descriptor has `O_NONBLOCK` |
 | `files/` | `is_random`'s contract restated; a random device's read takes `nonblocking` (px23's) for its `O_NONBLOCK` |
-| `procfs/` | `/proc/pax-random` (entry 59; `ENTRIES` 60): `ready`, `source`, `reason`, `errno`, `rdrand`, `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test` |
+| `procfs/` | `/proc/pax-random` (entry 59; `ENTRIES` and `NONE` 62): `ready`, `source`, `reason`, `errno`, `rdrand`, `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test` |
 
 ## px130 — the kernel's lines kept, read back, and spared the screen
 
@@ -1418,7 +1418,7 @@ the old answer (`notes/dw02-the-entropy-contract.md`).
 | `signal/`, `user/`, `process/` (px130 change) | a program's ordinary life at `log.INFO`: a death by a signal's default action, a death by a fault, an exec, an exit and a thread's, an `execve` that ended threads, the -ENOSYS, -EBADF and -EFAULT lines, the census lines (a full tree stays a warning) |
 | `user/` (px130 change) | `syslog(2)` (103): actions 0-10 as syslog(2) gives them, every one but READ_ALL and SIZE_BUFFER root's and those two too while dmesg_restrict is 1 (asked first); READ waits as a pipe's reader does; `loglevel=N` read at `start`; a write to /dev/kmsg (target 11) and to a setting of /proc/sys/kernel (target 12); a writev to /dev/kmsg is one record |
 | `files/` (px130 change) | `/dev/kmsg` (mem's 1:11, 0644, inode 0x15): kind K_KMSG, its open file's offset word the reader's record number and ring offset; a reader held to dmesg_restrict at open (-EPERM), a user's write to the mode (-EACCES); one record a read (-EINVAL for a buffer it does not fit), -EAGAIN or a wait at the end, -EPIPE once for a reader the ring overtook; SEEK_SET, SEEK_END and SEEK_DATA with offset 0 (-ESPIPE for another offset, -EINVAL for another whence); poll; a write a record at its `<N>`'s level and facility (LOG_USER for none or for the kernel's); `setting_write` |
-| `procfs/` (px130 change) | `/proc/sys/kernel/dmesg_restrict` and `/proc/sys/kernel/printk` (four tab-separated numbers), both 0644 and root's to write (entries 59 and 60; `ENTRIES` and `NONE` 61) |
+| `procfs/` (px130 change) | `/proc/sys/kernel/dmesg_restrict` and `/proc/sys/kernel/printk` (four tab-separated numbers), both 0644 and root's to write (entries 60 and 61; `ENTRIES` and `NONE` 62) |
 | `sched/` (px130 change) | `wake_sleepers` makes every pipe waiter ready when a record came while a log reader waited |
 | `console/`, `ahci/` (px130 change) | the bytes they wrote to COM1 inside a kernel line go through `log.put_byte` |
 | `kmain_console.lu` (px130 change) | `log.past_boot()` as the first program starts |
