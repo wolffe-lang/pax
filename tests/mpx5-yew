@@ -359,9 +359,10 @@ PY
 # `ps2> ` is on the serial log: the arrows, Home, End, PgUp, PgDn,
 # Insert, Delete (px58), then (px59) F1-F12, modified arrows and editing
 # keys, Shift's and Ctrl's function keys, left Alt with a key, right Alt
-# with an arrow, five keys the VT gives nothing for (Shift+PgUp, Alt+Left,
-# Alt+F1, Shift+Ctrl+F1, Alt+Shift+a), then `.`. Each key's bytes are the
-# VT's own, measured twice (notes/px59/vt.rows, vt2.rows).
+# with an arrow, four keys that remain silent (Shift+PgUp, Alt+F1,
+# Shift+Ctrl+F1, Alt+Shift+a), then `.`. Bytes are the measured VT's,
+# except bare Alt+Left/Right: application-facing xterm chords on PAX,
+# which has no virtual-terminal switch behind that reservation.
 PS2_TABLE="up:1b5b41 down:1b5b42 right:1b5b43 left:1b5b44 home:1b5b317e end:1b5b347e pgup:1b5b357e pgdn:1b5b367e
 insert:1b5b327e delete:1b5b337e
 f1:1b5b5b41 f2:1b5b5b42 f3:1b5b5b43 f4:1b5b5b44 f5:1b5b5b45 f6:1b5b31377e f7:1b5b31387e f8:1b5b31397e
@@ -372,7 +373,8 @@ shift-home:1b5b317e ctrl-delete:1b5b337e alt-pgup:1b5b357e
 shift-f1:1b5b32337e shift-f10:1b5b33347e shift-f12:1b5b32347e ctrl-f5:1b5b5b45
 alt-a:1b61 alt-z:1b7a ctrl-alt-a:1b01 alt-1:1b31 alt-backspace:1b7f alt-esc:1b1b alt-slash:1b2f
 alt_r-up:1b5b41
-shift-pgup: alt-left: alt-f1: shift-ctrl-f1: alt-shift-a:
+alt-left:1b5b313b3344 alt-right:1b5b313b3343
+shift-pgup: alt-f1: shift-ctrl-f1: alt-shift-a:
 kp_0:1b5b327e
 kp_1:1b5b347e
 kp_2:1b5b42
@@ -558,7 +560,7 @@ for leg in $legs; do
             out=$PAX_BUILD/mpx5-yew-$tier-$leg-probe-2.raw
             run_raw "$log" 3 "$out"
             got=$(sed -n 's/^P: typed: //p' "$out" | tr -d '\r')
-            [ "$got" = "$PS2_WANT" ] && say "PASS Y3 $id: the keyboard's $(echo $PS2_KEYS | wc -w | tr -d ' ') keys give the measured VT's bytes ($(echo $PS2_WANT | wc -w | tr -d ' ')): the cursor and editing keys, F1-F12, the modifiers, Alt" \
+            [ "$got" = "$PS2_WANT" ] && say "PASS Y3 $id: the keyboard's $(echo $PS2_KEYS | wc -w | tr -d ' ') keys give the expected VT/application bytes ($(echo $PS2_WANT | wc -w | tr -d ' ')): the cursor and editing keys, F1-F12, the modifiers, Alt" \
                 || bad "Y3 $id: typed '$got', not '$PS2_WANT'"
             out=$PAX_BUILD/mpx5-yew-$tier-$leg-probe-3.raw
             run_raw "$log" 4 "$out"
