@@ -68,6 +68,13 @@ def main():
         ps.validate_qcodes([name for name, _ in ps.yew_key_plan(text)], codes)
     assert ps.yew_key_plan('H') == [('shift', True), ('h', True), ('h', False), ('shift', False)]
     print('PASS qkeycode-command-plans')
+    for launcher in ('/bin/as', '/bin/env'):
+        assert ps.yew_init_ended_zero(f'PAX: init {launcher} ended with status 0; nothing left to run\r\n'.encode())
+    for status in ('1', '10', '-1'):
+        assert not ps.yew_init_ended_zero(f'PAX: init /bin/env ended with status {status}; nothing left to run\r\n'.encode())
+    assert not ps.yew_init_ended_zero(b'PAX: init /bin/env ended by signal 9\r\n')
+    assert not ps.yew_init_ended_zero(b'')
+    print('PASS yew-init-status')
     return 0
 
 
