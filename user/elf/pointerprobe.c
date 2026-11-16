@@ -55,6 +55,8 @@
  *                     master's bytes printed; a click on the console (0);
  *                     a report the master writes, read on the slave; then
  *                     the probe's own mode (1)
+ *   alt-arrows-ps2    the same Alt-arrow and function-key census after
+ *                     keys-interleaved unplugged the USB keyboard
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -73,11 +75,11 @@
 static const char *labels[] = {
     "pointer-drawn", "pointer-scroll", "no-mode", "sgr-buttons", "drag", "wheel",
     "modifiers", "relative", "reset", "unserved", "owner-exits", "owner-background",
-    "tracking-modes", "alt-arrows", "keys-interleaved", "pty"
+    "tracking-modes", "alt-arrows", "keys-interleaved", "pty", "alt-arrows-ps2"
 };
 enum {
     DRAWN, SCROLL, NOMODE, BUTTONS, DRAG, WHEEL, MODS, REL, RESET, UNSERVED,
-    EXITS, BACKGROUND, TRACKING, ALT, KEYS, PTY, ROWS
+    EXITS, BACKGROUND, TRACKING, ALT, KEYS, PTY, ALT_PS2, ROWS
 };
 
 #define ON "\033[?1002h\033[?1006h"
@@ -323,7 +325,7 @@ int main(void) {
             own(row, 2, ALLOFF "\033[?1003h\033[?1006h");
             out(1, ALLOFF);
             break;
-        case ALT:
+        case ALT: case ALT_PS2:
             own(row, 0, ALLOFF);
             break;
         case KEYS:
