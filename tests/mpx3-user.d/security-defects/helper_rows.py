@@ -18,6 +18,10 @@ def checked_api(text):
                for name in ("put", "zero", "get", "get64"))
 
 def evaluate(text):
+    # OVMF can leave cursor-position controls adjacent to the first verdict.
+    # Remove CSI only; unrelated prefixes and malformed controls still fail
+    # the exact-line match, and normalized FAIL/PANIC remain fatal.
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
     return "PANIC" not in text and "FAIL " not in text and all(text.splitlines().count("PASS " + row) == 1 for row in ROWS)
 
 def main():
@@ -48,7 +52,13 @@ def main():
                 r = subprocess.run([str(x) for x in [ROOT / "tools/qemu-halt", "--firmware", firmware,
                     "--accel", "kvm" if kvm else "tcg", "--serial", log, "--timeout", "60", "--no-screen", "--elf", elf,
                     "--marker", "halt|PANIC .*", "--qemu", "-cpu", "--qemu", "host" if kvm else "max", iso]],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                (work / f"{firmware}.qemu-halt.stdout").write_bytes(r.stdout)
+                (work / f"{firmware}.qemu-halt.stderr").write_bytes(r.stderr)
+                if r.returncode:
+                    for stream in (r.stdout, r.stderr):
+                        for line in stream.decode(errors="replace").splitlines():
+                            print("  qemu-halt: " + line, flush=True)
                 text = log.read_bytes().decode("latin-1").replace("\r", "") if log.exists() else ""
                 for line in text.splitlines(): print("  " + line, flush=True)
                 ok = r.returncode == 0 and evaluate(text)
