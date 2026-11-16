@@ -1,0 +1,369 @@
+//! user/auth/utmp.lu — login records (px133): utmp(5)'s records, as login, pid 1,
+//! logd and last write and read them.
+//!
+//! **The record** is x86-64 glibc's `struct utmp`, 384 bytes, every number
+//! little-endian (utmp(5); boreutils' who reads the same layout):
+//!
+//!     0   ut_type      short     the kind (below), then 2 bytes of padding
+//!     4   ut_pid       int32
+//!     8   ut_line[32]  the terminal's name less `/dev/` (`console`, `pts/0`),
+//!                      or `~` for a boot or a shutdown, `ssh:notty` for a
+//!                      refused ssh login
+//!     40  ut_id[4]     the terminal's last four bytes (sshd's rule, measured;
+//!                      `~~` for a boot or a shutdown)
+//!     44  ut_user[32]
+//!     76  ut_host[256] the remote host, or for a boot the kernel's release
+//!     332 ut_exit      e_termination, e_exit: two shorts
+//!     336 ut_session   int32
+//!     340 ut_tv        int32 seconds, int32 microseconds
+//!     348 ut_addr_v6   four int32: an IPv4 address in the first
+//!     364 20 bytes unused
+//!
+//! The kinds this code writes: BOOT_TIME (2, user `reboot`), RUN_LVL (1, user
+//! `shutdown`), USER_PROCESS (7, a session's start), DEAD_PROCESS (8, its end:
+//! no user and no host, as a logout's wtmp record is), and for btmp the record
+//! of a refused login (7 from login, 6 from an ssh server, as Ubuntu's login and
+//! OpenSSH's sshd write them, measured: docs/SOURCES.md, px133).
+//!
+//! **The files**: `/var/run/utmp` (who is on now: one slot a terminal, 0644),
+//! `/var/log/wtmp` (every login, logout, boot and shutdown, appended, 0644) and
+//! `/var/log/btmp` (refused logins, appended, root's 0600). An append is one
+//! write(2) of the whole record on an `O_APPEND` descriptor, so two writers
+//! never interleave a record. A utmp slot is written under an exclusive lock
+//! of the file (flock(2)), tried until it is free, at most two seconds. A
+//! file whose directory the system does not have (a tree with no /var/log or
+//! /var/run) is not kept: nothing is written there, and that is no failure.
+//!
+//! Builtins only (fs, time), so the programs built with the account toolchain
+//! (login) and those built with the kernel's wolf (logd, last) share this file.
+
+const UT_SIZE: int = 384
+const UT_RUN_LVL: int = 1
+const UT_BOOT_TIME: int = 2
+const UT_LOGIN_PROCESS: int = 6
+const UT_USER_PROCESS: int = 7
+const UT_DEAD_PROCESS: int = 8
+const UTMP_PATH: str = "/var/run/utmp"
+const WTMP_PATH: str = "/var/log/wtmp"
+const BTMP_PATH: str = "/var/log/btmp"
+
+struct Utmp {
+    kind: int,
+    pid: int,
+    line: str,
+    id: str,
+    user: str,
+    host: str,
+    term: int,
+    exit: int,
+    session: int,
+    secs: int,
+    usecs: int,
+    /// The address's bytes: 4 for IPv4, 16 for IPv6, none when unknown.
+    addr: List[byte],
+}
+
+/// A record with only its kind, pid, line, user and host, stamped now.
+fn ut_new(kind: int, pid: int, line: str, user: str, host: str) -> Utmp {
+    let ms = time_unix_ms()
+    Utmp {
+        kind: kind,
+        pid: pid,
+        line: line,
+        id: ut_id_of(line),
+        user: user,
+        host: host,
+        term: 0,
+        exit: 0,
+        session: 0,
+        secs: ms / 1000,
+        usecs: ms % 1000 * 1000,
+        addr: List[byte](),
+    }
+}
+
+/// `ut_id` for a terminal: its last four bytes (`ts/0` for `pts/0`, `sole` for
+/// `console`), as OpenSSH's sshd writes it; `~~` for the boot's and the
+/// shutdown's line `~`.
+fn ut_id_of(line: str) -> str {
+    if line == "~" {
+        return "~~"
+    }
+    if line.len <= 4 {
+        return line
+    }
+    line[line.len - 4..]
+}
+
+/// The terminal name a record carries for the device path `dev`: `/dev/` taken off.
+fn ut_line_of(dev: str) -> str {
+    if dev.starts_with("/dev/") {
+        return dev[5..]
+    }
+    dev
+}
+
+fn ut_put_word(mut b: List[byte], at: int, v: int, width: int) {
+    var x = v
+    if x < 0 {
+        x = x + (if width == 2 then 65536 else 4294967296)
+    }
+    for k in 0..width {
+        b[at + k] = (x % 256) as byte
+        x = x / 256
+    }
+}
+
+fn ut_put_text(mut b: List[byte], at: int, s: str, width: int) {
+    let t = s.bytes()
+    var k = 0
+    while k < t.len && k < width {
+        b[at + k] = t[k]
+        k += 1
+    }
+}
+
+/// The record's 384 bytes.
+fn ut_bytes(u: Utmp) -> List[byte] {
+    var b = List[byte]()
+    for _ in 0..UT_SIZE {
+        (mut b).push(0 as byte)
+    }
+    ut_put_word(mut b, 0, u.kind, 2)
+    ut_put_word(mut b, 4, u.pid, 4)
+    ut_put_text(mut b, 8, u.line, 32)
+    ut_put_text(mut b, 40, u.id, 4)
+    ut_put_text(mut b, 44, u.user, 32)
+    ut_put_text(mut b, 76, u.host, 256)
+    ut_put_word(mut b, 332, u.term, 2)
+    ut_put_word(mut b, 334, u.exit, 2)
+    ut_put_word(mut b, 336, u.session, 4)
+    ut_put_word(mut b, 340, u.secs, 4)
+    ut_put_word(mut b, 344, u.usecs, 4)
+    var k = 0
+    while k < u.addr.len && k < 16 {
+        b[348 + k] = u.addr[k]
+        k += 1
+    }
+    b
+}
+
+fn ut_word(b: List[byte], at: int, width: int) -> int {
+    var n = 0
+    var power = 1
+    for k in 0..width {
+        n += (b[at + k] as int) * power
+        power *= 256
+    }
+    if width == 4 && n >= 2147483648 {
+        n -= 4294967296
+    }
+    if width == 2 && n >= 32768 {
+        n -= 65536
+    }
+    n
+}
+
+fn ut_text(b: List[byte], at: int, width: int) -> str {
+    var end = at
+    while end < at + width && (b[end] as int) != 0 {
+        end += 1
+    }
+    str_from_utf8(b[at..end]) else ""
+}
+
+/// The record at byte `at` of `b` (`at + 384 <= b.len`).
+fn ut_parse(b: List[byte], at: int) -> Utmp {
+    var addr = List[byte]()
+    var k = 0
+    while k < 16 {
+        (mut addr).push(b[at + 348 + k])
+        k += 1
+    }
+    Utmp {
+        kind: ut_word(b, at, 2),
+        pid: ut_word(b, at + 4, 4),
+        line: ut_text(b, at + 8, 32),
+        id: ut_text(b, at + 40, 4),
+        user: ut_text(b, at + 44, 32),
+        host: ut_text(b, at + 76, 256),
+        term: ut_word(b, at + 332, 2),
+        exit: ut_word(b, at + 334, 2),
+        session: ut_word(b, at + 336, 4),
+        secs: ut_word(b, at + 340, 4),
+        usecs: ut_word(b, at + 344, 4),
+        addr: addr,
+    }
+}
+
+/// Every whole record of `path` in order; none for a missing file. A short
+/// trailing record is left out, as last and who leave it.
+fn ut_read(path: str) -> List[Utmp] {
+    var out = List[Utmp]()
+    let b = fs_read_bytes(path) else |_| {
+        return out
+    }
+    var at = 0
+    while at + UT_SIZE <= b.len {
+        (mut out).push(ut_parse(b, at))
+        at += UT_SIZE
+    }
+    out
+}
+
+/// Make `path` with mode `perm` when it is not there (an existing file keeps its own).
+/// Whether the system keeps `path`: its directory is there.
+fn ut_kept(path: str) -> bool {
+    let cut = path.rfind("/") else -1
+    cut <= 0 || fs_is_dir(path[0..cut])
+}
+
+fn ut_ensure(path: str, perm: int) {
+    if fs_exists(path) {
+        return
+    }
+    let fd = fs_open_perm(path, 4, perm) else |_| {
+        return
+    }
+    fs_close(fd) else |_| {
+    }
+}
+
+/// `u` appended to `path` (wtmp, btmp): one write of the whole record, the file
+/// made with `perm` when missing. False when it could not be written.
+fn ut_append(path: str, u: Utmp, perm: int) -> bool {
+    if !ut_kept(path) {
+        return true
+    }
+    ut_ensure(path, perm)
+    let fd = fs_open_mode(path, 2) else |_| {
+        return false
+    }
+    var ok = true
+    fs_write_chunk(fd, ut_bytes(u)) else |_| {
+        ok = false
+    }
+    fs_close(fd) else |_| {
+    }
+    ok
+}
+
+/// The exclusive lock on `fd`, tried every 10 ms for at most two seconds.
+fn ut_lock(fd: int) -> bool {
+    var tries = 0
+    while tries < 200 {
+        var taken = false
+        fs_lock(fd, 2) else |e| match e {
+            busy => {
+                taken = true
+            },
+            _ => {
+                return false
+            },
+        }
+        if !taken {
+            return true
+        }
+        time_sleep_ms(10)
+        tries += 1
+    }
+    false
+}
+
+/// `u` written into utmp's slot for its terminal (the first record with the
+/// same `ut_id` and a login kind, or a boot's for a boot record), else at the
+/// end; under the file's lock. False when it could not be written.
+fn ut_put(path: str, u: Utmp) -> bool {
+    if !ut_kept(path) {
+        return true
+    }
+    ut_ensure(path, 420)
+    let fd = fs_open_mode(path, 3) else |_| {
+        return false
+    }
+    if !ut_lock(fd) {
+        fs_close(fd) else |_| {
+        }
+        return false
+    }
+    let all = ut_read(path)
+    var slot = all.len
+    var i = 0
+    while i < all.len {
+        let r = copy all[i]
+        let login_kind = r.kind == UT_USER_PROCESS || r.kind == UT_DEAD_PROCESS || r.kind == UT_LOGIN_PROCESS || r.kind == 5
+        let same = if u.kind == UT_BOOT_TIME || u.kind == UT_RUN_LVL then r.kind == u.kind else login_kind && r.id == u.id
+        if same {
+            slot = i
+            break
+        }
+        i += 1
+    }
+    var ok = true
+    let _at = fs_seek(fd, slot * UT_SIZE, 0) else |_| {
+        ok = false
+        0
+    }
+    if ok {
+        fs_write_chunk(fd, ut_bytes(u)) else |_| {
+            ok = false
+        }
+    }
+    fs_unlock(fd) else |_| {
+    }
+    fs_close(fd) else |_| {
+    }
+    ok
+}
+
+/// The boot's first act (pid 1): utmp emptied, and the boot's record, BOOT_TIME
+/// `reboot` on `~` at the time the boot started with the kernel's release, in
+/// utmp and wtmp. `start` is that time in seconds.
+fn ut_boot(start: int, release: str) -> bool {
+    if ut_kept(UTMP_PATH) {
+        fs_write_bytes(UTMP_PATH, List[byte]()) else |_| {
+        }
+        fs_set_mode(UTMP_PATH, 420) else |_| {
+        }
+    }
+    var u = ut_new(UT_BOOT_TIME, 0, "~", "reboot", release)
+    u.secs = start
+    u.usecs = 0
+    let a = ut_put(UTMP_PATH, u)
+    let b = ut_append(WTMP_PATH, u, 420)
+    a && b
+}
+
+/// The machine's end (logd, at the end's SIGTERM): RUN_LVL `shutdown` on `~`, in wtmp.
+fn ut_shutdown(release: str) -> bool {
+    ut_append(WTMP_PATH, ut_new(UT_RUN_LVL, 0, "~", "shutdown", release), 420)
+}
+
+/// A session's start: USER_PROCESS in utmp and wtmp.
+fn ut_login(pid: int, line: str, user: str, host: str) -> bool {
+    let u = ut_new(UT_USER_PROCESS, pid, line, user, host)
+    let a = ut_put(UTMP_PATH, u)
+    let b = ut_append(WTMP_PATH, u, 420)
+    a && b
+}
+
+/// A session's end: DEAD_PROCESS in utmp's slot (its line and id kept, the user
+/// and host cleared) and in wtmp (the line alone), `term` the signal that ended
+/// the session's program (0 for none) and `status` its exit status.
+fn ut_logout(pid: int, line: str, term: int, status: int) -> bool {
+    var u = ut_new(UT_DEAD_PROCESS, pid, line, "", "")
+    u.term = term
+    u.exit = status
+    let a = ut_put(UTMP_PATH, u)
+    var w = copy u
+    w.id = ""
+    let b = ut_append(WTMP_PATH, w, 420)
+    a && b
+}
+
+/// A refused login, in btmp (root's, 0600): `user` as the person typed it, or
+/// `UNKNOWN` for a name no account has (login.defs' LOG_UNKFAIL_ENAB no,
+/// Ubuntu's default).
+fn ut_failed(pid: int, line: str, user: str) -> bool {
+    ut_append(BTMP_PATH, ut_new(UT_USER_PROCESS, pid, line, user, ""), 384)
+}
