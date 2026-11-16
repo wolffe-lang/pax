@@ -57,7 +57,8 @@
 //! - px133: then, as pid 1, the boot's login records (user/auth/utmp.lu):
 //!   /var/run/utmp emptied (on an installed system /var is on the disk, and
 //!   a reboot must leave no session in it, as Linux's tmpfs /run does), and a
-//!   BOOT_TIME record, `reboot` on `~` with the kernel's release (`uname -r`)
+//!   BOOT_TIME record, `reboot` on `~` with the kernel's release (`uname -r`;
+//!   empty while boreutils' uname cannot read the release on PAX, wolf-lang#907)
 //!   and the time it is written, in utmp and /var/log/wtmp. A session the
 //!   previous boot never closed (a power cut) is closed by it, as on Linux:
 //!   `last` reads it as `crash`.
@@ -174,7 +175,8 @@ fn boot_clean() {
 
 /// px133: as pid 1, utmp emptied and the boot's record in utmp and wtmp
 /// (user/auth/utmp.lu's `ut_boot`), the kernel's release from `uname -r`
-/// (none when it cannot be run). A failure is one line on the console.
+/// (none when it cannot be run or answers nothing: on PAX today boreutils'
+/// uname says `-r: raw kernel field unavailable`, wolf-lang#907). A failure is one line on the console.
 fn boot_utmp() {
     if !ut_boot(time_unix_ms() / 1000, kernel_release()) {
         print("login: the boot's record could not be written to {UTMP_PATH} and {WTMP_PATH}")
