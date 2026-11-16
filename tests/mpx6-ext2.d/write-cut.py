@@ -241,4 +241,39 @@ row('write-cut-repair-clean', p.returncode in (0, 1) and check.returncode == 0,
 stats = debug(image, 'stats')
 row('write-cut-unclean-preserved', bool(re.search(r'Filesystem state:\s+not clean', stats)),
     'unclean cut root was not marked clean on resumed unmount')
+
+# A leftover that a sync did put on the disk: a valid, partial temporary (3
+# MiB of other bytes) beside the old /bin/burrowd on a clean root, made
+# offline. The same put_file must remove it through tmp_of and finish, on a
+# root e2fsck finds clean after, with no name twice.
+left = leg / 'leftover.img'
+with left.open('wb') as f:
+    f.truncate(64 * 1024 * 1024)
+p = run(['mke2fs', '-q', '-F', '-t', 'ext2', '-b', '4096', '-I', '256',
+         '-O', 'filetype,sparse_super,large_file,^resize_inode,^dir_index,^ext_attr', left])
+assert p.returncode == 0, p.stdout
+partial = leg / 'partial'
+partial.write_bytes(bytes(range(255, -1, -1)) * (3 * 4096))
+debug(left, 'mkdir /bin', True)
+debug(left, 'write %s /bin/burrowd' % old, True)
+debug(left, 'write %s /bin/burrowd.pax-tmp' % partial, True)
+assert run(['e2fsck', '-fn', left]).returncode == 0
+names(left, 'leftover', require_tmp=True)
+lserial = leg / 'leftover.serial'
+p = run([repo / 'tools/qemu-halt', '--firmware', firmware, '--serial', lserial,
+         '--timeout', '240', '--elf', work / 'kernel.elf', '--marker', 'halt|PANIC .*',
+         '--qemu', '-m', '--qemu', '1G', '--qemu', '-drive',
+         '--qemu', 'file=%s,if=none,id=d0,format=raw' % left,
+         '--qemu', '-device', '--qemu', 'virtio-blk-pci,drive=d0', work / 'write-cut.iso'])
+(leg / 'leftover.verdict').write_text(p.stdout)
+ltext = lserial.read_text(errors='replace')
+row('write-cut-leftover-resume', p.returncode == 0 and 'PASS upgrade-replace: /bin/burrowd digest ' in ltext,
+    'the leftover temporary removed by tmp_of, the replace finished')
+out = leg / 'leftover-burrowd'
+debug(left, 'dump /bin/burrowd %s' % out)
+row('write-cut-leftover-bytes', out.read_bytes() == (work / 'source').read_bytes(), 'replaced file equals source')
+names(left, 'leftover-after')
+lf = run(['e2fsck', '-fn', left])
+(leg / 'leftover-after.fsck').write_text(lf.stdout)
+row('write-cut-leftover-clean', lf.returncode == 0, 'e2fsck -fn exit %d after the leftover was removed and the replace synced' % lf.returncode)
 sys.exit(1 if failed else 0)
