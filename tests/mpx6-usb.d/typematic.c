@@ -26,8 +26,9 @@ int main(void) {
         do {
             if (read(0, &bytes[n], 1) != 1) return 3;
             stamps[n++] = millis() - begin;
-        } while (n < sizeof bytes && millis() - begin < 1600
-                 && poll(&p, 1, (int)(1600 - (millis() - begin))) > 0);
+            int remaining = (int)(1600 - (millis() - begin));
+            if (n == sizeof bytes || remaining <= 0 || poll(&p, 1, remaining) <= 0) break;
+        } while (1);
         printf("TYPEMATIC_BYTES %u", row);
         for (unsigned i = 0; i < n; ++i) printf(" %02x", bytes[i]);
         printf("\nTYPEMATIC_TIMES %u", row);
