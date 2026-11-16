@@ -25,7 +25,7 @@ int main(void) {
             unsigned char b[32];
             int moved = 0;
             ssize_t n;
-            while ((n = read(mouse, b, sizeof b)) == sizeof b) {
+            while ((n = read(mouse, b, sizeof b)) == (ssize_t)sizeof b) {
                 int32_t dx;
                 memcpy(&dx, b + 16, sizeof dx);
                 if (dx == 7) moved = 1;
