@@ -18,9 +18,11 @@ build)
     readelf -hW "$work/damage" | grep -Eq 'Type: +EXEC'
     if readelf -lW "$work/damage" | grep -q INTERP; then die 'probe is not static'; fi
     printf '/dev/vda /mnt ext2 defaults 0 0\n' > "$work/fstab"
-    printf '/bin/damage\n' > "$work/pax-run"
+    "$PAX_ROOT/tools/mkinstall" "$work/bin" temporary
+    printf '/bin/damage\n/bin/temp-probe /mnt/bin/burrowd\n' > "$work/pax-run"
     "$PAX_ROOT/tools/mkinitramfs" "$work/damage.cpio" \
         /mnt/:755 "/bin/damage=$work/damage:755" \
+        "/bin/temp-probe=$work/bin/pax-temporary:755" \
         "/etc/fstab=$work/fstab:644" "/etc/pax-run=$work/pax-run:644"
     export PAX_WOLF
     PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
@@ -50,8 +52,8 @@ run)
             "$work/damage.iso" > "$log.verdict" 2>&1 || rc=$?
         serial_norm "$log" > "$log.norm"
         # Named reds remain column zero for the recorder.
-        grep -E '^(PASS|FAIL) damage-' "$log.norm" || true
-        if [ "$rc" != 0 ] || ! grep -q '^PASS damage-probe failures=0$' "$log.norm"; then
+        grep -E '^(PASS|FAIL) (damage-|temporary-)' "$log.norm" || true
+        if [ "$rc" != 0 ] || ! grep -q '^PASS damage-probe failures=0$' "$log.norm" || ! grep -q '^PASS temporary-refused:' "$log.norm"; then
             echo "FAIL damage-$case-$firmware: probe or boot failed (boot exit $rc)"
             failed=1
         else
