@@ -54,6 +54,14 @@
 //!   `pax-boot-status record` and waits for it: the boot's first program
 //!   writes how the previous boot ended to /var/log/boot.log
 //!   (user/bootlog). Its failure is its own and never stops the login.
+//! - px133: then, as pid 1, the boot's login records (user/auth/utmp.lu):
+//!   /var/run/utmp emptied (on an installed system /var is on the disk, and
+//!   a reboot must leave no session in it, as Linux's tmpfs /run does), and a
+//!   BOOT_TIME record, `reboot` on `~` with the kernel's release (`uname -r`;
+//!   empty while boreutils' uname cannot read the release on PAX, wolf-lang#907)
+//!   and the time it is written, in utmp and /var/log/wtmp. A session the
+//!   previous boot never closed (a power cut) is closed by it, as on Linux:
+//!   `last` reads it as `crash`.
 //! - Then, as pid 1, the boot's hooks (px112, R-px112-7): each file of
 //!   `/etc/pax-boot.d` in name order (a name starting `.` left out), its
 //!   standard input /dev/null, its output on the console, as the leader of
@@ -62,6 +70,15 @@
 //!   running then is named and left to run. PAX has no service manager;
 //!   this is where a server starts (`/etc/pax-boot.d/burrowd`). The
 //!   kernel's wait for the network comes before pid 1, so before them.
+//!
+//! - px133: the login records (utmp(5); Ubuntu's login and pam_lastlog,
+//!   measured): a session's start, USER_PROCESS with the terminal's name
+//!   (`console`, `pts/N`), the account and this process's pid (the shell's,
+//!   which replaces it), in utmp and wtmp; each refused try a record in
+//!   /var/log/btmp (root's, 0600) with the name typed, or `UNKNOWN` for a
+//!   name no account has (login.defs' LOG_UNKFAIL_ENAB no, Ubuntu's
+//!   default), so a password typed as a name never reaches the file. A
+//!   record that cannot be written never stops a login.
 //!
 //! **What it does not, by name:** as pid 1 it has no getty to start it
 //! again, so after the fifth failure or the timeout it starts over
@@ -126,6 +143,7 @@ fn main() -> int {
     if pid1 {
         boot_clean()
         boot_record()
+        boot_utmp()
         boot_hooks()
     }
     loop {
@@ -153,6 +171,57 @@ fn boot_clean() {
         fs_remove("{dir}/{n}") else |_| {
         }
     }
+}
+
+/// px133: as pid 1, utmp emptied and the boot's record in utmp and wtmp
+/// (user/auth/utmp.lu's `ut_boot`), the kernel's release from `uname -r`
+/// (none when it cannot be run or answers nothing: on PAX today boreutils'
+/// uname says `-r: raw kernel field unavailable`, wolf-lang#907). A failure is one line on the console.
+fn boot_utmp() {
+    if !ut_boot(time_unix_ms() / 1000, kernel_release()) {
+        print("login: the boot's record could not be written to {UTMP_PATH} and {WTMP_PATH}")
+    }
+}
+
+/// `uname -r`'s answer, or "" when /bin/uname cannot be run.
+fn kernel_release() -> str {
+    if !fs_is_file("/bin/uname") {
+        return ""
+    }
+    let p = process.pipe() else |_| {
+        return ""
+    }
+    var c = process.command("/bin/uname")
+    process.push_arg(mut c, "-r")
+    process.set_stdout(mut c, p.write)
+    let ch = process.start(c) else |_| {
+        fs.close(take p.write) else |_| {
+        }
+        fs.close(take p.read) else |_| {
+        }
+        return ""
+    }
+    fs.close(take p.write) else |_| {
+    }
+    var r = p.read
+    let got = fs.read(mut r, 64) else ""
+    fs.close(take r) else |_| {
+    }
+    let _st = process.wait_status(take ch) else 0
+    trim(got)
+}
+
+/// The terminal's name as a login record has it (`console`, `pts/0`): what
+/// standard input is, `/dev/` taken off; "" when it is no terminal file.
+fn tty_line() -> str {
+    let raw = fs_read_link("/proc/self/fd/0") else |_| {
+        return ""
+    }
+    let path = str_from_utf8(raw) else ""
+    if !path.starts_with("/dev/") {
+        return ""
+    }
+    ut_line_of(path)
 }
 
 /// As pid 1, the boot's hooks: each file of /etc/pax-boot.d in name order,
@@ -312,6 +381,11 @@ fn session(first: str) -> int {
         if found.name.len > 0 && pw_matches(pw, shadow_entry(stext, name).field) {
             return enter(found)
         }
+        // px133: the refused try in btmp, the name only when an account has it.
+        let line = tty_line()
+        if line.len > 0 {
+            let _b = ut_failed(os_pid(), line, if found.name.len > 0 then name else "UNKNOWN")
+        }
         time_sleep_ms(FAIL_DELAY_MS)
         print("\nLogin incorrect")
         tries += 1
@@ -326,6 +400,13 @@ fn session(first: str) -> int {
 fn enter(u: users.User) -> int {
     let group = fs_read_text("/etc/group") else ""
     let groups = users.groups_of(group, u.name, u.gid)
+    // px133: the session's start in utmp and wtmp, written as root before the
+    // ids change; its pid is the shell's, which replaces this process.
+    let line = tty_line()
+    let me = os_pid()
+    if line.len > 0 {
+        let _l = ut_login(me, line, u.name, "")
+    }
     // The terminal is the account's, as login(1) gives it (px98's rule).
     fs_set_owner("/dev/stdin", u.uid, u.gid, true) else |_| {
     }
@@ -358,6 +439,9 @@ fn enter(u: users.User) -> int {
     }
     if why.len > 0 {
         eprint("login: cannot set user and group ids: {why}")
+        if line.len > 0 {
+            let _o = ut_logout(me, line, 0, 1)
+        }
         return 1
     }
     os_chdir(home) else |_| {
@@ -395,6 +479,9 @@ fn enter(u: users.User) -> int {
         },
     }
     eprint("login: failed to execute {shell}: {row}")
+    if line.len > 0 {
+        let _o = ut_logout(me, line, 0, 1)
+    }
     1
 }
 
