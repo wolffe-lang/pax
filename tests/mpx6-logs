@@ -10,7 +10,8 @@
 # G0 builds the image's tree (build/mpx6-logs/root, files.txt as tools/mkinitramfs' arguments):
 # kmain_console, the kernel every shipped image boots, with `quiet`; the installed system's run
 # list (/bin/login as pid 1, user/login built by tools/mkauth with /bin/passwd and /bin/sudo);
-# pelt as /bin/sh; the boreutils the rows run; dmesg (tools/mkdmesg); logd and last
+# pelt as /bin/sh; the boreutils the rows run (env for burrowd's hook); dmesg (tools/mkdmesg); reboot
+# and poweroff (tools/mkdiskprobe); lope for /etc/shrc's hook (tools/mklope); logd and last
 # (tools/mklogd), /bin/lastb a link to last; burrow's three programs (tools/mkburrow,
 # tools/install-burrow); /etc/pax-boot.d/burrowd and /etc/pax-boot.d/logd as the images ship
 # them (user/pax-boot.d); /etc/fstab mounting the run's own ext3 volume (label px133-log) on
@@ -49,7 +50,7 @@ done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
 
-BORE="cat chmod dd head id kill ls mkdir rm sleep stty sync tty uname users wc who yes"
+BORE="cat chmod dd env head id kill ls mkdir rm sleep stty sync tty uname users wc who yes"
 work=$PAX_BUILD/mpx6-logs
 fail=0
 need python3 readelf
@@ -79,6 +80,12 @@ if [ -z "$images" ]; then
     cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"
     "$PAX_ROOT/tools/mkdmesg" "$work/dmesg" > "$work/dmesg.txt" 2>&1 || why+=" tools/mkdmesg;"
     cp "$work/dmesg/dmesg" "$r/bin/dmesg" 2>/dev/null || why+=" no dmesg;"
+    # reboot and poweroff as the images ship them (tools/mkdiskprobe's reboot.S, by both names).
+    "$PAX_ROOT/tools/mkdiskprobe" "$work/probe" > "$work/probe.txt" 2>&1 || why+=" tools/mkdiskprobe;"
+    for p in reboot poweroff; do cp "$work/probe/reboot" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    # lope as the dev image has it (user/lope.pin, tools/mklope): /etc/shrc's hook runs it.
+    "$PAX_ROOT/tools/mklope" "$work/lope" > "$work/lope.txt" 2>&1 || why+=" tools/mklope;"
+    cp "$work/lope/lope" "$r/bin/lope" 2>/dev/null || why+=" no lope;"
     # px133: logd and last (tools/mklogd), lastb a link to last. A tree without them names them
     # missing, and the rows that need them fail by name.
     if [ -x "$PAX_ROOT/tools/mklogd" ] && "$PAX_ROOT/tools/mklogd" "$work/logd" > "$work/logd.txt" 2>&1; then
