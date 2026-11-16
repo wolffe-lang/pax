@@ -1,7 +1,7 @@
 # SOURCES — what each change was written from
 
-The clean-room rule (`CLAUDE.md`) requires this log. Every lane adds its
-entries: what it consulted, at which version, for which file, and how
+The clean-room rule (`CONTRIBUTING.md`) requires this log. Every change adds
+its entries: what it consulted, at which version, for which file, and how
 (read, black-box run, or the author's own knowledge with no text copied).
 **Linux kernel source is never an entry**: the allowed Linux material is the
 uapi headers, the syscall tables, `Documentation/`, and black-box behaviour.
