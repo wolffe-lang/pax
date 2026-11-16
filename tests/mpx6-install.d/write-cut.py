@@ -205,7 +205,10 @@ finally:
     qlog.close()
     glog.close()
 
-names(image, 'cut', require_tmp=True)
+# The temporary's name is on the disk only once an ordered write has put
+# its inode there first; either state must hold the invariants, and the
+# resume must clean the leftover or create afresh (its row says which).
+names(image, 'cut')
 fsck(image, 'cut')
 # No repair or image mutation between the cut and this reboot.
 resume = leg / 'resume.serial'
