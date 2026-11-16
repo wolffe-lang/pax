@@ -34,7 +34,7 @@ import sys
 import time
 
 ROWS = ['pointer-drawn', 'pointer-scroll', 'no-mode', 'sgr-buttons', 'drag', 'wheel', 'modifiers',
-        'relative', 'reset', 'unserved', 'owner-exits', 'owner-background', 'tracking-modes', 'alt-arrows', 'keys-interleaved', 'pty']
+        'relative', 'reset', 'unserved', 'owner-exits', 'owner-background', 'tracking-modes', 'alt-arrows', 'keys-interleaved', 'pty', 'alt-arrows-ps2']
 # The arrow, a row of eight pixels a byte (bit 7 the leftmost): its outline
 # and its fill, sixteen rows (the cell's height at scale 1).
 OUTLINE = [0x80, 0xc0, 0xa0, 0x90, 0x88, 0x84, 0x82, 0x81, 0x8f, 0xa8, 0xd4, 0x94, 0x0a, 0x0a, 0x04, 0x00]
@@ -88,6 +88,7 @@ def expected(cols, rows):
     for k, v in enumerate([False, True, False, True]):
         e[('owner-background', k)] = click_bytes(0, HERE) if v else b''
     e[('alt-arrows', 0)] = b'\x1b[1;3D\x1b[1;3C\x1b[[A\x1b[[B\x1b[[C\x1b[[D\x1b[[E'
+    e[('alt-arrows-ps2', 0)] = e[('alt-arrows', 0)]
     for k, letters in enumerate(('abcd', 'efgh')):
         a, b, c, d = (x.encode() for x in letters)
         e[('keys-interleaved', k)] = (sgr(0, HERE) + a + sgr(0, HERE, False) + b + sgr(64, HERE) + c
@@ -448,7 +449,9 @@ def run(args):
                     at(HERE); press('left')
                     at((HERE[0] + 1, HERE[1])); release('left')
                     at(HERE)
-                elif label == 'alt-arrows':
+                elif label in ('alt-arrows', 'alt-arrows-ps2'):
+                    # The latter follows keys-interleaved, which unplugged
+                    # the USB keyboard; these same chords then use PS/2.
                     hold('alt', True)
                     tap('left'); tap('right')
                     # These reservations are deliberately unchanged.
