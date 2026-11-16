@@ -235,6 +235,11 @@ pax_sched_locks:
         .globl pax_sched_state
 pax_sched_state:
         .zero 256
+        /* Urgent and queued flags: two bitmaps covering all 1024 slots. */
+        .p2align 6
+        .globl pax_sched_bits
+pax_sched_bits:
+        .zero 2 * 16 * 8
         /* px102: per-thread virtual DR0-DR7, 8 words in each of 1024 slots (64 before px126). */
         .p2align 6
         .globl pax_debugregs
