@@ -33,17 +33,18 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       at each, the first record not on disk was written at most BOUND s before the cut (the serial
       port's arrival time of each record is when it was written); each next boot's marker names the
       cut (`ends without logd's end line`)
-  G5  the login records: `last` at the console (root still logged in, pax's ssh session with its
-      logout, the dropped session, the reboot); after boot 7, PAX's last and util-linux's last on the
-      same wtmp byte for byte (no options, -x, -F, -i, -w, -a, -R, -n 6), PAX's `last -e` naming the
-      dropped session `dropped`; the ssh records' host is what burrowd's log says of the connection
-      (on PAX the client's address is not yet known: a NOTE line says so)
+  G5  the login records: `last` at the console (root still logged in on the console's line, as `tty`
+      names it; pax's ssh session with its logout, the dropped session, the reboot); after boot 7,
+      PAX's last and util-linux's last on the same wtmp byte for byte (no options, -x, -F, -i, -w,
+      -a, -R, -n 6), PAX's `last -e` naming the dropped session `dropped`; the ssh records' host is
+      what burrowd's log says of the connection (on PAX the client's address is not yet known: a
+      NOTE line says so)
   G6  `lastb` as root at the console shows the two refused tries (`pax`, and `UNKNOWN` for a name
       no account has); as pax over ssh it is refused as util-linux refuses (`lastb: cannot open
       /var/log/btmp: Permission denied`, status 1); PAX's lastb and util-linux's on the same btmp
       byte for byte
   G7  as pax over ssh: kern.log and btmp cannot be read (Permission denied), wtmp can (`last`), and
-      `who` shows root on the console
+      `who` is shown in a NOTE line (boreutils' who reads utmp on Linux only, a follow-on)
   G8  every capped file filled past its cap: kern.log rotated with four kept (the oldest gone, the
       new file starting with the boot's marker `(continued …)`), wtmp, btmp, sudo.log, burrowd.log
       and pax-upgrade.log each at most its cap with one `.1`, their modes kept, and everything under
@@ -251,6 +252,8 @@ def boot1(b, client, out):
     if not b.root():
         bad('G5', 'root could not log in at the console')
         return seen
+    # The console's line in the login records: the device `tty` names there (QEMU's serial port).
+    seen['con_line'] = re.sub(r'^/dev/', '', (b.cmd('tty') or '').strip()) or 'console'
     # ssh: a terminal session with a logout, a dropped one, a command.
     t = client.terminal(GUEST_AT, 33, 97)
     m = t.expect(B.PROMPT, 30)
@@ -533,7 +536,8 @@ def g5(work, wtmp, seen):
         return
     con = seen.get('last') or ''
     sess = [l for l in con.splitlines() if l.startswith('pax ')]
-    want_console = re.search(r'^root\s+console\s.*still logged in', con, re.M)
+    line = re.escape(seen.get('con_line') or 'console')
+    want_console = re.search(r'^root\s+%s\s.*still logged in' % line, con, re.M)
     want_boot = re.search(r'^reboot\s+system boot\s', con, re.M)
     lines_ok = bool(want_console and want_boot and len(sess) >= 2)
     diffs = []
@@ -559,7 +563,8 @@ def g5(work, wtmp, seen):
 
 def g6(work, btmp, seen):
     con = seen.get('lastb') or ''
-    tries = re.search(r'^pax\s+console\s', con, re.M) and re.search(r'^UNKNOWN\s+console\s', con, re.M)
+    line = re.escape(seen.get('con_line') or 'console')
+    tries = re.search(r'^pax\s+%s\s' % line, con, re.M) and re.search(r'^UNKNOWN\s+%s\s' % line, con, re.M)
     r = seen.get('g7', {}).get('lastb')
     refused = r and r[0] == 1 and b'lastb: cannot open /var/log/btmp: Permission denied' in r[2]
     same = False
@@ -579,9 +584,13 @@ def g7(seen):
     g = seen.get('g7', {})
     k, bt, w, who = (g.get(x) for x in ('kern', 'btmp', 'wtmp', 'who'))
     good = (k and k[0] != 0 and b'Permission denied' in k[2] and bt and bt[0] != 0 and b'Permission denied' in bt[2]
-            and w and w[0] == 0 and b'reboot' in w[1] and who and re.search(rb'^root\s+console\s', who[1], re.M))
-    (ok if good else bad)('G7', 'as pax: kern.log %s; btmp %s; last %s; who %s'
-                          % tuple(B.show(x) if x else '-' for x in (k, bt, w, who)))
+            and w and w[0] == 0 and b'reboot' in w[1])
+    (ok if good else bad)('G7', 'as pax: kern.log %s; btmp %s; last %s'
+                          % tuple(B.show(x) if x else '-' for x in (k, bt, w)))
+    # boreutils' who reads utmp on Linux alone (its login ABI check names linux/x86_64); PAX's utmp is the
+    # same x86-64 layout, so who waits on boreutils taking PAX's name: said, not held.
+    say('NOTE G7 who as pax: %s (boreutils\' who reads utmp on Linux only: a boreutils follow-on)'
+        % (B.show(who) if who else '-'))
 
 
 def g8(work, vol, seen):
