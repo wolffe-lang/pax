@@ -203,6 +203,9 @@ class Session:
                 json.loads(self.reader.readline())
                 self.execute('qmp_capabilities')
                 self.wait(r' login: ', timeout=90)
+                identity = f'kernel: {self.args.kernel_commit} sha256 {self.args.kernel_sha},'
+                if identity not in self.text():
+                    raise RuntimeError('booted kernel identity does not match the supplied ELF and commit')
                 if working:
                     self.wait(r'xhci: mouse usb2-5 .*; pointer')
                     self.type('root\n')
@@ -241,7 +244,6 @@ class Session:
                 if 'PANIC' in text or 'REFUSAL-BAD-COMMAND' in text:
                     raise RuntimeError('guest panic or incorrect shell command')
                 result = verdict(self.kind, text, before, after)
-                # The booted identity must name the exact commit used to build the image.
                 for name, ok in result:
                     print(f'{"PASS" if ok else "FAIL"} {name} {self.args.firmware} {self.args.accel}', flush=True)
                 return all(ok for _, ok in result)
@@ -273,6 +275,8 @@ def main():
     parser.add_argument('--selftest', action='store_true')
     parser.add_argument('--image')
     parser.add_argument('--output')
+    parser.add_argument('--kernel-sha')
+    parser.add_argument('--kernel-commit')
     parser.add_argument('--firmware', choices=('bios', 'uefi'), default='bios')
     parser.add_argument('--accel', choices=('auto', 'kvm', 'tcg'), default='auto')
     args = parser.parse_args()
@@ -281,6 +285,8 @@ def main():
         return 0
     if not args.image or not args.output:
         parser.error('--image and --output are required')
+    if not re.fullmatch('[0-9a-f]{64}', args.kernel_sha or '') or not re.fullmatch('[0-9a-f]{40}', args.kernel_commit or ''):
+        parser.error('--kernel-sha and --kernel-commit must name the tested ELF and exact clean head')
     good = True
     for kind in ('spare', 'sole', 'detached', 'enumeration'):
         try:
