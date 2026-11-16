@@ -459,15 +459,19 @@ def g1(text, recs, own, markers, seen):
 def g2(recs, own):
     got = [(r[4], int(r[5].split()[1])) for r in recs if r[5].startswith('px133-g2 ')]
     nums = [n for _, n in got]
-    seqs = [s for s, _ in got]
     twice = sorted({n for n in nums if nums.count(n) > 1})
     absent = sorted(set(range(1, 201)) - set(nums))
-    consecutive = all(b2 - a2 == 1 for a2, b2 in zip(seqs, seqs[1:]))
-    again = [l for _, l in own if '== logd started again in ' in l]
-    lostg2 = [l for _, l in own if 'records lost' in l or 'record lost' in l]
-    good = not twice and not absent and consecutive and again
-    (ok if good else bad)('G2', '%d of 200 records once each (twice: %s, absent: %s), sequence numbers %s, %d restart '
-                          'line(s), %d loss line(s) in the log'
+    # Every record kern.log holds from the first numbered one to the last, the kernel's own lines between
+    # them too (logd's SIGKILL is one): their sequence numbers one apart, none skipped, none twice.
+    at = [k for k, r in enumerate(recs) if r[5].startswith('px133-g2 ')]
+    span = recs[at[0]:at[-1] + 1] if at else []
+    seqs = [r[4] for r in span]
+    consecutive = bool(span) and all(b2 - a2 == 1 for a2, b2 in zip(seqs, seqs[1:]))
+    again = [l for i, l in own if '== logd started again in ' in l and span and span[0][0] < i < span[-1][0]]
+    lostg2 = [l for i, l in own if ('records lost' in l or 'record lost' in l) and span and span[0][0] < i < span[-1][0]]
+    good = not twice and not absent and consecutive and again and not lostg2
+    (ok if good else bad)('G2', '%d of 200 records once each (twice: %s, absent: %s), the sequence numbers from the '
+                          'first to the last %s, %d restart line(s) and %d loss line(s) between them'
                           % (len(set(nums)), twice[:5], absent[:5], 'consecutive' if consecutive else 'NOT consecutive',
                              len(again), len(lostg2)))
 
