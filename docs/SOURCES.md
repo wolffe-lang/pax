@@ -2558,3 +2558,16 @@ speed conversion, PTY flag normalization, master/slave sharing and fault behavio
 | Linux 7.2.4, run with static probes in containers | binary | `user/elf/termios2probe.c`: every input/output baud encoding, BOTHER, legacy interoperation, the master's setters, short and read-only buffers, flushing, `tcgetattr`, `tcsetattr`, `cfgetispeed`, `isatty` and window-size-based column layout; observed references in `tests/mpx5-pty.d/linux/termios2*.txt` |
 | glibc 2.44 and GCC 16.2.1; pelt at `00c12d72abf0d2783afbb43c91c901abd4eb4083` | binaries and the project's own shell | the same C probe linked statically against glibc 2.44, and an unmodified static pelt reaching its interactive prompt |
 | PAX's own `kernel/console`, `kernel/pty`, `user/elf/ptyprobe.c`, `tests/mpx5-pty` | this tree | the shared terminal state, job-control and flush rules, and the existing terminal regression rows |
+## Console application input
+
+No other operating system's implementation source was read. The Linux VT's saved keyboard rows remain unchanged;
+bare Alt+Left/Right intentionally use xterm's application encoding instead of reserving an unimplemented VT switch.
+Alt+Fn is unchanged.
+
+| source | version | read, for |
+|---|---|---|
+| XTerm Control Sequences, Mouse Tracking and SGR mouse encoding | the documented 1000, 1002, 1003 and 1006 modes | clicks, held-button motion, buttonless motion as Cb 35, modifier bits, 1-based coordinates and releases |
+| QEMU QMP `query-qmp-schema` and `input-send-event` | QEMU 8.2.2, queried without a guest | resolve the QKeyCode enum through command argument references; save its schema for the off-boot regression; send uppercase text as Shift plus lowercase QKeyCode events |
+| PAX's own `kernel/console`, `kernel/screen`, `kernel/files` and yew's input decoder, mouse routing and context-menu geometry | the projects' own code | the tracking-mode handoff, foreground ownership, event bytes, menu hit tests and the absence of a VT-switch action |
+| Console pointer and keyboard probes under QEMU | the same static probe before and after the change | exact SGR bytes for the three tracking modes, ownership and foreground guards, Alt-arrow bytes, unchanged Alt+Fn and F1–F5; a real yew menu's hover and click frames |
+

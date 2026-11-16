@@ -2,7 +2,8 @@
  * mouse reports it types. No terminal emulator's, kernel's or C library's
  * source was consulted. The modes and the report encoding are read only as
  * the XTerm Control Sequences document gives them ("Mouse Tracking":
- * button-event tracking, 1002; SGR, 1006); the program prints every byte it
+ * normal tracking 1000, button-event tracking 1002, all-motion 1003;
+ * SGR encoding 1006); the program prints every byte it
  * reads as hex, so tools/pointer-session judges them by the document
  * independently of this program. Results go to stdout (the console).
  *
@@ -35,7 +36,8 @@
  *   unserved          1002 alone (0); 1006 alone (1); 1000 with 1006 (2);
  *                     1003 with 1006 (3); 9 with 1006 (4); 1006 then 1002
  *                     (5); then DECRST 1000, not the selected one (6);
- *                     then 1005 in 1006's place (7)
+ *                     then 1005 in 1006's place (7); steps 2, 3, 5 and 6
+ *                     must report clicks, the rest must remain silent
  *   owner-exits       the probe's own mode (0); a child's that exits
  *                     without resetting it (1); a child's killed by
  *                     SIGKILL (2); the probe's own again (3)
