@@ -69,6 +69,22 @@ class Verdicts(unittest.TestCase):
             self.assertFalse(helpers.evaluate(wrong))
         self.assertFalse(helpers.checked_api("pub fn put(p: u64) {}"))
 
+    def test_helper_uefi_csi(self):
+        spec = importlib.util.spec_from_file_location("helper_rows", path.with_name("helper_rows.py"))
+        helpers = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helpers)
+        lines = ["PASS " + row + "\n" for row in helpers.ROWS]
+        csi = "\x1b[01;01H\x1b[01;01H"
+        text = "firmware boot\n" + csi + "".join(lines)
+        self.assertTrue(helpers.evaluate(text))
+        for line in lines:
+            self.assertFalse(helpers.evaluate(text.replace(line, "")))
+            self.assertFalse(helpers.evaluate(text + csi + line))
+        for suffix in ("\x1b[31mFAIL other\x1b[0m\n", "\x1b[2JPANIC page fault\n"):
+            self.assertFalse(helpers.evaluate(text + suffix))
+        self.assertFalse(helpers.evaluate(text.replace(csi, "not-a-control ")))
+        self.assertFalse(helpers.evaluate(text.replace(csi, "\x1b[01;")))
+
 
 if __name__ == "__main__":
     unittest.main()
