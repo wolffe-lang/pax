@@ -118,9 +118,27 @@
 //! holds every change a system call made before the call returns;
 //! write-back marks it and writes it at `sync` (fsync, syncfs, sync,
 //! unmount, halt, reboot) or when the clock hand takes it. `sync` writes
-//! every dirty buffer of a device, in the order of its slots, then sends the
-//! device a FLUSH when it takes one, so what is written is on the disk's
-//! medium, not in its cache. The counters say what each policy cost.
+//! every dirty buffer of a device, then sends the device a FLUSH when it
+//! takes one, so what is written is on the disk's medium, not in its cache.
+//! The counters say what each policy cost.
+//!
+//! **Order (px151, pax#442).** A power cut lands between two writes, so the
+//! order of the writes is what a cut can leave. A plain (unjournalled)
+//! volume marks its metadata with `dirty_meta` and an order class, 0 to
+//! CLASSES - 1 (kernel/ext2 names them: the allocation bitmaps, group
+//! descriptors and superblock 0; the single, double and triple indirect
+//! blocks 1, 2 and 3, a symbolic link's block 1; the inode tables 4; the
+//! directory blocks 5). `sync` writes the buffers of no class (file data) and class 0, then
+//! each class in turn, and FLUSHes before it writes a class after one it
+//! wrote, so the disk's medium never holds a block ahead of one it depends
+//! on: an inode before the bitmap that allocates it and the blocks it
+//! points at, a name before the inode it names. Under write-back the clock
+//! hand passes a dirty metadata buffer by, as it passes a running
+//! transaction's, so metadata reaches the disk only in that order (at
+//! `sync`, the flusher's included, between two calls, or at kernel/ext2's
+//! `order`); when every buffer it could take is such metadata, it is all
+//! written in order first, said once and counted (`early`). Write-through
+//! is unchanged: each change is written in the calls' own order.
 //!
 //! **The journal's buffers (px68).** kernel/journal marks a metadata
 //! block it holds for the running transaction (`jdirty`: B_JRUN, and
@@ -244,6 +262,7 @@ const HX_ESIZE: u64 = 8
 const HX_ACRC: u64 = 9
 const HX_HCRC: u64 = 10
 const S_PINNED: u64 = 104 // px68: misses that found every buffer held by a running transaction
+const S_EARLY: u64 = 110 // px151: metadata written in order before a sync, the cache full of it
 const S_REQ: u64 = 128 // the request record (8 words, kernel/vblk's layout)
 
 // What the table read found.
@@ -341,6 +360,16 @@ const B_DIRTY: u64 = 2
 const B_REF: u64 = 4
 const B_JRUN: u64 = 8 // px68: in the running transaction: never written home or evicted
 const B_JMETA: u64 = 16 // px68: a journalled volume's metadata (logged, awaiting its checkpoint)
+// px151 (pax#442): a plain volume's metadata, marked by `dirty_meta`, and
+// its order class (bits 6-8): written class by class, never evicted while
+// dirty under write-back (the module's header says why).
+const B_META: u64 = 32
+const B_CLASS_SHIFT: u64 = 6
+const B_CLASS: u64 = 448
+/// px151: the order classes `dirty_meta` takes, 0 to CLASSES - 1: every
+/// dirty buffer of class k reaches the disk, FLUSHed, before any of a
+/// higher class is written.
+pub const CLASSES: u64 = 6
 
 /// The cache's counters: buffers found, read from the disk, taken by
 /// the hand, written (marked dirty, then written), marked dirty while
@@ -2163,7 +2192,7 @@ fn write_slot(s: u64) -> u64 {
     if r == 0 && hw(s, H_FLAGS) & B_DIRTY != 0 {
         // Only a successful home write retires its dirty metadata. A failed
         // slot remains dirty, so the clock hand cannot later evict it as clean.
-        put_hw(s, H_FLAGS, hw(s, H_FLAGS) & !(B_DIRTY | B_JMETA))
+        put_hw(s, H_FLAGS, hw(s, H_FLAGS) & !(B_DIRTY | B_JMETA | B_META | B_CLASS))
         put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) - 1)
     }
     r
@@ -2189,6 +2218,56 @@ fn victim() -> u64 {
     if made == 0 {
         return NB
     }
+    let s = hand_pick(made)
+    if s != NB {
+        return s
+    }
+    // px151: every buffer the hand could take is dirty metadata awaiting its
+    // ordered write: write it now, in order, on every disk, and take one.
+    if st(S_POLICY) == WRITE_BACK && meta_waiting() {
+        put_st(S_EARLY, st(S_EARLY) + 1)
+        if !said(0, 16) {
+            log.put("block: the cache is full of metadata awaiting its ordered write: written in order now, before the sync")
+            log.end()
+        }
+        var d: u64 = 0
+        while d < count() {
+            let _o = ordered(d, false)
+            d += 1
+        }
+        let s2 = hand_pick(made)
+        if s2 != NB {
+            return s2
+        }
+    }
+    put_st(S_PINNED, st(S_PINNED) + 1)
+    if !said(0, 8) {
+        log.put("block: no buffer to be had: every one of the ")
+        log.dec(made as int)
+        log.put(" is held by a running transaction or would not write")
+        log.end()
+    }
+    NB
+}
+
+/// px151: whether a dirty metadata buffer is waiting for its ordered write.
+fn meta_waiting() -> bool {
+    var s: u64 = 0
+    while s < st(S_MADE) {
+        if hw(s, H_FLAGS) & (B_DIRTY | B_META | B_JRUN) == (B_DIRTY | B_META) {
+            return true
+        }
+        s += 1
+    }
+    false
+}
+
+/// The clock hand's next buffer not looked at since it last passed,
+/// written first when dirty, among the `made`: NB when none can be had.
+/// px151: under write-back a plain volume's dirty metadata is passed by, as
+/// a running transaction's is: it reaches the disk only in its order.
+fn hand_pick(made: u64) -> u64 {
+    let wb = st(S_POLICY) == WRITE_BACK
     var n: u64 = 0
     while n < 3 * made {
         let s = st(S_HAND) % made
@@ -2196,6 +2275,10 @@ fn victim() -> u64 {
         let f = hw(s, H_FLAGS)
         if f & B_JRUN != 0 {
             n += 1 // px68: the running transaction's: not written home, not taken
+            continue
+        }
+        if wb && f & (B_DIRTY | B_META) == (B_DIRTY | B_META) {
+            n += 1
             continue
         }
         if f & B_REF != 0 {
@@ -2214,13 +2297,6 @@ fn victim() -> u64 {
             return s
         }
         n += 1
-    }
-    put_st(S_PINNED, st(S_PINNED) + 1)
-    if !said(0, 8) {
-        log.put("block: no buffer to be had: every one of the ")
-        log.dec(made as int)
-        log.put(" is held by a running transaction or would not write")
-        log.end()
     }
     NB
 }
@@ -2277,7 +2353,7 @@ pub fn fresh(d: u64, blk: u64, bsize: u64) -> u64 {
     // px68: a block in the running transaction stays in it (a new
     // indirect block made again); a committed one's old contents are no
     // longer what it holds, so it is no longer awaiting a checkpoint.
-    put_hw(s, H_FLAGS, (hw(s, H_FLAGS) & (B_DIRTY | B_JRUN)) | B_VALID | B_REF)
+    put_hw(s, H_FLAGS, (hw(s, H_FLAGS) & (B_DIRTY | B_JRUN | B_META | B_CLASS)) | B_VALID | B_REF)
     kbump(K_FRESH, 1)
     va
 }
@@ -2286,6 +2362,21 @@ pub fn fresh(d: u64, blk: u64, bsize: u64) -> u64 {
 /// (write-through) or marked (write-back). 0, -EIO, or -ENOSPC when the
 /// block is not in the cache (a caller that broke the rule above).
 pub fn dirty(d: u64, blk: u64, bsize: u64) -> u64 {
+    mark(d, blk, bsize, 0)
+}
+
+/// px151 (pax#442): metadata block `blk` of a plain volume on disk `d`
+/// has been changed in its buffer: as `dirty`, and of order class `class`
+/// (0 to CLASSES - 1). Under write-back it reaches the disk only in its
+/// class's turn (`sync`, `order`), never by the clock hand while another
+/// buffer can be had.
+pub fn dirty_meta(d: u64, blk: u64, bsize: u64, class: u64) -> u64 {
+    mark(d, blk, bsize, if class < CLASSES { class + 1 } else { CLASSES })
+}
+
+/// `dirty`'s and `dirty_meta`'s: `c` 0 for a buffer of no class (file
+/// data, a raw device's block), else its class + 1.
+fn mark(d: u64, blk: u64, bsize: u64, c: u64) -> u64 {
     let s = find(key(d, bsize, blk))
     if s == NB {
         return neg(ENOSPC)
@@ -2296,9 +2387,10 @@ pub fn dirty(d: u64, blk: u64, bsize: u64) -> u64 {
     } else {
         // Mark the attempted change dirty even in write-through mode. A
         // failed write must remain represented until a real successful retry.
-        put_hw(s, H_FLAGS, f | B_DIRTY)
         put_st(S_COUNT + K_DIRTY, st(S_COUNT + K_DIRTY) + 1)
     }
+    let kept = f & !(B_META | B_CLASS)
+    put_hw(s, H_FLAGS, if c == 0 { kept | B_DIRTY } else { kept | B_DIRTY | B_META | ((c - 1) << B_CLASS_SHIFT) })
     if st(S_POLICY) == WRITE_THROUGH && f & B_JRUN == 0 {
         return write_slot(s)
     }
@@ -2306,25 +2398,137 @@ pub fn dirty(d: u64, blk: u64, bsize: u64) -> u64 {
 }
 
 /// Write every dirty buffer of disk `d`, then FLUSH it: 0 or -EIO (the
-/// first error; the rest are still tried).
+/// first error; the rest of a class are still tried). px151: the buffers
+/// of no class (file data) and class 0 first, then each class in turn,
+/// FLUSHed before the next is written; a class after one whose write
+/// failed stays dirty for the next sync, so the disk never holds a block
+/// ahead of one it depends on.
 pub fn sync(d: u64) -> u64 {
     if !present(d) {
         return 0
     }
+    let err = ordered(d, true)
+    let f = flush(d)
+    if err != 0 { err } else { f }
+}
+
+/// px151 (pax#442): the dirty metadata of disk `d` written class by class
+/// (no file data), each class FLUSHed before the next, and the last one
+/// FLUSHed: kernel/ext2's ordered write (`settle`). 0 or the first -EIO.
+pub fn order(d: u64) -> u64 {
+    if !present(d) {
+        return 0
+    }
+    let (err, owed) = ordered_owed(d, false)
+    if err != 0 {
+        return err
+    }
+    if owed { flush(d) } else { 0 }
+}
+
+/// px151: `sync`'s and `order`'s writes: with `data`, the buffers of no
+/// class beside class 0; then class 1 and on. The first -EIO, or 0.
+fn ordered(d: u64, data: bool) -> u64 {
+    let (err, _owed) = ordered_owed(d, data)
+    err
+}
+
+/// `ordered`, and whether a write is not FLUSHed yet.
+fn ordered_owed(d: u64, data: bool) -> (u64, bool) {
+    var owed = false
+    if data {
+        let (n, e) = pass(d, 0)
+        if e != 0 {
+            return (e, true)
+        }
+        owed = n > 0
+    }
+    var c: u64 = 1
+    while c <= CLASSES {
+        if waiting(d, c) {
+            if owed && c > 1 {
+                // the classes before it on the disk's medium first
+                let f = flush(d)
+                if f != 0 {
+                    return (f, true)
+                }
+            }
+            let (n, e) = pass(d, c)
+            if e != 0 {
+                return (e, true)
+            }
+            if n > 0 {
+                owed = true
+            }
+        }
+        c += 1
+    }
+    (0, owed)
+}
+
+/// px151: a buffer's class + 1 (0: none).
+fn class_of(f: u64) -> u64 {
+    if f & B_META == 0 { 0 } else { ((f & B_CLASS) >> B_CLASS_SHIFT) + 1 }
+}
+
+/// px151: whether disk `d` has a dirty buffer of `class_of` `c` that no
+/// running transaction holds.
+fn waiting(d: u64, c: u64) -> bool {
+    var s: u64 = 0
+    while s < st(S_MADE) {
+        let f = hw(s, H_FLAGS)
+        if f & (B_DIRTY | B_JRUN) == B_DIRTY && class_of(f) == c && key_dev(hw(s, H_KEY)) == d + 1 {
+            return true
+        }
+        s += 1
+    }
+    false
+}
+
+/// px151: every dirty buffer of disk `d` of `class_of` `c` that no running
+/// transaction holds, written: (how many, the first -EIO or 0; the rest of
+/// the class are still tried).
+fn pass(d: u64, c: u64) -> (u64, u64) {
+    var n: u64 = 0
     var err: u64 = 0
     var s: u64 = 0
     while s < st(S_MADE) {
         // px68: a running transaction's buffer is the journal's to write
-        if hw(s, H_FLAGS) & (B_DIRTY | B_JRUN) == B_DIRTY && key_dev(hw(s, H_KEY)) == d + 1 {
+        let f = hw(s, H_FLAGS)
+        if f & (B_DIRTY | B_JRUN) == B_DIRTY && class_of(f) == c && key_dev(hw(s, H_KEY)) == d + 1 {
             let w = write_slot(s)
             if w != 0 && err == 0 {
                 err = w
             }
+            n += 1
         }
         s += 1
     }
-    let f = flush(d)
-    if err != 0 { err } else { f }
+    (n, err)
+}
+
+/// px151 (pax#442): block `blk` of disk `d` written now when it is dirty,
+/// then the disk FLUSHed: kernel/ext2's directory block just made, on the
+/// disk's medium before the inode's pointer to it is written in its class.
+/// 0, -EIO, or -ENOSPC when the cache does not hold it.
+pub fn write_now(d: u64, blk: u64, bsize: u64) -> u64 {
+    let s = find(key(d, bsize, blk))
+    if s == NB {
+        return neg(ENOSPC)
+    }
+    if hw(s, H_FLAGS) & (B_DIRTY | B_JRUN) == B_DIRTY {
+        let w = write_slot(s)
+        if w != 0 {
+            return w
+        }
+    }
+    flush(d)
+}
+
+/// px151: how many times the cache, full of dirty metadata, wrote it in
+/// order before a sync (the clock hand found nothing else to take).
+pub fn early() -> u64 {
+    if base() == 0 { 0 } else { st(S_EARLY) }
 }
 
 // --- px68: the journal's side of the cache ----------------------------------------
