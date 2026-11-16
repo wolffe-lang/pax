@@ -2746,6 +2746,87 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px133: the system's logs. logd keeps the kernel's log on disk
+  # (/var/log/kern.log on an ext3 volume the image mounts, across reboots,
+  # a restart, a wrapped ring and five power cuts), login, burrowd, pid 1 and
+  # logd write the login records, and last, lastb and who read them; every
+  # file of /var/log is held to its cap. The image is reached from the
+  # runner as from a LAN, as mpx5-burrowd's is. L1 holds PAX's last and lastb
+  # byte for byte to the runner's util-linux on crafted records; G5 and G6 to
+  # the same on the records the guest wrote. G0 builds as the runner's user;
+  # the boots need root for the tap and dnsmasq, so they run under sudo.
+  mpx6-logs:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-logs')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, openssh, git, dnsmasq, iproute2, e2fsprogs, util-linux (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev openssh-client git dnsmasq-base iproute2 e2fsprogs util-linux
+          qemu-system-x86_64 --version
+          last --version
+          sudo -n true && echo "sudo -n: yes"
+          ls -l /dev/net/tun
+          ls -l /dev/kvm || true
+          python3 --version
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-logs-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image's tree and kernels (G0), the plan's legs
+        run: tests/mpx6-logs --no-boot $PAX_LEGS
+
+      - name: last against util-linux, and the logs on PAX from the LAN, the plan's legs (root, for the tap)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_REQUIRE_BURROWD_RIG: "1"
+        run: sudo -E env "PATH=$PATH" tests/mpx6-logs --images build/mpx6-logs $PAX_LEGS
+
+      - name: the transcripts the runner's again (the boots ran as root)
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" build/mpx6-logs build/mpx6-logs-runs build/mpx6-logs-cases || true
+
+      - name: keep the transcripts, the volumes' logs and the records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-logs
+          path: |
+            build/mpx6-logs/files.txt
+            build/mpx6-logs/missing.txt
+            build/mpx6-logs/*.txt
+            build/mpx6-logs/*/kmain_console.build-kernel.log
+            build/mpx6-logs-cases/*.pax
+            build/mpx6-logs-cases/*.linux
+            build/mpx6-logs-runs/*/boot*/serial.log
+            build/mpx6-logs-runs/*/work/kern-all.txt
+            build/mpx6-logs-runs/*/work/wtmp
+            build/mpx6-logs-runs/*/work/btmp
+            build/mpx6-logs-runs/*/work/*.pax
+            build/mpx6-logs-runs/*/work/*.linux
+            build/mpx6-logs-runs/*/dnsmasq.log
+          retention-days: 14
+          if-no-files-found: warn
+
   # px23: TCP. Ten static Linux programs (user/net: eight C files built
   # here by tools/mknet against this runner's glibc, and two wolf
   # programs built by the pinned wolf) run unmodified on
@@ -6270,6 +6351,7 @@ jobs:
       - mpx4-console-net
       - mpx4-console-push
       - mpx5-burrowd
+      - mpx6-logs
       - mpx4-udp
       - mpx4-tcp
       - mpx4-ready
