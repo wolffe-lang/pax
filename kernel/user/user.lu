@@ -832,13 +832,13 @@ fn writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     var sum: u64 = 0
     var i: u64 = 0
     while i < cnt {
-        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        let l = (uaccess.get64(pml4, iov + i * 16 + 8) else |_| { return NEG_EFAULT })
         if l >= 0x8000000000000000 || sum + l >= 0x8000000000000000 {
             return NEG_EINVAL
         }
         // Every part is the caller's to read before one byte is taken
         // (Linux answered -EFAULT for a bad second part and wrote nothing).
-        if l > 0 && !uaccess.readable(pml4, uaccess.get64(pml4, iov + i * 16), l) {
+        if l > 0 && !uaccess.readable(pml4, (uaccess.get64(pml4, iov + i * 16) else |_| { return NEG_EFAULT }), l) {
             return NEG_EFAULT
         }
         sum += l
@@ -858,8 +858,8 @@ fn writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     var total: u64 = 0
     i = 0
     while i < cnt {
-        let base = uaccess.get64(pml4, iov + i * 16)
-        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        let base = (uaccess.get64(pml4, iov + i * 16) else |_| { return NEG_EFAULT })
+        let l = (uaccess.get64(pml4, iov + i * 16 + 8) else |_| { return NEG_EFAULT })
         let r = if l == 0 && total > 0 { 0 } else if piped { files.pipe_write_part(area(), pml4, fd, base, l) } else { write(fd, base, l) }
         if r == files.WAIT {
             if total == 0 {
@@ -1181,13 +1181,14 @@ fn refusal_line(nr: u64, r: u64) {
 }
 
 /// Write the str `s` at user `va` and a NUL (checked by the caller).
-fn put_str(va: u64, s: str) {
+fn put_str(va: u64, s: str) -> u64 ! {fault} {
     var k: u64 = 0
     for b in s.bytes() {
-        uaccess.put(paging.live(), va + k, b as int as u64, 1)
+        let _stored1 = uaccess.put(paging.live(), va + k, b as int as u64, 1) else |_| { return fault }
         k += 1
     }
-    uaccess.put(paging.live(), va + k, 0, 1)
+    let _stored2 = uaccess.put(paging.live(), va + k, 0, 1) else |_| { return fault }
+    0
 }
 
 /// `uname(buf)`: struct new_utsname, six fields of 65 bytes.
@@ -1196,13 +1197,13 @@ fn uname(buf: u64) -> u64 {
     if !uaccess.writable(pml4, buf, 390) {
         return NEG_EFAULT
     }
-    uaccess.zero(pml4, buf, 390)
-    put_str(buf, "PAX")
-    put_str(buf + 65, "pax")
-    put_str(buf + 130, "0.0.1")
-    put_str(buf + 195, "#1 px12")
-    put_str(buf + 260, "x86_64")
-    put_str(buf + 325, "(none)")
+    let _stored3 = uaccess.zero(pml4, buf, 390) else |_| { return NEG_EFAULT }
+    let _copied1 = put_str(buf, "PAX") else |_| { return NEG_EFAULT }
+    let _copied2 = put_str(buf + 65, "pax") else |_| { return NEG_EFAULT }
+    let _copied3 = put_str(buf + 130, "0.0.1") else |_| { return NEG_EFAULT }
+    let _copied4 = put_str(buf + 195, "#1 px12") else |_| { return NEG_EFAULT }
+    let _copied5 = put_str(buf + 260, "x86_64") else |_| { return NEG_EFAULT }
+    let _copied6 = put_str(buf + 325, "(none)") else |_| { return NEG_EFAULT }
     0
 }
 
@@ -1221,7 +1222,7 @@ fn arch_prctl(code: u64, addr: u64) -> u64 {
         if !uaccess.writable(pml4, addr, 8) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, addr, sched.self_fs(), 8)
+        let _stored4 = uaccess.put(pml4, addr, sched.self_fs(), 8) else |_| { return NEG_EFAULT }
         return 0
     }
     NEG_EINVAL
@@ -1244,7 +1245,7 @@ fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
             if !uaccess.readable(pml4, arg2 + i, 1) {
                 return NEG_EFAULT
             }
-            let b = uaccess.get(pml4, arg2 + i, 1)
+            let b = (uaccess.get(pml4, arg2 + i, 1) else |_| { return NEG_EFAULT })
             if b == 0 {
                 break
             }
@@ -1300,12 +1301,12 @@ fn prctl(option: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> u64 {
     if !uaccess.writable(pml4, arg2, 16) {
         return NEG_EFAULT
     }
-    uaccess.zero(pml4, arg2, 16)
+    let _stored5 = uaccess.zero(pml4, arg2, 16) else |_| { return NEG_EFAULT }
     let n0 = sched.self_name(0)
     let n1 = sched.self_name(1)
     if n0 != 0 || n1 != 0 {
-        uaccess.put(pml4, arg2, n0, 8)
-        uaccess.put(pml4, arg2 + 8, n1 & 0x00ffffffffffffff, 7)
+        let _stored6 = uaccess.put(pml4, arg2, n0, 8) else |_| { return NEG_EFAULT }
+        let _stored7 = uaccess.put(pml4, arg2 + 8, n1 & 0x00ffffffffffffff, 7) else |_| { return NEG_EFAULT }
         return 0
     }
     if sched.self_prog() == sched.ELF_PROG {
@@ -1340,8 +1341,8 @@ fn prlimit(pid: u64, res: u64, new: u64, old: u64) -> u64 {
             return NEG_EFAULT
         }
         let (soft, hard) = procfs.rlimit(res, files.FDS) // px24: 128 descriptors; px34: 1024
-        uaccess.put(pml4, old, soft, 8)
-        uaccess.put(pml4, old + 8, hard, 8)
+        let _stored8 = uaccess.put(pml4, old, soft, 8) else |_| { return NEG_EFAULT }
+        let _stored9 = uaccess.put(pml4, old + 8, hard, 8) else |_| { return NEG_EFAULT }
     }
     0
 }
@@ -1369,7 +1370,7 @@ fn getrandom(buf: u64, len: u64, flags: u64) -> u64 {
         while i < n {
             let w = process.random_word(i)
             let k = if n - i < 8 { n - i } else { 8 }
-            uaccess.put(pml4, buf + i, w, k)
+            let _stored10 = uaccess.put(pml4, buf + i, w, k) else |_| { return NEG_EFAULT }
             i += k
         }
         return n
@@ -1416,8 +1417,8 @@ fn clock_gettime(clk: u64, tp: u64) -> u64 {
         return NEG_EFAULT
     }
     let ns = if is_wall(clk) { wall_ns() } else { now_ns() }
-    uaccess.put(pml4, tp, ns / NS_PER_SEC, 8)
-    uaccess.put(pml4, tp + 8, ns % NS_PER_SEC, 8)
+    let _stored11 = uaccess.put(pml4, tp, ns / NS_PER_SEC, 8) else |_| { return NEG_EFAULT }
+    let _stored12 = uaccess.put(pml4, tp + 8, ns % NS_PER_SEC, 8) else |_| { return NEG_EFAULT }
     0
 }
 
@@ -1431,7 +1432,7 @@ fn time(tloc: u64) -> u64 {
         if !uaccess.writable(pml4, tloc, 8) {
             return NEG_EFAULT
         }
-        uaccess.put(pml4, tloc, sec, 8)
+        let _stored13 = uaccess.put(pml4, tloc, sec, 8) else |_| { return NEG_EFAULT }
     }
     sec
 }
@@ -1443,14 +1444,14 @@ fn gettimeofday(tv: u64, tz: u64) -> u64 {
             return NEG_EFAULT
         }
         let ns = wall_ns()
-        uaccess.put(pml4, tv, ns / NS_PER_SEC, 8)
-        uaccess.put(pml4, tv + 8, ns % NS_PER_SEC / 1000, 8)
+        let _stored14 = uaccess.put(pml4, tv, ns / NS_PER_SEC, 8) else |_| { return NEG_EFAULT }
+        let _stored15 = uaccess.put(pml4, tv + 8, ns % NS_PER_SEC / 1000, 8) else |_| { return NEG_EFAULT }
     }
     if tz != 0 {
         if !uaccess.writable(pml4, tz, 8) {
             return NEG_EFAULT
         }
-        uaccess.zero(pml4, tz, 8)
+        let _stored16 = uaccess.zero(pml4, tz, 8) else |_| { return NEG_EFAULT }
     }
     0
 }
@@ -1464,8 +1465,8 @@ fn sleep_until(req: u64, abs: bool, wall: bool) -> (u64, u64) {
     if !uaccess.readable(pml4, req, 16) {
         return (0, NEG_EFAULT)
     }
-    let sec = uaccess.get64(pml4, req)
-    let nsec = uaccess.get64(pml4, req + 8)
+    let sec = (uaccess.get64(pml4, req) else |_| { return (0, NEG_EFAULT) })
+    let nsec = (uaccess.get64(pml4, req + 8) else |_| { return (0, NEG_EFAULT) })
     if nsec >= NS_PER_SEC || sec >= 0x8000000000000000 {
         return (0, NEG_EINVAL)
     }
@@ -1538,7 +1539,7 @@ fn serve(f: u64) -> u64 {
         let ct = sched.self_ctid()
         let pml4 = paging.live()
         if ct != 0 && uaccess.writable(pml4, ct, 4) {
-            uaccess.put(pml4, ct, 0, 4)
+            let _stored17 = uaccess.put(pml4, ct, 0, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
             futex.wake_tid(pml4, ct)
         }
         return sched.end_thread(f, (a0 & 0xff) << 8)
@@ -1603,7 +1604,7 @@ fn serve(f: u64) -> u64 {
             put_word(f, W_RAX, NEG_EFAULT)
             return f
         }
-        return sched.suspend_current(f, uaccess.get64(pml4, a0))
+        return sched.suspend_current(f, (uaccess.get64(pml4, a0) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }))
     }
     if nr == SYS_SIGALTSTACK {
         // px24: it reads the caller's stack pointer from the frame.

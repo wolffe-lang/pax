@@ -408,36 +408,35 @@ fn addr_in(pml4: u64, addr: u64, len: u64) -> (u64, u64, u64) {
     if !uaccess.readable(pml4, addr, ADDR) {
         return (neg(EFAULT), 0, 0)
     }
-    if uaccess.get(pml4, addr, 2) != AF_INET {
+    if (uaccess.get(pml4, addr, 2) else |_| { return (neg(EFAULT), 0, 0) }) != AF_INET {
         return (neg(EAFNOSUPPORT), 0, 0)
     }
-    let port = uaccess.get(pml4, addr + 2, 1) << 8 | uaccess.get(pml4, addr + 3, 1)
-    let ip4 = uaccess.get(pml4, addr + 4, 1) << 24 | uaccess.get(pml4, addr + 5, 1) << 16 | uaccess.get(pml4, addr + 6, 1) << 8 | uaccess.get(pml4, addr + 7, 1)
+    let port = (uaccess.get(pml4, addr + 2, 1) else |_| { return (neg(EFAULT), 0, 0) }) << 8 | (uaccess.get(pml4, addr + 3, 1) else |_| { return (neg(EFAULT), 0, 0) })
+    let ip4 = (uaccess.get(pml4, addr + 4, 1) else |_| { return (neg(EFAULT), 0, 0) }) << 24 | (uaccess.get(pml4, addr + 5, 1) else |_| { return (neg(EFAULT), 0, 0) }) << 16 | (uaccess.get(pml4, addr + 6, 1) else |_| { return (neg(EFAULT), 0, 0) }) << 8 | (uaccess.get(pml4, addr + 7, 1) else |_| { return (neg(EFAULT), 0, 0) })
     (0, ip4, port)
 }
 
 /// Whether a `struct sockaddr_in` can be written at user `addr` with its
-/// length at `lenp` (getsockname(2)'s value-result pair): 0, or -errno.
-fn addr_room(pml4: u64, addr: u64, lenp: u64) -> u64 {
+/// length at `lenp`: (0, checked capacity), or (-errno, 0).
+fn addr_room(pml4: u64, addr: u64, lenp: u64) -> (u64, u64) {
     if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
-        return neg(EFAULT)
+        return (neg(EFAULT), 0)
     }
-    let cap = uaccess.get(pml4, lenp, 4)
+    let cap = (uaccess.get(pml4, lenp, 4) else |_| { return (neg(EFAULT), 0) })
     if cap >= 0x80000000 {
-        return neg(EINVAL)
+        return (neg(EINVAL), 0)
     }
     let n = if cap < ADDR { cap } else { ADDR }
     if !uaccess.writable(pml4, addr, n) {
-        return neg(EFAULT)
+        return (neg(EFAULT), 0)
     }
-    0
+    (0, n)
 }
 
 /// Write `ip4`:`port` as a `struct sockaddr_in` at user `addr`, cut to
-/// the length at `lenp`, and the whole length (16) there (checked by
-/// `addr_room`).
-fn addr_out(pml4: u64, addr: u64, lenp: u64, ip4: u64, port: u64) {
-    let cap = uaccess.get(pml4, lenp, 4)
+/// the capacity `addr_room` checked, and the whole length (16) at
+/// `lenp`. Never re-read capacity after copying bytes into user memory.
+fn addr_out(pml4: u64, addr: u64, lenp: u64, cap: u64, ip4: u64, port: u64) -> u64 ! {fault} {
     var i: u64 = 0
     while i < ADDR && i < cap {
         var b: u64 = 0
@@ -450,10 +449,11 @@ fn addr_out(pml4: u64, addr: u64, lenp: u64, ip4: u64, port: u64) {
         } else if i >= 4 && i < 8 {
             b = (ip4 >> ((7 - i) * 8)) & 0xff
         }
-        uaccess.put(pml4, addr + i, b, 1)
+        let _stored1 = uaccess.put(pml4, addr + i, b, 1) else |_| { return fault }
         i += 1
     }
-    uaccess.put(pml4, lenp, ADDR, 4)
+    let _stored2 = uaccess.put(pml4, lenp, ADDR, 4) else |_| { return fault }
+    0
 }
 
 fn errno_of(e: u64) -> u64 {
@@ -534,7 +534,7 @@ pub fn connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if !uaccess.readable(pml4, addr, 2) {
         return neg(EFAULT)
     }
-    if uaccess.get(pml4, addr, 2) == AF_UNSPEC {
+    if (uaccess.get(pml4, addr, 2) else |_| { return neg(EFAULT) }) == AF_UNSPEC {
         udp.disconnect(s)
         return 0
     }
@@ -638,11 +638,11 @@ fn one_message(a: u64, pml4: u64, s: u64, m: u64) -> u64 {
     if !uaccess.readable(pml4, m, MMSG) || !uaccess.writable(pml4, m + 56, 4) {
         return neg(EFAULT)
     }
-    let name = uaccess.get64(pml4, m)
-    let namelen = uaccess.get(pml4, m + 8, 4)
-    let iov = uaccess.get64(pml4, m + 16)
-    let parts = uaccess.get64(pml4, m + 24)
-    let control = uaccess.get64(pml4, m + 40)
+    let name = (uaccess.get64(pml4, m) else |_| { return neg(EFAULT) })
+    let namelen = (uaccess.get(pml4, m + 8, 4) else |_| { return neg(EFAULT) })
+    let iov = (uaccess.get64(pml4, m + 16) else |_| { return neg(EFAULT) })
+    let parts = (uaccess.get64(pml4, m + 24) else |_| { return neg(EFAULT) })
+    let control = (uaccess.get64(pml4, m + 40) else |_| { return neg(EFAULT) })
     if control != 0 {
         return refuse(a, R_CONTROL, EINVAL, control, 0)
     }
@@ -655,7 +655,7 @@ fn one_message(a: u64, pml4: u64, s: u64, m: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
     while i < parts {
-        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        let l = (uaccess.get64(pml4, iov + i * 16 + 8) else |_| { return neg(EFAULT) })
         if l >= 0x8000000000000000 || n + l > DATAGRAM_MAX + 1 {
             return neg(if l >= 0x8000000000000000 { EINVAL } else { EMSGSIZE })
         }
@@ -670,7 +670,7 @@ fn one_message(a: u64, pml4: u64, s: u64, m: u64) -> u64 {
     if r != 0 {
         return neg(r)
     }
-    uaccess.put(pml4, m + 56, n, 4)
+    let _stored3 = uaccess.put(pml4, m + 56, n, 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -685,7 +685,7 @@ pub fn fionread(a: u64, pml4: u64, fd: u64, arg: u64) -> u64 {
     if !uaccess.writable(pml4, arg, 4) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, arg, udp.next_len(s), 4)
+    let _stored4 = uaccess.put(pml4, arg, udp.next_len(s), 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -723,8 +723,10 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
         return neg(EAGAIN)
     }
     let wants = addr != 0 && lenp != 0
+    var addr_cap: u64 = 0
     if wants {
-        let ar = addr_room(pml4, addr, lenp)
+        let (ar, checked) = addr_room(pml4, addr, lenp)
+        addr_cap = checked
         if ar != 0 {
             sched.set_self_until(0)
             return ar
@@ -739,7 +741,7 @@ pub fn recvfrom(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64, addr: 
         return got
     }
     if wants {
-        addr_out(pml4, addr, lenp, src, sport)
+        let _copied1 = addr_out(pml4, addr, lenp, addr_cap, src, sport) else |_| { return neg(EFAULT) }
     }
     if flags & MSG_TRUNC != 0 { whole } else { got }
 }
@@ -797,16 +799,18 @@ pub fn recvmsg(a: u64, pml4: u64, fd: u64, msg: u64, flags: u64) -> u64 {
     if flags & MSG_ERRQUEUE != 0 {
         return neg(EAGAIN) // px104's error queue, always empty
     }
-    let name = uaccess.get64(pml4, msg)
+    let name = (uaccess.get64(pml4, msg) else |_| { return neg(EFAULT) })
+    var addr_cap: u64 = 0
     if name != 0 {
-        let ar = addr_room(pml4, name, msg + 8)
+        let (ar, checked) = addr_room(pml4, name, msg + 8)
+        addr_cap = checked
         if ar != 0 {
             sched.set_self_until(0)
             return ar
         }
     }
-    let iov = uaccess.get64(pml4, msg + 16)
-    let parts = uaccess.get64(pml4, msg + 24)
+    let iov = (uaccess.get64(pml4, msg + 16) else |_| { return neg(EFAULT) })
+    let parts = (uaccess.get64(pml4, msg + 24) else |_| { return neg(EFAULT) })
     let (got, src, sport, whole) = udp.recv_vec(s, pml4, iov, parts, cap, flags & MSG_PEEK != 0)
     if got == udp.EMPTY {
         return nothing_yet(a, fd, s, flags)
@@ -816,10 +820,10 @@ pub fn recvmsg(a: u64, pml4: u64, fd: u64, msg: u64, flags: u64) -> u64 {
         return got
     }
     if name != 0 {
-        addr_out(pml4, name, msg + 8, src, sport)
+        let _copied2 = addr_out(pml4, name, msg + 8, addr_cap, src, sport) else |_| { return neg(EFAULT) }
     }
-    uaccess.put(pml4, msg + 40, 0, 8)
-    uaccess.put(pml4, msg + 48, if whole > got { MSG_TRUNC } else { 0 }, 4)
+    let _stored5 = uaccess.put(pml4, msg + 40, 0, 8) else |_| { return neg(EFAULT) }
+    let _stored6 = uaccess.put(pml4, msg + 48, if whole > got { MSG_TRUNC } else { 0 }, 4) else |_| { return neg(EFAULT) }
     if flags & MSG_TRUNC != 0 { whole } else { got }
 }
 
@@ -832,8 +836,8 @@ fn header_ok(pml4: u64, msg: u64) -> (u64, u64) {
     if !uaccess.readable(pml4, msg, MSGHDR) || !uaccess.writable(pml4, msg, MSGHDR) {
         return (neg(EFAULT), 0)
     }
-    let iov = uaccess.get64(pml4, msg + 16)
-    let parts = uaccess.get64(pml4, msg + 24)
+    let iov = (uaccess.get64(pml4, msg + 16) else |_| { return (neg(EFAULT), 0) })
+    let parts = (uaccess.get64(pml4, msg + 24) else |_| { return (neg(EFAULT), 0) })
     if parts > UIO_MAXIOV {
         return (neg(EMSGSIZE), 0)
     }
@@ -843,7 +847,7 @@ fn header_ok(pml4: u64, msg: u64) -> (u64, u64) {
     var sum: u64 = 0
     var i: u64 = 0
     while i < parts {
-        let l = uaccess.get64(pml4, iov + i * 16 + 8)
+        let l = (uaccess.get64(pml4, iov + i * 16 + 8) else |_| { return (neg(EFAULT), 0) })
         if l >= 0x8000000000000000 || sum + l >= 0x8000000000000000 {
             return (neg(EINVAL), 0)
         }
@@ -874,11 +878,11 @@ pub fn getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> 
             sip = la
             sport = lp
         }
-        let sr = addr_room(pml4, addr, lenp)
+        let (sr, addr_cap) = addr_room(pml4, addr, lenp)
         if sr != 0 {
             return sr
         }
-        addr_out(pml4, addr, lenp, sip, sport)
+        let _copied3 = addr_out(pml4, addr, lenp, addr_cap, sip, sport) else |_| { return neg(EFAULT) }
         return 0
     }
     let (e, s) = sock(a, fd, if peer { 52 } else { 51 })
@@ -899,11 +903,11 @@ pub fn getname(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> 
         ip4 = la
         port = lp
     }
-    let ar = addr_room(pml4, addr, lenp)
+    let (ar, addr_cap) = addr_room(pml4, addr, lenp)
     if ar != 0 {
         return ar
     }
-    addr_out(pml4, addr, lenp, ip4, port)
+    let _copied4 = addr_out(pml4, addr, lenp, addr_cap, ip4, port) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -923,7 +927,7 @@ pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
         if !uaccess.readable(pml4, value, 4) {
             return neg(EFAULT)
         }
-        let v = uaccess.get(pml4, value, 4)
+        let v = (uaccess.get(pml4, value, 4) else |_| { return neg(EFAULT) })
         if o == tcp.O_SYNCNT && (v < 1 || v > 255) {
             return neg(EINVAL)
         }
@@ -945,7 +949,7 @@ pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
         if !uaccess.readable(pml4, value, 4) {
             return neg(EFAULT)
         }
-        udp.set_recverr(s, uaccess.get(pml4, value, 4) != 0)
+        udp.set_recverr(s, (uaccess.get(pml4, value, 4) else |_| { return neg(EFAULT) }) != 0)
         return 0
     }
     if level != SOL_SOCKET || option != SO_RCVTIMEO_OLD {
@@ -957,8 +961,8 @@ pub fn setsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     if !uaccess.readable(pml4, value, 16) {
         return neg(EFAULT)
     }
-    let sec = uaccess.get64(pml4, value)
-    let usec = uaccess.get64(pml4, value + 8)
+    let sec = (uaccess.get64(pml4, value) else |_| { return neg(EFAULT) })
+    let usec = (uaccess.get64(pml4, value + 8) else |_| { return neg(EFAULT) })
     if usec >= 1000000 || sec >= 0x8000000000000000 {
         return neg(EDOM)
     }
@@ -990,7 +994,7 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
         if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
             return neg(EFAULT)
         }
-        let scap = uaccess.get(pml4, lenp, 4)
+        let scap = (uaccess.get(pml4, lenp, 4) else |_| { return neg(EFAULT) })
         if scap >= 0x80000000 {
             return neg(EINVAL)
         }
@@ -1008,8 +1012,8 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
         } else {
             sv = tcp.take_error(c)
         }
-        uaccess.put(pml4, value, sv, sn)
-        uaccess.put(pml4, lenp, sn, 4)
+        let _stored7 = uaccess.put(pml4, value, sv, sn) else |_| { return neg(EFAULT) }
+        let _stored8 = uaccess.put(pml4, lenp, sn, 4) else |_| { return neg(EFAULT) }
         return 0
     }
     let (e, s) = sock(a, fd, 55)
@@ -1023,7 +1027,7 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
     if !uaccess.readable(pml4, lenp, 4) || !uaccess.writable(pml4, lenp, 4) {
         return neg(EFAULT)
     }
-    let cap = uaccess.get(pml4, lenp, 4)
+    let cap = (uaccess.get(pml4, lenp, 4) else |_| { return neg(EFAULT) })
     if cap >= 0x80000000 {
         return neg(EINVAL)
     }
@@ -1035,17 +1039,17 @@ pub fn getsockopt(a: u64, pml4: u64, fd: u64, level: u64, option: u64, value: u6
             return neg(EFAULT)
         }
         let (sec, usec) = udp.timeval(s)
-        uaccess.put(pml4, value, sec, 8)
-        uaccess.put(pml4, value + 8, usec, 8)
-        uaccess.put(pml4, lenp, 16, 4)
+        let _stored9 = uaccess.put(pml4, value, sec, 8) else |_| { return neg(EFAULT) }
+        let _stored10 = uaccess.put(pml4, value + 8, usec, 8) else |_| { return neg(EFAULT) }
+        let _stored11 = uaccess.put(pml4, lenp, 16, 4) else |_| { return neg(EFAULT) }
         return 0
     }
     let n = if cap < 4 { cap } else { 4 }
     if !uaccess.writable(pml4, value, n) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, value, if recverr { udp.recverr(s) } else if option == SO_TYPE { SOCK_DGRAM } else { 0 }, n)
-    uaccess.put(pml4, lenp, n, 4)
+    let _stored12 = uaccess.put(pml4, value, if recverr { udp.recverr(s) } else if option == SO_TYPE { SOCK_DGRAM } else { 0 }, n) else |_| { return neg(EFAULT) }
+    let _stored13 = uaccess.put(pml4, lenp, n, 4) else |_| { return neg(EFAULT) }
     0
 }
 
@@ -1089,8 +1093,10 @@ pub fn accept(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, flags: u64, nr: 
         return neg(EINVAL)
     }
     let wants = addr != 0 && lenp != 0
+    var addr_cap: u64 = 0
     if wants {
-        let ar = addr_room(pml4, addr, lenp)
+        let (ar, checked) = addr_room(pml4, addr, lenp)
+        addr_cap = checked
         if ar != 0 {
             return ar
         }
@@ -1109,7 +1115,7 @@ pub fn accept(a: u64, pml4: u64, fd: u64, addr: u64, lenp: u64, flags: u64, nr: 
     }
     if wants {
         let (_connected, pa, pp) = tcp.peer(c)
-        addr_out(pml4, addr, lenp, pa, pp)
+        let _copied5 = addr_out(pml4, addr, lenp, addr_cap, pa, pp) else |_| { return neg(EFAULT) }
     }
     nfd
 }

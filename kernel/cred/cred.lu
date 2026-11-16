@@ -318,15 +318,15 @@ pub fn getres(a: u64, pml4: u64, user: bool, rp: u64, ep: u64, sp: u64) -> u64 {
     if !uaccess.writable(pml4, rp, 4) {
         return NEG_EFAULT
     }
-    uaccess.put(pml4, rp, get(a, b + REAL), 4)
+    let _stored1 = uaccess.put(pml4, rp, get(a, b + REAL), 4) else |_| { return NEG_EFAULT }
     if !uaccess.writable(pml4, ep, 4) {
         return NEG_EFAULT
     }
-    uaccess.put(pml4, ep, get(a, b + EFFECTIVE), 4)
+    let _stored2 = uaccess.put(pml4, ep, get(a, b + EFFECTIVE), 4) else |_| { return NEG_EFAULT }
     if !uaccess.writable(pml4, sp, 4) {
         return NEG_EFAULT
     }
-    uaccess.put(pml4, sp, get(a, b + SAVED), 4)
+    let _stored3 = uaccess.put(pml4, sp, get(a, b + SAVED), 4) else |_| { return NEG_EFAULT }
     0
 }
 
@@ -348,7 +348,7 @@ pub fn getgroups(a: u64, pml4: u64, n0: u64, list: u64) -> u64 {
     }
     var i: u64 = 0
     while i < have {
-        uaccess.put(pml4, list + i * 4, get(a, C_GROUPS + i), 4)
+        let _stored4 = uaccess.put(pml4, list + i * 4, get(a, C_GROUPS + i), 4) else |_| { return NEG_EFAULT }
         i += 1
     }
     have
@@ -374,7 +374,7 @@ pub fn setgroups(a: u64, pml4: u64, n0: u64, list: u64) -> u64 {
     // caller's to read whole (checked), so nothing fails from here.
     var i: u64 = 0
     while i < n {
-        let g = uaccess.get(pml4, list + i * 4, 4)
+        let g = (uaccess.get(pml4, list + i * 4, 4) else |_| { return NEG_EFAULT })
         var k = i
         while k > 0 && get(a, C_GROUPS + k - 1) > g {
             put(a, C_GROUPS + k, get(a, C_GROUPS + k - 1))

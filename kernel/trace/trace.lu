@@ -73,7 +73,7 @@ fn getregs(s: u64, data: u64, bytes: u64) -> u64 {
     if bytes != 0 && !uaccess.writable(pml4, data, bytes) { return EFAULT }
     var i: u64 = 0
     while i < bytes / 8 {
-        uaccess.put(pml4, data + i * 8, reg(s, i), 8)
+        let _stored1 = uaccess.put(pml4, data + i * 8, reg(s, i), 8) else |_| { return EFAULT }
         i += 1
     }
     0
@@ -115,13 +115,13 @@ fn setregs(s: u64, data: u64) -> u64 {
     // Validate the complete image before changing any saved register.
     var i: u64 = 0
     while i < 27 {
-        if !word_ok(i, uaccess.get64(pml4, data + i * 8)) { return EIO }
+        if !word_ok(i, (uaccess.get64(pml4, data + i * 8) else |_| { return EFAULT })) { return EIO }
         i += 1
     }
     let f = sched.trace_frame(s)
     i = 0
     while i < 22 {
-        store_word(s, f, i, uaccess.get64(pml4, data + i * 8))
+        store_word(s, f, i, (uaccess.get64(pml4, data + i * 8) else |_| { return EFAULT }))
         i += 1
     }
     put_word(f, 15, 0x101) // IRETQ, preserving the requested RCX/R11
@@ -148,7 +148,7 @@ fn fpregs(s: u64, data: u64, bytes: u64) -> u64 {
             b = if i == 24 { 0x80 } else if i == 25 { 0x1f } else { 0 }
         }
         if i >= 416 { b = 0 } // user_fpregs_struct's reserved padding
-        uaccess.put(pml4, data + i, b, 1)
+        let _stored2 = uaccess.put(pml4, data + i, b, 1) else |_| { return EFAULT }
         i += 1
     }
     0
@@ -163,13 +163,13 @@ fn getregset(s: u64, note: u64, data: u64) -> u64 {
         log.end()
         return EINVAL
     }
-    let dst = uaccess.get64(pml4, data)
-    let n = uaccess.get64(pml4, data + 8)
+    let dst = (uaccess.get64(pml4, data) else |_| { return EFAULT })
+    let n = (uaccess.get64(pml4, data + 8) else |_| { return EFAULT })
     if n & 7 != 0 { return EINVAL }
     let max = if note == 1 { 216 } else { 512 }
     let bytes = if n < max { n } else { max }
     let err = if note == 1 { getregs(s, dst, bytes) } else { fpregs(s, dst, bytes) }
-    if err == 0 { uaccess.put(pml4, data + 8, bytes, 8) }
+    if err == 0 { let _stored3 = uaccess.put(pml4, data + 8, bytes, 8) else |_| { return EFAULT } }
     err
 }
 
@@ -180,7 +180,7 @@ fn peekuser(s: u64, addr: u64, data: u64) -> u64 {
     else if addr >= 848 && addr < 912 { v = sched.trace_dr(s, (addr - 848) / 8) }
     let pml4 = paging.live()
     if !uaccess.writable(pml4, data, 8) { return EFAULT }
-    uaccess.put(pml4, data, v, 8)
+    let _stored4 = uaccess.put(pml4, data, v, 8) else |_| { return EFAULT }
     0
 }
 
@@ -266,7 +266,7 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
         if !ok { return EIO }
         let pml4 = paging.live()
         if !uaccess.writable(pml4, data, 8) { return EFAULT }
-        uaccess.put(pml4, data, value, 8)
+        let _stored5 = uaccess.put(pml4, data, value, 8) else |_| { return EFAULT }
         return 0
     }
     if req == 4 || req == 5 { return trace_mem.poke(s, addr, data) }
@@ -304,19 +304,19 @@ pub fn call(req: u64, pid: u64, addr: u64, data: u64) -> u64 {
     if req == 0x4201 {
         let pml4 = paging.live()
         if !uaccess.writable(pml4, data, 8) { return EFAULT }
-        uaccess.put(pml4, data, trace_state.event(s), 8)
+        let _stored6 = uaccess.put(pml4, data, trace_state.event(s), 8) else |_| { return EFAULT }
         return 0
     }
     if req == 0x4202 {
         let pml4 = paging.live()
         if !uaccess.writable(pml4, data, 128) { return EFAULT }
         let (sig, code, at) = sched.trace_info(s)
-        uaccess.zero(pml4, data, 128)
+        let _stored7 = uaccess.zero(pml4, data, 128) else |_| { return EFAULT }
         let kind = trace_state.stop_kind(s)
-        uaccess.put(pml4, data, if kind == 2 || kind == 3 { 5 } else { sig }, 4)
-        uaccess.put(pml4, data + 8, code, 4)
-        uaccess.put(pml4, data + 16, at, 8)
-        if sig == 17 { uaccess.put(pml4, data + 24, trace_state.signal_status(s), 4) }
+        let _stored8 = uaccess.put(pml4, data, if kind == 2 || kind == 3 { 5 } else { sig }, 4) else |_| { return EFAULT }
+        let _stored9 = uaccess.put(pml4, data + 8, code, 4) else |_| { return EFAULT }
+        let _stored10 = uaccess.put(pml4, data + 16, at, 8) else |_| { return EFAULT }
+        if sig == 17 { let _stored11 = uaccess.put(pml4, data + 24, trace_state.signal_status(s), 4) else |_| { return EFAULT } }
         return 0
     }
     refused(req)

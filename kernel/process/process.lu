@@ -907,7 +907,7 @@ fn copy_vector(pml4: u64, vec: u64, off: u64) -> (u64, u64, u64) {
         if !uaccess.readable(pml4, pv, 8) {
             return (0, 0, NEG_EFAULT)
         }
-        let p = uaccess.get64(pml4, pv)
+        let p = (uaccess.get64(pml4, pv) else |_| { return (0, 0, NEG_EFAULT) })
         if p == 0 {
             return (n, at, 0)
         }
@@ -983,7 +983,7 @@ fn blank(c: u64) -> bool {
 /// length, 0, whether it names the descriptor, whether it is the
 /// descriptor itself) or (0, -errno, …). The walk read the path already.
 fn filename(pml4: u64, dirfd: u64, va: u64, dst: u64) -> (u64, u64, bool, bool) {
-    let c0 = if uaccess.readable(pml4, va, 1) { uaccess.get(pml4, va, 1) } else { 0 }
+    let c0 = if uaccess.readable(pml4, va, 1) { (uaccess.get(pml4, va, 1) else |_| { return (0, NEG_EFAULT, false, false) }) } else { 0 }
     var k: u64 = 0
     if dirfd != AT_FDCWD && c0 != 47 {
         for b in "/dev/fd/".bytes() {
@@ -1308,7 +1308,22 @@ fn run_file(f: u64, dirfd: u64, path: u64, argv: u64, envp: u64, flags: u64) -> 
     // bits were passed over with the script), AT_SECURE and AT_EUID
     // from them, the point of no return below applies them.
     let (smode, suid, sgid, nosuid) = files.exec_setid(o)
-    let (eu, eg) = cred.exec_ids(a, smode, suid, sgid, nosuid)
+    let (wanted_u, wanted_g) = cred.exec_ids(a, smode, suid, sgid, nosuid)
+    // execve(2): an unprivileged tracer must not retain control over
+    // credentials it could not trace. Keep the trace, ignore the set-ID
+    // bits instead. A privileged tracer may trace the new credentials.
+    let tracer = sched.tracer_of(sched.self_slot())
+    var traced_ids = false
+    if tracer != 0 {
+        let ts = sched.trace_live(tracer)
+        if ts == sched.SLOTS {
+            traced_ids = true
+        } else {
+            let ta = sched.proc_area(ts)
+            traced_ids = !cred.privileged(ta) && (cred.uid(ta, cred.REAL) != wanted_u || cred.gid(ta, cred.REAL) != wanted_g || cred.uid(a, cred.REAL) != wanted_u || cred.gid(a, cred.REAL) != wanted_g)
+        }
+    }
+    let (eu, eg) = cred.exec_ids(a, smode, suid, sgid, nosuid || traced_ids)
     let sp = build_stack(space, file, entry, av, argc, ae, av + ae, envc, ee - ae, pa, pl, a, eu, eg)
     let (w0, w1, nl) = if itself { files.exe_name(o) } else { comm_of(pa, pl) }
     // The point of no return. px26: every other thread of the process
@@ -1387,16 +1402,23 @@ pub fn clone(f: u64, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u6
             put_word(f, W_RAX, NEG_EFAULT)
             return f
         }
-        flags = uaccess.get64(pml4, a0)
-        ctid = uaccess.get64(pml4, a0 + 16)
-        ptid = uaccess.get64(pml4, a0 + 24)
-        let stack = uaccess.get64(pml4, a0 + 40)
-        let size = uaccess.get64(pml4, a0 + 48)
+        flags = (uaccess.get64(pml4, a0) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f })
+        ctid = (uaccess.get64(pml4, a0 + 16) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f })
+        ptid = (uaccess.get64(pml4, a0 + 24) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f })
+        let stack = (uaccess.get64(pml4, a0 + 40) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f })
+        let size = (uaccess.get64(pml4, a0 + 48) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f })
         if stack != 0 {
+            if !uaccess.in_user(stack, size) {
+                put_word(f, W_RAX, NEG_EINVAL)
+                return f
+            }
             usp = stack + size
+        } else if size != 0 {
+            put_word(f, W_RAX, NEG_EINVAL)
+            return f
         }
-        tls = uaccess.get64(pml4, a0 + 56)
-        if n >= 80 && (uaccess.get64(pml4, a0 + 64) != 0 || uaccess.get64(pml4, a0 + 72) != 0) {
+        tls = (uaccess.get64(pml4, a0 + 56) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f })
+        if n >= 80 && ((uaccess.get64(pml4, a0 + 64) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }) != 0 || (uaccess.get64(pml4, a0 + 72) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }) != 0) {
             put_word(f, W_RAX, refuse_with(R_FLAGS, NEG_EINVAL)) // set_tid
             return f
         }
@@ -1467,10 +1489,10 @@ fn fork(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64) -> u64 {
     }
     let pid = sched.slot_pid(s)
     if flags & CLONE_CHILD_SETTID != 0 && uaccess.writable(space, ctid, 4) {
-        uaccess.put(space, ctid, pid, 4)
+        let _stored1 = uaccess.put(space, ctid, pid, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
     }
     if flags & CLONE_PARENT_SETTID != 0 {
-        uaccess.put(pml4, ptid, pid, 4)
+        let _stored2 = uaccess.put(pml4, ptid, pid, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
     }
     put_word(f, W_RAX, pid)
     let event = trace.created(f, s, 1)
@@ -1510,10 +1532,10 @@ fn thread(f: u64, flags: u64, usp: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
     }
     let t = sched.slot_pid(s)
     if flags & CLONE_PARENT_SETTID != 0 {
-        uaccess.put(pml4, ptid, t, 4)
+        let _stored3 = uaccess.put(pml4, ptid, t, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
     }
     if flags & CLONE_CHILD_SETTID != 0 {
-        uaccess.put(pml4, ctid, t, 4)
+        let _stored4 = uaccess.put(pml4, ctid, t, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
     }
     let n = sched.threads_made()
     if !log.quiet() && (n <= 4 || n % 2500 == 0) {
@@ -1620,13 +1642,13 @@ pub fn wait4(f: u64, nr: u64, pid: u64, wstatus: u64, options: u64, rusage: u64)
         st = if what == sched.W_TRACED { sig } else if what == sched.W_STOPPED { (sig << 8) | 0x7f } else { 0xffff }
     }
     if wstatus != 0 {
-        uaccess.put(pml4, wstatus, st, 4)
+        let _stored5 = uaccess.put(pml4, wstatus, st, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
     }
     if rusage != 0 {
         if what == sched.W_EXITED {
-            put_rusage(pml4, rusage, ru_child)
+            let _copied1 = put_rusage(pml4, rusage, ru_child) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
         } else {
-            uaccess.zero(pml4, rusage, 144) // px88: a stop's or continue's report carries none (measured)
+            let _stored6 = uaccess.zero(pml4, rusage, 144) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f } // px88: a stop's or continue's report carries none (measured)
         }
     }
     put_word(f, W_RAX, cp)
@@ -1667,7 +1689,7 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
     if s == sched.SLOTS {
         if o & WNOHANG != 0 {
             if infop != 0 {
-                uaccess.zero(pml4, infop, 128)
+                let _stored7 = uaccess.zero(pml4, infop, 128) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
             }
             put_word(f, W_RAX, 0)
             return f
@@ -1692,17 +1714,17 @@ pub fn waitid(f: u64, nr: u64, idtype: u64, id: u64, infop: u64, options: u64, r
         status = if what == sched.W_TRACED { sig >> 8 } else if what == sched.W_STOPPED { sig } else { SIGCONT }
     }
     if infop != 0 {
-        uaccess.zero(pml4, infop, 128)
-        uaccess.put(pml4, infop, SIGCHLD, 4)
-        uaccess.put(pml4, infop + 8, code, 4)
-        uaccess.put(pml4, infop + 16, cp, 4)
-        uaccess.put(pml4, infop + 24, status, 4)
+        let _stored8 = uaccess.zero(pml4, infop, 128) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
+        let _stored9 = uaccess.put(pml4, infop, SIGCHLD, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
+        let _stored10 = uaccess.put(pml4, infop + 8, code, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
+        let _stored11 = uaccess.put(pml4, infop + 16, cp, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
+        let _stored12 = uaccess.put(pml4, infop + 24, status, 4) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
     }
     if rusage != 0 {
         if what == sched.W_EXITED {
-            put_rusage(pml4, rusage, ru_child)
+            let _copied2 = put_rusage(pml4, rusage, ru_child) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
         } else {
-            uaccess.zero(pml4, rusage, 144)
+            let _stored13 = uaccess.zero(pml4, rusage, 144) else |_| { put_word(f, W_RAX, NEG_EFAULT); return f }
         }
     }
     put_word(f, W_RAX, 0)
@@ -1717,9 +1739,10 @@ const RUSAGE_CHILDREN: u64 = 0xffffffff // -1, as the int `who` is read
 const RUSAGE_BYTES: u64 = 144 // struct rusage on x86-64: two timevals, fourteen longs
 
 /// `ns` nanoseconds as a struct timeval at `va` in `pml4` (written).
-fn put_timeval(pml4: u64, va: u64, ns: u64) {
-    uaccess.put(pml4, va, ns / 1000000000, 8)
-    uaccess.put(pml4, va + 8, (ns % 1000000000) / 1000, 8)
+fn put_timeval(pml4: u64, va: u64, ns: u64) -> u64 ! {fault} {
+    let _stored14 = uaccess.put(pml4, va, ns / 1000000000, 8) else |_| { return fault }
+    let _stored15 = uaccess.put(pml4, va + 8, (ns % 1000000000) / 1000, 8) else |_| { return fault }
+    0
 }
 
 /// px88: a struct rusage at `va` (144 writable bytes in `pml4`) from
@@ -1727,15 +1750,16 @@ fn put_timeval(pml4: u64, va: u64, ns: u64) {
 /// pages, voluntary switches, involuntary ones): ru_utime and ru_stime
 /// (offsets 0 and 16), ru_maxrss in KiB (32), ru_nvcsw (128) and
 /// ru_nivcsw (136); every other field 0 (the module's words above).
-pub fn put_rusage(pml4: u64, va: u64, u: (u64, u64, u64, u64, u64)) {
+pub fn put_rusage(pml4: u64, va: u64, u: (u64, u64, u64, u64, u64)) -> u64 ! {fault} {
     let (cpu, sys, peak, vcs, ics) = u
     let s = if sys > cpu { cpu } else { sys }
-    uaccess.zero(pml4, va, RUSAGE_BYTES)
-    put_timeval(pml4, va, sched.cycles_ns(cpu - s))
-    put_timeval(pml4, va + 16, sched.cycles_ns(s))
-    uaccess.put(pml4, va + 32, peak * 4, 8)
-    uaccess.put(pml4, va + 128, vcs, 8)
-    uaccess.put(pml4, va + 136, ics, 8)
+    let _stored16 = uaccess.zero(pml4, va, RUSAGE_BYTES) else |_| { return fault }
+    let _copied3 = put_timeval(pml4, va, sched.cycles_ns(cpu - s)) else |_| { return fault }
+    let _copied4 = put_timeval(pml4, va + 16, sched.cycles_ns(s)) else |_| { return fault }
+    let _stored17 = uaccess.put(pml4, va + 32, peak * 4, 8) else |_| { return fault }
+    let _stored18 = uaccess.put(pml4, va + 128, vcs, 8) else |_| { return fault }
+    let _stored19 = uaccess.put(pml4, va + 136, ics, 8) else |_| { return fault }
+    0
 }
 
 /// px88: `getrusage(who, usage)` (98): 0, -EINVAL for a `who` that is
@@ -1750,7 +1774,7 @@ pub fn getrusage(who: u64, va: u64) -> u64 {
     if !uaccess.writable(pml4, va, RUSAGE_BYTES) {
         return NEG_EFAULT
     }
-    put_rusage(pml4, va, sched.usage(if w == RUSAGE_SELF { 0 } else if w == RUSAGE_CHILDREN { 1 } else { 2 }))
+    let _copied5 = put_rusage(pml4, va, sched.usage(if w == RUSAGE_SELF { 0 } else if w == RUSAGE_CHILDREN { 1 } else { 2 })) else |_| { return NEG_EFAULT }
     0
 }
 
@@ -1989,7 +2013,7 @@ pub fn sched_setscheduler(pid: u64, policy: u64, param: u64) -> u64 {
     if !rt && pol != SCHED_OTHER && pol != SCHED_BATCH && pol != SCHED_IDLE {
         return NEG_EINVAL
     }
-    let prio = uaccess.get(pml4, param, 4)
+    let prio = (uaccess.get(pml4, param, 4) else |_| { return NEG_EFAULT })
     if (rt && (prio < 1 || prio > 99)) || (!rt && prio != 0) {
         return NEG_EINVAL
     }
