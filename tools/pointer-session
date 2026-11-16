@@ -640,6 +640,12 @@ YEW_MENU = (b'Select All', b'Command Palette...')
 YEW_AT = (10, 3)
 
 
+def yew_init_ended_zero(text):
+    # The small session image launches /bin/as; a live image uses
+    # /bin/env. Require an actual zero status, not one launcher name.
+    return re.search(rb'^PAX: init \S+ ended with status 0(?:;|\r?$)', text, re.M) is not None
+
+
 def run_yew(args):
     """tests/mpx5-yew's Y9: yew under pelt on PAX's console, typed at the USB
     keyboard (so the window is the screen's grid), a right click on the
@@ -870,7 +876,7 @@ def run_yew(args):
     text = serial.read_bytes()
     if not (out / 'menu.ppm').exists():
         why.append('no screendump')
-    if b'PAX: init /bin/as ended with status 0' not in text:
+    if not yew_init_ended_zero(text):
         why.append('init did not end with status 0')
     print(f'{"FAIL" if why else "PASS"} yew-menu {args.firmware} {args.accel}: '
           + ('; '.join(why) if why else f'a right click on the tablet at cell {YEW_AT} opened yew\'s document menu '
