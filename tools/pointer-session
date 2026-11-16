@@ -650,7 +650,63 @@ def yew_init_ended_zero(text):
 
 
 def yew_click_activated(frame, footer_row):
-    return re.search(rb' H(?:\xc2\xb7C)? ', frame) is not None
+    """Read the fixed H·C chip cells, not a raw full-paint substring.
+
+    Render diffs can omit column 1's unchanged space or reach column 2
+    with CUF. Only the narrow mode-chip cells are inspected here.
+    """
+    cells = {}
+    row = col = 0
+    saved = (0, 0)
+    text = frame.decode('utf-8', errors='replace')
+    at = 0
+    while at < len(text):
+        ch = text[at]
+        if ch == '\x1b':
+            seq = re.match(r'\x1b\[([0-?]*)([ -/]*)([@-~])', text[at:])
+            if seq:
+                params, inter, final = seq.groups()
+                if not inter and re.fullmatch(r'[0-9;]*', params):
+                    values = [int(v or '0') or 1 for v in params.split(';')]
+                    n = values[0]
+                    if final in ('H', 'f'):
+                        row, col = n, values[1] if len(values) > 1 else 1
+                    elif final == 'G':
+                        col = n
+                    elif final == 'C':
+                        col += n
+                    elif final == 'D':
+                        col = max(1, col - n)
+                    elif final == 'A':
+                        row = max(1, row - n)
+                    elif final == 'B':
+                        row += n
+                at += len(seq.group(0))
+                continue
+            if at + 1 < len(text) and text[at + 1] in ']P_^X':
+                ends = [(i, size) for i, size in ((text.find('\x07', at + 2), 1),
+                                                (text.find('\x1b\\', at + 2), 2)) if i >= 0]
+                if not ends:
+                    break
+                end, size = min(ends)
+                at = end + size
+                continue
+            if text[at:at + 2] == '\x1b7':
+                saved = (row, col)
+            elif text[at:at + 2] == '\x1b8':
+                row, col = saved
+            at += 2
+            continue
+        if ch == '\r':
+            col = 1
+        elif ch == '\n':
+            row += 1
+        elif ord(ch) >= 32:
+            if row == footer_row and 2 <= col <= 4:
+                cells[col] = ch
+            col += 1
+        at += 1
+    return ''.join(cells.get(c, '') for c in (2, 3, 4)) == 'H·C'
 
 
 def run_yew(args):
