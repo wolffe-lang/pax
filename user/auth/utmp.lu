@@ -30,7 +30,9 @@
 //! `/var/log/btmp` (refused logins, appended, root's 0600). An append is one
 //! write(2) of the whole record on an `O_APPEND` descriptor, so two writers
 //! never interleave a record. A utmp slot is written under an exclusive lock
-//! of the file (flock(2)), tried until it is free, at most two seconds.
+//! of the file (flock(2)), tried until it is free, at most two seconds. A
+//! file whose directory the system does not have (a tree with no /var/log or
+//! /var/run) is not kept: nothing is written there, and that is no failure.
 //!
 //! Builtins only (fs, time), so the programs built with the account toolchain
 //! (login) and those built with the kernel's wolf (logd, last) share this file.
@@ -210,6 +212,12 @@ fn ut_read(path: str) -> List[Utmp] {
 }
 
 /// Make `path` with mode `perm` when it is not there (an existing file keeps its own).
+/// Whether the system keeps `path`: its directory is there.
+fn ut_kept(path: str) -> bool {
+    let cut = path.rfind("/") else -1
+    cut <= 0 || fs_is_dir(path[0..cut])
+}
+
 fn ut_ensure(path: str, perm: int) {
     if fs_exists(path) {
         return
@@ -224,6 +232,9 @@ fn ut_ensure(path: str, perm: int) {
 /// `u` appended to `path` (wtmp, btmp): one write of the whole record, the file
 /// made with `perm` when missing. False when it could not be written.
 fn ut_append(path: str, u: Utmp, perm: int) -> bool {
+    if !ut_kept(path) {
+        return true
+    }
     ut_ensure(path, perm)
     let fd = fs_open_mode(path, 2) else |_| {
         return false
@@ -263,6 +274,9 @@ fn ut_lock(fd: int) -> bool {
 /// same `ut_id` and a login kind, or a boot's for a boot record), else at the
 /// end; under the file's lock. False when it could not be written.
 fn ut_put(path: str, u: Utmp) -> bool {
+    if !ut_kept(path) {
+        return true
+    }
     ut_ensure(path, 420)
     let fd = fs_open_mode(path, 3) else |_| {
         return false
@@ -306,9 +320,11 @@ fn ut_put(path: str, u: Utmp) -> bool {
 /// `reboot` on `~` at the time the boot started with the kernel's release, in
 /// utmp and wtmp. `start` is that time in seconds.
 fn ut_boot(start: int, release: str) -> bool {
-    fs_write_bytes(UTMP_PATH, List[byte]()) else |_| {
-    }
-    fs_set_mode(UTMP_PATH, 420) else |_| {
+    if ut_kept(UTMP_PATH) {
+        fs_write_bytes(UTMP_PATH, List[byte]()) else |_| {
+        }
+        fs_set_mode(UTMP_PATH, 420) else |_| {
+        }
     }
     var u = ut_new(UT_BOOT_TIME, 0, "~", "reboot", release)
     u.secs = start
