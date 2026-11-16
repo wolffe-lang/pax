@@ -75,6 +75,16 @@ def main():
     assert not ps.yew_init_ended_zero(b'PAX: init /bin/env ended by signal 9\r\n')
     assert not ps.yew_init_ended_zero(b'')
     print('PASS yew-init-status')
+    frame = (Path(__file__).parent / 'menu-click-diff.raw').read_bytes()
+    assert ps.yew_click_activated(frame, 50), 'captured footer diff has an H·C chip'
+    assert ps.yew_click_activated(b'\x1b[50;1H\x1b[30;47m H\xc2\xb7C ', 50)
+    assert ps.yew_click_activated(b'\x1b[50;1H\x1b[C\x1b[30;47mH\xc2\xb7C', 50)
+    assert not ps.yew_click_activated(b'\x1b[2;1H H\xc2\xb7C ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;20H H\xc2\xb7C ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;1H L ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;2HH\xc2\xb7C\x1b[50;2HL ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;2H\x1b]52;;H\xc2\xb7C\x07', 50)
+    print('PASS yew-click-footer-diff')
     return 0
 
 
