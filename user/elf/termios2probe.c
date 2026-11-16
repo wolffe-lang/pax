@@ -79,6 +79,16 @@ int main(int argc, char **argv) {
         char id[64];snprintf(id,sizeof id,"Z7-action-%u",j);
         row(id,r==0 && !get(s,&u) && !memcmp(&u,&t,44));
     }
+    if (m>=0) {
+        for(unsigned j=0;j<3;j++) {
+            t=saved;t.c=(t.c&~(BAUD|(BAUD<<16)))|OTHER|(OTHER<<16);
+            t.is=12345+j;t.os=54321+j;t.cc[18]=91;t.l^=ECHO;
+            r=ioctl(m,reqs[j],&t);
+            char id[64];snprintf(id,sizeof id,"Z7-master-action-%u",j);
+            row(id,r==0 && !get(s,&u) && !memcmp(&u,&t,44) &&
+                !get(m,&u) && !memcmp(&u,&t,44));
+        }
+    }
     /* Legacy TCGETS has only 36 bytes; TCSETS retains BOTHER speeds. */
     memset(guard,0xa5,sizeof guard);r=ioctl(s,0x5401,guard+8);
     ok=r==0 && !memcmp(guard+8,&t,36);
@@ -112,6 +122,14 @@ int main(int argc, char **argv) {
     row("Z13-fault-atomic",!get(s,&u) && !memcmp(&u,&saved,44));
     memcpy(p+4096-36,&saved,36);
     row("Z14-legacy-short",ioctl(s,0x5402,p+4096-36)==0);
+    memcpy(p,&saved,44);
+    mprotect(p,4096,PROT_READ);
+    errno=0;r=ioctl(s,GET2,p);
+    row("Z14-readonly-get",r==-1 && errno==EFAULT);
+    for(unsigned j=0;j<3;j++) {
+        char id[64];snprintf(id,sizeof id,"Z14-readonly-set-%u",j);
+        row(id,ioctl(s,reqs[j],p)==0);
+    }
     munmap(p,8192);
     struct termios lib;
     row("Z15-tcgetattr",tcgetattr(s,&lib)==0);
@@ -127,14 +145,21 @@ int main(int argc, char **argv) {
         memset(&win,0,sizeof win);
         int columns=isatty(s) && ioctl(s,TIOCGWINSZ,&win)==0 ? win.ws_col/10 : 1;
         row("Z17-terminal-columns",columns==4);
+        if(columns<1)columns=1;
+        const char *names[]={"ant","bee","cat","dog"};
+        printf("Z17-layout ");
+        for(int j=0;j<4;j++) {
+            if(j==3) printf("%s\n",names[j]);
+            else printf("%-10s%s",names[j],(j+1)%columns==0 ? "\n" : "");
+        }
         /* A queued raw byte survives NOW/DRAIN, but FLUSH discards it. */
-        for(unsigned j=0;j<3;j++) {
+        for(unsigned j=0;j<6;j++) {
             t=saved;t.l=0;t.i=0;t.cc[6]=1;t.cc[5]=0;ioctl(s,SET2,&t);
-            write(m,"q",1);struct pollfd f={s,POLLIN,0};poll(&f,1,1000);
-            r=ioctl(s,reqs[j],&t);f.revents=0;poll(&f,1,100);
+            (void)!write(m,"q",1);struct pollfd f={s,POLLIN,0};poll(&f,1,1000);
+            r=ioctl(j<3?s:m,reqs[j%3],&t);f.revents=0;poll(&f,1,100);
             char id[64];snprintf(id,sizeof id,"Z18-flush-%u",j);
-            row(id,r==0 && !!(f.revents&POLLIN)==(j!=2));
-            if(j!=2){char c;read(s,&c,1);}
+            row(id,r==0 && !!(f.revents&POLLIN)==(j%3!=2));
+            if(j%3!=2){char c;(void)!read(s,&c,1);}
         }
     }
     ioctl(s,SET2,&saved);

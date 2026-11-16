@@ -18,7 +18,7 @@
 #   tests/mpx5-pty [--no-boot | --only build] [--firmware bios|uefi|both]
 #                  [--tier native|release|both] [--accel auto|kvm|tcg|both]
 #
-# Three images, each kmain_console with an `/etc/pax-run` of its own:
+# Five images, each kmain_console with an `/etc/pax-run` of its own:
 #   probe    `/bin/ptyprobe`, then `/bin/as 1000 1000 /bin/ptyprobe`
 #            (sections O T C W H P M);
 #   session  `/bin/ptyprobe drive`, then `/bin/as 1000 1000 /bin/ptyprobe
@@ -26,6 +26,13 @@
 #            and sleep, user/pelt.pin and user/boreutils.pin);
 #   copy     px141: `/bin/ptyprobe copy`, then `/bin/as 1000 1000
 #            /bin/ptyprobe copy` (section K, with boreutils' cat).
+#   termios2 /bin/termios2probe as root and as 1000:1000, over a fresh
+#            pty: all four termios2 ioctls, numeric speeds, legacy
+#            interoperation, fault boundaries, libc and columns (Z rows).
+#   termios2-console the same probe on fd 0, as root and as 1000:1000.
+# The Z references are observed Linux answers, recorded with
+# mpx5-pty.d/record-termios2.py. PAX_TERMIOS2_PROBE may name a static
+# glibc 2.44 build of that same source for the Arch compatibility proof.
 # The Linux side boots the same archive (notes/px111/rig/record.sh; the
 # copy image's the same way), so the session's and the copy rows'
 # programs are the same bytes on both.
@@ -112,6 +119,11 @@ mkdir -p "$work/bin"
 why=
 python3 -I "$ref/check.py" --selftest > "$work/selftest.txt" 2>&1 || why+=" the checker's selftest;"
 "$PAX_ROOT/tools/mkpty" "$work/bin" > "$work/programs.txt" || why+=" tools/mkpty;"
+if [ -n "${PAX_TERMIOS2_PROBE:-}" ]; then
+    readelf -hW "$PAX_TERMIOS2_PROBE" | grep -Eq 'Type: +EXEC' || why+=" termios2 override is not ET_EXEC;"
+    readelf -lW "$PAX_TERMIOS2_PROBE" | grep -q INTERP && why+=" termios2 override has PT_INTERP;"
+    say "termios2 override: $(sha256_of "$PAX_TERMIOS2_PROBE")"
+fi
 "$PAX_ROOT/tools/mkas" "$work/bin" >> "$work/programs.txt" || why+=" tools/mkas;"
 "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
 "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE cat > "$work/bore.txt" || why+=" tools/mkboreutils;"
