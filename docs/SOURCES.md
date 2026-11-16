@@ -2570,4 +2570,3 @@ Alt+Fn is unchanged.
 | QEMU QMP `query-qmp-schema` and `input-send-event` | QEMU 8.2.2, queried without a guest | resolve the QKeyCode enum through command argument references; save its schema for the off-boot regression; send uppercase text as Shift plus lowercase QKeyCode events |
 | PAX's own `kernel/console`, `kernel/screen`, `kernel/files` and yew's input decoder, mouse routing and context-menu geometry | the projects' own code | the tracking-mode handoff, foreground ownership, event bytes, menu hit tests and the absence of a VT-switch action |
 | Console pointer and keyboard probes under QEMU | the same static probe before and after the change | exact SGR bytes for the three tracking modes, ownership and foreground guards, Alt-arrow bytes, unchanged Alt+Fn and F1–F5; a real yew menu's hover and click frames |
-
