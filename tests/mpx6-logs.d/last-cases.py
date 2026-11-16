@@ -61,6 +61,12 @@ FILES = {
     # a session open at a power cut: the next boot with no shutdown before it
     'crash': [boot(T0), login(T0 + 10, 1, 'console', 'root'), login(T0 + 20, 140, 'pts/0', 'pax', '192.168.89.1', A),
               boot(T0 + 200), login(T0 + 210, 1, 'console', 'root')],
+    # power cuts, then a clean shutdown (tests/mpx6-logs' boots 2 to 7): each cut boot's console session
+    # crashed, and each boot's line ends at the last shutdown util-linux has seen, not at the next boot
+    'cuts': [boot(T0), login(T0 + 5, 1, 'ttyS0', 'root'), down(T0 + 60),
+             boot(T0 + 70), login(T0 + 75, 1, 'ttyS0', 'root'),
+             boot(T0 + 130), login(T0 + 135, 1, 'ttyS0', 'root'),
+             boot(T0 + 190), login(T0 + 195, 1, 'ttyS0', 'root'), down(T0 + 250)],
     # a session open at a clean shutdown
     'down': [boot(T0), login(T0 + 10, 1, 'console', 'root'), down(T0 + 300), boot(T0 + 400)],
     # long sessions: a day and more
