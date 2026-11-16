@@ -135,6 +135,7 @@ const NS: u64 = 1000000000
 
 // errnos (uapi asm-generic/errno-base.h, errno.h)
 const EIO: u64 = 5
+const EEXIST: u64 = 17
 const EINVAL: u64 = 22
 const EFBIG: u64 = 27
 const ENOSPC: u64 = 28
@@ -1305,6 +1306,35 @@ pub fn mode(v: u64, ino: u64) -> u64 {
     if a == 0 { 0 } else { r16(a + I_MODE) }
 }
 
+/// A directory entry must name an allocated inode with a live type and
+/// link count. Inode zero in a directory record is a free slot, not a name;
+/// callers only ask here after finding a nonzero entry. Never turn a
+/// dangling name into absence, even when its inode record was cached.
+pub fn named_inode(v: u64, ino: u64) -> bool {
+    let a = inode(v, ino)
+    if a == 0 {
+        return false
+    }
+    let t = r16(a + I_MODE) & S_IFMT
+    let links = r16(a + I_LINKS)
+    if links == 0 || (t != 0x1000 && t != 0x2000 && t != 0x4000 && t != 0x6000 && t != 0x8000 && t != 0xa000 && t != 0xc000) {
+        corrupt(v, "a directory entry names a deleted or invalid inode:", ino)
+        return false
+    }
+    let g = (ino - 1) / vw(v, V_IPG)
+    let k = (ino - 1) % vw(v, V_IPG)
+    let bm = gd_word(v, g, GD_IBITMAP)
+    let b = get(v, bm)
+    if b == 0 {
+        return false
+    }
+    if r8(b + k / 8) & (1 << (k % 8)) == 0 {
+        corrupt(v, "a directory entry names an unused inode:", ino)
+        return false
+    }
+    true
+}
+
 /// Its link count.
 pub fn nlink(v: u64, ino: u64) -> u64 {
     let a = inode(v, ino)
@@ -2300,6 +2330,12 @@ pub fn empty(v: u64, d: u64) -> bool {
 /// `ino` of type byte `ft`: in the first record with room, else in a new
 /// block. 0, or -ENOSPC, -EIO.
 pub fn add(v: u64, d: u64, name: u64, len: u64, ino: u64, ft: u64) -> u64 {
+    // Check directory records, not inode validity: a dangling name is
+    // still occupied. In particular, never insert behind a zero inode.
+    let (held, _o, _p, _i) = find(v, d, name, len)
+    if held != BAD {
+        return neg(EEXIST)
+    }
     let b = bs(v)
     let nd = need(len)
     let nb = size(v, d) / b
