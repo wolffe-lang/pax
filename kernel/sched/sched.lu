@@ -259,6 +259,7 @@ extern "c" fn pax_rdtsc() -> u64 // px88: boot/fpu.S's RDTSC
 extern "c" let pax_threads: *u64
 extern "c" let pax_threads_end: *u8
 extern "c" let pax_sched_state: *u64
+extern "c" let pax_sched_bits: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_syscall_state: *u64
@@ -455,14 +456,15 @@ const S_TSC0: u64 = 20 // px88: the TSC at `start` (0: not taken)
 const S_NS0: u64 = 21 // px88: kernel/clock's nanoseconds at `start`
 const S_TICK0: u64 = 22 // px88: the tick at `start`
 const S_MULT: u64 = 23 // px88: nanoseconds per TSC cycle, times 2^24, once calibrated (0: not yet)
-const S_URGENT: u64 = 24 // px131: a bit a slot (SLOTS is 64: one word): woken by a device's work, at the queue's head (`wake_urgent`)
+const BITMAP_WORDS: u64 = 16 // one bit per slot, across all 1024 slots
+const B_URGENT: u64 = 0 // first complete bitmap
+const B_QUEUED: u64 = 16 // second complete bitmap
 const S_NETD: u64 = 25 // px131: slot + 1 of the network thread (the one that waits in `block_net`); 0 none yet
-const S_QUEUED: u64 = 26 // px131e: a bit a slot (SLOTS is 64: one word): in the run queue
 const S_STARVE: u64 = 27 // px131e: the tick since which the queue's threads that are not urgent have waited with none of them run
-const S_TOP: u64 = 24 // px126: one past the highest slot that is not free; every walk stops there
-const S_WAKE_AT: u64 = 25 // px126: no waiting thread's deadline falls before this tick (NEVER: none has one)
-const S_REFUSED: u64 = 26 // px126: clones refused for want of a slot since one was last found free
-const S_NPROC_REFUSED: u64 = 27 // px126: clones refused at a user's RLIMIT_NPROC since a slot was last taken
+const S_TOP: u64 = 28 // px126: one past the highest slot that is not free; every walk stops there
+const S_WAKE_AT: u64 = 29 // px126: no waiting thread's deadline falls before this tick (NEVER: none has one)
+const S_REFUSED: u64 = 30 // px126: clones refused for want of a slot since one was last found free
+const S_NPROC_REFUSED: u64 = 31 // px126: clones refused at a user's RLIMIT_NPROC since a slot was last taken
 
 // px88: the process area's usage words (kernel/sched's; words 6084-6093
 // of the 6144, past kernel/vm's last, 6083): the process's own sums,
@@ -520,6 +522,50 @@ fn sv(i: u64) -> u64 {
 fn put_sv(i: u64, v: u64) {
     // # Safety: as `sv`.
     unsafe { ((pax_sched_state as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// Bitmap word `i`, separate from the scheduler's scalar words.
+fn mask_word(i: u64) -> u64 {
+    // # Safety: i < 2 * BITMAP_WORDS, inside boot/sched.S's reservation.
+    unsafe { ((pax_sched_bits as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn mask_put(i: u64, value: u64) {
+    // # Safety: as `mask_word`.
+    unsafe { ((pax_sched_bits as u64 + i * 8) as *u64).write_volatile(value) }
+}
+
+fn mask_has(kind: u64, s: u64) -> bool {
+    mask_word(kind + s / 64) & (1 << (s % 64)) != 0
+}
+
+fn mask_set(kind: u64, s: u64) {
+    let i = kind + s / 64
+    mask_put(i, mask_word(i) | (1 << (s % 64)))
+}
+
+fn mask_clear(kind: u64, s: u64) {
+    let i = kind + s / 64
+    mask_put(i, mask_word(i) & !(1 << (s % 64)))
+}
+
+fn normal_waits() -> bool {
+    var i: u64 = 0
+    while i < BITMAP_WORDS {
+        if mask_word(B_QUEUED + i) & !mask_word(B_URGENT + i) != 0 {
+            return true
+        }
+        i += 1
+    }
+    false
+}
+
+fn clear_masks() {
+    var i: u64 = 0
+    while i < 2 * BITMAP_WORDS {
+        mask_put(i, 0)
+        i += 1
+    }
 }
 
 fn cur() -> u64 {
@@ -598,11 +644,10 @@ fn enqueue(s: u64) {
     put_sv(S_TAIL, s + 1)
     // px131e: the first thread that is not urgent to wait starts the wait
     // that bounds urgency (`starved`)
-    let q = sv(S_QUEUED)
-    if q & !sv(S_URGENT) == 0 {
+    if !normal_waits() {
         put_sv(S_STARVE, timer.ticks())
     }
-    put_sv(S_QUEUED, q | (1 << s))
+    mask_set(B_QUEUED, s)
 }
 
 /// px131: put slot `s` at the queue's head.
@@ -613,14 +658,14 @@ fn enqueue_front(s: u64) {
     if h == 0 {
         put_sv(S_TAIL, s + 1)
     }
-    put_sv(S_QUEUED, sv(S_QUEUED) | (1 << s)) // px131e
+    mask_set(B_QUEUED, s) // px131e
 }
 
 /// px131e: a thread that is not urgent has waited in the queue a quantum
 /// with none of its kind run: urgency yields to it (`wake_urgent` joins the
 /// tail, `urgent_waits` is false) until one of them runs.
 fn starved() -> bool {
-    sv(S_QUEUED) & !sv(S_URGENT) != 0 && timer.ticks() - sv(S_STARVE) >= QUANTUM
+    normal_waits() && timer.ticks() - sv(S_STARVE) >= QUANTUM
 }
 
 /// px131: make slot `s` ready at the queue's head, marked urgent: woken by
@@ -637,15 +682,14 @@ fn wake_urgent(s: u64) {
         return
     }
     enqueue_front(s)
-    put_sv(S_URGENT, sv(S_URGENT) | (1 << s))
+    mask_set(B_URGENT, s)
 }
 
 /// px131: the queue's head is a thread a device's work woke and `c`, the
 /// running thread, is not one (`kick` and `preempt` switch to it at once).
 fn urgent_waits(c: u64) -> bool {
     let h = sv(S_HEAD) // #598
-    let u = sv(S_URGENT)
-    h != 0 && u & (1 << (h - 1)) != 0 && u & (1 << c) == 0 && !starved() // px131e
+    h != 0 && mask_has(B_URGENT, h - 1) && !mask_has(B_URGENT, c) && !starved() // px131e
 }
 
 /// The queue's head (slot + 1), removed; 0 when it is empty.
@@ -660,7 +704,7 @@ fn dequeue() -> u64 {
     if n == 0 {
         put_sv(S_TAIL, 0)
     }
-    put_sv(S_QUEUED, sv(S_QUEUED) & !(1 << s)) // px131e
+    mask_clear(B_QUEUED, s) // px131e
     s + 1
 }
 
@@ -769,10 +813,10 @@ fn run_next() -> u64 {
     // px131: the thread leaving has had its urgent turn; the one starting
     // keeps its mark while it runs, so `kick` gives the CPU to no other
     // urgent thread before it blocks or the tick preempts it
-    put_sv(S_URGENT, sv(S_URGENT) & !(1 << from))
+    mask_clear(B_URGENT, from)
     // px131e: a thread that is not urgent runs: the wait that bounds urgency
     // starts again
-    if s != IDLE && sv(S_URGENT) & (1 << s) == 0 {
+    if s != IDLE && !mask_has(B_URGENT, s) {
         put_sv(S_STARVE, timer.ticks())
     }
     account(from, s) // px88
@@ -1278,9 +1322,8 @@ pub fn start(pml4: u64) {
     put_sv(S_LIVE, 0)
     put_sv(S_WAITER, 0)
     put_sv(S_FLOOR, 0)
-    put_sv(S_URGENT, 0) // px131
+    clear_masks()
     put_sv(S_NETD, 0)
-    put_sv(S_QUEUED, 0) // px131e
     put_sv(S_STARVE, 0)
     put_sv(S_SLICE, timer.ticks())
     // px88: the bases the TSC's cycles are converted against.
@@ -1737,8 +1780,8 @@ fn unqueue(s: u64) {
             put_field(s, offset_of(Thread, next), 0)
             // px131e: out of the queue, and no longer urgent (the mark
             // would pass to the slot's next thread)
-            put_sv(S_QUEUED, sv(S_QUEUED) & !(1 << s))
-            put_sv(S_URGENT, sv(S_URGENT) & !(1 << s))
+            mask_clear(B_QUEUED, s)
+            mask_clear(B_URGENT, s)
             return
         }
         prev = h
