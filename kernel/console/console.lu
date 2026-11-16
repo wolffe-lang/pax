@@ -25,8 +25,9 @@
 //! kasumi's kernel's VT: notes/px58-yew-on-pax.md §E), each byte through
 //! the line discipline as if typed; (px59, measured the same way:
 //! notes/px59/vt2.rows) an arrow with Shift, left Alt or Ctrl gives `ESC
-//! [ 1 ; m X`, m = 1 + Shift 1 + Alt 2 + Ctrl 4 (left Alt alone on Left
-//! or Right gives nothing: the VT's console switch); the editing block
+//! [ 1 ; m X`, m = 1 + Shift 1 + Alt 2 + Ctrl 4. Bare left Alt with
+//! Left/Right is delivered to applications, not reserved for an
+//! unimplemented VT switch. The editing block
 //! takes no modifier (Shift with PgUp or PgDn gives nothing: the VT's
 //! scrolling); F1-F12 give `ESC [ [ A` to `ESC [ [ E` and `ESC [ 17 ~` to
 //! `ESC [ 24 ~`, Shift+F1-F10 the VT's F11-F20 (`ESC [ 23 ~` to `ESC [ 34
@@ -1800,7 +1801,6 @@ fn navigation_key(k: u64, keys: u64, keypad: bool) {
     var m: u64 = 1
     if f >= 65 && f <= 68 {
         m = 1 + (if shift { 1 } else { 0 }) + (if alt { 2 } else { 0 }) + (if ctrl { 4 } else { 0 })
-        if m == 3 && (k == 0x4b || k == 0x4d) { return }
     }
     bump(CON, C_RX_KBD)
     input(CON, 27); input(CON, 91)
