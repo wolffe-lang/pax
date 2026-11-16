@@ -321,10 +321,7 @@ for leg in $legs; do
         if [ "$hrc" = 3 ]; then bad "I5 $tier kmain_timer $leg: no image"; else
             why=
             [ "$hrc" = 0 ] || why+=" not halted ($(not_halted));"
-            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" \
-                "apic: 0x00000000fee00000 at 0xffffb00000000000, id 0, svr $HEX, lint0 $HEX -> 0x0000000000008700" \
-                'timer: LAPIC calibrated by (HPET|PM|PIT) divide16 [0-9]+ Hz, tick 100 Hz vector 32; PIT IRQ masked' \
-                'timer: 20 ticks on vector 32, 0 spurious' 'halt' >/dev/null \
+            python3 -I "$here/mpx2-interrupts.d/timer-tail.py" "$log" >/dev/null \
                 || why+=" the log does not end apic …, timer: pit …, timer: 20 ticks on vector 32, 0 spurious, halt;"
             if [ -z "$why" ]; then
                 say "PASS I5 $tier kmain_timer $leg: $(grab "$log" '\(apic: .*\)'); 20 ticks on vector 32; $(halted)"
