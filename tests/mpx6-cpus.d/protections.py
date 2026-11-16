@@ -6,6 +6,7 @@ import sys
 
 rows = json.loads(Path(sys.argv[1]).read_text())
 protection = {
+ 'kmsg': 'kernel log ring records, sequence and length publication; writer and reader wakeup state',
  'bootlog': 'persistent console bytes, length and checksum; mark/seal publication',
  'bootmark': 'CMOS selector/data transaction and boot-stage record',
  'clock': 'counter extension: previous, elapsed, fraction and rollover diagnostics',
