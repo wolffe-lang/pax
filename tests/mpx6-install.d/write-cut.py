@@ -133,9 +133,9 @@ captured = {}
 def reg(name): return int(gdb.parse_and_eval('$' + name)) & ((1 << 64) - 1)
 class Write(gdb.Breakpoint):
     def stop(self):
-        # wspan returns a tuple: rdi is its hidden result pointer.
-        if captured and reg('rsi') == captured['volume'] and reg('rdx') == captured['inode'] and reg('rcx') >= 4 * 1024 * 1024:
-            captured['offset'] = reg('rcx')
+        # Native wolf puts the tuple's hidden result pointer last (r8).
+        if captured and reg('rdi') == captured['volume'] and reg('rsi') == captured['inode'] and reg('rdx') >= 4 * 1024 * 1024:
+            captured['offset'] = reg('rdx')
             captured['pc'] = reg('rip')
             Path(%r).write_text(json.dumps(captured))
             return True
