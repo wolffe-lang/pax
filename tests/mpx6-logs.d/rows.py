@@ -21,8 +21,9 @@ from its monitor, no end); 7 a clean `poweroff`, after which the volume is read 
 The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
   G0  the image: /bin/logd, /bin/last, /bin/lastb and /etc/pax-boot.d/logd in it
   G1  boot 1's `user: yes pid N killed: SIGPIPE` line (a pipeline over ssh) is in kern.log after
-      the reboots, under boot 1's marker, with a wall time within 5 s of the rig's clock at the
-      command and its time since boot; every boot has its marker, each a different identity
+      the reboots, under boot 1's marker, with a wall time within 3 s of the guest's own clock at the
+      command (`date -u +%s` just before it; the rig's clock beside it, reported) and its time since
+      boot; every boot has its marker, each a different identity
   G2  200 numbered records written to /dev/kmsg as root, logd SIGKILLed after the 100th and started
       again by its loop: each record in kern.log exactly once, the sequence numbers consecutive, no
       loss named, logd's `started again` line between
@@ -43,7 +44,8 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       no account has); as pax over ssh it is refused as util-linux refuses (`lastb: cannot open
       /var/log/btmp: Permission denied`, status 1); PAX's lastb and util-linux's on the same btmp
       byte for byte
-  G7  as pax over ssh: kern.log and btmp cannot be read (Permission denied), wtmp can (`last`), and
+  G7  as pax over ssh: kern.log and btmp cannot be read (Permission denied: the kernel's log is root's,
+      as `dmesg` is, and refused logins are root's, as on Linux), wtmp can (`last`, the whole file), and
       `who` is shown in a NOTE line (boreutils' who reads utmp on Linux only, a follow-on)
   G8  every capped file filled past its cap: kern.log rotated with four kept (the oldest gone, the
       new file starting with the boot's marker `(continued …)`), wtmp, btmp, sudo.log, burrowd.log
@@ -279,14 +281,18 @@ def boot1(b, client, out):
     seen['tty2'] = tty2.group(1).decode() if tty2 else None
     time.sleep(3)
     # G1: a pipeline's writer killed by SIGPIPE over ssh, the rig's clock beside it.
+    # The guest's own clock read just before (`date -u +%s`): logd's wall time is the guest's, which a
+    # loaded host's KVM can let run behind the rig's.
     seen['g1_at'] = time.time()
-    r = client.ssh(GUEST_AT, ['yes | head -n 1'])
+    r = client.ssh(GUEST_AT, ['date -u +%s; yes | head -n 1'])
     seen['g1'] = r
+    m = re.match(rb'\s*(\d{9,})\s', r[1] or b'')
+    seen['g1_guest'] = int(m.group(1)) if m else None
     pid = c.wait(r'user: yes pid (\d+) killed: SIGPIPE[^\n]*\n', 30)
     seen['g1_pid'] = pid.group(1).decode() if pid else None
     # G7: what pax may read; who.
     seen['g7'] = {k: client.ssh(GUEST_AT, [cmd]) for k, cmd in (
-        ('kern', 'cat /var/log/kern.log'), ('btmp', 'cat /var/log/btmp'), ('wtmp', 'last -n 3'), ('who', 'who'),
+        ('kern', 'cat /var/log/kern.log'), ('btmp', 'cat /var/log/btmp'), ('wtmp', 'last'), ('who', 'who'),
         ('lastb', 'lastb'))}
     # G5, G6 at the console: last and lastb as root.
     seen['last'] = b.cmd('last')
@@ -447,13 +453,17 @@ def g1(text, recs, own, markers, seen):
         return
     i, w, mono, sel, seq, t = line[0]
     before = [l for j, l in own if j < i and ' == boot ' in l]
-    skew = abs(iso_secs(w) - seen['g1_at']) if w != '-' else None
-    good = (len(ids) >= 7 and len(set(ids)) == len(ids) and skew is not None and skew <= 5 and sel == 'kern.info'
+    wall = iso_secs(w) if w != '-' else None
+    guest = seen.get('g1_guest')
+    skew = abs(wall - guest) if wall is not None and guest is not None else None
+    rig = wall - seen['g1_at'] if wall is not None else None
+    good = (len(ids) >= 7 and len(set(ids)) == len(ids) and skew is not None and skew <= 3 and sel == 'kern.info'
             and before and before[-1] == markers[0])
-    (ok if good else bad)('G1', 'the SIGPIPE line `%s` at %s [%d.%06d] %s #%d, %s s from the rig\'s clock, under the '
-                          'first boot\'s marker; %d boots marked, %d identities'
+    (ok if good else bad)('G1', 'the SIGPIPE line `%s` at %s [%d.%06d] %s #%d, %s s from the guest\'s clock at the '
+                          'command (%s s from the rig\'s), under the first boot\'s marker; %d boots marked, %d identities'
                           % (t[:60], w, mono // 1000000, mono % 1000000, sel, seq,
-                             '%.1f' % skew if skew is not None else 'no wall time', len(ids), len(set(ids))))
+                             '%d' % skew if skew is not None else 'no wall time or no guest clock',
+                             '%+.1f' % rig if rig is not None else '-', len(ids), len(set(ids))))
 
 
 def g2(recs, own):
@@ -548,7 +558,7 @@ def g5(work, wtmp, seen):
     for opts in ([], ['-x'], ['-F'], ['-i'], ['-w'], ['-a'], ['-R'], ['-n', '6']):
         rp, rl = last_both(work, work / 'wtmp', 'last', opts)
         if (rp.returncode, rp.stdout, rp.stderr) != (rl.returncode, rl.stdout, rl.stderr):
-            diffs.append(' '.join(opts) or '(none)')
+            diffs.append(' '.join(opts) or 'no options')
             (work / ('last%s.pax' % '_'.join(opts))).write_bytes(rp.stdout + rp.stderr)
             (work / ('last%s.linux' % '_'.join(opts))).write_bytes(rl.stdout + rl.stderr)
     rp, _ = last_both(work, work / 'wtmp', 'last', ['-e'])
@@ -588,7 +598,7 @@ def g7(seen):
     g = seen.get('g7', {})
     k, bt, w, who = (g.get(x) for x in ('kern', 'btmp', 'wtmp', 'who'))
     good = (k and k[0] != 0 and b'Permission denied' in k[2] and bt and bt[0] != 0 and b'Permission denied' in bt[2]
-            and w and w[0] == 0 and b'reboot' in w[1])
+            and w and w[0] == 0 and b'reboot ' in w[1] and b'wtmp begins ' in w[1])
     (ok if good else bad)('G7', 'as pax: kern.log %s; btmp %s; last %s'
                           % tuple(B.show(x) if x else '-' for x in (k, bt, w)))
     # boreutils' who reads utmp on Linux alone (its login ABI check names linux/x86_64); PAX's utmp is the
