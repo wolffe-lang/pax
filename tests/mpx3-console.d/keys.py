@@ -34,8 +34,12 @@ rows += [(['alt', 'shift', 'ctrl', 'a'], b''),
          (['shift', 'a'], b'A'),
          (['shift', 'backslash'], b'|'),
          (['alt_r', 'shift', 'a'], b''),
-         (['alt_r', 'shift', '1'], b'')]
-assert len(rows) == 30
+         (['alt_r', 'shift', '1'], b''),
+         (['alt', 'backslash'], b'\x1b\\'),
+         (['alt', 't'], b'\x1bt'),
+         (['alt', 'w'], b'\x1bw'),
+         (['alt', 'shift', 'ret'], b'')]
+assert len(rows) == 34
 cmd = [str(root / 'tools/qemu-run'), '--firmware', a.firmware, '--accel', a.accel,
        '--timeout', '180', '--serial', str(serial)]
 if a.keyboard == 'usb': cmd += ['--usb-kbd']
