@@ -66,6 +66,16 @@
 #   L8 px131e: under the same flood (`ctl`), a command's round trip over a
 #      unix socket at most 100 ms (KVM only): a control socket's command to
 #      a server under its load.
+#   L9 px159: a byte's round trip between two processes over a pipe, a unix
+#      socketpair and a pty, one every 5 ms, beside a process that only
+#      computes (`hop:KIND+spin`): its p99 within the larger of three times
+#      the same with no hog (`hop:KIND`) and that plus 2 ms (KVM only): the
+#      reader woken by the object that changed runs at once, not after the
+#      hog's quantum.
+#  L10 px159: a 19,456-byte write without waiting on a fresh unix
+#      socketpair and on a fresh path connection is taken whole, and one
+#      read takes it whole: a terminal multiplexer's frame crosses in one
+#      round trip.
 # Exit 0 when every assertion held, 3 when the only red is L6-unmeasured, 1
 # otherwise, 2 on a usage or tool error.
 set -uo pipefail
@@ -104,7 +114,7 @@ loads_for() { # mib
     local m=$1
     case $loads in
         guard) python3 -I "$D/rows.py" --guard-loads "$m" ;;
-        all) echo "idle spin flood console:65536 pty:16384 write:$((m / 16)) fork:$((m / 8)) exec mmap:$((m / 8)) hole:1024 procmem:8 random:8 pipe:65536 tcplo:65536 dir:4000 poll:1000" ;;
+        all) echo "idle spin flood console:65536 pty:16384 write:$((m / 16)) fork:$((m / 8)) exec mmap:$((m / 8)) hole:1024 procmem:8 random:8 pipe:65536 tcplo:65536 dir:4000 poll:1000 $(python3 -I "$D/rows.py" --hop-loads)" ;;
         *) echo "$loads" ;;
     esac
 }
