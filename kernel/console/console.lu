@@ -95,6 +95,12 @@
 //!
 //! **Terminal ioctls** (`ioctl`), answered: TCGETS (0x5401), TCSETS,
 //! TCSETSW and TCSETSF (0x5402-0x5404; TCSETSF discards unread input),
+//! and TCGETS2/TCSETS2/TCSETSW2/TCSETSF2 with the x86-64 44-byte
+//! termios2 layout (19 control bytes, numeric input/output speeds at
+//! offsets 36/40). Standard baud encodings determine the numeric speeds;
+//! BOTHER keeps the supplied rate, and an input baud of zero follows
+//! the output baud. Both layouts share the settings and flush rules.
+//! The speed is reported, not a change to the console's physical UART.
 //! TIOCGWINSZ (0x5413; 0 rows and 0 columns, what a Linux serial line
 //! and pseudo-terminal answer until someone sets them — or, px19, when
 //! the screen is the console (kernel/screen attached before `start`),
@@ -230,6 +236,8 @@ const C_ANSWERS: u64 = 27 // px59: bytes of the screen's answers typed into the 
 const C_UNANSWERED: u64 = 28 // px59: bytes of the screen's answers dropped (input last from COM1, or none yet)
 
 const C_ENTRY: u64 = 29 // Alt decimal/AltGr hex: bit32 pending, low32 accumulator
+const C_ISPEED: u64 = 38 // termios2's numeric input baud
+const C_OSPEED: u64 = 39 // termios2's numeric output baud
 // px111: a pty slave's own words (the console's stay 0)
 const C_IQ_R: u64 = 40 // bytes of IQ the line discipline has taken
 const C_IQ_W: u64 = 41 // bytes the master has written into IQ
@@ -297,12 +305,18 @@ const VEOL: u64 = 11
 const VWERASE: u64 = 14
 
 const TERMIOS_BYTES: u64 = 36
+const TERMIOS2_BYTES: u64 = 44
+const CBAUD: u64 = 0x100f
 
 // ioctl requests (black-box: strace's names, notes/px13/termios.strace).
 const TCGETS: u64 = 0x5401
 const TCSETS: u64 = 0x5402
 const TCSETSW: u64 = 0x5403
 const TCSETSF: u64 = 0x5404
+pub const TCGETS2: u64 = 0x802c542a
+pub const TCSETS2: u64 = 0x402c542b
+pub const TCSETSW2: u64 = 0x402c542c
+pub const TCSETSF2: u64 = 0x402c542d
 const TIOCGWINSZ: u64 = 0x5413
 const TIOCSWINSZ: u64 = 0x5414
 // px48: the controlling terminal's (uapi asm-generic/ioctls.h, ioctl_tty(2)).
@@ -708,6 +722,8 @@ fn defaults(t: u64) {
     put_sv(t, C_IFLAG, ICRNL)
     put_sv(t, C_OFLAG, OPOST | ONLCR)
     put_sv(t, C_CFLAG, 0xbf)
+    put_sv(t, C_ISPEED, 38400)
+    put_sv(t, C_OSPEED, 38400)
     put_sv(t, C_LFLAG, ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN)
     // c_cc: VINTR ^C, VQUIT ^\, VERASE DEL, VKILL ^U, VEOF ^D, VTIME 0,
     // VMIN 1, VSWTC 0 | VSTART ^Q, VSTOP ^S, VSUSP ^Z, VEOL 0, VREPRINT
@@ -1148,8 +1164,48 @@ pub fn read(t: u64, pml4: u64, buf: u64, n: u64, nonblock: bool, until: u64) -> 
 
 // --- the terminal's ioctls ----------------------------------------------
 
-pub fn termios_out(t: u64, pml4: u64, arg: u64) -> u64 {
-    if !uaccess.writable(pml4, arg, TERMIOS_BYTES) {
+// Linux x86-64's baud encodings, measured on a pty. BOTHER (0x1000)
+// takes the numeric field; legacy TCSETS has no such field and retains it.
+fn baud(code: u64, other: u64) -> u64 {
+    match code {
+        0 => 0,
+        1 => 50,
+        2 => 75,
+        3 => 110,
+        4 => 134,
+        5 => 150,
+        6 => 200,
+        7 => 300,
+        8 => 600,
+        9 => 1200,
+        10 => 1800,
+        11 => 2400,
+        12 => 4800,
+        13 => 9600,
+        14 => 19200,
+        15 => 38400,
+        0x1001 => 57600,
+        0x1002 => 115200,
+        0x1003 => 230400,
+        0x1004 => 460800,
+        0x1005 => 500000,
+        0x1006 => 576000,
+        0x1007 => 921600,
+        0x1008 => 1000000,
+        0x1009 => 1152000,
+        0x100a => 1500000,
+        0x100b => 2000000,
+        0x100c => 2500000,
+        0x100d => 3000000,
+        0x100e => 3500000,
+        0x100f => 4000000,
+        _ => other,
+    }
+}
+
+pub fn termios_out(t: u64, pml4: u64, arg: u64, extended: bool) -> u64 {
+    let bytes = if extended { TERMIOS2_BYTES } else { TERMIOS_BYTES }
+    if !uaccess.writable(pml4, arg, bytes) {
         return NEG_EFAULT
     }
     uaccess.put(pml4, arg, sv(t, C_IFLAG), 4)
@@ -1160,17 +1216,35 @@ pub fn termios_out(t: u64, pml4: u64, arg: u64) -> u64 {
     uaccess.put(pml4, arg + 17, sv(t, C_CC), 8)
     uaccess.put(pml4, arg + 25, sv(t, C_CC + 1), 8)
     uaccess.put(pml4, arg + 33, sv(t, C_CC + 2), 3)
+    if extended {
+        uaccess.put(pml4, arg + 36, sv(t, C_ISPEED), 4)
+        uaccess.put(pml4, arg + 40, sv(t, C_OSPEED), 4)
+    }
     0
 }
 
-pub fn termios_in(t: u64, pml4: u64, arg: u64, flush: bool) -> u64 {
-    if !uaccess.readable(pml4, arg, TERMIOS_BYTES) {
+pub fn termios_in(t: u64, pml4: u64, arg: u64, flush: bool, extended: bool) -> u64 {
+    let bytes = if extended { TERMIOS2_BYTES } else { TERMIOS_BYTES }
+    // Check the whole layout before changing any setting or flushing input.
+    if !uaccess.readable(pml4, arg, bytes) {
         return NEG_EFAULT
     }
     let was_canon = lflag(t, ICANON)
+    var cflag = uaccess.get(pml4, arg + 8, 4)
+    if t != CON {
+        // Linux ptys preserve CSIZE/CREAD and clear PARENB/ADDRB.
+        cflag = (cflag & !0x200001b0) | (sv(t, C_CFLAG) & 0xb0)
+    }
+    let other_out = if extended { uaccess.get(pml4, arg + 40, 4) } else { sv(t, C_OSPEED) }
+    let other_in = if extended { uaccess.get(pml4, arg + 36, 4) } else { sv(t, C_ISPEED) }
+    let ospeed = baud(cflag & CBAUD, other_out)
+    let in_code = (cflag >> 16) & CBAUD
+    let ispeed = if in_code == 0 { ospeed } else { baud(in_code, other_in) }
     put_sv(t, C_IFLAG, uaccess.get(pml4, arg, 4))
     put_sv(t, C_OFLAG, uaccess.get(pml4, arg + 4, 4))
-    put_sv(t, C_CFLAG, uaccess.get(pml4, arg + 8, 4))
+    put_sv(t, C_CFLAG, cflag)
+    put_sv(t, C_ISPEED, ispeed)
+    put_sv(t, C_OSPEED, ospeed)
     put_sv(t, C_LFLAG, uaccess.get(pml4, arg + 12, 4))
     put_sv(t, C_LINE, uaccess.get(pml4, arg + 16, 1))
     put_sv(t, C_CC, uaccess.get(pml4, arg + 17, 8))
@@ -1334,15 +1408,16 @@ pub fn ioctl(t: u64, a: u64, pml4: u64, req: u64, arg: u64) -> u64 {
     if hung(t) {
         return NEG_EIO
     }
-    if req == TCGETS {
-        return termios_out(t, pml4, arg)
+    if req == TCGETS || req == TCGETS2 {
+        return termios_out(t, pml4, arg, req == TCGETS2)
     }
-    if req == TCSETS || req == TCSETSW || req == TCSETSF {
+    if req == TCSETS || req == TCSETSW || req == TCSETSF || req == TCSETS2 || req == TCSETSW2 || req == TCSETSF2 {
         let j = job(t, J_SET)
         if j != 0 {
             return j
         }
-        let r = termios_in(t, pml4, arg, req == TCSETSF)
+        let extended = req == TCSETS2 || req == TCSETSW2 || req == TCSETSF2
+        let r = termios_in(t, pml4, arg, req == TCSETSF || req == TCSETSF2, extended)
         if t != CON {
             sched.wake_pipes()
         }
