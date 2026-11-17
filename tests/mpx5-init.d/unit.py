@@ -83,5 +83,32 @@ class LifecycleReadings(unittest.TestCase):
                 rows.second_start_snapshot(Console([response]), 1)
 
 
+class LogoutRecord(unittest.TestCase):
+    """I16's verdict on what PAX's last prints (user/last: util-linux's columns, -e PAX's own)."""
+    BOOT = 'reboot   system boot  2026-11-17T04:00:00+00:00   still running'
+
+    def lines(self, end):
+        return '\n'.join([
+            'root     console      2026-11-17T04:01:10+00:00   still logged in  [still logged in]',
+            'root     console      2026-11-17T04:01:00+00:00 - %s  (00:00)  [logout]' % end,
+            self.BOOT, '', 'wtmp begins 2026-11-17T04:00:00+00:00'])
+
+    def test_a_logout_record_of_its_own_holds(self):
+        held, why = rows.logout_verdict(self.lines('2026-11-17T04:01:06+00:00'))
+        self.assertTrue(held, why)
+
+    def test_a_session_closed_only_by_the_next_login_is_red_by_name(self):
+        held, why = rows.logout_verdict(self.lines('2026-11-17T04:01:10+00:00'))
+        self.assertFalse(held)
+        self.assertIn('no record of the logout', why)
+
+    def test_missing_sessions_or_a_second_boot_record_are_red(self):
+        one = self.lines('2026-11-17T04:01:06+00:00')
+        for text in ('', None, one.replace(self.BOOT, ''), one + '\n' + self.BOOT,
+                     one.replace('[logout]', '[signal 9]')):
+            with self.subTest(text=text):
+                self.assertFalse(rows.logout_verdict(text)[0])
+
+
 if __name__ == '__main__':
     unittest.main()
