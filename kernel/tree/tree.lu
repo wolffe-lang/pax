@@ -212,6 +212,7 @@ const LINK_INLINE: u64 = 128
 
 // errnos (uapi asm-generic/errno-base.h, errno.h)
 const ENOENT: u64 = 2
+const EEXIST: u64 = 17
 const ENOTDIR: u64 = 20
 const EISDIR: u64 = 21
 const EINVAL: u64 = 22
@@ -1145,7 +1146,8 @@ fn find(d: u64, name: u64, len: u64) -> u64 {
 }
 
 /// The inode the name [name, name + len) leads to in directory `d`, or
-/// NONE (also in a directory that has been removed).
+/// NONE (also in a directory that has been removed), or -EIO when a
+/// present directory entry cannot be resolved to a live inode record.
 pub fn lookup(d: u64, name: u64, len: u64) -> u64 {
     var i = NONE
     if on_volume(d) {
@@ -1154,6 +1156,9 @@ pub fn lookup(d: u64, name: u64, len: u64) -> u64 {
             return NONE
         }
         i = vrec(vol(d), n, d)
+        if i == NONE {
+            return neg(EIO)
+        }
     } else {
         let r = find(d, name, len)
         if r == 0 {
@@ -1325,6 +1330,9 @@ fn make(d: u64, name: u64, len: u64, m: u64, uid: u64, gid: u64) -> u64 {
     }
     if ig(d, I_NLINK) == 0 {
         return neg(ENOENT)
+    }
+    if find(d, name, len) != 0 {
+        return neg(EEXIST)
     }
     let i = inode_new(m, uid, gid)
     if i == NONE {
@@ -1973,6 +1981,9 @@ fn vol_ready() -> bool {
 /// `..` leads back while it lives), stamped with this system call; NONE
 /// when the inode cannot be read or the table is full.
 fn vrec(v: u64, ino: u64, parent: u64) -> u64 {
+    if !ext2.named_inode(v, ino) {
+        return NONE
+    }
     let b = bucket(v, ino)
     var r = rd(b)
     var guard: u64 = 0
@@ -2252,6 +2263,11 @@ fn vdrop_name(i: u64) {
 /// `d`: `make`'s, on the disk.
 fn vmake(d: u64, name: u64, len: u64, m: u64, uid: u64, gid: u64) -> u64 {
     let v = vol(d)
+    // Check before allocating: a dangling name can point at a clear
+    // allocation bit, which must not be reused while refusing this name.
+    if ext2.lookup(v, vino(d), name, len) != 0 {
+        return neg(EEXIST)
+    }
     if ext2.read_only(v) != 0 {
         return neg(EROFS)
     }
@@ -2280,6 +2296,11 @@ fn vmake(d: u64, name: u64, len: u64, m: u64, uid: u64, gid: u64) -> u64 {
 
 fn vmkdir(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
     let v = vol(d)
+    // Check before allocating: a dangling name can point at a clear
+    // allocation bit, which must not be reused while refusing this name.
+    if ext2.lookup(v, vino(d), name, len) != 0 {
+        return neg(EEXIST)
+    }
     if ext2.read_only(v) != 0 {
         return neg(EROFS)
     }
@@ -2317,6 +2338,11 @@ fn vmkdir(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
 
 fn vsymlink(d: u64, name: u64, len: u64, target: u64, tlen: u64, uid: u64, gid: u64) -> u64 {
     let v = vol(d)
+    // Check before allocating: a dangling name can point at a clear
+    // allocation bit, which must not be reused while refusing this name.
+    if ext2.lookup(v, vino(d), name, len) != 0 {
+        return neg(EEXIST)
+    }
     if ext2.read_only(v) != 0 {
         return neg(EROFS)
     }
@@ -2823,7 +2849,7 @@ pub fn top_has(name: str) -> bool {
     }
     let c = lookup(top(), b, n)
     frames.free(pa)
-    c != NONE && is_dir(c)
+    c != NONE && !failed(c) && is_dir(c)
 }
 
 /// px67: whether mount `m` is `/`'s.
@@ -3055,7 +3081,7 @@ pub fn small_file(path: str) -> (u64, u64, u64) {
             gone = true
         } else {
             let c = lookup(d, b + s0, i - s0)
-            if c == NONE {
+            if c == NONE || failed(c) {
                 gone = true
             } else {
                 f = c
@@ -3146,6 +3172,9 @@ fn adopt(e: u64) {
             continue
         }
         let c = lookup(d, a + s, n)
+        if c != NONE && failed(c) {
+            return
+        }
         if !last {
             if c == NONE {
                 d = make_dir(d, a + s, n, 0x1ed, 0, 0)

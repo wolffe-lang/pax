@@ -389,9 +389,22 @@ fn installed_manifest(new: Manifest, dev: str, payload: str, tools: str, work: s
 /// fsynced, held to `digest` and renamed over `dest`.
 fn tmp_of(dest: str) -> str ! {io} {
     let tmp = "{dest}.pax-tmp"
-    let _st = fs_lstat(tmp) else |_| { return tmp }
-    // A cut run's leftover goes first.
-    fs_remove(tmp) else |_| { return io }
+    let _st = fs_lstat(tmp) else |e| match e {
+        not_found => { return tmp },
+        denied => {
+            print("pax-install: cannot inspect temporary path {tmp}: permission denied; check the target's permissions before retrying")
+            return io
+        },
+        io => {
+            print("pax-install: cannot inspect temporary path {tmp}: filesystem damage or I/O error; stop retrying, power off, boot recovery media, leave the target root partition unmounted and run e2fsck -f on it, then retry the upgrade")
+            return io
+        },
+    }
+    // A cut run's leftover goes first, but only after successful inspection.
+    fs_remove(tmp) else |_| {
+        print("pax-install: cannot remove temporary path {tmp}; stop retrying, power off, boot recovery media, leave the target root partition unmounted and run e2fsck -f on it, then retry the upgrade")
+        return io
+    }
     tmp
 }
 
@@ -691,7 +704,7 @@ fn upgrade_main(o: Options, work: str) -> int {
             fs_remove_dir(dest) else |_| { (mut p.dropped_kept).push("{a.path} (a directory not empty)") }
         }
         if !ok {
-            return stop(mut lg, "pax-install: upgrade stopped at {a.op} {a.path}; run pax-install --upgrade again from this stick to finish")
+            return stop(mut lg, "pax-install: upgrade stopped at {a.op} {a.path}; resolve the preceding error before retrying pax-install --upgrade")
         }
         done += 1
         note(mut lg, "done {a.op} {a.path}")

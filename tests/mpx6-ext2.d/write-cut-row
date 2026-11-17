@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Build and run a deterministic power cut inside the real upgrade's write.
+# write-cut-row build WORK [KERNEL.elf]
+# write-cut-row run WORK [bios|uefi]
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ "$#" -ge 2 ] || die 'write-cut-row build|run WORK [KERNEL.elf|bios|uefi]'
+mode=$1 work=$2
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+case $mode in
+build)
+    need python3 mke2fs debugfs e2fsck
+    "$PAX_ROOT/tools/mkinstall" "$work/bin" write-cut
+    python3 -I - "$work/source" <<'PY'
+import sys
+from pathlib import Path
+# Nonzero deterministic data; no compression or sparse source shortcut.
+Path(sys.argv[1]).write_bytes(bytes(range(256)) * 65536)
+PY
+    printf '/dev/vda /mnt ext2 defaults 0 0\n' > "$work/fstab"
+    printf '/bin/write-cut\n' > "$work/pax-run"
+    "$PAX_ROOT/tools/mkinitramfs" "$work/write-cut.cpio" /mnt/:755 \
+        "/bin/write-cut=$work/bin/pax-write-cut:755" "/source=$work/source:644" \
+        "/etc/fstab=$work/fstab:644" "/etc/pax-run=$work/pax-run:644"
+    export PAX_WOLF
+    PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
+    "$PAX_ROOT/tools/fetch-limine"
+    kernel=${3:-}
+    if [ -z "$kernel" ]; then
+        kernel=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel")
+    fi
+    cp "$kernel" "$work/kernel.elf"
+    "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+        --add "$work/write-cut.cpio" initramfs.cpio "$work/kernel.elf" "$work/write-cut.iso"
+    ;;
+run)
+    need python3 gdb nm mke2fs debugfs e2fsck qemu-system-x86_64
+    python3 -I "$PAX_ROOT/tests/mpx6-ext2.d/write-cut.py" "$PAX_ROOT" "$work" "${3:-bios}"
+    ;;
+*) die 'write-cut-row takes build or run';;
+esac
