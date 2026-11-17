@@ -95,7 +95,7 @@ static int start(const char *release)
             _exit(2);
         if (null > 2)
             close(null);
-        if (write(p[1], &sid, sizeof(sid)) != sizeof(sid))
+        if (write(p[1], &sid, sizeof(sid)) != (ssize_t)sizeof(sid))
             _exit(2);
         close(p[1]);
         for (;;) {
@@ -110,7 +110,7 @@ static int start(const char *release)
     pid_t sid = 0;
     ssize_t n = read(p[0], &sid, sizeof(sid));
     close(p[0]);
-    if (n != sizeof(sid) || sid != c) {
+    if (n != (ssize_t)sizeof(sid) || sid != c) {
         fprintf(stderr, "orphan: child did not report its own session\n");
         return 2;
     }
