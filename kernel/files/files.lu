@@ -125,7 +125,7 @@
 //!
 //! **Socketpairs** (px17, `socketpair(2)`, AF_UNIX, SOCK_STREAM or
 //! SOCK_SEQPACKET: what wolf's spawn uses to hear an `execve` fail in
-//! its child): two one-frame buffers, one each way; each end reads one
+//! its child): two buffers of 65536 bytes (px159; one frame before), one each way; each end reads one
 //! and writes the other, as a pipe's ends do, `recvfrom` and `sendto`
 //! with no address being `read` and `write`. Named drift: a
 //! SOCK_SEQPACKET's record boundaries are not kept (a read takes what is
@@ -301,13 +301,17 @@ const P_RD: u64 = 3 // bytes read since it was made
 const P_WR: u64 = 4 // bytes written
 const P_OGEN: u64 = 5 // px24: times a read gave a writer room it did not have (an edge-triggered registration's count)
 const P_MSG: u64 = 6 // px34: 1 for a SOCK_SEQPACKET buffer: messages behind an eight-byte length
+const P_SOCK: u64 = 7 // px159: 1 for a socket's buffer (a socketpair's, a path connection's); 0 a pipe's or a FIFO's
 const P_FRAME: u64 = 8 // the frames' physical addresses, from here (16 at most: words 8 to 23)
 const P_OWNER: u64 = 24 // px43 (pax#58): a pipe's or a socketpair's maker's file-system user id (low 32 bits) and group id (high 32)
 const P_CPID: u64 = 25 // px45: a socketpair's maker's pid + 1, for SO_PEERCRED (0: a pipe's)
 const P_CIDS: u64 = 26 // px45: and its effective user id (low 32 bits) and group id (high 32)
 const P_FIFO: u64 = 27 // px62: a FIFO's buffer: the FIFO's inode + 1, held while the buffer lives (0: a pipe's or a socket's)
 const PIPE_PAGES: u64 = 16 // 65536 bytes, Linux's default capacity
-const SOCK_PAGES: u64 = 1
+// px159: a socket's buffer, each way, holds 65536 bytes as a pipe does (one
+// frame, 4096 bytes, before): a terminal multiplexer's 19 KiB frame took five
+// write, wake and read round trips through one, now one.
+const SOCK_PAGES: u64 = 16
 /// PIPE_BUF (`pipe(7)`): a write of at most this many bytes is atomic.
 const PIPE_BUF: u64 = 4096
 /// The answer that means "wait and run the call again" (px17): never seen
@@ -658,9 +662,20 @@ fn pipe_new(pages: u64) -> u64 {
     put_ppw(p, P_RD, 0)
     put_ppw(p, P_WR, 0)
     put_ppw(p, P_MSG, 0)
+    put_ppw(p, P_SOCK, 0) // px159: a pipe's, until `sock_new` sets it
     put_ppw(p, P_CPID, 0) // px45: a pipe's, until a socketpair sets it
     put_ppw(p, P_FIFO, 0) // px62: a pipe's, until a FIFO's open sets it
     put_ppw(p, P_PAGES, pages)
+    p
+}
+
+/// px159: a socket's buffer (a socketpair's or a path connection's, each
+/// way): `pipe_new`'s, marked a socket's (`room_wanted`); PIPES when none.
+fn sock_new() -> u64 {
+    let p = pipe_new(SOCK_PAGES)
+    if p != PIPES {
+        put_ppw(p, P_SOCK, 1)
+    }
     p
 }
 
@@ -1374,11 +1389,11 @@ pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) 
     if s0 == FDS || lowest_free(a, s0 + 1) == FDS {
         return neg(EMFILE)
     }
-    let c1 = pipe_new(SOCK_PAGES)
+    let c1 = sock_new()
     if c1 == PIPES {
         return neg(ENFILE)
     }
-    let c2 = pipe_new(SOCK_PAGES)
+    let c2 = sock_new()
     if c2 == PIPES {
         pipe_settle(c1)
         return neg(ENFILE)
@@ -1418,9 +1433,10 @@ pub fn socketpair(a: u64, pml4: u64, domain: u64, ty: u64, proto: u64, sv: u64) 
 /// px24: the least room a writer of buffer `p` must find for `poll` to
 /// call it writable: PIPE_BUF for a pipe (measured on Linux: a full
 /// pipe is writable again when 4096 bytes have been read, not 4095), a
-/// byte for a socketpair's one-frame buffer.
+/// byte for a socket's buffer (px159: told by P_SOCK, now that both hold
+/// 16 frames).
 fn room_wanted(p: u64) -> u64 {
-    if ppw(p, P_PAGES) == SOCK_PAGES { 1 } else { PIPE_BUF }
+    if ppw(p, P_SOCK) != 0 { 1 } else { PIPE_BUF }
 }
 
 /// `k` bytes of buffer `p` were read: its read count moves, and when
@@ -3144,12 +3160,12 @@ pub fn unix_connect(a: u64, pml4: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if srv == unix.SOCKS {
         return neg(ENOBUFS)
     }
-    let b1 = pipe_new(SOCK_PAGES)
+    let b1 = sock_new()
     if b1 == PIPES {
         unix.free(srv)
         return neg(ENOBUFS)
     }
-    let b2 = pipe_new(SOCK_PAGES)
+    let b2 = sock_new()
     if b2 == PIPES {
         pipe_settle(b1)
         unix.free(srv)
