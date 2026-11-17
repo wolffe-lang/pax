@@ -287,14 +287,24 @@ pub fn master_read(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool) -> u64
         if slave_gone(n) {
             return NEG_EIO
         }
-        return if nonblock { NEG_EAGAIN } else { WAIT }
+        return waits(n, nonblock)
     }
     if len == 0 {
         return 0
     }
     let r = console.oq_take(t, pml4, buf, len)
-    sched.wake_pipes() // a slave writer waiting for room
+    sched.wake_obj(sched.KEY_PTY, n) // a slave writer waiting for room (px159: this pty's alone)
     r
+}
+
+/// px159: -EAGAIN, or WAIT on pty `n` (kernel/sched's `wait_key`: woken
+/// when this pty changes, not by every pipe's change).
+fn waits(n: u64, nonblock: bool) -> u64 {
+    if nonblock {
+        return NEG_EAGAIN
+    }
+    sched.wait_key(sched.KEY_PTY, n)
+    WAIT
 }
 
 /// The master's `write`: the bytes IQ takes (then fed to the line
@@ -316,11 +326,11 @@ fn master_in(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool, kernel: bool
         return 0
     }
     if console.iq_room(t) == 0 {
-        return if nonblock { NEG_EAGAIN } else { WAIT }
+        return waits(n, nonblock)
     }
     let r = if kernel { console.master_put_kernel(t, buf, len) } else { console.master_write(t, pml4, buf, len) }
     console.pty_signals(t)
-    sched.wake_pipes()
+    sched.wake_obj(sched.KEY_PTY, n) // px159: the slave's readers (and the echo's for the master's)
     r
 }
 
@@ -349,9 +359,9 @@ fn slave_in(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool, kernel: bool)
     }
     let r = if kernel { console.slave_put_kernel(t, buf, len) } else { console.slave_write(t, pml4, buf, len) }
     if r == 0 {
-        return if nonblock { NEG_EAGAIN } else { WAIT }
+        return waits(n, nonblock)
     }
-    sched.wake_pipes()
+    sched.wake_obj(sched.KEY_PTY, n) // px159: the master's readers
     r
 }
 
@@ -359,7 +369,7 @@ fn slave_in(n: u64, pml4: u64, buf: u64, len: u64, nonblock: bool, kernel: bool)
 /// writer waiting for room runs again.
 pub fn slave_took(n: u64) {
     let _m = console.feed(tty(n))
-    sched.wake_pipes()
+    sched.wake_obj(sched.KEY_PTY, n) // px159: this pty's waiters alone
 }
 
 /// poll's mask for pty `n`'s master.
