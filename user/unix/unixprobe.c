@@ -791,7 +791,7 @@ static void seqpacket(void)
     got("recv after the writer's end closed, one message left", sv[1], 100, 0);
     got("recv at the end", sv[1], 100, 0);
     close(sv[1]);
-    /* A large message: Linux takes it whole; PAX's buffer is one frame. */
+    /* A large message: Linux takes it whole; PAX too since px159 (its buffer was one frame). */
     socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv);
     char *big = calloc(1, 8000);
     r = send(sv[0], big, 8000, MSG_DONTWAIT);
