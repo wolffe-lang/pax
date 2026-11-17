@@ -2526,3 +2526,13 @@ beyond its pin.
 | Intel SDM vol. 3A §4.5 (4-level paging: one page table maps 2 MiB), §4.10.4 (INVLPG) | as px03's entry | the areas' region and its page tables taken at `start` |
 | PAX's own `kernel/sched`, `kernel/fpu`, `kernel/process`, `kernel/procfs`, `kernel/vm`, `kernel/trace_state`, `boot/sched.S`, `boot/fpu.S`, `user/elf/ptyprobe.c` (the pty idioms), `tests/mpx5-pty` and `tests/mpx5-forks` (the suite's shape) | this tree | read and extended |
 | pelt at `user/pelt.pin`'s commit and boreutils' `cat` at `user/boreutils.pin`'s, built unmodified by `tools/mkpelt` and `tools/mkboreutils` | the pins | black box: their thread counts on PAX (`/proc/<pid>/status`), pelt's `-c` |
+
+## px159 — a wake-up for the readers of what changed; 64 KiB socket buffers
+
+No kernel's source of any OS and no C library's source was read.
+
+| source | version | read, for |
+|---|---|---|
+| pipe(7), unix(7), socketpair(2), socket(7) (SO_SNDBUF's meaning), eventfd(2), pty(7), poll(2), epoll(7), termios(3) (`cfmakeraw`) (the Linux man-pages) | 6.9 | what a reader and a writer of each wait for; the probe's hop over a pty in raw mode; a socket's buffer sized as a pipe's |
+| Intel SDM vol. 2 (RDTSC) | as px88's entry | an urgent thread's first millisecond, by the time-stamp counter since its switch |
+| PAX's own `kernel/sched`, `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/ready`, `kernel/event`, `kernel/unix`, `kernel/user`, `tests/mpx6-latency` and `user/elf/latprobe.c` | this tree | every wait on a pipe, a socket, a pty, the console and an eventfd, and every wake of them, read; extended |
