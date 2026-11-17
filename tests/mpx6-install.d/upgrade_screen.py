@@ -17,9 +17,15 @@ class SocketWait(RuntimeError):
     pass
 
 
+ECHO_PREFIX = 24
+
+
 def echoes(flat, cmd):
-    """Start offsets of the command's echoes: its text right after a prompt's `$ `, `# ` or `> `."""
-    return [m.end() - len(cmd) for m in re.finditer(r'[$#>] ' + re.escape(cmd), flat)]
+    """Start offsets of the command's echoes: its first ECHO_PREFIX characters right after a prompt's `$ `,
+    `# ` or `> `. The prefix only: a host under load drops keys, and the echo then lacks the line's tail
+    (pax#457, U2d-state); the rows' own checks read what the command printed."""
+    head = cmd[:ECHO_PREFIX]
+    return [m.end() - len(head) for m in re.finditer(r'[$#>] ' + re.escape(head), flat)]
 
 
 def echo_count(flat, cmd):
