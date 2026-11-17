@@ -154,5 +154,27 @@ def main(argv):
     print("%s %d bytes sha256 %s" % (out, len(buf), hashlib.sha256(buf).hexdigest()))
 
 
+def identity(argv):
+    """Witness branch only, never merged (pax#467): the same arguments through the reference
+    (the tool as it was) must give the same archive. Says so on stderr; exit 1 when not."""
+    import subprocess
+    out = argv[1]
+    ref = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests",
+                       "mkinitramfs-selftest.d", "reference")
+    tmp = out + ".identity-reference"
+    r = subprocess.run([sys.executable, "-I", ref, tmp] + argv[2:], capture_output=True)
+    a = open(out, "rb").read()
+    b = open(tmp, "rb").read() if os.path.exists(tmp) else b""
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    if r.returncode != 0 or a != b:
+        sys.stderr.write("FAIL mkinitramfs-identity %s: %d bytes, the reference's %d (exit %d)\n"
+                         % (out, len(a), len(b), r.returncode))
+        sys.exit(1)
+    sys.stderr.write("mkinitramfs-identity: %s identical to the reference, %d bytes sha256 %s\n"
+                     % (out, len(a), hashlib.sha256(a).hexdigest()))
+
+
 if __name__ == "__main__":
     main(sys.argv)
+    identity(sys.argv)
