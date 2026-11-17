@@ -16,6 +16,9 @@
   S10 the new echo scrolled off the top by a long output (green4's U-var-log: the upgrade printed more than a
       screen): once its echo was seen, what is on the screen is all after it, so the line `Upgrade complete`
       is still read. Losing the scope there hung the wait for 3600 s on an empty screen.
+  S11 keys the guest dropped under host load (green5's U2d-state: the echo read `…echo run=$?;/` for a typed
+      `…echo run=$?; cd /`): the echo is still found by its first 24 characters, so the wait reads the prompt
+      instead of waiting 300 s for an echo that will not come. The row's own checks still see the output.
   S9  upgrade.py uses these helpers: no fixed `'$ ' +` marker, the QMP wait is the bounded one, and U2's
       state creates /var/log first.
 """
@@ -83,6 +86,14 @@ need(got is not None and 'Upgrade complete' in got, 'S10', f'a scrolled-off echo
 fresh = us.Baseline(CMD, 0)
 need(fresh.scope(tail) is None, 'S10', 'a screen that never showed the echo was in scope')
 print('PASS S10: a scrolled-off echo keeps the scope; a never-seen echo has none')
+
+# S11: green5's U2d-state. The old shell prompts `$ `, and the echo lost its last keys.
+dropped = (root / 'tests/mpx6-install.d/screens/u2d-dropped-keys.txt').read_text()
+typed = "./args one 'two words' > out.txt; echo run=$?; cd /"
+need(typed not in dropped, 'S11', 'the capture does not show dropped keys')
+got = us.scope_after_echo(dropped, typed, 0)
+need(got is not None and 'run=0' in got, 'S11', f'the garbled echo was not found: {got!r}')
+print('PASS S11: an echo that lost keys is found by its first 24 characters')
 
 # S6-S8
 class Alive:
