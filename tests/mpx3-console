@@ -168,12 +168,22 @@ if [ -z "$images" ]; then
             why+=" tools/mkinitramfs $p;"
         fi
     done
+    # A raw reader reports the bytes delivered by either keyboard.
+    if cc -static -O1 -Wall -Wextra -o "$work/keys" "$here/mpx3-console.d/keys.c"; then
+        printf '/bin/keys\n' > "$work/keys-run"
+        "$PAX_ROOT/tools/mkinitramfs" "$work/keys.cpio" "/bin/keys=$work/keys" "/etc/pax-run=$work/keys-run" || why+=" keys initramfs;"
+    else
+        why+=" keys probe compile;"
+    fi
     for tier in $tiers; do
         flag=(); [ "$tier" = release ] && flag=(--release)
         mkdir -p "$work/$tier"
         log=$work/$tier/kmain_console.build-kernel.log
         if elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
             cat "$log" >&2
+            "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+                --add "$work/keys.cpio" initramfs.cpio "$elf" "$work/$tier/console-keys.iso" >/dev/null \
+                || why+=" $tier console-keys: mkimage;"
             for p in ask pelt; do
                 "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
                     --add "$work/$p.cpio" initramfs.cpio "$elf" "$work/$tier/console-$p.iso" >/dev/null \
@@ -235,6 +245,14 @@ for leg in $legs; do
         continue
     fi
     for tier in $tiers; do
+        if [ "$suffix" = iso ]; then
+            for kb in ps2 usb; do
+                if ! python3 -I "$here/mpx3-console.d/keys.py" --image "$images/$tier/console-keys.iso" \
+                    --output "$PAX_BUILD/console-keys-$tier-$leg-$kb" --keyboard "$kb" --firmware "$leg" --accel "$accel"; then
+                    bad "console-keys $tier $leg $kb"
+                fi
+            done
+        fi
         for s in $SESSIONS; do
             p=$(image_of "$s") kb=$(kbd_of "$s") pr=$(prompt_of "$s")
             id="$tier $leg $s"
