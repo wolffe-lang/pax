@@ -947,7 +947,8 @@ for byte over COM1.
 ## The console for an editor (px59)
 
 PAX's screen draws what an editor writes as a Linux VT draws it, and
-its keyboard gives what a VT's gives: each class measured black-box on
+its keyboard follows the VT for the keys below except shifted printable
+Meta chords: each class was measured black-box on
 kasumi's own kernel's VT under QEMU (`/dev/vcsa1` read after each case;
 `notes/px59-the-console-for-an-editor.md`, `notes/px59/vt.rows` and
 `vt2.rows`, two probes, each run twice), `tools/screen-ref` held to those
@@ -958,7 +959,7 @@ pixel and, on the VT's own 80×25 grid, to the VT's cells directly
 | module | what |
 |---|---|
 | `screen/` | CUP HVP CUU CUD CUF CUB CNL CPL CHA HPA VPA; ED and EL in the current rendition; DECSC/DECRC; `?1049h/l` (the alternate screen in the upper 16 bits of each 32-bit cell: no memory; a scroll moves the active half only; leaving redraws the main screen); `?25l/h`; DECSCUSR recorded (PAX's cursor stays a block); SGR 22 27, 100–107 (bright, R-px59-1), `38;5`/`48;5` by the VT's measured mapping (R-px59-3); OSC to BEL or any ESC, `OSC P` and `OSC R`; BS at the margin clears the wrap and moves left (R-px59-5); a scrolled-in row blank in the current rendition; the answers DA1/`ESC Z` (`ESC [ ? 6 c`), DSR 5 (`ESC [ 0 n`), DSR 6 and `? 6` (`ESC [ r ; c R`) queued for the console (`answer`) |
-| `console/` | the screen's answers typed into the input through the line discipline when the keyboard was the device last typed at, dropped and counted before any input and after COM1's (`answered`, R-px59-4); F1–F12 (`ESC [ [ A`–`E`, `ESC [ 17 ~`–`24 ~`), Shift+F1–F10 the VT's F11–F20, Ctrl+Fn plain, Alt or Shift+Ctrl with Fn nothing; the arrows `ESC [ 1 ; m X` (m = 1 + Shift + 2 Alt + 4 Ctrl; Alt alone on Left/Right nothing); the editing block unmodified (Shift+PgUp/PgDn nothing); left Alt sends ESC before a character key (with Shift: nothing); right Alt adds nothing (R-px59-2) |
+| `console/` | the screen's answers typed into the input through the line discipline when the keyboard was the device last typed at, dropped and counted before any input and after COM1's (`answered`, R-px59-4); F1–F12 (`ESC [ [ A`–`E`, `ESC [ 17 ~`–`24 ~`), Shift+F1–F10 the VT's F11–F20, Ctrl+Fn plain, Alt or Shift+Ctrl with Fn nothing; the arrows `ESC [ 1 ; m X` (m = 1 + Shift + 2 Alt + 4 Ctrl; Alt alone on Left/Right nothing); the editing block unmodified (Shift+PgUp/PgDn nothing); left Alt sends ESC before a printable character, including its shifted form with Shift; Ctrl, AltGr and nonprintable combinations keep their existing behavior |
 | `user/` | a console `write` hands the screen's answers to the console before it returns (`console.answered`), waking a waiting reader |
 | `../boot/limine-vt.conf` | Limine asked for 640×400, the VT's 80×25 grid (the BIOS gives it; OVMF does not) |
 
