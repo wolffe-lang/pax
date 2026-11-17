@@ -1154,6 +1154,8 @@ def track_a():
         fail(row, f'new system did not write its boot log: rc={rc}, log={log_text[-400:]!r}')
     passed(row, 'upgrade created /var/log on an old install without /var; the new system wrote its boot log')
     run(['cp', '--sparse=always', work/'u2-target.img', DISKS/'target.img'], row=row)
+    if set(ROWS) == {'U1', 'U2', 'UVAR'}:
+        return
     # U0: the new stick's default entry mounts nothing and writes nothing.
     t0 = extents_sha(DISKS/'target.img')
     m = Machine('u0-default', sym_new, new)
