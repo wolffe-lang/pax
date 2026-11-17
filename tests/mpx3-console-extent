@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Focused console regression: Ctrl-Space as NUL and the complete box,
+# arrow and powerline extent. One static probe, no shell or mux fixtures.
+# --no-boot builds once; --images reuses that immutable kernel/image pair.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+images= noboot=0 legs=both tiers=both accel=auto
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images) images=$2; shift 2;;
+        --no-boot) noboot=1; shift;;
+        --firmware) legs=$2; shift 2;;
+        --tier) tiers=$2; shift 2;;
+        --accel) accel=$2; shift 2;;
+        *) die "usage: mpx3-console-extent [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|tcg|kvm]";;
+    esac
+done
+case $legs in both) legs='bios uefi';; bios|uefi) ;; *) die 'invalid firmware';; esac
+case $tiers in both) tiers='native release';; native|release) ;; *) die 'invalid tier';; esac
+case $accel in auto|tcg|kvm) ;; *) die 'invalid accel';; esac
+need python3 readelf
+D=$PAX_ROOT/tests/mpx3-console-extent.d
+if [ -z "$images" ]; then
+    images=$PAX_BUILD/mpx3-console-extent
+    mkdir -p "$images"
+    cc=${CC:-cc}
+    need "$cc" "${PAX_WOLF:-wolf}"
+    "$cc" -static -no-pie -O1 -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
+        "$D/probe.c" -o "$images/extent"
+    readelf -hW "$images/extent" | grep -Eq 'Type: +EXEC'
+    if readelf -lW "$images/extent" | grep -q INTERP; then die 'probe is not static'; fi
+    printf '/bin/extent\n' > "$images/pax-run"
+    "$PAX_ROOT/tools/mkinitramfs" "$images/extent.cpio" \
+        "/bin/extent=$images/extent" "/etc/pax-run=$images/pax-run"
+    "$PAX_ROOT/tools/fetch-limine"
+    for tier in $tiers; do
+        flags=(); [ "$tier" != release ] || flags=(--release)
+        mkdir -p "$images/$tier"
+        elf=$("$PAX_ROOT/tools/build-kernel" "${flags[@]}" --src "$PAX_ROOT/kernel/kmain_console.lu" "$images/$tier")
+        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+            --add "$images/extent.cpio" initramfs.cpio "$elf" "$images/$tier/extent.iso"
+        printf 'PASS console-extent-build %s: elf=%s iso=%s\n' "$tier" \
+            "$(sha256_of "$elf")" "$(sha256_of "$images/$tier/extent.iso")"
+    done
+fi
+[ "$noboot" = 0 ] || exit 0
+fail=0
+for tier in $tiers; do
+    elf=$images/$tier/kmain_console.elf
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            echo 'FAIL console-extent-boot: UEFI requested without OVMF'
+            fail=1
+            continue
+        fi
+        out=$PAX_BUILD/console-extent-$tier-$leg
+        mkdir -p "$out"
+        log=$out/serial.log
+        sock=$out/keys.sock
+        # Each take must use a new PAX_BUILD: stale logs cannot satisfy prompts.
+        [ ! -e "$log" ] || die "existing console record: $log"
+        python3 -I "$PAX_ROOT/tools/ps2-session" --serial "$log" --monitor "$sock" \
+            --keys "$D/keys" --out "$out" --gap 0.15 --timeout 60 > "$out/keys.log" 2>&1 &
+        keys_pid=$!
+        hrc=0 krc=0
+        "$PAX_ROOT/tools/qemu-halt" --accel "$accel" --firmware "$leg" --serial "$log" \
+            --timeout 120 --elf "$elf" --marker 'halt|PANIC .*' \
+            --qemu -monitor --qemu "unix:$sock,server=on,wait=off" \
+            "$images/$tier/extent.iso" > "$out/halt.log" 2>&1 || hrc=$?
+        wait "$keys_pid" || krc=$?
+        printf 'console-extent %s %s: halt=%s keys=%s serial=%s\n' \
+            "$tier" "$leg" "$hrc" "$krc" "$(sha256_of "$log")"
+        python3 -I "$D/check.py" "$log" "$out/extent.ppm" || fail=1
+        serial_norm "$log" > "$out/serial.norm"
+        if [ "$hrc" = 0 ] && [ "$krc" = 0 ] && \
+            grep -qx 'PAX: init /bin/extent ended with status 0; nothing left to run' "$out/serial.norm" && \
+            grep -q "^kernel: .* sha256 $(sha256_of "$elf"), " "$out/serial.norm" && \
+            ! grep -q '^PANIC ' "$out/serial.norm"; then
+            echo "PASS console-extent-boot $tier $leg: kernel identified, keys sent, clean exit and halt"
+        else
+            echo "FAIL console-extent-boot $tier $leg: halt=$hrc keys=$krc; see $out"
+            fail=1
+        fi
+    done
+done
+exit "$fail"
