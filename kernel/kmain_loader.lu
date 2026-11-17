@@ -16,6 +16,11 @@
 //                           switched with the thread
 //   /bin/hello-pie, /bin/hello-dyn, /bin/hello32, /bin/hello-arm,
 //   /etc/motd, /bin/nothing refused by name, nothing kept
+//   /usr/lib/ld-linux-x86-64.so.2 --version, /usr/bin/bash -c true
+//                           (px145) Arch's own, when the initramfs holds
+//                           them: refused by name, the interpreter named
+//   /bin/execdyn …          (px145) the same refusals through execve:
+//                           bash, the loader, hello-dyn, hello-pie
 //   /bin/wolf-hello         when the initramfs holds it: a wolf program
 //                           linked static (glibc), run until PAX lacks
 //                           what it asks for (the gap census)
@@ -142,6 +147,19 @@ export fn kmain() {
     run("/bin/hello-arm", "/bin/hello-arm")
     run("/etc/motd", "/etc/motd")
     run("/bin/nothing", "/bin/nothing")
+    // px145: Arch's own dynamic programs, when the initramfs holds them
+    // (tests/mpx3-loader fetches them by digest): its loader (ET_DYN, no
+    // PT_INTERP) and bash (ET_DYN with PT_INTERP), each refused by name
+    // with its interpreter named; then the same refusals through execve.
+    if initramfs.lookup("/usr/lib/ld-linux-x86-64.so.2") != initramfs.END {
+        run("/usr/lib/ld-linux-x86-64.so.2", "/usr/lib/ld-linux-x86-64.so.2 --version")
+    }
+    if initramfs.lookup("/usr/bin/bash") != initramfs.END {
+        run("/usr/bin/bash", "/usr/bin/bash -c true")
+    }
+    if initramfs.lookup("/bin/execdyn") != initramfs.END {
+        run("/bin/execdyn", "/bin/execdyn /usr/bin/bash /usr/lib/ld-linux-x86-64.so.2 /bin/hello-dyn /bin/hello-pie")
+    }
     if initramfs.lookup("/bin/wolf-hello") != initramfs.END {
         run("/bin/wolf-hello", "/bin/wolf-hello")
     } else {
