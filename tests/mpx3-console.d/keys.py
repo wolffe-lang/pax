@@ -79,9 +79,13 @@ with (out / 'qemu.log').open('wb') as log:
                 wait_for(f'KEYREADY {i}'.encode())
                 def event(code, down):
                     return {'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': code}}}
-                command('input-send-event', {'events': [event(k, True) for k in keys]})
-                time.sleep(.1)
-                command('input-send-event', {'events': [event(k, False) for k in reversed(keys)]})
+                # Separate modifier reports so USB sees the actual order too.
+                for k in keys:
+                    command('input-send-event', {'events': [event(k, True)]})
+                    time.sleep(.05)
+                for k in reversed(keys):
+                    command('input-send-event', {'events': [event(k, False)]})
+                    time.sleep(.05)
                 line = wait_for(f'KEYROW {i}'.encode(), 10)
                 got = bytes.fromhex(line.decode().split(' ', 2)[2]) if len(line.split()) > 2 else b''
                 ok = got == want
