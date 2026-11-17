@@ -42,7 +42,8 @@ def header(ino, mode, nlink, size, name, uid=0, gid=0):
 
 
 def pad4(buf):
-    return buf + b"\0" * (-len(buf) % 4)
+    """Pads the bytearray `buf` in place to a multiple of four bytes."""
+    buf += b"\0" * (-len(buf) % 4)
 
 
 def attrs(spec, what):
@@ -127,22 +128,27 @@ def main(argv):
     entries += [(n, d, m | 0o100000, u, g) for n, (d, m, u, g) in files.items()]
     entries += [(n, t, 0o120777, u, g) for n, (t, u, g) in links.items()]
     entries.sort(key=lambda e: e[0])
-    buf = b""
+    # pax#467: built in place. `buf = buf + …` on an immutable string copied the whole archive
+    # at every entry: about 280 GB for a 355 MB image, minutes, where this takes under a second.
+    buf = bytearray()
     ino = 1
     for name, data, mode, uid, gid in entries:
         nb = name.encode()
         size = 0 if data is None else len(data)
         nlink = 2 if data is None else 1
-        buf = pad4(buf + header(ino, mode, nlink, size, nb, uid, gid) + nb + b"\0")
+        buf += header(ino, mode, nlink, size, nb, uid, gid) + nb + b"\0"
+        pad4(buf)
         if data is not None:
-            buf = pad4(buf + data)
+            buf += data
+            pad4(buf)
         own = "" if (uid, gid) == (0, 0) else " %d:%d" % (uid, gid)
         if mode & 0o170000 == 0o120000:
             print("link %o %d %s -> %s%s" % (mode, size, name, data.decode(), own))
         else:
             print("%s %o %d %s%s" % ("dir " if data is None else "file", mode, size, name, own))
         ino += 1
-    buf = pad4(buf + header(0, 0, 1, 0, b"TRAILER!!!") + b"TRAILER!!!\0")
+    buf += header(0, 0, 1, 0, b"TRAILER!!!") + b"TRAILER!!!\0"
+    pad4(buf)
     with open(out, "wb") as f:
         f.write(buf)
     print("%s %d bytes sha256 %s" % (out, len(buf), hashlib.sha256(buf).hexdigest()))
