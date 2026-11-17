@@ -2,6 +2,7 @@
 """Exercise console keyboard bytes using QMP, on PS/2 and USB."""
 import argparse
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -44,8 +45,11 @@ cmd = [str(root / 'tools/qemu-run'), '--firmware', a.firmware, '--accel', a.acce
        '--timeout', '180', '--serial', str(serial)]
 if a.keyboard == 'usb': cmd += ['--usb-kbd']
 cmd += [str(Path(a.image).resolve()), '--', '-qmp', f'unix:{qmp},server=on,wait=off']
+env = dict(os.environ)
+# The enclosing USB replay must not silently turn our PS/2 leg into USB.
+env.pop('PAX_USB_KBD', None)
 with (out / 'qemu.log').open('wb') as log:
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=env)
     try:
         deadline = time.monotonic() + 120
         while not qmp.exists():
