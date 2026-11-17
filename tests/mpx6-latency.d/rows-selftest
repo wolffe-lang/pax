@@ -26,6 +26,13 @@ gives them. tests/mpx6-latency runs it first (S0).
      trip over a unix socket (`ctl`) the same; under TCG both SKIPPED by
      name; no `ctl` line where the run list has it fails; the guard's run
      list has `ctl` after the saturating flood.
+  S7 px159, L9: a hop beside the hog within max(3 x its p99 with none, that
+     plus 2 ms): 2600 us over 600 us passes, 2601 fails; over 1500 us the
+     limit is three times it, 4500 us; under TCG SKIPPED by name; a kind
+     with no round trips fails; the run list has each kind with and
+     without the hog; parse() reads a `latprobe-ops` line into its load.
+  S8 px159, L10: the frame line parsed; 19456 four times passes; a write
+     cut to 4096 (one 4 KiB buffer) fails; no line fails.
 Exit 0 when every row held; the first failing row is named.
 """
 from importlib.machinery import SourceFileLoader
@@ -142,4 +149,64 @@ loads = rows.guard_loads(1024)
 if 'ctl' not in loads or loads.index('ctl') != loads.index('flood') + 1:
     bad('S6', f'the run list {loads}')
 print(f'rows-selftest: PASS S6 L7 and L8 at {B} us pass, {B + 1} us fails, SKIPPED under TCG, no ctl line fails; the run list has ctl after flood')
+
+# S7: L9, a hop beside a CPU-bound process (px159)
+for name in ('hop_rows', 'hop_limit', 'hop_loads', 'HOP_BOUND', 'HOP_SLACK_US', 'HOP_KINDS'):
+    if not hasattr(rows, name):
+        bad('S7', f'rows.py has no {name}')
+if rows.hop_limit(600) != 2600 or rows.hop_limit(1500) != 4500:
+    bad('S7', f'limits {rows.hop_limit(600)} and {rows.hop_limit(1500)}, wanted 2600 and 4500')
+hw = rows.hop_loads()
+def hops(accel, spin99, base99=600, missing=None):
+    rs = {}
+    for k in rows.HOP_KINDS:
+        rs['hop:%s' % k] = row(on=600, o50=base99 // 2, o99=base99, omax=base99 * 2)
+        rs['hop:%s+spin' % k] = row(on=590, o50=spin99 // 2, o99=spin99, omax=spin99 * 2)
+    if missing:
+        del rs[missing]
+    return rows.hop_rows('native-bios-1024', accel, rs, hw)
+fail, lines = hops('kvm', 2600)
+if fail or len(lines) != 3 or not all(l.startswith('PASS L9 native-bios-1024 ') for l in lines):
+    bad('S7', f'at the limit: {fail} {lines}')
+fail, lines = hops('kvm', 2601)
+if not fail or not all(l.startswith('FAIL L9 native-bios-1024 ') for l in lines):
+    bad('S7', f'1 us over the limit: {fail} {lines}')
+fail, lines = hops('kvm', 4500, base99=1500)
+if fail:
+    bad('S7', f'three times 1500 us: {fail} {lines}')
+fail, lines = hops('tcg', 40000)
+if fail or not all(l.startswith('SKIP L9 native-bios-1024 ') and 'reason=tcg' in l for l in lines):
+    bad('S7', f'under TCG: {fail} {lines}')
+fail, lines = hops('kvm', 600, missing='hop:pty+spin')
+if not fail or not any(l.startswith('FAIL L9 native-bios-1024 pty: no ') for l in lines):
+    bad('S7', f'no pty round trips: {fail} {lines}')
+loads = rows.guard_loads(1024)
+for k in rows.HOP_KINDS:
+    if 'hop:%s' % k not in loads or 'hop:%s+spin' % k not in loads:
+        bad('S7', f'the run list {loads}')
+sample = ('latprobe hop:pipe+spin: wake n 2900 p50 50 p99 900 max 1800; lo n 590 p50 120 max 900 lost 0; net -; ops 595 max 40000; '
+          'irqoff 120 vector 0x100 nr 1; schedgap 10; ticks 300 of 300; sys 1:10 0:5 3:2; clocks mono 3000000 real 3000000 tsc 3000001\n'
+          'latprobe-ops hop:pipe+spin: n 595 p50 18000 p99 38000 max 40000\n')
+got = rows.parse(sample).get('hop:pipe+spin') or {}
+if (got.get('on'), got.get('o50'), got.get('o99'), got.get('omax')) != (595, 18000, 38000, 40000):
+    bad('S7', f'parse() of a latprobe-ops line: {got}')
+print('rows-selftest: PASS S7 L9 within max(3 x, + 2 ms): 2600/600 passes, 2601 fails, 4500/1500 passes; '
+      'SKIPPED under TCG; no round trips fails; the run list has every kind; parse() reads latprobe-ops')
+
+# S8: L10, a frame in one round trip (px159)
+for name in ('frame_row', 'parse_frame', 'FRAME'):
+    if not hasattr(rows, name):
+        bad('S8', f'rows.py has no {name}')
+F = rows.FRAME
+fr = rows.parse_frame('noise latprobe-frame: socketpair sent %d read %d; path sent %d read %d\n' % (F, F, F, F))
+fail, line = rows.frame_row('native-bios-1024', fr)
+if fail or not line.startswith('PASS L10 native-bios-1024: '):
+    bad('S8', f'{F} four times: {fail} {line}')
+fail, line = rows.frame_row('native-bios-1024', rows.parse_frame('latprobe-frame: socketpair sent 4096 read 4096; path sent 4096 read 4096'))
+if not fail or not line.startswith('FAIL L10 native-bios-1024: '):
+    bad('S8', f'a write cut to 4096: {fail} {line}')
+fail, line = rows.frame_row('native-bios-1024', rows.parse_frame('latprobe: end'))
+if not fail or 'no latprobe-frame line' not in line:
+    bad('S8', f'no line: {fail} {line}')
+print(f'rows-selftest: PASS S8 L10 {F} four times passes, 4096 fails, no line fails')
 print('rows-selftest: PASS')
