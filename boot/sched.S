@@ -104,8 +104,10 @@
                        while the slot has a process area mapped; the mark
                        an ending process puts on each child whose group
                        it may orphan (a 64-bit mask before, wrong past
-                       slot 63)
-     pax_pid_hint      px126: 4096 words, `pid mod 4096` to the slot
+                       slot 63); px159: three a slot, the third the key
+                       buckets its system call looked at, which a wake
+                       of one object reads while it waits
+     pax_pid_hint     px126: 4096 words, `pid mod 4096` to the slot
                        that last took that pid or tid, plus one: a hint
                        kernel/sched checks, walking the slots only when
                        it misses
@@ -218,7 +220,7 @@ pax_threads_end:
         .p2align 6
         .globl pax_slot_words
 pax_slot_words:
-        .zero 1024 * 2 * 8
+        .zero 1024 * 3 * 8
         .p2align 6
         .globl pax_pid_hint
 pax_pid_hint:
