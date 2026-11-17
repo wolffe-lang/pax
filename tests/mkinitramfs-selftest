@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""tests/mkinitramfs-selftest — tools/mkinitramfs writes the archive it has always written, in
+time that grows with the archive, not with the archive times its entries (pax#467).
+
+  S1  identity: 40 generated trees (a fixed seed), each packed by tools/mkinitramfs and by the
+      reference (tests/mkinitramfs-selftest.d/reference, the tool as it was before pax#467): the
+      same archive bytes and the same listing. Between them the trees hold every length of name
+      and of data modulo 4, empty files, links of 1 to 4095 bytes, directories named with modes and
+      owners, files with owners, and paths up to six deep.
+  S2  identity on a real tree: for each --argv FILE (one argument per line, as a suite passes them;
+      its source files must exist), the same comparison, with each tool's wall and CPU time.
+  S3  linear time: a 64 MiB file that sorts first, then 2,000 small files. The tool's CPU stays
+      under 20 s (it is under a second; a tool that copies the archive at every entry copies about
+      270 GB here, minutes, and is cut at 120 s).
+
+  tests/mkinitramfs-selftest [--argv FILE]...
+
+Each row prints `PASS <row> …` or `FAIL <row> …` at column 0. Exit 0 when every row held, 1 when
+any failed.
+"""
+import hashlib
+import os
+import pathlib
+import random
+import resource
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = pathlib.Path(__file__).resolve().parent
+TOOL = HERE.parent / 'tools' / 'mkinitramfs'
+REFERENCE = HERE / 'mkinitramfs-selftest.d' / 'reference'
+FAILS = []
+
+
+def row(ok, name, why):
+    print('%s %s %s' % ('PASS' if ok else 'FAIL', name, why), flush=True)
+    if not ok:
+        FAILS.append(name)
+
+
+def pack(tool, out, argv, timeout=600):
+    """Runs `tool OUT ARGV…`: (exit, listing, archive sha256, wall s, CPU s); exit None when cut."""
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    t = time.monotonic()
+    try:
+        r = subprocess.run([sys.executable, '-I', str(tool), str(out)] + argv, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, b'', '', time.monotonic() - t, 0.0
+    wall = time.monotonic() - t
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
+    sha = hashlib.sha256(out.read_bytes()).hexdigest() if out.exists() else ''
+    # The listing's last line names the output file; compare the rest and the digest it states.
+    lines = r.stdout.splitlines()
+    listing = b'\n'.join(lines[:-1] + [lines[-1].split(b' ', 1)[-1]] if lines else [])
+    return r.returncode, listing, sha, wall, cpu
+
+
+def name(rng, used, depth):
+    alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789._-'
+    while True:
+        parts = []
+        for _ in range(depth):
+            n = rng.randint(1, 12)
+            p = ''.join(rng.choice(alphabet) for _ in range(n)).strip('.') or 'x'
+            if rng.random() < 0.05:
+                p += 'é'
+            parts.append(p)
+        path = '/'.join(parts)
+        if path not in used and not any(path.startswith(u + '/') or u.startswith(path + '/') for u in used):
+            used.add(path)
+            return path
+
+
+def tree(rng, d):
+    """A generated tree under `d`: the argument vector that packs it."""
+    argv, used = [], set()
+    sizes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 511, 512, 513, 4095, 4096, 4097, 65537]
+    for i in range(rng.randint(5, 30)):
+        p = name(rng, used, rng.randint(1, 6))
+        src = d / ('f%d' % i)
+        src.write_bytes(rng.randbytes(rng.choice(sizes)))
+        if rng.random() < 0.3:
+            os.chmod(src, 0o755)
+        spec = ''
+        r = rng.random()
+        if r < 0.25:
+            spec = ':%o' % rng.choice([0o600, 0o644, 0o700, 0o755, 0o4755])
+        elif r < 0.5:
+            spec = ':%o:%d:%d' % (rng.choice([0o644, 0o755]), rng.randint(0, 65535), rng.randint(0, 65535))
+        argv.append('/%s=%s%s' % (p, src, spec))
+    for _ in range(rng.randint(0, 6)):
+        p = name(rng, used, rng.randint(1, 4))
+        r = rng.random()
+        spec = '' if r < 0.3 else (':%o' % rng.choice([0o700, 0o755, 0o1777]) if r < 0.6 else
+                                   ':%o:%d:%d' % (rng.choice([0o700, 0o755]), rng.randint(0, 65535), rng.randint(0, 65535)))
+        argv.append('/%s/%s' % (p, spec))
+    for _ in range(rng.randint(0, 5)):
+        p = name(rng, used, rng.randint(1, 4))
+        target = ''.join(rng.choice('abcdefghij/._-') for _ in range(rng.choice([1, 2, 3, 4, 5, 63, 4095])))
+        spec = '' if rng.random() < 0.6 else ':%d:%d' % (rng.randint(0, 65535), rng.randint(0, 65535))
+        argv.append('/%s->%s%s' % (p, target, spec))
+    rng.shuffle(argv)
+    return argv
+
+
+def same(argv, d, label):
+    """Both tools on `argv`: '' when identical, else what differs."""
+    a = pack(TOOL, d / 'tool.cpio', argv)
+    b = pack(REFERENCE, d / 'reference.cpio', argv)
+    for f in ('tool.cpio', 'reference.cpio'):
+        (d / f).unlink(missing_ok=True)
+    if a[0] != b[0]:
+        return 'exit %s against the reference\'s %s' % (a[0], b[0]), a, b
+    if a[2] != b[2]:
+        return 'archive sha256 %s against the reference\'s %s' % (a[2][:16], b[2][:16]), a, b
+    if a[1] != b[1]:
+        return 'the listing differs from the reference\'s', a, b
+    return '', a, b
+
+
+def main(args):
+    argvs = []
+    while args:
+        if args[0] == '--argv' and len(args) > 1:
+            argvs.append(pathlib.Path(args[1]))
+            args = args[2:]
+        else:
+            sys.stderr.write('usage: tests/mkinitramfs-selftest [--argv FILE]...\n')
+            return 2
+    rng = random.Random(467)
+    with tempfile.TemporaryDirectory(prefix='mkinitramfs-selftest.') as d:
+        d = pathlib.Path(d)
+        bad, total = [], 0
+        for i in range(40):
+            t = d / ('t%d' % i)
+            t.mkdir()
+            argv = tree(rng, t)
+            total += len(argv)
+            why, a, _ = same(argv, d, 'tree %d' % i)
+            if why or a[0] != 0:
+                bad.append('tree %d: %s' % (i, why or 'exit %s' % a[0]))
+        row(not bad, 'S1', '; '.join(bad) if bad else
+            '40 generated trees, %d arguments: the same archives and listings as the reference' % total)
+        for f in argvs:
+            argv = [l for l in f.read_text().splitlines() if l]
+            why, a, b = same(argv, d, f.name)
+            row(not why and a[0] == 0, 'S2', '%s (%d arguments): %s; the tool %.1f s wall, %.1f s CPU; the reference %.1f s wall, %.1f s CPU'
+                % (f.name, len(argv), why or 'the same archive, sha256 %s' % a[2], a[3], a[4], b[3], b[4]))
+        big = d / 'big'
+        big.mkdir()
+        (big / 'a').write_bytes(os.urandom(64 << 20))
+        argv = ['/a/big=%s' % (big / 'a')]
+        (big / 's').write_bytes(b'small\n')
+        argv += ['/b/%04d=%s' % (i, big / 's') for i in range(2000)]
+        code, _, _, wall, cpu = pack(TOOL, d / 'big.cpio', argv, timeout=120)
+        if code is None:
+            row(False, 'S3', 'a 64 MiB file then 2,000 small ones: cut at 120 s')
+        else:
+            row(code == 0 and cpu < 20, 'S3', 'a 64 MiB file then 2,000 small ones: exit %d, %.1f s wall, %.1f s CPU (under 20)' % (code, wall, cpu))
+    return 1 if FAILS else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
