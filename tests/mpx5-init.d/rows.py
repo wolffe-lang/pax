@@ -42,7 +42,16 @@ the kernel's and init's:
       /run/user/1000 that is pax's 0700 again on /run's tmpfs, and `sudo
       poweroff` ends the machine (QEMU exits 0).
 
-Exit 0 when every row held, 1 otherwise. A row that cannot be reached (the
+Lifecycle boots, independent of I4 and of each other:
+  I14 observe a live adopted setsid child (PPid=1), release it, then require
+      ENOENT within 5000 guest monotonic milliseconds without logging out.
+      Missing observations and inspection errors fail, never mean reaped.
+  I15 root literally executes `exec /bin/login` and authenticates again;
+      boot hooks and boot-status recording each remain at one call, the
+      service and pid 1 identities stay unchanged, and a sudo-record
+      sentinel survives. The fixture counts boot-status invocations only.
+
+Exit 0 when every selected row held, 1 otherwise. A row that cannot be reached (the
 machine halted at a logout) fails by name with what the console said.
 """
 import argparse
@@ -521,11 +530,130 @@ def boot_disk(work, img):
         b.quit()
 
 
+def proc_fields(line):
+    """Strict stat parsing: a missing/failed observation is never absence."""
+    at = line.rfind(') ')
+    if at < 0 or ' (' not in line[:at]:
+        raise ValueError('not a proc stat: %r' % line)
+    fields = [line.split(' ', 1)[0]] + line[at + 2:].split()
+    if (len(fields) < 21 or len(fields[1]) != 1 or fields[1] not in 'RSDZTtWXxIKP'
+            or any(not fields[i].isdigit() for i in (0, 2, 4, 20))):
+        raise ValueError('incomplete proc stat: %r' % line)
+    return fields
+
+
+def console_identity(con, n):
+    out = con.command('echo $$; cat /proc/1/stat', n)
+    lines = out.strip().splitlines() if out is not None else []
+    if len(lines) != 2 or not lines[0].isdigit():
+        raise ValueError('unreadable console identity: %r' % out)
+    init = proc_fields(lines[1])
+    if init[0] != '1' or init[1] == 'Z':
+        raise ValueError('pid 1 not alive: %r' % out)
+    return lines[0], init[20]
+
+
+def orphan_before_logout(con):
+    if not login(con, 'pax', 'I14'):
+        return
+    before = console_identity(con, 140)
+    path = '/tmp/init-orphan-release'
+    out = con.command('orphan ' + path, 141)
+    m = re.fullmatch(r'READY ([1-9][0-9]*) ([1-9][0-9]*)\s*', out or '')
+    if not m or m[1] != m[2]:
+        bad('I14', 'no valid child handshake: %r' % out)
+        return
+    pid = m[1]
+    observed = con.command('orphan inspect ' + pid, 142)
+    if observed is None or not observed.startswith('PRESENT '):
+        bad('I14', 'missing initial live observation of %s: %r' % (pid, observed))
+        return
+    child = proc_fields(observed[len('PRESENT '):].strip())
+    if child[0] != pid or child[1] not in ('S', 'R') or child[2] != '1' or child[4] != pid:
+        bad('I14', 'not a live adopted child in its own session: %r' % observed)
+        return
+    result = con.command('orphan release %s %s; echo ORPHAN-RC=$?' % (pid, path), 143, timeout=30)
+    after = console_identity(con, 144)
+    expected = ['GONE ' + pid, 'ORPHAN-RC=0']
+    if result is not None and result.strip().splitlines() == expected and after == before:
+        ok('I14', 'observed live child %s PPid=1 SID=%s; reaped within 5000 guest ms before any logout; '
+           'console shell %s and pid 1 unchanged' % (pid, pid, before[0]))
+    else:
+        bad('I14', 'observed live child %s PPid=1 SID=%s; release/check %r; console identities %r -> %r'
+            % (pid, pid, result, before, after))
+
+
+def second_start_snapshot(con, n):
+    out = con.command('echo HOOK; cat /var/log/init-hook.calls; echo STATUS; cat /var/log/init-boot.calls; '
+                      'echo SERVICE; p=$(cat /run/svc.pid); echo $p; cat /proc/$p/stat; '
+                      'echo SENTINEL; cat /var/run/sudo/ts/init-second-start; echo DONE', n)
+    if out is None:
+        raise ValueError('no second-start snapshot')
+    sections = {}
+    name = None
+    for line in out.strip().splitlines():
+        if line in ('HOOK', 'STATUS', 'SERVICE', 'SENTINEL', 'DONE'):
+            if line in sections:
+                raise ValueError('duplicate snapshot section: %r' % out)
+            name = line
+            sections[name] = []
+        elif name is not None:
+            sections[name].append(line)
+        else:
+            raise ValueError('unreadable snapshot: %r' % out)
+    if set(sections) != {'HOOK', 'STATUS', 'SERVICE', 'SENTINEL', 'DONE'} or sections['DONE']:
+        raise ValueError('incomplete snapshot: %r' % out)
+    service = sections['SERVICE']
+    if len(service) != 2 or not service[0].isdigit():
+        raise ValueError('unreadable service: %r' % service)
+    st = proc_fields(service[1])
+    if st[0] != service[0] or st[1] not in ('S', 'R'):
+        raise ValueError('service is not alive: %r' % service)
+    return sections['HOOK'], sections['STATUS'], (st[0], st[20]), sections['SENTINEL']
+
+
+def second_start(con):
+    if not login(con, 'root', 'I15'):
+        return
+    identity = console_identity(con, 150)
+    made = con.command('echo keep > /var/run/sudo/ts/init-second-start; echo CREATED=$?', 151)
+    if made is None or made.strip() != 'CREATED=0':
+        bad('I15', 'could not establish timestamp sentinel: %r' % made)
+        return
+    before = second_start_snapshot(con, 152)
+    if before[0] != ['hook'] or before[1] != ['record'] or before[3] != ['keep']:
+        bad('I15', 'initial boot duties not observed exactly once: %r' % (before,))
+        return
+    con.type('exec /bin/login')
+    if not login(con, 'root', 'I15'):
+        return
+    after = second_start_snapshot(con, 153)
+    identity2 = console_identity(con, 154)
+    if before == after and identity == identity2:
+        ok('I15', 'exec /bin/login: hook and boot-status each called once, service %s and pid 1 unchanged, '
+           'sudo timestamp sentinel kept; console shell %s' % (before[2][0], identity[0]))
+    else:
+        bad('I15', 'exec /bin/login repeated boot duties: hook/status/service/sentinel %r -> %r; '
+            'console identities %r -> %r' % (before, after, identity, identity2))
+
+
+def lifecycle_boots(the_iso):
+    for row, check in (('I14', orphan_before_logout), ('I15', second_start)):
+        con = Console(ARGS.out / ('boot-' + row), the_iso)
+        try:
+            check(con)
+        except Exception as e:
+            bad(row, '%s: %s; console %r' % (type(e).__name__, e, con.text(300)))
+        finally:
+            con.quit()
+
+
 def main():
     global ARGS
     a = argparse.ArgumentParser()
     for k in ('images', 'elf', 'tier', 'leg', 'accel', 'out'):
         a.add_argument('--' + k, required=True)
+    a.add_argument('--rows', choices=('all', 'lifecycle'), default='all')
     ARGS = a.parse_args()
     ARGS.images = pathlib.Path(ARGS.images)
     ARGS.out = pathlib.Path(ARGS.out)
@@ -539,25 +667,27 @@ def main():
         say('the tree has no %s' % missing)
     make_shadow(work)
     the_iso = iso(work, 'image', 'quiet')
-    con = Console(ARGS.out / 'boot1', the_iso)
-    try:
-        boot1(con)
-    except Exception as e:  # a row's reading that broke is that run's red, never a silent pass
-        bad('I0', 'boot 1 stopped at %s: %s; the console: %r' % (type(e).__name__, e, con.text(300)))
-    finally:
-        con.quit()
-    if shutil.which('mke2fs') and shutil.which('debugfs') and shutil.which('e2fsck'):
+    lifecycle_boots(the_iso)
+    if ARGS.rows == 'all':
+        con = Console(ARGS.out / 'boot1', the_iso)
         try:
-            img = disk(work)
-        except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
-            bad('I13', 'the disk could not be made: %s' % e)
-        else:
+            boot1(con)
+        except Exception as e:  # a broken reading is red, never a silent pass
+            bad('I0', 'boot 1 stopped at %s: %s; the console: %r' % (type(e).__name__, e, con.text(300)))
+        finally:
+            con.quit()
+        if shutil.which('mke2fs') and shutil.which('debugfs') and shutil.which('e2fsck'):
             try:
-                boot_disk(work, img)
-            except Exception as e:
-                bad('I13', 'the disk\'s boots stopped at %s: %s' % (type(e).__name__, e))
-    else:
-        say('SKIPPED LOUDLY I13: no mke2fs, debugfs or e2fsck on this host')
+                img = disk(work)
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+                bad('I13', 'the disk could not be made: %s' % e)
+            else:
+                try:
+                    boot_disk(work, img)
+                except Exception as e:
+                    bad('I13', 'the disk\'s boots stopped at %s: %s' % (type(e).__name__, e))
+        else:
+            say('SKIPPED LOUDLY I13: no mke2fs, debugfs or e2fsck on this host')
     for p in sorted(ARGS.out.rglob('*')):
         if p.is_file() and p.suffix not in ('.iso', '.img', '.cpio') and p.stat().st_size < 64 << 20:
             data = p.read_bytes()
