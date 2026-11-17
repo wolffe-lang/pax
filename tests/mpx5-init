@@ -8,6 +8,12 @@
 #
 #   tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                   [--tier native|release|both] [--accel auto|kvm|tcg]
+#                   [--rows all|lifecycle]
+#
+# I14 and I15 use separate boots, before any logout: an observed adopted child
+# must be reaped within 5000 guest milliseconds, and a literal exec /bin/login
+# must not repeat boot hooks, boot-status recording or sudo-record clearing.
+# --rows lifecycle runs just these two rows; the default includes all rows.
 #
 # P0 builds the image's tree (build/mpx5-init/root, files.txt as
 # tools/mkinitramfs' arguments): kmain_console, the kernel every shipped image
@@ -40,7 +46,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 
-images= legs=both tiers=both noboot=0 accel=auto
+images= legs=both tiers=both noboot=0 accel=auto rows=all
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -48,11 +54,13 @@ while [ $# -gt 0 ]; do
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
-        *)          die "usage: tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+        --rows)     rows=$2; shift 2 ;;
+        *)          die "usage: tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--rows all|lifecycle]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $rows in all|lifecycle) ;; *) die "--rows takes all or lifecycle" ;; esac
 
 BORE="cat cut id kill ls sleep stat stty touch tr"
 work=$PAX_BUILD/mpx5-init
@@ -94,6 +102,8 @@ if [ -z "$images" ]; then
         -o "$r/bin/detach" "$PAX_ROOT/user/elf/detach.c" > "$work/detach.txt" 2>&1 || why+=" gcc: detach.c;"
     gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$r/bin/ttymode" "$PAX_ROOT/user/elf/ttymode.c" > "$work/ttymode.txt" 2>&1 || why+=" gcc: ttymode.c;"
+    gcc -static -no-pie -O2 -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$r/bin/orphan" "$PAX_ROOT/user/elf/orphan.c" > "$work/orphan.txt" 2>&1 || why+=" gcc: orphan.c;"
     cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
     # /etc/shrc as the images ship it (user/shrc: `logout` among it), but for lope's hook: no
     # lope in this tree, and its `eval` would print an error at every login.
@@ -101,18 +111,26 @@ if [ -z "$images" ]; then
     cat > "$r/etc/pax-boot.d/svc" <<'HOOK'
 #!/bin/pelt
 # tests/mpx5-init's boot hook: a process left running in pid 1's session, as
-# burrowd's loop is; I11 reads it across every logout.
+# burrowd's loop is; I11 reads it across every logout. I15 counts starts.
+echo hook >> /var/log/init-hook.calls
 /bin/sleep 100000 < /dev/null > /dev/null 2>&1 &
 echo $! > /run/svc.pid
 echo "svc: started"
 HOOK
     chmod 755 "$r/etc/pax-boot.d/svc"
+    # Count calls to the boot-status program, not its internal file format.
+    cat > "$r/bin/pax-boot-status" <<'STATUS'
+#!/bin/pelt
+echo "$*" >> /var/log/init-boot.calls
+STATUS
+    chmod 755 "$r/bin/pax-boot-status"
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nbob:x:1001:1001:bob:/home/bob:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\n' > "$r/etc/passwd"
     printf 'root:x:0:\nsudo:x:27:pax\npax:x:1000:\nbob:x:1001:\nlobo:x:990:\n' > "$r/etc/group"
     printf '/bin/login\n' > "$r/etc/pax-run"
     : > "$work/files.txt"
     printf '%s\n' /tmp/:1777 /root/:700 /run/:755 /home/:755 /home/pax/:750:1000:1000 /home/bob/:750:1001:1001 \
-        /srv/:755 /srv/lobo/:750:990:990 /var/:755 /var/log/:755 /var/run/:755 /etc/sudoers.d/:755 >> "$work/files.txt"
+        /srv/:755 /srv/lobo/:750:990:990 /var/:755 /var/log/:755 /var/run/:755 /var/run/sudo/:700 \
+        /var/run/sudo/ts/:700 /etc/sudoers.d/:755 >> "$work/files.txt"
     (cd "$r" && find . -mindepth 1 -type f | sort) | while IFS= read -r f; do
         f=${f#./}
         m=644; [ -x "$r/$f" ] && m=755
@@ -162,7 +180,7 @@ for tier in $tiers; do
         say "boots: $tier $leg"
         rc=0
         python3 -I "$here/mpx5-init.d/rows.py" --images "$images" --elf "$elf" --tier "$tier" --leg "$leg" \
-            --accel "$accel" --out "$out/$tier-$leg" || rc=$?
+            --accel "$accel" --out "$out/$tier-$leg" --rows "$rows" || rc=$?
         [ "$rc" = 0 ] || fail=1
         ran=$((ran + 1))
     done
