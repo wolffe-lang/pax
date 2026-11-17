@@ -213,4 +213,17 @@ for job in ('mpx3-shell', 'mpx5-pelt'):
         'no attempt has timed ' + '; '.join(repr(n) for n in untimed) if untimed
         else 'every named step timed by an attempt'))
     failed |= bool(untimed)
+# pax#467's follow-up: mpx5-jobs from its wall times, each tier against its own peak (no phase
+# data for this job); the row named budget/mpx5-jobs/<tier>.
+jobs = json.loads((DATA / 'jobs.json').read_text())
+for tier in ('pr', 'full', 'all'):
+    seen = [r['seconds'] for r in jobs['ci'] if r['tier'] == tier and r['conclusion'] == 'success']
+    if not seen:
+        continue
+    floor = max(seen)
+    seconds = tier_bound('mpx5-jobs', tier)
+    ok = seconds * 10 >= floor * 14
+    print('%s budget/mpx5-jobs/%s CI budget mpx5-jobs (tier %s): bound=%ds sizing-floor=%ds margin=%ds (%d runs)' %
+          ('PASS' if ok else 'FAIL', tier, tier, seconds, floor, seconds - floor, len(seen)))
+    failed |= not ok
 sys.exit(1 if failed else 0)
