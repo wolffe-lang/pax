@@ -23,6 +23,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.dont_write_bytecode = True
@@ -161,7 +162,7 @@ class Session:
         self.out = Path(args.output).resolve() / kind
         self.out.mkdir(parents=True, exist_ok=True)
         self.serial = self.out / 'serial.log'
-        self.base = Path(os.environ.get('TMPDIR', str(self.out))) / f'qr{os.getpid()}'
+        self.base = Path(os.environ.get('TMPDIR') or tempfile.gettempdir()) / f'qr{os.getpid()}'
         self.sock = Path(str(self.base) + '.qmp')
         if len(str(self.base).encode()) > 85:
             raise RuntimeError('set TMPDIR to a short lane-owned socket directory')
