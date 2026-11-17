@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Resolve QKeyCode through a captured QEMU 8.2.2 schema, without booting.
+
+qemu-8.2-schema.json is the full query-qmp-schema return value from a
+machine-none QEMU process. Its type IDs are intentionally opaque.
+"""
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import copy
+import json
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+root = Path(__file__).resolve().parents[2]
+loader = SourceFileLoader('pointer_session', str(root / 'tools/pointer-session'))
+ps = module_from_spec(spec_from_loader('pointer_session', loader))
+loader.exec_module(ps)
+
+
+def renamed(schema):
+    names = {entry['name']: f'opaque-{i}' for i, entry in enumerate(schema)
+             if entry['meta-type'] not in ('command', 'event')}
+
+    def walk(value):
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        if isinstance(value, dict):
+            return {k: names.get(v, v) if k in ('type', 'arg-type', 'ret-type', 'element-type')
+                    and isinstance(v, str) else walk(v) for k, v in value.items()}
+        return value
+
+    out = walk(schema)
+    for entry in out:
+        if entry['meta-type'] not in ('command', 'event'):
+            entry['name'] = names[entry['name']]
+    return out
+
+
+def main():
+    schema = json.loads((Path(__file__).parent / 'qemu-8.2-schema.json').read_text())
+    codes = ps.qkeycode_values(schema)
+    assert len(codes) == 162, f'{len(codes)} codes, expected 162 in the saved transcript'
+    assert {'h', 'shift', 'ret', 'spc', 'left', 'right', 'f1', 'f5'} <= codes
+    assert 'H' not in codes
+    print('PASS qkeycode-saved-schema')
+
+    assert ps.qkeycode_values(renamed(schema)) == codes
+    print('PASS qkeycode-opaque-references')
+
+    decoy = copy.deepcopy(schema)
+    decoy.append({'name': 'QKeyCode', 'meta-type': 'enum', 'values': ['H']})
+    assert ps.qkeycode_values(decoy) == codes
+    print('PASS qkeycode-decoy-type-name')
+
+    broken = copy.deepcopy(schema)
+    command = next(e for e in broken if e['name'] == 'input-send-event')
+    command['arg-type'] = 'missing-type'
+    try:
+        ps.qkeycode_values(broken)
+    except ps.HarnessError:
+        pass
+    else:
+        raise AssertionError('dangling schema reference accepted')
+    print('PASS qkeycode-missing-reference-refused')
+
+    for text in ps.YEW_COMMANDS.values():
+        ps.validate_qcodes([name for name, _ in ps.yew_key_plan(text)], codes)
+    assert ps.yew_key_plan('H') == [('shift', True), ('h', True), ('h', False), ('shift', False)]
+    print('PASS qkeycode-command-plans')
+    for launcher in ('/bin/as', '/bin/env'):
+        assert ps.yew_init_ended_zero(f'PAX: init {launcher} ended with status 0; nothing left to run\r\n'.encode())
+    for status in ('1', '10', '-1'):
+        assert not ps.yew_init_ended_zero(f'PAX: init /bin/env ended with status {status}; nothing left to run\r\n'.encode())
+    assert not ps.yew_init_ended_zero(b'PAX: init /bin/env ended by signal 9\r\n')
+    assert not ps.yew_init_ended_zero(b'')
+    print('PASS yew-init-status')
+    frame = (Path(__file__).parent / 'menu-click-diff.raw').read_bytes()
+    assert ps.yew_click_activated(frame, 50), 'captured footer diff has an H·C chip'
+    assert ps.yew_click_activated(b'\x1b[50;1H\x1b[30;47m H\xc2\xb7C ', 50)
+    assert ps.yew_click_activated(b'\x1b[50;1H\x1b[C\x1b[30;47mH\xc2\xb7C', 50)
+    assert not ps.yew_click_activated(b'\x1b[2;1H H\xc2\xb7C ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;20H H\xc2\xb7C ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;1H L ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;2HH\xc2\xb7C\x1b[50;2HL ', 50)
+    assert not ps.yew_click_activated(b'\x1b[50;2H\x1b]52;;H\xc2\xb7C\x07', 50)
+    print('PASS yew-click-footer-diff')
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (AssertionError, ps.HarnessError) as error:
+        print(f'FAIL qkeycode-resolver: {error}', flush=True)
+        sys.exit(1)

@@ -12,8 +12,8 @@ Every step ends with the key `.` typed (on the USB keyboard, then the
 PS/2 one), which the probe reads as the step's end: the bytes before it are what the step typed.
 
 The judge holds every step's bytes to the encoding the XTerm Control
-Sequences document gives for button-event tracking (1002) with the SGR
-encoding (1006): `CSI < Cb ; Cx ; Cy M` for a press or a motion, `m` for a
+Sequences document gives for normal, button-event and all-motion tracking
+(1000, 1002 and 1003) with the SGR encoding (1006): `CSI < Cb ; Cx ; Cy M` for a press or a motion, `m` for a
 release; Cb 0 left, 1 middle, 2 right, 32 + the button for a motion into
 another cell with it held, 64 and 65 the wheel, Shift 4, Meta (Alt) 8,
 Control 16 added; Cx and Cy the 1-based cell. The pointer's rows read the
@@ -34,7 +34,7 @@ import sys
 import time
 
 ROWS = ['pointer-drawn', 'pointer-scroll', 'no-mode', 'sgr-buttons', 'drag', 'wheel', 'modifiers',
-        'relative', 'reset', 'unserved', 'owner-exits', 'owner-background', 'keys-interleaved', 'pty']
+        'relative', 'reset', 'unserved', 'owner-exits', 'owner-background', 'tracking-modes', 'alt-arrows', 'keys-interleaved', 'pty', 'alt-arrows-ps2']
 # The arrow, a row of eight pixels a byte (bit 7 the leftmost): its outline
 # and its fill, sixteen rows (the cell's height at scale 1).
 OUTLINE = [0x80, 0xc0, 0xa0, 0x90, 0x88, 0x84, 0x82, 0x81, 0x8f, 0xa8, 0xd4, 0x94, 0x0a, 0x0a, 0x04, 0x00]
@@ -78,11 +78,17 @@ def expected(cols, rows):
     for k, v in enumerate([True, False, True, False]):
         e[('reset', k)] = click_bytes(0, HERE) if v else b''
     for k in range(8):
-        e[('unserved', k)] = click_bytes(0, HERE) if k in (5, 6) else b''
+        e[('unserved', k)] = click_bytes(0, HERE) if k in (2, 3, 5, 6) else b''
+    end = (HERE[0] + 1, HERE[1])
+    for k in range(3):
+        e[('tracking-modes', k)] = (sgr(0, HERE) + (sgr(32, end) if k > 0 else b'')
+                                    + sgr(0, end, False) + (sgr(35, HERE) if k == 2 else b''))
     for k, v in enumerate([True, False, False, True]):
         e[('owner-exits', k)] = click_bytes(0, HERE) if v else b''
     for k, v in enumerate([False, True, False, True]):
         e[('owner-background', k)] = click_bytes(0, HERE) if v else b''
+    e[('alt-arrows', 0)] = b'\x1b[1;3D\x1b[1;3C\x1b[[A\x1b[[B\x1b[[C\x1b[[D\x1b[[E'
+    e[('alt-arrows-ps2', 0)] = e[('alt-arrows', 0)]
     for k, letters in enumerate(('abcd', 'efgh')):
         a, b, c, d = (x.encode() for x in letters)
         e[('keys-interleaved', k)] = (sgr(0, HERE) + a + sgr(0, HERE, False) + b + sgr(64, HERE) + c
@@ -439,6 +445,21 @@ def run(args):
                         time.sleep(.1)
                     click('left')
                     select('tablet')
+                elif label == 'tracking-modes':
+                    at(HERE); press('left')
+                    at((HERE[0] + 1, HERE[1])); release('left')
+                    at(HERE)
+                elif label in ('alt-arrows', 'alt-arrows-ps2'):
+                    # The latter follows keys-interleaved, which unplugged
+                    # the USB keyboard; these same chords then use PS/2.
+                    hold('alt', True)
+                    tap('left'); tap('right')
+                    # These reservations are deliberately unchanged.
+                    tap('f1')
+                    hold('ctrl', True); tap('f1'); hold('ctrl', False)
+                    hold('alt', False)
+                    for name in ('f1', 'f2', 'f3', 'f4', 'f5'):
+                        tap(name)
                 elif label == 'keys-interleaved':
                     # Step 0 on the USB keyboard, 20 ms apart (QEMU polls it,
                     # so closer keys may reach the guest after a later
@@ -501,11 +522,191 @@ def run(args):
     return judge_dir(out, args)
 
 
-QCODE = {' ': 'spc', '/': 'slash', '.': 'dot', '\r': 'ret', ';': 'semicolon', '-': 'minus', '\x1b': 'esc'}
+QCODE = {' ': 'spc', '/': 'slash', '.': 'dot', '\r': 'ret', ';': 'semicolon', '-': 'minus', '=': 'equal', '\x1b': 'esc'}
 SHIFTED = {':': 'semicolon'}
+YEW_COMMANDS = {
+    'cd': 'cd /home/pax\r',
+    'launch': 'export HOME=/home/pax/menu-test SHELL=/bin/sh; mkdir -p /home/pax/menu-test; yew notes.txt\r',
+    'escape': '\x1b',
+    'quit': ':q\r',
+    'exit': 'exit\r',
+}
+
+
+class HarnessError(RuntimeError):
+    """A driver/preflight failure, never a guest behavioral red."""
+
+
+def yew_key_plan(text):
+    """QKeyCode names and modifier transitions, not character names."""
+    plan = []
+    for ch in text:
+        shifted = ch in SHIFTED or 'A' <= ch <= 'Z'
+        base = ch.lower() if 'A' <= ch <= 'Z' else ch
+        name = SHIFTED[ch] if ch in SHIFTED else QCODE.get(base, base)
+        if shifted:
+            plan.append(('shift', True))
+        plan.extend(((name, True), (name, False)))
+        if shifted:
+            plan.append(('shift', False))
+    return plan
+
+
+def validate_qcodes(names, allowed):
+    wrong = sorted(set(names) - allowed)
+    if wrong:
+        raise HarnessError(f'unknown QKeyCode names: {wrong}')
+
+
+def qkeycode_values(schema):
+    """Follow QMP's wire fields; introspection type IDs are opaque."""
+    types = {entry['name']: entry for entry in schema}
+
+    def node(ref, kind):
+        value = types.get(ref)
+        if value is None or value.get('meta-type') != kind:
+            raise HarnessError(f'QMP schema reference {ref!r} is not a {kind}')
+        return value
+
+    def member(value, name, kind):
+        found = [m for m in value.get('members', []) if m['name'] == name]
+        if len(found) != 1:
+            raise HarnessError(f'QMP schema {value["name"]!r} has no unique member {name!r}')
+        return node(found[0]['type'], kind)
+
+    def variant(value, case):
+        found = [v for v in value.get('variants', []) if v['case'] == case]
+        if len(found) != 1:
+            raise HarnessError(f'QMP schema {value["name"]!r} has no unique variant {case!r}')
+        return node(found[0]['type'], 'object')
+
+    command = node('input-send-event', 'command')
+    arguments = node(command['arg-type'], 'object')
+    events = member(arguments, 'events', 'array')
+    event = node(events['element-type'], 'object')
+    key_event = member(variant(event, 'key'), 'data', 'object')
+    key_value = member(key_event, 'key', 'object')
+    enum = member(variant(key_value, 'qcode'), 'data', 'enum')
+    values = enum.get('values')
+    if values is None:
+        values = [m['name'] for m in enum.get('members', [])]
+    if not isinstance(values, list) or not values or any(not isinstance(v, str) for v in values):
+        raise HarnessError('QMP qcode enum has no valid values')
+    return set(values)
+
+
+def check_yew_keys(out):
+    """Query QEMU's own enum without a guest, firmware, CPU or boot disk."""
+    commands = ''.join(json.dumps(m) + '\n' for m in [
+        {'execute': 'qmp_capabilities', 'id': 1},
+        {'execute': 'query-qmp-schema', 'id': 2},
+        {'execute': 'quit', 'id': 3},
+    ])
+    cmd = [os.environ.get('PAX_QEMU', 'qemu-system-x86_64'), '-machine', 'none',
+           '-nodefaults', '-no-user-config', '-display', 'none', '-S', '-m', '32M', '-qmp', 'stdio']
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    (out / 'qkeycode-preflight.pid').write_text(str(proc.pid) + '\n')
+    try:
+        stdout, stderr = proc.communicate(commands, timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate(timeout=5)
+        (out / 'qkeycode-preflight.log').write_text(stdout + stderr)
+        raise HarnessError('QKeyCode schema preflight exceeded 15 seconds')
+    (out / 'qkeycode-preflight.log').write_text(stdout + stderr)
+    try:
+        replies = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    except ValueError as error:
+        raise HarnessError(f'invalid QMP schema response: {error}')
+    schema = next((r.get('return') for r in replies if r.get('id') == 2), None)
+    if proc.returncode or not isinstance(schema, list):
+        raise HarnessError(f'QKeyCode schema query failed: exit={proc.returncode}, replies={replies[:3]}')
+    allowed = qkeycode_values(schema)
+    plans = {name: yew_key_plan(text) for name, text in YEW_COMMANDS.items()}
+    names = {q for plan in plans.values() for q, _ in plan}
+    validate_qcodes(names, allowed)
+    if yew_key_plan('H') != [('shift', True), ('h', True), ('h', False), ('shift', False)]:
+        raise HarnessError('uppercase key-plan selftest failed')
+    try:
+        validate_qcodes(['H'], allowed)
+    except HarnessError:
+        pass
+    else:
+        raise HarnessError('invalid uppercase QKeyCode was not rejected by the dry check')
+    (out / 'qkeycode-plan.json').write_text(json.dumps(plans, indent=2) + '\n')
+    print(f'PASS yew-keycode-preflight: {len(names)} names checked against QEMU QKeyCode; uppercase-H rejection passed', flush=True)
+    return plans, allowed
+
+
 # yew's document menu (its src/edit/ctxrows.lu): two of its rows.
 YEW_MENU = (b'Select All', b'Command Palette...')
 YEW_AT = (10, 3)
+
+
+def yew_init_ended_zero(text):
+    # The small session image launches /bin/as; a live image uses
+    # /bin/env. Require an actual zero status, not one launcher name.
+    return re.search(rb'^PAX: init \S+ ended with status 0(?:;|\r?$)', text, re.M) is not None
+
+
+def yew_click_activated(frame, footer_row):
+    """Read the fixed H·C chip cells, not a raw full-paint substring.
+
+    Render diffs can omit column 1's unchanged space or reach column 2
+    with CUF. Only the narrow mode-chip cells are inspected here.
+    """
+    cells = {}
+    row = col = 0
+    saved = (0, 0)
+    text = frame.decode('utf-8', errors='replace')
+    at = 0
+    while at < len(text):
+        ch = text[at]
+        if ch == '\x1b':
+            seq = re.match(r'\x1b\[([0-?]*)([ -/]*)([@-~])', text[at:])
+            if seq:
+                params, inter, final = seq.groups()
+                if not inter and re.fullmatch(r'[0-9;]*', params):
+                    values = [int(v or '0') or 1 for v in params.split(';')]
+                    n = values[0]
+                    if final in ('H', 'f'):
+                        row, col = n, values[1] if len(values) > 1 else 1
+                    elif final == 'G':
+                        col = n
+                    elif final == 'C':
+                        col += n
+                    elif final == 'D':
+                        col = max(1, col - n)
+                    elif final == 'A':
+                        row = max(1, row - n)
+                    elif final == 'B':
+                        row += n
+                at += len(seq.group(0))
+                continue
+            if at + 1 < len(text) and text[at + 1] in ']P_^X':
+                ends = [(i, size) for i, size in ((text.find('\x07', at + 2), 1),
+                                                (text.find('\x1b\\', at + 2), 2)) if i >= 0]
+                if not ends:
+                    break
+                end, size = min(ends)
+                at = end + size
+                continue
+            if text[at:at + 2] == '\x1b7':
+                saved = (row, col)
+            elif text[at:at + 2] == '\x1b8':
+                row, col = saved
+            at += 2
+            continue
+        if ch == '\r':
+            col = 1
+        elif ch == '\n':
+            row += 1
+        elif ord(ch) >= 32:
+            if row == footer_row and 2 <= col <= 4:
+                cells[col] = ch
+            col += 1
+        at += 1
+    return ''.join(cells.get(c, '') for c in (2, 3, 4)) == 'H·C'
 
 
 def run_yew(args):
@@ -515,6 +716,7 @@ def run_yew(args):
     after the click and none before; the screen read with the menu up."""
     out = Path(args.output).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    plans, allowed_qcodes = check_yew_keys(out)
     serial = out / 'serial.log'
     for stale in [serial, *out.glob('*.ppm')]:
         stale.unlink(missing_ok=True)
@@ -525,17 +727,31 @@ def run_yew(args):
     sock.unlink(missing_ok=True)
     root = Path(__file__).resolve().parents[1]
     cmd = [str(root / 'tools/qemu-run'), '--firmware', args.firmware, '--accel', args.accel,
-           '--usb-kbd=root', '--serial', str(serial), '--timeout', '600',
-           str(Path(args.image).resolve()), '--', '-m', '512M',
+           '--usb-kbd=root', '--serial', str(serial), '--timeout', str(args.yew_timeout + 15),
+           str(Path(args.image).resolve()), '--', '-m', args.yew_memory,
            '-qmp', f'unix:{sock},server=on,wait=off',
            '-device', 'usb-tablet,id=pax-tablet,bus=pax-usb.0,port=2']
     why = []
+    start = time.monotonic()
+    deadline = start + args.yew_timeout
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise HarnessError(f'yew driver exceeded its {args.yew_timeout}s active runtime budget')
+        return left
+
+    def phase(name):
+        print(f'PHASE yew-menu {name} elapsed={time.monotonic() - start:.3f}s budget={args.yew_timeout}s', flush=True)
+
+    phase('guest-launch')
     with (out / 'runner.log').open('wb') as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        (out / 'runner.pid').write_text(str(proc.pid) + '\n')
         conn = reader = None
-        start = time.monotonic()
         try:
             while not sock.exists():
+                remaining()
                 if proc.poll() is not None or time.monotonic() - start > 15:
                     raise RuntimeError('QMP did not start')
                 time.sleep(.02)
@@ -546,34 +762,40 @@ def run_yew(args):
             json.loads(reader.readline())
 
             def execute(name, arguments=None):
+                conn.settimeout(max(.01, min(20, remaining())))
                 payload = {'execute': name}
                 if arguments is not None:
                     payload['arguments'] = arguments
                 conn.sendall(json.dumps(payload).encode() + b'\n')
                 while True:
-                    reply = json.loads(reader.readline())
+                    remaining()
+                    try:
+                        raw = reader.readline()
+                    except socket.timeout:
+                        raise HarnessError(f'QMP command timed out: {name}')
+                    if not raw:
+                        raise HarnessError(f'QMP closed during: {name}')
+                    reply = json.loads(raw)
                     if 'error' in reply:
-                        raise RuntimeError(reply)
+                        raise HarnessError(reply)
                     if 'return' in reply:
                         return reply['return']
 
             execute('qmp_capabilities')
 
             def key(name, down):
+                validate_qcodes([name], allowed_qcodes)
                 execute('input-send-event', {'events': [{'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': name}}}]})
                 time.sleep(.03)
 
-            def typed(text):
-                for ch in text:
-                    if ch in SHIFTED:
-                        key('shift', True); key(SHIFTED[ch], True); key(SHIFTED[ch], False); key('shift', False)
-                    else:
-                        q = QCODE.get(ch, ch)
-                        key(q, True); key(q, False)
+            def typed(name):
+                for qcode, down in plans[name]:
+                    key(qcode, down)
 
             def wait_for(pattern, after, limit):
                 until = time.monotonic() + limit
                 while time.monotonic() < until:
+                    remaining()
                     data = serial.read_bytes() if serial.exists() else b''
                     if pattern in data[after:]:
                         return data
@@ -587,6 +809,7 @@ def run_yew(args):
                 until = time.monotonic() + limit
                 size, since = -1, time.monotonic()
                 while time.monotonic() < until:
+                    remaining()
                     n = serial.stat().st_size
                     if n != size:
                         size, since = n, time.monotonic()
@@ -594,12 +817,14 @@ def run_yew(args):
                         return
                     time.sleep(.05)
 
+            phase('await-shell')
             data = wait_for(b'$ ', 0, 240)
             mark = len(data)
-            typed('cd /home/pax\r')
+            typed('cd')
             data = wait_for(b'$ ', mark, 60)
             mark = len(data)
-            typed('yew notes.txt\r')
+            phase('launch-editor')
+            typed('launch')
             wait_for(b'\x1b[?1002h\x1b[?1006h', mark, 120)
             quiet(3, 120)
             before = serial.read_bytes()
@@ -617,6 +842,7 @@ def run_yew(args):
             execute('input-send-event', {'events': [{'type': 'abs', 'data': {'axis': 'x', 'value': x}},
                                                     {'type': 'abs', 'data': {'axis': 'y', 'value': y}}]})
             time.sleep(.2)
+            phase('open-context-menu')
             clicked = len(serial.read_bytes())
             for down in (True, False):
                 execute('input-send-event', {'events': [{'type': 'btn', 'data': {'down': down, 'button': 'right'}}]})
@@ -634,27 +860,86 @@ def run_yew(args):
                     why.append(f'{label!r} before the click')
                 if label not in after[clicked:]:
                     why.append(f'no {label!r} after the click')
-            typed('\x1b')
+            # Opening a context menu changes 1002 to 1003. PAX must keep
+            # reporting clicks and report no-button motion in that mode.
+            # Locate Select All from its emitted row, rather than assuming
+            # a box origin: the menu is clamped and can shed optional rows.
+            menu_bytes = after[clicked:]
+            armed = b'\x1b[?1002l\x1b[?1003h' in menu_bytes
+            # A strip chevron may already have armed 1003 before opening.
+            armed = armed or b'\x1b[?1002l\x1b[?1003h' in before
+            label_at = menu_bytes.find(b'Select All')
+            positions = list(re.finditer(rb'\x1b\[(\d+);(\d+)H', menu_bytes[:label_at])) if label_at >= 0 else []
+            hover_ok = click_ok = False
+            if armed and positions:
+                phase('hover-select-all')
+                row = int(positions[-1][1]) - 1
+                col = YEW_AT[0] + 2
+                hx = 32768 * (2 * col + 1) // (2 * cols)
+                hy = 32768 * (2 * row + 1) // (2 * nrows)
+                mark = len(serial.read_bytes())
+                execute('input-send-event', {'events': [
+                    {'type': 'abs', 'data': {'axis': 'x', 'value': hx}},
+                    {'type': 'abs', 'data': {'axis': 'y', 'value': hy}}]})
+                time.sleep(1)
+                quiet(.5, 10)
+                frame = serial.read_bytes()[mark:]
+                (out / 'menu-hover.raw').write_bytes(frame)
+                # A repaint naming this enabled row is the highlight,
+                # not just the framebuffer's pointer moving by itself.
+                hover_ok = b'Select All' in frame
+                execute('screendump', {'filename': str(out / 'menu-hover.ppm')})
+                phase('click-select-all')
+                mark = len(serial.read_bytes())
+                for down in (True, False):
+                    execute('input-send-event', {'events': [
+                        {'type': 'btn', 'data': {'down': down, 'button': 'left'}}]})
+                    time.sleep(.1)
+                time.sleep(1)
+                quiet(.5, 10)
+                frame = serial.read_bytes()[mark:]
+                (out / 'menu-click.raw').write_bytes(frame)
+                # Select All enters highlight mode; the chip may include
+                # the character-selection suffix H·C.
+                click_ok = yew_click_activated(frame, nrows)
+                execute('screendump', {'filename': str(out / 'menu-click.ppm')})
+            for name, ok in [('yew-menu-hover-1003', hover_ok), ('yew-menu-click-1003', click_ok)]:
+                print(f'{"PASS" if ok else "FAIL"} {name}: '
+                      f'1003={armed}, Select All located={bool(positions)}', flush=True)
+                if not ok:
+                    why.append(name)
+            phase('quit-editor')
+            typed('escape')
             quiet(1, 30)
-            typed(':q\r')
+            typed('quit')
             wait_for(b'$ ', len(after), 60)
-            typed('exit\r')
+            typed('exit')
             wait_for(b'\nhalt\r\n', 0, 60)
             execute('quit')
             proc.wait(timeout=10)
         finally:
+            if proc.poll() is None and conn is not None:
+                try:
+                    conn.sendall(b'{"execute":"quit"}\n')
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
             if reader is not None:
                 reader.close()
             if conn is not None:
                 conn.close()
             if proc.poll() is None:
                 proc.terminate()
-                proc.wait(timeout=10)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
             sock.unlink(missing_ok=True)
     text = serial.read_bytes()
     if not (out / 'menu.ppm').exists():
         why.append('no screendump')
-    if b'PAX: init /bin/as ended with status 0' not in text:
+    if not yew_init_ended_zero(text):
         why.append('init did not end with status 0')
     print(f'{"FAIL" if why else "PASS"} yew-menu {args.firmware} {args.accel}: '
           + ('; '.join(why) if why else f'a right click on the tablet at cell {YEW_AT} opened yew\'s document menu '
@@ -687,13 +972,26 @@ if __name__ == '__main__':
     parser.add_argument('--accel', choices=['auto', 'kvm', 'tcg'], default='auto')
     parser.add_argument('--judge', action='store_true', help='judge the serial log and screendumps already in OUTPUT')
     parser.add_argument('--yew', action='store_true', help="tests/mpx5-yew's Y9: IMAGE is its session image")
+    parser.add_argument('--yew-memory', default='512M', help='QEMU memory for --yew; use 2048M for a full live image')
+    parser.add_argument('--yew-timeout', type=int, default=600, help='total active guest/driver budget, 1..600 seconds')
+    parser.add_argument('--check-yew-keys', action='store_true', help='validate every planned key against QEMU QKeyCode without booting')
     a = parser.parse_args()
+    if not 1 <= a.yew_timeout <= 600:
+        parser.error('--yew-timeout must be 1..600 seconds')
     if a.judge:
         sys.exit(judge_dir(Path(a.output).resolve(), a))
-    if not a.image:
+    if not a.image and not a.check_yew_keys:
         parser.error('--image is needed to boot')
     try:
+        if a.check_yew_keys:
+            out = Path(a.output).resolve()
+            out.mkdir(parents=True, exist_ok=True)
+            check_yew_keys(out)
+            sys.exit(0)
         sys.exit(run_yew(a) if a.yew else run(a))
+    except (HarnessError, subprocess.TimeoutExpired) as error:
+        print(f'INFRA yew-menu: {error}', flush=True)
+        sys.exit(75)
     except (RuntimeError, OSError) as error:
         print(f'FAIL {"yew-menu" if a.yew else "pointer-session"} {a.firmware} {a.accel}: {error}', flush=True)
         sys.exit(1)
