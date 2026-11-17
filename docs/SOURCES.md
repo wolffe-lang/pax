@@ -2025,16 +2025,6 @@ source; no kernel's, firmware's or driver's.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no DHCP, HTTP or TLS
   implementation's source; no Git source.
 
-## px127 — names from an on-box build (recvmsg on a datagram socket)
-
-- **recvmsg(2), udp(7), socket(7)** (the Linux man-pages project's text, as published): `struct msghdr`, the
-  value-result `msg_namelen`, `msg_controllen` and `msg_flags`' MSG_TRUNC, the iovec cap. What Linux answers in each
-  case was measured black box with `user/net/dgramopts.c`'s recvmsg rows, run on Linux; what musl's resolver asks of
-  the kernel, by strace of a program the dev image's own compiler built, on Linux (`notes/px127/probes.txt`). No C
-  library's source, no kernel's source.
-- **hosts(5)**: the workaround's line; measured black box on Linux and on PAX that both C libraries read the file
-  before DNS and make no socket for a name it holds.
-
 ## px104 — push from the console (burrow as ssh, the root set, the resolver's calls)
 
 - **ip(7), udp(7), sendmmsg(2), socket(7)** (the Linux man-pages project's text, as published): IP_RECVERR's
@@ -2307,182 +2297,23 @@ distribution ships it.
 | yew at `user/yew.pin`'s commit (the org's own, public): `src/term/input.lu` (`input_enable_blob`: `CSI ? 2004 h`, `CSI ? 1002 h`, `CSI ? 1006 h`, `CSI ? 1004 h`; `input_disable_blob`; `decode_mouse`: SGR's Cb 0-2 press and release, 32-35 motion, 64-67 the wheel, 128-129, the 4/8/16 modifiers, and the X10 form whose release it refuses), `src/edit/mouse.lu` (`press_opens_menu`, `press_menu`, `mouse_release`), `src/edit/ctxrows.lu` (the document menu's rows), and the mouse tests `src/edit_ctxmenu_test.lu`, `src/edit_drag_test.lu` | `2eb9cb9b` | what yew enables and parses; Y9's witness. Built unmodified by `tools/mkyew` |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/mouse`, `kernel/xhci`, `kernel/sched` (`proc_slot`, `proc_word`, `tty_pgrp_of`), `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx5-yew` | this tree | read and extended |
 
-## px120 — a USB device plugged in after boot gets a record (pax#348)
+## px125 — PAX for a terminal multiplexer (the readiness probe, Ctrl-Space, the box-drawing glyphs)
 
-No kernel's, firmware's, USB stack's, device model's or driver's source was read: not Linux's, not any BSD's, not
-QEMU's, not usbredir's library, not any vendor's. The one new document is the USB redirection protocol's own
-description, which `tools/hotplug-session` speaks to QEMU's `usb-redir` device to play two composite HID devices.
-
-| source | version | read, for |
-|---|---|---|
-| **USB Network Redirection protocol description**, `docs/usb-redirection-protocol.md` of the usbredir project (`https://gitlab.freedesktop.org/spice/usbredir/-/raw/main/docs/usb-redirection-protocol.md`, fetched 2026-11-11, sha256 `a93209f0a537fa4141dd5f55c4102ef24df5a4fa0c007ded45de15fcb973b338`, 1,180 lines). Only that document: no header, no library, no QEMU source | version 0.7 (19 May 2014) | the header (type, length, id; 64-bit ids when both sides say so), hello and its capabilities, `ep_info`, `interface_info`, `device_connect` and `device_disconnect` (and its ack), set and get configuration and alternate setting, start and stop interrupt receiving, `control_packet`, `interrupt_packet`, the status codes. The packets' numbers are the document's list order, the control packets from 0 and the data packets from 100, measured: QEMU's first packet arrives as 0 (hello) and its first request as 100 with a GET_DESCRIPTOR setup in it. `tools/hotplug-session`'s `Redir` |
-| USB 2.0 (§9.4 standard requests, §9.6 the device, configuration, interface, endpoint and string descriptors, §11.24.2.7 a hub port's status and change bits), as px74's entries | as px74 | the devices `tools/hotplug-session` plays; kernel/xhci's hub ports |
-| USB HID 1.11 (§6.2.1 the HID descriptor, §7.2 the class requests, appendix B.1 the boot keyboard's report descriptor, B.2 the boot mouse's) and the HID Usage Tables 1.7, as px109's entries | as px109 | the composite devices' report descriptors: a mouse with buttons 1 to 5, 16-bit X and Y and a wheel, the boot keyboard, a vendor-defined page, consumer keys with an all-keys bitmap |
-| xHCI 1.2 (§4.6.3 Enable Slot, §4.6.4 Disable Slot, §5.4.7 CONFIG's MaxSlotsEn, §5.4.8 PORTSC's CCS and CSC), as px74's entries | as px74 | kernel/xhci: a refused port waits for a change; a slot past MaxSlotsEn given back |
-| QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with `qemu-xhci`, `nec-usb-xhci`, `usb-mouse`, `usb-kbd`, `usb-hub`, `usb-ccid` and `usb-redir`, q35's `max-ram-below-4g` | binary | black box: pax#348 reproduced (`notes/px120-hotplug.md` §2); Enable Slot answers success with slots past CONFIG's MaxSlotsEn (33 and 34 with 32 enabled); `nec-usb-xhci`'s `slots` property leaves HCSPARAMS1's MaxSlots at 64 (read through the monitor's `xp`); usb-redir on an xHCI refuses a peer that announces only the device version, disconnect acks and endpoint packet sizes ("lacks capabilities needed for use with XHCI") and takes one that adds 64-bit ids and 32-bit bulk lengths (which of the two it needs was not separated); the composite devices enumerate at full speed |
-| PAX's own `kernel/frames`, `kernel/xhci`, `kernel/mouse`, `kernel/usb_mouse`, `kernel/triage`, `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx2-frames`, `tests/mpx6-usb` | this tree | read and extended |
-
-## px123 — a terminal over ssh, and Ctrl-C reaching what runs on it
-
-- **POSIX.1-2024 XCU 2.11, Signals and Error Handling:** an asynchronous list in a shell without job control
-  starts with SIGINT and SIGQUIT ignored, and a program keeps an ignored signal across exec; **XCU 2.9.3.1** for
-  the asynchronous list itself. That is why the boot hook's loop, and burrowd started from it, had both ignored.
-- **proc_pid_status(5)** and **proc_pid_stat(5)** (man-pages 6.7): `SigIgn`, `SigBlk`, `SigCgt`, and the process
-  group, session, `tty_nr` and `tpgid` fields, read on PAX's own `/proc` to find which layer kept Ctrl-C from the
-  foreground program (the pty's line discipline and its foreground group were right; the program had SIGINT
-  ignored).
-- **env(1)** as boreutils documents its `--default-signal` (GNU coreutils' option), the hook's way to start
-  burrowd with both at their defaults.
-- burrow at `user/burrow.pin`'s commit (the org's own, public): its README and `notes/bw06-the-terminal.md` for
-  what burrowd now does with `pty-req`, `window-change` and a command with no terminal; `src/ssession/ssession.lu`
-  for which signals its session children reset. pelt at `user/pelt.pin`'s commit: `src/sh/exec.lu`'s asynchronous
-  lists and `src/sh/edit_prompt.lu`'s prompt (its host, `?` when none is found).
-- OpenSSH 9.6p1 (Ubuntu's) and 10.2p1 as black boxes: `ssh -tt` on a pseudo-terminal of the rows' own, its window
-  changes by SIGWINCH.
-- No kernel's source of any OS, no shell's, no C library's, no sshd's.
-
-## px122 — trunk's cut runs after #344: the two jobs' limits, and /proc/pax-boot in small functions
-
-No kernel's, firmware's or boot loader's source. The change in kernel/procfs follows PAX's own notes on the release
-tier's inlining; the rest is measurement.
+No kernel's, terminal emulator's, multiplexer's or C library's source was read: not Linux's, not xterm's, not any
+other terminal's or multiplexer's. Ubuntu was measured as a black box with the probe's own static binaries.
 
 | source | version | read, for |
 |---|---|---|
-| PAX's own `kernel/block` (the report's comment, pax#215), `kernel/tcp` ("one function a line"), `kernel/xhci` (`attach`'s comment) | trunk `309036ec` | the release tier inlines each formatter's loop at every call, and its range pass costs the square of one function's branches |
-| GitHub's REST API for the ci workflow's runs, jobs (pages of 30) and job logs; the runs' artifacts | as served 2026-11-11 | each step's seconds and conclusion, the runs' tiers, the kernel's boot lines and the build phases |
-| wolf 0.2.35's `wolf build --release` (`tools/build-kernel --release`) | the pinned archive | black box: `kmain_console`'s release build timed cold at each of #344's kernel commits |
-
-## px123 — the images' pins at the commits the first --latest image carried; sniff; --latest on trunk
-
-- The org's own trees, read where a pin needs them: each one's `wolf-toolchain.toml` at its new pin, and its log
-  since the old one, for the pin's words: pelt `b80d6570`, yew `3a9983ee`, den `291011dd`, sniff `6dd382d4`,
-  wolf-std `77cf3210` (its `vendor/tools.toml`: wolf 0.2.39, lupin 0.1.61), wolf-interp's `v0.1.61`
-  (`vendor/upstream/PIN`, `rust-toolchain.toml`) and wolf-lang's `v0.2.39` (`rust-toolchain.toml`,
-  `crates/wolf_driver/STD-PIN`). The source archives, lupin's musl archive and the dev compiler's build were read by
-  digest, each twice.
-- `tools/latest-resolve`, `tools/mkdistribution --latest` and `tests/latest` are px97's, carried as they were
-  written there (GitHub's REST API for a repository's newest release and its assets' digests).
-- No other implementation's source; no kernel's, firmware's or driver's.
-
-## px128 — ligature on the dev image, beside lld
-
-No third-party linker's, C library's or kernel's source was read: not lld's, GNU ld's or any other linker's,
-not musl's or glibc's, not Linux's. Of ligature, the org's own linker, the lane read its documentation (README,
-`wolf-toolchain.toml`) and searched its cc front end (`src/front/front.lu`, `src/ligature.lu`) for the
-arguments it accepts and the directory it reads musl's inputs from; nothing of it was changed here. Of
-wolf-lang, the lane read the `--linker` and `WOLF_LD` clause of `wolf build --help` and the driver's link path
-(`crates/wolf_driver/src/link.rs`, and in `main.rs` the platform link and the note that names lld).
-
-| source | version | read, for |
-|---|---|---|
-| ligature's README, `wolf-toolchain.toml` and cc front end (`wolffe-lang/ligature`) | `32ec7f43` | how it is built (its own pinned wolf 0.2.38 archive, `wolf build --deny-warnings src/ligature.lu`), its cc front end (the link line `wolf build` gives a selected linker; `/usr/lib/wolf-musl` unless `LIGATURE_SYSROOT`), its link bundle's contents and digests |
-| ligature's `wolf-toolchain.toml` and commit log (`wolffe-lang/ligature`) | `8594073c` | the pin's move: the same wolf 0.2.38, lupin 0.1.60 and std `d4a4d4ca` as `32ec7f43`, so `tools/mkligature` builds it unchanged; the log's subjects for what moved (the link's memory and time, ligature#36) |
-| wolf-lang's `wolf build --help` text on `--linker` and `WOLF_LD`, and the driver's link path | 0.2.39 (`3fc86f77`) | the selection (the command line over `WOLF_LD` over the platform's cc, which asks for lld when an `ld.lld` is on `PATH`), the link line, a selected linker's failure final, and the note naming lld |
-| `getrusage(2)`, `wait4(2)`, `clock_gettime(2)` (the Linux man-pages) | 6.9 | `tests/distribution-ligature.d/ldtime.c`: a child's wall time, CPU time and peak resident set |
-| ligature 0.0.2, ld.lld 18.1.8 and the image's link-only cc | binaries | black box: each links the same programs on PAX and on Linux (`notes/px128-ligature-on-the-image.md` §2) |
-| PAX's own `tools/mktrash`, `tools/mkclef`, `tools/distribution-root`, `tools/system-env`, `tests/distribution`, `tests/distribution-boot`, and `kernel/process`'s `wait4` and `getrusage` | this tree | read and extended |
-
-## px129 — the console draws only what changes, once a write
-
-No kernel's, terminal emulator's, firmware's, driver's or C library's source was read: not Linux's, not any BSD's,
-not xterm's or any other terminal's, not QEMU's. The screen's new drawing is written from what kernel/screen already
-was and from the Intel SDM's account of write-combining memory; the measurements are black-box runs.
-
-| source | version | read, for |
-|---|---|---|
-| Intel SDM vol. 3A §11.3 (the memory types; WC: writes combined in buffers and written out in bursts, a partial line written as smaller transactions), §11.3.1 (WC buffering), §11.12 (the PAT), as px19's and kernel/fb's entries | as kernel/fb | why `blit` writes a run of cells a pixel row at a time, left to right: whole 64-byte lines, in order, rather than 32 bytes of sixteen lines a cell |
-| Intel SDM vol. 2 (RDTSC) | as px87 | conspeed's, keylat's and cpugaps' clocks |
-| console_codes(4), ECMA-48 (CUP, ED, SGR, DECTCEM), as px59's entries | as px59 | the sequences conspeed writes; the answers keylat gives as the console gives them |
-| the man pages of `posix_openpt(3)`, `ptsname(3)`, `setsid(2)`, `ioctl_tty(2)` (TIOCSCTTY, TIOCSWINSZ, TIOCGWINSZ), `clock_gettime(2)`, `tcflush(3)`, `poll(2)`, `readlink(2)` on `/proc/self/fd` | the man-pages project | user/elf/conspeed.c, keylat.c, cpugaps.c |
-| yew's public source (the org's own) at `user/yew.pin`'s commit: `src/edit/loop.lu` (one wait over the terminal and the jobs with the earliest deadline, one render a turn), `src/term/input.lu` (`ESC_TIMEOUT_MS`, 25 ms, armed only for an ESC at a read's end), `src/edit/keys.lu` (F mode's keys) | `user/yew.pin` | what yew waits on between a key and its frame (notes/px129-console-speed.md §6) |
-| yew (`/bin/yew`, sha256 `edcca94a…cdb14bb4`) and cub (sha256 `8056dfd4…cdb1045f`), the binaries an installed image ships, run unmodified on a Linux pseudo-terminal of 256×90 with TERM=linux | as installed | black box: their output a keypress or a step, recorded as tests/mpx3-conspeed.d/streams; strace(1) of each for its writes, yew's child processes and the files it writes |
-| QEMU 8.2.2 (Ubuntu's `qemu-system-x86`) with its VGA device at 2560×1440, KVM and TCG, no COM1 and with one | binary | black box: the console's costs before and after; a byte's cost with a UART under KVM (two port accesses, about 6 µs); the screendump the table is read from |
-| PC16550D data sheet facts: IER bit 1 (the transmitter holding register empty interrupt, raised when the transmit FIFO empties with it enabled, cleared by a write to THR), LSR bit 5 in FIFO mode (the transmit FIFO empty), the 16-byte transmit FIFO | the author's own knowledge, as px01's and px13's entries | kernel/serial's transmit ring and its interrupt |
-| the man pages `pipe(7)` (a pipe's capacity) and `fcntl(2)` (`F_SETPIPE_SZ`) | the man-pages project | tests/mpx3-conspeed.d/uart.py: a pipe of one page read at a line's rate |
-| QEMU's documentation of its character devices (`-chardev pipe,path=…`: `path.in` and `path.out`) and of `-serial chardev:` | QEMU 8.2 | tools/qemu-run's `--serial-chardev`, the slow UART's far end |
-| QEMU 8.2.2's 16550 with COM1 on a pipe drained at 11,520 bytes a second | binary | black box: a kernel that waits on THRE per byte waits 78-86 µs a byte, as the installed machine's did |
-| PAX's own `kernel/screen`, `kernel/console`, `kernel/user`, `kernel/serial`, `kernel/panic`, `kernel/power`, `kernel/procfs`, `kernel/sched` (`wake_input`, `kick`), `kernel/interrupts`, `kernel/xhci`, `boot/screen.S`, `boot/io.S`, `tools/screen-ref`, `tools/qemu-run`, `tests/mpx3-screen`, px125's `user/elf/muxprobe.c` and `tests/mpx7-mux` (B7) | this tree, and px125's branch | read and extended |
-
-## px131 — what the kernel holds too long
-
-No kernel's, driver's or C library's source was read. The rule and the inventory are read from this tree's own
-code; Linux was run as a black box in a virtual machine (its own kernel and modules, booted, never read).
-
-| source | version | read, for |
-|---|---|---|
-| Intel SDM vol. 3A §6.8.1, §6.10-§6.14; vol. 3B §18.17; vol. 2 (CLI, STI, RDTSC, RDRAND, CPUID, SYSCALL, SYSRET, IRETQ) | the current edition | the instrument's interval (IF set to clear and back), what a gate and SYSCALL do to IF, the time-stamp counter, RDRAND and CPUID's cost under a hypervisor |
-| getrandom(2), proc_pid_mem(5), munmap(2), clock_nanosleep(2), netdevice(7), init's duties in boot(7) | the Linux man-pages 6.9 | getrandom's short count above 256 bytes, /proc/<pid>/mem's reads, munmap of a range with nothing in it, the probe's sleeps, the Linux guest's interfaces (`user/elf/latinit.c`) |
-| QEMU's documentation of `-netdev user` (`hostfwd`, the gateway's address) and RFC 862 | QEMU 8.2 | the host's pings to the guest's echo, the guest's report to the host |
-| Linux 7.2.4 (the build host's kernel, `CONFIG_PREEMPT_LAZY`, `CONFIG_HZ=1000`) and its virtio modules | binaries | black box: the comparison column (`notes/px131-long-kernel-paths.md` §7) |
-| PAX's own `boot/isr.S`, `boot/sched.S`, `boot/user.S`, `kernel/interrupts`, `kernel/sched`, `kernel/user`, `kernel/vm`, `kernel/paging`, `kernel/process`, `kernel/trace_mem`, `kernel/procfs`, `kernel/netd`, the drivers | this tree | read for the rule and the inventory; extended |
-
-### px131, the second part — the clocks from the clock, device-driven wake-ups at once
-
-| source | version | read, for |
-|---|---|---|
-| Intel SDM vol. 3A §11.5.4 (the APIC timer), §11.8.3-§11.8.4 (a pending interrupt held in the IRR, a second at the same vector lost) | the current edition | why a stretch with interrupts off delivers one tick |
-| IA-PC HPET 1.0a §2.3 and §2.4, ACPI 6.5 §4.8.3.3 (the PM timer) | as named | the counters `kernel/clock` reads and their wraps |
-| clock_gettime(2), nanosleep(2), poll(2) (the Linux man-pages) and POSIX.1-2024's `clock_gettime`, `nanosleep`, `poll` | 6.9; 2024 | a timeout is a minimum and lateness is allowed; what CLOCK_MONOTONIC and CLOCK_REALTIME promise |
-| QEMU's documentation of `-mem-prealloc` | QEMU 8.2 | the guest's memory backed before boot in the guard |
-| PAX's own `kernel/timer`, `kernel/clock`, `kernel/sched`, `kernel/interrupts`, `kernel/netd`, `kernel/user`, `kernel/ready`, `kernel/socket`, `kernel/futex`, `kernel/tcp`, `kernel/arp`, `kernel/dhcp`, `kernel/xhci` | this tree | every tick-counted deadline and every wake-up, read; extended |
-
-### px131e — urgency gives way after a quantum's wait
-
-No kernel's or C library's source was read.
-
-| source | version | read, for |
-|---|---|---|
-| socketpair(2) and unix(7) (the Linux man-pages) | 6.9 | the guard's `ctl` load: a byte each way over an AF_UNIX stream pair |
-| lobo's `docs/CONTROL.md` and `src/main.lu` | the release rev in `user/lobo.pin` (`91b76133`) | how long the control client waits for the master's reply (2 s) |
-| PAX's own `kernel/sched`, `kernel/socket`, `kernel/unix`, `kernel/netd` | this tree | the run queue, the urgent mark and who wakes a socket's reader; extended (`kernel/sched`) |
-
-## px141 — sendfile and splice onto a pty
-
-No kernel's source of any OS and no C library's source was read. The calls' rules are the man pages'; every
-answer the pages leave open is Linux's, run as a black box.
-
-| source | version | read, for |
-|---|---|---|
-| sendfile(2), splice(2), copy_file_range(2), eventfd(2), epoll_create(2), pty(7), termios(3) (OPOST, ONLCR, TOSTOP) | man-pages 6.x | the calls' arguments and errors; what a slave's output processing does to the bytes |
-| Linux 7.2.4 (a test machine's installed kernel image), run as a user on the host and booted under QEMU/KVM with `notes/px111/vminit.c` as its first program, `user/elf/ptyprobe.c`'s K rows as root and as 1000:1000 (`tests/mpx5-pty.d/linux/copy-*.txt`) | binary | black box: what `sendfile` and `splice` answer onto a pty's master and slave (the bytes the other end reads, a full end with O_NONBLOCK, SPLICE_F_NONBLOCK onto a full blocking slave, an output offset, a slave hung up, the background rule), onto /dev/null, /dev/full, an eventfd, an epoll descriptor and /proc/self/cgroup, with a count of 0, at the end of the file and from an empty pipe with no writer; boreutils' `cat` onto a slave |
-| the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
-| boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
-| PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
-
-## dw02 — the entropy contract
-
-No kernel's, firmware's or C library's source was read. The image's programs were read at their pins for their
-draws (the org's own repositories); C libraries were seen only as black boxes (recorded straces, and the probe's
-ptrace of its own child).
-
-| source | version | read, for |
-|---|---|---|
-| Intel Digital Random Number Generator (DRNG) Software Implementation Guide | rev. 2.1, 2018-10-17 | RDRAND and RDSEED's CPUID bits; the carry flag as the only sign of a value (5.2); ten retries (5.2.1); RDSEED's failures (5.3.1); the self tests and health tests (3.2.6, 3.2.7) |
-| Intel SDM vol. 2 (CPUID, RDRAND, RDSEED) | the current edition | the instructions, the carry flag, the register zeroed on failure |
-| AMD-SB-7055, "RDSEED Failure on AMD Zen 5 Processors" (CVE-2025-62626) | as published | a zero returned with the carry set; "treat RDSEED returning 0 equivalent to when CF=0" |
-| INTEL-SA-00320 (CVE-2020-0543, SRBDS) | as published | RDRAND and RDSEED values sampled across cores; the microcode's mitigation |
-| getrandom(2), random(4), random(7) | the Linux man-pages (man7.org, read 2026-11-12) | blocking until initialized, `EAGAIN` for `GRND_NONBLOCK`, `/dev/urandom` before initialization |
-| uapi `include/uapi/linux/random.h` | Linux's uapi tree | `GRND_NONBLOCK`, `GRND_RANDOM` ("No effect"), `GRND_INSECURE` ("Return non-cryptographic random bytes") |
-| wolf's specification `spec/11-os.md` §2 (`[os.random]`) and wolf's runtime `crates/wolf_rt/src/random.rs` | wolf-lang v0.2.39 (`3fc86f77`) | `os_random`'s one call (flags 0, `EINTR` retried) and its trap (exit 134) |
-| boreutils, pelt, yew, burrow, den, lobo, wolf-std at `user/*.pin`'s revisions; PAX's own `user/` | the pins | which programs draw, how, and what each does on a failed draw (`notes/dw02-the-entropy-contract.md` §5) |
-| ptrace(2) (`PTRACE_TRACEME`, `PTRACE_SYSCALL`, `PTRACE_O_TRACESYSGOOD`, `PTRACE_GETREGS`) | the Linux man-pages 6.9 | the probe's watch of the C library's start-up draw |
-| QEMU's `-cpu` models (`max`, `max,-rdrand`, the default) | QEMU 8.2.2 | black box: CPUID read in the guest |
-| the Intel Core i9-11900K's family (Rocket Lake): its published instruction-set extensions | Wikipedia's "Rocket Lake" and "RDRAND", read 2026-11-12 | RDRAND (Ivy Bridge and later) and RDSEED (Broadwell and later) |
-
-## px130 — the kernel's log, a quiet console, dmesg
-
-No kernel's, log daemon's, journald's, util-linux's, busybox's or C library's source was read. The record's form,
-its seeks, -EPIPE and -EAGAIN are the kernel's documentation's; every answer the probe asks was then held to a
-real Linux's own under QEMU (the lane host's installed kernel image, booted and never read).
-
-| source | version | read, for |
-|---|---|---|
-| `Documentation/ABI/testing/dev-kmsg` (kernel.org, the uapi-adjacent ABI document) | trunk of 2026-11 | /dev/kmsg: one record a read, `PRI,SEQ,USEC,FLAGS;TEXT\n`, the escapes, -EAGAIN, -EPIPE and the reader moved on, SEEK_SET/SEEK_END/SEEK_DATA and -ESPIPE/-EINVAL, the `<N>` prefix's level and facility, LOG_USER for none or for the kernel's |
-| `Documentation/admin-guide/sysctl/kernel.rst` | trunk of 2026-11 | `printk`'s four values, `dmesg_restrict` |
-| `Documentation/core-api/printk-basics.rst` | trunk of 2026-11 | the levels' names and the default level of a line with none |
-| syslog(2) | man-pages 6.19 | the actions 0-10, who may ask which, READ_ALL's "last len bytes since the last clear", CONSOLE_OFF/ON's save and restore, CONSOLE_LEVEL's 1-8, the errors |
-| dmesg(1) | util-linux 2.39.3's manual (man7.org) | the options PAX's dmesg takes and their meanings |
-| util-linux 2.39.3's dmesg | Ubuntu 24.04's, black box in a container (strace of each option) | its words and statuses when refused (`read kernel buffer failed`, `klogctl failed`, `clear kernel buffer failed`: Operation not permitted, exit 1), /dev/kmsg opened O_RDONLY\|O_NONBLOCK (O_RDONLY for -w), syslog(10) and syslog(3) when it cannot be, `-n err` sending 4 (a name's number + 1) |
-| Linux 7.2.4 (the lane host's installed image) | black box under QEMU/KVM, `printk.devkmsg=on` | `tests/mpx5-kmsg.d/linux/`: every row of the probe as root and as 1000:1000 |
-| pelt's README and docs/FRIENDLY.md (`wolffe-lang/pelt`) | `b80d6570` | the measurement: pelt friendly unless invoked as `sh`, and its friendly prompt's `den status --porcelain` with a 50 ms deadline |
-| bootparam(7), kernel-parameters (kernel.org) | trunk of 2026-11 | `loglevel=`, `quiet`, `printk.devkmsg=` |
+| man-pages `pty(7)`, `unix(7)` (`SO_PEERCRED`, `SCM_RIGHTS`, abstract names), `epoll(7)`, `signal(7)`, `termios(3)` (`cfmakeraw`), `credentials(7)`, `setsid(2)`, `prctl(2)` (`PR_SET_CHILD_SUBREAPER`), `eventfd(2)`, `timerfd_create(2)`, `signalfd(2)`, `ppoll(2)`, `sendmsg(2)`, `cmsg(3)`, `ioctl_tty(2)` (`TIOCSWINSZ`, `TIOCGPTN`, `TIOCGSID`) | man-pages 6.x | the A rows' questions and the calls `user/elf/muxprobe.c` makes |
+| man-pages `console_codes(4)`, man7.org's HTML copy, sha256 `3cabfae601fcb7e50f1b09e6e3feae742f225a59e114af8e63ee08a07981da77` | Linux man-pages 6.19, 2026-07-29 | which sequences the Linux console documents (RI, SCOSC/SCORC, DECIM, DECOM, DECAWM) and which it lists as not implemented (DCS, SOS, PM); the B1 and B6 verdicts and the console issue |
+| POSIX.1-2024, XBD 11 (General Terminal Interface) | 2024 | the controlling terminal, the foreground process group, the special characters |
+| **XTerm Control Sequences**, as px117's entry (by its digests) | as px117 | what each B case expects xterm to draw, answer or send: the alternate screens, DECSC/SCOSC, DECSTBM, RI, IL/DL/ICH/DCH/ECH, EL/ED, SU/SD, REP, IRM, DECOM, DECAWM, CHT, SGR (the 16, 256 and direct colours, the underline styles), DA1/DA2/DA3, DSR, CPR and DECXCPR, DECRQM, XTVERSION, OSC 10, DECRQSS, XTGETTCAP, DECSCUSR, bracketed paste and focus, the PC-style function keys and their modifiers, OSC 0/2/8/52, DCS, APC, PM and SOS (`tests/mpx7-mux.d/cases.py`) |
+| the kitty keyboard protocol's query `CSI ? u` | the sequence alone | B4's question whether the console answers it (it does not); no document or source read beyond the sequence |
+| ECMA-48, as px19's entry | 5th ed. | the control functions' names |
+| **Spleen 8x16**, as the font's entry (vendored, BSD-2-Clause) | 2.2.0 | its own glyphs for U+2500-U+257F, U+2190-U+2193, U+E0A0-U+E0A2 and U+E0B0-U+E0B3, taken by `tools/mkfont` through `font/extent.txt`; no other font consulted |
+| wolf-std at `77cf3210a82c93dc05ded987c249bb69e79b0a89` (the org's own, public): `std/term`, `std/process`, `std/signal`, `std/net` and `std/net/unix`, `std/fs` | `77cf3210` | the calls `user/muxwolf` makes and the two it lacks (the wolf-std issues) |
+| wolf 0.2.39, the release archive for x86_64-unknown-linux-gnu, sha256 `53f75d2b2dd79c0532b21920bc9f073098154aa0133caa2405209a1ef2af0457` | 0.2.39 | builds `user/muxwolf` (`tools/mkmuxwolf`) |
+| Ubuntu 24.04.5 in the suite's container (`localhost/px75-ubuntu:2`), on a Linux 7.2 host | binary | black box: the same static `muxprobe` and `muxwolf` as pid 1 on a pseudo-terminal (`tools/linux-tree`), the references in `tests/mpx7-mux.d/linux/` with their digests in `record.meta` |
+| QEMU 8.2.2 (Ubuntu's `qemu-system-x86`): `-device VGA` with `vgamem_mb=64`, `xres=2560`, `yres=1440`; the i8042; the monitor's `screendump` and `sendkey` | binary | black box: B7 at the target machine's display size; B5's keys typed at the PS/2 keyboard |
+| px123's rows in `tests/mpx5-burrowd` (B19-B27: a terminal over `ssh -t`, its size, a resize, Ctrl-C, Ctrl-\, Ctrl-Z) | px123's branch | cited for A.3, A.4 and B8, not run here |
+| PAX's own `kernel/sched` (`SLOTS`), `kernel/ready`, `kernel/pty`, `kernel/unix`, `kernel/console`, `kernel/screen`, `kernel/user`, `tools/linux-tree`, `tools/ps2-session`, `tools/screen-ref`, `user/elf/vtcases.c`, `tools/mksigwolf` (the probe's builder's shape) | this tree | read and extended |
