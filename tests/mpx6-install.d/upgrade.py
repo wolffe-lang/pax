@@ -89,6 +89,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import upgrade_screen as us
+
 repo, work, old_src, new_src = map(Path, sys.argv[1:5])
 ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7',
                                                         'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11', 'U12',
@@ -309,20 +312,22 @@ class Machine:
         self.qlog = (self.dir/'qemu.log').open('wb')
         self.t0 = time.monotonic()
         self.p = subprocess.Popen([str(x) for x in a], stdin=subprocess.DEVNULL, stdout=self.qlog, stderr=subprocess.STDOUT)
-        for _ in range(200):
-            if self.sock.exists():
-                break
-            if self.p.poll() is not None:
-                fail(name, 'QEMU did not start: ' + (self.dir/'qemu.log').read_text(errors='replace')[-2000:])
-            time.sleep(.05)
+        try:
+            us.wait_for_socket(self.sock, self.p, name)
+        except us.SocketWait as error:
+            fail(name, f'{error}: ' + (self.dir/'qemu.log').read_text(errors='replace')[-2000:])
         self.q = QMP(self.sock)
         self.shots = 0
         self.cols = 0
-        self.since = ''
+        self.since = None
+
+    def mark(self, line):
+        """Remember the line about to be typed and how many echoes of it the screen already holds."""
+        self.since = us.Baseline(line, us.echo_count(self.unwrapped(self.screen()), line))
 
     def run(self, cmd):
         """Type a command whose output the next waits read alone."""
-        self.since = '$ ' + cmd
+        self.mark(cmd)
         self.type(cmd + '\n')
 
     def screen(self):
@@ -367,9 +372,9 @@ class Machine:
             flat = self.unwrapped(text)
             # After a command typed by run(), only what follows its last echo counts: a
             # previous run's lines may still be on the screen.
-            if self.since and self.since in flat:
-                flat = flat[flat.rindex(self.since):]
-                text = flat
+            if self.since:
+                scoped = self.since.scope(flat)
+                flat = text = scoped if scoped is not None else ''
             look = text.rstrip('\n').split('\n')[-1] if last else flat
             if re.search(pattern, look, re.M):
                 return text
@@ -415,7 +420,7 @@ class Machine:
             time.sleep(.05)
 
     def command(self, line, row, timeout=300):
-        self.since = '$ ' + line
+        self.mark(line)
         self.type(line + '\n')
         time.sleep(.5)
         return self.wait(PROMPT, row, timeout, last=True)
@@ -424,7 +429,7 @@ class Machine:
         """px103: type the line, read it back from the screen, and only then press Enter: a key the
         keyboard dropped (seen under host load: 'su wof') fails the row by name before anything runs.
         Its echo is found by the line's own text, as run()'s and command()'s: the prompt may be pelt's friendly one."""
-        self.since = line
+        self.mark(line)
         self.type(line)
         time.sleep(.3)
         shown = [l for l in self.unwrapped(self.screen()).split('\n') if l.strip()]
