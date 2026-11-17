@@ -22,6 +22,8 @@
   S12 a scrolling console, replayed: green6's U8-mistyped (an earlier run's refusal above the new command, a
       screen too short for the output, so the old echo scrolls off first), for every screen height 10 to 60 and
       every output chunk of 1, 3 and 7 lines: the earlier refusal is never in scope.
+  S13 green4's long upgrade output through every screen height; run, command and vcommand arm the scope
+      after typing the line and before Enter.
   S9  upgrade.py uses these helpers: no fixed `'$ ' +` marker, the QMP wait is the bounded one, and U2's
       state creates /var/log first.
 """
@@ -131,9 +133,36 @@ def replay(rows, chunk, arm):
 
 for rows in range(10, 61):
     for chunk in (1, 3, 7):
-        why = replay(rows, chunk, False)
-        need(why is None, 'S12', why)
+        for arm in (True, False):
+            why = replay(rows, chunk, arm)
+            need(why is None, 'S12', why)
 print('PASS S12: green6 replayed at 51 screen heights and 3 chunk sizes: the earlier refusal never in scope')
+
+# S13: green4's U-var-log (the upgrade's own output, longer than a screen): at every height the scrolled
+# window still reads `Upgrade complete`, armed or not, with the earlier command's echo still above at the start.
+UP = ['root@? ~# ' + CMD, 'Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-1.txt', 'Upgrading /dev/sdc: its root',
+      'PAX upgrade plan v1'] + ['write 177 path(s) the target lacks'] * 12 + [
+      'Upgrade Samsung SSD 860, serial <target-serial> (1.0 TB, /dev/sdc) from 9c88ec8a to 1fea7144, keeping your files?',
+      'To upgrade, type this line exactly; anything else cancels:', 'UPGRADE /dev/sdc Samsung SSD 860 <target-serial> eeef1ad8',
+      'pax-install> UPGRADE /dev/sdc Samsung SSD 860 <target-serial> eeef1ad8', 'Target log: /mnt/target/etc/pax-install/upgrade-1.txt',
+      'phase record: durable', 'upgrade: 100 of 323 done', 'upgrade: 200 of 323 done', 'upgrade: 300 of 323 done',
+      'phase root: durable (323 path(s), 6 text(s), 23150 ms)', 'phase manifest: durable (/mnt/target/etc/pax-install/manifest, 487 paths)',
+      'Upgrade complete: /dev/sdc holds 1fea7144; 0 of your changed file(s) kept.', 'Type reboot to reboot now or poweroff to power off']
+for rows in range(10, 61):
+    for arm in (True, False):
+        base = us.Baseline(CMD, 0)
+        lines = ['login: root', 'root@? ~# cat /proc/self/mounts']
+        if arm:
+            base.armed('\n'.join((lines + UP[:1])[-rows:]))
+        for i, line in enumerate(UP):
+            lines.append(line)
+            got = base.scope('\n'.join(lines[-rows:]))
+        need(got is not None and 'Upgrade complete' in got, 'S13', f'rows {rows}, armed {arm}: {got!r}')
+print('PASS S13: a long upgrade output scrolled through 51 screen heights still reads Upgrade complete')
+
+src2 = (root / 'tests/mpx6-install.d/upgrade.py').read_text()
+need(src2.count('self.arm()') == 3, 'S13', 'run, command and vcommand must each arm before Enter')
+print('PASS S13b: run, command and vcommand arm the scope before Enter')
 
 # S6-S8
 class Alive:
