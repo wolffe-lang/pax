@@ -19,6 +19,9 @@
   S11 keys the guest dropped under host load (green5's U2d-state: the echo read `…echo run=$?;/` for a typed
       `…echo run=$?; cd /`): the echo is still found by its first 24 characters, so the wait reads the prompt
       instead of waiting 300 s for an echo that will not come. The row's own checks still see the output.
+  S12 a scrolling console, replayed: green6's U8-mistyped (an earlier run's refusal above the new command, a
+      screen too short for the output, so the old echo scrolls off first), for every screen height 10 to 60 and
+      every output chunk of 1, 3 and 7 lines: the earlier refusal is never in scope.
   S9  upgrade.py uses these helpers: no fixed `'$ ' +` marker, the QMP wait is the bounded one, and U2's
       state creates /var/log first.
 """
@@ -94,6 +97,43 @@ need(typed not in dropped, 'S11', 'the capture does not show dropped keys')
 got = us.scope_after_echo(dropped, typed, 0)
 need(got is not None and 'run=0' in got, 'S11', f'the garbled echo was not found: {got!r}')
 print('PASS S11: an echo that lost keys is found by its first 24 characters')
+
+# S12: replay green6's transcript through a scrolling window.
+cap = (root / 'tests/mpx6-install.d/screens/u8-mistyped-green6.txt').read_text().split('\n')
+start = cap.index('Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-3.txt') if 'Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-3.txt' in cap else 0
+new_out = cap[start:] if start else cap
+old_out = ['Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-2.txt'] + ['Disks (5); install allow-list /dev/sdd1:/pax/install-targets, 1 line(s)'] * 20
+old_out += ['pax-install: upgrade refused: the install on /dev/sdc has no manifest and matches no baseline this stick carries',
+            'root@? ~ [1]# cat /root/pr > /mnt/target/etc/pax-release; echo p=$?', 'p=1']
+history = ['login: root'] + ['root@? ~# cat /proc/self/mounts; echo end'] * 1 + ['rootfs / rootfs rw 0 0', 'end'] + \
+          ['root@? ~# ' + CMD] + old_out
+typed = 'root@? ~# ' + CMD
+bad_pattern = re.compile(STOPPED, re.M)
+
+
+def replay(rows, chunk, arm):
+    window = lambda lines: '\n'.join(lines[-rows:])
+    base = us.Baseline(CMD, us.echo_count(window(history), CMD))
+    lines = history + [typed]
+    if arm:
+        base.armed(window(lines))
+    shown = len(lines)
+    stream = new_out[:]
+    while True:
+        scoped = base.scope(window(lines))
+        if scoped is not None and bad_pattern.search(scoped):
+            return f'rows {rows}, chunk {chunk}: the earlier refusal is in scope after {len(lines) - len(history)} lines:\n{scoped}'
+        if not stream:
+            return None
+        lines += stream[:chunk]
+        stream = stream[chunk:]
+
+
+for rows in range(10, 61):
+    for chunk in (1, 3, 7):
+        why = replay(rows, chunk, False)
+        need(why is None, 'S12', why)
+print('PASS S12: green6 replayed at 51 screen heights and 3 chunk sizes: the earlier refusal never in scope')
 
 # S6-S8
 class Alive:
