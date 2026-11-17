@@ -9,7 +9,9 @@
 #
 # G0 builds the image's tree (build/mpx6-logs/root, files.txt as tools/mkinitramfs' arguments):
 # kmain_console, the kernel every shipped image boots, with `quiet`; the installed system's run
-# list (/bin/login as pid 1, user/login built by tools/mkauth with /bin/passwd and /bin/sudo);
+# list (/bin/login as pid 1, user/login built by tools/mkauth with /bin/passwd and /bin/sudo;
+# /bin/init beside it, tools/mkinit's, which login as pid 1 execs: init writes the boot's
+# record, runs the hooks and starts login in a session of its own);
 # pelt as /bin/sh; the boreutils the rows run (env for burrowd's hook); dmesg (tools/mkdmesg); reboot
 # and poweroff (tools/mkdiskprobe); lope for /etc/shrc's hook (tools/mklope); logd and last
 # (tools/mklogd), /bin/lastb a link to last; burrow's three programs (tools/mkburrow,
@@ -76,6 +78,9 @@ if [ -z "$images" ]; then
     for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
     "$PAX_ROOT/tools/mkauth" "$work/auth" login passwd sudo mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
     for p in login passwd sudo; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    # /bin/init, which login as pid 1 execs (the installed shape since pax#352): the boot's login
+    # record, the hooks (logd's, burrowd's) and the console's sessions are init's.
+    "$PAX_ROOT/tools/mkinit" "$work/init" > "$work/init.txt" 2>&1 && cp "$work/init/init" "$r/bin/init" || why+=" tools/mkinit;"
     cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
     cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"
     "$PAX_ROOT/tools/mkdmesg" "$work/dmesg" > "$work/dmesg.txt" 2>&1 || why+=" tools/mkdmesg;"

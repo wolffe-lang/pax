@@ -30,6 +30,33 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   `tests/mpx6-usb --topology refusal` checks the framebuffer and the log with a nested composite HID
   fixture, real login and sudo; the fixture does not identify the physical device’s descriptors.
 
+- **A logout at the console: pid 1 stays (px124, px156, pax#352).** An installed
+  PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
+  names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs
+  on `/run`, makes `/run/user/UID` (0700, the account's) for every account
+  with a login shell, runs what login ran as pid 1 (sudo's records emptied,
+  `pax-boot-status record`, the boot hooks), gives the console up, and then
+  starts `/bin/login` on it in a session of its own, again after each session
+  ends. So `exit`, `logout` (a function of `/etc/shrc`) and Ctrl-D at an
+  empty prompt give `HOST login:` again instead of halting the machine. What
+  the session left is hung up: SIGHUP and SIGCONT to each process still in
+  it, SIGKILL 2 s later to one still there (one line on the console); a
+  process that called setsid goes on and is reaped by init when it ends; the
+  hooks' services (burrowd) and ssh sessions are untouched; the console's
+  modes are put back and it is root's 0600 between sessions. login sets
+  `XDG_RUNTIME_DIR`. init reaps whatever the kernel hands it as soon as it
+  ends, so a program whose parent ended first no longer stays a zombie under
+  pid 1 (the shell, until now, never waited for it). The boot's duties run
+  once a boot: `exec /bin/login` logs in again without running the hooks,
+  `pax-boot-status record` or the boot's login record a second time, or
+  emptying sudo's records. The boot's record in utmp and wtmp is init's, and
+  a console logout is its own record (DEAD_PROCESS, as utmp(5) has init write
+  it), so `last` ends the session at the logout. The dev and release images
+  and the live stick keep their root-shell pid 1. `tests/mpx5-init` holds the
+  console's rows (I14 the orphan, I15 the second start, I16 the logout's
+  record), `tests/mpx5-burrowd` B30-B32 the ssh side, and `tests/mpx6-logs`
+  the records with init as pid 1: `notes/px124-pid-1.md`.
+
 - **The kernel's log kept across reboots, and who logged in (px133).** `logd`, started at boot, appends every
   record of `/dev/kmsg` to `/var/log/kern.log` (root's): wall time, time since boot, level, sequence number and
   text, a line naming each boot and saying when the previous one ended without its end line, records the
