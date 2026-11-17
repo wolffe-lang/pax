@@ -42,7 +42,7 @@ elif name=='qemu-run':
         p=tree/'tools'/name; p.write_text(helper); p.chmod(0o755)
     # px109: the mouse judge's selftest runs before each mouse session;
     # px120: the hot-plug judge's before each hot-plug session.
-    for name in ('mouse-judge-selftest','hotplug-judge-selftest'):
+    for name in ('mouse-judge-selftest','hotplug-judge-selftest','typematic-judge-selftest','typematic-session'):
         p=tree/'tests/mpx6-usb.d'/name; p.write_text(helper); p.chmod(0o755)
     (tree/'tests/mpx6-usb.d/quiet-refusal').write_text(
         '#!/bin/sh\nexec "$(dirname "$0")/../../tools/refusal-session" "$@"\n')
@@ -85,7 +85,12 @@ elif name=='qemu-run':
     assert all(Path(a[a.index('--kernel')+1]).name=='kmain_console.elf' and
         Path(a[a.index('--kernel')+1]).parent.name==a[a.index('--tier')+1]
         for n,a in records if n=='refusal-session'), 'refusal session must reuse the matching kernel'
-    print('PASS USB build-once: four builds, four invariant boots, twelve keyboard, four mouse, four hot-plug and four refusal sessions')
+    typematic=collections.Counter((Path(a[a.index('--image')+1]).parent.name,
+        a[a.index('--firmware')+1],a[a.index('--keyboard')+1]) for n,a in records if n=='typematic-session')
+    assert typematic==collections.Counter({(t,f,k):1 for t in ('native','release')
+        for f in ('bios','uefi') for k in ('usb','ps2')}), 'typematic matrix legs were duplicated or dropped'
+    assert sum(n=='typematic-judge-selftest' for n,a in records)==4, 'the typematic judge selftest was dropped'
+    print('PASS USB build-once: four builds, four invariant boots, twelve keyboard, four mouse, four hot-plug, four refusal and eight typematic sessions')
     bundle=tree/'build/mpx6-usb/native'
     (bundle/'invariants/tier.txt').write_text('release\n')
     result=subprocess.run([str(tree/'tests/mpx6-usb'),'--tier','native','--firmware','uefi','--images',str(bundle)],

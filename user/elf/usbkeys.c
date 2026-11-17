@@ -66,7 +66,7 @@ int main(void) {
                 int k=read(input,&b,1);
                 if(k!=1) return 3;
                 bytes[n]=b; times[n]=now(); n++;
-            } while(n<1024 && poll(&p,1,row==10?400:180)>0);
+            } while(n<1024 && poll(&p,1,row==10?650:180)>0);
         }
         dprintf(output,"USBROW %s",labels[row]);
         for(unsigned i=0;i<n;i++) dprintf(output," %02x",bytes[i]);

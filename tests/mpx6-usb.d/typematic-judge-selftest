@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""The raw-byte judge rejects early, missing, fast, slow and stuck repeats."""
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import contextlib
+import io
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+loader = SourceFileLoader('typematic', str(Path(__file__).with_name('typematic-session')))
+session = module_from_spec(spec_from_loader('typematic', loader))
+loader.exec_module(session)
+judge = session.judge
+
+def transcript(stamps=None, short=1, byte='7c'):
+    stamps = stamps if stamps is not None else [0] + [500 + 33*i for i in range(16)]
+    lines = []
+    for row in range(4):
+        times = stamps if row == 3 else [0]*short
+        lines += [f'TYPEMATIC_BYTES {row}' + (' '+byte)*len(times),
+                  f'TYPEMATIC_TIMES {row}' + ''.join(f' {t}' for t in times)]
+    return '\n'.join(lines)+'\n'
+
+cases = [('normal', transcript(), 'usb', True),
+         ('ps2', transcript([0]), 'ps2', True),
+         ('early', transcript([0] + [250+33*i for i in range(23)]), 'usb', False),
+         ('short-duplicate', transcript(short=2), 'usb', False),
+         ('no-repeat', transcript([0]), 'usb', False),
+         ('fast', transcript([0]+[500+20*i for i in range(16)]), 'usb', False),
+         ('slow', transcript([0]+[500+40*i for i in range(16)]), 'usb', False),
+         ('wrong-byte', transcript(byte='61'), 'usb', False),
+         ('stuck-release', transcript([0]+[500+33*i for i in range(18)]), 'usb', False)]
+for name, data, keyboard, expected in cases:
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert judge(data, keyboard) == expected, name
+    print(f'PASS typematic-judge-{name}')

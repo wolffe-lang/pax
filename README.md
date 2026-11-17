@@ -709,7 +709,8 @@ The console supports:
 - Ctrl with a letter or one of `@[\]^_` types its control character, and (px125) Ctrl-Space NUL, as xterm sends it:
   a terminal multiplexer's usual prefix key;
 - USB keyboards over xHCI, directly or behind hubs, sharing the PS/2 keyboard's mapping; unplugging one releases its
-  held keys, and a replacement can be attached while the system runs; repeat at 250 ms then 33 ms, as measured on Linux.
+  held keys, and a replacement can be attached while the system runs. Held keys begin repeating after 500 ms,
+  matching the usual PS/2 initial delay, then repeat every 33 ms (about 30 times a second); a brief press acts once.
 - (px120) Devices plugged in after boot on any controller, however long the system has run on memory above 4 GiB:
   mice, keyboards and composite devices (a mouse with keyboard and vendor interfaces, say); each unplug gives its
   device record and slot back, so plugging and unplugging never runs out; a device that cannot be taken (no slot

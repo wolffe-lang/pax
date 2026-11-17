@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Raw-console typematic policy: QMP down, timed hold, up; USB and PS/2."""
+import argparse
+import json
+from pathlib import Path
+import re
+import socket
+import subprocess
+import time
+
+
+def judge(data, keyboard):
+    failures = []
+    for row, hold in enumerate((50, 150, 250, 1000)):
+        values = re.search(rf'^TYPEMATIC_BYTES {row}((?: [0-9a-f]{{2}})+)\r?$', data, re.M)
+        times = re.search(rf'^TYPEMATIC_TIMES {row}((?: [0-9]+)+)\r?$', data, re.M)
+        if not values or not times:
+            raise RuntimeError(f'missing raw row {row}')
+        values = values[1].split(); stamps = list(map(int, times[1].split()))
+        ok = all(x == '7c' for x in values) and len(stamps) == len(values)
+        if hold < 500 or keyboard == 'ps2':
+            ok &= len(values) == 1
+        else:
+            # 1 make plus floor((1000-500)/33)+1 repeats = 17,
+            # with two reports' margin for QMP/10ms scheduling granularity.
+            ok &= 15 <= len(values) <= 18 and len(stamps) >= 3
+            if len(stamps) >= 3:
+                ok &= 470 <= stamps[1] <= 570
+                ok &= 29 <= (stamps[-1] - stamps[1]) / (len(stamps) - 2) <= 38
+        # The capture remains open 600 ms beyond even the longest hold:
+        # a release must stop the typematic, not leave a stuck key behind.
+        ok &= stamps[-1] <= hold + 80
+        name = f'typematic-{keyboard}-{hold}ms'
+        print(f'{"PASS" if ok else "FAIL"} {name} count={len(values)} bytes={" ".join(values)} times_ms={stamps}', flush=True)
+        if not ok:
+            failures.append(name)
+    return not failures
+
+
+def run(args):
+    out = Path(args.output).resolve(); out.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[2]
+    serial, sock = out/'serial.log', out/'qmp.sock'
+    sock.unlink(missing_ok=True)
+    cmd = [str(root/'tools/qemu-run'), '--firmware', args.firmware, '--accel', args.accel,
+           '--serial', str(serial), '--timeout', '60']
+    if args.keyboard == 'usb':
+        cmd += ['--usb-kbd']
+    cmd += [str(Path(args.image).resolve()), '--', '-qmp', f'unix:{sock},server=on,wait=off']
+    with (out/'runner.log').open('wb') as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+        conn = reader = None
+        try:
+            end = time.monotonic() + 50
+            while not sock.exists():
+                if proc.poll() is not None or time.monotonic() > end:
+                    raise RuntimeError('QMP not started')
+                time.sleep(.02)
+            conn = socket.socket(socket.AF_UNIX); conn.settimeout(5); conn.connect(str(sock))
+            reader = conn.makefile('rb'); json.loads(reader.readline())
+            def execute(name, arguments=None):
+                conn.sendall(json.dumps({'execute': name, **({'arguments': arguments} if arguments else {})}).encode() + b'\n')
+                while True:
+                    reply = json.loads(reader.readline())
+                    if 'error' in reply: raise RuntimeError(reply)
+                    if 'return' in reply: return reply['return']
+            execute('qmp_capabilities')
+            def text():
+                return serial.read_text(errors='replace') if serial.exists() else ''
+            def wait(marker):
+                while marker not in text():
+                    if proc.poll() is not None or time.monotonic() > end:
+                        raise RuntimeError(f'no {marker}: {text()[-500:]}')
+                    time.sleep(.01)
+            def keys(down):
+                codes = ('shift', 'backslash') if down else ('backslash', 'shift')
+                execute('input-send-event', {'events': [
+                    {'type': 'key', 'data': {'down': down, 'key': {'type': 'qcode', 'data': code}}}
+                    for code in codes]})
+            for row, hold in enumerate((50, 150, 250, 1000)):
+                wait(f'TYPEMATIC_READY {row}')
+                began = time.monotonic(); keys(True); time.sleep(hold / 1000); keys(False)
+                print(f'INPUT {args.keyboard} pipe down/up requested_ms={hold} elapsed_ms={(time.monotonic()-began)*1000:.3f}', flush=True)
+            wait('TYPEMATIC_DONE')
+            wait('halt')
+            execute('quit'); proc.wait(timeout=10)
+        finally:
+            if reader: reader.close()
+            if conn: conn.close()
+            if proc.poll() is None:
+                proc.terminate(); proc.wait(timeout=10)
+    data = serial.read_text(errors='replace')
+    if args.keyboard == 'usb' and ('xhci: keyboard usb1-' not in data or '(0 scancodes)' not in data):
+        raise RuntimeError('USB path was not exclusive')
+    return 0 if judge(data, args.keyboard) else 1
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--image', required=True)
+    parser.add_argument('--output', required=True)
+    parser.add_argument('--keyboard', choices=['usb', 'ps2'], default='usb')
+    parser.add_argument('--firmware', choices=['bios', 'uefi'], default='bios')
+    parser.add_argument('--accel', choices=['auto', 'kvm', 'tcg'], default='auto')
+    raise SystemExit(run(parser.parse_args()))
