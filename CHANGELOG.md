@@ -7,7 +7,7 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
-- **A logout at the console: pid 1 stays (px124, pax#352).** An installed
+- **A logout at the console: pid 1 stays (px124, px156, pax#352).** An installed
   PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
   names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs
   on `/run`, makes `/run/user/UID` (0700, the account's) for every account
@@ -21,9 +21,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   process that called setsid goes on and is reaped by init when it ends; the
   hooks' services (burrowd) and ssh sessions are untouched; the console's
   modes are put back and it is root's 0600 between sessions. login sets
-  `XDG_RUNTIME_DIR`. The dev and release images and the live stick keep their
-  root-shell pid 1. `tests/mpx5-init` holds the console's rows,
-  `tests/mpx5-burrowd` B30-B32 the ssh side: `notes/px124-pid-1.md`.
+  `XDG_RUNTIME_DIR`. init reaps whatever the kernel hands it as soon as it
+  ends, so a program whose parent ended first no longer stays a zombie under
+  pid 1 (the shell, until now, never waited for it). The boot's duties run
+  once a boot: `exec /bin/login` logs in again without running the hooks,
+  `pax-boot-status record` or the boot's login record a second time, or
+  emptying sudo's records. The boot's record in utmp and wtmp is init's, and
+  a console logout is its own record (DEAD_PROCESS, as utmp(5) has init write
+  it), so `last` ends the session at the logout. The dev and release images
+  and the live stick keep their root-shell pid 1. `tests/mpx5-init` holds the
+  console's rows (I14 the orphan, I15 the second start, I16 the logout's
+  record), `tests/mpx5-burrowd` B30-B32 the ssh side, and `tests/mpx6-logs`
+  the records with init as pid 1: `notes/px124-pid-1.md`.
 
 - **What PAX can do for a terminal multiplexer, measured (px125).** A new suite,
   `tests/mpx7-mux`, asks PAX every question a multiplexer's server and client
