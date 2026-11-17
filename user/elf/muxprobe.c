@@ -1218,15 +1218,25 @@ static void sec_a5(void) {
  * what the kernel does with it when init ends). */
 static void leave_daemon(void) {
     fflush(stdout);
+    int rd[2];
+    if (pipe(rd) < 0) return;
     pid_t S = fork();
     if (S == 0) {
         pid_t D = fork();
         if (D == 0) {
             setsid();
+            char ok = 1;
+            (void)!write(rd[1], &ok, 1);
             for (;;) pause();
         }
+        /* The starter ends only once the daemon has its own session: on a slow machine init could
+         * otherwise end first, and its session's hangup would reach a daemon not yet in a session of its own. */
+        char ok;
+        (void)!read(rd[0], &ok, 1);
         _exit(0);
     }
+    close(rd[0]);
+    close(rd[1]);
     int st;
     waitpid(S, &st, 0);
     say("A5.4 init ends now and leaves a daemon running\n");
