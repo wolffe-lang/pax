@@ -1449,3 +1449,19 @@ after a quantum when a non-urgent thread is waiting.
 | `trace_state/` (px126 change) | 1024 slots |
 | `../boot/sched.S` | `pax_threads`, `pax_siginfo`, `pax_debugregs` and `pax_trace_state` for 1024 slots; `pax_procs` gone (3 MiB at 64 slots); `pax_slot_words` (two a slot) and `pax_pid_hint` (4096 words): 1.9 MiB of `.bss` in all where 64 slots took 3.1 MiB |
 | `../boot/fpu.S` | `pax_fpu_state` 1032 words |
+
+## px159 — a wake-up for the readers of what changed; 64 KiB socket buffers
+
+A change to a pipe's buffer, a socket's, a pty or an eventfd wakes only the threads whose calls looked at it, at the
+head of the run queue and marked urgent, under px131e's bound; every other change still wakes every waiter at the tail.
+Beside a process that only computes, a byte's round trip between two processes over a pipe, a socketpair or a pty
+took about 10 ms (the hog's turn ahead of it); it now takes what it does with no hog, tens of microseconds. A socket's buffer holds
+64 KiB each way, as a pipe's does, so a 19 KiB frame crosses in one write and one read.
+
+| module or file | what |
+|---|---|
+| `sched/` (px159) | `wait_key(class, i)` and `wait_other`: what the running call looked at, into its slot's third word (`W_KEYS`; `KEY_BUF` a pipe or socket buffer, `KEY_PTY` a pty, `KEY_CON` the console's input, `KEY_EVT` an eventfd's counter; 62 buckets of a hash, bit 62 an object whose changes wake everyone); cleared by `syscall_begins`; `settle_keys` at `block_pipe_until` and `block_pipe_eintr` makes a wait that named nothing, or more than 16 buckets, a wait on every change; `wake_obj(class, i)`: the waiters whose word has the object's bucket made ready by `wake_urgent`, a waiter on every change as `wake_pipes` would, the rest left waiting; `wake_input` wakes a PIPE waiter only when its call looked at the console's input (or waits on every change); `shielded`: an urgent thread holds off other urgent ones for its first millisecond of run only (`URGENT_RUN_NS`, by the TSC since its switch; by the tick before the TSC's rate is known) |
+| `files/` (px159) | the WAIT returns of a pipe's and a socket's read and write (`pipe_recv`, `msg_writev`, `pipe_put`), an eventfd's (`event_read`, `event_write`), the console's timed read and a pty slave's read name what they wait on; `node_poll` names each descriptor `poll` and `epoll_wait` ask of (`wait_on`); a read's room and a write's bytes wake that buffer's waiters (`wake_obj`), and so does an eventfd's counter; `wait_room` for kernel/user's whole `writev`; `SOCK_PAGES` 16 (65536 bytes a direction, one frame before), `sock_new` marks a socket's buffer (`P_SOCK`), which `room_wanted` reads (one byte of room for a socket, PIPE_BUF for a pipe) |
+| `pty/` (px159) | `master_read`, `master_in`, `slave_in` and `slave_took` wake the pty's own waiters (`wake_obj`); their WAITs name the pty (`waits`) |
+| `user/` (px159) | a `writev` to a pipe or socket that must wait for room for its whole sum names that buffer |
+| `../boot/sched.S` (px159) | `pax_slot_words` three words a slot (two before) |
