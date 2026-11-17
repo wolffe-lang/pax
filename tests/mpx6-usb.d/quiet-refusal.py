@@ -118,7 +118,41 @@ def selftest():
     err = 'xhci 1: device enumeration failed 0x0000000000000003'
     assert all(ok for _, ok in verdict('enumeration', transcript(3, err), pic, altered))
     assert not all(ok for _, ok in verdict('enumeration', transcript(4, err), pic, altered))
+    socket_paths_selftest()
     print('PASS refusal-judge-selftest descriptor shape, levels, blank log, framebuffer and error visibility')
+
+
+def socket_paths_selftest():
+    """Session construction must not put sockets under a long output path."""
+    import tempfile as paths_tempfile
+    from unittest.mock import patch
+
+    errors = []
+    with paths_tempfile.TemporaryDirectory(prefix='quiet-refusal-paths-') as temporary:
+        root = Path(temporary)
+        args = argparse.Namespace(output=str(root / ('output-' + 'x' * 100)))
+        # A path-only stand-in: Session construction opens no socket there.
+        short = Path('/quiet-refusal-test-sockets')
+        cases = [('unset', None, False), ('empty', '', False),
+                 ('explicit-short', str(short), False),
+                 ('explicit-long', str(root / ('tmp-' + 'x' * 100)), True)]
+        for name, override, refused in cases:
+            with patch.dict(os.environ):
+                if override is None:
+                    os.environ.pop('TMPDIR', None)
+                else:
+                    os.environ['TMPDIR'] = override
+                with patch.object(paths_tempfile, 'gettempdir', return_value=str(short)):
+                    try:
+                        session = Session(args, 'spare')
+                    except RuntimeError as exc:
+                        ok = refused and str(exc) == 'set TMPDIR to a short lane-owned socket directory'
+                    else:
+                        ok = not refused and session.base.parent == short
+            print(f'{"PASS" if ok else "FAIL"} refusal-socket-{name}', flush=True)
+            if not ok:
+                errors.append(name)
+    assert not errors, f'socket directory selection: {errors}'
 
 
 class Session:
