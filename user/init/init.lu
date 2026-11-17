@@ -44,18 +44,19 @@
 //!    takes the console as its controlling terminal (setsid, TIOCSCTTY
 //!    with 1: taken from a session that opened it after leaving the last
 //!    one, as root may, so the login always has its terminal); init waits,
-//!    and reaps every other child handed to it as it ends. When the
-//!    session's leader ends, its end goes into the login records (utmp(5):
-//!    init marks the ended process's utmp entry DEAD_PROCESS): when utmp
-//!    holds a session of that pid (login's USER_PROCESS), a DEAD_PROCESS
-//!    on the console's line, in utmp's slot and in wtmp, with the signal
-//!    that ended it or its exit status, so `last` shows the logout at its
-//!    own time. Then the session is hung up: every process still in it (by
-//!    /proc/PID/stat's session field; a zombie left out) gets SIGHUP and
-//!    SIGCONT, and SIGKILL if it is still in it 2000 ms later (the
-//!    kernel's own end's grace, kernel/user); one line says so when any
-//!    needed SIGKILL. A process that left the session (setsid(2), as a
-//!    server does) is not touched; it is init's child once its parent
+//!    and reaps every other child handed to it as it ends (an orphan the
+//!    kernel hands to pid 1 among them, at once, never only at a logout).
+//!    When the session's leader ends, its end goes into the login records
+//!    (utmp(5): init marks the ended process's utmp entry DEAD_PROCESS):
+//!    when utmp holds a session of that pid (login's USER_PROCESS), a
+//!    DEAD_PROCESS on the console's line, in utmp's slot and in wtmp, with
+//!    the signal that ended it or its exit status, so `last` shows the
+//!    logout at its own time. Then the session is hung up: every process
+//!    still in it (by /proc/PID/stat's session field; a zombie left out)
+//!    gets SIGHUP and SIGCONT, and SIGKILL if it is still in it 2000 ms
+//!    later (the kernel's own end's grace, kernel/user); one line says so
+//!    when any needed SIGKILL. A process that left the session (setsid(2),
+//!    as a server does) is not touched; it is init's child once its parent
 //!    ends, and init reaps it when it ends. Then the loop starts again:
 //!    `HOST login:`.
 //!
