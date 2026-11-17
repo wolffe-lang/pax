@@ -113,10 +113,10 @@ final all-tier validation.
 
 ## The installer (px84, R-px84-6)
 
-`mpx6-install`'s limit is tiered: **60 min** in `tier pr`, **110 min** in
-`tier full` and any partial run, **175 min** in `tier all`. The full tier
-adds a full-density install onto a sparse 500 GB target, and `tier all`
-adds one onto 4 TB. `install.json` keeps each run's phases, read from the
+`mpx6-install`'s limit is tiered: **60 min** in `tier pr`, **175 min** in
+`tier full` and any partial run, **250 min** in `tier all` (110 and 175
+until 2026-11-17). The full tier adds a full-density install onto a sparse
+500 GB target, and `tier all` adds one onto 4 TB. `install.json` keeps each run's phases, read from the
 job log's timestamps. A phase's floor is its peak over the runs. Seconds:
 
 | run | tier | units | inputs (yew alone) | smoke | faults | faults tail | full rows |
@@ -126,29 +126,50 @@ job log's timestamps. A phase's floor is its peak over the runs. Seconds:
 | 40532219747 | full | 20 | 502 (99) | 100 | 152 | 45 | 334 |
 | 40690748340 | all | 21 | 2541 (1450) | 128 | 199 | 58 | 412 |
 | 40634374652 | all | 15 | 2580 (1488) | 131 | 202 | 59 | 418 |
+| 44049539848 | all | 44 | 4562 (3070) | 252 | 356 | 87 | 802 |
+| 44049600813 | all | 41 | 3895 (2801) | 184 | 241 | 56 | 555 |
+| 44049663902 | all | 36 | 3597 (2501) | 183 | 234 | 55 | 557 |
+| 44049723593 | all | 35 | 3485 (2521) | 184 | 242 | 58 | 579 |
+| 44049783532 | all | 44 | 4868 (3388) | 256 | 361 | 88 | 831 |
+| 44050081887 | full | 40 | 3823 (2739) | 168 | 225 | 53 | 505 |
+| 44050086473 | full, cut at 110 min | 46 | 5220 (3715) | 241 | 338 | 82 | not reached |
+| 44050097152 | all | 39 | 3883 (2767) | 185 | 242 | 57 | 555 |
+| 44050101505 | all | 43 | 4153 (3024) | 189 | 250 | 59 | 574 |
+| 44050106417 | all | 39 | 4135 (2976) | 216 | 291 | 71 | 693 |
+| 44050111169 | all | 44 | 3792 (2674) | 183 | 241 | 57 | 565 |
+| 44050111188 | all | 52 | 4928 (3529) | 234 | 316 | 77 | 767 |
 
-The phases sum to 4057 s at their peaks. No runner has finished a big row
-yet. Each row is therefore its whole kasumi wall time scaled by 1.669, the
-larger runner/kasumi ratio of the same smoke installs in run 40817980461
-(I-install-yes-vdc: 43.80 s on the runner against 26.24 s on kasumi):
+The phases sum to 6808 s at their peaks. A big row's floor is its whole
+kasumi wall time scaled by 1.669, the larger runner/kasumi ratio of the
+same smoke installs in run 40817980461 (I-install-yes-vdc: 43.80 s on the
+runner against 26.24 s on kasumi), or its peak on the runner, whichever is
+larger. The runners have finished both since 2026-11-17:
 
-- 500 GB: 262 s on kasumi, 438 s scaled;
-- 4 TB: 1655 s on kasumi, 2763 s scaled.
+- 500 GB: 262 s on kasumi, 438 s scaled; 241 s to 449 s on the runner;
+- 4 TB: 1655 s on kasumi, 2763 s scaled; 1553 s to 3077 s on the runner.
+
+The all tier also runs the serial-less install, a step of its own: 79 s to
+122 s.
 
 | tier | measured sizing floor | allowance included | bound | margin above floor |
 |---|---:|---|---:|---:|
-| pr | 642 s | the one completed pr-tier job (run 40817751644) | 3600 s | 2958 s |
-| full | 4675 s | phases 4057 + 500 GB 438 + overhead 180 | 6600 s | 1925 s |
-| all | 7438 s | full 4675 + 4 TB 2763 | 10500 s | 3062 s |
+| pr | 909 s | the slowest completed pr-tier job (run 44049483790) | 3600 s | 2691 s |
+| full | 7437 s | phases 6808 + 500 GB 449 + overhead 180 | 10500 s | 3063 s |
+| all | 10636 s | full 7437 + 4 TB 3077 + serial-less 122 | 15000 s | 4364 s |
 
 At the old limits (60 and 120 minutes) the check fails for both full and
 all. The full tier misses even without the 500 GB row: its floor would
 still be 4237 s against 3600 s. The inputs phase is mostly building the
 installed tree's programs, and yew's build alone has ranged from 99 s to
 1701 s on the runner. That build, not px84's rows, is what pushed run
-40817980461 past 60 minutes before its full rows began. 175 minutes is
-below the 6-hour per-job ceiling. It holds one of the org's 20 slots for
-up to three hours in each trunk push and nightly run.
+40817980461 past 60 minutes before its full rows began. On 2026-11-17 it
+did the same to a full run (44050086473, cut at 110 minutes in its last
+guided installs, before the 500 GB row): yew alone took 3715 s there
+against 2739 s on another runner the same afternoon, at the same pin, and
+that runner's installs took 37 s against 24 s. The change under test added
+a 21 s build to the inputs phase and three rows. The same fourteen runs put the all tier at 169 minutes of its 175. 250 minutes
+is below the 6-hour per-job ceiling. It holds one of the org's 20 slots for
+up to four hours in each nightly run.
 
 ## mpx5-trace (px102)
 
