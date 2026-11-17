@@ -18,6 +18,10 @@
                                   after each session (output drained first)
      init_mount_run()             mount("tmpfs", "/run", "tmpfs",
                                   MS_NOSUID | MS_NODEV, "mode=755"), 165
+     init_uname()                 uname(2), 63, into the utsname kept here
+     init_uname_byte(i)           its release's byte i (i < 65): the boot's
+                                  login record names the kernel (px133's
+                                  record, user/auth/utmp.lu)
 
    Listed under `asm` in user/init/wolf.pkg; wolf has the link's `cc`
    assemble it ([abi.asm.link]). Written from the x86-64 psABI (the
@@ -25,8 +29,9 @@
    clobbered, the fourth argument in %r10), the syscall table's numbers,
    setsid(2), ioctl_tty(2) (TIOCSCTTY 0x540E, TIOCNOTTY 0x5422, TCGETS
    0x5401, TCSETSW 0x5403), termios(3) (the kernel's structure, 36 bytes,
-   as px13 measured it: notes/px13), wait4(2), kill(2) and mount(2). No
-   libc source; no kernel source. */
+   as px13 measured it: notes/px13), wait4(2), kill(2), mount(2) and
+   uname(2) (struct utsname: six fields of 65 bytes, the release the
+   third, as user/logd/raw.S reads it). No libc source; no kernel source. */
 
         .text
         .globl init_setsid
@@ -104,6 +109,23 @@ init_mount_run:
         ret
         .size init_mount_run, . - init_mount_run
 
+        .globl init_uname
+        .type init_uname, @function
+init_uname:
+        leaq    init_uts(%rip), %rdi
+        movl    $63, %eax
+        syscall
+        ret
+        .size init_uname, . - init_uname
+
+        .globl init_uname_byte
+        .type init_uname_byte, @function
+init_uname_byte:
+        leaq    init_uts(%rip), %rax
+        movzbl  130(%rax,%rdi), %eax
+        ret
+        .size init_uname_byte, . - init_uname_byte
+
         .section .rodata
 init_tmpfs:
         .asciz  "tmpfs"
@@ -118,5 +140,7 @@ init_tc:
         .zero   64
 init_st:
         .zero   8
+init_uts:
+        .zero   390
 
         .section .note.GNU-stack,"",@progbits
