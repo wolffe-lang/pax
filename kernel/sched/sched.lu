@@ -405,6 +405,10 @@ const NEVER: u64 = 0xffffffffffffffff
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
+// px159: an urgent thread keeps the processor from other urgent threads for
+// this much of its run at most (`shielded`), then is preempted as any thread
+// is: a thread a pipe woke may go on to compute for a quantum.
+const URGENT_RUN_NS: u64 = 1000000
 
 /// The `prog` an ELF process carries (px10): past every kernel/user
 /// blob's number + 1.
@@ -689,11 +693,27 @@ fn wake_urgent(s: u64) {
 
 /// px131: the queue's head is a thread a device's work woke and `c`, the
 /// running thread, is not one (`kick` and `preempt` switch to it at once).
+/// px159: or `c` is one that has run past its shield (`shielded`).
 fn urgent_waits(c: u64) -> bool {
     let h = sv(S_HEAD) // #598
-    h != 0 && mask_has(B_URGENT, h - 1) && !mask_has(B_URGENT, c) && !starved() // px131e
+    h != 0 && mask_has(B_URGENT, h - 1) && !(mask_has(B_URGENT, c) && shielded()) && !starved() // px131e
 }
 
+/// px159: the running thread, urgent, has run less than URGENT_RUN_NS since
+/// it was switched in (px88's TSC at the switch, `S_IN_TSC`); before the
+/// TSC's rate is known, while the tick it started in lasts. Since a pipe's,
+/// a socket's and a pty's readers are woken urgent (`wake_obj`), a thread
+/// that then computes (a language server woken by an edit) would otherwise
+/// hold off a key's reader for its whole quantum.
+fn shielded() -> bool {
+    let m = sv(S_MULT)
+    if m == 0 {
+        return timer.ticks() == sv(S_SLICE)
+    }
+    let t = tsc()
+    let at = sv(S_IN_TSC)
+    t <= at || t - at < (URGENT_RUN_NS << 24) / m
+}
 
 /// The queue's head (slot + 1), removed; 0 when it is empty.
 fn dequeue() -> u64 {
