@@ -19,15 +19,24 @@
 //!    installed PAX's /var is on ext2, and a reboot must void them.
 //! 3. `pax-boot-status record` when /bin/pax-boot-status is there, waited
 //!    for (px118, user/bootlog). Its failure is its own.
-//! 4. The boot's hooks (px112): each file of /etc/pax-boot.d in name order
+//! 4. The boot's login records (px133, user/auth/utmp.lu, which
+//!    tools/mkinit puts beside this file): /var/run/utmp emptied (an
+//!    installed system's /var is on the disk, and a reboot must leave no
+//!    session in it, as Linux's tmpfs /run does) and a BOOT_TIME record,
+//!    `reboot` on `~` with the kernel's release (uname(2)) and the time it
+//!    is written, in utmp and /var/log/wtmp. A session the previous boot
+//!    never closed (a power cut) is closed by it: `last` reads it as
+//!    `crash`. A system with no /var/run or /var/log keeps no record there;
+//!    a record that cannot be written is one line on the console.
+//! 5. The boot's hooks (px112): each file of /etc/pax-boot.d in name order
 //!    (a name starting `.` left out), standard input /dev/null, its output
 //!    on the console, the leader of a process group of its own, each
 //!    waited for at most 10 s; one still running then is named and left to
 //!    run. What they start stays in pid 1's session, which no console
 //!    session's end reaches (burrowd is neither restarted nor ended).
-//! 5. The console leaves pid 1's session (TIOCNOTTY): from here no key,
+//! 6. The console leaves pid 1's session (TIOCNOTTY): from here no key,
 //!    hangup or stop at the console reaches pid 1 or what the hooks left.
-//! 6. Then, for ever: the console's modes put back as the boot left them
+//! 7. Then, for ever: the console's modes put back as the boot left them
 //!    (TCSETSW of the termios read at the start), its owner root and its
 //!    mode 0600 again (kernel/files' boot record: /bin/login gives it to
 //!    the account), and the session's program (/bin/login, or the words
@@ -71,6 +80,8 @@ extern "c" fn init_status() -> int
 extern "c" fn init_tcsave(fd: int) -> int
 extern "c" fn init_tcrestore(fd: int) -> int
 extern "c" fn init_mount_run() -> int
+extern "c" fn init_uname() -> int
+extern "c" fn init_uname_byte(i: int) -> int
 
 const LOGIN: str = "/bin/login"
 const HOOK_DIR: str = "/etc/pax-boot.d"
@@ -131,6 +142,28 @@ fn mount_run() -> int {
     unsafe { init_mount_run() }
 }
 
+/// The kernel's release, uname(2)'s third field (init.S keeps the
+/// utsname), or "" when uname fails.
+fn kernel_release() -> str {
+    // # Safety: as above; the utsname is init.S's own.
+    let got = unsafe { init_uname() }
+    if got != 0 {
+        return ""
+    }
+    var b = List[byte]()
+    var i = 0
+    while i < 64 {
+        // # Safety: i < 64, inside the 65-byte release field.
+        let c = unsafe { init_uname_byte(i) }
+        if c == 0 {
+            break
+        }
+        (mut b).push(c as byte)
+        i += 1
+    }
+    str_from_utf8(b) else ""
+}
+
 fn main() -> int {
     let me = os_pid()
     if me != 1 {
@@ -145,6 +178,7 @@ fn main() -> int {
     run_dirs()
     boot_clean()
     boot_record()
+    boot_utmp()
     boot_hooks()
     let _dropped = ioctl(0, TIOCNOTTY, 0)
     var pause = 0
@@ -298,6 +332,15 @@ fn boot_record() {
         return
     }
     let _st = os_wait(child) else |_| -1
+}
+
+/// px133: utmp emptied and the boot's record in utmp and wtmp
+/// (user/auth/utmp.lu's `ut_boot`), the kernel's release from uname(2).
+/// A failure is one line on the console.
+fn boot_utmp() {
+    if !ut_boot(time_unix_ms() / 1000, kernel_release()) {
+        print("init: the boot's record could not be written to {UTMP_PATH} and {WTMP_PATH}")
+    }
 }
 
 /// The boot's hooks: each file of /etc/pax-boot.d in name order, in a
