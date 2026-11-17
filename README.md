@@ -236,7 +236,7 @@ first program it prints how long its boot took and how much of that the console 
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
 | ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `8594073c` |
-| warren | the terminal multiplexer in wolf, `/usr/bin/warren` of the dev image: `warren` attaches to the default session, starting it; behind Ctrl-Space, `\|` and `-` split, `h j k l` move the focus, `d` detaches; `warren attach -t NAME` comes back | `user/warren.pin`, `9ef76d73` |
+| warren | the terminal multiplexer in wolf, `/usr/bin/warren` of the dev image: `warren` attaches to the default session, starting it; behind Ctrl-Space, `\|` and `-` split, `h j k l` move the focus, `d` detaches; `warren attach -t NAME` comes back | `user/warren.pin`, `c927b979` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
 
 `tools/mkpxg OUTDIR` builds the package manager from `user/pxg.pin` using its source tree's own toolchain,
