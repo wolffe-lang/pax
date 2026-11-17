@@ -2492,3 +2492,24 @@ No init's, getty's, login's, systemd's or any kernel's source was read, and no C
   mode), `kernel/procfs` (`/proc/PID/stat`), `kernel/kmain_console.lu` (the run list, init's end),
   `user/termwolf/tio.S` and `user/install/raw.S` (the membrane's shape), and the wolf runtime's `os_fork` (the
   org's own, wolf-lang's `crates/wolf_rt/src/fork.rs`: the child's table, why a raw fork would be unsound).
+
+## px156 — pid 1 reaps what it is handed, runs the boot's duties once, and records a logout (pax#352)
+
+No init's, login's, util-linux's or any kernel's source was read, and no C library's or shell's. What was:
+
+- **utmp(5)** (man-pages 6.7): `DEAD_PROCESS`, and init's part in it (when init finds that a process has ended, it
+  finds its utmp entry by `ut_pid` and marks it `DEAD_PROCESS`), for init's record of a console session's end;
+  `BOOT_TIME` for the boot's record, which moved from login to init unchanged.
+- **uname(2)** (`struct utsname`: the release the third of six 65-byte fields), for `user/init/init.S`, read as
+  `user/logd/raw.S` reads it.
+- **fork(2)**, **setsid(2)**, **pipe(2)**, **open(2)**, **read(2)**, **clock_gettime(2)** (`CLOCK_MONOTONIC`),
+  **wait4(2)** and **proc_pid_stat(5)** (`state`, field 3; `ppid`, field 4; `session`, field 6; `starttime`, field
+  22), for `user/elf/orphan.c` and rows I14 and I15: a zombie is `Z`, an ended and reaped process has no
+  `/proc/PID`.
+- **login(1)** and **init(8)** (Ubuntu 24.04's manual pages): a login started again in its session is not a new
+  boot.
+- PAX's own `user/init`, `user/login/login.lu`, `user/auth/utmp.lu` (`ut_boot`, `ut_logout`, `ut_read`),
+  `user/last/last.lu` (`-e`, `--time-format iso`), `user/logd/raw.S` (uname's shape), `tests/mpx6-logs` and
+  `tests/mpx5-burrowd.d/rows.py` (the trees' installed shape).
+- Black-box: the shell as pid 1 on a trunk image, which leaves an orphan that ended as a zombie whose parent is 1,
+  and runs the hooks, `pax-boot-status record` and sudo's emptying again at `exec /bin/login` (the rows' red take).
