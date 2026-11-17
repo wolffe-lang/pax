@@ -7,6 +7,21 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **What PAX can do for a terminal multiplexer, measured (px125).** A new suite,
+  `tests/mpx7-mux`, asks PAX every question a multiplexer's server and client
+  ask of their system, row by row against Ubuntu 24.04 running the same
+  static programs: 32 ptys in one epoll loop, a 50 MB flood with every byte
+  in order and the other panes answering within a tick, back-pressure,
+  SIGWINCH through a pty inside a pty, the signal keys, a daemon that
+  outlives its starter, Unix sockets (mode, owner, 16 clients, peer
+  credentials, a stale file), non-blocking I/O and the loop's timers, termios
+  raw and back, the same work through wolf-std alone, and on the console what
+  a client draws, asks and types (Ctrl-Space as NUL and the box-drawing,
+  arrow and powerline glyphs, which pax#461 fixed). The gaps are issues: the
+  64 thread slots, a Unix stream's 4096 bytes, the loop calls PAX lacks
+  (sendmsg/recvmsg, timerfd, signalfd, ppoll), the console's subset, and two
+  wolf-std calls: `notes/px125-multiplexer-readiness.md`.
+
 - **The kernel's log kept across reboots, and who logged in (px133).** `logd`, started at boot, appends every
   record of `/dev/kmsg` to `/var/log/kern.log` (root's): wall time, time since boot, level, sequence number and
   text, a line naming each boot and saying when the previous one ended without its end line, records the
