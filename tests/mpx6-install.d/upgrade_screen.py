@@ -41,23 +41,30 @@ def scope_after_echo(flat, cmd, prior):
 
 
 class Baseline:
-    """The echoes of a command already on the screen when it is typed; follows them off a scrolled screen.
+    """The echoes of a command already on the screen when it is typed, and whether its own echo has been seen.
 
-    Once the new echo has been seen it stays seen: output longer than the screen scrolls the echo off the
-    top, and everything left on the screen is then after it (pax#457, a whole upgrade's output)."""
+    Typing puts the new echo at the foot of the screen: `armed` is called with the screen after the line is
+    typed and before Enter, so the new echo is known to be the last one. From then on the scope is the
+    newest echo on the screen, whatever scrolls off above it (an older echo scrolls off first), and the
+    whole screen once the newest scrolls off too (everything left is after it). A screen read without
+    `armed` falls back to counting: a further echo beyond the earlier ones opens the scope.
+    (pax#457: U8-mistyped's earlier refusal came into scope when an old echo scrolled off.)"""
 
     def __init__(self, cmd, prior):
         self.cmd = cmd
         self.prior = prior
         self.seen = False
 
+    def armed(self, flat):
+        if echo_count(flat, self.cmd) > self.prior:
+            self.seen = True
+
     def scope(self, flat):
         n = echo_count(flat, self.cmd)
-        if n > self.prior:
+        if not self.seen and n > self.prior:
             self.seen = True
-            return scope_after_echo(flat, self.cmd, self.prior)
         if self.seen:
-            return flat
+            return scope_after_echo(flat, self.cmd, 0) if n else flat
         if n < self.prior:
             self.prior = n
         return None
