@@ -171,6 +171,27 @@ a 21 s build to the inputs phase and three rows. The same fourteen runs put the 
 is below the 6-hour per-job ceiling. It holds one of the org's 20 slots for
 up to four hours in each nightly run.
 
+## mpx5-jobs (pax#467's follow-up, 2026-11-17)
+
+`timeout-minutes: 165`, every tier (120 until 2026-11-17). There is no
+phase data for this job, so it is sized from its wall time: `jobs.json`
+keeps each run's seconds, from GitHub's job timestamps, over the chain's
+runs after pax#443 and the five nightlies before it. A tier's floor is its
+peak over its successful runs:
+
+| tier | runs | wall time | floor | bound | margin above floor |
+|---|---:|---|---:|---:|---:|
+| pr | 2 | 1520 s to 1714 s | 1714 s | 9900 s | 8186 s |
+| full | 1 | 2287 s | 2287 s | 9900 s | 7613 s |
+| all | 16 | 5280 s to 7013 s | 7013 s | 9900 s | 2887 s |
+
+The all tier is what needs the change: the nightly of 2026-11-13
+(43443284130) took 7013 s of the old 7200, and the chain's runs took up to
+6718 s. 165 minutes is 7013 s plus 40%, rounded up to five minutes. A
+plain limit is every tier's, so a stuck pr or full job holds its runner
+longer than its own floor needs; the floors are kept per tier so that a
+tiered limit can follow when either has more runs.
+
 ## mpx5-trace (px102)
 
 Not a long job: `timeout-minutes: 60`. An estimate, not a runner
