@@ -13,6 +13,9 @@
   S6  the QMP socket appearing late (a loaded host) is waited for.
   S7  a socket that never appears is a named timeout, not a FileNotFoundError from connect.
   S8  QEMU dying before its socket is its own named failure, with the exit status.
+  S10 the new echo scrolled off the top by a long output (green4's U-var-log: the upgrade printed more than a
+      screen): once its echo was seen, what is on the screen is all after it, so the line `Upgrade complete`
+      is still read. Losing the scope there hung the wait for 3600 s on an empty screen.
   S9  upgrade.py uses these helpers: no fixed `'$ ' +` marker, the QMP wait is the bounded one, and U2's
       state creates /var/log first.
 """
@@ -70,6 +73,16 @@ got = base.scope('root@? ~# ' + CMD + '\nrefused\nroot@? ~# ' + CMD + '\n')
 need(got is not None and got.count(CMD) == 1, 'S5', f'the new echo not found after the scroll: {got!r}')
 print('PASS S5: the baseline follows a scroll')
 
+
+# S10: green4. The echo is seen, then the output scrolls it off.
+base = us.Baseline(CMD, 0)
+need(base.scope('root@? ~# ' + CMD + '\nUPGRADE /dev/sdc x\n') is not None, 'S10', 'the echo was not seen')
+tail = 'phase root: durable\nUpgrade complete: /dev/sdc holds abc\npax-install> '
+got = base.scope(tail)
+need(got is not None and 'Upgrade complete' in got, 'S10', f'a scrolled-off echo lost the scope: {got!r}')
+fresh = us.Baseline(CMD, 0)
+need(fresh.scope(tail) is None, 'S10', 'a screen that never showed the echo was in scope')
+print('PASS S10: a scrolled-off echo keeps the scope; a never-seen echo has none')
 
 # S6-S8
 class Alive:
