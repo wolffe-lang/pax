@@ -191,16 +191,17 @@ answer, `b`). That is console_codes(4)'s Linux console, which lists them as not 
 **B7, the repaint.** `muxprobe paint` on the console, under KVM: 100 full screens in each of three forms, each
 screen one `write`: "cells" a cursor motion before every cell, "runs" one motion a row and then the row's
 characters, "coloured" an SGR colour before every cell. Then 1000 writes of one cell each. The probe's own line
-(`paint: C x R, ...`) records the grid and the times it read; row M6 holds that the 860's mode (2560 x 1440) gives a
-256 x 90 grid and that the repaint finishes, and holds no time.
+(`paint: C x R, ...`) records the grid and the times it read; row M6 holds that the framebuffer is the 860's mode (2560 x 1440), that the probe printed its line and that the
+repaint finished with init ended and the machine halted, and holds no time (a 2-CPU KVM take at trunk printed a
+320 x 90 grid).
 
 The times this lane first read (about 10 ms a full screen at both 1280 x 800 and 2560 x 1440, a cell about 50
 microseconds) are not a cost. They were read from PAX's `CLOCK_MONOTONIC`, which lost time in the tests: a console
 write runs with interrupts off and the ticks that fall inside it are lost (the tick clock kept 35 % of the time the
-tests took at trunk under KVM). The 10 ms was a tick, and the true cost at 256 x 90 was about the same only by
+tests took at trunk under KVM). The 10 ms was a tick, and the true cost at the 2560 x 1440 grid was about the same only by
 coincidence; `notes/px129-console-speed.md` (the clock, and the drawing's cost per cell) corrects this claim, and
-`tests/mpx3-conspeed` is the suite that measures what the console costs to draw. The grid is at most 256 columns
-(`kernel/screen`), so a 2560-pixel display shows 256 columns and leaves the right 512 pixels blank.
+`tests/mpx3-conspeed` is the suite that measures what the console costs to draw. The grid was at most 256 columns when this lane measured (`kernel/screen`), which left the right 512 pixels of a
+2560-pixel display blank; px129 raised the limit to 320 columns, which fills it.
 
 **B8, through burrow's `ssh -t`.** Not measured in this lane (R-px125-6). What is known: PAX's pty carries every
 byte value in raw mode (A1.5's stream is every byte value, checked in order), and px123's rows hold the size, a
