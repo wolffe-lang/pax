@@ -1512,6 +1512,7 @@ fn pipe_recv(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64) -> u64 {
         if flags & MSG_DONTWAIT != 0 || status(a, fd) & O_NONBLOCK != 0 {
             return neg(EAGAIN)
         }
+        sched.wait_key(sched.KEY_BUF, p) // px159: it waits for this buffer's bytes
         return WAIT
     }
     if ppw(p, P_MSG) != 0 {
@@ -1533,7 +1534,7 @@ fn pipe_recv(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, flags: u64) -> u64 {
     }
     if flags & MSG_PEEK == 0 {
         took(p, k)
-        sched.wake_pipes()
+        sched.wake_obj(sched.KEY_BUF, p) // px159: room for this buffer's writers
     }
     k
 }
@@ -1583,7 +1584,7 @@ fn msg_read(p: u64, pml4: u64, buf: u64, n: u64, flags: u64) -> u64 {
     }
     if flags & MSG_PEEK == 0 {
         took(p, 8 + m)
-        sched.wake_pipes()
+        sched.wake_obj(sched.KEY_BUF, p) // px159
     }
     if flags & MSG_TRUNC != 0 { m } else { k }
 }
@@ -1618,7 +1619,7 @@ fn msg_put(p: u64, pml4: u64, buf: u64, iov: u64, cnt: u64, m: u64) {
         }
     }
     put_ppw(p, P_WR, at + 8 + m)
-    sched.wake_pipes()
+    sched.wake_obj(sched.KEY_BUF, p) // px159: a message for this buffer's readers
 }
 
 /// px34: `n` bytes from user `src` into buffer `p` from byte `at` on.
@@ -1648,6 +1649,7 @@ pub fn msg_writev(a: u64, pml4: u64, fd: u64, iov: u64, cnt: u64, m: u64) -> u64
         if status(a, fd) & O_NONBLOCK != 0 {
             return neg(EAGAIN)
         }
+        sched.wait_key(sched.KEY_BUF, p) // px159: it waits for this buffer's room
         return WAIT
     }
     msg_put(p, pml4, 0, iov, cnt, m)
@@ -1674,6 +1676,16 @@ pub fn pipe_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool) 
 /// has applied it to the sum (`pipe_room`).
 pub fn pipe_write_part(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     pipe_put(a, pml4, fd, buf, n, false, false)
+}
+
+/// px159: the call waits for room in the buffer descriptor `fd` writes to
+/// (kernel/user's `writev` of a sum that must go whole): kernel/sched's
+/// `wait_key` of that buffer.
+pub fn wait_room(a: u64, fd: u64) {
+    if kind(a, fd) == K_UNIX && unix.state(rf(node_of(a, fd))) != unix.CONN {
+        return
+    }
+    sched.wait_key(sched.KEY_BUF, tx_of(a, fd))
 }
 
 /// px24: the room in the buffer descriptor `fd` writes to (a pipe's, a
@@ -1723,6 +1735,7 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
             if nonblock || status(a, fd) & O_NONBLOCK != 0 {
                 return neg(EAGAIN)
             }
+            sched.wait_key(sched.KEY_BUF, p) // px159
             return WAIT
         }
         msg_put(p, pml4, buf, 0, 0, n)
@@ -1752,6 +1765,7 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
             return if done > 0 { done } else { neg(EAGAIN) }
         }
         sched.set_self_done(done)
+        sched.wait_key(sched.KEY_BUF, p) // px159: it waits for this buffer's room
         return WAIT
     }
     let k = if rest < space { rest } else { space }
@@ -1763,12 +1777,13 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
         c += m
     }
     put_ppw(p, P_WR, ppw(p, P_WR) + k)
-    sched.wake_pipes()
+    sched.wake_obj(sched.KEY_BUF, p) // px159: bytes for this buffer's readers
     if done + k == n || nb {
         sched.set_self_done(0)
         return done + k
     }
     sched.set_self_done(done + k)
+    sched.wait_key(sched.KEY_BUF, p) // px159: the rest waits for its room
     WAIT
 }
 
@@ -2352,13 +2367,14 @@ fn event_read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         if status(a, fd) & O_NONBLOCK != 0 {
             return neg(EAGAIN)
         }
+        sched.wait_key(sched.KEY_EVT, v) // px159: it waits for this counter
         return WAIT
     }
     if !uaccess.writable(pml4, buf, 8) {
         return neg(EFAULT)
     }
     uaccess.put(pml4, buf, event.ev_take(v), 8)
-    sched.wake_pipes()
+    sched.wake_obj(sched.KEY_EVT, v) // px159: room for this counter's writers
     8
 }
 
@@ -2607,13 +2623,15 @@ pub fn event_write(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
     if x == 0xffffffffffffffff {
         return neg(EINVAL)
     }
-    if !event.ev_add(rf(node_of(a, fd)), x) {
+    let v = rf(node_of(a, fd))
+    if !event.ev_add(v, x) {
         if status(a, fd) & O_NONBLOCK != 0 {
             return neg(EAGAIN)
         }
+        sched.wait_key(sched.KEY_EVT, v) // px159: it waits for this counter's room
         return WAIT
     }
-    sched.wake_pipes()
+    sched.wake_obj(sched.KEY_EVT, v) // px159: a count for this counter's readers
     8
 }
 
@@ -2671,6 +2689,37 @@ fn pipe_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
     (m, gin, gout)
 }
 
+/// px159: what a call that asks `node_poll` of the thing of kind `k` at
+/// node `n` (`poll`, `epoll_wait`) waits on, named to kernel/sched
+/// (`wait_key`): a pipe's or a socket's buffers, a pty, the console's
+/// input, an eventfd's counter, each woken alone when it changes; anything
+/// else (`wait_other`) is woken by every change, as before.
+fn wait_on(k: u64, n: u64) {
+    if k == K_PIPE {
+        sched.wait_key(sched.KEY_BUF, rf(n))
+    } else if k == K_SOCK {
+        sched.wait_key(sched.KEY_BUF, (rf(n) >> 16) & 0xffff)
+        sched.wait_key(sched.KEY_BUF, rf(n) & 0xffff)
+    } else if k == K_UNIX && unix.state(rf(n)) == unix.CONN {
+        let rx = unix.buf(rf(n), 0)
+        let tx = unix.buf(rf(n), 1)
+        if rx != unix.NONE_BUF {
+            sched.wait_key(sched.KEY_BUF, rx)
+        }
+        if tx != unix.NONE_BUF {
+            sched.wait_key(sched.KEY_BUF, tx)
+        }
+    } else if k == K_EVENT {
+        sched.wait_key(sched.KEY_EVT, rf(n))
+    } else if k == K_CONSOLE {
+        sched.wait_key(sched.KEY_CON, 0)
+    } else if k == K_PTM || k == K_PTS {
+        sched.wait_key(sched.KEY_PTY, pts_no(n))
+    } else {
+        sched.wait_other()
+    }
+}
+
 /// What `poll` says now of the thing of kind `k` at node `n`, opened
 /// with access `acc`: its bits — POLLIN, POLLOUT, POLLERR, POLLHUP,
 /// POLLRDHUP, whether or not the caller asks for each — and two counts
@@ -2679,6 +2728,7 @@ fn pipe_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
 /// back. A file, a directory and `/dev/null` can always be read and
 /// written; the console can be read when a `read` would answer.
 fn node_poll(k: u64, n: u64, acc: u64) -> (u64, u64, u64) {
+    wait_on(k, n)
     if k == K_PIPE || k == K_SOCK {
         return pipe_poll(k, n, acc)
     }
@@ -5209,6 +5259,7 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         let (r, u) = console.read(console.CON, pml4, buf, n, status(a, fd) & O_NONBLOCK != 0, sched.self_until())
         sched.set_self_until(u)
         if r == console.TIMED {
+            sched.wait_key(sched.KEY_CON, 0) // px159: it waits for a key (`wake_input`)
             return WAIT
         }
         return r
@@ -5229,6 +5280,7 @@ pub fn read(a: u64, pml4: u64, fd: u64, buf: u64, n: u64) -> u64 {
         let (r, u) = console.read(t, pml4, buf, n, status(a, fd) & O_NONBLOCK != 0, sched.self_until())
         sched.set_self_until(u)
         if r == console.TIMED || r == console.RESTART {
+            sched.wait_key(sched.KEY_PTY, pn) // px159: it waits for this pty's input
             return WAIT
         }
         if r != 0 && r < 0x8000000000000000 {
