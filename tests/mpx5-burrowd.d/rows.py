@@ -197,8 +197,13 @@ def run(argv, env=None, data=b'', timeout=300, check=True):
     return r
 
 
-# pax#467: the seconds tools/mkinitramfs may take to pack an image's tree.
-MKINITRAMFS_BOUND = 300
+# pax#467: the seconds tools/mkinitramfs may take to pack an image's tree. The image is about
+# 355 MB in 327 entries, and the tool copies the archive built so far at every entry: about 280 GB
+# copied in all, so its time is the host's memory bandwidth. Hosted runners took 257 s and 281 s
+# from a leg's start to its first row, most of it this build, and once ran past the old bound of
+# 300 s. 1,200 s is four times the slowest build seen to finish, rounded up; the `image:` line
+# shows each run's time against it.
+MKINITRAMFS_BOUND = 1200
 
 
 def initramfs(cpio, files, row, mk=None, bound=None):
