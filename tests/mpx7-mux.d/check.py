@@ -4,6 +4,7 @@ multiplexer probe (user/elf/muxprobe.c) to Ubuntu's, row by row.
 
     check.py LINUX.txt RULED.txt PAX.txt     every row; exit 1 on any FAIL
     check.py --refusals RULED.txt            the `refused:` lines ruled, sorted
+    check.py --refusals-match RULED.txt      the lines on stdin are the ruled ones (exit 1 if not)
     check.py --selftest
 
 A row's id is its first word (`A1.4`, `A6.2`), and `#2`, `#3`, ... after
@@ -16,6 +17,8 @@ expected on PAX exactly, unless RULED.txt names PAX's own line for it:
     row ID <TAB> PAX'S LINE           the line PAX prints instead (a gap, named)
     row ID <TAB> -                    a row PAX does not print
     refusal <TAB> refused: ...        a refusal the kernel names, once a run
+    refusal-min N <TAB> refused: ...  a refusal at least N times, more as the machine's timing gives
+                                      (a shell of the probe's own that finds no thread slot free)
     bound ID NAME OP NUMBER           the `~ID` line's number after NAME
                                       (`max 250`: the first integer that
                                       follows the word NAME) holds OP
@@ -52,7 +55,8 @@ def measures(lines):
     return out
 
 
-def ruled(path):
+def ruled(path, mins=None):
+    mins = {} if mins is None else mins
     sub, refusals, bounds = {}, [], []
     for raw in open(path, encoding="utf-8", errors="replace"):
         ln = raw.rstrip("\n")
@@ -64,6 +68,8 @@ def ruled(path):
             sub[w[1]] = None if text == "-" else text
         elif w[0] == "refusal" and len(w) == 1:
             refusals.append(text)
+        elif w[0] == "refusal-min" and len(w) == 2 and w[1].isdigit():
+            mins[text] = int(w[1])
         elif w[0] == "bound" and len(w) == 5 and w[3] in ("<=", ">=", "=="):
             bounds.append((w[1], w[2], w[3], int(w[4])))
         else:
@@ -124,6 +130,19 @@ def read(path):
     return open(path, encoding="utf-8", errors="replace").read().split("\n")
 
 
+def refusals_match(refusals, mins, have):
+    """have: the `refused:` lines a run made. Each exact `refusal` line once, each `refusal-min`
+    line at least its N times, nothing else."""
+    from collections import Counter
+    got = Counter(x for x in have if x)
+    want = Counter(refusals)
+    for text, n in mins.items():
+        if got[text] < n:
+            return False
+        want[text] = got[text]
+    return got == want
+
+
 def selftest():
     import os
     import tempfile
@@ -150,7 +169,14 @@ def selftest():
     assert b == 1 and any(x.startswith("FAIL bound A1.6 max <= 250: none") for x in o), o
     _, r, _ = ruled(rl)
     assert r == ["refused: x, -22"], r
-    print("check.py selftest: 7 cases held")
+    mins = {}
+    _, r, _ = ruled(rl, mins)
+    assert refusals_match(r, mins, ["refused: x, -22"]) and not refusals_match(r, mins, [])
+    assert not refusals_match(r, mins, ["refused: x, -22", "refused: y, -1"])
+    mins = {"refused: s, -11": 2}
+    assert refusals_match([], mins, ["refused: s, -11"] * 2) and refusals_match([], mins, ["refused: s, -11"] * 4)
+    assert not refusals_match([], mins, ["refused: s, -11"])
+    print("check.py selftest: 12 cases held")
     return 0
 
 
@@ -162,6 +188,10 @@ def main(argv):
         if refusals:
             print("\n".join(sorted(refusals)))
         return 0
+    if len(argv) == 3 and argv[1] == "--refusals-match":
+        mins = {}
+        _, refusals, _ = ruled(argv[2], mins)
+        return 0 if refusals_match(refusals, mins, sys.stdin.read().split("\n")) else 1
     if len(argv) != 4:
         sys.stderr.write(__doc__)
         return 2
