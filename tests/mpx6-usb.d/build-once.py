@@ -38,12 +38,14 @@ elif name=='qemu-run':
     sys.exit(33)
 '''
     for name in ('build-kernel','mkimage','mkinitramfs','fetch-limine','qemu-run','usb-session','mouse-session',
-                 'hotplug-session'):
+                 'hotplug-session','refusal-session'):
         p=tree/'tools'/name; p.write_text(helper); p.chmod(0o755)
     # px109: the mouse judge's selftest runs before each mouse session;
     # px120: the hot-plug judge's before each hot-plug session.
     for name in ('mouse-judge-selftest','hotplug-judge-selftest'):
         p=tree/'tests/mpx6-usb.d'/name; p.write_text(helper); p.chmod(0o755)
+    (tree/'tests/mpx6-usb.d/quiet-refusal').write_text(
+        '#!/bin/sh\nexec "$(dirname "$0")/../../tools/refusal-session" "$@"\n')
     # The C compiler is a fixture too: no executable under test is produced.
     (tree/'tools/cc').write_text('#!/bin/sh\nexit 0\n'); (tree/'tools/cc').chmod(0o755)
     calls=tree/'calls.jsonl'
@@ -76,7 +78,14 @@ elif name=='qemu-run':
         f'hot-plug sessions {dict(hot)}, expected one a tier and firmware'
     assert all(Path(a[a.index('--image')+1]).name=='hotplug.iso' for n,a in records if n=='hotplug-session'), 'hot-plug session image'
     assert sum(n=='hotplug-judge-selftest' for n,a in records)==4, 'the hot-plug judge selftest was dropped'
-    print('PASS USB build-once: four builds, four invariant boots, twelve keyboard, four mouse and four hot-plug sessions')
+    refusal=collections.Counter((a[a.index('--tier')+1],a[a.index('--firmware')+1])
+        for n,a in records if n=='refusal-session')
+    assert refusal==collections.Counter({(t,f):1 for t in ('native','release') for f in ('bios','uefi')}), \
+        f'refusal sessions {dict(refusal)}, expected one a tier and firmware'
+    assert all(Path(a[a.index('--kernel')+1]).name=='kmain_console.elf' and
+        Path(a[a.index('--kernel')+1]).parent.name==a[a.index('--tier')+1]
+        for n,a in records if n=='refusal-session'), 'refusal session must reuse the matching kernel'
+    print('PASS USB build-once: four builds, four invariant boots, twelve keyboard, four mouse, four hot-plug and four refusal sessions')
     bundle=tree/'build/mpx6-usb/native'
     (bundle/'invariants/tier.txt').write_text('release\n')
     result=subprocess.run([str(tree/'tests/mpx6-usb'),'--tier','native','--firmware','uefi','--images',str(bundle)],
