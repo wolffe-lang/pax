@@ -43,19 +43,26 @@ def tier_bound(job, tier):
 def install_floors():
     """px84 (R-px84-6): mpx6-install, per tier. Each phase's floor is its
     peak over the recorded runs; a cancelled run's unreached phases are
-    absent, never zero, so it raises a floor only where it got to. The big
-    rows have no runner observation yet: each is its kasumi wall time scaled
-    by the larger runner/kasumi ratio of the same smoke installs."""
+    absent, never zero, so it raises a floor only where it got to. A big row
+    is its kasumi wall time scaled by the larger runner/kasumi ratio of the
+    same smoke installs, or its peak on the runner where runs have finished
+    it (pax#467's chain, 2026-11-17), whichever is larger. The all tier also
+    runs the serial-less install, a step of its own: its peak too."""
     d = json.loads((DATA / 'install.json').read_text())
     names = ['units', 'inputs', 'smoke', 'faults', 'faults_tail', 'full_rows']
     peak = {n: max(r['phases'][n] for r in d['ci'] if n in r['phases']) for n in names}
     ratio = max(x['ci'] / x['kasumi'] for x in d['ratio'])
-    big = {k: -(-v['kasumi_seconds'] * ratio // 1) for k, v in d['big'].items()}
-    full = sum(peak.values()) + int(big['500gb']) + 180
-    every = full + int(big['4tb'])
+    scaled = {k: int(-(-v['kasumi_seconds'] * ratio // 1)) for k, v in d['big'].items()}
+    seen = {k: max([r['phases']['big_' + k] for r in d['ci'] if 'big_' + k in r['phases']], default=0) for k in scaled}
+    big = {k: max(scaled[k], seen[k]) for k in scaled}
+    noserial = max([r['phases']['noserial'] for r in d['ci'] if 'noserial' in r['phases']], default=0)
+    full = sum(peak.values()) + big['500gb'] + 180
+    every = full + big['4tb'] + noserial
     pr = max(r['seconds'] for r in d['pr'] if r['conclusion'] == 'success')
-    print('mpx6-install: phase peaks %s (sum %ds), runner/kasumi %.3f, 500 GB %ds, 4 TB %ds, setup/artifacts=180s' %
-          (' '.join('%s=%d' % kv for kv in peak.items()), sum(peak.values()), ratio, big['500gb'], big['4tb']))
+    print('mpx6-install: phase peaks %s (sum %ds), runner/kasumi %.3f, 500 GB %ds (scaled %ds, runner peak %ds), '
+          '4 TB %ds (scaled %ds, runner peak %ds), serial-less %ds, setup/artifacts=180s' %
+          (' '.join('%s=%d' % kv for kv in peak.items()), sum(peak.values()), ratio, big['500gb'], scaled['500gb'],
+           seen['500gb'], big['4tb'], scaled['4tb'], seen['4tb'], noserial))
     return {'pr': pr, 'full': full, 'all': every}
 
 
@@ -176,8 +183,10 @@ for job, floor in floors.items():
 for tier, floor in install_floors().items():
     seconds = tier_bound('mpx6-install', tier)
     ok = seconds * 10 >= floor * 14
-    print('%s CI budget mpx6-install (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
-          ('PASS' if ok else 'FAIL', tier, seconds, floor, seconds - floor))
+    # one word names the row (budget/mpx6-install/<tier>), as yew's are, so a plant's record can be
+    # held to it by name
+    print('%s budget/mpx6-install/%s CI budget mpx6-install (tier %s): bound=%ds sizing-floor=%ds margin=%ds' %
+          ('PASS' if ok else 'FAIL', tier, tier, seconds, floor, seconds - floor))
     failed |= not ok
 # px113 (pax#305): yew's two jobs, each tier against its floor.
 for job in ('mpx5-yew', 'mpx5-screen'):
