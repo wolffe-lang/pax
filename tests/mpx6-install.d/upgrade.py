@@ -325,10 +325,16 @@ class Machine:
         """Remember the line about to be typed and how many echoes of it the screen already holds."""
         self.since = us.Baseline(line, us.echo_count(self.unwrapped(self.screen()), line))
 
+    def arm(self):
+        """The line is typed and Enter not yet pressed: its echo is the screen's last, whatever scrolls later."""
+        self.since.armed(self.unwrapped(self.screen()))
+
     def run(self, cmd):
         """Type a command whose output the next waits read alone."""
         self.mark(cmd)
-        self.type(cmd + '\n')
+        self.type(cmd)
+        self.arm()
+        self.type('\n')
 
     def screen(self):
         self.q.call('stop')
@@ -421,7 +427,9 @@ class Machine:
 
     def command(self, line, row, timeout=300):
         self.mark(line)
-        self.type(line + '\n')
+        self.type(line)
+        self.arm()
+        self.type('\n')
         time.sleep(.5)
         return self.wait(PROMPT, row, timeout, last=True)
 
@@ -432,6 +440,7 @@ class Machine:
         self.mark(line)
         self.type(line)
         time.sleep(.3)
+        self.arm()
         shown = [l for l in self.unwrapped(self.screen()).split('\n') if l.strip()]
         if not shown or not shown[-1].rstrip().endswith(line):
             fail(row, f'keys dropped before Enter: typed {line!r}, the screen shows {shown[-1:]!r}')
