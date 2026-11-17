@@ -1,0 +1,19 @@
+# notes/px125/rig/gauntlet.manifest — px125's green take at the final head (take.sh, the recorder's
+# steps mode with --keep-going and --preflight): the planner's test; tests/mpx7-mux built on both
+# tiers, its Linux side held to the committed references, and booted on every leg under KVM; the
+# console's suites the two fixes reach: the screen pixel for pixel (mpx3-screen) and the VT's rows
+# (mpx5-screen) on both firmwares, the typed sessions (mpx3-console) and the games' glyphs
+# (mpx6-games) on native BIOS.
+floor 35
+rig lib.sh committed=../../..:HEAD:notes/px125/rig/lib.sh
+rig engine.sh committed=../../..:HEAD:notes/px125/rig/engine.sh
+rig gauntlet.manifest committed=../../..:HEAD:notes/px125/rig/gauntlet.manifest
+step ci-plan image=localhost/px75-ubuntu:2 tools=python3 script=step.sh -- ci-plan
+step build image=localhost/px75-ubuntu:2 tools=cc,clang,readelf,python3,git,curl script=step.sh -- build --tier both
+step linux needs=build tools=python3 script=step.sh -- linux
+step boot-native needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- boot --tier native --firmware both
+step boot-release needs=build image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3 script=step.sh -- boot --tier release --firmware both
+step screen image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf,git,curl script=step.sh -- screen --tier native --firmware both
+step vt image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf,git,curl script=step.sh -- vt --tier native --firmware both
+step console image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf,git,curl script=step.sh -- console --tier native --firmware bios
+step games image=localhost/px75-ubuntu:2 tools=qemu-system-x86_64,python3,cc,clang,readelf,git,curl script=step.sh -- games --tier native --firmware bios

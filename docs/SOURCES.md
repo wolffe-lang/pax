@@ -2040,16 +2040,6 @@ source; no kernel's, firmware's or driver's.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source; no DHCP, HTTP or TLS
   implementation's source; no Git source.
 
-## px127 — names from an on-box build (recvmsg on a datagram socket)
-
-- **recvmsg(2), udp(7), socket(7)** (the Linux man-pages project's text, as published): `struct msghdr`, the
-  value-result `msg_namelen`, `msg_controllen` and `msg_flags`' MSG_TRUNC, the iovec cap. What Linux answers in each
-  case was measured black box with `user/net/dgramopts.c`'s recvmsg rows, run on Linux; what musl's resolver asks of
-  the kernel, by strace of a program the dev image's own compiler built, on Linux (`notes/px127/probes.txt`). No C
-  library's source, no kernel's source.
-- **hosts(5)**: the workaround's line; measured black box on Linux and on PAX that both C libraries read the file
-  before DNS and make no socket for a name it holds.
-
 ## px104 — push from the console (burrow as ssh, the root set, the resolver's calls)
 
 - **ip(7), udp(7), sendmmsg(2), socket(7)** (the Linux man-pages project's text, as published): IP_RECVERR's
@@ -2322,11 +2312,10 @@ distribution ships it.
 | yew at `user/yew.pin`'s commit (the org's own, public): `src/term/input.lu` (`input_enable_blob`: `CSI ? 2004 h`, `CSI ? 1002 h`, `CSI ? 1006 h`, `CSI ? 1004 h`; `input_disable_blob`; `decode_mouse`: SGR's Cb 0-2 press and release, 32-35 motion, 64-67 the wheel, 128-129, the 4/8/16 modifiers, and the X10 form whose release it refuses), `src/edit/mouse.lu` (`press_opens_menu`, `press_menu`, `mouse_release`), `src/edit/ctxrows.lu` (the document menu's rows), and the mouse tests `src/edit_ctxmenu_test.lu`, `src/edit_drag_test.lu` | `2eb9cb9b` | what yew enables and parses; Y9's witness. Built unmodified by `tools/mkyew` |
 | PAX's own `kernel/screen`, `kernel/console`, `kernel/mouse`, `kernel/xhci`, `kernel/sched` (`proc_slot`, `proc_word`, `tty_pgrp_of`), `tools/mouse-session` and `user/elf/mouseprobe.c` (the QMP session's shape), `tests/mpx5-yew` | this tree | read and extended |
 
-## px120 — a USB device plugged in after boot gets a record (pax#348)
+## px125 — PAX for a terminal multiplexer (the readiness probe, Ctrl-Space, the box-drawing glyphs)
 
-No kernel's, firmware's, USB stack's, device model's or driver's source was read: not Linux's, not any BSD's, not
-QEMU's, not usbredir's library, not any vendor's. The one new document is the USB redirection protocol's own
-description, which `tools/hotplug-session` speaks to QEMU's `usb-redir` device to play two composite HID devices.
+No kernel's, terminal emulator's, multiplexer's or C library's source was read: not Linux's, not xterm's, not any
+other terminal's or multiplexer's. Ubuntu was measured as a black box with the probe's own static binaries.
 
 | source | version | read, for |
 |---|---|---|
