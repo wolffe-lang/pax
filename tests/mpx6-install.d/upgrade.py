@@ -1117,9 +1117,43 @@ def track_a():
     disks()
     result['install_seconds'] = install_from(old, sym_old, 'u1-install', 'U1-install')
     passed('U1-install', f'the old stick installed the target in {result["install_seconds"]} s')
+    run(['cp', '--sparse=always', DISKS/'target.img', work/'u1-target.img'], row='U1-install')
     before, den_before = state(sym_old, 'u2', 'U2-state')
     run(['cp', '--sparse=always', DISKS/'target.img', work/'u2-target.img'], row='U2-state')
     passed('U2-state', f'{len(user_paths(before))} user paths, den log with three commits, /etc/shrc edited, /etc/motd deleted; e2fsck -fn clean')
+    # An independent old install, without U2's user-created /var, must gain the
+    # shipped log directory in the upgrade and write a boot log on first boot.
+    row = 'U-var-log'
+    run(['cp', '--sparse=always', work/'u1-target.img', DISKS/'target.img'], row=row)
+    old_rows, rc, text = tree('u-var-before', row)
+    if rc != 0 or '/var' in old_rows:
+        fail(row, f'old install must have no /var and a clean filesystem: rc={rc}, /var={old_rows.get("/var")}')
+    m = Machine('u-var-upgrade', sym_new, new)
+    try:
+        m.upgrade_entry(row)
+        login(m, row)
+        upgrade(m, row, ['from the baseline 9c88ec8a.manifest'])
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    upgraded, rc, text = tree('u-var-upgraded', row)
+    if rc != 0 or upgraded.get('/var/log', ('',))[0] != 'd':
+        fail(row, f'upgrade did not create /var/log as a directory: rc={rc}, row={upgraded.get("/var/log")}')
+    m = Machine('u-var-boot', sym_new, None)
+    try:
+        screen = login(m, row)
+        need(m.unwrapped(screen), f'kernel: {new_commit}', row)
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    booted, rc, text = tree('u-var-booted', row)
+    log_text = tree_text('u-var-booted', '/var/log/boot.log')
+    if rc != 0 or booted.get('/var/log/boot.log', ('',))[0] != 'f' or '== boot ' not in log_text:
+        fail(row, f'new system did not write its boot log: rc={rc}, log={log_text[-400:]!r}')
+    passed(row, 'upgrade created /var/log on an old install without /var; the new system wrote its boot log')
+    run(['cp', '--sparse=always', work/'u2-target.img', DISKS/'target.img'], row=row)
     # U0: the new stick's default entry mounts nothing and writes nothing.
     t0 = extents_sha(DISKS/'target.img')
     m = Machine('u0-default', sym_new, new)
