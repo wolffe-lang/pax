@@ -69,6 +69,25 @@
  *                   child reading [65536]
  *   dir:N           getdents64 over a directory of N names [4000]
  *   poll:N          poll of N descriptors (pipes' ends), no wait [1000]
+ *   hop:KIND[+spin] px159: a round trip of one byte to a child that
+ *                   echoes it, over KIND: `pipe` (a pipe each way),
+ *                   `unix` (an AF_UNIX stream socketpair) or `pty` (a
+ *                   pseudo-terminal's master, the child on its slave in
+ *                   raw mode), each an op, one every 5 ms, each timed
+ *                   from its write; with `+spin` a child that only
+ *                   computes runs through the window: a hop between two
+ *                   processes beside a CPU-bound one. Its ops' p50, p99
+ *                   and max are a line of their own:
+ *
+ *   latprobe-ops LOAD: n N p50 U p99 U max U
+ *
+ * And once, before the loads (px159), one line on what an AF_UNIX stream
+ * socket holds: a write of 19,456 bytes (a terminal multiplexer's frame)
+ * with MSG_DONTWAIT on a fresh socketpair and on a fresh connection to a
+ * path, and one read of up to 65,536 bytes at the other end, each
+ * answer as the call gave it (-errno on a failure):
+ *
+ *   latprobe-frame: socketpair sent S read R; path sent S read R
  *
  * Exit 0 when every load ran, 1 when one could not be set up (named), 2
  * on a usage error. Written from the man pages of the calls named and the
@@ -93,7 +112,9 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 #include <x86intrin.h>
@@ -259,13 +280,81 @@ struct load {
     int fd, sock;
     pid_t helper;
     struct pollfd *pfds;
+    int spin;     /* px159: a hop's load runs a CPU-bound child through the window */
+    pid_t hog;    /* that child */
+    long pace_us; /* px159: each op starts this long after the last ended (untimed) */
 };
+
+/* px159: the echo child of a hop: each byte read from `in` written back
+ * to `out`, until either end is gone. */
+static void echo_bytes(int in, int out) {
+    char c;
+    for (;;) {
+        ssize_t k = read(in, &c, 1);
+        if (k < 0 && errno == EINTR) continue;
+        if (k != 1) _exit(0);
+        while (write(out, &c, 1) != 1)
+            if (errno != EINTR) _exit(0);
+    }
+}
+
+/* px159: a hop's setup over `kind` (pipe, unix, pty): the echo child
+ * forked, the prober's write end in L->fd and its read end in L->sock. */
+static int hop_setup(struct load *L, const char *kind) {
+    if (!strcmp(kind, "pipe")) {
+        int there[2], back[2];
+        if (pipe(there) || pipe(back)) { perror("latprobe: hop pipe"); return -1; }
+        if ((L->helper = fork()) == 0) { close(there[1]); close(back[0]); echo_bytes(there[0], back[1]); }
+        close(there[0]);
+        close(back[1]);
+        L->fd = there[1];
+        L->sock = back[0];
+        return L->helper > 0 ? 0 : -1;
+    }
+    if (!strcmp(kind, "unix")) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv)) { perror("latprobe: hop socketpair"); return -1; }
+        if ((L->helper = fork()) == 0) { close(sv[0]); echo_bytes(sv[1], sv[1]); }
+        close(sv[1]);
+        L->fd = L->sock = sv[0];
+        return L->helper > 0 ? 0 : -1;
+    }
+    if (!strcmp(kind, "pty")) {
+        int m = posix_openpt(O_RDWR | O_NOCTTY);
+        if (m < 0 || grantpt(m) || unlockpt(m)) { perror("latprobe: hop pty"); return -1; }
+        int s = open(ptsname(m), O_RDWR | O_NOCTTY);
+        struct termios t;
+        if (s < 0 || tcgetattr(s, &t)) { perror("latprobe: hop pty slave"); return -1; }
+        cfmakeraw(&t);
+        t.c_cc[VMIN] = 1;
+        t.c_cc[VTIME] = 0;
+        if (tcsetattr(s, TCSANOW, &t)) { perror("latprobe: hop pty raw"); return -1; }
+        if ((L->helper = fork()) == 0) { close(m); echo_bytes(s, s); }
+        close(s);
+        L->fd = L->sock = m;
+        return L->helper > 0 ? 0 : -1;
+    }
+    fprintf(stderr, "latprobe: no hop over %s\n", kind);
+    return -1;
+}
 
 /* Each load: its setup (before the window starts) and one op. A setup
  * returns 0, or -1 with a word on stderr. */
 static int setup(struct load *L) {
     const char *k = L->name;
     if (!strcmp(k, "idle") || !strcmp(k, "spin") || !strcmp(k, "flood") || !strcmp(k, "exec")) return 0;
+    if (!strcmp(k, "hop")) {
+        char kind[16];
+        snprintf(kind, sizeof kind, "%s", L->arg ? L->arg : "");
+        char *plus = strchr(kind, '+');
+        if (plus) {
+            if (strcmp(plus, "+spin")) { fprintf(stderr, "latprobe: hop:%s: only +spin\n", L->arg); return -1; }
+            *plus = 0;
+            L->spin = 1;
+        }
+        L->pace_us = 5000;
+        return hop_setup(L, kind);
+    }
     if (!strcmp(k, "console")) { L->n = arg_or(L->arg, 65536); return (L->buf = filled(L->n, 1)) ? 0 : -1; }
     if (!strcmp(k, "pty")) {
         L->n = arg_or(L->arg, 16384);
@@ -418,6 +507,15 @@ static void op(struct load *L) {
         if (write(L->fd, &c, 1) != 1 || read(L->fd, &c, 1) != 1) perror("latprobe: ctl");
         return;
     }
+    if (!strcmp(k, "hop")) {
+        char c = 'h';
+        ssize_t k2;
+        while ((k2 = write(L->fd, &c, 1)) < 0 && errno == EINTR) {}
+        if (k2 != 1) { perror("latprobe: hop write"); return; }
+        while ((k2 = read(L->sock, &c, 1)) < 0 && errno == EINTR) {}
+        if (k2 != 1) perror("latprobe: hop read");
+        return;
+    }
 }
 
 /* The load's child: setup, `r` to the parent, wait for `g`, ops until the
@@ -426,14 +524,18 @@ static void run_load(struct load *L, int out, int go) {
     char c = setup(L) == 0 ? 'r' : 'x';
     if (write(out, &c, 1) != 1 || c != 'r') _exit(1);
     if (read(go, &c, 1) != 1) _exit(1);
+    /* px159: a hop's hog computes through the window, no system call */
+    if (L->spin && (L->hog = fork()) == 0) for (;;) {}
     static uint32_t s[MAXS];
     uint64_t n = 0, end = tsc() + (uint64_t)seconds * 1000000ull * per_us;
     while (tsc() < end) {
+        if (L->pace_us) sleep_us(L->pace_us); /* px159: untimed, so the hog runs between ops */
         uint64_t a = tsc();
         op(L);
         uint64_t b = tsc();
         if (n < MAXS) s[n++] = (uint32_t)us_of(b - a);
     }
+    if (L->hog > 0) { kill(L->hog, SIGKILL); waitpid(L->hog, NULL, 0); }
     if (L->helper > 0) { kill(L->helper, SIGKILL); waitpid(L->helper, NULL, 0); }
     if (!strcmp(L->name, "write")) unlink("/tmp/latprobe.w");
     send_sum(out, summarize(s, n, 0));
@@ -589,10 +691,55 @@ static int measure(const char *spec) {
     if (len && line[len - 1] == '\n') line[--len] = 0;
     snprintf(line + len, sizeof line - len, "; clocks mono %lld real %lld tsc %llu\n", mono, real, (unsigned long long)us_of(c1 - c0));
     report(line);
+    if (!strcmp(L->name, "hop")) {
+        /* px159: a hop's round trips, the row's figures */
+        char ol[256];
+        snprintf(ol, sizeof ol, "latprobe-ops %s: n %llu p50 %llu p99 %llu max %llu\n", spec, (unsigned long long)ls.n,
+                 (unsigned long long)ls.p50, (unsigned long long)ls.p99, (unsigned long long)ls.max);
+        report(ol);
+    }
     fflush(stdout);
     close(lp[0]);
     close(gp[1]);
     return 0;
+}
+
+/* px159: what one non-blocking write of FRAME bytes puts on a fresh AF_UNIX
+ * stream connection, and what one read takes at its other end: each call's
+ * answer, -errno on a failure. */
+#define FRAME 19456
+static void frame_one(int w, int r, long *sent, long *got) {
+    static char out[FRAME], in[65536];
+    memset(out, 'f', sizeof out);
+    ssize_t k = send(w, out, sizeof out, MSG_DONTWAIT);
+    *sent = k < 0 ? -errno : (long)k;
+    k = recv(r, in, sizeof in, MSG_DONTWAIT);
+    *got = k < 0 ? -errno : (long)k;
+}
+
+static void frame_check(void) {
+    long ps = -1, pr = -1, cs = -1, cr = -1;
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+        frame_one(sv[0], sv[1], &ps, &pr);
+        close(sv[0]);
+        close(sv[1]);
+    } else ps = pr = -errno;
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    snprintf(a.sun_path, sizeof a.sun_path, "/tmp/latprobe-frame.sock");
+    unlink(a.sun_path);
+    int ls = socket(AF_UNIX, SOCK_STREAM, 0), c = socket(AF_UNIX, SOCK_STREAM, 0), s = -1;
+    if (ls >= 0 && c >= 0 && bind(ls, (struct sockaddr *)&a, sizeof a) == 0 && listen(ls, 1) == 0 &&
+        connect(c, (struct sockaddr *)&a, sizeof a) == 0 && (s = accept(ls, NULL, NULL)) >= 0)
+        frame_one(c, s, &cs, &cr);
+    else cs = cr = -errno;
+    if (s >= 0) close(s);
+    if (c >= 0) close(c);
+    if (ls >= 0) close(ls);
+    unlink(a.sun_path);
+    char l[160];
+    snprintf(l, sizeof l, "latprobe-frame: socketpair sent %ld read %ld; path sent %ld read %ld\n", ps, pr, cs, cr);
+    report(l);
 }
 
 int main(int argc, char **argv) {
@@ -632,6 +779,7 @@ int main(int argc, char **argv) {
     char head[128];
     snprintf(head, sizeof head, "latprobe: tsc %llu per us, %d s a load%s\n", (unsigned long long)per_us, seconds, net_port ? ", the network's echo up" : "");
     report(head);
+    frame_check();
     int bad = 0;
     for (; i < argc; i++)
         if (measure(argv[i])) bad = 1;
