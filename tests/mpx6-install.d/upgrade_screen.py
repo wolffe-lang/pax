@@ -35,18 +35,26 @@ def scope_after_echo(flat, cmd, prior):
 
 
 class Baseline:
-    """The echoes of a command already on the screen when it is typed; follows them off a scrolled screen."""
+    """The echoes of a command already on the screen when it is typed; follows them off a scrolled screen.
+
+    Once the new echo has been seen it stays seen: output longer than the screen scrolls the echo off the
+    top, and everything left on the screen is then after it (pax#457, a whole upgrade's output)."""
 
     def __init__(self, cmd, prior):
         self.cmd = cmd
         self.prior = prior
+        self.seen = False
 
     def scope(self, flat):
         n = echo_count(flat, self.cmd)
+        if n > self.prior:
+            self.seen = True
+            return scope_after_echo(flat, self.cmd, self.prior)
+        if self.seen:
+            return flat
         if n < self.prior:
             self.prior = n
-            return None
-        return scope_after_echo(flat, self.cmd, self.prior)
+        return None
 
 
 def wait_for_socket(path, proc, name, timeout=60, step=.05):
