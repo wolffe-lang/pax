@@ -47,9 +47,10 @@
 #                      1,000, three interleaved rounds, and a yield with
 #                      nobody else to run (the call, no switch): the least
 #                      CPU a yield of the three. A yield among 16 within
-#                      SWITCH_ALONE times the lone one (a walk of every
-#                      slot at every switch, raising the table alone,
-#                      breaks it); among 64 within 1.5 times and among
+#                      SWITCH_ALONE times the lone one, SWITCH_ALONE_RELEASE
+#                      in the release tier (a walk of every slot at every
+#                      switch, raising the table alone, breaks both);
+#                      among 64 within 1.5 times and among
 #                      1,000 within 4 times the 16's (a walk of every live
 #                      slot at every switch breaks it: 5.5 times; this
 #                      kernel 1.8 to 2.8, the most with the host's other
@@ -109,8 +110,16 @@ memory_of() {
 }
 quiet_of() { case $1 in switch|herd) echo 1 ;; *) echo 0 ;; esac; }
 # A yield among 16 processes, at most this many lone yields (measured,
-# notes/px126-process-slots.md §6).
+# notes/px126-process-slots.md §6), in the native tier.
 SWITCH_ALONE=10
+# From native to release the lone yield (the call alone) shrinks far more than
+# a yield among 16 (one host: 213 to 83 ns alone, 1,179 to 846 ns among 16),
+# so the release ratio sits higher. At this kernel: 8.6 to 11.9 in 12 boots
+# under KVM on two hosts, 15.4 to 17.8 in 6 under TCG (a hosted runner's
+# accelerator); at this branch's kernel before its rebase, 11.5 to 12.8. The
+# variant that walks every slot at every switch: 41 to 50 under KVM, 45 to 48
+# under TCG. (Native under TCG: 6.9 to 7.5, within SWITCH_ALONE.)
+SWITCH_ALONE_RELEASE=25
 # What a session's refusals may be: a pattern every `refused:` line must
 # match, and how many there must be ("" none).
 refusals_of() {
@@ -187,7 +196,7 @@ prog_lines() { # norm prefix
 }
 
 check_session() { # session norm hrc digest id
-    local s=$1 norm=$2 hrc=$3 digest=$4 id=$5 why= l n
+    local s=$1 norm=$2 hrc=$3 digest=$4 id=$5 why= l n alone
     case $s in
     threads)
         for r in 1 2; do
@@ -239,7 +248,8 @@ check_session() { # session norm hrc digest id
         if [ $# -ne 4 ] || [ "$1" -le 0 ]; then
             why+=" '$l' (every N measured);"
         else
-            [ "$2" -le $(($1 * SWITCH_ALONE)) ] || why+=" a yield among 16 costs $2 ns, more than $SWITCH_ALONE times a lone yield's $1 ns;"
+            alone=$SWITCH_ALONE; [ "${id%% *}" != release ] || alone=$SWITCH_ALONE_RELEASE
+            [ "$2" -le $(($1 * alone)) ] || why+=" a yield among 16 costs $2 ns, more than $alone times a lone yield's $1 ns;"
             [ $(($3 * 2)) -le $(($2 * 3)) ] || why+=" a yield among 64 costs $3 ns, more than 1.5 times the 16's $2 ns;"
             [ "$4" -le $(($2 * 4)) ] || why+=" a yield among 1,000 costs $4 ns, more than four times the 16's $2 ns;"
         fi
