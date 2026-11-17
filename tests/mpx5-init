@@ -10,10 +10,12 @@
 #                   [--tier native|release|both] [--accel auto|kvm|tcg]
 #                   [--rows all|lifecycle]
 #
-# I14 and I15 use separate boots, before any logout: an observed adopted child
-# must be reaped within 5000 guest milliseconds, and a literal exec /bin/login
-# must not repeat boot hooks, boot-status recording or sudo-record clearing.
-# --rows lifecycle runs just these two rows; the default includes all rows.
+# I14, I15 and I16 use a boot each: an observed adopted child must be reaped
+# within 5000 guest milliseconds, before any logout; a literal exec /bin/login
+# must not repeat boot hooks, boot-status recording or sudo-record clearing;
+# and a console logout is its own record in wtmp (init's, as utmp(5) has it),
+# the boot's record written once. --rows lifecycle runs just these three rows;
+# the default includes all rows.
 #
 # P0 builds the image's tree (build/mpx5-init/root, files.txt as
 # tools/mkinitramfs' arguments): kmain_console, the kernel every shipped image
@@ -22,6 +24,7 @@
 # execs init as on an installed system; login and sudo (tools/mkauth; sudo
 # set-user-ID root, its shipped policy), pelt as /bin/sh, boreutils' cat cut id
 # kill ls sleep stat stty touch tr, reboot and poweroff (tools/mkdiskprobe),
+# last (tools/mklogd: I16 reads the login records with it),
 # user/elf/detach.c (a process that calls setsid and lives on) and
 # user/elf/ttymode.c (the console's echo, canonical and signal bits); an
 # /etc/passwd with root, pax (in group sudo), bob and lobo (/bin/false);
@@ -98,6 +101,9 @@ if [ -z "$images" ]; then
     fi
     "$PAX_ROOT/tools/mkdiskprobe" "$work/diskprobe" > "$work/diskprobe.txt" 2>&1 || why+=" tools/mkdiskprobe;"
     cp "$work/diskprobe/reboot" "$r/bin/reboot" 2>/dev/null && cp "$work/diskprobe/reboot" "$r/bin/poweroff" || why+=" no reboot;"
+    # last as the images carry it (tools/mklogd, user/auth/utmp.lu beside it): I16 reads wtmp with it.
+    "$PAX_ROOT/tools/mklogd" "$work/logd" > "$work/logd.txt" 2>&1 || why+=" tools/mklogd;"
+    cp "$work/logd/last" "$r/bin/last" 2>/dev/null || why+=" no last;"
     gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$r/bin/detach" "$PAX_ROOT/user/elf/detach.c" > "$work/detach.txt" 2>&1 || why+=" gcc: detach.c;"
     gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \

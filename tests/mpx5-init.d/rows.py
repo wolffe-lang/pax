@@ -42,7 +42,7 @@ the kernel's and init's:
       /run/user/1000 that is pax's 0700 again on /run's tmpfs, and `sudo
       poweroff` ends the machine (QEMU exits 0).
 
-Lifecycle boots, independent of I4 and of each other:
+Lifecycle boots, a boot each, independent of I4 and of each other:
   I14 observe a live adopted setsid child (PPid=1), release it, then require
       ENOENT within 5000 guest monotonic milliseconds without logging out.
       Missing observations and inspection errors fail, never mean reaped.
@@ -50,11 +50,20 @@ Lifecycle boots, independent of I4 and of each other:
       boot hooks and boot-status recording each remain at one call, the
       service and pid 1 identities stay unchanged, and a sudo-record
       sentinel survives. The fixture counts boot-status invocations only.
+  I16 the login records across a console logout (utmp(5): when init finds
+      that a session's process has ended it marks its utmp entry
+      DEAD_PROCESS): root logs in, `exit`s, and 3 s after `login:` logs in
+      again; `last -R -e --time-format iso` (tools/mklogd's last) shows two
+      sessions of root on one line, the newer still logged in, the older
+      ended `[logout]` at least 2 s before the newer began (a session closed
+      only by the next login on its line ends at that login's time), and one
+      `reboot` line: the boot's record, written once.
 
 Exit 0 when every selected row held, 1 otherwise. A row that cannot be reached (the
 machine halted at a logout) fails by name with what the console said.
 """
 import argparse
+import calendar
 import os
 import pathlib
 import re
@@ -637,8 +646,56 @@ def second_start(con):
             'console identities %r -> %r' % (before, after, identity, identity2))
 
 
+ISO_STAMP = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00')
+
+
+def stamps(line):
+    """The ISO times on a `last --time-format iso` line, in seconds since the epoch."""
+    return [calendar.timegm(time.strptime(t, '%Y-%m-%dT%H:%M:%S+00:00')) for t in ISO_STAMP.findall(line)]
+
+
+def logout_verdict(out):
+    """I16's reading of `last -R -e --time-format iso`: (held, why). A reading
+    that is not two sessions of root on one line and one boot is red."""
+    lines = [l for l in (out or '').splitlines() if l.strip()]
+    roots = [l for l in lines if l.split()[0] == 'root']
+    boots = [l for l in lines if l.split()[0] == 'reboot']
+    shown = ' | '.join(lines)
+    if len(roots) != 2 or len(boots) != 1:
+        return False, 'want two sessions of root and one boot: %r' % shown
+    newer, older = roots
+    t_new, t_old = stamps(newer), stamps(older)
+    same_line = newer.split()[1] == older.split()[1]
+    if not (same_line and len(t_new) == 1 and 'still logged in' in newer and len(t_old) == 2):
+        return False, 'the login records after a logout: %r' % shown
+    if t_old[1] == t_new[0]:
+        return False, 'no record of the logout: root\'s first session ends at the next login\'s start: %r' % shown
+    if older.rstrip().endswith('[logout]') and t_old[1] <= t_new[0] - 2:
+        return True, ('the logout is its own record: root on %s ended [logout] %d s before the next login; '
+                      'one boot record' % (older.split()[1], t_new[0] - t_old[1]))
+    return False, 'the logout\'s record: %r' % shown
+
+
+def logout_record(con):
+    if not login(con, 'root', 'I16'):
+        return
+    con.type('exit')
+    if not con.wait(r'login: $', 15) or not con.running():
+        bad('I16', 'no `login:` after root\'s exit: %r' % con.text(300))
+        return
+    time.sleep(3)
+    if not login(con, 'root', 'I16', prompted=True):
+        return
+    out = con.command('last -R -e --time-format iso', 160)
+    if out is None:
+        bad('I16', 'last printed nothing between its marks: %r' % con.text(300))
+        return
+    held, why = logout_verdict(out)
+    (ok if held else bad)('I16', why)
+
+
 def lifecycle_boots(the_iso):
-    for row, check in (('I14', orphan_before_logout), ('I15', second_start)):
+    for row, check in (('I14', orphan_before_logout), ('I15', second_start), ('I16', logout_record)):
         con = Console(ARGS.out / ('boot-' + row), the_iso)
         try:
             check(con)
