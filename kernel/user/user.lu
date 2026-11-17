@@ -880,7 +880,11 @@ fn writev(fd: u64, iov: u64, cnt: u64) -> u64 {
     // what the rule reads.
     let piped = files.write_target(area(), fd) == 3
     if piped && sum > 0 && sum <= PIPE_BUF && sched.self_done() == 0 && files.pipe_room(area(), fd) < sum {
-        return if files.nonblocking(area(), fd) { NEG_EAGAIN } else { files.WAIT }
+        if files.nonblocking(area(), fd) {
+            return NEG_EAGAIN
+        }
+        files.wait_room(area(), fd) // px159: it waits for that buffer's room
+        return files.WAIT
     }
     var total: u64 = 0
     i = 0
