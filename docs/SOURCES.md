@@ -1,5 +1,20 @@
 # SOURCES — what each change was written from
 
+## pxg image integration (2026-11-13)
+
+- PAX's own `tools/mkden`, `tools/mkdistribution`, `tools/distribution-root`,
+  `tools/mkpax-release` and installer suites at `bbe91e16`: read and reused
+  for the source pin, static builder, image input, identity and installed-root rows.
+- The package manager's public source at `a497e373`, specifically
+  `tools/build`, `tools/lib-toolchain.sh`, its toolchain pin and reader/refusal
+  tests: read to invoke its static build unmodified, with its own compiler,
+  interpreter and std, and to assert its existing diagnostics. Only its
+  production executable is an image input.
+- Wolf and Lupin release archives, binutils, the C compiler and static C
+  runtime, QEMU, OVMF and filesystem checkers: binary build/test tools only.
+  No other package manager's, kernel's, libc's, archiver's, compressor's,
+  TLS library's or HTTP library's implementation was read.
+
 The clean-room rule (`CLAUDE.md`) requires this log. Every lane adds its
 entries: what it consulted, at which version, for which file, and how
 (read, black-box run, or the author's own knowledge with no text copied).
@@ -2531,3 +2546,16 @@ black box in a container of Ubuntu 24.04.5, on records those programs wrote and 
 | Ubuntu 24.04's login (`login` 1:4.13+dfsg1-4ubuntu3.2) | black box on a pseudo-terminal in a container, px106's bare PAM | its utmp record, its btmp records for a refused try (USER_PROCESS, `UNKNOWN` for a name no account has), no wtmp record |
 | OpenSSH 9.6p1's sshd (Ubuntu's `openssh-server` 1:9.6p1-3ubuntu13.20) | black box on loopback in a container | a pty session's USER_PROCESS and DEAD_PROCESS in wtmp and utmp, nothing for a command with no pty, a refused password's LOGIN_PROCESS on `ssh:notty` in btmp |
 | util-linux 2.39.3's last and lastb (Ubuntu's `util-linux` 2.39.3-9ubuntu6.6) | black box in a container, 87 runs on hand-written files and a calibration | every column, the end column's forms, the lengths, `FILE begins`, a session whose process started after its record `gone - no logout`, the refusals' words and statuses |
+
+## px126 — process slots: 64 to 1024
+
+No kernel's, C library's or shell's source was read: not Linux's, not any BSD's, not glibc's or musl's, not pelt's
+beyond its pin.
+
+| source | version | read, for |
+|---|---|---|
+| The man-pages project: clone(2), fork(2), wait(2), futex(2), pipe(2), sched_yield(2), getrusage(2), clock_gettime(2), getrlimit(2) (RLIMIT_NPROC: a limit on the real user's threads, the privileged exempt), proc_pid_status(5), proc_pid_stat(5), proc_sys_kernel(5) (`threads-max`, `pid_max`), pty(7), posix_openpt(3), unlockpt(3), ptsname(3), ioctl_tty(2) | 6.7 | `user/elf/slotprobe.c`'s calls and what it reads back; `notes/px126-process-slots.md`'s recommendation on RLIMIT_NPROC |
+| POSIX.1-2024: XSH fork, waitpid, setsid, _exit's consequences (orphaned process groups); XBD 3 (orphaned process group), chapter 11 | 2024 | `process_ends`' children set, unchanged in meaning |
+| Intel SDM vol. 3A §4.5 (4-level paging: one page table maps 2 MiB), §4.10.4 (INVLPG) | as px03's entry | the areas' region and its page tables taken at `start` |
+| PAX's own `kernel/sched`, `kernel/fpu`, `kernel/process`, `kernel/procfs`, `kernel/vm`, `kernel/trace_state`, `boot/sched.S`, `boot/fpu.S`, `user/elf/ptyprobe.c` (the pty idioms), `tests/mpx5-pty` and `tests/mpx5-forks` (the suite's shape) | this tree | read and extended |
+| pelt at `user/pelt.pin`'s commit and boreutils' `cat` at `user/boreutils.pin`'s, built unmodified by `tools/mkpelt` and `tools/mkboreutils` | the pins | black box: their thread counts on PAX (`/proc/<pid>/status`), pelt's `-c` |

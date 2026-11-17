@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Replay I5, including the nightly calibration retry that used to fail."""
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+HERE = Path(__file__).resolve().parent
+FIXTURE = HERE / "timer-retry.serial"
+HELPER = HERE / "timer-tail.py"
+
+
+def check(text):
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".serial") as log:
+        log.write(text)
+        log.flush()
+        return subprocess.run([sys.executable, "-I", str(HELPER), log.name],
+                              capture_output=True, text=True, timeout=5).returncode
+
+
+def main():
+    raw = FIXTURE.read_text()
+    clean = "\n".join(line for line in raw.splitlines()
+                      if not line.startswith("timer: LAPIC calibration: ")) + "\n"
+    apic = next(line for line in clean.splitlines() if line.startswith("apic: "))
+    calibrated = next(line for line in clean.splitlines() if line.startswith("timer: LAPIC calibrated by "))
+    diagnostics = [
+        "timer: LAPIC calibration: window 1 set aside: 62435232 Hz, the clock 20001 us against the PM timer's 21000 us",
+        "timer: LAPIC calibration: no second counter beside the HPET to hold each window to; two windows off alike in a row would pass",
+        "timer: LAPIC calibration: no two windows in a row agreed in 6; took 62501608 Hz",
+    ]
+    cases = [("timer-retry-nightly", raw, 0), ("timer-clean", clean, 0),
+             ("timer-CRLF", raw.replace("\n", "\r\n"), 0)]
+    for i, diagnostic in enumerate(diagnostics):
+        cases.append((f"timer-diagnostic-{i}", clean.replace(apic, apic + "\n" + diagnostic), 0))
+    for clock in ("PM", "PIT"):
+        cases.append((f"timer-clock-{clock}", raw.replace("calibrated by HPET", "calibrated by " + clock), 0))
+    for name, text in [
+        ("unknown", clean.replace(apic, apic + "\ntimer: unexpected failure")),
+        ("unknown-retry", clean.replace(apic, apic + "\ntimer: LAPIC calibration: ignored failure")),
+        ("unknown-among-retries", raw.replace("timer: LAPIC calibration: windows 2", "unknown\ntimer: LAPIC calibration: windows 2")),
+        ("missing-calibration", raw.replace(calibrated + "\n", "")),
+        ("missing-apic", raw.replace(apic + "\n", "")),
+        ("missing-ticks", raw.replace("timer: 20 ticks on vector 32, 0 spurious\n", "")),
+        ("missing-halt", raw.replace("halt\n", "")),
+        ("wrong-ticks", raw.replace("20 ticks", "21 ticks")),
+        ("spurious", raw.replace("0 spurious", "1 spurious")),
+        ("wrong-apic", raw.replace("-> 0x0000000000008700", "-> 0x0000000000000000")),
+        ("after-halt", raw + "unexpected\n"),
+        ("retry-after-calibration", clean.replace(calibrated, calibrated + "\n" + diagnostics[0])),
+        ("retry-after-halt", clean + diagnostics[0] + "\n"),
+        ("retry-only", apic + "\n" + diagnostics[0] + "\n"),
+        ("malformed-diagnostic", clean.replace(apic, apic + "\n" + diagnostics[0] + " trailing")),
+    ]:
+        cases.append(("timer-reject-" + name, text, 1))
+    failed = 0
+    for name, text, expected in cases:
+        status = check(text)
+        good = status == expected
+        print(f"{'PASS' if good else 'FAIL'} {name} exit={status} expected={expected}")
+        failed += not good
+    print(f"timer-tail: {len(cases) - failed}/{len(cases)}, 0 SKIP")
+    return bool(failed)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

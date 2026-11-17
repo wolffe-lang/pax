@@ -182,6 +182,7 @@ first program it prints how long its boot took and how much of that the console 
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `291011dd` (wolf 0.2.36) |
 | burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.39) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
+| pxg | the package manager, `/bin/pxg`; selected readers only on PAX, transactions refused | `a497e373` (its own wolf 0.2.38 pin) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `3a9983ee` |
 | sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
@@ -190,6 +191,13 @@ first program it prints how long its boot took and how much of that the console 
 | ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `8594073c` |
 | warren | the terminal multiplexer in wolf, `/usr/bin/warren` of the dev image: `warren` attaches to the default session, starting it; behind Ctrl-Space, `\|` and `-` split, `h j k l` move the focus, `d` detaches; `warren attach -t NAME` comes back | `user/warren.pin`, `c927b979` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
+
+`tools/mkpxg OUTDIR` builds the package manager from `user/pxg.pin` using its source tree's own toolchain,
+not the image's compiler. Two separate source checkouts must produce identical static bytes. Both images carry
+only the production `/bin/pxg`, never its failpoint or qualification probes. `pxg version` and `pxg compare`
+work on PAX, but this is not package-update support: live-root mutations report `live-root-is-pm05`, and
+initialising an alternate root on the installer's plain ext2 reports `unqualified-filesystem ext2-family
+(journal not qualified on PAX)`. The installer suite and `tests/distribution-install` hold these refusals.
 
 Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
 each. `tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT` assembles both image variants at one clean
@@ -919,7 +927,7 @@ and `--tier native --firmware bios` picks one leg.
 
 | Group | Suites | What they hold |
 |---|---|---|
-| The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
+| The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `fetch-busybox-selftest`, `mpx2-interrupts.d/selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap`, `mpx6-latency` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor; how long a system call keeps interrupts off (`/proc/pax-latency`, with `latency` on the command line) and how late a sleeper, a loopback echo and a host's pings run beside long calls, against Linux in a virtual machine of the same shape |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-conspeed`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the console's drawing cost at 2560×1440 as ratios on one boot (its table read off the screen), the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net`, `mpx4-console-push`, `mpx5-burrowd` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), the tick clock held to the clock over the lease, and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes); den pushing from the console over https and through burrow over ssh to fixtures that answer as github.com, names through a DNS server of the suite's own, the resolver's datagram calls against Linux, a scrubbed transcript proven on fake secrets (root, sshd, mke2fs); burrowd started at boot and reached from a LAN on a tap, held to OpenSSH's sshd on Linux: commands by key and by password, the refusals, git through den, a restart, the host key kept across a reboot, the stick's shape on loopback alone (root, dnsmasq, sshd) |
@@ -952,6 +960,10 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   reset, a failed connect, a timeout or a stalled transfer, an HTTP 5xx or 429), three attempts at most, 10 and then
   30 seconds apart, the pinned commit checked after the fetch; an unknown revision or a refusal stops at once. Every
   `tools/mk*` source fetch, `tools/fetch-wolf` and the census go through it (`tests/fetch-retry-selftest`).
+- `tools/fetch-busybox` also retries a failed download: three attempts at most, 25 seconds each (10 to connect),
+  with exponential backoff of 1 and 2 seconds and a 90-second retry envelope, inside the USB test's unchanged
+  120-second fetch phase. The archive and extracted binary still have to match their pinned SHA-256 digests;
+  `tests/fetch-busybox-selftest` exercises real curl against a local HTTP server, including failures and recovery.
 
 ## Hosts
 

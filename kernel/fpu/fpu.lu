@@ -18,9 +18,13 @@
 //!   "size required by the enabled features"), at most a page;
 //! - without XSAVE, FXSAVE's 512-byte area.
 //!
-//! **One area per thread slot**, a frame each from the allocator (17
-//! frames: one per slot and the template), reached through the HHDM,
-//! so 4096-aligned (XSAVE wants 64). The template is the state a new
+//! **One area per thread slot**, a frame each from the allocator,
+//! reached through the HHDM, so 4096-aligned (XSAVE wants 64). px126:
+//! taken only while the slot lives (`area_new`, which kernel/sched calls
+//! with the slot's kernel stack, and `area_free`, with the stack's end);
+//! `start` takes the template's and slot 0's (the kernel's own first
+//! context, which has no stack of its own). Before px126 every slot's
+//! was taken at `start`, 64 frames whether a slot was ever used or not. The template is the state a new
 //! thread starts in — Linux's at execve, measured on kasumi by
 //! user/elf/hello.S (`fcw 0x037f mxcsr 0x1f80`) and the SDM's FNINIT
 //! values: FCW 0x037f, every tag empty, MXCSR 0x1f80 (every exception
@@ -64,7 +68,7 @@ const OFF: u64 = 0
 const XSAVE: u64 = 1
 const FXSAVE: u64 = 2
 
-const SLOTS: u64 = 64 // kernel/sched's
+const SLOTS: u64 = 1024 // kernel/sched's (64 before px126); kernel/sched's start holds the two equal (`slots`)
 const PAGE: u64 = 4096
 
 const CR0_MP: u64 = 0x2 // bit 1
@@ -88,11 +92,11 @@ const S_MODE: u64 = 0
 const S_SIZE: u64 = 1
 const S_XCR0: u64 = 2
 const S_TEMPLATE: u64 = 3
-const S_AREAS: u64 = 8 // px24: sixty-four words (sixteen at 4 before)
+const S_AREAS: u64 = 8 // px126: a word a slot (sixty-four before, sixteen at 4 before px24)
 const S_MXMASK: u64 = 4 // px26: MXCSR_MASK as FXSAVE reports it (0xffbf when it reports 0)
 
 fn sw(i: u64) -> u64 {
-    // # Safety: i < 24, inside boot/fpu.S's 192-byte pax_fpu_state.
+    // # Safety: i < 8 + SLOTS, inside boot/fpu.S's (8 + SLOTS) words of pax_fpu_state.
     unsafe { ((pax_fpu_state as u64 + i * 8) as *u64).read_volatile() }
 }
 
@@ -172,11 +176,9 @@ pub fn start() {
     put_sw(S_TEMPLATE, t)
     put_sw(S_SIZE, size)
     put_sw(S_XCR0, xcr0)
-    var s: u64 = 0
-    while s < SLOTS {
-        put_sw(S_AREAS + s, page())
-        s += 1
-    }
+    // px126: slot 0's area alone (the kernel's first context); every
+    // other slot's comes with its kernel stack (`area_new`).
+    put_sw(S_AREAS, page())
     put_sw(S_MODE, mode)
     // px26: MXCSR's writable bits, from a save of the state as it is
     // (FXSAVE's bytes 28-31; 0 there means the default mask, SDM vol. 1
@@ -187,11 +189,59 @@ pub fn start() {
         ((sw(S_AREAS) + 24) as *u64).read_volatile() >> 32
     }
     put_sw(S_MXMASK, if mk == 0 { 0xffbf } else { mk })
-    s = 0
-    while s < SLOTS {
-        reset(s)
-        s += 1
+    reset(0)
+}
+
+/// px126: kernel/sched's slot count, which this module's must equal
+/// (it cannot import kernel/sched, which imports it).
+pub fn slots() -> u64 {
+    SLOTS
+}
+
+/// px126: slot `s` gets an area of its own (kernel/sched, with the
+/// slot's kernel stack): a zeroed frame. False when no frame is left
+/// (nothing kept). Nothing to take before `start` or when the slot has
+/// one. Thread context, IF clear.
+pub fn area_new(s: u64) -> bool {
+    if sw(S_MODE) == OFF || s >= SLOTS || sw(S_AREAS + s) != 0 {
+        return true
     }
+    let pa = frames.alloc() else 0
+    if pa == 0 {
+        return false
+    }
+    let v = pa + frames.hhdm()
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        // # Safety: the frame just taken, through the HHDM.
+        unsafe { ((v + i * 8) as *u64).write_volatile(0) }
+        i += 1
+    }
+    put_sw(S_AREAS + s, v)
+    true
+}
+
+/// px126: slot `s`'s area given back (kernel/sched, with its kernel
+/// stack). Thread context, IF clear.
+pub fn area_free(s: u64) {
+    if s >= SLOTS || s == 0 {
+        return
+    }
+    let a = sw(S_AREAS + s)
+    if a != 0 {
+        put_sw(S_AREAS + s, 0)
+        frames.free(a - frames.hhdm())
+    }
+}
+
+/// Slot `s`'s area: a named panic when it has none (a slot that runs, or
+/// is switched, always has one: it came with its stack).
+fn area_of(s: u64) -> u64 {
+    let a = sw(S_AREAS + s)
+    if a == 0 {
+        panic.fail("fpu: no area for slot", s)
+    }
+    a
 }
 
 /// Slot `s`'s area starts as the template (kernel/sched, for a new
@@ -201,7 +251,7 @@ pub fn reset(s: u64) {
         return
     }
     let t = sw(S_TEMPLATE)
-    let a = sw(S_AREAS + s)
+    let a = area_of(s)
     var i: u64 = 0
     while i < PAGE / 8 {
         // # Safety: two of `start`'s frames, through the HHDM.
@@ -223,8 +273,8 @@ pub fn switch(from: u64, to: u64) {
     // what XSAVE/FXSAVE wrote, so XRSTOR/FXRSTOR's checks (the header's
     // reserved bytes, MXCSR's reserved bits) hold.
     unsafe {
-        pax_fpu_save(sw(S_AREAS + from), mode)
-        pax_fpu_restore(sw(S_AREAS + to), mode)
+        pax_fpu_save(area_of(from), mode)
+        pax_fpu_restore(area_of(to), mode)
     }
 }
 
@@ -236,8 +286,8 @@ pub fn fork(from: u64, to: u64) {
     if mode == OFF || from >= SLOTS || to >= SLOTS {
         return
     }
-    let a = sw(S_AREAS + from)
-    let b = sw(S_AREAS + to)
+    let a = area_of(from)
+    let b = area_of(to)
     // # Safety: `from`'s area, a page of its own (as in `switch`).
     unsafe { pax_fpu_save(a, mode) }
     var i: u64 = 0
@@ -258,7 +308,7 @@ pub fn exec(s: u64) {
     }
     reset(s)
     // # Safety: as in `switch`: the area holds the template.
-    unsafe { pax_fpu_restore(sw(S_AREAS + s), mode) }
+    unsafe { pax_fpu_restore(area_of(s), mode) }
 }
 
 // --- a signal frame's copy of the state (px26) ------------------------------
@@ -290,7 +340,7 @@ pub fn capture(s: u64) -> u64 {
     if mode == OFF || s >= SLOTS {
         return 0
     }
-    let a = sw(S_AREAS + s)
+    let a = area_of(s)
     // # Safety: the slot's own page, as in `switch`.
     unsafe { pax_fpu_save(a, mode) }
     a
@@ -302,7 +352,7 @@ pub fn area(s: u64) -> u64 {
     if sw(S_MODE) == OFF || s >= SLOTS {
         return 0
     }
-    sw(S_AREAS + s)
+    area_of(s)
 }
 
 /// Load slot `s`'s area, which the caller has just filled from a signal
@@ -318,7 +368,7 @@ pub fn adopt(s: u64) -> bool {
     if mode == OFF || s >= SLOTS {
         return true
     }
-    let a = sw(S_AREAS + s)
+    let a = area_of(s)
     // # Safety: the slot's own page through the HHDM: MXCSR at byte 24
     // (its high half the mask's word, rewritten whole), the XSAVE
     // header at bytes 512-575 (SDM vol. 1 §13.4.2).

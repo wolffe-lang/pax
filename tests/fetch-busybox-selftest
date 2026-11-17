@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Exercise the BusyBox fetch with real curl and a local HTTP oracle."""
+import contextlib
+import hashlib
+import http.server
+import io
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+BINARY = b"fixture static binary\n"
+
+
+def deb_bytes():
+    data = io.BytesIO()
+    with tarfile.open(fileobj=data, mode="w:gz") as archive:
+        info = tarfile.TarInfo("./usr/bin/busybox")
+        info.size = len(BINARY)
+        info.mode = 0o755
+        archive.addfile(info, io.BytesIO(BINARY))
+    payload = data.getvalue()
+    header = f"{'data.tar.gz':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(payload):<10}`\n"
+    return b"!<arch>\n" + header.encode() + payload + (b"\n" if len(payload) % 2 else b"")
+
+
+class Oracle(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.requests.append(time.monotonic())
+        index = min(len(self.server.requests) - 1, len(self.server.statuses) - 1)
+        status = self.server.statuses[index]
+        payload = self.server.payload if status == 200 else b"try again\n"
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass
+
+
+@contextlib.contextmanager
+def oracle(statuses, payload):
+    server = http.server.HTTPServer(("127.0.0.1", 0), Oracle)
+    server.statuses = statuses
+    server.payload = payload
+    server.requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def script(path, text):
+    path.write_text("#!/bin/sh\n" + text)
+    path.chmod(0o755)
+
+
+def run_case(name, statuses, *, corrupt=False, bad_binary=False, cached=False, timeout=False):
+    archive = deb_bytes()
+    with tempfile.TemporaryDirectory(prefix="busybox-fetch-") as temp:
+        work = Path(temp)
+        for directory in ("tools", "user", "bin", "home", "tmp"):
+            (work / directory).mkdir()
+        for tool in ("fetch-busybox", "lib.sh"):
+            shutil.copyfile(ROOT / "tools" / tool, work / "tools" / tool)
+        # Extraction is real ar/tar. The fixture is not an executable, so only
+        # readelf's format report is a stub; both digest checks remain real.
+        script(work / "bin/readelf", 'case "$1" in -hW) echo "Type: EXEC";; -lW) echo "LOAD";; *) exit 2;; esac\n')
+        script(work / "bin/zstd", 'exit 99\n')  # the fixture uses gzip
+        real_curl = shutil.which("curl")
+        assert real_curl, "curl missing"
+        if timeout:
+            script(work / "bin/curl", 'printf "%s\\n" "$@" >> "$CURL_ARGS"\necho "curl: (28) Operation timed out" >&2\nexit 28\n')
+        else:
+            script(work / "bin/curl", 'printf "%s\\n" "$@" >> "$CURL_ARGS"\nexec ' + shlex.quote(real_curl) + ' "$@"\n')
+        with oracle(statuses, b"corrupt" if corrupt else archive) as server:
+            binary_digest = hashlib.sha256(b"wrong" if bad_binary else BINARY).hexdigest()
+            (work / "user/busybox.pin").write_text(
+                f"BUSYBOX_URL=http://127.0.0.1:{server.server_port}/busybox.deb\n"
+                f"BUSYBOX_DEB_SHA256={hashlib.sha256(archive).hexdigest()}\n"
+                f"BUSYBOX_SHA256={binary_digest}\n")
+            env = dict(os.environ, PATH=str(work / "bin") + ":" + os.environ["PATH"],
+                       HOME=str(work / "home"), SHELL="/bin/sh", TMPDIR=str(work / "tmp"),
+                       CURL_ARGS=str(work / "curl.args"), NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
+            env.pop("PAX_CACHE", None)
+            env.pop("PAX_BUILD", None)
+            argv = ["bash", str(work / "tools/fetch-busybox"), str(work / "out")]
+            result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=15)
+            requests = list(server.requests)
+            args = (work / "curl.args").read_text().splitlines()
+            bounded = all(flag in args and args[args.index(flag) + 1] == value for flag, value in
+                          [("--connect-timeout", "10"), ("--max-time", "25"),
+                           ("--retry", "2"), ("--retry-max-time", "90")])
+            bounded = bounded and "--retry-all-errors" in args and "--retry-delay" not in args
+            if timeout:
+                good = result.returncode == 2 and "Operation timed out" in result.stderr
+            elif corrupt or bad_binary:
+                good = result.returncode == 2 and "sha256" in result.stderr and not (work / "out/busybox").exists()
+            elif statuses[-1] != 200:
+                good = result.returncode == 2 and len(requests) == 3 and not (work / "out/busybox").exists()
+            else:
+                good = result.returncode == 0 and (work / "out/busybox").read_bytes() == BINARY
+                good = good and len(requests) == len(statuses)
+            if len(statuses) >= 3 and statuses[:2] == [503, 503] and len(requests) == 3:
+                good = good and requests[1] - requests[0] >= 0.8 and requests[2] - requests[1] >= 1.8
+            if cached and good:
+                (work / "curl.args").unlink()
+                again = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=5)
+                good = again.returncode == 0 and not (work / "curl.args").exists() and len(server.requests) == 1
+            good = good and bounded
+            print(f"{'PASS' if good else 'FAIL'} {name} exit={result.returncode} requests={len(requests)} bounded={bounded}")
+            if not good:
+                print(json.dumps({"args": args, "stderr": result.stderr}))
+            return good
+
+
+def main():
+    cases = [
+        ("busybox-first-transfer", [200], {}),
+        ("busybox-retry-recovery", [503, 200], {}),
+        ("busybox-exponential-backoff", [503, 503, 200], {}),
+        ("busybox-retry-exhausted", [503], {}),
+        ("busybox-deb-digest", [200], {"corrupt": True}),
+        ("busybox-binary-digest", [200], {"bad_binary": True}),
+        ("busybox-cache-verified", [200], {"cached": True}),
+        ("busybox-timeout-diagnostic", [200], {"timeout": True}),
+    ]
+    passed = sum(run_case(name, statuses, **options) for name, statuses, options in cases)
+    print(f"fetch-busybox: {passed}/{len(cases)}, 0 SKIP")
+    return passed != len(cases)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

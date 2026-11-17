@@ -1,0 +1,66 @@
+//! member: false
+// Fixtures for the parser used on firmware, including x2APIC IDs above 255.
+use cpus
+use log
+use panic
+use serial
+extern "c" let pax_argbuf: *u8
+extern "c" fn pax_exit(v: u8)
+export fn pax_interrupt(_frame: u64) -> u64 { panic.halt() }
+export fn pax_trace_resume_syscall(_frame: u64) -> u64 { panic.halt() }
+export fn pax_trace_finish_syscall(_frame: u64) -> u64 { panic.halt() }
+export fn pax_thread_exit() { panic.halt() }
+fn base() -> u64 { unsafe { pax_argbuf as u64 } }
+fn put(at: u64, v: u64) { unsafe { ((base() + at) as *u8).write_volatile(v as u8) } }
+fn word(at: u64, v: u64) {
+    var i: u64 = 0
+    while i < 4 { put(at + i, (v >> (i * 8)) & 255); i += 1 }
+}
+fn clear() { var i: u64 = 0; while i < 128 { put(i, 0); i += 1 } }
+fn lapic(at: u64, uid: u64, id: u64, flags: u64) {
+    put(at, 0); put(at + 1, 8); put(at + 2, uid); put(at + 3, id); word(at + 4, flags)
+}
+fn x2(at: u64, uid: u64, id: u64, flags: u64) {
+    put(at, 9); put(at + 1, 16); word(at + 4, id); word(at + 8, flags); word(at + 12, uid)
+}
+fn check(row: str, n: u64, valid: bool, yes: u64, hot: u64, no: u64) {
+    let (v, y, h, d) = cpus.count(base(), n)
+    if v != valid || y != yes || h != hot || d != no {
+        log.put("FAIL "); log.line(row); unsafe { pax_exit(0x11) }; panic.halt()
+    }
+    log.put("PASS "); log.line(row)
+}
+export fn kmain() {
+    let _status = serial.init()
+    clear()
+    check("CPU-TABLE-short", 43, false, 0, 0, 0)
+    check("CPU-TABLE-empty", 44, false, 0, 0, 0)
+    lapic(44, 0, 0, 1)
+    check("CPU-TABLE-lapic", 52, true, 1, 0, 0)
+    x2(52, 256, 65536, 1)
+    lapic(68, 2, 2, 2)
+    lapic(76, 3, 3, 0)
+    check("CPU-TABLE-mixed", 84, true, 2, 1, 1)
+    put(84, 127); put(85, 2)
+    check("CPU-TABLE-unknown-kind", 86, true, 2, 1, 1)
+    check("CPU-TABLE-tail", 85, false, 0, 0, 0)
+    put(85, 0)
+    check("CPU-TABLE-zero-length", 86, false, 0, 0, 0)
+    put(85, 3)
+    check("CPU-TABLE-overrun", 86, false, 0, 0, 0)
+    put(53, 15)
+    check("CPU-TABLE-short-x2", 84, false, 0, 0, 0)
+    put(53, 16)
+    word(56, 0)
+    check("CPU-TABLE-duplicate-id", 84, false, 0, 0, 0)
+    word(56, 65536); word(64, 0)
+    check("CPU-TABLE-duplicate-uid", 84, false, 0, 0, 0)
+    word(64, 256)
+    cpus.observe(base(), 84)
+    if !cpus.valid() || cpus.available() != 2 || cpus.online_capable() != 1 || cpus.disabled_entries() != 1 { unsafe { pax_exit(0x11) }; panic.halt() }
+    cpus.observe(base(), 84)
+    if cpus.valid() { unsafe { pax_exit(0x11) }; panic.halt() }
+    log.line("PASS CPU-TABLE-duplicate-table")
+    unsafe { pax_exit(0x10) }
+    panic.halt()
+}

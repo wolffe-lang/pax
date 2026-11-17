@@ -24,7 +24,9 @@ named, never printed.
 
 The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
   B0  the image: /bin/burrowd in it; /etc/shadow made (pax at the shipped
-      cost, the others at 2^14); the ISO and the volume
+      cost, the others at 2^14); the ISO and the volume; its archive packed
+      within MKINITRAMFS_BOUND seconds, the time said on an `image:` line
+      (the stick's image too, under B11)
   B1  boot 1: the console's `burrowd: host key 256 SHA256:… (made at this
       boot)` line before the login prompt; the key the rig's ssh is shown
       (accepted into a file of its own) has that fingerprint
@@ -193,6 +195,32 @@ def run(argv, env=None, data=b'', timeout=300, check=True):
         raise RuntimeError('%s: exit %d: %s' % (' '.join(map(str, argv[:3])), r.returncode,
                                                 r.stderr.decode(errors='replace')[-400:]))
     return r
+
+
+# pax#467: the seconds tools/mkinitramfs may take to pack an image's tree. The image is about
+# 355 MB in 327 entries, and the tool copies the archive built so far at every entry: about 280 GB
+# copied in all, so its time is the host's memory bandwidth. Hosted runners took 257 s and 281 s
+# from a leg's start to its first row, most of it this build, and once ran past the old bound of
+# 300 s. 1,200 s is four times the slowest build seen to finish, rounded up; the `image:` line
+# shows each run's time against it.
+MKINITRAMFS_BOUND = 1200
+
+
+def initramfs(cpio, files, row, mk=None, bound=None):
+    """tools/mkinitramfs CPIO FILES…, within `bound` seconds (MKINITRAMFS_BOUND); says how long it
+    took on every run, so a build drifting toward its bound shows before it fails (pax#467). True
+    when it built; False, and `row` failed by name, when it ran past the bound."""
+    mk = mk or ROOT / 'tools/mkinitramfs'
+    bound = bound or MKINITRAMFS_BOUND
+    t = time.monotonic()
+    try:
+        run([mk, cpio] + files, timeout=bound)
+    except subprocess.TimeoutExpired:
+        bad(row, 'tools/mkinitramfs ran past its bound of %d s on %s (%d arguments)' % (bound, cpio.name, len(files)))
+        return False
+    say('image: %s, %d arguments, %d bytes, packed by tools/mkinitramfs in %.1f s (bound %d s)'
+        % (cpio.name, len(files), cpio.stat().st_size, time.monotonic() - t, bound))
+    return True
 
 
 def leaks(places):
@@ -700,7 +728,8 @@ def image(work, shadow_text, client, repo):
             files.append('%s/:755:1000:1000' % g)
         else:
             files.append('%s=%s:%s:1000:1000' % (g, p, '755' if os.access(p, os.X_OK) else '644'))
-    run([ROOT / 'tools/mkinitramfs', work / 'image.cpio'] + files)
+    if not initramfs(work / 'image.cpio', files, 'B0'):
+        return None, None
     run([ROOT / 'tools/mkimage', '--conf', ROOT / 'boot/limine-initramfs-quiet.conf', '--add', work / 'image.cpio',
          'initramfs.cpio', ARGS.elf, work / 'image.iso'])
     vol = work / 'keys-d'
@@ -1281,7 +1310,8 @@ def live_image(work):
              if l and not l.startswith(('/etc/pax-run=', '/etc/fstab='))]
     (work / 'live.run').write_text('/bin/pelt /etc/pax-live-login\n')
     files += ['/etc/pax-run=%s:644' % (work / 'live.run'), '/etc/pax-live-login=%s:644' % (ROOT / 'user/usb-login.sh')]
-    run([ROOT / 'tools/mkinitramfs', work / 'live.cpio'] + files)
+    if not initramfs(work / 'live.cpio', files, 'B11'):
+        return None
     run([ROOT / 'tools/mkimage', '--conf', ROOT / 'boot/limine-initramfs-quiet.conf', '--add', work / 'live.cpio',
          'initramfs.cpio', ARGS.elf, work / 'live.iso'])
     return work / 'live.iso'
@@ -1340,6 +1370,9 @@ def main():
     shadow_text, pax_line = make_shadow(work)
     repo = seed_repo(work)
     iso, vol = image(work, shadow_text, client, repo)
+    if iso is None:
+        say('mpx5-burrowd %s %s: FAIL %s' % (ARGS.tier, ARGS.leg, ' '.join(FAILS)))
+        return 1
     ok('B0', 'the image (%d bytes), its /etc/shadow (pax at the shipped cost), the keys volume' % iso.stat().st_size)
     net = Net(out)
     linux = LinuxSide(out, pax_line, client.pub('pax'), repo, image_setenv())
@@ -1373,11 +1406,13 @@ def main():
             con2.quit(120)
         b3 = out / 'boot3-stick'
         b3.mkdir()
-        con3 = Console(b3, live_image(work), None)
-        try:
-            stick_rows(con3, client)
-        finally:
-            con3.quit(120)
+        live = live_image(work)
+        if live:
+            con3 = Console(b3, live, None)
+            try:
+                stick_rows(con3, client)
+            finally:
+                con3.quit(120)
     finally:
         linux.close()
         net.close()

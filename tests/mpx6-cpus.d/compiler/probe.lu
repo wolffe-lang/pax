@@ -1,0 +1,16 @@
+//! member: false
+// Build-only witness: assembly GS access and publication through CAS.
+extern "c" fn cpu_self() -> u64
+extern "c" fn cpu_swap()
+export fn cpu_pointer() -> u64 { unsafe { cpu_self() } }
+export fn cpu_exchange_bases() { unsafe { cpu_swap() } }
+export fn cpu_claim(address: u64) -> bool {
+    let p = unsafe { address as *u64 }
+    let seen = unsafe { p.atomic_load(Order.relaxed) }
+    if seen != 0 { return false }
+    let (old, ok) = unsafe { p.atomic_cas(0, 1, Order.acquire, Order.relaxed) }
+    ok && old == 0
+}
+export fn cpu_publish(address: u64) {
+    unsafe { (address as *u64).atomic_store(0, Order.release) }
+}

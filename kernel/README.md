@@ -1,5 +1,13 @@
 # kernel/
 
+PAX currently runs on one logical processor. At boot it counts the enabled
+processors in the ACPI MADT and reports how many are available and that one
+is active; it starts no secondary processor. `/proc/pax-cpus` reports the same
+counts, with online-capable-only and disabled entries separate. Missing or
+unusable firmware data means `available unknown`, not an invented count.
+The parser and boot/proc agreement are tested by `tests/mpx6-cpus`.
+
+
 The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.35 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair; px36 to 0.2.28; px51 to 0.2.32; px53 to 0.2.33 and px57 to 0.2.34, each with no source change and no section's size moved: notes/px53-the-pins-0233.md §J, notes/px57-the-pins-0234.md §J; px65 to 0.2.35, no source change, every kernel's `.text` 80 bytes longer and no other section moved, all of it the freestanding runtime's new `__wolf_rt_list_reserve`: notes/px65-the-pins-0235.md). `kmain.lu` brings up COM1,
 reads what Limine handed it and prints one line each — the banner, the
 UART, the bootloader and base revision, the firmware, a memory-map
@@ -1365,7 +1373,7 @@ pass measures how long, ranks the paths, and makes three of them short.
 | module | change |
 |---|---|
 | `latency/` (new) | the instrument, on only with `latency` on the command line (`start`, from `kmain_console` before interrupts go on): boot/isr.S's common path opens an interrupts-off interval on entry from IF set (its RIP, vector and %rax) and closes it on resuming a frame with IF set; `pax_irq_save`/`pax_irq_restore`, `pax_wait` and `pax_enter_user` likewise; `pax_lat_close` keeps the longest since boot and since the last read, a histogram by the cycles' highest bit, and since the last read the longest per system call number, vector and thread slot's irq_save sections; `sched_point` the longest gap between the scheduler's chances; `ticks` delivered against due by kernel/clock; `restart` ends the window |
-| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 59): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
+| `procfs/` | `/proc/pax-latency` (entry 58; `ENTRIES` 64 with the accumulated proc reports): `latency off`, or the instrument's lines (`irqoff`, `schedgap`, `ticks`, `hist`, `sys`, `vec`, `slot`); opening it restarts the window |
 | `sched/` | `latency.sched_point` in `preempt`, `kick` and `run_next`; `who` names a thread for it |
 | `paging/` | `next_leaf`: the next present 4 KiB leaf in a range, an absent table stepped over whole |
 | `vm/` | `unmap_range` and `cut_maps` visit only the leaves `next_leaf` finds (munmap of 1 TiB of nothing: 3 s to under 0.3 ms) |
@@ -1378,7 +1386,7 @@ pass measures how long, ranks the paths, and makes three of them short.
 | module | change |
 |---|---|
 | `timer/` | with `follow_clock` (`kmain_console`, the shipped kernel), `tick` sets the count to the larger of itself plus one and the ticks kernel/clock says are due since the tick was armed, so every deadline counted in ticks (CLOCK_MONOTONIC, CLOCK_REALTIME, sleeps, poll's, epoll's, a receive's and a futex's timeouts, TCP's, ARP's and DHCP's timers) is one in real time; `delivered` counts the interrupts themselves (`drift`, `mark`, kernel/latency's lost ticks). The test kernels count interrupts as before |
-| `sched/` | `wake_urgent`: a thread a device's work woke (`wake_net`, `wake_input`, and `wake_pipes` from the network thread, which `block_net` names) goes to the queue's head marked urgent (`S_URGENT`, a bit a slot); `kick` and `preempt` switch to an urgent head when the running thread is not one; a thread keeps its mark while it runs and loses it when it leaves the CPU |
+| `sched/` | `wake_urgent`: a thread a device's work woke (`wake_net`, `wake_input`, and `wake_pipes` from the network thread, which `block_net` names) goes to the queue's head marked urgent (`B_URGENT`, a bit a slot); `kick` and `preempt` switch to an urgent head when the running thread is not one; a thread keeps its mark while it runs and loses it when it leaves the CPU |
 | `latency/` | lost ticks from `timer.delivered` |
 | `xhci/` | `command` and `control` look at their completion before their deadline, so a stretch that carries the tick count past it does not quarantine a controller that answered during it |
 
@@ -1386,7 +1394,7 @@ pass measures how long, ranks the paths, and makes three of them short.
 
 | module | change |
 |---|---|
-| `sched/` | `S_QUEUED` (a bit a slot: in the run queue) and `S_STARVE` (the tick since which the queue's threads that are not urgent have waited with none of them run), kept by `enqueue`, `enqueue_front`, `dequeue`, `unqueue`, `run_next` and `start`. `starved` is true once that wait reaches `QUANTUM`; then `wake_urgent` puts the thread at the tail without its mark, and `urgent_waits` (what `kick` and `preempt` ask) answers no. `unqueue` also clears an ended thread's urgent mark, which would otherwise pass to the slot's next thread |
+| `sched/` | `B_QUEUED` (a bit a slot: in the run queue) and `S_STARVE` (the tick since which the queue's threads that are not urgent have waited with none of them run), kept by `enqueue`, `enqueue_front`, `dequeue`, `unqueue`, `run_next` and `start`. `starved` is true once that wait reaches `QUANTUM`; then `wake_urgent` puts the thread at the tail without its mark, and `urgent_waits` (what `kick` and `preempt` ask) answers no. `unqueue` also clears an ended thread's urgent mark, which would otherwise pass to the slot's next thread |
 
 ## px141 — sendfile and splice onto a pty (pax#422)
 
@@ -1408,7 +1416,7 @@ the old answer (`notes/dw02-the-entropy-contract.md`).
 | `process/` | `random_word` and `random_fill` are kernel/random's insecure path (AT_RANDOM, TCP's and DHCP's words, `GRND_INSECURE`) |
 | `user/` | `getrandom`: flags 0, `GRND_RANDOM` and `GRND_NONBLOCK` from the strict path (`-EAGAIN`, `-EIO`; `-EAGAIN` for `GRND_NONBLOCK`), `GRND_INSECURE` from the insecure path, 0 bytes answers 0, the staging frame zeroed; a random device's read is getrandom with `GRND_NONBLOCK` when its descriptor has `O_NONBLOCK` |
 | `files/` | `is_random`'s contract restated; a random device's read takes `nonblocking` (px23's) for its `O_NONBLOCK` |
-| `procfs/` | `/proc/pax-random` (entry 59; `ENTRIES` and `NONE` 62): `ready`, `source`, `reason`, `errno`, `rdrand`, `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test` |
+| `procfs/` | `/proc/pax-random` (entry 59; `ENTRIES` and `NONE` 64): `ready`, `source`, `reason`, `errno`, `rdrand`, `rdseed`, `tries`, `draws`, `retried`, `rejected`, `failed`, `folded`, `test` |
 
 ## px130 — the kernel's lines kept, read back, and spared the screen
 
@@ -1420,8 +1428,45 @@ the old answer (`notes/dw02-the-entropy-contract.md`).
 | `signal/`, `user/`, `process/` (px130 change) | a program's ordinary life at `log.INFO`: a death by a signal's default action, a death by a fault, an exec, an exit and a thread's, an `execve` that ended threads, the -ENOSYS, -EBADF and -EFAULT lines, the census lines (a full tree stays a warning) |
 | `user/` (px130 change) | `syslog(2)` (103): actions 0-10 as syslog(2) gives them, every one but READ_ALL and SIZE_BUFFER root's and those two too while dmesg_restrict is 1 (asked first); READ waits as a pipe's reader does; `loglevel=N` read at `start`; a write to /dev/kmsg (target 11) and to a setting of /proc/sys/kernel (target 12); a writev to /dev/kmsg is one record |
 | `files/` (px130 change) | `/dev/kmsg` (mem's 1:11, 0644, inode 0x15): kind K_KMSG, its open file's offset word the reader's record number and ring offset; a reader held to dmesg_restrict at open (-EPERM), a user's write to the mode (-EACCES); one record a read (-EINVAL for a buffer it does not fit), -EAGAIN or a wait at the end, -EPIPE once for a reader the ring overtook; SEEK_SET, SEEK_END and SEEK_DATA with offset 0 (-ESPIPE for another offset, -EINVAL for another whence); poll; a write a record at its `<N>`'s level and facility (LOG_USER for none or for the kernel's); `setting_write` |
-| `procfs/` (px130 change) | `/proc/sys/kernel/dmesg_restrict` and `/proc/sys/kernel/printk` (four tab-separated numbers), both 0644 and root's to write (entries 60 and 61; `ENTRIES` and `NONE` 62) |
+| `procfs/` (px130 change) | `/proc/sys/kernel/dmesg_restrict` and `/proc/sys/kernel/printk` (four tab-separated numbers), both 0644 and root's to write (entries 60 and 61; `ENTRIES` and `NONE` 64) |
 | `sched/` (px130 change) | `wake_sleepers` makes every pipe waiter ready when a record came while a log reader waited |
 | `console/`, `ahci/` (px130 change) | the bytes they wrote to COM1 inside a kernel line go through `log.put_byte` |
 | `kmain_console.lu` (px130 change) | `log.past_boot()` as the first program starts |
 | `../boot/console.S` (px130 change) | `pax_log_line` (2 words), `pax_kmsg_state` (32 words), `pax_kmsg_buf` (128 KiB), `pax_kmsg_line`, `pax_kmsg_user`, `pax_kmsg_out` |
+
+## px126 — process slots: 64 to 1024
+
+The urgent and queued flags each occupy sixteen 64-bit words, separate from the scalar state.
+A slot selects its word and bit independently, so slots above 63 do not alias lower slots.
+The high-water, deadline and refusal counters use distinct scalar words; urgency still yields
+after a quantum when a non-urgent thread is waiting.
+
+| module or file | what |
+|---|---|
+| `sched/` (px126 change) | 1024 slots (64 before); a slot costs what it holds while it lives: a thread its kernel stack (four frames) and its FPU area (one), a process its area too (twelve frames, mapped at `0xffffd04000000000 + s * 64 KiB` in PML4 slot 416 while the slot leads a process, the span's top 16 KiB never mapped; MAIN's at `start`; a thread of a group and a kernel thread have none, and asking one's is a named panic; `exec_alone` moves the leader's frames to the caller's span instead of copying 48 KiB); every page table both regions need taken at `start` (32 each, so the frames line stays balanced); every walk of the slots stops at `top` (one past the highest slot not free); the tick and every switch walk only when a deadline has come (`S_WAKE_AT`, lowered by each wait that gets one); `pax_pid_hint` (`pid mod 4096` to the slot) before any walk in `live_slot`, `proc_slot`, `tid_slot`, `trace_live`; `process_ends` marks the children whose groups it may orphan in a slot word (the 64-bit mask it kept was wrong past slot 63); `first_refusal`: the first of a run of clones refused for want of a slot; `NO_AREA` |
+| `fpu/` (px126 change) | an area per live slot, taken with the slot's kernel stack and given back with it (`area_new`, `area_free`); `start` takes the template's and slot 0's (64 frames, every slot's, before); a slot switched or asked with no area is a named panic; `slots` for sched's check |
+| `process/` (px126 change) | a fork whose area finds no frames is refused by name (`no frames for a process's area`, -EAGAIN); `no free process slot` is written for the first refused clone of a run and not for the ones after it until a slot is free again (each still -EAGAIN) |
+| `procfs/` (px126 change) | a task reference's slot in sixteen bits (seven before); the task walks stop at `sched.top()` |
+| `vm/` (px126 change) | `cut_maps` walks to `sched.top()` |
+| `trace_state/` (px126 change) | 1024 slots |
+| `../boot/sched.S` | `pax_threads`, `pax_siginfo`, `pax_debugregs` and `pax_trace_state` for 1024 slots; `pax_procs` gone (3 MiB at 64 slots); `pax_slot_words` (two a slot) and `pax_pid_hint` (4096 words): 1.9 MiB of `.bss` in all where 64 slots took 3.1 MiB |
+| `../boot/fpu.S` | `pax_fpu_state` 1032 words |
+
+## px146 — /proc/pax-security: each protection and its state
+
+What stands between PAX's kernel and a security boundary, read at each open
+from the registers and the live page tables where it can be measured, and from
+the kernel's fixed policy where it is policy. Nothing here turns a protection on
+or off; the file only says where each stands.
+
+| module | change |
+|---|---|
+| `procfs/` | `/proc/pax-security` (entry 63; `ENTRIES` and `NONE` 64), 0444: one `name state` line a protection, `on` when it holds: `nx` (IA32_EFER.NXE), `wp` (CR0.WP), `smep`, `smap` and `umip` (CR4; `absent` when CPUID has none), `kernel-wx` (no leaf of the kernel half both writable and executable, walked in the reader's tables), `kstack-guard` (the reading thread's kernel stack mapped and its guard below unmapped), `ist-guard` (an unmapped page below each IST stack), `kpti` (the reader's tables carry none of the kernel half), `ibrs` (IA32_SPEC_CTRL.IBRS where leaf 7 enumerates it), `arch-capabilities` (IA32_ARCH_CAPABILITIES as the CPU reports it, or `absent`), then the fixed policy: `aslr`, `user-wx` (no user mapping both writable and executable), `stack-nx` and `null-page` (`paxsec`, one function a group of lines) |
+
+`tests/mpx12-security` (run by `tests/mpx3-user` as U11) holds the file to what
+can be seen from outside it, per tier and firmware, under KVM with `-cpu host`,
+TCG with `-cpu max` and TCG with `-cpu qemu64`: the halted machine's EFER, CR0
+and CR4 and its `info tlb`, CPUID read in ring 3, the image's symbols, and a
+ring-3 witness for each protection a program can observe (a call into a
+read-write page and onto the stack, SGDT, an RWX mapping, a mapping at address
+0, two runs' addresses).

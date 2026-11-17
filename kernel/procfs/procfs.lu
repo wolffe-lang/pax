@@ -123,6 +123,7 @@ use boot_info
 use bootlog
 use bootmark
 use cred
+use cpus
 use frames
 use kmsg
 use latency
@@ -136,12 +137,21 @@ use uaccess
 use udp
 use unix
 
+// px146: /proc/pax-security's reads (boot/fpu.S's CPUID, boot/cpu.S's RDMSR,
+// boot/isr.S's IST stacks).
+extern "c" fn pax_cpuid(leaf: u64, sub: u64, reg: u64) -> u64
+extern "c" fn pax_rdmsr(msr: u64) -> u64
+extern "c" let pax_ist1_stack: *u8
+extern "c" let pax_ist2_stack: *u8
+extern "c" let pax_ist3_stack: *u8
+extern "c" let pax_ist4_stack: *u8
+
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 62
+pub const ENTRIES: u64 = 64
 /// No entry.
-pub const NONE: u64 = 62
+pub const NONE: u64 = 64
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -228,6 +238,11 @@ pub const PAXRAND: u64 = 59
 /// write the first), fixed entries of `/proc/sys/kernel`, both 0644.
 pub const DMESG_RESTRICT: u64 = 60
 pub const PRINTK: u64 = 61
+/// Firmware's available processors, separate from the one PAX uses.
+pub const PAXCPUS: u64 = 62
+/// px146: `/proc/pax-security` (`paxsec`: each protection between PAX and a
+/// security boundary, and its state now), in `/proc`, read-only.
+pub const PAXSEC: u64 = 63
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
@@ -296,11 +311,14 @@ const G_PAXLAT: u64 = 30 // px131
 const G_PAXRAND: u64 = 31 // dw02
 const G_DMESG: u64 = 32 // px130
 const G_PRINTK: u64 = 33
+const G_PAXCPUS: u64 = 34
+const G_PAXSEC: u64 = 35 // px146
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
 const RLIMIT_CORE: u64 = 4
 const RLIMIT_NOFILE: u64 = 7
+const RLIMIT_NPROC: u64 = 6 // px126
 pub const RLIM_NLIMITS: u64 = 16
 pub const RLIM_INFINITY: u64 = 0xffffffffffffffff
 /// One policy for the eagerly mapped initial ELF stack and RLIMIT_STACK.
@@ -320,7 +338,8 @@ const S_IFREG: u64 = 0x8000
 /// is the stack PAX gives, the descriptors' the table's; the core
 /// file's soft limit 0 and its hard one unlimited, Linux's boot default
 /// (measured, px53): PAX writes no core and sets no wait status's core
-/// bit, and 0 says so; every other unlimited. None can be set.
+/// bit, and 0 says so; px126: the processes' (RLIMIT_NPROC) `sched.NPROC`,
+/// a user's threads (root exempt); every other unlimited. None can be set.
 pub fn rlimit(res: u64, fds: u64) -> (u64, u64) {
     if res == RLIMIT_STACK {
         return (STACK_LIMIT, STACK_LIMIT)
@@ -330,6 +349,9 @@ pub fn rlimit(res: u64, fds: u64) -> (u64, u64) {
     }
     if res == RLIMIT_CORE {
         return (0, RLIM_INFINITY)
+    }
+    if res == RLIMIT_NPROC {
+        return (sched.NPROC, sched.NPROC) // px126: a user's threads, root exempt (kernel/process)
     }
     (RLIM_INFINITY, RLIM_INFINITY)
 }
@@ -395,7 +417,7 @@ pub fn set(r: u64, v: u64) -> bool {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == DMESG_RESTRICT || e == PRINTK
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == DMESG_RESTRICT || e == PRINTK || e == PAXCPUS || e == PAXSEC
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -512,6 +534,11 @@ pub fn self_limits() -> u64 {
 pub fn entry(r: u64) -> u64 {
     r & EMASK
 }
+
+/// px126: a task's slot + 1 in a reference, from bit 40: sixteen bits
+/// (seven, 127, before: the table had 64 slots), below kernel/files'
+/// node type at bit 56.
+const SLOT_MASK: u64 = 0xffff
 
 /// px25: the pid a reference carries (0: none, a fixed entry). px79: 24
 /// bits (a block device's references carry the device from bit 40).
@@ -645,6 +672,8 @@ pub fn name(e: u64) -> str {
     if e == PAXBOOTLOG { return "pax-bootlog" }
     if e == PAXLAT { return "pax-latency" } // px131
     if e == PAXRAND { return "pax-random" } // dw02
+    if e == PAXCPUS { return "pax-cpus" }
+    if e == PAXSEC { return "pax-security" } // px146
     if e == SMOUNTS || e == PMOUNTS || e == MOUNTSLINK { return "mounts" } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return "mountinfo" }
     if e == SYSBLOCK || e == SYSCLASSBLOCK { return "block" } // px79
@@ -732,7 +761,7 @@ pub fn parent(r: u64) -> u64 {
     }
     if e == BIDENT { return dev_ref(dev_of(r), BDEV) }
     if e >= BATTR && e < BATTR + 9 { return dev_ref(dev_of(r), if e == BATTR + A_MODEL || e == BATTR + A_SERIAL { BIDENT } else { BDEV }) }
-    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND { return 0 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == PAXCPUS || e == PAXSEC { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
     if e == CORE_PATTERN || e == PTYDIR || e == DMESG_RESTRICT || e == PRINTK { return KERNEL } // px130: dmesg_restrict, printk
@@ -783,6 +812,8 @@ fn gen(r: u64) -> u64 {
     if e == PAXBOOTLOG { return G_PAXBOOTLOG }
     if e == PAXLAT { return G_PAXLAT } // px131
     if e == PAXRAND { return G_PAXRAND } // dw02
+    if e == PAXCPUS { return G_PAXCPUS }
+    if e == PAXSEC { return G_PAXSEC } // px146
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
@@ -903,7 +934,7 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     var seen: u64 = 0
     if d != ROOT && entry(d) == PTASK {
         var sl: u64 = 0
-        while sl < sched.SLOTS {
+        while sl < sched.top() { // px126: the slots in use, not the table
             if sched.thread_tid(sl, pid_of(d)) != 0 {
                 if seen == k { return (pid_of(d) << 16) | ((sl + 1) << 40) | PTID }
                 seen += 1
@@ -1049,6 +1080,285 @@ fn paxrand(base: u64) -> u64 {
         return put_b(base, n, 10)
     }
     put_s(base, n, "\ntest none\n")
+}
+
+/// Available firmware processors are distinct from the one active processor.
+fn paxcpus(base: u64) -> u64 {
+    var n = put_s(base, 0, "available ")
+    if cpus.valid() { n = put_dec(base, n, cpus.available()) }
+    else { n = put_s(base, n, "unknown") }
+    n = put_s(base, n, "\nactive ")
+    n = put_dec(base, n, cpus.active())
+    if cpus.valid() {
+        n = put_s(base, n, "\nsource ACPI MADT\nonline-capable ")
+        n = put_dec(base, n, cpus.online_capable())
+        n = put_s(base, n, "\ndisabled ")
+        n = put_dec(base, n, cpus.disabled_entries())
+        return put_b(base, n, 10)
+    }
+    put_s(base, n, "\nsource unavailable\n")
+}
+
+// --- px146: /proc/pax-security ----------------------------------------------------
+// Bits from Intel's SDM vol. 3A §2.5 (CR0.WP bit 16; CR4.UMIP 11, SMEP 20, SMAP
+// 21), §2.2.1 and vol. 4 (IA32_EFER.NXE bit 11; IA32_SPEC_CTRL 0x48, IBRS bit 0;
+// IA32_ARCH_CAPABILITIES 0x10a), vol. 2's CPUID (leaf 7 subleaf 0: EBX bits 7 SMEP
+// and 20 SMAP, ECX bit 2 UMIP, EDX bits 26 IBRS/IBPB and 29 ARCH_CAPABILITIES) and
+// §4.6.1 (a translation is writable when every level's RW is set and executable when
+// no level's XD is), and the AMD64 APM vol. 2 §3.1 and §5.6.
+const SEC_CR0_WP: u64 = 0x10000
+const SEC_CR4_UMIP: u64 = 0x800
+const SEC_CR4_SMEP: u64 = 0x100000
+const SEC_CR4_SMAP: u64 = 0x200000
+const SEC_EFER_NXE: u64 = 0x800
+const SEC_ID7_SMEP: u64 = 0x80 // EBX bit 7
+const SEC_ID7_SMAP: u64 = 0x100000 // EBX bit 20
+const SEC_ID7_UMIP: u64 = 0x4 // ECX bit 2
+const SEC_ID7_IBRS: u64 = 0x4000000 // EDX bit 26
+const SEC_ID7_ARCHCAP: u64 = 0x20000000 // EDX bit 29
+const SEC_SPEC_CTRL: u64 = 0x48
+const SEC_ARCH_CAP: u64 = 0x10a
+const SEC_P: u64 = 0x1
+const SEC_RW: u64 = 0x2
+const SEC_PS: u64 = 0x80
+const SEC_NX: u64 = 0x8000000000000000
+const SEC_ADDR: u64 = 0x000ffffffffff000
+
+/// px146: `/proc/pax-security`'s text at `base`: its length. One `name state`
+/// line a protection, in this order, made at each open:
+///
+///     nx on|off                 IA32_EFER.NXE
+///     wp on|off                 CR0.WP
+///     smep on|off|absent        CR4.SMEP; absent when CPUID has none
+///     smap on|off|absent        CR4.SMAP
+///     umip on|off|absent        CR4.UMIP
+///     kernel-wx on|off          no leaf of the kernel half both writable and executable
+///     kstack-guard on|off       the reading thread's kernel stack has its unmapped guard
+///     ist-guard on|off          each IST stack has an unmapped page below it
+///     kpti on|off               the reader's tables carry none of the kernel half
+///     ibrs on|off|absent        IA32_SPEC_CTRL.IBRS (Intel's enumeration, leaf 7)
+///     arch-capabilities 0x<v>|absent   IA32_ARCH_CAPABILITIES as the CPU reports it
+///     aslr on|off               ring 3's addresses move between runs
+///     user-wx on|off            no user mapping may be both writable and executable
+///     stack-nx on|off           the user stack is never executable
+///     null-page on|off          the page at address 0 cannot be mapped
+///
+/// `on` is the protection holding. The first eleven are measured (registers,
+/// CPUID, the live tables); the last four are the kernel's fixed policy
+/// (kernel/elf, kernel/process, kernel/vm), each held to a witness in ring 3 by
+/// tests/mpx12-security. One function a group, as `paxboot`'s (px122).
+fn paxsec(base: u64) -> u64 {
+    var n = paxsec_cpu(base)
+    n = paxsec_tables(base, n)
+    n = paxsec_spec(base, n)
+    paxsec_policy(base, n)
+}
+
+/// px146: `name state` and a newline at `at`.
+fn sec_line(base: u64, at: u64, name: str, state: str) -> u64 {
+    var n = put_s(base, at, name)
+    n = put_b(base, n, 32)
+    n = put_s(base, n, state)
+    put_b(base, n, 10)
+}
+
+fn on_off(v: bool) -> str {
+    if v {
+        return "on"
+    }
+    "off"
+}
+
+/// px146: on or off by `bit` of `reg`; absent when the CPU has no such feature.
+fn cpu_state(has: bool, reg: u64, bit: u64) -> str {
+    if !has {
+        return "absent"
+    }
+    on_off(reg & bit != 0)
+}
+
+/// px146: CPUID leaf 7 subleaf 0's register `reg` (1 EBX, 2 ECX, 3 EDX); 0 when
+/// the CPU's highest leaf is below 7.
+fn cpuid7(reg: u64) -> u64 {
+    // # Safety: CPUID reads nothing and writes only its registers.
+    let top = unsafe { pax_cpuid(0, 0, 0) }
+    if top < 7 {
+        return 0
+    }
+    // # Safety: as above.
+    unsafe { pax_cpuid(7, 0, reg) }
+}
+
+/// px146: nx, wp, smep, smap and umip, from EFER, CR0, CR4 and CPUID.
+fn paxsec_cpu(base: u64) -> u64 {
+    let cr4 = paging.cr4()
+    let b = cpuid7(1)
+    var n = sec_line(base, 0, "nx", on_off(paging.efer() & SEC_EFER_NXE != 0))
+    n = sec_line(base, n, "wp", on_off(paging.cr0() & SEC_CR0_WP != 0))
+    n = sec_line(base, n, "smep", cpu_state(b & SEC_ID7_SMEP != 0, cr4, SEC_CR4_SMEP))
+    n = sec_line(base, n, "smap", cpu_state(b & SEC_ID7_SMAP != 0, cr4, SEC_CR4_SMAP))
+    sec_line(base, n, "umip", cpu_state(cpuid7(2) & SEC_ID7_UMIP != 0, cr4, SEC_CR4_UMIP))
+}
+
+/// px146: kernel-wx, kstack-guard, ist-guard and kpti, from the live tables (the
+/// reader's: a process's, whose kernel half is shared, px09).
+fn paxsec_tables(base: u64, at: u64) -> u64 {
+    let live = paging.live()
+    var n = sec_line(base, at, "kernel-wx", on_off(sec_wx_leaves(live) == 0))
+    n = sec_line(base, n, "kstack-guard", on_off(sec_kstack_guarded(live)))
+    n = sec_line(base, n, "ist-guard", on_off(sec_ist_guarded(live)))
+    sec_line(base, n, "kpti", on_off(paging.kernel_half(live, sched.pml4(), 0) == 0))
+}
+
+/// px146: entry `i` of the table at physical `t`, read through the HHDM.
+fn sec_entry(t: u64, i: u64) -> u64 {
+    // # Safety: `t` is a table of the live structures (CR3's PML4, or a table an
+    // entry of them names: frames from kernel/frames, in the HHDM); i < 512 keeps
+    // the eight bytes inside it. Only read.
+    unsafe { ((frames.hhdm() + t + i * 8) as *u64).read_volatile() }
+}
+
+/// px146: the rights a walk carries past entry `e`: RW while every level so far
+/// has it, NX once any level has it.
+fn sec_acc(acc: u64, e: u64) -> u64 {
+    (acc & e & SEC_RW) | ((acc | e) & SEC_NX)
+}
+
+/// px146: 1 when rights `acc` make a leaf both writable and executable.
+fn sec_bad(acc: u64) -> u64 {
+    if acc & SEC_RW != 0 && acc & SEC_NX == 0 {
+        return 1
+    }
+    0
+}
+
+/// px146: how many present leaves of the kernel half (PML4 entries 256-511) of
+/// the structures at `pml4` are both writable and executable.
+fn sec_wx_leaves(pml4: u64) -> u64 {
+    var wx: u64 = 0
+    var i: u64 = 256
+    while i < 512 {
+        let e4 = sec_entry(pml4, i)
+        if e4 & SEC_P != 0 {
+            wx += sec_wx_pdpt(sec_acc(SEC_RW, e4), e4 & SEC_ADDR)
+        }
+        i += 1
+    }
+    wx
+}
+
+fn sec_wx_pdpt(acc: u64, t: u64) -> u64 {
+    var wx: u64 = 0
+    var i: u64 = 0
+    while i < 512 {
+        let e = sec_entry(t, i)
+        if e & SEC_P != 0 && e & SEC_PS != 0 {
+            wx += sec_bad(sec_acc(acc, e))
+        } else if e & SEC_P != 0 {
+            wx += sec_wx_pd(sec_acc(acc, e), e & SEC_ADDR)
+        }
+        i += 1
+    }
+    wx
+}
+
+fn sec_wx_pd(acc: u64, t: u64) -> u64 {
+    var wx: u64 = 0
+    var i: u64 = 0
+    while i < 512 {
+        let e = sec_entry(t, i)
+        if e & SEC_P != 0 && e & SEC_PS != 0 {
+            wx += sec_bad(sec_acc(acc, e))
+        } else if e & SEC_P != 0 {
+            wx += sec_wx_pt(sec_acc(acc, e), e & SEC_ADDR)
+        }
+        i += 1
+    }
+    wx
+}
+
+fn sec_wx_pt(acc: u64, t: u64) -> u64 {
+    var wx: u64 = 0
+    var i: u64 = 0
+    while i < 512 {
+        let e = sec_entry(t, i)
+        if e & SEC_P != 0 {
+            wx += sec_bad(sec_acc(acc, e))
+        }
+        i += 1
+    }
+    wx
+}
+
+/// px146: whether `va`'s page translates in the structures at `pml4`.
+fn sec_mapped(pml4: u64, va: u64) -> bool {
+    let pa = paging.translate(pml4, va & !(PAGE - 1)) else 0
+    pa != 0
+}
+
+/// px146: whether the reading thread's kernel stack is mapped with every page of
+/// its guard below it unmapped (kernel/sched: 48 KiB never mapped under 16 KiB).
+fn sec_kstack_guarded(pml4: u64) -> bool {
+    let id = sched.self_id()
+    let g = sched.guard_lo(id)
+    let lo = sched.stack_lo(id)
+    if g == 0 || lo <= g || !sec_mapped(pml4, lo) {
+        return false
+    }
+    var va = g
+    while va < lo {
+        if sec_mapped(pml4, va) {
+            return false
+        }
+        va += PAGE
+    }
+    true
+}
+
+/// px146: whether each of boot/isr.S's four IST stacks has an unmapped page
+/// below its lowest byte, so an overflow faults instead of writing what lies there.
+fn sec_ist_guarded(pml4: u64) -> bool {
+    // # Safety: link-time addresses; nothing is read.
+    let (a, b, c, d) = unsafe { (pax_ist1_stack as u64, pax_ist2_stack as u64, pax_ist3_stack as u64, pax_ist4_stack as u64) }
+    !sec_mapped(pml4, a - 1) && !sec_mapped(pml4, b - 1) && !sec_mapped(pml4, c - 1) && !sec_mapped(pml4, d - 1)
+}
+
+/// px146: ibrs and arch-capabilities, read only where CPUID says the MSR exists.
+fn paxsec_spec(base: u64, at: u64) -> u64 {
+    let d = cpuid7(3)
+    var n = sec_line(base, at, "ibrs", sec_ibrs(d))
+    n = put_s(base, n, "arch-capabilities ")
+    if d & SEC_ID7_ARCHCAP == 0 {
+        n = put_s(base, n, "absent")
+        return put_b(base, n, 10)
+    }
+    // # Safety: RDMSR of IA32_ARCH_CAPABILITIES, which CPUID.(EAX=7,ECX=0):EDX[29] says exists.
+    let v = unsafe { pax_rdmsr(SEC_ARCH_CAP) }
+    n = put_s(base, n, "0x")
+    n = put_hex16(base, n, v)
+    put_b(base, n, 10)
+}
+
+/// px146: IA32_SPEC_CTRL.IBRS, given CPUID leaf 7's EDX `d`.
+fn sec_ibrs(d: u64) -> str {
+    if d & SEC_ID7_IBRS == 0 {
+        return "absent"
+    }
+    // # Safety: RDMSR of IA32_SPEC_CTRL, which CPUID.(EAX=7,ECX=0):EDX[26] says exists.
+    let v = unsafe { pax_rdmsr(SEC_SPEC_CTRL) }
+    on_off(v & 1 != 0)
+}
+
+/// px146: the kernel's fixed policy for ring 3: no ASLR (kernel/elf loads ET_EXEC
+/// at its link address; kernel/process's stack top, kernel/vm's mmap top and the
+/// break after the image never move); no user W^X (kernel/vm gives PROT_WRITE |
+/// PROT_EXEC a writable executable leaf); the stack no-execute whatever
+/// PT_GNU_STACK says (kernel/process); MAP_FIXED below 64 KiB refused (kernel/vm).
+fn paxsec_policy(base: u64, at: u64) -> u64 {
+    var n = sec_line(base, at, "aslr", "off")
+    n = sec_line(base, n, "user-wx", "off")
+    n = sec_line(base, n, "stack-nx", "on")
+    sec_line(base, n, "null-page", "on")
 }
 
 /// px131: `/proc/pax-latency`'s text at `base`: its length; then
@@ -1948,7 +2258,7 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
     if g == G_STATUS {
         n = status(base, sched.SLOTS, 0, area, umask, fds, sched.SLOTS)
     } else if g == G_PSTATUS {
-        n = status(base, slot, pid_of(r), area, umask, fds, if entry(r) == TSTATUS { ((r >> 40) & 127) - 1 } else { sched.SLOTS })
+        n = status(base, slot, pid_of(r), area, umask, fds, if entry(r) == TSTATUS { ((r >> 40) & SLOT_MASK) - 1 } else { sched.SLOTS })
     } else if g == G_STAT {
         n = stat(base, if slot == sched.SLOTS { sched.proc_slot(sched.self_pid()) } else { slot }, slot == sched.SLOTS, area)
     } else if g == G_MEMINFO {
@@ -1984,10 +2294,14 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = paxboot(base) // px118
     } else if g == G_PAXBOOTLOG {
         n = bootlog.prev_len() // px118: the length only; kernel/files makes each read's bytes
+    } else if g == G_PAXCPUS {
+        n = paxcpus(base)
     } else if g == G_PAXLAT {
         n = paxlat(base) // px131
     } else if g == G_PAXRAND {
         n = paxrand(base) // dw02
+    } else if g == G_PAXSEC {
+        n = paxsec(base) // px146
     } else if g == G_CORE_PATTERN {
         n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
     } else if g == G_PTYNR {
@@ -2022,7 +2336,7 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
 
 pub fn is_mem(r: u64) -> bool { entry(r) == PMEM || entry(r) == TMEM }
 fn task_tid(r: u64) -> u64 {
-    let slot = (r >> 40) & 127
+    let slot = (r >> 40) & SLOT_MASK
     if slot == 0 { return 0 }
     sched.thread_tid(slot - 1, pid_of(r))
 }
@@ -2031,7 +2345,7 @@ pub fn trace_dir(r: u64) -> bool { entry(r) == PTASK || entry(r) == PTID }
 /// A dynamic task-directory child named by the caller's kernel buffer.
 pub fn trace_child(r: u64, a: u64, n: u64) -> u64 {
     var k: u64 = 0
-    while k <= sched.SLOTS {
+    while k <= sched.top() { // px126: a group has no more threads than slots in use
         let c = child_at(r, k)
         if c == NONE { return NONE }
         if name_len(c) == n {

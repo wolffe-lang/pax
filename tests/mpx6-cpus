@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Read-only processor discovery: no secondary processor enters the kernel.
+# CPUS_TIER=native|release CPUS_FIRMWARE='bios uefi' CPUS_COUNTS='1 2 4 16'.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+cd "$PAX_ROOT"
+bash tests/mpx6-cpus.d/source-census.sh
+work=$PAX_BUILD/mpx6-cpus
+mkdir -p "$work"
+flags=(); [ "${CPUS_TIER:-native}" != release ] || flags=(--release)
+if [ -z "${CPUS_IMAGES:-}" ]; then
+    tools/fetch-limine
+    tools/build-kernel "${flags[@]}" --src kernel/kmain_console.lu "$work"
+    tools/build-kernel "${flags[@]}" --src kernel/kmain_cpucheck.lu "$work/check"
+    tools/mkimage "$work/check/kmain_cpucheck.elf" "$work/check.iso"
+    gcc -nostdlib -static -fno-stack-protector -fno-pie -no-pie -O2 -o "$work/cpuprobe" tests/mpx6-cpus.d/probe.c
+    printf '/bin/cpuprobe\n' > "$work/run"
+    tools/mkinitramfs "$work/root.cpio" /bin/cpuprobe="$work/cpuprobe":0755 /etc/pax-run="$work/run"
+    printf 'timeout: 0\n/PAX\n    protocol: limine\n    path: boot():/boot/pax\n    module_path: boot():/boot/initramfs.cpio\n    cmdline: quiet nonet pax.nobeep pax.nomarks\n' > "$work/limine.conf"
+    tools/mkimage --conf "$work/limine.conf" --add "$work/root.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/cpus.iso"
+else
+    work=$CPUS_IMAGES
+fi
+for fw in ${CPUS_FIRMWARE:-bios uefi}; do
+    status=0
+    tools/qemu-run --firmware "$fw" --timeout 20 --serial "$work/check-$fw.log" "$work/check.iso" || status=$?
+    if [ "$status" != 33 ]; then
+        printf 'FAIL CPU-TABLE %s status=%s\n' "$fw" "$status"; exit 1
+    fi
+    printf 'PASS CPU-TABLE %s\n' "$fw"
+    for count in ${CPUS_COUNTS:-1 2 4 16}; do
+        serial=$work/cpus-$fw-$count.log
+        if ! tools/qemu-halt --firmware "$fw" --timeout 45 --no-screen --serial "$serial" --elf "$work/kmain_console.elf" --marker 'halt' --cmd 'info registers -a' --qemu -smp --qemu "$count" "$work/cpus.iso"; then
+            printf 'FAIL CPU-BOOT %s smp=%s\n' "$fw" "$count"; exit 1
+        fi
+        python3 -I tests/mpx6-cpus.d/rows.py "$serial" "$count"
+    done
+    serial=$work/cpus-$fw-disabled.log
+    tools/qemu-halt --firmware "$fw" --timeout 45 --no-screen --serial "$serial" --elf "$work/kmain_console.elf" --marker halt --qemu -smp --qemu 4,maxcpus=16 "$work/cpus.iso"
+    python3 -I tests/mpx6-cpus.d/rows.py "$serial" 4 12
+    if [ "$fw" = uefi ]; then
+        serial=$work/cpus-uefi-no-acpi.log
+        tools/qemu-halt --firmware uefi --timeout 45 --no-screen --serial "$serial" --elf "$work/kmain_console.elf" --marker halt --qemu -machine --qemu acpi=off --qemu -smp --qemu 4 "$work/cpus.iso"
+        python3 -I tests/mpx6-cpus.d/rows.py "$serial" unknown
+    fi
+done
