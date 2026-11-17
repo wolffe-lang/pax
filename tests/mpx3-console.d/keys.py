@@ -69,7 +69,7 @@ with (out / 'qemu.log').open('wb') as log:
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     data = serial.read_bytes().replace(b'\r', b'') if serial.exists() else b''
-                    for line in data.split(b'\n'):
+                    for line in data.split(b'\n')[:-1]:
                         if line == text or line.startswith(text + b' '): return line
                     if proc.poll() is not None: raise RuntimeError('QEMU exited before ' + repr(text))
                     time.sleep(.05)
