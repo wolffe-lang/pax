@@ -140,10 +140,16 @@ installer has written it, and login, run as pid 1, execs `/bin/init`. At each bo
 
 - `/run`: a fresh tmpfs, 0755, so it is empty at every boot (`/` itself is on the disk); `/run/user` 0755, root's;
   and `/run/user/UID`, 0700, the account's own, for every account whose shell is not a `…/false` or `…/nologin`;
-- what the boot's first program did before: sudo's records emptied, `pax-boot-status record`, the hooks of
-  `/etc/pax-boot.d` (burrowd's among them) in a process group each;
+- what the boot's first program did before: sudo's records emptied, `pax-boot-status record`, utmp emptied and the
+  boot's record in utmp and wtmp (`last` shows it as `reboot   system boot`), the hooks of `/etc/pax-boot.d`
+  (burrowd's and logd's among them) in a process group each;
 - then it gives the console up and, for as long as the machine runs, starts `/bin/login` on it in a session of its
   own (`HOST login:`), waits, and starts it again.
+
+These run once a boot whatever happens at the console: `exec /bin/login` in a shell logs in again in that session
+but runs no hook a second time, restarts no service, keeps sudo's records and writes no second boot record (login
+is not pid 1 then). And while it waits, init reaps every process the kernel hands it, as Linux's pid 1 does: a
+program whose parent ended before it does not stay a zombie under pid 1 once it ends, logged out or not.
 
 **`exit`, `logout` or Ctrl-D at an empty prompt** ends the login shell, and so the session: `HOST login:` comes
 back at once (2 seconds later when something in the session ignores SIGHUP), and the machine keeps running. What
@@ -154,7 +160,10 @@ once its parent has ended, and init reaps it when it ends. What the boot hooks s
 session and never hung up, and an ssh session open across a console logout goes on. The console's terminal modes are
 put back as the boot left them (a program that left it raw or with echo off does not reach the next login), and the
 console is root's 0600 again until the next login gives it to its account. sudo's remembered password does not
-reach the next session: its record names the session's leader, a new process at every login.
+reach the next session: its record names the session's leader, a new process at every login. The logout is in the
+login records at its own time: init marks the session's utmp entry ended and appends that to wtmp, as utmp(5) has
+init do, so `last` shows the session ended at the logout (`last -e`: `logout`, or `signal N` when a signal ended
+the shell), not at the next login.
 
 **The runtime directory.** login sets `XDG_RUNTIME_DIR=/run/user/UID` (the XDG Base Directory Specification's),
 making the directory when it is not there (an account added since the boot). It is where a per-user server puts its
