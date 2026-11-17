@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""tests/upgrade-screen-selftest: the upgrade leg's console reading and QMP wait can say no, and say why
+(pax#457). No QEMU: captured screens and a fake socket.
+
+  S1  a screen captured from a live run at 768f9685 (the pelt friendly prompt, `root@? ~# `): the previous
+      run's refusal is still above the new command's echo. Read whole, it trips the stop pattern; read
+      after the new echo, it does not. This is the failure of the leg's U8-mistyped row.
+  S2  the new command typed but not yet echoed: nothing counts yet, so the old refusal cannot trip a wait.
+  S3  the echo is found after any prompt: `$ `, `# `, `> `, the friendly `root@? ~# ` and
+      `root@? ~ [1]# ` (a failed command's status).
+  S4  an echo of the same text in the middle of a line is not an echo (only a prompt precedes one).
+  S5  a screen that scrolled an old echo away: the baseline follows it down and the new echo still counts.
+  S6  the QMP socket appearing late (a loaded host) is waited for.
+  S7  a socket that never appears is a named timeout, not a FileNotFoundError from connect.
+  S8  QEMU dying before its socket is its own named failure, with the exit status.
+  S9  upgrade.py uses these helpers: no fixed `'$ ' +` marker, the QMP wait is the bounded one, and U2's
+      state creates /var/log first.
+"""
+import re
+import sys
+import threading
+import time
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root / 'tests/mpx6-install.d'))
+import upgrade_screen as us
+
+STOPPED = re.search(r'STOPPED = r\'(.*)\'', (root / 'tests/mpx6-install.d/upgrade.py').read_text()).group(1)
+CMD = 'pax-install --upgrade'
+screen = (root / 'tests/mpx6-install.d/screens/u8-friendly-prompt.txt').read_text()
+
+
+def need(ok, name, msg):
+    if not ok:
+        sys.exit(f'FAIL {name}: {msg}')
+
+
+# S1: before the new echo is typed the screen ends at the new echo; the old echo is the first
+before_new = screen[:screen.rindex('root@? ~# ' + CMD)]
+need(re.search(STOPPED, screen, re.M), 'S1', 'the captured screen does not trip the stop pattern whole')
+prior = us.echo_count(before_new, CMD)
+need(prior == 1, 'S1', f'{prior} echoes before the new one, 1 expected')
+scoped = us.scope_after_echo(screen, CMD, prior)
+need(scoped is not None and CMD in scoped, 'S1', f'no scope: {scoped!r}')
+need(not re.search(STOPPED, scoped, re.M), 'S1', f'the old refusal is in the scope: {scoped!r}')
+print('PASS S1: the old refusal trips the stop pattern whole and is outside the scope after the new echo')
+
+# S2
+need(us.scope_after_echo(before_new, CMD, prior) is None, 'S2', 'an echo that is not there yet was found')
+print('PASS S2: before the new echo nothing is in scope')
+
+# S3
+for name, prompt in (('dollar', '$ '), ('hash', '# '), ('angle', '> '), ('friendly', 'root@? ~# '), ('status', 'root@? ~ [1]# ')):
+    text = 'earlier output\n' + prompt + 'ls /mnt\nout\n'
+    got = us.scope_after_echo(text, 'ls /mnt', 0)
+    need(got is not None and got.startswith(prompt[-2:] + 'ls /mnt') and 'earlier' not in got, 'S3', f'{name}: {got!r}')
+print('PASS S3: the echo is found after $ , # , > , root@? ~# and root@? ~ [1]# ')
+
+# S4
+need(us.scope_after_echo('printf "x; ls /mnt"\n', 'ls /mnt', 0) is None, 'S4', 'a mid-line mention counted as an echo')
+need(us.echo_count('see: ls /mnt\n', 'ls /mnt') == 0, 'S4', 'a mid-line mention was counted')
+print('PASS S4: only a prompt before the text makes an echo')
+
+# S5
+base = us.Baseline(CMD, 2)
+need(base.scope('root@? ~# ' + CMD + '\nrefused\n') is None, 'S5', 'one echo is not more than two')
+need(base.prior == 1, 'S5', f'baseline did not follow the scroll: {base.prior}')
+got = base.scope('root@? ~# ' + CMD + '\nrefused\nroot@? ~# ' + CMD + '\n')
+need(got is not None and got.count(CMD) == 1, 'S5', f'the new echo not found after the scroll: {got!r}')
+print('PASS S5: the baseline follows a scroll')
+
+
+# S6-S8
+class Alive:
+    def __init__(self, rc=None):
+        self.rc = rc
+
+    def poll(self):
+        return self.rc
+
+
+tmp = Path(__import__('tempfile').mkdtemp(prefix='upgrade-screen-selftest-'))
+late = tmp / 'late.sock'
+threading.Timer(0.5, late.touch).start()
+t0 = time.monotonic()
+us.wait_for_socket(late, Alive(), 'late', timeout=5, step=.05)
+need(.4 <= time.monotonic() - t0 < 3, 'S6', 'the wait did not span the late socket')
+print('PASS S6: a socket created 0.5 s late is waited for')
+
+
+def raises(fn, text):
+    try:
+        fn()
+    except us.SocketWait as error:
+        return text in str(error), str(error)
+    return False, 'nothing raised'
+
+
+ok, msg = raises(lambda: us.wait_for_socket(tmp / 'never.sock', Alive(), 'never', timeout=.3, step=.05), 'never.sock was not created in')
+need(ok, 'S7', msg)
+print(f'PASS S7: {msg}')
+ok, msg = raises(lambda: us.wait_for_socket(tmp / 'dead.sock', Alive(3), 'dead', timeout=5, step=.05), 'QEMU ended (exit 3)')
+need(ok, 'S8', msg)
+print(f'PASS S8: {msg}')
+
+# S9
+src = (root / 'tests/mpx6-install.d/upgrade.py').read_text()
+need("'$ ' +" not in src, 'S9', "upgrade.py still marks a command with a fixed '$ ' prefix")
+need('us.wait_for_socket(' in src and 'range(200)' not in src, 'S9', 'upgrade.py has not the bounded socket wait')
+need("'mkdir -p /var/log'," in src, 'S9', "U2's state does not create /var/log")
+print('PASS S9: upgrade.py uses the helpers and U2 creates /var/log')
