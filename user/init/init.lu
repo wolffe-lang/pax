@@ -43,15 +43,21 @@
 //!    init was given) started in a child that leads a new session and
 //!    takes the console as its controlling terminal (setsid, TIOCSCTTY
 //!    with 1: taken from a session that opened it after leaving the last
-//!    one, as root may, so the login always has its terminal); init waits, and reaps every other child handed to it as it ends.
-//!    When the session's leader ends, the session is hung up: every
-//!    process still in it (by /proc/PID/stat's session field; a zombie
-//!    left out) gets SIGHUP and SIGCONT, and SIGKILL if it is still in it
-//!    2000 ms later (the kernel's own end's grace, kernel/user); one line
-//!    says so when any needed SIGKILL. A process that left the session
-//!    (setsid(2), as a server does) is not touched; it is init's child
-//!    once its parent ends, and init reaps it when it ends. Then the loop
-//!    starts again: `HOST login:`.
+//!    one, as root may, so the login always has its terminal); init waits,
+//!    and reaps every other child handed to it as it ends. When the
+//!    session's leader ends, its end goes into the login records (utmp(5):
+//!    init marks the ended process's utmp entry DEAD_PROCESS): when utmp
+//!    holds a session of that pid (login's USER_PROCESS), a DEAD_PROCESS
+//!    on the console's line, in utmp's slot and in wtmp, with the signal
+//!    that ended it or its exit status, so `last` shows the logout at its
+//!    own time. Then the session is hung up: every process still in it (by
+//!    /proc/PID/stat's session field; a zombie left out) gets SIGHUP and
+//!    SIGCONT, and SIGKILL if it is still in it 2000 ms later (the
+//!    kernel's own end's grace, kernel/user); one line says so when any
+//!    needed SIGKILL. A process that left the session (setsid(2), as a
+//!    server does) is not touched; it is init's child once its parent
+//!    ends, and init reaps it when it ends. Then the loop starts again:
+//!    `HOST login:`.
 //!
 //! A session that ends within 2 s of its start makes the next start wait,
 //! 1 s doubling to 60 s, with one line (a missing /bin/login never spins
@@ -176,6 +182,7 @@ fn main() -> int {
         prog = [LOGIN]
     }
     let saved = tc_save(0) == 0
+    let line = console_line()
     run_dirs()
     boot_clean()
     boot_record()
@@ -188,7 +195,8 @@ fn main() -> int {
         let t0 = now_ms()
         let leader = start(prog)
         if leader > 0 {
-            wait_for(leader)
+            let st = wait_for(leader)
+            session_end(line, leader, st)
             hang_up(leader)
         }
         if now_ms() - t0 < QUICK_MS {
@@ -462,16 +470,60 @@ fn start(prog: List[str]) -> int {
     pid
 }
 
-/// Wait until `leader` ends, reaping every other child as it ends.
-fn wait_for(leader: int) {
+/// Wait until `leader` ends, reaping every other child as it ends: the
+/// leader's wait status, or -1 when there is no child left to wait for.
+fn wait_for(leader: int) -> int {
     loop {
         let p = wait(-1, 0)
-        if p == leader || p == 0 - ECHILD {
-            return
+        if p == leader {
+            return status()
+        }
+        if p == 0 - ECHILD {
+            return -1
         }
         if p < 0 {
             time_sleep_ms(100)
         }
+    }
+}
+
+/// The console's line as login's records name it (`console`): what standard
+/// input is, `/dev/` taken off; "" when it is no device file.
+fn console_line() -> str {
+    let raw = fs_read_link("/proc/self/fd/0") else |_| {
+        return ""
+    }
+    let path = str_from_utf8(raw) else ""
+    if !path.starts_with("/dev/") {
+        return ""
+    }
+    ut_line_of(path)
+}
+
+/// The end of the session whose leader was `leader`, ended with wait
+/// status `st`: DEAD_PROCESS on `line` in utmp and wtmp (`ut_logout`), the
+/// signal that ended it or its exit status, when utmp holds a session of
+/// that pid (a login that let no one in left none). A record that cannot
+/// be written is one line on the console.
+fn session_end(line: str, leader: int, st: int) {
+    if line.len == 0 || st < 0 {
+        return
+    }
+    let recs = ut_read(UTMP_PATH)
+    var found = false
+    var i = 0
+    while i < recs.len && !found {
+        let r = copy recs[i]
+        found = r.kind == UT_USER_PROCESS && r.pid == leader
+        i += 1
+    }
+    if !found {
+        return
+    }
+    let sig = st & 0x7f
+    let code = if sig == 0 then (st >> 8) & 0xff else 0
+    if !ut_logout(leader, line, sig, code) {
+        print("init: the end of the session of pid {leader} could not be written to {UTMP_PATH} and {WTMP_PATH}")
     }
 }
 
