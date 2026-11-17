@@ -705,7 +705,6 @@ STATE = ['mkdir -p /home/wolf/notes /usr/local/bin',
          'chmod 755 /usr/local/bin/hello',
          'rm /etc/motd',
          # px118: the boot log (user/bootlog) is the machine's own: an upgrade keeps it byte for byte
-         'mkdir -p /var/log',
          "printf '== boot 7, {nonce}\\nprevious: boot 6 completed\\n' >> /var/log/boot.log",
          'cd /home/wolf',
          'export GIT_AUTHOR_NAME=Wolf GIT_AUTHOR_EMAIL=wolf@pax.invalid GIT_COMMITTER_NAME=Wolf GIT_COMMITTER_EMAIL=wolf@pax.invalid TZ=UTC',
