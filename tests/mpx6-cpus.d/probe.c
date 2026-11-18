@@ -59,7 +59,10 @@ static void census(const char *tag) {
     put(tag); put(" begin\n"); out(buf, n); put(tag); put(" end\n");
     call(3, fd, 0, 0);
 }
-void _start(void) {
+/* The kernel enters _start with %rsp 16-aligned, not 8 mod 16 as after a call, and gcc's
+   SSE stores to the stack (movaps) assume the latter: the attribute realigns it (px161's red
+   take at 82947b46: `killed: general protection vector 13` at a movaps). */
+__attribute__((force_align_arg_pointer)) void _start(void) {
     const U magic = 0x50415847535f3136ul;
     long m = call6(9, 0x200000, 4096, 3, 0x32, (U)-1, 0); /* PROT_READ|WRITE, PRIVATE|ANONYMOUS|FIXED */
     if (m != 0x200000) { put("CPU-USER-GS mmap failed "); hex((U)m); put("\n"); }
