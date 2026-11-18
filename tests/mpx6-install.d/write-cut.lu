@@ -1,0 +1,12 @@
+//! The real upgrade replace operation, restarted from the same source after
+//! a hardware-breakpoint power cut. There is no test-only recovery logic.
+fn main() -> int {
+    let digest = hash_file("/source") else |_| { return 2 }
+    let row = Row { kind: "f", mode: 493, uid: 0, gid: 0, size: 16777216, digest: digest, path: "/bin/burrowd" }
+    put_file("/source", "/mnt/bin/burrowd", row) else |e| {
+        print("pax-install: upgrade stopped at replace /bin/burrowd: {e}; resolve the preceding error before retrying pax-install --upgrade")
+        return 1
+    }
+    print("PASS upgrade-replace: /bin/burrowd digest {digest}")
+    0
+}
