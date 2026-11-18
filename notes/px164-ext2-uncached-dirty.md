@@ -74,6 +74,10 @@ KVM, one light slot, from a commit.
   descriptor block for the inode's block, and `idirty`'s `get` takes the inode's block back for the descriptor.
   chmod after a walk (the modes row), an append whose inode block went clean at the flusher's last turn, and a
   create or truncate in a cold group all do. The scene row is kept as the workload the installed machine ran.
+- **The loss thrashed the cache too.** A lost change leaves its block clean, so the hand can take it again, and the
+  next change reads it again. At the image head the modes row took 5,190 ms and 60,852 misses (486,811 sectors
+  read); with the fix it took 900 ms and 2,191 misses (17,523 sectors), and the cache filled with dirty metadata
+  once, as px151 designed. The books lines are each boot's last `block: vda:` line.
 - **P3 held.** Memory pressure (the probe held all but 48 MiB) moved nothing: the cache's 512 buffers are made once
   and kept, and frames are never taken back from it.
 - **P5 held.** No stale-buffer line came in any take: every lost change was written before its buffer was taken,
