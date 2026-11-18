@@ -74,10 +74,13 @@ extra = '' if n == 'unknown' else f'online-capable 0\ndisabled {a.disabled}\n'
 head = f'available {n}\nactive 1\nsource {source}\n{extra}'
 proc1, proc2 = block('CPU-PROC'), block('CPU-PROC2')
 if text.count(line + '\n') != 1 or proc1 is None or not proc1.startswith(head):
-    fail('CPU-CENSUS', 'boot summary or proc record differs')
-    print(text)
-    sys.exit(1)
-ok('CPU-CENSUS', f'available={n} active=1 boot=proc')
+    # Said, and the stage 1 rows still run: each says what it found missing (px161: a probe that died
+    # before its lines once hid every row behind this one).
+    fail('CPU-CENSUS', f'boot summary {text.count(line + chr(10))} times, proc record '
+         f'{"missing" if proc1 is None else "differs"}; the transcript\'s last lines:')
+    print('\n'.join('  ' + x for x in text.splitlines()[-12:]))
+else:
+    ok('CPU-CENSUS', f'available={n} active=1 boot=proc')
 
 # --- stage 1 ---------------------------------------------------------------------------------
 cpus = 1 if n == 'unknown' else int(n)   # with no ACPI the bootloader starts no processor
