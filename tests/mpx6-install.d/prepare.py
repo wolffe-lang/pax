@@ -70,7 +70,9 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
     before={str(x):x.read_bytes() for x in s.rglob('*') if x.is_file()}
     for game in ['yes','no']:
         out=w/game
-        r=subprocess.run([program,s,p,out,'alice',game],capture_output=True,text=True)
+        # px162: yes is the default root (ext3), no the named ext2 one
+        profile='ext3' if game=='yes' else 'ext2'
+        r=subprocess.run([program,s,p,out,'alice',game,profile],capture_output=True,text=True)
         assert r.returncode==0,(r.stdout,r.stderr)
         text=(out/'etc/passwd').read_text()
         assert text.startswith(root) and 'alice:x:1000:1000:alice:/home/alice:/bin/pelt\n' in text and '\npax:' not in text,text
@@ -89,8 +91,11 @@ with tempfile.TemporaryDirectory(dir=work,prefix='prepare-') as tmp:
             assert attrs['/home/alice/Games/pack/engine.source.tar.gz'][:3]==['0644','1000','1000']
         else:assert not (out/'home/alice/Games').exists()
         guid=str(uuid.UUID(bytes=hashlib.sha256(b'pax-gpt-part:test:1700000000:2').digest()[:16]))
-        assert 'root=PARTUUID='+guid in (out/'boot/limine/limine.conf').read_text()
-        assert (out/'etc/fstab').read_text().startswith('PARTUUID='+guid+' / ext2 rw')
+        conf=(out/'boot/limine/limine.conf').read_text()
+        assert 'root=PARTUUID='+guid in conf
+        if f'rootfstype={profile} rw' not in conf or not (out/'etc/fstab').read_text().startswith('PARTUUID='+guid+f' / {profile} rw'):
+            print(f'FAIL I-texts-{profile}: limine.conf {conf!r}, fstab {(out/"etc/fstab").read_text()!r}'); sys.exit(1)
+        print(f'PASS I-texts-{profile}: limine.conf and /etc/fstab name the root {profile}',flush=True)
         got=(out/'etc/burrowd/burrowd_config').read_text() if (out/'etc/burrowd/burrowd_config').exists() else ''
         row('I-burrowd-lan-'+game,got==want_burrowd and attrs.get('/etc/burrowd/burrowd_config',[])[:3]==['0644','0','0'],
             'the installed burrowd_config is the shipped one with `ListenAddress 0.0.0.0`, root\'s, 0644')
