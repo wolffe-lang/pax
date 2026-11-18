@@ -11,10 +11,21 @@ import subprocess
 import sys
 import time
 
+# px162: the guided summary's second line for the default (ext3) root, and ext2's, named
+EXT3_NOTICE='The root file system is ext3, journalled (data=ordered); pax-install --ext2-preview installs ext2 without a journal.'
+EXT2_NOTICE='The root file system is ext2 without a journal.'
+
 repo,lane,work=map(Path,sys.argv[1:4]);games,name=sys.argv[4:6]
 fault=os.environ.get('PAX_INSTALL_FAULT','')
+# px162: the root's profile. ext3 is pax-install's default (no flag, a token ending ` ext3`); ext2 is
+# named (--ext2-preview, the token every earlier installer took). The fault rows keep ext2's path but
+# the guided cancel-words row (the default's summary) and the ext3-small ones: an ext3 root under
+# 64 MiB, refused by name in each mode before any write.
+small_ext3=fault in ('ext3-small-dryrun','ext3-small-install','ext3-small-guided')
+profile=os.environ.get('PAX_INSTALL_PROFILE','') or ('ext2' if fault and not small_ext3 and fault!='cancel-words' else 'ext3')
+assert profile in ('ext2','ext3')
 used=os.environ.get('PAX_INSTALL_USED','') # px86: a used target (tools/used-disk)
-guided=os.environ.get('PAX_INSTALL_GUIDED','')=='1' or fault=='cancel-words'
+guided=os.environ.get('PAX_INSTALL_GUIDED','')=='1' or fault in ('cancel-words','ext3-small-guided')
 full_tree=len(sys.argv)>6 and sys.argv[6]=='full'
 assert games in ['yes','no'] and name in ['vdb','vdc']
 work.mkdir(parents=True,exist_ok=True)
@@ -86,7 +97,7 @@ if fault=='invalid-manifest':
     (source/'bin/paxext2').write_text('#!/bin/sh\nprev=\nfor arg do\n if [ "$prev" = --attrs ]; then printf "not a manifest\\n" > "$arg"; fi\n prev=$arg\ndone\nexec /bin/paxext2.real "$@"\n')
 seed='px71-'+games+'-'+name
 minor,seq=(16,2) if name=='vdb' else (32,3)
-capacity=77611520 if fault=='enospc' else int(os.environ.get('PAX_INSTALL_CAPACITY','536870912'))
+capacity=77611520 if fault=='enospc' or small_ext3 else int(os.environ.get('PAX_INSTALL_CAPACITY','536870912'))
 assert capacity >= 77611520 and capacity % 512 == 0
 assert not fault or capacity in (77611520,536870912), 'large-image faults need a bounded guard, never a full-hole hash'
 root_bytes=min(17592186040320,(capacity-33*512)//4096*4096-69206016)
@@ -94,20 +105,28 @@ ratio=4096 if root_bytes < 536870912 else 16384 if root_bytes < 4398046511104 el
 sparse_zeroes=os.environ.get('PAX_INSTALL_SPARSE_ZEROES','')=='1'
 needed=1<<30 if sparse_zeroes else root_bytes//ratio*256
 assert shutil.disk_usage(work).free > needed + (2<<30), 'insufficient space for initialized inode tables'
-token=f'ERASE /dev/{name} 254:{minor}-seq{seq} {capacity} {seed}'
+token=f'ERASE /dev/{name} 254:{minor}-seq{seq} {capacity} {seed}'+(' ext3' if profile=='ext3' else '')
 if fault=='wrong-token':token+='-WRONG'
+flag=' --ext2-preview' if profile=='ext2' else ''
+(work/'profile').write_text(profile+'\n')
 script=work/'install.sh'
 # px78: the target is named on an install allow-list by its serial (the
 # virtio disk's GET_ID string, QEMU's serial=; a virtio disk shows no model).
 serial='PX71-'+name.upper()
 (work/'allow-list').write_text(f'# px71 rig: the target alone\nmodel= serial={serial}\n')
 allow='--allow-list /etc/pax-install-targets'
-script.write_text(f'/bin/pax-install --install --ext2-preview --target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload {allow} --confirm "{token}"\n'
+script.write_text(f'/bin/pax-install --install{flag} --target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload {allow} --confirm "{token}"\n'
                   'echo INSTALL-EXIT-$?\n')
+if fault=='ext3-small-dryrun':
+    script.write_text(f'/bin/pax-install --dry-run --target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload {allow}\n'
+                      'echo INSTALL-EXIT-$?\n')
 if guided:
-    script.write_text(f'/bin/pax-install --seed {seed} --source /source --payload /payload {allow}\necho INSTALL-EXIT-$?\n')
+    script.write_text(f'/bin/pax-install{flag} --seed {seed} --source /source --payload /payload {allow}\necho INSTALL-EXIT-$?\n')
     # px106: after the word, the password questions for root and pax, each n (both left locked)
     (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\nyes\nn\nn\nno\n')
+    if fault=='ext3-small-guided':
+        # The plan is made after the user and games answers: refused there, nothing asked after.
+        (work/'keys').write_text(('2' if name=='vdb' else '3')+'\npax\n'+('y' if games=='yes' else 'n')+'\n')
 # px78b (R-P6-confirm): every answer but yes cancels at the one
 # confirmation, the target byte-identical: one boot, one guided run each.
 words=['y','YES','q','',token]
@@ -121,10 +140,10 @@ if used:
     # topology), so the scripted path takes the token from --dry-run, as
     # docs/BOOT.md's scripted invocation does; the host checks it below.
     common=f'--target {name} --seed {seed} --user pax --games {games} --source /source --payload /payload {allow}'
-    script.write_text(f'/bin/pax-install --dry-run {common} > /tmp/plan.txt\necho DRYRUN-EXIT-$?\ntok=\n'
+    script.write_text(f'/bin/pax-install --dry-run{flag} {common} > /tmp/plan.txt\necho DRYRUN-EXIT-$?\ntok=\n'
                       'while IFS= read -r line; do\n    case $line in\n        "confirmation "*) tok=${line#confirmation } ;;\n    esac\ndone < /tmp/plan.txt\n'
                       'echo "TOKEN $tok"\n'
-                      f'/bin/pax-install --install --ext2-preview {common} --confirm "$tok"\necho INSTALL-EXIT-$?\n')
+                      f'/bin/pax-install --install{flag} {common} --confirm "$tok"\necho INSTALL-EXIT-$?\n')
 (work/'run').write_text('/bin/sh /install.sh\n')
 args=['/tmp/:1777','/bin/sh='+str(source/'bin/sh')+':755','/bin/pax-install='+str(source/'bin/pax-install')+':755',
       '/etc/pax-run='+str(work/'run')+':644','/install.sh='+str(script)+':644','/etc/pax-install-targets='+str(work/'allow-list')+':644']
@@ -151,7 +170,7 @@ if used:
     print(run([repo/'tools/used-disk','make',work/'target.img',used,work/'boot.iso']).stdout.decode(),end='',flush=True)
 guard=sha(work/'source-guard.img')
 blank=sha(work/'target.img') if fault else None
-cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INSTALL_FIRMWARE','bios'),'--timeout',os.environ.get('PAX_INSTALL_TIMEOUT','1200'),'--elf',kernel,
+cmd=[repo/'tools/qemu-halt','--accel','tcg','--firmware',os.environ.get('PAX_INSTALL_FIRMWARE','bios'),'--timeout',os.environ.get('PAX_INSTALL_TIMEOUT','300' if small_ext3 else '1200'),'--elf',kernel,
      '--serial',work/'install.serial','--marker','halt','--qemu','-m','--qemu','1536M','--drive',str(work/'source-guard.img')+',ro']
 if name=='vdc':cmd+=['--drive',str(work/'source-guard.img')+',ro']
 if guided:cmd+=['--type',work/'keys','--prompt','pax-install> ']
@@ -169,6 +188,23 @@ else:
 cmd+=[work/'boot.iso']
 t=time.monotonic();p=run(cmd,False);install_seconds=time.monotonic()-t
 (work/'install.boot').write_bytes(p.stdout+p.stderr)
+if small_ext3:
+    kind=fault.rsplit('-',1)[1]
+    flat=(work/'install.serial').read_text(errors='replace').replace('\r','') if (work/'install.serial').exists() else ''
+    words={'dryrun':'pax-install: refused: too_small_for_ext3','install':'pax-install: refused: too_small_for_ext3',
+           'guided':'pax-install: cancelled/refused before writes: too_small_for_ext3'}[kind]
+    why=[]
+    if p.returncode!=0: why.append(f'qemu-halt exit {p.returncode}')
+    if 'INSTALL-EXIT-1' not in flat: why.append('no INSTALL-EXIT-1')
+    if words not in flat: why.append('no '+repr(words))
+    if 'pax-install --ext2-preview' not in flat: why.append('the refusal does not name --ext2-preview')
+    if sha(work/'target.img')!=blank: why.append('the target changed')
+    if sha(work/'source-guard.img')!=guard: why.append('the source guard changed')
+    if why:
+        print(f'FAIL I-{fault}: '+'; '.join(why)+'\n'+flat[-4000:],flush=True)
+        sys.exit(1)
+    print(f'PASS I-{fault}: an ext3 root under 64 MiB ({capacity} bytes) refused by name in {kind} mode, --ext2-preview named; target byte-identical',flush=True)
+    sys.exit(0)
 (work/'install-timing.json').write_text(json.dumps({'capacity_bytes':capacity,'root_bytes':root_bytes,'install_seconds':install_seconds,'qemu_zero_unmap':sparse_zeroes})+'\n')
 assert p.returncode==0,(p.returncode,p.stdout,p.stderr)
 s=(work/'install.serial').read_text(errors='replace')
@@ -183,7 +219,7 @@ if fault:
         if fault=='cancel-words':
             # A virtio disk shows no model (allow.lu); its serial is QEMU's serial=.
             flat=s.replace('\r','')
-            for line in [f'Erase (no model), serial {serial} (0.5 GB, /dev/{name}), and install PAX?\n','The root file system is ext2 without a journal.\n','Type yes to install; anything else cancels: ']:
+            for line in [f'Erase (no model), serial {serial} (0.5 GB, /dev/{name}), and install PAX?\n',EXT3_NOTICE+'\n','Type yes to install; anything else cancels: ']:
                 assert flat.count(line)==len(words),'FAIL I-cancel-words: the summary: '+line+'\n'+flat[-8000:]
             assert flat.count('pax-install: cancelled/refused before writes: cancelled')==len(words),'FAIL I-cancel-words: a word did not cancel\n'+flat[-8000:]
             assert flat.count('CANCEL-EXIT-1')==len(words) and 'CANCEL-EXIT-0' not in flat,'FAIL I-cancel-words: an exit\n'+flat[-8000:]
@@ -206,7 +242,7 @@ if used:
     flat=s.replace('\r','')
     assert 'DRYRUN-EXIT-0' in flat,'FAIL I-used-'+used+': --dry-run\n'+flat[-8000:]
     tok=[l[6:] for l in flat.splitlines() if l.startswith('TOKEN ')]
-    assert len(tok)==1 and tok[0].startswith(f'ERASE /dev/{name} 254:{minor}-seq{seq}') and tok[0].endswith(f' {capacity} {seed}'),'FAIL I-used-'+used+f': the token {tok}'
+    assert len(tok)==1 and tok[0].startswith(f'ERASE /dev/{name} 254:{minor}-seq{seq}') and tok[0].endswith(f' {capacity} {seed}'+(' ext3' if profile=='ext3' else '')),'FAIL I-used-'+used+f': the token {tok}'
     if used!='iso':
         # The old partitions, as the kernel listed them at boot, are in the identity.
         lines=[l for l in flat[:flat.index('TOKEN ')].splitlines() if l.startswith('block: '+name) and ', sectors ' in l]
@@ -263,5 +299,26 @@ with (work/'root.img').open('rb') as f:
     expected_ipg=((root_bytes//ratio+groups-1)//groups+15)//16*16
     assert ipg==expected_ipg and struct.unpack_from('<I',sb,0)[0]==groups*expected_ipg,'I-density'
 print(f'PASS I-density: root {root_bytes} bytes; {groups*ipg} inodes; ratio {ratio}',flush=True)
+# px162: the installed root is the profile the plan named, as Linux's own tools read it.
+geometry=(work/'root.geometry').read_text(errors='replace')
+compat=struct.unpack_from('<I',sb,92)[0]
+why=[]
+if profile=='ext3':
+    jinum=struct.unpack_from('<I',sb,0xE0)[0]
+    if not compat&4 or jinum!=8: why.append(f'superblock compat {compat:#x} journal inode {jinum}')
+    import re
+    for want in (r'^Filesystem features:.*\bhas_journal\b',r'^Journal features:\s+\(none\)$',r'^Total journal blocks:\s+4096$',
+                 r'^Journal sequence:\s+0x0*1$',r'^Journal start:\s+0$'):
+        if not re.search(want,geometry,re.M): why.append('dumpe2fs -h lacks '+want)
+    if not records[0]['detail'].startswith('PAX install plan v2\nformat ext3 '): why.append('the logged plan is not an ext3 one')
+    if 'Installation complete: ext3, journalled.' not in s: why.append('no ext3 completion line')
+else:
+    if compat&4 or 'has_journal' in geometry: why.append('a journal on an ext2 install')
+    if not records[0]['detail'].startswith('PAX install plan v1\nformat ext2-developer-preview'): why.append('the logged plan is not the ext2 one')
+    if 'Installation complete: ext2 developer preview.' not in s: why.append('no ext2 completion line')
+if why:
+    print(f'FAIL I-{profile}-root: '+'; '.join(why),flush=True)
+    sys.exit(1)
+print(f'PASS I-{profile}-root: '+('has_journal, inode 8 a journal of 4096 blocks, empty (sequence 1, start 0), e2fsck -fn clean' if profile=='ext3' else 'no journal, the ext2 plan and line as before; e2fsck -fn clean'),flush=True)
 print(f'PASS I-install-{games}-{name}: guest executor complete, durable phase log, source guard unchanged, e2fsck clean; install {install_seconds:.2f}s; with verification {time.monotonic()-t:.2f}s',flush=True)
 if used:print(f'PASS I-used-{used}: the install onto an old {used} layout complete, every phase durable',flush=True)
