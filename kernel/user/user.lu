@@ -255,6 +255,7 @@
 
 use block
 use boot_info
+use clock
 use console
 use cred
 use files
@@ -2002,7 +2003,17 @@ fn ask_end(cmd: u64) {
 /// px67 (R-px67-4, recommended, not decided): the end's grace, in the
 /// timer's ticks (10 ms): how long the processes left at the end have
 /// after SIGTERM before SIGKILL. The wait ends as soon as none is left.
+/// px160 (pax#472): ticks the timer delivered (`timer.delivered`), not
+/// the clock's (`timer.ticks`, px131's): a stretch with interrupts off
+/// delivers one tick however long it is, and a disk is waited for with
+/// interrupts off (kernel/vblk's polled requests), so a process whose
+/// last writes wait on a slow disk is not ended for the disk's time,
+/// in which nothing else could run.
 const GRACE_TICKS: u64 = 200
+/// px160: the end's bound by kernel/clock (30 s, in nanoseconds; the
+/// clock, not `timer.ticks`, which follows it only in kmain_console):
+/// however much of the grace is left, SIGKILL then, and the line says so.
+const END_NS: u64 = 30000000000
 /// How long the end waits for SIGKILL's work before it goes on and says so.
 const KILL_TICKS: u64 = 500
 /// px67: at init's end, how long the end first waits for what is left
@@ -2027,6 +2038,59 @@ fn procs_left() -> u64 {
     n
 }
 
+/// px160 (pax#472): the line naming each process the end is about to
+/// send SIGKILL (a zombie is not one), with how much of the grace ran
+/// (`ran` delivered ticks) in how long (`wall_ms`, by the clock), or
+/// that the end's bound sent it (`bound`).
+fn say_killed(ran: u64, wall_ms: u64, bound: bool) {
+    let s = sync.acquire(sync.console())
+    log.put("PAX: SIGKILL at the end: ")
+    var first = true
+    var q = sched.proc_after(0)
+    while q != 0 {
+        let sl = sched.proc_slot(q)
+        if sl != sched.SLOTS && sched.proc_word(sl, 8) != 1 {
+            if !first {
+                log.put(", ")
+            }
+            first = false
+            let at = sched.proc_word(sl, 6)
+            let len = sched.proc_word(sl, 7)
+            var i: u64 = 0
+            while at != 0 && i < len && i < 64 {
+                // # Safety: a byte of the program's name (kernel/sched's
+                // record of it, /proc/<pid>/status's), the slot live.
+                let v = unsafe { ((at + i) as *u8).read_volatile() }
+                log.put_byte(v as int)
+                i += 1
+            }
+            if len == 0 || at == 0 {
+                log.put("?")
+            }
+            log.put(" pid ")
+            log.dec(q as int)
+        }
+        q = sched.proc_after(q)
+    }
+    if bound {
+        log.put(" (the end's ")
+        log.dec((END_NS / 1000000) as int)
+        log.put(" ms bound; ")
+        log.dec((ran * 10) as int)
+        log.put(" ms of the ")
+        log.dec((GRACE_TICKS * 10) as int)
+        log.put(" ms grace ran)")
+    } else {
+        log.put(" (the ")
+        log.dec((GRACE_TICKS * 10) as int)
+        log.put(" ms grace ran in ")
+        log.dec(wall_ms as int)
+        log.put(" ms)")
+    }
+    log.end()
+    sync.release(sync.console(), s)
+}
+
 fn signal_all(sig: u64) {
     let info = sched.sig_info(sched.I_KERNEL, 0, 0, 0)
     var q = sched.proc_after(0)
@@ -2045,6 +2109,16 @@ fn signal_all(sig: u64) {
 /// anyway is not signalled. One line when any was signalled:
 ///
 ///     PAX: the end: SIGTERM to 3 processes, 2 ended within 40 ms; SIGKILL to 1 after the 2000 ms grace
+///
+/// px160 (pax#472): the grace is GRACE_TICKS the timer delivered, so a
+/// stretch with interrupts off (a disk's writes) does not spend it, and
+/// END_NS by the clock bound the whole wait; when that bound, not the
+/// grace, sends SIGKILL, the line says `at the end's 30000 ms bound`. The
+/// processes SIGKILL is sent to are named first, by name and pid, with
+/// how much of the grace ran in how long:
+///
+///     PAX: SIGKILL at the end: mounts pid 3 (the 2000 ms grace ran in 7310 ms)
+///     PAX: SIGKILL at the end: mounts pid 4 (the end's 30000 ms bound; 1380 ms of the 2000 ms grace ran)
 pub fn end_processes(settle: bool) {
     if settle {
         let t = timer.ticks()
@@ -2058,11 +2132,13 @@ pub fn end_processes(settle: bool) {
     }
     sched.ending() // px67: pid 1 is ended too
     let t0 = timer.ticks()
+    let d0 = timer.delivered()
+    let ns0 = clock.now_ns()
     signal_all(SIGTERM)
     signal_all(SIGCONT)
     var was = n
     var took: u64 = 0
-    while procs_left() != 0 && timer.ticks() - t0 < GRACE_TICKS {
+    while procs_left() != 0 && timer.delivered() - d0 < GRACE_TICKS && clock.now_ns() - ns0 < END_NS {
         let _s = sched.sleep(1)
         let now = procs_left()
         if now < was {
@@ -2071,7 +2147,10 @@ pub fn end_processes(settle: bool) {
         }
     }
     let left = procs_left()
+    let ran = timer.delivered() - d0
+    let bound = left != 0 && ran < GRACE_TICKS
     if left != 0 {
+        say_killed(ran, (clock.now_ns() - ns0) / 1000000, bound)
         signal_all(SIGKILL)
         let t1 = timer.ticks()
         while procs_left() != 0 && timer.ticks() - t1 < KILL_TICKS {
@@ -2089,9 +2168,15 @@ pub fn end_processes(settle: bool) {
     if left != 0 {
         log.put("; SIGKILL to ")
         log.dec(left as int)
-        log.put(" after the ")
-        log.dec((GRACE_TICKS * 10) as int)
-        log.put(" ms grace")
+        if bound {
+            log.put(" at the end's ")
+            log.dec((END_NS / 1000000) as int)
+            log.put(" ms bound")
+        } else {
+            log.put(" after the ")
+            log.dec((GRACE_TICKS * 10) as int)
+            log.put(" ms grace")
+        }
         if procs_left() != 0 {
             log.put(", ")
             log.dec(procs_left() as int)

@@ -70,7 +70,7 @@
                         (waitpid WNOHANG every millisecond, the
                         monotonic clock), then SIGKILL; one `~term:` line
                         with the milliseconds and how it ended
-     mounts linger [halt|restart]
+     mounts linger [halt|restart [late N]]
                         two children left running when it returns, for
                         the end's rows, each in a session of its own
                         (setsid: a daemon, which no terminal's hang-up
@@ -78,7 +78,14 @@
                         default ends it), one ignores SIGTERM (only
                         SIGKILL ends it); each says it has started;
                         with `halt` or `restart` it then asks reboot(2)
-                        for that itself (sync(2) first, as reboot(8) does)
+                        for that itself (sync(2) first, as reboot(8) does).
+                        px160: with `late N`, a third, whose SIGTERM is
+                        a daemon's last writes: N times 1 KiB appended
+                        to /late.data and fsync(2)'d, a pause of 100 ms
+                        (its next step), then one line appended to
+                        /late.txt (`late: N syncs, then this line, T ms
+                        after SIGTERM`) and fsync(2)'d, then exit 0; a
+                        row reads /late.txt off the disk after the end
 
    Every call is printed with its answer (`= 0` or `= -1 ENAME`). Lines
    that begin `~` hold what is the kernel's own to choose (mount ids,
@@ -344,11 +351,58 @@ static void user(int uid, const char *dev, const char *dir) {
     say("user %d: end, status %d\n", uid, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 }
 
-static void linger(const char *then) {
-    for (int k = 0; k < 2; k++) {
+static volatile sig_atomic_t termed;
+
+static void on_term(int sig) {
+    (void)sig;
+    termed = 1;
+}
+
+/* px160: linger's third child: at SIGTERM, a daemon's last writes, each
+   synced (on a slow disk each fsync(2) is a stretch the end's grace must
+   not count), then its record. */
+static void late(int n) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_term;
+    sigaction(SIGTERM, &sa, NULL);
+    say("linger 2: pid %d, SIGTERM %d synced writes, then /late.txt\n", (int)getpid(), n);
+    while (!termed)
+        pause();
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    char kib[1024];
+    memset(kib, 'x', sizeof kib);
+    kib[sizeof kib - 1] = '\n';
+    int fd = open("/late.data", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    for (int i = 0; i < n && fd >= 0; i++) {
+        if (write(fd, kib, sizeof kib) != (ssize_t)sizeof kib || fsync(fd) != 0)
+            break;
+    }
+    if (fd >= 0)
+        close(fd);
+    struct timespec step = {0, 100000000};
+    nanosleep(&step, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    char line[96];
+    int len = snprintf(line, sizeof line, "late: %d syncs, then this line, %ld ms after SIGTERM\n", n,
+                       (long)((b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000));
+    fd = open("/late.txt", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        if (write(fd, line, (size_t)len) == len)
+            fsync(fd);
+        close(fd);
+    }
+    _exit(0);
+}
+
+static void linger(const char *then, int late_n) {
+    for (int k = 0; k < (late_n > 0 ? 3 : 2); k++) {
         pid_t p = fork();
         if (p == 0) {
             setsid();
+            if (k == 2)
+                late(late_n);
             if (k == 1)
                 signal(SIGTERM, SIG_IGN);
             say("linger %d: pid %d, SIGTERM %s\n", k, (int)getpid(), k == 1 ? "ignored" : "default");
@@ -677,7 +731,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "linger") == 0) {
-        linger(argc >= 3 ? argv[2] : NULL);
+        linger(argc >= 3 ? argv[2] : NULL, argc >= 5 && strcmp(argv[3], "late") == 0 ? atoi(argv[4]) : 0);
         return 0;
     }
     if (argc >= 4 && strcmp(argv[1], "term") == 0) {
@@ -714,6 +768,6 @@ int main(int argc, char **argv) {
         for (;;)
             pause();
     }
-    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N [S] | revoke | term WAIT PROG [ARG...] | end | linger [halt|restart] | init [DEV DIR [disk-tmp [no-end]]]\n");
+    say("usage: mounts table | calls DEV DIR | user UID DEV DIR | root | twice MARKER | churn N [S] | revoke | term WAIT PROG [ARG...] | end | linger [halt|restart [late N]] | init [DEV DIR [disk-tmp [no-end]]]\n");
     return 2;
 }

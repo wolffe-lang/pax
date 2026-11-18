@@ -2639,3 +2639,14 @@ Alt+Fn is unchanged.
 | QEMU QMP `query-qmp-schema` and `input-send-event` | QEMU 8.2.2, queried without a guest | resolve the QKeyCode enum through command argument references; save its schema for the off-boot regression; send uppercase text as Shift plus lowercase QKeyCode events |
 | PAX's own `kernel/console`, `kernel/screen`, `kernel/files` and yew's input decoder, mouse routing and context-menu geometry | the projects' own code | the tracking-mode handoff, foreground ownership, event bytes, menu hit tests and the absence of a VT-switch action |
 | Console pointer and keyboard probes under QEMU | captured before and after the change | exact SGR bytes for the three tracking modes, ownership and foreground guards, Alt-arrow bytes, unchanged Alt+Fn and F1–F5; a real yew menu's hover and click frames |
+
+## The end's grace and a slow disk (pax#472)
+
+No kernel's, init's or log daemon's source was read. The race was found in PAX's own code (kernel/user's
+`end_processes`, kernel/timer's `ticks` and `delivered`, kernel/vblk's polled `wait`, user/logd's `finish`) and made
+deterministic by holding the guest's disk to a few writes a second from QEMU, which the rows then use.
+
+| source | version | read, for |
+|---|---|---|
+| QEMU's `-drive` throttling options (`throttling.iops-write`) and HMP's `block_set_io_throttle` and `info blockstats` (qemu.org documentation) | QEMU 8.2.2 and 11.1.2, run | a disk that takes each write at most N times a second, set from boot by `-set drive.d0.throttling.iops-write=N` (checked: `info block` says `iops_wr=N`) or at a moment from the monitor |
+| fsync(2), sigaction(2), nanosleep(2) | man-pages 6.19 | the probe's late daemon: its writes synced, its SIGTERM handler, its 100 ms step |

@@ -439,7 +439,17 @@ those still there after a grace of 2 s (R-px67-4) are sent SIGKILL; then each vo
 in the reverse of its mount order, `/` last: flushed, its clean flag
 written; the disk's books, then init's line, then `halt`:
 
+    PAX: SIGKILL at the end: mounts pid 3 (the 2000 ms grace ran in 2000 ms)
     PAX: the end: SIGTERM to 2 processes, 1 ended within 10 ms; SIGKILL to 1 after the 2000 ms grace
+
+The grace is 2 s in which the processes could run (pax#472). A disk is
+waited for with interrupts off, so while a program's write or fsync(2)
+waits on a slow disk nothing else runs; the grace counts the timer's
+ticks as they are delivered, and such a stretch delivers one, so a
+daemon's last writes are not cut off for the disk's time. The clock
+bounds the whole wait at 30 s: a program still there then is sent
+SIGKILL, and the lines say so (`at the end's 30000 ms bound`). Each
+program sent SIGKILL is named first, by name and pid.
 
 On an ext2 root (px67's; since px68 `--no-journal`, the journal's
 section below says what a journalled root does) a power cut (QEMU
