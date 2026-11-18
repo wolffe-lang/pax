@@ -4,6 +4,7 @@
 # log).
 #
 #   rows.py --guard-loads MIB            the guard's run list for a boot of MIB MiB
+#   rows.py --hop-loads                  L9's loads (px159), for the full table's list
 #   rows.py --l6-again --images DIR BOOT...   the boots whose every L6 hold so far is unmeasured
 #   rows.py --accel A --images DIR --com1 0|1 BOOT...   the rows (BOOT is tier-firmware-mib)
 #
@@ -47,9 +48,20 @@
 #    answers it at most STARVE_BOUND_US: a control socket's command to a
 #    server under its load (lobo's reload under mpx4-lobo's load). Under TCG
 #    SKIPPED by name.
+# L9 px159: a hop between two processes beside a CPU-bound one: for each of
+#    a pipe, a unix socketpair and a pty, the paced one-byte round trip's p99
+#    beside a hog (`hop:KIND+spin`) within the larger of HOP_BOUND times its
+#    p99 with no hog (`hop:KIND`) and that p99 plus HOP_SLACK_US: the woken
+#    reader of the object that changed runs at once, not after the hog's
+#    quantum. Under TCG SKIPPED by name.
+# L10 px159: a terminal multiplexer's frame (FRAME bytes) crosses an AF_UNIX
+#    stream socket in one round trip: a non-blocking write of it on a fresh
+#    socketpair and on a fresh connection to a path is taken whole, and one
+#    read at the other end takes it whole (`latprobe-frame:`). Both tiers,
+#    and the Linux column.
 # L3 `~` lines: every load's figures (the measurement table's rows).
-# Exit 0 when L1, L2, L4, L5, L6, L7 and L8 held; 3 when the only red is
-# L6-unmeasured; 1 otherwise.
+# Exit 0 when L1, L2, L4, L5, L6, L7, L8, L9 and L10 held; 3 when the only
+# red is L6-unmeasured; 1 otherwise.
 import re
 import sys
 from pathlib import Path
@@ -96,12 +108,26 @@ HOLDS = 3        # L6: holds at most, while unmeasured
 # at most a quantum (20 ms) before urgent wake-ups stop going ahead of it, then
 # its turn among those ready: a few quanta; 100 ms is five.
 STARVE_BOUND_US = 100000
+# L9 (px159): the hop's p99 beside a hog over its p99 with none, or that p99
+# plus a slack for anything (a host's stall, an interrupts-off stretch of the
+# probes beside it), whichever is larger. Before the fix a hop waits most of
+# the hog's 20 ms quantum each way.
+HOP_KINDS = ('pipe', 'unix', 'pty')
+HOP_BOUND = 3.0
+HOP_SLACK_US = 2000
+# L10 (px159): a terminal multiplexer's frame, 19 KiB (warren's at 160x50)
+FRAME = 19456
+
+
+def hop_loads():
+    """L9's loads: each kind with no hog, then beside one."""
+    return [l for k in HOP_KINDS for l in ('hop:%s' % k, 'hop:%s+spin' % k)]
 
 
 def guard_loads(mib):
     """The guard's run list: idle, spin, the paced and the saturating
-    floods, the guarded and the pending loads."""
-    return ['idle', 'spin', 'flood:%d' % FLOOD_RATE, 'flood', 'ctl'] + guard(mib) + [p for p, _ in pending(mib)]
+    floods, the guarded and the pending loads, then the hops (px159)."""
+    return ['idle', 'spin', 'flood:%d' % FLOOD_RATE, 'flood', 'ctl'] + guard(mib) + [p for p, _ in pending(mib)] + hop_loads()
 
 LINE = re.compile(r'^latprobe (\S+): wake n (\d+) p50 (\d+) p99 (\d+) max (\d+); lo n (\d+) p50 (\d+) max (\d+) lost (\d+); '
                   r'(?:net n (\d+) p50 (\d+) max (\d+) lost (\d+)|net -); ops (\d+) max (\d+); '
@@ -110,12 +136,28 @@ LINE = re.compile(r'^latprobe (\S+): wake n (\d+) p50 (\d+) p99 (\d+) max (\d+);
 
 HOST = re.compile(r'^hostnet (\S+): n (\d+) p50 (\d+) p99 (\d+) max (\d+) lost (\d+)(?: sent (\d+) secs ([0-9.]+))?$')
 CLOCKS = re.compile(r'; clocks mono (-?\d+) real (-?\d+) tsc (\d+)$')
+OPS = re.compile(r'latprobe-ops (\S+): n (\d+) p50 (\d+) p99 (\d+) max (\d+)$')
+FRAME_LINE = re.compile(r'latprobe-frame: socketpair sent (-?\d+) read (-?\d+); path sent (-?\d+) read (-?\d+)$')
+
+
+def parse_frame(text):
+    """L10's line: (socketpair sent, read, path sent, read), or None."""
+    for l in text.replace('\r', '').splitlines():
+        m = FRAME_LINE.search(l.strip())
+        if m:
+            return tuple(int(x) for x in m.groups())
+    return None
 
 
 def parse(text):
     out = {}
     host = {}
+    ops = {}
     for l in text.replace('\r', '').splitlines():
+        o = OPS.search(l.strip())
+        if o:
+            ops[o.group(1)] = [int(x) for x in o.groups()[1:]]
+            continue
         # a serial log's line may follow a console flood's bytes
         i = l.find('latprobe ')
         if i > 0 and not l.startswith('hostnet'):
@@ -142,7 +184,54 @@ def parse(text):
     for k, (n, p50, p99, mx, lost, sent, secs) in host.items():
         if k in out:
             out[k].update(nn=n, n50=p50, n99=p99, nmax=mx, nlost=lost, sent=sent, secs=secs)
+    for k, (n, p50, p99, mx) in ops.items():
+        if k in out:
+            out[k].update(on=n, o50=p50, o99=p99, omax=mx)
     return out
+
+
+def hop_limit(base99):
+    """L9's limit for a hop's p99 beside the hog, from its p99 with none."""
+    return max(HOP_BOUND * max(base99, 1), base99 + HOP_SLACK_US)
+
+
+def hop_rows(boot, accel, rows, want):
+    """L9: each kind's hop beside the hog against the same with none.
+    Returns (fail, lines)."""
+    fail, lines = 0, []
+    for k in HOP_KINDS:
+        a, b = 'hop:%s' % k, 'hop:%s+spin' % k
+        if a not in want and b not in want:
+            continue
+        r0, r1 = rows.get(a), rows.get(b)
+        if not r0 or not r1 or r0.get('o99') is None or r1.get('o99') is None or not r0['on'] or not r1['on']:
+            lines.append('FAIL L9 %s %s: no %s or %s round trips' % (boot, k, a, b))
+            fail = 1
+            continue
+        limit = hop_limit(r0['o99'])
+        text = ('a byte\'s round trip over a %s beside a CPU-bound process p99 %d us (p50 %d, max %d, n %d), '
+                'with none p99 %d us (p50 %d, max %d, n %d)'
+                % (k, r1['o99'], r1['o50'], r1['omax'], r1['on'], r0['o99'], r0['o50'], r0['omax'], r0['on']))
+        if accel != 'kvm':
+            lines.append('SKIP L9 %s %s reason=%s: %s' % (boot, k, accel, text))
+        elif r1['o99'] <= limit:
+            lines.append('PASS L9 %s %s: %s; limit %d us' % (boot, k, text, limit))
+        else:
+            lines.append('FAIL L9 %s %s: %s; limit %d us' % (boot, k, text, limit))
+            fail = 1
+    return fail, lines
+
+
+def frame_row(boot, frame):
+    """L10: (fail, line) from parse_frame's tuple (None: no line)."""
+    if frame is None:
+        return 1, 'FAIL L10 %s: no latprobe-frame line' % boot
+    ps, pr, cs, cr = frame
+    text = ('a %d-byte write without waiting: a socketpair took %d and one read gave %d; a path connection took %d '
+            'and one read gave %d' % (FRAME, ps, pr, cs, cr))
+    if frame == (FRAME, FRAME, FRAME, FRAME):
+        return 0, 'PASS L10 %s: %s' % (boot, text)
+    return 1, 'FAIL L10 %s: %s; wanted %d each' % (boot, text, FRAME)
 
 
 def say(s):
@@ -324,6 +413,9 @@ def main(argv):
     if argv[:1] == ['--guard-loads']:
         print(' '.join(guard_loads(int(argv[1]))))
         return 0
+    if argv[:1] == ['--hop-loads']:
+        print(' '.join(hop_loads()))
+        return 0
     if argv[:1] == ['--l6-again']:
         images = Path(argv[argv.index('--images') + 1])
         for boot in argv[argv.index('--images') + 2:]:
@@ -391,6 +483,13 @@ def main(argv):
             for line in lines:
                 say(line)
             fail |= f
+        # px159: L9 and L10; the Linux column's are printed, held to nothing
+        f, lines = hop_rows(boot, accel, rows, want)
+        f10, line10 = frame_row(boot, parse_frame(rep) or parse_frame(ser))
+        for line in lines + [line10]:
+            say(line if tier != 'linux' else '~' + line.split(' ', 1)[1])
+        if tier != 'linux':
+            fail |= f | f10
         for k, r in rows.items():
             say('~L3 %s %s: wake p50 %s p99 %s max %s; lo p50 %s max %s lost %s; net p50 %s max %s lost %s; ops %s max %s; '
                 'irqoff %s vec 0x%s nr %s; schedgap %s; ticks %s of %s; sys %s; clocks mono %s real %s tsc %s'

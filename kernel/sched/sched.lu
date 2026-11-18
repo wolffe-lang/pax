@@ -263,7 +263,7 @@ extern "c" let pax_sched_bits: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_syscall_state: *u64
-extern "c" let pax_slot_words: *u64 // px126: two words a slot (W_AREA, W_MARK)
+extern "c" let pax_slot_words: *u64 // px126: two words a slot (W_AREA, W_MARK); px159: three (W_KEYS)
 extern "c" let pax_pid_hint: *u64 // px126: pid mod HINTS to slot + 1
 extern "c" let pax_siginfo: *u64
 extern "c" let pax_tty_table: *u64
@@ -399,10 +399,16 @@ const CHUNK: u64 = 2097152 // px126: what one page table maps
 const HINTS: u64 = 4096 // px126: pax_pid_hint's words
 const W_AREA: u64 = 0 // px126: slot word: 1 while the slot has its process area mapped
 const W_MARK: u64 = 1 // px126: slot word: process_ends' mark on a child whose group it may orphan
+const W_KEYS: u64 = 2 // px159: slot word: the key buckets its system call looked at (`wait_key`), what it waits on in PIPE
+const SLOT_WORDS: u64 = 3 // px159: boot/sched.S's pax_slot_words a slot (two before px159)
 const NEVER: u64 = 0xffffffffffffffff
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
 const QUANTUM: u64 = 2 // ticks
+// px159: an urgent thread keeps the processor from other urgent threads for
+// this much of its run at most (`shielded`), then is preempted as any thread
+// is: a thread a pipe woke may go on to compute for a quantum.
+const URGENT_RUN_NS: u64 = 1000000
 
 /// The `prog` an ELF process carries (px10): past every kernel/user
 /// blob's number + 1.
@@ -594,15 +600,15 @@ fn lower_top() {
     put_sv(S_TOP, t)
 }
 
-/// px126: slot `s`'s scheduler word `i` (W_AREA, W_MARK).
+/// px126: slot `s`'s scheduler word `i` (W_AREA, W_MARK; px159: W_KEYS).
 fn slot_word(s: u64, i: u64) -> u64 {
-    // # Safety: s < SLOTS, i < 2: inside boot/sched.S's pax_slot_words.
-    unsafe { ((pax_slot_words as u64 + (s * 2 + i) * 8) as *u64).read_volatile() }
+    // # Safety: s < SLOTS, i < SLOT_WORDS: inside boot/sched.S's pax_slot_words.
+    unsafe { ((pax_slot_words as u64 + (s * SLOT_WORDS + i) * 8) as *u64).read_volatile() }
 }
 
 fn put_slot_word(s: u64, i: u64, v: u64) {
     // # Safety: as `slot_word`.
-    unsafe { ((pax_slot_words as u64 + (s * 2 + i) * 8) as *u64).write_volatile(v) }
+    unsafe { ((pax_slot_words as u64 + (s * SLOT_WORDS + i) * 8) as *u64).write_volatile(v) }
 }
 
 /// px126: pid (or tid) `p` now names slot `s`.
@@ -687,9 +693,26 @@ fn wake_urgent(s: u64) {
 
 /// px131: the queue's head is a thread a device's work woke and `c`, the
 /// running thread, is not one (`kick` and `preempt` switch to it at once).
+/// px159: or `c` is one that has run past its shield (`shielded`).
 fn urgent_waits(c: u64) -> bool {
     let h = sv(S_HEAD) // #598
-    h != 0 && mask_has(B_URGENT, h - 1) && !mask_has(B_URGENT, c) && !starved() // px131e
+    h != 0 && mask_has(B_URGENT, h - 1) && !(mask_has(B_URGENT, c) && shielded()) && !starved() // px131e
+}
+
+/// px159: the running thread, urgent, has run less than URGENT_RUN_NS since
+/// it was switched in (px88's TSC at the switch, `S_IN_TSC`); before the
+/// TSC's rate is known, while the tick it started in lasts. Since a pipe's,
+/// a socket's and a pty's readers are woken urgent (`wake_obj`), a thread
+/// that then computes (a language server woken by an edit) would otherwise
+/// hold off a key's reader for its whole quantum.
+fn shielded() -> bool {
+    let m = sv(S_MULT)
+    if m == 0 {
+        return timer.ticks() == sv(S_SLICE)
+    }
+    let t = tsc()
+    let at = sv(S_IN_TSC)
+    t <= at || t - at < (URGENT_RUN_NS << 24) / m
 }
 
 /// The queue's head (slot + 1), removed; 0 when it is empty.
@@ -1249,9 +1272,12 @@ pub fn wake_input() -> u64 {
     var s: u64 = FIRST
     while s < top() {
         // px24: a thread in `poll` or `epoll_wait` may be watching the
-        // console too; it waits as a pipe's reader does (PIPE).
+        // console too; it waits as a pipe's reader does (PIPE). px159: one
+        // whose call looked at the console's input (`wait_key`, KEY_CON),
+        // or that waits on every change; the rest are not the console's.
         let st = field(s, offset_of(Thread, state))
-        if st == INPUT || st == PIPE {
+        let w = if st == PIPE { slot_word(s, W_KEYS) } else { 0 }
+        if st == INPUT || (st == PIPE && (w == KEYS_ALL || w & key_bit(KEY_CON, 0) != 0)) {
             wake_urgent(s) // px131: a key's reader runs at once
             n += 1
         }
@@ -2754,8 +2780,8 @@ pub fn zombie(s: u64, reap_it: bool) -> (u64, u64) {
 
 /// Block the running process in a read or write of a pipe or socket
 /// (px17): its frame `f`, rewound by kernel/user to run the call again,
-/// saved; the thread waits until `wake_pipes`; the next thread's frame.
-/// IF clear.
+/// saved; the thread waits until `wake_pipes` (px159: or `wake_obj` of an
+/// object its call looked at); the next thread's frame. IF clear.
 pub fn block_pipe(f: u64) -> u64 {
     block_pipe_until(f, 0)
 }
@@ -2768,6 +2794,7 @@ pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     set_wake(c, wake, false)
+    settle_keys(c) // px159
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_REWOUND } else { W_TIMED_REWOUND }) // px26
     wake_sleepers()
@@ -2781,6 +2808,7 @@ pub fn block_pipe_eintr(f: u64, wake: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     set_wake(c, wake, false)
+    settle_keys(c) // px159
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), W_TIMED_REWOUND)
     wake_sleepers()
@@ -2810,6 +2838,101 @@ pub fn set_self_altstack(sp: u64, size: u64) {
     let c = cur()
     put_field(c, offset_of(Thread, ss_sp), sp)
     put_field(c, offset_of(Thread, ss_size), size)
+}
+
+// --- px159: what a waiting call waits on -------------------------------------------
+//
+// No object keeps a queue of its waiters (kernel/ready's header): a call
+// that cannot answer is run again once something changes. A change that
+// says which object it was wakes only the threads whose calls looked at
+// that object, at the queue's head (`wake_obj`); every other change still
+// wakes every waiter (`wake_pipes`). A call names what it looks at as it
+// runs (`wait_key`: a pipe's buffer, a pty, the console's input, an
+// eventfd's counter, each a class and an index), into one word of its
+// thread, cleared when a system call begins (`syscall_begins`); an object
+// whose changes still wake everyone is OTHER (`wait_other`). The word
+// holds 62 buckets, a hash of class and index: two objects in one bucket
+// only cost a call run again for nothing. At the wait (`settle_keys`) a
+// call that named nothing, or more than KEYS_MOST buckets (a poll of
+// hundreds of pipes), waits on every change, as before px159.
+
+/// A pipe buffer (kernel/files: a pipe's, a FIFO's, either buffer of a
+/// socketpair or of a path socket's connection): its bytes, its room.
+pub const KEY_BUF: u64 = 0
+/// A pseudo-terminal (kernel/pty), both its queues.
+pub const KEY_PTY: u64 = 1
+/// The console's input (kernel/console's CON): what `wake_input` wakes.
+pub const KEY_CON: u64 = 2
+/// An eventfd's counter (kernel/event).
+pub const KEY_EVT: u64 = 3
+const KEY_BUCKETS: u64 = 62
+const KEY_OTHER: u64 = 0x4000000000000000 // bit 62: an object `wake_obj` never names
+const KEYS_ALL: u64 = 0xffffffffffffffff // every change wakes it
+const KEYS_MOST: u64 = 16
+
+fn key_bit(class: u64, i: u64) -> u64 {
+    1 << ((i * 4 + class) % KEY_BUCKETS)
+}
+
+/// px159: the running thread's call looked at object `i` of `class`
+/// (KEY_*) and may wait for it to change.
+pub fn wait_key(class: u64, i: u64) {
+    let c = cur()
+    put_slot_word(c, W_KEYS, slot_word(c, W_KEYS) | key_bit(class, i))
+}
+
+/// px159: the running thread's call looked at an object whose changes
+/// wake every waiter (`wake_pipes`): a socket of the network's, a
+/// listener, the log, a mouse, the sound device, an epoll object.
+pub fn wait_other() {
+    let c = cur()
+    put_slot_word(c, W_KEYS, slot_word(c, W_KEYS) | KEY_OTHER)
+}
+
+/// px159: the keys of slot `c`'s wait, as it begins (`block_pipe_until`,
+/// `block_pipe_eintr`): none named, or more than KEYS_MOST buckets, is a
+/// wait on every change.
+fn settle_keys(c: u64) {
+    let w = slot_word(c, W_KEYS)
+    var n: u64 = 0
+    var b = w & !KEY_OTHER
+    while b != 0 {
+        b = b & (b - 1)
+        n += 1
+    }
+    if w == 0 || n > KEYS_MOST {
+        put_slot_word(c, W_KEYS, KEYS_ALL)
+    }
+}
+
+/// px159: object `i` of `class` changed (bytes came, room came back): each
+/// thread waiting on it (`wait_key`) is made ready at the queue's head,
+/// urgent (`wake_urgent`, under px131e's bound), so it runs before a
+/// thread that only computes rather than after its quantum; a thread
+/// waiting on every change is made ready as `wake_pipes` would; the rest
+/// wait on. Before, every change woke every waiter at the queue's tail:
+/// beside one process that only computes, a byte's round trip between two
+/// processes over a pipe waited a quantum each way. IF clear.
+pub fn wake_obj(class: u64, i: u64) {
+    let net = sv(S_NETD) != 0 && cur() == sv(S_NETD) - 1
+    let k = key_bit(class, i)
+    var s: u64 = FIRST
+    while s < top() {
+        if field(s, offset_of(Thread, state)) == PIPE {
+            let w = slot_word(s, W_KEYS)
+            if w == KEYS_ALL {
+                if net {
+                    wake_urgent(s)
+                } else {
+                    put_field(s, offset_of(Thread, state), READY)
+                    enqueue(s)
+                }
+            } else if w & k != 0 {
+                wake_urgent(s)
+            }
+        }
+        s += 1
+    }
 }
 
 /// Make every thread waiting on a pipe or socket ready (px17: some pipe
@@ -2913,6 +3036,7 @@ pub fn set_self_done(v: u64) {
 pub fn syscall_begins() {
     let c = cur()
     put_field(c, offset_of(Thread, rst), W_NONE)
+    put_slot_word(c, W_KEYS, 0) // px159: what this call looks at, from nothing
     put_field(c, offset_of(Thread, sysin), tsc())
 }
 

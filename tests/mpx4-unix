@@ -57,8 +57,9 @@
 #      six things PAX refuses by name (a SOCK_RAW, SOCK_SEQPACKET or
 #      SOCK_DGRAM Unix socket -ESOCKTNOSUPPORT, an option set on one
 #      -ENOPROTOOPT, an abstract name and autobind -EINVAL), each with
-#      its `refused:` line from the kernel; a seqpacket message larger
-#      than its buffer -EMSGSIZE; the `/proc` and `/sys` lines PAX makes
+#      its `refused:` line from the kernel; a seqpacket message of 8,000
+#      bytes taken whole (px159: a socket's buffer holds 64 KiB, as Linux
+#      takes it; -EMSGSIZE when it held one frame); the `/proc` and `/sys` lines PAX makes
 #      (one CPU, the one controller, 1024 descriptors); and the
 #      MAP_NORESERVE region: nothing backed at the mmap, three pages and
 #      the read's page after the touches (12 kB), all of them back
@@ -125,7 +126,7 @@ owners_of() { case $1 in probes-user|soak-user) echo '/u 755 1000 1000' ;; ctl-u
 mem_of() { case $1 in ctl*) echo 512M ;; *) echo 256M ;; esac; }
 REFUSED='~refused: socket SOCK_RAW ESOCKTNOSUPPORT, socket SOCK_SEQPACKET ESOCKTNOSUPPORT, socket SOCK_DGRAM ESOCKTNOSUPPORT, setsockopt SO_REUSEADDR ENOPROTOOPT, bind abstract EINVAL, bind autobind EINVAL'
 REFUSALS='syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 54: refused: an option set on a Unix socket (PAX has none to set), -92'
-SEQ_LINE='~seqpacket: a message of 8000 bytes: -EMSGSIZE'
+SEQ_LINE='~seqpacket: a message of 8000 bytes: 8000' # px159: taken whole, as Linux takes it (-EMSGSIZE when a socket's buffer was one frame)
 PAX_LINES='~  FDSize:	1024|~  VmRSS:	*|~  Cpus_allowed_list:	0|~  * lines|~  "cpu"|~  "0"|~rlimit: RLIMIT_NOFILE 1024 1024'
 STACK_REFUSAL="syscall 56: refused: no frame for a thread's kernel stack, -11|syscall 9: refused: out of frames, -12|syscall 9: refused: out of frames, -12"
 NORESERVE='~noreserve: VmRSS * kB before, 0 kB more after the mmap|~noreserve: 12 kB more after three pages and a read|~noreserve: -12 kB after MADV_FREE than before it'

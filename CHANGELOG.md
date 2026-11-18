@@ -7,6 +7,26 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A pipe's, a socket's and a pty's reader runs at once beside a busy process; socket buffers hold 64 KiB
+  (px159).** A change to any pipe, socket or pty woke every thread waiting on any of them, at the tail of the run
+  queue, so a reader waited out the quantum of whatever process was computing: beside one CPU-bound process a byte's
+  round trip between two processes over a pipe, a socketpair or a pty took about 10 ms (p99 10.7 to 11.1 ms, against
+  137 to 149 us with no such process), and a terminal multiplexer, its editor and the editor's language server paid
+  that on every hop of every key. Now it takes what it takes with none: p99 27 to 41 us beside the hog, 40 to 41 us
+  without (KVM, one boot each, native tier).
+  Now a call that waits names what it looked at, and a change to a pipe's or socket's buffer, a pty or an eventfd
+  wakes only those threads, at the head of the queue, under the bound that already lets a thread that is not urgent
+  run after a quantum's wait. An urgent thread keeps other urgent ones off the processor for its first millisecond
+  only, so a reader that goes on to compute no longer holds off a key's reader for its quantum. A change of any other
+  kind (an end opened or closed, a connection, the network, the log) still wakes every waiter. An AF_UNIX socket's
+  buffer holds 64 KiB each way instead of 4 KiB, as a pipe's does: a 19 KiB frame crosses in one write and one read
+  instead of five round trips, and each connection holds 128 KiB of frames instead of 8 KiB while it is open. A
+  SOCK_SEQPACKET socketpair takes a message of up to 65,528 bytes whole, as Linux takes an 8,000-byte one (it was
+  -EMSGSIZE past 4,088).
+  `tests/mpx6-latency` holds both: L9, the round trip's p99 over each of the three beside a CPU-bound process within
+  three times the same with none (or that plus 2 ms), under KVM; L10, a 19,456-byte write without waiting on a
+  socketpair and on a path connection taken whole and read whole in one read, on every tier.
+
 - **Process slots: 64 to 1,024 (px126).** PAX held 64 threads system-wide,
   about 28 wolf programs; it now holds 1,024. A slot costs memory only while it
   lives: a thread its kernel stack and FPU area, a process its 48 KiB area,
