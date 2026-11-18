@@ -11,14 +11,18 @@ import termios
 import time
 
 program=sys.argv[1]
-token='ERASE /dev/vdb 254:16-seq2 536870912 test'
+token='ERASE /dev/vdb 254:16-seq2 536870912 test ext3'
 # px78b (R-P6-confirm): after the plan, one summary naming the disk by
-# model, serial, size and node, the ext2 notice folded in, and one word.
+# model, serial, size and node, the root's notice folded in, and one word.
+# px162: ext3 is the default; --ext2-preview names ext2 (the witness's argument).
 summary=('Erase Samsung SSD 860, serial PX71-VDB (0.5 GB, /dev/vdb), and install PAX?\n'
-         'The root file system is ext2 without a journal.\n'
+         'The root file system is ext3, journalled (data=ordered); pax-install --ext2-preview installs ext2 without a journal.\n'
          'Type yes to install; anything else cancels: pax-install> ')
-def ui(keys):
-    return subprocess.run([program],input=keys,text=True,capture_output=True)
+summary2=('Erase Samsung SSD 860, serial PX71-VDB (0.5 GB, /dev/vdb), and install PAX?\n'
+          'The root file system is ext2 without a journal.\n'
+          'Type yes to install; anything else cancels: pax-install> ')
+def ui(keys,*args):
+    return subprocess.run([program,*args],input=keys,text=True,capture_output=True)
 for prefix in ['', '2\n', '2\nalice\n', '2\nalice\ny\n']:
     p=ui(prefix)
     assert p.returncode==1 and 'UI result cancelled' in p.stdout,(prefix,p.stdout,p.stderr)
@@ -27,12 +31,18 @@ for game,expected in [('y','true'),('n','false')]:
     p=ui(f'n\np\n2\nalice\n\n{game}\nyes\n')
     assert p.returncode==0 and f'UI confirmed vdb alice {expected}' in p.stdout,(p.stdout,p.stderr)
     assert 'An explicit y or n is required.' in p.stdout
-    assert 'NO journal' in p.stdout and 'capacity_bytes 536870912' in p.stdout
+    assert 'PAX install plan v2\nformat ext3 (journal 4096 blocks' in p.stdout and 'capacity_bytes 536870912' in p.stdout,p.stdout
     assert summary in p.stdout,p.stdout
-    for gone in ['confirmation ', 'ext2-preview', token]:
+    for gone in ['confirmation ', 'Type ext2-preview', token]:
         assert gone not in p.stdout,(gone,p.stdout)
 print('PASS I-ui-answers: navigation, full plan, both games answers, no blank default; the summary names the disk and yes installs')
-for word in ['y', 'YES', 'Yes', 'q', '', token, 'ext2-preview', 'confirmation '+token]:
+p=ui('2\nalice\nn\nyes\n','--ext2-preview')
+assert p.returncode==0 and 'UI confirmed vdb alice false ext2' in p.stdout,(p.stdout,p.stderr)
+assert 'PAX install plan v1\nformat ext2-developer-preview (NO journal; not ext3)' in p.stdout and summary2 in p.stdout,p.stdout
+p=ui('2\nalice\nn\nyes\n')
+assert p.returncode==0 and 'UI confirmed vdb alice false ext3' in p.stdout,(p.stdout,p.stderr)
+print('PASS I-ui-profile: the guided plan is ext3 by default; --ext2-preview plans ext2, its plan and notice as before')
+for word in ['y', 'YES', 'Yes', 'q', '', token, 'ext2-preview', 'ext3', 'confirmation '+token]:
     p=ui(f'2\nalice\ny\n{word}\n')
     assert p.returncode==1 and 'UI result cancelled' in p.stdout and summary in p.stdout,(word,p.stdout,p.stderr)
     assert 'UI confirmed' not in p.stdout,(word,p.stdout)
