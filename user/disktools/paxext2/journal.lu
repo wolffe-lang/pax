@@ -1,0 +1,83 @@
+//! An internal ext3 journal (inode 8) from the published layouts: the ext4
+//! documentation's journal page (the v2 journal superblock, big-endian) and
+//! super.rst (has_journal, s_journal_inum, s_jnl_blocks, s_jnl_backup_type).
+//! The journal is empty: s_sequence 1, s_start 0, no journal feature, its
+//! UUID the volume's, one user. Its blocks are reserved before the tree's,
+//! so they are one contiguous run, zeroed, the map's blocks after them.
+
+use diskio
+
+const JOURNAL_MAGIC: int = 3225106840 // 0xC03B3998
+
+const JOURNAL_SB_V2: int = 4
+
+/// The smallest journal: the kernel's largest transaction needs 522 blocks
+/// of 4 KiB, and 1024 is the documented minimum of jbd2's tools.
+const JOURNAL_MIN: int = 1024
+
+/// 1 GiB of 4 KiB blocks.
+const JOURNAL_MAX: int = 262144
+
+/// A big-endian 32-bit field of the journal superblock.
+fn put_be(mut b: List[byte], at: int, value: int) {
+    b[at] = ((value >> 24) & 255) as byte
+    b[at + 1] = ((value >> 16) & 255) as byte
+    b[at + 2] = ((value >> 8) & 255) as byte
+    b[at + 3] = (value & 255) as byte
+}
+
+/// The journal's own superblock, journal block 0.
+fn journal_super(blocks: int, uuid: List[byte]) -> List[byte] {
+    var b = diskio.zeros(4096)
+    put_be(mut b, 0, JOURNAL_MAGIC)
+    put_be(mut b, 4, JOURNAL_SB_V2)
+    put_be(mut b, 8, 0)
+    put_be(mut b, 12, 4096) // s_blocksize
+    put_be(mut b, 16, blocks) // s_maxlen
+    put_be(mut b, 20, 1) // s_first
+    put_be(mut b, 24, 1) // s_sequence
+    put_be(mut b, 28, 0) // s_start: empty
+    diskio.paste(mut b, 48, uuid[0..16]) // s_uuid: the volume's
+    put_be(mut b, 64, 1) // s_nr_users
+    b
+}
+
+/// Journal `blocks` blocks long, written as inode 8 into group 0's table:
+/// the data blocks zeroed and the superblock in the first. Returns the
+/// inode's i_block words and its size (s_jnl_blocks' 17 words).
+fn write_journal(mut fs: Fs, blocks: int, uuid: List[byte], epoch: int) -> List[int] ! {io, full, invalid} {
+    if blocks < JOURNAL_MIN || blocks > JOURNAL_MAX || blocks > fs.blocks / 4 { return invalid }
+    var data = List[int]()
+    for _ in 0..blocks { (mut data).push(reserve(mut fs)?) }
+    // reserve hands out increasing blocks, skipping only a group's metadata:
+    // zero each contiguous stretch once.
+    var run = 0
+    while run < blocks {
+        var end = run + 1
+        while end < blocks && data[end] == data[end - 1] + 1 { end += 1 }
+        zero_blocks(fs, data[run], end - run)?
+        run = end
+    }
+    block_write(fs, data[0], journal_super(blocks, uuid))?
+    var inode = diskio.zeros(256)
+    diskio.put(mut inode, 0, 33152, 2) // a regular file, 0600 (0o100600)
+    diskio.put(mut inode, 26, 1, 2)
+    diskio.put(mut inode, 128, 32, 2)
+    inode_time(mut inode, 8, 140, epoch)
+    inode_time(mut inode, 12, 132, epoch)
+    inode_time(mut inode, 16, 136, epoch)
+    inode_time(mut inode, 144, 148, epoch)
+    let size = blocks * 4096
+    let meta = block_map(mut fs, data, mut inode)?
+    diskio.put(mut inode, 4, size & 4294967295, 4)
+    diskio.put(mut inode, 108, (size >> 32) & 4294967295, 4)
+    diskio.put(mut inode, 28, (blocks + meta) * 8, 4)
+    // Inode 8 is reserved (1..10 counted used in group 0): no bitmap change.
+    let index = 7
+    diskio.write_at(fs.fd, fs.base + fs.groups[0].table * 4096 + index * 256, inode)?
+    var words = List[int]()
+    for i in 0..15 { (mut words).push(diskio.le(inode, 40 + i * 4, 4)?) }
+    (mut words).push(size >> 32)
+    (mut words).push(size & 4294967295)
+    words
+}
