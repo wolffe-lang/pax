@@ -862,6 +862,10 @@ fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
         if r == journal.R_ABORTED { return refuse("journal records an error and needs offline recovery: inode", jino) }
         if r == journal.R_VERSION { return refuse("journal version without a qualified UUID: inode", jino) }
         if r == journal.R_USERS { return refuse("journal is not private to one filesystem: inode", jino) }
+        if r == journal.R_START {
+            // pax#419: refused before any write, the log kept for an offline check.
+            return refuse("the journal's s_start is outside its log [s_first, s_maxlen), nothing replayed: s_start", journal.refused_bits(v))
+        }
         if r == journal.R_FEAT {
             log.put("ext2: refused: ")
             block.put_name(dev)
