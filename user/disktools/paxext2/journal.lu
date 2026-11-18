@@ -42,11 +42,17 @@ fn journal_super(blocks: int, uuid: List[byte]) -> List[byte] {
     b
 }
 
+/// Whether a journal of `blocks` fits a volume of `total` blocks: the bounds
+/// above, and at most a quarter of the volume. Checked before the image opens.
+fn journal_fits(blocks: int, total: int) -> bool {
+    blocks >= JOURNAL_MIN && blocks <= JOURNAL_MAX && blocks <= total / 4
+}
+
 /// Journal `blocks` blocks long, written as inode 8 into group 0's table:
 /// the data blocks zeroed and the superblock in the first. Returns the
 /// inode's i_block words and its size (s_jnl_blocks' 17 words).
 fn write_journal(mut fs: Fs, blocks: int, uuid: List[byte], epoch: int) -> List[int] ! {io, full, invalid} {
-    if blocks < JOURNAL_MIN || blocks > JOURNAL_MAX || blocks > fs.blocks / 4 { return invalid }
+    if !journal_fits(blocks, fs.blocks) { return invalid }
     var data = List[int]()
     for _ in 0..blocks { (mut data).push(reserve(mut fs)?) }
     // reserve hands out increasing blocks, skipping only a group's metadata:

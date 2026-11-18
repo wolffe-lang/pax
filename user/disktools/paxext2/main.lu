@@ -260,6 +260,7 @@ fn run(args: List[str]) -> () ! {invalid, io, full, too_large} {
     // Validate the geometry and inode budget before opening the destination.
     var fs = layout(-1, base, bytes, inodes)?
     for n in nodes { if n.ino > fs.groups.len * fs.ipg { return full } }
+    if journal != 0 && !journal_fits(journal, fs.blocks) { return invalid }
     let fd = fs_open_mode(path, 3) else |_| { return io }
     defer fs_close(fd) else |_| {}
     let dst = fs_fstat_record(fd) else |_| { return io }
