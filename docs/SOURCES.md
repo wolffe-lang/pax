@@ -2448,3 +2448,15 @@ answer the pages leave open is Linux's, run as a black box.
 | the same kernel and its sound modules (snd-intel8x0, snd-pcm-oss) under QEMU with an AC97 device (`tools/linux-sound`) | binary | black box: `sendfile` and `splice` onto /dev/dsp (`user/sound/dspprobe.c`'s two lines) |
 | boreutils' `src/cat.lu` and wolf's runtime's `fs_copy_chunk` (`[os.fs.copy]`; the org's own) | `user/boreutils.pin`; wolf-lang's trunk | the order `cat` tries the calls in, and which answers make it fall back to the next |
 | PAX's own `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/user` (`write`'s targets) | this tree | read and extended |
+
+## px164 — an inode's change lost under write-back
+
+No kernel's, file system's or C library's source was read, and no e2fsprogs source. The probe's calls are the man
+pages'; e2fsprogs is run as a black box.
+
+| source | version | read, for |
+|---|---|---|
+| chmod(2), getdents64(2), lstat(2), open(2), read(2), write(2) with O_APPEND, fork(2), kill(2), sync(2), proc(5) (`/proc/meminfo`), mmap(2) | man-pages 6.x | `user/elf/churn.c`'s calls and what each one changes |
+| e2fsprogs' `mke2fs -d`, `debugfs` (`stat`, `dump`), `e2fsck -fn`, `dumpe2fs -h` | 1.47.0 (the pinned image's, or the toolchain image's own) | black box: the rows' disk made from a tree, and every inode's mode and access time, the appended log's bytes and the volume's consistency read back from it |
+| the ext2 layout documents kernel/ext2's header names | as there | which block of a group is its inode table (a line's block number read as a table block) |
+| PAX's own `kernel/ext2`, `kernel/block`, `kernel/tree`, `kernel/fstab`, `kernel/signal`, `kernel/sched`, `user/init`, `user/disktools/paxext2` | this tree | where a change and its mark are apart; who raises SIGKILL; the installed root's layout; extended (`kernel/ext2`, `kernel/block`) |
