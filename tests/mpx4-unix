@@ -125,11 +125,16 @@ base_of() { echo "${1%-user}"; }
 owners_of() { case $1 in probes-user|soak-user) echo '/u 755 1000 1000' ;; ctl-user) echo '/logs 755 1000 1000' ;; esac; }
 mem_of() { case $1 in ctl*) echo 512M ;; *) echo 256M ;; esac; }
 REFUSED='~refused: socket SOCK_RAW ESOCKTNOSUPPORT, socket SOCK_SEQPACKET ESOCKTNOSUPPORT, socket SOCK_DGRAM ESOCKTNOSUPPORT, setsockopt SO_REUSEADDR ENOPROTOOPT, bind abstract EINVAL, bind autobind EINVAL'
-REFUSALS='syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 54: refused: an option set on a Unix socket (PAX has none to set), -92'
+REFUSALS='syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 54: refused: an option set on a Unix socket (PAX has none to set), -92|syscall 9: refused: out of frames, -12|syscall 9: refused: out of frames, -12' # px159: the last two, the mmaps section L's frames ran out on
 SEQ_LINE='~seqpacket: a message of 8000 bytes: 8000' # px159: taken whole, as Linux takes it (-EMSGSIZE when a socket's buffer was one frame)
 PAX_LINES='~  FDSize:	1024|~  VmRSS:	*|~  Cpus_allowed_list:	0|~  * lines|~  "cpu"|~  "0"|~rlimit: RLIMIT_NOFILE 1024 1024'
 STACK_REFUSAL="syscall 56: refused: no frame for a thread's kernel stack, -11|syscall 9: refused: out of frames, -12|syscall 9: refused: out of frames, -12"
 NORESERVE='~noreserve: VmRSS * kB before, 0 kB more after the mmap|~noreserve: 12 kB more after three pages and a read|~noreserve: -12 kB after MADV_FREE than before it'
+# px159: a socket's buffer takes its frames as bytes are written to it: an idle
+# pair holds none; 20,000 bytes each way take five frames each way, all given
+# back with the last end (within one frame); with the frames gone, a stream
+# takes what has frames and a message goes in whole or not at all.
+FRAMES='~frames: 32 idle socketpairs: 0 kB taken|~frames: 16 pairs, 20000 bytes each way: 640 kB taken while open, * kB after their last ends|~frames: every frame taken, one given back: a stream write of 30000 bytes: short (*)|~frames: two more given back: a seqpacket message of 30000 bytes: ENOBUFS, without MSG_DONTWAIT: ENOBUFS; a read then: EAGAIN|~frames: the memory given back: the message: 30000, read whole: 30000; the stream held *'
 
 work=$PAX_BUILD/mpx4-unix
 runs=$PAX_BUILD/mpx4-unix-runs.txt
@@ -342,7 +347,11 @@ for leg in $legs; do
                 lines_match "$pl" "$PAX_LINES" || why+=" the /proc and /sys lines '$pl';"
                 nr=$(grep '^~noreserve' "$out" | paste -sd'|' -)
                 lines_match "$nr" "$NORESERVE" || why+=" the MAP_NORESERVE lines '$nr';"
-                [ -z "$why" ] && say "PASS U2 $id: $g; $q; $(printf '%s' "$pl" | tr '\t' ' '); $nr (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep '^~noreserve' "$out.linux" | paste -sd'|' -))" || bad "U2 $id:$why"
+                fr=$(grep '^~frames' "$out" | paste -sd'|' -)
+                lines_match "$fr" "$FRAMES" || why+=" the socket frames lines '$fr';"
+                back=$(printf '%s\n' "$fr" | sed -n -E 's/.* kB taken while open, (-?[0-9]+) kB after their last ends.*/\1/p')
+                [ -n "$back" ] && [ "${back#-}" -le 4 ] || why+=" the frames not back within one frame after the last ends: '$back';"
+                [ -z "$why" ] && say "PASS U2 $id: $g; $q; $(printf '%s' "$pl" | tr '\t' ' '); $nr; $fr (Linux here: $(grep -m1 '^~refused' "$out.linux"); $(grep '^~noreserve' "$out.linux" | paste -sd'|' -))" || bad "U2 $id:$why"
             fi
 
             # px47: probes-user was a user's: its own answer to opening its
