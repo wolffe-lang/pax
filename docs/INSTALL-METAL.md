@@ -169,9 +169,13 @@ pax-install
 
    ```text
    Erase Samsung SSD 870, serial PX78-TARGET-0001 (500.1 GB, /dev/sdc), and install PAX?
-   The root file system is ext2 without a journal.
+   The root file system is ext3, journalled (data=ordered); pax-install --ext2-preview installs ext2 without a journal.
    Type yes to install; anything else cancels: pax-install>
    ```
+
+   The root is ext3 unless you run `pax-install --ext2-preview`, which installs the ext2 developer preview without
+   a journal (the summary then says `The root file system is ext2 without a journal.`). Upgrading an installed
+   system never changes its file system.
 
    **Photo 2: the plan and the summary, before typing anything else.** Check that the model and serial are the
    target's (the size is in decimal GB or TB, as on the disk's label).
