@@ -6,7 +6,7 @@
 fn wipe_witness(path: str, bytes: str, only: str) -> int {
     let n = bytes.to_int() else |_| { return 2 }
     let t = Target { name: "vdb", identity: "254:16-seq2", bytes: n, sector: 512, readonly: false, mounted: false, running_root: false }
-    let p = make_plan(t, "test", "pax", "no") else |e| { eprint("executor: plan {e}"); return 2 }
+    let p = make_plan(t, "test", "pax", "no", PROFILE_EXT2) else |e| { eprint("executor: plan {e}"); return 2 }
     let fd = fs_open_mode(path, 3) else |_| { return 2 }
     defer fs_close(fd) else |_| {}
     var used = 0
@@ -18,9 +18,36 @@ fn wipe_witness(path: str, bytes: str, only: str) -> int {
     0
 }
 
+/// px162: the root phase's argv for a 512 MiB plan of PROFILE (TREE holds the boot files the
+/// verify phases hash), one argument a line.
+fn root_args_witness(profile: str, tree: str) -> int {
+    let t = Target { name: "vdb", identity: "254:16-seq2", bytes: 536870912, sector: 512, readonly: false, mounted: false, running_root: false }
+    let p = make_plan(t, "test", "pax", "no", profile) else |e| { eprint("executor: plan {e}"); return 2 }
+    let commands = actions(p, tree, "/attrs", "/bin") else |e| { eprint("executor: {e}"); return 2 }
+    for a in commands {
+        if a.phase == "root" {
+            print(a.exe)
+            for x in a.args { print(x) }
+        }
+    }
+    0
+}
+
+/// px162: root_as_planned's answer for PROFILE and FILE's bytes [1024, 2048).
+fn root_check_witness(profile: str, path: str) -> int {
+    let fd = fs_open_mode(path, 0) else |_| { return 2 }
+    defer fs_close(fd) else |_| {}
+    let sb = fs_read_at(fd, 1024, 1024) else |_| { return 2 }
+    let why = root_as_planned(sb, profile)
+    print(if why.len == 0 then "as planned" else why)
+    0
+}
+
 fn main() -> int {
     let args = env_args()
     if args.len == 4 && args[0] == "--wipe" { return wipe_witness(args[1], args[2], args[3]) }
+    if args.len == 3 && args[0] == "--root-args" { return root_args_witness(args[1], args[2]) }
+    if args.len == 3 && args[0] == "--root-check" { return root_check_witness(args[1], args[2]) }
     if args.len != 4 { return 2 }
     let fd = fs_open_mode(args[0], 3) else |_| { return 2 }
     defer fs_close(fd) else |_| {}
