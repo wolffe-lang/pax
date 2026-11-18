@@ -7,6 +7,14 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A program can prove a journal is live: `/proc/fs/jbd2` and `/sys/dev/block`.** While a volume's journal is
+  live (mounted read-write, writing through it, not failed), `/proc/fs/jbd2/<device>-<journal inode>` is there
+  (`vda2-8`), with PAX's own `info` lines; it goes when the journal aborts and at the unmount, and plain ext2 and a
+  read-only mount never have one. `/sys/dev/block/<major>:<minor>` links each disk and partition to
+  `../../class/block/<name>`, so stat's `st_dev` names its device. That is the Linux path of paxage's journal
+  check; pxg's behaviour does not change until paxage takes it up on PAX. `tests/mpx6-journal` J11's JP rows run
+  that check in the guest; the Linux side, measured black-box, is `notes/px162/linux-jbd2.txt`.
+
 - **The installer formats a journalled root: ext3 by default, ext2 a named choice.** `pax-install` now writes
   an ext3 root with a 16 MiB journal (`data=ordered`), which PAX replays after a power cut, in the guided flow,
   `--dry-run` and `--install`; `--ext2-preview` still installs the ext2 developer preview without a journal.
