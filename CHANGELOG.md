@@ -7,6 +7,15 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A journal whose replay start lies outside its log is refused, the log kept (pax#419).** The journal's
+  superblock names where its log begins (`s_start`); a value that is not 0 and not one of the log's own blocks,
+  from `s_first` up to `s_maxlen`, made the replay read a block no transaction wrote, find nothing, and empty the
+  log as if it held nothing, so a volume with damaged journal geometry lost its recovery log at the first mount.
+  The mount now refuses it by name before any write, read-write or read-only (`the journal's s_start is outside
+  its log`), and the log stays for an offline check. PAX's own `fsck.ext2` already refused it.
+  `tests/mpx6-journal` J11's JF-start rows: past the log, past the journal inode, before the log, and a start at
+  the log's last block as the control.
+
 - **Process slots: 64 to 1,024 (px126).** PAX held 64 threads system-wide,
   about 28 wolf programs; it now holds 1,024. A slot costs memory only while it
   lives: a thread its kernel stack and FPU area, a process its 48 KiB area,
