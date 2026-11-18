@@ -288,6 +288,22 @@ fn le32(b: List[byte], o: int) -> int {
 
 /// The target root's free bytes and inodes, from its superblock on the
 /// disk (read once, before any write: the mount wrote it at boot).
+/// px162: the root's profile, read from its superblock (has_journal: ext3),
+/// or "" when no ext2-family superblock is there. An upgrade never changes it.
+fn root_profile(fd: int) -> str {
+    let sb = fs_read_at(fd, ROOT_START + 1024, 1024) else |_| { return "" }
+    if sb.len != 1024 || sb[56] != 83 as byte || sb[57] != 239 as byte { return "" }
+    if le32(sb, 92) & 4 != 0 then PROFILE_EXT3 else PROFILE_EXT2
+}
+
+/// px162: the root's own limine.conf text: its profile's (ext2's as before).
+fn root_config_text(dev: str, uuid: str) -> str {
+    let fd = fs_open(dev) else |_| { return config_text(uuid) }
+    let profile = root_profile(fd)
+    fs_close(fd) else |_| {}
+    profile_config_text(uuid, profile)
+}
+
 fn root_free(fd: int) -> (int, int) {
     let sb = fs_read_at(fd, ROOT_START + 1024, 1024) else |_| { return (-1, -1) }
     if sb.len != 1024 || sb[56] != 83 as byte || sb[57] != 239 as byte { return (-1, -1) }
@@ -569,8 +585,13 @@ fn upgrade_main(o: Options, work: str) -> int {
     var known = known_texts(old, o.payload)
     // px118: the quiet text px78's to px118's installers wrote, for this root's PARTUUID.
     (mut known).push("{sha2.to_hex(sha2.sum256(config_text_quiet(uuid).bytes()))} /boot/limine/limine.conf")
-    text_step(mut p, "/etc/fstab", fstab_text(uuid), "regenerated for PARTUUID={uuid}", known)
-    text_step(mut p, "/boot/limine/limine.conf", config_text(uuid), "regenerated for PARTUUID={uuid}", known)
+    // px162: the root's own profile's texts (an ext2 root's as before, byte for byte); never converted.
+    let pfd = fs_open(dev) else |_| { return stop(mut lg, "pax-install: upgrade: {dev} cannot be read") }
+    let profile = root_profile(pfd)
+    fs_close(pfd) else |_| {}
+    if profile.len == 0 { return stop(mut lg, "pax-install: upgrade refused: {dev}'s partition 2 holds no ext2 or ext3 superblock") }
+    text_step(mut p, "/etc/fstab", profile_fstab_text(uuid, profile), "regenerated for PARTUUID={uuid}", known)
+    text_step(mut p, "/boot/limine/limine.conf", profile_config_text(uuid, profile), "regenerated for PARTUUID={uuid}", known)
     text_step(mut p, "/etc/pax-run", INSTALLED_RUN, "the installed login", known)
     text_step(mut p, "/etc/pax-login", installed_login(), "the installed login", known)
     // px112 (R-px112-9, C): the installed burrowd's configuration, the stick's with the LAN's ListenAddress.
@@ -588,7 +609,7 @@ fn upgrade_main(o: Options, work: str) -> int {
         }
     }
     let conf = "{work}/upgrade-limine.conf"
-    durable_text(conf, config_text(uuid)) else |_| { return stop(mut lg, "pax-install: upgrade: scratch {conf}") }
+    durable_text(conf, profile_config_text(uuid, profile)) else |_| { return stop(mut lg, "pax-install: upgrade: scratch {conf}") }
     if esp_sha(dev, "/boot/limine/limine.conf", o.tools, work, 9) != file_sha(conf) {
         (mut p.esp).push([conf, "/boot/limine/limine.conf"])
     }
