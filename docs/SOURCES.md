@@ -2538,3 +2538,24 @@ speed conversion, PTY flag normalization, master/slave sharing and fault behavio
 | Linux 7.2.4, run with static probes in containers | binary | `user/elf/termios2probe.c`: every input/output baud encoding, BOTHER, legacy interoperation, the master's setters, short and read-only buffers, flushing, `tcgetattr`, `tcsetattr`, `cfgetispeed`, `isatty` and window-size-based column layout; observed references in `tests/mpx5-pty.d/linux/termios2*.txt` |
 | glibc 2.44 and GCC 16.2.1; pelt at `00c12d72abf0d2783afbb43c91c901abd4eb4083` | binaries and the project's own shell | the same C probe linked statically against glibc 2.44, and an unmodified static pelt reaching its interactive prompt |
 | PAX's own `kernel/console`, `kernel/pty`, `user/elf/ptyprobe.c`, `tests/mpx5-pty` | this tree | the shared terminal state, job-control and flush rules, and the existing terminal regression rows |
+
+## px125 — PAX for a terminal multiplexer (the readiness probe, Ctrl-Space, the box-drawing glyphs)
+
+No kernel's, terminal emulator's, multiplexer's or C library's source was read: not Linux's, not xterm's, not any
+other terminal's or multiplexer's. Ubuntu was measured as a black box with the probe's own static binaries.
+
+| source | version | read, for |
+|---|---|---|
+| man-pages `pty(7)`, `unix(7)` (`SO_PEERCRED`, `SCM_RIGHTS`, abstract names), `epoll(7)`, `signal(7)`, `termios(3)` (`cfmakeraw`), `credentials(7)`, `setsid(2)`, `prctl(2)` (`PR_SET_CHILD_SUBREAPER`), `eventfd(2)`, `timerfd_create(2)`, `signalfd(2)`, `ppoll(2)`, `sendmsg(2)`, `cmsg(3)`, `ioctl_tty(2)` (`TIOCSWINSZ`, `TIOCGPTN`, `TIOCGSID`) | man-pages 6.x | the A rows' questions and the calls `user/elf/muxprobe.c` makes |
+| man-pages `console_codes(4)`, man7.org's HTML copy, sha256 `3cabfae601fcb7e50f1b09e6e3feae742f225a59e114af8e63ee08a07981da77` | Linux man-pages 6.19, 2026-07-29 | which sequences the Linux console documents (RI, SCOSC/SCORC, DECIM, DECOM, DECAWM) and which it lists as not implemented (DCS, SOS, PM); the B1 and B6 verdicts and the console issue |
+| POSIX.1-2024, XBD 11 (General Terminal Interface) | 2024 | the controlling terminal, the foreground process group, the special characters |
+| **XTerm Control Sequences**, as px117's entry (by its digests) | as px117 | what each B case expects xterm to draw, answer or send: the alternate screens, DECSC/SCOSC, DECSTBM, RI, IL/DL/ICH/DCH/ECH, EL/ED, SU/SD, REP, IRM, DECOM, DECAWM, CHT, SGR (the 16, 256 and direct colours, the underline styles), DA1/DA2/DA3, DSR, CPR and DECXCPR, DECRQM, XTVERSION, OSC 10, DECRQSS, XTGETTCAP, DECSCUSR, bracketed paste and focus, the PC-style function keys and their modifiers, OSC 0/2/8/52, DCS, APC, PM and SOS (`tests/mpx7-mux.d/cases.py`) |
+| the kitty keyboard protocol's query `CSI ? u` | the sequence alone | B4's question whether the console answers it (it does not); no document or source read beyond the sequence |
+| ECMA-48, as px19's entry | 5th ed. | the control functions' names |
+| **Spleen 8x16**, as the font's entry (vendored, BSD-2-Clause) | 2.2.0 | its own glyphs for U+2500-U+257F, U+2190-U+2193, U+E0A0-U+E0A2 and U+E0B0-U+E0B3, taken by `tools/mkfont` through `font/extent.txt`; no other font consulted |
+| wolf-std at `77cf3210a82c93dc05ded987c249bb69e79b0a89` (the org's own, public): `std/term`, `std/process`, `std/signal`, `std/net` and `std/net/unix`, `std/fs` | `77cf3210` | the calls `user/muxwolf` makes and the two it lacks (the wolf-std issues) |
+| wolf 0.2.39, the release archive for x86_64-unknown-linux-gnu, sha256 `53f75d2b2dd79c0532b21920bc9f073098154aa0133caa2405209a1ef2af0457` | 0.2.39 | builds `user/muxwolf` (`tools/mkmuxwolf`) |
+| Ubuntu 24.04.5 in the suite's container (`localhost/px75-ubuntu:2`), on a Linux 7.2 host | binary | black box: the same static `muxprobe` and `muxwolf` as pid 1 on a pseudo-terminal (`tools/linux-tree`), the references in `tests/mpx7-mux.d/linux/` with their digests in `record.meta` |
+| QEMU 8.2.2 (Ubuntu's `qemu-system-x86`): `-device VGA` with `vgamem_mb=64`, `xres=2560`, `yres=1440`; the i8042; the monitor's `screendump` and `sendkey` | binary | black box: B7 at the target machine's display size; B5's keys typed at the PS/2 keyboard |
+| px123's rows in `tests/mpx5-burrowd` (B19-B27: a terminal over `ssh -t`, its size, a resize, Ctrl-C, Ctrl-\, Ctrl-Z) | px123's branch | cited for A.3, A.4 and B8, not run here |
+| PAX's own `kernel/sched` (`SLOTS`), `kernel/ready`, `kernel/pty`, `kernel/unix`, `kernel/console`, `kernel/screen`, `kernel/user`, `tools/linux-tree`, `tools/ps2-session`, `tools/screen-ref`, `user/elf/vtcases.c`, `tools/mksigwolf` (the probe's builder's shape) | this tree | read and extended |
