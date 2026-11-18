@@ -109,7 +109,17 @@
 //! buffer cache, whose rule this code keeps throughout: an address it
 //! returns is good until the next `get` or `fresh`, so each function
 //! reads what it needs, or writes and marks the buffer dirty, before it
-//! asks for another block.
+//! asks for another block. px164: an inode's writers keep the block
+//! `inode_w` read and mark it with `imark`, asking for nothing in between
+//! (`idirty` found the block again through the group's descriptor, a `get`
+//! between the change and its mark: under write-back the clock hand could
+//! take the inode's clean buffer for it, and the change was lost). Each mark
+//! names the address its change went through, and kernel/block's `written`
+//! says whether that is still the block's buffer. A change lost before its
+//! mark is a kernel bug and is said as one, never as the disk's error:
+//!
+//!     ext2: vda: a kernel bug: ext2 dirtied an uncached block <n>; the change is lost (not a disk error)
+//!     ext2: vda: a kernel bug: ext2 wrote block <n>'s change through a stale buffer, block <m>'s now, forgotten: read again from the disk; the change is lost (not a disk error)
 //!
 //! **Order (px151, pax#442).** ext2 has no journal, so a power cut leaves
 //! whatever writes reached the disk; the order of the writes is all that
@@ -615,18 +625,31 @@ fn iloc(v: u64, ino: u64) -> (u64, u64) {
 /// Inode `ino`'s bytes (valid until the next block is asked for), 0 on
 /// an I/O error or a number out of range.
 fn inode(v: u64, ino: u64) -> u64 {
+    let (a, _b) = inode_w(v, ino)
+    a
+}
+
+/// px164: inode `ino`'s bytes, to be changed: (their address, valid until
+/// the next block is asked for; the inode table's block that holds them,
+/// for `imark`), (0, 0) on an I/O error or a number out of range.
+fn inode_w(v: u64, ino: u64) -> (u64, u64) {
     if ino == 0 || ino > vw(v, V_INODES) {
         corrupt(v, "an inode number out of range:", ino)
-        return 0
+        return (0, 0)
     }
     let (b, o) = iloc(v, ino)
     let a = get(v, b)
-    if a == 0 { 0 } else { a + o }
+    if a == 0 { (0, 0) } else { (a + o, b) }
 }
 
-fn idirty(v: u64, ino: u64) {
-    let (b, _o) = iloc(v, ino)
-    dirty(v, b, C_INODE, 0)
+/// The inode at `a` changed in its buffer, of block `b` (`inode_w`'s): marked
+/// with nothing asked for in between. px164: this was `idirty(v, ino)`, which
+/// found the block again through `iloc`, a `get` of the group's descriptor
+/// block between the change and its mark; under write-back the clock hand
+/// could take the inode's clean buffer back for it, and the change was lost
+/// (`ext2: sda2: an I/O error writing block N` on an installed root).
+fn imark(v: u64, b: u64, a: u64) {
+    dirty(v, b, C_INODE, a)
 }
 
 // --- mounting ------------------------------------------------------------------
@@ -1592,7 +1615,7 @@ fn put_time(v: u64, a: u64, lo_off: u64, ex_off: u64, t: u64) {
 /// Set the times `which` names (T_* bits) of inode `ino` to `t` (signed
 /// nanoseconds), one write.
 pub fn touch(v: u64, ino: u64, which: u64, t: u64) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a == 0 {
         return
     }
@@ -1608,14 +1631,14 @@ pub fn touch(v: u64, ino: u64, which: u64, t: u64) {
     if which & T_CRTIME != 0 {
         put_time(v, a, I_CRTIME, I_CRTIME_EXTRA, t)
     }
-    idirty(v, ino)
+    imark(v, ib, a)
 }
 
 /// Set inode `ino`'s access time to `at` and its modification time to
 /// `mt` when `which` has bit 0 and bit 1 (utimensat), and its change
 /// time to `ct` when either does: one write.
 pub fn set_times(v: u64, ino: u64, at: u64, mt: u64, ct: u64, which: u64) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a == 0 {
         return
     }
@@ -1628,44 +1651,44 @@ pub fn set_times(v: u64, ino: u64, at: u64, mt: u64, ct: u64, which: u64) {
     if which != 0 {
         put_time(v, a, I_CTIME, I_CTIME_EXTRA, ct)
     }
-    idirty(v, ino)
+    imark(v, ib, a)
 }
 
 /// Set inode `ino`'s mode word (its type kept by the caller).
 pub fn set_mode(v: u64, ino: u64, m: u64) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a != 0 {
         w16(a + I_MODE, m)
-        idirty(v, ino)
+        imark(v, ib, a)
     }
 }
 
 /// Set its link count.
 pub fn set_nlink(v: u64, ino: u64, n: u64) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a != 0 {
         w16(a + I_LINKS, n)
-        idirty(v, ino)
+        imark(v, ib, a)
     }
 }
 
 /// Set its owner and group (32-bit ids: the low 16 bits in the core,
 /// the high 16 in Linux's osd2 words).
 pub fn set_owner(v: u64, ino: u64, uid: u64, gid: u64) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a != 0 {
         w16(a + I_UID, uid & 0xffff)
         w16(a + I_UID_HIGH, (uid >> 16) & 0xffff)
         w16(a + I_GID, gid & 0xffff)
         w16(a + I_GID_HIGH, (gid >> 16) & 0xffff)
-        idirty(v, ino)
+        imark(v, ib, a)
     }
 }
 
 /// Set its size; a regular file of 2 GiB or more needs LARGE_FILE, set
 /// in the superblock the first time.
 pub fn set_size(v: u64, ino: u64, n: u64) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a == 0 {
         return
     }
@@ -1674,7 +1697,7 @@ pub fn set_size(v: u64, ino: u64, n: u64) {
     if reg {
         w32(a + I_SIZE_HIGH, n >> 32)
     }
-    idirty(v, ino)
+    imark(v, ib, a)
     if reg && n >= 0x80000000 && vw(v, V_FR) & RO_LARGE_FILE == 0 {
         let s = sb(v)
         if s != 0 {
@@ -1686,22 +1709,22 @@ pub fn set_size(v: u64, ino: u64, n: u64) {
 }
 
 fn add_blocks(v: u64, ino: u64, up: bool) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a != 0 {
         let n = r32(a + I_BLOCKS)
         let per = bs(v) / 512
         w32(a + I_BLOCKS, if up { n + per } else { if n >= per { n - per } else { 0 } })
-        idirty(v, ino)
+        imark(v, ib, a)
     }
 }
 
 /// Clear a directory's htree flag (it is about to change, and this code
 /// keeps no index).
 fn unindex(v: u64, ino: u64) {
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a != 0 && r32(a + I_FLAGS) & INDEX_FL != 0 {
         w32(a + I_FLAGS, r32(a + I_FLAGS) & !INDEX_FL)
-        idirty(v, ino)
+        imark(v, ib, a)
     }
 }
 
@@ -1874,7 +1897,7 @@ pub fn ialloc(v: u64, dir: u64, m: u64, uid: u64, gid: u64, t: u64) -> u64 {
                     counts(v, g, GD_DIRS, 0, true)
                 }
                 let ino = g * ipg + k + 1
-                let p = inode(v, ino)
+                let (p, ib) = inode_w(v, ino)
                 if p == 0 {
                     return neg(EIO)
                 }
@@ -1894,7 +1917,7 @@ pub fn ialloc(v: u64, dir: u64, m: u64, uid: u64, gid: u64, t: u64) -> u64 {
                 put_time(v, p, I_MTIME, I_MTIME_EXTRA, t)
                 put_time(v, p, I_CTIME, I_CTIME_EXTRA, t)
                 put_time(v, p, I_CRTIME, I_CRTIME_EXTRA, t)
-                idirty(v, ino)
+                imark(v, ib, p)
                 bump(v, V_IALLOC)
                 return ino
             }
@@ -1920,11 +1943,11 @@ pub fn ifree(v: u64, ino: u64, t: u64) {
     if !fast_link(v, ino) {
         let _c = truncate(v, ino, 0)
     }
-    let a = inode(v, ino)
+    let (a, ib) = inode_w(v, ino)
     if a != 0 {
         w16(a + I_LINKS, 0)
         w32(a + I_DTIME, t)
-        idirty(v, ino)
+        imark(v, ib, a)
     }
     let g = (ino - 1) / vw(v, V_IPG)
     let k = (ino - 1) % vw(v, V_IPG)
@@ -2155,12 +2178,12 @@ fn bmap(v: u64, ino: u64, fb: u64, alloc: bool) -> (u64, bool) {
         if b == 0 {
             return (BAD, false)
         }
-        let a2 = inode(v, ino)
+        let (a2, ib) = inode_w(v, ino)
         if a2 == 0 {
             return (BAD, false)
         }
         w32(a2 + I_BLOCK + top * 4, b)
-        idirty(v, ino)
+        imark(v, ib, a2)
         if levels == 0 {
             return (b, true)
         }
@@ -2340,14 +2363,14 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
     // the direct blocks
     var k = keep
     while k < 12 {
-        let a = inode(v, ino)
+        let (a, ib) = inode_w(v, ino)
         if a == 0 {
             return neg(EIO)
         }
         let e = r32(a + I_BLOCK + k * 4)
         if e != 0 {
             w32(a + I_BLOCK + k * 4, 0)
-            idirty(v, ino)
+            imark(v, ib, a)
             bfree(v, e)
             // A journal that aborted here (its bitmap snapshot could not be
             // kept, so the block stayed allocated) never commits this
@@ -2374,10 +2397,10 @@ pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
             // blocks are freed, so no free is of a block something still
             // points at (a plain volume holds its frees: `hold`).
             if keep <= first {
-                let a2 = inode(v, ino)
+                let (a2, ib) = inode_w(v, ino)
                 if a2 != 0 {
                     w32(a2 + I_BLOCK + (11 + lvl) * 4, 0)
-                    idirty(v, ino)
+                    imark(v, ib, a2)
                 }
             }
             cut_tree(v, ino, top, lvl, first, span, keep)
@@ -2483,14 +2506,14 @@ pub fn set_target(v: u64, ino: u64, src: u64, n: u64) -> u64 {
         return neg(ENAMETOOLONG)
     }
     if n < 60 {
-        let a = inode(v, ino)
+        let (a, ib) = inode_w(v, ino)
         if a == 0 {
             return neg(EIO)
         }
         zero_bytes(a + I_BLOCK, 60)
         copy_bytes(a + I_BLOCK, src, n)
         w32(a + I_SIZE, n)
-        idirty(v, ino)
+        imark(v, ib, a)
         return 0
     }
     let (dst, c, blk) = wspan(v, ino, 0, n)
