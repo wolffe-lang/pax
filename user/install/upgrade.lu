@@ -286,8 +286,6 @@ fn le32(b: List[byte], o: int) -> int {
     (b[o] as int) | (b[o + 1] as int) << 8 | (b[o + 2] as int) << 16 | (b[o + 3] as int) << 24
 }
 
-/// The target root's free bytes and inodes, from its superblock on the
-/// disk (read once, before any write: the mount wrote it at boot).
 /// px162: the root's profile, read from its superblock (has_journal: ext3),
 /// or "" when no ext2-family superblock is there. An upgrade never changes it.
 fn root_profile(fd: int) -> str {
@@ -304,6 +302,8 @@ fn root_config_text(dev: str, uuid: str) -> str {
     profile_config_text(uuid, profile)
 }
 
+/// The target root's free bytes and inodes, from its superblock on the
+/// disk (read once, before any write: the mount wrote it at boot).
 fn root_free(fd: int) -> (int, int) {
     let sb = fs_read_at(fd, ROOT_START + 1024, 1024) else |_| { return (-1, -1) }
     if sb.len != 1024 || sb[56] != 83 as byte || sb[57] != 239 as byte { return (-1, -1) }
