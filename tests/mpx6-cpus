@@ -1,46 +1,93 @@
 #!/usr/bin/env bash
-# Read-only processor discovery: no secondary processor enters the kernel.
-# CPUS_TIER=native|release CPUS_FIRMWARE='bios uefi' CPUS_COUNTS='1 2 4 16'.
+# tests/mpx6-cpus — the processors: what the firmware has (px138, SMP stage 0) and every
+# application processor started, given its own state and parked idle (px161, stage 1).
+#
+#   tests/mpx6-cpus [--tier native|release|both] [--firmware bios|uefi|both]
+#   (or CPUS_TIER=native|release CPUS_FIRMWARE='bios uefi'; CPUS_COUNTS='1 2 4 16';
+#    CPUS_IMAGES=DIR boots images built before)
+#
+# The source census first (tests/mpx6-cpus.d/source-census.sh) and the rows' own proof
+# (rows-selftest.py: synthetic boots, each row seen red and green). Then per tier and firmware:
+# kmain_cpucheck's parser fixtures (CPU-TABLE), and kmain_console booted with
+# tests/mpx6-cpus.d/probe.c as its only command at -smp 1, 2, 4 and 16, at 4 of 16 possible
+# processors, with `nosmp` and with `pax.cpunmi` at 4, and under UEFI with no ACPI at 4. Each
+# boot runs to `halt` (tools/qemu-halt), and then the monitor stops the machine and dumps every
+# processor's registers, three times with the machine running between (`stop`, `info registers
+# -a`, `cont`): QEMU's view, beside the kernel's own lines and /proc/pax-cpus read twice by the
+# probe. tests/mpx6-cpus.d/rows.py names each row (its docstring lists them). A red row does not
+# stop the suite: every boot's rows are said, and the exit is 1 if any was red.
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
 cd "$PAX_ROOT"
-bash tests/mpx6-cpus.d/source-census.sh
-work=$PAX_BUILD/mpx6-cpus
-mkdir -p "$work"
-flags=(); [ "${CPUS_TIER:-native}" != release ] || flags=(--release)
-if [ -z "${CPUS_IMAGES:-}" ]; then
-    tools/fetch-limine
-    tools/build-kernel "${flags[@]}" --src kernel/kmain_console.lu "$work"
-    tools/build-kernel "${flags[@]}" --src kernel/kmain_cpucheck.lu "$work/check"
-    tools/mkimage "$work/check/kmain_cpucheck.elf" "$work/check.iso"
-    gcc -nostdlib -static -fno-stack-protector -fno-pie -no-pie -O2 -o "$work/cpuprobe" tests/mpx6-cpus.d/probe.c
-    printf '/bin/cpuprobe\n' > "$work/run"
-    tools/mkinitramfs "$work/root.cpio" /bin/cpuprobe="$work/cpuprobe":0755 /etc/pax-run="$work/run"
-    printf 'timeout: 0\n/PAX\n    protocol: limine\n    path: boot():/boot/pax\n    module_path: boot():/boot/initramfs.cpio\n    cmdline: quiet nonet pax.nobeep pax.nomarks\n' > "$work/limine.conf"
-    tools/mkimage --conf "$work/limine.conf" --add "$work/root.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/cpus.iso"
-else
-    work=$CPUS_IMAGES
-fi
-for fw in ${CPUS_FIRMWARE:-bios uefi}; do
-    status=0
-    tools/qemu-run --firmware "$fw" --timeout 20 --serial "$work/check-$fw.log" "$work/check.iso" || status=$?
-    if [ "$status" != 33 ]; then
-        printf 'FAIL CPU-TABLE %s status=%s\n' "$fw" "$status"; exit 1
-    fi
-    printf 'PASS CPU-TABLE %s\n' "$fw"
-    for count in ${CPUS_COUNTS:-1 2 4 16}; do
-        serial=$work/cpus-$fw-$count.log
-        if ! tools/qemu-halt --firmware "$fw" --timeout 45 --no-screen --serial "$serial" --elf "$work/kmain_console.elf" --marker 'halt' --cmd 'info registers -a' --qemu -smp --qemu "$count" "$work/cpus.iso"; then
-            printf 'FAIL CPU-BOOT %s smp=%s\n' "$fw" "$count"; exit 1
-        fi
-        python3 -I tests/mpx6-cpus.d/rows.py "$serial" "$count"
-    done
-    serial=$work/cpus-$fw-disabled.log
-    tools/qemu-halt --firmware "$fw" --timeout 45 --no-screen --serial "$serial" --elf "$work/kmain_console.elf" --marker halt --qemu -smp --qemu 4,maxcpus=16 "$work/cpus.iso"
-    python3 -I tests/mpx6-cpus.d/rows.py "$serial" 4 12
-    if [ "$fw" = uefi ]; then
-        serial=$work/cpus-uefi-no-acpi.log
-        tools/qemu-halt --firmware uefi --timeout 45 --no-screen --serial "$serial" --elf "$work/kmain_console.elf" --marker halt --qemu -machine --qemu acpi=off --qemu -smp --qemu 4 "$work/cpus.iso"
-        python3 -I tests/mpx6-cpus.d/rows.py "$serial" unknown
-    fi
+tiers=${CPUS_TIER:-native} firmware=${CPUS_FIRMWARE:-bios uefi}
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        *) die 'usage: tests/mpx6-cpus [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+    esac
 done
+case $tiers in both) tiers='native release' ;; esac
+case $firmware in both) firmware='bios uefi' ;; esac
+bash tests/mpx6-cpus.d/source-census.sh
+python3 -I tests/mpx6-cpus.d/rows-selftest.py
+rc=0
+dump=(--cmd stop --cmd 'info registers -a' --cmd cont --cmd stop --cmd 'info registers -a' --cmd cont
+      --cmd stop --cmd 'info registers -a')
+conf() { # FILE CMDLINE-WORDS
+    printf 'timeout: 0\n/PAX\n    protocol: limine\n    path: boot():/boot/pax\n    module_path: boot():/boot/initramfs.cpio\n    cmdline: quiet nonet pax.nobeep pax.nomarks%s\n' "$2" > "$1"
+}
+for tier in $tiers; do
+    work=$PAX_BUILD/mpx6-cpus/$tier
+    mkdir -p "$work"
+    flags=(); [ "$tier" != release ] || flags=(--release)
+    if [ -z "${CPUS_IMAGES:-}" ]; then
+        tools/fetch-limine
+        tools/build-kernel ${flags[@]+"${flags[@]}"} --src kernel/kmain_console.lu "$work"
+        tools/build-kernel ${flags[@]+"${flags[@]}"} --src kernel/kmain_cpucheck.lu "$work/check"
+        tools/mkimage "$work/check/kmain_cpucheck.elf" "$work/check.iso"
+        gcc -nostdlib -static -ffreestanding -fno-stack-protector -fno-pie -no-pie -O2 -o "$work/cpuprobe" tests/mpx6-cpus.d/probe.c
+        printf '/bin/cpuprobe\n' > "$work/run"
+        tools/mkinitramfs "$work/root.cpio" /bin/cpuprobe="$work/cpuprobe":0755 /etc/pax-run="$work/run"
+        for v in cpus: nosmp:' nosmp' nmi:' pax.cpunmi'; do
+            conf "$work/limine-${v%%:*}.conf" "${v#*:}"
+            tools/mkimage --conf "$work/limine-${v%%:*}.conf" --add "$work/root.cpio" initramfs.cpio "$work/kmain_console.elf" "$work/${v%%:*}.iso"
+        done
+    else
+        work=$CPUS_IMAGES/$tier
+    fi
+    elf=$work/kmain_console.elf
+    # boot NAME FIRMWARE ISO ROWS-ARGS... -- QEMU-ARGS...
+    boot() {
+        local name=$1 fw=$2 iso=$3; shift 3
+        local args=() q=()
+        while [ "$1" != -- ]; do args+=("$1"); shift; done; shift
+        for x in "$@"; do q+=(--qemu "$x"); done
+        local serial=$work/cpus-$fw-$name.log
+        if ! tools/qemu-halt --firmware "$fw" --timeout 90 --no-screen --serial "$serial" --elf "$elf" \
+                --marker halt "${dump[@]}" "${q[@]}" "$iso"; then
+            printf 'FAIL CPU-BOOT %s %s %s\n' "$tier" "$fw" "$name"; rc=1; return 0
+        fi
+        printf '%s %s %s:\n' "$tier" "$fw" "$name"
+        python3 -I tests/mpx6-cpus.d/rows.py "$serial" "${args[@]}" --elf "$elf" || rc=1
+    }
+    for fw in $firmware; do
+        status=0
+        tools/qemu-run --firmware "$fw" --timeout 20 --serial "$work/check-$fw.log" "$work/check.iso" || status=$?
+        if [ "$status" != 33 ]; then
+            printf 'FAIL CPU-TABLE %s %s status=%s\n' "$tier" "$fw" "$status"; rc=1
+        else
+            printf 'PASS CPU-TABLE %s %s\n' "$tier" "$fw"
+        fi
+        for count in ${CPUS_COUNTS:-1 2 4 16}; do
+            boot "$count" "$fw" "$work/cpus.iso" "$count" -- -smp "$count"
+        done
+        boot disabled "$fw" "$work/cpus.iso" 4 12 -- -smp 4,maxcpus=16
+        boot nosmp "$fw" "$work/nosmp.iso" 4 --mode nosmp -- -smp 4
+        boot nmi "$fw" "$work/nmi.iso" 4 --mode nmi -- -smp 4
+        if [ "$fw" = uefi ]; then
+            boot no-acpi uefi "$work/cpus.iso" unknown -- -machine acpi=off -smp 4
+        fi
+    done
+done
+exit "$rc"
