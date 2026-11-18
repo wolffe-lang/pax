@@ -124,7 +124,9 @@ use bootlog
 use bootmark
 use cred
 use cpus
+use ext2
 use frames
+use journal
 use kmsg
 use latency
 use paging
@@ -149,9 +151,9 @@ extern "c" let pax_ist4_stack: *u8
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 64
+pub const ENTRIES: u64 = 68
 /// No entry.
-pub const NONE: u64 = 64
+pub const NONE: u64 = 68
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -243,9 +245,26 @@ pub const PAXCPUS: u64 = 62
 /// px146: `/proc/pax-security` (`paxsec`: each protection between PAX and a
 /// security boundary, and its state now), in `/proc`, read-only.
 pub const PAXSEC: u64 = 63
+/// px162: a journal a program can prove (paxage's check, its Linux path):
+/// `/proc/fs` and `/proc/fs/jbd2`, `/sys/dev` and `/sys/dev/block`, fixed
+/// (the layout of Linux's, from Documentation/ABI's sysfs-dev and a
+/// black-box run of Linux under QEMU: docs/SOURCES.md). In `/proc/fs/jbd2`,
+/// JVOL `<device>-<journal inode>` (`vda2-8`) for each volume whose
+/// journal is live (kernel/ext2's `journal_live`: mounted read-write,
+/// writing through its journal, not failed), and in it JINFO, `info`
+/// (PAX's own lines, `jbd2info`); in `/sys/dev/block`, DEVLINK
+/// `<major>:<minor>` for every block device, a link to
+/// `../../class/block/<name>`, so stat's st_dev names its device.
+pub const PROCFSDIR: u64 = 64
+const JBD2: u64 = 65
+const SYSDEV: u64 = 66
+const SYSDEVBLOCK: u64 = 67
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
+const JVOL: u64 = 0x1803 // px162: /proc/fs/jbd2/<device>-<inode>
+const JINFO: u64 = 0x1804 // px162: its info
+pub const DEVLINK: u64 = 0x1805 // px162: /sys/dev/block/<major>:<minor>
 const BATTR: u64 = 0x1810
 pub const PMEM: u64 = 0x1820 // px102: pid/mem, handled by kernel/files
 const PTASK: u64 = 0x1821
@@ -313,6 +332,8 @@ const G_DMESG: u64 = 32 // px130
 const G_PRINTK: u64 = 33
 const G_PAXCPUS: u64 = 34
 const G_PAXSEC: u64 = 35 // px146
+const G_JBD2INFO: u64 = 36 // px162
+const G_DEVLINK: u64 = 37 // px162: a link kernel/files reads and follows
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -417,7 +438,7 @@ pub fn set(r: u64, v: u64) -> bool {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == DMESG_RESTRICT || e == PRINTK || e == PAXCPUS || e == PAXSEC
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == DMESG_RESTRICT || e == PRINTK || e == PAXCPUS || e == PAXSEC || (e >= PROCFSDIR && e <= SYSDEVBLOCK)
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -436,7 +457,20 @@ fn dev_of(r: u64) -> u64 {
 /// fixed table: `/sys/block`, `/sys/class/block` and the devices'.
 pub fn searched(r: u64) -> bool {
     let e = entry(r)
-    r != ROOT && (e == SYSBLOCK || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || e == BIDENT)
+    r != ROOT && (e == SYSBLOCK || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || e == BIDENT || e == JBD2 || e == JVOL || e == SYSDEVBLOCK)
+}
+
+/// px162: whether reference `c`'s name is the `n` bytes at kernel address `a`.
+fn named(c: u64, a: u64, n: u64) -> bool {
+    if name_len(c) != n { return false }
+    var j: u64 = 0
+    while j < n && name_byte(c, j) == abyte(a + j) { j += 1 }
+    j == n
+}
+
+/// px162: whether device `d`'s volume has a live journal (kernel/ext2's).
+fn jvol_live(d: u64) -> bool {
+    ext2.live_journal_on(d) != ext2.VOLS
 }
 
 /// px79: the child of `/sys/block`, `/sys/class/block` or a block
@@ -447,6 +481,29 @@ pub fn searched(r: u64) -> bool {
 /// attribute among the few `attr_at` counts.
 pub fn dev_child(d: u64, a: u64, n: u64) -> u64 {
     let e = entry(d)
+    // px162: a live journal by its name, its info, a device by its numbers
+    if e == JBD2 {
+        var k: u64 = 0
+        while ext2.live_journal_dev(k) != block.DEVS {
+            let c = dev_ref(ext2.live_journal_dev(k), JVOL)
+            if named(c, a, n) { return c }
+            k += 1
+        }
+        return NONE
+    }
+    if e == JVOL {
+        let c = dev_ref(dev_of(d), JINFO)
+        return if jvol_live(dev_of(d)) && named(c, a, n) { c } else { NONE }
+    }
+    if e == SYSDEVBLOCK {
+        var k: u64 = 0
+        while block.nth_dev(k) != block.DEVS {
+            let c = dev_ref(block.nth_dev(k), DEVLINK)
+            if named(c, a, n) { return c }
+            k += 1
+        }
+        return NONE
+    }
     if e == SYSBLOCK || e == SYSCLASSBLOCK {
         let b = block.by_name(a, n)
         if b == block.DEVS || (e == SYSBLOCK && block.partno(b) != 0) {
@@ -685,6 +742,11 @@ pub fn name(e: u64) -> str {
     if e == BATTR + A_START { return "start" }
     if e == BATTR + A_PARTITION { return "partition" }
     if e == BIDENT { return "device" }
+    if e == PROCFSDIR { return "fs" } // px162
+    if e == JBD2 { return "jbd2" }
+    if e == SYSDEV { return "dev" }
+    if e == SYSDEVBLOCK { return "block" }
+    if e == JINFO { return "info" }
     if e == BATTR + A_MODEL { return "model" }
     if e == BATTR + A_SERIAL || e == BATTR + A_DSERIAL { return "serial" }
     "online"
@@ -700,12 +762,52 @@ fn digits(v: u64) -> u64 {
     n
 }
 
+/// px162: the ASCII digit `i` (from the most significant) of `v`.
+fn digit_at(v: u64, i: u64) -> u64 {
+    var d: u64 = 1
+    var k = digits(v) - 1 - i
+    while k > 0 {
+        d *= 10
+        k -= 1
+    }
+    48 + (v / d) % 10
+}
+
+/// px162: JVOL's journal inode (0 once the journal is no longer live).
+fn jvol_ino(d: u64) -> u64 {
+    let v = ext2.live_journal_on(d)
+    if v == ext2.VOLS { 0 } else { ext2.journal_inode(v) }
+}
+
+/// px162: the length of DEVLINK's target, `../../class/block/<name>`.
+pub fn link_len(r: u64) -> u64 {
+    18 + block.name_len(dev_of(r))
+}
+
+/// px162: byte `i` of DEVLINK's target.
+pub fn link_byte(r: u64, i: u64) -> u64 {
+    if i >= 18 { return block.name_byte(dev_of(r), i - 18) }
+    var k: u64 = 0
+    for b in "../../class/block/".bytes() {
+        if k == i { return b as int as u64 }
+        k += 1
+    }
+    0
+}
+
 /// The length of reference `r`'s name.
 pub fn name_len(r: u64) -> u64 {
     if entry(r) == PIDDIR { return digits(pid_of(r)) }
     if entry(r) == PTID { return digits(task_tid(r)) }
     if entry(r) == BDEV || entry(r) == CBDEV {
         return block.name_len(dev_of(r)) // px79: the device's name
+    }
+    if entry(r) == JVOL {
+        return block.name_len(dev_of(r)) + 1 + digits(jvol_ino(dev_of(r))) // px162: `vda2-8`
+    }
+    if entry(r) == DEVLINK {
+        let (ma, mi) = block.numbers(dev_of(r))
+        return digits(ma) + 1 + digits(mi) // px162: `254:2`
     }
     let n = desc_of(r)
     if n != FDS_MAX {
@@ -722,6 +824,19 @@ pub fn name_len(r: u64) -> u64 {
 pub fn name_byte(r: u64, i: u64) -> u64 {
     if entry(r) == BDEV || entry(r) == CBDEV {
         return block.name_byte(dev_of(r), i) // px79
+    }
+    if entry(r) == JVOL {
+        let l = block.name_len(dev_of(r))
+        if i < l { return block.name_byte(dev_of(r), i) }
+        if i == l { return 45 }
+        return digit_at(jvol_ino(dev_of(r)), i - l - 1)
+    }
+    if entry(r) == DEVLINK {
+        let (ma, mi) = block.numbers(dev_of(r))
+        let l = digits(ma)
+        if i < l { return digit_at(ma, i) }
+        if i == l { return 58 }
+        return digit_at(mi, i - l - 1)
     }
     let fdn = desc_of(r)
     let isfd = fdn != FDS_MAX
@@ -750,6 +865,13 @@ pub fn parent(r: u64) -> u64 {
     let e = entry(r)
     if e == 0 || e == 7 { return ROOT }
     if e == SYSBLOCK || e == SYSCLASS { return 7 } // px79
+    if e == PROCFSDIR { return 0 } // px162
+    if e == JBD2 { return PROCFSDIR }
+    if e == SYSDEV { return 7 }
+    if e == SYSDEVBLOCK { return SYSDEV }
+    if e == JVOL { return JBD2 }
+    if e == JINFO { return dev_ref(dev_of(r), JVOL) }
+    if e == DEVLINK { return SYSDEVBLOCK }
     if e == SYSCLASSBLOCK { return SYSCLASS }
     if e == PMEM || e == PTASK { return pid_dir(pid_of(r)) }
     if e == PTID { return (pid_of(r) << 16) | PTASK }
@@ -817,6 +939,8 @@ fn gen(r: u64) -> u64 {
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
+    if e == JINFO { return G_JBD2INFO } // px162
+    if e == DEVLINK { return G_DEVLINK }
     if e >= BATTR && e < BATTR + 9 { return G_BATTR } // px79; px78's A_DSERIAL
     let (isfd, _n) = fd_of(r)
     if isfd { return G_CMDLINE } // px45: not a directory (px50: a link kernel/files follows; never opened itself)
@@ -844,8 +968,8 @@ pub fn mode(r: u64) -> u64 {
     if isfd {
         return 0xa000 | 0x1c0 // px45: S_IFLNK 0700, as Linux lists a descriptor
     }
-    if e == MOUNTSLINK {
-        return 0xa000 | 0x1ff // px67: /proc/mounts, S_IFLNK 0777 (measured)
+    if e == MOUNTSLINK || e == DEVLINK {
+        return 0xa000 | 0x1ff // px67: /proc/mounts, S_IFLNK 0777 (measured); px162: /sys/dev/block's links
     }
     if is_dir(r) {
         if e == PFD {
@@ -854,7 +978,7 @@ pub fn mode(r: u64) -> u64 {
         if e == PFDINFO {
             return S_IFDIR | 0x16d // px50: 0555 (measured)
         }
-        if e <= 7 || e == 17 || e == 19 || e == NET || e == IPV4 || e == PIDDIR || e == KERNEL || e == PTYDIR {
+        if e <= 7 || e == 17 || e == 19 || e == NET || e == IPV4 || e == PIDDIR || e == KERNEL || e == PTYDIR || e == PROCFSDIR || e == JBD2 || e == JVOL {
             return S_IFDIR | 0x16d // 0555: /proc, /proc/self, /proc/sys, /proc/sys/vm, /sys; px45: /proc/sys/net, its ipv4; px55: /proc/sys/kernel
         }
         return S_IFDIR | 0x1ed // 0755
@@ -914,6 +1038,9 @@ pub fn size(r: u64) -> u64 {
     if entry(r) == MOUNTSLINK {
         return 11 // px67: `self/mounts`, a link's target's length (measured)
     }
+    if entry(r) == DEVLINK {
+        return link_len(r) // px162
+    }
     if entry(r) == 15 || gen(r) == G_BATTR { 4096 } else { 0 } // px79: a block device's attribute too
 }
 
@@ -923,6 +1050,8 @@ pub fn fs(r: u64) -> u64 {
     if e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == BDEV || e == CBDEV || e == BIDENT || (e >= BATTR && e < BATTR + 9) {
         return 1 // px79: /sys's
     }
+    if e == SYSDEV || e == SYSDEVBLOCK || e == DEVLINK { return 1 } // px162
+    if e == PROCFSDIR || e == JBD2 || e == JVOL || e == JINFO { return 0 }
     if e <= 6 || e >= 16 { 0 } else { 1 } // px45's entries (26 and up) are /proc's
 }
 
@@ -946,6 +1075,18 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     if d != ROOT && entry(d) == PTID {
         if task_tid(d) == 0 { return NONE }
         return if k == 0 { (d & !EMASK) | TMEM } else if k == 1 { (d & !EMASK) | TSTATUS } else { NONE }
+    }
+    // px162: the live journals, a live journal's info, every device's numbers
+    if d != ROOT && entry(d) == JBD2 {
+        let b = ext2.live_journal_dev(k)
+        return if b == block.DEVS { NONE } else { dev_ref(b, JVOL) }
+    }
+    if d != ROOT && entry(d) == JVOL {
+        return if k == 0 && jvol_live(dev_of(d)) { dev_ref(dev_of(d), JINFO) } else { NONE }
+    }
+    if d != ROOT && entry(d) == SYSDEVBLOCK {
+        let b = block.nth_dev(k)
+        return if b == block.DEVS { NONE } else { dev_ref(b, DEVLINK) }
     }
     // px79: the block devices' directories, counted from kernel/block
     if d != ROOT && entry(d) == SYSBLOCK {
@@ -1026,6 +1167,43 @@ pub fn child_at(d: u64, k: u64) -> u64 {
         p = sched.proc_after(p)
     }
     NONE
+}
+
+/// px162: `/proc/fs/jbd2/<device>-<inode>/info`'s text at `base`: its
+/// length. PAX's own lines (not jbd2's statistics), one fact a line:
+///
+///     state live|gone          live while kernel/ext2's journal_live holds
+///     device <name> <major>:<minor>
+///     journal inode <n>, <blocks> blocks in <runs> runs, data=ordered
+///     sequence <next>, <commits> commits
+fn jbd2info(base: u64, r: u64) -> u64 {
+    let d = dev_of(r)
+    let v = ext2.live_journal_on(d)
+    if v == ext2.VOLS {
+        return put_s(base, 0, "state gone\n")
+    }
+    var n = put_s(base, 0, "state live\ndevice ")
+    var i: u64 = 0
+    while i < block.name_len(d) {
+        n = put_b(base, n, block.name_byte(d, i))
+        i += 1
+    }
+    let (ma, mi) = block.numbers(d)
+    n = put_b(base, n, 32)
+    n = put_dec(base, n, ma)
+    n = put_b(base, n, 58)
+    n = put_dec(base, n, mi)
+    n = put_s(base, n, "\njournal inode ")
+    n = put_dec(base, n, ext2.journal_inode(v))
+    n = put_s(base, n, ", ")
+    n = put_dec(base, n, journal.size(v))
+    n = put_s(base, n, " blocks in ")
+    n = put_dec(base, n, journal.runs(v))
+    n = put_s(base, n, " runs, data=ordered\nsequence ")
+    n = put_dec(base, n, journal.sequence(v))
+    n = put_s(base, n, ", ")
+    n = put_dec(base, n, journal.book(v, 0))
+    put_s(base, n, " commits\n")
 }
 
 /// dw02: `/proc/pax-random`'s text at `base`: its length. One fact a line,
@@ -2290,6 +2468,8 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = block.partitions_len()
     } else if g == G_BATTR {
         n = battr(base, r) // px79
+    } else if g == G_JBD2INFO {
+        n = jbd2info(base, r) // px162
     } else if g == G_PAXBOOT {
         n = paxboot(base) // px118
     } else if g == G_PAXBOOTLOG {
