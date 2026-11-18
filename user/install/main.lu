@@ -1,7 +1,10 @@
 //! Guided or explicitly scripted fresh install. No default confirmation:
 //! the guided install asks the word yes after a summary naming the disk
-//! (px78b); the scripted `--install --ext2-preview` takes `--confirm` with
-//! the plan's exact token (--dry-run prints it).
+//! (px78b); the scripted `--install` takes `--confirm` with the plan's
+//! exact token (--dry-run prints it).
+//! px162: the root is ext3 (journalled) unless `--ext2-preview` names ext2,
+//! in the guided install, --dry-run and --install alike; each profile's plan
+//! has its own token (plan.lu), so an ext2 token never installs ext3.
 //! px78: only a disk on the install allow-list is ever a target (allow.lu);
 //! `--check` prints every disk's verdict and writes nothing; the stick's
 //! install log records the run.
@@ -58,9 +61,10 @@ fn options(args: List[str]) -> Options ! {invalid} {
         }
     }
     if o.target.starts_with("/dev/") { o.target = o.target[5..] }
-    if o.mode == "--install" && (!o.preview || o.confirm.len == 0 || o.seed.len == 0) {
+    if o.mode == "--install" && (o.confirm.len == 0 || o.seed.len == 0) {
         return invalid
     }
+    if (o.mode == "--inventory" || o.mode == "--check") && o.preview { return invalid }
     if (o.mode == "guided" || o.mode == "--check") &&
         (o.target.len != 0 || o.user.len != 0 || o.games.len != 0 || o.confirm.len != 0) {
         return invalid
@@ -88,7 +92,7 @@ fn fresh_seed() -> str {
 fn main() -> int {
     let o = options(env_args()) else |_| {
         eprint(
-            "usage: pax-install [--inventory | --check | --dry-run | --install --ext2-preview --confirm TOKEN | --upgrade [--seed TEXT --confirm LINE | --armed RECORD]] [--target NAME --seed TEXT --user NAME --games yes|no] [--allow-list FILE] [--source DIR --payload DIR --tool-dir DIR]",
+            "usage: pax-install [--inventory | --check | --dry-run | --install --confirm TOKEN | --upgrade [--seed TEXT --confirm LINE | --armed RECORD]] [--ext2-preview] [--target NAME --seed TEXT --user NAME --games yes|no] [--allow-list FILE] [--source DIR --payload DIR --tool-dir DIR]",
         )
         return 2
     }
@@ -118,6 +122,8 @@ fn main() -> int {
     flush_log(mut lg)
     if o.mode == "--check" { return if eligible(disks).len == 0 then 1 else 0 }
     let seed = if o.seed.len == 0 then fresh_seed() else o.seed
+    let profile = if o.preview then PROFILE_EXT2 else PROFILE_EXT3
+    note(mut lg, "root {profile}")
     var p = Plan {
         target: Target { name: "", identity: "", bytes: 0, sector: 0, readonly: false, mounted: false, running_root: false },
         seed: "",
@@ -127,13 +133,15 @@ fn main() -> int {
         tail_bytes: 0,
         unused_bytes: 0,
         token: "",
+        profile: profile,
     }
     if o.mode == "guided" {
         if eligible(disks).len == 0 {
             return stop(mut lg, "pax-install: refused before writes: no disk is on the install allow-list")
         }
-        p = guided_plan(mut lg, disks, seed) else |e| {
-            return stop(mut lg, "pax-install: cancelled/refused before writes: {e}")
+        p = guided_plan(mut lg, disks, seed, profile) else |e| {
+            let why = "{e}"
+            return stop(mut lg, "pax-install: cancelled/refused before writes: {why}{small_ext3_hint(why)}")
         }
     } else {
         var why = "no such disk"
@@ -142,7 +150,10 @@ fn main() -> int {
             if d.target.name == o.target { why = d.reason; t = copy d.target }
         }
         if why.len != 0 { return stop(mut lg, "pax-install: refused: {why}: /dev/{o.target}") }
-        p = make_plan(t, seed, o.user, o.games) else |e| { return stop(mut lg, "pax-install: refused: {e}") }
+        p = make_plan(t, seed, o.user, o.games, profile) else |e| {
+            let why = "{e}"
+            return stop(mut lg, "pax-install: refused: {why}{small_ext3_hint(why)}")
+        }
     }
     if o.mode == "--dry-run" { print_raw(plan_text(p)); return 0 }
     if o.mode != "guided" {
