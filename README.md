@@ -422,7 +422,9 @@ A writable journalled mount, writable remount or journal replay requires a succe
 its first write. The internal journal must be version 2, belong to this filesystem's UUID and have one user; only
 its revoke feature is supported. Unsupported feature words, external-journal identifiers, a recorded journal
 error and a log start (`s_start`) outside the log's blocks are refused by name, without falling back to plain writes;
-a refused start writes nothing, so the log is kept for an offline check.
+a refused start writes nothing, so the log is kept for an offline check. While a volume's journal is live (read-write,
+not failed), `/proc/fs/jbd2/<device>-<journal inode>` is there, and `/sys/dev/block/<major>:<minor>` names every
+disk and partition, which is how paxage's journal check proves a journal on Linux; pxg does not read them on PAX yet.
 
 On a volume mounted or remounted writable, a journal write, barrier, checkpoint or bitmap-snapshot failure aborts that
 journal. Later syncs return `EIO`, further mutation is refused, and a failed unmount keeps ownership of its recovery state.
