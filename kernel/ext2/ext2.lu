@@ -337,6 +337,7 @@ const C_DIR: u64 = 5 // the directory blocks
 const PEND_W: u64 = 128
 const P_INODE: u64 = 0x8000000000000000
 const P_DIR: u64 = 0x4000000000000000
+const V_JINO: u64 = 36 // px162: the journal's inode (s_journal_inum), set with V_JNL
 
 // The module's frame: VOLS records, then the name scratch (256 bytes at
 // SCRATCH), and a second frame of zeros for holes.
@@ -1090,6 +1091,7 @@ fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
     // blocks no file can have (Linux 7.3.0's answer on its ext3 root,
     // measured: 4731 of 6144 blocks, the journal's 1025 among the 1413).
     put_vw(v, V_OVERHEAD, vw(v, V_OVERHEAD) + blocks512(v, jino) / (b / 512))
+    put_vw(v, V_JINO, jino)
     put_vw(v, V_JNL, 1)
     0
 }
@@ -1400,6 +1402,45 @@ pub fn block_size(v: u64) -> u64 {
 /// Its disk (kernel/block's number).
 pub fn dev_of(v: u64) -> u64 {
     vw(v, V_DEV)
+}
+
+/// px162: whether volume `v`'s journal is live: mounted read-write and
+/// writing through its journal, which has not failed. What a program may
+/// take as proof that a sync on the volume is journalled (kernel/procfs's
+/// `/proc/fs/jbd2/<device>-<inode>`, paxage's check); a read-only mount, a
+/// plain ext2 volume and an aborted journal are not.
+pub fn journal_live(v: u64) -> bool {
+    mounted(v) && vw(v, V_JNL) != 0 && vw(v, V_RO) == 0 && journal.active(v) && !journal.failed(v)
+}
+
+/// px162: the kernel/block device of the `k`th volume (in volume order)
+/// whose journal is live, or block.DEVS past the last.
+pub fn live_journal_dev(k: u64) -> u64 {
+    var seen: u64 = 0
+    var v: u64 = 0
+    while v < VOLS {
+        if journal_live(v) {
+            if seen == k { return vw(v, V_DEV) }
+            seen += 1
+        }
+        v += 1
+    }
+    block.DEVS
+}
+
+/// px162: the volume on kernel/block device `d` whose journal is live, or VOLS.
+pub fn live_journal_on(d: u64) -> u64 {
+    var v: u64 = 0
+    while v < VOLS {
+        if journal_live(v) && vw(v, V_DEV) == d { return v }
+        v += 1
+    }
+    VOLS
+}
+
+/// px162: volume `v`'s journal inode (s_journal_inum), 0 with no journal.
+pub fn journal_inode(v: u64) -> u64 {
+    if vw(v, V_JNL) == 0 { 0 } else { vw(v, V_JINO) }
 }
 
 /// Word `w` of the books: 0 blocks allocated, 1 freed, 2 inodes made, 3
