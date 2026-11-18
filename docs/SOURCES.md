@@ -2526,3 +2526,17 @@ beyond its pin.
 | Intel SDM vol. 3A §4.5 (4-level paging: one page table maps 2 MiB), §4.10.4 (INVLPG) | as px03's entry | the areas' region and its page tables taken at `start` |
 | PAX's own `kernel/sched`, `kernel/fpu`, `kernel/process`, `kernel/procfs`, `kernel/vm`, `kernel/trace_state`, `boot/sched.S`, `boot/fpu.S`, `user/elf/ptyprobe.c` (the pty idioms), `tests/mpx5-pty` and `tests/mpx5-forks` (the suite's shape) | this tree | read and extended |
 | pelt at `user/pelt.pin`'s commit and boreutils' `cat` at `user/boreutils.pin`'s, built unmodified by `tools/mkpelt` and `tools/mkboreutils` | the pins | black box: their thread counts on PAX (`/proc/<pid>/status`), pelt's `-c` |
+
+## px162 — the installer's ext3 root: paxext2's journal, the two profiles
+
+No kernel's, e2fsprogs' or installer's source was read: not Linux's `fs/ext4` or `fs/jbd2`, not e2fsprogs'
+`lib/ext2fs` or `misc/mke2fs.c`, not any distribution's installer. The journal paxext2 writes is empty, so no
+replay or commit rule is new here; those stay px68's.
+
+| source | version | read, for |
+|---|---|---|
+| `Documentation/filesystems/ext4/journal.rst` | as px68's entry | the v2 journal superblock `paxext2 --journal` writes in the journal's first block, big-endian: the magic, block type 4, `s_blocksize`, `s_maxlen`, `s_first` 1, `s_sequence` 1, `s_start` 0 (an empty log), `s_uuid` (the volume's) and `s_nr_users` 1 |
+| `Documentation/filesystems/ext4/super.rst` | as px68's entry | `COMPAT_HAS_JOURNAL` 0x4, `s_journal_inum` (8), `s_jnl_blocks` (the journal inode's 15 block words, then `i_size_high` and `i_size`) and `s_jnl_backup_type` 1 |
+| mke2fs(8) | e2fsprogs 1.47.0's | a journal of at least 1024 blocks (`-J size=`); the 16 MiB size, the 64 MiB floor and the quarter-of-the-volume ceiling are PAX's own |
+| e2fsprogs 1.47.0 (`mke2fs -t ext3 -b 4096 -J size=16`, `dumpe2fs -h`, `e2fsck -fn`), the pinned image's | 1.47.0 | black box: `tests/mpx6-disktools.d/ext3.py` holds paxext2's journal superblock and dumpe2fs's journal lines to mke2fs's at 64, 448 and 1024 MiB, and every image to `e2fsck -fn`; `tests/mpx6-install` checks each installed root with them, and the power-cut row's root before and after PAX's replay |
+| PAX's own `kernel/ext2`, `kernel/journal`, `user/install`, `user/disktools/paxext2`, `tests/mpx6-install` | this tree | read and extended: the plan, its token, the written root's check, the installed `limine.conf` and `/etc/fstab`, the upgrade's texts |
