@@ -1,5 +1,6 @@
 /* Journal failure probe: Linux ABI calls only; each run owns its image. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/falloc.h>
@@ -8,7 +9,9 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 static void result(const char *name, long value) {
@@ -20,6 +23,119 @@ static void done(void) {
     puts("JF DONE"); fflush(stdout);
     for (;;) pause(); /* The QEMU runner cuts power, not a guest process. */
 }
+/* The journal's proof (paxage's X2): /proc/fs/jbd2's entries, each a line; the count, or -1 and why. */
+static int jbd2_list(const char *tag) {
+    DIR *d = opendir("/proc/fs/jbd2");
+    if (!d) { printf("JP %s jbd2-none errno=%d\n", tag, errno); fflush(stdout); return -1; }
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        printf("JP %s jbd2 %s\n", tag, e->d_name);
+        n++;
+    }
+    closedir(d);
+    printf("JP %s jbd2-count %d\n", tag, n);
+    fflush(stdout);
+    return n;
+}
+/* A file's lines, each `JP TAG info LINE`, or why not. */
+static void info(const char *tag, const char *path) {
+    char text[2048];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { printf("JP %s info-none errno=%d\n", tag, errno); fflush(stdout); return; }
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n < 0) n = 0;
+    text[n] = 0;
+    for (char *l = strtok(text, "\n"); l; l = strtok(NULL, "\n")) printf("JP %s info %s\n", tag, l);
+    fflush(stdout);
+}
+/* paxage's X2, its Linux path (src/qualify/qualify.lu), in C: statfs's f_type 0xEF53, stat's st_dev, the
+   device's name from readlink(/sys/dev/block/MAJ:MIN)'s basename, then an entry of /proc/fs/jbd2 named NAME-*. */
+static void x2(const char *tag, const char *path) {
+    struct statfs sf;
+    struct stat st;
+    if (statfs(path, &sf) < 0 || stat(path, &st) < 0) { printf("JP %s x2 refused stat errno=%d\n", tag, errno); fflush(stdout); return; }
+    if ((unsigned long)sf.f_type != 0xEF53) { printf("JP %s x2 refused type=%lx\n", tag, (unsigned long)sf.f_type); fflush(stdout); return; }
+    char majmin[32], sys[64], link[256], name[128] = "";
+    snprintf(majmin, sizeof(majmin), "%u:%u", major(st.st_dev), minor(st.st_dev));
+    snprintf(sys, sizeof(sys), "/sys/dev/block/%s", majmin);
+    ssize_t n = readlink(sys, link, sizeof(link) - 1);
+    if (n > 0) {
+        link[n] = 0;
+        const char *b = strrchr(link, '/');
+        snprintf(name, sizeof(name), "%s", b ? b + 1 : link);
+    }
+    printf("JP %s sysdev %s -> %s\n", tag, majmin, n > 0 ? link : "(none)");
+    if (!name[0]) { printf("JP %s x2 refused unproven %s\n", tag, majmin); fflush(stdout); return; }
+    DIR *d = opendir("/proc/fs/jbd2");
+    struct dirent *e;
+    size_t len = strlen(name);
+    while (d && (e = readdir(d))) {
+        if (!strncmp(e->d_name, name, len) && e->d_name[len] == '-') {
+            printf("JP %s x2 journalled %s\n", tag, e->d_name);
+            closedir(d);
+            fflush(stdout);
+            return;
+        }
+    }
+    if (d) closedir(d);
+    printf("JP %s x2 refused no-journal %s\n", tag, name);
+    fflush(stdout);
+}
+/* The proof's cases: a live journal listed and proved, then gone at the unmount; plain ext2 and a
+   read-only ext3 mount never listed; a journal that fails taken off the list at once. */
+static void proof(const char *which) {
+    char data[4096];
+    memset(data, 'P', sizeof(data));
+    if (!strcmp(which, "proof-plain")) {
+        result("mount", mount("/dev/vda", "/volume", "ext2", 0, NULL));
+        jbd2_list("plain");
+        x2("plain", "/volume");
+        done();
+    }
+    if (!strcmp(which, "proof-ro")) {
+        result("mount", mount("/dev/vda", "/volume", "ext3", MS_RDONLY, NULL));
+        jbd2_list("ro");
+        x2("ro", "/volume");
+        done();
+    }
+    result("mount", mount("/dev/vda", "/volume", "ext3", 0, NULL));
+    jbd2_list("live");
+    info("live", "/proc/fs/jbd2/vda-8/info");
+    x2("live", "/volume");
+    DIR *d = opendir("/sys/dev/block");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char path[300], link[256];
+        snprintf(path, sizeof(path), "/sys/dev/block/%s", e->d_name);
+        ssize_t n = readlink(path, link, sizeof(link) - 1);
+        if (n < 0) n = 0;
+        link[n] = 0;
+        printf("JP sysdev-entry %s -> %s\n", e->d_name, link);
+    }
+    if (!d) printf("JP sysdev-none errno=%d\n", errno);
+    else closedir(d);
+    fflush(stdout);
+    if (!strcmp(which, "proof-failed")) {
+        int fd = open("/volume/new", O_CREAT|O_WRONLY|O_EXCL, 0600);
+        result("open", fd);
+        if (fd >= 0) {
+            result("write", write(fd, data, sizeof(data)));
+            result("fsync", fsync(fd));
+            close(fd);
+        }
+        jbd2_list("failed");
+        x2("failed", "/volume");
+        done();
+    }
+    result("unmount", umount("/volume"));
+    jbd2_list("unmounted");
+    done();
+}
+
 int main(void) {
     char which[64] = {0}, data[4096];
     int c = open("/case", O_RDONLY);
@@ -28,6 +144,7 @@ int main(void) {
     close(c);
     if (received <= 0) return 2;
     mkdir("/volume", 0755);
+    if (!strncmp(which, "proof-", 6)) proof(which);
     if (!strcmp(which, "pre-mount-barrier") || !strcmp(which, "rw-barrier-error")) {
         memset(data, 'Q', sizeof(data));
         int raw = open("/dev/vda", O_WRONLY);
