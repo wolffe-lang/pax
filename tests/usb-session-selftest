@@ -178,4 +178,15 @@ code, calls, printed, holds, last = held([failure, None, None])
 if code is not failure or calls != ['bios-root'] or not holds.startswith('1 failed bios-root '):
     sys.exit(f'FAIL U18: {code=} {calls=} {holds=!r}')
 print('PASS U18: a measured failure on hold 1 is raised at once, never held again')
+# Linux retains its measured 250 ms delay; PAX starts at 500 ms.
+pax = [0] + [500000000 + 33000000*k for k in range(16)]
+delay, median, mean, lost, out = session.repeat_period(pax, 1000 * NS, [], initial_delay=500)
+assert delay == 500 and mean == 33 and not out
+try:
+    session.repeat_period(clean, 1000 * NS, [], initial_delay=500)
+except RuntimeError as error:
+    assert str(error).startswith('repeat outside measured tolerance:')
+else:
+    sys.exit('FAIL U19: PAX accepted the old 250 ms delay')
+print('PASS U19: PAX delay 500 ms, period 33 ms; old 250 ms delay refused; Linux fixtures unchanged')
 print('PASS usb-session-selftest')
