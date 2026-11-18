@@ -13,13 +13,27 @@ fn target(name: str, bytes: int) -> Target {
 }
 
 fn verdict(t: Target, user: str, games: str) -> str {
-    let _p = make_plan(t, "test", user, games) else |e| { return "{e}" }
+    let _p = make_plan(t, "test", user, games, PROFILE_EXT2) else |e| { return "{e}" }
+    "ok"
+}
+
+/// px162: the verdict for a profile's plan.
+fn profile_verdict(t: Target, profile: str) -> str {
+    let _p = make_plan(t, "test", "pax", "no", profile) else |e| { return "{e}" }
     "ok"
 }
 
 fn confirmation_verdict(p: Plan, t: Target, token: str) -> str {
     confirm_plan(p, t, token) else |e| { return "{e}" }
     "ok"
+}
+
+/// px162: a profile row's verdict, its row named when it differs.
+fn profile_check(row: str, actual: str, expected: str) {
+    if actual != expected {
+        eprint("FAIL {row}: expected {expected}, got {actual}")
+        os_exit(1)
+    }
 }
 
 fn identity_check(actual: str, expected: str) {
@@ -31,7 +45,7 @@ fn identity_check(actual: str, expected: str) {
 
 fn main() {
     let t = target("vdb", 536870912)
-    let p = make_plan(t, "test", "pax", "yes") else |_| { assert(false); return }
+    let p = make_plan(t, "test", "pax", "yes", PROFILE_EXT2) else |_| { assert(false); return }
     assert(p.root_bytes == 467644416)
     assert(p.tail_bytes == 20480)
     assert(ROOT_START + p.root_bytes + p.tail_bytes == t.bytes)
@@ -45,7 +59,7 @@ fn main() {
     assert(verdict(target("vdb", maximum + 4096), "pax", "no") == "ok")
     assert(verdict(target("vdb", 9223372036854775296), "pax", "no") == "ok")
     for bytes in [8589934592, 68719476736, 500000000000, 4000000000000, 18691697672192, 9223372036854775296] {
-        let large = make_plan(target("vdb", bytes), "big", "pax", "no") else |e| {
+        let large = make_plan(target("vdb", bytes), "big", "pax", "no", PROFILE_EXT2) else |e| {
             eprint("FAIL I-big-plan: {bytes}: {e}"); os_exit(1); return
         }
         let end = (bytes - 33 * 512) / 4096 * 4096
@@ -130,10 +144,10 @@ fn main() {
     assert(wipe_text(w[3]) == "zero-gap [17408,65536) [131072,1048576) [536850432,536854016)")
     for x in w { assert(plan_body(p).contains(wipe_text(x) + " (")) }
     // A disk whose tail is the backup table alone has no slack range.
-    let snug = make_plan(target("vdb", 536850432 + 16896), "test", "pax", "no") else |_| { assert(false); return }
+    let snug = make_plan(target("vdb", 536850432 + 16896), "test", "pax", "no", PROFILE_EXT2) else |_| { assert(false); return }
     assert(wipe_text(wipes(snug)[3]) == "zero-gap [17408,65536) [131072,1048576)")
     for bytes in [ROOT_START + ROOT_MIN + 33 * 512, 536867328, 1000204886016, 4000787030016, 18691697672192] {
-        let q = make_plan(target("vdb", bytes), "big", "pax", "no") else |_| { assert(false); return }
+        let q = make_plan(target("vdb", bytes), "big", "pax", "no", PROFILE_EXT2) else |_| { assert(false); return }
         var spans = List[List[int]]()
         for x in wipes(q) { for r in x.ranges { (mut spans).push(copy r) } }
         for i in 0..spans.len {
@@ -151,4 +165,47 @@ fn main() {
         print("PASS I-wipe-span: {bytes} bytes: {spans.len} disjoint ranges clear of the tables, the log and the backup")
     }
     print("PASS I-wipe-plan: the zero phases' exact ranges, each named by the plan")
+    // px162: the ext2 plan is every earlier installer's, byte for byte, and its token too.
+    let golden = "PAX install plan v1\nformat ext2-developer-preview (NO journal; not ext3)\ntarget /dev/vdb\nidentity 254:16-seq2\n" +
+        "capacity_bytes 536870912\nlogical_sector_bytes 512\npartition 3 bios offset_bytes 1048576 length_bytes 1048576\n" +
+        "partition 1 esp offset_bytes 2097152 length_bytes 67108864\npartition 2 root offset_bytes 69206016 length_bytes 467644416\n" +
+        "prefix_reserved_bytes 1048576 (persistent log: offset 65536 length 65536)\ntail_reserved_bytes 20480 (GPT backup and block alignment)\n" +
+        "unused_bytes 0 (capacity beyond the ext2 block-number limit)\n" +
+        "zero-bios [1048576,2097152) (partition 3 whole, before Limine)\n" +
+        "zero-esp [2097152,3145728) [68157440,69206016) (partition 1's first and last MiB)\n" +
+        "zero-root [69206016,70254592) [535801856,536850432) (partition 2's first and last MiB)\n" +
+        "zero-gap [17408,65536) [131072,1048576) [536850432,536854016) (the first MiB outside the table and the log; the tail before the backup)\n" +
+        "seed test\nuser pax uid 1000 gid 1000 no-password\ngames yes\nconfirmation ERASE /dev/vdb 254:16-seq2 536870912 test\n"
+    if plan_text(p) != golden {
+        eprint("FAIL I-profile-ext2: the ext2 plan moved:\n{plan_text(p)}")
+        os_exit(1)
+    }
+    print("PASS I-profile-ext2: the ext2 plan and its token byte for byte as every earlier installer's")
+    // px162: the default, ext3: plan v2, the journal named, the token ending ` ext3`; the same layout.
+    let p3 = make_plan(t, "test", "pax", "yes", PROFILE_EXT3) else |_| { assert(false); return }
+    let head3 = "PAX install plan v2\nformat ext3 (journal 4096 blocks of 4096 bytes, 16 MiB, inode 8; data=ordered)\n"
+    let rest2 = golden.replace("PAX install plan v1\nformat ext2-developer-preview (NO journal; not ext3)\n", "")
+    let rest3 = rest2.replace("beyond the ext2 block-number", "beyond the ext3 block-number")
+    let want3 = head3 + rest3.replace("536870912 test\n", "536870912 test ext3\n")
+    if plan_text(p3) != want3 || p3.token != "ERASE /dev/vdb 254:16-seq2 536870912 test ext3" || p3.root_bytes != p.root_bytes {
+        eprint("FAIL I-profile-ext3: the ext3 plan:\n{plan_text(p3)}")
+        os_exit(1)
+    }
+    print("PASS I-profile-ext3: plan v2 names the journal; the same layout; the token ends in ext3")
+    // Neither profile's token confirms the other's plan.
+    profile_check("I-profile-tokens", confirmation_verdict(p3, t, p.token), "unconfirmed")
+    profile_check("I-profile-tokens", confirmation_verdict(p, t, p3.token), "unconfirmed")
+    profile_check("I-profile-tokens", confirmation_verdict(p3, t, p3.token), "ok")
+    print("PASS I-profile-tokens: an ext2 token never confirms an ext3 plan, nor the other way")
+    // An ext3 root needs 64 MiB (its 16 MiB journal at most a quarter); ext2 keeps its 8 MiB floor.
+    let floor3 = ROOT_START + ROOT_MIN_EXT3 + 33 * 512
+    profile_check("I-profile-floor", profile_verdict(target("vdb", floor3), PROFILE_EXT3), "ok")
+    profile_check("I-profile-floor", profile_verdict(target("vdb", floor3 - 4096), PROFILE_EXT3), "too_small_for_ext3")
+    profile_check("I-profile-floor", profile_verdict(target("vdb", floor3 - 4096), PROFILE_EXT2), "ok")
+    profile_check("I-profile-floor", profile_verdict(target("vdb", ROOT_START + ROOT_MIN + 33 * 512), PROFILE_EXT3), "too_small_for_ext3")
+    profile_check("I-profile-floor", profile_verdict(target("vdb", ROOT_START + ROOT_MIN + 33 * 512 - 512), PROFILE_EXT3), "too_small")
+    profile_check("I-profile-floor", profile_verdict(t, "ext4"), "invalid")
+    assert(small_ext3_hint("too_small_for_ext3").contains("pax-install --ext2-preview"))
+    assert(small_ext3_hint("too_small") == "")
+    print("PASS I-profile-floor: ext3 refused below 64 MiB by name (too_small_for_ext3, --ext2-preview named), ext2 not; an unknown profile invalid")
 }
