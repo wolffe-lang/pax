@@ -7,6 +7,16 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The end waits out a daemon's last writes on a slow disk (pax#472).** At a reboot, a halt or a power-off every
+  program left has a grace of 2 s after SIGTERM. PAX waits for a disk with interrupts off, and since the tick count
+  follows the clock a slow write or fsync(2) spent the grace while nothing could run: a daemon whose SIGTERM work
+  synced a file was sent SIGKILL before its next write, and logd's shutdown record could be lost from
+  /var/log/wtmp. The grace now counts the ticks the timer delivers (a stretch with interrupts off delivers one),
+  bounded at 30 s by the clock, and a new line names every program SIGKILL ends:
+  `PAX: SIGKILL at the end: sh pid 16 (the 2000 ms grace ran in 2000 ms)`. tests/mpx6-root's R12 boots a daemon
+  that syncs five writes at SIGTERM on a disk QEMU holds to two writes a second and finds its last line on the disk;
+  R13 holds the 30 s bound and its line; R9 requires the new line.
+
 - **A pipe's, a socket's and a pty's reader runs at once beside a busy process; socket buffers hold 64 KiB
   (px159).** A change to any pipe, socket or pty woke every thread waiting on any of them, at the tail of the run
   queue, so a reader waited out the quantum of whatever process was computing: beside one CPU-bound process a byte's
