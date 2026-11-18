@@ -45,7 +45,8 @@
 //! **The end**: a SIGTERM's sender is read (raw.S): from the kernel's end of the run
 //! (si_code SI_KERNEL, or pid 1), logd reads the ring to its end, writes its end line
 //! and the shutdown record to /var/log/wtmp (user/auth/utmp.lu), syncs both and exits
-//! 0, inside the end's 2000 ms grace; from anyone else it writes `logd stopped` and
+//! 0, inside the end's 2000 ms grace; both are written before either is synced
+//! (pax#472: a sync waits on the disk, and the kernel's end writes the cache); from anyone else it writes `logd stopped` and
 //! exits 0 (its loop starts it again). What the kernel says after the end's SIGTERM is
 //! not in kern.log (logd is gone): the serial port and the ring keep it.
 //!
@@ -749,17 +750,20 @@ fn finish(mut l: Log, fd: int) -> int {
     } else {
         add(mut l, "{now_wall(l)} == logd stopped by SIGTERM from pid {pid}; this logd wrote {l.written} records")
     }
+    // px160 (pax#472): both records are written (into the cache, which the
+    // kernel's end writes to the disk before it marks the volumes clean)
+    // before either is synced: a sync waits on the disk, and the end may
+    // send SIGKILL during it.
     let _f = flush(mut l)
+    let downed = kernel_end && ut_shutdown(l.release)
     l.dirty_since = mono_ms()
     sync_now(mut l)
-    if kernel_end {
-        if ut_shutdown(l.release) {
-            let w = fs_open_mode(WTMP_PATH, 2) else -1
-            if w >= 0 {
-                fs_sync(w) else |_| {
-                }
-                fs_close(w) else |_| {
-                }
+    if downed {
+        let w = fs_open_mode(WTMP_PATH, 2) else -1
+        if w >= 0 {
+            fs_sync(w) else |_| {
+            }
+            fs_close(w) else |_| {
             }
         }
     }
