@@ -4022,7 +4022,13 @@ fn walk_who(a: u64, who: u64, pml4: u64, dirfd: u64, va: u64, empty_ok: bool, fo
 /// `/dev/stdin`, `stdout`, `stderr` (pax#83); px55: and `/dev/fd`
 /// (pax#88).
 fn is_link_node(c: u64) -> bool {
-    !is_err(c) && ((ty(c) == T_INO && tree.is_link(rf(c))) || ty(c) == T_STD || is_mounts_link(c))
+    !is_err(c) && ((ty(c) == T_INO && tree.is_link(rf(c))) || ty(c) == T_STD || is_mounts_link(c) || is_dev_link(c))
+}
+
+/// px162: whether node `c` is one of `/sys/dev/block`'s links, to
+/// `../../class/block/<name>` (kernel/procfs's DEVLINK).
+fn is_dev_link(c: u64) -> bool {
+    ty(c) == T_SYN && procfs.entry(rf(c)) == procfs.DEVLINK
 }
 
 /// px67: whether node `c` is `/proc/mounts`, a link to `self/mounts`.
@@ -4036,6 +4042,9 @@ fn link_bytes(c: u64) -> u64 {
     if is_mounts_link(c) {
         return 11 // px67: `self/mounts`
     }
+    if is_dev_link(c) {
+        return procfs.link_len(rf(c)) // px162
+    }
     if ty(c) == T_STD {
         return if rf(c) == FD_LINK { 13 } else { 15 }
     }
@@ -4046,6 +4055,16 @@ fn link_bytes(c: u64) -> u64 {
 /// (px55: `/dev/fd`'s `k` is at most its 13, so neither the last `/` nor
 /// a digit is written).
 fn link_target(c: u64, dst: u64, k: u64) {
+    if is_dev_link(c) {
+        // px162: `../../class/block/<name>`, kernel/procfs's
+        var i: u64 = 0
+        while i < k && i < procfs.link_len(rf(c)) {
+            // # Safety: dst is pax_kbuf's (or its second half), at least k bytes.
+            unsafe { ((dst + i) as *u8).write_volatile(procfs.link_byte(rf(c), i) as u8) }
+            i += 1
+        }
+        return
+    }
     if is_mounts_link(c) {
         var i: u64 = 0
         for b in "self/mounts".bytes() {
