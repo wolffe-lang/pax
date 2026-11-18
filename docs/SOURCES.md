@@ -2536,3 +2536,14 @@ No kernel's source of any OS and no C library's source was read.
 | pipe(7), unix(7), socketpair(2), socket(7) (SO_SNDBUF's meaning), eventfd(2), pty(7), poll(2), epoll(7), termios(3) (`cfmakeraw`) (the Linux man-pages) | 6.9 | what a reader and a writer of each wait for; the probe's hop over a pty in raw mode; a socket's buffer sized as a pipe's |
 | Intel SDM vol. 2 (RDTSC) | as px88's entry | an urgent thread's first millisecond, by the time-stamp counter since its switch |
 | PAX's own `kernel/sched`, `kernel/files`, `kernel/pty`, `kernel/console`, `kernel/ready`, `kernel/event`, `kernel/unix`, `kernel/user`, `tests/mpx6-latency` and `user/elf/latprobe.c` | this tree | every wait on a pipe, a socket, a pty, the console and an eventfd, and every wake of them, read; extended |
+
+## The end's grace and a slow disk (pax#472)
+
+No kernel's, init's or log daemon's source was read. The race was found in PAX's own code (kernel/user's
+`end_processes`, kernel/timer's `ticks` and `delivered`, kernel/vblk's polled `wait`, user/logd's `finish`) and made
+deterministic by holding the guest's disk to a few writes a second from QEMU, which the rows then use.
+
+| source | version | read, for |
+|---|---|---|
+| QEMU's `-drive` throttling options (`throttling.iops-write`) and HMP's `block_set_io_throttle` and `info blockstats` (qemu.org documentation) | QEMU 8.2.2 and 11.1.2, run | a disk that takes each write at most N times a second, set from boot by `-set drive.d0.throttling.iops-write=N` (checked: `info block` says `iops_wr=N`) or at a moment from the monitor |
+| fsync(2), sigaction(2), nanosleep(2) | man-pages 6.19 | the probe's late daemon: its writes synced, its SIGTERM handler, its 100 ms step |
