@@ -20,7 +20,9 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   only, so a reader that goes on to compute no longer holds off a key's reader for its quantum. A change of any other
   kind (an end opened or closed, a connection, the network, the log) still wakes every waiter. An AF_UNIX socket's
   buffer holds 64 KiB each way instead of 4 KiB, as a pipe's does: a 19 KiB frame crosses in one write and one read
-  instead of five round trips, and each connection holds 128 KiB of frames instead of 8 KiB while it is open. A
+  instead of five round trips. Its frames are taken as bytes are written, up to 128 KiB a connection while it is
+  open, and none for an idle one (8 KiB before, from the start); with no frame free, a stream write is short and a
+  message is refused whole (-ENOBUFS). A
   SOCK_SEQPACKET socketpair takes a message of up to 65,528 bytes whole, as Linux takes an 8,000-byte one (it was
   -EMSGSIZE past 4,088).
   `tests/mpx6-latency` holds both: L9, the round trip's p99 over each of the three beside a CPU-bound process within
