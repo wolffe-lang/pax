@@ -1,7 +1,9 @@
 //! paxext2: ext2 layout from the documented ext4 legacy-format fields.
 //! paxext2 [--from DIR] [--attrs FILE] [--label LABEL] [--seed TEXT]
-//!         [--inodes N] [--offset BYTES] [--exclude /DIR]... SIZE IMAGE
-//! 4 KiB blocks, 256-byte inodes, sparse-super backups, no journal.
+//!         [--inodes N] [--offset BYTES] [--journal BLOCKS] [--exclude /DIR]... SIZE IMAGE
+//! 4 KiB blocks, 256-byte inodes, sparse-super backups. No journal unless
+//! --journal names its blocks (journal.lu): then ext3, has_journal and an
+//! empty internal journal in inode 8.
 
 use diskio
 use std.x.crypto.sha2
@@ -136,7 +138,14 @@ fn layout(fd: int, base: int, bytes: int, requested: int) -> Fs ! {invalid} {
     Fs { fd: fd, base: base, blocks: blocks, bpg: bpg, ipg: ipg, groups: groups, next: 0 }
 }
 
-fn finish(fs: Fs, epoch: int, label: str, seed: str) -> () ! {io} {
+/// The volume's UUID: the seed's and the epoch's, so a rebuild is the same.
+fn volume_uuid(seed: str, epoch: int) -> List[byte] {
+    let uuid = sha2.sum256("pax-disk:{seed}:{epoch}".bytes())
+    uuid[0..16]
+}
+
+/// `jnl`: the journal inode's s_jnl_blocks words (journal.lu), empty when none.
+fn finish(fs: Fs, epoch: int, label: str, seed: str, jnl: List[int]) -> () ! {io} {
     let count = fs.groups.len
     var gd = diskio.zeros((count * 32 + 4095) / 4096 * 4096)
     var free = 0, ifree = 0
@@ -177,11 +186,17 @@ fn finish(fs: Fs, epoch: int, label: str, seed: str) -> () ! {io} {
     diskio.put(mut sb, 76, 1, 4)
     diskio.put(mut sb, 84, 11, 4)
     diskio.put(mut sb, 88, 256, 2)
-    diskio.put(mut sb, 96, 2, 4) // filetype, not has_journal
+    if jnl.len != 0 {
+        diskio.put(mut sb, 92, 4, 4) // has_journal
+        diskio.put(mut sb, 224, 8, 4) // s_journal_inum
+        sb[253] = 1 as byte // s_jnl_backup_type: s_jnl_blocks holds i_block and the size
+        for i in 0..jnl.len { diskio.put(mut sb, 268 + i * 4, jnl[i], 4) }
+    }
+    diskio.put(mut sb, 96, 2, 4) // filetype
     diskio.put(mut sb, 100, 3, 4) // sparse_super, large_file
-    let uuid = sha2.sum256("pax-disk:{seed}:{epoch}".bytes())
+    let uuid = volume_uuid(seed, epoch)
     let hash = sha2.sum256("pax-hash:{seed}:{epoch}".bytes())
-    diskio.paste(mut sb, 104, uuid[0..16])
+    diskio.paste(mut sb, 104, uuid)
     diskio.paste(mut sb, 120, label.bytes())
     diskio.paste(mut sb, 236, hash[0..16])
     sb[252] = 1 as byte
@@ -203,7 +218,7 @@ fn finish(fs: Fs, epoch: int, label: str, seed: str) -> () ! {io} {
 
 fn run(args: List[str]) -> () ! {invalid, io, full, too_large} {
     var source = "", attrs_path = "", label = "pax", seed = ""
-    var inodes: int = 0, base: int = 0
+    var inodes: int = 0, base: int = 0, journal: int = 0
     var excludes = List[str]()
     var i = 0
     while i < args.len && args[i].starts_with("--") {
@@ -216,6 +231,7 @@ fn run(args: List[str]) -> () ! {invalid, io, full, too_large} {
             "--seed" => { seed = value },
             "--inodes" => { inodes = diskio.size(value)?; if inodes < 11 { return invalid } },
             "--offset" => { base = diskio.size(value)? },
+            "--journal" => { journal = diskio.size(value)?; if journal == 0 { return invalid } },
             "--exclude" => {
                 if !value.starts_with("/") { return invalid }
                 (mut excludes).push(value)
@@ -264,13 +280,15 @@ fn run(args: List[str]) -> () ! {invalid, io, full, too_large} {
         zero_blocks(fs, fs.groups[g].table, fs.ipg / 16)?
         if has_super(g) { zero_blocks(fs, g * fs.bpg, 1 + (fs.groups.len * 32 + 4095) / 4096)? }
     }
+    // The journal's blocks first, so they are one run (journal.lu).
+    let jnl = if journal == 0 then List[int]() else write_journal(mut fs, journal, volume_uuid(seed, epoch), epoch)?
     for n in nodes {
         if !n.primary { continue }
         region inode {
             write_node(mut fs, n, nodes)?
         }
     }
-    finish(fs, epoch, label, seed)?
+    finish(fs, epoch, label, seed, jnl)?
 }
 
 fn main() -> int {
