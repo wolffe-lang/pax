@@ -45,8 +45,13 @@ output=io.StringIO()
 with contextlib.redirect_stdout(output): assert mod.main(['e2tree',str(root)])==0
 listing=output.getvalue();(work/'target.tree').write_text(listing)
 actual={x.split('\t')[0]:x.split('\t') for x in listing.splitlines()}
-config=f'timeout: 5\nverbose: yes\nserial: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={guid} rootfstype=ext2 rw\n'
-changes={'/boot/limine/limine.conf':config.encode(),'/etc/fstab':f'PARTUUID={guid} / ext2 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n'.encode()}
+# px162: the root's profile (install.py's), ext3 by default: its entry and its type in both texts.
+profile=(work/'profile').read_text().strip() if (work/'profile').exists() else 'ext2'
+if profile=='ext3':
+    config=f'timeout: 5\nverbose: yes\nserial: yes\n\n/PAX ext3\n    protocol: limine\n    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={guid} rootfstype=ext3 rw\n'
+else:
+    config=f'timeout: 5\nverbose: yes\nserial: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={guid} rootfstype=ext2 rw\n'
+changes={'/boot/limine/limine.conf':config.encode(),'/etc/fstab':f'PARTUUID={guid} / {profile} rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n'.encode()}
 # px106: the installer makes its user (pax) a member of group sudo, gid 27, appended to the source's lines
 changes['/etc/group']=(source/'etc/group').read_bytes()+b'sudo:x:27:pax\n'
 changed_meta=set(changes)|{'/etc/passwd','/etc/group','/home/pax'}
@@ -120,4 +125,4 @@ for path in ['/boot/pax','/boot/limine/limine-bios.sys','/boot/limine/limine.con
     content=changes.get(src,(source/src.lstrip('/')).read_bytes())
     assert out==content,path
 print(f'PASS I-tree-{games}: every source path, byte, mode, owner, link target and whole-second time; games {games}'+(f' ({len(catalog)}: '+', '.join(r[0] for r in catalog)+', each with its source and its engine\'s)' if games=='yes' else '')+' bytes/modes/owners; no hidden game payload')
-print('PASS I-boot-files: independent FAT byte readback, new configuration and PARTUUID')
+print(f'PASS I-boot-files: independent FAT byte readback, new configuration ({profile}) and PARTUUID')
