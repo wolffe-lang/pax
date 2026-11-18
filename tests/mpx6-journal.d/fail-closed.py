@@ -557,6 +557,53 @@ class Rows:
                      and "s_start is outside its log" in text,
                      f"s_start {start} outside [s_first {first}, s_maxlen {maxlen}): refused by name, nothing written, the log kept")
 
+    def proof(self):
+        # A journal a program can prove (paxage's X2, its Linux path): /proc/fs/jbd2/<dev>-<inode> while the
+        # volume's journal is live (mounted read-write, writing through it, not failed), and
+        # /sys/dev/block/<major>:<minor> naming the device stat's st_dev is. Plain ext2 and a read-only ext3
+        # mount are never listed; a failed journal leaves the list at once; the unmount takes it off.
+        def lines(text, tag, what):
+            return [l.split(" ", 3)[3] for l in text.splitlines() if l.startswith(f"JP {tag} {what} ")]
+        def count(text, tag):
+            m = re.search(rf"^JP {tag} jbd2-count (\d+)$", text, re.M)
+            return int(m[1]) if m else -1
+        disk = self.image("proof-live")
+        text = self.boot("proof-live", disk, "proof-live")
+        info = lines(text, "live", "info")
+        self.row("JP-live", value(text, "mount") == (0, 0) and lines(text, "live", "jbd2") == ["vda-8"]
+                 and "state live" in info and any(re.match(r"journal inode 8, 4096 blocks", l) for l in info)
+                 and lines(text, "live", "x2") == ["journalled vda-8"]
+                 and value(text, "unmount") == (0, 0) and count(text, "unmounted") == 0,
+                 "a live journal: /proc/fs/jbd2 lists vda-8 alone, its info says live, paxage's check proves it; gone at the unmount")
+        sysdev = re.findall(r"^JP sysdev-entry (\S+) -> (\S*)$", text, re.M)
+        self.row("JP-sysdev", ("254:0", "../../class/block/vda") in sysdev
+                 and re.search(r"^JP live sysdev 254:0 -> \S*/vda$", text, re.M) is not None
+                 and all(t.rsplit("/", 1)[-1] and t.startswith("../../class/block/") for _, t in sysdev),
+                 f"/sys/dev/block names each device by its numbers ({len(sysdev)}), st_dev's link's basename its name")
+        disk = self.image("proof-failed")
+        _, journal = geometry(disk)
+        cfg = self.out / "proof-failed.cfg"
+        cfg.write_text('[inject-error]\nevent = "write_aio"\niotype = "write"\n'
+                       f'errno = "5"\nsector = "{(journal + 1) * 8}"\nonce = "on"\nimmediately = "off"\n')
+        text = self.boot("proof-failed", disk, "proof-failed", cfg=cfg)
+        self.row("JP-failed", value(text, "mount") == (0, 0) and count(text, "live") == 1
+                 and value(text, "fsync") == (-1, 5) and count(text, "failed") == 0
+                 and lines(text, "failed", "x2") == ["refused no-journal vda"],
+                 "a journal that fails is off the list at once; paxage's check refuses it")
+        disk = self.out / "proof-plain.img"
+        with disk.open("wb") as f:
+            f.truncate(64 * 1024 * 1024)
+        run(["mke2fs", "-q", "-F", "-t", "ext2", "-b", "4096", disk])
+        text = self.boot("proof-plain", disk, "proof-plain")
+        self.row("JP-plain", value(text, "mount") == (0, 0) and count(text, "plain") <= 0
+                 and any(l.startswith("refused") for l in lines(text, "plain", "x2")),
+                 "plain ext2 is never listed; paxage's check refuses it")
+        disk = self.image("proof-ro")
+        text = self.boot("proof-ro", disk, "proof-ro")
+        self.row("JP-readonly", value(text, "mount") == (0, 0) and count(text, "ro") <= 0
+                 and any(l.startswith("refused") for l in lines(text, "ro", "x2")),
+                 "a read-only ext3 mount writes nothing through its journal: not listed, refused")
+
     def late_layout(self, kind):
         """A healthy write-through late operation: the write ordinal of its
         superblock write and the backing-flush ordinal of the barrier after it."""
@@ -898,6 +945,9 @@ class Rows:
         if self.a.only == "start":
             self.start_range()
             return 1 if self.failed else 0
+        if self.a.only == "proof":
+            self.proof()
+            return 1 if self.failed else 0
         if self.a.only == "late":
             self.late()
             self.overwrite()
@@ -929,6 +979,7 @@ class Rows:
         self.refusal("JF-external-uuid", 0xd0, b"X" * 16, words="external journal UUID", filesystem=True)
         self.refusal("JF-external-device", 0xe4, struct.pack("<I", 1), words="external journal device", filesystem=True)
         self.start_range()
+        self.proof()
         self.no_flush()
         self.mount_barrier()
         self.mount_state("write")
@@ -962,7 +1013,7 @@ if __name__ == "__main__":
     p.add_argument("--guard-kernel", type=Path)
     p.add_argument("--firmware", choices=("bios", "uefi"), default="bios")
     p.add_argument("--large", action="store_true")
-    p.add_argument("--only", choices=("large", "plain", "no-flush", "boundaries", "late", "start"))
+    p.add_argument("--only", choices=("large", "plain", "no-flush", "boundaries", "late", "start", "proof"))
     p.add_argument("out", type=Path)
     args = p.parse_args()
     try:
