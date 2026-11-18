@@ -476,6 +476,13 @@ volume (-EIO), so the next boot replays it whole
 
     ext2: vda2: recovering the journal stopped at sequence 2: an I/O error; the volume is refused, -EIO
 
+A log whose start (s_start) is not 0 and not one of its own blocks,
+from s_first up to s_maxlen, is refused before the replay begins and
+before any write, so nothing empties it (pax#419; `tests/mpx6-journal`
+J11's JF-start rows, read-write and read-only):
+
+    ext2: refused: vda2: the journal's s_start is outside its log [s_first, s_maxlen), nothing replayed: s_start 0x0000000000000fa0
+
 A read-write mount sets needs_recovery and leaves the state `clean`
 (Linux 7.3.0 keeps a journalled root clean while it is mounted and after
 a power cut, measured), and the root's line says how it writes:
