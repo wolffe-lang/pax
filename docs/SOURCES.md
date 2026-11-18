@@ -2599,8 +2599,8 @@ replay or commit rule is new here; those stay px68's.
 
 ## px162, the second part — a journal a program can prove: /proc/fs/jbd2 and /sys/dev/block
 
-No kernel's source was read: not Linux's `fs/jbd2`, `fs/proc` or `drivers/base`. paxage's own check (its
-`src/qualify/qualify.lu`, the owner's code) says what a program asks: statfs's type, stat's `st_dev`, the name
+No kernel's source was read: not Linux's `fs/jbd2`, `fs/proc` or `drivers/base`. paxage's own check
+(`src/qualify/qualify.lu` in paxage's tree) says what a program asks: statfs's type, stat's `st_dev`, the name
 `/sys/dev/block/<major>:<minor>` links to, and an entry of `/proc/fs/jbd2` named `<that name>-…`.
 
 | source | version | read, for |
