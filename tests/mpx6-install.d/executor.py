@@ -96,3 +96,29 @@ with tempfile.TemporaryDirectory(dir=work,prefix='wipe-') as tmp:
                 if r['state']=='started':assert r['detail']=='zero '+' '.join(f'[{a},{b})' for a,b in ranges[r['phase']]),r
             disk.unlink()
             print(f'PASS I-{"zero-all" if only == "all" else only}: {n} bytes: '+'; '.join(f'{k} '+' '.join(f'[{a},{b})' for a,b in ranges[k]) for k in names)+' zeroed and nothing else; the log holds its records alone',flush=True)
+# px162: the root phase's argv: ext3 adds --journal 4096 to ext2's, which is every earlier
+# installer's; and the written superblock held to the plan's profile.
+import struct
+tree=work/'tree'
+for f in ['boot/pax','boot/limine/limine-bios.sys','boot/limine/limine.conf','boot/EFI/BOOT/BOOTX64.EFI']:
+    (tree/f).parent.mkdir(parents=True,exist_ok=True);(tree/f).write_bytes(f.encode())
+def root_args(profile):
+    r=subprocess.run([program,'--root-args',profile,str(tree)],capture_output=True,text=True)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    return r.stdout.splitlines()
+ext2_args=['/bin/paxext2','--from',str(tree),'--attrs','/attrs','--label','pax-root','--seed','test','--offset','69206016','467644416','/dev/vdb']
+got2,got3=root_args('ext2'),root_args('ext3')
+if got2!=ext2_args or got3!=ext2_args[:11]+['--journal','4096']+ext2_args[11:]:
+    print(f'FAIL I-root-args: ext2 {got2}, ext3 {got3}',flush=True);sys.exit(1)
+print('PASS I-root-args: ext2 formats as before; ext3 the same with --journal 4096',flush=True)
+def check(profile,compat,inode):
+    sb=bytearray(1024);struct.pack_into('<H',sb,56,0xEF53);struct.pack_into('<I',sb,92,compat);struct.pack_into('<I',sb,224,inode)
+    f=work/'super.img';f.write_bytes(bytes(1024)+bytes(sb))
+    r=subprocess.run([program,'--root-check',profile,str(f)],capture_output=True,text=True)
+    assert r.returncode==0,(r.stdout,r.stderr)
+    return r.stdout.strip()
+cases=[('ext3',4,8,'as planned'),('ext3',0,0,'not the plan'),('ext3',4,9,'not the plan'),('ext2',0,0,'as planned'),('ext2',4,8,'not the plan')]
+bad=[(c,check(*c[:3])) for c in cases if c[3] not in check(*c[:3])]
+if bad:
+    print(f'FAIL I-root-profile-check: {bad}',flush=True);sys.exit(1)
+print('PASS I-root-profile-check: an ext3 plan needs has_journal and inode 8; an ext2 plan no journal; anything else refused by name',flush=True)
