@@ -6,6 +6,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -256,7 +257,10 @@ if 'INSTALL-EXIT-0' not in s:
     # px162: the failed install's row at column 0, with the installer's own words (a plant's red names it)
     flat=s.replace('\r','')
     said=[l.strip() for l in flat.splitlines() if 'pax-install:' in l or ('phase ' in l and 'failed' in l)]
-    print(('FAIL I-boot-files' if 'phase verify-boot-' in s else f'FAIL I-install-{games}-{name}')+': '+' | '.join(said)[-2000:],flush=True)
+    # I-boot-files only when a boot file's own check failed (`phase verify-boot-N: failed`); the earlier rule, any
+    # `phase verify-boot-` in the text, named a later failure (the root's check after durable boot phases) so too.
+    boot=re.search(r'phase verify-boot-\d+: failed',flat) is not None
+    print(('FAIL I-boot-files' if boot else f'FAIL I-install-{games}-{name}')+': '+' | '.join(said)[-2000:],flush=True)
     print(flat[-18000:],flush=True)
     sys.exit(1)
 assert sha(work/'source-guard.img')==guard
@@ -312,7 +316,6 @@ why=[]
 if profile=='ext3':
     jinum=struct.unpack_from('<I',sb,0xE0)[0]
     if not compat&4 or jinum!=8: why.append(f'superblock compat {compat:#x} journal inode {jinum}')
-    import re
     for want in (r'^Filesystem features:.*\bhas_journal\b',r'^Journal features:\s+\(none\)$',r'^Total journal blocks:\s+4096$',
                  r'^Journal sequence:\s+0x0*1$',r'^Journal start:\s+0$'):
         if not re.search(want,geometry,re.M): why.append('dumpe2fs -h lacks '+want)
