@@ -5009,6 +5009,71 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px164: every inode change reaches the disk while the block cache turns
+  # over under write-back: tests/mpx6-ext2-cache boots kmain_console with a
+  # 20 GiB sparse ext2 volume of 12,000 files mounted at /mnt and runs
+  # user/elf/churn.c: a walk that moves every access time beside an
+  # appender (scene), the same under memory pressure (pressure), and chmod of
+  # every file (modes); then e2fsprogs reads every inode on the disk (no lost
+  # time or mode, the appended log whole, `e2fsck -fn` clean) and the serial
+  # log holds no ext2 fault line.
+  mpx6-ext2-cache:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-ext2-cache')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev
+          qemu-system-x86_64 --version
+          docker --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-ext2-cache-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: e2fsprogs from the image pinned by digest
+        run: |
+          docker pull docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+          PAX_ENGINE=docker tools/e2fs --version
+
+      - name: every inode change on the disk after the walk, the appender and chmod; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+          PAX_ENGINE: docker
+        run: tests/mpx6-ext2-cache $PAX_LEGS
+
+      - name: keep the serial logs, the checks and the disk's facts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-ext2-cache
+          path: |
+            build/mpx6-ext2-cache/*/disk.dumpe2fs
+            build/mpx6-ext2-cache/*/*/serial.log
+            build/mpx6-ext2-cache/*/*/qemu-halt.txt
+            build/mpx6-ext2-cache/*/*/e2fsck.txt
+            build/mpx6-ext2-cache/*/*/app.log
+          retention-days: 14
+          if-no-files-found: warn
+
   # px79: block device nodes, the block ioctls and a second disk
   # (pax#144). kmain_console with up to three virtio disks: /dev's nodes,
   # stat, /proc/partitions and /sys's block files, the ioctls, raw I/O,
@@ -6191,6 +6256,7 @@ jobs:
       - mpx5-screen
       - mpx6-blk
       - mpx6-ext2
+      - mpx6-ext2-cache
       - mpx6-part
       - mpx6-root
       - mpx6-journal
