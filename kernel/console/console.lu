@@ -31,8 +31,8 @@
 //! scrolling); F1-F12 give `ESC [ [ A` to `ESC [ [ E` and `ESC [ 17 ~` to
 //! `ESC [ 24 ~`, Shift+F1-F10 the VT's F11-F20 (`ESC [ 23 ~` to `ESC [ 34
 //! ~`), Ctrl the same as none, any Alt or Shift with Ctrl nothing; left
-//! Alt with a character key sends ESC before it (with Shift too,
-//! nothing); right Alt is tracked and adds nothing (R-px59-2: the VT's
+//! Alt with a printable key sends ESC before it, including with Shift;
+//! right Alt is tracked and adds nothing (R-px59-2: the VT's
 //! AltGr enters a character by its code, not served); the keypad's
 //! digits and point give nothing. `irq` takes
 //! both vectors and acknowledges the 8259 (kernel/timer's `eoi`); both
@@ -1915,13 +1915,11 @@ pub fn key_event(code: u64, pressed: bool, usb: bool) {
     if c == 0 {
         return
     }
-    // px59 (R-px59-2): left Alt sends ESC before the key's character, as
-    // the VT's Meta does; with Shift too it gives nothing (measured on
-    // `a` and `1`); the keypad's keys take no prefix (keypad Enter
-    // measured). Right Alt's hexadecimal entry and symbols were handled
-    // above; other character keys retain their measured normal mapping.
+    // Left Alt sends ESC before the shifted printable character. Keep the
+    // earlier suppression for Ctrl, AltGr and non-printable keys; the
+    // keypad's keys take no prefix. AltGr entry was handled above.
     let meta = keys & K_LALT != 0 && !ext && k != 0x37 && k != 0x4a && k != 0x4e
-    if meta && keys & (K_LSHIFT | K_RSHIFT) != 0 {
+    if meta && keys & (K_LSHIFT | K_RSHIFT) != 0 && (keys & (K_LCTRL | K_RCTRL | K_RALT) != 0 || c < 32 || c > 126) {
         return
     }
     let shift = keys & (K_LSHIFT | K_RSHIFT) != 0
