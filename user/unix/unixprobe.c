@@ -1067,6 +1067,94 @@ static void stacks(void)
     munmap(st, 4 * sz);
 }
 
+/* --- section L: a socket's frames (px159) ------------------------------ */
+/* PAX's own answers (`~` lines; Linux's MemFree moves with the rest of its
+   machine): a socket's buffer takes its frames as bytes are written to it
+   and gives them back with its last end, so an idle pair costs none. A
+   message (SOCK_SEQPACKET) goes in whole or not at all when frames run
+   out; a stream takes what has frames. Static buffers only: nothing here
+   may take a frame of its own between two readings. */
+
+static char mi[4096];
+static long memfree_kb(void)
+{
+    int fd = open("/proc/meminfo", O_RDONLY);
+    long n = read(fd, mi, sizeof mi - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    mi[n] = 0;
+    char *p = strstr(mi, "MemFree:");
+    return p ? strtol(p + 8, 0, 10) : -1;
+}
+
+static int fp[32][2];
+static char fb[30000];
+
+static void sockframes(void)
+{
+    say("== a socket's frames\n");
+    long a = memfree_kb();
+    for (int i = 0; i < 32; i++)
+        socketpair(AF_UNIX, SOCK_STREAM, 0, fp[i]);
+    long b = memfree_kb();
+    say("~frames: 32 idle socketpairs: %ld kB taken\n", a - b);
+    for (int i = 0; i < 32; i++)
+        close(fp[i][0]), close(fp[i][1]);
+    a = memfree_kb();
+    for (int i = 0; i < 16; i++) {
+        socketpair(AF_UNIX, SOCK_STREAM, 0, fp[i]);
+        send(fp[i][0], fb, 20000, MSG_DONTWAIT);
+        send(fp[i][1], fb, 20000, MSG_DONTWAIT);
+    }
+    b = memfree_kb();
+    for (int i = 0; i < 16; i++) {
+        recv(fp[i][1], fb, 20000, MSG_DONTWAIT);
+        close(fp[i][0]), close(fp[i][1]);
+    }
+    long c = memfree_kb();
+    say("~frames: 16 pairs, 20000 bytes each way: %ld kB taken while open, %ld kB after their last ends\n", a - b, a - c);
+
+    int ss[2], sq[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, ss);
+    socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sq);
+    int nc = 0, np = 0;
+    while (nc < 2048) {
+        void *m = mmap(0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED)
+            break;
+        chunks[nc++] = m;
+    }
+    while (np < 8192) {
+        void *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED)
+            break;
+        pages[np++] = m;
+    }
+    munmap(pages[--np], 4096);
+    long r = send(ss[0], fb, 30000, MSG_DONTWAIT);
+    say("~frames: every frame taken, one given back: a stream write of 30000 bytes: %s (%ld)\n",
+        r > 0 && r < 30000 ? "short" : r == 30000 ? "whole" : ename(errno), r);
+    munmap(pages[--np], 4096);
+    munmap(pages[--np], 4096);
+    r = send(sq[0], fb, 30000, MSG_DONTWAIT);
+    const char *e1 = r < 0 ? ename(errno) : "taken";
+    long r2 = send(sq[0], fb, 30000, 0);
+    const char *e2 = r2 < 0 ? ename(errno) : "taken";
+    long r3 = recv(sq[1], fb, sizeof fb, MSG_DONTWAIT);
+    say("~frames: two more given back: a seqpacket message of 30000 bytes: %s, without MSG_DONTWAIT: %s; a read then: %s\n",
+        e1, e2, r3 < 0 ? ename(errno) : "a message");
+    for (int i = 0; i < nc; i++)
+        munmap(chunks[i], 1 << 20);
+    for (int i = 0; i < np; i++)
+        munmap(pages[i], 4096);
+    r = send(sq[0], fb, 30000, MSG_DONTWAIT);
+    r2 = recv(sq[1], fb, sizeof fb, MSG_DONTWAIT);
+    r3 = recv(ss[1], fb, sizeof fb, MSG_DONTWAIT);
+    say("~frames: the memory given back: the message: %ld, read whole: %ld; the stream held %ld\n", r, r2, r3);
+    close(ss[0]), close(ss[1]), close(sq[0]), close(sq[1]);
+}
+
 /* --- the soak ------------------------------------------------------------ */
 
 static int soak(void)
@@ -1148,6 +1236,7 @@ int main(int argc, char **argv)
     seqpacket();
     procsys();
     noreserve();
+    sockframes();
     say("~refused: %s\n", refused);
     DIR *d = opendir("/u");
     struct dirent *e;
