@@ -2540,3 +2540,15 @@ replay or commit rule is new here; those stay px68's.
 | mke2fs(8) | e2fsprogs 1.47.0's | a journal of at least 1024 blocks (`-J size=`); the 16 MiB size, the 64 MiB floor and the quarter-of-the-volume ceiling are PAX's own |
 | e2fsprogs 1.47.0 (`mke2fs -t ext3 -b 4096 -J size=16`, `dumpe2fs -h`, `e2fsck -fn`), the pinned image's | 1.47.0 | black box: `tests/mpx6-disktools.d/ext3.py` holds paxext2's journal superblock and dumpe2fs's journal lines to mke2fs's at 64, 448 and 1024 MiB, and every image to `e2fsck -fn`; `tests/mpx6-install` checks each installed root with them, and the power-cut row's root before and after PAX's replay |
 | PAX's own `kernel/ext2`, `kernel/journal`, `user/install`, `user/disktools/paxext2`, `tests/mpx6-install` | this tree | read and extended: the plan, its token, the written root's check, the installed `limine.conf` and `/etc/fstab`, the upgrade's texts |
+
+## px162, the second part — a journal a program can prove: /proc/fs/jbd2 and /sys/dev/block
+
+No kernel's source was read: not Linux's `fs/jbd2`, `fs/proc` or `drivers/base`. paxage's own check (its
+`src/qualify/qualify.lu`, the owner's code) says what a program asks: statfs's type, stat's `st_dev`, the name
+`/sys/dev/block/<major>:<minor>` links to, and an entry of `/proc/fs/jbd2` named `<that name>-…`.
+
+| source | version | read, for |
+|---|---|---|
+| `Documentation/ABI/testing/sysfs-dev` | Linux's master, read 2026-11-18 | `/sys/dev/block` holds links named `<major>:<minor>`, from stat(2)'s numbers, to the device's sysfs directory |
+| black-box Linux 7.2.14-arch1-1 on QEMU 8.2.2 (q35, TCG), an ext3 disk and an ext2 disk, `notes/px162/jbd2look.c` as init (`notes/px162/jbd2.sh`; the record `notes/px162/linux-jbd2.txt`) | 7.2.14 | run, never read: `/proc/fs/jbd2` (0555) is there with no journal; a read-write ext3 mount of `vda` adds the directory `vda-8` (the device's name, the journal's inode) holding `info` (0444, jbd2's statistics, not PAX's lines); plain ext2 adds nothing; the unmount takes it away; `/sys/dev` is 0755 and each `/sys/dev/block/<major>:<minor>` a 0777 link into `/sys/devices/…/block/<name>`. Two answers PAX does not copy: Linux lists a read-only ext3 mount's journal, and keeps an aborted journal listed (the `abort` remount option of `Documentation/admin-guide/ext4.rst`) until the unmount. PAX lists a journal only while a sync on its volume is journalled (read-write, not failed), which is what the entry is taken as proof of |
+| PAX's own `kernel/procfs`, `kernel/files`, `kernel/ext2`, `kernel/journal`, `tests/mpx6-journal.d` | this tree | read and extended: the fixed entries, a device's dynamic references (px79's), the link `/proc/mounts` already is (px67's), the J11 probe and its QEMU fault injection |
