@@ -2498,3 +2498,14 @@ physical KVM were available. The fixture is synthetic, not a claim about that de
 | PAX’s `tools/hotplug-session` | this tree | the existing USB-redirection protocol fixture, device and HID descriptor helpers; reused without changing that tool |
 | PAX’s `kernel/xhci`, `kernel/log`, `kernel/kmsg` | this tree | live pointer records, existing line levels and the quiet framebuffer threshold; no change to descriptor selection or enumeration |
 | PAX’s `user/login`, `user/sudo`, `user/dmesg` | this tree | the real login and privileged log read used by the end-to-end regression |
+
+## The end's grace and a slow disk (pax#472)
+
+No kernel's, init's or log daemon's source was read. The race was found in PAX's own code (kernel/user's
+`end_processes`, kernel/timer's `ticks` and `delivered`, kernel/vblk's polled `wait`, user/logd's `finish`) and made
+deterministic by holding the guest's disk to a few writes a second from QEMU, which the rows then use.
+
+| source | version | read, for |
+|---|---|---|
+| QEMU's `-drive` throttling options (`throttling.iops-write`) and HMP's `block_set_io_throttle` and `info blockstats` (qemu.org documentation) | QEMU 8.2.2 and 11.1.2, run | a disk that takes each write at most N times a second, set from boot by `-set drive.d0.throttling.iops-write=N` (checked: `info block` says `iops_wr=N`) or at a moment from the monitor |
+| fsync(2), sigaction(2), nanosleep(2) | man-pages 6.19 | the probe's late daemon: its writes synced, its SIGTERM handler, its 100 ms step |
