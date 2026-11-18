@@ -5,14 +5,20 @@
 //! their reason; only a disk on the install allow-list can be chosen. What
 //! is printed and what is typed go to the install log (allow.lu).
 //! px78b (R-P6-confirm): after the plan, one summary names the disk by
-//! model, serial, size and node with the ext2 notice, and the word `yes`,
+//! model, serial, size and node with the root's notice, and the word `yes`,
 //! exactly, installs; anything else cancels with nothing written.
+//! px162: the root is ext3 unless `pax-install --ext2-preview` names ext2;
+//! the notice says which, and how to have the other. No question is added.
 
 /// The one confirmation's summary (no model: a virtio disk shows none).
 fn summary_text(p: Plan, model: str, serial: str) -> str {
     let m = if model.len == 0 then "(no model)" else model
-    "Erase {m}, serial {serial} ({size_text(p.target.bytes)}, /dev/{p.target.name}), and install PAX?\n" +
+    let notice = if p.profile == PROFILE_EXT3 {
+        "The root file system is ext3, journalled (data=ordered); pax-install --ext2-preview installs ext2 without a journal."
+    } else {
         "The root file system is ext2 without a journal."
+    }
+    "Erase {m}, serial {serial} ({size_text(p.target.bytes)}, /dev/{p.target.name}), and install PAX?\n" + notice
 }
 
 fn answer(mut lg: Log, prompt: str) -> str ! {cancelled, io} {
@@ -66,7 +72,7 @@ fn pick_target(mut lg: Log, disks: List[Disk]) -> Target ! {cancelled, io, inval
     }
 }
 
-fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
+fn guided_plan(mut lg: Log, disks: List[Disk], seed: str, profile: str) -> Plan ! {
     cancelled,
     io,
     invalid,
@@ -75,6 +81,7 @@ fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
     readonly,
     sector_size,
     too_small,
+    too_small_for_ext3,
     too_large,
 } {
     let t = pick_target(mut lg, disks)?
@@ -91,7 +98,7 @@ fn guided_plan(mut lg: Log, disks: List[Disk], seed: str) -> Plan ! {
         if s == "n" { games = "no"; break }
         say(mut lg, "An explicit y or n is required.")
     }
-    let p = make_plan(t, seed, user, games)?
+    let p = make_plan(t, seed, user, games, profile)?
     print_raw(plan_body(p))
     // The log keeps the confirmation line as its record of what was erased.
     lg.pending += plan_text(p)
