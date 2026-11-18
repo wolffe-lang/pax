@@ -419,8 +419,9 @@ spellings) with no initramfs. The root is ext3 by default since the journal was 
 
 A writable journalled mount, writable remount or journal replay requires a successful device flush barrier before
 its first write. The internal journal must be version 2, belong to this filesystem's UUID and have one user; only
-its revoke feature is supported. Unsupported feature words, external-journal identifiers and a recorded journal
-error are refused by name, without falling back to plain writes.
+its revoke feature is supported. Unsupported feature words, external-journal identifiers, a recorded journal
+error and a log start (`s_start`) outside the log's blocks are refused by name, without falling back to plain writes;
+a refused start writes nothing, so the log is kept for an offline check.
 
 On a volume mounted or remounted writable, a journal write, barrier, checkpoint or bitmap-snapshot failure aborts that
 journal. Later syncs return `EIO`, further mutation is refused, and a failed unmount keeps ownership of its recovery state.
