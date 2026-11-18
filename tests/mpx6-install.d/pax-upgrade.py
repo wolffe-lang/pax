@@ -45,6 +45,11 @@ Rows, each PASS or FAIL by name:
   P26 boot-clean     the first boot after: the staged files removed, the ESP's kernel emptied
   P27 boot-verdict   the verdict cut: written at the first boot, then the files removed
   P28 install-armed  pax-install's --armed with a typed line, a seed, or without --upgrade: usage
+  P29 arm-ext3       (px162) an ext3 root (mke2fs -t ext3; the ESP holding the ext3 install's text): armed,
+                     its installed entry the ext3 one, exactly
+  P30 disarm-ext3    the ext3 root's configuration byte for byte its installer's again
+  P31 arm-ext3-text  an ext3 root whose ESP holds the ext2 text: refused as not the installer's text
+The ext2 rows (P6, P14, P18-P20, P25) hold the ext2 root's texts byte for byte as before.
 """
 from pathlib import Path
 import hashlib
@@ -125,12 +130,15 @@ def newc(rows):
     return bytes(out)
 
 
-def config_text(uuid):
+def config_text(uuid, profile='ext2'):
+    if profile == 'ext3':  # px162: the ext3 install's entry
+        return ('timeout: 5\nverbose: yes\nserial: yes\n\n/PAX ext3\n    protocol: limine\n'
+                f'    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={uuid} rootfstype=ext3 rw\n')
     return ('timeout: 5\nverbose: yes\nserial: yes\n\n/PAX ext2 developer preview\n    protocol: limine\n'
             f'    path: boot():/boot/pax\n    cmdline: quiet root=PARTUUID={uuid} rootfstype=ext2 rw\n')
 
 
-def make_disk(img, root_mib, seed):
+def make_disk(img, root_mib, seed, profile='ext2', text=None):
     last = (ROOT_START + root_mib * MIB) // 512 - 1
     with open(img, 'wb') as f:
         f.truncate(ROOT_START + root_mib * MIB + MIB)
@@ -143,9 +151,9 @@ def make_disk(img, root_mib, seed):
     uuid = next(w.split('=', 1)[1].lower() for line in dump.splitlines() if line.startswith(f'{img}2 :')
                 for w in (x.strip() for x in line.split(',')) if w.startswith('uuid='))
     conf = T / f'{img.stem}.conf'
-    conf.write_text(config_text(uuid))
+    conf.write_text(config_text(uuid, text or profile))
     must([DISKTOOLS / 'paxfat', '--offset', ESP_START, 'copy', img, conf, '/boot/limine/limine.conf'])
-    must(['mke2fs', '-q', '-F', '-t', 'ext2', '-b', '4096', '-L', 'pax-root', '-E', f'offset={ROOT_START}', img,
+    must(['mke2fs', '-q', '-F', '-t', profile, '-b', '4096', '-L', 'pax-root', '-E', f'offset={ROOT_START}', img,
           str(root_mib * 256)])
     return uuid
 
@@ -417,7 +425,32 @@ def rows():
         r = run([INSTALL] + argv)
         ok = ok and r.returncode == 2 and 'usage: pax-install' in r.stderr
     row('P28 install-armed', ok, 'a usage refusal was not exit 2')
-    say(f'pax-upgrade rows: {28 - len(bad)} of 28 held' + (f'; failed: {", ".join(bad)}' if bad else ''))
+    # px162: an ext3 root, the installer's default since px162: its own texts, read from its superblock.
+    disk3 = T / 'disk3.img'
+    make_disk(disk3, 64, 'px115-rows', 'ext3')  # the same seed: the same PARTUUID and fstab line
+    wrong3 = T / 'wrong3.img'
+    make_disk(wrong3, 64, 'px115-rows', 'ext3', text='ext2')
+    fstab2 = (R / 'etc/fstab').read_text()
+    (R / 'etc/fstab').write_text(f'PARTUUID={uuid} / ext3 rw 0 1\ntmpfs /tmp tmpfs nosuid,nodev 0 0\n')
+    installer3 = esp(disk3, '/boot/limine/limine.conf')
+    want3 = ('timeout: 5\ndefault_entry: 1\n\n' +
+             entry.decode().replace('@PARTUUID@', uuid).replace('@SHA256@', new_sha) + '\n' +
+             config_text(uuid, 'ext3').split('\n\n', 1)[1]).encode()
+    receive('new')
+    r = up(['arm'], disk_=disk3)
+    conf3 = esp(disk3, '/boot/limine/limine.conf') or b''
+    row('P29 arm-ext3', r.returncode == 0 and installer3 == config_text(uuid, 'ext3').encode() and conf3 == want3,
+        f'exit {r.returncode}: {r.stdout}{r.stderr}\n{conf3.decode(errors="replace")}')
+    r = up(['disarm'], disk_=disk3)
+    row('P30 disarm-ext3', r.returncode == 0 and esp(disk3, '/boot/limine/limine.conf') == installer3 and
+        not (st / 'armed').exists(), f'exit {r.returncode}: {r.stdout}{r.stderr}')
+    up(['clean'], disk_=disk3)
+    receive('new')
+    r = up(['arm'], disk_=wrong3)
+    row('P31 arm-ext3-text', r.returncode == 1 and says(r, "limine.conf is not the installer's text") and
+        esp(wrong3, '/boot/limine/limine.conf') == config_text(uuid, 'ext2').encode(), f'exit {r.returncode}: {r.stderr}')
+    (R / 'etc/fstab').write_text(fstab2)
+    say(f'pax-upgrade rows: {31 - len(bad)} of 31 held' + (f'; failed: {", ".join(bad)}' if bad else ''))
     return 1 if bad else 0
 
 
