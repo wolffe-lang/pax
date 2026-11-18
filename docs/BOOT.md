@@ -527,6 +527,31 @@ row uses to boot a killed disk once for its replay. An ext2 root
 (`--no-journal`) behaves as px67 measured: not clean after a cut, said
 once by the next boot, left for an offline check, from the rescue archive or the host.
 
+A program can prove a volume's sync is journalled as it would on Linux
+(paxage's check): statfs says 0xEF53, stat's `st_dev` names the device
+through `/sys/dev/block/<major>:<minor>` (a link to
+`../../class/block/<name>`, one for every disk and partition), and
+`/proc/fs/jbd2/<name>-<journal inode>` is there (on an installed root,
+`254:2` links to `../../class/block/vda2` and the entry is `vda2-8`).
+
+The entry is there only while the volume's journal is live: mounted
+read-write, writing through its journal, and not failed. It goes when the
+journal aborts (a write, barrier or checkpoint the disk fails) and at the
+unmount, and plain ext2 and a read-only ext3 mount never have one (Linux
+lists a read-only mount's journal, and an aborted one until the unmount,
+measured: notes/px162/linux-jbd2.txt). Its `info` is
+PAX's own lines, not jbd2's statistics; J11's guest, its ext3 disk whole
+as `vda`, just mounted:
+
+    state live
+    device vda 254:0
+    journal inode 8, 4096 blocks in 5 runs, data=ordered
+    sequence 1, 0 commits
+
+(`tests/mpx6-journal` J11's JP rows run paxage's check, its Linux path,
+in C in the guest.) pxg does not read these yet: it refuses an ext2-family
+root on PAX outright until paxage takes them up.
+
 ## The disks' nodes and a second disk (px79)
 
 kernel/vblk brings up every virtio block device on the bus, up to four,
