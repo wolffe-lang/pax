@@ -66,13 +66,17 @@ finally:
 s=logpath.read_text(errors='replace').replace('\r','')
 s=re.sub(r'\x1b\[[0-9;?=<>]*[A-Za-z]','',s)
 boots=s.split('PAX: the console')[1:];assert len(boots)==2,s[-4000:]
+# px162: the root's profile (install.py's): an ext3 root is journalled, its one run 4096 blocks.
+profile=(work/'profile').read_text().strip() if (work/'profile').exists() else 'ext2'
+kind='ext3, read-write, data=ordered' if profile=='ext3' else 'ext2, read-write, write-back'
 for i,b in enumerate(boots,1):
-    assert re.search(r'^root: PARTUUID=[0-9a-fA-F-]+ \(vda2\) on /: ext2, read-write, write-back$',b,re.M),b
+    assert re.search(r'^root: PARTUUID=[0-9a-fA-F-]+ \(vda2\) on /: '+kind+'$',b,re.M),b
     assert f'clean, mount {i};' in b,b
-    assert re.search(r'fstab: PARTUUID=[0-9a-fA-F-]+ \(vda2\) is /: ext2, read-write, write-back',b),b
+    assert re.search(r'fstab: PARTUUID=[0-9a-fA-F-]+ \(vda2\) is /: '+kind,b),b
+    if profile=='ext3':assert 'journal of 4096 blocks in 1 runs, data=ordered' in b,b
 assert 'pax-install: refused: the running root: /dev/vda' in boots[0],boots[0]
 second=boots[1]
-for command,answer in [('cat /etc/motd','\nhello\n'),('lope list','/usr/share/tunes'),('cat notes.txt','written on PAX, before the reboot'),('cat /root/note','root wrote this in /root'),('cat /proc/self/mounts','/dev/root / ext2 rw,relatime 0 0')]:
+for command,answer in [('cat /etc/motd','\nhello\n'),('lope list','/usr/share/tunes'),('cat notes.txt','written on PAX, before the reboot'),('cat /root/note','root wrote this in /root'),('cat /proc/self/mounts',f'/dev/root / {profile} rw,relatime 0 0')]:
     assert command in second and answer in second.split(command,1)[1].split('$ ',1)[0],(command,second)
 check=work/('session-'+firmware+'-root.img')
 with image.open('rb') as f,check.open('wb') as o:
@@ -90,4 +94,4 @@ assert re.search(rb'^Filesystem state:\s+clean$',r.stdout,re.M) and re.search(rb
 subprocess.run([sys.executable,'-I',str(Path(__file__).with_name('pxg-rows.py')),
                 str(logpath),str(work/'source/etc/pax-release')],check=True)
 image.unlink();check.unlink()
-print(f'PASS I-session-{firmware}: target alone, motd/home/root/lope persisted across reboot, ext2 clean and mount count 2')
+print(f'PASS I-session-{firmware}: target alone, motd/home/root/lope persisted across reboot, {profile} clean and mount count 2')
