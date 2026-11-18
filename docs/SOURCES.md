@@ -2526,3 +2526,15 @@ beyond its pin.
 | Intel SDM vol. 3A §4.5 (4-level paging: one page table maps 2 MiB), §4.10.4 (INVLPG) | as px03's entry | the areas' region and its page tables taken at `start` |
 | PAX's own `kernel/sched`, `kernel/fpu`, `kernel/process`, `kernel/procfs`, `kernel/vm`, `kernel/trace_state`, `boot/sched.S`, `boot/fpu.S`, `user/elf/ptyprobe.c` (the pty idioms), `tests/mpx5-pty` and `tests/mpx5-forks` (the suite's shape) | this tree | read and extended |
 | pelt at `user/pelt.pin`'s commit and boreutils' `cat` at `user/boreutils.pin`'s, built unmodified by `tools/mkpelt` and `tools/mkboreutils` | the pins | black box: their thread counts on PAX (`/proc/<pid>/status`), pelt's `-c` |
+
+## termios2 terminal attributes
+
+No kernel's or C library's implementation source was read. The layout and requests are Linux's x86-64 ABI;
+speed conversion, PTY flag normalization, master/slave sharing and fault behavior were measured as a black box.
+
+| source | version | read, for |
+|---|---|---|
+| TCGETS(2const), TCSETS(2const), termios(3) | Linux man-pages 6.19 | the 44-byte termios2 layout, BOTHER and numeric speeds, the three set actions, and libc's terminal functions |
+| Linux 7.2.4, run with static probes in containers | binary | `user/elf/termios2probe.c`: every input/output baud encoding, BOTHER, legacy interoperation, the master's setters, short and read-only buffers, flushing, `tcgetattr`, `tcsetattr`, `cfgetispeed`, `isatty` and window-size-based column layout; observed references in `tests/mpx5-pty.d/linux/termios2*.txt` |
+| glibc 2.44 and GCC 16.2.1; pelt at `00c12d72abf0d2783afbb43c91c901abd4eb4083` | binaries and the project's own shell | the same C probe linked statically against glibc 2.44, and an unmodified static pelt reaching its interactive prompt |
+| PAX's own `kernel/console`, `kernel/pty`, `user/elf/ptyprobe.c`, `tests/mpx5-pty` | this tree | the shared terminal state, job-control and flush rules, and the existing terminal regression rows |
