@@ -89,6 +89,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import upgrade_screen as us
+
 repo, work, old_src, new_src = map(Path, sys.argv[1:5])
 ROWS = sys.argv[5].split(',') if len(sys.argv) > 5 else ['U1', 'U2', 'U0', 'U8', 'U3', 'U4', 'U5', 'U6', 'U7',
                                                         'U1d', 'U2d', 'U3d', 'U4d', 'U6d', 'U9', 'U10', 'U11', 'U12',
@@ -309,21 +312,29 @@ class Machine:
         self.qlog = (self.dir/'qemu.log').open('wb')
         self.t0 = time.monotonic()
         self.p = subprocess.Popen([str(x) for x in a], stdin=subprocess.DEVNULL, stdout=self.qlog, stderr=subprocess.STDOUT)
-        for _ in range(200):
-            if self.sock.exists():
-                break
-            if self.p.poll() is not None:
-                fail(name, 'QEMU did not start: ' + (self.dir/'qemu.log').read_text(errors='replace')[-2000:])
-            time.sleep(.05)
+        try:
+            us.wait_for_socket(self.sock, self.p, name)
+        except us.SocketWait as error:
+            fail(name, f'{error}: ' + (self.dir/'qemu.log').read_text(errors='replace')[-2000:])
         self.q = QMP(self.sock)
         self.shots = 0
         self.cols = 0
-        self.since = ''
+        self.since = None
+
+    def mark(self, line):
+        """Remember the line about to be typed and how many echoes of it the screen already holds."""
+        self.since = us.Baseline(line, us.echo_count(self.unwrapped(self.screen()), line))
+
+    def arm(self):
+        """The line is typed and Enter not yet pressed: its echo is the screen's last, whatever scrolls later."""
+        self.since.armed(self.unwrapped(self.screen()))
 
     def run(self, cmd):
         """Type a command whose output the next waits read alone."""
-        self.since = '$ ' + cmd
-        self.type(cmd + '\n')
+        self.mark(cmd)
+        self.type(cmd)
+        self.arm()
+        self.type('\n')
 
     def screen(self):
         self.q.call('stop')
@@ -367,9 +378,9 @@ class Machine:
             flat = self.unwrapped(text)
             # After a command typed by run(), only what follows its last echo counts: a
             # previous run's lines may still be on the screen.
-            if self.since and self.since in flat:
-                flat = flat[flat.rindex(self.since):]
-                text = flat
+            if self.since:
+                scoped = self.since.scope(flat)
+                flat = text = scoped if scoped is not None else ''
             look = text.rstrip('\n').split('\n')[-1] if last else flat
             if re.search(pattern, look, re.M):
                 return text
@@ -415,8 +426,10 @@ class Machine:
             time.sleep(.05)
 
     def command(self, line, row, timeout=300):
-        self.since = '$ ' + line
-        self.type(line + '\n')
+        self.mark(line)
+        self.type(line)
+        self.arm()
+        self.type('\n')
         time.sleep(.5)
         return self.wait(PROMPT, row, timeout, last=True)
 
@@ -424,9 +437,10 @@ class Machine:
         """px103: type the line, read it back from the screen, and only then press Enter: a key the
         keyboard dropped (seen under host load: 'su wof') fails the row by name before anything runs.
         Its echo is found by the line's own text, as run()'s and command()'s: the prompt may be pelt's friendly one."""
-        self.since = line
+        self.mark(line)
         self.type(line)
         time.sleep(.3)
+        self.arm()
         shown = [l for l in self.unwrapped(self.screen()).split('\n') if l.strip()]
         if not shown or not shown[-1].rstrip().endswith(line):
             fail(row, f'keys dropped before Enter: typed {line!r}, the screen shows {shown[-1:]!r}')
@@ -691,6 +705,7 @@ STATE = ['mkdir -p /home/wolf/notes /usr/local/bin',
          'chmod 755 /usr/local/bin/hello',
          'rm /etc/motd',
          # px118: the boot log (user/bootlog) is the machine's own: an upgrade keeps it byte for byte
+         'mkdir -p /var/log',
          "printf '== boot 7, {nonce}\\nprevious: boot 6 completed\\n' >> /var/log/boot.log",
          'cd /home/wolf',
          'export GIT_AUTHOR_NAME=Wolf GIT_AUTHOR_EMAIL=wolf@pax.invalid GIT_COMMITTER_NAME=Wolf GIT_COMMITTER_EMAIL=wolf@pax.invalid TZ=UTC',
@@ -1116,9 +1131,45 @@ def track_a():
     disks()
     result['install_seconds'] = install_from(old, sym_old, 'u1-install', 'U1-install')
     passed('U1-install', f'the old stick installed the target in {result["install_seconds"]} s')
+    run(['cp', '--sparse=always', DISKS/'target.img', work/'u1-target.img'], row='U1-install')
     before, den_before = state(sym_old, 'u2', 'U2-state')
     run(['cp', '--sparse=always', DISKS/'target.img', work/'u2-target.img'], row='U2-state')
     passed('U2-state', f'{len(user_paths(before))} user paths, den log with three commits, /etc/shrc edited, /etc/motd deleted; e2fsck -fn clean')
+    # An independent old install, without U2's user-created /var, must gain the
+    # shipped log directory in the upgrade and write a boot log on first boot.
+    row = 'U-var-log'
+    run(['cp', '--sparse=always', work/'u1-target.img', DISKS/'target.img'], row=row)
+    old_rows, rc, text = tree('u-var-before', row)
+    if rc != 0 or '/var' in old_rows:
+        fail(row, f'old install must have no /var and a clean filesystem: rc={rc}, /var={old_rows.get("/var")}')
+    m = Machine('u-var-upgrade', sym_new, new)
+    try:
+        m.upgrade_entry(row)
+        login(m, row)
+        upgrade(m, row, ['from the baseline 9c88ec8a.manifest'])
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    upgraded, rc, text = tree('u-var-upgraded', row)
+    if rc != 0 or upgraded.get('/var/log', ('',))[0] != 'd':
+        fail(row, f'upgrade did not create /var/log as a directory: rc={rc}, row={upgraded.get("/var/log")}')
+    m = Machine('u-var-boot', sym_new, None)
+    try:
+        screen = login(m, row)
+        need(m.unwrapped(screen), f'kernel: {new_commit}', row)
+        poweroff(m, row)
+    finally:
+        m.kill()
+    check_witnesses(row)
+    booted, rc, text = tree('u-var-booted', row)
+    log_text = tree_text('u-var-booted', '/var/log/boot.log')
+    if rc != 0 or booted.get('/var/log/boot.log', ('',))[0] != 'f' or '== boot ' not in log_text:
+        fail(row, f'new system did not write its boot log: rc={rc}, log={log_text[-400:]!r}')
+    passed(row, 'upgrade created /var/log on an old install without /var; the new system wrote its boot log')
+    run(['cp', '--sparse=always', work/'u2-target.img', DISKS/'target.img'], row=row)
+    if set(ROWS) == {'U1', 'U2', 'UVAR'}:
+        return
     # U0: the new stick's default entry mounts nothing and writes nothing.
     t0 = extents_sha(DISKS/'target.img')
     m = Machine('u0-default', sym_new, new)
