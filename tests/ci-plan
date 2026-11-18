@@ -303,11 +303,18 @@ ROOTDISK = ["mpx3-boreutils", "mpx3-console", "mpx3-shell", "mpx3-threads", "mpx
 # suites; its tools, probes, fixture and recordings are mpx6-ext2's (the
 # probes mpx5-users' too: it reads user/elf).
 expect("P2 the block device and the block layer reach the disk's suites (px63; px66: the partition table's; px67: the root's; px68: the journal's; px79: the nodes'; px69: the disk tools'; px75: NVMe's; px90: den's /home)",
-       plan(["kernel/vblk/vblk.lu", "kernel/block/block.lu"], **pr), "pr", ["mpx5-den", "mpx6-blk", "mpx6-ext2", "mpx6-part", "mpx6-root", "mpx6-journal", "mpx6-nodes", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-nvme", "mpx6-ahci", "mpx6-kasumi"])
+       plan(["kernel/vblk/vblk.lu", "kernel/block/block.lu"], **pr), "pr", ["mpx5-den", "mpx6-blk", "mpx6-ext2", "mpx6-part", "mpx6-root", "mpx6-journal", "mpx6-nodes", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-nvme", "mpx6-ahci", "mpx6-kasumi", "mpx6-ext2-cache"])
 expect("P2 the self-test kernel and its host check are mpx6-blk's (px63; px79: the check is mpx6-nodes' too, its second-disk row's; px75: and mpx6-nvme's, the guest's 1 GiB)",
        plan(["kernel/kmain_blk.lu", "tools/blk-pattern", "tests/mpx6-blk"], **pr), "pr", ["mpx6-blk", "mpx6-nodes", "mpx6-nvme"])
 expect("P2 ext2 and the mount reach mpx6-ext2 and the user suites (px63)",
        plan(["kernel/ext2/ext2.lu", "kernel/fstab/fstab.lu"], **pr), "pr", has=["mpx6-ext2", "mpx3-tree", "mpx5-users"], lacks=["mpx6-blk", "mpx2-heap"])
+# px164: the cache turned over under a write-back mount. kernel/ext2,
+# kernel/fstab and kernel/block reach mpx6-ext2-cache; its rows and probe
+# are its own (the probe mpx5-users' too: it reads user/elf).
+expect("P2 ext2, the mount and the block layer reach mpx6-ext2-cache; its rows and probe are its own (px164)",
+       plan(["kernel/ext2/ext2.lu", "kernel/fstab/fstab.lu", "kernel/block/block.lu"], **pr), "pr", has=["mpx6-ext2-cache", "mpx6-ext2"], lacks=["mpx2-heap"])
+expect("P2 the cache rows' driver and probe select mpx6-ext2-cache (px164)",
+       plan(["tests/mpx6-ext2-cache.d/rows.py", "user/elf/churn.c"], **pr), "pr", has=["mpx6-ext2-cache"], lacks=["mpx6-blk", "mpx2-heap", "mpx4-net"])
 expect("P2 the disk's tools and recordings are mpx6-ext2's (px63; px66: mpx6-part reads mkdisk, e2fs, mkdiskprobe and user/fstab too; px67: mpx6-root all but user/fstab)",
        plan(["tools/e2fs", "tools/mkdisk", "tools/e2tree", "tools/linux-blk", "tools/mkdiskprobe",
              "tests/mpx6-ext2.d/fixture", "tests/mpx6-ext2.d/linux/read.session", "tests/mpx6-ext2.d/disks.sha256",
