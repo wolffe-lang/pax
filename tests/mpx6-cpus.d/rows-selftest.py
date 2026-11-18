@@ -146,6 +146,14 @@ g = green(4)
 g['text'] = g['text'].replace('CPU-USER-GS ok 3 reads\n', '')
 cases.append(('user gs', g, [], {'SMP-ENTER'}, {'SMP-USER-GS'}))
 
+# The probe dies before its lines: the census is red, and so is every row that needs the probe; the
+# register dumps' rows still say what they see.
+g = green(4)
+g['text'] = re.sub(r'CPU-USER-GS.*?CPU-PROC2 end\n', 'user: cpuprobe pid 1 killed: general protection vector 13\n',
+                   g['text'], flags=re.S)
+cases.append(('probe died', g, [], {'SMP-IDLE', 'SMP-SCHED'},
+              {'CPU-CENSUS', 'SMP-ENTER', 'SMP-USER-GS', 'SMP-TICKS', 'SMP-PRIVATE'}))
+
 # nosmp: the application processors stay in the bootloader.
 park = proc(4, 4, aps_state='parked', started=1, idle=0)
 parked_dump = bsp_regs() + ''.join(regs(k, rip=0xffff80000009f000, rsp=0, gs=0, gdt=0, tr=0) for k in range(1, 4))
