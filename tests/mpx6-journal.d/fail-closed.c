@@ -58,7 +58,7 @@ static void x2(const char *tag, const char *path) {
     struct stat st;
     if (statfs(path, &sf) < 0 || stat(path, &st) < 0) { printf("JP %s x2 refused stat errno=%d\n", tag, errno); fflush(stdout); return; }
     if ((unsigned long)sf.f_type != 0xEF53) { printf("JP %s x2 refused type=%lx\n", tag, (unsigned long)sf.f_type); fflush(stdout); return; }
-    char majmin[32], sys[64], link[256], name[128] = "";
+    char majmin[32], sys[64], link[256], name[256] = "";
     snprintf(majmin, sizeof(majmin), "%u:%u", major(st.st_dev), minor(st.st_dev));
     snprintf(sys, sizeof(sys), "/sys/dev/block/%s", majmin);
     ssize_t n = readlink(sys, link, sizeof(link) - 1);
