@@ -2,7 +2,8 @@
 # tests/mpx6-ext2-cache — every change ext2 makes to an inode reaches the
 # disk while the block cache turns over under a write-back mount (px164).
 #
-#   tests/mpx6-ext2-cache [--kernel ELF] [--rows LIST] [--firmware bios|uefi]
+#   tests/mpx6-ext2-cache [--kernel ELF] [--rows LIST] [--firmware bios|uefi|both]
+#                         [--tier native|release|both]
 #
 # kernel/block's cache holds at most 512 buffers (2 MiB of 4 KiB blocks)
 # and, under write-back, never takes back a dirty metadata buffer before
@@ -49,8 +50,12 @@
 #
 # The host's e2fsprogs is the pinned container's (tools/e2fs), or, with
 # PAX_E2FS_NATIVE=1 (a runner already inside a pinned toolchain image),
-# the image's own. Exit 0 when every row held, 1 otherwise, 2 on a usage
-# or tool error.
+# the image's own. Every row runs on each leg asked (tier and firmware,
+# `both` and `both` by default, as the other suites; --kernel names one
+# tier's kernel, built elsewhere), its evidence under
+# build/mpx6-ext2-cache/<rows>/<tier>-<firmware>-<row>/. The UEFI leg needs
+# OVMF (skipped loudly without it unless PAX_REQUIRE_UEFI=1). Exit 0 when
+# every row held, 1 otherwise, 2 on a usage or tool error.
 import argparse
 import hashlib
 import os
@@ -90,6 +95,12 @@ def run(argv, **kw):
     return r.stdout
 
 
+def ovmf():
+    """Whether tools/lib.sh's find_ovmf finds the UEFI firmware."""
+    r = subprocess.run(["bash", "-c", f". {ROOT}/tools/lib.sh && find_ovmf"], capture_output=True, text=True)
+    return r.returncode == 0 and r.stdout.strip() != ""
+
+
 def file_bytes(rel):
     n = 64 + (int(hashlib.sha256(rel.encode()).hexdigest()[:8], 16) % 3937)
     seed = (rel + "\n").encode()
@@ -105,11 +116,13 @@ class Suite:
         shutil.rmtree(self.out, ignore_errors=True)
         self.out.mkdir(parents=True)
         self.failed = 0
+        self.tier = self.fw = ""
         self.paths = [f"/tree/d{d:03d}/f{f:03d}" for d in range(DIRS) for f in range(FILES)]
         self.dirs = ["/tree"] + [f"/tree/d{d:03d}" for d in range(DIRS)]
 
     def row(self, name, ok, why):
-        say(("PASS " if ok else "FAIL ") + name + " " + why)
+        leg = f"({self.tier} {self.fw}) " if self.tier else ""
+        say(("PASS " if ok else "FAIL ") + name + " " + leg + why)
         if not ok:
             self.failed += 1
 
@@ -125,15 +138,18 @@ class Suite:
         if not re.search(r"Type: +EXEC", hdr) or "INTERP" in hdr:
             why.append("churn is not a static ET_EXEC")
         self.probe = probe
-        if self.a.kernel:
-            self.kernel = Path(self.a.kernel)
-        else:
-            kdir = self.out / "kernel"
-            r = subprocess.run([ROOT / "tools/build-kernel", "--src", ROOT / "kernel/kmain_console.lu", kdir],
+        self.kernels = {}
+        for tier in self.a.tiers:
+            if self.a.kernel:
+                self.kernels[tier] = Path(self.a.kernel)
+                continue
+            kdir = self.out / f"kernel-{tier}"
+            flag = ["--release"] if tier == "release" else []
+            r = subprocess.run([ROOT / "tools/build-kernel", *flag, "--src", ROOT / "kernel/kmain_console.lu", kdir],
                                capture_output=True, text=True)
             if r.returncode:
-                die("tools/build-kernel:\n" + r.stderr[-3000:])
-            self.kernel = Path(r.stdout.strip().splitlines()[-1])
+                die(f"tools/build-kernel ({tier}):\n" + r.stderr[-3000:])
+            self.kernels[tier] = Path(r.stdout.strip().splitlines()[-1])
         seed = self.out / "seed"
         for rel in self.paths:
             p = seed / rel.lstrip("/")
@@ -164,13 +180,13 @@ class Suite:
         groups = re.search(r"^Block count:\s+(\d+)", dump, re.M)
         (self.out / "disk.dumpe2fs").write_text(dump)
         self.row("C0", not why, "; ".join(why) if why else
-                 f"churn static, kernel {self.kernel.name}, disk of {len(self.paths)} files in {DIRS} directories, "
+                 f"churn static, kmain_console ({', '.join(self.kernels)}), disk of {len(self.paths)} files in {DIRS} directories, "
                  f"{groups.group(1) if groups else '?'} blocks, clean")
         if why:
             sys.exit(1)
 
     def boot(self, row, run_line):
-        work = self.out / row
+        work = self.out / f"{self.tier}-{self.fw}-{row}"
         work.mkdir()
         (work / "fstab").write_text("/dev/vda /mnt ext2 defaults 0 0\n")
         (work / "pax-run").write_text(run_line + "\n")
@@ -179,14 +195,14 @@ class Suite:
              f"/etc/fstab={work / 'fstab'}:644", f"/etc/pax-run={work / 'pax-run'}:644"])
         iso = work / "boot.iso"
         run([ROOT / "tools/mkimage", "--conf", ROOT / "boot/limine-initramfs.conf", "--add", archive,
-             "initramfs.cpio", self.kernel, iso])
+             "initramfs.cpio", self.kernels[self.tier], iso])
         disk = work / "disk.img"
         r = subprocess.run(["cp", "--sparse=always", self.disk, disk])
         if r.returncode:
             die("cp the disk")
         log = work / "serial.log"
-        r = subprocess.run([ROOT / "tools/qemu-halt", "--firmware", self.a.firmware, "--serial", log,
-                            "--timeout", "900", "--qemu", "-m", "--qemu", "1G", "--elf", self.kernel,
+        r = subprocess.run([ROOT / "tools/qemu-halt", "--firmware", self.fw, "--serial", log,
+                            "--timeout", "900", "--qemu", "-m", "--qemu", "1G", "--elf", self.kernels[self.tier],
                             "--marker", "halt|PANIC .*",
                             "--qemu", "-drive", "--qemu", f"file={disk},if=none,id=d0,format=raw",
                             "--qemu", "-device", "--qemu", "virtio-blk-pci,drive=d0", iso],
@@ -280,19 +296,33 @@ def main():
     p = argparse.ArgumentParser(prog=NAME)
     p.add_argument("--kernel")
     p.add_argument("--rows", default=",".join(ROWS))
-    p.add_argument("--firmware", default="bios", choices=("bios", "uefi"))
+    p.add_argument("--firmware", default="both", choices=("bios", "uefi", "both"))
+    p.add_argument("--tier", default="both", choices=("native", "release", "both"))
     a = p.parse_args()
     rows = a.rows.split(",")
     if any(r not in ROWS for r in rows):
         die(f"--rows takes {','.join(ROWS)}")
+    a.tiers = ["native", "release"] if a.tier == "both" else [a.tier]
+    legs = ["bios", "uefi"] if a.firmware == "both" else [a.firmware]
+    if a.kernel and len(a.tiers) != 1:
+        die("--kernel names one tier's kernel: give --tier too")
     s = Suite(a, rows)
     s.build()
-    for r in rows:
-        if r == "modes":
-            s.modes(r)
-        else:
-            s.scene(r, 48 if r == "pressure" else 0)
-    say(("PASS" if s.failed == 0 else f"FAIL ({s.failed} rows)") + f": {', '.join(rows)}")
+    for fw in legs:
+        if fw == "uefi" and not ovmf():
+            if os.environ.get("PAX_REQUIRE_UEFI") == "1":
+                s.row("C0-uefi", False, "no OVMF firmware and PAX_REQUIRE_UEFI=1")
+            else:
+                say("SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)")
+            continue
+        for tier in a.tiers:
+            s.tier, s.fw = tier, fw
+            for r in rows:
+                if r == "modes":
+                    s.modes(r)
+                else:
+                    s.scene(r, 48 if r == "pressure" else 0)
+    say(("PASS" if s.failed == 0 else f"FAIL ({s.failed} rows)") + f": {', '.join(rows)} on {', '.join(a.tiers)} x {', '.join(legs)}")
     return 1 if s.failed else 0
 
 
