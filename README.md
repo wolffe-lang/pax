@@ -525,7 +525,14 @@ under QEMU, both firmwares.
 ### The guided installer
 
 `pax-install` inventories the real block nodes, shows a read-only plan, names the target by model, serial, size and node,
-and writes only after the word `yes` (anything else cancels). It is an explicit ext2 developer preview, not a journalled installation:
+and writes only after the word `yes` (anything else cancels). The root it formats is ext3, journalled (`data=ordered`, a
+16 MiB journal that PAX replays after a power cut), unless `--ext2-preview` names the ext2 developer preview without a
+journal ([Guided installation](docs/BOOT.md#guided-installation)):
+
+- ext3 is the default in the guided flow, `--dry-run` and `--install`; each profile's plan has its own confirmation
+  token, an ext2 plan's byte for byte the earlier installers', so no ext2 token installs ext3; an ext3 root under
+  64 MiB is refused by name before any write; an existing ext2 install is never converted, and its upgrade keeps
+  `limine.conf` and `/etc/fstab` as they were;
 
 - whole-disk fresh installs only, 512-byte sectors, root volumes up to 16 TiB less one 4 KiB block;
   larger targets keep that root size and name the remaining space as unused in the plan;
