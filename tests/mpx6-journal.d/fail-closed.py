@@ -95,6 +95,28 @@ def file_blocks(path, name):
     raise RuntimeError("fixture file not found: " + name.decode())
 
 
+def journal_block(path, j):
+    """The volume block of journal block `j` in the 4 KiB fixture (inode 8's map:
+    direct, single and double indirect)."""
+    sb = at(path, 1024, 1024)
+    per_group = struct.unpack_from("<I", sb, 40)[0]
+    isize = struct.unpack_from("<H", sb, 88)[0]
+    group, index = divmod(8 - 1, per_group)
+    table = struct.unpack_from("<I", at(path, 4096 + group * 32, 32), 8)[0]
+    blocks = struct.unpack_from("<15I", at(path, table * 4096 + index * isize, isize), 40)
+    per = 4096 // 4
+    if j < 12:
+        return blocks[j]
+    j -= 12
+    if j < per:
+        return struct.unpack_from("<I", at(path, blocks[12] * 4096 + j * 4, 4))[0]
+    j -= per
+    if j < per * per:
+        mid = struct.unpack_from("<I", at(path, blocks[13] * 4096 + (j // per) * 4, 4))[0]
+        return struct.unpack_from("<I", at(path, mid * 4096 + (j % per) * 4, 4))[0]
+    raise RuntimeError("journal block past the double-indirect map")
+
+
 def value(text, name):
     m = re.search(r"^JF " + re.escape(name) + r" rc=(-?\d+) errno=(\d+)$", text, re.M)
     return tuple(map(int, m.groups())) if m else None
@@ -489,6 +511,52 @@ class Rows:
                  and sha(disk) == before and not any(e[0] == "write" for e in self.requests("no-flush-replay")),
                  "even a read-only mount refuses needed replay without a barrier, before home or journal writes")
 
+    def start_range(self):
+        # pax#419: a nonzero s_start must name a block of the log, [s_first, s_maxlen).
+        # Each case edits only the journal superblock (and zeroes the block it names, as
+        # a fresh log leaves it): a start outside the log is refused by name, read-write
+        # or read-only, with no write at all, so the log is kept for an offline check.
+        # The control starts at the log's last block, s_maxlen - 1: in range, nothing to replay.
+        cases = (("JF-start-past-log", "refuse", "past-log"),
+                 ("JF-start-past-log-ro", "ro-replay-refuse", "past-log"),
+                 ("JF-start-before-log", "refuse", "before-log"),
+                 ("JF-start-past-inode", "refuse", "past-inode"),
+                 ("JF-start-last-control", "control", "last"))
+        for name, case, how in cases:
+            disk = self.image(name)
+            sb = journal_block(disk, 0) * 4096
+            maxlen, first = struct.unpack(">II", at(disk, sb + 0x10, 8))
+            inode_blocks = maxlen
+            if how == "past-log":
+                maxlen -= 96
+                start = maxlen
+            elif how == "before-log":
+                first += 1
+                start = first - 1
+            elif how == "past-inode":
+                start = maxlen
+            else:
+                start = maxlen - 1
+            put(disk, sb + 0x10, struct.pack(">II", maxlen, first))
+            put(disk, sb + 0x1c, struct.pack(">I", start))
+            if start < inode_blocks:
+                put(disk, journal_block(disk, start) * 4096, bytes(4096))
+            before = sha(disk)
+            text = self.boot(name, disk, case)
+            writes = [e for e in self.requests(name) if e[0] == "write"]
+            check = process(["e2fsck", "-fn", str(disk)], capture_output=True, text=True)
+            (self.out / (name + ".fsck.txt")).write_text(check.stdout + check.stderr)
+            if how == "last":
+                after = struct.unpack(">I", at(disk, sb + 0x1c, 4))[0]
+                self.row(name, value(text, "mount") == (0, 0) and value(text, "unmount") == (0, 0)
+                         and after == 0 and check.returncode == 0,
+                         f"s_start {start}, the log's last block (s_maxlen {maxlen}): nothing to replay, mounts, fsck clean")
+                continue
+            print(f"INFO {name} e2fsck -fn exit {check.returncode} on the image after the boot", flush=True)
+            self.row(name, value(text, "mount") == (-1, 22) and sha(disk) == before and not writes
+                     and "s_start is outside its log" in text,
+                     f"s_start {start} outside [s_first {first}, s_maxlen {maxlen}): refused by name, nothing written, the log kept")
+
     def late_layout(self, kind):
         """A healthy write-through late operation: the write ordinal of its
         superblock write and the backing-flush ordinal of the barrier after it."""
@@ -827,6 +895,9 @@ class Rows:
         if self.a.only == "plain":
             self.plain()
             return 1 if self.failed else 0
+        if self.a.only == "start":
+            self.start_range()
+            return 1 if self.failed else 0
         if self.a.only == "late":
             self.late()
             self.overwrite()
@@ -857,6 +928,7 @@ class Rows:
         self.refusal("JF-users", 64, struct.pack(">I", 2), words="not private to one filesystem")
         self.refusal("JF-external-uuid", 0xd0, b"X" * 16, words="external journal UUID", filesystem=True)
         self.refusal("JF-external-device", 0xe4, struct.pack("<I", 1), words="external journal device", filesystem=True)
+        self.start_range()
         self.no_flush()
         self.mount_barrier()
         self.mount_state("write")
@@ -890,7 +962,7 @@ if __name__ == "__main__":
     p.add_argument("--guard-kernel", type=Path)
     p.add_argument("--firmware", choices=("bios", "uefi"), default="bios")
     p.add_argument("--large", action="store_true")
-    p.add_argument("--only", choices=("large", "plain", "no-flush", "boundaries", "late"))
+    p.add_argument("--only", choices=("large", "plain", "no-flush", "boundaries", "late", "start"))
     p.add_argument("out", type=Path)
     args = p.parse_args()
     try:
