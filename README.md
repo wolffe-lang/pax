@@ -829,9 +829,12 @@ The console supports:
   bytes when it cannot be read); unplugging one releases its buttons. Their events go into a bounded queue for each
   reader, which never drops a button press or release while it can merge motion instead; `/dev/mouse0` shows it
   as fixed 32-byte records (`notes/px109-the-mouse.md`, "The record"). (px117) The console draws a pointer, an
-  arrow over a cell, from the first motion, and types xterm's SGR reports of button-event tracking (`CSI ? 1002 h`
-  with `CSI ? 1006 h`: press, release, drag, the wheel, Shift, Alt and Ctrl) for the program that set the modes,
-  while it is in the foreground; the modes end with it (`notes/px117-the-pointer.md`).
+  arrow over a cell, from the first motion, and types xterm's SGR reports (`CSI ? 1006 h`) with normal tracking
+  (`1000`: clicks and the wheel), button-event tracking (`1002`: held-button motion too), or all-motion tracking
+  (`1003`: buttonless motion too), including Shift, Alt and Ctrl, for the program that set the modes,
+  while it is in the foreground; the modes end with it (`notes/px117-the-pointer.md`). Bare left Alt with Left/Right
+  gives applications `ESC [ 1 ; 3 D` / `ESC [ 1 ; 3 C`, so word jumps work as over a modern terminal. PAX has no VT
+  switch behind those chords. Alt with a function key remains silent.
   `usbraw` on the kernel's command line logs each pointer's descriptors and every report's bytes; `hidboot` reads
   every boot mouse by the boot protocol.
 

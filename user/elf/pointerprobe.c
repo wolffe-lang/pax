@@ -2,7 +2,8 @@
  * mouse reports it types. No terminal emulator's, kernel's or C library's
  * source was consulted. The modes and the report encoding are read only as
  * the XTerm Control Sequences document gives them ("Mouse Tracking":
- * button-event tracking, 1002; SGR, 1006); the program prints every byte it
+ * normal tracking 1000, button-event tracking 1002, all-motion 1003;
+ * SGR encoding 1006); the program prints every byte it
  * reads as hex, so tools/pointer-session judges them by the document
  * independently of this program. Results go to stdout (the console).
  *
@@ -35,7 +36,8 @@
  *   unserved          1002 alone (0); 1006 alone (1); 1000 with 1006 (2);
  *                     1003 with 1006 (3); 9 with 1006 (4); 1006 then 1002
  *                     (5); then DECRST 1000, not the selected one (6);
- *                     then 1005 in 1006's place (7)
+ *                     then 1005 in 1006's place (7); steps 2, 3, 5 and 6
+ *                     must report clicks, the rest must remain silent
  *   owner-exits       the probe's own mode (0); a child's that exits
  *                     without resetting it (1); a child's killed by
  *                     SIGKILL (2); the probe's own again (3)
@@ -43,12 +45,18 @@
  *                     the probe in the foreground (0); that child given the
  *                     foreground, reading (1); after it ended (2); the
  *                     probe's own (3)
+ *   tracking-modes    1000 clicks only (0), 1002 held motion (1), 1003
+ *                     held and buttonless motion (2), all in SGR 1006
+ *   alt-arrows        Alt+Left/Right, then Alt+F1 and Ctrl+Alt+F1 (still
+ *                     silent), then the Linux-console F1-F5 byte spellings
  *   keys-interleaved  clicks, the wheel and keys 20 ms apart on the USB
  *                     keyboard (0); 3 ms apart on the PS/2 keyboard (1)
  *   pty               a child on a pty's slave sets the modes there; the
  *                     master's bytes printed; a click on the console (0);
  *                     a report the master writes, read on the slave; then
  *                     the probe's own mode (1)
+ *   alt-arrows-ps2    the same Alt-arrow and function-key census after
+ *                     keys-interleaved unplugged the USB keyboard
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -67,11 +75,11 @@
 static const char *labels[] = {
     "pointer-drawn", "pointer-scroll", "no-mode", "sgr-buttons", "drag", "wheel",
     "modifiers", "relative", "reset", "unserved", "owner-exits", "owner-background",
-    "keys-interleaved", "pty"
+    "tracking-modes", "alt-arrows", "keys-interleaved", "pty", "alt-arrows-ps2"
 };
 enum {
     DRAWN, SCROLL, NOMODE, BUTTONS, DRAG, WHEEL, MODS, REL, RESET, UNSERVED,
-    EXITS, BACKGROUND, KEYS, PTY, ROWS
+    EXITS, BACKGROUND, TRACKING, ALT, KEYS, PTY, ALT_PS2, ROWS
 };
 
 #define ON "\033[?1002h\033[?1006h"
@@ -310,6 +318,15 @@ int main(void) {
             break;
         case BACKGROUND:
             row_background(row);
+            break;
+        case TRACKING:
+            own(row, 0, ALLOFF "\033[?1000h\033[?1006h");
+            own(row, 1, ALLOFF "\033[?1002h\033[?1006h");
+            own(row, 2, ALLOFF "\033[?1003h\033[?1006h");
+            out(1, ALLOFF);
+            break;
+        case ALT: case ALT_PS2:
+            own(row, 0, ALLOFF);
             break;
         case KEYS:
             own(row, 0, ON);

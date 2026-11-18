@@ -2626,3 +2626,16 @@ No init's, login's, util-linux's or any kernel's source was read, and no C libra
   `tests/mpx5-burrowd.d/rows.py` (the trees' installed shape).
 - Black-box: the shell as pid 1 on a trunk image, which leaves an orphan that ended as a zombie whose parent is 1,
   and runs the hooks, `pax-boot-status record` and sudo's emptying again at `exec /bin/login` (the rows' red take).
+
+## Console application input
+
+No other operating system's implementation source was read. The Linux VT's saved keyboard rows remain unchanged;
+bare Alt+Left/Right intentionally use xterm's application encoding instead of reserving an unimplemented VT switch.
+Alt+Fn is unchanged.
+
+| source | version | read, for |
+|---|---|---|
+| XTerm Control Sequences, Mouse Tracking and SGR mouse encoding | the documented 1000, 1002, 1003 and 1006 modes | clicks, held-button motion, buttonless motion as Cb 35, modifier bits, 1-based coordinates and releases |
+| QEMU QMP `query-qmp-schema` and `input-send-event` | QEMU 8.2.2, queried without a guest | resolve the QKeyCode enum through command argument references; save its schema for the off-boot regression; send uppercase text as Shift plus lowercase QKeyCode events |
+| PAX's own `kernel/console`, `kernel/screen`, `kernel/files` and yew's input decoder, mouse routing and context-menu geometry | the projects' own code | the tracking-mode handoff, foreground ownership, event bytes, menu hit tests and the absence of a VT-switch action |
+| Console pointer and keyboard probes under QEMU | captured before and after the change | exact SGR bytes for the three tracking modes, ownership and foreground guards, Alt-arrow bytes, unchanged Alt+Fn and F1–F5; a real yew menu's hover and click frames |
