@@ -252,7 +252,13 @@ if used and 'INSTALL-EXIT-0' not in s:
     why=[l.strip() for l in s.replace('\r','').splitlines() if 'pax-install:' in l or 'error: ' in l or 'recognised filesystem' in l or 'Install failed' in l]
     print(f'FAIL I-used-{used}: the install onto the used disk stopped: '+' | '.join(why)[-3000:],flush=True)
     sys.exit(1)
-assert 'INSTALL-EXIT-0' in s,('FAIL I-boot-files' if 'phase verify-boot-' in s else 'FAIL I-install')+'\n'+s[-18000:]
+if 'INSTALL-EXIT-0' not in s:
+    # px162: the failed install's row at column 0, with the installer's own words (a plant's red names it)
+    flat=s.replace('\r','')
+    said=[l.strip() for l in flat.splitlines() if 'pax-install:' in l or ('phase ' in l and 'failed' in l)]
+    print(('FAIL I-boot-files' if 'phase verify-boot-' in s else f'FAIL I-install-{games}-{name}')+': '+' | '.join(said)[-2000:],flush=True)
+    print(flat[-18000:],flush=True)
+    sys.exit(1)
 assert sha(work/'source-guard.img')==guard
 # px88 (pax#248): the two peak lines read getrusage's ru_maxrss, RUSAGE_SELF
 # and RUSAGE_CHILDREN, in KiB: more than 1 MiB and less than the guest's
