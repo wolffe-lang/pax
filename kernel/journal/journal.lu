@@ -79,7 +79,10 @@
 //! at or after the tag's names it (e2fsck's rule, measured: a block
 //! revoked in its own transaction is not replayed either), unescaped.
 //! Then a FLUSH, and the superblock with s_start 0 and s_sequence one past
-//! the end's (as e2fsck leaves it), FLUSHed.
+//! the end's (as e2fsck leaves it), FLUSHed. A nonzero s_start outside the
+//! log, [s_first, s_maxlen), is refused at `load` (R_START, pax#419): its
+//! walk would read a block no transaction wrote, find no magic, and empty
+//! the log as if it held nothing.
 //!
 //! One CPU, IF clear for the whole of every call; no region, no heap: the
 //! records are one frame's words, the rest frames this module takes once
@@ -152,6 +155,9 @@ pub const R_ABORTED: u64 = 11
 pub const R_VERSION: u64 = 12
 /// The internal journal is not private to one filesystem.
 pub const R_USERS: u64 = 13
+/// A nonzero `s_start` outside the log, [s_first, s_maxlen) (pax#419;
+/// the value: `refused_bits`).
+pub const R_START: u64 = 14
 
 // A record's words.
 const J_USED: u64 = 0
@@ -522,6 +528,15 @@ pub fn load(v: u64, dev: u64, bs: u64, nblocks: u64, uuid0: u64, uuid1: u64) -> 
     let first = be32(a + 0x14)
     if maxlen > nblocks || first == 0 || first >= maxlen {
         return R_LEN
+    }
+    // pax#419: the log the replay walks is [s_first, s_maxlen). A start
+    // outside it names a block the log never wrote (inode 8's blocks past
+    // s_maxlen, the ones before s_first, or none at all): refused here,
+    // before any barrier or replay, so the log is kept as found.
+    let start = be32(a + 0x1c)
+    if start != 0 && (start < first || start >= maxlen) {
+        put_jw(v, J_BAD, start)
+        return R_START
     }
     if t != T_SB2 { return R_VERSION }
     if be32(a + 0x20) != 0 { return R_ABORTED }
