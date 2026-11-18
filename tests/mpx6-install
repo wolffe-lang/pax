@@ -138,17 +138,23 @@ rm -rf "$work/asuser" "$work/asuser-su"
 "$PAX_ROOT/tools/mksu" "$work/asuser-su" > "$work/asuser-su.log"
 python3 -I "$D/asuser.py" "$PAX_ROOT" "$work/asuser" "$inputs/build/install-gate/bin" "$inputs/build/full" "$work/asuser-su" "$(cat "$inputs/build/disktools/$first.elf.path")"
 # Both decisions and a different target name are unconditional smoke rows.
+# px162: `no` onto vdb is ext2, named (--ext2-preview, the token every earlier
+# installer took: the root-nvme and upgrade rows stay on it); `yes` onto vdc is
+# the default, ext3, cut by power mid-write and replayed (powercut.py).
 for game in no yes; do
     target=vdb; [ "$game" != yes ] || target=vdc
+    profile=ext2; [ "$game" != yes ] || profile=ext3
     casework=$work/$game
-    python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" "$game" "$target"
+    PAX_INSTALL_PROFILE=$profile python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" "$game" "$target"
     python3 -I "$D/verify.py" "$PAX_ROOT" "$casework" "$game" "$target"
     python3 -I "$D/gap.py" "$casework" "$inputs/build/disktools/limine/limine"
     python3 -I "$D/session.py" "$casework" bios "$casework/log-last.img"
+    [ "$profile" != ext3 ] || python3 -I "$D/powercut.py" "$casework" bios "$casework/log-last.img"
 done
 # px78: the running root refused when the allow-list names it, on NVMe.
 python3 -I "$D/root-nvme.py" "$work/no" "$work/no/log-last.img"
-for fault in cancel cancel-words wrong-token readonly 4kn missing-boot corrupt-boot missing-tool gpt fat root limine invalid-manifest enospc; do
+for fault in cancel cancel-words wrong-token readonly 4kn missing-boot corrupt-boot missing-tool gpt fat root limine invalid-manifest enospc \
+        ext3-small-dryrun ext3-small-install ext3-small-guided; do
     PAX_INSTALL_FAULT=$fault python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$work/fault-$fault" no vdb
 done
 # px86: a used target, as the 860 came to it (tools/used-disk): an old GPT
@@ -172,7 +178,10 @@ if [ "$rows" = full ]; then
             PAX_INSTALL_GUIDED=1 PAX_INSTALL_TIER=$t PAX_INSTALL_FIRMWARE=$fw python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" yes vdc full
             python3 -I "$D/verify.py" "$PAX_ROOT" "$casework" yes vdc
             python3 -I "$D/gap.py" "$casework" "$inputs/build/disktools/limine/limine"
-            for boot in bios uefi; do python3 -I "$D/session.py" "$casework" "$boot" "$casework/log-last.img"; done
+            for boot in bios uefi; do
+                python3 -I "$D/session.py" "$casework" "$boot" "$casework/log-last.img"
+                python3 -I "$D/powercut.py" "$casework" "$boot" "$casework/log-last.img"
+            done
         done
     done
 fi
