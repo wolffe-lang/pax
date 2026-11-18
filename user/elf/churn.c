@@ -17,8 +17,10 @@
                         for, and sync(2) is called. With HOLD (MiB), the
                         parent first takes and touches anonymous memory until
                         /proc/meminfo's MemFree is at most HOLD MiB, and keeps
-                        it to the end (the cache cannot grow past what it
-                        holds then). Prints `scene: walked F files, D
+                        it to the end (memory pressure beside the walk; the
+                        appender is forked first, since a fork copies the
+                        address space). Prints
+                        `scene: walked F files, D
                         directories, B bytes in MS ms`, `scene: appended N
                         lines`, `scene: held K MiB, MemFree M kB` and `scene:
                         end`.
@@ -156,6 +158,10 @@ static long mem_free_kb(void) {
 static int scene(const char *tree, const char *log, long secs, long hold) {
     long long t0 = now_ms();
     long held = 0;
+    fflush(stdout);
+    pid_t kid = fork(); /* first: a fork copies the address space, the memory held too */
+    if (kid < 0) return fail("fork");
+    if (kid == 0) _exit(appender(log));
     if (hold > 0) {
         long kb;
         while ((kb = mem_free_kb()) > hold * 1024) {
@@ -167,10 +173,6 @@ static int scene(const char *tree, const char *log, long secs, long hold) {
         printf("scene: held %ld MiB, MemFree %ld kB\n", held, mem_free_kb());
         fflush(stdout);
     }
-    fflush(stdout);
-    pid_t kid = fork();
-    if (kid < 0) return fail("fork");
-    if (kid == 0) _exit(appender(log));
     long long w0 = now_ms();
     if (walk(tree, 0) != 0) {
         kill(kid, SIGTERM);
