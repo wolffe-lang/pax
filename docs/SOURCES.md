@@ -15,7 +15,7 @@
   No other package manager's, kernel's, libc's, archiver's, compressor's,
   TLS library's or HTTP library's implementation was read.
 
-The clean-room rule (`CLAUDE.md`) requires this log. Every lane adds its
+The clean-room rule requires this log. Every lane adds its
 entries: what it consulted, at which version, for which file, and how
 (read, black-box run, or the author's own knowledge with no text copied).
 **Linux kernel source is never an entry**: the allowed Linux material is the
