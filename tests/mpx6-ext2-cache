@@ -33,7 +33,7 @@
 #             are made once and kept);
 #   modes     `churn modes /mnt/tree 600`: chmod(2) of every file, one change
 #             to one inode each, then sync(2).
-# Rows (each boot's, named by its row):
+# Rows (each boot's, named by its boot: C2-scene, C3-modes, …):
 #   C0 build: the probe static, the kernel, the image, the disk clean
 #      (e2fsck -fn) before any boot.
 #   C1 the boot: the probe's `end` line, `PAX: init /bin/churn ended with
@@ -191,7 +191,9 @@ class Suite:
                             "--qemu", "-device", "--qemu", "virtio-blk-pci,drive=d0", iso],
                            capture_output=True, text=True)
         (work / "qemu-halt.txt").write_text(r.stdout + r.stderr)
-        text = log.read_text(errors="replace").replace("\r", "") if log.exists() else ""
+        text = log.read_text(errors="replace") if log.exists() else ""
+        # tools/lib.sh's serial_norm: the terminal's escapes and CRs out
+        text = re.sub(r"\x1b\[[0-9;?=<>]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[c78DEHM=>]|\r", "", text)
         return disk, text, r.returncode
 
     def stats(self, disk, paths):
@@ -219,7 +221,7 @@ class Suite:
         self.common(row, text, rc, "scene: end")
         lost = [(p, s[0]) for p, s, b in zip(self.paths + self.dirs, self.stats(disk, self.paths + self.dirs), self.before)
                 if s[2] == b[2]]
-        self.row("C3", not lost, f"{row}: " + (f"{len(lost)} of {len(self.paths) + len(self.dirs)} inodes kept the "
+        self.row(f"C3-{row}", not lost, (f"{len(lost)} of {len(self.paths) + len(self.dirs)} inodes kept the "
                  f"old access time: " + ", ".join(f"{p} (inode {i})" for p, i in lost[:6]) if lost else
                  f"every one of {len(self.paths)} files' and {len(self.dirs)} directories' access times moved"))
         m = re.search(r"^scene: appended (\d+) lines$", text, re.M)
@@ -229,11 +231,11 @@ class Suite:
         want = "".join(f"line {k:08d}\n" for k in range(n)).encode() if n >= 0 else None
         have = got.read_bytes() if got.exists() else b""
         if want is not None and have == want:
-            self.row("C4", True, f"{row}: /log/app.log holds the {n} lines appended, in order")
+            self.row(f"C4-{row}", True, f"/log/app.log holds the {n} lines appended, in order")
         else:
             lines = have.decode(errors="replace").splitlines()
             gaps = [k for k, l in enumerate(lines) if l != f"line {k:08d}"][:3]
-            self.row("C4", False, f"{row}: /log/app.log has {len(have)} bytes, {len(lines)} lines, the probe "
+            self.row(f"C4-{row}", False, f"/log/app.log has {len(have)} bytes, {len(lines)} lines, the probe "
                      f"appended {n}; first out of place at {gaps}")
         self.fsck(row, disk)
 
@@ -241,7 +243,7 @@ class Suite:
         disk, text, rc = self.boot(row, "/bin/churn modes /mnt/tree 600")
         self.common(row, text, rc, "modes: end")
         lost = [(p, s[0], s[1]) for p, s in zip(self.paths, self.stats(disk, self.paths)) if s[1] & 0o7777 != 0o600]
-        self.row("C3", not lost, f"{row}: " + (f"{len(lost)} of {len(self.paths)} files kept another mode: " +
+        self.row(f"C3-{row}", not lost, (f"{len(lost)} of {len(self.paths)} files kept another mode: " +
                  ", ".join(f"{p} (inode {i}, {m & 0o7777:04o})" for p, i, m in lost[:6]) if lost else
                  f"every one of {len(self.paths)} files is 0600"))
         self.fsck(row, disk)
@@ -257,18 +259,18 @@ class Suite:
         if re.search(r"^PANIC ", text, re.M):
             why.append("PANIC")
         books = re.search(r"^block: vda: .*$", text, re.M)
-        self.row("C1", not why, f"{row}: " + ("; ".join(why) if why else "the probe ended, init 0, halted") +
+        self.row(f"C1-{row}", not why, ("; ".join(why) if why else "the probe ended, init 0, halted") +
                  (f"; {books.group(0)}" if books else ""))
         faults = re.findall(r"^ext2: vda: [a-z].*$", text, re.M)
         early = re.findall(r"^block: the cache is full of metadata.*$", text, re.M)
-        self.row("C2", not faults, f"{row}: " + (" | ".join(faults[:4]) if faults else "no ext2 fault line") +
+        self.row(f"C2-{row}", not faults, (" | ".join(faults[:4]) if faults else "no ext2 fault line") +
                  (f" (and: {early[0]})" if early else ""))
 
     def fsck(self, row, disk):
         r = process(["e2fsck", "-fn", disk], capture_output=True, text=True)
         (disk.parent / "e2fsck.txt").write_text(r.stdout + r.stderr)
         body = [l for l in r.stdout.splitlines() if not l.startswith(("e2fsck ", "Pass "))]
-        self.row("C5", r.returncode == 0, f"{row}: e2fsck -fn " + ("clean" if r.returncode == 0 else
+        self.row(f"C5-{row}", r.returncode == 0, f"e2fsck -fn " + ("clean" if r.returncode == 0 else
                  f"exit {r.returncode}: " + " | ".join(body[:8])))
         disk.unlink()
 
