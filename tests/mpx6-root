@@ -16,7 +16,7 @@
 #
 # The programs, static and unmodified: user/elf/mounts.c (the probe:
 # tools/mkrootprobe) and user/elf/reboot.S (/bin/reboot,
-# tools/mkdiskprobe). Four archives (tools/mkinitramfs; /etc/fstab
+# tools/mkdiskprobe). Seven archives (tools/mkinitramfs; /etc/fstab
 # names `/` and a tmpfs /tmp: user/fstab-root, the playground's), each installed
 # as partition 2 of a GPT disk of its own by `tools/mkdisk --gpt --root`
 # (128 MiB: the ESP with Limine and the kernel and no initramfs,
@@ -29,6 +29,13 @@
 #           written, reboot(2) to restart; the second boot reads them;
 #   linger  `linger`: two daemons left when init ends (one ignoring
 #           SIGTERM); and `linger restart`, the same with reboot(2);
+#   late    `linger restart late 5` (px160, pax#472): beside linger's
+#           two, a daemon whose SIGTERM is five synced writes and then
+#           a synced line in /late.txt; booted with QEMU holding the
+#           disk to two writes a second (`-set
+#           drive.d0.throttling.iops-write=2`), so its writes outlast
+#           the 2000 ms grace by the clock; and `latebound`, the same
+#           with 20 writes, past the end's 30 s bound;
 #   cut     `table`, then `linger`: QEMU is killed after the table.
 #
 # Rows, per tier and firmware (--rows pr, CI's pr tier, PAX_ROOT_ROWS:
@@ -70,14 +77,27 @@
 #       once (R-px67-5, as Linux does: measured), and its clean end
 #       leaves it not clean still.
 #   R9  the end: init ended, its daemons are sent SIGTERM, one ends, the
-#       other is sent SIGKILL after the grace (R-px67-4); halted, clean;
-#       and with reboot(2) (`linger restart`): every process ended, the
-#       reboot(2) line, the reset, clean between.
+#       other is sent SIGKILL after the grace (R-px67-4), named by the
+#       `PAX: SIGKILL at the end:` line (px160); halted, clean; and with
+#       reboot(2) (`linger restart`): every process ended, the reboot(2)
+#       line, the reset, clean between.
 #   R10 the ISO way: the main archive on an ISO with no `root=` and the
 #       same disk beside it: no `root:` line, `/` the initramfs's
 #       (`rootfs` in the table), the volume at /mnt by mount(2).
 #   R11 each boot: `block: vda: … 0 errors`, halted or reset as it
 #       should, no PANIC.
+#   R12 px160 (pax#472): the end waits out a daemon's writes on a slow
+#       disk. `late` boots with the disk held to two writes a second; at
+#       reboot(2) the late daemon's five synced writes take longer than
+#       the grace by the clock, in stretches with interrupts off (the
+#       disk is polled), which the grace does not count: /late.txt is on
+#       partition 2 after the reset, its line says the writes took more
+#       than 2000 ms; only linger's SIGTERM-ignoring daemon is named by
+#       `PAX: SIGKILL at the end:`; one SIGKILL after the grace; clean.
+#   R13 px160: the end's bound. `latebound`'s 20 writes outlast the end's
+#       30000 ms bound: SIGKILL then, the line names the late daemon and
+#       the SIGTERM-ignoring one and says the bound sent it, /late.txt is
+#       not on the disk, partition 2 clean and e2fsck -fn clean.
 #
 # --fstype ext2 is px69's explicit non-journalled root leg. It uses its
 # own Linux recording, keeps R8e, and says SKIP for journal-only R8.
@@ -231,13 +251,15 @@ if [ -z "$images" ]; then
     r=$(static_ok "$work/bin/mounts") || why+=" $r;"
     sed 's/^/  program: /' "$work/probes.txt" >&2
     printf 'px67: /etc/motd as the archive made it\n' > "$work/motd"
-    for img in main twice linger lingerboot cut; do
+    for img in main twice linger lingerboot cut late latebound; do
         case $img in
             main)       printf '/bin/mounts table\n/bin/mounts root\n/bin/mounts calls /dev/vda4 /mnt\n/bin/mounts user 1000 /dev/vda4 /mnt\n/bin/mounts table\n' ;;
             twice)      printf '/bin/mounts twice /etc/px67-booted\n' ;;
             linger)     printf '/bin/mounts linger\n' ;;
             lingerboot) printf '/bin/mounts linger restart\n' ;;
             cut)        printf '/bin/mounts table\n/bin/mounts linger\n' ;;
+            late)       printf '/bin/mounts linger restart late 5\n' ;;
+            latebound)  printf '/bin/mounts linger restart late 20\n' ;;
         esac > "$work/$img.run"
         "$PAX_ROOT/tools/mkinitramfs" "$work/$img.cpio" /bin/mounts="$work/bin/mounts":755 /bin/reboot="$work/bin/reboot":755 \
             /etc/motd="$work/motd":644 /etc/fstab="$PAX_ROOT/user/fstab-root":644 /etc/pax-run="$work/$img.run":644 /etc/mtab-\>../proc/self/mounts \
@@ -258,7 +280,7 @@ if [ -z "$images" ]; then
         fi
     done
     if [ "$only" = build ]; then
-        [ -z "$why" ] && say "PASS R0 (build): the probe static, kmain_console built ($tiers), five archives (the disks are made where the boots run)" || bad "R0 (build):$why"
+        [ -z "$why" ] && say "PASS R0 (build): the probe static, kmain_console built ($tiers), seven archives (the disks are made where the boots run)" || bad "R0 (build):$why"
         exit "$fail"
     fi
     if [ "$(uname -s)" != Linux ]; then
@@ -300,13 +322,14 @@ halt_boot() { # tier leg what disk [qemu-halt args]
 }
 
 # A boot that ends by the reset (qemu-run, -no-reboot: QEMU's status 0).
-reset_boot() { # tier leg what disk
-    local rc=0
-    log=$PAX_BUILD/mpx6-root-$1-$2-$3.serial.log
+# px160: further arguments are QEMU's (R12's throttle).
+reset_boot() { # tier leg what disk [qemu args]
+    local rc=0 t=$1 l=$2 w=$3 dk=$4; shift 4
+    log=$PAX_BUILD/mpx6-root-$t-$l-$w.serial.log
     rm -f "$log" "$log.verdict" "$log.norm"
-    "$PAX_ROOT/tools/qemu-run" --firmware "$2" --serial "$log" --timeout 300 --boot-disk "$4" -- -m 512M > "$log.verdict" 2>&1 || rc=$?
+    "$PAX_ROOT/tools/qemu-run" --firmware "$l" --serial "$log" --timeout 300 --boot-disk "$dk" -- -m 512M "$@" > "$log.verdict" 2>&1 || rc=$?
     norm_log
-    record_run "$1" "$2" "$3" "$rc"
+    record_run "$t" "$l" "$w" "$rc"
     return "$rc"
 }
 
@@ -375,11 +398,11 @@ for leg in $legs; do
         dk=$images/$tier/disks
         mkdir -p "$dk"
         why=
-        for img in main twice linger lingerboot cut; do
+        for img in main twice linger lingerboot cut late latebound; do
             [ -f "$dk/$img.img" ] || make_disk "$dk/$img.img" "$images/$img.cpio" "$PAX_ROOT/boot/limine-initramfs.conf" "px67-$img" \
                 || why+=" mkdisk $img: $(tail -n 2 "$dk/$img.img.mkdisk.txt" | tr '\n' '|');"
         done
-        [ -z "$why" ] && say "PASS R0 $tier disks: five, each $(sed -n 's/^mkdisk: \(root=PARTUUID=\).*/\1…/p' "$dk/main.img.mkdisk.txt") ($(sha256_of "$dk/main.img" | cut -c1-12)… the main one)" || { bad "R0 $tier disks:$why"; continue; }
+        [ -z "$why" ] && say "PASS R0 $tier disks: seven, each $(sed -n 's/^mkdisk: \(root=PARTUUID=\).*/\1…/p' "$dk/main.img.mkdisk.txt") ($(sha256_of "$dk/main.img" | cut -c1-12)… the main one)" || { bad "R0 $tier disks:$why"; continue; }
         id="$tier $leg"
 
         # --- the main boot: R1 (its spelling), R2, R3, R6, R7, R11 ------------------
@@ -489,9 +512,11 @@ for leg in $legs; do
         why=
         sgrep -Eq '^user: mounts pid [0-9]+ killed: SIGTERM after [0-9]+ runs$' || why+=" no daemon ended by SIGTERM;"
         sgrep -Eq '^user: mounts pid [0-9]+ killed: SIGKILL after [0-9]+ runs$' || why+=" no daemon ended by SIGKILL;"
-        sgrep -Eq '^PAX: the end: SIGTERM to 2 processes, 1 ended within [0-9]+ ms; SIGKILL to 1 after the 2000 ms grace$' || why+=" $(sgrep -m1 '^PAX: the end' || echo 'no end line');"
+        sgrep -Eq '^PAX: the end: SIGTERM to 2 processes, 1 ended within [0-9]+ ms; SIGKILL to 1 after the 2000 ms grace$' || why+=" $(sgrep -m1 '^PAX: the end:' || echo 'no end line');"
+        ig=$(sed -n 's/^linger 1: pid \([0-9]*\), SIGTERM ignored$/\1/p' "$log.norm" | head -n 1)
+        sgrep -Eq "^PAX: SIGKILL at the end: mounts pid ${ig:-none} \(the 2000 ms grace ran in [0-9]+ ms\)\$" || why+=" no SIGKILL line naming mounts pid ${ig:-?} ($(sgrep -m1 '^PAX: SIGKILL at the end' || echo none));"
         [ "$(state_of "$disk" 2)" = "clean 1" ] || why+=" partition 2 '$(state_of "$disk" 2)';"
-        [ -z "$why" ] && say "PASS R9 $id: init ended; '$(sgrep -m1 '^PAX: the end')'; halted, / clean" || bad "R9 $id:$why"
+        [ -z "$why" ] && say "PASS R9 $id: init ended; '$(sgrep -m1 '^PAX: SIGKILL at the end')'; '$(sgrep -m1 '^PAX: the end:')'; halted, / clean" || bad "R9 $id:$why"
         halted "$id linger" "$hrc"
         rm -f "$disk"
         [ "$rows" = all ] || { first=0; continue; }
@@ -502,12 +527,52 @@ for leg in $legs; do
         rrc=0; reset_boot "$tier" "$leg" lingerboot "$disk" || rrc=$?
         why=
         [ "$rrc" = 0 ] || why+=" no reset (qemu-run $rrc);"
-        sgrep -Eq '^PAX: the end: SIGTERM to 3 processes, 2 ended within [0-9]+ ms; SIGKILL to 1 after the 2000 ms grace$' || why+=" $(sgrep -m1 '^PAX: the end' || echo 'no end line');"
+        sgrep -Eq '^PAX: the end: SIGTERM to 3 processes, 2 ended within [0-9]+ ms; SIGKILL to 1 after the 2000 ms grace$' || why+=" $(sgrep -m1 '^PAX: the end:' || echo 'no end line');"
         sgrep -Eq '^user: mounts pid 1 reboot\(2\): the volumes written and marked clean; restarting$' || why+=" no reboot(2) line;"
         [ "$(state_of "$disk" 2)" = "clean 1" ] || why+=" partition 2 '$(state_of "$disk" 2)';"
-        [ -z "$why" ] && say "PASS R9 $id reboot(2): '$(sgrep -m1 '^PAX: the end')', the reboot(2) line, the reset; / clean" || bad "R9 $id reboot(2):$why"
+        [ -z "$why" ] && say "PASS R9 $id reboot(2): '$(sgrep -m1 '^PAX: the end:')', the reboot(2) line, the reset; / clean" || bad "R9 $id reboot(2):$why"
         books "$id lingerboot"
         rm -f "$disk"
+
+        # --- R12: the end waits out a daemon's writes on a slow disk (px160) -----------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-late.img
+        cp --sparse=always "$dk/late.img" "$disk"
+        rrc=0; reset_boot "$tier" "$leg" late "$disk" -set drive.d0.throttling.iops-write=2 || rrc=$?
+        why=
+        [ "$rrc" = 0 ] || why+=" no reset (qemu-run $rrc);"
+        ig=$(sed -n 's/^linger 1: pid \([0-9]*\), SIGTERM ignored$/\1/p' "$log.norm" | head -n 1)
+        part_of "$disk" 2 "$disk.p2"
+        lt=$("$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" debugfs -R "cat /late.txt" "$disk.p2" 2>/dev/null)
+        rm -f "$disk.p2"
+        lms=$(printf '%s\n' "$lt" | sed -n 's/^late: 5 syncs, then this line, \([0-9]*\) ms after SIGTERM$/\1/p')
+        [ -n "$lms" ] || why+=" /late.txt on the disk reads '$lt' (want the late daemon's line);"
+        [ -z "$lms" ] || [ "$lms" -gt 2000 ] || why+=" the late daemon's writes took $lms ms, not past the grace (the throttle did not hold);"
+        sgrep -Eq "^PAX: SIGKILL at the end: mounts pid ${ig:-none} \(the 2000 ms grace ran in [0-9]+ ms\)\$" || why+=" $(sgrep -m1 '^PAX: SIGKILL at the end' || echo 'no SIGKILL line') (want mounts pid ${ig:-?} alone);"
+        sgrep -Eq '^PAX: the end: SIGTERM to 4 processes, 3 ended within [0-9]+ ms; SIGKILL to 1 after the 2000 ms grace$' || why+=" $(sgrep -m1 '^PAX: the end:' || echo 'no end line');"
+        [ "$(state_of "$disk" 2)" = "clean 1" ] || why+=" partition 2 '$(state_of "$disk" 2)';"
+        [ -z "$why" ] && say "PASS R12 $id: the disk held to two writes a second; /late.txt '$lt'; '$(sgrep -m1 '^PAX: SIGKILL at the end')'; '$(sgrep -m1 '^PAX: the end:')'; / clean" || bad "R12 $id:$why"
+        books "$id late"
+        rm -f "$disk"
+
+        # --- R13: the end's bound (px160) -----------------------------------------------
+        disk=$PAX_BUILD/mpx6-root-$tier-$leg-latebound.img
+        cp --sparse=always "$dk/latebound.img" "$disk"
+        rrc=0; reset_boot "$tier" "$leg" latebound "$disk" -set drive.d0.throttling.iops-write=2 || rrc=$?
+        why=
+        [ "$rrc" = 0 ] || why+=" no reset (qemu-run $rrc);"
+        ig=$(sed -n 's/^linger 1: pid \([0-9]*\), SIGTERM ignored$/\1/p' "$log.norm" | head -n 1)
+        la=$(sed -n 's/^linger 2: pid \([0-9]*\), SIGTERM 20 synced writes, then \/late.txt$/\1/p' "$log.norm" | head -n 1)
+        sgrep -Eq "^PAX: SIGKILL at the end: mounts pid ${ig:-none}, mounts pid ${la:-none} \(the end's 30000 ms bound; [0-9]+ ms of the 2000 ms grace ran\)\$" || why+=" $(sgrep -m1 '^PAX: SIGKILL at the end' || echo 'no SIGKILL line') (want mounts pid ${ig:-?} and ${la:-?} at the bound);"
+        sgrep -Eq "^PAX: the end: SIGTERM to 4 processes, 2 ended within [0-9]+ ms; SIGKILL to 2 at the end's 30000 ms bound\$" || why+=" $(sgrep -m1 '^PAX: the end:' || echo 'no end line');"
+        part_of "$disk" 2 "$disk.p2"
+        lt=$("$PAX_ROOT/tools/e2fs" "$(dirname "$disk")" debugfs -R "cat /late.txt" "$disk.p2" 2>/dev/null)
+        rm -f "$disk.p2"
+        [ -z "$lt" ] || why+=" /late.txt is there: '$lt';"
+        [ "$(state_of "$disk" 2)" = "clean 1" ] || why+=" partition 2 '$(state_of "$disk" 2)';"
+        fsck_ok "$disk" 2 || why+=" e2fsck -fn: $(tail -n 2 "$disk.p2.fsck" | tr '\n' '|');"
+        [ -z "$why" ] && say "PASS R13 $id: '$(sgrep -m1 '^PAX: SIGKILL at the end')'; '$(sgrep -m1 '^PAX: the end:')'; no /late.txt; / clean, e2fsck -fn clean" || bad "R13 $id:$why"
+        books "$id latebound"
+        rm -f "$disk" "$disk.p2.fsck"
 
         # --- R5: /etc across a reboot -------------------------------------------------
         disk=$PAX_BUILD/mpx6-root-$tier-$leg-twice.img
