@@ -9,6 +9,9 @@
 //! partition 3 first of all, which Limine refuses to hold a file system.
 //! px93: the staged tree gets its own /etc/pax-install/manifest (manifest.lu)
 //! before the root is written, so every install can be upgraded.
+//! px162: an ext3 plan's root is written with paxext2 --journal (plan.lu's
+//! JOURNAL_BLOCKS), and the written superblock is held to the plan's profile:
+//! has_journal and inode 8 for ext3, neither for ext2.
 
 use std.json
 use std.x.crypto.sha2
@@ -248,23 +251,17 @@ fn actions(p: Plan, tree: str, attrs: str, tools: str) -> List[Action] ! {io} {
             output_hash: "",
         })
     }
+    var root_args = ["--from", tree, "--attrs", attrs, "--label", "pax-root", "--seed", p.seed, "--offset", "{ROOT_START}"]
+    if p.profile == PROFILE_EXT3 {
+        (mut root_args).push("--journal")
+        (mut root_args).push("{JOURNAL_BLOCKS}")
+    }
+    (mut root_args).push("{p.root_bytes}")
+    (mut root_args).push(dev)
     (mut out).push(Action {
         phase: "root",
         exe: "{tools}/paxext2",
-        args: [
-            "--from",
-            tree,
-            "--attrs",
-            attrs,
-            "--label",
-            "pax-root",
-            "--seed",
-            p.seed,
-            "--offset",
-            "{ROOT_START}",
-            "{p.root_bytes}",
-            dev,
-        ],
+        args: root_args,
         output_hash: "",
     })
     (mut out).push(Action {
@@ -288,6 +285,20 @@ fn actions(p: Plan, tree: str, attrs: str, tools: str) -> List[Action] ! {io} {
         })
     }
     out
+}
+
+/// px162: "" when the written root's superblock (1024 bytes) is the plan's
+/// profile: ext2's magic, and has_journal with the journal in inode 8 for
+/// ext3, no has_journal for ext2; else why not, for the phase log.
+fn root_as_planned(super: List[byte], profile: str) -> str {
+    if super.len != 1024 || super[56] != 83 as byte || super[57] != 239 as byte {
+        return "the root holds no ext2-family superblock"
+    }
+    let journalled = super[92] as int & 4 != 0
+    let inode = super[224] as int | (super[225] as int << 8) | (super[226] as int << 16) | (super[227] as int << 24)
+    let ok = if profile == PROFILE_EXT3 then journalled && inode == 8 else !journalled
+    if ok { return "" }
+    "the root's superblock is not the plan's {profile} (has_journal {journalled}, journal inode {inode})"
 }
 
 /// px78: the sha256 of the first MiB of each partition the install wrote:
@@ -372,10 +383,9 @@ fn execute_plan(mut lg: Log, p: Plan, source: str, payload: str, tools: str, wor
         return verify_failed
     }
     let super = fs_read_at(fd, ROOT_START + 1024, 1024) else |_| { return io }
-    if super.len != 1024 ||
-        super[56] != 83 as byte ||
-        super[57] != 239 as byte ||
-        super[92] as int & 4 != 0 {
+    let off_plan = root_as_planned(super, p.profile)
+    if off_plan.len != 0 {
+        disk_log(mut lg, fd, mut used, "verify", "failed", off_plan)?
         return verify_failed
     }
     let sums = first_mib_sums(fd, p.target.name)?
@@ -387,9 +397,9 @@ fn execute_plan(mut lg: Log, p: Plan, source: str, payload: str, tools: str, wor
         mut used,
         "result",
         "complete",
-        "ext2-preview; boot files read back; no rollback or automatic resume; reboot offered",
+        "{if p.profile == PROFILE_EXT3 then "ext3" else "ext2-preview"}; boot files read back; no rollback or automatic resume; reboot offered",
     )?
-    say(mut lg, "Installation complete: ext2 developer preview. Reboot to test the target alone.")
+    say(mut lg, if p.profile == PROFILE_EXT3 then "Installation complete: ext3, journalled. Reboot to test the target alone." else "Installation complete: ext2 developer preview. Reboot to test the target alone.")
     say(
         mut lg,
         "Persistent phase log: /dev/{p.target.name}, bytes {LOG_OFFSET}..{LOG_OFFSET + LOG_CAPACITY}; not a resume authority.",
