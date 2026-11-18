@@ -829,8 +829,18 @@ Source regular files remain limited to 0xffffffff bytes. The tools do
 not resize or repair filesystems, provide power-failure transactions,
 or overwrite existing FAT files.
 
-The ext2 writer leaves `has_journal` clear. The host's `mkdisk --gpt --root`
-still creates ext3 by default; `--no-journal` selects ext2.
+The ext2 writer leaves `has_journal` clear unless `--journal BLOCKS` asks
+for ext3: then it writes an empty internal journal in inode 8 (a v2 journal
+superblock, sequence 1, start 0, no journal feature, the volume's UUID, one
+user), sets `has_journal`, `s_journal_inum` 8 and the `s_jnl_blocks` backup
+of the inode's map, and reserves the journal's blocks before the tree's, so
+they are one run with the map's blocks after them. The journal is 1024 to
+262,144 blocks and at most a quarter of the volume, refused before the
+image is opened otherwise. `tests/mpx6-disktools.d/ext3.py` holds it to
+`mke2fs -t ext3 -J size=16` at 64, 448 and 1024 MiB: `e2fsck -fn` clean,
+the same journal superblock fields and `dumpe2fs -h` journal lines, and a
+populated tree that walks as the plain build's. The host's `mkdisk --gpt
+--root` still creates ext3 by default; `--no-journal` selects ext2.
 `PAX_EXT2_WRITER=/path/to/paxext2` is an explicit host-builder override for
 ext2 only and rejects journalled requests. The root suite's `--fstype ext2`
 leg uses it without changing the default ext3 leg or its journal tests.
@@ -853,11 +863,16 @@ calls the existing static `paxgpt`, `paxfat`, `paxext2` and unchanged Limine
 installer by argv lists, not shell commands. All offsets passed to the
 formatters are bytes.
 
-**This is a whole-disk, fresh-install ext2 developer preview. It destroys
-the selected target. It is not ext3, a resize tool, a migration service, a
-repair tool or an automatic recovery/resume mechanism.** The host builder's
-journalled-root default is unchanged. The targets are QEMU disks (virtio,
-NVMe and SATA); `docs/INSTALL-METAL.md` is the runbook for a real one.
+**This is a whole-disk, fresh install. It destroys the selected target. It
+is not a resize tool, a migration service, a repair tool or an automatic
+recovery/resume mechanism.** The root is ext3, journalled (`data=ordered`,
+a 16 MiB journal: `paxext2 --journal 4096`), unless `--ext2-preview` names
+the ext2 developer preview without a journal, in the guided flow,
+`--dry-run` and `--install` alike. An ext3 root needs at least 64 MiB;
+smaller is refused by name (`too_small_for_ext3`, naming `--ext2-preview`)
+before any write. An existing ext2 install is never converted: an upgrade
+keeps its profile and its texts. The targets are QEMU disks (virtio, NVMe
+and SATA); `docs/INSTALL-METAL.md` is the runbook for a real one.
 
 ### Prepare an offline payload
 
@@ -926,8 +941,10 @@ plain-text flow. EOF or `q` before writing cancels. Terminal dimensions
 are sampled on each target page. The flow asks for a user name (uid/gid
 1000, no password yet) and an explicit `y` or `n` for games, prints the
 plan, then one summary naming the target by model, serial, size (decimal GB,
-or TB from 1000.0 GB) and node with the ext2-without-a-journal notice, and
-asks for the word `yes`; anything else, `y`, `YES`, `q` or an empty line
+or TB from 1000.0 GB) and node with the root's notice (`The root file system
+is ext3, journalled (data=ordered); pax-install --ext2-preview installs ext2
+without a journal.`, or ext2's `without a journal` line under
+`--ext2-preview`), and asks for the word `yes`; anything else, `y`, `YES`, `q` or an empty line
 included, cancels with nothing written. The guided flow never asks for the
 plan's confirmation token; the install log keeps the plan's `confirmation`
 line as its record of what was erased. Root's account
@@ -939,8 +956,20 @@ A scripted invocation must supply both decisions and the plan's exact token
 
 ```text
 pax-install --dry-run --target vdb --user pax --games no
-pax-install --install --ext2-preview --target vdb --user pax --games no   --seed SEED_FROM_PLAN --confirm 'EXACT_CONFIRMATION_FROM_PLAN'
+pax-install --install --target vdb --user pax --games no   --seed SEED_FROM_PLAN --confirm 'EXACT_CONFIRMATION_FROM_PLAN'
 ```
+
+For ext2, both commands take `--ext2-preview`. The two profiles' plans and
+tokens differ: an ext3 plan is `PAX install plan v2`, names its journal on
+its `format` line, and its token ends in ` ext3`; an ext2 plan, its text and
+its token (`ERASE /dev/NAME IDENTITY BYTES SEED`) are byte for byte the ones
+every earlier installer printed, so a script written for them keeps its
+meaning with `--ext2-preview` on both lines. No token of one profile
+confirms the other: an old two-line script that ran `--dry-run` without the
+flag and `--install --ext2-preview` now stops `unconfirmed`, before writes.
+After the root is written, its superblock is held to the plan (has_journal
+and the journal in inode 8 for ext3, no journal for ext2); a mismatch stops
+the install at its `verify` phase.
 
 The first command generates a fresh seed unless `--seed` is supplied.
 The same seed and exact identity token are required by the second command;
@@ -951,10 +980,12 @@ metadata uses epoch 1700000000; copied ext2 metadata comes from the source
 manifest. New root PARTUUIDs derive from the recorded seed and that epoch.
 
 The layout is a 1 MiB BIOS boot partition at byte 1048576, a 64 MiB FAT32
-ESP at byte 2097152, and an ext2 root from byte 69206016. The plan accounts
-for GPT and alignment reservations. Unsupported sector sizes, a root
-smaller than 8 MiB, and boot assets that do not fit the fixed ESP are
-refused. The root is capped at 17,592,186,040,320 bytes; any remaining
+ESP at byte 2097152, and the root (ext3, or ext2) from byte 69206016. The
+plan accounts for GPT and alignment reservations. Unsupported sector sizes,
+a root smaller than 8 MiB (64 MiB for ext3), and boot assets that do not fit
+the fixed ESP are refused. An ext3 install's limine.conf entry is `PAX ext3`
+with `rootfstype=ext3` and its `/etc/fstab` names `/` ext3; an ext2
+install's texts are the earlier installers', byte for byte. The root is capped at 17,592,186,040,320 bytes; any remaining
 capacity is listed separately as `unused_bytes`, not hidden in GPT's
 tail reservation. No rescue initramfs is added.
 
