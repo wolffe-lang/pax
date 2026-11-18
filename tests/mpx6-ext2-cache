@@ -97,10 +97,11 @@ def file_bytes(rel):
 
 
 class Suite:
-    def __init__(self, a):
+    def __init__(self, a, rows):
         self.a = a
         build = Path(os.environ.get("PAX_BUILD", ROOT / "build"))
-        self.out = build / NAME
+        # one directory a run's rows, so a run of other rows keeps this one's evidence
+        self.out = build / NAME / "-".join(rows)
         shutil.rmtree(self.out, ignore_errors=True)
         self.out.mkdir(parents=True)
         self.failed = 0
@@ -284,7 +285,7 @@ def main():
     rows = a.rows.split(",")
     if any(r not in ROWS for r in rows):
         die(f"--rows takes {','.join(ROWS)}")
-    s = Suite(a)
+    s = Suite(a, rows)
     s.build()
     for r in rows:
         if r == "modes":
