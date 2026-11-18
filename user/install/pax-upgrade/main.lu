@@ -278,7 +278,7 @@ fn put_back(u: Up, base: str, dev: str) -> str {
     if text.len == 0 {
         let uuid = root_partuuid(dev, u.tools, u.work)
         if uuid.len == 0 { return "the root's PARTUUID could not be read, and no configuration was saved" }
-        text = config_text(uuid)
+        text = root_config_text(dev, uuid) // px162: the root's profile's
     }
     let src = "{u.work}/limine.conf.back"
     durable_text(src, text) else |_| { return "{src} could not be written" }
@@ -365,15 +365,15 @@ fn release_epoch(text: str) -> int {
 }
 
 /// The armed configuration: the archive's entry, filled, first and the default; the installed
-/// entry (the installer's text's) second; a five-second menu. Or "" and why not.
-fn armed_conf(template: str, uuid: str, digest: str) -> (str, str) {
+/// entry (`installed`, the installer's text for the root's profile) second; a five-second menu.
+/// Or "" and why not.
+fn armed_conf(template: str, uuid: str, digest: str, installed: str) -> (str, str) {
     if !template.contains("@PARTUUID@") || !template.contains("@SHA256@") || !template.starts_with("/") {
         return ("", "its {ENTRY} is not an entry with @PARTUUID@ and @SHA256@")
     }
     var filled = template.replace("@PARTUUID@", uuid).replace("@SHA256@", digest)
     if !filled.ends_with("\n") { filled += "\n" }
     if !filled.contains("{STAGED_WORD}{digest}") { return ("", "its {ENTRY} names no {STAGED_WORD}") }
-    let installed = config_text(uuid)
     let at = installed.find("\n\n") else -1
     if at < 0 { return ("", "the installer's configuration has no entry") }
     ("timeout: 5\ndefault_entry: 1\n\n{filled}\n{installed[at + 2..]}", "")
@@ -421,7 +421,7 @@ fn arm(mut u: Up, reboot: bool) -> int {
     }
     let (got_conf, conf) = esp_text(u, dev, ESP_CONF, "esp-conf")
     if !got_conf { return refuse("arm", "the ESP's {ESP_CONF} cannot be read on {dev}") }
-    if conf != config_text(uuid) {
+    if conf != root_config_text(dev, uuid) { // px162: the root's profile's (ext2's as before)
         return refuse("arm", "the ESP's {ESP_CONF} is not the installer's text (edited?); it is never merged: put the installer's back, or upgrade with the stick")
     }
     let fd = fs_open(dev) else |_| { return refuse("arm", "{dev} cannot be read") }
@@ -490,7 +490,7 @@ fn arm(mut u: Up, reboot: bool) -> int {
         print("pax-upgrade: arm: {if old_epoch < 0 then "the installed" else "the archive's"} /etc/pax-release has no source-date-epoch; its age is not checked")
     }
     let template = fs_read_text("{work}/entry") else |_| ""
-    let (armed_text_conf, conf_why) = armed_conf(template, uuid, digest)
+    let (armed_text_conf, conf_why) = armed_conf(template, uuid, digest, conf) // px162: the root's own (checked above)
     if conf_why.len != 0 {
         fs_remove(staged) else |_| {}
         return refuse("arm", "{conf_why}; removed")
