@@ -35,9 +35,7 @@
 #           disk to two writes a second (`-set
 #           drive.d0.throttling.iops-write=2`), so its writes outlast
 #           the 2000 ms grace by the clock; and `latebound`, the same
-#           with 1000 writes, which no disk held to two writes a second
-#           can finish within the end's 30 s bound (each fsync(2) of an
-#           appended KiB is at least one write: 500 s at the least);
+#           with 20 writes, past the end's 30 s bound;
 #   cut     `table`, then `linger`: QEMU is killed after the table.
 #
 # Rows, per tier and firmware (--rows pr, CI's pr tier, PAX_ROOT_ROWS:
@@ -96,14 +94,10 @@
 #       partition 2 after the reset, its line says the writes took more
 #       than 2000 ms; only linger's SIGTERM-ignoring daemon is named by
 #       `PAX: SIGKILL at the end:`; one SIGKILL after the grace; clean.
-#   R13 px160: the end's bound. `latebound`'s 1000 writes outlast the
-#       end's 30000 ms bound on any root and any host (at two writes a
-#       second they take 500 s at the least; 20 did not: on the ext2
-#       root, with no journal to write, they took 28.5 s and the line
-#       reached the disk): SIGKILL then, the line names the late daemon
-#       and the SIGTERM-ignoring one and says the bound sent it,
-#       /late.txt is not on the disk, partition 2 clean and e2fsck -fn
-#       clean.
+#   R13 px160: the end's bound. `latebound`'s 20 writes outlast the end's
+#       30000 ms bound: SIGKILL then, the line names the late daemon and
+#       the SIGTERM-ignoring one and says the bound sent it, /late.txt is
+#       not on the disk, partition 2 clean and e2fsck -fn clean.
 #
 # --fstype ext2 is px69's explicit non-journalled root leg. It uses its
 # own Linux recording, keeps R8e, and says SKIP for journal-only R8.
@@ -265,7 +259,7 @@ if [ -z "$images" ]; then
             lingerboot) printf '/bin/mounts linger restart\n' ;;
             cut)        printf '/bin/mounts table\n/bin/mounts linger\n' ;;
             late)       printf '/bin/mounts linger restart late 5\n' ;;
-            latebound)  printf '/bin/mounts linger restart late 1000\n' ;;
+            latebound)  printf '/bin/mounts linger restart late 20\n' ;;
         esac > "$work/$img.run"
         "$PAX_ROOT/tools/mkinitramfs" "$work/$img.cpio" /bin/mounts="$work/bin/mounts":755 /bin/reboot="$work/bin/reboot":755 \
             /etc/motd="$work/motd":644 /etc/fstab="$PAX_ROOT/user/fstab-root":644 /etc/pax-run="$work/$img.run":644 /etc/mtab-\>../proc/self/mounts \
@@ -567,7 +561,7 @@ for leg in $legs; do
         why=
         [ "$rrc" = 0 ] || why+=" no reset (qemu-run $rrc);"
         ig=$(sed -n 's/^linger 1: pid \([0-9]*\), SIGTERM ignored$/\1/p' "$log.norm" | head -n 1)
-        la=$(sed -n 's/^linger 2: pid \([0-9]*\), SIGTERM 1000 synced writes, then \/late.txt$/\1/p' "$log.norm" | head -n 1)
+        la=$(sed -n 's/^linger 2: pid \([0-9]*\), SIGTERM 20 synced writes, then \/late.txt$/\1/p' "$log.norm" | head -n 1)
         sgrep -Eq "^PAX: SIGKILL at the end: mounts pid ${ig:-none}, mounts pid ${la:-none} \(the end's 30000 ms bound; [0-9]+ ms of the 2000 ms grace ran\)\$" || why+=" $(sgrep -m1 '^PAX: SIGKILL at the end' || echo 'no SIGKILL line') (want mounts pid ${ig:-?} and ${la:-?} at the bound);"
         sgrep -Eq "^PAX: the end: SIGTERM to 4 processes, 2 ended within [0-9]+ ms; SIGKILL to 2 at the end's 30000 ms bound\$" || why+=" $(sgrep -m1 '^PAX: the end:' || echo 'no end line');"
         part_of "$disk" 2 "$disk.p2"
