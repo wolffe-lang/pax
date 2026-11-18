@@ -201,6 +201,7 @@ const ENXIO: u64 = 6 // px79
 const EBUSY: u64 = 16
 const EINVAL: u64 = 22 // px79
 const ENOSPC: u64 = 28
+const ESTALE: u64 = 116 // px164 (uapi asm-generic/errno.h)
 
 // The state frame's words.
 const S_DISKS: u64 = 0 // px79: disks up (each with DPD records); 0 none
@@ -2363,6 +2364,57 @@ pub fn fresh(d: u64, blk: u64, bsize: u64) -> u64 {
 /// block is not in the cache (a caller that broke the rule above).
 pub fn dirty(d: u64, blk: u64, bsize: u64) -> u64 {
     mark(d, blk, bsize, 0)
+}
+
+/// px164: whether a change just written through kernel address `va` is in
+/// block `blk`'s buffer of disk `d`, asked before the change is marked
+/// (kernel/ext2's `dirty`): 0 when the cache holds the block and `va` is
+/// inside its buffer; -ENOSPC when the cache holds no such block (its buffer
+/// was taken back before the mark, so the change is lost); -ESTALE when the
+/// block is cached somewhere other than `va` (the change went through an
+/// address the cache had since given to another block: `stray` says whose).
+/// `va` 0 asks only whether the block is cached.
+pub fn written(d: u64, blk: u64, bsize: u64, va: u64) -> u64 {
+    if base() == 0 || shift_of(bsize) == 0 {
+        return neg(ENOSPC)
+    }
+    let s = find(key(d, bsize, blk))
+    if s == NB {
+        return neg(ENOSPC)
+    }
+    let at = hw(s, H_PA) + hh()
+    if va != 0 && (va < at || va >= at + bsize) {
+        return neg(ESTALE)
+    }
+    0
+}
+
+/// px164: the buffer kernel address `va` is in, after a change went through
+/// it stale (`written`'s -ESTALE): (its device, its block, whether it is
+/// dirty); the device DEVS when `va` is in no buffer, or in one that holds no
+/// block. A clean one is forgotten here, so the stray bytes never reach its
+/// disk and the next `get` reads the block again. A dirty one cannot be told
+/// apart from its own changes, so it is kept (the caller says so).
+pub fn stray(va: u64) -> (u64, u64, bool) {
+    var s: u64 = 0
+    while base() != 0 && s < st(S_MADE) {
+        let at = hw(s, H_PA) + hh()
+        if va >= at && va < at + PAGE {
+            if hw(s, H_KEY) == 0 {
+                return (DEVS, 0, false)
+            }
+            let (d, blk, _bsize) = parts(s)
+            let f = hw(s, H_FLAGS)
+            if f & (B_DIRTY | B_JRUN) == 0 {
+                unhash(s)
+                put_hw(s, H_FLAGS, 0)
+                return (d, blk, false)
+            }
+            return (d, blk, true)
+        }
+        s += 1
+    }
+    (DEVS, 0, false)
 }
 
 /// px151 (pax#442): metadata block `blk` of a plain volume on disk `d`
