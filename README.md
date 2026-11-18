@@ -195,8 +195,9 @@ first program it prints how long its boot took and how much of that the console 
 not the image's compiler. Two separate source checkouts must produce identical static bytes. Both images carry
 only the production `/bin/pxg`, never its failpoint or qualification probes. `pxg version` and `pxg compare`
 work on PAX, but this is not package-update support: live-root mutations report `live-root-is-pm05`, and
-initialising an alternate root on the installer's plain ext2 reports `unqualified-filesystem ext2-family
-(journal not qualified on PAX)`. The installer suite and `tests/distribution-install` hold these refusals.
+initialising an alternate root on an installed root, the ext3 default or the ext2 preview, reports
+`unqualified-filesystem ext2-family (journal not qualified on PAX)`. The installer suite and
+`tests/distribution-install` hold these refusals.
 
 Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
 each. `tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT` assembles both image variants at one clean
@@ -616,8 +617,8 @@ stops instead, go to the console:
 
 - Limine shows `PANIC` and `Press a key to return to menu.`, or the staged kernel stops on a panic. **A kernel panic
   in the staged boot halts the machine: nothing restarts it, and a person must choose the installed entry at the
-  console or boot the stick.** Press a key, or power the machine off and on, and in Limine's menu choose `PAX ext2
-  developer preview` with the arrow keys and Enter. The installed system sees that it booted while armed, disarms and says so
+  console or boot the stick.** Press a key, or power the machine off and on, and in Limine's menu choose the installed
+  entry, `PAX ext3` (`PAX ext2 developer preview` on an ext2 install), with the arrow keys and Enter. The installed system sees that it booted while armed, disarms and says so
   (or log in and run `sudo pax-upgrade disarm`). Each power cycle into the staged entry counts as a try, so after two
   the installed system boots by itself.
 - The installed system does not boot either (an upgrade cut after it began writing): boot the stick. Its entry `PAX:
