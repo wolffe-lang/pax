@@ -12,6 +12,11 @@
 # cached and never built (px05: 0.2.23; px02 and kw10 built wolf-lang
 # from source, and cached the build, while no release carried kw06-kw09).
 #
+# Every Linux job runs on `ubuntu-24.04`, never `ubuntu-latest`: the
+# label moved to Ubuntu 26.04 under the workflow, and with it glibc, gcc
+# and QEMU (pax#474). tests/ci-runners.py, in the plan job, holds each job
+# to its pinned label and the plan job's runner to that label's image.
+#
 # QEMU, OVMF, xorriso and gdb come from the distro (apt) and Homebrew;
 # Limine comes from its release archive BY DIGEST (tools/fetch-limine
 # refuses on a mismatch). Every step runs bare and its exit code is read
@@ -122,7 +127,7 @@ jobs:
   # decided once and printed path by path, so a run's log says why it
   # has the jobs it has. The planner's own proof runs first.
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       tier: ${{ steps.plan.outputs.tier }}
@@ -170,7 +175,7 @@ jobs:
   proof:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'proof')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -262,7 +267,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mkw')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -328,7 +333,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx1')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -388,7 +393,7 @@ jobs:
   census:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'census')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -411,7 +416,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-frames')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -472,7 +477,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-paging')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -539,7 +544,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-interrupts')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # px83: completed peak 2885 s across 21 observations; see ci-budgets.
     timeout-minutes: 75
     steps:
@@ -604,7 +609,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-sched')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -670,7 +675,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx2-heap')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # px83: 20 all-tier samples peak at 55.6 min; 60 left only 4.4.
     # Keep all six kernels and every leg; 90 leaves 34.4 min at that peak.
     timeout-minutes: 90
@@ -740,7 +745,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-user')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -807,7 +812,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-loader')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -884,7 +889,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-boreutils')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -971,7 +976,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-console')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -1105,7 +1110,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-screen')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -1182,7 +1187,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-shell')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # px122: step by step, floors all and partial 8125 s, pr 1704 s, full 2446 s, 40%
     # headroom (tests/ci-budgets.py, shell-pelt.json).
     timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'partial' && 190 || 120 }}
@@ -1296,7 +1301,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-threads')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -1386,7 +1391,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-tree')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -1472,7 +1477,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-maps')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -1564,7 +1569,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-forks')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -1645,7 +1650,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-rates')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -1710,7 +1715,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-trace')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -1791,7 +1796,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-kmsg')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -1857,7 +1862,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-pty')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -1923,7 +1928,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-slots')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -1990,7 +1995,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-speaker')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -2069,7 +2074,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-sound')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -2136,7 +2141,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx3-orchestra')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -2199,7 +2204,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'tour')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -2275,7 +2280,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-net')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -2364,7 +2369,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-udp')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -2449,7 +2454,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-dhcp')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -2525,7 +2530,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-igb')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -2598,7 +2603,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-console-net')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -2676,7 +2681,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-console-push')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -2745,7 +2750,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-burrowd')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -2858,7 +2863,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-tcp')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -2960,7 +2965,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-ready')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
@@ -3055,7 +3060,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-session')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -3150,7 +3155,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-unix')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -3234,7 +3239,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx4-lobo')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -3353,7 +3358,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # px83: all ISO legs plus rootdisk, measured stage peaks and 40% margin.
     timeout-minutes: 210
     steps:
@@ -3462,7 +3467,7 @@ jobs:
   mpx5-users-ahci:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-users-ahci')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # R-px75b-6: CI's leg 3436 s (run 40818748481), the users virtio root
     # floor 3422 s x hasu's TCG ratio 1733/1728 = 3432 s; floor 50 + 3436 + 180
     # = 3666 s, 40% above it 5132 s: 90 min (tests/ci-budgets.py).
@@ -3543,7 +3548,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-sudo')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -3608,7 +3613,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-accounts')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -3698,7 +3703,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-jobs')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -3805,7 +3810,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lope')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -3910,7 +3915,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_PELT_CASES: ${{ inputs.pelt_cases }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # px83: replay + rootdisk + one Linux retry, measured with 40% margin.
     # px122: step by step, the USB typing step counted, floors all and partial
     # 14904 s, pr 4232 s, full 6532 s, 40% headroom (tests/ci-budgets.py, shell-pelt.json).
@@ -4012,7 +4017,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-aspen')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -4095,7 +4100,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-den')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 240 || 120 }}
     steps:
       - uses: actions/checkout@v4
@@ -4181,7 +4186,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-scent')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -4261,7 +4266,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-trash')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -4340,7 +4345,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-bore')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -4422,7 +4427,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lupin')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -4510,7 +4515,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_WOLF_PLANT: ${{ inputs.wolf_plant }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -4615,7 +4620,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-lsp')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -4712,7 +4717,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'kernel-as')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -4784,7 +4789,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-clef')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -4863,7 +4868,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-yew')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # px113 (pax#305): sizing floors, every leg 5860 s and native BIOS alone
     # 4044 s (the phase peaks of 91 attempts, yew's build up to 2947 s with
     # the other programs), 40% headroom; see ci-budgets. all and partial
@@ -4952,7 +4957,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-screen')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # px113 (pax#305): sizing floors, every leg 5568 s and native BIOS alone
     # 3951 s (the phase peaks of 94 attempts), 40% headroom; see
     # ci-budgets. all and partial 130 min, pr and full 95.
@@ -5022,7 +5027,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-blk')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -5084,7 +5089,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_EXT2_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'read' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -5157,7 +5162,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_NODES_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -5232,7 +5237,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_NVME_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -5312,7 +5317,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_AHCI_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -5377,7 +5382,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-staged')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -5436,7 +5441,7 @@ jobs:
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-bootlog')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -5492,7 +5497,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_PART_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'table' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -5566,7 +5571,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -5639,7 +5644,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_JOURNAL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -5704,7 +5709,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -5911,7 +5916,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_ROOT_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'pr' || 'all' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -6044,7 +6049,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -6084,7 +6089,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -6123,7 +6128,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -6171,7 +6176,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -6220,7 +6225,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -6273,7 +6278,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -6392,7 +6397,7 @@ jobs:
       - mpx6-latency
       - mpx6-entropy
       - mpx6-firmware
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     # The issue step's token may write issues; nothing else.
     permissions:
