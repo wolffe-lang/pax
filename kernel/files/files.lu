@@ -637,6 +637,13 @@ fn put_ppw(p: u64, w: u64, v: u64) {
 /// A pipe buffer of `pages` frames: its record, or PIPES when no record
 /// or frame is free (nothing kept).
 fn pipe_new(pages: u64) -> u64 {
+    pipe_make(pages, pages)
+}
+
+/// px159: a buffer of `pages` frames' capacity holding the first `now`
+/// of them now (a pipe all, a socket none: `ring_frames` takes the rest
+/// as bytes come); PIPES when no record or frame is free (nothing kept).
+fn pipe_make(pages: u64, now: u64) -> u64 {
     var p: u64 = 0
     while p < PIPES && ppw(p, P_PAGES) != 0 {
         p += 1
@@ -645,7 +652,7 @@ fn pipe_new(pages: u64) -> u64 {
         return PIPES
     }
     var k: u64 = 0
-    while k < pages {
+    while k < now {
         let pa = frames.alloc() else 0
         if pa == 0 {
             while k > 0 {
@@ -655,6 +662,10 @@ fn pipe_new(pages: u64) -> u64 {
             return PIPES
         }
         put_ppw(p, P_FRAME + k, pa)
+        k += 1
+    }
+    while k < pages {
+        put_ppw(p, P_FRAME + k, 0) // px159: not taken yet
         k += 1
     }
     put_ppw(p, P_READERS, 0)
@@ -670,9 +681,11 @@ fn pipe_new(pages: u64) -> u64 {
 }
 
 /// px159: a socket's buffer (a socketpair's or a path connection's, each
-/// way): `pipe_new`'s, marked a socket's (`room_wanted`); PIPES when none.
+/// way), marked a socket's (`room_wanted`); PIPES when none. It holds no
+/// frame until bytes are written to it (`ring_frames`): an idle pair, such
+/// as the one a shell's spawn keeps until the child's `execve`, costs none.
 fn sock_new() -> u64 {
-    let p = pipe_new(SOCK_PAGES)
+    let p = pipe_make(SOCK_PAGES, 0)
     if p != PIPES {
         put_ppw(p, P_SOCK, 1)
     }
@@ -687,7 +700,10 @@ fn pipe_settle(p: u64) {
     let n = ppw(p, P_PAGES)
     var k: u64 = 0
     while k < n {
-        frames.free(ppw(p, P_FRAME + k))
+        let f = ppw(p, P_FRAME + k)
+        if f != 0 {
+            frames.free(f) // px159: only the frames a socket's buffer took
+        }
         put_ppw(p, P_FRAME + k, 0)
         k += 1
     }
@@ -1486,6 +1502,31 @@ fn ring_at(p: u64, at: u64) -> (u64, u64) {
     (frames.hhdm() + ppw(p, P_FRAME + pg) + off, PAGE - off)
 }
 
+/// px159: buffer `p` given the frames under its bytes [at, at + n) that it
+/// lacks, in order: how many of those bytes then have a frame (n, or fewer
+/// when no frame was free). A socket's buffer takes its frames here, as
+/// bytes come, and keeps them until `pipe_settle`; a pipe's has them all.
+/// The caller has found room for the n bytes.
+fn ring_frames(p: u64, at: u64, n: u64) -> u64 {
+    let cap = ppw(p, P_PAGES) * PAGE
+    var c: u64 = 0
+    while c < n {
+        let o = (at + c) % cap
+        let pg = o / PAGE
+        if ppw(p, P_FRAME + pg) == 0 {
+            let pa = frames.alloc() else 0
+            if pa == 0 {
+                return c
+            }
+            put_ppw(p, P_FRAME + pg, pa)
+        }
+        let room = PAGE - o % PAGE
+        let step = if n - c < room { n - c } else { room }
+        c += step
+    }
+    n
+}
+
 /// px17: a read of a pipe or socket: what is there (up to `n`), 0 when
 /// it is empty and no writer is open, WAIT (or -EAGAIN) when it is empty
 /// and a writer is.
@@ -1668,6 +1709,9 @@ pub fn msg_writev(a: u64, pml4: u64, fd: u64, iov: u64, cnt: u64, m: u64) -> u64
         sched.wait_key(sched.KEY_BUF, p) // px159: it waits for this buffer's room
         return WAIT
     }
+    if ring_frames(p, ppw(p, P_WR), m + 8) < m + 8 {
+        return neg(ENOBUFS) // px159: a message goes in whole or not at all
+    }
     msg_put(p, pml4, 0, iov, cnt, m)
     m
 }
@@ -1754,6 +1798,9 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
             sched.wait_key(sched.KEY_BUF, p) // px159
             return WAIT
         }
+        if ring_frames(p, ppw(p, P_WR), n + 8) < n + 8 {
+            return neg(ENOBUFS) // px159: a message goes in whole or not at all
+        }
         msg_put(p, pml4, buf, 0, 0, n)
         return n
     }
@@ -1784,7 +1831,13 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
         sched.wait_key(sched.KEY_BUF, p) // px159: it waits for this buffer's room
         return WAIT
     }
-    let k = if rest < space { rest } else { space }
+    let want = if rest < space { rest } else { space }
+    // px159: a stream takes the bytes it has frames for; none, -ENOBUFS.
+    let k = ring_frames(p, ppw(p, P_WR), want)
+    if k == 0 {
+        sched.set_self_done(0)
+        return if done > 0 { done } else { neg(ENOBUFS) }
+    }
     var c: u64 = 0
     while c < k {
         let (dst, room) = ring_at(p, ppw(p, P_WR) + c)
@@ -1794,7 +1847,7 @@ fn pipe_put(a: u64, pml4: u64, fd: u64, buf: u64, n: u64, nonblock: bool, atomic
     }
     put_ppw(p, P_WR, ppw(p, P_WR) + k)
     sched.wake_obj(sched.KEY_BUF, p) // px159: bytes for this buffer's readers
-    if done + k == n || nb {
+    if done + k == n || nb || k < want {
         sched.set_self_done(0)
         return done + k
     }
@@ -1903,6 +1956,10 @@ pub fn sendfile(a: u64, pml4: u64, out: u64, inf: u64, offp: u64, count: u64) ->
         }
         if k > space {
             k = space
+        }
+        k = ring_frames(p, ppw(p, P_WR), k) // px159: what has frames
+        if k == 0 {
+            return neg(ENOBUFS)
         }
         while done < k {
             let (src, c) = tree.span(i, off + done, k - done)
@@ -2049,6 +2106,10 @@ pub fn splice(a: u64, pml4: u64, inf: u64, offin: u64, out: u64, offout: u64, le
         }
         if k > space {
             k = space
+        }
+        k = ring_frames(q, ppw(q, P_WR), k) // px159: what has frames
+        if k == 0 {
+            return neg(ENOBUFS)
         }
     }
     let j = copy_job(a, t, out) // px49 (pax#76), as sendfile
