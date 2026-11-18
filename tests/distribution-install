@@ -16,7 +16,7 @@ blank=$(sha256_of "$disk")
 # shows no model), as tests/mpx6-install.d/install.py does.
 cat > "$out/install.keys" <<'KEYS'
 printf 'model= serial=PX90-TARGET\n' > /tmp/install-targets
-pax-install --install --ext2-preview --target vda --seed px82-image --user pax --games yes --allow-list /tmp/install-targets --confirm 'ERASE /dev/vda 254:0-seq1 1073741824 px82-image'
+pax-install --install --target vda --seed px82-image --user pax --games yes --allow-list /tmp/install-targets --confirm 'ERASE /dev/vda 254:0-seq1 1073741824 px82-image ext3'
 echo PX82-INSTALL=$?
 exit 0
 KEYS
@@ -54,6 +54,10 @@ with source.open('rb') as f:
             out.write(chunk);remaining-=len(chunk)
 PY
 e2fsck -fn "$out/installed-root.img" > "$out/installed-root.fsck.log" 2>&1
+# px162: the image installs its default root, ext3: a journal Linux's tools read as mke2fs's.
+dumpe2fs -h "$out/installed-root.img" > "$out/installed-root.dumpe2fs" 2>&1
+grep -Eq '^Filesystem features:.*\bhas_journal\b' "$out/installed-root.dumpe2fs" || die 'the installed root has no journal (ext3 is the default)'
+grep -Eq '^Total journal blocks: +4096$' "$out/installed-root.dumpe2fs" || die 'the installed root journal is not 4096 blocks'
 cat "$PAX_ROOT/tests/mpx6-install.d/pxg.keys" > "$out/installed.keys"
 printf 'pax-release\nls /home/pax/Games\nexit 0\n' >> "$out/installed.keys"
 for firmware in bios uefi; do
