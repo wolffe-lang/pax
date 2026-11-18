@@ -138,10 +138,31 @@ for name, args in (("plain", []), ("journalled", ["--journal", str(JOURNAL)])):
         row("tree", False, f"--from with {args}: exit {p.returncode}")
         break
 else:
-    ta = run([ROOT / "tools/e2tree", OUT / "tree-plain.img"])
-    tb = run([ROOT / "tools/e2tree", OUT / "tree-journalled.img"])
+    if os.environ.get("PAX_E2FS_NATIVE") == "1":
+        # tools/e2tree runs debugfs through tools/e2fs; inside a pinned image, directly (verify.py's way).
+        from importlib.machinery import SourceFileLoader
+        import contextlib
+        import io
+        wrapper = OUT / "e2fs-local"
+        wrapper.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        wrapper.chmod(0o755)
+        mod = SourceFileLoader("px162_e2tree", str(ROOT / "tools/e2tree")).load_module()
+        mod.E2FS = str(wrapper)
+
+        def tree_of(img):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = mod.main(["e2tree", str(img)])
+            return code, out.getvalue().encode()
+    else:
+        def tree_of(img):
+            r = run([ROOT / "tools/e2tree", img])
+            return r.returncode, r.stdout
+    (ca, ta), (cb, tb) = tree_of(OUT / "tree-plain.img"), tree_of(OUT / "tree-journalled.img")
+    (OUT / "tree-plain.txt").write_bytes(ta)
+    (OUT / "tree-journalled.txt").write_bytes(tb)
     check = oracle("e2fsck", "-fn", OUT / "tree-journalled.img")
-    row("tree", ta.returncode == 0 and ta.stdout == tb.stdout and check.returncode == 0,
+    row("tree", ca == 0 and cb == 0 and ta == tb and len(ta) > 0 and check.returncode == 0,
         "a populated journalled root: e2tree equal to the plain build's, e2fsck -fn clean")
     again = OUT / "tree-again.img"
     if again.exists():
