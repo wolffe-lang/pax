@@ -606,11 +606,12 @@ def main():
         # px78b: one summary names the allow-listed disk; one word installs.
         flat = m.unwrapped(plan)
         need(flat, SUMMARY, 'M3-summary')
-        need(flat, 'The root file system is ext2 without a journal.', 'M3-summary')
-        for gone in ('confirmation ERASE', 'ext2-preview', 'Type the complete confirmation'):
+        # px162: the guided default is ext3; the summary names it and the flag that installs ext2.
+        need(flat, 'The root file system is ext3, journalled (data=ordered); pax-install --ext2-preview installs ext2 without a journal.', 'M3-summary')
+        for gone in ('confirmation ERASE', 'Type ext2-preview', 'Type the complete confirmation'):
             if gone in flat:
                 fail('M3-summary', f'{gone!r} on the screen:\n' + plan)
-        print(f'PASS M3-summary: {SUMMARY!r}, the ext2 notice, one word asked; no token on the screen', flush=True)
+        print(f'PASS M3-summary: {SUMMARY!r}, the ext3 notice, one word asked; no token on the screen', flush=True)
         m.type('yes\n')
         t_confirm = time.monotonic()
         # px106: the installer asks for root's and wolf's passwords after the word; n leaves both locked.
