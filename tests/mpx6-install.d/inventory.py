@@ -19,9 +19,10 @@ def digest(path):
         for b in iter(lambda: f.read(1024 * 1024), b''): h.update(b)
     return h.hexdigest()
 
-for n in ['a', 'b']:
+# px162: vda 256 MiB, so the default profile's dry-run (ext3: a root of 64 MiB at least) plans it.
+for n, mib in [('a', 256), ('b', 128)]:
     p = work / (n + '.img')
-    with p.open('wb') as f: f.truncate(128 * 1024 * 1024)
+    with p.open('wb') as f: f.truncate(mib * 1024 * 1024)
 before = [digest(work / (n + '.img')) for n in ['a', 'b']]
 # px78: vda is named on the allow-list by its serial (GET_ID); vdb is
 # read-only (refused before the list); vdc is not there.
@@ -40,9 +41,9 @@ run(repo/'tools/mkimage', '--conf', repo/'boot/limine-initramfs.conf', '--add', 
     '--serial', work/'serial.log', '--marker', 'halt', '--drive', str(work/'a.img')+';serial=PX71-INV-A',
     '--drive', str(work/'b.img')+',ro;serial=PX71-INV-B', work/'boot.iso'))
 s=(work/'serial.log').read_text(errors='replace')
-assert '/dev/vda bytes=134217728 sector=512 readonly=false mounted=false root=false' in s, s
+assert '/dev/vda bytes=268435456 sector=512 readonly=false mounted=false root=false' in s, s
 assert '/dev/vdb bytes=134217728 sector=512 readonly=true mounted=false root=false' in s, s
-assert 'capacity_bytes 134217728' in s and 'games no' in s, s
+assert 'capacity_bytes 268435456' in s and 'games no' in s and 'format ext3' in s, s
 assert 'pax-install: refused: read-only: /dev/vdb' in s, s
 assert 'pax-install: refused: no such disk: /dev/vdc' in s, s
 assert [digest(work/(n+'.img')) for n in ['a','b']] == before
