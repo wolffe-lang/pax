@@ -1,6 +1,11 @@
 //! Pure whole-disk planner. No path opens, clocks or environment reads.
 //! GPT uses 512-byte sectors; ext2 uses 4096-byte blocks. Every otherwise
 //! unused byte is named in the plan, never hidden by a rounded capacity.
+//! px162: the root's profile is ext3 (a journal of JOURNAL_BLOCKS, the
+//! default) or ext2 (`--ext2-preview`, named). An ext2 plan, its text and
+//! its token are the ones every earlier installer made, byte for byte; an
+//! ext3 plan is v2 and its token ends in ` ext3`, so no token of one
+//! profile confirms the other.
 
 const INSTALL_USER_ID: int = 1000
 
@@ -15,6 +20,16 @@ const ESP_BYTES: int = 67108864
 const ROOT_MIN: int = 8388608
 
 const ROOT_MAX: int = 17592186040320 // (2^32 - 1) ext2 blocks of 4096 bytes
+
+/// px162: the ext3 root's journal, 16 MiB of 4 KiB blocks (paxext2 --journal).
+const JOURNAL_BLOCKS: int = 4096
+
+/// px162: an ext3 root holds its journal in at most a quarter of its blocks.
+const ROOT_MIN_EXT3: int = 67108864
+
+const PROFILE_EXT3: str = "ext3"
+
+const PROFILE_EXT2: str = "ext2"
 
 struct Target {
     name: str,
@@ -35,6 +50,8 @@ struct Plan {
     tail_bytes: int,
     unused_bytes: int,
     token: str,
+    // px162: PROFILE_EXT3 or PROFILE_EXT2
+    profile: str,
 }
 
 fn valid_name(s: str) -> bool {
@@ -66,13 +83,14 @@ fn valid_disk(s: str) -> bool {
     s != "." && s != ".."
 }
 
-fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
+fn make_plan(t: Target, seed: str, user: str, games: str, profile: str) -> Plan ! {
     invalid,
     running_root,
     mounted,
     readonly,
     sector_size,
     too_small,
+    too_small_for_ext3,
 } {
     if !valid_disk(t.name) || !valid_name(user) || seed.len < 1 || seed.len > 128 { return invalid }
     for c in seed.bytes() {
@@ -80,6 +98,7 @@ fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
         if n < 33 || n > 126 { return invalid }
     }
     if GAMES_REQUIRE_ANSWER && games != "yes" && games != "no" { return invalid }
+    if profile != PROFILE_EXT3 && profile != PROFILE_EXT2 { return invalid }
     if t.running_root { return running_root }
     if t.mounted { return mounted }
     if t.readonly { return readonly }
@@ -90,7 +109,9 @@ fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
     let available = end - ROOT_START
     if available < ROOT_MIN { return too_small }
     let root = if available < ROOT_MAX then available else ROOT_MAX
-    let token = "ERASE /dev/{t.name} {t.identity} {t.bytes} {seed}"
+    if profile == PROFILE_EXT3 && root < ROOT_MIN_EXT3 { return too_small_for_ext3 }
+    let suffix = if profile == PROFILE_EXT3 then " ext3" else ""
+    let token = "ERASE /dev/{t.name} {t.identity} {t.bytes} {seed}{suffix}"
     Plan {
         target: copy t,
         seed: seed,
@@ -100,7 +121,15 @@ fn make_plan(t: Target, seed: str, user: str, games: str) -> Plan ! {
         tail_bytes: t.bytes - end,
         unused_bytes: available - root,
         token: token,
+        profile: profile,
     }
+}
+
+/// px162: what a refusal adds after its name: an ext3 root too small for
+/// its journal says so, and names the choice that installs one without.
+fn small_ext3_hint(why: str) -> str {
+    if why != "too_small_for_ext3" { return "" }
+    " (an ext3 root needs {ROOT_MIN_EXT3 / 1048576} MiB for its {JOURNAL_BLOCKS * 4096 / 1048576} MiB journal; pax-install --ext2-preview installs ext2 without one)"
 }
 
 fn confirm_plan(p: Plan, current: Target, answer: str) -> () ! {unconfirmed, changed} {
@@ -180,15 +209,20 @@ fn wipe_text(w: Wipe) -> str {
 fn plan_body(p: Plan) -> str {
     var zero = ""
     for w in wipes(p) { zero += "{wipe_text(w)} ({w.why})\n" }
-    "PAX install plan v1\n" +
-        "format ext2-developer-preview (NO journal; not ext3)\n" +
+    let head = if p.profile == PROFILE_EXT3 {
+        "PAX install plan v2\nformat ext3 (journal {JOURNAL_BLOCKS} blocks of 4096 bytes, 16 MiB, inode 8; data=ordered)\n"
+    } else {
+        "PAX install plan v1\nformat ext2-developer-preview (NO journal; not ext3)\n"
+    }
+    let fs = if p.profile == PROFILE_EXT3 then "ext3" else "ext2"
+    head +
         "target /dev/{p.target.name}\nidentity {p.target.identity}\n" +
         "capacity_bytes {p.target.bytes}\nlogical_sector_bytes {p.target.sector}\n" +
         "partition 3 bios offset_bytes 1048576 length_bytes 1048576\n" +
         "partition 1 esp offset_bytes {ESP_START} length_bytes {ESP_BYTES}\n" +
         "partition 2 root offset_bytes {ROOT_START} length_bytes {p.root_bytes}\n" +
         "prefix_reserved_bytes 1048576 (persistent log: offset 65536 length 65536)\ntail_reserved_bytes {p.tail_bytes} (GPT backup and block alignment)\n" +
-        "unused_bytes {p.unused_bytes} (capacity beyond the ext2 block-number limit)\n" +
+        "unused_bytes {p.unused_bytes} (capacity beyond the {fs} block-number limit)\n" +
         zero +
         "seed {p.seed}\nuser {p.user} uid {INSTALL_USER_ID} gid {INSTALL_USER_ID} no-password\n" +
         "games {if p.games then "yes" else "no"}\n"
