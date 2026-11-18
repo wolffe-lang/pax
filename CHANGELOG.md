@@ -7,6 +7,28 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **An inode's change is no longer lost under write-back, and a lost change is said as a kernel bug, never as the disk's error (px164).**
+  An installed root on plain ext2, mounted write-back, said `ext2: sda2: an I/O error writing block 328169` while the
+  machine sat at its shell prompt, with no error from the disk. Block 328169 is an inode table's. Every change to an
+  inode wrote the inode's bytes into the buffer `inode()` returned and then called `idirty`, which found the block
+  again through the group's descriptor: a `get` between the change and its mark, against the cache's rule. When the
+  descriptor block was not cached, the clock hand ran, and under write-back it passes dirty metadata by (px151's
+  order), so on a volume where many inodes had changed since the flusher's last turn it chose among few buffers, the
+  inode's clean one among them. The change was gone, and the mark found no block. The window was there since px63;
+  px151's skip made it reachable.
+  - **The fix.** An inode's writers keep the block `inode_w` read and mark it (`imark`) with nothing asked for in
+    between.
+  - **Said by name.** Every mark names the address its change went through, and kernel/block's `written` says
+    whether that is still the block's buffer. A change lost before its mark is `ext2: vda: a kernel bug: ext2
+    dirtied an uncached block N; the change is lost (not a disk error)`, or, through a stale buffer now another
+    block's, a line naming that block (forgotten when clean, so the stray bytes never reach the disk). The first
+    eight a volume are said and all are counted; the volume is not marked clean at its unmount.
+  - **Rows.** `tests/mpx6-ext2-cache`: a write-back volume of 12,000 files in 120 directories (20 GiB, sparse),
+    `chmod` of every file (modes), a walk that moves every access time beside an appender, then the flusher's idle
+    turns (scene), and the same under memory pressure (pressure); every inode is then read from the disk by
+    e2fsprogs. Before: modes lost 793 and 801 of 12,000 changes in two takes, with the installed root's very line.
+    After: every mode, every access time and every appended line is on the disk, and `e2fsck -fn` is clean.
+
 - **A power cut no longer leaves a name of an inode that is not there, and an upgrade cut that way resumes (px151, pax#442).**
   An upgrade cut by power while it wrote `/bin/burrowd.pax-tmp` left the temporary's directory entry and its
   inode's bitmap bit on the disk, but not the inode: under write-back the buffer cache's clock hand had written the
