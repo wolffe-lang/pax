@@ -7,6 +7,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **The installer formats a journalled root: ext3 by default, ext2 a named choice.** `pax-install` now writes
+  an ext3 root with a 16 MiB journal (`data=ordered`), which PAX replays after a power cut, in the guided flow,
+  `--dry-run` and `--install`; `--ext2-preview` still installs the ext2 developer preview without a journal.
+  `paxext2 --journal BLOCKS` writes the journal (an empty internal one in inode 8, held to `mke2fs -t ext3` by
+  `e2fsck -fn` and `dumpe2fs`). Each profile's plan has its own confirmation token: an ext2 plan and its token are
+  byte for byte the earlier installers', and an ext3 token ends in ` ext3`, so neither confirms the other. An
+  ext3 root under 64 MiB is refused by name before any write. The written root is held to the plan (a journal
+  in inode 8 for ext3, none for ext2), the installed `limine.conf` and `/etc/fstab` name ext3, and an upgrade
+  regenerates the root's own profile's texts: an ext2 install keeps ext2 and its texts byte for byte, and is
+  never converted. The image's own install takes the default. `tests/mpx6-install` installs both profiles,
+  checks the ext3 root with Linux's `e2fsck -fn`, cuts its power mid-write, and checks it clean again after
+  PAX's replay (`powercut.py`).
+
 - **A journal whose replay start lies outside its log is refused, the log kept (pax#419).** The journal's
   superblock names where its log begins (`s_start`); a value that is not 0 and not one of the log's own blocks,
   from `s_first` up to `s_maxlen`, made the replay read a block no transaction wrote, find nothing, and empty the
