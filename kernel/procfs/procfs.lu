@@ -1174,8 +1174,8 @@ pub fn child_at(d: u64, k: u64) -> u64 {
 ///
 ///     state live|gone          live while kernel/ext2's journal_live holds
 ///     device <name> <major>:<minor>
-///     journal inode <n>, <blocks> blocks in <runs> runs, data=ordered
-///     sequence <next>, <commits> commits
+///     journal inode <n>, <blocks> blocks in <runs> run(s), data=ordered
+///     sequence <next>, <commits> commit(s)
 fn jbd2info(base: u64, r: u64) -> u64 {
     let d = dev_of(r)
     let v = ext2.live_journal_on(d)
@@ -1199,11 +1199,11 @@ fn jbd2info(base: u64, r: u64) -> u64 {
     n = put_dec(base, n, journal.size(v))
     n = put_s(base, n, " blocks in ")
     n = put_dec(base, n, journal.runs(v))
-    n = put_s(base, n, " runs, data=ordered\nsequence ")
+    n = put_s(base, n, if journal.runs(v) == 1 { " run, data=ordered\nsequence " } else { " runs, data=ordered\nsequence " })
     n = put_dec(base, n, journal.sequence(v))
     n = put_s(base, n, ", ")
     n = put_dec(base, n, journal.book(v, 0))
-    put_s(base, n, " commits\n")
+    put_s(base, n, if journal.book(v, 0) == 1 { " commit\n" } else { " commits\n" })
 }
 
 /// dw02: `/proc/pax-random`'s text at `base`: its length. One fact a line,
