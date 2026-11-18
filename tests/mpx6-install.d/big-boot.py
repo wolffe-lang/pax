@@ -24,7 +24,9 @@ r = subprocess.run([str(x) for x in [a.repo / 'tools/qemu-halt', '--boot-disk', 
 (a.work / ('big-boot-' + a.firmware + '.log')).write_bytes(r.stdout + r.stderr)
 assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
 text = serial.read_text(errors='replace').replace('\r', '')
-assert re.search(r'root: PARTUUID=[0-9a-fA-F-]+ \(vda2\) on /: ext2, read-write', text), text
+# px162: the root's profile (install.py's), ext3 by default.
+profile = (a.work / 'profile').read_text().strip() if (a.work / 'profile').exists() else 'ext2'
+assert re.search(r'root: PARTUUID=[0-9a-fA-F-]+ \(vda2\) on /: ' + profile + ', read-write', text), text
 assert '$ ' in text and 'PANIC' not in text and 'wolf-trap' not in text, text
 with image.open('rb') as f:
     f.seek(69206016 + 1024)
