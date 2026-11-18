@@ -2570,3 +2570,15 @@ Alt+Fn is unchanged.
 | QEMU QMP `query-qmp-schema` and `input-send-event` | QEMU 8.2.2, queried without a guest | resolve the QKeyCode enum through command argument references; save its schema for the off-boot regression; send uppercase text as Shift plus lowercase QKeyCode events |
 | PAX's own `kernel/console`, `kernel/screen`, `kernel/files` and yew's input decoder, mouse routing and context-menu geometry | the projects' own code | the tracking-mode handoff, foreground ownership, event bytes, menu hit tests and the absence of a VT-switch action |
 | Console pointer and keyboard probes under QEMU | captured before and after the change | exact SGR bytes for the three tracking modes, ownership and foreground guards, Alt-arrow bytes, unchanged Alt+Fn and F1–F5; a real yew menu's hover and click frames |
+
+## px164 — an inode's change lost under write-back
+
+No kernel's, file system's or C library's source was read, and no e2fsprogs source. The probe's calls are the man
+pages'; e2fsprogs is run as a black box.
+
+| source | version | read, for |
+|---|---|---|
+| chmod(2), getdents64(2), lstat(2), open(2), read(2), write(2) with O_APPEND, fork(2), kill(2), sync(2), proc(5) (`/proc/meminfo`), mmap(2) | man-pages 6.x | `user/elf/churn.c`'s calls and what each one changes |
+| e2fsprogs' `mke2fs -d`, `debugfs` (`stat`, `dump`), `e2fsck -fn`, `dumpe2fs -h` | 1.47.0 (the pinned image's, or the toolchain image's own) | black box: the rows' disk made from a tree, and every inode's mode and access time, the appended log's bytes and the volume's consistency read back from it |
+| the ext2 layout documents kernel/ext2's header names | as there | which block of a group is its inode table (a line's block number read as a table block) |
+| PAX's own `kernel/ext2`, `kernel/block`, `kernel/tree`, `kernel/fstab`, `kernel/signal`, `kernel/sched`, `user/init`, `user/disktools/paxext2` | this tree | where a change and its mark are apart; who raises SIGKILL; the installed root's layout; extended (`kernel/ext2`, `kernel/block`) |
