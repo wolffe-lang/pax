@@ -2547,3 +2547,18 @@ deterministic by holding the guest's disk to a few writes a second from QEMU, wh
 |---|---|---|
 | QEMU's `-drive` throttling options (`throttling.iops-write`) and HMP's `block_set_io_throttle` and `info blockstats` (qemu.org documentation) | QEMU 8.2.2 and 11.1.2, run | a disk that takes each write at most N times a second, set from boot by `-set drive.d0.throttling.iops-write=N` (checked: `info block` says `iops_wr=N`) or at a moment from the monitor |
 | fsync(2), sigaction(2), nanosleep(2) | man-pages 6.19 | the probe's late daemon: its writes synced, its SIGTERM handler, its 100 ms step |
+
+## px161 — SMP stage 1: every application processor started, its own state, parked idle
+
+No kernel's, firmware's or bootloader's source was read: the bootloader is a black box run by its protocol, and its
+processors' parked state was read from QEMU's register dump, not from its code.
+
+| source | version | read, for |
+|---|---|---|
+| The Limine protocol, PROTOCOL.md: the MP (Multiprocessor) feature (the request, its x2APIC flag, the response, `struct limine_mp_info`, `goto_address` with release and acquire, `extra_argument`), the Stack Size feature, the x86-64 machine state at entry (base revisions 5 and 6: the local APIC on every processor, the LVT entries masked) | limine-protocol `3a0526b7` (Limine 12.9.1, `boot/limine.pin`) | the request in `boot/start.S`, `kernel/boot_info`'s MP response, `kernel/smp`'s hold and release, `boot/isr.S`'s `pax_ap_hold` and `pax_ap_entry` |
+| Limine's CONFIG.md | v12.9.1 | that no configuration option turns the MP feature off: `nosmp` is the kernel's word |
+| Intel SDM vol. 2: SWAPGS, SYSCALL, SYSRET, IRET, RDMSR, WRMSR, LGDT, LTR, LIDT, MOV to CR3, XSETBV, HLT (and what ends it with interrupts off), STI's shadow | as px09's and kw10's entries | the GS step at every change of ring, the application processor's hold, entry and idle |
+| Intel SDM vol. 3A §2.5 (CR0, CR4), §2.6 (XCR0), §3.4.4 (FS and GS bases in 64-bit mode), §5.8.8 (SYSCALL and SYSRET, the window before the stack switch), §6.7.1 (the NMI's blocking until IRET), §6.14.1 (the 64-bit interrupt gate), §6.14.5 (the interrupt stack table), §7.7 (the 64-bit TSS), §9.4 (INIT, wait-for-SIPI), §11.4-§11.6 (the local APIC, the ICR, NMI and INIT delivery), §11.5.4 (its timer), §11.9 (the spurious vector), §11.12 (x2APIC: the ICR as one MSR, xAPIC to x2APIC directly) | as px76's and kw10's entries | per-processor GDT, TSS and IST stacks, the control state an application processor takes from the boot processor, its tick, the hold's gate and its one NMI, INIT for a processor not run, the NMI the test sends |
+| Intel SDM vol. 4: IA32_GS_BASE (0xC0000101), IA32_KERNEL_GS_BASE (0xC0000102), IA32_EFER, STAR, LSTAR, FMASK, IA32_APIC_BASE | as px09's entry | the GS bases each ring sees, and the MSRs mirrored |
+| QEMU's monitor (`stop`, `cont`, `info registers -a`) | QEMU 8.2.2, run | every processor's RIP, RSP, GS, GDT, TR, IDT, CR0, CR3, CR4 and EFER from outside the guest, for tests/mpx6-cpus |
+| The processor census (`tests/mpx6-cpus.d/inventory.json`, `protections.json`), and PAX's own `kernel/gdt`, `kernel/idt`, `kernel/apic`, `kernel/timer`, `kernel/interrupts`, `kernel/sched`, `kernel/procfs`, `kernel/cpus`, `boot/isr.S`, `boot/user.S`, `boot/sched.S`, `tests/mpx6-cpus` | this tree | read and extended |
