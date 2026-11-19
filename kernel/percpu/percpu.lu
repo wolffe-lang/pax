@@ -1,0 +1,250 @@
+//! percpu — each processor's record (px161, SMP stage 1).
+//!
+//! A record is 512 bytes: CPU 0's is boot/isr.S's `pax_cpu0`, an
+//! application processor's the first page of its window (kernel/smp). In
+//! ring 0 IA32_GS_BASE holds the running CPU's record (boot/isr.S's GS
+//! step: SWAPGS at every change of ring), so `mine()` is one load,
+//! `%gs:0`, the record's own address. Words, by byte offset (boot/isr.S,
+//! boot/user.S and boot/sched.S read 8, 16, 24, 32 and 96 as `%gs:N` or
+//! from the record, by these numbers):
+//!
+//!     0 ME       the record's own address        8 INDEX    0 the boot processor
+//!    16 KSTACK   SYSCALL's stack top (the running thread's kernel stack)
+//!    24 USP      the user RSP while pax_syscall_entry builds the frame
+//!    32 CURRENT  the running thread's slot (kernel/sched); IDLE_SLOT on an
+//!                application processor, which runs no thread
+//!    40 APIC     its local APIC ID     48 UID  its ACPI processor UID
+//!    56 STATE    BOOT, RELEASED, IDLE or STOPPED
+//!    64 TICKS    its local timer's interrupts (an application processor's)
+//!    72 WAKES    its idle loop's turns      80 NMIS  its NMIs
+//!    88 SPURIOUS its local APIC's spurious interrupts
+//!    96 STACK    its idle stack's top (the entry's RSP)
+//!   104 CAUSE, 112 ERROR, 120 RIP, 128 CR2: why it stopped
+//!   136 TSC      the TSC when it reached its idle loop
+//!   144 TSS, 152 GDT: the addresses its TR and GDTR name
+//!   160 GS_SEEN  IA32_GS_BASE as the processor itself read it
+//!   168 NMI_AT   the frame its last NMI was taken on (its IST2 stack)
+//!   256 its GDT (7 descriptors), 320 its GDTR, 384 its TSS (104 bytes)
+//!
+//! Each word is written by its own processor alone after it is released
+//! (the counters, CURRENT, KSTACK, USP, the cause), or by the boot
+//! processor alone before (the rest); every other processor only reads,
+//! volatile. `pax_ap_boot`'s words (boot/isr.S; kernel/smp's header) are
+//! the rest of what the processors share.
+//!
+//! Written from the Intel SDM vol. 2 (SWAPGS, RDMSR, WRMSR), vol. 3A
+//! §3.4.4 (the GS base in 64-bit mode) and vol. 4 (IA32_GS_BASE
+//! 0xC0000101, IA32_KERNEL_GS_BASE 0xC0000102). No Linux source; no other
+//! kernel's source.
+
+extern "c" fn pax_cpu_self() -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
+extern "c" fn pax_halt() -> never
+
+extern "c" let pax_cpu0: *u64
+extern "c" let pax_ap_boot: *u64
+extern "c" let pax_gdt: *u64
+extern "c" let pax_tss: *u64
+
+pub const SIZE: u64 = 512
+pub const ME: u64 = 0
+pub const INDEX: u64 = 8
+pub const KSTACK: u64 = 16
+pub const USP: u64 = 24
+pub const CURRENT: u64 = 32
+pub const APIC: u64 = 40
+pub const UID: u64 = 48
+pub const STATE: u64 = 56
+pub const TICKS: u64 = 64
+pub const WAKES: u64 = 72
+pub const NMIS: u64 = 80
+pub const SPURIOUS: u64 = 88
+pub const STACK: u64 = 96
+pub const CAUSE: u64 = 104
+pub const ERROR: u64 = 112
+pub const RIP: u64 = 120
+pub const CR2: u64 = 128
+pub const TSC: u64 = 136
+pub const TSS: u64 = 144
+pub const GDT: u64 = 152
+pub const GS_SEEN: u64 = 160
+pub const NMI_AT: u64 = 168
+pub const GDT_AREA: u64 = 256
+pub const GDTR_AREA: u64 = 320
+pub const TSS_AREA: u64 = 384
+
+/// STATE's values (0: a record never made).
+pub const BOOT: u64 = 1
+pub const RELEASED: u64 = 2
+pub const IDLE: u64 = 3
+pub const STOPPED: u64 = 4
+
+/// An application processor's CURRENT: its idle loop, no thread's slot.
+pub const IDLE_SLOT: u64 = 0xffffffffffffffff
+
+/// CAUSE for a processor other than CPU 0 at the scheduler's tick or
+/// switch (`boot_only`); an exception's cause is its vector (0-255).
+pub const CAUSE_SCHED: u64 = 0x1000
+
+/// `pax_ap_boot`'s words (kernel/smp's header says what each holds).
+pub const W_CR3: u64 = 0
+pub const W_CR0: u64 = 2
+pub const W_CR4: u64 = 3
+pub const W_EFER: u64 = 4
+pub const W_XCR0: u64 = 5
+pub const W_STAR: u64 = 6
+pub const W_LSTAR: u64 = 7
+pub const W_FMASK: u64 = 8
+pub const W_X2APIC: u64 = 9
+pub const W_STOPPED: u64 = 10
+pub const W_REPORTED: u64 = 11
+pub const W_MAIN: u64 = 1
+
+const GS_BASE: u64 = 0xc0000101
+const KERNEL_GS_BASE: u64 = 0xc0000102
+
+/// Word `off` of the record at `rec`, read volatile.
+pub fn get(rec: u64, off: u64) -> u64 {
+    // # Safety: `rec` is a record (pax_cpu0 or a window's first page,
+    // mapped before its processor was released), off < SIZE, 8-aligned.
+    unsafe { ((rec + off) as *u64).read_volatile() }
+}
+
+/// Write word `off` of the record at `rec`.
+pub fn put(rec: u64, off: u64, v: u64) {
+    // # Safety: as `get`; each word has one writer (the header says which).
+    unsafe { ((rec + off) as *u64).write_volatile(v) }
+}
+
+/// This processor's record: %gs:0.
+pub fn mine() -> u64 {
+    // # Safety: isr.S's `movq %gs:0, %rax`; ring 0 outside the entry
+    // windows always has its record at GS's base (gdt.start set CPU 0's
+    // before any IDT was loaded; pax_ap_entry an application processor's).
+    unsafe { pax_cpu_self() }
+}
+
+/// This processor's index: 0 the boot processor.
+pub fn index() -> u64 {
+    get(mine(), INDEX)
+}
+
+/// The running thread's slot on this processor (kernel/sched's `cur`).
+pub fn current() -> u64 {
+    get(mine(), CURRENT)
+}
+
+pub fn set_current(s: u64) {
+    put(mine(), CURRENT, s)
+}
+
+/// SYSCALL's stack on this processor: the running thread's kernel stack
+/// top (kernel/sched's `enter_space`; boot/user.S reads %gs:16).
+pub fn set_kstack(v: u64) {
+    put(mine(), KSTACK, v)
+}
+
+/// This processor's TSS (kernel/gdt's `set_rsp0`).
+pub fn tss() -> u64 {
+    get(mine(), TSS)
+}
+
+/// One more of counter `off` in this processor's record (its own word:
+/// no other processor writes it).
+pub fn count(off: u64) {
+    let r = mine()
+    put(r, off, get(r, off) + 1)
+}
+
+/// CPU 0's record.
+pub fn boot_record() -> u64 {
+    // # Safety: the address of boot/isr.S's 512 bytes; nothing is read.
+    unsafe { pax_cpu0 as u64 }
+}
+
+/// CPU 0's record filled and made GS's base (kernel/gdt's `start`, right
+/// after LGDT reloaded GS, which set its base to the descriptor's 0):
+/// IA32_GS_BASE the record, IA32_KERNEL_GS_BASE 0 (ring 3's).
+pub fn boot_init() {
+    let r = boot_record()
+    var i: u64 = 0
+    while i < SIZE {
+        put(r, i, 0)
+        i += 8
+    }
+    put(r, ME, r)
+    put(r, STATE, BOOT)
+    // # Safety: link-time addresses of boot/isr.S's tables; nothing read.
+    unsafe {
+        put(r, TSS, pax_tss as u64)
+        put(r, GDT, pax_gdt as u64)
+    }
+    // # Safety: cpu.S's WRMSR of the two architectural GS bases; the
+    // record is the kernel's, and nothing in ring 3 runs yet.
+    unsafe {
+        pax_wrmsr(GS_BASE, r)
+        pax_wrmsr(KERNEL_GS_BASE, 0)
+    }
+    put(r, GS_SEEN, r)
+}
+
+/// `pax_ap_boot`'s word `i`.
+pub fn word(i: u64) -> u64 {
+    // # Safety: boot/isr.S's 16 words; i < 16.
+    unsafe { ((pax_ap_boot as u64 + i * 8) as *u64).read_volatile() }
+}
+
+pub fn put_word(i: u64, v: u64) {
+    // # Safety: as `word`; written by the boot processor before any
+    // application processor is released (W_STOPPED and W_REPORTED below).
+    unsafe { ((pax_ap_boot as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// The processors that have stopped (bit i for index i), set by each
+/// processor for itself (`stop`), read by the boot processor.
+pub fn stopped() -> u64 {
+    // # Safety: an 8-aligned word of boot/isr.S's; every access to it is
+    // atomic.
+    unsafe { ((pax_ap_boot as u64 + W_STOPPED * 8) as *u64).atomic_load(Order.acquire) }
+}
+
+/// This processor stops for good: why in its record, its bit in
+/// W_STOPPED (the boot processor names it at its next tick: kernel/smp's
+/// `report_stops`), then `cli; hlt` forever. It writes no log: the boot
+/// processor writes the screen, the ring and COM1 without a lock.
+pub fn stop(cause: u64, error: u64, rip: u64, cr2: u64) -> never {
+    let r = mine()
+    put(r, CAUSE, cause)
+    put(r, ERROR, error)
+    put(r, RIP, rip)
+    put(r, CR2, cr2)
+    put(r, STATE, STOPPED)
+    let bit: u64 = 1 << (get(r, INDEX) & 63)
+    // # Safety: as `stopped`; a CAS loop sets one bit, release so the
+    // record's words above are seen with it.
+    unsafe {
+        let p = (pax_ap_boot as u64 + W_STOPPED * 8) as *u64
+        var done = false
+        while !done {
+            let old = p.atomic_load(Order.relaxed)
+            let (_o, ok) = p.atomic_cas(old, old | bit, Order.release, Order.relaxed)
+            done = ok
+        }
+        pax_halt()
+    }
+}
+
+/// px161 (the orchestrator's ruling): the scheduler's tick and switch run
+/// on CPU 0 alone in stage 1. On any other processor this stops it, its
+/// cause CAUSE_SCHED and the RIP of `f` (the frame the scheduler was
+/// handed: boot/isr.S's, its RIP at byte 136), so an application
+/// processor that ever reached the scheduler is named by the boot
+/// processor, never run on.
+pub fn boot_only(f: u64) {
+    if index() != 0 {
+        // # Safety: `f` is the trampoline's frame (176 bytes), live for
+        // the handler that passed it.
+        let rip = unsafe { ((f + 136) as *u64).read_volatile() }
+        stop(CAUSE_SCHED, 0, rip, 0)
+    }
+}
