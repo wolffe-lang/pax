@@ -124,6 +124,37 @@ OVMF, by build). Usable memory is mapped in the
 HHDM at this base revision, so the allocator reaches every frame it
 hands out through it.
 
+**Every processor (px161, SMP stage 1).** `boot/start.S` carries the MP
+request (id `0x95a67b819a1b857e, 0xa0b61b723b6a73e0`, revision 0, flags 0:
+no x2APIC asked, so a firmware's x2APIC mode is turned off where Limine
+can; every machine PAX has met handed over in xAPIC mode). With it Limine
+starts every application processor before the kernel's entry and parks
+each in a loop of its own that polls the processor's `goto_address`; its
+response lists every processor, the boot one included (one entry on a
+machine with one). The parked loop, the processors' stacks and the response
+are bootloader-reclaimable memory, which `kernel/frames` never hands out.
+The parked loop spins: a processor left there costs a thread of the
+machine (with 16 processors on 8 host threads under KVM, a boot that left
+them there until `kernel/user`'s start took 820 ms where one with none
+started took 480 ms). So the kernel's first step (`kernel/smp`'s `hold`)
+stores `boot/isr.S`'s `pax_ap_hold` into each `goto_address` with release
+semantics, as the protocol asks: on Limine's tables and stack, the
+processor loads an IDT of its own holding only an NMI gate and halts with
+interrupts off. After `kernel/user`'s start `kernel/smp` gives each its own
+window of 84 KiB in PML4 slot 417 (a record page, an idle stack and four
+IST stacks, each above an unmapped guard), stores the record where the
+held processor looks and sends it one NMI. It goes on to `pax_ap_entry`,
+which loads PAX's tables and its own stack before anything else, then its
+GDT, TSS, the IDT and GS. A processor PAX does not run (`nosmp` on the
+kernel command line, past 64, or one that never reached its idle loop) is
+halted at the entry and sent INIT later, so it waits for a startup IPI as
+it did before any bootloader started it; Limine's configuration has no
+option that drops the request, so this is how `nosmp` gives back the
+one-processor machine. Measured on
+QEMU 8.2.2 (q35, KVM): 1, 2, 4 and 16 processors, SeaBIOS and OVMF, every
+application processor halted in `pax_ap_halt` with its own GS, GDT and TR
+(`tests/mpx6-cpus`).
+
 ## The image
 
 `tools/mkimage KERNEL.elf OUT.iso` lays out:
