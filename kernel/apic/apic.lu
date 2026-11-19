@@ -138,6 +138,74 @@ pub fn start(pml4: u64) {
     write(0x350, LINT0_EXTINT)
 }
 
+/// px161: whether `start` found x2APIC mode (the boot processor's mode,
+/// which an application processor takes too: `ap_start`).
+pub fn x2() -> bool {
+    // # Safety: a scalar written once by `start`, before any application
+    // processor is released.
+    unsafe { x2mode }
+}
+
+/// px161: an application processor's local APIC, set as the boot
+/// processor's is: x2APIC when the boot processor's is (IA32_APIC_BASE's
+/// EXTD set beside EN: xAPIC to x2APIC is a direct change, SDM vol. 3A
+/// §11.12.5), then the spurious-interrupt vector `spurious` with the
+/// software enable (SVR bit 8, §11.9). Limine left every LVT entry masked
+/// (docs/BOOT.md); LINT0 stays so (the 8259 reaches the boot processor
+/// alone). Returns its APIC ID.
+pub fn ap_start(spurious: u64) -> u64 {
+    if x2() && !x2apic() {
+        // # Safety: cpu.S's RDMSR and WRMSR of IA32_APIC_BASE (0x1b), EN
+        // (bit 11) and EXTD (bit 10) set, its base kept.
+        unsafe { pax_wrmsr(0x1b, pax_apic_base() | 0xc00) }
+    }
+    write(0xf0, (0x100 | (spurious & 0xff)) as u32)
+    id()
+}
+
+/// px161: end of interrupt at this processor's local APIC (0xb0, SDM vol.
+/// 3A §11.8.5).
+pub fn eoi() {
+    write(0xb0, 0)
+}
+
+/// px161: an interprocessor interrupt to the processor whose APIC ID is
+/// `dest`: the interrupt command register's low word `low` (the delivery
+/// mode in bits 10:8, level assert in bit 14), physical destination, no
+/// shorthand (SDM vol. 3A §11.6.1; in x2APIC mode the one 64-bit MSR
+/// 0x830, the destination in bits 63:32, §11.12.9). In xAPIC mode the high
+/// word first (0x310, the destination in bits 31:24), then the low one,
+/// which sends; then its delivery status (bit 12) is waited out, a bounded
+/// spin.
+fn send_ipi(dest: u64, low: u64) {
+    if x2() {
+        // # Safety: cpu.S's WRMSR of the x2APIC ICR.
+        unsafe { pax_wrmsr(0x830, (dest << 32) | low) }
+        return
+    }
+    write(0x310, ((dest & 0xff) << 24) as u32)
+    write(0x300, low as u32)
+    var k: u64 = 0
+    while k < 1000000 && read(0x300) & 0x1000 != 0 {
+        k += 1
+    }
+}
+
+/// px161: an NMI to the processor whose APIC ID is `dest` (delivery mode
+/// NMI, 0b100).
+pub fn send_nmi(dest: u64) {
+    send_ipi(dest, 0x4400)
+}
+
+/// px161: INIT to the processor whose APIC ID is `dest` (delivery mode
+/// INIT, 0b101, edge, assert): it stops whatever it ran and waits for a
+/// startup IPI (SDM vol. 3A §9.4, §11.6.1), as before any bootloader
+/// started it. The de-assert form older processors needed is not sent:
+/// processors since the Pentium 4 ignore it (§11.6.1).
+pub fn send_init(dest: u64) {
+    send_ipi(dest, 0x4500)
+}
+
 /// Write the APIC's line:
 /// `apic: 0x<phys> at 0x<va>, id <n>, svr 0x<s>, lint0 0x<old> -> 0x<new>`.
 pub fn report() {
