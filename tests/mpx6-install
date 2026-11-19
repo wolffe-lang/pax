@@ -162,13 +162,14 @@ done
 # (bytes [1 MiB, 2 MiB) are PAX's BIOS boot partition, where Limine's
 # bios-install refused the old file system), and an old live image written
 # at byte 0. Each installs, verifies as a blank target does, and leaves no
-# old signature (tools/used-disk check: wipefs and blkid -p).
+# old signature (tools/used-disk check: wipefs and blkid -p). px162: the
+# default profile, so the root is ext3 and its signature ext3's alone.
 for used in fat32 ext4 iso; do
     casework=$work/used-$used
     PAX_INSTALL_USED=$used python3 -I "$D/install.py" "$PAX_ROOT" "$inputs" "$casework" no vdb
     python3 -I "$D/verify.py" "$PAX_ROOT" "$casework" no vdb
     python3 -I "$D/gap.py" "$casework" "$inputs/build/disktools/limine/limine"
-    "$PAX_ROOT/tools/used-disk" check "$casework/target.img" "I-used-signatures-$used"
+    "$PAX_ROOT/tools/used-disk" check "$casework/target.img" "I-used-signatures-$used" ext3
 done
 if [ "$rows" = full ]; then
     tiers=$tier; [ "$tier" != both ] || tiers='native release'
