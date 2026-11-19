@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Judge pxg's selected readers and named refusals on installer-created ext2."""
+"""Judge pxg's selected readers and named refusals on an installer-created root (ext3 by default, or the ext2
+preview: both ext2-family to paxage)."""
 from pathlib import Path
 import re
 import shlex
