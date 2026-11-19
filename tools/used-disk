@@ -2,7 +2,8 @@
 """used-disk (px86): a used disk, as the 860 came to the installer, and the signature oracle.
 
     tools/used-disk make IMAGE CASE [ISO]   lay CASE down on IMAGE (a sparse file of the disk's size)
-    tools/used-disk check IMAGE ROW         the signature oracle over a PAX install on IMAGE
+    tools/used-disk check IMAGE ROW [ROOT]  the signature oracle over a PAX install on IMAGE (ROOT: the root's
+                                            type, ext3 the installer's default, ext2 its --ext2-preview)
 
 The 860 held two partitions from an older install, the first at sector 2048
 (the usual 1 MiB alignment), so its file system began exactly where PAX's
@@ -24,7 +25,8 @@ image's own primary GPT; each partition's allocated extents copied, holes
 kept, to a file of its size) through `wipefs --no-act --json` and `blkid -p`
 (util-linux): the whole disk carries the protective MBR and the two GPT
 headers and no file system; partition 1 vfat's signatures alone; partition 2
-ext2's alone; partition 3 none (Limine's stage is not a file system); blkid's
+the root's type's alone (px162: ext3, or ext2 when ROOT says so); partition 3
+none (Limine's stage is not a file system); blkid's
 one answer for 1 and 2 PAX's own labels (PAX-ESP, pax-root). Exit 1 with
 `FAIL ROW: ...` naming what survived; exit 0 with one PASS line.
 """
@@ -179,7 +181,7 @@ def signatures(img, start, length):
     return found
 
 
-def check(img, row):
+def check(img, row, root='ext3'):
     size = img.stat().st_size
     parts = gpt(img)
     if sorted(parts) != [1, 2, 3]:
@@ -188,7 +190,7 @@ def check(img, row):
     # Each signature kind wipefs may list more than once at its own offsets
     # (a FAT boot sector reads as vfat at 0, 82 and 510); the kinds are the
     # test, and blkid's one answer names PAX's own volume by its label.
-    want = {'disk': ({'PMBR', 'gpt'}, None, None), 1: ({'vfat'}, 'vfat', 'PAX-ESP'), 2: ({'ext2'}, 'ext2', 'pax-root'),
+    want = {'disk': ({'PMBR', 'gpt'}, None, None), 1: ({'vfat'}, 'vfat', 'PAX-ESP'), 2: ({root}, root, 'pax-root'),
             3: (set(), None, None)}
     said = []
     for key, (types, fs, label) in want.items():
@@ -214,7 +216,7 @@ if __name__ == '__main__':
     what, img = sys.argv[1], Path(sys.argv[2]).resolve()
     if what == 'make':
         make(img, sys.argv[3], Path(sys.argv[4]) if len(sys.argv) > 4 else None)
-    elif what == 'check':
-        check(img, sys.argv[3])
+    elif what == 'check' and (len(sys.argv) < 5 or sys.argv[4] in ('ext2', 'ext3')):
+        check(img, sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else 'ext3')
     else:
-        sys.exit('usage: tools/used-disk make IMAGE CASE [ISO] | check IMAGE ROW')
+        sys.exit('usage: tools/used-disk make IMAGE CASE [ISO] | check IMAGE ROW [ext3|ext2]')
