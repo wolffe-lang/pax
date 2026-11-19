@@ -39,12 +39,14 @@
 //!     10 W_STOPPED, 11 W_REPORTED: the stopped processors, by bit
 //!
 //! Then each is released: its record stored into its second hold word with
-//! release semantics, and one NMI when its first says HELD (its gate is
-//! loaded then; the gate's handler returns to the look at the record, so
-//! the one NMI is never lost). It writes the record into `extra_argument`
-//! and goes on to `pax_ap_entry`, as if Limine had sent it there. The boot
-//! processor waits up to a second by kernel/clock for each record to say
-//! IDLE and names any that never did. A processor PAX does not run (`nosmp`
+//! release semantics, every record first, and then one NMI to each once its
+//! first word says HELD (its gate is loaded then, and it looks at the
+//! record only on that gate's return: the NMI is taken in the hold, never
+//! after the processor went on, where no gate of PAX's is ready for it). It
+//! writes the record into `extra_argument` and goes on to `pax_ap_entry`,
+//! as if Limine had sent it there. The boot processor waits up to a second
+//! by kernel/clock for each to say HELD and then IDLE, and names any that
+//! never did. A processor PAX does not run (`nosmp`
 //! on the command line, one past MAX, one whose window memory refused, one
 //! that never reached its idle loop) gets INIT (`park`): it waits for a startup IPI
 //! as it did before any bootloader started it, which is what the
@@ -378,23 +380,31 @@ pub fn start_aps(pml4: u64, main: u64) {
     i = 1
     while i <= m {
         let w = window(i)
-        let h = holds(i)
         percpu.put(w, percpu.STATE, percpu.RELEASED)
-        // # Safety: its hold words (boot/isr.S's, 8-aligned): the record
-        // stored with release semantics, so it and every word published
-        // above are seen by the processor that reads it; then one NMI,
-        // only to a processor that says HELD (its gate is loaded then). A
-        // processor not held yet reads the record before its first HLT.
-        unsafe {
-            ((h + 8) as *u64).atomic_store(w, Order.release)
-            if (h as *u64).atomic_load(Order.acquire) != 0 {
-                apic.send_nmi(percpu.get(w, percpu.APIC))
-            }
-        }
+        // # Safety: its second hold word (boot/isr.S's, 8-aligned): the
+        // record stored with release semantics, so it and every word
+        // published above are seen by the processor that reads it.
+        unsafe { ((holds(i) + 8) as *u64).atomic_store(w, Order.release) }
         i += 1
     }
+    // One NMI each, and only to a processor that says HELD: its gate is
+    // loaded then, and it looks at its record only on that gate's return,
+    // so the NMI is taken in the hold. One not held yet is asked again on
+    // the next turn; one that never says so within the second gets no NMI
+    // and is named below.
+    var sent: u64 = 0 // by bit i (i < MAX, a word's bits)
     var waiting = true
     while waiting {
+        i = 1
+        while i <= m {
+            let bit: u64 = 1 << i
+            // # Safety: its first hold word, which the processor sets.
+            if sent & bit == 0 && unsafe { (holds(i) as *u64).atomic_load(Order.acquire) } != 0 {
+                apic.send_nmi(percpu.get(window(i), percpu.APIC))
+                sent = sent | bit
+            }
+            i += 1
+        }
         waiting = idle_count() < m && clock.now_ns() - t0 < 1000000000
         // # Safety: PAUSE; a polling loop's opaque call.
         unsafe { pax_pause() }
