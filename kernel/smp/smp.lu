@@ -1,0 +1,779 @@
+//! smp — the application processors: started, each with its own state,
+//! and parked idle while the boot processor runs every thread (px161, SMP
+//! stage 1; px138's plan, its stage 1 row).
+//!
+//! **Bring-up, in two steps.** Limine's MP feature (boot/start.S's
+//! request, flags 0) started every processor its MP response lists and
+//! parked each in its own loop, which polls the processor's `goto_address`
+//! (bootloader-reclaimable memory, never handed out by kernel/frames) and
+//! spins: with 16 processors on 8 host threads under KVM, a boot that left
+//! them there until kernel/user's start took 820 ms where one with none
+//! started took 480 ms, most of it before kernel/apic's start. So `hold`,
+//! the kernel's first step, sends each to boot/isr.S's `pax_ap_hold`: CLI;
+//! HLT on Limine's tables and stack, an IDT of its own with only the NMI's
+//! gate, until its record appears in its hold words. Under `nosmp`, and
+//! past MAX, a processor goes to `pax_ap_park` (CLI; HLT) instead.
+//!
+//! `start_aps` (kmain_console, after kernel/user's `start`: the boot
+//! processor's CR0, CR4, EFER and SYSCALL MSRs are final then, and
+//! kernel/timer has its calibration) numbers the response's entries other
+//! than the boot processor's 1, 2, … in its order: index i. For each, up to
+//! MAX in all, a window of 256 KiB at CPUS + i × SPAN (PML4 slot 417, its
+//! tables made now, before the first process copies the kernel half)
+//! holds, each page from kernel/frames, read-write, no-execute:
+//!
+//!     +0x00000  the record (kernel/percpu: 512 bytes, its GDT and TSS in it)
+//!     +0x08000  the idle stack, 16 KiB      (+0x01000 to +0x08000 a guard)
+//!     +0x10000  IST1, the double fault's     +0x18000 IST2, the NMI's
+//!     +0x20000  IST3, the machine check's    +0x28000 IST4, #DB's
+//!
+//! each stack 16 KiB above 16 KiB never mapped: 21 frames, 84 KiB, a
+//! processor. The boot processor writes the record (its index, APIC ID,
+//! ACPI UID, idle stack top, CURRENT the idle mark), the GDT and TSS
+//! (kernel/gdt's `fill_ap`: RSP0 the idle stack, IST1-4 its own four) and
+//! publishes in boot/isr.S's `pax_ap_boot`, before any release:
+//!
+//!     0 W_CR3 the kernel's PML4   1 W_MAIN pax_ap_main's address
+//!     2 W_CR0, 3 W_CR4, 4 W_EFER, 5 W_XCR0 (when CR4.OSXSAVE),
+//!     6 W_STAR, 7 W_LSTAR, 8 W_FMASK: the boot processor's own
+//!     10 W_STOPPED, 11 W_REPORTED: the stopped processors, by bit
+//!
+//! Then each is released: its record stored into its second hold word with
+//! release semantics, and one NMI when its first says HELD (its gate is
+//! loaded then; the gate's handler returns to the look at the record, so
+//! the one NMI is never lost). It writes the record into `extra_argument`
+//! and goes on to `pax_ap_entry`, as if Limine had sent it there. The boot
+//! processor waits up to a second by kernel/clock for each record to say
+//! IDLE and names any that never did. A processor PAX does not run (`nosmp`
+//! on the command line, one past MAX, one whose window memory refused, one
+//! that never reached its idle loop) gets INIT (`park`): it waits for a startup IPI
+//! as it did before any bootloader started it, which is what the
+//! one-processor fallback, `nosmp`, gives back.
+//!
+//! **An application processor** enters at `pax_ap_entry` (PAX's tables,
+//! its own stack, GDT, TSS, the one IDT, GS its record), then
+//! `pax_ap_main`: IA32_GS_BASE read back into its record (GS_SEEN), CR0,
+//! CR4, XCR0, EFER, STAR, LSTAR and FMASK set to the boot processor's, its
+//! local APIC as the boot processor's (kernel/apic's `ap_start`: x2APIC when
+//! that one is, spurious vector 47, its APIC ID held to Limine's), its tick
+//! armed with the boot processor's calibration (kernel/timer's `ap_arm`:
+//! 100 Hz on vector 32), STATE IDLE, then for ever: WAKES + 1; STI; HLT;
+//! CLI (boot/isr.S's `pax_ap_halt`). It runs no thread: its CURRENT is
+//! the idle mark, and kernel/sched's tick and switch stop a processor
+//! other than CPU 0 by name (kernel/percpu's `boot_only`).
+//!
+//! **Its interrupts** (kernel/interrupts sends every vector it takes but
+//! the NMI here, `ap_interrupt`): vector 32, its tick, is counted (TICKS)
+//! and acknowledged at its local APIC; 47, its local APIC's spurious
+//! interrupt, counted and not acknowledged (SDM vol. 3A §11.9); anything
+//! else stops it, the vector, error, RIP and CR2 in its record. Its NMI
+//! (`ap_nmi`, on its own IST2) is counted, the frame's address kept, and
+//! it resumes. The 8259's line reaches CPU 0 alone (LINT0, kernel/apic),
+//! MSI names CPU 0's APIC ID, and every other LVT entry Limine masked: an
+//! application processor takes its tick, NMIs and its spurious vector.
+//!
+//! **What is said.** With one processor, nothing (no line of any boot
+//! changes). With more: `cpus: application processors idle K of M in T
+//! ms, 84 KiB each (N KiB with their tables); the boot processor runs every
+//! thread`, a line for each
+//! that never reached its idle loop, then the private-state check
+//! (`check`): every processor's record, GDT and TSS its own, each TSS's
+//! RSP0 and IST1-4 inside its own window (CPU 0's: boot/isr.S's IST
+//! stacks), GS's base as each processor read it its own record:
+//! `cpus: private state checked: N processors, no record, GDT, TSS or
+//! stack shared`, or what was shared, by name. `pax.cpunmi` (a test's
+//! word) then sends each idle processor one NMI and says whether each took
+//! it on its own IST2. A stopped processor is named by the boot processor
+//! at its next tick (`report_stops`): an application processor never
+//! writes the log. /proc/pax-cpus reads the rest (kernel/procfs).
+//!
+//! Written from: the Limine protocol (PROTOCOL.md at 3a0526b7: the MP
+//! feature, its response and `struct limine_mp_info`, the release store,
+//! the machine state at entry); the Intel SDM vol. 3A §2.5 (CR0, CR4),
+//! §2.6 (XCR0), §5.8.8 (STAR, LSTAR, FMASK), §6.14.5 (the IST), §7.7
+//! (the 64-bit TSS), §11.5.4 (the APIC timer), §11.6.1 (the ICR), §11.9
+//! (the spurious vector), §11.12 (x2APIC); vol. 2 (WRMSR, XSETBV, HLT);
+//! vol. 4 (IA32_EFER, IA32_GS_BASE). No Linux source; no other kernel's
+//! source.
+
+use apic
+use boot_info
+use clock
+use frames
+use gdt
+use log
+use paging
+use percpu
+use timer
+
+extern "c" fn pax_ap_halt()
+extern "c" fn pax_rdmsr(msr: u64) -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
+extern "c" fn pax_cr0() -> u64
+extern "c" fn pax_cr2() -> u64
+extern "c" fn pax_cr4() -> u64
+extern "c" fn pax_set_cr0(v: u64)
+extern "c" fn pax_set_cr4(v: u64)
+extern "c" fn pax_xgetbv0() -> u64
+extern "c" fn pax_xsetbv0(v: u64)
+extern "c" fn pax_rdtsc() -> u64
+extern "c" fn pax_pause()
+
+extern "c" let pax_ap_hold: *u8
+extern "c" let pax_ap_park: *u8
+extern "c" let pax_ap_holds: *u8
+extern "c" let pax_ist1_top: *u8
+extern "c" let pax_ist2_top: *u8
+extern "c" let pax_ist3_top: *u8
+extern "c" let pax_ist4_top: *u8
+
+/// Records PAX makes (CPU 0's included); a processor past them is left
+/// parked in the bootloader's loop and counted (R-px161-4).
+pub const MAX: u64 = 64
+/// The windows: PML4 slot 417, a processor's 256 KiB at CPUS + i × SPAN.
+pub const CPUS: u64 = 0xffffd08000000000
+pub const SPAN: u64 = 0x40000
+const STACK_AT: u64 = 0x8000 // the idle stack's first byte
+const IST_AT: u64 = 0x10000 // IST k's first byte: IST_AT + (k - 1) × IST_STEP
+const IST_STEP: u64 = 0x8000
+const STACK_BYTES: u64 = 0x4000
+const PAGE: u64 = 4096
+const WINDOW_KIB: u64 = 84 // 21 frames: the record and five stacks
+/// An application processor's spurious-interrupt vector: 47 is gated
+/// already (kernel/idt's 8259 line 15), and its low nibble is all ones, as
+/// older processors require of the spurious vector (SDM vol. 3A §11.9).
+pub const SPURIOUS_VECTOR: u64 = 47
+/// CAUSE: the local APIC answered another APIC ID than Limine's.
+const CAUSE_APIC: u64 = 0x1001
+
+const EFER: u64 = 0xc0000080
+const STAR: u64 = 0xc0000081
+const LSTAR: u64 = 0xc0000082
+const FMASK: u64 = 0xc0000084
+const GS_BASE: u64 = 0xc0000101
+const CR4_OSXSAVE: u64 = 0x40000
+
+/// Limine's processors, the boot one included (1 without a response);
+/// the windows made (indexes 1 to `made`); the bring-up's time.
+var listed: u64 = 1
+var made: u64 = 0
+var took_ms: u64 = 0
+var taken_kib: u64 = 0
+
+/// Application processor `i`'s window (its record), i in 1..MAX.
+pub fn window(i: u64) -> u64 {
+    CPUS + i * SPAN
+}
+
+/// IST k's top in window `w` (k 1-4); k 0 the idle stack's.
+fn top(w: u64, k: u64) -> u64 {
+    if k == 0 {
+        return w + STACK_AT + STACK_BYTES
+    }
+    w + IST_AT + (k - 1) * IST_STEP + STACK_BYTES
+}
+
+/// Limine's entry for index `i` (i ≥ 1): the i-th entry whose APIC ID is
+/// not the boot processor's; the count past the end when there is none.
+fn entry_of(i: u64) -> u64 {
+    let n = boot_info.mp_count()
+    let bsp = boot_info.mp_bsp()
+    var seen: u64 = 0
+    var j: u64 = 0
+    while j < n {
+        if boot_info.mp_apic(j) != bsp {
+            seen += 1
+            if seen == i {
+                return j
+            }
+        }
+        j += 1
+    }
+    n
+}
+
+/// `pages` zeroed frames mapped at `va` on, read-write, no-execute; false
+/// when a frame or a table is refused (the window is left as it is: its
+/// processor is never released).
+fn back(pml4: u64, va: u64, pages: u64) -> bool {
+    var k: u64 = 0
+    while k < pages {
+        let pa = frames.alloc() else 0
+        if pa == 0 {
+            return false
+        }
+        let v = pa + frames.hhdm()
+        var i: u64 = 0
+        while i < PAGE {
+            // # Safety: the frame just taken, through the HHDM, 8-aligned.
+            unsafe { ((v + i) as *u64).write_volatile(0) }
+            i += 8
+        }
+        let m = paging.map(pml4, va + k * PAGE, pa, paging.RW | paging.NX) else 99
+        if m == 99 {
+            frames.free(pa)
+            return false
+        }
+        k += 1
+    }
+    true
+}
+
+/// Application processor `i`'s window: its record, its GDT and TSS, its
+/// five stacks. False when memory ran out.
+fn make(pml4: u64, i: u64) -> bool {
+    let w = window(i)
+    if !back(pml4, w, 1) || !back(pml4, w + STACK_AT, STACK_BYTES / PAGE) {
+        return false
+    }
+    var k: u64 = 1
+    while k <= 4 {
+        if !back(pml4, top(w, k) - STACK_BYTES, STACK_BYTES / PAGE) {
+            return false
+        }
+        k += 1
+    }
+    let j = entry_of(i)
+    percpu.put(w, percpu.ME, w)
+    percpu.put(w, percpu.INDEX, i)
+    percpu.put(w, percpu.CURRENT, percpu.IDLE_SLOT)
+    percpu.put(w, percpu.APIC, boot_info.mp_apic(j))
+    percpu.put(w, percpu.UID, boot_info.mp_uid(j))
+    percpu.put(w, percpu.STACK, top(w, 0))
+    percpu.put(w, percpu.KSTACK, top(w, 0))
+    gdt.fill_ap(w, top(w, 0), top(w, 1), top(w, 2), top(w, 3), top(w, 4))
+    true
+}
+
+/// Every application processor PAX does not run (`nosmp`, past MAX, a
+/// window memory refused, or one that never reached its idle loop) is put
+/// back where it was before the bootloader started it: INIT, and it waits
+/// for a startup IPI (kernel/apic's `send_init`).
+fn park(i: u64) {
+    apic.send_init(apic_of(i))
+}
+
+/// Processor `i`'s two hold words in boot/isr.S's `pax_ap_holds` (i in
+/// 1..MAX): 0 HELD, 1 its record.
+fn holds(i: u64) -> u64 {
+    // # Safety: the address of boot/isr.S's words; nothing is read.
+    unsafe { pax_ap_holds as u64 } + i * 16
+}
+
+/// px161: first thing at the kernel's entry (kmain_console): every
+/// application processor out of the bootloader's parked loop, which spins.
+/// Each up to MAX goes to boot/isr.S's `pax_ap_hold` (`extra_argument` its
+/// hold words), where it halts with interrupts off on the bootloader's
+/// tables and stack until `start_aps`; under `nosmp`, and past MAX, to
+/// `pax_ap_park`, halted for good until `start_aps` sends INIT. Nothing is
+/// said: the log is not up yet.
+pub fn hold() {
+    let n = boot_info.mp_count()
+    if n <= 1 {
+        return
+    }
+    let none = boot_info.cmdline_has("nosmp")
+    let bsp = boot_info.mp_bsp()
+    var i: u64 = 1
+    var j: u64 = 0
+    while j < n {
+        if boot_info.mp_apic(j) != bsp {
+            let info = boot_info.mp_info(j)
+            if i < MAX && !none {
+                // # Safety: the processor's `struct limine_mp_info`
+                // (Limine's, mapped in the HHDM): extra_argument (+24) is
+                // the executable's to use; goto_address (+16) is stored
+                // last, with release semantics, as PROTOCOL.md asks.
+                unsafe {
+                    ((info + 24) as *u64).write_volatile(holds(i))
+                    ((info + 16) as *u64).atomic_store(pax_ap_hold as u64, Order.release)
+                }
+            } else {
+                // # Safety: as above.
+                unsafe { ((info + 16) as *u64).atomic_store(pax_ap_park as u64, Order.release) }
+            }
+            i += 1
+        }
+        j += 1
+    }
+}
+
+/// px161: every application processor PAX runs given its window and let
+/// on to its idle loop (kmain_console, after kernel/user's start: the boot
+/// processor's CR0, CR4, EFER and SYSCALL MSRs are final then, and
+/// kernel/timer has its calibration); the others sent INIT. `main` is
+/// pax_ap_main's address (kmain_console names it: wolf names an export's
+/// address only from another module).
+pub fn start_aps(pml4: u64, main: u64) {
+    let b = percpu.boot_record()
+    percpu.put(b, percpu.APIC, apic.id())
+    let n = boot_info.mp_count()
+    if n == 0 {
+        return
+    }
+    // # Safety: scalars the boot processor alone writes, interrupts off.
+    unsafe { listed = n }
+    var j: u64 = 0
+    while j < n {
+        if boot_info.mp_apic(j) == boot_info.mp_bsp() {
+            percpu.put(b, percpu.UID, boot_info.mp_uid(j))
+        }
+        j += 1
+    }
+    if n == 1 {
+        return
+    }
+    let aps = n - 1
+    if boot_info.cmdline_has("nosmp") {
+        var k: u64 = 1
+        while k <= aps {
+            park(k)
+            k += 1
+        }
+        log.put("cpus: application processors left parked ")
+        log.dec(aps as int)
+        log.put(" of ")
+        log.dec(aps as int)
+        log.line(" (nosmp)")
+        return
+    }
+    // The boot processor's control state, which each takes as its own.
+    // # Safety: cpu.S's and fpu.S's reads of this processor's control
+    // registers and MSRs; XGETBV only with CR4.OSXSAVE set.
+    unsafe {
+        let cr4 = pax_cr4()
+        percpu.put_word(percpu.W_CR3, pml4)
+        percpu.put_word(percpu.W_MAIN, main)
+        percpu.put_word(percpu.W_CR0, pax_cr0())
+        percpu.put_word(percpu.W_CR4, cr4)
+        percpu.put_word(percpu.W_EFER, pax_rdmsr(EFER))
+        percpu.put_word(percpu.W_XCR0, if cr4 & CR4_OSXSAVE != 0 { pax_xgetbv0() } else { 0 })
+        percpu.put_word(percpu.W_STAR, pax_rdmsr(STAR))
+        percpu.put_word(percpu.W_LSTAR, pax_rdmsr(LSTAR))
+        percpu.put_word(percpu.W_FMASK, pax_rdmsr(FMASK))
+        percpu.put_word(percpu.W_STOPPED, 0)
+        percpu.put_word(percpu.W_REPORTED, 0)
+    }
+    let free0 = frames.free_count()
+    var i: u64 = 1
+    while i <= aps && i < MAX {
+        if !make(pml4, i) {
+            log.put("cpus: no memory for application processor ")
+            log.dec(i as int)
+            log.line("'s stacks; it and every later one left parked")
+            i = MAX
+        } else {
+            // # Safety: as above.
+            unsafe { made = i }
+            i += 1
+        }
+    }
+    let m = unsafe { made }
+    i = m + 1
+    while i <= aps {
+        park(i) // past MAX, or no memory: back to waiting for a start
+        i += 1
+    }
+    let t0 = clock.now_ns()
+    i = 1
+    while i <= m {
+        let w = window(i)
+        let h = holds(i)
+        percpu.put(w, percpu.STATE, percpu.RELEASED)
+        // # Safety: its hold words (boot/isr.S's, 8-aligned): the record
+        // stored with release semantics, so it and every word published
+        // above are seen by the processor that reads it; then one NMI,
+        // only to a processor that says HELD (its gate is loaded then). A
+        // processor not held yet reads the record before its first HLT.
+        unsafe {
+            ((h + 8) as *u64).atomic_store(w, Order.release)
+            if (h as *u64).atomic_load(Order.acquire) != 0 {
+                apic.send_nmi(percpu.get(w, percpu.APIC))
+            }
+        }
+        i += 1
+    }
+    var waiting = true
+    while waiting {
+        waiting = idle_count() < m && clock.now_ns() - t0 < 1000000000
+        // # Safety: PAUSE; a polling loop's opaque call.
+        unsafe { pax_pause() }
+    }
+    let ms = (clock.now_ns() - t0) / 1000000
+    // # Safety: scalars the boot processor alone writes.
+    unsafe {
+        took_ms = ms
+        taken_kib = (free0 - frames.free_count()) * 4
+    }
+    log.put("cpus: application processors idle ")
+    log.dec(idle_count() as int)
+    log.put(" of ")
+    log.dec(aps as int)
+    log.put(" in ")
+    log.dec(ms as int)
+    log.put(" ms, ")
+    log.dec(WINDOW_KIB as int)
+    log.put(" KiB each (")
+    log.dec(unsafe { taken_kib } as int)
+    log.line(" KiB with their tables); the boot processor runs every thread")
+    if aps >= MAX {
+        log.put("cpus: application processors past ")
+        log.dec(MAX as int)
+        log.put(" left parked: ")
+        log.dec((aps - (MAX - 1)) as int)
+        log.end()
+    }
+    i = 1
+    while i <= m {
+        if percpu.get(window(i), percpu.STATE) == percpu.RELEASED {
+            log.put("cpus: cpu ")
+            log.dec(i as int)
+            log.put(" (apic ")
+            log.dec(percpu.get(window(i), percpu.APIC) as int)
+            log.line(") never reached its idle loop; put back to wait for a start")
+            park(i)
+        }
+        i += 1
+    }
+    report_stops()
+    check()
+    if boot_info.cmdline_has("pax.cpunmi") {
+        nmi_each()
+    }
+}
+
+/// The processors whose record says IDLE now.
+pub fn idle_count() -> u64 {
+    var c: u64 = 0
+    var i: u64 = 1
+    while i <= unsafe { made } {
+        if percpu.get(window(i), percpu.STATE) == percpu.IDLE {
+            c += 1
+        }
+        i += 1
+    }
+    c
+}
+
+/// Processor `c`'s three tables and five stacks as checked: 0 its record
+/// (GS's base as it read it), 1 its TSS, 2 its GDT, 3-7 its TSS's RSP0 and
+/// IST1-4 (CPU 0's RSP0 follows its running thread, so 0 there).
+fn item(c: u64, k: u64) -> u64 {
+    let r = if c == 0 { percpu.boot_record() } else { window(c) }
+    if k == 0 {
+        return percpu.get(r, percpu.GS_SEEN)
+    }
+    if k == 1 {
+        return percpu.get(r, percpu.TSS)
+    }
+    if k == 2 {
+        return percpu.get(r, percpu.GDT)
+    }
+    if c == 0 && k == 3 {
+        return 0
+    }
+    gdt.tss_stack(percpu.get(r, percpu.TSS), k - 3)
+}
+
+fn item_name(k: u64) -> str {
+    if k == 0 { return "record (GS)" }
+    if k == 1 { return "TSS" }
+    if k == 2 { return "GDT" }
+    if k == 3 { return "RSP0 stack" }
+    if k == 4 { return "IST1 stack" }
+    if k == 5 { return "IST2 stack" }
+    if k == 6 { return "IST3 stack" }
+    "IST4 stack"
+}
+
+/// Where processor `c`'s item `k` must be: CPU 0's boot/isr.S storage, an
+/// application processor's own window.
+fn expected(c: u64, k: u64) -> u64 {
+    if c == 0 {
+        // # Safety: link-time addresses; nothing is read.
+        unsafe {
+            if k == 0 { return percpu.boot_record() }
+            if k == 4 { return pax_ist1_top as u64 }
+            if k == 5 { return pax_ist2_top as u64 }
+            if k == 6 { return pax_ist3_top as u64 }
+            if k == 7 { return pax_ist4_top as u64 }
+        }
+        return item(c, k)
+    }
+    let w = window(c)
+    if k == 0 { return w }
+    if k == 1 { return w + percpu.TSS_AREA }
+    if k == 2 { return w + percpu.GDT_AREA }
+    top(w, k - 3)
+}
+
+/// The private-state check, over every window `release` made, whatever its
+/// processor reached (and CPU 0): its record, TSS, GDT and stacks where its
+/// own must be, and no two alike. GS's base as the processor read it counts
+/// only once it entered PAX (it writes GS_SEEN first).
+fn check() {
+    let m = unsafe { made }
+    var bad: u64 = 0
+    var c: u64 = 0
+    while c <= m {
+        var k: u64 = 0
+        while k < 8 {
+            let counts = k != 0 || c == 0 || percpu.get(window(c), percpu.STATE) != percpu.RELEASED
+            let v = item(c, k)
+            if counts && v != expected(c, k) {
+                log.put("cpus: private state: cpu ")
+                log.dec(c as int)
+                log.put("'s ")
+                log.put(item_name(k))
+                log.put(" is ")
+                log.hex(v)
+                log.put(", not its own ")
+                log.hex(expected(c, k))
+                log.end()
+                bad += 1
+            }
+            var d: u64 = 0
+            while d < c {
+                if counts && v != 0 && v == item(d, k) {
+                    log.put("cpus: private state: cpu ")
+                    log.dec(c as int)
+                    log.put(" and cpu ")
+                    log.dec(d as int)
+                    log.put(" share a ")
+                    log.put(item_name(k))
+                    log.put(", ")
+                    log.hex(v)
+                    log.end()
+                    bad += 1
+                }
+                d += 1
+            }
+            k += 1
+        }
+        c += 1
+    }
+    if bad == 0 {
+        log.put("cpus: private state checked: ")
+        log.dec((m + 1) as int)
+        log.line(" processors, no record, GDT, TSS or stack shared")
+    }
+}
+
+/// `pax.cpunmi` (a test's word): one NMI to each idle processor by its
+/// local APIC (kernel/apic's `send_nmi`), then a second by kernel/clock for
+/// each to count it; each must have taken it on its own IST2.
+fn nmi_each() {
+    let m = unsafe { made }
+    var want: u64 = 0
+    var i: u64 = 1
+    while i <= m {
+        let w = window(i)
+        if percpu.get(w, percpu.STATE) == percpu.IDLE {
+            want += 1
+            apic.send_nmi(percpu.get(w, percpu.APIC))
+        }
+        i += 1
+    }
+    let t0 = clock.now_ns()
+    var took: u64 = 0
+    var own: u64 = 0
+    var waiting = true
+    while waiting {
+        took = 0
+        own = 0
+        i = 1
+        while i <= m {
+            let w = window(i)
+            if percpu.get(w, percpu.STATE) == percpu.IDLE && percpu.get(w, percpu.NMIS) != 0 {
+                took += 1
+                let at = percpu.get(w, percpu.NMI_AT)
+                if at >= top(w, 2) - STACK_BYTES && at < top(w, 2) {
+                    own += 1
+                }
+            }
+            i += 1
+        }
+        waiting = took < want && clock.now_ns() - t0 < 1000000000
+        // # Safety: PAUSE.
+        unsafe { pax_pause() }
+    }
+    log.put("cpus: application processors took an NMI each ")
+    log.dec(took as int)
+    log.put(" of ")
+    log.dec(want as int)
+    if own == took {
+        log.line(", each on its own stack")
+    } else {
+        log.put("; on its own stack ")
+        log.dec(own as int)
+        log.end()
+    }
+}
+
+/// px161: where Limine's parked processor goes (boot/isr.S's pax_ap_entry
+/// jumps here with its record, on its own stack, its GDT, TSS, IDT and GS
+/// loaded). Never returns.
+export fn pax_ap_main(rec: u64) {
+    // # Safety: isr.S's RDMSR of IA32_GS_BASE, which pax_ap_entry set.
+    percpu.put(rec, percpu.GS_SEEN, unsafe { pax_rdmsr(GS_BASE) })
+    // # Safety: the boot processor's control state (`start_aps` published
+    // it before the record): the same CPU model's bits, CR4.OSXSAVE before
+    // XSETBV; EFER's LME and LMA as they already are.
+    unsafe {
+        pax_set_cr0(percpu.word(percpu.W_CR0))
+        let cr4 = percpu.word(percpu.W_CR4)
+        pax_set_cr4(cr4)
+        if cr4 & CR4_OSXSAVE != 0 {
+            pax_xsetbv0(percpu.word(percpu.W_XCR0))
+        }
+        pax_wrmsr(EFER, percpu.word(percpu.W_EFER))
+        pax_wrmsr(STAR, percpu.word(percpu.W_STAR))
+        pax_wrmsr(LSTAR, percpu.word(percpu.W_LSTAR))
+        pax_wrmsr(FMASK, percpu.word(percpu.W_FMASK))
+    }
+    let id = apic.ap_start(SPURIOUS_VECTOR)
+    if id != percpu.get(rec, percpu.APIC) {
+        percpu.stop(CAUSE_APIC, id, 0, 0)
+    }
+    timer.ap_arm()
+    // # Safety: fpu.S's RDTSC.
+    percpu.put(rec, percpu.TSC, unsafe { pax_rdtsc() })
+    percpu.put(rec, percpu.STATE, percpu.IDLE)
+    while true {
+        percpu.count(percpu.WAKES)
+        // # Safety: isr.S's STI; HLT; CLI: the processor sleeps until its
+        // next interrupt, every one of which has a gate.
+        unsafe { pax_ap_halt() }
+    }
+}
+
+/// Word `i` of boot/isr.S's frame at `f`.
+fn frame(f: u64, i: u64) -> u64 {
+    // # Safety: the trampoline's frame (22 words), live for this handler.
+    unsafe { ((f + i * 8) as *u64).read_volatile() }
+}
+
+/// An application processor's interrupt (kernel/interrupts, every vector
+/// but the NMI): its tick, its spurious vector, or a stop. The frame to
+/// resume: `f` itself.
+pub fn ap_interrupt(f: u64) -> u64 {
+    let v = frame(f, 15)
+    if v == timer.MASTER_BASE {
+        percpu.count(percpu.TICKS)
+        apic.eoi()
+        return f
+    }
+    if v == SPURIOUS_VECTOR {
+        percpu.count(percpu.SPURIOUS)
+        return f
+    }
+    // # Safety: cpu.S's MOV from CR2 (the page fault's address for 14).
+    let cr2 = if v == 14 { unsafe { pax_cr2() } } else { 0 }
+    percpu.stop(v, frame(f, 16), frame(f, 17), cr2)
+}
+
+/// An application processor's NMI (on its own IST2): counted, the frame's
+/// address kept, and it resumes.
+pub fn ap_nmi(f: u64) {
+    percpu.count(percpu.NMIS)
+    percpu.put(percpu.mine(), percpu.NMI_AT, f)
+}
+
+/// CPU 0, at each tick and after the bring-up: each processor that has
+/// stopped since the last call, named once.
+pub fn report_stops() {
+    let s = percpu.stopped()
+    let r = percpu.word(percpu.W_REPORTED)
+    if s == r {
+        return
+    }
+    var i: u64 = 1
+    while i < MAX {
+        let bit: u64 = 1 << i
+        if s & bit != 0 && r & bit == 0 {
+            let w = window(i)
+            let cause = percpu.get(w, percpu.CAUSE)
+            log.put("cpus: cpu ")
+            log.dec(i as int)
+            log.put(" stopped: ")
+            if cause == percpu.CAUSE_SCHED {
+                log.put("entered the scheduler, rip ")
+                log.hex(percpu.get(w, percpu.RIP))
+            } else if cause == CAUSE_APIC {
+                log.put("its local APIC answered APIC ID ")
+                log.dec(percpu.get(w, percpu.ERROR) as int)
+                log.put(", the bootloader's ")
+                log.dec(percpu.get(w, percpu.APIC) as int)
+            } else {
+                log.put("vector ")
+                log.dec(cause as int)
+                log.put(" error ")
+                log.hex(percpu.get(w, percpu.ERROR))
+                log.put(" rip ")
+                log.hex(percpu.get(w, percpu.RIP))
+                log.put(" cr2 ")
+                log.hex(percpu.get(w, percpu.CR2))
+            }
+            log.end()
+        }
+        i += 1
+    }
+    percpu.put_word(percpu.W_REPORTED, s)
+}
+
+// --- /proc/pax-cpus's lines (kernel/procfs) -----------------------------------
+
+/// The processors the bootloader listed, the boot one included (1 with no
+/// MP response).
+pub fn total() -> u64 {
+    // # Safety: a scalar written once by `start_aps`.
+    unsafe { listed }
+}
+
+/// Processors that entered PAX: CPU 0 and each released one that reached
+/// its idle loop (stopped since or not).
+pub fn started() -> u64 {
+    var c: u64 = 1
+    var i: u64 = 1
+    while i <= unsafe { made } {
+        let s = percpu.get(window(i), percpu.STATE)
+        if s == percpu.IDLE || s == percpu.STOPPED {
+            c += 1
+        }
+        i += 1
+    }
+    c
+}
+
+/// Processor `i`'s record, 0 when it has none (parked: `nosmp`, past MAX,
+/// or out of memory).
+pub fn record(i: u64) -> u64 {
+    if i == 0 {
+        return percpu.boot_record()
+    }
+    if i > unsafe { made } {
+        return 0
+    }
+    window(i)
+}
+
+/// Processor `i`'s APIC ID, from its record or, parked, Limine's entry.
+pub fn apic_of(i: u64) -> u64 {
+    let r = record(i)
+    if r != 0 {
+        return percpu.get(r, percpu.APIC)
+    }
+    boot_info.mp_apic(entry_of(i))
+}
+
+/// CPU 0's tick count: kernel/timer's (its ticks are the boot processor's
+/// timer's, counted there).
+pub fn boot_ticks() -> u64 {
+    timer.delivered()
+}
+
+/// The bring-up's time, in ms (0 before or without one).
+pub fn took() -> u64 {
+    // # Safety: a scalar written once by `start_aps`.
+    unsafe { took_ms }
+}
