@@ -152,7 +152,10 @@ kernel command line, past 64, or one that never reached its idle loop) is
 halted at the entry and sent INIT later, so it waits for a startup IPI as
 it did before any bootloader started it; Limine's configuration has no
 option that drops the request, so this is how `nosmp` gives back the
-one-processor machine. Measured on
+one-processor machine. (QEMU without KVM acts on INIT sent to a halted
+processor only when something next wakes it: there the processor stays
+halted in `pax_ap_park`, interrupts off, which `tests/mpx6-cpus` holds
+under that accelerator alone.) Measured on
 QEMU 8.2.2 (q35, KVM): 1, 2, 4 and 16 processors, SeaBIOS and OVMF, every
 application processor halted in `pax_ap_halt` with its own GS, GDT and TR
 (`tests/mpx6-cpus`).
