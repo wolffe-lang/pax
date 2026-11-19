@@ -9,6 +9,10 @@
 //! thread's saved frame to switch (kernel/sched). Interrupts are off
 //! throughout (every gate is an interrupt gate, kernel/idt).
 //!
+//! - px161: on an application processor (kernel/percpu's index not 0)
+//!   every vector but the NMI is kernel/smp's (`ap_interrupt`: its tick,
+//!   its spurious vector, or a stop), and the NMI is counted in its record
+//!   with no line; none of the boot processor's work below runs there;
 //! - vector 2, the NMI (px77d; its gate on IST2): one line for each of
 //!   the first eight, `nmi: <n> at rip 0x<r> reason 0x<p>, continuing`,
 //!   and the interrupted code resumes, whatever ring it was in; nothing
@@ -88,8 +92,10 @@ use idt
 use log
 use net
 use panic
+use percpu
 use sched
 use signal
+use smp
 use sound
 use speaker
 use timer
@@ -381,8 +387,21 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     // scheduler with IF clear).
     // # Safety: `f` is the trampoline's frame, live for this call.
     if unsafe { f[0].vector } == 2 {
-        nmi(f)
+        // px161: each processor's own count; CPU 0's line as before, none
+        // from an application processor (CPU 0 writes the log unlocked).
+        if percpu.index() == 0 {
+            percpu.count(percpu.NMIS)
+            nmi(f)
+        } else {
+            smp.ap_nmi(unsafe { f as u64 })
+        }
         return f
+    }
+    // px161: an application processor's tick, spurious vector or fault is
+    // kernel/smp's: none of the boot processor's work below runs there.
+    if percpu.index() != 0 {
+        // # Safety: the frame's address; kernel/smp hands back `f` itself.
+        return unsafe { smp.ap_interrupt(f as u64) as *Frame }
     }
     let g = route(f)
     // # Safety: the frame `route` returned is this one or a saved frame
@@ -418,6 +437,7 @@ fn route(f: *Frame) -> *Frame {
     }
     if v == timer.MASTER_BASE {
         timer.tick()
+        smp.report_stops() // px161: an application processor stopped since, named once
         speaker.tick(timer.ticks()) // px18: a KDMKTONE tone's end
         xhci.tick()
         console.pointer_drain() // px117: the pointers' records, the pointer drawn, the reports typed
