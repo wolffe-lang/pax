@@ -452,13 +452,17 @@ pax_lat_open:
                            `extra_argument` (+24) in %rbx, an IDT of its
                            own on its stack with one gate, the NMI's (IST
                            0, the code segment it runs on), then HELD set
-                           and a loop: its record (word 1) looked at, HLT.
-                           The NMI's handler (pax_ap_hold_nmi) returns to
-                           the look, not into the loop, so an NMI that
-                           comes between the look and HLT is not lost.
-                           With the record: `extra_argument` = the record,
-                           and on to pax_ap_entry, as if Limine had sent it
-                           there.
+                           and HLT, for good. The NMI's handler
+                           (pax_ap_hold_nmi) returns to the look at its
+                           record (word 1), never into the loop: the
+                           record is looked at only after an NMI, and
+                           kernel/smp sends its one NMI only after it
+                           stored the record and read HELD, so that NMI
+                           is always taken here, on this gate, and none
+                           is left to arrive once the processor has gone
+                           on. No record yet: HLT again. With the record:
+                           `extra_argument` = the record, and on to
+                           pax_ap_entry, as if Limine had sent it there.
    pax_ap_park             CLI; HLT for good: an application processor PAX
                            will not run (`nosmp`, past kernel/smp's MAX),
                            until kernel/smp sends it INIT.
@@ -561,13 +565,13 @@ pax_ap_hold:
         movq    %rsp, 50(%rsp)
         lidt    48(%rsp)
         movq    $1, (%rbx)              /* HELD: an NMI finds its gate now */
-pax_ap_hold_look:
+1:      hlt                             /* until an NMI: its handler returns below */
+        jmp     1b
+pax_ap_hold_look:                       /* reached from pax_ap_hold_nmi alone */
         movq    8(%rbx), %rax           /* its record, once kernel/smp wrote it */
         testq   %rax, %rax
-        jnz     1f
-        hlt
-        jmp     pax_ap_hold_look
-1:      movq    %rax, 24(%rdi)
+        jz      1b
+        movq    %rax, 24(%rdi)
         jmp     pax_ap_entry
         .size pax_ap_hold, . - pax_ap_hold
 
