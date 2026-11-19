@@ -12,15 +12,16 @@ import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 CPUS_VA, SPAN = 0xffffd08000000000, 0x40000
-SYMS = {'pax_ap_halt': (0xffffffff80001000, 0x10), 'pax_cpu0': (0xffffffff80200000, 0x200),
+SYMS = {'pax_ap_halt': (0xffffffff80001000, 0x10), 'pax_ap_park': (0xffffffff80000ff0, 0x10),
+        'pax_cpu0': (0xffffffff80200000, 0x200),
         'pax_gdt': (0xffffffff80201000, 0x40), 'pax_tss': (0xffffffff80201040, 0x70),
         'pax_idt': (0xffffffff80202000, 0x1000)}
 
 
 def regs(k, *, rip, rsp, gs, gdt, tr, hlt=1, idt=SYMS['pax_idt'][0], cr0=0x80010033, cr3=0x1000,
-         cr4=0x3006a0, efer=0xd01):
+         cr4=0x3006a0, efer=0xd01, rfl=0x246):
     return (f'CPU#{k}\nRAX=0000000000000000 RBX=0000000000000000\nRSI=0 RDI=0 RBP=0 RSP={rsp:016x}\n'
-            f'RIP={rip:016x} RFL=00000246 [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT={hlt}\n'
+            f'RIP={rip:016x} RFL={rfl:08x} [---Z-P-] CPL=0 II=0 A20=1 SMM=0 HLT={hlt}\n'
             f'GS =0010 {gs:016x} 000fffff 00af9300 DPL=0 DS   [-WA]\n'
             f'TR =0028 {tr:016x} 0000006f 00008b00 DPL=0 TSS64-busy\n'
             f'GDT=     {gdt:016x} 00000037\nIDT=     {idt:016x} 00000fff\n'
@@ -165,6 +166,31 @@ nos2 = dict(nos)
 nos2['dumps'] = [green(4)['dumps'][0]] * 3
 cases.append(('nosmp but released', nos2, ['--mode', 'nosmp'], {'SMP-NOSMP'}, {'CPU-PARKED'}))
 
+# nosmp under QEMU's TCG, which acts on a halted processor's INIT only when something next wakes it: the
+# processors still sit where the kernel halted them for good (pax_ap_park, HLT=1, interrupts off). Held
+# there under TCG alone; with interrupts on, not halted, or under KVM (which acts on INIT at once), red.
+def held(meta, **kw):
+    base = dict(rip=SYMS['pax_ap_park'][0] + 3, rsp=0xffff80000f54fff8, gs=0, gdt=0, tr=0, rfl=0x2)
+    base.update(kw)
+    c = dict(nos)
+    c['dumps'] = [bsp_regs() + ''.join(regs(k, **base) for k in range(1, 4))] * 3
+    c['meta'] = meta
+    return c
+
+
+cases.append(('nosmp, halted in the park under TCG', held('accel: tcg\n'), ['--mode', 'nosmp'],
+              {'SMP-NOSMP', 'CPU-PARKED'}, set()))
+cases.append(('nosmp, halted in the park under KVM', held('accel: kvm\n'), ['--mode', 'nosmp'],
+              {'SMP-NOSMP'}, {'CPU-PARKED'}))
+cases.append(('nosmp, halted in the park, no accelerator said', held(None), ['--mode', 'nosmp'],
+              {'SMP-NOSMP'}, {'CPU-PARKED'}))
+cases.append(('nosmp, in the park with interrupts on under TCG', held('accel: tcg\n', rfl=0x202), ['--mode', 'nosmp'],
+              {'SMP-NOSMP'}, {'CPU-PARKED'}))
+cases.append(('nosmp, in the park but running under TCG', held('accel: tcg\n', hlt=0), ['--mode', 'nosmp'],
+              {'SMP-NOSMP'}, {'CPU-PARKED'}))
+cases.append(('nosmp, idle in the kernel under TCG', held('accel: tcg\n', rip=SYMS['pax_ap_halt'][0] + 3),
+              ['--mode', 'nosmp'], {'SMP-NOSMP'}, {'CPU-PARKED'}))
+
 # pax.cpunmi: one NMI each, ticking after it.
 nmi_lines = [idle_line(3), private_line(4), 'cpus: application processors took an NMI each 3 of 3, each on its own stack']
 d = green(4)['dumps'][0]
@@ -186,6 +212,9 @@ with tempfile.TemporaryDirectory() as t:
             (t / f'serial.log.cmd{k}').unlink(missing_ok=True)
         for k, dump in zip((2, 5, 8), c['dumps']):
             (t / f'serial.log.cmd{k}').write_text(dump)
+        (t / 'serial.log.meta').unlink(missing_ok=True)
+        if c.get('meta'):
+            (t / 'serial.log.meta').write_text(c['meta'])
         r = subprocess.run([sys.executable, '-I', str(HERE / 'rows.py'), str(s), c['n'], *extra,
                             '--symbols', str(t / 'nm.txt')], capture_output=True, text=True)
         got_pass = set(re.findall(r'^PASS (\S+)', r.stdout, re.M))
