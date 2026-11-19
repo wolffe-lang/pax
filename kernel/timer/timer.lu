@@ -177,6 +177,20 @@ pub fn start() {
     report()
 }
 
+/// px161: this processor's local APIC timer as the boot processor's tick:
+/// divide by 16, periodic on vector 32, the initial count `start`
+/// calibrated (its accepted rate, #447's) over 100. Every local APIC timer
+/// counts the same clock (SDM vol. 3A §11.5.4), so an application
+/// processor takes the boot processor's calibration and makes none of its
+/// own. The LVT entry is written before the initial count, which starts it.
+pub fn ap_arm() {
+    apic.write(0x3e0, 3)
+    apic.write(0x320, (0x20000 | MASTER_BASE) as u32)
+    // # Safety: written once by `start`, before any application processor
+    // is released.
+    apic.write(0x380, (unsafe { measured_hz } / 100) as u32)
+}
+
 /// px107 (pax#308): the local APIC timer's current count, kernel/clock's
 /// nanoseconds and the PM timer read directly (0 when there is none),
 /// back to back by the same code. Both ends of a calibration window are
