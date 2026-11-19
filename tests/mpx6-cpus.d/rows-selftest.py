@@ -65,7 +65,8 @@ def transcript(n, cpus, boot_lines, p1, p2, gs='CPU-USER-GS ok 3 reads', pid=1):
 
 
 def idle_line(aps):
-    return f'cpus: application processors idle {aps} of {aps} in 2 ms, 84 KiB each; the boot processor runs every thread'
+    return (f'cpus: application processors idle {aps} of {aps} in 2 ms, 84 KiB each ({aps * 84 + 12} KiB with their '
+            'tables); the boot processor runs every thread')
 
 
 def private_line(cpus):
