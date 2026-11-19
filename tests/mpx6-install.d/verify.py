@@ -12,6 +12,7 @@ import subprocess
 import sys
 import uuid
 
+sys.dont_write_bytecode = True  # no tools/__pycache__ beside the tools it loads (-I ignores the variable)
 repo,work=map(Path,sys.argv[1:3]);games,name=sys.argv[3:5]
 def run(*args):
     p=subprocess.run([str(x) for x in args],capture_output=True)
