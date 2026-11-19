@@ -24,7 +24,8 @@
 # twice; G3 the ring wrapped while logd was held, the loss counted; G4 power cuts, the loss
 # bounded; G5 `last` (a console login, ssh logins, a dropped one, the boots) and PAX's last held
 # byte for byte to util-linux's on the same wtmp; G6 lastb; G7 what a user may read; G8 the caps;
-# G9 a clean end's records. tests/mpx6-logs.d/last-cases holds PAX's last and lastb to
+# G9 a clean end's records; G10 logd's end traced (its shutdown record written before its first sync
+# returns). tests/mpx6-logs.d/last-cases holds PAX's last and lastb to
 # util-linux's on crafted files with no boot (L1).
 #
 # Needs root in the rig (the tap, dnsmasq) or `sudo -n`, /dev/net/tun, ip(8), dnsmasq(8),
@@ -118,6 +119,9 @@ if [ -z "$images" ]; then
     # The rows' own scripts (tests/mpx6-logs.d/guest), root's, never in a shipped image.
     mkdir -p "$r/root/rows"
     for f in "$here"/mpx6-logs.d/guest/*.sh; do cp "$f" "$r/root/rows/" || why+=" no ${f##*/};"; done
+    # G10's tracer of logd's end (tests/mpx6-logs.d/guest/endtrace.c), static, root's like the scripts.
+    gcc -static -no-pie -O1 -Wall -Wextra -o "$r/root/rows/endtrace" "$here/mpx6-logs.d/guest/endtrace.c" \
+        > "$work/endtrace.txt" 2>&1 || why+=" tests/mpx6-logs.d/guest/endtrace.c;"
     : > "$work/files.txt"
     printf '%s\n' /tmp/:1777 /root/:700 /root/rows/:700 /run/:755 /home/:755 /home/pax/:755:1000:1000 /var/:755 \
         /var/log/:755 /var/run/:755 /etc/burrowd/:755 /etc/pax-boot.d/:755 >> "$work/files.txt"

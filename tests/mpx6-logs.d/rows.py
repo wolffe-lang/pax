@@ -53,6 +53,11 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       /var/log within the caps' sum
   G9  a clean end: boot 1's (`reboot`) and boot 7's (`poweroff`) logs end with logd's end line, and
       wtmp has a `shutdown` record for each; util-linux's `last -x` shows them
+  G10 the order of logd's end (pax#472): a copy of the volume after boot 7, booted once more (boot 9);
+      the rows' tracer (guest/endtrace.c, ptrace) on logd, then SIGTERM from root's shell, which is pid 1
+      here, so logd takes it for the kernel's end; logd's system calls after the signal must show the
+      `shutdown` record written to /var/log/wtmp before its first sync returns. A sync waits on the disk,
+      and until the record is written it exists nowhere: the end may send SIGKILL in that wait
 Exit 0 when every row held, 1 otherwise, 3 when the rig cannot run here.
 """
 import argparse
@@ -411,9 +416,25 @@ def main():
                 bad('G8', 'root could not log in at boot 8')
         finally:
             b.close(180)
+        endv = work / 'end.img'
+        shutil.copy(story, endv)
+        b = Boot(out, 'boot9-end', iso, endv)
+        try:
+            if b.root():
+                b.cmd('(/root/rows/endtrace $(cat /var/run/logd.pid) > /tmp/endtrace.txt 2>&1 &)')
+                time.sleep(2)
+                b.cmd('kill -TERM $(cat /var/run/logd.pid)')
+                time.sleep(4)
+                seen['g10'] = b.cmd('cat /tmp/endtrace.txt') or ''
+                b.end('poweroff')
+            else:
+                bad('G10', 'root could not log in at boot 9')
+        finally:
+            b.close(180)
     finally:
         net.close()
     judge(out, work, story, vol, seen, cuts)
+    g10(seen)
     say('mpx6-logs %s %s: %s' % (ARGS.tier, ARGS.leg, 'FAIL ' + ' '.join(FAILS) if FAILS else 'PASS'))
     return 1 if FAILS else 0
 
@@ -641,6 +662,38 @@ def g9(own, wtmp, work):
     (ok if len(ends) == 2 and downs == 2 and shown == 2 else bad)(
         'G9', '%d end lines in kern.log, %d shutdown records in wtmp, %d `shutdown system down` lines in util-linux\'s '
         'last -x (want 2 each: boot 1\'s reboot, boot 7\'s poweroff)' % (len(ends), downs, shown))
+
+
+def g10(seen):
+    if 'g10' not in seen:
+        return
+    lines = [l.strip() for l in seen['g10'].splitlines() if l.startswith('ET ')]
+    fails = [l for l in lines if l.startswith('ET FAIL')]
+    if fails or 'ET signal 15' not in lines:
+        bad('G10', 'the tracer did not see logd take the SIGTERM: %r' % (fails or lines[-3:]))
+        return
+    after = lines[lines.index('ET signal 15') + 1:]
+    wtmp, wrote, synced = set(), None, None
+    for i, l in enumerate(after):
+        w = l.split()
+        if w[1] == 'open' and w[2] == '/var/log/wtmp' and int(w[-1]) >= 0:
+            wtmp.add(w[-1])
+        elif w[1] == 'close':
+            wtmp.discard(w[2][3:])
+        elif w[1] == 'write' and w[2][3:] in wtmp and int(w[-1]) > 0 and wrote is None:
+            wrote = i
+        elif w[1] == 'sync' and synced is None:
+            synced = i
+    if wrote is None:
+        bad('G10', 'logd wrote no shutdown record to /var/log/wtmp after the SIGTERM (%d calls traced)' % len(after))
+    elif synced is None:
+        bad('G10', 'logd synced nothing after the SIGTERM (%d calls traced)' % len(after))
+    elif synced < wrote:
+        bad('G10', 'logd\'s first sync (`%s`, call %d after the SIGTERM) returned before the shutdown record was '
+            'written to /var/log/wtmp (call %d): until then the record exists nowhere' % (after[synced], synced + 1, wrote + 1))
+    else:
+        ok('G10', 'the shutdown record written to /var/log/wtmp (call %d after the SIGTERM) before logd\'s first '
+           'sync returned (`%s`, call %d)' % (wrote + 1, after[synced], synced + 1))
 
 
 if __name__ == '__main__':
