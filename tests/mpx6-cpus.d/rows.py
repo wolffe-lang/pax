@@ -24,7 +24,9 @@ Stage 1 (px161):
   SMP-USER-GS  ring 3's GS base is its own (0), never the kernel's record.
   SMP-NMI      (--mode nmi) every application processor took one NMI, and ticks after it.
   SMP-NOSMP    (--mode nosmp) the application processors left parked, outside the kernel
-               (stage 0's CPU-PARKED), `started 1`.
+               (stage 0's CPU-PARKED), `started 1`. Under QEMU's TCG alone (SERIAL.meta's `accel:`)
+               CPU-PARKED also holds a processor halted in pax_ap_park with interrupts off: TCG acts
+               on INIT sent to a halted processor only when something next wakes it.
 """
 import argparse
 import pathlib
@@ -201,7 +203,8 @@ def parse(d):
             continue
         r = {}
         for key, pat in (('rip', r'\b[RE]IP=([0-9a-f]+)'), ('rsp', r'\b[RE]SP=([0-9a-f]+)'),
-                         ('hlt', r'\bHLT=([01])'), ('gs', r'^GS =[0-9a-f]{4} ([0-9a-f]+)'),
+                         ('hlt', r'\bHLT=([01])'), ('rfl', r'\b[RE]FL=([0-9a-f]+)'),
+                         ('gs', r'^GS =[0-9a-f]{4} ([0-9a-f]+)'),
                          ('tr', r'^TR =[0-9a-f]{4} ([0-9a-f]+)'), ('gdt', r'^GDT=\s*([0-9a-f]+)'),
                          ('idt', r'^IDT=\s*([0-9a-f]+)'), ('cr0', r'\bCR0=([0-9a-f]+)'),
                          ('cr3', r'\bCR3=([0-9a-f]+)'), ('cr4', r'\bCR4=([0-9a-f]+)'),
@@ -233,6 +236,13 @@ def symbols(elf):
     sys.exit(1)
 
 
+def accel():
+    """The boot's accelerator, as tools/qemu-run wrote it beside the transcript; '' when it did not."""
+    p = pathlib.Path(f'{a.serial}.meta')
+    m = re.search(r'^accel: (\w+)', p.read_text(errors='replace'), re.M) if p.exists() else None
+    return m[1] if m else ''
+
+
 ds = [parse(d) for d in dumps()]
 if a.mode == 'nosmp' or cpus > 1:
     row = 'CPU-PARKED' if a.mode == 'nosmp' else 'SMP-IDLE'
@@ -240,8 +250,21 @@ if a.mode == 'nosmp' or cpus > 1:
         fail(row, f'register dumps: {len(ds)}, processors in the first: {len(ds[0]) if ds else 0}')
     elif a.mode == 'nosmp':
         ips = [ds[0][i]['rip'] for i in sorted(ds[0])]
-        if ips[0] is None or ips[0] < KERNEL or any(ip is None or ip >= KERNEL for ip in ips[1:]):
+        # The kernel halts a processor it will not run (pax_ap_park: CLI; HLT) and later sends it INIT. KVM
+        # and a real processor act on INIT at once: it waits for a startup IPI, outside the kernel. QEMU's
+        # TCG acts on it only when something next wakes the halted processor, so there it may still sit in
+        # pax_ap_park, halted, interrupts off: held under TCG alone, and nowhere else in the kernel.
+        lo, size = symbols(a.elf).get('pax_ap_park', (0, 0)) if accel() == 'tcg' else (0, 0)
+
+        def halted_in_park(c):
+            return (lo <= (c['rip'] or 0) < lo + size and c['hlt'] == 1
+                    and c['rfl'] is not None and c['rfl'] & 0x200 == 0)
+        inside = [i for i in sorted(ds[0])[1:] if ds[0][i]['rip'] is None or ds[0][i]['rip'] >= KERNEL]
+        if ips[0] is None or ips[0] < KERNEL or not all(halted_in_park(ds[0][i]) for i in inside):
             fail('CPU-PARKED', f'unexpected processor instruction pointers: {[hex(x or 0) for x in ips]}')
+        elif inside:
+            ok('CPU-PARKED', f'{len(ips) - 1 - len(inside)} secondary processors outside the kernel, {len(inside)} '
+                             'halted in pax_ap_park with interrupts off (TCG: INIT waits for a wake)')
         else:
             ok('CPU-PARKED', f'{len(ips) - 1} secondary processors outside the kernel')
     else:
