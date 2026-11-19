@@ -65,7 +65,7 @@
 //! kernel/user's number plus one). `run_next` makes the switched-in
 //! thread's space live (MOV to CR3 only when it differs from the live
 //! one) and points the TSS's RSP0 (kernel/gdt) and SYSCALL's stack word
-//! (boot/user.S's `pax_syscall_state` word 0) at the top of its kernel
+//! (px161: its processor's record, kernel/percpu) at the top of its kernel
 //! stack, so an interrupt, exception or system call from ring 3 lands
 //! on the stack of the thread that was running. A thread ended from a
 //! handler (a system call's exit, a fault in ring 3: `end_current`)
@@ -244,6 +244,7 @@ use latency
 use log
 use paging
 use panic
+use percpu
 use speaker
 use sync
 use timer
@@ -262,7 +263,6 @@ extern "c" let pax_sched_state: *u64
 extern "c" let pax_sched_bits: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
-extern "c" let pax_syscall_state: *u64
 extern "c" let pax_slot_words: *u64 // px126: two words a slot (W_AREA, W_MARK); px159: three (W_KEYS)
 extern "c" let pax_pid_hint: *u64 // px126: pid mod HINTS to slot + 1
 extern "c" let pax_siginfo: *u64
@@ -439,7 +439,8 @@ const RFLAGS_IF: u64 = 0x202 // IF and the always-one bit 1
 // never forwarded or merged ([mem.unsafe.volatile]), so each read here
 // is the word as it is now.
 const S_STARTED: u64 = 0
-const S_CURRENT: u64 = 1 // the running thread's slot
+// px161: word 1, the running thread's slot, is each processor's record's
+// (kernel/percpu's CURRENT, read through GS): `cur`, `run_next`, `start`.
 const S_HEAD: u64 = 2 // slot + 1; 0 when the queue is empty
 const S_TAIL: u64 = 3
 const S_SLICE: u64 = 4 // the tick the current thread was switched in at
@@ -575,7 +576,7 @@ fn clear_masks() {
 }
 
 fn cur() -> u64 {
-    sv(S_CURRENT) // #598: reread after every switch
+    percpu.current() // #598: reread after every switch; px161: this processor's
 }
 
 /// px126: one past the highest slot that is not free: every slot from
@@ -808,8 +809,7 @@ fn enter_space(s: u64) {
     let hi = field(s, offset_of(Thread, stack_hi))
     if hi != 0 {
         gdt.set_rsp0(hi)
-        // # Safety: word 0 of boot/user.S's 64-byte pax_syscall_state.
-        unsafe { (pax_syscall_state as *u64).write_volatile(hi) }
+        percpu.set_kstack(hi) // px161: this processor's record (pax_syscall_state word 0 before)
     }
 }
 
@@ -851,7 +851,7 @@ fn run_next() -> u64 {
     }
     put_field(s, offset_of(Thread, state), RUNNING)
     put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
-    put_sv(S_CURRENT, s)
+    percpu.set_current(s)
     put_sv(S_SLICE, timer.ticks())
     enter_space(s)
     let f = field(s, offset_of(Thread, frame))
@@ -863,6 +863,7 @@ fn run_next() -> u64 {
 /// the tick). Returns the frame to resume: `f` itself, or another
 /// thread's.
 pub fn preempt(f: u64) -> u64 {
+    percpu.boot_only(f) // px161: CPU 0's alone; another processor here stops, named
     if sv(S_STARTED) == 0 {
         return f
     }
@@ -890,6 +891,7 @@ pub fn preempt(f: u64) -> u64 {
 /// The voluntary half (kernel/interrupts, vector 0x81 from
 /// `pax_switch`): the current thread has set its own state.
 pub fn switched(f: u64) -> u64 {
+    percpu.boot_only(f) // px161: as `preempt`
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     let st = field(c, offset_of(Thread, state))
@@ -1340,7 +1342,7 @@ pub fn start(pml4: u64) {
     put_sv(S_REFUSED, 0)
     put_sv(S_STARTED, 0)
     put_sv(S_PML4, pml4)
-    put_sv(S_CURRENT, MAIN)
+    percpu.set_current(MAIN)
     put_sv(S_HEAD, 0)
     put_sv(S_TAIL, 0)
     put_sv(S_NEXT_ID, 2)
