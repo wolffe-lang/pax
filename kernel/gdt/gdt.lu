@@ -16,6 +16,12 @@
 //!     0x28  the TSS       a 16-byte system descriptor, type 9 (an
 //!                         available 64-bit TSS), limit 103
 //!
+//! px161: every processor has its own GDT and TSS, this one layout: the
+//! boot processor's in boot/isr.S's storage (`start`), an application
+//! processor's in its record (`fill_ap`, kernel/smp); `set_rsp0` writes the
+//! running processor's TSS (kernel/percpu). `start` also makes CPU 0's
+//! record GS's base.
+//!
 //! px09 puts the user segments to use (ring 3 runs on 0x23 and 0x1b,
 //! the selectors with RPL 3) and keeps RSP0 current: `set_rsp0`, called
 //! by kernel/sched at every switch with the switched-in thread's kernel
@@ -46,6 +52,7 @@
 //! other kernel's source.
 
 use log
+use percpu
 
 extern "c" fn pax_load_gdt(gdtr: *Gdtr)
 extern "c" fn pax_ltr(sel: u16)
@@ -98,25 +105,24 @@ fn descriptor(base: u64, limit: u64, access: u64, flags: u64) -> u64 {
     (limit & 0xffff) | ((base & 0xffffff) << 16) | (access << 40) | (((limit >> 16) & 0xf) << 48) | (flags << 52) | (((base >> 24) & 0xff) << 56)
 }
 
-/// Build the GDT and the TSS, load the GDT (CS 0x08; DS, ES, SS, FS, GS
-/// 0x10) and the task register (0x28).
-pub fn start() {
-    // # Safety: pax_gdt, pax_tss and pax_gdtr are boot/isr.S's .bss
-    // storage (64, 112 and 16 bytes), written by nothing else; the GDT
-    // loaded is complete before LGDT and the TSS before LTR, and the
-    // selectors reloaded name descriptors this table has.
+/// The seven descriptors at `g` and the TSS at `t` (RSP0 `rsp0`, IST1-4
+/// the four stacks' tops), one layout for every processor (px161: each
+/// has its own pair, its TSS's descriptor naming its own TSS).
+fn fill(g: *u64, t: *Tss, rsp0: u64, ist1: u64, ist2: u64, ist3: u64, ist4: u64) {
+    // # Safety: `g` is 56 bytes and `t` 104 the caller owns, written
+    // before any processor loads them.
     unsafe {
-        let tss = pax_tss as u64
-        pax_tss[0] = Tss {
+        let tss = t as u64
+        t[0] = Tss {
             reserved0: 0,
-            rsp0: 0,
+            rsp0: rsp0,
             rsp1: 0,
             rsp2: 0,
             reserved1: 0,
-            ist1: pax_ist1_top as u64,
-            ist2: pax_ist2_top as u64,
-            ist3: pax_ist3_top as u64,
-            ist4: pax_ist4_top as u64,
+            ist1: ist1,
+            ist2: ist2,
+            ist3: ist3,
+            ist4: ist4,
             ist5: 0,
             ist6: 0,
             ist7: 0,
@@ -124,16 +130,61 @@ pub fn start() {
             reserved3: 0,
             iomap_base: size_of(Tss) as u16,
         }
-        pax_gdt[0] = 0
-        pax_gdt[1] = descriptor(0, 0xfffff, 0x9a, 0xa) // P, DPL 0, code, exec/read; G, L
-        pax_gdt[2] = descriptor(0, 0xfffff, 0x92, 0xc) // P, DPL 0, data, read/write; G, D/B
-        pax_gdt[3] = descriptor(0, 0xfffff, 0xf2, 0xc) // P, DPL 3, data
-        pax_gdt[4] = descriptor(0, 0xfffff, 0xfa, 0xa) // P, DPL 3, code; L
-        pax_gdt[5] = descriptor(tss, size_of(Tss) as u64 - 1, 0x89, 0) // P, DPL 0, type 9
-        pax_gdt[6] = tss >> 32
+        g[0] = 0
+        g[1] = descriptor(0, 0xfffff, 0x9a, 0xa) // P, DPL 0, code, exec/read; G, L
+        g[2] = descriptor(0, 0xfffff, 0x92, 0xc) // P, DPL 0, data, read/write; G, D/B
+        g[3] = descriptor(0, 0xfffff, 0xf2, 0xc) // P, DPL 3, data
+        g[4] = descriptor(0, 0xfffff, 0xfa, 0xa) // P, DPL 3, code; L
+        g[5] = descriptor(tss, size_of(Tss) as u64 - 1, 0x89, 0) // P, DPL 0, type 9
+        g[6] = tss >> 32
+    }
+}
+
+/// Build the GDT and the TSS, load the GDT (CS 0x08; DS, ES, SS, FS, GS
+/// 0x10) and the task register (0x28). px161: then CPU 0's record is GS's
+/// base (kernel/percpu: LGDT's reload of GS set the base to 0).
+pub fn start() {
+    // # Safety: pax_gdt, pax_tss and pax_gdtr are boot/isr.S's .bss
+    // storage (64, 112 and 16 bytes), written by nothing else; the GDT
+    // loaded is complete before LGDT and the TSS before LTR, and the
+    // selectors reloaded name descriptors this table has.
+    unsafe {
+        fill(pax_gdt, pax_tss, 0, pax_ist1_top as u64, pax_ist2_top as u64, pax_ist3_top as u64, pax_ist4_top as u64)
         pax_gdtr[0] = Gdtr { limit: (COUNT * 8 - 1) as u16, base: pax_gdt as u64 }
         pax_load_gdt(pax_gdtr)
         pax_ltr(TSS_SEL as u16)
+    }
+    percpu.boot_init()
+}
+
+/// px161: an application processor's GDT, GDTR and TSS, in its record at
+/// `rec` (kernel/percpu's GDT_AREA, GDTR_AREA and TSS_AREA), written by
+/// the boot processor before it is released; boot/isr.S's pax_ap_entry
+/// loads them (LGDT, LTR 0x28).
+pub fn fill_ap(rec: u64, rsp0: u64, ist1: u64, ist2: u64, ist3: u64, ist4: u64) {
+    let g = rec + percpu.GDT_AREA
+    let t = rec + percpu.TSS_AREA
+    // # Safety: the record's page is mapped and the boot processor's alone
+    // until its processor is released; GDT_AREA, GDTR_AREA and TSS_AREA
+    // lie in it (64, 16 and 112 bytes).
+    unsafe {
+        fill(g as *u64, t as *Tss, rsp0, ist1, ist2, ist3, ist4)
+        ((rec + percpu.GDTR_AREA) as *Gdtr)[0] = Gdtr { limit: (COUNT * 8 - 1) as u16, base: g }
+    }
+    percpu.put(rec, percpu.TSS, t)
+    percpu.put(rec, percpu.GDT, g)
+}
+
+/// px161: word `i` of the TSS at `t` as the processor reads it: 0 RSP0,
+/// 1-4 IST1-4 (two aligned 32-bit halves each, as `set_rsp0` writes them).
+pub fn tss_stack(t: u64, i: u64) -> u64 {
+    let at = if i == 0 { t + 4 } else { t + 36 + (i - 1) * 8 }
+    // # Safety: `t` is a TSS (104 bytes) the kernel built; `at` + 8 lies
+    // inside it, 4-aligned.
+    unsafe {
+        let lo = (at as *u32).read_volatile() as u64
+        let hi = ((at + 4) as *u32).read_volatile() as u64
+        (hi << 32) | lo
     }
 }
 
@@ -147,20 +198,22 @@ pub fn start() {
 /// reads RSP0, and only on an interrupt, which cannot land between the
 /// two writes: every caller runs with IF clear.
 pub fn set_rsp0(v: u64) {
-    // # Safety: pax_tss is boot/isr.S's 112 bytes; bytes 4-11 are RSP0,
-    // both halves 4-aligned.
+    // # Safety: px161: this processor's TSS (pax_tss on CPU 0, its
+    // record's on another: kernel/percpu), 104 bytes; bytes 4-11 are
+    // RSP0, both halves 4-aligned.
     unsafe {
-        let t = pax_tss as u64
+        let t = percpu.tss()
         ((t + 4) as *u32).write_volatile((v & 0xffffffff) as u32)
         ((t + 8) as *u32).write_volatile((v >> 32) as u32)
     }
 }
 
-/// The TSS's RSP0 now (px09), read as its two halves.
+/// The TSS's RSP0 now (px09), read as its two halves; px161: this
+/// processor's TSS.
 pub fn rsp0() -> u64 {
     // # Safety: as `set_rsp0`.
     unsafe {
-        let t = pax_tss as u64
+        let t = percpu.tss()
         let lo = ((t + 4) as *u32).read_volatile() as u64
         let hi = ((t + 8) as *u32).read_volatile() as u64
         (hi << 32) | lo
