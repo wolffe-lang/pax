@@ -49,7 +49,7 @@ a = ap.parse_args()
 
 text = pathlib.Path(a.serial).read_text(errors='replace').replace('\r', '')
 n = a.n
-tag = f'smp={n}' + ('' if a.mode == 'default' else f' {a.mode}')
+tag = f'smp={n}' + (f' disabled={a.disabled}' if a.disabled else '') + ('' if a.mode == 'default' else f' {a.mode}')
 red = []
 
 
@@ -126,8 +126,8 @@ elif cpus == 1:
     else:
         ok('SMP-ONE', 'no cpus: line; started 1, idle 0, cpu 0 alone')
 else:
-    want = re.compile(rf'^cpus: application processors idle {aps} of {aps} in \d+ ms, \d+ KiB each; '
-                      r'the boot processor runs every thread$')
+    want = re.compile(rf'^cpus: application processors idle {aps} of {aps} in \d+ ms, \d+ KiB each '
+                      r'\(\d+ KiB with their tables\); the boot processor runs every thread$')
     apics = sorted(v[0] for v in one.values())
     if not any(want.match(b) for b in boot):
         fail('SMP-ENTER', f'no boot line "idle {aps} of {aps}": {boot}')
