@@ -143,7 +143,9 @@ processor loads an IDT of its own holding only an NMI gate and halts with
 interrupts off. After `kernel/user`'s start `kernel/smp` gives each its own
 window of 84 KiB in PML4 slot 417 (a record page, an idle stack and four
 IST stacks, each above an unmapped guard), stores the record where the
-held processor looks and sends it one NMI. It goes on to `pax_ap_entry`,
+held processor looks, and sends it one NMI once it says it is held: it
+looks only on that NMI's return, so the NMI is always taken in the hold.
+It goes on to `pax_ap_entry`,
 which loads PAX's tables and its own stack before anything else, then its
 GDT, TSS, the IDT and GS. A processor PAX does not run (`nosmp` on the
 kernel command line, past 64, or one that never reached its idle loop) is
