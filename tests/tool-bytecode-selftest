@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""tests/tool-bytecode-selftest — a test that loads a program of tools/ as
+a module leaves no tools/__pycache__ behind. No QEMU: python3 only.
+
+    python3 -I tests/tool-bytecode-selftest
+
+A tool with no `.py` in its name, loaded through SourceFileLoader, is
+compiled and cached as tools/__pycache__/<name>cpython-XY.pyc: an
+untracked directory in whatever checkout the suite ran in. The scripts
+here run under `python3 -I`, which ignores PYTHONDONTWRITEBYTECODE with
+the rest of the environment, so the script itself has to say
+`sys.dont_write_bytecode = True` before it loads anything.
+
+  B1  the premise, on a scratch tool: loaded under -I with the variable
+      set, the cache is written all the same; with the script's own
+      flag, nothing is.
+  B2  every python script under tests/ and tools/ that names
+      SourceFileLoader sets the flag on a line before its first use.
+  B3  the scripts that can run on a bare tree, run in a scratch copy of
+      it: tests/mpx6-disktools.d/fixture.py (as far as its loader; it
+      stops at the first program it has no build of) and
+      tests/usb-linux-fetch leave no tools/__pycache__ there.
+
+Exit 0 when every row held, 1 otherwise.
+"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+FLAG = 'sys.dont_write_bytecode = True'
+USE = 'SourceFileLoader('
+fails = 0
+
+
+def say(ok, text):
+    global fails
+    fails += 0 if ok else 1
+    print('%s %s' % ('PASS' if ok else 'FAIL', text))
+
+
+def isolated(script, *args, cwd):
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+    return subprocess.run([sys.executable, '-I', str(script)] + [str(a) for a in args], cwd=str(cwd), env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+def cached(tree):
+    return sorted(str(p.relative_to(tree)) for p in Path(tree).rglob('__pycache__'))
+
+
+# --- B1 the premise ---------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as d:
+    d = Path(d)
+    (d / 'tools').mkdir()
+    (d / 'tools' / 'a-tool').write_text('VALUE = 7\n')
+    body = ("from importlib.machinery import SourceFileLoader\nimport sys\n%s\n"
+            "assert SourceFileLoader('a_tool', sys.argv[1]).load_module().VALUE == 7\n")
+    (d / 'plain').write_text(body % '')
+    (d / 'flagged').write_text(body % FLAG)
+    r = isolated(d / 'plain', d / 'tools' / 'a-tool', cwd=d)
+    say(r.returncode == 0 and cached(d) == ['tools/__pycache__'],
+        'B1 under -I the variable is ignored: a loaded tool is cached beside itself (%s)' % (cached(d) or r.stderr.strip()[-200:]))
+    shutil.rmtree(d / 'tools' / '__pycache__', ignore_errors=True)
+    r = isolated(d / 'flagged', d / 'tools' / 'a-tool', cwd=d)
+    say(r.returncode == 0 and cached(d) == [], 'B1 with the flag set first, nothing is cached (%s)' % (cached(d) or 'none'))
+
+# --- B2 every loader sets the flag first ------------------------------------------------
+try:
+    tracked = subprocess.run(['git', '-C', str(ROOT), 'ls-files', 'tests', 'tools'], check=True, capture_output=True,
+                             text=True).stdout.split('\n')
+except (subprocess.CalledProcessError, FileNotFoundError):
+    tracked = [str(p.relative_to(ROOT)) for top in ('tests', 'tools') for p in sorted((ROOT / top).rglob('*')) if p.is_file()]
+loaders = []
+for name in tracked:
+    path = ROOT / name
+    if not name or name == 'tests/tool-bytecode-selftest' or not path.is_file() or path.is_symlink():
+        continue
+    try:
+        text = path.read_text()
+    except (UnicodeDecodeError, OSError):
+        continue
+    first = text.split('\n', 1)[0]
+    if not (name.endswith('.py') or (first.startswith('#!') and 'python' in first)) or USE not in text:
+        continue
+    loaders.append(name)
+    flag, use = text.find(FLAG), text.find(USE)
+    if flag < 0 or flag > use:
+        say(False, 'B2 %s loads a module by path and %s' % (name, 'never sets the flag' if flag < 0 else 'sets the flag after it'))
+say(len(loaders) >= 3, 'B2 %d scripts load a module by path; each was checked' % len(loaders))
+
+# --- B3 the two that run on a bare tree -------------------------------------------------
+with tempfile.TemporaryDirectory() as d:
+    d = Path(d)
+    for name in ('tools/mkdisk', 'tools/fetch-usb-linux', 'tests/mpx6-disktools.d/fixture.py', 'tests/usb-linux-fetch'):
+        (d / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / name, d / name)
+    r = isolated(d / 'tests/mpx6-disktools.d/fixture.py', d, d / 'work', d / 'dest', d / 'kernel', cwd=d)
+    reached = 'paxgpt' in r.stderr  # past the loader: the first program it copies
+    say(reached and cached(d) == [], 'B3 the disk tools\' fixture loads tools/mkdisk and leaves no cache (%s)'
+        % (cached(d) or ('none' if reached else 'it never reached its loader: ' + r.stderr.strip()[-200:])))
+    shutil.rmtree(d / 'tools' / '__pycache__', ignore_errors=True)
+    r = isolated(d / 'tests/usb-linux-fetch', cwd=d)
+    ran = '\nRan ' in '\n' + r.stderr
+    say(ran and cached(d) == [], 'B3 the USB fetch test loads tools/fetch-usb-linux and leaves no cache (%s)'
+        % (cached(d) or ('none' if ran else 'it ran no test: ' + r.stderr.strip()[-200:])))
+
+print('tool-bytecode-selftest: %s' % ('PASS' if fails == 0 else 'FAIL (%d)' % fails))
+sys.exit(1 if fails else 0)
