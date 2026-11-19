@@ -682,11 +682,12 @@ pub fn ap_interrupt(f: u64) -> u64 {
     percpu.stop(v, frame(f, 16), frame(f, 17), cr2)
 }
 
-/// An application processor's NMI (on its own IST2): counted, the frame's
-/// address kept, and it resumes.
+/// An application processor's NMI (on its own IST2): the frame's address
+/// kept, then counted, and it resumes. The count is what says so: `nmi_each`
+/// reads the address as soon as it sees the count, so the address is there first.
 pub fn ap_nmi(f: u64) {
-    percpu.count(percpu.NMIS)
     percpu.put(percpu.mine(), percpu.NMI_AT, f)
+    percpu.count(percpu.NMIS)
 }
 
 /// CPU 0, at each tick and after the bring-up: each processor that has
