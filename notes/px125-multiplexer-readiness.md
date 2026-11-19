@@ -51,6 +51,13 @@ gains the `mpx7-mux` job; `tools/ci-tiers.map`, `tests/ci-plan`, `tools/linux-tr
 
 ## 3. A. The plumbing a server needs
 
+**Since 2026-11-19 (the process table at 1,024, pax#361):** rows A1.0 and A1.9 below are as measured on the
+64-slot kernel and are kept as that history. On a kernel with 1,024 slots PAX's lines are Ubuntu's: `A1.0 100
+processes at once besides this one: yes` and `A1.9 32 pelt shells at once, each idle between its lines: every one
+answered twice` (32 of 32 started, none refused), and the kernel prints no `refused: no free process slot` line.
+`tests/mpx7-mux.d/ruled-plumb.txt` no longer rules either row. The gap of #354 is closed by that table; the issue
+stays open until this suite is on trunk.
+
 Ubuntu is 24.04.5 in a container on a Linux 7.2 host; the probe is pid 1 there as it is on PAX. "works" means PAX
 answers as Ubuntu does.
 

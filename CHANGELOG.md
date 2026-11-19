@@ -17,8 +17,8 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   credentials, a stale file), non-blocking I/O and the loop's timers, termios
   raw and back, the same work through wolf-std alone, and on the console what
   a client draws, asks and types (Ctrl-Space as NUL and the box-drawing,
-  arrow and powerline glyphs, which pax#461 fixed). The gaps are issues: the
-  64 thread slots, a Unix stream's 4096 bytes, the loop calls PAX lacks
+  arrow and powerline glyphs, which pax#461 fixed). The gaps are issues: a
+  Unix stream's 64 KiB before EAGAIN, the loop calls PAX lacks
   (sendmsg/recvmsg, timerfd, signalfd, ppoll), the console's subset, and two
   wolf-std calls: `notes/px125-multiplexer-readiness.md`.
 
