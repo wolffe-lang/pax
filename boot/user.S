@@ -15,8 +15,8 @@
                          — and %rsp still the USER's: SYSCALL switches no
                          stack (Intel SDM vol. 3A §5.8.8; vol. 2 SYSCALL;
                          AMD64 APM vol. 2 §6.1.1). It parks the user %rsp
-                         in pax_syscall_state word 1, loads word 0 (the
-                         running thread's kernel stack top, which
+                         in its CPU's record (px161), loads the record's
+                         kernel stack top (the running thread's, which
                          kernel/sched writes beside the TSS's RSP0 at
                          every switch), and builds there the frame an
                          interrupt from ring 3 would have built — SS
@@ -31,9 +31,10 @@
                          %r9, the result written back to the frame's
                          %rax: the psABI's A.2.1 kernel convention, which
                          is Linux's), and the frame leaves by SYSRETQ
-                         (boot/isr.S's pax_sysret). One CPU and IF clear
-                         from SYSCALL to here make word 1 safe; SMP needs
-                         SWAPGS and a per-CPU area.
+                         (boot/isr.S's pax_sysret). px161: SWAPGS first,
+                         and the two words are this CPU's record's
+                         (kernel/percpu, %gs:24 and %gs:16), words 1 and 0
+                         of pax_syscall_state before.
    pax_enter_user(rip, rsp)
                          a kernel thread's way into ring 3, never
                          returning: CLI (px131: and kernel/latency's
@@ -63,9 +64,9 @@
                          witness jumps to a user page in ring 0).
 
    Storage (.bss, kernel/sched and kernel/user write it, read volatile):
-     pax_syscall_state   eight 8-byte words: 0 the running thread's
-                         kernel stack top (SYSCALL's stack), 1 the user
-                         RSP while the entry builds the frame, 2 the
+     pax_syscall_state   eight 8-byte words: 0 and 1 unused since px161
+                         (the running thread's kernel stack top and the
+                         user RSP: each CPU's record's now), 2 the
                          timer ticks that landed in ring 3, 3 SMAP on,
                          4 SMEP on, 5 the last exit's status + 1 (px13),
                          6 the wall clock at tick 0 (px26), 7 a page fault
@@ -103,14 +104,25 @@
    %r11 destroyed, the result in %rax, -4095..-1 an error). No Linux
    source; no other kernel's source. */
 
+/* px161: SWAPGS and the GS-relative accesses are written as their bytes:
+   clef, the assembler in wolf (tests/kernel-as's K5, which holds every
+   object to GNU as's), has neither the mnemonic nor a %gs: memory operand
+   yet. The bytes are what GNU as and clang emit for the instruction in
+   each comment (Intel SDM vol. 2: SWAPGS 0F 01 F8; MOV, CMP and PUSH with
+   the GS prefix 65 and an absolute disp32, ModRM rm 100 and SIB 25). */
+        .macro SWAPGS
+        .byte   0x0f, 0x01, 0xf8        /* swapgs */
+        .endm
+
         .text
         .globl pax_syscall_entry
         .type pax_syscall_entry, @function
 pax_syscall_entry:
-        movq    %rsp, pax_syscall_state+8(%rip)  /* the user's rsp */
-        movq    pax_syscall_state(%rip), %rsp    /* this thread's kernel stack */
+        SWAPGS                          /* px161: this CPU's record at %gs */
+        .byte   0x65, 0x48, 0x89, 0x24, 0x25, 0x18, 0x00, 0x00, 0x00 /* movq    %rsp, %gs:24: the user's rsp, in the record */
+        .byte   0x65, 0x48, 0x8b, 0x24, 0x25, 0x10, 0x00, 0x00, 0x00 /* movq    %gs:16, %rsp: the running thread's kernel stack */
         pushq   $0x1b                   /* SS */
-        pushq   pax_syscall_state+8(%rip)        /* RSP */
+        .byte   0x65, 0xff, 0x34, 0x25, 0x18, 0x00, 0x00, 0x00 /* pushq   %gs:24: RSP */
         pushq   %r11                    /* RFLAGS */
         pushq   $0x23                   /* CS */
         pushq   %rcx                    /* RIP */
@@ -154,6 +166,7 @@ pax_enter_user:
         xorl    %r13d, %r13d
         xorl    %r14d, %r14d
         xorl    %r15d, %r15d
+        SWAPGS                          /* px161: ring 3's GS, last */
         iretq
         .size pax_enter_user, . - pax_enter_user
 
