@@ -55,6 +55,7 @@ extern "c" let limine_framebuffer_request: *u64
 extern "c" let limine_rsdp_request: *u64
 extern "c" let limine_efi_system_table_request: *u64
 extern "c" let limine_executable_file_request: *u64 // px87: the kernel's own file (pax#176)
+extern "c" let limine_mp_request: *u64 // px161: every processor (the MP feature)
 extern "c" let __pax_image_start: *u8
 extern "c" let __pax_image_end: *u8
 
@@ -62,7 +63,8 @@ extern "c" let __pax_image_end: *u8
 /// tag, 1 bootloader info, 2 firmware type, 3 memory map, 4 HHDM, 5
 /// executable address, 6 modules (px10), 7 the executable command line
 /// (px15), 8 the framebuffer (px19), 9 the RSDP and 10 the EFI system
-/// table (px76), 11 the executable file (px87); 0 for any other `which`.
+/// table (px76), 11 the executable file (px87), 12 the processors
+/// (px161); 0 for any other `which`.
 fn request(which: int) -> u64 {
     // # Safety: link-time addresses; nothing is read.
     unsafe {
@@ -96,6 +98,7 @@ fn request(which: int) -> u64 {
         if which == 9 { return limine_rsdp_request as u64 }
         if which == 10 { return limine_efi_system_table_request as u64 }
         if which == 11 { return limine_executable_file_request as u64 }
+        if which == 12 { return limine_mp_request as u64 }
     }
     0
 }
@@ -502,6 +505,60 @@ pub fn module_guid(i: u64, part: bool, w: u64) -> u64 {
         return 0
     }
     word(f + (if part { 80 } else { 64 }) + w * 8)
+}
+
+/// px161: how many processors Limine's MP response lists, the boot
+/// processor included (PROTOCOL.md's MP feature, x86-64: revision (0),
+/// flags (8, u32), bsp_lapic_id (12, u32), cpu_count (16), cpus (24): an
+/// array of pointers to `struct limine_mp_info` {processor_id (0, u32,
+/// the MADT's ACPI UID), lapic_id (4, u32), reserved (8), goto_address
+/// (16), extra_argument (24)}): 0 without a response.
+pub fn mp_count() -> u64 {
+    let r = response(12)
+    if r == 0 {
+        return 0
+    }
+    word(r + 16)
+}
+
+/// px161: the boot processor's local APIC ID, as the MP response says
+/// (0 without one).
+pub fn mp_bsp() -> u64 {
+    let r = response(12)
+    if r == 0 {
+        return 0
+    }
+    word(r + 8) >> 32
+}
+
+/// px161: entry `i`'s `struct limine_mp_info` (i < mp_count()), 0 past
+/// the end. Bootloader-reclaimable memory, which kernel/frames never
+/// hands out, mapped in the HHDM: a parked processor polls its
+/// goto_address there.
+pub fn mp_info(i: u64) -> u64 {
+    let r = response(12)
+    if r == 0 || i >= word(r + 16) {
+        return 0
+    }
+    word(word(r + 24) + i * 8)
+}
+
+/// px161: entry `i`'s local APIC ID (0 past the end).
+pub fn mp_apic(i: u64) -> u64 {
+    let a = mp_info(i)
+    if a == 0 {
+        return 0
+    }
+    word(a) >> 32
+}
+
+/// px161: entry `i`'s ACPI processor UID (0 past the end).
+pub fn mp_uid(i: u64) -> u64 {
+    let a = mp_info(i)
+    if a == 0 {
+        return 0
+    }
+    word(a) & 0xffffffff
 }
 
 /// How many framebuffers Limine handed over (px19): 0 without a
