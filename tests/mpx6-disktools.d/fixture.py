@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True  # no tools/__pycache__ beside the tool it loads (-I ignores the variable)
 repo, work, dest, kernel = map(Path, sys.argv[1:])
 mk = SourceFileLoader('pax_mkdisk', str(repo / 'tools/mkdisk')).load_module()
 tree = dest / 'tree'
