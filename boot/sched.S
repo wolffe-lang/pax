@@ -119,7 +119,8 @@
                        the console's)
      pax_sched_state   thirty-two 8-byte words (sixteen before px48's
                        console session words): the scheduler's scalars
-                       (the current slot, the run queue's ends, …),
+                       (the run queue's ends, …; px161: the running
+                       thread's slot is each CPU's record's, kernel/percpu),
                        kept here and read volatile rather than in module
                        `var`s, which wolf 0.2.24 forwards across a call
                        that writes them (wolf-lang#598)
@@ -133,6 +134,13 @@
    mode) and §8.9.5 (IRET in long mode); the x86-64 psABI (alignment,
    the callee-saved registers). No Linux source; no other kernel's
    source. */
+
+/* px161: the GS-relative load in pax_irq_save is written as its bytes:
+   clef, the assembler in wolf (tests/kernel-as's K5, which holds every
+   object to GNU as's), has no %gs: memory operand yet. The bytes are what
+   GNU as and clang emit for the instruction in the comment (Intel SDM vol.
+   2: MOV with the GS prefix 65 and an absolute disp32, ModRM rm 100 and SIB
+   25). */
 
         .text
         .globl pax_switch
@@ -187,7 +195,7 @@ pax_irq_save:
         pushq   %rax
         movq    8(%rsp), %rdi           /* where: our caller */
         movq    $0x200, %rsi            /* tag: an irq_save */
-        movq    pax_sched_state+8(%rip), %rdx /* the running thread's slot */
+        .byte   0x65, 0x48, 0x8b, 0x14, 0x25, 0x20, 0x00, 0x00, 0x00 /* movq    %gs:32, %rdx: the running thread's slot (px161: its CPU's record's) */
         call    pax_lat_open
         popq    %rax
 1:      ret
