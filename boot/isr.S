@@ -20,7 +20,10 @@
    clear, moves the frame it RETURNS into %rsp (px07), restores the
    registers from it, drops the vector and the error code and returns
    with `iretq` (or, for a system call's frame, px09, `sysretq`:
-   pax_sysret below). A handler that returns its argument resumes the
+   pax_sysret below). px161: between the pushes and the call, and again
+   before the pops, the GS step: SWAPGS on every change of ring, so ring 0
+   always finds its CPU's record at %gs:0 (the comment at the step says
+   how an exception that lands in a window is told apart). A handler that returns its argument resumes the
    interrupted code; one that returns another thread's saved frame
    switches to that thread (kernel/sched, boot/sched.S: the frame lives
    on that thread's stack, where the CPU or pax_switch built it, and
@@ -56,6 +59,13 @@
                     kernel/timer's count of tick interrupts taken (px131):
                     the same kind of word; pax_tick_count follows the
                     clock, so a host reads this one for the ticks lost
+     pax_cpu0       px161: CPU 0's record (kernel/percpu), GS's base in
+                    ring 0 on the boot processor
+     pax_ap_boot    px161: sixteen words kernel/smp publishes for the
+                    application processors and the processors share
+     pax_ap_holds   px161: two words for each application processor
+                    held at the entry (pax_ap_hold): 0 HELD, which it
+                    sets, 1 its record, which kernel/smp sets
 
    Routines:
      pax_load_gdt(gdtr)   LGDT, then CS = 0x08 (a far return), DS, ES, SS,
@@ -102,6 +112,16 @@ pax_isr\v:
         pushq   $\v
         jmp     pax_isr_common
         .size pax_isr\v, . - pax_isr\v
+        .endm
+
+/* px161: SWAPGS and the GS-relative accesses are written as their bytes:
+   clef, the assembler in wolf (tests/kernel-as's K5, which holds every
+   object to GNU as's), has neither the mnemonic nor a %gs: memory operand
+   yet. The bytes are what GNU as and clang emit for the instruction in
+   each comment (Intel SDM vol. 2: SWAPGS 0F 01 F8; MOV, CMP and PUSH with
+   the GS prefix 65 and an absolute disp32, ModRM rm 100 and SIB 25). */
+        .macro SWAPGS
+        .byte   0x0f, 0x01, 0xf8        /* swapgs */
         .endm
 
         .text
@@ -177,12 +197,49 @@ pax_isr_common:
         pushq   %r13
         pushq   %r14
         pushq   %r15
+        /* px161: GS. In ring 0 IA32_GS_BASE is this CPU's record (kernel/
+           percpu); in ring 3 it is the program's (0: PAX gives ring 3 no GS
+           base of its own), the record waiting in IA32_KERNEL_GS_BASE. Every
+           register is in the frame now, so any may be used. %r12 (callee-
+           saved, so it survives pax_interrupt and every call below, and
+           restored from the frame on the way out) says whether the way out
+           must swap back: 1 only for an exception that landed in a window
+           where ring 0 ran on ring 3's GS (between SWAPGS and SYSRETQ or
+           IRETQ, or before pax_syscall_entry's own SWAPGS).
+           - vector 0x100, a system call's frame: pax_syscall_entry swapped;
+           - an exception (0-31: an NMI, #MC, #DB or #DF may land anywhere, and
+             IRETQ's own faults land in a window): IA32_GS_BASE read; a kernel
+             (negative) address is the record, anything else ring 3's, swapped;
+           - an interrupt (32 and up, and pax_switch's 0x81: IF is clear in
+             every window): swapped when it came from ring 3 (CS's RPL). */
+        xorl    %r12d, %r12d
+        cmpq    $0x100, 120(%rsp)
+        je      .Lpax_gs_ready
+        cmpq    $32, 120(%rsp)
+        jb      .Lpax_gs_exception
+        testb   $3, 144(%rsp)
+        jz      .Lpax_gs_ready
+        SWAPGS
+        jmp     .Lpax_gs_ready
+.Lpax_gs_exception:
+        movl    $0xc0000101, %ecx       /* IA32_GS_BASE */
+        rdmsr
+        testl   %edx, %edx
+        js      .Lpax_gs_ready          /* the record already */
+        SWAPGS
+        testb   $3, 144(%rsp)
+        jnz     .Lpax_gs_ready          /* from ring 3: the way out decides by CS */
+        movl    $1, %r12d               /* a window: swap back on the way out */
+.Lpax_gs_ready:
         /* px131: kernel/latency's instrument, on with `latency` on the
            command line: an entry from a context with IF set opens an
            interrupts-off interval, begun at the interrupted RIP, for the
-           vector, with %rax (a system call's number). */
+           vector, with %rax (a system call's number). px161: on CPU 0 only
+           (%gs:8, the record's index): one CPU's instrument. */
         testq   $1, pax_lat(%rip)
         jz      1f
+        .byte   0x65, 0x48, 0x83, 0x3c, 0x25, 0x08, 0x00, 0x00, 0x00, 0x00 /* cmpq    $0, %gs:8 */
+        jne     1f
         testq   $0x200, 152(%rsp)
         jz      1f
         movq    136(%rsp), %rdi
@@ -202,6 +259,8 @@ pax_isr_common:
            may clobber any; %rbx keeps %rsp across it). */
         testq   $1, pax_lat(%rip)
         jz      2f
+        .byte   0x65, 0x48, 0x83, 0x3c, 0x25, 0x08, 0x00, 0x00, 0x00, 0x00 /* cmpq    $0, %gs:8: px161: CPU 0's instrument */
+        jne     2f
         testq   $0x200, 152(%rsp)
         jz      2f
         movq    %rsp, %rbx
@@ -229,6 +288,14 @@ pax_isr_common:
         call    pax_trace_finish_syscall
         jmp     .Lpax_resume_frame
 .Lpax_iret:
+        /* px161: back to ring 3, or into a window an exception interrupted
+           (%r12, set on the way in): ring 3's GS. */
+        testb   $3, 144(%rsp)
+        jnz     3f
+        testl   %r12d, %r12d
+        jz      4f
+3:      SWAPGS
+4:
         popq    %r15
         popq    %r14
         popq    %r13
@@ -293,6 +360,7 @@ pax_sysret:
         movq    16(%rsp), %rcx          /* rip (the vector is at 0, error 8) */
         movq    32(%rsp), %r11          /* rflags */
         movq    40(%rsp), %rsp          /* the user's rsp */
+        SWAPGS                          /* px161: ring 3's GS, last */
         sysretq
         .size pax_sysret, . - pax_sysret
 
@@ -367,6 +435,168 @@ pax_lat_open:
         ret
         .size pax_lat_open, . - pax_lat_open
 
+/* px161: the processors (SMP stage 1). kernel/percpu names a CPU's record
+   by these offsets, and the code below and in boot/user.S and boot/sched.S
+   reads them as %gs:N: 0 the record's own address, 8 its index (0 the boot
+   processor), 16 the running thread's kernel stack top (SYSCALL's stack),
+   24 the user RSP while pax_syscall_entry builds the frame, 32 the running
+   thread's slot, 96 an application processor's idle stack top, 320 its
+   GDTR (LGDT's operand), then its GDT at 256 and its TSS at 384.
+
+   pax_cpu_self() -> u64   %gs:0, this CPU's record.
+   pax_ap_hold             where Limine sends an application processor
+                           at the kernel's entry (its MP feature:
+                           `goto_address`, with %rdi its `struct
+                           limine_mp_info`, on Limine's tables and stack,
+                           interrupts off): CLI, its hold words from
+                           `extra_argument` (+24) in %rbx, an IDT of its
+                           own on its stack with one gate, the NMI's (IST
+                           0, the code segment it runs on), then HELD set
+                           and a loop: its record (word 1) looked at, HLT.
+                           The NMI's handler (pax_ap_hold_nmi) returns to
+                           the look, not into the loop, so an NMI that
+                           comes between the look and HLT is not lost.
+                           With the record: `extra_argument` = the record,
+                           and on to pax_ap_entry, as if Limine had sent it
+                           there.
+   pax_ap_park             CLI; HLT for good: an application processor PAX
+                           will not run (`nosmp`, past kernel/smp's MAX),
+                           until kernel/smp sends it INIT.
+   pax_ap_entry            an application processor's way into PAX, with
+                           %rdi its `struct limine_mp_info` (Limine's
+                           tables and stack, interrupts off). The record
+                           kernel/smp wrote into `extra_argument` (+24) is kept in
+                           %rbx; PAX's tables load first (pax_ap_boot word
+                           0: the kernel's PML4) and at once the record's
+                           stack (Limine's stack need not be mapped in
+                           PAX's tables), then the record's GDT (CS 0x08 by
+                           a far return, the data selectors 0x10), its TSS
+                           (LTR 0x28), the one IDT (pax_idtr), GS_BASE the
+                           record and KERNEL_GS_BASE 0, and then the wolf
+                           routine whose address pax_ap_boot word 1 holds
+                           (kernel/smp's pax_ap_main, given the record),
+                           which never returns. No wolf symbol is named
+                           here, so a kernel without kernel/smp links as
+                           before.
+   pax_ap_halt()           STI; HLT; CLI; RET: an application processor's
+                           idle, until its next interrupt (its tick).
+
+   Written from: the Limine protocol (PROTOCOL.md at 3a0526b7, the MP
+   feature: goto_address, extra_argument, %rdi, the machine state as at
+   the entry); the Intel SDM vol. 2 (SWAPGS, RDMSR, WRMSR, LGDT, LTR,
+   LIDT, MOV to CR3, HLT, STI's shadow, IRETQ), vol. 3A §6.7.1 and §6.14.1
+   (the NMI's blocking, a 64-bit interrupt gate), §2.5 and §4.10.4.1
+   (CR3), §3.4.4 and §5.8.8 (FS and GS bases in 64-bit mode, the SYSCALL
+   window), vol. 4 (IA32_GS_BASE 0xC0000101, IA32_KERNEL_GS_BASE
+   0xC0000102). No Linux source; no other kernel's source. */
+        .globl pax_cpu_self
+        .type pax_cpu_self, @function
+pax_cpu_self:
+        .byte   0x65, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00 /* movq    %gs:0, %rax */
+        ret
+        .size pax_cpu_self, . - pax_cpu_self
+
+        .globl pax_ap_entry
+        .type pax_ap_entry, @function
+pax_ap_entry:
+        cli
+        movq    24(%rdi), %rbx          /* extra_argument: this CPU's record */
+        movq    pax_ap_boot(%rip), %rax /* the kernel's PML4 */
+        movq    %rax, %cr3
+        movq    96(%rbx), %rsp          /* the record's idle stack */
+        lgdt    320(%rbx)
+        movw    $0x10, %ax
+        movw    %ax, %ds
+        movw    %ax, %es
+        movw    %ax, %ss
+        movw    %ax, %fs
+        movw    %ax, %gs
+        leaq    1f(%rip), %rax
+        pushq   $0x08
+        pushq   %rax
+        lretq                           /* CS = 0x08 */
+1:      movw    $0x28, %ax
+        ltr     %ax
+        lidt    pax_idtr(%rip)
+        movl    $0xc0000101, %ecx       /* IA32_GS_BASE: the record */
+        movl    %ebx, %eax
+        movq    %rbx, %rdx
+        shrq    $32, %rdx
+        wrmsr
+        movl    $0xc0000102, %ecx       /* IA32_KERNEL_GS_BASE: 0 */
+        xorl    %eax, %eax
+        xorl    %edx, %edx
+        wrmsr
+        movq    %rbx, %rdi
+        xorl    %ebp, %ebp
+        pushq   $0                      /* no return address: the chain ends */
+        movq    pax_ap_boot+8(%rip), %rax
+        jmp     *%rax                   /* pax_ap_main(record), never back */
+        .size pax_ap_entry, . - pax_ap_entry
+
+        .globl pax_ap_hold
+        .type pax_ap_hold, @function
+pax_ap_hold:
+        cli
+        movq    24(%rdi), %rbx          /* extra_argument: its hold words */
+        andq    $-16, %rsp
+        subq    $64, %rsp               /* the IDT at 0 (3 gates), its IDTR at 48 */
+        xorl    %eax, %eax
+        movq    %rax, 0(%rsp)
+        movq    %rax, 8(%rsp)
+        movq    %rax, 16(%rsp)
+        movq    %rax, 24(%rsp)
+        movq    %rax, 32(%rsp)
+        movq    %rax, 40(%rsp)
+        leaq    pax_ap_hold_nmi(%rip), %rax
+        movw    %ax, 32(%rsp)           /* gate 2: offset 15:0 */
+        movw    %cs, %cx
+        movw    %cx, 34(%rsp)           /* the code segment it runs on */
+        movw    $0x8e00, 36(%rsp)       /* IST 0; present, DPL 0, interrupt gate */
+        shrq    $16, %rax
+        movw    %ax, 38(%rsp)           /* offset 31:16 */
+        shrq    $16, %rax
+        movl    %eax, 40(%rsp)          /* offset 63:32 */
+        movw    $47, 48(%rsp)
+        movq    %rsp, 50(%rsp)
+        lidt    48(%rsp)
+        movq    $1, (%rbx)              /* HELD: an NMI finds its gate now */
+pax_ap_hold_look:
+        movq    8(%rbx), %rax           /* its record, once kernel/smp wrote it */
+        testq   %rax, %rax
+        jnz     1f
+        hlt
+        jmp     pax_ap_hold_look
+1:      movq    %rax, 24(%rdi)
+        jmp     pax_ap_entry
+        .size pax_ap_hold, . - pax_ap_hold
+
+        .type pax_ap_hold_nmi, @function
+pax_ap_hold_nmi:
+        pushq   %rax
+        leaq    pax_ap_hold_look(%rip), %rax
+        movq    %rax, 8(%rsp)           /* the frame's RIP: back to the look */
+        popq    %rax
+        iretq
+        .size pax_ap_hold_nmi, . - pax_ap_hold_nmi
+
+        .globl pax_ap_park
+        .type pax_ap_park, @function
+pax_ap_park:
+        cli
+1:      hlt
+        jmp     1b
+        .size pax_ap_park, . - pax_ap_park
+
+        .globl pax_ap_halt
+        .type pax_ap_halt, @function
+pax_ap_halt:
+        sti
+        hlt
+        cli
+        ret
+        .size pax_ap_halt, . - pax_ap_halt
+
 
         .globl pax_int3
         .type pax_int3, @function
@@ -427,6 +657,21 @@ pax_tick_count:
         .globl pax_tick_delivered
 pax_tick_delivered:
         .zero 8
+        /* px161: CPU 0's record (kernel/percpu: 512 bytes, the offsets
+           above; its GDT and TSS stay pax_gdt and pax_tss), and the words
+           kernel/smp publishes before it releases an application processor
+           and the words the processors share after (kernel/smp's header
+           lists them), then the hold words of up to 64 processors. */
+        .p2align 6
+        .globl pax_cpu0
+pax_cpu0:
+        .zero 512
+        .globl pax_ap_boot
+pax_ap_boot:
+        .zero 128
+        .globl pax_ap_holds
+pax_ap_holds:
+        .zero 1024
         /* px131: kernel/latency's words (32): 0 on, 1 the open interval's
            TSC (0 none), 2 its RIP, 3 its vector or tag, 4 its number or
            slot, then kernel/latency's own, and 31 the address of its
