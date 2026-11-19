@@ -7,6 +7,24 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Every processor is started and parked idle, each with its own state (SMP stage 1).** PAX asks the bootloader
+  for every processor (Limine's MP feature) and releases each application processor into the kernel: its own
+  record (GS's base in ring 0), GDT, TSS and five guarded 16 KiB stacks (its idle stack and one each for the double
+  fault, the NMI, the machine check and #DB), CR0, CR4, EFER, XCR0 and the SYSCALL MSRs as the boot processor has
+  them, and its local APIC timer at 100 Hz from the boot processor's calibration. It then halts between its ticks.
+  The boot processor still runs every thread, system call and device interrupt; the scheduler's tick and switch stop
+  any other processor that reaches them, and the boot processor names it. A system call and every change of ring
+  now swaps GS (SWAPGS), so ring 0 always finds its processor's record and ring 3 never sees it; the running
+  thread's slot and the system call's stack words live in that record. `/proc/pax-cpus` adds `started`, `idle` and
+  a line per processor (its APIC ID, state, current thread, ticks, idle wake-ups and NMIs); `active` stays 1. With
+  one processor no boot line changes; with more, one line says how many are idle and a second that no record, GDT,
+  TSS or stack is shared. An application processor costs 84 KiB. The kernel's first step takes the processors out of
+  the bootloader's parked loop, which spins (left there, 16 processors on 8 host threads slowed a boot from 480 to
+  820 ms), and halts them until the boot processor's control state is final. `nosmp` on the command line runs none
+  and sends each INIT, so it waits for a startup IPI as it did before the bootloader started it, and the boot is the
+  one-processor boot it was. `tests/mpx6-cpus` holds
+  the rows, QEMU's register dump of every processor beside the kernel's own lines, at 1, 2, 4 and 16 processors.
+
 - **The end waits out a daemon's last writes on a slow disk (pax#472).** At a reboot, a halt or a power-off every
   program left has a grace of 2 s after SIGTERM. PAX waits for a disk with interrupts off, and since the tick count
   follows the clock a slow write or fsync(2) spent the grace while nothing could run: a daemon whose SIGTERM work
