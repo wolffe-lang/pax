@@ -16,6 +16,7 @@ import struct
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True  # no tools/__pycache__ beside the tool it loads (-I ignores the variable)
 BIN = Path(sys.argv[1]).resolve()
 OUT = Path(sys.argv[2]).resolve()
 RUNNER = [sys.argv[3]] if len(sys.argv) > 3 else []
