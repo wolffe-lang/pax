@@ -107,7 +107,6 @@
 
 use block
 use boot_info
-use ext2
 use frames
 use identity
 use initramfs
@@ -117,6 +116,7 @@ use panic
 use sched
 use sync
 use tree
+use volume
 
 const PATH: str = "/etc/fstab"
 
@@ -255,7 +255,7 @@ fn spec_device(a: u64, n: u64) -> (u64, bool) {
         }
         var d: u64 = 0
         while d < block.count() {
-            let (has, h, l) = ext2.probe(d)
+            let (has, h, l) = volume.probe(d)
             if has && h == hi && l == lo {
                 return (d, true)
             }
@@ -269,13 +269,13 @@ fn spec_device(a: u64, n: u64) -> (u64, bool) {
         }
         var d: u64 = 0
         while d < block.count() {
-            let (has, _h, _l) = ext2.probe(d)
+            let (has, _h, _l) = volume.probe(d)
             if has {
                 var k: u64 = 0
-                while k < n - 6 && ext2.probed_label(k) == byte(a + 6 + k) {
+                while k < n - 6 && volume.probed_label(k) == byte(a + 6 + k) {
                     k += 1
                 }
-                if k == n - 6 && ext2.probed_label(k) == 0 {
+                if k == n - 6 && volume.probed_label(k) == 0 {
                     return (d, true)
                 }
             }
@@ -333,13 +333,13 @@ pub fn mount_root() -> u64 {
     if d == block.DEVS {
         return no_root(ra, rl, if named { "no such volume" } else { "no such disk" })
     }
-    if asked == 3 && !ext2.has_journal(d) {
+    if asked == 3 && !volume.has_journal(d) {
         // px68: Linux 7.3.0's `couldn't mount as ext3 due to feature incompatibilities`
         return no_root(ra, rl, "rootfstype=ext3 names a volume with no journal")
     }
     let _old = block.set_policy(block.WRITE_BACK)
     let m = tree.mount_root(d, ro, 0)
-    if ext2.failed(m) {
+    if volume.failed(m) {
         log.put("root: ")
         put_span(ra, rl)
         log.put(" (")
@@ -352,7 +352,7 @@ pub fn mount_root() -> u64 {
     // # Safety: a scalar module var, written at boot with IF clear.
     unsafe { write_back = 1 }
     let v = tree.mounted(m)
-    ext2.ask_type(v, asked)
+    volume.ask_type(v, asked)
     log.put("root: ")
     put_span(ra, rl)
     log.put(" (")
@@ -360,7 +360,7 @@ pub fn mount_root() -> u64 {
     log.put(") on /: ")
     put_kind(v, false)
     log.end()
-    ext2.report(v)
+    volume.report(v)
     covers()
     1
 }
@@ -410,19 +410,19 @@ pub fn staged_refused() -> bool {
 /// A refusal with the attempts file at inode `ai` of volume `v` known: its letter `code` in the
 /// file's last byte (written through), then `staged_no`.
 fn staged_no_at(why: str, v: u64, ai: u64, code: u64) -> bool {
-    let (wa, wl, wb) = ext2.wspan(v, ai, 7, 1)
+    let (wa, wl, wb) = volume.wspan(v, ai, 7, 1)
     if wl != 0 {
         // # Safety: the block buffer wspan gave, one byte.
         unsafe { (wa as *u8).write_volatile(code as u8) }
-        ext2.wrote(v, wb)
-        let _s = ext2.sync(v, 0)
+        volume.wrote(v, wb)
+        let _s = volume.sync(v, 0)
     }
     staged_no(why, v)
 }
 
 fn staged_no(why: str, v: u64) -> bool {
     if v != NOVOL {
-        let _u = ext2.unmount(v, 0)
+        let _u = volume.unmount(v, 0)
     }
     log.put("staged: ")
     log.put(why)
@@ -442,7 +442,7 @@ fn staged_walk(v: u64, path: str, sa: u64) -> u64 {
     for c in path.bytes() {
         if c as int == 47 {
             if !first {
-                d = ext2.lookup(v, d, sa, len)
+                d = volume.lookup(v, d, sa, len)
                 if d == 0 {
                     return 0
                 }
@@ -458,7 +458,7 @@ fn staged_walk(v: u64, path: str, sa: u64) -> u64 {
     if len == 0 {
         return d
     }
-    ext2.lookup(v, d, sa, len)
+    volume.lookup(v, d, sa, len)
 }
 
 /// px115: the staged archive read from the installed root and made `/` (see above): true when
@@ -477,20 +477,20 @@ pub fn load_staged(pml4: u64) -> bool {
     if d == block.DEVS {
         return staged_no("root= names no volume", NOVOL)
     }
-    let v = ext2.mount(d, false, 0)
-    if ext2.failed(v) {
+    let v = volume.mount(d, false, 0)
+    if volume.failed(v) {
         return staged_no("the root's volume did not mount", NOVOL)
     }
     let scratch = frames.alloc() else |_| { return staged_no("no frame to work in", v) }
     let sa = scratch + frames.hhdm()
     // The attempt, counted before anything that can fail.
     let ai = staged_walk(v, "/var/lib/pax-upgrade/attempts", sa)
-    if ai == 0 || ext2.size(v, ai) < 8 {
+    if ai == 0 || volume.size(v, ai) < 8 {
         return staged_no("no /var/lib/pax-upgrade/attempts (eight bytes)", v)
     }
     var used: u64 = 0
     while used < 8 {
-        let (a, l) = ext2.rspan(v, ai, used, 1)
+        let (a, l) = volume.rspan(v, ai, used, 1)
         if l == 0 {
             return staged_no("/var/lib/pax-upgrade/attempts could not be read", v)
         }
@@ -503,14 +503,14 @@ pub fn load_staged(pml4: u64) -> bool {
     if used >= ATTEMPTS_MAX {
         return staged_no_at("two staged boots began already; the third is the installed system's", v, ai, 84)
     }
-    let (wa, wl, wb) = ext2.wspan(v, ai, used, 1)
+    let (wa, wl, wb) = volume.wspan(v, ai, used, 1)
     if wl == 0 {
         return staged_no("/var/lib/pax-upgrade/attempts could not be written", v)
     }
     // # Safety: the block buffer wspan gave, one byte.
     unsafe { (wa as *u8).write_volatile(49 as u8) }
-    ext2.wrote(v, wb)
-    let _s = ext2.sync(v, 0)
+    volume.wrote(v, wb)
+    let _s = volume.sync(v, 0)
     log.put("staged: attempt ")
     log.dec((used + 1) as int)
     log.put(" of ")
@@ -521,7 +521,7 @@ pub fn load_staged(pml4: u64) -> bool {
     if fi == 0 {
         return staged_no_at("no /var/lib/pax-upgrade/staged/archive", v, ai, 77)
     }
-    let n = ext2.size(v, fi)
+    let n = volume.size(v, fi)
     if n == 0 {
         return staged_no_at("/var/lib/pax-upgrade/staged/archive is empty", v, ai, 69)
     }
@@ -539,7 +539,7 @@ pub fn load_staged(pml4: u64) -> bool {
             mapped += 4096
         }
         let room = mapped - off
-        let (a, l) = ext2.rspan(v, fi, off, if n - off < room { n - off } else { room })
+        let (a, l) = volume.rspan(v, fi, off, if n - off < room { n - off } else { room })
         if l == 0 {
             return staged_no_at("/var/lib/pax-upgrade/staged/archive could not be read", v, ai, 82)
         }
@@ -564,7 +564,7 @@ pub fn load_staged(pml4: u64) -> bool {
         initramfs.use_staged(0, 0)
         return staged_no_at("the archive is no archive PAX reads", v, ai, 65)
     }
-    let _u = ext2.unmount(v, 0)
+    let _u = volume.unmount(v, 0)
     frames.free(scratch)
     // # Safety: as above.
     unsafe { staged = 1 }
@@ -582,9 +582,9 @@ pub fn load_staged(pml4: u64) -> bool {
 /// `data=ordered, write-through` with `sync` (its file data written
 /// through; its metadata still at the journal's commits).
 fn put_kind(v: u64, wt: bool) {
-    log.put(if ext2.fstype(v) == 3 { "ext3, " } else { "ext2, " })
-    log.put(if ext2.read_only(v) != 0 { "read-only" } else { "read-write" })
-    if ext2.journalled(v) {
+    log.put(if volume.fstype(v) == 3 { "ext3, " } else { "ext2, " })
+    log.put(if volume.read_only(v) != 0 { "read-only" } else { "read-write" })
+    if volume.journalled(v) {
         log.put(if wt { ", data=ordered, write-through" } else { ", data=ordered" })
     } else {
         log.put(if wt { ", write-through" } else { ", write-back" })
@@ -876,7 +876,7 @@ fn mount_line(a: u64, n: u64) -> bool {
         log.end()
         return false
     }
-    if t3 && !ext2.has_journal(d) {
+    if t3 && !volume.has_journal(d) {
         log.put("fstab: refused: ")
         put_span(fa, fl)
         log.put(" on ")
@@ -892,7 +892,7 @@ fn mount_line(a: u64, n: u64) -> bool {
         unsafe { write_back = 1 }
     }
     let m = tree.mount(point, d, opts & O_RO != 0, mh_of(opts))
-    if ext2.failed(m) {
+    if volume.failed(m) {
         log.put("fstab: ")
         put_span(fa, fl)
         if named {
@@ -908,7 +908,7 @@ fn mount_line(a: u64, n: u64) -> bool {
         return false
     }
     let v = tree.mounted(m)
-    ext2.ask_type(v, if t3 { 3 } else { 2 })
+    volume.ask_type(v, if t3 { 3 } else { 2 })
     log.put("fstab: ")
     put_span(fa, fl)
     if named {
@@ -930,7 +930,7 @@ fn mount_line(a: u64, n: u64) -> bool {
         }
     }
     log.end()
-    ext2.report(v)
+    volume.report(v)
     true
 }
 
@@ -965,7 +965,7 @@ fn root_line(fa: u64, fl: u64, opts: u64) -> bool {
         return false
     }
     let v = tree.mounted(rm)
-    let ro_now = ext2.read_only(v) != 0
+    let ro_now = volume.read_only(v) != 0
     var e: u64 = 0
     if opts & O_RO != 0 && !ro_now {
         e = tree.remount(rm, true)
@@ -1007,7 +1007,7 @@ fn tmpfs_line(fa: u64, fl: u64, ga: u64, gl: u64, opts: u64, mode: u64) -> bool 
         return false
     }
     let m = tree.mount_mem(point, mode)
-    if ext2.failed(m) {
+    if volume.failed(m) {
         log.put("fstab: ")
         put_span(fa, fl)
         log.put(" on ")
@@ -1271,19 +1271,19 @@ pub fn mount_upgrade() -> u64 {
     if p == block.DEVS || block.kind(p) != block.KIND_GPT || block.start_of(p) != ROOT_SECTOR {
         return no_upgrade_on(disk, "has no GPT partition 2 at sector 135168: not PAX's install layout")
     }
-    let (has, _h, _l) = ext2.probe(p)
+    let (has, _h, _l) = volume.probe(p)
     if !has {
         return no_upgrade_on(disk, "holds no ext2 volume in its partition 2")
     }
     var lk: u64 = 0
     var label = true
     for c in "pax-root".bytes() {
-        if ext2.probed_label(lk) != c as int as u64 {
+        if volume.probed_label(lk) != c as int as u64 {
             label = false
         }
         lk += 1
     }
-    if !label || ext2.probed_label(lk) != 0 {
+    if !label || volume.probed_label(lk) != 0 {
         return no_upgrade_on(disk, "has an ext2 partition 2 not labelled pax-root: not PAX's root")
     }
     log.put("upgrade: /pax/install-targets names ")
@@ -1307,7 +1307,7 @@ pub fn mount_upgrade() -> u64 {
     log.put(" (")
     block.put_name(p)
     log.put(") on /mnt/target: ")
-    if ext2.failed(m) {
+    if volume.failed(m) {
         log.put("not mounted, -")
         log.dec((!m + 1) as int)
         log.end()
@@ -1316,9 +1316,9 @@ pub fn mount_upgrade() -> u64 {
     // # Safety: a scalar module var, written at boot with IF clear.
     unsafe { write_back = 1 }
     let v = tree.mounted(m)
-    ext2.ask_type(v, 2)
+    volume.ask_type(v, 2)
     put_kind(v, false)
     log.end()
-    ext2.report(v)
+    volume.report(v)
     1
 }
