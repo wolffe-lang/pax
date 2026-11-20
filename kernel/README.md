@@ -1488,3 +1488,19 @@ When no frame is free, a stream write takes the bytes that have frames and a mes
 | `pty/` (px159) | `master_read`, `master_in`, `slave_in` and `slave_took` wake the pty's own waiters (`wake_obj`); their WAITs name the pty (`waits`) |
 | `user/` (px159) | a `writev` to a pipe or socket that must wait for room for its whole sum names that buffer |
 | `../boot/sched.S` (px159) | `pax_slot_words` three words a slot (two before) |
+
+## One way into the file systems: kernel/volume
+
+kernel/tree's second store, kernel/fstab's mounts and its flusher, kernel/files' mount lines and
+`mount(2)`, and kernel/procfs' `/proc/fs/jbd2` ask `kernel/volume` for everything a mounted volume holds.
+It is the only module that calls kernel/ext2 and kernel/journal (the journal's white-box guard kernel,
+`kmain_journal_guard.lu`, aside), so a second on-disk format has one place to sit beside ext2. Today each
+of its items is ext2's or the journal's own, under the same name (the journal's four with a `journal_`
+prefix), and it keeps no state: nothing a volume does changed when the callers moved onto it.
+`tests/mpx6-ext2`'s SEAM-CALLERS row fails by name on any kernel source that reaches ext2 or the journal
+another way.
+
+| module or file | what |
+|---|---|
+| `volume/` | the 65 items kernel/tree, fstab, files and procfs use, each forwarded to kernel/ext2 or kernel/journal |
+| `ext2/` | its header names kernel/volume as its only caller |
