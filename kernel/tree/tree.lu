@@ -120,12 +120,12 @@
 //! room for the new name, then the change, with no call between. No
 //! region, no heap.
 
-use ext2
 use frames
 use initramfs
 use paging
 use panic
 use timer
+use volume
 
 extern "c" fn pax_tree_copy(dst: u64, src: u64, n: u64)
 extern "c" fn pax_tree_zero(dst: u64, n: u64)
@@ -470,7 +470,7 @@ fn pack(uid: u64, gid: u64) -> u64 {
 /// px63: inode `i`'s owner and group, from whichever store it is in.
 fn owner_of(i: u64) -> (u64, u64) {
     if on_volume(i) {
-        return ext2.owner(vol(i), vino(i))
+        return volume.owner(vol(i), vino(i))
     }
     (ig(i, I_OWNER) & 0xffffffff, ig(i, I_OWNER) >> 32)
 }
@@ -478,7 +478,7 @@ fn owner_of(i: u64) -> (u64, u64) {
 /// px42: inode `i`'s owner, a user id.
 pub fn uid(i: u64) -> u64 {
     if on_volume(i) {
-        let (u, _g) = ext2.owner(vol(i), vino(i))
+        let (u, _g) = volume.owner(vol(i), vino(i))
         return u
     }
     ig(i, I_OWNER) & 0xffffffff
@@ -487,7 +487,7 @@ pub fn uid(i: u64) -> u64 {
 /// px42: inode `i`'s group, a group id.
 pub fn gid(i: u64) -> u64 {
     if on_volume(i) {
-        let (_u, g) = ext2.owner(vol(i), vino(i))
+        let (_u, g) = volume.owner(vol(i), vino(i))
         return g
     }
     ig(i, I_OWNER) >> 32
@@ -547,7 +547,7 @@ pub fn nlink(i: u64) -> u64 {
 /// 20 an entry, tmpfs's numbers (measured), which `ls -l` prints.
 pub fn size(i: u64) -> u64 {
     if on_volume(i) {
-        return ext2.size(vol(i), vino(i)) // px63: the volume's (a directory's whole blocks)
+        return volume.size(vol(i), vino(i)) // px63: the volume's (a directory's whole blocks)
     }
     if is_dir(i) {
         if ig(i, I_NLINK) == 0 {
@@ -577,7 +577,7 @@ pub fn parent(i: u64) -> u64 {
 /// made; nanoseconds since the epoch.
 pub fn time(i: u64, which: int) -> u64 {
     if on_volume(i) {
-        return ext2.time(vol(i), vino(i), which)
+        return volume.time(vol(i), vino(i), which)
     }
     if which == 0 {
         return ig(i, I_ATIME)
@@ -628,7 +628,7 @@ pub fn run_release(i: u64) {
 /// LINK_INLINE, eight for a longer one (its one frame).
 pub fn blocks(i: u64) -> u64 {
     if on_volume(i) {
-        return ext2.blocks512(vol(i), vino(i)) // px63: i_blocks, indirect blocks counted
+        return volume.blocks512(vol(i), vino(i)) // px63: i_blocks, indirect blocks counted
     }
     if is_dir(i) {
         return 0
@@ -667,8 +667,8 @@ pub fn touch_read(i: u64) {
     if on_volume(i) {
         let v = vol(i)
         let n = vino(i)
-        if ext2.read_only(v) == 0 && (not_after(ext2.time(v, n, 0), ext2.time(v, n, 1)) || not_after(ext2.time(v, n, 0), ext2.time(v, n, 2))) {
-            ext2.touch(v, n, ext2.T_ATIME, now())
+        if volume.read_only(v) == 0 && (not_after(volume.time(v, n, 0), volume.time(v, n, 1)) || not_after(volume.time(v, n, 0), volume.time(v, n, 2))) {
+            volume.touch(v, n, volume.T_ATIME, now())
         }
         return
     }
@@ -679,8 +679,8 @@ pub fn touch_read(i: u64) {
 
 fn touch_change(i: u64) {
     if on_volume(i) {
-        if ext2.read_only(vol(i)) == 0 {
-            ext2.touch(vol(i), vino(i), ext2.T_MTIME | ext2.T_CTIME, now())
+        if volume.read_only(vol(i)) == 0 {
+            volume.touch(vol(i), vino(i), volume.T_MTIME | volume.T_CTIME, now())
         }
         return
     }
@@ -894,7 +894,7 @@ pub fn span(i: u64, off: u64, want: u64) -> (u64, u64) {
         return (pa + hh() + po, n)
     }
     if on_volume(i) {
-        return ext2.rspan(vol(i), vino(i), off, n) // px63: (0, 0) on an I/O error
+        return volume.rspan(vol(i), vino(i), off, n) // px63: (0, 0) on an I/O error
     }
     let bl = ig(i, I_BACKLEN)
     if off < bl {
@@ -909,7 +909,7 @@ pub fn span(i: u64, off: u64, want: u64) -> (u64, u64) {
 /// A file's size in bytes (a directory's record bytes).
 pub fn bytes(i: u64) -> u64 {
     if on_volume(i) {
-        return ext2.size(vol(i), vino(i))
+        return volume.size(vol(i), vino(i))
     }
     ig(i, I_SIZE)
 }
@@ -1071,7 +1071,7 @@ pub fn punch(i: u64, off: u64, len: u64) -> u64 {
     let size = bytes(i)
     if on_volume(i) && off < size {
         let end = if len < size - off { off + len } else { size }
-        let (r, done) = ext2.zero_range(vol(i), vino(i), off, end - off) // px63: the blocks kept, zeroed
+        let (r, done) = volume.zero_range(vol(i), vino(i), off, end - off) // px63: the blocks kept, zeroed
         if r != 0 {
             zero_frames(i, off, off + done)
             return r
@@ -1151,7 +1151,7 @@ fn find(d: u64, name: u64, len: u64) -> u64 {
 pub fn lookup(d: u64, name: u64, len: u64) -> u64 {
     var i = NONE
     if on_volume(d) {
-        let n = ext2.lookup(vol(d), vino(d), name, len)
+        let n = volume.lookup(vol(d), vino(d), name, len)
         if n == 0 {
             return NONE
         }
@@ -1293,7 +1293,7 @@ pub fn name_of(d: u64, c: u64) -> (u64, u64) {
         if !on_volume(c) || vol(c) != vol(d) {
             return (0, 0)
         }
-        return ext2.name_of(vol(d), vino(d), vino(c))
+        return volume.name_of(vol(d), vino(d), vino(c))
     }
     var pos: u64 = 0
     var ra: u64 = 0
@@ -1471,7 +1471,7 @@ pub fn symlink(d: u64, name: u64, len: u64, target: u64, tlen: u64, uid: u64, gi
 /// how many.
 pub fn target(i: u64, dst: u64, n: u64) -> u64 {
     if on_volume(i) {
-        return ext2.target(vol(i), vino(i), dst, n)
+        return volume.target(vol(i), vino(i), dst, n)
     }
     let k = if n < ig(i, I_SIZE) { n } else { ig(i, I_SIZE) }
     var done: u64 = 0
@@ -1534,7 +1534,7 @@ pub fn chown(i: u64, uid: u64, gid: u64, outside: bool) {
     let u = if uid & 0xffffffff == KEEP { ou } else { uid }
     let g = if gid & 0xffffffff == KEEP { og } else { gid }
     if on_volume(i) {
-        ext2.set_owner(vol(i), vino(i), u, g)
+        volume.set_owner(vol(i), vino(i), u, g)
     }
     ip(i, I_OWNER, pack(u, g))
     let m = ig(i, I_MODE)
@@ -1558,8 +1558,8 @@ pub fn chown(i: u64, uid: u64, gid: u64, outside: bool) {
 /// when either does.
 pub fn set_times(i: u64, at: u64, mt: u64, which: u64) {
     if on_volume(i) {
-        if ext2.read_only(vol(i)) == 0 {
-            ext2.set_times(vol(i), vino(i), at, mt, now(), which)
+        if volume.read_only(vol(i)) == 0 {
+            volume.set_times(vol(i), vino(i), at, mt, now(), which)
         }
         return
     }
@@ -1885,7 +1885,7 @@ fn point_mount(i: u64) -> u64 {
 }
 
 fn is_vroot(i: u64) -> bool {
-    on_volume(i) && vino(i) == ext2.ROOT_INO
+    on_volume(i) && vino(i) == volume.ROOT_INO
 }
 
 /// px63: the number `stat` answers for inode `i`: a volume's own inode
@@ -1901,18 +1901,18 @@ pub fn store(i: u64) -> u64 {
 
 /// px63: the disk (kernel/block's) of inode `i`'s volume; NONE for the memory.
 pub fn disk_of(i: u64) -> u64 {
-    if on_volume(i) { ext2.dev_of(vol(i)) } else { NONE }
+    if on_volume(i) { volume.dev_of(vol(i)) } else { NONE }
 }
 
 /// px63: whether inode `i` is on a volume mounted read-only (kernel/files
 /// answers a change -EROFS).
 pub fn read_only(i: u64) -> bool {
-    on_volume(i) && ext2.read_only(vol(i)) != 0
+    on_volume(i) && volume.read_only(vol(i)) != 0
 }
 
 /// px63: the block size `stat` gives inode `i` (st_blksize).
 pub fn io_size(i: u64) -> u64 {
-    if on_volume(i) { ext2.block_size(vol(i)) } else { PAGE }
+    if on_volume(i) { volume.block_size(vol(i)) } else { PAGE }
 }
 
 /// px63: one more system call (kernel/user, at every entry): a volume's
@@ -1921,8 +1921,8 @@ pub fn tick() {
     put_st(S_GEN, st(S_GEN) + 1)
     // px68: between two calls, a journalled volume's large running
     // transaction is committed (kernel/ext2's `boundary`).
-    if ext2.wants_boundary() {
-        ext2.boundary(now())
+    if volume.wants_boundary() {
+        volume.boundary(now())
     }
 }
 
@@ -1981,7 +1981,7 @@ fn vol_ready() -> bool {
 /// `..` leads back while it lives), stamped with this system call; NONE
 /// when the inode cannot be read or the table is full.
 fn vrec(v: u64, ino: u64, parent: u64) -> u64 {
-    if !ext2.named_inode(v, ino) {
+    if !volume.named_inode(v, ino) {
         return NONE
     }
     let b = bucket(v, ino)
@@ -2000,11 +2000,11 @@ fn vrec(v: u64, ino: u64, parent: u64) -> u64 {
     if st(S_VLIVE) >= VOL_KEEP {
         evict(VOL_KEEP / 8)
     }
-    let m = ext2.mode(v, ino)
+    let m = volume.mode(v, ino)
     if m == 0 {
         return NONE
     }
-    let (u, g) = ext2.owner(v, ino)
+    let (u, g) = volume.owner(v, ino)
     var i = inode_new(m, u, g)
     if i == NONE {
         evict(VOL_KEEP)
@@ -2015,11 +2015,11 @@ fn vrec(v: u64, ino: u64, parent: u64) -> u64 {
     }
     put_st(S_LIVE, st(S_LIVE) - 1)
     put_st(S_VLIVE, st(S_VLIVE) + 1)
-    ip(i, I_NLINK, ext2.nlink(v, ino))
+    ip(i, I_NLINK, volume.nlink(v, ino))
     put_side(i, ino | ((v + 1) << SD_VOL_SHIFT) | (rd(b) << SD_NEXT_SHIFT))
     wr(b, i + 1)
     stamp(i)
-    if m & S_IFMT == S_IFDIR && ino != ext2.ROOT_INO {
+    if m & S_IFMT == S_IFDIR && ino != volume.ROOT_INO {
         ip(i, I_PARENT, parent)
         hold(parent)
     }
@@ -2069,8 +2069,8 @@ fn vdrop(i: u64) {
 /// blocks and its number given back), then the record.
 fn vgone(i: u64) {
     let v = vol(i)
-    if ext2.read_only(v) == 0 {
-        ext2.ifree(v, vino(i), now_s())
+    if volume.read_only(v) == 0 {
+        volume.ifree(v, vino(i), now_s())
     }
     vdrop(i)
 }
@@ -2088,7 +2088,7 @@ fn evict(want: u64) {
             c = 0
         }
         let s = side(c)
-        if (s >> SD_VOL_SHIFT) & 0xf != 0 && ig(c, I_MODE) != 0 && ig(c, I_REFS) == 0 && s & 0xffffffff != ext2.ROOT_INO && ((s >> SD_GEN_SHIFT) & 0x7f) != (st(S_GEN) & 0x7f) {
+        if (s >> SD_VOL_SHIFT) & 0xf != 0 && ig(c, I_MODE) != 0 && ig(c, I_REFS) == 0 && s & 0xffffffff != volume.ROOT_INO && ((s >> SD_GEN_SHIFT) & 0x7f) != (st(S_GEN) & 0x7f) {
             vdrop(c)
             put_st(S_VEVICT, st(S_VEVICT) + 1)
             done += 1
@@ -2106,7 +2106,7 @@ fn vfill(i: u64, pg: u64, dst: u64) {
     var o: u64 = 0
     while o < PAGE && pg * PAGE + o < sz {
         let want = if sz - (pg * PAGE + o) < PAGE - o { sz - (pg * PAGE + o) } else { PAGE - o }
-        let (src, c) = ext2.rspan(vol(i), vino(i), pg * PAGE + o, want)
+        let (src, c) = volume.rspan(vol(i), vino(i), pg * PAGE + o, want)
         if c == 0 {
             return
         }
@@ -2128,7 +2128,7 @@ pub fn shared_write(i: u64) {
 /// may have changed to the disk (every frame it holds: the page table's
 /// dirty bit is not read).
 pub fn writeback(i: u64) {
-    if side(i) & SD_SHARED == 0 || !on_volume(i) || ext2.read_only(vol(i)) != 0 {
+    if side(i) & SD_SHARED == 0 || !on_volume(i) || volume.read_only(vol(i)) != 0 {
         return
     }
     let sz = bytes(i)
@@ -2140,15 +2140,15 @@ pub fn writeback(i: u64) {
             var o: u64 = 0
             while o < end {
                 // A volume that failed during this writeback takes no more.
-                if ext2.read_only(vol(i)) != 0 {
+                if volume.read_only(vol(i)) != 0 {
                     return
                 }
-                let (dst, c, blk) = ext2.wspan(vol(i), vino(i), pg * PAGE + o, end - o)
+                let (dst, c, blk) = volume.wspan(vol(i), vino(i), pg * PAGE + o, end - o)
                 if c == 0 {
                     return
                 }
                 bcopy(dst, pa + hh() + o, c)
-                let _w = ext2.wrote(vol(i), blk) // a plain volume's sync retries it
+                let _w = volume.wrote(vol(i), blk) // a plain volume's sync retries it
                 o += c
             }
         }
@@ -2162,10 +2162,10 @@ pub fn writeback(i: u64) {
 fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
     let v = vol(i)
     let ino = vino(i)
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
-    let max = ext2.max_size(v)
+    let max = volume.max_size(v)
     if off >= max {
         return neg(EFBIG)
     }
@@ -2174,10 +2174,10 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
     while done < k {
         // A device error in an earlier span fails a journalled volume: write
         // nothing more (wspan does not ask about blocks already allocated).
-        if ext2.read_only(v) != 0 {
+        if volume.read_only(v) != 0 {
             break
         }
-        let (dst, c, blk) = ext2.wspan(v, ino, off + done, k - done)
+        let (dst, c, blk) = volume.wspan(v, ino, off + done, k - done)
         if c == 0 {
             break
         }
@@ -2190,8 +2190,8 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
         if pa != 0 {
             bcopy(pa + hh() + (off + done) % PAGE, dst, c)
         }
-        let w = ext2.wrote(v, blk)
-        if w != 0 && ext2.read_only(v) != 0 {
+        let w = volume.wrote(v, blk)
+        if w != 0 && volume.read_only(v) != 0 {
             // The device refused this block and failed its journalled volume
             // (a plain volume keeps it dirty for its sync's retry, as before):
             // the count is what went before it; with nothing before, the error.
@@ -2203,10 +2203,10 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
         done += c
     }
     if done == 0 {
-        return if ext2.full(v) { neg(ENOSPC) } else { neg(EIO) }
+        return if volume.full(v) { neg(ENOSPC) } else { neg(EIO) }
     }
-    if off + done > ext2.size(v, ino) {
-        ext2.set_size(v, ino, off + done)
+    if off + done > volume.size(v, ino) {
+        volume.set_size(v, ino, off + done)
     }
     touch_change(i)
     done
@@ -2215,36 +2215,36 @@ fn vwrite(pml4: u64, i: u64, off: u64, buf: u64, n: u64) -> u64 {
 /// `ftruncate` on a volume.
 fn vtruncate(i: u64, size: u64) -> u64 {
     let v = vol(i)
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
-    if size > ext2.max_size(v) {
+    if size > volume.max_size(v) {
         return neg(EFBIG)
     }
-    if size < ext2.size(v, vino(i)) {
+    if size < volume.size(v, vino(i)) {
         cut(i, size)
-        let r = ext2.truncate(v, vino(i), size)
+        let r = volume.truncate(v, vino(i), size)
         if r != 0 {
             return r
         }
     } else {
-        ext2.set_size(v, vino(i), size)
+        volume.set_size(v, vino(i), size)
     }
     touch_change(i)
     0
 }
 
 fn vset_nlink(i: u64, n: u64) {
-    ext2.set_nlink(vol(i), vino(i), n)
+    volume.set_nlink(vol(i), vino(i), n)
     ip(i, I_NLINK, n)
 }
 
 /// A volume inode's mode word written from the record's mirror, its
 /// ctime moved.
 fn vmode(i: u64) {
-    if ext2.read_only(vol(i)) == 0 {
-        ext2.set_mode(vol(i), vino(i), ig(i, I_MODE))
-        ext2.touch(vol(i), vino(i), ext2.T_CTIME, now())
+    if volume.read_only(vol(i)) == 0 {
+        volume.set_mode(vol(i), vino(i), ig(i, I_MODE))
+        volume.touch(vol(i), vino(i), volume.T_CTIME, now())
     }
 }
 
@@ -2253,7 +2253,7 @@ fn vmode(i: u64) {
 fn vdrop_name(i: u64) {
     let n = ig(i, I_NLINK)
     vset_nlink(i, if n > 0 { n - 1 } else { 0 })
-    ext2.touch(vol(i), vino(i), ext2.T_CTIME, now())
+    volume.touch(vol(i), vino(i), volume.T_CTIME, now())
     if n <= 1 && ig(i, I_REFS) == 0 {
         vgone(i)
     }
@@ -2265,28 +2265,28 @@ fn vmake(d: u64, name: u64, len: u64, m: u64, uid: u64, gid: u64) -> u64 {
     let v = vol(d)
     // Check before allocating: a dangling name can point at a clear
     // allocation bit, which must not be reused while refusing this name.
-    if ext2.lookup(v, vino(d), name, len) != 0 {
+    if volume.lookup(v, vino(d), name, len) != 0 {
         return neg(EEXIST)
     }
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
     if ig(d, I_NLINK) == 0 {
         return neg(ENOENT)
     }
     let t = now()
-    let ino = ext2.ialloc(v, vino(d), m, uid, gid, t)
+    let ino = volume.ialloc(v, vino(d), m, uid, gid, t)
     if failed(ino) {
         return ino
     }
-    ext2.set_nlink(v, ino, 1)
-    let r = ext2.add(v, vino(d), name, len, ino, ext2.ftype(m))
+    volume.set_nlink(v, ino, 1)
+    let r = volume.add(v, vino(d), name, len, ino, volume.ftype(m))
     if failed(r) {
-        ext2.set_nlink(v, ino, 0)
-        ext2.ifree(v, ino, now_s())
+        volume.set_nlink(v, ino, 0)
+        volume.ifree(v, ino, now_s())
         return r
     }
-    ext2.touch(v, vino(d), ext2.T_MTIME | ext2.T_CTIME, t)
+    volume.touch(v, vino(d), volume.T_MTIME | volume.T_CTIME, t)
     let i = vrec(v, ino, d)
     if i == NONE {
         return neg(ENOMEM)
@@ -2298,37 +2298,37 @@ fn vmkdir(d: u64, name: u64, len: u64, perm: u64, uid: u64, gid: u64) -> u64 {
     let v = vol(d)
     // Check before allocating: a dangling name can point at a clear
     // allocation bit, which must not be reused while refusing this name.
-    if ext2.lookup(v, vino(d), name, len) != 0 {
+    if volume.lookup(v, vino(d), name, len) != 0 {
         return neg(EEXIST)
     }
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
     if ig(d, I_NLINK) == 0 {
         return neg(ENOENT)
     }
-    if ig(d, I_NLINK) >= ext2.LINK_MAX {
+    if ig(d, I_NLINK) >= volume.LINK_MAX {
         return neg(EMLINK)
     }
     let t = now()
-    let ino = ext2.ialloc(v, vino(d), S_IFDIR | (perm & 0xfff), uid, gid, t)
+    let ino = volume.ialloc(v, vino(d), S_IFDIR | (perm & 0xfff), uid, gid, t)
     if failed(ino) {
         return ino
     }
-    let r = ext2.make_dir(v, ino, vino(d))
+    let r = volume.make_dir(v, ino, vino(d))
     if failed(r) {
-        ext2.ifree(v, ino, now_s())
+        volume.ifree(v, ino, now_s())
         return r
     }
-    ext2.set_nlink(v, ino, 2)
-    let r2 = ext2.add(v, vino(d), name, len, ino, 2)
+    volume.set_nlink(v, ino, 2)
+    let r2 = volume.add(v, vino(d), name, len, ino, 2)
     if failed(r2) {
-        ext2.set_nlink(v, ino, 0)
-        ext2.ifree(v, ino, now_s())
+        volume.set_nlink(v, ino, 0)
+        volume.ifree(v, ino, now_s())
         return r2
     }
     vset_nlink(d, ig(d, I_NLINK) + 1)
-    ext2.touch(v, vino(d), ext2.T_MTIME | ext2.T_CTIME, t)
+    volume.touch(v, vino(d), volume.T_MTIME | volume.T_CTIME, t)
     let i = vrec(v, ino, d)
     if i == NONE {
         return neg(ENOMEM)
@@ -2340,33 +2340,33 @@ fn vsymlink(d: u64, name: u64, len: u64, target: u64, tlen: u64, uid: u64, gid: 
     let v = vol(d)
     // Check before allocating: a dangling name can point at a clear
     // allocation bit, which must not be reused while refusing this name.
-    if ext2.lookup(v, vino(d), name, len) != 0 {
+    if volume.lookup(v, vino(d), name, len) != 0 {
         return neg(EEXIST)
     }
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
     if ig(d, I_NLINK) == 0 {
         return neg(ENOENT)
     }
     let t = now()
-    let ino = ext2.ialloc(v, vino(d), S_IFLNK | 0x1ff, uid, gid, t)
+    let ino = volume.ialloc(v, vino(d), S_IFLNK | 0x1ff, uid, gid, t)
     if failed(ino) {
         return ino
     }
-    let r = ext2.set_target(v, ino, target, tlen)
+    let r = volume.set_target(v, ino, target, tlen)
     if failed(r) {
-        ext2.ifree(v, ino, now_s())
+        volume.ifree(v, ino, now_s())
         return r
     }
-    ext2.set_nlink(v, ino, 1)
-    let r2 = ext2.add(v, vino(d), name, len, ino, 7)
+    volume.set_nlink(v, ino, 1)
+    let r2 = volume.add(v, vino(d), name, len, ino, 7)
     if failed(r2) {
-        ext2.set_nlink(v, ino, 0)
-        ext2.ifree(v, ino, now_s())
+        volume.set_nlink(v, ino, 0)
+        volume.ifree(v, ino, now_s())
         return r2
     }
-    ext2.touch(v, vino(d), ext2.T_MTIME | ext2.T_CTIME, t)
+    volume.touch(v, vino(d), volume.T_MTIME | volume.T_CTIME, t)
     let i = vrec(v, ino, d)
     if i == NONE {
         return neg(ENOMEM)
@@ -2379,33 +2379,33 @@ fn vlink(d: u64, name: u64, len: u64, i: u64) -> u64 {
     if vol(i) != v {
         return neg(EXDEV)
     }
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
     if ig(d, I_NLINK) == 0 || ig(i, I_NLINK) == 0 {
         return neg(ENOENT)
     }
-    if ig(i, I_NLINK) >= ext2.LINK_MAX {
+    if ig(i, I_NLINK) >= volume.LINK_MAX {
         return neg(EMLINK)
     }
-    let r = ext2.add(v, vino(d), name, len, vino(i), ext2.ftype(ig(i, I_MODE)))
+    let r = volume.add(v, vino(d), name, len, vino(i), volume.ftype(ig(i, I_MODE)))
     if failed(r) {
         return r
     }
     let t = now()
     vset_nlink(i, ig(i, I_NLINK) + 1)
-    ext2.touch(v, vino(i), ext2.T_CTIME, t)
-    ext2.touch(v, vino(d), ext2.T_MTIME | ext2.T_CTIME, t)
+    volume.touch(v, vino(i), volume.T_CTIME, t)
+    volume.touch(v, vino(d), volume.T_MTIME | volume.T_CTIME, t)
     0
 }
 
 fn vunlink(d: u64, name: u64, len: u64) -> u64 {
     let v = vol(d)
-    let n = ext2.lookup(v, vino(d), name, len)
+    let n = volume.lookup(v, vino(d), name, len)
     if n == 0 {
         return neg(ENOENT)
     }
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
     let i = vrec(v, n, d)
@@ -2415,7 +2415,7 @@ fn vunlink(d: u64, name: u64, len: u64) -> u64 {
     if is_dir(i) {
         return neg(EISDIR)
     }
-    let _gone = ext2.remove(v, vino(d), name, len)
+    let _gone = volume.remove(v, vino(d), name, len)
     touch_change(d)
     vdrop_name(i)
     put_st(S_UNLINKS, st(S_UNLINKS) + 1)
@@ -2424,11 +2424,11 @@ fn vunlink(d: u64, name: u64, len: u64) -> u64 {
 
 fn vrmdir(d: u64, name: u64, len: u64) -> u64 {
     let v = vol(d)
-    let n = ext2.lookup(v, vino(d), name, len)
+    let n = volume.lookup(v, vino(d), name, len)
     if n == 0 {
         return neg(ENOENT)
     }
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
     let i = vrec(v, n, d)
@@ -2441,14 +2441,14 @@ fn vrmdir(d: u64, name: u64, len: u64) -> u64 {
     if is_point(i) {
         return neg(EBUSY) // px67: a mount covers it
     }
-    if !ext2.empty(v, n) {
+    if !volume.empty(v, n) {
         return neg(ENOTEMPTY)
     }
-    let _gone = ext2.remove(v, vino(d), name, len)
+    let _gone = volume.remove(v, vino(d), name, len)
     vset_nlink(d, if ig(d, I_NLINK) > 0 { ig(d, I_NLINK) - 1 } else { 0 })
     touch_change(d)
     vset_nlink(i, 0)
-    ext2.touch(v, n, ext2.T_CTIME, now())
+    volume.touch(v, n, volume.T_CTIME, now())
     if ig(i, I_REFS) == 0 {
         vgone(i)
     }
@@ -2460,11 +2460,11 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
     if ig(nd, I_NLINK) == 0 {
         return neg(ENOENT)
     }
-    let n = ext2.lookup(v, vino(od), on, ol)
+    let n = volume.lookup(v, vino(od), on, ol)
     if n == 0 {
         return neg(ENOENT)
     }
-    if ext2.read_only(v) != 0 {
+    if volume.read_only(v) != 0 {
         return neg(EROFS)
     }
     let i = vrec(v, n, od)
@@ -2478,8 +2478,8 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
     if dir && below(nd, i) {
         return neg(EINVAL)
     }
-    let ft = ext2.ftype(ig(i, I_MODE))
-    let tn = ext2.lookup(v, vino(nd), nn, nl)
+    let ft = volume.ftype(ig(i, I_MODE))
+    let tn = volume.lookup(v, vino(nd), nn, nl)
     if tn != 0 {
         let j = vrec(v, tn, nd)
         if j == NONE {
@@ -2497,15 +2497,15 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
         if !dir && is_dir(j) {
             return neg(EISDIR)
         }
-        if dir && !ext2.empty(v, tn) {
+        if dir && !volume.empty(v, tn) {
             return neg(ENOTEMPTY)
         }
-        let _ok = ext2.relink(v, vino(nd), nn, nl, n, ft)
-        let _gone = ext2.remove(v, vino(od), on, ol)
+        let _ok = volume.relink(v, vino(nd), nn, nl, n, ft)
+        let _gone = volume.remove(v, vino(od), on, ol)
         if is_dir(j) {
             vset_nlink(nd, if ig(nd, I_NLINK) > 0 { ig(nd, I_NLINK) - 1 } else { 0 })
             vset_nlink(j, 0)
-            ext2.touch(v, tn, ext2.T_CTIME, now())
+            volume.touch(v, tn, volume.T_CTIME, now())
             if ig(j, I_REFS) == 0 {
                 vgone(j)
             }
@@ -2513,17 +2513,17 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
             vdrop_name(j)
         }
     } else {
-        if dir && od != nd && ig(nd, I_NLINK) >= ext2.LINK_MAX {
+        if dir && od != nd && ig(nd, I_NLINK) >= volume.LINK_MAX {
             return neg(EMLINK)
         }
-        let r = ext2.add(v, vino(nd), nn, nl, n, ft)
+        let r = volume.add(v, vino(nd), nn, nl, n, ft)
         if failed(r) {
             return r
         }
-        let _gone = ext2.remove(v, vino(od), on, ol)
+        let _gone = volume.remove(v, vino(od), on, ol)
     }
     if dir && od != nd {
-        ext2.set_dotdot(v, n, vino(nd))
+        volume.set_dotdot(v, n, vino(nd))
         vset_nlink(od, if ig(od, I_NLINK) > 0 { ig(od, I_NLINK) - 1 } else { 0 })
         vset_nlink(nd, ig(nd, I_NLINK) + 1)
         hold(nd)
@@ -2533,7 +2533,7 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
     }
     touch_change(od)
     touch_change(nd)
-    ext2.touch(v, n, ext2.T_CTIME, now())
+    volume.touch(v, n, volume.T_CTIME, now())
     0
 }
 
@@ -2544,7 +2544,7 @@ fn vrename(od: u64, on: u64, ol: u64, nd: u64, nn: u64, nl: u64) -> u64 {
 /// memory's, its records.
 pub fn dirent(d: u64, pos: u64) -> (u64, u64, u64, u64, u64) {
     if on_volume(d) {
-        let (n, ft, a, l, nx) = ext2.entry_at(vol(d), vino(d), pos)
+        let (n, ft, a, l, nx) = volume.entry_at(vol(d), vino(d), pos)
         return (n, dt_of(ft), a, l, nx)
     }
     let (i, a, l, nx) = entry_at(d, pos)
@@ -2653,17 +2653,17 @@ fn free_mount() -> u64 {
 
 /// The record standing for volume `v`'s root, made for its mount.
 fn vroot_new(v: u64) -> u64 {
-    let md = ext2.mode(v, ext2.ROOT_INO)
-    let (u, g) = ext2.owner(v, ext2.ROOT_INO)
+    let md = volume.mode(v, volume.ROOT_INO)
+    let (u, g) = volume.owner(v, volume.ROOT_INO)
     let r = inode_new(md, u, g)
     if r == NONE {
         return NONE
     }
     put_st(S_LIVE, st(S_LIVE) - 1)
     put_st(S_VLIVE, st(S_VLIVE) + 1)
-    let b = bucket(v, ext2.ROOT_INO)
-    ip(r, I_NLINK, ext2.nlink(v, ext2.ROOT_INO))
-    put_side(r, ext2.ROOT_INO | ((v + 1) << SD_VOL_SHIFT) | (rd(b) << SD_NEXT_SHIFT))
+    let b = bucket(v, volume.ROOT_INO)
+    ip(r, I_NLINK, volume.nlink(v, volume.ROOT_INO))
+    put_side(r, volume.ROOT_INO | ((v + 1) << SD_VOL_SHIFT) | (rd(b) << SD_NEXT_SHIFT))
     wr(b, r + 1)
     r
 }
@@ -2717,13 +2717,13 @@ pub fn mount(point: u64, dev: u64, ro: bool, how: u64) -> u64 {
     if m == MOUNTS {
         return neg(EBUSY)
     }
-    let v = ext2.mount(dev, ro, now_s())
+    let v = volume.mount(dev, ro, now_s())
     if failed(v) {
         return v
     }
     let r = vroot_new(v)
     if r == NONE {
-        let _u = ext2.unmount(v, now_s())
+        let _u = volume.unmount(v, now_s())
         return neg(ENOMEM)
     }
     attach(m, point, r, v, dev, how)
@@ -2743,13 +2743,13 @@ pub fn mount_root(dev: u64, ro: bool, how: u64) -> u64 {
     if m == MOUNTS {
         return neg(EBUSY)
     }
-    let v = ext2.mount(dev, ro, now_s())
+    let v = volume.mount(dev, ro, now_s())
     if failed(v) {
         return v
     }
     let r = vroot_new(v)
     if r == NONE {
-        let _u = ext2.unmount(v, now_s())
+        let _u = volume.unmount(v, now_s())
         return neg(ENOMEM)
     }
     let k = attach(m, ROOT, r, v, dev, how | MH_ROOT)
@@ -2932,7 +2932,7 @@ pub fn unmount(m: u64) -> u64 {
         }
         writeback(r)
         cut(r, 0)
-        e = ext2.unmount(v, now_s())
+        e = volume.unmount(v, now_s())
         if e != 0 { return e } // A failed journal still owns this mount and its buffers.
         unhash(r)
         put_side(r, 0)
@@ -2961,7 +2961,7 @@ pub fn remount(m: u64, ro: bool) -> u64 {
         return if ro { neg(EINVAL) } else { 0 }
     }
     writeback_vol(v)
-    ext2.remount(v, ro, now_s())
+    volume.remount(v, ro, now_s())
 }
 
 fn writeback_vol(v: u64) {
@@ -2984,7 +2984,7 @@ pub fn sync_all() -> u64 {
         let v = mounted(m)
         if v != NONE {
             writeback_vol(v)
-            let r = ext2.sync(v, now()) // px68: a journalled volume's commit, at this time
+            let r = volume.sync(v, now()) // px68: a journalled volume's commit, at this time
             if r != 0 && err == 0 {
                 err = r
             }
@@ -3002,7 +3002,7 @@ pub fn sync_of(i: u64) -> u64 {
         return 0
     }
     writeback(i)
-    ext2.sync(vol(i), now())
+    volume.sync(vol(i), now())
 }
 
 /// px63: the end (a halt, a reboot): every volume's shared pages and
@@ -3030,7 +3030,7 @@ pub fn halt_volumes() -> u64 {
         let v = mw(last, M_VOL)
         if v != NONE {
             writeback_vol(v)
-            let r = ext2.unmount(v, now_s())
+            let r = volume.unmount(v, now_s())
             if r != 0 && err == 0 {
                 err = r
             }
@@ -3108,7 +3108,7 @@ pub fn vol_statfs(i: u64, w: u64) -> u64 {
     if !on_volume(i) {
         return 0
     }
-    ext2.statfs(vol(i), w)
+    volume.statfs(vol(i), w)
 }
 
 /// px63: records standing for a volume's inodes (0), given back while
