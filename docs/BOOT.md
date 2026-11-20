@@ -301,7 +301,7 @@ steps added in `kernel/kmain_console`:
    (device 254:0, as Linux numbers it).
 2. `kernel/fstab` reads the initramfs's `/etc/fstab` (the repository's
    `user/fstab`: `/dev/vda /home ext2 defaults 0 2`, R-px63-1) and
-   mounts each line through `kernel/ext2` onto a directory of the
+   mounts each line through `kernel/volume` (kernel/ext2 behind it) onto a directory of the
    in-memory tree, the tree's second store (`fstab: /dev/vda on /home:
    ext2, read-write, write-back`). A disk that is not there leaves the
    directory the tree's, said once. Root stays the in-memory tree
