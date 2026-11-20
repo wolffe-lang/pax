@@ -54,8 +54,9 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
   G9  a clean end: boot 1's (`reboot`) and boot 7's (`poweroff`) logs end with logd's end line, and
       wtmp has a `shutdown` record for each; util-linux's `last -x` shows them
   G10 the order of logd's end (pax#472): a copy of the volume after boot 7, booted once more (boot 9);
-      the rows' tracer (guest/endtrace.c, ptrace) on logd, then SIGTERM from root's shell, which is pid 1
-      here, so logd takes it for the kernel's end; logd's system calls after the signal must show the
+      the rows' tracer (guest/endtrace.c, ptrace) on logd, its output the console, then `poweroff`: the
+      kernel's end sends logd its SIGTERM (whatever pid 1 is: a shell, or init), the tracer ignores its own
+      and ends with logd inside the end's grace; logd's system calls after the signal must show the
       `shutdown` record written to /var/log/wtmp before its first sync returns. A sync waits on the disk,
       and until the record is written it exists nowhere: the end may send SIGKILL in that wait
 Exit 0 when every row held, 1 otherwise, 3 when the rig cannot run here.
@@ -421,12 +422,11 @@ def main():
         b = Boot(out, 'boot9-end', iso, endv)
         try:
             if b.root():
-                b.cmd('(/root/rows/endtrace $(cat /var/run/logd.pid) > /tmp/endtrace.txt 2>&1 &)')
+                b.cmd('(/root/rows/endtrace $(cat /var/run/logd.pid) > /dev/console 2>&1 &)')
                 time.sleep(2)
-                b.cmd('kill -TERM $(cat /var/run/logd.pid)')
-                time.sleep(4)
-                seen['g10'] = b.cmd('cat /tmp/endtrace.txt') or ''
+                at = len(b.con.seen)
                 b.end('poweroff')
+                seen['g10'] = b.con.seen[at:].decode(errors='replace')
             else:
                 bad('G10', 'root could not log in at boot 9')
         finally:
@@ -669,7 +669,12 @@ def g9(own, wtmp, work):
 def g10(seen):
     if 'g10' not in seen:
         return
-    lines = [l.strip() for l in seen['g10'].splitlines() if l.startswith('ET ')]
+    # the tracer's lines among the console's (the kernel's own lines of the end run beside them)
+    lines = [l.strip() for l in re.findall(r'ET (?:attached|open|write|sync|close|signal|end|FAIL)[^\n]*', seen['g10'])]
+    kills = re.findall(r'PAX: SIGKILL at the end: [^\n]*', seen['g10'])
+    if any(re.search(r'\b(endtrace|logd) pid \d+', k) for k in kills):
+        bad('G10', 'the tracer or logd outlasted the end\'s grace: %r' % kills[:1])
+        return
     fails = [l for l in lines if l.startswith('ET FAIL')]
     if fails or 'ET signal 15' not in lines:
         bad('G10', 'the tracer did not see logd take the SIGTERM: %r' % (fails or lines[-3:]))
