@@ -182,6 +182,10 @@ def check(blob):
     assert rows['bin/lastb'][0][1] == 0o120777 and rows['bin/lastb'][1] == b'last', 'image-lastb-link'
     assert rows['etc/pax-boot.d/logd'][1] == (ROOT/'user/pax-boot.d/logd').read_bytes(), 'image-logd-hook'
     assert rows['etc/pax-boot.d/logd'][0][1] == 0o100755 and rows['etc/pax-boot.d/logd'][0][2:4] == [0, 0], 'image-logd-hook-mode'
+    # px124: /bin/init, tools/mkinit's bytes, root's 0755 (an installed system's pid 1; this image's
+    # own run list stays the root shell, above).
+    assert rows['bin/init'][0][1] == 0o100755 and rows['bin/init'][0][2:4] == [0, 0], 'image-init-mode'
+    assert rows['bin/init'][1] == (identity/'init/init').read_bytes(), 'image-init-bytes'
     assert rows['bin/pax-upgrade'][1] == (identity/'installer/pax-upgrade').read_bytes(), 'image-pax-upgrade-bytes'
     for path, source, mode in (('etc/pax-boot.d/pax-upgrade', 'boot-hook', 0o100755), ('usr/share/pax-upgrade/entry', 'entry', 0o100644)):
         assert rows[path][1] == (ROOT/'user/install/pax-upgrade'/source).read_bytes(), 'image-pax-upgrade-'+source

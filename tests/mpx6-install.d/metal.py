@@ -154,6 +154,8 @@ def build_stick():
     # px106: the account programs, as the distribution has them: the installed system's /etc/pax-run is
     # /bin/login (pax-install writes it), and su, sudo and passwd are set-user-ID root (below).
     progs.update({n: inputs/'build/auth'/n for n in ['su', 'sudo', 'passwd', 'login']})
+    # px124: /bin/init, which login as pid 1 execs: the installed disk's console logs out to `login:`.
+    progs['init'] = inputs/'build/init/init'
     for n, p in progs.items():
         if p.read_bytes()[:4] == b'\x7fELF':
             run(['strip', '-o', LIVE/'bin'/n, p])
