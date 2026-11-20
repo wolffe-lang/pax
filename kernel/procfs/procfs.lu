@@ -124,9 +124,7 @@ use bootlog
 use bootmark
 use cred
 use cpus
-use ext2
 use frames
-use journal
 use kmsg
 use latency
 use paging
@@ -138,6 +136,7 @@ use tcp
 use uaccess
 use udp
 use unix
+use volume
 
 // px146: /proc/pax-security's reads (boot/fpu.S's CPUID, boot/cpu.S's RDMSR,
 // boot/isr.S's IST stacks).
@@ -470,7 +469,7 @@ fn named(c: u64, a: u64, n: u64) -> bool {
 
 /// px162: whether device `d`'s volume has a live journal (kernel/ext2's).
 fn jvol_live(d: u64) -> bool {
-    ext2.live_journal_on(d) != ext2.VOLS
+    volume.live_journal_on(d) != volume.VOLS
 }
 
 /// px79: the child of `/sys/block`, `/sys/class/block` or a block
@@ -484,8 +483,8 @@ pub fn dev_child(d: u64, a: u64, n: u64) -> u64 {
     // px162: a live journal by its name, its info, a device by its numbers
     if e == JBD2 {
         var k: u64 = 0
-        while ext2.live_journal_dev(k) != block.DEVS {
-            let c = dev_ref(ext2.live_journal_dev(k), JVOL)
+        while volume.live_journal_dev(k) != block.DEVS {
+            let c = dev_ref(volume.live_journal_dev(k), JVOL)
             if named(c, a, n) { return c }
             k += 1
         }
@@ -775,8 +774,8 @@ fn digit_at(v: u64, i: u64) -> u64 {
 
 /// px162: JVOL's journal inode (0 once the journal is no longer live).
 fn jvol_ino(d: u64) -> u64 {
-    let v = ext2.live_journal_on(d)
-    if v == ext2.VOLS { 0 } else { ext2.journal_inode(v) }
+    let v = volume.live_journal_on(d)
+    if v == volume.VOLS { 0 } else { volume.journal_inode(v) }
 }
 
 /// px162: the length of DEVLINK's target, `../../class/block/<name>`.
@@ -1078,7 +1077,7 @@ pub fn child_at(d: u64, k: u64) -> u64 {
     }
     // px162: the live journals, a live journal's info, every device's numbers
     if d != ROOT && entry(d) == JBD2 {
-        let b = ext2.live_journal_dev(k)
+        let b = volume.live_journal_dev(k)
         return if b == block.DEVS { NONE } else { dev_ref(b, JVOL) }
     }
     if d != ROOT && entry(d) == JVOL {
@@ -1178,8 +1177,8 @@ pub fn child_at(d: u64, k: u64) -> u64 {
 ///     sequence <next>, <commits> commit(s)
 fn jbd2info(base: u64, r: u64) -> u64 {
     let d = dev_of(r)
-    let v = ext2.live_journal_on(d)
-    if v == ext2.VOLS {
+    let v = volume.live_journal_on(d)
+    if v == volume.VOLS {
         return put_s(base, 0, "state gone\n")
     }
     var n = put_s(base, 0, "state live\ndevice ")
@@ -1194,16 +1193,16 @@ fn jbd2info(base: u64, r: u64) -> u64 {
     n = put_b(base, n, 58)
     n = put_dec(base, n, mi)
     n = put_s(base, n, "\njournal inode ")
-    n = put_dec(base, n, ext2.journal_inode(v))
+    n = put_dec(base, n, volume.journal_inode(v))
     n = put_s(base, n, ", ")
-    n = put_dec(base, n, journal.size(v))
+    n = put_dec(base, n, volume.journal_size(v))
     n = put_s(base, n, " blocks in ")
-    n = put_dec(base, n, journal.runs(v))
-    n = put_s(base, n, if journal.runs(v) == 1 { " run, data=ordered\nsequence " } else { " runs, data=ordered\nsequence " })
-    n = put_dec(base, n, journal.sequence(v))
+    n = put_dec(base, n, volume.journal_runs(v))
+    n = put_s(base, n, if volume.journal_runs(v) == 1 { " run, data=ordered\nsequence " } else { " runs, data=ordered\nsequence " })
+    n = put_dec(base, n, volume.journal_sequence(v))
     n = put_s(base, n, ", ")
-    n = put_dec(base, n, journal.book(v, 0))
-    put_s(base, n, if journal.book(v, 0) == 1 { " commit\n" } else { " commits\n" })
+    n = put_dec(base, n, volume.journal_book(v, 0))
+    put_s(base, n, if volume.journal_book(v, 0) == 1 { " commit\n" } else { " commits\n" })
 }
 
 /// dw02: `/proc/pax-random`'s text at `base`: its length. One fact a line,
