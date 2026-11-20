@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""tests/upgrade-screen-selftest: the upgrade leg's console reading and QMP wait can say no, and say why
+(pax#457). No QEMU: captured screens and a fake socket.
+
+  S1  a screen captured from a live run at 768f9685 (the pelt friendly prompt, `root@? ~# `): the previous
+      run's refusal is still above the new command's echo. Read whole, it trips the stop pattern; read
+      after the new echo, it does not. This is the failure of the leg's U8-mistyped row.
+  S2  the new command typed but not yet echoed: nothing counts yet, so the old refusal cannot trip a wait.
+  S3  the echo is found after any prompt: `$ `, `# `, `> `, the friendly `root@? ~# ` and
+      `root@? ~ [1]# ` (a failed command's status).
+  S4  an echo of the same text in the middle of a line is not an echo (only a prompt precedes one).
+  S5  a screen that scrolled an old echo away: the baseline follows it down and the new echo still counts.
+  S6  the QMP socket appearing late (a loaded host) is waited for.
+  S7  a socket that never appears is a named timeout, not a FileNotFoundError from connect.
+  S8  QEMU dying before its socket is its own named failure, with the exit status.
+  S10 the new echo scrolled off the top by a long output (green4's U-var-log: the upgrade printed more than a
+      screen): once its echo was seen, what is on the screen is all after it, so the line `Upgrade complete`
+      is still read. Losing the scope there hung the wait for 3600 s on an empty screen.
+  S11 keys the guest dropped under host load (green5's U2d-state: the echo read `…echo run=$?;/` for a typed
+      `…echo run=$?; cd /`): the echo is still found by its first 24 characters, so the wait reads the prompt
+      instead of waiting 300 s for an echo that will not come. The row's own checks still see the output.
+  S12 a scrolling console, replayed: green6's U8-mistyped (an earlier run's refusal above the new command, a
+      screen too short for the output, so the old echo scrolls off first), for every screen height 10 to 60 and
+      every output chunk of 1, 3 and 7 lines: the earlier refusal is never in scope.
+  S13 green4's long upgrade output through every screen height; run, command and vcommand arm the scope
+      after typing the line and before Enter.
+  S9  upgrade.py uses these helpers: no fixed `'$ ' +` marker, the QMP wait is the bounded one, and U2's
+      state creates /var/log first.
+"""
+import re
+import sys
+import threading
+import time
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root / 'tests/mpx6-install.d'))
+import upgrade_screen as us
+
+STOPPED = re.search(r'STOPPED = r\'(.*)\'', (root / 'tests/mpx6-install.d/upgrade.py').read_text()).group(1)
+CMD = 'pax-install --upgrade'
+screen = (root / 'tests/mpx6-install.d/screens/u8-friendly-prompt.txt').read_text()
+
+
+def need(ok, name, msg):
+    if not ok:
+        sys.exit(f'FAIL {name}: {msg}')
+
+
+# S1: before the new echo is typed the screen ends at the new echo; the old echo is the first
+before_new = screen[:screen.rindex('root@? ~# ' + CMD)]
+need(re.search(STOPPED, screen, re.M), 'S1', 'the captured screen does not trip the stop pattern whole')
+prior = us.echo_count(before_new, CMD)
+need(prior == 1, 'S1', f'{prior} echoes before the new one, 1 expected')
+scoped = us.scope_after_echo(screen, CMD, prior)
+need(scoped is not None and CMD in scoped, 'S1', f'no scope: {scoped!r}')
+need(not re.search(STOPPED, scoped, re.M), 'S1', f'the old refusal is in the scope: {scoped!r}')
+print('PASS S1: the old refusal trips the stop pattern whole and is outside the scope after the new echo')
+
+# S2
+need(us.scope_after_echo(before_new, CMD, prior) is None, 'S2', 'an echo that is not there yet was found')
+print('PASS S2: before the new echo nothing is in scope')
+
+# S3
+for name, prompt in (('dollar', '$ '), ('hash', '# '), ('angle', '> '), ('friendly', 'root@? ~# '), ('status', 'root@? ~ [1]# ')):
+    text = 'earlier output\n' + prompt + 'ls /mnt\nout\n'
+    got = us.scope_after_echo(text, 'ls /mnt', 0)
+    need(got is not None and got.startswith(prompt[-2:] + 'ls /mnt') and 'earlier' not in got, 'S3', f'{name}: {got!r}')
+print('PASS S3: the echo is found after $ , # , > , root@? ~# and root@? ~ [1]# ')
+
+# S4
+need(us.scope_after_echo('printf "x; ls /mnt"\n', 'ls /mnt', 0) is None, 'S4', 'a mid-line mention counted as an echo')
+need(us.echo_count('see: ls /mnt\n', 'ls /mnt') == 0, 'S4', 'a mid-line mention was counted')
+print('PASS S4: only a prompt before the text makes an echo')
+
+# S5
+base = us.Baseline(CMD, 2)
+need(base.scope('root@? ~# ' + CMD + '\nrefused\n') is None, 'S5', 'one echo is not more than two')
+need(base.prior == 1, 'S5', f'baseline did not follow the scroll: {base.prior}')
+got = base.scope('root@? ~# ' + CMD + '\nrefused\nroot@? ~# ' + CMD + '\n')
+need(got is not None and got.count(CMD) == 1, 'S5', f'the new echo not found after the scroll: {got!r}')
+print('PASS S5: the baseline follows a scroll')
+
+
+# S10: green4. The echo is seen, then the output scrolls it off.
+base = us.Baseline(CMD, 0)
+need(base.scope('root@? ~# ' + CMD + '\nUPGRADE /dev/sdc x\n') is not None, 'S10', 'the echo was not seen')
+tail = 'phase root: durable\nUpgrade complete: /dev/sdc holds abc\npax-install> '
+got = base.scope(tail)
+need(got is not None and 'Upgrade complete' in got, 'S10', f'a scrolled-off echo lost the scope: {got!r}')
+fresh = us.Baseline(CMD, 0)
+need(fresh.scope(tail) is None, 'S10', 'a screen that never showed the echo was in scope')
+print('PASS S10: a scrolled-off echo keeps the scope; a never-seen echo has none')
+
+# S11: green5's U2d-state. The old shell prompts `$ `, and the echo lost its last keys.
+dropped = (root / 'tests/mpx6-install.d/screens/u2d-dropped-keys.txt').read_text()
+typed = "./args one 'two words' > out.txt; echo run=$?; cd /"
+need(typed not in dropped, 'S11', 'the capture does not show dropped keys')
+got = us.scope_after_echo(dropped, typed, 0)
+need(got is not None and 'run=0' in got, 'S11', f'the garbled echo was not found: {got!r}')
+print('PASS S11: an echo that lost keys is found by its first 24 characters')
+
+# S12: replay green6's transcript through a scrolling window.
+cap = (root / 'tests/mpx6-install.d/screens/u8-mistyped-green6.txt').read_text().split('\n')
+start = cap.index('Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-3.txt') if 'Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-3.txt' in cap else 0
+new_out = cap[start:] if start else cap
+old_out = ['Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-2.txt'] + ['Disks (5); install allow-list /dev/sdd1:/pax/install-targets, 1 line(s)'] * 20
+old_out += ['pax-install: upgrade refused: the install on /dev/sdc has no manifest and matches no baseline this stick carries',
+            'root@? ~ [1]# cat /root/pr > /mnt/target/etc/pax-release; echo p=$?', 'p=1']
+history = ['login: root'] + ['root@? ~# cat /proc/self/mounts; echo end'] * 1 + ['rootfs / rootfs rw 0 0', 'end'] + \
+          ['root@? ~# ' + CMD] + old_out
+typed = 'root@? ~# ' + CMD
+bad_pattern = re.compile(STOPPED, re.M)
+
+
+def replay(rows, chunk, arm):
+    window = lambda lines: '\n'.join(lines[-rows:])
+    base = us.Baseline(CMD, us.echo_count(window(history), CMD))
+    lines = history + [typed]
+    if arm:
+        base.armed(window(lines))
+    shown = len(lines)
+    stream = new_out[:]
+    while True:
+        scoped = base.scope(window(lines))
+        if scoped is not None and bad_pattern.search(scoped):
+            return f'rows {rows}, chunk {chunk}: the earlier refusal is in scope after {len(lines) - len(history)} lines:\n{scoped}'
+        if not stream:
+            return None
+        lines += stream[:chunk]
+        stream = stream[chunk:]
+
+
+for rows in range(10, 61):
+    for chunk in (1, 3, 7):
+        for arm in (True, False):
+            why = replay(rows, chunk, arm)
+            need(why is None, 'S12', why)
+print('PASS S12: green6 replayed at 51 screen heights and 3 chunk sizes: the earlier refusal never in scope')
+
+# S13: green4's U-var-log (the upgrade's own output, longer than a screen): at every height the scrolled
+# window still reads `Upgrade complete`, armed or not, with the earlier command's echo still above at the start.
+UP = ['root@? ~# ' + CMD, 'Install log: /dev/sdd partition 1 (FAT32) /pax/logs/install-1.txt', 'Upgrading /dev/sdc: its root',
+      'PAX upgrade plan v1'] + ['write 177 path(s) the target lacks'] * 12 + [
+      'Upgrade Samsung SSD 860, serial <target-serial> (1.0 TB, /dev/sdc) from 9c88ec8a to 1fea7144, keeping your files?',
+      'To upgrade, type this line exactly; anything else cancels:', 'UPGRADE /dev/sdc Samsung SSD 860 <target-serial> eeef1ad8',
+      'pax-install> UPGRADE /dev/sdc Samsung SSD 860 <target-serial> eeef1ad8', 'Target log: /mnt/target/etc/pax-install/upgrade-1.txt',
+      'phase record: durable', 'upgrade: 100 of 323 done', 'upgrade: 200 of 323 done', 'upgrade: 300 of 323 done',
+      'phase root: durable (323 path(s), 6 text(s), 23150 ms)', 'phase manifest: durable (/mnt/target/etc/pax-install/manifest, 487 paths)',
+      'Upgrade complete: /dev/sdc holds 1fea7144; 0 of your changed file(s) kept.', 'Type reboot to reboot now or poweroff to power off']
+for rows in range(10, 61):
+    for arm in (True, False):
+        base = us.Baseline(CMD, 0)
+        lines = ['login: root', 'root@? ~# cat /proc/self/mounts']
+        if arm:
+            base.armed('\n'.join((lines + UP[:1])[-rows:]))
+        for i, line in enumerate(UP):
+            lines.append(line)
+            got = base.scope('\n'.join(lines[-rows:]))
+        need(got is not None and 'Upgrade complete' in got, 'S13', f'rows {rows}, armed {arm}: {got!r}')
+print('PASS S13: a long upgrade output scrolled through 51 screen heights still reads Upgrade complete')
+
+src2 = (root / 'tests/mpx6-install.d/upgrade.py').read_text()
+need(src2.count('self.arm()') == 3, 'S13', 'run, command and vcommand must each arm before Enter')
+print('PASS S13b: run, command and vcommand arm the scope before Enter')
+
+# S6-S8
+class Alive:
+    def __init__(self, rc=None):
+        self.rc = rc
+
+    def poll(self):
+        return self.rc
+
+
+tmp = Path(__import__('tempfile').mkdtemp(prefix='upgrade-screen-selftest-'))
+late = tmp / 'late.sock'
+threading.Timer(0.5, late.touch).start()
+t0 = time.monotonic()
+us.wait_for_socket(late, Alive(), 'late', timeout=5, step=.05)
+need(.4 <= time.monotonic() - t0 < 3, 'S6', 'the wait did not span the late socket')
+print('PASS S6: a socket created 0.5 s late is waited for')
+
+
+def raises(fn, text):
+    try:
+        fn()
+    except us.SocketWait as error:
+        return text in str(error), str(error)
+    return False, 'nothing raised'
+
+
+ok, msg = raises(lambda: us.wait_for_socket(tmp / 'never.sock', Alive(), 'never', timeout=.3, step=.05), 'never.sock was not created in')
+need(ok, 'S7', msg)
+print(f'PASS S7: {msg}')
+ok, msg = raises(lambda: us.wait_for_socket(tmp / 'dead.sock', Alive(3), 'dead', timeout=5, step=.05), 'QEMU ended (exit 3)')
+need(ok, 'S8', msg)
+print(f'PASS S8: {msg}')
+
+# S9
+src = (root / 'tests/mpx6-install.d/upgrade.py').read_text()
+need("'$ ' +" not in src, 'S9', "upgrade.py still marks a command with a fixed '$ ' prefix")
+need('us.wait_for_socket(' in src and 'range(200)' not in src, 'S9', 'upgrade.py has not the bounded socket wait')
+need("'mkdir -p /var/log'," in src, 'S9', "U2's state does not create /var/log")
+print('PASS S9: upgrade.py uses the helpers and U2 creates /var/log')
