@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# tests/mpx6-smp — SMP stage 2: user code on every processor under one kernel lock.
+#
+#   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
+#   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
+#    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
+#    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before)
+#
+# The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green). Then per
+# tier: kmain_console with tests/mpx6-smp.d/probe.c as its only command, booted under each firmware:
+#   - at each of SMP_COUNTS processors, the default kind: SMP-ACTIVE, SMP-RUN, SMP-TLB, SMP-SIGNAL,
+#     SMP-EXIT, SMP-WAIT;
+#   - SMP-LOCK's stress at 4, SMP_STRESS_BOOTS boots a tier, the firmwares taken in turn;
+#   - SMP-END at 4: root's reboot(2) for a halt (the monitor's register dumps after it, three, with the
+#     machine running between), a power-off and a restart (QEMU's own end, its status read);
+#   - SMP-NOSMP (`nosmp` at 4, dumps), SMP-ONE (-smp 1), SMP-CAP (`pax.cpus=2` and `pax.cpus=1` at 4);
+# and SMP-BUILD once, on the first tier and firmware: the processor census's pack fixture at -smp 1 and -smp 4 with
+# 2 GiB, the batches timed by the host (tests/mpx6-smp.d/build.py), the pinned den built by tools/mkden
+# from user/den.pin (or SMP_DEN). SMP_SCALING: `gate` holds the four-job wall to 1.6 times the one-job
+# wall under KVM (the scaling hold: a block of its own, never one shared with timing noise), `report`
+# (the default) prints the figures and holds the identities and the processor count, `skip` names the
+# row NOT-RUN. tests/mpx6-smp.d/rows.py names each row (its docstring lists them and the kernel text
+# they read). Timed bounds are gated under KVM alone, from each boot's .meta. A red row does not stop
+# the suite: every boot's rows are said, and the exit is 1 if any was red.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+cd "$PAX_ROOT"
+tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
+counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        *) die 'usage: tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+    esac
+done
+case $tiers in both) tiers='native release' ;; esac
+case $firmware in both) firmware='bios uefi' ;; esac
+case $scaling in gate|report|skip) ;; *) die "SMP_SCALING is gate, report or skip, not $scaling" ;; esac
+python3 -I -B tests/mpx6-smp.d/rows-selftest.py
+rc=0
+dump=(--cmd stop --cmd 'info registers -a' --cmd cont --cmd stop --cmd 'info registers -a' --cmd cont
+      --cmd stop --cmd 'info registers -a')
+conf() { # FILE CMDLINE-WORDS
+    printf 'timeout: 0\n/PAX\n    protocol: limine\n    path: boot():/boot/pax\n    module_path: boot():/boot/initramfs.cpio\n    cmdline: quiet nonet pax.nobeep pax.nomarks%s\n' "$2" > "$1"
+}
+# NAME:CMDLINE-WORDS:the run list's line (the probe's mode)
+images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-halt::/bin/smpprobe end halt"
+        "end-poweroff::/bin/smpprobe end poweroff" "end-reboot::/bin/smpprobe end restart" "one::/bin/smpprobe one"
+        "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one")
+set -- $firmware
+first_fw=$1 nfw=$#
+built_build=0
+for tier in $tiers; do
+    work=$PAX_BUILD/mpx6-smp/$tier
+    mkdir -p "$work"
+    flags=(); [ "$tier" != release ] || flags=(--release)
+    if [ -z "${SMP_IMAGES:-}" ]; then
+        tools/fetch-limine
+        tools/build-kernel ${flags[@]+"${flags[@]}"} --src kernel/kmain_console.lu "$work"
+        gcc -nostdlib -static -ffreestanding -fno-stack-protector -fno-pie -no-pie -O2 -mgeneral-regs-only -Wall \
+            -o "$work/smpprobe" tests/mpx6-smp.d/probe.c
+        for spec in "${images[@]}"; do
+            name=${spec%%:*} rest=${spec#*:}
+            words=${rest%%:*} line=${rest#*:}
+            printf '%s\n' "$line" > "$work/run-$name"
+            tools/mkinitramfs "$work/root-$name.cpio" /bin/smpprobe="$work/smpprobe":0755 /etc/pax-run="$work/run-$name" \
+                > "$work/root-$name.txt"
+            conf "$work/limine-$name.conf" "$words"
+            tools/mkimage --conf "$work/limine-$name.conf" --add "$work/root-$name.cpio" initramfs.cpio \
+                "$work/kmain_console.elf" "$work/$name.iso"
+        done
+    else
+        work=$SMP_IMAGES/$tier
+    fi
+    elf=$work/kmain_console.elf
+    # boot LOG FIRMWARE IMAGE TIMEOUT DUMPS(0|1) ROWS-ARGS... -- QEMU-ARGS...: to `halt`, then the rows
+    boot() {
+        local log=$1 fw=$2 iso=$3 t=$4 d=$5; shift 5
+        local args=() q=() dm=()
+        while [ "$1" != -- ]; do args+=("$1"); shift; done; shift
+        for x in "$@"; do q+=(--qemu "$x"); done
+        [ "$d" = 0 ] || dm=("${dump[@]}")
+        printf '%s %s %s:\n' "$tier" "$fw" "$(basename "$log" .log)"
+        if ! tools/qemu-halt --firmware "$fw" --timeout "$t" --no-screen --serial "$log" --elf "$elf" \
+                --marker halt ${dm[@]+"${dm[@]}"} "${q[@]}" "$iso"; then
+            printf 'FAIL SMP-BOOT %s %s %s: no halt (the transcript\x27s last lines below)\n' "$tier" "$fw" "$(basename "$log")"
+            { tail -n 12 "$log" 2>/dev/null || true; } | sed 's/^/  /'
+            rc=1
+        fi
+        python3 -I -B tests/mpx6-smp.d/rows.py "$log" "${args[@]}" --elf "$elf" || rc=1
+    }
+    for fw in $firmware; do
+        for n in $counts; do
+            boot "$work/smp-$fw-rows-$n.log" "$fw" "$work/rows.iso" 600 0 --kind rows --smp "$n" -- -smp "$n" -m 512
+        done
+        boot "$work/smp-$fw-end-halt.log" "$fw" "$work/end-halt.iso" 180 1 --kind end-halt --smp 4 -- -smp 4 -m 512
+        for how in poweroff reboot; do
+            log=$work/smp-$fw-end-$how.log st=0
+            printf '%s %s %s:\n' "$tier" "$fw" "end-$how"
+            tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$work/end-$how.iso" -- -smp 4 -m 512 || st=$?
+            python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind "end-$how" --smp 4 --qemu-status "$st" --elf "$elf" || rc=1
+        done
+        boot "$work/smp-$fw-nosmp.log" "$fw" "$work/nosmp.iso" 180 1 --kind nosmp --smp 4 -- -smp 4 -m 512
+        boot "$work/smp-$fw-one.log" "$fw" "$work/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
+        boot "$work/smp-$fw-cap2.log" "$fw" "$work/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
+        boot "$work/smp-$fw-cap1.log" "$fw" "$work/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
+    done
+    # The stress: SMP_STRESS_BOOTS boots a tier, the firmwares in turn.
+    set -- $firmware
+    for i in $(seq 1 "$boots"); do
+        k=$(( (i - 1) % nfw + 1 )); fw=${!k}
+        boot "$work/smp-$fw-stress-$i.log" "$fw" "$work/stress.iso" $((secs + 240)) 0 --kind stress --smp 4 --boot "$i" \
+            -- -smp 4 -m 512
+    done
+    # SMP-BUILD, once: the first tier asked, its first firmware.
+    if [ "$built_build" = 0 ]; then
+        built_build=1
+        if [ "$scaling" = skip ]; then
+            printf 'NOT-RUN SMP-BUILD: SMP_SCALING=skip (the all tier and the scaling hold run it)\n'
+            continue
+        fi
+        b=$work/build
+        mkdir -p "$b"
+        if [ -n "${SMP_DEN:-}" ]; then
+            den=$SMP_DEN
+            say "SMP-BUILD's den given: $den sha256 $(sha256_of "$den")"
+        else
+            tools/mkden "$b/den"
+            den=$b/den/den
+        fi
+        gcc -O2 -static -Wall -Wextra -o "$b/bench" tests/mpx6-smp.d/bench.c
+        printf '/bin/bench 4\n' > "$b/run"
+        python3 -I -B tests/mpx6-smp.d/fixture.py "$PAX_ROOT" "$b" "$den"
+        conf "$b/limine.conf" ''
+        tools/mkimage --conf "$b/limine.conf" --add "$b/root.cpio" initramfs.cpio "$elf" "$b/build.iso"
+        for n in 1 4; do
+            log=$b/smp-$first_fw-build-$n.log
+            printf '%s %s build at %s:\n' "$tier" "$first_fw" "$n"
+            python3 -I -B tests/mpx6-smp.d/build.py "$first_fw" "$n" 900 "$elf" "$b/build.iso" "$log" \
+                || { printf 'FAIL SMP-BOOT %s %s build-%s: no halt\n' "$tier" "$first_fw" "$n"; rc=1; }
+            sargs=(); [ "$n" = 1 ] || sargs=(--scaling "$scaling")
+            python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind build --smp "$n" --expected "$b/expected.json" \
+                ${sargs[@]+"${sargs[@]}"} --elf "$elf" || rc=1
+        done
+    fi
+done
+exit "$rc"
