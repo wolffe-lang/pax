@@ -6,7 +6,8 @@
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before)
 #
-# The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green). Then per
+# The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green) and the
+# harness's processor knob (knob-selftest.sh: PAX_SMP through tools/qemu-run and tools/tour). Then per
 # tier: kmain_console with tests/mpx6-smp.d/probe.c as its only command, booted under each firmware:
 #   - at each of SMP_COUNTS processors, the default kind: SMP-ACTIVE, SMP-RUN, SMP-TLB, SMP-SIGNAL,
 #     SMP-EXIT, SMP-WAIT;
@@ -38,6 +39,7 @@ case $tiers in both) tiers='native release' ;; esac
 case $firmware in both) firmware='bios uefi' ;; esac
 case $scaling in gate|report|skip) ;; *) die "SMP_SCALING is gate, report or skip, not $scaling" ;; esac
 python3 -I -B tests/mpx6-smp.d/rows-selftest.py
+bash tests/mpx6-smp.d/knob-selftest.sh
 rc=0
 dump=(--cmd stop --cmd 'info registers -a' --cmd cont --cmd stop --cmd 'info registers -a' --cmd cont
       --cmd stop --cmd 'info registers -a')
