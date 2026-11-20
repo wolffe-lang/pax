@@ -4,7 +4,8 @@
 #   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
 #   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
-#    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before)
+#    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
+#    boots' logs still under PAX_BUILD)
 #
 # The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green) and the
 # harness's processor knob (knob-selftest.sh: PAX_SMP through tools/qemu-run and tools/tour). Then per
@@ -72,10 +73,10 @@ for tier in $tiers; do
             tools/mkimage --conf "$work/limine-$name.conf" --add "$work/root-$name.cpio" initramfs.cpio \
                 "$work/kmain_console.elf" "$work/$name.iso"
         done
-    else
-        work=$SMP_IMAGES/$tier
     fi
-    elf=$work/kmain_console.elf
+    img=${SMP_IMAGES:+$SMP_IMAGES/$tier}
+    img=${img:-$work}
+    elf=$img/kmain_console.elf
     # boot LOG FIRMWARE IMAGE TIMEOUT DUMPS(0|1) ROWS-ARGS... -- QEMU-ARGS...: to `halt`, then the rows
     boot() {
         local log=$1 fw=$2 iso=$3 t=$4 d=$5; shift 5
@@ -94,25 +95,25 @@ for tier in $tiers; do
     }
     for fw in $firmware; do
         for n in $counts; do
-            boot "$work/smp-$fw-rows-$n.log" "$fw" "$work/rows.iso" 600 0 --kind rows --smp "$n" -- -smp "$n" -m 512
+            boot "$work/smp-$fw-rows-$n.log" "$fw" "$img/rows.iso" 600 0 --kind rows --smp "$n" -- -smp "$n" -m 512
         done
-        boot "$work/smp-$fw-end-halt.log" "$fw" "$work/end-halt.iso" 180 1 --kind end-halt --smp 4 -- -smp 4 -m 512
+        boot "$work/smp-$fw-end-halt.log" "$fw" "$img/end-halt.iso" 180 1 --kind end-halt --smp 4 -- -smp 4 -m 512
         for how in poweroff reboot; do
             log=$work/smp-$fw-end-$how.log st=0
             printf '%s %s %s:\n' "$tier" "$fw" "end-$how"
-            tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$work/end-$how.iso" -- -smp 4 -m 512 || st=$?
+            tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$img/end-$how.iso" -- -smp 4 -m 512 || st=$?
             python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind "end-$how" --smp 4 --qemu-status "$st" --elf "$elf" || rc=1
         done
-        boot "$work/smp-$fw-nosmp.log" "$fw" "$work/nosmp.iso" 180 1 --kind nosmp --smp 4 -- -smp 4 -m 512
-        boot "$work/smp-$fw-one.log" "$fw" "$work/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
-        boot "$work/smp-$fw-cap2.log" "$fw" "$work/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
-        boot "$work/smp-$fw-cap1.log" "$fw" "$work/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
+        boot "$work/smp-$fw-nosmp.log" "$fw" "$img/nosmp.iso" 180 1 --kind nosmp --smp 4 -- -smp 4 -m 512
+        boot "$work/smp-$fw-one.log" "$fw" "$img/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
+        boot "$work/smp-$fw-cap2.log" "$fw" "$img/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
+        boot "$work/smp-$fw-cap1.log" "$fw" "$img/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
     done
     # The stress: SMP_STRESS_BOOTS boots a tier, the firmwares in turn.
     set -- $firmware
     for i in $(seq 1 "$boots"); do
         k=$(( (i - 1) % nfw + 1 )); fw=${!k}
-        boot "$work/smp-$fw-stress-$i.log" "$fw" "$work/stress.iso" $((secs + 240)) 0 --kind stress --smp 4 --boot "$i" \
+        boot "$work/smp-$fw-stress-$i.log" "$fw" "$img/stress.iso" $((secs + 240)) 0 --kind stress --smp 4 --boot "$i" \
             -- -smp 4 -m 512
     done
     # SMP-BUILD, once: the first tier asked, its first firmware.
