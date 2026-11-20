@@ -7128,15 +7128,15 @@ jobs:
   # each processor, nosmp, one processor and pax.cpus. A job of its own
   # (the firmware job, where the processor census runs, sits at its cap).
   # The hosted runner gives the job no KVM: the truth rows gate, the timed
-  # bounds are printed. SMP-BUILD (the pinned den's pack batches, den built
-  # here) runs in the all tier and is named NOT-RUN in the others.
+  # bounds are printed. SMP-BUILD is NOT-RUN here by design: its bound is
+  # a wall-time ratio, gated in a record on a reserved host with KVM.
   mpx6-smp:
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-smp')
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
-      SMP_SCALING: ${{ needs.plan.outputs.tier == 'all' && 'report' || 'skip' }}
+      SMP_SCALING: skip
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 180 || 90 }}
     steps:
