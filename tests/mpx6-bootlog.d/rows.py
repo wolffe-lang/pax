@@ -55,7 +55,7 @@ def run(argv, **kw):
 
 
 def archive_record(name, prog):
-    """The archive whose run list is `pax-boot-status record` (pid 1, as /bin/login runs it on an
+    """The archive whose run list is `pax-boot-status record` (pid 1, as /bin/init runs it on an
     installed system), then `pax-boot-status` (the show), then init.c."""
     a = WORK / 'in'
     a.mkdir(exist_ok=True)
