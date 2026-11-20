@@ -556,7 +556,9 @@ def g4(recs, own, markers, cuts):
 
 def last_both(work, path, prog, opts):
     env = dict(PATH='/usr/bin:/bin', TZ='UTC', LC_ALL='C')
-    pax = ARGS.images / 'tools' / 'last'
+    # the link's target absolute: --images may be relative (CI's `--images build/mpx6-logs`), and a relative
+    # target is read from the link's own directory
+    pax = (ARGS.images / 'tools' / 'last').resolve()
     argv0 = work / prog
     if not argv0.exists():
         argv0.symlink_to(pax)
