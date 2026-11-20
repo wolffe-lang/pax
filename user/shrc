@@ -24,3 +24,18 @@ export LUPIN_STD=/usr/share/wolf/std
 # Mozilla's store as user/roots.pin names it (den reads no system store
 # of its own).
 export DEN_TLS_ROOTS=/etc/ssl/certs/ca-roots.der
+
+# px124: `logout` ends a login shell, as bash's builtin does, and tells any
+# other shell to use `exit`. A login shell here is one that leads its
+# session (/proc/$$/stat's sixth field is its own pid): the console's,
+# which /bin/init starts so. At an installed system's console init then
+# hangs the session up and asks `login:` again; `exit` and Ctrl-D at an
+# empty prompt do the same.
+logout() {
+    read -r __pax_x __pax_x __pax_x __pax_x __pax_x __pax_sid __pax_x < /proc/$$/stat
+    if [ "$__pax_sid" = "$$" ]; then
+        exit "$@"
+    fi
+    echo "logout: not login shell: use \`exit'" >&2
+    return 1
+}

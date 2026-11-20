@@ -1,0 +1,86 @@
+"""upgrade_screen: how upgrade.py reads the console and waits for QEMU (pax#457).
+
+Pure functions, so tests/upgrade-screen-selftest can run them without QEMU.
+
+A command typed at the console is echoed after the shell's prompt, and the prompt is not fixed: `$ `,
+`# `, `> `, pelt's friendly `root@? ~# ` or, after a failed command, `root@? ~ [1]# `. What a wait
+reads is what follows the echo of the command it just typed. An earlier run of the same command may
+still be on the screen, so the echoes already there are counted before the new one is typed, and only a
+further echo opens the scope. Until it shows, nothing is in scope, so the previous run's output cannot
+satisfy or trip a pattern.
+"""
+import re
+import time
+
+
+class SocketWait(RuntimeError):
+    pass
+
+
+ECHO_PREFIX = 24
+
+
+def echoes(flat, cmd):
+    """Start offsets of the command's echoes: its first ECHO_PREFIX characters right after a prompt's `$ `,
+    `# ` or `> `. The prefix only: a host under load drops keys, and the echo then lacks the line's tail
+    (pax#457, U2d-state); the rows' own checks read what the command printed."""
+    head = cmd[:ECHO_PREFIX]
+    return [m.end() - len(head) for m in re.finditer(r'[$#>] ' + re.escape(head), flat)]
+
+
+def echo_count(flat, cmd):
+    return len(echoes(flat, cmd))
+
+
+def scope_after_echo(flat, cmd, prior):
+    """The screen from the newest echo of cmd, or None when no echo beyond the PRIOR earlier ones shows."""
+    found = echoes(flat, cmd)
+    if len(found) <= prior:
+        return None
+    return flat[found[-1] - 2:]
+
+
+class Baseline:
+    """The echoes of a command already on the screen when it is typed, and whether its own echo has been seen.
+
+    Typing puts the new echo at the foot of the screen: `armed` is called with the screen after the line is
+    typed and before Enter, so the new echo is known to be the last one. From then on the scope is the
+    newest echo on the screen, whatever scrolls off above it (an older echo scrolls off first), and the
+    whole screen once the newest scrolls off too (everything left is after it). A screen read without
+    `armed` falls back to counting: a further echo beyond the earlier ones opens the scope.
+    (pax#457: U8-mistyped's earlier refusal came into scope when an old echo scrolled off.)"""
+
+    def __init__(self, cmd, prior):
+        self.cmd = cmd
+        self.prior = prior
+        self.seen = False
+
+    def armed(self, flat):
+        if echo_count(flat, self.cmd) > self.prior:
+            self.seen = True
+
+    def scope(self, flat):
+        n = echo_count(flat, self.cmd)
+        if not self.seen and n > self.prior:
+            self.seen = True
+        if self.seen:
+            return scope_after_echo(flat, self.cmd, 0) if n else flat
+        if n < self.prior:
+            self.prior = n
+        return None
+
+
+def wait_for_socket(path, proc, name, timeout=60, step=.05):
+    """Wait for QEMU's QMP socket to exist. A loaded host took over 10 s once (pax#457's third part):
+    the wait is longer, bounded, and names the cause when it gives up."""
+    end = time.monotonic() + timeout
+    while True:
+        if path.exists():
+            return
+        rc = proc.poll()
+        if rc is not None:
+            raise SocketWait(f'{name}: QEMU ended (exit {rc}) before it created {path.name}')
+        if time.monotonic() >= end:
+            raise SocketWait(f'{name}: {path.name} was not created in {timeout} s, QEMU still running: '
+                             'a host too loaded to start it, not a failure of the system under test')
+        time.sleep(step)

@@ -7,7 +7,9 @@
  *     ET close fd=FD
  *     ET signal N               a signal on its way to PID (passed on as it came)
  *     ET end STATUS             PID is gone
- * The row sends PID a SIGTERM and reads the order from these lines. ptrace(2), wait(2) and syscall(2) are the
+ * It ignores SIGTERM and SIGHUP itself, so it outlives the start of the kernel's end and sees PID through it;
+ * it ends when PID does. The row runs it with the console as its output, powers off, and reads the order of
+ * PID's calls at the end from these lines. ptrace(2), wait(2) and syscall(2) are the
  * manual pages'; a system call's entry stop shows -ENOSYS in rax and its number in orig_rax.
  */
 #define _GNU_SOURCE
@@ -54,6 +56,8 @@ int main(int argc, char **argv) {
     struct user_regs_struct r, at;
     char path[256];
     setvbuf(stdout, NULL, _IOLBF, 0);
+    signal(SIGTERM, SIG_IGN);
+    signal(SIGHUP, SIG_IGN);
     if (pt(PT_ATTACH, pid, 0, 0) < 0) { printf("ET FAIL attach to %ld: %s\n", pid, strerror(errno)); return 1; }
     if (waitpid((pid_t)pid, &st, __WALL) < 0 || !WIFSTOPPED(st)) { printf("ET FAIL no stop after the attach\n"); return 1; }
     if (pt(PT_SETOPTIONS, pid, 0, PT_O_TRACESYSGOOD) < 0) { printf("ET FAIL options: %s\n", strerror(errno)); return 1; }

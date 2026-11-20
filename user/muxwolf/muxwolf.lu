@@ -1,0 +1,521 @@
+//! member: false
+//!
+//! muxwolf — px125: a terminal multiplexer's server, done with wolf-std
+//! alone (77cf3210, wolf 0.2.39), on PAX and on Linux. The calls are
+//! the ones wolf-std's tests/term/pty_session.lu shows for an ssh
+//! server's terminal, at a multiplexer's scale: eight ptys from
+//! `term.open_pty`, each a shell in a session of its own (`process.fork`,
+//! `process.lead_session`, `term.open_controlling`, `process.exec`), read
+//! through `signal.wait_fds` with `fs.read_chunk` and written with
+//! `fs.write_some` on non-blocking masters; a resize; the interrupt key
+//! with the interrupt ignored by the server and reset for the pane; a
+//! unix listener's mode, its clients and a stale file; whether one wait
+//! takes a pty's master and a socket together; `term.restore_at_exit`
+//! after an exit and after a SIGKILL; the console raw and back. Every
+//! line is `W<n> text`, no pid, time or name in it; it is held line for
+//! line to the same binary's on Ubuntu (tests/mpx7-mux).
+//!
+//! Written from wolf-std's own documentation (std/term, std/process,
+//! std/signal, std/net, std/net/unix, std/fs at 77cf3210) and its
+//! tests/term/pty_session.lu. No C library's, kernel's or multiplexer's
+//! source.
+
+use std.env
+use std.fs
+use std.net
+use std.net.unix
+use std.process
+use std.signal
+use std.str
+use std.term
+
+const LOOP: str = "while read -r l; do eval \"$l\"; done"
+
+struct Pane {
+    m: fs.File,
+    slot: int,
+}
+
+fn bytes_of(s: str) -> List[byte] {
+    var out = List[byte]()
+    for b in s.bytes() {
+        (mut out).push(b)
+    }
+    out
+}
+
+fn one_byte(v: int) -> List[byte] {
+    var out = List[byte]()
+    (mut out).push(v as byte)
+    out
+}
+
+// Read master `m` until `want` shows, its end, or `turns` waits of 200 ms.
+fn read_until(mut m: fs.File, want: str, turns: int) -> str {
+    var got = ""
+    var k = 0
+    while k < turns && !str.contains(got, want) {
+        var watched = List[fs.File]()
+        (mut watched).push(m)
+        let w = signal.wait_fds(watched, signal.child(), 200) else |_| {
+            return got
+        }
+        if w.ready == 0 {
+            let chunk = fs.read_chunk(mut m, 4096) else |_| {
+                return got
+            }
+            got = got + (str_from_utf8(chunk) else "")
+        }
+        k = k + 1
+    }
+    got
+}
+
+// Read what master `m` holds until 50 ms pass with nothing more.
+fn drain(mut m: fs.File) {
+    var k = 0
+    while k < 50 {
+        var watched = List[fs.File]()
+        (mut watched).push(m)
+        let w = signal.wait_fds(watched, signal.child(), 50) else |_| {
+            return
+        }
+        if w.ready != 0 {
+            return
+        }
+        let _chunk = fs.read_chunk(mut m, 4096) else |_| {
+            return
+        }
+        k = k + 1
+    }
+}
+
+fn type_line(mut m: fs.File, s: str) -> int {
+    fs.write_some(mut m, bytes_of(s)) else 0 - 1
+}
+
+// A pane: a pty, and `/bin/sh -c CMD` in a session of its own on it, the
+// slave its controlling terminal. `reset` sets interrupt() and quit()
+// back to the default in the child before the exec.
+fn start_pane(cmd: str, reset: bool) -> !Pane {
+    let p = term.open_pty()?
+    var m = p.master
+    var s = p.slave
+    let name = term.pty_name(m)?
+    let f = process.fork()?
+    if process.is_child(f) {
+        process.lead_session() else |_| {
+            process.exit(7)
+        }
+        let tty = term.open_controlling(name) else |_| {
+            process.exit(8)
+            return Pane { m: fs.File { fd: 0 - 1 }, slot: 0 - 1 }
+        }
+        if reset {
+            signal.reset(signal.interrupt() + signal.quit()) else |_| {
+                process.exit(10)
+            }
+        }
+        var c = process.command("/bin/sh")
+        process.push_arg(mut c, "-c")
+        process.push_arg(mut c, cmd)
+        process.set_stdin(mut c, tty)
+        process.set_stdout(mut c, tty)
+        process.set_stderr(mut c, tty)
+        process.exec(c, env.vars()) else |_| {}
+        process.exit(9)
+        return Pane { m: fs.File { fd: 0 - 1 }, slot: 0 - 1 }
+    }
+    fs.close(take s)?
+    fs.set_nonblock(mut m, true)?
+    Pane { m: m, slot: f.child.slot }
+}
+
+fn status_of(slot: int) -> int {
+    var ch = process.Child { slot: slot }
+    process.wait_status(take ch) else 0 - 999
+}
+
+fn ended(st: int) -> str {
+    if st >= 0 {
+        return "exited {st}"
+    }
+    let int_n = signal.number(signal.interrupt()) else 0
+    let kill_n = signal.number(signal.kill()) else 0
+    let hup_n = signal.number(signal.reload()) else 0
+    if st == 0 - int_n {
+        return "ended by interrupt()"
+    }
+    if st == 0 - kill_n {
+        return "ended by kill()"
+    }
+    if st == 0 - hup_n {
+        return "ended by the hangup"
+    }
+    "ended by signal {0 - st}"
+}
+
+fn panes() -> !int {
+    var ps = List[Pane]()
+    var made = 0
+    var k = 0
+    while k < 8 {
+        let pane = start_pane(LOOP, false) else |_| {
+            k = k + 1
+            continue
+        }
+        (mut ps).push(pane)
+        made = made + 1
+        k = k + 1
+    }
+    print("W1 {made} ptys from term.open_pty, each a shell leading its own session on its slave")
+    var answered = 0
+    k = 0
+    while k < ps.len {
+        var m = copy ps[k].m
+        let _n = type_line(mut m, "echo pong {k}\n")
+        let got = read_until(mut m, "pong {k}\r\n", 25)
+        if str.contains(got, "pong {k}\r\n") {
+            answered = answered + 1
+        }
+        k = k + 1
+    }
+    print("W2 {answered} of {ps.len} panes answered a typed line through fs.write_some and fs.read_chunk")
+    // One wait over every master: which does it say?
+    var all = List[fs.File]()
+    k = 0
+    while k < ps.len {
+        (mut all).push(copy ps[k].m)
+        k = k + 1
+    }
+    k = 0
+    while k < ps.len {
+        var mk = copy ps[k].m
+        drain(mut mk)
+        k = k + 1
+    }
+    let w0 = signal.wait_fds(all, signal.child(), 0)?
+    var m7 = copy ps[7].m
+    let _a = type_line(mut m7, "echo seven\n")
+    let w1 = signal.wait_fds(all, signal.child(), 3000)?
+    let _r1 = read_until(mut m7, "seven\r\n", 10)
+    var m3 = copy ps[3].m
+    var m6 = copy ps[6].m
+    let _b = type_line(mut m6, "echo six\n")
+    let _c = type_line(mut m3, "echo three\n")
+    // both ready before the one wait over all 8 (on Linux a typed line's
+    // echo can come a moment after the write returns); nothing is read
+    var only3 = List[fs.File]()
+    (mut only3).push(copy ps[3].m)
+    var only6 = List[fs.File]()
+    (mut only6).push(copy ps[6].m)
+    let _s3 = signal.wait_fds(only3, signal.child(), 3000)?
+    let _s6 = signal.wait_fds(only6, signal.child(), 3000)?
+    let w2 = signal.wait_fds(all, signal.child(), 3000)?
+    let _r3 = read_until(mut m3, "three\r\n", 10)
+    let _r6 = read_until(mut m6, "six\r\n", 10)
+    print("W3 signal.wait_fds over the 8 masters: none ready answers {w0.ready}; pane 7 alone ready answers {w1.ready}; panes 3 and 6 ready answer {w2.ready}, one index a call")
+    // The window's size.
+    var m0 = copy ps[0].m
+    term.set_size(m0, term.Size { rows: 40, columns: 120 }, 0, 0)?
+    let _s = type_line(mut m0, "stty size\n")
+    let sz = read_until(mut m0, "40 120\r\n", 25)
+    let sized = str.contains(sz, "40 120\r\n")
+    print("W4 term.set_size on a master, then stty size in its shell: {if sized { "40 120" } else { "not 40 120" }}")
+    // The interrupt key through a master, at the default.
+    var m1 = copy ps[1].m
+    let _e = type_line(mut m1, "exec sleep 30\n")
+    let _f = read_until(mut m1, "never", 3)
+    let _g = fs.write_some(mut m1, one_byte(3))?
+    print("W5 0x03 to a master whose shell became sleep 30: {ended(status_of(ps[1].slot))}")
+    // Every master closed: the shells hear the hangup.
+    var hup = 0
+    var other = 0
+    k = 0
+    while k < ps.len {
+        if k != 1 {
+            var mk = copy ps[k].m
+            fs.close(take mk)?
+            let st = status_of(ps[k].slot)
+            if ended(st) == "ended by the hangup" { hup = hup + 1 } else { other = other + 1 }
+        } else {
+            var mk = copy ps[k].m
+            fs.close(take mk)?
+        }
+        k = k + 1
+    }
+    print("W6 the other masters closed: {hup} shells ended by the hangup, {other} otherwise")
+    0
+}
+
+// The interrupt ignored by the server: inherited by the pane, or reset.
+fn ignored() -> !int {
+    signal.ignore(signal.interrupt() + signal.quit())?
+    var a = start_pane("exec sleep 30", false)?
+    let _w = read_until(mut a.m, "never", 3)
+    let _x = fs.write_some(mut a.m, one_byte(3))?
+    let _y = read_until(mut a.m, "never", 3)
+    var ca = process.Child { slot: a.slot }
+    process.kill(mut ca)?
+    let sa = process.wait_status(take ca) else 0 - 999
+    fs.close(take a.m)?
+    var b = start_pane("exec sleep 30", true)?
+    let _w2 = read_until(mut b.m, "never", 3)
+    let _x2 = fs.write_some(mut b.m, one_byte(3))?
+    let sb = status_of(b.slot)
+    fs.close(take b.m)?
+    signal.reset(signal.interrupt() + signal.quit())?
+    print("W7 the server ignoring interrupt(): a pane that inherits it, sent 0x03: {ended(sa)}; a pane reset by signal.reset before exec: {ended(sb)}")
+    0
+}
+
+fn sockets() -> !int {
+    let path = "/tmp/wmux.sock"
+    if fs.exists(path) {
+        fs.remove(path)?
+    }
+    var srv = unix.listen(path)?
+    fs.set_mode(path, 384)?
+    // a user's dial of root's 0600 socket
+    let u = process.fork()?
+    if process.is_child(u) {
+        var none = List[int]()
+        process.set_ids(1000, 1000, none) else |_| {
+            process.exit(2)
+        }
+        var c = unix.connect(path) else |e| {
+            let code = match e {
+                denied => 13,
+                refused => 11,
+                not_found => 12,
+                unsupported => 14,
+                io => 15,
+            }
+            process.exit(code)
+            return 1
+        }
+        net.close(take c) else |_| {}
+        process.exit(0)
+        return 0
+    }
+    let us = status_of(u.child.slot)
+    let refused = if us == 13 { "denied" } else if us == 0 { "connected" } else { "status {us}" }
+    // four clients
+    var slots = List[int]()
+    var k = 0
+    while k < 4 {
+        let f = process.fork()?
+        if process.is_child(f) {
+            var c = unix.connect(path) else |_| {
+                process.exit(3)
+                return 1
+            }
+            net.write(mut c, "hi {k}\n") else |_| {
+                process.exit(4)
+            }
+            let back = net.read(mut c, 64) else "?"
+            process.exit(if back == "ok {k}\n" { 0 } else { 5 })
+            return 0
+        }
+        (mut slots).push(f.child.slot)
+        k = k + 1
+    }
+    var served = 0
+    k = 0
+    while k < 4 {
+        var conn = net.accept(mut srv)?
+        let line = net.read(mut conn, 64)?
+        let words = str.split(str.trim(line), " ")
+        if words.len == 2 {
+            net.write(mut conn, "ok {words[1]}\n")?
+            served = served + 1
+        }
+        net.close(take conn)?
+        k = k + 1
+    }
+    var good = 0
+    for s in slots {
+        if status_of(s) == 0 {
+            good = good + 1
+        }
+    }
+    print("W8 unix.listen at a path, fs.set_mode 0600: a user's unix.connect {refused}; 4 clients accepted and answered, {good} ended well")
+    // One wait over a pty's master and a socket.
+    let p = term.open_pty()?
+    var cli = unix.connect(path)?
+    var conn = net.accept(mut srv)?
+    net.write(mut cli, "x")?
+    var mixed = List[fs.File]()
+    (mut mixed).push(copy p.master)
+    (mut mixed).push(fs.File { fd: conn.fd })
+    var fs_takes = "yes"
+    let w = signal.wait_fds(mixed, signal.child(), 1000) else |e| {
+        fs_takes = match e {
+            io => "no (io)",
+            invalid => "no (invalid)",
+            unsupported => "no (unsupported)",
+        }
+        signal.Wake { meaning: 0, ready: 0 - 1 }
+    }
+    if fs_takes == "yes" && w.ready != 1 {
+        fs_takes = "no (it answered {w.ready})"
+    }
+    var nets = List[int]()
+    (mut nets).push(conn.fd)
+    (mut nets).push(p.master.fd)
+    var net_takes = "yes"
+    let r = net.wait(nets, 1000) else |_| {
+        net_takes = "no (io)"
+        List[int]()
+    }
+    if net_takes == "yes" && r.len != 1 {
+        net_takes = "no ({r.len} ready)"
+    }
+    print("W9 one wait over a pty's master and a unix socket: signal.wait_fds takes the socket's handle as a file: {fs_takes}; net.wait takes the master's handle: {net_takes}")
+    net.close(take cli)?
+    net.close(take conn)?
+    var pm = p.master
+    var pslave = p.slave
+    fs.close(take pm)?
+    fs.close(take pslave)?
+    net.close_listener(take srv)?
+    print("W8 the listener closed: its file {if fs.exists(path) { "stays" } else { "is gone (net.close_listener unlinks it)" }}")
+    // A server that dies: its file stays.
+    let stale = "/tmp/wstale.sock"
+    let zp = process.pipe()?
+    var zr = zp.read
+    var zw = zp.write
+    let z = process.fork()?
+    if process.is_child(z) {
+        var l = unix.listen(stale) else |_| {
+            process.exit(3)
+            return 1
+        }
+        fs.write(mut zw, "r\n") else |_| {}
+        var forever = 0
+        while forever < 1000 {
+            let _w = signal.wait_fds(List[fs.File](), signal.child(), 1000) else |_| {
+                signal.Wake { meaning: 0, ready: 0 - 1 }
+            }
+            forever = forever + 1
+        }
+        net.close_listener(take l) else |_| {}
+        process.exit(4)
+        return 1
+    }
+    fs.close(take zw)?
+    let _zr = fs.read(mut zr, 2)?
+    fs.close(take zr)?
+    var zc = process.Child { slot: z.child.slot }
+    process.kill(mut zc)?
+    let zs = process.wait_status(take zc) else 0 - 999
+    var dial = "connected"
+    var d = unix.connect(stale) else |e| {
+        dial = match e {
+            refused => "refused",
+            not_found => "not_found",
+            denied => "denied",
+            unsupported => "unsupported",
+            io => "io",
+        }
+        net.Socket { fd: 0 - 1 }
+    }
+    if dial == "connected" {
+        net.close(take d)?
+    }
+    var bind = "bound"
+    var again = unix.listen(stale) else |e| {
+        bind = match e {
+            exists => "exists",
+            not_found => "not_found",
+            denied => "denied",
+            unsupported => "unsupported",
+            io => "io",
+        }
+        net.Listener { fd: 0 - 1 }
+    }
+    if bind == "bound" {
+        net.close_listener(take again)?
+    }
+    fs.remove(stale) else |_| {}
+    var fresh = unix.listen(stale)?
+    net.close_listener(take fresh)?
+    print("W10 a server {ended(zs)}: unix.connect {dial}, unix.listen {bind}; fs.remove, then unix.listen binds")
+    0
+}
+
+fn restore() -> !int {
+    let q = process.pipe()?
+    var qr = q.read
+    var qw = q.write
+    var words = List[str]()
+    var mode = 0
+    while mode < 2 {
+        let p = term.open_pty()?
+        var m = p.master
+        var s = p.slave
+        let name = term.pty_name(m)?
+        let f = process.fork()?
+        if process.is_child(f) {
+            process.lead_session() else |_| {
+                process.exit(7)
+            }
+            let tty = term.open_controlling(name) else |_| {
+                process.exit(8)
+                return 1
+            }
+            let saved = term.mode(tty)?
+            term.restore_at_exit(tty, saved, List[byte]())?
+            term.set_mode(tty, term.raw_bytes(saved))?
+            fs.write(mut qw, "r\n")?
+            if mode == 0 {
+                process.exit(0)
+                return 0
+            }
+            var forever = 0
+            while forever < 1000 {
+                let _w = signal.wait_fds(List[fs.File](), signal.child(), 1000) else |_| {
+                    signal.Wake { meaning: 0, ready: 0 - 1 }
+                }
+                forever = forever + 1
+            }
+            process.exit(0)
+            return 0
+        }
+        fs.close(take s)?
+        let _r = fs.read(mut qr, 2)?
+        var ch = process.Child { slot: f.child.slot }
+        if mode == 1 {
+            process.kill(mut ch)?
+        }
+        let st = process.wait_status(take ch) else 0 - 999
+        let icanon = term.attr(m, 51)?
+        let echo = term.attr(m, 53)?
+        (mut words).push("{ended(st)}: {if icanon == 1 && echo == 1 { "cooked again" } else { "still raw" }}")
+        fs.close(take m)?
+        mode = mode + 1
+    }
+    print("W11 term.restore_at_exit then raw: a client that {words[0]}; one {words[1]}")
+    // The console.
+    var tty = fs.stdin()
+    let saved = term.mode(tty) else |_| {
+        print("W12 the console: no mode")
+        return 0
+    }
+    term.set_mode(tty, term.raw_bytes(saved))?
+    let raw = term.mode(tty)?
+    term.set_mode(tty, saved)?
+    let back = term.mode(tty)?
+    print("W12 the console through term.set_mode: raw_bytes reads back {term.pack(raw) == term.pack(term.raw_bytes(saved))}; put back {term.pack(back) == term.pack(saved)}")
+    0
+}
+
+fn main() -> !int {
+    print("muxwolf: px125's wolf-std probe")
+    let _a = panes()?
+    let _b = ignored()?
+    let _c = sockets()?
+    let _d = restore()?
+    print("W13 done")
+    0
+}

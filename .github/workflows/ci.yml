@@ -158,6 +158,7 @@ jobs:
           python3 -I tests/mpx2-interrupts.d/selftest
           python3 -I tests/usb-session-selftest
           python3 -I tests/pipe-shape-selftest
+          python3 -I tests/upgrade-screen-selftest
 
       - name: the plan
         id: plan
@@ -1851,6 +1852,76 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # px125: what PAX already does for a terminal multiplexer. Two probes,
+  # each the first program of a console image: user/elf/muxprobe.c (32
+  # ptys under one epoll loop with a shell on each, a flood, back-pressure,
+  # the window's size and a pty in a pty, the keys' signals, a setsid
+  # daemon, Unix sockets, non-blocking writes and timers, termios) and
+  # user/muxwolf/muxwolf.lu (the same server's work through wolf-std 77cf3210
+  # at wolf 0.2.39), each held to the same binaries' transcript on Ubuntu
+  # (tests/mpx7-mux.d/linux, recorded in a throwaway container), every
+  # difference named in tests/mpx7-mux.d/ruled-*.txt (M1-M3); the console's
+  # screens, answers and keys read back against screen.rows (M4, M5); the
+  # repaint at the 860's 2560 x 1440 mode (M6).
+  mpx7-mux:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx7-mux')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, curl (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx7-mux-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: both probes against Ubuntu's transcripts, the console's screens, keys and answers, the 860's repaint; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx7-mux $PAX_LEGS
+
+      - name: keep the programs' sums, the transcripts, the screens, the serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx7-mux
+          path: |
+            build/mpx7-mux/programs.txt
+            build/mpx7-mux/muxwolf/sums.txt
+            build/mpx7-mux/pelt/sums.txt
+            build/mpx7-mux/bore/sums.txt
+            build/mpx7-mux/*/kmain_console.elf
+            build/mpx7-mux-*.txt
+            build/mpx7-mux-*.serial.log
+            build/mpx7-mux-*.norm
+            build/mpx7-mux-*.verdict
+            build/mpx7-mux-*-screen/
+          retention-days: 14
+          if-no-files-found: warn
+
   # px111: pseudo-terminals. One probe (user/elf/ptyprobe.c, tools/mkpty)
   # asks /dev/ptmx and /dev/pts, termios over a pty, the controlling
   # terminal and job control, SIGWINCH, the hangup, poll and the full
@@ -1982,6 +2053,66 @@ jobs:
             build/mpx5-slots-*.norm
             build/mpx5-slots-*.verdict
             build/mpx5-slots-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  # px124 (pax#352): an installed PAX's pid 1 is /bin/init. Login, `exit`,
+  # `logout` and Ctrl-D back to `login:`; the session's leftovers hung up,
+  # a process that called setsid outlives it; a second account; sudo's
+  # record void across a logout; the runtime directory on /run's tmpfs,
+  # empty again after a reboot of a disk whose volume is `/`.
+  mpx5-init:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx5-init')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, curl, e2fsprogs (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl e2fsprogs
+          qemu-system-x86_64 --version
+          clang --version
+          gcc --version | head -n 1
+          python3 --version
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx5-init-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: the image's tree and kernels (P0), then the console's sessions; the plan's legs
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx5-init $PAX_LEGS
+
+      - name: keep the tree's list and the transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx5-init
+          path: |
+            build/mpx5-init/files.txt
+            build/mpx5-init/missing.txt
+            build/mpx5-init/*.txt
+            build/mpx5-init/*/kmain_console.build-kernel.log
+            build/mpx5-init-runs/*/boot*/serial.log
+            build/mpx5-init-runs/*/boot*/*.meta
           retention-days: 14
           if-no-files-found: warn
 
@@ -6508,6 +6639,8 @@ jobs:
       - mpx5-pty
       - mpx5-kmsg
       - mpx5-slots
+      - mpx7-mux
+      - mpx5-init
       - mpx3-speaker
       - mpx3-sound
       - mpx3-orchestra
