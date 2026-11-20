@@ -28,6 +28,7 @@
 # The machine everywhere: q35, `-cpu max`, 256 MiB, no NIC, BIOS
 # (SeaBIOS) or UEFI (OVMF / Homebrew's edk2, found as tools/qemu-run
 # finds it). QEMU is $PAX_QEMU, default `qemu-system-x86_64` on PATH.
+# PAX_SMP=N adds `-smp N` to both QEMU starts, as tools/qemu-run does.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
@@ -35,6 +36,14 @@ usage() { sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit "${1:-0}";
 [ $# -ge 1 ] || usage 2
 cmd=$1; shift
 
+# PAX_SMP=N: the processor count tools/qemu-run gives every boot, here too (`-smp N`).
+smp_args() {
+    case ${PAX_SMP:-} in
+        '') ;;
+        *[!0-9]*|0*) die "PAX_SMP takes a count of processors, 1 or more, not '${PAX_SMP}'" ;;
+        *) printf '%s\n' -smp "$PAX_SMP" ;;
+    esac
+}
 # The UEFI firmware's pflash drive argument (tools/lib.sh's find_ovmf).
 ovmf_drive() {
     local code vars
@@ -81,6 +90,8 @@ boot)
     qemu=${PAX_QEMU:-qemu-system-x86_64}
     need "$qemu"
     set -- "$qemu" -machine q35 -cpu max -m 256M -display none -serial stdio -monitor none -nic none -no-reboot -cdrom "$iso"
+    smp=$(smp_args) || exit 2
+    [ -z "$smp" ] || set -- "$@" -smp "$PAX_SMP"
     case $fw in
         bios) ;;
         uefi) d=$(ovmf_drive) || exit 2; set -- "$@" -drive "$d" ;;
@@ -103,6 +114,8 @@ time)
     qemu=${PAX_QEMU:-qemu-system-x86_64}
     need "$qemu" python3
     set -- "$qemu" -machine q35 -cpu max -m 256M -accel "$accel" -display none -serial stdio -monitor none -nic none -no-reboot -cdrom "$iso"
+    smp=$(smp_args) || exit 2
+    [ -z "$smp" ] || set -- "$@" -smp "$PAX_SMP"
     case $fw in
         bios) ;;
         uefi) d=$(ovmf_drive) || exit 2; set -- "$@" -drive "$d" ;;
