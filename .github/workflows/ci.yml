@@ -6953,6 +6953,55 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # SMP stage 2, user code on every processor (tests/mpx6-smp): the
+  # processor count told to programs, work on every processor at once,
+  # shootdowns, signals, exits and waits across processors at 2, 4 and 16,
+  # a stress of ten processes ten times, the kernel's end with a spinner on
+  # each processor, nosmp, one processor and pax.cpus. A job of its own
+  # (the firmware job, where the processor census runs, sits at its cap).
+  # The hosted runner gives the job no KVM: the truth rows gate, the timed
+  # bounds are printed. SMP-BUILD (the pinned den's pack batches, den built
+  # here) runs in the all tier and is named NOT-RUN in the others.
+  mpx6-smp:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-smp')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+      PAX_REQUIRE_UEFI: "1"
+      SMP_SCALING: ${{ needs.plan.outputs.tier == 'all' && 'report' || 'skip' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 180 || 90 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl make git
+          qemu-system-x86_64 --version
+          ls -l /dev/kvm || true
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: every processor at work, the plan's legs
+        run: tests/mpx6-smp $PAX_LEGS
+
+      - name: keep the transcripts and the monitors' answers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-smp
+          path: |
+            build/mpx6-smp/**/*.log*
+            build/mpx6-smp/**/*.txt
+            build/mpx6-smp/**/*.conf
+          retention-days: 14
+          if-no-files-found: error
+
   tier:
     name: tier ${{ needs.plan.outputs.tier || 'unplanned' }}
     if: ${{ !cancelled() }}
@@ -7044,6 +7093,7 @@ jobs:
       - mpx6-latency
       - mpx6-entropy
       - mpx6-firmware
+      - mpx6-smp
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # It reads; the one job that may write issues is the nightly's, below.
