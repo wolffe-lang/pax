@@ -7,6 +7,12 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **One way into the file systems.** kernel/tree, kernel/fstab, kernel/files and kernel/procfs reach a mounted
+  volume only through the new `kernel/volume`, which forwards each of the 65 items they use to kernel/ext2 or
+  kernel/journal unchanged; a second on-disk format will sit beside ext2 there. No behaviour changes.
+  `tests/mpx6-ext2`'s SEAM-CALLERS row (`--only seam` runs it alone) names any kernel source that reaches ext2
+  or the journal another way.
+
 - **A logout at the console: pid 1 stays (px124, px156, pax#352).** An installed
   PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
   names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs
