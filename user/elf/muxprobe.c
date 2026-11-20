@@ -497,7 +497,12 @@ static const char *pane_settle(int k, int ms) {
     return r;
 }
 
-/* Take what pane k has; 0, or -1 once it reads EIO or end of file. */
+/* Take one read of what pane k has; 0, or -1 once it reads EIO or end of file.
+ * One read a call, as a multiplexer reads each pane a bounded amount a turn:
+ * the masters are level-triggered in the epoll set, so what is left is
+ * reported again on the next turn. Draining a pane until EAGAIN let a writer
+ * that refills its queue between two reads hold the loop for the whole
+ * flood, and A1.6 then timed the probe, not the other panes. */
 static int pane_read(int k) {
     struct pane *p = &P[k];
     static unsigned char b[65536];
@@ -516,7 +521,7 @@ static int pane_read(int k) {
             p->len += take;
             p->buf[p->len] = 0;
             char *h = strstr(p->buf, HEADER);
-            if (!h) continue;
+            if (!h) return 0;
             p->hdr = 1;
             size_t after = (size_t)(h - p->buf) + strlen(HEADER);
             /* what of this read lies past the header */
@@ -530,7 +535,7 @@ static int pane_read(int k) {
                 p->fseen++;
             }
             if (p->fseen >= FLOOD_BYTES && flood_done_ms < 0) flood_done_ms = now_ms();
-            continue;
+            return 0;
         }
         if ((size_t)r >= sizeof p->buf - 1) {
             memcpy(p->buf, b + r - (sizeof p->buf - 1), sizeof p->buf - 1);
@@ -545,6 +550,7 @@ static int pane_read(int k) {
             p->len += (size_t)r;
         }
         p->buf[p->len] = 0;
+        return 0;
     }
 }
 
