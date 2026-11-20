@@ -97,6 +97,10 @@
 # nec-usb-xhci, which has both (R-px76-5); without the option the device
 # is qemu-xhci as it comes (on 8.2: no MSI capability, so INTx).
 #
+# PAX_SMP=N (SMP stage 2): every boot a suite makes at N processors (`-smp N`), unless the caller's
+# own QEMU arguments name -smp (theirs win); FILE.meta says `smp: N (PAX_SMP)` when it applied. A
+# value that is not a count of 1 or more is refused before QEMU starts. tools/tour reads it too.
+#
 # --high-bar (or PAX_HIGH_BAR=1), UEFI only (R-px76-6): OVMF's 64-bit
 # PCI window made 64 GiB (`-fw_cfg name=opt/ovmf/X-PciMmio64Mb,
 # string=65536`), so OVMF places the 64-bit BARs above 4 GiB (kasumi's
@@ -207,6 +211,8 @@ case $usbirq in
     *) die '--usb-irq takes msi or intx' ;;
 esac
 case $nohpet$nopit$highbar in *[!01]*) die "PAX_NO_HPET, PAX_NO_PIT and PAX_HIGH_BAR take 0 or 1" ;; esac
+smp=${PAX_SMP:-}
+case $smp in '') ;; *[!0-9]*|0*) die "PAX_SMP takes a count of processors, 1 or more, not '$smp'" ;; esac
 if [ "$highbar" = 1 ]; then
     [ "$firmware" = uefi ] || die "--high-bar is OVMF's 64-bit window: --firmware uefi"
     memory=8G
@@ -307,12 +313,19 @@ case $firmware in
 esac
 [ "$highbar" = 0 ] || cmd+=(-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=65536)
 [ -z "$gdb_port" ] || cmd+=(-gdb "tcp:127.0.0.1:$gdb_port" -S)
+smp_line=
+if [ -n "$smp" ]; then
+    own=0
+    for x in "$@"; do [ "$x" != -smp ] || own=1; done
+    if [ "$own" = 0 ]; then cmd+=(-smp "$smp"); smp_line="smp: $smp (PAX_SMP)"; else smp_line="smp: the caller's (PAX_SMP=$smp not applied)"; fi
+fi
 cmd+=("$@")
 
 {
     printf 'cmd:'; printf ' %q' "${cmd[@]}"; printf '\n'
     printf 'qemu: %s\n' "$("$qemu" --version | head -n 1)"
     printf 'firmware: %s\naccel: %s\ntimeout: %s\n' "$firmware" "$accel" "$timeout"
+    [ -z "$smp_line" ] || printf '%s\n' "$smp_line"
     [ "$firmware" = uefi ] && printf 'ovmf: %s %s\n' "$ovmf_code" "${ovmf_vars:-}"
 } > "$serial.meta"
 
