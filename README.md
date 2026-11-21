@@ -1017,6 +1017,15 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   `tier all` is green already; the Sunday schedule runs every leg whatever the head has.
 - `macos-run` is in no `tier full` run, so the merge gate waits for no macOS runner: a trunk push, the nightly, the
   Sunday run and a pull request whose paths choose the proof run it.
+- Sixteen suites run under KVM on the hosted runners: mpx5-users, mpx5-users-ahci, mpx5-pelt, mpx5-jobs, mpx5-den,
+  mpx6-staged, mpx4-ready, mpx6-disktools, mpx4-unix, mpx5-lupin, mpx5-slots, mpx5-trace, mpx6-bootlog,
+  mpx4-console-net, mpx6-nvme and mpx4-tcp. Each was more than 10 % faster under KVM in two measured runs, about 18 %
+  of a `tier full` run's runner-minutes together. Their jobs open `/dev/kvm` first (`tools/kvm-open`), and a boot that
+  would fall back to TCG there is refused (`PAX_REQUIRE_KVM`). Every other suite runs on TCG, the suites with timing
+  bounds stated on bare metal (`mpx6-firmware`, `mpx3-conspeed`, `mpx6-latency`) included. The Sunday run and a
+  dispatch with `accel=tcg` run every suite on TCG, whose slower pace is where several timing defects were found. If
+  the sixteen save under 10 % of a `tier full` run, or a KVM job goes red because of the runner rather than PAX, the
+  list shrinks to the two users suites; under 5 %, it empties.
 - Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, 90 for users again
   with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
   (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in
@@ -1044,7 +1053,8 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 | linux x86-64 (CI's ubuntu, the pool) | yes: binutils, cc, make, curl, xorriso | yes: `qemu-system-x86_64`; OVMF for UEFI; KVM used when `/dev/kvm` is usable | yes: gdb |
 | macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every trunk push and nightly, and on a pull request whose paths choose the proof | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
 
-- **CI**: `ubuntu-24.04` with QEMU 8.2.2, OVMF and xorriso from apt (TCG); the `macos-run` job boots the same ISO,
+- **CI**: `ubuntu-24.04` with QEMU 8.2.2, OVMF and xorriso from apt (TCG, and KVM for sixteen suites: see Continuous
+  integration); the `macos-run` job boots the same ISO,
   checked by digest, with Homebrew's QEMU 11.1.1 (TCG). Every Linux job names `ubuntu-24.04`, never `ubuntu-latest`,
   which moved to Ubuntu 26.04 (glibc 2.43, gcc 15, QEMU 10.2) under the workflow (#474); `tests/ci-runners.py` holds
   each job to that label, and the plan job's runner to Ubuntu 24.04.
