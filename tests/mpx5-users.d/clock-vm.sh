@@ -30,7 +30,7 @@ cc -static -no-pie -O1 -Wall -Wextra -I "$pax/user/elf" -Wl,--build-id=none -o "
 "$pax/tools/mkinitramfs" "$work/init.cpio" "/init=$work/bin/vminit:755" > "$out/vm-clock.initramfs.txt" || exit 2
 cat "$work/image.cpio" "$work/init.cpio" > "$work/probes.cpio"
 {
-    echo "kernel: $k $(sha256sum "$k" | cut -d' ' -f1)"
+    echo "kernel: $(basename "$k") $(sha256sum "$k" | cut -d' ' -f1)"
     echo "qemu: $(qemu-system-x86_64 --version | head -n 1)"
     echo "image archive: $(sha256sum "$work/image.cpio" | cut -d' ' -f1)"
     echo "initramfs: $(sha256sum "$work/probes.cpio" | cut -d' ' -f1)"
