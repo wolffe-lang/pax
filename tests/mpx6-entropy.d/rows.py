@@ -31,6 +31,7 @@ CAP = 16384  # px131: getrandom(2)'s bytes a call
 WOLF_TRAP = 134  # wolf's TRAP_EXIT_CODE
 
 GR = re.compile(r'entropy: (early|later) getrandom (first )?flags (\S+) n (\d+) ret (-?\d+) errno (\S+) words (\d+) hirep (\d+)$')
+CMD = re.compile(r'entropy: early cmdline uid (\d+) ret (-?\d+) errno (\S+) text (.*)$')
 RD = re.compile(r'entropy: (early|later) read (\S+)( nonblock)? n (\d+) ret (-?\d+) errno (\S+)(?: words (\d+) hirep (\d+)| open)$')
 CP = re.compile(r'entropy: (early|later) cap (.*)$')
 CPUID = re.compile(r'entropy: early cpuid vendor (\S+) rdrand (\d) rdseed (\d)$')
@@ -41,6 +42,9 @@ WOLF_GAVE = re.compile(r'wolf-entropy: os_random 32 gave (\d+)$')
 WOLF_END = re.compile(r'user: wolf-entropy pid \d+ (exit_group (\d+)|killed: .*)')
 
 failed = False
+
+# The command line each configuration boots with (tests/mpx6-entropy's words_of); none for present, masked, default.
+CMDLINE = {'retry': 'pax.rdrand_fail=9', 'fail': 'pax.rdrand_fail=1000000', 'stuck': 'pax.rdrand_stuck'}
 
 
 def say(*a):
@@ -67,6 +71,7 @@ class Boot:
         self.rd = {}   # (phase, path, nonblock, n) -> (ret, errno, words, hirep)
         self.cap = {'early': [], 'later': []}
         self.cpuid = None
+        self.cmdline = None    # (uid, ret, errno, text): /proc/cmdline read as uid 65534, newlines written \n
         self.aux = {}
         self.wolf_gave = None
         self.wolf_end = None
@@ -84,6 +89,8 @@ class Boot:
                 self.rd[(m[1], m[2], bool(m[3]), int(m[4]))] = (int(m[5]), m[6]) + w
             elif m := CP.search(ln):
                 self.cap[m[1]].append(m[2])
+            elif m := CMD.search(ln):
+                self.cmdline = (int(m[1]), int(m[2]), m[3], m[4])
             elif m := CPUID.search(ln):
                 self.cpuid = (m[1], int(m[2]), int(m[3]))
             elif m := AUX.search(ln):
@@ -318,6 +325,14 @@ def check(b):
         ok &= good
         why.append(f'flags {f}: {w}')
     row(ok, 'E10', n, '; '.join(why))
+
+    # E11: /proc/cmdline, read by an unprivileged user, is the command line the boot was given and one newline
+    # (Linux prints it so; with no command line, the newline alone).
+    want = CMDLINE.get(b.cfg, '') + '\\n'
+    g = b.cmdline
+    row(g is not None and g == (65534, len(want) - 1, '0', want), 'E11', n,
+        f'uid {g[0]} ret {g[1]} errno {g[2]} text "{g[3]}"; want uid 65534 ret {len(want) - 1} errno 0 text "{want}"'
+        if g else 'no cmdline line from the probe')
 
 
 def main():
