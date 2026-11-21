@@ -133,6 +133,7 @@ jobs:
       tier: ${{ steps.plan.outputs.tier }}
       suites: ${{ steps.plan.outputs.suites }}
       legs: ${{ steps.plan.outputs.legs }}
+      also_release: ${{ steps.plan.outputs.also_release }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -6463,6 +6464,13 @@ jobs:
 
       - name: the firmware's machine, the plan's legs (all four in the all tier)
         run: tests/mpx6-firmware $PAX_LEGS
+
+      # A kernel change's merge gate runs native BIOS only, and the NMI
+      # row's injection points (F11) are the release build's: the planner
+      # asks for the release legs too (its also_release output).
+      - name: the release legs as well, for a kernel change
+        if: contains(fromJSON(needs.plan.outputs.also_release), 'mpx6-firmware')
+        run: tests/mpx6-firmware --tier release
 
       - name: keep the transcripts, the screens and the monitors' answers
         if: always()
