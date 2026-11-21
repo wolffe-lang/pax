@@ -7,6 +7,14 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **fsck.ext2 at any size ext2 and ext3 name.** The offline checker no longer refuses volumes past 4,194,304
+  blocks, 1,048,576 inodes or 512 groups: ownership is one bit a block and an inode's state three bytes, inode tables
+  and bitmaps are read a group at a time, and only directories keep their block lists. A 1 TB root of 244 million
+  blocks and 61 million inodes is checked in about 214 MiB and a minute; 16 TiB with few inodes in 561 MiB. Journals
+  of up to 1 GiB are read. A volume of more than 2^30 inodes or 2^20 groups is refused by name.
+  `tests/mpx6-fsck.d/capacity.py` checks five sizes from 8 GiB to 16 TiB less a block on hosted runs and the owner-sized roots locally, each
+  against e2fsck's verdict, with both checkers' peak memory stated.
+
 - **A logout at the console: pid 1 stays (px124, px156, pax#352).** An installed
   PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
   names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs
