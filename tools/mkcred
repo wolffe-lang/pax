@@ -9,13 +9,14 @@
 # (user/elf/seven.S, no libc: `cc -nostdlib`, exits 7); px44: px38's
 # `setid` (user/elf/setid.c, byte for byte); px45: px38's `sig` and
 # `priv` (user/elf/sig.c, user/elf/priv.c, byte for byte) and `rights`
-# (user/elf/rights.c).
+# (user/elf/rights.c); px168: `clock` (user/elf/clock.c, -pthread: its
+# futex row waits in a second thread).
 #
 #   tools/mkcred OUTDIR
 #
 # The host's cc and its static glibc, as notes/px38/probes/build.sh
 # built the recorded runs: `cc -static -no-pie -O1`, ET_EXEC with no
-# PT_INTERP (checked); `ident` with -pthread. The same files run on
+# PT_INTERP (checked); `ident` and `clock` with -pthread. The same files run on
 # Linux and on PAX. Build on a baseline x86-64 glibc (the CI runner's
 # Ubuntu; an Ubuntu container on kasumi), never on kasumi's own, whose
 # start-up uses AVX-512 (px10). Prints `<name> <sha256> <bytes>` for
@@ -28,8 +29,8 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 cc=${CC:-cc}
 need "$cc" readelf
-for p in cred ids ident as own perm chk seven setid sig priv rights; do
-    thr=(); [ "$p" != ident ] || thr=(-pthread)
+for p in cred ids ident as own perm chk seven setid sig priv rights clock; do
+    thr=(); { [ "$p" != ident ] && [ "$p" != clock ]; } || thr=(-pthread)
     if [ "$p" = seven ]; then
         "$cc" -static -no-pie -nostdlib -Wl,--build-id=none -Wl,-z,noexecstack -o "$out/$p" "$PAX_ROOT/user/elf/$p.S" || die "cc: $p"
     else

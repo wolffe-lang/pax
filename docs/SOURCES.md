@@ -2629,3 +2629,18 @@ black box in a container of Ubuntu 24.04.5, on records those programs wrote and 
 | Ubuntu 24.04's login (`login` 1:4.13+dfsg1-4ubuntu3.2) | black box on a pseudo-terminal in a container, px106's bare PAM | its utmp record, its btmp records for a refused try (USER_PROCESS, `UNKNOWN` for a name no account has), no wtmp record |
 | OpenSSH 9.6p1's sshd (Ubuntu's `openssh-server` 1:9.6p1-3ubuntu13.20) | black box on loopback in a container | a pty session's USER_PROCESS and DEAD_PROCESS in wtmp and utmp, nothing for a command with no pty, a refused password's LOGIN_PROCESS on `ssh:notty` in btmp |
 | util-linux 2.39.3's last and lastb (Ubuntu's `util-linux` 2.39.3-9ubuntu6.6) | black box in a container, 87 runs on hand-written files and a calibration | every column, the end column's forms, the lengths, `FILE begins`, a session whose process started after its record `gone - no logout`, the refusals' words and statuses |
+
+## px168 — root sets the clock
+
+No kernel's, C library's or time daemon's source was read. Every answer the clock sessions hold, and the order of the
+checks, was measured on Linux booted under QEMU with the probe a child of pid 1.
+
+| source | version | read, for |
+|---|---|---|
+| clock_getres(2) (clock_settime) | man-pages 6.19 | the clocks, the errors, a time below CLOCK_MONOTONIC refused since Linux 4.3 |
+| settimeofday(2), gettimeofday(2) | man-pages 6.19 | the zone kept and answered, its first call's warp when the battery clock keeps local time, EPERM |
+| adjtimex(2), clock_adjtime | man-pages 6.19 | the modes a user may ask (0, ADJ_OFFSET_SS_READ), the clock's states, EOPNOTSUPP for a clock that cannot be adjusted |
+| clock_nanosleep(2), futex(2) | man-pages 6.19 | an absolute sleep and a FUTEX_CLOCK_REALTIME wait on the wall clock, a relative sleep across a set |
+| POSIX.1-2024 `clock_settime` | 2024 | a set of CLOCK_REALTIME and relative and absolute sleeps |
+| uapi `linux/time.h`, `linux/timex.h` | the sparse checkout's | the clock numbers, the ADJ_* modes, `struct __kernel_timex`'s 208 bytes |
+| black-box Linux 7.2.4 (a distribution's kernel image run as a guest under QEMU 8.2.2, TCG, `tests/mpx5-users.d/clock-vminit.c` as pid 1, the date given on its command line; `tests/mpx5-users.d/clock-vm.sh`) | — | measured (`tests/mpx5-users.d/linux/clock*.txt`, `vm-clock.meta`): each set's answers to root and to a user and their order; the largest second either call takes (8,277,292,035); the zone's range (900 minutes either way) and the first call's warp; adjtimex's and clock_adjtime's answers; that an absolute sleep and a FUTEX_CLOCK_REALTIME wait follow a set and a relative sleep does not; FUTEX_WAIT with FUTEX_CLOCK_REALTIME -ENOSYS |
