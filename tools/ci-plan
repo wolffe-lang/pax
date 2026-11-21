@@ -73,7 +73,9 @@ WHICH SUITES A PATH SELECTS (the pr tier). The union of:
 FULL wins over everything, ALL and the label included (a pin beside a
 core change, or under the label, is an all run). A path that nothing
 matches is FULL: an unknown path never shrinks a run. `macos-run` runs
-when `proof` does (it boots proof's ISO).
+when `proof` does (it boots proof's ISO), except in a full run: the
+merge gate waits for no macOS runner, and the trunk push (rest or all),
+the nightly and the weekly run it.
 
     tools/ci-plan --verdict     (NEEDS: the `tier` job's `toJSON(needs)`)
 
@@ -120,6 +122,9 @@ COVERED = ("all", "full", "none")
 WEEKLY = "47 6 * * 0"
 TIERS = ("all", "full", "pr", "rest", "partial", "noop")
 FULL_LABEL = "full-matrix"
+# The macOS proof: in every tier but full (the merge gate waits for none of
+# the few macOS runners; a push, the nightly and the weekly carry it).
+MACOS = "macos-run"
 NOT_SUITES = {"plan", "tier"}
 SPECIAL = {"FULL", "ALL", "NONE"}
 
@@ -290,6 +295,8 @@ def plan(a):
     def result(tier, chosen, legs):
         if "proof" in chosen and "macos-run" in suites:
             chosen = set(chosen) | {"macos-run"}
+        if tier == "full":
+            chosen = set(chosen) - {MACOS}
         also = [s for s in RELEASE_TOO if s in chosen] if kernel and tier in ("pr", "full") else []
         if also:
             log.append("a kernel path (%s): %s on the release legs as well" % (kernel[0], " ".join(also)))
@@ -408,8 +415,13 @@ def verdict(needs):
         print("tier: the plan named no tier this file knows (%r)" % tier)
         bad += 1
     elif tier in ("all", "full"):
-        if chosen != every:
-            print("tier: a %s run chose %d of the %d suites; every one, or it is not %s" % (tier, len(chosen), len(every), tier))
+        want = every - {MACOS} if tier == "full" else every
+        if tier == "full" and MACOS in chosen:
+            print("tier: a full run chose %s; the merge gate waits for no macOS runner" % MACOS)
+            bad += 1
+        elif chosen != want:
+            print("tier: a %s run chose %d of the %d suites; every one%s, or it is not %s"
+                  % (tier, len(chosen), len(want), " but %s" % MACOS if tier == "full" else "", tier))
             bad += 1
         if legs != LEGS[tier]:
             print("tier: a %s run on legs '%s'; its legs are '%s'" % (tier, legs, LEGS[tier]))
