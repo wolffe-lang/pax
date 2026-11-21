@@ -1257,11 +1257,16 @@ staged until every pass finishes, the superblock made dirty first, and
 `clean` written only after metadata is flushed. This is not a transaction
 for an arbitrary power cut during repair; keep a copy of important images.
 
-Bounds and refusals are explicit: at most 512 groups, 4,194,304 blocks and
-1,048,576 inodes. Exceeding these checker resource limits returns 8 with
-`volume exceeds checker capacity`, before allocation, replay or writes.
-They are not ext2 format limits. Large installed volumes currently need
-Linux's e2fsck for offline checks; boot does not run this checker.
+Bounds and refusals are explicit. Every block count ext2 and ext3 can name
+(up to 2^32 - 1) is checked: ownership is one bit a block, an inode's state
+three bytes, inode tables and bitmaps are read a group at a time, and only
+directories keep their block lists. That is about 204 MiB for a 1 TB root of
+61 million inodes, and 518 MiB at 16 TiB with few inodes. A volume of more
+than 1,073,741,824 inodes or 1,048,576 groups returns 8 with `volume exceeds
+checker capacity`, before allocation, replay or writes. These are checker
+limits, not ext2 format limits. Journals of up to 1 GiB (262,144 blocks of
+4 KiB) are read; a larger one is refused by name. Boot does not run this
+checker.
 External journals, journal checksum/64-bit features,
 external attribute blocks, indexed-directory validation, a nonempty
 orphan chain, cyclic/shared indirect blocks, and ambiguous malformed
