@@ -138,6 +138,7 @@ kernel/apic/*                   ALL
 kernel/timer/*                  ALL
 kernel/heap/*                   ALL
 kernel/sync/*                   ALL
+kernel/cpus/*                   ALL # kernel/acpi calls it on every boot (the MADT census)
 kernel/sched/*                  ALL
 kernel/fpu/*                    ALL
 # px131: kernel/latency, the interrupts-off instrument: off unless the
@@ -182,6 +183,7 @@ tests/upgrade-screen-selftest   ALL
 # A test that loads a tool as a module leaves no tools/__pycache__: checked
 # in the plan job too, beside the others.
 tests/tool-bytecode-selftest    ALL
+tests/fetch-busybox-selftest    ALL # the plan job runs it before every plan
 # pax#474: every job's runner is the pinned image; the plan job checks its own.
 tests/ci-runners*               ALL
 
@@ -767,8 +769,11 @@ boot/limine-fix.conf           mpx6-firmware
 # files was a path nothing reads, and so an all run. The scripts that
 # generate and check them (run by tests/mpx6-cpus.d/source-census.sh),
 # the boot rows' judge and the probe tests/mpx6-cpus builds are that
-# suite's too. Each file is named: the directory's other files are read
-# by no test, and stay unknown until something runs them.
+# suite's too. Each file is named. The directory's other files (a
+# black-box witness of the runtime's ambient pair and a build-only
+# witness of the compiler's GS stubs) are run by no job, so they plan
+# nothing; a suite that comes to read one selects itself by the
+# derivation.
 tests/mpx6-cpus.d/inventory.json   mpx6-firmware
 tests/mpx6-cpus.d/protections.json mpx6-firmware
 tests/mpx6-cpus.d/census.py        mpx6-firmware
@@ -777,6 +782,11 @@ tests/mpx6-cpus.d/census-selftest.py mpx6-firmware
 tests/mpx6-cpus.d/source-census.sh mpx6-firmware
 tests/mpx6-cpus.d/rows.py          mpx6-firmware
 tests/mpx6-cpus.d/probe.c          mpx6-firmware
+tests/mpx6-cpus.d/ambient.c        NONE
+tests/mpx6-cpus.d/compiler.sh      NONE
+tests/mpx6-cpus.d/compiler/*       NONE
+# The kernel tests/mpx6-cpus builds (F12's processor-count check).
+kernel/kmain_cpucheck.lu           mpx6-firmware
 
 # px78: the whole install path (tests/mpx6-kasumi, the kasumi-shaped
 # leg: the live stick on USB mass storage, the install allow-list, the
