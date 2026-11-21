@@ -12,6 +12,7 @@
  *   entropy: early cpuid vendor V rdrand 0|1 rdseed 0|1
  *   entropy: early auxv at_random 0|1 nonzero 0|1 hieq 0|1
  *   entropy: early cap absent | entropy: early cap <a line of /proc/pax-random>
+ *   entropy: early cmdline uid U ret R errno E text T
  *   entropy: early getrandom flags F n N ret R errno E words W hirep H
  *   entropy: early read PATH [nonblock] n N ret R errno E words W hirep H
  *   entropy: early malloc ok
@@ -198,6 +199,57 @@ static void cap_rows(void) {
     fclose(f);
 }
 
+/* /proc/cmdline as an unprivileged user reads it: a forked child gives up root (uid 65534), opens and reads the
+ * file whole, and prints it as one line with each newline written `\n` (T is empty when the file did not open).
+ * The kernel's command line, as Linux prints it: the line and one newline. */
+static void cmdline_row(void) {
+    fflush(stdout);
+    pid_t c = fork();
+    if (c < 0) {
+        printf("entropy: %s cmdline fork FAILED errno %s\n", phase, ename(errno));
+        return;
+    }
+    if (c == 0) {
+        if (setgid(65534) != 0 || setuid(65534) != 0)
+            _exit(126);
+        char text[1024], line[2200];
+        size_t n = 0, o = 0;
+        int fd = open("/proc/cmdline", O_RDONLY | O_CLOEXEC);
+        long ret = fd;
+        int e = fd < 0 ? errno : 0;
+        if (fd >= 0) {
+            for (;;) {
+                ssize_t k = read(fd, text + n, sizeof text - n);
+                if (k <= 0) {
+                    if (k < 0) {
+                        ret = -1;
+                        e = errno;
+                    }
+                    break;
+                }
+                n += (size_t)k;
+            }
+            close(fd);
+            if (e == 0)
+                ret = (long)n;
+        }
+        for (size_t i = 0; i < n && o + 3 < sizeof line; i++) {
+            if (text[i] == '\n') {
+                line[o++] = '\\';
+                line[o++] = 'n';
+            } else
+                line[o++] = text[i];
+        }
+        line[o] = 0;
+        printf("entropy: %s cmdline uid %d ret %ld errno %s text %s\n", phase, (int)getuid(), ret, ename(e), line);
+        fflush(stdout);
+        _exit(0);
+    }
+    int st = 0;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        printf("entropy: %s cmdline child FAILED status %d\n", phase, st);
+}
+
 /* The C library's start-up draw, watched: `entropy alloc` traced to its end. */
 static void startup_rows(const char *self) {
     fflush(stdout);
@@ -296,6 +348,7 @@ int main(int argc, char **argv) {
     }
     cpuid_row();
     cap_rows();
+    cmdline_row();
     for (size_t i = 0; i < sizeof FLAGS / sizeof FLAGS[0]; i++)
         getrandom_row(32, FLAGS[i]);
     getrandom_row(4096, 0);
