@@ -181,6 +181,8 @@ need "$qemu"
 
 if [ "$accel" = auto ]; then
     if [ "$(uname -s)" = Linux ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+    # A measured KVM run (tools/kvm-open) must not fall back to TCG unseen.
+    [ "$accel" = kvm ] || [ "${PAX_REQUIRE_KVM:-}" != 1 ] || die "PAX_REQUIRE_KVM=1 but /dev/kvm is not usable here: refusing TCG"
 fi
 case $accel in kvm|tcg) ;; *) die "--accel takes auto, kvm or tcg" ;; esac
 
