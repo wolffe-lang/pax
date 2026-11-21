@@ -761,6 +761,14 @@ for j in JOBS:
     m = re.search(r"^  %s:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)" % re.escape(j), wf, re.M | re.S)
     blocks[j] = m.group(1) if m else ""
 say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tier job")
+# The KVM trial: a dispatch's `kvm` input (off by default) opens the hosted runner's /dev/kvm in every Linux
+# suite job before anything else runs there, and tools/kvm-open makes the job's boots refuse TCG after it.
+KVM_STEP = "      - name: KVM for this runner (the dispatch's kvm input; off by default)\n        if: inputs.kvm\n        run: tools/kvm-open\n"
+say(re.search(r"^      kvm:\n        description: .*\n        type: boolean\n        default: false\n", wf, re.M) is not None,
+    "P4 the dispatch's kvm input is a boolean, off by default")
+nokvm = [j for j in SUITES if j != "macos-run" and ("      - uses: actions/checkout@v4\n\n" + KVM_STEP) not in blocks[j]]
+say(not nokvm and KVM_STEP not in blocks["macos-run"] and KVM_STEP not in blocks["plan"],
+    "P4 every Linux suite job opens /dev/kvm first when the dispatch asks, and no other job does%s" % (" (missing: %s)" % " ".join(nokvm[:8]) if nokvm else ""))
 for j in SUITES:
     b = blocks[j]
     needs = "[plan, proof]" if j == "macos-run" else "plan"
