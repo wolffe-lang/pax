@@ -33,7 +33,7 @@ row runs whatever an earlier one said, and the exit is 1 if any failed):
       flushes up to that point. Each such root must need no more than the
       log: `e2fsck -fn` clean where the log is empty, and where it is not,
       Linux's replay pair above. PAX's own replay boot then runs on the last
-      of them that needs recovery. And what a cut kept, every later cut
+      of them whose log holds committed transactions (journal start nonzero). And what a cut kept, every later cut
       keeps: the loop's files in /root (debugfs, after Linux's replay) never
       fall from one durable point to the next, and all FILES are there at
       the end; a log emptied before its blocks reached home loses them. A
@@ -392,7 +392,7 @@ def flush_cut():
         extract(source, root.name)
         size = root.stat().st_size
         checked = recovering = 0
-        last_recovering = None
+        last_logged = None
         kept, kept_at = None, None
         with root.open('r+b') as f:
             for k, epoch in enumerate(held.epochs):
@@ -411,7 +411,8 @@ def flush_cut():
                 try:
                     if needs:
                         recovering += 1
-                        last_recovering = k
+                        if start != 0:
+                            last_logged = k  # committed transactions in the log, not only the flag
                         _, count = linux_replay(root, f'flushcut-{k}', files_in_root)
                     elif plain != 0:
                         fail(f'e2fsck -fn exit {plain} on a root whose log is empty; see powercut-{firmware}-flushcut-{k}.fsck')
@@ -424,14 +425,16 @@ def flush_cut():
                 except RowFail as e:
                     fail(f'the cut after durable point {k} of {len(held.epochs)} '
                          f'(needs_recovery {needs}, journal start {start}): {e}')
-        if last_recovering is None:
-            fail(f'no durable point left a log to replay ({checked} roots checked): {s}')
+        if last_logged is None:
+            fail(f'no durable point left committed transactions in the log ({checked} roots checked): {s}')
         if kept != FILES:
             fail(f'after the halt the root holds {kept} of the {FILES} files the shell made')
-        # PAX's replay of the last root that needs it, booted from the whole disk as it was then.
+        # PAX's replay of the last root whose log holds transactions (a root may carry
+        # needs_recovery with the log already empty, between the checkpoint's FLUSH and
+        # the flag's: its replay is 0 transactions), booted from the whole disk as it was then.
         copy(source, full)
         with full.open('r+b') as f:
-            for epoch in held.epochs[:last_recovering + 1]:
+            for epoch in held.epochs[:last_logged + 1]:
                 for sector, data in epoch:
                     f.seek(sector * 512)
                     f.write(data)
@@ -440,7 +443,7 @@ def flush_cut():
                 f'{s["fua_writes"]} FUA, {s["held_at_close"]} sectors held at the close; {checked} cut roots checked, '
                 f'{recovering} needing the log (Linux replayed each and changed nothing else), the rest e2fsck -fn clean; '
                 f'the files kept never fell, {FILES} at the end; '
-                f'PAX at durable point {last_recovering}: {pax}')
+                f'PAX at durable point {last_logged}: {pax}')
     finally:
         for path in (disk, sock, root, full):
             path.unlink(missing_ok=True)
