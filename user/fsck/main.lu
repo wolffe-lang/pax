@@ -271,7 +271,7 @@ fn walk_blocks(mut v: Volume, ino: int, b: int, depth: int, at: int, dir: bool) 
     if depth == 0 {
         v.leaves += 1
         // A data block's second claim is cloned after the walk; the first keeps it.
-        if previous { (mut v.dups).push(Claim { ino: ino, block: b, pointer: at }) }
+        if previous { (mut v.dups).push(copy Claim { ino: ino, block: b, pointer: at }) }
         if dir { (mut v.dirs[v.dirs.len - 1].blocks).push(b) }
         return
     }
@@ -286,8 +286,12 @@ fn walk_blocks(mut v: Volume, ino: int, b: int, depth: int, at: int, dir: bool) 
 }
 fn check_inode(mut v: Volume, ino: int, raw: List[byte], at: int) -> () ! {io} {
     let kind = u(raw, at, 2) & 61440
+    // Called inside pass 1's per-group region: the record and its block list
+    // are copied into the volume's region, where the list then grows. Without
+    // the copy the list's buffer was the table region's, freed at its end (a
+    // SIGSEGV in pass 2 once a group's table was large enough to be unmapped).
     if live(v, ino) && kind == 16384 {
-        (mut v.dirs).push(Dir { ino: ino, blocks: List[int](), parent: 0, reached: false, seen: false })
+        (mut v.dirs).push(copy Dir { ino: ino, blocks: List[int](), parent: 0, reached: false, seen: false })
     }
     if kind != 4096 && kind != 8192 && kind != 16384 && kind != 24576 && kind != 32768 && kind != 40960 && kind != 49152 && ino != 1 {
         refuse(mut v, "inode {ino}: unknown inode type"); return
@@ -573,12 +577,12 @@ fn make_lost(mut v: Volume) -> int ! {io, full} {
     patch(mut v, inode_at(v, ino), raw)
     v.state[ino] = (LIVE | 2) as byte
     // Into its place in inode order.
-    (mut v.dirs).push(Dir { ino: ino, blocks: [block], parent: 2, reached: true, seen: true })
+    (mut v.dirs).push(copy Dir { ino: ino, blocks: [block], parent: 2, reached: true, seen: true })
     var k: int = v.dirs.len - 1
     while k > 0 && v.dirs[k - 1].ino > ino {
         let moved = copy v.dirs[k - 1]
         v.dirs[k - 1] = copy v.dirs[k]
-        v.dirs[k] = moved
+        v.dirs[k] = copy moved
         k -= 1
     }
     var b = diskio.zeros(v.bs)
