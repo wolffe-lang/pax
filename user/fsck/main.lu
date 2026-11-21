@@ -3,6 +3,17 @@
 //! All repairs are planned before writes; unsupported damage aborts the
 //! plan. The primary superblock is made dirty before any repair and made
 //! clean only after repaired metadata reaches stable storage.
+//!
+//! Memory is one bit a block and three bytes an inode, whatever the
+//! volume holds: `used` marks every block that is metadata, claimed by an
+//! inode or allocated by a repair; `state` keeps an inode's type, whether
+//! it is in use and the connectivity marks; `refs` counts the directory
+//! entries naming it. Inode tables and bitmaps are read group by group
+//! when a pass needs them, never held. Only directories keep their block
+//! lists (`dirs`, in inode order), and only a block's second and later
+//! claims are kept (`dups`). The owner's 1 TB root (244,173,745 blocks,
+//! 61,046,784 inodes) needs about 204 MiB; 16 TiB with 16 inodes a group
+//! about 518 MiB.
 use diskio
 
 extern "c" fn px72_path_byte(index: int, value: int)
@@ -14,23 +25,37 @@ fn raw_close(fd: int) {
 }
 
 struct Patch { at: int, bytes: List[byte] }
-struct Group { bb: int, ib: int, table: int, bitmap: List[byte], imap: List[byte] }
-struct Node { raw: List[byte], live: bool, kind: int, data: List[int], sectors: int, refs: int, parent: int, reached: bool }
-struct Claim { ino: int, block: int, pointer: int, leaf: bool }
+struct Group { bb: int, ib: int, table: int, sup: bool }
+struct Dir { ino: int, blocks: List[int], parent: int, reached: bool, seen: bool }
+struct Claim { ino: int, block: int, pointer: int }
 struct Volume {
     fd: int, mode: int, bs: int, blocks: int, first: int, bpg: int,
     ipg: int, isize: int, ninodes: int, firstino: int, compat: int,
     filetype: bool, sb: List[byte], gd: List[byte], groups: List[Group],
-    nodes: List[Node], owner: List[int], claims: List[Claim], patches: List[Patch],
+    gdtblocks: int, reserve: int, tables: int,
+    used: List[byte], state: List[byte], refs: List[byte],
+    dirs: List[Dir], dups: List[Claim], patches: List[Patch], sectors: int, leaves: int,
     problems: int, fixed: int, left: int, soft: int, epoch: int,
 }
+
+// An inode's state byte: its directory-entry type (dtype, 0 when the
+// mode names none), then these marks.
+const LIVE: int = 8
+const REACHED: int = 16
+const NAMED: int = 32
+const OVERFLOW: int = 64
+// The checker's named capacity: 3 GiB of inode state (mke2fs's default
+// density at 16 TiB), and a descriptor table no mke2fs volume exceeds.
+const MAX_INODES: int = 1073741824
+const MAX_GROUPS: int = 1048576
 
 fn u(b: List[byte], at: int, width: int) -> int { diskio.le(b, at, width) else |_| 0 - 1 }
 fn bit(b: List[byte], n: int) -> bool { b[n / 8] as int & (1 << n % 8) != 0 }
 fn mark(mut b: List[byte], n: int) { b[n / 8] = (b[n / 8] as int | (1 << n % 8)) as byte }
-fn ints(n: int, value: int) -> List[int] {
-    var out = List[int]()
-    for _ in 0..n { (mut out).push(value) }
+fn filled(n: int, value: int) -> List[byte] {
+    var out = List[byte]()
+    (mut out).reserve(n)
+    for _ in 0..n { (mut out).push(value as byte) }
     out
 }
 fn has_super(g: int, sparse: bool) -> bool {
@@ -76,11 +101,50 @@ fn read_at(v: Volume, at: int, n: int) -> List[byte] ! {io} {
 fn inode_at(v: Volume, ino: int) -> int {
     v.groups[(ino - 1) / v.ipg].table * v.bs + (ino - 1) % v.ipg * v.isize
 }
-fn pointer(mut v: Volume, at: int, block: int) {
-    var b = diskio.zeros(4)
-    diskio.put(mut b, 0, block, 4)
+fn put_field(mut v: Volume, at: int, value: int, width: int) {
+    var b = diskio.zeros(width)
+    diskio.put(mut b, 0, value, width)
     patch(mut v, at, b)
 }
+fn pointer(mut v: Volume, at: int, block: int) { put_field(mut v, at, block, 4) }
+fn inode_put(mut v: Volume, ino: int, offset: int, value: int, width: int) {
+    put_field(mut v, inode_at(v, ino) + offset, value, width)
+}
+
+fn st(v: Volume, ino: int) -> int { v.state[ino] as int }
+fn live(v: Volume, ino: int) -> bool { (st(v, ino) & LIVE) != 0 }
+fn kind_of(v: Volume, ino: int) -> int { st(v, ino) & 7 }
+fn is_dir(v: Volume, ino: int) -> bool { (st(v, ino) & (LIVE | 7)) == (LIVE | 2) }
+fn set_mark(mut v: Volume, ino: int, m: int) { v.state[ino] = (st(v, ino) | m) as byte }
+fn refs_of(v: Volume, ino: int) -> int { v.refs[2 * ino] as int | (v.refs[2 * ino + 1] as int << 8) }
+fn add_ref(mut v: Volume, ino: int) {
+    let n = refs_of(v, ino)
+    if n == 65535 { set_mark(mut v, ino, OVERFLOW); return }
+    v.refs[2 * ino] = ((n + 1) & 255) as byte
+    v.refs[2 * ino + 1] = ((n + 1) >> 8) as byte
+}
+fn is_used(v: Volume, b: int) -> bool { bit(v.used, b - v.first) }
+fn take_block(mut v: Volume, b: int) { mark(mut v.used, b - v.first) }
+// Metadata is the boot block, then each group's own: a superblock and
+// descriptor copy where sparse_super keeps one, both bitmaps, the table.
+fn is_meta(v: Volume, b: int) -> bool {
+    if b < v.first { return true }
+    let g = (b - v.first) / v.bpg
+    let lo = v.first + g * v.bpg
+    if v.groups[g].sup && b < lo + 1 + v.gdtblocks + v.reserve { return true }
+    b == v.groups[g].bb || b == v.groups[g].ib || (b >= v.groups[g].table && b < v.groups[g].table + v.tables)
+}
+// The index in `dirs` of directory inode ino, or -1; `dirs` is in inode order.
+fn find_dir(v: Volume, ino: int) -> int {
+    var lo: int = 0
+    var hi: int = v.dirs.len
+    while lo < hi {
+        let mid = (lo + hi) / 2
+        if v.dirs[mid].ino < ino { lo = mid + 1 } else { hi = mid }
+    }
+    if lo < v.dirs.len && v.dirs[lo].ino == ino then lo else 0 - 1
+}
+
 fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsupported} {
     let sb = diskio.exact(fd, 1024, 1024)?
     if u(sb, 56, 2) != 61267 { print("invalid: ext2 superblock magic"); return invalid }
@@ -103,10 +167,11 @@ fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsuppo
         print("unsupported: filesystem features compat={compat}, incompat={incompat}, ro_compat={ro}")
         return unsupported
     }
-    // R-px84-5: the dense owner's/inode's memory bounds are checker
-    // limits, not format limits. Refuse before allocating or replaying.
-    if blocks > 4194304 || ninodes > 1048576 {
-        print("unsupported: volume exceeds checker capacity (4194304 blocks, 1048576 inodes); no repair committed")
+    // Every block count the format names fits one bit a block (512 MiB at
+    // 2^32 blocks); three bytes an inode is bounded here, before
+    // allocating or replaying. A checker limit, not a format limit.
+    if ninodes > MAX_INODES {
+        print("unsupported: volume exceeds checker capacity (1073741824 inodes); no repair committed")
         return unsupported
     }
     if first != (if bs == 1024 then 1 else 0) || blocks <= first ||
@@ -114,8 +179,8 @@ fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsuppo
         isize < 128 || isize > bs || bs % isize != 0 || ipg % (bs / isize) != 0 ||
         firstino < 11 || firstino > ninodes { return invalid }
     let ng = (blocks - first + bpg - 1) / bpg
-    if ng > 512 {
-        print("unsupported: volume exceeds checker capacity (512 groups); no repair committed")
+    if ng > MAX_GROUPS {
+        print("unsupported: volume exceeds checker capacity (1048576 groups); no repair committed")
         return unsupported
     }
     if ninodes != ng * ipg { return invalid }
@@ -123,142 +188,177 @@ fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsuppo
     if size < blocks * bs { print("invalid: truncated filesystem"); return invalid }
     let gd = diskio.exact(fd, (first + 1) * bs, ng * 32)?
     var groups = List[Group]()
-    var owner = ints(blocks, 0)
-    for b in 0..first { owner[b] = 0 - 1 }
+    (mut groups).reserve(ng)
     let gdtblocks = (ng * 32 + bs - 1) / bs
     let reserve = if compat & 16 != 0 then u(sb, 206, 2) else 0
+    let tables = ipg * isize / bs
     for g in 0..ng {
         let lo = first + g * bpg
         let hi = if lo + bpg < blocks then lo + bpg else blocks
-        if has_super(g, ro & 1 != 0) {
-            if lo + 1 + gdtblocks + reserve > hi { return invalid }
-            for b in lo..lo + 1 + gdtblocks + reserve { owner[b] = 0 - 1 }
-        }
+        let sup = has_super(g, ro & 1 != 0)
+        // A group's metadata lies inside the group: overlaps are checked
+        // against the copy of the superblock and descriptors, then each other.
+        let top = if sup then lo + 1 + gdtblocks + reserve else lo
+        if top > hi { return invalid }
         let bb = u(gd, g * 32, 4)
         let ib = u(gd, g * 32 + 4, 4)
         let table = u(gd, g * 32 + 8, 4)
-        let tables = ipg * isize / bs
         if bb < lo || bb >= hi || ib < lo || ib >= hi || table < lo || table + tables > hi { return invalid }
-        for b in [bb, ib] {
-            if owner[b] != 0 { return invalid }
-            owner[b] = 0 - 1
-        }
-        for b in table..table + tables {
-            if owner[b] != 0 { return invalid }
-            owner[b] = 0 - 1
-        }
-        (mut groups).push(Group { bb: bb, ib: ib, table: table,
-            bitmap: diskio.exact(fd, bb * bs, bs)?, imap: diskio.exact(fd, ib * bs, bs)? })
+        if bb < top || ib < top || ib == bb { return invalid }
+        if table < top || (bb >= table && bb < table + tables) || (ib >= table && ib < table + tables) { return invalid }
+        (mut groups).push(Group { bb: bb, ib: ib, table: table, sup: sup })
     }
     Volume { fd: fd, mode: mode, bs: bs, blocks: blocks, first: first, bpg: bpg,
         ipg: ipg, isize: isize, ninodes: ninodes, firstino: firstino, compat: compat,
         filetype: incompat & 2 != 0, sb: sb, gd: gd, groups: groups,
-        nodes: List[Node](), owner: owner, claims: List[Claim](), patches: List[Patch](),
+        gdtblocks: gdtblocks, reserve: reserve, tables: tables,
+        used: List[byte](), state: List[byte](), refs: List[byte](),
+        dirs: List[Dir](), dups: List[Claim](), patches: List[Patch](), sectors: 0, leaves: 0,
         problems: 0, fixed: 0, left: 0, soft: 0, epoch: epoch }
 }
-fn alloc(mut v: Volume) -> int ! {full} {
-    for b in v.first..v.blocks {
-        if v.owner[b] == 0 {
-            let rel = b - v.first
-            if !bit(v.groups[rel / v.bpg].bitmap, rel % v.bpg) {
-                v.owner[b] = 0 - 2
-                return b
+// The passes' state, allocated once, after any journal replay.
+fn prepare(mut v: Volume) {
+    v.used = filled((v.blocks - v.first + 7) / 8, 0)
+    v.state = filled(v.ninodes + 1, 0)
+    v.refs = filled(2 * (v.ninodes + 1), 0)
+    for g in 0..v.groups.len {
+        let lo = v.first + g * v.bpg
+        if v.groups[g].sup {
+            for b in lo..lo + 1 + v.gdtblocks + v.reserve { take_block(mut v, b) }
+        }
+        take_block(mut v, v.groups[g].bb)
+        take_block(mut v, v.groups[g].ib)
+        let table = v.groups[g].table
+        for b in table..table + v.tables { take_block(mut v, b) }
+    }
+}
+// A group's on-disk block or inode bitmap, as it was before any repair.
+fn disk_bitmap(v: Volume, block: int) -> List[byte] ! {io} { diskio.exact(v.fd, block * v.bs, v.bs) }
+fn alloc(mut v: Volume) -> int ! {io, full} {
+    for g in 0..v.groups.len {
+        let lo = g * v.bpg
+        let end = if lo + v.bpg < v.blocks - v.first then lo + v.bpg else v.blocks - v.first
+        var on_disk = List[byte]()
+        var loaded = false
+        var rel: int = lo
+        while rel < end {
+            if rel % 8 == 0 && rel + 8 <= end && v.used[rel / 8] as int == 255 { rel += 8; continue }
+            if !bit(v.used, rel) {
+                if !loaded { on_disk = disk_bitmap(v, v.groups[g].bb)?; loaded = true }
+                if !bit(on_disk, rel - lo) {
+                    mark(mut v.used, rel)
+                    return v.first + rel
+                }
             }
+            rel += 1
         }
     }
     full
 }
-fn walk_blocks(mut v: Volume, ino: int, b: int, depth: int, at: int) -> () ! {io} {
+fn walk_blocks(mut v: Volume, ino: int, b: int, depth: int, at: int, dir: bool) -> () ! {io} {
     if b == 0 { return }
     if b < v.first || b >= v.blocks { refuse(mut v, "inode {ino}: block {b} outside volume"); return }
     // Resize inode 7 intentionally names reserved GDT blocks; no other
     // inode is allowed to claim filesystem metadata.
-    if v.owner[b] < 0 && !(ino == 7 && v.compat & 16 != 0) {
+    let meta = is_meta(v, b)
+    if meta && !(ino == 7 && v.compat & 16 != 0) {
         refuse(mut v, "inode {ino}: block {b} overlaps metadata")
         return
     }
-    let previous = v.owner[b]
-    if previous == 0 { v.owner[b] = ino }
-    (mut v.claims).push(Claim { ino: ino, block: b, pointer: at, leaf: depth == 0 })
-    v.nodes[ino].sectors += v.bs / 512
-    if depth == 0 { (mut v.nodes[ino].data).push(b); return }
-    if previous > 0 { refuse(mut v, "inode {ino}: shared or cyclic indirect block {b}"); return }
+    let previous = !meta && is_used(v, b)
+    if !meta { take_block(mut v, b) }
+    v.sectors += v.bs / 512
+    if depth == 0 {
+        v.leaves += 1
+        // A data block's second claim is cloned after the walk; the first keeps it.
+        if previous { (mut v.dups).push(Claim { ino: ino, block: b, pointer: at }) }
+        if dir { (mut v.dirs[v.dirs.len - 1].blocks).push(b) }
+        return
+    }
+    if previous { refuse(mut v, "inode {ino}: shared or cyclic indirect block {b}"); return }
     region indirect {
         let bytes = read_at(v, b * v.bs, v.bs)?
         for j in 0..v.bs / 4 {
             let child = u(bytes, j * 4, 4)
-            walk_blocks(mut v, ino, child, depth - 1, b * v.bs + j * 4)?
+            walk_blocks(mut v, ino, child, depth - 1, b * v.bs + j * 4, dir)?
         }
+    }
+}
+fn check_inode(mut v: Volume, ino: int, raw: List[byte], at: int) -> () ! {io} {
+    let kind = u(raw, at, 2) & 61440
+    if live(v, ino) && kind == 16384 {
+        (mut v.dirs).push(Dir { ino: ino, blocks: List[int](), parent: 0, reached: false, seen: false })
+    }
+    if kind != 4096 && kind != 8192 && kind != 16384 && kind != 24576 && kind != 32768 && kind != 40960 && kind != 49152 && ino != 1 {
+        refuse(mut v, "inode {ino}: unknown inode type"); return
+    }
+    if u(raw, at + 112, 4) != 0 { refuse(mut v, "inode {ino}: fragment address"); return }
+    if u(raw, at + 104, 4) != 0 { refuse(mut v, "inode {ino}: external attribute block verification"); return }
+    if u(raw, at + 32, 4) & 0x10080000 != 0 { refuse(mut v, "inode {ino}: inline data or extent map"); return }
+    if kind == 16384 && u(raw, at + 32, 4) & 4096 != 0 { refuse(mut v, "inode {ino}: indexed directory validation"); return }
+    let size = u(raw, at + 4, 4)
+    if kind == 40960 && size <= 60 && u(raw, at + 28, 4) == 0 { return }
+    if kind != 16384 && kind != 32768 && kind != 40960 && ino != 1 { return }
+    let dir = live(v, ino) && kind == 16384
+    v.sectors = 0
+    v.leaves = 0
+    let base = inode_at(v, ino)
+    for j in 0..15 {
+        walk_blocks(mut v, ino, u(raw, at + 40 + j * 4, 4), if j < 12 then 0 else j - 11, base + 40 + j * 4, dir)?
+    }
+    if u(raw, at + 28, 4) != v.sectors {
+        let sectors = v.sectors
+        if report(mut v, "Inode {ino}: i_blocks should be {sectors}", true) { inode_put(mut v, ino, 28, sectors, 4) }
+    }
+    if kind == 16384 && size != v.leaves * v.bs {
+        let length = v.leaves * v.bs
+        if report(mut v, "Directory inode {ino}: i_size should be {length}", true) { inode_put(mut v, ino, 4, length, 4) }
     }
 }
 fn pass1(mut v: Volume) -> () ! {io, full} {
     print("Pass 1: Checking inodes, blocks, and sizes")
-    (mut v.nodes).push(copy Node { raw: List[byte](), live: false, kind: 0, data: List[int](), sectors: 0, refs: 0, parent: 0, reached: false })
+    // The table read twice: every deleted-inode finding is reported before
+    // any block finding, in inode order, as the checker always has.
     for g in 0..v.groups.len {
         region table {
             let bytes = read_at(v, v.groups[g].table * v.bs, v.ipg * v.isize)?
             for i in 0..v.ipg {
                 let ino = g * v.ipg + i + 1
-                let raw = bytes[i * v.isize..(i + 1) * v.isize]
-                let kind = u(raw, 0, 2) & 61440
-                let live = kind != 0 && u(raw, 20, 4) == 0
-                (mut v.nodes).push(copy Node { raw: copy raw, live: live, kind: kind,
-                    data: List[int](), sectors: 0, refs: 0, parent: 0, reached: false })
-                if live && ino >= v.firstino && u(raw, 26, 2) == 0 {
+                let at = i * v.isize
+                let kind = u(bytes, at, 2) & 61440
+                let in_use = kind != 0 && u(bytes, at + 20, 4) == 0
+                v.state[ino] = (dtype(kind) | (if in_use then LIVE else 0)) as byte
+                if in_use && ino >= v.firstino && u(bytes, at + 26, 2) == 0 {
                     if report(mut v, "Deleted inode {ino} has zero dtime", true) {
-                        diskio.put(mut v.nodes[ino].raw, 20, v.epoch, 4)
-                        v.nodes[ino].live = false
+                        inode_put(mut v, ino, 20, v.epoch, 4)
+                        v.state[ino] = dtype(kind) as byte
                     }
                 }
             }
         }
     }
-    for ino in 1..v.nodes.len {
-        if !v.nodes[ino].live && ino != 1 { continue }
-        region inode {
-            let kind = v.nodes[ino].kind
-            let raw = copy v.nodes[ino].raw
-            if kind != 4096 && kind != 8192 && kind != 16384 && kind != 24576 && kind != 32768 && kind != 40960 && kind != 49152 && ino != 1 {
-                refuse(mut v, "inode {ino}: unknown inode type"); continue
-            }
-            if u(raw, 112, 4) != 0 { refuse(mut v, "inode {ino}: fragment address"); continue }
-            if u(raw, 104, 4) != 0 { refuse(mut v, "inode {ino}: external attribute block verification"); continue }
-            if u(raw, 32, 4) & 0x10080000 != 0 { refuse(mut v, "inode {ino}: inline data or extent map"); continue }
-            if kind == 16384 && u(raw, 32, 4) & 4096 != 0 { refuse(mut v, "inode {ino}: indexed directory validation"); continue }
-            let size = u(raw, 4, 4)
-            if kind == 40960 && size <= 60 && u(raw, 28, 4) == 0 { continue }
-            if kind != 16384 && kind != 32768 && kind != 40960 && ino != 1 { continue }
-            for j in 0..15 {
-                walk_blocks(mut v, ino, u(raw, 40 + j * 4, 4), if j < 12 then 0 else j - 11, inode_at(v, ino) + 40 + j * 4)?
-            }
-            if u(raw, 28, 4) != v.nodes[ino].sectors {
-                let count = v.nodes[ino].sectors
-                if report(mut v, "Inode {ino}: i_blocks should be {count}", true) { diskio.put(mut v.nodes[ino].raw, 28, count, 4) }
-            }
-            if kind == 16384 && size != v.nodes[ino].data.len * v.bs {
-                let length = v.nodes[ino].data.len * v.bs
-                if report(mut v, "Directory inode {ino}: i_size should be {length}", true) { diskio.put(mut v.nodes[ino].raw, 4, length, 4) }
+    for g in 0..v.groups.len {
+        region table {
+            let bytes = read_at(v, v.groups[g].table * v.bs, v.ipg * v.isize)?
+            for i in 0..v.ipg {
+                let ino = g * v.ipg + i + 1
+                if !live(v, ino) && ino != 1 { continue }
+                check_inode(mut v, ino, bytes, i * v.isize)?
             }
         }
     }
     // All ownership is known before allocating a clone. A bitmap bit
     // cleared by damage can never make a later inode's block available.
-    var seen = ints(v.blocks, 0)
-    for ci in 0..v.claims.len {
-        let c = copy v.claims[ci]
-        let duplicate = seen[c.block] != 0
-        seen[c.block] += 1
-        if c.leaf && v.owner[c.block] > 0 && duplicate {
-            let ino = c.ino, old = c.block
-            if report(mut v, "Inode {ino}: multiply-claimed block {old}; clone", false) {
-                let b = alloc(mut v)?
-                patch(mut v, b * v.bs, read_at(v, old * v.bs, v.bs)?)
-                let ia = inode_at(v, ino)
-                if c.pointer >= ia && c.pointer + 4 <= ia + v.isize {
-                    diskio.put(mut v.nodes[ino].raw, c.pointer - ia, b, 4)
-                } else { pointer(mut v, c.pointer, b) }
-                for j in 0..v.nodes[ino].data.len { if v.nodes[ino].data[j] == old { v.nodes[ino].data[j] = b; break } }
-                v.owner[b] = ino
+    for ci in 0..v.dups.len {
+        let c = copy v.dups[ci]
+        let ino = c.ino, old = c.block
+        if report(mut v, "Inode {ino}: multiply-claimed block {old}; clone", false) {
+            let b = alloc(mut v)?
+            patch(mut v, b * v.bs, read_at(v, old * v.bs, v.bs)?)
+            pointer(mut v, c.pointer, b)
+            let d = find_dir(v, ino)
+            if d >= 0 {
+                for j in 0..v.dirs[d].blocks.len { if v.dirs[d].blocks[j] == old { v.dirs[d].blocks[j] = b; break } }
             }
         }
     }
@@ -273,10 +373,10 @@ fn name_is(b: List[byte], at: int, len: int, text: str) -> bool {
 }
 fn pass2(mut v: Volume) -> () ! {io} {
     print("Pass 2: Checking directory structure")
-    for ino in 1..v.nodes.len {
-        if !v.nodes[ino].live || v.nodes[ino].kind != 16384 { continue }
-        for bi in 0..v.nodes[ino].data.len {
-            let block = v.nodes[ino].data[bi]
+    for k in 0..v.dirs.len {
+        let ino = v.dirs[k].ino
+        for bi in 0..v.dirs[k].blocks.len {
+            let block = v.dirs[k].blocks[bi]
             region directory {
                 var b = read_at(v, block * v.bs, v.bs)?
                 var at = 0
@@ -290,10 +390,10 @@ fn pass2(mut v: Volume) -> () ! {io} {
                         break
                     }
                     if target != 0 {
-                        if target > v.ninodes || !v.nodes[target].live || (target < v.firstino && target != 2) {
+                        if target > v.ninodes || !live(v, target) || (target < v.firstino && target != 2) {
                             if report(mut v, "Directory {ino}: deleted/unused inode {target}", false) { diskio.put(mut b, at, 0, 4); changed = true }
                         } else {
-                            let ty = dtype(v.nodes[target].kind)
+                            let ty = kind_of(v, target)
                             if v.filetype && b[at + 7] as int != ty {
                                 if report(mut v, "Directory {ino}: inode {target} has incorrect filetype", true) { b[at + 7] = ty as byte; changed = true }
                             }
@@ -310,12 +410,15 @@ fn pass2(mut v: Volume) -> () ! {io} {
         }
     }
 }
-fn links(mut v: Volume) -> () ! {io} {
-    for ino in 1..v.nodes.len { v.nodes[ino].refs = 0; v.nodes[ino].parent = 0; v.nodes[ino].reached = false }
-    for ino in 1..v.nodes.len {
-        if !v.nodes[ino].live || v.nodes[ino].kind != 16384 { continue }
-        for bi in 0..v.nodes[ino].data.len {
-            let block = v.nodes[ino].data[bi]
+// Every entry of every directory, in inode order: scan 0 counts the
+// references and records each directory's parent, scan 1 marks a
+// non-directory reached when the last directory naming it is reached.
+fn entries(mut v: Volume, scan: int) -> () ! {io} {
+    for k in 0..v.dirs.len {
+        let ino = v.dirs[k].ino
+        let namer_reached = v.dirs[k].reached
+        for bi in 0..v.dirs[k].blocks.len {
+            let block = v.dirs[k].blocks[bi]
             region directory {
                 let b = read_at(v, block * v.bs, v.bs)?
                 var at = 0
@@ -323,11 +426,20 @@ fn links(mut v: Volume) -> () ! {io} {
                     let target = u(b, at, 4), length = u(b, at + 4, 2)
                     let len = b[at + 6] as int
                     if length < 8 || length % 4 != 0 || length > v.bs - at || len > length - 8 { break }
-                    if target > 0 && target <= v.ninodes && v.nodes[target].live {
-                        v.nodes[target].refs += 1
-                        if !name_is(b, at + 8, len, ".") && !name_is(b, at + 8, len, "..") {
-                            if v.nodes[target].kind == 16384 && v.nodes[target].parent != 0 { refuse(mut v, "directory {target}: multiple parent entries") }
-                            v.nodes[target].parent = ino
+                    if target > 0 && target <= v.ninodes && live(v, target) {
+                        let dots = name_is(b, at + 8, len, ".") || name_is(b, at + 8, len, "..")
+                        if scan == 0 {
+                            add_ref(mut v, target)
+                            if !dots {
+                                let d = if is_dir(v, target) then find_dir(v, target) else 0 - 1
+                                if d >= 0 {
+                                    if v.dirs[d].parent != 0 { refuse(mut v, "directory {target}: multiple parent entries") }
+                                    v.dirs[d].parent = ino
+                                } else { set_mark(mut v, target, NAMED) }
+                            }
+                        } else if !dots && !is_dir(v, target) {
+                            let s = st(v, target)
+                            v.state[target] = (if namer_reached then s | REACHED else s & !REACHED) as byte
                         }
                     }
                     at += length
@@ -335,20 +447,63 @@ fn links(mut v: Volume) -> () ! {io} {
             }
         }
     }
-    v.nodes[2].reached = true
-    var changed = true
-    var turns = 0
-    while changed && turns < v.ninodes {
-        changed = false; turns += 1
-        for ino in v.firstino..v.nodes.len {
-            let parent = v.nodes[ino].parent
-            if !v.nodes[ino].reached && parent > 0 && v.nodes[parent].reached { v.nodes[ino].reached = true; changed = true }
+}
+// A directory is reached when its parent chain ends at the root through
+// directories at or past the first ordinary inode; a chain into itself,
+// a reserved inode or a directory without a parent is not.
+fn reach(mut v: Volume) {
+    for k in 0..v.dirs.len {
+        v.dirs[k].reached = v.dirs[k].ino == 2
+        v.dirs[k].seen = v.dirs[k].ino == 2
+    }
+    var chain = List[int]()
+    for k in 0..v.dirs.len {
+        if v.dirs[k].seen { continue }
+        (mut chain).reset()
+        var cur = k
+        var result = false
+        var walking = true
+        while walking {
+            if v.dirs[cur].seen { result = v.dirs[cur].reached; walking = false; continue }
+            v.dirs[cur].seen = true
+            (mut chain).push(cur)
+            let ino = v.dirs[cur].ino
+            let parent = v.dirs[cur].parent
+            let next = if ino < v.firstino || parent == 0 || parent == ino then 0 - 1 else find_dir(v, parent)
+            if next < 0 { walking = false } else { cur = next }
         }
+        for c in chain { v.dirs[c].reached = result }
     }
 }
+fn links(mut v: Volume) -> () ! {io} {
+    for i in 0..v.refs.len { v.refs[i] = 0 as byte }
+    for ino in 0..v.ninodes + 1 { v.state[ino] = (st(v, ino) & (LIVE | 7)) as byte }
+    for k in 0..v.dirs.len { v.dirs[k].parent = 0; v.dirs[k].reached = false; v.dirs[k].seen = false }
+    entries(mut v, 0)?
+    reach(mut v)
+    entries(mut v, 1)?
+}
+fn reached(v: Volume, ino: int) -> bool {
+    if is_dir(v, ino) {
+        let d = find_dir(v, ino)
+        return d >= 0 && v.dirs[d].reached
+    }
+    (st(v, ino) & REACHED) != 0
+}
+// The directory naming ino (its parent for a directory), 0 for none; a
+// non-directory's namer is only known to exist.
+fn parent_of(v: Volume, ino: int) -> int {
+    if is_dir(v, ino) {
+        let d = find_dir(v, ino)
+        return if d >= 0 then v.dirs[d].parent else 0
+    }
+    if (st(v, ino) & NAMED) != 0 then 0 - 1 else 0
+}
 fn find_name(v: Volume, dir: int, name: str) -> int ! {io} {
-    for bi in 0..v.nodes[dir].data.len {
-        let block = v.nodes[dir].data[bi]
+    let d = find_dir(v, dir)
+    if d < 0 { return 0 }
+    for bi in 0..v.dirs[d].blocks.len {
+        let block = v.dirs[d].blocks[bi]
         region directory {
             let b = read_at(v, block * v.bs, v.bs)?
             var at = 0
@@ -364,22 +519,24 @@ fn find_name(v: Volume, dir: int, name: str) -> int ! {io} {
 }
 fn insert(mut v: Volume, dir: int, ino: int, name: str) -> () ! {io, full} {
     let need = (8 + name.len + 3) / 4 * 4
-    for bi in 0..v.nodes[dir].data.len {
-        let block = v.nodes[dir].data[bi]
+    let d = find_dir(v, dir)
+    if d < 0 { return full }
+    for bi in 0..v.dirs[d].blocks.len {
+        let block = v.dirs[d].blocks[bi]
         region directory {
             var b = read_at(v, block * v.bs, v.bs)?
             var at = 0
             while at + 8 <= v.bs {
                 let len = u(b, at + 4, 2), n = b[at + 6] as int
                 if len < 8 || len > v.bs - at || n > len - 8 { return io }
-                let used = if u(b, at, 4) == 0 then 0 else (8 + n + 3) / 4 * 4
-                if len - used >= need {
-                    if used > 0 { diskio.put(mut b, at + 4, used, 2) }
-                    let pos = at + used
+                let used_len = if u(b, at, 4) == 0 then 0 else (8 + n + 3) / 4 * 4
+                if len - used_len >= need {
+                    if used_len > 0 { diskio.put(mut b, at + 4, used_len, 2) }
+                    let pos = at + used_len
                     diskio.put(mut b, pos, ino, 4)
-                    diskio.put(mut b, pos + 4, len - used, 2)
+                    diskio.put(mut b, pos + 4, len - used_len, 2)
                     diskio.put(mut b, pos + 6, name.len, 2)
-                    if v.filetype { b[pos + 7] = dtype(v.nodes[ino].kind) as byte }
+                    if v.filetype { b[pos + 7] = kind_of(v, ino) as byte }
                     for j in 0..name.len { b[pos + 8 + j] = name.bytes()[j] }
                     patch(mut v, block * v.bs, b)
                     return
@@ -392,8 +549,13 @@ fn insert(mut v: Volume, dir: int, ino: int, name: str) -> () ! {io, full} {
 }
 fn make_lost(mut v: Volume) -> int ! {io, full} {
     var ino = 0
-    for n in v.firstino..v.nodes.len {
-        if !v.nodes[n].live && !bit(v.groups[(n - 1) / v.ipg].imap, (n - 1) % v.ipg) { ino = n; break }
+    var imap = List[byte]()
+    var loaded = 0 - 1
+    for n in v.firstino..v.ninodes + 1 {
+        if live(v, n) { continue }
+        let g = (n - 1) / v.ipg
+        if g != loaded { imap = disk_bitmap(v, v.groups[g].ib)?; loaded = g }
+        if !bit(imap, (n - 1) % v.ipg) { ino = n; break }
     }
     if ino == 0 { return full }
     let block = alloc(mut v)?
@@ -408,8 +570,17 @@ fn make_lost(mut v: Volume) -> int ! {io, full} {
         diskio.put(mut raw, 128, 32, 2)
         diskio.put(mut raw, 144, v.epoch, 4)
     }
-    v.nodes[ino] = copy Node { raw: raw, live: true, kind: 16384, data: [block],
-        sectors: v.bs / 512, refs: 0, parent: 2, reached: true }
+    patch(mut v, inode_at(v, ino), raw)
+    v.state[ino] = (LIVE | 2) as byte
+    // Into its place in inode order.
+    (mut v.dirs).push(Dir { ino: ino, blocks: [block], parent: 2, reached: true, seen: true })
+    var k: int = v.dirs.len - 1
+    while k > 0 && v.dirs[k - 1].ino > ino {
+        let moved = copy v.dirs[k - 1]
+        v.dirs[k - 1] = copy v.dirs[k]
+        v.dirs[k] = moved
+        k -= 1
+    }
     var b = diskio.zeros(v.bs)
     diskio.put(mut b, 0, ino, 4); diskio.put(mut b, 4, 12, 2)
     b[6] = 1 as byte; b[8] = 46 as byte
@@ -417,35 +588,36 @@ fn make_lost(mut v: Volume) -> int ! {io, full} {
     b[18] = 2 as byte; b[20] = 46 as byte; b[21] = 46 as byte
     if v.filetype { b[7] = 2 as byte; b[19] = 2 as byte }
     patch(mut v, block * v.bs, b)
-    v.owner[block] = ino
     insert(mut v, 2, ino, "lost+found")?
     ino
 }
 fn pass3(mut v: Volume) -> () ! {io, full} {
     print("Pass 3: Checking directory connectivity")
-    if !v.nodes[2].live || v.nodes[2].kind != 16384 { refuse(mut v, "root inode is missing or not a directory"); return }
+    if !is_dir(v, 2) { refuse(mut v, "root inode is missing or not a directory"); return }
     links(mut v)?
     var lost = find_name(v, 2, "lost+found")?
     if lost == 0 && v.mode == 2 {
         var need = false
-        for ino in v.firstino..v.nodes.len { if v.nodes[ino].live && !v.nodes[ino].reached { need = true } }
+        for ino in v.firstino..v.ninodes + 1 { if live(v, ino) && !reached(v, ino) { need = true; break } }
         if need {
             let _yes = report(mut v, "/lost+found not found; create", false)
             lost = make_lost(mut v)?
         }
     }
-    for ino in v.firstino..v.nodes.len {
-        if !v.nodes[ino].live || v.nodes[ino].reached { continue }
-        if v.nodes[ino].parent != 0 && v.nodes[ino].parent != ino { continue }
-        if lost == 0 || lost > v.ninodes || v.nodes[lost].kind != 16384 {
+    for ino in v.firstino..v.ninodes + 1 {
+        if !live(v, ino) || reached(v, ino) { continue }
+        let parent = parent_of(v, ino)
+        if parent != 0 && parent != ino { continue }
+        if lost == 0 || lost > v.ninodes || kind_of(v, lost) != 2 {
             refuse(mut v, "lost+found missing; disconnected inode {ino}; directory allocation not yet supported")
             continue
         }
         if report(mut v, "Unattached inode {ino}; connect to /lost+found", false) {
             insert(mut v, lost, ino, "#{ino}")?
-            if v.nodes[ino].kind == 16384 {
-                if v.nodes[ino].data.len == 0 { refuse(mut v, "directory {ino}: no directory blocks"); continue }
-                let block = v.nodes[ino].data[0]
+            if is_dir(v, ino) {
+                let d = find_dir(v, ino)
+                if v.dirs[d].blocks.len == 0 { refuse(mut v, "directory {ino}: no directory blocks"); continue }
+                let block = v.dirs[d].blocks[0]
                 var b = read_at(v, block * v.bs, v.bs)?
                 let next = u(b, 4, 2)
                 if next < 8 || next + 12 > v.bs || !name_is(b, next + 8, b[next + 6] as int, "..") { refuse(mut v, "disconnected directory {ino}: missing '..'") }
@@ -454,43 +626,73 @@ fn pass3(mut v: Volume) -> () ! {io, full} {
         }
     }
     links(mut v)?
-    for ino in 2..v.nodes.len {
-        if !v.nodes[ino].live || v.nodes[ino].kind != 16384 { continue }
-        if !v.nodes[ino].reached { refuse(mut v, "directory {ino}: disconnected cycle"); continue }
+    for k in 0..v.dirs.len {
+        let ino = v.dirs[k].ino
+        if ino < 2 { continue }
+        if !v.dirs[k].reached { refuse(mut v, "directory {ino}: disconnected cycle"); continue }
         if find_name(v, ino, ".")? != ino { refuse(mut v, "directory {ino}: missing or incorrect '.'") }
-        let parent = if ino == 2 then 2 else v.nodes[ino].parent
+        let parent = if ino == 2 then 2 else v.dirs[k].parent
         if parent == 0 || find_name(v, ino, "..")? != parent { refuse(mut v, "directory {ino}: missing or incorrect '..'") }
     }
 }
-fn pass4(mut v: Volume) {
+fn pass4(mut v: Volume) -> () ! {io} {
     print("Pass 4: Checking reference counts")
-    for ino in 2..v.nodes.len {
-        if !v.nodes[ino].live || (ino < v.firstino && ino != 2) { continue }
-        let count = v.nodes[ino].refs
-        if count > 65535 { refuse(mut v, "inode {ino}: reference count overflows"); continue }
-        if u(v.nodes[ino].raw, 26, 2) != count {
-            if report(mut v, "Inode {ino}: ref count should be {count}", true) { diskio.put(mut v.nodes[ino].raw, 26, count, 2) }
+    for g in 0..v.groups.len {
+        region table {
+            let bytes = read_at(v, v.groups[g].table * v.bs, v.ipg * v.isize)?
+            for i in 0..v.ipg {
+                let ino = g * v.ipg + i + 1
+                if ino < 2 || !live(v, ino) || (ino < v.firstino && ino != 2) { continue }
+                if (st(v, ino) & OVERFLOW) != 0 { refuse(mut v, "inode {ino}: reference count overflows"); continue }
+                let n = refs_of(v, ino)
+                if u(bytes, i * v.isize + 26, 2) != n {
+                    if report(mut v, "Inode {ino}: ref count should be {n}", true) { inode_put(mut v, ino, 26, n, 2) }
+                }
+            }
         }
     }
 }
-fn pass5(mut v: Volume) {
+fn pass5(mut v: Volume) -> () ! {io} {
     print("Pass 5: Checking group summary information")
-    var free = 0, ifree = 0
+    var ones = List[int]()
+    for n in 0..256 {
+        var c: int = 0
+        for k in 0..8 { if n & (1 << k) != 0 { c += 1 } }
+        (mut ones).push(c)
+    }
+    var free: int = 0
+    var ifree: int = 0
     for g in 0..v.groups.len {
         region bitmap {
-            var bm = diskio.zeros(v.bs), im = diskio.zeros(v.bs)
-            var nb = 0, ni = 0, dirs = 0
-            for j in 0..v.bs * 8 {
-                let block = v.first + g * v.bpg + j
-                if j >= v.bpg || block >= v.blocks || v.owner[block] != 0 { mark(mut bm, j) } else { nb += 1 }
-                let ino = g * v.ipg + j + 1
-                if j >= v.ipg || ino > v.ninodes || ino < v.firstino || v.nodes[ino].live { mark(mut im, j) } else { ni += 1 }
-                if j < v.ipg && ino <= v.ninodes && v.nodes[ino].live && v.nodes[ino].kind == 16384 { dirs += 1 }
+            // The group's blocks are bits g*bpg .. of `used` (bpg is a
+            // multiple of 8, so whole bytes); past its end every bit is set.
+            var bm = filled(v.bs, 255), im = filled(v.bs, 255)
+            let lo = g * v.bpg
+            let span = if lo + v.bpg < v.blocks - v.first then v.bpg else v.blocks - v.first - lo
+            var nb: int = 0
+            for j in 0..span / 8 {
+                let octet = v.used[lo / 8 + j]
+                bm[j] = octet
+                nb += 8 - ones[octet as int]
             }
-            if !diskio.equal(bm, v.groups[g].bitmap) {
+            for j in (span / 8 * 8)..span {
+                if bit(v.used, lo + j) { continue }
+                bm[j / 8] = (bm[j / 8] as int & !(1 << j % 8)) as byte
+                nb += 1
+            }
+            var ni: int = 0
+            var dirs: int = 0
+            for j in 0..(v.ipg + 7) / 8 { im[j] = 0 as byte }
+            for j in 0..v.ipg {
+                let ino = g * v.ipg + j + 1
+                if ino < v.firstino || live(v, ino) { mark(mut im, j) } else { ni += 1 }
+                if is_dir(v, ino) { dirs += 1 }
+            }
+            for j in v.ipg..(v.ipg + 7) / 8 * 8 { mark(mut im, j) }
+            if !diskio.equal(bm, read_at(v, v.groups[g].bb * v.bs, v.bs)?) {
                 if report(mut v, "Block bitmap differences in group {g}", true) { patch(mut v, v.groups[g].bb * v.bs, bm) }
             }
-            if !diskio.equal(im, v.groups[g].imap) {
+            if !diskio.equal(im, read_at(v, v.groups[g].ib * v.bs, v.bs)?) {
                 if report(mut v, "Inode bitmap differences in group {g}", true) { patch(mut v, v.groups[g].ib * v.bs, im) }
             }
             for pair in [[12, nb], [14, ni], [16, dirs]] {
@@ -518,13 +720,6 @@ fn commit(mut v: Volume) -> () ! {io} {
     diskio.write_at(v.fd, 1024, dirty)?
     fs_sync(v.fd) else |_| { return io }
     for p in v.patches { diskio.write_at(v.fd, p.at, p.bytes)? }
-    for ino in 1..v.nodes.len {
-        let at = inode_at(v, ino)
-        region inode {
-            let old = diskio.exact(v.fd, at, v.isize)?
-            if !diskio.equal(old, v.nodes[ino].raw) { diskio.write_at(v.fd, at, v.nodes[ino].raw)? }
-        }
-    }
     diskio.write_at(v.fd, (v.first + 1) * v.bs, v.gd)?
     fs_sync(v.fd) else |_| { return io }
     diskio.put(mut v.sb, 58, 1, 2)
@@ -541,11 +736,12 @@ fn check(fd: int, mode: int, epoch: int) -> int ! {io, invalid, unsupported, ful
     }
     if recovered { v = open_volume(fd, mode, epoch)? }
     if u(v.sb, 232, 4) != 0 { print("unsupported: nonempty on-disk orphan chain; no repair committed"); return 4 }
+    prepare(mut v)
     pass1(mut v)?
     pass2(mut v)?
     pass3(mut v)?
-    pass4(mut v)
-    pass5(mut v)
+    pass4(mut v)?
+    pass5(mut v)?
     if mode != 0 && u(v.sb, 58, 2) != 1 { let _fixed = report(mut v, "Filesystem not clean", true) }
     let problems = v.problems, fixed = v.fixed, left = v.left
     print("fsck.ext2: {problems} findings, {fixed} planned repairs, {left} uncorrected")
