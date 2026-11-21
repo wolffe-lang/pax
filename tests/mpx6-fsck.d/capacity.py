@@ -7,8 +7,8 @@ block 2^31. No implementation source is used; mke2fs and e2fsck are black boxes.
 Rows (one verdict line each; a planned row without one is a FAIL):
   F-size-8G, -64G, -500G, -4T, -16T  px84's sizes (16 TiB less a block the
       largest), 16 inodes a group as tests/mpx6-disktools.d/big.py makes them:
-      -fn exits 0 with no finding where e2fsck -fn exits 0; -fy changes no
-      byte; the checker's peak resident set is at most the floor plus its
+      -fn exits 0 with no finding where e2fsck -fn exits 0; neither -fn nor
+      -fy writes (the image's mtime and ctime stay); the checker's peak resident set is at most the floor plus its
       planned state (one bit a block, three bytes an inode) plus 64 MiB.
   F-big-repair  two block bitmap differences planted past block 2^31 of the
       16T image: -fy repairs both as e2fsck -fy does (the superblock, the
@@ -26,7 +26,6 @@ The checker runs from a small parent (peak.py) under RLIMIT_AS; the floor is
 it is a native binary (PAX_FSCK_ORACLE_BIN); a containerized oracle's is not
 measurable from here and is printed as such.
 """
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -94,18 +93,19 @@ def extents(path):
             at = stop
 
 
-def digest(path):
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for start, length in extents(path):
-            h.update(struct.pack('<QQ', start, length))
-            f.seek(start)
-            while length:
-                chunk = f.read(min(length, 8 * MIB))
-                assert chunk, ('short read', path, start)
-                h.update(chunk)
-                length -= len(chunk)
-    return h.hexdigest()
+def stamp(path):
+    """Size, mtime and ctime: any write the checker makes moves them."""
+    st = os.stat(path)
+    return st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def layout_change(before, after):
+    """The first data extents (start block, blocks) only one of two listings has. The host's
+    ext4 can move this map with no write (zeroed ranges read in become data), so it is
+    printed, never a verdict by itself."""
+    a, b = set(before), set(after)
+    blocks = lambda xs: [(at // 4096, n // 4096) for at, n in sorted(xs)[:4]]
+    return {'only_before': blocks(a - b), 'only_after': blocks(b - a)}
 
 
 def allocated(path):
@@ -195,12 +195,15 @@ def size_row(row, size, ext3=False, small=True):
         planned = g['blocks'] // 8 + 3 * g['inodes']
         es, epeak, esec, eout = oracle(row + '.e2fsck', ['-fn', image])
         assert es == 0, ('e2fsck -fn', es, eout[-400:])
-        before = digest(image)
+        layout, before = list(extents(image)), stamp(image)
         ws, wpeak, wsec, wout = measured(row + '.wolf-n', cap_for(g), [checker, '-fn', image])
         assert ws == 0 and CLEAN in wout, ('fsck.ext2 -fn', ws, wout[-400:])
+        assert stamp(image) == before, ('fsck.ext2 -fn wrote to the image', before, stamp(image),
+                                        layout_change(layout, list(extents(image))))
         ys, _, ysec, yout = measured(row + '.wolf-y', cap_for(g), [checker, '-fy', image])
         assert ys == 0 and CLEAN in yout, ('fsck.ext2 -fy', ys, yout[-400:])
-        assert digest(image) == before, ('fsck.ext2 -fy changed a clean image',)
+        moved = layout_change(layout, list(extents(image)))
+        assert stamp(image) == before, ('fsck.ext2 -fy wrote to a clean image', before, stamp(image), moved)
         bound = floor() + (planned + 64 * MIB) // 1024
         assert wpeak <= bound, ('peak', wpeak, 'KiB over', bound)
         verdict(row, 'PASS', json.dumps({
@@ -208,7 +211,8 @@ def size_row(row, size, ext3=False, small=True):
             'planned_bytes': planned, 'peak_kib': wpeak, 'floor_kib': floor(),
             'e2fsck_peak_kib': epeak if epeak is not None else 'not measured (container oracle)',
             'fsck_seconds': wsec, 'repair_mode_seconds': ysec, 'e2fsck_seconds': round(esec, 3),
-            'mke2fs_seconds': round(made, 3), 'allocated_bytes': allocated(image)}))
+            'mke2fs_seconds': round(made, 3), 'allocated_bytes': allocated(image),
+            'host_extents_moved': moved if moved['only_before'] or moved['only_after'] else 'no'}))
     except Exception as e:  # every failure is this row's FAIL, never a silent stop
         verdict(row, 'FAIL', repr(e)[:600])
     finally:
@@ -251,9 +255,9 @@ def big_repair():
         oy = run(['e2fsck', '-fy', ref])
         (work / (row + '.oracle-y.log')).write_bytes(oy.stdout)
         assert oy.returncode == 1, ('e2fsck -fy', oy.returncode, oy.stdout[-600:])
-        before = digest(wolf)
+        before = stamp(wolf)
         ns, _, _, nout = measured(row + '.wolf-n', cap_for(g), [checker, '-fn', wolf])
-        assert ns == 4 and digest(wolf) == before, ('fsck.ext2 -fn', ns, nout[-600:])
+        assert ns == 4 and stamp(wolf) == before, ('fsck.ext2 -fn', ns, nout[-600:])
         ys, ypeak, ysec, yout = measured(row + '.wolf-y', cap_for(g), [checker, '-fy', wolf])
         assert ys == 1, ('fsck.ext2 -fy', ys, yout[-600:])
         for group, _, _, _ in planted:
