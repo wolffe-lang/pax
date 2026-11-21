@@ -140,7 +140,7 @@ class FlushDisk(threading.Thread):
 
     def commit(self, fd, held):
         """held made durable on IMAGE, in sector order; recorded as one epoch."""
-        epoch = sorted(held.items())
+        epoch = sorted(held.items())[len(held) // 2:]
         for s, data in epoch:
             os.pwrite(fd, data, s * SECTOR)
         os.fsync(fd)
