@@ -239,7 +239,8 @@ def big_repair():
         g = geometry(wolf)
         gd = read(wolf, 4096, g['groups'] * 32)
         last, middle = g['groups'] - 1, 65536
-        assert last > middle and middle * g['bpg'] > 1 << 31
+        # Group 65536 begins at block 2^31: both its bitmap blocks lie past it.
+        assert last > middle and middle * g['bpg'] >= 1 << 31, ('geometry', last, g['bpg'])
         last_bb = struct.unpack_from('<I', gd, last * 32)[0]
         middle_bb, middle_ib = struct.unpack_from('<II', gd, middle * 32)
         tail = g['blocks'] - 1 - g['first'] - last * g['bpg']
