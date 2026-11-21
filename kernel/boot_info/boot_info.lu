@@ -196,6 +196,30 @@ pub fn cmdline_has(w: str) -> bool {
     false
 }
 
+/// The kernel's command line (Limine's `cmdline`, px15): its length in
+/// bytes, 0 without a response or a line.
+pub fn cmdline_len() -> u64 {
+    let r = response(7)
+    if r == 0 {
+        return 0
+    }
+    let s = word(r + 8)
+    if s == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while cbyte(s, i) != 0 {
+        i += 1
+    }
+    i
+}
+
+/// Byte `i` of the kernel's command line, for `i` below `cmdline_len()`
+/// (read in place, as `cmdline_has` does).
+pub fn cmdline_at(i: u64) -> u64 {
+    cbyte(word(response(7) + 8), i)
+}
+
 /// px67: the value of the kernel command line's `key=VALUE` word (the
 /// first one; `root=`, `rootfstype=`, bootparam(7)'s spellings), as the
 /// kernel address of its first byte and its length, read in place in
