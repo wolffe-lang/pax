@@ -3,8 +3,8 @@
 
     tests/ci-plan
 
-  P1  the tiers by event (tl29): a trunk push, the nightly and a dispatch
-      are all (every suite, every leg); the `full-matrix` label is full,
+  P1  the tiers by event (tl29): a trunk push with nothing green at its
+      head, the nightly and a dispatch are all (every suite, every leg); the `full-matrix` label is full,
       the merge gate (every suite on the merge legs, native BIOS), and all
       beside a FULL path or with no paths to read; another label's
       `labeled` event is a noop; a dispatch can ask for full or pr, and
@@ -28,6 +28,12 @@
       default; the tier job's last step, on a red nightly only and after
       the verdict, runs tools/nightly-red, and only that job may write
       issues.
+  P8  what a trunk head already has (tools/ci-covered, against a
+      stand-in `gh`): a green `tier all` check run at the head is all, a
+      green `tier full` alone is full, a red one or another app's is
+      none, an API failure is none (so the push runs every leg), and no
+      REPO or SHA is refused. A push plans from it: all green, noop;
+      full green, rest (every suite on the release legs); none, all.
   P6  the verdict (`tools/ci-plan --verdict`, the `tier` job): green for
       an all run whose `legs` output is absent (GitHub drops an empty
       output; run 38344726280 was red on exactly that), a full run on the
@@ -125,6 +131,17 @@ def expect(name, got, tier, suites=None, has=(), lacks=(), legs=None):
 # --- P1 the tiers by event (tl29) -----------------------------------------------
 expect("P1 a push to trunk", plan(event="push"), "all", SUITES)
 expect("P1 the nightly", plan(event="schedule"), "all", SUITES)
+# A trunk push's head is a merged pull request's head (merges are fast-forwards): it plans from what that
+# head already has green (P8), so a merge repeats nothing its pull request ran.
+REST_LEGS = "--tier release"
+expect("P1 a push whose head has a green tier all: noop", plan(event="push", covered="all"), "noop", [])
+expect("P1 a push whose head has a green tier full: rest, every suite on the release legs",
+       plan(event="push", covered="full"), "rest", SUITES, legs=REST_LEGS)
+expect("P1 a push whose head has nothing green: all", plan(event="push", covered="none"), "all", SUITES)
+expect("P1 the nightly plans all whatever its head has (the covered input is a push's)",
+       plan(event="schedule", covered="all"), "all", SUITES)
+expect("P1 a dispatch plans all whatever its head has", plan(event="workflow_dispatch", covered="full"), "all", SUITES)
+say(plan(event="push", covered="some")["tier"].startswith("ERROR rc=2"), "P1 a covered value that is none of all, full, none is refused")
 expect("P1 a dispatch, no inputs", plan(event="workflow_dispatch"), "all", SUITES)
 expect("P1 a dispatch, tier all", plan(event="workflow_dispatch", tier="all"), "all", SUITES)
 expect("P1 a dispatch, tier full: the merge gate", plan(event="workflow_dispatch", tier="full"), "full", SUITES)
@@ -200,6 +217,8 @@ expect("P2 who a process is (px39) reaches every user suite", plan(["kernel/cred
 expect("P2 the credentials' programs and recordings are mpx5-users' alone",
        plan(["user/elf/cred.c", "user/elf/ident.c", "tools/mkcred", "tests/mpx5-users.d/linux/cred.txt"], **pr), "pr", ["mpx5-users"])
 expect("P2 the census's own", plan(["docs/CENSUS.md"], **pr), "pr", ["census"])
+expect("P2 the trunk push's reader of its head's green runs is CI's own, as the planner is",
+       plan(["tools/ci-covered"], **pr), plan(["tools/ci-plan"], **pr)["tier"], SUITES)
 expect("P2 the accounts' recording is mpx5-accounts' alone (px46)",
        plan(["tests/mpx5-accounts.d/linux/accounts.tty"], **pr), "pr", ["mpx5-accounts"])
 # px47 (P5 U7): every suite as a user. `su` and `as` reach each suite
@@ -749,11 +768,23 @@ vexpect("a partial run of no suite", run_of("partial", [], legs=""), 1)
 vexpect("a partial run on legs no tier has", run_of("partial", ["census"], legs="--tier release --firmware uefi"), 1)
 vexpect("a noop run that chose a suite", run_of("noop", ["census"]), 1)
 vexpect("a tier the planner never names", run_of("release", SUITES, legs=""), 1)
+vexpect("a green rest run, every suite on the release legs", run_of("rest", SUITES, legs=REST_LEGS), 0)
+vexpect("a rest run of every suite but one", run_of("rest", SUITES[:-1], legs=REST_LEGS), 1)
+vexpect("a rest run on every leg", run_of("rest", SUITES, legs=""), 1)
+vexpect("a rest run with a chosen suite failed", run_of("rest", SUITES, {"mpx1": {"result": "failure", "outputs": {}}}, legs=REST_LEGS), 1)
 
 # --- P4 the wiring -------------------------------------------------------------------------
 wf = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
-say("PAX_INSTALL_BIG_ROWS: ${{ needs.plan.outputs.tier == 'all' && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}" in wf,
-    "P4 big installs: 500 GB in full, 4 TB only in all, neither in pr")
+say("PAX_INSTALL_BIG_ROWS: ${{ (needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest') && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}" in wf,
+    "P4 big installs: 500 GB in full, 4 TB in all and rest, neither in pr")
+say("needs.plan.outputs.tier == 'all'" not in wf.replace("needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'", "")
+    .replace("needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'rest' && 190", "")
+    .replace("needs.plan.outputs.tier == 'all' && 350 || needs.plan.outputs.tier == 'rest' && 350", "")
+    .replace("needs.plan.outputs.tier == 'all' && 240 || needs.plan.outputs.tier == 'rest' && 240", "")
+    .replace("needs.plan.outputs.tier == 'all' && 145 || needs.plan.outputs.tier == 'rest' && 145", "")
+    .replace("needs.plan.outputs.tier == 'all' && 130 || needs.plan.outputs.tier == 'rest' && 130", "")
+    .replace("needs.plan.outputs.tier == 'all' && 250 || needs.plan.outputs.tier == 'rest' && 250", ""),
+    "P4 every step and limit the all tier gates by name, the rest tier gets too (a trunk push's release legs run what all runs on them)")
 say("build/mpx6-install/**/*.geometry" in wf,
     "P4 large installed-volume geometry is retained as evidence")
 blocks = {}
@@ -781,8 +812,17 @@ say("        run: tools/ci-plan --verdict\n" in blocks["tier"] and "actions/chec
     "P4 the tier job's check is tools/ci-plan --verdict")
 say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 cancel-in-progress for pull requests only")
 group = re.search(r"^concurrency:\n  group: (.*)$", wf, re.M)
-say(group is not None and group.group(1).rstrip().endswith("|| format('ci-{0}-{1}', github.event_name, github.run_id) }}"),
-    "P4 a run that is no pull request's has a group of its own run id")
+say(group is not None and group.group(1).rstrip().endswith("|| github.event_name == 'push' && 'ci-push-trunk' || format('ci-{0}-{1}', github.event_name, github.run_id) }}"),
+    "P4 trunk pushes share one group, never cancelled in progress (the running one and the newest pending one run); the nightly and a dispatch each have a group of their own run id")
+cov = re.search(r"^      - name: what this head already has green \(tools/ci-covered\)\n        id: covered\n        if: github\.event_name == 'push'\n((?:        .*\n)+)", blocks["plan"], re.M)
+say(cov is not None and "run: tools/ci-covered --github-output \"$GITHUB_OUTPUT\"" in cov.group(1)
+    and "GH_TOKEN: ${{ github.token }}" in cov.group(1) and "SHA: ${{ github.sha }}" in cov.group(1)
+    and "          COVERED: ${{ steps.covered.outputs.covered }}\n" in blocks["plan"]
+    and blocks["plan"].index("tools/ci-covered") < blocks["plan"].index("tools/ci-plan --github-output"),
+    "P4 a push's plan reads what its head already has (tools/ci-covered) before it plans")
+pperm = re.search(r"^    permissions:\n((?:      .*\n)+)", blocks["plan"], re.M)
+say(pperm is not None and sorted(pperm.group(1).split()) == sorted(["contents:", "read", "checks:", "read"]),
+    "P4 the plan job may read contents and check runs, nothing else")
 say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
 say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
 say("types: [opened, synchronize, reopened, labeled]" in wf, "P4 adding a label starts a run")
@@ -846,6 +886,62 @@ say(rc == 0 and [c for c in calls if c.startswith("issue create")], "P7 a label 
 rc, calls = nightly_red(unset=True)
 say(rc != 0 and not calls, "P7 the script refuses to run without REPO, WORKFLOW and RUN_URL, and calls nothing")
 say(re.search(r"^name: ci$", wf, re.M) is not None, "P7 the workflow's name is ci, the title's")
+
+# --- P8 what a trunk head already has (tools/ci-covered) ------------------------------------
+COVERED = os.path.join(ROOT, "tools", "ci-covered")
+FAKE_CHECKS = r'''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+[ "${FAKE_RC:-0}" = 0 ] || exit "$FAKE_RC"
+case "$*" in
+  *"check_name=tier%20all"*) printf '%s\n' "$FAKE_ALL" ;;
+  *"check_name=tier%20full"*) printf '%s\n' "$FAKE_FULL" ;;
+  *) printf '{"check_runs": []}\n' ;;
+esac
+'''
+
+
+def check_run(name, conclusion="success", status="completed", app="github-actions", url="https://github.com/wolffe-lang/pax/runs/1"):
+    return {"name": name, "status": status, "conclusion": conclusion, "app": {"slug": app}, "html_url": url}
+
+
+def covered(all_runs=(), full_runs=(), rc=0, unset=False):
+    d = tempfile.mkdtemp(prefix="ci-plan-checks-")
+    try:
+        with open(os.path.join(d, "gh"), "w") as f:
+            f.write(FAKE_CHECKS)
+        os.chmod(os.path.join(d, "gh"), 0o755)
+        log = os.path.join(d, "log")
+        env = dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", ""), FAKE_LOG=log, FAKE_RC=str(rc),
+                   FAKE_ALL=json.dumps({"check_runs": list(all_runs)}), FAKE_FULL=json.dumps({"check_runs": list(full_runs)}),
+                   REPO="wolffe-lang/pax", SHA="a" * 40)
+        if unset:
+            env.pop("REPO"); env.pop("SHA")
+        out = os.path.join(d, "out")
+        r = subprocess.run([COVERED, "--github-output", out], capture_output=True, text=True, env=env)
+        got = dict(l.split("=", 1) for l in open(out).read().splitlines() if "=" in l) if os.path.exists(out) else {}
+        calls = open(log).read().splitlines() if os.path.exists(log) else []
+        return r.returncode, got, calls
+    except OSError as e:
+        return -1, {"error": str(e)}, []
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+rc, got, calls = covered(all_runs=[check_run("tier all")], full_runs=[check_run("tier full")])
+say(rc == 0 and got.get("covered") == "all" and got.get("covered_by", "").startswith("https://"),
+    "P8 a green tier all at the head: covered=all, naming the check run (%s)" % got)
+say(calls and all("repos/wolffe-lang/pax/commits/" + "a" * 40 + "/check-runs" in c for c in calls),
+    "P8 it asks for the head's own check runs")
+rc, got, calls = covered(full_runs=[check_run("tier full")])
+say(rc == 0 and got.get("covered") == "full", "P8 a green tier full alone: covered=full (%s)" % got)
+rc, got, calls = covered(all_runs=[check_run("tier all", conclusion="failure")], full_runs=[check_run("tier full", status="in_progress", conclusion=None)])
+say(rc == 0 and got.get("covered") == "none", "P8 a red tier all and a tier full still running: covered=none (%s)" % got)
+rc, got, calls = covered(all_runs=[check_run("tier all", app="someone-else")])
+say(rc == 0 and got.get("covered") == "none", "P8 a check run of another app is no evidence: covered=none (%s)" % got)
+rc, got, calls = covered(all_runs=[check_run("tier all")], rc=1)
+say(rc == 0 and got.get("covered") == "none", "P8 the API failing: covered=none, so the push runs every leg (%s)" % got)
+rc, got, calls = covered(unset=True)
+say(rc == 2 and not calls, "P8 no REPO or SHA: refused, nothing asked")
 
 # --- P5 every tracked path is known --------------------------------------------------------
 try:
