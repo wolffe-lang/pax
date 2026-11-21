@@ -206,7 +206,9 @@
 //!   and `settimeofday` (164) set the wall clock, U_EPOCH, in one store;
 //!   the time zone `settimeofday` is given is kept and `gettimeofday`
 //!   answers it, the first zone given alone moving the clock as Linux's
-//!   does. The checks come in Linux's measured order (tests/mpx5-users' `clock`
+//!   does; `adjtimex` (159) and `clock_adjtime` (305) are refused by name
+//!   (PAX keeps no discipline), a user's change of one -EPERM first. The
+//!   checks come in Linux's measured order (tests/mpx5-users' `clock`
 //!   sessions): the clock, an unreadable argument, the time itself, the
 //!   caller, then a time below CLOCK_MONOTONIC.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
@@ -1098,6 +1100,8 @@ const CMD_CAD_OFF: u64 = 0
 const SYS_SETHOSTNAME: u64 = 170
 const SYS_SETDOMAINNAME: u64 = 171
 const SYS_CLOCK_SETTIME: u64 = 227
+const SYS_ADJTIMEX: u64 = 159 // px168
+const SYS_CLOCK_ADJTIME: u64 = 305 // px168
 const AT_REMOVEDIR: u64 = 0x200
 // px39: the credentials (kernel/cred): the twelve numbers px38's traces
 // and probes hold.
@@ -1568,7 +1572,10 @@ fn gettimeofday(tv: u64, tz: u64) -> u64 {
 /// 8277292036 refused, by root and by a user's checks alike).
 const SETTOD_SEC_MAX: u64 = 8277292035
 const TZ_WEST_MAX: u64 = 900 // a zone's minutes west, either way (measured: 900 taken, 901 -EINVAL)
+const ADJ_OFFSET_SS_READ: u64 = 0xa001 // uapi linux/timex.h: a read a user may ask
+const TIMEX_BYTES: u64 = 208 // struct __kernel_timex on x86-64
 const CLOCK_REALTIME: u64 = 0
+const NEG_EOPNOTSUPP: u64 = 0xffffffffffffffa1 // -95
 
 /// The zone `settimeofday` was last given: tz_minuteswest and tz_dsttime,
 /// each a C int's 32 bits; and whether no zone has been given yet (the
@@ -1676,6 +1683,31 @@ fn settimeofday(tv: u64, tz: u64) -> u64 {
         }
     }
     0
+}
+
+/// `adjtimex(buf)` (159, `clock` CLOCK_REALTIME) and `clock_adjtime(clock,
+/// buf)` (305): PAX keeps no discipline (no frequency, offset or status)
+/// and steps its clock only by a set, so each is refused by name (the
+/// area's refusal word, kernel/process's R_CLOCK; -EOPNOTSUPP) once
+/// Linux's own answers are given: a clock other than CLOCK_REALTIME
+/// -EOPNOTSUPP when it is one of the twelve and -EINVAL past them, an
+/// unreadable buffer -EFAULT, and -EPERM for a user who asks a change
+/// (modes neither 0 nor ADJ_OFFSET_SS_READ).
+fn adjust(clk: u64, buf: u64) -> u64 {
+    let c = clk & 0xffffffff
+    if c != CLOCK_REALTIME {
+        return if c <= 11 { NEG_EOPNOTSUPP } else { NEG_EINVAL }
+    }
+    let pml4 = paging.live()
+    if !uaccess.readable(pml4, buf, TIMEX_BYTES) {
+        return NEG_EFAULT
+    }
+    let modes = uaccess.get(pml4, buf, 4)
+    if modes != 0 && modes != ADJ_OFFSET_SS_READ && !cred.privileged(area()) {
+        return NEG_EPERM
+    }
+    put_aword(A_REFUSAL, process.R_CLOCK)
+    NEG_EOPNOTSUPP
 }
 
 /// The tick a sleep of `req` (a user timespec) ends at, absolute when
@@ -2631,6 +2663,12 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     }
     if nr == SYS_SETTIMEOFDAY {
         return settimeofday(a0, a1) // px168
+    }
+    if nr == SYS_ADJTIMEX {
+        return adjust(CLOCK_REALTIME, a0) // px168
+    }
+    if nr == SYS_CLOCK_ADJTIME {
+        return adjust(a0, a1) // px168
     }
     if nr == SYS_UNAME {
         return uname(a0)
