@@ -30,7 +30,7 @@ ROWS = [
     'git-branch', 'git-tag', 'git-diff', 'git-cat-file', 'git-init', 'objects',
     'fsck', 'gc-refused', 'repack', 'git-fsck', 'final-log', 'terminal',
 ]
-VERSION = 'den 0.0.0 (built with wolf 0.2.36)'
+VERSION = 'den 0.1.0 (built with unrecorded compiler; local source build)'
 
 def parse(lines):
     """[(command, output lines)]: a command is a line after the prompt."""
