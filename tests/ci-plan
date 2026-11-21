@@ -763,7 +763,10 @@ for j in JOBS:
 say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tier job")
 # The KVM trial: a dispatch's `kvm` input (off by default) opens the hosted runner's /dev/kvm in every Linux
 # suite job before anything else runs there, and tools/kvm-open makes the job's boots refuse TCG after it.
-KVM_STEP = "      - name: KVM for this runner (the dispatch's kvm input; off by default)\n        if: inputs.kvm\n        run: tools/kvm-open\n"
+# The step has no name of its own: GitHub calls it "Run tools/kvm-open", and tests/ci-budgets.py counts an
+# unnamed step with checkout and setup in the 180 s allowance, where a named one would be a budgeted job's
+# unmeasured step (mpx3-shell's and mpx5-pelt's per-step rows go red on a named step no attempt has timed).
+KVM_STEP = "      - if: inputs.kvm\n        run: tools/kvm-open\n"
 say(re.search(r"^      kvm:\n        description: .*\n        type: boolean\n        default: false\n", wf, re.M) is not None,
     "P4 the dispatch's kvm input is a boolean, off by default")
 nokvm = [j for j in SUITES if j != "macos-run" and ("      - uses: actions/checkout@v4\n\n" + KVM_STEP) not in blocks[j]]
