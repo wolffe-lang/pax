@@ -12,6 +12,9 @@
       `full-matrix` label's own event is a noop where the head's paths
       already choose every suite or a FULL path: the push's run at that
       head is the full (or all) run, and one run a head is enough.
+      `macos-run` is in no full run: a pull request's merge gate waits
+      for no macOS runner; a push (all or rest), the nightly, a FULL-path
+      pull request (all) and a pr run that chooses the proof carry it.
   P2  the pr tier by path, one change per area: the network's suites for
       kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
       test, a user program and a shared device select their readers.
@@ -46,7 +49,8 @@
       merge legs, a pr run, a partial run and a noop; red for a chosen
       suite failed, skipped or cancelled, a suite that ran unasked, a
       failed plan, a plan with no suites, and (tl29) a tier whose shape
-      does not hold: a full or an all run of fewer suites than every one,
+      does not hold: a full run that chose macos-run or an all run of
+      fewer suites than every one, a full run of fewer than every other,
       a full run on every leg (px37's full, now all), an all run on the
       merge legs, a pr run on every leg, a partial run of no suite, a
       tier the planner never names.
@@ -118,6 +122,14 @@ def jobs():
 
 JOBS = jobs()
 SUITES = [j for j in JOBS if j not in ("plan", "tier")]
+# macos-run (the proof's ISO under macOS's QEMU, on one of the few macOS runners) is not in the full
+# tier: a pull request's merge gate waits for no macOS runner, and the trunk push (rest or all), the
+# nightly and the weekly run it. A pull request whose paths choose the proof still runs it (pr tier).
+FULL_SUITES = [s for s in SUITES if s != "macos-run"]
+
+
+def every(tier):
+    return FULL_SUITES if tier == "full" else SUITES
 
 
 def expect(name, got, tier, suites=None, has=(), lacks=(), legs=None):
@@ -136,7 +148,9 @@ def expect(name, got, tier, suites=None, has=(), lacks=(), legs=None):
         legs = TIER_LEGS.get(tier, "?")
     if got["legs"] != legs:
         why.append("legs '%s', wanted '%s'" % (got["legs"], legs))
-    shown = "every suite (%d)" % len(SUITES) if sorted(got["suites"]) == sorted(SUITES) else (" ".join(got["suites"]) or "no suite")
+    shown = ("every suite (%d)" % len(SUITES) if sorted(got["suites"]) == sorted(SUITES) else
+             "every suite but macos-run (%d)" % len(FULL_SUITES) if sorted(got["suites"]) == sorted(FULL_SUITES) else
+             " ".join(got["suites"]) or "no suite")
     say(not why, "%s: %s%s" % (name, tier, (" (" + "; ".join(why) + ")") if why else ", " + shown))
 
 
@@ -161,19 +175,28 @@ expect("P1 a dispatch plans all whatever its head has", plan(event="workflow_dis
 say(plan(event="push", covered="some")["tier"].startswith("ERROR rc=2"), "P1 a covered value that is none of all, full, none is refused")
 expect("P1 a dispatch, no inputs", plan(event="workflow_dispatch"), "all", SUITES)
 expect("P1 a dispatch, tier all", plan(event="workflow_dispatch", tier="all"), "all", SUITES)
-expect("P1 a dispatch, tier full: the merge gate", plan(event="workflow_dispatch", tier="full"), "full", SUITES)
+expect("P1 a dispatch, tier full: the merge gate", plan(event="workflow_dispatch", tier="full"), "full", FULL_SUITES)
 expect("P1 a dispatch, tier pr", plan(event="workflow_dispatch", tier="pr"), "pr", SUITES)
 say(plan(event="workflow_dispatch", tier="release")["tier"].startswith("ERROR rc=2"), "P1 a dispatch asking for a tier that is none is refused")
 expect("P1 a dispatch, one suite: partial, every leg", plan(event="workflow_dispatch", suites="mpx3-tree"), "partial", ["mpx3-tree"], legs="")
 expect("P1 a plant: one suite on the pr leg", plan(event="workflow_dispatch", tier="pr", suites="census"), "partial", ["census"], legs=PR_LEGS)
 expect("P1 a dispatch naming every suite is still partial", plan(event="workflow_dispatch", suites=" ".join(SUITES)), "partial", SUITES, legs="")
 expect("P1 a dispatch, proof brings macos-run", plan(event="workflow_dispatch", suites="proof"), "partial", ["proof", "macos-run"], legs="")
+expect("P1 a labelled pull request's full run leaves macos-run to the trunk push",
+       plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix"), "full", lacks=["macos-run"])
+expect("P1 a pull request's every-suite run (full) leaves macos-run to the trunk push",
+       plan([".github/workflows/ci.yml"], event="pull_request", action="synchronize"), "full", lacks=["macos-run"])
+expect("P1 a push with nothing green at its head runs macos-run (all)", plan(event="push"), "all", has=["macos-run"])
+expect("P1 a push after a green full runs macos-run (rest)", plan(event="push", covered="full"), "rest", has=["macos-run"], legs=REST_LEGS)
+expect("P1 the nightly runs macos-run", plan(event="schedule"), "all", has=["macos-run"])
+expect("P1 a pull request with a FULL path runs macos-run (all)",
+       plan(["kernel/wolf.pin"], event="pull_request", action="synchronize"), "all", has=["macos-run"])
 expect("P1 a pull request labelled full-matrix, notes only: every suite, the merge legs",
-       plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", SUITES)
+       plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", FULL_SUITES)
 expect("P1 the full-matrix label added",
-       plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
+       plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", FULL_SUITES)
 expect("P1 a labelled push beside a core change: every suite, the merge legs",
-       plan(["kernel/heap/heap.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "full", SUITES)
+       plan(["kernel/heap/heap.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "full", FULL_SUITES)
 expect("P1 the label added beside a core change: noop, the push's run at that head is already full",
        plan(["kernel/heap/heap.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
 expect("P1 a labelled push beside a FULL path: all",
@@ -181,7 +204,7 @@ expect("P1 a labelled push beside a FULL path: all",
 expect("P1 the label added beside a FULL path: noop, the push's run at that head is already all",
        plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
 expect("P1 the label added beside a narrow change: full, the push's run chose fewer suites",
-       plan(["kernel/tcp/tcp.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
+       plan(["kernel/tcp/tcp.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", FULL_SUITES)
 expect("P1 the label beside a path no rule knows: all",
        plan(["newplace/thing.c"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
 expect("P1 the label and no changed paths to read: all",
@@ -241,7 +264,7 @@ expect("P2 the credentials' programs and recordings are mpx5-users' alone",
        plan(["user/elf/cred.c", "user/elf/ident.c", "tools/mkcred", "tests/mpx5-users.d/linux/cred.txt"], **pr), "pr", ["mpx5-users"])
 expect("P2 the census's own", plan(["docs/CENSUS.md"], **pr), "pr", ["census"])
 expect("P2 the trunk push's reader of its head's green runs is CI's own, as the planner is",
-       plan(["tools/ci-covered"], **pr), plan(["tools/ci-plan"], **pr)["tier"], SUITES)
+       plan(["tools/ci-covered"], **pr), plan(["tools/ci-plan"], **pr)["tier"], every(plan(["tools/ci-plan"], **pr)["tier"]))
 expect("P2 the accounts' recording is mpx5-accounts' alone (px46)",
        plan(["tests/mpx5-accounts.d/linux/accounts.tty"], **pr), "pr", ["mpx5-accounts"])
 # px47 (P5 U7): every suite as a user. `su` and `as` reach each suite
@@ -451,7 +474,7 @@ expect("P2 AHCI fixtures and recordings reach their gate",
 # the metal scripts and kernels the firmware suite alone; its typing
 # helper the two jobs that run it in the all tier.
 expect("P2 kernel/acpi and kernel/clock reach every suite, on the pr leg: the merge gate's shape, full (px76)",
-       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "full", SUITES)
+       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "full", FULL_SUITES)
 expect("P2 kernel/msi reaches the firmware and USB suites alone (px76)",
        plan(["kernel/msi/msi.lu"], **pr), "pr", ["mpx6-usb", "mpx6-firmware"])
 expect("P2 kernel/power reaches the suites whose sessions reboot and the firmware suite (px76)",
@@ -460,7 +483,7 @@ expect("P2 the metal scripts and kernels are the firmware suite's alone (px76)",
        plan(["tests/mpx6-metal", "tests/mpx6-metal-power", "tests/mpx6-metal-serial", "tests/mpx6-metal.d/panic-screen.py",
              "kernel/kmain_metal.lu", "kernel/kmain_metal_msi.lu", "tests/mpx6-firmware"], **pr), "pr", ["mpx6-firmware"])
 expect("P2 kernel/triage and boot/triage.S reach every suite, on the pr leg: full (px77d)",
-       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "full", SUITES)
+       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "full", FULL_SUITES)
 expect("P2 the triage suite and the two sticks' confs are the firmware suite's alone (px77d)",
        plan(["tests/mpx6-triage", "tests/mpx6-triage.d/leg.py", "boot/limine-triage.conf", "boot/limine-bisect.conf", "boot/limine-fix.conf",
              "tests/mpx6-nmi", "tests/mpx6-nmi.d/inject.py"], **pr), "pr", ["mpx6-firmware"])
@@ -478,21 +501,21 @@ expect("P2 the processor census's generators, rows and probe are the firmware su
 # from the planner itself, so these rows hold whatever that tier is named.
 CORE_PLAN = plan(["kernel/heap/heap.lu"], **pr)
 CI_PLAN = plan([".github/workflows/ci.yml"], **pr)
-expect("P2 kernel/cpus plans as the kernel's core does (every suite)", plan(["kernel/cpus/cpus.lu"], **pr), CORE_PLAN["tier"], SUITES)
+expect("P2 kernel/cpus plans as the kernel's core does (every suite)", plan(["kernel/cpus/cpus.lu"], **pr), CORE_PLAN["tier"], every(CORE_PLAN["tier"]))
 # SMP stage 1 (pax#484): kernel/smp starts every processor and kernel/percpu holds each one's state; the
 # scheduler, the GDT, the interrupt entry and kmain call them on every boot, so they plan as the core does.
-expect("P2 kernel/smp plans as the kernel's core does (every suite)", plan(["kernel/smp/smp.lu"], **pr), CORE_PLAN["tier"], SUITES)
-expect("P2 kernel/percpu plans as the kernel's core does (every suite)", plan(["kernel/percpu/percpu.lu"], **pr), CORE_PLAN["tier"], SUITES)
+expect("P2 kernel/smp plans as the kernel's core does (every suite)", plan(["kernel/smp/smp.lu"], **pr), CORE_PLAN["tier"], every(CORE_PLAN["tier"]))
+expect("P2 kernel/percpu plans as the kernel's core does (every suite)", plan(["kernel/percpu/percpu.lu"], **pr), CORE_PLAN["tier"], every(CORE_PLAN["tier"]))
 expect("P2 kmain_cpucheck is the firmware suite's alone (tests/mpx6-cpus, its F12)",
        plan(["kernel/kmain_cpucheck.lu"], **pr), "pr", ["mpx6-firmware"])
 expect("P2 the census directory's build-only witnesses are the processor suite's, so the firmware suite's (pax#484)",
        plan(["tests/mpx6-cpus.d/ambient.c", "tests/mpx6-cpus.d/compiler.sh", "tests/mpx6-cpus.d/compiler/cpu.S",
              "tests/mpx6-cpus.d/compiler/probe.lu", "tests/mpx6-cpus.d/compiler/wolf.pkg"], **pr), "pr", ["mpx6-firmware"])
 expect("P2 the plan job's fetch-busybox selftest plans as CI's own files do",
-       plan(["tests/fetch-busybox-selftest"], **pr), CI_PLAN["tier"], SUITES)
+       plan(["tests/fetch-busybox-selftest"], **pr), CI_PLAN["tier"], every(CI_PLAN["tier"]))
 expect("P2 a census-only change under the full-matrix label is full, not all",
        plan(["tests/mpx6-cpus.d/inventory.json", "tests/mpx6-cpus.d/protections.json"],
-            event="pull_request", action="synchronize", labels="full-matrix"), "full", SUITES)
+            event="pull_request", action="synchronize", labels="full-matrix"), "full", FULL_SUITES)
 expect("P2 the processor suite and its rows are the firmware suite's alone (px161: F12 runs it)",
        plan(["tests/mpx6-cpus", "tests/mpx6-cpus.d/rows.py", "tests/mpx6-cpus.d/rows-selftest.py", "tests/mpx6-cpus.d/probe.c"], **pr),
        "pr", ["mpx6-firmware"])
@@ -761,7 +784,7 @@ expect("P2 the kasumi leg's driver runs with the installer's suites (px78)",
 expect("P2 installer fixtures reach their gate only",
        plan(["tests/mpx6-install", "tests/mpx6-install.d/gap.py"], **pr), "pr", ["mpx6-install", "mpx6-ahci", "mpx6-kasumi"])
 
-expect("P2 CI itself: every suite, the pr leg: full", plan([".github/workflows/ci.yml"], **pr), "full", SUITES)
+expect("P2 CI itself: every suite, the pr leg: full", plan([".github/workflows/ci.yml"], **pr), "full", FULL_SUITES)
 
 # The kernel's core (px40, ruling #76): every suite, on the pr leg. A pull request's run of every
 # suite on that leg is the merge gate's shape (every suite on native BIOS), so it is named full and
@@ -772,10 +795,10 @@ expect("P2 CI itself: every suite, the pr leg: full", plan([".github/workflows/c
 CORE = ["serial", "log", "panic", "boot_info", "frames", "paging", "gdt", "idt", "interrupts",
         "apic", "heap", "sync", "fpu"]
 CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/fpu.S"]
-expect("P2 a core-only change (kernel/heap): every suite, the pr leg: full", plan(["kernel/heap/heap.lu"], **pr), "full", SUITES)
+expect("P2 a core-only change (kernel/heap): every suite, the pr leg: full", plan(["kernel/heap/heap.lu"], **pr), "full", FULL_SUITES)
 for p in ["kernel/%s/%s.lu" % (m, m) for m in CORE] + CORE_ASM:
-    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "full", SUITES)
-expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/heap/heap.lu"], **pr), "full", SUITES)
+    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "full", FULL_SUITES)
+expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/heap/heap.lu"], **pr), "full", FULL_SUITES)
 
 # --- P3 FULL wins ---------------------------------------------------------------------
 PINS = ["kernel/wolf.pin", "kernel/wolf.pkg", "boot/limine.pin"]
@@ -840,14 +863,16 @@ def vexpect(name, needs, want):
 
 
 vexpect("a green all run, its legs output absent", run_of("all", SUITES, legs=""), 0)
-vexpect("a green full run, every suite on the merge legs", run_of("full", SUITES, legs=MERGE_LEGS), 0)
+vexpect("a green full run, every suite but macos-run on the merge legs", run_of("full", FULL_SUITES, legs=MERGE_LEGS), 0)
+vexpect("a full run that chose macos-run (the gate waits for no macOS runner)", run_of("full", SUITES, legs=MERGE_LEGS), 1)
+vexpect("a full run where macos-run ran unasked", run_of("full", FULL_SUITES, {"macos-run": {"result": "success", "outputs": {}}}, legs=MERGE_LEGS), 1)
 vexpect("a green pr run of two suites", run_of("pr", ["mpx3-sound", "census"]), 0)
 vexpect("a green pr run of no suite (notes only)", run_of("pr", []), 0)
 vexpect("a noop run", run_of("noop", []), 0)
 vexpect("a green partial run, one suite on the pr leg", run_of("partial", ["census"]), 0)
 vexpect("a green partial run, one suite on every leg", run_of("partial", ["mpx3-tree"], legs=""), 0)
 vexpect("a chosen suite failed", run_of("all", SUITES, {"mpx1": {"result": "failure", "outputs": {}}}, legs=""), 1)
-vexpect("a chosen suite failed in the merge gate", run_of("full", SUITES, {"mpx5-jobs": {"result": "failure", "outputs": {}}}, legs=MERGE_LEGS), 1)
+vexpect("a chosen suite failed in the merge gate", run_of("full", FULL_SUITES, {"mpx5-jobs": {"result": "failure", "outputs": {}}}, legs=MERGE_LEGS), 1)
 vexpect("a chosen suite was skipped", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "skipped", "outputs": {}}}), 1)
 vexpect("a chosen suite was cancelled", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "cancelled", "outputs": {}}}), 1)
 vexpect("a suite ran unasked", run_of("pr", ["census"], {"mpx4-tcp": {"result": "success", "outputs": {}}}), 1)
@@ -855,7 +880,7 @@ vexpect("the plan failed", {"plan": {"result": "failure", "outputs": {}}, "censu
 vexpect("the plan chose nothing readable", {"plan": {"result": "success", "outputs": {}}, "census": {"result": "skipped", "outputs": {}}}, 1)
 # tl29: the name says the shape.
 vexpect("a full run of one suite (px37's one-suite dispatch)", run_of("full", ["mpx3-tree"], legs=MERGE_LEGS), 1)
-vexpect("a full run on every leg (px37's full, now all)", run_of("full", SUITES, legs=""), 1)
+vexpect("a full run on every leg (px37's full, now all)", run_of("full", FULL_SUITES, legs=""), 1)
 vexpect("an all run on the merge legs", run_of("all", SUITES, legs=MERGE_LEGS), 1)
 vexpect("an all run of every suite but one", run_of("all", SUITES[:-1], legs=""), 1)
 vexpect("a pr run on every leg", run_of("pr", ["census"], legs=""), 1)
