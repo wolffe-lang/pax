@@ -1,13 +1,15 @@
 """SMP stage 2's rows: user code on every processor under one kernel lock.
 
-  rows.py SERIAL --kind KIND --smp N [--cap C] [--boot K] [--scaling gate|report]
+  rows.py SERIAL --kind KIND --smp N [--cap C] [--boot K] [--scaling gate|report] [--host-cpus K]
           [--qemu-status S] [--expected JSON] [--elf KERNEL.elf | --symbols NM.txt]
 
 SERIAL is one boot's transcript (tests/mpx6-smp boots tests/mpx6-smp.d/probe.c, or bench.c for
 `build`); SERIAL.meta is tools/qemu-run's (its `accel:` line: a timed bound is gated under KVM alone
 and printed under TCG); SERIAL.cmdK are the monitor's answers where the suite asked for register
 dumps (`stop`, `info registers -a`, `cont`, three times: dumps in .cmd2, .cmd5, .cmd8); SERIAL.times
-is build.py's host-observed batch times.
+is build.py's host-observed batch times. --host-cpus is how many host CPUs the boot's QEMU had (the take's
+`nproc`): a timed bound is gated only under KVM and only when the boot's processors fit them (N virtual
+processors on fewer host threads cannot all run at once, whatever the kernel does); otherwise it is printed.
 
 What stage 2 prints, and these rows read (the kernel's text is defined here):
   /proc/pax-cpus, after stage 1's head lines (`available`, `active`, `source`, `online-capable`,
@@ -94,6 +96,7 @@ ap.add_argument('--cap', type=int)
 ap.add_argument('--boot', type=int)
 ap.add_argument('--scaling', default='report', choices=('gate', 'report'))
 ap.add_argument('--qemu-status', type=int)
+ap.add_argument('--host-cpus', type=int, default=0, help='the host CPUs the boot had (0: not said)')
 ap.add_argument('--expected')
 ap.add_argument('--elf')
 ap.add_argument('--symbols', help='`nm -S` output in a file, in place of --elf (rows-selftest)')
@@ -129,6 +132,9 @@ def accel():
 
 
 KVM = accel() == 'kvm'
+TIMED = KVM and (a.host_cpus == 0 or N <= a.host_cpus)
+UNTIMED = '' if TIMED else (f'timed bounds printed, not gated: {N} processors on {a.host_cpus} host CPUs' if KVM else
+                               f'timed bounds printed, not gated: {accel() or "no accelerator said"}')
 
 
 # --- the probe's lines and /proc/pax-cpus ------------------------------------------------------
@@ -306,7 +312,9 @@ def run_check(n, nrounds, cap=None):
                 why.append(f'round {k}: processors past the cap ran workers {outside} or gained ring-3 ticks {gained}')
         elif len(seen) < n - 1:
             why.append(f'round {k}: workers seen running on {seen}, want {n - 1} processors at least')
-    if KVM and not cap:
+    if not TIMED and not cap:
+        info.append(UNTIMED)
+    if TIMED and not cap:
         ratio = min(r['wall'] for r in rounds.values()) / max(min(r['lone_wall'] for r in rounds.values()), 1)
         if ratio > 1.5:
             why.append(f'{n} workers took {ratio:.2f} times one worker\'s wall (1.5 at most, minimum of {nrounds} rounds)')
@@ -336,7 +344,9 @@ def tlb_check():
     for s in repl:
         if kv(s, 'stale') != 0 or kv(s, 'fixed') != 'yes':
             why.append(f'B read the old page after the new one was written: {s}')
-    if KVM and prot and fast < 4:
+    if not TIMED:
+        info.append(UNTIMED)
+    if TIMED and prot and fast < 4:
         why.append(f'{fast} of {len(prot)} faults within 1 ms (4 at least)')
     info.append(f'protect latencies {[kv(s, "latency-us") for s in prot]} us')
     return why, info
@@ -375,7 +385,9 @@ def signal_check():
         why.append(f'stop and continue: {stop[0]}')
     if tst and kv(tst[0], 'tgkill-status') != '0x0':
         why.append(f'the tgkill process ended {tst[0]}')
-    if KVM:
+    if not TIMED:
+        info.append(UNTIMED)
+    if TIMED:
         for name, group, need in (('usr1', usr1, 8), ('kill', kill, 4), ('tgkill', tgk, 8)):
             n = sum(1 for s in group if isinstance(kv(s, 'latency-us'), int) and kv(s, 'latency-us') <= 2000)
             if group and n < need:
@@ -472,7 +484,10 @@ elif a.kind == 'stress':
     s = next((x for x in lk if x.startswith('kill ')), None)
     if s is None or kv(s, 'lost') != 0 or not kv(s, 'sent') or kv(s, 'got') != kv(s, 'sent'):
         why.append(f'kill: {s or "no line"}')
-    comp = [x for x in lk if x.startswith('component ')]
+    hung = [x for x in lk if x.startswith('component ') and ' hung ' in x]
+    if hung:
+        why.append(f'components hung past the deadline: {hung}')
+    comp = [x for x in lk if x.startswith('component ') and ' hung ' not in x]
     if len(comp) != 10 or any(kv(x, 'status') != '0x0' for x in comp):
         why.append(f'component statuses: {[kv(x, "status") for x in comp]}')
     ut = next((x for x in lk if x.startswith('user-ticks')), '')
@@ -598,8 +613,8 @@ elif a.kind == 'build':
     fig = (f'one job {min(one) * 1000:.0f} ms, four jobs {min(four) * 1000:.0f} ms (host, minimum of three), '
            f'{ratio:.2f}x; guest walls {[(int(j), int(w) // 1000) for _r, j, w in guest]} ms') if ratio else 'no figures'
     if N > 1 and ratio is not None:
-        if a.scaling == 'gate' and not KVM:
-            why.append(f'the scaling bound is asked under {accel() or "an unknown accelerator"}: KVM only')
+        if a.scaling == 'gate' and not TIMED:
+            why.append(f'the scaling bound is asked where it cannot hold ({UNTIMED})')
         elif a.scaling == 'gate' and ratio > 1.6:
             why.append(f'four jobs took {ratio:.2f} times one job\'s wall (1.6 at most)')
     if why:
