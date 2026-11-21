@@ -961,7 +961,8 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run at the head.
 - Merges are fast-forwards, so a push to trunk runs only what its head lacks: nothing after a green `tier all`, every
   suite on the release legs (`tier rest`) after a green `tier full`, every leg otherwise. Trunk pushes share one
-  queue: the running one finishes and only the newest waiting one runs after it.
+  queue: the running one finishes and only the newest waiting one runs after it. The nightly skips a head whose
+  `tier all` is green already; the Sunday schedule runs every leg whatever the head has.
 - Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, 90 for users again
   with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
   (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in

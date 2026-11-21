@@ -33,7 +33,8 @@
       green `tier full` alone is full, a red one or another app's is
       none, an API failure is none (so the push runs every leg), and no
       REPO or SHA is refused. A push plans from it: all green, noop;
-      full green, rest (every suite on the release legs); none, all.
+      full green, rest (every suite on the release legs); none, all. The
+      nightly too: all green, noop, but the weekly schedule runs all.
   P6  the verdict (`tools/ci-plan --verdict`, the `tier` job): green for
       an all run whose `legs` output is absent (GitHub drops an empty
       output; run 38344726280 was red on exactly that), a full run on the
@@ -138,8 +139,13 @@ expect("P1 a push whose head has a green tier all: noop", plan(event="push", cov
 expect("P1 a push whose head has a green tier full: rest, every suite on the release legs",
        plan(event="push", covered="full"), "rest", SUITES, legs=REST_LEGS)
 expect("P1 a push whose head has nothing green: all", plan(event="push", covered="none"), "all", SUITES)
-expect("P1 the nightly plans all whatever its head has (the covered input is a push's)",
-       plan(event="schedule", covered="all"), "all", SUITES)
+# The nightly at a head that already has a green tier all repeats it: noop. The weekly schedule always runs every
+# leg (the sentinel for a moved runner image, the network, and flakes).
+WEEKLY = "47 6 * * 0"
+expect("P1 the nightly at a head with a green tier all: noop", plan(event="schedule", covered="all", schedule="17 6 * * *"), "noop", [])
+expect("P1 the weekly schedule at a head with a green tier all: all", plan(event="schedule", covered="all", schedule=WEEKLY), "all", SUITES)
+expect("P1 the nightly at a head with a green tier full only: all", plan(event="schedule", covered="full", schedule="17 6 * * *"), "all", SUITES)
+expect("P1 the nightly at a head with nothing green: all", plan(event="schedule", covered="none", schedule="17 6 * * *"), "all", SUITES)
 expect("P1 a dispatch plans all whatever its head has", plan(event="workflow_dispatch", covered="full"), "all", SUITES)
 say(plan(event="push", covered="some")["tier"].startswith("ERROR rc=2"), "P1 a covered value that is none of all, full, none is refused")
 expect("P1 a dispatch, no inputs", plan(event="workflow_dispatch"), "all", SUITES)
@@ -814,7 +820,7 @@ say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 
 group = re.search(r"^concurrency:\n  group: (.*)$", wf, re.M)
 say(group is not None and group.group(1).rstrip().endswith("|| github.event_name == 'push' && 'ci-push-trunk' || format('ci-{0}-{1}', github.event_name, github.run_id) }}"),
     "P4 trunk pushes share one group, never cancelled in progress (the running one and the newest pending one run); the nightly and a dispatch each have a group of their own run id")
-cov = re.search(r"^      - name: what this head already has green \(tools/ci-covered\)\n        id: covered\n        if: github\.event_name == 'push'\n((?:        .*\n)+)", blocks["plan"], re.M)
+cov = re.search(r"^      - name: what this head already has green \(tools/ci-covered\)\n        id: covered\n        if: github\.event_name == 'push'(?: \|\| github\.event_name == 'schedule')?\n((?:        .*\n)+)", blocks["plan"], re.M)
 say(cov is not None and "run: tools/ci-covered --github-output \"$GITHUB_OUTPUT\"" in cov.group(1)
     and "GH_TOKEN: ${{ github.token }}" in cov.group(1) and "SHA: ${{ github.sha }}" in cov.group(1)
     and "          COVERED: ${{ steps.covered.outputs.covered }}\n" in blocks["plan"]
@@ -825,6 +831,9 @@ say(pperm is not None and sorted(pperm.group(1).split()) == sorted(["contents:",
     "P4 the plan job may read contents and check runs, nothing else")
 say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
 say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
+say(('    - cron: "%s"\n' % WEEKLY) in wf and "          SCHEDULE: ${{ github.event.schedule }}\n" in blocks["plan"]
+    and "        if: github.event_name == 'push' || github.event_name == 'schedule'\n" in blocks["plan"],
+    "P4 the weekly schedule is in the workflow, the plan reads which schedule ran, and the nightly reads its head's green runs too")
 say("types: [opened, synchronize, reopened, labeled]" in wf, "P4 adding a label starts a run")
 say(re.search(r'^      tier:\n        description: .*\n        type: choice\n        options: \[all, full, pr\]\n        default: all\n', wf, re.M) is not None
     and "IN_TIER: ${{ inputs.tier }}" in blocks["plan"], "P4 the dispatch's tier input is all, full or pr, all by default, and the plan reads it")

@@ -4,10 +4,12 @@
     tools/ci-plan [--event E] [--action A] [--label L] [--labels L1,L2]
                   [--base SHA --head SHA | --paths-from FILE]
                   [--tier all|full|pr] [--suites "S..."] [--covered all|full|none]
+                  [--schedule CRON]
                   [--github-output FILE] [--json]
 
 Every option also reads an environment variable of its name in capitals
-(EVENT, ACTION, LABEL, LABELS, BASE, HEAD, IN_TIER, IN_SUITES, COVERED), which is
+(EVENT, ACTION, LABEL, LABELS, BASE, HEAD, IN_TIER, IN_SUITES, COVERED,
+SCHEDULE), which is
 how the workflow's `plan` job passes the event in.
 
 THE TIERS. A suite is a job of .github/workflows/ci.yml (proof, mkw,
@@ -43,7 +45,9 @@ release) on one firmware (BIOS, UEFI); every leg is four.
         fast-forwards, so the head is the pull request's): every suite on
         the release legs, `--tier release` (REST_LEGS), the compiler
         tier the merge gate did not run. Native UEFI is the nightly's.
-        A push whose head has a green `tier all` repeats nothing: noop.
+        A push whose head has a green `tier all` repeats nothing: noop,
+        and neither does the nightly at such a head, except the weekly
+        schedule (WEEKLY), which runs every leg whatever the head has.
   partial  a `workflow_dispatch` that names suites (`-f suites=...`, a
         plant): those suites, on its `tier` input's legs (every leg
         unless it says full or pr). Never `full` or `all`, whatever it
@@ -99,6 +103,8 @@ LEGS = {"all": "", "full": MERGE_LEGS, "pr": PR_LEGS}
 # (every test takes one --tier/--firmware pair; native UEFI is the nightly's).
 REST_LEGS = "--tier release"
 COVERED = ("all", "full", "none")
+# The weekly schedule of .github/workflows/ci.yml: every leg, never skipped.
+WEEKLY = "47 6 * * 0"
 TIERS = ("all", "full", "pr", "rest", "partial", "noop")
 FULL_LABEL = "full-matrix"
 NOT_SUITES = {"plan", "tier"}
@@ -300,6 +306,9 @@ def plan(a):
             return result("rest", set(suites), REST_LEGS)
         log.append("push: nothing green at this head: all")
         return result("all", set(suites), "")
+    if ev == "schedule" and (a.covered or "none") == "all" and (a.schedule or "") != WEEKLY:
+        log.append("schedule '%s': this head's tier all is green already: noop (the weekly '%s' runs every leg)" % (a.schedule or "", WEEKLY))
+        return result("noop", set(), PR_LEGS)
     if ev != "pull_request":
         log.append("%s: all" % ev)
         return result("all", set(suites), "")
@@ -416,6 +425,7 @@ def main():
     ap.add_argument("--tier", default=env("IN_TIER") or None)
     ap.add_argument("--suites", default=env("IN_SUITES"))
     ap.add_argument("--covered", default=env("COVERED") or None)
+    ap.add_argument("--schedule", default=env("SCHEDULE") or None)
     ap.add_argument("--github-output")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
