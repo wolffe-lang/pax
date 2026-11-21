@@ -63,6 +63,11 @@
       too (the planner's also_release); nothing more for other changes,
       kernel-wide ones (all has those legs), pushes, the nightly or a
       dispatch.
+  P10 the KVM split: sixteen suites, named, open the hosted runner's
+      /dev/kvm (tools/kvm-open, right after checkout, an unnamed step)
+      when the plan says kvm=yes, and no other job does; the plan says
+      yes for every event but the weekly never-skip run and a dispatch
+      asking accel=tcg, which run every suite on TCG.
   P5  every tracked path is known to the map or read by a suite. An
       unknown path would make every pull request touching it run every
       leg; now the pull request that adds one is red here instead.
@@ -99,7 +104,7 @@ def plan(paths=None, **kw):
     for k, v in kw.items():
         args += ["--" + k.replace("_", "-"), v]
     env = {k: v for k, v in os.environ.items()
-           if k not in ("EVENT", "ACTION", "LABEL", "LABELS", "BASE", "HEAD", "IN_TIER", "IN_SUITES")}
+           if k not in ("EVENT", "ACTION", "LABEL", "LABELS", "BASE", "HEAD", "IN_TIER", "IN_SUITES", "IN_ACCEL")}
     if paths is not None:
         args += ["--paths-from", "-"]
     r = subprocess.run(args, input="\n".join(paths or []) + "\n", capture_output=True, text=True, env=env)
@@ -839,6 +844,38 @@ expect("P3 an unknown path beside a core change", plan(["kernel/sched/sched.lu",
 expect("P3 no changed paths to read", plan(**pr), "all", SUITES)
 expect("P3 a diff git cannot take", plan(base="0" * 40, head="1" * 40, **pr), "all", SUITES)
 
+# --- P10 the KVM split -----------------------------------------------------------------------
+# Two hosted samples at one head (runs 44881637188 and 44893124934 against the TCG run 44871753222): these
+# sixteen were more than 10 % faster under KVM in both and never red there; together they save about 18 % of a
+# tier full run's runner-minutes, the users suite alone 13 %. Every other job stays on TCG, the three suites with
+# timing bounds stated on bare metal (mpx6-firmware, mpx3-conspeed, mpx6-latency) included. The fallback: under
+# 10 % saved, or a KVM job red on the runner rather than on PAX, the list shrinks to mpx5-users and
+# mpx5-users-ahci; under 5 %, it empties.
+KVM16 = ["mpx5-users", "mpx5-users-ahci", "mpx5-pelt", "mpx5-jobs", "mpx5-den", "mpx6-staged", "mpx4-ready",
+         "mpx6-disktools", "mpx4-unix", "mpx5-lupin", "mpx5-slots", "mpx5-trace", "mpx6-bootlog", "mpx4-console-net",
+         "mpx6-nvme", "mpx4-tcp"]
+
+
+def kvm(got):
+    return got.get("kvm")
+
+
+got = plan(event="push")
+say(sorted(got.get("kvm_suites") or []) == sorted(KVM16),
+    "P10 the planner's KVM suites are the sixteen (%s)" % " ".join(got.get("kvm_suites") or ["none"]))
+say(kvm(plan(["notes/px99.md"], **pr)) == "yes", "P10 a pull request's run: the sixteen on KVM")
+say(kvm(plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix")) == "yes",
+    "P10 a labelled pull request's run: the sixteen on KVM")
+say(kvm(plan(event="push")) == "yes", "P10 a trunk push: the sixteen on KVM")
+say(kvm(plan(event="schedule", schedule="17 6 * * *")) == "yes", "P10 the nightly: the sixteen on KVM")
+say(kvm(plan(event="schedule", schedule=WEEKLY)) == "no", "P10 the weekly never-skip run: every suite on TCG")
+say(kvm(plan(event="schedule", schedule=WEEKLY, covered="all")) == "no",
+    "P10 the weekly run at a head with a green tier all: still all, every suite on TCG")
+say(kvm(plan(event="workflow_dispatch")) == "yes", "P10 a dispatch: the sixteen on KVM")
+say(kvm(plan(event="workflow_dispatch", accel="tcg")) == "no", "P10 a dispatch asking accel=tcg: every suite on TCG")
+say(plan(event="workflow_dispatch", accel="hvf")["tier"].startswith("ERROR rc=2"), "P10 a dispatch asking an accel that is none is refused")
+expect("P10 tools/kvm-open plans as CI's own files do", plan(["tools/kvm-open"], **pr), CI_PLAN["tier"], every(CI_PLAN["tier"]))
+
 # --- P6 the verdict -----------------------------------------------------------------------
 def verdict(needs):
     env = dict(os.environ, NEEDS=json.dumps(needs))
@@ -912,6 +949,19 @@ for j in JOBS:
     m = re.search(r"^  %s:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)" % re.escape(j), wf, re.M | re.S)
     blocks[j] = m.group(1) if m else ""
 say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tier job")
+# P10: the KVM step. Unnamed, so tests/ci-budgets.py counts it with checkout and setup in the 180 s allowance
+# (a named step would be a budgeted job's unmeasured step).
+KVM_STEP = "      - if: needs.plan.outputs.kvm == 'yes'\n        run: tools/kvm-open\n"
+withkvm = [j for j in JOBS if KVM_STEP in blocks[j]]
+stray = [j for j in withkvm if j not in KVM16]
+missing = [j for j in KVM16 if ("      - uses: actions/checkout@v4\n\n" + KVM_STEP) not in blocks[j]]
+say(not stray and not missing,
+    "P10 exactly the sixteen open /dev/kvm, right after checkout%s%s"
+    % (" (stray: %s)" % " ".join(stray) if stray else "", " (missing: %s)" % " ".join(missing[:8]) if missing else ""))
+say("      kvm: ${{ steps.plan.outputs.kvm }}\n" in blocks["plan"] and "          IN_ACCEL: ${{ inputs.accel }}\n" in blocks["plan"],
+    "P10 the plan reads the dispatch's accel input and hands kvm to the jobs")
+say(re.search(r"^      accel:\n        description: .*\n        type: choice\n        options: \[kvm, tcg\]\n        default: kvm\n", wf, re.M) is not None,
+    "P10 the dispatch's accel input: kvm by default, tcg to run every suite on TCG")
 fwrel = re.search(r"^      - name: .*\n        if: contains\(fromJSON\(needs\.plan\.outputs\.also_release\), 'mpx6-firmware'\)\n        run: tests/mpx6-firmware --tier release\n", blocks["mpx6-firmware"], re.M)
 say(fwrel is not None and "      also_release: ${{ steps.plan.outputs.also_release }}\n" in blocks["plan"],
     "P4 the plan's also_release reaches the firmware job, which runs its release legs when asked")
