@@ -62,6 +62,10 @@
 #   M6 B7 at the 860's mode (its 2560 x 1440 display): Limine's
 #      framebuffer that size, `muxprobe paint`'s line (its grid and its
 #      repaint times, a measurement), init ended, halted.
+#   M7 the wolf probe's W2 (`8 of 8 panes answered`) printed only after
+#      every pane's shell has run: the kernel names each of the eight
+#      shells (`user: sh pid P ...`) before W2 (check.py --w2-started), so
+#      no shell's answer is still on its way when W3 waits (pax#498).
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
 # every assertion held, 1 otherwise, 2 on a usage or tool error.
@@ -289,6 +293,14 @@ boot_probe() {
         daemon="; the daemon it left: ${daemon#user: } (${theend#PAX: })"
     fi
     [ -z "$why" ] && say "PASS M3 $id $im: init ended, status 0$daemon; frames back; kernel $digest; $(tail -n 1 "$log.verdict")" || bad "M3 $id $im:$why"
+    if [ "$im" = wolf ]; then
+        gate=$(python3 -I "$D/check.py" --w2-started "$norm" 2>&1)
+        if [ $? = 0 ]; then
+            say "PASS M7 $id wolf: $(printf '%s\n' "$gate" | sed -n 's/^PASS W2-STARTED: //p')"
+        else
+            bad "M7 $id wolf: $(printf '%s\n' "$gate" | sed -n 's/^FAIL W2-STARTED: //p')"
+        fi
+    fi
 }
 
 mkdir -p "$PAX_BUILD"
