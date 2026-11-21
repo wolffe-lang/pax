@@ -77,6 +77,9 @@
 /* How long a pane's program may take to say it is ready before a row signals it (A3, A4). A row signals only
  * after the ready line: a signal sent before its handler is set is lost, and the row then measured the start. */
 #define READY_MS 10000
+/* `muxprobe winch late` and `muxprobe sig late` sleep this long between their first line and their wait: A3.5 and
+ * A4.5 send their signal inside that sleep, the window in which a signal once went unreported (pax#500). */
+#define LATE_MS 3000
 
 /* --- small things -------------------------------------------------------- */
 
@@ -310,12 +313,13 @@ static void winch_line(int fd) {
     puts_fd(1, b);
 }
 
-static int mode_winch(void) {
+static int mode_winch(int late) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa, 0); /* no SA_RESTART: the read below is torn */
     winch_line(0);
+    if (late) nap(LATE_MS); /* A3.5: a size set now is still to be reported */
     for (;;) {
         char b[256];
         ssize_t k = read(0, b, sizeof b);
@@ -327,7 +331,7 @@ static int mode_winch(void) {
 static volatile sig_atomic_t heard_sig;
 static void on_sig(int s) { heard_sig = s; }
 
-static int mode_sig(void) {
+static int mode_sig(int late) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_sig;
@@ -335,6 +339,7 @@ static int mode_sig(void) {
     sigaction(SIGQUIT, &sa, 0);
     sigaction(SIGTSTP, &sa, 0);
     puts_fd(1, "sig: ready\n");
+    if (late) nap(LATE_MS); /* A4.5: a signal now is still to be reported */
     for (;;) {
         char b[256];
         ssize_t k = read(0, b, sizeof b);
@@ -1080,6 +1085,22 @@ static void sec_a3(void) {
     type(r, "\004");
     say("A3.4 the relay's end: %s; the winch panes' %s, %s\n", pane_settle(r, 5000), pane_settle(a, 3000),
         pane_settle(b, 3000));
+    /* A3.5 (pax#500): a size set while the program sleeps between its first line and its wait is reported once it
+     * waits; a program that checks a flag only after its read returns sleeps past it */
+    char *wl[] = {"/bin/muxprobe", "winch", "late", 0};
+    int c = pane_start(wl, 0, 1);
+    NEED(c, "A3.5");
+    int rc5 = until(c, "winch 0 0", READY_MS);
+    forget(c);
+    if (!rc5) {
+        say("A3.5 a size set between a program's first line and its wait: NOT ready, its program never said its first size\n");
+    } else {
+        setsize(P[c].m, 33, 97);
+        say("A3.5 a size set between a program's first line and its wait: %s\n",
+            until(c, "winch 33 97", LATE_MS + 5000) ? "read 33 97" : "NOT 33 97");
+    }
+    type(c, "\004");
+    pane_settle(c, 3000);
     fflush(stdout);
 }
 
@@ -1133,6 +1154,19 @@ static void sec_a4(void) {
                       : "ignored by the parent, reset to the default in the child before exec",
             what[0], what[1]);
     }
+    /* A4.5 (pax#500): 0x03 while the program sleeps between its ready line and its wait is heard once it waits */
+    char *sl5[] = {"/bin/muxprobe", "sig", "late", 0};
+    int l5 = pane_start(sl5, 0, 1);
+    NEED(l5, "A4.5");
+    if (!until(l5, "sig: ready", READY_MS)) {
+        say("A4.5 0x03 between a program's ready line and its wait: NOT ready, its program never said it was ready\n");
+    } else {
+        type(l5, "\003");
+        say("A4.5 0x03 between a program's ready line and its wait: %s\n",
+            until(l5, "heard INT", LATE_MS + 5000) ? "heard INT" : "NOT INT");
+    }
+    type(l5, "\004");
+    pane_settle(l5, 3000);
     fflush(stdout);
 }
 
@@ -1655,9 +1689,9 @@ int main(int argc, char **argv) {
         if (strcmp(argv[1], "spew") == 0) return mode_spew();
         if (strcmp(argv[1], "pane") == 0) return mode_pane();
         if (strcmp(argv[1], "hold") == 0) return mode_hold();
-        if (strcmp(argv[1], "winch") == 0) return mode_winch();
+        if (strcmp(argv[1], "winch") == 0) return mode_winch(argc > 2 && strcmp(argv[2], "late") == 0);
         if (strcmp(argv[1], "relay") == 0) return mode_relay();
-        if (strcmp(argv[1], "sig") == 0) return mode_sig();
+        if (strcmp(argv[1], "sig") == 0) return mode_sig(argc > 2 && strcmp(argv[2], "late") == 0);
         if (strcmp(argv[1], "rawkill") == 0) return mode_rawkill();
         if (strcmp(argv[1], "keys") == 0) return mode_keys();
         if (strcmp(argv[1], "paint") == 0) return mode_paint(argc > 2 ? atoi(argv[2]) : 10);
