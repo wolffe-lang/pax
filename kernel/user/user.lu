@@ -202,6 +202,13 @@
 //!   FIFO's open rules (`openat`). A page fault on a mapping's page past
 //!   its file's end is SIGBUS (`kill`, U_BUS), and a process that used
 //!   `mremap` says how at its end (`remap_line`).
+//! - the clock set (px168): root's `clock_settime` (227) of CLOCK_REALTIME
+//!   and `settimeofday` (164) set the wall clock, U_EPOCH, in one store;
+//!   the time zone `settimeofday` is given is kept and `gettimeofday`
+//!   answers it, the first zone given alone moving the clock as Linux's
+//!   does. The checks come in Linux's measured order (tests/mpx5-users' `clock`
+//!   sessions): the clock, an unreadable argument, the time itself, the
+//!   caller, then a time below CLOCK_MONOTONIC.
 //! Every other number is -ENOSYS, logged once per program (`unknown`),
 //! among them `set_robust_list` (273) and `rseq` (334), which glibc
 //! tolerates (px09's hello asks `_sysctl` (156), which Linux answers
@@ -1540,7 +1547,133 @@ fn gettimeofday(tv: u64, tz: u64) -> u64 {
         if !uaccess.writable(pml4, tz, 8) {
             return NEG_EFAULT
         }
-        uaccess.zero(pml4, tz, 8)
+        // px168: the zone `settimeofday` was last given (0 0 until then).
+        // # Safety: module words only `settimeofday` writes, IF clear.
+        uaccess.put(pml4, tz, unsafe { tz_west | (tz_dst << 32) }, 8)
+    }
+    0
+}
+
+// --- px168: setting the clock ------------------------------------------------------
+//
+// Written from clock_getres(2) (clock_settime's errors, the time below
+// CLOCK_MONOTONIC), settimeofday(2) (the zone, its first-call warp),
+// adjtimex(2) and clock_adjtime(2) (the modes a user may ask), uapi
+// `linux/time.h` and `linux/timex.h` (the clocks, ADJ_OFFSET_SS_READ,
+// `struct __kernel_timex`'s 208 bytes), and black-box runs of Linux 7.2.4
+// under QEMU (tests/mpx5-users.d/clock-vm.sh: the order of every check
+// and the largest second, SETTOD_SEC_MAX). No Linux source.
+
+/// The largest second either set takes (measured: 8277292035 is taken,
+/// 8277292036 refused, by root and by a user's checks alike).
+const SETTOD_SEC_MAX: u64 = 8277292035
+const TZ_WEST_MAX: u64 = 900 // a zone's minutes west, either way (measured: 900 taken, 901 -EINVAL)
+const CLOCK_REALTIME: u64 = 0
+
+/// The zone `settimeofday` was last given: tz_minuteswest and tz_dsttime,
+/// each a C int's 32 bits; and whether no zone has been given yet (the
+/// first one given alone moves the clock: `settimeofday`).
+var tz_west: u64 = 0
+var tz_dst: u64 = 0
+var tz_first: bool = true
+
+/// Set the wall clock to `ns` since the epoch, the caller's checks past:
+/// -EPERM for a user, -EINVAL below CLOCK_MONOTONIC (clock_getres(2):
+/// Linux refuses it since 4.3), else U_EPOCH in one 64-bit store (each
+/// reader adds the ticks to it: `wall_ns`, kernel/tree's `now`).
+fn set_wall(ns: u64) -> u64 {
+    if !cred.privileged(area()) {
+        return NEG_EPERM
+    }
+    let mono = now_ns()
+    if ns < mono {
+        return NEG_EINVAL
+    }
+    put_state(U_EPOCH, ns - mono)
+    0
+}
+
+/// `clock_settime(clock, tp)` (227): CLOCK_REALTIME alone, any other
+/// clock -EINVAL first; an unreadable `tp` -EFAULT; nanoseconds out of
+/// range, a negative second or one past SETTOD_SEC_MAX -EINVAL; then
+/// `set_wall`. The bound comes before any product, which wolf would trap.
+fn clock_settime(clk: u64, tp: u64) -> u64 {
+    if clk & 0xffffffff != CLOCK_REALTIME {
+        return NEG_EINVAL
+    }
+    let pml4 = paging.live()
+    if !uaccess.readable(pml4, tp, 16) {
+        return NEG_EFAULT
+    }
+    let sec = uaccess.get64(pml4, tp)
+    let nsec = uaccess.get64(pml4, tp + 8)
+    if nsec >= NS_PER_SEC || sec > SETTOD_SEC_MAX {
+        return NEG_EINVAL
+    }
+    set_wall(sec * NS_PER_SEC + nsec)
+}
+
+/// `settimeofday(tv, tz)` (164), either argument NULL: an unreadable one
+/// -EFAULT; microseconds out of range or a second as `clock_settime`
+/// refuses it -EINVAL; then -EPERM for a user, even with both NULL; a
+/// zone more than 900 minutes either way -EINVAL; the time set
+/// (`set_wall`); the zone kept. The first zone given with no time and
+/// minutes west not 0 moves the clock by those minutes (settimeofday(2):
+/// the battery clock taken to keep local time), once a boot.
+fn settimeofday(tv: u64, tz: u64) -> u64 {
+    let pml4 = paging.live()
+    var sec: u64 = 0
+    var usec: u64 = 0
+    if tv != 0 {
+        if !uaccess.readable(pml4, tv, 16) {
+            return NEG_EFAULT
+        }
+        sec = uaccess.get64(pml4, tv)
+        usec = uaccess.get64(pml4, tv + 8)
+    }
+    var west: u64 = 0
+    var dst: u64 = 0
+    if tz != 0 {
+        if !uaccess.readable(pml4, tz, 8) {
+            return NEG_EFAULT
+        }
+        west = uaccess.get(pml4, tz, 4)
+        dst = uaccess.get(pml4, tz + 4, 4)
+    }
+    if tv != 0 && (usec >= 1000000 || sec > SETTOD_SEC_MAX) {
+        return NEG_EINVAL
+    }
+    if !cred.privileged(area()) {
+        return NEG_EPERM
+    }
+    let east = west >= 0x80000000 // a negative int: minutes east
+    let minutes = if east { 0x100000000 - west } else { west }
+    if tz != 0 && minutes > TZ_WEST_MAX {
+        return NEG_EINVAL
+    }
+    if tv != 0 {
+        let r = set_wall(sec * NS_PER_SEC + usec * 1000)
+        if r != 0 {
+            return r
+        }
+    }
+    if tz != 0 {
+        // # Safety: module words, written here alone, IF clear.
+        let first = unsafe { tz_first }
+        unsafe {
+            tz_first = false
+            tz_west = west
+            tz_dst = dst
+        }
+        if first && tv == 0 && minutes != 0 {
+            let d = minutes * 60 * NS_PER_SEC
+            let e = state(U_EPOCH)
+            if !east {
+                put_state(U_EPOCH, e + d)
+            } else if e >= d {
+                put_state(U_EPOCH, e - d)
+            }
+        }
     }
     0
 }
@@ -2493,6 +2626,12 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_GETTIMEOFDAY {
         return gettimeofday(a0, a1)
     }
+    if nr == SYS_CLOCK_SETTIME {
+        return clock_settime(a0, a1) // px168
+    }
+    if nr == SYS_SETTIMEOFDAY {
+        return settimeofday(a0, a1) // px168
+    }
     if nr == SYS_UNAME {
         return uname(a0)
     }
@@ -2670,7 +2809,7 @@ fn dispatch(nr: u64, r0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u6
     if nr == SYS_UMOUNT2 && cred.privileged(a) {
         return files.umount_call(a, pml4, r0, a1)
     }
-    if nr == SYS_CHROOT || nr == SYS_SETTIMEOFDAY || nr == SYS_MOUNT || nr == SYS_UMOUNT2 || nr == SYS_REBOOT || nr == SYS_SETHOSTNAME || nr == SYS_SETDOMAINNAME || nr == SYS_CLOCK_SETTIME {
+    if nr == SYS_CHROOT || nr == SYS_MOUNT || nr == SYS_UMOUNT2 || nr == SYS_REBOOT || nr == SYS_SETHOSTNAME || nr == SYS_SETDOMAINNAME {
         return process.root_call(nr, r0, a1, a2)
     }
     if nr == SYS_UTIMES || nr == SYS_UTIME {
