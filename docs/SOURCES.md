@@ -2629,3 +2629,85 @@ black box in a container of Ubuntu 24.04.5, on records those programs wrote and 
 | Ubuntu 24.04's login (`login` 1:4.13+dfsg1-4ubuntu3.2) | black box on a pseudo-terminal in a container, px106's bare PAM | its utmp record, its btmp records for a refused try (USER_PROCESS, `UNKNOWN` for a name no account has), no wtmp record |
 | OpenSSH 9.6p1's sshd (Ubuntu's `openssh-server` 1:9.6p1-3ubuntu13.20) | black box on loopback in a container | a pty session's USER_PROCESS and DEAD_PROCESS in wtmp and utmp, nothing for a command with no pty, a refused password's LOGIN_PROCESS on `ssh:notty` in btmp |
 | util-linux 2.39.3's last and lastb (Ubuntu's `util-linux` 2.39.3-9ubuntu6.6) | black box in a container, 87 runs on hand-written files and a calibration | every column, the end column's forms, the lengths, `FILE begins`, a session whose process started after its record `gone - no logout`, the refusals' words and statuses |
+
+## px125 — PAX for a terminal multiplexer (the readiness probe, Ctrl-Space, the box-drawing glyphs)
+
+No kernel's, terminal emulator's, multiplexer's or C library's source was read: not Linux's, not xterm's, not any
+other terminal's or multiplexer's. Ubuntu was measured as a black box with the probe's own static binaries.
+
+| source | version | read, for |
+|---|---|---|
+| man-pages `pty(7)`, `unix(7)` (`SO_PEERCRED`, `SCM_RIGHTS`, abstract names), `epoll(7)`, `signal(7)`, `termios(3)` (`cfmakeraw`), `credentials(7)`, `setsid(2)`, `prctl(2)` (`PR_SET_CHILD_SUBREAPER`), `eventfd(2)`, `timerfd_create(2)`, `signalfd(2)`, `ppoll(2)`, `sendmsg(2)`, `cmsg(3)`, `ioctl_tty(2)` (`TIOCSWINSZ`, `TIOCGPTN`, `TIOCGSID`) | man-pages 6.x | the A rows' questions and the calls `user/elf/muxprobe.c` makes |
+| man-pages `console_codes(4)`, man7.org's HTML copy, sha256 `3cabfae601fcb7e50f1b09e6e3feae742f225a59e114af8e63ee08a07981da77` | Linux man-pages 6.19, 2026-07-29 | which sequences the Linux console documents (RI, SCOSC/SCORC, DECIM, DECOM, DECAWM) and which it lists as not implemented (DCS, SOS, PM); the B1 and B6 verdicts and the console issue |
+| POSIX.1-2024, XBD 11 (General Terminal Interface) | 2024 | the controlling terminal, the foreground process group, the special characters |
+| **XTerm Control Sequences**, as px117's entry (by its digests) | as px117 | what each B case expects xterm to draw, answer or send: the alternate screens, DECSC/SCOSC, DECSTBM, RI, IL/DL/ICH/DCH/ECH, EL/ED, SU/SD, REP, IRM, DECOM, DECAWM, CHT, SGR (the 16, 256 and direct colours, the underline styles), DA1/DA2/DA3, DSR, CPR and DECXCPR, DECRQM, XTVERSION, OSC 10, DECRQSS, XTGETTCAP, DECSCUSR, bracketed paste and focus, the PC-style function keys and their modifiers, OSC 0/2/8/52, DCS, APC, PM and SOS (`tests/mpx7-mux.d/cases.py`) |
+| the kitty keyboard protocol's query `CSI ? u` | the sequence alone | B4's question whether the console answers it (it does not); no document or source read beyond the sequence |
+| ECMA-48, as px19's entry | 5th ed. | the control functions' names |
+| **Spleen 8x16**, as the font's entry (vendored, BSD-2-Clause) | 2.2.0 | its own glyphs for U+2500-U+257F, U+2190-U+2193, U+E0A0-U+E0A2 and U+E0B0-U+E0B3, taken by `tools/mkfont` through `font/extent.txt`; no other font consulted |
+| wolf-std at `77cf3210a82c93dc05ded987c249bb69e79b0a89` (the org's own, public): `std/term`, `std/process`, `std/signal`, `std/net` and `std/net/unix`, `std/fs` | `77cf3210` | the calls `user/muxwolf` makes and the two it lacks (the wolf-std issues) |
+| wolf 0.2.39, the release archive for x86_64-unknown-linux-gnu, sha256 `53f75d2b2dd79c0532b21920bc9f073098154aa0133caa2405209a1ef2af0457` | 0.2.39 | builds `user/muxwolf` (`tools/mkmuxwolf`) |
+| Ubuntu 24.04.5 in the suite's container (`localhost/px75-ubuntu:2`), on a Linux 7.2 host | binary | black box: the same static `muxprobe` and `muxwolf` as pid 1 on a pseudo-terminal (`tools/linux-tree`), the references in `tests/mpx7-mux.d/linux/` with their digests in `record.meta` |
+| QEMU 8.2.2 (Ubuntu's `qemu-system-x86`): `-device VGA` with `vgamem_mb=64`, `xres=2560`, `yres=1440`; the i8042; the monitor's `screendump` and `sendkey` | binary | black box: B7 at the target machine's display size; B5's keys typed at the PS/2 keyboard |
+| px123's rows in `tests/mpx5-burrowd` (B19-B27: a terminal over `ssh -t`, its size, a resize, Ctrl-C, Ctrl-\, Ctrl-Z) | px123's branch | cited for A.3, A.4 and B8, not run here |
+| PAX's own `kernel/sched` (`SLOTS`), `kernel/ready`, `kernel/pty`, `kernel/unix`, `kernel/console`, `kernel/screen`, `kernel/user`, `tools/linux-tree`, `tools/ps2-session`, `tools/screen-ref`, `user/elf/vtcases.c`, `tools/mksigwolf` (the probe's builder's shape) | this tree | read and extended |
+## px124 — pid 1 stays: a logout at the console, and a runtime directory for each account (pax#352)
+
+No init's, getty's, login's, systemd's or any kernel's source was read, and no C library's or shell's. What was:
+
+- **init(8)**, **getty(8)** and **login(1)** (Ubuntu 24.04's manual pages): what pid 1 and the console's login are
+  to each other, a login started again when it ends.
+- **setsid(2)**, **ioctl_tty(2)** (`TIOCSCTTY`, `TIOCNOTTY`: a session leader that gives its terminal up sends its
+  foreground group SIGHUP and SIGCONT; `TCGETS`, `TCSETSW`), **termios(3)**, **wait4(2)**, **kill(2)**,
+  **mount(2)** and **proc_pid_stat(5)** (`session`, field 6; `tty_nr`, field 7) (man-pages 6.7), and the x86-64
+  psABI and the syscall table's numbers for `user/init/init.S`.
+- **POSIX.1-2024** XBD 11.1 (sessions, controlling terminals, the controlling process and its terminal's hangup)
+  and XSH `_exit` (an ending controlling process's foreground group sent SIGHUP; orphaned groups).
+- **The XDG Base Directory Specification** (0.8): `$XDG_RUNTIME_DIR`, owned by the user alone, mode 0700, its
+  lifetime bound to the user's logins; **pam_systemd(8)**, **logind.conf(5)** and **loginctl(1)** (`/run/user/$UID`,
+  its owner and mode, `KillUserProcesses`: a session's processes ended when it ends; `enable-linger`: a user's
+  directory and services kept past the last logout) as published text, for the directory's place, its lifetime
+  (PAX keeps it from boot to shutdown, as lingering does: notes/px124-pid-1.md) and the hangup's shape.
+- **bash(1)**'s `logout` builtin ("Exit a login shell"), as a page.
+- PAX's own `user/login/login.lu` (its boot duties, moved), `user/auth/secret.lu`, `user/sudo/sudo.lu` (`ts_key`:
+  the terminal's record names the session leader's start time), `kernel/sched` (`setsid`, `take_tty_of`,
+  `drop_tty_of`, `tty_leaves`, `reparent`, `process_ends`), `kernel/signal` (pid 1 spared a default action),
+  `kernel/user` (`end_processes`, `the_end`), `kernel/files` (mount(2)'s tmpfs, the console terminals' owner and
+  mode), `kernel/procfs` (`/proc/PID/stat`), `kernel/kmain_console.lu` (the run list, init's end),
+  `user/termwolf/tio.S` and `user/install/raw.S` (the membrane's shape), and the wolf runtime's `os_fork` (the
+  org's own, wolf-lang's `crates/wolf_rt/src/fork.rs`: the child's table, why a raw fork would be unsound).
+
+## px156 — pid 1 reaps what it is handed, runs the boot's duties once, and records a logout (pax#352)
+
+No init's, login's, util-linux's or any kernel's source was read, and no C library's or shell's. What was:
+
+- **utmp(5)** (man-pages 6.7): `DEAD_PROCESS`, and init's part in it (when init finds that a process has ended, it
+  finds its utmp entry by `ut_pid` and marks it `DEAD_PROCESS`), for init's record of a console session's end;
+  `BOOT_TIME` for the boot's record, which moved from login to init unchanged.
+- **uname(2)** (`struct utsname`: the release the third of six 65-byte fields), for `user/init/init.S`, read as
+  `user/logd/raw.S` reads it.
+- **fork(2)**, **setsid(2)**, **pipe(2)**, **open(2)**, **read(2)**, **clock_gettime(2)** (`CLOCK_MONOTONIC`),
+  **wait4(2)** and **proc_pid_stat(5)** (`state`, field 3; `ppid`, field 4; `session`, field 6; `starttime`, field
+  22), for `user/elf/orphan.c` and rows I14 and I15: a zombie is `Z`, an ended and reaped process has no
+  `/proc/PID`.
+- **login(1)** and **init(8)** (Ubuntu 24.04's manual pages): a login started again in its session is not a new
+  boot.
+- PAX's own `user/init`, `user/login/login.lu`, `user/auth/utmp.lu` (`ut_boot`, `ut_logout`, `ut_read`),
+  `user/last/last.lu` (`-e`, `--time-format iso`), `user/logd/raw.S` (uname's shape), `tests/mpx6-logs` and
+  `tests/mpx5-burrowd.d/rows.py` (the trees' installed shape).
+- Black-box: the shell as pid 1 on a trunk image, which leaves an orphan that ended as a zombie whose parent is 1,
+  and runs the hooks, `pax-boot-status record` and sudo's emptying again at `exec /bin/login` (the rows' red take).
+
+## px161 — SMP stage 1: every application processor started, its own state, parked idle
+
+No kernel's, firmware's or bootloader's source was read: the bootloader is a black box run by its protocol, and its
+processors' parked state was read from QEMU's register dump, not from its code.
+
+| source | version | read, for |
+|---|---|---|
+| The Limine protocol, PROTOCOL.md: the MP (Multiprocessor) feature (the request, its x2APIC flag, the response, `struct limine_mp_info`, `goto_address` with release and acquire, `extra_argument`), the Stack Size feature, the x86-64 machine state at entry (base revisions 5 and 6: the local APIC on every processor, the LVT entries masked) | limine-protocol `3a0526b7` (Limine 12.9.1, `boot/limine.pin`) | the request in `boot/start.S`, `kernel/boot_info`'s MP response, `kernel/smp`'s hold and release, `boot/isr.S`'s `pax_ap_hold` and `pax_ap_entry` |
+| Limine's CONFIG.md | v12.9.1 | that no configuration option turns the MP feature off: `nosmp` is the kernel's word |
+| Intel SDM vol. 2: SWAPGS, SYSCALL, SYSRET, IRET, RDMSR, WRMSR, LGDT, LTR, LIDT, MOV to CR3, XSETBV, HLT (and what ends it with interrupts off), STI's shadow | as px09's and kw10's entries | the GS step at every change of ring, the application processor's hold, entry and idle |
+| Intel SDM vol. 3A §2.5 (CR0, CR4), §2.6 (XCR0), §3.4.4 (FS and GS bases in 64-bit mode), §5.8.8 (SYSCALL and SYSRET, the window before the stack switch), §6.7.1 (the NMI's blocking until IRET), §6.14.1 (the 64-bit interrupt gate), §6.14.5 (the interrupt stack table), §7.7 (the 64-bit TSS), §9.4 (INIT, wait-for-SIPI), §11.4-§11.6 (the local APIC, the ICR, NMI and INIT delivery), §11.5.4 (its timer), §11.9 (the spurious vector), §11.12 (x2APIC: the ICR as one MSR, xAPIC to x2APIC directly) | as px76's and kw10's entries | per-processor GDT, TSS and IST stacks, the control state an application processor takes from the boot processor, its tick, the hold's gate and its one NMI, INIT for a processor not run, the NMI the test sends |
+| Intel SDM vol. 4: IA32_GS_BASE (0xC0000101), IA32_KERNEL_GS_BASE (0xC0000102), IA32_EFER, STAR, LSTAR, FMASK, IA32_APIC_BASE | as px09's entry | the GS bases each ring sees, and the MSRs mirrored |
+| QEMU's monitor (`stop`, `cont`, `info registers -a`) | QEMU 8.2.2, run | every processor's RIP, RSP, GS, GDT, TR, IDT, CR0, CR3, CR4 and EFER from outside the guest, for tests/mpx6-cpus |
+| The processor census (`tests/mpx6-cpus.d/inventory.json`, `protections.json`), and PAX's own `kernel/gdt`, `kernel/idt`, `kernel/apic`, `kernel/timer`, `kernel/interrupts`, `kernel/sched`, `kernel/procfs`, `kernel/cpus`, `boot/isr.S`, `boot/user.S`, `boot/sched.S`, `tests/mpx6-cpus` | this tree | read and extended |

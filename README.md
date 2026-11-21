@@ -20,11 +20,10 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
 | Disks | Up to eight disks: virtio (four), NVMe (`nvme0n1`, major 259), SATA AHCI (`sda`, major 8, LBA48; a controller in RAID mode named and left alone), or USB mass storage (`sdX`, Bulk-Only Transport), with GPT or MBR tables and `/dev` nodes; ext2 read and written, file data past 2 TiB on every bus; ext3's journal written and replayed; `/` on the disk, `mount(2)`, `/etc/fstab`; an offline `fsck.ext2` in wolf | Linux 7.3.0 under QEMU (NVMe and AHCI: 7.2.4) and e2fsprogs |
 | Network | virtio-net, and Intel's 82576 (by MSI-X) and I225/I226 (polled) on one ring model; ARP, IPv4, ICMP, UDP, TCP (RFC 9293, 6298, 5681), Unix sockets, `poll`, `epoll`, `eventfd`; 256 TCP connections; a DHCP client (RFC 2131) when `/etc/pax-net` says `dhcp`, with `/etc/resolv.conf` from the lease, or a static address when it says `static`; the console every image boots takes its address so, bounded: a missing device, a cable with no link or a server that never answers never stops the boot; names resolve through the C library's resolver as on Linux (`/etc/hosts`, then DNS) | Linux in a namespace, captures rebuilt byte by byte, and dnsmasq as a black box for every lease event |
-| Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline with Linux's termios and termios2 ioctls on the console and pseudo-terminals; USB mice and tablets, their events in `/dev/mouse0`, a pointer on the screen and xterm's SGR mouse reports for the program that asks; a firmware-sized framebuffer with the Linux VT's colours and 560 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
-| Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline; USB mice and tablets, their events in `/dev/mouse0`, a pointer on the screen and xterm's SGR mouse reports for the program that asks; a firmware-sized framebuffer with the Linux VT's colours and 690 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
+| Console | A 16550 serial console when present, PS/2 and USB keyboards over xHCI with MSI or INTx, one line discipline with Linux's termios and termios2 ioctls on the console and pseudo-terminals; USB mice and tablets, their events in `/dev/mouse0`, a pointer on the screen and xterm's SGR mouse reports for the program that asks; a firmware-sized framebuffer with the Linux VT's colours and 690 glyphs | typed sessions on a Linux pseudo-terminal; screendumps against a reference renderer |
 | Firmware | Checksummed ACPI tables, one boot line each; a local APIC tick calibrated against the HPET (checked against the ACPI PM timer), else the PM timer, else the PIT; the xHCI on MSI where it offers it; ACPI reset and static S5 power-off; every boot line on the screen with no serial port | QEMU BIOS and UEFI, including machines with no HPET, no PIT, no COM1, a 3840×2160 GOP and BARs above 4 GiB |
 | Sound | The PC speaker through Linux's console ioctls; virtio sound behind OSS `/dev/dsp`; `/bin/play`, an orchestra of 17 timbres | QEMU's capture, every pitch within 1% |
-| Shipped programs | pelt (the shell, PID 1), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh` and its server `burrowd`, yew, sniff (the debugger), lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
+| Shipped programs | init (an installed system's PID 1), pelt (the shell; PID 1 of the dev and release images and the stick), boreutils (107 utilities), scent as `grep`, den as `git`, burrow as `ssh` and its server `burrowd`, yew, sniff (the debugger), lope, aspen, lupin, lobo, clef, three wolf games | the same binaries in a Linux container |
 
 What PAX is not: a security boundary. The permission checks hold for honest programs; the kernel has never been fuzzed
 or audited, it loads programs at fixed addresses, the live USB entry accepts `root` with no password, and so does an
@@ -54,7 +53,8 @@ accounts, and all four read one password file:
   then `Password: ` with no echo. A failure waits 3 seconds and says `Login
   incorrect`, the same words for a wrong password, a locked account and one
   that does not exist; five failures end the try, and 60 seconds end an
-  unfinished one. Then it starts again, since nothing else would.
+  unfinished one. Then `/bin/init` starts it again, as it does after every
+  logout (below).
 - **`su`** (set-user-ID root) asks for the target's password, once. A wrong
   one waits 3 seconds and says `su: Authentication failure`. Root is never
   asked.
@@ -133,6 +133,52 @@ All of this is **enforced for honest programs; not a boundary against an
 attacker**: the kernel has never been fuzzed or audited and loads programs at
 fixed addresses.
 
+## Logging out: pid 1 on an installed system
+
+An installed PAX's pid 1 is `/bin/init` (`user/init`, in wolf). Its `/etc/pax-run` names `/bin/login`, as every
+installer has written it, and login, run as pid 1, execs `/bin/init`. At each boot init does, once:
+
+- `/run`: a fresh tmpfs, 0755, so it is empty at every boot (`/` itself is on the disk); `/run/user` 0755, root's;
+  and `/run/user/UID`, 0700, the account's own, for every account whose shell is not a `…/false` or `…/nologin`;
+- what the boot's first program did before: sudo's records emptied, `pax-boot-status record`, utmp emptied and the
+  boot's record in utmp and wtmp (`last` shows it as `reboot   system boot`), the hooks of `/etc/pax-boot.d`
+  (burrowd's and logd's among them) in a process group each;
+- then it gives the console up and, for as long as the machine runs, starts `/bin/login` on it in a session of its
+  own (`HOST login:`), waits, and starts it again.
+
+These run once a boot whatever happens at the console: `exec /bin/login` in a shell logs in again in that session
+but runs no hook a second time, restarts no service, keeps sudo's records and writes no second boot record (login
+is not pid 1 then). And while it waits, init reaps every process the kernel hands it, as Linux's pid 1 does: a
+program whose parent ended before it does not stay a zombie under pid 1 once it ends, logged out or not.
+
+**`exit`, `logout` or Ctrl-D at an empty prompt** ends the login shell, and so the session: `HOST login:` comes
+back at once (2 seconds later when something in the session ignores SIGHUP), and the machine keeps running. What
+the session left behind is hung up, as logind ends a session's processes: every process still in it gets SIGHUP (and SIGCONT, so a stopped job hears it), and one
+still there 2 seconds later gets SIGKILL, which init says in one line (`init: the session of pid N: SIGKILL to 1 of 2
+…`). A process that left the session first, with `setsid` as a server does, is not touched: it goes on, init's child
+once its parent has ended, and init reaps it when it ends. What the boot hooks started (burrowd) is in pid 1's own
+session and never hung up, and an ssh session open across a console logout goes on. The console's terminal modes are
+put back as the boot left them (a program that left it raw or with echo off does not reach the next login), and the
+console is root's 0600 again until the next login gives it to its account. sudo's remembered password does not
+reach the next session: its record names the session's leader, a new process at every login. The logout is in the
+login records at its own time: init marks the session's utmp entry ended and appends that to wtmp, as utmp(5) has
+init do, so `last` shows the session ended at the logout (`last -e`: `logout`, or `signal N` when a signal ended
+the shell), not at the next login.
+
+**The runtime directory.** login sets `XDG_RUNTIME_DIR=/run/user/UID` (the XDG Base Directory Specification's),
+making the directory when it is not there (an account added since the boot). It is where a per-user server puts its
+socket: it is the account's alone, and empty after every boot. Over ssh the directory is there but the variable is
+not set (burrowd sets the same variables for every account).
+
+**Shutting down** is as before: `sudo poweroff`, `sudo reboot`, or `sudo reboot -h` to halt. The kernel ends every
+process, init too (SIGTERM and SIGCONT, then SIGKILL after 2 seconds), writes the volumes and resets, halts or
+powers off.
+
+**Where pid 1 is not init.** The dev and release images boot to a root shell, pid 1
+`/bin/env ENV=/etc/shrc /bin/sh -i -m` (pelt), and the live stick to its live login script (pelt): on both, `exit`
+ends pid 1, writes `/` and halts, as it always has, and there is no `/run` tmpfs or runtime directory.
+`tests/mpx5-init` holds all of it at the console of an installed-shaped image, and `tests/mpx5-burrowd` the ssh side.
+
 ## Quick start
 
 On a Linux x86-64 host with binutils, cc, make, curl, xorriso and `qemu-system-x86_64` (the Hosts table below says what
@@ -177,7 +223,7 @@ first program it prints how long its boot took and how much of that the console 
 | wolf, dev | the dev image's compiler, `/usr/bin/wolf` (`user/wolf.pin`) | 0.2.39, `3fc86f7` |
 | lupin | the reference interpreter for wolf, `/bin/lupin` | 0.1.61, `a10cbe57` |
 | wolf-std | the standard library beside lupin, `/usr/share/wolf/std` | `77cf3210` |
-| pelt | the POSIX shell, PID 1 at the console | `b80d6570` |
+| pelt | the POSIX shell, PID 1 at the dev and release images' console | `b80d6570` |
 | boreutils | coreutils in wolf, 107 command binaries in `/bin` (`df` not yet) | `ff5396ad` |
 | scent | grep in wolf: `/bin/scent`, with `grep` a link to it and `egrep` and `fgrep` its wrappers | `eb888dfc` |
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `291011dd` (wolf 0.2.36) |
@@ -321,7 +367,7 @@ answers for the same steps on Linux, and, given a repository on GitHub in its en
 ## Logging in to PAX over ssh
 
 `burrowd`, burrow's server, starts at every boot: `/etc/pax-boot.d/burrowd`, which pid 1 runs before the first prompt
-(`/bin/login` on an installed system, the live entry on the stick), makes the machine's host key at its first boot
+(`/bin/init` on an installed system, the live entry on the stick), makes the machine's host key at its first boot
 (`/etc/burrowd/ssh_host_ed25519_key`, from the CPU's RDRAND through `/dev/urandom`, and none on a machine without
 RDRAND, where `/dev/urandom` refuses: `/proc/pax-random`; no image ships one), prints its
 fingerprint on the console at every boot, and starts burrowd again a second after it ends. On an installed system it
@@ -564,7 +610,8 @@ journal ([Guided installation](docs/BOOT.md#guided-installation)):
   `sudo`'s log, and root's dotfiles and `/Trash` (root's home is `/`: the shell's history, lope's store, what `trash`
   put aside) are never copied to an
   install or an upgrade, nor listed in its manifest; the installed system writes its own;
-- an install made from the live stick boots to `/bin/login`, not the stick's passwordless entry: root or the new
+- an install made from the live stick boots to the console's login (`/bin/login`, which execs `/bin/init`, so
+  `exit` logs out: "Logging out" above), not the stick's passwordless entry: root or the new
   user, with their passwords, or root with none while every account is locked (the first-boot rule above). As
   Linux's `login` does, the login gives the terminal to the account it logs in (its user, its primary group, mode
   0600), so what the user opens by name, such as `/dev/stdout` or `/dev/stderr`, is theirs to open.
@@ -947,6 +994,7 @@ and `--tier native --firmware bios` picks one leg.
 | Users and the shipped programs | `mpx5-users`, `mpx5-accounts`, `mpx5-jobs`, `mpx5-pty`, `mpx5-kmsg`, `mpx5-forks`, `mpx5-rates`, `mpx5-pelt`, `mpx5-bore`, `mpx5-scent`, `mpx5-den`, `mpx5-lope`, `mpx5-aspen`, `mpx5-lupin`, `mpx5-yew`, `mpx5-wolf`, `mpx5-lsp`, `mpx5-clef`, `mpx5-screen` | every rule as root and as `pax`, job control typed byte for byte, the kernel's log through `/dev/kmsg` and `syslog(2)` against Linux's, static musl programs that fork and ask `getrusage`, the rates a clone leans on against the host's Linux, each program's typed session against the same binary in a container, the language server's frames both ways |
 | Disks | `mpx6-blk`, `mpx6-ext2`, `mpx6-part`, `mpx6-root`, `mpx6-journal`, `mpx6-nodes`, `mpx6-nvme`, `mpx6-ahci`, `mpx6-disktools`, `mpx6-fsck`, `mpx6-install`, `mpx6-games` | Linux 7.3.0 on QEMU with the same disks, e2fsprogs, the formatters' differentials, a power cut repaired, the installer (and what it tells a user who is not root), the games' frames cell for cell |
 | USB | `mpx6-usb`, `mpx6-usbcheck`, `mpx6-pointer`, `usb-tools`, `usb-stick`, `usb-linux-fetch` | xHCI, hubs, keyboard bytes and hotplug; two mice and a tablet through `/dev/mouse0`'s records (moves, each button, a drag, the wheel, a burst that fills the queue with no edge lost, unplug and replug, typing during motion), under KVM and TCG; (px117) the pointer drawn and erased cell-exact and never copied by a scroll, SGR reports of each button, drags, the wheel and the modifiers from the tablet and the mouse, none without a mode or for a mode not served, the modes' owner ending or in the background, reports and keys in order, a pty's program served by its master; (px120) hot-plug after the probe has churned memory past 4 GiB, on two controllers (INTx and MSI): mice, a keyboard and two composite HID devices played over usb-redir, 40 plugs and unplugs past the 32 records a controller keeps, two devices past them said once each; the stick's boot files, both firmwares, Linux mounting the ESP; the oracle's two pinned Ubuntu packages |
+| A terminal multiplexer's needs | `mpx7-mux` | (px125) a server's plumbing held to Ubuntu 24.04 running the same static C and wolf-std programs as pid 1 on a pseudo-terminal: 32 ptys in one epoll loop, a 50 MB flood in order with the other panes answering, back-pressure, SIGWINCH through a pty inside a pty, the signal keys, a setsid daemon, Unix sockets (mode, owner, 16 clients, peer credentials, a stale file, descriptor passing), non-blocking I/O and the loop's timers, termios raw and after SIGKILL; what the console draws, answers and types for a client, read back cell by cell (the screen's operations, SGR, glyphs and widths, the cursor and the queries, keys, OSC and DCS), and a full repaint timed at 2560 x 1440 |
 | Firmware and display | `mpx6-firmware` | independent tick-rate checks with and without the HPET and the PIT, the clock's answers to a reading behind the last, a torn read of the HPET and the rollovers of a 32-bit HPET and of the PM timer, the tick timed by the PM timer after a stall inside its calibration (with the PM timer beside the clock, without it, and standing still with it), the timer and scheduler suites on those machines, MSI and INTx keyboard sessions, both MSI layouts, BARs above 4 GiB, reset and S5, a padded pitch, serial-less early panic pixels at 1280×800 and 4K, a serial-less 4K session shaped like the target machine, the metal triage's boxes, fault screens and words, an NMI survived and a machine check named anywhere in the boot (`tests/mpx6-nmi`) |
 
 Suites that need something of the host say so and stop: root for the Linux network side (`tools/linux-net`), docker or
@@ -1011,7 +1059,7 @@ without it `tests/proof` skips that leg loudly, unless `PAX_REQUIRE_UEFI=1` (CI)
 |---|---|
 | `kernel/` | the wolf kernel, one module per subsystem (`kernel/README.md`), its `wolf.pkg` and the wolf and lupin pins |
 | `boot/` | the Limine pin and configs, the kernel's entry and requests, port I/O, the control registers, the interrupt trampolines and the descriptor tables' storage (`start.S`, `io.S`, `cpu.S`, `isr.S`, `kernel.ld`), and the harness's assembly proof under `boot/stub/` |
-| `user/` | what the images carry: the pins of every shipped program (`*.pin`), the typed sessions (`console/`), `su`, the probes (`elf/`, `net/`), `play/` and `tunes/`, `disktools/` (paxgpt, paxfat, paxext2), `install/` (the guided installer), the fstabs and the shell's `$ENV` file |
+| `user/` | what the images carry: the pins of every shipped program (`*.pin`), the typed sessions (`console/`), `su`, the probes (`elf/`, `net/`, and `muxwolf/`, px125's wolf-std probe with its own toolchain pin), `play/` and `tunes/`, `disktools/` (paxgpt, paxfat, paxext2), `install/` (the guided installer), the fstabs and the shell's `$ENV` file |
 | `tools/` | the harness: the fetchers by digest (`fetch-limine`, `fetch-wolf`, `fetch-lupin`, `fetch-usb-linux`) and the source fetches' one retry (`fetch-retry`), the builders (`build-kernel`, `mkimage`, `mkdisk`, `mkdistribution`, `mkinstall`, `mkgames`, `mkfsck`, `mk*` for each program), the QEMU drivers (`qemu-run`, `qemu-halt`, `qemu-fault`, `qemu-gdb`, `expect-serial`), the Linux sides (`linux-run`, `linux-net`, `linux-tree`, `linux-blk`, `linux-part`), the network tools (`net-peer`, `pcap-net`, `pcap-dhcp`, `dhcp-wire`, `gateway-probe`, `paxnet.py`, `paxtcp.py`), the metal stick for the network (`mkwire`), the font tools (`mkfont`, `screen-ref`), the USB tools (`check-usb`, `usb-write`, `usb-typing`), the installer tests' used disks (`used-disk`) and CI's planner (`ci-plan`, `ci-tiers.map`, `ci-retry`) |
 | `font/` | the screen's font: Spleen 8×16 (BSD-2-Clause, with its licence), `extent.txt` (the code points drawn above U+00FF), `pax-extra.bdf` (PAX's own rows for the glyphs Spleen lacks) and `games-glyphs.txt` |
 | `tests/` | the suites above, each with its fixtures in `NAME.d/`; `ci-budgets.d/` |

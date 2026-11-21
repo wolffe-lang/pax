@@ -1,11 +1,30 @@
 # kernel/
 
-PAX currently runs on one logical processor. At boot it counts the enabled
-processors in the ACPI MADT and reports how many are available and that one
-is active; it starts no secondary processor. `/proc/pax-cpus` reports the same
-counts, with online-capable-only and disabled entries separate. Missing or
-unusable firmware data means `available unknown`, not an invented count.
-The parser and boot/proc agreement are tested by `tests/mpx6-cpus`.
+PAX runs its threads on one logical processor, the boot processor. At boot it
+counts the enabled processors in the ACPI MADT and reports how many are
+available and that one is active. Since SMP stage 1 (px161) it also starts
+every application processor the bootloader lists (Limine's MP feature): each
+gets its own record (`percpu/`, GS's base in ring 0), GDT, TSS and five
+guarded stacks, takes the boot processor's control registers and SYSCALL MSRs,
+arms its own local APIC timer from the boot processor's calibration and halts
+between its ticks (`smp/`). It runs no thread: the scheduler's tick and switch
+stop any processor but CPU 0 that reaches them. The kernel's first step
+takes the processors out of the bootloader's parked loop, which spins, and
+halts them until the boot processor's control state is final. `nosmp` runs
+none and sends each INIT: it waits for a startup IPI, as before any was
+started.
+`/proc/pax-cpus` reports the firmware's counts (online-capable-only and
+disabled entries separate; missing or unusable firmware data means `available
+unknown`, not an invented count), then `started`, `idle` and one line a
+processor. The parser, the boot and proc agreement, and every processor's
+state as QEMU's register dump shows it are tested by `tests/mpx6-cpus`.
+
+Every change of ring swaps GS (SWAPGS: `boot/isr.S`'s GS step, `boot/user.S`'s
+SYSCALL entry and the way into ring 3), so ring 0 finds its processor's record
+at `%gs:0` and ring 3 keeps a GS base of its own (0). An exception reads
+IA32_GS_BASE to tell a window (an NMI or #DB between a SWAPGS and the ring
+change) from ring 0's ordinary state; an interrupt reads its frame's CS. The
+running thread's slot and SYSCALL's stack words are each processor's record's.
 
 
 The wolf kernel: first light (px01, M-PX1), physical frames (px02), paging (px03), interrupts (kw10), preemptive kernel threads (px07), the heap (px06) and user mode (px09, below), on the wolf 0.2.35 release archive (px05 moved pax to the archive at 0.2.23; px07 to 0.2.24 for kw11's atomics; px10 to 0.2.25; px16 to 0.2.26; px21a to 0.2.27 for the ambient pair; px36 to 0.2.28; px51 to 0.2.32; px53 to 0.2.33 and px57 to 0.2.34, each with no source change and no section's size moved: notes/px53-the-pins-0233.md §J, notes/px57-the-pins-0234.md §J; px65 to 0.2.35, no source change, every kernel's `.text` 80 bytes longer and no other section moved, all of it the freestanding runtime's new `__wolf_rt_list_reserve`: notes/px65-the-pins-0235.md). `kmain.lu` brings up COM1,

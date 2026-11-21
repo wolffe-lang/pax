@@ -7,6 +7,66 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Every processor is started and parked idle, each with its own state (SMP stage 1).** PAX asks the bootloader
+  for every processor (Limine's MP feature) and releases each application processor into the kernel: its own
+  record (GS's base in ring 0), GDT, TSS and five guarded 16 KiB stacks (its idle stack and one each for the double
+  fault, the NMI, the machine check and #DB), CR0, CR4, EFER, XCR0 and the SYSCALL MSRs as the boot processor has
+  them, and its local APIC timer at 100 Hz from the boot processor's calibration. It then halts between its ticks.
+  The boot processor still runs every thread, system call and device interrupt; the scheduler's tick and switch stop
+  any other processor that reaches them, and the boot processor names it. A system call and every change of ring
+  now swaps GS (SWAPGS), so ring 0 always finds its processor's record and ring 3 never sees it; the running
+  thread's slot and the system call's stack words live in that record. `/proc/pax-cpus` adds `started`, `idle` and
+  a line per processor (its APIC ID, state, current thread, ticks, idle wake-ups and NMIs); `active` stays 1. With
+  one processor no boot line changes; with more, one line says how many are idle and a second that no record, GDT,
+  TSS or stack is shared. An application processor costs 84 KiB. The kernel's first step takes the processors out of
+  the bootloader's parked loop, which spins (left there, 16 processors on 8 host threads slowed a boot from 480 to
+  820 ms), and halts them until the boot processor's control state is final. `nosmp` on the command line runs none
+  and sends each INIT, so it waits for a startup IPI as it did before the bootloader started it, and the boot is the
+  one-processor boot it was. `tests/mpx6-cpus` holds
+  the rows, QEMU's register dump of every processor beside the kernel's own lines, at 1, 2, 4 and 16 processors.
+
+- **A logout at the console: pid 1 stays (px124, px156, pax#352).** An installed
+  PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
+  names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs
+  on `/run`, makes `/run/user/UID` (0700, the account's) for every account
+  with a login shell, runs what login ran as pid 1 (sudo's records emptied,
+  `pax-boot-status record`, the boot hooks), gives the console up, and then
+  starts `/bin/login` on it in a session of its own, again after each session
+  ends. So `exit`, `logout` (a function of `/etc/shrc`) and Ctrl-D at an
+  empty prompt give `HOST login:` again instead of halting the machine. What
+  the session left is hung up: SIGHUP and SIGCONT to each process still in
+  it, SIGKILL 2 s later to one still there (one line on the console); a
+  process that called setsid goes on and is reaped by init when it ends; the
+  hooks' services (burrowd) and ssh sessions are untouched; the console's
+  modes are put back and it is root's 0600 between sessions. login sets
+  `XDG_RUNTIME_DIR`. init reaps whatever the kernel hands it as soon as it
+  ends, so a program whose parent ended first no longer stays a zombie under
+  pid 1 (the shell, until now, never waited for it). The boot's duties run
+  once a boot: `exec /bin/login` logs in again without running the hooks,
+  `pax-boot-status record` or the boot's login record a second time, or
+  emptying sudo's records. The boot's record in utmp and wtmp is init's, and
+  a console logout is its own record (DEAD_PROCESS, as utmp(5) has init write
+  it), so `last` ends the session at the logout. The dev and release images
+  and the live stick keep their root-shell pid 1. `tests/mpx5-init` holds the
+  console's rows (I14 the orphan, I15 the second start, I16 the logout's
+  record), `tests/mpx5-burrowd` B30-B32 the ssh side, and `tests/mpx6-logs`
+  the records with init as pid 1: `notes/px124-pid-1.md`.
+
+- **What PAX can do for a terminal multiplexer, measured (px125).** A new suite,
+  `tests/mpx7-mux`, asks PAX every question a multiplexer's server and client
+  ask of their system, row by row against Ubuntu 24.04 running the same
+  static programs: 32 ptys in one epoll loop, a 50 MB flood with every byte
+  in order and the other panes answering within a tick, back-pressure,
+  SIGWINCH through a pty inside a pty, the signal keys, a daemon that
+  outlives its starter, Unix sockets (mode, owner, 16 clients, peer
+  credentials, a stale file), non-blocking I/O and the loop's timers, termios
+  raw and back, the same work through wolf-std alone, and on the console what
+  a client draws, asks and types (Ctrl-Space as NUL and the box-drawing,
+  arrow and powerline glyphs, which pax#461 fixed). The gaps are issues: a
+  Unix stream's 64 KiB before EAGAIN, the loop calls PAX lacks
+  (sendmsg/recvmsg, timerfd, signalfd, ppoll), the console's subset, and two
+  wolf-std calls: `notes/px125-multiplexer-readiness.md`.
+
 - **The kernel's log kept across reboots, and who logged in (px133).** `logd`, started at boot, appends every
   record of `/dev/kmsg` to `/var/log/kern.log` (root's): wall time, time since boot, level, sequence number and
   text, a line naming each boot and saying when the previous one ended without its end line, records the
