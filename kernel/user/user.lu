@@ -342,7 +342,7 @@ const U_TICKS: u64 = 2
 const U_SMAP: u64 = 3
 const U_SMEP: u64 = 4
 const U_LAST_EXIT: u64 = 5 // px13: the last exit's status + 1 (0: none yet)
-const U_EPOCH: u64 = 6 // px26: CLOCK_REALTIME at tick 0, in seconds (kernel/rtc)
+const U_EPOCH: u64 = 6 // px26: CLOCK_REALTIME at tick 0 (kernel/rtc); px168: in nanoseconds (seconds before), so a set is one store
 const U_BUS: u64 = 7 // px62: 1 when the page fault `fault_in` just answered was a mapping's page past its file's end (SIGBUS), until `kill` takes it
 
 // boot/isr.S's frame, as word indices.
@@ -458,9 +458,11 @@ pub fn start() {
         put_state(U_TICKS, 0)
     }
     // px26: the wall clock, read once: the date now less the ticks so far.
+    // px168: kept in nanoseconds, the same instant as before (whole
+    // seconds: the RTC's year is at most 2099, so the product fits).
     let wall = rtc.read()
     let up = timer.ticks() * NS_PER_TICK / NS_PER_SEC
-    put_state(U_EPOCH, if wall > up { wall - up } else { 0 })
+    put_state(U_EPOCH, if wall > up { (wall - up) * NS_PER_SEC } else { 0 })
     tree.start() // px27: the file tree, before the first program and the first frame count
 }
 
@@ -1480,8 +1482,10 @@ fn now_ns() -> u64 {
 /// px26: nanoseconds since the epoch (CLOCK_REALTIME): the real-time
 /// clock's reading at boot (kernel/rtc, `start`) plus the ticks since.
 /// On a machine whose clock cannot be read it counts from the epoch.
+/// px168: U_EPOCH is the wall clock at tick 0 in nanoseconds, which
+/// root's set moves (`set_wall`).
 fn wall_ns() -> u64 {
-    state(U_EPOCH) * NS_PER_SEC + now_ns()
+    state(U_EPOCH) + now_ns()
 }
 
 /// Whether clock `clk` is a wall clock: CLOCK_REALTIME (0),
