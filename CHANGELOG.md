@@ -73,6 +73,14 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   `tests/mpx6-ext2`'s SEAM-CALLERS row (`--only seam` runs it alone) names any kernel source that reaches ext2
   or the journal another way.
 
+- **Root can set the clock.** `clock_settime(CLOCK_REALTIME)` and `settimeofday` set the wall clock for root, as on
+  Linux, so a machine whose battery clock is wrong can be corrected (TLS certificates and package metadata are judged
+  by this clock); the battery clock itself is not written. A user is refused as before, each check in Linux's order.
+  `settimeofday` keeps a time zone and `gettimeofday` answers it. `adjtimex` and `clock_adjtime` are refused by name:
+  PAX keeps no clock discipline. CLOCK_MONOTONIC and relative sleeps never move with a set. One difference is named: an
+  absolute sleep or futex wait on the wall clock keeps the deadline its call computed, where Linux's follows the set.
+  Held by `tests/mpx5-users`' `clock` sessions against Linux's answers, measured under QEMU.
+
 - **The kernel's log kept across reboots, and who logged in (px133).** `logd`, started at boot, appends every
   record of `/dev/kmsg` to `/var/log/kern.log` (root's): wall time, time since boot, level, sequence number and
   text, a line naming each boot and saying when the previous one ended without its end line, records the
