@@ -174,8 +174,11 @@ fn panes() -> !int {
     while k < ps.len {
         var m = copy ps[k].m
         let _n = type_line(mut m, "echo pong {k}\n")
-        let got = read_until(mut m, "pong {k}\r\n", 25)
-        if str.contains(got, "pong {k}\r\n") {
+        // the shell's answer, after the echo of the typed line: the echo
+        // alone (`echo pong K\r\n`) holds `pong K\r\n` too (pax#498)
+        let answer = "\r\npong {k}\r\n"
+        let got = read_until(mut m, answer, 25)
+        if str.contains(got, answer) {
             answered = answered + 1
         }
         k = k + 1
