@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""fsck.ext2 at size: px84's five geometries, the owner's root, a repair past
+"""fsck.ext2 at size: the formatter's five big geometries, the owner's root, a repair past
 block 2^31. No implementation source is used; mke2fs and e2fsck are black boxes.
 
     capacity.py CHECKER WORK
 
 Rows (one verdict line each; a planned row without one is a FAIL):
-  F-size-8G, -64G, -500G, -4T, -16T  px84's sizes (16 TiB less a block the
+  F-size-8G, -64G, -500G, -4T, -16T  the formatter's big sizes (16 TiB less a block the
       largest), 16 inodes a group as tests/mpx6-disktools.d/big.py makes them:
       -fn exits 0 with no finding where e2fsck -fn exits 0; neither -fn nor
       -fy writes (the image's mtime and ctime stay) or changes a byte (a hash
