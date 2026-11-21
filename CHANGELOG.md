@@ -7,6 +7,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **alpha on the image, with nothing to start.** `/bin/alpha`, the service
+  manager in wolf (`user/alpha.pin`), is in both images: `tools/mkalpha`
+  builds it from alpha's own tree with the toolchain that tree pins, through
+  its own `tools/build --static`, in two checkouts that must agree byte for
+  byte, and ships the stripped copy, which `tools/distribution-root` holds to
+  the builder's sums. No unit ships and nothing runs it at boot: the boot
+  hooks and `/etc/pax-run` are unchanged, so it is a program to type.
+  `tests/mpx6-services` boots it under QEMU and types at it (A0): `alpha
+  --version` prints the version line the same binary prints on Linux,
+  `alpha check --root /` counts no unit, and `alpha status` finds no manager
+  (status 3). `--latest` images take alpha's trunk head.
+
 - **fsck.ext2 at any size ext2 and ext3 name.** The offline checker no longer refuses volumes past 4,194,304
   blocks, 1,048,576 inodes or 512 groups: ownership is one bit a block and an inode's state three bytes, inode tables
   and bitmaps are read a group at a time, and only directories keep their block lists. A 1 TB root of 244 million
