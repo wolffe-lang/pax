@@ -974,9 +974,10 @@ and its Linux and PAX runs write identical bytes. See `docs/BOOT.md`, "Writing a
 `tools/mkfsck` builds `fsck.ext2` in wolf for Linux and PAX. It checks inodes, blocks, directories, connectivity,
 references and allocation summaries; repairs counts, bitmaps, links, orphans and duplicate data blocks; and replays
 supported ext3 journals. A separate rescue archive repairs an unmounted `/dev/vda2` without Linux. Unsupported formats
-and ambiguous damage are refused, never marked clean, and a mounted volume is never repaired. The current checker
-also refuses more than 4,194,304 blocks, 1,048,576 inodes or 512 groups by name; large installed volumes need Linux's
-`e2fsck` until the checker is extended. See `docs/BOOT.md`, "Checking a volume from rescue".
+and ambiguous damage are refused, never marked clean, and a mounted volume is never repaired. It checks every block
+count ext2 and ext3 can name in one bit a block and three bytes an inode (about 204 MiB for a 1 TB root), reads
+journals up to 1 GiB, and refuses more than 1,073,741,824 inodes or 1,048,576 groups by name. See `docs/BOOT.md`,
+"Checking a volume from rescue".
 
 ## Tests
 
