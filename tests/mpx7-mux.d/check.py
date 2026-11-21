@@ -5,6 +5,7 @@ multiplexer probe (user/elf/muxprobe.c) to Ubuntu's, row by row.
     check.py LINUX.txt RULED.txt PAX.txt     every row; exit 1 on any FAIL
     check.py --refusals RULED.txt            the `refused:` lines ruled, sorted
     check.py --refusals-match RULED.txt      the lines on stdin are the ruled ones (exit 1 if not)
+    check.py --w2-started SERIAL.norm        the wolf probe's W2 printed after every pane's shell ran (M7)
     check.py --selftest
 
 A row's id is its first word (`A1.4`, `A6.2`), and `#2`, `#3`, ... after
@@ -143,6 +144,41 @@ def refusals_match(refusals, mins, have):
     return got == want
 
 
+def started(lines):
+    """M7: the wolf probe's W2 (`8 of 8 panes answered`) is printed only after every pane's shell has run.
+    W2 waits for each shell's own answer, so a shell the kernel has not yet named when W2 is printed means
+    W2 took something else for the answer (the line discipline's echo of the typed line), and W3's waits
+    then race the shells' late answers (pax#498). The panes' shells are the first eight `user: exec pid P`
+    lines after the probe's first line, in pid order (the order the probe forked them); a shell has run
+    once the kernel names it in a line of its own (`user: sh pid P ...`: today the ENOSYS of its runtime's
+    first set_robust_list, before it reads any line). One `PASS W2-STARTED: ...` or `FAIL W2-STARTED: ...`."""
+    lines = [ln.rstrip("\r") for ln in lines]
+    top = next((i for i, ln in enumerate(lines) if ln.startswith("muxwolf: ")), None)
+    w2 = next((i for i, ln in enumerate(lines) if ln.startswith("W2 ")), None)
+    if top is None or w2 is None:
+        return ["FAIL W2-STARTED: no %s line" % ("'muxwolf: '" if top is None else "W2")], 1
+    w3 = next((i for i, ln in enumerate(lines) if ln.startswith("W3 ")), len(lines))
+    pids = []
+    for ln in lines[top:w3]:
+        m = re.search(r"user: exec pid (\d+) ", ln)
+        if m and int(m.group(1)) not in pids:
+            pids.append(int(m.group(1)))
+    pids = sorted(pids)[:8]
+    if len(pids) != 8:
+        return ["FAIL W2-STARTED: %d shells exec'd before W3, want 8" % len(pids)], 1
+    late = []
+    for k, pid in enumerate(pids):
+        named = re.compile(r"user: sh pid %d " % pid)
+        first = next((i for i, ln in enumerate(lines) if named.search(ln)), None)
+        if first is None:
+            late.append("pane %d (pid %d) never named" % (k, pid))
+        elif first > w2 or (first == w2 and not lines[w2].startswith("user: ")):
+            late.append("pane %d (pid %d) %d lines later" % (k, pid, first - w2))
+    if late:
+        return ["FAIL W2-STARTED: W2 printed before %d of 8 shells ran: %s" % (len(late), ", ".join(late))], 1
+    return ["PASS W2-STARTED: every pane's shell ran before W2 (pids %d-%d)" % (pids[0], pids[-1])], 0
+
+
 def selftest():
     import os
     import tempfile
@@ -176,7 +212,25 @@ def selftest():
     mins = {"refused: s, -11": 2}
     assert refusals_match([], mins, ["refused: s, -11"] * 2) and refusals_match([], mins, ["refused: s, -11"] * 4)
     assert not refusals_match([], mins, ["refused: s, -11"])
-    print("check.py selftest: 12 cases held")
+    head = ["user: muxwolf pid 1 syscall 273: -ENOSYS", "muxwolf: px125's wolf-std probe"]
+    execs = ["user: exec pid %d cr3 0x1 entry 0x2" % p for p in range(4, 12)]
+    runs = ["user: sh pid %d syscall 273: -ENOSYS" % p for p in range(4, 12)]
+    w = ["W1 8 ptys", "W2 8 of 8 panes answered", "W3 signal.wait_fds"]
+    o, b = started(head + execs + runs + w)
+    assert b == 0 and o[0].startswith("PASS W2-STARTED"), o
+    o, b = started(head + execs + runs[:7] + w[:2] + runs[7:] + w[2:])
+    assert b == 1 and "1 of 8" in o[0] and "pane 7 (pid 11)" in o[0], o
+    o, b = started(head + execs[:5] + runs[:5] + w[:2] + execs[5:] + runs[5:] + w[2:])
+    assert b == 1 and "3 of 8" in o[0] and "pane 5 (pid 9)" in o[0], o
+    o, b = started(head + execs + runs[:7] + ["W2 8 of 8 panes answered" + runs[7]] + w[2:])
+    assert b == 1 and "pane 7 (pid 11) 0 lines later" in o[0], o
+    o, b = started(head + execs + runs[:7] + w)
+    assert b == 1 and "pane 7 (pid 11) never named" in o[0], o
+    o, b = started(head + execs[:7] + runs[:7] + w)
+    assert b == 1 and "7 shells exec'd before W3" in o[0], o
+    o, b = started(head + execs + runs + w[:1] + w[2:])
+    assert b == 1 and o[0] == "FAIL W2-STARTED: no W2 line", o
+    print("check.py selftest: 19 cases held")
     return 0
 
 
@@ -192,6 +246,10 @@ def main(argv):
         mins = {}
         _, refusals, _ = ruled(argv[2], mins)
         return 0 if refusals_match(refusals, mins, sys.stdin.read().split("\n")) else 1
+    if len(argv) == 3 and argv[1] == "--w2-started":
+        out, bad = started(read(argv[2]))
+        print("\n".join(out))
+        return 1 if bad else 0
     if len(argv) != 4:
         sys.stderr.write(__doc__)
         return 2
