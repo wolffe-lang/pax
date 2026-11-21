@@ -95,6 +95,11 @@ on:
         description: "the suites (job names, space-separated; tier partial on the tier's legs); empty: every suite"
         type: string
         default: ""
+      accel:
+        description: "kvm: the sixteen KVM suites open /dev/kvm (the default); tcg: every suite on TCG, to recheck a red"
+        type: choice
+        options: [kvm, tcg]
+        default: kvm
       pelt_cases:
         description: "mpx5-pelt only: named replay cases; empty runs every case (plants may name corpus)"
         type: string
@@ -146,6 +151,7 @@ jobs:
       suites: ${{ steps.plan.outputs.suites }}
       legs: ${{ steps.plan.outputs.legs }}
       also_release: ${{ steps.plan.outputs.also_release }}
+      kvm: ${{ steps.plan.outputs.kvm }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -197,6 +203,7 @@ jobs:
           HEAD: ${{ github.sha }}
           IN_TIER: ${{ inputs.tier }}
           IN_SUITES: ${{ inputs.suites }}
+          IN_ACCEL: ${{ inputs.accel }}
           COVERED: ${{ steps.covered.outputs.covered }}
           SCHEDULE: ${{ github.event.schedule }}
         run: tools/ci-plan --github-output "$GITHUB_OUTPUT"
@@ -1758,6 +1765,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
           sudo apt-get update -q
@@ -2040,6 +2050,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, curl (apt)
         run: |
@@ -2776,6 +2789,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, dnsmasq (apt)
         run: |
           sudo apt-get update -q
@@ -3117,6 +3133,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
         run: |
           sudo apt-get update -q
@@ -3218,6 +3237,9 @@ jobs:
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
         run: |
@@ -3408,6 +3430,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -3613,6 +3638,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
           sudo apt-get update -q
@@ -3723,6 +3751,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -3960,6 +3991,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, zstd (apt)
         run: |
           sudo apt-get update -q
@@ -4175,6 +4209,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
           sudo apt-get update -q
@@ -4356,6 +4393,9 @@ jobs:
     timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 240 || needs.plan.outputs.tier == 'rest' && 240 || 120 }}
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -4683,6 +4723,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -5569,6 +5612,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
           sudo apt-get update -q
@@ -5714,6 +5760,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
         run: |
           sudo apt-get update -q
@@ -5772,6 +5821,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
         run: |
@@ -6040,6 +6092,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, firmware, compiler and tracing tools
         run: |
           sudo apt-get update -q
