@@ -19,7 +19,8 @@
       assembly) and CI's own files select every suite, on the pr leg,
       which is the merge gate's shape: that run is named full.
   P3  FULL wins: the toolchain pins, the harness, the kernel's entry,
-      link script and Limine configuration, and any path no rule knows
+      link script and Limine configuration, the kernel-wide modules (the
+      scheduler, the timer, the interrupt and syscall entries), and any path no rule knows
       make a pull request's run all (every leg), alone or beside a core
       change; a pull request whose changed paths cannot be read is all too.
   P4  the wiring of .github/workflows/ci.yml: every suite job needs the
@@ -53,6 +54,11 @@
       `gh`, tl29): no open issue opens one, labelled nightly-red, under
       the one title; an open one gets a comment and no new issue; a label
       that already exists is no failure; unset variables are refused.
+  P9  a kernel change whose run includes the firmware suite (a narrow pr
+      run, or an every-suite one named full) runs it on the release legs
+      too (the planner's also_release); nothing more for other changes,
+      kernel-wide ones (all has those legs), pushes, the nightly or a
+      dispatch.
   P5  every tracked path is known to the map or read by a suite. An
       unknown path would make every pull request touching it run every
       leg; now the pull request that adds one is red here instead.
@@ -94,7 +100,7 @@ def plan(paths=None, **kw):
         args += ["--paths-from", "-"]
     r = subprocess.run(args, input="\n".join(paths or []) + "\n", capture_output=True, text=True, env=env)
     if r.returncode != 0:
-        return {"tier": "ERROR rc=%d %s" % (r.returncode, r.stderr.strip()[-300:]), "suites": [], "legs": ""}
+        return {"tier": "ERROR rc=%d %s" % (r.returncode, r.stderr.strip()[-300:]), "suites": [], "legs": "", "also_release": None}
     return json.loads(r.stdout)
 
 
@@ -167,9 +173,9 @@ expect("P1 a pull request labelled full-matrix, notes only: every suite, the mer
 expect("P1 the full-matrix label added",
        plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
 expect("P1 a labelled push beside a core change: every suite, the merge legs",
-       plan(["kernel/sched/sched.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "full", SUITES)
+       plan(["kernel/heap/heap.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "full", SUITES)
 expect("P1 the label added beside a core change: noop, the push's run at that head is already full",
-       plan(["kernel/sched/sched.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
+       plan(["kernel/heap/heap.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
 expect("P1 a labelled push beside a FULL path: all",
        plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
 expect("P1 the label added beside a FULL path: noop, the push's run at that head is already all",
@@ -470,7 +476,7 @@ expect("P2 the processor census's generators, rows and probe are the firmware su
 # are run by no job, so they plan nothing; the plan job's fetch-busybox
 # selftest plans as CI's own files do. The core's and CI's tier is read
 # from the planner itself, so these rows hold whatever that tier is named.
-CORE_PLAN = plan(["kernel/sched/sched.lu"], **pr)
+CORE_PLAN = plan(["kernel/heap/heap.lu"], **pr)
 CI_PLAN = plan([".github/workflows/ci.yml"], **pr)
 expect("P2 kernel/cpus plans as the kernel's core does (every suite)", plan(["kernel/cpus/cpus.lu"], **pr), CORE_PLAN["tier"], SUITES)
 # SMP stage 1 (pax#484): kernel/smp starts every processor and kernel/percpu holds each one's state; the
@@ -760,13 +766,16 @@ expect("P2 CI itself: every suite, the pr leg: full", plan([".github/workflows/c
 # The kernel's core (px40, ruling #76): every suite, on the pr leg. A pull request's run of every
 # suite on that leg is the merge gate's shape (every suite on native BIOS), so it is named full and
 # the label's own event adds no second run at that head (P1).
+# The kernel-wide modules (the scheduler and its wake-ups, the timer, the interrupt entry, the syscall entry) are
+# FULL instead (P3): every process reaches them, and the soak and load legs of the other three legs are where a
+# lost wake-up or a timing change shows.
 CORE = ["serial", "log", "panic", "boot_info", "frames", "paging", "gdt", "idt", "interrupts",
-        "apic", "timer", "heap", "sync", "sched", "fpu"]
-CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/isr.S", "boot/sched.S", "boot/fpu.S"]
-expect("P2 a core-only change (kernel/sched): every suite, the pr leg: full", plan(["kernel/sched/sched.lu"], **pr), "full", SUITES)
+        "apic", "heap", "sync", "fpu"]
+CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/fpu.S"]
+expect("P2 a core-only change (kernel/heap): every suite, the pr leg: full", plan(["kernel/heap/heap.lu"], **pr), "full", SUITES)
 for p in ["kernel/%s/%s.lu" % (m, m) for m in CORE] + CORE_ASM:
     expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "full", SUITES)
-expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sched/sched.lu"], **pr), "full", SUITES)
+expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/heap/heap.lu"], **pr), "full", SUITES)
 
 # --- P3 FULL wins ---------------------------------------------------------------------
 PINS = ["kernel/wolf.pin", "kernel/wolf.pkg", "boot/limine.pin"]
@@ -776,6 +785,30 @@ ENTRY = ["boot/start.S", "boot/kernel.ld", "boot/limine.conf"]
 for p in PINS + HARNESS + ENTRY:
     expect("P3 %s" % p, plan([p, "notes/px99.md"], **pr), "all", SUITES)
 expect("P3 a path no rule knows", plan(["newplace/thing.c"], **pr), "all", SUITES)
+KERNEL_WIDE = ["kernel/sched/sched.lu", "kernel/timer/timer.lu", "boot/isr.S", "boot/sched.S", "boot/user.S"]
+for p in KERNEL_WIDE:
+    expect("P3 a kernel-wide path, %s: every suite, every leg" % p, plan([p, "notes/px99.md"], **pr), "all", SUITES)
+
+# --- P9 a kernel change runs the firmware suite's release legs ------------------------------
+# The NMI row's injection points (tests/mpx6-nmi, the firmware suite's F11) are a property of the release build:
+# twice in a fortnight a kernel change moved the release compiler's inlining and only the trunk push's every-leg
+# run saw it. So a kernel change whose run includes mpx6-firmware also runs it on the release legs.
+def also(got):
+    return got.get("also_release")
+say(also(plan(["kernel/tcp/tcp.lu"], event="pull_request", action="synchronize", labels="full-matrix")) == ["mpx6-firmware"],
+    "P9 a labelled kernel change: the firmware suite on the release legs as well")
+say(also(plan(["boot/triage.S"], **pr)) == ["mpx6-firmware"],
+    "P9 a kernel change whose every-suite pr run (named full) includes the firmware suite: its release legs as well")
+say(also(plan(["kernel/usb_storage/usb_storage.lu"], **pr)) == ["mpx6-firmware"],
+    "P9 a kernel change whose narrow pr run includes the firmware suite: its release legs as well")
+say(also(plan(["kernel/tcp/tcp.lu"], **pr)) == [],
+    "P9 a kernel change whose pr run leaves the firmware suite out: nothing more")
+say(also(plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix")) == [],
+    "P9 a labelled change with no kernel path: nothing more")
+say(also(plan(["kernel/sched/sched.lu"], **pr)) == [],
+    "P9 a kernel-wide change: nothing more, its all run has the release legs")
+say(also(plan(event="push")) == [] and also(plan(event="schedule")) == [] and also(plan(event="workflow_dispatch", tier="full")) == [],
+    "P9 a push, the nightly and a dispatch: nothing more")
 expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/wolf.pin"], **pr), "all", SUITES)
 expect("P3 a pin beside a core change", plan(["kernel/sched/sched.lu", "kernel/wolf.pin"], **pr), "all", SUITES)
 expect("P3 a harness tool beside a core change", plan(["kernel/heap/heap.lu", "tools/qemu-run"], **pr), "all", SUITES)
@@ -854,6 +887,9 @@ for j in JOBS:
     m = re.search(r"^  %s:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)" % re.escape(j), wf, re.M | re.S)
     blocks[j] = m.group(1) if m else ""
 say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tier job")
+fwrel = re.search(r"^      - name: .*\n        if: contains\(fromJSON\(needs\.plan\.outputs\.also_release\), 'mpx6-firmware'\)\n        run: tests/mpx6-firmware --tier release\n", blocks["mpx6-firmware"], re.M)
+say(fwrel is not None and "      also_release: ${{ steps.plan.outputs.also_release }}\n" in blocks["plan"],
+    "P4 the plan's also_release reaches the firmware job, which runs its release legs when asked")
 for j in SUITES:
     b = blocks[j]
     needs = "[plan, proof]" if j == "macos-run" else "plan"
