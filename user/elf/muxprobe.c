@@ -301,9 +301,20 @@ static int mode_hold(void) {
     return 0;
 }
 
-static volatile sig_atomic_t winched;
+/* The helpers hear their signals through a pipe the handler writes, as the relay does: a signal that lands after
+ * the first line but before the loop waits is a byte waiting in the pipe. A flag checked after read() returned lost
+ * such a signal until the next one woke the read, and that one then took its place (pax#500; A3.5 and A4.5 put a
+ * signal in that window on purpose). */
 static int wpipe[2] = {-1, -1};
-static void on_winch(int s) { (void)s; winched = 1; if (wpipe[1] >= 0) (void)!write(wpipe[1], "w", 1); }
+static void on_winch(int s) { (void)s; if (wpipe[1] >= 0) (void)!write(wpipe[1], "w", 1); }
+static void on_sig(int s) { unsigned char c = (unsigned char)s; if (wpipe[1] >= 0) (void)!write(wpipe[1], &c, 1); }
+
+static int sig_pipe(void) {
+    if (pipe(wpipe) < 0) return -1;
+    nonblock(wpipe[0]);
+    nonblock(wpipe[1]);
+    return 0;
+}
 
 static void winch_line(int fd) {
     struct winsize w;
@@ -313,44 +324,64 @@ static void winch_line(int fd) {
     puts_fd(1, b);
 }
 
-static int mode_winch(int late) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_winch;
-    sigaction(SIGWINCH, &sa, 0); /* no SA_RESTART: the read below is torn */
-    winch_line(0);
-    if (late) nap(LATE_MS); /* A3.5: a size set now is still to be reported */
+/* Wait on standard input and the signal pipe: 1 when the pipe has bytes (left for the caller), 0 at standard
+ * input's end. */
+static int sig_wait(void) {
     for (;;) {
-        char b[256];
-        ssize_t k = read(0, b, sizeof b);
-        if (winched) { winched = 0; winch_line(0); }
-        if (k == 0 || (k < 0 && errno != EINTR)) return 0;
+        struct pollfd p[2] = {{0, POLLIN, 0}, {wpipe[0], POLLIN, 0}};
+        if (poll(p, 2, -1) < 0) {
+            if (errno == EINTR) continue;
+            return 0;
+        }
+        if (p[1].revents & POLLIN) return 1;
+        if (p[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+            char b[256];
+            ssize_t k = read(0, b, sizeof b);
+            if (k == 0 || (k < 0 && errno != EINTR && errno != EAGAIN)) return 0;
+        }
     }
 }
 
-static volatile sig_atomic_t heard_sig;
-static void on_sig(int s) { heard_sig = s; }
+static int mode_winch(int late) {
+    if (sig_pipe() < 0) return 3;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_winch;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGWINCH, &sa, 0);
+    winch_line(0);
+    if (late) nap(LATE_MS); /* A3.5: a size set now is still to be reported */
+    while (sig_wait()) {
+        char c[16];
+        while (read(wpipe[0], c, sizeof c) > 0) {}
+        winch_line(0);
+    }
+    return 0;
+}
 
 static int mode_sig(int late) {
+    if (sig_pipe() < 0) return 3;
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_sig;
+    sa.sa_flags = SA_RESTART;
     sigaction(SIGINT, &sa, 0);
     sigaction(SIGQUIT, &sa, 0);
     sigaction(SIGTSTP, &sa, 0);
     puts_fd(1, "sig: ready\n");
     if (late) nap(LATE_MS); /* A4.5: a signal now is still to be reported */
-    for (;;) {
-        char b[256];
-        ssize_t k = read(0, b, sizeof b);
-        if (heard_sig) {
-            char m[32];
-            snprintf(m, sizeof m, "heard %s\n", sname(heard_sig));
-            heard_sig = 0;
-            puts_fd(1, m);
+    while (sig_wait()) {
+        unsigned char c[16];
+        ssize_t n;
+        while ((n = read(wpipe[0], c, sizeof c)) > 0) {
+            for (ssize_t j = 0; j < n; j++) {
+                char m[32];
+                snprintf(m, sizeof m, "heard %s\n", sname(c[j]));
+                puts_fd(1, m);
+            }
         }
-        if (k == 0 || (k < 0 && errno != EINTR)) return 0;
     }
+    return 0;
 }
 
 static int mode_rawkill(void) {
