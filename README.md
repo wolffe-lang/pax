@@ -956,7 +956,9 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 ## Continuous integration
 
 - A pull request's push runs the suites its change can affect (`tools/ci-plan`, `tools/ci-tiers.map`) on one leg,
-  native BIOS; a change to the kernel's core or to CI itself runs every suite on that leg.
+  native BIOS; a change to the kernel's core or to CI itself runs every suite on that leg. A change to the scheduler,
+  the timer, or the interrupt or syscall entry runs every suite on every leg, and a kernel change whose run includes
+  the firmware suite runs that suite on the release legs too (its NMI rows depend on the release build's inlining).
 - The `full-matrix` label runs every suite on the merge leg (`tier full`); a push to trunk, the nightly and a dispatch
   run every suite on every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run
   at the head.
