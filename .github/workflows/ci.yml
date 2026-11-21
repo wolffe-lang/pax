@@ -113,13 +113,15 @@ permissions:
 # so a new push frees the slots of the run it supersedes. The full run
 # and the pr run live in SEPARATE groups (adding the label must not cancel
 # the pr run at the same head), and another label's noop run gets a group
-# of its own so it cancels nothing. Every other run (a trunk push, the
-# nightly, a dispatch) gets a group of its own run id: never cancelled,
-# and never replaced while pending, since each trunk push's all run is
-# the coverage that merge is owed (since tl29 the only one of three legs
-# before the nightly).
+# of its own so it cancels nothing. Trunk pushes share one group and are
+# never cancelled in progress: the running push finishes, and of the pushes
+# that arrive meanwhile only the newest waits (GitHub replaces a pending run
+# with a newer one). A fast-forward trunk is linear, so a green run at the
+# newest head covers the code of every head below it; a red one is bisected
+# by dispatching the heads between. The nightly and a dispatch each get a
+# group of their own run id: never cancelled, never replaced.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}-{1}', github.head_ref, (github.event.action == 'labeled' && github.event.label.name != 'full-matrix') && format('noop-{0}', github.run_id) || (contains(github.event.pull_request.labels.*.name, 'full-matrix') && 'full' || 'pr')) || format('ci-{0}-{1}', github.event_name, github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}-{1}', github.head_ref, (github.event.action == 'labeled' && github.event.label.name != 'full-matrix') && format('noop-{0}', github.run_id) || (contains(github.event.pull_request.labels.*.name, 'full-matrix') && 'full' || 'pr')) || github.event_name == 'push' && 'ci-push-trunk' || format('ci-{0}-{1}', github.event_name, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -129,6 +131,10 @@ jobs:
   plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # A push's plan reads its head's check runs (tools/ci-covered).
+    permissions:
+      contents: read
+      checks: read
     outputs:
       tier: ${{ steps.plan.outputs.tier }}
       suites: ${{ steps.plan.outputs.suites }}
@@ -159,6 +165,18 @@ jobs:
           python3 -I tests/usb-session-selftest
           python3 -I tests/pipe-shape-selftest
 
+      # Merges are fast-forwards, so a trunk push's head is a pull request's
+      # head: what that head already has green decides what the push runs
+      # (tools/ci-plan's rest tier). Unreadable is none: every leg, as before.
+      - name: what this head already has green (tools/ci-covered)
+        id: covered
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: tools/ci-covered --github-output "$GITHUB_OUTPUT"
+
       - name: the plan
         id: plan
         env:
@@ -170,6 +188,7 @@ jobs:
           HEAD: ${{ github.sha }}
           IN_TIER: ${{ inputs.tier }}
           IN_SUITES: ${{ inputs.suites }}
+          COVERED: ${{ steps.covered.outputs.covered }}
         run: tools/ci-plan --github-output "$GITHUB_OUTPUT"
 
   proof:
@@ -1052,7 +1071,7 @@ jobs:
           if-no-files-found: warn
 
       - name: the same typing rows with the xHCI on MSI only, then INTx only (px76, nec-usb-xhci; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         env:
           PAX_REQUIRE_UEFI: "1"
         run: tests/mpx6-firmware.d/typing-irq mpx3-console $PAX_LEGS
@@ -1195,7 +1214,7 @@ jobs:
     runs-on: ubuntu-24.04
     # px122: step by step, floors all and partial 8125 s, pr 1704 s, full 2446 s, 40%
     # headroom (tests/ci-budgets.py, shell-pelt.json).
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'partial' && 190 || 120 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'rest' && 190 || needs.plan.outputs.tier == 'partial' && 190 || 120 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -1245,7 +1264,7 @@ jobs:
           if-no-files-found: warn
 
       - name: the same typing rows with the xHCI on MSI only, then INTx only (px76, nec-usb-xhci; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         env:
           PAX_REQUIRE_UEFI: "1"
         run: tests/mpx6-firmware.d/typing-irq mpx3-shell $PAX_LEGS
@@ -4008,7 +4027,7 @@ jobs:
     # px83: replay + rootdisk + one Linux retry, measured with 40% margin.
     # px122: step by step, the USB typing step counted, floors all and partial
     # 14904 s, pr 4232 s, full 6532 s, 40% headroom (tests/ci-budgets.py, shell-pelt.json).
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 350 || needs.plan.outputs.tier == 'partial' && 350 || 210 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 350 || needs.plan.outputs.tier == 'rest' && 350 || needs.plan.outputs.tier == 'partial' && 350 || 210 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -4190,7 +4209,7 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 240 || 120 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 240 || needs.plan.outputs.tier == 'rest' && 240 || 120 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -4964,7 +4983,7 @@ jobs:
     # 140 min, pr and full 95. px117: Y9 boots the session once more a leg
     # (a right click under yew); the limits take five minutes more: all
     # and partial 145, pr and full 100, until CI's own phases are read.
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 145 || needs.plan.outputs.tier == 'partial' && 145 || 100 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 145 || needs.plan.outputs.tier == 'rest' && 145 || needs.plan.outputs.tier == 'partial' && 145 || 100 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -5050,7 +5069,7 @@ jobs:
     # px113 (pax#305): sizing floors, every leg 5568 s and native BIOS alone
     # 3951 s (the phase peaks of 94 attempts), 40% headroom; see
     # ci-budgets. all and partial 130 min, pr and full 95.
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 130 || needs.plan.outputs.tier == 'partial' && 130 || 95 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 130 || needs.plan.outputs.tier == 'rest' && 130 || needs.plan.outputs.tier == 'partial' && 130 || 95 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -5442,7 +5461,7 @@ jobs:
         run: tests/mpx6-nvme $PAX_LEGS
 
       - name: the pr rows with the controller's BAR above 4 GiB, native UEFI (px76, tools/qemu-run --high-bar; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
@@ -5952,11 +5971,11 @@ jobs:
     # build alone ranged from 2501 s to 3715 s on the runners. px76's
     # serial-less install (all tier only) is a step of its own, bounded at
     # 15 minutes, inside the all tier's 250.
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 250 || needs.plan.outputs.tier == 'pr' && 60 || 175 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 250 || needs.plan.outputs.tier == 'rest' && 250 || needs.plan.outputs.tier == 'pr' && 60 || 175 }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_INSTALL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'smoke' || 'full' }}
-      PAX_INSTALL_BIG_ROWS: ${{ needs.plan.outputs.tier == 'all' && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}
+      PAX_INSTALL_BIG_ROWS: ${{ (needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest') && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}
       PAX_LOPE_REPO: ${{ github.workspace }}/.lope
       CARGO_INCREMENTAL: "0"
     steps:
@@ -5988,7 +6007,7 @@ jobs:
       - name: guided installer, independent readback and persistent target sessions
         run: tests/mpx6-install $PAX_LEGS
       - name: the unattended install with no serial port, native UEFI (px76, tools/qemu-halt --no-serial; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         timeout-minutes: 15
         run: tests/mpx6-install --only noserial --inputs "$PWD/build/mpx6-install/inputs"
       - name: keep installer phase logs, byte-range proofs and oracle verdicts
