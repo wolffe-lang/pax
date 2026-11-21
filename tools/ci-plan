@@ -32,7 +32,9 @@ release) on one firmware (BIOS, UEFI); every leg is four.
         ONE leg, `--tier native --firmware bios` (PR_LEGS). A change to
         the kernel's core or to CI itself (the map's ALL paths) can
         affect every suite, so it runs every suite, on that leg (px40,
-        ruling #76: the core was FULL before). Native is
+        ruling #76: the core was FULL before), and every suite on that
+        leg is the merge gate's shape, so that run is named `full` and
+        runs what `full` runs. Native is
         the tier whose build is cheap (the release tier's LLVM build is
         about half of every all run's job-minutes); BIOS is the leg on
         which every suite runs its widest set of scenarios. A dispatch
@@ -42,7 +44,10 @@ release) on one firmware (BIOS, UEFI); every leg is four.
         unless it says full or pr). Never `full` or `all`, whatever it
         names: a green `tier full` says every suite ran.
   noop  a pull request's `labeled` event for a label other than
-        `full-matrix`: nothing runs.
+        `full-matrix`: nothing runs. Also the `full-matrix` label's own
+        event at a head whose paths choose every suite or a FULL path:
+        the push's run at that head is already the full (or all) run,
+        and a second one would repeat it.
 
 WHICH SUITES A PATH SELECTS (the pr tier). The union of:
   - every rule of tools/ci-tiers.map whose glob matches the path;
@@ -283,6 +288,9 @@ def plan(a):
         log.append("%s: all" % ev)
         return result("all", set(suites), "")
     labelled = FULL_LABEL in labels
+    # The label's own event: the push that made this head started a run
+    # already, and planned it from the same paths.
+    added = a.action == "labeled" and a.label == FULL_LABEL
 
     # A pull request's paths are read with the label too: a FULL path
     # makes the run an all run, labelled or not (tl29: the label alone
@@ -308,11 +316,21 @@ def plan(a):
         got -= SPECIAL
         log.append("%s -> %s  [%s]" % (p, "FULL" if p in full else (" ".join(s for s in suites if s in got) or "nothing"), "; ".join(why)))
         chosen |= got
+    every = chosen >= set(suites)
+    if full and added:
+        log.append("%d path(s) FULL: the push's run at this head is all; the %s label adds none: noop" % (len(full), FULL_LABEL))
+        return result("noop", set(), PR_LEGS)
     if full:
         log.append("%d path(s) FULL: all%s" % (len(full), " (the %s label as well)" % FULL_LABEL if labelled else ""))
         return result("all", set(suites), "")
+    if every and added:
+        log.append("every suite on the pull-request leg: the push's run at this head is full; the %s label adds none: noop" % FULL_LABEL)
+        return result("noop", set(), PR_LEGS)
     if labelled:
         log.append("the %s label: full, every suite on the merge legs ('%s')" % (FULL_LABEL, MERGE_LEGS))
+        return result("full", set(suites), MERGE_LEGS)
+    if every and PR_LEGS == MERGE_LEGS:
+        log.append("%d path(s) choose every suite on the pull-request leg, the merge legs ('%s'): full" % (len(paths), MERGE_LEGS))
         return result("full", set(suites), MERGE_LEGS)
     log.append("%d path(s): pr tier, %d suite(s), legs %s" % (len(paths), len(chosen), PR_LEGS))
     return result("pr", chosen, PR_LEGS)
