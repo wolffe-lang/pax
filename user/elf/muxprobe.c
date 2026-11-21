@@ -74,6 +74,9 @@
 #define LOOP "while read -r l; do eval \"$l\"; done"
 #define FLOOD_BYTES 50000000L
 #define HEADER "<<px125 flood>>"
+/* How long a pane's program may take to say it is ready before a row signals it (A3, A4). A row signals only
+ * after the ready line: a signal sent before its handler is set is lost, and the row then measured the start. */
+#define READY_MS 10000
 
 /* --- small things -------------------------------------------------------- */
 
@@ -1036,16 +1039,20 @@ static void sec_a3(void) {
     NEED(a, "A3.1");
     int b = pane_start(wi, 0, 1);
     NEED(b, "A3.1");
-    until(a, "winch 0 0", 3000);
-    until(b, "winch 0 0", 3000);
+    int ra = until(a, "winch 0 0", READY_MS);
+    int rb = until(b, "winch 0 0", READY_MS);
     forget(a);
     forget(b);
-    setsize(P[a].m, 41, 120);
-    int got = until(a, "winch 41 120", 3000);
-    long end = now_ms() + 300;
-    while (now_ms() < end) turn(20);
-    say("A3.1 TIOCSWINSZ on a master: its program %s; another pane's %s\n", got ? "heard SIGWINCH and read 41 120" : "did NOT read 41 120",
-        has(b, "winch") ? "heard it TOO" : "heard nothing");
+    if (!ra || !rb) {
+        say("A3.1 TIOCSWINSZ on a master: NOT ready, %s never said its first size\n", !ra ? "its program" : "another pane's");
+    } else {
+        setsize(P[a].m, 41, 120);
+        int got = until(a, "winch 41 120", 3000);
+        long end = now_ms() + 300;
+        while (now_ms() < end) turn(20);
+        say("A3.1 TIOCSWINSZ on a master: its program %s; another pane's %s\n", got ? "heard SIGWINCH and read 41 120" : "did NOT read 41 120",
+            has(b, "winch") ? "heard it TOO" : "heard nothing");
+    }
     type(a, "\004");
     type(b, "\004");
     /* stty in a shell pane */
@@ -1058,14 +1065,18 @@ static void sec_a3(void) {
     char *re[] = {"/bin/muxprobe", "relay", 0};
     int r = pane_start(re, 0, 1);
     NEED(r, "A3.3");
-    until(r, "winch 0 0", 5000);
+    int rr = until(r, "winch 0 0", READY_MS);
     forget(r);
-    setsize(P[r].m, 33, 97);
-    int one = until(r, "winch 33 97", 5000);
-    forget(r);
-    setsize(P[r].m, 41, 120);
-    int two = until(r, "winch 41 120", 5000);
-    say("A3.3 a pty inside a pty: the inner program read %s, then %s\n", one ? "33 97" : "NOT 33 97", two ? "41 120" : "NOT 41 120");
+    if (!rr) {
+        say("A3.3 a pty inside a pty: NOT ready, the inner program never said its first size\n");
+    } else {
+        setsize(P[r].m, 33, 97);
+        int one = until(r, "winch 33 97", 5000);
+        forget(r);
+        setsize(P[r].m, 41, 120);
+        int two = until(r, "winch 41 120", 5000);
+        say("A3.3 a pty inside a pty: the inner program read %s, then %s\n", one ? "33 97" : "NOT 33 97", two ? "41 120" : "NOT 41 120");
+    }
     type(r, "\004");
     say("A3.4 the relay's end: %s; the winch panes' %s, %s\n", pane_settle(r, 5000), pane_settle(a, 3000),
         pane_settle(b, 3000));
@@ -1078,15 +1089,18 @@ static void sec_a4(void) {
     char *sg[] = {"/bin/muxprobe", "sig", 0};
     int k = pane_start(sg, 0, 1);
     NEED(k, "A4.1");
-    until(k, "sig: ready", 3000);
-    type(k, "\003");
-    int i = until(k, "heard INT", 3000);
-    type(k, "\034");
-    int q = until(k, "heard QUIT", 3000);
-    type(k, "\032");
-    int z = until(k, "heard TSTP", 3000);
-    say("A4.1 0x03, 0x1c, 0x1a to a master, its program handling them: %s, %s, %s\n", i ? "heard INT" : "NOT INT",
-        q ? "heard QUIT" : "NOT QUIT", z ? "heard TSTP" : "NOT TSTP");
+    if (!until(k, "sig: ready", READY_MS)) {
+        say("A4.1 0x03, 0x1c, 0x1a to a master: NOT ready, its program never said it was ready\n");
+    } else {
+        type(k, "\003");
+        int i = until(k, "heard INT", 3000);
+        type(k, "\034");
+        int q = until(k, "heard QUIT", 3000);
+        type(k, "\032");
+        int z = until(k, "heard TSTP", 3000);
+        say("A4.1 0x03, 0x1c, 0x1a to a master, its program handling them: %s, %s, %s\n", i ? "heard INT" : "NOT INT",
+            q ? "heard QUIT" : "NOT QUIT", z ? "heard TSTP" : "NOT TSTP");
+    }
     type(k, "\004");
     pane_settle(k, 3000);
     char *sl[] = {"/bin/sleep", "30", 0};
