@@ -116,13 +116,22 @@ boot/limine.pin                 FULL
 boot/limine.conf                FULL
 boot/start.S                    FULL
 boot/kernel.ld                  FULL
+# The kernel-wide modules: the scheduler and its wake-ups, the timer, the
+# interrupt entry and the syscall entry. Every process reaches them, and a
+# lost wake-up or a timing change shows in the soak and load legs of the
+# other three legs (a scheduler change once merged on every suite at native
+# BIOS and turned trunk red in the lobo suite's release load and the users
+# suite's native UEFI soak): every suite, every leg.
+kernel/sched/*                  FULL
+kernel/timer/*                  FULL
+boot/isr.S                      FULL
+boot/sched.S                    FULL
+boot/user.S                     FULL
 # --- the kernel's core: every suite on the pull-request leg (px40, ruling #76)
 # Every suite runs this code, so every suite runs; the other three legs
 # (release, UEFI) are the trunk push's and the nightly's (tl29).
 boot/io.S                       ALL
 boot/cpu.S                      ALL
-boot/isr.S                      ALL
-boot/sched.S                    ALL
 boot/fpu.S                      ALL
 kernel/serial/*                 ALL
 kernel/log/*                    ALL
@@ -135,13 +144,11 @@ kernel/gdt/*                    ALL
 kernel/idt/*                    ALL
 kernel/interrupts/*             ALL
 kernel/apic/*                   ALL
-kernel/timer/*                  ALL
 kernel/heap/*                   ALL
 kernel/sync/*                   ALL
 kernel/cpus/*                   ALL # kernel/acpi calls it on every boot (the MADT census)
 kernel/smp/*                    ALL # SMP stage 1: every processor started; the core calls it on every boot
 kernel/percpu/*                 ALL # each processor's state; the scheduler, GDT and interrupt entry read it
-kernel/sched/*                  ALL
 kernel/fpu/*                    ALL
 # px131: kernel/latency, the interrupts-off instrument: off unless the
 # command line says `latency`, so only mpx6-latency turns it on; the
