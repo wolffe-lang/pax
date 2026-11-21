@@ -79,8 +79,11 @@ on:
     types: [opened, synchronize, reopened, labeled]
   schedule:
     # Nightly, the all tier (every suite, every leg), on trunk; a red one
-    # opens an issue (the `tier` job's last step).
+    # opens an issue (the `tier` job's last step). The nightly plans noop at
+    # a head whose tier all is green already; the weekly one (Sundays) runs
+    # every leg whatever the head has (tools/ci-plan's WEEKLY).
     - cron: "17 6 * * *"
+    - cron: "47 6 * * 0"
   workflow_dispatch:
     inputs:
       tier:
@@ -175,7 +178,7 @@ jobs:
       # (tools/ci-plan's rest tier). Unreadable is none: every leg, as before.
       - name: what this head already has green (tools/ci-covered)
         id: covered
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -194,6 +197,7 @@ jobs:
           IN_TIER: ${{ inputs.tier }}
           IN_SUITES: ${{ inputs.suites }}
           COVERED: ${{ steps.covered.outputs.covered }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: tools/ci-plan --github-output "$GITHUB_OUTPUT"
 
   proof:
