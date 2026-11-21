@@ -55,6 +55,7 @@ static L wait4(L pid, int *st, L opt, void *ru) { return sc6(NR_WAIT4, pid, (L)s
 static void *map(U len, L prot, L flags) { return (void *)sc6(NR_MMAP, 0, (L)len, prot, flags, -1, 0); }
 static void *shared_page(void) { return map(4096, PROT_RW, MAP_SHARED_ANON); }
 static int futex(volatile int *w, L op, L val) { return (int)sc6(NR_FUTEX, (L)w, op, val, 0, 0, 0); }
+#define FUTEX_WAIT 0
 #define FUTEX_WAIT_PRIVATE 128
 #define FUTEX_WAKE_PRIVATE 129
 
@@ -259,8 +260,11 @@ static L spawn(struct thr *t, void (*fn)(void *), void *arg) {
                      : "rcx", "r11", "memory");
     return r;
 }
+/* The kernel's clear-child-tid wake at a thread's end is a wake WITHOUT the private flag (as on Linux, and as
+   a threading library's join waits), so this wait is not private either: a private wait is never reached by it,
+   and a join that began before the thread ended would wait for ever (the first development take's stress). */
 static void join(struct thr *t) {
-    for (;;) { int v = t->tid; if (!v) break; futex(&t->tid, FUTEX_WAIT_PRIVATE, v); }
+    for (;;) { int v = t->tid; if (!v) break; futex(&t->tid, FUTEX_WAIT, v); }
     sc(NR_MUNMAP, t->stack, STACK, 0);
 }
 
