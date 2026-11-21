@@ -8,12 +8,16 @@
       the merge gate (every suite on the merge legs, native BIOS), and all
       beside a FULL path or with no paths to read; another label's
       `labeled` event is a noop; a dispatch can ask for full or pr, and
-      one naming suites is partial, on its tier input's legs.
+      one naming suites is partial, on its tier input's legs. The
+      `full-matrix` label's own event is a noop where the head's paths
+      already choose every suite or a FULL path: the push's run at that
+      head is the full (or all) run, and one run a head is enough.
   P2  the pr tier by path, one change per area: the network's suites for
       kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
       test, a user program and a shared device select their readers.
       The kernel's core (px40, ruling #76: its fifteen modules and their
-      assembly) and CI's own files select every suite, on the pr leg.
+      assembly) and CI's own files select every suite, on the pr leg,
+      which is the merge gate's shape: that run is named full.
   P3  FULL wins: the toolchain pins, the harness, the kernel's entry,
       link script and Limine configuration, and any path no rule knows
       make a pull request's run all (every leg), alone or beside a core
@@ -138,10 +142,16 @@ expect("P1 a pull request labelled full-matrix, notes only: every suite, the mer
        plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", SUITES)
 expect("P1 the full-matrix label added",
        plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
-expect("P1 the label beside a core change: every suite, the merge legs",
-       plan(["kernel/sched/sched.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
-expect("P1 the label beside a FULL path: all",
-       plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "all", SUITES)
+expect("P1 a labelled push beside a core change: every suite, the merge legs",
+       plan(["kernel/sched/sched.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "full", SUITES)
+expect("P1 the label added beside a core change: noop, the push's run at that head is already full",
+       plan(["kernel/sched/sched.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
+expect("P1 a labelled push beside a FULL path: all",
+       plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
+expect("P1 the label added beside a FULL path: noop, the push's run at that head is already all",
+       plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
+expect("P1 the label added beside a narrow change: full, the push's run chose fewer suites",
+       plan(["kernel/tcp/tcp.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
 expect("P1 the label beside a path no rule knows: all",
        plan(["newplace/thing.c"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
 expect("P1 the label and no changed paths to read: all",
@@ -399,8 +409,8 @@ expect("P2 AHCI fixtures and recordings reach their gate",
 # power module the suites whose sessions reboot and the firmware suite;
 # the metal scripts and kernels the firmware suite alone; its typing
 # helper the two jobs that run it in the all tier.
-expect("P2 kernel/acpi and kernel/clock reach every suite, on the pr leg (px76)",
-       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "pr", SUITES)
+expect("P2 kernel/acpi and kernel/clock reach every suite, on the pr leg: the merge gate's shape, full (px76)",
+       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "full", SUITES)
 expect("P2 kernel/msi reaches the firmware and USB suites alone (px76)",
        plan(["kernel/msi/msi.lu"], **pr), "pr", ["mpx6-usb", "mpx6-firmware"])
 expect("P2 kernel/power reaches the suites whose sessions reboot and the firmware suite (px76)",
@@ -408,8 +418,8 @@ expect("P2 kernel/power reaches the suites whose sessions reboot and the firmwar
 expect("P2 the metal scripts and kernels are the firmware suite's alone (px76)",
        plan(["tests/mpx6-metal", "tests/mpx6-metal-power", "tests/mpx6-metal-serial", "tests/mpx6-metal.d/panic-screen.py",
              "kernel/kmain_metal.lu", "kernel/kmain_metal_msi.lu", "tests/mpx6-firmware"], **pr), "pr", ["mpx6-firmware"])
-expect("P2 kernel/triage and boot/triage.S reach every suite, on the pr leg (px77d)",
-       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "pr", SUITES)
+expect("P2 kernel/triage and boot/triage.S reach every suite, on the pr leg: full (px77d)",
+       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "full", SUITES)
 expect("P2 the triage suite and the two sticks' confs are the firmware suite's alone (px77d)",
        plan(["tests/mpx6-triage", "tests/mpx6-triage.d/leg.py", "boot/limine-triage.conf", "boot/limine-bisect.conf", "boot/limine-fix.conf",
              "tests/mpx6-nmi", "tests/mpx6-nmi.d/inject.py"], **pr), "pr", ["mpx6-firmware"])
@@ -676,16 +686,18 @@ expect("P2 the kasumi leg's driver runs with the installer's suites (px78)",
 expect("P2 installer fixtures reach their gate only",
        plan(["tests/mpx6-install", "tests/mpx6-install.d/gap.py"], **pr), "pr", ["mpx6-install", "mpx6-ahci", "mpx6-kasumi"])
 
-expect("P2 CI itself: every suite, the pr leg", plan([".github/workflows/ci.yml"], **pr), "pr", SUITES)
+expect("P2 CI itself: every suite, the pr leg: full", plan([".github/workflows/ci.yml"], **pr), "full", SUITES)
 
-# The kernel's core (px40, ruling #76): every suite, on the pr leg.
+# The kernel's core (px40, ruling #76): every suite, on the pr leg. A pull request's run of every
+# suite on that leg is the merge gate's shape (every suite on native BIOS), so it is named full and
+# the label's own event adds no second run at that head (P1).
 CORE = ["serial", "log", "panic", "boot_info", "frames", "paging", "gdt", "idt", "interrupts",
         "apic", "timer", "heap", "sync", "sched", "fpu"]
 CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/isr.S", "boot/sched.S", "boot/fpu.S"]
-expect("P2 a core-only change (kernel/sched): every suite, the pr leg", plan(["kernel/sched/sched.lu"], **pr), "pr", SUITES)
+expect("P2 a core-only change (kernel/sched): every suite, the pr leg: full", plan(["kernel/sched/sched.lu"], **pr), "full", SUITES)
 for p in ["kernel/%s/%s.lu" % (m, m) for m in CORE] + CORE_ASM:
-    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "pr", SUITES)
-expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sched/sched.lu"], **pr), "pr", SUITES)
+    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "full", SUITES)
+expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sched/sched.lu"], **pr), "full", SUITES)
 
 # --- P3 FULL wins ---------------------------------------------------------------------
 PINS = ["kernel/wolf.pin", "kernel/wolf.pkg", "boot/limine.pin"]
