@@ -67,6 +67,12 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   (sendmsg/recvmsg, timerfd, signalfd, ppoll), the console's subset, and two
   wolf-std calls: `notes/px125-multiplexer-readiness.md`.
 
+- **One way into the file systems.** kernel/tree, kernel/fstab, kernel/files and kernel/procfs reach a mounted
+  volume only through the new `kernel/volume`, which forwards each of the 65 items they use to kernel/ext2 or
+  kernel/journal unchanged; a second on-disk format will sit beside ext2 there. No behaviour changes.
+  `tests/mpx6-ext2`'s SEAM-CALLERS row (`--only seam` runs it alone) names any kernel source that reaches ext2
+  or the journal another way.
+
 - **The kernel's log kept across reboots, and who logged in (px133).** `logd`, started at boot, appends every
   record of `/dev/kmsg` to `/var/log/kern.log` (root's): wall time, time since boot, level, sequence number and
   text, a line naming each boot and saying when the previous one ended without its end line, records the
