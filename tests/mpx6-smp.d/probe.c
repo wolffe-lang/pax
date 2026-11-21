@@ -839,10 +839,26 @@ static void stress(U secs) {
         else if (i == 8) c_churn();
         else c_kill();
     }
+    /* Every component ends by itself soon after the deadline; one still there 30 s later is named as hung and
+       ended with SIGKILL (its status then 0x9), so a hang is a red row by name and the boot still reaches its end. */
+    int stv[10], left = 10;
+    L gone[10];
+    for (int i = 0; i < 10; i++) gone[i] = 0;
+    while (left && mono_ns() < deadline + 30000000000ul) {
+        L w = wait4(-1, &st, WNOHANG, 0);
+        if (w <= 0) { nap(100000000); continue; }
+        for (int i = 0; i < 10; i++) if (pids[i] == w && !gone[i]) { gone[i] = 1; stv[i] = st; left--; }
+    }
     for (int i = 0; i < 10; i++) {
-        L w = wait4(pids[i], &st, 0, 0);
+        if (gone[i]) continue;
         l.n = 0; ls(&l, "SMP-LOCK component "); ls(&l, names[i]); ls(&l, " pid "); lsd(&l, pids[i]);
-        ls(&l, " status "); lx(&l, w == pids[i] ? (U)st : 0xdead); le(&l);
+        ls(&l, " hung 30 s past the deadline: SIGKILL"); le(&l);
+        sc(NR_KILL, pids[i], SIGKILL, 0);
+        if (wait4(pids[i], &st, 0, 0) == pids[i]) { gone[i] = 1; stv[i] = st; }
+    }
+    for (int i = 0; i < 10; i++) {
+        l.n = 0; ls(&l, "SMP-LOCK component "); ls(&l, names[i]); ls(&l, " pid "); lsd(&l, pids[i]);
+        ls(&l, " status "); lx(&l, gone[i] ? (U)stv[i] : 0xdead); le(&l);
     }
     take(&z1);
     l.n = 0; ls(&l, "SMP-LOCK user-ticks");
