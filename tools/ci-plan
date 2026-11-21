@@ -82,7 +82,15 @@ held (`all` and `full`: every suite, on that tier's legs; `pr`: PR_LEGS;
 `partial`: some suite; `noop`: none), every suite it chose succeeded and
 every other was skipped; 1 otherwise.
 
-Output: `tier=`, `suites=` (a JSON list) and `legs=` lines, to
+ALSO ON THE RELEASE LEGS. A pull request's `pr` or `full` run with a
+kernel path (a kernel/*.lu or boot/*.S) that includes mpx6-firmware also
+runs that suite on the release legs (`also_release=["mpx6-firmware"]`,
+read by a step of its job): the NMI row's injection points (tests/mpx6-nmi,
+the suite's F11) are a property of the release build, and the merge gate's
+leg is native.
+
+Output: `tier=`, `suites=` (a JSON list), `legs=` and `also_release=` (a
+JSON list) lines, to
 --github-output (appended) and to standard output; with --json, one
 JSON object instead. The reasons, one line per changed path, go to
 standard error, so a run's log says why it has the jobs it has.
@@ -193,6 +201,8 @@ def full_tools(rules):
     return {g for g, t, _ in rules if "FULL" in t and g.startswith("tools/") and "*" not in g}
 
 
+KERNEL_PATH = re.compile(r"^(kernel/.*\.lu|boot/[^/]*\.S)$")
+RELEASE_TOO = ["mpx6-firmware"]
 REF = re.compile(r"(?<![A-Za-z0-9_.-])((?:tools|user|boot|font|kernel|tests|docs)/[A-Za-z0-9._/-]*[A-Za-z0-9_-])")
 KMAIN = re.compile(r"\b(kmain(?:_[a-z0-9_]+)?)\b")
 
@@ -275,11 +285,15 @@ def plan(a):
     ft = full_tools(rules)
     refs = {s: suite_refs(s, jobs, ft) for s in suites}
     log = []
+    kernel = []   # the pull request's kernel paths, for also_release
 
     def result(tier, chosen, legs):
         if "proof" in chosen and "macos-run" in suites:
             chosen = set(chosen) | {"macos-run"}
-        return {"tier": tier, "suites": [s for s in suites if s in chosen], "legs": legs, "log": log}
+        also = [s for s in RELEASE_TOO if s in chosen] if kernel and tier in ("pr", "full") else []
+        if also:
+            log.append("a kernel path (%s): %s on the release legs as well" % (kernel[0], " ".join(also)))
+        return {"tier": tier, "suites": [s for s in suites if s in chosen], "legs": legs, "also_release": also, "log": log}
 
     labels = [x for x in (a.labels or "").split(",") if x]
     asked = [s for s in (a.suites or "").split() if s]
@@ -339,6 +353,8 @@ def plan(a):
     chosen, full = set(), []
     for p in paths:
         got, why = classify(p, suites, rules, refs)
+        if KERNEL_PATH.match(p):
+            kernel.append(p)
         if "FULL" in got:
             full.append(p)
         if "ALL" in got:
@@ -453,9 +469,9 @@ def main():
     for line in r["log"]:
         print("ci-plan: " + line, file=sys.stderr)
     if a.json:
-        print(json.dumps({k: r[k] for k in ("tier", "suites", "legs")}))
+        print(json.dumps({k: r[k] for k in ("tier", "suites", "legs", "also_release")}))
     else:
-        out = "tier=%s\nsuites=%s\nlegs=%s\n" % (r["tier"], json.dumps(r["suites"]), r["legs"])
+        out = "tier=%s\nsuites=%s\nlegs=%s\nalso_release=%s\n" % (r["tier"], json.dumps(r["suites"]), r["legs"], json.dumps(r["also_release"]))
         sys.stdout.write(out)
         if a.github_output:
             with open(a.github_output, "a") as f:
