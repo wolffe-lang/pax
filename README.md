@@ -1015,6 +1015,8 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   suite on the release legs (`tier rest`) after a green `tier full`, every leg otherwise. Trunk pushes share one
   queue: the running one finishes and only the newest waiting one runs after it. The nightly skips a head whose
   `tier all` is green already; the Sunday schedule runs every leg whatever the head has.
+- `macos-run` is in no `tier full` run, so the merge gate waits for no macOS runner: a trunk push, the nightly, the
+  Sunday run and a pull request whose paths choose the proof run it.
 - Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, 90 for users again
   with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
   (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in
@@ -1040,7 +1042,7 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 | host | build an image | boot one (`qemu-run`, `tests/proof --image`) | gdb (`qemu-gdb`) |
 |---|---|---|---|
 | linux x86-64 (CI's ubuntu, the pool) | yes: binutils, cc, make, curl, xorriso | yes: `qemu-system-x86_64`; OVMF for UEFI; KVM used when `/dev/kvm` is usable | yes: gdb |
-| macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every push | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
+| macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every trunk push and nightly, and on a pull request whose paths choose the proof | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
 
 - **CI**: `ubuntu-24.04` with QEMU 8.2.2, OVMF and xorriso from apt (TCG); the `macos-run` job boots the same ISO,
   checked by digest, with Homebrew's QEMU 11.1.1 (TCG). Every Linux job names `ubuntu-24.04`, never `ubuntu-latest`,
