@@ -213,6 +213,16 @@ case('sched_setaffinity refused', rows_text(4).replace('setaffinity-ret 0', 'set
 case('status still says one processor', rows_text(4).replace('cpus-allowed f cpus-allowed-list 0-3', 'cpus-allowed 1 cpus-allowed-list 0'),
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-ACTIVE'}, {'SMP-ACTIVE'})
 
+# Timed bounds hold only where the boot's processors fit the take's host CPUs: 16 virtual processors on four host
+# threads run the 16 workers four at a time whatever the kernel does, and a target's virtual processor may wait for one.
+case('16 workers at 4x on 4 host CPUs under KVM: printed, not gated', rows_text(16, run=run_lines(16, ratio=4.0)),
+     ['--kind', 'rows', '--smp', '16', '--host-cpus', '4'], ALL6, set())
+case('16 workers at 4x on 20 host CPUs under KVM: red', rows_text(16, run=run_lines(16, ratio=4.0)),
+     ['--kind', 'rows', '--smp', '16', '--host-cpus', '20'], ALL6 - {'SMP-RUN'}, {'SMP-RUN'})
+case('signals over a tick at 16 on 4 host CPUs: printed, not gated', rows_text(16, signal=signal_lines(usr1=tick, tgk=tick)),
+     ['--kind', 'rows', '--smp', '16', '--host-cpus', '4'], ALL6, set())
+case('signals over a tick at 4 on 4 host CPUs: red', rows_text(4, signal=signal_lines(usr1=tick, tgk=tick)),
+     ['--kind', 'rows', '--smp', '4', '--host-cpus', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'})
 
 # --- the stress ----------------------------------------------------------------------------------
 def stress_text(stage=2, extra='', lost=0, unlocked=0, done=True, gains=None):
@@ -255,6 +265,8 @@ case('allocations outside the lock', stress_text(unlocked=3), sa, set(), {'SMP-L
 case('a processor out of the stress', stress_text(gains=['+1900', '+1900', '+0', '+1900']), sa, set(), {'SMP-LOCK'})
 case('a program killed by a fault', stress_text(extra='user: smpprobe pid 17 killed: page fault vector 14 error 0x4 rip 0x401000 after 3 runs\n'),
      sa, set(), {'SMP-LOCK'})
+case('a component hung past the deadline, ended by the probe',
+     stress_text(extra='SMP-LOCK component futex pid 16 hung 30 s past the deadline: SIGKILL\n'), sa, set(), {'SMP-LOCK'})
 case('SIGKILL and SIGTERM deaths are expected', stress_text(extra='user: smpprobe pid 17 killed: SIGKILL after 3 runs\n'),
      sa, {'SMP-LOCK'}, set())
 
@@ -358,6 +370,8 @@ case('build at 4, gated under TCG', build_text(4), ba + ['--scaling', 'gate'], s
      files={'times': times(0.203, 0.264)})
 case('build at stage 1: one processor runs the jobs', build_text(1), ba + ['--scaling', 'report'], set(), {'SMP-BUILD'},
      files={'times': times(0.203, 0.876)})
+case('build at 4, gated, on 2 host CPUs', build_text(4), ba + ['--scaling', 'gate', '--host-cpus', '2'], set(), {'SMP-BUILD'},
+     files={'times': times(0.203, 0.264)})
 case('build at 1: the figures alone', build_text(1), ['--kind', 'build', '--smp', '1', '--expected', 'expected.json'],
      {'SMP-BUILD'}, set(), files={'times': times(0.203, 0.876)})
 case('build with an output not the oracle\'s', build_text(4, wrong=True), ba + ['--scaling', 'report'], set(), {'SMP-BUILD'},
