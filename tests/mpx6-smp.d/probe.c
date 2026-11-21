@@ -223,7 +223,7 @@ static U memfree_kb(void) {
     const char *k = find(m, m + n, "MemFree:");
     if (!k) return 0;
     k += 8;
-    while (*k == ' ') k++;
+    while (*k == ' ' || *k == '\t') k++; /* `MemFree:\t` then the value padded to eight */
     return (U)num(k, m + n);
 }
 
