@@ -41,6 +41,8 @@
    loaded it), whose SHA-256 kernel/identity prints under the banner
    (pax#176), and `pax_kernel_commit`, 48 bytes of .rodata that
    tools/build-kernel writes after the link (the commit it built).
+   px161 adds the MP request (revision 0; PROTOCOL.md's MP feature),
+   three words longer than the rest: its `flags`.
 
    Not listed in kernel/wolf.pkg: the boot code is the consumer's, and
    links wolf's object (K6(b)); tools/build-kernel assembles it.
@@ -121,6 +123,19 @@ limine_efi_system_table_request:
 limine_executable_file_request:         /* px87: the kernel's own file (pax#176) */
         .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0xad97e90e83f1ed67, 0x31eb5d1c5ff23b69
         .quad 0, 0
+
+        /* px161: the MP feature (PROTOCOL.md's MP (Multiprocessor) Feature,
+           revision 0, flags 0: no x2APIC asked, so a firmware's x2APIC is
+           turned off where Limine can, and every machine PAX has met hands
+           over in xAPIC mode). With it Limine starts every application
+           processor and parks it in its own loop, polling its
+           `goto_address`; kernel/smp releases each (or none, under
+           `nosmp`). Its response lists every processor, the boot one too. */
+        .globl limine_mp_request
+limine_mp_request:
+        .quad LIMINE_MAGIC_0, LIMINE_MAGIC_1, 0x95a67b819a1b857e, 0xa0b61b723b6a73e0
+        .quad 0, 0
+        .quad 0                         /* flags */
 
         .globl limine_base_revision
         .set limine_base_revision, base_revision
