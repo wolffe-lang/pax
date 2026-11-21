@@ -7,6 +7,17 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **alpha on the image, with nothing to start.** `/bin/alpha`, the service
+  manager in wolf (`user/alpha.pin`), is in both images: `tools/mkalpha`
+  builds it from alpha's own tree with the toolchain that tree pins, through
+  its own `tools/build --static`, in two checkouts that must agree byte for
+  byte, and ships the stripped copy, which `tools/distribution-root` holds to
+  the builder's sums. No unit ships and nothing runs it at boot: the boot
+  hooks and `/etc/pax-run` are unchanged, so it is a program to type.
+  `tests/mpx6-services` boots it under QEMU and types at it (A0): `alpha
+  --version` prints the version line the same binary prints on Linux,
+  `alpha check --root /` counts no unit, and `alpha status` finds no manager
+  (status 3). `--latest` images take alpha's trunk head.
 - **Every processor is started and parked idle, each with its own state (SMP stage 1).** PAX asks the bootloader
   for every processor (Limine's MP feature) and releases each application processor into the kernel: its own
   record (GS's base in ring 0), GDT, TSS and five guarded 16 KiB stacks (its idle stack and one each for the double
