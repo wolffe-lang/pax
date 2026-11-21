@@ -60,7 +60,10 @@ fn replay(v: Volume) -> bool ! {io, unsupported} {
     let raw = diskio.exact(v.fd, inode_at(v, ino), v.isize)?
     if u(raw, 0, 2) & 61440 != 32768 || u(raw, 4, 4) % v.bs != 0 { return unsupported }
     let size = u(raw, 4, 4) / v.bs
-    if size < 2 || size > 131072 { return unsupported }
+    if size < 2 { return unsupported }
+    // mke2fs and paxext2 make journals of up to 1 GiB (262144 blocks of
+    // 4 KiB), which a volume past 128 GiB gets; a larger one is named.
+    if size > 262144 { print("unsupported: journal of {size} blocks (at most 262144)"); return unsupported }
     var map = List[int]()
     for i in 0..size { (mut map).push(jphysical(v, raw, i)?) }
     var sb = diskio.exact(v.fd, map[0] * v.bs, v.bs)?
