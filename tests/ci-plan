@@ -42,8 +42,9 @@
       `gh`, tl29): no open issue opens one, labelled nightly-red, under
       the one title; an open one gets a comment and no new issue; a label
       that already exists is no failure; unset variables are refused.
-  P5  (a WARN, not a failure) every tracked path is known to the map or
-      read by a suite; an unknown one makes its pull request full.
+  P5  every tracked path is known to the map or read by a suite. An
+      unknown path would make every pull request touching it run every
+      leg; now the pull request that adds one is red here instead.
 
 Exit 0 when every check passes, 1 otherwise.
 """
@@ -418,6 +419,23 @@ expect("P2 the processor census's two data files are the firmware suite's alone 
 expect("P2 the processor census's generators, rows and probe are the firmware suite's alone",
        plan(["tests/mpx6-cpus.d/census.py", "tests/mpx6-cpus.d/protections.py", "tests/mpx6-cpus.d/rows.py", "tests/mpx6-cpus.d/probe.c",
              "tests/mpx6-cpus.d/source-census.sh", "tests/mpx6-cpus.d/census-selftest.py"], **pr), "pr", ["mpx6-firmware"])
+# The paths P5 found no rule for: each named, so that P5 can be a failure.
+# kernel/cpus runs on every boot (processor discovery), so it plans as the
+# kernel's core does; kmain_cpucheck is the kernel tests/mpx6-cpus builds
+# (the firmware suite's F12); the census directory's build-only witnesses
+# are run by no job, so they plan nothing; the plan job's fetch-busybox
+# selftest plans as CI's own files do. The core's and CI's tier is read
+# from the planner itself, so these rows hold whatever that tier is named.
+CORE_PLAN = plan(["kernel/sched/sched.lu"], **pr)
+CI_PLAN = plan([".github/workflows/ci.yml"], **pr)
+expect("P2 kernel/cpus plans as the kernel's core does (every suite)", plan(["kernel/cpus/cpus.lu"], **pr), CORE_PLAN["tier"], SUITES)
+expect("P2 kmain_cpucheck is the firmware suite's alone (tests/mpx6-cpus, its F12)",
+       plan(["kernel/kmain_cpucheck.lu"], **pr), "pr", ["mpx6-firmware"])
+expect("P2 the census directory's build-only witnesses plan no suite (no job runs them)",
+       plan(["tests/mpx6-cpus.d/ambient.c", "tests/mpx6-cpus.d/compiler.sh", "tests/mpx6-cpus.d/compiler/cpu.S",
+             "tests/mpx6-cpus.d/compiler/probe.lu", "tests/mpx6-cpus.d/compiler/wolf.pkg"], **pr), "pr", [])
+expect("P2 the plan job's fetch-busybox selftest plans as CI's own files do",
+       plan(["tests/fetch-busybox-selftest"], **pr), CI_PLAN["tier"], SUITES)
 expect("P2 a census-only change under the full-matrix label is full, not all",
        plan(["tests/mpx6-cpus.d/inventory.json", "tests/mpx6-cpus.d/protections.json"],
             event="pull_request", action="synchronize", labels="full-matrix"), "full", SUITES)
@@ -864,11 +882,8 @@ if tracked:
     r = subprocess.run([PLAN, "--event", "pull_request", "--paths-from", "-"], input="\n".join(tracked),
                        capture_output=True, text=True)
     unknown = [l.split(" -> ")[0].replace("ci-plan: ", "") for l in r.stderr.splitlines() if "no rule and no suite reads it" in l]
-    if unknown:
-        print("ci-plan: WARN P5 %d tracked path(s) no rule knows (a pull request touching one runs full): %s"
-              % (len(unknown), " ".join(unknown[:20])))
-    else:
-        print("ci-plan: PASS P5 every one of %d tracked paths is known" % len(tracked))
+    say(not unknown, "P5 every one of %d tracked paths is known to the map or read by a suite%s"
+        % (len(tracked), "" if not unknown else " (%d no rule knows, each a pull request's every leg: %s)" % (len(unknown), " ".join(unknown[:20]))))
 else:
     print("ci-plan: WARN P5 not a git checkout: the tracked paths not checked")
 
