@@ -144,8 +144,36 @@
 #     lines Linux's, the whole held to tests/mpx5-users.d/priv.pax.
 # And ids' SO_PEERCRED line is Linux's: 61 of its 71 (IDS_LINUX_LINES).
 #
+# px168: root sets the clock. Two sessions in an image of their own
+# (/bin/clock, /bin/as, /t/clock/ 0777); the reference is real root's
+# Linux under QEMU with the program a child of pid 1 and the host's date
+# (tests/mpx5-users.d/clock-vm.sh and clock-vminit.c made linux/clock*.txt
+# and vm-clock.meta; Linux 7.2.4):
+#   - clock (user/elf/clock.c), as root: the zone settimeofday keeps (the
+#     first zone given alone moves the clock), what clock_settime and
+#     settimeofday refuse and the largest second they take, a set forward
+#     and one back read by every wall clock and stamped on new files,
+#     CLOCK_MONOTONIC and CLOCK_BOOTTIME across them, relative sleeps across
+#     a set, absolute sleeps and futex waits on the wall clock across sets
+#     forward and back, adjtimex and clock_adjtime, the clock put back:
+#     CLOCK_LINUX_LINES (12) of its 18 lines Linux's, the whole held to
+#     tests/mpx5-users.d/clock.pax (adjtimex and clock_adjtime are refused
+#     by name; an absolute wait on the wall clock keeps the deadline its
+#     call computed, where Linux's follows the set);
+#   - clock-user, the same program after `as 1000 1000`: what a user is
+#     told, in Linux's order (the clock, an unreadable argument, the time,
+#     then -EPERM, then a time below CLOCK_MONOTONIC): CLOCK_USER_LINUX_LINES
+#     (5) of its 6 lines Linux's, the whole held to
+#     tests/mpx5-users.d/clock-user.pax (a user's read of the clock's
+#     discipline refused by name).
+#   Each line starts with its row's name, and U1 names every row that
+#   differs from the held file on a line of its own (`FAIL <row> …`).
+#
 #   tests/mpx5-users [--images DIR | --no-boot | --only build] [--bin DIR] [--bore DIR]
-#                    [--firmware bios|uefi|both] [--tier native|release|both]
+#                    [--firmware bios|uefi|both] [--tier native|release|both] [--sessions S,S…]
+#
+# `--sessions S,S…` (px168): boot only the sessions named (a development
+# take, a plant); every recording is still checked. CI names none.
 #
 # **The reference is a recording, and each row says which.** Root's
 # rows are compared with the real root of a Linux kernel booted under
@@ -268,8 +296,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 grep() { command grep -a "$@"; }
 
-images= legs=both tiers=both noboot=0 only= bindir= boredir=
-usage="usage: tests/mpx5-users [--images DIR | --no-boot | --only build] [--bin DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both]"
+images= legs=both tiers=both noboot=0 only= bindir= boredir= sessions_only=
+usage="usage: tests/mpx5-users [--images DIR | --no-boot | --only build] [--bin DIR] [--bore DIR] [--firmware bios|uefi|both] [--tier native|release|both] [--sessions S,S…]"
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -279,6 +307,7 @@ while [ $# -gt 0 ]; do
         --bore)     boredir=$2; shift 2 ;;
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
+        --sessions) sessions_only=$2; shift 2 ;;
         *)          die "$usage" ;;
     esac
 done
@@ -287,13 +316,21 @@ case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier
 case $only in ''|build) ;; *) die "--only takes build" ;; esac
 need readelf python3
 
-PROGS="cred ids ident as own perm chk seven setid sig priv rights"
+PROGS="cred ids ident as own perm chk seven setid sig priv rights clock"
 CRED_SESSIONS="cred cred-user ident ident-user ids soak soak-user" # px39's, in px39's archive
 OWN_SESSIONS="own perm own-user own-soak own-soak-user ls ls-names" # px42's, in the archive that carries owners
 CHK_SESSIONS="chk chk-user chk-soak chk-soak-user" # px43's, in the archive that carries the cases (/k); px44 adds its rows
 SETID_SESSIONS="setid" # px44's: px38's set-ID probe, its `bits:` lines
 RIGHTS_SESSIONS="rights sig priv rights-user rights-soak rights-soak-user" # px45's, in the archive of their own
-SESSIONS="own perm chk setid sig priv rights own-user $CRED_SESSIONS own-soak own-soak-user ls ls-names chk-user chk-soak chk-soak-user rights-user rights-soak rights-soak-user"
+CLOCK_SESSIONS="clock clock-user" # px168's, in the archive of their own
+SESSIONS="own perm chk setid sig priv rights own-user $CRED_SESSIONS own-soak own-soak-user ls ls-names chk-user chk-soak chk-soak-user rights-user rights-soak rights-soak-user $CLOCK_SESSIONS"
+ALL_SESSIONS=$SESSIONS
+if [ -n "$sessions_only" ]; then # px168: --sessions, in the suite's own order
+    for w in ${sessions_only//,/ }; do case " $ALL_SESSIONS " in *" $w "*) ;; *) die "--sessions: no session $w" ;; esac; done
+    SESSIONS=
+    for w in $ALL_SESSIONS; do case ",$sessions_only," in *",$w,"*) SESSIONS="$SESSIONS $w" ;; esac; done
+    SESSIONS=${SESSIONS# }
+fi
 LS_ARGS="/home /home/pax /home/pax/notes /srv"
 ref=$here/mpx5-users.d/linux
 run_of() {
@@ -316,6 +353,8 @@ run_of() {
         rights-soak-user) echo "/bin/rights soak 100000 1000" ;;
         sig)           echo "/bin/sig /t/sig" ;;
         priv)          echo "/bin/priv /t/priv" ;;
+        clock)         echo "/bin/clock /t/clock" ;;
+        clock-user)    echo "/bin/as 1000 1000 /bin/clock user /t/clock" ;;
         cred)       echo "/bin/cred" ;;
         cred-user)  echo "/bin/as 1000 1000 /bin/cred" ;;
         ident)      echo "/bin/ident /bin/ident-setid" ;;
@@ -329,7 +368,8 @@ lines_of() { # the recording's line count: a change to a recording is a change h
     case $1 in cred) echo 2684 ;; cred-user) echo 3983 ;; ident) echo 225 ;; ident-user) echo 129 ;; ids) echo 71 ;; soak|soak-user) echo 2 ;;
         own) echo 278 ;; own-user) echo 9 ;; perm) echo 382 ;; own-soak|own-soak-user) echo 2 ;; ls|ls-names) echo 18 ;;
         chk) echo 339 ;; chk-user) echo 65 ;; chk-soak|chk-soak-user) echo 2 ;; setid) echo 74 ;;
-        rights) echo 284 ;; rights-user) echo 20 ;; rights-soak|rights-soak-user) echo 2 ;; sig) echo 144 ;; priv) echo 30 ;; esac
+        rights) echo 284 ;; rights-user) echo 20 ;; rights-soak|rights-soak-user) echo 2 ;; sig) echo 144 ;; priv) echo 30 ;;
+        clock) echo 18 ;; clock-user) echo 6 ;; esac
 }
 pax_lines_of() { # what PAX writes: the recording's count, but for setid (px44: its execve rows); perm's three `!` lines (a SIGSTOP PAX dropped) went with px48; sig's `!` line (px45: the set-ID target that did not settle) with px56
     case $1 in setid) echo 72 ;; *) lines_of "$1" ;; esac # px56: setid's copies run (70 before); sig's target settles (145 before)
@@ -383,11 +423,36 @@ PRIV_LINUX_LINES=22 # px45 (4 before; px62: 19 before PAX made FIFOs, the user's
 PRIV_REFUSED="syscall 133: refused: a device node (the tree makes none), -1|syscall 41: refused: an AF_INET socket that is neither a datagram nor a stream socket: type 3, -94" # px62: root's and the user's FIFOs are made now
 SIG_ENOSYS="273 334" # glibc's two (px49, pax#73: sig's targets wait in `pause`, which PAX has now; 34 before)
 
+# px168: clock's 18 lines and clock-user's 6, of which PAX writes these
+# Linux's (the rest held in tests/mpx5-users.d/clock.pax and clock-user.pax:
+# adjtimex and clock_adjtime refused by name, root's reads and changes and
+# a user's reads; an absolute wait on the wall clock keeps its call's
+# deadline across a set, two sleeps and two futex waits); and the
+# kernel's refusals of those calls, by name: root's seven, a user's three.
+CLOCK_LINUX_LINES=12
+CLOCK_USER_LINUX_LINES=5
+CLOCK_WHY='refused: the clock'"'"'s discipline read or changed (PAX keeps no frequency, offset or status; root steps the clock with clock_settime or settimeofday), -95'
+CLOCK_REFUSED="syscall 159: $CLOCK_WHY|syscall 159: $CLOCK_WHY|syscall 159: $CLOCK_WHY|syscall 159: $CLOCK_WHY|syscall 159: $CLOCK_WHY|syscall 305: $CLOCK_WHY|syscall 305: $CLOCK_WHY"
+CLOCK_USER_REFUSED="syscall 159: $CLOCK_WHY|syscall 159: $CLOCK_WHY|syscall 305: $CLOCK_WHY"
 
 work=$PAX_BUILD/mpx5-users
 runs=$PAX_BUILD/mpx5-users-runs.txt
 fail=0 ran=0
 bad() { say "FAIL $*"; fail=1; }
+
+# px168: the clock sessions' rows, held (file 1) against written (file 2),
+# line by line: `<row>\t<held>\t<written>` for each that differs, the row
+# the text before the line's first colon.
+clock_rows() {
+    python3 -I - "$1" "$2" <<'PY'
+import itertools, sys
+held = open(sys.argv[1], errors='replace').read().splitlines()
+got = open(sys.argv[2], errors='replace').read().splitlines()
+for w, g in itertools.zip_longest(held, got, fillvalue=''):
+    if w != g:
+        print('\t'.join([(w or g).split(':', 1)[0] or 'clock-?', w, g]))
+PY
+}
 
 static_ok() { # file -> reason on failure
     readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
@@ -402,7 +467,7 @@ refs_ok() { # -> reasons on stdout
             cmp -s "$px/probes/$f" "$PAX_ROOT/user/elf/$f" || printf ' user/elf/%s is not notes/px38/probes/%s;' "$f" "$f"
         fi
     done
-    for s in $SESSIONS; do
+    for s in $ALL_SESSIONS; do
         [ -f "$ref/$s.txt" ] || { printf ' no recording %s.txt;' "$s"; continue; }
         n=$(wc -l < "$ref/$s.txt" | tr -d ' ')
         [ "$n" = "$(lines_of "$s")" ] || printf ' %s.txt has %s lines, not %s;' "$s" "$n" "$(lines_of "$s")"
@@ -650,6 +715,17 @@ if [ -z "$images" ]; then
             why+=" tools/mkinitramfs $s;"
         fi
     done
+    # px168: the clock sessions (root's sets the clock, so one boot a
+    # session); the entries tests/mpx5-users.d/clock-vm.sh gives Linux.
+    for s in $CLOCK_SESSIONS; do
+        run_of "$s" > "$work/$s.run"
+        if "$PAX_ROOT/tools/mkinitramfs" "$work/$s.cpio" "/bin/clock=$work/bin/clock:755" "/bin/as=$work/bin/as:755" "/t/:777" "/t/clock/:777" \
+            "/etc/pax-run=$work/$s.run:644" > "$work/$s.initramfs.txt"; then
+            say "  initramfs $s: $(tail -n 1 "$work/$s.initramfs.txt")"
+        else
+            why+=" tools/mkinitramfs $s;"
+        fi
+    done
     for s in $CRED_SESSIONS; do
         run_of "$s" > "$work/$s.run"
         # The set-ID copy of ident: mode 6755, root's, where the kernel
@@ -679,7 +755,7 @@ if [ -z "$images" ]; then
             why+=" $tier kmain_console: tools/build-kernel;"
         fi
     done
-    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), twelve programs and boreutils' ls static, user/elf's cred.c, ids.c, perm.c, setid.c, sig.c, priv.c and px38.h are px38's, twenty-five recordings with their line counts (cred's is px38's recorded vm section, 2684 lines; perm's, setid's, sig's and priv's its vm-protected sections, 382, 74, 144 and 30)" || bad "U0:$why"
+    [ -z "$why" ] && say "PASS U0: kmain_console built ($tiers), thirteen programs and boreutils' ls static, user/elf's cred.c, ids.c, perm.c, setid.c, sig.c, priv.c and px38.h are px38's, twenty-seven recordings with their line counts (cred's is px38's recorded vm section, 2684 lines; perm's, setid's, sig's and priv's its vm-protected sections, 382, 74, 144 and 30; clock's and clock-user's, 18 and 6)" || bad "U0:$why"
     images=$work
     if [ "$only" = build ] || [ "$noboot" = 1 ]; then
         [ "$fail" = 0 ] && say "mpx5-users build (U0): PASS (no boot)" || say "mpx5-users build: FAIL"
@@ -687,7 +763,7 @@ if [ -z "$images" ]; then
     fi
 else
     why=$(refs_ok)
-    [ -z "$why" ] && say "PASS U0 (recordings): twenty-five, with their line counts; the sources are px38's" || bad "U0 (recordings):$why"
+    [ -z "$why" ] && say "PASS U0 (recordings): twenty-seven, with their line counts; the sources are px38's" || bad "U0 (recordings):$why"
 fi
 
 record() { # tier leg session status
@@ -791,6 +867,21 @@ for leg in $legs; do
                     [ "$same" = "$SETID_BITS" ] || why+=" $same bits: lines are real root's, not $SETID_BITS;"
                     note="all $SETID_BITS of its bits: lines (what a write, a truncation, fallocate, utimensat, chmod, rename and a link by the owner, another user and root do to the set-ID bits) byte-identical to real root's recording with the protected settings on (vm-protected); its execve rows of a set-ID copy PAX's (R5: set-ID execution not honoured; px56: the copies run, so the plain one, 02745's, the owner's own and the script's rows are Linux's), the whole held to tests/mpx5-users.d/setid.pax"
                     ;;
+                clock|clock-user)
+                    # px168: every line PAX writes is held to tests/mpx5-users.d/$s.pax;
+                    # of the recording's, CLOCK_LINUX_LINES (root's) or
+                    # CLOCK_USER_LINUX_LINES are PAX's to the byte. Each row that
+                    # differs is named on a line of its own: `FAIL <row> …`.
+                    cx=$here/mpx5-users.d/$s.pax
+                    cmp -s "$cx" "$out" || why+=" the session differs from tests/mpx5-users.d/$s.pax: $(diff "$cx" "$out" | head -n 10 | cut -c1-400 | tr '\n' '|');"
+                    while IFS=$'\t' read -r row want got; do
+                        bad "$row $id: PAX wrote '$got' where tests/mpx5-users.d/$s.pax holds '$want'"
+                    done < <(clock_rows "$cx" "$out")
+                    same=$(paste -d'\n' "$ref/$s.txt" "$out" | awk 'NR % 2 { a = $0; next } a == $0 { n++ } END { print n + 0 }')
+                    wl=$CLOCK_LINUX_LINES; [ "$s" = clock ] || wl=$CLOCK_USER_LINUX_LINES
+                    [ "$same" = "$wl" ] || why+=" $same of the recording's lines are PAX's, not $wl;"
+                    note="$same of its $(lines_of "$s") lines byte-identical to $([ "$s" = clock ] && echo "real root's" || echo "1000:1000's") recording (Linux under QEMU, a child of pid 1), the rest named in tests/mpx5-users.d/$s.pax"
+                    ;;
                 sig)
                     # px45: every line PAX writes is held to sig.pax; of its 102
                     # sender rows SIG_LINUX_ROWS are the recording's to the byte.
@@ -885,6 +976,8 @@ for leg in $legs; do
                 rights)     wr="" ;;
                 sig)        wn=$SIG_ENOSYS; wr="" ;; # px56: its set-ID copy runs (px27 refused it)
                 priv)       wr=$PRIV_REFUSED ;;
+                clock)      wr=$CLOCK_REFUSED ;;
+                clock-user) wr=$CLOCK_USER_REFUSED ;;
             esac
             [ "$tl" = "$wt" ] || why+=" the '~' lines are '$tl', not '$wt';"
             [ "$rf" = "$wr" ] || why+=" refusal lines '$rf', not '$wr';"
