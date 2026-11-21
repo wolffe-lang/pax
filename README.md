@@ -964,6 +964,8 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
   (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in
   [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200 seconds for its 100,000 rounds.
+- Every tracked path is known to the planner (a rule in `tools/ci-tiers.map`, or a suite that reads it); a pull
+  request that adds a path nothing knows is red in its plan job, where before it ran every leg on every push.
 - A test is seen red before it is trusted: the break is planted in a commit and run of its own, then fixed.
 - One known stall of the Linux reference shell ([#196](https://github.com/wolffe-lang/pax/issues/196),
   [pelt#98](https://github.com/wolffe-lang/pelt/issues/98)) gets one retry of its Linux leg only, with a warning that
