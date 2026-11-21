@@ -193,9 +193,31 @@ static void invalid_rows(const char *who)
     long G = rc(SYS_settimeofday, (long)unmapped, 0, 0, 0, 0);
     long H = rc(SYS_settimeofday, 0, 0, 0, 0, 0);
     long I = rc(SYS_settimeofday, 0, (long)&z, 0, 0, 0);
+    struct timezone zf = { 901, 0 };
+    long J = rc(SYS_settimeofday, 0, (long)&zf, 0, 0, 0);
+    long K = rc(SYS_settimeofday, 0, (long)unmapped, 0, 0, 0);
     say("%s: settimeofday to now %ld; tv_usec 1000000 %ld, -1 %ld; tv_sec -1 %ld; {0, 1} (below CLOCK_MONOTONIC) %ld; "
-        "2^40 s %ld; an unmapped timeval %ld; (NULL, NULL) %ld; (NULL, {0, 0}) %ld\n",
-        who, A, B, C, Dd, E, F, G, H, I);
+        "2^40 s %ld; an unmapped timeval %ld; (NULL, NULL) %ld; (NULL, {0, 0}) %ld; (NULL, {901, 0}) %ld; (NULL, an unmapped "
+        "zone) %ld\n",
+        who, A, B, C, Dd, E, F, G, H, I, J, K);
+    /* The largest second either call takes, found by halving between 2100-01-01 and 2^33 s: root's call takes it
+     * (0); a user's is refused -EPERM only once the time itself is one a set could take, and -EINVAL before that. */
+    long ok = strcmp(who, "clock-invalid") == 0 ? 0 : -EPERM;
+    long long lo = T2100, hi = 1LL << 33;
+    while (hi - lo > 1) {
+        long long mid = lo + (hi - lo) / 2;
+        ts.tv_sec = (time_t)mid;
+        ts.tv_nsec = 0;
+        if (rc(SYS_clock_settime, CLOCK_REALTIME, (long)&ts, 0, 0, 0) == ok) lo = mid;
+        else hi = mid;
+    }
+    long long lo2 = T2100, hi2 = 1LL << 33;
+    while (hi2 - lo2 > 1) {
+        long long mid = lo2 + (hi2 - lo2) / 2;
+        if (set_tv(mid, 0) == ok) lo2 = mid;
+        else hi2 = mid;
+    }
+    say("%s: the largest tv_sec clock_settime takes %lld, settimeofday %lld\n", who, lo, lo2);
 }
 
 /* --- root's sets ------------------------------------------------------------- */
