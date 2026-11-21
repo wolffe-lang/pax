@@ -26,24 +26,36 @@ for args, code in [([], 16), (['-ny', missing], 16), (['-y', missing], 8),
     p = run([checker, *args])
     assert p.returncode == code and not missing.exists(), (args, p.returncode, p.stdout)
 print('PASS usage: exact statuses, missing repair target not created')
-# Capacity is a named resource refusal before any owner map allocation,
-# journal replay or repair. These bounded superblock witnesses must not
-# require a multi-terabyte backing file merely to reject its geometry.
-for name, blocks, inodes, bpg in [('blocks',4194305,16,32768),
-                                 ('inodes',2048,1048577,32768),
-                                 ('groups',4104,8208,8)]:
-    image=work/('capacity-'+name+'.img')
-    before=bytearray(4096)
-    for off,value,width in [(56,61267,2),(24,2,4),(4,blocks,4),(0,inodes,4),
-                            (32,bpg,4),(40,16,4),(76,1,4),(88,256,2),(84,11,4)]:
-        struct.pack_into('<H' if width==2 else '<I',before,1024+off,value)
+# Capacity: the checker keeps one bit a block and three bytes an inode, so
+# every block count the format can name is checked, and a volume naming
+# more than 2^30 inodes (3 GiB of inode state; mke2fs's default density at
+# 16 TiB) is a named refusal before any allocation, journal replay or
+# repair; so is one of more than 2^20 groups (no volume mke2fs makes at
+# either block size has that many). The superblock alone is the witness:
+# no multi-terabyte file.
+cap_failures = []
+for name, blocks, inodes, bpg, ipg, text in [
+        ('inodes', 32768 * 65537, (1 << 30) + 16, 32768, 16384, b'(1073741824 inodes)'),
+        ('groups', 8 * 1048577, 16, 8, 16, b'(1048576 groups)')]:
+    image = work/('capacity-' + name + '.img')
+    before = bytearray(4096)
+    for off, value, width in [(56, 61267, 2), (24, 2, 4), (4, blocks, 4), (0, inodes, 4),
+                              (32, bpg, 4), (40, ipg, 4), (76, 1, 4), (88, 256, 2), (84, 11, 4)]:
+        struct.pack_into('<H' if width == 2 else '<I', before, 1024 + off, value)
     image.write_bytes(before)
-    for mode in ['-n','-y','-p']:
-        result=run([checker,mode,image])
-        assert result.returncode==8 and b'unsupported: volume exceeds checker capacity' in result.stdout,(name,mode,result.returncode,result.stdout)
-        assert image.read_bytes()==before,(name,mode,'modified refused image')
-        (work/('capacity-'+name+mode+'.log')).write_bytes(result.stdout)
-    print('PASS F-capacity-'+name+': named, byte-unchanged refusal before allocation')
+    for mode in ['-n', '-y', '-p']:
+        result = run([checker, mode, image])
+        (work/('capacity-' + name + mode + '.log')).write_bytes(result.stdout)
+        if result.returncode != 8 or b'unsupported: volume exceeds checker capacity ' + text + b'; no repair committed' not in result.stdout:
+            cap_failures.append((name, mode, result.returncode, result.stdout[-200:]))
+        elif image.read_bytes() != before:
+            cap_failures.append((name, mode, 'modified refused image'))
+# A red F-cap is said by name and the remaining rows still run; the
+# script's exit says it at the end.
+if cap_failures:
+    print('FAIL F-cap: ' + repr(cap_failures)[:600], flush=True)
+else:
+    print('PASS F-cap: more than 1073741824 inodes or 1048576 groups, named, byte-unchanged refusals before allocation')
 for name in ['group-free-count', 'block-bit-cleared', 'link-count', 'cross-linked-block']:
     initial = work.parent/'corpus'/(name+'.img')
     a, b = work/(name+'.oracle'), work/(name+'.wolf')
@@ -93,3 +105,4 @@ for name in ['tag-past-end', 'bad-revoke-count', 'csum3']:
     results.append(row)
     print('UNSUPPORTED journal-' + name + ': ' + json.dumps(row))
 (work/'results.json').write_text(json.dumps(results, indent=2)+'\n')
+raise SystemExit(1 if cap_failures else 0)
