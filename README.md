@@ -229,6 +229,7 @@ first program it prints how long its boot took and how much of that the console 
 | den | version control in wolf, Git's repository formats byte for byte: `/bin/den`, with `git` a link to it, and its wire over `file://`, `git://`, SSH and HTTPS | `291011dd` (wolf 0.2.36) |
 | burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.39) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
+| alpha | the service manager in wolf: `/bin/alpha` checks unit files (`alpha check`) and asks a running manager; the image ships no unit and starts nothing yet | `2aaf3f8b` (wolf 0.2.40) |
 | pxg | the package manager, `/bin/pxg`; selected readers only on PAX, transactions refused | `a497e373` (its own wolf 0.2.38 pin) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `3a9983ee` |
