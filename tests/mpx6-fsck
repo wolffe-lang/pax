@@ -4,6 +4,11 @@
 # tools/mkpelt tools/mklope tools/mkboreutils tools/mkdiskprobe tools/mkinitramfs
 # tools/build-kernel kernel/kmain_console.lu user/fstab-root
 # tests/mpx6-journal.d/replays
+# The linux phase ends with tests/mpx6-fsck.d/capacity.py, the checker at
+# size: px84's five geometries to 16 TiB less a block, a repair past block
+# 2^31, and the owner's root, which is local-only (PAX_FSCK_LOCAL_BIG=1;
+# without it the two owner rows print SKIP and F-local-skips asserts that).
+# --only capacity builds the checker alone (tools/mkfsck) and runs those rows.
 set -euo pipefail
 . "$(dirname "$0")/../tools/lib.sh"
 work=$PAX_BUILD/mpx6-fsck
@@ -14,12 +19,12 @@ while [ $# -gt 0 ]; do
         --only) only=$2; shift 2 ;;
         --tier) tiers=$2; shift 2 ;;
         --firmware) firmware=$2; shift 2 ;;
-        *) die 'usage: mpx6-fsck [--work DIR] [--only build|linux|pax-corpus|rescue|all] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+        *) die 'usage: mpx6-fsck [--work DIR] [--only build|linux|capacity|pax-corpus|rescue|all] [--tier native|release|both] [--firmware bios|uefi|both]' ;;
     esac
 done
 case $tiers in both) tiers='native release' ;; native|release) ;; *) die 'invalid tier' ;; esac
 case $firmware in both) firmware=bios,uefi ;; bios|uefi) ;; *) die 'invalid firmware' ;; esac
-case $only in all|build|linux|pax-corpus|rescue) ;; *) die 'invalid phase' ;; esac
+case $only in all|build|linux|capacity|pax-corpus|rescue) ;; *) die 'invalid phase' ;; esac
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
 D=$PAX_ROOT/tests/mpx6-fsck.d
@@ -43,7 +48,7 @@ if [ "$only" = build ] || [ "$only" = all ]; then
         done
     done
 fi
-if [ "$only" = linux ] || [ "$only" = all ]; then
+if [ "$only" = linux ] || [ "$only" = capacity ] || [ "$only" = all ]; then
     need python3
     if [ -n "${PAX_FSCK_ORACLE_BIN:-}" ]; then
         export PATH="$PAX_FSCK_ORACLE_BIN:$PATH"
@@ -56,9 +61,17 @@ if [ "$only" = linux ] || [ "$only" = all ]; then
         export PATH="$work/oracles:$PATH"
     fi
     e2fsck -V > "$work/oracle-version.log" 2>&1
-    python3 -I "$D/corpus.py" --checker "$work/bin/fsck.ext2" --work "$work/corpus"
-    python3 -I "$D/journal.py" "$work/bin/fsck.ext2" "$work/journal"
-    python3 -I "$D/refusals.py" "$work/bin/fsck.ext2" "$work/refusals"
+    rows=0
+    if [ "$only" = capacity ]; then
+        "$PAX_ROOT/tools/mkfsck" "$work/bin"
+    else
+        python3 -I "$D/corpus.py" --checker "$work/bin/fsck.ext2" --work "$work/corpus"
+        python3 -I "$D/journal.py" "$work/bin/fsck.ext2" "$work/journal"
+        python3 -I "$D/refusals.py" "$work/bin/fsck.ext2" "$work/refusals" || rows=1
+    fi
+    # The capacity rows run whatever refusals.py said; either red fails the phase.
+    python3 -I -B "$D/capacity.py" "$work/bin/fsck.ext2" "$work/capacity" || rows=1
+    [ "$rows" = 0 ] || die "the refusal or capacity rows are red (FAIL lines above)"
 fi
 if [ "$only" = rescue ] || [ "$only" = all ]; then
     for tier in $tiers; do
