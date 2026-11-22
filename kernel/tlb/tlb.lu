@@ -79,6 +79,14 @@ var span: u64 = 0
 var n: u64 = 0
 /// The last generation asked.
 var gen: u64 = 0
+/// kernel/sched's boot check alone (`park_selftest`, before any other
+/// processor runs a thread): while set, every space answers held.
+var all_held: bool = false
+
+pub fn hold_all_for_test(on: bool) {
+    // # Safety: CPU 0's boot check, before any application processor runs.
+    unsafe { all_held = on }
+}
 
 pub fn start(x2apic: bool, lapic_va: u64, windows: u64, each: u64, cr3: u64) {
     // # Safety: written once by CPU 0 before any application processor is
@@ -164,6 +172,10 @@ pub fn space(pml4: u64) {
 /// Every other processor that runs a thread of `pml4` now: its index + 1,
 /// 0 if none (kernel/sched's departure rule).
 pub fn user_of(pml4: u64) -> u64 {
+    // # Safety: as `hold_all_for_test`.
+    if unsafe { all_held } {
+        return 1
+    }
     let me = percpu.mine()
     var i: u64 = 0
     // # Safety: as `start`.
