@@ -245,6 +245,25 @@ pub fn leave() {
     unsafe { at(OWNER).atomic_store(0, Order.release) }
 }
 
+/// The end's last act on CPU 0 (kmain_console's `halt`, kernel/user's
+/// `the_end` after a power-off that did not take): interrupts off, the
+/// lock given back whole whatever DEPTH kmain held it at, then
+/// `panic.halt`. The other processors' next ticks find it free and they
+/// rest in their idle loop's HLT with interrupts on, as before stage 2
+/// (tests/mpx6-cpus' SMP-IDLE), rather than spin for a lock no one will
+/// give back, interrupts off, until power is cut. A panic does not come
+/// here: its processor halts holding the lock, and the others spin until
+/// stage 2's STOP step stops them first.
+pub fn halt_given_back() -> never {
+    let _off = sync.irq_save()
+    if held_here() {
+        put_depth(0)
+        // # Safety: the holder's release store; as `owner`.
+        unsafe { at(OWNER).atomic_store(0, Order.release) }
+    }
+    panic.halt()
+}
+
 /// kmain's hold, once, before interrupts go on: the boot thread is the
 /// first kernel thread and holds the lock while it runs.
 pub fn boot() {
