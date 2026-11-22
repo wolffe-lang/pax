@@ -470,7 +470,7 @@ static void tlb_replace(int r) {
     struct ln l;
     volatile U *p = map(4096, PROT_RW, MAP_PRIVATE_ANON);
     p[0] = PAT_X; p[1] = PAT_X;
-    G->ready = G->stop = G->phase = G->done = G->stale = G->reads = G->btid = 0;
+    G->ready = G->stop = G->phase = G->done = G->stale = G->reads = G->btid = G->fault_tsc = 0;
     spawn(&t, b_replace, (void *)p);
     int up = await(&G->ready, 2000);
     take(&z0);
@@ -485,6 +485,9 @@ static void tlb_replace(int r) {
     ls(&l, " stale ");
     if (done) ld(&l, G->stale); else lc(&l, '-');
     ls(&l, " reads "); ld(&l, G->reads); ls(&l, m == (L)p ? " fixed yes" : " fixed no");
+    /* B's SIGSEGV (h_segv: the time, then its thread ends): a fault on the page while A replaced it, refused when
+       it was routed although the new page was present by then */
+    ls(&l, G->fault_tsc ? " b-fault yes" : " b-fault no");
     tlb_cpus(&l, &z0);
     ls(&l, " tlb "); ldelta(&l, tlb_sum(&z0), tlb_sum(&z1));
     ls(&l, up ? "" : " b-never-ready");
