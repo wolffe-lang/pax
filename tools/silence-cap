@@ -7,7 +7,7 @@
 Runs COMMAND with its standard output and standard error joined and passed straight through, in a process group of its
 own (setpgid in the child, as `subprocess` does with process_group=0; no new session). Any byte counts as output, a line
 or not. If none arrives for the limit, it prints the group's processes (pid, elapsed time, command line, one line each),
-a line naming the cut and the last line the command printed, and an `::error::` annotation with the same text; then it
+then a line naming the cut and the last line the command printed, then an `::error::` annotation with the same text; then it
 sends TERM to the group, waits up to 10 s for the group to end (the suites' own cleanup: QEMU killed, temporary files
 removed), sends KILL to whatever is left, and exits 124. Otherwise it exits with COMMAND's status (128 + the signal if
 a signal ended it). A TERM or INT to this tool (a job's cancel) is passed to the group the same way, and it exits 143.
@@ -101,6 +101,8 @@ def stop(child, why, fd=None):
     else:
         say('the command is not the leader of a group of its own: signalling pid %d alone' % pid)
     say(why)
+    sys.stdout.buffer.write(('::error::silence-cap: %s\n' % why.replace('%', '%25')).encode())
+    sys.stdout.buffer.flush()
 
     def send(sig):
         try:
@@ -163,7 +165,6 @@ def main(argv):
         if not sel.select(timeout=limit):
             shown = (partial or last).decode(errors='replace').strip()[:200]
             why = 'no output for %s after "%s"; stopped the step (exit 124)' % (unit, shown)
-            sys.stdout.buffer.write(('::error::silence-cap: %s\n' % why.replace('%', '%25')).encode())
             stop(child, why, fd)
             sys.exit(124)
         data = os.read(fd, 65536)
