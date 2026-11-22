@@ -201,7 +201,7 @@ case('a wrong wait status', rows_text(4, wait=wait_lines(4, right=15)), ['--kind
      ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'})
 case('children on one processor', rows_text(4, wait=wait_lines(4, cpus='0')), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'})
-case('a kernel panic mid-run', rows_text(4, extra='PANIC sched: slot 9 running on two processors 0x0000000000000009\n'),
+case('a kernel panic mid-run', rows_text(4, extra='PANIC page fault vector 14 error 0x0 rip 0xffffffff80012345 rsp 0xffffd00000027f00 frame 0xffffd00000027e40 cr2 0x0\n'),
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-RUN', 'SMP-EXIT'}, {'SMP-RUN', 'SMP-EXIT'})
 t = rows_text(4)
 case('the probe died after SMP-RUN', t[:t.index('SMP-TLB protect 0')] + 'user: smpprobe pid 1 killed: page fault vector 14\nhalt\n',
