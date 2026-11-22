@@ -455,6 +455,17 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
 fn route(f: *Frame) -> *Frame {
     // # Safety: `f` is the trampoline's frame, live for this call.
     let v = unsafe { f[0].vector }
+    // px166 (step 5a): the door. A thread another processor ended in place
+    // (exit_group, exec) while it ran in ring 3 or spun for the lock leaves
+    // here: its system call or ring-3 fault is never routed. Its ticks and
+    // RESCHEDs switch it off in kernel/sched (`preempt`, `kick`); CPU 0's
+    // devices are routed as ever, and the ender's RESCHED follows.
+    // # Safety: the frame's address; nothing is read here.
+    if (v == user.SYSCALL || (v < 32 && user.from_user(unsafe { f as u64 }))) && sched.ended_here() {
+        // # Safety: the frame sched hands back is a saved frame on a live
+        // thread's stack or an idle loop's.
+        return unsafe { sched.leave_ended(f as u64) as *Frame }
+    }
     // px102: the DPL-3 INT3 gate delivers #BP, not #GP. A traced
     // user receives a stop; an untraced user takes SIGTRAP normally.
     if v == 1 && !user.from_user(unsafe { f as u64 }) && trace.kernel_debug(unsafe { f as u64 }) { return f }
