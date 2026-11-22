@@ -59,7 +59,7 @@ for kind, path, line, fn, code in rows:
     elif module.startswith('kmain_') or module in ('heapthreads','pax_tour','schedtest'):
         what = 'boot/test orchestration: spawn/await, snapshots or final halt; no secondary CPU currently enters it'
         need = 'boot CPU owns initialization; test snapshots need all-CPU quiescence, not just local IF clear'
-    elif module == 'tlb' and fn == 'stop_others':
+    elif module == 'ipi' and fn == 'stop_others':
         what = 'the end or a panic asking every other processor to stop: interrupts off from the first mailbox write to the bound'
         need = 'none beyond it: the end holds the kernel lock; a panic may not, and its STOP is best effort, bounded, never waited past'
     elif module == 'tlb' and fn == 'request':
