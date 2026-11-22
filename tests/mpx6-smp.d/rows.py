@@ -587,8 +587,9 @@ elif a.kind in ('panic', 'panic2'):
     # every processor halted with interrupts off in the last dump (gated under KVM; printed under TCG)
     row = 'SMP-PANIC-STOP' if a.kind == 'panic' else 'SMP-PANIC-TWO'
     why, info = [], []
-    # the two lines' texts, not whole lines: kernel/panic has the second wait (bounded) for the first's line, and a
-    # wait that timed out could interleave their bytes; each text must still be there exactly once
+    # the two lines' texts, not whole lines: kernel/panic's print token serializes the panicking processors' lines,
+    # but a token wait past its bound, or a lock holder's line in progress, can put bytes beside them; each text must
+    # still be there whole, exactly once (a text broken by another's bytes is red)
     firsts = re.findall(r'PANIC testwords: a test panic, cpu ', text)
     seconds = re.findall(r"\(a second panic, cpu \d+'s first\): testwords: a test panic", text)
     want2 = 1 if a.kind == 'panic2' else 0
