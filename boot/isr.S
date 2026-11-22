@@ -273,6 +273,20 @@ pax_isr_common:
         callq   *%rax
         movq    %rbx, %rsp
 2:
+        /* px166: the kernel lock's release store (kernel/klock's
+           `pax_klock_resumed`), made here, on the frame to resume, for a
+           frame kernel/user's `hand_back` gave the lock up for: this
+           processor has left the stack it was handed the frame on (the
+           old thread's, when it switched), so no other processor can take
+           the lock and run that thread under it. Before the vector is
+           looked at, so a continuation still finds the lock it kept;
+           before the GS step back to ring 3's. %rbx keeps %rsp, as above. */
+        movq    %rsp, %rdi
+        movq    %rsp, %rbx
+        andq    $-16, %rsp
+        cld
+        call    pax_klock_resumed
+        movq    %rbx, %rsp
         cmpq    $0x102, 120(%rsp)       /* px102: stopped syscall's kernel continuation */
         je      .Lpax_trace_syscall
         cmpq    $0x103, 120(%rsp)       /* px102: finish a completed clone/vfork/exec call */
