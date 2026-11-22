@@ -287,7 +287,7 @@ case('a slot on two processors in a rows boot', head('rows') + DUP, ['--kind', '
 case('a slot on two processors in a cap2 boot', head('cap') + DUP, ['--kind', 'cap2', '--smp', '4', '--cap', '2'], set(),
      {'SMP-CAP', 'SMP-DUP', 'SMP-DEAD'})
 case('a slot on two processors at one processor', head('one') + DUP, ['--kind', 'one', '--smp', '1'], set(),
-     {'SMP-ONE', 'SMP-DUP'})
+     {'SMP-ONE', 'SMP-DUP', 'SMP-REFUSE'})  # the boot dies before the probe's refusals
 case('a lost signal in the storm', stress_text(lost=1), sa, set(), {'SMP-LOCK'})
 # the kernel lock's door (kernel/interrupts): a processor carrying the lock into ring 3 panics by name, and
 # SMP-KLOCK carries that line; another panic (the slot on two processors, above) is not the lock's door
@@ -297,7 +297,7 @@ case('the lock plant in a stress boot: red by the door\'s line', stress_text(ext
 case('the lock plant in a rows boot: the probe stops at its first entry', head('rows') + KLOCK,
      ['--kind', 'rows', '--smp', '4'], set(), ALL6 | {'SMP-KLOCK'})
 case('the lock plant at one processor', head('one') + KLOCK, ['--kind', 'one', '--smp', '1'], set(),
-     {'SMP-ONE', 'SMP-KLOCK'})
+     {'SMP-ONE', 'SMP-KLOCK', 'SMP-REFUSE'})  # the boot dies before the probe's refusals
 case('allocations outside the lock', stress_text(unlocked=3), sa, set(), {'SMP-LOCK'})
 case('a processor out of the stress', stress_text(gains=['+1900', '+1900', '+0', '+1900']), sa, set(), {'SMP-LOCK'})
 case('a program killed by a fault', stress_text(extra='user: smpprobe pid 17 killed: page fault vector 14 error 0x4 rip 0x401000 after 3 runs\n'),
