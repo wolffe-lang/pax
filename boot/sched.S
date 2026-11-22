@@ -106,7 +106,9 @@
                        it may orphan (a 64-bit mask before, wrong past
                        slot 63); px159: three a slot, the third the key
                        buckets its system call looked at, which a wake
-                       of one object reads while it waits
+                       of one object reads while it waits; px166: four,
+                       the fourth the processor running it (its index
+                       plus one; 0 while it runs nowhere)
      pax_pid_hint     px126: 4096 words, `pid mod 4096` to the slot
                        that last took that pid or tid, plus one: a hint
                        kernel/sched checks, walking the slots only when
@@ -231,7 +233,7 @@ pax_threads_end:
         .p2align 6
         .globl pax_slot_words
 pax_slot_words:
-        .zero 1024 * 3 * 8
+        .zero 1024 * 4 * 8
         .p2align 6
         .globl pax_pid_hint
 pax_pid_hint:
