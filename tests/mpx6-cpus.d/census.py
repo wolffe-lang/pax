@@ -68,7 +68,11 @@ if __name__ == '__main__':
     if a.check:
         expected = json.loads(a.check.read_text())
         if rows != expected:
-            print('FAIL CPU-INVENTORY source sites changed; regenerate and review the census')
+            # pax#525: the rows are keyed by line, so a line moved above a site fails too. Say what to run.
+            print('FAIL CPU-INVENTORY source sites changed; regenerate and review the census: '
+                  'python3 -I tests/mpx6-cpus.d/census.py . > tests/mpx6-cpus.d/inventory.json && '
+                  'python3 -I tests/mpx6-cpus.d/protections.py tests/mpx6-cpus.d/inventory.json > tests/mpx6-cpus.d/protections.json'
+                  ', then review git diff tests/mpx6-cpus.d/')
             raise SystemExit(1)
         print(f'PASS CPU-INVENTORY {len(rows)} source sites')
     else:
