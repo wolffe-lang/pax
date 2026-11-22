@@ -144,8 +144,9 @@ fi
 
 # --- step 2: the object --------------------------------------------------
 rc=0
-(cd "$srcdir" && "$wolf" build "$name.lu" --target x86_64-unknown-none --emit=obj -o "$obj" \
-    ${tierflag[@]+"${tierflag[@]}"} ${asflag[@]+"${asflag[@]}"}) >"$out/$name.build.log" 2>&1 || rc=$?
+(cd "$srcdir" && "$PAX_ROOT/tools/progress" --log "$out/$name.build.log" "build-kernel: $name ($tier), the object" -- \
+    "$wolf" build "$name.lu" --target x86_64-unknown-none --emit=obj -o "$obj" \
+    ${tierflag[@]+"${tierflag[@]}"} ${asflag[@]+"${asflag[@]}"}) || rc=$?
 if [ "$rc" != 0 ]; then
     sed 's/^/  wolf: /' "$out/$name.build.log" >&2
     if [ -n "$asm_sel" ] && grep -q 'unknown flag `--assembler`' "$out/$name.build.log"; then
@@ -227,8 +228,8 @@ if grep -Eq -- '-0x[0-9a-f]+\(%rsp\)' "$out/$name.dis"; then
     fail "the code addresses below %rsp (a red zone): $(grep -Em1 -- '-0x[0-9a-f]+\(%rsp\)' "$out/$name.dis")"
 fi
 if [ "$tier" = release ]; then
-    (cd "$srcdir" && "$wolf" build "$name.lu" --target x86_64-unknown-none --release \
-        --emit=llvm-ir -o "$out/$name.ll") >"$out/$name.ir.log" 2>&1 \
+    (cd "$srcdir" && "$PAX_ROOT/tools/progress" --log "$out/$name.ir.log" "build-kernel: $name (release), the IR" -- \
+        "$wolf" build "$name.lu" --target x86_64-unknown-none --release --emit=llvm-ir -o "$out/$name.ll") \
         || fail "wolf build --release --emit=llvm-ir exited non-zero"
     # Every `define … #N` names attribute group N; each such group must
     # carry noredzone and the no-SSE feature string.
