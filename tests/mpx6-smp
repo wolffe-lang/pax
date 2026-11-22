@@ -33,7 +33,7 @@ set -euo pipefail
 cd "$PAX_ROOT"
 tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
 counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
-kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 stress}
+kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 stress nooff panic panic2 testwords}
 kinds=${kinds//,/ } # commas or spaces between the kinds
 # SMP_ROWS_CAP=N, a development knob (tests/mpx6-smp.d/rows-cap.sh): said first, so no one reads its greens as the gate's.
 . tests/mpx6-smp.d/rows-cap.sh
@@ -41,7 +41,8 @@ rows_cap=${SMP_ROWS_CAP:-}
 rows_cap_check "$rows_cap" || exit 2
 [ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 for k in $kinds; do
-    case $k in rows|end|nosmp|one|cap2|cap1|stress) ;; *) die "SMP_KINDS names rows end nosmp one cap2 cap1 stress, not $k" ;; esac
+    case $k in rows|end|nosmp|one|cap2|cap1|stress|nooff|panic|panic2|testwords) ;;
+        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 stress nooff panic panic2 testwords, not $k" ;; esac
 done
 asked() { # KIND: 0 when SMP_KINDS asks it, else its NOT-RUN line and 1
     case " $kinds " in *" $1 "*) return 0 ;; esac
@@ -72,7 +73,12 @@ conf() { # FILE CMDLINE-WORDS
 # NAME:CMDLINE-WORDS:the run list's line (the probe's mode)
 images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-halt::/bin/smpprobe end halt"
         "end-poweroff::/bin/smpprobe end poweroff" "end-reboot::/bin/smpprobe end restart" "one::/bin/smpprobe one"
-        "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one")
+        "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one"
+        "end-nooff: pax.cpus=4 pax.nopoweroff:/bin/smpprobe end poweroff" "panic: pax.cpus=4 pax.panictest=1:/bin/smpprobe spin"
+        "panic2: pax.cpus=4 pax.panictest=2:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff")
+# The STOP step's test kinds boot a test build (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu in
+# kernel/testwords' place); testwords boots the shipped kernel given both words.
+testbuilt() { case $1 in end-nooff|panic|panic2) return 0 ;; esac; return 1; }
 if [ -n "$rows_cap" ]; then # SMP_ROWS_CAP: unset, the list above is used as it stands
     capped=()
     for spec in "${images[@]}"; do capped+=("$(rows_cap_spec "$rows_cap" "$spec")"); done
@@ -88,6 +94,12 @@ for tier in $tiers; do
     if [ -z "${SMP_IMAGES:-}" ]; then
         tools/fetch-limine
         tools/build-kernel ${flags[@]+"${flags[@]}"} --src kernel/kmain_console.lu "$work"
+        tools/build-kernel ${flags[@]+"${flags[@]}"} --test-words --src kernel/kmain_console.lu "$work/test"
+        # op 3 and the test panic live in the test build alone: seen present there and absent from the shipped one
+        tw=$(nm "$work/test/kmain_console.elf" | grep -cE ' _Wtestwords\.(fire|test_panic)\$' || true)
+        sw=$(nm "$work/kmain_console.elf" | grep -cE ' _Wtestwords\.(fire|test_panic)\$' || true)
+        if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-ELF $tier: the test build holds fire and test_panic; the shipped one neither"
+        else echo "FAIL TESTWORDS-ELF $tier: test build $tw of 2 test symbols, shipped $sw (want 0)"; rc=1; fi
         gcc -nostdlib -static -ffreestanding -fno-stack-protector -fno-pie -no-pie -O2 -mgeneral-regs-only -Wall \
             -o "$work/smpprobe" tests/mpx6-smp.d/probe.c
         for spec in "${images[@]}"; do
@@ -97,8 +109,10 @@ for tier in $tiers; do
             tools/mkinitramfs "$work/root-$name.cpio" /bin/smpprobe="$work/smpprobe":0755 /etc/pax-run="$work/run-$name" \
                 > "$work/root-$name.txt"
             conf "$work/limine-$name.conf" "$words"
+            kern=$work/kmain_console.elf
+            ! testbuilt "$name" || kern=$work/test/kmain_console.elf
             tools/mkimage --conf "$work/limine-$name.conf" --add "$work/root-$name.cpio" initramfs.cpio \
-                "$work/kmain_console.elf" "$work/$name.iso"
+                "$kern" "$work/$name.iso"
         done
     fi
     img=${SMP_IMAGES:+$SMP_IMAGES/$tier}
@@ -114,7 +128,7 @@ for tier in $tiers; do
         [ "$d" = 0 ] || dm=("${dump[@]}")
         printf '%s %s %s:\n' "$tier" "$fw" "$(basename "$log" .log)"
         if ! tools/qemu-halt --firmware "$fw" --timeout "$t" --no-screen --serial "$log" --elf "$elf" \
-                --marker halt ${dm[@]+"${dm[@]}"} "${q[@]}" "$iso"; then
+                --marker "${BOOT_MARKER:-halt}" ${BOOT_SYMBOL:+--symbol "$BOOT_SYMBOL"} ${dm[@]+"${dm[@]}"} "${q[@]}" "$iso"; then
             printf 'FAIL SMP-BOOT %s %s %s: no halt (the transcript\x27s last lines below)\n' "$tier" "$fw" "$(basename "$log")"
             { tail -n 12 "$log" 2>/dev/null || true; } | sed 's/^/  /'
             rc=1 halted=0
@@ -140,6 +154,22 @@ for tier in $tiers; do
         ! asked one || boot "$work/smp-$fw-one.log" "$fw" "$img/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
         ! asked cap2 || boot "$work/smp-$fw-cap2.log" "$fw" "$img/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
         ! asked cap1 || boot "$work/smp-$fw-cap1.log" "$fw" "$img/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
+        # the STOP step's kinds (test builds but testwords): their rows read the test ELF's symbols for the dumps
+        if asked nooff; then
+            elf=$img/test/kmain_console.elf boot "$work/smp-$fw-end-nooff.log" "$fw" "$img/end-nooff.iso" 180 1 --kind end-nooff --smp 4 -- -smp 4 -m 512
+        fi
+        if asked panic; then
+            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic.log" "$fw" "$img/panic.iso" 180 1 --kind panic --smp 4 -- -smp 4 -m 512
+        fi
+        if asked panic2; then
+            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic2.log" "$fw" "$img/panic2.iso" 180 1 --kind panic2 --smp 4 -- -smp 4 -m 512
+        fi
+        if asked testwords; then
+            log=$work/smp-$fw-testwords.log st=0
+            printf '%s %s %s:\n' "$tier" "$fw" testwords
+            tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$img/testwords.iso" -- -smp 4 -m 512 || st=$?
+            python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind testwords --smp 4 --qemu-status "$st" --host-cpus "$hostcpus" --elf "$elf" || rc=1
+        fi
     done
     # The stress: SMP_STRESS_BOOTS boots a tier, the firmwares in turn.
     # The probe ends a component still there 30 s past the deadline itself, so a boot that does not halt within
