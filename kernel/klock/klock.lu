@@ -229,7 +229,9 @@ pub fn leave_at_resume() {
 /// NMI may land between `leave_at_resume` and this call, and its own way
 /// out passes here before the interrupted one has left its stack.
 export fn pax_klock_resumed(v: u64) {
-    if v == 2 {
+    // The NMI (2) and the shootdown (kernel/tlb's 49) never take the lock,
+    // so their way out gives nothing back, whatever this processor holds.
+    if v == 2 || v == tlb.VECTOR {
         return
     }
     if held_here() && depth() == 0 {
