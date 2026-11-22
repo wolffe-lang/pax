@@ -51,6 +51,11 @@
 #      inode table grew by (never given back).
 #   K5 the end: `PAX: init … ended with status 0; nothing left to run`,
 #      and qemu-halt holds the machine halted.
+#   K6 forks: the registers a new image starts with (pax#510), as the
+#      image's own entry point stored them before musl's start-up: the
+#      three exec rows (after fork, from vfork, posix_spawn) each print
+#      them, each says `rax 0` (execve's result), and all three lines are
+#      Linux's.
 # PAX_FORKS_SESSIONS names the sessions to boot (all four by default; a
 # plant or a red-first run may name one). The first session of the first
 # leg runs first, and the suite stops at its first failure. The UEFI leg needs OVMF: SKIPPED LOUDLY without it
@@ -251,6 +256,20 @@ for leg in $legs; do
             [ "$(wc -l < "$out.cmp" | tr -d ' ')" -gt 20 ] || why+=" fewer than 21 lines;"
             grep -qx "$p: done" "$out.cmp" || why+=" no '$p: done';"
             [ -z "$why" ] && say "PASS K1 $id: $(wc -l < "$out.cmp" | tr -d ' ') lines byte-identical to Linux's ($(sha256_of "$out.cmp" | cut -c1-12)…), exit $pst" || bad "K1 $id:$why"
+
+            # K6: the registers exec left at the new image's entry (pax#510).
+            if [ "$p" = forks ]; then
+                why=
+                rx="registers at the new image's entry: "
+                pr=$(grep -aF "$rx" "$out.cmp")
+                lr=$(grep -aF "$rx" "$out.linux.cmp")
+                pn=$(printf '%s\n' "$pr" | grep -c .)
+                [ "$pn" = 3 ] || why+=" $pn lines, not 3 (exec after fork, from vfork, posix_spawn);"
+                nz=$(printf '%s\n' "$pr" | grep -v 'entry: rax 0 ' | head -n 1)
+                [ -z "$nz" ] || why+=" rax not 0: $nz;"
+                [ "$pr" = "$lr" ] || why+=" not Linux's: PAX '$(printf '%s' "$pr" | tr '\n' '|')', Linux '$(printf '%s' "$lr" | tr '\n' '|')';"
+                [ -z "$why" ] && say "PASS K6 $id: $(printf '%s' "$pr" | head -n 1 | sed 's/^.*entry: //'), each of the three, as on Linux" || bad "K6 $id:$why"
+            fi
 
             # K2: what PAX does not keep, by name.
             if [ "$p" = usage ]; then
