@@ -448,11 +448,15 @@ expect("P2 the processor census's generators, rows and probe are the firmware su
 CORE_PLAN = plan(["kernel/sched/sched.lu"], **pr)
 CI_PLAN = plan([".github/workflows/ci.yml"], **pr)
 expect("P2 kernel/cpus plans as the kernel's core does (every suite)", plan(["kernel/cpus/cpus.lu"], **pr), CORE_PLAN["tier"], SUITES)
+# SMP stage 1 (pax#484): kernel/smp starts every processor and kernel/percpu holds each one's state; the
+# scheduler, the GDT, the interrupt entry and kmain call them on every boot, so they plan as the core does.
+expect("P2 kernel/smp plans as the kernel's core does (every suite)", plan(["kernel/smp/smp.lu"], **pr), CORE_PLAN["tier"], SUITES)
+expect("P2 kernel/percpu plans as the kernel's core does (every suite)", plan(["kernel/percpu/percpu.lu"], **pr), CORE_PLAN["tier"], SUITES)
 expect("P2 kmain_cpucheck is the firmware suite's alone (tests/mpx6-cpus, its F12)",
        plan(["kernel/kmain_cpucheck.lu"], **pr), "pr", ["mpx6-firmware"])
-expect("P2 the census directory's build-only witnesses plan no suite (no job runs them)",
+expect("P2 the census directory's build-only witnesses are the processor suite's, so the firmware suite's (pax#484)",
        plan(["tests/mpx6-cpus.d/ambient.c", "tests/mpx6-cpus.d/compiler.sh", "tests/mpx6-cpus.d/compiler/cpu.S",
-             "tests/mpx6-cpus.d/compiler/probe.lu", "tests/mpx6-cpus.d/compiler/wolf.pkg"], **pr), "pr", [])
+             "tests/mpx6-cpus.d/compiler/probe.lu", "tests/mpx6-cpus.d/compiler/wolf.pkg"], **pr), "pr", ["mpx6-firmware"])
 expect("P2 the plan job's fetch-busybox selftest plans as CI's own files do",
        plan(["tests/fetch-busybox-selftest"], **pr), CI_PLAN["tier"], SUITES)
 expect("P2 a census-only change under the full-matrix label is full, not all",
