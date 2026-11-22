@@ -130,6 +130,7 @@ use log
 use paging
 use percpu
 use timer
+use tlb
 
 extern "c" fn pax_ap_halt()
 extern "c" fn pax_rdmsr(msr: u64) -> u64
@@ -384,6 +385,7 @@ pub fn start_aps(pml4: u64, main: u64) {
     unsafe {
         let cr4 = pax_cr4()
         percpu.put_word(percpu.W_CR3, pml4)
+        tlb.start(apic.x2(), apic.device_va(), CPUS, SPAN, pml4) // px166: the shootdown's records and APIC
         percpu.put_word(percpu.W_MAIN, main)
         percpu.put_word(percpu.W_CR0, pax_cr0())
         percpu.put_word(percpu.W_CR4, cr4)
@@ -409,6 +411,7 @@ pub fn start_aps(pml4: u64, main: u64) {
         } else {
             // # Safety: as above.
             unsafe { made = i }
+            tlb.made(i, pml4) // px166: it starts on the kernel's PML4
             i += 1
         }
     }
@@ -792,6 +795,9 @@ export fn pax_ap_main(rec: u64) {
     percpu.put(rec, percpu.STATE, percpu.IDLE)
     while true {
         percpu.count(percpu.WAKES)
+        // px166: a shootdown asked since its last turn, answered before it
+        // sleeps (one asked after this, during the HLT, is its vector 49).
+        tlb.answer()
         // # Safety: isr.S's STI; HLT; CLI: the processor sleeps until its
         // next interrupt, every one of which has a gate.
         unsafe { pax_ap_halt() }
