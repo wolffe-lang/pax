@@ -1,0 +1,249 @@
+//! tlb — px166 (SMP stage 2): the shootdown. INVLPG and a MOV to CR3 act
+//! on the processor that runs them alone (Intel SDM vol. 3A §4.10.4, §4.10.5
+//! "Propagation of Paging-Structure Changes to Multiple Processors"), so a
+//! page the kernel unmaps or protects may stay cached in another
+//! processor's TLB: one running a thread of that space in ring 3, or any
+//! processor for the kernel half, which every PML4 shares. Before the
+//! frame behind such a page is freed, every processor that may cache it
+//! drops it here.
+//!
+//! The mailbox is six words of each processor's record (kernel/percpu):
+//! TLB_REQ (a generation << 8 | the op), TLB_VA, TLB_PML4, TLB_ACK (the
+//! generation answered), LOADED_CR3 (the PML4 its CR3 holds, written at
+//! every load: kernel/paging's `load`) and TLB (the shootdowns it
+//! answered: /proc/pax-cpus' `tlb`). The ops: INVLPG va, and KERNEL_PML4,
+//! the kernel's PML4 loaded in place of a space about to be freed.
+//!
+//! The requester holds the kernel lock (kernel/klock): every caller is
+//! kernel code, and one processor at a time runs it. It writes each
+//! target's VA and PML4, then its REQ, sends vector 49 (a fixed IPI, SDM
+//! vol. 3A §11.6.1) and spins until every target's ACK is the generation,
+//! at most TSC_BOUND cycles (1 s at 4 GHz), then panics naming the
+//! processor that did not answer. The targets: for a kernel-half page every
+//! other processor that runs (CPU 0; an application processor whose STATE
+//! is IDLE); for a user-half page or a space's end, those of them whose
+//! LOADED_CR3 is that space.
+//!
+//! A target answers in three places, never under the lock (it never holds
+//! it: the requester is its one holder): kernel/interrupts' vector 49,
+//! before `klock.enter`, when it was in ring 3, idle or in kernel code with
+//! interrupts on; `klock.enter`'s spin, each turn, when it waits for the
+//! requester's lock with interrupts off; an application processor's idle
+//! loop, before its HLT. `answer` touches only this processor's own
+//! mailbox words and counter, its TLB (INVLPG) and its CR3; it is
+//! idempotent (a stale vector 49 finds REQ's generation answered).
+//!
+//! The words are read and written volatile through kernel/percpu: x86's
+//! stores are not reordered with older stores, nor loads with older loads
+//! (SDM vol. 3A §8.2.2), so a target that sees REQ's new generation sees
+//! the VA and PML4 written before it, and the requester that sees ACK sees
+//! the INVLPG done before it.
+//!
+//! Written from the Intel SDM vol. 3A §4.10, §8.2.2 and §11.6. No Linux
+//! source; no other kernel's source.
+
+use panic
+use percpu
+use sync
+
+extern "c" fn pax_invlpg(va: u64)
+extern "c" fn pax_set_cr3(v: u64)
+extern "c" fn pax_rdtsc() -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
+
+/// The shootdown's vector (boot/isr.S's trampoline 49, kernel/idt's gate).
+pub const VECTOR: u64 = 49
+/// The ops.
+pub const INVLPG: u64 = 1
+pub const KERNEL_PML4: u64 = 2
+
+const KERNEL_HALF: u64 = 0xffff800000000000
+/// The requester's bound on every target's answer: 1 s at 4 GHz.
+const TSC_BOUND: u64 = 4000000000
+/// At most this many processors (kernel/smp's MAX): one mask word.
+const MAX: u64 = 64
+
+/// kernel/smp's `start` hands these over once, before any application
+/// processor is released: whether the local APIC is in x2APIC mode, its
+/// MMIO page (kernel/apic's DEVICE_VA) and the records' windows.
+var x2: bool = false
+var lapic: u64 = 0
+var base: u64 = 0
+var span: u64 = 0
+/// The processors with a record (kernel/smp's `made` + 1); 0 until `start`.
+var n: u64 = 0
+/// The last generation asked.
+var gen: u64 = 0
+
+pub fn start(x2apic: bool, lapic_va: u64, windows: u64, each: u64, cr3: u64) {
+    // # Safety: written once by CPU 0 before any application processor is
+    // released; read after.
+    unsafe {
+        x2 = x2apic
+        lapic = lapic_va
+        base = windows
+        span = each
+        n = 1
+    }
+    percpu.put(percpu.boot_record(), percpu.LOADED_CR3, cr3)
+}
+
+/// kernel/smp: application processor `i`'s record is made (its words
+/// zero, LOADED_CR3 the kernel's PML4 it starts on).
+pub fn made(i: u64, cr3: u64) {
+    percpu.put(record(i), percpu.LOADED_CR3, cr3)
+    // # Safety: as `start`; CPU 0 makes the records one at a time.
+    unsafe {
+        if i + 1 > n && i < MAX {
+            n = i + 1
+        }
+    }
+}
+
+fn record(i: u64) -> u64 {
+    if i == 0 {
+        return percpu.boot_record()
+    }
+    // # Safety: as `start`.
+    unsafe { base + i * span }
+}
+
+/// kernel/paging's `load`: this processor's CR3 now holds `pml4`.
+pub fn loaded(pml4: u64) {
+    // # Safety: as `start`.
+    if unsafe { n } != 0 {
+        percpu.put(percpu.mine(), percpu.LOADED_CR3, pml4)
+    }
+}
+
+/// This processor's mailbox answered, if it holds a request not yet
+/// answered. Interrupts off (a handler, or `klock.enter`'s spin, or the
+/// idle loop before its HLT).
+pub fn answer() {
+    // # Safety: as `start`.
+    if unsafe { n } < 2 {
+        return
+    }
+    let me = percpu.mine()
+    let r = percpu.get(me, percpu.TLB_REQ)
+    let g = r >> 8
+    if g == percpu.get(me, percpu.TLB_ACK) {
+        return
+    }
+    let op = r & 0xff
+    if op == INVLPG {
+        // # Safety: cpu.S's INVLPG; it only drops TLB entries.
+        unsafe { pax_invlpg(percpu.get(me, percpu.TLB_VA)) }
+    } else if op == KERNEL_PML4 {
+        let k = percpu.word(percpu.W_CR3)
+        // # Safety: cpu.S's MOV to CR3; the kernel's PML4 maps the kernel
+        // half every PML4 shares, so the code and stack running stay mapped.
+        unsafe { pax_set_cr3(k) }
+        percpu.put(me, percpu.LOADED_CR3, k)
+    }
+    percpu.put(me, percpu.TLB, percpu.get(me, percpu.TLB) + 1)
+    percpu.put(me, percpu.TLB_ACK, g)
+}
+
+/// The page at `va` in the space at `pml4` (or the kernel half) dropped on
+/// every other processor that may cache it. The lock's holder, after its
+/// own INVLPG, before the page's frame is freed.
+pub fn page(pml4: u64, va: u64) {
+    request(INVLPG, va, pml4, va >= KERNEL_HALF)
+}
+
+/// The space at `pml4` about to be freed: every other processor whose CR3
+/// holds it loads the kernel's PML4 first.
+pub fn space(pml4: u64) {
+    request(KERNEL_PML4, 0, pml4, false)
+}
+
+/// Every other processor that runs a thread of `pml4` now: its index + 1,
+/// 0 if none (kernel/sched's departure rule).
+pub fn user_of(pml4: u64) -> u64 {
+    let me = percpu.mine()
+    var i: u64 = 0
+    // # Safety: as `start`.
+    while i < unsafe { n } {
+        let r = record(i)
+        if r != me && runs(i, r) && percpu.get(r, percpu.LOADED_CR3) == pml4 {
+            return i + 1
+        }
+        i += 1
+    }
+    0
+}
+
+fn runs(i: u64, r: u64) -> bool {
+    i == 0 || percpu.get(r, percpu.STATE) == percpu.IDLE
+}
+
+fn request(op: u64, va: u64, pml4: u64, all: bool) {
+    // # Safety: as `start`.
+    let cnt = unsafe { n }
+    if cnt < 2 {
+        return
+    }
+    let me = percpu.mine()
+    // # Safety: the lock's holder alone writes it.
+    let g = unsafe { gen } + 1
+    unsafe { gen = g }
+    var sent: u64 = 0
+    var i: u64 = 0
+    while i < cnt {
+        let r = record(i)
+        if r != me && runs(i, r) && (all || percpu.get(r, percpu.LOADED_CR3) == pml4) {
+            percpu.put(r, percpu.TLB_VA, va)
+            percpu.put(r, percpu.TLB_PML4, pml4)
+            percpu.put(r, percpu.TLB_REQ, (g << 8) | op)
+            send(percpu.get(r, percpu.APIC))
+            sent |= 1 << i
+        }
+        i += 1
+    }
+    if sent == 0 {
+        return
+    }
+    // # Safety: fpu.S's RDTSC.
+    let until = unsafe { pax_rdtsc() } + TSC_BOUND
+    i = 0
+    while i < cnt {
+        if sent & (1 << i) != 0 {
+            let r = record(i)
+            while percpu.get(r, percpu.TLB_ACK) != g {
+                // # Safety: as above.
+                if unsafe { pax_rdtsc() } > until {
+                    panic.fail("cpus: a processor did not answer a shootdown in 1 s, cpu ", i)
+                }
+                sync.relax()
+            }
+        }
+        i += 1
+    }
+}
+
+/// Vector 49 to the processor whose APIC ID is `dest`: delivery mode fixed,
+/// edge, assert (SDM vol. 3A §11.6.1), as kernel/apic's `send_fixed`, which
+/// this module cannot import (kernel/apic imports kernel/paging, which
+/// imports this one).
+fn send(dest: u64) {
+    let low: u64 = 0x4000 | VECTOR
+    // # Safety: as `start`.
+    if unsafe { x2 } {
+        // # Safety: cpu.S's WRMSR of the x2APIC ICR (0x830).
+        unsafe { pax_wrmsr(0x830, (dest << 32) | low) }
+        return
+    }
+    // # Safety: the local APIC's page, mapped by kernel/apic's `start`
+    // before kernel/smp hands its address here; 32-bit accesses to the
+    // ICR's high and low words, then its delivery status waited out.
+    unsafe {
+        ((lapic + 0x310) as *u32).write_volatile(((dest & 0xff) << 24) as u32)
+        ((lapic + 0x300) as *u32).write_volatile(low as u32)
+    }
+    var k: u64 = 0
+    // # Safety: as above.
+    while k < 1000000 && unsafe { ((lapic + 0x300) as *u32).read_volatile() } & 0x1000 != 0 {
+        k += 1
+    }
+}
