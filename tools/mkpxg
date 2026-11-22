@@ -45,10 +45,9 @@ say "pxg $PXG_REV: wolf $wv, lupin $lv, std $srev (the source tree's own pin)"
 archive() { # name version digest repository -> cached path, digest checked twice
     local arc=$PAX_CACHE/$1-$2-x86_64-unknown-linux-gnu-$3.tar.gz k
     if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$3" ]; then
-        curl -sSfL --retry 3 -o "$arc.part" \
+        "$PAX_ROOT/tools/fetch-retry" --url \
             "https://github.com/wolffe-lang/$4/releases/download/v$2/$1-$2-x86_64-unknown-linux-gnu.tar.gz" \
-            || die "cannot download $1 $2"
-        mv "$arc.part" "$arc"
+            "$arc" "$3" || die "cannot download $1 $2"
     fi
     for k in 1 2; do
         [ "$(sha256_of "$arc")" = "$3" ] || die "$1 $2 archive digest mismatch on read $k"
