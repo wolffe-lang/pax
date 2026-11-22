@@ -30,6 +30,8 @@
 #            `gnutls_handshake() failed`, `SSL_read`, `SSL_ERROR_SYSCALL`,
 #            `OpenSSL SSL_connect`, curl 35)
 #   server   GitHub's own failure (an HTTP 5xx) or its rate limit (429)
+# A curl number is read in git's form (`curl 56`) and in curl's own
+# (`curl: (56)`), so --url's downloads are classed the same way.
 # Anything else stops at the first attempt and says so (`not retried`):
 # a revision the server does not have (`not our ref`, `couldn't find
 # remote ref`, an unadvertised object), a repository that is not there, a
@@ -86,13 +88,13 @@ classify() {
     if grep -Eq "not our ref|couldn.t find remote ref|unadvertised object|[Rr]epository not found|repository '.*' not found|returned error: 4([0-1][0-9]|2[0-8]|[3-9][0-9])|HTTP 4([0-1][0-9]|2[0-8]|[3-9][0-9])|Authentication failed|could not read Username|invalid refspec|not a git repository" "$1"; then
         return 0
     fi
-    if grep -Eq "Connection reset by peer|unexpected disconnect|early EOF|remote end hung up unexpectedly|transfer closed with outstanding read data|Empty reply from server|curl (18|52|55|56|92)[^0-9]" "$1"; then
+    if grep -Eq "Connection reset by peer|unexpected disconnect|early EOF|remote end hung up unexpectedly|transfer closed with outstanding read data|Empty reply from server|curl (18|52|55|56|92)[^0-9]|curl: \((18|52|55|56|92)\)" "$1"; then
         echo reset
-    elif grep -Eq "Could not resolve host|Failed to connect to|Couldn.t connect to server|Connection refused|Network is unreachable|Temporary failure in name resolution|curl (6|7)[^0-9]" "$1"; then
+    elif grep -Eq "Could not resolve host|Failed to connect to|Couldn.t connect to server|Connection refused|Network is unreachable|Temporary failure in name resolution|curl (6|7)[^0-9]|curl: \((6|7)\)" "$1"; then
         echo connect
-    elif grep -Eq "Operation timed out|Connection timed out|Operation too slow|curl 28[^0-9]" "$1"; then
+    elif grep -Eq "Operation timed out|Connection timed out|Operation too slow|curl 28[^0-9]|curl: \(28\)" "$1"; then
         echo timeout
-    elif grep -Eq "GnuTLS recv error|gnutls_handshake\(\) failed|SSL_read|SSL_ERROR_SYSCALL|OpenSSL SSL_connect|curl 35[^0-9]" "$1"; then
+    elif grep -Eq "GnuTLS recv error|gnutls_handshake\(\) failed|SSL_read|SSL_ERROR_SYSCALL|OpenSSL SSL_connect|curl 35[^0-9]|curl: \(35\)" "$1"; then
         echo tls
     elif grep -Eq "returned error: (5[0-9][0-9]|429)|HTTP (5[0-9][0-9]|429)" "$1"; then
         echo server
