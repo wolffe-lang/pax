@@ -89,6 +89,7 @@
 use console
 use gdt
 use idt
+use klock
 use log
 use net
 use panic
@@ -403,10 +404,27 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
         // # Safety: the frame's address; kernel/smp hands back `f` itself.
         return unsafe { smp.ap_interrupt(f as u64) as *Frame }
     }
+    // px166: the kernel lock (kernel/klock), taken by every entry the two
+    // returns above do not answer, before any kernel state is read; a fresh
+    // hold gives the running thread its ambient region back.
+    if klock.enter() {
+        sched.ambient_resume()
+    }
     let g = route(f)
     // # Safety: the frame `route` returned is this one or a saved frame
     // on a live thread's stack; what kernel/signal returns is one too.
-    unsafe { signal.on_return(g as u64) as *Frame }
+    let h = unsafe { signal.on_return(g as u64) }
+    // px166: the frame resumes ring 3 or the idle loop: the lock given back
+    // whole, the ambient slot parked in the thread first; any other ring-0
+    // frame (the code this interrupt landed in, a kernel thread) keeps it.
+    if user.from_user(h) || sched.idle_now() {
+        sched.ambient_park()
+        klock.leave()
+    } else {
+        klock.unwind()
+    }
+    // # Safety: as above: `h` is the frame kernel/signal returned.
+    unsafe { h as *Frame }
 }
 
 /// The vector's own work: the frame to resume.
