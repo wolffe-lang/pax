@@ -132,6 +132,31 @@ KVM_SUITES = ["mpx5-users", "mpx5-users-ahci", "mpx5-pelt", "mpx5-jobs", "mpx5-d
               "mpx4-ready", "mpx6-disktools", "mpx4-unix", "mpx5-lupin", "mpx5-slots", "mpx5-trace",
               "mpx6-bootlog", "mpx4-console-net", "mpx6-nvme", "mpx4-tcp"]
 ACCELS = ("kvm", "tcg")
+# The native leg. These suites' jobs boot the native leg beside the plan's
+# legs: a step of their own (a rootdisk step, NVMe's high-BAR rows, the
+# no-serial install) on the native images their $PAX_LEGS step built, or a
+# script that needs a native BIOS session first. A plan whose legs leave
+# that leg out fails them on images it never built: the retired `rest`
+# tier (`--tier release`) failed all twelve on trunk (runs 45003384558 and
+# 45018671496). So no plan may (native_short; tests/ci-plan P11 holds the
+# table to ci.yml and the scripts). suite: (the firmware it needs, None
+# for either; the file that says so; the words there).
+NATIVE_LEG = {
+    "mpx3-boreutils": (None, WORKFLOW, "tools/rootdisk-leg mpx3-boreutils --tier native --firmware bios"),
+    "mpx3-console": (None, WORKFLOW, "tools/rootdisk-leg mpx3-console --tier native --firmware bios"),
+    "mpx3-shell": (None, WORKFLOW, "tools/rootdisk-leg mpx3-shell --tier native --firmware bios"),
+    "mpx3-threads": (None, WORKFLOW, "tools/rootdisk-leg mpx3-threads --tier native --firmware bios"),
+    "mpx3-maps": (None, WORKFLOW, "tools/rootdisk-leg mpx3-maps --tier native --firmware bios"),
+    "mpx4-lobo": (None, WORKFLOW, "tools/rootdisk-leg mpx4-lobo --round 30 --tier native --firmware bios"),
+    "mpx5-users": (None, WORKFLOW, "tools/rootdisk-leg mpx5-users --tier native --firmware bios"),
+    "mpx5-jobs": (None, WORKFLOW, "tools/rootdisk-leg mpx5-jobs --tier native --firmware bios"),
+    "mpx5-pelt": (None, WORKFLOW, "tools/rootdisk-leg mpx5-pelt --tier native --firmware bios"),
+    "mpx6-nvme": (None, WORKFLOW, 'tests/mpx6-nvme --images "$PWD/build/mpx6-nvme" --rows pr --tier native --firmware uefi'),
+    "mpx6-install": (None, WORKFLOW, "the unattended install with no serial port, native UEFI"),
+    # beep-user's summary reads `mn`, set only by the tunes session, which
+    # runs on native BIOS alone (tests/mpx3-speaker, line 590).
+    "mpx3-speaker": ("bios", "tests/mpx3-speaker", 'else wt="$((mn + en)) 0 0"; fi'),
+}
 # The weekly schedule of .github/workflows/ci.yml: every leg, never skipped.
 WEEKLY = "47 6 * * 0"
 TIERS = ("all", "full", "pr", "partial", "noop")
@@ -297,6 +322,26 @@ def changed_paths(base, head):
     return [p for p in out.splitlines() if p]
 
 
+def leg_set(legs):
+    """The tiers and firmwares a legs string runs: '' is every leg; each
+    test takes one --tier and one --firmware (both, or one of each)."""
+    tiers, firmwares = {"native", "release"}, {"bios", "uefi"}
+    words = legs.split()
+    for flag, value in zip(words, words[1:]):
+        if flag == "--tier" and value != "both":
+            tiers = {value}
+        elif flag == "--firmware" and value != "both":
+            firmwares = {value}
+    return tiers, firmwares
+
+
+def native_short(chosen, legs):
+    """The chosen suites whose native leg (NATIVE_LEG) these legs leave out."""
+    tiers, firmwares = leg_set(legs)
+    return sorted(s for s in chosen if s in NATIVE_LEG
+                  and ("native" not in tiers or (NATIVE_LEG[s][0] and NATIVE_LEG[s][0] not in firmwares)))
+
+
 def plan(a):
     jobs = workflow_jobs()
     suites = suites_of(jobs)
@@ -314,6 +359,10 @@ def plan(a):
         also = [s for s in RELEASE_TOO if s in chosen] if kernel and tier in ("pr", "full") else []
         if also:
             log.append("a kernel path (%s): %s on the release legs as well" % (kernel[0], " ".join(also)))
+        short = native_short(chosen, legs)
+        if short:
+            die("refused: legs '%s' leave out the native leg that %s boot%s in their own job (NATIVE_LEG)"
+                % (legs, " ".join(short), "" if len(short) > 1 else "s"))
         tcg = (ev == "schedule" and (a.schedule or "") == WEEKLY) or (a.accel or "kvm") == "tcg"
         return {"tier": tier, "suites": [s for s in suites if s in chosen], "legs": legs, "also_release": also,
                 "kvm": "no" if tcg else "yes", "kvm_suites": KVM_SUITES, "log": log}
