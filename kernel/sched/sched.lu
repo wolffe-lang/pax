@@ -224,6 +224,30 @@
 //! is the one kernel/process says (`first_refusal`). Measured in
 //! notes/px126-process-slots.md.
 //!
+//! **Every processor** (px166, SMP stage 2): one run queue and one table
+//! of records, read and written under the kernel lock (kernel/klock);
+//! what is a processor's own is in its record (kernel/percpu): the slot
+//! it runs (CURRENT, `cur`), the tick and the TSC that slot was switched
+//! in at (SLICE, the quantum's start; IN_TSC, `account`'s, so a run is
+//! two reads of one processor's TSC), and on an application processor
+//! its idle loop's frame (IDLE_FRAME) while it runs a thread. CPU 0's idle
+//! context is slot 1, as before; an application processor's is that loop,
+//! no slot (kernel/percpu's IDLE_SLOT), which `run_next` resumes when the
+//! queue is empty, with the kernel's PML4 live (`enter_space`), so no
+//! process's tables stay under a processor that runs none of its threads.
+//! A thread runs on whichever processor first takes it from the queue: the
+//! one whose tick, switch or RESCHED (`kick`) comes first. On the way out
+//! of the kernel, a processor that leaves threads queued sends RESCHED to
+//! the lowest-numbered idle one that runs threads (`share`, kernel/smp's
+//! `runs`). Each slot's fourth word, W_CPU, names the processor running it
+//! (its index plus one; 0 while it runs nowhere): `run_next` clears the
+//! outgoing slot's and sets the incoming one's, and a slot the queue hands
+//! it that is RUNNING or still named by a processor is a kernel bug, named
+//! (`PANIC sched: slot N running on two processors`), never run twice.
+//! CPU 0's tick alone wakes the sleepers and fixes the TSC's rate (one
+//! walker, one rate: CPU 0's TSC, invariant across one socket's processors
+//! and QEMU's); every processor's tick ends its own thread's quantum.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`, volatile (`field`/`put_field`): wolf 0.2.26 stores a
 //! field of a raw element in place (wolf-lang#577), but as an ordinary
@@ -245,6 +269,7 @@ use log
 use paging
 use panic
 use percpu
+use smp
 use speaker
 use sync
 use timer
@@ -400,7 +425,8 @@ const HINTS: u64 = 4096 // px126: pax_pid_hint's words
 const W_AREA: u64 = 0 // px126: slot word: 1 while the slot has its process area mapped
 const W_MARK: u64 = 1 // px126: slot word: process_ends' mark on a child whose group it may orphan
 const W_KEYS: u64 = 2 // px159: slot word: the key buckets its system call looked at (`wait_key`), what it waits on in PIPE
-const SLOT_WORDS: u64 = 3 // px159: boot/sched.S's pax_slot_words a slot (two before px159)
+const W_CPU: u64 = 3 // px166: slot word: the processor running it, its index + 1; 0 while it runs nowhere (`run_next`)
+const SLOT_WORDS: u64 = 4 // px166: boot/sched.S's pax_slot_words a slot (three since px159, two before)
 const NEVER: u64 = 0xffffffffffffffff
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
@@ -443,7 +469,9 @@ const S_STARTED: u64 = 0
 // (kernel/percpu's CURRENT, read through GS): `cur`, `run_next`, `start`.
 const S_HEAD: u64 = 2 // slot + 1; 0 when the queue is empty
 const S_TAIL: u64 = 3
-const S_SLICE: u64 = 4 // the tick the current thread was switched in at
+// px166: words 4 and 19, the tick and the TSC the running thread was
+// switched in at, are each processor's record's (kernel/percpu's SLICE and
+// IN_TSC): `slice`, `in_tsc`.
 const S_NEXT_ID: u64 = 5
 const S_LIVE: u64 = 6 // created threads not yet exited
 const S_WAITER: u64 = 7 // slot + 1 of the thread in wait_all; 0 none
@@ -458,7 +486,6 @@ const S_TTY_ON: u64 = 14 // px48: 1 once the console is a terminal (kernel/conso
 // keeps every terminal's in boot/console.S's pax_tty_table (`tsid`, `tpgrp`).
 const S_WAITPID: u64 = 17 // px67: the pid whose end also readies the waiter (`wait_pid_or_down`); 0 none
 const S_ENDING: u64 = 18 // px67: 1 once the end has begun (kmain_console): pid 1 takes signals as any process does
-const S_IN_TSC: u64 = 19 // px88: the TSC when the current thread was switched in
 const S_TSC0: u64 = 20 // px88: the TSC at `start` (0: not taken)
 const S_NS0: u64 = 21 // px88: kernel/clock's nanoseconds at `start`
 const S_TICK0: u64 = 22 // px88: the tick at `start`
@@ -579,23 +606,125 @@ fn cur() -> u64 {
     percpu.current() // #598: reread after every switch; px161: this processor's
 }
 
-/// px166: whether this processor runs its idle thread (a frame returned
-/// to it gives the kernel lock back, kernel/interrupts).
+/// px166: whether `c` is an idle context: CPU 0's idle thread (slot 1) or
+/// an application processor's idle loop (no slot: kernel/percpu's
+/// IDLE_SLOT, never a field's index).
+fn idle(c: u64) -> bool {
+    c == IDLE || c == percpu.IDLE_SLOT
+}
+
+/// px166: this processor's idle context: slot 1 on CPU 0, its idle loop
+/// on another.
+fn idle_slot() -> u64 {
+    if percpu.index() == 0 { IDLE } else { percpu.IDLE_SLOT }
+}
+
+/// px166: whether this processor runs its idle context (a frame returned
+/// to it gives the kernel lock back, kernel/user's `hand_back`).
 pub fn idle_now() -> bool {
-    cur() == IDLE
+    idle(cur())
+}
+
+/// px166: the tick this processor's running thread was switched in at
+/// (its record's SLICE: the quantum's start).
+fn slice() -> u64 {
+    percpu.get(percpu.mine(), percpu.SLICE)
+}
+
+fn put_slice(t: u64) {
+    percpu.put(percpu.mine(), percpu.SLICE, t)
+}
+
+/// px166: the TSC this processor's running thread was switched in at (its
+/// record's IN_TSC; px88's S_IN_TSC before): `account` subtracts reads of
+/// one processor's TSC only.
+fn in_tsc() -> u64 {
+    percpu.get(percpu.mine(), percpu.IN_TSC)
+}
+
+fn put_in_tsc(t: u64) {
+    percpu.put(percpu.mine(), percpu.IN_TSC, t)
+}
+
+/// px131: kernel/latency's scheduler point for `c`, the running slot.
+/// px166: CPU 0's instrument alone, as boot/isr.S's open and close are
+/// (on CPU 0, `c` is a slot, never IDLE_SLOT).
+fn point(f: u64, c: u64) {
+    if percpu.index() == 0 {
+        latency.sched_point(f, who(c))
+    }
+}
+
+/// px166: `c` switched out at frame `f`: its record's frame, or, for an
+/// application processor's idle loop, this processor's IDLE_FRAME.
+fn save_frame(c: u64, f: u64) {
+    if c == percpu.IDLE_SLOT {
+        percpu.put(percpu.mine(), percpu.IDLE_FRAME, f)
+    } else {
+        put_field(c, offset_of(Thread, frame), f)
+    }
+}
+
+/// px166: the frame `s` resumes from, taken (0 left in its place).
+fn take_frame(s: u64) -> u64 {
+    if s == percpu.IDLE_SLOT {
+        let r = percpu.mine()
+        let f = percpu.get(r, percpu.IDLE_FRAME)
+        if f == 0 {
+            panic.fail("sched: an idle loop to resume with no frame kept, cpu ", percpu.index())
+        }
+        percpu.put(r, percpu.IDLE_FRAME, 0)
+        return f
+    }
+    let f = field(s, offset_of(Thread, frame))
+    put_field(s, offset_of(Thread, frame), 0)
+    f
 }
 
 /// px166: the runtime's ambient slot into the running thread's record,
 /// before kernel/klock's `leave`: another processor may take the lock and
-/// move the one slot before this one comes back. IF is clear.
+/// move the one slot before this one comes back. IF is clear. An
+/// application processor's idle loop has none (it allocates nothing).
 pub fn ambient_park() {
-    put_field(cur(), offset_of(Thread, amb), heap.ambient())
+    let c = cur()
+    if c != percpu.IDLE_SLOT {
+        put_field(c, offset_of(Thread, amb), heap.ambient())
+    }
 }
 
 /// px166: the running thread's ambient region back into the runtime's
-/// slot, after a fresh kernel/klock `enter`. IF is clear.
+/// slot, after a fresh kernel/klock `enter` (the root, 0, for an
+/// application processor's idle loop). IF is clear.
 pub fn ambient_resume() {
-    heap.set_ambient(field(cur(), offset_of(Thread, amb)))
+    let c = cur()
+    heap.set_ambient(if c == percpu.IDLE_SLOT { 0 } else { field(c, offset_of(Thread, amb)) })
+}
+
+/// px166: on the way out of the kernel with the lock about to be given
+/// back (kernel/user's `hand_back`): while the queue holds a thread, the
+/// lowest-numbered other processor that runs threads, is idle and has no
+/// RESCHED in flight (its record's POKED) is sent one (kernel/smp's
+/// `resched`), so it takes the queue's head now rather than at its tick.
+/// One a call: that processor passes the turn on as it leaves in its turn,
+/// so k queued threads wake up to k idle processors. A processor that
+/// finds the queue empty when it takes the lock goes back to its loop.
+pub fn share() {
+    if sv(S_STARTED) == 0 || sv(S_HEAD) == 0 {
+        return
+    }
+    let me = percpu.index()
+    let bound = smp.bound()
+    var i: u64 = 0
+    while i < bound {
+        if i != me && smp.runs(i) {
+            let r = smp.record(i)
+            if idle(percpu.get(r, percpu.CURRENT)) && percpu.get(r, percpu.POKED) == 0 {
+                smp.resched(i)
+                return
+            }
+        }
+        i += 1
+    }
 }
 
 /// px126: one past the highest slot that is not free: every slot from
@@ -720,7 +849,7 @@ fn urgent_waits(c: u64) -> bool {
 }
 
 /// px159: the running thread, urgent, has run less than URGENT_RUN_NS since
-/// it was switched in (px88's TSC at the switch, `S_IN_TSC`); before the
+/// it was switched in (px88's TSC at the switch, `in_tsc`); before the
 /// TSC's rate is known, while the tick it started in lasts. Since a pipe's,
 /// a socket's and a pty's readers are woken urgent (`wake_obj`), a thread
 /// that then computes (a language server woken by an edit) would otherwise
@@ -728,10 +857,10 @@ fn urgent_waits(c: u64) -> bool {
 fn shielded() -> bool {
     let m = sv(S_MULT)
     if m == 0 {
-        return timer.ticks() == sv(S_SLICE)
+        return timer.ticks() == slice()
     }
     let t = tsc()
-    let at = sv(S_IN_TSC)
+    let at = in_tsc()
     t <= at || t - at < (URGENT_RUN_NS << 24) / m
 }
 
@@ -814,6 +943,15 @@ fn set_wake(c: u64, at: u64, sleeps: bool) {
 /// the stack ring 3 enters on (px09): the TSS's RSP0 and SYSCALL's stack
 /// word. IF clear (a handler, or `pax_switch`'s path).
 fn enter_space(s: u64) {
+    // px166: an application processor's idle loop runs on the kernel's
+    // PML4: a process whose thread it ran may end and its tables be freed
+    // while it sleeps.
+    if s == percpu.IDLE_SLOT {
+        if paging.live() != sv(S_PML4) {
+            paging.load(sv(S_PML4))
+        }
+        return
+    }
     let c = field(s, offset_of(Thread, cr3))
     let want = if c == 0 { sv(S_PML4) } else { c }
     if paging.live() != want {
@@ -839,68 +977,115 @@ fn who(s: u64) -> u64 {
     if p != 0 { p } else { s | 0x100000000 }
 }
 
-/// Switch in the queue's head (the idle thread if it is empty): count
-/// its run, start its quantum, make its space live, return its frame.
+/// px166: the queue's head (slot + 1), removed, as `dequeue`; a slot it
+/// hands back that a processor still runs is named and the kernel stops:
+/// RUNNING, or its W_CPU not 0 (`run_next` cleared the outgoing slot's
+/// before it asked, so a thread the same processor takes back passes).
+fn take() -> u64 {
+    let n = dequeue()
+    if n != 0 {
+        let s = n - 1
+        let on = slot_word(s, W_CPU)
+        if field(s, offset_of(Thread, state)) == RUNNING || on != 0 {
+            log.put("PANIC sched: slot ")
+            log.dec(s as int)
+            log.put(" running on two processors: state ")
+            log.dec(field(s, offset_of(Thread, state)) as int)
+            log.put(", cpu ")
+            if on == 0 { log.put("none") } else { log.dec((on - 1) as int) }
+            log.put(", taken from the queue by cpu ")
+            log.dec(percpu.index() as int)
+            log.end()
+            panic.halt()
+        }
+    }
+    n
+}
+
+/// Switch in the queue's head (the idle context if it is empty: CPU 0's
+/// idle thread, an application processor's idle loop): count its run,
+/// start its quantum, make its space live, return its frame. px166: on
+/// any processor that runs threads, under the kernel lock; the outgoing
+/// slot's W_CPU cleared first, the incoming one's set.
 fn run_next() -> u64 {
     let from = cur()
-    latency.sched_point(0, who(from)) // px131: the scheduler chooses
-    var n = dequeue()
+    let real_from = from != percpu.IDLE_SLOT
+    point(0, from) // px131: the scheduler chooses
+    if real_from {
+        put_slot_word(from, W_CPU, 0)
+    }
+    var n = take()
     // px48: a thread of a stopped process runs nothing: it is parked
     // (STOPPED), its frame kept, until the process is continued.
     while n != 0 && parks(n - 1) {
         put_field(n - 1, offset_of(Thread, state), STOPPED)
-        n = dequeue()
+        n = take()
     }
-    let s = if n == 0 { IDLE } else { n - 1 }
+    let s = if n == 0 { idle_slot() } else { n - 1 }
+    let real_s = s != percpu.IDLE_SLOT
     // px131: the thread leaving has had its urgent turn; the one starting
     // keeps its mark while it runs, so `kick` gives the CPU to no other
     // urgent thread before it blocks or the tick preempts it
-    mask_clear(B_URGENT, from)
+    if real_from {
+        mask_clear(B_URGENT, from)
+    }
     // px131e: a thread that is not urgent runs: the wait that bounds urgency
     // starts again
-    if s != IDLE && !mask_has(B_URGENT, s) {
+    if !idle(s) && !mask_has(B_URGENT, s) {
         put_sv(S_STARVE, timer.ticks())
     }
     account(from, s) // px88
     if s != from {
-        fpu.switch(from, s) // px10: a no-op before fpu.start
+        fpu.switch(from, s) // px10: a no-op before fpu.start; px166: one side alone for an idle loop
         // px21a: the ambient region goes with its thread. IF is clear.
-        put_field(from, offset_of(Thread, amb), heap.ambient())
-        heap.set_ambient(field(s, offset_of(Thread, amb)))
+        // px166: an application processor's idle loop has none (the root).
+        if real_from {
+            put_field(from, offset_of(Thread, amb), heap.ambient())
+        }
+        heap.set_ambient(if real_s { field(s, offset_of(Thread, amb)) } else { 0 })
     }
-    put_field(s, offset_of(Thread, state), RUNNING)
-    put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
+    if real_s {
+        put_field(s, offset_of(Thread, state), RUNNING)
+        put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
+        put_slot_word(s, W_CPU, percpu.index() + 1)
+    }
     percpu.set_current(s)
-    put_sv(S_SLICE, timer.ticks())
+    put_slice(timer.ticks())
     enter_space(s)
-    let f = field(s, offset_of(Thread, frame))
-    put_field(s, offset_of(Thread, frame), 0)
-    f
+    take_frame(s)
 }
 
 /// The timer's half of a switch (kernel/interrupts, vector 32, after
 /// the tick). Returns the frame to resume: `f` itself, or another
 /// thread's.
+/// px166: on any processor's tick. CPU 0's alone fixes the TSC's rate and
+/// wakes the sleepers; a processor past the cap (kernel/smp's `runs`)
+/// switches nothing; an idle one takes the queue's head at once, its idle
+/// context's frame kept.
 pub fn preempt(f: u64) -> u64 {
-    percpu.boot_only(f) // px161: CPU 0's alone; another processor here stops, named
     if sv(S_STARTED) == 0 {
         return f
     }
-    latency.sched_point(f, who(cur())) // px131: a chance to choose
-    if sv(S_MULT) == 0 {
-        calibrate() // px88: once, a second of ticks after `start`
-    }
-    wake_sleepers()
     let c = cur()
+    point(f, c) // px131: a chance to choose
+    if percpu.index() == 0 {
+        if sv(S_MULT) == 0 {
+            calibrate() // px88: once, a second of ticks after `start`
+        }
+        wake_sleepers()
+    }
+    if !smp.runs_here() {
+        return f
+    }
     // #598: the queue's head is read after wake_sleepers wrote it.
     if sv(S_HEAD) == 0 {
         return f
     }
-    if c != IDLE && timer.ticks() - sv(S_SLICE) < QUANTUM && !urgent_waits(c) {
+    if !idle(c) && timer.ticks() - slice() < QUANTUM && !urgent_waits(c) {
         return f
     }
-    put_field(c, offset_of(Thread, frame), f)
-    if c != IDLE {
+    save_frame(c, f)
+    if !idle(c) {
         put_field(c, offset_of(Thread, state), READY)
         enqueue(c)
     }
@@ -909,8 +1094,9 @@ pub fn preempt(f: u64) -> u64 {
 
 /// The voluntary half (kernel/interrupts, vector 0x81 from
 /// `pax_switch`): the current thread has set its own state.
+/// px166: on any processor that runs threads (only a thread calls
+/// `pax_switch`, so `c` is a slot); CPU 0's alone wakes the sleepers.
 pub fn switched(f: u64) -> u64 {
-    percpu.boot_only(f) // px161: as `preempt`
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     let st = field(c, offset_of(Thread, state))
@@ -920,7 +1106,9 @@ pub fn switched(f: u64) -> u64 {
     if (st == READY || st == RUNNING) && c != IDLE {
         enqueue(c)
     }
-    wake_sleepers()
+    if percpu.index() == 0 {
+        wake_sleepers()
+    }
     run_next()
 }
 
@@ -1311,19 +1499,20 @@ pub fn wake_input() -> u64 {
 /// and a thread is now ready, switch to it at once rather than at the
 /// next tick; px131: and so when the queue's head is a thread the device's
 /// work woke (`wake_urgent`) and the running one is not; otherwise resume
-/// `f`. IF clear.
+/// `f`. IF clear. px166: and after RESCHED, on any processor that runs
+/// threads (kernel/interrupts): an idle one takes the queue's head.
 pub fn kick(f: u64) -> u64 {
-    if sv(S_STARTED) == 0 {
+    if sv(S_STARTED) == 0 || !smp.runs_here() {
         return f
     }
-    latency.sched_point(f, who(cur())) // px131: a chance to choose
+    let c = cur()
+    point(f, c) // px131: a chance to choose
     let h = sv(S_HEAD) // #598
     if h == 0 {
         return f
     }
-    let c = cur()
-    if c == IDLE {
-        put_field(IDLE, offset_of(Thread, frame), f)
+    if idle(c) {
+        save_frame(c, f)
         return run_next()
     }
     // px131: a thread a device's work woke (`wake_urgent`) runs now: the
@@ -1372,7 +1561,7 @@ pub fn start(pml4: u64) {
     clear_masks()
     put_sv(S_NETD, 0)
     put_sv(S_STARVE, 0)
-    put_sv(S_SLICE, timer.ticks())
+    put_slice(timer.ticks()) // px166: CPU 0's record's
     // px88: the bases the TSC's cycles are converted against.
     // # Safety: boot/fpu.S's RDTSC, which every x86-64 CPU has.
     let t0 = unsafe { pax_rdtsc() }
@@ -1380,8 +1569,9 @@ pub fn start(pml4: u64) {
     put_sv(S_NS0, if clock.started() { clock.now_ns() } else { 0 })
     put_sv(S_TICK0, timer.ticks())
     put_sv(S_MULT, 0)
-    put_sv(S_IN_TSC, t0)
+    put_in_tsc(t0) // px166: CPU 0's record's
     put_field(MAIN, offset_of(Thread, state), RUNNING)
+    put_slot_word(MAIN, W_CPU, 1) // px166: CPU 0 runs it
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
     // px126: every page table the stacks and the areas will need (32
@@ -4263,9 +4453,11 @@ pub fn born(a: u64) -> u64 {
 /// neither when it has ended. Kernel threads (no process) count nothing.
 fn account(from: u64, to: u64) {
     let now = tsc()
-    let was = sv(S_IN_TSC)
-    put_sv(S_IN_TSC, now)
-    if field(from, offset_of(Thread, tgid)) != 0 {
+    let was = in_tsc()
+    put_in_tsc(now)
+    // px166: an application processor's idle loop is no slot: nothing is
+    // charged to it, and nothing is reopened for it.
+    if from != percpu.IDLE_SLOT && field(from, offset_of(Thread, tgid)) != 0 {
         let a = proc_area(from)
         if was != 0 && now > was {
             put_field(from, offset_of(Thread, cpu), field(from, offset_of(Thread, cpu)) + (now - was))
@@ -4290,7 +4482,7 @@ fn account(from: u64, to: u64) {
             }
         }
     }
-    if to != from && field(to, offset_of(Thread, sysin)) == 1 {
+    if to != from && to != percpu.IDLE_SLOT && field(to, offset_of(Thread, sysin)) == 1 {
         put_field(to, offset_of(Thread, sysin), now)
     }
 }
@@ -4411,7 +4603,7 @@ pub fn usage(which: u64) -> (u64, u64, u64, u64, u64) {
         return (ru_get(a, RU_KIDS + RU_CPU), ru_get(a, RU_KIDS + RU_SYS), ru_get(a, RU_KIDS + RU_PEAK), ru_get(a, RU_KIDS + RU_VCS), ru_get(a, RU_KIDS + RU_ICS))
     }
     let now = tsc()
-    let was = sv(S_IN_TSC)
+    let was = in_tsc()
     let run = if was != 0 && now > was { now - was } else { 0 }
     let si = field(c, offset_of(Thread, sysin))
     let open = if si > 1 && now > si { now - si } else { 0 }
