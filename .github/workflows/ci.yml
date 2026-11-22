@@ -4557,6 +4557,74 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # alpha (user/alpha.pin, tools/mkalpha), the service manager in wolf,
+  # staged on PAX as /bin/alpha with nothing to start, typed at pelt: it
+  # runs, checks a tree with no unit and finds no manager. alpha is public:
+  # tools/mkalpha fetches it and builds it static against the runner's
+  # glibc (libc6-dev's static archive).
+  mpx6-services:
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.suites), 'mpx6-services')
+    env:
+      PAX_LEGS: ${{ needs.plan.outputs.legs }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          qemu-system-x86_64 --version
+          gcc --version | head -n 1
+          python3 --version
+          dpkg -s libc6 | grep -E '^(Package|Version):'
+          uname -sr
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .pax-cache/limine-*
+          key: mpx6-services-${{ hashFiles('boot/limine.pin') }}
+
+      - name: wolf at the pin (the release archive, by digest)
+        run: |
+          bin=$(tools/fetch-wolf)
+          echo "PAX_WOLF=$bin" >> "$GITHUB_ENV"
+          "$bin" --version
+
+      - name: fetch limine (by digest)
+        run: tools/fetch-limine
+
+      - name: alpha at the console with nothing to start; the plan's legs (all four in the all tier)
+        env:
+          PAX_REQUIRE_UEFI: "1"
+        run: tests/mpx6-services $PAX_LEGS
+
+      - name: keep the programs' sums, the sessions, the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pax-mpx6-services
+          path: |
+            build/mpx6-services/*.txt
+            build/mpx6-services/alpha/sums.txt
+            build/mpx6-services/alpha/version.txt
+            build/mpx6-services/pelt/sums.txt
+            build/mpx6-services/*/kmain_console.elf
+            build/mpx6-services/*/*.log
+            build/mpx6-services-*.session
+            build/mpx6-services-*.log
+            build/mpx6-services-*.norm
+            build/mpx6-services-*.meta
+            build/mpx6-services-*.halt
+            build/mpx6-services-*.verdict
+            build/mpx6-services-*.typed
+            build/mpx6-services-runs.txt
+          retention-days: 14
+          if-no-files-found: warn
+
   # px65: boreutils' new utilities (user/boreutils.pin at 575dc7b: bu30's
   # small file tools, bu31's text tools) in /bin, a typed session per
   # group as root and as a user, against the same binaries in a throwaway
@@ -6670,6 +6738,7 @@ jobs:
       - mpx5-aspen
       - mpx5-scent
       - mpx5-trash
+      - mpx6-services
       - mpx5-den
       - mpx5-bore
       - mpx5-lupin

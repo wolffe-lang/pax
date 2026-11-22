@@ -135,4 +135,49 @@ with tempfile.TemporaryDirectory(prefix='pxg-image-') as tmp:
         raise AssertionError('image-pxg-collision-accepted')
     print('R5 PASS pxg digest, size, extra-input and image-collision refusals')
 
+# alpha, the service manager, is a source-built input in both variants:
+# /bin/alpha alone, root's, 0755, byte for byte as tools/mkalpha built it.
+# Nothing starts it (no unit ships), so nothing else of it is installed.
+pin = ROOT / 'user/alpha.pin'
+assert pin.is_file(), 'image-alpha-pin-missing'
+values = dict(line.split('=', 1) for line in pin.read_text().splitlines()
+              if line and not line.startswith('#') and '=' in line)
+assert values.get('ALPHA_REPO') == 'https://github.com/wolffe-lang/alpha', 'image-alpha-source'
+assert re.fullmatch(r'[0-9a-f]{40}', values.get('ALPHA_REV', '')), 'image-alpha-revision'
+assert callable(codec.get('install_alpha')), 'image-alpha-installer-missing'
+with tempfile.TemporaryDirectory(prefix='alpha-image-') as tmp:
+    inputs = Path(tmp)
+    (inputs / 'alpha').mkdir()
+    data = b'alpha input fixture\n'
+    (inputs / 'alpha/alpha').write_bytes(data)
+    sums = f'alpha {sha(data)} {len(data)}\n'
+    (inputs / 'alpha/sums.txt').write_text(sums)
+    (inputs / 'alpha/version.txt').write_text('alpha 0.0.0\n')
+    rows = {'bin': (0o40755, 0, 0, b'')}
+    codec['install_alpha'](rows, inputs)
+    assert rows == {'bin': (0o40755, 0, 0, b''),
+                    'bin/alpha': (0o100755, 0, 0, data)}, 'image-alpha-bin-only'
+    path = inputs / 'fixture.cpio'
+    codec['write_cpio'](rows, path)
+    assert codec['read_cpio'](path.read_bytes()) == rows, 'image-alpha-packed-bytes'
+    print('R6 PASS alpha source pin, /bin/alpha alone, its bytes, mode and owner')
+    for label, replacement in [('digest', f'alpha {"0" * 64} {len(data)}\n'),
+                               ('size', f'alpha {sha(data)} {len(data) + 1}\n'),
+                               ('extra', sums + 'probe unused 1\n')]:
+        (inputs / 'alpha/sums.txt').write_text(replacement)
+        try:
+            codec['install_alpha']({}, inputs)
+        except AssertionError as error:
+            assert str(error) == 'image-alpha-input-mismatch', error
+        else:
+            raise AssertionError('image-alpha-' + label + '-accepted')
+    (inputs / 'alpha/sums.txt').write_text(sums)
+    try:
+        codec['install_alpha'](rows, inputs)
+    except AssertionError as error:
+        assert str(error) == 'image-alpha-collision', error
+    else:
+        raise AssertionError('image-alpha-collision-accepted')
+    print('R7 PASS alpha digest, size, extra-input and image-collision refusals')
+
 runpy.run_path(str(ROOT / 'tests/mpx6-install.d/pxg-rows.py'))['selftest']()
