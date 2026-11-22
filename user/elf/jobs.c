@@ -48,6 +48,7 @@
 #include <unistd.h>
 
 static int rep[2];      /* what handlers heard: "TAG:SIG\n" */
+static volatile sig_atomic_t chlds; /* the SIGCHLDs R's handler has told */
 static char tag[16] = "?";
 static int root;
 
@@ -81,6 +82,7 @@ static void chld(int sig, siginfo_t *si, void *uc) {
                     si->si_code == CLD_STOPPED ? "STOPPED" : si->si_code == CLD_CONTINUED ? "CONTINUED" : "OTHER";
     int n = snprintf(b, sizeof b, "CHLD %s %s\n", c, si->si_code == CLD_EXITED ? "-" : sname(si->si_status));
     (void)!write(rep[1], b, (size_t)n);
+    chlds++;
 }
 
 static void on(int sig) {
@@ -111,6 +113,17 @@ static long now_ms(void) {
 static void nap(int ms) {
     struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
     while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {}
+}
+
+/* R hears a stop before it waits for it. A wait that reports a stop
+ * takes it, and on Linux a SIGCHLD sent after that carries si_status 0,
+ * not the stop's signal (measured: about 2 in 100 stops when the wait
+ * came straight after the kill; signal(7) and waitid(2) say nothing of
+ * the order of the two). So where a row prints what the handler was
+ * told about a stop, R waits here, until a SIGCHLD has been told since
+ * `since`, and only then calls the wait that takes the stop. */
+static void chld_told(sig_atomic_t since) {
+    for (long end = now_ms() + 5000; chlds == since && now_ms() < end;) nap(2);
 }
 
 static const char *ename(int e) {
@@ -498,14 +511,16 @@ static void stops(void) {
     pid_t a = idle_t(0, "A", 0, tp[1]);
     pid_t b = idle_t(a, "B", 0, tp[1]);
     printf("S: a group of two, ticking: %s\n", yesno(ticking(tp[0], 200)));
+    sig_atomic_t told = chlds;
     ANS("S: kill(-G, SIGSTOP)", kill(-a, SIGSTOP));
+    chld_told(told);
+    heard_list(h, sizeof h, 2, 1500); /* both members' stops told (or merged into one) before either is taken */
     int n = 0;
     for (int i = 0; i < 2; i++) {
         w = waitpid(-a, &st, WUNTRACED);
         if (w > 0 && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP && st == 0x137f) n++;
     }
     printf("S: waitpid(-G, WUNTRACED) reported stopped by SIGSTOP (status 0x137f): %d of 2\n", n);
-    heard_list(h, sizeof h, 2, 1500);
     printf("S: R heard %s\n", h);
     w = waitpid(-a, &st, WNOHANG | WUNTRACED);
     printf("S: a second waitpid(-G, WNOHANG|WUNTRACED): %s\n", how(w, st));
@@ -540,13 +555,17 @@ static void stops(void) {
     printf("S: a continued group runs again: %s\n", yesno(ticking(tp[0], 200)));
     w = waitpid(-a, &st, WNOHANG | WCONTINUED | WUNTRACED);
     printf("S: waitpid(-G, WNOHANG|WCONTINUED|WUNTRACED) once both are reported: %s\n", how(w, st));
+    told = chlds;
     ANS("S: kill(a, SIGTSTP)", kill(a, SIGTSTP));
+    chld_told(told);
     w = waitpid(a, &st, WUNTRACED);
     printf("S: SIGTSTP at its default: %s\n", how(w, st));
     {
         siginfo_t si;
         memset(&si, 0, sizeof si);
+        told = chlds;
         ANS("S: kill(b, SIGTTIN)", kill(b, SIGTTIN));
+        chld_told(told);
         int r = waitid(P_PGID, (id_t)a, &si, WSTOPPED | WNOWAIT);
         printf("S: waitid(P_PGID, G, WSTOPPED|WNOWAIT): %s, code %s, status %s, the pid b's %s\n", r < 0 ? ename(errno) : "0",
                si.si_code == CLD_STOPPED ? "CLD_STOPPED" : "other", sname(si.si_status), yesno(si.si_pid == b));
