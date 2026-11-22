@@ -961,6 +961,23 @@ for j in JOBS:
     m = re.search(r"^  %s:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)" % re.escape(j), wf, re.M | re.S)
     blocks[j] = m.group(1) if m else ""
 say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tier job")
+# pax#525: the processor census (tests/mpx6-cpus.d) reads every kernel/**/*.lu and boot/*.S, and only the firmware
+# suite ran it, so a kernel change planned narrow never did. Its textual half takes under a second with no build:
+# the plan job runs it on every run, before it plans, and a stale inventory fails there, before any runner.
+CENSUS = 'PAX_BUILD="${RUNNER_TEMP:-/tmp}/pax-census" bash tests/mpx6-cpus.d/source-census.sh'
+say(re.search(r"^      - name: the planner can say no \(tests/ci-plan\)\n        run: \|\n(?:          .*\n)*          %s\n" % re.escape(CENSUS),
+              blocks["plan"], re.M) is not None
+    and blocks["plan"].find(CENSUS) < blocks["plan"].find("      - name: the plan\n"),
+    "P4 the plan job runs the processor census (CPU-INVENTORY) in its planner step, before it plans")
+REGEN = ("python3 -I tests/mpx6-cpus.d/census.py . > tests/mpx6-cpus.d/inventory.json && "
+         "python3 -I tests/mpx6-cpus.d/protections.py tests/mpx6-cpus.d/inventory.json > tests/mpx6-cpus.d/protections.json")
+with tempfile.TemporaryDirectory() as d:
+    stale = os.path.join(d, "inventory.json")
+    open(stale, "w").write("[]\n")
+    r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tests/mpx6-cpus.d/census.py"), ROOT, "--check", stale],
+                       capture_output=True, text=True)
+say(r.returncode == 1 and "FAIL CPU-INVENTORY" in r.stdout and REGEN in r.stdout,
+    "P4 CPU-INVENTORY's failure, against a stale inventory, names the two commands that regenerate the census")
 # P10: the KVM step. Unnamed, so tests/ci-budgets.py counts it with checkout and setup in the 180 s allowance
 # (a named step would be a budgeted job's unmeasured step).
 KVM_STEP = "      - if: needs.plan.outputs.kvm == 'yes'\n        run: tools/kvm-open\n"
