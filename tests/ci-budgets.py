@@ -263,4 +263,42 @@ missing = [j for j in workflow_jobs if j not in held]
 print('%s budget/twice/coverage every job but the plan and the verdict has a row, an exception or an unmeasured entry (%d jobs)%s' %
       ('FAIL' if missing else 'PASS', len(workflow_jobs), ': none for ' + ' '.join(missing) if missing else ''))
 failed |= bool(missing)
+# The silence cap (silence.json): a wrapped suite step is stopped when it prints nothing for its limit
+# (tools/silence-cap), long before its job's cap when it hangs. Each limit is at least twice the longest silence
+# measured inside that step, and at least the floor; it is under the job's cap on every leg (a one-leg tier's cap
+# may come first); the step is exactly `tools/silence-cap LIMIT -- tests/JOB $PAX_LEGS`, so its exit 124 fails the
+# job (no `||`, no pipe, no continue-on-error); no other step uses the tool; and the plan job runs its selftest.
+
+
+def job_body(job):
+    body = text.split('  ' + job + ':\n', 1)[1]
+    return re.split(r'\n  [A-Za-z0-9_-]+:\n', body, maxsplit=1)[0]
+
+
+silence = json.loads((DATA / 'silence.json').read_text())
+for r in silence['rows']:
+    job, limit = r['job'], r['limit_minutes']
+    need = max(silence['floor_minutes'], 5 * -(-2 * r['seconds'] // 300))
+    every_cap = cap_for(job, {'tier': 'all', 'also_release': '[]', 'kvm': 'no'})
+    body = job_body(job)
+    step = '        run: tools/silence-cap %d -- tests/%s $PAX_LEGS\n' % (limit, job)
+    why = []
+    if limit < need:
+        why.append('limit %d min under max(%d, twice %d s)' % (limit, silence['floor_minutes'], r['seconds']))
+    if limit * 60 >= every_cap:
+        why.append('limit %d min not under the every-leg cap %d s' % (limit, every_cap))
+    if step not in body:
+        why.append('the suite step is not `%s`' % step.strip())
+    if 'continue-on-error' in body:
+        why.append('the job has continue-on-error')
+    print('%s budget/silence/%s limit=%dmin silence=%ds (run %d) need=%dmin cap(all)=%ds%s' %
+          ('FAIL' if why else 'PASS', job, limit, r['seconds'], r['run'], need, every_cap, ': ' + '; '.join(why) if why else ''))
+    failed |= bool(why)
+wrapping = sorted(j for j in workflow_jobs if 'tools/silence-cap' in job_body(j))
+listed = sorted(r['job'] for r in silence['rows'])
+plan_runs = 'python3 -I tests/silence-cap-selftest' in job_body('plan')
+ok = wrapping == listed and plan_runs
+print('%s budget/silence/only the steps silence.json lists use tools/silence-cap (%s), and the plan job runs its selftest (%s)' %
+      ('PASS' if ok else 'FAIL', ' '.join(wrapping) or 'none', 'yes' if plan_runs else 'no'))
+failed |= not ok
 sys.exit(1 if failed else 0)

@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""tests/silence-cap-selftest: tools/silence-cap's own proof, run in the plan job (Linux). No QEMU: python3 and bash.
+
+  W1  a command silent past its limit is stopped: exit 124, a line naming the limit and the last line it printed, and
+      an ::error:: annotation with the same text
+  W2  before it is stopped, every process of its group is printed: pid, elapsed time, command line
+  W3  nothing of the group is left after the cut: its background children too
+  W4  a command that keeps printing past the limit is not stopped, and its output passes through whole
+  W5  a byte with no newline is output too
+  W6  the command's own status passes through (0, 1, 3; 128 + the signal when a signal ends it)
+  W7  a command that cleans up on TERM gets its grace: its last words reach the log
+  W8  a command that ignores TERM is killed after the grace, and says so
+  W9  off Linux it refuses (exit 2), named; a bad usage is exit 2
+Exit 0 when every row passes, 1 otherwise. Off Linux only W9 runs; the others print SKIP with the reason.
+"""
+import os
+import platform
+import re
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOL = os.path.join(ROOT, 'tools', 'silence-cap')
+fails = 0
+
+
+def say(ok, what):
+    global fails
+    print('silence-cap-selftest: %s %s' % ('PASS' if ok else 'FAIL', what))
+    fails += not ok
+
+
+def run(args, env=None, timeout=60):
+    t0 = time.monotonic()
+    try:
+        r = subprocess.run([TOOL] + args, capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, **(env or {})))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 'ERROR %s' % e, -1, time.monotonic() - t0
+    return r.stdout + r.stderr, r.returncode, time.monotonic() - t0
+
+
+def alive(marker):
+    """Processes whose command line is exactly `sleep MARKER` (a duration no other process uses)."""
+    found = []
+    for d in os.listdir('/proc'):
+        if d.isdigit():
+            try:
+                with open('/proc/%s/cmdline' % d, 'rb') as f:
+                    if f.read().split(b'\0')[:2] == [b'sleep', marker.encode()]:
+                        found.append(d)
+            except OSError:
+                pass
+    return found
+
+
+linux = platform.system() == 'Linux'
+if linux:
+    out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c', 'echo start; sleep 617'])
+    cut = 'silence-cap: no output for 2 s after "start"; stopped the step (exit 124)'
+    say(rc == 124 and cut in out and ('::error::' + cut) in out and secs < 15,
+        'W1 silent past 2 s: exit %d in %.1f s, the cut line and its annotation%s' % (rc, secs, '' if cut in out else ' (missing: %r)' % out[-300:]))
+    tree = re.findall(r'^silence-cap: pid \d+ elapsed \d+:\d\d:\d\d (.*)$', out, re.M)
+    before = out.find('silence-cap: pid ') < out.find(cut) if tree else False
+    say('sleep 617' in tree and before, 'W2 the group printed before the cut: %s' % (tree or 'no pid lines'))
+    out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c', 'echo go; sleep 618 & sleep 619; wait'])
+    time.sleep(0.5)
+    left = alive('618') + alive('619')
+    say(rc == 124 and not left, 'W3 the group gone after the cut, its background child too (left: %s)' % (left or 'none'))
+    out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c', 'for i in 1 2 3 4 5; do echo line$i; sleep 1; done'])
+    say(rc == 0 and all('line%d' % i in out for i in range(1, 6)) and 'no output for' not in out,
+        'W4 printing every second past a 2 s limit: exit %d, all five lines, no cut' % rc)
+    out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c', 'for i in 1 2 3 4; do printf .; sleep 1; done'])
+    say(rc == 0 and '....' in out and 'no output for' not in out, 'W5 a dot a second with no newline: exit %d, not cut' % rc)
+    got = [run(['--seconds', '5', '--', 'bash', '-c', 'exit %d' % n])[1] for n in (0, 1, 3)]
+    sig = run(['--seconds', '5', '--', 'bash', '-c', 'kill -9 $$'])[1]
+    say(got == [0, 1, 3] and sig == 137, 'W6 status passed through: %s, and a KILLed command %d (want [0, 1, 3] and 137)' % (got, sig))
+    out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c',
+                         "trap 'sleep 2; echo cleaned up; exit 0' TERM; echo working; sleep 620 & wait"])
+    say(rc == 124 and 'cleaned up' in out and 'KILL' not in out, 'W7 a TERM cleanup of 2 s finishes inside the grace: exit %d%s' % (
+        rc, '' if 'cleaned up' in out else ', its last words lost'))
+    out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c', "trap '' TERM; echo stubborn; sleep 621"], timeout=60)
+    say(rc == 124 and 'still running 10 s after TERM: KILL' in out and not alive('621') and secs < 25,
+        'W8 TERM ignored: KILL after the 10 s grace, named, in %.1f s' % secs)
+else:
+    for row in ('W1', 'W2', 'W3', 'W4', 'W5', 'W6', 'W7', 'W8'):
+        print('silence-cap-selftest: SKIP %s reason=%s: the tool runs on Linux only' % (row, platform.system()))
+out, rc, secs = run(['--seconds', '2', '--', 'true'], env={'SILENCE_CAP_SYSTEM': 'Darwin'})
+bad = run(['2', 'true'])[1]
+say(rc == 2 and 'refused: untested on Darwin' in out and bad == 2, 'W9 refused off Linux (exit %d), a bad usage exit %d' % (rc, bad))
+print('silence-cap-selftest: %s' % ('PASS' if fails == 0 else 'FAIL (%d)' % fails))
+sys.exit(1 if fails else 0)
