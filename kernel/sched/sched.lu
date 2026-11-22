@@ -283,6 +283,7 @@ use smp
 use speaker
 use sync
 use timer
+use tlb
 use trace_state
 
 extern "c" let pax_debugregs: *u64
@@ -557,6 +558,36 @@ fn put_field(s: u64, off: int, v: u64) {
 }
 
 /// Scheduler word `i` (S_*), read volatile (#598).
+/// px166: 1 once `reap` or `ended` has put off a slot by the departure
+/// rule (`departure`), until a processor next moves off a DEAD slot.
+var departing: u64 = 0
+
+/// px166: the departure rule. Slot `s`, DEAD, is still another processor's
+/// to run on (its W_CPU), or its space (a process's, `owns`) is still in
+/// another processor's CR3 (a thread of it running there: kernel/tlb's
+/// LOADED_CR3): that processor's index + 1, after a RESCHED to it, which
+/// moves it off; 0 when nothing but this processor can touch the slot's
+/// stack, FPU area, record or space. The lock's holder; the caller puts the
+/// slot off to a later reap.
+fn departure(s: u64) -> u64 {
+    var k = slot_word(s, W_CPU)
+    if k == percpu.index() + 1 {
+        k = 0 // this processor's own: not a departure
+    }
+    if k == 0 {
+        let c = field(s, offset_of(Thread, cr3))
+        if c != 0 && field(s, offset_of(Thread, owns)) == 1 {
+            k = tlb.user_of(c)
+        }
+    }
+    if k != 0 {
+        smp.resched(k - 1)
+        // # Safety: the lock's holder alone writes it.
+        unsafe { departing = 1 }
+    }
+    k
+}
+
 fn sv(i: u64) -> u64 {
     // # Safety: i < 32, inside boot/sched.S's 256-byte pax_sched_state (px48; 128 before).
     unsafe { ((pax_sched_state as u64 + i * 8) as *u64).read_volatile() }
@@ -1090,6 +1121,14 @@ fn run_next() -> u64 {
     point(0, from) // px131: the scheduler chooses
     if real_from {
         put_slot_word(from, W_CPU, 0)
+        // px166: a DEAD slot put off by the departure rule is free to go
+        // now this processor has left it: its parent, if it waits, looks again.
+        if unsafe { departing } == 1 && field(from, offset_of(Thread, state)) == DEAD {
+            // # Safety: the lock's holder alone writes it.
+            unsafe { departing = 0 }
+            let l = field(from, offset_of(Thread, lead))
+            wake_waiter(field(if l != 0 { l } else { from }, offset_of(Thread, ppid)))
+        }
     }
     var n = take_next()
     // px48: a thread of a stopped process runs nothing: it is parked
@@ -1706,7 +1745,7 @@ fn tables(pml4: u64, base: u64, n: u64) {
 fn reap() {
     var s: u64 = FIRST
     while s < top() {
-        if s != cur() && field(s, offset_of(Thread, state)) == DEAD {
+        if s != cur() && field(s, offset_of(Thread, state)) == DEAD && departure(s) == 0 {
             if field(s, offset_of(Thread, stack_lo)) != 0 { // px26: a held leader's went at its own end
                 free_stack(s)
                 put_field(s, offset_of(Thread, stack_lo), 0)
@@ -2798,7 +2837,7 @@ fn is_proc(s: u64) -> bool {
 /// thread left, before `reap` makes it a ZOMBIE.
 fn ended(s: u64) -> bool {
     let st = field(s, offset_of(Thread, state))
-    st == ZOMBIE || (st == DEAD && field(s, offset_of(Thread, zombie)) == 1 && field(s, offset_of(Thread, threads)) == 0)
+    st == ZOMBIE || (st == DEAD && field(s, offset_of(Thread, zombie)) == 1 && field(s, offset_of(Thread, threads)) == 0 && departure(s) == 0)
 }
 
 /// px25: the slot of process `pid`'s leader, SLOTS if no such process.
