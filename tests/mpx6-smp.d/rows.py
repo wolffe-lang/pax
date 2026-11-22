@@ -289,6 +289,9 @@ def run_rounds():
             r['user'] = {int(i): (None if d == '-' else int(d)) for i, d in re.findall(r' (\d+):([+-]?\d+|-)', rest)}
         elif rest.startswith('sample'):
             r['samples'].append({int(i): v for i, v in re.findall(r' (\d+):(\S+)', rest)})
+            sp = re.search(r' sampler (\d+)', rest)
+            if sp:
+                r.setdefault('sampler', set()).add(sp[1])
     return rounds
 
 
@@ -314,8 +317,11 @@ def run_check(n, nrounds, cap=None):
                        f'{ {i: r["user"].get(i) for i in sorted(r["user"])} }')
         workers = set(r.get('workers', []))
         seen = sorted({i for s in r['samples'] for i, v in s.items() if v.isdigit() and int(v) in workers})
+        # the sampler reads on a processor of its own each time, which can never show a worker then
+        sat = sorted({i for s in r['samples'] for i, v in s.items() if v in r.get('sampler', set())})
         info.append(f'round {k}: wall {r["wall"]} us against the lone {r["lone_wall"]} us '
-                    f'({r["wall"] / max(r["lone_wall"], 1):.2f}x); workers seen on {seen}')
+                    f'({r["wall"] / max(r["lone_wall"], 1):.2f}x); workers seen on {seen}'
+                    + (f' (the sampler on {sat})' if sat else ''))
         if cap:
             outside = [i for i in seen if i >= cap]
             gained = [i for i in range(cap, n) if (r['user'].get(i) or 0) > 0]
