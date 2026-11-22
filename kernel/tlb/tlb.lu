@@ -5,17 +5,21 @@
 //! processor's TLB: one running a thread of that space in ring 3, or any
 //! processor for the kernel half, which every PML4 shares. Before the
 //! frame behind such a page is freed, every processor that may cache it
-//! drops it here.
+//! drops it here. A space is never freed while another processor runs a
+//! thread of it (its CR3 holds it): `space` refuses that by name; the
+//! scheduler's departure rule puts a reap off until it holds, and an exec
+//! whose sibling still runs elsewhere is stage 2's exec rendezvous's.
 //!
 //! The mailbox is six words of each processor's record (kernel/percpu):
 //! TLB_REQ (a generation << 8 | the op), TLB_VA, TLB_PML4, TLB_ACK (the
 //! generation answered), LOADED_CR3 (the PML4 its CR3 holds, written at
 //! every load: kernel/paging's `load`) and TLB (the shootdowns it
-//! answered: /proc/pax-cpus' `tlb`). The ops: INVLPG va, and KERNEL_PML4,
-//! the kernel's PML4 loaded in place of a space about to be freed.
+//! answered: /proc/pax-cpus' `tlb`). The op: INVLPG va.
 //!
-//! The requester holds the kernel lock (kernel/klock): every caller is
-//! kernel code, and one processor at a time runs it. It writes each
+//! The requester holds the kernel lock (kernel/klock), checked here by
+//! name, and keeps interrupts off from the first mailbox write to the last
+//! answer: no tick can switch it to another thread with a request out. It
+//! writes each
 //! target's VA and PML4, then its REQ, sends vector 49 (a fixed IPI, SDM
 //! vol. 3A §11.6.1) and spins until every target's ACK is the generation,
 //! at most TSC_BOUND cycles (1 s at 4 GHz), then panics naming the
@@ -30,7 +34,7 @@
 //! interrupts on; `klock.enter`'s spin, each turn, when it waits for the
 //! requester's lock with interrupts off; an application processor's idle
 //! loop, before its HLT. `answer` touches only this processor's own
-//! mailbox words and counter, its TLB (INVLPG) and its CR3; it is
+//! mailbox words and counter and its TLB (INVLPG); it is
 //! idempotent (a stale vector 49 finds REQ's generation answered).
 //!
 //! The words are read and written volatile through kernel/percpu: x86's
@@ -47,15 +51,16 @@ use percpu
 use sync
 
 extern "c" fn pax_invlpg(va: u64)
-extern "c" fn pax_set_cr3(v: u64)
 extern "c" fn pax_rdtsc() -> u64
 extern "c" fn pax_wrmsr(msr: u64, v: u64)
+/// kernel/klock's two words (OWNER, this processor's index + 1 while it
+/// holds the lock; DEPTH), read here because this module sits below it.
+extern "c" let pax_klock: *u64
 
 /// The shootdown's vector (boot/isr.S's trampoline 49, kernel/idt's gate).
 pub const VECTOR: u64 = 49
-/// The ops.
+/// The op (the one this step needs; the end's STOP is a later one).
 pub const INVLPG: u64 = 1
-pub const KERNEL_PML4: u64 = 2
 
 const KERNEL_HALF: u64 = 0xffff800000000000
 /// The requester's bound on every target's answer: 1 s at 4 GHz.
@@ -130,16 +135,9 @@ pub fn answer() {
     if g == percpu.get(me, percpu.TLB_ACK) {
         return
     }
-    let op = r & 0xff
-    if op == INVLPG {
+    if r & 0xff == INVLPG {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(percpu.get(me, percpu.TLB_VA)) }
-    } else if op == KERNEL_PML4 {
-        let k = percpu.word(percpu.W_CR3)
-        // # Safety: cpu.S's MOV to CR3; the kernel's PML4 maps the kernel
-        // half every PML4 shares, so the code and stack running stay mapped.
-        unsafe { pax_set_cr3(k) }
-        percpu.put(me, percpu.LOADED_CR3, k)
     }
     percpu.put(me, percpu.TLB, percpu.get(me, percpu.TLB) + 1)
     percpu.put(me, percpu.TLB_ACK, g)
@@ -152,10 +150,15 @@ pub fn page(pml4: u64, va: u64) {
     request(INVLPG, va, pml4, va >= KERNEL_HALF)
 }
 
-/// The space at `pml4` about to be freed: every other processor whose CR3
-/// holds it loads the kernel's PML4 first.
+/// The space at `pml4` about to be freed: no other processor's CR3 may hold
+/// it (no lazy CR3: a processor's CR3 holds a space only while it runs a
+/// thread of it, kernel/sched's `enter_space`), or that thread would go on,
+/// in ring 3 or in a system call, through freed tables. Refused by name.
 pub fn space(pml4: u64) {
-    request(KERNEL_PML4, 0, pml4, false)
+    let k = user_of(pml4)
+    if k != 0 {
+        panic.fail("tlb: a space freed while another processor runs in it, cpu ", k - 1)
+    }
 }
 
 /// Every other processor that runs a thread of `pml4` now: its index + 1,
@@ -185,6 +188,16 @@ fn request(op: u64, va: u64, pml4: u64, all: bool) {
         return
     }
     let me = percpu.mine()
+    // # Safety: kernel/klock's OWNER and DEPTH words, read volatile.
+    let owner = unsafe { (pax_klock as u64 as *u64).read_volatile() }
+    let depth = unsafe { ((pax_klock as u64 + 8) as *u64).read_volatile() }
+    if owner != percpu.index() + 1 || depth == 0 {
+        panic.fail("klock: a shootdown asked without the kernel lock, cpu ", percpu.index())
+    }
+    // Interrupts off until every answer is in: a tick at this depth would
+    // run the scheduler, which may switch this processor to another thread
+    // (and its own shootdown) with this request out.
+    let _off = sync.irq_save()
     // # Safety: the lock's holder alone writes it.
     let g = unsafe { gen } + 1
     unsafe { gen = g }
