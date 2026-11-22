@@ -35,14 +35,21 @@
 //!   216 POKED    1 while a RESCHED sent to it has not been taken
 //!   224 KTHREADS its switches to a kernel thread (CPU 0 alone runs them:
 //!                kernel/sched's `eligible`; 0 on every other)
+//!   px166, kernel/tlb's mailbox (the shootdown): 232 TLB_REQ (a generation
+//!                << 8 | the op), 240 TLB_VA, 248 TLB_PML4, written by the
+//!                kernel lock's holder; 488 TLB_ACK (the generation answered),
+//!                496 LOADED_CR3 (the PML4 its CR3 holds), 504 TLB (the
+//!                shootdowns it answered), written by the processor itself
 //!   256 its GDT (7 descriptors), 320 its GDTR, 384 its TSS (104 bytes)
 //!
 //! Each word is written by its own processor alone after it is released
 //! (the counters, CURRENT, KSTACK, USP, the cause, kernel/sched's words),
 //! or by the boot processor alone before (the rest); every other processor
-//! only reads, volatile. POKED is the one exception: the processor that
+//! only reads, volatile. POKED is one exception: the processor that
 //! sends the RESCHED sets it and the one that takes it clears it, each
-//! holding the kernel lock (kernel/klock), as every reader does. CURRENT
+//! holding the kernel lock (kernel/klock), as every reader does. The
+//! mailbox's TLB_REQ, TLB_VA and TLB_PML4 are the other: the lock's holder
+//! writes them, and the processor reads them without the lock (kernel/tlb). CURRENT
 //! changes only under the lock too, so a processor holding it reads every
 //! other's CURRENT as it stands. `pax_ap_boot`'s words (boot/isr.S;
 //! kernel/smp's header) are the rest of what the processors share.
@@ -91,9 +98,15 @@ pub const USER: u64 = 200
 pub const RESCHED: u64 = 208
 pub const POKED: u64 = 216
 pub const KTHREADS: u64 = 224
+pub const TLB_REQ: u64 = 232
+pub const TLB_VA: u64 = 240
+pub const TLB_PML4: u64 = 248
 pub const GDT_AREA: u64 = 256
 pub const GDTR_AREA: u64 = 320
 pub const TSS_AREA: u64 = 384
+pub const TLB_ACK: u64 = 488
+pub const LOADED_CR3: u64 = 496
+pub const TLB: u64 = 504
 
 /// STATE's values (0: a record never made).
 pub const BOOT: u64 = 1
