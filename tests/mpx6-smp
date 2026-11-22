@@ -6,6 +6,7 @@
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
 #    SMP_KINDS='rows end nosmp one cap2 cap1 stress' (or commas) the boots run, every kind by default, fewer for a
 #    plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
+#    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
 #    boots' logs still under PAX_BUILD)
 #
@@ -52,6 +53,11 @@ done
 case $tiers in both) tiers='native release' ;; esac
 case $firmware in both) firmware='bios uefi' ;; esac
 case $scaling in gate|report|skip) ;; *) die "SMP_SCALING is gate, report or skip, not $scaling" ;; esac
+# SMP_ROWS_CAP=N, a development knob (tests/mpx6-smp.d/rows-cap.sh): said first, so no one reads its greens as the gate's.
+. tests/mpx6-smp.d/rows-cap.sh
+rows_cap=${SMP_ROWS_CAP:-}
+rows_cap_check "$rows_cap" || exit 2
+[ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 python3 -I -B tests/mpx6-smp.d/rows-selftest.py
 bash tests/mpx6-smp.d/knob-selftest.sh
 python3 -I -B tests/mpx6-smp.d/frame-layout.py --selftest
@@ -67,6 +73,11 @@ conf() { # FILE CMDLINE-WORDS
 images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-halt::/bin/smpprobe end halt"
         "end-poweroff::/bin/smpprobe end poweroff" "end-reboot::/bin/smpprobe end restart" "one::/bin/smpprobe one"
         "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one")
+if [ -n "$rows_cap" ]; then # SMP_ROWS_CAP: unset, the list above is used as it stands
+    capped=()
+    for spec in "${images[@]}"; do capped+=("$(rows_cap_spec "$rows_cap" "$spec")"); done
+    images=("${capped[@]}")
+fi
 set -- $firmware
 first_fw=$1 nfw=$#
 built_build=0
