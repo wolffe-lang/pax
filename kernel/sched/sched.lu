@@ -568,6 +568,18 @@ fn ended_in_place(c: u64) -> bool {
     field(c, offset_of(Thread, state)) == DEAD
 }
 
+/// px166: whether the running `c` must leave this processor at this tick or
+/// RESCHED whatever the queue holds: ended in place (DEAD), or its process
+/// stopped (`parks`). `preempt` and `kick` test it before their returns for an
+/// empty queue and an unspent quantum: on a processor with nothing it may
+/// take, those returns resumed such a thread for ever (an application
+/// processor takes only threads of processes: tests/mpx6-smp's SMP-DEAD, and
+/// SMP-SIGNAL's SIGSTOP held). `run_next` then leaves it: W_CPU cleared, the
+/// departure's waiter woken, the idle context on the kernel's PML4.
+fn must_leave(c: u64) -> bool {
+    !idle(c) && (ended_in_place(c) || parks(c))
+}
+
 /// px166 (step 5a): kernel/interrupts' door, before a system call or a
 /// ring-3 fault is routed: the running thread was ended in place.
 pub fn ended_here() -> bool {
@@ -1221,12 +1233,15 @@ pub fn preempt(f: u64) -> u64 {
     if !smp.runs_here() {
         return f
     }
+    // px166: a thread that must leave (`must_leave`) is not kept by either
+    // return below.
+    let go = must_leave(c)
     // #598: the queue's head is read after wake_sleepers wrote it.
     // px166: on an application processor, a thread of a process.
-    if eligible() == 0 {
+    if !go && eligible() == 0 {
         return f
     }
-    if !idle(c) && my_ticks() - slice() < QUANTUM && !urgent_waits(c) {
+    if !go && !idle(c) && my_ticks() - slice() < QUANTUM && !urgent_waits(c) {
         return f
     }
     save_frame(c, f)
@@ -1655,7 +1670,9 @@ pub fn kick(f: u64) -> u64 {
     let c = cur()
     point(f, c) // px131: a chance to choose
     let h = eligible() // #598; px166: what this processor may take
-    if h == 0 {
+    // px166: a thread that must leave (`must_leave`) does so with nothing to
+    // take: ended, it is switched off below; stopped, it is queued and parked.
+    if h == 0 && !must_leave(c) {
         return f
     }
     if idle(c) {
