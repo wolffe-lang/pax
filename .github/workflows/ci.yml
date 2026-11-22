@@ -3633,8 +3633,10 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-24.04
-    # px83: all ISO legs plus rootdisk, measured stage peaks and 40% margin.
-    timeout-minutes: 210
+    # px83: all ISO legs plus rootdisk, measured stage peaks and 40% margin. On KVM (the plan's kvm=yes) it
+    # takes 18 minutes at most, so 210 holds; on TCG (the Sunday run) its slowest green all run took 174, so
+    # 360, which is also GitHub's limit for a hosted job.
+    timeout-minutes: ${{ needs.plan.outputs.kvm == 'yes' && 210 || 360 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -6664,7 +6666,10 @@ jobs:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # At least twice the slowest green of each shape (tests/ci-budgets.d/twice.json): one leg, native BIOS,
+    # 17 minutes at most, so 90; every leg (all, rest, a partial dispatch) or a kernel change's added
+    # release legs, 89 minutes at most, so 180.
+    timeout-minutes: ${{ (needs.plan.outputs.tier == 'full' || needs.plan.outputs.tier == 'pr') && needs.plan.outputs.also_release == '[]' && 90 || 180 }}
     steps:
       - uses: actions/checkout@v4
 
