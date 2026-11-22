@@ -109,6 +109,7 @@
 use panic
 use percpu
 use sync
+use ipi
 use tlb
 
 extern "c" let pax_klock: *u64
@@ -267,7 +268,7 @@ pub fn halt_given_back() -> never {
     // One that did not stop for the end (named on its own line) must never
     // run kernel code after the volumes: the ender keeps the lock, so that
     // one can only spin for it, interrupts off.
-    if held_here() && tlb.others() == 0 {
+    if held_here() && ipi.others() == 0 {
         put_depth(0)
         // # Safety: the holder's release store; as `owner`.
         unsafe { at(OWNER).atomic_store(0, Order.release) }
