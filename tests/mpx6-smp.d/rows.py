@@ -62,6 +62,10 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            outside the kernel (TCG: halted in pax_ap_park), and every other row
                            `NOT-ASKED … one processor: not asked`. A regression guard: green at stage 1.
   one         SMP-ONE      at -smp 1: no `cpus:` line, `started 1`, `active 1`; the rest not asked.
+  cap2        SMP-DEAD     three exit_groups from a group's main thread with its siblings spinning, one on the
+                           other processor that runs threads: status 0x700 each within 2 s, and none of the
+                           group's threads current on any processor in ten looks after (kernel/sched's
+                           `preempt` and `kick` switch a thread ended in place off, never queue it again).
   cap2, cap1  SMP-CAP      `pax.cpus=C` at -smp N: `active C`, `started N`, online and the mask C
                            processors; processors C and up on stage 1's idle line, never running a
                            worker and gaining no `user` tick (cap2's one SMP-RUN round).
@@ -96,7 +100,7 @@ STOP_LINE = 'cpus: {n} application processors stopped for the end'
 BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processors.*|.*did not answer a shootdown.*|'
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
-        'SMP-ONE', 'SMP-CAP', 'SMP-BUILD']
+        'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-BUILD']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
@@ -606,6 +610,28 @@ elif a.kind == 'cap2':
         fail('SMP-CAP', why[0], why[1:] + info)
     else:
         ok('SMP-CAP', f'active {c} of {N}; {"; ".join(info)}')
+    # SMP-DEAD: a thread another processor's exit_group ended while it ran is never run again.
+    dead = re.findall(r'^SMP-DEAD round (\d+) status (\S+) running (\d+) revived (\d+)$', text, re.M)
+    dwhy = []
+    if 'SMP-DEAD done' not in text or len(dead) != 3:
+        dwhy.append(f'{len(dead)} rounds of 3 and `SMP-DEAD done` {"seen" if "SMP-DEAD done" in text else "missing"}')
+    wrong = [(r, s) for r, s, _g, _v in dead if s != '0x700']
+    if wrong:
+        dwhy.append(f'statuses {wrong}, want 0x700 each (0xdead: no status in 2 s)')
+    back = [(r, v) for r, _s, _g, v in dead if v != '0']
+    if back:
+        dwhy.append(f'a thread of the ended group current again after its status: {back}')
+    alone = [(r, g) for r, _s, g, _v in dead if int(g) < c]
+    if alone:
+        dwhy.append(f'the group seen on fewer than {c} processors before its exit: {alone}')
+    bad = bad_lines()
+    if bad:
+        dwhy.append(f'the kernel said: {bad[:3]}')
+    if dwhy:
+        fail('SMP-DEAD', dwhy[0], dwhy[1:])
+    else:
+        ok('SMP-DEAD', f'three exit_groups with a sibling running on another processor: status 0x700 each, '
+                       f'none of the group current again')
 elif a.kind == 'build':
     why = []
     act = re.findall(r'^BENCH ACTIVE (\S+)$', text, re.M)
