@@ -197,6 +197,14 @@ pub fn send_nmi(dest: u64) {
     send_ipi(dest, 0x4400)
 }
 
+/// px166: interrupt `vector` (32-255) to the processor whose APIC ID is
+/// `dest`: delivery mode fixed (0b000), edge, assert (SDM vol. 3A
+/// §11.6.1). It is taken as any interrupt is, when that processor's IF is
+/// set, and acknowledged at its local APIC (`eoi`).
+pub fn send_fixed(dest: u64, vector: u64) {
+    send_ipi(dest, 0x4000 | (vector & 0xff))
+}
+
 /// px161: INIT to the processor whose APIC ID is `dest` (delivery mode
 /// INIT, 0b101, edge, assert): it stops whatever it ran and waits for a
 /// startup IPI (SDM vol. 3A §9.4, §11.6.1), as before any bootloader
