@@ -44,6 +44,16 @@ def check(source, assembly):
             reserved *= int(factor)
     if reserved < values.get("SLOTS", 1) * per * 8 or reserved == 0:
         errors.append("assembly does not reserve SLOT_WORDS words for every slot")
+    # px166 (step 5b): one parked space per processor at most (kernel/smp's MAX, 64), each a word
+    old = values.get("OLD_MAX", 0)
+    match = re.search(r"^pax_old_spaces:\s*\n\s*\.zero ([0-9 *]+)$", assembly, re.M)
+    reserved = 0
+    if match:
+        reserved = 1
+        for factor in match[1].replace(" ", "").split("*"):
+            reserved *= int(factor)
+    if old < 64 or reserved < old * 8:
+        errors.append("the parked-space table is smaller than one word a processor, or not reserved")
     return errors
 
 
@@ -62,10 +72,12 @@ def main():
                     (source.replace("const B_QUEUED: u64 = 16", "const B_QUEUED: u64 = 0"), assembly),
                     (source, assembly.replace(".zero 2 * 16 * 8", ".zero 16 * 8")),
                     (source + "\nfn invalid() { let x = 1 << s }\n", assembly),
-                    (source.replace("const SLOT_WORDS: u64 = 5", "const SLOT_WORDS: u64 = 4"), assembly),
-                    (source, assembly.replace(".zero 1024 * 5 * 8", ".zero 1024 * 4 * 8"))]
+                    (source.replace("const SLOT_WORDS: u64 = 4", "const SLOT_WORDS: u64 = 3"), assembly),
+                    (source, assembly.replace(".zero 1024 * 4 * 8", ".zero 1024 * 3 * 8")),
+                    (source.replace("const OLD_MAX: u64 = 64", "const OLD_MAX: u64 = 1"), assembly),
+                    (source, assembly.replace(".zero 64 * 8", ".zero 1 * 8"))]
         assert all(check(s, a) for s, a in variants), "a broken layout was accepted"
-        print("PASS slots-scheduler-layout-selftest: seven invalid layouts rejected")
+        print("PASS slots-scheduler-layout-selftest: nine invalid layouts rejected")
     for error in errors:
         print("FAIL slots-scheduler-layout: " + error)
     if not errors:
