@@ -579,6 +579,25 @@ fn cur() -> u64 {
     percpu.current() // #598: reread after every switch; px161: this processor's
 }
 
+/// px166: whether this processor runs its idle thread (a frame returned
+/// to it gives the kernel lock back, kernel/interrupts).
+pub fn idle_now() -> bool {
+    cur() == IDLE
+}
+
+/// px166: the runtime's ambient slot into the running thread's record,
+/// before kernel/klock's `leave`: another processor may take the lock and
+/// move the one slot before this one comes back. IF is clear.
+pub fn ambient_park() {
+    put_field(cur(), offset_of(Thread, amb), heap.ambient())
+}
+
+/// px166: the running thread's ambient region back into the runtime's
+/// slot, after a fresh kernel/klock `enter`. IF is clear.
+pub fn ambient_resume() {
+    heap.set_ambient(field(cur(), offset_of(Thread, amb)))
+}
+
 /// px126: one past the highest slot that is not free: every slot from
 /// here on is free, so a walk stops here.
 pub fn top() -> u64 {
