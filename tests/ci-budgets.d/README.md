@@ -340,3 +340,13 @@ A silence cut says `silence-cap: no output for …`; a cap cut is GitHub's own "
 `tests/ci-budgets.py` holds each limit to the rule, under the job's every-leg cap, and the step to exactly that shape;
 no other step uses the tool, and the plan job runs `tests/silence-cap-selftest`.
 
+### Progress lines in the long builds (`tools/progress`)
+
+Some builds print nothing for a long time: yew's release build (47 to 53 minutes in `mpx5-yew`, `mpx5-screen` and
+`mpx6-install`), burrow's build (22 minutes in `mpx5-burrowd`) and the kernel's release object (8 to 21 minutes).
+`tools/build-kernel`, `tools/mkyew` and `tools/mkburrow` run them under `tools/progress`. Each minute in which the
+build's processes used at least 6 s of CPU, it prints a line naming the build, its minutes and its CPU minutes. In a
+minute spent waiting it prints nothing, so a build that hangs on a wait stays silent and the step's silence cap still
+sees it. This lets the yew jobs, and tighter limits elsewhere, take a silence cap once a run has measured their
+silences with these lines.
+
