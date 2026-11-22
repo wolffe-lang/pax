@@ -300,6 +300,7 @@ extern "c" let pax_sched_bits: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_slot_words: *u64 // px126: two words a slot (W_AREA, W_MARK); px159: three (W_KEYS)
+extern "c" let pax_old_spaces: *u64 // px166 (step 5b): the parked spaces, OLD_MAX words
 extern "c" let pax_pid_hint: *u64 // px126: pid mod HINTS to slot + 1
 extern "c" let pax_siginfo: *u64
 extern "c" let pax_tty_table: *u64
@@ -437,8 +438,8 @@ const W_AREA: u64 = 0 // px126: slot word: 1 while the slot has its process area
 const W_MARK: u64 = 1 // px126: slot word: process_ends' mark on a child whose group it may orphan
 const W_KEYS: u64 = 2 // px159: slot word: the key buckets its system call looked at (`wait_key`), what it waits on in PIPE
 const W_CPU: u64 = 3 // px166: slot word: the processor running it, its index + 1; 0 while it runs nowhere (`run_next`)
-const W_OLD: u64 = 4 // px166 (step 5b): slot word: the space its exec left while another processor's CR3 held it (0: none); `reap` frees it
-const SLOT_WORDS: u64 = 5 // px166: boot/sched.S's pax_slot_words a slot (four in step 2, three since px159, two before)
+const SLOT_WORDS: u64 = 4 // px166: boot/sched.S's pax_slot_words a slot (three since px159, two before)
+const OLD_MAX: u64 = 64 // px166 (step 5b): boot/sched.S's pax_old_spaces: spaces execs left while another CR3 held them (kernel/smp's MAX)
 const NEVER: u64 = 0xffffffffffffffff
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
@@ -603,9 +604,6 @@ fn departure(s: u64) -> u64 {
         if c != 0 && field(s, offset_of(Thread, owns)) == 1 {
             k = tlb.user_of(c)
         }
-    }
-    if k == 0 && slot_word(s, W_OLD) != 0 {
-        k = tlb.user_of(slot_word(s, W_OLD)) // step 5b: its exec's old space, still in another CR3
     }
     if k != 0 {
         smp.resched(k - 1)
@@ -1462,13 +1460,6 @@ fn first_frame(s: u64, rip: u64, entry: u64, arg: u64) {
 }
 
 fn clear(s: u64) {
-    // px166 (step 5b): a parked old space goes with the slot (the
-    // departure rule put the slot off while another CR3 held it)
-    let o = slot_word(s, W_OLD)
-    if o != 0 {
-        put_slot_word(s, W_OLD, 0)
-        let _freed = paging.free_user(o)
-    }
     trace_state.clear(s)
     put_field(s, offset_of(Thread, frame), 0)
     put_field(s, offset_of(Thread, state), FREE)
@@ -1786,36 +1777,96 @@ fn tables(pml4: u64, base: u64, n: u64) {
 /// for (px14), its slot kept as a ZOMBIE holding its pid and status.
 /// IF clear, in thread context or a system call (never on the dead
 /// thread's own stack: it is not the running one).
-/// px166 (step 5b): slot `s`'s parked old space (W_OLD) freed if no other
-/// processor's CR3 holds it any more. Every `reap`, for every slot.
-fn reap_old(s: u64) {
-    let o = slot_word(s, W_OLD)
-    if o != 0 && tlb.user_of(o) == 0 {
-        put_slot_word(s, W_OLD, 0)
-        let _freed = paging.free_user(o)
+fn old_at(i: u64) -> u64 {
+    // # Safety: i < OLD_MAX: inside boot/sched.S's pax_old_spaces.
+    unsafe { ((pax_old_spaces as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_old(i: u64, v: u64) {
+    // # Safety: as `old_at`.
+    unsafe { ((pax_old_spaces as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// px166 (step 5b): every parked space no other processor's CR3 holds any
+/// more, freed. Every `reap`, and before every park.
+fn reap_olds() {
+    var i: u64 = 0
+    while i < OLD_MAX {
+        let o = old_at(i)
+        if o != 0 && tlb.user_of(o) == 0 {
+            put_old(i, 0)
+            let _freed = paging.free_user(o)
+        }
+        i += 1
     }
 }
 
-/// px166 (step 5b): exec's rendezvous. The space `old` that slot `c`'s exec
-/// left is freed now if no other processor's CR3 holds it; otherwise (a
-/// sibling `end_others` ended in place still runs in it elsewhere, sent a
-/// RESCHED by `reach`) it is parked on the slot for `reap`. Nothing waits.
+/// px166 (step 5b): exec's rendezvous. The space `old` an exec left is freed
+/// now if no other processor's CR3 holds it; otherwise (a sibling
+/// `end_others` ended in place still runs in it elsewhere, sent a RESCHED by
+/// `reach`) it is parked in pax_old_spaces for `reap`. Nothing waits, and
+/// nothing a program does can fill the table: after `reap_olds` every entry
+/// left is held by another processor's CR3, each processor's LOADED_CR3 is
+/// one PML4, and this processor's is the new space, so at most OLD_MAX - 1
+/// entries are held when a new one is parked. A full table is a kernel bug.
 fn leave_space(c: u64, old: u64) {
     if tlb.user_of(old) == 0 {
         let _freed = paging.free_user(old)
         return
     }
-    reap_old(c) // an earlier exec's parked space, if it has gone free since
-    if slot_word(c, W_OLD) != 0 {
-        panic.fail("sched: an exec's old space still held elsewhere at the next exec, slot ", c)
+    reap_olds()
+    var i: u64 = 0
+    while i < OLD_MAX {
+        if old_at(i) == 0 {
+            put_old(i, old)
+            return
+        }
+        i += 1
     }
-    put_slot_word(c, W_OLD, old)
+    panic.fail("sched: more parked spaces than other processors (a kernel bug), slot ", c)
+}
+
+/// px166 (step 5b): the boot's own check that the table parks more than one
+/// space at a time (one word a slot, the first form, could not): two fresh
+/// spaces parked while every space answers held (kernel/tlb's test hold,
+/// before any other processor runs), then both freed once let go. One line,
+/// tests/mpx6-smp's SMP-PARK.
+pub fn park_selftest() {
+    let a = paging.new_space(sv(S_PML4))
+    let b = paging.new_space(sv(S_PML4))
+    if a == 0 || b == 0 {
+        log.line("sched: parked spaces: no frames for the check")
+        return
+    }
+    tlb.hold_all_for_test(true)
+    leave_space(MAIN, a)
+    leave_space(MAIN, b)
+    var held: u64 = 0
+    var i: u64 = 0
+    while i < OLD_MAX {
+        if old_at(i) == a || old_at(i) == b { held += 1 }
+        i += 1
+    }
+    tlb.hold_all_for_test(false)
+    reap_olds()
+    var left: u64 = 0
+    i = 0
+    while i < OLD_MAX {
+        if old_at(i) != 0 { left += 1 }
+        i += 1
+    }
+    log.put("sched: parked spaces: ")
+    log.dec(held as int)
+    log.put(" held parked at once, ")
+    log.dec(left as int)
+    log.put(" left once let go")
+    log.end()
 }
 
 fn reap() {
+    reap_olds() // px166 (step 5b)
     var s: u64 = FIRST
     while s < top() {
-        reap_old(s)
         if s != cur() && field(s, offset_of(Thread, state)) == DEAD && departure(s) == 0 {
             if field(s, offset_of(Thread, stack_lo)) != 0 { // px26: a held leader's went at its own end
                 free_stack(s)
