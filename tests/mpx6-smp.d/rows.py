@@ -587,8 +587,10 @@ elif a.kind in ('panic', 'panic2'):
     # every processor halted with interrupts off in the last dump (gated under KVM; printed under TCG)
     row = 'SMP-PANIC-STOP' if a.kind == 'panic' else 'SMP-PANIC-TWO'
     why, info = [], []
-    firsts = re.findall(r'^PANIC testwords: a test panic, cpu .*$', text, re.M)
-    seconds = re.findall(r"^PANIC cpu \d+ \(a second panic, cpu \d+'s first\): testwords: a test panic.*$", text, re.M)
+    # the two lines' texts, not whole lines: kernel/panic has the second wait (bounded) for the first's line, and a
+    # wait that timed out could interleave their bytes; each text must still be there exactly once
+    firsts = re.findall(r'PANIC testwords: a test panic, cpu ', text)
+    seconds = re.findall(r"\(a second panic, cpu \d+'s first\): testwords: a test panic", text)
     want2 = 1 if a.kind == 'panic2' else 0
     if 'SMP-PANIC spinners' not in text:
         why.append('the spinners never started')
