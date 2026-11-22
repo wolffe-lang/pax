@@ -34,7 +34,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            processor's `user` ticks gain half the phase's ticks or more; N-1 processors
                            at least seen running a worker in the sampler's reads; each worker's CPU
                            time 0.8 of the lone worker's or more; statuses 0; under KVM the N-worker
-                           wall 1.5 times the lone wall or less (minimum of three rounds each).
+                           wall 1.5 times the lone wall or less (minimum of three rounds each). The ring-3
+                           ticks and the processors seen are held only where N fits the host's CPUs
+                           (--host-cpus), under KVM or TCG; otherwise printed with the reason.
               SMP-TLB      B spins on a page on another processor: A's mprotect(PROT_NONE) makes B
                            fault (4 of 5 rounds within 1 ms under KVM), A's MAP_FIXED over the page
                            and a write of a new pattern leave B no stale read and no SIGSEGV (a fault
@@ -338,6 +340,12 @@ def run_check(n, nrounds, cap=None):
     if sorted(rounds) != list(range(nrounds)) or any('wall' not in r or 'lone_wall' not in r for r in rounds.values()):
         return why + [f'rounds {sorted(rounds)} incomplete, want {nrounds}'], info
     runners = cap or n
+    # two checks depend on the host running every virtual processor at once (each processor's ring-3 ticks, workers
+    # seen on N-1 processors): held only where the processors that run threads fit the take's host CPUs (--host-cpus;
+    # unknown counts as fitting), under KVM or TCG alike; otherwise printed with the reason (the hosted job: 16 under
+    # TCG on a four-thread runner)
+    fits = a.host_cpus == 0 or runners <= a.host_cpus
+    loose = []
     for k, r in sorted(rounds.items()):
         if r['lone_status'] != '0x0' or r['bad'] != 0:
             why.append(f'round {k}: lone status {r["lone_status"]}, bad statuses {r["bad"]}')
@@ -347,8 +355,8 @@ def run_check(n, nrounds, cap=None):
         phase = r.get('phase') or 0
         lows = [i for i in range(runners) if (r['user'].get(i) or 0) < phase / 2]
         if lows:
-            why.append(f'round {k}: processors {lows} gained fewer than half the phase\'s {phase} ticks in ring 3: '
-                       f'{ {i: r["user"].get(i) for i in sorted(r["user"])} }')
+            (why if fits else loose).append(f'round {k}: processors {lows} gained fewer than half the phase\'s {phase} '
+                                            f'ticks in ring 3: { {i: r["user"].get(i) for i in sorted(r["user"])} }')
         workers = set(r.get('workers', []))
         seen = sorted({i for s in r['samples'] for i, v in s.items() if v.isdigit() and int(v) in workers})
         # the sampler reads on a processor of its own each time, which can never show a worker then
@@ -362,7 +370,10 @@ def run_check(n, nrounds, cap=None):
             if outside or gained:
                 why.append(f'round {k}: processors past the cap ran workers {outside} or gained ring-3 ticks {gained}')
         elif len(seen) < n - 1:
-            why.append(f'round {k}: workers seen running on {seen}, want {n - 1} processors at least')
+            (why if fits else loose).append(f'round {k}: workers seen running on {seen}, want {n - 1} processors at least')
+    if loose:
+        info.append(f'host-dependent checks printed, not gated: {runners} processors on {a.host_cpus} host CPUs: '
+                    + '; '.join(loose))
     if not TIMED and not cap:
         info.append(UNTIMED)
     if TIMED and not cap:
