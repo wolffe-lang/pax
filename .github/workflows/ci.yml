@@ -7125,7 +7125,11 @@ jobs:
   # processor count told to programs, work on every processor at once,
   # shootdowns, signals, exits and waits across processors at 2, 4 and 16,
   # a stress of ten processes ten times, the kernel's end with a spinner on
-  # each processor, nosmp, one processor and pax.cpus. A job of its own
+  # each processor, nosmp, one processor and pax.cpus, a group ended while
+  # its threads run elsewhere; and, from a second build with the test words
+  # (tools/build-kernel --test-words, never shipped), an end whose power-off
+  # is not done and one or two processors' panics, each stopping every
+  # processor; the shipped kernel ignores the same words. A job of its own
   # (the firmware job, where the processor census runs, sits at its cap).
   # The hosted runner gives the job no KVM: the truth rows gate, the timed
   # bounds are printed. SMP-BUILD is NOT-RUN here by design: its bound is
@@ -7138,7 +7142,7 @@ jobs:
       PAX_REQUIRE_UEFI: "1"
       SMP_SCALING: skip
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 180 || 90 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 180 || needs.plan.outputs.tier == 'rest' && 180 || 90 }}
     steps:
       - uses: actions/checkout@v4
 
