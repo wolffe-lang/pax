@@ -117,6 +117,9 @@
                        `sig_info`), for the siginfo a handler is given
      pax_sched_locks   eight 8-byte lock words (kernel/sync; word 0 is
                        the console's)
+     pax_klock         px166: the kernel lock's two words (kernel/klock):
+                       its owner, a processor's index plus one, and its
+                       depth; alone in its 64-byte line
      pax_sched_state   thirty-two 8-byte words (sixteen before px48's
                        console session words): the scheduler's scalars
                        (the run queue's ends, …; px161: the running
@@ -240,6 +243,10 @@ pax_siginfo:
         .p2align 6
         .globl pax_sched_locks
 pax_sched_locks:
+        .zero 64
+        .p2align 6
+        .globl pax_klock
+pax_klock:
         .zero 64
         .p2align 6
         .globl pax_sched_state
