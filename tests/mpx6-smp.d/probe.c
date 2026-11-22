@@ -325,13 +325,21 @@ static void row_active(void) {
 /* --- SMP-RUN ------------------------------------------------------------------------------ */
 struct rus { U us, uus, ss, sus; L rest[14]; };
 static U cpu_us(const struct rus *r) { return r->us * 1000000 + r->uus + r->ss * 1000000 + r->sus; }
+/* The sampler reads /proc/pax-cpus from ring 3, so the processor it runs on shows the sampler itself, never a
+   worker: each line names the sampler's pid (rows.py says where it sat) and the time since the phase began. Its naps
+   are 50, 60 and 70 ms in turn, whole ticks that are not all multiples of the scheduler's two-tick quantum, so its
+   reads do not lock to one point of the workers' rotation (sched2b-smoke's 25 reads, 8 ticks apart, all caught the
+   same worker on CPU 1). */
 static void sampler(int round) {
     struct snap z;
     struct ln l;
+    L me = getpid();
+    U t0 = rdtsc();
     for (int k = 0; !G->done && k < 2000; k++) {
-        nap(50000000);
+        nap((U)(5 + k % 3) * 10000000ul);
         if (G->done || !take(&z)) break;
         l.n = 0; ls(&l, "SMP-RUN round "); ld(&l, (U)round); ls(&l, " sample "); ld(&l, (U)k);
+        ls(&l, " at-us "); ld(&l, us_of(rdtsc() - t0)); ls(&l, " sampler "); lsd(&l, me);
         for (int i = 0; i < z.n; i++) {
             lc(&l, ' '); ld(&l, (U)i); lc(&l, ':');
             if (z.cur[i] >= 0) ld(&l, (U)z.cur[i]); else lc(&l, z.cur[i] == CUR_IDLE ? 'i' : z.cur[i] == CUR_KERNEL ? 'k' : '-');
