@@ -102,12 +102,14 @@ STOP_LINE = 'cpus: {n} application processors stopped for the end'
 BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processors.*|.*did not answer a shootdown.*|'
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
-        'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-BUILD']
+        'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
+        'SMP-TESTWORDS', 'SMP-BUILD']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
 ap.add_argument('--kind', required=True, choices=('rows', 'stress', 'end-halt', 'end-poweroff', 'end-reboot', 'nosmp',
-                                                  'one', 'cap2', 'cap1', 'build'))
+                                                  'one', 'cap2', 'cap1', 'build', 'end-nooff', 'panic', 'panic2',
+                                                  'testwords'))
 ap.add_argument('--smp', required=True, type=int)
 ap.add_argument('--cap', type=int)
 ap.add_argument('--boot', type=int)
@@ -544,6 +546,11 @@ elif a.kind == 'stress':
 elif a.kind.startswith('end-'):
     why = []
     how = a.kind[4:]
+    # end-nooff (a test build, `pax.nopoweroff`): root asks power-off, which is not done; the end halts, every
+    # application processor already stopped (SMP-END-NOOFF)
+    erow = 'SMP-END-NOOFF' if how == 'nooff' else 'SMP-END'
+    if how == 'nooff' and 'poweroff: not done (pax.nopoweroff, a test kernel)' not in text:
+        why.append('no `poweroff: not done (pax.nopoweroff, a test kernel)` line')
     want = STOP_LINE.format(n=N - 1)
     tl = text.splitlines()
     at = [i for i, x in enumerate(tl) if x == want]
@@ -558,7 +565,7 @@ elif a.kind.startswith('end-'):
     elif not end_line or not (at[0] < end_line[0]) or (the_end and not the_end[-1] < at[0]):
         why.append(f'the stop line at {at[0]}, `PAX: the end:` at {the_end}, the end\'s line at {end_line}: want after '
                    'the first, before the second')
-    if how == 'halt':
+    if how in ('halt', 'nooff'):
         ds = [parse_dump(d) for d in dumps()]
         last = ds[-1] if ds else {}
         wrong = [(k, hex(c.get('rip') or 0), c.get('hlt'), hex(c.get('rfl') or 0)) for k, c in sorted(last.items())
@@ -572,9 +579,57 @@ elif a.kind.startswith('end-'):
     if bad:
         why.append(f'the kernel said: {bad[:3]}')
     if why:
-        fail('SMP-END', why[0], why[1:])
+        fail(erow, why[0], why[1:])
     else:
-        ok('SMP-END', f'{want}, between the processes\' end and the end\'s line ({how})')
+        ok(erow, f'{want}, between the processes\' end and the end\'s line ({how})')
+elif a.kind in ('panic', 'panic2'):
+    # a test build's `pax.panictest=1|2`: one test panic, or two at once (one owns it, the other says one line);
+    # every processor halted with interrupts off in the last dump (gated under KVM; printed under TCG)
+    row = 'SMP-PANIC-STOP' if a.kind == 'panic' else 'SMP-PANIC-TWO'
+    why, info = [], []
+    firsts = re.findall(r'^PANIC testwords: a test panic, cpu .*$', text, re.M)
+    seconds = re.findall(r"^PANIC cpu \d+ \(a second panic, cpu \d+'s first\): testwords: a test panic.*$", text, re.M)
+    want2 = 1 if a.kind == 'panic2' else 0
+    if 'SMP-PANIC spinners' not in text:
+        why.append('the spinners never started')
+    if len(firsts) != 1 or len(seconds) != want2:
+        why.append(f'{len(firsts)} first and {len(seconds)} second test panics, want 1 and {want2}')
+    late = re.findall(r'^cpus: cpu \d+ did not stop for the panic$', text, re.M)
+    ds = [parse_dump(d) for d in dumps()]
+    last = ds[-1] if ds else {}
+    wrong = [(k, hex(c.get('rip') or 0), c.get('hlt'), hex(c.get('rfl') or 0)) for k, c in sorted(last.items())
+             if not (c.get('hlt') == 1 and c.get('rfl') is not None and not c['rfl'] & 0x200 and (c.get('rip') or 0) >= KERNEL)]
+    facts = f'late {late or "none"}; not halted with interrupts off: {wrong or ("none" if ds else "no dumps")}'
+    if TIMED:
+        if late:
+            why.append(f'processors late for the panic\'s stop: {late}')
+        if not ds or len(last) != N or wrong:
+            why.append(f'not every processor halted with interrupts off: {wrong or len(last)}')
+    else:
+        info.append(f'{UNTIMED}; {facts}')
+    if why:
+        fail(row, why[0], why[1:] + info)
+    else:
+        ok(row, f'{1 + want2} test panic{"s" if want2 else ""}, one owner; every processor stopped, interrupts off')
+elif a.kind == 'testwords':
+    # the shipped kernel given both test words: each ignored by name, root's power-off powers off, no PANIC,
+    # and no test op or test panic in its ELF
+    why = []
+    for w in ('pax.nopoweroff', 'pax.panictest'):
+        if f'testwords: {w} ignored (not a test kernel)' not in text:
+            why.append(f'no `testwords: {w} ignored (not a test kernel)` line')
+    if a.qemu_status != 0:
+        why.append(f'QEMU ended with status {a.qemu_status} (0: the machine powered off)')
+    test = sorted(n for n in symbols() if n.startswith(('_Wtestwords.fire', '_Wtestwords.test_panic')))
+    if test:
+        why.append(f'the shipped kernel holds test symbols: {test}')
+    bad = bad_lines()
+    if bad:
+        why.append(f'the kernel said: {bad[:3]}')
+    if why:
+        fail('SMP-TESTWORDS', why[0], why[1:])
+    else:
+        ok('SMP-TESTWORDS', 'both test words ignored by name, powered off, no test symbol in the shipped ELF')
 elif a.kind in ('nosmp', 'one', 'cap1'):
     row = {'nosmp': 'SMP-NOSMP', 'one': 'SMP-ONE', 'cap1': 'SMP-CAP'}[a.kind]
     started = N if a.kind == 'cap1' else 1
