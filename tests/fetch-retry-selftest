@@ -42,6 +42,10 @@
 #   U8  tools/fetch-wolf's release archive comes through `tools/fetch-retry
 #       --url`, and no bare curl is left in it (pax#517's run 44993722155,
 #       first attempt: one 403 from the download host ended a job).
+#   U9  every download of the harness goes through `tools/fetch-retry
+#       --url`: no curl writing a file in tools/ or the census's stage.sh
+#       but tools/fetch-busybox's (its own envelope inside the USB test),
+#       and each of the 28 sites calls it.
 # Exit 0 when every row held; each failing row is named.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -227,5 +231,22 @@ else bad "U7: rc $rc, $downloads downloads, waits '$sleeps', left '$left'"; fi
 if grep -q '"$PAX_ROOT/tools/fetch-retry" --url "$WOLF_URL"' "$root/tools/fetch-wolf" && ! grep -nE '^[^#]*\bcurl\b -' "$root/tools/fetch-wolf" >/dev/null; then
     ok "U8: tools/fetch-wolf's release archive comes through tools/fetch-retry --url; no bare curl in it"
 else bad "U8: tools/fetch-wolf still downloads its archive with a bare curl"; fi
+# U9: the downloads.
+dsites='tools/fetch-wolf tools/fetch-lupin tools/fetch-limine tools/fetch-arch tools/disktools tools/mkroots tools/mkbeep
+tools/mkgames tools/mklupin tools/mkclef tools/mkaspen tools/mkauth tools/mkboreutils tools/mkburrow tools/mkden
+tools/mkedwolf tools/mkligature tools/mklobo tools/mklope tools/mkmuxwolf tools/mkpelt tools/mkpxg tools/mkscent
+tools/mksigwolf tools/mksniff tools/mktrash tools/mkyew tools/census/inside/stage.sh'
+dstray=$(cd "$root" && grep -nE '(^|[^a-z-])curl +-' tools/* tools/census/inside/stage.sh 2>/dev/null \
+    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -vE '^tools/(fetch-retry|fetch-busybox):' || true)
+dmissing=
+for s in $dsites; do grep -q 'fetch-retry"* --url' "$root/$s" || dmissing="$dmissing $s"; done
+n=$(echo $dsites | wc -w | tr -d ' ')
+if [ -z "$dstray" ] && [ -z "$dmissing" ] && [ "$n" = 28 ]; then
+    ok "U9: all $n downloads go through tools/fetch-retry --url; no other curl download in tools/ but fetch-busybox's"
+else
+    [ -z "$dstray" ] || printf '  a curl download outside tools/fetch-retry:\n%s\n' "$(echo "$dstray" | sed 's/^/    /')"
+    [ -z "$dmissing" ] || echo "  sites not calling tools/fetch-retry --url:$dmissing"
+    bad "U9: the harness's downloads are not all the helper's"
+fi
 [ "$fail" = 0 ] && echo "PASS fetch-retry-selftest"
 exit $fail
