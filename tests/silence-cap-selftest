@@ -61,9 +61,16 @@ if linux:
     cut = 'silence-cap: no output for 2 s after "start"; stopped the step (exit 124)'
     say(rc == 124 and cut in out and ('::error::' + cut) in out and secs < 15,
         'W1 silent past 2 s: exit %d in %.1f s, the cut line and its annotation%s' % (rc, secs, '' if cut in out else ' (missing: %r)' % out[-300:]))
+    # The leader is `sleep 617` itself (bash runs the last command of -c in its own place). Every word about the cut,
+    # the plain line and its annotation, follows the group's lines (a take on hasu, 2026-11-22 07:08Z, found the
+    # annotation printed first).
     tree = re.findall(r'^silence-cap: pid \d+ elapsed \d+:\d\d:\d\d (.*)$', out, re.M)
-    before = out.find('silence-cap: pid ') < out.find(cut) if tree else False
-    say('sleep 617' in tree and before, 'W2 the group printed before the cut: %s' % (tree or 'no pid lines'))
+    first_pid = out.find('silence-cap: pid ')
+    plain = out.find('\n' + cut)
+    note = out.find('::error::silence-cap: ')
+    before = tree and 0 <= first_pid < plain and first_pid < note
+    say('sleep 617' in tree and before, 'W2 the group printed before the cut: %s (first pid line at %d, the cut line at %d, '
+        'its annotation at %d)' % (tree or 'no pid lines', first_pid, plain, note))
     out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c', 'echo go; sleep 618 & sleep 619; wait'])
     time.sleep(0.5)
     left = alive('618') + alive('619')
