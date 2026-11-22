@@ -1031,14 +1031,14 @@ pub fn commit(v: u64, now: u64) -> u64 {
 /// running). 0 or the first -EIO.
 fn checkpoint(v: u64) -> u64 {
     if failed(v) { return neg(EIO) }
-    let err = block.checkpoint(jw(v, J_DEV))
-    if err != 0 { return abort(v) }
-    let f = flush(v)
-    if f != 0 { return abort(v) }
-    let e = write_sb(v, jw(v, J_SEQ), 0)
-    if e != 0 { return abort(v) }
-    let f2 = flush(v)
-    if f2 != 0 { return abort(v) }
+    let emptied = write_sb(v, jw(v, J_SEQ), 0)
+    if emptied != 0 { return abort(v) }
+    let emptied_flush = flush(v)
+    if emptied_flush != 0 { return abort(v) }
+    let homed = block.checkpoint(jw(v, J_DEV))
+    if homed != 0 { return abort(v) }
+    let homed_flush = flush(v)
+    if homed_flush != 0 { return abort(v) }
     put_jw(v, J_TAIL, 0)
     put_jw(v, J_TAILSEQ, jw(v, J_SEQ))
     set_clear(v)
