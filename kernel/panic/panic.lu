@@ -25,6 +25,8 @@ use triage
 extern "c" fn pax_halt() -> never
 extern "c" fn pax_ap_stop() -> never // px166: boot/isr.S
 extern "c" let pax_panicking: *u64 // px166: boot/isr.S, the first panic's processor + 1
+extern "c" let pax_panic_said: *u64 // px166: boot/isr.S, 1 once the first panic's line is written
+extern "c" let pax_panic_again: *u64 // px166: boot/isr.S, the first panic's processor's entries again
 
 /// The trap kind's name in `[conf.trap.set]`'s vocabulary.
 pub fn kind_name(kind: int) -> str {
@@ -66,7 +68,37 @@ pub fn fail(what: str, v: u64) -> never {
     let me = if ipi.count() == 0 { 1 } else { percpu.index() + 1 }
     // # Safety: boot/isr.S's word; a compare-exchange, as kernel/klock's.
     let (old, ok) = unsafe { (pax_panicking as u64 as *u64).atomic_cas(0, me, Order.acquire, Order.relaxed) }
-    if !ok && old != me {
+    if !ok && old == me {
+        // The first panic's processor again, inside its own panic (a fault in
+        // its printing or its stop): one line the first time, then the halt at
+        // once, no stop phase; any further entry halts without a word. Only
+        // this processor writes the count. Before the STOP step a nested panic
+        // printed in full again, without bound.
+        // # Safety: boot/isr.S's word, read and written by this processor alone.
+        let again = unsafe { (pax_panic_again as u64 as *u64).read_volatile() }
+        unsafe { (pax_panic_again as u64 as *u64).write_volatile(again + 1) }
+        if again == 0 {
+            log.put("PANIC again on cpu ")
+            log.dec((me - 1) as int)
+            log.put(" (inside the first): ")
+            log.put(what)
+            log.put(" ")
+            log.hex(v)
+            log.end()
+            halt()
+        }
+        // # Safety: io.S's `cli; hlt` loop; it never returns.
+        unsafe { pax_halt() }
+    }
+    if !ok {
+        // A second panic: its line waits for the first's to be written
+        // (nothing else serializes the log's bytes), at most 1e8 reads of the
+        // word, about 100 ms; past that it prints anyway.
+        var k: u64 = 0
+        // # Safety: boot/isr.S's word, written once by the first panic.
+        while k < 100000000 && unsafe { (pax_panic_said as u64 as *u64).read_volatile() } == 0 {
+            k += 1
+        }
         log.put("PANIC cpu ")
         log.dec((me - 1) as int)
         log.put(" (a second panic, cpu ")
@@ -83,6 +115,8 @@ pub fn fail(what: str, v: u64) -> never {
     log.put(" ")
     log.hex(v)
     log.end()
+    // # Safety: boot/isr.S's word; this line is whole now.
+    unsafe { (pax_panic_said as u64 as *u64).write_volatile(1) }
     if ipi.count() >= 2 {
         let late = ipi.stop_others(ipi.CAUSE_PANIC, ipi.PANIC_BOUND)
         var i: u64 = 0
