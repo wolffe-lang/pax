@@ -263,7 +263,11 @@ pub fn leave() {
 /// stage 2's STOP step stops them first.
 pub fn halt_given_back() -> never {
     let _off = sync.irq_save()
-    if held_here() {
+    // px166 (the STOP step): only when every other processor has stopped.
+    // One that did not stop for the end (named on its own line) must never
+    // run kernel code after the volumes: the ender keeps the lock, so that
+    // one can only spin for it, interrupts off.
+    if held_here() && tlb.others() == 0 {
         put_depth(0)
         // # Safety: the holder's release store; as `owner`.
         unsafe { at(OWNER).atomic_store(0, Order.release) }
