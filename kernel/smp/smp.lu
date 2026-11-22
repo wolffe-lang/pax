@@ -534,6 +534,15 @@ pub fn runs(i: u64) -> bool {
     i < unsafe { cap } && i <= unsafe { made } && percpu.get(window(i), percpu.STATE) == percpu.IDLE
 }
 
+/// px166: one past the highest index that may run threads: the cap, or
+/// one past the records made when that is lower (1 with one processor).
+pub fn bound() -> u64 {
+    // # Safety: scalars written once by `start_aps` before any release.
+    let m = unsafe { made } + 1
+    let c = unsafe { cap }
+    if c < m { c } else { m }
+}
+
 /// px166: whether this processor runs threads.
 pub fn runs_here() -> bool {
     runs(percpu.index())
