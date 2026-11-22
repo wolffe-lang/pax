@@ -934,13 +934,11 @@ vexpect("a rest run with a chosen suite failed", run_of("rest", SUITES, {"mpx1":
 wf = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
 say("PAX_INSTALL_BIG_ROWS: ${{ (needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest') && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}" in wf,
     "P4 big installs: 500 GB in full, 4 TB in all and rest, neither in pr")
-say("needs.plan.outputs.tier == 'all'" not in wf.replace("needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'", "")
-    .replace("needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'rest' && 190", "")
-    .replace("needs.plan.outputs.tier == 'all' && 350 || needs.plan.outputs.tier == 'rest' && 350", "")
-    .replace("needs.plan.outputs.tier == 'all' && 240 || needs.plan.outputs.tier == 'rest' && 240", "")
-    .replace("needs.plan.outputs.tier == 'all' && 145 || needs.plan.outputs.tier == 'rest' && 145", "")
-    .replace("needs.plan.outputs.tier == 'all' && 130 || needs.plan.outputs.tier == 'rest' && 130", "")
-    .replace("needs.plan.outputs.tier == 'all' && 250 || needs.plan.outputs.tier == 'rest' && 250", ""),
+# A limit names all and rest with one figure (whatever it is: tests/ci-budgets.py holds each to twice its slowest
+# green); a step names both in one condition.
+say("needs.plan.outputs.tier == 'all'" not in re.sub(
+        r"needs\.plan\.outputs\.tier == 'all' && (\d+) \|\| needs\.plan\.outputs\.tier == 'rest' && \1\b", "",
+        wf.replace("needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'", "")),
     "P4 every step and limit the all tier gates by name, the rest tier gets too (a trunk push's release legs run what all runs on them)")
 say("build/mpx6-install/**/*.geometry" in wf,
     "P4 large installed-volume geometry is retained as evidence")
