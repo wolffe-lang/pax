@@ -35,6 +35,11 @@ tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
 counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
 kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 stress}
 kinds=${kinds//,/ } # commas or spaces between the kinds
+# SMP_ROWS_CAP=N, a development knob (tests/mpx6-smp.d/rows-cap.sh): said first, so no one reads its greens as the gate's.
+. tests/mpx6-smp.d/rows-cap.sh
+rows_cap=${SMP_ROWS_CAP:-}
+rows_cap_check "$rows_cap" || exit 2
+[ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 for k in $kinds; do
     case $k in rows|end|nosmp|one|cap2|cap1|stress) ;; *) die "SMP_KINDS names rows end nosmp one cap2 cap1 stress, not $k" ;; esac
 done
@@ -53,11 +58,6 @@ done
 case $tiers in both) tiers='native release' ;; esac
 case $firmware in both) firmware='bios uefi' ;; esac
 case $scaling in gate|report|skip) ;; *) die "SMP_SCALING is gate, report or skip, not $scaling" ;; esac
-# SMP_ROWS_CAP=N, a development knob (tests/mpx6-smp.d/rows-cap.sh): said first, so no one reads its greens as the gate's.
-. tests/mpx6-smp.d/rows-cap.sh
-rows_cap=${SMP_ROWS_CAP:-}
-rows_cap_check "$rows_cap" || exit 2
-[ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 python3 -I -B tests/mpx6-smp.d/rows-selftest.py
 bash tests/mpx6-smp.d/knob-selftest.sh
 python3 -I -B tests/mpx6-smp.d/frame-layout.py --selftest
