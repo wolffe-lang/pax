@@ -24,20 +24,23 @@ def bound(job):
     return int(re.search(r'^    timeout-minutes: (\d+)$', body, re.M)[1]) * 60
 
 
-def tier_bound(job, tier):
-    """px84: a limit tiered in the workflow, `${{ needs.plan.outputs.tier
-    == 'all' && A || needs.plan.outputs.tier == 'pr' && B || C }}`: the
-    named tier's minutes, else the trailing default's. px113: a plain
-    `timeout-minutes: N` is every tier's N."""
+def cap_for(job, outputs):
+    """A job's `timeout-minutes` in seconds for the plan's outputs (tier, also_release, kvm): a number, or an
+    expression over them, evaluated (`&&` and `||` as and and or, an absent output as the empty string)."""
     body = text.split('  ' + job + ':\n', 1)[1]
     body = re.split(r'\n  [A-Za-z0-9_-]+:\n', body, maxsplit=1)[0]
     plain = re.search(r'^    timeout-minutes: (\d+)$', body, re.M)
     if plain:
         return int(plain[1]) * 60
     expr = re.search(r'^    timeout-minutes: \$\{\{(.*)\}\}$', body, re.M)[1]
-    named = dict(re.findall(r"needs\.plan\.outputs\.tier == '(\w+)' && (\d+)", expr))
-    default = re.search(r'\|\|\s*(\d+)\s*$', expr)[1]
-    return int(named.get(tier, default)) * 60
+    py = re.sub(r"needs\.plan\.outputs\.(\w+)", lambda m: repr(outputs.get(m[1], '')), expr)
+    py = py.replace('&&', ' and ').replace('||', ' or ')
+    return int(eval(py, {'__builtins__': {}}, {})) * 60
+
+
+def tier_bound(job, tier):
+    """px84, px113: a job's limit in the named tier (a TCG run with no release legs added), from cap_for."""
+    return cap_for(job, {'tier': tier, 'also_release': '[]', 'kvm': 'no'})
 
 
 def install_floors():
@@ -228,30 +231,36 @@ for tier in ('pr', 'full', 'all'):
     failed |= not ok
 # The twice rule (twice.json): a job's time cap is at least twice its slowest green run of the shape the cap
 # applies to (its tier, the release legs a kernel change adds, KVM or TCG), so a slow runner is never a red
-# that is no one's. The cap is read from the job's `timeout-minutes`, a number or an expression over the
-# plan's outputs (tier, also_release, kvm), evaluated for that shape. The row is named
-# budget/twice/<job>/<shape>, so a plant's record can be held to it by name.
-
-
-def cap_for(job, outputs):
-    body = text.split('  ' + job + ':\n', 1)[1]
-    body = re.split(r'\n  [A-Za-z0-9_-]+:\n', body, maxsplit=1)[0]
-    plain = re.search(r'^    timeout-minutes: (\d+)$', body, re.M)
-    if plain:
-        return int(plain[1]) * 60
-    expr = re.search(r'^    timeout-minutes: \$\{\{(.*)\}\}$', body, re.M)[1]
-    py = re.sub(r"needs\.plan\.outputs\.(\w+)", lambda m: repr(outputs.get(m[1], '')), expr)
-    py = py.replace('&&', ' and ').replace('||', ' or ')
-    return int(eval(py, {'__builtins__': {}}, {})) * 60
-
-
+# that is no one's. Every job of the workflow but the plan and the verdict is held: a row for each measured
+# shape (budget/twice/<job>/<shape>), an exception where twice passes GitHub's limit on a hosted job (its cap
+# must then be that limit, budget/twice/<job>/<shape>/limit), or an unmeasured entry with its reason. A job
+# with none of the three fails budget/twice/coverage, so a new job arrives with its entry.
 twice = json.loads((DATA / 'twice.json').read_text())
+LIMIT = twice['limit_minutes'] * 60
+
+
+def shape(r):
+    return r['tier'] + ('+release' if r['also_release'] != '[]' else '') + ('+kvm' if r['kvm'] == 'yes' else '')
+
+
 for r in twice['rows']:
-    shape = r['tier'] + ('+release' if r['also_release'] != '[]' else '') + ('+kvm' if r['kvm'] == 'yes' else '')
     cap = cap_for(r['job'], {'tier': r['tier'], 'also_release': r['also_release'], 'kvm': r['kvm']})
     ok = cap >= 2 * r['seconds']
     print('%s budget/twice/%s/%s cap=%ds slowest-green=%ds (run %d%s) twice=%ds margin=%ds' %
-          ('PASS' if ok else 'FAIL', r['job'], shape, cap, r['seconds'], r['run'],
+          ('PASS' if ok else 'FAIL', r['job'], shape(r), cap, r['seconds'], r['run'],
            ', the %s tier bounds it' % r['from'] if 'from' in r else '', 2 * r['seconds'], cap - 2 * r['seconds']))
     failed |= not ok
+for r in twice['exceptions']:
+    cap = cap_for(r['job'], {'tier': r['tier'], 'also_release': r['also_release'], 'kvm': r['kvm']})
+    ok = cap >= LIMIT and r['seconds'] < LIMIT
+    print('%s budget/twice/%s/%s/limit cap=%ds slowest-green=%ds (run %d): twice passes the %ds limit, so the cap is the limit' %
+          ('PASS' if ok else 'FAIL', r['job'], shape(r), cap, r['seconds'], r['run'], LIMIT))
+    failed |= not ok
+held = {r['job'] for r in twice['rows'] + twice['exceptions']} | {u['job'] for u in twice['unmeasured']}
+workflow_jobs = [j for j in re.findall(r'^  ([A-Za-z0-9_-]+):\s*$', text.split('\njobs:\n', 1)[1], re.M)
+                 if j not in ('plan', 'tier')]
+missing = [j for j in workflow_jobs if j not in held]
+print('%s budget/twice/coverage every job but the plan and the verdict has a row, an exception or an unmeasured entry (%d jobs)%s' %
+      ('FAIL' if missing else 'PASS', len(workflow_jobs), ': none for ' + ' '.join(missing) if missing else ''))
+failed |= bool(missing)
 sys.exit(1 if failed else 0)
