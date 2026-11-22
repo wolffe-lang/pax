@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""tools/silence-cap: stop a command that has printed nothing for too long.
+
+    tools/silence-cap MINUTES -- COMMAND [ARG...]
+    tools/silence-cap --seconds SECONDS -- COMMAND [ARG...]
+
+Runs COMMAND with its standard output and standard error joined and passed straight through, in a process group of its
+own (setpgid in the child, as `subprocess` does with process_group=0; no new session). Any byte counts as output, a line
+or not. If none arrives for the limit, it prints the group's processes (pid, elapsed time, command line, one line each),
+a line naming the cut and the last line the command printed, and an `::error::` annotation with the same text; then it
+sends TERM to the group, waits up to 10 s for the group to end (the suites' own cleanup: QEMU killed, temporary files
+removed), sends KILL to whatever is left, and exits 124. Otherwise it exits with COMMAND's status (128 + the signal if
+a signal ended it). A TERM or INT to this tool (a job's cancel) is passed to the group the same way, and it exits 143.
+
+It signals a group only when the group is the one it made (its leader's group id equals the leader's pid); if not, it
+signals the leader alone and says so. A container a suite starts with `docker run` is its daemon's process, not in the
+group: TERM reaches the `docker` client, which passes it on to the container; KILL does not.
+
+Linux only, and Python 3.11 or later (subprocess's process_group, which sets the group in the child). The jobs it
+wraps run on Linux, and it reads /proc for the group's processes. On any other system, or under an older Python, it
+refuses by name (exit 2): it is untested there. SILENCE_CAP_SYSTEM, for its selftest, can only make it refuse. A
+process that has exited but is not yet reaped (a zombie) is no longer counted in the group.
+"""
+import os
+import platform
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+GRACE = 10.0
+
+
+def say(msg):
+    sys.stdout.buffer.write(('silence-cap: %s\n' % msg).encode())
+    sys.stdout.buffer.flush()
+
+
+def usage():
+    sys.stderr.write('usage: tools/silence-cap MINUTES -- COMMAND [ARG...] | --seconds SECONDS -- COMMAND [ARG...]\n')
+    sys.exit(2)
+
+
+def members(pgid):
+    """The processes of a group, from /proc: (pid, elapsed seconds, command line)."""
+    tick = os.sysconf('SC_CLK_TCK')
+    with open('/proc/uptime') as f:
+        uptime = float(f.read().split()[0])
+    out = []
+    for d in os.listdir('/proc'):
+        if not d.isdigit():
+            continue
+        try:
+            with open('/proc/%s/stat' % d) as f:
+                stat = f.read()
+            fields = stat[stat.rindex(')') + 2:].split()
+            if int(fields[2]) != pgid or fields[0] == 'Z':   # field 5, pgrp; field 3, the state (Z: exited)
+                continue
+            start = int(fields[19]) / tick       # field 22, starttime
+            with open('/proc/%s/cmdline' % d, 'rb') as f:
+                cmd = f.read().replace(b'\0', b' ').decode(errors='replace').strip()
+            out.append((int(d), uptime - start, cmd or stat[stat.index('(') + 1:stat.rindex(')')]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return sorted(out)
+
+
+def elapsed(s):
+    s = int(s)
+    return '%d:%02d:%02d' % (s // 3600, s % 3600 // 60, s % 60)
+
+
+def drain(fd, wait):
+    """Pass on what the command printed while it ends (its cleanup's last words), waiting at most `wait` s."""
+    if fd is None:
+        time.sleep(wait)
+        return True
+    import select
+    r, _, _ = select.select([fd], [], [], wait)
+    if r:
+        data = os.read(fd, 65536)
+        if not data:
+            return False
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    return True
+
+
+def stop(child, why, fd=None):
+    """TERM the child's group (or the child alone when the group is not its own), then KILL after the grace; what
+    the command prints meanwhile is passed on."""
+    pid = child.pid
+    try:
+        own = os.getpgid(pid) == pid
+    except ProcessLookupError:
+        return
+    if own:
+        for p, age, cmd in members(pid):
+            say('pid %d elapsed %s %s' % (p, elapsed(age), cmd))
+    else:
+        say('the command is not the leader of a group of its own: signalling pid %d alone' % pid)
+    say(why)
+
+    def send(sig):
+        try:
+            if own:
+                os.killpg(pid, sig)
+            else:
+                os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+    send(signal.SIGTERM)
+    end = time.monotonic() + GRACE
+    while time.monotonic() < end:
+        if child.poll() is not None and (not own or not members(pid)):
+            while fd is not None and drain(fd, 0.05):
+                pass
+            return
+        if not drain(fd, 0.1):
+            fd = None
+    say('still running %d s after TERM: KILL' % GRACE)
+    send(signal.SIGKILL)
+    child.wait()
+
+
+def main(argv):
+    if '--' not in argv:
+        usage()
+    i = argv.index('--')
+    opts, cmd = argv[:i], argv[i + 1:]
+    if not cmd:
+        usage()
+    if len(opts) == 1 and opts[0].isdigit():
+        limit, unit = int(opts[0]) * 60, '%s min' % opts[0]
+    elif len(opts) == 2 and opts[0] == '--seconds' and opts[1].isdigit():
+        limit, unit = int(opts[1]), '%s s' % opts[1]
+    else:
+        usage()
+    if sys.version_info < (3, 11):
+        say('refused: Python %d.%d; it needs 3.11 or later (subprocess\'s process_group)' % sys.version_info[:2])
+        sys.exit(2)
+    system = os.environ.get('SILENCE_CAP_SYSTEM') or platform.system()
+    if system != 'Linux' or platform.system() != 'Linux':
+        say('refused: untested on %s; it runs on Linux only (the jobs it wraps run there)' % system)
+        sys.exit(2)
+
+    child = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             process_group=0)
+
+    def cancelled(signum, frame):
+        stop(child, 'cancelled by signal %d: stopped the step' % signum, child.stdout.fileno())
+        sys.exit(143)
+    signal.signal(signal.SIGTERM, cancelled)
+    signal.signal(signal.SIGINT, cancelled)
+
+    fd = child.stdout.fileno()
+    sel = selectors.DefaultSelector()
+    sel.register(fd, selectors.EVENT_READ)
+    last, partial = b'', b''
+    out = sys.stdout.buffer
+    while True:
+        if not sel.select(timeout=limit):
+            shown = (partial or last).decode(errors='replace').strip()[:200]
+            why = 'no output for %s after "%s"; stopped the step (exit 124)' % (unit, shown)
+            sys.stdout.buffer.write(('::error::silence-cap: %s\n' % why.replace('%', '%25')).encode())
+            stop(child, why, fd)
+            sys.exit(124)
+        data = os.read(fd, 65536)
+        if not data:
+            break
+        out.write(data)
+        out.flush()
+        lines = (partial + data).split(b'\n')
+        partial = lines[-1]
+        done = [l for l in lines[:-1] if l.strip()]
+        if done:
+            last = done[-1]
+    rc = child.wait()
+    sys.exit(rc if rc >= 0 else 128 - rc)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
