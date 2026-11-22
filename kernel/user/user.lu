@@ -282,6 +282,7 @@ use sound
 use speaker
 use smp
 use sync
+use testwords
 use timer
 use trace
 use trace_state
@@ -2269,7 +2270,10 @@ pub fn the_end() -> never {
     if end_asked() == 1 {
         end_reset()
     }
-    if unsafe { end_cmd } == CMD_POWER_OFF { power.power_off() }
+    if unsafe { end_cmd } == CMD_POWER_OFF {
+        // px166 (the STOP step): a test build's `pax.nopoweroff` (kernel/testwords) skips it: the end halts
+        if testwords.nopoweroff() { log.line("poweroff: not done (pax.nopoweroff, a test kernel)") } else { power.power_off() }
+    }
     timer.stop()
     log.line("halt")
     klock.halt_given_back() // px166: the others rest in HLT, not in the lock's spin
