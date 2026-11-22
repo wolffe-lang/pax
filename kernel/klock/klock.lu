@@ -72,6 +72,35 @@
 //! one ever to return there, its exit keeps the lock and the next entry
 //! from ring 3 panics `klock: entered from ring 3 holding it`.
 //!
+//! **The window** (px166's second step): between `leave_at_resume`
+//! (DEPTH 0) and boot/isr.S's release store (`pax_klock_resumed`), this
+//! processor holds the lock at DEPTH 0, on its way out of the kernel:
+//! `pax_interrupt`'s epilogue on the stack it was handed the frame on,
+//! the common path's stack switch, CPU 0's latency close, the call
+//! itself. Interrupts are off there; what can still enter:
+//! - an NMI: `pax_interrupt` answers it before `enter` and touches no
+//!   lock word, and its own way out passes `pax_klock_resumed` with
+//!   vector 2, which never releases (the interrupted way out does, once
+//!   it is off its stack);
+//! - any other ring-0 entry (a fault in the epilogue, a machine check):
+//!   `enter` finds OWNER this processor at DEPTH 0 and panics, `klock:
+//!   entered between the release's two halves`. It never nests: nested,
+//!   its own exit could give the lock up (`hand_back` on an idle
+//!   context's frame) while the outer way out still stood on the old
+//!   stack, which is what the window is there to prevent. On an
+//!   application processor such a fault reaches `enter` too (kernel/smp's
+//!   `ap_early` sends a ring-0 fault on while `held_here`).
+//! What else reads `held_here` and could meet DEPTH 0: kernel/user's
+//! continuation check (`held_for_continuation`) runs only after the
+//! common path's release point, so it sees the lock kept (DEPTH 1 or
+//! more, `unwind`) or given back (and panics, by its own name), never the
+//! window; the door in `pax_interrupt` (`from_user` and `held_here`) is
+//! met only from ring 3, and the window ends before any IRETQ or SYSRETQ;
+//! `unwind`, `leave` and `leave_at_resume` run only after an `enter` on
+//! the same entry (DEPTH 1 or more); `boot` once, before any interrupt;
+//! `level` and `owner` report. So DEPTH 0 with OWNER this processor
+//! means the window and nothing else, and every reader treats it as held.
+//!
 //! Written from wolf's spec/03 §1 [conc.mm.atomic], the Intel SDM vol.
 //! 3A §9.1.2 (a LOCK-prefixed CMPXCHG is atomic against every other
 //! processor) and §6.8.1 (IF), and vol. 2 (CMPXCHG, PAUSE). No Linux
@@ -133,6 +162,12 @@ pub fn enter() -> bool {
     let p = at(OWNER)
     // # Safety: as `owner`.
     if unsafe { p.atomic_load(Order.relaxed) } == m {
+        // Held at DEPTH 0: this processor is between `leave_at_resume` and
+        // the release store (the header's "the window"); an entry there is
+        // a kernel bug's, named, never run on.
+        if depth() == 0 {
+            panic.fail("klock: entered between the release's two halves, cpu ", percpu.index())
+        }
         put_depth(depth() + 1)
         return false
     }
@@ -180,17 +215,17 @@ pub fn leave_at_resume() {
     put_depth(0)
 }
 
-/// boot/isr.S's common path, on the frame `f` it is about to resume (its
-/// stack now that frame's): the release `leave_at_resume` left to it. A
+/// boot/isr.S's common path, about to resume a frame whose vector is `v`
+/// (its stack now that frame's; the path reads the vector from the frame
+/// itself, an offset tests/mpx6-smp.d/frame-layout.py holds to
+/// kernel/interrupts' Frame): the release `leave_at_resume` left to it. A
 /// frame resumed with the lock kept (DEPTH 1 or more: a kernel thread's,
 /// a continuation's) changes nothing, nor does one this processor resumes
 /// without holding it. An NMI's frame (vector 2) never gives it back: an
 /// NMI may land between `leave_at_resume` and this call, and its own way
 /// out passes here before the interrupted one has left its stack.
-export fn pax_klock_resumed(f: u64) {
-    // # Safety: word 15 of boot/isr.S's frame (its vector), live while it
-    // is resumed.
-    if unsafe { ((f + 120) as *u64).read_volatile() } == 2 {
+export fn pax_klock_resumed(v: u64) {
+    if v == 2 {
         return
     }
     if held_here() && depth() == 0 {
