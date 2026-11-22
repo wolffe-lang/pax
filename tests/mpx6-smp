@@ -4,8 +4,8 @@
 #   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
 #   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
-#    SMP_KINDS='rows end nosmp one cap2 cap1 stress' (or commas) the boots run, every kind by default, fewer for a
-#    plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
+#    SMP_KINDS='rows end nosmp one cap2 cap1 stress nooff panic panic2 testwords' (or commas) the boots run, every
+#    kind by default, fewer for a plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
 #    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
 #    boots' logs still under PAX_BUILD)
@@ -19,7 +19,13 @@
 #   - SMP-LOCK's stress at 4, SMP_STRESS_BOOTS boots a tier, the firmwares taken in turn;
 #   - SMP-END at 4: root's reboot(2) for a halt (the monitor's register dumps after it, three, with the
 #     machine running between), a power-off and a restart (QEMU's own end, its status read);
-#   - SMP-NOSMP (`nosmp` at 4, dumps), SMP-ONE (-smp 1), SMP-CAP (`pax.cpus=2` and `pax.cpus=1` at 4);
+#   - SMP-NOSMP (`nosmp` at 4, dumps), SMP-ONE (-smp 1), SMP-CAP (`pax.cpus=2` and `pax.cpus=1` at 4), SMP-DEAD
+#     (cap2's boot);
+#   - from a second build of the same kernel with the test words (tools/build-kernel --test-words, never shipped):
+#     SMP-END-NOOFF (`nooff`), SMP-PANIC-STOP (`panic`) and SMP-PANIC-TWO (`panic2`), each at 4 with dumps; and
+#     SMP-TESTWORDS (`testwords`), the shipped kernel given the same words; TESTWORDS-ELF per tier: `fire` and
+#     `test_panic` in the test build's ELF, in the shipped one neither;
+#   - in every boot SMP-KLOCK, SMP-DUP, SMP-PIN and SMP-PARK (rows.py's every-kind rows);
 # and SMP-BUILD once, on the first tier and firmware: the processor census's pack fixture at -smp 1 and -smp 4 with
 # 2 GiB, the batches timed by the host (tests/mpx6-smp.d/build.py), the pinned den built by tools/mkden
 # from user/den.pin (or SMP_DEN). SMP_SCALING: `gate` holds the four-job wall to 1.6 times the one-job
