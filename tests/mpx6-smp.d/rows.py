@@ -16,11 +16,12 @@ What stage 2 prints, and these rows read (the kernel's text is defined here):
   `disabled`, `started`, `idle`): `unlocked-allocations U`, the runtime's allocations made while no
   processor held the kernel lock (always 0). `active` is the processors that run threads. A line a
   processor:
-    cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R tlb S nmis N
-    cpu I apic A runs current pid P|kernel|idle ticks T user U resched R tlb S wakes W nmis N
+    cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K tlb S nmis N
+    cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K tlb S wakes W nmis N
     cpu I apic A idle current idle ticks T wakes W nmis N        (stage 1's: left out by pax.cpus=N)
     cpu I apic A stopped cause C rip 0x<R> | never entered | parked   (stage 1's)
-  `user` this processor's ticks that interrupted ring 3; `resched` the RESCHED IPIs it took; `tlb` the
+  `user` this processor's ticks that interrupted ring 3; `resched` the RESCHED IPIs it took; `kthreads`
+  its switches to a kernel thread (0 on every processor but CPU 0, which alone runs them); `tlb` the
   shootdown requests it answered; `pid` the running thread's id (gettid). /sys/devices/system/cpu/
   online `0-(N-1)`, sched_getaffinity N bits, sched_setaffinity accepted (0), /proc/self/status's
   `Cpus_allowed` the mask in hex and `Cpus_allowed_list` as online. At the end, after the processes
@@ -74,6 +75,10 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
               SMP-DUP      no `PANIC sched: slot N running on two processors…` line (kernel/sched's `take`: a
                            slot the queue hands back that is RUNNING or still names a processor): red by
                            that line verbatim, silent when green.
+              SMP-PIN      kernel threads run on CPU 0 alone: in every /proc/pax-cpus the boot printed, each
+                           application processor's `runs` line says `kthreads 0`. Red naming the processor and
+                           its count (or a `runs` line with no count); green when an application processor ran
+                           threads; silent when none did.
 
 A row prints `PASS ROW tag: …` or `FAIL ROW tag: …`, a row this boot does not ask `NOT-ASKED ROW
 tag: …`, and what a red row found beyond its first reason `INFO ROW tag: …`. Exit 1 if any row failed.
@@ -161,7 +166,7 @@ def proc(tagname):
     for mm in re.finditer(r'^cpu (\d+) apic (\d+) (boot|runs|idle|stopped|never entered|parked)(.*)$', body, re.M):
         rest = mm[4]
         cur = re.search(r'\bcurrent (pid (\d+)|idle|kernel)\b', rest)
-        words = {k: int(v) for k, v in re.findall(r'\b(ticks|user|resched|tlb|wakes|nmis) (\d+)\b', rest)}
+        words = {k: int(v) for k, v in re.findall(r'\b(ticks|user|resched|kthreads|tlb|wakes|nmis) (\d+)\b', rest)}
         cpus[int(mm[1])] = dict(state=mm[3], cur=(int(cur[2]) if cur and cur[2] else (cur[1] if cur else None)),
                                 words=words)
     head['cpus'] = cpus
@@ -639,5 +644,26 @@ if klock:
 dup = [ln.strip() for ln in re.findall(r'^PANIC sched: slot \d+ running on two processors.*$', text, re.M)]
 if dup:
     fail('SMP-DUP', dup[0], dup[1:])
+
+# Every kind: kernel threads run on CPU 0 alone (stage 2's amendment to its contract's §3.6). Every
+# /proc/pax-cpus the boot printed is read: an application processor's `runs` line must say `kthreads 0`
+# (the count is cumulative, so the last read has the most). Green when one ran threads, silent when none did.
+kseen, kmiss = {}, set()
+for blk in re.finditer(r'^SMP-PROC (\S+) begin\n(.*?)^SMP-PROC \1 end$', text, re.M | re.S):
+    for mm in re.finditer(r'^cpu (\d+) apic \d+ runs (.*)$', blk[2], re.M):
+        if int(mm[1]) == 0:
+            continue
+        k = re.search(r'\bkthreads (\d+)\b', mm[2])
+        if k:
+            kseen[int(mm[1])] = max(kseen.get(int(mm[1]), 0), int(k[1]))
+        else:
+            kmiss.add(int(mm[1]))
+if kmiss:
+    fail('SMP-PIN', f'application processors {sorted(kmiss)} on a `runs` line with no kthreads count')
+elif any(kseen.values()):
+    fail('SMP-PIN', 'kernel threads ran on application processors: ' +
+         ', '.join(f'cpu {i} kthreads {k}' for i, k in sorted(kseen.items()) if k))
+elif kseen:
+    ok('SMP-PIN', f'no kernel thread on application processors {sorted(kseen)} (kthreads 0 each)')
 
 sys.exit(1 if red else 0)
