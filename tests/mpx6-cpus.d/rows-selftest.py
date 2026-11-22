@@ -13,6 +13,7 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 CPUS_VA, SPAN = 0xffffd08000000000, 0x40000
 SYMS = {'pax_ap_halt': (0xffffffff80001000, 0x10), 'pax_ap_park': (0xffffffff80000ff0, 0x10),
+        'pax_ap_stop': (0xffffffff80001010, 0x10),
         'pax_cpu0': (0xffffffff80200000, 0x200),
         'pax_gdt': (0xffffffff80201000, 0x40), 'pax_tss': (0xffffffff80201040, 0x70),
         'pax_idt': (0xffffffff80202000, 0x1000)}
@@ -31,7 +32,7 @@ def regs(k, *, rip, rsp, gs, gdt, tr, hlt=1, idt=SYMS['pax_idt'][0], cr0=0x80010
 def ap_regs(k, i=None, **kw):
     i = k if i is None else i
     rec = CPUS_VA + i * SPAN
-    base = dict(rip=SYMS['pax_ap_halt'][0] + 3, rsp=rec + 0xbf00, gs=rec, gdt=rec + 256, tr=rec + 384)
+    base = dict(rip=SYMS['pax_ap_stop'][0] + 2, rsp=rec + 0xbf00, gs=rec, gdt=rec + 256, tr=rec + 384, rfl=0x46)
     base.update(kw)
     return regs(k, **base)
 
@@ -107,6 +108,23 @@ g = green(4)
 shared = bsp_regs() + ''.join(ap_regs(k, gs=SYMS['pax_cpu0'][0]) for k in range(1, 4))
 g['dumps'] = [shared] * 3
 cases.append(('plant shared GS', g, [], {'SMP-ENTER', 'SMP-IDLE'}, {'SMP-PRIVATE'}))
+
+# Stage 2's STOP step: SMP-IDLE asks pax_ap_stop with interrupts off. Stage 1's form (pax_ap_halt, interrupts on)
+# is red now, as is a processor in pax_ap_stop with interrupts on; the end's own `cpus:` line is not a stop.
+g = green(4)
+old = bsp_regs() + ap_regs(1, rip=SYMS['pax_ap_halt'][0] + 3, rfl=0x246) + ap_regs(2) + ap_regs(3)
+g['dumps'] = [old] * 3
+cases.append(("an application processor in stage 1's idle halt", g, [], {'SMP-SCHED'}, {'SMP-IDLE'}))
+g = green(4)
+ion = bsp_regs() + ap_regs(1, rfl=0x246) + ap_regs(2) + ap_regs(3)
+g['dumps'] = [ion] * 3
+cases.append(('stopped with interrupts on', g, [], {'SMP-SCHED'}, {'SMP-IDLE'}))
+g = green(4)
+g['text'] += 'cpus: 3 application processors stopped for the end\nhalt\n'
+cases.append(("the end's stop line", g, [], {'SMP-SCHED', 'SMP-IDLE', 'SMP-ENTER'}, set()))
+g = green(4)
+g['text'] += 'cpus: cpu 2 stopped: cause 0x1001\n'
+cases.append(("a fault's stop line beside it", g, [], {'SMP-IDLE'}, {'SMP-SCHED'}))
 
 # One dump catches an application processor in its tick handler: the others save the row.
 g = green(4)
