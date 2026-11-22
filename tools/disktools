@@ -57,10 +57,9 @@ if [ ! -f "$store/.unpacked" ]; then
         deb=$store/debs/$f
         if [ ! -f "$deb" ] || [ "$(sha256_of "$deb")" != "$sum" ]; then
             enc=${f//+/%2b}
-            curl -sSfL -o "$deb.part" "http://archive.ubuntu.com/ubuntu/pool/$pool/$enc" \
-                || curl -sSfL -o "$deb.part" "https://launchpad.net/ubuntu/+archive/primary/+files/$enc" \
+            "$PAX_ROOT/tools/fetch-retry" --url "http://archive.ubuntu.com/ubuntu/pool/$pool/$enc" "$deb" "$sum" \
+                || "$PAX_ROOT/tools/fetch-retry" --url "https://launchpad.net/ubuntu/+archive/primary/+files/$enc" "$deb" "$sum" \
                 || die "cannot fetch $f"
-            mv "$deb.part" "$deb"
         fi
         [ "$(sha256_of "$deb")" = "$sum" ] || die "$f: sha256 $(sha256_of "$deb"), the pin says $sum"
     done
