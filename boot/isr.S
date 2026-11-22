@@ -624,9 +624,10 @@ pax_ap_park:
         .globl pax_panicking
 pax_panicking:
         .zero 8
-/* px166: 1 once the first panic's own line is written (a second waits for
-   it, bounded, so their bytes do not interleave); and how many times the
-   first panic's processor has entered `panic.fail` again inside it. */
+/* px166: the panicking processors' print token (0 until the first panic's
+   own line is written, then 1 free and 2 held: their lines' bytes do not
+   interleave); and how many times the first panic's processor has entered
+   `panic.fail` again inside it. */
         .globl pax_panic_said
 pax_panic_said:
         .zero 8
@@ -642,6 +643,15 @@ pax_ap_stop:
 1:      hlt
         jmp     1b
         .size pax_ap_stop, . - pax_ap_stop
+
+/* px166: interrupts off and nothing else (kernel/panic's first instruction:
+   a panic is neither preempted nor stopped before its line is out). */
+        .globl pax_cli
+        .type pax_cli, @function
+pax_cli:
+        cli
+        ret
+        .size pax_cli, . - pax_cli
 
         .globl pax_ap_halt
         .type pax_ap_halt, @function
