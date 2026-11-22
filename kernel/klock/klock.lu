@@ -1,0 +1,140 @@
+//! klock — the one kernel lock (SMP stage 2): owned by a processor,
+//! recursive by depth.
+//!
+//! Two words in boot/sched.S's .bss, `pax_klock`: OWNER, the holding
+//! processor's index plus one (0 free), and DEPTH, how many times that
+//! processor has entered the kernel without leaving it. A processor takes
+//! the lock at every entry to the kernel but the NMI's (kernel/interrupts'
+//! `pax_interrupt`, after the NMI and before `route`) and gives it back
+//! when the frame it returns resumes ring 3 or its idle loop. It is owned
+//! by the processor, not the thread: a switch is a frame `pax_interrupt`
+//! hands back, so the processor stays in the kernel across it and keeps
+//! the lock whatever thread it then runs. A kernel thread holds it for as
+//! long as it runs (its base depth, 1): a tick that lands on one nests
+//! (DEPTH 2) and unwinds to the base, never below it.
+//!
+//! It is the outermost lock: kernel/sync's eight words nest inside it,
+//! and nothing takes it while holding one of them. It is taken with
+//! interrupts off (every gate is an interrupt gate) by the same
+//! test-and-test-and-set as `sync.acquire`: spin on a relaxed load until
+//! the word reads 0, then `atomic_cas(0, me, Order.acquire,
+//! Order.relaxed)`; the release store hands every write of the holder's
+//! critical section to the next taker's exchange (wolf spec/03
+//! [conc.mm.atomic.order]). DEPTH is written by the owner alone.
+//!
+//! Who calls what: `enter` and `unwind` or `leave` from `pax_interrupt`;
+//! `leave` before a thread's first IRETQ to ring 3 (kernel/user's
+//! `pax_user_thread`); `boot` once from kmain, which holds it as the
+//! first kernel thread. The runtime's ambient-region slot moves with the
+//! lock (kernel/sched's `ambient_resume` after a fresh `enter`,
+//! `ambient_park` before `leave`), since one slot serves every processor.
+//!
+//! Written from wolf's spec/03 §1 [conc.mm.atomic], the Intel SDM vol.
+//! 3A §9.1.2 (a LOCK-prefixed CMPXCHG is atomic against every other
+//! processor) and §6.8.1 (IF), and vol. 2 (CMPXCHG, PAUSE). No Linux
+//! source; no other kernel's source.
+
+use panic
+use percpu
+use sync
+
+extern "c" let pax_klock: *u64
+
+const OWNER: u64 = 0
+const DEPTH: u64 = 8
+
+fn at(off: u64) -> *u64 {
+    // # Safety: the address of boot/sched.S's two words; nothing is read.
+    unsafe { (pax_klock as u64 + off) as *u64 }
+}
+
+fn me() -> u64 {
+    percpu.index() + 1
+}
+
+fn depth() -> u64 {
+    // # Safety: DEPTH is written by the owner alone; a volatile read.
+    unsafe { at(DEPTH).read_volatile() }
+}
+
+fn put_depth(d: u64) {
+    // # Safety: as `depth`; the caller is the owner.
+    unsafe { at(DEPTH).write_volatile(d) }
+}
+
+/// The processor that holds the lock, plus one; 0 when it is free (a
+/// relaxed read: a report, not a decision).
+pub fn owner() -> u64 {
+    // # Safety: `pax_klock`'s first word, 8-aligned; every access to it
+    // is atomic ([conc.mm.atomic.raw.4]).
+    unsafe { at(OWNER).atomic_load(Order.relaxed) }
+}
+
+/// Whether this processor holds the lock.
+pub fn held_here() -> bool {
+    owner() == me()
+}
+
+/// How deep this processor is in the kernel (0 when it does not hold the
+/// lock).
+pub fn level() -> u64 {
+    if held_here() { depth() } else { 0 }
+}
+
+/// An entry to the kernel (`pax_interrupt`, interrupts off): one deeper
+/// when this processor holds the lock already, else the lock taken.
+/// Returns true for a fresh acquisition (the caller restores the
+/// ambient slot of the thread this processor runs).
+pub fn enter() -> bool {
+    let m = me()
+    let p = at(OWNER)
+    // # Safety: as `owner`.
+    if unsafe { p.atomic_load(Order.relaxed) } == m {
+        put_depth(depth() + 1)
+        return false
+    }
+    var held = false
+    while !held {
+        // # Safety: as `owner`.
+        let seen = unsafe { p.atomic_load(Order.relaxed) }
+        if seen == 0 {
+            // # Safety: as `owner`.
+            let (old, ok) = unsafe { p.atomic_cas(0, m, Order.acquire, Order.relaxed) }
+            held = ok && old == 0
+        }
+        if !held {
+            sync.relax()
+        }
+    }
+    put_depth(1)
+    true
+}
+
+/// A return to a ring-0 frame that is not the idle loop (the code an
+/// interrupt landed in, or a kernel thread switched to): one level up,
+/// never below the base a running kernel thread holds.
+pub fn unwind() {
+    if !held_here() {
+        panic.fail("klock: unwound by a processor that does not hold it, cpu ", percpu.index())
+    }
+    let d = depth()
+    put_depth(if d > 1 { d - 1 } else { 1 })
+}
+
+/// A return to ring 3 or to the idle loop: the lock given back whole.
+pub fn leave() {
+    if !held_here() {
+        panic.fail("klock: left by a processor that does not hold it, cpu ", percpu.index())
+    }
+    put_depth(0)
+    // # Safety: the holder's release store; as `owner`.
+    unsafe { at(OWNER).atomic_store(0, Order.release) }
+}
+
+/// kmain's hold, once, before interrupts go on: the boot thread is the
+/// first kernel thread and holds the lock while it runs.
+pub fn boot() {
+    if !held_here() {
+        let _fresh = enter()
+    }
+}
