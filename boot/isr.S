@@ -624,6 +624,15 @@ pax_ap_park:
         .globl pax_panicking
 pax_panicking:
         .zero 8
+/* px166: 1 once the first panic's own line is written (a second waits for
+   it, bounded, so their bytes do not interleave); and how many times the
+   first panic's processor has entered `panic.fail` again inside it. */
+        .globl pax_panic_said
+pax_panic_said:
+        .zero 8
+        .globl pax_panic_again
+pax_panic_again:
+        .zero 8
         .text
 
         .globl pax_ap_stop
