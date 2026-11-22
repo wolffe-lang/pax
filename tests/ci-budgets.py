@@ -226,4 +226,32 @@ for tier in ('pr', 'full', 'all'):
     print('%s budget/mpx5-jobs/%s CI budget mpx5-jobs (tier %s): bound=%ds sizing-floor=%ds margin=%ds (%d runs)' %
           ('PASS' if ok else 'FAIL', tier, tier, seconds, floor, seconds - floor, len(seen)))
     failed |= not ok
+# The twice rule (twice.json): a job's time cap is at least twice its slowest green run of the shape the cap
+# applies to (its tier, the release legs a kernel change adds, KVM or TCG), so a slow runner is never a red
+# that is no one's. The cap is read from the job's `timeout-minutes`, a number or an expression over the
+# plan's outputs (tier, also_release, kvm), evaluated for that shape. The row is named
+# budget/twice/<job>/<shape>, so a plant's record can be held to it by name.
+
+
+def cap_for(job, outputs):
+    body = text.split('  ' + job + ':\n', 1)[1]
+    body = re.split(r'\n  [A-Za-z0-9_-]+:\n', body, maxsplit=1)[0]
+    plain = re.search(r'^    timeout-minutes: (\d+)$', body, re.M)
+    if plain:
+        return int(plain[1]) * 60
+    expr = re.search(r'^    timeout-minutes: \$\{\{(.*)\}\}$', body, re.M)[1]
+    py = re.sub(r"needs\.plan\.outputs\.(\w+)", lambda m: repr(outputs.get(m[1], '')), expr)
+    py = py.replace('&&', ' and ').replace('||', ' or ')
+    return int(eval(py, {'__builtins__': {}}, {})) * 60
+
+
+twice = json.loads((DATA / 'twice.json').read_text())
+for r in twice['rows']:
+    shape = r['tier'] + ('+release' if r['also_release'] != '[]' else '') + ('+kvm' if r['kvm'] == 'yes' else '')
+    cap = cap_for(r['job'], {'tier': r['tier'], 'also_release': r['also_release'], 'kvm': r['kvm']})
+    ok = cap >= 2 * r['seconds']
+    print('%s budget/twice/%s/%s cap=%ds slowest-green=%ds (run %d%s) twice=%ds margin=%ds' %
+          ('PASS' if ok else 'FAIL', r['job'], shape, cap, r['seconds'], r['run'],
+           ', the %s tier bounds it' % r['from'] if 'from' in r else '', 2 * r['seconds'], cap - 2 * r['seconds']))
+    failed |= not ok
 sys.exit(1 if failed else 0)
