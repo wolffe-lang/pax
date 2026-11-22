@@ -373,10 +373,16 @@ case('end restart green', end_text('restart'), ['--kind', 'end-reboot', '--smp',
 
 
 # --- one processor, the cap ----------------------------------------------------------------------
-def one_text(n, cmdline_parked=False, stage=1, boot_line=None, mode='one'):
+def refuse_lines(write_ro='yes', fetch_nx='yes', kernel_read='yes'):
+    st = {'yes': '0xb00', 'no': '0x0'}
+    return ''.join(f'SMP-REFUSE {w} refused {v} status {st[v]}\n' for w, v in
+                   (('write-ro', write_ro), ('fetch-nx', fetch_nx), ('kernel-read', kernel_read))) + 'SMP-REFUSE done\n'
+
+
+def one_text(n, cmdline_parked=False, stage=1, boot_line=None, mode='one', refuse=None):
     p = proc(n, active=1, started=1 if cmdline_parked or n == 1 else n, stage=1)
     t = 'PAX: the console\n' + (boot_line + '\n' if boot_line else '') + head(mode)[len('PAX: the console\n'):]
-    return t + block('start', p) + active_line(1, 1) + block('end', p) + tail()
+    return t + block('start', p) + active_line(1, 1) + (refuse_lines() if refuse is None else refuse) + block('end', p) + tail()
 
 
 parked = regs(0, KTEXT) + ''.join(regs(k, 0xffff80000009f000) for k in range(1, 4))
@@ -390,7 +396,15 @@ case('nosmp under TCG: halted in the park', one_text(4, True, boot_line=nosmp_li
      {'SMP-NOSMP'}, set(), meta=TCG, dumps=[held] * 3)
 case('nosmp under KVM: halted in the park is in the kernel', one_text(4, True, boot_line=nosmp_line),
      ['--kind', 'nosmp', '--smp', '4'], set(), {'SMP-NOSMP'}, dumps=[held] * 3)
-case('one green (stage 1)', one_text(1), ['--kind', 'one', '--smp', '1'], {'SMP-ONE'}, set())
+case('one green (stage 1)', one_text(1), ['--kind', 'one', '--smp', '1'], {'SMP-ONE', 'SMP-REFUSE'}, set())
+# SMP-REFUSE: the refusals kernel/vm keeps beside its retry of a fault on a page present at routing
+case('a write to a read-only page not refused', one_text(1, refuse=refuse_lines(write_ro='no')),
+     ['--kind', 'one', '--smp', '1'], {'SMP-ONE'}, {'SMP-REFUSE'}, why=r'write-ro not refused')
+case('a fetch from a page without PROT_EXEC not refused', one_text(1, refuse=refuse_lines(fetch_nx='no')),
+     ['--kind', 'one', '--smp', '1'], {'SMP-ONE'}, {'SMP-REFUSE'}, why=r'fetch-nx not refused')
+case('a read of the kernel half not refused', one_text(1, refuse=refuse_lines(kernel_read='no')),
+     ['--kind', 'one', '--smp', '1'], {'SMP-ONE'}, {'SMP-REFUSE'}, why=r'kernel-read not refused')
+case('no refusal lines at all', one_text(1, refuse=''), ['--kind', 'one', '--smp', '1'], {'SMP-ONE'}, {'SMP-REFUSE'})
 case('one with a cpus: line', one_text(1, boot_line='cpus: application processors idle 0 of 0'),
      ['--kind', 'one', '--smp', '1'], set(), {'SMP-ONE'})
 case('cap1 green (stage 1 ignores the word)', one_text(4), ['--kind', 'cap1', '--smp', '4', '--cap', '1'], {'SMP-CAP'}, set())
