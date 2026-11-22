@@ -561,6 +561,21 @@ pub fn active() -> u64 {
     c
 }
 
+/// px166 (R-px166-3 A): the processors that run threads, bit i for processor
+/// i (bit 0 always): what sched_getaffinity, /sys/devices/system/cpu/online
+/// and /proc/<pid>/status's `Cpus_allowed` say (kernel/ready, kernel/procfs).
+pub fn runners_mask() -> u64 {
+    var m: u64 = 1
+    var i: u64 = 1
+    while i <= unsafe { made } && i < MAX {
+        if runs(i) {
+            m = m | (1 << i)
+        }
+        i += 1
+    }
+    m
+}
+
 /// px166: RESCHED to processor `i` (one that runs threads, its POKED seen
 /// clear), POKED set first. The caller holds the kernel lock.
 pub fn resched(i: u64) {
