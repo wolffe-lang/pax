@@ -45,7 +45,20 @@
 //! - the two continuations that path calls after `pax_interrupt` (vector
 //!   0x102, a stopped system call resumed; 0x103, a creation or exec
 //!   event finished; px102): `hand_back` keeps the lock for them, and
-//!   each ends in `hand_back` itself (kernel/user).
+//!   each ends in `hand_back` itself (kernel/user). Other frames carry
+//!   those vectors by reuse: every signal handler's and `rt_sigreturn`'s
+//!   frame is 0x103 (kernel/signal's SIGNAL_VECTOR, pax#515), and every
+//!   exec'd frame was 0x102 until pax#510. The lock does not depend on
+//!   what a vector means, only on `continues` testing exactly the vectors
+//!   the common path sends to a continuation: such a frame keeps the lock
+//!   (one level up, never below 1), its continuation runs, and the frame
+//!   that continuation hands back gives it up, so a frame reaches ring 3
+//!   with the lock given back once, after however many continuation passes
+//!   (a signal handler's frame is one pass, ending at 0x101; a further
+//!   pending signal stacked by that pass's `signal.on_return` is another).
+//!   Each continuation checks it holds the lock first (`klock: a
+//!   continuation entered without the lock`), so the two tests cannot drift
+//!   apart quietly.
 //! - a new thread's first entry: `pax_user_thread` gives it back with IF
 //!   clear, then boot/user.S's `pax_enter_user` IRETQs.
 //! A fault between that `leave` and the IRETQ is a fault in ring 0: it
