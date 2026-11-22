@@ -310,8 +310,7 @@ least twice its slowest green run of the same shape:
 
 - `twice.json` has a row for each job and tier with a green run, from GitHub's job records of every hosted run
   2026-11-06 to 2026-11-22, TCG only (the runs where sixteen jobs ran on KVM are left out). Each row names its run
-  and job. `rest` runs a subset of `all`'s legs, so `all` bounds it; a partial dispatch may run every leg, so its
-  cap is `all`'s too. The firmware job's release legs added to a pr or full run have no green run yet, so the all
+  and job. A partial dispatch may run every leg, so its cap is `all`'s too. The firmware job's release legs added to a pr or full run have no green run yet, so the all
   tier bounds them; the users job on KVM has its own row.
 - Where twice passes GitHub's 360-minute limit on a hosted job, the job is an exception, and its cap must be the
   limit: `mpx5-pelt` in all (213 minutes) and partial (203), `mpx6-install` in all (199), and `mpx5-users` in a
