@@ -2,7 +2,7 @@
 
 The four long jobs retain every row and compiler/firmware leg. Their
 workflow bounds are interrupts **75 min**, heap **90 min**, pelt **210 min**
-(**350 min** in the all tier and a partial dispatch since px122, below),
+(**360 min**, the hosted ceiling, in the all tier and a partial dispatch; below),
 and users **210 min**. `tests/ci-budgets.py` checks at least 40% headroom
 above the measured sizing floors below; heap also retains its separately
 checked, stronger 50% headroom rule.
@@ -285,7 +285,7 @@ upload that GitHub's service answered twice with an error page, 285 s.
 | mpx3-shell | all, partial | 8125 s | 11400 s (190 min) | 3275 s |
 | mpx3-shell | full | 2446 s | 7200 s (120 min) | 4754 s |
 | mpx3-shell | pr | 1704 s | 7200 s (120 min) | 5496 s |
-| mpx5-pelt | all, partial | 14904 s | 21000 s (350 min) | 6096 s |
+| mpx5-pelt | all, partial | 14904 s | 21600 s (360 min) | 6696 s |
 | mpx5-pelt | full | 6532 s | 12600 s (210 min) | 6068 s |
 | mpx5-pelt | pr | 4232 s | 12600 s (210 min) | 8368 s |
 
@@ -294,7 +294,7 @@ row (`budget/mpx3-shell/steps`, `budget/mpx5-pelt/steps`), so a new step
 in either job is red in the plan job of its own pull request until an
 attempt has measured it and the data holds it.
 
-350 minutes is 10 below the hosted runners' 6-hour ceiling. At the 40%
+360 minutes is the hosted runners' 6-hour ceiling. At the 40%
 rule mpx5-pelt's all-tier floor can grow by 3.5% (to 15428 s) and still
 fit; past that no bound can hold it, and the split this README's capacity
 section asks for (the USB typing step and the root disk leg as a job of
@@ -302,17 +302,22 @@ their own, the images handed on by digest) is the only way left.
 
 ## Twice the slowest green (`twice.json`)
 
-A cap at least 40 % above a sizing floor still let a slow runner end a green job at its cap: the firmware
-job's slowest green every-leg run took 5,336 s against a 5,400 s cap, and it was cut at the cap four times.
-`tests/ci-budgets.py` therefore also holds each listed job's cap to at least twice its slowest green run of
-the same shape, read from GitHub's job timestamps over 2026-11-06 to 2026-11-21 (`twice.json` names the run
-and job of each figure).
+A cap at least 40 % above a sizing floor still let a slow runner end a green job at its cap. Over 2026-11-06 to
+2026-11-21, `mpx6-usb` was cut at 30 minutes five times against a slowest green of 29.8, `mpx2-frames` at 60 five
+times against 59.6, and the firmware job at 90 four times against 88.9; `mpx6-usb`'s last cut came 0.14 s after its
+last row passed. So `tests/ci-budgets.py` holds every job of the workflow but the plan and the verdict to a cap at
+least twice its slowest green run of the same shape:
 
-- Firmware: 90 minutes for one leg (pr, full; 17 minutes at most), 180 when it runs every leg (all, rest, a
-  partial dispatch) or the release legs a kernel change adds (bounded by the all tier's 89 minutes, since no
-  such run is green yet).
-- Users: 210 on KVM (18 minutes at most), 360 on TCG, the Sunday run (174 minutes at most). 360 minutes is
-  also GitHub's limit for a hosted job, so a tier full run on TCG, which only a dispatch asking for it makes
-  (181 minutes at most), cannot be held to twice.
-- Aspen: 60 (22 minutes at most).
-
+- `twice.json` has a row for each job and tier with a green run, from GitHub's job records of every hosted run
+  2026-11-06 to 2026-11-22, TCG only (the runs where sixteen jobs ran on KVM are left out). Each row names its run
+  and job. `rest` runs a subset of `all`'s legs, so `all` bounds it; a partial dispatch may run every leg, so its
+  cap is `all`'s too. The firmware job's release legs added to a pr or full run have no green run yet, so the all
+  tier bounds them; the users job on KVM has its own row.
+- Where twice passes GitHub's 360-minute limit on a hosted job, the job is an exception, and its cap must be the
+  limit: `mpx5-pelt` in all (213 minutes) and partial (203), `mpx6-install` in all (199), and `mpx5-users` in a
+  tier full run on TCG (181; only a dispatch asking `accel=tcg` makes one). These can only be brought under twice
+  by splitting the job.
+- A job with no row, exception or `unmeasured` entry (with its reason) fails `budget/twice/coverage`, so a new job
+  arrives with its entry.
+- Caps are only raised by this rule, never lowered. A higher cap costs nothing on a green run. A run that hangs
+  burns up to the cap; see the pull request that raised them for the worst case.
