@@ -65,6 +65,11 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            outside the kernel (TCG: halted in pax_ap_park), and every other row
                            `NOT-ASKED … one processor: not asked`. A regression guard: green at stage 1.
   one         SMP-ONE      at -smp 1: no `cpus:` line, `started 1`, `active 1`; the rest not asked.
+  one, nosmp, cap1
+              SMP-REFUSE   the faults the page tables refuse are refused still (kernel/vm runs a fault again only when
+                           its page is present at routing and allows the access): a write to a read-only page, a
+                           fetch from a page without PROT_EXEC and a read of the kernel's half each end the child in
+                           its SIGSEGV handler (`refused yes status 0xb00`).
   cap2        SMP-DEAD     three exit_groups from a group's main thread with its siblings spinning, one on the
                            other processor that runs threads: status 0x700 each within 2 s, and none of the
                            group's threads current on any processor in ten looks after (kernel/sched's
@@ -124,7 +129,7 @@ BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processor
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
         'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
-        'SMP-TESTWORDS', 'SMP-BUILD']
+        'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
@@ -702,7 +707,17 @@ elif a.kind in ('nosmp', 'one', 'cap1'):
     else:
         ok(row, {'nosmp': f'{N - 1} left parked, started 1, active 1', 'one': 'no cpus: line, started 1, active 1',
                  'cap1': f'active 1, {N - 1} processors idle in PAX'}[a.kind])
-    not_asked([r for r in ROWS if r != row], 'one processor: not asked')
+    # SMP-REFUSE: the probe's `one` mode, in each of these boots (one processor runs threads)
+    refuse = {x.split()[0]: x for x in lines('SMP-REFUSE') if x.split()[0] != 'done'}
+    rwhy = [f'{w} not refused: {refuse.get(w, "no line")}' for w in ('write-ro', 'fetch-nx', 'kernel-read')
+            if 'refused yes status 0xb00' not in refuse.get(w, '')]
+    if 'SMP-REFUSE done' not in text:
+        rwhy.append('no `SMP-REFUSE done`')
+    if rwhy:
+        fail('SMP-REFUSE', rwhy[0], rwhy[1:])
+    else:
+        ok('SMP-REFUSE', 'a write to a read-only page, a fetch without PROT_EXEC and a read of the kernel half: SIGSEGV each')
+    not_asked([r for r in ROWS if r not in (row, 'SMP-REFUSE')], 'one processor: not asked')
 elif a.kind == 'cap2':
     c = a.cap or 2
     why = active_facts(p0, c, N, True)
