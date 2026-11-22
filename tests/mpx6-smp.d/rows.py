@@ -425,8 +425,13 @@ def signal_check():
         why.append('tgkill handled on a thread it did not name')
     if any(kv(s, 'status') != '0x9' for s in kill):
         why.append(f'SIGKILL statuses {[kv(s, "status") for s in kill]}, want 0x9')
+    # SIGSTOP held: the target's spins stand still for 30 ms after its stop status (`held no`: it ran on, the stop
+    # never parked it; kernel/sched parks it when its processor next switches, so a processor that returned to it
+    # because nothing else was queued is this red)
+    if stop and 'held no' in stop[0]:
+        why.append(f'SIGSTOP not held: the target spun on after its stop status: {stop[0]}')
     if stop and (kv(stop[0], 'status') != '0x137f' or kv(stop[0], 'cont') is None or 'cont status 0xffff' not in stop[0]
-                 or 'held yes' not in stop[0] or 'resumed yes' not in stop[0]):
+                 or 'resumed yes' not in stop[0] or 'held' not in stop[0]):
         why.append(f'stop and continue: {stop[0]}')
     if tst and kv(tst[0], 'tgkill-status') != '0x0':
         why.append(f'the tgkill process ended {tst[0]}')
