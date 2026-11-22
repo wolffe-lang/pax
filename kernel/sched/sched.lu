@@ -235,8 +235,18 @@
 //! no slot (kernel/percpu's IDLE_SLOT), which `run_next` resumes when the
 //! queue is empty, with the kernel's PML4 live (`enter_space`), so no
 //! process's tables stay under a processor that runs none of its threads.
-//! A thread runs on whichever processor first takes it from the queue: the
-//! one whose tick, switch or RESCHED (`kick`) comes first. On the way out
+//! A thread of a process runs on whichever processor first takes it from
+//! the queue: the one whose tick, switch or RESCHED (`kick`) comes first.
+//! **A kernel thread runs on CPU 0 alone** (stage 2's amendment to its
+//! contract's §3.6, which had them run anywhere): an application processor
+//! takes the first thread of a process in the queue and leaves kernel
+//! threads where they stand (`eligible`). A kernel thread holds the kernel
+//! lock for as long as it runs; on another processor it would hold CPU 0
+//! out of the kernel, its tick and the count the kernel keeps time by with
+//! it, so a kernel thread waiting on that count there would wait for ever;
+//! and kmain's end stays CPU 0's, which stops the others. Each processor
+//! counts its switches to a kernel thread (its record's KTHREADS; 0 on
+//! every processor but CPU 0, tests/mpx6-smp's SMP-PIN). On the way out
 //! of the kernel, a processor that leaves threads queued sends RESCHED to
 //! the lowest-numbered idle one that runs threads (`share`, kernel/smp's
 //! `runs`). Each slot's fourth word, W_CPU, names the processor running it
@@ -718,8 +728,8 @@ pub fn ambient_resume() {
 }
 
 /// px166: on the way out of the kernel with the lock about to be given
-/// back (kernel/user's `hand_back`): while the queue holds a thread, the
-/// lowest-numbered other processor that runs threads, is idle and has no
+/// back (kernel/user's `hand_back`): while the queue holds a thread it may
+/// take (`eligible`'s rule), the lowest-numbered other processor that runs threads, is idle and has no
 /// RESCHED in flight (its record's POKED) is sent one (kernel/smp's
 /// `resched`), so it takes the queue's head now rather than at its tick.
 /// One a call: that processor passes the turn on as it leaves in its turn,
@@ -731,9 +741,12 @@ pub fn share() {
     }
     let me = percpu.index()
     let bound = smp.bound()
+    // px166: an application processor is sent one only for a thread of a
+    // process (kernel threads are CPU 0's).
+    let process = first_process_thread() != 0
     var i: u64 = 0
     while i < bound {
-        if i != me && smp.runs(i) {
+        if i != me && smp.runs(i) && (i == 0 || process) {
             let r = smp.record(i)
             if idle(percpu.get(r, percpu.CURRENT)) && percpu.get(r, percpu.POKED) == 0 {
                 smp.resched(i)
@@ -861,7 +874,7 @@ fn wake_urgent(s: u64) {
 /// running thread, is not one (`kick` and `preempt` switch to it at once).
 /// px159: or `c` is one that has run past its shield (`shielded`).
 fn urgent_waits(c: u64) -> bool {
-    let h = sv(S_HEAD) // #598
+    let h = eligible() // #598; px166: the thread this processor would take
     h != 0 && mask_has(B_URGENT, h - 1) && !(mask_has(B_URGENT, c) && shielded()) && !starved() // px131e
 }
 
@@ -994,13 +1007,60 @@ fn who(s: u64) -> u64 {
     if p != 0 { p } else { s | 0x100000000 }
 }
 
-/// px166: the queue's head (slot + 1), removed, as `dequeue`; a slot it
-/// hands back that a processor still runs is named and the kernel stops:
-/// RUNNING, or its W_CPU not 0 (`run_next` cleared the outgoing slot's
-/// before it asked, so a thread the same processor takes back passes).
+/// px166: whether slot `s` is a kernel thread (no program: `prog` 0;
+/// kmain's slot 0, the network's, the flusher's, xHCI's).
+fn kernel_thread(s: u64) -> bool {
+    field(s, offset_of(Thread, prog)) == 0
+}
+
+/// px166: the first thread of a process in the queue (slot + 1; 0 none).
+fn first_process_thread() -> u64 {
+    var n = sv(S_HEAD) // #598
+    while n != 0 && kernel_thread(n - 1) {
+        n = field(n - 1, offset_of(Thread, next))
+    }
+    n
+}
+
+/// px166: the queued thread this processor would take next (slot + 1; 0
+/// none): the head on CPU 0; on another, the first thread of a process,
+/// kernel threads left in the queue for CPU 0.
+fn eligible() -> u64 {
+    if percpu.index() == 0 { sv(S_HEAD) } else { first_process_thread() }
+}
+
+/// px166: queued slot + 1 `n` removed, wherever it stands: `dequeue` for
+/// the head; behind it, unlinked from the thread before it (its urgent
+/// mark kept: it is about to run, as a head's is).
+fn take_out(n: u64) {
+    if n == sv(S_HEAD) {
+        let _h = dequeue()
+        return
+    }
+    var p = sv(S_HEAD)
+    while p != 0 && field(p - 1, offset_of(Thread, next)) != n {
+        p = field(p - 1, offset_of(Thread, next))
+    }
+    if p == 0 {
+        panic.fail("sched: a slot taken from the queue that is not in it, slot ", n - 1)
+    }
+    let after = field(n - 1, offset_of(Thread, next))
+    put_field(p - 1, offset_of(Thread, next), after)
+    if after == 0 {
+        put_sv(S_TAIL, p)
+    }
+    mask_clear(B_QUEUED, n - 1) // px131e
+}
+
+/// px166: the thread this processor takes from the queue (`eligible`),
+/// removed (slot + 1; 0 none); a slot that a processor still runs is named
+/// and the kernel stops: RUNNING, or its W_CPU not 0 (`run_next` cleared
+/// the outgoing slot's before it asked, so a thread the same processor
+/// takes back passes).
 fn take() -> u64 {
-    let n = dequeue()
+    let n = eligible()
     if n != 0 {
+        take_out(n)
         let s = n - 1
         let on = slot_word(s, W_CPU)
         if field(s, offset_of(Thread, state)) == RUNNING || on != 0 {
@@ -1065,6 +1125,9 @@ fn run_next() -> u64 {
         put_field(s, offset_of(Thread, state), RUNNING)
         put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
         put_slot_word(s, W_CPU, percpu.index() + 1)
+        if s != from && !idle(s) && kernel_thread(s) {
+            percpu.count(percpu.KTHREADS) // px166: SMP-PIN's count
+        }
     }
     percpu.set_current(s)
     put_slice(my_ticks())
@@ -1095,7 +1158,8 @@ pub fn preempt(f: u64) -> u64 {
         return f
     }
     // #598: the queue's head is read after wake_sleepers wrote it.
-    if sv(S_HEAD) == 0 {
+    // px166: on an application processor, a thread of a process.
+    if eligible() == 0 {
         return f
     }
     if !idle(c) && my_ticks() - slice() < QUANTUM && !urgent_waits(c) {
@@ -1524,7 +1588,7 @@ pub fn kick(f: u64) -> u64 {
     }
     let c = cur()
     point(f, c) // px131: a chance to choose
-    let h = sv(S_HEAD) // #598
+    let h = eligible() // #598; px166: what this processor may take
     if h == 0 {
         return f
     }
