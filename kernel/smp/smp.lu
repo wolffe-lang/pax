@@ -853,6 +853,36 @@ pub fn ap_nmi(f: u64) {
     percpu.count(percpu.NMIS)
 }
 
+/// px166 (the STOP step): the end's stop, by the kernel lock's holder,
+/// after the processes have ended and before the volumes are written: every
+/// other processor that runs asked to stop (kernel/tlb's STOP) and waited
+/// for, 1 s at most; then one line, `cpus: N application processors
+/// stopped for the end` (N every one asked), or, for each that did not
+/// answer, `cpus: cpu K did not stop for the end`, and the end goes on. Says
+/// nothing when no other processor runs (one processor, `nosmp`).
+pub fn stop_for_end() {
+    let asked = tlb.others()
+    if asked == 0 {
+        return
+    }
+    let late = tlb.stop_others(tlb.CAUSE_END, tlb.END_BOUND)
+    if late == 0 {
+        log.put("cpus: ")
+        log.dec(asked as int)
+        log.line(" application processors stopped for the end")
+        return
+    }
+    var i: u64 = 0
+    while i < MAX {
+        if late & (1 << i) != 0 {
+            log.put("cpus: cpu ")
+            log.dec(i as int)
+            log.line(" did not stop for the end")
+        }
+        i += 1
+    }
+}
+
 /// CPU 0, at each tick and after the bring-up: each processor that has
 /// stopped since the last call, named once.
 pub fn report_stops() {
