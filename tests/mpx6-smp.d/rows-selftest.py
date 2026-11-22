@@ -268,7 +268,7 @@ case('the plant lock: a slot on two processors, the boot dies', stress_text(extr
 case('a slot on two processors in a rows boot', head('rows') + DUP, ['--kind', 'rows', '--smp', '4'], set(),
      ALL6 | {'SMP-DUP'})
 case('a slot on two processors in a cap2 boot', head('cap') + DUP, ['--kind', 'cap2', '--smp', '4', '--cap', '2'], set(),
-     {'SMP-CAP', 'SMP-DUP'})
+     {'SMP-CAP', 'SMP-DUP', 'SMP-DEAD'})
 case('a slot on two processors at one processor', head('one') + DUP, ['--kind', 'one', '--smp', '1'], set(),
      {'SMP-ONE', 'SMP-DUP'})
 case('a lost signal in the storm', stress_text(lost=1), sa, set(), {'SMP-LOCK'})
@@ -346,14 +346,30 @@ case('one with a cpus: line', one_text(1, boot_line='cpus: application processor
 case('cap1 green (stage 1 ignores the word)', one_text(4), ['--kind', 'cap1', '--smp', '4', '--cap', '1'], {'SMP-CAP'}, set())
 
 
-def cap2_text(stage=2, kthreads=None):
+def dead_lines(statuses=('0x700',) * 3, revived=(0, 0, 0), running=(2, 2, 2), done=True):
+    t = ''.join(f'SMP-DEAD round {r} status {s} running {g} revived {v}\n'
+                for r, (s, g, v) in enumerate(zip(statuses, running, revived)))
+    return t + ('SMP-DEAD done\n' if done else '')
+
+
+def cap2_text(stage=2, kthreads=None, dead=None):
     p = proc(4, active=1 if stage == 1 else 2, stage=stage, cap=None if stage == 1 else 2, kthreads=kthreads)
     t = head('cap') + block('start', p) + active_line(4, stage, cap=2)
     t += run_lines(4, stage, rounds=1, cap=None if stage == 1 else 2)
+    if stage == 2:
+        t += dead_lines() if dead is None else dead
     return t + block('end', p) + tail()
 
 
-case('cap2 green', cap2_text(), ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP', 'SMP-PIN'}, set())
+case('cap2 green', cap2_text(), ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP', 'SMP-PIN', 'SMP-DEAD'}, set())
+# SMP-DEAD: a thread another processor's exit_group ended while it ran is never run again (kernel/sched's
+# `preempt` and `kick` switch a DEAD thread off; before them it was queued again, or resumed, and ran on)
+case('a thread of the ended group current again', cap2_text(dead=dead_lines(revived=(0, 3, 0))),
+     ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP'}, {'SMP-DEAD'})
+case('an exit_group with no status in 2 s', cap2_text(dead=dead_lines(statuses=('0xdead',), revived=(10,), running=(2,))),
+     ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP'}, {'SMP-DEAD'})
+case('the group never on the second processor', cap2_text(dead=dead_lines(running=(2, 1, 2))),
+     ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP'}, {'SMP-DEAD'})
 # kernel threads run on CPU 0 alone (stage 2's amendment to its contract's §3.6): an application processor's
 # `runs` line counts none (`kthreads 0`); CPU 0's may count any number
 case('a kernel thread on an application processor in a cap2 boot', cap2_text(kthreads={1: 3}),
@@ -364,7 +380,7 @@ case('kernel threads on CPU 0 alone', rows_text(4, kthreads={0: 250}), ['--kind'
      ALL6 | {'SMP-PIN'}, set())
 case('a runs line with no kthreads count', rows_text(4).replace(' kthreads 0', ''), ['--kind', 'rows', '--smp', '4'],
      ALL6, {'SMP-PIN'})
-case('cap2 at stage 1: red', cap2_text(stage=1), ['--kind', 'cap2', '--smp', '4', '--cap', '2'], set(), {'SMP-CAP'})
+case('cap2 at stage 1: red', cap2_text(stage=1), ['--kind', 'cap2', '--smp', '4', '--cap', '2'], set(), {'SMP-CAP', 'SMP-DEAD'})
 t = re.sub(r'^(SMP-RUN round 0 sample 1 .*) 3:i$', r'\1 3:201', cap2_text(), flags=re.M)
 case('cap2 with a worker past the cap', t, ['--kind', 'cap2', '--smp', '4', '--cap', '2'], set(), {'SMP-CAP'})
 
