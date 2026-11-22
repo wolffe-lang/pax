@@ -1285,8 +1285,8 @@ fn cmdline(base: u64) -> u64 {
 /// Available firmware processors are distinct from the one active processor.
 /// px161: then the processors that entered PAX (`started`) and those parked
 /// idle (`idle`), and a line a processor, by kernel/smp's index:
-///   cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K nmis N
-///   cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K wakes W nmis N
+///   cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K tlb S nmis N
+///   cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K tlb S wakes W nmis N
 ///   cpu I apic A idle current idle ticks T wakes W nmis N
 ///   cpu I apic A stopped cause C rip 0x<R>   (kernel/percpu's `stop`)
 ///   cpu I apic A never entered               (released, never idle)
@@ -1296,7 +1296,8 @@ fn cmdline(base: u64) -> u64 {
 /// `runs` line: what it runs (`pid` the thread's id, gettid's; `kernel` a
 /// kernel thread; `idle` its idle context), its ticks that landed in ring
 /// 3 (`user`), the RESCHEDs it took and its switches to a kernel thread
-/// (`kthreads`: CPU 0 alone runs them, kernel/sched); one past the cap keeps stage 1's
+/// (`kthreads`: CPU 0 alone runs them, kernel/sched), the shootdowns it
+/// answered (`tlb`, kernel/tlb); one past the cap keeps stage 1's
 /// `idle` line. The lines stop short of the frame's end (`more N` says how
 /// many were left out).
 fn paxcpus(base: u64) -> u64 {
@@ -1347,6 +1348,8 @@ fn paxcpus(base: u64) -> u64 {
             n = put_dec(base, n, percpu.get(r, percpu.RESCHED))
             n = put_s(base, n, " kthreads ")
             n = put_dec(base, n, percpu.get(r, percpu.KTHREADS))
+            n = put_s(base, n, " tlb ")
+            n = put_dec(base, n, percpu.get(r, percpu.TLB))
             if i != 0 {
                 n = put_s(base, n, " wakes ")
                 n = put_dec(base, n, percpu.get(r, percpu.WAKES))
