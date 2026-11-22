@@ -1004,9 +1004,12 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 ## Continuous integration
 
 - A pull request's push runs the suites its change can affect (`tools/ci-plan`, `tools/ci-tiers.map`) on one leg,
-  native BIOS; a change to the kernel's core or to CI itself runs every suite on that leg, which is the merge gate's
-  shape, so that run is `tier full` and adding the label afterwards starts no second run at the same head. A change
-  to the scheduler, the timer, or the interrupt or syscall entry runs every suite on every leg, and a kernel change
+  native BIOS; a change to CI itself runs every suite on that leg, which is the merge gate's shape, so that run is
+  `tier full` and adding the label afterwards starts no second run at the same head. A change to the kernel's core,
+  the scheduler, the timer, or the interrupt or syscall entry runs every suite on every leg (`tier all`): a merge
+  gated on `tier full` buys a `tier all` trunk push after it, so a pull request that takes one gate run is cheaper
+  gated on all (about 2,700 Linux job-minutes against 860 + 2,700; the break-even is about 1.5 gate runs). A pull
+  request that expects to iterate in CI dispatches `-f tier=full` for its runs before the last. A kernel change
   whose run includes the firmware suite runs that suite on the release legs too (its NMI rows depend on the release
   build's inlining).
 - The `full-matrix` label runs every suite on the merge leg (`tier full`); the nightly and a dispatch run every suite on
