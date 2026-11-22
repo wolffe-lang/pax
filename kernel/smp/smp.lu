@@ -1,6 +1,6 @@
-//! smp — the application processors: started, each with its own state,
-//! and parked idle while the boot processor runs every thread (px161, SMP
-//! stage 1; px138's plan, its stage 1 row).
+//! smp — the application processors: started, each with its own state
+//! (px161, SMP stage 1; px138's plan, its stage 1 row), and running
+//! threads beside the boot processor (px166, SMP stage 2).
 //!
 //! **Bring-up, in two steps.** Limine's MP feature (boot/start.S's
 //! request, flags 0) started every processor its MP response lists and
@@ -64,9 +64,11 @@
 //!
 //! **Which processors run threads** (px166, SMP stage 2): CPU 0, and each
 //! application processor under the cap that reached its idle loop (`runs`):
-//! `pax.cpus=N` on the command line makes the cap N (a word for
-//! bisection), and DEFAULT_CAP holds it at 1 until stage 2 releases
-//! the others. One that runs threads takes the run queue's head at its
+//! by default every one that reached its idle loop (DEFAULT_CAP, stage
+//! 2's release); `pax.cpus=N` on the command line makes the cap N (a word
+//! for bisection; `pax.cpus=1` is stage 1's machine, the boot processor
+//! running every thread, the others in their loops) and `nosmp` leaves
+//! them in the bootloader. One that runs threads takes the run queue's head at its
 //! tick or at a RESCHED (kernel/sched's `preempt` and `kick`), its idle
 //! loop's frame kept in its record until the queue is empty again, and
 //! takes every system call and fault of the threads it runs as CPU 0
@@ -97,9 +99,9 @@
 //!
 //! **What is said.** With one processor, nothing (no line of any boot
 //! changes). With more: `cpus: application processors idle K of M in T
-//! ms, 84 KiB each (N KiB with their tables); the boot processor runs every
-//! thread` (px166: `; R processors run threads (pax.cpus)` when the cap
-//! lets more than CPU 0), a line for each
+//! ms, 84 KiB each (N KiB with their tables); R processors run threads`
+//! (px166; ` (pax.cpus)` after it when the command line set the cap;
+//! `the boot processor runs every thread` when R is 1), a line for each
 //! that never reached its idle loop, then the private-state check
 //! (`check`): every processor's record, GDT and TSS its own, each TSS's
 //! RSP0 and IST1-4 inside its own window (CPU 0's: boot/isr.S's IST
@@ -181,9 +183,11 @@ pub const RESCHED_VECTOR: u64 = 48
 const SWITCH: u64 = 0x81
 const SYSCALL: u64 = 0x100
 /// px166: the processors that run threads when the command line names no
-/// `pax.cpus=N`: CPU 0 alone until stage 2 releases the others, which it
-/// does once shootdowns, the signals' RESCHED and the end's STOP are in.
-const DEFAULT_CAP: u64 = 1
+/// `pax.cpus=N`: every one started (MAX, above any index), stage 2's
+/// release, once shootdowns, the signals' RESCHED, the exit and exec
+/// rendezvous and the end's and a panic's STOP were in. It was 1 (CPU 0
+/// alone) until then.
+const DEFAULT_CAP: u64 = MAX
 
 const EFER: u64 = 0xc0000080
 const STAR: u64 = 0xc0000081
@@ -475,7 +479,11 @@ pub fn start_aps(pml4: u64, main: u64) {
     if runners > 1 {
         log.put(" KiB with their tables); ")
         log.dec(runners as int)
-        log.line(" processors run threads (pax.cpus)")
+        if boot_info.cmdline_has("pax.cpus=") {
+            log.line(" processors run threads (pax.cpus)")
+        } else {
+            log.line(" processors run threads")
+        }
     } else {
         log.line(" KiB with their tables); the boot processor runs every thread")
     }
