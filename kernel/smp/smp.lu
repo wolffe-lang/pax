@@ -60,24 +60,46 @@
 //! that one is, spurious vector 47, its APIC ID held to Limine's), its tick
 //! armed with the boot processor's calibration (kernel/timer's `ap_arm`:
 //! 100 Hz on vector 32), STATE IDLE, then for ever: WAKES + 1; STI; HLT;
-//! CLI (boot/isr.S's `pax_ap_halt`). It runs no thread: its CURRENT is
-//! the idle mark, and kernel/sched's tick and switch stop a processor
-//! other than CPU 0 by name (kernel/percpu's `boot_only`).
+//! CLI (boot/isr.S's `pax_ap_halt`), its CURRENT the idle mark.
 //!
-//! **Its interrupts** (kernel/interrupts sends every vector it takes but
-//! the NMI here, `ap_interrupt`): vector 32, its tick, is counted (TICKS)
-//! and acknowledged at its local APIC; 47, its local APIC's spurious
-//! interrupt, counted and not acknowledged (SDM vol. 3A §11.9); anything
-//! else stops it, the vector, error, RIP and CR2 in its record. Its NMI
-//! (`ap_nmi`, on its own IST2) is counted, the frame's address kept, and
-//! it resumes. The 8259's line reaches CPU 0 alone (LINT0, kernel/apic),
-//! MSI names CPU 0's APIC ID, and every other LVT entry Limine masked: an
-//! application processor takes its tick, NMIs and its spurious vector.
+//! **Which processors run threads** (px166, SMP stage 2): CPU 0, and each
+//! application processor under the cap that reached its idle loop (`runs`):
+//! `pax.cpus=N` on the command line makes the cap N (R-px166-10's
+//! bisection word), and DEFAULT_CAP holds it at 1 until stage 2 releases
+//! the others. One that runs threads takes the run queue's head at its
+//! tick or at a RESCHED (kernel/sched's `preempt` and `kick`), its idle
+//! loop's frame kept in its record until the queue is empty again, and
+//! takes every system call and fault of the threads it runs as CPU 0
+//! does. One past the cap stays in its loop as in stage 1, its tick taken
+//! under the kernel lock and given straight back.
+//!
+//! **Its interrupts** (kernel/interrupts; `ap_early` decides before the
+//! kernel lock): 47, its local APIC's spurious interrupt, is counted and
+//! not acknowledged (SDM vol. 3A §11.9), and nothing else is done. Its
+//! tick (32: `ap_tick` counts it, TICKS and USER, and acknowledges it at
+//! its local APIC), RESCHED (48: `took_resched`), and the switches, system
+//! calls and faults of the threads it runs are taken under the kernel lock
+//! as CPU 0 takes them. Anything else (a fault in its idle loop, where it
+//! holds no lock; a vector nothing sends it) stops it, the vector, error,
+//! RIP and CR2 in its record. Its NMI (`ap_nmi`, on its own IST2) is
+//! counted, the frame's address kept, and it resumes. The 8259's line
+//! reaches CPU 0 alone (LINT0, kernel/apic), MSI names CPU 0's APIC ID,
+//! and every other LVT entry Limine masked: an application processor takes
+//! its tick, NMIs, its spurious vector and RESCHED.
+//!
+//! **RESCHED** (px166, vector 48, kernel/apic's fixed interrupt): a
+//! processor leaving the kernel with threads queued sends it to the
+//! lowest-numbered other processor that runs threads and is idle
+//! (kernel/sched's `share`), one in flight a target (its record's POKED,
+//! set by the sender, cleared by the target, both holding the kernel
+//! lock). The target takes the lock and the queue's head at once rather
+//! than at its next tick, up to 10 ms later.
 //!
 //! **What is said.** With one processor, nothing (no line of any boot
 //! changes). With more: `cpus: application processors idle K of M in T
 //! ms, 84 KiB each (N KiB with their tables); the boot processor runs every
-//! thread`, a line for each
+//! thread` (px166: `; R processors run threads (pax.cpus)` when the cap
+//! lets more than CPU 0), a line for each
 //! that never reached its idle loop, then the private-state check
 //! (`check`): every processor's record, GDT and TSS its own, each TSS's
 //! RSP0 and IST1-4 inside its own window (CPU 0's: boot/isr.S's IST
@@ -103,6 +125,7 @@ use boot_info
 use clock
 use frames
 use gdt
+use klock
 use log
 use paging
 use percpu
@@ -147,6 +170,18 @@ const WINDOW_KIB: u64 = 84 // 21 frames: the record and five stacks
 pub const SPURIOUS_VECTOR: u64 = 47
 /// CAUSE: the local APIC answered another APIC ID than Limine's.
 const CAUSE_APIC: u64 = 0x1001
+/// px166: RESCHED, the interrupt one processor sends another (kernel/idt's
+/// gate 48, boot/isr.S's trampoline).
+pub const RESCHED_VECTOR: u64 = 48
+/// px166: the frames an application processor that runs threads also
+/// takes under the kernel lock: boot/sched.S's `pax_switch` (PAX_SWITCH)
+/// and boot/user.S's `pax_syscall_entry` (PAX_SYSCALL).
+const SWITCH: u64 = 0x81
+const SYSCALL: u64 = 0x100
+/// px166: the processors that run threads when the command line names no
+/// `pax.cpus=N`: CPU 0 alone until stage 2 releases the others, which it
+/// does once shootdowns, the signals' RESCHED and the end's STOP are in.
+const DEFAULT_CAP: u64 = 1
 
 const EFER: u64 = 0xc0000080
 const STAR: u64 = 0xc0000081
@@ -161,6 +196,10 @@ var listed: u64 = 1
 var made: u64 = 0
 var took_ms: u64 = 0
 var taken_kib: u64 = 0
+/// px166: processors with an index below this may run threads (`runs`),
+/// written once by `start_aps` before any application processor is
+/// released.
+var cap: u64 = 1
 
 /// Application processor `i`'s window (its record), i in 1..MAX.
 pub fn window(i: u64) -> u64 {
@@ -356,6 +395,9 @@ pub fn start_aps(pml4: u64, main: u64) {
         percpu.put_word(percpu.W_STOPPED, 0)
         percpu.put_word(percpu.W_REPORTED, 0)
     }
+    // # Safety: a scalar the boot processor alone writes, before any
+    // application processor is released (the release store below orders it).
+    unsafe { cap = cap_word() }
     let free0 = frames.free_count()
     var i: u64 = 1
     while i <= aps && i < MAX {
@@ -425,7 +467,14 @@ pub fn start_aps(pml4: u64, main: u64) {
     log.dec(WINDOW_KIB as int)
     log.put(" KiB each (")
     log.dec(unsafe { taken_kib } as int)
-    log.line(" KiB with their tables); the boot processor runs every thread")
+    let runners = active()
+    if runners > 1 {
+        log.put(" KiB with their tables); ")
+        log.dec(runners as int)
+        log.line(" processors run threads (pax.cpus)")
+    } else {
+        log.line(" KiB with their tables); the boot processor runs every thread")
+    }
     if aps >= MAX {
         log.put("cpus: application processors past ")
         log.dec(MAX as int)
@@ -450,6 +499,74 @@ pub fn start_aps(pml4: u64, main: u64) {
     if boot_info.cmdline_has("pax.cpunmi") {
         nmi_each()
     }
+}
+
+/// px166: the cap `pax.cpus=N` names (one to four digits, N at least 1),
+/// else DEFAULT_CAP.
+fn cap_word() -> u64 {
+    let (a, n) = boot_info.cmdline_value("pax.cpus")
+    if n == 0 || n > 4 {
+        return DEFAULT_CAP
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        // # Safety: a byte of Limine's command line, inside the word found
+        // (kernel/boot_info's `cmdline_value`).
+        let d = unsafe { ((a + k) as *u8).read_volatile() as u64 }
+        if d < 48 || d > 57 {
+            return DEFAULT_CAP
+        }
+        v = v * 10 + (d - 48)
+        k += 1
+    }
+    if v == 0 { DEFAULT_CAP } else { v }
+}
+
+/// px166: whether processor `i` runs threads: CPU 0 always; an application
+/// processor under the cap whose record says IDLE (it reached its idle
+/// loop and has not stopped).
+pub fn runs(i: u64) -> bool {
+    if i == 0 {
+        return true
+    }
+    // # Safety: scalars written once by `start_aps` before any release.
+    i < unsafe { cap } && i <= unsafe { made } && percpu.get(window(i), percpu.STATE) == percpu.IDLE
+}
+
+/// px166: whether this processor runs threads.
+pub fn runs_here() -> bool {
+    runs(percpu.index())
+}
+
+/// px166: how many processors run threads now (/proc/pax-cpus' `active`).
+pub fn active() -> u64 {
+    var c: u64 = 1
+    var i: u64 = 1
+    while i <= unsafe { made } {
+        if runs(i) {
+            c += 1
+        }
+        i += 1
+    }
+    c
+}
+
+/// px166: RESCHED to processor `i` (one that runs threads, its POKED seen
+/// clear), POKED set first. The caller holds the kernel lock.
+pub fn resched(i: u64) {
+    percpu.put(record(i), percpu.POKED, 1)
+    apic.send_fixed(apic_of(i), RESCHED_VECTOR)
+}
+
+/// px166: RESCHED taken, on any processor, under the kernel lock
+/// (kernel/interrupts, before kernel/sched's `kick`): acknowledged at its
+/// local APIC, counted, and its POKED cleared, so the next processor to
+/// leave the kernel with threads queued may send it another.
+pub fn took_resched() {
+    apic.eoi()
+    percpu.count(percpu.RESCHED)
+    percpu.put(percpu.mine(), percpu.POKED, 0)
 }
 
 /// The processors whose record says IDLE now.
@@ -663,23 +780,39 @@ fn frame(f: u64, i: u64) -> u64 {
     unsafe { ((f + i * 8) as *u64).read_volatile() }
 }
 
-/// An application processor's interrupt (kernel/interrupts, every vector
-/// but the NMI): its tick, its spurious vector, or a stop. The frame to
-/// resume: `f` itself.
-pub fn ap_interrupt(f: u64) -> u64 {
+/// An application processor's interrupt before the kernel lock
+/// (kernel/interrupts, every vector but the NMI): its spurious vector,
+/// counted, and `f` to resume; 0 for a vector taken under the lock (its
+/// tick, RESCHED, a switch, a system call, a fault from ring 3 or in code
+/// that holds the lock: the caller takes the lock and routes it); any
+/// other stops it (px166: stage 1's stop, now for what it never takes).
+pub fn ap_early(f: u64) -> u64 {
     let v = frame(f, 15)
-    if v == timer.MASTER_BASE {
-        percpu.count(percpu.TICKS)
-        apic.eoi()
-        return f
-    }
     if v == SPURIOUS_VECTOR {
         percpu.count(percpu.SPURIOUS)
         return f
     }
+    if v == timer.MASTER_BASE || v == RESCHED_VECTOR || v == SWITCH || v == SYSCALL {
+        return 0
+    }
+    if v < 32 && (frame(f, 18) & 3 == 3 || klock.held_here()) {
+        return 0
+    }
     // # Safety: cpu.S's MOV from CR2 (the page fault's address for 14).
     let cr2 = if v == 14 { unsafe { pax_cr2() } } else { 0 }
     percpu.stop(v, frame(f, 16), frame(f, 17), cr2)
+}
+
+/// px166: an application processor's tick, under the kernel lock
+/// (kernel/interrupts, before kernel/sched's `preempt` for its running
+/// thread): counted (TICKS; USER too when `ring3`, it landed in ring 3)
+/// and acknowledged at its local APIC.
+pub fn ap_tick(ring3: bool) {
+    percpu.count(percpu.TICKS)
+    if ring3 {
+        percpu.count(percpu.USER)
+    }
+    apic.eoi()
 }
 
 /// An application processor's NMI (on its own IST2): the frame's address
@@ -707,10 +840,7 @@ pub fn report_stops() {
             log.put("cpus: cpu ")
             log.dec(i as int)
             log.put(" stopped: ")
-            if cause == percpu.CAUSE_SCHED {
-                log.put("entered the scheduler, rip ")
-                log.hex(percpu.get(w, percpu.RIP))
-            } else if cause == CAUSE_APIC {
+            if cause == CAUSE_APIC {
                 log.put("its local APIC answered APIC ID ")
                 log.dec(percpu.get(w, percpu.ERROR) as int)
                 log.put(", the bootloader's ")
