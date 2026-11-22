@@ -127,29 +127,36 @@ kernel/timer/*                  FULL
 boot/isr.S                      FULL
 boot/sched.S                    FULL
 boot/user.S                     FULL
-# --- the kernel's core: every suite on the pull-request leg (px40, ruling #76)
-# Every suite runs this code, so every suite runs; the other three legs
-# (release, UEFI) are the trunk push's and the nightly's (tl29).
-boot/io.S                       ALL
-boot/cpu.S                      ALL
-boot/fpu.S                      ALL
-kernel/serial/*                 ALL
-kernel/log/*                    ALL
-kernel/kmsg/*                   ALL # px130: every kernel line goes through it (kernel/log)
-kernel/panic/*                  ALL
-kernel/boot_info/*              ALL
-kernel/frames/*                 ALL
-kernel/paging/*                 ALL
-kernel/gdt/*                    ALL
-kernel/idt/*                    ALL
-kernel/interrupts/*             ALL
-kernel/apic/*                   ALL
-kernel/heap/*                   ALL
-kernel/sync/*                   ALL
-kernel/cpus/*                   ALL # kernel/acpi calls it on every boot (the MADT census)
-kernel/smp/*                    ALL # SMP stage 1: every processor started; the core calls it on every boot
-kernel/percpu/*                 ALL # each processor's state; the scheduler, GDT and interrupt entry read it
-kernel/fpu/*                    ALL
+# --- the kernel's core: every suite on every leg (px40, ruling #76)
+# Every suite runs this code, so every suite runs, on every leg: a pull
+# request gated on all pays one all run and its trunk push is a noop, where
+# a merge gated on full buys an all push after it (a push after a green
+# full runs every leg). All is the cheaper whenever the pull request takes
+# one gate run (about 2,700 Linux job-minutes against 860 + 2,700; break-
+# even about 1.5 runs). A pull request that expects to iterate in CI
+# dispatches `-f tier=full` for its runs before the last. No kernel or boot rule of
+# this map is ALL (tests/ci-plan P2): the same holds for the modules below
+# that every suite runs (acpi, clock, triage).
+boot/io.S                       FULL
+boot/cpu.S                      FULL
+boot/fpu.S                      FULL
+kernel/serial/*                 FULL
+kernel/log/*                    FULL
+kernel/kmsg/*                   FULL # px130: every kernel line goes through it (kernel/log)
+kernel/panic/*                  FULL
+kernel/boot_info/*              FULL
+kernel/frames/*                 FULL
+kernel/paging/*                 FULL
+kernel/gdt/*                    FULL
+kernel/idt/*                    FULL
+kernel/interrupts/*             FULL
+kernel/apic/*                   FULL
+kernel/heap/*                   FULL
+kernel/sync/*                   FULL
+kernel/cpus/*                   FULL # kernel/acpi calls it on every boot (the MADT census)
+kernel/smp/*                    FULL # SMP stage 1: every processor started; the core calls it on every boot
+kernel/percpu/*                 FULL # each processor's state; the scheduler, GDT and interrupt entry read it
+kernel/fpu/*                    FULL
 # px131: kernel/latency, the interrupts-off instrument: off unless the
 # command line says `latency`, so only mpx6-latency turns it on; the
 # scheduler's and the entry paths' calls into it run in every kernel, and
@@ -740,7 +747,7 @@ kernel/fb/*                     mpx6-bootlog
 # px76: the firmware's machine. kernel/acpi and kernel/clock are read by
 # every kernel that starts the tick (kernel/timer calibrates the local
 # APIC against the clock, which reads ACPI first), so a change can move
-# every suite: ALL, as kernel/timer. kernel/power is the end of every
+# every suite: FULL, as kernel/timer. kernel/power is the end of every
 # session that reboots or powers off (kernel/user's `end_reset` and
 # `the_end`): the disk suites whose sessions end in reboot(2), the
 # installer's, and mpx6-firmware's F3. kernel/msi is the message an MSI
@@ -750,8 +757,8 @@ kernel/fb/*                     mpx6-bootlog
 # firmware suite runs beyond the map's earlier rules (pci, xhci, screen,
 # fb) are its as well; tests/mpx6-metal* are its scripts (not suites of
 # their own) and kernel/kmain_metal* its kernels.
-kernel/acpi/*                  ALL
-kernel/clock/*                 ALL
+kernel/acpi/*                  FULL
+kernel/clock/*                 FULL
 kernel/power/*                 mpx6-firmware mpx6-root mpx6-install mpx6-ext2 mpx6-part mpx6-disktools mpx6-fsck
 kernel/msi/*                   mpx6-firmware mpx6-usb
 kernel/pci/*                   mpx6-firmware
@@ -764,12 +771,12 @@ kernel/kmain_metal*            mpx6-firmware
 # px77d: the metal triage. kernel/triage is called by kernel/panic's halt,
 # kernel/interrupts' fatal exception, kernel/screen's attach, kernel/fpu,
 # kernel/frames and kernel/apic in every kernel (each call returns at once
-# without `triage`), and boot/triage.S is on every kernel's roster: ALL,
+# without `triage`), and boot/triage.S is on every kernel's roster: FULL,
 # as the core. The suite that boots it (tests/mpx6-triage, the firmware
 # suite's F10) and the two sticks' confs it checks are the firmware
 # suite's.
-kernel/triage/*                ALL
-boot/triage.S                  ALL
+kernel/triage/*                FULL
+boot/triage.S                  FULL
 tests/mpx6-triage*             mpx6-firmware
 tests/mpx6-nmi*                mpx6-firmware
 # px161: the processor suite (px138's census, SMP stage 1's idle processors) is the
