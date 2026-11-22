@@ -1787,13 +1787,24 @@ fn put_old(i: u64, v: u64) {
     unsafe { ((pax_old_spaces as u64 + i * 8) as *u64).write_volatile(v) }
 }
 
+/// px166 (step 5b): whether space `o` is in another processor's CR3; `all`
+/// (the boot check's argument alone) answers every space held. An argument,
+/// not a switch: nothing of it outlives the call that passes it.
+fn held(o: u64, all: bool) -> bool {
+    all || tlb.user_of(o) != 0
+}
+
 /// px166 (step 5b): every parked space no other processor's CR3 holds any
 /// more, freed. Every `reap`, and before every park.
 fn reap_olds() {
+    reap_olds_as(false)
+}
+
+fn reap_olds_as(all: bool) {
     var i: u64 = 0
     while i < OLD_MAX {
         let o = old_at(i)
-        if o != 0 && tlb.user_of(o) == 0 {
+        if o != 0 && !held(o, all) {
             put_old(i, 0)
             let _freed = paging.free_user(o)
         }
@@ -1810,11 +1821,15 @@ fn reap_olds() {
 /// one PML4, and this processor's is the new space, so at most OLD_MAX - 1
 /// entries are held when a new one is parked. A full table is a kernel bug.
 fn leave_space(c: u64, old: u64) {
-    if tlb.user_of(old) == 0 {
+    park(c, old, false)
+}
+
+fn park(c: u64, old: u64, all: bool) {
+    if !held(old, all) {
         let _freed = paging.free_user(old)
         return
     }
-    reap_olds()
+    reap_olds_as(all)
     var i: u64 = 0
     while i < OLD_MAX {
         if old_at(i) == 0 {
@@ -1828,9 +1843,9 @@ fn leave_space(c: u64, old: u64) {
 
 /// px166 (step 5b): the boot's own check that the table parks more than one
 /// space at a time (one word a slot, the first form, could not): two fresh
-/// spaces parked while every space answers held (kernel/tlb's test hold,
-/// before any other processor runs), then both freed once let go. One line,
-/// tests/mpx6-smp's SMP-PARK.
+/// spaces parked as if another processor's CR3 held each (`park`'s `all`,
+/// passed here alone), then both freed by the real test once let go. One
+/// line, tests/mpx6-smp's SMP-PARK.
 pub fn park_selftest() {
     let a = paging.new_space(sv(S_PML4))
     let b = paging.new_space(sv(S_PML4))
@@ -1838,16 +1853,14 @@ pub fn park_selftest() {
         log.line("sched: parked spaces: no frames for the check")
         return
     }
-    tlb.hold_all_for_test(true)
-    leave_space(MAIN, a)
-    leave_space(MAIN, b)
+    park(MAIN, a, true)
+    park(MAIN, b, true)
     var held: u64 = 0
     var i: u64 = 0
     while i < OLD_MAX {
         if old_at(i) == a || old_at(i) == b { held += 1 }
         i += 1
     }
-    tlb.hold_all_for_test(false)
     reap_olds()
     var left: u64 = 0
     i = 0
