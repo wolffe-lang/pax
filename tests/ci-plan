@@ -18,12 +18,14 @@
   P2  the pr tier by path, one change per area: the network's suites for
       kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
       test, a user program and a shared device select their readers.
-      The kernel's core (px40, ruling #76: its fifteen modules and their
-      assembly) and CI's own files select every suite, on the pr leg,
-      which is the merge gate's shape: that run is named full.
+      CI's own files select every suite, on the pr leg, which is the
+      merge gate's shape: that run is named full.
   P3  FULL wins: the toolchain pins, the harness, the kernel's entry,
       link script and Limine configuration, the kernel-wide modules (the
-      scheduler, the timer, the interrupt and syscall entries), and any path no rule knows
+      scheduler, the timer, the interrupt and syscall entries), the
+      kernel's core (px40's modules and their assembly, and every other
+      kernel or boot path every suite runs: no such rule of the map is
+      ALL, so the gate is one all run and the push a noop), and any path no rule knows
       make a pull request's run all (every leg), alone or beside a core
       change; a pull request whose changed paths cannot be read is all too.
   P4  the wiring of .github/workflows/ci.yml: every suite job needs the
@@ -212,8 +214,8 @@ expect("P1 a pull request labelled full-matrix, notes only: every suite, the mer
        plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", FULL_SUITES)
 expect("P1 the full-matrix label added",
        plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", FULL_SUITES)
-expect("P1 a labelled push beside a core change: every suite, the merge legs",
-       plan(["kernel/heap/heap.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "full", FULL_SUITES)
+expect("P1 a labelled push beside a core change: every suite, every leg (the core is FULL)",
+       plan(["kernel/heap/heap.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
 expect("P1 the label added beside a core change: noop, the push's run at that head is already full",
        plan(["kernel/heap/heap.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
 expect("P1 a labelled push beside a FULL path: all",
@@ -490,8 +492,8 @@ expect("P2 AHCI fixtures and recordings reach their gate",
 # power module the suites whose sessions reboot and the firmware suite;
 # the metal scripts and kernels the firmware suite alone; its typing
 # helper the two jobs that run it in the all tier.
-expect("P2 kernel/acpi and kernel/clock reach every suite, on the pr leg: the merge gate's shape, full (px76)",
-       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "full", FULL_SUITES)
+expect("P2 kernel/acpi and kernel/clock reach every suite: every leg, as the core (px76)",
+       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "all", SUITES)
 expect("P2 kernel/msi reaches the firmware and USB suites alone (px76)",
        plan(["kernel/msi/msi.lu"], **pr), "pr", ["mpx6-usb", "mpx6-firmware"])
 expect("P2 kernel/power reaches the suites whose sessions reboot and the firmware suite (px76)",
@@ -499,8 +501,8 @@ expect("P2 kernel/power reaches the suites whose sessions reboot and the firmwar
 expect("P2 the metal scripts and kernels are the firmware suite's alone (px76)",
        plan(["tests/mpx6-metal", "tests/mpx6-metal-power", "tests/mpx6-metal-serial", "tests/mpx6-metal.d/panic-screen.py",
              "kernel/kmain_metal.lu", "kernel/kmain_metal_msi.lu", "tests/mpx6-firmware"], **pr), "pr", ["mpx6-firmware"])
-expect("P2 kernel/triage and boot/triage.S reach every suite, on the pr leg: full (px77d)",
-       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "full", FULL_SUITES)
+expect("P2 kernel/triage and boot/triage.S reach every suite: every leg, as the core (px77d)",
+       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "all", SUITES)
 expect("P2 the triage suite and the two sticks' confs are the firmware suite's alone (px77d)",
        plan(["tests/mpx6-triage", "tests/mpx6-triage.d/leg.py", "boot/limine-triage.conf", "boot/limine-bisect.conf", "boot/limine-fix.conf",
              "tests/mpx6-nmi", "tests/mpx6-nmi.d/inject.py"], **pr), "pr", ["mpx6-firmware"])
@@ -803,19 +805,24 @@ expect("P2 installer fixtures reach their gate only",
 
 expect("P2 CI itself: every suite, the pr leg: full", plan([".github/workflows/ci.yml"], **pr), "full", FULL_SUITES)
 
-# The kernel's core (px40, ruling #76): every suite, on the pr leg. A pull request's run of every
-# suite on that leg is the merge gate's shape (every suite on native BIOS), so it is named full and
-# the label's own event adds no second run at that head (P1).
+# The kernel's core (px40, ruling #76): every suite, on every leg (all). A merge gated on full buys an
+# all push after it (a push after a green full runs every leg), about 860 + 2,700 Linux job-minutes; a pull
+# request gated on all pays 2,700 a gate run and its push is a noop, the cheaper whenever it takes one gate run
+# (break-even 2,700 / (2,700 - 860), about 1.5 runs). A pull request that expects to iterate in CI dispatches full for its runs before the last.
 # The kernel-wide modules (the scheduler and its wake-ups, the timer, the interrupt entry, the syscall entry) are
 # FULL instead (P3): every process reaches them, and the soak and load legs of the other three legs are where a
 # lost wake-up or a timing change shows.
 CORE = ["serial", "log", "panic", "boot_info", "frames", "paging", "gdt", "idt", "interrupts",
         "apic", "heap", "sync", "fpu"]
 CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/fpu.S"]
-expect("P2 a core-only change (kernel/heap): every suite, the pr leg: full", plan(["kernel/heap/heap.lu"], **pr), "full", FULL_SUITES)
+expect("P2 a core-only change (kernel/heap): every suite, every leg: all", plan(["kernel/heap/heap.lu"], **pr), "all", SUITES)
 for p in ["kernel/%s/%s.lu" % (m, m) for m in CORE] + CORE_ASM:
-    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "full", FULL_SUITES)
-expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/heap/heap.lu"], **pr), "full", FULL_SUITES)
+    expect("P2 the core: %s: all" % p, plan([p, "notes/px99.md"], **pr), "all", SUITES)
+expect("P2 the core beside a narrow change: all", plan(["kernel/tcp/tcp.lu", "kernel/heap/heap.lu"], **pr), "all", SUITES)
+core_all = [l.split("#", 1)[0].strip() for l in open(os.path.join(ROOT, "tools/ci-tiers.map"))
+            if re.match(r"^(kernel|boot)/\S*\s+ALL\b", l)]
+say(not core_all, "P2 no kernel or boot rule of the map is ALL (every suite on the pr leg alone): code every suite runs "
+    "plans every leg%s" % (" (%d are: %s)" % (len(core_all), ", ".join(r.split()[0] for r in core_all[:6])) if core_all else ""))
 
 # --- P3 FULL wins ---------------------------------------------------------------------
 PINS = ["kernel/wolf.pin", "kernel/wolf.pkg", "boot/limine.pin"]
@@ -837,8 +844,10 @@ def also(got):
     return got.get("also_release")
 say(also(plan(["kernel/tcp/tcp.lu"], event="pull_request", action="synchronize", labels="full-matrix")) == ["mpx6-firmware"],
     "P9 a labelled kernel change: the firmware suite on the release legs as well")
-say(also(plan(["boot/triage.S"], **pr)) == ["mpx6-firmware"],
-    "P9 a kernel change whose every-suite pr run (named full) includes the firmware suite: its release legs as well")
+say(also(plan(["kernel/tcp/tcp.lu", ".github/workflows/ci.yml"], **pr)) == ["mpx6-firmware"],
+    "P9 a kernel change beside CI's own file (an every-suite pr run, named full) includes the firmware suite: its release legs as well")
+say(also(plan(["boot/triage.S"], **pr)) == [],
+    "P9 a change to the kernel's core: nothing more, its all run has the release legs")
 say(also(plan(["kernel/usb_storage/usb_storage.lu"], **pr)) == ["mpx6-firmware"],
     "P9 a kernel change whose narrow pr run includes the firmware suite: its release legs as well")
 say(also(plan(["kernel/tcp/tcp.lu"], **pr)) == [],
