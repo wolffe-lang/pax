@@ -69,6 +69,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            gate `active N`, and with --scaling gate under KVM the four-job wall 1.6
                            times the one-job wall or less (minimum of three rounds each).
 
+  every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
+                           `klock: entered from ring 3 holding it`): red by that line verbatim, silent when green.
+
 A row prints `PASS ROW tag: …` or `FAIL ROW tag: …`, a row this boot does not ask `NOT-ASKED ROW
 tag: …`, and what a red row found beyond its first reason `INFO ROW tag: …`. Exit 1 if any row failed.
 """
@@ -621,5 +624,11 @@ elif a.kind == 'build':
         fail('SMP-BUILD', why[0], why[1:] + [fig])
     else:
         ok('SMP-BUILD', fig + ('' if a.scaling == 'gate' or N == 1 else '; the 1.6 bound is the scaling hold\'s (reported)'))
+
+# Every kind: the kernel lock's door (kernel/interrupts' `pax_interrupt`) panics when a processor comes in from
+# ring 3 still holding the lock; that line, verbatim, is SMP-KLOCK's red (the lock plant's name). Silent when green.
+klock = [ln.strip() for ln in re.findall(r'^PANIC klock: .*$', text, re.M)]
+if klock:
+    fail('SMP-KLOCK', klock[0], klock[1:])
 
 sys.exit(1 if red else 0)
