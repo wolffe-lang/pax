@@ -260,7 +260,7 @@ def stress_text(stage=2, extra='', lost=0, unlocked=0, done=True, gains=None):
 sa = ['--kind', 'stress', '--smp', '4', '--boot', '3']
 case('stress green', stress_text(), sa, {'SMP-LOCK'}, set())
 case('stress at stage 1: red at the gate', stress_text(stage=1), sa, set(), {'SMP-LOCK'})
-# kernel/sched's duplicate-running check (`take`): a slot the queue hands back that a processor still runs;
+# kernel/sched's duplicate-running check (`take_next`): a slot the queue hands back that a processor still runs;
 # SMP-DUP carries that line verbatim in every kind (the W_CPU plant's name), and no other panic is it
 DUP = 'PANIC sched: slot 12 running on two processors: state 1, cpu 0, taken from the queue by cpu 2\n'
 case('the plant lock: a slot on two processors, the boot dies', stress_text(extra=DUP, done=False), sa, set(),
