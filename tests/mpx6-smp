@@ -7,8 +7,9 @@
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
 #    boots' logs still under PAX_BUILD)
 #
-# The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green) and the
-# harness's processor knob (knob-selftest.sh: PAX_SMP through tools/qemu-run and tools/tour). Then per
+# The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green), the
+# harness's processor knob (knob-selftest.sh: PAX_SMP through tools/qemu-run and tools/tour) and the
+# entry path's frame offsets (frame-layout.py, FRAME-LAYOUT, with its own proof). Then per
 # tier: kmain_console with tests/mpx6-smp.d/probe.c as its only command, booted under each firmware:
 #   - at each of SMP_COUNTS processors, the default kind: SMP-ACTIVE, SMP-RUN, SMP-TLB, SMP-SIGNAL,
 #     SMP-EXIT, SMP-WAIT;
@@ -41,6 +42,8 @@ case $firmware in both) firmware='bios uefi' ;; esac
 case $scaling in gate|report|skip) ;; *) die "SMP_SCALING is gate, report or skip, not $scaling" ;; esac
 python3 -I -B tests/mpx6-smp.d/rows-selftest.py
 bash tests/mpx6-smp.d/knob-selftest.sh
+python3 -I -B tests/mpx6-smp.d/frame-layout.py --selftest
+python3 -I -B tests/mpx6-smp.d/frame-layout.py .
 rc=0
 hostcpus=$(nproc) # the CPUs this take may use (taskset's, in a container): timed bounds need the boot to fit them
 dump=(--cmd stop --cmd 'info registers -a' --cmd cont --cmd stop --cmd 'info registers -a' --cmd cont
