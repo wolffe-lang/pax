@@ -71,6 +71,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
 
   every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
                            `klock: entered from ring 3 holding it`): red by that line verbatim, silent when green.
+              SMP-DUP      no `PANIC sched: slot N running on two processors…` line (kernel/sched's `take`: a
+                           slot the queue hands back that is RUNNING or still names a processor): red by
+                           that line verbatim, silent when green.
 
 A row prints `PASS ROW tag: …` or `FAIL ROW tag: …`, a row this boot does not ask `NOT-ASKED ROW
 tag: …`, and what a red row found beyond its first reason `INFO ROW tag: …`. Exit 1 if any row failed.
@@ -630,5 +633,11 @@ elif a.kind == 'build':
 klock = [ln.strip() for ln in re.findall(r'^PANIC klock: .*$', text, re.M)]
 if klock:
     fail('SMP-KLOCK', klock[0], klock[1:])
+
+# Every kind: kernel/sched's duplicate-running check (`take`) panics on a slot the run queue hands back that
+# a processor still runs; that line, verbatim, is SMP-DUP's red (the W_CPU plant's name). Silent when green.
+dup = [ln.strip() for ln in re.findall(r'^PANIC sched: slot \d+ running on two processors.*$', text, re.M)]
+if dup:
+    fail('SMP-DUP', dup[0], dup[1:])
 
 sys.exit(1 if red else 0)
