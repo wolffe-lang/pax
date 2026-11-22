@@ -14,7 +14,8 @@
  * eight at once, and a fork from a second thread.
  *
  *   forks              every row, then `forks: done`
- *   forks exec A B     the exec rows' new image (internal)
+ *   forks exec A B     the exec rows' new image (internal); its entry point stores
+ *                      the registers exec left (forks_entry)
  *
  * Every line is `case: answer`; no pid, time or address is printed. A
  * child prints only while its parent waits for it, so the lines' order is
@@ -44,6 +45,21 @@
 
 extern char **environ;
 static const char *self = "/bin/forks";
+
+/* pax#510: the registers a new image starts with, read before musl's start-up runs: this program's entry
+ * point is forks_entry (tools/mkforks links it with -e), which stores rax, rcx and rdx as exec left them
+ * and goes on to musl's _start with the stack untouched. The exec rows print them (rax is execve's own
+ * result, 0 when it succeeded; the others as the kernel starts every new image). */
+unsigned long entry_regs[3];
+__asm__(".text\n"
+        ".globl forks_entry\n"
+        ".type forks_entry, @function\n"
+        "forks_entry:\n"
+        "\tmovq %rax, entry_regs(%rip)\n"
+        "\tmovq %rcx, entry_regs+8(%rip)\n"
+        "\tmovq %rdx, entry_regs+16(%rip)\n"
+        "\tjmp _start\n"
+        ".size forks_entry, . - forks_entry\n");
 
 static void say(const char *fmt, ...) {
     char b[1024];
@@ -319,6 +335,7 @@ static void fork_rows(void) {
 /* E: exec after fork. The new image is this program again (`exec`). */
 static int exec_image(int argc, char **argv) {
     say("exec: argv %s %s %s, %d words\n", argv[1], argc > 2 ? argv[2] : "-", argc > 3 ? argv[3] : "-", argc);
+    say("exec: registers at the new image's entry: rax %#lx rcx %#lx rdx %#lx\n", entry_regs[0], entry_regs[1], entry_regs[2]);
     int w = write(3, "written", 7);
     say("exec: the pipe kept across exec (descriptor 3): %s\n", yes(w == 7));
     say("exec: SIGUSR2 ignored across exec: %s; SIGUSR1's handler reset to SIG_DFL: %s\n",
