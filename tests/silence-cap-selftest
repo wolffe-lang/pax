@@ -3,7 +3,8 @@
 
   W1  a command silent past its limit is stopped: exit 124, a line naming the limit and the last line it printed, and
       an ::error:: annotation with the same text
-  W2  before it is stopped, every process of its group is printed: pid, elapsed time, command line
+  W2  before it is stopped, every process of its group is printed (pid, elapsed time, command line): a group of five,
+      two shells and three children, each by its command line
   W3  nothing of the group is left after the cut: its background children too
   W4  a command that keeps printing past the limit is not stopped, and its output passes through whole
   W5  a byte with no newline is output too
@@ -61,16 +62,27 @@ if linux:
     cut = 'silence-cap: no output for 2 s after "start"; stopped the step (exit 124)'
     say(rc == 124 and cut in out and ('::error::' + cut) in out and secs < 15,
         'W1 silent past 2 s: exit %d in %.1f s, the cut line and its annotation%s' % (rc, secs, '' if cut in out else ' (missing: %r)' % out[-300:]))
-    # The leader is `sleep 617` itself (bash runs the last command of -c in its own place). Every word about the cut,
-    # the plain line and its annotation, follows the group's lines (a take on hasu, 2026-11-22 07:08Z, found the
-    # annotation printed first).
+    # A group of five that stays: a shell (`; wait` keeps it from running its last command in its own place), its
+    # background child, a second shell, and that shell's two children, one in the background. Every one of them is
+    # listed, by its command line, and every word about the cut (the plain line and its annotation) follows the
+    # listing (a take on hasu, 2026-11-22 07:08Z, found the annotation printed first).
+    out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c',
+                         'echo start; sleep 622 & bash -c "sleep 623 & sleep 624; wait"; wait'])
     tree = re.findall(r'^silence-cap: pid \d+ elapsed \d+:\d\d:\d\d (.*)$', out, re.M)
+    want = {'the first shell': lambda c: c.startswith('bash -c echo start; sleep 622'),
+            'its background child': lambda c: c == 'sleep 622',
+            'the second shell': lambda c: c == 'bash -c sleep 623 & sleep 624; wait',
+            'its background child, sleep 623': lambda c: c == 'sleep 623',
+            'its child, sleep 624': lambda c: c == 'sleep 624'}
+    missing = [k for k, f in want.items() if not any(f(c) for c in tree)]
+    cut2 = 'silence-cap: no output for 2 s after "start"; stopped the step (exit 124)'
     first_pid = out.find('silence-cap: pid ')
-    plain = out.find('\n' + cut)
+    plain = out.find('\n' + cut2)
     note = out.find('::error::silence-cap: ')
-    before = tree and 0 <= first_pid < plain and first_pid < note
-    say('sleep 617' in tree and before, 'W2 the group printed before the cut: %s (first pid line at %d, the cut line at %d, '
-        'its annotation at %d)' % (tree or 'no pid lines', first_pid, plain, note))
+    before = bool(tree) and 0 <= first_pid < plain and first_pid < note
+    say(rc == 124 and not missing and before,
+        'W2 the group of five listed before the cut: %d lines%s; first pid line at %d, the cut line at %d, its annotation at %d' % (
+            len(tree), ', missing ' + ', '.join(missing) if missing else ', every one by its command line', first_pid, plain, note))
     out, rc, secs = run(['--seconds', '2', '--', 'bash', '-c', 'echo go; sleep 618 & sleep 619; wait'])
     time.sleep(0.5)
     left = alive('618') + alive('619')
