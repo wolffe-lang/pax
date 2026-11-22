@@ -105,7 +105,7 @@ def tlb_lines(stage=2, faulted='yes', lat=40, stale=0, tlb='+1'):
     return out + 'SMP-TLB done\n'
 
 
-def signal_lines(stage=2, usr1=None, kill=None, tgk=None, tid='yes', kill_status='0x9'):
+def signal_lines(stage=2, usr1=None, kill=None, tgk=None, tid='yes', kill_status='0x9', resched='0:1 1:23 2:0 3:0'):
     w = '-' if stage == 1 else '1'
     usr1 = usr1 or [30] * 9
     kill = kill or [50] * 5
@@ -114,6 +114,7 @@ def signal_lines(stage=2, usr1=None, kill=None, tgk=None, tid='yes', kill_status
     out += 'SMP-SIGNAL stop status 0x137f cont status 0xffff held yes resumed yes\n'
     out += ''.join(f'SMP-SIGNAL kill {k} latency-us {v} status {kill_status} w-cpu {w} p-cpu 0\n' for k, v in enumerate(kill))
     out += ''.join(f'SMP-SIGNAL tgkill {k} latency-us {v} tid-ok {tid} t-cpu {w} m-cpu 0\n' for k, v in enumerate(tgk))
+    out += f'SMP-SIGNAL resched {resched}\n' if resched is not None else ''
     return out + 'SMP-SIGNAL tgkill-status 0x0\nSMP-SIGNAL done\n'
 
 
@@ -181,6 +182,10 @@ case('the plant resched: signals wait for the tick', rows_text(4, signal=signal_
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'})
 case('the plant resched under TCG: printed, not gated', rows_text(4, signal=signal_lines(usr1=tick, tgk=tick)),
      ['--kind', 'rows', '--smp', '4'], ALL6, set(), meta=TCG)
+case('no RESCHED taken where the targets ran', rows_text(4, signal=signal_lines(resched='0:1 1:0 2:0 3:0')),
+     ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'})
+case('no resched line', rows_text(4, signal=signal_lines(resched=None)), ['--kind', 'rows', '--smp', '4'],
+     ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'})
 case('one slow signal of nine is allowed', rows_text(4, signal=signal_lines(usr1=[30] * 8 + [5000])),
      ['--kind', 'rows', '--smp', '4'], ALL6, set())
 case('tgkill on the wrong thread', rows_text(4, signal=signal_lines(tid='no')), ['--kind', 'rows', '--smp', '4'],
