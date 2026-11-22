@@ -108,10 +108,11 @@
                        buckets its system call looked at, which a wake
                        of one object reads while it waits; px166: four,
                        the fourth the processor running it (its index
-                       plus one; 0 while it runs nowhere); five, the
-                       fifth the space its exec left while another
-                       processor's CR3 still held it (kernel/sched's
-                       W_OLD, freed by `reap`)
+                       plus one; 0 while it runs nowhere)
+     pax_old_spaces    px166: 64 words, the spaces execs left while
+                       another processor's CR3 still held them (kernel/
+                       sched's `leave_space`), freed by `reap`; at most
+                       one held per other processor, so never full
      pax_pid_hint     px126: 4096 words, `pid mod 4096` to the slot
                        that last took that pid or tid, plus one: a hint
                        kernel/sched checks, walking the slots only when
@@ -236,7 +237,11 @@ pax_threads_end:
         .p2align 6
         .globl pax_slot_words
 pax_slot_words:
-        .zero 1024 * 5 * 8
+        .zero 1024 * 4 * 8
+        .p2align 6
+        .globl pax_old_spaces
+pax_old_spaces:
+        .zero 64 * 8
         .p2align 6
         .globl pax_pid_hint
 pax_pid_hint:
