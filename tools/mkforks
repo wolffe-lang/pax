@@ -29,8 +29,15 @@ fi
 # Each source by its whole name: the CI map reads the paths a tool names.
 for src in "$PAX_ROOT/user/elf/forks.c" "$PAX_ROOT/user/elf/usage.c"; do
     p=$(basename "$src" .c)
+    # pax#510: forks enters at forks_entry, which keeps the registers exec left before musl's _start
+    entry=(); [ "$p" = forks ] && entry=(-Wl,-e,forks_entry)
     "$cc" -static -no-pie -O1 -pthread -Wall -Wextra -Wno-unused-result -Wl,--build-id=none -Wl,-z,noexecstack \
-        -o "$out/$p" "$src" || die "cc: $p"
+        ${entry[@]+"${entry[@]}"} -o "$out/$p" "$src" || die "cc: $p"
+    if [ "$p" = forks ]; then
+        e=$(readelf -hW "$out/$p" | sed -n 's/^ *Entry point address: *//p')
+        s=$(readelf -sW "$out/$p" | awk '$8 == "forks_entry" { print "0x" $2 }' | head -n 1)
+        [ "$((e))" = "$((s))" ] || die "forks: its entry $e is not forks_entry ($s)"
+    fi
     readelf -hW "$out/$p" | grep -Eq 'Type: +EXEC' || die "$p is not ET_EXEC"
     ! readelf -lW "$out/$p" | grep -q INTERP || die "$p has a PT_INTERP (not static)"
     ! readelf -SW "$out/$p" | grep -q '\.dynamic' || die "$p has a .dynamic section"
