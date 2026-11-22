@@ -1815,8 +1815,9 @@ Measured on the same machines (`/mnt/steamlib/lanes/px76/measure.sh`, its `MEASU
 - **QMP** (QEMU's documented machine protocol): `memsave` of boot/isr.S's `pax_tick_count` to hold the repeat row
   for 100 guest ticks; `input-send-event` for the press and the release.
 - **git's documented options** (`git-config(1)`: `http.lowSpeedLimit`, `http.lowSpeedTime`) and the error words
-  git and curl print, as observed (pax#259's `curl 56 Recv failure`) and as the selftest's local `file://` fetch
-  prints them; `tools/fetch-retry`.
+  git and curl print, as observed (pax#259's `curl 56 Recv failure`; pax#517's first attempt's `curl: (22) The
+  requested URL returned error: 403` on a release download) and as the selftest's local `file://` fetch prints them;
+  curl's documented options (`--speed-limit`, `--speed-time`) and exit codes for `--url`; `tools/fetch-retry`.
 - **The pipe shape** (pax#256): POSIX's awk `exit` and SIGPIPE on a write to a closed pipe, as px78b measured them
   (`notes/px78b-the-one-word-confirmation.md` §4); no awk's or nm's source.
 - No Linux source; no other kernel's, firmware's, bootloader's, emulator's or driver's source.
