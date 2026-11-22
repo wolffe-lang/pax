@@ -258,8 +258,17 @@ def stress_text(stage=2, extra='', lost=0, unlocked=0, done=True, gains=None):
 sa = ['--kind', 'stress', '--smp', '4', '--boot', '3']
 case('stress green', stress_text(), sa, {'SMP-LOCK'}, set())
 case('stress at stage 1: red at the gate', stress_text(stage=1), sa, set(), {'SMP-LOCK'})
-case('the plant lock: a slot on two processors, the boot dies',
-     stress_text(extra='PANIC sched: slot 12 running on two processors 0x000000000000000c\n', done=False), sa, set(), {'SMP-LOCK'})
+# kernel/sched's duplicate-running check (`take`): a slot the queue hands back that a processor still runs;
+# SMP-DUP carries that line verbatim in every kind (the W_CPU plant's name), and no other panic is it
+DUP = 'PANIC sched: slot 12 running on two processors: state 1, cpu 0, taken from the queue by cpu 2\n'
+case('the plant lock: a slot on two processors, the boot dies', stress_text(extra=DUP, done=False), sa, set(),
+     {'SMP-LOCK', 'SMP-DUP'})
+case('a slot on two processors in a rows boot', head('rows') + DUP, ['--kind', 'rows', '--smp', '4'], set(),
+     ALL6 | {'SMP-DUP'})
+case('a slot on two processors in a cap2 boot', head('cap') + DUP, ['--kind', 'cap2', '--smp', '4', '--cap', '2'], set(),
+     {'SMP-CAP', 'SMP-DUP'})
+case('a slot on two processors at one processor', head('one') + DUP, ['--kind', 'one', '--smp', '1'], set(),
+     {'SMP-ONE', 'SMP-DUP'})
 case('a lost signal in the storm', stress_text(lost=1), sa, set(), {'SMP-LOCK'})
 # the kernel lock's door (kernel/interrupts): a processor carrying the lock into ring 3 panics by name, and
 # SMP-KLOCK carries that line; another panic (the slot on two processors, above) is not the lock's door
