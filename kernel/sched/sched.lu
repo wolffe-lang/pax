@@ -558,6 +558,14 @@ fn put_field(s: u64, off: int, v: u64) {
 }
 
 /// Scheduler word `i` (S_*), read volatile (#598).
+/// px166: whether the running thread `c` was ended in place, while it ran,
+/// by another processor's exit_group or exec (`end_others` marks it DEAD):
+/// `preempt` and `kick` switch it off and never queue it again
+/// (tests/mpx6-smp's SMP-DEAD).
+fn ended_in_place(c: u64) -> bool {
+    field(c, offset_of(Thread, state)) == DEAD
+}
+
 /// px166: 1 once `reap` or `ended` has put off a slot by the departure
 /// rule (`departure`), until a processor next moves off a DEAD slot.
 var departing: u64 = 0
@@ -1207,7 +1215,7 @@ pub fn preempt(f: u64) -> u64 {
     save_frame(c, f)
     // px166: a thread ended in place by another processor (DEAD: exit_group,
     // exec) is switched off at its tick, never queued again.
-    if !idle(c) && field(c, offset_of(Thread, state)) != DEAD {
+    if !idle(c) && !ended_in_place(c) {
         put_field(c, offset_of(Thread, state), READY)
         enqueue(c)
     }
@@ -1641,6 +1649,12 @@ pub fn kick(f: u64) -> u64 {
     // interrupt landed where the tick could have preempted (it was taken,
     // so IF was set: ring 3, a kernel thread outside its locks), and the
     // running thread goes to the tail as `preempt` would send it.
+    // px166: a thread another processor ended in place (DEAD) is switched
+    // off here, the RESCHED the departure rule sends, never resumed or queued.
+    if ended_in_place(c) {
+        save_frame(c, f)
+        return run_next()
+    }
     if !urgent_waits(c) {
         return f
     }
