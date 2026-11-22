@@ -102,10 +102,6 @@ pub const STOPPED: u64 = 4
 /// (CPU 0's idle context is kernel/sched's slot 1).
 pub const IDLE_SLOT: u64 = 0xffffffffffffffff
 
-/// CAUSE for a processor other than CPU 0 at the scheduler's tick or
-/// switch (`boot_only`); an exception's cause is its vector (0-255).
-pub const CAUSE_SCHED: u64 = 0x1000
-
 /// `pax_ap_boot`'s words (kernel/smp's header says what each holds).
 pub const W_CR3: u64 = 0
 pub const W_CR0: u64 = 2
@@ -251,20 +247,5 @@ pub fn stop(cause: u64, error: u64, rip: u64, cr2: u64) -> never {
             done = ok
         }
         pax_halt()
-    }
-}
-
-/// px161: the scheduler's tick and switch run
-/// on CPU 0 alone in stage 1. On any other processor this stops it, its
-/// cause CAUSE_SCHED and the RIP of `f` (the frame the scheduler was
-/// handed: boot/isr.S's, its RIP at byte 136), so an application
-/// processor that ever reached the scheduler is named by the boot
-/// processor, never run on.
-pub fn boot_only(f: u64) {
-    if index() != 0 {
-        // # Safety: `f` is the trampoline's frame (176 bytes), live for
-        // the handler that passed it.
-        let rip = unsafe { ((f + 136) as *u64).read_volatile() }
-        stop(CAUSE_SCHED, 0, rip, 0)
     }
 }
