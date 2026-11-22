@@ -29,13 +29,17 @@
 #   tls      the TLS session dropped (`GnuTLS recv error`,
 #            `gnutls_handshake() failed`, `SSL_read`, `SSL_ERROR_SYSCALL`,
 #            `OpenSSL SSL_connect`, curl 35)
-#   server   GitHub's own failure (an HTTP 5xx) or its rate limit (429)
+#   server   GitHub's own failure (an HTTP 5xx), its rate limit (429), or
+#            its 403: every repository and archive the harness fetches is
+#            public, so a 403 is the host's passing trouble, not a
+#            refusal (a download's: pax#517's run 44993722155; a git
+#            fetch's: run 45044644655's mkaspen, aspen's pinned revision)
 # A curl number is read in git's form (`curl 56`) and in curl's own
 # (`curl: (56)`), so --url's downloads are classed the same way.
 # Anything else stops at the first attempt and says so (`not retried`):
 # a revision the server does not have (`not our ref`, `couldn't find
 # remote ref`, an unadvertised object), a repository that is not there, a
-# refusal (any other HTTP 4xx), a local error. Those are checked first,
+# refusal (any other HTTP 4xx: a 404, a 401), a local error. Those are checked first,
 # so a refusal is never retried whatever else its message says.
 #
 # With SHA, the commit fetched (FETCH_HEAD) is compared with it after the
@@ -47,14 +51,11 @@
 #
 # A download in place of a git fetch: `curl -fsSL` of URL into FILE, held
 # to the same floor (--speed-limit 1000 --speed-time 60), tried the same
-# number of times with the same waits and classes. One difference: an HTTP
-# 403 from a download is retried as `server`. The archives the harness
-# downloads are public, so their host's 403 is its own passing trouble,
-# not a refusal: the first attempt of pax#517's run 44993722155 lost a job
-# to one (`curl: (22) The requested URL returned error: 403`, 60 ms into
-# the step), and the second attempt fetched the same archive. A git
-# fetch's 403 is still a refusal. Other 4xx answers (a 404: no such
-# release) are not retried. The download goes to FILE.part;
+# number of times with the same waits and classes: a 403 is retried as
+# `server`, any other 4xx (a 404: no such release) is not. The first
+# attempt of pax#517's run 44993722155 lost a job to one 403 (`curl: (22)
+# The requested URL returned error: 403`, 60 ms into the step), and the
+# second attempt fetched the same archive. The download goes to FILE.part;
 # its sha256 must be SHA256 (`refused: its sha256 is …`, exit 5, nothing
 # left), and only then is it moved to FILE. Every download of the harness
 # goes through it (tools/fetch-wolf, fetch-lupin, fetch-limine,
@@ -86,7 +87,7 @@ trap 'rm -f "$err"' EXIT
 
 # The class of a failed attempt's stderr, or nothing: not retried.
 classify() {
-    if [ "$mode" = url ] && grep -Eq "returned error: 403|HTTP 403" "$1"; then
+    if grep -Eq "returned error: 403|HTTP 403" "$1"; then
         echo server
         return 0
     fi
