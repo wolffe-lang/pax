@@ -12,7 +12,8 @@
 //!    16 KSTACK   SYSCALL's stack top (the running thread's kernel stack)
 //!    24 USP      the user RSP while pax_syscall_entry builds the frame
 //!    32 CURRENT  the running thread's slot (kernel/sched); IDLE_SLOT on an
-//!                application processor, which runs no thread
+//!                application processor in its idle loop (px166: one that
+//!                runs threads leaves it for a thread, kernel/smp's `runs`)
 //!    40 APIC     its local APIC ID     48 UID  its ACPI processor UID
 //!    56 STATE    BOOT, RELEASED, IDLE or STOPPED
 //!    64 TICKS    its local timer's interrupts (an application processor's)
@@ -24,13 +25,25 @@
 //!   144 TSS, 152 GDT: the addresses its TR and GDTR name
 //!   160 GS_SEEN  IA32_GS_BASE as the processor itself read it
 //!   168 NMI_AT   the frame its last NMI was taken on (its IST2 stack)
+//!   px166 (SMP stage 2), kernel/sched's words for what this processor runs:
+//!   176 SLICE    the tick its running thread was switched in at (the quantum)
+//!   184 IN_TSC   the TSC then (`account` compares one processor's reads only)
+//!   192 IDLE_FRAME  an application processor's idle loop's frame, saved while
+//!                it runs a thread and resumed when the run queue is empty
+//!   200 USER     its ticks that landed in ring 3
+//!   208 RESCHED  the RESCHED interrupts it took (kernel/smp's vector 48)
+//!   216 POKED    1 while a RESCHED sent to it has not been taken
 //!   256 its GDT (7 descriptors), 320 its GDTR, 384 its TSS (104 bytes)
 //!
 //! Each word is written by its own processor alone after it is released
-//! (the counters, CURRENT, KSTACK, USP, the cause), or by the boot
-//! processor alone before (the rest); every other processor only reads,
-//! volatile. `pax_ap_boot`'s words (boot/isr.S; kernel/smp's header) are
-//! the rest of what the processors share.
+//! (the counters, CURRENT, KSTACK, USP, the cause, kernel/sched's words),
+//! or by the boot processor alone before (the rest); every other processor
+//! only reads, volatile. POKED is the one exception: the processor that
+//! sends the RESCHED sets it and the one that takes it clears it, each
+//! holding the kernel lock (kernel/klock), as every reader does. CURRENT
+//! changes only under the lock too, so a processor holding it reads every
+//! other's CURRENT as it stands. `pax_ap_boot`'s words (boot/isr.S;
+//! kernel/smp's header) are the rest of what the processors share.
 //!
 //! Written from the Intel SDM vol. 2 (SWAPGS, RDMSR, WRMSR), vol. 3A
 //! §3.4.4 (the GS base in 64-bit mode) and vol. 4 (IA32_GS_BASE
@@ -69,6 +82,12 @@ pub const TSS: u64 = 144
 pub const GDT: u64 = 152
 pub const GS_SEEN: u64 = 160
 pub const NMI_AT: u64 = 168
+pub const SLICE: u64 = 176
+pub const IN_TSC: u64 = 184
+pub const IDLE_FRAME: u64 = 192
+pub const USER: u64 = 200
+pub const RESCHED: u64 = 208
+pub const POKED: u64 = 216
 pub const GDT_AREA: u64 = 256
 pub const GDTR_AREA: u64 = 320
 pub const TSS_AREA: u64 = 384
@@ -79,7 +98,8 @@ pub const RELEASED: u64 = 2
 pub const IDLE: u64 = 3
 pub const STOPPED: u64 = 4
 
-/// An application processor's CURRENT: its idle loop, no thread's slot.
+/// An application processor's CURRENT in its idle loop: no thread's slot
+/// (CPU 0's idle context is kernel/sched's slot 1).
 pub const IDLE_SLOT: u64 = 0xffffffffffffffff
 
 /// CAUSE for a processor other than CPU 0 at the scheduler's tick or
