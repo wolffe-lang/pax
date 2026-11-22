@@ -100,12 +100,17 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 srcdir=$(cd "$(dirname "$src")" && pwd)
 # px166: --test-words (tests/mpx6-smp's test kinds alone): the kernel's tree copied under OUTDIR with
-# tests/mpx6-smp.d/testwords.lu in kernel/testwords/testwords.lu's place; never a shipped kernel.
+# tests/mpx6-smp.d/testwords.lu in kernel/testwords/testwords.lu's place; never a shipped kernel. The copy is
+# OUTDIR/test-words/kernel, beside links to the checkout's boot/ and user/: kernel/wolf.pkg names its assembly
+# as ../boot/*.S and ../user/*, which must resolve from the copy as from kernel/.
 if [ "$testwords" = 1 ]; then
     [ "$(basename "$srcdir")" = kernel ] || die "--test-words builds a kernel/ source"
-    rm -rf "$out/kernel-test-words" && cp -R "$srcdir" "$out/kernel-test-words"
-    cp "$PAX_ROOT/tests/mpx6-smp.d/testwords.lu" "$out/kernel-test-words/testwords/testwords.lu"
-    srcdir=$out/kernel-test-words
+    tw=$out/test-words
+    rm -rf "$tw" && mkdir -p "$tw" && cp -R "$srcdir" "$tw/kernel"
+    ln -s "$(dirname "$srcdir")/boot" "$tw/boot"
+    ln -s "$(dirname "$srcdir")/user" "$tw/user"
+    cp "$PAX_ROOT/tests/mpx6-smp.d/testwords.lu" "$tw/kernel/testwords/testwords.lu"
+    srcdir=$tw/kernel
 fi
 name=$(basename "$src" .lu)
 obj=$out/$name.o
