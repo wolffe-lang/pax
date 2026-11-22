@@ -80,12 +80,13 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
-tier=native hosted=0 src=$PAX_ROOT/kernel/kmain.lu out=
+tier=native hosted=0 src=$PAX_ROOT/kernel/kmain.lu out= testwords=0
 while [ $# -gt 0 ]; do
     case $1 in
         --release) tier=release; shift ;;
         --hosted)  hosted=1; shift ;;
         --src)     src=$2; shift 2 ;;
+        --test-words) testwords=1; shift ;;
         -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         -*)        die "unknown option: $1" ;;
         *)         [ -z "$out" ] || die "one OUTDIR only"; out=$1; shift ;;
@@ -98,6 +99,14 @@ need "$wolf" nm objdump
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 srcdir=$(cd "$(dirname "$src")" && pwd)
+# px166: --test-words (tests/mpx6-smp's test kinds alone): the kernel's tree copied under OUTDIR with
+# tests/mpx6-smp.d/testwords.lu in kernel/testwords/testwords.lu's place; never a shipped kernel.
+if [ "$testwords" = 1 ]; then
+    [ "$(basename "$srcdir")" = kernel ] || die "--test-words builds a kernel/ source"
+    rm -rf "$out/kernel-test-words" && cp -R "$srcdir" "$out/kernel-test-words"
+    cp "$PAX_ROOT/tests/mpx6-smp.d/testwords.lu" "$out/kernel-test-words/testwords/testwords.lu"
+    srcdir=$out/kernel-test-words
+fi
 name=$(basename "$src" .lu)
 obj=$out/$name.o
 asmobjs=() wobjs=()
