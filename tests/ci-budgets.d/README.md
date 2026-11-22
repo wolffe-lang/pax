@@ -321,3 +321,22 @@ least twice its slowest green run of the same shape:
   arrives with its entry.
 - Caps are only raised by this rule, never lowered. A higher cap costs nothing on a green run. A run that hangs
   burns up to the cap; see the pull request that raised them for the worst case.
+
+## The silence cap (`silence.json`, `tools/silence-cap`)
+
+A cap stops a hung job only at its end. Eight jobs whose caps the twice rule raised furthest, and whose suite steps
+are never silent for long, run their suite step under `tools/silence-cap LIMIT -- tests/JOB $PAX_LEGS`. The step is
+stopped when it prints nothing for LIMIT minutes. Each limit is at least twice the longest silence measured inside that
+step over ten TCG tier all runs (each a quiet release build or one long row), and at least 20 minutes:
+`mpx6-games` 45, `mpx6-journal` 30, `mpx6-usb` 30, `mpx6-staged` 25, `mpx2-heap` 25, `mpx2-interrupts` 25,
+`mpx3-tree` 25, `mpx2-frames` 20.
+
+Before it stops the step, the tool prints every process of the step's group (pid, elapsed time, command line) and a
+line naming the limit and the last line the step printed, also as an `::error::` annotation. Then it sends TERM to the
+group, gives it 10 s to clean up (the suites' cleanup only kills QEMU and removes temporary files), sends KILL to what
+is left, and exits 124, which fails the job; each job's artifact step runs `if: always()`, so the serial logs are kept.
+A silence cut says `silence-cap: no output for …`; a cap cut is GitHub's own "exceeded the maximum execution time".
+
+`tests/ci-budgets.py` holds each limit to the rule, under the job's every-leg cap, and the step to exactly that shape;
+no other step uses the tool, and the plan job runs `tests/silence-cap-selftest`.
+
