@@ -28,7 +28,12 @@
 //! kernel/user's `hand_back` gives it back or unwinds it on every way out
 //! of `pax_interrupt`; `leave` before a thread's first IRETQ to ring 3
 //! (kernel/user's `pax_user_thread`); `boot` once from kmain, which holds
-//! it as the first kernel thread. The runtime's ambient-region slot moves
+//! it as the first kernel thread. px166's second step: `hand_back` gives
+//! it back in two halves, DEPTH 0 (`leave_at_resume`) and then the release
+//! store, which boot/isr.S's common path makes once it has moved onto the
+//! frame it resumes (`pax_klock_resumed`): a processor that has switched
+//! threads is off the old thread's stack before any other can take the
+//! lock and run that thread. The runtime's ambient-region slot moves
 //! with the lock (kernel/sched's `ambient_resume` after a fresh `enter`,
 //! `ambient_park` before `leave`), since one slot serves every processor.
 //!
@@ -37,7 +42,8 @@
 //!   by IRETQ, or by SYSRETQ for a system call's frame (vector 0x100):
 //!   every system call enters by boot/user.S's `pax_syscall_entry`, which
 //!   jumps to that path (no system call is answered around it), so both
-//!   leave by `hand_back`. A fork or clone child's first return is its
+//!   leave by `hand_back` (and the release store by `pax_klock_resumed`,
+//!   which that path calls on every frame before it looks at the vector). A fork or clone child's first return is its
 //!   parent's system call frame, resumed when the scheduler picks it
 //!   inside `pax_interrupt`; exec rewrites the caller's frame and returns
 //!   it there; a signal handler's frame (kernel/signal's `on_return`) and
@@ -158,7 +164,43 @@ pub fn unwind() {
     put_depth(if d > 1 { d - 1 } else { 1 })
 }
 
-/// A return to ring 3 or to the idle loop: the lock given back whole.
+/// A return to ring 3 or to the idle loop, from `pax_interrupt` or a
+/// continuation (kernel/user's `hand_back`): DEPTH 0 now, the release
+/// itself left to boot/isr.S's common path once it stands on the frame it
+/// resumes (`pax_klock_resumed`). Until then this processor still runs on
+/// the stack it was handed the frame on, which is the stack of the thread
+/// it has just switched away from when the frame is another's: a thread
+/// another processor may resume (or, once it has ended, reap) the moment
+/// the lock is free. Given back here, that processor's frames would land
+/// where this one's return still reads.
+pub fn leave_at_resume() {
+    if !held_here() {
+        panic.fail("klock: left by a processor that does not hold it, cpu ", percpu.index())
+    }
+    put_depth(0)
+}
+
+/// boot/isr.S's common path, on the frame `f` it is about to resume (its
+/// stack now that frame's): the release `leave_at_resume` left to it. A
+/// frame resumed with the lock kept (DEPTH 1 or more: a kernel thread's,
+/// a continuation's) changes nothing, nor does one this processor resumes
+/// without holding it. An NMI's frame (vector 2) never gives it back: an
+/// NMI may land between `leave_at_resume` and this call, and its own way
+/// out passes here before the interrupted one has left its stack.
+export fn pax_klock_resumed(f: u64) {
+    // # Safety: word 15 of boot/isr.S's frame (its vector), live while it
+    // is resumed.
+    if unsafe { ((f + 120) as *u64).read_volatile() } == 2 {
+        return
+    }
+    if held_here() && depth() == 0 {
+        // # Safety: the holder's release store; as `owner`.
+        unsafe { at(OWNER).atomic_store(0, Order.release) }
+    }
+}
+
+/// A thread's first return to ring 3 (kernel/user's `pax_user_thread`, on
+/// that thread's own stack): the lock given back whole, at once.
 pub fn leave() {
     if !held_here() {
         panic.fail("klock: left by a processor that does not hold it, cpu ", percpu.index())
