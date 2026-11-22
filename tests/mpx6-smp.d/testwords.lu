@@ -1,0 +1,67 @@
+//! testwords — the test form (tests/mpx6-smp's end-nooff, panic and panic2
+//! kinds), put in kernel/testwords/testwords.lu's place by `tools/build-kernel
+//! --test-words` alone; never in a shipped kernel. `pax.nopoweroff`: the
+//! end's power-off is not done, so the end halts (its STOP already done).
+//! `pax.panictest=1|2`: 3 s after CPU 0's ticks begin, op 3 to one or two
+//! application processors, sent without waiting; each answers it by a panic
+//! in kernel/tlb's `answer`, outside the kernel lock, so two are at once.
+
+use boot_info
+use ipi
+use log
+use panic
+use percpu
+
+const TEST_OP: u64 = 3
+var fired: bool = false
+
+pub fn start() {
+    if boot_info.cmdline_has("pax.nopoweroff") {
+        log.line("testwords: pax.nopoweroff (a test kernel): the end's power-off is not done")
+    }
+    if how_many() != 0 {
+        log.put("testwords: pax.panictest=")
+        log.dec(how_many() as int)
+        log.line(" (a test kernel)")
+    }
+}
+
+pub fn nopoweroff() -> bool {
+    boot_info.cmdline_has("pax.nopoweroff")
+}
+
+fn how_many() -> u64 {
+    if boot_info.cmdline_has("pax.panictest=2") { 2 } else if boot_info.cmdline_has("pax.panictest=1") { 1 } else { 0 }
+}
+
+pub fn tick(t: u64) {
+    // # Safety: CPU 0's tick alone writes it.
+    if unsafe { fired } || t < 300 || how_many() == 0 || ipi.count() < 2 {
+        return
+    }
+    unsafe { fired = true }
+    fire(how_many())
+}
+
+/// Op 3 to application processors 1 .. k, without waiting for an answer.
+fn fire(k: u64) {
+    let g = ipi.next_gen()
+    var i: u64 = 1
+    while i <= k && i < ipi.count() {
+        let r = ipi.record(i)
+        percpu.put(r, percpu.TLB_REQ, (g << 8) | TEST_OP)
+        ipi.send(percpu.get(r, percpu.APIC), ipi.VECTOR)
+        i += 1
+    }
+}
+
+pub fn op(r: u64) -> bool {
+    if r & 0xff == TEST_OP {
+        test_panic()
+    }
+    false
+}
+
+fn test_panic() -> never {
+    panic.fail("testwords: a test panic, cpu ", percpu.index())
+}
