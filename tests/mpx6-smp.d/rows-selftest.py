@@ -261,6 +261,15 @@ case('stress at stage 1: red at the gate', stress_text(stage=1), sa, set(), {'SM
 case('the plant lock: a slot on two processors, the boot dies',
      stress_text(extra='PANIC sched: slot 12 running on two processors 0x000000000000000c\n', done=False), sa, set(), {'SMP-LOCK'})
 case('a lost signal in the storm', stress_text(lost=1), sa, set(), {'SMP-LOCK'})
+# the kernel lock's door (kernel/interrupts): a processor carrying the lock into ring 3 panics by name, and
+# SMP-KLOCK carries that line; another panic (the slot on two processors, above) is not the lock's door
+KLOCK = 'PANIC klock: entered from ring 3 holding it, cpu  0x0000000000000000\n'
+case('the lock plant in a stress boot: red by the door\'s line', stress_text(extra=KLOCK, done=False), sa, set(),
+     {'SMP-LOCK', 'SMP-KLOCK'})
+case('the lock plant in a rows boot: the probe stops at its first entry', head('rows') + KLOCK,
+     ['--kind', 'rows', '--smp', '4'], set(), ALL6 | {'SMP-KLOCK'})
+case('the lock plant at one processor', head('one') + KLOCK, ['--kind', 'one', '--smp', '1'], set(),
+     {'SMP-ONE', 'SMP-KLOCK'})
 case('allocations outside the lock', stress_text(unlocked=3), sa, set(), {'SMP-LOCK'})
 case('a processor out of the stress', stress_text(gains=['+1900', '+1900', '+0', '+1900']), sa, set(), {'SMP-LOCK'})
 case('a program killed by a fault', stress_text(extra='user: smpprobe pid 17 killed: page fault vector 14 error 0x4 rip 0x401000 after 3 runs\n'),
