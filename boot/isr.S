@@ -617,6 +617,15 @@ pax_ap_park:
 /* px166 (SMP stage 2, the STOP step): a processor stopped for the end or
    a panic (kernel/tlb's STOP): interrupts off, then HLT for ever. An NMI
    wakes it and returns here; nothing else is taken. Never returns. */
+/* px166: the first panic's processor index + 1 (kernel/panic's
+   compare-exchange from 0); 0 while no panic has begun. */
+        .section .bss
+        .p2align 3
+        .globl pax_panicking
+pax_panicking:
+        .zero 8
+        .text
+
         .globl pax_ap_stop
         .type pax_ap_stop, @function
 pax_ap_stop:
