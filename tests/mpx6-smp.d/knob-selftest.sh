@@ -13,6 +13,10 @@
 #   KNOB-REFUSED    PAX_SMP=0 or a word is refused by name (exit 2), QEMU never started
 #   KNOB-TOUR-TIME  tools/tour time with PAX_SMP=4 asks QEMU for `-smp 4` (its .meta's cmd too)
 #   KNOB-TOUR-BOOT  tools/tour boot with PAX_SMP=4 asks QEMU for `-smp 4`
+#   KNOB-ROWS-UNSET     SMP_ROWS_CAP unset: tests/mpx6-smp's nine image specs byte-identical (rows-cap.sh)
+#   KNOB-ROWS-SET       SMP_ROWS_CAP=4: rows, stress and the three ends gain ` pax.cpus=4`, the other four as they were
+#   KNOB-ROWS-REFUSED   SMP_ROWS_CAP 0, a word or 65 refused, and 4 under the hosted run (GITHUB_ACTIONS=true):
+#                       tests/mpx6-smp exits 2 before any self-test or build
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 t=$(mktemp -d "${TMPDIR:-/tmp}/knob.XXXXXX")
@@ -66,4 +70,26 @@ env PAX_SMP=4 PAX_QEMU="$t/qemu" KNOB_ARGS="$t/args" PAX_BUILD="$t/build" TMPDIR
     "$root/tools/tour" boot --firmware bios "$t/image.iso" > "$t/out" 2>&1; rc=$?
 asked "$t/args" 4
 row KNOB-TOUR-BOOT $(( rc != 0 || $? != 0 )) "exit $rc, -smp lines $(smps "$t/args")"
+# SMP_ROWS_CAP: the images tests/mpx6-smp makes, read from its own list.
+. "$root/tests/mpx6-smp.d/rows-cap.sh"
+secs=20
+eval "$(sed -n '/^images=(/,/)$/p' "$root/tests/mpx6-smp")"
+same=0 want=0 changed=0
+for spec in "${images[@]}"; do
+    want=$((want + 1))
+    [ "$(rows_cap_spec '' "$spec")" = "$spec" ] && same=$((same + 1))
+    got=$(rows_cap_spec 4 "$spec") name=${spec%%:*} rest=${spec#*:}
+    case $name in
+        rows|stress|end-*) [ "$got" = "$name:${rest%%:*} pax.cpus=4:${rest#*:}" ] && changed=$((changed + 1)) ;;
+        *) [ "$got" = "$spec" ] && changed=$((changed + 1)) ;;
+    esac
+done
+row KNOB-ROWS-UNSET $(( want != 9 || same != 9 )) "$same of $want image specs byte-identical with SMP_ROWS_CAP unset (want 9 of 9)"
+row KNOB-ROWS-SET $(( want != 9 || changed != 9 )) "$changed of $want as asked with SMP_ROWS_CAP=4 (rows, stress, end-*: pax.cpus=4; the rest unchanged)"
+codes=
+for v in 0 four 65; do
+    env -u GITHUB_ACTIONS SMP_ROWS_CAP=$v bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" $v:$?"
+done
+env GITHUB_ACTIONS=true SMP_ROWS_CAP=4 bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" hosted-4:$?"
+row KNOB-ROWS-REFUSED $(( $([ "$codes" = " 0:2 four:2 65:2 hosted-4:2" ]; echo $?) )) "exit codes$codes (want 2 each)"
 exit "$bad"
