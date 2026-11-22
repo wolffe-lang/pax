@@ -61,7 +61,7 @@ def active_line(n, stage=2, cap=None):
             f'cpus-allowed {format((1 << k) - 1, "x")} cpus-allowed-list {online(k)}\n')
 
 
-def run_lines(n, stage=2, rounds=3, ratio=1.05, cap=None, user=None):
+def run_lines(n, stage=2, rounds=3, ratio=1.05, cap=None, user=None, seen=None):
     out = f'SMP-RUN jobs {n} loops 300000000\n'
     for r in range(rounds):
         pids = [200 + 10 * r + i for i in range(n)]
@@ -72,7 +72,7 @@ def run_lines(n, stage=2, rounds=3, ratio=1.05, cap=None, user=None):
             for i in range(n):
                 if stage == 1:
                     cells.append(f'{i}:{pids[k % n]}' if i == 0 else f'{i}:i')
-                elif i >= runners:
+                elif i >= runners or (seen is not None and i not in seen):
                     cells.append(f'{i}:i')
                 elif i == k % runners:
                     cells.append(f'{i}:99')  # the sampler, where it ran this time
@@ -238,6 +238,20 @@ case('16 workers at 4x on 4 host CPUs under KVM: printed, not gated', rows_text(
      ['--kind', 'rows', '--smp', '16', '--host-cpus', '4'], ALL6, set())
 case('16 workers at 4x on 20 host CPUs under KVM: red', rows_text(16, run=run_lines(16, ratio=4.0)),
      ['--kind', 'rows', '--smp', '16', '--host-cpus', '20'], ALL6 - {'SMP-RUN'}, {'SMP-RUN'})
+# SMP-RUN's two checks that depend on the host running every virtual processor (each processor's ring-3 ticks at least
+# half the phase's; workers seen on N-1 processors) hold only where the processors fit the host's CPUs, under KVM or TCG
+# alike (the hosted job: 16 under TCG on four threads); at 2 and 4 on four they hold.
+few = run_lines(16, user=['+20'] * 16, seen={1, 2, 3, 4})
+case('16 under TCG on 4 host CPUs: ring-3 ticks under half, workers on four: printed, not gated', rows_text(16, run=few),
+     ['--kind', 'rows', '--smp', '16', '--host-cpus', '4'], ALL6, set(), meta=TCG)
+case('16 under KVM on 4 host CPUs: the same, printed', rows_text(16, run=few),
+     ['--kind', 'rows', '--smp', '16', '--host-cpus', '4'], ALL6, set())
+case('16 under TCG on 20 host CPUs: the same, red', rows_text(16, run=few),
+     ['--kind', 'rows', '--smp', '16', '--host-cpus', '20'], ALL6 - {'SMP-RUN'}, {'SMP-RUN'}, meta=TCG,
+     why=r'gained fewer than half')
+case('4 under TCG on 4 host CPUs: a processor under half its ring-3 ticks, red',
+     rows_text(4, run=run_lines(4, user=['+100', '+100', '+20', '+100'])), ['--kind', 'rows', '--smp', '4', '--host-cpus', '4'],
+     ALL6 - {'SMP-RUN'}, {'SMP-RUN'}, meta=TCG, why=r'gained fewer than half')
 case('signals over a tick at 16 on 4 host CPUs: printed, not gated', rows_text(16, signal=signal_lines(usr1=tick, tgk=tick)),
      ['--kind', 'rows', '--smp', '16', '--host-cpus', '4'], ALL6, set())
 case('signals over a tick at 4 on 4 host CPUs: red', rows_text(4, signal=signal_lines(usr1=tick, tgk=tick)),
