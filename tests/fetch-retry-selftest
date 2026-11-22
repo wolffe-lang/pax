@@ -33,6 +33,9 @@
 #   U4  --url, a 503 then the archive: tried again (server), downloaded.
 #   U5  --url, an archive whose sha256 is not the pin: exit 5, `refused:`,
 #       no file left behind.
+#   U7  --url, curl's own words for a dropped HTTP/2 stream (`curl: (92)`,
+#       nothing else on the line a class knows): tried again (reset),
+#       downloaded.
 #   U6  tools/fetch-wolf's release archive comes through `tools/fetch-retry
 #       --url`, and no bare curl is left in it (pax#517's run 44993722155:
 #       one 403 from the download host ended a job).
@@ -210,6 +213,10 @@ urun U5 0 '' 0 0000000000000000000000000000000000000000000000000000000000000000
 if [ "$rc" = 5 ] && [ "$downloads" = 1 ] && [ -z "$left" ] && grep -q "refused: its sha256 is $asha, the pin says 0000" "$w/U5.err"; then
     ok "U5: an archive that is not the pin is refused by name, nothing left"
 else bad "U5: rc $rc, $downloads downloads, left '$left'"; fi
+urun U7 1 'curl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR (err 2)' 92 "$asha"
+if [ "$rc" = 0 ] && [ "$downloads" = 2 ] && [ "$left" = w.tar.gz ] && grep -q 'failed (reset)' "$w/U7.err"; then
+    ok "U7: curl's own 'curl: (92)' is a dropped transfer (reset), tried again, downloaded"
+else bad "U7: rc $rc, $downloads downloads, left '$left'"; fi
 if grep -q '"$PAX_ROOT/tools/fetch-retry" --url "$WOLF_URL"' "$root/tools/fetch-wolf" && ! grep -nE '^[^#]*\bcurl\b -' "$root/tools/fetch-wolf" >/dev/null; then
     ok "U6: tools/fetch-wolf's release archive comes through tools/fetch-retry --url; no bare curl in it"
 else bad "U6: tools/fetch-wolf still downloads its archive with a bare curl"; fi
