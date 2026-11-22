@@ -61,10 +61,9 @@ say "sniff $SNIFF_REV pins wolf $wv (${wsha:0:8}…); the archive binds its stan
 # wolf, by the digest sniff names (cached by digest).
 arc=$PAX_CACHE/wolf-$wv-$wsha.tar.gz
 if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
-    curl -sSfL --retry 3 -o "$arc.part" \
+    "$PAX_ROOT/tools/fetch-retry" --url \
         "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
-        || die "cannot download wolf $wv"
-    mv "$arc.part" "$arc"
+        "$arc" "$wsha" || die "cannot download wolf $wv"
 fi
 [ "$(sha256_of "$arc")" = "$wsha" ] || die "wolf $wv archive: sha256 $(sha256_of "$arc"), sniff pins $wsha"
 mkdir -p "$w/wolf"
