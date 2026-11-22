@@ -1205,7 +1205,9 @@ pub fn preempt(f: u64) -> u64 {
         return f
     }
     save_frame(c, f)
-    if !idle(c) {
+    // px166: a thread ended in place by another processor (DEAD: exit_group,
+    // exec) is switched off at its tick, never queued again.
+    if !idle(c) && field(c, offset_of(Thread, state)) != DEAD {
         put_field(c, offset_of(Thread, state), READY)
         enqueue(c)
     }
