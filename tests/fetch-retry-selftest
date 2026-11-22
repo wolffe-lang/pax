@@ -25,6 +25,17 @@
 #   R9  every source fetch of the harness goes through tools/fetch-retry:
 #       no `git … fetch` outside it in tools/ or the census's stage.sh,
 #       and each of the 16 sites calls it.
+#   U1  --url, a download: GitHub's 403 for a release asset (its rate limit
+#       on downloads) on attempt 1, then the archive: exit 0, attempt 2 of
+#       3, one wait of 10 s, the file in place with the pinned sha256.
+#   U2  --url, a 404: exit 4, not retried, one download, no file.
+#   U3  --url, a 403 every time: exit 3, gave up after 3, waits 10 and 30 s.
+#   U4  --url, a 503 then the archive: tried again (server), downloaded.
+#   U5  --url, an archive whose sha256 is not the pin: exit 5, `refused:`,
+#       no file left behind.
+#   U6  tools/fetch-wolf's release archive comes through `tools/fetch-retry
+#       --url`, and no bare curl is left in it (pax#517's run 44993722155:
+#       one 403 from the download host ended a job).
 # Exit 0 when every row held; each failing row is named.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -143,5 +154,64 @@ else
     [ -z "$missing" ] || echo "  sites not calling tools/fetch-retry:$missing"
     bad "R9: the harness's fetches are not all the helper's"
 fi
+# --url: a fake curl ahead of any real one, failing the first N downloads
+# with the words and exit status a real failure gives, then copying the
+# archive to -o.
+cat > "$w/bin/curl" <<'EOF2'
+#!/bin/sh
+n=$(cat "$FAKE_STATE/downloads" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$FAKE_STATE/downloads"
+out=
+while [ $# -gt 0 ]; do
+    case $1 in -o) out=$2; shift ;; esac
+    shift
+done
+if [ "$n" -le "${FAKE_FAILS:-0}" ]; then cat "$FAKE_ERR" >&2; exit "${FAKE_RC:-22}"; fi
+cp "$FAKE_SRC" "$out"
+EOF2
+chmod +x "$w/bin/curl"
+printf 'an archive\n' > "$w/archive.tar.gz"
+if command -v sha256sum >/dev/null 2>&1; then asha=$(sha256sum "$w/archive.tar.gz" | cut -d' ' -f1)
+else asha=$(shasum -a 256 "$w/archive.tar.gz" | cut -d' ' -f1); fi
+# urun NAME FAILS ERRTEXT RC SHA: one fetch-retry --url into a fresh directory.
+urun() {
+    local name=$1 fails=$2 text=$3 code=$4 want=$5
+    rm -rf "$w/dl" "$w/state"; mkdir -p "$w/dl" "$w/state"
+    printf '%s\n' "$text" > "$w/err.txt"
+    rc=0
+    PATH=$w/bin:$PATH FAKE_STATE=$w/state FAKE_FAILS=$fails FAKE_ERR=$w/err.txt FAKE_RC=$code FAKE_SRC=$w/archive.tar.gz \
+        sh "$helper" --url https://github.com/wolffe-lang/wolf-lang/releases/download/v0/w.tar.gz "$w/dl/w.tar.gz" "$want" \
+        > "$w/$name.out" 2> "$w/$name.err" || rc=$?
+    downloads=$(cat "$w/state/downloads" 2>/dev/null || echo 0)
+    sleeps=$(sed 's/ $//' "$w/state/sleeps" 2>/dev/null || true)
+    left=$(cd "$w/dl" && ls)
+    sed "s/^/  $name: /" "$w/$name.err"
+}
+r403='curl: (22) The requested URL returned error: 403'
+urun U1 1 "$r403" 22 "$asha"
+if [ "$rc" = 0 ] && [ "$downloads" = 2 ] && [ "$sleeps" = 10 ] && [ "$left" = w.tar.gz ] \
+    && grep -q 'attempt 1 of 3 failed (server); again in 10 s' "$w/U1.err" && grep -q 'fetched on attempt 2 of 3' "$w/U1.err"; then
+    ok "U1: a download's 403 is tried again (server), then fetched on attempt 2 (wait 10 s), the file in place"
+else bad "U1: rc $rc, $downloads downloads, waits '$sleeps', left '$left'"; fi
+urun U2 99 'curl: (22) The requested URL returned error: 404' 22 "$asha"
+if [ "$rc" = 4 ] && [ "$downloads" = 1 ] && [ -z "$sleeps" ] && [ -z "$left" ] && grep -q 'not retried' "$w/U2.err"; then
+    ok "U2: a download's 404 stops at once, not retried, nothing left"
+else bad "U2: rc $rc, $downloads downloads, waits '$sleeps', left '$left'"; fi
+urun U3 99 "$r403" 22 "$asha"
+if [ "$rc" = 3 ] && [ "$downloads" = 3 ] && [ "$sleeps" = '10 30' ] && grep -q 'gave up after 3 attempts, the last one server' "$w/U3.err"; then
+    ok "U3: a 403 every time stops after 3 attempts by name (waits 10 and 30 s)"
+else bad "U3: rc $rc, $downloads downloads, waits '$sleeps'"; fi
+urun U4 1 'curl: (22) The requested URL returned error: 503' 22 "$asha"
+if [ "$rc" = 0 ] && [ "$downloads" = 2 ] && [ "$left" = w.tar.gz ] && grep -q 'failed (server)' "$w/U4.err"; then
+    ok "U4: a download's 503 is tried again (server), downloaded"
+else bad "U4: rc $rc, $downloads downloads, left '$left'"; fi
+urun U5 0 '' 0 0000000000000000000000000000000000000000000000000000000000000000
+if [ "$rc" = 5 ] && [ "$downloads" = 1 ] && [ -z "$left" ] && grep -q "refused: its sha256 is $asha, the pin says 0000" "$w/U5.err"; then
+    ok "U5: an archive that is not the pin is refused by name, nothing left"
+else bad "U5: rc $rc, $downloads downloads, left '$left'"; fi
+if grep -q '"$PAX_ROOT/tools/fetch-retry" --url "$WOLF_URL"' "$root/tools/fetch-wolf" && ! grep -nE '^[^#]*\bcurl\b -' "$root/tools/fetch-wolf" >/dev/null; then
+    ok "U6: tools/fetch-wolf's release archive comes through tools/fetch-retry --url; no bare curl in it"
+else bad "U6: tools/fetch-wolf still downloads its archive with a bare curl"; fi
 [ "$fail" = 0 ] && echo "PASS fetch-retry-selftest"
 exit $fail
