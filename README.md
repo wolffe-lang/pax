@@ -1011,8 +1011,10 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   build's inlining).
 - The `full-matrix` label runs every suite on the merge leg (`tier full`); the nightly and a dispatch run every suite on
   every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run at the head.
-- Merges are fast-forwards, so a push to trunk runs only what its head lacks: nothing after a green `tier all`, every
-  suite on the release legs (`tier rest`) after a green `tier full`, every leg otherwise. Trunk pushes share one
+- Merges are fast-forwards, so a push to trunk runs nothing after a green `tier all` at its head and every leg
+  otherwise, a green `tier full` included: twelve suites boot the native leg in a step of their own beside the
+  plan's legs, so the legs a `tier full` run did not run cannot run alone, and the planner refuses any plan that
+  leaves a suite's native leg out (tools/ci-plan's NATIVE_LEG). Trunk pushes share one
   queue: the running one finishes and only the newest waiting one runs after it. The nightly skips a head whose
   `tier all` is green already; the Sunday schedule runs every leg whatever the head has.
 - `macos-run` is in no `tier full` run, so the merge gate waits for no macOS runner: a trunk push, the nightly, the
