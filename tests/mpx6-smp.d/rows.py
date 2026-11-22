@@ -75,6 +75,24 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            -smp 1 and -smp N; 15 pack/index pairs as the host oracle's; at -smp N the
                            gate `active N`, and with --scaling gate under KVM the four-job wall 1.6
                            times the one-job wall or less (minimum of three rounds each).
+  The test build's kinds (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu in kernel/testwords' place;
+  never a shipped kernel) and the shipped kernel's answer to the same words:
+  end-nooff   SMP-END-NOOFF  `pax.cpus=4 pax.nopoweroff` at 4: root's power-off answered `poweroff: not done
+                           (pax.nopoweroff, a test kernel)`, the stop line once between `PAX: the end:` and the end's
+                           line, and every application processor halted with interrupts off in the kernel in the last
+                           dump (the end's halt, not QEMU's power-off).
+  panic       SMP-PANIC-STOP `pax.panictest=1` at 4, four spinners running: 3 s after CPU 0's ticks begin, op 3 to CPU 1,
+                           which panics in its answer: the text `PANIC testwords: a test panic, cpu ` once; under KVM
+                           no `cpus: cpu K did not stop for the panic` line and every processor halted with interrupts
+                           off in the kernel in the last dump (printed under TCG).
+  panic2      SMP-PANIC-TWO  `pax.panictest=2`: op 3 to CPUs 1 and 2 at once: the owner's text once and the second's
+                           (`(a second panic, cpu K's first): testwords: a test panic`) once, each whole (texts, not
+                           lines: kernel/panic's print token serializes them, but its wait is bounded); the rest as
+                           SMP-PANIC-STOP.
+  testwords   SMP-TESTWORDS  the shipped kernel given `pax.nopoweroff pax.panictest=2`: each word ignored by name
+                           (`testwords: W ignored (not a test kernel)`), root's power-off powers off (QEMU's status 0),
+                           no PANIC, and neither `testwords.fire` nor `testwords.test_panic` in its ELF (the suite's
+                           TESTWORDS-ELF also holds both present in the test build).
 
   every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
                            `klock: entered from ring 3 holding it`): red by that line verbatim, silent when green.
@@ -85,6 +103,8 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            application processor's `runs` line says `kthreads 0`. Red naming the processor and
                            its count (or a `runs` line with no count); green when an application processor ran
                            threads; silent when none did.
+              SMP-PARK     kmain_console's own check of exec's parked-space table: `sched: parked spaces: 2 held
+                           parked at once, 0 left once let go`; red on another count or the table's PANIC.
 
 A row prints `PASS ROW tag: …` or `FAIL ROW tag: …`, a row this boot does not ask `NOT-ASKED ROW
 tag: …`, and what a red row found beyond its first reason `INFO ROW tag: …`. Exit 1 if any row failed.
