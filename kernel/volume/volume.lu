@@ -1,0 +1,334 @@
+//! volume — the one way into the file systems on a disk: kernel/tree,
+//! kernel/fstab, kernel/files and kernel/procfs ask here for everything a
+//! mounted volume holds, and only this module calls kernel/ext2 and
+//! kernel/journal (tests/mpx6-ext2's SEAM-CALLERS holds that).
+//!
+//! Today there is one on-disk format behind it, ext2 and its journalled
+//! form ext3, so each item below is ext2's or the journal's own, under the
+//! same name, with the same arguments and answer; the journal's four take
+//! a `journal_` prefix, since `size` is a volume's file's size here. The
+//! constants are ext2's values, spelled again (wolf cannot yet give a
+//! module constant another module's; tests/mpx6-ext2's SEAM-CONSTS keeps
+//! them equal). Nothing is kept here: no state, no lock, no call
+//! between a caller and kernel/ext2, so kernel/block's buffer rule
+//! (an address good until the next `get`) and kernel/ext2's write order
+//! hold through it unchanged. A second format sits beside ext2 here, behind
+//! the same names, when one is added.
+//!
+//! One CPU, IF clear for the whole of every call (as kernel/ext2).
+
+use ext2
+use journal
+
+/// kernel/ext2's `LINK_MAX`, as it is there.
+pub const LINK_MAX: u64 = 65000
+
+/// kernel/ext2's `ROOT_INO`, as it is there.
+pub const ROOT_INO: u64 = 2
+
+/// kernel/ext2's `T_ATIME`, as it is there.
+pub const T_ATIME: u64 = 1
+
+/// kernel/ext2's `T_CTIME`, as it is there.
+pub const T_CTIME: u64 = 4
+
+/// kernel/ext2's `T_MTIME`, as it is there.
+pub const T_MTIME: u64 = 2
+
+/// kernel/ext2's `VOLS`, as it is there.
+pub const VOLS: u64 = 4
+
+/// kernel/ext2's `add`, as it is there.
+pub fn add(v: u64, d: u64, name: u64, len: u64, ino: u64, ft: u64) -> u64 {
+    ext2.add(v, d, name, len, ino, ft)
+}
+
+/// kernel/ext2's `ask_type`, as it is there.
+pub fn ask_type(v: u64, t: u64) {
+    ext2.ask_type(v, t)
+}
+
+/// kernel/ext2's `block_size`, as it is there.
+pub fn block_size(v: u64) -> u64 {
+    ext2.block_size(v)
+}
+
+/// kernel/ext2's `blocks512`, as it is there.
+pub fn blocks512(v: u64, ino: u64) -> u64 {
+    ext2.blocks512(v, ino)
+}
+
+/// kernel/ext2's `boundary`, as it is there.
+pub fn boundary(now: u64) {
+    ext2.boundary(now)
+}
+
+/// kernel/ext2's `dev_of`, as it is there.
+pub fn dev_of(v: u64) -> u64 {
+    ext2.dev_of(v)
+}
+
+/// kernel/ext2's `empty`, as it is there.
+pub fn empty(v: u64, d: u64) -> bool {
+    ext2.empty(v, d)
+}
+
+/// kernel/ext2's `entry_at`, as it is there.
+pub fn entry_at(v: u64, d: u64, pos: u64) -> (u64, u64, u64, u64, u64) {
+    ext2.entry_at(v, d, pos)
+}
+
+/// kernel/ext2's `failed`, as it is there.
+pub fn failed(r: u64) -> bool {
+    ext2.failed(r)
+}
+
+/// kernel/ext2's `fstype`, as it is there.
+pub fn fstype(v: u64) -> u64 {
+    ext2.fstype(v)
+}
+
+/// kernel/ext2's `ftype`, as it is there.
+pub fn ftype(m: u64) -> u64 {
+    ext2.ftype(m)
+}
+
+/// kernel/ext2's `full`, as it is there.
+pub fn full(v: u64) -> bool {
+    ext2.full(v)
+}
+
+/// kernel/ext2's `has_journal`, as it is there.
+pub fn has_journal(dev: u64) -> bool {
+    ext2.has_journal(dev)
+}
+
+/// kernel/ext2's `ialloc`, as it is there.
+pub fn ialloc(v: u64, dir: u64, m: u64, uid: u64, gid: u64, t: u64) -> u64 {
+    ext2.ialloc(v, dir, m, uid, gid, t)
+}
+
+/// kernel/ext2's `ifree`, as it is there.
+pub fn ifree(v: u64, ino: u64, t: u64) {
+    ext2.ifree(v, ino, t)
+}
+
+/// kernel/ext2's `journal_inode`, as it is there.
+pub fn journal_inode(v: u64) -> u64 {
+    ext2.journal_inode(v)
+}
+
+/// kernel/ext2's `journalled`, as it is there.
+pub fn journalled(v: u64) -> bool {
+    ext2.journalled(v)
+}
+
+/// kernel/ext2's `live_journal_dev`, as it is there.
+pub fn live_journal_dev(k: u64) -> u64 {
+    ext2.live_journal_dev(k)
+}
+
+/// kernel/ext2's `live_journal_on`, as it is there.
+pub fn live_journal_on(d: u64) -> u64 {
+    ext2.live_journal_on(d)
+}
+
+/// kernel/ext2's `lookup`, as it is there.
+pub fn lookup(v: u64, d: u64, name: u64, len: u64) -> u64 {
+    ext2.lookup(v, d, name, len)
+}
+
+/// kernel/ext2's `make_dir`, as it is there.
+pub fn make_dir(v: u64, d: u64, parent: u64) -> u64 {
+    ext2.make_dir(v, d, parent)
+}
+
+/// kernel/ext2's `max_size`, as it is there.
+pub fn max_size(v: u64) -> u64 {
+    ext2.max_size(v)
+}
+
+/// kernel/ext2's `mode`, as it is there.
+pub fn mode(v: u64, ino: u64) -> u64 {
+    ext2.mode(v, ino)
+}
+
+/// kernel/ext2's `mount`, as it is there.
+pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
+    ext2.mount(dev, ro, now)
+}
+
+/// kernel/ext2's `name_of`, as it is there.
+pub fn name_of(v: u64, d: u64, c: u64) -> (u64, u64) {
+    ext2.name_of(v, d, c)
+}
+
+/// kernel/ext2's `named_inode`, as it is there.
+pub fn named_inode(v: u64, ino: u64) -> bool {
+    ext2.named_inode(v, ino)
+}
+
+/// kernel/ext2's `nlink`, as it is there.
+pub fn nlink(v: u64, ino: u64) -> u64 {
+    ext2.nlink(v, ino)
+}
+
+/// kernel/ext2's `owner`, as it is there.
+pub fn owner(v: u64, ino: u64) -> (u64, u64) {
+    ext2.owner(v, ino)
+}
+
+/// kernel/ext2's `probe`, as it is there.
+pub fn probe(dev: u64) -> (bool, u64, u64) {
+    ext2.probe(dev)
+}
+
+/// kernel/ext2's `probed_label`, as it is there.
+pub fn probed_label(i: u64) -> u64 {
+    ext2.probed_label(i)
+}
+
+/// kernel/ext2's `read_only`, as it is there.
+pub fn read_only(v: u64) -> u64 {
+    ext2.read_only(v)
+}
+
+/// kernel/ext2's `relink`, as it is there.
+pub fn relink(v: u64, d: u64, name: u64, len: u64, ino: u64, ft: u64) -> bool {
+    ext2.relink(v, d, name, len, ino, ft)
+}
+
+/// kernel/ext2's `remount`, as it is there.
+pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
+    ext2.remount(v, ro, now)
+}
+
+/// kernel/ext2's `remove`, as it is there.
+pub fn remove(v: u64, d: u64, name: u64, len: u64) -> u64 {
+    ext2.remove(v, d, name, len)
+}
+
+/// kernel/ext2's `report`, as it is there.
+pub fn report(v: u64) {
+    ext2.report(v)
+}
+
+/// kernel/ext2's `rspan`, as it is there.
+pub fn rspan(v: u64, ino: u64, off: u64, want: u64) -> (u64, u64) {
+    ext2.rspan(v, ino, off, want)
+}
+
+/// kernel/ext2's `set_dotdot`, as it is there.
+pub fn set_dotdot(v: u64, d: u64, parent: u64) {
+    ext2.set_dotdot(v, d, parent)
+}
+
+/// kernel/ext2's `set_mode`, as it is there.
+pub fn set_mode(v: u64, ino: u64, m: u64) {
+    ext2.set_mode(v, ino, m)
+}
+
+/// kernel/ext2's `set_nlink`, as it is there.
+pub fn set_nlink(v: u64, ino: u64, n: u64) {
+    ext2.set_nlink(v, ino, n)
+}
+
+/// kernel/ext2's `set_owner`, as it is there.
+pub fn set_owner(v: u64, ino: u64, uid: u64, gid: u64) {
+    ext2.set_owner(v, ino, uid, gid)
+}
+
+/// kernel/ext2's `set_size`, as it is there.
+pub fn set_size(v: u64, ino: u64, n: u64) {
+    ext2.set_size(v, ino, n)
+}
+
+/// kernel/ext2's `set_target`, as it is there.
+pub fn set_target(v: u64, ino: u64, src: u64, n: u64) -> u64 {
+    ext2.set_target(v, ino, src, n)
+}
+
+/// kernel/ext2's `set_times`, as it is there.
+pub fn set_times(v: u64, ino: u64, at: u64, mt: u64, ct: u64, which: u64) {
+    ext2.set_times(v, ino, at, mt, ct, which)
+}
+
+/// kernel/ext2's `size`, as it is there.
+pub fn size(v: u64, ino: u64) -> u64 {
+    ext2.size(v, ino)
+}
+
+/// kernel/ext2's `statfs`, as it is there.
+pub fn statfs(v: u64, w: u64) -> u64 {
+    ext2.statfs(v, w)
+}
+
+/// kernel/ext2's `sync`, as it is there.
+pub fn sync(v: u64, now: u64) -> u64 {
+    ext2.sync(v, now)
+}
+
+/// kernel/ext2's `target`, as it is there.
+pub fn target(v: u64, ino: u64, dst: u64, n: u64) -> u64 {
+    ext2.target(v, ino, dst, n)
+}
+
+/// kernel/ext2's `time`, as it is there.
+pub fn time(v: u64, ino: u64, which: int) -> u64 {
+    ext2.time(v, ino, which)
+}
+
+/// kernel/ext2's `touch`, as it is there.
+pub fn touch(v: u64, ino: u64, which: u64, t: u64) {
+    ext2.touch(v, ino, which, t)
+}
+
+/// kernel/ext2's `truncate`, as it is there.
+pub fn truncate(v: u64, ino: u64, n: u64) -> u64 {
+    ext2.truncate(v, ino, n)
+}
+
+/// kernel/ext2's `unmount`, as it is there.
+pub fn unmount(v: u64, now: u64) -> u64 {
+    ext2.unmount(v, now)
+}
+
+/// kernel/ext2's `wants_boundary`, as it is there.
+pub fn wants_boundary() -> bool {
+    ext2.wants_boundary()
+}
+
+/// kernel/ext2's `wrote`, as it is there.
+pub fn wrote(v: u64, blk: u64) -> u64 {
+    ext2.wrote(v, blk)
+}
+
+/// kernel/ext2's `wspan`, as it is there.
+pub fn wspan(v: u64, ino: u64, off: u64, want: u64) -> (u64, u64, u64) {
+    ext2.wspan(v, ino, off, want)
+}
+
+/// kernel/ext2's `zero_range`, as it is there.
+pub fn zero_range(v: u64, ino: u64, off: u64, n: u64) -> (u64, u64) {
+    ext2.zero_range(v, ino, off, n)
+}
+
+/// kernel/journal's `book`, as it is there.
+pub fn journal_book(v: u64, w: u64) -> u64 {
+    journal.book(v, w)
+}
+
+/// kernel/journal's `runs`, as it is there.
+pub fn journal_runs(v: u64) -> u64 {
+    journal.runs(v)
+}
+
+/// kernel/journal's `sequence`, as it is there.
+pub fn journal_sequence(v: u64) -> u64 {
+    journal.sequence(v)
+}
+
+/// kernel/journal's `size`, as it is there.
+pub fn journal_size(v: u64) -> u64 {
+    journal.size(v)
+}
