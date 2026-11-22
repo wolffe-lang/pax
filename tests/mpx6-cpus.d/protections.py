@@ -63,6 +63,9 @@ for kind, path, line, fn, code in rows:
         what = protection[module]
         if module == 'xhci': what = xhci[fn]
         need = 'big kernel lock first; then an owner lock/lifetime protocol covering IRQ and thread callers'
+        if module == 'user' and fn == 'pax_user_thread':
+            what = 'the kernel lock given back before the first IRETQ to ring 3, with no interrupt in between'
+            need = 'none beyond it: IF stays clear only until that IRETQ; the exclusion is the kernel lock itself'
         if module == 'sync': need = 'keep IF save on the invoking stack; callers must separately exclude remote CPUs'
     result.append({'site':f'{path}:{line}', 'function':fn, 'protection':what, 'needed':need})
 print(json.dumps(result, indent=2))
