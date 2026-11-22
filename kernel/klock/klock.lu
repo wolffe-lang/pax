@@ -22,12 +22,36 @@
 //! critical section to the next taker's exchange (wolf spec/03
 //! [conc.mm.atomic.order]). DEPTH is written by the owner alone.
 //!
-//! Who calls what: `enter` and `unwind` or `leave` from `pax_interrupt`;
-//! `leave` before a thread's first IRETQ to ring 3 (kernel/user's
-//! `pax_user_thread`); `boot` once from kmain, which holds it as the
-//! first kernel thread. The runtime's ambient-region slot moves with the
-//! lock (kernel/sched's `ambient_resume` after a fresh `enter`,
+//! Who calls what: `pax_interrupt` (kernel/interrupts) panics if a
+//! processor comes in from ring 3 already holding the lock (a hold
+//! carried into ring 3 is a bug, named, never healed), then `enter`;
+//! kernel/user's `hand_back` gives it back or unwinds it on every way out
+//! of `pax_interrupt`; `leave` before a thread's first IRETQ to ring 3
+//! (kernel/user's `pax_user_thread`); `boot` once from kmain, which holds
+//! it as the first kernel thread. The runtime's ambient-region slot moves
+//! with the lock (kernel/sched's `ambient_resume` after a fresh `enter`,
 //! `ambient_park` before `leave`), since one slot serves every processor.
+//!
+//! **Every way into ring 3** passes one of the two `leave` sites:
+//! - boot/isr.S's common path resumes the frame `pax_interrupt` returns
+//!   by IRETQ, or by SYSRETQ for a system call's frame (vector 0x100):
+//!   every system call enters by boot/user.S's `pax_syscall_entry`, which
+//!   jumps to that path (no system call is answered around it), so both
+//!   leave by `hand_back`. A fork or clone child's first return is its
+//!   parent's system call frame, resumed when the scheduler picks it
+//!   inside `pax_interrupt`; exec rewrites the caller's frame and returns
+//!   it there; a signal handler's frame (kernel/signal's `on_return`) and
+//!   `rt_sigreturn`'s restored one are made before `hand_back` runs.
+//! - the two continuations that path calls after `pax_interrupt` (vector
+//!   0x102, a stopped system call resumed; 0x103, a creation or exec
+//!   event finished; px102): `hand_back` keeps the lock for them, and
+//!   each ends in `hand_back` itself (kernel/user).
+//! - a new thread's first entry: `pax_user_thread` gives it back with IF
+//!   clear, then boot/user.S's `pax_enter_user` IRETQs.
+//! A fault between that `leave` and the IRETQ is a fault in ring 0: it
+//! takes the lock afresh and panics by name like any kernel fault; were
+//! one ever to return there, its exit keeps the lock and the next entry
+//! from ring 3 panics `klock: entered from ring 3 holding it`.
 //!
 //! Written from wolf's spec/03 §1 [conc.mm.atomic], the Intel SDM vol.
 //! 3A §9.1.2 (a LOCK-prefixed CMPXCHG is atomic against every other
