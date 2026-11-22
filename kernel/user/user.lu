@@ -643,12 +643,16 @@ fn held_for_continuation(f: u64) {
 /// `h` about to be resumed, which is returned. A continuation (above) or
 /// any other ring-0 frame that is not the idle loop keeps it, one level
 /// up; a frame that resumes ring 3, by IRETQ or by SYSRETQ (vector 0x100),
-/// or the idle loop gives it back whole, the ambient slot parked first.
-/// Called last by `pax_interrupt` and by the two continuations below.
+/// or the idle loop gives it back whole: an idle processor sent RESCHED
+/// while threads wait (kernel/sched's `share`), the ambient slot parked,
+/// DEPTH 0 here and the release store made by boot/isr.S once it stands
+/// on `h` (klock's `leave_at_resume`), off this stack. Called last by
+/// `pax_interrupt` and by the two continuations below.
 pub fn hand_back(h: u64) -> u64 {
     if !continues(h) && (from_user(h) || sched.idle_now()) {
+        sched.share()
         sched.ambient_park()
-        klock.leave()
+        klock.leave_at_resume()
     } else {
         klock.unwind()
     }
