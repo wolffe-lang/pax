@@ -601,14 +601,17 @@ export fn pax_user_thread(p: u64) {
     let rip = if elf { sched.self_exec(0) } else { CODE }
     let rsp = if elf { sched.self_exec(1) } else { STACK_TOP }
     // px166: IF clear first, so no interrupt finds the lock half given
-    // back; the ambient slot parked in this thread; then the lock given
-    // back and straight to pax_enter_user, whose IRETQ sets IF again. A
+    // back; an idle processor sent RESCHED while threads wait (as at every
+    // release, kernel/sched's `share`); the ambient slot parked in this
+    // thread; then the lock given back (at once: this is the new thread's
+    // own stack) and straight to pax_enter_user, whose IRETQ sets IF again. A
     // fault in between is a fault in ring 0: it takes the lock afresh and
     // panics by name as any kernel fault does; were one ever to return
     // here, its exit keeps the lock (a ring-0 frame), the IRETQ carries it
     // into ring 3, and the next entry panics `klock: entered from ring 3
     // holding it` (kernel/interrupts).
     let _flags = sync.irq_save()
+    sched.share()
     sched.ambient_park()
     klock.leave()
     // # Safety: boot/user.S's IRETQ to CPL 3. An ELF process's entry and
