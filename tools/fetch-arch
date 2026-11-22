@@ -31,14 +31,12 @@ while read -r name version sum bytes members; do
     pkg=$PAX_CACHE/arch/$sum.pkg.tar.zst
     if [ ! -f "$pkg" ] || [ "$(wc -c < "$pkg" | tr -d ' ')" != "$bytes" ] || [ "$(sha256_of "$pkg")" != "$sum" ]; then
         url="https://archive.archlinux.org/packages/${name:0:1}/$name/$name-${version//+/%2B}-x86_64.pkg.tar.zst"
-        part=$pkg.part
-        curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 -o "$part" "$url" || die "$name: fetching $url"
-        got=$(sha256_of "$part") size=$(wc -c < "$part" | tr -d ' ')
-        if [ "$got" != "$sum" ] || [ "$size" != "$bytes" ]; then
-            rm -f "$part"
-            die "$name $version: pinned sha256 $sum ($bytes bytes), got $got ($size bytes)"
+        "$PAX_ROOT/tools/fetch-retry" --url "$url" "$pkg" "$sum" || die "$name: fetching $url"
+        size=$(wc -c < "$pkg" | tr -d ' ')
+        if [ "$size" != "$bytes" ]; then
+            rm -f "$pkg"
+            die "$name $version: pinned sha256 $sum ($bytes bytes), got $size bytes"
         fi
-        mv "$part" "$pkg"
         say "fetched $name $version ($bytes bytes, sha256 $sum)"
     fi
     # shellcheck disable=SC2086 # the members are words
