@@ -12,8 +12,11 @@ Stage 1 (px161):
   SMP-ENTER    with N > 1 the boot line says N-1 application processors idle of N-1, and the proc
                file says `started N`, `idle N-1` and one line a processor, each APIC ID once.
   SMP-ONE      with one processor (or no ACPI): no `cpus:` line, `started 1`, `idle 0`, cpu 0 alone.
-  SMP-IDLE     every application processor's RIP lies in pax_ap_halt with QEMU's HLT=1, in one of
-               three dumps at least; the boot processor's lies in the kernel.
+  SMP-IDLE     every application processor's RIP lies in pax_ap_stop with QEMU's HLT=1 and interrupts
+               off (RFLAGS.IF clear), in one of three dumps at least: stopped by the end (kernel/tlb's STOP);
+               the boot processor's lies in the kernel. Stage 1's form, replaced at stage 2's STOP step:
+               pax_ap_halt with HLT=1 and interrupts on (resting in its idle loop).
+               (The record's STATE and CAUSE are not in a register dump; the end's line says them.)
   SMP-PRIVATE  per processor its own GS base (pax_cpu0, or slot 417 + 256 KiB x its index), GDT and
                TSS (in its record page), its RSP in its own idle stack; one IDT, pax_idt; every
                application processor's CR0, CR3, CR4 and EFER the boot processor's; the kernel's own
@@ -151,7 +154,8 @@ else:
     ok('SMP-USER-GS', "ring 3's GS base its own, 3 reads")
 
 if a.mode != 'nosmp':
-    stopped = [b for b in boot if ' stopped' in b or 'never reached' in b]
+    # stage 2's end says `cpus: N application processors stopped for the end`: the end's stop, not a fault's
+    stopped = [b for b in boot if (' stopped' in b and not b.endswith(' stopped for the end')) or 'never reached' in b]
     bad = sorted({i for rows in (one, two) for i, v in rows.items() if v[1] in ('stopped', 'never entered')})
     if stopped or bad:
         fail('SMP-SCHED', f'stopped or never entered: boot {stopped}, proc cpus {bad}')
@@ -269,18 +273,21 @@ if a.mode == 'nosmp' or cpus > 1:
             ok('CPU-PARKED', f'{len(ips) - 1} secondary processors outside the kernel')
     else:
         syms = symbols(a.elf)
-        lo, size = syms.get('pax_ap_halt', (0, 0))
+        lo, size = syms.get('pax_ap_stop', (0, 0))
         hi = lo + size
 
         def inloop(c):
-            return lo <= (c.get('rip') or 0) < hi and c.get('hlt') == 1
+            return (lo <= (c.get('rip') or 0) < hi and c.get('hlt') == 1
+                    and c.get('rfl') is not None and c['rfl'] & 0x200 == 0)
         halted = {i: any(inloop(d.get(i, {})) for d in ds) for i in range(1, cpus)}
         b0 = ds[0][0]['rip'] or 0
         if not size or not all(halted.values()) or b0 < KERNEL:
             where = [(i, [hex(d.get(i, {}).get('rip') or 0) for d in ds]) for i, v in halted.items() if not v]
-            fail('SMP-IDLE', f'pax_ap_halt [{lo:#x}, {hi:#x}); cpu 0 RIP {b0:#x}; not halted there: {where}')
+            fail('SMP-IDLE', f'pax_ap_stop [{lo:#x}, {hi:#x}) with interrupts off; cpu 0 RIP {b0:#x}; not stopped '
+                             f'there: {where} (stage 1\'s form, pax_ap_halt with interrupts on, replaced at the STOP step)')
         else:
-            ok('SMP-IDLE', f'{aps} application processors halted in pax_ap_halt')
+            ok('SMP-IDLE', f'{aps} application processors stopped in pax_ap_stop with interrupts off (stage 1\'s '
+                           'form, pax_ap_halt with interrupts on, replaced at the STOP step)')
 
         # Private state, from the first dump in which every application processor sat in its loop.
         d = next((d for d in ds if all(inloop(d.get(i, {})) for i in range(1, cpus))), ds[0])
