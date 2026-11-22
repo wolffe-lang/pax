@@ -406,7 +406,14 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     }
     // px166: the kernel lock (kernel/klock), taken by every entry the two
     // returns above do not answer, before any kernel state is read; a fresh
-    // hold gives the running thread its ambient region back.
+    // hold gives the running thread its ambient region back. A processor
+    // that comes in from ring 3 must not hold it already: every way into
+    // ring 3 gives it back (klock's header), so a hold carried out is a bug,
+    // named here rather than healed (the other processors would have spun).
+    // # Safety: the frame's address, read by kernel/user.
+    if user.from_user(unsafe { f as u64 }) && klock.held_here() {
+        panic.fail("klock: entered from ring 3 holding it, cpu ", percpu.index())
+    }
     if klock.enter() {
         sched.ambient_resume()
     }
@@ -414,17 +421,11 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     // # Safety: the frame `route` returned is this one or a saved frame
     // on a live thread's stack; what kernel/signal returns is one too.
     let h = unsafe { signal.on_return(g as u64) }
-    // px166: the frame resumes ring 3 or the idle loop: the lock given back
-    // whole, the ambient slot parked in the thread first; any other ring-0
-    // frame (the code this interrupt landed in, a kernel thread) keeps it.
-    if user.from_user(h) || sched.idle_now() {
-        sched.ambient_park()
-        klock.leave()
-    } else {
-        klock.unwind()
-    }
-    // # Safety: as above: `h` is the frame kernel/signal returned.
-    unsafe { h as *Frame }
+    // px166: the lock given back whole when `h` resumes ring 3 or the idle
+    // loop, kept one level up otherwise (kernel/user's `hand_back`).
+    let r = user.hand_back(h)
+    // # Safety: `r` is `h`, the frame kernel/signal returned.
+    unsafe { r as *Frame }
 }
 
 /// The vector's own work: the frame to resume.
