@@ -1,0 +1,34 @@
+//! testwords — px166 (SMP stage 2, the STOP step): the test-only words, as
+//! shipped. `pax.nopoweroff` (an end whose power-off does not take) and
+//! `pax.panictest=1|2` (one or two processors' test panics) act only in a
+//! kernel built with `tools/build-kernel --test-words`, which puts
+//! tests/mpx6-smp.d/testwords.lu in this file's place. Here neither acts: a
+//! shipped kernel given either says so by name and goes on as without it,
+//! and holds no test op and no test panic (tests/mpx6-smp's SMP-TESTWORDS
+//! reads both the lines and the ELF's symbols).
+
+use boot_info
+use log
+
+/// At the boot (kmain_console): each test word on the command line, ignored by name.
+pub fn start() {
+    if boot_info.cmdline_has("pax.nopoweroff") {
+        log.line("testwords: pax.nopoweroff ignored (not a test kernel)")
+    }
+    if boot_info.cmdline_has("pax.panictest=1") || boot_info.cmdline_has("pax.panictest=2") {
+        log.line("testwords: pax.panictest ignored (not a test kernel)")
+    }
+}
+
+/// kernel/user's `the_end`, before a power-off: never skipped as shipped.
+pub fn nopoweroff() -> bool {
+    false
+}
+
+/// CPU 0's tick (kernel/interrupts): nothing as shipped.
+pub fn tick(_t: u64) {}
+
+/// kernel/tlb's `answer`, given the request word: no op of its own as shipped.
+pub fn op(_r: u64) -> bool {
+    false
+}
