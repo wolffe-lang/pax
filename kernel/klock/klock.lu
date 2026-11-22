@@ -109,6 +109,7 @@
 use panic
 use percpu
 use sync
+use tlb
 
 extern "c" let pax_klock: *u64
 
@@ -181,6 +182,9 @@ pub fn enter() -> bool {
             held = ok && old == 0
         }
         if !held {
+            // px166: the holder may be waiting for this processor's
+            // answer to a shootdown (kernel/tlb), interrupts off here.
+            tlb.answer()
             sync.relax()
         }
     }
