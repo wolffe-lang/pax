@@ -4,6 +4,8 @@
 #   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
 #   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
+#    SMP_KINDS='rows end nosmp one cap2 cap1 stress' (or commas) the boots run, every kind by default, fewer for a
+#    plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
 #    boots' logs still under PAX_BUILD)
 #
@@ -30,6 +32,16 @@ set -euo pipefail
 cd "$PAX_ROOT"
 tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
 counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
+kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 stress}
+kinds=${kinds//,/ } # commas or spaces between the kinds
+for k in $kinds; do
+    case $k in rows|end|nosmp|one|cap2|cap1|stress) ;; *) die "SMP_KINDS names rows end nosmp one cap2 cap1 stress, not $k" ;; esac
+done
+asked() { # KIND: 0 when SMP_KINDS asks it, else its NOT-RUN line and 1
+    case " $kinds " in *" $1 "*) return 0 ;; esac
+    printf 'NOT-RUN %s %s: SMP_KINDS=%s\n' "$1" "$tier $fw" "$kinds"
+    return 1
+}
 while [ $# -gt 0 ]; do
     case $1 in
         --tier) tiers=$2; shift 2 ;;
@@ -99,26 +111,32 @@ for tier in $tiers; do
         python3 -I -B tests/mpx6-smp.d/rows.py "$log" "${args[@]}" --host-cpus "$hostcpus" --elf "$elf" || rc=1
     }
     for fw in $firmware; do
-        for n in $counts; do
-            boot "$work/smp-$fw-rows-$n.log" "$fw" "$img/rows.iso" 600 0 --kind rows --smp "$n" -- -smp "$n" -m 512
-        done
-        boot "$work/smp-$fw-end-halt.log" "$fw" "$img/end-halt.iso" 180 1 --kind end-halt --smp 4 -- -smp 4 -m 512
-        for how in poweroff reboot; do
-            log=$work/smp-$fw-end-$how.log st=0
-            printf '%s %s %s:\n' "$tier" "$fw" "end-$how"
-            tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$img/end-$how.iso" -- -smp 4 -m 512 || st=$?
-            python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind "end-$how" --smp 4 --qemu-status "$st" --host-cpus "$hostcpus" --elf "$elf" || rc=1
-        done
-        boot "$work/smp-$fw-nosmp.log" "$fw" "$img/nosmp.iso" 180 1 --kind nosmp --smp 4 -- -smp 4 -m 512
-        boot "$work/smp-$fw-one.log" "$fw" "$img/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
-        boot "$work/smp-$fw-cap2.log" "$fw" "$img/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
-        boot "$work/smp-$fw-cap1.log" "$fw" "$img/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
+        if asked rows; then
+            for n in $counts; do
+                boot "$work/smp-$fw-rows-$n.log" "$fw" "$img/rows.iso" 600 0 --kind rows --smp "$n" -- -smp "$n" -m 512
+            done
+        fi
+        if asked end; then
+            boot "$work/smp-$fw-end-halt.log" "$fw" "$img/end-halt.iso" 180 1 --kind end-halt --smp 4 -- -smp 4 -m 512
+            for how in poweroff reboot; do
+                log=$work/smp-$fw-end-$how.log st=0
+                printf '%s %s %s:\n' "$tier" "$fw" "end-$how"
+                tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$img/end-$how.iso" -- -smp 4 -m 512 || st=$?
+                python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind "end-$how" --smp 4 --qemu-status "$st" --host-cpus "$hostcpus" --elf "$elf" || rc=1
+            done
+        fi
+        ! asked nosmp || boot "$work/smp-$fw-nosmp.log" "$fw" "$img/nosmp.iso" 180 1 --kind nosmp --smp 4 -- -smp 4 -m 512
+        ! asked one || boot "$work/smp-$fw-one.log" "$fw" "$img/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
+        ! asked cap2 || boot "$work/smp-$fw-cap2.log" "$fw" "$img/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
+        ! asked cap1 || boot "$work/smp-$fw-cap1.log" "$fw" "$img/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
     done
     # The stress: SMP_STRESS_BOOTS boots a tier, the firmwares in turn.
     # The probe ends a component still there 30 s past the deadline itself, so a boot that does not halt within
     # SECS + 90 s is a kernel or probe hang: after three of them the rest are not run, each named red.
     set -- $firmware
     nohalt=0
+    fw=$1
+    asked stress || boots=0
     for i in $(seq 1 "$boots"); do
         k=$(( (i - 1) % nfw + 1 )); fw=${!k}
         if [ "$nohalt" -ge 3 ]; then
