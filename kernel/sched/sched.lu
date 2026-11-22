@@ -566,6 +566,21 @@ fn ended_in_place(c: u64) -> bool {
     field(c, offset_of(Thread, state)) == DEAD
 }
 
+/// px166 (step 5a): kernel/interrupts' door, before a system call or a
+/// ring-3 fault is routed: the running thread was ended in place.
+pub fn ended_here() -> bool {
+    let c = cur()
+    !idle(c) && ended_in_place(c)
+}
+
+/// px166 (step 5a): the running thread, ended in place, switched off at
+/// once (its frame `f` kept for nothing: it never runs again); the frame of
+/// what this processor runs next.
+pub fn leave_ended(f: u64) -> u64 {
+    save_frame(cur(), f)
+    run_next()
+}
+
 /// px166: 1 once `reap` or `ended` has put off a slot by the departure
 /// rule (`departure`), until a processor next moves off a DEAD slot.
 var departing: u64 = 0
@@ -1655,7 +1670,9 @@ pub fn kick(f: u64) -> u64 {
         save_frame(c, f)
         return run_next()
     }
-    if !urgent_waits(c) {
+    // px166 (step 5a): a thread whose process was stopped while it ran here
+    // (`stop_proc`'s RESCHED) goes through `run_next`, which parks it.
+    if !urgent_waits(c) && field(field(c, offset_of(Thread, lead)), offset_of(Thread, stopped)) == 0 {
         return f
     }
     put_field(c, offset_of(Thread, frame), f)
@@ -2183,6 +2200,7 @@ fn end_others(l: u64, keep: u64, status: u64) {
             thread_gone()
             put_field(t, offset_of(Thread, state), DEAD)
             put_field(t, offset_of(Thread, rst), W_NONE)
+            reach(t) // px166 (step 5a): running on another processor, it is switched off now (`kick`)
             // px102: a traced non-leader reports its own death (ptrace(2):
             // "every tracee in its thread group reports its death"; at an
             // exec, "as if they exited via _exit(2) with exit code 0").
@@ -3754,10 +3772,23 @@ fn interrupt(t: u64) {
 /// to take which will run a handler or end the process is made ready.
 /// Called when a signal is raised, a mask changes or a thread ends.
 /// IF clear.
+/// px166 (step 5a): slot `t`, if it runs on another processor (its W_CPU),
+/// is sent a RESCHED so that processor enters the kernel now rather than at
+/// its next tick: its way back to ring 3 does the rest (`hand_back`'s
+/// `signal.on_return` delivers, parks or ends; `run_next` parks a thread of
+/// a stopped process; `kick` switches a thread ended in place off).
+fn reach(t: u64) {
+    let k = slot_word(t, W_CPU)
+    if k != 0 && k != percpu.index() + 1 {
+        smp.resched(k - 1)
+    }
+}
+
 fn poke(l: u64) {
     var t: u64 = FIRST
     while t < top() {
-        if field(t, offset_of(Thread, lead)) == l && takes(t) && field(t, offset_of(Thread, state)) != READY && field(t, offset_of(Thread, state)) != RUNNING {
+        // px166: a RUNNING thread is looked at too: on another processor it is reached (`reach`)
+        if field(t, offset_of(Thread, lead)) == l && takes(t) && field(t, offset_of(Thread, state)) != READY {
             // Any of its deliverable signals that is not inert wakes it.
             let m = field(t, offset_of(Thread, sigmask))
             let own = field(t, offset_of(Thread, pend)) & !m
@@ -3770,7 +3801,9 @@ fn poke(l: u64) {
                 }
                 sig += 1
             }
-            if hit {
+            if hit && field(t, offset_of(Thread, state)) == RUNNING {
+                reach(t)
+            } else if hit {
                 interrupt(t)
             }
         }
@@ -4304,6 +4337,14 @@ fn stop_proc(l: u64, sig: u64) {
     put_field(l, offset_of(Thread, wstop), sig)
     put_field(l, offset_of(Thread, wcont), 0)
     tell_parent(l, I_CHLD_STOPPED, sig)
+    // px166 (step 5a): a thread of it running on another processor parks now
+    var t: u64 = FIRST
+    while t < top() {
+        if field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, state)) == RUNNING {
+            reach(t)
+        }
+        t += 1
+    }
 }
 
 /// Every parked thread of the process led by `l` made ready.
