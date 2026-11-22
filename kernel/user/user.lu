@@ -1172,6 +1172,7 @@ const SYS_WRITEV: u64 = 20
 const SYS_SIGALTSTACK: u64 = 131
 const SYS_RT_SIGSUSPEND: u64 = 130 // px48: an Almquist shell's `wait`
 const SYS_PAUSE: u64 = 34 // px49 (pax#73)
+const SYS_SCHED_SETAFFINITY: u64 = 203 // px166: accepted and ignored (kernel/ready)
 const SYS_SCHED_GETAFFINITY: u64 = 204
 const SYS_EPOLL_WAIT: u64 = 232
 const SYS_EPOLL_CTL: u64 = 233
@@ -2817,8 +2818,8 @@ fn change_calls(nr: u64, a: u64, pml4: u64, r0: u64, a1: u64, a2: u64, a3: u64, 
 }
 
 /// px24's calls that answer in place: `poll`, the three epoll calls,
-/// `eventfd2`, `sched_getaffinity`, `writev`; anything else is
-/// -ENOSYS, logged once a process.
+/// `eventfd2`, `sched_getaffinity` (px166: and `sched_setaffinity`),
+/// `writev`; anything else is -ENOSYS, logged once a process.
 fn ready_calls(nr: u64, a: u64, pml4: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     if nr == SYS_POLL {
         return ready.poll(a, pml4, a0, a1, int32(a2))
@@ -2837,6 +2838,9 @@ fn ready_calls(nr: u64, a: u64, pml4: u64, a0: u64, a1: u64, a2: u64, a3: u64) -
     }
     if nr == SYS_SCHED_GETAFFINITY {
         return ready.sched_getaffinity(pml4, a0, a1, a2)
+    }
+    if nr == SYS_SCHED_SETAFFINITY {
+        return ready.sched_setaffinity(pml4, a0, a1, a2)
     }
     if nr == SYS_WRITEV {
         return writev(a0, a1, int32(a2))
