@@ -736,7 +736,9 @@ fn readable(buf: u64, len: u64) -> bool {
 /// (kernel/vm's `fault`; error code bit 1 is a write); a page past its
 /// file's end is SIGBUS (U_BUS, for `kill`).
 pub fn fault_in(cr2: u64, err: u64) -> bool {
-    let r = vm.fault(area(), paging.live(), cr2 & !(PAGE - 1), err & 2 != 0)
+    // px166: with the error code whole: a fault on a page another processor
+    // made present meanwhile runs again (kernel/vm's `fault_trap`).
+    let r = vm.fault_trap(area(), paging.live(), cr2 & !(PAGE - 1), err)
     if r == vm.F_BUS {
         put_state(U_BUS, 1)
     }
