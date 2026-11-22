@@ -631,8 +631,19 @@ pub fn idle_context(c: u64) -> bool {
     idle(c)
 }
 
-/// px166: the tick this processor's running thread was switched in at
-/// (its record's SLICE: the quantum's start).
+/// px166: this processor's tick count, the quantum's clock: CPU 0's is
+/// kernel/timer's, the count the kernel keeps time by; an application
+/// processor's is its record's TICKS, its own timer's. A kernel thread
+/// holds the kernel lock while it runs, so while one runs on an
+/// application processor CPU 0 waits for the lock with its interrupts off
+/// and kernel/timer's count stands still: measured by it, that thread's
+/// quantum would never end.
+fn my_ticks() -> u64 {
+    if percpu.index() == 0 { timer.ticks() } else { percpu.get(percpu.mine(), percpu.TICKS) }
+}
+
+/// px166: the tick (`my_ticks`) this processor's running thread was
+/// switched in at (its record's SLICE: the quantum's start).
 fn slice() -> u64 {
     percpu.get(percpu.mine(), percpu.SLICE)
 }
@@ -863,7 +874,7 @@ fn urgent_waits(c: u64) -> bool {
 fn shielded() -> bool {
     let m = sv(S_MULT)
     if m == 0 {
-        return timer.ticks() == slice()
+        return my_ticks() == slice()
     }
     let t = tsc()
     let at = in_tsc()
@@ -1056,7 +1067,7 @@ fn run_next() -> u64 {
         put_slot_word(s, W_CPU, percpu.index() + 1)
     }
     percpu.set_current(s)
-    put_slice(timer.ticks())
+    put_slice(my_ticks())
     enter_space(s)
     take_frame(s)
 }
@@ -1087,7 +1098,7 @@ pub fn preempt(f: u64) -> u64 {
     if sv(S_HEAD) == 0 {
         return f
     }
-    if !idle(c) && timer.ticks() - slice() < QUANTUM && !urgent_waits(c) {
+    if !idle(c) && my_ticks() - slice() < QUANTUM && !urgent_waits(c) {
         return f
     }
     save_frame(c, f)
