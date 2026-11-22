@@ -31,6 +31,19 @@ def check(source, assembly):
         errors.append("a slot is shifted directly into one word")
     if source.count("clear_masks()") < 2:
         errors.append("bitmap reset is missing from scheduler start")
+    # px166 (step 5b): every slot word inside its slot's share of pax_slot_words, none aliased
+    per = values.get("SLOT_WORDS", 0)
+    slot_words = [int(v) for v in re.findall(r"^const W_\w+: u64 = (\d+) // [^\n]*slot word", source, re.M)]
+    if not slot_words or len(slot_words) != len(set(slot_words)) or any(w >= per for w in slot_words):
+        errors.append("slot words alias or reach past SLOT_WORDS")
+    match = re.search(r"^pax_slot_words:\s*\n\s*\.zero ([0-9 *]+)$", assembly, re.M)
+    reserved = 0
+    if match:
+        reserved = 1
+        for factor in match[1].replace(" ", "").split("*"):
+            reserved *= int(factor)
+    if reserved < values.get("SLOTS", 1) * per * 8 or reserved == 0:
+        errors.append("assembly does not reserve SLOT_WORDS words for every slot")
     return errors
 
 
@@ -48,9 +61,11 @@ def main():
                     (source.replace("const BITMAP_WORDS: u64 = 16", "const BITMAP_WORDS: u64 = 1"), assembly),
                     (source.replace("const B_QUEUED: u64 = 16", "const B_QUEUED: u64 = 0"), assembly),
                     (source, assembly.replace(".zero 2 * 16 * 8", ".zero 16 * 8")),
-                    (source + "\nfn invalid() { let x = 1 << s }\n", assembly)]
+                    (source + "\nfn invalid() { let x = 1 << s }\n", assembly),
+                    (source.replace("const SLOT_WORDS: u64 = 5", "const SLOT_WORDS: u64 = 4"), assembly),
+                    (source, assembly.replace(".zero 1024 * 5 * 8", ".zero 1024 * 4 * 8"))]
         assert all(check(s, a) for s, a in variants), "a broken layout was accepted"
-        print("PASS slots-scheduler-layout-selftest: five invalid layouts rejected")
+        print("PASS slots-scheduler-layout-selftest: seven invalid layouts rejected")
     for error in errors:
         print("FAIL slots-scheduler-layout: " + error)
     if not errors:
