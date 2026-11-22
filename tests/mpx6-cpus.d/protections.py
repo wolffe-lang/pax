@@ -59,6 +59,9 @@ for kind, path, line, fn, code in rows:
     elif module.startswith('kmain_') or module in ('heapthreads','pax_tour','schedtest'):
         what = 'boot/test orchestration: spawn/await, snapshots or final halt; no secondary CPU currently enters it'
         need = 'boot CPU owns initialization; test snapshots need all-CPU quiescence, not just local IF clear'
+    elif module == 'tlb' and fn == 'request':
+        what = 'a shootdown asked: the kernel lock held (checked by name), interrupts off from the first mailbox write to the last answer'
+        need = 'none beyond it: no tick may switch this processor to another thread with a request out; the targets answer without the lock'
     elif module == 'klock' and fn == 'halt_given_back':
         what = 'the end on CPU 0: the kernel lock given back before its last HLT, with no interrupt in between'
         need = 'none beyond it: IF stays clear for good (the halt); the others take the lock as it is given back'
