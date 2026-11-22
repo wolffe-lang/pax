@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""tests/progress-selftest: tools/progress's own proof, run in the plan job (Linux). No QEMU: python3 and bash.
+
+  P1  a command that keeps the CPU busy past two intervals gets a progress line each interval, naming its label
+  P2  a command that only sleeps gets none: a wait is not progress, so a hung build stays silent and the step's
+      silence cap still sees it
+  P3  the command's own status passes through (0, 1, 3; 128 + the signal when a signal ends it)
+  P4  with --log FILE the command's output goes to FILE, and the progress lines do not
+  P5  off Linux it runs the command with no progress line and its status passes through
+  P6  the long silent builds run under it: build-kernel's object and release-IR builds, mkyew's build of yew and
+      mkburrow's build of burrow
+Exit 0 when every row passes, 1 otherwise. Off Linux P1 and P2 print SKIP with the reason.
+"""
+import os
+import platform
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOL = os.path.join(ROOT, 'tools', 'progress')
+fails = 0
+
+
+def say(ok, what):
+    global fails
+    print('progress-selftest: %s %s' % ('PASS' if ok else 'FAIL', what))
+    fails += not ok
+
+
+def run(args, env=None):
+    try:
+        r = subprocess.run([TOOL] + args, capture_output=True, text=True, timeout=60, env=dict(os.environ, **(env or {})))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return '', 'ERROR %s' % e, -1
+    return r.stdout, r.stderr, r.returncode
+
+
+BUSY = 'end=$((SECONDS+4)); while [ $SECONDS -lt $end ]; do :; done; echo done'
+if platform.system() == 'Linux':
+    out, err, rc = run(['--interval', '1', 'busy build', '--', 'bash', '-c', BUSY])
+    lines = [l for l in err.splitlines() if l.startswith('progress: busy build: ')]
+    say(rc == 0 and len(lines) >= 2 and 'done' in out, 'P1 a busy command over 4 s: %d progress lines (want 2 or more), exit %d' % (len(lines), rc))
+    out, err, rc = run(['--interval', '1', 'sleeping build', '--', 'bash', '-c', 'sleep 3; echo woke'])
+    lines = [l for l in err.splitlines() if l.startswith('progress: ')]
+    say(rc == 0 and not lines and 'woke' in out, 'P2 a command that only sleeps 3 s: %d progress lines (want none), exit %d' % (len(lines), rc))
+else:
+    for row in ('P1', 'P2'):
+        print('progress-selftest: SKIP %s reason=%s: progress is read from /proc, on Linux' % (row, platform.system()))
+got = [run(['x', '--', 'bash', '-c', 'exit %d' % n])[2] for n in (0, 1, 3)]
+sig = run(['x', '--', 'bash', '-c', 'kill -9 $$'])[2]
+say(got == [0, 1, 3] and sig == 137, 'P3 status passed through: %s, and a KILLed command %d (want [0, 1, 3] and 137)' % (got, sig))
+with tempfile.TemporaryDirectory() as d:
+    log = os.path.join(d, 'build.log')
+    busy = BUSY if platform.system() == 'Linux' else 'echo done'
+    out, err, rc = run(['--interval', '1', '--log', log, 'logged build', '--', 'bash', '-c', busy + '; echo to-stderr >&2'])
+    text = open(log).read() if os.path.exists(log) else ''
+    ok = rc == 0 and 'done' in text and 'to-stderr' in text and 'progress:' not in text and 'done' not in out
+    if platform.system() == 'Linux':
+        ok = ok and 'progress: logged build: ' in err
+    say(ok, 'P4 --log: the output in the file (%d bytes), no progress line in it, the progress lines on stderr' % len(text))
+out, err, rc = run(['--interval', '1', 'elsewhere', '--', 'bash', '-c', 'echo ran; exit 3'], env={'PROGRESS_SYSTEM': 'Darwin'})
+say(rc == 3 and 'ran' in out and 'progress:' not in err, 'P5 off Linux: the command ran, exit %d, no progress line' % rc)
+WIRED = {
+    'tools/build-kernel': ['"$PAX_ROOT/tools/progress" --log "$out/$name.build.log"', '"$PAX_ROOT/tools/progress" --log "$out/$name.ir.log"'],
+    'tools/mkyew': ['"$PAX_ROOT/tools/progress" "mkyew: wolf build src/yew.lu" --'],
+    'tools/mkburrow': ['"$PAX_ROOT/tools/progress" --log "$w/$k.log"'],
+}
+missing = ['%s: %s' % (f, s) for f, needles in WIRED.items() for s in needles
+           if s not in open(os.path.join(ROOT, f)).read()]
+say(not missing, 'P6 the long silent builds run under tools/progress%s' % (' (missing: %s)' % '; '.join(missing) if missing else ''))
+print('progress-selftest: %s' % ('PASS' if fails == 0 else 'FAIL (%d)' % fails))
+sys.exit(1 if fails else 0)
