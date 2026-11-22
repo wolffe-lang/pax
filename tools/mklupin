@@ -58,8 +58,7 @@ if [ "${LUPIN_FROM:-tag}" = release ]; then
     mkdir -p "$PAX_CACHE"
     arc=$PAX_CACHE/${LUPIN_MUSL_URL##*/}
     if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$LUPIN_MUSL_SHA256" ]; then
-        curl -sSfL --retry 3 -o "$arc.part" "$LUPIN_MUSL_URL" || die "cannot download $LUPIN_MUSL_URL"
-        mv "$arc.part" "$arc"
+        "$PAX_ROOT/tools/fetch-retry" --url "$LUPIN_MUSL_URL" "$arc" "$LUPIN_MUSL_SHA256" || die "cannot download $LUPIN_MUSL_URL"
     fi
     [ "$(sha256_of "$arc")" = "$LUPIN_MUSL_SHA256" ] || die "lupin's musl archive: sha256 $(sha256_of "$arc"), the pin names $LUPIN_MUSL_SHA256"
     x=$(mktemp -d "${TMPDIR:-/tmp}/pax-mklupin-x.XXXXXX")
