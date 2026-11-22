@@ -131,6 +131,7 @@ use paging
 use percpu
 use timer
 use tlb
+use ipi
 
 extern "c" fn pax_ap_halt()
 extern "c" fn pax_rdmsr(msr: u64) -> u64
@@ -861,11 +862,11 @@ pub fn ap_nmi(f: u64) {
 /// answer, `cpus: cpu K did not stop for the end`, and the end goes on. Says
 /// nothing when no other processor runs (one processor, `nosmp`).
 pub fn stop_for_end() {
-    let asked = tlb.others()
+    let asked = ipi.others()
     if asked == 0 {
         return
     }
-    let late = tlb.stop_others(tlb.CAUSE_END, tlb.END_BOUND)
+    let late = ipi.stop_others(ipi.CAUSE_END, ipi.END_BOUND)
     if late == 0 {
         log.put("cpus: ")
         log.dec(asked as int)
