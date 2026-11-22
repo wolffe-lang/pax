@@ -1162,7 +1162,7 @@ pub fn fault_trap(a: u64, pml4: u64, pg: u64, err: u64) -> u64 {
         let w_ok = err & PF_W == 0 || (paging.user_ok_write(pml4, pg) && e & paging.COW == 0)
         let x_ok = err & PF_ID == 0 || e & paging.NX == 0
         if w_ok && x_ok {
-            return F_OK
+            return fault(a, pml4, pg, err & PF_W != 0) // plant: no retry, the fault refused as before (red at SMP-TLB)
         }
     }
     fault(a, pml4, pg, err & PF_W != 0)
