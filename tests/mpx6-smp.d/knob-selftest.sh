@@ -16,7 +16,7 @@
 #   KNOB-ROWS-UNSET     SMP_ROWS_CAP unset: tests/mpx6-smp's nine image specs byte-identical (rows-cap.sh)
 #   KNOB-ROWS-SET       SMP_ROWS_CAP=4: rows, stress and the three ends gain ` pax.cpus=4`, the other four as they were
 #   KNOB-ROWS-REFUSED   SMP_ROWS_CAP 0, a word or 65 refused, and 4 under the hosted run (GITHUB_ACTIONS=true):
-#                       tests/mpx6-smp exits 2 before any self-test or build
+#                       tests/mpx6-smp exits 2 with the knob's own refusal line, before any self-test or build
 set -uo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 t=$(mktemp -d "${TMPDIR:-/tmp}/knob.XXXXXX")
@@ -89,8 +89,8 @@ row KNOB-ROWS-SET $(( want != 9 || changed != 9 )) "$changed of $want as asked w
 codes=
 for v in 0 four 65; do
     # SMP_KINDS names no kind: a knob let through dies at that check (exit 1), never runs a boot
-    env -u GITHUB_ACTIONS SMP_ROWS_CAP=$v SMP_KINDS=no-such-kind bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" $v:$?"
+    env -u GITHUB_ACTIONS SMP_ROWS_CAP=$v SMP_KINDS=no-such-kind bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" $v:$?:$(grep -c '^SMP_ROWS_CAP' "$t/rc.out")"
 done
-env GITHUB_ACTIONS=true SMP_ROWS_CAP=4 SMP_KINDS=no-such-kind bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" hosted-4:$?"
-row KNOB-ROWS-REFUSED $(( $([ "$codes" = " 0:2 four:2 65:2 hosted-4:2" ]; echo $?) )) "exit codes$codes (want 2 each)"
+env GITHUB_ACTIONS=true SMP_ROWS_CAP=4 SMP_KINDS=no-such-kind bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" hosted-4:$?:$(grep -c '^SMP_ROWS_CAP' "$t/rc.out")"
+row KNOB-ROWS-REFUSED $(( $([ "$codes" = " 0:2:1 four:2:1 65:2:1 hosted-4:2:1" ]; echo $?) )) "exit:refusal lines$codes (want 2:1 each, the knob's own refusal)"
 exit "$bad"
