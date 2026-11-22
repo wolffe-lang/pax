@@ -262,10 +262,14 @@ pub fn reset(s: u64) {
 
 /// The switch from slot `from` to slot `to` (kernel/sched's `run_next`,
 /// IF clear, from != to): the live state saved in `from`'s area, `to`'s
-/// loaded. Nothing before `start`.
+/// loaded. Nothing before `start`. px166: either side may be an
+/// application processor's idle loop, no slot (SLOTS or more: kernel/
+/// percpu's IDLE_SLOT), which has no area and uses no FPU state: from it,
+/// `to`'s state is loaded alone; to it, `from`'s is saved alone and the
+/// registers keep it until the next thread's is loaded.
 pub fn switch(from: u64, to: u64) {
     let mode = sw(S_MODE)
-    if mode == OFF || from >= SLOTS || to >= SLOTS {
+    if mode == OFF {
         return
     }
     // # Safety: each area is a page of its own, 4096-aligned, as large
@@ -273,8 +277,12 @@ pub fn switch(from: u64, to: u64) {
     // what XSAVE/FXSAVE wrote, so XRSTOR/FXRSTOR's checks (the header's
     // reserved bytes, MXCSR's reserved bits) hold.
     unsafe {
-        pax_fpu_save(area_of(from), mode)
-        pax_fpu_restore(area_of(to), mode)
+        if from < SLOTS {
+            pax_fpu_save(area_of(from), mode)
+        }
+        if to < SLOTS {
+            pax_fpu_restore(area_of(to), mode)
+        }
     }
 }
 
