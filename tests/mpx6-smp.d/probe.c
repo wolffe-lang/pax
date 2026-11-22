@@ -41,6 +41,7 @@ enum {
 enum { SIGKILL = 9, SIGUSR1 = 10, SIGSEGV = 11, SIGUSR2 = 12, SIGCONT = 18, SIGSTOP = 19 };
 enum { WNOHANG = 1, WUNTRACED = 2, WCONTINUED = 8 };
 #define PROT_RW 3
+#define PROT_R 1
 #define MAP_SHARED_ANON 0x21
 #define MAP_PRIVATE_ANON 0x22
 #define MAP_FIXED 0x10
@@ -949,6 +950,43 @@ static void spin(void) {
     for (;;) nap(1000000000);
 }
 
+/* --- SMP-REFUSE (one processor runs threads: the one, nosmp and cap1 boots) ----------------------
+   Faults the page tables refuse are still refused (kernel/vm retries a fault only when the page is present at its
+   routing and allows the access): a write to a read-only page, a fetch from a page without PROT_EXEC, a read of the
+   kernel's half. Each in a child whose SIGSEGV handler exits 11: `refused yes` is that status (0xb00), a child the
+   access let through exits 0. */
+__attribute__((force_align_arg_pointer)) static void h_refused(int s) { (void)s; exit_group(11); }
+static void refuse_one(const char *what, int how) {
+    struct ln l;
+    int st = 0;
+    L p = fork();
+    if (!p) {
+        on(SIGSEGV, h_refused);
+        if (how == 0) {
+            volatile U *q = map(4096, PROT_R, MAP_PRIVATE_ANON);
+            q[0] = 1;
+        } else if (how == 1) {
+            volatile unsigned char *q = map(4096, PROT_RW, MAP_PRIVATE_ANON);
+            q[0] = 0xc3; /* ret */
+            ((void (*)(void))(U)q)();
+        } else {
+            volatile U *q = (volatile U *)0xffffffff80000000ul;
+            U v = *q;
+            __asm__ volatile("" :: "r"(v));
+        }
+        exit_group(0);
+    }
+    L w = wait4(p, &st, 0, 0);
+    l.n = 0; ls(&l, "SMP-REFUSE "); ls(&l, what); ls(&l, w == p && st == 0xb00 ? " refused yes" : " refused no");
+    ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); le(&l);
+}
+static void row_refuse(void) {
+    refuse_one("write-ro", 0);
+    refuse_one("fetch-nx", 1);
+    refuse_one("kernel-read", 2);
+    say("SMP-REFUSE done");
+}
+
 /* --- the entry ------------------------------------------------------------------------------ */
 __attribute__((used)) static void smp_main(U *sp) {
     int argc = (int)sp[0];
@@ -983,6 +1021,8 @@ __attribute__((used)) static void smp_main(U *sp) {
             row_run((int)started_cpus, 1);
             G = shared_page();
             row_dead();
+        } else if (same(mode, "one")) {
+            row_refuse();
         } else if (same(mode, "rows")) {
             row_run((int)started_cpus, 3);
             G = shared_page();
