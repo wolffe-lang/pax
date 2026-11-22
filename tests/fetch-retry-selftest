@@ -15,8 +15,13 @@
 #       exit 4, `not retried`, one fetch, no wait.
 #   R4  the real git's own answer for an unknown revision: exit 4, one
 #       fetch.
-#   R5  a refusal (HTTP 403): exit 4, one fetch, even beside a message
-#       that would otherwise read as a dropped connection.
+#   R5  GitHub's 403 for a public repository's pinned revision (run
+#       45044644655's mkaspen, `fatal: unable to access '…/aspen/': The
+#       requested URL returned error: 403`) on attempt 1: tried again
+#       (server), fetched, the commit the pin.
+#   R10 any other refusal (HTTP 404, 401) on a git fetch: exit 4, one
+#       fetch, even beside a message that would otherwise read as a
+#       dropped connection.
 #   R6  a server error (HTTP 503) on attempt 1: tried again, fetched.
 #   R7  a stalled transfer (curl 28, `Operation too slow`, the floor): tried
 #       again, fetched.
@@ -128,11 +133,18 @@ if [ "$rc" = 4 ] && [ "$fetches" = 1 ] && [ -z "$sleeps" ]; then
     ok "R4: the real git's answer for an unknown revision stops at once, not retried"
 else bad "R4: rc $rc, $fetches fetches, waits '$sleeps'"; fi
 
-run R5 99 "error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403
+run R5 1 "fatal: unable to access 'https://github.com/wolffe-lang/aspen/': The requested URL returned error: 403" "$pin" "$pin"
+if [ "$rc" = 0 ] && [ "$fetches" = 2 ] && [ "$sleeps" = 10 ] && [ "$head" = "$pin" ] && grep -q 'failed (server); again in 10 s' "$w/R5.err"; then
+    ok "R5: a git fetch's 403 is tried again (server), fetched, the commit the pin"
+else bad "R5: rc $rc, $fetches fetches, waits '$sleeps', head $head"; fi
+
+for code in 404 401; do
+    run R10-$code 99 "error: RPC failed; HTTP $code curl 22 The requested URL returned error: $code
 fatal: the remote end hung up unexpectedly" "$pin" "$pin"
-if [ "$rc" = 4 ] && [ "$fetches" = 1 ] && [ -z "$sleeps" ]; then
-    ok "R5: a 403 is a refusal, not retried, beside 'the remote end hung up'"
-else bad "R5: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+    if [ "$rc" = 4 ] && [ "$fetches" = 1 ] && [ -z "$sleeps" ]; then
+        ok "R10: a git fetch's $code is a refusal, not retried, beside 'the remote end hung up'"
+    else bad "R10: $code: rc $rc, $fetches fetches, waits '$sleeps'"; fi
+done
 
 run R6 1 "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503" "$pin" "$pin"
 if [ "$rc" = 0 ] && [ "$fetches" = 2 ] && grep -q 'failed (server)' "$w/R6.err" && [ "$head" = "$pin" ]; then
