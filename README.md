@@ -1026,10 +1026,10 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   dispatch with `accel=tcg` run every suite on TCG, whose slower pace is where several timing defects were found. If
   the sixteen save under 10 % of a `tier full` run, or a KVM job goes red because of the runner rather than PAX, the
   list shrinks to the two users suites; under 5 %, it empties.
-- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users (users 360 on TCG), 90 for users again
-  with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
-  (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in
-  [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200 seconds for its 100,000 rounds.
+- Every job's time cap is at least twice its slowest green run of the same shape (tier, KVM or TCG), and the long
+  jobs' caps are also at least 40 % above their measured stage timings. Where twice passes GitHub's 360-minute limit
+  for a hosted job (pelt and the installer on every leg), the cap is that limit. The figures, their runs and the
+  exceptions are in [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200 seconds for its 100,000 rounds.
 - Every tracked path is known to the planner (a rule in `tools/ci-tiers.map`, or a suite that reads it); a pull
   request that adds a path nothing knows is red in its plan job, where before it ran every leg on every push.
 - A test is seen red before it is trusted: the break is planted in a commit and run of its own, then fixed.
