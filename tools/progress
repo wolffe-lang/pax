@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""tools/progress: a progress line while a long build works, and none while it waits.
+
+    tools/progress [--interval SECONDS] [--log FILE] LABEL -- COMMAND [ARG...]
+
+Runs COMMAND and, every interval (60 s), sums the CPU time its processes have used (the command and every process
+under it, from /proc). When they used at least a tenth of the interval since the last look, it prints to standard
+error `progress: LABEL: running N min, its processes have used M min of CPU`. When they did not (the build waits on a
+pipe, a lock or the network), it prints nothing: a wait is not progress, so a build that hangs stays silent and a
+step's silence cap (tools/silence-cap) still sees it. A build that loops forever keeps using the CPU and is stopped
+by its job's cap.
+
+With --log FILE the command's standard output and standard error go to FILE (as the callers' own redirection did)
+and the progress lines to this tool's standard error, so they reach the job's log. Without it the command shares
+this tool's. The command's status is this tool's (128 + the signal when a signal ends it).
+
+The command's process group and session are left as they are. Off Linux (no /proc) it runs the command with no
+progress line. PROGRESS_SYSTEM, for its selftest, can only turn the progress lines off.
+"""
+import os
+import platform
+import subprocess
+import sys
+import time
+
+
+def usage():
+    sys.stderr.write('usage: tools/progress [--interval SECONDS] [--log FILE] LABEL -- COMMAND [ARG...]\n')
+    sys.exit(2)
+
+
+def cpu_of(root):
+    """CPU seconds used by `root` and every process under it (its own and its reaped children's), from /proc."""
+    tick = os.sysconf('SC_CLK_TCK')
+    parent, used = {}, {}
+    for d in os.listdir('/proc'):
+        if not d.isdigit():
+            continue
+        try:
+            with open('/proc/%s/stat' % d) as f:
+                stat = f.read()
+        except OSError:
+            continue
+        f = stat[stat.rindex(')') + 2:].split()
+        parent[int(d)] = int(f[1])                                  # field 4, ppid
+        used[int(d)] = sum(int(x) for x in f[11:15]) / tick         # fields 14-17: utime stime cutime cstime
+    total, todo, seen = 0.0, [root], set()
+    while todo:
+        p = todo.pop()
+        if p in seen or p not in used:
+            continue
+        seen.add(p)
+        total += used[p]
+        todo.extend(c for c, pp in parent.items() if pp == p)
+    return total
+
+
+def main(argv):
+    if '--' not in argv:
+        usage()
+    i = argv.index('--')
+    opts, cmd = argv[:i], argv[i + 1:]
+    interval, log = 60.0, None
+    while len(opts) > 1 and opts[0] in ('--interval', '--log'):
+        if opts[0] == '--interval':
+            interval = float(opts[1])
+        else:
+            log = opts[1]
+        opts = opts[2:]
+    if len(opts) != 1 or not cmd or interval <= 0:
+        usage()
+    label = opts[0]
+    out = open(log, 'wb') if log else None
+    try:
+        child = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT if out else None)
+    except OSError as e:
+        sys.stderr.write('progress: %s: cannot run %s: %s\n' % (label, cmd[0], e))
+        sys.exit(127)
+    watch = (os.environ.get('PROGRESS_SYSTEM') or platform.system()) == 'Linux' and platform.system() == 'Linux'
+    start = last_t = time.monotonic()
+    last_cpu = 0.0
+    while True:
+        try:
+            rc = child.wait(timeout=interval)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if not watch:
+            continue
+        cpu = cpu_of(child.pid)
+        now = time.monotonic()
+        if cpu - last_cpu >= (now - last_t) / 10:
+            sys.stderr.write('progress: %s: running %d min, its processes have used %.1f min of CPU\n' % (
+                label, (now - start) // 60, cpu / 60))
+            sys.stderr.flush()
+        last_cpu, last_t = cpu, now
+    if out:
+        out.close()
+    sys.exit(rc if rc >= 0 else 128 - rc)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
