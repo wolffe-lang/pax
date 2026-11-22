@@ -373,6 +373,14 @@ case('a thread of the ended group current again', cap2_text(dead=dead_lines(revi
      ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP'}, {'SMP-DEAD'})
 case('an exit_group with no status in 2 s', cap2_text(dead=dead_lines(statuses=('0xdead',), revived=(10,), running=(2,))),
      ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP'}, {'SMP-DEAD'})
+# SMP-PARK: exec's parked-space table (two at once; one word a slot, the first form, could not)
+PARK = 'sched: parked spaces: 2 held parked at once, 0 left once let go\n'
+case('the parked-space check green', PARK + cap2_text(), ['--kind', 'cap2', '--smp', '4', '--cap', '2'],
+     {'SMP-CAP', 'SMP-DEAD', 'SMP-PARK'}, set())
+case('one space parked where two were', PARK.replace(': 2 held', ': 1 held') + cap2_text(),
+     ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP', 'SMP-DEAD'}, {'SMP-PARK'})
+case('the table full at the second park', 'PANIC sched: more parked spaces than other processors (a kernel bug), slot 0\n'
+     + cap2_text(), ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP'}, {'SMP-PARK', 'SMP-DEAD'})
 case('the group never on the second processor', cap2_text(dead=dead_lines(running=(2, 1, 2))),
      ['--kind', 'cap2', '--smp', '4', '--cap', '2'], {'SMP-CAP'}, {'SMP-DEAD'})
 # kernel threads run on CPU 0 alone (stage 2's amendment to its contract's §3.6): an application processor's
