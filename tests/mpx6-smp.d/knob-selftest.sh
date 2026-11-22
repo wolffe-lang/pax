@@ -88,8 +88,9 @@ row KNOB-ROWS-UNSET $(( want != 9 || same != 9 )) "$same of $want image specs by
 row KNOB-ROWS-SET $(( want != 9 || changed != 9 )) "$changed of $want as asked with SMP_ROWS_CAP=4 (rows, stress, end-*: pax.cpus=4; the rest unchanged)"
 codes=
 for v in 0 four 65; do
-    env -u GITHUB_ACTIONS SMP_ROWS_CAP=$v bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" $v:$?"
+    # SMP_KINDS names no kind: a knob let through dies at that check (exit 1), never runs a boot
+    env -u GITHUB_ACTIONS SMP_ROWS_CAP=$v SMP_KINDS=no-such-kind bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" $v:$?"
 done
-env GITHUB_ACTIONS=true SMP_ROWS_CAP=4 bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" hosted-4:$?"
+env GITHUB_ACTIONS=true SMP_ROWS_CAP=4 SMP_KINDS=no-such-kind bash "$root/tests/mpx6-smp" > "$t/rc.out" 2>&1; codes+=" hosted-4:$?"
 row KNOB-ROWS-REFUSED $(( $([ "$codes" = " 0:2 four:2 65:2 hosted-4:2" ]; echo $?) )) "exit codes$codes (want 2 each)"
 exit "$bad"
