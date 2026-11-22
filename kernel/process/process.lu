@@ -223,9 +223,15 @@ const W_SS: u64 = 21
 const USER_CS: u64 = 0x23
 const USER_SS: u64 = 0x1b
 const RFLAGS_IF: u64 = 0x202
-// A vector no gate has and boot/isr.S does not take for SYSRETQ's: an
-// exec'd frame leaves by IRETQ, so %rcx and %r11 start 0 too.
-const EXEC_VECTOR: u64 = 0x102
+// A vector no gate has that boot/isr.S's common path sends straight to
+// IRETQ with the frame's registers (0x101, as PTRACE_SETREGS's frames):
+// an exec'd frame leaves by IRETQ, so %rcx and %r11 start 0 too, and %rax
+// is execve's own 0. pax#510: it was 0x102, which the common path has also
+// meant since the system-call stops (a stopped call's continuation, run
+// again by kernel/user's pax_trace_resume_syscall): every exec then ran a
+// second execve on the zeroed frame (a null name with no AT_EMPTY_PATH:
+// kernel/files' walk answers -ENOENT) and the new image began with -2.
+const EXEC_VECTOR: u64 = 0x101
 
 // Linux's numbers (syscall_64.tbl).
 const SYS_CLONE: u64 = 56
