@@ -73,7 +73,7 @@ text (`tests/tour`, `tools/tour`).
 | `process/` | processes (px14): a program's image and psABI stack (moved from `user/`), `clone`/`clone3`/`vfork` (CLONE_VM\|CLONE_VFORK: the child borrows the parent's space, the parent waits until it execs or ends), px88: `fork` (57, musl's) as `clone(SIGCHLD, 0)` and `getrusage` (98: RUSAGE_SELF, RUSAGE_CHILDREN, RUSAGE_THREAD from `sched`'s counts; wait4's and waitid's rusage the reaped child's, `put_rusage`), `execve` (path, argv, envp copied out first; close-on-exec, handled signals reset, the old space given back or handed back to the vfork parent), `wait4`/`waitid` (zombies reaped, Linux's status words, WNOHANG, a blocked wait re-runs when a child ends), px26: a thread by `clone`/`clone3` with CLONE_THREAD (`sched.clone_thread`), a census line every 2500th; `execve` ends a process's other threads first; `who`, the `user: <name> pid <n>` prefix; the signal calls moved to `signal/` |
 | `signal/` | signals delivered (px26): `rt_sigaction`, `rt_sigprocmask` (a mask a thread), `rt_sigpending`, `kill`, `tgkill`, `tkill`; `on_return`, which every frame about to resume in ring 3 passes through (`interrupts`) and which takes the thread's pending signals — ignore, terminate (the process ends, its wait status the signal), stop refused by name, or a handler on a frame laid on the thread's stack: the extended state as XSAVE wrote it with its two magics, siginfo, ucontext with every register, the restorer's address; `rt_sigreturn` puts it all back and leaves by IRETQ; a waiting system call is run again or answers -EINTR by what it was (`sched`'s `W_*`) and SA_RESTART; `fault` gives an exception in ring 3 to a handler; `tty` raises the console's signals for every process |
 | `futex/` | the `futex` call (px26): wait, wake, their bitset forms, FUTEX_PRIVATE_FLAG (a key bit: a private wait is not reached by a wake without it), relative and absolute timeouts; the key is the word's physical address; waiters are threads in `sched`'s FUTEX state, woken longest-waiting first; other operations refused by name |
-| `rtc/` | the CMOS real-time clock read once at `user.start` (px26): seconds since the epoch for CLOCK_REALTIME, `time` and `gettimeofday` |
+| `rtc/` | the CMOS real-time clock read once at `user.start` (px26): seconds since the epoch for CLOCK_REALTIME, `time` and `gettimeofday`; px168: root may set the clock after (kernel/user), and the battery clock is never written |
 | `tree/` | the writable file tree, in memory (px27): inodes, files in frames, directories of records, the initramfs as its first contents, a cap and `ENOSPC` (below, "The writable tree") |
 | `schedtest/` | the thread bodies `tests/mpx2-sched` runs, as `export fn`s the kernels name with `extern "c" let` (px07) |
 | `pax_tour/` | the tour's stages (px08): each calls the subsystems above as their test kernels do and prints their reports under a heading; `leaf`, a read-only walk of the live page tables for the permissions stage 3 prints; `pax_tour_worker`, stage 5's named thread body; the pauses between stages (the PIT's count polled before the timer interrupt is live, `timer.wait`, then `sched.sleep`) |
@@ -1523,3 +1523,33 @@ another way.
 |---|---|
 | `volume/` | the 65 items kernel/tree, fstab, files and procfs use, each forwarded to kernel/ext2 or kernel/journal |
 | `ext2/` | its header names kernel/volume as its only caller |
+
+## px168 — root sets the clock
+
+Root may set the wall clock with `clock_settime(CLOCK_REALTIME)` and `settimeofday`, as on Linux, so a machine whose
+battery clock is wrong can be corrected by an administrator's `date -s` or a time client. The battery clock is not
+written back (Linux's `settimeofday` does not either). A user is refused as before, in Linux's measured order: a clock
+other than CLOCK_REALTIME -EINVAL, an unreadable argument -EFAULT, a time out of range -EINVAL (negative, nanoseconds or
+microseconds out of range, a second past 8,277,292,035), then -EPERM, then -EINVAL for a time below CLOCK_MONOTONIC.
+`settimeofday` keeps the time zone it is given (minutes west within 900 either way) and `gettimeofday` answers it; the
+first zone given with no time and nonzero minutes moves the clock by those minutes, once a boot, as settimeofday(2)
+describes. `adjtimex` and `clock_adjtime` are refused by name (-EOPNOTSUPP, logged): PAX keeps no frequency, offset or
+status to read or change; a user's change is -EPERM first, and a bad clock or buffer has Linux's answer.
+
+The wall clock is one word, `pax_syscall_state` word 6: the clock at tick 0 in nanoseconds (seconds before), so a set
+is a single 64-bit store and every reader adds the ticks to it: `wall_ns` (CLOCK_REALTIME and its kin, `time`,
+`gettimeofday`, the futex's realtime base) and kernel/tree's `now` (every file time, an ext2 volume's mount times and a
+journal's commit stamps). Until a set, each reads the same instant as before.
+
+**Named difference:** an absolute wait on the wall clock (`clock_nanosleep` with TIMER_ABSTIME on CLOCK_REALTIME, its
+coarse form, CLOCK_REALTIME_ALARM or CLOCK_TAI; a FUTEX_WAIT_BITSET with FUTEX_CLOCK_REALTIME) keeps the deadline in
+ticks that its call computed, so a later set does not move it. On Linux such a wait follows the set: a set past the
+deadline ends it, a set back lengthens it. Relative sleeps are unaffected on both. `tests/mpx5-users`' `clock` session
+holds both outcomes by name (`clock-abs-sleep-follows`, `clock-futex-realtime`).
+
+| module or file | what |
+|---|---|
+| `user/` (px168) | `U_EPOCH` in nanoseconds; `set_wall` (the caller's privilege, CLOCK_MONOTONIC's floor, one store); `clock_settime` (227) and `settimeofday` (164) dispatched here, with the zone kept (`tz_west`, `tz_dst`, the first-zone warp) and answered by `gettimeofday`; `adjust` for `adjtimex` (159) and `clock_adjtime` (305): refusal 47 for every call past Linux's own answers |
+| `process/` (px168) | `root_call` no longer takes 227 and 164; refusal 47 (`R_CLOCK`, public) names the clock's discipline |
+| `tree/` (px168) | `now` adds the ticks to word 6's nanoseconds |
+| `futex/` (px168) | FUTEX_CLOCK_REALTIME with FUTEX_WAIT is -ENOSYS, as Linux answers it (with FUTEX_WAIT_BITSET alone it is taken) |
