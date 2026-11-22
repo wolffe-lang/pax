@@ -1057,7 +1057,7 @@ fn take_out(n: u64) {
 /// and the kernel stops: RUNNING, or its W_CPU not 0 (`run_next` cleared
 /// the outgoing slot's before it asked, so a thread the same processor
 /// takes back passes).
-fn take() -> u64 {
+fn take_next() -> u64 {
     let n = eligible()
     if n != 0 {
         take_out(n)
@@ -1091,12 +1091,12 @@ fn run_next() -> u64 {
     if real_from {
         put_slot_word(from, W_CPU, 0)
     }
-    var n = take()
+    var n = take_next()
     // px48: a thread of a stopped process runs nothing: it is parked
     // (STOPPED), its frame kept, until the process is continued.
     while n != 0 && parks(n - 1) {
         put_field(n - 1, offset_of(Thread, state), STOPPED)
-        n = take()
+        n = take_next()
     }
     let s = if n == 0 { idle_slot() } else { n - 1 }
     let real_s = s != percpu.IDLE_SLOT
