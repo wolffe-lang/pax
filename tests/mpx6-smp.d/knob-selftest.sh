@@ -84,8 +84,8 @@ for spec in "${images[@]}"; do
         *) [ "$got" = "$spec" ] && changed=$((changed + 1)) ;;
     esac
 done
-row KNOB-ROWS-UNSET $(( want != 9 || same != 9 )) "$same of $want image specs byte-identical with SMP_ROWS_CAP unset (want 9 of 9)"
-row KNOB-ROWS-SET $(( want != 9 || changed != 9 )) "$changed of $want as asked with SMP_ROWS_CAP=4 (rows, stress, end-*: pax.cpus=4; the rest unchanged)"
+row KNOB-ROWS-UNSET $(( want != 13 || same != 13 )) "$same of $want image specs byte-identical with SMP_ROWS_CAP unset (want 13 of 13)"
+row KNOB-ROWS-SET $(( want != 13 || changed != 13 )) "$changed of $want as asked with SMP_ROWS_CAP=4 (rows, stress, end-*: pax.cpus=4; the rest unchanged)"
 codes=
 for v in 0 four 65; do
     # SMP_KINDS names no kind: a knob let through dies at that check (exit 1), never runs a boot
