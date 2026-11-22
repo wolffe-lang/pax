@@ -316,6 +316,32 @@ def end_text(how, stage=2, order='right'):
 halted = regs(0, KTEXT, rfl=0x2) + ''.join(regs(k, KTEXT + 0x40, rfl=0x2) for k in range(1, 4))
 idle_dump = regs(0, KTEXT, rfl=0x2) + ''.join(regs(k, SYMS['pax_ap_halt'][0] + 3, rfl=0x246) for k in range(1, 4))
 case('end halt green', end_text('halt'), ['--kind', 'end-halt', '--smp', '4'], {'SMP-END'}, set(), dumps=[halted] * 3)
+# the STOP step's test kinds (a test build) and the shipped kernel given the test words
+NOOFF = 'poweroff: not done (pax.nopoweroff, a test kernel)\n'
+case('end-nooff green', end_text('halt') + NOOFF, ['--kind', 'end-nooff', '--smp', '4'], {'SMP-END-NOOFF'}, set(),
+     dumps=[halted] * 3)
+case('end-nooff: the power-off done after all', end_text('halt'), ['--kind', 'end-nooff', '--smp', '4'], set(),
+     {'SMP-END-NOOFF'}, dumps=[halted] * 3)
+case('end-nooff: processors ticking after the end', end_text('halt') + NOOFF, ['--kind', 'end-nooff', '--smp', '4'],
+     set(), {'SMP-END-NOOFF'}, dumps=[idle_dump] * 3)
+P1 = 'SMP-PANIC spinners 4\nPANIC testwords: a test panic, cpu  0x0000000000000001\n'
+P2 = P1 + "PANIC cpu 2 (a second panic, cpu 1's first): testwords: a test panic, cpu  0x0000000000000002\n"
+case('panic green', head('spin') + P1, ['--kind', 'panic', '--smp', '4'], {'SMP-PANIC-STOP'}, set(), dumps=[halted] * 3)
+case('panic: a processor spinning on', head('spin') + P1, ['--kind', 'panic', '--smp', '4'], set(), {'SMP-PANIC-STOP'},
+     dumps=[idle_dump] * 3)
+case('panic: a late processor named', head('spin') + P1 + 'cpus: cpu 3 did not stop for the panic\n',
+     ['--kind', 'panic', '--smp', '4'], set(), {'SMP-PANIC-STOP'}, dumps=[halted] * 3)
+case('panic under TCG: printed, not gated', head('spin') + P1 + 'cpus: cpu 3 did not stop for the panic\n',
+     ['--kind', 'panic', '--smp', '4'], {'SMP-PANIC-STOP'}, set(), meta=TCG, dumps=[halted] * 3)
+case('panic2 green', head('spin') + P2, ['--kind', 'panic2', '--smp', '4'], {'SMP-PANIC-TWO'}, set(), dumps=[halted] * 3)
+case('panic2: the second panic printed in full (two owners)', head('spin') + P1 + P1.split('\n')[1] + '\n',
+     ['--kind', 'panic2', '--smp', '4'], set(), {'SMP-PANIC-TWO'}, dumps=[halted] * 3)
+TW = 'testwords: pax.nopoweroff ignored (not a test kernel)\ntestwords: pax.panictest ignored (not a test kernel)\n'
+case('testwords green', head('end') + TW, ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], {'SMP-TESTWORDS'}, set())
+case('testwords: a word not reported', head('end') + TW.split('\n')[0] + '\n',
+     ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'})
+case('testwords: the power-off skipped', head('end') + TW, ['--kind', 'testwords', '--smp', '4', '--qemu-status', '1'],
+     set(), {'SMP-TESTWORDS'})
 case('end halt at stage 1: no stop line, APs idle with IF set', end_text('halt', stage=1), ['--kind', 'end-halt', '--smp', '4'],
      set(), {'SMP-END'}, dumps=[idle_dump] * 3)
 case('the plant end: the line gone, APs idle', end_text('halt').replace('cpus: 3 application processors stopped for the end\n', ''),
