@@ -41,7 +41,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            (`tlb`) each time; B running elsewhere at each change.
               SMP-SIGNAL   SIGUSR1 and tgkill to a thread spinning elsewhere handled (8 of 9 within 2 ms
                            under KVM; tgkill on the thread it named), SIGKILL to the reaped status
-                           (4 of 5 within 2 ms under KVM), SIGSTOP held and SIGCONT resumed.
+                           (4 of 5 within 2 ms under KVM), SIGSTOP held and SIGCONT resumed; every
+                           processor a target was signalled on took a RESCHED across the row (`resched`
+                           before and after: the raise paths' RESCHED, on both accelerators).
               SMP-EXIT     exit_group from the main thread and from a sibling with four threads running,
                            execve from a sibling with the others running: statuses 0x700, 0x800,
                            0x900; min(4, N) of the group seen running at once; MemFree after four
@@ -406,6 +408,17 @@ def signal_check():
         why.append(f'stop and continue: {stop[0]}')
     if tst and kv(tst[0], 'tgkill-status') != '0x0':
         why.append(f'the tgkill process ended {tst[0]}')
+    # step 5's witness: every processor a target was signalled on (not the sender's) took a RESCHED in the row
+    rs = [s for s in sig if s.startswith('resched')]
+    gains = {int(a): int(b) for a, b in re.findall(r'(\d+):(\d+)', rs[0])} if rs else {}
+    targets = sorted({cpu(kv(s, f'{who}-cpu')) for group, who, me in ((usr1, 'w', 'p'), (kill, 'w', 'p'), (tgk, 't', 'm'))
+                      for s in group if elsewhere(s, who, me)} - {None})
+    quiet = [c for c in targets if gains.get(c, 0) <= 0]
+    if targets and (not rs or quiet):
+        why.append(f'the target processors {quiet or targets} took no RESCHED across the row (the raise paths\' RESCHED): '
+                   f'`resched` gains {gains if rs else "missing"}')
+    elif rs:
+        info.append(f'RESCHEDs taken across the row: {gains}')
     if not TIMED:
         info.append(UNTIMED)
     if TIMED:
