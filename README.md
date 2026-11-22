@@ -1041,9 +1041,11 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   reset, a failed connect, a timeout or a stalled transfer, an HTTP 5xx or 429), three attempts at most, 10 and then
   30 seconds apart, the pinned commit checked after the fetch; an unknown revision or a refusal stops at once. Every
   `tools/mk*` source fetch, `tools/fetch-wolf` and the census go through it (`tests/fetch-retry-selftest`).
-  `tools/fetch-wolf`'s release archive comes through its `--url` download in the same way, checked against the pinned
-  sha256 before it is kept; there a 403 is also tried again, since the archive is public and the host's 403 has been
-  passing (a second attempt fetched it).
+  Every download goes through its `--url` mode in the same way, checked against the pinned sha256 before it is kept:
+  the release archives of `tools/fetch-wolf`, `fetch-lupin` and `fetch-limine`, the toolchain archives every
+  `tools/mk*` stages, the packages of `tools/fetch-arch` and `tools/disktools`, and the census's downloads. There a 403
+  is also tried again, since every archive is public and the host's 403 has been passing (a second attempt fetched
+  it). `tools/fetch-busybox` alone keeps its own envelope, below.
 - `tools/fetch-busybox` also retries a failed download: three attempts at most, 25 seconds each (10 to connect),
   with exponential backoff of 1 and 2 seconds and a 90-second retry envelope, inside the USB test's unchanged
   120-second fetch phase. The archive and extracted binary still have to match their pinned SHA-256 digests;
