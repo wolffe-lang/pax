@@ -53,14 +53,22 @@ use sync
 extern "c" fn pax_invlpg(va: u64)
 extern "c" fn pax_rdtsc() -> u64
 extern "c" fn pax_wrmsr(msr: u64, v: u64)
+extern "c" fn pax_ap_stop() -> never
 /// kernel/klock's two words (OWNER, this processor's index + 1 while it
 /// holds the lock; DEPTH), read here because this module sits below it.
 extern "c" let pax_klock: *u64
 
 /// The shootdown's vector (boot/isr.S's trampoline 49, kernel/idt's gate).
 pub const VECTOR: u64 = 49
-/// The op (the one this step needs; the end's STOP is a later one).
+/// The ops: INVLPG va; STOP (the end, a panic: VA carries the cause).
 pub const INVLPG: u64 = 1
+pub const STOP: u64 = 2
+/// STOP's causes, in the stopped processor's CAUSE word.
+pub const CAUSE_END: u64 = 0x2001
+pub const CAUSE_PANIC: u64 = 0x2002
+/// `stop_others`' bounds: 1 s at 4 GHz for the end; 100 ms for a panic.
+pub const END_BOUND: u64 = 4000000000
+pub const PANIC_BOUND: u64 = 400000000
 
 const KERNEL_HALF: u64 = 0xffff800000000000
 /// The requester's bound on every target's answer: 1 s at 4 GHz.
@@ -135,12 +143,95 @@ pub fn answer() {
     if g == percpu.get(me, percpu.TLB_ACK) {
         return
     }
+    if r & 0xff == STOP {
+        stopped(me, g, percpu.get(me, percpu.TLB_VA))
+    }
     if r & 0xff == INVLPG {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(percpu.get(me, percpu.TLB_VA)) }
     }
     percpu.put(me, percpu.TLB, percpu.get(me, percpu.TLB) + 1)
     percpu.put(me, percpu.TLB_ACK, g)
+}
+
+/// STOP answered: this processor gives the kernel lock back if it holds it
+/// (only a panic's STOP can find a holder: the end's requester holds the
+/// lock itself), says STOPPED with `cause` and the answer, then
+/// `pax_ap_stop`: interrupts off, HLT for ever. Its local APIC keeps any
+/// interrupt pending, never taken (vector 49's own is never acknowledged);
+/// an NMI is taken and returns into the HLT.
+fn stopped(me: u64, g: u64, cause: u64) -> never {
+    // # Safety: kernel/klock's OWNER and DEPTH words, as `request` reads them.
+    unsafe {
+        if (pax_klock as u64 as *u64).read_volatile() == percpu.index() + 1 {
+            ((pax_klock as u64 + 8) as *u64).write_volatile(0)
+            (pax_klock as u64 as *u64).write_volatile(0)
+        }
+    }
+    percpu.put(me, percpu.CAUSE, cause)
+    percpu.put(me, percpu.STATE, percpu.STOPPED)
+    percpu.put(me, percpu.TLB, percpu.get(me, percpu.TLB) + 1)
+    percpu.put(me, percpu.TLB_ACK, g)
+    // # Safety: isr.S's CLI; HLT loop; it never returns.
+    unsafe { pax_ap_stop() }
+}
+
+/// Every other processor that runs (CPU 0; an application processor whose
+/// STATE is IDLE) asked to stop with `cause`, then waited for, at most
+/// `bound` TSC cycles in all: the mask (bit i) of those that did not
+/// answer. Never panics, never waits past the bound. The end calls it
+/// holding the kernel lock; a panic calls it with or without.
+pub fn stop_others(cause: u64, bound: u64) -> u64 {
+    // # Safety: as `start`.
+    let cnt = unsafe { n }
+    if cnt < 2 {
+        return 0
+    }
+    let me = percpu.mine()
+    let _off = sync.irq_save()
+    // # Safety: written by whoever asks; a STOP is the last request a target answers.
+    let g = unsafe { gen } + 1
+    unsafe { gen = g }
+    var sent: u64 = 0
+    var i: u64 = 0
+    while i < cnt {
+        let r = record(i)
+        if r != me && runs(i, r) {
+            percpu.put(r, percpu.TLB_VA, cause)
+            percpu.put(r, percpu.TLB_REQ, (g << 8) | STOP)
+            send(percpu.get(r, percpu.APIC))
+            sent |= 1 << i
+        }
+        i += 1
+    }
+    // # Safety: fpu.S's RDTSC.
+    let until = unsafe { pax_rdtsc() } + bound
+    var late: u64 = sent
+    while late != 0 && unsafe { pax_rdtsc() } < until {
+        i = 0
+        while i < cnt {
+            if late & (1 << i) != 0 && percpu.get(record(i), percpu.STATE) == percpu.STOPPED {
+                late &= !(1 << i)
+            }
+            i += 1
+        }
+        sync.relax()
+    }
+    late
+}
+
+/// How many processors `stop_others` asked: every other one that runs now.
+pub fn others() -> u64 {
+    // # Safety: as `start`.
+    let cnt = unsafe { n }
+    let me = percpu.mine()
+    var k: u64 = 0
+    var i: u64 = 0
+    while i < cnt {
+        if record(i) != me && runs(i, record(i)) { k += 1 }
+        i += 1
+    }
+    k
 }
 
 /// The page at `va` in the space at `pml4` (or the kernel half) dropped on
