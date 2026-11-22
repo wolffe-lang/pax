@@ -3,7 +3,8 @@
 Usage: distribution-root BASE.cpio INPUTS IDENTITY_DIR OUT.cpio dev|release
 INPUTS holds auth/ (tools/mkauth's output: su, sudo, passwd, login and sums.txt) beside the other
 programs (px106; px103's sudo/ before it), trash/ (tools/mktrash's: the five commands and sums.txt)
-(tb03), and ligature/ (tools/mkligature's: ligature and sums.txt; the dev image's only) (px128).
+(tb03), ligature/ (tools/mkligature's: ligature and sums.txt; the dev image's only) (px128),
+and alpha/ (tools/mkalpha's: alpha and sums.txt).
 The old payload supplies only unchanged support files and the pinned native
 compiler/linker bundle. Every current org binary and the base std are replaced.
 """
@@ -55,6 +56,15 @@ def install_pxg(rows, inputs):
     assert (inputs/'pxg/sums.txt').read_text().split() == ['pxg', sha(data), str(len(data))], 'image-pxg-input-mismatch'
     assert 'bin/pxg' not in rows, 'image-pxg-collision'
     rows['bin/pxg'] = (0o100755, 0, 0, data)
+
+
+def install_alpha(rows, inputs):
+    """/bin/alpha, the service manager, byte-for-byte as tools/mkalpha built it (stripped there). Nothing
+    starts it: no unit ships, and the boot hooks and /etc/pax-run are unchanged."""
+    data = (inputs/'alpha/alpha').read_bytes()
+    assert (inputs/'alpha/sums.txt').read_text().split() == ['alpha', sha(data), str(len(data))], 'image-alpha-input-mismatch'
+    assert 'bin/alpha' not in rows, 'image-alpha-collision'
+    rows['bin/alpha'] = (0o100755, 0, 0, data)
 
 
 def main():
@@ -163,6 +173,7 @@ def main():
         put('bin/'+name, data, 0o755)
     # pxg is in both variants. The test-only failpoint and qualification tools never ship.
     install_pxg(rows, inputs)
+    install_alpha(rows, inputs)  # in both variants, as pxg is
     # px104 (R-px104-2): the root set den's TLS reads (tools/mkroots, held
     # to user/roots.pin's digests here as well), /etc/shrc exporting
     # DEN_TLS_ROOTS; (R-px104-6) GitHub's published host key.

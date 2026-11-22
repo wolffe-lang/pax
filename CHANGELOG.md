@@ -31,6 +31,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   one-processor boot it was. `tests/mpx6-cpus` holds
   the rows, QEMU's register dump of every processor beside the kernel's own lines, at 1, 2, 4 and 16 processors.
 
+- **alpha on the image, with nothing to start.** `/bin/alpha`, the service
+  manager in wolf (`user/alpha.pin`), is in both images: `tools/mkalpha`
+  builds it from alpha's own tree with the toolchain that tree pins, through
+  its own `tools/build --static`, in two checkouts that must agree byte for
+  byte, and ships the stripped copy, which `tools/distribution-root` holds to
+  the builder's sums. No unit ships and nothing runs it at boot: the boot
+  hooks and `/etc/pax-run` are unchanged, so it is a program to type.
+  `tests/mpx6-services` boots it under QEMU and types at it (A0): `alpha
+  --version` prints the version line the same binary prints on Linux,
+  `alpha check --root /` counts no unit, and `alpha status` finds no manager
+  (status 3). `--latest` images take alpha's trunk head.
+
 - **A logout at the console: pid 1 stays (px124, px156, pax#352).** An installed
   PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
   names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs

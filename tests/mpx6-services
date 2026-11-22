@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# tests/mpx6-services — alpha, the service manager in wolf (user/alpha.pin,
+# tools/mkalpha; wolffe-lang/alpha), staged on PAX as /bin/alpha with nothing
+# to start, typed at the console's shell (pelt).
+#
+#   tests/mpx6-services [--images DIR | --no-boot | --only build]
+#                       [--firmware bios|uefi|both] [--tier native|release|both]
+#
+# P0 builds the image's tree: kmain_console with the archive; pelt as
+# /bin/pelt and /bin/sh; /bin/alpha, tools/mkalpha's (built in two checkouts
+# of the pinned commit to one digest); /etc (hostname, motd, pax-run), /tmp
+# (1777) and /run (0755), with no unit anywhere under it. Every program is
+# checked static (ET_EXEC, no PT_INTERP). A piece the tree cannot build is
+# named at P0, and then nothing boots. The run list is one typed session,
+# `/bin/sh -i -m` as root (HOME=/), the keys user/console/services.keys,
+# prompt `$ `. The keys define `s` (a command's status, then its standard
+# output, `[stderr]` and its standard error, read back with the shell's own
+# `read` and `echo`, so no other program is in the tree).
+#
+# What is compared: the session's transcript, from its `run 1:` line to the
+# kernel's `user: frames free` line after it, normalised as a serial log is
+# (tools/lib.sh's serial_norm), the kernel's own `user: …` lines out.
+#
+# Assertions, per tier and firmware:
+#   A0 alpha runs on PAX with nothing to start (tests/mpx6-services.d/rows.py):
+#      found by PATH as /bin/alpha; `alpha --version` prints the line
+#      tools/mkalpha read from the same binary on the build host
+#      (version.txt), status 0; `alpha check --root /` counts 0 units, 0
+#      errors and 0 warnings, status 0; `alpha status` finds no manager at
+#      /run/alpha/control (not_found), status 3.
+#   K  the kernel's side: no `refused:` line; `PAX: init /bin/sh ended with
+#      status 0; nothing left to run`; no panic; halted. The system calls
+#      PAX answered -ENOSYS are printed, not held.
+#
+# The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
+# PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when every
+# assertion held, 1 otherwise, 2 on a usage or tool error.
+set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+grep() { command grep -a "$@"; }
+
+images= legs=both tiers=both noboot=0 only=
+usage="usage: tests/mpx6-services [--images DIR | --no-boot | --only build] [--firmware bios|uefi|both] [--tier native|release|both]"
+while [ $# -gt 0 ]; do
+    case $1 in
+        --images)   images=$2; shift 2 ;;
+        --no-boot)  noboot=1; shift ;;
+        --only)     only=$2; shift 2 ;;
+        --firmware) legs=$2; shift 2 ;;
+        --tier)     tiers=$2; shift 2 ;;
+        *)          die "$usage" ;;
+    esac
+done
+case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
+case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $only in ''|build) ;; *) die "--only takes build" ;; esac
+need readelf python3
+
+KEYS=$PAX_ROOT/user/console/services.keys
+ROWS=$here/mpx6-services.d/rows.py
+
+work=$PAX_BUILD/mpx6-services
+runs=$PAX_BUILD/mpx6-services-runs.txt
+fail=0 ran=0
+bad() { say "FAIL $*"; fail=1; }
+
+static_ok() { # file -> reason on failure
+    readelf -hW "$1" 2>/dev/null | command grep -Eq 'Type: +EXEC' || { echo "$1 is not ET_EXEC"; return 1; }
+    ! readelf -lW "$1" | command grep -q INTERP || { echo "$1 has a PT_INTERP"; return 1; }
+}
+
+if [ -z "$images" ]; then
+    wolf=${PAX_WOLF:-wolf}
+    need "$wolf"
+    say "wolf: $("$wolf" --version | head -n 1)"
+    "$PAX_ROOT/tools/fetch-limine" || exit 2
+    rm -rf "$work"
+    r=$work/root
+    mkdir -p "$r/bin" "$r/etc"
+    why=
+    "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" 2>&1 || why+=" tools/mkpelt;"
+    "$PAX_ROOT/tools/mkalpha" "$work/alpha" > "$work/alpha.txt" 2>&1 || { tail -n 20 "$work/alpha.txt" >&2; why+=" tools/mkalpha;"; }
+    cp "$work/pelt/pelt" "$r/bin/pelt" 2>/dev/null && cp "$work/pelt/pelt" "$r/bin/sh" || why+=" no pelt;"
+    cp "$work/alpha/alpha" "$r/bin/alpha" 2>/dev/null || why+=" no /bin/alpha;"
+    [ -s "$work/alpha/version.txt" ] || why+=" no version line from tools/mkalpha;"
+    for f in "$r"/bin/*; do
+        x=$(static_ok "$f") || why+=" $x;"
+        say "  program: ${f#"$r"/} $(sha256_of "$f") $(wc -c < "$f" | tr -d ' ') bytes"
+    done
+    [ ! -f "$work/alpha/sums.txt" ] || say "  tools/mkalpha: $(tr '\n' ' ' < "$work/alpha/sums.txt")$(cat "$work/alpha/version.txt" 2>/dev/null)"
+    printf '/bin/sh -i -m\n' > "$r/etc/pax-run"
+    printf 'pax\n' > "$r/etc/hostname"
+    printf 'PAX: alpha at the console, nothing to start\n' > "$r/etc/motd"
+    args=(/tmp/:1777 /run/:755
+        /etc/pax-run="$r/etc/pax-run":644 /etc/hostname="$r/etc/hostname":644 /etc/motd="$r/etc/motd":644)
+    for f in "$r"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
+    "$PAX_ROOT/tools/mkinitramfs" "$work/services.cpio" "${args[@]}" > "$work/services.initramfs.txt" || why+=" tools/mkinitramfs;"
+    for tier in $tiers; do
+        flag=(); [ "$tier" = release ] && flag=(--release)
+        mkdir -p "$work/$tier"
+        log=$work/$tier/kmain_console.build-kernel.log
+        if ! elf=$("$PAX_ROOT/tools/build-kernel" ${flag[@]+"${flag[@]}"} --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/$tier" 2>"$log"); then
+            cat "$log" >&2
+            why+=" $tier kmain_console: tools/build-kernel;"
+            continue
+        fi
+        [ "$elf" = "$work/$tier/kmain_console.elf" ] || cp "$elf" "$work/$tier/kmain_console.elf"
+        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+            --add "$work/services.cpio" initramfs.cpio "$elf" "$work/$tier/services.iso" >/dev/null || why+=" $tier: mkimage;"
+        say "built $tier services: elf $(sha256_of "$elf"), iso $(sha256_of "$work/$tier/services.iso"), initramfs $(sha256_of "$work/services.cpio")"
+    done
+    if [ -n "$why" ]; then
+        bad "P0 build:$why"
+        say "mpx6-services: FAIL"
+        exit 1
+    fi
+    say "PASS P0 build: kmain_console ($tiers), pelt and /bin/alpha static, the image built"
+    [ "$only" = build ] && exit 0
+    images=$work
+    if [ "$noboot" = 1 ]; then
+        say "mpx6-services build (P0): PASS (no boot: --no-boot)"
+        exit 0
+    fi
+fi
+version=$(head -n 1 "$images/alpha/version.txt" 2>/dev/null)
+[ -n "$version" ] || { bad "A0: no $images/alpha/version.txt (build first)"; exit 1; }
+
+# The session's transcript: from its `run 1:` line to the kernel's `user:
+# frames free …` line after it, the kernel's own lines left out
+# (tests/mpx5-jobs' rule).
+run_part() { # norm
+    awk '
+        /^run 1: / { on = 1; next }
+        on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+        on { i = index($0, "user: "); if (i == 1) next; if (i > 1) { printf "%s", substr($0, 1, i - 1); next } print }' "$1"
+}
+
+record() { # tier leg status
+    ran=$((ran + 1))
+    printf '%s kmain_console %s services halt-status=%s accel=%s serial=%s iso=%s\n' "$1" "$2" "$3" \
+        "$(sed -n 's/^accel: //p' "$log.meta" 2>/dev/null)" "$(sha256_of "$log")" "$(sha256_of "$iso")" >> "$runs"
+}
+
+mkdir -p "$PAX_BUILD"
+: > "$runs"
+for leg in $legs; do
+    if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+        if [ "${PAX_REQUIRE_UEFI:-0}" = 1 ]; then
+            bad "uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1"
+        else
+            say "SKIP uefi: no OVMF firmware found on this host (set PAX_OVMF_CODE)"
+        fi
+        continue
+    fi
+    for tier in $tiers; do
+        id="$tier $leg"
+        log=$PAX_BUILD/mpx6-services-$tier-$leg.serial.log
+        elf=$images/$tier/kmain_console.elf iso=$images/$tier/services.iso
+        rm -f "$log" "$log.verdict" "$log.typed"
+        if [ ! -f "$iso" ] || [ ! -f "$elf" ]; then
+            bad "K $id: no image"
+            continue
+        fi
+        hrc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 600 --qemu -m --qemu 1024M \
+            --elf "$elf" --marker 'halt|PANIC .*' --type "$KEYS" --prompt '$ ' "$iso" >"$log.verdict" 2>&1 || hrc=$?
+        record "$tier" "$leg" "$hrc"
+        norm=$log.norm; serial_norm "$log" > "$norm"
+        out=$PAX_BUILD/mpx6-services-$tier-$leg.session
+        run_part "$norm" > "$out"
+        # A0: the session's own witness.
+        why=$(python3 "$ROWS" "$out" "$version")
+        [ -z "$why" ] && say "PASS A0 $id: /bin/alpha by PATH; '$version', status 0; check: 0 units, status 0; status: no manager, status 3" \
+            || bad "A0 $id:$why"
+        # K: nothing refused; init's end; the halt.
+        why=
+        ns=$(sed -n -E 's/^user: [^ ]+ pid [0-9]+ syscall ([0-9]+): -ENOSYS$/\1/p' "$norm" | sort -un | paste -sd' ' -)
+        rf=$(grep -c ': refused: ' "$norm")
+        [ "$rf" = 0 ] || why+=" $rf refused lines ($(grep -m1 ': refused: ' "$norm" | cut -c1-160));"
+        grep -qx "PAX: init /bin/sh ended with status 0; nothing left to run" "$norm" \
+            || why+=" no 'PAX: init /bin/sh ended with status 0' ($(grep -m1 '^PAX: init ' "$norm"));"
+        pn=$(grep -m1 '^PANIC ' "$norm")
+        [ -z "$pn" ] || why+=" the kernel panicked: $pn;"
+        [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
+        [ -z "$why" ] && say "PASS K $id: nothing refused by name; init ended, status 0; -ENOSYS for '${ns:-none}'; $(tail -n 1 "$log.verdict")" \
+            || bad "K $id:$why"
+    done
+done
+cat "$runs"
+[ "$ran" -gt 0 ] || { say "FAIL: no boot ran"; exit 1; }
+[ "$fail" = 0 ] && say "mpx6-services: PASS" || say "mpx6-services: FAIL"
+exit "$fail"

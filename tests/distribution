@@ -86,6 +86,20 @@ def check(blob):
         pxg_identity = [next(l.split('=', 1)[1] for l in (ROOT/'user/pxg.pin').read_text().splitlines() if l.startswith('PXG_REV=')),
                         sha((ROOT/'user/pxg.pin').read_bytes())]
     assert release_rows.get('pxg') == pxg_identity, 'image-pxg-release-line'
+    # alpha, the service manager, in both variants: /bin/alpha byte for byte as tools/mkalpha built it, 0755,
+    # root's, its builder's sums, and its line in /etc/pax-release. Nothing starts it: no unit, no boot hook.
+    assert 'bin/alpha' in rows, 'image-alpha-missing'
+    fields, data = rows['bin/alpha']
+    assert data == (inputs/'alpha/alpha').read_bytes(), 'image-alpha-bytes'
+    assert fields[1] == 0o100755 and fields[2:4] == [0, 0], 'image-alpha-mode'
+    assert (inputs/'alpha/sums.txt').read_text().split() == ['alpha', sha(data), str(len(data))], 'image-alpha-sums'
+    assert not any(n.startswith(('usr/lib/alpha', 'etc/alpha')) or n == 'etc/pax-boot.d/alpha' for n in rows), 'image-alpha-started'
+    if resolution.is_file():
+        alpha_identity = next(l.split()[1:3] for l in resolution.read_text().splitlines() if l.startswith('alpha '))
+    else:
+        alpha_identity = [next(l.split('=', 1)[1] for l in (ROOT/'user/alpha.pin').read_text().splitlines() if l.startswith('ALPHA_REV=')),
+                          sha((ROOT/'user/alpha.pin').read_bytes())]
+    assert release_rows.get('alpha') == alpha_identity, 'image-alpha-release-line'
     # px90: den byte for byte as tools/mkden built it (never stripped), 0755,
     # and git a symbolic link to it, not a copy.
     den = inputs/'den'/'den'
@@ -220,7 +234,7 @@ def check(blob):
 
 blob = cpio.read_bytes()
 release, count = check(blob)
-print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, burrowd and its hook, configuration (its SetEnv line /etc/shrc's exports) and account, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, ligature at its pinned digest (dev) with lld still the default, and variant")
+print(f"I0 PASS actual {variant} initramfs: identity, {count} file digests, games/source/owners, base std, den and its git link, den's service wrappers on PATH, burrow as ssh, trash's five commands at their pinned digests, alpha with nothing to start, burrowd and its hook, configuration (its SetEnv line /etc/shrc's exports) and account, the root set and /etc/shrc's DEN_TLS_ROOTS, ssh_known_hosts, sudo and its policy, su, passwd and login, no /etc/shadow, /etc/pax-net, ligature at its pinned digest (dev) with lld still the default, and variant")
 bad = bytearray(blob)
 position = blob.find(release)
 assert position >= 0
