@@ -283,6 +283,7 @@ struct sh {
     volatile U fault_tsc, btid, reads, stale, started, running, cpumask;
     volatile U ttid, thit, t2, tready;
     volatile U pids[16];
+    volatile L gtids[4]; /* SMP-DEAD: the group's four thread ids, written by its main thread */
 };
 static struct sh *G;
 __attribute__((force_align_arg_pointer)) static void h_usr1(int s) { (void)s; G->hit = rdtsc(); __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST); }
@@ -612,12 +613,39 @@ static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a
         for (U i = 0; i < 3; i++) spawn(&grp[i], g_spin, (void *)i);
         U end = rdtsc() + cycles_of_ms(2000);
         while (G->started < 3 && rdtsc() < end) yield();
+        G->gtids[0] = gettid();
+        for (U i = 0; i < 3; i++) G->gtids[i + 1] = grp[i].tid;
         G->running = group_running();
         if (how == 0) exit_group(7);
         G->go = how == 1 ? 1 : 2;
         for (;;) G->spins++;
     }
     return p;
+}
+/* --- SMP-DEAD (the cap kind) --------------------------------------------------------------------
+   The group's main thread calls exit_group while its siblings spin, one on the other processor that
+   runs threads: that sibling is ended in place (DEAD) and must be switched off at its next tick or
+   RESCHED, never queued again. Three rounds: the status within 2 s (WNOHANG, every 5 ms), then ten
+   looks 10 ms apart for any of the group's thread ids still current on a processor. */
+static void row_dead(void) {
+    struct ln l;
+    struct snap z;
+    for (int r = 0; r < 3; r++) {
+        for (int i = 0; i < 4; i++) G->gtids[i] = 0;
+        int st = 0;
+        L p = group(0), w = 0;
+        U end = rdtsc() + cycles_of_ms(2000);
+        while (w == 0 && rdtsc() < end) { w = wait4(p, &st, WNOHANG, 0); if (w == 0) nap(5000000); }
+        U revived = 0;
+        for (int k = 0; k < 10; k++) {
+            nap(10000000);
+            if (take(&z)) for (int i = 0; i < 4; i++) if (G->gtids[i] > 0 && cpu_of(&z, G->gtids[i]) >= 0) revived++;
+        }
+        l.n = 0; ls(&l, "SMP-DEAD round "); ld(&l, (U)r); ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead);
+        ls(&l, " running "); ld(&l, G->running); ls(&l, " revived "); ld(&l, revived); le(&l);
+        if (w != p) break;
+    }
+    say("SMP-DEAD done");
 }
 static void row_exit(void) {
     struct ln l;
@@ -928,6 +956,8 @@ __attribute__((used)) static void smp_main(U *sp) {
         row_active();
         if (same(mode, "cap")) {
             row_run((int)started_cpus, 1);
+            G = shared_page();
+            row_dead();
         } else if (same(mode, "rows")) {
             row_run((int)started_cpus, 3);
             G = shared_page();
