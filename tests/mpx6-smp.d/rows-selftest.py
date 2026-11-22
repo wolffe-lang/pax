@@ -157,8 +157,9 @@ cases = []  # (name, text, args, meta, dumps, files, passes, fails)
 KVM, TCG = 'accel: kvm\n', 'accel: tcg\n'
 
 
-def case(name, text, args, passes, fails, meta=KVM, dumps=(), files=None):
-    cases.append((name, text, args, meta, list(dumps), files or {}, set(passes), set(fails)))
+def case(name, text, args, passes, fails, meta=KVM, dumps=(), files=None, why=None):
+    # why: a regular expression some `FAIL ROW …` line must match (the red for the reason named, not only the row)
+    cases.append((name, text, args, meta, list(dumps), files or {}, set(passes), set(fails), why))
 
 
 # --- the default kind ----------------------------------------------------------------------------
@@ -474,7 +475,7 @@ with tempfile.TemporaryDirectory() as td:
     td = pathlib.Path(td)
     (td / 'nm.txt').write_text(''.join(f'{v[0]:016x} {v[1]:016x} T {k}\n' for k, v in SYMS.items()))
     (td / 'expected.json').write_text(json.dumps(EXPECTED))
-    for name, text, args, meta, dumps, files, passes, fails in cases:
+    for name, text, args, meta, dumps, files, passes, fails, why in cases:
         s = td / 'serial.log'
         s.write_text(text)
         for suffix in ('.cmd2', '.cmd5', '.cmd8', '.meta', '.times'):
@@ -492,9 +493,11 @@ with tempfile.TemporaryDirectory() as td:
         got_fail = set(re.findall(r'^FAIL (\S+)', r.stdout, re.M))
         wrong = (passes - got_pass) | (fails - got_fail) | (got_fail - fails) | (passes & got_fail)
         code_ok = (r.returncode != 0) == bool(fails)
-        if wrong or not code_ok or r.stderr:
+        why_ok = why is None or any(re.search(why, x) for x in re.findall(r'^FAIL .*$', r.stdout, re.M))
+        if wrong or not code_ok or r.stderr or not why_ok:
             bad += 1
-            print(f'FAIL ROWS-SELFTEST {name}: want pass {sorted(passes)} fail {sorted(fails)}; '
+            print(f'FAIL ROWS-SELFTEST {name}: want pass {sorted(passes)} fail {sorted(fails)}'
+                  f'{"" if why is None else f" by {why!r}"}; '
                   f'got pass {sorted(got_pass)} fail {sorted(got_fail)} exit {r.returncode}')
             print(r.stdout + r.stderr)
         else:
