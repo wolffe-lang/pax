@@ -10,9 +10,16 @@
 //! throughout (every gate is an interrupt gate, kernel/idt).
 //!
 //! - px161: on an application processor (kernel/percpu's index not 0)
-//!   every vector but the NMI is kernel/smp's (`ap_interrupt`: its tick,
-//!   its spurious vector, or a stop), and the NMI is counted in its record
-//!   with no line; none of the boot processor's work below runs there;
+//!   the NMI is counted in its record with no line. px166: kernel/smp's
+//!   `ap_early` then answers its spurious vector and stops it on a vector
+//!   it never takes, before the kernel lock; everything else it takes
+//!   under the lock as below: its own tick (vector 32: counted and
+//!   acknowledged at its local APIC, then kernel/sched's `preempt` for its
+//!   running thread; none of CPU 0's tick duties), RESCHED, and the
+//!   switches, system calls and faults of the threads it runs;
+//! - vector 48, RESCHED (px166, from another processor, on any one):
+//!   acknowledged and counted (kernel/smp's `took_resched`), then
+//!   kernel/sched's `kick`: an idle processor takes the queue's head;
 //! - vector 2, the NMI (px77d; its gate on IST2): one line for each of
 //!   the first eight, `nmi: <n> at rip 0x<r> reason 0x<p>, continuing`,
 //!   and the interrupted code resumes, whatever ring it was in; nothing
@@ -398,11 +405,16 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
         }
         return f
     }
-    // px161: an application processor's tick, spurious vector or fault is
-    // kernel/smp's: none of the boot processor's work below runs there.
+    // px161: an application processor's spurious vector, or a vector it
+    // never takes, is kernel/smp's alone (px166: `ap_early`; 0 for every
+    // other, taken under the lock below).
     if percpu.index() != 0 {
         // # Safety: the frame's address; kernel/smp hands back `f` itself.
-        return unsafe { smp.ap_interrupt(f as u64) as *Frame }
+        let e = unsafe { smp.ap_early(f as u64) }
+        if e != 0 {
+            // # Safety: `e` is `f`.
+            return unsafe { e as *Frame }
+        }
     }
     // px166: the kernel lock (kernel/klock), taken by every entry the two
     // returns above do not answer, before any kernel state is read; a fresh
@@ -455,6 +467,15 @@ fn route(f: *Frame) -> *Frame {
         return f
     }
     if v == timer.MASTER_BASE {
+        // px166: an application processor's tick is its own: counted and
+        // acknowledged, then its running thread's quantum; every duty below
+        // is CPU 0's.
+        if percpu.index() != 0 {
+            // # Safety: the frame's address; nothing is read here.
+            smp.ap_tick(user.from_user(unsafe { f as u64 }))
+            // # Safety: as below.
+            return unsafe { sched.preempt(f as u64) as *Frame }
+        }
         timer.tick()
         smp.report_stops() // px161: an application processor stopped since, named once
         speaker.tick(timer.ticks()) // px18: a KDMKTONE tone's end
@@ -466,10 +487,17 @@ fn route(f: *Frame) -> *Frame {
         // # Safety: the frame's address; nothing is read here.
         if user.from_user(unsafe { f as u64 }) {
             user.count_tick() // px09: a tick that landed in ring 3
+            percpu.count(percpu.USER) // px166: CPU 0's own count of them
         }
         // # Safety: the frame's address, and the one sched hands back is
         // a saved frame on a live thread's stack.
         return unsafe { sched.preempt(f as u64) as *Frame }
+    }
+    if v == smp.RESCHED_VECTOR {
+        smp.took_resched()
+        // # Safety: the frame's address, and the one sched hands back is
+        // a saved frame on a live thread's stack or an idle loop's.
+        return unsafe { sched.kick(f as u64) as *Frame }
     }
     if v == SWITCH {
         // # Safety: as above.
