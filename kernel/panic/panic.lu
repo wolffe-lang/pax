@@ -24,8 +24,10 @@ use triage
 
 extern "c" fn pax_halt() -> never
 extern "c" fn pax_ap_stop() -> never // px166: boot/isr.S
+extern "c" fn pax_cli() // px166: boot/isr.S, interrupts off
+extern "c" fn pax_rdtsc() -> u64
 extern "c" let pax_panicking: *u64 // px166: boot/isr.S, the first panic's processor + 1
-extern "c" let pax_panic_said: *u64 // px166: boot/isr.S, 1 once the first panic's line is written
+extern "c" let pax_panic_said: *u64 // px166: boot/isr.S, the print token: 0 before the first's line, 1 free, 2 held
 extern "c" let pax_panic_again: *u64 // px166: boot/isr.S, the first panic's processor's entries again
 
 /// The trap kind's name in `[conf.trap.set]`'s vocabulary.
@@ -65,6 +67,10 @@ pub fn fail(what: str, v: u64) -> never {
     // effort: each one late is named) and halts. A second, on another
     // processor, says one line and stops itself, sending and waiting for
     // nothing. Before kernel/smp's start no per-processor word is read.
+    // Interrupts off first, for good: a panic is not preempted, and a second
+    // does not answer the first's STOP before its own line is out.
+    // # Safety: boot/isr.S's `cli; ret`.
+    unsafe { pax_cli() }
     let me = if ipi.count() == 0 { 1 } else { percpu.index() + 1 }
     // # Safety: boot/isr.S's word; a compare-exchange, as kernel/klock's.
     let (old, ok) = unsafe { (pax_panicking as u64 as *u64).atomic_cas(0, me, Order.acquire, Order.relaxed) }
@@ -91,14 +97,18 @@ pub fn fail(what: str, v: u64) -> never {
         unsafe { pax_halt() }
     }
     if !ok {
-        // A second panic: its line waits for the first's to be written
-        // (nothing else serializes the log's bytes), at most 1e8 reads of the
-        // word, about 100 ms; past that it prints anyway.
-        var k: u64 = 0
-        // # Safety: boot/isr.S's word, written once by the first panic.
-        while k < 100000000 && unsafe { (pax_panic_said as u64 as *u64).read_volatile() } == 0 {
-            k += 1
+        // A second panic. Its processor's CAUSE says so before anything else:
+        // a fault inside this path enters `fail` again and stops at once,
+        // without a word (CAUSE_PANIC on a running processor's record means
+        // just this; a processor stopped for a panic never runs again).
+        let mine = percpu.mine()
+        if percpu.get(mine, percpu.CAUSE) == ipi.CAUSE_PANIC {
+            stop_self()
         }
+        percpu.put(mine, percpu.CAUSE, ipi.CAUSE_PANIC)
+        // Its line waits for the print token: the first panic's line is out,
+        // and no other second is printing.
+        let held = take_token()
         log.put("PANIC cpu ")
         log.dec((me - 1) as int)
         log.put(" (a second panic, cpu ")
@@ -108,6 +118,10 @@ pub fn fail(what: str, v: u64) -> never {
         log.put(" ")
         log.hex(v)
         log.end()
+        if held {
+            // # Safety: boot/isr.S's word; this line is whole.
+            unsafe { (pax_panic_said as u64 as *u64).atomic_store(1, Order.release) }
+        }
         stop_self()
     }
     log.put("PANIC ")
@@ -115,10 +129,14 @@ pub fn fail(what: str, v: u64) -> never {
     log.put(" ")
     log.hex(v)
     log.end()
-    // # Safety: boot/isr.S's word; this line is whole now.
-    unsafe { (pax_panic_said as u64 as *u64).write_volatile(1) }
+    // # Safety: boot/isr.S's word; this line is whole: the token is free.
+    unsafe { (pax_panic_said as u64 as *u64).atomic_store(1, Order.release) }
     if ipi.count() >= 2 {
         let late = ipi.stop_others(ipi.CAUSE_PANIC, ipi.PANIC_BOUND)
+        // The token again for the lines that end the panic (never given back): a
+        // processor that stopped had printed its line first; a late one's line
+        // waits for it, or comes after the bound.
+        let _held = take_token()
         var i: u64 = 0
         while i < 64 {
             if late & (1 << i) != 0 {
@@ -131,6 +149,31 @@ pub fn fail(what: str, v: u64) -> never {
         log.line("panic: halt") // the last line of a panic that stopped others (tests/mpx6-smp's marker)
     }
     halt()
+}
+
+/// The panicking processors' print token (boot/isr.S's `pax_panic_said`),
+/// taken from 1 to 2: true when taken; false once ipi.PANIC_BOUND's TSC
+/// cycles (the bound the first panic's STOP waits, about 100 ms) have passed,
+/// when the caller prints anyway. Nothing else serializes the log's bytes
+/// (kernel/log writes byte by byte, with kmsg's staged record) among
+/// processors that print without the kernel lock. A processor holding the lock
+/// and in the middle of a line when another panics is not waited for: its
+/// bytes can still fall inside the first panic's line.
+fn take_token() -> bool {
+    // # Safety: io.S's rdtsc.
+    let until = unsafe { pax_rdtsc() } + ipi.PANIC_BOUND
+    // # Safety: io.S's rdtsc.
+    while unsafe { pax_rdtsc() } < until {
+        // # Safety: boot/isr.S's word, read before the compare-exchange (as kernel/klock's spin).
+        if unsafe { (pax_panic_said as u64 as *u64).read_volatile() } == 1 {
+            // # Safety: boot/isr.S's word; a compare-exchange, as kernel/klock's.
+            let (_old, ok) = unsafe { (pax_panic_said as u64 as *u64).atomic_cas(1, 2, Order.acquire, Order.relaxed) }
+            if ok {
+                return true
+            }
+        }
+    }
+    false
 }
 
 /// A second panic's processor: STOPPED with the panic's cause, then held
