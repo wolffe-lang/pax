@@ -334,6 +334,13 @@ case('panic: a late processor named', head('spin') + P1 + 'cpus: cpu 3 did not s
 case('panic under TCG: printed, not gated', head('spin') + P1 + 'cpus: cpu 3 did not stop for the panic\n',
      ['--kind', 'panic', '--smp', '4'], {'SMP-PANIC-STOP'}, set(), meta=TCG, dumps=[halted] * 3)
 case('panic2 green', head('spin') + P2, ['--kind', 'panic2', '--smp', '4'], {'SMP-PANIC-TWO'}, set(), dumps=[halted] * 3)
+case('panic2: the two lines interleaved (a timed-out wait): read by their texts',
+     head('spin') + 'SMP-PANIC spinners 4\nPANIC testwPANIC cpu 2 (a second panic, cpu 1\'s first): testwords: a test panic, '
+     'cpu  0x2\nords: a test panic, cpu  0x0000000000000001\n', ['--kind', 'panic2', '--smp', '4'], set(), {'SMP-PANIC-TWO'},
+     dumps=[halted] * 3)
+case('panic2: the two lines interleaved, each text whole', head('spin') + 'SMP-PANIC spinners 4\nPANIC testwords: a test '
+     "panic, cpu  0x1PANIC cpu 2 (a second panic, cpu 1's first): testwords: a test panic, cpu  0x2\n",
+     ['--kind', 'panic2', '--smp', '4'], {'SMP-PANIC-TWO'}, set(), dumps=[halted] * 3)
 case('panic2: the second panic printed in full (two owners)', head('spin') + P1 + P1.split('\n')[1] + '\n',
      ['--kind', 'panic2', '--smp', '4'], set(), {'SMP-PANIC-TWO'}, dumps=[halted] * 3)
 TW = 'testwords: pax.nopoweroff ignored (not a test kernel)\ntestwords: pax.panictest ignored (not a test kernel)\n'
