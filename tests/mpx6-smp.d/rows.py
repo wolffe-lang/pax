@@ -37,7 +37,8 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            wall 1.5 times the lone wall or less (minimum of three rounds each).
               SMP-TLB      B spins on a page on another processor: A's mprotect(PROT_NONE) makes B
                            fault (4 of 5 rounds within 1 ms under KVM), A's MAP_FIXED over the page
-                           and a write of a new pattern leave B no stale read, a shootdown counted
+                           and a write of a new pattern leave B no stale read and no SIGSEGV (a fault
+                           in the replacement's window runs again once routed), a shootdown counted
                            (`tlb`) each time; B running elsewhere at each change.
               SMP-SIGNAL   SIGUSR1 and tgkill to a thread spinning elsewhere handled (8 of 9 within 2 ms
                            under KVM; tgkill on the thread it named), SIGKILL to the reaped status
@@ -387,8 +388,17 @@ def tlb_check():
         elif isinstance(kv(s, 'latency-us'), int) and kv(s, 'latency-us') <= 1000:
             fast += 1
     for s in repl:
-        if kv(s, 'stale') != 0 or kv(s, 'fixed') != 'yes':
+        # three reasons, each its own: B's SIGSEGV (`b-fault yes`: a fault on the page A replaced, refused when it was
+        # routed although the new page was present by then; B's thread ends in its handler, so no count follows), a
+        # stale read (a count above 0: B saw the old page after the new one was written), or no count at all
+        if kv(s, 'b-fault') == 'yes':
+            why.append(f'B took SIGSEGV on a page present at routing: {s}')
+        elif isinstance(kv(s, 'stale'), int) and kv(s, 'stale') > 0:
             why.append(f'B read the old page after the new one was written: {s}')
+        elif kv(s, 'stale') != 0:
+            why.append(f'B never finished its reads of the new page: {s}')
+        if kv(s, 'fixed') != 'yes':
+            why.append(f'MAP_FIXED did not replace the page: {s}')
     if not TIMED:
         info.append(UNTIMED)
     if TIMED and prot and fast < 4:
