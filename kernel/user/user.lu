@@ -261,6 +261,7 @@ use cred
 use files
 use frames
 use futex
+use klock
 use kmsg
 use log
 use netd
@@ -593,6 +594,12 @@ pub fn describe(p: u64, id: u64, cr3: u64) {
 /// program's address space, already live): into ring 3 at CODE, the
 /// stack's top as RSP. Never returns.
 export fn pax_user_thread(p: u64) {
+    // px166: into ring 3 without the kernel lock (kernel/klock), the
+    // ambient slot parked first; IF clear before, so no interrupt finds the
+    // lock half given back (pax_enter_user's IRETQ sets IF again).
+    let _flags = sync.irq_save()
+    sched.ambient_park()
+    klock.leave()
     if sched.self_prog() == sched.ELF_PROG {
         // # Safety: as below; an ELF process's entry and stack were
         // mapped user by `exec` (kernel/elf's segments, the stack).
