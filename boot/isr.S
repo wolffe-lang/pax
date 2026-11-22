@@ -280,8 +280,10 @@ pax_isr_common:
            old thread's, when it switched), so no other processor can take
            the lock and run that thread under it. Before the vector is
            looked at, so a continuation still finds the lock it kept;
-           before the GS step back to ring 3's. %rbx keeps %rsp, as above. */
-        movq    %rsp, %rdi
+           before the GS step back to ring 3's. It is handed the frame's
+           vector (byte 120, kernel/interrupts' Frame; tests/mpx6-smp.d/
+           frame-layout.py holds the offset). %rbx keeps %rsp, as above. */
+        movq    120(%rsp), %rdi
         movq    %rsp, %rbx
         andq    $-16, %rsp
         cld
