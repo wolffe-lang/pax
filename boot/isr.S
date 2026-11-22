@@ -614,6 +614,17 @@ pax_ap_park:
         jmp     1b
         .size pax_ap_park, . - pax_ap_park
 
+/* px166 (SMP stage 2, the STOP step): a processor stopped for the end or
+   a panic (kernel/tlb's STOP): interrupts off, then HLT for ever. An NMI
+   wakes it and returns here; nothing else is taken. Never returns. */
+        .globl pax_ap_stop
+        .type pax_ap_stop, @function
+pax_ap_stop:
+        cli
+1:      hlt
+        jmp     1b
+        .size pax_ap_stop, . - pax_ap_stop
+
         .globl pax_ap_halt
         .type pax_ap_halt, @function
 pax_ap_halt:
