@@ -47,84 +47,48 @@
 //! source; no other kernel's source.
 
 use panic
+use ipi
 use percpu
 use sync
+use testwords
 
 extern "c" fn pax_invlpg(va: u64)
 extern "c" fn pax_rdtsc() -> u64
-extern "c" fn pax_wrmsr(msr: u64, v: u64)
 extern "c" fn pax_ap_stop() -> never
 /// kernel/klock's two words (OWNER, this processor's index + 1 while it
 /// holds the lock; DEPTH), read here because this module sits below it.
 extern "c" let pax_klock: *u64
 
 /// The shootdown's vector (boot/isr.S's trampoline 49, kernel/idt's gate).
-pub const VECTOR: u64 = 49
-/// The ops: INVLPG va; STOP (the end, a panic: VA carries the cause).
+pub const VECTOR: u64 = ipi.VECTOR
+/// The ops: INVLPG va; kernel/ipi's STOP (the end, a panic: VA carries the
+/// cause); a test build's op 3 (kernel/testwords, absent as shipped).
 pub const INVLPG: u64 = 1
-pub const STOP: u64 = 2
-/// STOP's causes, in the stopped processor's CAUSE word.
-pub const CAUSE_END: u64 = 0x2001
-pub const CAUSE_PANIC: u64 = 0x2002
-/// `stop_others`' bounds: 1 s at 4 GHz for the end; 100 ms for a panic.
-pub const END_BOUND: u64 = 4000000000
-pub const PANIC_BOUND: u64 = 400000000
 
 const KERNEL_HALF: u64 = 0xffff800000000000
 /// The requester's bound on every target's answer: 1 s at 4 GHz.
 const TSC_BOUND: u64 = 4000000000
-/// At most this many processors (kernel/smp's MAX): one mask word.
-const MAX: u64 = 64
-
-/// kernel/smp's `start` hands these over once, before any application
-/// processor is released: whether the local APIC is in x2APIC mode, its
-/// MMIO page (kernel/apic's DEVICE_VA) and the records' windows.
-var x2: bool = false
-var lapic: u64 = 0
-var base: u64 = 0
-var span: u64 = 0
-/// The processors with a record (kernel/smp's `made` + 1); 0 until `start`.
-var n: u64 = 0
-/// The last generation asked.
-var gen: u64 = 0
-
+/// kernel/smp's `start`: the records and the local APIC (kernel/ipi), and
+/// CPU 0's CR3, before any application processor is released.
 pub fn start(x2apic: bool, lapic_va: u64, windows: u64, each: u64, cr3: u64) {
-    // # Safety: written once by CPU 0 before any application processor is
-    // released; read after.
-    unsafe {
-        x2 = x2apic
-        lapic = lapic_va
-        base = windows
-        span = each
-        n = 1
-    }
+    ipi.start(x2apic, lapic_va, windows, each)
     percpu.put(percpu.boot_record(), percpu.LOADED_CR3, cr3)
 }
 
 /// kernel/smp: application processor `i`'s record is made (its words
 /// zero, LOADED_CR3 the kernel's PML4 it starts on).
 pub fn made(i: u64, cr3: u64) {
-    percpu.put(record(i), percpu.LOADED_CR3, cr3)
-    // # Safety: as `start`; CPU 0 makes the records one at a time.
-    unsafe {
-        if i + 1 > n && i < MAX {
-            n = i + 1
-        }
-    }
+    percpu.put(ipi.record(i), percpu.LOADED_CR3, cr3)
+    ipi.made(i)
 }
 
 fn record(i: u64) -> u64 {
-    if i == 0 {
-        return percpu.boot_record()
-    }
-    // # Safety: as `start`.
-    unsafe { base + i * span }
+    ipi.record(i)
 }
 
 /// kernel/paging's `load`: this processor's CR3 now holds `pml4`.
 pub fn loaded(pml4: u64) {
-    // # Safety: as `start`.
-    if unsafe { n } != 0 {
+    if ipi.count() != 0 {
         percpu.put(percpu.mine(), percpu.LOADED_CR3, pml4)
     }
 }
@@ -133,8 +97,7 @@ pub fn loaded(pml4: u64) {
 /// answered. Interrupts off (a handler, or `klock.enter`'s spin, or the
 /// idle loop before its HLT).
 pub fn answer() {
-    // # Safety: as `start`.
-    if unsafe { n } < 2 {
+    if ipi.count() < 2 {
         return
     }
     let me = percpu.mine()
@@ -143,9 +106,10 @@ pub fn answer() {
     if g == percpu.get(me, percpu.TLB_ACK) {
         return
     }
-    if r & 0xff == STOP {
+    if r & 0xff == ipi.STOP {
         stopped(me, g, percpu.get(me, percpu.TLB_VA))
     }
+    let _test = testwords.op(r) // as shipped: false, and no op of its own
     if r & 0xff == INVLPG {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(percpu.get(me, percpu.TLB_VA)) }
@@ -176,64 +140,6 @@ fn stopped(me: u64, g: u64, cause: u64) -> never {
     unsafe { pax_ap_stop() }
 }
 
-/// Every other processor that runs (CPU 0; an application processor whose
-/// STATE is IDLE) asked to stop with `cause`, then waited for, at most
-/// `bound` TSC cycles in all: the mask (bit i) of those that did not
-/// answer. Never panics, never waits past the bound. The end calls it
-/// holding the kernel lock; a panic calls it with or without.
-pub fn stop_others(cause: u64, bound: u64) -> u64 {
-    // # Safety: as `start`.
-    let cnt = unsafe { n }
-    if cnt < 2 {
-        return 0
-    }
-    let me = percpu.mine()
-    let _off = sync.irq_save()
-    // # Safety: written by whoever asks; a STOP is the last request a target answers.
-    let g = unsafe { gen } + 1
-    unsafe { gen = g }
-    var sent: u64 = 0
-    var i: u64 = 0
-    while i < cnt {
-        let r = record(i)
-        if r != me && runs(i, r) {
-            percpu.put(r, percpu.TLB_VA, cause)
-            percpu.put(r, percpu.TLB_REQ, (g << 8) | STOP)
-            send(percpu.get(r, percpu.APIC))
-            sent |= 1 << i
-        }
-        i += 1
-    }
-    // # Safety: fpu.S's RDTSC.
-    let until = unsafe { pax_rdtsc() } + bound
-    var late: u64 = sent
-    while late != 0 && unsafe { pax_rdtsc() } < until {
-        i = 0
-        while i < cnt {
-            if late & (1 << i) != 0 && percpu.get(record(i), percpu.STATE) == percpu.STOPPED {
-                late &= !(1 << i)
-            }
-            i += 1
-        }
-        sync.relax()
-    }
-    late
-}
-
-/// How many processors `stop_others` asked: every other one that runs now.
-pub fn others() -> u64 {
-    // # Safety: as `start`.
-    let cnt = unsafe { n }
-    let me = percpu.mine()
-    var k: u64 = 0
-    var i: u64 = 0
-    while i < cnt {
-        if record(i) != me && runs(i, record(i)) { k += 1 }
-        i += 1
-    }
-    k
-}
-
 /// The page at `va` in the space at `pml4` (or the kernel half) dropped on
 /// every other processor that may cache it. The lock's holder, after its
 /// own INVLPG, before the page's frame is freed.
@@ -257,8 +163,7 @@ pub fn space(pml4: u64) {
 pub fn user_of(pml4: u64) -> u64 {
     let me = percpu.mine()
     var i: u64 = 0
-    // # Safety: as `start`.
-    while i < unsafe { n } {
+    while i < ipi.count() {
         let r = record(i)
         if r != me && runs(i, r) && percpu.get(r, percpu.LOADED_CR3) == pml4 {
             return i + 1
@@ -269,12 +174,11 @@ pub fn user_of(pml4: u64) -> u64 {
 }
 
 fn runs(i: u64, r: u64) -> bool {
-    i == 0 || percpu.get(r, percpu.STATE) == percpu.IDLE
+    ipi.runs(i, r)
 }
 
 fn request(op: u64, va: u64, pml4: u64, all: bool) {
-    // # Safety: as `start`.
-    let cnt = unsafe { n }
+    let cnt = ipi.count()
     if cnt < 2 {
         return
     }
@@ -289,9 +193,7 @@ fn request(op: u64, va: u64, pml4: u64, all: bool) {
     // run the scheduler, which may switch this processor to another thread
     // (and its own shootdown) with this request out.
     let _off = sync.irq_save()
-    // # Safety: the lock's holder alone writes it.
-    let g = unsafe { gen } + 1
-    unsafe { gen = g }
+    let g = ipi.next_gen()
     var sent: u64 = 0
     var i: u64 = 0
     while i < cnt {
@@ -300,7 +202,7 @@ fn request(op: u64, va: u64, pml4: u64, all: bool) {
             percpu.put(r, percpu.TLB_VA, va)
             percpu.put(r, percpu.TLB_PML4, pml4)
             percpu.put(r, percpu.TLB_REQ, (g << 8) | op)
-            send(percpu.get(r, percpu.APIC))
+            ipi.send(percpu.get(r, percpu.APIC), VECTOR)
             sent |= 1 << i
         }
         i += 1
@@ -323,31 +225,5 @@ fn request(op: u64, va: u64, pml4: u64, all: bool) {
             }
         }
         i += 1
-    }
-}
-
-/// Vector 49 to the processor whose APIC ID is `dest`: delivery mode fixed,
-/// edge, assert (SDM vol. 3A §11.6.1), as kernel/apic's `send_fixed`, which
-/// this module cannot import (kernel/apic imports kernel/paging, which
-/// imports this one).
-fn send(dest: u64) {
-    let low: u64 = 0x4000 | VECTOR
-    // # Safety: as `start`.
-    if unsafe { x2 } {
-        // # Safety: cpu.S's WRMSR of the x2APIC ICR (0x830).
-        unsafe { pax_wrmsr(0x830, (dest << 32) | low) }
-        return
-    }
-    // # Safety: the local APIC's page, mapped by kernel/apic's `start`
-    // before kernel/smp hands its address here; 32-bit accesses to the
-    // ICR's high and low words, then its delivery status waited out.
-    unsafe {
-        ((lapic + 0x310) as *u32).write_volatile(((dest & 0xff) << 24) as u32)
-        ((lapic + 0x300) as *u32).write_volatile(low as u32)
-    }
-    var k: u64 = 0
-    // # Safety: as above.
-    while k < 1000000 && unsafe { ((lapic + 0x300) as *u32).read_volatile() } & 0x1000 != 0 {
-        k += 1
     }
 }
