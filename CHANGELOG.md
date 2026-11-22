@@ -7,6 +7,22 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Every processor runs threads, under one kernel lock (SMP stage 2).** Each application processor now takes
+  threads of programs from the one run queue, as the boot processor does; kernel threads stay on the boot processor.
+  Every kernel entry but the NMI's takes one lock, owned by a processor and given back on every way into ring 3 or
+  the idle loop, so the kernel runs on one processor at a time while programs run on all of them. A change to a
+  page table another processor may be using is shot down there (vector 49) before the change returns; a signal to
+  a thread running elsewhere reaches it by an interrupt (vector 48); a thread whose group another processor ended
+  never runs again, and its slot and address space are freed only once no processor still uses them. A page fault
+  that arrives after another processor made its page present runs the instruction again. The end, and a panic,
+  stop every other processor (interrupts off, halted) before the end's last writes or the panic's last line;
+  `poweroff: not done` and `pax.panictest` exist only in a test build. `/proc/pax-cpus` says `active` as the
+  processors that run threads, with each one's ticks in ring 3, interrupts taken, kernel threads run and
+  shootdowns answered; `/sys/devices/system/cpu/online`, `sched_getaffinity` and `Cpus_allowed` say the same set.
+  `pax.cpus=N` on the command line lets N processors run threads (`pax.cpus=1` is the previous behaviour, the
+  others started and idle) and `nosmp` still leaves them in the bootloader. With one processor no boot changes.
+  `tests/mpx6-smp` holds the rows, at 2, 4 and 16 processors.
+
 - **Your own shell file at login.** `/etc/shrc` ends by running `~/.config/pelt/shrc` when it is a readable
   regular file: at a console login, in a terminal over ssh and in a shell from `su USER`, as the account whose
   `HOME` it is; not for a command over ssh or `sudo -s`, which read no `ENV`. PAX ships no such file. The dev
