@@ -93,7 +93,7 @@ def run_lines(n, stage=2, rounds=3, ratio=1.05, cap=None, user=None):
     return out + 'SMP-RUN done\n'
 
 
-def tlb_lines(stage=2, faulted='yes', lat=40, stale=0, tlb='+1'):
+def tlb_lines(stage=2, faulted='yes', lat=40, stale=0, tlb='+1', bfault='no'):
     b = '-' if stage == 1 else '1'
     t = '-' if stage == 1 else tlb
     out = ''
@@ -101,7 +101,10 @@ def tlb_lines(stage=2, faulted='yes', lat=40, stale=0, tlb='+1'):
         out += (f'SMP-TLB protect {r} faulted {faulted} latency-us {lat if faulted == "yes" else "-"} call-us 30 mprotect 0 '
                 f'a-cpu 0 b-cpu {b} tlb {t} reads 1000\n')
     for r in range(5):
-        out += f'SMP-TLB replace {r} stale {stale} reads 200000 fixed yes a-cpu 0 b-cpu {b} tlb {t}\n'
+        if bfault == 'yes':  # tlb1b's own lines (B dead in h_segv: no count, no reads), with the fault named
+            out += f'SMP-TLB replace {r} stale - reads 0 fixed yes b-fault yes a-cpu 0 b-cpu {b} tlb {t}\n'
+        else:
+            out += f'SMP-TLB replace {r} stale {stale} reads 200000 fixed yes b-fault no a-cpu 0 b-cpu {b} tlb {t}\n'
     return out + 'SMP-TLB done\n'
 
 
@@ -173,6 +176,10 @@ case('the plant tlb: B reads on past PROT_NONE', rows_text(4, tlb=tlb_lines(faul
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-TLB'}, {'SMP-TLB'})
 case('a stale read after the new page', rows_text(4, tlb=tlb_lines(stale=1734)), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-TLB'}, {'SMP-TLB'})
+case('B took SIGSEGV on the page A replaced, present when the fault was routed', rows_text(4, tlb=tlb_lines(bfault='yes')),
+     ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-TLB'}, {'SMP-TLB'}, why=r'B took SIGSEGV on a page present at routing')
+case('a stale read after the new page, named so', rows_text(4, tlb=tlb_lines(stale=1734)), ['--kind', 'rows', '--smp', '4'],
+     ALL6 - {'SMP-TLB'}, {'SMP-TLB'}, why=r'B read the old page after the new one was written')
 case('no shootdown counted', rows_text(4, tlb=tlb_lines(tlb='+0')), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-TLB'}, {'SMP-TLB'})
 case('slow faults under KVM', rows_text(4, tlb=tlb_lines(lat=4000)), ['--kind', 'rows', '--smp', '4'],
