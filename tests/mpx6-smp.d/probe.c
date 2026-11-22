@@ -937,6 +937,15 @@ static void end(const char *how) {
     exit_group(1);
 }
 
+/* --- the panic kinds: a spinner on every processor until a test build's test panic stops them --- */
+static void spin(void) {
+    struct ln l;
+    int n = (int)(started_cpus < MAXC ? started_cpus : MAXC);
+    for (int i = 0; i < n; i++) { L p = fork(); if (!p) for (;;) work(1ul << 20); }
+    l.n = 0; ls(&l, "SMP-PANIC spinners "); ld(&l, (U)n); le(&l);
+    for (;;) nap(1000000000);
+}
+
 /* --- the entry ------------------------------------------------------------------------------ */
 __attribute__((used)) static void smp_main(U *sp) {
     int argc = (int)sp[0];
@@ -961,6 +970,8 @@ __attribute__((used)) static void smp_main(U *sp) {
         U secs = 0;
         for (const char *s = argc > 2 ? argv[2] : "20"; *s >= '0' && *s <= '9'; s++) secs = secs * 10 + (U)(*s - '0');
         stress(secs ? secs : 20);
+    } else if (same(mode, "spin")) {
+        spin();
     } else if (same(mode, "end")) {
         end(argc > 2 ? argv[2] : "halt");
     } else {
