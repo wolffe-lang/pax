@@ -102,7 +102,7 @@ STOP_LINE = 'cpus: {n} application processors stopped for the end'
 BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processors.*|.*did not answer a shootdown.*|'
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
-        'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-BUILD']
+        'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-BUILD']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
@@ -680,6 +680,14 @@ elif a.kind == 'build':
 
 # Every kind: the kernel lock's door (kernel/interrupts' `pax_interrupt`) panics when a processor comes in from
 # ring 3 still holding the lock; that line, verbatim, is SMP-KLOCK's red (the lock plant's name). Silent when green.
+# SMP-PARK (every kind): the boot's own check that exec's parked-space table holds two held spaces at once and
+# frees both once let go (kernel/sched's `park_selftest`); red on any other count or the table's PANIC.
+park = re.findall(r'^sched: parked spaces: (\d+) held parked at once, (\d+) left once let go$', text, re.M)
+pfull = re.findall(r'^PANIC sched: more parked spaces.*$', text, re.M)
+if pfull or (park and park[0] != ('2', '0')):
+    fail('SMP-PARK', pfull[0].strip() if pfull else f'{park[0][0]} held parked at once and {park[0][1]} left, want 2 and 0')
+elif park:
+    ok('SMP-PARK', 'two held spaces parked at once, both freed once let go')
 klock = [ln.strip() for ln in re.findall(r'^PANIC klock: .*$', text, re.M)]
 if klock:
     fail('SMP-KLOCK', klock[0], klock[1:])
