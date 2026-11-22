@@ -52,6 +52,8 @@ case $timeout in ''|*[!0-9]*) die "--timeout takes whole seconds" ;; esac
 need mkfifo
 if [ "$accel" = auto ]; then
     if [ "$(uname -s)" = Linux ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then accel=kvm; else accel=tcg; fi
+    # A measured KVM run (tools/kvm-open) must not fall back to TCG unseen.
+    [ "$accel" = kvm ] || [ "${PAX_REQUIRE_KVM:-}" != 1 ] || die "PAX_REQUIRE_KVM=1 but /dev/kvm is not usable here: refusing TCG"
 fi
 
 mkdir -p "$(dirname "$serial")"

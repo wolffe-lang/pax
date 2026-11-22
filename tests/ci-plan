@@ -3,19 +3,27 @@
 
     tests/ci-plan
 
-  P1  the tiers by event (tl29): a trunk push, the nightly and a dispatch
-      are all (every suite, every leg); the `full-matrix` label is full,
+  P1  the tiers by event (tl29): a trunk push with nothing green at its
+      head, the nightly and a dispatch are all (every suite, every leg); the `full-matrix` label is full,
       the merge gate (every suite on the merge legs, native BIOS), and all
       beside a FULL path or with no paths to read; another label's
       `labeled` event is a noop; a dispatch can ask for full or pr, and
-      one naming suites is partial, on its tier input's legs.
+      one naming suites is partial, on its tier input's legs. The
+      `full-matrix` label's own event is a noop where the head's paths
+      already choose every suite or a FULL path: the push's run at that
+      head is the full (or all) run, and one run a head is enough.
+      `macos-run` is in no full run: a pull request's merge gate waits
+      for no macOS runner; a push (all or rest), the nightly, a FULL-path
+      pull request (all) and a pr run that chooses the proof carry it.
   P2  the pr tier by path, one change per area: the network's suites for
       kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
       test, a user program and a shared device select their readers.
       The kernel's core (px40, ruling #76: its fifteen modules and their
-      assembly) and CI's own files select every suite, on the pr leg.
+      assembly) and CI's own files select every suite, on the pr leg,
+      which is the merge gate's shape: that run is named full.
   P3  FULL wins: the toolchain pins, the harness, the kernel's entry,
-      link script and Limine configuration, and any path no rule knows
+      link script and Limine configuration, the kernel-wide modules (the
+      scheduler, the timer, the interrupt and syscall entries), and any path no rule knows
       make a pull request's run all (every leg), alone or beside a core
       change; a pull request whose changed paths cannot be read is all too.
   P4  the wiring of .github/workflows/ci.yml: every suite job needs the
@@ -28,13 +36,21 @@
       default; the tier job's last step, on a red nightly only and after
       the verdict, runs tools/nightly-red, and only that job may write
       issues.
+  P8  what a trunk head already has (tools/ci-covered, against a
+      stand-in `gh`): a green `tier all` check run at the head is all, a
+      green `tier full` alone is full, a red one or another app's is
+      none, an API failure is none (so the push runs every leg), and no
+      REPO or SHA is refused. A push plans from it: all green, noop;
+      full green, rest (every suite on the release legs); none, all. The
+      nightly too: all green, noop, but the weekly schedule runs all.
   P6  the verdict (`tools/ci-plan --verdict`, the `tier` job): green for
       an all run whose `legs` output is absent (GitHub drops an empty
       output; run 38344726280 was red on exactly that), a full run on the
       merge legs, a pr run, a partial run and a noop; red for a chosen
       suite failed, skipped or cancelled, a suite that ran unasked, a
       failed plan, a plan with no suites, and (tl29) a tier whose shape
-      does not hold: a full or an all run of fewer suites than every one,
+      does not hold: a full run that chose macos-run or an all run of
+      fewer suites than every one, a full run of fewer than every other,
       a full run on every leg (px37's full, now all), an all run on the
       merge legs, a pr run on every leg, a partial run of no suite, a
       tier the planner never names.
@@ -42,8 +58,19 @@
       `gh`, tl29): no open issue opens one, labelled nightly-red, under
       the one title; an open one gets a comment and no new issue; a label
       that already exists is no failure; unset variables are refused.
-  P5  (a WARN, not a failure) every tracked path is known to the map or
-      read by a suite; an unknown one makes its pull request full.
+  P9  a kernel change whose run includes the firmware suite (a narrow pr
+      run, or an every-suite one named full) runs it on the release legs
+      too (the planner's also_release); nothing more for other changes,
+      kernel-wide ones (all has those legs), pushes, the nightly or a
+      dispatch.
+  P10 the KVM split: sixteen suites, named, open the hosted runner's
+      /dev/kvm (tools/kvm-open, right after checkout, an unnamed step)
+      when the plan says kvm=yes, and no other job does; the plan says
+      yes for every event but the weekly never-skip run and a dispatch
+      asking accel=tcg, which run every suite on TCG.
+  P5  every tracked path is known to the map or read by a suite. An
+      unknown path would make every pull request touching it run every
+      leg; now the pull request that adds one is red here instead.
 
 Exit 0 when every check passes, 1 otherwise.
 """
@@ -77,12 +104,12 @@ def plan(paths=None, **kw):
     for k, v in kw.items():
         args += ["--" + k.replace("_", "-"), v]
     env = {k: v for k, v in os.environ.items()
-           if k not in ("EVENT", "ACTION", "LABEL", "LABELS", "BASE", "HEAD", "IN_TIER", "IN_SUITES")}
+           if k not in ("EVENT", "ACTION", "LABEL", "LABELS", "BASE", "HEAD", "IN_TIER", "IN_SUITES", "IN_ACCEL")}
     if paths is not None:
         args += ["--paths-from", "-"]
     r = subprocess.run(args, input="\n".join(paths or []) + "\n", capture_output=True, text=True, env=env)
     if r.returncode != 0:
-        return {"tier": "ERROR rc=%d %s" % (r.returncode, r.stderr.strip()[-300:]), "suites": [], "legs": ""}
+        return {"tier": "ERROR rc=%d %s" % (r.returncode, r.stderr.strip()[-300:]), "suites": [], "legs": "", "also_release": None}
     return json.loads(r.stdout)
 
 
@@ -100,6 +127,14 @@ def jobs():
 
 JOBS = jobs()
 SUITES = [j for j in JOBS if j not in ("plan", "tier")]
+# macos-run (the proof's ISO under macOS's QEMU, on one of the few macOS runners) is not in the full
+# tier: a pull request's merge gate waits for no macOS runner, and the trunk push (rest or all), the
+# nightly and the weekly run it. A pull request whose paths choose the proof still runs it (pr tier).
+FULL_SUITES = [s for s in SUITES if s != "macos-run"]
+
+
+def every(tier):
+    return FULL_SUITES if tier == "full" else SUITES
 
 
 def expect(name, got, tier, suites=None, has=(), lacks=(), legs=None):
@@ -118,30 +153,63 @@ def expect(name, got, tier, suites=None, has=(), lacks=(), legs=None):
         legs = TIER_LEGS.get(tier, "?")
     if got["legs"] != legs:
         why.append("legs '%s', wanted '%s'" % (got["legs"], legs))
-    shown = "every suite (%d)" % len(SUITES) if sorted(got["suites"]) == sorted(SUITES) else (" ".join(got["suites"]) or "no suite")
+    shown = ("every suite (%d)" % len(SUITES) if sorted(got["suites"]) == sorted(SUITES) else
+             "every suite but macos-run (%d)" % len(FULL_SUITES) if sorted(got["suites"]) == sorted(FULL_SUITES) else
+             " ".join(got["suites"]) or "no suite")
     say(not why, "%s: %s%s" % (name, tier, (" (" + "; ".join(why) + ")") if why else ", " + shown))
 
 
 # --- P1 the tiers by event (tl29) -----------------------------------------------
 expect("P1 a push to trunk", plan(event="push"), "all", SUITES)
 expect("P1 the nightly", plan(event="schedule"), "all", SUITES)
+# A trunk push's head is a merged pull request's head (merges are fast-forwards): it plans from what that
+# head already has green (P8), so a merge repeats nothing its pull request ran.
+REST_LEGS = "--tier release"
+expect("P1 a push whose head has a green tier all: noop", plan(event="push", covered="all"), "noop", [])
+expect("P1 a push whose head has a green tier full: rest, every suite on the release legs",
+       plan(event="push", covered="full"), "rest", SUITES, legs=REST_LEGS)
+expect("P1 a push whose head has nothing green: all", plan(event="push", covered="none"), "all", SUITES)
+# The nightly at a head that already has a green tier all repeats it: noop. The weekly schedule always runs every
+# leg (the sentinel for a moved runner image, the network, and flakes).
+WEEKLY = "47 6 * * 0"
+expect("P1 the nightly at a head with a green tier all: noop", plan(event="schedule", covered="all", schedule="17 6 * * *"), "noop", [])
+expect("P1 the weekly schedule at a head with a green tier all: all", plan(event="schedule", covered="all", schedule=WEEKLY), "all", SUITES)
+expect("P1 the nightly at a head with a green tier full only: all", plan(event="schedule", covered="full", schedule="17 6 * * *"), "all", SUITES)
+expect("P1 the nightly at a head with nothing green: all", plan(event="schedule", covered="none", schedule="17 6 * * *"), "all", SUITES)
+expect("P1 a dispatch plans all whatever its head has", plan(event="workflow_dispatch", covered="full"), "all", SUITES)
+say(plan(event="push", covered="some")["tier"].startswith("ERROR rc=2"), "P1 a covered value that is none of all, full, none is refused")
 expect("P1 a dispatch, no inputs", plan(event="workflow_dispatch"), "all", SUITES)
 expect("P1 a dispatch, tier all", plan(event="workflow_dispatch", tier="all"), "all", SUITES)
-expect("P1 a dispatch, tier full: the merge gate", plan(event="workflow_dispatch", tier="full"), "full", SUITES)
+expect("P1 a dispatch, tier full: the merge gate", plan(event="workflow_dispatch", tier="full"), "full", FULL_SUITES)
 expect("P1 a dispatch, tier pr", plan(event="workflow_dispatch", tier="pr"), "pr", SUITES)
 say(plan(event="workflow_dispatch", tier="release")["tier"].startswith("ERROR rc=2"), "P1 a dispatch asking for a tier that is none is refused")
 expect("P1 a dispatch, one suite: partial, every leg", plan(event="workflow_dispatch", suites="mpx3-tree"), "partial", ["mpx3-tree"], legs="")
 expect("P1 a plant: one suite on the pr leg", plan(event="workflow_dispatch", tier="pr", suites="census"), "partial", ["census"], legs=PR_LEGS)
 expect("P1 a dispatch naming every suite is still partial", plan(event="workflow_dispatch", suites=" ".join(SUITES)), "partial", SUITES, legs="")
 expect("P1 a dispatch, proof brings macos-run", plan(event="workflow_dispatch", suites="proof"), "partial", ["proof", "macos-run"], legs="")
+expect("P1 a labelled pull request's full run leaves macos-run to the trunk push",
+       plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix"), "full", lacks=["macos-run"])
+expect("P1 a pull request's every-suite run (full) leaves macos-run to the trunk push",
+       plan([".github/workflows/ci.yml"], event="pull_request", action="synchronize"), "full", lacks=["macos-run"])
+expect("P1 a push with nothing green at its head runs macos-run (all)", plan(event="push"), "all", has=["macos-run"])
+expect("P1 a push after a green full runs macos-run (rest)", plan(event="push", covered="full"), "rest", has=["macos-run"], legs=REST_LEGS)
+expect("P1 the nightly runs macos-run", plan(event="schedule"), "all", has=["macos-run"])
+expect("P1 a pull request with a FULL path runs macos-run (all)",
+       plan(["kernel/wolf.pin"], event="pull_request", action="synchronize"), "all", has=["macos-run"])
 expect("P1 a pull request labelled full-matrix, notes only: every suite, the merge legs",
-       plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", SUITES)
+       plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="bug,full-matrix"), "full", FULL_SUITES)
 expect("P1 the full-matrix label added",
-       plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
-expect("P1 the label beside a core change: every suite, the merge legs",
-       plan(["kernel/sched/sched.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", SUITES)
-expect("P1 the label beside a FULL path: all",
-       plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "all", SUITES)
+       plan(["notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", FULL_SUITES)
+expect("P1 a labelled push beside a core change: every suite, the merge legs",
+       plan(["kernel/heap/heap.lu"], event="pull_request", action="synchronize", labels="full-matrix"), "full", FULL_SUITES)
+expect("P1 the label added beside a core change: noop, the push's run at that head is already full",
+       plan(["kernel/heap/heap.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
+expect("P1 a labelled push beside a FULL path: all",
+       plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
+expect("P1 the label added beside a FULL path: noop, the push's run at that head is already all",
+       plan(["kernel/wolf.pin", "notes/px99.md"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "noop", [])
+expect("P1 the label added beside a narrow change: full, the push's run chose fewer suites",
+       plan(["kernel/tcp/tcp.lu"], event="pull_request", action="labeled", label="full-matrix", labels="full-matrix"), "full", FULL_SUITES)
 expect("P1 the label beside a path no rule knows: all",
        plan(["newplace/thing.c"], event="pull_request", action="synchronize", labels="full-matrix"), "all", SUITES)
 expect("P1 the label and no changed paths to read: all",
@@ -200,6 +268,8 @@ expect("P2 who a process is (px39) reaches every user suite", plan(["kernel/cred
 expect("P2 the credentials' programs and recordings are mpx5-users' alone",
        plan(["user/elf/cred.c", "user/elf/ident.c", "tools/mkcred", "tests/mpx5-users.d/linux/cred.txt"], **pr), "pr", ["mpx5-users"])
 expect("P2 the census's own", plan(["docs/CENSUS.md"], **pr), "pr", ["census"])
+expect("P2 the trunk push's reader of its head's green runs is CI's own, as the planner is",
+       plan(["tools/ci-covered"], **pr), plan(["tools/ci-plan"], **pr)["tier"], every(plan(["tools/ci-plan"], **pr)["tier"]))
 expect("P2 the accounts' recording is mpx5-accounts' alone (px46)",
        plan(["tests/mpx5-accounts.d/linux/accounts.tty"], **pr), "pr", ["mpx5-accounts"])
 # px47 (P5 U7): every suite as a user. `su` and `as` reach each suite
@@ -408,8 +478,8 @@ expect("P2 AHCI fixtures and recordings reach their gate",
 # power module the suites whose sessions reboot and the firmware suite;
 # the metal scripts and kernels the firmware suite alone; its typing
 # helper the two jobs that run it in the all tier.
-expect("P2 kernel/acpi and kernel/clock reach every suite, on the pr leg (px76)",
-       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "pr", SUITES)
+expect("P2 kernel/acpi and kernel/clock reach every suite, on the pr leg: the merge gate's shape, full (px76)",
+       plan(["kernel/acpi/acpi.lu", "kernel/clock/clock.lu"], **pr), "full", FULL_SUITES)
 expect("P2 kernel/msi reaches the firmware and USB suites alone (px76)",
        plan(["kernel/msi/msi.lu"], **pr), "pr", ["mpx6-usb", "mpx6-firmware"])
 expect("P2 kernel/power reaches the suites whose sessions reboot and the firmware suite (px76)",
@@ -417,8 +487,8 @@ expect("P2 kernel/power reaches the suites whose sessions reboot and the firmwar
 expect("P2 the metal scripts and kernels are the firmware suite's alone (px76)",
        plan(["tests/mpx6-metal", "tests/mpx6-metal-power", "tests/mpx6-metal-serial", "tests/mpx6-metal.d/panic-screen.py",
              "kernel/kmain_metal.lu", "kernel/kmain_metal_msi.lu", "tests/mpx6-firmware"], **pr), "pr", ["mpx6-firmware"])
-expect("P2 kernel/triage and boot/triage.S reach every suite, on the pr leg (px77d)",
-       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "pr", SUITES)
+expect("P2 kernel/triage and boot/triage.S reach every suite, on the pr leg: full (px77d)",
+       plan(["kernel/triage/triage.lu", "boot/triage.S"], **pr), "full", FULL_SUITES)
 expect("P2 the triage suite and the two sticks' confs are the firmware suite's alone (px77d)",
        plan(["tests/mpx6-triage", "tests/mpx6-triage.d/leg.py", "boot/limine-triage.conf", "boot/limine-bisect.conf", "boot/limine-fix.conf",
              "tests/mpx6-nmi", "tests/mpx6-nmi.d/inject.py"], **pr), "pr", ["mpx6-firmware"])
@@ -427,9 +497,30 @@ expect("P2 the processor census's two data files are the firmware suite's alone 
 expect("P2 the processor census's generators, rows and probe are the firmware suite's alone",
        plan(["tests/mpx6-cpus.d/census.py", "tests/mpx6-cpus.d/protections.py", "tests/mpx6-cpus.d/rows.py", "tests/mpx6-cpus.d/probe.c",
              "tests/mpx6-cpus.d/source-census.sh", "tests/mpx6-cpus.d/census-selftest.py"], **pr), "pr", ["mpx6-firmware"])
+# The paths P5 found no rule for: each named, so that P5 can be a failure.
+# kernel/cpus runs on every boot (kernel/acpi calls it), so it plans as the
+# kernel's core does; kmain_cpucheck is the kernel tests/mpx6-cpus builds
+# (the firmware suite's F12); the census directory's build-only witnesses
+# are run by no job, so they plan nothing; the plan job's fetch-busybox
+# selftest plans as CI's own files do. The core's and CI's tier is read
+# from the planner itself, so these rows hold whatever that tier is named.
+CORE_PLAN = plan(["kernel/heap/heap.lu"], **pr)
+CI_PLAN = plan([".github/workflows/ci.yml"], **pr)
+expect("P2 kernel/cpus plans as the kernel's core does (every suite)", plan(["kernel/cpus/cpus.lu"], **pr), CORE_PLAN["tier"], every(CORE_PLAN["tier"]))
+# SMP stage 1 (pax#484): kernel/smp starts every processor and kernel/percpu holds each one's state; the
+# scheduler, the GDT, the interrupt entry and kmain call them on every boot, so they plan as the core does.
+expect("P2 kernel/smp plans as the kernel's core does (every suite)", plan(["kernel/smp/smp.lu"], **pr), CORE_PLAN["tier"], every(CORE_PLAN["tier"]))
+expect("P2 kernel/percpu plans as the kernel's core does (every suite)", plan(["kernel/percpu/percpu.lu"], **pr), CORE_PLAN["tier"], every(CORE_PLAN["tier"]))
+expect("P2 kmain_cpucheck is the firmware suite's alone (tests/mpx6-cpus, its F12)",
+       plan(["kernel/kmain_cpucheck.lu"], **pr), "pr", ["mpx6-firmware"])
+expect("P2 the census directory's build-only witnesses are the processor suite's, so the firmware suite's (pax#484)",
+       plan(["tests/mpx6-cpus.d/ambient.c", "tests/mpx6-cpus.d/compiler.sh", "tests/mpx6-cpus.d/compiler/cpu.S",
+             "tests/mpx6-cpus.d/compiler/probe.lu", "tests/mpx6-cpus.d/compiler/wolf.pkg"], **pr), "pr", ["mpx6-firmware"])
+expect("P2 the plan job's fetch-busybox selftest plans as CI's own files do",
+       plan(["tests/fetch-busybox-selftest"], **pr), CI_PLAN["tier"], every(CI_PLAN["tier"]))
 expect("P2 a census-only change under the full-matrix label is full, not all",
        plan(["tests/mpx6-cpus.d/inventory.json", "tests/mpx6-cpus.d/protections.json"],
-            event="pull_request", action="synchronize", labels="full-matrix"), "full", SUITES)
+            event="pull_request", action="synchronize", labels="full-matrix"), "full", FULL_SUITES)
 expect("P2 the processor suite and its rows are the firmware suite's alone (px161: F12 runs it)",
        plan(["tests/mpx6-cpus", "tests/mpx6-cpus.d/rows.py", "tests/mpx6-cpus.d/rows-selftest.py", "tests/mpx6-cpus.d/probe.c"], **pr),
        "pr", ["mpx6-firmware"])
@@ -713,16 +804,21 @@ expect("P2 the kasumi leg's driver runs with the installer's suites (px78)",
 expect("P2 installer fixtures reach their gate only",
        plan(["tests/mpx6-install", "tests/mpx6-install.d/gap.py"], **pr), "pr", ["mpx6-install", "mpx6-ahci", "mpx6-kasumi"])
 
-expect("P2 CI itself: every suite, the pr leg", plan([".github/workflows/ci.yml"], **pr), "pr", SUITES)
+expect("P2 CI itself: every suite, the pr leg: full", plan([".github/workflows/ci.yml"], **pr), "full", FULL_SUITES)
 
-# The kernel's core (px40, ruling #76): every suite, on the pr leg.
+# The kernel's core (px40, ruling #76): every suite, on the pr leg. A pull request's run of every
+# suite on that leg is the merge gate's shape (every suite on native BIOS), so it is named full and
+# the label's own event adds no second run at that head (P1).
+# The kernel-wide modules (the scheduler and its wake-ups, the timer, the interrupt entry, the syscall entry) are
+# FULL instead (P3): every process reaches them, and the soak and load legs of the other three legs are where a
+# lost wake-up or a timing change shows.
 CORE = ["serial", "log", "panic", "boot_info", "frames", "paging", "gdt", "idt", "interrupts",
-        "apic", "timer", "heap", "sync", "sched", "fpu"]
-CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/isr.S", "boot/sched.S", "boot/fpu.S"]
-expect("P2 a core-only change (kernel/sched): every suite, the pr leg", plan(["kernel/sched/sched.lu"], **pr), "pr", SUITES)
+        "apic", "heap", "sync", "fpu"]
+CORE_ASM = ["boot/io.S", "boot/cpu.S", "boot/fpu.S"]
+expect("P2 a core-only change (kernel/heap): every suite, the pr leg: full", plan(["kernel/heap/heap.lu"], **pr), "full", FULL_SUITES)
 for p in ["kernel/%s/%s.lu" % (m, m) for m in CORE] + CORE_ASM:
-    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "pr", SUITES)
-expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/sched/sched.lu"], **pr), "pr", SUITES)
+    expect("P2 the core: %s" % p, plan([p, "notes/px99.md"], **pr), "full", FULL_SUITES)
+expect("P2 the core beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/heap/heap.lu"], **pr), "full", FULL_SUITES)
 
 # --- P3 FULL wins ---------------------------------------------------------------------
 PINS = ["kernel/wolf.pin", "kernel/wolf.pkg", "boot/limine.pin"]
@@ -732,12 +828,68 @@ ENTRY = ["boot/start.S", "boot/kernel.ld", "boot/limine.conf"]
 for p in PINS + HARNESS + ENTRY:
     expect("P3 %s" % p, plan([p, "notes/px99.md"], **pr), "all", SUITES)
 expect("P3 a path no rule knows", plan(["newplace/thing.c"], **pr), "all", SUITES)
+KERNEL_WIDE = ["kernel/sched/sched.lu", "kernel/timer/timer.lu", "boot/isr.S", "boot/sched.S", "boot/user.S"]
+for p in KERNEL_WIDE:
+    expect("P3 a kernel-wide path, %s: every suite, every leg" % p, plan([p, "notes/px99.md"], **pr), "all", SUITES)
+
+# --- P9 a kernel change runs the firmware suite's release legs ------------------------------
+# The NMI row's injection points (tests/mpx6-nmi, the firmware suite's F11) are a property of the release build:
+# twice in a fortnight a kernel change moved the release compiler's inlining and only the trunk push's every-leg
+# run saw it. So a kernel change whose run includes mpx6-firmware also runs it on the release legs.
+def also(got):
+    return got.get("also_release")
+say(also(plan(["kernel/tcp/tcp.lu"], event="pull_request", action="synchronize", labels="full-matrix")) == ["mpx6-firmware"],
+    "P9 a labelled kernel change: the firmware suite on the release legs as well")
+say(also(plan(["boot/triage.S"], **pr)) == ["mpx6-firmware"],
+    "P9 a kernel change whose every-suite pr run (named full) includes the firmware suite: its release legs as well")
+say(also(plan(["kernel/usb_storage/usb_storage.lu"], **pr)) == ["mpx6-firmware"],
+    "P9 a kernel change whose narrow pr run includes the firmware suite: its release legs as well")
+say(also(plan(["kernel/tcp/tcp.lu"], **pr)) == [],
+    "P9 a kernel change whose pr run leaves the firmware suite out: nothing more")
+say(also(plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix")) == [],
+    "P9 a labelled change with no kernel path: nothing more")
+say(also(plan(["kernel/sched/sched.lu"], **pr)) == [],
+    "P9 a kernel-wide change: nothing more, its all run has the release legs")
+say(also(plan(event="push")) == [] and also(plan(event="schedule")) == [] and also(plan(event="workflow_dispatch", tier="full")) == [],
+    "P9 a push, the nightly and a dispatch: nothing more")
 expect("P3 FULL beside a narrow change", plan(["kernel/tcp/tcp.lu", "kernel/wolf.pin"], **pr), "all", SUITES)
 expect("P3 a pin beside a core change", plan(["kernel/sched/sched.lu", "kernel/wolf.pin"], **pr), "all", SUITES)
 expect("P3 a harness tool beside a core change", plan(["kernel/heap/heap.lu", "tools/qemu-run"], **pr), "all", SUITES)
 expect("P3 an unknown path beside a core change", plan(["kernel/sched/sched.lu", "newplace/thing.c"], **pr), "all", SUITES)
 expect("P3 no changed paths to read", plan(**pr), "all", SUITES)
 expect("P3 a diff git cannot take", plan(base="0" * 40, head="1" * 40, **pr), "all", SUITES)
+
+# --- P10 the KVM split -----------------------------------------------------------------------
+# Two hosted samples at one head (runs 44881637188 and 44893124934 against the TCG run 44871753222): these
+# sixteen were more than 10 % faster under KVM in both and never red there; together they save about 18 % of a
+# tier full run's runner-minutes, the users suite alone 13 %. Every other job stays on TCG, the three suites with
+# timing bounds stated on bare metal (mpx6-firmware, mpx3-conspeed, mpx6-latency) included. The fallback: under
+# 10 % saved, or a KVM job red on the runner rather than on PAX, the list shrinks to mpx5-users and
+# mpx5-users-ahci; under 5 %, it empties.
+KVM16 = ["mpx5-users", "mpx5-users-ahci", "mpx5-pelt", "mpx5-jobs", "mpx5-den", "mpx6-staged", "mpx4-ready",
+         "mpx6-disktools", "mpx4-unix", "mpx5-lupin", "mpx5-slots", "mpx5-trace", "mpx6-bootlog", "mpx4-console-net",
+         "mpx6-nvme", "mpx4-tcp"]
+
+
+def kvm(got):
+    return got.get("kvm")
+
+
+got = plan(event="push")
+say(sorted(got.get("kvm_suites") or []) == sorted(KVM16),
+    "P10 the planner's KVM suites are the sixteen (%s)" % " ".join(got.get("kvm_suites") or ["none"]))
+say(kvm(plan(["notes/px99.md"], **pr)) == "yes", "P10 a pull request's run: the sixteen on KVM")
+say(kvm(plan(["notes/px99.md"], event="pull_request", action="synchronize", labels="full-matrix")) == "yes",
+    "P10 a labelled pull request's run: the sixteen on KVM")
+say(kvm(plan(event="push")) == "yes", "P10 a trunk push: the sixteen on KVM")
+say(kvm(plan(event="schedule", schedule="17 6 * * *")) == "yes", "P10 the nightly: the sixteen on KVM")
+say(kvm(plan(event="schedule", schedule=WEEKLY)) == "no", "P10 the weekly never-skip run: every suite on TCG")
+say(kvm(plan(event="schedule", schedule=WEEKLY, covered="all")) == "no",
+    "P10 the weekly run at a head with a green tier all: still all, every suite on TCG")
+say(kvm(plan(event="workflow_dispatch")) == "yes", "P10 a dispatch: the sixteen on KVM")
+say(kvm(plan(event="workflow_dispatch", accel="tcg")) == "no", "P10 a dispatch asking accel=tcg: every suite on TCG")
+say(plan(event="workflow_dispatch", accel="hvf")["tier"].startswith("ERROR rc=2"), "P10 a dispatch asking an accel that is none is refused")
+expect("P10 tools/kvm-open plans as CI's own files do", plan(["tools/kvm-open"], **pr), CI_PLAN["tier"], every(CI_PLAN["tier"]))
 
 # --- P6 the verdict -----------------------------------------------------------------------
 def verdict(needs):
@@ -763,14 +915,16 @@ def vexpect(name, needs, want):
 
 
 vexpect("a green all run, its legs output absent", run_of("all", SUITES, legs=""), 0)
-vexpect("a green full run, every suite on the merge legs", run_of("full", SUITES, legs=MERGE_LEGS), 0)
+vexpect("a green full run, every suite but macos-run on the merge legs", run_of("full", FULL_SUITES, legs=MERGE_LEGS), 0)
+vexpect("a full run that chose macos-run (the gate waits for no macOS runner)", run_of("full", SUITES, legs=MERGE_LEGS), 1)
+vexpect("a full run where macos-run ran unasked", run_of("full", FULL_SUITES, {"macos-run": {"result": "success", "outputs": {}}}, legs=MERGE_LEGS), 1)
 vexpect("a green pr run of two suites", run_of("pr", ["mpx3-sound", "census"]), 0)
 vexpect("a green pr run of no suite (notes only)", run_of("pr", []), 0)
 vexpect("a noop run", run_of("noop", []), 0)
 vexpect("a green partial run, one suite on the pr leg", run_of("partial", ["census"]), 0)
 vexpect("a green partial run, one suite on every leg", run_of("partial", ["mpx3-tree"], legs=""), 0)
 vexpect("a chosen suite failed", run_of("all", SUITES, {"mpx1": {"result": "failure", "outputs": {}}}, legs=""), 1)
-vexpect("a chosen suite failed in the merge gate", run_of("full", SUITES, {"mpx5-jobs": {"result": "failure", "outputs": {}}}, legs=MERGE_LEGS), 1)
+vexpect("a chosen suite failed in the merge gate", run_of("full", FULL_SUITES, {"mpx5-jobs": {"result": "failure", "outputs": {}}}, legs=MERGE_LEGS), 1)
 vexpect("a chosen suite was skipped", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "skipped", "outputs": {}}}), 1)
 vexpect("a chosen suite was cancelled", run_of("pr", ["mpx3-sound"], {"mpx3-sound": {"result": "cancelled", "outputs": {}}}), 1)
 vexpect("a suite ran unasked", run_of("pr", ["census"], {"mpx4-tcp": {"result": "success", "outputs": {}}}), 1)
@@ -778,7 +932,7 @@ vexpect("the plan failed", {"plan": {"result": "failure", "outputs": {}}, "censu
 vexpect("the plan chose nothing readable", {"plan": {"result": "success", "outputs": {}}, "census": {"result": "skipped", "outputs": {}}}, 1)
 # tl29: the name says the shape.
 vexpect("a full run of one suite (px37's one-suite dispatch)", run_of("full", ["mpx3-tree"], legs=MERGE_LEGS), 1)
-vexpect("a full run on every leg (px37's full, now all)", run_of("full", SUITES, legs=""), 1)
+vexpect("a full run on every leg (px37's full, now all)", run_of("full", FULL_SUITES, legs=""), 1)
 vexpect("an all run on the merge legs", run_of("all", SUITES, legs=MERGE_LEGS), 1)
 vexpect("an all run of every suite but one", run_of("all", SUITES[:-1], legs=""), 1)
 vexpect("a pr run on every leg", run_of("pr", ["census"], legs=""), 1)
@@ -786,11 +940,23 @@ vexpect("a partial run of no suite", run_of("partial", [], legs=""), 1)
 vexpect("a partial run on legs no tier has", run_of("partial", ["census"], legs="--tier release --firmware uefi"), 1)
 vexpect("a noop run that chose a suite", run_of("noop", ["census"]), 1)
 vexpect("a tier the planner never names", run_of("release", SUITES, legs=""), 1)
+vexpect("a green rest run, every suite on the release legs", run_of("rest", SUITES, legs=REST_LEGS), 0)
+vexpect("a rest run of every suite but one", run_of("rest", SUITES[:-1], legs=REST_LEGS), 1)
+vexpect("a rest run on every leg", run_of("rest", SUITES, legs=""), 1)
+vexpect("a rest run with a chosen suite failed", run_of("rest", SUITES, {"mpx1": {"result": "failure", "outputs": {}}}, legs=REST_LEGS), 1)
 
 # --- P4 the wiring -------------------------------------------------------------------------
 wf = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
-say("PAX_INSTALL_BIG_ROWS: ${{ needs.plan.outputs.tier == 'all' && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}" in wf,
-    "P4 big installs: 500 GB in full, 4 TB only in all, neither in pr")
+say("PAX_INSTALL_BIG_ROWS: ${{ (needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest') && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}" in wf,
+    "P4 big installs: 500 GB in full, 4 TB in all and rest, neither in pr")
+say("needs.plan.outputs.tier == 'all'" not in wf.replace("needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'", "")
+    .replace("needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'rest' && 190", "")
+    .replace("needs.plan.outputs.tier == 'all' && 350 || needs.plan.outputs.tier == 'rest' && 350", "")
+    .replace("needs.plan.outputs.tier == 'all' && 240 || needs.plan.outputs.tier == 'rest' && 240", "")
+    .replace("needs.plan.outputs.tier == 'all' && 145 || needs.plan.outputs.tier == 'rest' && 145", "")
+    .replace("needs.plan.outputs.tier == 'all' && 130 || needs.plan.outputs.tier == 'rest' && 130", "")
+    .replace("needs.plan.outputs.tier == 'all' && 250 || needs.plan.outputs.tier == 'rest' && 250", ""),
+    "P4 every step and limit the all tier gates by name, the rest tier gets too (a trunk push's release legs run what all runs on them)")
 say("build/mpx6-install/**/*.geometry" in wf,
     "P4 large installed-volume geometry is retained as evidence")
 blocks = {}
@@ -798,6 +964,22 @@ for j in JOBS:
     m = re.search(r"^  %s:\s*\n(.*?)(?=^  [A-Za-z0-9_-]+:\s*$|\Z)" % re.escape(j), wf, re.M | re.S)
     blocks[j] = m.group(1) if m else ""
 say("plan" in JOBS and "tier" in JOBS, "P4 the workflow has a plan job and a tier job")
+# P10: the KVM step. Unnamed, so tests/ci-budgets.py counts it with checkout and setup in the 180 s allowance
+# (a named step would be a budgeted job's unmeasured step).
+KVM_STEP = "      - if: needs.plan.outputs.kvm == 'yes'\n        run: tools/kvm-open\n"
+withkvm = [j for j in JOBS if KVM_STEP in blocks[j]]
+stray = [j for j in withkvm if j not in KVM16]
+missing = [j for j in KVM16 if ("      - uses: actions/checkout@v4\n\n" + KVM_STEP) not in blocks[j]]
+say(not stray and not missing,
+    "P10 exactly the sixteen open /dev/kvm, right after checkout%s%s"
+    % (" (stray: %s)" % " ".join(stray) if stray else "", " (missing: %s)" % " ".join(missing[:8]) if missing else ""))
+say("      kvm: ${{ steps.plan.outputs.kvm }}\n" in blocks["plan"] and "          IN_ACCEL: ${{ inputs.accel }}\n" in blocks["plan"],
+    "P10 the plan reads the dispatch's accel input and hands kvm to the jobs")
+say(re.search(r"^      accel:\n        description: .*\n        type: choice\n        options: \[kvm, tcg\]\n        default: kvm\n", wf, re.M) is not None,
+    "P10 the dispatch's accel input: kvm by default, tcg to run every suite on TCG")
+fwrel = re.search(r"^      - name: .*\n        if: contains\(fromJSON\(needs\.plan\.outputs\.also_release\), 'mpx6-firmware'\)\n        run: tests/mpx6-firmware --tier release\n", blocks["mpx6-firmware"], re.M)
+say(fwrel is not None and "      also_release: ${{ steps.plan.outputs.also_release }}\n" in blocks["plan"],
+    "P4 the plan's also_release reaches the firmware job, which runs its release legs when asked")
 for j in SUITES:
     b = blocks[j]
     needs = "[plan, proof]" if j == "macos-run" else "plan"
@@ -818,10 +1000,22 @@ say("        run: tools/ci-plan --verdict\n" in blocks["tier"] and "actions/chec
     "P4 the tier job's check is tools/ci-plan --verdict")
 say("cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in wf, "P4 cancel-in-progress for pull requests only")
 group = re.search(r"^concurrency:\n  group: (.*)$", wf, re.M)
-say(group is not None and group.group(1).rstrip().endswith("|| format('ci-{0}-{1}', github.event_name, github.run_id) }}"),
-    "P4 a run that is no pull request's has a group of its own run id")
+say(group is not None and group.group(1).rstrip().endswith("|| github.event_name == 'push' && 'ci-push-trunk' || format('ci-{0}-{1}', github.event_name, github.run_id) }}"),
+    "P4 trunk pushes share one group, never cancelled in progress (the running one and the newest pending one run); the nightly and a dispatch each have a group of their own run id")
+cov = re.search(r"^      - name: what this head already has green \(tools/ci-covered\)\n        id: covered\n        if: github\.event_name == 'push'(?: \|\| github\.event_name == 'schedule')?\n((?:        .*\n)+)", blocks["plan"], re.M)
+say(cov is not None and "run: tools/ci-covered --github-output \"$GITHUB_OUTPUT\"" in cov.group(1)
+    and "GH_TOKEN: ${{ github.token }}" in cov.group(1) and "SHA: ${{ github.sha }}" in cov.group(1)
+    and "          COVERED: ${{ steps.covered.outputs.covered }}\n" in blocks["plan"]
+    and blocks["plan"].index("tools/ci-covered") < blocks["plan"].index("tools/ci-plan --github-output"),
+    "P4 a push's plan reads what its head already has (tools/ci-covered) before it plans")
+pperm = re.search(r"^    permissions:\n((?:      .*\n)+)", blocks["plan"], re.M)
+say(pperm is not None and sorted(pperm.group(1).split()) == sorted(["contents:", "read", "checks:", "read"]),
+    "P4 the plan job may read contents and check runs, nothing else")
 say(re.search(r"^  push:\n    branches: \[trunk\]", wf, re.M) is not None, "P4 a push to trunk runs")
 say(re.search(r"^  schedule:\n(\s+#.*\n)*\s+- cron: ", wf, re.M) is not None, "P4 the nightly runs")
+say(('    - cron: "%s"\n' % WEEKLY) in wf and "          SCHEDULE: ${{ github.event.schedule }}\n" in blocks["plan"]
+    and "        if: github.event_name == 'push' || github.event_name == 'schedule'\n" in blocks["plan"],
+    "P4 the weekly schedule is in the workflow, the plan reads which schedule ran, and the nightly reads its head's green runs too")
 say("types: [opened, synchronize, reopened, labeled]" in wf, "P4 adding a label starts a run")
 say(re.search(r'^      tier:\n        description: .*\n        type: choice\n        options: \[all, full, pr\]\n        default: all\n', wf, re.M) is not None
     and "IN_TIER: ${{ inputs.tier }}" in blocks["plan"], "P4 the dispatch's tier input is all, full or pr, all by default, and the plan reads it")
@@ -884,6 +1078,62 @@ rc, calls = nightly_red(unset=True)
 say(rc != 0 and not calls, "P7 the script refuses to run without REPO, WORKFLOW and RUN_URL, and calls nothing")
 say(re.search(r"^name: ci$", wf, re.M) is not None, "P7 the workflow's name is ci, the title's")
 
+# --- P8 what a trunk head already has (tools/ci-covered) ------------------------------------
+COVERED = os.path.join(ROOT, "tools", "ci-covered")
+FAKE_CHECKS = r'''#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG"
+[ "${FAKE_RC:-0}" = 0 ] || exit "$FAKE_RC"
+case "$*" in
+  *"check_name=tier%20all"*) printf '%s\n' "$FAKE_ALL" ;;
+  *"check_name=tier%20full"*) printf '%s\n' "$FAKE_FULL" ;;
+  *) printf '{"check_runs": []}\n' ;;
+esac
+'''
+
+
+def check_run(name, conclusion="success", status="completed", app="github-actions", url="https://github.com/wolffe-lang/pax/runs/1"):
+    return {"name": name, "status": status, "conclusion": conclusion, "app": {"slug": app}, "html_url": url}
+
+
+def covered(all_runs=(), full_runs=(), rc=0, unset=False):
+    d = tempfile.mkdtemp(prefix="ci-plan-checks-")
+    try:
+        with open(os.path.join(d, "gh"), "w") as f:
+            f.write(FAKE_CHECKS)
+        os.chmod(os.path.join(d, "gh"), 0o755)
+        log = os.path.join(d, "log")
+        env = dict(os.environ, PATH=d + os.pathsep + os.environ.get("PATH", ""), FAKE_LOG=log, FAKE_RC=str(rc),
+                   FAKE_ALL=json.dumps({"check_runs": list(all_runs)}), FAKE_FULL=json.dumps({"check_runs": list(full_runs)}),
+                   REPO="wolffe-lang/pax", SHA="a" * 40)
+        if unset:
+            env.pop("REPO"); env.pop("SHA")
+        out = os.path.join(d, "out")
+        r = subprocess.run([COVERED, "--github-output", out], capture_output=True, text=True, env=env)
+        got = dict(l.split("=", 1) for l in open(out).read().splitlines() if "=" in l) if os.path.exists(out) else {}
+        calls = open(log).read().splitlines() if os.path.exists(log) else []
+        return r.returncode, got, calls
+    except OSError as e:
+        return -1, {"error": str(e)}, []
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+rc, got, calls = covered(all_runs=[check_run("tier all")], full_runs=[check_run("tier full")])
+say(rc == 0 and got.get("covered") == "all" and got.get("covered_by", "").startswith("https://"),
+    "P8 a green tier all at the head: covered=all, naming the check run (%s)" % got)
+say(calls and all("repos/wolffe-lang/pax/commits/" + "a" * 40 + "/check-runs" in c for c in calls),
+    "P8 it asks for the head's own check runs")
+rc, got, calls = covered(full_runs=[check_run("tier full")])
+say(rc == 0 and got.get("covered") == "full", "P8 a green tier full alone: covered=full (%s)" % got)
+rc, got, calls = covered(all_runs=[check_run("tier all", conclusion="failure")], full_runs=[check_run("tier full", status="in_progress", conclusion=None)])
+say(rc == 0 and got.get("covered") == "none", "P8 a red tier all and a tier full still running: covered=none (%s)" % got)
+rc, got, calls = covered(all_runs=[check_run("tier all", app="someone-else")])
+say(rc == 0 and got.get("covered") == "none", "P8 a check run of another app is no evidence: covered=none (%s)" % got)
+rc, got, calls = covered(all_runs=[check_run("tier all")], rc=1)
+say(rc == 0 and got.get("covered") == "none", "P8 the API failing: covered=none, so the push runs every leg (%s)" % got)
+rc, got, calls = covered(unset=True)
+say(rc == 2 and not calls, "P8 no REPO or SHA: refused, nothing asked")
+
 # --- P5 every tracked path is known --------------------------------------------------------
 try:
     tracked = subprocess.run(["git", "-C", ROOT, "ls-files"], check=True, capture_output=True, text=True).stdout.split()
@@ -893,11 +1143,8 @@ if tracked:
     r = subprocess.run([PLAN, "--event", "pull_request", "--paths-from", "-"], input="\n".join(tracked),
                        capture_output=True, text=True)
     unknown = [l.split(" -> ")[0].replace("ci-plan: ", "") for l in r.stderr.splitlines() if "no rule and no suite reads it" in l]
-    if unknown:
-        print("ci-plan: WARN P5 %d tracked path(s) no rule knows (a pull request touching one runs full): %s"
-              % (len(unknown), " ".join(unknown[:20])))
-    else:
-        print("ci-plan: PASS P5 every one of %d tracked paths is known" % len(tracked))
+    say(not unknown, "P5 every one of %d tracked paths is known to the map or read by a suite%s"
+        % (len(tracked), "" if not unknown else " (%d no rule knows, each a pull request's every leg: %s)" % (len(unknown), " ".join(unknown[:20]))))
 else:
     print("ci-plan: WARN P5 not a git checkout: the tracked paths not checked")
 

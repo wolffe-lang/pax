@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# tools/kvm-open — open a hosted runner's /dev/kvm to the job's user, for a measured KVM run.
+#
+#     tools/kvm-open        (in a GitHub-hosted Linux job; sudo without a password)
+#
+# GitHub-hosted Linux runners carry /dev/kvm as root:kvm 0660, and the job's user is not in the group, so every
+# QEMU this harness starts with `--accel auto` falls back to TCG. GitHub's documented step (the changelog of
+# 2024-04-02, "Hardware accelerated Android virtualization") opens it with a udev rule; this is that step, then a
+# check that the device opened, then PAX_REQUIRE_KVM=1 for the job's later steps, so that tools/qemu-run and
+# tools/qemu-fault refuse an `auto` that would land on TCG instead of measuring TCG by accident. Boots that ask
+# for TCG by name (the Linux oracle VMs, the kasumi leg's PAX_METAL_ACCEL) still get it.
+# Exit 0 when /dev/kvm is usable, 1 when it is not.
+set -euo pipefail
+[ -e /dev/kvm ] || { echo "kvm-open: this runner has no /dev/kvm" >&2; exit 1; }
+echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+sudo udevadm control --reload-rules
+sudo udevadm trigger --name-match=kvm
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] && break
+    sleep 1
+done
+ls -l /dev/kvm
+if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then
+    echo "kvm-open: /dev/kvm is still not usable by $(id -un)" >&2
+    exit 1
+fi
+if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "PAX_REQUIRE_KVM=1" >> "$GITHUB_ENV"
+fi
+echo "kvm-open: /dev/kvm usable by $(id -un); PAX_REQUIRE_KVM=1 for this job's later steps"

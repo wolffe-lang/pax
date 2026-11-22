@@ -116,13 +116,22 @@ boot/limine.pin                 FULL
 boot/limine.conf                FULL
 boot/start.S                    FULL
 boot/kernel.ld                  FULL
+# The kernel-wide modules: the scheduler and its wake-ups, the timer, the
+# interrupt entry and the syscall entry. Every process reaches them, and a
+# lost wake-up or a timing change shows in the soak and load legs of the
+# other three legs (a scheduler change once merged on every suite at native
+# BIOS and turned trunk red in the lobo suite's release load and the users
+# suite's native UEFI soak): every suite, every leg.
+kernel/sched/*                  FULL
+kernel/timer/*                  FULL
+boot/isr.S                      FULL
+boot/sched.S                    FULL
+boot/user.S                     FULL
 # --- the kernel's core: every suite on the pull-request leg (px40, ruling #76)
 # Every suite runs this code, so every suite runs; the other three legs
 # (release, UEFI) are the trunk push's and the nightly's (tl29).
 boot/io.S                       ALL
 boot/cpu.S                      ALL
-boot/isr.S                      ALL
-boot/sched.S                    ALL
 boot/fpu.S                      ALL
 kernel/serial/*                 ALL
 kernel/log/*                    ALL
@@ -135,10 +144,11 @@ kernel/gdt/*                    ALL
 kernel/idt/*                    ALL
 kernel/interrupts/*             ALL
 kernel/apic/*                   ALL
-kernel/timer/*                  ALL
 kernel/heap/*                   ALL
 kernel/sync/*                   ALL
-kernel/sched/*                  ALL
+kernel/cpus/*                   ALL # kernel/acpi calls it on every boot (the MADT census)
+kernel/smp/*                    ALL # SMP stage 1: every processor started; the core calls it on every boot
+kernel/percpu/*                 ALL # each processor's state; the scheduler, GDT and interrupt entry read it
 kernel/fpu/*                    ALL
 # px131: kernel/latency, the interrupts-off instrument: off unless the
 # command line says `latency`, so only mpx6-latency turns it on; the
@@ -173,6 +183,8 @@ tools/ci-retry                  ALL
 tests/ci-retry.py               ALL
 tests/ci-budgets*               ALL
 tools/nightly-red               ALL
+tools/ci-covered                ALL # the trunk push's plan reads it
+tools/kvm-open                  ALL # the sixteen KVM suites' jobs run it after checkout
 # px85: the plan job's own selftests (the source fetches' retry, the repeat
 # row's verdict, the pipe shape of pax#254), run before every plan.
 tests/fetch-retry-selftest      ALL
@@ -182,6 +194,7 @@ tests/upgrade-screen-selftest   ALL
 # A test that loads a tool as a module leaves no tools/__pycache__: checked
 # in the plan job too, beside the others.
 tests/tool-bytecode-selftest    ALL
+tests/fetch-busybox-selftest    ALL # the plan job runs it before every plan
 # pax#474: every job's runner is the pinned image; the plan job checks its own.
 tests/ci-runners*               ALL
 
@@ -784,8 +797,10 @@ boot/limine-fix.conf           mpx6-firmware
 # files was a path nothing reads, and so an all run. The scripts that
 # generate and check them (run by tests/mpx6-cpus.d/source-census.sh),
 # the boot rows' judge and the probe tests/mpx6-cpus builds are that
-# suite's too. Each file is named: the directory's other files are read
-# by no test, and stay unknown until something runs them.
+# suite's too. Each file is named. The directory's other files (a
+# black-box witness of the runtime's ambient pair and a build-only
+# witness of the compiler's GS stubs) are run by no job; the processor
+# suite's rule above (tests/mpx6-cpus*) gives them to the firmware suite.
 tests/mpx6-cpus.d/inventory.json   mpx6-firmware
 tests/mpx6-cpus.d/protections.json mpx6-firmware
 tests/mpx6-cpus.d/census.py        mpx6-firmware
@@ -794,6 +809,8 @@ tests/mpx6-cpus.d/census-selftest.py mpx6-firmware
 tests/mpx6-cpus.d/source-census.sh mpx6-firmware
 tests/mpx6-cpus.d/rows.py          mpx6-firmware
 tests/mpx6-cpus.d/probe.c          mpx6-firmware
+# The kernel tests/mpx6-cpus builds (F12's processor-count check).
+kernel/kmain_cpucheck.lu           mpx6-firmware
 
 # px78: the whole install path (tests/mpx6-kasumi, the kasumi-shaped
 # leg: the live stick on USB mass storage, the install allow-list, the

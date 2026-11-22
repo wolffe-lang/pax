@@ -299,3 +299,20 @@ rule mpx5-pelt's all-tier floor can grow by 3.5% (to 15428 s) and still
 fit; past that no bound can hold it, and the split this README's capacity
 section asks for (the USB typing step and the root disk leg as a job of
 their own, the images handed on by digest) is the only way left.
+
+## Twice the slowest green (`twice.json`)
+
+A cap at least 40 % above a sizing floor still let a slow runner end a green job at its cap: the firmware
+job's slowest green every-leg run took 5,336 s against a 5,400 s cap, and it was cut at the cap four times.
+`tests/ci-budgets.py` therefore also holds each listed job's cap to at least twice its slowest green run of
+the same shape, read from GitHub's job timestamps over 2026-11-06 to 2026-11-21 (`twice.json` names the run
+and job of each figure).
+
+- Firmware: 90 minutes for one leg (pr, full; 17 minutes at most), 180 when it runs every leg (all, rest, a
+  partial dispatch) or the release legs a kernel change adds (bounded by the all tier's 89 minutes, since no
+  such run is green yet).
+- Users: 210 on KVM (18 minutes at most), 360 on TCG, the Sunday run (174 minutes at most). 360 minutes is
+  also GitHub's limit for a hosted job, so a tier full run on TCG, which only a dispatch asking for it makes
+  (181 minutes at most), cannot be held to twice.
+- Aspen: 60 (22 minutes at most).
+

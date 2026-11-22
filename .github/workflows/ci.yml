@@ -48,12 +48,15 @@
 #         (tools/ci-tiers.map and the tests' own text), each on ONE leg,
 #         `--tier native --firmware bios`. A change to the kernel's core
 #         or to CI itself can affect every suite: it runs all of them, on
-#         that one leg (px40, ruling #76). Nothing changed: no suite
+#         that one leg (px40, ruling #76), and every suite on that leg is
+#         the merge gate's shape, so that run is named `full`. Nothing changed: no suite
 #         dropped, none narrowed — a suite is left out of a PR run, or
 #         run on fewer legs there, and runs in full after the merge.
 #   partial  a dispatch naming suites (`-f suites=...`, a plant), on its
 #         `tier` input's legs.
-#   noop  a `labeled` event for any label but `full-matrix`.
+#   noop  a `labeled` event for any label but `full-matrix`; and the
+#         `full-matrix` label's own event at a head whose paths choose
+#         every suite or a FULL path, whose push already started that run.
 #
 # THE MERGE RULE: a lane's PR is merged only with a green `tier full`
 # (or `tier all`, which runs everything `tier full` does) at its head. A
@@ -76,8 +79,11 @@ on:
     types: [opened, synchronize, reopened, labeled]
   schedule:
     # Nightly, the all tier (every suite, every leg), on trunk; a red one
-    # opens an issue (the `tier` job's last step).
+    # opens an issue (the `tier` job's last step). The nightly plans noop at
+    # a head whose tier all is green already; the weekly one (Sundays) runs
+    # every leg whatever the head has (tools/ci-plan's WEEKLY).
     - cron: "17 6 * * *"
+    - cron: "47 6 * * 0"
   workflow_dispatch:
     inputs:
       tier:
@@ -89,6 +95,11 @@ on:
         description: "the suites (job names, space-separated; tier partial on the tier's legs); empty: every suite"
         type: string
         default: ""
+      accel:
+        description: "kvm: the sixteen KVM suites open /dev/kvm (the default); tcg: every suite on TCG, to recheck a red"
+        type: choice
+        options: [kvm, tcg]
+        default: kvm
       pelt_cases:
         description: "mpx5-pelt only: named replay cases; empty runs every case (plants may name corpus)"
         type: string
@@ -113,13 +124,15 @@ permissions:
 # so a new push frees the slots of the run it supersedes. The full run
 # and the pr run live in SEPARATE groups (adding the label must not cancel
 # the pr run at the same head), and another label's noop run gets a group
-# of its own so it cancels nothing. Every other run (a trunk push, the
-# nightly, a dispatch) gets a group of its own run id: never cancelled,
-# and never replaced while pending, since each trunk push's all run is
-# the coverage that merge is owed (since tl29 the only one of three legs
-# before the nightly).
+# of its own so it cancels nothing. Trunk pushes share one group and are
+# never cancelled in progress: the running push finishes, and of the pushes
+# that arrive meanwhile only the newest waits (GitHub replaces a pending run
+# with a newer one). A fast-forward trunk is linear, so a green run at the
+# newest head covers the code of every head below it; a red one is bisected
+# by dispatching the heads between. The nightly and a dispatch each get a
+# group of their own run id: never cancelled, never replaced.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}-{1}', github.head_ref, (github.event.action == 'labeled' && github.event.label.name != 'full-matrix') && format('noop-{0}', github.run_id) || (contains(github.event.pull_request.labels.*.name, 'full-matrix') && 'full' || 'pr')) || format('ci-{0}-{1}', github.event_name, github.run_id) }}
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}-{1}', github.head_ref, (github.event.action == 'labeled' && github.event.label.name != 'full-matrix') && format('noop-{0}', github.run_id) || (contains(github.event.pull_request.labels.*.name, 'full-matrix') && 'full' || 'pr')) || github.event_name == 'push' && 'ci-push-trunk' || format('ci-{0}-{1}', github.event_name, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -129,10 +142,16 @@ jobs:
   plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # A push's plan reads its head's check runs (tools/ci-covered).
+    permissions:
+      contents: read
+      checks: read
     outputs:
       tier: ${{ steps.plan.outputs.tier }}
       suites: ${{ steps.plan.outputs.suites }}
       legs: ${{ steps.plan.outputs.legs }}
+      also_release: ${{ steps.plan.outputs.also_release }}
+      kvm: ${{ steps.plan.outputs.kvm }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -161,6 +180,18 @@ jobs:
           python3 -I tests/upgrade-screen-selftest
           python3 -I tests/tool-bytecode-selftest
 
+      # Merges are fast-forwards, so a trunk push's head is a pull request's
+      # head: what that head already has green decides what the push runs
+      # (tools/ci-plan's rest tier). Unreadable is none: every leg, as before.
+      - name: what this head already has green (tools/ci-covered)
+        id: covered
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: tools/ci-covered --github-output "$GITHUB_OUTPUT"
+
       - name: the plan
         id: plan
         env:
@@ -172,6 +203,9 @@ jobs:
           HEAD: ${{ github.sha }}
           IN_TIER: ${{ inputs.tier }}
           IN_SUITES: ${{ inputs.suites }}
+          IN_ACCEL: ${{ inputs.accel }}
+          COVERED: ${{ steps.covered.outputs.covered }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: tools/ci-plan --github-output "$GITHUB_OUTPUT"
 
   proof:
@@ -232,6 +266,10 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # The proof's ISO under macOS's QEMU, on one of the few macOS runners. The
+  # planner leaves it out of the full tier, so a pull request's merge gate
+  # waits for no macOS runner; a trunk push (rest or all), the nightly, the
+  # weekly and a pull request whose paths choose the proof run it.
   macos-run:
     needs: [plan, proof]
     if: contains(fromJSON(needs.plan.outputs.suites), 'macos-run')
@@ -1054,7 +1092,7 @@ jobs:
           if-no-files-found: warn
 
       - name: the same typing rows with the xHCI on MSI only, then INTx only (px76, nec-usb-xhci; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         env:
           PAX_REQUIRE_UEFI: "1"
         run: tests/mpx6-firmware.d/typing-irq mpx3-console $PAX_LEGS
@@ -1197,7 +1235,7 @@ jobs:
     runs-on: ubuntu-24.04
     # px122: step by step, floors all and partial 8125 s, pr 1704 s, full 2446 s, 40%
     # headroom (tests/ci-budgets.py, shell-pelt.json).
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'partial' && 190 || 120 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 190 || needs.plan.outputs.tier == 'rest' && 190 || needs.plan.outputs.tier == 'partial' && 190 || 120 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -1247,7 +1285,7 @@ jobs:
           if-no-files-found: warn
 
       - name: the same typing rows with the xHCI on MSI only, then INTx only (px76, nec-usb-xhci; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         env:
           PAX_REQUIRE_UEFI: "1"
         run: tests/mpx6-firmware.d/typing-irq mpx3-shell $PAX_LEGS
@@ -1727,6 +1765,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
           sudo apt-get update -q
@@ -2009,6 +2050,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, curl (apt)
         run: |
@@ -2745,6 +2789,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, dnsmasq (apt)
         run: |
           sudo apt-get update -q
@@ -3086,6 +3133,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
         run: |
           sudo apt-get update -q
@@ -3187,6 +3237,9 @@ jobs:
     timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, strace (apt)
         run: |
@@ -3377,6 +3430,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -3577,10 +3633,15 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-24.04
-    # px83: all ISO legs plus rootdisk, measured stage peaks and 40% margin.
-    timeout-minutes: 210
+    # px83: all ISO legs plus rootdisk, measured stage peaks and 40% margin. On KVM (the plan's kvm=yes) it
+    # takes 18 minutes at most, so 210 holds; on TCG (the Sunday run) its slowest green all run took 174, so
+    # 360, which is also GitHub's limit for a hosted job.
+    timeout-minutes: ${{ needs.plan.outputs.kvm == 'yes' && 210 || 360 }}
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -3692,6 +3753,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -3929,6 +3993,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc, zstd (apt)
         run: |
           sudo apt-get update -q
@@ -4140,9 +4207,12 @@ jobs:
     # px83: replay + rootdisk + one Linux retry, measured with 40% margin.
     # px122: step by step, the USB typing step counted, floors all and partial
     # 14904 s, pr 4232 s, full 6532 s, 40% headroom (tests/ci-budgets.py, shell-pelt.json).
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 350 || needs.plan.outputs.tier == 'partial' && 350 || 210 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 350 || needs.plan.outputs.tier == 'rest' && 350 || needs.plan.outputs.tier == 'partial' && 350 || 210 }}
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -4322,9 +4392,12 @@ jobs:
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 240 || 120 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 240 || needs.plan.outputs.tier == 'rest' && 240 || 120 }}
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -4720,6 +4793,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
@@ -5164,7 +5240,7 @@ jobs:
     # 140 min, pr and full 95. px117: Y9 boots the session once more a leg
     # (a right click under yew); the limits take five minutes more: all
     # and partial 145, pr and full 100, until CI's own phases are read.
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 145 || needs.plan.outputs.tier == 'partial' && 145 || 100 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 145 || needs.plan.outputs.tier == 'rest' && 145 || needs.plan.outputs.tier == 'partial' && 145 || 100 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -5250,7 +5326,7 @@ jobs:
     # px113 (pax#305): sizing floors, every leg 5568 s and native BIOS alone
     # 3951 s (the phase peaks of 94 attempts), 40% headroom; see
     # ci-budgets. all and partial 130 min, pr and full 95.
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 130 || needs.plan.outputs.tier == 'partial' && 130 || 95 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 130 || needs.plan.outputs.tier == 'rest' && 130 || needs.plan.outputs.tier == 'partial' && 130 || 95 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -5606,6 +5682,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, xorriso, clang, lld, binutils, gcc (apt)
         run: |
           sudo apt-get update -q
@@ -5642,7 +5721,7 @@ jobs:
         run: tests/mpx6-nvme $PAX_LEGS
 
       - name: the pr rows with the controller's BAR above 4 GiB, native UEFI (px76, tools/qemu-run --high-bar; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         env:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
@@ -5751,6 +5830,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
         run: |
           sudo apt-get update -q
@@ -5809,6 +5891,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
 
       - name: qemu, ovmf, clang, lld, binutils, gcc, e2fsprogs, mtools (apt)
         run: |
@@ -6077,6 +6162,10 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - if: needs.plan.outputs.kvm == 'yes'
+        run: tools/kvm-open
+
       - name: qemu, firmware, compiler and tracing tools
         run: |
           sudo apt-get update -q
@@ -6152,11 +6241,11 @@ jobs:
     # build alone ranged from 2501 s to 3715 s on the runners. px76's
     # serial-less install (all tier only) is a step of its own, bounded at
     # 15 minutes, inside the all tier's 250.
-    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 250 || needs.plan.outputs.tier == 'pr' && 60 || 175 }}
+    timeout-minutes: ${{ needs.plan.outputs.tier == 'all' && 250 || needs.plan.outputs.tier == 'rest' && 250 || needs.plan.outputs.tier == 'pr' && 60 || 175 }}
     env:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_INSTALL_ROWS: ${{ needs.plan.outputs.tier == 'pr' && 'smoke' || 'full' }}
-      PAX_INSTALL_BIG_ROWS: ${{ needs.plan.outputs.tier == 'all' && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}
+      PAX_INSTALL_BIG_ROWS: ${{ (needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest') && 'all' || needs.plan.outputs.tier == 'full' && '500gb' || 'none' }}
       PAX_LOPE_REPO: ${{ github.workspace }}/.lope
       CARGO_INCREMENTAL: "0"
     steps:
@@ -6188,7 +6277,7 @@ jobs:
       - name: guided installer, independent readback and persistent target sessions
         run: tests/mpx6-install $PAX_LEGS
       - name: the unattended install with no serial port, native UEFI (px76, tools/qemu-halt --no-serial; the all tier)
-        if: needs.plan.outputs.tier == 'all'
+        if: needs.plan.outputs.tier == 'all' || needs.plan.outputs.tier == 'rest'
         timeout-minutes: 15
         run: tests/mpx6-install --only noserial --inputs "$PWD/build/mpx6-install/inputs"
       - name: keep installer phase logs, byte-range proofs and oracle verdicts
@@ -6645,7 +6734,10 @@ jobs:
       PAX_LEGS: ${{ needs.plan.outputs.legs }}
       PAX_REQUIRE_UEFI: "1"
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # At least twice the slowest green of each shape (tests/ci-budgets.d/twice.json): one leg, native BIOS,
+    # 17 minutes at most, so 90; every leg (all, rest, a partial dispatch) or a kernel change's added
+    # release legs, 89 minutes at most, so 180.
+    timeout-minutes: ${{ (needs.plan.outputs.tier == 'full' || needs.plan.outputs.tier == 'pr') && needs.plan.outputs.also_release == '[]' && 90 || 180 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -6663,6 +6755,13 @@ jobs:
 
       - name: the firmware's machine, the plan's legs (all four in the all tier)
         run: tests/mpx6-firmware $PAX_LEGS
+
+      # A kernel change's merge gate runs native BIOS only, and the NMI
+      # row's injection points (F11) are the release build's: the planner
+      # asks for the release legs too (its also_release output).
+      - name: the release legs as well, for a kernel change
+        if: contains(fromJSON(needs.plan.outputs.also_release), 'mpx6-firmware')
+        run: tests/mpx6-firmware --tier release
 
       - name: keep the transcripts, the screens and the monitors' answers
         if: always()

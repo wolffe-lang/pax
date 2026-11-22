@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""tools/ci-covered — what a trunk head already has green, for the trunk push's plan.
+
+    tools/ci-covered [--github-output FILE]      (REPO, SHA in the environment; `gh` on PATH, with a token)
+
+Merges to trunk are fast-forwards, so a trunk push's head is the head its pull request ran CI at. This asks
+GitHub for that commit's check runs named `tier all` and `tier full` (the `tier` job of .github/workflows/ci.yml
+names itself for its tier) and prints one of
+
+    covered=all     a completed, successful `tier all` check run of GitHub Actions at this commit
+    covered=full    no such `tier all`, but a successful `tier full` (every suite on the merge legs)
+    covered=none    neither, or the question could not be answered
+
+and `covered_by=` the check run's address (empty for none), to standard output and, with --github-output, to that
+file. tools/ci-plan reads `covered` for a push (its --covered): all plans noop, full plans rest (every suite on
+the release legs), none plans all. A failed or unreadable answer is none, so a push this script cannot read runs
+every leg, as before. Exit 0; 2 when REPO or SHA is missing.
+"""
+import json
+import os
+import subprocess
+import sys
+
+NAMES = (("tier all", "all"), ("tier full", "full"))
+
+
+def green(repo, sha, name):
+    path = "repos/%s/commits/%s/check-runs?check_name=%s&filter=latest&per_page=100" % (repo, sha, name.replace(" ", "%20"))
+    try:
+        r = subprocess.run(["gh", "api", path], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print("ci-covered: %s: %s" % (name, e), file=sys.stderr)
+        return None
+    if r.returncode != 0:
+        print("ci-covered: %s: gh api exit %d: %s" % (name, r.returncode, r.stderr.strip()[-200:]), file=sys.stderr)
+        return None
+    try:
+        runs = json.loads(r.stdout).get("check_runs") or []
+    except ValueError:
+        print("ci-covered: %s: an answer that is not JSON" % name, file=sys.stderr)
+        return None
+    for c in runs:
+        if (c.get("name") == name and c.get("status") == "completed" and c.get("conclusion") == "success"
+                and (c.get("app") or {}).get("slug") == "github-actions"):
+            return c.get("html_url") or "(no address)"
+    return None
+
+
+def main():
+    out = None
+    args = sys.argv[1:]
+    if args[:1] == ["--github-output"] and len(args) == 2:
+        out = args[1]
+    elif args:
+        print("usage: tools/ci-covered [--github-output FILE]", file=sys.stderr)
+        sys.exit(2)
+    repo, sha = os.environ.get("REPO", ""), os.environ.get("SHA", "")
+    if not repo or not sha:
+        print("ci-covered: REPO and SHA must be set", file=sys.stderr)
+        sys.exit(2)
+    covered, by = "none", ""
+    for name, value in NAMES:
+        url = green(repo, sha, name)
+        if url:
+            covered, by = value, url
+            break
+    print("ci-covered: %s at %s: covered=%s %s" % (repo, sha[:12], covered, by), file=sys.stderr)
+    text = "covered=%s\ncovered_by=%s\n" % (covered, by)
+    sys.stdout.write(text)
+    if out:
+        with open(out, "a") as f:
+            f.write(text)
+
+
+if __name__ == "__main__":
+    main()

@@ -1007,14 +1007,34 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 ## Continuous integration
 
 - A pull request's push runs the suites its change can affect (`tools/ci-plan`, `tools/ci-tiers.map`) on one leg,
-  native BIOS; a change to the kernel's core or to CI itself runs every suite on that leg.
-- The `full-matrix` label runs every suite on the merge leg (`tier full`); a push to trunk, the nightly and a dispatch
-  run every suite on every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run
-  at the head.
-- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users, 90 for users again
+  native BIOS; a change to the kernel's core or to CI itself runs every suite on that leg, which is the merge gate's
+  shape, so that run is `tier full` and adding the label afterwards starts no second run at the same head. A change
+  to the scheduler, the timer, or the interrupt or syscall entry runs every suite on every leg, and a kernel change
+  whose run includes the firmware suite runs that suite on the release legs too (its NMI rows depend on the release
+  build's inlining).
+- The `full-matrix` label runs every suite on the merge leg (`tier full`); the nightly and a dispatch run every suite on
+  every compiler and firmware leg (`tier all`). Merging needs a green `tier full` or `tier all` run at the head.
+- Merges are fast-forwards, so a push to trunk runs only what its head lacks: nothing after a green `tier all`, every
+  suite on the release legs (`tier rest`) after a green `tier full`, every leg otherwise. Trunk pushes share one
+  queue: the running one finishes and only the newest waiting one runs after it. The nightly skips a head whose
+  `tier all` is green already; the Sunday schedule runs every leg whatever the head has.
+- `macos-run` is in no `tier full` run, so the merge gate waits for no macOS runner: a trunk push, the nightly, the
+  Sunday run and a pull request whose paths choose the proof run it.
+- Sixteen suites run under KVM on the hosted runners: mpx5-users, mpx5-users-ahci, mpx5-pelt, mpx5-jobs, mpx5-den,
+  mpx6-staged, mpx4-ready, mpx6-disktools, mpx4-unix, mpx5-lupin, mpx5-slots, mpx5-trace, mpx6-bootlog,
+  mpx4-console-net, mpx6-nvme and mpx4-tcp. Each was more than 10 % faster under KVM in two measured runs, about 18 %
+  of a `tier full` run's runner-minutes together. Their jobs open `/dev/kvm` first (`tools/kvm-open`), and a boot that
+  would fall back to TCG there is refused (`PAX_REQUIRE_KVM`). Every other suite runs on TCG, the suites with timing
+  bounds stated on bare metal (`mpx6-firmware`, `mpx3-conspeed`, `mpx6-latency`) included. The Sunday run and a
+  dispatch with `accel=tcg` run every suite on TCG, whose slower pace is where several timing defects were found. If
+  the sixteen save under 10 % of a `tier full` run, or a KVM job goes red because of the runner rather than PAX, the
+  list shrinks to the two users suites; under 5 %, it empties.
+- Long jobs have budgets: 75 minutes for interrupts, 90 for the heap, 210 each for pelt and users (users 360 on TCG), 90 for users again
   with `/` on AHCI (`mpx5-users-ahci`, a job of its own), and for the installer 110 in `tier full` and 175 in `tier all`
   (its 500 GB and 4 TB installs); the measured stage timings and their headroom are in
   [CI budgets](tests/ci-budgets.d/README.md). The root-disk `chk-soak` has 1200 seconds for its 100,000 rounds.
+- Every tracked path is known to the planner (a rule in `tools/ci-tiers.map`, or a suite that reads it); a pull
+  request that adds a path nothing knows is red in its plan job, where before it ran every leg on every push.
 - A test is seen red before it is trusted: the break is planted in a commit and run of its own, then fixed.
 - One known stall of the Linux reference shell ([#196](https://github.com/wolffe-lang/pax/issues/196),
   [pelt#98](https://github.com/wolffe-lang/pelt/issues/98)) gets one retry of its Linux leg only, with a warning that
@@ -1034,9 +1054,10 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
 | host | build an image | boot one (`qemu-run`, `tests/proof --image`) | gdb (`qemu-gdb`) |
 |---|---|---|---|
 | linux x86-64 (CI's ubuntu, the pool) | yes: binutils, cc, make, curl, xorriso | yes: `qemu-system-x86_64`; OVMF for UEFI; KVM used when `/dev/kvm` is usable | yes: gdb |
-| macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every push | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
+| macOS arm64 | **no**: no x86-64 ELF binutils or xorriso in the base system | **yes**, TCG: Homebrew's `qemu`, which ships its own UEFI firmware; CI's `macos-run` job boots the linux-built ISO on every trunk push and nightly, and on a pull request whose paths choose the proof | no gdb in the base system; `tools/qemu-run --gdb 1234` and lldb's `gdb-remote 1234` by hand |
 
-- **CI**: `ubuntu-24.04` with QEMU 8.2.2, OVMF and xorriso from apt (TCG); the `macos-run` job boots the same ISO,
+- **CI**: `ubuntu-24.04` with QEMU 8.2.2, OVMF and xorriso from apt (TCG, and KVM for sixteen suites: see Continuous
+  integration); the `macos-run` job boots the same ISO,
   checked by digest, with Homebrew's QEMU 11.1.1 (TCG). Every Linux job names `ubuntu-24.04`, never `ubuntu-latest`,
   which moved to Ubuntu 26.04 (glibc 2.43, gcc 15, QEMU 10.2) under the workflow (#474); `tests/ci-runners.py` holds
   each job to that label, and the plan job's runner to Ubuntu 24.04.
