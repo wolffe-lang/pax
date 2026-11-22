@@ -152,7 +152,7 @@ enum { ST_NONE, ST_BOOT, ST_RUNS, ST_IDLE, ST_STOPPED, ST_NEVER, ST_PARKED, ST_O
 #define CUR_IDLE (-1)
 #define CUR_KERNEL (-2)
 #define CUR_NONE (-3)
-struct snap { L active, started, unlocked; int n; int st[MAXC]; L cur[MAXC], user[MAXC], tlb[MAXC]; };
+struct snap { L active, started, unlocked; int n; int st[MAXC]; L cur[MAXC], user[MAXC], tlb[MAXC], resched[MAXC]; };
 static const char *find(const char *s, const char *e, const char *pat) {
     for (; s < e; s++) {
         const char *a = s, *p = pat;
@@ -199,6 +199,7 @@ static int take(struct snap *z) {
                 z->cur[i] = p >= 0 ? p : find(s, t, " current idle") ? CUR_IDLE : find(s, t, " current kernel") ? CUR_KERNEL : CUR_NONE;
                 z->user[i] = after(s, t, " user ");
                 z->tlb[i] = after(s, t, " tlb ");
+                z->resched[i] = after(s, t, " resched ");
                 if (i + 1 > z->n) z->n = (int)i + 1;
             }
         }
@@ -517,6 +518,9 @@ static void t2_spin(void *arg) { (void)arg; G->t2 = (U)gettid(); G->tready = 1; 
 static void row_signal(int samples) {
     struct ln l, c;
     int st = 0, st2 = 0;
+    /* step 5's witness: each processor's RESCHEDs taken across the row (one snapshot before, one after) */
+    static struct snap r0, r1;
+    take(&r0);
     on(SIGUSR1, h_usr1);
     L w = spinner();
     for (int k = 0; k < samples; k++) {
@@ -573,6 +577,13 @@ static void row_signal(int samples) {
     }
     L r = wait4(cp, &st, 0, 0);
     l.n = 0; ls(&l, "SMP-SIGNAL tgkill-status "); lx(&l, r == cp ? (U)st : 0xdead); le(&l);
+    take(&r1);
+    l.n = 0; ls(&l, "SMP-SIGNAL resched");
+    for (int i = 0; i < r1.n; i++) {
+        lc(&l, ' '); ld(&l, (U)i); lc(&l, ':');
+        if (r0.resched[i] >= 0 && r1.resched[i] >= r0.resched[i]) ld(&l, (U)(r1.resched[i] - r0.resched[i])); else lc(&l, '-');
+    }
+    le(&l);
     say("SMP-SIGNAL done");
 }
 
