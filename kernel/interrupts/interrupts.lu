@@ -94,6 +94,7 @@
 //! No Linux source; no other kernel's source.
 
 use console
+use apic
 use gdt
 use idt
 use klock
@@ -107,6 +108,7 @@ use smp
 use sound
 use speaker
 use timer
+use tlb
 use trace
 use triage
 use user
@@ -403,6 +405,15 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
         } else {
             smp.ap_nmi(unsafe { f as u64 })
         }
+        return f
+    }
+    // px166: the shootdown (kernel/tlb's vector 49), answered before the
+    // kernel lock and kernel/smp's `ap_early`: its requester holds the lock
+    // and spins for this answer. `answer` touches this processor's own
+    // mailbox, counter, TLB and CR3 alone; the frame resumes as it came.
+    if unsafe { f[0].vector } == tlb.VECTOR {
+        tlb.answer()
+        apic.eoi()
         return f
     }
     // px161: an application processor's spurious vector, or a vector it
