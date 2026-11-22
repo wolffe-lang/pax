@@ -11,7 +11,7 @@
    and written by wolf (kernel/gdt, kernel/idt).
 
    ENTRY ([abi.interrupt], wolf-lang kw10). Wolf has no interrupt calling
-   convention. Each vector 0-48 has a trampoline made by one macro: a
+   convention. Each vector 0-49 has a trampoline made by one macro: a
    vector whose exception pushes no error code pushes a zero in its
    place, so every frame has one shape; then the vector. The common path
    saves the fifteen general registers (%rax first, %r15 last), passes
@@ -39,7 +39,8 @@
    vol. 3A §6.13 and Table 6-1), 29 #VC and 30 #SX (AMD64 APM vol. 2
    §8.2, Table 8-1). 32-47 are the 8259's sixteen lines, remapped there
    by kernel/timer (no error code); px166: 48 is RESCHED, the interrupt
-   one processor sends another (kernel/smp). No x87/SSE state is saved: the
+   one processor sends another (kernel/smp); 49 is the shootdown, which
+   kernel/interrupts answers before the kernel lock (kernel/tlb). No x87/SSE state is saved: the
    kernel is built with none ([abi.target.none.codegen]); and it keeps
    no red zone, so an interrupt in kernel code overwrites nothing live
    below %rsp.
@@ -176,6 +177,8 @@ pax_isr\v:
         ISR_NOERR 47
         /* px166: RESCHED, from another processor (kernel/smp). */
         ISR_NOERR 48
+        /* px166: the shootdown, from the kernel lock's holder (kernel/tlb). */
+        ISR_NOERR 49
         /* px76: four independently routed PCI MSI vectors. */
         ISR_NOERR 80
         ISR_NOERR 81
@@ -643,12 +646,12 @@ pax_bad_stack:
         ret
         .size pax_bad_stack, . - pax_bad_stack
 
-/* The trampolines' addresses by vector, 0-48, for kernel/idt. */
+/* The trampolines' addresses by vector, 0-49, for kernel/idt. */
         .section .rodata
         .p2align 3
         .globl pax_isr_table
 pax_isr_table:
-        .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48
+        .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49
         .quad pax_isr\v
         .endr
 
