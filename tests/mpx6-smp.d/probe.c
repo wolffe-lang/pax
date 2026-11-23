@@ -153,7 +153,7 @@ enum { ST_NONE, ST_BOOT, ST_RUNS, ST_IDLE, ST_STOPPED, ST_NEVER, ST_PARKED, ST_O
 #define CUR_IDLE (-1)
 #define CUR_KERNEL (-2)
 #define CUR_NONE (-3)
-struct snap { L active, started, unlocked; int n; int st[MAXC]; L cur[MAXC], user[MAXC], tlb[MAXC], resched[MAXC]; };
+struct snap { L active, started; int n; int st[MAXC]; L cur[MAXC], user[MAXC], tlb[MAXC], resched[MAXC]; };
 static const char *find(const char *s, const char *e, const char *pat) {
     for (; s < e; s++) {
         const char *a = s, *p = pat;
@@ -177,12 +177,11 @@ static L after(const char *s, const char *e, const char *key) {
 static int starts(const char *s, const char *e, const char *w) { while (*w) { if (s >= e || *s != *w) return 0; s++; w++; } return 1; }
 static int take(struct snap *z) {
     L n = readfile("/proc/pax-cpus", pbuf, sizeof pbuf);
-    z->n = 0; z->active = z->started = z->unlocked = -1;
+    z->n = 0; z->active = z->started = -1;
     if (n < 0) return 0;
     const char *e = pbuf + n;
     z->active = after(pbuf, e, "\nactive ");
     z->started = after(pbuf, e, "\nstarted ");
-    z->unlocked = after(pbuf, e, "\nunlocked-allocations ");
     for (const char *s = pbuf; s < e;) {
         const char *t = s;
         while (t < e && *t != '\n') t++;
@@ -879,7 +878,6 @@ static void stress(U secs) {
     L pids[10];
     int st;
     take(&z0);
-    l.n = 0; ls(&l, "SMP-LOCK unlocked-allocations-before "); lsd(&l, z0.unlocked); le(&l);
     deadline = mono_ns() + secs * 1000000000ul;
     for (int i = 0; i < 10; i++) {
         pids[i] = fork();
@@ -915,7 +913,6 @@ static void stress(U secs) {
     l.n = 0; ls(&l, "SMP-LOCK user-ticks");
     for (int i = 0; i < z1.n; i++) { lc(&l, ' '); ld(&l, (U)i); lc(&l, ':'); ldelta(&l, i < z0.n ? z0.user[i] : -1, z1.user[i]); }
     le(&l);
-    l.n = 0; ls(&l, "SMP-LOCK unlocked-allocations-after "); lsd(&l, z1.unlocked); le(&l);
     census("stress");
     say("SMP-LOCK done");
 }
