@@ -756,6 +756,18 @@ static void exits(const char *self) {
     }
     waitpid(c, &st, 0);
     say("exit: an execve from a second thread: the new program's status 0x%x\n", st);
+    /* The same with a third thread asleep: the exec ends it with the old leader, and on PAX it leads from the
+       caller from then on (kernel/sched's exec_alone). On one processor no thread the exec ended runs again, so
+       this line reads the same with or without that: a guard on the exec, the end and the reap (T4's frames), never
+       a red here. Its red needs another processor running the third thread: tests/mpx6-smp's SMP-EXIT at 2, 4, 16. */
+    c = fork();
+    if (c == 0) {
+        pthread_create(&t, 0, x_sleep, 0);
+        pthread_create(&t, 0, x_exec, (void *)self);
+        for (;;) ms(1000);
+    }
+    waitpid(c, &st, 0);
+    say("exit: an execve from a second thread while a third sleeps: the new program's status 0x%x\n", st);
 }
 
 /* ---- memory a thread's library asks for ----------------------------------- */
