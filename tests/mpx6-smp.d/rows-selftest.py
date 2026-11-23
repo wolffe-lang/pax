@@ -20,7 +20,7 @@ SYMS = {'pax_ap_halt': (0xffffffff80001000, 0x10), 'pax_ap_park': (0xffffffff800
 
 
 # --- /proc/pax-cpus ------------------------------------------------------------------------------
-def proc(n, active=None, started=None, stage=2, cur=None, user=100, tlb=5, cap=None, kthreads=None):
+def proc(n, active=None, started=None, stage=2, cur=None, user=100, tlb=5, cap=None, kthreads=None, heap=0):
     """n processors. Stage 2: `runs` lines (cap: those past it on stage 1's idle line), `kthreads` 0 unless
     the dict says otherwise for a processor; stage 1: idle lines."""
     active = n if active is None else active
@@ -28,6 +28,8 @@ def proc(n, active=None, started=None, stage=2, cur=None, user=100, tlb=5, cap=N
     head = f'available {n}\nactive {active}\nsource ACPI MADT\nonline-capable 0\ndisabled 0\n'
     idle = 0 if stage == 2 and not cap else (started - 1 if stage == 1 else n - cap)
     body = f'started {started}\nidle {idle}\n'
+    if heap is not None:  # the kernel's word: whether its heap was started (0: the runtime can allocate nothing)
+        body += f'heap-started {heap}\n'
     cur = cur or {}
     for i in range(n):
         c = cur.get(i, 'pid 1' if i == 0 else ('idle' if stage == 1 or (cap and i >= cap) else f'pid {100 + i}'))
@@ -144,7 +146,7 @@ def head(mode='rows'):
 
 
 def rows_text(n, stage=2, **kw):
-    p = proc(n, active=1 if stage == 1 else n, stage=stage, kthreads=kw.get('kthreads'))
+    p = proc(n, active=1 if stage == 1 else n, stage=stage, kthreads=kw.get('kthreads'), heap=kw.get('heap', 0))
     t = head() + block('start', p) + active_line(n, stage)
     t += kw.get('run', run_lines(n, stage))
     t += kw.get('tlb', tlb_lines(stage))
@@ -308,6 +310,20 @@ case('the lock plant in a rows boot: the probe stops at its first entry', head('
      ['--kind', 'rows', '--smp', '4'], set(), ALL6 | {'SMP-KLOCK'})
 case('the lock plant at one processor', head('one') + KLOCK, ['--kind', 'one', '--smp', '1'], set(),
      {'SMP-ONE', 'SMP-KLOCK', 'SMP-REFUSE'})  # the boot dies before the probe's refusals
+# contract §3.7 (c) as amended: the console kernel starts no heap, so the runtime can allocate nothing on any
+# processor, locked or not; every /proc/pax-cpus says `heap-started 0` and an allocation panics by name
+HEAP = 'PANIC heap: alloc before heap.start, asked 0x0000000000000010\n'
+case('the heap not started, said in every /proc/pax-cpus', rows_text(4), ['--kind', 'rows', '--smp', '4'],
+     ALL6 | {'SMP-NOHEAP'}, set())
+case('stress: the heap not started', stress_text(), sa, {'SMP-LOCK', 'SMP-NOHEAP'}, set())
+case('the plant apalloc in a stress boot: an application processor allocates before the lock',
+     stress_text(extra=HEAP, done=False), sa, set(), {'SMP-LOCK', 'SMP-NOHEAP'}, why=r'PANIC heap: alloc before heap\.start')
+case('the plant apalloc in a rows boot: the boot dies at an application processor\'s first entry', head('rows') + HEAP,
+     ['--kind', 'rows', '--smp', '4'], set(), ALL6 | {'SMP-NOHEAP'}, why=r'SMP-NOHEAP .*PANIC heap: alloc before heap\.start')
+case('a kernel whose heap was started', rows_text(4, heap=1), ['--kind', 'rows', '--smp', '4'], ALL6, {'SMP-NOHEAP'},
+     why=r'SMP-NOHEAP .*heap-started 1')
+case('a /proc/pax-cpus that does not say whether the heap was started', rows_text(4, heap=None),
+     ['--kind', 'rows', '--smp', '4'], ALL6, {'SMP-NOHEAP'})
 case('a processor out of the stress', stress_text(gains=['+1900', '+1900', '+0', '+1900']), sa, set(), {'SMP-LOCK'})
 case('a program killed by a fault', stress_text(extra='user: smpprobe pid 17 killed: page fault vector 14 error 0x4 rip 0x401000 after 3 runs\n'),
      sa, set(), {'SMP-LOCK'})
