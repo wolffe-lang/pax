@@ -122,7 +122,12 @@ def signal_lines(stage=2, usr1=None, kill=None, tgk=None, tid='yes', kill_status
     # the sleeper: a SIGUSR1 to a process whose main thread blocks it, its second thread asleep (`-` the sleeper's cpu)
     if sleeper != 'none':
         out += ''.join(f'SMP-SIGNAL sleeper {k} latency-us {v} s-cpu - p-cpu 0\n' for k, v in enumerate(sleeper or [40] * 30))
-        out += ''.join(f'SMP-SIGNAL sleeper-ten round {r} taken {t}\n' for r, t in enumerate(ten or [10] * 20))
+        for r, t in enumerate(ten or [10] * 20):
+            # a round: taken, the worst send-to-handler time, and the kernel's counts across it (set, merged, took,
+            # sleeps entered with one pending); a round of ten taken is ten set, none merged
+            n, worst, merged, slept = (t, 40, 0, 0) if isinstance(t, int) else t
+            out += (f'SMP-SIGNAL sleeper-ten round {r} taken {n} worst-us {worst} set {10 - merged} merged {merged} '
+                    f'took {n} slept-pending {slept}\n')
         out += f'SMP-SIGNAL sleeper-status {sleeper_status}\n'
     out += f'SMP-SIGNAL resched {resched}\n' if resched is not None else ''
     return out + 'SMP-SIGNAL done\n'
@@ -214,9 +219,16 @@ case('the sleeper: one of 30 at 3 ms, within the bound', rows_text(4, signal=sig
      ['--kind', 'rows', '--smp', '4'], ALL6, set())
 case('the sleeper: four of 30 over 2 ms: red', rows_text(4, signal=signal_lines(sleeper=[40] * 26 + [3000] * 4)),
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'sleeper: 26 of 30 within 2 ms')
-# ten 5 ms apart, twenty rounds: SIGUSR1 is not queued, so ten of ten is usual, not guaranteed: printed, never gated
-case('the sleeper took 8 of ten in a round: printed, not gated', rows_text(4, signal=signal_lines(ten=[10] * 19 + [8])),
-     ['--kind', 'rows', '--smp', '4'], ALL6, set())
+# ten 5 ms apart, twenty rounds: each SIGUSR1 handled before the next is sent (a pending signal ends the sleeper's
+# interruptible sleep at once, so its delivery is bounded far below the 5 ms between sends); a round that loses one to
+# a merge, its predecessor handled late, is red under the timed bounds and printed otherwise
+LOST = [10] * 19 + [(9, 9800, 1, 1)]
+case('a round loses one: merged into a pending one after a sleep entered with it pending: red', rows_text(4, signal=signal_lines(ten=LOST)),
+     ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'round 19: taken 9 of ten, the worst 9800 us')
+case('a round loses one under TCG: printed, not gated', rows_text(4, signal=signal_lines(ten=LOST)),
+     ['--kind', 'rows', '--smp', '4'], ALL6, set(), meta=TCG)
+case('a round of ten, one late: red', rows_text(4, signal=signal_lines(ten=[10] * 19 + [(10, 6000, 0, 1)])),
+     ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'round 19: taken 10 of ten, the worst 6000 us')
 case('the sleeper never woken', rows_text(4, signal=signal_lines(sleeper=[40] * 29 + ['-'])), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'never ran')
 case('no sleeper lines', rows_text(4, signal=signal_lines(sleeper='none')), ['--kind', 'rows', '--smp', '4'],
