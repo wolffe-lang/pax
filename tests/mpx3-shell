@@ -592,8 +592,12 @@ for leg in $legs; do
             grep -qx "PAX: init /bin/$ip ended with status $lst; nothing left to run" "$norm" \
                 || why+=" no 'PAX: init /bin/$ip ended with status $lst' ($(grep -m1 '^PAX: init ' "$norm"));"
             [ "$hrc" = 0 ] || why+=" not halted ($(grep -m1 'NOT HALTED\|qemu-halt:' "$log.verdict"));"
-            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' 'halt' >/dev/null \
-                || why+=" the log does not end with the init line and halt;"
+            # px166: with N > 1 processors running threads (PAX_SMP), the end stops the other N-1 before its halt and
+            # says so between the init line and `halt` (tests/mpx6-smp's SMP-END reads the same line); nothing else
+            # may come between, and at one processor nothing does
+            stop=(); case ${PAX_SMP:-1} in 1) ;; *) stop=("cpus: $((PAX_SMP - 1)) application processors stopped for the end") ;; esac
+            "$PAX_ROOT/tools/expect-serial" --tail --regex "$log" 'PAX: init .*' ${stop[@]+"${stop[@]}"} 'halt' >/dev/null \
+                || why+=" the log does not end with the init line${stop[@]+, the stop line} and halt;"
             [ -z "$why" ] && say "PASS S5 $id: init ended, status $lst; $(tail -n 1 "$log.verdict")" || bad "S5 $id:$why"
 
             # S6: what the brief's session says, on Linux (S2 holds PAX to it).
