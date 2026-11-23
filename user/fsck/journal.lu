@@ -46,6 +46,40 @@ fn jphysical(v: Volume, raw: List[byte], logical: int) -> int ! {io, unsupported
     if root < v.first || root >= v.blocks { return unsupported }
     root
 }
+/// The journal's extent tree (ifork.rst) at `b[off..]` into `map` (logical block to physical), checked as
+/// pass 1 checks any tree (magic, max, entries, a depth one less at each child, blocks inside the volume);
+/// a damaged one is refused by name before any replay. Depth falls at each level, so the walk ends.
+fn jextents(v: Volume, b: List[byte], off: int, max: int, depth: int, mut map: List[int]) -> () ! {io, unsupported} {
+    let magic = u(b, off, 2), entries = u(b, off + 2, 2), m = u(b, off + 4, 2), d = u(b, off + 6, 2)
+    if magic != 62218 || m != max || entries > m || d > 5 || (depth >= 0 && d != depth) {
+        print("unsupported: journal inode: a damaged node in its extent tree; no repair committed")
+        return unsupported
+    }
+    for e in 0..entries {
+        let o = off + 12 + e * 12
+        let lb = u(b, o, 4)
+        if d == 0 {
+            var len = u(b, o + 4, 2)
+            if len > 32768 { len -= 32768 }
+            let start = (u(b, o + 6, 2) << 32) | u(b, o + 8, 4)
+            if start < v.first || start + len > v.blocks || lb + len > map.len {
+                print("unsupported: journal inode: extent {lb}+{len} at block {start} outside the volume or the journal, in its extent tree; no repair committed")
+                return unsupported
+            }
+            for k in 0..len { map[lb + k] = start + k }
+        } else {
+            let child = (u(b, o + 8, 2) << 32) | u(b, o + 4, 4)
+            if child < v.first || child >= v.blocks {
+                print("unsupported: journal inode: tree block {child} outside the volume, in its extent tree; no repair committed")
+                return unsupported
+            }
+            region jtree {
+                let bytes = diskio.exact(v.fd, child * v.bs, v.bs)?
+                jextents(v, bytes, 0, (v.bs - 12) / 12, d - 1, mut map)?
+            }
+        }
+    }
+}
 fn jnext(pos: int, first: int, count: int) -> int { if pos + 1 >= count then first else pos + 1 }
 fn replay(v: Volume) -> bool ! {io, unsupported} {
     let recovery = u(v.sb, 96, 4) & 4 != 0
@@ -65,7 +99,16 @@ fn replay(v: Volume) -> bool ! {io, unsupported} {
     // 4 KiB), which a volume past 128 GiB gets; a larger one is named.
     if size > 262144 { print("unsupported: journal of {size} blocks (at most 262144)"); return unsupported }
     var map = List[int]()
-    for i in 0..size { (mut map).push(jphysical(v, raw, i)?) }
+    if u(raw, 32, 4) & 0x80000 != 0 {
+        // An extent-mapped journal (EXTENTS_FL: mke2fs -t ext4's, paxext2 --extents'): its tree fills the map.
+        for _ in 0..size { (mut map).push(0) }
+        jextents(v, raw, 40, 4, 0 - 1, mut map)?
+        for x in map {
+            if x == 0 { print("unsupported: journal inode {ino}: a block its extent tree does not map; no repair committed"); return unsupported }
+        }
+    } else {
+        for i in 0..size { (mut map).push(jphysical(v, raw, i)?) }
+    }
     var sb = diskio.exact(v.fd, map[0] * v.bs, v.bs)?
     let kind = be(sb, 4, 4)
     if be(sb, 0, 4) != 0xc03b3998 || (kind != 3 && kind != 4) || be(sb, 12, 4) != v.bs {
