@@ -69,11 +69,14 @@ for tier in $tiers; do
         if bounded corruption-check 120 "$PAX_ROOT/tools/check-usb" "$work/broken.img" > "$work/$tier-$fault.red.log" 2>&1; then
             die "FAIL U4: $fault corruption accepted"
         fi
+        # Quiet: check-usb's own `FAIL USB:` line is the refusal this row wants, not a failure, and printed
+        # it read as one in every run's log.
         case $fault in
-            efi) grep -F 'required boot file missing: /EFI/BOOT/BOOTX64.EFI' "$work/$tier-$fault.red.log" ;;
-            mbr) grep -F 'protective MBR must cover the disk' "$work/$tier-$fault.red.log" ;;
+            efi) words='required boot file missing: /EFI/BOOT/BOOTX64.EFI' ;;
+            mbr) words='protective MBR must cover the disk' ;;
         esac
-        say "PASS U4: $fault rejected by name"
+        grep -qF "$words" "$work/$tier-$fault.red.log" || die "FAIL U4: $fault refused, but not with '$words'"
+        say "PASS U4: $fault rejected by name ($words)"
     done
     rm "$work/broken.img" "$work/repeat.img"
     # Hold the exact same five sessions to their original Linux transcripts,
