@@ -31,7 +31,7 @@ struct Claim { ino: int, block: int, pointer: int }
 struct Volume {
     fd: int, mode: int, bs: int, blocks: int, first: int, bpg: int,
     ipg: int, isize: int, ninodes: int, firstino: int, compat: int,
-    filetype: bool, sb: List[byte], gd: List[byte], groups: List[Group],
+    filetype: bool, extents: bool, sb: List[byte], gd: List[byte], groups: List[Group],
     gdtblocks: int, reserve: int, tables: int,
     used: List[byte], state: List[byte], refs: List[byte],
     dirs: List[Dir], dups: List[Claim], patches: List[Patch], sectors: int, leaves: int,
@@ -163,7 +163,8 @@ fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsuppo
     let compat = if rev == 0 then 0 else u(sb, 92, 4)
     let incompat = if rev == 0 then 0 else u(sb, 96, 4)
     let ro = if rev == 0 then 0 else u(sb, 100, 4)
-    if incompat & 0xfffffff9 != 0 || ro & 0xfffffffc != 0 || compat & 0xffffffc3 != 0 {
+    // incompat: filetype (2), needs_recovery (4) and, since X3, extent (0x40).
+    if incompat & 0xffffffb9 != 0 || ro & 0xfffffffc != 0 || compat & 0xffffffc3 != 0 {
         print("unsupported: filesystem features compat={compat}, incompat={incompat}, ro_compat={ro}")
         return unsupported
     }
@@ -210,7 +211,7 @@ fn open_volume(fd: int, mode: int, epoch: int) -> Volume ! {io, invalid, unsuppo
     }
     Volume { fd: fd, mode: mode, bs: bs, blocks: blocks, first: first, bpg: bpg,
         ipg: ipg, isize: isize, ninodes: ninodes, firstino: firstino, compat: compat,
-        filetype: incompat & 2 != 0, sb: sb, gd: gd, groups: groups,
+        filetype: incompat & 2 != 0, extents: incompat & 64 != 0, sb: sb, gd: gd, groups: groups,
         gdtblocks: gdtblocks, reserve: reserve, tables: tables,
         used: List[byte](), state: List[byte](), refs: List[byte](),
         dirs: List[Dir](), dups: List[Claim](), patches: List[Patch](), sectors: 0, leaves: 0,
@@ -284,6 +285,60 @@ fn walk_blocks(mut v: Volume, ino: int, b: int, depth: int, at: int, dir: bool) 
         }
     }
 }
+/// One node of inode `ino`'s extent tree at `b[off..]` (ifork.rst): its header (magic 0xF30A, entries,
+/// max, depth), then index or leaf entries. `max` is what the node holds (4 in i_block, (bs - 12) / 12 in a
+/// block); `depth` the depth it must have (-1 at the root: its own); logical blocks lie in [lo, hi). Tree
+/// blocks are claimed as metadata, data blocks as data; both count in i_blocks; a directory's blocks are
+/// collected in logical order. Each damage is refused by name ("… in its extent tree"): a repair would change
+/// the tree, which this checker never writes. False after a refusal (the inode's walk stops there).
+fn ext_node(mut v: Volume, ino: int, b: List[byte], off: int, max: int, depth: int, lo: int, hi: int, dir: bool) -> bool ! {io} {
+    let magic = u(b, off, 2), entries = u(b, off + 2, 2), m = u(b, off + 4, 2), d = u(b, off + 6, 2)
+    if magic != 62218 { refuse(mut v, "inode {ino}: bad magic {magic} in its extent tree"); return false }
+    if m != max { refuse(mut v, "inode {ino}: a node's max {m}, not {max}, in its extent tree"); return false }
+    if entries > m { refuse(mut v, "inode {ino}: {entries} entries over a node's max {m} in its extent tree"); return false }
+    if d > 5 || (depth >= 0 && d != depth) { refuse(mut v, "inode {ino}: a node of depth {d} where depth {depth} belongs, in its extent tree"); return false }
+    var floor = lo
+    for e in 0..entries {
+        let o = off + 12 + e * 12
+        let lb = u(b, o, 4)
+        if lb < floor { refuse(mut v, "inode {ino}: logical block {lb} out of order or overlapping in its extent tree"); return false }
+        if d == 0 {
+            var len = u(b, o + 4, 2)
+            if len > 32768 { len -= 32768 } // uninitialized: claimed like any other
+            let start = (u(b, o + 6, 2) << 32) | u(b, o + 8, 4)
+            if len == 0 { refuse(mut v, "inode {ino}: an extent of no blocks at logical {lb} in its extent tree"); return false }
+            if lb + len > hi { refuse(mut v, "inode {ino}: extent {lb}+{len} past its index's range in its extent tree"); return false }
+            if start < v.first || start + len > v.blocks { refuse(mut v, "inode {ino}: block {start} outside volume in its extent tree"); return false }
+            for k in 0..len {
+                let blk = start + k
+                if is_meta(v, blk) { refuse(mut v, "inode {ino}: block {blk} overlaps metadata in its extent tree"); return false }
+                let previous = is_used(v, blk)
+                take_block(mut v, blk)
+                v.sectors += v.bs / 512
+                v.leaves += 1
+                if previous { refuse(mut v, "inode {ino}: multiply-claimed block {blk} in its extent tree"); return false }
+                if dir { (mut v.dirs[v.dirs.len - 1].blocks).push(blk) }
+            }
+            floor = lb + len
+        } else {
+            let next = if e + 1 < entries then u(b, o + 12, 4) else hi
+            let child = (u(b, o + 8, 2) << 32) | u(b, o + 4, 4)
+            if child < v.first || child >= v.blocks { refuse(mut v, "inode {ino}: tree block {child} outside volume in its extent tree"); return false }
+            if is_meta(v, child) { refuse(mut v, "inode {ino}: tree block {child} overlaps metadata in its extent tree"); return false }
+            if is_used(v, child) { refuse(mut v, "inode {ino}: shared or cyclic tree block {child} in its extent tree"); return false }
+            take_block(mut v, child)
+            v.sectors += v.bs / 512
+            var whole = true
+            region tree {
+                let bytes = read_at(v, child * v.bs, v.bs)?
+                whole = ext_node(mut v, ino, bytes, 0, (v.bs - 12) / 12, d - 1, lb, next, dir)?
+            }
+            if !whole { return false }
+            floor = lb + 1
+        }
+    }
+    true
+}
 fn check_inode(mut v: Volume, ino: int, raw: List[byte], at: int) -> () ! {io} {
     let kind = u(raw, at, 2) & 61440
     // Called inside pass 1's per-group region: the record and its block list
@@ -298,7 +353,10 @@ fn check_inode(mut v: Volume, ino: int, raw: List[byte], at: int) -> () ! {io} {
     }
     if u(raw, at + 112, 4) != 0 { refuse(mut v, "inode {ino}: fragment address"); return }
     if u(raw, at + 104, 4) != 0 { refuse(mut v, "inode {ino}: external attribute block verification"); return }
-    if u(raw, at + 32, 4) & 0x10080000 != 0 { refuse(mut v, "inode {ino}: inline data or extent map"); return }
+    let flags = u(raw, at + 32, 4)
+    if flags & 0x10000000 != 0 { refuse(mut v, "inode {ino}: inline data"); return }
+    let extent = flags & 0x80000 != 0
+    if extent && !v.extents { refuse(mut v, "inode {ino}: EXTENTS_FL on a volume without the extent feature, in its extent tree"); return }
     if kind == 16384 && u(raw, at + 32, 4) & 4096 != 0 { refuse(mut v, "inode {ino}: indexed directory validation"); return }
     let size = u(raw, at + 4, 4)
     if kind == 40960 && size <= 60 && u(raw, at + 28, 4) == 0 { return }
@@ -307,8 +365,12 @@ fn check_inode(mut v: Volume, ino: int, raw: List[byte], at: int) -> () ! {io} {
     v.sectors = 0
     v.leaves = 0
     let base = inode_at(v, ino)
-    for j in 0..15 {
-        walk_blocks(mut v, ino, u(raw, at + 40 + j * 4, 4), if j < 12 then 0 else j - 11, base + 40 + j * 4, dir)?
+    if extent {
+        let _whole = ext_node(mut v, ino, raw, at + 40, 4, 0 - 1, 0, 4294967296, dir)?
+    } else {
+        for j in 0..15 {
+            walk_blocks(mut v, ino, u(raw, at + 40 + j * 4, 4), if j < 12 then 0 else j - 11, base + 40 + j * 4, dir)?
+        }
     }
     if u(raw, at + 28, 4) != v.sectors {
         let sectors = v.sectors
