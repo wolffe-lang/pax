@@ -29,7 +29,7 @@
 #       one fetch.
 #   R9  every source fetch of the harness goes through tools/fetch-retry:
 #       no `git … fetch` outside it in tools/ or the census's stage.sh,
-#       and each of the 16 sites calls it.
+#       and each of the 19 sites calls it.
 #   U1  --url, a download: the release host's 403 on attempt 1 (pax#517's
 #       first attempt's own words), then the archive: exit 0, attempt 2 of
 #       3, one wait of 10 s, the file in place with the pinned sha256.
@@ -51,6 +51,9 @@
 #       --url`: no curl writing a file in tools/ or the census's stage.sh
 #       but tools/fetch-busybox's (its own envelope inside the USB test),
 #       and each of the 28 sites calls it.
+#   R11 tools/fetch-retry's header counts what this selftest holds: the
+#       source fetches R9 lists and the downloads U9 lists, so a site
+#       added to either list changes the header with it.
 # Exit 0 when every row held; each failing row is named.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -260,5 +263,11 @@ else
     [ -z "$dmissing" ] || echo "  sites not calling tools/fetch-retry --url:$dmissing"
     bad "U9: the harness's downloads are not all the helper's"
 fi
+# R11: the header's counts, read from the helper, against R9's and U9's lists.
+hdr=$(grep -oE 'checks all [0-9]+' "$helper" | awk '{print $3}' | tr '\n' ' ' | sed 's/ $//')
+want="$(echo $sites | wc -w | tr -d ' ') $(echo $dsites | wc -w | tr -d ' ')"
+if [ "$hdr" = "$want" ]; then
+    ok "R11: tools/fetch-retry's header counts ${want% *} source fetches and ${want#* } downloads, as this selftest lists them"
+else bad "R11: tools/fetch-retry's header says '$hdr', the lists hold '$want' (source fetches, downloads)"; fi
 [ "$fail" = 0 ] && echo "PASS fetch-retry-selftest"
 exit $fail
