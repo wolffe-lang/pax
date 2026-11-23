@@ -132,7 +132,10 @@ mem_of() { case $1 in ctl*) echo 512M ;; *) echo 256M ;; esac; }
 REFUSED='~refused: socket SOCK_RAW ESOCKTNOSUPPORT, socket SOCK_SEQPACKET ESOCKTNOSUPPORT, socket SOCK_DGRAM ESOCKTNOSUPPORT, setsockopt SO_REUSEADDR ENOPROTOOPT, bind abstract EINVAL, bind autobind EINVAL'
 REFUSALS='syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 41: refused: an AF_UNIX socket of a type PAX has on a path neither (SOCK_STREAM only), -94|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 49: refused: an abstract name or autobind (PAX names Unix sockets by path only), -22|syscall 54: refused: an option set on a Unix socket (PAX has none to set), -92|syscall 9: refused: out of frames, -12|syscall 9: refused: out of frames, -12' # px159: the last two, the mmaps section L's frames ran out on
 SEQ_LINE='~seqpacket: a message of 8000 bytes: 8000' # px159: taken whole, as Linux takes it (-EMSGSIZE when a socket's buffer was one frame)
-PAX_LINES='~  FDSize:	1024|~  VmRSS:	*|~  Cpus_allowed_list:	0|~  * lines|~  "cpu"|~  "0"|~rlimit: RLIMIT_NOFILE 1024 1024'
+# px166: the processors that run threads, which `Cpus_allowed_list` and the online file name: one, or as many as
+# PAX_SMP boots (tools/qemu-run, which refuses anything but a count): `0`, or `0-(N-1)`
+cpuset=0; case ${PAX_SMP:-1} in 1) ;; *) cpuset=0-$((PAX_SMP - 1)) ;; esac
+PAX_LINES="~  FDSize:	1024|~  VmRSS:	*|~  Cpus_allowed_list:	$cpuset|~  * lines|~  \"cpu\"|~  \"$cpuset\"|~rlimit: RLIMIT_NOFILE 1024 1024"
 STACK_REFUSAL="syscall 56: refused: no frame for a thread's kernel stack, -11|syscall 9: refused: out of frames, -12|syscall 9: refused: out of frames, -12"
 NORESERVE='~noreserve: VmRSS * kB before, 0 kB more after the mmap|~noreserve: 12 kB more after three pages and a read|~noreserve: -12 kB after MADV_FREE than before it'
 # px159: a socket's buffer takes its frames as bytes are written to it: an idle
