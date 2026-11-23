@@ -602,6 +602,31 @@ pub fn leave_ended(f: u64) -> u64 {
 /// rule (`departure`), until a processor next moves off a DEAD slot.
 var departing: u64 = 0
 
+/// px166: the signal counts /proc/pax-cpus prints (`signals …`), for
+/// tests/mpx6-smp's sleeper: a raise that set its signal's pending bit
+/// (`sig_set`), one that found the bit set already and so merged into the
+/// signal pending (`sig_merged`), a signal taken (`sig_taken`), and a
+/// process thread that went to sleep (`sleep_current`) with a signal it
+/// would take pending (`sleep_pending`). Each written under the kernel lock.
+var sig_set: u64 = 0
+var sig_merged: u64 = 0
+var sig_taken: u64 = 0
+var sleep_pending: u64 = 0
+
+/// px166: the four signal counts: (set, merged, taken, sleeps with one pending).
+pub fn signal_counts() -> (u64, u64, u64, u64) {
+    // # Safety: the module's own `var`s, written under the kernel lock; a report.
+    unsafe { (sig_set, sig_merged, sig_taken, sleep_pending) }
+}
+
+/// px166: count a raise of `sig` into the pending word `w` (`signal_counts`).
+fn count_raise(w: u64, sig: u64) {
+    // # Safety: as `signal_counts`; the caller holds the kernel lock.
+    unsafe {
+        if w & bit(sig) != 0 { sig_merged += 1 } else { sig_set += 1 }
+    }
+}
+
 /// px166: the departure rule. Slot `s`, DEAD, is still another processor's
 /// to run on (its W_CPU), or its space (a process's, `owns`) is still in
 /// another processor's CR3 (a thread of it running there: kernel/tlb's
@@ -1607,6 +1632,10 @@ pub fn set_self_fs(v: u64) {
 /// returned is the next thread's, for the handler to resume. IF clear.
 pub fn sleep_current(f: u64, wake: u64) -> u64 {
     let c = cur()
+    if signal_waits() {
+        // # Safety: as `signal_counts`; a system call, under the kernel lock.
+        unsafe { sleep_pending += 1 } // px166: the sleeper's instrument
+    }
     put_field(c, offset_of(Thread, frame), f)
     set_wake(c, wake, true)
     put_field(c, offset_of(Thread, state), SLEEPING)
@@ -3964,6 +3993,7 @@ pub fn raise_thread(t: u64, sig: u64, info: u64) {
     if inert(l, sig) && field(t, offset_of(Thread, sigmask)) & bit(sig) == 0 {
         return
     }
+    count_raise(field(t, offset_of(Thread, pend)), sig) // px166
     put_field(t, offset_of(Thread, pend), field(t, offset_of(Thread, pend)) | bit(sig))
     put_info(t, 0, sig, info)
     poke(l)
@@ -3982,6 +4012,7 @@ pub fn raise_group(l: u64, sig: u64, info: u64) {
     if inert(l, sig) && taker(l, sig) != SLOTS {
         return
     }
+    count_raise(field(l, offset_of(Thread, gpend)), sig) // px166
     put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) | bit(sig))
     put_info(l, 1, sig, info)
     poke(l)
@@ -4693,6 +4724,8 @@ pub fn take_signal() -> (u64, u64) {
     if sig == 0 {
         return (0, 0)
     }
+    // # Safety: as `signal_counts`; a system call or interrupt, under the kernel lock.
+    unsafe { sig_taken += 1 } // px166
     if g == 1 {
         put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) & !bit(sig))
         return (sig, info_of(l, 1, sig))
