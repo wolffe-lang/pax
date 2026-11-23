@@ -222,8 +222,13 @@ def cpu(v):
     return v if isinstance(v, int) and v >= 0 else None
 
 
-def bad_lines():
-    return [m[0] for m in BAD.finditer(text)]
+def bad_lines(ending=False):
+    # ending: a boot that runs the end (the end kinds, testwords). There a program killed by SIGHUP between the probe's
+    # `SMP-END asking reboot(2)` and `PAX: the end:` is the end's own: pid 1, the controlling process, ends first and
+    # its terminal's hangup sends its foreground group SIGHUP, taken before their SIGTERM (a lower number first)
+    lo, hi = (text.find('SMP-END asking reboot(2)'), text.find('PAX: the end:')) if ending else (-1, -1)
+    return [m[0] for m in BAD.finditer(text)
+            if not (0 <= lo < m.start() < hi and re.match(r'user: \S+ pid \d+ killed: SIGHUP\b', m[0]))]
 
 
 def mask_hex(n):
@@ -626,7 +631,7 @@ elif a.kind.startswith('end-'):
             why.append(f'application processors not halted with interrupts off in the kernel: {wrong or len(last)}')
     elif a.qemu_status != 0:
         why.append(f'QEMU ended with status {a.qemu_status} (0: the machine {"powered off" if how == "poweroff" else "reset"})')
-    bad = bad_lines()
+    bad = bad_lines(ending=True)
     if bad:
         why.append(f'the kernel said: {bad[:3]}')
     if why:
@@ -677,7 +682,7 @@ elif a.kind == 'testwords':
     test = sorted(n for n in symbols() if n.startswith(('_Wtestwords.fire$', '_Wtestwords.test_panic$')))
     if test:
         why.append(f'the shipped kernel holds test symbols: {test}')
-    bad = bad_lines()
+    bad = bad_lines(ending=True)
     if bad:
         why.append(f'the kernel said: {bad[:3]}')
     if why:
