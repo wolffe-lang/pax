@@ -590,10 +590,11 @@ static void row_signal(int samples) {
     }
     L r = wait4(cp, &st, 0, 0);
     l.n = 0; ls(&l, "SMP-SIGNAL tgkill-status "); lx(&l, r == cp ? (U)st : 0xdead); le(&l);
-    /* the sleeper: a SIGUSR1 to the process, which only its sleeping second thread may take. The main thread spins
-       while it waits (no yield), so its own processor does not take the sleeper: the kernel must wake it where it
-       can run. Then ten sent 5 ms apart with the main thread asleep between them, as the takers probe sends them:
-       how many the sleeper took (SIGUSR1 is not queued, so one still pending when the next is sent is taken once) */
+    /* the sleeper: a SIGUSR1 to the process, which only its sleeping second thread may take, thirty times. The main
+       thread spins while it waits (no yield), so its own processor does not take the sleeper: the kernel must wake
+       it where it can run. Then twenty rounds of ten sent 5 ms apart with the main thread asleep between them, as
+       the takers probe sends them: how many the sleeper took in each (SIGUSR1 is not queued, so one still pending
+       when the next is sent is taken once) */
     G->tready = 0;
     L sp = fork();
     if (!sp) {
@@ -604,7 +605,7 @@ static void row_signal(int samples) {
         spawn(&t, t2_sleep, 0);
         await(&G->tready, 2000);
         nap(20000000);
-        for (int k = 0; k < samples; k++) {
+        for (int k = 0; k < 30; k++) {
             G->hit = 0;
             c.n = 0; sig_cpus(&c, "s", (L)G->t2);
             U t0 = rdtsc(), end = t0 + cycles_of_ms(1000);
@@ -615,10 +616,12 @@ static void row_signal(int samples) {
             c.b[c.n] = 0; ls(&l, c.b); le(&l);
             nap(20000000);
         }
-        G->count = 0;
-        for (int k = 0; k < 10; k++) { sc(NR_KILL, getpid(), SIGUSR1, 0); nap(5000000); }
-        nap(50000000);
-        l.n = 0; ls(&l, "SMP-SIGNAL sleeper-ten taken "); ld(&l, G->count); le(&l);
+        for (int round = 0; round < 20; round++) {
+            G->count = 0;
+            for (int k = 0; k < 10; k++) { sc(NR_KILL, getpid(), SIGUSR1, 0); nap(5000000); }
+            nap(50000000);
+            l.n = 0; ls(&l, "SMP-SIGNAL sleeper-ten round "); ld(&l, (U)round); ls(&l, " taken "); ld(&l, G->count); le(&l);
+        }
         exit_group(0);
     }
     r = wait4(sp, &st, 0, 0);
