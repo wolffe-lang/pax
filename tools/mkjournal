@@ -15,8 +15,9 @@
 # IMAGE holds an ext3 volume at --offset (default 0: the image is the
 # volume; a GPT disk's partition 2 from tools/mkgpt --print otherwise).
 # The journal inode's blocks are read from the volume itself (inode 8's
-# i_block and its indirect blocks: inodes.rst, blockmap.rst), not from a
-# tool. SPEC is a file of lines (`#` comments):
+# i_block and its indirect blocks: inodes.rst, blockmap.rst; or, on an
+# ext4 volume whose journal inode has EXTENTS_FL, its extent tree:
+# ifork.rst), not from a tool. SPEC is a file of lines (`#` comments):
 #
 #   start SEQ POS          the log begins at journal block POS with
 #                          transaction SEQ (s_start, s_sequence)
@@ -108,6 +109,8 @@ class Vol:
         ii = self.inode(ino)
         size = struct.unpack_from("<I", ii, 4)[0] | (struct.unpack_from("<I", ii, 0x6C)[0] << 32)
         n = (size + self.bs - 1) // self.bs
+        if struct.unpack_from("<I", ii, 0x20)[0] & 0x80000:
+            return self.extent_blocks(ino, ii[0x28:0x28 + 60], n)
         ptrs = list(struct.unpack_from("<15I", ii, 0x28))
         p = self.bs // 4
         out = []
@@ -130,6 +133,40 @@ class Vol:
             if len(out) < n and ptrs[k]:
                 walk(ptrs[k], lvl)
         if len(out) != n or 0 in out:
+            die("journal inode %d: %d of %d blocks mapped" % (ino, len([x for x in out if x]), n))
+        return out
+
+    def extent_blocks(self, ino, root, n):
+        # An extent-mapped inode (EXTENTS_FL, ifork.rst): a 12-byte header
+        # (magic 0xF30A, entries, max, depth), then 12-byte entries: an index
+        # (ei_block, 48-bit leaf) above depth 0, a leaf (ee_block, ee_len,
+        # 48-bit start) at it. Logical block k is its extent's start plus
+        # k's offset in it; every block of the journal must be mapped.
+        out = [0] * n
+        seen = set()
+
+        def node(raw, want):
+            magic, entries, _mx, depth = struct.unpack_from("<HHHH", raw, 0)
+            if magic != 0xF30A or depth > 5 or (want is not None and depth != want):
+                die("journal inode %d: bad extent header" % ino)
+            for e in range(entries):
+                at = 12 + 12 * e
+                if depth == 0:
+                    lblk, length, hi, lo = struct.unpack_from("<IHHI", raw, at)
+                    if length > 32768:
+                        length -= 32768
+                    for k in range(length):
+                        if lblk + k < n:
+                            out[lblk + k] = ((hi << 32) | lo) + k
+                else:
+                    _lblk, lo, hi = struct.unpack_from("<IIH", raw, at)
+                    child = (hi << 32) | lo
+                    if child in seen:
+                        die("journal inode %d: extent block %d named twice" % (ino, child))
+                    seen.add(child)
+                    node(self.block(child), depth - 1)
+        node(root, None)
+        if 0 in out:
             die("journal inode %d: %d of %d blocks mapped" % (ino, len([x for x in out if x]), n))
         return out
 
