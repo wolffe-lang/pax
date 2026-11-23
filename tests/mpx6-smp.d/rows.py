@@ -50,8 +50,10 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            a SIGUSR1 to a process whose main thread blocks it and spins, taken by its
                            sleeping second thread, thirty times: under KVM every one within 5 ms and 27 of
                            30 within 2 ms, each latency and the worst printed; and twenty rounds of ten sent
-                           5 ms apart with the main thread asleep between (tests/mpx3-threads' takers), the
-                           counts printed, never gated (SIGUSR1 is not queued: ten of ten is not owed).
+                           5 ms apart with the main thread asleep between (tests/mpx3-threads' takers): under
+                           KVM every round ten taken, each within 5 ms of its send (a pending signal ends the
+                           sleep at once), with the kernel's signal counts printed (set, merged, taken, sleeps
+                           entered with one pending).
               SMP-EXIT     exit_group from the main thread and from a sibling with four threads running,
                            execve from a sibling with the others running: statuses 0x700, 0x800,
                            0x900; min(4, N) of the group seen running at once; MemFree after four
@@ -519,11 +521,20 @@ def signal_check():
     if lat:
         info.append(f'the sleeper\'s worst {max(lat)} us')
     if ten:
-        # ten sent 5 ms apart, twenty rounds: SIGUSR1 is not queued, so ten of ten is usual, not guaranteed (POSIX leaves
-        # a second while one is pending to the implementation; Linux and PAX take it once): printed, never gated
-        counts = [kv(s, 'taken') for s in ten]
-        info.append(f'the sleeper took ten of ten in {sum(1 for c in counts if c == 10)} of {len(counts)} rounds '
-                    f'(taken {counts}; not queued, so printed, not gated)')
+        # ten sent 5 ms apart, twenty rounds, each with the worst send-to-handler time and the kernel's signal counts
+        # across it (set, merged into one pending, taken, sleeps entered with one pending). A pending signal ends the
+        # sleeper's interruptible sleep at once, so each is handled long before the next is sent and none merges: a
+        # round short of ten, or one handled 5 ms or more after its send, is a wake the kernel lost (held under the
+        # timed bounds, printed otherwise)
+        bad = [s for s in ten if kv(s, 'taken') != 10 or not isinstance(kv(s, 'worst-us'), int) or kv(s, 'worst-us') > 5000]
+        if TIMED and bad:
+            s0 = bad[0]
+            why.append(f'sleeper round {kv(s0, "round")}: taken {kv(s0, "taken")} of ten, the worst {kv(s0, "worst-us")} us, '
+                       f'merged {kv(s0, "merged")}, sleeps entered with one pending {kv(s0, "slept-pending")} ({len(bad)} rounds so)')
+        tot = {k: sum(kv(s, k) for s in ten if isinstance(kv(s, k), int)) for k in ('set', 'merged', 'took', 'slept-pending')}
+        info.append(f'the sleeper took ten of ten in {sum(1 for s in ten if kv(s, "taken") == 10)} of {len(ten)} rounds '
+                    f'(taken {[kv(s, "taken") for s in ten]}, worst {[kv(s, "worst-us") for s in ten]} us); the kernel: '
+                    f'set {tot["set"]}, merged {tot["merged"]}, took {tot["took"]}, sleeps entered with one pending {tot["slept-pending"]}')
     return why, info
 
 
