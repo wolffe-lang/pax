@@ -95,6 +95,18 @@
   P5  every tracked path is known to the map or read by a suite. An
       unknown path would make every pull request touching it run every
       leg; now the pull request that adds one is red here instead.
+  P13 BusyBox from the cache, under busybox-<the .deb's sha256 in
+      user/busybox.pin>, in three shapes. A job whose suite cannot run
+      without it (tests/usb-stick's mpx3-console, mpx5-jobs) restores it,
+      fetches it in a step of its own before the suite (a failed fetch
+      stops the job there, by name) and saves it when the restore missed.
+      mpx5-pelt alone adds no named step: tests/ci-budgets.py cannot time
+      a new named step of it whose plan job it reddens, so the pin read,
+      the restore and the save are unnamed steps around the suite, whose
+      own fetch stops it by fetch-busybox's line. The suites that fetch it
+      for a live Linux side alone (tests/mpx6-ext2, mpx6-nvme) restore it
+      and fetch nothing that could stop them. Every suite that runs
+      tools/fetch-busybox is on one of those lists.
 
 Exit 0 when every check passes, 1 otherwise.
 """
@@ -1319,6 +1331,119 @@ if tracked:
 else:
     print("ci-plan: WARN P5 not a git checkout: the tracked paths not checked")
 
+
+# --- P13 BusyBox from the cache, by the pin's sha256 ------------------------------------------
+def bb_jobs(text):
+    """Each job's body lines."""
+    jobs, job, inside = {}, None, False
+    for l in text.splitlines():
+        if l.rstrip() == "jobs:":
+            inside = True
+        elif inside:
+            m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", l)
+            if m:
+                job = m.group(1)
+                jobs[job] = []
+            elif job is not None:
+                jobs[job].append(l)
+    return jobs
+
+
+def bb_steps(body):
+    """A job's steps, each as its text with the step's own keys at column 0."""
+    steps, on = [], False
+    for l in body:
+        if l.startswith("    steps:"):
+            on = True
+        elif on and l.startswith("      - "):
+            steps.append([l[8:]])
+        elif on and steps and (l.startswith("        ") or not l.strip()):
+            steps[-1].append(l[8:])
+        elif on and l.strip() and not l.startswith("      "):
+            on = False
+    return ["\n".join(s) for s in steps]
+
+
+# Whose suite needs BusyBox, in which shape; and the suites that fetch it for a live Linux side alone (a host
+# with a readable kernel), go on without it, and so get no fetch that could stop their job.
+BB_OWN_STEP = ("usb-stick", "mpx5-jobs")
+BB_AROUND = {"mpx5-pelt": "tests/ci-budgets.py cannot time a new named step of mpx5-pelt whose plan job it reddens"}
+BB_LIVE_ONLY = ("mpx6-ext2", "mpx6-nvme")
+
+
+def bb_check(text, script, shape):
+    """(the jobs that run tests/SCRIPT, what each lacks for SHAPE: own, around or restore)."""
+    chosen, problems = [], []
+    for job, body in bb_jobs(text).items():
+        steps = bb_steps(body)
+        suite = [i for i, st in enumerate(steps) if re.search(r"(^|[\s;&|(])tests/%s(\s|$)" % re.escape(script), st, re.M)]
+        if not suite:
+            continue
+        chosen.append(job)
+        pins = [i for i, st in enumerate(steps) if re.search(r"^id: \S+$", st, re.M) and "BUSYBOX_DEB_SHA256" in st
+                and "user/busybox.pin" in st and "GITHUB_OUTPUT" in st]
+        if not pins:
+            problems.append("%s reads no BUSYBOX_DEB_SHA256 from user/busybox.pin into a step's output" % job)
+            continue
+        key = "busybox-${{ steps.%s.outputs.sha256 }}" % re.search(r"^id: (\S+)$", steps[pins[0]], re.M).group(1)
+
+        def cache(uses):
+            return [i for i, st in enumerate(steps) if re.search(r"^uses: %s$" % re.escape(uses), st, re.M)
+                    and re.search(r"^  key: %s$" % re.escape(key), st, re.M) and re.search(r"^  path: \.pax-cache/busybox-\*$", st, re.M)]
+        restore, save = cache("actions/cache/restore@v4"), cache("actions/cache/save@v4")
+        fetch = [i for i, st in enumerate(steps) if re.search(r"^run: tools/fetch-busybox \S+$", st, re.M)]
+        if not restore or not pins[0] < restore[0] < suite[0]:
+            problems.append("%s restores no .pax-cache/busybox-* under %s between the pin and the suite" % (job, key))
+        elif shape == "own":
+            if not fetch or not restore[0] < fetch[0] < suite[0]:
+                problems.append("%s fetches BusyBox in no step of its own between the restore and the suite" % job)
+            elif not save or not fetch[0] < save[0] < suite[0] or not re.search(r"^if: .*cache-hit != 'true'", steps[save[0]], re.M):
+                problems.append("%s saves no BusyBox after its fetch, before the suite, when the restore missed" % job)
+        elif shape == "around":
+            named = [i for i in (pins[0], restore[0]) + tuple(save[:1]) if re.search(r"^name: ", steps[i], re.M)]
+            if fetch:
+                problems.append("%s fetches BusyBox in a step of its own" % job)
+            elif not save or not save[0] > suite[0] or not re.search(r"^if: .*always\(\).*cache-hit != 'true'.*hashFiles\('\.pax-cache/busybox-\*'\)", steps[save[0]], re.M):
+                problems.append("%s saves no BusyBox after the suite (always, when the restore missed and there is one)" % job)
+            elif named:
+                problems.append("%s names a BusyBox step, which the step budget cannot time" % job)
+        elif shape == "restore":
+            if fetch or save:
+                problems.append("%s fetches or saves BusyBox, which nothing there needs" % job)
+    return chosen, problems
+
+
+bb_call = '"$PAX_ROOT/tools/' + 'fetch-busybox"'
+bb_callers = sorted(n for n in os.listdir(os.path.join(ROOT, "tests")) if os.path.isfile(os.path.join(ROOT, "tests", n))
+                    and bb_call in open(os.path.join(ROOT, "tests", n), errors="replace").read())
+
+
+def bb_odd_of(callers):
+    """The callers on no list, and the listed suites that no longer call it."""
+    known = BB_OWN_STEP + tuple(BB_AROUND) + BB_LIVE_ONLY
+    return [n for n in callers if n not in known] + ["%s (no longer calls it)" % n for n in known if n not in callers]
+
+
+bb_odd = bb_odd_of(bb_callers)
+bb_says_no = bb_odd_of(bb_callers + ["mpx9-new"]) == bb_odd + ["mpx9-new"] if not bb_odd else False
+say(not bb_odd and bb_says_no,
+    "P13 every suite that runs tools/fetch-busybox is on one list: a fetch step of its own (tests/%s), around the suite "
+    "(tests/%s), a live Linux side alone (tests/%s); a suite on none is named%s"
+    % (" tests/".join(BB_OWN_STEP), " tests/".join(BB_AROUND), " tests/".join(BB_LIVE_ONLY), (": not so: " + ", ".join(bb_odd)) if bb_odd else ""))
+bb_wf = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
+for shape, scripts, says in (
+        ("own", BB_OWN_STEP, "restores .pax-cache/busybox-* under busybox-<the pin's sha256>, fetches it in a step of its own before the suite, and saves it when the restore missed"),
+        ("around", tuple(BB_AROUND), "restores it before the suite in unnamed steps, adds no named step (%s), and saves it after the suite when the restore missed; the suite's own fetch stops it by fetch-busybox's line" % "; ".join(BB_AROUND.values())),
+        ("restore", BB_LIVE_ONLY, "restores it before the suite, and fetches or saves nothing")):
+    chosen, missing = [], []
+    for sc in scripts:
+        c, m = bb_check(bb_wf, sc, shape)
+        chosen += c
+        missing += m or ([] if c else ["no job runs tests/%s" % sc])
+    say(bool(chosen) and not missing, "P13 BusyBox, %s: each job (%s) %s%s" % (shape, " ".join(chosen) or "none", says,
+                                                                             (": " + "; ".join(missing)) if missing else ""))
+pelt_stops = (bb_call + ' "$work/bin" || exit 2') in open(os.path.join(ROOT, "tests/mpx5-pelt")).read()
+say(pelt_stops, "P13 tests/mpx5-pelt stops at a failed BusyBox fetch, by fetch-busybox's own line (exit 2)")
 
 # px61: replay fixtures and both staging pins reach their actual users.
 expect("P2 pelt fork replay fixtures", plan(["user/console/fork/corpus.keys"], **pr), "pr", has=["mpx5-pelt"])
