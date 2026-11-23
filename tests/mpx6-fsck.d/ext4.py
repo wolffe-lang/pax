@@ -196,7 +196,7 @@ clean_row("mixed", mixed)
 
 
 # --- damage, each on a copy; e2fsck must call it damage, fsck.ext2 must name it
-def damage(name, fn, ino_name, img_path=base):
+def damage(name, fn, ino_name, img_path=base, finding=None):
     copy = WORK / f"damage-{name}.img"
     shutil.copyfile(img_path, copy)
     im = Image(copy)
@@ -212,7 +212,8 @@ def damage(name, fn, ino_name, img_path=base):
     c = checker(copy, "-fn")
     out = c.stdout.decode(errors="replace")
     (WORK / f"damage-{name}.log").write_text(out)
-    named = re.search(rf"[Ii]node {ino}\b[^\n]*extent", out) is not None and "unsupported: filesystem features" not in out
+    pattern = finding(ino) if finding else rf"[Ii]node {ino}\b[^\n]*extent"
+    named = re.search(pattern, out) is not None and "unsupported: filesystem features" not in out
     # e2fsck's verdict is its exit's uncorrected bit (4): on a loop it also says 8, an operational error (exit 12).
     ok = e.returncode & 4 != 0 and c.returncode == 4 and named and ea == before and digest(copy) == before
     row(f"damage-{name}", ok, f"inode {ino} ({ino_name}): e2fsck -fn exit {e.returncode}, fsck.ext2 -fn exit {c.returncode}{', named' if named else ', no finding naming the inode and its extent tree'}{'' if digest(copy) == before else ', the copy changed'}")
@@ -293,7 +294,9 @@ def shared(im):
 
 
 damage("shared-leaf", shared, "many")
-damage("i_blocks-wrong", lambda im: (im.put(im.ino(A) + 28, im.u(im.ino(A) + 28) + 8), A)[1], "a")
+# Not tree damage: its finding is the counted i_blocks (repair-i_blocks-wrong holds its repair to e2fsck's).
+damage("i_blocks-wrong", lambda im: (im.put(im.ino(A) + 28, im.u(im.ino(A) + 28) + 8), A)[1], "a",
+       finding=lambda ino: rf"Inode {ino}: i_blocks should be")
 plain = WORK / "plain-ext3.img"
 fresh(plain, 64)
 assert run(["mke2fs", "-q", "-F", "-t", "ext3", "-b", "4096", plain]).returncode == 0
@@ -329,15 +332,32 @@ repair("inode-bit-cleared", lambda im: im.b.__setitem__(im.u(4096 + 4) * 4096 + 
 repair("free-count", lambda im: im.put(im.sb + 12, im.u(im.sb + 12) + 1))
 repair("i_blocks-wrong", lambda im: im.put(im.ino(A) + 28, im.u(im.ino(A) + 28) + 8))
 
-# lost+found removed: fsck.ext2 makes it again (an indirect map: no tree writer), e2fsck -fn clean after.
+# lost+found's entry dropped from the root (corpus.py's missing-lost-found, on this base: debugfs rmdir left it in
+# place, the head take of 2026-11-23): e2fsck -fn must call the copy damaged; fsck.ext2 -fy makes lost+found again
+# (an indirect map: no tree writer) and e2fsck -fn is clean after.
+def drop_entry(im, name):
+    at = im.u(leaf_entry(im, 2) + 8) * 4096
+    o = 0
+    while o < 4096:
+        ino, rec, nl = im.u(at + o), im.u(at + o + 4, 2), im.b[at + o + 6]
+        if ino and bytes(im.b[at + o + 8:at + o + 8 + nl]) == name.encode():
+            im.put(at + o, 0)
+            return
+        o += rec or 4096
+    raise ValueError("no entry " + name + " in the root's first block")
+
+
 lf = WORK / "repair-lost-found.img"
 shutil.copyfile(base, lf)
-debugfs_w(lf, ["rmdir lost+found"])
+im = Image(lf)
+drop_entry(im, "lost+found")
+im.save(lf)
+ep = run(["e2fsck", "-fn", lf])
 wp = checker(lf, "-fy")
 vp = run(["e2fsck", "-fn", lf])
 (WORK / "repair-lost-found.log").write_bytes(wp.stdout)
-row("repair-lost-found", wp.returncode in (1, 2) and vp.returncode == 0 and inode_of(lf, "lost+found") is not None,
-    f"fsck.ext2 -fy exit {wp.returncode} makes lost+found again; e2fsck -fn exit {vp.returncode} after")
+row("repair-lost-found", ep.returncode & 4 != 0 and wp.returncode in (1, 2) and vp.returncode == 0 and inode_of(lf, "lost+found") is not None,
+    f"lost+found's entry dropped: e2fsck -fn exit {ep.returncode} on the copy; fsck.ext2 -fy exit {wp.returncode} makes it again; e2fsck -fn exit {vp.returncode} after")
 
 
 # --- repairs that would change an extent tree: refused by name, the copy unchanged
