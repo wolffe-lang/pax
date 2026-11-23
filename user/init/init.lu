@@ -31,12 +31,35 @@
 //!    never closed (a power cut) is closed by it: `last` reads it as
 //!    `crash`. A system with no /var/run or /var/log keeps no record there;
 //!    a record that cannot be written is one line on the console.
-//! 5. The boot's hooks (px112): each file of /etc/pax-boot.d in name order
-//!    (a name starting `.` left out), standard input /dev/null, its output
-//!    on the console, the leader of a process group of its own, each
-//!    waited for at most 10 s; one still running then is named and left to
-//!    run. What they start stays in pid 1's session, which no console
-//!    session's end reaches (burrowd is neither restarted nor ended).
+//! 5. The boot's services, as the kernel command line's `pax.services=`
+//!    word says (/proc/cmdline, read once; no word, or no /proc/cmdline:
+//!    `hooks`, SERVICES_DEFAULT; another value is one line and the default):
+//!    - `hooks`: the boot's hooks (px112): each file of /etc/pax-boot.d in
+//!      name order (a name starting `.` left out), standard input
+//!      /dev/null, its output on the console, the leader of a process group
+//!      of its own, each waited for at most 10 s; one still running then is
+//!      named and left to run. What they start stays in pid 1's session,
+//!      which no console session's end reaches (burrowd is neither
+//!      restarted nor ended).
+//!    - `alpha`: /run/alpha/state removed (it means something only across
+//!      alpha's restarts within one boot), then `/bin/alpha manager --kmsg`
+//!      started as the hooks are, a job in pid 1's session (a process group
+//!      of its own, never a session leader, so it never takes the console
+//!      between two logins), descriptor 0 /dev/null and 1 and 2 /dev/kmsg
+//!      (its lines kept in the kernel's log at their levels; the console's
+//!      descriptors, with one line, when /dev/kmsg cannot be opened); then
+//!      the hooks as above but each NAME that has a unit of its name
+//!      (/usr/lib/alpha/units/NAME.unit or /etc/alpha/units/NAME.unit),
+//!      which alpha starts in its place. With no /bin/alpha, or when it
+//!      cannot be started, one line and the hooks as with `hooks`. init
+//!      keeps alpha: when its first run ends with status 1 or 2 (alpha's
+//!      own refusal at its start: another manager, the socket, the
+//!      arguments) one line, and the hooks it was to replace run, as if
+//!      there were no /bin/alpha; any other end (a signal, any exit on a
+//!      later run) is one line, `init: /bin/alpha ended (…); again in N s`,
+//!      and a start again N s later: 1 s, doubling to 60 s while each run
+//!      ends within 2 s of its start. Never the hooks once alpha has run:
+//!      the services it started may still run.
 //! 6. The console leaves pid 1's session (TIOCNOTTY): from here no key,
 //!    hangup or stop at the console reaches pid 1 or what the hooks left.
 //! 7. Then, for ever: the console's modes put back as the boot left them
@@ -67,8 +90,9 @@
 //! 1 s doubling to 60 s, with one line (a missing /bin/login never spins
 //! the console); a longer one starts the next at once.
 //!
-//! **What it does not, by name:** no runlevels, inittab, service manager
-//! or getty (login prompts by itself); no shutdown of its own: `reboot`
+//! **What it does not, by name:** no runlevels, inittab or getty (login
+//! prompts by itself), and no service manager of its own (alpha is one,
+//! started only under the word); no shutdown of its own: `reboot`
 //! and `poweroff` are reboot(2), whose end is the kernel's (kernel/user's
 //! `end_processes`: SIGTERM and SIGCONT to every process, init among them,
 //! SIGKILL 2000 ms later, then the volumes); no screen reset and no input
@@ -96,6 +120,13 @@ extern "c" fn init_uname_byte(i: int) -> int
 
 const LOGIN: str = "/bin/login"
 const HOOK_DIR: str = "/etc/pax-boot.d"
+/// The boot's services when the kernel command line names none.
+const SERVICES_DEFAULT: str = "hooks"
+const SERVICES_WORD: str = "pax.services="
+const ALPHA: str = "/bin/alpha"
+const ALPHA_STATE: str = "/run/alpha/state"
+const UNITS_SHIPPED: str = "/usr/lib/alpha/units"
+const UNITS_ADMIN: str = "/etc/alpha/units"
 const HOOK_MS: int = 10000
 const HANGUP_MS: int = 2000
 const KILL_MS: int = 5000
@@ -191,7 +222,11 @@ fn main() -> int {
     boot_clean()
     boot_record()
     boot_utmp()
-    boot_hooks()
+    var k = Keeper { on: false, pid: 0, runs: 0, began: 0, pause: 0, due: 0 }
+    if services_mode() == "alpha" {
+        k = alpha_first()
+    }
+    boot_hooks(if k.on then HOOKS_NO_UNIT else HOOKS_ALL)
     let _dropped = ioctl(0, TIOCNOTTY, 0)
     var pause = 0
     loop {
@@ -199,9 +234,9 @@ fn main() -> int {
         let t0 = now_ms()
         let leader = start(prog)
         if leader > 0 {
-            let st = wait_for(leader)
+            let st = wait_for(leader, mut k)
             session_end(line, leader, st)
-            hang_up(leader)
+            hang_up(leader, mut k)
         }
         if now_ms() - t0 < QUICK_MS {
             pause = if pause == 0 then 1000 else pause * 2
@@ -209,7 +244,7 @@ fn main() -> int {
                 pause = PAUSE_MAX_MS
             }
             print("init: {prog[0]} ended within {QUICK_MS / 1000} s of its start; again in {pause / 1000} s")
-            nap(pause)
+            nap(pause, mut k)
         } else {
             pause = 0
         }
@@ -220,22 +255,27 @@ fn now_ms() -> int {
     os_clock_ns() / 1000000
 }
 
-/// Sleep `ms`, reaping what ends meanwhile.
-fn nap(ms: int) {
+/// Sleep `ms`, reaping what ends meanwhile, alpha started again when due.
+fn nap(ms: int, mut k: Keeper) {
     let until = now_ms() + ms
     while now_ms() < until {
-        reap()
+        reap(mut k)
+        alpha_due(mut k)
         time_sleep_ms(50)
     }
 }
 
 /// Every child that has ended, reaped (an orphan handed to pid 1 among
-/// them); returns when none is left to reap now.
-fn reap() {
+/// them; alpha's end read by the keeper); returns when none is left to
+/// reap now.
+fn reap(mut k: Keeper) {
     loop {
         let p = wait(-1, WNOHANG)
         if p <= 0 {
             return
+        }
+        if p == k.pid {
+            alpha_ended(mut k, status())
         }
     }
 }
@@ -356,11 +396,18 @@ fn boot_utmp() {
     }
 }
 
+const HOOKS_ALL: int = 0
+const HOOKS_NO_UNIT: int = 1
+const HOOKS_UNIT: int = 2
+
 /// The boot's hooks: each file of /etc/pax-boot.d in name order, in a
 /// process group of its own, standard input /dev/null, waited for at most
-/// HOOK_MS. A hook that cannot start, or ends other than 0, is one line on
-/// the console; the boot goes on either way.
-fn boot_hooks() {
+/// HOOK_MS: every one (HOOKS_ALL), those with no alpha unit of their name
+/// (HOOKS_NO_UNIT: alpha starts the others) or only those with one
+/// (HOOKS_UNIT: alpha refused at its start). A hook that cannot start, or
+/// ends other than 0, is one line on the console; the boot goes on either
+/// way.
+fn boot_hooks(which: int) {
     var names = fs_read_dir(HOOK_DIR) else |_| {
         return
     }
@@ -368,6 +415,9 @@ fn boot_hooks() {
     for n in names {
         let path = "{HOOK_DIR}/{n}"
         if n.starts_with(".") || !fs_is_file(path) {
+            continue
+        }
+        if which != HOOKS_ALL && has_unit(n) != (which == HOOKS_UNIT) {
             continue
         }
         let null = fs_open("/dev/null") else |_| {
@@ -474,18 +524,24 @@ fn start(prog: List[str]) -> int {
     pid
 }
 
-/// Wait until `leader` ends, reaping every other child as it ends: the
-/// leader's wait status, or -1 when there is no child left to wait for.
-fn wait_for(leader: int) -> int {
+/// Wait until `leader` ends, reaping every other child as it ends (alpha's
+/// end read by the keeper, and alpha started again when due: the wait
+/// then looks every 50 ms instead of sleeping in the kernel): the leader's
+/// wait status, or -1 when there is no child left to wait for.
+fn wait_for(leader: int, mut k: Keeper) -> int {
     loop {
-        let p = wait(-1, 0)
+        alpha_due(mut k)
+        let p = wait(-1, if k.due > 0 then WNOHANG else 0)
         if p == leader {
             return status()
         }
-        if p == 0 - ECHILD {
+        if p > 0 && p == k.pid {
+            alpha_ended(mut k, status())
+        } else if p == 0 {
+            time_sleep_ms(50)
+        } else if p == 0 - ECHILD {
             return -1
-        }
-        if p < 0 {
+        } else if p < 0 {
             time_sleep_ms(100)
         }
     }
@@ -561,7 +617,7 @@ fn members(sid: int) -> List[int] {
 
 /// The end of session `sid`: SIGHUP and SIGCONT to every process still in
 /// it; SIGKILL, HANGUP_MS later, to any still there (one line then).
-fn hang_up(sid: int) {
+fn hang_up(sid: int, mut k: Keeper) {
     let first = members(sid)
     if first.len == 0 {
         return
@@ -572,7 +628,7 @@ fn hang_up(sid: int) {
     }
     let until = now_ms() + HANGUP_MS
     while now_ms() < until {
-        reap()
+        reap(mut k)
         if members(sid).len == 0 {
             return
         }
@@ -584,9 +640,156 @@ fn hang_up(sid: int) {
     }
     let gone = now_ms() + KILL_MS
     while now_ms() < gone && members(sid).len != 0 {
-        reap()
+        reap(mut k)
         time_sleep_ms(20)
     }
-    reap()
+    reap(mut k)
     print("init: the session of pid {sid}: SIGKILL to {left.len} of {first.len} still there {HANGUP_MS} ms after its SIGHUP")
+}
+
+/// The boot's services (the module's 5): "alpha" or "hooks" from the kernel
+/// command line's `pax.services=` word (/proc/cmdline, read once); with no
+/// word, or no /proc/cmdline, SERVICES_DEFAULT; another value is one line
+/// and the default.
+fn services_mode() -> str {
+    let text = fs_read_text("/proc/cmdline") else ""
+    for line in text.lines() {
+        for w in line.split(" ") {
+            if w.starts_with(SERVICES_WORD) {
+                let v = w[SERVICES_WORD.len..]
+                if v == "alpha" || v == "hooks" {
+                    return v
+                }
+                print("init: {w}: neither alpha nor hooks; {SERVICES_DEFAULT}")
+                return SERVICES_DEFAULT
+            }
+        }
+    }
+    SERVICES_DEFAULT
+}
+
+/// alpha as init keeps it under `pax.services=alpha`: whether it is kept
+/// (`on`), its pid while it runs (0 when it does not), how many times it
+/// was started, when its run began, the pause before the next start and
+/// when that start is due (0: none due).
+struct Keeper {
+    on: bool,
+    pid: int,
+    runs: int,
+    began: int,
+    pause: int,
+    due: int,
+}
+
+/// Whether the hook `name` has an alpha unit of its name, which alpha
+/// starts in its place.
+fn has_unit(name: str) -> bool {
+    fs_exists("{UNITS_SHIPPED}/{name}.unit") || fs_exists("{UNITS_ADMIN}/{name}.unit")
+}
+
+/// alpha at the boot: the state file of an earlier boot removed, then its
+/// first start. With no /bin/alpha, or a first start that fails, one line,
+/// and the keeper off: the hooks run as they do with `hooks`.
+fn alpha_first() -> Keeper {
+    var k = Keeper { on: false, pid: 0, runs: 0, began: 0, pause: 0, due: 0 }
+    if !fs_is_file(ALPHA) {
+        print("init: pax.services=alpha, but there is no {ALPHA}; the boot's hooks run")
+        return k
+    }
+    if fs_exists(ALPHA_STATE) {
+        fs_remove(ALPHA_STATE) else |_| {
+            print("init: {ALPHA_STATE} from an earlier boot cannot be removed")
+        }
+    }
+    k.on = true
+    alpha_start(mut k)
+    k
+}
+
+/// `/bin/alpha manager --kmsg` started as a job in pid 1's session (its own
+/// process group), descriptor 0 /dev/null, 1 and 2 /dev/kmsg, or the
+/// console's with one line when /dev/kmsg cannot be opened. A start that
+/// fails is one line: the first one turns the keeper off (the hooks run),
+/// a later one makes the next start due after the pause.
+fn alpha_start(mut k: Keeper) {
+    k.due = 0
+    let null = fs_open("/dev/null") else |_| -1
+    let log = fs_open_mode("/dev/kmsg", 2) else |_| -1
+    var map = List[int]()
+    if null >= 0 {
+        (mut map).push(0)
+        (mut map).push(null)
+    }
+    if log >= 0 {
+        (mut map).push(1)
+        (mut map).push(log)
+        (mut map).push(2)
+        (mut map).push(log)
+    } else {
+        print("init: /dev/kmsg cannot be opened; {ALPHA} writes to the console")
+    }
+    let h = os_spawn_job(ALPHA, ["manager", "--kmsg"], map, 0, -1, 0) else |e| {
+        close_fd(null)
+        close_fd(log)
+        if k.runs == 0 {
+            k.on = false
+            print("init: {ALPHA} not started ({e}); the boot's hooks run")
+        } else {
+            alpha_later(mut k, "not started ({e})")
+        }
+        return
+    }
+    close_fd(null)
+    close_fd(log)
+    k.pid = os_proc_pid(h) else -1
+    k.runs += 1
+    k.began = now_ms()
+}
+
+/// alpha's end, wait status `st`. Its first run's exit 1 or 2 is alpha's
+/// own refusal at its start: one line, the hooks it was to replace run, and
+/// it is not started again. Any other end: one line, and a start again
+/// after the pause.
+fn alpha_ended(mut k: Keeper, st: int) {
+    k.pid = 0
+    let sig = st & 0x7f
+    let code = (st >> 8) & 0xff
+    if k.runs == 1 && sig == 0 && (code == 1 || code == 2) {
+        k.on = false
+        print("init: {ALPHA} ended with status {code} at its start; the boot's hooks run")
+        boot_hooks(HOOKS_UNIT)
+        return
+    }
+    let how = if sig == 0 then "exit {code}" else "killed by signal {sig}"
+    alpha_later(mut k, "ended ({how})")
+}
+
+/// The next start due after the pause: 1 s, doubling to PAUSE_MAX_MS while
+/// each run ends within QUICK_MS of its start; one line.
+fn alpha_later(mut k: Keeper, what: str) {
+    if now_ms() - k.began < QUICK_MS {
+        k.pause = if k.pause == 0 then 1000 else k.pause * 2
+        if k.pause > PAUSE_MAX_MS {
+            k.pause = PAUSE_MAX_MS
+        }
+    } else {
+        k.pause = 1000
+    }
+    k.due = now_ms() + k.pause
+    print("init: {ALPHA} {what}; again in {k.pause / 1000} s")
+}
+
+/// alpha started again when its start is due.
+fn alpha_due(mut k: Keeper) {
+    if k.on && k.pid == 0 && k.due > 0 && now_ms() >= k.due {
+        alpha_start(mut k)
+    }
+}
+
+/// `fd` closed when it is one (-1 is none).
+fn close_fd(fd: int) {
+    if fd >= 0 {
+        fs_close(fd) else |_| {
+        }
+    }
 }
