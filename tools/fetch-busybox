@@ -11,8 +11,14 @@
 # digest (a later run, or a host without zstd, takes it from there).
 # Nothing is built and no package script runs. A transfer has at most three
 # attempts, each bounded by 25 s (10 s to connect), with curl's exponential
-# 1 s / 2 s backoff and a 90 s retry envelope. This fits the USB suite's
-# existing 120 s fetch phase; curl's error/retry diagnostics stay on stderr.
+# 1 s / 2 s backoff and a 90 s retry envelope. When none fetched it, the
+# same .deb comes from the pin's second source, Launchpad's librarian
+# (BUSYBOX_URL2, which keeps a build after the archive's pool drops it for
+# a newer one), in one attempt bounded the same way, and the fetch says so
+# (`cannot fetch URL; from Launchpad's librarian, URL2`); it is held to the
+# same sha256. Both fit the USB suite's existing 120 s fetch phase (at most
+# 78 s, then 25 s); curl's error/retry diagnostics stay on stderr. A .deb
+# from the first source that is not the pin is refused, not fetched again.
 # Prints `busybox <sha256> <bytes>`. Exit 0, or 2 on a tool error.
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
@@ -31,13 +37,19 @@ check() { # file -> dies unless it is the pin's binary
 if [ ! -f "$bin" ] || [ "$(sha256_of "$bin")" != "$BUSYBOX_SHA256" ]; then
     need curl ar tar zstd
     deb=$PAX_CACHE/busybox-$BUSYBOX_DEB_SHA256.deb
+    src=$BUSYBOX_URL
     if [ ! -f "$deb" ] || [ "$(sha256_of "$deb")" != "$BUSYBOX_DEB_SHA256" ]; then
-        curl -sSfL --connect-timeout 10 --max-time 25 \
+        if ! curl -sSfL --connect-timeout 10 --max-time 25 \
             --retry 2 --retry-all-errors --retry-max-time 90 \
-            -o "$deb.part" "$BUSYBOX_URL" || die "cannot fetch $BUSYBOX_URL"
+            -o "$deb.part" "$BUSYBOX_URL"; then
+            src=$BUSYBOX_URL2
+            say "cannot fetch $BUSYBOX_URL; from Launchpad's librarian, $src"
+            curl -sSfL --connect-timeout 10 --max-time 25 -o "$deb.part" "$src" \
+                || die "cannot fetch $BUSYBOX_URL or $src"
+        fi
         mv "$deb.part" "$deb"
     fi
-    [ "$(sha256_of "$deb")" = "$BUSYBOX_DEB_SHA256" ] || die "$BUSYBOX_URL: sha256 $(sha256_of "$deb"), the pin says $BUSYBOX_DEB_SHA256"
+    [ "$(sha256_of "$deb")" = "$BUSYBOX_DEB_SHA256" ] || die "$src: sha256 $(sha256_of "$deb"), the pin says $BUSYBOX_DEB_SHA256"
     w=$(mktemp -d "${TMPDIR:-/tmp}/pax-busybox.XXXXXX")
     trap 'rm -rf "$w"' EXIT
     ( cd "$w" && ar x "$deb" ) || die "ar: $deb"
