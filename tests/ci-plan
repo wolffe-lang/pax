@@ -80,6 +80,12 @@
       that script holds; and the planner refuses a plan whose legs leave
       out the native tier (or the firmware an entry names) for a suite
       it chose, while every leg, the merge legs and the pr leg pass.
+  P12 the job's token for tools/fetch-retry (PAX_FETCH_TOKEN): the
+      workflow gives every job its own, read-only; a job whose token can
+      write (the `tier` job's issues) empties it; nothing else sets it or
+      FETCH_RETRY_OWN; and a workflow that runs on pull_request_target
+      gives it no run. The check says no to each of those, on ci.yml
+      changed to break it.
   P5  every tracked path is known to the map or read by a suite. An
       unknown path would make every pull request touching it run every
       leg; now the pull request that adds one is red here instead.
@@ -1209,6 +1215,120 @@ else:
     say(short(["mpx3-speaker", "mpx5-users"], "--tier native --firmware uefi") == ["mpx3-speaker"],
         "P11 native UEFI alone leaves out mpx3-speaker's native BIOS, not mpx5-users' native images")
     say(short(["mpx1", "census"], REST_LEGS) == [], "P11 a suite outside the table runs on any legs")
+
+# --- P12 the job's token reaches no job that could write -------------------------------------
+TOKEN = "PAX_FETCH_TOKEN"
+
+
+def workflow_parts(text):
+    """(top, jobs) of a workflow, by indentation, comment lines dropped: top maps each top-level key to
+    (its inline value, its body lines), jobs maps each job to its body lines."""
+    top, cur = {}, None
+    for l in text.splitlines():
+        if l.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^([A-Za-z_][\w-]*):\s*(.*)$", l)
+        if m:
+            cur = m.group(1)
+            top[cur] = (m.group(2).strip(), [])
+        elif cur is not None:
+            top[cur][1].append(l)
+    jobs, job = {}, None
+    for l in top.get("jobs", ("", []))[1]:
+        m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", l)
+        if m:
+            job = m.group(1)
+            jobs[job] = []
+        elif job is not None:
+            jobs[job].append(l)
+    return top, jobs
+
+
+def sub_block(body, key, indent):
+    """(inline value, [(key, value)]) of `key:` at INDENT spaces in BODY, its entries one level deeper."""
+    inline, entries, inside = None, [], False
+    for l in body:
+        m = re.match(r"^ {%d}%s:\s*(.*)$" % (indent, re.escape(key)), l)
+        if m:
+            inline, inside = m.group(1).strip(), True
+            continue
+        if inside:
+            m = re.match(r"^ {%d}([A-Za-z_][\w-]*):\s*(.*)$" % (indent + 2), l)
+            if m:
+                entries.append((m.group(1), m.group(2).strip()))
+            elif l.strip() and len(l) - len(l.lstrip()) <= indent:
+                inside = False
+    return inline, entries
+
+
+def can_write(inline, entries):
+    return (inline or "").startswith("write-all") or any(v.startswith("write") for _, v in entries)
+
+
+def token_problems(text):
+    """What lets PAX_FETCH_TOKEN reach a token that can write, or keeps it from the jobs: [] for neither."""
+    top, jobs = workflow_parts(text)
+    kept = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    problems = []
+    on_inline, on_body = top.get("on", ("", []))
+    triggers = set(re.findall(r"[a-z_]+", on_inline)) | {m.group(1) for m in (re.match(r"^  ([a-z_]+):", l) for l in on_body) if m}
+    perm = top.get("permissions")
+    if perm is None:
+        problems.append("the workflow has no permissions of its own, so its token can write")
+    elif can_write(perm[0], sub_block(["permissions:"] + perm[1], "permissions", 0)[1]):
+        problems.append("the workflow's own permissions can write")
+    given = dict(sub_block(["env:"] + top.get("env", ("", []))[1], "env", 0)[1]).get(TOKEN) == "${{ github.token }}"
+    if not given:
+        problems.append("the workflow does not give its jobs %s: ${{ github.token }}" % TOKEN)
+    if given and "pull_request_target" in triggers:
+        problems.append("it runs on pull_request_target, where the token can write, and gives that run the token")
+    emptied = 0
+    for name, body in jobs.items():
+        jtok = dict(sub_block(body, "env", 4)[1]).get(TOKEN)
+        if jtok in ('""', "''"):
+            emptied += 1
+        elif jtok is not None:
+            problems.append("job %s sets %s to %s" % (name, TOKEN, jtok))
+        jin, jentries = sub_block(body, "permissions", 4)
+        if given and can_write(jin, jentries) and jtok not in ('""', "''"):
+            problems.append("job %s can write (%s) and sees the token"
+                            % (name, ", ".join("%s: %s" % e for e in jentries if e[1].startswith("write")) or jin))
+    seen = len(re.findall(r"^\s*%s:" % TOKEN, kept, re.M))
+    if seen != int(given) + emptied:
+        problems.append("%s is set somewhere else (%d places, %d of them the workflow's and the empty ones)" % (TOKEN, seen, int(given) + emptied))
+    if re.search(r"^\s*FETCH_RETRY_OWN:", kept, re.M):
+        problems.append("the workflow sets FETCH_RETRY_OWN, the prefix that gets the token")
+    return problems
+
+
+wf_text = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
+tp = token_problems(wf_text)
+writers = sorted(n for n, b in workflow_parts(wf_text)[1].items() if can_write(*sub_block(b, "permissions", 4)))
+say(not tp, "P12 the job's token: the workflow gives every job %s (its own, read-only), the jobs whose token can write (%s) empty it, "
+    "nothing else sets it or FETCH_RETRY_OWN, and no pull_request_target%s" % (TOKEN, " ".join(writers) or "none", (": " + "; ".join(tp)) if tp else ""))
+
+
+def token_refused(name, change, words):
+    """None when ci.yml changed by CHANGE (a function of its text) is refused with WORDS in a problem."""
+    changed = change(wf_text)
+    if changed == wf_text and name != "the tier job without its empty token":
+        return "%s (cannot be made from ci.yml)" % name
+    got = token_problems(changed)
+    return None if any(words in p for p in got) else "%s (said: %s)" % (name, "; ".join(got) or "nothing")
+
+
+misses = [m for m in (
+    token_refused("a pull_request_target trigger", lambda t: t.replace("\non:\n", "\non:\n  pull_request_target:\n", 1), "pull_request_target"),
+    # Every job's own empty token taken out (the tier job's alone, today): still refused if it was never there.
+    token_refused("the tier job without its empty token", lambda t: re.sub(r"(?m)^      %s: .*\n" % TOKEN, "", t), "job tier can write"),
+    token_refused("write at the top", lambda t: t.replace("\npermissions:\n  contents: read\n", "\npermissions:\n  contents: write\n", 1),
+                  "own permissions can write"),
+    token_refused("FETCH_RETRY_OWN set", lambda t: t.replace("\nenv:\n", "\nenv:\n  FETCH_RETRY_OWN: https://example.invalid/\n", 1), "FETCH_RETRY_OWN"),
+    token_refused("a step that sets the token", lambda t: t.replace("        run: tools/ci-plan --verdict\n",
+                  "        run: tools/ci-plan --verdict\n        env:\n          %s: ${{ secrets.X }}\n" % TOKEN, 1), "somewhere else"),
+) if m]
+say(not misses, "P12 the check says no to a pull_request_target trigger, a job that can write without the empty token, write at the top, "
+    "FETCH_RETRY_OWN set and a step that sets the token%s" % (": not refused: " + ", ".join(misses) if misses else ""))
 
 # --- P5 every tracked path is known --------------------------------------------------------
 try:
