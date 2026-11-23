@@ -362,31 +362,17 @@ else:
 (bigdir / "big").unlink()
 
 # --- Linux's own driver reads the populated root (live, or the record for these exact bytes)
-TYPES = {0o100000: "reg", 0o040000: "dir", 0o120000: "lnk"}
+# The walk against e2tree's listing: ext4_walk.py's functions, which the rig's dry runs too.
+from importlib.machinery import SourceFileLoader as _Loader
+WALK = _Loader("x3_ext4_walk", str(HERE / "ext4_walk.py")).load_module()
+walked = WALK.walked
 
 
 def expected():
     # e2tree's listing of the extent image (debugfs, the oracle): path, type, mode, size, contents.
-    if not imgs.get("extents"):
+    if not imgs.get("extents") or not (OUT / "tree-extents.txt").exists():
         return []
-    text = (OUT / "tree-extents.txt").read_text() if (OUT / "tree-extents.txt").exists() else ""
-    out = []
-    for l in text.splitlines():
-        f = l.split("\t")
-        path = f[0].lstrip("/")
-        if path and path != "lost+found":
-            out.append(f"{path} {f[1]} {f[2]} {f[6]} {f[11]}")
-    return sorted(out)
-
-
-def walked(lines):
-    # The guest's `walk: PATH MODEHEX SIZE WHAT` lines in e2tree's words.
-    out = []
-    for l in lines:
-        path, mode, size, what = l.split(" ", 3)
-        m = int(mode, 16)
-        out.append(f"{path} {TYPES.get(m & 0o170000, '?')} {m & 0o7777:04o} {size} {what}")
-    return sorted(out)
+    return WALK.expected((OUT / "tree-extents.txt").read_text())
 
 
 expect = expected()
@@ -419,7 +405,7 @@ if imgs.get("extents"):
             return g.returncode, log, status, uname, mount
 
         rc, log, status, uname, mount = guest("linux", imgs["extents"], "ext4-walk.sh")
-        got = [l.split("walk: ", 1)[1].strip() for l in log.splitlines() if "walk: " in l and "walk-errors" not in l]
+        got = WALK.walk_lines(log)
         errors = [l for l in log.splitlines() if "walk-errors: " in l]
         ok = rc == 0 and status == "0" and bool(expect) and walked(got) == expect and bool(errors) and errors[-1].split()[-1] == "0"
         why = (f"the walk exited {status} in the guest (mount {mount})" if status != "0" else
@@ -446,7 +432,10 @@ if imgs.get("extents"):
             + (f"refused (cat exit {read_rc}, {derr} EXT4-fs errors), as fsck.ext2 refuses it; e2fsck -fn exit {e2}" if refused else
                f"the guest's run exited {status2}, cat exit {read_rc}, EXT4-fs errors {derr}; e2fsck -fn exit {e2}"))
         if ok and status2 == "0" and making:
-            Path(making).write_text(f"image {image_sha}\nuname {uname}\n" + "\n".join(got) + "\n"
+            Path(making).write_text(f"# E4-linux-reads' record: Linux {uname} walked the paxext2 --extents root of {len(got)} entries, each equal to\n"
+                                    "# e2tree's listing (type, mode, size, contents; a link's target as -> TARGET), and refused six read through\n"
+                                    "# a leaf whose depth disagrees with its parent's. Lines: image, uname, the walk, depth.\n"
+                                    + f"image {image_sha}\nuname {uname}\n" + "\n".join(got) + "\n"
                                     + f"depth {depth_sha} read {read_rc} errors {derr}\n")
             print(f"ext4.py: the record written to {making}", flush=True)
     elif making:
@@ -457,7 +446,7 @@ if imgs.get("extents"):
         print(f"SKIP E4-linux-reads no readable Linux kernel ({kernel}) and no record ({record.name})", flush=True)
         print(f"SKIP E4-linux-depth no readable Linux kernel ({kernel}) and no record ({record.name})", flush=True)
     else:
-        rec = record.read_text().splitlines()
+        rec = [l for l in record.read_text().splitlines() if not l.startswith("#")]
         made = rec[1].split()[-1] if len(rec) > 1 else "?"
         print(f"LOUD: E4-linux-reads, E4-linux-depth: no readable Linux kernel ({kernel}) or PAX_LINUX=recorded: the record, made on Linux {made}", flush=True)
         walk_lines = [l for l in rec[2:] if not l.startswith("depth ")]
