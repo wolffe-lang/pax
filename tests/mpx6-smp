@@ -13,7 +13,8 @@
 # The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green), the
 # harness's processor knob (knob-selftest.sh: PAX_SMP through tools/qemu-run and tools/tour) and the
 # entry path's frame offsets (frame-layout.py, FRAME-LAYOUT, with its own proof) and the waits that ask for a pending
-# signal (wait-census.py, WAIT-CENSUS, with its own proof). Then per
+# signal (wait-census.py, WAIT-CENSUS, with its own proof), and every change of a thread's signal mask
+# offers the process's pending signals to its other threads (MASK-CENSUS, the same script). Then per
 # tier: kmain_console with tests/mpx6-smp.d/probe.c as its only command, booted under each firmware:
 #   - at each of SMP_COUNTS processors, the default kind: SMP-ACTIVE, SMP-RUN, SMP-TLB, SMP-SIGNAL,
 #     SMP-EXIT, SMP-WAIT;
@@ -70,7 +71,8 @@ python3 -I -B tests/mpx6-smp.d/rows-selftest.py
 bash tests/mpx6-smp.d/knob-selftest.sh
 python3 -I -B tests/mpx6-smp.d/frame-layout.py --selftest
 python3 -I -B tests/mpx6-smp.d/frame-layout.py .
-# every interruptible wait asks for a pending signal before it switches away (the sleeper rounds' lost wake)
+# every interruptible wait asks for a pending signal before it switches away (the sleeper rounds' lost wake), and
+# every mask change offers the process's pending signals to its other threads
 python3 -I -B tests/mpx6-smp.d/wait-census.py --selftest
 rc=0
 python3 -I -B tests/mpx6-smp.d/wait-census.py . || rc=1 # red, and the boots still run: SMP-SIGNAL's sleeper shows the cost
