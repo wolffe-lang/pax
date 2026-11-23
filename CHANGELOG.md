@@ -7,6 +7,16 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **`pax.services=alpha`: init starts alpha in the hooks' place.** With that word on the kernel command line,
+  `/bin/init` removes alpha's state from an earlier boot, starts `/bin/alpha manager --kmsg` as a job in pid 1's
+  session (a process group of its own; descriptor 0 `/dev/null`, 1 and 2 `/dev/kmsg`), and runs only the boot hooks
+  that have no alpha unit of their name. It keeps alpha: an end is one line and a start again 1 s later, doubling
+  to 60 s while it keeps ending within 2 s; a first run that ends with status 1 or 2 (alpha's own refusal), or no
+  `/bin/alpha`, runs the hooks instead. No word, or `pax.services=hooks`, is today's boot. `user/alpha.pin` moves to
+  alpha `82e07e7` (one waiter for the manager's life, `--kmsg`). `tests/mpx5-init` gains I17-I22: alpha's place in
+  pid 1's session and its descriptors, a SIGKILLed alpha started again, the two fallbacks, the word's absence, and
+  `reboot -h` stopping alpha's units before the kernel's end.
+
 - **alpha on the image, with nothing to start.** `/bin/alpha`, the service
   manager in wolf (`user/alpha.pin`), is in both images: `tools/mkalpha`
   builds it from alpha's own tree with the toolchain that tree pins, through
