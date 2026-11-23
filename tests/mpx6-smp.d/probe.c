@@ -639,8 +639,15 @@ static void row_signal(int samples) {
             for (int k = 0; k < 10; k++) { sent[k] = rdtsc(); sc(NR_KILL, getpid(), SIGUSR1, 0); nap(5000000); }
             nap(50000000);
             take(&a1);
+            /* each send's latency: to the first handler entry at or after it (entries are in time order; a send merged
+               into one still pending is answered by that one's late entry, so the worst is the oldest pending signal's
+               wait, not a pairing of the k-th entry with the k-th send, which a merge shifts by a send interval) */
             U n = G->count, worst = 0;
-            for (U i = 0; i < n && i < 10; i++) { U d = G->ht[i] > sent[i] ? G->ht[i] - sent[i] : 0; if (d > worst) worst = d; }
+            for (int k = 0; k < 10; k++) {
+                U d = cycles_of_ms(1000);
+                for (U i = 0; i < n && i < 16; i++) if (G->ht[i] >= sent[k]) { d = G->ht[i] - sent[k]; break; }
+                if (d > worst) worst = d;
+            }
             l.n = 0; ls(&l, "SMP-SIGNAL sleeper-ten round "); ld(&l, (U)round); ls(&l, " taken "); ld(&l, n);
             ls(&l, " worst-us "); ld(&l, us_of(worst));
             ls(&l, " set "); lsd(&l, a0.sset < 0 || a1.sset < 0 ? -1 : a1.sset - a0.sset);
