@@ -143,9 +143,18 @@ def exit_lines(n, stage=2, statuses=('0x700', '0x700', '0x800', '0x800'), after=
     return out + f'SMP-EXIT frames-kb before 200000 after {after}\nSMP-EXIT stopped {stopped}\nSMP-EXIT done\n'
 
 
-def wait_lines(n, stage=2, right=16, cpus=None):
+def wait_lines(n, stage=2, right=16, cpus=None, ticks='seen'):
+    # ticks: each processor's ring-3 ticks gained while the children ran (the kernel's counters): 'seen' gives +30 to
+    # each processor the sampler saw and +0 to the rest; a list gives them one by one; None prints no line (a probe
+    # from before the counters)
     cpus = cpus or ('0' if stage == 1 else ','.join(str(i) for i in range(min(n, 16))))
-    return f'SMP-WAIT statuses right {right} of 16 cpu-us 2800000 expected-us 2720000 cpus {cpus}\nSMP-WAIT done\n'
+    out = f'SMP-WAIT statuses right {right} of 16 cpu-us 2800000 expected-us 2720000 cpus {cpus}\n'
+    if ticks == 'seen':
+        seen = {int(x) for x in cpus.split(',')}
+        ticks = ['+30' if i in seen else '+0' for i in range(n)]
+    if ticks is not None:
+        out += 'SMP-WAIT user-ticks' + ''.join(f' {i}:{d}' for i, d in enumerate(ticks)) + '\n'
+    return out + 'SMP-WAIT done\n'
 
 
 def tail():
@@ -172,9 +181,10 @@ cases = []  # (name, text, args, meta, dumps, files, passes, fails)
 KVM, TCG = 'accel: kvm\n', 'accel: tcg\n'
 
 
-def case(name, text, args, passes, fails, meta=KVM, dumps=(), files=None, why=None):
-    # why: a regular expression some `FAIL ROW …` line must match (the red for the reason named, not only the row)
-    cases.append((name, text, args, meta, list(dumps), files or {}, set(passes), set(fails), why))
+def case(name, text, args, passes, fails, meta=KVM, dumps=(), files=None, why=None, says=None):
+    # why: a regular expression some `FAIL ROW …` line must match (the red for the reason named, not only the row);
+    # says: one some line of the row's output must match (what a green row prints, such as the processors it missed)
+    cases.append((name, text, args, meta, list(dumps), files or {}, set(passes), set(fails), why, says))
 
 
 # --- the default kind ----------------------------------------------------------------------------
@@ -260,6 +270,21 @@ case('a wrong wait status', rows_text(4, wait=wait_lines(4, right=15)), ['--kind
      ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'})
 case('children on one processor', rows_text(4, wait=wait_lines(4, cpus='0')), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'})
+# SMP-WAIT counts the processors the children ran on from the kernel's ring-3 ticks, not from the sampler, which never
+# sees a child on the processor it runs on itself (dev-final3's boot at 16: the sampler missed 0, its own, and 8, idle)
+all16 = ','.join(str(i) for i in range(16))
+case("the sampler misses its own processor and an idle one; the kernel's ticks count fifteen",
+     rows_text(16, wait=wait_lines(16, cpus=','.join(str(i) for i in range(16) if i not in (0, 8)),
+                                   ticks=['+0' if i == 8 else '+30' for i in range(16)])),
+     ['--kind', 'rows', '--smp', '16'], ALL6, set(), says=r'^PASS SMP-WAIT .*missed \[8\]')
+case("the kernel's ticks count fourteen though the sampler saw sixteen",
+     rows_text(16, wait=wait_lines(16, cpus=all16, ticks=['+0' if i in (0, 8) else '+30' for i in range(16)])),
+     ['--kind', 'rows', '--smp', '16'], ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'}, why=r'ran on 14 processors')
+case('a processor with one ring-3 tick did not run the children (the sampler or the parent may take a tick)',
+     rows_text(4, wait=wait_lines(4, ticks=['+30', '+30', '+1', '+1'])), ['--kind', 'rows', '--smp', '4'],
+     ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'}, why=r'ran on 2 processors')
+case("no SMP-WAIT user-ticks line (a probe from before the kernel's counters)", rows_text(4, wait=wait_lines(4, ticks=None)),
+     ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'}, why=r'no SMP-WAIT user-ticks line')
 case('a kernel panic mid-run', rows_text(4, extra='PANIC page fault vector 14 error 0x0 rip 0xffffffff80012345 rsp 0xffffd00000027f00 frame 0xffffd00000027e40 cr2 0x0\n'),
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-RUN', 'SMP-EXIT'}, {'SMP-RUN', 'SMP-EXIT'})
 t = rows_text(4)
@@ -581,7 +606,7 @@ with tempfile.TemporaryDirectory() as td:
     td = pathlib.Path(td)
     (td / 'nm.txt').write_text(''.join(f'{v[0]:016x} {v[1]:016x} T {k}\n' for k, v in SYMS.items()))
     (td / 'expected.json').write_text(json.dumps(EXPECTED))
-    for name, text, args, meta, dumps, files, passes, fails, why in cases:
+    for name, text, args, meta, dumps, files, passes, fails, why, says in cases:
         s = td / 'serial.log'
         s.write_text(text)
         for suffix in ('.cmd2', '.cmd5', '.cmd8', '.meta', '.times'):
@@ -604,10 +629,11 @@ with tempfile.TemporaryDirectory() as td:
         wrong = (passes - got_pass) | (fails - got_fail) | (got_fail - fails) | (passes & got_fail)
         code_ok = (r.returncode != 0) == bool(fails)
         why_ok = why is None or any(re.search(why, x) for x in re.findall(r'^FAIL .*$', r.stdout, re.M))
-        if wrong or not code_ok or r.stderr or not why_ok:
+        says_ok = says is None or re.search(says, r.stdout, re.M) is not None
+        if wrong or not code_ok or r.stderr or not why_ok or not says_ok:
             bad += 1
             print(f'FAIL ROWS-SELFTEST {name}: want pass {sorted(passes)} fail {sorted(fails)}'
-                  f'{"" if why is None else f" by {why!r}"}; '
+                  f'{"" if why is None else f" by {why!r}"}{"" if says is None else f", saying {says!r}"}; '
                   f'got pass {sorted(got_pass)} fail {sorted(got_fail)} exit {r.returncode}')
             print(r.stdout + r.stderr)
         else:
