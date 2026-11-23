@@ -130,6 +130,7 @@ use cred
 use cpus
 use ext2
 use frames
+use heap
 use journal
 use kmsg
 use latency
@@ -1268,7 +1269,8 @@ fn paxrand(base: u64) -> u64 {
 
 /// Available firmware processors are distinct from the one active processor.
 /// px161: then the processors that entered PAX (`started`) and those parked
-/// idle (`idle`), and a line a processor, by kernel/smp's index:
+/// idle (`idle`); px166: whether the heap was started (`heap-started 0|1`,
+/// kernel/heap's `is_up`); and a line a processor, by kernel/smp's index:
 ///   cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K tlb S nmis N
 ///   cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K tlb S wakes W nmis N
 ///   cpu I apic A idle current idle ticks T wakes W nmis N
@@ -1304,6 +1306,11 @@ fn paxcpus(base: u64) -> u64 {
     n = put_dec(base, n, smp.started())
     n = put_s(base, n, "\nidle ")
     n = put_dec(base, n, smp.idle_count())
+    // px166: whether the kernel's heap was started. The console kernel starts
+    // none, so the runtime can allocate nothing on any processor, locked or
+    // not, and an allocation panics by name (tests/mpx6-smp's SMP-NOHEAP).
+    n = put_s(base, n, "\nheap-started ")
+    n = put_dec(base, n, if heap.is_up() { 1 } else { 0 })
     n = put_b(base, n, 10)
     let total = smp.total()
     var i: u64 = 0
