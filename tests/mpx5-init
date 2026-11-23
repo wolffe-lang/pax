@@ -24,7 +24,8 @@
 # execs init as on an installed system; login and sudo (tools/mkauth; sudo
 # set-user-ID root, its shipped policy), pelt as /bin/sh, boreutils' cat cut id
 # kill ls sleep stat stty touch tr, reboot and poweroff (tools/mkdiskprobe),
-# last (tools/mklogd: I16 reads the login records with it),
+# last (tools/mklogd: I16 reads the login records with it), /bin/alpha (tools/mkalpha: the service manager
+# init starts under `pax.services=alpha`, rows I17-I22),
 # user/elf/detach.c (a process that calls setsid and lives on) and
 # user/elf/ttymode.c (the console's echo, canonical and signal bits); an
 # /etc/passwd with root, pax (in group sudo), bob and lobo (/bin/false);
@@ -37,7 +38,8 @@
 #
 # The rows (tests/mpx5-init.d/rows.py's header has each), on every tier and
 # firmware asked: I1-I12 on the image booted from an ISO (the tree in memory),
-# I13 with `/` on an ext2 disk (root=/dev/vda rw), two boots of one disk. The
+# I13 with `/` on an ext2 disk (root=/dev/vda rw), two boots of one disk; I17-I22 on boots of their
+# own with `pax.services=` on the kernel command line. The
 # passwords are made at run time (Python's secrets, hashed by mkshadow on its
 # standard input), never written to the tree, an argument vector, a log or a
 # record.
@@ -104,6 +106,14 @@ if [ -z "$images" ]; then
     # last as the images carry it (tools/mklogd, user/auth/utmp.lu beside it): I16 reads wtmp with it.
     "$PAX_ROOT/tools/mklogd" "$work/logd" > "$work/logd.txt" 2>&1 || why+=" tools/mklogd;"
     cp "$work/logd/last" "$r/bin/last" 2>/dev/null || why+=" no last;"
+    # /bin/alpha as the images carry it (tools/mkalpha): init starts it under `pax.services=alpha` (I17-I22); a
+    # tree from before it has no tools/mkalpha, and then the alpha rows fail by name.
+    if [ -x "$PAX_ROOT/tools/mkalpha" ]; then
+        "$PAX_ROOT/tools/mkalpha" "$work/alpha" > "$work/alpha.txt" 2>&1 && cp "$work/alpha/alpha" "$r/bin/alpha" \
+            || { tail -n 20 "$work/alpha.txt" >&2; why+=" tools/mkalpha;"; }
+    else
+        missing+=" /bin/alpha (no tools/mkalpha in this tree)"
+    fi
     gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$r/bin/detach" "$PAX_ROOT/user/elf/detach.c" > "$work/detach.txt" 2>&1 || why+=" gcc: detach.c;"
     gcc -static -no-pie -O2 -Wall -Wextra -Wl,--build-id=none -Wl,-z,noexecstack \
