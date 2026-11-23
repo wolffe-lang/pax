@@ -72,7 +72,7 @@ are otherwise as they ran):
   21600` each, detached, pid, log and exit marker). dnsmasq runs on a tap in the container's own network namespace
   (`/dev/net/tun`, CAP_NET_ADMIN: nothing of the lane host's network is touched).
 - **The metal target** (read once, 2026-11-03 23:05Z): the cabled port is the I225-V, PCI `70:00.0`, `8086:15f3` rev 03,
-  BAR0 1 MiB at 0xa4900000 (32-bit), BAR3 16 KiB, `enp112s0`, MAC `7c:10:c9:3f:cb:9c`, 1000 Mb/s, DHCP from
+  BAR0 1 MiB at 0xa4900000 (32-bit), BAR3 16 KiB, `enp112s0`, MAC `(the network card's address, withheld)`, 1000 Mb/s, DHCP from
   `192.168.0.1` on `192.168.0.0/24`. The other port is an Aquantia AQC113CS (`6f:00.0`, `1d6a:94c0`), no cable.
 - **The datasheets**: the I225/I226 public datasheet has no register map, no descriptor layout, no reset, PHY or
   interrupt programming (Intel's I225 software manual is not public and was not read). The 82576 and I210
@@ -240,7 +240,7 @@ byte-identical. The stick: `~/pax-smoke/pax-wire-f68505c6.img` on the build Mac,
 `ba06df59…358c7` (read twice on the lane host, twice on the build Mac), with `~/pax-smoke/README-wire-f68505c6.txt` (a copy in
 `notes/px89/stick-README.txt`).
 
-The I225-V on the metal target: PCI `70:00.0`, `8086:15f3` rev 03, `enp112s0`, MAC `7c:10:c9:3f:cb:9c`, the port cabled
+The I225-V on the metal target: PCI `70:00.0`, `8086:15f3` rev 03, `enp112s0`, MAC `(the network card's address, withheld)`, the port cabled
 today (CachyOS's `lspci -nn` and `/sys/class/net`, read once; `notes/px89/blackbox.txt` §3). The stick's own
 `net: Intel I225/I226 8086:15f3 at 70:00.0` line will confirm it from PAX's side.
 
