@@ -801,6 +801,12 @@ record() { # tier leg boot status
 # Run k's transcript: from its `run <k>:` line to the kernel's `user:
 # frames free …` line after it (the run's report: its tree and its
 # sockets' lines follow), the kernel's own lines left out.
+run_raw() { # norm k -> run k's part with the kernel's lines kept
+    awk -v k="$2" '
+        $0 ~ "^run " k ": " { on = 1; next }
+        on && /^run [0-9]+: |^run: [0-9]+ commands$|^user: frames free / { exit }
+        on { print }' "$1"
+}
 run_part() { # norm k
     awk -v k="$2" '
         $0 ~ "^run " k ": " { on = 1; next }
@@ -920,7 +926,16 @@ for leg in $legs; do
                             pjobs-*) grep -q '^\$ ' "$out.cmp" || why+=" no prompt;"
                                      for w in $(pwitness "${n#pjobs-}"); do
                                          grep -q -- "$w" "$out.cmp" || why+=" no '$w';"
-                                     done ;;
+                                     done
+                                     case $n in
+                                         *c_jc_ctrl_c_loop)
+                                             # the loop's ^C killed the sleep that held the terminal, before the next exec
+                                             run_raw "$norm" "$k" | awk '
+                                                 !seen && index($0, "^C") { seen = 1; $0 = substr($0, index($0, "^C") + 2) }
+                                                 seen && /user: sleep pid [0-9]+ killed: SIGINT/ { ok = 1; exit }
+                                                 seen && /user: exec pid / { exit }
+                                                 END { exit !ok }' || why+=" the loop's ^C killed no sleep before the next exec;" ;;
+                                     esac ;;
                             groups|groups-user)
                                 for w in st=124 st=137 st=125 st=126 st=127 st=143 'st=1$' Terminated Killed RTMAX checked \
                                          st=139 st=162 '^ 0 EXIT Unknown signal 0$'; do # px53: the last three
