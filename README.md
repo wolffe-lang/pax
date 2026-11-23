@@ -1055,11 +1055,12 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   `tools/fetch-wolf` and the census go through it (`tests/fetch-retry-selftest`). Every download goes through its
   `--url` mode in the same way, checked against the pinned sha256 before it is kept: the release archives of
   `tools/fetch-wolf`, `fetch-lupin` and `fetch-limine`, the toolchain archives every `tools/mk*` stages, the packages
-  of `tools/fetch-arch` and `tools/disktools`, and the census's downloads. `tools/fetch-busybox` alone keeps its own
-  envelope, below.
+  of `tools/fetch-arch` and `tools/disktools`, and the census's downloads. `tools/fetch-busybox` alone keeps its own,
+  shorter envelope, below: this helper's waits and floor would not fit the USB suite's 120-second fetch phase.
 - `tools/fetch-busybox` also retries a failed download: three attempts at most, 25 seconds each (10 to connect),
   with exponential backoff of 1 and 2 seconds and a 90-second retry envelope, inside the USB test's unchanged
-  120-second fetch phase. The archive and extracted binary still have to match their pinned SHA-256 digests;
+  120-second fetch phase ([#445](https://github.com/wolffe-lang/pax/issues/445)); `tests/mpx5-jobs` and
+  `tests/mpx5-pelt` fetch BusyBox through it too. The archive and extracted binary still have to match their pinned SHA-256 digests;
   `tests/fetch-busybox-selftest` exercises real curl against a local HTTP server, including failures and recovery.
 
 ## Hosts
