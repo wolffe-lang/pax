@@ -120,6 +120,13 @@ on:
 permissions:
   contents: read
 
+# Each job's own token, read-only (above), for tools/fetch-retry's fetches of
+# our own repositories and releases, so they do not share the anonymous
+# limit of the runners' addresses. A job whose token can write empties it;
+# tests/ci-plan's P12 holds that, and that no pull_request_target run gets it.
+env:
+  PAX_FETCH_TOKEN: ${{ github.token }}
+
 # A pull request's runs: one group per branch and tier, cancel-in-progress,
 # so a new push frees the slots of the run it supersedes. The full run
 # and the pr run live in SEPARATE groups (adding the label must not cancel
@@ -7071,9 +7078,13 @@ jobs:
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # Its token may write issues; nothing else. So the token the workflow
+    # hands every job for fetches is not this job's to hand on.
     permissions:
       contents: read
       issues: write
+    env:
+      PAX_FETCH_TOKEN: ""
     steps:
       - uses: actions/checkout@v4
         with:
