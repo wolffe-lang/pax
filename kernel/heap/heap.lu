@@ -185,6 +185,8 @@ struct HeapState {
     class_top: u64, // class-zone pages mapped: [CLASS_ZONE, CLASS_ZONE + class_top)
     class_desc_pages: u64, // the class zone's descriptor pages mapped
     frames_n: u64, // every frame the heap took from kernel/frames: its pages, its books, their tables
+    lock_word: u64, // px166: kernel/klock's owner word once kmain watches it (`watch_lock`), else 0
+    unlocked_n: u64, // px166: the runtime's allocations while that word read 0 (no processor held the lock)
 }
 
 /// Whether `start` has mapped the state page; the module's one `var`.
@@ -795,11 +797,43 @@ pub fn report() {
 
 // --- wolf's allocator hook (kw12, [abi.target.none.hooks] (d)) -------------
 
+/// px166 (SMP stage 2): watch the kernel lock's owner word at `word`
+/// (kernel/klock's `owner_word`, handed in by kmain once it holds the
+/// lock): from then on every runtime allocation made while it reads 0, no
+/// processor holding the lock, is counted (`unlocked_allocations`;
+/// /proc/pax-cpus' `unlocked-allocations`, always 0: tests/mpx6-smp's
+/// SMP-LOCK). The count is a diagnostic: an increment races only with
+/// another allocation outside the lock, which is the fault it counts.
+pub fn watch_lock(word: u64) {
+    if is_up() {
+        set(offset_of(HeapState, lock_word), word)
+    }
+}
+
+/// px166: the runtime's allocations made while no processor held the
+/// kernel lock, since `watch_lock` (0 before it, and with no heap).
+pub fn unlocked_allocations() -> u64 {
+    if is_up() { get(offset_of(HeapState, unlocked_n)) } else { 0 }
+}
+
+fn note_unlocked() {
+    if !is_up() {
+        return
+    }
+    let w = get(offset_of(HeapState, lock_word))
+    // # Safety: kernel/klock's owner word, 8-aligned, live for the
+    // kernel's life; an atomic read, as klock's own.
+    if w != 0 && unsafe { (w as *u64).atomic_load(Order.relaxed) } == 0 {
+        set(offset_of(HeapState, unlocked_n), get(offset_of(HeapState, unlocked_n)) + 1)
+    }
+}
+
 /// The freestanding runtime's allocation: `size` bytes at `align`.
 export fn wolf_alloc(size: i64, align: i64) -> *u8 {
     if size <= 0 || align <= 0 {
         panic.fail("heap: wolf_alloc of a size that is not positive", size as u64)
     }
+    note_unlocked() // px166
     let a = alloc(size as u64, align as u64)
     // # Safety: an address in the heap's mapped pages, `size` bytes long.
     unsafe { a as *u8 }
