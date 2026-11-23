@@ -33,7 +33,7 @@ static L sc6(L n, L a, L b, L c, L d, L e, L f) {
 #define sc(n, a, b, c) sc6((n), (L)(a), (L)(b), (L)(c), 0, 0, 0)
 enum {
     NR_READ = 0, NR_WRITE = 1, NR_OPEN = 2, NR_CLOSE = 3, NR_MMAP = 9, NR_MPROTECT = 10, NR_MUNMAP = 11,
-    NR_SIGACTION = 13, NR_YIELD = 24, NR_MADVISE = 28, NR_NANOSLEEP = 35, NR_GETPID = 39, NR_CLONE = 56,
+    NR_SIGACTION = 13, NR_SIGPROCMASK = 14, NR_YIELD = 24, NR_MADVISE = 28, NR_NANOSLEEP = 35, NR_GETPID = 39, NR_CLONE = 56,
     NR_FORK = 57, NR_EXECVE = 59, NR_EXIT = 60, NR_WAIT4 = 61, NR_KILL = 62, NR_GETRUSAGE = 98,
     NR_REBOOT = 169, NR_GETTID = 186, NR_FUTEX = 202, NR_SETAFFINITY = 203, NR_GETAFFINITY = 204,
     NR_CLOCK_GETTIME = 228, NR_EXIT_GROUP = 231, NR_TGKILL = 234, NR_PIPE2 = 293
@@ -518,6 +518,16 @@ static void sig_cpus(struct ln *l, const char *who, L tid) {
     ls(l, " p-cpu "); lcpu(l, cpu_of(&z, gettid()));
 }
 static void t2_spin(void *arg) { (void)arg; G->t2 = (U)gettid(); G->tready = 1; for (;;) G->spins++; }
+/* the sleeper: the second thread of a process whose main thread blocks SIGUSR1; it unblocks SIGUSR1 for itself and
+   sleeps 10 ms at a time, so a SIGUSR1 sent to the process must wake it (tests/mpx3-threads' takers, which a record
+   saw take 8 of 10 at four processors where Linux took 10) */
+static void t2_sleep(void *arg) {
+    (void)arg;
+    U set = 1ul << (SIGUSR1 - 1);
+    sc6(NR_SIGPROCMASK, 1, (L)&set, 0, 8, 0, 0); /* SIG_UNBLOCK */
+    G->t2 = (U)gettid(); G->tready = 1;
+    for (;;) nap(10000000);
+}
 static void row_signal(int samples) {
     struct ln l, c;
     int st = 0, st2 = 0;
@@ -580,6 +590,39 @@ static void row_signal(int samples) {
     }
     L r = wait4(cp, &st, 0, 0);
     l.n = 0; ls(&l, "SMP-SIGNAL tgkill-status "); lx(&l, r == cp ? (U)st : 0xdead); le(&l);
+    /* the sleeper: a SIGUSR1 to the process, which only its sleeping second thread may take. The main thread spins
+       while it waits (no yield), so its own processor does not take the sleeper: the kernel must wake it where it
+       can run. Then ten sent 5 ms apart with the main thread asleep between them, as the takers probe sends them:
+       how many the sleeper took (SIGUSR1 is not queued, so one still pending when the next is sent is taken once) */
+    G->tready = 0;
+    L sp = fork();
+    if (!sp) {
+        struct thr t;
+        U set = 1ul << (SIGUSR1 - 1);
+        on(SIGUSR1, h_usr1);
+        sc6(NR_SIGPROCMASK, 0, (L)&set, 0, 8, 0, 0); /* SIG_BLOCK: the main thread never takes it */
+        spawn(&t, t2_sleep, 0);
+        await(&G->tready, 2000);
+        nap(20000000);
+        for (int k = 0; k < samples; k++) {
+            G->hit = 0;
+            c.n = 0; sig_cpus(&c, "s", (L)G->t2);
+            U t0 = rdtsc(), end = t0 + cycles_of_ms(1000);
+            sc(NR_KILL, getpid(), SIGUSR1, 0);
+            while (!G->hit && rdtsc() < end) ;
+            l.n = 0; ls(&l, "SMP-SIGNAL sleeper "); ld(&l, (U)k); ls(&l, " latency-us ");
+            if (G->hit) ld(&l, us_of(G->hit - t0)); else lc(&l, '-');
+            c.b[c.n] = 0; ls(&l, c.b); le(&l);
+            nap(20000000);
+        }
+        G->count = 0;
+        for (int k = 0; k < 10; k++) { sc(NR_KILL, getpid(), SIGUSR1, 0); nap(5000000); }
+        nap(50000000);
+        l.n = 0; ls(&l, "SMP-SIGNAL sleeper-ten taken "); ld(&l, G->count); le(&l);
+        exit_group(0);
+    }
+    r = wait4(sp, &st, 0, 0);
+    l.n = 0; ls(&l, "SMP-SIGNAL sleeper-status "); lx(&l, r == sp ? (U)st : 0xdead); le(&l);
     take(&r1);
     l.n = 0; ls(&l, "SMP-SIGNAL resched");
     for (int i = 0; i < r1.n; i++) {
