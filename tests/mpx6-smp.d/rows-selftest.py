@@ -109,7 +109,7 @@ def tlb_lines(stage=2, faulted='yes', lat=40, stale=0, tlb='+1', bfault='no'):
 
 
 def signal_lines(stage=2, usr1=None, kill=None, tgk=None, tid='yes', kill_status='0x9', resched='0:1 1:23 2:0 3:0',
-                 held='yes'):
+                 held='yes', sleeper=None, ten=10, sleeper_status='0x0'):
     w = '-' if stage == 1 else '1'
     usr1 = usr1 or [30] * 9
     kill = kill or [50] * 5
@@ -118,8 +118,13 @@ def signal_lines(stage=2, usr1=None, kill=None, tgk=None, tid='yes', kill_status
     out += f'SMP-SIGNAL stop status 0x137f cont status 0xffff held {held} resumed yes\n'
     out += ''.join(f'SMP-SIGNAL kill {k} latency-us {v} status {kill_status} w-cpu {w} p-cpu 0\n' for k, v in enumerate(kill))
     out += ''.join(f'SMP-SIGNAL tgkill {k} latency-us {v} tid-ok {tid} t-cpu {w} m-cpu 0\n' for k, v in enumerate(tgk))
+    out += 'SMP-SIGNAL tgkill-status 0x0\n'
+    # the sleeper: a SIGUSR1 to a process whose main thread blocks it, its second thread asleep (`-` the sleeper's cpu)
+    if sleeper != 'none':
+        out += ''.join(f'SMP-SIGNAL sleeper {k} latency-us {v} s-cpu - p-cpu 0\n' for k, v in enumerate(sleeper or [40] * 9))
+        out += f'SMP-SIGNAL sleeper-ten taken {ten}\nSMP-SIGNAL sleeper-status {sleeper_status}\n'
     out += f'SMP-SIGNAL resched {resched}\n' if resched is not None else ''
-    return out + 'SMP-SIGNAL tgkill-status 0x0\nSMP-SIGNAL done\n'
+    return out + 'SMP-SIGNAL done\n'
 
 
 def exit_lines(n, stage=2, statuses=('0x700', '0x700', '0x800', '0x800'), after=200000, stopped='none'):
@@ -195,6 +200,25 @@ case('no RESCHED taken where the targets ran', rows_text(4, signal=signal_lines(
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'})
 case('no resched line', rows_text(4, signal=signal_lines(resched=None)), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'})
+# the sleeper (tests/mpx3-threads' takers at four processors): a process-directed SIGUSR1 that only a sleeping second
+# thread may take, woken where it can run; and ten 5 ms apart, each taken before the next comes (not queued: one
+# still pending is taken once)
+case('the sleeper woken within a tick: green', rows_text(4, signal=signal_lines()), ['--kind', 'rows', '--smp', '4'],
+     ALL6, set())
+case('the sleeper waits for a tick: red', rows_text(4, signal=signal_lines(sleeper=tick)), ['--kind', 'rows', '--smp', '4'],
+     ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'sleeper: \d+ of 9 within 2 ms')
+case('the sleeper waits for a tick under TCG: printed, not gated', rows_text(4, signal=signal_lines(sleeper=tick)),
+     ['--kind', 'rows', '--smp', '4'], ALL6, set(), meta=TCG)
+case('the sleeper took 8 of 10: red', rows_text(4, signal=signal_lines(ten=8)), ['--kind', 'rows', '--smp', '4'],
+     ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'took 8 of ten')
+case('the sleeper took 8 of 10 under TCG: printed, not gated', rows_text(4, signal=signal_lines(ten=8)),
+     ['--kind', 'rows', '--smp', '4'], ALL6, set(), meta=TCG)
+case('the sleeper never woken', rows_text(4, signal=signal_lines(sleeper=[40] * 8 + ['-'])), ['--kind', 'rows', '--smp', '4'],
+     ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'never ran')
+case('no sleeper lines', rows_text(4, signal=signal_lines(sleeper='none')), ['--kind', 'rows', '--smp', '4'],
+     ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'sleeper')
+case('the sleeper\'s process ended badly', rows_text(4, signal=signal_lines(sleeper_status='0x8b')),
+     ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'}, why=r'sleeper process ended')
 case('SIGSTOP not held: the target spun on after its stop status (its processor had nothing else to take)',
      rows_text(4, signal=signal_lines(held='no')), ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-SIGNAL'}, {'SMP-SIGNAL'},
      why=r'SIGSTOP not held')
