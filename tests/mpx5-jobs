@@ -171,7 +171,22 @@
 #      container's too (J3); its J4 witness: pelt's prompt, and over the
 #      image the job lines (`Stopped`, `Running`, `Done`, `Terminated`,
 #      `Killed`, `Stopped (tty input)`) and `leader`, `foreground`,
-#      `own-group`, `group-is-pid` from /proc/<pid>/stat.
+#      `own-group`, `group-is-pid` from /proc/<pid>/stat. The pjobs boots
+#      type a key at a running program (`^~`) 2.5 s after the step before,
+#      not qemu-halt's 2 s. At 2 s, c_jc_ctrl_c_loop's ^C fell at the end
+#      of its second `sleep 1` in 2 of 20 boots of that case alone: after
+#      that job ended and before pelt took the terminal back, when the
+#      terminal's group has no live process. A key there reaches no one,
+#      and no shell on any kernel can promise its delivery (pelt's moment
+#      is longer than dash's: pelt#144). At 2.5 s the key falls 0.3 s or
+#      more inside the third sleep. Its J4 witness holds the kernel's own
+#      line that the key killed that sleep (`user: sleep pid N killed:
+#      SIGINT`, before the next exec), a kernel fact whatever the shell
+#      does next. Keys swept over the loop's period on PAX: of 120, 113
+#      fell during a sleep and every one was delivered; 7 fell between a
+#      sleep's end and the next exec (6 the shell heard, 1 reached an
+#      empty group); the kernel lost none. Keys typed into that boundary
+#      are measured apart and reported, never gated.
 #   J10 px51: groups and groups-user byte-identical to real root's
 #      recordings, the user's to the container's too (J3); its J4
 #      witness: a group sent to (`Terminated`, `Killed`), `kill 0`'s
@@ -366,6 +381,9 @@ if [ -n "${PAX_JOBS_BOOTS:-}" ]; then
     subset=" (a subset, PAX_JOBS_BOOTS: $BOOTS)"
     say "boots: $BOOTS (PAX_JOBS_BOOTS: a subset of the suite's boots, not its verdict)"
 fi
+image_pause() { # image -> the seconds a `^~` key waits after the step before (qemu-halt's PAX_TYPE_PAUSE)
+    case $1 in pjobs|pjobs-user) echo 2.5 ;; *) echo "${PAX_TYPE_PAUSE:-2}" ;; esac
+}
 booted() { # image -> whether one of BOOTS boots it
     case " $BOOTS " in *" $1:"*) return 0 ;; esac
     return 1
@@ -839,7 +857,7 @@ for leg in $legs; do
             fi
             image_keys "$im" > "$images/$bn.keys"
             hrc=0
-            "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 512M \
+            PAX_TYPE_PAUSE=$(image_pause "$im") "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$log" --timeout 900 --qemu -m --qemu 512M \
                 --elf "$elf" --marker 'halt|PANIC .*' --type "$images/$bn.keys" --prompt "$(image_prompt "$im")" --keyboard "$kb" "$iso" >"$log.verdict" 2>&1 || hrc=$?
             record "$tier" "$leg" "$bn" "$hrc"
             norm=$log.norm; serial_norm "$log" > "$norm"
