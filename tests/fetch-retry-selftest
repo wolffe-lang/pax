@@ -4,7 +4,8 @@
 # (px85, pax#259). No network: a local repository fetched through file://,
 # a fake `git` ahead of the real one that fails the first N fetches with
 # the words a real failure prints, and a fake `sleep` that records the
-# waits instead of sleeping them.
+# waits instead of sleeping them; for the token's rows, a local stand-in
+# for github.com and a second host, both recording the headers sent them.
 #
 #   R1  a reset on attempt 1 (pax#259's own `curl 56 Recv failure`), then
 #       fetched: exit 0, attempt 2 of 3, one wait of 10 s, the commit
@@ -22,6 +23,16 @@
 #   R10 any other refusal (HTTP 404, 401) on a git fetch: exit 4, one
 #       fetch, even beside a message that would otherwise read as a
 #       dropped connection.
+#   T1  the job's token (PAX_FETCH_TOKEN) on a git fetch of our own
+#       repository: git's http.extraheader for https://github.com/
+#       wolffe-lang/ alone, appended to any GIT_CONFIG_ entries already
+#       there, from the environment: not on git's command line, in no
+#       line printed but `with the job's token`.
+#   T2  no header for another owner, host or scheme, nor for our own
+#       repository without a token.
+#   T3  our own repository's 403, three times, with the token: gave up by
+#       name, the token in no line; a token with a character no token has
+#       is refused (exit 2) without being printed or fetched with.
 #   R6  a server error (HTTP 503) on attempt 1: tried again, fetched.
 #   R7  a stalled transfer (curl 28, `Operation too slow`, the floor): tried
 #       again, fetched.
@@ -47,6 +58,14 @@
 #   U8  tools/fetch-wolf's release archive comes through `tools/fetch-retry
 #       --url`, and no bare curl is left in it (pax#517's run 44993722155,
 #       first attempt: one 403 from the download host ended a job).
+#   T4  --url, the token on a download from our own releases: a header in
+#       a config curl reads on stdin, not on curl's command line, in no
+#       line printed.
+#   T5  --url through the real curl: the token reaches the stand-in for
+#       github.com and not the host its redirect names (the release
+#       archive's own host).
+#   T6  --url through the real curl: no token for another owner's URL,
+#       nor without one.
 #   U9  every download of the harness goes through `tools/fetch-retry
 #       --url`: no curl writing a file in tools/ or the census's stage.sh
 #       but tools/fetch-busybox's (its own envelope inside the USB test),
@@ -57,10 +76,15 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 helper=$root/tools/fetch-retry
 w=$(mktemp -d "${TMPDIR:-/tmp}/fetch-retry-selftest.XXXXXX")
-trap 'rm -rf "$w"' EXIT
+spid=
+trap '[ -z "$spid" ] || kill "$spid" 2>/dev/null; rm -rf "$w"' EXIT
 fail=0
 bad() { echo "FAIL $*"; fail=1; }
 ok() { echo "PASS $*"; }
+# CI hands every job its token for tools/fetch-retry's fetches of our own
+# repositories: every row runs without it, T1 to T6 with one of their own.
+[ -z "${PAX_FETCH_TOKEN:-}" ] || echo "fetch-retry-selftest: PAX_FETCH_TOKEN is set here (${#PAX_FETCH_TOKEN} characters); the rows run without it"
+unset PAX_FETCH_TOKEN FETCH_RETRY_OWN GIT_CONFIG_COUNT
 
 real_git=$(command -v git) || { echo 'fetch-retry-selftest: no git' >&2; exit 2; }
 mkdir -p "$w/bin" "$w/state"
@@ -68,10 +92,16 @@ cat > "$w/bin/git" <<'EOF'
 #!/bin/sh
 case " $* " in
     *" fetch "*)
+        if [ -n "${FAKE_RECORD:-}" ]; then
+            printf '%s\n' "$*" > "$FAKE_RECORD.argv"
+            env | grep '^GIT_CONFIG_' | sort > "$FAKE_RECORD.env" || true
+        fi
         n=$(cat "$FAKE_STATE/fetches" 2>/dev/null || echo 0)
         n=$((n + 1))
         echo "$n" > "$FAKE_STATE/fetches"
         if [ "$n" -le "${FAKE_FAILS:-0}" ]; then cat "$FAKE_ERR" >&2; exit 128; fi
+        # A recorded fetch (T1-T3) answers without the network.
+        [ -z "${FAKE_RECORD:-}" ] || exit 0
         ;;
 esac
 exec "$REAL_GIT" "$@"
@@ -146,6 +176,61 @@ fatal: the remote end hung up unexpectedly" "$pin" "$pin"
     else bad "R10: $code: rc $rc, $fetches fetches, waits '$sleeps'"; fi
 done
 
+# T1-T3: the job's token on a git fetch of our own repositories. The fake git records its command line and
+# every GIT_CONFIG_ variable it was given, and answers without the network.
+# trun NAME REPO TOKEN FAILS [VAR=VALUE ...]: one fetch-retry of REPO's main (no pin), with
+# PAX_FETCH_TOKEN=TOKEN (empty: unset) and the variables given.
+trun() {
+    local name=$1 repo=$2 tok=$3 fails=$4
+    shift 4
+    rm -rf "$w/dst" "$w/state"; mkdir -p "$w/state"
+    "$real_git" init -q "$w/dst"
+    printf '%s\n' "fatal: unable to access '$repo/': The requested URL returned error: 403" > "$w/err.txt"
+    rc=0
+    env ${tok:+PAX_FETCH_TOKEN=$tok} "$@" PATH="$w/bin:$PATH" REAL_GIT="$real_git" FAKE_STATE="$w/state" FAKE_FAILS="$fails" \
+        FAKE_ERR="$w/err.txt" FAKE_RECORD="$w/state/rec" sh "$helper" "$w/dst" "$repo" main > "$w/$name.out" 2> "$w/$name.err" || rc=$?
+    fetches=$(cat "$w/state/fetches" 2>/dev/null || echo 0)
+    sed "s/^/  $name: /" "$w/$name.err"
+}
+tok=pax-selftest-token-a1
+b64=$(printf 'x-access-token:%s' "$tok" | base64 | tr -d '\n')
+hdr="http.https://github.com/wolffe-lang/.extraheader"
+trun T1 https://github.com/wolffe-lang/pelt "$tok" 0
+t1a=$(tr '\n' ' ' < "$w/state/rec.env" 2>/dev/null)
+t1ok=0
+[ "$rc" = 0 ] && [ "$t1a" = "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$hdr GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $b64 " ] \
+    && ! grep -qF -e "$tok" -e "$b64" "$w/state/rec.argv" "$w/T1.err" "$w/T1.out" \
+    && grep -q "^fetch-retry: https://github.com/wolffe-lang/pelt main: with the job's token$" "$w/T1.err" && t1ok=1
+trun T1 https://github.com/wolffe-lang/pelt "$tok" 0 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_VALUE_0=false
+t1b=$(tr '\n' ' ' < "$w/state/rec.env" 2>/dev/null)
+[ "$rc" = 0 ] && [ "$t1b" = "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.quotePath GIT_CONFIG_KEY_1=$hdr GIT_CONFIG_VALUE_0=false GIT_CONFIG_VALUE_1=AUTHORIZATION: basic $b64 " ] || t1ok=0
+if [ "$t1ok" = 1 ]; then
+    ok "T1: a git fetch of our own repository carries the job's token as git's http.extraheader for https://github.com/wolffe-lang/ alone, appended to the GIT_CONFIG_ entries there, from the environment: not on git's command line, in no line printed"
+else bad "T1: rc $rc, git's GIT_CONFIG_ environment: '$(echo "$t1a" | sed "s|$b64|<the token's header>|")', beside another entry: '$(echo "$t1b" | sed "s|$b64|<the token's header>|")'"; fi
+
+t2=
+for r in https://github.com/wolffe-lang.evil/pelt https://github.com/wolffe-langx/pelt https://github.com/other/pelt https://gitlab.com/wolffe-lang/pelt http://github.com/wolffe-lang/pelt; do
+    trun T2 "$r" "$tok" 0
+    { [ "$rc" = 0 ] && [ ! -s "$w/state/rec.env" ] && ! grep -q "job's token" "$w/T2.err"; } || t2="$t2 $r"
+done
+trun T2 https://github.com/wolffe-lang/pelt "" 0
+{ [ "$rc" = 0 ] && [ ! -s "$w/state/rec.env" ] && ! grep -q "job's token" "$w/T2.err"; } || t2="$t2 (no token)"
+if [ -z "$t2" ]; then
+    ok "T2: no header for another owner, host or scheme, nor for our own repository without a token"
+else bad "T2: a header or the token's line for:$t2"; fi
+
+t3=0
+trun T3 https://github.com/wolffe-lang/pelt "$tok" 99
+[ "$rc" = 3 ] && [ "$fetches" = 3 ] && grep -q 'gave up after 3 attempts, the last one server' "$w/T3.err" \
+    && grep -q "with the job's token" "$w/T3.err" && ! grep -qF -e "$tok" -e "$b64" "$w/T3.err" "$w/T3.out" && t3=1
+badtok='pax"selftest;token'
+trun T3 https://github.com/wolffe-lang/pelt "$badtok" 0
+[ "$rc" = 2 ] && [ "$fetches" = 0 ] && grep -q 'PAX_FETCH_TOKEN holds a character no token has' "$w/T3.err" \
+    && ! grep -qF "$badtok" "$w/T3.err" "$w/T3.out" || t3=0
+if [ "$t3" = 1 ]; then
+    ok "T3: our own repository's 403 with the token, three times: gave up by name, the token in no line; a token with a character no token has is refused unprinted, nothing fetched"
+else bad "T3: rc $rc, $fetches fetches"; fi
+
 run R6 1 "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503" "$pin" "$pin"
 if [ "$rc" = 0 ] && [ "$fetches" = 2 ] && grep -q 'failed (server)' "$w/R6.err" && [ "$head" = "$pin" ]; then
     ok "R6: a 503 is tried again (server), fetched"
@@ -184,6 +269,8 @@ cat > "$w/bin/curl" <<'EOF2'
 n=$(cat "$FAKE_STATE/downloads" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$FAKE_STATE/downloads"
+printf '%s\n' "$*" > "$FAKE_STATE/curl.argv"
+case " $* " in *" -K - "*) cat > "$FAKE_STATE/curl.config" ;; esac
 out=
 while [ $# -gt 0 ]; do
     case $1 in -o) out=$2; shift ;; esac
@@ -243,6 +330,95 @@ else bad "U7: rc $rc, $downloads downloads, waits '$sleeps', left '$left'"; fi
 if grep -q '"$PAX_ROOT/tools/fetch-retry" --url "$WOLF_URL"' "$root/tools/fetch-wolf" && ! grep -nE '^[^#]*\bcurl\b -' "$root/tools/fetch-wolf" >/dev/null; then
     ok "U8: tools/fetch-wolf's release archive comes through tools/fetch-retry --url; no bare curl in it"
 else bad "U8: tools/fetch-wolf still downloads its archive with a bare curl"; fi
+
+# T4-T6: the job's token on a download from our own releases. T4 through the fake curl, its command line and
+# what it reads on stdin recorded; T5 and T6 through the real curl, against a local stand-in for github.com
+# that answers every request with a redirect to a second host, both recording the headers they are sent.
+export PAX_FETCH_TOKEN=$tok
+urun T4 0 '' 0 "$asha"
+unset PAX_FETCH_TOKEN
+if [ "$rc" = 0 ] && [ "$left" = w.tar.gz ] && grep -qx "header = \"Authorization: Bearer $tok\"" "$w/state/curl.config" 2>/dev/null \
+    && ! grep -qF "$tok" "$w/state/curl.argv" "$w/T4.err" "$w/T4.out" && grep -q "with the job's token" "$w/T4.err"; then
+    ok "T4: a download from our own releases hands curl the token as a header in a config read on stdin: not on curl's command line, in no line printed"
+else bad "T4: rc $rc, left '$left', curl's command line: $(sed "s|$tok|<the token>|g" "$w/state/curl.argv" 2>/dev/null)"; fi
+
+printf 'a release\n' > "$w/release.tar.gz"
+if command -v sha256sum >/dev/null 2>&1; then rsha=$(sha256sum "$w/release.tar.gz" | cut -d' ' -f1)
+else rsha=$(shasum -a 256 "$w/release.tar.gz" | cut -d' ' -f1); fi
+mkdir -p "$w/stub"
+cat > "$w/stub.py" <<'EOF3'
+import http.server, os, sys, threading
+d, body = sys.argv[1], open(sys.argv[2], "rb").read()
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        with open(os.path.join(d, self.server.role + ".headers"), "a") as f:
+            f.write("GET %s\n" % self.path)
+            for k, v in self.headers.items():
+                f.write("%s: %s\n" % (k, v))
+        if self.server.role == "github":
+            self.send_response(302)
+            self.send_header("Location", "http://localhost:%d/asset" % asset.server_address[1])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+gh = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+gh.role = "github"
+asset = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+asset.role = "asset"
+for s in (gh, asset):
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+with open(os.path.join(d, "ports.part"), "w") as f:
+    f.write("%d %d\n" % (gh.server_address[1], asset.server_address[1]))
+os.rename(os.path.join(d, "ports.part"), os.path.join(d, "ports"))
+threading.Event().wait()
+EOF3
+pa=
+if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    python3 -I "$w/stub.py" "$w/stub" "$w/release.tar.gz" > "$w/stub.log" 2>&1 &
+    spid=$!
+    i=0
+    while [ ! -s "$w/stub/ports" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+    read -r pa pb < "$w/stub/ports" 2>/dev/null || pa=
+fi
+# srun NAME URL TOKEN: one fetch-retry --url of URL through the real curl, with the stand-in's /wolffe-lang/
+# as our own prefix and PAX_FETCH_TOKEN=TOKEN (empty: unset).
+srun() {
+    local name=$1 u=$2 tok=$3
+    rm -rf "$w/dl"; mkdir -p "$w/dl"; rm -f "$w/stub/github.headers" "$w/stub/asset.headers"
+    rc=0
+    env ${tok:+PAX_FETCH_TOKEN=$tok} FETCH_RETRY_OWN="http://127.0.0.1:$pa/wolffe-lang/" \
+        sh "$helper" --url "$u" "$w/dl/r.tar.gz" "$rsha" > "$w/$name.out" 2> "$w/$name.err" || rc=$?
+    left=$(cd "$w/dl" && ls)
+    sed "s/^/  $name: /" "$w/$name.err"
+}
+nauth() { [ -f "$1" ] && { grep -ci '^authorization:' "$1" || true; }; }
+if [ -z "$pa" ]; then
+    bad "T5: no stand-in to download from (curl: $(command -v curl || echo none), python3: $(command -v python3 || echo none))"
+    bad "T6: no stand-in to download from"
+else
+    srun T5 "http://127.0.0.1:$pa/wolffe-lang/wolf-lang/releases/download/v0/r.tar.gz" "$tok"
+    if [ "$rc" = 0 ] && [ "$left" = r.tar.gz ] && grep -qx "Authorization: Bearer $tok" "$w/stub/github.headers" 2>/dev/null \
+        && [ -s "$w/stub/asset.headers" ] && [ "$(nauth "$w/stub/asset.headers")" = 0 ]; then
+        ok "T5: the token reaches the stand-in for github.com, and not the host its redirect names ($(curl --version | head -n 1 | cut -d' ' -f1-2))"
+    else bad "T5: rc $rc, left '$left'; Authorization sent to the stand-in: $(nauth "$w/stub/github.headers"), to the redirect's host: $(nauth "$w/stub/asset.headers")"; fi
+    t6=
+    srun T6 "http://127.0.0.1:$pa/other/wolf-lang/releases/download/v0/r.tar.gz" "$tok"
+    { [ "$rc" = 0 ] && [ "$(nauth "$w/stub/github.headers")" = 0 ] && ! grep -q "job's token" "$w/T6.err"; } || t6="$t6 another owner's URL"
+    srun T6 "http://127.0.0.1:$pa/wolffe-lang/wolf-lang/releases/download/v0/r.tar.gz" ""
+    { [ "$rc" = 0 ] && [ "$(nauth "$w/stub/github.headers")" = 0 ]; } || t6="$t6 (no token)"
+    if [ -z "$t6" ]; then
+        ok "T6: no token for another owner's release, nor without one"
+    else bad "T6: a token sent for:$t6"; fi
+    kill "$spid" 2>/dev/null
+    wait "$spid" 2>/dev/null
+    spid=
+fi
 # U9: the downloads.
 dsites='tools/fetch-wolf tools/fetch-lupin tools/fetch-limine tools/fetch-arch tools/disktools tools/mkroots tools/mkbeep
 tools/mkgames tools/mklupin tools/mkalpha tools/mkclef tools/mkaspen tools/mkauth tools/mkboreutils tools/mkburrow tools/mkden
