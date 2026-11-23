@@ -1056,7 +1056,7 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   of our own repositories (`https://github.com/wolffe-lang/`) go as each job's own read-only token, handed to git and
   curl as a header, never on a command line or in the log, so they do not share the anonymous limit of the runners'
   addresses. curl does not send it on to the host a release's redirect names, the census's container is not given it,
-  and the `tier` job, whose token can write issues, empties it (`tests/ci-plan`'s P12). Every `tools/mk*` source fetch,
+  and the `nightly-red` job, whose token can write issues, empties it (`tests/ci-plan`'s P12). Every `tools/mk*` source fetch,
   `tools/fetch-wolf` and the census go through it (`tests/fetch-retry-selftest`). Every download goes through its
   `--url` mode in the same way, checked against the pinned sha256 before it is kept: the release archives of
   `tools/fetch-wolf`, `fetch-lupin` and `fetch-limine`, the toolchain archives every `tools/mk*` stages, the packages
