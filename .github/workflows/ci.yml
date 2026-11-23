@@ -6873,10 +6873,9 @@ jobs:
       - mpx6-firmware
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # The issue step's token may write issues; nothing else.
+    # It reads; the one job that may write issues is the nightly's, below.
     permissions:
       contents: read
-      issues: write
     steps:
       - uses: actions/checkout@v4
 
@@ -6885,13 +6884,25 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: tools/ci-plan --verdict
 
-      # A red nightly opens an issue (tl29, ruling #92): a scheduled run
-      # has no lane watching it, and three of the four legs run nowhere
-      # else before the next merge. One open issue per workflow, its title
-      # the dedupe key; a further red night comments on it. Never on a
-      # pull request, a push or a dispatch: those reds have a lane already.
-      - name: a red nightly opens an issue
-        if: failure() && github.event_name == 'schedule'
+  # A red nightly opens an issue (tl29): a scheduled run has nobody
+  # watching it, and three of the four legs run nowhere else before the
+  # next merge. One open issue per workflow, its title the dedupe key; a
+  # further red night comments on it. The schedule's runs alone reach this
+  # job, so no pull request, push or dispatch is handed the workflow's one
+  # token that can write issues (tests/ci-plan's P14).
+  nightly-red:
+    name: a red nightly opens an issue
+    needs: tier
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: open the nightly's issue, or comment on the open one
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}

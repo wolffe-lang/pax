@@ -258,9 +258,9 @@ for r in twice['exceptions']:
     failed |= not ok
 held = {r['job'] for r in twice['rows'] + twice['exceptions']} | {u['job'] for u in twice['unmeasured']}
 workflow_jobs = [j for j in re.findall(r'^  ([A-Za-z0-9_-]+):\s*$', text.split('\njobs:\n', 1)[1], re.M)
-                 if j not in ('plan', 'tier')]
+                 if j not in ('plan', 'tier', 'nightly-red')]
 missing = [j for j in workflow_jobs if j not in held]
-print('%s budget/twice/coverage every job but the plan and the verdict has a row, an exception or an unmeasured entry (%d jobs)%s' %
+print('%s budget/twice/coverage every job but the plan, the verdict and the nightly issue has a row, an exception or an unmeasured entry (%d jobs)%s' %
       ('FAIL' if missing else 'PASS', len(workflow_jobs), ': none for ' + ' '.join(missing) if missing else ''))
 failed |= bool(missing)
 # The silence cap (silence.json): a wrapped suite step is stopped when it prints nothing for its limit
