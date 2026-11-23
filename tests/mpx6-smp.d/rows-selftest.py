@@ -396,6 +396,12 @@ case('testwords: a word not reported', head('end') + TW.split('\n')[0] + '\n',
      ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'})
 case('testwords: the power-off skipped', head('end') + TW, ['--kind', 'testwords', '--smp', '4', '--qemu-status', '1'],
      set(), {'SMP-TESTWORDS'})
+# the shipped ELF holds a test mark: the test op or test panic by name (the native tier), or the test op's static
+# `fired`, which the release tier's inlining keeps where it removes both names
+for mark in ('_Wtestwords.fire$d0d02dc177140c90', '_Wtestwords.test_panic$be7c8dfa707358fc', '_Wtestwords.fired.s334a994a33b36f9'):
+    case(f'testwords: the shipped ELF holds {mark.split("$")[0].split(".s3")[0]}', head('end') + TW,
+         ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'},
+         files={'syms': [mark]}, why=r'test symbols')
 case('end halt at stage 1: no stop line, APs idle with IF set', end_text('halt', stage=1), ['--kind', 'end-halt', '--smp', '4'],
      set(), {'SMP-END'}, dumps=[idle_dump] * 3)
 case('the plant end: the line gone, APs idle', end_text('halt').replace('cpus: 3 application processors stopped for the end\n', ''),
@@ -547,7 +553,11 @@ with tempfile.TemporaryDirectory() as td:
         if 'times' in files:
             (td / 'serial.log.times').write_text(files['times'])
         argv = [x if x != 'expected.json' else str(td / 'expected.json') for x in args]
-        r = subprocess.run([sys.executable, '-I', '-B', str(HERE / 'rows.py'), str(s), *argv, '--symbols', str(td / 'nm.txt')],
+        nm = td / 'nm.txt'
+        if 'syms' in files:  # the ELF's symbols and these besides (a shipped kernel holding a test mark)
+            nm = td / 'nm-case.txt'
+            nm.write_text((td / 'nm.txt').read_text() + ''.join(f'{0xffffffff80600000:016x} {8:016x} B {k}\n' for k in files['syms']))
+        r = subprocess.run([sys.executable, '-I', '-B', str(HERE / 'rows.py'), str(s), *argv, '--symbols', str(nm)],
                            capture_output=True, text=True)
         got_pass = set(re.findall(r'^PASS (\S+)', r.stdout, re.M))
         got_fail = set(re.findall(r'^FAIL (\S+)', r.stdout, re.M))
