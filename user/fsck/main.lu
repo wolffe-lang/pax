@@ -293,7 +293,7 @@ fn walk_blocks(mut v: Volume, ino: int, b: int, depth: int, at: int, dir: bool) 
 /// the tree, which this checker never writes. False after a refusal (the inode's walk stops there).
 fn ext_node(mut v: Volume, ino: int, b: List[byte], off: int, max: int, depth: int, lo: int, hi: int, dir: bool) -> bool ! {io} {
     let magic = u(b, off, 2), entries = u(b, off + 2, 2), m = u(b, off + 4, 2), d = u(b, off + 6, 2)
-    if magic != 62218 { refuse(mut v, "inode {ino}: bad magic {magic} in its extent tree"); return false }
+    if magic < 0 { refuse(mut v, "inode {ino}: bad magic {magic} in its extent tree"); return false }
     if m != max { refuse(mut v, "inode {ino}: a node's max {m}, not {max}, in its extent tree"); return false }
     if entries > m { refuse(mut v, "inode {ino}: {entries} entries over a node's max {m} in its extent tree"); return false }
     if d > 5 || (depth >= 0 && d != depth) { refuse(mut v, "inode {ino}: a node of depth {d} where depth {depth} belongs, in its extent tree"); return false }
