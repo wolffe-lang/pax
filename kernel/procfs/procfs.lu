@@ -1286,7 +1286,8 @@ fn cmdline(base: u64) -> u64 {
 /// Available firmware processors are distinct from the one active processor.
 /// px161: then the processors that entered PAX (`started`) and those parked
 /// idle (`idle`); px166: whether the heap was started (`heap-started 0|1`,
-/// kernel/heap's `is_up`); and a line a processor, by kernel/smp's index:
+/// kernel/heap's `is_up`), the signal counts (`signals set S merged M taken
+/// T slept-with-one-pending P`); and a line a processor, by kernel/smp's index:
 ///   cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K tlb S nmis N
 ///   cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K tlb S wakes W nmis N
 ///   cpu I apic A idle current idle ticks T wakes W nmis N
@@ -1327,6 +1328,19 @@ fn paxcpus(base: u64) -> u64 {
     // not, and an allocation panics by name (tests/mpx6-smp's SMP-NOHEAP).
     n = put_s(base, n, "\nheap-started ")
     n = put_dec(base, n, if heap.is_up() { 1 } else { 0 })
+    // px166: the signal counts (kernel/sched's `signal_counts`), for
+    // tests/mpx6-smp's sleeper: raises that set a pending bit, raises merged
+    // into a signal already pending, signals taken, and sleeps entered with
+    // a signal the sleeper would take pending.
+    let (ss, sm, st, sp) = sched.signal_counts()
+    n = put_s(base, n, "\nsignals set ")
+    n = put_dec(base, n, ss)
+    n = put_s(base, n, " merged ")
+    n = put_dec(base, n, sm)
+    n = put_s(base, n, " taken ")
+    n = put_dec(base, n, st)
+    n = put_s(base, n, " slept-with-one-pending ")
+    n = put_dec(base, n, sp)
     n = put_b(base, n, 10)
     let total = smp.total()
     var i: u64 = 0
