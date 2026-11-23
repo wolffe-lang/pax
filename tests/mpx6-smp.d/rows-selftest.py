@@ -327,13 +327,16 @@ def regs(k, rip, hlt=1, rfl=0x2):
     return f'CPU#{k}\nRAX=0000000000000000\nRIP={rip:016x} RFL={rfl:08x} [-------] CPL=0 II=0 A20=1 SMM=0 HLT={hlt}\n'
 
 
-def end_text(how, stage=2, order='right'):
+def end_text(how, stage=2, order='right', hup=False):
     n = 4
     p = proc(n, active=1 if stage == 1 else n, stage=stage)
     t = head('end') + block('start', p)
     t += f'SMP-END spinners 4 on cpus {"0" if stage == 1 else "0,1,2,3"}\nSMP-END asking reboot(2) {how}\n'
     stop = 'cpus: 3 application processors stopped for the end\n' if stage == 2 else ''
     the_end = 'PAX: the end: SIGTERM to 5 processes, 5 ended within 0 ms\n'
+    if hup:  # the controlling process (pid 1) ends by SIGTERM and its terminal's hangup ends the spinners (rel2's lines)
+        the_end = ('user: smpprobe pid 1 killed: SIGTERM after 27 runs\n'
+                   + ''.join(f'user: smpprobe pid {p} killed: SIGHUP after 2 runs\n' for p in (4, 2, 3)) + the_end)
     line = f'user: smpprobe pid 1 reboot(2): the volumes written and marked clean; {"restarting" if how == "restart" else "halting"}\n'
     t += (stop + the_end if order == 'early' else the_end + stop) + line
     return t + ('halt\n' if how == 'halt' else '')
@@ -342,6 +345,13 @@ def end_text(how, stage=2, order='right'):
 halted = regs(0, KTEXT, rfl=0x2) + ''.join(regs(k, KTEXT + 0x40, rfl=0x2) for k in range(1, 4))
 idle_dump = regs(0, KTEXT, rfl=0x2) + ''.join(regs(k, SYMS['pax_ap_halt'][0] + 3, rfl=0x246) for k in range(1, 4))
 case('end halt green', end_text('halt'), ['--kind', 'end-halt', '--smp', '4'], {'SMP-END'}, set(), dumps=[halted] * 3)
+# the end's own SIGHUP: pid 1, the controlling process, ends first, and its terminal's hangup reaches the spinners in its
+# foreground group before their SIGTERM (a lower signal number is taken first); a SIGHUP kill before the end asks is red
+case('end halt: the spinners ended by the terminal\'s hangup', end_text('halt', hup=True), ['--kind', 'end-halt', '--smp', '4'],
+     {'SMP-END'}, set(), dumps=[halted] * 3)
+case('end halt: a program killed by SIGHUP before the end',
+     end_text('halt').replace('SMP-END asking', 'user: smpprobe pid 7 killed: SIGHUP after 3 runs\nSMP-END asking'),
+     ['--kind', 'end-halt', '--smp', '4'], set(), {'SMP-END'}, dumps=[halted] * 3, why=r'killed: SIGHUP')
 # the STOP step's test kinds (a test build) and the shipped kernel given the test words
 NOOFF = 'poweroff: not done (pax.nopoweroff, a test kernel)\n'
 case('end-nooff green', end_text('halt') + NOOFF, ['--kind', 'end-nooff', '--smp', '4'], {'SMP-END-NOOFF'}, set(),
