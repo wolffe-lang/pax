@@ -32,6 +32,7 @@ export SOURCE_DATE_EPOCH=1700000000
 python3 -I "$D/monitor-test.py" "$work/monitor-tests"
 if [ "$only" = build ] || [ "$only" = all ]; then
     "$PAX_ROOT/tools/mkfsck" "$work/bin"
+    "$PAX_ROOT/tools/mkdisktools" "$work/bin" paxext2  # the ext4 rows' paxext2 --extents image
     "$PAX_ROOT/tools/mkpelt" "$work/pelt"
     "$PAX_ROOT/tools/mklope" "$work/lope"
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" cat env
@@ -54,7 +55,7 @@ if [ "$only" = linux ] || [ "$only" = capacity ] || [ "$only" = all ]; then
         export PATH="$PAX_FSCK_ORACLE_BIN:$PATH"
     else
         mkdir -p "$work/oracles"
-        for program in mke2fs e2fsck; do
+        for program in mke2fs e2fsck debugfs dumpe2fs; do
             printf '#!/usr/bin/env bash\nexec %q %q %q "$@"\n' "$PAX_ROOT/tools/e2fs" "$work" "$program" > "$work/oracles/$program"
             chmod +x "$work/oracles/$program"
         done
@@ -67,6 +68,9 @@ if [ "$only" = linux ] || [ "$only" = capacity ] || [ "$only" = all ]; then
     else
         python3 -I "$D/corpus.py" --checker "$work/bin/fsck.ext2" --work "$work/corpus"
         python3 -I "$D/journal.py" "$work/bin/fsck.ext2" "$work/journal"
+        # X3: the same replays on an extent-mapped journal, and extent trees checked, repaired, refused.
+        python3 -I "$D/journal.py" "$work/bin/fsck.ext2" "$work/journal-ext4" --ext4 || rows=1
+        python3 -I "$D/ext4.py" "$work/bin/fsck.ext2" "$work/ext4" "$work/bin/paxext2" || rows=1
         python3 -I "$D/refusals.py" "$work/bin/fsck.ext2" "$work/refusals" || rows=1
     fi
     # The capacity rows run whatever refusals.py said; either red fails the phase.
