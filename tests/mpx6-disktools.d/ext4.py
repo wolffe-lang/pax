@@ -508,8 +508,9 @@ if img.exists():
 p = paxext2("--from", small, "--label", "pax-root", "--journal", str(JOURNAL), "64M", img)
 got["tree-ext3-64"] = sha(img) if p.returncode == 0 else f"exit-{p.returncode}"
 img.unlink(missing_ok=True)
-if os.environ.get("PAX_E4_GOLDENS_WRITE") == "1":
-    goldens.write_text("# paxext2 without --extents: each image's sha256, made by the base binary (tests/mpx6-disktools.d/ext4.py)\n"
+# PAX_E4_GOLDENS_WRITE=PATH: the digests written to PATH (never into the checkout, where the file is tracked).
+if os.environ.get("PAX_E4_GOLDENS_WRITE", "") not in ("", "1"):
+    Path(os.environ["PAX_E4_GOLDENS_WRITE"]).write_text("# paxext2 without --extents: each image's sha256, made by the base binary (tests/mpx6-disktools.d/ext4.py)\n"
                        + "".join(f"{k} {v}\n" for k, v in sorted(got.items())))
 moved = [k for k in got if want.get(k) != got[k]]
 row("unchanged", bool(want) and not moved, "ext2 and ext3 images of fixed inputs without --extents hash to the base binary's digests" + (": " + ", ".join(f"{k} {got[k][:16]} (held {want.get(k, 'none')[:16]})" for k in moved) if moved else ""))
