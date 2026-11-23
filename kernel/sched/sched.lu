@@ -1642,6 +1642,7 @@ pub fn sleep_current(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, rst), W_SLEEP) // px26: a signal ends it with -EINTR
     trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -1664,6 +1665,7 @@ pub fn block_input(f: u64) -> u64 {
     put_field(c, offset_of(Thread, state), INPUT)
     put_field(c, offset_of(Thread, rst), W_REWOUND) // px26
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -3329,6 +3331,7 @@ pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_REWOUND } else { W_TIMED_REWOUND }) // px26
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -3343,6 +3346,7 @@ pub fn block_pipe_eintr(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), W_TIMED_REWOUND)
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -3522,6 +3526,7 @@ pub fn wait_child(f: u64) -> u64 {
     put_field(c, offset_of(Thread, state), WAITING)
     put_field(c, offset_of(Thread, rst), W_REWOUND) // px26
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -3709,6 +3714,7 @@ pub fn futex_wait(f: u64, key: u64, bits: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_FUTEX } else { W_TIMED })
     trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -3966,6 +3972,22 @@ fn signal_wakes(t: u64, l: u64) -> bool {
         sig += 1
     }
     false
+}
+
+/// px166: the running thread `c` has set itself to an interruptible wait
+/// (its state, its frame saved) and is about to switch away, under the
+/// kernel lock. A signal that wakes it may have been raised while it was
+/// on its way here from ring 3 on this processor and another processor
+/// held the lock: `poke` then found it RUNNING and only reached it (a
+/// RESCHED this processor takes after the wait has begun, to no effect),
+/// and the signal waited for whatever else would end the wait. So every
+/// such wait asks itself, as poke would: that signal ends it now (READY,
+/// queued), as one raised an instant later would. tests/mpx6-smp.d's
+/// WAIT-CENSUS holds every interruptible wait to asking, before run_next.
+fn wake_if_signalled(c: u64) {
+    if field(c, offset_of(Thread, tgid)) != 0 && signal_wakes(c, field(c, offset_of(Thread, lead))) {
+        interrupt(c)
+    }
 }
 
 fn poke(l: u64) {
@@ -4672,7 +4694,7 @@ pub fn suspend_current(f: u64, mask: u64) -> u64 {
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, state), SUSPEND)
     put_field(c, offset_of(Thread, rst), W_SUSPEND)
-    poke(field(c, offset_of(Thread, lead))) // a signal already pending and now unblocked ends it at once
+    wake_if_signalled(c) // a signal already pending and now unblocked ends it at once (px166: the one test every wait asks)
     wake_sleepers()
     run_next()
 }
@@ -4695,7 +4717,7 @@ pub fn resuspend(f: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, state), SUSPEND)
-    poke(field(c, offset_of(Thread, lead))) // a signal deliverable now ends it at once
+    wake_if_signalled(c) // a signal already pending and now unblocked ends it at once (px166: the one test every wait asks)
     wake_sleepers()
     run_next()
 }
