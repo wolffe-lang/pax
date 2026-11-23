@@ -74,7 +74,9 @@ fn write_journal(mut fs: Fs, blocks: int, uuid: List[byte], epoch: int) -> List[
     inode_time(mut inode, 16, 136, epoch)
     inode_time(mut inode, 144, 148, epoch)
     let size = blocks * 4096
-    let meta = block_map(mut fs, data, mut inode)?
+    // --extents: one run, so one extent per 32768 blocks, mapped as mke2fs -t ext4 maps its journal.
+    var meta = 0
+    if fs.extents { meta = extent_map(mut fs, data, mut inode)? } else { meta = block_map(mut fs, data, mut inode)? }
     diskio.put(mut inode, 4, size & 4294967295, 4)
     diskio.put(mut inode, 108, (size >> 32) & 4294967295, 4)
     diskio.put(mut inode, 28, (blocks + meta) * 8, 4)
