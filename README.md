@@ -1052,7 +1052,11 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   reset, a failed connect, a timeout or a stalled transfer, an HTTP 5xx, 429 or 403), three attempts at most, 10 and
   then 30 seconds apart, the pinned commit checked after the fetch; an unknown revision or any other refusal (a 404, a
   401) stops at once. A 403 is tried again because every repository and archive the harness fetches is public, and the
-  host's 403 has been passing: a second attempt fetched what the first was refused. Every `tools/mk*` source fetch,
+  host's 403 has been passing: a second attempt fetched what the first was refused. In CI the fetches and downloads
+  of our own repositories (`https://github.com/wolffe-lang/`) go as each job's own read-only token, handed to git and
+  curl as a header, never on a command line or in the log, so they do not share the anonymous limit of the runners'
+  addresses. curl does not send it on to the host a release's redirect names, the census's container is not given it,
+  and the `tier` job, whose token can write issues, empties it (`tests/ci-plan`'s P12). Every `tools/mk*` source fetch,
   `tools/fetch-wolf` and the census go through it (`tests/fetch-retry-selftest`). Every download goes through its
   `--url` mode in the same way, checked against the pinned sha256 before it is kept: the release archives of
   `tools/fetch-wolf`, `fetch-lupin` and `fetch-limine`, the toolchain archives every `tools/mk*` stages, the packages
