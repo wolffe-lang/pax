@@ -46,7 +46,10 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            under KVM; tgkill on the thread it named), SIGKILL to the reaped status
                            (4 of 5 within 2 ms under KVM), SIGSTOP held and SIGCONT resumed; every
                            processor a target was signalled on took a RESCHED across the row (`resched`
-                           before and after: the raise paths' RESCHED, on both accelerators).
+                           before and after: the raise paths' RESCHED, on both accelerators); the sleeper,
+                           a SIGUSR1 to a process whose main thread blocks it and spins, taken by its
+                           sleeping second thread (8 of 9 within 2 ms under KVM), and ten sent 5 ms apart
+                           with the main thread asleep between, ten taken (tests/mpx3-threads' takers).
               SMP-EXIT     exit_group from the main thread and from a sibling with four threads running,
                            execve from a sibling with the others running: statuses 0x700, 0x800,
                            0x900; min(4, N) of the group seen running at once; MemFree after four
@@ -442,6 +445,11 @@ def signal_check():
     tgk = [s for s in sig if s.startswith('tgkill ')]
     stop = [s for s in sig if s.startswith('stop ')]
     tst = [s for s in sig if s.startswith('tgkill-status ')]
+    # the sleeper: a SIGUSR1 to a process whose main thread blocks it, which only its sleeping second thread may take
+    # (tests/mpx3-threads' takers), sent while the main thread spins; then ten 5 ms apart with it asleep between
+    slp = [s for s in sig if s.startswith('sleeper ')]
+    ten = [s for s in sig if s.startswith('sleeper-ten ')]
+    sst = [s for s in sig if s.startswith('sleeper-status ')]
     if 'SMP-SIGNAL done' not in text or len(usr1) != 9 or len(kill) != 5 or len(tgk) != 9 or len(stop) != 1:
         why.append(f'usr1 {len(usr1)}, kill {len(kill)}, tgkill {len(tgk)}, stop {len(stop)}: want 9, 5, 9, 1 and '
                    '`SMP-SIGNAL done`')
@@ -471,6 +479,12 @@ def signal_check():
         why.append(f'stop and continue: {stop[0]}')
     if tst and kv(tst[0], 'tgkill-status') != '0x0':
         why.append(f'the tgkill process ended {tst[0]}')
+    if len(slp) != 9 or len(ten) != 1 or len(sst) != 1:
+        why.append(f'sleeper {len(slp)}, sleeper-ten {len(ten)}, sleeper-status {len(sst)}: want 9, 1, 1')
+    if any(not isinstance(kv(s, 'latency-us'), int) for s in slp):
+        why.append(f'a sleeping thread\'s handler never ran: {[s for s in slp if not isinstance(kv(s, "latency-us"), int)][0]}')
+    if sst and kv(sst[0], 'sleeper-status') != '0x0':
+        why.append(f'the sleeper process ended {sst[0]}')
     # step 5's witness: every processor a target was signalled on (not the sender's) took a RESCHED in the row
     rs = [s for s in sig if s.startswith('resched')]
     gains = {int(a): int(b) for a, b in re.findall(r'(\d+):(\d+)', rs[0])} if rs else {}
@@ -489,8 +503,17 @@ def signal_check():
             n = sum(1 for s in group if isinstance(kv(s, 'latency-us'), int) and kv(s, 'latency-us') <= 2000)
             if group and n < need:
                 why.append(f'{name}: {n} of {len(group)} within 2 ms ({need} at least)')
-    for name, group in (('usr1', usr1), ('kill', kill), ('tgkill', tgk)):
+        # the sleeper woken where it can run: within 2 ms, 8 of 9 as SIGUSR1's; and ten sent 5 ms apart, each taken
+        # before the next is sent (a SIGUSR1 still pending 5 ms after it was sent is taken once with the next)
+        n = sum(1 for s in slp if isinstance(kv(s, 'latency-us'), int) and kv(s, 'latency-us') <= 2000)
+        if slp and n < 8:
+            why.append(f'sleeper: {n} of {len(slp)} within 2 ms (8 at least): a sleeping thread woken late')
+        if ten and kv(ten[0], 'taken') != 10:
+            why.append(f'the sleeper took {kv(ten[0], "taken")} of ten sent 5 ms apart: a SIGUSR1 still pending when the next came')
+    for name, group in (('usr1', usr1), ('kill', kill), ('tgkill', tgk), ('sleeper', slp)):
         info.append(f'{name} latencies {[kv(s, "latency-us") for s in group]} us')
+    if ten:
+        info.append(f'the sleeper took {kv(ten[0], "taken")} of ten sent 5 ms apart')
     return why, info
 
 
