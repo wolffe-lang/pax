@@ -153,7 +153,7 @@ enum { ST_NONE, ST_BOOT, ST_RUNS, ST_IDLE, ST_STOPPED, ST_NEVER, ST_PARKED, ST_O
 #define CUR_IDLE (-1)
 #define CUR_KERNEL (-2)
 #define CUR_NONE (-3)
-struct snap { L active, started; int n; int st[MAXC]; L cur[MAXC], user[MAXC], tlb[MAXC], resched[MAXC]; };
+struct snap { L active, started, sset, smerged, staken, sslept; int n; int st[MAXC]; L cur[MAXC], user[MAXC], tlb[MAXC], resched[MAXC]; };
 static const char *find(const char *s, const char *e, const char *pat) {
     for (; s < e; s++) {
         const char *a = s, *p = pat;
@@ -177,11 +177,16 @@ static L after(const char *s, const char *e, const char *key) {
 static int starts(const char *s, const char *e, const char *w) { while (*w) { if (s >= e || *s != *w) return 0; s++; w++; } return 1; }
 static int take(struct snap *z) {
     L n = readfile("/proc/pax-cpus", pbuf, sizeof pbuf);
-    z->n = 0; z->active = z->started = -1;
+    z->n = 0; z->active = z->started = z->sset = z->smerged = z->staken = z->sslept = -1;
     if (n < 0) return 0;
     const char *e = pbuf + n;
     z->active = after(pbuf, e, "\nactive ");
     z->started = after(pbuf, e, "\nstarted ");
+    /* the kernel's signal counts (kernel/sched's `signal_counts`): the sleeper's instrument */
+    z->sset = after(pbuf, e, "\nsignals set ");
+    z->smerged = after(pbuf, e, " merged ");
+    z->staken = after(pbuf, e, " taken ");
+    z->sslept = after(pbuf, e, " slept-with-one-pending ");
     for (const char *s = pbuf; s < e;) {
         const char *t = s;
         while (t < e && *t != '\n') t++;
@@ -283,6 +288,7 @@ struct sh {
     volatile U ready, stop, go, done, phase, hit, count, spins, got, wpid;
     volatile U fault_tsc, btid, reads, stale, started, running, cpumask;
     volatile U ttid, thit, t2, tready;
+    volatile U ht[16]; /* the sleeper's rounds: when the handler took each SIGUSR1, in order */
     volatile U pids[16];
     volatile L gtids[4]; /* SMP-DEAD: the group's four thread ids, written by its main thread */
 };
@@ -290,6 +296,12 @@ static struct sh *G;
 __attribute__((force_align_arg_pointer)) static void h_usr1(int s) { (void)s; G->hit = rdtsc(); __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST); }
 __attribute__((force_align_arg_pointer)) static void h_usr2(int s) { (void)s; G->ttid = (U)gettid(); G->thit = rdtsc(); }
 __attribute__((force_align_arg_pointer)) static void h_count(int s) { (void)s; __atomic_add_fetch(&G->got, 1, __ATOMIC_SEQ_CST); }
+__attribute__((force_align_arg_pointer)) static void h_round(int s) {
+    (void)s;
+    U t = rdtsc(), n = __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST);
+    if (n <= 16) G->ht[n - 1] = t;
+    G->hit = t;
+}
 __attribute__((force_align_arg_pointer)) static void h_segv(int s) { (void)s; G->fault_tsc = rdtsc(); exit_thread(0); }
 
 static char **envp;
@@ -600,7 +612,7 @@ static void row_signal(int samples) {
     if (!sp) {
         struct thr t;
         U set = 1ul << (SIGUSR1 - 1);
-        on(SIGUSR1, h_usr1);
+        on(SIGUSR1, h_round);
         sc6(NR_SIGPROCMASK, 0, (L)&set, 0, 8, 0, 0); /* SIG_BLOCK: the main thread never takes it */
         spawn(&t, t2_sleep, 0);
         await(&G->tready, 2000);
@@ -616,11 +628,26 @@ static void row_signal(int samples) {
             c.b[c.n] = 0; ls(&l, c.b); le(&l);
             nap(20000000);
         }
+        /* each round with its instrument: the worst time from a send to the handler's entry that took it (in order),
+           and the kernel's signal counts across the round (raises that set the bit, raises merged into one pending,
+           signals taken, sleeps entered with one pending) */
+        static struct snap a0, a1;
         for (int round = 0; round < 20; round++) {
+            U sent[10];
             G->count = 0;
-            for (int k = 0; k < 10; k++) { sc(NR_KILL, getpid(), SIGUSR1, 0); nap(5000000); }
+            take(&a0);
+            for (int k = 0; k < 10; k++) { sent[k] = rdtsc(); sc(NR_KILL, getpid(), SIGUSR1, 0); nap(5000000); }
             nap(50000000);
-            l.n = 0; ls(&l, "SMP-SIGNAL sleeper-ten round "); ld(&l, (U)round); ls(&l, " taken "); ld(&l, G->count); le(&l);
+            take(&a1);
+            U n = G->count, worst = 0;
+            for (U i = 0; i < n && i < 10; i++) { U d = G->ht[i] > sent[i] ? G->ht[i] - sent[i] : 0; if (d > worst) worst = d; }
+            l.n = 0; ls(&l, "SMP-SIGNAL sleeper-ten round "); ld(&l, (U)round); ls(&l, " taken "); ld(&l, n);
+            ls(&l, " worst-us "); ld(&l, us_of(worst));
+            ls(&l, " set "); lsd(&l, a0.sset < 0 || a1.sset < 0 ? -1 : a1.sset - a0.sset);
+            ls(&l, " merged "); lsd(&l, a0.smerged < 0 || a1.smerged < 0 ? -1 : a1.smerged - a0.smerged);
+            ls(&l, " took "); lsd(&l, a0.staken < 0 || a1.staken < 0 ? -1 : a1.staken - a0.staken);
+            ls(&l, " slept-pending "); lsd(&l, a0.sslept < 0 || a1.sslept < 0 ? -1 : a1.sslept - a0.sslept);
+            le(&l);
         }
         exit_group(0);
     }
