@@ -7,7 +7,9 @@ the wait has begun), and the signal waited for whatever else ended the wait (tes
 lost one to three of ten at 2, 4 and 16 processors until each wait asked).
 
   python3 -I tests/mpx6-smp.d/wait-census.py [ROOT]        the check (ROOT the tree, default .)
-  python3 -I tests/mpx6-smp.d/wait-census.py --selftest    its own proof: the tree green, each planted wait red
+  python3 -I tests/mpx6-smp.d/wait-census.py --selftest    its own proof: each planted wait adds a red to the tree's
+                                                           own (the tree's state is the check's to say, not the
+                                                           proof's: a planted tree's suite still boots, red)
 
 What is held: in every kernel/*.lu file, each `put_field(<slot>, offset_of(Thread, state), <S>)` with S an
 interruptible wait (SLEEPING, INPUT, PIPE, WAITING, FUTEX, SUSPEND) is followed, in the same function and before
@@ -90,38 +92,34 @@ def selftest():
     here = pathlib.Path(__file__).resolve().parent.parent.parent
     bad = 0
     cases = [
-        ('the tree as it is', None, True),
         ('a ninth wait without the question',
          lambda s: s.replace('\nfn signal_wakes(', '\npub fn planted_wait(f: u64) -> u64 {\n    let c = cur()\n'
-                             '    put_field(c, offset_of(Thread, state), WAITING)\n    run_next()\n}\n\nfn signal_wakes(', 1),
-         False),
+                             '    put_field(c, offset_of(Thread, state), WAITING)\n    run_next()\n}\n\nfn signal_wakes(', 1)),
         ('a wait that asks after it has switched away',
          lambda s: s.replace('\nfn signal_wakes(', '\npub fn planted_late(f: u64) -> u64 {\n    let c = cur()\n'
                              '    put_field(c, offset_of(Thread, state), FUTEX)\n    let r = run_next()\n'
-                             '    wake_if_signalled(c)\n    r\n}\n\nfn signal_wakes(', 1),
-         False),
+                             '    wake_if_signalled(c)\n    r\n}\n\nfn signal_wakes(', 1)),
         ('wake_if_signalled that does not ask signal_wakes',
          lambda s: re.sub(r'(^fn wake_if_signalled\(.*?^\})', lambda m: m[1].replace('signal_wakes(', 'takes_any('), s,
-                          count=1, flags=re.M | re.S),
-         False),
+                          count=1, flags=re.M | re.S)),
     ]
-    for name, plant, green in cases:
+    base = set(check(here)[0])
+    print(f'INFO WAIT-CENSUS-SELFTEST the tree as it is: {"green" if not base else f"{len(base)} red (the check says which)"}')
+    for name, plant in cases:
         with tempfile.TemporaryDirectory() as td:
             t = pathlib.Path(td)
             shutil.copytree(here / 'kernel', t / 'kernel')
             p = t / 'kernel/sched/sched.lu'
-            if plant:
-                s = p.read_text()
-                s2 = plant(s)
-                if s2 == s:
-                    print(f'FAIL WAIT-CENSUS-SELFTEST {name}: the plant did not apply')
-                    bad += 1
-                    continue
-                p.write_text(s2)
-            why, _ = check(t)
-            ok = (not why) == green
-            print(f'{"PASS" if ok else "FAIL"} WAIT-CENSUS-SELFTEST {name}: {"green" if not why else why[0]}')
-            bad += 0 if ok else 1
+            s = p.read_text()
+            s2 = plant(s)
+            if s2 == s:
+                print(f'FAIL WAIT-CENSUS-SELFTEST {name}: the plant did not apply')
+                bad += 1
+                continue
+            p.write_text(s2)
+            new = [w for w in check(t)[0] if w not in base]
+            print(f'{"PASS" if new else "FAIL"} WAIT-CENSUS-SELFTEST {name}: {new[0] if new else "no red the tree lacks"}')
+            bad += 0 if new else 1
     return 1 if bad else 0
 
 
