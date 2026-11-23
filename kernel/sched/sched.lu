@@ -569,15 +569,18 @@ fn ended_in_place(c: u64) -> bool {
 }
 
 /// px166: whether the running `c` must leave this processor at this tick or
-/// RESCHED whatever the queue holds: ended in place (DEAD), or its process
-/// stopped (`parks`). `preempt` and `kick` test it before their returns for an
-/// empty queue and an unspent quantum: on a processor with nothing it may
-/// take, those returns resumed such a thread for ever (an application
-/// processor takes only threads of processes: tests/mpx6-smp's SMP-DEAD, and
-/// SMP-SIGNAL's SIGSTOP held). `run_next` then leaves it: W_CPU cleared, the
-/// departure's waiter woken, the idle context on the kernel's PML4.
+/// RESCHED whatever the queue holds: ended in place (DEAD). `preempt` and
+/// `kick` test it before their returns for an empty queue and an unspent
+/// quantum: on a processor with nothing it may take, those returns resumed
+/// such a thread for ever (an application processor takes only threads of
+/// processes: tests/mpx6-smp's SMP-DEAD). `run_next` then leaves it: W_CPU
+/// cleared, the departure's waiter woken, the idle context on the kernel's
+/// PML4. A thread of a stopped process needs no test here: stop_proc's
+/// RESCHED (`reach`) brings it into the kernel at once, and whichever return
+/// resumes ring 3 goes through `signal.on_return`, which parks it
+/// (`park_current`; SMP-SIGNAL's SIGSTOP held).
 fn must_leave(c: u64) -> bool {
-    !idle(c) && (ended_in_place(c) || parks(c))
+    !idle(c) && ended_in_place(c)
 }
 
 /// px166 (step 5a): kernel/interrupts' door, before a system call or a
@@ -1670,8 +1673,8 @@ pub fn kick(f: u64) -> u64 {
     let c = cur()
     point(f, c) // px131: a chance to choose
     let h = eligible() // #598; px166: what this processor may take
-    // px166: a thread that must leave (`must_leave`) does so with nothing to
-    // take: ended, it is switched off below; stopped, it is queued and parked.
+    // px166: a thread that must leave (`must_leave`), ended in place, is
+    // switched off below even with nothing to take.
     if h == 0 && !must_leave(c) {
         return f
     }
