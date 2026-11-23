@@ -681,7 +681,8 @@ elif a.kind == 'testwords':
             why.append(f'no `testwords: {w} ignored (not a test kernel)` line')
     if a.qemu_status != 0:
         why.append(f'QEMU ended with status {a.qemu_status} (0: the machine powered off)')
-    test = sorted(n for n in symbols() if n.startswith(('_Wtestwords.fire$', '_Wtestwords.test_panic$')))
+    # the test op and test panic by name, and the test op's static `fired`, which survives the release tier's inlining
+    test = sorted(n for n in symbols() if n.startswith(('_Wtestwords.fire$', '_Wtestwords.test_panic$', '_Wtestwords.fired.')))
     if test:
         why.append(f'the shipped kernel holds test symbols: {test}')
     bad = bad_lines(ending=True)
