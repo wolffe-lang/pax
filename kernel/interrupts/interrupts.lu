@@ -394,6 +394,12 @@ fn fatal(f: *Frame) {
 /// signal to take, points it at a handler or ends the process and hands
 /// back the next thread's.
 export fn pax_interrupt(f: *Frame) -> *Frame {
+    // plant: an application processor allocates (the runtime's List) before kernel/klock's `enter`, NMIs and
+    // shootdowns excepted (red at SMP-NOHEAP and SMP-LOCK by `PANIC heap: alloc before heap.start`)
+    if percpu.index() != 0 && unsafe { f[0].vector } != 2 && unsafe { f[0].vector } != tlb.VECTOR {
+        var xs = List[int]()
+        (mut xs).push(1)
+    }
     // px77d: an NMI resumes where it landed, whatever ring, and nothing
     // else is done on its way out (it can land anywhere, even inside the
     // scheduler with IF clear).
