@@ -1072,6 +1072,28 @@ jobs:
           timeout --kill-after=10s 660 tools/fetch-usb-linux "$PWD/build/usb-linux"
           python3 -I -c 'import json; d=json.load(open("build/usb-linux/inputs.json")); print("PAX_LINUX_KERNEL="+d["kernel"]); print("PAX_LINUX_MODULES="+d["modules"])' >> "$GITHUB_ENV"
 
+      # BusyBox for the suite (user/busybox.pin, by digest): from the cache under its .deb's sha256, else from
+      # Ubuntu's archive and then Launchpad's librarian; a fetch that fails stops the job here, by name
+      # (tests/ci-plan's P13). The first run after a new pin finds the cache cold and fills it.
+      - name: BusyBox's pin (its .deb's sha256, the cache's key)
+        id: busybox-pin
+        if: needs.plan.outputs.tier != 'pr'
+        run: echo "sha256=$(sed -n 's/^BUSYBOX_DEB_SHA256=//p' user/busybox.pin)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: busybox-cache
+        if: needs.plan.outputs.tier != 'pr'
+        with:
+          path: .pax-cache/busybox-*
+          key: busybox-${{ steps.busybox-pin.outputs.sha256 }}
+      - name: BusyBox (by digest; the archive, then Launchpad's librarian, unless the cache holds it)
+        if: needs.plan.outputs.tier != 'pr'
+        run: tools/fetch-busybox build/busybox
+      - uses: actions/cache/save@v4
+        if: needs.plan.outputs.tier != 'pr' && steps.busybox-cache.outputs.cache-hit != 'true'
+        with:
+          path: .pax-cache/busybox-*
+          key: busybox-${{ steps.busybox-pin.outputs.sha256 }}
+
       - name: live USB stick, both firmwares, full console suite and Linux ESP differential
         if: needs.plan.outputs.tier != 'pr'
         timeout-minutes: 21
@@ -4032,6 +4054,25 @@ jobs:
         env:
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 
+      # BusyBox for the suite (user/busybox.pin, by digest): from the cache under its .deb's sha256, else from
+      # Ubuntu's archive and then Launchpad's librarian; a fetch that fails stops the job here, by name
+      # (tests/ci-plan's P13). The first run after a new pin finds the cache cold and fills it.
+      - name: BusyBox's pin (its .deb's sha256, the cache's key)
+        id: busybox-pin
+        run: echo "sha256=$(sed -n 's/^BUSYBOX_DEB_SHA256=//p' user/busybox.pin)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: busybox-cache
+        with:
+          path: .pax-cache/busybox-*
+          key: busybox-${{ steps.busybox-pin.outputs.sha256 }}
+      - name: BusyBox (by digest; the archive, then Launchpad's librarian, unless the cache holds it)
+        run: tools/fetch-busybox build/busybox
+      - uses: actions/cache/save@v4
+        if: steps.busybox-cache.outputs.cache-hit != 'true'
+        with:
+          path: .pax-cache/busybox-*
+          key: busybox-${{ steps.busybox-pin.outputs.sha256 }}
+
       - name: job control against real root's recordings and the container, as root and as a user; the plan's legs (all four in the all tier)
         env:
           PAX_REQUIRE_UEFI: "1"
@@ -4249,6 +4290,25 @@ jobs:
           docker image inspect --format '{{.Id}} {{.RepoDigests}}' "$PAX_TREE_IMAGE"
         env:
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+
+      # BusyBox for the suite (user/busybox.pin, by digest): from the cache under its .deb's sha256, else from
+      # Ubuntu's archive and then Launchpad's librarian; a fetch that fails stops the job here, by name
+      # (tests/ci-plan's P13). The first run after a new pin finds the cache cold and fills it.
+      - name: BusyBox's pin (its .deb's sha256, the cache's key)
+        id: busybox-pin
+        run: echo "sha256=$(sed -n 's/^BUSYBOX_DEB_SHA256=//p' user/busybox.pin)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: busybox-cache
+        with:
+          path: .pax-cache/busybox-*
+          key: busybox-${{ steps.busybox-pin.outputs.sha256 }}
+      - name: BusyBox (by digest; the archive, then Launchpad's librarian, unless the cache holds it)
+        run: tools/fetch-busybox build/busybox
+      - uses: actions/cache/save@v4
+        if: steps.busybox-cache.outputs.cache-hit != 'true'
+        with:
+          path: .pax-cache/busybox-*
+          key: busybox-${{ steps.busybox-pin.outputs.sha256 }}
 
       - name: pelt's complete fork replay against Linux, as root and as a user; the plan's legs (all four in the all tier)
         env:
