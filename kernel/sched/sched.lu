@@ -3950,23 +3950,31 @@ fn reach(t: u64) {
     }
 }
 
+/// px166: whether thread `t` of the process led by `l` has a pending
+/// signal that wakes it: its own or its process's (the process's only where
+/// `t` is that signal's taker), not blocked and not inert. `poke`'s test,
+/// and `wake_if_signalled`'s, the same one.
+fn signal_wakes(t: u64, l: u64) -> bool {
+    let m = field(t, offset_of(Thread, sigmask))
+    let own = field(t, offset_of(Thread, pend)) & !m
+    let grp = field(l, offset_of(Thread, gpend)) & !m
+    var sig: u64 = 1
+    while sig <= NSIG {
+        if (own & bit(sig) != 0 || (grp & bit(sig) != 0 && taker(l, sig) == t)) && !inert(l, sig) {
+            return true
+        }
+        sig += 1
+    }
+    false
+}
+
 fn poke(l: u64) {
     var t: u64 = FIRST
     while t < top() {
         // px166: a RUNNING thread is looked at too: on another processor it is reached (`reach`)
         if field(t, offset_of(Thread, lead)) == l && takes(t) && field(t, offset_of(Thread, state)) != READY {
             // Any of its deliverable signals that is not inert wakes it.
-            let m = field(t, offset_of(Thread, sigmask))
-            let own = field(t, offset_of(Thread, pend)) & !m
-            let grp = field(l, offset_of(Thread, gpend)) & !m
-            var sig: u64 = 1
-            var hit = false
-            while sig <= NSIG && !hit {
-                if (own & bit(sig) != 0 || (grp & bit(sig) != 0 && taker(l, sig) == t)) && !inert(l, sig) {
-                    hit = true
-                }
-                sig += 1
-            }
+            let hit = signal_wakes(t, l)
             if hit && field(t, offset_of(Thread, state)) == RUNNING {
                 reach(t)
             } else if hit {
