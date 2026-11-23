@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise px68's unchanged replay corpus against userspace fsck and e2fsck."""
+"""Exercise px68's unchanged replay corpus against userspace fsck and e2fsck.
+
+--ext4 (X3): the same corpus on an ext4 base (mke2fs -t ext4 with every default feature but
+ext3's and `extent` off, derived from dumpe2fs -h), whose journal inode is extent-mapped; the
+rows are then journal-ext4-<case>.
+"""
 from pathlib import Path
 import argparse
 import json
@@ -18,13 +23,25 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('checker', type=Path)
     ap.add_argument('work', type=Path)
+    ap.add_argument('--ext4', action='store_true')
     a = ap.parse_args()
     root = Path(__file__).resolve().parents[2]
     a.work.mkdir(parents=True, exist_ok=True)
     base = a.work / 'base.img'
     with base.open('wb') as f:
         f.truncate(32 * 1024 * 1024)
-    p = run(['mke2fs', '-q', '-F', '-t', 'ext3', '-b', '4096', base])
+    if a.ext4:
+        probe = a.work / 'defaults.img'
+        with probe.open('wb') as f:
+            f.truncate(32 * 1024 * 1024)
+        assert run(['mke2fs', '-q', '-F', '-t', 'ext4', '-b', '4096', probe]).returncode == 0
+        line = [l for l in run(['dumpe2fs', '-h', probe]).stdout.decode().splitlines() if l.startswith('Filesystem features:')]
+        have = set(line[0].split(':', 1)[1].split()) if line else set()
+        keep = {'extent', 'filetype', 'has_journal', 'large_file', 'sparse_super'}
+        opts = ','.join(sorted('^' + x for x in have - keep) + sorted(keep - have))
+        p = run(['mke2fs', '-q', '-F', '-t', 'ext4', '-O', opts, '-b', '4096', base])
+    else:
+        p = run(['mke2fs', '-q', '-F', '-t', 'ext3', '-b', '4096', base])
     assert p.returncode == 0, p.stdout
     api = runpy.run_path(str(root / 'tools/mkjournal'), run_name='px72_mkjournal')
     v = api['Vol'](str(base), 0)
@@ -65,7 +82,7 @@ def main():
                   'verify_rc': vp.returncode, 'byte_differences': len(diffs),
                   'unexpected_offsets': unexpected[:30], 'pass': okay}
         results.append(result)
-        print(('PASS ' if okay else 'FAIL ') + 'journal-' + name + ': ' + json.dumps(result), flush=True)
+        print(('PASS ' if okay else 'FAIL ') + ('journal-ext4-' if a.ext4 else 'journal-') + name + ': ' + json.dumps(result), flush=True)
     (a.work / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
     return int(any(not row['pass'] for row in results))
 
