@@ -101,11 +101,19 @@ for tier in $tiers; do
         tools/fetch-limine
         tools/build-kernel ${flags[@]+"${flags[@]}"} --src kernel/kmain_console.lu "$work"
         tools/build-kernel ${flags[@]+"${flags[@]}"} --test-words --src kernel/kmain_console.lu "$work/test"
-        # op 3 and the test panic live in the test build alone: seen present there and absent from the shipped one
-        tw=$(nm "$work/test/kmain_console.elf" | grep -cE ' _Wtestwords\.(fire|test_panic)\$' || true)
-        sw=$(nm "$work/kmain_console.elf" | grep -cE ' _Wtestwords\.(fire|test_panic)\$' || true)
-        if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-ELF $tier: the test build holds fire and test_panic; the shipped one neither"
-        else echo "FAIL TESTWORDS-ELF $tier: test build $tw of 2 test symbols, shipped $sw (want 0)"; rc=1; fi
+        # op 3 and the test panic live in the test build alone: seen present there and absent from the shipped one.
+        # px166 (11-23): by two marks that survive the release tier's inlining (which removes `fire` and `test_panic`
+        # as symbols while both still act): the test panic's text in the ELF's bytes, and the test op's static
+        # `fired` among its symbols
+        marks() { # ELF: how many of the two it holds
+            local n=0
+            grep -aq 'testwords: a test panic, cpu ' "$1" && n=$((n + 1))
+            [ "$(nm "$1" | grep -cE ' _Wtestwords\.fired\.')" -gt 0 ] && n=$((n + 1)) # -c reads all: no SIGPIPE under pipefail
+            echo "$n"
+        }
+        tw=$(marks "$work/test/kmain_console.elf") sw=$(marks "$work/kmain_console.elf")
+        if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-ELF $tier: the test build holds the test panic's text and the test op's state; the shipped one neither"
+        else echo "FAIL TESTWORDS-ELF $tier: test build $tw of 2 test marks (the test panic's text, the test op's \`fired\`), shipped $sw (want 2 and 0)"; rc=1; fi
         gcc -nostdlib -static -ffreestanding -fno-stack-protector -fno-pie -no-pie -O2 -mgeneral-regs-only -Wall \
             -o "$work/smpprobe" tests/mpx6-smp.d/probe.c
         for spec in "${images[@]}"; do
