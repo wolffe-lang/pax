@@ -33,6 +33,9 @@
 #   T3  our own repository's 403, three times, with the token: gave up by
 #       name, the token in no line; a token with a character no token has
 #       is refused (exit 2) without being printed or fetched with.
+#   T0  on CI, the token the job was handed is one tools/fetch-retry takes
+#       (its own run of a git fetch with it, recorded, not printed), so a
+#       token of a new form stops here, before any suite's fetch.
 #   R6  a server error (HTTP 503) on attempt 1: tried again, fetched.
 #   R7  a stalled transfer (curl 28, `Operation too slow`, the floor): tried
 #       again, fetched.
@@ -87,7 +90,8 @@ bad() { echo "FAIL $*"; fail=1; }
 ok() { echo "PASS $*"; }
 # CI hands every job its token for tools/fetch-retry's fetches of our own
 # repositories: every row runs without it, T1 to T6 with one of their own.
-[ -z "${PAX_FETCH_TOKEN:-}" ] || echo "fetch-retry-selftest: PAX_FETCH_TOKEN is set here (${#PAX_FETCH_TOKEN} characters); the rows run without it"
+ci_tok=${PAX_FETCH_TOKEN:-}
+[ -z "$ci_tok" ] || echo "fetch-retry-selftest: PAX_FETCH_TOKEN is set here (${#ci_tok} characters); the rows run without it, T0 with it"
 unset PAX_FETCH_TOKEN FETCH_RETRY_OWN GIT_CONFIG_COUNT
 
 real_git=$(command -v git) || { echo 'fetch-retry-selftest: no git' >&2; exit 2; }
@@ -191,7 +195,7 @@ trun() {
     "$real_git" init -q "$w/dst"
     printf '%s\n' "fatal: unable to access '$repo/': The requested URL returned error: 403" > "$w/err.txt"
     rc=0
-    env ${tok:+PAX_FETCH_TOKEN=$tok} "$@" PATH="$w/bin:$PATH" REAL_GIT="$real_git" FAKE_STATE="$w/state" FAKE_FAILS="$fails" \
+    env ${tok:+"PAX_FETCH_TOKEN=$tok"} "$@" PATH="$w/bin:$PATH" REAL_GIT="$real_git" FAKE_STATE="$w/state" FAKE_FAILS="$fails" \
         FAKE_ERR="$w/err.txt" FAKE_RECORD="$w/state/rec" sh "$helper" "$w/dst" "$repo" main > "$w/$name.out" 2> "$w/$name.err" || rc=$?
     fetches=$(cat "$w/state/fetches" 2>/dev/null || echo 0)
     sed "s/^/  $name: /" "$w/$name.err"
@@ -234,6 +238,16 @@ trun T3 https://github.com/wolffe-lang/pelt "$badtok" 0
 if [ "$t3" = 1 ]; then
     ok "T3: our own repository's 403 with the token, three times: gave up by name, the token in no line; a token with a character no token has is refused unprinted, nothing fetched"
 else bad "T3: rc $rc, $fetches fetches"; fi
+
+if [ -z "$ci_tok" ]; then
+    ok "T0: no PAX_FETCH_TOKEN here (a run off CI): nothing to check"
+else
+    trun T0 https://github.com/wolffe-lang/pelt "$ci_tok" 0
+    if [ "$rc" = 0 ] && [ "$fetches" = 1 ] && grep -q "with the job's token" "$w/T0.err"; then
+        ok "T0: the token this job was handed (${#ci_tok} characters) is one tools/fetch-retry takes"
+    else bad "T0: tools/fetch-retry does not take the token this job was handed (${#ci_tok} characters): rc $rc; every fetch of our own repositories would stop"; fi
+fi
+ci_tok=
 
 run R6 1 "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503" "$pin" "$pin"
 if [ "$rc" = 0 ] && [ "$fetches" = 2 ] && grep -q 'failed (server)' "$w/R6.err" && [ "$head" = "$pin" ]; then
@@ -396,7 +410,7 @@ srun() {
     local name=$1 u=$2 tok=$3
     rm -rf "$w/dl"; mkdir -p "$w/dl"; rm -f "$w/stub/github.headers" "$w/stub/asset.headers"
     rc=0
-    env ${tok:+PAX_FETCH_TOKEN=$tok} FETCH_RETRY_OWN="http://127.0.0.1:$pa/wolffe-lang/" \
+    env ${tok:+"PAX_FETCH_TOKEN=$tok"} FETCH_RETRY_OWN="http://127.0.0.1:$pa/wolffe-lang/" \
         sh "$helper" --url "$u" "$w/dl/r.tar.gz" "$rsha" > "$w/$name.out" 2> "$w/$name.err" || rc=$?
     left=$(cd "$w/dl" && ls)
     sed "s/^/  $name: /" "$w/$name.err"
