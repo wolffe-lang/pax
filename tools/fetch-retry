@@ -71,10 +71,28 @@
 # Each failed attempt is said on stderr with its class and the wait:
 # `fetch-retry: REPO REFSPEC: attempt 1 of 3 failed (reset); again in 10 s`.
 # Exit 0 fetched (and the commit is SHA's); 3 the network failed every
-# attempt; 4 not retried; 5 the wrong commit; 2 usage.
+# attempt; 4 not retried; 5 the wrong commit; 2 usage, or a token refused.
+#
+# The job's token, for our own repositories alone. With PAX_FETCH_TOKEN
+# set (CI sets it to each job's own token, read-only), a REPO or URL under
+# https://github.com/wolffe-lang/ is fetched as that token, so it does not
+# share the anonymous limit of the runners' addresses (three 403s in a row
+# ended a git fetch of wolf-std in run 45139544166 and one of pelt in run
+# 45135688186). git is given it as http.<that prefix>.extraheader
+# (`AUTHORIZATION: basic`, user x-access-token) through GIT_CONFIG_COUNT,
+# GIT_CONFIG_KEY_n and GIT_CONFIG_VALUE_n, after any entries already there;
+# curl as an `Authorization: Bearer` header in a config it reads on stdin,
+# which curl does not send on to the host a redirect names (a release
+# archive's own host). Neither is on a command line or in a line printed:
+# the fetch says `with the job's token` once. Any other repository or URL,
+# and every run without the variable (every run off CI), is anonymous as
+# before. A token with a character no token has is refused (exit 2).
+# FETCH_RETRY_OWN moves the prefix, for tests/fetch-retry-selftest's local
+# stand-in alone.
 #
 # POSIX sh (the census container's stage.sh runs it under /bin/sh); it
-# needs git and sleep, and for --url curl and sha256sum or shasum.
+# needs git and sleep, base64 for a git fetch with the token, and for
+# --url curl and sha256sum or shasum.
 set -u
 usage() { echo 'usage: fetch-retry DIR REPO REFSPEC [SHA] | fetch-retry --url URL FILE SHA256' >&2; exit 2; }
 mode=git
@@ -88,6 +106,28 @@ fi
 attempts=3
 err=$(mktemp "${TMPDIR:-/tmp}/fetch-retry.XXXXXX") || exit 2
 trap 'rm -f "$err"' EXIT
+
+# The job's token, for our own repositories alone (above).
+own=${FETCH_RETRY_OWN:-https://github.com/wolffe-lang/}
+tok=
+case $repo in
+    "$own"*) tok=${PAX_FETCH_TOKEN:-} ;;
+esac
+if [ -n "$tok" ]; then
+    case $tok in
+        *[!A-Za-z0-9_.-]*)
+            echo "fetch-retry: $repo $ref: refused: PAX_FETCH_TOKEN holds a character no token has" >&2
+            exit 2 ;;
+    esac
+    echo "fetch-retry: $repo $ref: with the job's token" >&2
+    if [ "$mode" = git ]; then
+        i=${GIT_CONFIG_COUNT:-0}
+        case $i in ''|*[!0-9]*) i=0 ;; esac
+        export "GIT_CONFIG_KEY_$i=http.$own.extraheader"
+        export "GIT_CONFIG_VALUE_$i=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$tok" | base64 | tr -d '\n')"
+        export GIT_CONFIG_COUNT=$((i + 1))
+    fi
+fi
 
 # The class of a failed attempt's stderr, or nothing: not retried.
 classify() {
@@ -120,7 +160,12 @@ while :; do
     status=0
     if [ "$mode" = url ]; then
         rm -f "$file.part"
-        curl -fsSL --speed-limit 1000 --speed-time 60 -o "$file.part" "$url" 2>"$err" || status=$?
+        if [ -n "$tok" ]; then
+            printf 'header = "Authorization: Bearer %s"\n' "$tok" \
+                | curl -K - -fsSL --speed-limit 1000 --speed-time 60 -o "$file.part" "$url" 2>"$err" || status=$?
+        else
+            curl -fsSL --speed-limit 1000 --speed-time 60 -o "$file.part" "$url" 2>"$err" || status=$?
+        fi
         [ "$status" = 0 ] || rm -f "$file.part"
     else
         git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$dir" fetch -q --depth 1 "$repo" "$ref" 2>"$err" || status=$?
