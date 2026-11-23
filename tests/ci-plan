@@ -94,7 +94,7 @@
       it chose, while every leg, the merge legs and the pr leg pass.
   P12 the job's token for tools/fetch-retry (PAX_FETCH_TOKEN): the
       workflow gives every job its own, read-only; a job whose token can
-      write (the `tier` job's issues) empties it; nothing else sets it or
+      write (the `nightly-red` job's issues) empties it; nothing else sets it or
       FETCH_RETRY_OWN; and a workflow that runs on pull_request_target
       gives it no run. The check says no to each of those, on ci.yml
       changed to break it.
@@ -1428,7 +1428,7 @@ say(not tp, "P12 the job's token: the workflow gives every job %s (its own, read
 def token_refused(name, change, words):
     """None when ci.yml changed by CHANGE (a function of its text) is refused with WORDS in a problem."""
     changed = change(wf_text)
-    if changed == wf_text and name != "the tier job without its empty token":
+    if changed == wf_text and name != "the nightly-red job without its empty token":
         return "%s (cannot be made from ci.yml)" % name
     got = token_problems(changed)
     return None if any(words in p for p in got) else "%s (said: %s)" % (name, "; ".join(got) or "nothing")
@@ -1436,8 +1436,8 @@ def token_refused(name, change, words):
 
 misses = [m for m in (
     token_refused("a pull_request_target trigger", lambda t: t.replace("\non:\n", "\non:\n  pull_request_target:\n", 1), "pull_request_target"),
-    # Every job's own empty token taken out (the tier job's alone, today): still refused if it was never there.
-    token_refused("the tier job without its empty token", lambda t: re.sub(r"(?m)^      %s: .*\n" % TOKEN, "", t), "job tier can write"),
+    # Every job's own empty token taken out (the nightly-red job's alone, today): still refused if it was never there.
+    token_refused("the nightly-red job without its empty token", lambda t: re.sub(r"(?m)^      %s: .*\n" % TOKEN, "", t), "job nightly-red can write"),
     token_refused("write at the top", lambda t: t.replace("\npermissions:\n  contents: read\n", "\npermissions:\n  contents: write\n", 1),
                   "own permissions can write"),
     token_refused("FETCH_RETRY_OWN set", lambda t: t.replace("\nenv:\n", "\nenv:\n  FETCH_RETRY_OWN: https://example.invalid/\n", 1), "FETCH_RETRY_OWN"),
