@@ -269,7 +269,15 @@ def without_blocks(text):
 
 
 def lookup(img, path):
-    """The inode number of PATH in IMG, by the image's own directories (filetype entries)."""
+    """The inode number of PATH in IMG, by the image's own directories (filetype entries); None when a name or a
+    tree on the way cannot be read (a plant's image: the rows then FAIL by name, never stop the script)."""
+    try:
+        return _lookup(img, path)
+    except (ValueError, struct.error, AssertionError, IndexError, UnicodeDecodeError):
+        return None
+
+
+def _lookup(img, path):
     ino = 2
     for part in path.split("/"):
         found = None
@@ -308,8 +316,15 @@ if imgs["plain"] and imgs["extents"]:
     bad = []
     for path, want_depth in MINDEPTH.items():
         ino = lookup(img, path)
+        if ino is None:
+            bad.append(f"{path}: not found through the image's directories")
+            continue
         raw = img.inode(ino)
-        depth, ext, nodes = img.tree(raw)
+        try:
+            depth, ext, nodes = img.tree(raw)
+        except (ValueError, struct.error, AssertionError):
+            bad.append(f"{path}: its extent tree cannot be read")
+            continue
         data = (tree / path).read_bytes()
         runs, k, n = [], 0, (len(data) + 4095) // 4096
         while k < n:
@@ -417,20 +432,24 @@ if imgs.get("extents"):
         shutil.copyfile(imgs["extents"], depth_img)
         di = Image(depth_img)
         six_ino = lookup(di, "six")
-        raw6 = di.inode(six_ino)
-        leaf = (struct.unpack_from("<H", raw6, 40 + 12 + 8)[0] << 32) | struct.unpack_from("<I", raw6, 40 + 12 + 4)[0]
-        with depth_img.open("r+b") as f:
-            f.seek(leaf * 4096 + 6)
-            f.write(struct.pack("<H", 1))
-        depth_sha = sha(depth_img)
-        e2 = oracle("e2fsck", "-fn", depth_img).returncode
-        rc2, log2, status2, _u, _m = guest("linux-depth", depth_img, "ext4-depth.sh")
-        read_rc = next((l.split()[-1] for l in log2.splitlines() if "depth-read: " in l), "?")
-        derr = next((l.split()[-1] for l in log2.splitlines() if "depth-errors: " in l), "?")
-        refused = status2 == "0" and read_rc not in ("0", "?") and derr not in ("0", "?")
-        row("linux-depth", refused, f"Linux {uname} reads six through a leaf whose depth disagrees with its parent's: "
-            + (f"refused (cat exit {read_rc}, {derr} EXT4-fs errors), as fsck.ext2 refuses it; e2fsck -fn exit {e2}" if refused else
-               f"the guest's run exited {status2}, cat exit {read_rc}, EXT4-fs errors {derr}; e2fsck -fn exit {e2}"))
+        status2, read_rc, derr, depth_sha, e2 = "?", "?", "?", "-", "?"
+        if six_ino is None:
+            row("linux-depth", False, "six not found through the image's directories")
+        else:
+            raw6 = di.inode(six_ino)
+            leaf = (struct.unpack_from("<H", raw6, 40 + 12 + 8)[0] << 32) | struct.unpack_from("<I", raw6, 40 + 12 + 4)[0]
+            with depth_img.open("r+b") as f:
+                f.seek(leaf * 4096 + 6)
+                f.write(struct.pack("<H", 1))
+            depth_sha = sha(depth_img)
+            e2 = oracle("e2fsck", "-fn", depth_img).returncode
+            rc2, log2, status2, _u, _m = guest("linux-depth", depth_img, "ext4-depth.sh")
+            read_rc = next((l.split()[-1] for l in log2.splitlines() if "depth-read: " in l), "?")
+            derr = next((l.split()[-1] for l in log2.splitlines() if "depth-errors: " in l), "?")
+            refused = status2 == "0" and read_rc not in ("0", "?") and derr not in ("0", "?")
+            row("linux-depth", refused, f"Linux {uname} reads six through a leaf whose depth disagrees with its parent's: "
+                + (f"refused (cat exit {read_rc}, {derr} EXT4-fs errors), as fsck.ext2 refuses it; e2fsck -fn exit {e2}" if refused else
+                   f"the guest's run exited {status2}, cat exit {read_rc}, EXT4-fs errors {derr}; e2fsck -fn exit {e2}"))
         if ok and status2 == "0" and making:
             Path(making).write_text(f"# E4-linux-reads' record: Linux {uname} walked the paxext2 --extents root of {len(got)} entries, each equal to\n"
                                     "# e2tree's listing (type, mode, size, contents; a link's target as -> TARGET), and refused six read through\n"
