@@ -55,7 +55,7 @@ BEFORE THE SESSION (optional: the TCP host, R-px89-3)
 THE SESSION
   0. Write the stick: balenaEtcher, pax-wire-f68505c6.img. Check its digest first:
        shasum -a 256 ~/pax-smoke/pax-wire-f68505c6.img   (must print ba06df597c9fac9ce1ffa40864a2fee2c15be16b47276ba63d7a7d75537358c7)
-  1. The metal target: the Ethernet cable in the port CachyOS calls enp112s0 (the I225-V, MAC 7c:10:c9:3f:cb:9c; it is
+  1. The metal target: the Ethernet cable in the port CachyOS calls enp112s0 (the I225-V, MAC (the network card's address, withheld); it is
      the port cabled today). The other wired port (the Aquantia 10 GbE) stays empty.
   2. The stick in a USB port. Power on, press F8, choose the stick's UEFI entry. Limine's menu: let the
      default boot (3 s). Take a phone VIDEO from the menu to the end of the record.
@@ -63,8 +63,8 @@ THE SESSION
        net: Intel I225/I226 8086:15f3 at 70:00.0, bar0 0x...a4900000, reset in ... us, address from RAL0/RAH0
        net: link up after ... ms: ... (STATUS ...)            or   net: NO link after 10000 ms (STATUS ...)
        net: regs CTRL ... STATUS ... (one long line: what the controller holds)
-       net: 7c:10:c9:3f:cb:9c, polled every tick (line ..., an I225: polled by design), 66 frames held
-       dhcp: started on 7c:10:c9:3f:cb:9c ...
+       net: (the network card's address, withheld), polled every tick (line ..., an I225: polled by design), 66 frames held
+       dhcp: started on (the network card's address, withheld) ...
        dhcp: +... s DISCOVER / OFFER / REQUEST / ACK ... / bound 192.168.0.x netmask ... gateway 192.168.0.1
        dhcp: the router 192.168.0.1 answers the kernel's echo     (or "does NOT answer")
   4. The record, printed at the end ("px89 wire record", the lease file, resolv.conf, "== the stick: /dev/sd?",
