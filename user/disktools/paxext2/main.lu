@@ -261,7 +261,9 @@ fn run(args: List[str]) -> () ! {invalid, io, full, too_large} {
     let epoch = et.to_int() else |_| { return invalid }
     if epoch < 0 || epoch > 4294967295 { return invalid }
     let attrs = attributes(attrs_path, epoch)?
-    let nodes = collect(source, attrs, excludes, epoch)?
+    // A file's size is 32 bits without --extents (no i_size_high written), 2^32 blocks with them (ee_block).
+    let limit = if extents then 17592186044415 else 4294967295
+    let nodes = collect(source, attrs, excludes, epoch, limit)?
     // Validate the geometry and inode budget before opening the destination.
     var fs = layout(-1, base, bytes, inodes)?
     fs.extents = extents
