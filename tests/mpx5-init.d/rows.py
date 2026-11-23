@@ -59,6 +59,30 @@ Lifecycle boots, a boot each, independent of I4 and of each other:
       only by the next login on its line ends at that login's time), and one
       `reboot` line: the boot's record, written once.
 
+Alpha boots (pax.services= on the kernel command line, after `quiet`), a boot each:
+  I17 `pax.services=alpha`, the tree's /bin/alpha: one process whose comm is
+      `alpha`, its parent 1, its process group its own pid, its session 1
+      (init's: a job, never a session leader); its descriptors 0 /dev/null, 1
+      and 2 /dev/kmsg; `alpha list --format=1` answers (status 0); the
+      suite's hook `svc` (no unit of its name) ran once; /proc/1/cmdline still
+      `/bin/init`.
+  I18 the same boot: root SIGKILLs alpha (the pid of its own first line on
+      the serial log, `manager … pid N`): init's line `init: /bin/alpha ended
+      (killed by signal 9); again in 1 s`, and a new alpha (a second
+      `manager … pid M` line, M not N) within 10 s of it (1 s, and the TCG
+      margin); `svc` not run again.
+  I22 the same boot: root's `reboot -h`: alpha's `stopping every unit (TERM)`
+      and `exit 0` on the serial log before the kernel's `PAX: the end:` line,
+      which names no SIGKILL (nor any `PAX: SIGKILL at the end:` line), and no
+      `init: /bin/alpha ended` after the reboot was typed.
+  I19 `pax.services=alpha` with no /bin/alpha in the tree: one `init:` line
+      naming /bin/alpha, and the hooks run (`svc: started`).
+  I20 `pax.services=alpha`, /bin/alpha a pelt script that exits 2 at once:
+      one `init:` line naming its status, `svc: started` once, and no `again
+      in` line within 15 s (alpha is not started again).
+  I21 no word (boot 1) and `pax.services=hooks`: no process whose comm is
+      `alpha`, and the hooks as today (`svc: started`).
+
 Exit 0 when every selected row held, 1 otherwise. A row that cannot be reached (the
 machine halted at a logout) fails by name with what the console said.
 """
@@ -226,11 +250,11 @@ def files(work):
     return out + ['/etc/shadow=%s:600' % (work / 'shadow')]
 
 
-def iso(work, name, cmdline):
+def iso(work, name, cmdline, rows=None):
     conf = work / (name + '.conf')
     text = (ROOT / 'boot/limine-initramfs-quiet.conf').read_text()
     conf.write_text(text.replace('cmdline: quiet', 'cmdline: ' + cmdline))
-    run([ROOT / 'tools/mkinitramfs', work / (name + '.cpio')] + files(work))
+    run([ROOT / 'tools/mkinitramfs', work / (name + '.cpio')] + (files(work) if rows is None else rows))
     run([ROOT / 'tools/mkimage', '--conf', conf, '--add', work / (name + '.cpio'), 'initramfs.cpio', ARGS.elf,
          work / (name + '.iso')])
     return work / (name + '.iso')
@@ -355,6 +379,8 @@ def boot1(con):
             bad('I1', 'pid 1 %r (tty_nr %s); the shell %s: ppid %s sid %s tty_nr %s' % (init_cmd, init_tty, me, ppid, sid, tty))
     else:
         bad('I1', 'unreadable: %r' % out)
+    # I21, the no-word half: no alpha process (the hooks ran: I11's `svc: started` above)
+    NO_WORD['alpha'] = alpha_pids(con, 90)
     # I2
     out = con.command("echo X=$XDG_RUNTIME_DIR; stat -c '%n %u %g %a %F' /run /run/user /run/user/0 /run/user/1000 "
                       "/run/user/1001 $XDG_RUNTIME_DIR; ls /run/user; cat /proc/self/mounts", 2) or ''
@@ -705,6 +731,183 @@ def lifecycle_boots(the_iso):
             con.quit()
 
 
+NO_WORD = {}
+
+
+def alpha_pids(con, n):
+    """The pids whose /proc/PID/comm is `alpha`, read at the console (None when unreadable)."""
+    out = con.command('for d in /proc/[0-9]*; do read c < $d/comm; if [ "$c" = alpha ]; then echo "A=${d#/proc/}"; fi; done', n)
+    if out is None:
+        return None
+    return [int(l[2:]) for l in out.split() if l.startswith('A=') and l[2:].isdigit()]
+
+
+def seen_after(con, start, pattern, timeout):
+    """The first match of `pattern` anywhere in the transcript after byte `start`, waited for up to `timeout`
+    seconds (the cursor untouched: alpha's records and the console's lines reach the wire in either order)."""
+    rx = re.compile(pattern.encode() if isinstance(pattern, str) else pattern, re.M)
+    end = time.monotonic() + timeout
+    while True:
+        m = rx.search(con.seen, start)
+        if m or time.monotonic() >= end or not con.running():
+            return m
+        con.pump(0.1)
+
+
+def alpha_tree(work, alpha):
+    """files() with /bin/alpha as `alpha` says: 'real' (the tree's), 'none' (left out), 'stub' (exits 2)."""
+    rows = [l for l in files(work) if not l.startswith('/bin/alpha=')]
+    if alpha == 'real':
+        return files(work)
+    if alpha == 'stub':
+        stub = work / 'alpha-stub'
+        stub.write_text("#!/bin/pelt\n# tests/mpx5-init.d/rows.py, I20: a /bin/alpha that exits 2 at once\nexit 2\n")
+        os.chmod(stub, 0o755)
+        rows.append('/bin/alpha=%s:755' % stub)
+    return rows
+
+
+def alpha_boot(con):
+    """I17, I18 and I22: pax.services=alpha, the tree's /bin/alpha."""
+    first = seen_after(con, 0, r'manager [0-9][^ \n]* pid ([0-9]+) root /', 180)
+    hook = seen_after(con, 0, r'svc: started\n', 180)
+    if not first:
+        bad('I17', 'no `manager … pid N root /` line from alpha on the serial log: %r' % con.text(600))
+    if not hook:
+        bad('I17', 'the boot hook never ran (no `svc: started`): %r' % con.text(600))
+    if not login(con, 'root', 'I17'):
+        return
+    pids = alpha_pids(con, 170)
+    if not pids or len(pids) != 1:
+        bad('I17', 'one alpha process wanted; /proc/*/comm gave %r' % pids)
+        return
+    pid = pids[0]
+    out = con.command("cut -d' ' -f4,5,6 /proc/%d/stat; ls -l /proc/%d/fd/0 /proc/%d/fd/1 /proc/%d/fd/2; "
+                      "alpha list --format=1 > /tmp/list.json; echo status=$?; cat /var/log/init-hook.calls; "
+                      "tr '\\0' ' ' < /proc/1/cmdline; echo" % (pid, pid, pid, pid), 171) or ''
+    lines = [l.strip() for l in out.strip().splitlines()]
+    why = []
+    if not lines or lines[0].split() != ['1', str(pid), '1']:
+        why.append('ppid, pgrp, session %r, wanted 1 %d 1' % (lines[0] if lines else None, pid))
+    for fd, target in (('0', '/dev/null'), ('1', '/dev/kmsg'), ('2', '/dev/kmsg')):
+        if not any(re.search(r'/fd/%s -> %s$' % (fd, re.escape(target)), l) for l in lines):
+            why.append('fd %s is not %s' % (fd, target))
+    if 'status=0' not in lines:
+        why.append('`alpha list --format=1` did not answer (%r)' % [l for l in lines if l.startswith('status=')])
+    if lines.count('hook') != 1:
+        why.append('the hook ran %d times' % lines.count('hook'))
+    if '/bin/init' not in lines:
+        why.append('/proc/1/cmdline is not /bin/init')
+    if first and int(first.group(1)) != pid:
+        why.append('alpha\'s own line says pid %s, /proc says %d' % (first.group(1).decode(), pid))
+    if why:
+        bad('I17', '; '.join(why) + ': %r' % out[-600:])
+    else:
+        ok('I17', 'alpha pid %d: parent 1, its own group, session 1; 0 /dev/null, 1 and 2 /dev/kmsg; `alpha list` answers; '
+                  '`svc` ran once; pid 1 is /bin/init' % pid)
+    # I18: SIGKILL; init's line; a new alpha; the hook not again
+    mark = len(con.seen)
+    con.type('kill -9 %d' % pid)
+    line = seen_after(con, mark, r'init: /bin/alpha ended \(killed by signal 9\); again in 1 s', 30)
+    t_line = time.monotonic()
+    again = seen_after(con, mark, r'manager [0-9][^ \n]* pid ([0-9]+) root /', 40)
+    took = time.monotonic() - t_line
+    hooks = con.command('cat /var/log/init-hook.calls', 172) or ''
+    why = []
+    if not line:
+        why.append('no `init: /bin/alpha ended (killed by signal 9); again in 1 s` line')
+    if not again or int(again.group(1)) == pid:
+        why.append('no new alpha (`manager … pid M`, M not %d)' % pid)
+    elif line and took > 10:
+        why.append('the new alpha came %.1f s after init\'s line' % took)
+    if hooks.split().count('hook') != 1:
+        why.append('the hook ran %d times' % hooks.split().count('hook'))
+    if why:
+        bad('I18', '; '.join(why) + ': %r' % con.text(600))
+    else:
+        ok('I18', 'SIGKILL to %d: init\'s line, then alpha pid %s within %.1f s; `svc` not run again' % (
+            pid, again.group(1).decode(), took))
+    # I22: reboot -h; alpha's stop before the kernel's end line, no SIGKILL, no restart
+    mark = len(con.seen)
+    con.type('reboot -h')
+    end = seen_after(con, mark, r'^PAX: the end: [^\n]*\n', 90)
+    con.wait(r'^halt$', 60)
+    tail = con.seen[mark:end.start()] if end else b''
+    after = con.seen[mark:]
+    why = []
+    if not end:
+        why.append('no `PAX: the end:` line')
+    else:
+        if b'stopping every unit (TERM)' not in tail:
+            why.append('no `stopping every unit (TERM)` before the end line')
+        if not re.search(rb'(^|[ >])exit 0$', tail, re.M):
+            why.append('no `exit 0` from alpha before the end line')
+        if b'SIGKILL' in end.group(0) or b'PAX: SIGKILL at the end:' in after:
+            why.append('the end names a SIGKILL: %r' % end.group(0))
+    if b'init: /bin/alpha ended' in after:
+        why.append('init started alpha again during the end')
+    if why:
+        bad('I22', '; '.join(why) + ': %r' % con.text(800))
+    else:
+        ok('I22', 'reboot -h: alpha stopped its units and exited 0 before %s' % end.group(0).decode().strip())
+
+
+def alpha_fallback(con, row, want):
+    """I19 and I20: the console's own lines, no login: init's one line `want`, the hook once, no start again."""
+    line = seen_after(con, 0, want, 180)
+    hook = seen_after(con, 0, r'svc: started\n', 180)
+    con.wait(r'login: $', 120)
+    time.sleep(15)
+    con.pump(0.5)
+    why = []
+    if not line:
+        why.append('no init line matching %r' % want)
+    elif len(re.findall(want.encode(), con.seen, re.M)) != 1:
+        why.append('init\'s line %d times' % len(re.findall(want.encode(), con.seen, re.M)))
+    if not hook or con.seen.count(b'svc: started\n') != 1:
+        why.append('`svc: started` %d times' % con.seen.count(b'svc: started\n'))
+    if b'again in' in con.seen:
+        why.append('init starts /bin/alpha again (`again in`)')
+    if why:
+        bad(row, '; '.join(why) + ': %r' % con.text(600))
+    else:
+        ok(row, '%s; the hooks ran once; no start again' % line.group(0).decode().strip())
+
+
+def hooks_boot(con):
+    """I21's word half: pax.services=hooks."""
+    hook = seen_after(con, 0, r'svc: started\n', 180)
+    if not login(con, 'pax', 'I21'):
+        return None
+    return {'alpha': alpha_pids(con, 180), 'hook': bool(hook)}
+
+
+def alpha_boots(work):
+    for name, cmdline, alpha, check in (
+            ('alpha', 'quiet pax.services=alpha', 'real', alpha_boot),
+            ('alpha-none', 'quiet pax.services=alpha', 'none',
+             lambda c: alpha_fallback(c, 'I19', r'^init: [^\n]*/bin/alpha[^\n]*\n')),
+            ('alpha-exit2', 'quiet pax.services=alpha', 'stub',
+             lambda c: alpha_fallback(c, 'I20', r'^init: /bin/alpha ended with status 2[^\n]*\n')),
+            ('hooks', 'quiet pax.services=hooks', 'real', hooks_boot)):
+        image = iso(work, name, cmdline, alpha_tree(work, alpha))
+        con = Console(ARGS.out / ('boot-' + name), image)
+        try:
+            got = check(con)
+        except Exception as e:
+            bad({'alpha': 'I17', 'alpha-none': 'I19', 'alpha-exit2': 'I20', 'hooks': 'I21'}[name],
+                '%s: %s; console %r' % (type(e).__name__, e, con.text(300)))
+            got = None
+        finally:
+            con.quit()
+        if name == 'hooks':
+            nw = NO_WORD.get('alpha')
+            if got and got['alpha'] == [] and got['hook'] and nw == []:
+                ok('I21', 'no alpha process with no word (boot 1) or pax.services=hooks; the hooks ran')
+            else:
+                bad('I21', 'no word: alpha pids %r; pax.services=hooks: %r' % (nw, got))
+
+
 def main():
     global ARGS
     a = argparse.ArgumentParser()
@@ -745,6 +948,7 @@ def main():
                     bad('I13', 'the disk\'s boots stopped at %s: %s' % (type(e).__name__, e))
         else:
             say('SKIPPED LOUDLY I13: no mke2fs, debugfs or e2fsck on this host')
+        alpha_boots(work)
     for p in sorted(ARGS.out.rglob('*')):
         if p.is_file() and p.suffix not in ('.iso', '.img', '.cpio') and p.stat().st_size < 64 << 20:
             data = p.read_bytes()
