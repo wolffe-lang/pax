@@ -391,7 +391,11 @@ def walked(lines):
 
 expect = expected()
 record = HERE / "ext4-linux.record"
+# PAX_E4_LINUX_RECORD=PATH: this host makes the record (written to PATH, never into the checkout); a host that
+# makes it must boot Linux live, so a missing kernel is a failure there, not a reason to read the old record.
+making = os.environ.get("PAX_E4_LINUX_RECORD", "")
 kernel = os.environ.get("PAX_LINUX_KERNEL", f"/usr/lib/modules/{os.uname().release}/vmlinuz")
+skipped = False
 if imgs.get("extents"):
     image_sha = sha(imgs["extents"])
     live = os.environ.get("PAX_LINUX") != "recorded" and os.access(kernel, os.R_OK)
@@ -412,15 +416,22 @@ if imgs.get("extents"):
         log = (guest / "serial.log").read_text(errors="replace") if (guest / "serial.log").exists() else ""
         got = [l.split("walk: ", 1)[1].strip() for l in log.splitlines() if "walk: " in l and "walk-errors" not in l]
         errors = [l for l in log.splitlines() if "walk-errors: " in l]
+        uname = next((l.split()[-1] for l in log.splitlines() if "linux-blk: uname" in l), "?")
         ok = g.returncode == 0 and bool(expect) and walked(got) == expect and bool(errors) and errors[-1].split()[-1] == "0"
-        if ok and os.environ.get("PAX_E4_LINUX_RECORD") == "1":
-            record.write_text(f"image {image_sha}\nuname {next((l.split()[-1] for l in log.splitlines() if 'linux-blk: uname' in l), '?')}\n" + "\n".join(got) + "\n")
-        row("linux-reads", ok, f"Linux (live) mounts the root -t ext4 read-only: {len(got)} names against e2tree's {len(expect)}, types, modes, sizes and contents {'equal' if ok else 'not equal'}, EXT4-fs errors {errors[-1].split()[-1] if errors else '?'}")
+        if ok and making:
+            Path(making).write_text(f"image {image_sha}\nuname {uname}\n" + "\n".join(got) + "\n")
+        row("linux-reads", ok, f"Linux {uname} (live) mounts the root -t ext4 read-only: {len(got)} names against e2tree's {len(expect)}, types, modes, sizes and contents {'equal' if ok else 'not equal'}, EXT4-fs errors {errors[-1].split()[-1] if errors else '?'}" + (f"; the record written to {making}" if ok and making else ""))
+    elif making:
+        row("linux-reads", False, f"this host makes the record (PAX_E4_LINUX_RECORD) but no Linux kernel is readable at {kernel}")
+    elif not record.exists():
+        skipped = True
+        print(f"SKIP E4-linux-reads no readable Linux kernel ({kernel}) and no record ({record.name})", flush=True)
     else:
-        print(f"LOUD: E4-linux-reads: no readable Linux kernel ({kernel}) or PAX_LINUX=recorded: the record ({record.name})", flush=True)
-        rec = record.read_text().splitlines() if record.exists() else []
-        ok = bool(rec) and rec[0] == f"image {image_sha}" and bool(expect) and walked(rec[2:]) == expect
-        row("linux-reads", ok, f"the record's image {'is' if rec and rec[0] == 'image ' + image_sha else 'is not'} these bytes ({image_sha[:16]}), its walk {'equal' if ok else 'not equal'} to the tree")
+        rec = record.read_text().splitlines()
+        print(f"LOUD: E4-linux-reads: no readable Linux kernel ({kernel}) or PAX_LINUX=recorded: the record, made on Linux {rec[1].split()[-1] if len(rec) > 1 else '?'}", flush=True)
+        same = bool(rec) and rec[0] == f"image {image_sha}"
+        ok = same and bool(expect) and walked(rec[2:]) == expect
+        row("linux-reads", ok, f"the record (Linux {rec[1].split()[-1] if len(rec) > 1 else '?'}) is {'of these bytes' if same else 'of other bytes: remake it'} ({image_sha[:16]}), its walk {'equal' if ok else 'not equal'} to the tree")
 else:
     row("linux-reads", False, "no extent image to read")
 
