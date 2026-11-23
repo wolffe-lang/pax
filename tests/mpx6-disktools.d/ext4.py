@@ -401,39 +401,75 @@ if imgs.get("extents"):
     live = os.environ.get("PAX_LINUX") != "recorded" and os.access(kernel, os.R_OK)
     if live:
         bb = OUT / "bb"
-        f = run([ROOT / "tools/fetch-busybox", bb])
-        guest = OUT / "linux"
-        img = OUT / "linux.img"
-        shutil.copyfile(imgs["extents"], img)
-        script = OUT / "walk.sh"
-        script.write_text("cd /mnt && find . -mindepth 1 ! -path './lost+found*' | sort | while read -r p; do\n"
-                          "  p=${p#./}; m=$(stat -c %f \"$p\"); s=$(stat -c %s \"$p\")\n"
-                          "  if [ -L \"$p\" ]; then w=$(readlink \"$p\"); elif [ -d \"$p\" ]; then w=-; else w=$(sha256sum \"$p\" | cut -d' ' -f1); fi\n"
-                          "  echo \"walk: $p $m $s $w\"\ndone\ndmesg | grep -c 'EXT4-fs error' | sed 's/^/walk-errors: /'\n")
+        run([ROOT / "tools/fetch-busybox", bb])
         mods = os.environ.get("PAX_LINUX_MODULES", f"/usr/lib/modules/{os.uname().release}")
-        g = run([ROOT / "tools/linux-blk", "--kernel", kernel, "--modules", mods, "--busybox", bb / "busybox", "--ro", "--type", "ext4",
-                 "--file", f"{script}=/etc/disk/walk.sh", guest, img, "--", "/bin/sh /etc/disk/walk.sh"])
-        log = (guest / "serial.log").read_text(errors="replace") if (guest / "serial.log").exists() else ""
+
+        def guest(name, image, script):
+            # tools/linux-blk runs each command through the guest's /bin/sh: busybox, given that name.
+            out = OUT / name
+            copy = OUT / f"{name}.img"
+            shutil.copyfile(image, copy)
+            g = run([ROOT / "tools/linux-blk", "--kernel", kernel, "--modules", mods, "--busybox", bb / "busybox", "--ro", "--type", "ext4",
+                     "--file", f"{bb / 'busybox'}=/bin/sh", "--file", f"{HERE / script}=/etc/disk/{script}",
+                     out, copy, "--", f"/bin/sh /etc/disk/{script}"])
+            log = (out / "serial.log").read_text(errors="replace") if (out / "serial.log").exists() else ""
+            status = next((l.split()[-1] for l in log.splitlines() if "linux-blk: run 1 status" in l), "?")
+            uname = next((l.split()[-1] for l in log.splitlines() if "linux-blk: uname" in l), "?")
+            mount = next((l.split()[-1] for l in log.splitlines() if "linux-blk: mount " in l), "?")
+            return g.returncode, log, status, uname, mount
+
+        rc, log, status, uname, mount = guest("linux", imgs["extents"], "ext4-walk.sh")
         got = [l.split("walk: ", 1)[1].strip() for l in log.splitlines() if "walk: " in l and "walk-errors" not in l]
         errors = [l for l in log.splitlines() if "walk-errors: " in l]
-        uname = next((l.split()[-1] for l in log.splitlines() if "linux-blk: uname" in l), "?")
-        ok = g.returncode == 0 and bool(expect) and walked(got) == expect and bool(errors) and errors[-1].split()[-1] == "0"
-        if ok and making:
-            Path(making).write_text(f"image {image_sha}\nuname {uname}\n" + "\n".join(got) + "\n")
-        row("linux-reads", ok, f"Linux {uname} (live) mounts the root -t ext4 read-only: {len(got)} names against e2tree's {len(expect)}, types, modes, sizes and contents {'equal' if ok else 'not equal'}, EXT4-fs errors {errors[-1].split()[-1] if errors else '?'}" + (f"; the record written to {making}" if ok and making else ""))
+        ok = rc == 0 and status == "0" and bool(expect) and walked(got) == expect and bool(errors) and errors[-1].split()[-1] == "0"
+        why = (f"the walk exited {status} in the guest (mount {mount})" if status != "0" else
+               f"{len(got)} names against e2tree's {len(expect)}, types, modes, sizes and contents {'equal' if walked(got) == expect else 'not equal'}, EXT4-fs errors {errors[-1].split()[-1] if errors else '?'}")
+        row("linux-reads", ok, f"Linux {uname} (live) mounts the root -t ext4 read-only: {why}")
+        # The leaf's own depth field set to disagree with its parent's: e2fsck -fn says nothing (the rows takes of
+        # 2026-11-23); fsck.ext2 refuses it. This row asks Linux, which decides whether that refusal stands.
+        depth_img = OUT / "depth.img"
+        shutil.copyfile(imgs["extents"], depth_img)
+        di = Image(depth_img)
+        six_ino = lookup(di, "six")
+        raw6 = di.inode(six_ino)
+        leaf = (struct.unpack_from("<H", raw6, 40 + 12 + 8)[0] << 32) | struct.unpack_from("<I", raw6, 40 + 12 + 4)[0]
+        with depth_img.open("r+b") as f:
+            f.seek(leaf * 4096 + 6)
+            f.write(struct.pack("<H", 1))
+        depth_sha = sha(depth_img)
+        e2 = oracle("e2fsck", "-fn", depth_img).returncode
+        rc2, log2, status2, _u, _m = guest("linux-depth", depth_img, "ext4-depth.sh")
+        read_rc = next((l.split()[-1] for l in log2.splitlines() if "depth-read: " in l), "?")
+        derr = next((l.split()[-1] for l in log2.splitlines() if "depth-errors: " in l), "?")
+        refused = status2 == "0" and read_rc not in ("0", "?") and derr not in ("0", "?")
+        row("linux-depth", refused, f"Linux {uname} reads six through a leaf whose depth disagrees with its parent's: "
+            + (f"refused (cat exit {read_rc}, {derr} EXT4-fs errors), as fsck.ext2 refuses it; e2fsck -fn exit {e2}" if refused else
+               f"the guest's run exited {status2}, cat exit {read_rc}, EXT4-fs errors {derr}; e2fsck -fn exit {e2}"))
+        if ok and status2 == "0" and making:
+            Path(making).write_text(f"image {image_sha}\nuname {uname}\n" + "\n".join(got) + "\n"
+                                    + f"depth {depth_sha} read {read_rc} errors {derr}\n")
+            print(f"ext4.py: the record written to {making}", flush=True)
     elif making:
         row("linux-reads", False, f"this host makes the record (PAX_E4_LINUX_RECORD) but no Linux kernel is readable at {kernel}")
+        row("linux-depth", False, "this host makes the record but no Linux kernel is readable")
     elif not record.exists():
         skipped = True
         print(f"SKIP E4-linux-reads no readable Linux kernel ({kernel}) and no record ({record.name})", flush=True)
+        print(f"SKIP E4-linux-depth no readable Linux kernel ({kernel}) and no record ({record.name})", flush=True)
     else:
         rec = record.read_text().splitlines()
-        print(f"LOUD: E4-linux-reads: no readable Linux kernel ({kernel}) or PAX_LINUX=recorded: the record, made on Linux {rec[1].split()[-1] if len(rec) > 1 else '?'}", flush=True)
+        made = rec[1].split()[-1] if len(rec) > 1 else "?"
+        print(f"LOUD: E4-linux-reads, E4-linux-depth: no readable Linux kernel ({kernel}) or PAX_LINUX=recorded: the record, made on Linux {made}", flush=True)
+        walk_lines = [l for l in rec[2:] if not l.startswith("depth ")]
         same = bool(rec) and rec[0] == f"image {image_sha}"
-        ok = same and bool(expect) and walked(rec[2:]) == expect
-        row("linux-reads", ok, f"the record (Linux {rec[1].split()[-1] if len(rec) > 1 else '?'}) is {'of these bytes' if same else 'of other bytes: remake it'} ({image_sha[:16]}), its walk {'equal' if ok else 'not equal'} to the tree")
+        ok = same and bool(expect) and walked(walk_lines) == expect
+        row("linux-reads", ok, f"the record (Linux {made}) is {'of these bytes' if same else 'of other bytes: remake it'} ({image_sha[:16]}), its walk {'equal' if ok else 'not equal'} to the tree")
+        dline = next((l.split() for l in rec if l.startswith("depth ")), None)
+        row("linux-depth", bool(dline) and same and dline[3] not in ("0", "?") and dline[5] not in ("0", "?"),
+            f"the record (Linux {made}): reading six through the disagreeing leaf " + (f"refused (cat exit {dline[3]}, {dline[5]} EXT4-fs errors)" if dline else "not in the record"))
 else:
     row("linux-reads", False, "no extent image to read")
+    row("linux-depth", False, "no extent image to damage")
 
 # --- the same inputs, the same bytes
 if imgs.get("extents"):
