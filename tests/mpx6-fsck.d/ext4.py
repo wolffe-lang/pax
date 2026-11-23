@@ -213,7 +213,8 @@ def damage(name, fn, ino_name, img_path=base):
     out = c.stdout.decode(errors="replace")
     (WORK / f"damage-{name}.log").write_text(out)
     named = re.search(rf"[Ii]node {ino}\b[^\n]*extent", out) is not None and "unsupported: filesystem features" not in out
-    ok = e.returncode == 4 and c.returncode == 4 and named and ea == before and digest(copy) == before
+    # e2fsck's verdict is its exit's uncorrected bit (4): on a loop it also says 8, an operational error (exit 12).
+    ok = e.returncode & 4 != 0 and c.returncode == 4 and named and ea == before and digest(copy) == before
     row(f"damage-{name}", ok, f"inode {ino} ({ino_name}): e2fsck -fn exit {e.returncode}, fsck.ext2 -fn exit {c.returncode}{', named' if named else ', no finding naming the inode and its extent tree'}{'' if digest(copy) == before else ', the copy changed'}")
 
 
@@ -234,7 +235,9 @@ def child_of(im, at, e=0):
 
 
 damage("bad-magic", lambda im: (im.put(im.ino(A) + 40, 0x1234, 2), A)[1], "a")
-damage("bad-depth", lambda im: (im.put(child_of(im, first_index(im, SIX)) + 6, 1, 2), SIX)[1], "six")
+# A depth over five (the documented maximum) in the root. (A leaf whose own depth disagrees with its parent's is
+# not damage to e2fsck: -fn exits 0 on it, the rows take of 2026-11-23, so it is no row here.)
+damage("bad-depth", lambda im: (im.put(im.ino(SIX) + 40 + 6, 6, 2), SIX)[1], "six")
 damage("bad-max", lambda im: (im.put(im.ino(A) + 40 + 4, 5, 2), A)[1], "a")
 damage("entries-over-max", lambda im: (im.put(im.ino(A) + 40 + 2, 5, 2), A)[1], "a")
 damage("overlap", lambda im: (im.put(leaf_entry(im, SIX, 0, 1), im.u(leaf_entry(im, SIX, 0, 0))), SIX)[1], "six")
@@ -251,9 +254,10 @@ damage("unsorted", unsorted, "six")
 
 
 def index_order(im):
-    at = first_index(im, MANY)
-    if im.u(at + 2, 2) < 2:
-        raise ValueError("many's first index has one entry")
+    # many's root holds one index entry (debugfs's tree, depth 2); the index block below it holds several.
+    at = next((a for (a, d) in im.nodes(MANY) if d > 0 and im.u(a + 2, 2) >= 2), None)
+    if at is None:
+        raise ValueError("no index node of many's holds two entries")
     a, b = at + 12, at + 24
     x, y = bytes(im.b[a:a + 4]), bytes(im.b[b:b + 4])
     im.b[a:a + 4], im.b[b:b + 4] = y, x
