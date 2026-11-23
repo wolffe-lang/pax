@@ -44,6 +44,12 @@
       decide (failure(), cancelled(), needs.*, a label, an input), reads
       only. The check is shown to say no to a job that runs unless
       cancelled, and to pass one that runs on a red schedule alone.
+  P15 every checkout whose job then runs a command keeps no git
+      credentials (`persist-credentials: false`): no later step needs
+      them, since what CI fetches goes through tools/fetch-retry into
+      repositories of its own. A job that ever needs them for a later git
+      command is named here with why (none today); checkouts of other
+      repositories are counted apart.
   P8  what a trunk head already has (tools/ci-covered, against a
       stand-in `gh`): a green `tier all` check run at the head is all, a
       green `tier full` alone is full, a red one or another app's is
@@ -1125,6 +1131,27 @@ say(bool(pr_events) and not reached and says_no,
     "P14 no job a pull request can reach may write: the jobs that may (%s) run where none does%s%s"
     % (" ".join(writers) or "none", ("; reached: " + "; ".join(reached)) if reached else "",
        "" if says_no else "; the check does not say no to a job that runs unless cancelled"))
+
+# --- P15 checkouts keep no credentials they do not need --------------------------------------
+PERSIST_OK = {}  # job -> why its checkout keeps git credentials for a later git command (none today)
+own_co, other_co, kept = 0, 0, []
+for j in JOBS:
+    steps = re.split(r"(?m)^(?=      - )", blocks[j])
+    for i, st in enumerate(steps):
+        if not re.search(r"^(?:      - |        )uses: actions/checkout@", st, re.M):
+            continue
+        if not any(re.search(r"^(?:      - |        )run: ", later, re.M) for later in steps[i + 1:]):
+            continue
+        if re.search(r"^          repository: ", st, re.M):
+            other_co += 1
+        else:
+            own_co += 1
+        if not re.search(r"^          persist-credentials: false$", st, re.M) and j not in PERSIST_OK:
+            kept.append(j)
+say(own_co > 0 and not kept,
+    "P15 every checkout whose job then runs a command keeps no git credentials (%d of this repository, %d of others; kept for a "
+    "later git command by: %s)%s" % (own_co, other_co, ", ".join("%s (%s)" % kv for kv in PERSIST_OK.items()) or "none",
+                                     (": still kept in %d: %s%s" % (len(kept), " ".join(kept[:10]), " …" if len(kept) > 10 else "")) if kept else ""))
 
 # --- P7 the red nightly's issue (tl29) ------------------------------------------------------
 FAKE_GH = r'''#!/usr/bin/env bash
