@@ -1062,6 +1062,14 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   with exponential backoff of 1 and 2 seconds and a 90-second retry envelope, inside the USB test's unchanged
   120-second fetch phase. The archive and extracted binary still have to match their pinned SHA-256 digests;
   `tests/fetch-busybox-selftest` exercises real curl against a local HTTP server, including failures and recovery.
+- When Ubuntu's archive cannot be fetched, the same `.deb` comes from Launchpad's librarian (`BUSYBOX_URL2` in
+  `user/busybox.pin`, which keeps a build after the archive's pool drops it for a newer one): one attempt, bounded the
+  same way, held to the same digests, and the fetch says so. In CI, BusyBox comes from the Actions cache under the
+  `.deb`'s pinned sha256 when the cache holds it (`tests/ci-plan`'s P13). `mpx3-console` and `mpx5-jobs` fetch it in a
+  step of their own before the suite, so a failed fetch stops the job there by name, and `tests/mpx5-jobs` stops its
+  build at a failed fetch too. `mpx5-pelt` restores and saves it in unnamed steps around its suite, whose own fetch
+  stops it by `fetch-busybox`'s line. `tests/mpx6-ext2` and `tests/mpx6-nvme`, which fetch it for a live Linux side
+  alone and go on without it, only restore it.
 
 ## Hosts
 
