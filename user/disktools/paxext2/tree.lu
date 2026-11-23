@@ -105,6 +105,7 @@ fn walk(
     attrs: Map[str, Meta],
     excludes: List[str],
     epoch: int,
+    limit: int,
     depth: int,
 ) -> () ! {invalid, io} {
     if depth > 128 { return invalid }
@@ -139,7 +140,7 @@ fn walk(
         var target = List[byte]()
         var size = st[1]
         if kind == 0 {
-            if size < 0 || size > 4294967295 { return invalid }
+            if size < 0 || size > limit { return invalid }
             let key = "{st[9]}:{st[10]}"
             let owner = identities[key] else -1
             if owner >= 0 {
@@ -187,13 +188,16 @@ fn walk(
                 attrs,
                 excludes,
                 epoch,
+                limit,
                 depth + 1,
             )?
         }
     }
 }
 
-fn collect(source: str, attrs: Map[str, Meta], excludes: List[str], epoch: int) -> List[Node] ! {
+/// `limit`: the largest regular file, in bytes (4 GiB - 1 for an indirect map's 32-bit i_size; an extent
+/// tree's 2^32 blocks with --extents, main.lu).
+fn collect(source: str, attrs: Map[str, Meta], excludes: List[str], epoch: int, limit: int) -> List[Node] ! {
     invalid,
     io,
 } {
@@ -229,7 +233,7 @@ fn collect(source: str, attrs: Map[str, Meta], excludes: List[str], epoch: int) 
     if source.len > 0 {
         let st = fs_stat(source) else |_| { return io }
         if st[0] != 1 { return invalid }
-        walk(mut nodes, mut next, mut identities, source, "/", 2, attrs, excludes, epoch, 0)?
+        walk(mut nodes, mut next, mut identities, source, "/", 2, attrs, excludes, epoch, limit, 0)?
     }
     for i in 0..nodes.len {
         if nodes[i].kind == 1 {
