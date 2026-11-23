@@ -83,6 +83,14 @@
   P5  every tracked path is known to the map or read by a suite. An
       unknown path would make every pull request touching it run every
       leg; now the pull request that adds one is red here instead.
+  P13 BusyBox from the cache: each job whose suite cannot run without it
+      (tests/usb-stick, mpx5-jobs, mpx5-pelt) reads the .deb's sha256
+      from user/busybox.pin, restores .pax-cache/busybox-* under
+      busybox-<that sha256>, fetches BusyBox in a step of its own before
+      the suite (so a fetch that fails stops the job there, by name) and
+      saves it after that step when the restore missed. Every suite that
+      runs tools/fetch-busybox is one of those or one that fetches it for
+      a live Linux side alone (tests/mpx6-ext2, mpx6-nvme).
 
 Exit 0 when every check passes, 1 otherwise.
 """
@@ -1224,6 +1232,98 @@ if tracked:
 else:
     print("ci-plan: WARN P5 not a git checkout: the tracked paths not checked")
 
+
+# --- P13 BusyBox from the cache, by the pin's sha256, in a step of its own ---------------------
+def bb_jobs(text):
+    """Each job's body lines."""
+    jobs, job, inside = {}, None, False
+    for l in text.splitlines():
+        if l.rstrip() == "jobs:":
+            inside = True
+        elif inside:
+            m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", l)
+            if m:
+                job = m.group(1)
+                jobs[job] = []
+            elif job is not None:
+                jobs[job].append(l)
+    return jobs
+
+
+def bb_steps(body):
+    """A job's steps, each as its text with the step's own keys at column 0."""
+    steps, on = [], False
+    for l in body:
+        if l.startswith("    steps:"):
+            on = True
+        elif on and l.startswith("      - "):
+            steps.append([l[8:]])
+        elif on and steps and (l.startswith("        ") or not l.strip()):
+            steps[-1].append(l[8:])
+        elif on and l.strip() and not l.startswith("      "):
+            on = False
+    return ["\n".join(s) for s in steps]
+
+
+def bb_problems(text, scripts):
+    """(the jobs whose suites fetch BusyBox, what each lacks)."""
+    chosen, problems = [], []
+    for job, body in bb_jobs(text).items():
+        steps = bb_steps(body)
+        suite = [i for i, st in enumerate(steps)
+                 if any(re.search(r"(^|[\s;&|(])tests/%s(\s|$)" % re.escape(sc), st, re.M) for sc in scripts)]
+        if not suite:
+            continue
+        chosen.append(job)
+        pins = [i for i, st in enumerate(steps) if re.search(r"^id: \S+$", st, re.M) and "BUSYBOX_DEB_SHA256" in st
+                and "user/busybox.pin" in st and "GITHUB_OUTPUT" in st]
+        if not pins:
+            problems.append("%s reads no BUSYBOX_DEB_SHA256 from user/busybox.pin into a step's output" % job)
+            continue
+        key = "busybox-${{ steps.%s.outputs.sha256 }}" % re.search(r"^id: (\S+)$", steps[pins[0]], re.M).group(1)
+
+        def cache(uses):
+            return [i for i, st in enumerate(steps) if re.search(r"^uses: %s$" % re.escape(uses), st, re.M)
+                    and re.search(r"^  key: %s$" % re.escape(key), st, re.M) and re.search(r"^  path: \.pax-cache/busybox-\*$", st, re.M)]
+        restore, save = cache("actions/cache/restore@v4"), cache("actions/cache/save@v4")
+        fetch = [i for i, st in enumerate(steps) if re.search(r"^run: tools/fetch-busybox \S+$", st, re.M)]
+        if not restore or not restore[0] > pins[0]:
+            problems.append("%s restores no .pax-cache/busybox-* under %s after reading the pin" % (job, key))
+        elif not fetch or not restore[0] < fetch[0] < suite[0]:
+            problems.append("%s fetches BusyBox in no step of its own between the restore and the suite" % job)
+        elif not save or not fetch[0] < save[0] < suite[0]:
+            problems.append("%s saves no .pax-cache/busybox-* under %s after the fetch, before the suite" % (job, key))
+        elif not re.search(r"^if: .*cache-hit != 'true'", steps[save[0]], re.M):
+            problems.append("%s saves BusyBox even when the restore hit" % job)
+    return chosen, problems
+
+
+# The suites that cannot run without BusyBox, and those that fetch it for a live Linux side alone (a host with a
+# readable kernel), go on without it, and so get no fetch step that would stop their job.
+BB_NEEDS = ("usb-stick", "mpx5-jobs", "mpx5-pelt")
+BB_LIVE_ONLY = ("mpx6-ext2", "mpx6-nvme")
+bb_call = '"$PAX_ROOT/tools/' + 'fetch-busybox"'
+bb_callers = sorted(n for n in os.listdir(os.path.join(ROOT, "tests")) if os.path.isfile(os.path.join(ROOT, "tests", n))
+                    and bb_call in open(os.path.join(ROOT, "tests", n), errors="replace").read())
+
+
+def bb_odd_of(callers):
+    """The callers on neither list, and the listed suites that no longer call it."""
+    known = BB_NEEDS + BB_LIVE_ONLY
+    return [n for n in callers if n not in known] + ["%s (no longer calls it)" % n for n in known if n not in callers]
+
+
+bb_odd = bb_odd_of(bb_callers)
+bb_says_no = bb_odd_of(bb_callers + ["mpx9-new"]) == bb_odd + ["mpx9-new"] if not bb_odd else False
+say(not bb_odd and bb_says_no,
+    "P13 every suite that runs tools/fetch-busybox needs it (tests/%s) or fetches it for a live Linux side alone (tests/%s), "
+    "and a suite on neither list is named%s"
+    % (" tests/".join(BB_NEEDS), " tests/".join(BB_LIVE_ONLY), (": not so: " + ", ".join(bb_odd)) if bb_odd else ""))
+bb_chosen, bb_missing = bb_problems(open(os.path.join(ROOT, ".github/workflows/ci.yml")).read(), BB_NEEDS)
+say(len(bb_chosen) >= len(BB_NEEDS) and not bb_missing,
+    "P13 BusyBox by the pin's sha256: each job whose suite needs it (%s) restores .pax-cache/busybox-* under busybox-<that sha256>, "
+    "fetches it in a step of its own before the suite and saves it when the restore missed%s"
+    % (" ".join(bb_chosen) or "none", (": " + "; ".join(bb_missing)) if bb_missing else ""))
 
 # px61: replay fixtures and both staging pins reach their actual users.
 expect("P2 pelt fork replay fixtures", plan(["user/console/fork/corpus.keys"], **pr), "pr", has=["mpx5-pelt"])
