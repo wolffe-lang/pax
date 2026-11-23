@@ -13,7 +13,8 @@ processors on fewer host threads cannot all run at once, whatever the kernel doe
 
 What stage 2 prints, and these rows read (the kernel's text is defined here):
   /proc/pax-cpus, after stage 1's head lines (`available`, `active`, `source`, `online-capable`,
-  `disabled`, `started`, `idle`). `active` is the processors that run threads. A line a
+  `disabled`, `started`, `idle`), then `heap-started 0|1`, whether the kernel's heap was started (the
+  console kernel starts none: 0). `active` is the processors that run threads. A line a
   processor:
     cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K tlb S nmis N
     cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K tlb S wakes W nmis N
@@ -106,6 +107,11 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
               SMP-DUP      no `PANIC sched: slot N running on two processors…` line (kernel/sched's `take_next`: a
                            slot the queue hands back that is RUNNING or still names a processor): red by
                            that line verbatim, silent when green.
+              SMP-NOHEAP   no allocation on any processor, locked or not: every /proc/pax-cpus the boot printed
+                           says `heap-started 0` (the kernel's heap was never started, so the runtime can allocate
+                           nothing) and no `PANIC heap: …` line (an allocation anyway panics by name, `heap: alloc
+                           before heap.start`). Red by that line verbatim, or by a read that says otherwise or
+                           nothing; green when a read was printed, silent when none was.
               SMP-PIN      kernel threads run on CPU 0 alone: in every /proc/pax-cpus the boot printed, each
                            application processor's `runs` line says `kthreads 0`. Red naming the processor and
                            its count (or a `runs` line with no count); green when an application processor ran
@@ -838,5 +844,20 @@ elif any(kseen.values()):
          ', '.join(f'cpu {i} kthreads {k}' for i, k in sorted(kseen.items()) if k))
 elif kseen:
     ok('SMP-PIN', f'no kernel thread on application processors {sorted(kseen)} (kthreads 0 each)')
+
+# Every kind: no allocation on any processor (the stage 2 contract's §3.7 (c) as amended): the kernel says in every
+# /proc/pax-cpus the boot printed that its heap was not started, so the runtime can allocate nothing, locked or not;
+# an allocation anyway panics by name (`heap: alloc before heap.start`), and that line is this row's red verbatim
+# (the plant apalloc's: an application processor allocating before kernel/klock's `enter`).
+heap_panics = re.findall(r'^PANIC heap: .*$', text, re.M)
+heap_reads = [re.search(r'^heap-started (\d+)$', blk[2], re.M)
+              for blk in re.finditer(r'^SMP-PROC (\S+) begin\n(.*?)^SMP-PROC \1 end$', text, re.M | re.S)]
+heap_off = [h[0] if h else 'no heap-started line' for h in heap_reads if not h or h[1] != '0']
+if heap_panics:
+    fail('SMP-NOHEAP', heap_panics[0], heap_panics[1:])
+elif heap_off:
+    fail('SMP-NOHEAP', f'a /proc/pax-cpus that does not say `heap-started 0`: {heap_off[:3]}')
+elif heap_reads:
+    ok('SMP-NOHEAP', f'the heap not started (`heap-started 0` in each of {len(heap_reads)} reads of /proc/pax-cpus), no heap panic')
 
 sys.exit(1 if red else 0)
