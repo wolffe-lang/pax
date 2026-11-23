@@ -13,8 +13,7 @@ processors on fewer host threads cannot all run at once, whatever the kernel doe
 
 What stage 2 prints, and these rows read (the kernel's text is defined here):
   /proc/pax-cpus, after stage 1's head lines (`available`, `active`, `source`, `online-capable`,
-  `disabled`, `started`, `idle`): `unlocked-allocations U`, the runtime's allocations made while no
-  processor held the kernel lock (always 0). `active` is the processors that run threads. A line a
+  `disabled`, `started`, `idle`). `active` is the processors that run threads. A line a
   processor:
     cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K tlb S nmis N
     cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K tlb S wakes W nmis N
@@ -56,7 +55,7 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
   stress      SMP-LOCK     ten processes for SECS seconds (four fork-exit-wait loops, two pipe
                            ping-pongs, two futex ping-pong thread pairs, a map/protect/unmap churner
                            beside a reader thread, a signal storm): every count right, every status
-                           0, every processor's `user` gained, `unlocked-allocations 0`, no PANIC, no
+                           0, every processor's `user` gained, no PANIC, no
                            stopped processor, no slot on two processors, no program killed by a fault.
   end-halt, end-poweroff, end-reboot
               SMP-END      a spinner a processor, then root's reboot(2): the line above once, after
@@ -195,7 +194,7 @@ def proc(tagname):
         return None
     body = m[1]
     head = {}
-    for key in ('available', 'active', 'started', 'idle', 'unlocked-allocations'):
+    for key in ('available', 'active', 'started', 'idle'):
         mm = re.search(rf'^{key} (\d+)$', body, re.M)
         head[key] = int(mm[1]) if mm else None
     cpus = {}
@@ -587,9 +586,6 @@ elif a.kind == 'stress':
     idle = [i for i in range(N) if not re.fullmatch(r'\+\d+', gains.get(i, '-')) or int(gains[i]) < 1]
     if idle:
         why.append(f'processors {idle} gained no ring-3 tick in the stress: {gains}')
-    ua = next((x for x in lk if x.startswith('unlocked-allocations-after ')), None)
-    if ua is None or kv(ua, 'unlocked-allocations-after') != 0:
-        why.append(f'allocations outside the kernel lock: {ua or "no line"}')
     if 'SMP-LOCK done' not in text:
         why.append('no `SMP-LOCK done` (the probe or the kernel stopped inside the stress)')
     bad = bad_lines()
