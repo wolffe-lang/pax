@@ -146,6 +146,14 @@ installer has written it, and login, run as pid 1, execs `/bin/init`. At each bo
 - then it gives the console up and, for as long as the machine runs, starts `/bin/login` on it in a session of its
   own (`HOST login:`), waits, and starts it again.
 
+**`pax.services=alpha`** on the kernel command line (typed at Limine's menu for one boot) puts alpha, the service
+manager, in the hooks' place: init starts `/bin/alpha manager --kmsg` as a job in pid 1's session (never a session
+leader, so it never takes the console), with its lines in the kernel's log (`/dev/kmsg`, kept in `kern.log`), and
+still runs each hook of `/etc/pax-boot.d` that has no alpha unit of its name. When alpha ends, init says so in one line
+and starts it again a second later (doubling to a minute while it keeps ending at once); when it refuses to start at
+all (status 1 or 2 on its first run), or there is no `/bin/alpha`, init runs the hooks as before. With no word, or
+`pax.services=hooks`, the boot is as it was. No unit ships yet, so alpha has nothing to start.
+
 These run once a boot whatever happens at the console: `exec /bin/login` in a shell logs in again in that session
 but runs no hook a second time, restarts no service, keeps sudo's records and writes no second boot record (login
 is not pid 1 then). And while it waits, init reaps every process the kernel hands it, as Linux's pid 1 does: a
