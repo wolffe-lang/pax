@@ -2948,6 +2948,21 @@ pub fn exec_alone() {
         put_field(c, offset_of(Thread, wstop), field(l, offset_of(Thread, wstop)))
         put_field(c, offset_of(Thread, wcont), field(l, offset_of(Thread, wcont)))
         put_field(c, offset_of(Thread, lead), c)
+        // px166: the other threads, ended in place (`end_others`), may still
+        // run on other processors and enter the kernel once more: their tick
+        // or RESCHED switches them off (`must_leave`), the door leaves a
+        // system call, and `account` charges their last slice to their
+        // leader's area, which `move_area` has just made the caller's. They
+        // lead from the caller from here on; read through the old leader,
+        // whose area is unmapped now, it was `no process area for slot`
+        // (tests/mpx6-smp's SMP-EXIT, an execve from a sibling).
+        var t: u64 = FIRST
+        while t < top() {
+            if t != c && t != l && field(t, offset_of(Thread, lead)) == l {
+                put_field(t, offset_of(Thread, lead), c)
+            }
+            t += 1
+        }
         // The old leader: no pid, no parent, no space; its stack (if it
         // still has one) and its slot go at the next reap.
         put_field(l, offset_of(Thread, pid), 0)
