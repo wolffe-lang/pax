@@ -46,7 +46,10 @@
 #   switch (3 GiB)     slots-switch: N processes yielding, N = 16, 64 and
 #                      1,000, three interleaved rounds, and a yield with
 #                      nobody else to run (the call, no switch): the least
-#                      CPU a yield of the three. A yield among 16 within
+#                      CPU a yield of the three (at N > 1 processors under
+#                      PAX_SMP the least wall a yield, the CPU figures a
+#                      BASELINE line: under one kernel lock CPU counts the
+#                      others' spin for it). A yield among 16 within
 #                      SWITCH_ALONE times the lone one, SWITCH_ALONE_RELEASE
 #                      in the release tier (a walk of every slot at every
 #                      switch, raising the table alone, breaks both);
@@ -249,9 +252,33 @@ check_session() { # session norm hrc digest id
             why+=" '$l' (every N measured);"
         else
             alone=$SWITCH_ALONE; [ "${id%% *}" != release ] || alone=$SWITCH_ALONE_RELEASE
-            [ "$2" -le $(($1 * alone)) ] || why+=" a yield among 16 costs $2 ns, more than $alone times a lone yield's $1 ns;"
-            [ $(($3 * 2)) -le $(($2 * 3)) ] || why+=" a yield among 64 costs $3 ns, more than 1.5 times the 16's $2 ns;"
-            [ "$4" -le $(($2 * 4)) ] || why+=" a yield among 1,000 costs $4 ns, more than four times the 16's $2 ns;"
+            ncpu=${PAX_SMP:-1}
+            if [ "$ncpu" -gt 1 ]; then
+                # px166: with N > 1 processors running threads under one kernel lock, a yield's CPU time counts the
+                # others' spin for the lock (while one is inside, the others spin, and each spin is charged to the
+                # thread that entered: N=16's CPU a yield is about N times its wall), so the gate holds the wall a
+                # yield, the least of the rounds; the CPU figures are a baseline, reported, for stage 3's finer
+                # locking to bring down. The lone yield is its own wall (one thread, nothing to spin against).
+                least_wall() {
+                    prog_lines "$norm" switch | sed -n -E "s/^switch: round [0-9]+: N=$1: [0-9]+ ns cpu, ([0-9]+) ns wall a yield$/\1/p" \
+                        | sort -n | head -n 1
+                }
+                w16=$(least_wall 16) w64=$(least_wall 64) w1000=$(least_wall 1000)
+                if [ -z "$w16" ] || [ -z "$w64" ] || [ -z "$w1000" ]; then
+                    why+=" no wall a yield for every N in the rounds;"
+                else
+                    [ "$w16" -le $(($1 * alone)) ] || why+=" a yield among 16 takes $w16 ns of wall, more than $alone times a lone yield's $1 ns;"
+                    [ $((w64 * 2)) -le $((w16 * 3)) ] || why+=" a yield among 64 takes $w64 ns of wall, more than 1.5 times the 16's $w16 ns;"
+                    [ "$w1000" -le $((w16 * 4)) ] || why+=" a yield among 1,000 takes $w1000 ns of wall, more than four times the 16's $w16 ns;"
+                    l="least wall a yield at $ncpu processors: alone $1 ns, N=16 $w16 ns, N=64 $w64 ns, N=1000 $w1000 ns (one kernel lock: CPU a yield counts the others' spin for it: the BASELINE line)"
+                fi
+                printf 'BASELINE slots-switch-cpu %s: %s processors, least cpu a yield: alone %s ns, N=16 %s ns, N=64 %s ns, N=1000 %s ns (one kernel lock: while one processor is inside, the others spin for it and each spin is charged to the thread that entered; not gated, for stage 3 to bring down)\n' \
+                    "$id" "$ncpu" "$1" "$2" "$3" "$4"
+            else
+                [ "$2" -le $(($1 * alone)) ] || why+=" a yield among 16 costs $2 ns, more than $alone times a lone yield's $1 ns;"
+                [ $(($3 * 2)) -le $(($2 * 3)) ] || why+=" a yield among 64 costs $3 ns, more than 1.5 times the 16's $2 ns;"
+                [ "$4" -le $(($2 * 4)) ] || why+=" a yield among 1,000 costs $4 ns, more than four times the 16's $2 ns;"
+            fi
         fi
         [ -z "$why" ] && row_pass "slots-switch $id: ${l#switch: }" || row_fail "slots-switch $id:$why" ;;
     herd)
