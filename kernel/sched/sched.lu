@@ -4739,9 +4739,7 @@ pub fn suspend_current(f: u64, mask: u64) -> u64 {
     unsafe { ((f + W_RAX * 8) as *u64).write_volatile(0xfffffffffffffffc) } // -EINTR
     put_field(c, offset_of(Thread, ssold), field(c, offset_of(Thread, sigmask)))
     put_field(c, offset_of(Thread, sigmask), mask & !0x40100)
-    // px166: as every mask change: a process signal the new mask blocks, if this
-    // thread was its taker, is another thread's now, and that thread may be waiting.
-    masks_changed()
+    // plant: rt_sigsuspend's mask change offers nothing to the other threads (red at MASK-CENSUS)
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, state), SUSPEND)
     put_field(c, offset_of(Thread, rst), W_SUSPEND)
