@@ -5,7 +5,7 @@
 # ext2 rows are held to.
 #
 #   tools/linux-blk [--kernel VMLINUZ] [--modules DIR] [--busybox FILE]
-#                   [--accel tcg|kvm] [--ro] [--mount DIR]
+#                   [--accel tcg|kvm] [--ro] [--mount DIR] [--type T]
 #                   [--file SRC=DEST]... OUTDIR IMAGE PROG... -- CMD...
 #
 # Builds an initramfs in OUTDIR from a static busybox (the px13-ubuntu
@@ -13,8 +13,9 @@
 # (each to /bin/<basename>) and each --file SRC at DEST, boots VMLINUZ
 # on q35 with `-drive file=IMAGE,if=none,id=d0,format=raw -device
 # virtio-blk-pci,drive=d0` (the IMAGE is written in place: copy it
-# first), mounts /dev/vda at DIR (default /mnt) as `-t ext2` (read-only
-# with --ro), and runs each CMD (a shell line) with PAX's environment
+# first), mounts /dev/vda at DIR (default /mnt) as `-t T` (T `ext2`
+# unless --type names `ext3` or `ext4`; read-only with --ro), and runs
+# each CMD (a shell line) with PAX's environment
 # (`env -i HOME=/ TERM=linux PAX=1 PATH=/bin`), from /, between the
 # lines `linux-blk: run <k>: <cmd>` and `linux-blk: run <k> status <s>`
 # on the guest's serial console, OUTDIR/serial.log. Then it unmounts (the
@@ -36,6 +37,7 @@ busybox=
 accel=tcg
 ro=0
 mnt=/mnt
+fstype=ext2
 files=()
 while [ $# -gt 0 ]; do
     case $1 in
@@ -45,6 +47,7 @@ while [ $# -gt 0 ]; do
         --accel) accel=$2; shift 2 ;;
         --ro) ro=1; shift ;;
         --mount) mnt=$2; shift 2 ;;
+        --type) case $2 in ext2|ext3|ext4) fstype=$2 ;; *) die "--type $2: ext2, ext3 or ext4" ;; esac; shift 2 ;;
         --file) files+=("$2"); shift 2 ;;
         --) shift; break ;;
         -*) die "unknown option $1" ;;
@@ -125,7 +128,7 @@ opt=; [ "$ro" = 1 ] && opt="-o ro"
     echo 'for m in $(cat /lib/modules/order); do insmod /lib/modules/$m.ko || echo "linux-blk: insmod $m failed"; done'
     echo 'n=0; while [ ! -b /dev/vda ] && [ $n -lt 50 ]; do sleep 0.1; n=$((n + 1)); done'
     echo 'echo "linux-blk: uname $(uname -r)"'
-    echo "mount -t ext2 $opt /dev/vda $mnt; echo \"linux-blk: mount \$?\""
+    echo "mount -t $fstype $opt /dev/vda $mnt; echo \"linux-blk: mount \$?\""
     echo "echo \"linux-blk: device \$(stat -c %t:%T /dev/vda) $(printf '%s' "$mnt") \$(stat -c %D $mnt)\""
     k=0
     for c in "${cmds[@]}"; do
