@@ -222,16 +222,19 @@ static L tlb_sum(const struct snap *z) {
     return s;
 }
 static void ldelta(struct ln *l, L a, L b) { if (a < 0 || b < 0) lc(l, '-'); else { lc(l, '+'); lsd(l, b - a); } }
-static U memfree_kb(void) {
-    static char m[2048];
-    L n = readfile("/proc/meminfo", m, sizeof m);
+/* The kB a /proc file gives `key` (`MemFree:`, `VmRSS:`): the key, tabs or spaces, the value; 0 when absent. */
+static U kb_of(const char *path, const char *key) {
+    static char m[8192];
+    L n = readfile(path, m, sizeof m);
     if (n < 0) return 0;
-    const char *k = find(m, m + n, "MemFree:");
+    const char *k = find(m, m + n, key);
     if (!k) return 0;
-    k += 8;
-    while (*k == ' ' || *k == '\t') k++; /* `MemFree:\t` then the value padded to eight */
-    return (U)num(k, m + n);
+    while (*key) { k++; key++; }
+    while (k < m + n && (*k == ' ' || *k == '\t')) k++; /* `MemFree:\t` then the value padded to eight */
+    L v = num(k, m + n);
+    return v < 0 ? 0 : (U)v;
 }
+static U memfree_kb(void) { return kb_of("/proc/meminfo", "MemFree:"); }
 
 /* --- threads ------------------------------------------------------------------------------ */
 #define THREAD_FLAGS (0x100 | 0x200 | 0x400 | 0x800 | 0x10000 | 0x40000 | 0x100000 | 0x200000)
@@ -292,6 +295,7 @@ struct sh {
     volatile U pids[16];
     volatile L gtids[4]; /* SMP-DEAD: the group's four thread ids, written by its main thread */
     volatile U wsamples, wsampon, widle[MAXC]; /* SMP-WAIT's sampler: its reads, the processors it sat on, each one's idle reads */
+    volatile U rss; /* SMP-EXIT: the group's VmRSS in kB, read by its main thread before the exec */
 };
 static struct sh *G;
 __attribute__((force_align_arg_pointer)) static void h_usr1(int s) { (void)s; G->hit = rdtsc(); __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST); }
@@ -711,6 +715,7 @@ static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a
         G->gtids[0] = gettid();
         for (U i = 0; i < 3; i++) G->gtids[i + 1] = grp[i].tid;
         G->running = group_running();
+        if (how == 2) G->rss = kb_of("/proc/self/status", "VmRSS:");
         if (how == 0) exit_group(7);
         G->go = how == 1 ? 1 : 2;
         for (;;) G->spins++;
@@ -742,6 +747,27 @@ static void row_dead(void) {
     }
     say("SMP-DEAD done");
 }
+/* SMP-EXIT's settle after exec round child `p` was waited: every 5 ms, at most 2 s, until none of the round's four
+   threads is current on any processor (/proc/pax-cpus), then a wait4 for `p` again, which finds no such child but runs
+   the kernel's reap first (kernel/sched's wait_find); then MemFree. That reap frees the space the exec parked while an
+   ended sibling's processor still held it in CR3 (kernel/sched's leave_space) and the siblings' stacks the departure
+   rule put off. The round's own wait4 runs it too, but may run it before the last of those processors has switched,
+   and nothing else reaps until the next fork. `ms` the wait, `left` the threads still current when it ended. */
+static U settled_kb(L p, U *ms, U *left) {
+    struct snap z;
+    U t0 = rdtsc(), end = t0 + cycles_of_ms(2000);
+    for (;;) {
+        U k = 4;
+        if (take(&z)) { k = 0; for (int i = 0; i < 4; i++) if (G->gtids[i] > 0 && cpu_of(&z, G->gtids[i]) >= 0) k++; }
+        *left = k;
+        if (!k || rdtsc() >= end) break;
+        nap(5000000);
+    }
+    *ms = us_of(rdtsc() - t0) / 1000;
+    int st;
+    wait4(p, &st, WNOHANG, 0);
+    return memfree_kb();
+}
 static void row_exit(void) {
     struct ln l;
     int st;
@@ -751,16 +777,23 @@ static void row_exit(void) {
         l.n = 0; ls(&l, "SMP-EXIT group "); ld(&l, (U)r); ls(&l, r < 2 ? " exiter main" : " exiter sibling");
         ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); ls(&l, " running "); ld(&l, G->running); ls(&l, " of 4"); le(&l);
     }
-    U before = 0;
+    /* Each exec round read twice: when its wait4 returns, and settled (`settled_kb`). The warm round's settled
+       reading is `before`, the last round's `after`. */
+    U before = 0, after = 0;
     for (int r = 0; r < 5; r++) {
-        if (r == 1) { nap(20000000); before = memfree_kb(); }
+        for (int i = 0; i < 4; i++) G->gtids[i] = 0;
+        G->rss = 0;
         L p = group(2);
         L w = wait4(p, &st, 0, 0);
+        U waited = memfree_kb(), ms = 0, left = 0;
+        U settled = settled_kb(p, &ms, &left);
+        if (r == 0) before = settled;
+        after = settled;
         l.n = 0; ls(&l, "SMP-EXIT exec "); ld(&l, (U)r); ls(&l, r ? " measured" : " warm");
-        ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); ls(&l, " running "); ld(&l, G->running); ls(&l, " of 4"); le(&l);
+        ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); ls(&l, " running "); ld(&l, G->running); ls(&l, " of 4");
+        ls(&l, " rss-kb "); ld(&l, G->rss); ls(&l, " waited-kb "); ld(&l, waited); ls(&l, " settled-kb "); ld(&l, settled);
+        ls(&l, " settle-ms "); ld(&l, ms); ls(&l, " left "); ld(&l, left); le(&l);
     }
-    nap(50000000);
-    U after = memfree_kb();
     l.n = 0; ls(&l, "SMP-EXIT frames-kb before "); ld(&l, before); ls(&l, " after "); ld(&l, after); le(&l);
     struct snap z;
     take(&z);
