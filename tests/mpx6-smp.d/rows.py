@@ -61,7 +61,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
               SMP-WAIT     16 children of 20 to 320 ms of work: 16 statuses right, the children's CPU
                            0.8 of the work or more, and the children ran on max(2, min(N, 16) - 1)
                            processors by the kernel's ring-3 ticks (two at least each), the ones missed
-                           printed on every boot; the sampler's sightings printed, not judged.
+                           printed on every boot; the sampler's sightings, each processor's RESCHEDs
+                           over the window, where the sampler sat and each processor's idle reads
+                           printed, not judged.
   stress      SMP-LOCK     ten processes for SECS seconds (four fork-exit-wait loops, two pipe
                            ping-pongs, two futex ping-pong thread pairs, a map/protect/unmap churner
                            beside a reader thread, a signal storm): every count right, every status
@@ -600,6 +602,18 @@ def wait_check(n):
         why.append(f'the children ran on {len(ran)} processors by the kernel\'s ring-3 ticks, want {need} at least')
     info = f'the children ran on {len(ran)} of {n} processors by the kernel\'s ring-3 ticks, missed {missed or "none"}' \
            f' (ticks {" ".join(f"{i}:{gains.get(i, chr(45))}" for i in range(n))}); the sampler saw {seen}'
+    # what settles a starved processor: the RESCHEDs each took while the children ran (share() sends one to the
+    # lowest-numbered idle processor with none in flight), where the sampler sat, and how often each one idled
+    rs = next((x for x in w if x.startswith('resched')), None)
+    if rs:
+        took = dict(re.findall(r' (\d+):(\S+)', rs))
+        info += f'; RESCHEDs taken {" ".join(f"{i}:{took.get(str(i), chr(45))}" for i in range(n))}'
+    sm = next((x for x in w if x.startswith('samples ')), None)
+    if sm:
+        on = [int(x) for x in str(kv(sm, 'sampler-on')).split(',') if x.isdigit()]
+        idle = dict(re.findall(r' (\d+):(\d+)', sm.split(' idle', 1)[1] if ' idle' in sm else ''))
+        info += (f'; the sampler sat on {on} in {kv(sm, "samples")} samples; idle in samples'
+                 f' {" ".join(f"{i}:{idle.get(str(i), chr(45))}" for i in range(n))}')
     return why, [info]
 
 
