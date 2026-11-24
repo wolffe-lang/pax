@@ -9,6 +9,8 @@
      /bin/smpprobe cap             SMP-ACTIVE and one SMP-RUN round (SMP-CAP, `pax.cpus=N`)
      /bin/smpprobe one             SMP-ACTIVE alone (one processor: `nosmp`, `-smp 1`, `pax.cpus=1`)
      /bin/smpprobe exec-child      SMP-EXIT's execve target: one line, exit status 9
+     /bin/smpprobe trace           SMP-ACTIVE, SMP-TRACE-EXIT (a traced group exiting with its second thread on
+                                   another processor) and SMP-TRACE-INT (PTRACE_INTERRUPT of a seized tracee there)
 
    Every line starts with its row's name; tests/mpx6-smp.d/rows.py reads them with /proc/pax-cpus as
    the probe copied it (`SMP-PROC <tag> begin` … `SMP-PROC <tag> end`). Times are the TSC's, read in
@@ -296,6 +298,7 @@ struct sh {
     volatile L gtids[4]; /* SMP-DEAD: the group's four thread ids, written by its main thread */
     volatile U wsamples, wsampon, widle[MAXC]; /* SMP-WAIT's sampler: its reads, the processors it sat on, each one's idle reads */
     volatile U rss; /* SMP-EXIT: the group's VmRSS in kB, read by its main thread before the exec */
+    volatile L tcpu; /* SMP-TRACE-EXIT: the processor the traced thread was seen on before its group's exit */
 };
 static struct sh *G;
 __attribute__((force_align_arg_pointer)) static void h_usr1(int s) { (void)s; G->hit = rdtsc(); __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST); }
@@ -1126,6 +1129,172 @@ static void row_refuse(void) {
     say("SMP-REFUSE done");
 }
 
+/* --- SMP-TRACE-EXIT and SMP-TRACE-INT (`trace`) ---------------------------------------------- */
+#define NR_PTRACE 101
+#define PTRACE_TRACEME 0
+#define PTRACE_CONT 7
+#define PTRACE_SETOPTIONS 0x4200
+#define PTRACE_SEIZE 0x4206
+#define PTRACE_INTERRUPT 0x4207
+#define WALL 0x40000000
+static L ptrace(L req, L pid, L addr, L data) { return sc6(NR_PTRACE, req, pid, addr, data, 0, 0); }
+/* wait4(pid, WNOHANG | __WALL) every 1 ms for at most `ms`: the pid reported (its status in *st), 0 when none
+   came, the error when it is one. Nothing here waits unbounded: a stop or death that never comes is named. */
+static L wait_for(L pid, int *st, U ms) {
+    U end = rdtsc() + cycles_of_ms(ms);
+    for (;;) {
+        L w = wait4(pid, st, WNOHANG | WALL, 0);
+        if (w != 0 || rdtsc() >= end) return w;
+        nap(1000000);
+    }
+}
+/* What is left of a round's group, ended: SIGKILL readies a tracee in any stop; 2 s of reaping at most. */
+static void end_group(L p) {
+    int st;
+    sc(NR_KILL, p, SIGKILL, 0);
+    U end = rdtsc() + cycles_of_ms(2000);
+    while (rdtsc() < end) { L w = wait4(-1, &st, WNOHANG | WALL, 0); if (w < 0) break; if (w == 0) nap(1000000); }
+}
+static struct thr tx;
+static void tx_body(void *arg) {
+    U loop = (U)arg;
+    __atomic_add_fetch(&G->started, 1, __ATOMIC_SEQ_CST);
+    for (;;) { G->spins++; if (loop) yield(); }
+}
+/* The traced group: PTRACE_TRACEME and a SIGSTOP, then a second thread that spins (or yields in a loop), seen on
+   another processor (50 looks 2 ms apart at most), then exit_group(37). */
+static __attribute__((noreturn)) void tx_child(U loop) {
+    ptrace(PTRACE_TRACEME, 0, 0, 0);
+    sc(NR_KILL, getpid(), SIGSTOP, 0);
+    if (spawn(&tx, tx_body, (void *)loop) <= 0) exit_group(111);
+    U end = rdtsc() + cycles_of_ms(2000);
+    while (!G->started && rdtsc() < end) yield();
+    struct snap z;
+    G->tcpu = -1;
+    for (int k = 0; k < 50 && G->tcpu < 0; k++) {
+        if (take(&z)) {
+            L c = cpu_of(&z, tx.tid), m = cpu_of(&z, gettid());
+            if (c >= 0 && c != m) G->tcpu = c;
+        }
+        if (G->tcpu < 0) nap(2000000);
+    }
+    exit_group(37);
+    __builtin_unreachable(); /* exit_group loops on its call */
+}
+static void lstat(struct ln *l, L have, int st) { if (have) lx(l, (U)(unsigned)st); else lc(l, '-'); }
+/* One round, the probe the tracer (options TRACECLONE | TRACEEXIT): the group's first stop, its clone (the leader's
+   PTRACE_EVENT_CLONE and the thread's first stop, either first), both resumed; then the leader's exit_group: both
+   threads' PTRACE_EVENT_EXIT within 2 s; the thread's spins over the next 20 ms and the processor it is current on
+   (stopped means stopped); both CONTed; both deaths within 2 s; then ECHILD. */
+static void trace_exit_round(int r, U loop) {
+    struct ln l;
+    struct snap z;
+    int st = 0, lst = 0, tst = 0, dst[2] = { 0, 0 };
+    L p, t = 0, w, ran = -1, cur = -1, echild = 0;
+    int lhave = 0, thave = 0, stops = 0, deaths = 0;
+    const char *failed = "none";
+    G->started = 0; G->spins = 0; G->tcpu = -2;
+    p = fork();
+    if (!p) tx_child(loop);
+    do {
+        if (p < 0) { failed = "fork"; break; }
+        w = wait_for(p, &st, 2000);
+        if (w != p || st != 0x137f) { failed = "initial-stop"; break; }
+        if (ptrace(PTRACE_SETOPTIONS, p, 0, 0x48) || ptrace(PTRACE_CONT, p, 0, 0)) { failed = "options"; break; }
+        int seen = 0;
+        for (int k = 0; k < 2 && seen != 3; k++) {
+            w = wait_for(-1, &st, 2000);
+            if (w <= 0) break;
+            if (w == p && st == 0x3057f) seen |= 1;
+            else if (w != p && st == 0x137f) { seen |= 2; t = w; }
+        }
+        if (seen != 3) { failed = "clone"; break; }
+        if (ptrace(PTRACE_CONT, t, 0, 0) || ptrace(PTRACE_CONT, p, 0, 0)) { failed = "resume"; break; }
+        failed = "exit";
+        U end = rdtsc() + cycles_of_ms(2200); /* the leader's looks first: 100 ms at most */
+        while (stops < 2 && rdtsc() < end) {
+            w = wait4(-1, &st, WNOHANG | WALL, 0);
+            if (w == 0) { nap(1000000); continue; }
+            if (w < 0) break;
+            if (w == p && !lhave) { lhave = 1; lst = st; if (st == 0x6057f) stops++; }
+            else if (w == t && !thave) { thave = 1; tst = st; if (st == 0x6057f) stops++; }
+        }
+        if (stops != 2) break;
+        U s0 = G->spins;
+        nap(20000000);
+        ran = (L)(G->spins - s0);
+        if (take(&z)) cur = cpu_of(&z, t);
+        if (ptrace(PTRACE_CONT, t, 0, 0) || ptrace(PTRACE_CONT, p, 0, 0)) { failed = "cont"; break; }
+        end = rdtsc() + cycles_of_ms(2000);
+        while (deaths < 2 && rdtsc() < end) {
+            w = wait4(-1, &st, WNOHANG | WALL, 0);
+            if (w == 0) { nap(1000000); continue; }
+            if (w < 0) break;
+            if ((st & 0x7f) == 0) dst[deaths++] = st;
+        }
+        echild = wait4(-1, &st, WNOHANG | WALL, 0);
+        if (deaths == 2 && echild == -10) failed = "none";
+    } while (0);
+    if (p > 0 && (deaths != 2 || echild != -10)) end_group(p);
+    l.n = 0; ls(&l, "SMP-TRACE-EXIT round "); ld(&l, (U)r); ls(&l, loop ? " yield" : " spin");
+    ls(&l, " thread-cpu "); lsd(&l, G->tcpu); ls(&l, " exit-stops "); ld(&l, (U)stops);
+    ls(&l, " leader "); lstat(&l, lhave, lst); ls(&l, " thread "); lstat(&l, thave, tst);
+    ls(&l, " ran-after "); if (ran >= 0) lsd(&l, ran); else lc(&l, '-');
+    ls(&l, " current-after "); if (cur >= 0) lsd(&l, cur); else lc(&l, '-');
+    ls(&l, " deaths "); ld(&l, (U)deaths); ls(&l, " statuses ");
+    lstat(&l, deaths > 0, dst[0]); lc(&l, ' '); lstat(&l, deaths > 1, dst[1]);
+    ls(&l, " echild "); if (stops == 2) lsd(&l, echild); else lc(&l, '-');
+    ls(&l, " failed-at "); ls(&l, failed); le(&l);
+}
+static void row_trace_exit(int rounds) {
+    for (int r = 0; r < rounds; r++) trace_exit_round(r, (U)(r & 1));
+    say("SMP-TRACE-EXIT done");
+}
+/* A seized tracee spinning on another processor, interrupted `rounds` times: before each, seen current on a
+   processor not this one (20 looks 1 ms apart at most); the latency from the request to the stop's report
+   (wait4 asked without a pause), its status, the CONT's return, and whether it spins again 20 ms after. */
+static void row_trace_int(int rounds) {
+    struct ln l;
+    struct snap z;
+    int st = 0;
+    if (started_cpus < 2) { say("SMP-TRACE-INT one processor: not run"); return; }
+    G->started = 0; G->spins = 0;
+    L p = fork();
+    if (p < 0) { say("SMP-TRACE-INT fork failed"); return; }
+    if (!p) {
+        __atomic_add_fetch(&G->started, 1, __ATOMIC_SEQ_CST);
+        for (;;) G->spins++;
+    }
+    U end = rdtsc() + cycles_of_ms(2000);
+    while (!G->started && rdtsc() < end) nap(1000000);
+    L sz = ptrace(PTRACE_SEIZE, p, 0, 0);
+    l.n = 0; ls(&l, "SMP-TRACE-INT seize "); lsd(&l, sz); ls(&l, " cpu ");
+    L c0 = -1;
+    if (take(&z)) { L x = cpu_of(&z, p), m = cpu_of(&z, gettid()); if (x >= 0 && x != m) c0 = x; }
+    lsd(&l, c0); le(&l);
+    for (int k = 0; k < rounds && sz == 0; k++) {
+        L c = -1;
+        for (int j = 0; j < 20 && c < 0; j++) {
+            if (take(&z)) { L x = cpu_of(&z, p), m = cpu_of(&z, gettid()); if (x >= 0 && x != m) c = x; }
+            if (c < 0) nap(1000000);
+        }
+        U t0 = rdtsc();
+        L req = ptrace(PTRACE_INTERRUPT, p, 0, 0), w = 0;
+        U e = t0 + cycles_of_ms(500);
+        while (w == 0 && rdtsc() < e) w = wait4(p, &st, WNOHANG | WALL, 0);
+        U us = us_of(rdtsc() - t0);
+        L cont = w == p ? ptrace(PTRACE_CONT, p, 0, 0) : -1;
+        U s0 = G->spins;
+        nap(20000000);
+        int ran = G->spins != s0;
+        l.n = 0; ls(&l, "SMP-TRACE-INT round "); ld(&l, (U)k); ls(&l, " cpu "); lsd(&l, c); ls(&l, " req "); lsd(&l, req);
+        ls(&l, " status "); lstat(&l, w == p, st); ls(&l, " us "); ld(&l, us); ls(&l, " cont "); lsd(&l, cont);
+        ls(&l, " ran "); ls(&l, ran ? "yes" : "no"); le(&l);
+    }
+    end_group(p);
+    say("SMP-TRACE-INT done");
+}
+
 /* --- the entry ------------------------------------------------------------------------------ */
 __attribute__((used)) static void smp_main(U *sp) {
     int argc = (int)sp[0];
@@ -1162,6 +1331,11 @@ __attribute__((used)) static void smp_main(U *sp) {
             row_dead();
         } else if (same(mode, "one")) {
             row_refuse();
+        } else if (same(mode, "trace")) {
+            G = shared_page();
+            row_trace_exit(10);
+            G = shared_page();
+            row_trace_int(9);
         } else if (same(mode, "rows")) {
             row_run((int)started_cpus, 3);
             G = shared_page();
