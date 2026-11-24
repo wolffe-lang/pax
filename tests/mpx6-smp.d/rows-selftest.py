@@ -640,15 +640,33 @@ def trace_int_lines(us=None, status='0x80057f', ran='yes', cpu=1, done=True):
     return out + ('SMP-TRACE-INT done\n' if done else '')
 
 
-def trace_text(n, exit=None, intr=None, active=None):
+# df6-2b3ac6fd's smp4-jobs line 89 (`SIGSTOP to it: it runs on yes`) at four processors: SMP-STOPWRITE, 24 stops of a
+# process writing a pipe a byte a call on another processor; drained at once (settle 0) one byte may follow the stop,
+# the write in progress when it came; drained 50 ms on (settle 50) none, and no ring-3 turn.
+def stopwrite_lines(n, rounds=24, done=True, bad=None):
+    # bad: {round: {field: value}}, the round's line as the probe prints it otherwise
+    out = ''
+    for r in range(rounds):
+        settle = 50 if r % 2 else 0
+        f = dict(settle=settle, wc=1 if n > 1 else '-', mc=0, b=1 if settle == 0 and r % 4 == 2 else 0, t=0,
+                 st='0x137f', ct='0xffff', again=1400)
+        f.update((bad or {}).get(r, {}))
+        out += (f'SMP-STOPWRITE round {r} settle {f["settle"]} writer-cpu {f["wc"]} me-cpu {f["mc"]} '
+                f'bytes-after {f["b"]} turns-after {f["t"]} stop-status {f["st"]} cont-status {f["ct"]} '
+                f'bytes-resumed {f["again"]}\n')
+    return out + ('SMP-STOPWRITE done\n' if done else '')
+
+
+def trace_text(n, exit=None, intr=None, active=None, sw=None):
     p = proc(n, active=active)
     t = head('trace') + block('start', p) + active_line(n)
     t += trace_exit_lines(n) if exit is None else exit
     t += (trace_int_lines(cpu=1 if n > 1 else -1) if intr is None else intr)
+    t += stopwrite_lines(n) if sw is None else sw
     return t + block('end', p) + tail()
 
 
-TR = {'SMP-TRACE-EXIT', 'SMP-TRACE-INT'}
+TR = {'SMP-TRACE-EXIT', 'SMP-TRACE-INT', 'SMP-STOPWRITE'}
 for n in (2, 4, 16):
     case(f'trace green at {n}', trace_text(n), ['--kind', 'trace', '--smp', str(n)], TR, set(),
          says=r'^PASS SMP-TRACE-EXIT smp=%d trace: 10 rounds \(5 spinning, 5 in a system-call loop\)' % n)
@@ -689,13 +707,41 @@ case('a tracee not running again after its CONT', trace_text(4, intr=trace_int_l
 case('the tracee never on another processor', trace_text(4, intr=trace_int_lines(cpu=-1)),
      ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-EXIT'}, {'SMP-TRACE-INT'},
      why=r'round 0: the tracee not seen on another processor before its interrupt')
-case('one processor runs threads: both red at the gate', trace_text(4, active=1), ['--kind', 'trace', '--smp', '4'],
+case('one processor runs threads: the three red at the gate', trace_text(4, active=1), ['--kind', 'trace', '--smp', '4'],
      set(), TR, why=r'active 1 of 4')
 # trace74's red point: the unfixed kernel panicked in most boots at 2 and 4 after a lost stop (a kernel page fault),
 # the rounds after it never printed; the rows name the kernel's line, whatever else the boot printed
 PAN = 'PANIC page fault vector 14 error 0x0000000000000000 rip 0xffffffff8016fbfc rsp 0xffffd0000003f960 cr2 0x0000000000000098\n'
-case('a kernel panic in a trace boot: both rows red by its line', trace_text(4).replace('SMP-TRACE-INT done\n', 'SMP-TRACE-INT done\n' + PAN),
+case('a kernel panic in a trace boot: the three red by its line', trace_text(4).replace('SMP-TRACE-INT done\n', 'SMP-TRACE-INT done\n' + PAN),
      ['--kind', 'trace', '--smp', '4'], set(), TR, why=r'the kernel said: \[\'PANIC page fault vector 14')
+TX = {'SMP-TRACE-EXIT', 'SMP-TRACE-INT'}
+SW = ['--kind', 'trace', '--smp', '4']
+for n in (1, 2, 4, 16):
+    case(f'stop-write green at {n}', trace_text(n), ['--kind', 'trace', '--smp', str(n)], {'SMP-STOPWRITE'}, set(),
+         says=r'^PASS SMP-STOPWRITE smp=%d trace: 24 stops .* \(6 of 12 a write in progress\)' % n)
+# the plant stoprun (signal.on_return's park skipped): a stopped process's thread runs on in ring 3 while nothing else
+# is queued on its processor, writing a pipe's worth in the 300 ms
+stoprun = {r: dict(b=65536, t=900 + r) for r in range(24)}
+case('the plant stoprun: the writer runs on after its stop', trace_text(4, sw=stopwrite_lines(4, bad=stoprun)), SW, TX,
+     {'SMP-STOPWRITE'}, why=r'round 0 \(settle 0 ms\): 65536 bytes written after the stop \(at most the one write in progress\)')
+case('two writes after a stop drained at once', trace_text(4, sw=stopwrite_lines(4, bad={4: dict(b=2)})), SW, TX,
+     {'SMP-STOPWRITE'}, why=r'round 4 \(settle 0 ms\): 2 bytes written after the stop')
+case('a byte after the stop had taken effect', trace_text(4, sw=stopwrite_lines(4, bad={3: dict(b=1)})), SW, TX,
+     {'SMP-STOPWRITE'}, why=r'round 3 \(settle 50 ms\): 1 bytes and 0 ring-3 turns after the stop had taken effect')
+case('a ring-3 turn after the stop had taken effect', trace_text(4, sw=stopwrite_lines(4, bad={5: dict(t=1)})), SW, TX,
+     {'SMP-STOPWRITE'}, why=r'round 5 \(settle 50 ms\): 0 bytes and 1 ring-3 turns after the stop had taken effect')
+case('the writer not on another processor before its stop', trace_text(4, sw=stopwrite_lines(4, bad={0: dict(wc='-')})),
+     SW, TX, {'SMP-STOPWRITE'}, why=r'round 0 \(settle 0 ms\): the writer not seen on another processor')
+case('the writer on the prober\'s own processor', trace_text(4, sw=stopwrite_lines(4, bad={2: dict(wc=0)})),
+     SW, TX, {'SMP-STOPWRITE'}, why=r'round 2 \(settle 0 ms\): the writer not seen on another processor')
+case('a stop not reported', trace_text(4, sw=stopwrite_lines(4, bad={6: dict(st='-')})), SW, TX, {'SMP-STOPWRITE'},
+     why=r'round 6 \(settle 0 ms\): stop status - and continue status 0xffff')
+case('the writer not writing again after SIGCONT', trace_text(4, sw=stopwrite_lines(4, bad={7: dict(again=0)})), SW, TX,
+     {'SMP-STOPWRITE'}, why=r'round 7 \(settle 50 ms\): no byte in the 30 ms after SIGCONT')
+case('the probe stopped inside the stop rounds', trace_text(4, sw=stopwrite_lines(4, rounds=10, done=False)), SW, TX,
+     {'SMP-STOPWRITE'}, why=r'10 rounds of 24 and no `SMP-STOPWRITE done`')
+case('a stop-write round under TCG: judged the same', trace_text(4, sw=stopwrite_lines(4, bad={4: dict(b=2)})), SW, TX,
+     {'SMP-STOPWRITE'}, meta=TCG, why=r'round 4 \(settle 0 ms\): 2 bytes written after the stop')
 
 
 # --- SMP-BUILD -------------------------------------------------------------------------------------
