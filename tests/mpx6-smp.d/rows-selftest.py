@@ -133,13 +133,24 @@ def signal_lines(stage=2, usr1=None, kill=None, tgk=None, tid='yes', kill_status
     return out + 'SMP-SIGNAL done\n'
 
 
-def exit_lines(n, stage=2, statuses=('0x700', '0x700', '0x800', '0x800'), after=200000, stopped='none'):
+def exit_lines(n, stage=2, statuses=('0x700', '0x700', '0x800', '0x800'), after=200000, stopped='none', back=None,
+               left=None, settled=True):
+    # each exec round: the group's VmRSS before its exec (`rss-kb`), MemFree when its wait4 returned (`waited-kb`) and
+    # once its threads were off every processor and a reap had run (`settled-kb`), the settling's wait (`settle-ms`)
+    # and the round's threads still current when it ended (`left`); back: the kB each round's settle gave back, five
+    # values; left: five values; settled False prints the rounds without them (a probe from before the settled reading)
     run = 1 if stage == 1 else min(4, n)
+    back, left = back or (0,) * 5, left or (0,) * 5
     out = ''.join(f'SMP-EXIT group {r} exiter {"main" if r < 2 else "sibling"} status {s} running {run} of 4\n'
                   for r, s in enumerate(statuses))
     for r in range(5):
         out += f'SMP-EXIT exec-child pid {40 + r}\n'
-        out += f'SMP-EXIT exec {r} {"measured" if r else "warm"} status 0x900 running {run} of 4\n'
+        out += f'SMP-EXIT exec {r} {"measured" if r else "warm"} status 0x900 running {run} of 4'
+        kb = after if r == 4 else 200000
+        if settled:
+            out += (f' rss-kb 1316 waited-kb {kb - back[r]} settled-kb {kb} settle-ms {2000 if left[r] else 3}'
+                    f' left {left[r]}')
+        out += '\n'
     return out + f'SMP-EXIT frames-kb before 200000 after {after}\nSMP-EXIT stopped {stopped}\nSMP-EXIT done\n'
 
 
@@ -273,6 +284,26 @@ case('the exec rounds lose frames', rows_text(4, exit=exit_lines(4, after=199000
      ALL6 - {'SMP-EXIT'}, {'SMP-EXIT'})
 case('a processor stopped', rows_text(4, exit=exit_lines(4, stopped='3')), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-EXIT'}, {'SMP-EXIT'})
+# dev-final4's boot at 16 read MemFree 1368 kB short 50 ms after the last exec round. The exec parks the space it left
+# while an ended sibling's processor still holds it in CR3 (kernel/sched's leave_space), and the kernel frees a parked
+# space at its next reap (a fork, a clone, a wait), which the last round's wait4 may run before that processor has
+# switched. So each round is read twice: when its wait4 returns, and once its threads are off every processor and a
+# wait4 with no child to wait for has run the reap. The settled readings are judged; what each settle gave back is
+# printed.
+case('frames out at a round\'s wait4, given back once its threads were off every processor and a reap ran',
+     rows_text(16, exit=exit_lines(16, back=(0, 0, 0, 0, 1368))), ['--kind', 'rows', '--smp', '16'], ALL6, set(),
+     says=r'^PASS SMP-EXIT smp=16: MemFree before 200000 kB, after 200000 kB, each read once the round\'s threads were '
+          r'off every processor and a reap had run \(settled in at most 3 ms\); given back by each round\'s settle '
+          r'\[0, 0, 0, 0, 1368\] kB; the group\'s VmRSS before each exec \[1316, 1316, 1316, 1316, 1316\] kB')
+case('frames short even once settled', rows_text(16, exit=exit_lines(16, after=198632)), ['--kind', 'rows', '--smp', '16'],
+     ALL6 - {'SMP-EXIT'}, {'SMP-EXIT'},
+     why=r'MemFree around the four exec rounds: frames-kb before 200000 after 198632 \(within 64 kB, each read once settled\)')
+case('a round\'s thread still current on a processor 2 s after its wait4',
+     rows_text(16, exit=exit_lines(16, left=(0, 0, 1, 0, 0))), ['--kind', 'rows', '--smp', '16'],
+     ALL6 - {'SMP-EXIT'}, {'SMP-EXIT'}, why=r'exec round 2: 1 of its threads still current on a processor 2000 ms after its wait4')
+case('no settled reading (a probe from before it)', rows_text(4, exit=exit_lines(4, settled=False)),
+     ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-EXIT'}, {'SMP-EXIT'},
+     why=r'exec round 0: no settled MemFree reading \(`settled-kb`, `left`\)')
 case('a wrong wait status', rows_text(4, wait=wait_lines(4, right=15)), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'})
 case('children on one processor', rows_text(4, wait=wait_lines(4, cpus='0')), ['--kind', 'rows', '--smp', '4'],
