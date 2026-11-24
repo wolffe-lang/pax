@@ -339,6 +339,10 @@ A silence cut says `silence-cap: no output for …`; a cap cut is GitHub's own "
 `tests/ci-budgets.py` holds each limit to the rule, under the job's every-leg cap, and the step to exactly that shape;
 no other step uses the tool, and the plan job runs `tests/silence-cap-selftest`.
 
+`tools/apt-update` also runs the tool, for apt's update alone in every step that runs apt-get, at two minutes and
+outside this table: in the 90 jobs measured for #540 the update was never silent for more than 31 s, and every stall
+there was silent from its first minute to the job's cap. `tests/apt-update-selftest` and `tests/ci-plan` P16 hold it.
+
 ### Progress lines in the long builds (`tools/progress`)
 
 Some builds print nothing for a long time: yew's release build (47 to 53 minutes in `mpx5-yew`, `mpx5-screen` and
