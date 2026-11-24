@@ -4,8 +4,9 @@
 #   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
 #   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
-#    SMP_KINDS='rows end nosmp one cap2 cap1 stress nooff panic panic2 testwords' (or commas) the boots run, every
+#    SMP_KINDS='rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords' (or commas) the boots run, every
 #    kind by default, fewer for a plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
+#    SMP_TRACE_COUNTS='1 2 4' (or commas) the trace kind's processor counts, SMP_TRACE_BOOTS=1 its boots at each;
 #    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
 #    boots' logs still under PAX_BUILD)
@@ -22,7 +23,8 @@
 #   - SMP-END at 4: root's reboot(2) for a halt (the monitor's register dumps after it, three, with the
 #     machine running between), a power-off and a restart (QEMU's own end, its status read);
 #   - SMP-NOSMP (`nosmp` at 4, dumps), SMP-ONE (-smp 1), SMP-CAP (`pax.cpus=2` and `pax.cpus=1` at 4), SMP-DEAD
-#     (cap2's boot);
+#     (cap2's boot); SMP-TRACE-EXIT and SMP-TRACE-INT (`trace`, at each of SMP_TRACE_COUNTS, SMP_TRACE_BOOTS boots):
+#     a traced group's exit and a PTRACE_INTERRUPT with the tracee on another processor;
 #   - from a second build of the same kernel with the test words (tools/build-kernel --test-words, never shipped):
 #     SMP-END-NOOFF (`nooff`), SMP-PANIC-STOP (`panic`) and SMP-PANIC-TWO (`panic2`), each at 4 with dumps; and
 #     SMP-TESTWORDS (`testwords`), the shipped kernel given the same words; TESTWORDS-ELF per tier: `fire` and
@@ -41,7 +43,11 @@ set -euo pipefail
 cd "$PAX_ROOT"
 tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
 counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
-kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 stress nooff panic panic2 testwords}
+kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords}
+tcounts=${SMP_TRACE_COUNTS:-1 2 4} tboots=${SMP_TRACE_BOOTS:-1}
+tcounts=${tcounts//,/ }
+case $tboots in ''|*[!0-9]*|0) die "SMP_TRACE_BOOTS is a count of boots, not $tboots" ;; esac
+for n in $tcounts; do case $n in ''|*[!0-9]*|0) die "SMP_TRACE_COUNTS names processor counts, not $n" ;; esac; done
 kinds=${kinds//,/ } # commas or spaces between the kinds
 # SMP_ROWS_CAP=N, a development knob (tests/mpx6-smp.d/rows-cap.sh): said first, so no one reads its greens as the gate's.
 . tests/mpx6-smp.d/rows-cap.sh
@@ -49,8 +55,8 @@ rows_cap=${SMP_ROWS_CAP:-}
 rows_cap_check "$rows_cap" || exit 2
 [ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 for k in $kinds; do
-    case $k in rows|end|nosmp|one|cap2|cap1|stress|nooff|panic|panic2|testwords) ;;
-        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 stress nooff panic panic2 testwords, not $k" ;; esac
+    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords) ;;
+        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords, not $k" ;; esac
 done
 asked() { # KIND: 0 when SMP_KINDS asks it, else its NOT-RUN line and 1
     case " $kinds " in *" $1 "*) return 0 ;; esac
@@ -85,7 +91,7 @@ conf() { # FILE CMDLINE-WORDS
 # NAME:CMDLINE-WORDS:the run list's line (the probe's mode)
 images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-halt::/bin/smpprobe end halt"
         "end-poweroff::/bin/smpprobe end poweroff" "end-reboot::/bin/smpprobe end restart" "one::/bin/smpprobe one"
-        "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one"
+        "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one" "trace::/bin/smpprobe trace"
         "end-nooff: pax.cpus=4 pax.nopoweroff:/bin/smpprobe end poweroff" "panic: pax.cpus=4 pax.panictest=1:/bin/smpprobe spin"
         "panic2: pax.cpus=4 pax.panictest=2:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff")
 # The STOP step's test kinds boot a test build (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu in
@@ -174,6 +180,13 @@ for tier in $tiers; do
         ! asked one || boot "$work/smp-$fw-one.log" "$fw" "$img/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
         ! asked cap2 || boot "$work/smp-$fw-cap2.log" "$fw" "$img/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
         ! asked cap1 || boot "$work/smp-$fw-cap1.log" "$fw" "$img/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
+        if asked trace; then
+            for n in $tcounts; do
+                for i in $(seq 1 "$tboots"); do
+                    boot "$work/smp-$fw-trace-$n-$i.log" "$fw" "$img/trace.iso" 240 0 --kind trace --smp "$n" --boot "$i" -- -smp "$n" -m 512
+                done
+            done
+        fi
         # the STOP step's kinds (test builds but testwords): their rows read the test ELF's symbols for the dumps
         if asked nooff; then
             elf=$img/test/kmain_console.elf boot "$work/smp-$fw-end-nooff.log" "$fw" "$img/end-nooff.iso" 180 1 --kind end-nooff --smp 4 -- -smp 4 -m 512
