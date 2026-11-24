@@ -957,6 +957,14 @@ pub fn on_return(f: u64) -> u64 {
         if word(g, W_CS) & 3 != 3 {
             return g
         }
+        // px166: a group exit's PTRACE_EVENT_EXIT owed by a thread that ran
+        // elsewhere when it began (kernel/sched's `trace_group_exit`): taken
+        // before ring 3, with this frame.
+        if sched.owes_exit_stop() {
+            g = sched.take_exit_stop(g)
+            guard += 1
+            continue
+        }
         let injected = trace_state.inject_sig(sched.self_slot())
         if injected != 0 && !sched.kill_pending() {
             trace_state.set_inject_sig(sched.self_slot(), 0)
