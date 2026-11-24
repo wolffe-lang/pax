@@ -110,5 +110,59 @@ class LogoutRecord(unittest.TestCase):
                 self.assertFalse(rows.logout_verdict(text)[0])
 
 
+class AlphaReadings(unittest.TestCase):
+    def setUp(self):
+        rows.FAILS.clear()
+        rows.ARGS = types.SimpleNamespace(tier='unit', leg='unit', out=pathlib.Path('/unused'))
+
+    def test_pid_listing_requires_complete_successful_observation(self):
+        for text in (None, '', 'read: permission denied\n', 'BEGIN-ALPHA\n',
+                     'BEGIN-ALPHA\nEND-ALPHA 1\n',
+                     'BEGIN-ALPHA\nA=12\nA=12\nEND-ALPHA 0\n',
+                     'BEGIN-ALPHA\nA=oops\nEND-ALPHA 0\n'):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                rows.alpha_pids(Console([text]), 170)
+
+    def test_complete_pid_listing_distinguishes_empty_and_present(self):
+        self.assertEqual(rows.alpha_pids(Console(['BEGIN-ALPHA\nEND-ALPHA 0\n']), 170), [])
+        self.assertEqual(rows.alpha_pids(Console(['BEGIN-ALPHA\nA=12\nEND-ALPHA 0\n']), 170), [12])
+
+    def test_no_manager_fails_restart_dependency_explicitly(self):
+        con = types.SimpleNamespace(text=lambda n: 'no alpha')
+        with mock.patch.object(rows, 'seen_after', return_value=None), \
+                mock.patch.object(rows, 'login', return_value=True), \
+                mock.patch.object(rows, 'alpha_pids', return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rows.alpha_boot(con)
+        self.assertIn('I17', rows.FAILS)
+        self.assertIn('I18', rows.FAILS)
+
+    def test_shutdown_uses_an_independent_boot(self):
+        con = types.SimpleNamespace(quit=lambda: None)
+        rows.NO_WORD['alpha'] = []
+        with mock.patch.object(rows, 'iso', return_value='iso'), \
+                mock.patch.object(rows, 'alpha_tree', return_value=[]), \
+                mock.patch.object(rows, 'Console', return_value=con), \
+                mock.patch.object(rows, 'alpha_boot'), \
+                mock.patch.object(rows, 'alpha_fallback'), \
+                mock.patch.object(rows, 'hooks_boot', return_value={'alpha': [], 'hook': True}), \
+                mock.patch.object(rows, 'alpha_shutdown', create=True) as shutdown, \
+                contextlib.redirect_stdout(io.StringIO()):
+            rows.alpha_boots(pathlib.Path('/unused'))
+        shutdown.assert_called_once_with(con)
+
+    def test_shutdown_requires_halt_and_real_alpha_records(self):
+        good = (b'alpha: @10 stopping every unit (TERM)\nalpha: @11 exit 0\n'
+                b'PAX: the end: SIGTERM to 3\nhalt\n')
+        self.assertTrue(rows.alpha_shutdown_verdict(good, True)[0])
+        for data, halt in ((good, False), (good.replace(b'alpha: @11 exit 0\n', b''), True),
+                           (good + b'init: /bin/alpha ended (exit 0); again in 1 s\n', True),
+                           (good.replace(b'SIGTERM to 3', b'SIGKILL to 3'), True),
+                           (b'echo stopping every unit (TERM); echo exit 0\n'
+                            b'PAX: the end: SIGTERM to 3\nhalt\n', True)):
+            with self.subTest(data=data, halt=halt):
+                self.assertFalse(rows.alpha_shutdown_verdict(data, halt)[0])
+
+
 if __name__ == '__main__':
     unittest.main()
