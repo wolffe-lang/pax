@@ -116,6 +116,10 @@ on:
         description: "mpx5-wolf only: deliberate glibc or std-root break; empty is the control"
         type: string
         default: ""
+      rehearse:
+        description: "nightly-red: rehearse the nightly's issue job after a red tier, with a recording gh (this branch only; never on trunk)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -7068,7 +7072,9 @@ jobs:
   nightly-red:
     name: a red nightly opens an issue
     needs: tier
-    if: ${{ failure() && github.event_name == 'schedule' }}
+    # The rehearsal (branch ci10-rehearse-nightly-red, never merged): a dispatch with rehearse=nightly-red runs
+    # this job too, after a red tier, with a recording gh ahead of the real one (tools/rehearse-gh).
+    if: ${{ failure() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.rehearse == 'nightly-red')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -7079,10 +7085,27 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: a recording gh ahead of the real one (the rehearsal's; it passes reads, records writes, refuses the rest)
+        run: |
+          mkdir -p "$RUNNER_TEMP/rehearsal-bin"
+          cp tools/rehearse-gh "$RUNNER_TEMP/rehearsal-bin/gh"
+          chmod +x "$RUNNER_TEMP/rehearsal-bin/gh"
+          echo "REAL_GH=$(command -v gh)" >> "$GITHUB_ENV"
+          echo "GH_RECORD=$RUNNER_TEMP/gh-record.log" >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/gh-record.log"
+          echo "$RUNNER_TEMP/rehearsal-bin" >> "$GITHUB_PATH"
+          echo "the real gh: $(command -v gh); the recorder: $RUNNER_TEMP/rehearsal-bin/gh"
+
       - name: open the nightly's issue, or comment on the open one
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           WORKFLOW: ${{ github.workflow }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: tools/nightly-red
+        run: |
+          echo "gh on PATH: $(command -v gh)"
+          tools/nightly-red
+
+      - name: what the recording gh passed through, recorded and refused
+        if: always()
+        run: cat "$GH_RECORD"
