@@ -2342,7 +2342,7 @@ fn end_others(l: u64, keep: u64, status: u64) {
     var t: u64 = FIRST
     while t < top() {
         let st = field(t, offset_of(Thread, state))
-        let held = trace_state.exit_pending(t) == 3 && tracer_of(keep) == 0 // px102: parked in EVENT_EXIT for its tracer
+        let held = (trace_state.exit_pending(t) == 3 || trace_state.exit_pending(t) == 4) && tracer_of(keep) == 0 // px102: parked in EVENT_EXIT for its tracer (px166: or owed it, running elsewhere)
         if t != keep && !held && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 {
             if st == READY {
                 unqueue(t)
@@ -3224,7 +3224,7 @@ fn threads_unreported(l: u64) -> bool {
     while t < top() {
         let st = field(t, offset_of(Thread, state))
         if t != l && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, zombie)) == 1 && (st == ZOMBIE || st == DEAD) { return true }
-        if t != l && field(t, offset_of(Thread, lead)) == l && trace_state.exit_pending(t) == 3 && tracer_of(t) != 0 && st != FREE && st != DEAD { return true } // parked in EVENT_EXIT
+        if t != l && field(t, offset_of(Thread, lead)) == l && (trace_state.exit_pending(t) == 3 || trace_state.exit_pending(t) == 4) && tracer_of(t) != 0 && st != FREE && st != DEAD { return true } // parked in EVENT_EXIT (px166: or owed it)
         t += 1
     }
     false
@@ -5375,6 +5375,14 @@ pub fn trace_detach(s: u64) {
 /// its message the group's status; resumed, it ends with that status.
 /// Only a traced, stopping caller does this (it holds the group's end
 /// until its tracer resumes it). IF clear.
+/// px166: a thread running on another processor (its W_CPU) is not parked
+/// from here: its frame is that processor's, live, and its state its own
+/// to write (the next system call it makes, or its tick, would overwrite a
+/// TRACED written here, and its tracer would wait for ever: tests/mpx6-smp's
+/// SMP-TRACE-EXIT, mpx5-trace's group-exit-event at four processors). It is
+/// owed the stop instead (exit_pending 4) and sent a RESCHED; it parks
+/// itself with its own frame at its next kernel entry or way back to ring 3
+/// (`take_exit_stop`: kernel/interrupts' door, kernel/signal's `on_return`).
 pub fn trace_group_exit(status: u64) {
     let c = cur()
     let l = field(c, offset_of(Thread, lead))
@@ -5382,15 +5390,46 @@ pub fn trace_group_exit(status: u64) {
     while t < top() {
         let st = field(t, offset_of(Thread, state))
         if t != c && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && tracer_of(t) != 0 && trace_state.options(t) & 0x40 != 0 && trace_state.exit_pending(t) == 0 {
-            trace_state.set_exit_pending(t, 3)
             trace_state.set_exit_status(t, status)
             trace_state.set_event(t, status)
             trace_state.set_stop_kind(t, 4)
             trace_state.set_control(t, trace_state.control(t) & !(trace_state.FAULT | trace_state.INTERRUPT))
-            let _parked = trace_park(t, 0, 0x605, 0x605, field(t, offset_of(Thread, pid)) | (real_uid(l) << 32))
+            if slot_word(t, W_CPU) != 0 {
+                trace_state.set_exit_pending(t, 4) // px166: owed, taken where it runs
+                reach(t)
+            } else {
+                trace_state.set_exit_pending(t, 3)
+                let _parked = trace_park(t, 0, 0x605, 0x605, field(t, offset_of(Thread, pid)) | (real_uid(l) << 32))
+            }
         }
         t += 1
     }
+}
+
+/// px166: whether the running thread is owed a group exit's
+/// PTRACE_EVENT_EXIT (`trace_group_exit`, exit_pending 4). The lock's
+/// holder: kernel/interrupts' door and kernel/signal's `on_return`.
+pub fn owes_exit_stop() -> bool {
+    let c = cur()
+    !idle(c) && trace_state.exit_pending(c) == 4 && field(c, offset_of(Thread, state)) == RUNNING
+}
+
+/// px166: the running thread takes the PTRACE_EVENT_EXIT it is owed, with
+/// its own frame `f` (a system call's or a fault's at the door, a ring-3
+/// frame at `on_return`): parked as `trace_group_exit` parks a thread that
+/// runs nowhere (exit_pending 3, the same status, code and address); the
+/// frame of what this processor runs next. Its tracer gone, it is owed
+/// nothing and goes on (the group's end ends it).
+pub fn take_exit_stop(f: u64) -> u64 {
+    let c = cur()
+    let l = field(c, offset_of(Thread, lead))
+    trace_state.set_exit_pending(c, 3)
+    if !trace_park(c, f, 0x605, 0x605, field(c, offset_of(Thread, pid)) | (real_uid(l) << 32)) {
+        trace_state.set_exit_pending(c, 0)
+        return f
+    }
+    wake_sleepers()
+    run_next()
 }
 
 /// A thread resumed from a group exit's PTRACE_EVENT_EXIT ends now (it is
