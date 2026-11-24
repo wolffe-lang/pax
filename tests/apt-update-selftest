@@ -8,8 +8,11 @@ python3 and sh, with stand-in commands and APT_UPDATE_QUIET=2, APT_UPDATE_PAUSE=
   U3  silent on both tries: exit 124, two tries, the line that gives up
   U4  a command that fails (exit 100, apt's own failure status) is not tried again: exit 100, one try, named
   U5  with no command it runs `apt-get update -q` (a stand-in apt-get first on PATH records its arguments)
-  U6  a limit or pause that is not whole seconds is refused (exit 2) before anything runs
-  U7  when tools/silence-cap refuses (off Linux: exit 2), that status passes through and nothing is tried again
+  U6  a limit or pause that is not whole seconds is refused (exit 2, in the tool's own words) before anything runs
+  U7  when tools/silence-cap refuses (off Linux: exit 2, in its own words), that status passes through and nothing
+      is tried again
+Each row asks for the tool's own words as well as its status: on Linux `sh` exits 2 for a script it cannot open, so
+a status alone would pass U6 and U7 with no tool at all (run 45382596126 did).
 Exit 0 when every row passes, 1 otherwise. Off Linux, where tools/silence-cap refuses, U1 to U5 print SKIP with the
 reason; U6 and U7 run everywhere.
 """
@@ -98,14 +101,20 @@ else:
     for row in ('U1', 'U2', 'U3', 'U4', 'U5'):
         print('apt-update-selftest: SKIP %s reason=%s: tools/silence-cap runs on Linux only' % (row, platform.system()))
 
+REFUSE = 'apt-update: APT_UPDATE_QUIET and APT_UPDATE_PAUSE are whole seconds'
 cmd, count = counted('u6', 'echo ran')
-bad = [run(cmd, env={'APT_UPDATE_QUIET': '2s'})[1], run(cmd, env={'APT_UPDATE_PAUSE': '-1'})[1]]
-say(bad == [2, 2] and tries(count) == 0, 'U6 a limit or pause not in whole seconds: exits %s, %d tries (want [2, 2] and 0)'
-    % (bad, tries(count)))
+got = [run(cmd, env={'APT_UPDATE_QUIET': '2s'}), run(cmd, env={'APT_UPDATE_PAUSE': '-1'})]
+bad = [rc for out, rc, secs in got]
+named = all(REFUSE in out for out, rc, secs in got)
+say(bad == [2, 2] and named and tries(count) == 0,
+    'U6 a limit or pause not in whole seconds: exits %s, %s, %d tries (want [2, 2], the refusal named, 0)'
+    % (bad, 'the refusal named' if named else 'no refusal of the tool\'s own', tries(count)))
 
 cmd, count = counted('u7', 'echo ran')
 out, rc, secs = run(cmd, env={'SILENCE_CAP_SYSTEM': 'Darwin'})
-say(rc == 2 and tries(count) == 0 and 'once more' not in out,
-    'U7 silence-cap refusing: exit %d passed through, %d tries, nothing tried again' % (rc, tries(count)))
+refused = 'silence-cap: refused: untested on Darwin' in out
+say(rc == 2 and refused and tries(count) == 0 and 'once more' not in out,
+    'U7 silence-cap refusing: exit %d passed through, %s, %d tries, nothing tried again' % (
+        rc, 'its refusal in the log' if refused else 'no refusal of silence-cap\'s', tries(count)))
 print('apt-update-selftest: %s' % ('PASS' if fails == 0 else 'FAIL (%d)' % fails))
 sys.exit(1 if fails else 0)
