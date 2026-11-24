@@ -291,6 +291,7 @@ struct sh {
     volatile U ht[16]; /* the sleeper's rounds: when the handler took each SIGUSR1, in order */
     volatile U pids[16];
     volatile L gtids[4]; /* SMP-DEAD: the group's four thread ids, written by its main thread */
+    volatile U wsamples, wsampon, widle[MAXC]; /* SMP-WAIT's sampler: its reads, the processors it sat on, each one's idle reads */
 };
 static struct sh *G;
 __attribute__((force_align_arg_pointer)) static void h_usr1(int s) { (void)s; G->hit = rdtsc(); __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST); }
@@ -774,12 +775,17 @@ static void row_exit(void) {
 /* --- SMP-WAIT ----------------------------------------------------------------------------- */
 static void wait_sampler(void) {
     struct snap z;
+    L me = getpid();
     for (int k = 0; !G->done && k < 5000; k++) {
         nap(10000000);
         if (!take(&z)) continue;
-        for (int i = 0; i < z.n; i++)
+        G->wsamples++;
+        for (int i = 0; i < z.n && i < MAXC; i++) {
             for (int j = 0; j < 16; j++)
                 if (G->pids[j] && z.cur[i] == (L)G->pids[j]) G->cpumask |= 1ul << i;
+            if (z.cur[i] == me) G->wsampon |= 1ul << i;    /* where it sat: blind there this read */
+            if (z.cur[i] == CUR_IDLE) G->widle[i]++;        /* a processor with no thread this read */
+        }
     }
     exit_group(0);
 }
@@ -794,7 +800,8 @@ static void row_wait(void) {
        the children ran on from these, which no processor hides from (the sampler, below, never sees a child on the
        processor it runs on itself) */
     if (!take(&z0)) z0.n = 0;
-    G->done = 0; G->cpumask = 0;
+    G->done = 0; G->cpumask = 0; G->wsamples = 0; G->wsampon = 0;
+    for (int i = 0; i < MAXC; i++) G->widle[i] = 0;
     for (int j = 0; j < 16; j++) G->pids[j] = 0;
     L sp = fork();
     if (!sp) wait_sampler();
@@ -824,6 +831,19 @@ static void row_wait(void) {
     le(&l);
     l.n = 0; ls(&l, "SMP-WAIT user-ticks");
     for (int i = 0; i < z1.n; i++) { lc(&l, ' '); ld(&l, (U)i); lc(&l, ':'); ldelta(&l, i < z0.n ? z0.user[i] : -1, z1.user[i]); }
+    le(&l);
+    /* the RESCHEDs each processor took while the children ran (kernel/sched's share() sends one to the lowest-numbered
+       idle processor with none in flight): a processor the ticks find starved either took some and found nothing, or
+       took none */
+    l.n = 0; ls(&l, "SMP-WAIT resched");
+    for (int i = 0; i < z1.n; i++) { lc(&l, ' '); ld(&l, (U)i); lc(&l, ':'); ldelta(&l, i < z0.n ? z0.resched[i] : -1, z1.resched[i]); }
+    le(&l);
+    l.n = 0; ls(&l, "SMP-WAIT samples "); ld(&l, G->wsamples); ls(&l, " sampler-on ");
+    any = 0;
+    for (int i = 0; i < MAXC; i++) if (G->wsampon >> i & 1) { if (any) lc(&l, ','); ld(&l, (U)i); any = 1; }
+    if (!any) lc(&l, '-');
+    ls(&l, " idle");
+    for (int i = 0; i < z1.n && i < MAXC; i++) { lc(&l, ' '); ld(&l, (U)i); lc(&l, ':'); ld(&l, G->widle[i]); }
     le(&l);
     say("SMP-WAIT done");
 }
