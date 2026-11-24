@@ -109,7 +109,8 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            rounds drained at once); none, and no ring-3 turn, once it has taken effect (the rounds
                            drained 50 ms on); each stop and continue reported (0x137f, 0xffff), the writer writing
                            again after SIGCONT. At two processors or more the writer is seen on another processor
-                           before each stop (the case set up). mpx5-jobs' `SIGSTOP to it: it runs on` is this case,
+                           before each stop (the case set up; looked for up to 2 s, the looks printed, a round never
+                           set up named). mpx5-jobs' `SIGSTOP to it: it runs on` is this case,
                            met once in a while.
   build       SMP-BUILD    the census's pack fixture: one job and four jobs, three interleaved rounds, at
                            -smp 1 and -smp N; 15 pack/index pairs as the host oracle's; at -smp N the
@@ -972,7 +973,8 @@ elif a.kind == 'trace':
         at = f'round {kv(x, "round")} (settle {settle} ms)'
         wc = cpu(kv(x, 'writer-cpu'))
         if N > 1 and (wc is None or wc == cpu(kv(x, 'me-cpu'))):
-            why.append(f'{at}: the writer not seen on another processor before its stop (the case not set up)')
+            why.append(f'{at}: the writer not seen on another processor in 2 s of looking ({kv(x, "looks")} looks; '
+                       f'the case not set up)')
         if settle == 0 and not (isinstance(b, int) and b <= 1):
             why.append(f'{at}: {b} bytes written after the stop (at most the one write in progress)')
         elif settle != 0 and (b != 0 or t != 0):
@@ -985,9 +987,11 @@ elif a.kind == 'trace':
     if bad:
         why.insert(0, f'the kernel said: {bad[:3]}')
     at_once = [kv(x, 'bytes-after') for x in sr if kv(x, 'settle') == 0]
+    looks = [kv(x, 'looks') for x in sr if isinstance(kv(x, 'looks'), int)]
     figs = (f'drained at once, the bytes after each stop {at_once} ({sum(1 for v in at_once if v == 1)} of '
             f'{len(at_once)} a write in progress); drained 50 ms on, '
-            f'{[kv(x, "bytes-after") for x in sr if kv(x, "settle") != 0]}')
+            f'{[kv(x, "bytes-after") for x in sr if kv(x, "settle") != 0]}; the set-up\'s looks '
+            f'{"most " + str(max(looks)) + ", " + str(sum(1 for v in looks if v > 1)) + " rounds more than one" if looks else "not printed"}')
     if gate:
         fail('SMP-STOPWRITE', gate, why + [figs])
     elif why:
