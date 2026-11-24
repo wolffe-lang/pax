@@ -648,10 +648,10 @@ def stopwrite_lines(n, rounds=24, done=True, bad=None):
     out = ''
     for r in range(rounds):
         settle = 50 if r % 2 else 0
-        f = dict(settle=settle, wc=1 if n > 1 else '-', mc=0, b=1 if settle == 0 and r % 4 == 2 else 0, t=0,
+        f = dict(settle=settle, wc=1 if n > 1 else '-', mc=0, looks=1, b=1 if settle == 0 and r % 4 == 2 else 0, t=0,
                  st='0x137f', ct='0xffff', again=1400)
         f.update((bad or {}).get(r, {}))
-        out += (f'SMP-STOPWRITE round {r} settle {f["settle"]} writer-cpu {f["wc"]} me-cpu {f["mc"]} '
+        out += (f'SMP-STOPWRITE round {r} settle {f["settle"]} writer-cpu {f["wc"]} me-cpu {f["mc"]} looks {f["looks"]} '
                 f'bytes-after {f["b"]} turns-after {f["t"]} stop-status {f["st"]} cont-status {f["ct"]} '
                 f'bytes-resumed {f["again"]}\n')
     return out + ('SMP-STOPWRITE done\n' if done else '')
@@ -730,10 +730,23 @@ case('a byte after the stop had taken effect', trace_text(4, sw=stopwrite_lines(
      {'SMP-STOPWRITE'}, why=r'round 3 \(settle 50 ms\): 1 bytes and 0 ring-3 turns after the stop had taken effect')
 case('a ring-3 turn after the stop had taken effect', trace_text(4, sw=stopwrite_lines(4, bad={5: dict(t=1)})), SW, TX,
      {'SMP-STOPWRITE'}, why=r'round 5 \(settle 50 ms\): 0 bytes and 1 ring-3 turns after the stop had taken effect')
-case('the writer not on another processor before its stop', trace_text(4, sw=stopwrite_lines(4, bad={0: dict(wc='-')})),
-     SW, TX, {'SMP-STOPWRITE'}, why=r'round 0 \(settle 0 ms\): the writer not seen on another processor')
-case('the writer on the prober\'s own processor', trace_text(4, sw=stopwrite_lines(4, bad={2: dict(wc=0)})),
+case('the writer not on another processor before its stop', trace_text(4, sw=stopwrite_lines(4, bad={0: dict(wc='-', looks=200)})),
+     SW, TX, {'SMP-STOPWRITE'}, why=r'round 0 \(settle 0 ms\): the writer not seen on another processor in 2 s of '
+                                   r'looking \(200 looks; the case not set up\)')
+case('the writer on the prober\'s own processor', trace_text(4, sw=stopwrite_lines(4, bad={2: dict(wc=0, looks=200)})),
      SW, TX, {'SMP-STOPWRITE'}, why=r'round 2 \(settle 0 ms\): the writer not seen on another processor')
+# df7-0ec7099b's red at two processors: round 0's writer not seen elsewhere in 20 looks; the set-up now looks for 2 s,
+# the looks printed: a set-up that took many is green and says so
+case('a set-up that took 37 looks: green, its looks said', trace_text(2, sw=stopwrite_lines(2, bad={0: dict(looks=37)})),
+     ['--kind', 'trace', '--smp', '2'], {'SMP-STOPWRITE'}, set(),
+     says=r'^PASS SMP-STOPWRITE smp=2 trace: .* the set-up\'s looks most 37, 1 rounds more than one')
+# the plant pinned: the application processors take no process's thread, every one on the boot processor; each row's
+# set-up names it, never a pass
+pinned = {r: dict(wc=0, looks=200) for r in range(24)}
+pinned_tx = {r: dict(tcpu=-1) for r in range(10)}
+case('the plant pinned: no thread ever on another processor, every set-up named',
+     trace_text(4, exit=trace_exit_lines(4, bad=pinned_tx), intr=trace_int_lines(cpu=-1), sw=stopwrite_lines(4, bad=pinned)),
+     SW, set(), TR, why=r'round 0 \(settle 0 ms\): the writer not seen on another processor in 2 s of looking \(200 looks')
 case('a stop not reported', trace_text(4, sw=stopwrite_lines(4, bad={6: dict(st='-')})), SW, TX, {'SMP-STOPWRITE'},
      why=r'round 6 \(settle 0 ms\): stop status - and continue status 0xffff')
 case('the writer not writing again after SIGCONT', trace_text(4, sw=stopwrite_lines(4, bad={7: dict(again=0)})), SW, TX,
