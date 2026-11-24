@@ -57,7 +57,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
               SMP-EXIT     exit_group from the main thread and from a sibling with four threads running,
                            execve from a sibling with the others running: statuses 0x700, 0x800,
                            0x900; min(4, N) of the group seen running at once; MemFree after four
-                           exec rounds within 64 kB of before; no processor stopped.
+                           exec rounds within 64 kB of before, each read once the round's threads are
+                           off every processor and a wait4 with no child has run the kernel's reap
+                           (what each round's settle gave back printed); no processor stopped.
               SMP-WAIT     16 children of 20 to 320 ms of work: 16 statuses right, the children's CPU
                            0.8 of the work or more, and the children ran on max(2, min(N, 16) - 1)
                            processors by the kernel's ring-3 ticks (two at least each), the ones missed
@@ -565,10 +567,28 @@ def exit_check(n):
             why.append(f'exec round {k}: {kv(s, "running")} of 4 seen running at once, want {want}')
     if len(kids) != len(exe):
         why.append(f'{len(kids)} exec-child lines for {len(exe)} execs')
+    # each round read once its threads were off every processor and a wait4 with no child had run the kernel's reap,
+    # which frees the space an exec parked while an ended sibling's processor still held it (kernel/sched's
+    # leave_space) and the siblings' stacks the departure rule put off: the frames the round's own wait4 may leave out
+    keys = ('rss-kb', 'waited-kb', 'settled-kb', 'settle-ms', 'left')
+    missing = [k for k, s in enumerate(exe) if not all(isinstance(kv(s, x), int) for x in keys)]
+    if missing:
+        why.append(f'exec round {missing[0]}: no settled MemFree reading (`settled-kb`, `left`)'
+                   + (f', nor in rounds {missing[1:]}' if len(missing) > 1 else ''))
+    for k, s in enumerate(exe):
+        if k not in missing and kv(s, 'left'):
+            why.append(f'exec round {k}: {kv(s, "left")} of its threads still current on a processor '
+                       f'{kv(s, "settle-ms")} ms after its wait4')
     fr = [s for s in ex if s.startswith('frames-kb ')]
     if not fr or not isinstance(kv(fr[0], 'before'), int) or not isinstance(kv(fr[0], 'after'), int) \
             or kv(fr[0], 'before') == 0 or kv(fr[0], 'after') < kv(fr[0], 'before') - 64:
-        why.append(f'MemFree around the four exec rounds: {fr[0] if fr else "no line"} (within 64 kB)')
+        why.append(f'MemFree around the four exec rounds: {fr[0] if fr else "no line"} (within 64 kB, each read once settled)')
+    if exe and not missing and fr:
+        info.append(f'MemFree before {kv(fr[0], "before")} kB, after {kv(fr[0], "after")} kB, each read once the round\'s '
+                    f'threads were off every processor and a reap had run (settled in at most '
+                    f'{max(kv(s, "settle-ms") for s in exe)} ms); given back by each round\'s settle '
+                    f'{[kv(s, "settled-kb") - kv(s, "waited-kb") for s in exe]} kB; the group\'s VmRSS before each exec '
+                    f'{[kv(s, "rss-kb") for s in exe]} kB')
     st = [s for s in ex if s.startswith('stopped')]
     if st != ['stopped none']:
         why.append(f'processors stopped: {st}')
