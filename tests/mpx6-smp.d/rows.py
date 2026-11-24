@@ -59,7 +59,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            0x900; min(4, N) of the group seen running at once; MemFree after four
                            exec rounds within 64 kB of before; no processor stopped.
               SMP-WAIT     16 children of 20 to 320 ms of work: 16 statuses right, the children's CPU
-                           0.8 of the work or more, children seen on max(2, min(N, 16) - 1) processors.
+                           0.8 of the work or more, and the children ran on max(2, min(N, 16) - 1)
+                           processors by the kernel's ring-3 ticks (two at least each), the ones missed
+                           printed on every boot; the sampler's sightings printed, not judged.
   stress      SMP-LOCK     ten processes for SECS seconds (four fork-exit-wait loops, two pipe
                            ping-pongs, two futex ping-pong thread pairs, a map/protect/unmap churner
                            beside a reader thread, a signal storm): every count right, every status
@@ -584,9 +586,21 @@ def wait_check(n):
         why.append(f'the children\'s CPU {kv(s, "cpu-us")} us against {kv(s, "expected-us")} us of work (0.8 at least)')
     seen = [int(x) for x in str(kv(s, 'cpus')).split(',') if x.isdigit()]
     need = max(2, min(n, 16) - 1)
-    if len(seen) < need:
-        why.append(f'children seen running on {seen}, want {need} processors at least')
-    return why, [f'children seen on {seen}']
+    # the processors the children ran on, by the kernel's own ring-3 ticks gained while they ran: two ticks at least
+    # (a child's shortest work is 20 ms; the sampler and the parent run ring 3 for microseconds a wake, so either may
+    # take a stray tick). The sampler's list stays as INFO: it never sees a child on the processor it runs on itself.
+    ut = next((x for x in w if x.startswith('user-ticks')), None)
+    if ut is None:
+        why.append('no SMP-WAIT user-ticks line (the kernel\'s per-processor ring-3 ticks around the children)')
+        return why, [f'children seen on {seen} (the sampler)']
+    gains = {int(i): d for i, d in re.findall(r' (\d+):(\S+)', ut)}
+    ran = [i for i in range(n) if re.fullmatch(r'\+\d+', gains.get(i, '-')) and int(gains[i]) >= 2]
+    missed = [i for i in range(n) if i not in ran]
+    if len(ran) < need:
+        why.append(f'the children ran on {len(ran)} processors by the kernel\'s ring-3 ticks, want {need} at least')
+    info = f'the children ran on {len(ran)} of {n} processors by the kernel\'s ring-3 ticks, missed {missed or "none"}' \
+           f' (ticks {" ".join(f"{i}:{gains.get(i, chr(45))}" for i in range(n))}); the sampler saw {seen}'
+    return why, [info]
 
 
 # --- the kinds ---------------------------------------------------------------------------------
