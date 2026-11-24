@@ -1918,6 +1918,9 @@ fn reap_olds_as(all: bool) {
 /// one PML4, and this processor's is the new space, so at most OLD_MAX - 1
 /// entries are held when a new one is parked. A full table is a kernel bug.
 fn leave_space(c: u64, old: u64) {
+    if held(old, false) {
+        return // plant leakpark: a space another processor's CR3 holds is dropped, never parked or freed
+    }
     park(c, old, false)
 }
 
