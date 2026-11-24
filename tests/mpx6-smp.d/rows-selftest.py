@@ -610,6 +610,89 @@ t = re.sub(r'^(SMP-RUN round 0 sample 1 .*) 3:i$', r'\1 3:201', cap2_text(), fla
 case('cap2 with a worker past the cap', t, ['--kind', 'cap2', '--smp', '4', '--cap', '2'], set(), {'SMP-CAP'})
 
 
+
+# --- the traced group's exit and the interrupt (kind trace) -------------------------------------
+# dev-final5's mpx5-trace hang at four processors: exit_group with PTRACE_O_TRACEEXIT parked the group's other
+# traced thread for its PTRACE_EVENT_EXIT from the exiting thread's processor while it ran on another (kernel/sched's
+# `trace_group_exit`): no RESCHED, no frame; it ran on, and its own futex call overwrote the stop. The kind's two rows:
+# SMP-TRACE-EXIT, ten rounds (spinning and in a system-call loop, in turn) of a traced group whose second thread runs on
+# another processor when the leader exits; SMP-TRACE-INT, nine PTRACE_INTERRUPTs of a seized tracee running on another
+# processor, each stop's latency (8 of 9 within 2 ms under KVM; a tracee told nothing stops at its processor's tick).
+def trace_exit_lines(n, rounds=10, tcpu=None, done=True, bad=None):
+    # bad: {round: {field: value}}, the round's line as the probe prints it otherwise
+    out = ''
+    for r in range(rounds):
+        f = dict(variant='spin' if r % 2 == 0 else 'yield', tcpu=(1 if n > 1 else -1) if tcpu is None else tcpu,
+                 stops=2, leader='0x6057f', thread='0x6057f', ran=0, cur='-', deaths=2, st='0x2500 0x2500',
+                 echild=-10, failed='none')
+        f.update((bad or {}).get(r, {}))
+        out += (f'SMP-TRACE-EXIT round {r} {f["variant"]} thread-cpu {f["tcpu"]} exit-stops {f["stops"]} '
+                f'leader {f["leader"]} thread {f["thread"]} ran-after {f["ran"]} current-after {f["cur"]} '
+                f'deaths {f["deaths"]} statuses {f["st"]} echild {f["echild"]} failed-at {f["failed"]}\n')
+    return out + ('SMP-TRACE-EXIT done\n' if done else '')
+
+
+def trace_int_lines(us=None, status='0x80057f', ran='yes', cpu=1, done=True):
+    us = us or [40, 35, 31, 30, 33, 29, 31, 30, 32]
+    out = f'SMP-TRACE-INT seize 0 cpu {cpu}\n'
+    for k, u in enumerate(us):
+        out += f'SMP-TRACE-INT round {k} cpu {cpu} req 0 status {status} us {u} cont 0 ran {ran}\n'
+    return out + ('SMP-TRACE-INT done\n' if done else '')
+
+
+def trace_text(n, exit=None, intr=None, active=None):
+    p = proc(n, active=active)
+    t = head('trace') + block('start', p) + active_line(n)
+    t += trace_exit_lines(n) if exit is None else exit
+    t += (trace_int_lines(cpu=1 if n > 1 else -1) if intr is None else intr)
+    return t + block('end', p) + tail()
+
+
+TR = {'SMP-TRACE-EXIT', 'SMP-TRACE-INT'}
+for n in (2, 4, 16):
+    case(f'trace green at {n}', trace_text(n), ['--kind', 'trace', '--smp', str(n)], TR, set(),
+         says=r'^PASS SMP-TRACE-EXIT smp=%d trace: 10 rounds \(5 spinning, 5 in a system-call loop\)' % n)
+case('trace at 1: the exit green, the interrupt not asked', trace_text(1), ['--kind', 'trace', '--smp', '1'],
+     {'SMP-TRACE-EXIT'}, set(), says=r'^NOT-ASKED SMP-TRACE-INT smp=1 trace: one processor')
+farpark = {r: (dict(ran=41233 + r, cur=1) if r % 2 == 0 else dict(stops=1, thread='-', ran='-', deaths=0, st='-',
+               echild='-', failed='exit')) for r in range(10)}
+case('the far park: a spinning thread runs on past its reported stop, a looping one loses it',
+     trace_text(4, exit=trace_exit_lines(4, bad=farpark)), ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-INT'},
+     {'SMP-TRACE-EXIT'}, why=r'round 0 \(spin\): the thread made 41233 spins in the 20 ms after its PTRACE_EVENT_EXIT '
+                             r'stop was reported \(current on processor 1\)')
+case('a looping thread\'s stop never reported', trace_text(4, exit=trace_exit_lines(4, bad={1: farpark[1]})),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-INT'}, {'SMP-TRACE-EXIT'},
+     why=r'round 1 \(yield\): 1 PTRACE_EVENT_EXIT stop of 2 reported within 2 s \(the thread\'s missing\)')
+case('the thread not on another processor at its group\'s exit', trace_text(4, exit=trace_exit_lines(4, bad={0: dict(tcpu=-1)})),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-INT'}, {'SMP-TRACE-EXIT'},
+     why=r'round 0 \(spin\): the thread was not seen on another processor before its group\'s exit \(the case not set up\)')
+case('a death not reported after the CONTs', trace_text(4, exit=trace_exit_lines(4, bad={2: dict(deaths=1, st='0x2500 -')})),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-INT'}, {'SMP-TRACE-EXIT'},
+     why=r'round 2 \(spin\): 1 death of 2 reported within 2 s of the CONTs')
+case('a round that never began (the clone not reported)', trace_text(4, exit=trace_exit_lines(4, bad={3: dict(
+     stops=0, leader='-', thread='-', ran='-', deaths=0, st='-', echild='-', failed='clone')})),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-INT'}, {'SMP-TRACE-EXIT'}, why=r'round 3 \(yield\): failed at the clone')
+case('the probe stopped inside the exit rounds', trace_text(4, exit=trace_exit_lines(4, rounds=4, done=False)),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-INT'}, {'SMP-TRACE-EXIT'},
+     why=r'4 rounds of 10 and no `SMP-TRACE-EXIT done`')
+tick = [3000, 7000, 500, 9000, 4000, 6000, 8000, 2500, 1000]
+case('interrupts stopped at the tick, not at once (no RESCHED)', trace_text(4, intr=trace_int_lines(us=tick)),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-EXIT'}, {'SMP-TRACE-INT'},
+     why=r'2 of 9 PTRACE_INTERRUPT stops within 2 ms \(8 wanted under KVM\)')
+case('interrupts at the tick under TCG: printed, not gated', trace_text(4, intr=trace_int_lines(us=tick)),
+     ['--kind', 'trace', '--smp', '4'], TR, set(), meta=TCG)
+case('an interrupt stop of the wrong kind', trace_text(4, intr=trace_int_lines(status='0x137f')),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-EXIT'}, {'SMP-TRACE-INT'},
+     why=r'round 0: status 0x137f, want 0x80057f \(PTRACE_EVENT_STOP\)')
+case('a tracee not running again after its CONT', trace_text(4, intr=trace_int_lines(ran='no')),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-EXIT'}, {'SMP-TRACE-INT'}, why=r'round 0: not running 20 ms after its CONT')
+case('the tracee never on another processor', trace_text(4, intr=trace_int_lines(cpu=-1)),
+     ['--kind', 'trace', '--smp', '4'], {'SMP-TRACE-EXIT'}, {'SMP-TRACE-INT'},
+     why=r'round 0: the tracee not seen on another processor before its interrupt')
+case('one processor runs threads: both red at the gate', trace_text(4, active=1), ['--kind', 'trace', '--smp', '4'],
+     set(), TR, why=r'active 1 of 4')
+
+
 # --- SMP-BUILD -------------------------------------------------------------------------------------
 EXPECTED = {'pack-8ae042682afb5156b4b5a80bc241260795144d29.pack': '8ae042682afb5156b4b5a80bc241260795144d29',
             'pack-8ae042682afb5156b4b5a80bc241260795144d29.idx': 'c219e2f6ef55933c2050bc2356210dff1d746e4b'}
