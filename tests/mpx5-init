@@ -8,7 +8,7 @@
 #
 #   tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                   [--tier native|release|both] [--accel auto|kvm|tcg]
-#                   [--rows all|lifecycle]
+#                   [--rows all|lifecycle|alpha|alpha-smoke|base]
 #
 # I14, I15 and I16 use a boot each: an observed adopted child must be reaped
 # within 5000 guest milliseconds, before any logout; a literal exec /bin/login
@@ -60,14 +60,14 @@ while [ $# -gt 0 ]; do
         --tier)     tiers=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
         --rows)     rows=$2; shift 2 ;;
-        *)          die "usage: tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--rows all|lifecycle]" ;;
+        *)          die "usage: tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--rows all|lifecycle|alpha|alpha-smoke|base]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $rows in all|lifecycle) ;; *) die "--rows takes all or lifecycle" ;; esac
+case $rows in all|lifecycle|alpha|alpha-smoke|base) ;; *) die "--rows takes all or lifecycle" ;; esac
 
-BORE="cat cut id kill ls sleep stat stty touch tr"
+BORE="cat cut id kill ls mkdir sleep stat stty touch tr"
 work=$PAX_BUILD/mpx5-init
 fail=0
 need python3 readelf
@@ -120,6 +120,8 @@ if [ -z "$images" ]; then
         -o "$r/bin/ttymode" "$PAX_ROOT/user/elf/ttymode.c" > "$work/ttymode.txt" 2>&1 || why+=" gcc: ttymode.c;"
     gcc -static -no-pie -O2 -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
         -o "$r/bin/orphan" "$PAX_ROOT/user/elf/orphan.c" > "$work/orphan.txt" 2>&1 || why+=" gcc: orphan.c;"
+    gcc -static -no-pie -O2 -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
+        -o "$r/bin/init-clock" "$PAX_ROOT/user/elf/init-clock.c" > "$work/init-clock.txt" 2>&1 || why+=" gcc: init-clock.c;"
     cp "$PAX_ROOT/user/sudo/sudoers" "$r/etc/sudoers" 2>/dev/null || why+=" no user/sudo/sudoers;"
     # /etc/shrc as the images ship it (user/shrc: `logout` among it), but for lope's hook: no
     # lope in this tree, and its `eval` would print an error at every login.
