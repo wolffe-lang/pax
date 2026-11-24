@@ -10,7 +10,8 @@
      /bin/smpprobe one             SMP-ACTIVE alone (one processor: `nosmp`, `-smp 1`, `pax.cpus=1`)
      /bin/smpprobe exec-child      SMP-EXIT's execve target: one line, exit status 9
      /bin/smpprobe trace           SMP-ACTIVE, SMP-TRACE-EXIT (a traced group exiting with its second thread on
-                                   another processor) and SMP-TRACE-INT (PTRACE_INTERRUPT of a seized tracee there)
+                                   another processor), SMP-TRACE-INT (PTRACE_INTERRUPT of a seized tracee there) and
+                                   SMP-STOPWRITE (SIGSTOP to a process writing a pipe there)
 
    Every line starts with its row's name; tests/mpx6-smp.d/rows.py reads them with /proc/pax-cpus as
    the probe copied it (`SMP-PROC <tag> begin` … `SMP-PROC <tag> end`). Times are the TSC's, read in
@@ -1305,6 +1306,73 @@ static void row_trace_int(int rounds) {
     end_group(p);
     say("SMP-TRACE-INT done");
 }
+/* SMP-STOPWRITE: SIGSTOP to a process writing a pipe on another processor (mpx5-jobs' orphaned group's check, `it
+   runs on`, made to happen often). Its one thread writes a byte a call and spins 20 us between calls, so the stop
+   finds it inside write(2) as often as in ring 3. A call already in progress when the stop comes completes (Linux
+   allows it too); the stop takes effect before the thread is back in ring 3: at most that one byte after the stop,
+   never two, and none once the stop has taken effect (50 ms on). Each round: the writer seen on another processor (20
+   looks 1 ms apart at most), the pipe drained, SIGSTOP; at once (settle 0) or 50 ms on (settle 50), the pipe drained
+   again; the bytes and the writer's ring-3 turns over the next 300 ms; its stop's status (WUNTRACED, 2 s at most),
+   SIGCONT and its status (WCONTINUED), its bytes in the 30 ms after. */
+#define O_NONBLOCK 0x800
+static void sw_writer(int fd) {
+    char c = 't';
+    U gap = tsc_hz / 50000;
+    for (;;) {
+        sc(NR_WRITE, fd, &c, 1);
+        G->spins++;
+        U e = rdtsc() + gap;
+        while (rdtsc() < e) {}
+    }
+}
+static U drain(int fd) { char b[512]; U n = 0; L r; while ((r = sc(NR_READ, fd, b, sizeof b)) > 0) n += (U)r; return n; }
+static L wait_status(L pid, int *st, L opt, U ms) {
+    U end = rdtsc() + cycles_of_ms(ms);
+    for (;;) {
+        L w = wait4(pid, st, WNOHANG | opt, 0);
+        if (w != 0 || rdtsc() >= end) return w;
+        nap(1000000);
+    }
+}
+static void row_stop_write(int rounds) {
+    struct ln l;
+    struct snap z;
+    int p[2], st;
+    if (sc(NR_PIPE2, p, O_NONBLOCK, 0)) { say("SMP-STOPWRITE pipe2 failed"); say("SMP-STOPWRITE done"); return; }
+    L w = fork();
+    if (!w) { sc(NR_CLOSE, p[0], 0, 0); sw_writer(p[1]); }
+    sc(NR_CLOSE, p[1], 0, 0);
+    for (int r = 0; r < rounds; r++) {
+        U settle = (r & 1) ? 50 : 0;
+        L wc = -1, mc = -1;
+        for (int k = 0; k < 20; k++) {
+            if (take(&z)) { wc = cpu_of(&z, w); mc = cpu_of(&z, gettid()); }
+            if (started_cpus < 2 || (wc >= 0 && wc != mc)) break;
+            nap(1000000);
+        }
+        drain(p[0]);
+        sc(NR_KILL, w, SIGSTOP, 0);
+        if (settle) nap(settle * 1000000);
+        drain(p[0]);
+        U s0 = G->spins;
+        nap(300000000);
+        U after = drain(p[0]), turns = G->spins - s0;
+        int s1 = 0, s2 = 0;
+        L a = wait_status(w, &s1, WUNTRACED, 2000);
+        sc(NR_KILL, w, SIGCONT, 0);
+        L b = wait_status(w, &s2, WCONTINUED, 2000);
+        nap(30000000);
+        U again = drain(p[0]);
+        l.n = 0; ls(&l, "SMP-STOPWRITE round "); ld(&l, (U)r); ls(&l, " settle "); ld(&l, settle);
+        ls(&l, " writer-cpu "); lcpu(&l, wc); ls(&l, " me-cpu "); lcpu(&l, mc);
+        ls(&l, " bytes-after "); ld(&l, after); ls(&l, " turns-after "); ld(&l, turns);
+        ls(&l, " stop-status "); lstat(&l, a == w, s1); ls(&l, " cont-status "); lstat(&l, b == w, s2);
+        ls(&l, " bytes-resumed "); ld(&l, again); le(&l);
+    }
+    sc(NR_KILL, w, SIGKILL, 0);
+    wait4(w, &st, 0, 0);
+    say("SMP-STOPWRITE done");
+}
 
 /* --- the entry ------------------------------------------------------------------------------ */
 __attribute__((used)) static void smp_main(U *sp) {
@@ -1347,6 +1415,8 @@ __attribute__((used)) static void smp_main(U *sp) {
             row_trace_exit(10);
             G = shared_page();
             row_trace_int(9);
+            G = shared_page();
+            row_stop_write(24);
         } else if (same(mode, "rows")) {
             row_run((int)started_cpus, 3);
             G = shared_page();
