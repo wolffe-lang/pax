@@ -143,7 +143,7 @@ def exit_lines(n, stage=2, statuses=('0x700', '0x700', '0x800', '0x800'), after=
     return out + f'SMP-EXIT frames-kb before 200000 after {after}\nSMP-EXIT stopped {stopped}\nSMP-EXIT done\n'
 
 
-def wait_lines(n, stage=2, right=16, cpus=None, ticks='seen'):
+def wait_lines(n, stage=2, right=16, cpus=None, ticks='seen', resched=None, sampler=None):
     # ticks: each processor's ring-3 ticks gained while the children ran (the kernel's counters): 'seen' gives +30 to
     # each processor the sampler saw and +0 to the rest; a list gives them one by one; None prints no line (a probe
     # from before the counters)
@@ -154,6 +154,13 @@ def wait_lines(n, stage=2, right=16, cpus=None, ticks='seen'):
         ticks = ['+30' if i in seen else '+0' for i in range(n)]
     if ticks is not None:
         out += 'SMP-WAIT user-ticks' + ''.join(f' {i}:{d}' for i, d in enumerate(ticks)) + '\n'
+    # resched: each processor's RESCHEDs taken while the children ran (a list); sampler: (samples, the processors it
+    # sat on, each processor's idle samples): printed as INFO, never judged
+    if resched is not None:
+        out += 'SMP-WAIT resched' + ''.join(f' {i}:{d}' for i, d in enumerate(resched)) + '\n'
+    if sampler is not None:
+        k, on, idle = sampler
+        out += f'SMP-WAIT samples {k} sampler-on {",".join(str(i) for i in on) or "-"} idle' + ''.join(f' {i}:{c}' for i, c in enumerate(idle)) + '\n'
     return out + 'SMP-WAIT done\n'
 
 
@@ -283,6 +290,15 @@ case("the kernel's ticks count fourteen though the sampler saw sixteen",
 case('a processor with one ring-3 tick did not run the children (the sampler or the parent may take a tick)',
      rows_text(4, wait=wait_lines(4, ticks=['+30', '+30', '+1', '+1'])), ['--kind', 'rows', '--smp', '4'],
      ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'}, why=r'ran on 2 processors')
+# what settles a processor the ticks find starved (dev-final3, df3-retake and rows16: 8, twice missed, once 2 ticks):
+# whether share() sent it a RESCHED and it found nothing, or never sent it one; and where the sampler sat
+case("SMP-WAIT prints each processor's RESCHEDs over the children's window, where the sampler sat and how often each idled",
+     rows_text(16, wait=wait_lines(16, cpus=','.join(str(i) for i in range(16) if i not in (0, 8)),
+                                   ticks=['+0' if i == 8 else '+30' for i in range(16)],
+                                   resched=['+0' if i == 8 else '+3' for i in range(16)],
+                                   sampler=(48, [0], [0] * 8 + [48] + [0] * 7))),
+     ['--kind', 'rows', '--smp', '16'], ALL6, set(),
+     says=r'^PASS SMP-WAIT .*missed \[8\].*RESCHEDs taken 0:\+3 .*8:\+0 .*the sampler sat on \[0\] in 48 samples.*idle in samples .*8:48')
 case("no SMP-WAIT user-ticks line (a probe from before the kernel's counters)", rows_text(4, wait=wait_lines(4, ticks=None)),
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-WAIT'}, {'SMP-WAIT'}, why=r'no SMP-WAIT user-ticks line')
 case('a kernel panic mid-run', rows_text(4, extra='PANIC page fault vector 14 error 0x0 rip 0xffffffff80012345 rsp 0xffffd00000027f00 frame 0xffffd00000027e40 cr2 0x0\n'),
