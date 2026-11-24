@@ -786,9 +786,14 @@ static void wait_sampler(void) {
 static void row_wait(void) {
     struct ln l;
     struct rus r0, r1;
+    struct snap z0, z1;
     int st;
     memset(&r0, 0, sizeof r0); memset(&r1, 0, sizeof r1);
     sc(NR_GETRUSAGE, -1, &r0, 0);
+    /* the kernel's own per-processor ring-3 ticks, before the children and after them: the row counts the processors
+       the children ran on from these, which no processor hides from (the sampler, below, never sees a child on the
+       processor it runs on itself) */
+    if (!take(&z0)) z0.n = 0;
     G->done = 0; G->cpumask = 0;
     for (int j = 0; j < 16; j++) G->pids[j] = 0;
     L sp = fork();
@@ -810,11 +815,15 @@ static void row_wait(void) {
     G->done = 1;
     wait4(sp, &st, 0, 0);
     sc(NR_GETRUSAGE, -1, &r1, 0);
+    if (!take(&z1)) z1.n = 0;
     l.n = 0; ls(&l, "SMP-WAIT statuses right "); ld(&l, (U)right); ls(&l, " of 16 cpu-us "); ld(&l, cpu_us(&r1) - cpu_us(&r0));
     ls(&l, " expected-us "); ld(&l, expect_us); ls(&l, " cpus");
     int any = 0;
     for (int i = 0; i < MAXC; i++) if (G->cpumask >> i & 1) { lc(&l, any ? ',' : ' '); ld(&l, (U)i); any = 1; }
     if (!any) ls(&l, " -");
+    le(&l);
+    l.n = 0; ls(&l, "SMP-WAIT user-ticks");
+    for (int i = 0; i < z1.n; i++) { lc(&l, ' '); ld(&l, (U)i); lc(&l, ':'); ldelta(&l, i < z0.n ? z0.user[i] : -1, z1.user[i]); }
     le(&l);
     say("SMP-WAIT done");
 }
