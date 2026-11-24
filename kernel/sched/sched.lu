@@ -568,6 +568,23 @@ fn ended_in_place(c: u64) -> bool {
     field(c, offset_of(Thread, state)) == DEAD
 }
 
+/// px166: whether the running thread `c` holds a state other than RUNNING
+/// and DEAD, which only another processor could have written while it ran.
+/// None does: every write of another thread's state is to one that runs
+/// nowhere, DEAD's (`end_others`, `exec_alone`) excepted, and a group
+/// exit's stop is owed to a running thread, not written (`trace_group_exit`).
+/// A write that did would be undone by `preempt` and `kick` (READY over it,
+/// queued) or outrun by the thread's next system call (its own state over
+/// it), and whatever waits on that state would wait for ever (the far park
+/// a group exit's PTRACE_EVENT_EXIT once was: mpx5-trace's group-exit-event
+/// at four processors). Such a thread leaves this processor as an ended one
+/// does, its frame kept for when the state is undone, never queued again by
+/// either and its system call never routed.
+fn written_from_afar(c: u64) -> bool {
+    let st = field(c, offset_of(Thread, state))
+    st != RUNNING && st != DEAD
+}
+
 /// px166: whether the running `c` must leave this processor at this tick or
 /// RESCHED whatever the queue holds: ended in place (DEAD). `preempt` and
 /// `kick` test it before their returns for an empty queue and an unspent
@@ -580,14 +597,14 @@ fn ended_in_place(c: u64) -> bool {
 /// resumes ring 3 goes through `signal.on_return`, which parks it
 /// (`park_current`; SMP-SIGNAL's SIGSTOP held).
 fn must_leave(c: u64) -> bool {
-    !idle(c) && ended_in_place(c)
+    !idle(c) && (ended_in_place(c) || written_from_afar(c))
 }
 
 /// px166 (step 5a): kernel/interrupts' door, before a system call or a
 /// ring-3 fault is routed: the running thread was ended in place.
 pub fn ended_here() -> bool {
     let c = cur()
-    !idle(c) && ended_in_place(c)
+    !idle(c) && (ended_in_place(c) || written_from_afar(c))
 }
 
 /// px166 (step 5a): the running thread, ended in place, switched off at
@@ -1275,7 +1292,7 @@ pub fn preempt(f: u64) -> u64 {
     save_frame(c, f)
     // px166: a thread ended in place by another processor (DEAD: exit_group,
     // exec) is switched off at its tick, never queued again.
-    if !idle(c) && !ended_in_place(c) {
+    if !idle(c) && !ended_in_place(c) && !written_from_afar(c) {
         put_field(c, offset_of(Thread, state), READY)
         enqueue(c)
     }
@@ -1719,7 +1736,7 @@ pub fn kick(f: u64) -> u64 {
     // running thread goes to the tail as `preempt` would send it.
     // px166: a thread another processor ended in place (DEAD) is switched
     // off here, the RESCHED the departure rule sends, never resumed or queued.
-    if ended_in_place(c) {
+    if ended_in_place(c) || written_from_afar(c) {
         save_frame(c, f)
         return run_next()
     }
