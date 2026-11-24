@@ -773,6 +773,11 @@ static void stops(void) {
         kill(m2, SIGTTIN);
         printf("S: SIGTTIN likewise: it runs on %s\n", yesno(ticking(tq[0], 300)));
         kill(m2, SIGSTOP);
+        /* A write(2) already in progress when the stop came may complete
+         * after kill returns (on a multiprocessor, Linux's and PAX's
+         * alike); the stop holds from then on, and the ticks are counted
+         * from there (tests/mpx6-smp's SMP-STOPWRITE holds both). */
+        nap(50);
         int on2 = ticking(tq[0], 300);
         printf("S: SIGSTOP to it: it runs on %s, state %c\n", yesno(on2), pstat_of(m2).state);
         kill(m2, SIGCONT);
