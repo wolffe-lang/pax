@@ -29,7 +29,9 @@
 #       one fetch.
 #   R9  every source fetch of the harness goes through tools/fetch-retry:
 #       no `git … fetch` outside it in tools/ or the census's stage.sh,
-#       and each of the 24 sites calls it.
+#       and each of the 24 sites calls it; no file there calls it for a
+#       fetch (a first argument other than --url) without being one of
+#       the 24, each such caller named.
 #   U1  --url, a download: the release host's 403 on attempt 1 (pax#517's
 #       first attempt's own words), then the archive: exit 0, attempt 2 of
 #       3, one wait of 10 s, the file in place with the pinned sha256.
@@ -51,7 +53,8 @@
 #       --url`: no curl writing a file in tools/ or the census's stage.sh
 #       but tools/fetch-busybox's (its 90 s envelope fits the USB suite's
 #       120 s fetch phase, which this helper's waits would not),
-#       and each of the 29 sites calls it.
+#       and each of the 29 sites calls it; no file there calls it with
+#       --url without being one of the 29, each such caller named.
 #   R11 tools/fetch-retry's header counts what this selftest holds: the
 #       source fetches R9 lists and the downloads U9 lists, so a site
 #       added to either list changes the header with it.
@@ -165,6 +168,27 @@ if [ "$rc" = 5 ] && [ "$fetches" = 1 ] && grep -q "refused: fetched $other, the 
     ok "R8: another commit than the pin is refused by name, never fetched again"
 else bad "R8: rc $rc, $fetches fetches"; fi
 
+# calls MODE: file:line of each call of the helper in tools/ or the census's
+# stage.sh, in MODE: url, a first argument of --url; git, any other. A call
+# writes the helper's path from a variable or from / ("$PAX_ROOT/tools/
+# fetch-retry" --url \, sh /census-tools/fetch-retry "$3.git"); the tier
+# map's, the census mount's and the resolver's mentions are not calls, nor
+# is a comment line.
+calls() {
+    (cd "$root" && grep -nE '(\$[^[:space:]]*|(^|[[:space:]])/[^[:space:]]*)/fetch-retry"?[[:space:]]+[^[:space:]]' \
+        tools/* tools/census/inside/stage.sh 2>/dev/null) \
+        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -v '^tools/fetch-retry:' \
+        | sed -E 's/^([^:]+:[0-9]+):.*\/fetch-retry"?[[:space:]]+([^[:space:]]+).*/\1 \2/' \
+        | awk -v m="$1" '(m == "url") == ($2 == "--url") { print $1 }'
+}
+# unlisted MODE LIST: the calls in MODE from a file not on LIST.
+unlisted() {
+    local c out=
+    for c in $(calls "$1"); do
+        case " $(echo $2) " in *" ${c%:*} "*) ;; *) out="$out $c" ;; esac
+    done
+    echo "${out# }"
+}
 # R9: the sites.
 sites='tools/mkalpha tools/mkaspen tools/mkboreutils tools/mkclef tools/mkden tools/mkedwolf tools/mkligature tools/mklobo tools/mklope tools/mklupin
 tools/mkpelt tools/mkscent tools/mksigwolf tools/mkauth tools/mktrash tools/mkwolf tools/mkwolf-std tools/mkyew tools/fetch-wolf
@@ -173,9 +197,13 @@ stray=$(cd "$root" && grep -nE 'git( -c [^ ]+)*( -C [^ ]+)? fetch' tools/* tools
 missing=
 for s in $sites; do grep -q 'fetch-retry' "$root/$s" || missing="$missing $s"; done
 n=$(echo $sites | wc -w | tr -d ' ')
-if [ -z "$stray" ] && [ -z "$missing" ] && [ "$n" = 24 ]; then
-    ok "R9: all $n source fetches go through tools/fetch-retry; no other git fetch in tools/"
+gcalls=$(calls git | wc -l | tr -d ' ')
+gnew=$(unlisted git "$sites")
+if [ -z "$stray" ] && [ -z "$missing" ] && [ "$n" = 24 ] && [ -z "$gnew" ] && [ "$gcalls" -gt 0 ]; then
+    ok "R9: all $n source fetches go through tools/fetch-retry; no other git fetch in tools/; its $gcalls fetch calls all from the $n"
 else
+    [ "$gcalls" -gt 0 ] || echo "  no fetch call of tools/fetch-retry found: the census of its callers reads nothing"
+    [ -z "$gnew" ] || echo "  a fetch through tools/fetch-retry from a file not on R9's list: $gnew"
     [ -z "$stray" ] || printf '  a git fetch outside tools/fetch-retry:\n%s\n' "$(echo "$stray" | sed 's/^/    /')"
     [ -z "$missing" ] || echo "  sites not calling tools/fetch-retry:$missing"
     bad "R9: the harness's fetches are not all the helper's"
@@ -257,9 +285,13 @@ dstray=$(cd "$root" && grep -nE '(^|[^a-z-])curl +-' tools/* tools/census/inside
 dmissing=
 for s in $dsites; do grep -q 'fetch-retry"* --url' "$root/$s" || dmissing="$dmissing $s"; done
 n=$(echo $dsites | wc -w | tr -d ' ')
-if [ -z "$dstray" ] && [ -z "$dmissing" ] && [ "$n" = 29 ]; then
-    ok "U9: all $n downloads go through tools/fetch-retry --url; no other curl download in tools/ but fetch-busybox's"
+ucalls=$(calls url | wc -l | tr -d ' ')
+unew=$(unlisted url "$dsites")
+if [ -z "$dstray" ] && [ -z "$dmissing" ] && [ "$n" = 29 ] && [ -z "$unew" ] && [ "$ucalls" -gt 0 ]; then
+    ok "U9: all $n downloads go through tools/fetch-retry --url; no other curl download in tools/ but fetch-busybox's; its $ucalls --url calls all from the $n"
 else
+    [ "$ucalls" -gt 0 ] || echo "  no --url call of tools/fetch-retry found: the census of its callers reads nothing"
+    [ -z "$unew" ] || echo "  a download through tools/fetch-retry --url from a file not on U9's list: $unew"
     [ -z "$dstray" ] || printf '  a curl download outside tools/fetch-retry:\n%s\n' "$(echo "$dstray" | sed 's/^/    /')"
     [ -z "$dmissing" ] || echo "  sites not calling tools/fetch-retry --url:$dmissing"
     bad "U9: the harness's downloads are not all the helper's"
