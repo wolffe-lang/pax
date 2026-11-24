@@ -691,6 +691,11 @@ case('the tracee never on another processor', trace_text(4, intr=trace_int_lines
      why=r'round 0: the tracee not seen on another processor before its interrupt')
 case('one processor runs threads: both red at the gate', trace_text(4, active=1), ['--kind', 'trace', '--smp', '4'],
      set(), TR, why=r'active 1 of 4')
+# trace74's red point: the unfixed kernel panicked in most boots at 2 and 4 after a lost stop (a kernel page fault),
+# the rounds after it never printed; the rows name the kernel's line, whatever else the boot printed
+PAN = 'PANIC page fault vector 14 error 0x0000000000000000 rip 0xffffffff8016fbfc rsp 0xffffd0000003f960 cr2 0x0000000000000098\n'
+case('a kernel panic in a trace boot: both rows red by its line', trace_text(4).replace('SMP-TRACE-INT done\n', 'SMP-TRACE-INT done\n' + PAN),
+     ['--kind', 'trace', '--smp', '4'], set(), TR, why=r'the kernel said: \[\'PANIC page fault vector 14')
 
 
 # --- SMP-BUILD -------------------------------------------------------------------------------------
