@@ -142,6 +142,7 @@ class AlphaReadings(unittest.TestCase):
         rows.NO_WORD['alpha'] = []
         with mock.patch.object(rows, 'iso', return_value='iso'), \
                 mock.patch.object(rows, 'alpha_tree', return_value=[]), \
+                mock.patch.object(rows, 'fixture_tree', return_value=[], create=True), \
                 mock.patch.object(rows, 'Console', return_value=con), \
                 mock.patch.object(rows, 'alpha_boot'), \
                 mock.patch.object(rows, 'alpha_fallback'), \

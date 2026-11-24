@@ -88,6 +88,7 @@ machine halted at a logout) fails by name with what the console said.
 """
 import argparse
 import calendar
+import json
 import os
 import pathlib
 import re
@@ -735,11 +736,29 @@ NO_WORD = {}
 
 
 def alpha_pids(con, n):
-    """The pids whose /proc/PID/comm is `alpha`, read at the console (None when unreadable)."""
-    out = con.command('for d in /proc/[0-9]*; do read c < $d/comm; if [ "$c" = alpha ]; then echo "A=${d#/proc/}"; fi; done', n)
-    if out is None:
-        return None
-    return [int(l[2:]) for l in out.split() if l.startswith('A=') and l[2:].isdigit()]
+    """An explicitly complete enumeration; failed reads never mean absence."""
+    out = con.command('echo BEGIN-ALPHA; r=0; for d in /proc/[0-9]*; do '
+                      'if [ ! -e "$d/comm" ]; then continue; fi; c=; '
+                      'if read c < "$d/comm"; then '
+                      'if [ "$c" = alpha ]; then echo "A=${d#/proc/}"; fi; '
+                      'else r=1; fi; done; echo END-ALPHA $r', n)
+    lines = out.splitlines() if out is not None else []
+    if not lines or lines[0] != 'BEGIN-ALPHA' or lines[-1] != 'END-ALPHA 0':
+        raise ValueError('incomplete alpha enumeration: %r' % out)
+    middle = lines[1:-1]
+    if any(not re.fullmatch(r'A=[1-9][0-9]*', l) for l in middle) or len(set(middle)) != len(middle):
+        raise ValueError('malformed alpha enumeration: %r' % out)
+    return [int(l[2:]) for l in middle]
+
+
+def check_cmdline(con, row):
+    """Confirm this boot's actual newline-terminated kernel interface."""
+    expected = getattr(con, 'expected_cmdline', None)
+    if expected is None:  # Mocked direct driver calls have no real boot.
+        return
+    got = con.command('cat /proc/cmdline; echo CMDLINE-RC=$?', 190)
+    if got is None or got.splitlines() != [expected, 'CMDLINE-RC=0']:
+        raise ValueError('%s command-line prerequisite: got %r, wanted %r plus LF' % (row, got, expected))
 
 
 def seen_after(con, start, pattern, timeout):
@@ -759,11 +778,12 @@ def alpha_tree(work, alpha):
     rows = [l for l in files(work) if not l.startswith('/bin/alpha=')]
     if alpha == 'real':
         return files(work)
-    if alpha == 'stub':
-        stub = work / 'alpha-stub'
-        stub.write_text("#!/bin/pelt\n# tests/mpx5-init.d/rows.py, I20: a /bin/alpha that exits 2 at once\nexit 2\n")
-        os.chmod(stub, 0o755)
-        rows.append('/bin/alpha=%s:755' % stub)
+    if alpha in ('stub', 'stub1', 'noexec'):
+        code = 1 if alpha == 'stub1' else 2
+        stub = work / ('alpha-' + alpha)
+        stub.write_text('#!/bin/pelt\nexit %d\n' % code)
+        os.chmod(stub, 0o755 if alpha != 'noexec' else 0o644)
+        rows.append('/bin/alpha=%s:%s' % (stub, '755' if alpha != 'noexec' else '644'))
     return rows
 
 
@@ -776,19 +796,31 @@ def alpha_boot(con):
     if not hook:
         bad('I17', 'the boot hook never ran (no `svc: started`): %r' % con.text(600))
     if not login(con, 'root', 'I17'):
+        bad('I18', 'not reached: I17 could not log in')
         return
+    check_cmdline(con, 'I17')
     pids = alpha_pids(con, 170)
     if not pids or len(pids) != 1:
         bad('I17', 'one alpha process wanted; /proc/*/comm gave %r' % pids)
+        bad('I18', 'not reached: no unique live alpha to restart')
         return
     pid = pids[0]
-    out = con.command("cut -d' ' -f4,5,6 /proc/%d/stat; ls -l /proc/%d/fd/0 /proc/%d/fd/1 /proc/%d/fd/2; "
+    out = con.command("cat /proc/%d/stat; ls -l /proc/%d/fd/0 /proc/%d/fd/1 /proc/%d/fd/2; "
                       "alpha list --format=1 > /tmp/list.json; echo status=$?; cat /var/log/init-hook.calls; "
                       "tr '\\0' ' ' < /proc/1/cmdline; echo" % (pid, pid, pid, pid), 171) or ''
     lines = [l.strip() for l in out.strip().splitlines()]
     why = []
-    if not lines or lines[0].split() != ['1', str(pid), '1']:
-        why.append('ppid, pgrp, session %r, wanted 1 %d 1' % (lines[0] if lines else None, pid))
+    st = proc_fields(lines[0]) if lines else []
+    if not st or st[0] != str(pid) or st[1] not in ('S', 'R') or st[2:5] != ['1', str(pid), '1']:
+        why.append('not a live alpha with parent 1, own group and session 1: %r' % st)
+    listing = con.command('alpha list --format=1; echo LIST-RC=$?', 191)
+    try:
+        parts = listing.splitlines()
+        reply = json.loads('\n'.join(parts[:-1]))
+        if parts[-1] != 'LIST-RC=0' or reply.get('v') != 1 or reply.get('ok') is not True or not isinstance(reply.get('units'), list):
+            raise ValueError('not a successful format-1 list')
+    except (AttributeError, IndexError, TypeError, ValueError) as e:
+        why.append('invalid list response: %s: %r' % (e, listing))
     for fd, target in (('0', '/dev/null'), ('1', '/dev/kmsg'), ('2', '/dev/kmsg')):
         if not any(re.search(r'/fd/%s -> %s$' % (fd, re.escape(target)), l) for l in lines):
             why.append('fd %s is not %s' % (fd, target))
@@ -805,61 +837,89 @@ def alpha_boot(con):
     else:
         ok('I17', 'alpha pid %d: parent 1, its own group, session 1; 0 /dev/null, 1 and 2 /dev/kmsg; `alpha list` answers; '
                   '`svc` ran once; pid 1 is /bin/init' % pid)
-    # I18: SIGKILL; init's line; a new alpha; the hook not again
+    if getattr(ARGS, 'rows', 'all') == 'alpha-smoke':
+        return
+    # The guest clock is taken immediately before SIGKILL, not on host log receipt.
     mark = len(con.seen)
-    con.type('kill -9 %d' % pid)
+    killed = con.command('init-clock %d; echo KILL-RC=$?' % pid, 192)
+    km = re.fullmatch(r'KILL-MS ([0-9]+)\nKILL-RC=0\n', killed or '')
     line = seen_after(con, mark, r'init: /bin/alpha ended \(killed by signal 9\); again in 1 s', 30)
-    t_line = time.monotonic()
     again = seen_after(con, mark, r'manager [0-9][^ \n]* pid ([0-9]+) root /', 40)
-    took = time.monotonic() - t_line
     hooks = con.command('cat /var/log/init-hook.calls', 172) or ''
     why = []
+    took = None
+    if not km:
+        why.append('no successful timestamped guest kill: %r' % killed)
     if not line:
         why.append('no `init: /bin/alpha ended (killed by signal 9); again in 1 s` line')
     if not again or int(again.group(1)) == pid:
         why.append('no new alpha (`manager … pid M`, M not %d)' % pid)
-    elif line and took > 10:
-        why.append('the new alpha came %.1f s after init\'s line' % took)
+    else:
+        new_pid = int(again.group(1))
+        live = alpha_pids(con, 193)
+        raw = con.command('cat /proc/%d/stat' % new_pid, 194)
+        st2 = proc_fields((raw or '').strip())
+        if live != [new_pid] or st2[0] != str(new_pid) or st2[1] not in ('S', 'R') or st2[2:5] != ['1', str(new_pid), '1']:
+            why.append('replacement is not the unique live job of pid 1: %r %r' % (live, st2))
+        if km:
+            took = int(st2[20]) * 10 - int(km[1])
+            if not 500 <= took <= 10000:
+                why.append('guest restart delay %d ms outside [500,10000], 10 ms tick grain' % took)
     if hooks.split().count('hook') != 1:
         why.append('the hook ran %d times' % hooks.split().count('hook'))
     if why:
         bad('I18', '; '.join(why) + ': %r' % con.text(600))
     else:
-        ok('I18', 'SIGKILL to %d: init\'s line, then alpha pid %s within %.1f s; `svc` not run again' % (
+        ok('I18', 'SIGKILL to %d: unique replacement %s after %d guest ms; hook not rerun' % (
             pid, again.group(1).decode(), took))
-    # I22: reboot -h; alpha's stop before the kernel's end line, no SIGKILL, no restart
+    # I22 runs on its own fresh boot: a restart plant must not remove its manager.
+
+
+def alpha_shutdown_verdict(after, halted):
+    end = re.search(rb'^PAX: the end: [^\n]*\n', after, re.M)
+    if not end or not halted:
+        return False, 'missing kernel end or real halt'
+    before = after[:end.start()]
+    if not re.search(rb'^(?:<\d+>)?alpha: @\d+ stopping every unit \(TERM\)$', before, re.M):
+        return False, 'missing alpha TERM record before kernel end'
+    if not re.search(rb'^(?:<\d+>)?alpha: @\d+ exit 0$', before, re.M):
+        return False, 'missing alpha exit 0 before kernel end'
+    if b'SIGKILL' in end.group(0) or b'PAX: SIGKILL at the end:' in after:
+        return False, 'kernel end required SIGKILL'
+    if b'init: /bin/alpha ended' in after:
+        return False, 'init restarted alpha during shutdown'
+    return True, 'alpha stopped and exited before kernel end; real halt observed'
+
+
+def alpha_shutdown(con):
+    """I22 alone, independent of the restart check's boot."""
+    if not login(con, 'root', 'I22'):
+        return
+    check_cmdline(con, 'I22')
+    if len(alpha_pids(con, 220)) != 1:
+        bad('I22', 'not reached: no unique live alpha to shut down')
+        return
     mark = len(con.seen)
     con.type('reboot -h')
     end = seen_after(con, mark, r'^PAX: the end: [^\n]*\n', 90)
-    con.wait(r'^halt$', 60)
-    tail = con.seen[mark:end.start()] if end else b''
-    after = con.seen[mark:]
-    why = []
-    if not end:
-        why.append('no `PAX: the end:` line')
-    else:
-        if b'stopping every unit (TERM)' not in tail:
-            why.append('no `stopping every unit (TERM)` before the end line')
-        if not re.search(rb'(^|[ >])exit 0$', tail, re.M):
-            why.append('no `exit 0` from alpha before the end line')
-        if b'SIGKILL' in end.group(0) or b'PAX: SIGKILL at the end:' in after:
-            why.append('the end names a SIGKILL: %r' % end.group(0))
-    if b'init: /bin/alpha ended' in after:
-        why.append('init started alpha again during the end')
-    if why:
-        bad('I22', '; '.join(why) + ': %r' % con.text(800))
-    else:
-        ok('I22', 'reboot -h: alpha stopped its units and exited 0 before %s' % end.group(0).decode().strip())
+    halted = bool(seen_after(con, mark, r'^halt$', 60)) if end else False
+    held, why = alpha_shutdown_verdict(con.seen[mark:], halted)
+    (ok if held else bad)('I22', why)
 
 
 def alpha_fallback(con, row, want):
     """I19 and I20: the console's own lines, no login: init's one line `want`, the hook once, no start again."""
-    line = seen_after(con, 0, want, 180)
-    hook = seen_after(con, 0, r'svc: started\n', 180)
-    con.wait(r'login: $', 120)
-    time.sleep(15)
-    con.pump(0.5)
+    if not login(con, 'root', row):
+        return
+    check_cmdline(con, row)
+    line = seen_after(con, 0, want, 20)
+    hook = seen_after(con, 0, r'svc: started\n', 20)
+    until = time.monotonic() + 15
+    while time.monotonic() < until and con.running():
+        con.pump(0.1)
     why = []
+    if alpha_pids(con, 195):
+        why.append('a manager remains after fallback')
     if not line:
         why.append('no init line matching %r' % want)
     elif len(re.findall(want.encode(), con.seen, re.M)) != 1:
@@ -879,33 +939,125 @@ def hooks_boot(con):
     hook = seen_after(con, 0, r'svc: started\n', 180)
     if not login(con, 'pax', 'I21'):
         return None
+    check_cmdline(con, 'I21')
     return {'alpha': alpha_pids(con, 180), 'hook': bool(hook)}
 
 
+def base_boot(con):
+    """The red checkpoint's dry: real init, kernel cmdline and static alpha."""
+    if not login(con, 'root', 'D0'):
+        return
+    check_cmdline(con, 'D0')
+    out = con.command("tr '\\0' ' ' < /proc/1/cmdline; echo; alpha --version; echo VERSION-RC=$?", 196)
+    if out is None or out.splitlines() != ['/bin/init ', 'alpha 0.0.0', 'VERSION-RC=0']:
+        bad('D0', 'real init/static alpha not established: %r' % out)
+    else:
+        ok('D0', 'real pinned init, static alpha and kernel command-line interface')
+
+
+def selection_boot(con, expect_alpha, invalid=False):
+    if not login(con, 'root', 'I23'):
+        return
+    check_cmdline(con, 'I23')
+    pids = alpha_pids(con, 197)
+    held = len(pids) == 1 if expect_alpha else pids == []
+    diagnostic = b'init: pax.services=wrong: neither alpha nor hooks; hooks'
+    if held and con.seen.count(diagnostic) == int(invalid):
+        ok('I23', 'literal first matching word selects %s; diagnostic count %d' % (
+            'alpha' if expect_alpha else 'hooks', int(invalid)))
+    else:
+        bad('I23', 'selection gave pids %r and diagnostic count %d' % (pids, con.seen.count(diagnostic)))
+
+
+def fixture_tree(work, mode):
+    """Test-only disabled units and hooks, never installed by distribution-root."""
+    rows = alpha_tree(work, 'real' if mode == 'real' else 'stub')
+    for name, dest in (('vendor-test', '/usr/lib/alpha/units'), ('admin-test', '/etc/alpha/units')):
+        unit = work / (name + '.unit')
+        unit.write_text('alpha = 1\nenable = false\n[run]\nexec = ["/bin/sleep", "1"]\n')
+        hook = work / (name + '.hook')
+        hook.write_text('#!/bin/pelt\necho %s >> /var/log/replaced.calls\n' % name)
+        rows += ['%s/%s.unit=%s:644' % (dest, name, unit), '/etc/pax-boot.d/%s=%s:755' % (name, hook)]
+    boot = work / 'fixture-boot-status'
+    boot.write_text('#!/bin/pelt\necho "$*" >> /var/log/init-boot.calls\n'
+                    '/bin/mkdir -p /run/alpha\necho stale > /run/alpha/state\n')
+    rows = [r for r in rows if not r.startswith('/bin/pax-boot-status=')]
+    rows.append('/bin/pax-boot-status=%s:755' % boot)
+    if mode == 'real':
+        binary = next(r for r in rows if r.startswith('/bin/alpha='))
+        rows = [r for r in rows if not r.startswith('/bin/alpha=')]
+        rows.append(binary.replace('/bin/alpha=', '/usr/lib/fixture/alpha=', 1))
+        wrapper = work / 'fixture-alpha'
+        wrapper.write_text('#!/bin/pelt\nif [ -e /run/alpha/state ]; then echo stale; else echo clean; fi '
+                           '> /run/alpha-state-check\nexec /usr/lib/fixture/alpha "$@"\n')
+        rows.append('/bin/alpha=%s:755' % wrapper)
+    return rows
+
+
+def fixture_boot(con, real):
+    selected = ('I24', 'I25') if real else ('I26',)
+    if not login(con, 'root', selected[0]):
+        for row in selected[1:]:
+            bad(row, 'not reached: fixture login failed')
+        return
+    check_cmdline(con, selected[0])
+    pids = alpha_pids(con, 198)
+    out = con.command('if [ -e /var/log/replaced.calls ]; then cat /var/log/replaced.calls; fi; '
+                      'echo LOCAL; cat /var/log/init-hook.calls; echo DONE', 199)
+    expected = ['LOCAL', 'hook', 'DONE'] if real else ['admin-test', 'vendor-test', 'LOCAL', 'hook', 'DONE']
+    held = out is not None and out.splitlines() == expected and (len(pids) == 1 if real else pids == [])
+    if not real:
+        held = held and con.seen.count(b'init: /bin/alpha ended with status 2 at its start;') == 1
+    (ok if held else bad)(selected[0], 'replaced and local hooks: %r; alpha pids %r' % (out, pids))
+    if real:
+        state = con.command('cat /run/alpha-state-check', 200)
+        (ok if state == 'clean\n' and len(pids) == 1 else bad)('I25', 'state before first exec: %r' % state)
+
+
 def alpha_boots(work):
-    for name, cmdline, alpha, check in (
-            ('alpha', 'quiet pax.services=alpha', 'real', alpha_boot),
-            ('alpha-none', 'quiet pax.services=alpha', 'none',
-             lambda c: alpha_fallback(c, 'I19', r'^init: [^\n]*/bin/alpha[^\n]*\n')),
-            ('alpha-exit2', 'quiet pax.services=alpha', 'stub',
-             lambda c: alpha_fallback(c, 'I20', r'^init: /bin/alpha ended with status 2[^\n]*\n')),
-            ('hooks', 'quiet pax.services=hooks', 'real', hooks_boot)):
-        image = iso(work, name, cmdline, alpha_tree(work, alpha))
+    cases = [
+        ('alpha', 'quiet pax.services=alpha', 'real', alpha_boot, ('I17', 'I18')),
+        ('alpha-shutdown', 'quiet pax.services=alpha', 'real', alpha_shutdown, ('I22',)),
+        ('alpha-none', 'quiet pax.services=alpha', 'none',
+         lambda c: alpha_fallback(c, 'I19', r'^init: [^\n]*/bin/alpha[^\n]*\n'), ('I19',)),
+        ('alpha-noexec', 'quiet pax.services=alpha', 'noexec',
+         lambda c: alpha_fallback(c, 'I19', r'^init: /bin/alpha not started[^\n]*\n'), ('I19',)),
+        ('alpha-exit1', 'quiet pax.services=alpha', 'stub1',
+         lambda c: alpha_fallback(c, 'I20', r'^init: /bin/alpha ended with status 1[^\n]*\n'), ('I20',)),
+        ('alpha-exit2', 'quiet pax.services=alpha', 'stub',
+         lambda c: alpha_fallback(c, 'I20', r'^init: /bin/alpha ended with status 2[^\n]*\n'), ('I20',)),
+        ('no-word', 'quiet', 'real', hooks_boot, ('I21',)),
+        ('hooks', 'quiet pax.services=hooks', 'real', hooks_boot, ('I21',)),
+        ('invalid', 'quiet pax.services=wrong', 'real', lambda c: selection_boot(c, False, True), ('I23',)),
+        ('first-hooks', 'quiet pax.services=hooks pax.services=alpha', 'real', lambda c: selection_boot(c, False), ('I23',)),
+        ('first-alpha', 'quiet pax.services=alpha pax.services=hooks', 'real', lambda c: selection_boot(c, True), ('I23',)),
+        ('spaces', 'quiet  pax.services=alpha  ', 'real', lambda c: selection_boot(c, True), ('I23',)),
+        ('lookalike', 'quiet xpax.services=alpha pax.services=hooksx', 'real', lambda c: selection_boot(c, False), ('I23',)),
+        ('fixture-alpha', 'quiet pax.services=alpha', 'fixture-real', lambda c: fixture_boot(c, True), ('I24', 'I25')),
+        ('fixture-fallback', 'quiet pax.services=alpha', 'fixture-stub', lambda c: fixture_boot(c, False), ('I26',)),
+    ]
+    chosen = getattr(ARGS, 'rows', 'all')
+    if chosen == 'alpha-smoke':
+        cases = cases[:1]
+    for name, cmdline, alpha, check, selected in cases:
+        rows = fixture_tree(work, 'real' if alpha == 'fixture-real' else 'stub') if alpha.startswith('fixture-') else alpha_tree(work, alpha)
+        image = iso(work, name, cmdline, rows)
         con = Console(ARGS.out / ('boot-' + name), image)
+        con.expected_cmdline = cmdline
+        before = len(FAILS)
         try:
             got = check(con)
+            if name in ('hooks', 'no-word'):
+                if got and got['alpha'] == [] and got['hook']:
+                    ok('I21', '%s: no alpha; local hook ran' % name)
+                else:
+                    bad('I21', '%s: %r' % (name, got))
         except Exception as e:
-            bad({'alpha': 'I17', 'alpha-none': 'I19', 'alpha-exit2': 'I20', 'hooks': 'I21'}[name],
-                '%s: %s; console %r' % (type(e).__name__, e, con.text(300)))
-            got = None
+            for row in selected:
+                if row not in FAILS[before:]:
+                    bad(row, 'not reached or unreadable: %s: %s' % (type(e).__name__, e))
         finally:
             con.quit()
-        if name == 'hooks':
-            nw = NO_WORD.get('alpha')
-            if got and got['alpha'] == [] and got['hook'] and nw == []:
-                ok('I21', 'no alpha process with no word (boot 1) or pax.services=hooks; the hooks ran')
-            else:
-                bad('I21', 'no word: alpha pids %r; pax.services=hooks: %r' % (nw, got))
 
 
 def main():
@@ -913,7 +1065,7 @@ def main():
     a = argparse.ArgumentParser()
     for k in ('images', 'elf', 'tier', 'leg', 'accel', 'out'):
         a.add_argument('--' + k, required=True)
-    a.add_argument('--rows', choices=('all', 'lifecycle'), default='all')
+    a.add_argument('--rows', choices=('all', 'lifecycle', 'alpha', 'alpha-smoke', 'base'), default='all')
     ARGS = a.parse_args()
     ARGS.images = pathlib.Path(ARGS.images)
     ARGS.out = pathlib.Path(ARGS.out)
@@ -927,7 +1079,17 @@ def main():
         say('the tree has no %s' % missing)
     make_shadow(work)
     the_iso = iso(work, 'image', 'quiet')
-    lifecycle_boots(the_iso)
+    if ARGS.rows in ('all', 'lifecycle'):
+        lifecycle_boots(the_iso)
+    if ARGS.rows == 'base':
+        con = Console(ARGS.out / 'boot-base-dry', the_iso)
+        con.expected_cmdline = 'quiet'
+        try:
+            base_boot(con)
+        except Exception as e:
+            bad('D0', '%s: %s' % (type(e).__name__, e))
+        finally:
+            con.quit()
     if ARGS.rows == 'all':
         con = Console(ARGS.out / 'boot1', the_iso)
         try:
@@ -948,6 +1110,7 @@ def main():
                     bad('I13', 'the disk\'s boots stopped at %s: %s' % (type(e).__name__, e))
         else:
             say('SKIPPED LOUDLY I13: no mke2fs, debugfs or e2fsck on this host')
+    if ARGS.rows in ('all', 'alpha', 'alpha-smoke'):
         alpha_boots(work)
     for p in sorted(ARGS.out.rglob('*')):
         if p.is_file() and p.suffix not in ('.iso', '.img', '.cpio') and p.stat().st_size < 64 << 20:
