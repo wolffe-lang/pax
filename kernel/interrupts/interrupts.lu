@@ -467,6 +467,14 @@ fn route(f: *Frame) -> *Frame {
         // thread's stack or an idle loop's.
         return unsafe { sched.leave_ended(f as u64) as *Frame }
     }
+    // px166: a thread owed its group exit's PTRACE_EVENT_EXIT (another
+    // processor's exit_group found it running here) takes it here: its
+    // system call or ring-3 fault is never routed.
+    // # Safety: the frame's address; nothing is read here.
+    if (v == user.SYSCALL || (v < 32 && user.from_user(unsafe { f as u64 }))) && sched.owes_exit_stop() {
+        // # Safety: as above.
+        return unsafe { sched.take_exit_stop(f as u64) as *Frame }
+    }
     // px102: the DPL-3 INT3 gate delivers #BP, not #GP. A traced
     // user receives a stop; an untraced user takes SIGTRAP normally.
     if v == 1 && !user.from_user(unsafe { f as u64 }) && trace.kernel_debug(unsafe { f as u64 }) { return f }
