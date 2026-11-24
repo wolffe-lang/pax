@@ -333,7 +333,9 @@ const R_POLICY: u64 = 43
 const R_CHROOT: u64 = 44
 const R_REBOOT: u64 = 45
 const R_HOSTNAME: u64 = 46
-const R_CLOCK: u64 = 47
+/// px168: kernel/user's refusal of adjtimex and clock_adjtime (px45's
+/// refusal of a set, before root could set the clock).
+pub const R_CLOCK: u64 = 47
 const R_MOUNT: u64 = 48
 const R_AREA: u64 = 49 // px126
 const R_NPROC: u64 = 50 // px126
@@ -389,7 +391,7 @@ pub fn why(r: u64) -> str {
         return "a host or domain name set (PAX's uname is fixed)"
     }
     if r == R_CLOCK {
-        return "the time of day set (PAX reads the clock at boot and counts its ticks)"
+        return "the clock's discipline read or changed (PAX keeps no frequency, offset or status; root steps the clock with clock_settime or settimeofday)"
     }
     if r == R_MOUNT {
         return "a mount PAX does not make (px67: a bind, a move or a propagation change, MNT_DETACH, another of the kernel's own trees, a read-only memory tree)"
@@ -2106,12 +2108,12 @@ const REBOOT_MAGIC2A: u64 = 85072278
 const REBOOT_MAGIC2B: u64 = 369367448
 const REBOOT_MAGIC2C: u64 = 537993216
 const HOST_NAME_MAX: u64 = 64
-const CLOCK_REALTIME: u64 = 0
 
 /// px45: what only root may do, beside files and signals (`chroot(2)`,
-/// `reboot(2)`, `sethostname(2)`, `setdomainname(2)`,
-/// `settimeofday(2)`, `clock_settime(2)`, `mount(2)`, `umount(2)`),
-/// each answered to a user as Linux answers (measured, `rights` P):
+/// `reboot(2)`, `sethostname(2)`, `setdomainname(2)`, `mount(2)`,
+/// `umount(2)`; px168: `settimeofday(2)` and `clock_settime(2)` are
+/// kernel/user's now, which sets the clock for root), each answered to a
+/// user as Linux answers (measured, `rights` P):
 /// - `chroot` (161): the path first (-ENOENT, -ENOTDIR, -EACCES), then
 ///   -EPERM; root: the tree's root is 0 (nothing changes), any other
 ///   directory refused by name;
@@ -2120,9 +2122,6 @@ const CLOCK_REALTIME: u64 = 0
 ///   magic before it reaches here, so the refusal is not reached);
 /// - `sethostname` (170), `setdomainname` (171): -EPERM first; root: a
 ///   name over 64 bytes -EINVAL, else refused by name;
-/// - `clock_settime` (227): a clock that cannot be set is -EINVAL first
-///   (measured: CLOCK_MONOTONIC to a user too); CLOCK_REALTIME -EPERM,
-///   root refused by name; `settimeofday` (164) the same;
 /// - `mount` (165): -EPERM; `umount2` (166): the path first, then
 ///   -EPERM; px67: root's are kernel/files' (`mount_call`,
 ///   `umount_call`), kernel/user calls them before this.
@@ -2161,15 +2160,6 @@ pub fn root_call(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
             return NEG_EINVAL
         }
         return root_only(R_HOSTNAME)
-    }
-    if nr == 227 {
-        if a0 & 0xffffffff != CLOCK_REALTIME {
-            return NEG_EINVAL
-        }
-        return root_only(R_CLOCK)
-    }
-    if nr == 164 {
-        return root_only(R_CLOCK)
     }
     if nr == 166 {
         let e = files.path_found(a, pml4, a0)

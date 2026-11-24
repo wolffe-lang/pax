@@ -28,7 +28,11 @@
 //!   on CLOCK_MONOTONIC or, with FUTEX_CLOCK_REALTIME, the wall clock.
 //!   The wait answers 0 when woken, -ETIMEDOUT at its deadline (also
 //!   when the deadline has passed already), -EINTR for a handler that
-//!   ran (or runs again: kernel/signal).
+//!   ran (or runs again: kernel/signal). px168: FUTEX_CLOCK_REALTIME goes
+//!   with FUTEX_WAIT_BITSET alone; with FUTEX_WAIT, as with a wake, the
+//!   call is -ENOSYS, as Linux answers it (tests/mpx5-users' `clock`). A
+//!   wall-clock deadline is turned into ticks when the call is made, so a
+//!   later set of the clock does not move it (Linux's does: kernel/README).
 //! - FUTEX_WAKE (1): wake at most `val` waiters, the longest-waiting
 //!   first; FUTEX_WAKE_BITSET (10): those whose bitset shares a bit
 //!   with `val3`. The count woken.
@@ -118,7 +122,8 @@ pub fn call(f: u64, uaddr: u64, op: u64, val: u64, utime: u64, val3: u64, wall_n
         return answer(f, NEG_ENOSYS)
     }
     let wait = cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET
-    if realtime && !wait {
+    if realtime && cmd != FUTEX_WAIT_BITSET {
+        // px168: with FUTEX_WAIT too (measured: Linux 7.2.4 answers it -ENOSYS)
         return answer(f, NEG_ENOSYS)
     }
     if uaddr % 4 != 0 {

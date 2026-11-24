@@ -51,6 +51,18 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   one-processor boot it was. `tests/mpx6-cpus` holds
   the rows, QEMU's register dump of every processor beside the kernel's own lines, at 1, 2, 4 and 16 processors.
 
+- **alpha on the image, with nothing to start.** `/bin/alpha`, the service
+  manager in wolf (`user/alpha.pin`), is in both images: `tools/mkalpha`
+  builds it from alpha's own tree with the toolchain that tree pins, through
+  its own `tools/build --static`, in two checkouts that must agree byte for
+  byte, and ships the stripped copy, which `tools/distribution-root` holds to
+  the builder's sums. No unit ships and nothing runs it at boot: the boot
+  hooks and `/etc/pax-run` are unchanged, so it is a program to type.
+  `tests/mpx6-services` boots it under QEMU and types at it (A0): `alpha
+  --version` prints the version line the same binary prints on Linux,
+  `alpha check --root /` counts no unit, and `alpha status` finds no manager
+  (status 3). `--latest` images take alpha's trunk head.
+
 - **A logout at the console: pid 1 stays (px124, px156, pax#352).** An installed
   PAX's pid 1 is now `/bin/init` (`user/init`, in wolf): `/etc/pax-run` still
   names `/bin/login`, which, run as pid 1, execs it. init mounts a fresh tmpfs
@@ -92,6 +104,14 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   Unix stream's 64 KiB before EAGAIN, the loop calls PAX lacks
   (sendmsg/recvmsg, timerfd, signalfd, ppoll), the console's subset, and two
   wolf-std calls: `notes/px125-multiplexer-readiness.md`.
+
+- **Root can set the clock.** `clock_settime(CLOCK_REALTIME)` and `settimeofday` set the wall clock for root, as on
+  Linux, so a machine whose battery clock is wrong can be corrected (TLS certificates and package metadata are judged
+  by this clock); the battery clock itself is not written. A user is refused as before, each check in Linux's order.
+  `settimeofday` keeps a time zone and `gettimeofday` answers it. `adjtimex` and `clock_adjtime` are refused by name:
+  PAX keeps no clock discipline. CLOCK_MONOTONIC and relative sleeps never move with a set. One difference is named: an
+  absolute sleep or futex wait on the wall clock keeps the deadline its call computed, where Linux's follows the set.
+  Held by `tests/mpx5-users`' `clock` sessions against Linux's answers, measured under QEMU.
 
 - **The kernel's log kept across reboots, and who logged in (px133).** `logd`, started at boot, appends every
   record of `/dev/kmsg` to `/var/log/kern.log` (root's): wall time, time since boot, level, sequence number and
@@ -276,6 +296,13 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   threads get their turns: a hog beside the flood keeps 0.89 to 0.94 of its share instead of 0.29 to 0.67. The
   release tier answers 125,000 to 134,000 a second before and after.
 
+- **warren on the dev image (px142).** The terminal multiplexer in wolf at `/usr/bin/warren`, built static by
+  `tools/mkwarren` from warren's own tree with the wolf and std that tree pins, twice from fresh checkouts that
+  must agree, stripped, held to its builder's sums by `tools/distribution-root` and `tests/distribution`; a
+  `--latest` build resolves it as it resolves the other trees.
+- **The dev image's compiler is wolf 0.2.40 (px142).** `user/wolf.pin` at v0.2.40 with its std `be1d10fa`;
+  `user/wolf.sums` are two `tools/mkwolf` builds that agree. A `--latest` build refuses a pin older than wolf's
+  newest release.
 - **`cat FILE` prints on a terminal again: sendfile and splice write to a pty (px141, pax#422).** A
   pty's master and slave were outputs `write` served and `sendfile` and `splice` did not: their copy
   loop counted the bytes, moved the input's offset and wrote nothing. boreutils' `cat` copies with

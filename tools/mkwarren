@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# mkwarren — build warren, the terminal multiplexer in wolf (wolffe-lang/warren),
+# as one fully static x86-64 Linux executable, `warren`, unmodified, from
+# warren's own tree (px142).
+#
+#   tools/mkwarren OUTDIR
+#
+# trash's builder's twin. The tree is user/warren.pin's commit of
+# wolffe-lang/warren (public), fetched from PAX_WARREN_REPO when it is set (a
+# local clone or cache that holds the commit) and from WARREN_REPO otherwise,
+# through tools/fetch-retry; HEAD is refused unless it is WARREN_REV. Nothing
+# of warren's tree is kept: the build directory is removed at the end.
+#
+# The toolchain is the one THAT tree pins in its wolf-toolchain.toml: the
+# whole wolf release archive for x86_64-unknown-linux-gnu, its sha256 read
+# twice and refused unless both reads are the pin's, its `wolf --version`
+# refused unless it names the pin's version, the runtime (`libwolf_rt.a`)
+# beside `wolf`; and the std its `[std]` table pins (a wolf-std commit that
+# may be newer than the one the archive bundles), fetched through
+# tools/fetch-retry and refused unless the commit is the pin's and its tree
+# the pin's `tree`. The archive is cached in PAX_CACHE by digest, under the
+# name trash's, burrow's and den's builders cache it by.
+#
+# warren is built as its own gate builds it for PAX: its version member
+# generated from src/wolf.pkg (tools/vt/generate_version.py), then `wolf build
+# --deny-warnings --no-cache --std-root STD src/warren.lu` through a `cc`
+# that adds -static (wolf has no --static). It is built twice, each time from
+# a fresh checkout of the pinned commit at the same path (warren's build is
+# not yet shown independent of its checkout's path), and the two builds must
+# agree byte for byte (exit 1 otherwise). The binary is checked static
+# (readelf: ET_EXEC, no PT_INTERP, no dynamic section) and asked `warren
+# modules` (its seven modules, exit 0); what PAX carries is `strip -o`'s copy,
+# as the image's other wolf programs are stripped. `OUTDIR/sums.txt` gets
+# `warren <sha256> <bytes>` of that copy.
+#
+# Build on a baseline x86-64 glibc (the CI runner's Ubuntu; an Ubuntu 24.04
+# container), never on a newer host glibc (px10). Needs git, curl, tar,
+# readelf, strip, cc and python3. Exit 0, 1 when two builds differ, or 2 on a
+# tool error.
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+[ $# -eq 1 ] || die "usage: mkwarren OUTDIR"
+out=$1
+need git curl tar readelf strip cc python3
+pin=$PAX_ROOT/user/warren.pin
+. "$pin"
+[ -n "${WARREN_REPO:-}" ] && printf '%s' "${WARREN_REV:-}" | grep -Eq '^[0-9a-f]{40}$' \
+    || die "$pin must set WARREN_REPO and WARREN_REV (a full 40-hex sha, never a branch)"
+mkdir -p "$out" "$PAX_CACHE"
+out=$(cd "$out" && pwd)
+
+w=$(mktemp -d "${TMPDIR:-/tmp}/pax-warren.XXXXXX")
+trap 'rm -rf "$w"' EXIT
+
+tree() { # repo rev dir
+    mkdir -p "$3"
+    git -C "$3" init -q
+    "$PAX_ROOT/tools/fetch-retry" "$3" "$1" "$2" "$2" || die "cannot fetch $1 at $2"
+    git -C "$3" checkout -q --detach FETCH_HEAD
+    [ "$(git -C "$3" rev-parse HEAD)" = "$2" ] || die "$1: HEAD is not $2"
+}
+
+tree "${PAX_WARREN_REPO:-$WARREN_REPO}" "$WARREN_REV" "$w/origin"
+toml=$w/origin/wolf-toolchain.toml
+key() { # section key
+    awk -v s="[$1]" -v k="$2" '
+        /^\[/ { on = ($0 == s); next }
+        on && $1 == k { v = $0; sub(/^[^=]*= *"?/, "", v); sub(/"? *$/, "", v); print v; exit }' "$toml"
+}
+wv=$(key wolf version)
+wsha=$(key wolf x86_64-unknown-linux-gnu)
+srepo=$(key std repo)
+srev=$(key std rev)
+stree=$(key std tree)
+[ -n "$wv" ] && [ -n "$wsha" ] && [ -n "$srepo" ] && [ -n "$srev" ] && [ -n "$stree" ] \
+    || die "cannot read wolf version/digest and std repo/rev/tree from warren's wolf-toolchain.toml"
+say "warren $WARREN_REV pins wolf $wv (${wsha:0:8}…), $srepo $srev (tree ${stree:0:8}…)"
+
+arc=$PAX_CACHE/wolf-$wv-x86_64-unknown-linux-gnu-$wsha.tar.gz
+if [ ! -f "$arc" ] || [ "$(sha256_of "$arc")" != "$wsha" ]; then
+    curl -sSfL --retry 3 -o "$arc.part" \
+        "https://github.com/wolffe-lang/wolf-lang/releases/download/v$wv/wolf-$wv-x86_64-unknown-linux-gnu.tar.gz" \
+        || die "cannot download wolf $wv"
+    mv "$arc.part" "$arc"
+fi
+for k in 1 2; do
+    have=$(sha256_of "$arc")
+    [ "$have" = "$wsha" ] || die "wolf $wv archive, read $k: sha256 $have, warren pins $wsha"
+done
+say "wolf $wv archive: sha256 $wsha, read twice"
+mkdir -p "$w/wolf"
+tar -xzf "$arc" -C "$w/wolf" --strip-components=1
+wolf=$w/wolf/wolf
+[ -x "$wolf" ] || die "the wolf $wv archive has no wolf"
+[ -f "$w/wolf/libwolf_rt.a" ] || die "the wolf $wv archive has no libwolf_rt.a beside wolf"
+have=$("$wolf" --version | head -n 1)
+case $have in "wolf $wv "*|"wolf $wv") ;; *) die "wolf --version says '$have'; warren pins $wv" ;; esac
+say "$have; libwolf_rt.a beside it"
+
+# The std warren pins: the commit, then its tree, then its std/ directory alone.
+tree "https://github.com/$srepo" "$srev" "$w/std-src"
+[ "$(git -C "$w/std-src" rev-parse 'HEAD^{tree}')" = "$stree" ] || die "$srepo $srev: its tree is not the pin's $stree"
+mkdir -p "$w/std"
+git -C "$w/std-src" archive HEAD std | tar -x -C "$w/std"
+printf '%s\n' "$srev" > "$w/std/std/STD-REV"
+say "std: $srepo $srev, tree $stree, the pin's"
+
+mkdir -p "$w/cc"
+printf '#!/bin/sh\nexec %s -static "$@"\n' "$(command -v cc)" > "$w/cc/cc"
+chmod +x "$w/cc/cc"
+static() {
+    readelf -hW "$1" | grep -Eq 'Type: +EXEC' || die "$1 is not ET_EXEC"
+    ! readelf -lW "$1" | grep -q INTERP || die "$1 has a PT_INTERP (not static)"
+    readelf -dW "$1" | grep -q 'There is no dynamic section' || die "$1 has a dynamic section"
+}
+for k in a b; do
+    rm -rf "$w/src"
+    tree "$w/origin" "$WARREN_REV" "$w/src/warren"
+    rc=0
+    (cd "$w/src/warren" && python3 -I tools/vt/generate_version.py \
+        && TMPDIR=$w HOME=$w XDG_CACHE_HOME=$w/cache PATH="$w/cc:$PATH" \
+            "$wolf" build --deny-warnings --no-cache --std-root "$w/std/std" src/warren.lu -o "$w/warren-$k") \
+        > "$w/$k.log" 2>&1 || rc=$?
+    cat "$w/$k.log" >&2
+    [ "$rc" = 0 ] || die "warren's build (pass $k) exited $rc"
+    static "$w/warren-$k"
+done
+one=$(sha256_of "$w/warren-a")
+two=$(sha256_of "$w/warren-b")
+if [ "$one" != "$two" ]; then
+    say "REFUSED: the two builds of warren differ: $one, then $two"
+    exit 1
+fi
+say "warren built twice from fresh checkouts, the same digest $one ($(wc -c < "$w/warren-a" | tr -d ' ') bytes)"
+strip -o "$out/warren" "$w/warren-a"
+chmod 755 "$out/warren"
+static "$out/warren"
+mods=$(cd "$w" && "$out/warren" modules) || die "warren modules"
+[ "$(printf '%s\n' "$mods" | grep -cE '^[a-z]+	W[0-9]+	(pure|host)$')" -eq 7 ] || die "warren modules lists no seven modules: $mods"
+printf 'warren %s %s\n' "$(sha256_of "$out/warren")" "$(wc -c < "$out/warren" | tr -d ' ')" | tee "$out/sums.txt"
+printf 'warren built at %s, linked against: %s\n' "$WARREN_REV" "$(cc -print-file-name=libc.a)"
