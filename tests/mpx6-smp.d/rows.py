@@ -908,6 +908,9 @@ elif a.kind == 'trace':
         if kv(x, 'deaths') != 2 or not x.split(' statuses ')[1].startswith('0x2500 0x2500 ') or kv(x, 'echild') != -10:
             why.append(f'{at}: {kv(x, "deaths")} death of 2 reported within 2 s of the CONTs '
                        f'(statuses {" ".join(x.split(" statuses ")[1].split()[:2])}, then {kv(x, "echild")}, want -10)')
+    bad = bad_lines()
+    if bad:
+        why.insert(0, f'the kernel said: {bad[:3]}')
     cpus = [kv(x, 'thread-cpu') for x in rounds]
     info.append(f'the thread\'s processor at each exit {cpus}')
     if gate:
@@ -936,6 +939,8 @@ elif a.kind == 'trace':
                 why.append(f'round {k}: status {kv(x, "status")}, want 0x80057f (PTRACE_EVENT_STOP), the request\'s return {kv(x, "req")}')
             if kv(x, 'cont') != 0 or kv(x, 'ran') != 'yes':
                 why.append(f'round {k}: not running 20 ms after its CONT (the CONT said {kv(x, "cont")})')
+        if bad:
+            why.insert(0, f'the kernel said: {bad[:3]}')
         lat = [kv(x, 'us') for x in ir if isinstance(kv(x, 'us'), int)]
         fast = sum(1 for u in lat if u <= 2000)
         if TIMED and len(lat) == 9 and fast < 8:
