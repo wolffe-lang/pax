@@ -103,6 +103,14 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            PTRACE_EVENT_STOP (0x80057f), the tracee running again 20 ms after its CONT; under KVM 8 of 9
                            stopped within 2 ms (a tracee told nothing stops at its processor's next tick, 10 ms).
                            Not asked at one processor.
+              SMP-STOPWRITE  24 rounds of SIGSTOP to a process writing a pipe a byte a call (20 us apart) on another
+                           processor: a write already in progress when the stop comes completes (Linux allows it), and
+                           the stop takes effect before ring 3, so at most one byte follows the stop, never two (the
+                           rounds drained at once); none, and no ring-3 turn, once it has taken effect (the rounds
+                           drained 50 ms on); each stop and continue reported (0x137f, 0xffff), the writer writing
+                           again after SIGCONT. At two processors or more the writer is seen on another processor
+                           before each stop (the case set up). mpx5-jobs' `SIGSTOP to it: it runs on` is this case,
+                           met once in a while.
   build       SMP-BUILD    the census's pack fixture: one job and four jobs, three interleaved rounds, at
                            -smp 1 and -smp N; 15 pack/index pairs as the host oracle's; at -smp N the
                            gate `active N`, and with --scaling gate under KVM the four-job wall 1.6
@@ -160,7 +168,7 @@ BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processor
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
         'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
-        'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT']
+        'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT', 'SMP-STOPWRITE']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
@@ -953,6 +961,41 @@ elif a.kind == 'trace':
         else:
             ok('SMP-TRACE-INT', f'nine interrupts of a seized tracee running on another processor, each a '
                                 f'PTRACE_EVENT_STOP, the tracee running again after each CONT; {figs}')
+    # SMP-STOPWRITE: after SIGSTOP at most one write already in progress completes, never two, and none after the stop
+    # has taken effect
+    sr = [x for x in lines('SMP-STOPWRITE') if x.startswith('round ')]
+    why = []
+    if 'SMP-STOPWRITE done' not in text or len(sr) != 24:
+        why.append(f'{len(sr)} rounds of 24 and {"`SMP-STOPWRITE done`" if "SMP-STOPWRITE done" in text else "no `SMP-STOPWRITE done`"}')
+    for x in sr:
+        settle, b, t = kv(x, 'settle'), kv(x, 'bytes-after'), kv(x, 'turns-after')
+        at = f'round {kv(x, "round")} (settle {settle} ms)'
+        wc = cpu(kv(x, 'writer-cpu'))
+        if N > 1 and (wc is None or wc == cpu(kv(x, 'me-cpu'))):
+            why.append(f'{at}: the writer not seen on another processor before its stop (the case not set up)')
+        if settle == 0 and not (isinstance(b, int) and b <= 1):
+            why.append(f'{at}: {b} bytes written after the stop (at most the one write in progress)')
+        elif settle != 0 and (b != 0 or t != 0):
+            why.append(f'{at}: {b} bytes and {t} ring-3 turns after the stop had taken effect (none)')
+        if kv(x, 'stop-status') != '0x137f' or kv(x, 'cont-status') != '0xffff':
+            why.append(f'{at}: stop status {kv(x, "stop-status")} and continue status {kv(x, "cont-status")} '
+                       f'(0x137f and 0xffff)')
+        if not (isinstance(kv(x, 'bytes-resumed'), int) and kv(x, 'bytes-resumed') > 0):
+            why.append(f'{at}: no byte in the 30 ms after SIGCONT (the writer not writing again)')
+    if bad:
+        why.insert(0, f'the kernel said: {bad[:3]}')
+    at_once = [kv(x, 'bytes-after') for x in sr if kv(x, 'settle') == 0]
+    figs = (f'drained at once, the bytes after each stop {at_once} ({sum(1 for v in at_once if v == 1)} of '
+            f'{len(at_once)} a write in progress); drained 50 ms on, '
+            f'{[kv(x, "bytes-after") for x in sr if kv(x, "settle") != 0]}')
+    if gate:
+        fail('SMP-STOPWRITE', gate, why + [figs])
+    elif why:
+        fail('SMP-STOPWRITE', '; '.join(why[:4]), why[4:] + [figs])
+    else:
+        ok('SMP-STOPWRITE', f'{len(sr)} stops of a process writing a pipe on another processor: at most the one write in '
+                            f'progress completed after each, none once the stop had taken effect, each stop and '
+                            f'continue reported, the writer writing again; {figs}')
 elif a.kind == 'build':
     why = []
     act = re.findall(r'^BENCH ACTIVE (\S+)$', text, re.M)
