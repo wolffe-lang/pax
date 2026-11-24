@@ -92,6 +92,17 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
   cap2, cap1  SMP-CAP      `pax.cpus=C` at -smp N: `active C`, `started N`, online and the mask C
                            processors; processors C and up on stage 1's idle line, never running a
                            worker and gaining no `user` tick (cap2's one SMP-RUN round).
+  trace       SMP-TRACE-EXIT ten rounds, spinning and in a system-call loop in turn, of a traced group (TRACECLONE and
+                           TRACEEXIT) whose second thread runs on another processor when its leader calls exit_group:
+                           both threads' PTRACE_EVENT_EXIT stops (0x6057f) reported within 2 s; the thread then makes
+                           no spin in the 20 ms after its stop is reported and is current on no processor (stopped
+                           means stopped); both deaths (0x2500) within 2 s of the CONTs, then ECHILD. At two
+                           processors or more the thread is seen on another processor before each exit (the case set
+                           up). Bounded everywhere: a round that misses is named, its group SIGKILLed and reaped.
+              SMP-TRACE-INT  nine PTRACE_INTERRUPTs of a seized tracee spinning on another processor: each a
+                           PTRACE_EVENT_STOP (0x80057f), the tracee running again 20 ms after its CONT; under KVM 8 of 9
+                           stopped within 2 ms (a tracee told nothing stops at its processor's next tick, 10 ms).
+                           Not asked at one processor.
   build       SMP-BUILD    the census's pack fixture: one job and four jobs, three interleaved rounds, at
                            -smp 1 and -smp N; 15 pack/index pairs as the host oracle's; at -smp N the
                            gate `active N`, and with --scaling gate under KVM the four-job wall 1.6
@@ -149,13 +160,13 @@ BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processor
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
         'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
-        'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD']
+        'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
 ap.add_argument('--kind', required=True, choices=('rows', 'stress', 'end-halt', 'end-poweroff', 'end-reboot', 'nosmp',
                                                   'one', 'cap2', 'cap1', 'build', 'end-nooff', 'panic', 'panic2',
-                                                  'testwords'))
+                                                  'testwords', 'trace'))
 ap.add_argument('--smp', required=True, type=int)
 ap.add_argument('--cap', type=int)
 ap.add_argument('--boot', type=int)
@@ -864,6 +875,79 @@ elif a.kind == 'cap2':
     else:
         ok('SMP-DEAD', f'three exit_groups with a sibling running on another processor: status 0x700 each, '
                        f'none of the group current again')
+elif a.kind == 'trace':
+    gate = None if p0 and p0['active'] == N and p0['started'] == N else \
+        f'active {p0["active"] if p0 else None} of {N} (started {p0["started"] if p0 else None}): one processor runs threads'
+    # SMP-TRACE-EXIT: a traced thread running on another processor when its group exits stops for its tracer itself
+    tx = lines('SMP-TRACE-EXIT')
+    rounds = [x for x in tx if x.startswith('round ')]
+    why, info = [], []
+    if 'SMP-TRACE-EXIT done' not in text or len(rounds) != 10:
+        why.append(f'{len(rounds)} rounds of 10 and {"`SMP-TRACE-EXIT done`" if "SMP-TRACE-EXIT done" in text else "no `SMP-TRACE-EXIT done`"}')
+    for x in rounds:
+        r, v = kv(x, 'round'), x.split()[2]
+        at = f'round {r} ({v})'
+        if kv(x, 'failed-at') not in ('none', 'exit'):
+            early = kv(x, 'failed-at') in ('fork', 'initial-stop', 'options', 'clone', 'resume')
+            why.append(f'{at}: failed at the {kv(x, "failed-at")}' + (' (before the group\'s exit)' if early else ''))
+            if early:
+                continue
+        if N > 1 and not (isinstance(kv(x, 'thread-cpu'), int) and kv(x, 'thread-cpu') >= 0):
+            why.append(f'{at}: the thread was not seen on another processor before its group\'s exit (the case not set up)')
+        if kv(x, 'exit-stops') != 2 or kv(x, 'leader') != '0x6057f' or kv(x, 'thread') != '0x6057f':
+            missing = [w for w in ('leader', 'thread') if kv(x, w) != '0x6057f']
+            why.append(f'{at}: {kv(x, "exit-stops")} PTRACE_EVENT_EXIT stop of 2 reported within 2 s '
+                       f'(the {" and ".join(missing)}\'s {"missing" if all(kv(x, w) == "-" for w in missing) else "wrong"})')
+            continue
+        if kv(x, 'ran-after') != 0:
+            c = kv(x, 'current-after')
+            why.append(f'{at}: the thread made {kv(x, "ran-after")} spins in the 20 ms after its PTRACE_EVENT_EXIT stop was '
+                       f'reported' + (f' (current on processor {c})' if isinstance(c, int) else ''))
+        elif isinstance(kv(x, 'current-after'), int):
+            why.append(f'{at}: the thread current on processor {kv(x, "current-after")} after its stop was reported')
+        if kv(x, 'deaths') != 2 or not x.split(' statuses ')[1].startswith('0x2500 0x2500 ') or kv(x, 'echild') != -10:
+            why.append(f'{at}: {kv(x, "deaths")} death of 2 reported within 2 s of the CONTs '
+                       f'(statuses {" ".join(x.split(" statuses ")[1].split()[:2])}, then {kv(x, "echild")}, want -10)')
+    cpus = [kv(x, 'thread-cpu') for x in rounds]
+    info.append(f'the thread\'s processor at each exit {cpus}')
+    if gate:
+        fail('SMP-TRACE-EXIT', gate, why + info)
+    elif why:
+        fail('SMP-TRACE-EXIT', '; '.join(why[:4]), why[4:] + info)
+    else:
+        spins = sum(1 for x in rounds if x.split()[2] == 'spin')
+        ok('SMP-TRACE-EXIT', f'{len(rounds)} rounds ({spins} spinning, {len(rounds) - spins} in a system-call loop): '
+                             f'both threads\' PTRACE_EVENT_EXIT reported, the thread stopped when reported (no spin after, '
+                             f'current nowhere), both deaths after the CONTs; {info[0]}')
+    # SMP-TRACE-INT: a PTRACE_INTERRUPT reaches a seized tracee running on another processor at once
+    if N == 1:
+        not_asked(['SMP-TRACE-INT'], 'one processor: not asked')
+    else:
+        ti = lines('SMP-TRACE-INT')
+        ir = [x for x in ti if x.startswith('round ')]
+        why = []
+        if 'SMP-TRACE-INT done' not in text or len(ir) != 9:
+            why.append(f'{len(ir)} interrupts of 9 and {"`SMP-TRACE-INT done`" if "SMP-TRACE-INT done" in text else "no `SMP-TRACE-INT done`"}')
+        for x in ir:
+            k = kv(x, 'round')
+            if not (isinstance(kv(x, 'cpu'), int) and kv(x, 'cpu') >= 0):
+                why.append(f'round {k}: the tracee not seen on another processor before its interrupt')
+            if kv(x, 'req') != 0 or kv(x, 'status') != '0x80057f':
+                why.append(f'round {k}: status {kv(x, "status")}, want 0x80057f (PTRACE_EVENT_STOP), the request\'s return {kv(x, "req")}')
+            if kv(x, 'cont') != 0 or kv(x, 'ran') != 'yes':
+                why.append(f'round {k}: not running 20 ms after its CONT (the CONT said {kv(x, "cont")})')
+        lat = [kv(x, 'us') for x in ir if isinstance(kv(x, 'us'), int)]
+        fast = sum(1 for u in lat if u <= 2000)
+        if TIMED and len(lat) == 9 and fast < 8:
+            why.append(f'{fast} of 9 PTRACE_INTERRUPT stops within 2 ms (8 wanted under KVM)')
+        figs = f'latencies {lat} us' + ('' if TIMED else f'; {UNTIMED}')
+        if gate:
+            fail('SMP-TRACE-INT', gate, why + [figs])
+        elif why:
+            fail('SMP-TRACE-INT', '; '.join(why[:4]), why[4:] + [figs])
+        else:
+            ok('SMP-TRACE-INT', f'nine interrupts of a seized tracee running on another processor, each a '
+                                f'PTRACE_EVENT_STOP, the tracee running again after each CONT; {figs}')
 elif a.kind == 'build':
     why = []
     act = re.findall(r'^BENCH ACTIVE (\S+)$', text, re.M)
