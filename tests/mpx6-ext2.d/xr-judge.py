@@ -208,9 +208,10 @@ def plan_damage(m):
     p.op("file /mnt/c-before", "XR-damage-control-before", lambda o: six(o, "c-before"))
     for rel in sorted(k for k in q["edit"] if k.startswith(("v-", "m-", "f-")) and k != "v-max"):
         p.op(f"file /mnt/{rel}", f"XR-damage-{rel[2:]}", ok_eio())
-    # An eh_max under its node's room is no damage: ifork.rst's field is the
-    # most entries that could follow, and the Linux guest reads v-max whole.
-    # Only one past the room (v-maxover) is refused.
+    # The inode's root with eh_max one under its room is no damage: pinned
+    # e2fsck and the Linux guest both read v-max whole. Past the room
+    # (v-maxover), further under it in the root (v-max1) or under it in a
+    # block (m-idx-max) is refused: e2fsck calls the last two corrupt.
     p.op("file /mnt/v-max", "XR-eh_max-under-room", lambda o: six(o, "v-max"))
     p.op("list /mnt/d-out", "XR-dir-eio-list-out", ok_eio())
     p.op("stat /mnt/d-out/n000", "XR-dir-eio-lookup-out", ok_eio())
