@@ -8,22 +8,24 @@
 #
 #   tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both]
 #                   [--tier native|release|both] [--accel auto|kvm|tcg]
-#                   [--rows all|lifecycle]
+#                   [--rows all|lifecycle|hook]
 #
 # I14, I15 and I16 use a boot each: an observed adopted child must be reaped
 # within 5000 guest milliseconds, before any logout; a literal exec /bin/login
 # must not repeat boot hooks, boot-status recording or sudo-record clearing;
 # and a console logout is its own record in wtmp (init's, as utmp(5) has it),
 # the boot's record written once. --rows lifecycle runs just these three rows;
-# the default includes all rows.
+# the default includes all rows. I17-I21 (warren W6) use one boot of their own: /etc/shrc sources
+# the account's own file, last; --rows hook runs just that boot.
 #
 # P0 builds the image's tree (build/mpx5-init/root, files.txt as
 # tools/mkinitramfs' arguments): kmain_console, the kernel every shipped image
 # boots, with `quiet`; the installed system's run list, `/bin/login` (the
 # installer's text), with /bin/init beside it (tools/mkinit), so login as pid 1
 # execs init as on an installed system; login and sudo (tools/mkauth; sudo
-# set-user-ID root, its shipped policy), pelt as /bin/sh, boreutils' cat cut id
-# kill ls sleep stat stty touch tr, reboot and poweroff (tools/mkdiskprobe),
+# set-user-ID root, its shipped policy), su (root drops to pax for I17), pelt as /bin/sh,
+# boreutils' cat chmod cut id kill ls mkdir rm sleep stat stty touch tr (chmod, mkdir and rm set up
+# I18-I21's files at root's prompt), reboot and poweroff (tools/mkdiskprobe),
 # last (tools/mklogd: I16 reads the login records with it),
 # user/elf/detach.c (a process that calls setsid and lives on) and
 # user/elf/ttymode.c (the console's echo, canonical and signal bits); an
@@ -58,14 +60,14 @@ while [ $# -gt 0 ]; do
         --tier)     tiers=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
         --rows)     rows=$2; shift 2 ;;
-        *)          die "usage: tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--rows all|lifecycle]" ;;
+        *)          die "usage: tests/mpx5-init [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--rows all|lifecycle|hook]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $rows in all|lifecycle) ;; *) die "--rows takes all or lifecycle" ;; esac
+case $rows in all|lifecycle|hook) ;; *) die "--rows takes all, lifecycle or hook" ;; esac
 
-BORE="cat cut id kill ls sleep stat stty touch tr"
+BORE="cat chmod cut id kill ls mkdir rm sleep stat stty touch tr"
 work=$PAX_BUILD/mpx5-init
 fail=0
 need python3 readelf
@@ -89,8 +91,8 @@ if [ -z "$images" ]; then
     # shellcheck disable=SC2086 # the utilities' names, one word each
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" 2>&1 || why+=" tools/mkboreutils;"
     for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
-    "$PAX_ROOT/tools/mkauth" "$work/auth" login sudo mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
-    for p in login sudo; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
+    "$PAX_ROOT/tools/mkauth" "$work/auth" login sudo su mkshadow > "$work/auth.txt" 2>&1 || why+=" tools/mkauth;"
+    for p in login sudo su; do cp "$work/auth/$p" "$r/bin/$p" 2>/dev/null || why+=" no $p;"; done
     cp "$work/auth/mkshadow" "$work/tools/mkshadow" 2>/dev/null || why+=" no mkshadow;"
     # /bin/init, as the images carry it; a tree from before px124 has no tools/mkinit, and then
     # the image boots login as pid 1 (the rows say so by name).
