@@ -481,6 +481,12 @@ flex_bg, metadata_csum, huge_file, dir_index, dir_nlink, ext_attr, extra_isize a
 when the mount names `ext4`: `mount -t ext4`, an fstab line, or `rootfstype=ext4`. Its files, directories and links
 read through their trees; a damaged tree, directory or link answers EIO on its own path. Any other feature, a volume
 that needs recovery or holds an orphan list, and one not cleanly unmounted are refused by name, the disk untouched.
+A node's eh_max may be under the room the node has (the field is the most entries that could follow); one past it
+is damage. Linux, reading the same damaged images, answers differently in two ways that are kept on purpose. It
+says EUCLEAN for most damage (ENODATA for a file flagged encrypted) and refuses some of it when the file is opened;
+PAX says EIO, mostly at the read. It lists a directory with a hole in it as complete and calls a name in the hole
+absent; PAX answers EIO, because a missing directory block cannot prove a name is not there. A mapped page that
+cannot be read is SIGBUS on every volume, as on Linux.
 Writing extent volumes is later work; ext2 and ext3 asks are unchanged, and the installer still formats ext3.
 
 ### A disk that boots
