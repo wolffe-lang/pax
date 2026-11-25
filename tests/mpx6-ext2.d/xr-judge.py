@@ -83,7 +83,7 @@ class Sources:
 # --- the boots ---------------------------------------------------------------------
 
 def boots(m):
-    out = [("map", [m["P"]["image"], m["U"]["image"]]), ("damage", [m["Q"]["image"]])]
+    out = [("map", [m["P"]["image"], m["U"]["image"]]), ("multi", [m["M"]["image"]]), ("damage", [m["Q"]["image"]])]
     feats = [("F-base", m["F"]["base"]["image"])] + [(k, v["image"]) for k, v in sorted(m["F"]["cases"].items())]
     for i in range(0, len(feats), 4):
         out.append((f"feat-{i // 4}", [img for _n, img in feats[i:i + 4]]))
@@ -184,6 +184,20 @@ def plan_map(m):
     return p
 
 
+def plan_multi(m):
+    """Two groups: group 1's superblock and descriptor copies, bitmaps and
+    table sit where the layout says, and a file there reads back whole."""
+    p = Plan()
+    f = m["M"]["files"]
+    whole = lambda rel: (lambda o: (o["rc"] == 0 and o.get("sha256") == f[rel]["sha256"] and o.get("bytes") == str(f[rel]["bytes"]),
+                                    f"rc={o['rc']} errno={o['errno']} bytes={o.get('bytes')} sha256 {'equal' if o.get('sha256') == f[rel]['sha256'] else 'differs'}"))
+    p.op("mount /dev/vda /mnt ext4 ro", "XR-multigroup-mount", ok_rc(0, 0))
+    p.op("file /mnt/b-far", "XR-multigroup-far", whole("b-far"))
+    p.op("file /mnt/a-fill", "XR-multigroup-fill", whole("a-fill"))
+    p.op("umount /mnt", "XR-multigroup-umount", ok_rc(0, 0))
+    return p
+
+
 def plan_damage(m):
     p = Plan()
     q = m["Q"]
@@ -236,6 +250,8 @@ def plan_for(boot, m):
                 return plan_map(m), images
             if boot == "damage":
                 return plan_damage(m), images
+            if boot == "multi":
+                return plan_multi(m), images
             return plan_disks(m, images, boot.split("-")[0]), images
     raise SystemExit(f"no boot {boot}")
 
@@ -333,6 +349,7 @@ def judge(boot, m, log, diskdir, tag):
                 hit = [l for l in lines if word in l]
                 row(f"XR-state-{name}-named", len(hit) == 2, f"{len(hit)} refusal lines for {dev} saying '{word}' (want 2): {lines[:1]}")
     want = {m["P"]["image"]: m["P"]["sha256"], m["U"]["image"]: m["U"]["sha256"], m["Q"]["image"]: m["Q"]["sha256"],
+            m["M"]["image"]: m["M"]["sha256"],
             m["F"]["base"]["image"]: m["F"]["base"]["sha256"], m["J"]["clean"]["image"]: m["J"]["clean"]["sha256"]}
     want.update({v["image"]: v["sha256"] for v in m["F"]["cases"].values()})
     want.update({v["image"]: v["sha256"] for v in m["J"]["cases"].values()})
