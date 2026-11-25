@@ -4886,6 +4886,18 @@ fn account(from: u64, to: u64) {
     // px166: an application processor's idle loop is no slot: nothing is
     // charged to it, and nothing is reopened for it.
     if from != percpu.IDLE_SLOT && field(from, offset_of(Thread, tgid)) != 0 {
+        // px166: the run is charged to the thread's own process, whose leader
+        // its lead names by slot. A lead whose tgid is not the thread's (that
+        // slot reaped since, and cleared or given to a new process) would
+        // charge another process's area, or none: named here, whatever the
+        // slot's area now holds. Every write of the two keeps them equal
+        // (clone, fork, exec's re-point and old leader, `clear`), and
+        // `departure` keeps a leader until its ended threads have left; one
+        // load and one compare a switch, under the lock.
+        let l = field(from, offset_of(Thread, lead))
+        if field(l, offset_of(Thread, tgid)) != field(from, offset_of(Thread, tgid)) {
+            panic.fail("sched: a thread's leader is another process's, slot", from)
+        }
         let a = proc_area(from)
         if was != 0 && now > was {
             put_field(from, offset_of(Thread, cpu), field(from, offset_of(Thread, cpu)) + (now - was))
