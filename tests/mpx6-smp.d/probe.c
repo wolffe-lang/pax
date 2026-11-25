@@ -304,6 +304,7 @@ struct sh {
     volatile U wsamples, wsampon, widle[MAXC]; /* SMP-WAIT's sampler: its reads, the processors it sat on, each one's idle reads */
     volatile U rss; /* SMP-EXIT: the group's VmRSS in kB, read by its main thread before the exec */
     volatile L tcpu; /* SMP-TRACE-EXIT: the processor the traced thread was seen on before its group's exit */
+    volatile L mcpu; /* SMP-EXEC-LEAVE: the processor an exec-settle round's main thread said go on (-1: none found) */
 };
 static struct sh *G;
 __attribute__((force_align_arg_pointer)) static void h_usr1(int s) { (void)s; G->hit = rdtsc(); __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST); }
@@ -690,8 +691,8 @@ static void g_spin(void *arg) {
     __atomic_add_fetch(&G->started, 1, __ATOMIC_SEQ_CST);
     for (;;) {
         if (G->go == 1 && me == 2) exit_group(8);
-        if ((G->go == 2 || G->go == 3) && me == 1) {
-            char *argv[] = { "/bin/smpprobe", G->go == 2 ? "exec-child" : "exec-kill-child", 0 };
+        if ((G->go == 2 || G->go == 3 || G->go == 5) && me == 1) {
+            char *argv[] = { "/bin/smpprobe", G->go == 3 ? "exec-kill-child" : "exec-child", 0 };
             sc(NR_EXECVE, argv[0], argv, envp);
             exit_group(66);
         }
@@ -721,11 +722,31 @@ static U group_running(void) {
     return best;
 }
 /* SMP-EXEC-LEAVE's exec rounds: the main thread sleeps once it has said go, so the processors beside the exec'ing
-   sibling run its other two siblings, the threads the exec re-points (spinning, the main thread would be the one beside
-   it at two processors: it says go while the exec'ing sibling runs, and an exec's old leader is charged nothing) */
+   sibling run only its other two siblings, the threads the exec re-points (an exec's old leader is charged nothing) */
 static int main_naps;
+/* SMP-EXEC-LEAVE's exec-settle rounds, in the group's main thread before it says go: looks at /proc/pax-cpus until one
+   look shows it current on an application processor and the exec'ing sibling current on another, sleeping 1 to 4 ticks
+   between looks, which moves it in the run queue. Its processor, or -1 when none came. The test word holds only an
+   application processor, and left to the scheduler the main thread was never on one when the sibling saw go under KVM
+   (no hold of a thread with tgid 0 in 80 rounds over four boots at 2 and 4; under TCG in 15 of 40). At 2 the three
+   siblings keep both processors busy while it sleeps, so it wakes into the queue and either may take it: 2 s at most.
+   At 4 its processor idles while it sleeps and takes it back at the wake: 0.5 s, the rounds counted, not wanted. */
+static L main_on_ap(void) {
+    struct snap z;
+    U t0 = rdtsc(), lim = 2000;
+    for (U k = 0;; k++) {
+        if (take(&z)) {
+            L m = cpu_of(&z, G->gtids[0]), x = cpu_of(&z, G->gtids[2]);
+            if (m > 0 && x >= 0 && x != m) return m;
+            if (z.active > 2) lim = 500;
+        }
+        if (rdtsc() - t0 >= cycles_of_ms(lim)) return -1;
+        nap((k % 4 + 1) * 10000000ul);
+    }
+}
 static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a sibling execs, 3 a sibling execs a
-                             program killed by its own SIGKILL, 4 the main thread exits alone and a sibling then exits */
+                             program killed by its own SIGKILL, 4 the main thread exits alone and a sibling then exits,
+                             5 as 2, once the main thread is current on an application processor (`main_on_ap`) */
     G->started = 0; G->go = 0; G->running = 0;
     L p = fork();
     if (!p) {
@@ -738,7 +759,8 @@ static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a
         if (how == 2) G->rss = kb_of("/proc/self/status", "VmRSS:");
         if (how == 0) exit_group(7);
         if (how == 4) { G->go = 4; exit_thread(0); }
-        G->go = how == 1 ? 1 : how == 3 ? 3 : 2;
+        if (how == 5) G->mcpu = main_on_ap();
+        G->go = how == 1 ? 1 : how == 3 ? 3 : how == 5 ? 5 : 2;
         if (main_naps && how >= 2) for (;;) nap(1000000);
         for (;;) G->spins++;
     }
@@ -835,7 +857,8 @@ static void row_exit(void) {
    check `a thread's leader is another process's`). Four rounds whose main thread exits alone and a sibling then ends
    the group (status 0xa00), thirty whose sibling execs a program that exits 9 (0x900), five whose exec'd program is
    killed by its own SIGKILL (0x9); in the exec rounds the main thread sleeps once it has said go (`main_naps`); then
-   twenty exec-settle rounds whose main thread spins, each read three times (MemFree at the wait4, settled, late). */
+   twenty exec-settle rounds whose main thread spins on an application processor, each read three times (MemFree at
+   the wait4, settled, late). */
 static void row_leave(void) {
     struct ln l;
     int st;
@@ -850,15 +873,17 @@ static void row_leave(void) {
             if (w != p) break;
         }
     }
-    /* Twenty exec-settle rounds, the main thread spinning beside the exec'ing sibling: at 2 processors it is the thread
-       on the other one, held there by the test word whenever that is the application processor. The exec takes its
-       pid for the caller, so /proc/pax-cpus names that processor `current kernel` until it switches, its CR3 still the
-       space the exec parked. Each round read as SMP-EXIT's are (at the wait4, then `settled_kb`), and once more 500 ms
-       on after another reap, when every hold is long over: the settled reading must be that one. */
+    /* Twenty exec-settle rounds, the main thread spinning: it says go once a look finds it current on an application
+       processor with the exec'ing sibling current beside it (`main_on_ap`), so the exec ends it in place there and the
+       test word holds it. The exec takes its pid for the caller, so /proc/pax-cpus names that processor `current
+       kernel` until it switches, its CR3 still the space the exec parked. Each round read as SMP-EXIT's are (at the
+       wait4, then `settled_kb`), and once more 500 ms on after another reap, when every hold is long over: the settled
+       reading must be that one. `main-cpu` the processor the main thread said go on (-1: no look found one). */
     main_naps = 0;
     for (int r = 0; r < 20; r++) {
         for (int i = 0; i < 4; i++) G->gtids[i] = 0;
-        L p = group(2);
+        G->mcpu = -1;
+        L p = group(5);
         L w = wait4(p, &st, 0, 0);
         U waited = memfree_kb(), ms = 0, left = 0;
         U settled = settled_kb(p, &ms, &left);
@@ -869,7 +894,9 @@ static void row_leave(void) {
         l.n = 0; ls(&l, "SMP-LEAVE exec-settle "); ld(&l, (U)r);
         ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); ls(&l, " running "); ld(&l, G->running); ls(&l, " of 4");
         ls(&l, " waited-kb "); ld(&l, waited); ls(&l, " settled-kb "); ld(&l, settled); ls(&l, " late-kb "); ld(&l, late);
-        ls(&l, " settle-ms "); ld(&l, ms); ls(&l, " left "); ld(&l, left); le(&l);
+        ls(&l, " settle-ms "); ld(&l, ms); ls(&l, " left "); ld(&l, left);
+        ls(&l, " main-cpu "); if (G->mcpu < 0) ls(&l, "-1"); else ld(&l, (U)G->mcpu);
+        le(&l);
         if (w != p) break;
     }
     say("SMP-LEAVE done");
