@@ -615,10 +615,6 @@ pub fn leave_ended(f: u64) -> u64 {
     run_next()
 }
 
-/// px166: 1 once `reap` or `ended` has put off a slot by the departure
-/// rule (`departure`), until a processor next moves off a DEAD slot.
-var departing: u64 = 0
-
 /// px166: the signal counts /proc/pax-cpus prints (`signals …`), for
 /// tests/mpx6-smp's sleeper: a raise that set its signal's pending bit
 /// (`sig_set`), one that found the bit set already and so merged into the
@@ -647,10 +643,12 @@ fn count_raise(w: u64, sig: u64) {
 /// px166: the departure rule. Slot `s`, DEAD, is still another processor's
 /// to run on (its W_CPU), or its space (a process's, `owns`) is still in
 /// another processor's CR3 (a thread of it running there: kernel/tlb's
-/// LOADED_CR3): that processor's index + 1, after a RESCHED to it, which
-/// moves it off; 0 when nothing but this processor can touch the slot's
-/// stack, FPU area, record or space. The lock's holder; the caller puts the
-/// slot off to a later reap.
+/// LOADED_CR3), or a thread that leads from it is (`follower_on`): that
+/// processor's index + 1, after a RESCHED to it, which moves it off; 0 when
+/// nothing but this processor can touch the slot's stack, FPU area, record,
+/// space or process area. The lock's holder; the caller puts the slot off to
+/// a later reap, and `run_next` wakes the waiting parent when that processor
+/// moves off its DEAD slot.
 fn departure(s: u64) -> u64 {
     var k = slot_word(s, W_CPU)
     if k == percpu.index() + 1 {
@@ -662,12 +660,37 @@ fn departure(s: u64) -> u64 {
             k = tlb.user_of(c)
         }
     }
+    if k == 0 {
+        k = follower_on(s)
+    }
     if k != 0 {
         smp.resched(k - 1)
-        // # Safety: the lock's holder alone writes it.
-        unsafe { departing = 1 }
     }
     k
+}
+
+/// px166: a DEAD thread that leads from slot `l` and is still current on
+/// another processor: that processor's index + 1, else 0. Its switch-off
+/// there charges its last slice to `l`'s area (`account`, `proc_area`), so
+/// `l` is not collected, and its area and slot not let go, until it has
+/// left. Only an exec makes such a thread run outside `l`'s space, where the
+/// space's rule above cannot see it: `exec_alone` ends the caller's siblings
+/// in place and points them at the caller, whose space is new; collected
+/// while one still ran elsewhere, the caller's area was gone at that
+/// switch-off (`no process area for slot`), or a slot reused since took the
+/// charge.
+fn follower_on(l: u64) -> u64 {
+    var t: u64 = FIRST
+    while t < top() {
+        if t != l && field(t, offset_of(Thread, state)) == DEAD && field(t, offset_of(Thread, lead)) == l {
+            let k = slot_word(t, W_CPU)
+            if k != 0 && k != percpu.index() + 1 {
+                return k
+            }
+        }
+        t += 1
+    }
+    0
 }
 
 fn sv(i: u64) -> u64 {
@@ -1203,13 +1226,19 @@ fn run_next() -> u64 {
     point(0, from) // px131: the scheduler chooses
     if real_from {
         put_slot_word(from, W_CPU, 0)
-        // px166: a DEAD slot put off by the departure rule is free to go
-        // now this processor has left it: its parent, if it waits, looks again.
-        if unsafe { departing } == 1 && field(from, offset_of(Thread, state)) == DEAD {
-            // # Safety: the lock's holder alone writes it.
-            unsafe { departing = 0 }
+        // px166: a DEAD slot the departure rule may have put off (its own,
+        // its space's or its leader's) is free to go now this processor has
+        // left it: its process's parent, if it waits, looks again. Every such
+        // switch-off wakes it, not only one marked by a flag: one word for the
+        // machine was taken by the first DEAD switch-off anywhere (an exec's
+        // old leader, parentless, among them), and the parent the rule held
+        // slept on.
+        if field(from, offset_of(Thread, state)) == DEAD {
             let l = field(from, offset_of(Thread, lead))
-            wake_waiter(field(if l != 0 { l } else { from }, offset_of(Thread, ppid)))
+            let pp = field(if l != 0 { l } else { from }, offset_of(Thread, ppid))
+            if pp != 0 {
+                wake_waiter(pp)
+            }
         }
     }
     var n = take_next()
@@ -3006,7 +3035,9 @@ pub fn exec_alone() {
         // leader's area, which `move_area` has just made the caller's. They
         // lead from the caller from here on; read through the old leader,
         // whose area is unmapped now, it was `no process area for slot`
-        // (tests/mpx6-smp's SMP-EXIT, an execve from a sibling).
+        // (tests/mpx6-smp's SMP-EXIT, an execve from a sibling). They run in
+        // the old space, not the caller's, so `departure` keeps the caller
+        // uncollected until each has left its processor (`follower_on`).
         var t: u64 = FIRST
         while t < top() {
             if t != c && t != l && field(t, offset_of(Thread, state)) != FREE && field(t, offset_of(Thread, lead)) == l {
