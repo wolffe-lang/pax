@@ -9,6 +9,10 @@
      /bin/smpprobe cap             SMP-ACTIVE and one SMP-RUN round (SMP-CAP, `pax.cpus=N`)
      /bin/smpprobe one             SMP-ACTIVE alone (one processor: `nosmp`, `-smp 1`, `pax.cpus=1`)
      /bin/smpprobe exec-child      SMP-EXIT's execve target: one line, exit status 9
+     /bin/smpprobe exec-kill-child the same line, then killed by its own SIGKILL (status 0x9)
+     /bin/smpprobe leave           SMP-ACTIVE, then SMP-EXEC-LEAVE's rounds (a test kernel's `pax.slowleave=MS`): four
+                                   whose main thread exits alone and a sibling then calls exit_group(10), thirty whose
+                                   sibling execs a program that exits 9, five whose exec'd program is killed by SIGKILL
      /bin/smpprobe trace           SMP-ACTIVE, SMP-TRACE-EXIT (a traced group exiting with its second thread on
                                    another processor), SMP-TRACE-INT (PTRACE_INTERRUPT of a seized tracee there) and
                                    SMP-STOPWRITE (SIGSTOP to a process writing a pipe there)
@@ -686,10 +690,17 @@ static void g_spin(void *arg) {
     __atomic_add_fetch(&G->started, 1, __ATOMIC_SEQ_CST);
     for (;;) {
         if (G->go == 1 && me == 2) exit_group(8);
-        if (G->go == 2 && me == 1) {
-            char *argv[] = { "/bin/smpprobe", "exec-child", 0 };
+        if ((G->go == 2 || G->go == 3) && me == 1) {
+            char *argv[] = { "/bin/smpprobe", G->go == 2 ? "exec-child" : "exec-kill-child", 0 };
             sc(NR_EXECVE, argv[0], argv, envp);
             exit_group(66);
+        }
+        /* SMP-EXEC-LEAVE's leader rounds: the main thread has exited alone (it sets go, then exit(2)); 20 ms on, this
+           sibling ends the group, its other two siblings ended in place wherever they run */
+        if (G->go == 4 && me == 2) {
+            U end = rdtsc() + cycles_of_ms(20);
+            while (rdtsc() < end) G->spins++;
+            exit_group(10);
         }
         G->spins++;
     }
@@ -709,7 +720,8 @@ static U group_running(void) {
     }
     return best;
 }
-static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a sibling execs */
+static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a sibling execs, 3 a sibling execs a
+                             program killed by its own SIGKILL, 4 the main thread exits alone and a sibling then exits */
     G->started = 0; G->go = 0; G->running = 0;
     L p = fork();
     if (!p) {
@@ -721,7 +733,8 @@ static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a
         G->running = group_running();
         if (how == 2) G->rss = kb_of("/proc/self/status", "VmRSS:");
         if (how == 0) exit_group(7);
-        G->go = how == 1 ? 1 : 2;
+        if (how == 4) { G->go = 4; exit_thread(0); }
+        G->go = how == 1 ? 1 : how == 3 ? 3 : 2;
         for (;;) G->spins++;
     }
     return p;
@@ -807,6 +820,29 @@ static void row_exit(void) {
     if (!any) ls(&l, " none");
     le(&l);
     say("SMP-EXIT done");
+}
+
+/* --- SMP-EXEC-LEAVE (the leave kind, a test kernel with `pax.slowleave=MS`) --------------------------------------
+   Each round a group of four spinning threads ends while some of them run on other processors, and the kernel's test
+   word holds each such processor (with the lock given back) before it switches its ended thread off: what a host that
+   has not run that processor does. The round's wait4 must find the right status, and the kernel must not read a
+   process area that went with the reap (kernel/sched's `account`, `no process area for slot`). Four rounds whose main
+   thread exits alone and a sibling then ends the group (status 0xa00), thirty whose sibling execs a program that
+   exits 9 (0x900), five whose exec'd program is killed by its own SIGKILL (0x9). */
+static void row_leave(void) {
+    struct ln l;
+    int st;
+    const struct { const char *name; int how, rounds; } kinds[] = { { "leader-exit", 4, 4 }, { "exec", 2, 30 }, { "exec-kill", 3, 5 } };
+    for (int k = 0; k < 3; k++) {
+        for (int r = 0; r < kinds[k].rounds; r++) {
+            L p = group(kinds[k].how);
+            L w = wait4(p, &st, 0, 0);
+            l.n = 0; ls(&l, "SMP-LEAVE "); ls(&l, kinds[k].name); lc(&l, ' '); ld(&l, (U)r);
+            ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); ls(&l, " running "); ld(&l, G->running); ls(&l, " of 4"); le(&l);
+            if (w != p) break;
+        }
+    }
+    say("SMP-LEAVE done");
 }
 
 /* --- SMP-WAIT ----------------------------------------------------------------------------- */
@@ -1390,8 +1426,9 @@ __attribute__((used)) static void smp_main(U *sp) {
     envp = argv + argc + 1;
     const char *mode = argc > 1 ? argv[1] : "rows";
     struct ln l;
-    if (same(mode, "exec-child")) {
+    if (same(mode, "exec-child") || same(mode, "exec-kill-child")) {
         l.n = 0; ls(&l, "SMP-EXIT exec-child pid "); lsd(&l, getpid()); le(&l);
+        if (same(mode, "exec-kill-child")) for (;;) sc(NR_KILL, getpid(), SIGKILL, 0);
         exit_group(9);
     }
     G = shared_page();
@@ -1426,6 +1463,9 @@ __attribute__((used)) static void smp_main(U *sp) {
             row_trace_int(9);
             G = shared_page();
             row_stop_write(24);
+        } else if (same(mode, "leave")) {
+            G = shared_page();
+            row_leave();
         } else if (same(mode, "rows")) {
             row_run((int)started_cpus, 3);
             G = shared_page();
