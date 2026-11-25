@@ -51,10 +51,17 @@ def main():
     parser.add_argument("--paxext2", required=True, type=pool_path)
     parser.add_argument("--paxext2-sha256", required=True)
     parser.add_argument("--formatter-head", required=True, choices=[BASE])
-    parser.add_argument("--engine", required=True)
+    parser.add_argument("--engine", help="container engine executable when not already inside the pinned builder")
+    parser.add_argument("--native-oracle", type=pool_path,
+                        help="verified oracle.sh inside the existing immutable pool builder (PAX_E2FS_NATIVE=1)")
     parser.add_argument("--image", required=True, help="immutable local image ID, sha256:<64hex>")
     parser.add_argument("--dry", action="store_true", help="one real six-run depth-1 image/read/control, not a mock")
     args = parser.parse_args()
+    if bool(args.engine) == bool(args.native_oracle):
+        parser.error("choose exactly one of --engine or --native-oracle")
+    if args.native_oracle and (os.environ.get("PAX_E2FS_NATIVE") != "1" or not args.native_oracle.is_file()):
+        print("REFUSED native-oracle requires the pinned pool container and its identity script", flush=True)
+        return 75
     if sys.platform != "linux":
         print("REFUSED oracle-row requires the Linux pool", flush=True)
         return 75
@@ -86,6 +93,12 @@ def main():
         return result
 
     def oracle(tag, *command):
+        if args.native_oracle:
+            # The existing pool image contains the exact pinned binaries. Match
+            # the formatter qualification's PAX_E2FS_NATIVE path, rechecking
+            # version and executable digests on every command. No nested engine.
+            translated = [str(item).replace("/work/", str(work) + "/") for item in command]
+            return run(["/bin/sh", args.native_oracle, *translated], tag)
         return run([args.engine, "run", "--rm", "--network", "none", "--read-only",
                     "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                     "--memory", "512m", "--memory-swap", "512m", "--pids-limit", "64",
