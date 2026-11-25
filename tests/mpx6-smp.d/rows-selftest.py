@@ -61,7 +61,7 @@ def active_line(n, stage=2, cap=None):
             f'cpus-allowed {format((1 << k) - 1, "x")} cpus-allowed-list {online(k)}\n')
 
 
-def run_lines(n, stage=2, rounds=3, ratio=1.05, cap=None, user=None, seen=None):
+def run_lines(n, stage=2, rounds=3, ratio=1.05, cap=None, user=None, seen=None, wcpu=990000):
     out = f'SMP-RUN jobs {n} loops 300000000\n'
     for r in range(rounds):
         pids = [200 + 10 * r + i for i in range(n)]
@@ -81,7 +81,7 @@ def run_lines(n, stage=2, rounds=3, ratio=1.05, cap=None, user=None, seen=None):
             out += f'SMP-RUN round {r} sample {k} ' + ' '.join(cells) + '\n'
         out += f'SMP-RUN round {r} workers ' + ' '.join(map(str, pids)) + '\n'
         wall = int(1000000 * (n if stage == 1 else ratio * (n / runners)))
-        out += f'SMP-RUN round {r} jobs {n} wall-us {wall} cpu-us ' + ','.join(['990000'] * n) + ' bad-status 0\n'
+        out += f'SMP-RUN round {r} jobs {n} wall-us {wall} cpu-us ' + ','.join([str(wcpu)] * n) + ' bad-status 0\n'
         phase = wall // 10000
         if user is not None:
             gains = user
@@ -154,12 +154,12 @@ def exit_lines(n, stage=2, statuses=('0x700', '0x700', '0x800', '0x800'), after=
     return out + f'SMP-EXIT frames-kb before 200000 after {after}\nSMP-EXIT stopped {stopped}\nSMP-EXIT done\n'
 
 
-def wait_lines(n, stage=2, right=16, cpus=None, ticks='seen', resched=None, sampler=None):
+def wait_lines(n, stage=2, right=16, cpus=None, ticks='seen', resched=None, sampler=None, cpu=2800000):
     # ticks: each processor's ring-3 ticks gained while the children ran (the kernel's counters): 'seen' gives +30 to
     # each processor the sampler saw and +0 to the rest; a list gives them one by one; None prints no line (a probe
     # from before the counters)
     cpus = cpus or ('0' if stage == 1 else ','.join(str(i) for i in range(min(n, 16))))
-    out = f'SMP-WAIT statuses right {right} of 16 cpu-us 2800000 expected-us 2720000 cpus {cpus}\n'
+    out = f'SMP-WAIT statuses right {right} of 16 cpu-us {cpu} expected-us 2720000 cpus {cpus}\n'
     if ticks == 'seen':
         seen = {int(x) for x in cpus.split(',')}
         ticks = ['+30' if i in seen else '+0' for i in range(n)]
@@ -211,6 +211,20 @@ for n in (2, 4, 16):
     case(f'stage 1 at {n}: every row red at the gate', rows_text(n, stage=1), ['--kind', 'rows', '--smp', str(n)],
          set(), ALL6)
 case('stage 2 green under TCG', rows_text(4), ['--kind', 'rows', '--smp', '4'], ALL6, set(), meta=TCG)
+# the CPU shares (each worker 0.8 of the lone, the children 0.8 of their work): the work is a loop count calibrated at
+# boot, so its CPU time is the processor's speed at the time; under TCG the guest's TSC follows the host's clock, and on
+# a shared host that speed moves within a boot (the hosted job at one head: the lone read 361, 889 and 475 ms for one
+# second of work). Gated where the timed bounds are, printed elsewhere with the reason; every run says its accelerator
+# and the host's processors.
+low = dict(run=run_lines(2, wcpu=350000), wait=wait_lines(2, cpu=1100000))
+case('low CPU shares under TCG: printed, not gated', rows_text(2, **low), ['--kind', 'rows', '--smp', '2', '--host-cpus', '4'],
+     ALL6, set(), meta=TCG, says=r"^PASS SMP-RUN smp=2: .*tcg: not gated: CPU time of fixed work follows the host's speed under TCG")
+case("low CPU shares under TCG: the children's said so", rows_text(2, **low), ['--kind', 'rows', '--smp', '2', '--host-cpus', '4'],
+     ALL6, set(), meta=TCG, says=r"^PASS SMP-WAIT smp=2: the children's CPU 1100000 us .*tcg: not gated: CPU time of fixed work follows the host's speed under TCG")
+case('low CPU shares under KVM: red', rows_text(2, **low), ['--kind', 'rows', '--smp', '2', '--host-cpus', '4'],
+     ALL6 - {'SMP-RUN', 'SMP-WAIT'}, {'SMP-RUN', 'SMP-WAIT'}, why=r"the children's CPU 1100000 us against 2720000 us")
+case('every run says its accelerator and the host\'s processors', rows_text(2), ['--kind', 'rows', '--smp', '2', '--host-cpus', '4'],
+     ALL6, set(), says=r'^INFO SMP-HOST smp=2: accel kvm, 4 host CPUs for 2 processors')
 case('the plant tlb: B reads on past PROT_NONE', rows_text(4, tlb=tlb_lines(faulted='no')),
      ['--kind', 'rows', '--smp', '4'], ALL6 - {'SMP-TLB'}, {'SMP-TLB'})
 case('a stale read after the new page', rows_text(4, tlb=tlb_lines(stale=1734)), ['--kind', 'rows', '--smp', '4'],
