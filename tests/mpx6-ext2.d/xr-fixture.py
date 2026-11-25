@@ -305,11 +305,12 @@ def make(args):
         return f"P {rec['sha256'][:16]} (depths 0/1/2, 600 names, links, 5 GiB sparse), U e2fsck exit {u['U']['e2fsck']}"
 
     # --- Q: one damage case a file, controls on both sides --------------------------
-    victims = ["v-magic", "v-max", "v-maxover", "v-entries", "v-depth-child", "v-depth-root", "v-unsorted", "v-overlap",
-               "v-len0", "v-hiaddr", "v-pastend", "v-metadata", "v-journal"]
+    victims = ["v-magic", "v-max", "v-maxover", "v-max1", "v-entries", "v-depth-child", "v-depth-root", "v-unsorted",
+               "v-overlap", "v-len0", "v-hiaddr", "v-pastend", "v-metadata", "v-journal"]
     qfiles = [("c-before", "pattern", 6), ("c-after", "pattern", 6), ("f-inline", "bytes", b"inline?\n"),
               ("f-encrypt", "bytes", b"encrypted?\n"), ("m-depth6", "pattern", 1500),
-              ("m-idx-unsorted", "pattern", 1500), ("s-bad", "link", "c-before/" + "x" * 80)]
+              ("m-idx-unsorted", "pattern", 1500), ("m-idx-max", "pattern", 1500),
+              ("s-bad", "link", "c-before/" + "x" * 80)]
     qfiles += [(v, "pattern", 6) for v in victims]
     qfiles += [(f"d-out/n{k:03d}", "bytes", b"") for k in range(600)]
     qfiles += [(f"d-hole/n{k:03d}", "bytes", b"") for k in range(600)]
@@ -322,7 +323,7 @@ def make(args):
         f = rec["files"]
         for v in victims + ["c-before", "c-after"]:
             need(f[v]["depth"] == 1, f"{v} depth {f[v]['depth']}")
-        for m in ("m-depth6", "m-idx-unsorted"):
+        for m in ("m-depth6", "m-idx-unsorted", "m-idx-max"):
             need(f[m]["depth"] == 2, f"{m} depth {f[m]['depth']}")
         jroot = img.inode(8) + 40
         jh = img.header(jroot)
@@ -339,10 +340,15 @@ def make(args):
         def edit(i):
             out = {}
             r = root(i, "v-magic"); i.put(r, 2, 0x1234); out["v-magic"] = "root magic 0x1234"
-            # Not damage: an eh_max under the node's room is a layout ifork.rst
-            # allows (the most entries that could follow); it reads whole.
+            # Not damage: the inode's root with eh_max one under its room, which
+            # pinned e2fsck and the Linux guest both read whole. Two under in the
+            # root, or under the room in a block, pinned e2fsck calls corrupt.
             r = root(i, "v-max"); i.put(r + 4, 2, 3); out["v-max"] = "root eh_max 3 under its room of 4"
             r = root(i, "v-maxover"); i.put(r + 4, 2, 5); out["v-maxover"] = "root eh_max 5 over its room of 4"
+            r = root(i, "v-max1"); i.put(r + 4, 2, 1); out["v-max1"] = "root eh_max 1, three under its room of 4"
+            ib = i.child(root(i, "m-idx-max"), 0)[1] * BS
+            need(i.header(ib)["depth"] == 1 and i.header(ib)["entries"] <= 100, f"m-idx-max's index node {i.header(ib)}")
+            i.put(ib + 4, 2, 100); out["m-idx-max"] = f"index block eh_max 100 under its room of {(BS - 12) // 12}"
             r = root(i, "v-entries"); i.put(r + 2, 2, 5); out["v-entries"] = "root eh_entries 5 over eh_max 4"
             lb = leafblock(i, "v-depth-child"); i.put(lb + 6, 2, 1); out["v-depth-child"] = "leaf says depth 1 under a depth-1 root"
             # Only the parent-and-child depth rule catches this one: every
