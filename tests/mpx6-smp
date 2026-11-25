@@ -4,7 +4,7 @@
 #   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
 #   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
-#    SMP_KINDS='rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords' (or commas) the boots run, every
+#    SMP_KINDS='rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave' (or commas) the boots run, every
 #    kind by default, fewer for a plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
 #    SMP_TRACE_COUNTS='1 2 4' (or commas) the trace kind's processor counts, SMP_TRACE_BOOTS=1 its boots at each;
 #    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
@@ -29,7 +29,11 @@
 #   - from a second build of the same kernel with the test words (tools/build-kernel --test-words, never shipped):
 #     SMP-END-NOOFF (`nooff`), SMP-PANIC-STOP (`panic`) and SMP-PANIC-TWO (`panic2`), each at 4 with dumps; and
 #     SMP-TESTWORDS (`testwords`), the shipped kernel given the same words; TESTWORDS-ELF per tier: `fire` and
-#     `test_panic` in the test build's ELF, in the shipped one neither;
+#     `test_panic` in the test build's ELF, in the shipped one neither; SMP-EXEC-LEAVE (`leave`, at 2 and 4): the test
+#     build given `pax.slowleave=200`, which holds each application processor whose thread was ended in place 200 ms
+#     before it switches it off (a host that has not run that processor), under exec, exit_group and a leader's lone
+#     exit; TESTWORDS-SLOWLEAVE-ELF per tier: the hold's state and line in the test build's ELF, in the shipped one
+#     neither;
 #   - in every boot SMP-KLOCK, SMP-DUP, SMP-PIN and SMP-PARK (rows.py's every-kind rows);
 # and SMP-BUILD once, on the first tier and firmware: the processor census's pack fixture at -smp 1 and -smp 4 with
 # 2 GiB, the batches timed by the host (tests/mpx6-smp.d/build.py), the pinned den built by tools/mkden
@@ -44,7 +48,7 @@ set -euo pipefail
 cd "$PAX_ROOT"
 tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
 counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
-kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords}
+kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave}
 tcounts=${SMP_TRACE_COUNTS:-1 2 4} tboots=${SMP_TRACE_BOOTS:-1}
 tcounts=${tcounts//,/ }
 case $tboots in ''|*[!0-9]*|0) die "SMP_TRACE_BOOTS is a count of boots, not $tboots" ;; esac
@@ -56,8 +60,8 @@ rows_cap=${SMP_ROWS_CAP:-}
 rows_cap_check "$rows_cap" || exit 2
 [ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 for k in $kinds; do
-    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords) ;;
-        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords, not $k" ;; esac
+    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords|leave) ;;
+        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave, not $k" ;; esac
 done
 asked() { # KIND: 0 when SMP_KINDS asks it, else its NOT-RUN line and 1
     case " $kinds " in *" $1 "*) return 0 ;; esac
@@ -94,10 +98,11 @@ images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-hal
         "end-poweroff::/bin/smpprobe end poweroff" "end-reboot::/bin/smpprobe end restart" "one::/bin/smpprobe one"
         "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one" "trace::/bin/smpprobe trace"
         "end-nooff: pax.cpus=4 pax.nopoweroff:/bin/smpprobe end poweroff" "panic: pax.cpus=4 pax.panictest=1:/bin/smpprobe spin"
-        "panic2: pax.cpus=4 pax.panictest=2:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff")
-# The STOP step's test kinds boot a test build (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu in
-# kernel/testwords' place); testwords boots the shipped kernel given both words.
-testbuilt() { case $1 in end-nooff|panic|panic2) return 0 ;; esac; return 1; }
+        "panic2: pax.cpus=4 pax.panictest=2:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff"
+        "leave: pax.slowleave=200:/bin/smpprobe leave")
+# The STOP step's test kinds and leave boot a test build (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu
+# in kernel/testwords' place); testwords boots the shipped kernel given both words.
+testbuilt() { case $1 in end-nooff|panic|panic2|leave) return 0 ;; esac; return 1; }
 if [ -n "$rows_cap" ]; then # SMP_ROWS_CAP: unset, the list above is used as it stands
     capped=()
     for spec in "${images[@]}"; do capped+=("$(rows_cap_spec "$rows_cap" "$spec")"); done
@@ -127,6 +132,17 @@ for tier in $tiers; do
         tw=$(marks "$work/test/kmain_console.elf") sw=$(marks "$work/kmain_console.elf")
         if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-ELF $tier: the test build holds the test panic's text and the test op's state; the shipped one neither"
         else echo "FAIL TESTWORDS-ELF $tier: test build $tw of 2 test marks (the test panic's text, the test op's \`fired\`), shipped $sw (want 2 and 0)"; rc=1; fi
+        # px166 (11-25): pax.slowleave's hold the same way, by two marks: its line's text in the ELF's bytes, and the
+        # hold's static `slow` among its symbols; the shipped kernel's entry asks testwords for a hold and gets none
+        slowmarks() { # ELF: how many of the two it holds
+            local n=0
+            grep -aq 'testwords: a slow leave, cpu ' "$1" && n=$((n + 1))
+            [ "$(nm "$1" | grep -cE ' _Wtestwords\.slow\.')" -gt 0 ] && n=$((n + 1))
+            echo "$n"
+        }
+        tw=$(slowmarks "$work/test/kmain_console.elf") sw=$(slowmarks "$work/kmain_console.elf")
+        if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-SLOWLEAVE-ELF $tier: the test build holds pax.slowleave's line and its hold's state; the shipped one neither"
+        else echo "FAIL TESTWORDS-SLOWLEAVE-ELF $tier: test build $tw of 2 marks (the slow leave's line, the hold's \`slow\`), shipped $sw (want 2 and 0)"; rc=1; fi
         gcc -nostdlib -static -ffreestanding -fno-stack-protector -fno-pie -no-pie -O2 -mgeneral-regs-only -Wall \
             -o "$work/smpprobe" tests/mpx6-smp.d/probe.c
         for spec in "${images[@]}"; do
@@ -198,6 +214,12 @@ for tier in $tiers; do
         fi
         if asked panic2; then
             BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic2.log" "$fw" "$img/panic2.iso" 180 1 --kind panic2 --smp 4 -- -smp 4 -m 512
+        fi
+        # SMP-EXEC-LEAVE: the test build given pax.slowleave=200 at 2 and 4; a kernel panic ends the boot at its line
+        if asked leave; then
+            for n in 2 4; do
+                BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-leave-$n.log" "$fw" "$img/leave.iso" 300 0 --kind leave --smp "$n" -- -smp "$n" -m 512
+            done
         fi
         if asked testwords; then
             log=$work/smp-$fw-testwords.log st=0
