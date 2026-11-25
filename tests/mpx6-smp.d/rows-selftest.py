@@ -793,9 +793,9 @@ def leave_lines(n, leader=('0xa00',) * 4, execs=30, kills=5, exec_st='0x900', ki
     return out + ('SMP-LEAVE done\n' if done else '')
 
 
-def leave_text(n, word=True, slows=12, lines=None, extra='', end=True):
+def leave_text(n, word=True, slows=12, lines=None, extra='', end=True, tgid=lambda i: 0 if i % 3 == 0 else 60 + 4 * i):
     t = (SLOW_WORD if word else '') + head('leave') + block('start', proc(n)) + active_line(n)
-    t += ''.join(f'testwords: a slow leave, cpu {1 + i % (n - 1)}\n' for i in range(slows))
+    t += ''.join(f'testwords: a slow leave, cpu {1 + i % (n - 1)}, slot {5 + i % 3}, tgid {tgid(i)}\n' for i in range(slows))
     t += (lines if lines is not None else leave_lines(n)) + extra
     return t + (block('end', proc(n)) + tail() if end else '')
 
@@ -815,6 +815,14 @@ case('leave: a shipped kernel (the word not taken)', leave_text(4, word=False, s
      set(), {'SMP-EXEC-LEAVE'}, why=r'no `testwords: pax.slowleave=')
 case('leave: the word taken but no processor held', leave_text(4, slows=0), ['--kind', 'leave', '--smp', '4'], set(),
      {'SMP-EXEC-LEAVE'}, why=r'0 slow leaves')
+case('leave at 2: holds only of threads with no process (an exec\'s old leader, charged nothing)',
+     leave_text(2, tgid=lambda i: 0), ['--kind', 'leave', '--smp', '2'], set(), {'SMP-EXEC-LEAVE'},
+     why=r'12 slow leaves, none of a thread with a tgid')
+case('leave green at 2 says how many holds were of a thread with a tgid', leave_text(2), ['--kind', 'leave', '--smp', '2'],
+     {'SMP-EXEC-LEAVE'}, set(), says=r'12 slow leaves, 8 of a thread with a tgid')
+case('leave at 2: the leader check\'s panic is the row\'s red',
+     leave_text(2, lines=leave_lines(2, stop_after=2), extra="PANIC sched: a thread's leader is another process's, slot 0x0000000000000007\npanic: halt\n", end=False),
+     ['--kind', 'leave', '--smp', '2'], set(), {'SMP-EXEC-LEAVE'}, why=r"the kernel said: \[.PANIC sched: a thread's leader is another process's")
 case('leave: an exec round with the wrong status', leave_text(4, lines=leave_lines(4, exec_st='0xdead')),
      ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'}, why=r'exec round 0: status 0xdead, want 0x900')
 case('leave: an exec-kill round not killed', leave_text(4, lines=leave_lines(4, kill_st='0x900')),
