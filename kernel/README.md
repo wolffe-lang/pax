@@ -1517,9 +1517,11 @@ It is the only module that calls kernel/ext2 and kernel/journal (the journal's w
 of its items is ext2's or the journal's own, under the same name (the journal's four with a `journal_`
 prefix), and it keeps no state: nothing a volume does changed when the callers moved onto it.
 `tests/mpx6-ext2`'s SEAM-CALLERS row fails by name on any kernel source that reaches ext2 or the journal
-another way.
+another way. The extent profile came in the same way: `mount_as` carries the type a mount names (4 for `ext4`,
+read-only extent trees) and `LOOKUP_BAD` is how a damaged extent directory's lookup reaches kernel/tree as EIO
+rather than absence; every older item is as it was.
 
 | module or file | what |
 |---|---|
-| `volume/` | the 65 items kernel/tree, fstab, files and procfs use, each forwarded to kernel/ext2 or kernel/journal |
+| `volume/` | the 67 items kernel/tree, fstab, files and procfs use, each forwarded to kernel/ext2 or kernel/journal |
 | `ext2/` | its header names kernel/volume as its only caller |
