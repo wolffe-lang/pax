@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""tests/apt-update-selftest: tools/apt-update's own proof, run in the plan job (Linux). No QEMU, no apt, no sudo:
+python3 and sh, with stand-in commands and APT_UPDATE_QUIET=2, APT_UPDATE_PAUSE=0.
+
+  U1  a command that succeeds is run once: exit 0, its output whole, no word of a second try
+  U2  a command silent past the limit on its first try and quick on its second: exit 0, two tries, the line saying so
+      and a warning annotation, both tries' output in the log
+  U3  silent on both tries: exit 124, two tries, the line that gives up
+  U4  a command that fails (exit 100, apt's own failure status) is not tried again: exit 100, one try, named
+  U5  with no command it runs `apt-get update -q` (a stand-in apt-get first on PATH records its arguments)
+  U6  a limit or pause that is not whole seconds is refused (exit 2, in the tool's own words) before anything runs
+  U7  when tools/silence-cap refuses (off Linux: exit 2, in its own words), that status passes through and nothing
+      is tried again
+Each row asks for the tool's own words as well as its status: on Linux `sh` exits 2 for a script it cannot open, so
+a status alone would pass U6 and U7 with no tool at all (run 45382596126 did).
+Exit 0 when every row passes, 1 otherwise. Off Linux, where tools/silence-cap refuses, U1 to U5 print SKIP with the
+reason; U6 and U7 run everywhere.
+"""
+import os
+import platform
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TOOL = os.path.join(ROOT, 'tools', 'apt-update')
+fails = 0
+
+
+def say(ok, what):
+    global fails
+    print('apt-update-selftest: %s %s' % ('PASS' if ok else 'FAIL', what))
+    fails += not ok
+
+
+def run(args, env=None, timeout=90):
+    t0 = time.monotonic()
+    e = dict(os.environ, APT_UPDATE_QUIET='2', APT_UPDATE_PAUSE='0')
+    e.update(env or {})
+    try:
+        r = subprocess.run(['sh', TOOL] + args, capture_output=True, text=True, timeout=timeout, env=e)
+    except (OSError, subprocess.TimeoutExpired) as x:
+        return 'ERROR %s' % x, -1, time.monotonic() - t0
+    return r.stdout + r.stderr, r.returncode, time.monotonic() - t0
+
+
+work = tempfile.mkdtemp(prefix='apt-update-selftest-')
+
+
+def counted(name, body):
+    """A stand-in command that counts its tries in a file of its own and then runs BODY, with $n the try."""
+    count = os.path.join(work, name)
+    return ['sh', '-c', 'n=$(cat %s 2>/dev/null || echo 0); n=$((n + 1)); echo $n > %s; %s' % (count, count, body)], count
+
+
+def tries(count):
+    try:
+        with open(count) as f:
+            return int(f.read())
+    except OSError:
+        return 0
+
+
+again = 'printed nothing for 2 s; trying once more in 0 s'
+linux = platform.system() == 'Linux'
+if linux:
+    cmd, count = counted('u1', 'echo fetched $n; echo all done')
+    out, rc, secs = run(cmd)
+    say(rc == 0 and tries(count) == 1 and 'fetched 1' in out and 'all done' in out and 'once more' not in out,
+        'U1 a command that succeeds: exit %d, %d try, its output whole, no second try' % (rc, tries(count)))
+
+    cmd, count = counted('u2', 'echo try $n; if [ $n -eq 1 ]; then sleep 631; fi; echo done $n')
+    out, rc, secs = run(cmd)
+    say(rc == 0 and tries(count) == 2 and again in out and '::warning title=apt update tried again::' in out
+        and 'try 1' in out and 'try 2' in out and 'done 2' in out and 'done 1' not in out,
+        'U2 silent on the first try, quick on the second: exit %d, %d tries, the line and the warning, in %.1f s'
+        % (rc, tries(count), secs))
+
+    cmd, count = counted('u3', 'echo try $n; sleep 632')
+    out, rc, secs = run(cmd)
+    say(rc == 124 and tries(count) == 2 and 'printed nothing for 2 s on both tries; giving up (exit 124)' in out,
+        'U3 silent on both tries: exit %d, %d tries, the line that gives up, in %.1f s' % (rc, tries(count), secs))
+
+    cmd, count = counted('u4', 'echo "E: Failed to fetch"; exit 100')
+    out, rc, secs = run(cmd)
+    say(rc == 100 and tries(count) == 1 and 'exited 100 on try 1; not a stall, not tried again' in out
+        and 'once more' not in out,
+        'U4 a command that fails: exit %d, %d try, named, not tried again' % (rc, tries(count)))
+
+    stub = os.path.join(work, 'bin')
+    os.mkdir(stub)
+    record = os.path.join(work, 'apt-get.args')
+    with open(os.path.join(stub, 'apt-get'), 'w') as f:
+        f.write('#!/bin/sh\nprintf "%%s\\n" "$*" > %s\necho "Reading package lists..."\n' % record)
+    os.chmod(os.path.join(stub, 'apt-get'), 0o755)
+    out, rc, secs = run([], env={'PATH': stub + os.pathsep + os.environ.get('PATH', '')})
+    got = open(record).read().strip() if os.path.exists(record) else None
+    say(rc == 0 and got == 'update -q', 'U5 with no command: exit %d, apt-get ran with %r (want %r)' % (rc, got, 'update -q'))
+else:
+    for row in ('U1', 'U2', 'U3', 'U4', 'U5'):
+        print('apt-update-selftest: SKIP %s reason=%s: tools/silence-cap runs on Linux only' % (row, platform.system()))
+
+REFUSE = 'apt-update: APT_UPDATE_QUIET and APT_UPDATE_PAUSE are whole seconds'
+cmd, count = counted('u6', 'echo ran')
+got = [run(cmd, env={'APT_UPDATE_QUIET': '2s'}), run(cmd, env={'APT_UPDATE_PAUSE': '-1'})]
+bad = [rc for out, rc, secs in got]
+named = all(REFUSE in out for out, rc, secs in got)
+say(bad == [2, 2] and named and tries(count) == 0,
+    'U6 a limit or pause not in whole seconds: exits %s, %s, %d tries (want [2, 2], the refusal named, 0)'
+    % (bad, 'the refusal named' if named else 'no refusal of the tool\'s own', tries(count)))
+
+cmd, count = counted('u7', 'echo ran')
+out, rc, secs = run(cmd, env={'SILENCE_CAP_SYSTEM': 'Darwin'})
+refused = 'silence-cap: refused: untested on Darwin' in out
+say(rc == 2 and refused and tries(count) == 0 and 'once more' not in out,
+    'U7 silence-cap refusing: exit %d passed through, %s, %d tries, nothing tried again' % (
+        rc, 'its refusal in the log' if refused else 'no refusal of silence-cap\'s', tries(count)))
+print('apt-update-selftest: %s' % ('PASS' if fails == 0 else 'FAIL (%d)' % fails))
+sys.exit(1 if fails else 0)

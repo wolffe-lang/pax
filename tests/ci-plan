@@ -18,6 +18,10 @@
   P2  the pr tier by path, one change per area: the network's suites for
       kernel/tcp, sound's for user/play, nothing for notes; a kmain, a
       test, a user program and a shared device select their readers.
+      A suite's readings are found in its whole text, comments included:
+      a script whose note names another suite's path reads that path, so
+      a note names another suite by name, never by path (the SMP stage 2
+      suite's row went red when a shell-suite note named its script).
       CI's own files select every suite, on the pr leg, which is the
       merge gate's shape: that run is named full.
   P3  FULL wins: the toolchain pins, the harness, the kernel's entry,
@@ -50,6 +54,13 @@
       repositories of its own. A job that ever needs them for a later git
       command is named here with why (none today); checkouts of other
       repositories are counted apart.
+  P16 every step that runs apt-get ends when apt stalls (pax#540): it has a
+      `timeout-minutes` of its own, at most APT_STEP_MINUTES, and its update
+      is `sudo tools/apt-update` (stopped after two minutes of silence and
+      tried once more), before any `apt-get install`; no bare `apt-get
+      update` is left. The check is shown to say no to a step with no limit,
+      one with a limit over the bound, one with a bare update and one that
+      installs before it updates, and to pass the shape it asks for.
   P8  what a trunk head already has (tools/ci-covered, against a
       stand-in `gh`): a green `tier all` check run at the head is all, a
       green `tier full` alone is full, a red one or another app's is
@@ -569,6 +580,14 @@ expect("P2 a census-only change under the full-matrix label is full, not all",
 expect("P2 the processor suite and its rows are the firmware suite's alone (px161: F12 runs it)",
        plan(["tests/mpx6-cpus", "tests/mpx6-cpus.d/rows.py", "tests/mpx6-cpus.d/rows-selftest.py", "tests/mpx6-cpus.d/probe.c"], **pr),
        "pr", ["mpx6-firmware"])
+# SMP stage 2's suite, its probe, rows and pack fixture are its own job's alone (not the
+# firmware job's, where the processor census runs as F12).
+expect("P2 the SMP stage 2 suite and its files are mpx6-smp's alone",
+       plan(["tests/mpx6-smp", "tests/mpx6-smp.d/probe.c", "tests/mpx6-smp.d/rows.py", "tests/mpx6-smp.d/rows-selftest.py",
+             "tests/mpx6-smp.d/bench.c", "tests/mpx6-smp.d/fixture.py", "tests/mpx6-smp.d/build.py"], **pr), "pr", ["mpx6-smp"])
+expect("P2 the modules programs drive across processors reach the SMP suite with @user",
+       plan(["kernel/process/process.lu", "kernel/vm/vm.lu", "kernel/futex/futex.lu", "kernel/signal/signal.lu"], **pr), "pr",
+       has=["mpx6-smp", "mpx5-forks", "mpx3-threads"], lacks=["mpx2-heap"])
 expect("P2 the MSI and INTx typing helper is the firmware suite's and the two typing jobs' (px76)",
        plan(["tests/mpx6-firmware.d/typing-irq"], **pr), "pr", ["mpx3-console", "mpx3-shell", "mpx6-firmware"])
 expect("P2 the USB session driver reaches the USB and firmware suites (px74, px76)",
@@ -653,7 +672,7 @@ expect("P2 the pelt and boreutils pins reach mpx5-jobs and the shell's suites (p
 # file and the typed session are mpx5-lope's alone; the keys file is
 # read by the suites that read user/console too.
 expect("P2 lope's inputs reach its own suite and the disk playground (px54, px69), and /etc/shrc's den lines mpx5-den's remote image (px100)",
-       plan(["user/lope.pin", "tools/mklope", "user/shrc"], **pr), "pr", ["mpx5-lope", "mpx5-den", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-kasumi", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "census", "mpx6-logs", "mpx5-init"])  # px133: the logs suite's lope and /etc/shrc; px104: its image's /etc/shrc; px112: its den, through tools/install-den; px116: /etc/shrc writes burrowd_config's SetEnv line (tools/system-env), in the distribution's roots too; px124: mpx5-init's /etc/shrc (logout)
+       plan(["user/lope.pin", "tools/mklope", "user/shrc"], **pr), "pr", ["mpx5-lope", "mpx5-den", "mpx6-disktools", "mpx6-install", "mpx6-fsck", "mpx6-kasumi", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "census", "mpx6-logs", "mpx5-init", "mpx6-smp"])  # mpx6-smp: SMP-BUILD's den, through tools/mkden; px133: the logs suite's lope and /etc/shrc; px104: its image's /etc/shrc; px112: its den, through tools/install-den; px116: /etc/shrc writes burrowd_config's SetEnv line (tools/system-env), in the distribution's roots too; px124: mpx5-init's /etc/shrc (logout)
 # px105: mpx4-console-net's https row builds its own den through tools/mkden,
 # so what mkden's text names (user/den.pin, tools/install-den and, through
 # it, den's wrappers and user/shrc) reaches that suite too.
@@ -749,7 +768,7 @@ expect("P2 who a process is reaches mpx6-services with the user suites (@user)",
 # px90: den's pin, builder, keys and rows are mpx5-den's; its installer
 # reaches the distribution's checks too (tools/distribution-root runs it).
 expect("P2 den's pin and builder are mpx5-den's, and the console's https row's (px90, px105)",
-       plan(["user/den.pin", "tools/mkden"], **pr), "pr", ["mpx5-den", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "mpx6-logs"])  # px104: the push suite's den; px112: burrowd's den; px133: the logs suite's, through tools/mkburrow
+       plan(["user/den.pin", "tools/mkden"], **pr), "pr", ["mpx5-den", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "mpx6-logs", "mpx6-smp"])  # mpx6-smp: SMP-BUILD's den; px104: the push suite's den; px112: burrowd's den; px133: the logs suite's, through tools/mkburrow
 expect("P2 den's session keys reach mpx5-den (px90)",
        plan(["user/console/den.keys"], **pr), "pr", has=["mpx5-den"], lacks=["mpx2-heap", "mpx4-tcp", "mpx5-scent"])
 expect("P2 den's extractor and rows are mpx5-den's alone (px90)",
@@ -757,9 +776,9 @@ expect("P2 den's extractor and rows are mpx5-den's alone (px90)",
 expect("P2 den's remote session keys reach mpx5-den (px100)",
        plan(["user/console/den-remote.keys"], **pr), "pr", has=["mpx5-den"], lacks=["mpx2-heap", "mpx4-tcp", "mpx5-scent"])
 expect("P2 den's service wrappers reach mpx5-den and the distribution's checks, as its installer does (px100)",
-       plan(["user/den/upload-pack", "user/den/receive-pack"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "mpx6-logs"])  # px133: through tools/mkburrow
+       plan(["user/den/upload-pack", "user/den/receive-pack"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "mpx6-logs", "mpx6-smp"])  # px133: through tools/mkburrow; mpx6-smp: tools/mkden
 expect("P2 den's installer reaches mpx5-den and the distribution's checks (px90)",
-       plan(["tools/install-den"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "mpx6-logs"])  # px133: through tools/mkburrow
+       plan(["tools/install-den"], **pr), "pr", ["mpx5-den", "census", "mpx6-install", "mpx4-console-net", "mpx4-console-push", "mpx5-burrowd", "mpx6-logs", "mpx6-smp"])  # px133: through tools/mkburrow; mpx6-smp: tools/mkden
 expect("P2 ext2 and the virtio disk reach mpx5-den's /home (px90)",
        plan(["kernel/ext2/ext2.lu", "kernel/vblk/vblk.lu"], **pr), "pr", has=["mpx5-den", "mpx6-ext2"], lacks=["mpx2-heap"])
 expect("P2 scent's fixture and rows are mpx5-scent's alone (px64)",
@@ -1171,6 +1190,60 @@ say(own_co > 0 and not kept,
     "P15 every checkout whose job then runs a command keeps no git credentials (%d of this repository, %d of others; kept for a "
     "later git command by: %s)%s" % (own_co, other_co, ", ".join("%s (%s)" % kv for kv in PERSIST_OK.items()) or "none",
                                      (": still kept in %d: %s%s" % (len(kept), " ".join(kept[:10]), " …" if len(kept) > 10 else "")) if kept else ""))
+
+# --- P16 every step that runs apt-get ends when apt stalls (pax#540) ----------------------------
+# pax#540: an apt step takes a median of 322 s, at most 510 s, in a full run, and none that succeeded took over 17
+# minutes among the 20,479 jobs read (their installs up to 999 s, their updates up to 85 s). The stalls, every one in
+# `apt-get update`, held their jobs 45 to 160 minutes. tools/apt-update stops an update silent for 120 s and tries it
+# once more; the step's limit bounds the rest.
+APT_STEP_MINUTES = 25
+
+
+def apt_problems(step):
+    """What keeps one step that runs apt-get from ending when apt stalls: [] when nothing does."""
+    if "apt-get" not in step and "tools/apt-update" not in step:
+        return []
+    found = []
+    limit = re.search(r"^        timeout-minutes: (\d+)$", step, re.M)
+    if not limit:
+        found.append("no timeout-minutes of its own")
+    elif int(limit.group(1)) > APT_STEP_MINUTES:
+        found.append("timeout-minutes %s, over %d" % (limit.group(1), APT_STEP_MINUTES))
+    if re.search(r"apt-get\s+(?:-\S+\s+)*update\b", step):
+        found.append("a bare apt-get update")
+    update = re.search(r"^          sudo tools/apt-update$", step, re.M)
+    install = re.search(r"apt-get\s+(?:-\S+\s+)*install\b", step)
+    if not update:
+        found.append("no sudo tools/apt-update")
+    elif install and install.start() < update.start():
+        found.append("an install before the update")
+    return found
+
+
+GOOD_APT = ("      - name: qemu (apt)\n        timeout-minutes: %d\n        run: |\n          sudo tools/apt-update\n"
+            "          sudo apt-get install -y -q qemu-system-x86\n" % APT_STEP_MINUTES)
+apt_says_no = (not apt_problems(GOOD_APT)
+               and apt_problems(GOOD_APT.replace("        timeout-minutes: %d\n" % APT_STEP_MINUTES, ""))
+               and apt_problems(GOOD_APT.replace("timeout-minutes: %d" % APT_STEP_MINUTES,
+                                                 "timeout-minutes: %d" % (APT_STEP_MINUTES + 1)))
+               and apt_problems(GOOD_APT.replace("sudo tools/apt-update", "sudo apt-get update -q"))
+               and apt_problems(GOOD_APT.replace("          sudo tools/apt-update\n", "")
+                                + "          sudo tools/apt-update\n"))
+apt_steps, apt_bad = 0, []
+for j in JOBS:
+    for st in re.split(r"(?m)^(?=      - )", blocks[j]):
+        if not st.startswith("      - "):
+            continue
+        if "apt-get" in st or "tools/apt-update" in st:
+            apt_steps += 1
+            why = apt_problems(st)
+            if why:
+                name = (re.match(r"      - name: (.*)", st) or [None, st.split("\n")[0].strip()])[1]
+                apt_bad.append("%s: %s (%s)" % (j, name, ", ".join(why)))
+say(apt_steps > 0 and not apt_bad and apt_says_no,
+    "P16 every step that runs apt-get (%d) has a limit of at most %d minutes and updates through tools/apt-update%s%s"
+    % (apt_steps, APT_STEP_MINUTES, (": %d do not: %s%s" % (len(apt_bad), "; ".join(apt_bad[:3]), " …" if len(apt_bad) > 3 else ""))
+       if apt_bad else "", "" if apt_says_no else "; the check does not say no to a step without the limit or the tool"))
 
 # --- P7 the red nightly's issue (tl29) ------------------------------------------------------
 FAKE_GH = r'''#!/usr/bin/env bash

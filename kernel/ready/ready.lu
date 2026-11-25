@@ -77,9 +77,15 @@
 //! are O_RDWR and O_NONBLOCK alone: EFD_SEMAPHORE is the counter's,
 //! never a status flag (F_GETFL and fdinfo's `flags` on Linux, measured).
 //!
-//! **`sched_getaffinity(pid, len, mask)`**: PAX runs on one CPU: 8, and
-//! the mask's first eight bytes with bit 0 set; -EINVAL for a mask
-//! under eight bytes, -ESRCH for a thread that is none.
+//! **`sched_getaffinity(pid, len, mask)`**: 8, and the mask's first eight
+//! bytes with a bit for each processor that runs threads (px166:
+//! kernel/smp's `runners_mask`, CPU 0's bit always; one bit before, and
+//! with one processor); -EINVAL for a mask under eight bytes, -ESRCH for a
+//! thread that is none. **`sched_setaffinity(pid, len, mask)`** (px166):
+//! accepted and ignored, 0 (every thread may run on every processor that
+//! runs threads; stage 4 makes the mask real): -ESRCH for a thread that is
+//! none, -EFAULT for a mask that cannot be read, -EINVAL for one that names
+//! no processor that runs threads (its first `len` bytes, eight at most).
 //!
 //! No region, no heap: a call that waits gives up its kernel stack.
 //! Written from poll(2), epoll(7), epoll_create1(2), epoll_ctl(2),
@@ -93,6 +99,7 @@ use event
 use files
 use log
 use sched
+use smp
 use signal
 use timer
 use uaccess
@@ -490,7 +497,8 @@ pub fn eventfd2(a: u64, init: u64, flags: u64) -> u64 {
     fd
 }
 
-/// `sched_getaffinity(pid, len, mask)`: 8, with CPU 0 in the mask.
+/// `sched_getaffinity(pid, len, mask)`: 8, the mask the processors that
+/// run threads (px166; CPU 0 alone before).
 pub fn sched_getaffinity(pml4: u64, pid: u64, len: u64, mask: u64) -> u64 {
     if len < 8 {
         return neg(EINVAL)
@@ -502,8 +510,28 @@ pub fn sched_getaffinity(pml4: u64, pid: u64, len: u64, mask: u64) -> u64 {
     if !uaccess.writable(pml4, mask, 8) {
         return neg(EFAULT)
     }
-    uaccess.put(pml4, mask, 1, 8)
+    uaccess.put(pml4, mask, smp.runners_mask(), 8)
     8
+}
+
+/// px166: `sched_setaffinity(pid, len, mask)`: accepted and ignored (0)
+/// when the mask names a processor that runs threads (the header).
+pub fn sched_setaffinity(pml4: u64, pid: u64, len: u64, mask: u64) -> u64 {
+    let p = pid & 0xffffffff
+    if p != 0 && !sched.raise_tid(0, p, 0, 0) {
+        return neg(ESRCH)
+    }
+    let n = if len < 8 { len } else { 8 }
+    if n == 0 {
+        return neg(EINVAL)
+    }
+    if !uaccess.readable(pml4, mask, n) {
+        return neg(EFAULT)
+    }
+    if uaccess.get(pml4, mask, n) & smp.runners_mask() == 0 {
+        return neg(EINVAL)
+    }
+    0
 }
 
 /// The books: kernel/event's counts on one line,

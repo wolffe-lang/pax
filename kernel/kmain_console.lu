@@ -99,6 +99,7 @@ use identity
 use initramfs
 use interrupts
 use ip
+use klock
 use latency
 use log
 use mouse
@@ -117,6 +118,7 @@ use sound
 use speaker
 use sync
 use tcp
+use testwords
 use timer
 use tree
 use triage
@@ -624,12 +626,18 @@ export fn kmain() {
     fpu.report()
     triage.step(12)
     sched.start(pml4)
+    sched.park_selftest() // px166 (step 5b): tests/mpx6-smp's SMP-PARK
+    testwords.start() // px166 (the STOP step): each test word given, ignored by name as shipped
     sched.report()
+    // px166: the boot thread is the first kernel thread and holds the kernel
+    // lock while it runs, as every kernel thread does (kernel/klock).
+    klock.boot()
     triage.step(13)
     user.start()
     user.report()
-    // px161: every application processor started, given its own state and
-    // parked idle (none under `nosmp`); the boot processor runs every thread.
+    // px161: every application processor started and given its own state
+    // (none under `nosmp`); px166: each runs threads from here, as many as
+    // `pax.cpus=N` allows when the command line names it.
     // # Safety: the address of kernel/smp's export; nothing is read.
     smp.start_aps(pml4, unsafe { pax_ap_main as u64 })
     triage.step(14)
@@ -809,6 +817,7 @@ export fn kmain() {
         log.line("staged: the staged program ended; reboot")
         power.reboot()
     }
+    smp.stop_for_end() // px166 (the STOP step): every other processor stopped, interrupts off
     log.line("halt")
-    panic.halt()
+    klock.halt_given_back() // px166: the lock given back whole, as before the STOP step
 }

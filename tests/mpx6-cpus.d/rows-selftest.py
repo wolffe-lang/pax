@@ -13,6 +13,7 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 CPUS_VA, SPAN = 0xffffd08000000000, 0x40000
 SYMS = {'pax_ap_halt': (0xffffffff80001000, 0x10), 'pax_ap_park': (0xffffffff80000ff0, 0x10),
+        'pax_ap_stop': (0xffffffff80001010, 0x10),
         'pax_cpu0': (0xffffffff80200000, 0x200),
         'pax_gdt': (0xffffffff80201000, 0x40), 'pax_tss': (0xffffffff80201040, 0x70),
         'pax_idt': (0xffffffff80202000, 0x1000)}
@@ -31,7 +32,7 @@ def regs(k, *, rip, rsp, gs, gdt, tr, hlt=1, idt=SYMS['pax_idt'][0], cr0=0x80010
 def ap_regs(k, i=None, **kw):
     i = k if i is None else i
     rec = CPUS_VA + i * SPAN
-    base = dict(rip=SYMS['pax_ap_halt'][0] + 3, rsp=rec + 0xbf00, gs=rec, gdt=rec + 256, tr=rec + 384)
+    base = dict(rip=SYMS['pax_ap_stop'][0] + 2, rsp=rec + 0xbf00, gs=rec, gdt=rec + 256, tr=rec + 384, rfl=0x46)
     base.update(kw)
     return regs(k, **base)
 
@@ -43,15 +44,24 @@ def bsp_regs(**kw):
     return regs(0, **base)
 
 
-def proc(n, cpus, aps_state='idle', ticks=100, nmis=0, pid=1, started=None, idle=None, disabled=0):
-    head = f'available {n}\nactive 1\n'
+def proc(n, cpus, aps_state='runs', ticks=100, nmis=0, pid=1, started=None, idle=None, disabled=0, on=0):
+    # aps_state `runs`: stage 2's release, every application processor runs threads (its `runs` line, `active`
+    # every processor); `idle`: stage 1's default, the boot processor alone (`active 1`); `on`: the processor the
+    # probe runs on when it reads (its pid there; CPU 0 then runs a kernel thread or idles)
+    active = cpus if aps_state == 'runs' else 1
+    head = f'available {n}\nactive {active}\n'
     head += 'source unavailable\n' if n == 'unknown' else f'source ACPI MADT\nonline-capable 0\ndisabled {disabled}\n'
     started = cpus if started is None else started
-    idle = (cpus - 1 if aps_state == 'idle' else 0) if idle is None else idle
-    body = f'started {started}\nidle {idle}\ncpu 0 apic 0 boot current pid {pid} ticks {ticks} nmis 0\n'
+    idle = (cpus - 1 if aps_state in ('idle', 'runs') else 0) if idle is None else idle
+    cur0 = f'pid {pid}' if on == 0 else 'kernel'
+    body = f'started {started}\nidle {idle}\ncpu 0 apic 0 boot current {cur0} ticks {ticks} nmis 0\n'
     for i in range(1, cpus):
         if aps_state == 'idle':
             body += f'cpu {i} apic {i} idle current idle ticks {ticks} wakes {ticks + 1} nmis {nmis}\n'
+        elif aps_state == 'runs':
+            cur = f'pid {pid}' if on == i else 'idle'
+            body += (f'cpu {i} apic {i} runs current {cur} ticks {ticks} user 0 resched 0 kthreads 0 tlb 0 '
+                     f'wakes {ticks + 1} nmis {nmis}\n')
         else:
             body += f'cpu {i} apic {i} {aps_state}\n'
     return head + body
@@ -66,6 +76,12 @@ def transcript(n, cpus, boot_lines, p1, p2, gs='CPU-USER-GS ok 3 reads', pid=1):
 
 
 def idle_line(aps):
+    # stage 2's release: every started processor runs threads
+    return (f'cpus: application processors idle {aps} of {aps} in 2 ms, 84 KiB each ({aps * 84 + 12} KiB with their '
+            f'tables); {aps + 1} processors run threads')
+
+
+def stage1_line(aps):
     return (f'cpus: application processors idle {aps} of {aps} in 2 ms, 84 KiB each ({aps * 84 + 12} KiB with their '
             'tables); the boot processor runs every thread')
 
@@ -87,6 +103,21 @@ for cpus in (2, 4, 16):
     cases.append((f'green {cpus}', g, [], {'CPU-CENSUS', 'SMP-ENTER', 'SMP-USER-GS', 'SMP-SCHED', 'SMP-TICKS',
                                          'SMP-IDLE', 'SMP-PRIVATE'}, set()))
 
+# Stage 2's release: the probe may run on any processor (CPU 0 then runs a kernel thread or idles); stage 1's
+# default (the boot processor runs every thread, the others on the idle line, `active 1`) is red now by SMP-ENTER.
+g = green(4)
+g['text'] = transcript(4, 4, [idle_line(3), private_line(4)], proc(4, 4, on=2), proc(4, 4, ticks=130, on=2))
+cases.append(('the probe on an application processor', g, [], {'CPU-CENSUS', 'SMP-ENTER', 'SMP-TICKS', 'SMP-PRIVATE'},
+              set()))
+g = green(4)
+g['text'] = transcript(4, 4, [stage1_line(3), private_line(4)], proc(4, 4, aps_state='idle'),
+                       proc(4, 4, aps_state='idle', ticks=130))
+cases.append(("stage 1's default: the boot processor runs every thread", g, [], {'CPU-CENSUS', 'SMP-TICKS'},
+              {'SMP-ENTER'}))
+g = green(4)
+g['text'] = g['text'].replace('cpu 3 apic 3 runs current idle ticks 100', 'cpu 3 apic 3 runs current pid 7 ticks 100', 1)
+cases.append(('another program current where only the probe runs', g, [], {'SMP-ENTER'}, {'SMP-TICKS'}))
+
 # Trunk: no application processor enters; the dump shows them in wait-for-SIPI, GS 0.
 trunk_proc = 'available 4\nactive 1\nsource ACPI MADT\nonline-capable 0\ndisabled 0\n'
 trunk_dump = regs(0, rip=0xffffffff80005000, rsp=0xffffd0000000ff00, gs=0, gdt=SYMS['pax_gdt'][0], tr=SYMS['pax_tss'][0]) + \
@@ -107,6 +138,23 @@ g = green(4)
 shared = bsp_regs() + ''.join(ap_regs(k, gs=SYMS['pax_cpu0'][0]) for k in range(1, 4))
 g['dumps'] = [shared] * 3
 cases.append(('plant shared GS', g, [], {'SMP-ENTER', 'SMP-IDLE'}, {'SMP-PRIVATE'}))
+
+# Stage 2's STOP step: SMP-IDLE asks pax_ap_stop with interrupts off. Stage 1's form (pax_ap_halt, interrupts on)
+# is red now, as is a processor in pax_ap_stop with interrupts on; the end's own `cpus:` line is not a stop.
+g = green(4)
+old = bsp_regs() + ap_regs(1, rip=SYMS['pax_ap_halt'][0] + 3, rfl=0x246) + ap_regs(2) + ap_regs(3)
+g['dumps'] = [old] * 3
+cases.append(("an application processor in stage 1's idle halt", g, [], {'SMP-SCHED'}, {'SMP-IDLE'}))
+g = green(4)
+ion = bsp_regs() + ap_regs(1, rfl=0x246) + ap_regs(2) + ap_regs(3)
+g['dumps'] = [ion] * 3
+cases.append(('stopped with interrupts on', g, [], {'SMP-SCHED'}, {'SMP-IDLE'}))
+g = green(4)
+g['text'] += 'cpus: 3 application processors stopped for the end\nhalt\n'
+cases.append(("the end's stop line", g, [], {'SMP-SCHED', 'SMP-IDLE', 'SMP-ENTER'}, set()))
+g = green(4)
+g['text'] += 'cpus: cpu 2 stopped: cause 0x1001\n'
+cases.append(("a fault's stop line beside it", g, [], {'SMP-IDLE'}, {'SMP-SCHED'}))
 
 # One dump catches an application processor in its tick handler: the others save the row.
 g = green(4)
@@ -131,7 +179,8 @@ cases.append(('no kernel check', g, [], {'SMP-ENTER'}, {'SMP-PRIVATE'}))
 # The scheduler check: an application processor stopped by name.
 g = green(4)
 g['text'] = g['text'].replace(private_line(4), private_line(4) + '\ncpus: cpu 2 stopped: entered the scheduler')
-g['text'] = g['text'].replace('cpu 2 apic 2 idle current idle ticks 130 wakes 131 nmis 0', 'cpu 2 apic 2 stopped entered the scheduler')
+g['text'] = g['text'].replace('cpu 2 apic 2 runs current idle ticks 130 user 0 resched 0 kthreads 0 tlb 0 wakes 131 nmis 0',
+                              'cpu 2 apic 2 stopped entered the scheduler')
 cases.append(('ap in the scheduler', g, [], {'SMP-ENTER'}, {'SMP-SCHED', 'SMP-TICKS'}))
 
 # Ticks that do not advance; the boot processor's current not the probe.
@@ -197,8 +246,9 @@ d = green(4)['dumps'][0]
 nm = dict(n='4', text=transcript(4, 4, nmi_lines, proc(4, 4, nmis=1), proc(4, 4, ticks=130, nmis=1)), dumps=[d] * 3)
 cases.append(('nmi', nm, ['--mode', 'nmi'], {'SMP-NMI', 'SMP-ENTER', 'SMP-PRIVATE'}, set()))
 nm2 = dict(nm)
-nm2['text'] = nm['text'].replace('nmis 1', 'nmis 0', 1).replace('cpu 1 apic 1 idle current idle ticks 100 wakes 101 nmis 1',
-                                                                'cpu 1 apic 1 idle current idle ticks 100 wakes 101 nmis 2')
+nm2['text'] = nm['text'].replace(
+    'cpu 1 apic 1 runs current idle ticks 100 user 0 resched 0 kthreads 0 tlb 0 wakes 101 nmis 1',
+    'cpu 1 apic 1 runs current idle ticks 100 user 0 resched 0 kthreads 0 tlb 0 wakes 101 nmis 2')
 cases.append(('nmi counted twice', nm2, ['--mode', 'nmi'], {'SMP-ENTER'}, {'SMP-NMI'}))
 
 bad = 0

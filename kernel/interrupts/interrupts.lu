@@ -10,9 +10,16 @@
 //! throughout (every gate is an interrupt gate, kernel/idt).
 //!
 //! - px161: on an application processor (kernel/percpu's index not 0)
-//!   every vector but the NMI is kernel/smp's (`ap_interrupt`: its tick,
-//!   its spurious vector, or a stop), and the NMI is counted in its record
-//!   with no line; none of the boot processor's work below runs there;
+//!   the NMI is counted in its record with no line. px166: kernel/smp's
+//!   `ap_early` then answers its spurious vector and stops it on a vector
+//!   it never takes, before the kernel lock; everything else it takes
+//!   under the lock as below: its own tick (vector 32: counted and
+//!   acknowledged at its local APIC, then kernel/sched's `preempt` for its
+//!   running thread; none of CPU 0's tick duties), RESCHED, and the
+//!   switches, system calls and faults of the threads it runs;
+//! - vector 48, RESCHED (px166, from another processor, on any one):
+//!   acknowledged and counted (kernel/smp's `took_resched`), then
+//!   kernel/sched's `kick`: an idle processor takes the queue's head;
 //! - vector 2, the NMI (px77d; its gate on IST2): one line for each of
 //!   the first eight, `nmi: <n> at rip 0x<r> reason 0x<p>, continuing`,
 //!   and the interrupted code resumes, whatever ring it was in; nothing
@@ -87,8 +94,10 @@
 //! No Linux source; no other kernel's source.
 
 use console
+use apic
 use gdt
 use idt
+use klock
 use log
 use net
 use panic
@@ -99,6 +108,8 @@ use smp
 use sound
 use speaker
 use timer
+use testwords
+use tlb
 use trace
 use triage
 use user
@@ -397,22 +408,73 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
         }
         return f
     }
-    // px161: an application processor's tick, spurious vector or fault is
-    // kernel/smp's: none of the boot processor's work below runs there.
+    // px166: the shootdown (kernel/tlb's vector 49), answered before the
+    // kernel lock and kernel/smp's `ap_early`: its requester holds the lock
+    // and spins for this answer. `answer` touches this processor's own
+    // mailbox, counter, TLB and CR3 alone; the frame resumes as it came.
+    if unsafe { f[0].vector } == tlb.VECTOR {
+        tlb.answer()
+        apic.eoi()
+        return f
+    }
+    // px161: an application processor's spurious vector, or a vector it
+    // never takes, is kernel/smp's alone (px166: `ap_early`; 0 for every
+    // other, taken under the lock below).
     if percpu.index() != 0 {
         // # Safety: the frame's address; kernel/smp hands back `f` itself.
-        return unsafe { smp.ap_interrupt(f as u64) as *Frame }
+        let e = unsafe { smp.ap_early(f as u64) }
+        if e != 0 {
+            // # Safety: `e` is `f`.
+            return unsafe { e as *Frame }
+        }
+    }
+    // px166: the kernel lock (kernel/klock), taken by every entry the two
+    // returns above do not answer, before any kernel state is read; a fresh
+    // hold gives the running thread its ambient region back. A processor
+    // that comes in from ring 3 must not hold it already: every way into
+    // ring 3 gives it back (klock's header), so a hold carried out is a bug,
+    // named here rather than healed (the other processors would have spun).
+    // # Safety: the frame's address, read by kernel/user.
+    if user.from_user(unsafe { f as u64 }) && klock.held_here() {
+        panic.fail("klock: entered from ring 3 holding it, cpu ", percpu.index())
+    }
+    if klock.enter() {
+        sched.ambient_resume()
     }
     let g = route(f)
     // # Safety: the frame `route` returned is this one or a saved frame
     // on a live thread's stack; what kernel/signal returns is one too.
-    unsafe { signal.on_return(g as u64) as *Frame }
+    let h = unsafe { signal.on_return(g as u64) }
+    // px166: the lock given back whole when `h` resumes ring 3 or the idle
+    // loop, kept one level up otherwise (kernel/user's `hand_back`).
+    let r = user.hand_back(h)
+    // # Safety: `r` is `h`, the frame kernel/signal returned.
+    unsafe { r as *Frame }
 }
 
 /// The vector's own work: the frame to resume.
 fn route(f: *Frame) -> *Frame {
     // # Safety: `f` is the trampoline's frame, live for this call.
     let v = unsafe { f[0].vector }
+    // px166 (step 5a): the door. A thread another processor ended in place
+    // (exit_group, exec) while it ran in ring 3 or spun for the lock leaves
+    // here: its system call or ring-3 fault is never routed. Its ticks and
+    // RESCHEDs switch it off in kernel/sched (`preempt`, `kick`); CPU 0's
+    // devices are routed as ever, and the ender's RESCHED follows.
+    // # Safety: the frame's address; nothing is read here.
+    if (v == user.SYSCALL || (v < 32 && user.from_user(unsafe { f as u64 }))) && sched.ended_here() {
+        // # Safety: the frame sched hands back is a saved frame on a live
+        // thread's stack or an idle loop's.
+        return unsafe { sched.leave_ended(f as u64) as *Frame }
+    }
+    // px166: a thread owed its group exit's PTRACE_EVENT_EXIT (another
+    // processor's exit_group found it running here) takes it here: its
+    // system call or ring-3 fault is never routed.
+    // # Safety: the frame's address; nothing is read here.
+    if (v == user.SYSCALL || (v < 32 && user.from_user(unsafe { f as u64 }))) && sched.owes_exit_stop() {
+        // # Safety: as above.
+        return unsafe { sched.take_exit_stop(f as u64) as *Frame }
+    }
     // px102: the DPL-3 INT3 gate delivers #BP, not #GP. A traced
     // user receives a stop; an untraced user takes SIGTRAP normally.
     if v == 1 && !user.from_user(unsafe { f as u64 }) && trace.kernel_debug(unsafe { f as u64 }) { return f }
@@ -436,7 +498,17 @@ fn route(f: *Frame) -> *Frame {
         return f
     }
     if v == timer.MASTER_BASE {
+        // px166: an application processor's tick is its own: counted and
+        // acknowledged, then its running thread's quantum; every duty below
+        // is CPU 0's.
+        if percpu.index() != 0 {
+            // # Safety: the frame's address; nothing is read here.
+            smp.ap_tick(user.from_user(unsafe { f as u64 }))
+            // # Safety: as below.
+            return unsafe { sched.preempt(f as u64) as *Frame }
+        }
         timer.tick()
+        testwords.tick(timer.ticks()) // px166: nothing as shipped (a test build's test panic)
         smp.report_stops() // px161: an application processor stopped since, named once
         speaker.tick(timer.ticks()) // px18: a KDMKTONE tone's end
         xhci.tick()
@@ -447,10 +519,17 @@ fn route(f: *Frame) -> *Frame {
         // # Safety: the frame's address; nothing is read here.
         if user.from_user(unsafe { f as u64 }) {
             user.count_tick() // px09: a tick that landed in ring 3
+            percpu.count(percpu.USER) // px166: CPU 0's own count of them
         }
         // # Safety: the frame's address, and the one sched hands back is
         // a saved frame on a live thread's stack.
         return unsafe { sched.preempt(f as u64) as *Frame }
+    }
+    if v == smp.RESCHED_VECTOR {
+        smp.took_resched()
+        // # Safety: the frame's address, and the one sched hands back is
+        // a saved frame on a live thread's stack or an idle loop's.
+        return unsafe { sched.kick(f as u64) as *Frame }
     }
     if v == SWITCH {
         // # Safety: as above.

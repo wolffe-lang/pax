@@ -1,0 +1,179 @@
+//! ipi — px166 (SMP stage 2): the processors' records and the fixed IPI,
+//! below every module that sends one: kernel/tlb (a shootdown, the end's
+//! STOP) and kernel/panic (a panic's STOP, which cannot import kernel/tlb:
+//! tlb imports panic). Each processor's mailbox words are kernel/percpu's;
+//! the protocol is kernel/tlb's header's.
+//!
+//! What a panic writes here without the kernel lock: each target's TLB_VA
+//! and TLB_REQ, and `gen`. Each is one aligned 64-bit store, which x86-64
+//! never tears (SDM vol. 3A §8.1.1). A target may read one sender's REQ
+//! with another's VA: an INVLPG of a cause value (it only drops a TLB
+//! entry), or a STOP whose CAUSE holds a VA. Two senders may draw the same
+//! generation: a STOP's sender polls STATE, not ACK; a shootdown requester
+//! that sees its ACK written by a STOP answer of the same generation reads
+//! it from a processor that never runs again.
+//!
+//! Written from the Intel SDM vol. 3A §8.1.1, §8.2.2 and §11.6.1. No Linux
+//! source; no other kernel's source.
+
+use percpu
+use sync
+
+extern "c" fn pax_rdtsc() -> u64
+extern "c" fn pax_wrmsr(msr: u64, v: u64)
+
+/// The STOP op (kernel/tlb's mailbox), its causes and its bounds, in TSC
+/// cycles: 1 s and 100 ms at 4 GHz (longer on a slower TSC; under TCG the
+/// TSC follows the host's clock while the guest runs slower).
+pub const STOP: u64 = 2
+/// The vector every request rides (kernel/tlb's 49: boot/isr.S, kernel/idt).
+pub const VECTOR: u64 = 49
+pub const CAUSE_END: u64 = 0x2001
+pub const CAUSE_PANIC: u64 = 0x2002
+pub const END_BOUND: u64 = 4000000000
+pub const PANIC_BOUND: u64 = 400000000
+/// At most this many processors (kernel/smp's MAX): one mask word.
+const MAX: u64 = 64
+
+/// kernel/smp's `start` (through kernel/tlb) hands these over once, before
+/// any application processor is released.
+var x2: bool = false
+var lapic: u64 = 0
+var base: u64 = 0
+var span: u64 = 0
+/// The processors with a record (kernel/smp's `made` + 1); 0 until `start`.
+var n: u64 = 0
+/// The last generation asked, by a shootdown or a STOP.
+var gen: u64 = 0
+
+pub fn start(x2apic: bool, lapic_va: u64, windows: u64, each: u64) {
+    // # Safety: written once by CPU 0 before any application processor is
+    // released; read after.
+    unsafe {
+        x2 = x2apic
+        lapic = lapic_va
+        base = windows
+        span = each
+        n = 1
+    }
+}
+
+pub fn made(i: u64) {
+    // # Safety: as `start`; CPU 0 makes the records one at a time.
+    unsafe {
+        if i + 1 > n && i < MAX {
+            n = i + 1
+        }
+    }
+}
+
+/// The processors with a record; 0 before kernel/smp's start (a panic
+/// before it reads no per-processor word).
+pub fn count() -> u64 {
+    // # Safety: as `start`.
+    unsafe { n }
+}
+
+pub fn record(i: u64) -> u64 {
+    if i == 0 {
+        return percpu.boot_record()
+    }
+    // # Safety: as `start`.
+    unsafe { base + i * span }
+}
+
+/// Processor `i` (record `r`) runs: CPU 0, or an application processor
+/// whose STATE is IDLE (not parked, not stopped).
+pub fn runs(i: u64, r: u64) -> bool {
+    i == 0 || percpu.get(r, percpu.STATE) == percpu.IDLE
+}
+
+/// The next generation: one more than the last asked.
+pub fn next_gen() -> u64 {
+    // # Safety: the kernel lock's holder writes it, or a panic (above).
+    let g = unsafe { gen } + 1
+    unsafe { gen = g }
+    g
+}
+
+/// A fixed IPI, vector `v`, to the processor whose APIC ID is `dest`:
+/// delivery mode fixed, edge, assert (SDM vol. 3A §11.6.1), as kernel/apic's
+/// `send_fixed`, which this module cannot import (apic imports paging).
+pub fn send(dest: u64, v: u64) {
+    let low: u64 = 0x4000 | (v & 0xff)
+    // # Safety: as `start`.
+    if unsafe { x2 } {
+        // # Safety: cpu.S's WRMSR of the x2APIC ICR (0x830).
+        unsafe { pax_wrmsr(0x830, (dest << 32) | low) }
+        return
+    }
+    // # Safety: the local APIC's page, mapped by kernel/apic's `start`
+    // before kernel/smp hands its address here; 32-bit accesses to the
+    // ICR's high and low words, then its delivery status waited out.
+    unsafe {
+        ((lapic + 0x310) as *u32).write_volatile(((dest & 0xff) << 24) as u32)
+        ((lapic + 0x300) as *u32).write_volatile(low as u32)
+    }
+    var k: u64 = 0
+    // # Safety: as above.
+    while k < 1000000 && unsafe { ((lapic + 0x300) as *u32).read_volatile() } & 0x1000 != 0 {
+        k += 1
+    }
+}
+
+/// How many other processors run now (those `stop_others` would ask).
+pub fn others() -> u64 {
+    let cnt = count()
+    if cnt == 0 {
+        return 0
+    }
+    let me = percpu.mine()
+    var k: u64 = 0
+    var i: u64 = 0
+    while i < cnt {
+        if record(i) != me && runs(i, record(i)) { k += 1 }
+        i += 1
+    }
+    k
+}
+
+/// Every other processor that runs asked to stop with `cause` (kernel/tlb's
+/// STOP, vector 49), then waited for, at most `bound` TSC cycles in all:
+/// the mask (bit i) of those not STOPPED by then. Never panics, never waits
+/// past the bound. The end calls it holding the kernel lock; a panic with
+/// or without.
+pub fn stop_others(cause: u64, bound: u64) -> u64 {
+    let cnt = count()
+    if cnt < 2 {
+        return 0
+    }
+    let me = percpu.mine()
+    let _off = sync.irq_save()
+    let g = next_gen()
+    var sent: u64 = 0
+    var i: u64 = 0
+    while i < cnt {
+        let r = record(i)
+        if r != me && runs(i, r) {
+            percpu.put(r, percpu.TLB_VA, cause)
+            percpu.put(r, percpu.TLB_REQ, (g << 8) | STOP)
+            send(percpu.get(r, percpu.APIC), VECTOR)
+            sent |= 1 << i
+        }
+        i += 1
+    }
+    // # Safety: fpu.S's RDTSC.
+    let until = unsafe { pax_rdtsc() } + bound
+    var late: u64 = sent
+    while late != 0 && unsafe { pax_rdtsc() } < until {
+        i = 0
+        while i < cnt {
+            if late & (1 << i) != 0 && percpu.get(record(i), percpu.STATE) == percpu.STOPPED {
+                late &= !(1 << i)
+            }
+            i += 1
+        }
+        sync.relax()
+    }
+    late
+}

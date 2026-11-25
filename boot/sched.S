@@ -106,7 +106,13 @@
                        it may orphan (a 64-bit mask before, wrong past
                        slot 63); px159: three a slot, the third the key
                        buckets its system call looked at, which a wake
-                       of one object reads while it waits
+                       of one object reads while it waits; px166: four,
+                       the fourth the processor running it (its index
+                       plus one; 0 while it runs nowhere)
+     pax_old_spaces    px166: 64 words, the spaces execs left while
+                       another processor's CR3 still held them (kernel/
+                       sched's `leave_space`), freed by `reap`; at most
+                       one held per other processor, so never full
      pax_pid_hint     px126: 4096 words, `pid mod 4096` to the slot
                        that last took that pid or tid, plus one: a hint
                        kernel/sched checks, walking the slots only when
@@ -117,6 +123,9 @@
                        `sig_info`), for the siginfo a handler is given
      pax_sched_locks   eight 8-byte lock words (kernel/sync; word 0 is
                        the console's)
+     pax_klock         px166: the kernel lock's two words (kernel/klock):
+                       its owner, a processor's index plus one, and its
+                       depth; alone in its 64-byte line
      pax_sched_state   thirty-two 8-byte words (sixteen before px48's
                        console session words): the scheduler's scalars
                        (the run queue's ends, …; px161: the running
@@ -228,7 +237,11 @@ pax_threads_end:
         .p2align 6
         .globl pax_slot_words
 pax_slot_words:
-        .zero 1024 * 3 * 8
+        .zero 1024 * 4 * 8
+        .p2align 6
+        .globl pax_old_spaces
+pax_old_spaces:
+        .zero 64 * 8
         .p2align 6
         .globl pax_pid_hint
 pax_pid_hint:
@@ -240,6 +253,10 @@ pax_siginfo:
         .p2align 6
         .globl pax_sched_locks
 pax_sched_locks:
+        .zero 64
+        .p2align 6
+        .globl pax_klock
+pax_klock:
         .zero 64
         .p2align 6
         .globl pax_sched_state

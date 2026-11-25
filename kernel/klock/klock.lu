@@ -1,0 +1,285 @@
+//! klock — the one kernel lock (SMP stage 2): owned by a processor,
+//! recursive by depth.
+//!
+//! Two words in boot/sched.S's .bss, `pax_klock`: OWNER, the holding
+//! processor's index plus one (0 free), and DEPTH, how many times that
+//! processor has entered the kernel without leaving it. A processor takes
+//! the lock at every entry to the kernel but the NMI's (kernel/interrupts'
+//! `pax_interrupt`, after the NMI and before `route`) and gives it back
+//! when the frame it returns resumes ring 3 or its idle loop. It is owned
+//! by the processor, not the thread: a switch is a frame `pax_interrupt`
+//! hands back, so the processor stays in the kernel across it and keeps
+//! the lock whatever thread it then runs. A kernel thread holds it for as
+//! long as it runs (its base depth, 1): a tick that lands on one nests
+//! (DEPTH 2) and unwinds to the base, never below it.
+//!
+//! It is the outermost lock: kernel/sync's eight words nest inside it,
+//! and nothing takes it while holding one of them. It is taken with
+//! interrupts off (every gate is an interrupt gate) by the same
+//! test-and-test-and-set as `sync.acquire`: spin on a relaxed load until
+//! the word reads 0, then `atomic_cas(0, me, Order.acquire,
+//! Order.relaxed)`; the release store hands every write of the holder's
+//! critical section to the next taker's exchange (wolf spec/03
+//! [conc.mm.atomic.order]). DEPTH is written by the owner alone.
+//!
+//! Who calls what: `pax_interrupt` (kernel/interrupts) panics if a
+//! processor comes in from ring 3 already holding the lock (a hold
+//! carried into ring 3 is a bug, named, never healed), then `enter`;
+//! kernel/user's `hand_back` gives it back or unwinds it on every way out
+//! of `pax_interrupt`; `leave` before a thread's first IRETQ to ring 3
+//! (kernel/user's `pax_user_thread`); `boot` once from kmain, which holds
+//! it as the first kernel thread. px166's second step: `hand_back` gives
+//! it back in two halves, DEPTH 0 (`leave_at_resume`) and then the release
+//! store, which boot/isr.S's common path makes once it has moved onto the
+//! frame it resumes (`pax_klock_resumed`): a processor that has switched
+//! threads is off the old thread's stack before any other can take the
+//! lock and run that thread. The runtime's ambient-region slot moves
+//! with the lock (kernel/sched's `ambient_resume` after a fresh `enter`,
+//! `ambient_park` before `leave`), since one slot serves every processor.
+//!
+//! **Every way into ring 3** passes one of the two `leave` sites:
+//! - boot/isr.S's common path resumes the frame `pax_interrupt` returns
+//!   by IRETQ, or by SYSRETQ for a system call's frame (vector 0x100):
+//!   every system call enters by boot/user.S's `pax_syscall_entry`, which
+//!   jumps to that path (no system call is answered around it), so both
+//!   leave by `hand_back` (and the release store by `pax_klock_resumed`,
+//!   which that path calls on every frame before it looks at the vector). A fork or clone child's first return is its
+//!   parent's system call frame, resumed when the scheduler picks it
+//!   inside `pax_interrupt`; exec rewrites the caller's frame and returns
+//!   it there; a signal handler's frame (kernel/signal's `on_return`) and
+//!   `rt_sigreturn`'s restored one are made before `hand_back` runs.
+//! - the two continuations that path calls after `pax_interrupt` (vector
+//!   0x102, a stopped system call resumed; 0x103, a creation or exec
+//!   event finished; px102): `hand_back` keeps the lock for them, and
+//!   each ends in `hand_back` itself (kernel/user). Other frames carry
+//!   those vectors by reuse: every signal handler's and `rt_sigreturn`'s
+//!   frame is 0x103 (kernel/signal's SIGNAL_VECTOR, pax#515), and every
+//!   exec'd frame was 0x102 until pax#510. The lock does not depend on
+//!   what a vector means, only on `continues` testing exactly the vectors
+//!   the common path sends to a continuation: such a frame keeps the lock
+//!   (one level up, never below 1), its continuation runs, and the frame
+//!   that continuation hands back gives it up, so a frame reaches ring 3
+//!   with the lock given back once, after however many continuation passes
+//!   (a signal handler's frame is one pass, ending at 0x101; a further
+//!   pending signal stacked by that pass's `signal.on_return` is another).
+//!   Each continuation checks it holds the lock first (`klock: a
+//!   continuation entered without the lock`), so the two tests cannot drift
+//!   apart quietly.
+//! - a new thread's first entry: `pax_user_thread` gives it back with IF
+//!   clear, then boot/user.S's `pax_enter_user` IRETQs.
+//! A fault between that `leave` and the IRETQ is a fault in ring 0: it
+//! takes the lock afresh and panics by name like any kernel fault; were
+//! one ever to return there, its exit keeps the lock and the next entry
+//! from ring 3 panics `klock: entered from ring 3 holding it`.
+//!
+//! **The window** (px166's second step): between `leave_at_resume`
+//! (DEPTH 0) and boot/isr.S's release store (`pax_klock_resumed`), this
+//! processor holds the lock at DEPTH 0, on its way out of the kernel:
+//! `pax_interrupt`'s epilogue on the stack it was handed the frame on,
+//! the common path's stack switch, CPU 0's latency close, the call
+//! itself. Interrupts are off there; what can still enter:
+//! - an NMI: `pax_interrupt` answers it before `enter` and touches no
+//!   lock word, and its own way out passes `pax_klock_resumed` with
+//!   vector 2, which never releases (the interrupted way out does, once
+//!   it is off its stack);
+//! - any other ring-0 entry (a fault in the epilogue, a machine check):
+//!   `enter` finds OWNER this processor at DEPTH 0 and panics, `klock:
+//!   entered between the release's two halves`. It never nests: nested,
+//!   its own exit could give the lock up (`hand_back` on an idle
+//!   context's frame) while the outer way out still stood on the old
+//!   stack, which is what the window is there to prevent. On an
+//!   application processor such a fault reaches `enter` too (kernel/smp's
+//!   `ap_early` sends a ring-0 fault on while `held_here`).
+//! What else reads `held_here` and could meet DEPTH 0: kernel/user's
+//! continuation check (`held_for_continuation`) runs only after the
+//! common path's release point, so it sees the lock kept (DEPTH 1 or
+//! more, `unwind`) or given back (and panics, by its own name), never the
+//! window; the door in `pax_interrupt` (`from_user` and `held_here`) is
+//! met only from ring 3, and the window ends before any IRETQ or SYSRETQ;
+//! `unwind`, `leave` and `leave_at_resume` run only after an `enter` on
+//! the same entry (DEPTH 1 or more); `boot` once, before any interrupt;
+//! `level` and `owner` report. So DEPTH 0 with OWNER this processor
+//! means the window and nothing else, and every reader treats it as held.
+//!
+//! Written from wolf's spec/03 §1 [conc.mm.atomic], the Intel SDM vol.
+//! 3A §9.1.2 (a LOCK-prefixed CMPXCHG is atomic against every other
+//! processor) and §6.8.1 (IF), and vol. 2 (CMPXCHG, PAUSE). No Linux
+//! source; no other kernel's source.
+
+use panic
+use percpu
+use sync
+use ipi
+use tlb
+
+extern "c" let pax_klock: *u64
+
+const OWNER: u64 = 0
+const DEPTH: u64 = 8
+
+fn at(off: u64) -> *u64 {
+    // # Safety: the address of boot/sched.S's two words; nothing is read.
+    unsafe { (pax_klock as u64 + off) as *u64 }
+}
+
+fn me() -> u64 {
+    percpu.index() + 1
+}
+
+fn depth() -> u64 {
+    // # Safety: DEPTH is written by the owner alone; a volatile read.
+    unsafe { at(DEPTH).read_volatile() }
+}
+
+fn put_depth(d: u64) {
+    // # Safety: as `depth`; the caller is the owner.
+    unsafe { at(DEPTH).write_volatile(d) }
+}
+
+/// The processor that holds the lock, plus one; 0 when it is free (a
+/// relaxed read: a report, not a decision).
+pub fn owner() -> u64 {
+    // # Safety: `pax_klock`'s first word, 8-aligned; every access to it
+    // is atomic ([conc.mm.atomic.raw.4]).
+    unsafe { at(OWNER).atomic_load(Order.relaxed) }
+}
+
+/// Whether this processor holds the lock.
+pub fn held_here() -> bool {
+    owner() == me()
+}
+
+/// How deep this processor is in the kernel (0 when it does not hold the
+/// lock).
+pub fn level() -> u64 {
+    if held_here() { depth() } else { 0 }
+}
+
+/// An entry to the kernel (`pax_interrupt`, interrupts off): one deeper
+/// when this processor holds the lock already, else the lock taken.
+/// Returns true for a fresh acquisition (the caller restores the
+/// ambient slot of the thread this processor runs).
+pub fn enter() -> bool {
+    let m = me()
+    let p = at(OWNER)
+    // # Safety: as `owner`.
+    if unsafe { p.atomic_load(Order.relaxed) } == m {
+        // Held at DEPTH 0: this processor is between `leave_at_resume` and
+        // the release store (the header's "the window"); an entry there is
+        // a kernel bug's, named, never run on.
+        if depth() == 0 {
+            panic.fail("klock: entered between the release's two halves, cpu ", percpu.index())
+        }
+        put_depth(depth() + 1)
+        return false
+    }
+    var held = false
+    while !held {
+        // # Safety: as `owner`.
+        let seen = unsafe { p.atomic_load(Order.relaxed) }
+        if seen == 0 {
+            // # Safety: as `owner`.
+            let (old, ok) = unsafe { p.atomic_cas(0, m, Order.acquire, Order.relaxed) }
+            held = ok && old == 0
+        }
+        if !held {
+            // px166: the holder may be waiting for this processor's
+            // answer to a shootdown (kernel/tlb), interrupts off here.
+            tlb.answer()
+            sync.relax()
+        }
+    }
+    put_depth(1)
+    true
+}
+
+/// A return to a ring-0 frame that is not the idle loop (the code an
+/// interrupt landed in, or a kernel thread switched to): one level up,
+/// never below the base a running kernel thread holds.
+pub fn unwind() {
+    if !held_here() {
+        panic.fail("klock: unwound by a processor that does not hold it, cpu ", percpu.index())
+    }
+    let d = depth()
+    put_depth(if d > 1 { d - 1 } else { 1 })
+}
+
+/// A return to ring 3 or to the idle loop, from `pax_interrupt` or a
+/// continuation (kernel/user's `hand_back`): DEPTH 0 now, the release
+/// itself left to boot/isr.S's common path once it stands on the frame it
+/// resumes (`pax_klock_resumed`). Until then this processor still runs on
+/// the stack it was handed the frame on, which is the stack of the thread
+/// it has just switched away from when the frame is another's: a thread
+/// another processor may resume (or, once it has ended, reap) the moment
+/// the lock is free. Given back here, that processor's frames would land
+/// where this one's return still reads.
+pub fn leave_at_resume() {
+    if !held_here() {
+        panic.fail("klock: left by a processor that does not hold it, cpu ", percpu.index())
+    }
+    put_depth(0)
+}
+
+/// boot/isr.S's common path, about to resume a frame whose vector is `v`
+/// (its stack now that frame's; the path reads the vector from the frame
+/// itself, an offset tests/mpx6-smp.d/frame-layout.py holds to
+/// kernel/interrupts' Frame): the release `leave_at_resume` left to it. A
+/// frame resumed with the lock kept (DEPTH 1 or more: a kernel thread's,
+/// a continuation's) changes nothing, nor does one this processor resumes
+/// without holding it. An NMI's frame (vector 2) never gives it back: an
+/// NMI may land between `leave_at_resume` and this call, and its own way
+/// out passes here before the interrupted one has left its stack.
+export fn pax_klock_resumed(v: u64) {
+    // The NMI (2) and the shootdown (kernel/tlb's 49) never take the lock,
+    // so their way out gives nothing back, whatever this processor holds.
+    if v == 2 || v == tlb.VECTOR {
+        return
+    }
+    if held_here() && depth() == 0 {
+        // # Safety: the holder's release store; as `owner`.
+        unsafe { at(OWNER).atomic_store(0, Order.release) }
+    }
+}
+
+/// A thread's first return to ring 3 (kernel/user's `pax_user_thread`, on
+/// that thread's own stack): the lock given back whole, at once.
+pub fn leave() {
+    if !held_here() {
+        panic.fail("klock: left by a processor that does not hold it, cpu ", percpu.index())
+    }
+    put_depth(0)
+    // # Safety: the holder's release store; as `owner`.
+    unsafe { at(OWNER).atomic_store(0, Order.release) }
+}
+
+/// The end's last act on CPU 0 (kmain_console's `halt` after the last
+/// process, kernel/user's `the_end` for a halt asked for or after a
+/// power-off that did not take): interrupts off, the lock given back
+/// whole whatever DEPTH this processor held it at (kmain, or the thread
+/// whose reboot(2) asked for the end), then `panic.halt`. The other processors' next ticks find it free and they
+/// rest in their idle loop's HLT with interrupts on, as before stage 2
+/// (tests/mpx6-cpus' SMP-IDLE), rather than spin for a lock no one will
+/// give back, interrupts off, until power is cut. A panic does not come
+/// here: its processor halts holding the lock, and the others spin until
+/// stage 2's STOP step stops them first.
+pub fn halt_given_back() -> never {
+    let _off = sync.irq_save()
+    // px166 (the STOP step): only when every other processor has stopped.
+    // One that did not stop for the end (named on its own line) must never
+    // run kernel code after the volumes: the ender keeps the lock, so that
+    // one can only spin for it, interrupts off.
+    if held_here() && ipi.others() == 0 {
+        put_depth(0)
+        // # Safety: the holder's release store; as `owner`.
+        unsafe { at(OWNER).atomic_store(0, Order.release) }
+    }
+    panic.halt()
+}
+
+/// kmain's hold, once, before interrupts go on: the boot thread is the
+/// first kernel thread and holds the lock while it runs.
+pub fn boot() {
+    if !held_here() {
+        let _fresh = enter()
+    }
+}

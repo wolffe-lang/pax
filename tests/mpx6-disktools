@@ -65,6 +65,13 @@ if [ "$only" != pax ]; then
             python3 -I "$D/ext3.py" "$programs/paxext2" "$work/ext3" ${executor:+"$executor"}
             # X3's ext4: paxext2 --extents against mke2fs -t ext4, and Linux's ext4 driver reading it.
             python3 -I "$D/ext4.py" "$programs/paxext2" "$work/ext4" ${executor:+"$executor"}
+            # Independent pinned readers: exact bytes through both levels, with a damaged-copy control.
+            python3 -I -B "$D/extent-oracle/identity-selftest.py"
+            eo=(); [ -z "$executor" ] || eo=(--executor "$executor")
+            python3 -I -B "$D/extent-oracle/row.py" --work "$work/extent-oracle" \
+                --paxext2 "$programs/paxext2" --paxext2-sha256 "$(sha256_of "$programs/paxext2")" \
+                --formatter-head "$(git -C "$PAX_ROOT" rev-parse HEAD)" --e2fs "$PAX_ROOT/tools/e2fs" \
+                ${eo[@]+"${eo[@]}"}
         fi
     done
     if [ "$only" = all ] || [ "$only" = linux ]; then

@@ -270,6 +270,7 @@ use cred
 use files
 use frames
 use futex
+use klock
 use kmsg
 use log
 use netd
@@ -288,7 +289,9 @@ use signal
 use socket
 use sound
 use speaker
+use smp
 use sync
+use testwords
 use timer
 use trace
 use trace_state
@@ -604,17 +607,72 @@ pub fn describe(p: u64, id: u64, cr3: u64) {
 /// program's address space, already live): into ring 3 at CODE, the
 /// stack's top as RSP. Never returns.
 export fn pax_user_thread(p: u64) {
-    if sched.self_prog() == sched.ELF_PROG {
-        // # Safety: as below; an ELF process's entry and stack were
-        // mapped user by `exec` (kernel/elf's segments, the stack).
-        unsafe { pax_enter_user(sched.self_exec(0), sched.self_exec(1)) }
-        panic.fail("user: pax_enter_user returned, an ELF process", p)
+    // Where ring 3 starts, read while this thread still holds the kernel
+    // lock (kernel/klock): nothing after the `leave` below reads kernel
+    // state, so the lock is given back at the last moment.
+    let elf = sched.self_prog() == sched.ELF_PROG
+    let rip = if elf { sched.self_exec(0) } else { CODE }
+    let rsp = if elf { sched.self_exec(1) } else { STACK_TOP }
+    // px166: IF clear first, so no interrupt finds the lock half given
+    // back; an idle processor sent RESCHED while threads wait (as at every
+    // release, kernel/sched's `share`); the ambient slot parked in this
+    // thread; then the lock given back (at once: this is the new thread's
+    // own stack) and straight to pax_enter_user, whose IRETQ sets IF again. A
+    // fault in between is a fault in ring 0: it takes the lock afresh and
+    // panics by name as any kernel fault does; were one ever to return
+    // here, its exit keeps the lock (a ring-0 frame), the IRETQ carries it
+    // into ring 3, and the next entry panics `klock: entered from ring 3
+    // holding it` (kernel/interrupts).
+    let _flags = sync.irq_save()
+    sched.share()
+    sched.ambient_park()
+    klock.leave()
+    // # Safety: boot/user.S's IRETQ to CPL 3. An ELF process's entry and
+    // stack were mapped user by `exec` (kernel/elf's segments, the stack);
+    // a program's CODE and stack are mapped user in the live tables
+    // (`load`); RSP0 and SYSCALL's stack word are this thread's (sched's
+    // `enter_space`).
+    unsafe { pax_enter_user(rip, rsp) }
+    panic.fail("user: pax_enter_user returned, slot ", p)
+}
+
+/// px166: whether the frame at `f` is one boot/isr.S's common path hands
+/// to kernel code after `pax_interrupt` returns it (vector 0x102, a
+/// stopped system call's continuation; 0x103, a creation or exec event's
+/// finish, px102): the kernel lock stays held for that code.
+pub fn continues(f: u64) -> bool {
+    let v = word(f, W_VECTOR)
+    v == 0x102 || v == 0x103
+}
+
+/// px166: a continuation (vector 0x102 or 0x103) runs only with the kernel
+/// lock `hand_back` kept for it: `continues` tests exactly the two vectors
+/// boot/isr.S's common path sends to a continuation. A continuation reached
+/// without the lock (the two tests disagreeing) is named, not run unlocked.
+fn held_for_continuation(f: u64) {
+    if !klock.held_here() {
+        panic.fail("klock: a continuation entered without the lock, vector ", word(f, W_VECTOR))
     }
-    // # Safety: boot/user.S's IRETQ to CPL 3; CODE and the stack are
-    // mapped user in the live tables (`load`), RSP0 and SYSCALL's stack
-    // word are this thread's (sched's `enter_space`).
-    unsafe { pax_enter_user(CODE, STACK_TOP) }
-    panic.fail("user: pax_enter_user returned, program", p)
+}
+
+/// px166: the kernel lock on the way out (kernel/klock), for the frame
+/// `h` about to be resumed, which is returned. A continuation (above) or
+/// any other ring-0 frame that is not the idle loop keeps it, one level
+/// up; a frame that resumes ring 3, by IRETQ or by SYSRETQ (vector 0x100),
+/// or the idle loop gives it back whole: an idle processor sent RESCHED
+/// while threads wait (kernel/sched's `share`), the ambient slot parked,
+/// DEPTH 0 here and the release store made by boot/isr.S once it stands
+/// on `h` (klock's `leave_at_resume`), off this stack. Called last by
+/// `pax_interrupt` and by the two continuations below.
+pub fn hand_back(h: u64) -> u64 {
+    if !continues(h) && (from_user(h) || sched.idle_now()) {
+        sched.share()
+        sched.ambient_park()
+        klock.leave_at_resume()
+    } else {
+        klock.unwind()
+    }
+    h
 }
 
 /// Whether the frame at `f` was pushed by an interrupt, exception or
@@ -689,7 +747,9 @@ fn readable(buf: u64, len: u64) -> bool {
 /// (kernel/vm's `fault`; error code bit 1 is a write); a page past its
 /// file's end is SIGBUS (U_BUS, for `kill`).
 pub fn fault_in(cr2: u64, err: u64) -> bool {
-    let r = vm.fault(area(), paging.live(), cr2 & !(PAGE - 1), err & 2 != 0)
+    // px166: with the error code whole: a fault on a page another processor
+    // made present meanwhile runs again (kernel/vm's `fault_trap`).
+    let r = vm.fault_trap(area(), paging.live(), cr2 & !(PAGE - 1), err)
     if r == vm.F_BUS {
         put_state(U_BUS, 1)
     }
@@ -1129,6 +1189,7 @@ const SYS_WRITEV: u64 = 20
 const SYS_SIGALTSTACK: u64 = 131
 const SYS_RT_SIGSUSPEND: u64 = 130 // px48: an Almquist shell's `wait`
 const SYS_PAUSE: u64 = 34 // px49 (pax#73)
+const SYS_SCHED_SETAFFINITY: u64 = 203 // px166: accepted and ignored (kernel/ready)
 const SYS_SCHED_GETAFFINITY: u64 = 204
 const SYS_EPOLL_WAIT: u64 = 232
 const SYS_EPOLL_CTL: u64 = 233
@@ -2371,6 +2432,7 @@ pub fn end_processes(settle: bool) {
 pub fn the_end() -> never {
     end_processes(false)
     let _off = sync.irq_save()
+    smp.stop_for_end() // px166 (the STOP step): every other processor stopped before the volumes are written
     var e: u64 = 0
     if block.count() != 0 {
         e = tree.halt_volumes()
@@ -2382,10 +2444,13 @@ pub fn the_end() -> never {
     if end_asked() == 1 {
         end_reset()
     }
-    if unsafe { end_cmd } == CMD_POWER_OFF { power.power_off() }
+    if unsafe { end_cmd } == CMD_POWER_OFF {
+        // px166 (the STOP step): a test build's `pax.nopoweroff` (kernel/testwords) skips it: the end halts
+        if testwords.nopoweroff() { log.line("poweroff: not done (pax.nopoweroff, a test kernel)") } else { power.power_off() }
+    }
     timer.stop()
     log.line("halt")
-    panic.halt()
+    klock.halt_given_back() // px166: the others rest in HLT, not in the lock's spin
 }
 
 /// px67: which end root's reboot(2) asked for: 0 none, 1 a restart, 2 a
@@ -2945,8 +3010,8 @@ fn change_calls(nr: u64, a: u64, pml4: u64, r0: u64, a1: u64, a2: u64, a3: u64, 
 }
 
 /// px24's calls that answer in place: `poll`, the three epoll calls,
-/// `eventfd2`, `sched_getaffinity`, `writev`; anything else is
-/// -ENOSYS, logged once a process.
+/// `eventfd2`, `sched_getaffinity` (px166: and `sched_setaffinity`),
+/// `writev`; anything else is -ENOSYS, logged once a process.
 fn ready_calls(nr: u64, a: u64, pml4: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
     if nr == SYS_POLL {
         return ready.poll(a, pml4, a0, a1, int32(a2))
@@ -2965,6 +3030,9 @@ fn ready_calls(nr: u64, a: u64, pml4: u64, a0: u64, a1: u64, a2: u64, a3: u64) -
     }
     if nr == SYS_SCHED_GETAFFINITY {
         return ready.sched_getaffinity(pml4, a0, a1, a2)
+    }
+    if nr == SYS_SCHED_SETAFFINITY {
+        return ready.sched_setaffinity(pml4, a0, a1, a2)
     }
     if nr == SYS_WRITEV {
         return writev(a0, a1, int32(a2))
@@ -3177,6 +3245,7 @@ pub fn exec_span(body: u64, pa: u64, pl: u64, aa: u64, al: u64, ea: u64, el: u64
 /// boot/isr.S's special return vector resumes a stopped syscall in the
 /// kernel. No user opcode is re-executed, even if the tracer rewrote it.
 export fn pax_trace_resume_syscall(f: u64) -> u64 {
+    held_for_continuation(f)
     let c = sched.self_slot()
     if trace_state.exit_pending(c) == 2 {
         put_word(f, W_RAX, trace_state.exit_nr(c))
@@ -3189,14 +3258,15 @@ export fn pax_trace_resume_syscall(f: u64) -> u64 {
     let g = serve(f)
     sched.syscall_ends(c)
     let out = if g == f && sched.self_slot() == c { trace.syscall_return(g) } else { g }
-    signal.on_return(out)
+    hand_back(signal.on_return(out)) // px166: the kernel lock, as `pax_interrupt` leaves it
 }
 
 
 /// A creation/exec event has already completed the syscall. Restarting
 /// it only applies syscall-exit/step tracing; it must never create twice.
 export fn pax_trace_finish_syscall(f: u64) -> u64 {
+    held_for_continuation(f)
     trace_state.set_finish_pending(sched.self_slot(), 0)
     put_word(f, W_VECTOR, 0x101)
-    signal.on_return(trace.syscall_return(f))
+    hand_back(signal.on_return(trace.syscall_return(f))) // px166: as above
 }

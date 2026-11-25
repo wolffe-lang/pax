@@ -94,6 +94,7 @@ use boot_info
 use frames
 use log
 use screen
+use tlb
 use panic
 
 extern "c" fn pax_cr0() -> u64
@@ -187,6 +188,7 @@ pub fn load(pml4: u64) {
     // # Safety: cpu.S's MOV to CR3; `pml4` is the kernel's PML4 or one
     // `new_space` made from it.
     unsafe { pax_set_cr3(pml4) }
+    tlb.loaded(pml4) // px166: the shootdown's targets read it
 }
 
 /// CR0 now.
@@ -532,6 +534,9 @@ pub fn unmap(pml4: u64, va: u64) -> u64 ! MapError {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(va) }
     }
+    // px166: and on every other processor that may cache it (kernel/tlb),
+    // before the caller frees the frame this returns.
+    tlb.page(pml4, va)
     e1 & ADDR
 }
 
@@ -687,6 +692,7 @@ pub fn protect_user(pml4: u64, va: u64, flags: u64) -> bool {
         // # Safety: cpu.S's INVLPG; it only drops TLB entries.
         unsafe { pax_invlpg(va) }
     }
+    tlb.page(pml4, va) // px166: and on every other processor running in that space
     true
 }
 
@@ -699,6 +705,7 @@ pub fn free_user(pml4: u64) -> u64 {
     if live() == pml4 {
         panic.fail("paging: free_user of the live PML4", pml4)
     }
+    tlb.space(pml4) // px166: no other processor's CR3 holds it either
     var n: u64 = 0
     var i4: u64 = 0
     while i4 < KERNEL_FIRST {
