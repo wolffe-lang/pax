@@ -1,11 +1,14 @@
 //! testwords — px166 (SMP stage 2, the STOP step): the test-only words, as
-//! shipped. `pax.nopoweroff` (an end whose power-off does not take) and
-//! `pax.panictest=1|2` (one or two processors' test panics) act only in a
-//! kernel built with `tools/build-kernel --test-words`, which puts
-//! tests/mpx6-smp.d/testwords.lu in this file's place. Here neither acts: a
-//! shipped kernel given either says so by name and goes on as without it,
-//! and holds no test op and no test panic (tests/mpx6-smp's SMP-TESTWORDS
-//! reads both the lines and the ELF's symbols).
+//! shipped. `pax.nopoweroff` (an end whose power-off does not take),
+//! `pax.panictest=1|2` (one or two processors' test panics) and
+//! `pax.slowleave=MS` (an application processor that holds a thread ended in
+//! place MS ms before it switches it off: a host that has not run that
+//! processor, made to happen) act only in a kernel built with
+//! `tools/build-kernel --test-words`, which puts tests/mpx6-smp.d/testwords.lu
+//! in this file's place. Here none acts: a shipped kernel given one says so by
+//! name and goes on as without it, and holds no test op, no test panic and no
+//! hold (tests/mpx6-smp's SMP-TESTWORDS and TESTWORDS-SLOWLEAVE-ELF read the
+//! lines and the ELF).
 
 use boot_info
 use log
@@ -17,6 +20,10 @@ pub fn start() {
     }
     if boot_info.cmdline_has("pax.panictest=1") || boot_info.cmdline_has("pax.panictest=2") {
         log.line("testwords: pax.panictest ignored (not a test kernel)")
+    }
+    let (_a, n) = boot_info.cmdline_value("pax.slowleave")
+    if n != 0 {
+        log.line("testwords: pax.slowleave ignored (not a test kernel)")
     }
 }
 
@@ -32,3 +39,13 @@ pub fn tick(_t: u64) {}
 pub fn op(_r: u64) -> bool {
     false
 }
+
+/// kernel/interrupts' entry on an application processor whose thread was
+/// ended in place: CPU 0's ticks to hold it before it is switched off. None
+/// as shipped, so the entry's hold never runs.
+pub fn hold() -> u64 {
+    0
+}
+
+/// After a hold (never as shipped).
+pub fn held(_cpu: u64) {}
