@@ -148,13 +148,14 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            S running M of 4` rounds: 4 leader-exit (the main thread exits alone, a sibling then calls
                            exit_group(10): 0xa00), 30 exec (a sibling execs a program that exits 9: 0x900), 5
                            exec-kill (the exec'd program killed by its own SIGKILL: 0x9), 20 exec-settle (0x900, the
-                           main thread spinning beside the exec'ing sibling: `waited-kb W settled-kb S late-kb L
-                           settle-ms MS left K`), `SMP-LEAVE done`; an `SMP-EXIT exec-child pid P` line for every exec;
-                           one hold at least; each exec-settle round's settled MemFree (SMP-EXIT's settle) within 64 kB
-                           of its reading 500 ms on, with no thread of it still current; at 2, one round at least whose
-                           wait4 came back with the space the exec left still held (the old leader held beside it);
-                           no PANIC (an exec'd leader collected while an ended sibling still ran: `sched: no process
-                           area for slot`).
+                           main thread saying go once a look shows it current on an application processor beside the
+                           exec'ing sibling: `waited-kb W settled-kb S late-kb L settle-ms MS left K main-cpu C`),
+                           `SMP-LEAVE done`; an `SMP-EXIT exec-child pid P` line for every exec; one hold at least;
+                           each exec-settle round's settled MemFree (SMP-EXIT's settle) within 64 kB of its reading
+                           500 ms on, with no thread of it still current, and where the main thread ran at the exec
+                           said; at 2, one round at least whose wait4 came back with the space the exec left still
+                           held (the old leader held on the application processor); no PANIC (an exec'd leader
+                           collected while an ended sibling still ran: `sched: no process area for slot`).
 
   every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
                            `klock: entered from ring 3 holding it`): red by that line verbatim, silent when green.
@@ -850,7 +851,8 @@ elif a.kind == 'leave':
     # switch-off). The probe's rounds: four whose main thread exits alone and a sibling then calls exit_group(10), thirty
     # whose sibling execs a program that exits 9, five whose exec'd program is killed by its own SIGKILL; each round's
     # wait4 status, every exec's child line, at least one hold, no PANIC. Then twenty exec-settle rounds, the main
-    # thread spinning beside the exec'ing sibling: the exec takes its pid, and a processor still running it shows
+    # thread saying go once a look shows it current on an application processor (`main-cpu`), the exec'ing sibling
+    # current beside it: the exec takes the main thread's pid, and a processor still running it shows
     # `current kernel` in /proc/pax-cpus, its CR3 still the space the exec parked. Each is read as SMP-EXIT's are (at
     # the wait4, settled) and 500 ms on, once every hold is long over; the settled reading must be the late one (the
     # rows at 4 on two host CPUs at b06378bb: a settle that looked for the group's thread ids alone read 1392 kB short).
@@ -887,6 +889,14 @@ elif a.kind == 'leave':
         why.append(f'exec-settle round {unread[0]}: no MemFree readings (`waited-kb`, `settled-kb`, `late-kb`, '
                    f'`settle-ms`, `left`)' + (f', nor in rounds {unread[1:]}' if len(unread) > 1 else ''))
     read = [(r, x) for r, x in enumerate(sr) if r not in unread]
+    # where the main thread ran when it said go: an application processor's index, or -1 when no look in 3 s found it on
+    # one beside the exec'ing sibling
+    unsaid = [r for r, x in enumerate(sr) if not isinstance(kv(x, 'main-cpu'), int)]
+    if unsaid:
+        why.append(f'exec-settle round {unsaid[0]}: no `main-cpu` (where the main thread ran at the exec)'
+                   + (f', nor in rounds {unsaid[1:]}' if len(unsaid) > 1 else ''))
+    forced = len([1 for x in sr if isinstance(kv(x, 'main-cpu'), int) and kv(x, 'main-cpu') > 0])
+    on_ap = f'the main thread on an application processor at the exec in {forced} of {len(sr)}'
     for r, x in read:
         if kv(x, 'left'):
             why.append(f'exec-settle round {r}: {kv(x, "left")} of its threads still current on a processor '
@@ -895,13 +905,14 @@ elif a.kind == 'leave':
             why.append(f'exec-settle round {r}: MemFree settled {kv(x, "settled-kb")} kB, '
                        f'{kv(x, "late-kb") - kv(x, "settled-kb")} kB below the reading 500 ms on ({kv(x, "late-kb")} kB): '
                        f'read while the space the exec left was still parked')
-    # the window: a round whose wait4 came back with that space still held. At 2 the thread beside the exec'ing sibling
-    # is the old leader, held on the application processor in most rounds; at 4 the siblings the exec re-pointed are
-    # held beside it and the wait4 waits for them, so the old leader may be gone by then: printed there, not wanted
+    # the window: a round whose wait4 came back with that space still held. At 2 a round whose main thread was on the
+    # application processor at the exec has it there, held, while the wait4 comes back; at 4 the siblings the exec
+    # re-pointed are held beside it and the wait4 waits for them, so the old leader may be gone by then: printed there,
+    # not wanted
     opened = len([1 for _r, x in read if kv(x, 'waited-kb') < kv(x, 'late-kb') - 64])
     if word and read and not unread and opened == 0 and N == 2:
         why.append(f'no exec-settle round\'s wait4 came back with the space the exec left still held (0 of {len(read)}): '
-                   f'the window the settle must wait out never opened')
+                   f'the window the settle must wait out never opened ({on_ap})')
     if word and slows == 0:
         why.append('0 slow leaves: no application processor held a thread ended in place (the window never opened)')
     elif word and followers == 0:
@@ -915,9 +926,9 @@ elif a.kind == 'leave':
     else:
         ok('SMP-EXEC-LEAVE', f'4 leader-exit, 30 exec, 5 exec-kill and 20 exec-settle rounds, each its status; '
                              f'{slows} slow leaves, {followers} of a thread with a tgid (an application processor held '
-                             f'{word[1]} ms with its thread ended in place); the exec-settle rounds: the space the exec '
-                             f'left still held at the wait4 in {opened} of {len(read)}, each settled reading within 64 kB '
-                             f'of the reading 500 ms on (settled in at most '
+                             f'{word[1]} ms with its thread ended in place); the exec-settle rounds: {on_ap}, the space '
+                             f'the exec left still held at the wait4 in {opened} of {len(read)}, each settled reading '
+                             f'within 64 kB of the reading 500 ms on (settled in at most '
                              f'{max(kv(x, "settle-ms") for _r, x in read)} ms); no panic')
 elif a.kind in ('nosmp', 'one', 'cap1'):
     row = {'nosmp': 'SMP-NOSMP', 'one': 'SMP-ONE', 'cap1': 'SMP-CAP'}[a.kind]
