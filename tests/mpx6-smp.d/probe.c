@@ -808,13 +808,22 @@ static void row_dead(void) {
    the kernel's reap first (kernel/sched's wait_find); then MemFree. That reap frees the space the exec parked while an
    ended sibling's processor still held it in CR3 (kernel/sched's leave_space) and the siblings' stacks the departure
    rule put off. The round's own wait4 runs it too, but may run it before the last of those processors has switched,
-   and nothing else reaps until the next fork. `ms` the wait, `left` the threads still current when it ended. */
+   and nothing else reaps until the next fork. `ms` the wait, `left` the threads still current when it ended.
+   The main thread is looked for by no id: the exec gives its pid to the caller (kernel/sched's exec_alone) and leaves
+   it none, so a processor still running it reads `current kernel`, its CR3 still the parked space. No other thread
+   reads so here: an application processor runs no kernel thread (SMP-PIN), and one on CPU 0 holds the kernel lock
+   while it runs, which this read takes. Missed, the settle read before that processor switched (the rows at 4 on two
+   host CPUs at b06378bb: 1392 kB short, `left 0`). */
 static U settled_kb(L p, U *ms, U *left) {
     struct snap z;
     U t0 = rdtsc(), end = t0 + cycles_of_ms(2000);
     for (;;) {
         U k = 4;
-        if (take(&z)) { k = 0; for (int i = 0; i < 4; i++) if (G->gtids[i] > 0 && cpu_of(&z, G->gtids[i]) >= 0) k++; }
+        if (take(&z)) {
+            k = 0;
+            for (int i = 0; i < 4; i++) if (G->gtids[i] > 0 && cpu_of(&z, G->gtids[i]) >= 0) k++;
+            for (int i = 0; i < z.n; i++) if (z.cur[i] == CUR_KERNEL) k++;
+        }
         *left = k;
         if (!k || rdtsc() >= end) break;
         nap(5000000);
