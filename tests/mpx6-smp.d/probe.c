@@ -834,7 +834,8 @@ static void row_exit(void) {
    process area that went with the reap (kernel/sched's `account`, `no process area for slot`, or since the leader
    check `a thread's leader is another process's`). Four rounds whose main thread exits alone and a sibling then ends
    the group (status 0xa00), thirty whose sibling execs a program that exits 9 (0x900), five whose exec'd program is
-   killed by its own SIGKILL (0x9); in the exec rounds the main thread sleeps once it has said go (`main_naps`). */
+   killed by its own SIGKILL (0x9); in the exec rounds the main thread sleeps once it has said go (`main_naps`); then
+   twenty exec-settle rounds whose main thread spins, each read three times (MemFree at the wait4, settled, late). */
 static void row_leave(void) {
     struct ln l;
     int st;
@@ -848,6 +849,28 @@ static void row_leave(void) {
             ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); ls(&l, " running "); ld(&l, G->running); ls(&l, " of 4"); le(&l);
             if (w != p) break;
         }
+    }
+    /* Twenty exec-settle rounds, the main thread spinning beside the exec'ing sibling: at 2 processors it is the thread
+       on the other one, held there by the test word whenever that is the application processor. The exec takes its
+       pid for the caller, so /proc/pax-cpus names that processor `current kernel` until it switches, its CR3 still the
+       space the exec parked. Each round read as SMP-EXIT's are (at the wait4, then `settled_kb`), and once more 500 ms
+       on after another reap, when every hold is long over: the settled reading must be that one. */
+    main_naps = 0;
+    for (int r = 0; r < 20; r++) {
+        for (int i = 0; i < 4; i++) G->gtids[i] = 0;
+        L p = group(2);
+        L w = wait4(p, &st, 0, 0);
+        U waited = memfree_kb(), ms = 0, left = 0;
+        U settled = settled_kb(p, &ms, &left);
+        nap(500000000);
+        int again;
+        wait4(p, &again, WNOHANG, 0);
+        U late = memfree_kb();
+        l.n = 0; ls(&l, "SMP-LEAVE exec-settle "); ld(&l, (U)r);
+        ls(&l, " status "); lx(&l, w == p ? (U)st : 0xdead); ls(&l, " running "); ld(&l, G->running); ls(&l, " of 4");
+        ls(&l, " waited-kb "); ld(&l, waited); ls(&l, " settled-kb "); ld(&l, settled); ls(&l, " late-kb "); ld(&l, late);
+        ls(&l, " settle-ms "); ld(&l, ms); ls(&l, " left "); ld(&l, left); le(&l);
+        if (w != p) break;
     }
     say("SMP-LEAVE done");
 }
