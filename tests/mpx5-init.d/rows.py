@@ -71,9 +71,11 @@ the boot.
       directory at the path change nothing bob sees (the same text as with
       no file) and print nothing of theirs.
   I19 hook-fails: a file running `false; echo AFTER19-$(id -u)` gives
-      AFTER19-1000 and a working prompt; a syntax error gives a prompt or
-      `login:` again (the row says which); `exit 1` gives `login:` again, the
-      machine running, and the next login works.
+      AFTER19-1000 and a working prompt; a syntax error gives the shell's
+      syntax error and a prompt or `login:` again (the row says which, and
+      whether the echo before it on the same line ran: a shell that parses the
+      line first runs none of it); `exit 1` gives `login:` again, the machine
+      running, and the next login works.
   I20 hook-exec: a file `[ -z "$H20" ] && H20=1 exec /bin/sh -i -m` replaces
       the login shell: the prompt's shell has H20=1 and leads the session (its
       sid its pid), and its `exit` gives `login:` again.
@@ -837,15 +839,17 @@ def hook_boot(con):
                  % (how, 'printed' if 'AFTER19-1000' in seen else 'missing', 'ran' if works else 'did not run'))
     held, why = root_setup(con, [hook_write(pax_f, 'echo BEFORE19B; if then fi')], 192)
     seen, how = login_seen(con, 'pax') if held else (why, None)
+    said = bool(re.search(r'syntax error', seen, re.I))
+    before = 'ran' if 'BEFORE19B' in seen else 'did not run'
     if how == 'prompt':
         works = (con.command('echo I19B-OK', 193) or '').strip() == 'I19B-OK'
         to_login(con)
-        good &= works and 'BEFORE19B' in seen
-        notes.append('a syntax error: the prompt (pelt said %r), a command after %s'
-                     % (norm(seen.replace('BEFORE19B', ''))[-120:], 'ran' if works else 'did not run'))
+        good &= works and said
+        notes.append('a syntax error: the prompt (pelt said %r; the echo before it %s), a command after %s'
+                     % (norm(seen.replace('BEFORE19B', ''))[-120:], before, 'ran' if works else 'did not run'))
     elif how == 'login':
-        good &= 'BEFORE19B' in seen and con.running()
-        notes.append('a syntax error: `login:` again (pelt said %r)' % norm(seen)[-120:])
+        good &= said and con.running()
+        notes.append('a syntax error: `login:` again (pelt said %r; the echo before it %s)' % (norm(seen)[-120:], before))
     else:
         good = False
         notes.append('a syntax error: neither a prompt nor `login:`: %r' % seen[-200:])
