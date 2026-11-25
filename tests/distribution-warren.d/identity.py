@@ -97,7 +97,7 @@ def archive(out, iso_initramfs, work):
         return no('the archive has no /etc/pax-release')
     if release != (out / 'pax-release').read_bytes():
         return no('the archive\'s /etc/pax-release is not OUT/pax-release')
-    named = [line.split() for line in release.decode().splitlines() if line.split()[:1] == ['warren']]
+    named = [line.split() for line in release.decode().splitlines() if line.split()[:1] == ['yew']]
     if len(named) != 1 or len(named[0]) != 3 or not SHA.fullmatch(named[0][1]):
         return no('/etc/pax-release has no one `warren COMMIT …` row (%d rows)' % len(named))
     commit = named[0][1]
