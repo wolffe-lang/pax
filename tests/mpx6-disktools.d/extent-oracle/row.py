@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Check existing paxext2 --extents output with two pinned black-box e2fsprogs readers.
 
-This is a host/container row, not a kernel boot. Run only on the pool, with a
-fresh work directory on its second disk and a formatter built from the recorded
-unchanged baseline. No recorded oracle fallback and no repair of the good image.
-The script is intentionally independent of the existing E4 rows and their goldens.
+This is a Linux host/container row, not a kernel boot. Supply a fresh work
+directory and the formatter's recorded source commit and executable digest.
+There is no recorded oracle fallback and no repair of the good image. The EO
+rows are independent of the existing E4 assertions and their goldens.
 """
 import argparse
 import hashlib
@@ -16,9 +16,9 @@ import shutil
 import subprocess
 import sys
 
-BASE = "d87560427ce449ae076b54adbcbc45dfa1c8e1fb"
-POOL = Path("/mnt/lanes2/px172")
 EPOCH = "1700000000"
+VERSION = "1.47.0-2.4~exp1ubuntu4.1"
+HERE = Path(__file__).resolve().parent
 
 
 class Failure(Exception):
@@ -38,36 +38,54 @@ def require(condition, why):
         raise Failure(why)
 
 
-def pool_path(value):
-    path = Path(value).resolve()
-    if path == POOL or POOL not in path.parents:
-        raise argparse.ArgumentTypeError("all row trees and formatter inputs must be below /mnt/lanes2/px172")
-    return path
+def input_path(value):
+    return Path(value).resolve()
+
+
+def identity_holds(output):
+    text = output.decode(errors="replace")
+    if not re.search(r"^e2fsprogs(?:=|:\s*)" + re.escape(VERSION) + r"$", text, re.M):
+        return False
+    for line in (HERE / "binaries.sha256").read_text().splitlines():
+        sha, path = line.split()
+        name = Path(path).name
+        native = r"^" + re.escape(sha) + r"\s+" + re.escape(path) + r"$"
+        wrapped = r"^" + re.escape(name) + r":\s+" + re.escape(sha) + r"$"
+        if not re.search(native, text, re.M) and not re.search(wrapped, text, re.M):
+            return False
+    return True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--work", required=True, type=pool_path)
-    parser.add_argument("--paxext2", required=True, type=pool_path)
+    parser.add_argument("--work", required=True, type=input_path)
+    parser.add_argument("--paxext2", required=True, type=input_path)
     parser.add_argument("--paxext2-sha256", required=True)
-    parser.add_argument("--formatter-head", required=True, choices=[BASE])
-    parser.add_argument("--engine", help="container engine executable when not already inside the pinned builder")
-    parser.add_argument("--native-oracle", type=pool_path,
-                        help="verified oracle.sh inside the existing immutable pool builder (PAX_E2FS_NATIVE=1)")
-    parser.add_argument("--image", required=True, help="immutable local image ID, sha256:<64hex>")
+    parser.add_argument("--formatter-head", required=True)
+    parser.add_argument("--executor", type=input_path, help="optional formatter executor, as in the existing disk-tool rows")
+    parser.add_argument("--e2fs", type=input_path, help="the repository's pinned tools/e2fs wrapper")
+    parser.add_argument("--engine", help="engine for the standalone pinned Containerfile image")
+    parser.add_argument("--native-oracle", type=input_path,
+                        help="oracle.sh inside a qualified container (PAX_E2FS_NATIVE=1)")
+    parser.add_argument("--image", help="immutable local image ID, sha256:<64hex>, for engine/native modes")
     parser.add_argument("--dry", action="store_true", help="one real six-run depth-1 image/read/control, not a mock")
     args = parser.parse_args()
-    if bool(args.engine) == bool(args.native_oracle):
-        parser.error("choose exactly one of --engine or --native-oracle")
+    if sum(bool(x) for x in (args.engine, args.native_oracle, args.e2fs)) != 1:
+        parser.error("choose exactly one of --e2fs, --engine or --native-oracle")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.formatter_head):
+        parser.error("--formatter-head must be a full source commit")
+    if re.search(r'[\s"\\]', str(args.work)):
+        parser.error("--work must have no whitespace, quote or backslash (debugfs command syntax)")
     if args.native_oracle and (os.environ.get("PAX_E2FS_NATIVE") != "1" or not args.native_oracle.is_file()):
-        print("REFUSED native-oracle requires the pinned pool container and its identity script", flush=True)
+        print("REFUSED native-oracle requires the qualified container and its identity script", flush=True)
         return 75
     if sys.platform != "linux":
-        print("REFUSED oracle-row requires the Linux pool", flush=True)
+        print("REFUSED oracle-row requires Linux", flush=True)
         return 75
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image):
+    if not args.e2fs and (not args.image or not re.fullmatch(r"sha256:[0-9a-f]{64}", args.image)):
         print("REFUSED oracle-image requires an immutable image ID", flush=True)
         return 75
+    oracle_label = args.image if not args.e2fs else "tools/e2fs"
     if not re.fullmatch(r"[0-9a-f]{64}", args.paxext2_sha256):
         print("REFUSED formatter-digest", flush=True)
         return 75
@@ -93,11 +111,14 @@ def main():
         return result
 
     def oracle(tag, *command):
+        translated = [str(item).replace("/work/", str(work) + "/") for item in command]
+        if args.e2fs:
+            if command == ("--identity",):
+                return run([args.e2fs, "--version"], tag)
+            return run([args.e2fs, work, *translated], tag)
         if args.native_oracle:
-            # The existing pool image contains the exact pinned binaries. Match
-            # the formatter qualification's PAX_E2FS_NATIVE path, rechecking
-            # version and executable digests on every command. No nested engine.
-            translated = [str(item).replace("/work/", str(work) + "/") for item in command]
+            # A qualified image contains the exact pinned binaries. Recheck
+            # version and executable digests on every command; no nested engine.
             return run(["/bin/sh", args.native_oracle, *translated], tag)
         return run([args.engine, "run", "--rm", "--network", "none", "--read-only",
                     "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
@@ -137,10 +158,10 @@ def main():
 
     try:
         identity = oracle("oracle-identity", "--identity")
-        if identity.returncode != 0 or b"e2fsprogs=1.47.0-2.4~exp1ubuntu4.1" not in identity.stdout:
+        if identity.returncode != 0 or not identity_holds(identity.stdout):
             print("REFUSED oracle-identity; formatter not run; see oracle-identity.log", flush=True)
             return 75
-        passed(row, args.image + " e2fsprogs=1.47.0-2.4~exp1ubuntu4.1")
+        passed(row, oracle_label + " e2fsprogs=" + VERSION)
         tree = work / "source"
         tree.mkdir()
         patterns = {"six": (6, 1)}
@@ -160,11 +181,12 @@ def main():
         expected = {path.name: {"bytes": path.stat().st_size, "sha256": digest(path)}
                     for path in sorted(tree.iterdir())}
         (work / "inputs.json").write_text(json.dumps({"formatter_head": args.formatter_head,
-            "formatter_sha256": args.paxext2_sha256, "oracle_image": args.image,
+            "formatter_sha256": args.paxext2_sha256, "oracle_backend": oracle_label,
             "fixtures": expected}, indent=2) + "\n")
         row = "EO-format"
         image = work / "extent.img"
-        made = run([args.paxext2, "--from", tree, "--label", "extent-oracle", "--seed", "extent-oracle",
+        runner = [args.executor] if args.executor else []
+        made = run([*runner, args.paxext2, "--from", tree, "--label", "extent-oracle", "--seed", "extent-oracle",
                     "--journal", "4096", "--extents", "96M", image], "paxext2")
         require(made.returncode == 0 and image.is_file(), "unchanged baseline formatter failed; see paxext2.log")
         before = digest(image)
@@ -172,7 +194,7 @@ def main():
             stream.seek(1024 + 92)
             features = [int.from_bytes(stream.read(4), "little") for _ in range(3)]
         require(features == [4, 0x42, 3], "profile words are not has_journal/filetype+extent/sparse_super+large_file")
-        passed(row, f"formatter_head={BASE} image_sha256={before} features=4,66,3")
+        passed(row, f"formatter_head={args.formatter_head} image_sha256={before} features=4,66,3")
         row = "EO-fsck"
         check = oracle("e2fsck-good", "e2fsck", "-fn", "/work/extent.img")
         require(check.returncode == 0 and b"WARNING" not in check.stdout,
@@ -220,11 +242,11 @@ def main():
                 f"negative control not detected unchanged (exit={bad.returncode}); see e2fsck-bad-magic.log")
         passed(row, f"copy only: inode={ino} bad extent magic; e2fsck exit=4; neither image repaired")
         require(digest(image) == before, "control changed the good image")
-        print(f"ORACLE-END baseline={BASE} rows={count} exit=0", flush=True)
+        print(f"ORACLE-END baseline={args.formatter_head} rows={count} exit=0", flush=True)
         return 0
     except (Failure, OSError, subprocess.TimeoutExpired) as error:
         print(f"FAIL {row} {error}", flush=True)
-        print(f"ORACLE-END baseline={BASE} exit=1; preserve {work}; report before further work", flush=True)
+        print(f"ORACLE-END baseline={args.formatter_head} exit=1; preserve {work}; report before further work", flush=True)
         return 1
 
 
