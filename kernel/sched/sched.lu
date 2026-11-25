@@ -665,9 +665,14 @@ fn departure(s: u64) -> u64 {
     }
     if k != 0 {
         smp.resched(k - 1)
+        // # Safety: the lock's holder alone writes it.
+        unsafe { departing = 1 }
     }
     k
 }
+
+/// plant leavewake: the fix's wake taken back, one word for the machine.
+var departing: u64 = 0
 
 /// px166: a DEAD thread that leads from slot `l` and is still current on
 /// another processor: that processor's index + 1, else 0. Its switch-off
@@ -1233,12 +1238,11 @@ fn run_next() -> u64 {
         // machine was taken by the first DEAD switch-off anywhere (an exec's
         // old leader, parentless, among them), and the parent the rule held
         // slept on.
-        if field(from, offset_of(Thread, state)) == DEAD {
+        if unsafe { departing } == 1 && field(from, offset_of(Thread, state)) == DEAD {
+            // # Safety: the lock's holder alone writes it.
+            unsafe { departing = 0 }
             let l = field(from, offset_of(Thread, lead))
-            let pp = field(if l != 0 { l } else { from }, offset_of(Thread, ppid))
-            if pp != 0 {
-                wake_waiter(pp)
-            }
+            wake_waiter(field(if l != 0 { l } else { from }, offset_of(Thread, ppid)))
         }
     }
     var n = take_next()
