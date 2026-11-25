@@ -128,15 +128,17 @@ class Sim:
         f = self.files.get(path)
         if f is None or f[0] is None or (user != 'root' and not f[1] & 0o444):
             return False
-        for stmt in [s.strip() for s in f[0].split(';')]:
+        stmts = [s.strip() for s in f[0].split(';')]
+        if 'if then fi' in stmts:
+            # A shell parses the whole line before it runs any of it: a syntax error anywhere on it runs nothing.
+            self.out('pelt: line 1: syntax error: unexpected \'then\'\n')
+            return False
+        for stmt in stmts:
             sh = self.stack[-1]
             if stmt == 'false':
                 continue
             if stmt.startswith('echo '):
                 self.out(stmt[5:].replace('$(id -u)', str(UIDS[sh['user']])) + '\n')
-            elif stmt == 'if then fi':
-                self.out('pelt: syntax error: `then\' unexpected\n')
-                return False
             elif stmt == 'exit 1':
                 self.prompt_login()
                 return True
