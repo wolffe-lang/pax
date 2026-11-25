@@ -1152,6 +1152,9 @@ pub fn lookup(d: u64, name: u64, len: u64) -> u64 {
     var i = NONE
     if on_volume(d) {
         let n = volume.lookup(vol(d), vino(d), name, len)
+        if n == volume.LOOKUP_BAD {
+            return neg(EIO) // an extent volume's damaged directory: never absence
+        }
         if n == 0 {
             return NONE
         }
@@ -2709,6 +2712,12 @@ fn coverable(point: u64) -> u64 {
 /// MH_SYNC: its mount's number, or -errno (-ENOTDIR, -EBUSY, -ENOMEM,
 /// ext2's own).
 pub fn mount(point: u64, dev: u64, ro: bool, how: u64) -> u64 {
+    mount_as(point, dev, ro, how, 0)
+}
+
+/// `mount` of the type a mount names (kernel/ext2's `mount_as`: 4 is
+/// `ext4`, read-only extents; anything else as `mount` was).
+pub fn mount_as(point: u64, dev: u64, ro: bool, how: u64, kind: u64) -> u64 {
     let c = coverable(point)
     if c != 0 {
         return c
@@ -2717,7 +2726,7 @@ pub fn mount(point: u64, dev: u64, ro: bool, how: u64) -> u64 {
     if m == MOUNTS {
         return neg(EBUSY)
     }
-    let v = volume.mount(dev, ro, now_s())
+    let v = volume.mount_as(dev, ro, now_s(), kind)
     if failed(v) {
         return v
     }
@@ -2733,6 +2742,11 @@ pub fn mount(point: u64, dev: u64, ro: bool, how: u64) -> u64 {
 /// program): the volume's root covers the memory's ROOT, and every path
 /// starts there from now on (`top`). Once, at boot: -EBUSY after.
 pub fn mount_root(dev: u64, ro: bool, how: u64) -> u64 {
+    mount_root_as(dev, ro, how, 0)
+}
+
+/// `mount_root` of the type `rootfstype=` names (as `mount_as`).
+pub fn mount_root_as(dev: u64, ro: bool, how: u64, kind: u64) -> u64 {
     if st(S_ROOTM) != 0 || !ready() {
         return neg(EBUSY)
     }
@@ -2743,7 +2757,7 @@ pub fn mount_root(dev: u64, ro: bool, how: u64) -> u64 {
     if m == MOUNTS {
         return neg(EBUSY)
     }
-    let v = volume.mount(dev, ro, now_s())
+    let v = volume.mount_as(dev, ro, now_s(), kind)
     if failed(v) {
         return v
     }
