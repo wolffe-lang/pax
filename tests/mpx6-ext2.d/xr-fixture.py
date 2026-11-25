@@ -305,7 +305,7 @@ def make(args):
         return f"P {rec['sha256'][:16]} (depths 0/1/2, 600 names, links, 5 GiB sparse), U e2fsck exit {u['U']['e2fsck']}"
 
     # --- Q: one damage case a file, controls on both sides --------------------------
-    victims = ["v-magic", "v-max", "v-entries", "v-depth-child", "v-unsorted", "v-overlap", "v-len0",
+    victims = ["v-magic", "v-max", "v-entries", "v-depth-child", "v-depth-root", "v-unsorted", "v-overlap", "v-len0",
                "v-hiaddr", "v-pastend", "v-metadata", "v-journal"]
     qfiles = [("c-before", "pattern", 6), ("c-after", "pattern", 6), ("f-inline", "bytes", b"inline?\n"),
               ("f-encrypt", "bytes", b"encrypted?\n"), ("m-depth6", "pattern", 1500),
@@ -342,6 +342,9 @@ def make(args):
             r = root(i, "v-max"); i.put(r + 4, 2, 3); out["v-max"] = "root eh_max 3 (canonical 4)"
             r = root(i, "v-entries"); i.put(r + 2, 2, 5); out["v-entries"] = "root eh_entries 5 over eh_max 4"
             lb = leafblock(i, "v-depth-child"); i.put(lb + 6, 2, 1); out["v-depth-child"] = "leaf says depth 1 under a depth-1 root"
+            # Only the parent-and-child depth rule catches this one: every
+            # entry below is well formed, the root merely claims one level more.
+            r = root(i, "v-depth-root"); i.put(r + 6, 2, 2); out["v-depth-root"] = "root says depth 2 over a real leaf"
             lb = leafblock(i, "v-unsorted")
             a, b = i.read(lb + 12 + 24, 12), i.read(lb + 12 + 36, 12)
             i.write(lb + 12 + 24, b); i.write(lb + 12 + 36, a); out["v-unsorted"] = "leaf entries 2 and 3 swapped"
