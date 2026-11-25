@@ -14,14 +14,25 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   page table another processor may be using is shot down there (vector 49) before the change returns; a signal to
   a thread running elsewhere reaches it by an interrupt (vector 48); a thread whose group another processor ended
   never runs again, and its slot and address space are freed only once no processor still uses them. A page fault
-  that arrives after another processor made its page present runs the instruction again. The end, and a panic,
+  that arrives after another processor made its page present runs the instruction again. A stop reaches a thread
+  of the stopped process running on another processor by vector 48, and the thread parks before it returns to
+  ring 3; a write(2) already under way when the stop comes completes first, as on Linux, so a pipe drained at once
+  may hold one more write and a pipe drained 50 ms on holds none (SMP-STOPWRITE, which first waits up to 2 s to
+  see the writer on another processor and says how many looks that took). The end, and a panic,
   stop every other processor (interrupts off, halted) before the end's last writes or the panic's last line;
   `poweroff: not done` and `pax.panictest` exist only in a test build. `/proc/pax-cpus` says `active` as the
   processors that run threads, with each one's ticks in ring 3, interrupts taken, kernel threads run and
-  shootdowns answered; `/sys/devices/system/cpu/online`, `sched_getaffinity` and `Cpus_allowed` say the same set.
+  shootdowns answered; it also says `heap-started 0|1`, whether the kernel's heap was started (the console kernel
+  starts none, and an allocation there panics by name), and the signal counts, `signals set S merged M taken T
+  slept-with-one-pending P` (raises that set a pending bit, raises merged into a signal already pending, signals
+  taken, and sleeps entered with a signal the sleeper would take already pending).
+  `/sys/devices/system/cpu/online`, `sched_getaffinity` and `Cpus_allowed` say the same set as `active`.
   `pax.cpus=N` on the command line lets N processors run threads (`pax.cpus=1` is the previous behaviour, the
   others started and idle) and `nosmp` still leaves them in the bootloader. With one processor no boot changes.
-  `tests/mpx6-smp` holds the rows, at 2, 4 and 16 processors.
+  `tests/mpx6-smp` holds the rows, at 2, 4 and 16 processors. `tests/mpx5-jobs`' probe (`user/elf/jobs.c`)
+  collects a stop's SIGCHLDs before it reaps the stop, on both sides: Linux, when the reap comes first, can
+  report the stopped child's signal as 0 (pax#541). It also watches a stopped member of an orphaned group from
+  50 ms after the stop, once a write in progress has completed.
 
 - **alpha on the image, with nothing to start.** `/bin/alpha`, the service
   manager in wolf (`user/alpha.pin`), is in both images: `tools/mkalpha`
