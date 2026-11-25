@@ -140,6 +140,15 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            (`testwords: W ignored (not a test kernel)`), root's power-off powers off (QEMU's status 0),
                            no PANIC, and neither `testwords.fire` nor `testwords.test_panic` in its ELF (the suite's
                            TESTWORDS-ELF also holds both present in the test build).
+  leave       SMP-EXEC-LEAVE the test build given `pax.slowleave=MS` (`testwords: pax.slowleave=MS (a test kernel)…`):
+                           an application processor that comes in from ring 3 with its thread ended in place gives the
+                           lock back and holds MS ms before it switches that thread off (`testwords: a slow leave, cpu
+                           K`), what a host that has not run that processor does. The probe's `SMP-LEAVE KIND R status
+                           S running M of 4` rounds: 4 leader-exit (the main thread exits alone, a sibling then calls
+                           exit_group(10): 0xa00), 30 exec (a sibling execs a program that exits 9: 0x900), 5
+                           exec-kill (the exec'd program killed by its own SIGKILL: 0x9), `SMP-LEAVE done`; an
+                           `SMP-EXIT exec-child pid P` line for every exec; one hold at least; no PANIC (an exec'd
+                           leader collected while an ended sibling still ran: `sched: no process area for slot`).
 
   every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
                            `klock: entered from ring 3 holding it`): red by that line verbatim, silent when green.
@@ -175,13 +184,14 @@ BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processor
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
         'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
-        'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT', 'SMP-STOPWRITE']
+        'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT', 'SMP-STOPWRITE',
+        'SMP-EXEC-LEAVE']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
 ap.add_argument('--kind', required=True, choices=('rows', 'stress', 'end-halt', 'end-poweroff', 'end-reboot', 'nosmp',
                                                   'one', 'cap2', 'cap1', 'build', 'end-nooff', 'panic', 'panic2',
-                                                  'testwords', 'trace'))
+                                                  'testwords', 'trace', 'leave'))
 ap.add_argument('--smp', required=True, type=int)
 ap.add_argument('--cap', type=int)
 ap.add_argument('--boot', type=int)
@@ -826,6 +836,44 @@ elif a.kind == 'testwords':
         fail('SMP-TESTWORDS', why[0], why[1:])
     else:
         ok('SMP-TESTWORDS', 'both test words ignored by name, powered off, no test symbol in the shipped ELF')
+elif a.kind == 'leave':
+    # SMP-EXEC-LEAVE: a test kernel given `pax.slowleave=MS` (kernel/testwords) holds each application processor that
+    # comes in from ring 3 with its thread ended in place, the lock given back, before it switches that thread off: what
+    # a host that has not run that processor does (rows at 4 on two host CPUs: the exec'd leader collected while an
+    # ended sibling still ran elsewhere, then `PANIC sched: no process area for slot 0x…06` at that sibling's
+    # switch-off). The probe's rounds: four whose main thread exits alone and a sibling then calls exit_group(10), thirty
+    # whose sibling execs a program that exits 9, five whose exec'd program is killed by its own SIGKILL; each round's
+    # wait4 status, every exec's child line, at least one hold, no PANIC.
+    why = []
+    word = re.search(r'^testwords: pax\.slowleave=(\d+) \(a test kernel\)', text, re.M)
+    if not word:
+        why.append('no `testwords: pax.slowleave=MS (a test kernel)` line: the word was not taken (a shipped kernel?)')
+    slows = len(re.findall(r'^testwords: a slow leave, cpu \d+$', text, re.M))
+    lv = lines('SMP-LEAVE')
+    want = {'leader-exit': (4, '0xa00'), 'exec': (30, '0x900'), 'exec-kill': (5, '0x9')}
+    got = {k: [x for x in lv if re.match(rf'{k} \d+ ', x)] for k in want}
+    done = 'SMP-LEAVE done' in text
+    if not done or any(len(got[k]) != w for k, (w, _st) in want.items()):
+        why.append(', '.join(f'{len(got[k])} of {w} {k}' for k, (w, _st) in want.items()) + ' rounds'
+                   + ('' if done else ', no `SMP-LEAVE done`'))
+    for k, (_w, st) in want.items():
+        for r, x in enumerate(got[k]):
+            if kv(x, 'status') != st:
+                why.append(f'{k} round {r}: status {kv(x, "status")}, want {st}')
+    execs = len(got['exec']) + len(got['exec-kill'])
+    kids = len([x for x in lines('SMP-EXIT') if x.startswith('exec-child ')])
+    if kids != execs:
+        why.append(f'{kids} exec-child lines for {execs} execs')
+    if word and slows == 0:
+        why.append('0 slow leaves: no application processor held a thread ended in place (the window never opened)')
+    bad = bad_lines()
+    if bad:
+        why.append(f'the kernel said: {bad[:3]}')
+    if why:
+        fail('SMP-EXEC-LEAVE', '; '.join(why[:6]), why[6:])
+    else:
+        ok('SMP-EXEC-LEAVE', f'4 leader-exit, 30 exec and 5 exec-kill rounds, each its status; {slows} slow leaves '
+                             f'(an application processor held {word[1]} ms with its thread ended in place); no panic')
 elif a.kind in ('nosmp', 'one', 'cap1'):
     row = {'nosmp': 'SMP-NOSMP', 'one': 'SMP-ONE', 'cap1': 'SMP-CAP'}[a.kind]
     started = N if a.kind == 'cap1' else 1
