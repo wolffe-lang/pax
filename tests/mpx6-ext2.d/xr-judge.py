@@ -83,7 +83,8 @@ class Sources:
 # --- the boots ---------------------------------------------------------------------
 
 def boots(m):
-    out = [("map", [m["P"]["image"], m["U"]["image"]]), ("multi", [m["M"]["image"]]), ("damage", [m["Q"]["image"]])]
+    out = [("map", [m["P"]["image"], m["U"]["image"]]), ("multi", [m["M"]["image"]]),
+           ("damage", [m["Q"]["image"], m["K"]["image"]])]
     feats = [("F-base", m["F"]["base"]["image"])] + [(k, v["image"]) for k, v in sorted(m["F"]["cases"].items())]
     for i in range(0, len(feats), 4):
         out.append((f"feat-{i // 4}", [img for _n, img in feats[i:i + 4]]))
@@ -206,13 +207,17 @@ def plan_damage(m):
                           f"rc={o['rc']} errno={o['errno']} sha256 {'equal' if o.get('sha256') == f[rel]['sha256'] else 'differs'}")
     p.op("mount /dev/vda /mnt ext4 ro", "XR-damage-mount", ok_rc(0, 0))
     p.op("file /mnt/c-before", "XR-damage-control-before", lambda o: six(o, "c-before"))
-    for rel in sorted(k for k in q["edit"] if k.startswith(("v-", "m-", "f-")) and k != "v-max"):
+    # An eh_max one or two under its node's room is no damage: pinned e2fsck
+    # accepts exactly the room and the two values under it at rooms 4, 84 and
+    # 340, whatever the entry count, and the Linux guest reads them whole.
+    # Past the room (v-maxover) or three and more under it (v-max1,
+    # m-idx-337, m-idx-max) is refused.
+    reads = {"v-max": "XR-eh_max-under-room", "v-max2": "XR-eh_max-root-2-under",
+             "m-idx-338": "XR-eh_max-block-2-under"}
+    for rel in sorted(k for k in q["edit"] if k.startswith(("v-", "m-", "f-")) and k not in reads):
         p.op(f"file /mnt/{rel}", f"XR-damage-{rel[2:]}", ok_eio())
-    # The inode's root with eh_max one under its room is no damage: pinned
-    # e2fsck and the Linux guest both read v-max whole. Past the room
-    # (v-maxover), further under it in the root (v-max1) or under it in a
-    # block (m-idx-max) is refused: e2fsck calls the last two corrupt.
-    p.op("file /mnt/v-max", "XR-eh_max-under-room", lambda o: six(o, "v-max"))
+    for rel, row in reads.items():
+        p.op(f"file /mnt/{rel}", row, lambda o, rel=rel: six(o, rel))
     p.op("list /mnt/d-out", "XR-dir-eio-list-out", ok_eio())
     p.op("stat /mnt/d-out/n000", "XR-dir-eio-lookup-out", ok_eio())
     p.op("list /mnt/d-hole", "XR-dir-eio-list-hole", ok_eio())
@@ -225,6 +230,15 @@ def plan_damage(m):
          needs="XR-damage-mount")
     p.op("file /mnt/c-after", "XR-damage-control-after", lambda o: six(o, "c-after"))
     p.op("umount /mnt", "XR-damage-umount", ok_rc(0, 0))
+    # K: an extent volume of 1 KiB blocks, whose leaf room is 84.
+    kf = m["K"]["files"]
+    kread = lambda o, rel: (o["rc"] == 0 and o.get("sha256") == kf[rel]["sha256"],
+                            f"rc={o['rc']} errno={o['errno']} sha256 {'equal' if o.get('sha256') == kf[rel]['sha256'] else 'differs'}")
+    p.op("mount /dev/vdb /mnt2 ext4 ro", "XR-1k-mount", ok_rc(0, 0))
+    p.op("file /mnt2/k-control", "XR-1k-control", lambda o: kread(o, "k-control"))
+    p.op("file /mnt2/k-max82", "XR-eh_max-1k-2-under", lambda o: kread(o, "k-max82"))
+    p.op("file /mnt2/k-max81", "XR-damage-1k-3-under", ok_eio(), needs="XR-1k-control")
+    p.op("umount /mnt2", "XR-1k-umount", ok_rc(0, 0))
     return p
 
 
@@ -354,7 +368,7 @@ def judge(boot, m, log, diskdir, tag):
                 hit = [l for l in lines if word in l]
                 row(f"XR-state-{name}-named", len(hit) == 2, f"{len(hit)} refusal lines for {dev} saying '{word}' (want 2): {lines[:1]}")
     want = {m["P"]["image"]: m["P"]["sha256"], m["U"]["image"]: m["U"]["sha256"], m["Q"]["image"]: m["Q"]["sha256"],
-            m["M"]["image"]: m["M"]["sha256"],
+            m["M"]["image"]: m["M"]["sha256"], m["K"]["image"]: m["K"]["sha256"],
             m["F"]["base"]["image"]: m["F"]["base"]["sha256"], m["J"]["clean"]["image"]: m["J"]["clean"]["sha256"]}
     want.update({v["image"]: v["sha256"] for v in m["F"]["cases"].values()})
     want.update({v["image"]: v["sha256"] for v in m["J"]["cases"].values()})
