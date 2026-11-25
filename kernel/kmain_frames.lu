@@ -17,11 +17,13 @@
 //      but for that frame, must hand that frame back;
 //   4. frees every frame along the chain: the free count returns to
 //      what `init` left;
-//   6. (px120) with every frame free and `alloc`'s next-fit hint at the
-//      top (step 3's), `alloc_below` under the frame `alloc` gives: the
-//      lowest free frame, none free below it, none below 1 MiB, and
+//   6. (px120) with every frame free and `alloc`'s next-fit hint high
+//      (step 3's, at the top word; walked up past the middle when the
+//      top word holds the one frame `alloc` gives), `alloc_below` under
+//      the frame `alloc` gives: the lowest free frame, none free below it,
+//      none below 1 MiB, and
 //      `alloc`'s hint where it was (its next frame the one it would have
-//      given without the call); the three frames given back;
+//      given without the call); the frames given back;
 //   5. allocates until `out_of_memory` again.
 //
 // Volatile accesses for the tags: a write followed by a read of the
@@ -243,11 +245,39 @@ export fn kmain() {
     log.put(" free")
     log.end()
 
-    // 6. px120: alloc_below under a high hint (step 3 left it at the top)
-    let h = frames.alloc() else 0
-    let before = frames.alloc() else 0
+    // 6. px120: alloc_below under a high hint (step 3 left it at the top word).
+    // That word may hold one usable frame alone, h, as where Limine
+    // lands the image decides (and that moves between boots of one image):
+    // then alloc's next frame after h wraps to the lowest free frame, the
+    // very one alloc_below must give, and a kept hint would read as a moved
+    // one. So while alloc's next frame is not above h, or h lies in the lower
+    // half of the frames step 1 took, h is held and the next frame becomes
+    // h: the hint walks up past the middle, with a free frame after h in its
+    // word. The held frames are given back before alloc_below, but those in
+    // h's word only after the row, so alloc's next frame stays the one after
+    // h. Where the top word holds more than h, nothing is held.
+    var held: u64 = 0
+    var h = frames.alloc() else 0
+    var before = frames.alloc() else 0
+    while h != 0 && before != 0 && (before < h || h < head / 2) {
+        tag(hhdm, h, held)
+        held = h
+        h = before
+        before = frames.alloc() else 0
+    }
     if before != 0 {
         frames.free(before)
+    }
+    var kept: u64 = 0
+    while held != 0 {
+        let next = frame_word(hhdm, held, 1)
+        if held / 4096 / 64 == h / 4096 / 64 {
+            tag(hhdm, held, kept)
+            kept = held
+        } else {
+            frames.free(held)
+        }
+        held = next
     }
     let l = frames.alloc_below(h) else 0
     let none_below = below_oom(l)
@@ -273,6 +303,11 @@ export fn kmain() {
     }
     if after != 0 {
         frames.free(after)
+    }
+    while kept != 0 {
+        let next = frame_word(hhdm, kept, 1)
+        frames.free(kept)
+        kept = next
     }
 
     // 5. exhaust again
