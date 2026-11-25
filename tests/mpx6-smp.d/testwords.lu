@@ -10,7 +10,7 @@
 //! (an exec's or an exit_group's sibling) gives the lock back and holds MS ms
 //! of CPU 0's ticks (ten to a tick, at least one) before it takes it again and
 //! switches that thread off (kernel/interrupts' entry): what a host that has
-//! not run that processor does, every time. Each hold says one line after it.
+//! not run that processor does, every time. Each hold says one line after it, naming the held thread's slot and tgid.
 
 use boot_info
 use ipi
@@ -110,9 +110,14 @@ pub fn hold() -> u64 {
     unsafe { slow }
 }
 
-/// After a hold, the lock taken again: one line.
-pub fn held(cpu: u64) {
+/// After a hold, the lock taken again: one line naming the processor, the held thread's slot and its tgid (0 for a
+/// thread with no process: an exec's old leader, which nothing is charged for).
+pub fn held(cpu: u64, slot: u64, tgid: u64) {
     log.put("testwords: a slow leave, cpu ")
     log.dec(cpu as int)
+    log.put(", slot ")
+    log.dec(slot as int)
+    log.put(", tgid ")
+    log.dec(tgid as int)
     log.end()
 }
