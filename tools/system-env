@@ -7,7 +7,9 @@
 
 /etc/shrc is user/shrc, and in the dev image two lines more: `export PATH=/usr/bin:/bin` and
 `export WOLF_STD=/usr/share/wolf/compiler-std` (px92: the compiler's own std; lupin's stays at
-/usr/share/wolf/std). The console's shell runs it (ENV=/etc/shrc, from /etc/pax-run or /bin/login), so
+/usr/share/wolf/std), put before user/shrc's last part, the account's own file (warren W6), which stays
+last on every image so the account's file may change what the system set. A user/shrc without that
+part's first line is refused by name. The console's shell runs it (ENV=/etc/shrc, from /etc/pax-run or /bin/login), so
 the console has every variable it exports.
 
 A command over ssh never reads /etc/shrc (pax#334): burrowd gives it its own environment. So
@@ -29,6 +31,8 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEV_LINES = 'export PATH=/usr/bin:/bin\nexport WOLF_STD=/usr/share/wolf/compiler-std\n'
+# The first line of user/shrc's last part, the account's own file (warren W6): the dev lines go before it.
+ACCOUNT_FILE = "# The account's own file, last (warren W6)"
 SESSION_ENV = 'ENV=/etc/shrc'
 EXPORT = re.compile(r'^export ([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_./:,+=@%-]*)$')
 COMMENT = ('# px116 (pax#334): the variables /etc/shrc exports for the console, every one but PATH, in\n'
@@ -46,8 +50,11 @@ def shrc(variant):
     if variant not in ('dev', 'release'):
         die('shrc takes dev or release, not %r' % variant)
     text = (ROOT / 'user/shrc').read_text()
+    at = text.find('\n' + ACCOUNT_FILE)
+    if at < 0:
+        die('user/shrc has no line starting %r: the account\'s own file is its last part' % ACCOUNT_FILE)
     if variant == 'dev':
-        text += '\n' + DEV_LINES
+        text = text[:at + 1] + DEV_LINES + text[at:]
     return text
 
 
