@@ -444,12 +444,27 @@ def make(args):
         shutil.rmtree(tree)
         return f"J: clean control and {len(out)} refusals on {rec['sha256'][:16]}"
 
+    # --- M: two groups, a file whose blocks are all in the second ----------------
+    def m_set():
+        tree = work / "tree-m"
+        build_tree(tree, [("a-fill", "blocks", 34000), ("b-far", "pattern", 6)])
+        image, img, rec = checked_base(tools, tree, "256M", "M", 4096, ["a-fill", "b-far"])
+        need(img.blocks > 32768, f"M has {img.blocks} blocks, one group")
+        leaf = img.child(img.inode(rec["files"]["b-far"]["ino"]) + 40, 0)[1] * BS
+        (_s, _l, phys), _ = img.leaf(leaf, 0)
+        need(phys >= 32768 and img.itable(1) >= 32768, f"b-far's first block {phys}, group 1's table {img.itable(1)}")
+        rec["far_block"] = phys
+        manifest["M"] = rec
+        shutil.rmtree(tree)
+        return f"M {rec['sha256'][:16]}: {img.blocks} blocks, b-far from block {phys} (group 1)"
+
     section("P", p_set)
+    section("M", m_set)
     section("Q", q_set)
     section("F", f_set)
     section("J", j_set)
     (work / "manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
-    print(f"XR-FIXTURE-END exit={0 if ok else 1}", flush=True)
+    print(f"XR-FIXTURE-END exit={0 if ok else 1}", flush=True)  # five sets: P, M, Q, F, J
     return 0 if ok else 1
 
 
