@@ -5073,11 +5073,11 @@ fn mounts_of(info: bool) -> (u64, u64) {
             k = tdec(base, k, cap, mi)
             k = tstr(base, k, cap, " / / ")
             k = mount_opts(base, k, cap, ro, tree.mount_how(rm))
-            k = tstr(base, k, cap, if volume.fstype(v) == 3 { " - ext3 /dev/root " } else { " - ext2 /dev/root " })
+            k = tstr(base, k, cap, if volume.fstype(v) == 4 { " - ext4 /dev/root " } else if volume.fstype(v) == 3 { " - ext3 /dev/root " } else { " - ext2 /dev/root " })
             k = tstr(base, k, cap, if ro { "ro" } else { "rw" })
         } else {
             // px68: a journalled root is `ext3`, as Linux 7.3.0 names it
-            k = tstr(base, k, cap, if volume.fstype(v) == 3 { "/dev/root / ext3 " } else { "/dev/root / ext2 " })
+            k = tstr(base, k, cap, if volume.fstype(v) == 4 { "/dev/root / ext4 " } else if volume.fstype(v) == 3 { "/dev/root / ext3 " } else { "/dev/root / ext2 " })
             k = mount_opts(base, k, cap, ro, tree.mount_how(rm))
             k = tstr(base, k, cap, " 0 0")
         }
@@ -5144,7 +5144,7 @@ fn mounts_of(info: bool) -> (u64, u64) {
             k = tput(base, k, cap, 32)
             k = mount_opts(base, k, cap, ro, how)
             if v != tree.NONE {
-                k = tstr(base, k, cap, if volume.fstype(v) == 3 { " - ext3 /dev/" } else { " - ext2 /dev/" })
+                k = tstr(base, k, cap, if volume.fstype(v) == 4 { " - ext4 /dev/" } else if volume.fstype(v) == 3 { " - ext3 /dev/" } else { " - ext2 /dev/" })
                 k = block.name_into(tree.mount_dev(n), base, k, cap)
                 k = tput(base, k, cap, 32)
                 k = tstr(base, k, cap, if ro { "ro" } else { "rw" })
@@ -5158,7 +5158,7 @@ fn mounts_of(info: bool) -> (u64, u64) {
                 k = block.name_into(tree.mount_dev(n), base, k, cap)
                 k = tput(base, k, cap, 32)
                 k = tpath_esc(base, k, cap, pt)
-                k = tstr(base, k, cap, if volume.fstype(v) == 3 { " ext3 " } else { " ext2 " })
+                k = tstr(base, k, cap, if volume.fstype(v) == 4 { " ext4 " } else if volume.fstype(v) == 3 { " ext3 " } else { " ext2 " })
                 k = mount_opts(base, k, cap, ro, how)
             } else {
                 k = tstr(base, k, cap, "tmpfs ")
@@ -6349,13 +6349,15 @@ pub fn mount_call(a: u64, pml4: u64, src: u64, tgt: u64, typ: u64, flags: u64, d
     } else if bytes_are(fb, tl, "proc") || bytes_are(fb, tl, "sysfs") || bytes_are(fb, tl, "devtmpfs") {
         refuse(a, R_MOUNT)
         r = neg(EINVAL)
-    } else if !bytes_are(fb, tl, "ext2") && !bytes_are(fb, tl, "ext3") {
+    } else if !bytes_are(fb, tl, "ext2") && !bytes_are(fb, tl, "ext3") && !bytes_are(fb, tl, "ext4") {
         r = neg(ENODEV)
     } else {
         // px68: `ext3` names a journalled volume (one without a journal is
         // refused, -EINVAL, as Linux 7.3.0's `couldn't mount as ext3`);
         // `ext2` mounts either, its journal still used (measured).
         let t3 = bytes_are(fb, tl, "ext3")
+        // `ext4` admits the extent profile, read-only (kernel/ext2's `mount_as`)
+        let t4 = bytes_are(fb, tl, "ext4")
         let sb = fb + 128
         let sl = uaccess.string_in(pml4, src, sb, PATH_MAX)
         if sl > PATH_MAX {
@@ -6379,11 +6381,11 @@ pub fn mount_call(a: u64, pml4: u64, src: u64, tgt: u64, typ: u64, flags: u64, d
             } else if t3 && !volume.has_journal(dev) {
                 r = neg(EINVAL)
             } else {
-                let m = tree.mount(rf(t), dev, fl & MS_RDONLY != 0, mh_of(fl))
+                let m = tree.mount_as(rf(t), dev, fl & MS_RDONLY != 0, mh_of(fl), if t4 { 4 } else { 0 })
                 if tree.failed(m) {
                     r = m
                 } else {
-                    volume.ask_type(tree.mounted(m), if t3 { 3 } else { 2 })
+                    volume.ask_type(tree.mounted(m), if t4 { 4 } else if t3 { 3 } else { 2 })
                 }
             }
         }
@@ -8281,7 +8283,13 @@ pub fn getdents(a: u64, pml4: u64, fd: u64, buf: u64, count: u64) -> u64 {
             more = false
         } else if p >= 2 {
             let (di, dt, addr, l, nx) = tree.dirent(rf(d), p - 2) // px63: a volume's entries too
-            if di != 0 {
+            if di == volume.LOOKUP_BAD {
+                // An extent volume's damaged directory: -EIO, never a short listing.
+                if used == 0 {
+                    return neg(EIO)
+                }
+                more = false
+            } else if di != 0 {
                 dino = di
                 dtyp = dt
                 na = addr
