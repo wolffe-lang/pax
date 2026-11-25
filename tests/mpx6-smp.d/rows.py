@@ -159,6 +159,12 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            held (the old leader held on the application processor), fewer a red of its own name,
                            NOT-FORCED; no PANIC (an exec'd leader
                            collected while an ended sibling still ran: `sched: no process area for slot`).
+  share       SMP-SHARE    (asked only, never by default) N + 1 threads of one process spin on the N processors that
+                           run threads, each counting its own progress, three rounds of one second (`SMP-SHARE round R
+                           threads T processors N looks L ms M`, a `thread I count C on K:LOOKS,…` line each, the
+                           looks every 10 ms at /proc/pax-cpus): each thread's part of a round's progress against the
+                           fair 1/(N + 1), at least 0.85 of it under KVM with a host CPU for each processor (printed
+                           elsewhere, as the CPU shares are); a thread with no progress red anywhere; `SMP-SHARE done`.
 
   every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
                            `klock: entered from ring 3 holding it`): red by that line verbatim, silent when green.
@@ -195,13 +201,13 @@ BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processor
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
         'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
         'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT', 'SMP-STOPWRITE',
-        'SMP-EXEC-LEAVE']
+        'SMP-EXEC-LEAVE', 'SMP-SHARE']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
 ap.add_argument('--kind', required=True, choices=('rows', 'stress', 'end-halt', 'end-poweroff', 'end-reboot', 'nosmp',
                                                   'one', 'cap2', 'cap1', 'build', 'end-nooff', 'panic', 'panic2',
-                                                  'testwords', 'trace', 'leave'))
+                                                  'testwords', 'trace', 'leave', 'share'))
 ap.add_argument('--smp', required=True, type=int)
 ap.add_argument('--cap', type=int)
 ap.add_argument('--boot', type=int)
@@ -937,6 +943,59 @@ elif a.kind == 'leave':
                              f'the exec left still held at the wait4 in {opened} of {len(read)}, each settled reading '
                              f'within 64 kB of the reading 500 ms on (settled in at most '
                              f'{max(kv(x, "settle-ms") for _r, x in read)} ms); no panic')
+elif a.kind == 'share':
+    # SMP-SHARE: N + 1 threads spin on the N processors that run threads, each counting its own progress, three rounds of
+    # a second; each thread's part of a round's progress against the fair 1/(N + 1). A scheduler that lets an
+    # application processor keep one thread while the others take turns on CPU 0 gives that thread 1/2 of the progress
+    # at 2 and the other two 1/4 each, 0.75 of fair (the exec-settle rounds' looks under KVM at 2 saw an application
+    # processor keep one sibling through a whole round). Held where the CPU shares are (SHARES): under KVM with a host
+    # CPU for each processor, every thread at least 0.85 of fair; a thread with no progress is red anywhere. Each
+    # round's looks (/proc/pax-cpus every 10 ms) say where each thread ran.
+    why, info = [], []
+    sh = lines('SMP-SHARE')
+    hdr = [x for x in sh if re.match(r'round \d+ threads \d+ ', x)]
+    done = 'SMP-SHARE done' in text
+    if not done or len(hdr) != 3:
+        why.append(f'{len(hdr)} of 3 rounds' + ('' if done else ', no `SMP-SHARE done`'))
+    worst = None
+    for x in hdr:
+        r, t, pn = kv(x, 'round'), kv(x, 'threads'), kv(x, 'processors')
+        if pn != N or t != N + 1:
+            why.append(f'round {r}: {t} threads on {pn} processors that run threads, want {N + 1} on {N}')
+            continue
+        th = [y for y in sh if re.match(rf'round {r} thread \d+ ', y)]
+        counts = [kv(y, 'count') for y in th]
+        if len(th) != t or not all(isinstance(c, int) for c in counts):
+            why.append(f'round {r}: {len(th)} thread lines for {t} threads')
+            continue
+        tot = sum(counts)
+        ratios = [c * t / tot if tot else 0.0 for c in counts]
+        ons, stays = [], []
+        for y in th:
+            m = re.search(r' on (\S+)$', y)
+            ons.append(m[1] if m else '-')
+            lk = {int(k): int(v) for k, v in re.findall(r'(\d+):(\d+)', m[1])} if m else {}
+            top = max(lk, key=lk.get) if lk else None
+            stays.append(f'{lk[top]}/{sum(lk.values())} on {top}' if lk else '-')
+        for i, c in enumerate(counts):
+            if c == 0:
+                why.append(f'round {r}: thread {i} made no progress (looks by processor {ons[i]})')
+            elif TIMED and ratios[i] < 0.85:
+                why.append(f'round {r}: thread {i} had {ratios[i]:.2f} of its fair share of the progress (1/{t}), '
+                           f'under 0.85; looks by processor {ons[i]}')
+        worst = min(ratios) if worst is None else min(worst, min(ratios))
+        info.append(f'round {r}: each thread\'s part of the progress against the fair 1/{t} '
+                    f'{[round(q, 2) for q in ratios]}; its most looks on one processor {stays}')
+    if not TIMED:
+        info.append(SHARES)
+    bad = bad_lines()
+    if bad:
+        why.append(f'the kernel said: {bad[:3]}')
+    if why:
+        fail('SMP-SHARE', '; '.join(why[:6]), why[6:] + info)
+    else:
+        ok('SMP-SHARE', f'3 rounds of {N + 1} threads on {N} processors, every thread at least {worst:.2f} of its fair '
+                        f'share of the progress' + ('' if TIMED else ' (printed)') + '; ' + '; '.join(info))
 elif a.kind in ('nosmp', 'one', 'cap1'):
     row = {'nosmp': 'SMP-NOSMP', 'one': 'SMP-ONE', 'cap1': 'SMP-CAP'}[a.kind]
     started = N if a.kind == 'cap1' else 1
