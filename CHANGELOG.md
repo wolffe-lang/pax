@@ -7,6 +7,15 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Your own shell file at login.** `/etc/shrc` ends by running `~/.config/pelt/shrc` when it is a readable
+  regular file: at a console login, in a terminal over ssh and in a shell from `su USER`, as the account whose
+  `HOME` it is; not for a command over ssh or `sudo -s`, which read no `ENV`. PAX ships no such file. The dev
+  image's two exports now come before it, so the account's file runs last on every image. Where pid 1 is the
+  shell (the dev and release images), an `exit` in the file halts the machine, as `exit` typed there does.
+  `tests/mpx5-init` I17-I21 (its line runs; no file, an unreadable file or a directory change nothing; a failing
+  file leaves the login usable; `exec` replaces the login shell; Ctrl-C reaches a file that waits) and
+  `tests/mpx5-burrowd` B44 and B45 hold it; `--rows hook` runs those alone.
+
 - **warren's console rows against the shipped dev image.** `tests/distribution-warren IMAGE_DIRECTORY` takes
   `tools/mkdistribution`'s output and runs warren's own `tests/pax/console_rows.py` from the commit the image names.
   By default it asks every row that file asks, on BIOS with a USB keyboard and on UEFI with a PS/2 one, and each of
