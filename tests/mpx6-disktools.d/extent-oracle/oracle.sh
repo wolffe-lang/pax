@@ -6,7 +6,7 @@ if [ "$version" != '1.47.0-2.4~exp1ubuntu4.1' ]; then
     printf '%s\n' "REFUSED oracle-version found=$version expected=1.47.0-2.4~exp1ubuntu4.1" >&2
     exit 75
 fi
-sha256sum -c /opt/extent-oracle/binaries.sha256 >&2 || {
+sha256sum -c "$(dirname "$0")/binaries.sha256" >&2 || {
     printf '%s\n' 'REFUSED oracle-binary-digest' >&2
     exit 75
 }
