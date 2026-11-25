@@ -74,11 +74,11 @@
 //! An inode with EXTENTS_FL (0x80000) maps through its tree; one without it
 //! keeps the block map. A lookup walks at most six nodes: each node's magic
 //! 0xf30a, its eh_max its room (4 in the inode, (block size - 12) / 12 in a
-//! block; the inode's root may say one under, the one smaller value pinned
-//! e2fsck and Linux both read), its entries at most eh_max, its depth at
-//! most 5 and exactly one under its parent's, its keys increasing inside
-//! the range its parent gave it, no block twice on the path, every extent
-//! of 1 to 32768 blocks
+//! block) or one or two under it, the values pinned e2fsck accepts (measured
+//! at rooms 4, 84 and 340) and Linux reads, its entries at most eh_max, its
+//! depth at most 5 and exactly one under its parent's, its keys increasing
+//! inside the range its parent gave it, no block twice on the path, every
+//! extent of 1 to 32768 blocks
 //! (an unwritten one, `ee_len` past 32768, reads as zeros) inside the
 //! volume, off its group metadata and its journal. Damage answers -EIO with
 //! a line naming the inode (`xbad`): a file's read, a directory's lookup or
@@ -1157,8 +1157,8 @@ fn xmap(v: u64, ino: u64, fb: u64) -> u64 {
         if r16(node + 4) > cap {
             return xbad(v, ino, "an extent node's eh_max is past the room its node has, logical block", fb)
         }
-        if r16(node + 4) < cap && (level != 0 || r16(node + 4) + 1 != cap) {
-            return xbad(v, ino, "an extent node's eh_max is under its room (only the inode's root may be one under), logical block", fb)
+        if r16(node + 4) + 2 < cap {
+            return xbad(v, ino, "an extent node's eh_max is more than two under its room, logical block", fb)
         }
         if n > r16(node + 4) {
             return xbad(v, ino, "an extent node has more entries than its eh_max, logical block", fb)
