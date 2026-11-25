@@ -771,6 +771,60 @@ case('a stop-write round under TCG: judged the same', trace_text(4, sw=stopwrite
      {'SMP-STOPWRITE'}, meta=TCG, why=r'round 4 \(settle 0 ms\): 2 bytes written after the stop')
 
 
+# --- the leave kind (SMP-EXEC-LEAVE): a test kernel's `pax.slowleave=MS` holds each application processor whose thread
+# was ended in place before it switches it off; the rounds' statuses, the holds' lines, and no panic. The red the rows
+# at 4 on two host CPUs met at f4942845: `PANIC sched: no process area for slot 0x…06` after an exec round's child line.
+SLOW_WORD = ('testwords: pax.slowleave=200 (a test kernel): a thread ended in place held 20 ticks on its application '
+             'processor before it is switched off\n')
+
+
+def leave_lines(n, leader=('0xa00',) * 4, execs=30, kills=5, exec_st='0x900', kill_st='0x9', done=True, stop_after=None):
+    """The probe's SMP-LEAVE lines; stop_after: the transcript ends after that many exec rounds' child lines (a panic's
+    or a hang's place), with no done."""
+    run = min(4, n)
+    out = ''.join(f'SMP-LEAVE leader-exit {r} status {st} running {run} of 4\n' for r, st in enumerate(leader))
+    for r in range(execs):
+        out += f'SMP-EXIT exec-child pid {60 + 4 * r}\n'
+        if stop_after is not None and r >= stop_after:
+            return out
+        out += f'SMP-LEAVE exec {r} status {exec_st} running {run} of 4\n'
+    for r in range(kills):
+        out += f'SMP-EXIT exec-child pid {200 + 4 * r}\nSMP-LEAVE exec-kill {r} status {kill_st} running {run} of 4\n'
+    return out + ('SMP-LEAVE done\n' if done else '')
+
+
+def leave_text(n, word=True, slows=12, lines=None, extra='', end=True):
+    t = (SLOW_WORD if word else '') + head('leave') + block('start', proc(n)) + active_line(n)
+    t += ''.join(f'testwords: a slow leave, cpu {1 + i % (n - 1)}\n' for i in range(slows))
+    t += (lines if lines is not None else leave_lines(n)) + extra
+    return t + (block('end', proc(n)) + tail() if end else '')
+
+
+PANIC6 = 'PANIC sched: no process area for slot 0x0000000000000006\npanic: halt\n'
+for n in (2, 4):
+    case(f'leave green at {n}', leave_text(n), ['--kind', 'leave', '--smp', str(n)], {'SMP-EXEC-LEAVE'}, set(),
+         says=rf'^PASS SMP-EXEC-LEAVE smp={n} leave: 4 leader-exit, 30 exec and 5 exec-kill rounds')
+    case(f'leave at {n}: the exec\'d leader collected while a sibling\'s processor held it (the panic at 4 on two host CPUs)',
+         leave_text(n, lines=leave_lines(n, stop_after=1), extra=PANIC6, end=False), ['--kind', 'leave', '--smp', str(n)],
+         set(), {'SMP-EXEC-LEAVE'}, why=r'the kernel said: \[.PANIC sched: no process area for slot 0x0000000000000006')
+case('leave under TCG: judged the same', leave_text(4), ['--kind', 'leave', '--smp', '4'], {'SMP-EXEC-LEAVE'}, set(), meta=TCG)
+case('leave: the parent never woken after a hold (a hang: no more rounds, no done)',
+     leave_text(4, lines=leave_lines(4, stop_after=3), end=False), ['--kind', 'leave', '--smp', '4'], set(),
+     {'SMP-EXEC-LEAVE'}, why=r'1 of 3 exec rounds, 0 of 0 exec-kill|no `SMP-LEAVE done`')
+case('leave: a shipped kernel (the word not taken)', leave_text(4, word=False, slows=0), ['--kind', 'leave', '--smp', '4'],
+     set(), {'SMP-EXEC-LEAVE'}, why=r'no `testwords: pax.slowleave=')
+case('leave: the word taken but no processor held', leave_text(4, slows=0), ['--kind', 'leave', '--smp', '4'], set(),
+     {'SMP-EXEC-LEAVE'}, why=r'0 slow leaves')
+case('leave: an exec round with the wrong status', leave_text(4, lines=leave_lines(4, exec_st='0xdead')),
+     ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'}, why=r'exec round 0: status 0xdead, want 0x900')
+case('leave: an exec-kill round not killed', leave_text(4, lines=leave_lines(4, kill_st='0x900')),
+     ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'}, why=r'exec-kill round 0: status 0x900, want 0x9')
+case('leave: a leader round with the wrong status', leave_text(4, lines=leave_lines(4, leader=('0xa00', '0x0', '0xa00', '0xa00'))),
+     ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'}, why=r'leader-exit round 1: status 0x0, want 0xa00')
+case('leave: an exec-child line missing', leave_text(4, lines=leave_lines(4).replace('SMP-EXIT exec-child pid 64\n', '')),
+     ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'}, why=r'34 exec-child lines for 35 execs')
+
+
 # --- SMP-BUILD -------------------------------------------------------------------------------------
 EXPECTED = {'pack-8ae042682afb5156b4b5a80bc241260795144d29.pack': '8ae042682afb5156b4b5a80bc241260795144d29',
             'pack-8ae042682afb5156b4b5a80bc241260795144d29.idx': 'c219e2f6ef55933c2050bc2356210dff1d746e4b'}
