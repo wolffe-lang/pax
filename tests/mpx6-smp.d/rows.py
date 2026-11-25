@@ -63,8 +63,9 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            execve from a sibling with the others running: statuses 0x700, 0x800,
                            0x900; min(4, N) of the group seen running at once; MemFree after four
                            exec rounds within 64 kB of before, each read once the round's threads are
-                           off every processor and a wait4 with no child has run the kernel's reap
-                           (what each round's settle gave back printed); no processor stopped.
+                           off every processor (the main thread, which the exec leaves with no pid, by
+                           `current kernel`) and a wait4 with no child has run the kernel's reap (what
+                           each round's settle gave back printed); no processor stopped.
               SMP-WAIT     16 children of 20 to 320 ms of work: 16 statuses right, the children's CPU
                            0.8 of the work or more (held where SMP-RUN's CPU share is), and the children
                            ran on max(2, min(N, 16) - 1)
