@@ -4857,8 +4857,10 @@ fn account(from: u64, to: u64) {
     if from != percpu.IDLE_SLOT && field(from, offset_of(Thread, tgid)) != 0 {
         let a = proc_area(from)
         if was != 0 && now > was {
-            put_field(from, offset_of(Thread, cpu), field(from, offset_of(Thread, cpu)) + (now - was))
-            ru_add(a, RU_CPU, now - was)
+            // plant apcharge: an application processor's run charged at a quarter while the boot processor runs a thread (red at SMP-RUN and SMP-WAIT under KVM)
+            let d = if percpu.index() != 0 && !idle(percpu.get(smp.record(0), percpu.CURRENT)) { (now - was) / 4 } else { now - was }
+            put_field(from, offset_of(Thread, cpu), field(from, offset_of(Thread, cpu)) + d)
+            ru_add(a, RU_CPU, d)
         }
         let si = field(from, offset_of(Thread, sysin))
         if si > 1 {
