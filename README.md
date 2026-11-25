@@ -179,6 +179,15 @@ powers off.
 ends pid 1, writes `/` and halts, as it always has, and there is no `/run` tmpfs or runtime directory.
 `tests/mpx5-init` holds all of it at the console of an installed-shaped image, and `tests/mpx5-burrowd` the ssh side.
 
+**Your own shell file.** The last thing `/etc/shrc` does is run `~/.config/pelt/shrc`, when that is a readable
+regular file. It runs wherever `/etc/shrc` runs, as the account whose `HOME` it is: a console login, a terminal over
+ssh, and a shell from `su USER` (su sets `HOME` to the target's). A command over ssh and `sudo -s` read no `ENV`, so
+they do not run it. PAX ships no such file; write one to set your own variables, aliases or a program to start at
+login (`exec` in it replaces the login shell, as at a prompt). A failing command in it leaves the prompt working; an
+`exit` in it ends the session, and on an installed system init asks `login:` again. Where pid 1 is the shell (the dev
+and release images), an `exit` in the file ends pid 1 and halts the machine, as `exit` typed there does. The path is
+one line in `user/shrc`. `tests/mpx5-init` (I17 to I21) and `tests/mpx5-burrowd` (B44, B45) hold all of this.
+
 ## Quick start
 
 On a Linux x86-64 host with binutils, cc, make, curl, xorriso and `qemu-system-x86_64` (the Hosts table below says what
