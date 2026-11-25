@@ -952,11 +952,14 @@ for leg in $legs; do
                                      done
                                      case $n in
                                          *c_jc_ctrl_c_loop)
-                                             # the loop's ^C killed the sleep that held the terminal, before the next exec
+                                             # the loop's ^C killed the sleep that held the terminal, before the next exec;
+                                             # the first of the two lines decides and the rest is read to its end, so
+                                             # run_raw is never cut off by SIGPIPE (pax#254's shape)
                                              run_raw "$norm" "$k" | awk '
+                                                 decided { next }
                                                  !seen && index($0, "^C") { seen = 1; $0 = substr($0, index($0, "^C") + 2) }
-                                                 seen && /user: sleep pid [0-9]+ killed: SIGINT/ { ok = 1; exit }
-                                                 seen && /user: exec pid / { exit }
+                                                 seen && /user: sleep pid [0-9]+ killed: SIGINT/ { ok = 1; decided = 1; next }
+                                                 seen && /user: exec pid / { decided = 1; next }
                                                  END { exit !ok }' || why+=" the loop's ^C killed no sleep before the next exec;" ;;
                                      esac ;;
                             groups|groups-user)
