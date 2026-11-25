@@ -103,6 +103,13 @@ The rows, each `PASS <row> …` or `FAIL <row> …` at column 0:
       not interactive, so it reads no ENV though ENV is set (the SetEnv
       line's value, or unset): `ssh host COMMAND` prints what it prints, a
       bare `../` changes no directory, and `g` is no function
+  B44 (warren W6) a terminal over ssh ran the account's own file: pax's
+      HOOK_PATH under its home, made over ssh (`echo B44-HOOK-$(id -u)`),
+      prints B44-HOOK-1000 before the session's first prompt, after
+      /etc/shrc's own hook
+  B45 (warren W6) a command over ssh did not: `ssh host 'echo B45-CMD'`
+      prints exactly B45-CMD (no ENV read, so no file of the account's); the
+      file is removed after, and its removal checked, so no later row meets it
   B40 (px130) a writer killed by SIGPIPE over ssh (`yes | head -n 1`,
       the session's own command): the kernel's line for it on the serial
       port as it always was, byte for byte (`user: yes pid N killed:
@@ -675,6 +682,9 @@ class Tty:
 
 
 GUEST_AT = (GUEST, 22)
+# The account's own file /etc/shrc sources, under its home (warren W6). The rows keep their own copy of the
+# ruled path, so a wrong path in user/shrc is red here; a new ruling changes this line and user/shrc's.
+HOOK_PATH = '.config/pelt/shrc'
 LINUX_AT = (HOST, SSHD_PORT)
 
 
@@ -1053,6 +1063,36 @@ def tty_rows(client):
     want = ('B29-42\nenv=%s\npwd=/home/pax\ng=none\n' % env_want).encode()
     (ok if r[0] == 0 and r[1] == want else bad)(
         'B29', 'ssh host COMMAND, no terminal: %s (want ENV %s seen and not read: no autocd, no g)' % (show(r), env_want))
+
+
+def hook_rows(client):
+    """B44, B45 (warren W6): pax's own file, made over ssh, run by a terminal session and not by a command."""
+    c = client
+    path = '$HOME/' + HOOK_PATH
+    made = c.ssh(GUEST_AT, ['mkdir -p "%s" && echo \'echo B44-HOOK-$(id -u)\' > "%s" && echo B44-made'
+                            % (path.rsplit('/', 1)[0], path)])
+    if made[0] != 0 or made[1] != b'B44-made\n':
+        bad('B44', 'the file could not be made over ssh: %s' % show(made))
+        bad('B45', 'no file to read: %s' % show(made))
+        return
+    t = c.terminal(GUEST_AT, 33, 97)
+    try:
+        hook = t.expect(rb'^B44-HOOK-1000$', 30)
+        first = t.expect(PROMPT, 30)
+        text = t.shown()
+        before = bool(hook and first and text.find(b'B44-HOOK-1000') < first.start())
+        (ok if before else bad)('B44', 'a terminal over ssh ran ~/%s: %s' % (
+            HOOK_PATH, 'B44-HOOK-1000 before the first prompt' if before else 'shown %r' % text[-200:]))
+        t.type(b'exit\r')
+        t.pump(3)
+    finally:
+        (c.dir / 'tty-hook.raw').write_bytes(t.raw)
+        t.close()
+    r = c.ssh(GUEST_AT, ['echo B45-CMD'])
+    (ok if r[0] == 0 and r[1] == b'B45-CMD\n' else bad)('B45', 'ssh host COMMAND with ~/%s present: %s' % (HOOK_PATH, show(r)))
+    gone = c.ssh(GUEST_AT, ['rm -f "%s" && test ! -e "%s" && echo B45-removed' % (path, path)])
+    if gone[0] != 0 or gone[1] != b'B45-removed\n':
+        bad('B45', 'the file was not removed after the rows: %s' % show(gone))
 
 
 def image_exports():
@@ -1444,6 +1484,7 @@ def main():
     a = argparse.ArgumentParser()
     for k in ('images', 'elf', 'tier', 'leg', 'accel', 'out'):
         a.add_argument('--' + k, required=True)
+    a.add_argument('--rows', choices=('all', 'hook'), default='all')
     ARGS = a.parse_args()
     ARGS.images = pathlib.Path(ARGS.images)
     out = pathlib.Path(ARGS.out)
@@ -1477,32 +1518,36 @@ def main():
         con = Console(b1, iso, vol)
         try:
             fp = first_boot(con, client, linux)
-            if fp:
+            if fp and ARGS.rows == 'hook':
+                hook_rows(client)
+            elif fp:
                 host_rows(client)
                 tty_rows(client)
+                hook_rows(client)  # warren W6: B44, B45, after the terminal rows; the file removed after
                 env_rows(client)
                 git_rows(client, work)
                 console_rows(con, client)
         finally:
             con.quit(5)  # px124: the console asks `login:` again after its logout; nothing halts
-        b2 = out / 'boot2'
-        b2.mkdir()
-        con2 = Console(b2, iso, vol)
-        try:
-            if fp:
-                second_boot(con2, client, fp)
-            poweroff_row(con2, client)
-        finally:
-            con2.quit(5)
-        b3 = out / 'boot3-stick'
-        b3.mkdir()
-        live = live_image(work)
-        if live:
-            con3 = Console(b3, live, None)
+        if ARGS.rows == 'all':  # --rows hook: the first boot's B0, B1, B44 and B45 alone
+            b2 = out / 'boot2'
+            b2.mkdir()
+            con2 = Console(b2, iso, vol)
             try:
-                stick_rows(con3, client)
+                if fp:
+                    second_boot(con2, client, fp)
+                poweroff_row(con2, client)
             finally:
-                con3.quit(120)
+                con2.quit(5)
+            b3 = out / 'boot3-stick'
+            b3.mkdir()
+            live = live_image(work)
+            if live:
+                con3 = Console(b3, live, None)
+                try:
+                    stick_rows(con3, client)
+                finally:
+                    con3.quit(120)
     finally:
         linux.close()
         net.close()
