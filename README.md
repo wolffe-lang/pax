@@ -481,13 +481,15 @@ flex_bg, metadata_csum, huge_file, dir_index, dir_nlink, ext_attr, extra_isize a
 when the mount names `ext4`: `mount -t ext4`, an fstab line, or `rootfstype=ext4`. Its files, directories and links
 read through their trees; a damaged tree, directory or link answers EIO on its own path. Any other feature, a volume
 that needs recovery or holds an orphan list, and one not cleanly unmounted are refused by name, the disk untouched.
-A node's eh_max is the room the node has, except that the root in the inode may say one under it (3 of 4), which
-e2fsck and Linux both read; any other value is damage. Linux, reading the same damaged images, answers differently in
-three ways that are kept on purpose. It says EUCLEAN for most damage (ENODATA for a file flagged encrypted) and
-refuses some of it when the file is opened; PAX says EIO, mostly at the read. It lists a directory with a hole in it
-as complete and calls a name in the hole absent; PAX answers EIO, because a missing directory block cannot prove a
-name is not there. It reads a tree whose eh_max is further under the room, which e2fsck calls corrupt; PAX answers
-EIO. A mapped page that cannot be read is SIGBUS on every volume, as on Linux.
+A node's eh_max is the room the node has or one or two under it, which e2fsck accepts (measured at rooms of 4, 84
+and 340 entries) and Linux reads; any other value is damage. Volumes of 1 and 4 KiB blocks are held to rows; 2 KiB
+blocks are admitted and take the same rule (a room of 169), but no row or measurement covers them yet. Linux, reading
+the same damaged images, answers differently in three ways that are kept on purpose. It says EUCLEAN for most damage
+(ENODATA for a file flagged encrypted) and refuses some of it when the file is opened; PAX says EIO, mostly at the
+read. It lists a directory with a hole in it as complete and calls a name in the hole absent; PAX answers EIO,
+because a missing directory block cannot prove a name is not there. It reads a tree whose eh_max is three or more
+under the room, which e2fsck calls corrupt; PAX answers EIO. A mapped page that cannot be read is SIGBUS on every
+volume, as on Linux.
 Writing extent volumes is later work; ext2 and ext3 asks are unchanged, and the installer still formats ext3.
 
 ### A disk that boots
