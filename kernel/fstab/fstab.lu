@@ -321,10 +321,10 @@ pub fn mount_root() -> u64 {
         return 0
     }
     let (ta, tl) = boot_info.cmdline_value("rootfstype")
-    if tl != 0 && !is(ta, tl, "ext2") && !is(ta, tl, "ext3") {
-        return no_root(ra, rl, "rootfstype= names a file system PAX does not mount (ext2 and ext3 are the ones)")
+    if tl != 0 && !is(ta, tl, "ext2") && !is(ta, tl, "ext3") && !is(ta, tl, "ext4") {
+        return no_root(ra, rl, "rootfstype= names a file system PAX does not mount (ext2, ext3 and ext4 are the ones)")
     }
-    let asked = if tl == 0 { 0 } else if is(ta, tl, "ext3") { 3 } else { 2 } // px68
+    let asked = if tl == 0 { 0 } else if is(ta, tl, "ext4") { 4 } else if is(ta, tl, "ext3") { 3 } else { 2 } // px68
     let ro = !boot_info.cmdline_has("rw")
     var (d, named) = spec_device(ra, rl)
     if d == block.DEVS {
@@ -338,7 +338,7 @@ pub fn mount_root() -> u64 {
         return no_root(ra, rl, "rootfstype=ext3 names a volume with no journal")
     }
     let _old = block.set_policy(block.WRITE_BACK)
-    let m = tree.mount_root(d, ro, 0)
+    let m = tree.mount_root_as(d, ro, 0, if asked == 4 { 4 } else { 0 })
     if volume.failed(m) {
         log.put("root: ")
         put_span(ra, rl)
@@ -582,7 +582,7 @@ pub fn load_staged(pml4: u64) -> bool {
 /// `data=ordered, write-through` with `sync` (its file data written
 /// through; its metadata still at the journal's commits).
 fn put_kind(v: u64, wt: bool) {
-    log.put(if volume.fstype(v) == 3 { "ext3, " } else { "ext2, " })
+    log.put(if volume.fstype(v) == 4 { "ext4, " } else if volume.fstype(v) == 3 { "ext3, " } else { "ext2, " })
     log.put(if volume.read_only(v) != 0 { "read-only" } else { "read-write" })
     if volume.journalled(v) {
         log.put(if wt { ", data=ordered, write-through" } else { ", data=ordered" })
@@ -840,18 +840,19 @@ fn mount_line(a: u64, n: u64) -> bool {
     if is(ta, tl, "tmpfs") {
         return tmpfs_line(fa, fl, ga, gl, opts, mode)
     }
-    if !is(ta, tl, "ext2") && !is(ta, tl, "ext3") {
+    if !is(ta, tl, "ext2") && !is(ta, tl, "ext3") && !is(ta, tl, "ext4") {
         log.put("fstab: refused: ")
         put_span(fa, fl)
         log.put(" on ")
         put_span(ga, gl)
         log.put(": a file system type PAX does not mount (")
         put_span(ta, tl)
-        log.put("; ext2, ext3 and tmpfs are the ones)")
+        log.put("; ext2, ext3, ext4 and tmpfs are the ones)")
         log.end()
         return false
     }
     let t3 = is(ta, tl, "ext3") // px68
+    let t4 = is(ta, tl, "ext4") // the extent profile, read-only
     let (d, named) = spec_device(fa, fl)
     if d == block.DEVS {
         if opts & O_NOFAIL == 0 {
@@ -891,7 +892,7 @@ fn mount_line(a: u64, n: u64) -> bool {
         // # Safety: a scalar module var, written at boot with IF clear.
         unsafe { write_back = 1 }
     }
-    let m = tree.mount(point, d, opts & O_RO != 0, mh_of(opts))
+    let m = tree.mount_as(point, d, opts & O_RO != 0, mh_of(opts), if t4 { 4 } else { 0 })
     if volume.failed(m) {
         log.put("fstab: ")
         put_span(fa, fl)
@@ -908,7 +909,7 @@ fn mount_line(a: u64, n: u64) -> bool {
         return false
     }
     let v = tree.mounted(m)
-    volume.ask_type(v, if t3 { 3 } else { 2 })
+    volume.ask_type(v, if t4 { 4 } else if t3 { 3 } else { 2 })
     log.put("fstab: ")
     put_span(fa, fl)
     if named {
