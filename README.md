@@ -484,6 +484,13 @@ qemu-system-x86_64 -machine q35 -cpu max -m 512M -display cocoa \
 Without `-no-reboot`, root's `reboot` restarts the machine and the same disk boots again. Between boots, `e2fsck -fn
 pax-home.img` and `debugfs` read it on the host: the file is the file system, with no partition table.
 
+An extent-mapped volume (ext4's extent trees, made by `paxext2 --extents` or by `mke2fs -t ext4` without 64bit,
+flex_bg, metadata_csum, huge_file, dir_index, dir_nlink, ext_attr, extra_isize and resize_inode) mounts read-only
+when the mount names `ext4`: `mount -t ext4`, an fstab line, or `rootfstype=ext4`. Its files, directories and links
+read through their trees; a damaged tree, directory or link answers EIO on its own path. Any other feature, a volume
+that needs recovery or holds an orphan list, and one not cleanly unmounted are refused by name, the disk untouched.
+Writing extent volumes is later work; ext2 and ext3 asks are unchanged, and the installer still formats ext3.
+
 ### A disk that boots
 
 One file, no ISO. `tools/mkdisk --gpt` writes a GPT disk with an EFI system partition (Limine, the kernel, the
