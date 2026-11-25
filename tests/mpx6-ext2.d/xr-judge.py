@@ -206,8 +206,12 @@ def plan_damage(m):
                           f"rc={o['rc']} errno={o['errno']} sha256 {'equal' if o.get('sha256') == f[rel]['sha256'] else 'differs'}")
     p.op("mount /dev/vda /mnt ext4 ro", "XR-damage-mount", ok_rc(0, 0))
     p.op("file /mnt/c-before", "XR-damage-control-before", lambda o: six(o, "c-before"))
-    for rel in sorted(k for k in q["edit"] if k.startswith(("v-", "m-", "f-"))):
+    for rel in sorted(k for k in q["edit"] if k.startswith(("v-", "m-", "f-")) and k != "v-max"):
         p.op(f"file /mnt/{rel}", f"XR-damage-{rel[2:]}", ok_eio())
+    # An eh_max under its node's room is no damage: ifork.rst's field is the
+    # most entries that could follow, and the Linux guest reads v-max whole.
+    # Only one past the room (v-maxover) is refused.
+    p.op("file /mnt/v-max", "XR-eh_max-under-room", lambda o: six(o, "v-max"))
     p.op("list /mnt/d-out", "XR-dir-eio-list-out", ok_eio())
     p.op("stat /mnt/d-out/n000", "XR-dir-eio-lookup-out", ok_eio())
     p.op("list /mnt/d-hole", "XR-dir-eio-list-hole", ok_eio())
