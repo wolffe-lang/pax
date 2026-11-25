@@ -1003,6 +1003,12 @@ Suites that need something of the host say so and stop: root for the Linux netwo
 podman for the throwaway containers (`tools/linux-tree`, e2fsprogs), KVM for speed. `tools/mkimage` is reproducible:
 every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so one commit builds one digest.
 
+`tests/distribution-warren IMAGE_DIRECTORY` runs warren's own console rows against a dev image that carries warren,
+the terminal multiplexer in wolf. It fetches the rows from warren's repository at the commit the image's
+`/etc/pax-release` names, and boots the image twice: BIOS with a USB keyboard, then UEFI with a PS/2 one. First it
+checks the image's warren against the image's own release file and digests. It then runs those same bytes on the
+host to replay what the console drew. A row that prints nothing fails. The suite needs KVM and the network.
+
 ## Continuous integration
 
 - A pull request's push runs the suites its change can affect (`tools/ci-plan`, `tools/ci-tiers.map`) on one leg,
