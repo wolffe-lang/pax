@@ -11,7 +11,9 @@ inode. Damaged, unwritten, feature and state variants are byte edits of
 copies, at offsets taken from the published layout (Documentation/
 filesystems/ext4: super.rst, group_descr.rst, inodes.rst, ifork.rst,
 journal.rst); e2fsck's verdict on each copy is saved, not assumed. No
-fixture is ever repaired.
+fixture is ever repaired. The damage set also makes K, an extent volume of
+1 KiB blocks from pinned mke2fs (paxext2 makes only 4 KiB blocks) with
+exactly the extent profile, held to e2fsck and debugfs alike.
 
 Prints `PASS XR-fixture-<set>` or `FAIL XR-fixture-<set> <why>` and writes
 DIR/manifest.json for xr-judge.py. Exit 0 when every set was made.
@@ -191,6 +193,17 @@ def stat_ino(tools, image, path, tag):
     return int(ino[1]), int(flags[1], 16)
 
 
+def dumped(tools, image, src, rel, tag):
+    """Hold file `rel` of `image` to its source through pinned debugfs."""
+    out = tools.work / "dump.tmp"
+    if out.exists():
+        out.unlink()
+    r = tools.debugfs(image, f"dump /{rel} {out}", f"{tag}-dump-{rel.replace('/', '_')}")
+    need(r.returncode == 0 and out.is_file() and sha(out) == sha(src),
+         f"{tag}: debugfs dump of {rel} is not its source")
+    out.unlink()
+
+
 def checked_base(tools, tree, size, name, journal, files, undumped=()):
     """Format, then hold the image to e2fsck and debugfs: (image, its record).
     A file in `undumped` (the 5 GiB sparse one) is not dumped whole: its
@@ -213,13 +226,7 @@ def checked_base(tools, tree, size, name, journal, files, undumped=()):
         elif rel in undumped:
             entry["bytes"] = src.stat().st_size
         else:
-            out = tools.work / "dump.tmp"
-            if out.exists():
-                out.unlink()
-            r = tools.debugfs(image, f"dump /{rel} {out}", f"{name}-dump-{rel.replace('/', '_')}")
-            need(r.returncode == 0 and out.is_file() and sha(out) == sha(src),
-                 f"{name}: debugfs dump of {rel} is not its source")
-            out.unlink()
+            dumped(tools, image, src, rel, name)
             entry["bytes"] = src.stat().st_size
             entry["sha256"] = sha(src)
         if not src.is_symlink() or len(os.readlink(src)) >= 60:
@@ -400,7 +407,55 @@ def make(args):
         manifest["Q"] = {"base": rec, **cases["Q"]}
         shutil.rmtree(tree)
         (work / "Q-base.img").unlink()
-        return f"Q: {len(cases['Q']['edit'])} edits on one copy, e2fsck exit {cases['Q']['e2fsck']}"
+        kilo = k_image()
+        return (f"Q: {len(cases['Q']['edit'])} edits on one copy, e2fsck exit {cases['Q']['e2fsck']}; "
+                f"K: 1 KiB blocks, two leaf eh_max edits, e2fsck exit {kilo}")
+
+    # --- K: an extent volume of 1 KiB blocks (leaf room 84), beside Q in its boot ----
+    kfiles = [("k-control", "pattern", 6), ("k-max82", "pattern", 6), ("k-max81", "pattern", 6)]
+
+    def k_image():
+        """Pinned mke2fs (paxext2 makes only 4 KiB blocks) with exactly the
+        extent profile: filetype and extent, sparse_super and large_file,
+        no journal. k-max82's leaf says eh_max 82 (two under its room of
+        84), k-max81's 81 (three under)."""
+        tree = work / "tree-k"
+        build_tree(tree, kfiles)
+        base = work / "K-base.img"
+        r = tools.run([tools.e2fs, work, "mke2fs", "-q", "-F", "-t", "ext4", "-b", "1024", "-I", "256",
+                       "-O", "^has_journal,^metadata_csum,^64bit,^flex_bg,^huge_file,^dir_nlink,^extra_isize,"
+                       "^ext_attr,^resize_inode,^dir_index",
+                       "-U", "6b2d8c1e-4f3a-4e7b-9c5d-0a1b2c3d4e5f", "-L", "xr-K", "-d", tree, base, "8M"], "mke2fs-xr-K")
+        need(r.returncode == 0 and base.is_file(), f"mke2fs xr-K exit {r.returncode}; see logs/mke2fs-xr-K.log")
+        need(tools.fsck(base, "K-base") == 0, "K-base: e2fsck -fn not clean on mke2fs's own image")
+        img = Image(base)
+        need(img.bs == 1024 and img.words == (0, 0x42, 3), f"K-base: block size {img.bs}, feature words {img.words}")
+        room = (img.bs - 12) // 12
+        files = {}
+        for rel, *_ in kfiles:
+            ino, flags = stat_ino(tools, base, "/" + rel, "K-base-stat-" + rel)
+            need(flags & 0x80000, f"K-base: {rel} has no EXTENTS_FL")
+            dumped(tools, base, tree / rel, rel, "K-base")
+            h = img.header(img.inode(ino) + 40)
+            need(h["magic"] == MAGIC and h["depth"] == 1, f"K-base: {rel}'s root {h}")
+            files[rel] = {"ino": ino, "bytes": (tree / rel).stat().st_size, "sha256": sha(tree / rel)}
+
+        def edit(i):
+            out = {}
+            for rel, mx in (("k-max82", room - 2), ("k-max81", room - 3)):
+                leaf = i.child(i.inode(files[rel]["ino"]) + 40, 0)[1] * i.bs
+                h = i.header(leaf)
+                need(h["depth"] == 0 and h["max"] == room and h["entries"] <= mx, f"{rel}'s leaf {h}")
+                i.put(leaf + 4, 2, mx)
+                out[rel] = f"leaf eh_max {mx} under its room of {room}"
+            return out
+
+        cases = {}
+        damaged(tools, base, "K", edit, cases)
+        manifest["K"] = {**cases["K"], "files": files}
+        shutil.rmtree(tree)
+        base.unlink()
+        return cases["K"]["e2fsck"]
 
     # --- F: one superblock feature bit a copy, no journal ---------------------------
     features = [(1, 0x1, "compression"), (1, 0x8, "journal_dev"), (1, 0x10, "meta_bg"), (1, 0x80, "64bit"),
