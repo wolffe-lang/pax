@@ -720,6 +720,10 @@ static U group_running(void) {
     }
     return best;
 }
+/* SMP-EXEC-LEAVE's exec rounds: the main thread sleeps once it has said go, so the processors beside the exec'ing
+   sibling run its other two siblings, the threads the exec re-points (spinning, the main thread would be the one beside
+   it at two processors: it says go while the exec'ing sibling runs, and an exec's old leader is charged nothing) */
+static int main_naps;
 static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a sibling execs, 3 a sibling execs a
                              program killed by its own SIGKILL, 4 the main thread exits alone and a sibling then exits */
     G->started = 0; G->go = 0; G->running = 0;
@@ -735,6 +739,7 @@ static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a
         if (how == 0) exit_group(7);
         if (how == 4) { G->go = 4; exit_thread(0); }
         G->go = how == 1 ? 1 : how == 3 ? 3 : 2;
+        if (main_naps && how >= 2) for (;;) nap(1000000);
         for (;;) G->spins++;
     }
     return p;
@@ -826,12 +831,14 @@ static void row_exit(void) {
    Each round a group of four spinning threads ends while some of them run on other processors, and the kernel's test
    word holds each such processor (with the lock given back) before it switches its ended thread off: what a host that
    has not run that processor does. The round's wait4 must find the right status, and the kernel must not read a
-   process area that went with the reap (kernel/sched's `account`, `no process area for slot`). Four rounds whose main
-   thread exits alone and a sibling then ends the group (status 0xa00), thirty whose sibling execs a program that
-   exits 9 (0x900), five whose exec'd program is killed by its own SIGKILL (0x9). */
+   process area that went with the reap (kernel/sched's `account`, `no process area for slot`, or since the leader
+   check `a thread's leader is another process's`). Four rounds whose main thread exits alone and a sibling then ends
+   the group (status 0xa00), thirty whose sibling execs a program that exits 9 (0x900), five whose exec'd program is
+   killed by its own SIGKILL (0x9); in the exec rounds the main thread sleeps once it has said go (`main_naps`). */
 static void row_leave(void) {
     struct ln l;
     int st;
+    main_naps = 1;
     const struct { const char *name; int how, rounds; } kinds[] = { { "leader-exit", 4, 4 }, { "exec", 2, 30 }, { "exec-kill", 3, 5 } };
     for (int k = 0; k < 3; k++) {
         for (int r = 0; r < kinds[k].rounds; r++) {
