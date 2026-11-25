@@ -5,7 +5,8 @@
 #   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
 #    SMP_KINDS='rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave' (or commas) the boots run, every
-#    kind by default, fewer for a plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
+#    kind by default, fewer for a plant's take, each kind left out said `NOT-RUN … SMP_KINDS`; `share` (SMP-SHARE)
+#    besides, asked only, never by default and never said;
 #    SMP_TRACE_COUNTS='1 2 4' (or commas) the trace kind's processor counts, SMP_TRACE_BOOTS=1 its boots at each;
 #    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
@@ -60,8 +61,8 @@ rows_cap=${SMP_ROWS_CAP:-}
 rows_cap_check "$rows_cap" || exit 2
 [ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 for k in $kinds; do
-    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords|leave) ;;
-        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave, not $k" ;; esac
+    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords|leave|share) ;;
+        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share, not $k" ;; esac
 done
 asked() { # KIND: 0 when SMP_KINDS asks it, else its NOT-RUN line and 1
     case " $kinds " in *" $1 "*) return 0 ;; esac
@@ -99,7 +100,7 @@ images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-hal
         "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one" "trace::/bin/smpprobe trace"
         "end-nooff: pax.cpus=4 pax.nopoweroff:/bin/smpprobe end poweroff" "panic: pax.cpus=4 pax.panictest=1:/bin/smpprobe spin"
         "panic2: pax.cpus=4 pax.panictest=2:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff"
-        "leave: pax.slowleave=200:/bin/smpprobe leave")
+        "leave: pax.slowleave=200:/bin/smpprobe leave" "share::/bin/smpprobe share")
 # The STOP step's test kinds and leave boot a test build (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu
 # in kernel/testwords' place); testwords boots the shipped kernel given both words.
 testbuilt() { case $1 in end-nooff|panic|panic2|leave) return 0 ;; esac; return 1; }
@@ -221,6 +222,13 @@ for tier in $tiers; do
                 BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-leave-$n.log" "$fw" "$img/leave.iso" 300 0 --kind leave --smp "$n" -- -smp "$n" -m 512
             done
         fi
+        # SMP-SHARE, asked only: N + 1 threads spinning on N processors at 2 and 4, each one's part of the progress
+        case " $kinds " in
+            *" share "*)
+                for n in 2 4; do
+                    BOOT_MARKER='halt|PANIC .*' boot "$work/smp-$fw-share-$n.log" "$fw" "$img/share.iso" 180 0 --kind share --smp "$n" -- -smp "$n" -m 512
+                done ;;
+        esac
         if asked testwords; then
             log=$work/smp-$fw-testwords.log st=0
             printf '%s %s %s:\n' "$tier" "$fw" testwords
