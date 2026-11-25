@@ -962,7 +962,7 @@ Three programs in wolf write disks, built as static Linux executables and run un
 |---|---|---|
 | `paxgpt` | a GPT | sgdisk, sfdisk |
 | `paxfat` | FAT32 and VFAT | dosfstools, mtools |
-| `paxext2` | an ext2 tree with modes, owners, times, symbolic and hard links (no journal) | e2fsprogs |
+| `paxext2` | an ext2 tree with modes, owners, times, symbolic and hard links (optional internal journal with `--journal`) | e2fsprogs |
 
 `paxext2` formats volumes through 16 TiB less one 4 KiB block, with fully initialized inode tables and sparse
 superblock backups. Its large-volume inode density follows Linux's defaults. File data beyond 2 TiB is written and
