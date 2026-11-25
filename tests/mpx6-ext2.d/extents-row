@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Extent read rows (XR): an explicit `ext4` mount reads extent-mapped files
+# and directories read-only; ext2 and ext3 asks keep today's refusal; damage
+# answers EIO on its own path; every unserved feature bit and unclean state is
+# refused by name; no disk is written.
+#
+#   extents-row build WORK [KERNEL.elf]  the static probe, paxext2, the kernel
+#   extents-row run WORK [bios|uefi]     the fixtures (once a WORK), then every
+#                                        boot: its plan, initramfs and ISO, its
+#                                        disks copied, booted, judged
+#
+# Fixtures: tests/mpx6-ext2.d/xr-fixture.py, paxext2's own output held to
+# pinned e2fsck and debugfs through tools/e2fs, damage and feature variants as
+# byte edits of copies. Expectations: tests/mpx6-ext2.d/xr-judge.py. Probe:
+# tests/mpx6-ext2.d/xr-probe.c. Row lines are `PASS|FAIL XR-<row> <leg>: …`.
+set -euo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ "$#" -ge 2 ] || die 'extents-row build|run WORK [KERNEL.elf|bios|uefi]'
+mode=$1 work=$2
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+D=$PAX_ROOT/tests/mpx6-ext2.d
+case $mode in
+build)
+    need cc readelf
+    cc -static -no-pie -O1 -Wall -Wextra -Werror -Wl,--build-id=none -Wl,-z,noexecstack \
+        "$D/xr-probe.c" -o "$work/xr-probe"
+    readelf -hW "$work/xr-probe" | grep -Eq 'Type: +EXEC'
+    if readelf -lW "$work/xr-probe" | grep -q INTERP; then die 'probe is not static'; fi
+    export PAX_WOLF
+    PAX_WOLF=$("$PAX_ROOT/tools/fetch-wolf")
+    "$PAX_ROOT/tools/fetch-limine"
+    mkdir -p "$work/bin"
+    "$PAX_ROOT/tools/mkdisktools" "$work/bin" paxext2
+    kernel=${3:-}
+    if [ -z "$kernel" ]; then
+        kernel=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel")
+    fi
+    cp "$kernel" "$work/kernel.elf"
+    ;;
+run)
+    leg=${3:-bios}
+    case $leg in bios|uefi) ;; *) die 'firmware must be bios or uefi' ;; esac
+    need python3
+    manifest=$work/fix/manifest.json
+    if [ ! -f "$manifest" ]; then
+        rm -rf "$work/fix"
+        # Its own PASS/FAIL XR-fixture-* lines; a missing set stops every boot.
+        if ! python3 -I -B "$D/xr-fixture.py" --paxext2 "$work/bin/paxext2" \
+            --e2fs "$PAX_ROOT/tools/e2fs" --work "$work/fix"; then
+            echo "FAIL XR-fixtures $leg: a fixture set was not made (lines above)"
+            exit 1
+        fi
+    fi
+    failed=0
+    python3 -I -B "$D/xr-judge.py" boots "$manifest" > "$work/boots-$leg.txt"
+    while read -r boot images; do
+        b=$work/$leg/$boot
+        rm -rf "$b" && mkdir -p "$b"
+        python3 -I -B "$D/xr-judge.py" plan "$boot" "$manifest" > "$b/plan"
+        printf '/bin/xr-probe\n' > "$b/pax-run"
+        "$PAX_ROOT/tools/mkinitramfs" "$b/xr.cpio" /mnt/:755 /mnt2/:755 /mnt3/:755 /mnt4/:755 \
+            "/bin/xr-probe=$work/xr-probe:755" "/etc/xr/plan=$b/plan:644" \
+            "/etc/pax-run=$b/pax-run:644" > "$b/initramfs.txt"
+        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$b/xr.cpio" initramfs.cpio \
+            "$work/kernel.elf" "$b/xr.iso" > /dev/null
+        drives=() k=0
+        for image in $images; do
+            cp --sparse=always "$work/fix/$image" "$b/$image"
+            drives+=(--qemu -drive --qemu "file=$b/$image,if=none,id=d$k,format=raw"
+                     --qemu -device --qemu "virtio-blk-pci,drive=d$k")
+            k=$((k + 1))
+        done
+        rc=0
+        "$PAX_ROOT/tools/qemu-halt" --firmware "$leg" --serial "$b/serial.log" --timeout 600 \
+            --qemu -m --qemu 1G --elf "$work/kernel.elf" --marker 'halt|PANIC .*' \
+            "${drives[@]}" "$b/xr.iso" > "$b/serial.log.verdict" 2>&1 || rc=$?
+        serial_norm "$b/serial.log" > "$b/serial.norm"
+        if [ "$rc" != 0 ]; then
+            echo "FAIL XR-$boot-halt $leg: qemu-halt exit $rc ($(tail -n 1 "$b/serial.log.verdict"))"
+            failed=1
+        fi
+        python3 -I -B "$D/xr-judge.py" judge "$boot" "$manifest" "$b/serial.norm" "$b" "$leg" || failed=1
+        # The judge has hashed this boot's copies; keep the logs, not the disks.
+        for image in $images; do rm -f "$b/$image"; done
+    done < "$work/boots-$leg.txt"
+    exit "$failed"
+    ;;
+*) die 'extents-row takes build or run' ;;
+esac
