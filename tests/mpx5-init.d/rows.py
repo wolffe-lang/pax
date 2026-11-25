@@ -106,7 +106,7 @@ PASSWORDS = {}
 MARK = 'PX124-ROW-'
 DETACH_S = 20
 # The account's own file /etc/shrc sources, under its home (warren W6). The rows keep their own copy of the
-# ruled path, so a wrong path in user/shrc is red here; a new ruling changes this line and user/shrc's.
+# path, so a wrong path in user/shrc is red here; a different path changes this line and user/shrc's.
 HOOK_PATH = '.config/pelt/shrc'
 
 
