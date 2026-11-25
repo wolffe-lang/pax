@@ -17,7 +17,8 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   execve from a thread that was not the leader, the new program's process is not reaped while a thread the exec
   ended still runs on another processor, whose last time slice is charged to that process, and a parent waiting
   for it is woken as each such thread leaves its processor (SMP-EXEC-LEAVE holds this whichever processor the host
-  runs late). A page fault
+  runs late); a switch that would charge a thread's time to a slot now holding another process panics by name. A
+  page fault
   that arrives after another processor made its page present runs the instruction again. A stop reaches a thread
   of the stopped process running on another processor by vector 48, and the thread parks before it returns to
   ring 3; a write(2) already under way when the stop comes completes first, as on Linux, so a pipe drained at once
