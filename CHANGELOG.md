@@ -7,6 +7,14 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **warren's console rows against the shipped dev image.** `tests/distribution-warren IMAGE_DIRECTORY` takes
+  `tools/mkdistribution`'s output and runs warren's own `tests/pax/console_rows.py` from the commit the image names.
+  By default it asks every row that file asks, on BIOS with a USB keyboard and on UEFI with a PS/2 one, and each of
+  warren's rows becomes one of the suite's rows. Before any boot, the suite runs its judge's self-test. It then checks
+  that the ISO boots the archive it reads, and that the archive's warren is the build its release file and digests
+  name, a static x86-64 executable. Those bytes, run on the host, must name the version of warren's tree at that
+  commit. A row that printed nothing fails. The suite builds and pins nothing of its own.
+
 - **alpha on the image, with nothing to start.** `/bin/alpha`, the service
   manager in wolf (`user/alpha.pin`), is in both images: `tools/mkalpha`
   builds it from alpha's own tree with the toolchain that tree pins, through
