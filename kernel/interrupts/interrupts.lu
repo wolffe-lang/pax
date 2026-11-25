@@ -104,6 +104,7 @@ use panic
 use percpu
 use sched
 use signal
+use sync
 use smp
 use sound
 use speaker
@@ -438,8 +439,32 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     if user.from_user(unsafe { f as u64 }) && klock.held_here() {
         panic.fail("klock: entered from ring 3 holding it, cpu ", percpu.index())
     }
-    if klock.enter() {
+    let fresh = klock.enter()
+    if fresh {
         sched.ambient_resume()
+    }
+    // px166: a test kernel's `pax.slowleave=MS` (kernel/testwords; no hold as
+    // shipped, so nothing below runs there). An application processor that
+    // comes in from ring 3 with its thread ended in place by another processor
+    // (an exec's or an exit_group's sibling, `ended_here`) gives the lock back
+    // and holds that many of CPU 0's ticks, interrupts off, answering
+    // shootdowns, before it takes the lock again and switches the thread off:
+    // what a host that has not run this processor's vCPU does. Its thread stays
+    // current here meanwhile (its slot's processor word), so nothing reaps it;
+    // tests/mpx6-smp's leave kind (SMP-EXEC-LEAVE) makes the window every time.
+    let hold = testwords.hold()
+    // # Safety: the frame's address; nothing is read here.
+    if hold != 0 && fresh && percpu.index() != 0 && user.from_user(unsafe { f as u64 }) && sched.ended_here() {
+        klock.leave()
+        let until = timer.ticks() + hold
+        while timer.ticks() < until {
+            tlb.answer()
+            sync.relax()
+        }
+        if klock.enter() {
+            sched.ambient_resume()
+        }
+        testwords.held(percpu.index())
     }
     let g = route(f)
     // # Safety: the frame `route` returned is this one or a saved frame
