@@ -928,6 +928,75 @@ static void row_leave(void) {
     say("SMP-LEAVE done");
 }
 
+/* --- SMP-SHARE (the share kind, asked only) -----------------------------------------------------------------------
+   N + 1 threads of this process spin on the N processors that run threads (/proc/pax-cpus' `active`), each adding to
+   its own counter (a cache line each), while this thread sleeps but for a look at /proc/pax-cpus every 10 ms. Three
+   rounds of one second: per round its threads, processors, looks and length; per thread its progress and the looks it
+   was current in on each processor; per processor the ring-3 ticks and RESCHEDs it took. A fair scheduler gives each
+   thread N/(N + 1) of a processor; the row (rows.py) holds each to its part of the round's progress. Under KVM at 2
+   the exec-settle rounds' looks had an application processor keep one sibling through a whole round. */
+#define SHARE_MAX 17
+static struct thr sthr[SHARE_MAX];
+static volatile U *share_c;
+static volatile U share_stop, share_started;
+static U share_looks[SHARE_MAX][MAXC];
+static void s_spin(void *arg) {
+    U i = (U)arg;
+    __atomic_add_fetch(&share_started, 1, __ATOMIC_SEQ_CST);
+    while (!share_stop) share_c[i * 8]++;
+    exit_thread(0);
+}
+static void row_share(void) {
+    struct ln l;
+    struct snap z, a, b;
+    int n = take(&z) && z.active > 0 ? (int)z.active : 1;
+    if (n > SHARE_MAX - 1) n = SHARE_MAX - 1;
+    if (n > MAXC) n = MAXC;
+    int t = n + 1;
+    share_c = map(4096, PROT_RW, MAP_PRIVATE_ANON);
+    share_stop = 0; share_started = 0;
+    for (int i = 0; i < t; i++) spawn(&sthr[i], s_spin, (void *)(U)i);
+    U end = rdtsc() + cycles_of_ms(2000);
+    while (share_started < (U)t && rdtsc() < end) nap(1000000);
+    for (int r = 0; r < 3; r++) {
+        U c0[SHARE_MAX], c1[SHARE_MAX], looks = 0;
+        memset(share_looks, 0, sizeof share_looks);
+        int ha = take(&a);
+        for (int i = 0; i < t; i++) c0[i] = share_c[i * 8];
+        U t0 = rdtsc();
+        while (rdtsc() - t0 < cycles_of_ms(1000)) {
+            nap(10000000);
+            if (!take(&z)) continue;
+            looks++;
+            for (int i = 0; i < t; i++) {
+                L k = cpu_of(&z, sthr[i].tid);
+                if (k >= 0 && k < n) share_looks[i][k]++;
+            }
+        }
+        for (int i = 0; i < t; i++) c1[i] = share_c[i * 8];
+        U ms = us_of(rdtsc() - t0) / 1000;
+        int hb = take(&b);
+        l.n = 0; ls(&l, "SMP-SHARE round "); ld(&l, (U)r); ls(&l, " threads "); ld(&l, (U)t); ls(&l, " processors ");
+        ld(&l, (U)n); ls(&l, " looks "); ld(&l, looks); ls(&l, " ms "); ld(&l, ms); le(&l);
+        for (int i = 0; i < t; i++) {
+            l.n = 0; ls(&l, "SMP-SHARE round "); ld(&l, (U)r); ls(&l, " thread "); ld(&l, (U)i); ls(&l, " count ");
+            ld(&l, c1[i] - c0[i]); ls(&l, " on ");
+            for (int k = 0; k < n; k++) { if (k) lc(&l, ','); ld(&l, (U)k); lc(&l, ':'); ld(&l, share_looks[i][k]); }
+            le(&l);
+        }
+        for (int k = 0; k < n; k++) {
+            l.n = 0; ls(&l, "SMP-SHARE round "); ld(&l, (U)r); ls(&l, " cpu "); ld(&l, (U)k); ls(&l, " user ");
+            if (ha && hb && a.user[k] >= 0 && b.user[k] >= a.user[k]) { lc(&l, '+'); ld(&l, (U)(b.user[k] - a.user[k])); } else lc(&l, '-');
+            ls(&l, " resched ");
+            if (ha && hb && a.resched[k] >= 0 && b.resched[k] >= a.resched[k]) { lc(&l, '+'); ld(&l, (U)(b.resched[k] - a.resched[k])); } else lc(&l, '-');
+            le(&l);
+        }
+    }
+    share_stop = 1;
+    for (int i = 0; i < t; i++) join(&sthr[i]);
+    say("SMP-SHARE done");
+}
+
 /* --- SMP-WAIT ----------------------------------------------------------------------------- */
 static void wait_sampler(void) {
     struct snap z;
@@ -1549,6 +1618,8 @@ __attribute__((used)) static void smp_main(U *sp) {
         } else if (same(mode, "leave")) {
             G = shared_page();
             row_leave();
+        } else if (same(mode, "share")) {
+            row_share();
         } else if (same(mode, "rows")) {
             row_run((int)started_cpus, 3);
             G = shared_page();
