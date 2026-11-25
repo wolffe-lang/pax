@@ -5,6 +5,12 @@
 //! `pax.panictest=1|2`: 3 s after CPU 0's ticks begin, op 3 to one or two
 //! application processors, sent without waiting; each answers it by a panic
 //! in kernel/tlb's `answer`, outside the kernel lock, so two are at once.
+//! `pax.slowleave=MS` (px166, tests/mpx6-smp's leave kind): an application
+//! processor that enters the kernel from ring 3 with its thread ended in place
+//! (an exec's or an exit_group's sibling) gives the lock back and holds MS ms
+//! of CPU 0's ticks (ten to a tick, at least one) before it takes it again and
+//! switches that thread off (kernel/interrupts' entry): what a host that has
+//! not run that processor does, every time. Each hold says one line after it.
 
 use boot_info
 use ipi
@@ -14,6 +20,7 @@ use percpu
 
 const TEST_OP: u64 = 3
 var fired: bool = false
+var slow: u64 = 0 // pax.slowleave's hold in CPU 0's ticks (0: none); its symbol marks a test build
 
 pub fn start() {
     if boot_info.cmdline_has("pax.nopoweroff") {
@@ -24,6 +31,37 @@ pub fn start() {
         log.dec(how_many() as int)
         log.line(" (a test kernel)")
     }
+    let ms = slowleave_ms()
+    if ms != 0 {
+        let t = (ms + 9) / 10
+        // # Safety: written once here, at the boot, before any application processor runs a thread.
+        unsafe { slow = t }
+        log.put("testwords: pax.slowleave=")
+        log.dec(ms as int)
+        log.put(" (a test kernel): a thread ended in place held ")
+        log.dec(t as int)
+        log.line(" ticks on its application processor before it is switched off")
+    }
+}
+
+/// `pax.slowleave=MS`'s MS (decimal, at most six digits); 0 when the word is absent or not a number.
+fn slowleave_ms() -> u64 {
+    let (a, n) = boot_info.cmdline_value("pax.slowleave")
+    if n == 0 || n > 6 {
+        return 0
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        // # Safety: a byte of Limine's command line, inside the word found (kernel/boot_info's `cmdline_value`).
+        let d = unsafe { ((a + k) as *u8).read_volatile() as u64 }
+        if d < 48 || d > 57 {
+            return 0
+        }
+        v = v * 10 + (d - 48)
+        k += 1
+    }
+    v
 }
 
 pub fn nopoweroff() -> bool {
@@ -64,4 +102,17 @@ pub fn op(r: u64) -> bool {
 
 fn test_panic() -> never {
     panic.fail("testwords: a test panic, cpu ", percpu.index())
+}
+
+/// kernel/interrupts' entry: the hold in CPU 0's ticks (0 without the word).
+pub fn hold() -> u64 {
+    // # Safety: written once at the boot (`start`).
+    unsafe { slow }
+}
+
+/// After a hold, the lock taken again: one line.
+pub fn held(cpu: u64) {
+    log.put("testwords: a slow leave, cpu ")
+    log.dec(cpu as int)
+    log.end()
 }
