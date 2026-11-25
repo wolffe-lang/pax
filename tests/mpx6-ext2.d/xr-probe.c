@@ -190,14 +190,24 @@ static void try1(const char *dir, const char *name, int rc, int err) {
     say(what, rc < 0 ? -1 : 0, err, "");
 }
 
+/* DIR/NAME into out: 0, or -1 when it would not fit. A cut path is never
+ * acted on: the caller refuses it by name. */
+static int join(char *out, size_t size, const char *dir, const char *name) {
+    int n = snprintf(out, size, "%s/%s", dir, name);
+    return n < 0 || (size_t)n >= size ? -1 : 0;
+}
+
 /* errno is read at once, before anything else can move it. */
 #define TRY(name, expr) do { errno = 0; int r_ = (expr); int e_ = errno; try1(dir, name, r_, e_); } while (0)
 
 static void op_tries(const char *dir) {
     char a[512], b[512], f[512];
-    snprintf(a, sizeof a, "%s/xr-new", dir);
-    snprintf(b, sizeof b, "%s/xr-new2", dir);
-    snprintf(f, sizeof f, "%s/small", dir);
+    if (join(a, sizeof a, dir, "xr-new") || join(b, sizeof b, dir, "xr-new2") || join(f, sizeof f, dir, "small")) {
+        char what[600];
+        snprintf(what, sizeof what, "tries %s", dir);
+        say(what, -1, ENAMETOOLONG, "path-too-long");
+        return;
+    }
     struct timespec ts[2] = {{1, 0}, {1, 0}};
     int fd;
     errno = 0; fd = open(a, O_WRONLY | O_CREAT | O_EXCL, 0644); try1(dir, "create", fd, errno); if (fd >= 0) close(fd);
