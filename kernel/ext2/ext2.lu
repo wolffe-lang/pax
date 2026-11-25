@@ -60,6 +60,29 @@
 //!
 //!     ext2: vda2: recovering the journal: <n> transactions (sequence <a> to <b>), <k> blocks written home, <r> revoked; recovery complete
 //!
+//! **Extents, read-only (`ext4`).** A mount that asks for `ext4` reads
+//! the extent profile from the ext4 layout documentation (ifork.rst,
+//! super.rst): INCOMPAT filetype and extent, COMPAT has_journal or nothing,
+//! RO_COMPAT within sparse_super and large_file, every group's superblock
+//! and descriptor copies, bitmaps and inode table at the start of the group
+//! (no flex_bg), `s_blocks_per_group` eight times the block size. Every
+//! other bit is refused by name, read-only too; a volume that needs
+//! recovery, has an orphan list, records errors or was not cleanly
+//! unmounted is refused unchanged with the instruction to check it
+//! offline, and its journal is never replayed. The mount is read-only
+//! whatever it asked (a read-write remount is -EROFS) and writes nothing.
+//! An inode with EXTENTS_FL (0x80000) maps through its tree; one without it
+//! keeps the block map. A lookup walks at most six nodes: each node's magic
+//! 0xf30a, its eh_max the layout's (4 in the inode, (block size - 12) / 12
+//! in a block), its entries at most that, its depth at most 5 and exactly
+//! one under its parent's, its keys increasing inside the range its parent
+//! gave it, no block twice on the path, every extent of 1 to 32768 blocks
+//! (an unwritten one, `ee_len` past 32768, reads as zeros) inside the
+//! volume, off its group metadata and its journal. Damage answers -EIO with
+//! a line naming the inode (`xbad`): a file's read, a directory's lookup or
+//! listing (never absence or a short listing) and a link's resolution. An
+//! ext2 or ext3 ask of an extent volume is refused as before.
+//!
 //! **Groups.** Block group g has its descriptor in the table that starts
 //! in the block after the superblock's (32 bytes each: the block bitmap's
 //! block, the inode bitmap's, the inode table's, the free blocks, free
@@ -227,6 +250,17 @@ const INCOMPAT_RECOVER: u64 = 0x4 // px68: needs_recovery
 const INCOMPAT_JOURNAL_DEV: u64 = 0x8 // px68: the volume is an external journal
 const RO_SPARSE_SUPER: u64 = 0x1
 const RO_LARGE_FILE: u64 = 0x2
+const INCOMPAT_EXTENT: u64 = 0x40 // the extent profile (super.rst)
+/// The inode flag of an extent-mapped inode (inodes.rst).
+const EXTENTS_FL: u64 = 0x80000
+/// Inode flags an extent volume's file is not read with (inodes.rst):
+/// compression, encryption, huge_file, verity, an EA inode, inline data,
+/// casefolding, the snapshot flags and the reserved bit.
+const REFUSED_IFLAGS: u64 = 0x4 | 0x200 | 0x800 | 0x40000 | 0x100000 | 0x200000 | 0x1000000 | 0x4000000 | 0x8000000 | 0x10000000 | 0x40000000 | 0x80000000
+const EH_MAGIC: u64 = 0xf30a
+/// What kernel/ext2's `lookup` answers for a name an extent volume's
+/// damaged directory cannot say is there or not (-EIO above it).
+pub const LOOKUP_BAD: u64 = 0xffffffffffffffff
 
 // Group descriptor (group_descr.rst), 32 bytes.
 const GD_BBITMAP: u64 = 0x00
@@ -279,7 +313,7 @@ pub const T_CRTIME: u64 = 8
 // A volume record's words.
 const V_USED: u64 = 0
 const V_DEV: u64 = 1
-const V_RO: u64 = 2 // 0 read-write; else why read-only (1 asked, 2 a feature)
+const V_RO: u64 = 2 // 0 read-write; else why read-only (1 asked, 2 a feature, 5 an extent volume)
 const V_BS: u64 = 3
 const V_FIRST: u64 = 4
 const V_BPG: u64 = 5
@@ -338,6 +372,9 @@ const PEND_W: u64 = 128
 const P_INODE: u64 = 0x8000000000000000
 const P_DIR: u64 = 0x4000000000000000
 const V_JINO: u64 = 43 // px162: the journal's inode (s_journal_inum), set with V_JNL (43: 36-42 are taken in flight)
+const V_EXT: u64 = 44 // 1: an `ext4` mount of the extent profile (read-only, V_RO 5)
+const V_XSAID: u64 = 45 // damage lines said on an extent volume (XSAY at most)
+const XSAY: u64 = 16
 
 // The module's frame: VOLS records, then the name scratch (256 bytes at
 // SCRATCH), and a second frame of zeros for holes.
@@ -675,6 +712,12 @@ fn refuse(what: str, x: u64) -> u64 {
 /// -EINVAL (no ext2 volume there, or one refused by name), -EIO. `now`:
 /// the wall clock, seconds since the epoch (the mount time).
 pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
+    mount_as(dev, ro, now, 0)
+}
+
+/// `mount` for the type a mount names: 4 (`ext4`) admits the extent
+/// profile, read-only; anything else is `mount` as it was.
+pub fn mount_as(dev: u64, ro: bool, now: u64, kind: u64) -> u64 {
     if !block.present(dev) {
         return neg(ENODEV)
     }
@@ -702,14 +745,14 @@ pub fn mount(dev: u64, ro: bool, now: u64) -> u64 {
     if c != 0 {
         return c
     }
-    let r = mount_claimed(v, dev, ro, now)
+    let r = mount_claimed(v, dev, ro, now, kind)
     if failed(r) && vw(v, V_USED) == 0 {
         block.release(dev)
     }
     r
 }
 
-fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
+fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64, kind: u64) -> u64 {
     // # Safety: a scalar module var, IF clear.
     unsafe { mounting = dev }
     // The superblock, through a 1 KiB buffer, forgotten once read (every
@@ -738,6 +781,7 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     let rblocks = r32(p + SB_RBLOCKS)
     let rgdt = if fc & COMPAT_RESIZE_INODE != 0 { r16(p + SB_RESERVED_GDT) } else { 0 }
     let jino = if rev >= 1 { r32(p + SB_JNL_INUM) } else { 0 }
+    let orphans = if rev >= 1 { r32(p + SB_LAST_ORPHAN) } else { 0 }
     block.forget(dev)
     if rev > 1 {
         return refuse("a revision this code does not know:", rev)
@@ -748,7 +792,13 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     // px68: FILETYPE is served, and needs_recovery when the journal is the
     // volume's own (kernel/journal replays it); anything else is named.
     let has_j = fc & COMPAT_HAS_JOURNAL != 0
-    let served = INCOMPAT_FILETYPE | (if has_j && jino != 0 { INCOMPAT_RECOVER } else { 0 })
+    if kind == 4 {
+        let x = ext4_admit(fc, fi, fr, st, orphans)
+        if failed(x) {
+            return x
+        }
+    }
+    let served = INCOMPAT_FILETYPE | (if kind == 4 { INCOMPAT_EXTENT } else if has_j && jino != 0 { INCOMPAT_RECOVER } else { 0 })
     if fi & !served != 0 {
         return refuse_features(fi & !served)
     }
@@ -790,6 +840,8 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     put_vw(v, V_BUGS, 0) // px164
     put_vw(v, V_SPAN_BLK, 0)
     put_vw(v, V_SPAN_VA, 0)
+    put_vw(v, V_EXT, if kind == 4 { 1 } else { 0 })
+    put_vw(v, V_XSAID, 0)
     put_vw(v, V_JNL, 0)
     put_vw(v, V_ASKED, 0)
     put_vw(v, V_REC, 0)
@@ -814,6 +866,12 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     var why: u64 = 0
     if ro {
         why = 1
+    } else if kind == 4 {
+        why = 5
+        log.put("ext2: ")
+        block.put_name(dev)
+        log.put(": an extent volume, mounted read-only: this code reads extent trees and does not write them")
+        log.end()
     } else if fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE) != 0 {
         why = 2
         log.put("ext2: ")
@@ -831,6 +889,13 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     if gd_block(v, groups - 1) >= blocks || gd_word(v, 0, GD_ITABLE) == 0 {
         put_vw(v, V_USED, 0)
         return refuse("a group descriptor table past the volume's end, groups", groups)
+    }
+    if kind == 4 {
+        let g = ext4_layout(v, dev, gdtb, itb)
+        if failed(g) {
+            put_vw(v, V_USED, 0)
+            return g
+        }
     }
     let root = inode(v, ROOT_INO)
     if root == 0 || r16(root + I_MODE) & S_IFMT != S_IFDIR {
@@ -885,6 +950,293 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64) -> u64 {
     }
     if why == 0 && !has_j && block.flags(dev) & block.F_FLUSH == 0 { log.put("ext2: "); block.put_name(dev); log.put(": no flush barrier; sync is not a durability guarantee"); log.end() }
     v
+}
+
+/// The extent profile's admission (the header's **Extents**): 0, or the
+/// refusal said by name. Recovery and unclean states first, each with the
+/// offline instruction; then any bit outside the profile, by its name.
+fn ext4_admit(fc: u64, fi: u64, fr: u64, st: u64, orphans: u64) -> u64 {
+    if fi & INCOMPAT_EXTENT == 0 {
+        return refuse("an ext4 mount of a volume without the extent feature: s_feature_incompat", fi)
+    }
+    if fi & INCOMPAT_RECOVER != 0 {
+        return refuse_offline("needs_recovery is set")
+    }
+    if orphans != 0 {
+        return refuse_offline("an orphan list (s_last_orphan) is pending")
+    }
+    if st & STATE_ERROR != 0 {
+        return refuse_offline("the volume records errors (s_state)")
+    }
+    if st & STATE_VALID == 0 {
+        return refuse_offline("the volume was not cleanly unmounted (s_state)")
+    }
+    if fi & !(INCOMPAT_FILETYPE | INCOMPAT_EXTENT) != 0 {
+        return refuse_features(fi & !(INCOMPAT_FILETYPE | INCOMPAT_EXTENT))
+    }
+    if fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE) != 0 {
+        return refuse_bits("read-only-compatible features an extent volume is not read with", "s_feature_ro_compat", fr & !(RO_SPARSE_SUPER | RO_LARGE_FILE), 2)
+    }
+    if fc & !COMPAT_HAS_JOURNAL != 0 {
+        return refuse_bits("compatible features an extent volume is not read with", "s_feature_compat", fc & !COMPAT_HAS_JOURNAL, 0)
+    }
+    0
+}
+
+/// A refusal that leaves the volume for an offline check:
+///
+///     ext2: refused: vda: <why>; this code reads only a clean extent volume and recovers none: check it offline (e2fsck -f) and mount it again
+fn refuse_offline(why: str) -> u64 {
+    log.put("ext2: refused: ")
+    // # Safety: a scalar module var, written by `mount` on one CPU with IF clear.
+    block.put_name(unsafe { mounting })
+    log.put(": ")
+    log.put(why)
+    log.put("; this code reads only a clean extent volume and recovers none: check it offline (e2fsck -f) and mount it again")
+    log.end()
+    neg(EINVAL)
+}
+
+/// Bits of one feature word refused by name (`word` 0 compat, 2 ro_compat):
+///
+///     ext2: refused: vda: <what> (<hex>): <field> <name>, …
+fn refuse_bits(what: str, field: str, bits: u64, word: u64) -> u64 {
+    log.put("ext2: refused: ")
+    // # Safety: a scalar module var, written by `mount` on one CPU with IF clear.
+    block.put_name(unsafe { mounting })
+    log.put(": ")
+    log.put(what)
+    log.put(" (")
+    var nd: u64 = 1
+    while nd < 16 && bits >> (nd * 4) != 0 {
+        nd += 1
+    }
+    log.hex_n(bits, nd)
+    log.put("): ")
+    log.put(field)
+    log.put(" ")
+    var b: u64 = 1
+    var first = true
+    while b != 0 && b <= bits {
+        if bits & b != 0 {
+            if !first {
+                log.put(", ")
+            }
+            first = false
+            if word == 2 { put_rocompat(b) } else { put_compat(b) }
+        }
+        b = if b >= 0x80000000 { 0 } else { b << 1 }
+    }
+    log.end()
+    neg(EINVAL)
+}
+
+/// s_feature_compat's bits by name (super.rst), or the hex of one it does
+/// not name.
+fn put_compat(b: u64) {
+    log.put(if b == 0x1 { "dir_prealloc" } else if b == 0x2 { "imagic_inodes" } else if b == 0x4 { "has_journal" } else if b == 0x8 { "ext_attr" } else if b == 0x10 { "resize_inode" } else if b == 0x20 { "dir_index" } else if b == 0x40 { "lazy_bg" } else if b == 0x80 { "exclude_inode" } else if b == 0x100 { "exclude_bitmap" } else if b == 0x200 { "sparse_super2" } else if b == 0x400 { "fast_commit" } else if b == 0x1000 { "orphan_file" } else { "" })
+    let named = b <= 0x400 || b == 0x1000
+    if !named {
+        log.put("an unknown bit ")
+        log.hex(b)
+    }
+}
+
+/// The extent profile's group layout, checked before anything is read: the
+/// device holds every block, `s_blocks_per_group` is eight times the block
+/// size, and group g's superblock and descriptor copies (when it has them),
+/// block bitmap, inode bitmap and inode table lie in that order at the
+/// group's start. `meta` then knows every group's metadata by arithmetic.
+fn ext4_layout(v: u64, dev: u64, gdtb: u64, itb: u64) -> u64 {
+    let bs = vw(v, V_BS)
+    let blocks = vw(v, V_BLOCKS)
+    if block.sectors(dev) < blocks * (bs / 512) {
+        return refuse("an extent volume longer than its device, blocks", blocks)
+    }
+    if vw(v, V_BPG) != bs * 8 {
+        return refuse("an extent volume whose groups are not eight times the block size in blocks (an unsupported layout), s_blocks_per_group", vw(v, V_BPG))
+    }
+    var g: u64 = 0
+    while g < vw(v, V_GROUPS) {
+        let at = meta_start(v, g, gdtb)
+        let bb = gd_word(v, g, GD_BBITMAP)
+        let ib = gd_word(v, g, GD_IBITMAP)
+        let it = gd_word(v, g, GD_ITABLE)
+        if bb != at || ib != at + 1 || it != at + 2 || it + itb > blocks {
+            return refuse("an extent volume whose group metadata is not where this code reads it (no flex_bg layout), group", g)
+        }
+        g += 1
+    }
+    0
+}
+
+/// Where group g's bitmaps start: after its superblock and descriptor
+/// copies, when it has them.
+fn meta_start(v: u64, g: u64, gdtb: u64) -> u64 {
+    let gs = vw(v, V_FIRST) + g * vw(v, V_BPG)
+    if has_super(g, vw(v, V_FR)) { gs + 1 + gdtb } else { gs }
+}
+
+/// Whether blocks [p, p + n) of an extent volume (inside it, n at most
+/// 32768) meet any group's superblock or descriptor copy, bitmaps or inode
+/// table (`ext4_layout`'s order). Arithmetic only: no block is read.
+fn meta(v: u64, p: u64, n: u64) -> bool {
+    let bs = vw(v, V_BS)
+    let gdtb = (vw(v, V_GROUPS) * GD_SIZE + bs - 1) / bs
+    let itb = (vw(v, V_IPG) * vw(v, V_ISIZE) + bs - 1) / bs
+    let first = vw(v, V_FIRST)
+    var g = (p - first) / vw(v, V_BPG)
+    let last = (p + n - 1 - first) / vw(v, V_BPG)
+    while g <= last && g < vw(v, V_GROUPS) {
+        let gs = first + g * vw(v, V_BPG)
+        let end = meta_start(v, g, gdtb) + 2 + itb
+        if p < end && gs < p + n {
+            return true
+        }
+        g += 1
+    }
+    false
+}
+
+/// Damage on an extent volume: XSAY lines a volume, each naming the inode,
+/// every one counted in the books; BAD, for the caller to return.
+///
+///     ext2: vda: inode <ino>: <what> <n>
+fn xbad(v: u64, ino: u64, what: str, n: u64) -> u64 {
+    bump(v, V_ERRS)
+    if vw(v, V_XSAID) < XSAY {
+        bump(v, V_XSAID)
+        log.put("ext2: ")
+        block.put_name(vw(v, V_DEV))
+        log.put(": inode ")
+        log.dec(ino as int)
+        log.put(": ")
+        log.put(what)
+        log.put(" ")
+        log.dec(n as int)
+        log.end()
+    }
+    BAD
+}
+
+/// Logical block `fb` of extent-mapped inode `ino` (the header's
+/// **Extents**): its volume block; 0 for a hole or an unwritten extent (read
+/// as zeros); BAD for damage (said by `xbad`) or an I/O error. Each node is
+/// checked whole before its child is fetched, and nothing read from a node
+/// is used after the next fetch.
+fn xmap(v: u64, ino: u64, fb: u64) -> u64 {
+    let a = inode(v, ino)
+    if a == 0 {
+        return BAD
+    }
+    if fb >= 0x100000000 {
+        return 0
+    }
+    let first = vw(v, V_FIRST)
+    let blocks = vw(v, V_BLOCKS)
+    let jnl = vw(v, V_JNL) != 0
+    var node = a + I_BLOCK
+    var cap: u64 = 4
+    var want: u64 = BAD
+    var lo: u64 = 0
+    var hi: u64 = 0x100000000
+    var p1: u64 = 0
+    var p2: u64 = 0
+    var p3: u64 = 0
+    var p4: u64 = 0
+    var p5: u64 = 0
+    var level: u64 = 0
+    while level <= 5 {
+        let n = r16(node + 2)
+        let depth = r16(node + 6)
+        if r16(node) != EH_MAGIC {
+            return xbad(v, ino, "an extent node's magic is not 0xf30a, logical block", fb)
+        }
+        if r16(node + 4) != cap {
+            return xbad(v, ino, "an extent node's eh_max is not this layout's (an unsupported layout), logical block", fb)
+        }
+        if n > cap {
+            return xbad(v, ino, "an extent node has more entries than its eh_max, logical block", fb)
+        }
+        if depth > 5 || (want != BAD && depth != want) {
+            return xbad(v, ino, "an extent node's depth is not one under its parent's (or past 5), logical block", fb)
+        }
+        if depth == 0 {
+            var hit: u64 = 0
+            var at: u64 = 0
+            var prev = lo
+            var i: u64 = 0
+            while i < n {
+                let e = node + 12 + i * 12
+                let s = r32(e)
+                let raw = r16(e + 4)
+                let pl = r32(e + 8)
+                if raw == 0 {
+                    return xbad(v, ino, "an extent of no blocks (ee_len 0), logical block", s)
+                }
+                let len = if raw > 32768 { raw - 32768 } else { raw }
+                if r16(e + 6) != 0 || pl < first || pl + len > blocks {
+                    return xbad(v, ino, "an extent's blocks are outside the volume, logical block", s)
+                }
+                if s < prev || s + len > hi {
+                    return xbad(v, ino, "extents overlap or are out of order, logical block", s)
+                }
+                if meta(v, pl, len) || (jnl && journal.holds(v, pl, len)) {
+                    return xbad(v, ino, "an extent's blocks are the volume's metadata or journal, logical block", s)
+                }
+                if fb >= s && fb < s + len {
+                    hit = if raw > 32768 { 2 } else { 1 }
+                    at = pl + (fb - s)
+                }
+                prev = s + len
+                i += 1
+            }
+            return if hit == 1 { at } else { 0 }
+        }
+        if n == 0 {
+            return xbad(v, ino, "an index node with no entries, logical block", fb)
+        }
+        var pick: u64 = BAD
+        var prevk: u64 = 0
+        var i: u64 = 0
+        while i < n {
+            let e = node + 12 + i * 12
+            let k = r32(e)
+            let c = r32(e + 4)
+            if r16(e + 8) != 0 || c < first || c >= blocks || meta(v, c, 1) || (jnl && journal.holds(v, c, 1)) {
+                return xbad(v, ino, "an index entry's child is outside the volume or is its metadata or journal, key", k)
+            }
+            if k < lo || k >= hi || (i > 0 && k <= prevk) {
+                return xbad(v, ino, "index keys are out of order or outside their node's range, key", k)
+            }
+            if k <= fb {
+                pick = i
+            }
+            prevk = k
+            i += 1
+        }
+        if pick == BAD {
+            return 0
+        }
+        let e = node + 12 + pick * 12
+        let child = r32(e + 4)
+        lo = r32(e)
+        if pick + 1 < n {
+            hi = r32(e + 12)
+        }
+        if child == p1 || child == p2 || child == p3 || child == p4 || child == p5 {
+            return xbad(v, ino, "an extent tree path meets a block twice, block", child)
+        }
+        level += 1
+        if level == 1 { p1 = child } else if level == 2 { p2 = child } else if level == 3 { p3 = child } else if level == 4 { p4 = child } else { p5 = child }
+        want = depth - 1
+        cap = (vw(v, V_BS) - 12) / 12
+        node = get(v, child)
+        if node == 0 {
+            return BAD
+        }
+    }
+    xbad(v, ino, "an extent tree deeper than 5, logical block", fb)
 }
 
 /// px68: names of s_feature_incompat's bits (super.rst), one or the hex
@@ -1030,6 +1382,9 @@ fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
             return neg(EINVAL)
         }
         return refuse(if r == journal.R_IO { "the journal's superblock could not be read: inode" } else if r == journal.R_MAGIC { "no journal superblock (jbd2's magic) at the journal's first block: inode" } else if r == journal.R_BSIZE { "a journal whose block size is not the volume's: inode" } else if r == journal.R_LEN { "a journal whose s_maxlen or s_first is out of its inode's blocks: inode" } else if r == journal.R_SMALL { "a journal smaller than the largest transaction (the cache's 512 buffers and their descriptors): inode" } else { "no frame for the journal's state: inode" }, jino)
+    }
+    if vw(v, V_EXT) != 0 && journal.start_found(v) != 0 {
+        return refuse_offline("the journal holds transactions (s_start)")
     }
     if vw(v, V_RO) == 0 || journal.start_found(v) != 0 {
         let barrier = journal_barrier(dev)
@@ -1192,6 +1547,9 @@ pub fn remount(v: u64, ro: bool, now: u64) -> u64 {
         return neg(EINVAL)
     }
     if vw(v, V_JNL) != 0 && journal.failed(v) { return neg(EIO) }
+    if !ro && vw(v, V_EXT) != 0 {
+        return neg(EROFS)
+    }
     let dev = vw(v, V_DEV)
     let was = vw(v, V_RO)
     if ro {
@@ -1312,7 +1670,7 @@ pub fn journalled(v: u64) -> bool {
 /// ext2 (Linux 7.3.0 names an ext3 root `ext2` when `rootfstype=ext2`
 /// asked for it, its journal still used: measured), else 2.
 pub fn fstype(v: u64) -> u64 {
-    if vw(v, V_JNL) != 0 && vw(v, V_ASKED) != 2 { 3 } else { 2 }
+    if vw(v, V_EXT) != 0 { 4 } else if vw(v, V_JNL) != 0 && vw(v, V_ASKED) != 2 { 3 } else { 2 }
 }
 
 /// px68: the type the mount asked for (2 ext2, 3 ext3, 0 neither).
@@ -1514,8 +1872,17 @@ pub fn named_inode(v: u64, ino: u64) -> bool {
     }
     let t = r16(a + I_MODE) & S_IFMT
     let links = r16(a + I_LINKS)
+    let fl = r32(a + I_FLAGS)
     if links == 0 || (t != 0x1000 && t != 0x2000 && t != 0x4000 && t != 0x6000 && t != 0x8000 && t != 0xa000 && t != 0xc000) {
         corrupt(v, "a directory entry names a deleted or invalid inode:", ino)
+        return false
+    }
+    if vw(v, V_EXT) != 0 && fl & REFUSED_IFLAGS != 0 {
+        let _b = xbad(v, ino, "an inode flag this code does not read files with, i_flags", fl)
+        return false
+    }
+    if vw(v, V_EXT) != 0 && fl & EXTENTS_FL != 0 && t != S_IFREG && t != S_IFDIR && t != S_IFLNK {
+        let _b = xbad(v, ino, "EXTENTS_FL on an inode that has no blocks, mode", t)
         return false
     }
     let g = (ino - 1) / vw(v, V_IPG)
@@ -1528,6 +1895,14 @@ pub fn named_inode(v: u64, ino: u64) -> bool {
     if r8(b + k / 8) & (1 << (k % 8)) == 0 {
         corrupt(v, "a directory entry names an unused inode:", ino)
         return false
+    }
+    if vw(v, V_EXT) != 0 && t == S_IFLNK && !fast_link(v, ino) {
+        // A slow link's one block is mapped and written, or it is damage.
+        let (lb, _m) = bmap(v, ino, 0, false)
+        if lb == 0 || lb == BAD {
+            let _b = xbad(v, ino, "a symbolic link's block is not there, block", lb)
+            return false
+        }
     }
     true
 }
@@ -2175,6 +2550,16 @@ fn new_block(v: u64, ino: u64, lvl: u64) -> u64 {
 /// not be had: the volume full, an I/O error, or past what three levels
 /// hold.
 fn bmap(v: u64, ino: u64, fb: u64, alloc: bool) -> (u64, bool) {
+    if vw(v, V_EXT) != 0 {
+        let x = inode(v, ino)
+        if x == 0 {
+            return (BAD, false)
+        }
+        if r32(x + I_FLAGS) & EXTENTS_FL != 0 {
+            // An extent volume is mounted read-only: nothing is allocated.
+            return (if alloc { BAD } else { xmap(v, ino, fb) }, false)
+        }
+    }
     let p = vw(v, V_PTRS)
     var levels: u64 = 0
     var top: u64 = 0
@@ -2607,12 +2992,16 @@ fn find(v: u64, d: u64, name: u64, len: u64) -> (u64, u64, u64, u64) {
     let b = bs(v)
     let nb = size(v, d) / b
     var fb: u64 = 0
+    let x = vw(v, V_EXT) != 0
     while fb < nb {
         let (blk, _m) = bmap(v, d, fb, false)
+        if x && (blk == 0 || blk == BAD) {
+            return (BAD, 0, 0, BAD) // a hole, an unwritten range or damage inside a directory
+        }
         if blk != 0 && blk != BAD {
             let a = get(v, blk)
             if a == 0 {
-                return (BAD, 0, 0, 0)
+                return (BAD, 0, 0, if x { BAD } else { 0 })
             }
             var o: u64 = 0
             var prev = b
@@ -2620,6 +3009,9 @@ fn find(v: u64, d: u64, name: u64, len: u64) -> (u64, u64, u64, u64) {
                 let rl = r16(a + o + 4)
                 if rl < 8 || o + rl > b {
                     corrupt(v, "a directory entry's record length is wrong in block", blk)
+                    if x {
+                        return (BAD, 0, 0, BAD)
+                    }
                     break
                 }
                 let ino = r32(a + o)
@@ -2635,32 +3027,40 @@ fn find(v: u64, d: u64, name: u64, len: u64) -> (u64, u64, u64, u64) {
     (BAD, 0, 0, 0)
 }
 
-/// The inode the name [name, name + len) leads to in directory `d`, or 0.
+/// The inode the name [name, name + len) leads to in directory `d`, or 0;
+/// LOOKUP_BAD when an extent volume's directory is damaged.
 pub fn lookup(v: u64, d: u64, name: u64, len: u64) -> u64 {
     let (blk, _o, _p, ino) = find(v, d, name, len)
-    if blk == BAD { 0 } else { ino }
+    if blk == BAD { if ino == BAD { LOOKUP_BAD } else { 0 } } else { ino }
 }
 
 /// The first entry of directory `d` at or after byte `pos` that is not
-/// `.` or `..`: (its inode, 0 at the end; its type byte; its name, copied
+/// `.` or `..` (LOOKUP_BAD for an extent volume's damage): (its inode, 0 at the end; its type byte; its name, copied
 /// to the module's scratch; the name's length; the position after it).
 pub fn entry_at(v: u64, d: u64, pos: u64) -> (u64, u64, u64, u64, u64) {
     let b = bs(v)
     let sz = size(v, d)
     var fb = pos / b
     var want = pos % b
+    let x = vw(v, V_EXT) != 0
     while fb * b < sz {
         let (blk, _m) = bmap(v, d, fb, false)
+        if x && (blk == 0 || blk == BAD) {
+            return (LOOKUP_BAD, 0, 0, 0, sz) // never a short listing
+        }
         if blk != 0 && blk != BAD {
             let a = get(v, blk)
             if a == 0 {
-                return (0, 0, 0, 0, sz)
+                return (if x { LOOKUP_BAD } else { 0 }, 0, 0, 0, sz)
             }
             var o: u64 = 0
             while o + 8 <= b {
                 let rl = r16(a + o + 4)
                 if rl < 8 || o + rl > b {
                     corrupt(v, "a directory entry's record length is wrong in block", blk)
+                    if x {
+                        return (LOOKUP_BAD, 0, 0, 0, sz)
+                    }
                     break
                 }
                 if o >= want && r32(a + o) != 0 && !is_dot(a + o) {
@@ -2685,7 +3085,7 @@ pub fn name_of(v: u64, d: u64, c: u64) -> (u64, u64) {
     var guard: u64 = 0
     while guard < 1000000 {
         let (i, _t, a, l, nx) = entry_at(v, d, pos)
-        if i == 0 {
+        if i == 0 || i == LOOKUP_BAD {
             return (0, 0)
         }
         if i == c {
@@ -2936,7 +3336,7 @@ pub fn report(v: u64) {
     log.dec(vw(v, V_MNT) as int)
     log.put("; ")
     let ro = vw(v, V_RO)
-    log.put(if ro == 0 { "read-write" } else if ro == 1 { "read-only (asked)" } else if ro == 2 { "read-only (a feature)" } else { "read-only (the disk is)" })
+    log.put(if ro == 0 { "read-write" } else if ro == 1 { "read-only (asked)" } else if ro == 2 { "read-only (a feature)" } else if ro == 5 { "read-only (an extent volume)" } else { "read-only (the disk is)" })
     if vw(v, V_JNL) != 0 {
         // px68: Linux's `with ordered data mode`
         log.put("; journal of ")
