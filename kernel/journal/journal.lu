@@ -410,6 +410,24 @@ pub fn runs(v: u64) -> u64 {
     jw(v, J_NRUNS)
 }
 
+/// Whether any of volume blocks [p, p + n) is one of the journal's (an
+/// extent volume's file data and tree never are). Reads the run table only.
+pub fn holds(v: u64, p: u64, n: u64) -> bool {
+    if !ready() || v >= JVOLS || frame_at(v, J_FR_RUNS) == 0 {
+        return false
+    }
+    let t = jw(v, J_FR_RUNS) + hh()
+    var k: u64 = 0
+    while k < jw(v, J_NRUNS) {
+        let a = t + k * 24
+        if p < rd(a + 8) + rd(a + 16) && rd(a + 8) < p + n {
+            return true
+        }
+        k += 1
+    }
+    false
+}
+
 /// The volume block journal block `j` is, 0 when none.
 fn phys(v: u64, j: u64) -> u64 {
     let t = jw(v, J_FR_RUNS) + hh()
