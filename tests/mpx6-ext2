@@ -86,6 +86,17 @@
 #      one): the same put_file removes it and finishes, `e2fsck -fn` clean
 #      (tests/mpx6-ext2.d/write-cut-row). E10 and E11 run on the first
 #      tier's kernel, each leg.
+#   XR (every tier of rows) extent-mapped files and directories, read-only,
+#      on the first tier's kernel, each leg (tests/mpx6-ext2.d/extents-row):
+#      paxext2's extent output, held to pinned e2fsck and debugfs, mounted as
+#      `ext4`: every byte of depth-0, 1 and 2 trees, a 5 GiB sparse file, a
+#      multi-block directory, fast and slow links, an unwritten range read as
+#      zeros, mmap; ext2 and ext3 asks keep today's refusal line; every
+#      mutation and a read-write remount refused (EROFS); one damaged tree,
+#      directory or link a file, each EIO on its own path, never ENOENT or a
+#      short listing, with untouched files before and after reading right;
+#      each unserved superblock feature bit and each unclean or journal-map
+#      state refused by name; every disk byte-identical after its boot.
 #   SEAM-CALLERS (every mode; `--only seam` runs it alone, no build): no
 #      kernel source outside kernel/ext2, kernel/journal and kernel/volume
 #      imports ext2 or journal or calls into them, so kernel/volume is the
@@ -485,6 +496,27 @@ else
             say "PASS E11 $cut_tier $leg: cut inside put_file's write at 6 MiB; no dangling or duplicate name, leaks at most, the resume finished, repairable, still unclean"
         else
             bad "E11 $cut_tier $leg: write-cut-row (its named rows above)"
+        fi
+    done
+fi
+
+# --- XR: extent-mapped files and directories, read-only -------------------------
+xw=$PAX_BUILD/mpx6-ext2-extents
+rm -rf "$xw"
+if [ ! -f "$k" ]; then
+    bad "XR: no $cut_tier kernel at $k"
+elif ! bash "$D/extents-row" build "$xw" "$k" > "$xw.build.log" 2>&1; then
+    bad "XR build: $(tail -n 3 "$xw.build.log" | tr '\n' '|')"
+else
+    for leg in $legs; do
+        if [ "$leg" = uefi ] && [ -z "$(find_ovmf)" ]; then
+            [ "${PAX_REQUIRE_UEFI:-0}" = 1 ] && bad "XR uefi: no OVMF firmware and PAX_REQUIRE_UEFI=1" || say "SKIP XR uefi: no OVMF firmware found on this host"
+            continue
+        fi
+        if bash "$D/extents-row" run "$xw" "$leg"; then
+            say "PASS XR $cut_tier $leg: an ext4 mount reads extent trees read-only, ext2 and ext3 asks keep their refusal, damage is EIO on its own path, unserved features and unclean states refused by name, no disk written"
+        else
+            bad "XR $cut_tier $leg: extents-row (its named rows above)"
         fi
     done
 fi
