@@ -6,7 +6,7 @@
 # by its package list), as a machine on the LAN would.
 #
 #   tests/mpx5-burrowd [--images DIR | --no-boot] [--firmware bios|uefi|both]
-#                      [--tier native|release|both] [--accel auto|kvm|tcg]
+#                      [--tier native|release|both] [--accel auto|kvm|tcg] [--rows all|hook]
 #
 # P0 builds the image's tree (build/mpx5-burrowd/root, files.txt as
 # tools/mkinitramfs' arguments): kmain_console, the kernel every shipped
@@ -61,7 +61,9 @@
 # not; B28 (pax#368)
 # that session ran /etc/shrc (lope's hook: autocd takes a bare `../`, `g`
 # is a function); B29 a command over ssh still reads no ENV (not
-# interactive); B11 the live stick's shape (the live
+# interactive); B44 and B45 (warren W6) a terminal over ssh ran the account's own
+# file that /etc/shrc sources, and a command over ssh did not (--rows hook: the
+# first boot's B0 and B1, then these two alone); B11 the live stick's shape (the live
 # entry as pid 1, the shipped configuration's loopback): a connection from
 # the LAN refused, one on loopback answered; (px124) B30 an ssh command
 # running across a console logout ends with its own output and status, and
@@ -78,7 +80,7 @@ set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../tools/lib.sh"
 
-images= legs=both tiers=both noboot=0 accel=auto
+images= legs=both tiers=both noboot=0 accel=auto rows=all
 while [ $# -gt 0 ]; do
     case $1 in
         --images)   images=$2; shift 2 ;;
@@ -86,11 +88,13 @@ while [ $# -gt 0 ]; do
         --firmware) legs=$2; shift 2 ;;
         --tier)     tiers=$2; shift 2 ;;
         --accel)    accel=$2; shift 2 ;;
-        *)          die "usage: tests/mpx5-burrowd [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg]" ;;
+        --rows)     rows=$2; shift 2 ;;
+        *)          die "usage: tests/mpx5-burrowd [--images DIR | --no-boot] [--firmware bios|uefi|both] [--tier native|release|both] [--accel auto|kvm|tcg] [--rows all|hook]" ;;
     esac
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
+case $rows in all|hook) ;; *) die "--rows takes all or hook" ;; esac
 
 BORE="cat chmod env head id kill ls mkdir rm sleep stty tty yes"
 work=$PAX_BUILD/mpx5-burrowd
@@ -277,7 +281,7 @@ for tier in $tiers; do
         say "boots: $tier $leg"
         rc=0
         python3 -I "$here/mpx5-burrowd.d/rows.py" --images "$images" --elf "$elf" --tier "$tier" --leg "$leg" \
-            --accel "$accel" --out "$out/$tier-$leg" || rc=$?
+            --accel "$accel" --out "$out/$tier-$leg" --rows "$rows" || rc=$?
         case $rc in
             0) ran=$((ran + 1)) ;;
             3)
