@@ -143,7 +143,8 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
   leave       SMP-EXEC-LEAVE the test build given `pax.slowleave=MS` (`testwords: pax.slowleave=MS (a test kernel)…`):
                            an application processor that comes in from ring 3 with its thread ended in place gives the
                            lock back and holds MS ms before it switches that thread off (`testwords: a slow leave, cpu
-                           K`), what a host that has not run that processor does. The probe's `SMP-LEAVE KIND R status
+                           K, slot S, tgid T`), what a host that has not run that processor does; one hold at least of a
+                           thread with a tgid (one charged at its switch-off). The probe's `SMP-LEAVE KIND R status
                            S running M of 4` rounds: 4 leader-exit (the main thread exits alone, a sibling then calls
                            exit_group(10): 0xa00), 30 exec (a sibling execs a program that exits 9: 0x900), 5
                            exec-kill (the exec'd program killed by its own SIGKILL: 0x9), `SMP-LEAVE done`; an
@@ -848,7 +849,11 @@ elif a.kind == 'leave':
     word = re.search(r'^testwords: pax\.slowleave=(\d+) \(a test kernel\)', text, re.M)
     if not word:
         why.append('no `testwords: pax.slowleave=MS (a test kernel)` line: the word was not taken (a shipped kernel?)')
-    slows = len(re.findall(r'^testwords: a slow leave, cpu \d+$', text, re.M))
+    holds = re.findall(r'^testwords: a slow leave, cpu \d+(?:, slot \d+, tgid (\d+))?$', text, re.M)
+    slows = len(holds)
+    # a hold of a thread with a tgid: one the exec re-pointed (or an exit_group's), whose switch-off is charged to its
+    # leader's area; an exec's old leader has tgid 0 and is charged nothing, so holds of it alone test nothing
+    followers = len([t for t in holds if t and t != '0'])
     lv = lines('SMP-LEAVE')
     want = {'leader-exit': (4, '0xa00'), 'exec': (30, '0x900'), 'exec-kill': (5, '0x9')}
     got = {k: [x for x in lv if re.match(rf'{k} \d+ ', x)] for k in want}
@@ -866,14 +871,18 @@ elif a.kind == 'leave':
         why.append(f'{kids} exec-child lines for {execs} execs')
     if word and slows == 0:
         why.append('0 slow leaves: no application processor held a thread ended in place (the window never opened)')
+    elif word and followers == 0:
+        why.append(f'{slows} slow leaves, none of a thread with a tgid: no held thread was one charged at its switch-off '
+                   f'(the window held only threads with no process)')
     bad = bad_lines()
     if bad:
         why.append(f'the kernel said: {bad[:3]}')
     if why:
         fail('SMP-EXEC-LEAVE', '; '.join(why[:6]), why[6:])
     else:
-        ok('SMP-EXEC-LEAVE', f'4 leader-exit, 30 exec and 5 exec-kill rounds, each its status; {slows} slow leaves '
-                             f'(an application processor held {word[1]} ms with its thread ended in place); no panic')
+        ok('SMP-EXEC-LEAVE', f'4 leader-exit, 30 exec and 5 exec-kill rounds, each its status; {slows} slow leaves, '
+                             f'{followers} of a thread with a tgid (an application processor held {word[1]} ms with its '
+                             f'thread ended in place); no panic')
 elif a.kind in ('nosmp', 'one', 'cap1'):
     row = {'nosmp': 'SMP-NOSMP', 'one': 'SMP-ONE', 'cap1': 'SMP-CAP'}[a.kind]
     started = N if a.kind == 'cap1' else 1
