@@ -36,7 +36,12 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            time 0.8 of the lone worker's or more; statuses 0; under KVM the N-worker
                            wall 1.5 times the lone wall or less (minimum of three rounds each). The ring-3
                            ticks and the processors seen are held only where N fits the host's CPUs
-                           (--host-cpus), under KVM or TCG; otherwise printed with the reason.
+                           (--host-cpus), under KVM or TCG; otherwise printed with the reason. The CPU
+                           share is held where the timed bounds are (KVM, N fitting the host's CPUs):
+                           the work is a loop count calibrated at boot, so its CPU time is the
+                           processor's speed at the time, and under TCG the guest's TSC follows the
+                           host's clock (on a shared host the lone worker read 361, 889 and 475 ms for
+                           one second of work in one boot); elsewhere it is printed with the reason.
               SMP-TLB      B spins on a page on another processor: A's mprotect(PROT_NONE) makes B
                            fault (4 of 5 rounds within 1 ms under KVM), A's MAP_FIXED over the page
                            and a write of a new pattern leave B no stale read and no SIGSEGV (a fault
@@ -61,7 +66,8 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            off every processor and a wait4 with no child has run the kernel's reap
                            (what each round's settle gave back printed); no processor stopped.
               SMP-WAIT     16 children of 20 to 320 ms of work: 16 statuses right, the children's CPU
-                           0.8 of the work or more, and the children ran on max(2, min(N, 16) - 1)
+                           0.8 of the work or more (held where SMP-RUN's CPU share is), and the children
+                           ran on max(2, min(N, 16) - 1)
                            processors by the kernel's ring-3 ticks (two at least each), the ones missed
                            printed on every boot; the sampler's sightings, each processor's RESCHEDs
                            over the window, where the sampler sat and each processor's idle reads
@@ -220,6 +226,13 @@ KVM = accel() == 'kvm'
 TIMED = KVM and (a.host_cpus == 0 or N <= a.host_cpus)
 UNTIMED = '' if TIMED else (f'timed bounds printed, not gated: {N} processors on {a.host_cpus} host CPUs' if KVM else
                                f'timed bounds printed, not gated: {accel() or "no accelerator said"}')
+# The CPU shares (SMP-RUN's each worker 0.8 of the lone, SMP-WAIT's children 0.8 of their work) are held where the
+# timed bounds are: fixed work's CPU time is the processor's speed, and under TCG the guest's TSC follows the host's clock.
+SHARES = '' if TIMED else (f'kvm: not gated: {N} processors on {a.host_cpus} host CPUs' if KVM else
+                           f'{accel() or "no accelerator said"}: not gated: CPU time of fixed work follows the host\'s speed under TCG')
+# every run says its accelerator and the host's processors (--host-cpus: the take's nproc; 0 when not given)
+print(f'INFO SMP-HOST {tag}: accel {accel() or "not said"}, {a.host_cpus or "unknown"} host CPUs for {N} processors; '
+      f'timed bounds and CPU shares {"gated" if TIMED else "printed, not gated"}')
 
 
 # --- the probe's lines and /proc/pax-cpus ------------------------------------------------------
@@ -394,7 +407,11 @@ def run_check(n, nrounds, cap=None):
             why.append(f'round {k}: lone status {r["lone_status"]}, bad statuses {r["bad"]}')
         short = [c for c in r['cpus'] if c < 0.8 * r['lone_cpu']]
         if short or len(r['cpus']) != n:
-            why.append(f'round {k}: workers\' CPU {r["cpus"]} us against the lone {r["lone_cpu"]} us (0.8 at least each)')
+            share = f'round {k}: workers\' CPU {r["cpus"]} us against the lone {r["lone_cpu"]} us (0.8 at least each)'
+            if TIMED or len(r['cpus']) != n:
+                why.append(share)
+            else:
+                info.append(f'{share}; {SHARES}')
         phase = r.get('phase') or 0
         lows = [i for i in range(runners) if (r['user'].get(i) or 0) < phase / 2]
         if lows:
@@ -624,8 +641,13 @@ def wait_check(n):
         return ['no SMP-WAIT line, or no `SMP-WAIT done`'], []
     if kv(s, 'right') != 16:
         why.append(f'{kv(s, "right")} of 16 statuses right')
+    share = []
     if not isinstance(kv(s, 'cpu-us'), int) or kv(s, 'cpu-us') < 0.8 * kv(s, 'expected-us'):
-        why.append(f'the children\'s CPU {kv(s, "cpu-us")} us against {kv(s, "expected-us")} us of work (0.8 at least)')
+        low = f'the children\'s CPU {kv(s, "cpu-us")} us against {kv(s, "expected-us")} us of work (0.8 at least)'
+        if TIMED or not isinstance(kv(s, 'cpu-us'), int):
+            why.append(low)
+        else:
+            share = [f'{low}; {SHARES}']
     seen = [int(x) for x in str(kv(s, 'cpus')).split(',') if x.isdigit()]
     need = max(2, min(n, 16) - 1)
     # the processors the children ran on, by the kernel's own ring-3 ticks gained while they ran: two ticks at least
@@ -654,7 +676,7 @@ def wait_check(n):
         idle = dict(re.findall(r' (\d+):(\d+)', sm.split(' idle', 1)[1] if ' idle' in sm else ''))
         info += (f'; the sampler sat on {on} in {kv(sm, "samples")} samples; idle in samples'
                  f' {" ".join(f"{i}:{idle.get(str(i), chr(45))}" for i in range(n))}')
-    return why, [info]
+    return why, share + [info]
 
 
 # --- the kinds ---------------------------------------------------------------------------------
