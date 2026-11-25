@@ -117,6 +117,15 @@ def check(blob):
     assert not any(name.startswith('usr/libexec/den/') for name in rows), 'image-den-libexec'
     shrc = rows['etc/shrc'][1].decode().splitlines()
     assert not any(line.startswith(('export DEN_UPLOAD_PACK=', 'export DEN_RECEIVE_PACK=')) for line in shrc), 'image-shrc-den'
+    # warren W6: /etc/shrc ends by sourcing the account's own file, HOOK_PATH under $HOME (the rows keep
+    # their own copy of the ruled path; a new ruling changes this line and user/shrc's), and no image ships
+    # such a file for any account.
+    HOOK_PATH = '.config/pelt/shrc'
+    code = [l.strip() for l in shrc if l.strip() and not l.strip().startswith('#')]
+    named = [i for i, l in enumerate(code) if '$HOME/' + HOOK_PATH in l]
+    sourced = [i for i, l in enumerate(code) if l.startswith('. "$')]
+    assert named and sourced and named[0] < sourced[-1] and sourced[-1] >= len(code) - 3, 'image-shrc-hook'
+    assert not any(name.endswith(HOOK_PATH) for name in rows), 'image-no-user-shrc'
     # px104: burrow as /bin/ssh and /bin/burrow-keygen, byte for byte as
     # tools/mkburrow built them (never stripped), 0755, root's.
     for name, built in (('ssh', 'burrow'), ('burrow-keygen', 'burrow-keygen'), ('burrowd', 'burrowd')):
