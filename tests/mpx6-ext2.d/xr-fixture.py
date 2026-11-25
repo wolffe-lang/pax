@@ -108,7 +108,8 @@ class Image:
             self.sb = f.read(1024)
         w = lambda o, n=4: int.from_bytes(self.sb[o:o + n], "little")
         need(w(0x38, 2) == 0xEF53, f"{path.name}: no ext2 superblock magic")
-        need(w(0x18) == 2, f"{path.name}: block size is not 4096")
+        need(w(0x18) in (0, 1, 2), f"{path.name}: block size is not 1, 2 or 4 KiB")
+        self.bs = 1024 << w(0x18)
         self.blocks = w(0x4)
         self.first = w(0x14)
         self.ipg = w(0x28)
@@ -132,12 +133,12 @@ class Image:
         self.write(off, value.to_bytes(n, "little"))
 
     def itable(self, group):
-        return self.u((self.first + 1) * BS + group * 32 + 8, 4)
+        return self.u((self.first + 1) * self.bs + group * 32 + 8, 4)
 
     def inode(self, ino):
         group, index = divmod(ino - 1, self.ipg)
-        at = self.itable(group) * BS + index * self.isize
-        need(0 < at < self.blocks * BS, f"inode {ino} outside the image")
+        at = self.itable(group) * self.bs + index * self.isize
+        need(0 < at < self.blocks * self.bs, f"inode {ino} outside the image")
         return at
 
     def header(self, at):
