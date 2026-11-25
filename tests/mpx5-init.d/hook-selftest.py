@@ -7,9 +7,13 @@ Three shapes of /etc/shrc:
   hook   sources ~/.config/pelt/shrc when it is a readable regular file: every row green;
   plant  sources ~/.config/pelt/shrc.d instead: I17 red by name, I18 green.
 And one console that does not give way to 0x03 while the file waits: I21 red, saying so.
-Exit 0 when every shape reads as written here, 1 otherwise.
+Only HOOK-SELFTEST lines are printed: the rows' own lines are kept from the output, since a simulated
+shape's FAIL at column 0 would read as a red row of the suite. Exit 0 when every shape reads as written here,
+1 otherwise.
 """
+import contextlib
 import importlib.util
+import io
 import pathlib
 import re
 import sys
@@ -216,7 +220,9 @@ def take(hook, gives_way=True):
     rows.FAILS.clear()
     rows.PASSWORDS.update(root='r-pw', pax='p-pw', bob='b-pw')
     sim = Sim(hook, gives_way)
-    rows.hook_boot(sim)
+    # The rows' own PASS and FAIL lines stay here: a simulated shape's FAIL at column 0 would read as a red row.
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows.hook_boot(sim)
     return set(rows.FAILS)
 
 
