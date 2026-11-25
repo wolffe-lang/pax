@@ -71,7 +71,7 @@ Alpha boots (pax.services= on the kernel command line, after `quiet`), a boot ea
       (killed by signal 9); again in 1 s`, and a new alpha (a second
       `manager … pid M` line, M not N) within 10 s of it (1 s, and the TCG
       margin); `svc` not run again.
-  I22 the same boot: root's `reboot -h`: alpha's `stopping every unit (TERM)`
+  I22 a fresh independent alpha boot: root's `reboot -h`: alpha's `stopping every unit (TERM)`
       and `exit 0` on the serial log before the kernel's `PAX: the end:` line,
       which names no SIGKILL (nor any `PAX: SIGKILL at the end:` line), and no
       `init: /bin/alpha ended` after the reboot was typed.
@@ -82,6 +82,16 @@ Alpha boots (pax.services= on the kernel command line, after `quiet`), a boot ea
       in` line within 15 s (alpha is not started again).
   I21 no word (boot 1) and `pax.services=hooks`: no process whose comm is
       `alpha`, and the hooks as today (`svc: started`).
+  I23 literal first-key selection: repeated spaces, duplicate keys, invalid
+      values and prefix lookalikes, with the actual /proc/cmdline verified.
+  I24 disabled shipped/admin units suppress their matching hooks, not svc.
+  I25 a state file made after /run is mounted is absent at alpha's first exec.
+  I26 first refusal replays both replaced hooks exactly once; svc not again.
+  I18 also covers first exit 0 followed by later exit 2: restart with backoff,
+      never replay replaced hooks after the first start.
+
+Selected rows: alpha runs the alpha boots alone; alpha-smoke just I17;
+base boots real init and asks the static alpha --version (D0, for a pre-fix dry).
 
 Exit 0 when every selected row held, 1 otherwise. A row that cannot be reached (the
 machine halted at a logout) fails by name with what the console said.
@@ -788,7 +798,7 @@ def alpha_tree(work, alpha):
 
 
 def alpha_boot(con):
-    """I17, I18 and I22: pax.services=alpha, the tree's /bin/alpha."""
+    """I17 and I18: pax.services=alpha, the tree's /bin/alpha."""
     first = seen_after(con, 0, r'manager [0-9][^ \n]* pid ([0-9]+) root /', 180)
     hook = seen_after(con, 0, r'svc: started\n', 180)
     if not first:
@@ -971,7 +981,7 @@ def selection_boot(con, expect_alpha, invalid=False):
 
 def fixture_tree(work, mode):
     """Test-only disabled units and hooks, never installed by distribution-root."""
-    rows = alpha_tree(work, 'real' if mode == 'real' else 'stub')
+    rows = alpha_tree(work, 'real' if mode in ('real', 'restart') else 'stub')
     for name, dest in (('vendor-test', '/usr/lib/alpha/units'), ('admin-test', '/etc/alpha/units')):
         unit = work / (name + '.unit')
         unit.write_text('alpha = 1\nenable = false\n[run]\nexec = ["/bin/sleep", "1"]\n')
@@ -983,15 +993,37 @@ def fixture_tree(work, mode):
                     '/bin/mkdir -p /run/alpha\necho stale > /run/alpha/state\n')
     rows = [r for r in rows if not r.startswith('/bin/pax-boot-status=')]
     rows.append('/bin/pax-boot-status=%s:755' % boot)
-    if mode == 'real':
+    if mode in ('real', 'restart'):
         binary = next(r for r in rows if r.startswith('/bin/alpha='))
         rows = [r for r in rows if not r.startswith('/bin/alpha=')]
         rows.append(binary.replace('/bin/alpha=', '/usr/lib/fixture/alpha=', 1))
         wrapper = work / 'fixture-alpha'
         wrapper.write_text('#!/bin/pelt\nif [ -e /run/alpha/state ]; then echo stale; else echo clean; fi '
                            '> /run/alpha-state-check\nexec /usr/lib/fixture/alpha "$@"\n')
+        if mode == 'restart':
+            wrapper.write_text('#!/bin/pelt\nif [ ! -e /run/alpha-fixture.count ]; then '
+                               'echo 1 > /run/alpha-fixture.count; exit 0; fi\n'
+                               'read n < /run/alpha-fixture.count\nif [ "$n" = 1 ]; then '
+                               'echo 2 > /run/alpha-fixture.count; exit 2; fi\n'
+                               'exec /usr/lib/fixture/alpha "$@"\n')
         rows.append('/bin/alpha=%s:755' % wrapper)
     return rows
+
+
+def restart_status_boot(con):
+    """I18 variant: first exit 0 and later exit 2 restart, never replay hooks."""
+    manager = seen_after(con, 0, r'manager [0-9][^ \n]* pid ([0-9]+) root /', 180)
+    if not login(con, 'root', 'I18'):
+        return
+    check_cmdline(con, 'I18')
+    pids = alpha_pids(con, 201)
+    out = con.command('cat /run/alpha-fixture.count; cat /var/log/init-hook.calls; '
+                      'if [ -e /var/log/replaced.calls ]; then cat /var/log/replaced.calls; fi', 202)
+    held = manager is not None and pids == [int(manager[1])] and out == '2\nhook\n'
+    held = held and b'init: /bin/alpha ended (exit 0); again in 1 s' in con.seen
+    held = held and b'init: /bin/alpha ended (exit 2); again in 2 s' in con.seen
+    held = held and b"the boot's hooks run" not in con.seen
+    (ok if held else bad)('I18', 'first exit 0, later exit 2: pids %r, hook/count snapshot %r' % (pids, out))
 
 
 def fixture_boot(con, real):
@@ -1035,12 +1067,14 @@ def alpha_boots(work):
         ('lookalike', 'quiet xpax.services=alpha pax.services=hooksx', 'real', lambda c: selection_boot(c, False), ('I23',)),
         ('fixture-alpha', 'quiet pax.services=alpha', 'fixture-real', lambda c: fixture_boot(c, True), ('I24', 'I25')),
         ('fixture-fallback', 'quiet pax.services=alpha', 'fixture-stub', lambda c: fixture_boot(c, False), ('I26',)),
+        ('restart-status', 'quiet pax.services=alpha', 'fixture-restart', restart_status_boot, ('I18',)),
     ]
     chosen = getattr(ARGS, 'rows', 'all')
     if chosen == 'alpha-smoke':
         cases = cases[:1]
     for name, cmdline, alpha, check, selected in cases:
-        rows = fixture_tree(work, 'real' if alpha == 'fixture-real' else 'stub') if alpha.startswith('fixture-') else alpha_tree(work, alpha)
+        mode = alpha.removeprefix('fixture-')
+        rows = fixture_tree(work, mode) if alpha.startswith('fixture-') else alpha_tree(work, alpha)
         image = iso(work, name, cmdline, rows)
         con = Console(ARGS.out / ('boot-' + name), image)
         con.expected_cmdline = cmdline
