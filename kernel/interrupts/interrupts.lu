@@ -439,7 +439,7 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     if user.from_user(unsafe { f as u64 }) && klock.held_here() {
         panic.fail("klock: entered from ring 3 holding it, cpu ", percpu.index())
     }
-    let fresh = klock.enter()
+    let fresh = percpu.index() == 0 && klock.enter() // plant: an application processor enters without the lock (red at SMP-KLOCK)
     if fresh {
         sched.ambient_resume()
     }
