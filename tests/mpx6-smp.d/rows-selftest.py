@@ -778,11 +778,14 @@ SLOW_WORD = ('testwords: pax.slowleave=200 (a test kernel): a thread ended in pl
              'processor before it is switched off\n')
 
 
-def settle_lines(n, rounds=20, held=(0, 2, 3, 5, 8), short=(), left=(), st='0x900', late=480000, keys=True):
-    """The leave mode's exec-settle rounds (the main thread spinning beside the exec'ing sibling, each round's MemFree
-    read at its wait4, settled, and 500 ms on): `held` the rounds whose wait4 came back with the space the exec left
-    still parked (1392 kB out), `short` those whose settled reading is still out (the settle read too soon), `left`
-    those with a thread still current when the settle gave up; keys=False: a line with no MemFree readings."""
+def settle_lines(n, rounds=20, held=(0, 2, 3, 5, 8), short=(), left=(), st='0x900', late=480000, keys=True,
+                 mcpu=lambda r: 1, mkey=True):
+    """The leave mode's exec-settle rounds (the exec'ing sibling waits to see the main thread current on an application
+    processor, each round's MemFree read at its wait4, settled, and 500 ms on): `held` the rounds whose wait4 came back
+    with the space the exec left still parked (1392 kB out), `short` those whose settled reading is still out (the
+    settle read too soon), `left` those with a thread still current when the settle gave up; keys=False: a line with no
+    MemFree readings; `mcpu(r)` the processor the main thread was seen on at round r's exec (-1: not seen on an
+    application processor in 2 s); mkey=False: a line without it."""
     run = min(4, n)
     out = ''
     for r in range(rounds):
@@ -791,6 +794,7 @@ def settle_lines(n, rounds=20, held=(0, 2, 3, 5, 8), short=(), left=(), st='0x90
         ms = 2000 if r in left else 200 if r in held and r not in short else 0
         mem = (f' waited-kb {waited} settled-kb {settled} late-kb {late} settle-ms {ms} left {1 if r in left else 0}'
                if keys else '')
+        mem += f' main-cpu {mcpu(r)}' if mkey else ''
         out += f'SMP-EXIT exec-child pid {300 + 4 * r}\nSMP-LEAVE exec-settle {r} status {st} running {run} of 4{mem}\n'
     return out
 
@@ -827,8 +831,9 @@ for n in (2, 4):
     # 0`. An exec gives its old leader's pid to the caller (kernel/sched's exec_alone), and /proc/pax-cpus names a
     # processor still running that thread `current kernel`; the settle looked for the group's thread ids alone, so it
     # read while that processor's CR3 still held the space the exec had parked. The exec-settle rounds open that window
-    # on purpose: the main thread spins beside the exec'ing sibling, so at 2 the old leader runs on the application
-    # processor in most rounds and the test word holds it there.
+    # on purpose: the main thread says go only once a look shows it current on an application processor, where the
+    # test word holds it, with the exec'ing sibling current beside it (`main-cpu`). Left to the scheduler, boots under
+    # KVM at 2 never had it there at the exec (no hold of a thread with tgid 0 in 40 rounds over two boots).
     case(f'leave at {n}: an exec-settle round read MemFree with the space the exec left still parked',
          leave_text(n, lines=leave_lines(n, settles=settle_lines(n, short=(3,)))), ['--kind', 'leave', '--smp', str(n)],
          set(), {'SMP-EXEC-LEAVE'},
@@ -880,6 +885,18 @@ case('leave: an exec-settle round with the wrong status', leave_text(4, lines=le
 case('leave: an exec-settle round with no MemFree readings', leave_text(4, lines=leave_lines(4, settles=settle_lines(4, keys=False))),
      ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'},
      why=r'exec-settle round 0: no MemFree readings \(`waited-kb`, `settled-kb`, `late-kb`, `settle-ms`, `left`\)')
+case('leave at 2 says in how many rounds the main thread was on an application processor at the exec',
+     leave_text(2, lines=leave_lines(2, settles=settle_lines(2, mcpu=lambda r: -1 if r in (4, 9) else 1))),
+     ['--kind', 'leave', '--smp', '2'], {'SMP-EXEC-LEAVE'}, set(),
+     says=r'the main thread on an application processor at the exec in 18 of 20, the space the exec left still held at '
+          r'the wait4 in 5 of 20')
+case('leave at 2: the main thread never on an application processor at the exec (the window never opened)',
+     leave_text(2, lines=leave_lines(2, settles=settle_lines(2, held=(), mcpu=lambda r: -1))),
+     ['--kind', 'leave', '--smp', '2'], set(), {'SMP-EXEC-LEAVE'},
+     why=r'never opened \(the main thread on an application processor at the exec in 0 of 20\)')
+case('leave: an exec-settle round that does not say where the main thread was (a probe from before the look)',
+     leave_text(4, lines=leave_lines(4, settles=settle_lines(4, mkey=False))), ['--kind', 'leave', '--smp', '4'], set(),
+     {'SMP-EXEC-LEAVE'}, why=r'exec-settle round 0: no `main-cpu` \(where the main thread ran at the exec\), nor in rounds')
 
 
 # --- SMP-BUILD -------------------------------------------------------------------------------------
