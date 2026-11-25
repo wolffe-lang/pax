@@ -914,6 +914,52 @@ case('leave: an exec-settle round that does not say where the main thread was (a
      {'SMP-EXEC-LEAVE'}, why=r'exec-settle round 0: no `main-cpu` \(where the main thread ran at the exec\), nor in rounds')
 
 
+# --- the share kind (SMP-SHARE, asked only): N + 1 threads spin on N processors, each counting its own progress, three
+# rounds of a second; each thread's part of a round's progress against the fair 1/(N + 1), and the looks (every 10 ms,
+# /proc/pax-cpus) it was current in on each processor. The exec-settle rounds under KVM at 2 saw an application
+# processor keep one sibling through a whole round while the others took turns on CPU 0: that thread gets 1/2 of the
+# progress and the other two 1/4 each, 0.75 of fair.
+def share_lines(n, rounds=3, counts=None, looks=None, procs=None, done=True):
+    out = ''
+    for r in range(rounds):
+        c = counts(r) if counts else [1000000] * (n + 1)
+        out += f'SMP-SHARE round {r} threads {len(c)} processors {procs or n} looks 99 ms 1000\n'
+        for i, ci in enumerate(c):
+            lk = looks(r, i) if looks else [99 // (n + 1)] * n
+            out += f'SMP-SHARE round {r} thread {i} count {ci} on ' + ','.join(f'{k}:{v}' for k, v in enumerate(lk)) + '\n'
+        for k in range(procs or n):
+            out += f'SMP-SHARE round {r} cpu {k} user +100 resched +0\n'
+    return out + ('SMP-SHARE done\n' if done else '')
+
+
+def share_text(n, lines=None, end=True):
+    p = proc(n)
+    t = head('share') + block('start', p) + active_line(n) + (lines if lines is not None else share_lines(n))
+    return t + (block('end', p) + tail() if end else '')
+
+
+KEPT = dict(counts=lambda r: [2000000, 1000000, 1000000], looks=lambda r, i: [0, 99] if i == 0 else [49, 0])
+SH2 = ['--kind', 'share', '--smp', '2', '--host-cpus', '2']
+case('share at 2 under KVM, a host CPU for each: fair, gated, green', share_text(2), SH2, {'SMP-SHARE'}, set(),
+     says=r'^PASS SMP-SHARE smp=2 share: 3 rounds of 3 threads on 2 processors, every thread at least 1.00 of its fair share')
+case('share at 2 under KVM: the application processor keeps one thread, the other two share CPU 0: red',
+     share_text(2, lines=share_lines(2, **KEPT)), SH2, set(), {'SMP-SHARE'},
+     why=r'round 0: thread 1 had 0.75 of its fair share of the progress \(1/3\), under 0.85; looks by processor 0:49,1:0')
+case('share at 2: the kept thread\'s looks are said', share_text(2, lines=share_lines(2, **KEPT)), SH2, set(), {'SMP-SHARE'},
+     says=r"^INFO SMP-SHARE smp=2 share: round 0: .* \[1.5, 0.75, 0.75\]; its most looks on one processor \['99/99 on 1'")
+case('share at 2 under TCG: printed, not gated', share_text(2, lines=share_lines(2, **KEPT)), SH2, {'SMP-SHARE'}, set(),
+     meta=TCG, says=r"^PASS SMP-SHARE smp=2 share: .*0.75 of its fair share of the progress \(printed\).*tcg: not gated")
+case('share at 4 on two host CPUs: printed, not gated',
+     share_text(4, lines=share_lines(4, counts=lambda r: [2, 2, 2, 1, 1])), ['--kind', 'share', '--smp', '4', '--host-cpus', '2'],
+     {'SMP-SHARE'}, set(), says=r'kvm: not gated: 4 processors on 2 host CPUs')
+case('share: a thread with no progress is red, gated or not', share_text(2, lines=share_lines(2, counts=lambda r: [5, 0, 5])),
+     SH2, set(), {'SMP-SHARE'}, meta=TCG, why=r'round 0: thread 1 made no progress')
+case('share: two rounds and no done', share_text(2, lines=share_lines(2, rounds=2, done=False)), SH2, set(), {'SMP-SHARE'},
+     why=r'2 of 3 rounds, no `SMP-SHARE done`')
+case('share at 2 where one processor runs threads (stage 1)', share_text(2, lines=share_lines(2, procs=1, counts=lambda r: [1, 1])),
+     SH2, set(), {'SMP-SHARE'}, why=r'round 0: 2 threads on 1 processors that run threads, want 3 on 2')
+
+
 # --- SMP-BUILD -------------------------------------------------------------------------------------
 EXPECTED = {'pack-8ae042682afb5156b4b5a80bc241260795144d29.pack': '8ae042682afb5156b4b5a80bc241260795144d29',
             'pack-8ae042682afb5156b4b5a80bc241260795144d29.idx': 'c219e2f6ef55933c2050bc2356210dff1d746e4b'}
