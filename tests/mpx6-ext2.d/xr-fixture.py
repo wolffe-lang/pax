@@ -305,8 +305,8 @@ def make(args):
         return f"P {rec['sha256'][:16]} (depths 0/1/2, 600 names, links, 5 GiB sparse), U e2fsck exit {u['U']['e2fsck']}"
 
     # --- Q: one damage case a file, controls on both sides --------------------------
-    victims = ["v-magic", "v-max", "v-entries", "v-depth-child", "v-depth-root", "v-unsorted", "v-overlap", "v-len0",
-               "v-hiaddr", "v-pastend", "v-metadata", "v-journal"]
+    victims = ["v-magic", "v-max", "v-maxover", "v-entries", "v-depth-child", "v-depth-root", "v-unsorted", "v-overlap",
+               "v-len0", "v-hiaddr", "v-pastend", "v-metadata", "v-journal"]
     qfiles = [("c-before", "pattern", 6), ("c-after", "pattern", 6), ("f-inline", "bytes", b"inline?\n"),
               ("f-encrypt", "bytes", b"encrypted?\n"), ("m-depth6", "pattern", 1500),
               ("m-idx-unsorted", "pattern", 1500), ("s-bad", "link", "c-before/" + "x" * 80)]
@@ -339,7 +339,10 @@ def make(args):
         def edit(i):
             out = {}
             r = root(i, "v-magic"); i.put(r, 2, 0x1234); out["v-magic"] = "root magic 0x1234"
-            r = root(i, "v-max"); i.put(r + 4, 2, 3); out["v-max"] = "root eh_max 3 (canonical 4)"
+            # Not damage: an eh_max under the node's room is a layout ifork.rst
+            # allows (the most entries that could follow); it reads whole.
+            r = root(i, "v-max"); i.put(r + 4, 2, 3); out["v-max"] = "root eh_max 3 under its room of 4"
+            r = root(i, "v-maxover"); i.put(r + 4, 2, 5); out["v-maxover"] = "root eh_max 5 over its room of 4"
             r = root(i, "v-entries"); i.put(r + 2, 2, 5); out["v-entries"] = "root eh_entries 5 over eh_max 4"
             lb = leafblock(i, "v-depth-child"); i.put(lb + 6, 2, 1); out["v-depth-child"] = "leaf says depth 1 under a depth-1 root"
             # Only the parent-and-child depth rule catches this one: every
