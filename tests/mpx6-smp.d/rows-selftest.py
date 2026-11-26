@@ -917,9 +917,9 @@ case('leave: an exec-settle round that does not say where the main thread was (a
 # --- the share kind (SMP-SHARE): N + 1 threads spin on N processors, each counting its own progress, three rounds of a
 # second; each thread's part of a round's progress against the fair 1/(N + 1). A processor that kept one thread while the
 # other two took turns on CPU 0 would give that thread 1/2 of the progress and the other two 1/4 each, 0.75 of fair. The
-# looks (/proc/pax-cpus after each 10 ms sleep) are said as what they are: samples taken at timer wakes, which under a
-# steady tick see the queue's turn at one phase (a fair boot under KVM at 2 saw one thread opposite the looker in every
-# look while each made a third of the progress), never where a thread lives.
+# looks (/proc/pax-cpus after each 10 ms sleep) are said as what they are: samples taken at timer wakes, never where a
+# thread lives (a fair boot under KVM at 2 saw one thread opposite the looker in every look while each made a third of
+# the progress).
 def share_lines(n, rounds=3, counts=None, looks=None, procs=None, done=True):
     out = ''
     for r in range(rounds):
