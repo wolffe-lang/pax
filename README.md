@@ -14,7 +14,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 
 | Area | What PAX does today | Held to |
 |---|---|---|
-| Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto the one disk the stick's allow-list names, its log written to the stick | both firmwares under QEMU, every push; the whole install on a machine shaped like kasumi |
+| Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto the one disk the stick's allow-list names, its log written to the stick | both firmwares under QEMU, every push; the whole install on a machine shaped like the CachyOS host |
 | Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers (a dynamic program, one with a `PT_INTERP` or a PIE, refused by name with its interpreter named); `fork` (glibc's and wolf's `clone`, and musl's `fork` itself), `vfork`, `posix_spawn`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; `getrusage` (user and system time, the peak resident set, the context switches, a process's and its children's); `ptrace` (TRACEME, ATTACH, SEIZE, stops and events, registers, memory, single-step, hardware watchpoints), the requests a debugger uses; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; set-user-ID and set-group-ID honoured as `execve(2)` says (`no_new_privs`, `nosuid`); `login`, `su`, `sudo` and `passwd` in wolf; passwords in `/etc/shadow` as scrypt `$7$`, none in any image | Linux as root and as a user; Ubuntu's `login`, `su`, `sudo` and `passwd` for the commands |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
@@ -621,11 +621,11 @@ The installer and the installed tree are tested on separate QEMU virtio disks un
 persistence, and on used ones (an old ESP and root, an old root and swap, an old live image; `tools/used-disk`), each
 left with no signature but PAX's. The merge gate (`tier full`) also installs onto a sparse 500 GB disk and `tier all`
 onto 4 TB, each target then booted alone under both firmwares. `tests/mpx6-kasumi` (`tier full`) runs the whole path
-on a QEMU machine shaped like kasumi: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe
+on a QEMU machine shaped like the CachyOS host: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe
 disk for CachyOS and three SATA disks; it installs to the listed disk through the keyboard, boots it alone, logs in
 and reads back a file written before the reboot, and holds every other disk byte-identical, then does it all again
-onto a used 1 TB disk shaped like kasumi's own target. Nothing here is a claim about a real machine:
-[docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for kasumi. See
+onto a used 1 TB disk shaped like the CachyOS host's own target. Nothing here is a claim about a real machine:
+[docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for the CachyOS host. See
 [Guided installation](docs/BOOT.md#guided-installation).
 
 ### Upgrading over ssh
