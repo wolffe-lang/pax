@@ -306,6 +306,7 @@ struct sh {
     volatile L tcpu; /* SMP-TRACE-EXIT: the processor the traced thread was seen on before its group's exit */
     volatile L mcpu; /* SMP-EXEC-LEAVE: the processor an exec-settle round's main thread said go on (-1: none found) */
     volatile U yields; /* SMP-EXEC-LEAVE: an exec-settle round's siblings give their processors up every 2 ms until go */
+    volatile U hush, hushed; /* SMP-EXEC-LEAVE: the two siblings that do not exec asked to sleep; how many sleep */
 };
 static struct sh *G;
 __attribute__((force_align_arg_pointer)) static void h_usr1(int s) { (void)s; G->hit = rdtsc(); __atomic_add_fetch(&G->count, 1, __ATOMIC_SEQ_CST); }
@@ -704,6 +705,14 @@ static void g_spin(void *arg) {
             while (rdtsc() < end) G->spins++;
             exit_group(10);
         }
+        /* SMP-EXEC-LEAVE's exec-settle rounds: hushed by the main thread's look (`main_on_ap`), the two siblings that
+           do not exec sleep until it lets them go, so only the main thread and the exec'ing sibling may run */
+        if (G->hush && me != 1) {
+            __atomic_add_fetch(&G->hushed, 1, __ATOMIC_SEQ_CST);
+            while (G->hush) nap(1000000);
+            __atomic_sub_fetch(&G->hushed, 1, __ATOMIC_SEQ_CST);
+            continue;
+        }
         /* SMP-EXEC-LEAVE's exec-settle rounds, until go: every 2 ms the sibling gives its processor up (sched_yield);
            with this, the main thread's look (`main_on_ap`) finds itself on an application processor far more often */
         if (G->yields && G->go == 0) {
@@ -732,20 +741,27 @@ static U group_running(void) {
    sibling run only its other two siblings, the threads the exec re-points (an exec's old leader is charged nothing) */
 static int main_naps;
 /* SMP-EXEC-LEAVE's exec-settle rounds, in the group's main thread before it says go: a look at /proc/pax-cpus just after
-   each wake from a sleep of 1 to 4 ticks, until one look shows it current on an application processor and the exec'ing
-   sibling current on another. Its processor, or -1 when none came in 2 s (0.5 s past two processors, where all four run
-   at once: counted there, not wanted). The test word holds only an application processor. As measured at two
-   processors, with the siblings yielding until go (`g_spin`): the look found it there in 0.97 of the rounds under KVM
-   and in all of them under TCG; about 0.62 of the rounds under KVM and 0.53 under TCG then opened (the old leader still
-   held when the wait4 came back), the rest's main thread no longer on that processor when the exec ended it, for a
-   cause not established. Without the yields, looks made at wakes found it there in 3 rounds of 40 under KVM. */
+   each wake from a sleep of 1 to 4 ticks, until one look shows it current on an application processor, the exec'ing
+   sibling current on another, and the two other siblings asleep. A look that finds the places right hushes those two
+   (`g_spin`: they sleep until let go) and looks again; one that finds them wrong lets them go again, so the yields move
+   the threads about. Once the two sleep, only the main thread and the exec'ing sibling may run, each on its processor,
+   and nothing is left to take the main thread's. Its processor, or -1 when none came in 2 s (0.5 s past two processors,
+   where all four run at once: counted there, not wanted). The test word holds only an application processor.
+   Measured before the hush, at two processors with the siblings yielding until go: on two host CPUs the look found it
+   there in 0.97 of the rounds under KVM and about 0.62 of the rounds opened (0.53 under TCG), the thread held at the
+   exec in most of the rest a re-pointed sibling; on six host CPUs, 0.72 and 0.13. */
 static L main_on_ap(void) {
     struct snap z;
     U t0 = rdtsc(), lim = 2000;
     for (U k = 0;; k++) {
         if (take(&z)) {
             L m = cpu_of(&z, G->gtids[0]), x = cpu_of(&z, G->gtids[2]);
-            if (m > 0 && x >= 0 && x != m) return m;
+            if (m > 0 && x >= 0 && x != m) {
+                if (G->hushed == 2) return m;
+                G->hush = 1;
+            } else {
+                G->hush = 0;
+            }
             if (z.active > 2) lim = 500;
         }
         if (rdtsc() - t0 >= cycles_of_ms(lim)) return -1;
@@ -755,7 +771,7 @@ static L main_on_ap(void) {
 static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a sibling execs, 3 a sibling execs a
                              program killed by its own SIGKILL, 4 the main thread exits alone and a sibling then exits,
                              5 as 2, once the main thread is current on an application processor (`main_on_ap`) */
-    G->started = 0; G->go = 0; G->running = 0; G->yields = how == 5;
+    G->started = 0; G->go = 0; G->running = 0; G->yields = how == 5; G->hush = 0; G->hushed = 0;
     L p = fork();
     if (!p) {
         for (U i = 0; i < 3; i++) spawn(&grp[i], g_spin, (void *)i);
