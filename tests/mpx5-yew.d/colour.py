@@ -87,7 +87,7 @@ def document_cells(data):
     clean = re.sub(rb'\x1b\].*?(?:\x07|\x1b\\|\Z)', b'', clean, flags=re.S)
     for byte in clean:
         term.feed(byte)
-    cells = term.editor if term.editor is not None else term.cells
+    cells = term.cells if term.primary is not None or term.editor is None else term.editor
     for y, row in enumerate(cells):
         if y == 0 or y >= term.rows - 3:
             continue
