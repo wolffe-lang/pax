@@ -224,6 +224,40 @@
 //! is the one kernel/process says (`first_refusal`). Measured in
 //! notes/px126-process-slots.md.
 //!
+//! **Every processor** (px166, SMP stage 2): one run queue and one table
+//! of records, read and written under the kernel lock (kernel/klock);
+//! what is a processor's own is in its record (kernel/percpu): the slot
+//! it runs (CURRENT, `cur`), the tick and the TSC that slot was switched
+//! in at (SLICE, the quantum's start; IN_TSC, `account`'s, so a run is
+//! two reads of one processor's TSC), and on an application processor
+//! its idle loop's frame (IDLE_FRAME) while it runs a thread. CPU 0's idle
+//! context is slot 1, as before; an application processor's is that loop,
+//! no slot (kernel/percpu's IDLE_SLOT), which `run_next` resumes when the
+//! queue is empty, with the kernel's PML4 live (`enter_space`), so no
+//! process's tables stay under a processor that runs none of its threads.
+//! A thread of a process runs on whichever processor first takes it from
+//! the queue: the one whose tick, switch or RESCHED (`kick`) comes first.
+//! **A kernel thread runs on CPU 0 alone** (stage 2's amendment to its
+//! contract's §3.6, which had them run anywhere): an application processor
+//! takes the first thread of a process in the queue and leaves kernel
+//! threads where they stand (`eligible`). A kernel thread holds the kernel
+//! lock for as long as it runs; on another processor it would hold CPU 0
+//! out of the kernel, its tick and the count the kernel keeps time by with
+//! it, so a kernel thread waiting on that count there would wait for ever;
+//! and kmain's end stays CPU 0's, which stops the others. Each processor
+//! counts its switches to a kernel thread (its record's KTHREADS; 0 on
+//! every processor but CPU 0, tests/mpx6-smp's SMP-PIN). On the way out
+//! of the kernel, a processor that leaves threads queued sends RESCHED to
+//! the lowest-numbered idle one that runs threads (`share`, kernel/smp's
+//! `runs`). Each slot's fourth word, W_CPU, names the processor running it
+//! (its index plus one; 0 while it runs nowhere): `run_next` clears the
+//! outgoing slot's and sets the incoming one's, and a slot the queue hands
+//! it that is RUNNING or still named by a processor is a kernel bug, named
+//! (`PANIC sched: slot N running on two processors`), never run twice.
+//! CPU 0's tick alone wakes the sleepers and fixes the TSC's rate (one
+//! walker, one rate: CPU 0's TSC, invariant across one socket's processors
+//! and QEMU's); every processor's tick ends its own thread's quantum.
+//!
 //! The record's fields are read and written as words at their
 //! `offset_of`, volatile (`field`/`put_field`): wolf 0.2.26 stores a
 //! field of a raw element in place (wolf-lang#577), but as an ordinary
@@ -245,9 +279,11 @@ use log
 use paging
 use panic
 use percpu
+use smp
 use speaker
 use sync
 use timer
+use tlb
 use trace_state
 
 extern "c" let pax_debugregs: *u64
@@ -264,6 +300,7 @@ extern "c" let pax_sched_bits: *u64
 extern "c" let pax_thread_entry: *u8
 extern "c" let pax_idle: *u8
 extern "c" let pax_slot_words: *u64 // px126: two words a slot (W_AREA, W_MARK); px159: three (W_KEYS)
+extern "c" let pax_old_spaces: *u64 // px166 (step 5b): the parked spaces, OLD_MAX words
 extern "c" let pax_pid_hint: *u64 // px126: pid mod HINTS to slot + 1
 extern "c" let pax_siginfo: *u64
 extern "c" let pax_tty_table: *u64
@@ -400,7 +437,9 @@ const HINTS: u64 = 4096 // px126: pax_pid_hint's words
 const W_AREA: u64 = 0 // px126: slot word: 1 while the slot has its process area mapped
 const W_MARK: u64 = 1 // px126: slot word: process_ends' mark on a child whose group it may orphan
 const W_KEYS: u64 = 2 // px159: slot word: the key buckets its system call looked at (`wait_key`), what it waits on in PIPE
-const SLOT_WORDS: u64 = 3 // px159: boot/sched.S's pax_slot_words a slot (two before px159)
+const W_CPU: u64 = 3 // px166: slot word: the processor running it, its index + 1; 0 while it runs nowhere (`run_next`)
+const SLOT_WORDS: u64 = 4 // px166: boot/sched.S's pax_slot_words a slot (three since px159, two before)
+const OLD_MAX: u64 = 64 // px166 (step 5b): boot/sched.S's pax_old_spaces: spaces execs left while another CR3 held them (kernel/smp's MAX)
 const NEVER: u64 = 0xffffffffffffffff
 const FS_BASE: u64 = 0xc0000100 // px12: IA32_FS_BASE (Intel SDM vol. 4)
 
@@ -443,7 +482,9 @@ const S_STARTED: u64 = 0
 // (kernel/percpu's CURRENT, read through GS): `cur`, `run_next`, `start`.
 const S_HEAD: u64 = 2 // slot + 1; 0 when the queue is empty
 const S_TAIL: u64 = 3
-const S_SLICE: u64 = 4 // the tick the current thread was switched in at
+// px166: words 4 and 19, the tick and the TSC the running thread was
+// switched in at, are each processor's record's (kernel/percpu's SLICE and
+// IN_TSC): `slice`, `in_tsc`.
 const S_NEXT_ID: u64 = 5
 const S_LIVE: u64 = 6 // created threads not yet exited
 const S_WAITER: u64 = 7 // slot + 1 of the thread in wait_all; 0 none
@@ -458,7 +499,6 @@ const S_TTY_ON: u64 = 14 // px48: 1 once the console is a terminal (kernel/conso
 // keeps every terminal's in boot/console.S's pax_tty_table (`tsid`, `tpgrp`).
 const S_WAITPID: u64 = 17 // px67: the pid whose end also readies the waiter (`wait_pid_or_down`); 0 none
 const S_ENDING: u64 = 18 // px67: 1 once the end has begun (kmain_console): pid 1 takes signals as any process does
-const S_IN_TSC: u64 = 19 // px88: the TSC when the current thread was switched in
 const S_TSC0: u64 = 20 // px88: the TSC at `start` (0: not taken)
 const S_NS0: u64 = 21 // px88: kernel/clock's nanoseconds at `start`
 const S_TICK0: u64 = 22 // px88: the tick at `start`
@@ -520,6 +560,139 @@ fn put_field(s: u64, off: int, v: u64) {
 }
 
 /// Scheduler word `i` (S_*), read volatile (#598).
+/// px166: whether the running thread `c` was ended in place, while it ran,
+/// by another processor's exit_group or exec (`end_others` marks it DEAD):
+/// `preempt` and `kick` switch it off and never queue it again
+/// (tests/mpx6-smp's SMP-DEAD).
+fn ended_in_place(c: u64) -> bool {
+    field(c, offset_of(Thread, state)) == DEAD
+}
+
+/// px166: whether the running thread `c` holds a state other than RUNNING
+/// and DEAD, which only another processor could have written while it ran.
+/// None does: every write of another thread's state is to one that runs
+/// nowhere, DEAD's (`end_others`, `exec_alone`) excepted, and a group
+/// exit's stop is owed to a running thread, not written (`trace_group_exit`).
+/// A write that did would be undone by `preempt` and `kick` (READY over it,
+/// queued) or outrun by the thread's next system call (its own state over
+/// it), and whatever waits on that state would wait for ever (the far park
+/// a group exit's PTRACE_EVENT_EXIT once was: mpx5-trace's group-exit-event
+/// at four processors). Such a thread leaves this processor as an ended one
+/// does, its frame kept for when the state is undone, never queued again by
+/// either and its system call never routed.
+fn written_from_afar(c: u64) -> bool {
+    let st = field(c, offset_of(Thread, state))
+    st != RUNNING && st != DEAD
+}
+
+/// px166: whether the running `c` must leave this processor at this tick or
+/// RESCHED whatever the queue holds: ended in place (DEAD). `preempt` and
+/// `kick` test it before their returns for an empty queue and an unspent
+/// quantum: on a processor with nothing it may take, those returns resumed
+/// such a thread for ever (an application processor takes only threads of
+/// processes: tests/mpx6-smp's SMP-DEAD). `run_next` then leaves it: W_CPU
+/// cleared, the departure's waiter woken, the idle context on the kernel's
+/// PML4. A thread of a stopped process needs no test here: stop_proc's
+/// RESCHED (`reach`) brings it into the kernel at once, and whichever return
+/// resumes ring 3 goes through `signal.on_return`, which parks it
+/// (`park_current`; SMP-SIGNAL's SIGSTOP held).
+fn must_leave(c: u64) -> bool {
+    !idle(c) && (ended_in_place(c) || written_from_afar(c))
+}
+
+/// px166 (step 5a): kernel/interrupts' door, before a system call or a
+/// ring-3 fault is routed: the running thread was ended in place.
+pub fn ended_here() -> bool {
+    let c = cur()
+    !idle(c) && (ended_in_place(c) || written_from_afar(c))
+}
+
+/// px166 (step 5a): the running thread, ended in place, switched off at
+/// once (its frame `f` kept for nothing: it never runs again); the frame of
+/// what this processor runs next.
+pub fn leave_ended(f: u64) -> u64 {
+    save_frame(cur(), f)
+    run_next()
+}
+
+/// px166: the signal counts /proc/pax-cpus prints (`signals …`), for
+/// tests/mpx6-smp's sleeper: a raise that set its signal's pending bit
+/// (`sig_set`), one that found the bit set already and so merged into the
+/// signal pending (`sig_merged`), a signal taken (`sig_taken`), and a
+/// process thread that went to sleep (`sleep_current`) with a signal it
+/// would take pending (`sleep_pending`). Each written under the kernel lock.
+var sig_set: u64 = 0
+var sig_merged: u64 = 0
+var sig_taken: u64 = 0
+var sleep_pending: u64 = 0
+
+/// px166: the four signal counts: (set, merged, taken, sleeps with one pending).
+pub fn signal_counts() -> (u64, u64, u64, u64) {
+    // # Safety: the module's own `var`s, written under the kernel lock; a report.
+    unsafe { (sig_set, sig_merged, sig_taken, sleep_pending) }
+}
+
+/// px166: count a raise of `sig` into the pending word `w` (`signal_counts`).
+fn count_raise(w: u64, sig: u64) {
+    // # Safety: as `signal_counts`; the caller holds the kernel lock.
+    unsafe {
+        if w & bit(sig) != 0 { sig_merged += 1 } else { sig_set += 1 }
+    }
+}
+
+/// px166: the departure rule. Slot `s`, DEAD, is still another processor's
+/// to run on (its W_CPU), or its space (a process's, `owns`) is still in
+/// another processor's CR3 (a thread of it running there: kernel/tlb's
+/// LOADED_CR3), or a thread that leads from it is (`follower_on`): that
+/// processor's index + 1, after a RESCHED to it, which moves it off; 0 when
+/// nothing but this processor can touch the slot's stack, FPU area, record,
+/// space or process area. The lock's holder; the caller puts the slot off to
+/// a later reap, and `run_next` wakes the waiting parent when that processor
+/// moves off its DEAD slot.
+fn departure(s: u64) -> u64 {
+    var k = slot_word(s, W_CPU)
+    if k == percpu.index() + 1 {
+        k = 0 // this processor's own: not a departure
+    }
+    if k == 0 {
+        let c = field(s, offset_of(Thread, cr3))
+        if c != 0 && field(s, offset_of(Thread, owns)) == 1 {
+            k = tlb.user_of(c)
+        }
+    }
+    if k == 0 {
+        k = follower_on(s)
+    }
+    if k != 0 {
+        smp.resched(k - 1)
+    }
+    k
+}
+
+/// px166: a DEAD thread that leads from slot `l` and is still current on
+/// another processor: that processor's index + 1, else 0. Its switch-off
+/// there charges its last slice to `l`'s area (`account`, `proc_area`), so
+/// `l` is not collected, and its area and slot not let go, until it has
+/// left. Only an exec makes such a thread run outside `l`'s space, where the
+/// space's rule above cannot see it: `exec_alone` ends the caller's siblings
+/// in place and points them at the caller, whose space is new; collected
+/// while one still ran elsewhere, the caller's area was gone at that
+/// switch-off (`no process area for slot`), or a slot reused since took the
+/// charge.
+fn follower_on(l: u64) -> u64 {
+    var t: u64 = FIRST
+    while t < top() {
+        if t != l && field(t, offset_of(Thread, state)) == DEAD && field(t, offset_of(Thread, lead)) == l {
+            let k = slot_word(t, W_CPU)
+            if k != 0 && k != percpu.index() + 1 {
+                return k
+            }
+        }
+        t += 1
+    }
+    0
+}
+
 fn sv(i: u64) -> u64 {
     // # Safety: i < 32, inside boot/sched.S's 256-byte pax_sched_state (px48; 128 before).
     unsafe { ((pax_sched_state as u64 + i * 8) as *u64).read_volatile() }
@@ -577,6 +750,147 @@ fn clear_masks() {
 
 fn cur() -> u64 {
     percpu.current() // #598: reread after every switch; px161: this processor's
+}
+
+/// px166: whether `c` is an idle context: CPU 0's idle thread (slot 1) or
+/// an application processor's idle loop (no slot: kernel/percpu's
+/// IDLE_SLOT, never a field's index).
+fn idle(c: u64) -> bool {
+    c == IDLE || c == percpu.IDLE_SLOT
+}
+
+/// px166: this processor's idle context: slot 1 on CPU 0, its idle loop
+/// on another.
+fn idle_slot() -> u64 {
+    if percpu.index() == 0 { IDLE } else { percpu.IDLE_SLOT }
+}
+
+/// px166: whether this processor runs its idle context (a frame returned
+/// to it gives the kernel lock back, kernel/user's `hand_back`).
+pub fn idle_now() -> bool {
+    idle(cur())
+}
+
+/// px166: whether a processor's CURRENT `c` is an idle context, which
+/// names no thread (kernel/procfs's /proc/pax-cpus, under the lock).
+pub fn idle_context(c: u64) -> bool {
+    idle(c)
+}
+
+/// px166: this processor's tick count, the quantum's clock: CPU 0's is
+/// kernel/timer's, the count the kernel keeps time by; an application
+/// processor's is its record's TICKS, its own timer's. A kernel thread
+/// holds the kernel lock while it runs, so while one runs on an
+/// application processor CPU 0 waits for the lock with its interrupts off
+/// and kernel/timer's count stands still: measured by it, that thread's
+/// quantum would never end.
+fn my_ticks() -> u64 {
+    if percpu.index() == 0 { timer.ticks() } else { percpu.get(percpu.mine(), percpu.TICKS) }
+}
+
+/// px166: the tick (`my_ticks`) this processor's running thread was
+/// switched in at (its record's SLICE: the quantum's start).
+fn slice() -> u64 {
+    percpu.get(percpu.mine(), percpu.SLICE)
+}
+
+fn put_slice(t: u64) {
+    percpu.put(percpu.mine(), percpu.SLICE, t)
+}
+
+/// px166: the TSC this processor's running thread was switched in at (its
+/// record's IN_TSC; px88's S_IN_TSC before): `account` subtracts reads of
+/// one processor's TSC only.
+fn in_tsc() -> u64 {
+    percpu.get(percpu.mine(), percpu.IN_TSC)
+}
+
+fn put_in_tsc(t: u64) {
+    percpu.put(percpu.mine(), percpu.IN_TSC, t)
+}
+
+/// px131: kernel/latency's scheduler point for `c`, the running slot.
+/// px166: CPU 0's instrument alone, as boot/isr.S's open and close are
+/// (on CPU 0, `c` is a slot, never IDLE_SLOT).
+fn point(f: u64, c: u64) {
+    if percpu.index() == 0 {
+        latency.sched_point(f, who(c))
+    }
+}
+
+/// px166: `c` switched out at frame `f`: its record's frame, or, for an
+/// application processor's idle loop, this processor's IDLE_FRAME.
+fn save_frame(c: u64, f: u64) {
+    if c == percpu.IDLE_SLOT {
+        percpu.put(percpu.mine(), percpu.IDLE_FRAME, f)
+    } else {
+        put_field(c, offset_of(Thread, frame), f)
+    }
+}
+
+/// px166: the frame `s` resumes from, taken (0 left in its place).
+fn take_frame(s: u64) -> u64 {
+    if s == percpu.IDLE_SLOT {
+        let r = percpu.mine()
+        let f = percpu.get(r, percpu.IDLE_FRAME)
+        if f == 0 {
+            panic.fail("sched: an idle loop to resume with no frame kept, cpu ", percpu.index())
+        }
+        percpu.put(r, percpu.IDLE_FRAME, 0)
+        return f
+    }
+    let f = field(s, offset_of(Thread, frame))
+    put_field(s, offset_of(Thread, frame), 0)
+    f
+}
+
+/// px166: the runtime's ambient slot into the running thread's record,
+/// before kernel/klock's `leave`: another processor may take the lock and
+/// move the one slot before this one comes back. IF is clear. An
+/// application processor's idle loop has none (it allocates nothing).
+pub fn ambient_park() {
+    let c = cur()
+    if c != percpu.IDLE_SLOT {
+        put_field(c, offset_of(Thread, amb), heap.ambient())
+    }
+}
+
+/// px166: the running thread's ambient region back into the runtime's
+/// slot, after a fresh kernel/klock `enter` (the root, 0, for an
+/// application processor's idle loop). IF is clear.
+pub fn ambient_resume() {
+    let c = cur()
+    heap.set_ambient(if c == percpu.IDLE_SLOT { 0 } else { field(c, offset_of(Thread, amb)) })
+}
+
+/// px166: on the way out of the kernel with the lock about to be given
+/// back (kernel/user's `hand_back`): while the queue holds a thread it may
+/// take (`eligible`'s rule), the lowest-numbered other processor that runs threads, is idle and has no
+/// RESCHED in flight (its record's POKED) is sent one (kernel/smp's
+/// `resched`), so it takes the queue's head now rather than at its tick.
+/// One a call: that processor passes the turn on as it leaves in its turn,
+/// so k queued threads wake up to k idle processors. A processor that
+/// finds the queue empty when it takes the lock goes back to its loop.
+pub fn share() {
+    if sv(S_STARTED) == 0 || sv(S_HEAD) == 0 {
+        return
+    }
+    let me = percpu.index()
+    let bound = smp.bound()
+    // px166: an application processor is sent one only for a thread of a
+    // process (kernel threads are CPU 0's).
+    let process = first_process_thread() != 0
+    var i: u64 = 0
+    while i < bound {
+        if i != me && smp.runs(i) && (i == 0 || process) {
+            let r = smp.record(i)
+            if idle(percpu.get(r, percpu.CURRENT)) && percpu.get(r, percpu.POKED) == 0 {
+                smp.resched(i)
+                return
+            }
+        }
+        i += 1
+    }
 }
 
 /// px126: one past the highest slot that is not free: every slot from
@@ -696,12 +1010,12 @@ fn wake_urgent(s: u64) {
 /// running thread, is not one (`kick` and `preempt` switch to it at once).
 /// px159: or `c` is one that has run past its shield (`shielded`).
 fn urgent_waits(c: u64) -> bool {
-    let h = sv(S_HEAD) // #598
+    let h = eligible() // #598; px166: the thread this processor would take
     h != 0 && mask_has(B_URGENT, h - 1) && !(mask_has(B_URGENT, c) && shielded()) && !starved() // px131e
 }
 
 /// px159: the running thread, urgent, has run less than URGENT_RUN_NS since
-/// it was switched in (px88's TSC at the switch, `S_IN_TSC`); before the
+/// it was switched in (px88's TSC at the switch, `in_tsc`); before the
 /// TSC's rate is known, while the tick it started in lasts. Since a pipe's,
 /// a socket's and a pty's readers are woken urgent (`wake_obj`), a thread
 /// that then computes (a language server woken by an edit) would otherwise
@@ -709,10 +1023,10 @@ fn urgent_waits(c: u64) -> bool {
 fn shielded() -> bool {
     let m = sv(S_MULT)
     if m == 0 {
-        return timer.ticks() == sv(S_SLICE)
+        return my_ticks() == slice()
     }
     let t = tsc()
-    let at = sv(S_IN_TSC)
+    let at = in_tsc()
     t <= at || t - at < (URGENT_RUN_NS << 24) / m
 }
 
@@ -795,6 +1109,15 @@ fn set_wake(c: u64, at: u64, sleeps: bool) {
 /// the stack ring 3 enters on (px09): the TSS's RSP0 and SYSCALL's stack
 /// word. IF clear (a handler, or `pax_switch`'s path).
 fn enter_space(s: u64) {
+    // px166: an application processor's idle loop runs on the kernel's
+    // PML4: a process whose thread it ran may end and its tables be freed
+    // while it sleeps.
+    if s == percpu.IDLE_SLOT {
+        if paging.live() != sv(S_PML4) {
+            paging.load(sv(S_PML4))
+        }
+        return
+    }
     let c = field(s, offset_of(Thread, cr3))
     let want = if c == 0 { sv(S_PML4) } else { c }
     if paging.live() != want {
@@ -820,68 +1143,185 @@ fn who(s: u64) -> u64 {
     if p != 0 { p } else { s | 0x100000000 }
 }
 
-/// Switch in the queue's head (the idle thread if it is empty): count
-/// its run, start its quantum, make its space live, return its frame.
+/// px166: whether slot `s` is a kernel thread (no program: `prog` 0;
+/// kmain's slot 0, the network's, the flusher's, xHCI's).
+fn kernel_thread(s: u64) -> bool {
+    field(s, offset_of(Thread, prog)) == 0
+}
+
+/// px166: the first thread of a process in the queue (slot + 1; 0 none).
+fn first_process_thread() -> u64 {
+    var n = sv(S_HEAD) // #598
+    while n != 0 && kernel_thread(n - 1) {
+        n = field(n - 1, offset_of(Thread, next))
+    }
+    n
+}
+
+/// px166: the queued thread this processor would take next (slot + 1; 0
+/// none): the head on CPU 0; on another, the first thread of a process,
+/// kernel threads left in the queue for CPU 0.
+fn eligible() -> u64 {
+    if percpu.index() == 0 { sv(S_HEAD) } else { first_process_thread() }
+}
+
+/// px166: queued slot + 1 `n` removed, wherever it stands: `dequeue` for
+/// the head; behind it, unlinked from the thread before it (its urgent
+/// mark kept: it is about to run, as a head's is).
+fn take_out(n: u64) {
+    if n == sv(S_HEAD) {
+        let _h = dequeue()
+        return
+    }
+    var p = sv(S_HEAD)
+    while p != 0 && field(p - 1, offset_of(Thread, next)) != n {
+        p = field(p - 1, offset_of(Thread, next))
+    }
+    if p == 0 {
+        panic.fail("sched: a slot taken from the queue that is not in it, slot ", n - 1)
+    }
+    let after = field(n - 1, offset_of(Thread, next))
+    put_field(p - 1, offset_of(Thread, next), after)
+    if after == 0 {
+        put_sv(S_TAIL, p)
+    }
+    mask_clear(B_QUEUED, n - 1) // px131e
+}
+
+/// px166: the thread this processor takes from the queue (`eligible`),
+/// removed (slot + 1; 0 none); a slot that a processor still runs is named
+/// and the kernel stops: RUNNING, or its W_CPU not 0 (`run_next` cleared
+/// the outgoing slot's before it asked, so a thread the same processor
+/// takes back passes).
+fn take_next() -> u64 {
+    let n = eligible()
+    if n != 0 {
+        take_out(n)
+        let s = n - 1
+        let on = slot_word(s, W_CPU)
+        if field(s, offset_of(Thread, state)) == RUNNING || on != 0 {
+            log.put("PANIC sched: slot ")
+            log.dec(s as int)
+            log.put(" running on two processors: state ")
+            log.dec(field(s, offset_of(Thread, state)) as int)
+            log.put(", cpu ")
+            if on == 0 { log.put("none") } else { log.dec((on - 1) as int) }
+            log.put(", taken from the queue by cpu ")
+            log.dec(percpu.index() as int)
+            log.end()
+            panic.halt()
+        }
+    }
+    n
+}
+
+/// Switch in the queue's head (the idle context if it is empty: CPU 0's
+/// idle thread, an application processor's idle loop): count its run,
+/// start its quantum, make its space live, return its frame. px166: on
+/// any processor that runs threads, under the kernel lock; the outgoing
+/// slot's W_CPU cleared first, the incoming one's set.
 fn run_next() -> u64 {
     let from = cur()
-    latency.sched_point(0, who(from)) // px131: the scheduler chooses
-    var n = dequeue()
+    let real_from = from != percpu.IDLE_SLOT
+    point(0, from) // px131: the scheduler chooses
+    if real_from {
+        put_slot_word(from, W_CPU, 0)
+        // px166: a DEAD slot the departure rule may have put off (its own,
+        // its space's or its leader's) is free to go now this processor has
+        // left it: its process's parent, if it waits, looks again. Every such
+        // switch-off wakes it, not only one marked by a flag: one word for the
+        // machine was taken by the first DEAD switch-off anywhere (an exec's
+        // old leader, parentless, among them), and the parent the rule held
+        // slept on.
+        if field(from, offset_of(Thread, state)) == DEAD {
+            let l = field(from, offset_of(Thread, lead))
+            let pp = field(if l != 0 { l } else { from }, offset_of(Thread, ppid))
+            if pp != 0 {
+                wake_waiter(pp)
+            }
+        }
+    }
+    var n = take_next()
     // px48: a thread of a stopped process runs nothing: it is parked
     // (STOPPED), its frame kept, until the process is continued.
     while n != 0 && parks(n - 1) {
         put_field(n - 1, offset_of(Thread, state), STOPPED)
-        n = dequeue()
+        n = take_next()
     }
-    let s = if n == 0 { IDLE } else { n - 1 }
+    let s = if n == 0 { idle_slot() } else { n - 1 }
+    let real_s = s != percpu.IDLE_SLOT
     // px131: the thread leaving has had its urgent turn; the one starting
     // keeps its mark while it runs, so `kick` gives the CPU to no other
     // urgent thread before it blocks or the tick preempts it
-    mask_clear(B_URGENT, from)
+    if real_from {
+        mask_clear(B_URGENT, from)
+    }
     // px131e: a thread that is not urgent runs: the wait that bounds urgency
     // starts again
-    if s != IDLE && !mask_has(B_URGENT, s) {
+    if !idle(s) && !mask_has(B_URGENT, s) {
         put_sv(S_STARVE, timer.ticks())
     }
     account(from, s) // px88
     if s != from {
-        fpu.switch(from, s) // px10: a no-op before fpu.start
+        fpu.switch(from, s) // px10: a no-op before fpu.start; px166: one side alone for an idle loop
         // px21a: the ambient region goes with its thread. IF is clear.
-        put_field(from, offset_of(Thread, amb), heap.ambient())
-        heap.set_ambient(field(s, offset_of(Thread, amb)))
+        // px166: an application processor's idle loop has none (the root).
+        if real_from {
+            put_field(from, offset_of(Thread, amb), heap.ambient())
+        }
+        heap.set_ambient(if real_s { field(s, offset_of(Thread, amb)) } else { 0 })
     }
-    put_field(s, offset_of(Thread, state), RUNNING)
-    put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
+    if real_s {
+        put_field(s, offset_of(Thread, state), RUNNING)
+        put_field(s, offset_of(Thread, runs), field(s, offset_of(Thread, runs)) + 1)
+        put_slot_word(s, W_CPU, percpu.index() + 1)
+        if s != from && !idle(s) && kernel_thread(s) {
+            percpu.count(percpu.KTHREADS) // px166: SMP-PIN's count
+        }
+    }
     percpu.set_current(s)
-    put_sv(S_SLICE, timer.ticks())
+    put_slice(my_ticks())
     enter_space(s)
-    let f = field(s, offset_of(Thread, frame))
-    put_field(s, offset_of(Thread, frame), 0)
-    f
+    take_frame(s)
 }
 
 /// The timer's half of a switch (kernel/interrupts, vector 32, after
 /// the tick). Returns the frame to resume: `f` itself, or another
 /// thread's.
+/// px166: on any processor's tick. CPU 0's alone fixes the TSC's rate and
+/// wakes the sleepers; a processor past the cap (kernel/smp's `runs`)
+/// switches nothing; an idle one takes the queue's head at once, its idle
+/// context's frame kept.
 pub fn preempt(f: u64) -> u64 {
-    percpu.boot_only(f) // px161: CPU 0's alone; another processor here stops, named
     if sv(S_STARTED) == 0 {
         return f
     }
-    latency.sched_point(f, who(cur())) // px131: a chance to choose
-    if sv(S_MULT) == 0 {
-        calibrate() // px88: once, a second of ticks after `start`
-    }
-    wake_sleepers()
     let c = cur()
+    point(f, c) // px131: a chance to choose
+    if percpu.index() == 0 {
+        if sv(S_MULT) == 0 {
+            calibrate() // px88: once, a second of ticks after `start`
+        }
+        wake_sleepers()
+    }
+    if !smp.runs_here() {
+        return f
+    }
+    // px166: a thread that must leave (`must_leave`) is not kept by either
+    // return below.
+    let go = must_leave(c)
     // #598: the queue's head is read after wake_sleepers wrote it.
-    if sv(S_HEAD) == 0 {
+    // px166: on an application processor, a thread of a process.
+    if !go && eligible() == 0 {
         return f
     }
-    if c != IDLE && timer.ticks() - sv(S_SLICE) < QUANTUM && !urgent_waits(c) {
+    if !go && !idle(c) && my_ticks() - slice() < QUANTUM && !urgent_waits(c) {
         return f
     }
-    put_field(c, offset_of(Thread, frame), f)
-    if c != IDLE {
+    save_frame(c, f)
+    // px166: a thread ended in place by another processor (DEAD: exit_group,
+    // exec) is switched off at its tick, never queued again.
+    if !idle(c) && !ended_in_place(c) && !written_from_afar(c) {
         put_field(c, offset_of(Thread, state), READY)
         enqueue(c)
     }
@@ -890,8 +1330,9 @@ pub fn preempt(f: u64) -> u64 {
 
 /// The voluntary half (kernel/interrupts, vector 0x81 from
 /// `pax_switch`): the current thread has set its own state.
+/// px166: on any processor that runs threads (only a thread calls
+/// `pax_switch`, so `c` is a slot); CPU 0's alone wakes the sleepers.
 pub fn switched(f: u64) -> u64 {
-    percpu.boot_only(f) // px161: as `preempt`
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     let st = field(c, offset_of(Thread, state))
@@ -901,7 +1342,9 @@ pub fn switched(f: u64) -> u64 {
     if (st == READY || st == RUNNING) && c != IDLE {
         enqueue(c)
     }
-    wake_sleepers()
+    if percpu.index() == 0 {
+        wake_sleepers()
+    }
     run_next()
 }
 
@@ -1235,12 +1678,17 @@ pub fn set_self_fs(v: u64) {
 /// returned is the next thread's, for the handler to resume. IF clear.
 pub fn sleep_current(f: u64, wake: u64) -> u64 {
     let c = cur()
+    if signal_waits() {
+        // # Safety: as `signal_counts`; a system call, under the kernel lock.
+        unsafe { sleep_pending += 1 } // px166: the sleeper's instrument
+    }
     put_field(c, offset_of(Thread, frame), f)
     set_wake(c, wake, true)
     put_field(c, offset_of(Thread, state), SLEEPING)
     put_field(c, offset_of(Thread, rst), W_SLEEP) // px26: a signal ends it with -EINTR
     trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -1263,6 +1711,7 @@ pub fn block_input(f: u64) -> u64 {
     put_field(c, offset_of(Thread, state), INPUT)
     put_field(c, offset_of(Thread, rst), W_REWOUND) // px26
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -1292,26 +1741,37 @@ pub fn wake_input() -> u64 {
 /// and a thread is now ready, switch to it at once rather than at the
 /// next tick; px131: and so when the queue's head is a thread the device's
 /// work woke (`wake_urgent`) and the running one is not; otherwise resume
-/// `f`. IF clear.
+/// `f`. IF clear. px166: and after RESCHED, on any processor that runs
+/// threads (kernel/interrupts): an idle one takes the queue's head.
 pub fn kick(f: u64) -> u64 {
-    if sv(S_STARTED) == 0 {
-        return f
-    }
-    latency.sched_point(f, who(cur())) // px131: a chance to choose
-    let h = sv(S_HEAD) // #598
-    if h == 0 {
+    if sv(S_STARTED) == 0 || !smp.runs_here() {
         return f
     }
     let c = cur()
-    if c == IDLE {
-        put_field(IDLE, offset_of(Thread, frame), f)
+    point(f, c) // px131: a chance to choose
+    let h = eligible() // #598; px166: what this processor may take
+    // px166: a thread that must leave (`must_leave`), ended in place, is
+    // switched off below even with nothing to take.
+    if h == 0 && !must_leave(c) {
+        return f
+    }
+    if idle(c) {
+        save_frame(c, f)
         return run_next()
     }
     // px131: a thread a device's work woke (`wake_urgent`) runs now: the
     // interrupt landed where the tick could have preempted (it was taken,
     // so IF was set: ring 3, a kernel thread outside its locks), and the
     // running thread goes to the tail as `preempt` would send it.
-    if !urgent_waits(c) {
+    // px166: a thread another processor ended in place (DEAD) is switched
+    // off here, the RESCHED the departure rule sends, never resumed or queued.
+    if ended_in_place(c) || written_from_afar(c) {
+        save_frame(c, f)
+        return run_next()
+    }
+    // px166 (step 5a): a thread whose process was stopped while it ran here
+    // (`stop_proc`'s RESCHED) goes through `run_next`, which parks it.
+    if !urgent_waits(c) && field(field(c, offset_of(Thread, lead)), offset_of(Thread, stopped)) == 0 {
         return f
     }
     put_field(c, offset_of(Thread, frame), f)
@@ -1353,7 +1813,7 @@ pub fn start(pml4: u64) {
     clear_masks()
     put_sv(S_NETD, 0)
     put_sv(S_STARVE, 0)
-    put_sv(S_SLICE, timer.ticks())
+    put_slice(timer.ticks()) // px166: CPU 0's record's
     // px88: the bases the TSC's cycles are converted against.
     // # Safety: boot/fpu.S's RDTSC, which every x86-64 CPU has.
     let t0 = unsafe { pax_rdtsc() }
@@ -1361,8 +1821,9 @@ pub fn start(pml4: u64) {
     put_sv(S_NS0, if clock.started() { clock.now_ns() } else { 0 })
     put_sv(S_TICK0, timer.ticks())
     put_sv(S_MULT, 0)
-    put_sv(S_IN_TSC, t0)
+    put_in_tsc(t0) // px166: CPU 0's record's
     put_field(MAIN, offset_of(Thread, state), RUNNING)
+    put_slot_word(MAIN, W_CPU, 1) // px166: CPU 0 runs it
     put_field(MAIN, offset_of(Thread, id), 0)
     put_field(MAIN, offset_of(Thread, runs), 1)
     // px126: every page table the stacks and the areas will need (32
@@ -1413,10 +1874,110 @@ fn tables(pml4: u64, base: u64, n: u64) {
 /// for (px14), its slot kept as a ZOMBIE holding its pid and status.
 /// IF clear, in thread context or a system call (never on the dead
 /// thread's own stack: it is not the running one).
+fn old_at(i: u64) -> u64 {
+    // # Safety: i < OLD_MAX: inside boot/sched.S's pax_old_spaces.
+    unsafe { ((pax_old_spaces as u64 + i * 8) as *u64).read_volatile() }
+}
+
+fn put_old(i: u64, v: u64) {
+    // # Safety: as `old_at`.
+    unsafe { ((pax_old_spaces as u64 + i * 8) as *u64).write_volatile(v) }
+}
+
+/// px166 (step 5b): whether space `o` is in another processor's CR3; `all`
+/// (the boot check's argument alone) answers every space held. An argument,
+/// not a switch: nothing of it outlives the call that passes it.
+fn held(o: u64, all: bool) -> bool {
+    all || tlb.user_of(o) != 0
+}
+
+/// px166 (step 5b): every parked space no other processor's CR3 holds any
+/// more, freed. Every `reap`, and before every park.
+fn reap_olds() {
+    reap_olds_as(false)
+}
+
+fn reap_olds_as(all: bool) {
+    var i: u64 = 0
+    while i < OLD_MAX {
+        let o = old_at(i)
+        if o != 0 && !held(o, all) {
+            put_old(i, 0)
+            let _freed = paging.free_user(o)
+        }
+        i += 1
+    }
+}
+
+/// px166 (step 5b): exec's rendezvous. The space `old` an exec left is freed
+/// now if no other processor's CR3 holds it; otherwise (a sibling
+/// `end_others` ended in place still runs in it elsewhere, sent a RESCHED by
+/// `reach`) it is parked in pax_old_spaces for `reap`. Nothing waits, and
+/// nothing a program does can fill the table: after `reap_olds` every entry
+/// left is held by another processor's CR3, each processor's LOADED_CR3 is
+/// one PML4, and this processor's is the new space, so at most OLD_MAX - 1
+/// entries are held when a new one is parked. A full table is a kernel bug.
+fn leave_space(c: u64, old: u64) {
+    park(c, old, false)
+}
+
+fn park(c: u64, old: u64, all: bool) {
+    if !held(old, all) {
+        let _freed = paging.free_user(old)
+        return
+    }
+    reap_olds_as(all)
+    var i: u64 = 0
+    while i < OLD_MAX {
+        if old_at(i) == 0 {
+            put_old(i, old)
+            return
+        }
+        i += 1
+    }
+    panic.fail("sched: more parked spaces than other processors (a kernel bug), slot ", c)
+}
+
+/// px166 (step 5b): the boot's own check that the table parks more than one
+/// space at a time (one word a slot, the first form, could not): two fresh
+/// spaces parked as if another processor's CR3 held each (`park`'s `all`,
+/// passed here alone), then both freed by the real test once let go. One
+/// line, tests/mpx6-smp's SMP-PARK.
+pub fn park_selftest() {
+    let a = paging.new_space(sv(S_PML4))
+    let b = paging.new_space(sv(S_PML4))
+    if a == 0 || b == 0 {
+        log.line("sched: parked spaces: no frames for the check")
+        return
+    }
+    park(MAIN, a, true)
+    park(MAIN, b, true)
+    var held: u64 = 0
+    var i: u64 = 0
+    while i < OLD_MAX {
+        if old_at(i) == a || old_at(i) == b { held += 1 }
+        i += 1
+    }
+    reap_olds()
+    var left: u64 = 0
+    i = 0
+    while i < OLD_MAX {
+        if old_at(i) != 0 { left += 1 }
+        i += 1
+    }
+    log.put("sched: parked spaces: ")
+    log.dec(held as int)
+    log.put(" held parked at once, ")
+    log.dec(left as int)
+    log.put(" left once let go")
+    log.end()
+}
+
 fn reap() {
+    reap_olds() // px166 (step 5b)
     var s: u64 = FIRST
     while s < top() {
-        if s != cur() && field(s, offset_of(Thread, state)) == DEAD {
+        if s != cur() && field(s, offset_of(Thread, state)) == DEAD && departure(s) == 0 {
             if field(s, offset_of(Thread, stack_lo)) != 0 { // px26: a held leader's went at its own end
                 free_stack(s)
                 put_field(s, offset_of(Thread, stack_lo), 0)
@@ -1827,7 +2388,7 @@ fn end_others(l: u64, keep: u64, status: u64) {
     var t: u64 = FIRST
     while t < top() {
         let st = field(t, offset_of(Thread, state))
-        let held = trace_state.exit_pending(t) == 3 && tracer_of(keep) == 0 // px102: parked in EVENT_EXIT for its tracer
+        let held = (trace_state.exit_pending(t) == 3 || trace_state.exit_pending(t) == 4) && tracer_of(keep) == 0 // px102: parked in EVENT_EXIT for its tracer (px166: or owed it, running elsewhere)
         if t != keep && !held && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 {
             if st == READY {
                 unqueue(t)
@@ -1838,6 +2399,7 @@ fn end_others(l: u64, keep: u64, status: u64) {
             thread_gone()
             put_field(t, offset_of(Thread, state), DEAD)
             put_field(t, offset_of(Thread, rst), W_NONE)
+            reach(t) // px166 (step 5a): running on another processor, it is switched off now (`kick`)
             // px102: a traced non-leader reports its own death (ptrace(2):
             // "every tracee in its thread group reports its death"; at an
             // exec, "as if they exited via _exit(2) with exit code 0").
@@ -2466,6 +3028,23 @@ pub fn exec_alone() {
         put_field(c, offset_of(Thread, wstop), field(l, offset_of(Thread, wstop)))
         put_field(c, offset_of(Thread, wcont), field(l, offset_of(Thread, wcont)))
         put_field(c, offset_of(Thread, lead), c)
+        // px166: the other threads, ended in place (`end_others`), may still
+        // run on other processors and enter the kernel once more: their tick
+        // or RESCHED switches them off (`must_leave`), the door leaves a
+        // system call, and `account` charges their last slice to their
+        // leader's area, which `move_area` has just made the caller's. They
+        // lead from the caller from here on; read through the old leader,
+        // whose area is unmapped now, it was `no process area for slot`
+        // (tests/mpx6-smp's SMP-EXIT, an execve from a sibling). They run in
+        // the old space, not the caller's, so `departure` keeps the caller
+        // uncollected until each has left its processor (`follower_on`).
+        var t: u64 = FIRST
+        while t < top() {
+            if t != c && t != l && field(t, offset_of(Thread, state)) != FREE && field(t, offset_of(Thread, lead)) == l {
+                put_field(t, offset_of(Thread, lead), c)
+            }
+            t += 1
+        }
         // The old leader: no pid, no parent, no space; its stack (if it
         // still has one) and its slot go at the next reap.
         put_field(l, offset_of(Thread, pid), 0)
@@ -2508,7 +3087,7 @@ fn is_proc(s: u64) -> bool {
 /// thread left, before `reap` makes it a ZOMBIE.
 fn ended(s: u64) -> bool {
     let st = field(s, offset_of(Thread, state))
-    st == ZOMBIE || (st == DEAD && field(s, offset_of(Thread, zombie)) == 1 && field(s, offset_of(Thread, threads)) == 0)
+    st == ZOMBIE || (st == DEAD && field(s, offset_of(Thread, zombie)) == 1 && field(s, offset_of(Thread, threads)) == 0 && departure(s) == 0)
 }
 
 /// px25: the slot of process `pid`'s leader, SLOTS if no such process.
@@ -2649,7 +3228,7 @@ pub fn exec_current(cr3: u64, entry: u64, usp: u64, name: u64, len: u64) {
     unsafe { pax_wrmsr(FS_BASE, 0) }
     if old != 0 && owned == 1 {
         note_rss(proc_area(c), paging.user_pages(old)) // px88: the process's peak outlives its image
-        let _freed = paging.free_user(old)
+        leave_space(c, old) // px166 (step 5b): now, or parked for `reap` while another processor runs in it
     } else if old != 0 {
         // px88: a vfork child's exec. The space it leaves is its parent's,
         // and Linux counts that space's peak in the child (measured: a
@@ -2693,7 +3272,7 @@ fn threads_unreported(l: u64) -> bool {
     while t < top() {
         let st = field(t, offset_of(Thread, state))
         if t != l && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, zombie)) == 1 && (st == ZOMBIE || st == DEAD) { return true }
-        if t != l && field(t, offset_of(Thread, lead)) == l && trace_state.exit_pending(t) == 3 && tracer_of(t) != 0 && st != FREE && st != DEAD { return true } // parked in EVENT_EXIT
+        if t != l && field(t, offset_of(Thread, lead)) == l && (trace_state.exit_pending(t) == 3 || trace_state.exit_pending(t) == 4) && tracer_of(t) != 0 && st != FREE && st != DEAD { return true } // parked in EVENT_EXIT (px166: or owed it)
         t += 1
     }
     false
@@ -2800,6 +3379,7 @@ pub fn block_pipe_until(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_REWOUND } else { W_TIMED_REWOUND }) // px26
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -2814,6 +3394,7 @@ pub fn block_pipe_eintr(f: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, state), PIPE)
     put_field(c, offset_of(Thread, rst), W_TIMED_REWOUND)
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -2993,6 +3574,7 @@ pub fn wait_child(f: u64) -> u64 {
     put_field(c, offset_of(Thread, state), WAITING)
     put_field(c, offset_of(Thread, rst), W_REWOUND) // px26
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -3180,6 +3762,7 @@ pub fn futex_wait(f: u64, key: u64, bits: u64, wake: u64) -> u64 {
     put_field(c, offset_of(Thread, rst), if wake == 0 { W_FUTEX } else { W_TIMED })
     trace_finish_frame(c) // px102: a traced call's wait returns directly: its exit stop on resume
     wake_sleepers()
+    wake_if_signalled(c) // px166: a signal raised on its way here ends the wait now
     run_next()
 }
 
@@ -3409,23 +3992,62 @@ fn interrupt(t: u64) {
 /// to take which will run a handler or end the process is made ready.
 /// Called when a signal is raised, a mask changes or a thread ends.
 /// IF clear.
+/// px166 (step 5a): slot `t`, if it runs on another processor (its W_CPU),
+/// is sent a RESCHED so that processor enters the kernel now rather than at
+/// its next tick: its way back to ring 3 does the rest (`hand_back`'s
+/// `signal.on_return` delivers, parks or ends; `run_next` parks a thread of
+/// a stopped process; `kick` switches a thread ended in place off).
+fn reach(t: u64) {
+    let k = slot_word(t, W_CPU)
+    if k != 0 && k != percpu.index() + 1 {
+        smp.resched(k - 1)
+    }
+}
+
+/// px166: whether thread `t` of the process led by `l` has a pending
+/// signal that wakes it: its own or its process's (the process's only where
+/// `t` is that signal's taker), not blocked and not inert. `poke`'s test,
+/// and `wake_if_signalled`'s, the same one.
+fn signal_wakes(t: u64, l: u64) -> bool {
+    let m = field(t, offset_of(Thread, sigmask))
+    let own = field(t, offset_of(Thread, pend)) & !m
+    let grp = field(l, offset_of(Thread, gpend)) & !m
+    var sig: u64 = 1
+    while sig <= NSIG {
+        if (own & bit(sig) != 0 || (grp & bit(sig) != 0 && taker(l, sig) == t)) && !inert(l, sig) {
+            return true
+        }
+        sig += 1
+    }
+    false
+}
+
+/// px166: the running thread `c` has set itself to an interruptible wait
+/// (its state, its frame saved) and is about to switch away, under the
+/// kernel lock. A signal that wakes it may have been raised while it was
+/// on its way here from ring 3 on this processor and another processor
+/// held the lock: `poke` then found it RUNNING and only reached it (a
+/// RESCHED this processor takes after the wait has begun, to no effect),
+/// and the signal waited for whatever else would end the wait. So every
+/// such wait asks itself, as poke would: that signal ends it now (READY,
+/// queued), as one raised an instant later would. tests/mpx6-smp.d's
+/// WAIT-CENSUS holds every interruptible wait to asking, before run_next.
+fn wake_if_signalled(c: u64) {
+    if field(c, offset_of(Thread, tgid)) != 0 && signal_wakes(c, field(c, offset_of(Thread, lead))) {
+        interrupt(c)
+    }
+}
+
 fn poke(l: u64) {
     var t: u64 = FIRST
     while t < top() {
-        if field(t, offset_of(Thread, lead)) == l && takes(t) && field(t, offset_of(Thread, state)) != READY && field(t, offset_of(Thread, state)) != RUNNING {
+        // px166: a RUNNING thread is looked at too: on another processor it is reached (`reach`)
+        if field(t, offset_of(Thread, lead)) == l && takes(t) && field(t, offset_of(Thread, state)) != READY {
             // Any of its deliverable signals that is not inert wakes it.
-            let m = field(t, offset_of(Thread, sigmask))
-            let own = field(t, offset_of(Thread, pend)) & !m
-            let grp = field(l, offset_of(Thread, gpend)) & !m
-            var sig: u64 = 1
-            var hit = false
-            while sig <= NSIG && !hit {
-                if (own & bit(sig) != 0 || (grp & bit(sig) != 0 && taker(l, sig) == t)) && !inert(l, sig) {
-                    hit = true
-                }
-                sig += 1
-            }
-            if hit {
+            let hit = signal_wakes(t, l)
+            if hit && field(t, offset_of(Thread, state)) == RUNNING {
+                reach(t)
+            } else if hit {
                 interrupt(t)
             }
         }
@@ -3449,6 +4071,7 @@ pub fn raise_thread(t: u64, sig: u64, info: u64) {
     if inert(l, sig) && field(t, offset_of(Thread, sigmask)) & bit(sig) == 0 {
         return
     }
+    count_raise(field(t, offset_of(Thread, pend)), sig) // px166
     put_field(t, offset_of(Thread, pend), field(t, offset_of(Thread, pend)) | bit(sig))
     put_info(t, 0, sig, info)
     poke(l)
@@ -3467,6 +4090,7 @@ pub fn raise_group(l: u64, sig: u64, info: u64) {
     if inert(l, sig) && taker(l, sig) != SLOTS {
         return
     }
+    count_raise(field(l, offset_of(Thread, gpend)), sig) // px166
     put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) | bit(sig))
     put_info(l, 1, sig, info)
     poke(l)
@@ -3959,6 +4583,14 @@ fn stop_proc(l: u64, sig: u64) {
     put_field(l, offset_of(Thread, wstop), sig)
     put_field(l, offset_of(Thread, wcont), 0)
     tell_parent(l, I_CHLD_STOPPED, sig)
+    // px166 (step 5a): a thread of it running on another processor parks now
+    var t: u64 = FIRST
+    while t < top() {
+        if field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, state)) == RUNNING {
+            reach(t)
+        }
+        t += 1
+    }
 }
 
 /// Every parked thread of the process led by `l` made ready.
@@ -4107,10 +4739,13 @@ pub fn suspend_current(f: u64, mask: u64) -> u64 {
     unsafe { ((f + W_RAX * 8) as *u64).write_volatile(0xfffffffffffffffc) } // -EINTR
     put_field(c, offset_of(Thread, ssold), field(c, offset_of(Thread, sigmask)))
     put_field(c, offset_of(Thread, sigmask), mask & !0x40100)
+    // px166: as every mask change: a process signal the new mask blocks, if this
+    // thread was its taker, is another thread's now, and that thread may be waiting.
+    masks_changed()
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, state), SUSPEND)
     put_field(c, offset_of(Thread, rst), W_SUSPEND)
-    poke(field(c, offset_of(Thread, lead))) // a signal already pending and now unblocked ends it at once
+    wake_if_signalled(c) // a signal already pending and now unblocked ends it at once (px166: the one test every wait asks)
     wake_sleepers()
     run_next()
 }
@@ -4133,7 +4768,7 @@ pub fn resuspend(f: u64) -> u64 {
     let c = cur()
     put_field(c, offset_of(Thread, frame), f)
     put_field(c, offset_of(Thread, state), SUSPEND)
-    poke(field(c, offset_of(Thread, lead))) // a signal deliverable now ends it at once
+    wake_if_signalled(c) // a signal already pending and now unblocked ends it at once (px166: the one test every wait asks)
     wake_sleepers()
     run_next()
 }
@@ -4170,6 +4805,8 @@ pub fn take_signal() -> (u64, u64) {
     if sig == 0 {
         return (0, 0)
     }
+    // # Safety: as `signal_counts`; a system call or interrupt, under the kernel lock.
+    unsafe { sig_taken += 1 } // px166
     if g == 1 {
         put_field(l, offset_of(Thread, gpend), field(l, offset_of(Thread, gpend)) & !bit(sig))
         return (sig, info_of(l, 1, sig))
@@ -4244,9 +4881,23 @@ pub fn born(a: u64) -> u64 {
 /// neither when it has ended. Kernel threads (no process) count nothing.
 fn account(from: u64, to: u64) {
     let now = tsc()
-    let was = sv(S_IN_TSC)
-    put_sv(S_IN_TSC, now)
-    if field(from, offset_of(Thread, tgid)) != 0 {
+    let was = in_tsc()
+    put_in_tsc(now)
+    // px166: an application processor's idle loop is no slot: nothing is
+    // charged to it, and nothing is reopened for it.
+    if from != percpu.IDLE_SLOT && field(from, offset_of(Thread, tgid)) != 0 {
+        // px166: the run is charged to the thread's own process, whose leader
+        // its lead names by slot. A lead whose tgid is not the thread's (that
+        // slot reaped since, and cleared or given to a new process) would
+        // charge another process's area, or none: named here, whatever the
+        // slot's area now holds. Every write of the two keeps them equal
+        // (clone, fork, exec's re-point and old leader, `clear`), and
+        // `departure` keeps a leader until its ended threads have left; one
+        // load and one compare a switch, under the lock.
+        let l = field(from, offset_of(Thread, lead))
+        if field(l, offset_of(Thread, tgid)) != field(from, offset_of(Thread, tgid)) {
+            panic.fail("sched: a thread's leader is another process's, slot", from)
+        }
         let a = proc_area(from)
         if was != 0 && now > was {
             put_field(from, offset_of(Thread, cpu), field(from, offset_of(Thread, cpu)) + (now - was))
@@ -4271,7 +4922,7 @@ fn account(from: u64, to: u64) {
             }
         }
     }
-    if to != from && field(to, offset_of(Thread, sysin)) == 1 {
+    if to != from && to != percpu.IDLE_SLOT && field(to, offset_of(Thread, sysin)) == 1 {
         put_field(to, offset_of(Thread, sysin), now)
     }
 }
@@ -4392,7 +5043,7 @@ pub fn usage(which: u64) -> (u64, u64, u64, u64, u64) {
         return (ru_get(a, RU_KIDS + RU_CPU), ru_get(a, RU_KIDS + RU_SYS), ru_get(a, RU_KIDS + RU_PEAK), ru_get(a, RU_KIDS + RU_VCS), ru_get(a, RU_KIDS + RU_ICS))
     }
     let now = tsc()
-    let was = sv(S_IN_TSC)
+    let was = in_tsc()
     let run = if was != 0 && now > was { now - was } else { 0 }
     let si = field(c, offset_of(Thread, sysin))
     let open = if si > 1 && now > si { now - si } else { 0 }
@@ -4758,6 +5409,9 @@ pub fn trace_bind(s: u64, seized: bool, options: u64) {
 pub fn trace_interrupt(s: u64) {
     trace_state.set_control(s, trace_state.control(s) | trace_state.INTERRUPT)
     interrupt(s) // rewound and direct-return waits resume at on_return
+    // px166: running on another processor, it enters the kernel now and
+    // stops at on_return, not at that processor's next tick (SMP-TRACE-INT)
+    reach(s)
 }
 
 pub fn trace_detach(s: u64) {
@@ -4784,6 +5438,14 @@ pub fn trace_detach(s: u64) {
 /// its message the group's status; resumed, it ends with that status.
 /// Only a traced, stopping caller does this (it holds the group's end
 /// until its tracer resumes it). IF clear.
+/// px166: a thread running on another processor (its W_CPU) is not parked
+/// from here: its frame is that processor's, live, and its state its own
+/// to write (the next system call it makes, or its tick, would overwrite a
+/// TRACED written here, and its tracer would wait for ever: tests/mpx6-smp's
+/// SMP-TRACE-EXIT, mpx5-trace's group-exit-event at four processors). It is
+/// owed the stop instead (exit_pending 4) and sent a RESCHED; it parks
+/// itself with its own frame at its next kernel entry or way back to ring 3
+/// (`take_exit_stop`: kernel/interrupts' door, kernel/signal's `on_return`).
 pub fn trace_group_exit(status: u64) {
     let c = cur()
     let l = field(c, offset_of(Thread, lead))
@@ -4791,15 +5453,46 @@ pub fn trace_group_exit(status: u64) {
     while t < top() {
         let st = field(t, offset_of(Thread, state))
         if t != c && field(t, offset_of(Thread, lead)) == l && field(t, offset_of(Thread, tgid)) != 0 && st != FREE && st != DEAD && st != ZOMBIE && st != HELD && tracer_of(t) != 0 && trace_state.options(t) & 0x40 != 0 && trace_state.exit_pending(t) == 0 {
-            trace_state.set_exit_pending(t, 3)
             trace_state.set_exit_status(t, status)
             trace_state.set_event(t, status)
             trace_state.set_stop_kind(t, 4)
             trace_state.set_control(t, trace_state.control(t) & !(trace_state.FAULT | trace_state.INTERRUPT))
-            let _parked = trace_park(t, 0, 0x605, 0x605, field(t, offset_of(Thread, pid)) | (real_uid(l) << 32))
+            if slot_word(t, W_CPU) != 0 {
+                trace_state.set_exit_pending(t, 4) // px166: owed, taken where it runs
+                reach(t)
+            } else {
+                trace_state.set_exit_pending(t, 3)
+                let _parked = trace_park(t, 0, 0x605, 0x605, field(t, offset_of(Thread, pid)) | (real_uid(l) << 32))
+            }
         }
         t += 1
     }
+}
+
+/// px166: whether the running thread is owed a group exit's
+/// PTRACE_EVENT_EXIT (`trace_group_exit`, exit_pending 4). The lock's
+/// holder: kernel/interrupts' door and kernel/signal's `on_return`.
+pub fn owes_exit_stop() -> bool {
+    let c = cur()
+    !idle(c) && trace_state.exit_pending(c) == 4 && field(c, offset_of(Thread, state)) == RUNNING
+}
+
+/// px166: the running thread takes the PTRACE_EVENT_EXIT it is owed, with
+/// its own frame `f` (a system call's or a fault's at the door, a ring-3
+/// frame at `on_return`): parked as `trace_group_exit` parks a thread that
+/// runs nowhere (exit_pending 3, the same status, code and address); the
+/// frame of what this processor runs next. Its tracer gone, it is owed
+/// nothing and goes on (the group's end ends it).
+pub fn take_exit_stop(f: u64) -> u64 {
+    let c = cur()
+    let l = field(c, offset_of(Thread, lead))
+    trace_state.set_exit_pending(c, 3)
+    if !trace_park(c, f, 0x605, 0x605, field(c, offset_of(Thread, pid)) | (real_uid(l) << 32)) {
+        trace_state.set_exit_pending(c, 0)
+        return f
+    }
+    wake_sleepers()
+    run_next()
 }
 
 /// A thread resumed from a group exit's PTRACE_EVENT_EXIT ends now (it is

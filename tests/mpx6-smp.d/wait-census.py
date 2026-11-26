@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""WAIT-CENSUS: every interruptible wait a process thread can enter in kernel/sched asks, once its state is set and
+before it switches away, whether a signal that wakes it is already pending (`wake_if_signalled`), so a signal raised
+while the thread was on its way to the wait from ring 3 on its own processor, with another holding the kernel lock,
+cannot sleep with it: `poke` found that thread RUNNING and only reached it (a RESCHED its processor then takes after
+the wait has begun), and the signal waited for whatever else ended the wait (tests/mpx6-smp's sleeper rounds, which
+lost one to three of ten at 2, 4 and 16 processors until each wait asked).
+
+  python3 -I tests/mpx6-smp.d/wait-census.py [ROOT]        the check (ROOT the tree, default .)
+  python3 -I tests/mpx6-smp.d/wait-census.py --selftest    its own proof: each planted wait adds a red to the tree's
+                                                           own (the tree's state is the check's to say, not the
+                                                           proof's: a planted tree's suite still boots, red)
+
+What is held: in every kernel/*.lu file, each `put_field(<slot>, offset_of(Thread, state), <S>)` with S an
+interruptible wait (SLEEPING, INPUT, PIPE, WAITING, FUTEX, SUSPEND) is followed, in the same function and before
+its `run_next()`, by `wake_if_signalled(<slot>)`; kernel/sched defines `wake_if_signalled` and it asks
+`signal_wakes`, the test `poke` applies. Exempt by name, each with its reason: kernel/sched's `sleep` (a kernel
+thread's sleep: tgid 0, no signals).
+
+MASK-CENSUS, beside it: a thread's own question covers only itself, and a change of a thread's signal mask can move
+the taker of a process signal it now blocks to another thread, which may be waiting (`taker`: the leader if it has
+the signal unblocked, else the lowest-numbered thread that has). rt_sigsuspend's mask did that with no one offering
+the signal to the new taker once its poke of the group became a question of its own: a process signal raised while
+the caller was on its way in (the window above) slept with a sibling until that sibling's wait ended by itself. What
+is held: in every kernel/*.lu file, each write of a thread's mask, `put_field(<slot>, offset_of(Thread, sigmask), ...)`
+or a call of kernel/sched's `set_self_sigmask`, is followed in the same function, and before its `run_next()`, by
+`masks_changed()` or `poke(`; kernel/sched's `masks_changed` pokes the running thread's group. Exempt by name, each
+with its reason: kernel/sched's `clear` (a slot made free: no thread), `clone_current` (a new process's only thread:
+its slot was cleared, nothing is pending for it), `clone_thread` (a new thread with its creator's mask: a process
+signal's taker can move only to it, and it is not waiting: it takes the signal on its first way to ring 3) and
+`set_self_sigmask` (the write its callers make: each call is held).
+"""
+import pathlib
+import re
+import shutil
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+
+WAITS = ('SLEEPING', 'INPUT', 'PIPE', 'WAITING', 'FUTEX', 'SUSPEND')
+EXEMPT = {('sched', 'sleep'): "a kernel thread's sleep: tgid 0, no signals"}
+WRITE = re.compile(r'put_field\((\w+), offset_of\(Thread, state\), (' + '|'.join(WAITS) + r')\)')
+FN = re.compile(r'^(?:pub )?fn (\w+)\(', re.M)
+MASK_EXEMPT = {
+    ('sched', 'clear'): 'a slot made free: no thread',
+    ('sched', 'clone_current'): "a new process's only thread: its slot was cleared, nothing is pending for it",
+    ('sched', 'clone_thread'): "a new thread with its creator's mask: a process signal's taker can move only to it, "
+                               'and it is not waiting',
+    ('sched', 'set_self_sigmask'): 'the write its callers make: each call is held',
+}
+MASK = re.compile(r'put_field\(([^,]+), offset_of\(Thread, sigmask\),|\bset_self_sigmask\(')
+OFFER = re.compile(r'\bmasks_changed\(\)|\bpoke\(')
+
+
+def functions(src):
+    """(name, start offset, end offset) of each top-level fn: from its line to the next top-level item."""
+    starts = [(m[1], m.start()) for m in FN.finditer(src)]
+    out = []
+    for k, (name, a) in enumerate(starts):
+        b = starts[k + 1][1] if k + 1 < len(starts) else len(src)
+        out.append((name, a, b))
+    return out
+
+
+def check(root):
+    root = pathlib.Path(root)
+    why, seen = [], []
+    for p in sorted((root / 'kernel').rglob('*.lu')):
+        src = p.read_text()
+        mod = p.parent.name if p.parent.name != 'kernel' else p.stem
+        for name, a, b in functions(src):
+            body = src[a:b]
+            for m in WRITE.finditer(body):
+                slot, state = m[1], m[2]
+                where = f'{p.relative_to(root)} {name} ({state})'
+                if (mod, name) in EXEMPT:
+                    seen.append(f'{where} exempt: {EXEMPT[(mod, name)]}')
+                    continue
+                rest = body[m.end():]
+                rn = rest.find('run_next()')
+                ask = rest.find(f'wake_if_signalled({slot})')
+                if ask < 0 or (rn >= 0 and ask > rn):
+                    why.append(f'{where}: no wake_if_signalled({slot}) between the state write and run_next()')
+                else:
+                    seen.append(where)
+    sched = (root / 'kernel/sched/sched.lu').read_text() if (root / 'kernel/sched/sched.lu').exists() else ''
+    d = re.search(r'^fn wake_if_signalled\(.*?^\}', sched, re.M | re.S)
+    if not d:
+        why.append('kernel/sched defines no wake_if_signalled')
+    elif 'signal_wakes(' not in d[0]:
+        why.append("kernel/sched's wake_if_signalled does not ask signal_wakes")
+    if not re.search(r'^fn signal_wakes\(', sched, re.M) or 'signal_wakes(' not in (re.search(r'^fn poke\(.*?^\}', sched, re.M | re.S) or [''])[0]:
+        why.append("kernel/sched's poke does not ask signal_wakes (one test for both)")
+    return why, seen
+
+
+def mask_check(root):
+    root = pathlib.Path(root)
+    why, seen = [], []
+    for p in sorted((root / 'kernel').rglob('*.lu')):
+        src = p.read_text()
+        mod = p.parent.name if p.parent.name != 'kernel' else p.stem
+        for name, a, b in functions(src):
+            body = src[a:b]
+            for m in MASK.finditer(body):
+                if body[:m.start()].rstrip().endswith('fn'):
+                    continue  # a definition's own name
+                where = f'{p.relative_to(root)} {name}'
+                if (mod, name) in MASK_EXEMPT:
+                    seen.append(f'{where} exempt: {MASK_EXEMPT[(mod, name)]}')
+                    continue
+                rest = body[m.end():]
+                rn = rest.find('run_next()')
+                offer = OFFER.search(rest)
+                if not offer or (rn >= 0 and offer.start() > rn):
+                    why.append(f'{where}: a mask write with no masks_changed() or poke( after it before run_next()')
+                else:
+                    seen.append(where)
+    sched = (root / 'kernel/sched/sched.lu').read_text() if (root / 'kernel/sched/sched.lu').exists() else ''
+    d = re.search(r'^pub fn masks_changed\(.*?^\}', sched, re.M | re.S)
+    if not d or 'poke(' not in d[0]:
+        why.append("kernel/sched's masks_changed does not poke the running thread's group")
+    return why, seen
+
+
+def main(argv):
+    if argv[1:2] == ['--selftest']:
+        return selftest()
+    root = argv[1] if len(argv) > 1 else '.'
+    rc = 0
+    why, seen = check(root)
+    if why:
+        for w in why:
+            print(f'FAIL WAIT-CENSUS {w}')
+        rc = 1
+    else:
+        waits = [s for s in seen if 'exempt' not in s]
+        print(f'PASS WAIT-CENSUS {len(waits)} interruptible waits ask for a pending signal before they switch away: '
+              + '; '.join(s.split(' ', 1)[1] for s in waits) + f' ({len(seen) - len(waits)} exempt)')
+    why, seen = mask_check(root)
+    if why:
+        for w in why:
+            print(f'FAIL MASK-CENSUS {w}')
+        rc = 1
+    else:
+        writes = [s for s in seen if 'exempt' not in s]
+        print(f"PASS MASK-CENSUS {len(writes)} mask changes offer the process's pending signals to its other threads: "
+              + '; '.join(s.split(' ', 1)[1] for s in writes) + f' ({len(seen) - len(writes)} exempt)')
+    return rc
+
+
+def selftest():
+    here = pathlib.Path(__file__).resolve().parent.parent.parent
+    bad = 0
+    cases = [
+        ('a ninth wait without the question',
+         lambda s: s.replace('\nfn signal_wakes(', '\npub fn planted_wait(f: u64) -> u64 {\n    let c = cur()\n'
+                             '    put_field(c, offset_of(Thread, state), WAITING)\n    run_next()\n}\n\nfn signal_wakes(', 1)),
+        ('a wait that asks after it has switched away',
+         lambda s: s.replace('\nfn signal_wakes(', '\npub fn planted_late(f: u64) -> u64 {\n    let c = cur()\n'
+                             '    put_field(c, offset_of(Thread, state), FUTEX)\n    let r = run_next()\n'
+                             '    wake_if_signalled(c)\n    r\n}\n\nfn signal_wakes(', 1)),
+        ('wake_if_signalled that does not ask signal_wakes',
+         lambda s: re.sub(r'(^fn wake_if_signalled\(.*?^\})', lambda m: m[1].replace('signal_wakes(', 'takes_any('), s,
+                          count=1, flags=re.M | re.S)),
+        ('a mask write that offers the pending signals to no one',
+         lambda s: s.replace('\nfn signal_wakes(', '\npub fn planted_mask(m: u64) {\n'
+                             '    put_field(cur(), offset_of(Thread, sigmask), m)\n}\n\nfn signal_wakes(', 1)),
+        ('a mask change offered after it has switched away',
+         lambda s: s.replace('\nfn signal_wakes(', '\npub fn planted_mask_late(f: u64) -> u64 {\n    let c = cur()\n'
+                             '    put_field(c, offset_of(Thread, sigmask), 0)\n    let r = run_next()\n'
+                             '    masks_changed()\n    r\n}\n\nfn signal_wakes(', 1)),
+        ('masks_changed that pokes no one',
+         lambda s: re.sub(r'(^pub fn masks_changed\(.*?^\})', lambda m: m[1].replace('poke(', 'reach(', 1), s,
+                          count=1, flags=re.M | re.S)),
+    ]
+    base = set(check(here)[0] + mask_check(here)[0])
+    print(f'INFO WAIT-CENSUS-SELFTEST the tree as it is: {"green" if not base else f"{len(base)} red (the check says which)"}')
+    for name, plant in cases:
+        with tempfile.TemporaryDirectory() as td:
+            t = pathlib.Path(td)
+            shutil.copytree(here / 'kernel', t / 'kernel')
+            p = t / 'kernel/sched/sched.lu'
+            s = p.read_text()
+            s2 = plant(s)
+            if s2 == s:
+                print(f'FAIL WAIT-CENSUS-SELFTEST {name}: the plant did not apply')
+                bad += 1
+                continue
+            p.write_text(s2)
+            new = [w for w in check(t)[0] + mask_check(t)[0] if w not in base]
+            print(f'{"PASS" if new else "FAIL"} WAIT-CENSUS-SELFTEST {name}: {new[0] if new else "no red the tree lacks"}')
+            bad += 0 if new else 1
+    return 1 if bad else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

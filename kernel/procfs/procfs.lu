@@ -29,8 +29,11 @@
 //!   TracerPid, Ngid, Kthread, VmLck, VmPin, RssFile, RssShmem, VmLib,
 //!   VmSwap, HugetlbPages, CoreDumping, the pending sets, NoNewPrivs,
 //!   Seccomp and the context
-//!   switches; NSpgid and NSsid 1; VmStk 132 kB and VmExe 0 kB; one CPU
-//!   (`Cpus_allowed: 1`, `Cpus_allowed_list: 0`) and one memory node.
+//!   switches; NSpgid and NSsid 1; VmStk 132 kB and VmExe 0 kB; the
+//!   processors that run threads (px166: `Cpus_allowed` the
+//!   mask in hex, as wide as the started processors need and in groups of
+//!   eight digits from the right, `Cpus_allowed_list` as `online`; `1` and
+//!   `0` with one processor) and one memory node.
 //!   The capability sets (px39, ruling #75 R9): PAX keeps none — a
 //!   process is root by its ids, not by capability — and prints what
 //!   Linux prints for a process with the same ids (kernel/cred's `cap`).
@@ -48,8 +51,9 @@
 //!   controller whose file lobo reads (Linux's lists every controller
 //!   the hierarchy has; PAX has none, and says the one it answers for).
 //! - `/sys/fs/cgroup/cpu.max`: `max 100000` (no limit, `cgroups(7)`).
-//! - `/sys/devices/system/cpu/online`: `0` (one CPU, `sysfs(5)`'s list
-//!   format).
+//! - `/sys/devices/system/cpu/online`: the processors that run threads,
+//!   in `sysfs(5)`'s list format (`0`, `0-3`, `0-1,3`; px166: kernel/smp's
+//!   `runners_mask`, `0` with one processor).
 //!
 //! - px25: `/proc/<pid>/status` for every process not yet reaped, and
 //!   `/proc` lists their numbers after its fixed names (Linux's order):
@@ -125,6 +129,7 @@ use bootmark
 use cred
 use cpus
 use frames
+use heap
 use kmsg
 use latency
 use paging
@@ -1280,21 +1285,31 @@ fn cmdline(base: u64) -> u64 {
 
 /// Available firmware processors are distinct from the one active processor.
 /// px161: then the processors that entered PAX (`started`) and those parked
-/// idle (`idle`), and a line a processor, by kernel/smp's index:
-///   cpu 0 apic A boot current pid P|kernel ticks T nmis N
+/// idle (`idle`); px166: whether the heap was started (`heap-started 0|1`,
+/// kernel/heap's `is_up`), the signal counts (`signals set S merged M taken
+/// T slept-with-one-pending P`); and a line a processor, by kernel/smp's index:
+///   cpu 0 apic A boot current pid P|kernel|idle ticks T user U resched R kthreads K tlb S nmis N
+///   cpu I apic A runs current pid P|kernel|idle ticks T user U resched R kthreads K tlb S wakes W nmis N
 ///   cpu I apic A idle current idle ticks T wakes W nmis N
 ///   cpu I apic A stopped cause C rip 0x<R>   (kernel/percpu's `stop`)
 ///   cpu I apic A never entered               (released, never idle)
 ///   cpu I apic A parked                      (`nosmp`, past 64, no memory)
-/// `active` stays the processors that run threads: CPU 0 alone in stage 1.
-/// The lines stop short of the frame's end (`more N` says how many were
-/// left out).
+/// px166: `active` is the processors that run threads (kernel/smp's
+/// `active`: every started processor, or CPU 0 and those under
+/// `pax.cpus=N`), each on a `boot` or
+/// `runs` line: what it runs (`pid` the thread's id, gettid's; `kernel` a
+/// kernel thread; `idle` its idle context), its ticks that landed in ring
+/// 3 (`user`), the RESCHEDs it took and its switches to a kernel thread
+/// (`kthreads`: CPU 0 alone runs them, kernel/sched), the shootdowns it
+/// answered (`tlb`, kernel/tlb); one past the cap keeps stage 1's
+/// `idle` line. The lines stop short of the frame's end (`more N` says how
+/// many were left out).
 fn paxcpus(base: u64) -> u64 {
     var n = put_s(base, 0, "available ")
     if cpus.valid() { n = put_dec(base, n, cpus.available()) }
     else { n = put_s(base, n, "unknown") }
     n = put_s(base, n, "\nactive ")
-    n = put_dec(base, n, cpus.active())
+    n = put_dec(base, n, smp.active())
     if cpus.valid() {
         n = put_s(base, n, "\nsource ACPI MADT\nonline-capable ")
         n = put_dec(base, n, cpus.online_capable())
@@ -1308,25 +1323,59 @@ fn paxcpus(base: u64) -> u64 {
     n = put_dec(base, n, smp.started())
     n = put_s(base, n, "\nidle ")
     n = put_dec(base, n, smp.idle_count())
+    // px166: whether the kernel's heap was started. The console kernel starts
+    // none, so the runtime can allocate nothing on any processor, locked or
+    // not, and an allocation panics by name (tests/mpx6-smp's SMP-NOHEAP).
+    n = put_s(base, n, "\nheap-started ")
+    n = put_dec(base, n, if heap.is_up() { 1 } else { 0 })
+    // px166: the signal counts (kernel/sched's `signal_counts`), for
+    // tests/mpx6-smp's sleeper: raises that set a pending bit, raises merged
+    // into a signal already pending, signals taken, and sleeps entered with
+    // a signal the sleeper would take pending.
+    let (ss, sm, st, sp) = sched.signal_counts()
+    n = put_s(base, n, "\nsignals set ")
+    n = put_dec(base, n, ss)
+    n = put_s(base, n, " merged ")
+    n = put_dec(base, n, sm)
+    n = put_s(base, n, " taken ")
+    n = put_dec(base, n, st)
+    n = put_s(base, n, " slept-with-one-pending ")
+    n = put_dec(base, n, sp)
     n = put_b(base, n, 10)
     let total = smp.total()
     var i: u64 = 0
-    while i < total && n < PAGE - 128 {
+    while i < total && n < PAGE - 160 {
         n = put_s(base, n, "cpu ")
         n = put_dec(base, n, i)
         n = put_s(base, n, " apic ")
         n = put_dec(base, n, smp.apic_of(i))
         let r = smp.record(i)
-        if i == 0 {
-            let pid = sched.slot_pid(percpu.get(r, percpu.CURRENT))
-            if pid == 0 {
-                n = put_s(base, n, " boot current kernel")
+        if i == 0 || (r != 0 && smp.runs(i)) {
+            n = put_s(base, n, if i == 0 { " boot current " } else { " runs current " })
+            let c = percpu.get(r, percpu.CURRENT)
+            let pid = if sched.idle_context(c) { 0 } else { sched.slot_pid(c) }
+            if sched.idle_context(c) {
+                n = put_s(base, n, "idle")
+            } else if pid == 0 {
+                n = put_s(base, n, "kernel")
             } else {
-                n = put_s(base, n, " boot current pid ")
+                n = put_s(base, n, "pid ")
                 n = put_dec(base, n, pid)
             }
             n = put_s(base, n, " ticks ")
-            n = put_dec(base, n, smp.boot_ticks())
+            n = put_dec(base, n, if i == 0 { smp.boot_ticks() } else { percpu.get(r, percpu.TICKS) })
+            n = put_s(base, n, " user ")
+            n = put_dec(base, n, percpu.get(r, percpu.USER))
+            n = put_s(base, n, " resched ")
+            n = put_dec(base, n, percpu.get(r, percpu.RESCHED))
+            n = put_s(base, n, " kthreads ")
+            n = put_dec(base, n, percpu.get(r, percpu.KTHREADS))
+            n = put_s(base, n, " tlb ")
+            n = put_dec(base, n, percpu.get(r, percpu.TLB))
+            if i != 0 {
+                n = put_s(base, n, " wakes ")
+                n = put_dec(base, n, percpu.get(r, percpu.WAKES))
+            }
         } else if r == 0 {
             n = put_s(base, n, " parked")
         } else {
@@ -2125,6 +2174,59 @@ fn put_hex16(base: u64, at: u64, v: u64) -> u64 {
     k
 }
 
+/// px166: processor mask `m` in sysfs(5)'s list format: its runs of set bits,
+/// `a` or `a-b`, comma-separated (`0-1,3`).
+fn put_cpu_list(base: u64, at: u64, m: u64) -> u64 {
+    var k = at
+    var first = true
+    var i: u64 = 0
+    while i < 64 {
+        if (m >> i) & 1 == 1 {
+            var j = i
+            while j + 1 < 64 && (m >> (j + 1)) & 1 == 1 {
+                j += 1
+            }
+            if !first {
+                k = put_b(base, k, 44)
+            }
+            k = put_dec(base, k, i)
+            if j > i {
+                k = put_b(base, k, 45)
+                k = put_dec(base, k, j)
+            }
+            first = false
+            i = j + 1
+        } else {
+            i += 1
+        }
+    }
+    k
+}
+
+/// px166: processor mask `m` as proc_pid_status(5)'s `Cpus_allowed`: hex,
+/// as many digits as `n` processors need (one at least), in groups of eight
+/// from the right, a comma between groups.
+fn put_cpu_mask(base: u64, at: u64, m: u64, n: u64) -> u64 {
+    var k = at
+    var digits = (n + 3) / 4
+    if digits == 0 {
+        digits = 1
+    }
+    if digits > 16 {
+        digits = 16
+    }
+    var d = digits
+    while d > 0 {
+        d -= 1
+        let x = (m >> (d * 4)) & 0xf
+        k = put_b(base, k, if x < 10 { 48 + x } else { 87 + x })
+        if d > 0 && d % 8 == 0 {
+            k = put_b(base, k, 44)
+        }
+    }
+    k
+}
+
 /// A memory line: `<name>:\t<kB, eight wide> kB\n`, Linux's form.
 fn put_kb(base: u64, at: u64, label: str, kb: u64) -> u64 {
     var k = put_s(base, at, label)
@@ -2299,7 +2401,11 @@ fn status(base: u64, s: u64, pid0: u64, area: u64, umask: u64, fds: u64, ts: u64
     k = put_field(base, k, "Seccomp_filters", 0)
     k = put_s(base, k, "Speculation_Store_Bypass:\tunknown\n")
     k = put_s(base, k, "SpeculationIndirectBranch:\tunknown\n")
-    k = put_s(base, k, "Cpus_allowed:\t1\nCpus_allowed_list:\t0\n")
+    k = put_s(base, k, "Cpus_allowed:\t")
+    k = put_cpu_mask(base, k, smp.runners_mask(), smp.started())
+    k = put_s(base, k, "\nCpus_allowed_list:\t")
+    k = put_cpu_list(base, k, smp.runners_mask())
+    k = put_b(base, k, 10)
     k = put_s(base, k, "Mems_allowed:\t1\nMems_allowed_list:\t0\n")
     k = put_field(base, k, "voluntary_ctxt_switches", 0)
     put_field(base, k, "nonvoluntary_ctxt_switches", 0)
@@ -2592,6 +2698,9 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = put_s(base, 0, "cpu\n")
     } else if g == G_CPUMAX {
         n = put_s(base, 0, "max 100000\n")
+    } else if g == G_ONLINE {
+        n = put_cpu_list(base, 0, smp.runners_mask()) // px166
+        n = put_b(base, n, 10)
     } else {
         n = put_s(base, 0, "0\n")
     }

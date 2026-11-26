@@ -1,0 +1,287 @@
+#!/usr/bin/env bash
+# tests/mpx6-smp — SMP stage 2: user code on every processor under one kernel lock.
+#
+#   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
+#   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
+#    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
+#    SMP_KINDS='rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share' (or commas) the boots
+#    run, every kind by default, fewer for a plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
+#    SMP_TRACE_COUNTS='1 2 4' (or commas) the trace kind's processor counts, SMP_TRACE_BOOTS=1 its boots at each;
+#    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
+#    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
+#    boots' logs still under PAX_BUILD)
+#
+# The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green), the
+# harness's processor knob (knob-selftest.sh: PAX_SMP through tools/qemu-run and tools/tour) and the
+# entry path's frame offsets (frame-layout.py, FRAME-LAYOUT, with its own proof) and the waits that ask for a pending
+# signal (wait-census.py, WAIT-CENSUS, with its own proof), and every change of a thread's signal mask
+# offers the process's pending signals to its other threads (MASK-CENSUS, the same script). Then per
+# tier: kmain_console with tests/mpx6-smp.d/probe.c as its only command, booted under each firmware:
+#   - at each of SMP_COUNTS processors, the default kind: SMP-ACTIVE, SMP-RUN, SMP-TLB, SMP-SIGNAL,
+#     SMP-EXIT, SMP-WAIT;
+#   - SMP-LOCK's stress at 4, SMP_STRESS_BOOTS boots a tier, the firmwares taken in turn;
+#   - SMP-END at 4: root's reboot(2) for a halt (the monitor's register dumps after it, three, with the
+#     machine running between), a power-off and a restart (QEMU's own end, its status read);
+#   - SMP-NOSMP (`nosmp` at 4, dumps), SMP-ONE (-smp 1), SMP-CAP (`pax.cpus=2` and `pax.cpus=1` at 4), SMP-DEAD
+#     (cap2's boot); SMP-TRACE-EXIT, SMP-TRACE-INT and SMP-STOPWRITE (`trace`, at each of SMP_TRACE_COUNTS,
+#     SMP_TRACE_BOOTS boots): a traced group's exit, a PTRACE_INTERRUPT, and SIGSTOP to a process writing a pipe, each
+#     with its thread on another processor;
+#   - from a second build of the same kernel with the test words (tools/build-kernel --test-words, never shipped):
+#     SMP-END-NOOFF (`nooff`), SMP-PANIC-STOP (`panic`) and SMP-PANIC-TWO (`panic2`), each at 4 with dumps; and
+#     SMP-TESTWORDS (`testwords`), the shipped kernel given the same words; TESTWORDS-ELF per tier: `fire` and
+#     `test_panic` in the test build's ELF, in the shipped one neither; SMP-EXEC-LEAVE (`leave`, at 2 and 4): the test
+#     build given `pax.slowleave=200`, which holds each application processor whose thread was ended in place 200 ms
+#     before it switches it off (a host that has not run that processor), under exec, exit_group and a leader's lone
+#     exit; TESTWORDS-SLOWLEAVE-ELF per tier: the hold's state and line in the test build's ELF, in the shipped one
+#     neither;
+#   - SMP-SHARE (`share`, at 2 and 4): N + 1 threads spinning on N processors, each one's part of the progress against
+#     the fair 1/(N + 1), held under KVM with a host CPU for each processor and printed elsewhere;
+#   - in every boot SMP-KLOCK, SMP-DUP, SMP-PIN and SMP-PARK (rows.py's every-kind rows);
+# and SMP-BUILD once, on the first tier and firmware: the processor census's pack fixture at -smp 1 and -smp 4 with
+# 2 GiB, the batches timed by the host (tests/mpx6-smp.d/build.py), the pinned den built by tools/mkden
+# from user/den.pin (or SMP_DEN). SMP_SCALING: `gate` holds the four-job wall to 1.6 times the one-job
+# wall under KVM (the scaling hold: a block of its own, never one shared with timing noise), `report`
+# (the default) prints the figures and holds the identities and the processor count, `skip` names the
+# row NOT-RUN. tests/mpx6-smp.d/rows.py names each row (its docstring lists them and the kernel text
+# they read). Timed bounds are gated under KVM alone, from each boot's .meta. A red row does not stop
+# the suite: every boot's rows are said, and the exit is 1 if any was red.
+set -euo pipefail
+. "$(dirname "$0")/../tools/lib.sh"
+cd "$PAX_ROOT"
+tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
+counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
+kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share}
+tcounts=${SMP_TRACE_COUNTS:-1 2 4} tboots=${SMP_TRACE_BOOTS:-1}
+tcounts=${tcounts//,/ }
+case $tboots in ''|*[!0-9]*|0) die "SMP_TRACE_BOOTS is a count of boots, not $tboots" ;; esac
+for n in $tcounts; do case $n in ''|*[!0-9]*|0) die "SMP_TRACE_COUNTS names processor counts, not $n" ;; esac; done
+kinds=${kinds//,/ } # commas or spaces between the kinds
+# SMP_ROWS_CAP=N, a development knob (tests/mpx6-smp.d/rows-cap.sh): said first, so no one reads its greens as the gate's.
+. tests/mpx6-smp.d/rows-cap.sh
+rows_cap=${SMP_ROWS_CAP:-}
+rows_cap_check "$rows_cap" || exit 2
+[ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
+for k in $kinds; do
+    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords|leave|share) ;;
+        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share, not $k" ;; esac
+done
+asked() { # KIND: 0 when SMP_KINDS asks it, else its NOT-RUN line and 1
+    case " $kinds " in *" $1 "*) return 0 ;; esac
+    printf 'NOT-RUN %s %s: SMP_KINDS=%s\n' "$1" "$tier $fw" "$kinds"
+    return 1
+}
+while [ $# -gt 0 ]; do
+    case $1 in
+        --tier) tiers=$2; shift 2 ;;
+        --firmware) firmware=$2; shift 2 ;;
+        *) die 'usage: tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]' ;;
+    esac
+done
+case $tiers in both) tiers='native release' ;; esac
+case $firmware in both) firmware='bios uefi' ;; esac
+case $scaling in gate|report|skip) ;; *) die "SMP_SCALING is gate, report or skip, not $scaling" ;; esac
+python3 -I -B tests/mpx6-smp.d/rows-selftest.py
+bash tests/mpx6-smp.d/knob-selftest.sh
+python3 -I -B tests/mpx6-smp.d/frame-layout.py --selftest
+python3 -I -B tests/mpx6-smp.d/frame-layout.py .
+# every interruptible wait asks for a pending signal before it switches away (the sleeper rounds' lost wake), and
+# every mask change offers the process's pending signals to its other threads
+python3 -I -B tests/mpx6-smp.d/wait-census.py --selftest
+rc=0
+python3 -I -B tests/mpx6-smp.d/wait-census.py . || rc=1 # red, and the boots still run: SMP-SIGNAL's sleeper shows the cost
+hostcpus=$(nproc) # the CPUs this take may use (taskset's, in a container): timed bounds need the boot to fit them
+dump=(--cmd stop --cmd 'info registers -a' --cmd cont --cmd stop --cmd 'info registers -a' --cmd cont
+      --cmd stop --cmd 'info registers -a')
+conf() { # FILE CMDLINE-WORDS
+    printf 'timeout: 0\n/PAX\n    protocol: limine\n    path: boot():/boot/pax\n    module_path: boot():/boot/initramfs.cpio\n    cmdline: quiet nonet pax.nobeep pax.nomarks%s\n' "$2" > "$1"
+}
+# NAME:CMDLINE-WORDS:the run list's line (the probe's mode)
+images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-halt::/bin/smpprobe end halt"
+        "end-poweroff::/bin/smpprobe end poweroff" "end-reboot::/bin/smpprobe end restart" "one::/bin/smpprobe one"
+        "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one" "trace::/bin/smpprobe trace"
+        "end-nooff: pax.cpus=4 pax.nopoweroff:/bin/smpprobe end poweroff" "panic: pax.cpus=4 pax.panictest=1:/bin/smpprobe spin"
+        "panic2: pax.cpus=4 pax.panictest=2:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff"
+        "leave: pax.slowleave=200:/bin/smpprobe leave" "share::/bin/smpprobe share")
+# The STOP step's test kinds and leave boot a test build (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu
+# in kernel/testwords' place); testwords boots the shipped kernel given both words.
+testbuilt() { case $1 in end-nooff|panic|panic2|leave) return 0 ;; esac; return 1; }
+if [ -n "$rows_cap" ]; then # SMP_ROWS_CAP: unset, the list above is used as it stands
+    capped=()
+    for spec in "${images[@]}"; do capped+=("$(rows_cap_spec "$rows_cap" "$spec")"); done
+    images=("${capped[@]}")
+fi
+set -- $firmware
+first_fw=$1 nfw=$#
+built_build=0
+for tier in $tiers; do
+    work=$PAX_BUILD/mpx6-smp/$tier
+    mkdir -p "$work"
+    flags=(); [ "$tier" != release ] || flags=(--release)
+    if [ -z "${SMP_IMAGES:-}" ]; then
+        tools/fetch-limine
+        tools/build-kernel ${flags[@]+"${flags[@]}"} --src kernel/kmain_console.lu "$work"
+        tools/build-kernel ${flags[@]+"${flags[@]}"} --test-words --src kernel/kmain_console.lu "$work/test"
+        # op 3 and the test panic live in the test build alone: seen present there and absent from the shipped one.
+        # px166 (11-23): by two marks that survive the release tier's inlining (which removes `fire` and `test_panic`
+        # as symbols while both still act): the test panic's text in the ELF's bytes, and the test op's static
+        # `fired` among its symbols
+        marks() { # ELF: how many of the two it holds
+            local n=0
+            grep -aq 'testwords: a test panic, cpu ' "$1" && n=$((n + 1))
+            [ "$(nm "$1" | grep -cE ' _Wtestwords\.fired\.')" -gt 0 ] && n=$((n + 1)) # -c reads all: no SIGPIPE under pipefail
+            echo "$n"
+        }
+        tw=$(marks "$work/test/kmain_console.elf") sw=$(marks "$work/kmain_console.elf")
+        if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-ELF $tier: the test build holds the test panic's text and the test op's state; the shipped one neither"
+        else echo "FAIL TESTWORDS-ELF $tier: test build $tw of 2 test marks (the test panic's text, the test op's \`fired\`), shipped $sw (want 2 and 0)"; rc=1; fi
+        # px166 (11-25): pax.slowleave's hold the same way, by two marks: its line's text in the ELF's bytes, and the
+        # hold's static `slow` among its symbols; the shipped kernel's entry asks testwords for a hold and gets none
+        slowmarks() { # ELF: how many of the two it holds
+            local n=0
+            grep -aq 'testwords: a slow leave, cpu ' "$1" && n=$((n + 1))
+            [ "$(nm "$1" | grep -cE ' _Wtestwords\.slow\.')" -gt 0 ] && n=$((n + 1))
+            echo "$n"
+        }
+        tw=$(slowmarks "$work/test/kmain_console.elf") sw=$(slowmarks "$work/kmain_console.elf")
+        if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-SLOWLEAVE-ELF $tier: the test build holds pax.slowleave's line and its hold's state; the shipped one neither"
+        else echo "FAIL TESTWORDS-SLOWLEAVE-ELF $tier: test build $tw of 2 marks (the slow leave's line, the hold's \`slow\`), shipped $sw (want 2 and 0)"; rc=1; fi
+        gcc -nostdlib -static -ffreestanding -fno-stack-protector -fno-pie -no-pie -O2 -mgeneral-regs-only -Wall \
+            -o "$work/smpprobe" tests/mpx6-smp.d/probe.c
+        for spec in "${images[@]}"; do
+            name=${spec%%:*} rest=${spec#*:}
+            words=${rest%%:*} line=${rest#*:}
+            printf '%s\n' "$line" > "$work/run-$name"
+            tools/mkinitramfs "$work/root-$name.cpio" /bin/smpprobe="$work/smpprobe":0755 /etc/pax-run="$work/run-$name" \
+                > "$work/root-$name.txt"
+            conf "$work/limine-$name.conf" "$words"
+            kern=$work/kmain_console.elf
+            ! testbuilt "$name" || kern=$work/test/kmain_console.elf
+            tools/mkimage --conf "$work/limine-$name.conf" --add "$work/root-$name.cpio" initramfs.cpio \
+                "$kern" "$work/$name.iso"
+        done
+    fi
+    img=${SMP_IMAGES:+$SMP_IMAGES/$tier}
+    img=${img:-$work}
+    elf=$img/kmain_console.elf
+    # boot LOG FIRMWARE IMAGE TIMEOUT DUMPS(0|1) ROWS-ARGS... -- QEMU-ARGS...: to `halt`, then the rows
+    boot() {
+        local log=$1 fw=$2 iso=$3 t=$4 d=$5; shift 5
+        local args=() q=() dm=()
+        halted=1
+        while [ "$1" != -- ]; do args+=("$1"); shift; done; shift
+        for x in "$@"; do q+=(--qemu "$x"); done
+        [ "$d" = 0 ] || dm=("${dump[@]}")
+        printf '%s %s %s:\n' "$tier" "$fw" "$(basename "$log" .log)"
+        if ! tools/qemu-halt --firmware "$fw" --timeout "$t" --no-screen --serial "$log" --elf "$elf" \
+                --marker "${BOOT_MARKER:-halt}" ${BOOT_SYMBOL:+--symbol "$BOOT_SYMBOL"} ${dm[@]+"${dm[@]}"} "${q[@]}" "$iso"; then
+            printf 'FAIL SMP-BOOT %s %s %s: no halt (the transcript\x27s last lines below)\n' "$tier" "$fw" "$(basename "$log")"
+            { tail -n 12 "$log" 2>/dev/null || true; } | sed 's/^/  /'
+            rc=1 halted=0
+        fi
+        python3 -I -B tests/mpx6-smp.d/rows.py "$log" "${args[@]}" --host-cpus "$hostcpus" --elf "$elf" || rc=1
+    }
+    for fw in $firmware; do
+        if asked rows; then
+            for n in $counts; do
+                boot "$work/smp-$fw-rows-$n.log" "$fw" "$img/rows.iso" 600 0 --kind rows --smp "$n" -- -smp "$n" -m 512
+            done
+        fi
+        if asked end; then
+            boot "$work/smp-$fw-end-halt.log" "$fw" "$img/end-halt.iso" 180 1 --kind end-halt --smp 4 -- -smp 4 -m 512
+            for how in poweroff reboot; do
+                log=$work/smp-$fw-end-$how.log st=0
+                printf '%s %s %s:\n' "$tier" "$fw" "end-$how"
+                tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$img/end-$how.iso" -- -smp 4 -m 512 || st=$?
+                python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind "end-$how" --smp 4 --qemu-status "$st" --host-cpus "$hostcpus" --elf "$elf" || rc=1
+            done
+        fi
+        ! asked nosmp || boot "$work/smp-$fw-nosmp.log" "$fw" "$img/nosmp.iso" 180 1 --kind nosmp --smp 4 -- -smp 4 -m 512
+        ! asked one || boot "$work/smp-$fw-one.log" "$fw" "$img/one.iso" 180 0 --kind one --smp 1 -- -smp 1 -m 512
+        ! asked cap2 || boot "$work/smp-$fw-cap2.log" "$fw" "$img/cap2.iso" 300 0 --kind cap2 --smp 4 --cap 2 -- -smp 4 -m 512
+        ! asked cap1 || boot "$work/smp-$fw-cap1.log" "$fw" "$img/cap1.iso" 180 0 --kind cap1 --smp 4 --cap 1 -- -smp 4 -m 512
+        if asked trace; then
+            for n in $tcounts; do
+                for i in $(seq 1 "$tboots"); do
+                    # a kernel panic ends the boot at its line (the rows name it), not at the 240 s bound
+                    BOOT_MARKER='halt|PANIC .*' boot "$work/smp-$fw-trace-$n-$i.log" "$fw" "$img/trace.iso" 240 0 --kind trace --smp "$n" --boot "$i" -- -smp "$n" -m 512
+                done
+            done
+        fi
+        # the STOP step's kinds (test builds but testwords): their rows read the test ELF's symbols for the dumps
+        if asked nooff; then
+            elf=$img/test/kmain_console.elf boot "$work/smp-$fw-end-nooff.log" "$fw" "$img/end-nooff.iso" 180 1 --kind end-nooff --smp 4 -- -smp 4 -m 512
+        fi
+        if asked panic; then
+            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic.log" "$fw" "$img/panic.iso" 180 1 --kind panic --smp 4 -- -smp 4 -m 512
+        fi
+        if asked panic2; then
+            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic2.log" "$fw" "$img/panic2.iso" 180 1 --kind panic2 --smp 4 -- -smp 4 -m 512
+        fi
+        # SMP-EXEC-LEAVE: the test build given pax.slowleave=200 at 2 and 4; a kernel panic ends the boot at its line
+        if asked leave; then
+            for n in 2 4; do
+                BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-leave-$n.log" "$fw" "$img/leave.iso" 300 0 --kind leave --smp "$n" -- -smp "$n" -m 512
+            done
+        fi
+        # SMP-SHARE: N + 1 threads spinning on N processors at 2 and 4, each one's part of the progress
+        if asked share; then
+            for n in 2 4; do
+                BOOT_MARKER='halt|PANIC .*' boot "$work/smp-$fw-share-$n.log" "$fw" "$img/share.iso" 180 0 --kind share --smp "$n" -- -smp "$n" -m 512
+            done
+        fi
+        if asked testwords; then
+            log=$work/smp-$fw-testwords.log st=0
+            printf '%s %s %s:\n' "$tier" "$fw" testwords
+            tools/qemu-run --firmware "$fw" --timeout 180 --no-screen --serial "$log" "$img/testwords.iso" -- -smp 4 -m 512 || st=$?
+            python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind testwords --smp 4 --qemu-status "$st" --host-cpus "$hostcpus" --elf "$elf" || rc=1
+        fi
+    done
+    # The stress: SMP_STRESS_BOOTS boots a tier, the firmwares in turn.
+    # The probe ends a component still there 30 s past the deadline itself, so a boot that does not halt within
+    # SECS + 90 s is a kernel or probe hang: after three of them the rest are not run, each named red.
+    set -- $firmware
+    nohalt=0
+    fw=$1
+    asked stress || boots=0
+    for i in $(seq 1 "$boots"); do
+        k=$(( (i - 1) % nfw + 1 )); fw=${!k}
+        if [ "$nohalt" -ge 3 ]; then
+            printf 'FAIL SMP-LOCK smp=4 boot=%s: not run: three stress boots did not halt\n' "$i"; rc=1; continue
+        fi
+        boot "$work/smp-$fw-stress-$i.log" "$fw" "$img/stress.iso" $((secs + 90)) 0 --kind stress --smp 4 --boot "$i" \
+            -- -smp 4 -m 512
+        [ "$halted" = 1 ] || nohalt=$((nohalt + 1))
+    done
+    # SMP-BUILD, once: the first tier asked, its first firmware.
+    if [ "$built_build" = 0 ]; then
+        built_build=1
+        if [ "$scaling" = skip ]; then
+            printf 'NOT-RUN SMP-BUILD: SMP_SCALING=skip (the all tier and the scaling hold run it)\n'
+            continue
+        fi
+        b=$work/build
+        mkdir -p "$b"
+        if [ -n "${SMP_DEN:-}" ]; then
+            den=$SMP_DEN
+            say "SMP-BUILD's den given: $den sha256 $(sha256_of "$den")"
+        else
+            tools/mkden "$b/den"
+            den=$b/den/den
+        fi
+        gcc -O2 -static -Wall -Wextra -o "$b/bench" tests/mpx6-smp.d/bench.c
+        printf '/bin/bench 4\n' > "$b/run"
+        python3 -I -B tests/mpx6-smp.d/fixture.py "$PAX_ROOT" "$b" "$den"
+        conf "$b/limine.conf" ''
+        tools/mkimage --conf "$b/limine.conf" --add "$b/root.cpio" initramfs.cpio "$elf" "$b/build.iso"
+        for n in 1 4; do
+            log=$b/smp-$first_fw-build-$n.log
+            printf '%s %s build at %s:\n' "$tier" "$first_fw" "$n"
+            python3 -I -B tests/mpx6-smp.d/build.py "$first_fw" "$n" 900 "$elf" "$b/build.iso" "$log" \
+                || { printf 'FAIL SMP-BOOT %s %s build-%s: no halt\n' "$tier" "$first_fw" "$n"; rc=1; }
+            sargs=(); [ "$n" = 1 ] || sargs=(--scaling "$scaling")
+            python3 -I -B tests/mpx6-smp.d/rows.py "$log" --kind build --smp "$n" --expected "$b/expected.json" \
+                ${sargs[@]+"${sargs[@]}"} --host-cpus "$hostcpus" --elf "$elf" || rc=1
+        done
+    fi
+done
+exit "$rc"

@@ -141,12 +141,33 @@ static const char *ename(int e) {
 
 static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 
+/* What the handlers reported so far, kept for the next heard_list:
+ * waits until `want` lines came or `ms` passed. A stop's SIGCHLD is
+ * collected so before the stop is reaped: on a multiprocessor Linux the
+ * reap can clear the stop code before the stopping child builds its
+ * SIGCHLD, which then reports status 0. */
+static char carry[4096];
+static size_t carried;
+static void await_heard(int want, int ms) {
+    long end = now_ms() + ms;
+    for (;;) {
+        ssize_t r = read(rep[0], carry + carried, sizeof carry - 1 - carried);
+        if (r > 0) { carried += (size_t)r; continue; }
+        int lines = 0;
+        for (size_t i = 0; i < carried; i++) if (carry[i] == '\n') lines++;
+        if (lines >= want || now_ms() >= end) return;
+        nap(10);
+    }
+}
+
 /* What the handlers reported, sorted and joined with commas ("-" for
  * nothing): waits until `want` lines came or `ms` passed, then a little
- * longer for anything not expected. */
+ * longer for anything not expected. Lines await_heard kept come first. */
 static void heard_list(char *out, size_t cap, int want, int ms) {
     char buf[4096];
-    size_t len = 0;
+    size_t len = carried;
+    memcpy(buf, carry, carried);
+    carried = 0;
     long end = now_ms() + ms, extra = -1;
     for (;;) {
         ssize_t r = read(rep[0], buf + len, sizeof buf - 1 - len);
@@ -172,7 +193,7 @@ static void heard_list(char *out, size_t cap, int want, int ms) {
     if (!n) snprintf(out, cap, "-");
 }
 
-static void flush_heard(void) { char b[4096]; while (read(rep[0], b, sizeof b) > 0) {} }
+static void flush_heard(void) { char b[4096]; carried = 0; while (read(rep[0], b, sizeof b) > 0) {} }
 
 /* A child that waits until killed. `pg`: 0 a new group, > 0 join that
  * group, -1 stay, -2 a new session. `sigs`: the signals it reports.
@@ -514,13 +535,14 @@ static void stops(void) {
     sig_atomic_t told = chlds;
     ANS("S: kill(-G, SIGSTOP)", kill(-a, SIGSTOP));
     chld_told(told);
-    heard_list(h, sizeof h, 2, 1500); /* both members' stops told (or merged into one) before either is taken */
+    await_heard(2, 1500); /* both stops' SIGCHLD before either stop is reaped */
     int n = 0;
     for (int i = 0; i < 2; i++) {
         w = waitpid(-a, &st, WUNTRACED);
         if (w > 0 && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP && st == 0x137f) n++;
     }
     printf("S: waitpid(-G, WUNTRACED) reported stopped by SIGSTOP (status 0x137f): %d of 2\n", n);
+    heard_list(h, sizeof h, 0, 150); /* await_heard waited for them above */
     printf("S: R heard %s\n", h);
     w = waitpid(-a, &st, WNOHANG | WUNTRACED);
     printf("S: a second waitpid(-G, WNOHANG|WUNTRACED): %s\n", how(w, st));
@@ -558,6 +580,7 @@ static void stops(void) {
     told = chlds;
     ANS("S: kill(a, SIGTSTP)", kill(a, SIGTSTP));
     chld_told(told);
+    await_heard(1, 1500); /* its SIGCHLD before its stop is reaped */
     w = waitpid(a, &st, WUNTRACED);
     printf("S: SIGTSTP at its default: %s\n", how(w, st));
     {
@@ -566,6 +589,7 @@ static void stops(void) {
         told = chlds;
         ANS("S: kill(b, SIGTTIN)", kill(b, SIGTTIN));
         chld_told(told);
+        await_heard(2, 1500); /* b's SIGCHLD too before b's stop is reaped */
         int r = waitid(P_PGID, (id_t)a, &si, WSTOPPED | WNOWAIT);
         printf("S: waitid(P_PGID, G, WSTOPPED|WNOWAIT): %s, code %s, status %s, the pid b's %s\n", r < 0 ? ename(errno) : "0",
                si.si_code == CLD_STOPPED ? "CLD_STOPPED" : "other", sname(si.si_status), yesno(si.si_pid == b));
@@ -768,6 +792,11 @@ static void stops(void) {
         kill(m2, SIGTTIN);
         printf("S: SIGTTIN likewise: it runs on %s\n", yesno(ticking(tq[0], 300)));
         kill(m2, SIGSTOP);
+        /* A write(2) already in progress when the stop came may complete
+         * after kill returns (on a multiprocessor, Linux's and PAX's
+         * alike); the stop holds from then on, and the ticks are counted
+         * from there (tests/mpx6-smp's SMP-STOPWRITE holds both). */
+        nap(50);
         int on2 = ticking(tq[0], 300);
         printf("S: SIGSTOP to it: it runs on %s, state %c\n", yesno(on2), pstat_of(m2).state);
         kill(m2, SIGCONT);

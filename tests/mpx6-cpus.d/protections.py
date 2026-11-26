@@ -59,10 +59,22 @@ for kind, path, line, fn, code in rows:
     elif module.startswith('kmain_') or module in ('heapthreads','pax_tour','schedtest'):
         what = 'boot/test orchestration: spawn/await, snapshots or final halt; no secondary CPU currently enters it'
         need = 'boot CPU owns initialization; test snapshots need all-CPU quiescence, not just local IF clear'
+    elif module == 'ipi' and fn == 'stop_others':
+        what = 'the end or a panic asking every other processor to stop: interrupts off from the first mailbox write to the bound'
+        need = 'none beyond it: the end holds the kernel lock; a panic may not, and its STOP is best effort, bounded, never waited past'
+    elif module == 'tlb' and fn == 'request':
+        what = 'a shootdown asked: the kernel lock held (checked by name), interrupts off from the first mailbox write to the last answer'
+        need = 'none beyond it: no tick may switch this processor to another thread with a request out; the targets answer without the lock'
+    elif module == 'klock' and fn == 'halt_given_back':
+        what = 'the end on CPU 0: the kernel lock given back before its last HLT, with no interrupt in between'
+        need = 'none beyond it: IF stays clear for good (the halt); the others take the lock as it is given back'
     else:
         what = protection[module]
         if module == 'xhci': what = xhci[fn]
         need = 'big kernel lock first; then an owner lock/lifetime protocol covering IRQ and thread callers'
+        if module == 'user' and fn == 'pax_user_thread':
+            what = 'the kernel lock given back before the first IRETQ to ring 3, with no interrupt in between'
+            need = 'none beyond it: IF stays clear only until that IRETQ; the exclusion is the kernel lock itself'
         if module == 'sync': need = 'keep IF save on the invoking stack; callers must separately exclude remote CPUs'
     result.append({'site':f'{path}:{line}', 'function':fn, 'protection':what, 'needed':need})
 print(json.dumps(result, indent=2))

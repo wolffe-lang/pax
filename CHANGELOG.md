@@ -7,6 +7,39 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Every processor runs threads, under one kernel lock (SMP stage 2).** Each application processor now takes
+  threads of programs from the one run queue, as the boot processor does; kernel threads stay on the boot processor.
+  Every kernel entry but the NMI's takes one lock, owned by a processor and given back on every way into ring 3 or
+  the idle loop, so the kernel runs on one processor at a time while programs run on all of them. A change to a
+  page table another processor may be using is shot down there (vector 49) before the change returns; a signal to
+  a thread running elsewhere reaches it by an interrupt (vector 48); a thread whose group another processor ended
+  never runs again, and its slot and address space are freed only once no processor still uses them. After an
+  execve from a thread that was not the leader, the new program's process is not reaped while a thread the exec
+  ended still runs on another processor, whose last time slice is charged to that process, and a parent waiting
+  for it is woken as each such thread leaves its processor (SMP-EXEC-LEAVE holds this whichever processor the host
+  runs late); a switch that would charge a thread's time to a slot now holding another process panics by name. A
+  page fault
+  that arrives after another processor made its page present runs the instruction again. A stop reaches a thread
+  of the stopped process running on another processor by vector 48, and the thread parks before it returns to
+  ring 3; a write(2) already under way when the stop comes completes first, as on Linux, so a pipe drained at once
+  may hold one more write and a pipe drained 50 ms on holds none (SMP-STOPWRITE, which first waits up to 2 s to
+  see the writer on another processor and says how many looks that took). The end, and a panic,
+  stop every other processor (interrupts off, halted) before the end's last writes or the panic's last line;
+  `poweroff: not done`, `pax.panictest` and `pax.slowleave` (a processor held before it switches off a thread
+  another ended, SMP-EXEC-LEAVE) exist only in a test build. `/proc/pax-cpus` says `active` as the
+  processors that run threads, with each one's ticks in ring 3, interrupts taken, kernel threads run and
+  shootdowns answered; it also says `heap-started 0|1`, whether the kernel's heap was started (the console kernel
+  starts none, and an allocation there panics by name), and the signal counts, `signals set S merged M taken T
+  slept-with-one-pending P` (raises that set a pending bit, raises merged into a signal already pending, signals
+  taken, and sleeps entered with a signal the sleeper would take already pending).
+  `/sys/devices/system/cpu/online`, `sched_getaffinity` and `Cpus_allowed` say the same set as `active`.
+  `pax.cpus=N` on the command line lets N processors run threads (`pax.cpus=1` is the previous behaviour, the
+  others started and idle) and `nosmp` still leaves them in the bootloader. With one processor no boot changes.
+  `tests/mpx6-smp` holds the rows, at 2, 4 and 16 processors. `tests/mpx5-jobs`' probe (`user/elf/jobs.c`)
+  collects a stop's SIGCHLDs before it reaps the stop, on both sides: Linux, when the reap comes first, can
+  report the stopped child's signal as 0 (pax#541). It also watches a stopped member of an orphaned group from
+  50 ms after the stop, once a write in progress has completed.
+
 - **Your own shell file at login.** `/etc/shrc` ends by running `~/.config/pelt/shrc` when it is a readable
   regular file: at a console login, in a terminal over ssh and in a shell from `su USER`, as the account whose
   `HOME` it is; not for a command over ssh or `sudo -s`, which read no `ENV`. PAX ships no such file. The dev

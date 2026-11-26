@@ -11,7 +11,7 @@
    and written by wolf (kernel/gdt, kernel/idt).
 
    ENTRY ([abi.interrupt], wolf-lang kw10). Wolf has no interrupt calling
-   convention. Each vector 0-47 has a trampoline made by one macro: a
+   convention. Each vector 0-49 has a trampoline made by one macro: a
    vector whose exception pushes no error code pushes a zero in its
    place, so every frame has one shape; then the vector. The common path
    saves the fifteen general registers (%rax first, %r15 last), passes
@@ -38,7 +38,9 @@
    10 #TS, 11 #NP, 12 #SS, 13 #GP, 14 #PF, 17 #AC, 21 #CP (Intel SDM
    vol. 3A §6.13 and Table 6-1), 29 #VC and 30 #SX (AMD64 APM vol. 2
    §8.2, Table 8-1). 32-47 are the 8259's sixteen lines, remapped there
-   by kernel/timer (no error code). No x87/SSE state is saved: the
+   by kernel/timer (no error code); px166: 48 is RESCHED, the interrupt
+   one processor sends another (kernel/smp); 49 is the shootdown, which
+   kernel/interrupts answers before the kernel lock (kernel/tlb). No x87/SSE state is saved: the
    kernel is built with none ([abi.target.none.codegen]); and it keeps
    no red zone, so an interrupt in kernel code overwrites nothing live
    below %rsp.
@@ -173,6 +175,10 @@ pax_isr\v:
         ISR_NOERR 45
         ISR_NOERR 46
         ISR_NOERR 47
+        /* px166: RESCHED, from another processor (kernel/smp). */
+        ISR_NOERR 48
+        /* px166: the shootdown, from the kernel lock's holder (kernel/tlb). */
+        ISR_NOERR 49
         /* px76: four independently routed PCI MSI vectors. */
         ISR_NOERR 80
         ISR_NOERR 81
@@ -270,6 +276,22 @@ pax_isr_common:
         callq   *%rax
         movq    %rbx, %rsp
 2:
+        /* px166: the kernel lock's release store (kernel/klock's
+           `pax_klock_resumed`), made here, on the frame to resume, for a
+           frame kernel/user's `hand_back` gave the lock up for: this
+           processor has left the stack it was handed the frame on (the
+           old thread's, when it switched), so no other processor can take
+           the lock and run that thread under it. Before the vector is
+           looked at, so a continuation still finds the lock it kept;
+           before the GS step back to ring 3's. It is handed the frame's
+           vector (byte 120, kernel/interrupts' Frame; tests/mpx6-smp.d/
+           frame-layout.py holds the offset). %rbx keeps %rsp, as above. */
+        movq    120(%rsp), %rdi
+        movq    %rsp, %rbx
+        andq    $-16, %rsp
+        cld
+        call    pax_klock_resumed
+        movq    %rbx, %rsp
         cmpq    $0x102, 120(%rsp)       /* px102: stopped syscall's kernel continuation */
         je      .Lpax_trace_syscall
         cmpq    $0x103, 120(%rsp)       /* px102: finish a completed clone/vfork/exec call */
@@ -592,6 +614,45 @@ pax_ap_park:
         jmp     1b
         .size pax_ap_park, . - pax_ap_park
 
+/* px166 (SMP stage 2, the STOP step): a processor stopped for the end or
+   a panic (kernel/tlb's STOP): interrupts off, then HLT for ever. An NMI
+   wakes it and returns here; nothing else is taken. Never returns. */
+/* px166: the first panic's processor index + 1 (kernel/panic's
+   compare-exchange from 0); 0 while no panic has begun. */
+        .section .bss
+        .p2align 3
+        .globl pax_panicking
+pax_panicking:
+        .zero 8
+/* px166: the panicking processors' print token (0 until the first panic's
+   own line is written, then 1 free and 2 held: their lines' bytes do not
+   interleave); and how many times the first panic's processor has entered
+   `panic.fail` again inside it. */
+        .globl pax_panic_said
+pax_panic_said:
+        .zero 8
+        .globl pax_panic_again
+pax_panic_again:
+        .zero 8
+        .text
+
+        .globl pax_ap_stop
+        .type pax_ap_stop, @function
+pax_ap_stop:
+        cli
+1:      hlt
+        jmp     1b
+        .size pax_ap_stop, . - pax_ap_stop
+
+/* px166: interrupts off and nothing else (kernel/panic's first instruction:
+   a panic is neither preempted nor stopped before its line is out). */
+        .globl pax_cli
+        .type pax_cli, @function
+pax_cli:
+        cli
+        ret
+        .size pax_cli, . - pax_cli
+
         .globl pax_ap_halt
         .type pax_ap_halt, @function
 pax_ap_halt:
@@ -624,12 +685,12 @@ pax_bad_stack:
         ret
         .size pax_bad_stack, . - pax_bad_stack
 
-/* The trampolines' addresses by vector, 0-47, for kernel/idt. */
+/* The trampolines' addresses by vector, 0-49, for kernel/idt. */
         .section .rodata
         .p2align 3
         .globl pax_isr_table
 pax_isr_table:
-        .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+        .irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49
         .quad pax_isr\v
         .endr
 

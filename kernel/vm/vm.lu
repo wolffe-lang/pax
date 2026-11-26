@@ -1132,6 +1132,42 @@ fn put_leaf(pml4: u64, pg: u64, pa: u64, f: u64) -> bool {
     r != 99
 }
 
+/// px166: a page fault's error code bits (Intel SDM vol. 3A §4.7): a write;
+/// an instruction fetch; a reserved bit set in an entry; a protection key;
+/// a shadow-stack access; an SGX access.
+const PF_W: u64 = 0x2
+const PF_ID: u64 = 0x10
+const PF_REFUSED: u64 = 0x8 | 0x20 | 0x40 | 0x8000 // RSVD, PK, SS, SGX: never run again
+
+/// px166: a page fault from ring 3 (kernel/user's `fault_in`), `err` its
+/// error code. A fault whose page is present by the time it is routed and
+/// allows the access runs the instruction again (F_OK): on another processor
+/// an mmap over the page, an mprotect or a first touch finished while this
+/// fault waited for the kernel lock (tests/mpx6-smp's SMP-TLB, the replace
+/// rounds). Allowed: every level present and user's (paging's `user_ok`:
+/// P and US at each); for a write, the leaf RW (`user_ok_write`; the upper
+/// levels are USER_TABLE, writable) and not COW; for a fetch, the leaf's NX
+/// clear (USER_TABLE carries no NX). It cannot
+/// loop: the page fault dropped this address's TLB entries (SDM vol. 3A
+/// §4.10.4.1), so the instruction's next access walks the tables again and
+/// finds the access allowed, unless another processor changed the entry
+/// again in between (that processor's progress, each time). A fault whose
+/// code says a reserved bit, a protection key, a shadow stack or SGX is not
+/// run again: such an entry would fault for ever. Every other fault goes on
+/// to `fault` as before (a write to a read-only page, a fetch from NX, the
+/// kernel's half: tests/mpx6-smp's SMP-REFUSE).
+pub fn fault_trap(a: u64, pml4: u64, pg: u64, err: u64) -> u64 {
+    if err & PF_REFUSED == 0 && paging.user_ok(pml4, pg) {
+        let e = paging.leaf(pml4, pg)
+        let w_ok = err & PF_W == 0 || (paging.user_ok_write(pml4, pg) && e & paging.COW == 0)
+        let x_ok = err & PF_ID == 0 || e & paging.NX == 0
+        if w_ok && x_ok {
+            return F_OK
+        }
+    }
+    fault(a, pml4, pg, err & PF_W != 0)
+}
+
 /// A touch of user page `pg` of the space at `pml4` that faulted (or
 /// that kernel/uaccess is about to make), a write when `write`: F_OK
 /// when the page is backed now (a page of a range backed on touch, px34;

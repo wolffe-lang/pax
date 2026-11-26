@@ -1,0 +1,51 @@
+//! testwords — px166 (SMP stage 2, the STOP step): the test-only words, as
+//! shipped. `pax.nopoweroff` (an end whose power-off does not take),
+//! `pax.panictest=1|2` (one or two processors' test panics) and
+//! `pax.slowleave=MS` (an application processor that holds a thread ended in
+//! place MS ms before it switches it off: a host that has not run that
+//! processor, made to happen) act only in a kernel built with
+//! `tools/build-kernel --test-words`, which puts tests/mpx6-smp.d/testwords.lu
+//! in this file's place. Here none acts: a shipped kernel given one says so by
+//! name and goes on as without it, and holds no test op, no test panic and no
+//! hold (tests/mpx6-smp's SMP-TESTWORDS and TESTWORDS-SLOWLEAVE-ELF read the
+//! lines and the ELF).
+
+use boot_info
+use log
+
+/// At the boot (kmain_console): each test word on the command line, ignored by name.
+pub fn start() {
+    if boot_info.cmdline_has("pax.nopoweroff") {
+        log.line("testwords: pax.nopoweroff ignored (not a test kernel)")
+    }
+    if boot_info.cmdline_has("pax.panictest=1") || boot_info.cmdline_has("pax.panictest=2") {
+        log.line("testwords: pax.panictest ignored (not a test kernel)")
+    }
+    let (_a, n) = boot_info.cmdline_value("pax.slowleave")
+    if n != 0 {
+        log.line("testwords: pax.slowleave ignored (not a test kernel)")
+    }
+}
+
+/// kernel/user's `the_end`, before a power-off: never skipped as shipped.
+pub fn nopoweroff() -> bool {
+    false
+}
+
+/// CPU 0's tick (kernel/interrupts): nothing as shipped.
+pub fn tick(_t: u64) {}
+
+/// kernel/tlb's `answer`, given the request word: no op of its own as shipped.
+pub fn op(_r: u64) -> bool {
+    false
+}
+
+/// kernel/interrupts' entry on an application processor whose thread was
+/// ended in place: CPU 0's ticks to hold it before it is switched off. None
+/// as shipped, so the entry's hold never runs.
+pub fn hold() -> u64 {
+    0
+}
+
+/// After a hold (never as shipped): the processor, the held thread's slot and its tgid.
+pub fn held(_cpu: u64, _slot: u64, _tgid: u64) {}
