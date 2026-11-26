@@ -920,14 +920,20 @@ case('leave: an exec-settle round that does not say where the main thread was (a
 # looks (/proc/pax-cpus after each 10 ms sleep) are said as what they are: samples taken at timer wakes, never where a
 # thread lives (a fair boot under KVM at 2 saw one thread opposite the looker in every look while each made a third of
 # the progress).
-def share_lines(n, rounds=3, counts=None, looks=None, procs=None, done=True):
+# px166 (11-26): each thread's processor time over the round as well (`round R time I cpu-us U wall-us W`, getrusage(RUSAGE_THREAD)
+# at the round's edges): `cpu` gives each thread's part of a processor (default an even N/(N + 1) each), None in the
+# list leaves that thread's time line out, and cpu=False leaves every time line out (a probe from before).
+def share_lines(n, rounds=3, counts=None, looks=None, procs=None, done=True, cpu=None):
     out = ''
     for r in range(rounds):
         c = counts(r) if counts else [1000000] * (n + 1)
         out += f'SMP-SHARE round {r} threads {len(c)} processors {procs or n} looks 99 ms 1000\n'
+        fr = cpu(r) if callable(cpu) else [n / len(c)] * len(c)
         for i, ci in enumerate(c):
             lk = looks(r, i) if looks else [99 // (n + 1)] * n
             out += f'SMP-SHARE round {r} thread {i} count {ci} on ' + ','.join(f'{k}:{v}' for k, v in enumerate(lk)) + '\n'
+            if cpu is not False and fr[i] is not None:
+                out += f'SMP-SHARE round {r} time {i} cpu-us {int(fr[i] * 1000000)} wall-us 1000000\n'
         for k in range(procs or n):
             out += f'SMP-SHARE round {r} cpu {k} user +100 resched +0\n'
     return out + ('SMP-SHARE done\n' if done else '')
@@ -939,19 +945,22 @@ def share_text(n, lines=None, end=True):
     return t + (block('end', p) + tail() if end else '')
 
 
-KEPT = dict(counts=lambda r: [2000000, 1000000, 1000000], looks=lambda r, i: [0, 99] if i == 0 else [49, 0])
+KEPT = dict(counts=lambda r: [2000000, 1000000, 1000000], looks=lambda r, i: [0, 99] if i == 0 else [49, 0],
+            cpu=lambda r: [1.0, 0.5, 0.5])
 SH2 = ['--kind', 'share', '--smp', '2', '--host-cpus', '2']
 case('share at 2 under KVM, a host CPU for each: fair, gated, green', share_text(2), SH2, {'SMP-SHARE'}, set(),
-     says=r'^PASS SMP-SHARE smp=2 share: 3 rounds of 3 threads on 2 processors, every thread at least 1.00 of its fair share')
+     says=r'^PASS SMP-SHARE smp=2 share: 3 rounds of 3 threads on 2 processors, every thread at least 1.00 of its fair share '
+          r'of processor time \(its progress at least 1.00\)')
 case('share at 2 under KVM: a processor that keeps one thread while the other two share CPU 0: red',
      share_text(2, lines=share_lines(2, **KEPT)), SH2, set(), {'SMP-SHARE'},
-     why=r'round 0: thread 1 had 0.75 of its fair share of the progress \(1/3\), under 0.85; looks by processor 0:49,1:0')
+     why=r'round 0: thread 1 had 0.75 of its fair share of processor time \(1/3\), under 0.85 \(its progress 0.75\); '
+         r'looks by processor 0:49,1:0')
 case('share at 2: the looks are said as samples at timer wakes, by processor, beside the parts',
      share_text(2, lines=share_lines(2, **KEPT)), SH2, set(), {'SMP-SHARE'},
      says=r"^INFO SMP-SHARE smp=2 share: round 0: .* \[1.5, 0.75, 0.75\]; the looks \(samples at timer wakes, one phase of "
           r"the turn, not where a thread lives\) by processor \['0:0,1:99', '0:49,1:0', '0:49,1:0'\]")
 case('share at 2 under TCG: printed, not gated', share_text(2, lines=share_lines(2, **KEPT)), SH2, {'SMP-SHARE'}, set(),
-     meta=TCG, says=r"^PASS SMP-SHARE smp=2 share: .*0.75 of its fair share of the progress \(printed\).*tcg: not gated")
+     meta=TCG, says=r"^PASS SMP-SHARE smp=2 share: .*0.75 of its fair share of processor time \(printed\).*tcg: not gated")
 case('share at 4 on two host CPUs: printed, not gated',
      share_text(4, lines=share_lines(4, counts=lambda r: [2, 2, 2, 1, 1])), ['--kind', 'share', '--smp', '4', '--host-cpus', '2'],
      {'SMP-SHARE'}, set(), says=r'kvm: not gated: 4 processors on 2 host CPUs')
@@ -959,6 +968,30 @@ case('share: a thread with no progress is red, gated or not', share_text(2, line
      SH2, set(), {'SMP-SHARE'}, meta=TCG, why=r'round 0: thread 1 made no progress')
 case('share: two rounds and no done', share_text(2, lines=share_lines(2, rounds=2, done=False)), SH2, set(), {'SMP-SHARE'},
      why=r'2 of 3 rounds, no `SMP-SHARE done`')
+# px166 (11-26): the row holds each thread's part of processor time, not of progress. rec-01a976f6's release UEFI boot
+# at 4 on six host threads (three cores) had every processor's ring-3 ticks equal (100-102 a round) and one thread alone
+# on a processor that ran 1.6 times as fast as the other three: progress 1.73 for it and 0.80-0.84 for the rest, time
+# about 1.25 and 0.94. A floor on progress cannot hold where the processors differ in speed; a floor on time can.
+SH4 = ['--kind', 'share', '--smp', '4', '--host-cpus', '6']
+FAST = dict(counts=lambda r: [820, 800, 1730, 840, 810], looks=lambda r, i: [0, 0, 0, 0] if i == 2 else [13, 13, 13, 0],
+            cpu=lambda r: [0.75, 0.75, 1.0, 0.75, 0.75])
+case('share at 4: time even, progress uneven (one processor faster than the rest): green, the progress printed',
+     share_text(4, lines=share_lines(4, **FAST)), SH4, {'SMP-SHARE'}, set(),
+     says=r'^PASS SMP-SHARE smp=4 share: 3 rounds of 5 threads on 4 processors, every thread at least 0.94 of its fair share '
+          r'of processor time \(its progress at least 0.80\);')
+case('share at 4: the progress said beside the time, by thread',
+     share_text(4, lines=share_lines(4, **FAST)), SH4, {'SMP-SHARE'}, set(),
+     says=r"round 0: each thread's part of processor time against the fair 1/5 \[0.94, 0.94, 1.25, 0.94, 0.94\], "
+          r"of the progress \[0.82, 0.8, 1.73, 0.84, 0.81\]")
+case('share at 4: progress even, three processors keeping a thread each and two threads sharing CPU 0: red at 0.62',
+     share_text(4, lines=share_lines(4, cpu=lambda r: [1.0, 1.0, 1.0, 0.5, 0.5])), SH4, set(), {'SMP-SHARE'},
+     why=r'round 0: thread 3 had 0.62 of its fair share of processor time \(1/5\), under 0.85 \(its progress 1.00\)')
+case('share: no time lines (a probe from before): red, gated or not',
+     share_text(2, lines=share_lines(2, cpu=False)), SH2, set(), {'SMP-SHARE'}, meta=TCG,
+     why=r'round 0: 0 time lines for 3 threads')
+case('share: one thread without its time line: red',
+     share_text(2, lines=share_lines(2, cpu=lambda r: [0.667, 0.667, None])), SH2, set(), {'SMP-SHARE'},
+     why=r'round 0: 2 time lines for 3 threads')
 case('share at 2 where one processor runs threads (stage 1)', share_text(2, lines=share_lines(2, procs=1, counts=lambda r: [1, 1])),
      SH2, set(), {'SMP-SHARE'}, why=r'round 0: 2 threads on 1 processors that run threads, want 3 on 2')
 
