@@ -5504,7 +5504,7 @@ jobs:
         timeout-minutes: 25
         run: |
           sudo tools/apt-update
-          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl
+          sudo apt-get install -y -q --no-install-recommends qemu-system-x86 ovmf xorriso clang lld binutils gcc libc6-dev curl openssh-server openssh-client git dnsmasq-base iproute2 e2fsprogs
           qemu-system-x86_64 --version
           gcc --version | head -n 1
           python3 --version
@@ -5539,7 +5539,13 @@ jobs:
           PAX_REQUIRE_UEFI: "1"
           PAX_ENGINE: docker
           PAX_TREE_IMAGE: docker.io/library/python@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-        run: tests/mpx5-yew $PAX_LEGS
+        run: |
+          tests/mpx5-yew $PAX_LEGS
+          mkdir -p "$RUNNER_TEMP/yew-ssh-home" "$RUNNER_TEMP/yew-ssh-tmp"
+          sudo env PAX_WOLF="$PAX_WOLF" PAX_BUILD="$PWD/build" PAX_CACHE="$PWD/.pax-cache" \
+            HOME="$RUNNER_TEMP/yew-ssh-home" SHELL=/bin/sh TMPDIR="$RUNNER_TEMP/yew-ssh-tmp" \
+            PAX_REQUIRE_UEFI=1 PAX_REQUIRE_BURROWD_RIG=1 \
+            bash tests/mpx5-yew --only ssh --images "$PWD/build/mpx5-yew" $PAX_LEGS
 
       - name: keep the programs' sums, the Linux side, the sessions, the screens, the logs
         if: always()
@@ -5549,6 +5555,7 @@ jobs:
           path: |
             build/mpx5-yew/*.txt
             build/mpx5-yew/yew/sums.txt
+            build/mpx5-yew/yew/source.txt
             build/mpx5-yew/termwolf/sums.txt
             build/mpx5-yew/pelt/sums.txt
             build/mpx5-yew/bore/sums.txt
@@ -5564,6 +5571,9 @@ jobs:
             build/mpx5-yew-*.verdict
             build/mpx5-yew-*.typed
             build/mpx5-yew-runs.txt
+            build/yew-colour-*/
+            build/mpx5-burrowd-runs/**/yew-ssh-*.raw
+            build/mpx5-burrowd-runs/**/*.log
           retention-days: 14
           if-no-files-found: warn
 
