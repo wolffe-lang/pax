@@ -50,6 +50,13 @@
       repositories of its own. A job that ever needs them for a later git
       command is named here with why (none today); checkouts of other
       repositories are counted apart.
+  P16 every step that runs apt-get ends when apt stalls (pax#540): it has a
+      `timeout-minutes` of its own, at most APT_STEP_MINUTES, and its update
+      is `sudo tools/apt-update` (stopped after two minutes of silence and
+      tried once more), before any `apt-get install`; no bare `apt-get
+      update` is left. The check is shown to say no to a step with no limit,
+      one with a limit over the bound, one with a bare update and one that
+      installs before it updates, and to pass the shape it asks for.
   P8  what a trunk head already has (tools/ci-covered, against a
       stand-in `gh`): a green `tier all` check run at the head is all, a
       green `tier full` alone is full, a red one or another app's is
@@ -1171,6 +1178,60 @@ say(own_co > 0 and not kept,
     "P15 every checkout whose job then runs a command keeps no git credentials (%d of this repository, %d of others; kept for a "
     "later git command by: %s)%s" % (own_co, other_co, ", ".join("%s (%s)" % kv for kv in PERSIST_OK.items()) or "none",
                                      (": still kept in %d: %s%s" % (len(kept), " ".join(kept[:10]), " …" if len(kept) > 10 else "")) if kept else ""))
+
+# --- P16 every step that runs apt-get ends when apt stalls (pax#540) ----------------------------
+# pax#540: an apt step takes a median of 322 s, at most 510 s, in a full run, and none that succeeded took over 17
+# minutes among the 20,479 jobs read (their installs up to 999 s, their updates up to 85 s). The stalls, every one in
+# `apt-get update`, held their jobs 45 to 160 minutes. tools/apt-update stops an update silent for 120 s and tries it
+# once more; the step's limit bounds the rest.
+APT_STEP_MINUTES = 25
+
+
+def apt_problems(step):
+    """What keeps one step that runs apt-get from ending when apt stalls: [] when nothing does."""
+    if "apt-get" not in step and "tools/apt-update" not in step:
+        return []
+    found = []
+    limit = re.search(r"^        timeout-minutes: (\d+)$", step, re.M)
+    if not limit:
+        found.append("no timeout-minutes of its own")
+    elif int(limit.group(1)) > APT_STEP_MINUTES:
+        found.append("timeout-minutes %s, over %d" % (limit.group(1), APT_STEP_MINUTES))
+    if re.search(r"apt-get\s+(?:-\S+\s+)*update\b", step):
+        found.append("a bare apt-get update")
+    update = re.search(r"^          sudo tools/apt-update$", step, re.M)
+    install = re.search(r"apt-get\s+(?:-\S+\s+)*install\b", step)
+    if not update:
+        found.append("no sudo tools/apt-update")
+    elif install and install.start() < update.start():
+        found.append("an install before the update")
+    return found
+
+
+GOOD_APT = ("      - name: qemu (apt)\n        timeout-minutes: %d\n        run: |\n          sudo tools/apt-update\n"
+            "          sudo apt-get install -y -q qemu-system-x86\n" % APT_STEP_MINUTES)
+apt_says_no = (not apt_problems(GOOD_APT)
+               and apt_problems(GOOD_APT.replace("        timeout-minutes: %d\n" % APT_STEP_MINUTES, ""))
+               and apt_problems(GOOD_APT.replace("timeout-minutes: %d" % APT_STEP_MINUTES,
+                                                 "timeout-minutes: %d" % (APT_STEP_MINUTES + 1)))
+               and apt_problems(GOOD_APT.replace("sudo tools/apt-update", "sudo apt-get update -q"))
+               and apt_problems(GOOD_APT.replace("          sudo tools/apt-update\n", "")
+                                + "          sudo tools/apt-update\n"))
+apt_steps, apt_bad = 0, []
+for j in JOBS:
+    for st in re.split(r"(?m)^(?=      - )", blocks[j]):
+        if not st.startswith("      - "):
+            continue
+        if "apt-get" in st or "tools/apt-update" in st:
+            apt_steps += 1
+            why = apt_problems(st)
+            if why:
+                name = (re.match(r"      - name: (.*)", st) or [None, st.split("\n")[0].strip()])[1]
+                apt_bad.append("%s: %s (%s)" % (j, name, ", ".join(why)))
+say(apt_steps > 0 and not apt_bad and apt_says_no,
+    "P16 every step that runs apt-get (%d) has a limit of at most %d minutes and updates through tools/apt-update%s%s"
+    % (apt_steps, APT_STEP_MINUTES, (": %d do not: %s%s" % (len(apt_bad), "; ".join(apt_bad[:3]), " …" if len(apt_bad) > 3 else ""))
+       if apt_bad else "", "" if apt_says_no else "; the check does not say no to a step without the limit or the tool"))
 
 # --- P7 the red nightly's issue (tl29) ------------------------------------------------------
 FAKE_GH = r'''#!/usr/bin/env bash

@@ -62,7 +62,9 @@
 #       line and table say ext3, data=ordered.
 #   J7  the crash row (tools/root-crash --check): counts, orphans and worse
 #       0 on every disk, each held to the last commit's bound and to
-#       e2fsck -fy's repair; with --rows all the torn row.
+#       e2fsck -fy's repair (a disk the session had closed before its kill,
+#       to the whole session); with --rows all the torn row; first, once,
+#       root-crash's own --selftest (its verdict on made-up kills).
 #   J8  each boot: `block: vda: … 0 errors`, halted, no PANIC (J5's
 #       refusals are not a panic: / stays the initramfs's).
 #   J9  PAX's own revocation: killed after the unlink's sync, the log holds
@@ -665,6 +667,12 @@ if txs and "commit at" in txs[0]:
 
         # --- J7: the crash row -------------------------------------------------------------
         why=
+        if [ -z "${j7self+x}" ]; then
+            j7rc=0
+            python3 -I "$PAX_ROOT/tools/root-crash" --selftest > "$work/root-crash-selftest.txt" 2>&1 || j7rc=$?
+            j7self=$(tail -n 1 "$work/root-crash-selftest.txt")
+        fi
+        [ "$j7rc" = 0 ] || why+=" root-crash --selftest exit $j7rc: $j7self;"
         if [ "$rows" = pr ]; then cr=(--n 4 --ops 600); else cr=(--n 12 --ops 1500 --torn); fi
         rcr=0
         SOURCE_DATE_EPOCH=$EPOCH python3 "$PAX_ROOT/tools/root-crash" --kernel "$elf" --probe "$images/bin/mounts" --firmware "$leg" \
@@ -675,7 +683,7 @@ if txs and "commit at" in txs[0]:
         if [ "$rows" = all ]; then
             grep -q '^| torn | .* | \(none\|lost writes\) |' "$w/crash/crash.txt" 2>/dev/null || why+=" no torn row held;"
         fi
-        [ -z "$why" ] && say "PASS J7 $id: the crash row (${cr[*]}): $tally; every disk within the last commit's bound and e2fsck -fy's tree" || bad "J7 $id:$why"
+        [ -z "$why" ] && say "PASS J7 $id: the crash row (${cr[*]}): $tally; every disk within the last commit's bound and e2fsck -fy's tree; root-crash --selftest: $j7self" || bad "J7 $id:$why"
         rm -rf "$w/crash/"*.img "$w/crash/"*.p2
     done
 done

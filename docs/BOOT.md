@@ -118,7 +118,7 @@ with wolf-lang kw09's `extern "c" let`, `kernel/boot_info` and
 Limine 12.9.1): SeaBIOS 65147–65157 usable frames, 44 of them below
 1 MiB, the highest usable byte below `0x10000000`; OVMF 53784–54863
 usable frames (the count moves by about a thousand between the OVMF
-builds of kasumi, CI and hasu), 159 below 1 MiB; the image near the top
+builds of the CachyOS host, CI and the NixOS host), 159 below 1 MiB; the image near the top
 of RAM (`0xff7f000` under SeaBIOS; `0xbfb1000` or `0xe72b000` under
 OVMF, by build). Usable memory is mapped in the
 HHDM at this base revision, so the allocator reaches every frame it
@@ -230,7 +230,7 @@ controller (Bulk-Only Transport, SCSI transparent; READ(10) and WRITE(10)
 of up to 240 sectors, SYNCHRONIZE CACHE, a write-protect bit read by MODE
 SENSE) as `sdX` after the SATA disks, with `removable` from INQUIRY's RMB
 and the model from its 16-byte product field, as Linux shows them. The
-keyboard and the stick share the controller, as on kasumi's 00:14.0. The
+keyboard and the stick share the controller, as on the CachyOS host's 00:14.0. The
 image builder neither adds nor removes programs from the supplied archive.
 
 For the live image only, place `user/usb-login.sh` at `/etc/pax-live-login`,
@@ -272,7 +272,7 @@ When the screen first attaches it times a 16 KiB read of the framebuffer
 against a write of the same bytes (one of each to warm them, then the
 cheapest of five of each), once, and copies for the rest of the boot only
 when the read cost at most four writes: through a GPU's write-combining mapping a read is
-uncached and far dearer (pax#253: kasumi's GPU), so the scroll redraws;
+uncached and far dearer (pax#253: the CachyOS host's GPU), so the scroll redraws;
 an emulator's framebuffer is ordinary host memory, where the copy is the
 cheaper way. The command-line words `fbread` (copy) and `fbwrite`
 (redraw) force either way (the metal A/B; `tests/mpx3-screen` V7 and V8).
@@ -740,7 +740,7 @@ fix (px78, pax#240):
 
 and another vendor's RAID controller `AHCI: a RAID controller VVVV:DDDD at
 BB:DD.F (class 01.04) is not driven`. The class check is a unit row over
-the configuration bytes (`ahci-check`, tests/mpx6-ahci A15: kasumi's
+the configuration bytes (`ahci-check`, tests/mpx6-ahci A15: the CachyOS host's
 `8086:43d2` at 00:17.0 read as RAID), since QEMU offers no RST; A15 also
 boots a `megasas` controller, class 01.04, beside an AHCI disk.
 
@@ -769,7 +769,7 @@ every ACPI table (checksummed; its signature, OEM ID and length), the MADT's
 entries, the FADT's PM timer and PM1 blocks, the HPET's address, the MCFG's
 windows (logged; PCI stays on mechanism #1), the clock chosen and the tick
 calibrated against it; the console and session kernels add the screen's mode,
-and an xHCI its BAR0 and its interrupt. On kasumi's shape (UEFI, no COM1, no
+and an xHCI its BAR0 and its interrupt. On the CachyOS host's shape (UEFI, no COM1, no
 PIT, the xHCI on MSI at a BAR above 4 GiB, a 3840x2160 GOP: tests/mpx6-firmware
 F8) the lines are:
 
@@ -1070,7 +1070,7 @@ file system's first sectors exactly in PAX's BIOS boot partition, and
 Limine's `bios-install` refuses a partition holding a recognised file
 system (`error: The partition selected to install the BIOS boot code to
 contains a recognised filesystem.`, then `Install failed, undoing work...`;
-kasumi's 860, 2026-10-31). Limine's `--force` is never passed: its other
+the CachyOS host's 860, 2026-10-31). Limine's `--force` is never passed: its other
 checks stay live. So after the new table and before any formatter or
 Limine writes, the installer zeroes four ranges itself, through the
 target's own claimed descriptor, each a phase in the disk log and a line
@@ -1165,7 +1165,7 @@ and both firmware sessions; the measured staged-input run on four assigned
 host CPUs took 5m52s, so these rows are in `tier full`, not nightly-only.
 `PAX_INSTALL_BIG_ROWS` (px84) adds a full-density install onto a sparse
 500 GB target in `tier full` and onto 4 TB in `tier all`
-(`tests/mpx6-install.d/big-run`; 232 s and 1,626 s under TCG on kasumi),
+(`tests/mpx6-install.d/big-run`; 232 s and 1,626 s under TCG on the CachyOS host),
 each target then booted alone under BIOS and UEFI. One fault row gives
 the installer a 4Kn target (virtio `logical_block_size=4096`): it is
 refused as `sector_size` before any write, the target byte-identical.
@@ -1178,7 +1178,7 @@ reference measured 11884 KiB peak RSS. The journalled formatter and
 timer-driven cursor blink remain separate prerequisites.
 
 `tests/mpx6-kasumi` (px78, `tier full`) runs the whole path on a QEMU
-machine shaped like kasumi: OVMF with a fresh variable store, no serial
+machine shaped like the CachyOS host: OVMF with a fresh variable store, no serial
 port, the stick and the USB keyboard on one xHCI controller, an NVMe disk
 with a foreign GPT standing in for CachyOS, and three SATA disks on the
 AHCI controller (two of one model, told apart by serial; the target a

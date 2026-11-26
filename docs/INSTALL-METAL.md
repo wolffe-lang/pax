@@ -1,8 +1,8 @@
-# Installing PAX on kasumi
+# Installing PAX on the CachyOS host
 
-This is the runbook for installing PAX from the USB stick onto a SATA SSD in kasumi, after the first boot (px77) has
+This is the runbook for installing PAX from the USB stick onto a SATA SSD in the CachyOS host, after the first boot (px77) has
 shown that the stick boots and the keyboard works. Every step below was rehearsed in QEMU on a machine shaped like
-kasumi (`tests/mpx6-kasumi`: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe disk
+the CachyOS host (`tests/mpx6-kasumi`: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe disk
 standing in for CachyOS, three SATA disks on the AHCI controller). The reference screens it took are in
 `notes/px78/screens/`; each step names the one to compare against.
 
@@ -14,7 +14,7 @@ Every other disk is listed with its model and serial and refused by name. Four r
 read: the disk `/` is on, a mounted disk, a read-only disk, and the stick itself (any disk whose first partition holds
 `/boot/initramfs.cpio`, which is how the installer recognises a PAX live medium).
 
-kasumi's own disks are never to appear in the file:
+The CachyOS host's own disks are never to appear in the file:
 
 | disk | what it is | rule |
 |---|---|---|
@@ -31,7 +31,7 @@ writing the new partition table and before anything else, the installer zeroes t
 still be read: all of the BIOS boot partition (partition 3, bytes 1 MiB to 2 MiB), the first and last MiB of the EFI
 partition and of the root, the first MiB outside the partition table and the phase log, and the few sectors before
 the backup table. The install log names these phases `zero-bios`, `zero-esp`, `zero-root` and `zero-gap`. (Before
-px86 nothing cleared partition 3, and on kasumi's 860, whose old first partition began at sector 2048, Limine found
+px86 nothing cleared partition 3, and on the CachyOS host's 860, whose old first partition began at sector 2048, Limine found
 the old file system there and refused; see the end of this page.)
 
 ## What you need
@@ -105,10 +105,10 @@ EVO 500GB` becomes `Samsung SSD 870`; `WDC WDS500G2B0A-00SM50` becomes `WDC WDS5
 
 ## 3. The firmware settings
 
-kasumi is an ASUS ROG Maximus XIII Extreme. Press Delete at power-on for setup and F8 for the one-time boot menu (the
+The CachyOS host is an ASUS ROG Maximus XIII Extreme. Press Delete at power-on for setup and F8 for the one-time boot menu (the
 board manual's keys; the splash screen names them too).
 
-**SATA mode: AHCI.** kasumi's SATA controller already runs in AHCI mode (CachyOS sees it as `[8086:43d2]`, a SATA
+**SATA mode: AHCI.** The CachyOS host's SATA controller already runs in AHCI mode (CachyOS sees it as `[8086:43d2]`, a SATA
 controller, class 01.06), so nothing needs changing. In setup it is under Advanced, PCH Storage Configuration, SATA
 Mode Selection. If someone has set it to Intel RST, PAX attaches no SATA disk and prints, early in the boot text:
 
@@ -118,7 +118,7 @@ AHCI: Intel RST/RAID mode at 00:17.0: switch the firmware to AHCI
 
 In that case set it back to AHCI. CachyOS itself needs AHCI to see `sda` and `sdb`.
 
-**Secure Boot.** px76's notes record nothing about Secure Boot on kasumi, and nothing in PAX is signed for it: the
+**Secure Boot.** px76's notes record nothing about Secure Boot on the CachyOS host, and nothing in PAX is signed for it: the
 pinned Limine EFI program on the stick is not a Secure Boot signing or key-enrolment solution (`docs/BOOT.md`). If the
 firmware enforces Secure Boot, it refuses the stick, usually by skipping it in the boot menu or showing a security
 violation. If px77's first boot already worked, leave the setting as it was. If not, turn enforcement off (on ASUS

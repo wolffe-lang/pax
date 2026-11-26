@@ -8,6 +8,7 @@
 #   tools/root-crash --kernel ELF --probe MOUNTS [--n N] [--seed S]
 #                    [--ops K] [--firmware bios|uefi] [--no-journal]
 #                    [--times R] [--check] [--torn] OUTDIR
+#   tools/root-crash --selftest   judge()'s cases, made up, no QEMU
 #
 # The archive: the probe (user/elf/mounts.c) as /bin/mounts, its run list
 # `/bin/mounts churn K` (default 1500 operations, 10 ms apart), installed
@@ -45,7 +46,14 @@
 #     read after it returns, so one that ended before the close may print
 #     a later time); a disk killed before any commit holds no /churn;
 #   - the host's repair's /churn the same as PAX's, every field of
-#     tools/e2tree's.
+#     tools/e2tree's;
+#   - a disk the session had already closed when the kill came (its state
+#     without needs_recovery: PAX sets it at a read-write mount and clears
+#     it only once the unmount's last commit, its checkpoint and the empty
+#     log are on the disk): every operation of the session on it, nothing
+#     to recover, and no bound (the unmount's commit holds everything; PAX
+#     writes that commit's time in whole seconds, so it can fall before
+#     the last operations' printed times).
 # The class, the worst that applies (with a journal, of PAX's replayed disk):
 #   none          e2fsck clean and the tree what the operations left;
 #   lost writes   e2fsck clean, the tree short of what they left (with a
@@ -180,7 +188,91 @@ def classify(rc, out, want, got):
     return "lost writes", "%d names short or different (%s)" % (len(short), " ".join(short[:4]))
 
 
+def judge(ops, last, kstate, b, span, rc, fo, got, hlst, lst, hfix, recl, halted):
+    """A journalled kill's class and first finding (px68), from what the host read: `ops` the session's operations,
+    `last` the last `churn: K` the killed boot printed, `kstate` the killed disk's state (dumpe2fs, before anything
+    replays it), `b` and `span` the last commit's bound and its text, `rc` and `fo` e2fsck -fn of PAX's replayed disk,
+    `got` its /churn, `hlst` and `lst` tools/e2tree of the host's repair and of PAX's replay, `hfix` what the host's
+    e2fsck -fy fixed, `recl` PAX's recovery line, `halted` its second boot halted clean."""
+    if "needs_recovery" not in kstate:
+        # Closed before the kill: the whole session on the disk, nothing to recover, the bound not asked.
+        cls, why = classify(rc, fo, replay(last), got)
+        if last != ops - 1:
+            cls, why = "worse", "the volume clean at the kill before the session's last operation (after %d of %d)" % (last + 1, ops)
+        elif cls != "none":
+            cls, why = "worse", "closed before the kill, yet %s: %s" % (cls, why)
+        why2 = []
+        if churn_lines(hlst) != churn_lines(lst):
+            why2.append("the host's repair gives another tree")
+        if hfix:
+            why2.append("the host's repair fixed more than its replay: %s" % hfix[0].strip())
+        if not halted:
+            why2.append("PAX's second boot did not halt clean")
+        if recl:
+            why2.append("a recovery on a volume the session had closed")
+        if why2 and cls != "worse":
+            cls, why = "worse", "; ".join(why2)
+        return cls, why
+    if b is None:
+        ok_bound = got == replay(-1)
+    else:
+        ok_bound = any(got == replay(m) for m in range(b[0], b[1] + 1))
+    # The class against what the operations did (px67's), the bound apart.
+    cls, why = classify(rc, fo, replay(last), got)
+    if cls in ("none", "lost writes") and not ok_bound:
+        cls, why = "worse", "the tree is outside the last commit's bound (%s)" % span
+    why2 = []
+    if churn_lines(hlst) != churn_lines(lst):
+        why2.append("the host's repair gives another tree")
+    if hfix:
+        why2.append("the host's repair fixed more than its replay: %s" % hfix[0].strip())
+    if not halted:
+        why2.append("PAX's second boot did not halt clean")
+    if not recl:
+        why2.append("no recovery line")
+    if why2 and cls != "worse":
+        cls, why = "worse", "; ".join(why2)
+    return cls, why
+
+
+def selftest():
+    """judge() against made-up kills of a 1500-operation session; exit 0 when each gives the class it wants."""
+    ops = 1500
+    line = "ext2: vda2: recovering the journal: 5 transactions (sequence 1 to 5), 336 blocks written home, 0 revoked; recovery complete"
+    mid = (1245, 1246, 1795647269.81)
+    span_mid = "ops to 1245-1246 at commit 5 (1795647269.810)"
+    # A kill after the session's unmount: its commit's time, which PAX writes in whole seconds, falls before the
+    # session's last operations printed theirs (the release UEFI leg's twelfth kill at 73fa15ce, run 45700366495).
+    end = (1467, 1468, 1795648703.0)
+    span_end = "ops to 1467-1468 at commit 7 (1795648703.000)"
+    cases = [
+        # name, (last, kstate, b, span, got, hlst, lst, hfix, recl, halted), the class wanted, the finding's start
+        ("after-close", (1499, "clean", end, span_end, replay(1499), "", "", [], "", True), "none", ""),
+        ("mid-bound", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "", "", [], line, True), "lost writes", "165 names"),
+        ("mid-outside", (1455, "clean, needs_recovery", mid, span_mid, replay(1300), "", "", [], line, True), "worse", "the tree is outside"),
+        ("mid-no-line", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "", "", [], "", True), "worse", "no recovery line"),
+        ("mid-no-halt", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "", "", [], line, False), "worse", "PAX's second boot"),
+        ("mid-host-tree", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "/churn/f1\treg", "", [], line, True), "worse", "the host's repair gives"),
+        ("no-commit", (56, "clean, needs_recovery", None, "no commit", replay(-1), "", "", [], line, True), "lost writes", ""),
+        ("clean-early", (1455, "clean", mid, span_mid, replay(1455), "", "", [], "", True), "worse", ""),
+        ("after-close-short", (1499, "clean", end, span_end, replay(1467), "", "", [], "", True), "worse", ""),
+        ("after-close-line", (1499, "clean", end, span_end, replay(1499), "", "", [], line, True), "worse", ""),
+        ("after-close-no-halt", (1499, "clean", end, span_end, replay(1499), "", "", [], "", False), "worse", ""),
+    ]
+    bad = 0
+    for name, (last, kstate, b, span, got, hlst, lst, hfix, recl, halted), want, start in cases:
+        cls, why = judge(ops, last, kstate, b, span, 0, "", got, hlst, lst, hfix, recl, halted)
+        ok = cls == want and why.startswith(start)
+        bad += not ok
+        print("%s root-crash-selftest %s: %s (%s), want %s%s" % ("PASS" if ok else "FAIL", name, cls, why[:90], want,
+                                                                  " (%s…)" % start if start else ""))
+    print("root-crash-selftest: %d of %d cases as expected" % (len(cases) - bad, len(cases)))
+    return 1 if bad else 0
+
+
 def main(argv):
+    if argv[1:] == ["--selftest"]:
+        return selftest()
     ap = argparse.ArgumentParser(prog="root-crash")
     ap.add_argument("--kernel", required=True)
     ap.add_argument("--probe", required=True)
@@ -371,30 +463,14 @@ def main(argv):
         rc, fo, lst, state = read_part(copy, "cut%02d" % i)
         open(os.path.join(out, "cut%02d.fsck" % i), "w").write(fo)
         got = tree_of(lst)
-        why2 = []
-        if b is None:
-            ok_bound = got == replay(-1)
-            span = "no commit"
-        else:
-            ok_bound = any(got == replay(m) for m in range(b[0], b[1] + 1))
-            span = "ops to %d-%d at commit %d (%.3f)" % (b[0], b[1], cs[-1][0], b[2])
-        # The class against what the operations did (px67's), the bound apart.
-        cls, why = classify(rc, fo, replay(last), got)
-        if cls in ("none", "lost writes") and not ok_bound:
-            cls, why = "worse", "the tree is outside the last commit's bound (%s)" % span
-        if churn_lines(hlst) != churn_lines(lst):
-            why2.append("the host's repair gives another tree")
-        if hfix:
-            why2.append("the host's repair fixed more than its replay: %s" % hfix[0].strip())
-        if not halted:
-            why2.append("PAX's second boot did not halt clean")
-        if not recl:
-            why2.append("no recovery line")
-        if why2 and cls != "worse":
-            cls, why = "worse", "; ".join(why2)
+        span = "no commit" if b is None else "ops to %d-%d at commit %d (%.3f)" % (b[0], b[1], cs[-1][0], b[2])
+        cls, why = judge(a.ops, last, kstate, b, span, rc, fo, got, hlst, lst, hfix, recl, halted)
+        closed = "needs_recovery" not in kstate
+        if closed:
+            span = "closed before the kill (the unmount's commit%s)" % (" %d" % cs[-1][0] if cs else "")
         if cls in ("counts", "orphans", "worse"):
             failed.append(i + 1)
-        lost = (last - b[1]) if b else last + 1
+        lost = 0 if closed else (last - b[1]) if b else last + 1
         rows.append(("%d" % (i + 1), "%.2f" % t, last, kstate + " -> " + state, cls, why,
                      "%s; %d ops after it lost; %s" % (span, lost, recl.split(": ", 2)[-1] if recl else "-")))
         print("root-crash: kill %2d at %6.2f s, after op %4d: %-11s %s; %s; %s; %s" % (i + 1, t, last, cls, state, why[:100], span, recl[-90:]), flush=True)

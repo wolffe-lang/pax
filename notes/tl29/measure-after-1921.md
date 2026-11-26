@@ -3,8 +3,6 @@
 | pax | after | tier pr | 4 (0) | 2.2 / 4.0 | 0.1 / 0.1 | 0.1 | 2.0 (9.0) | 0.0 |
 | pax | after | tier unplanned | 1 (0) | 0.5 / 0.5 | 0.1 / 0.1 | 0.1 | 0.4 (0.4) | 0.0 |
 | pax | after | (every run) | 5 (0) | 1.9 / 4.0 | 0.1 / 0.1 | 0.1 | 1.7 (9.4) | 0.0 |
-| wolf | after | untiered (CI) | 3 (0) | 0.2 / 0.2 | 0.1 / 0.1 | 0.1 | 0.1 (0.3) | 0.0 |
-| wolf | after | (every run) | 3 (0) | 0.2 / 0.2 | 0.1 / 0.1 | 0.1 | 0.1 (0.3) | 0.0 |
 | wolf-interp | after | tier noop | 1 (0) | 0.3 / 0.3 | 0.1 / 0.1 | 0.1 | 0.2 (0.2) | 0.0 |
 | wolf-interp | after | tier partial | 1 (0) | 0.6 / 0.6 | 0.1 / 0.1 | 0.1 | 0.4 (0.4) | 0.0 |
 | wolf-interp | after | (every run) | 2 (0) | 0.4 / 0.6 | 0.1 / 0.1 | 0.1 | 0.3 (0.5) | 0.0 |

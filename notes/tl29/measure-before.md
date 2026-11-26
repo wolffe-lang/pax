@@ -38,8 +38,6 @@
 | tree-sitter-wolf | before | tier full | 6 (0) | 19 / 49 | 2.1 / 5.1 | 12 | 4.7 (25) | 0.0 |
 | tree-sitter-wolf | before | untiered (CI) | 24 (0) | 6.2 / 14 | 0.5 / 8.1 | 0.5 | 5.5 (121) | 0.0 |
 | tree-sitter-wolf | before | (every run) | 30 (0) | 7.4 / 28 | 1.1 / 8.1 | 2.3 | 5.5 (145) | 0.0 |
-| wolf | before | untiered (CI) | 30 (0) | 1.5 / 22 | 1.4 / 22 | 1.4 | 0.1 (2.8) | 0.0 |
-| wolf | before | (every run) | 30 (0) | 1.5 / 22 | 1.4 / 22 | 1.4 | 0.1 (2.8) | 0.0 |
 | wolf-book | before | (cancelled before the verdict) | 1 (1) | — / — | — / — | — | — (5.4) | — |
 | wolf-book | before | tier full | 4 (0) | 82 / 91 | 1.0 / 3.4 | 66 | 64 (256) | 7.7 |
 | wolf-book | before | tier pr | 2 (0) | 93 / 107 | 9.9 / 15 | 58 | 42 (85) | 0.0 |
@@ -79,7 +77,5 @@
 | wolf-web | before | untiered (CI) | 12 (0) | 6.8 / 19 | 3.3 / 18 | 3.2 | 2.8 (28) | 0.0 |
 | wolf-web | before | untiered (windows learner path) | 18 (3) | 2.2 / 12 | 0.5 / 8.9 | 1.9 | 1.2 (19) | 0.0 |
 | wolf-web | before | (every run) | 30 (3) | 4.4 / 12 | 1.1 / 11 | 2.7 | 1.2 (47) | 0.0 |
-| wollf | before | untiered (tests) | 30 (0) | 15 / 23 | 3.6 / 13 | 3.6 | 12 (356) | 0.0 |
-| wollf | before | (every run) | 30 (0) | 15 / 23 | 3.6 / 13 | 3.6 | 12 (356) | 0.0 |
 | yew | before | untiered (ci) | 25 (10) | 22 / 52 | 0.7 / 5.8 | 14 | 17 (578) | 4.1 |
 | yew | before | (every run) | 25 (10) | 22 / 52 | 0.7 / 5.8 | 14 | 17 (578) | 4.1 |

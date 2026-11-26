@@ -59,6 +59,31 @@ Lifecycle boots, a boot each, independent of I4 and of each other:
       only by the next login on its line ends at that login's time), and one
       `reboot` line: the boot's record, written once.
 
+The hook boot, a boot of its own (warren W6; --rows hook runs it alone): /etc/shrc
+sources the account's own file, HOOK_PATH under its home, last, when it is a
+readable regular file. Root writes each case's file at its prompt; each case
+starts and ends at `login:`. I21 is last: a console that does not give way ends
+the boot.
+  I17 hook-runs: root's `su pax` prints pax's line (HOOK17-pax-1000), not
+      root's; pax's console login prints it before the first prompt; root's
+      login prints root's (HOOK17-root-0).
+  I18 hook-absent: bob with no file logs in as today; a mode-000 file and a
+      directory at the path change nothing bob sees (the same text as with
+      no file) and print nothing of theirs.
+  I19 hook-fails: a file running `false; echo AFTER19-$(id -u)` gives
+      AFTER19-1000 and a working prompt; a syntax error gives the shell's
+      syntax error and a prompt or `login:` again (the row says which, and
+      whether the echo before it on the same line ran: a shell that parses the
+      line first runs none of it); `exit 1` gives `login:` again, the machine
+      running, and the next login works.
+  I20 hook-exec: a file `[ -z "$H20" ] && H20=1 exec /bin/sh -i -m` replaces
+      the login shell: the prompt's shell has H20=1 and leads the session (its
+      sid its pid), and its `exit` gives `login:` again.
+  I21 hook-blocks: a file running `echo BLOCK21; sleep 600` at pax's login,
+      then the byte 0x03 written to the console's input: the prompt (working)
+      or `login:` within 20 s. Never a kill or a trap: if the console does not
+      give way, the row is red and says what the console showed.
+
 Exit 0 when every selected row held, 1 otherwise. A row that cannot be reached (the
 machine halted at a logout) fails by name with what the console said.
 """
@@ -82,6 +107,9 @@ ARGS = None
 PASSWORDS = {}
 MARK = 'PX124-ROW-'
 DETACH_S = 20
+# The account's own file /etc/shrc sources, under its home (warren W6). The rows keep their own copy of the
+# path, so a wrong path in user/shrc is red here; a different path changes this line and user/shrc's.
+HOOK_PATH = '.config/pelt/shrc'
 
 
 def say(line):
@@ -694,6 +722,184 @@ def logout_record(con):
     (ok if held else bad)('I16', why)
 
 
+def hook_file(home):
+    return '%s/%s' % (home.rstrip('/'), HOOK_PATH)
+
+
+def login_seen(con, who, prompted=True, timeout=60):
+    """`who` logs in at `login:` (already read when `prompted`): (the text between the password and what
+    came next, 'prompt' | 'login' | None). 'login' is `login:` again; None, neither within `timeout`."""
+    if not prompted and not con.wait(r'login: $', 60):
+        return con.text(400), None
+    con.type(who)
+    if not con.wait(r'Password: $', 30):
+        return con.text(400), None
+    at = con.cursor
+    con.type(PASSWORDS[who])
+    m = con.wait(r'\$ $|login: $', timeout)
+    if not m:
+        return con.seen[at:].decode(errors='replace'), None
+    return con.seen[at:m.start()].decode(errors='replace'), ('login' if m.group(0).startswith(b'login') else 'prompt')
+
+
+def to_login(con):
+    """From a shell's prompt: `exit`, then `login:` again; False when it does not come."""
+    con.type('exit')
+    return bool(con.wait(r'login: $', 20))
+
+
+def root_setup(con, lines, n):
+    """root logs in at `login:`, runs each line (every status 0), and exits to `login:` again: (held, what)."""
+    seen, how = login_seen(con, 'root')
+    if how != 'prompt':
+        return False, 'root did not reach its prompt (%s): %r' % (how, seen[-300:])
+    out = con.command(' && '.join(['umask 022'] + lines) + '; echo SETUP-RC=$?', n)
+    if out is None or out.strip().splitlines()[-1:] != ['SETUP-RC=0']:
+        to_login(con)
+        return False, 'the setup at root\'s prompt: %r' % out
+    if not to_login(con):
+        return False, 'no `login:` after root\'s setup: %r' % con.text(300)
+    return True, ''
+
+
+def hook_write(path, text):
+    """A setup line writing `text` (one line, no single quote) as the file at `path`."""
+    assert "'" not in text
+    return "echo '%s' > %s" % (text, path)
+
+
+def hook_boot(con):
+    """I17-I21 at one boot: each case starts and ends at `login:`."""
+    rows = ('I17', 'I18', 'I19', 'I20', 'I21')
+    if not con.wait(r'login: $', 120):
+        for row in rows:
+            bad(row, 'no first `login:`: %r' % con.text(300))
+        return
+    pax_f, root_f, bob_f = hook_file('/home/pax'), hook_file('/root'), hook_file('/home/bob')
+    dirs = ' '.join(f.rsplit('/', 1)[0] for f in (pax_f, root_f, bob_f))
+    held, why = root_setup(con, ['mkdir -p ' + dirs, hook_write(root_f, 'echo HOOK17-root-$(id -u)'),
+                                 hook_write(pax_f, 'echo HOOK17-pax-$(id -u)')], 170)
+    if not held:
+        for row in rows:
+            bad(row, why)
+        return
+    # I17: su from root, pax's login, root's login.
+    seen, how = login_seen(con, 'root')
+    su_seen = None
+    if how == 'prompt':
+        at = con.cursor
+        con.type('su pax')
+        m = con.wait(r'\$ $', 30)
+        su_seen = con.seen[at:m.start()].decode(errors='replace') if m else None
+        if m:
+            con.type('exit')
+            con.wait(r'\$ $', 20)
+        to_login(con)
+    pax_seen, pax_how = login_seen(con, 'pax')
+    if pax_how == 'prompt':
+        to_login(con)
+    root_seen, root_how = login_seen(con, 'root')
+    if root_how == 'prompt':
+        con.command('rm -f ' + root_f, 171)
+        to_login(con)
+    su_ok = su_seen is not None and re.search(r'^HOOK17-pax-1000$', su_seen, re.M) and 'HOOK17-root' not in su_seen
+    pax_ok = pax_how == 'prompt' and re.search(r'^HOOK17-pax-1000$', pax_seen, re.M)
+    root_ok = root_how == 'prompt' and re.search(r'^HOOK17-root-0$', root_seen, re.M)
+    (ok if su_ok and pax_ok and root_ok else bad)(
+        'I17', 'the account\'s own file (~/%s) at su pax: %r; at pax\'s login (%s): %r; at root\'s login (%s): %r'
+        % (HOOK_PATH, su_seen, pax_how, pax_seen.strip()[-120:], root_how, root_seen.strip()[-120:]))
+    # I18: no file, an unreadable file, a directory: bob sees the same, and nothing of theirs.
+    base, base_how = login_seen(con, 'bob')
+    if base_how == 'prompt':
+        to_login(con)
+    held1, why1 = root_setup(con, [hook_write(bob_f, 'echo HOOK18-bob'), 'chmod 000 ' + bob_f], 180)
+    locked, locked_how = login_seen(con, 'bob') if held1 else ('', None)
+    if locked_how == 'prompt':
+        to_login(con)
+    held2, why2 = root_setup(con, ['rm -f ' + bob_f, 'mkdir ' + bob_f], 181) if held1 else (False, why1)
+    folder, folder_how = login_seen(con, 'bob') if held2 else ('', None)
+    if folder_how == 'prompt':
+        to_login(con)
+    root_setup(con, ['rm -rf ' + bob_f], 182)
+    norm = lambda t: ' '.join(t.split())
+    same = base_how == locked_how == folder_how == 'prompt' and norm(base) == norm(locked) == norm(folder)
+    (ok if same and 'HOOK18' not in locked + folder else bad)(
+        'I18', 'bob with no file (%s): %r; mode 000 (%s): %r; a directory (%s): %r%s'
+        % (base_how, norm(base), locked_how, norm(locked), folder_how, norm(folder),
+           '' if held1 and held2 else '; setup: %s %s' % (why1, why2)))
+    # I19: a failing command, a syntax error, exit 1.
+    notes, good = [], True
+    held, why = root_setup(con, [hook_write(pax_f, 'false; echo AFTER19-$(id -u)')], 190)
+    seen, how = login_seen(con, 'pax') if held else (why, None)
+    works = how == 'prompt' and (con.command('echo I19A-OK', 191) or '').strip() == 'I19A-OK'
+    if how == 'prompt':
+        to_login(con)
+    good &= bool(re.search(r'^AFTER19-1000$', seen, re.M)) and works
+    notes.append('false then echo: %s, AFTER19 %s, a command after %s'
+                 % (how, 'printed' if 'AFTER19-1000' in seen else 'missing', 'ran' if works else 'did not run'))
+    held, why = root_setup(con, [hook_write(pax_f, 'echo BEFORE19B; if then fi')], 192)
+    seen, how = login_seen(con, 'pax') if held else (why, None)
+    said = bool(re.search(r'syntax error', seen, re.I))
+    before = 'ran' if 'BEFORE19B' in seen else 'did not run'
+    if how == 'prompt':
+        works = (con.command('echo I19B-OK', 193) or '').strip() == 'I19B-OK'
+        to_login(con)
+        good &= works and said
+        notes.append('a syntax error: the prompt (pelt said %r; the echo before it %s), a command after %s'
+                     % (norm(seen.replace('BEFORE19B', ''))[-120:], before, 'ran' if works else 'did not run'))
+    elif how == 'login':
+        good &= said and con.running()
+        notes.append('a syntax error: `login:` again (pelt said %r; the echo before it %s)' % (norm(seen)[-120:], before))
+    else:
+        good = False
+        notes.append('a syntax error: neither a prompt nor `login:`: %r' % seen[-200:])
+    held, why = root_setup(con, [hook_write(pax_f, 'echo BEFORE19C; exit 1')], 194)
+    seen, how = login_seen(con, 'pax') if held else (why, None)
+    if how == 'prompt':
+        to_login(con)
+    again, again_how = login_seen(con, 'root')
+    if again_how == 'prompt':
+        to_login(con)
+    good &= how == 'login' and 'BEFORE19C' in seen and con.running() and again_how == 'prompt'
+    notes.append('exit 1: %s (BEFORE19C %s), the next login %s' % (how, 'printed' if 'BEFORE19C' in seen else 'missing', again_how))
+    (ok if good else bad)('I19', '; '.join(notes))
+    # I20: exec in the file replaces the login shell.
+    held, why = root_setup(con, [hook_write(pax_f, '[ -z "$H20" ] && H20=1 exec /bin/sh -i -m')], 200)
+    seen, how = login_seen(con, 'pax') if held else (why, None)
+    out = con.command('echo H20=$H20; read -r a a a a a s a < /proc/$$/stat; echo SID=$s PID=$$', 201) if how == 'prompt' else None
+    m = re.search(r'H20=(\S*)\s+SID=(\d+) PID=(\d+)', out or '')
+    gone = to_login(con) if how == 'prompt' else False
+    (ok if m and m.group(1) == '1' and m.group(2) == m.group(3) and gone else bad)(
+        'I20', 'exec in the file: %s, the prompt\'s shell %r, its exit gave `login:` %s' % (how, out, 'again' if gone else 'not'))
+    # I21: a file that waits, and 0x03 at the console.
+    held, why = root_setup(con, [hook_write(pax_f, 'echo BLOCK21; sleep 600; echo AFTER21')], 210)
+    if not held:
+        bad('I21', why)
+        return
+    con.type('pax')
+    if not con.wait(r'Password: $', 30):
+        bad('I21', 'no Password: prompt for pax: %r' % con.text(300))
+        return
+    at = con.cursor
+    con.type(PASSWORDS['pax'])
+    if not con.wait(r'^BLOCK21$', 30):
+        bad('I21', 'the file did not run (no BLOCK21): %r' % con.seen[at:].decode(errors='replace')[-300:])
+        return
+    t0 = time.monotonic()
+    con.raw(b'\x03')
+    m = con.wait(r'\$ $|login: $', 20)
+    took = time.monotonic() - t0
+    shown = con.seen[at:].decode(errors='replace')
+    if m and m.group(0).startswith(b'login'):
+        ok('I21', 'the console gave way to 0x03 in %.1f s: `login:` again (AFTER21 %s)' % (took, 'printed' if 'AFTER21' in shown else 'not printed'))
+    elif m:
+        works = (con.command('echo I21-OK', 211) or '').strip() == 'I21-OK'
+        (ok if works else bad)('I21', 'the console gave way to 0x03 in %.1f s: the prompt (AFTER21 %s), a command after %s'
+                               % (took, 'printed' if 'AFTER21' in shown else 'not printed', 'ran' if works else 'did not run'))
+    else:
+        bad('I21', 'the console did not give way to 0x03 within 20 s (a finding, reported as is): %r' % shown[-300:])
+
+
 def lifecycle_boots(the_iso):
     for row, check in (('I14', orphan_before_logout), ('I15', second_start), ('I16', logout_record)):
         con = Console(ARGS.out / ('boot-' + row), the_iso)
@@ -710,7 +916,7 @@ def main():
     a = argparse.ArgumentParser()
     for k in ('images', 'elf', 'tier', 'leg', 'accel', 'out'):
         a.add_argument('--' + k, required=True)
-    a.add_argument('--rows', choices=('all', 'lifecycle'), default='all')
+    a.add_argument('--rows', choices=('all', 'lifecycle', 'hook'), default='all')
     ARGS = a.parse_args()
     ARGS.images = pathlib.Path(ARGS.images)
     ARGS.out = pathlib.Path(ARGS.out)
@@ -724,7 +930,16 @@ def main():
         say('the tree has no %s' % missing)
     make_shadow(work)
     the_iso = iso(work, 'image', 'quiet')
-    lifecycle_boots(the_iso)
+    if ARGS.rows in ('all', 'lifecycle'):
+        lifecycle_boots(the_iso)
+    if ARGS.rows in ('all', 'hook'):
+        con = Console(ARGS.out / 'boot-hook', the_iso)
+        try:
+            hook_boot(con)
+        except Exception as e:
+            bad('I17', 'the hook boot stopped at %s: %s; the console: %r' % (type(e).__name__, e, con.text(300)))
+        finally:
+            con.quit()
     if ARGS.rows == 'all':
         con = Console(ARGS.out / 'boot1', the_iso)
         try:

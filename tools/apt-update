@@ -1,0 +1,61 @@
+#!/bin/sh
+# tools/apt-update — the `apt-get update` of every (apt) step in ci.yml,
+# stopped when it stalls and tried once more (pax#540).
+#
+#   sudo tools/apt-update [COMMAND [ARG...]]
+#
+# Runs COMMAND, `apt-get update -q` unless given, under tools/silence-cap
+# with a limit of APT_UPDATE_QUIET seconds (default 120) on silence. In 90
+# jobs read for pax#540 (30 of a full run and the 60 slowest apt steps that
+# succeeded in 30 days), the update took at most 85 s and was never silent
+# for more than 31 s. A mirror that fails is not silent either: on
+# 2026-11-11 (run 43034582374) its name did not resolve, apt printed an
+# `Ign:` or `Err:` line every 20 s, never silent for more than 44 s, and
+# the update ended by itself after 205 to 421 s. The cap does not fire on
+# that; the install then fails by itself, or the step's limit ends it.
+# Every stall CI saw in those 30 days (15 jobs) printed one InRelease line
+# in its first minute and then nothing until the job's own limit cancelled
+# it, 45 to 160 minutes later. The install is left uncapped: it is where
+# the slow steps spend their time, silent for up to 417 s while they
+# download, and the step's own timeout-minutes bounds it.
+#
+# When silence-cap cuts the command (its exit 124), the command is tried
+# once more, APT_UPDATE_PAUSE seconds (default 10) later, with a warning
+# annotation saying so. A second cut ends it with 124, named; any other
+# status, on either try, ends it at once with that status: an update that
+# fails is not a stall, and trying it again hides nothing the log does not
+# already say.
+#
+# It runs under sudo, so silence-cap, COMMAND and everything COMMAND
+# starts share one user and a cut can end them all (apt's methods too, or
+# the second try would find apt's lock held). sudo resets the environment,
+# so the two variables above reach it only in tests/apt-update-selftest,
+# which runs it without sudo against stand-ins. Linux only, as silence-cap
+# is.
+set -u
+QUIET_DEFAULT=120
+here=$(cd "$(dirname "$0")" && pwd)
+quiet=${APT_UPDATE_QUIET:-$QUIET_DEFAULT}
+pause=${APT_UPDATE_PAUSE:-10}
+case $quiet$pause in
+  *[!0-9]*) echo "apt-update: APT_UPDATE_QUIET and APT_UPDATE_PAUSE are whole seconds" >&2; exit 2 ;;
+esac
+[ $# -gt 0 ] || set -- apt-get update -q
+
+try=1
+while :; do
+  python3 -I "$here/silence-cap" --seconds "$quiet" -- "$@"
+  rc=$?
+  if [ "$rc" -ne 124 ]; then
+    [ "$rc" -eq 0 ] || echo "apt-update: \`$*\` exited $rc on try $try; not a stall, not tried again"
+    exit "$rc"
+  fi
+  if [ "$try" -eq 2 ]; then
+    echo "apt-update: \`$*\` printed nothing for $quiet s on both tries; giving up (exit 124)"
+    exit 124
+  fi
+  echo "apt-update: \`$*\` printed nothing for $quiet s; trying once more in $pause s"
+  echo "::warning title=apt update tried again::\`$*\` printed nothing for $quiet s and was stopped; trying once more"
+  sleep "$pause"
+  try=2
+done

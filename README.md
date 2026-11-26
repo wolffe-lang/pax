@@ -14,7 +14,7 @@ Licence: GPL-3.0, with the wolf Training Data Permission (`LICENSE-TRAINING-DATA
 
 | Area | What PAX does today | Held to |
 |---|---|---|
-| Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto the one disk the stick's allow-list names, its log written to the stick | both firmwares under QEMU, every push; the whole install on a machine shaped like kasumi |
+| Boot | Limine 12.9.1 from one hybrid ISO (BIOS and UEFI), from a GPT disk, or from a live USB stick; a guided installer onto the one disk the stick's allow-list names, its log written to the stick | both firmwares under QEMU, every push; the whole install on a machine shaped like the CachyOS host |
 | Programs | Static x86-64 ELF run in ring 3 with Linux's syscall numbers (a dynamic program, one with a `PT_INTERP` or a PIE, refused by name with its interpreter named); `fork` (glibc's and wolf's `clone`, and musl's `fork` itself), `vfork`, `posix_spawn`, `execve`, `#!` lines, threads (`clone3`, `futex`), signals with the full frame restored, job control and sessions; `getrusage` (user and system time, the peak resident set, the context switches, a process's and its children's); `ptrace` (TRACEME, ATTACH, SEIZE, stops and events, registers, memory, single-step, hardware watchpoints), the requests a debugger uses; a fixed 1 MiB initial stack | the same binaries on Linux, byte for byte |
 | Users | `root`, `pax` and the service account `lobo`; real, effective, saved and file-system ids; every path walk, mode, owner and signal checked by Linux's rules; set-user-ID and set-group-ID honoured as `execve(2)` says (`no_new_privs`, `nosuid`); `login`, `su`, `sudo` and `passwd` in wolf; passwords in `/etc/shadow` as scrypt `$7$`, none in any image | Linux as root and as a user; Ubuntu's `login`, `su`, `sudo` and `passwd` for the commands |
 | Files | A writable in-memory tree seeded from the initramfs: links, modes, times, holes, `rename`; `mmap` private and shared, `mremap`, FIFOs, `flock`; `/dev`, `/proc`, `/sys`, `/tmp` | Linux's tmpfs in a throwaway container |
@@ -178,6 +178,15 @@ powers off.
 `/bin/env ENV=/etc/shrc /bin/sh -i -m` (pelt), and the live stick to its live login script (pelt): on both, `exit`
 ends pid 1, writes `/` and halts, as it always has, and there is no `/run` tmpfs or runtime directory.
 `tests/mpx5-init` holds all of it at the console of an installed-shaped image, and `tests/mpx5-burrowd` the ssh side.
+
+**Your own shell file.** The last thing `/etc/shrc` does is run `~/.config/pelt/shrc`, when that is a readable
+regular file. It runs wherever `/etc/shrc` runs, as the account whose `HOME` it is: a console login, a terminal over
+ssh, and a shell from `su USER` (su sets `HOME` to the target's). A command over ssh and `sudo -s` read no `ENV`, so
+they do not run it. PAX ships no such file; write one to set your own variables, aliases or a program to start at
+login (`exec` in it replaces the login shell, as at a prompt). A failing command in it leaves the prompt working; an
+`exit` in it ends the session, and on an installed system init asks `login:` again. Where pid 1 is the shell (the dev
+and release images), an `exit` in the file ends pid 1 and halts the machine, as `exit` typed there does. The path is
+one line in `user/shrc`. `tests/mpx5-init` (I17 to I21) and `tests/mpx5-burrowd` (B44, B45) hold all of this.
 
 ## Quick start
 
@@ -622,11 +631,11 @@ The installer and the installed tree are tested on separate QEMU virtio disks un
 persistence, and on used ones (an old ESP and root, an old root and swap, an old live image; `tools/used-disk`), each
 left with no signature but PAX's. The merge gate (`tier full`) also installs onto a sparse 500 GB disk and `tier all`
 onto 4 TB, each target then booted alone under both firmwares. `tests/mpx6-kasumi` (`tier full`) runs the whole path
-on a QEMU machine shaped like kasumi: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe
+on a QEMU machine shaped like the CachyOS host: OVMF, no serial port, the stick and the keyboard on one xHCI controller, an NVMe
 disk for CachyOS and three SATA disks; it installs to the listed disk through the keyboard, boots it alone, logs in
 and reads back a file written before the reboot, and holds every other disk byte-identical, then does it all again
-onto a used 1 TB disk shaped like kasumi's own target. Nothing here is a claim about a real machine:
-[docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for kasumi. See
+onto a used 1 TB disk shaped like the CachyOS host's own target. Nothing here is a claim about a real machine:
+[docs/INSTALL-METAL.md](docs/INSTALL-METAL.md) is the runbook for the CachyOS host. See
 [Guided installation](docs/BOOT.md#guided-installation).
 
 ### Upgrading over ssh
@@ -964,7 +973,7 @@ Three programs in wolf write disks, built as static Linux executables and run un
 |---|---|---|
 | `paxgpt` | a GPT | sgdisk, sfdisk |
 | `paxfat` | FAT32 and VFAT | dosfstools, mtools |
-| `paxext2` | an ext2 tree with modes, owners, times, symbolic and hard links (no journal) | e2fsprogs |
+| `paxext2` | an ext2 tree with modes, owners, times, symbolic and hard links (optional internal journal with `--journal`) | e2fsprogs |
 
 `paxext2` formats volumes through 16 TiB less one 4 KiB block, with fully initialized inode tables and sparse
 superblock backups. Its large-volume inode density follows Linux's defaults. File data beyond 2 TiB is written and
@@ -991,7 +1000,7 @@ and `--tier native --firmware bios` picks one leg.
 
 | Group | Suites | What they hold |
 |---|---|---|
-| The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `fetch-busybox-selftest`, `mpx2-interrupts.d/selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `upgrade-screen-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
+| The harness's own proofs | `proof`, `expect-serial-selftest`, `paxtcp-selftest`, `lobo-session-selftest`, `gdb-attach`, `ci-plan`, `fetch-retry-selftest`, `fetch-busybox-selftest`, `apt-update-selftest`, `mpx2-interrupts.d/selftest`, `usb-session-selftest`, `pipe-shape-selftest`, `upgrade-screen-selftest`, `census`, `kernel-as`, `mkw` | that the harness can fail, that CI's plan covers the change, every syscall by name, both assemblers' identical kernels, the first wolf kernel |
 | The kernel's core | `mpx1`, `mpx2-frames`, `mpx2-paging`, `mpx2-interrupts`, `mpx2-sched`, `mpx2-heap`, `mpx6-latency` | first light, the frame allocator, paging, named panics and the timer, threads, the heap: read back through QEMU's monitor; how long a system call keeps interrupts off (`/proc/pax-latency`, with `latency` on the command line) and how late a sleeper, a loopback echo and a host's pings run beside long calls, against Linux in a virtual machine of the same shape |
 | Programs and the console | `mpx3-user`, `mpx3-loader`, `mpx3-boreutils`, `mpx3-console`, `mpx3-shell`, `mpx3-screen`, `mpx3-conspeed`, `mpx3-threads`, `mpx3-tree`, `mpx3-maps`, `mpx3-speaker`, `mpx3-sound`, `mpx3-orchestra` | ring 3, the ELF loader, boreutils and pelt against the same binaries on Linux, screendumps against the reference renderer, no framebuffer read under a QEMU read watchpoint, the console's drawing cost at 2560×1440 as ratios on one boot (its table read off the screen), the kernel's own identity line, threads and signals, the writable tree, mappings, sound captures |
 | The network | `mpx4-net`, `mpx4-udp`, `mpx4-tcp`, `mpx4-ready`, `mpx4-unix`, `mpx4-session`, `mpx4-lobo`, `mpx4-dhcp`, `mpx4-igb`, `mpx4-console-net`, `mpx4-console-push`, `mpx5-burrowd` | captures rebuilt byte by byte, the witnesses against `tools/net-peer` and QEMU's user network (root for the Linux side), `poll` and `epoll`, Unix sockets, lobo serving; the DHCP client against QEMU's server and dnsmasq on a tap (root, dnsmasq), the tick clock held to the clock over the lease, and the UDP and TCP rows again on QEMU's 82576; the console's network: a lease on igb and virtio-net, a static address, no device, no link, a server that never answers, a quiet renewal, and den's clone over https from den's own fixture (git and OpenSSL as black boxes); den pushing from the console over https and through burrow over ssh to fixtures that answer as github.com, names through a DNS server of the suite's own, the resolver's datagram calls against Linux, a scrubbed transcript proven on fake secrets (root, sshd, mke2fs); burrowd started at boot and reached from a LAN on a tap, held to OpenSSH's sshd on Linux: commands by key and by password, the refusals, git through den, a restart, the host key kept across a reboot, the stick's shape on loopback alone (root, dnsmasq, sshd) |
@@ -1004,6 +1013,12 @@ and `--tier native --firmware bios` picks one leg.
 Suites that need something of the host say so and stop: root for the Linux network side (`tools/linux-net`), docker or
 podman for the throwaway containers (`tools/linux-tree`, e2fsprogs), KVM for speed. `tools/mkimage` is reproducible:
 every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so one commit builds one digest.
+
+`tests/distribution-warren IMAGE_DIRECTORY` runs warren's own console rows against a dev image that carries warren,
+the terminal multiplexer in wolf. It fetches the rows from warren's repository at the commit the image's
+`/etc/pax-release` names, and boots the image twice: BIOS with a USB keyboard, then UEFI with a PS/2 one. First it
+checks the image's warren against the image's own release file and digests. It then runs those same bytes on the
+host to replay what the console drew. A row that prints nothing fails. The suite needs KVM and the network.
 
 ## Continuous integration
 
@@ -1090,6 +1105,10 @@ every date in an ISO is `SOURCE_DATE_EPOCH`, default the last commit's time, so 
   checked by digest, with Homebrew's QEMU 11.1.1 (TCG). Every Linux job names `ubuntu-24.04`, never `ubuntu-latest`,
   which moved to Ubuntu 26.04 (glibc 2.43, gcc 15, QEMU 10.2) under the workflow (#474); `tests/ci-runners.py` holds
   each job to that label, and the plan job's runner to Ubuntu 24.04.
+  Every step that runs apt-get has a limit of its own, 25 minutes, and updates through `tools/apt-update`: an
+  `apt-get update` that prints nothing for two minutes is stopped and tried once more, since a stalled one would
+  otherwise hold its job until the job's own limit (#540; `tests/apt-update-selftest`, and `tests/ci-plan` P16 holds
+  every such step to the shape).
 - **NixOS**: nothing system-wide is needed. QEMU and xorriso come from a nix-shell and the UEFI firmware from nixpkgs'
   OVMF; use the **combined** `OVMF.fd` with no separate vars file, because the split `OVMF_CODE.fd` + `OVMF_VARS.fd`
   pair hangs in the firmware under KVM there:

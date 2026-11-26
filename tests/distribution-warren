@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# tests/distribution-warren — warren, the terminal multiplexer in wolf, at the dev image's console: warren's own
+# console rows run against the image the distribution ships.
+#
+#   tests/distribution-warren IMAGE_DIRECTORY [--legs bios-usb,uefi-ps2] [--rows C0,…]
+#
+# IMAGE_DIRECTORY is tools/mkdistribution's OUT (its commit, pax-release, dev.cpio and pax-dev-COMMIT.iso).
+# Only the dev image carries warren. The suite builds nothing and pins nothing of its own: the rows are
+# warren's (tests/pax/console_rows.py at the commit the image names), fetched through tools/fetch-retry, and a
+# change to them is a change to warren. The rows:
+#   JUDGE  the judge's own self-test (tests/distribution-warren.d/judge-selftest.py), first: a judge not
+#          seen telling green from red judges nothing
+#   W0     the image's warren (tests/distribution-warren.d/identity.py): the ISO boots OUT's dev.cpio; its
+#          /etc/pax-release is OUT's and names warren's commit (the resolution's too, when OUT has one);
+#          /usr/bin/warren is the bytes the archive's own digests name, a static x86-64 executable; warren's
+#          tree at that commit; and those same bytes, run on this host, name that tree's version. warren's
+#          vt-dump in the rows is this copy, so the host replays the console with the image's own warren.
+#   W1, W2 one a leg (the legs in --legs, in order): warren's rows on that firmware and keyboard, each of its
+#          rows a row of this suite (W1-C0 …), judged by tests/distribution-warren.d/judge.py. A row that
+#          printed nothing fails; it is never a skip.
+# The rows asked are the ones warren's file asks by default, unless --rows narrows them.
+# Each leg is one boot with KVM and 2 GiB (OVMF for UEFI), its COM1 transcript kept under the work
+# directory PAX_BUILD/distribution-warren.*, which this suite makes new each run. It needs the network for
+# warren's tree (PAX_WARREN_REPO, a local clone or cache holding the commit, is fetched from instead when set).
+# Exit 0 when every row passed, 1 otherwise, 2 on a usage or tool error.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../tools/lib.sh"
+D=$here/distribution-warren.d
+legs=bios-usb,uefi-ps2 rows=
+[ $# -ge 1 ] || die 'usage: distribution-warren IMAGE_DIRECTORY [--legs bios-usb,uefi-ps2] [--rows C0,…]'
+out=$(realpath "$1"); shift
+while [ $# -gt 0 ]; do
+    case $1 in
+        --legs) legs=$2; shift 2 ;;
+        --rows) rows=$2; shift 2 ;;
+        *) die "unknown option $1" ;;
+    esac
+done
+for leg in ${legs//,/ }; do
+    case $leg in bios-usb|bios-ps2|uefi-usb|uefi-ps2) ;; *) die "a leg is FIRMWARE-KEYBOARD (bios or uefi, usb or ps2): $leg" ;; esac
+done
+[ -z "$rows" ] || printf '%s\n' "$rows" | grep -Eqx 'C[0-9]+(,C[0-9]+)*' || die "--rows is a comma list of row names: $rows"
+need python3 git xorriso
+[ -f "$out/commit" ] || die "$out has no commit: not tools/mkdistribution's OUT"
+head=$(cat "$out/commit")
+iso=$out/pax-dev-${head:0:8}.iso
+[ -f "$iso" ] && [ -f "$out/dev.cpio" ] || die "$out has no pax-dev-${head:0:8}.iso or dev.cpio"
+mkdir -p "$PAX_BUILD"
+work=$(mktemp -d "$PAX_BUILD/distribution-warren.XXXXXX")
+say "image $head: $(sha256_of "$iso") $(basename "$iso"); work $work"
+ind() { "$@" 2>&1 | sed 's/^/  /'; return "${PIPESTATUS[0]}"; }
+fails=
+
+if ind python3 -I -B "$D/judge-selftest.py"; then
+    echo 'PASS JUDGE: the judge and the identity reader tell green from red on every made-up case'
+else
+    echo 'FAIL JUDGE: the judge or the identity reader misread a made-up case (above): no leg is judged'
+    fails="$fails JUDGE"
+fi
+
+w0=ok
+if ! xorriso -osirrox on -indev "$iso" -extract /boot/initramfs.cpio "$work/iso-initramfs.cpio" > "$work/extract.log" 2>&1; then
+    echo "FAIL W0 archive: the ISO's /boot/initramfs.cpio could not be read back ($work/extract.log)"
+    w0=
+elif ! python3 -I -B "$D/identity.py" archive "$out" "$work/iso-initramfs.cpio" "$work"; then
+    w0=
+fi
+if [ -n "$w0" ]; then
+    commit=$(cat "$work/warren-commit")
+    repo=${PAX_WARREN_REPO:-$(cat "$work/warren-repo")}
+    mkdir "$work/tree"
+    git -C "$work/tree" init -q
+    if ! ind "$PAX_ROOT/tools/fetch-retry" "$work/tree" "$repo" "$commit" "$commit"; then
+        echo "FAIL W0 tree: warren $commit could not be fetched from $repo"
+        w0=
+    else
+        git -C "$work/tree" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+        python3 -I -B "$D/identity.py" tree "$work/tree" "$commit" "$work/warren" || w0=
+    fi
+fi
+if [ -n "$w0" ] && [ -z "$rows" ]; then
+    rows=$(python3 -I -B "$D/identity.py" rows "$work/tree/tests/pax/console_rows.py") || { echo "$rows"; w0=; }
+fi
+[ -n "$w0" ] || fails="$fails W0"
+
+i=0 blocked=$fails
+for leg in ${legs//,/ }; do
+    i=$((i + 1))
+    fw=${leg%-*} kbd=${leg#*-}
+    if [ -n "$blocked" ]; then
+        echo "FAIL W$i $fw $kbd: not run, as$blocked failed"
+        fails="$fails W$i"
+        continue
+    fi
+    if [ "$i" = 1 ]; then
+        need qemu-system-x86_64
+        [ -c /dev/kvm ] && [ -w /dev/kvm ] || die 'the rows boot with KVM, and /dev/kvm is not usable here'
+    fi
+    say "W$i: warren $commit's console rows $rows, $fw firmware, $kbd keyboard"
+    rc=0
+    (cd "$work" && exec python3 -I "$work/tree/tests/pax/console_rows.py" --pax "$PAX_ROOT" --warren "$work/warren" \
+        "$iso" "$work/$leg" "$fw" "$kbd" "$rows") > "$work/$leg.out" 2>&1 < /dev/null || rc=$?
+    sed 's/^/  /' "$work/$leg.out" | cut -c1-600
+    python3 -I -B "$D/judge.py" "$i" "$fw" "$kbd" "$rows" "$rc" "$work/$leg.out" || fails="$fails W$i"
+done
+
+if [ -n "$fails" ]; then
+    echo "distribution-warren: FAIL$fails (transcripts under $work)"
+    exit 1
+fi
+echo "distribution-warren: PASS warren $commit at the dev image's console, legs $legs, rows $rows"
