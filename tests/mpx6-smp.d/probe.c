@@ -839,7 +839,7 @@ static U settled_kb(L p, U *ms, U *left) {
         if (take(&z)) {
             k = 0;
             for (int i = 0; i < 4; i++) if (G->gtids[i] > 0 && cpu_of(&z, G->gtids[i]) >= 0) k++;
-            for (int i = 0; i < z.n; i++) if (z.cur[i] == CUR_KERNEL) k++;
+            /* plant: the settle blind again to an exec's old leader (`current kernel`), as before b408a876 (red at SMP-EXEC-LEAVE's shortfall) */
         }
         *left = k;
         if (!k || rdtsc() >= end) break;
