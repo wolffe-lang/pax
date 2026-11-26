@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# The existing editor image, typed by each keyboard, with raw SGR retained.
+set -uo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ "$#" = 4 ] || die 'usage: colours IMAGES TIER FIRMWARE OUT'
+images=$1 tier=$2 firmware=$3 out=$4
+fail=0
+for adapter in ps2 usb; do
+    d=$out/$adapter
+    mkdir -p "$d"
+    log=$d/serial.log sock=$d/monitor.sock
+    rm -f "$sock" "$d/dumps.txt"
+    : > "$log"
+    python3 -I "$PAX_ROOT/tools/ps2-session" --serial "$log" --monitor "$sock" \
+        --keys "$PAX_ROOT/user/console/yew-colour.keys" --out "$d" --timeout 300 > "$d/keys.log" 2>&1 &
+    sender=$!
+    topology=; [ "$adapter" != usb ] || topology=root
+    boot=0 typed=0
+    PAX_USB_KBD=$topology "$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$log" --timeout 480 \
+        --qemu -m --qemu 512M --qemu -monitor --qemu "unix:$sock,server=on,wait=off" \
+        --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' \
+        "$images/$tier/session.iso" > "$d/halt.log" 2>&1 || boot=$?
+    wait "$sender" || typed=$?
+    if [ "$boot" != 0 ] || [ "$typed" != 0 ]; then
+        printf 'FAIL yew-colour-session-%s boot=%s sender=%s\n' "$adapter" "$boot" "$typed"
+        fail=1
+    fi
+    python3 -I "$PAX_ROOT/tests/mpx5-yew.d/colour-results.py" "$d" "$adapter" || fail=1
+    if [ "$adapter" = usb ]; then
+        if ! command grep -aEq 'console: 0 bytes from com1, [1-9][0-9]* keys \(0 scancodes\)' "$log"; then
+            printf 'FAIL yew-colour-usb-path no proof of zero PS/2 scancodes\n'
+            fail=1
+        else
+            printf 'PASS yew-colour-usb-path zero PS/2 scancodes\n'
+        fi
+    fi
+done
+exit "$fail"
