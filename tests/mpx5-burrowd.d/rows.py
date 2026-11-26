@@ -172,6 +172,7 @@ import argparse
 import os
 import pathlib
 import re
+import runpy
 import secrets
 import select
 import shutil
@@ -1484,7 +1485,7 @@ def main():
     a = argparse.ArgumentParser()
     for k in ('images', 'elf', 'tier', 'leg', 'accel', 'out'):
         a.add_argument('--' + k, required=True)
-    a.add_argument('--rows', choices=('all', 'hook'), default='all')
+    a.add_argument('--rows', choices=('all', 'hook', 'yew'), default='all')
     ARGS = a.parse_args()
     ARGS.images = pathlib.Path(ARGS.images)
     out = pathlib.Path(ARGS.out)
@@ -1518,7 +1519,11 @@ def main():
         con = Console(b1, iso, vol)
         try:
             fp = first_boot(con, client, linux)
-            if fp and ARGS.rows == 'hook':
+            if fp and ARGS.rows == 'yew':
+                editor_rows = runpy.run_path(str(ROOT / 'tests/mpx5-yew.d/ssh-colours.py'))['run_rows']
+                if not editor_rows(client, GUEST_AT):
+                    bad('yew-terminal-ssh', 'editor colour or key rows failed')
+            elif fp and ARGS.rows == 'hook':
                 hook_rows(client)
             elif fp:
                 host_rows(client)
