@@ -85,6 +85,11 @@
 # PAX_YEW_PAUSE seconds apart on PAX (default 6: yew's start under TCG,
 # measured in notes/px58), tools/linux-tty's 1.5 s in the container.
 #
+# --only colours --images DIR runs the keyword SGR, default foreground and
+# keyboard guards; --only ssh --images DIR uses the existing SSH network rig.
+# Ctrl+Alt+Up/Down remain H-mode bindings in the carried editor; byte guards
+# do not claim an all-mode binding change.
+#
 # The UEFI leg needs OVMF: SKIPPED LOUDLY without it unless
 # PAX_REQUIRE_UEFI=1 (CI sets it), when it is a failure. Exit 0 when
 # every assertion held, 1 otherwise, 2 on a usage or tool error.
@@ -107,10 +112,31 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $only in ''|build|linux|pointer) ;; *) die "--only takes build, linux or pointer" ;; esac
+case $only in ''|build|linux|pointer|colours|ssh) ;; *) die "--only takes build, linux, pointer, colours or ssh" ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 [ "$only" != pointer ] || [ -n "$images" ] || die "--only pointer needs --images DIR"
 need readelf python3
+python3 -I -B "$here/mpx5-yew.d/colour-selftest.py" || exit 1
+if [ "$only" = ssh ]; then
+    [ -n "$images" ] || die "--only ssh needs --images DIR"
+    t=both f=both
+    [ "$tiers" = 'native release' ] || t=$tiers
+    [ "$legs" = 'bios uefi' ] || f=$legs
+    export PAX_YEW_IMAGES=$images
+    "$here/mpx5-burrowd" --rows yew --tier "$t" --firmware "$f"
+    exit $?
+fi
+if [ "$only" = colours ]; then
+    [ -n "$images" ] || die "--only colours needs --images DIR"
+    failed=0
+    bash "$here/mpx5-yew.d/linux-colours" "$images" "$PAX_BUILD/yew-colour-linux" || failed=1
+    for tier in $tiers; do
+        for leg in $legs; do
+            bash "$here/mpx5-yew.d/colours" "$images" "$tier" "$leg" "$PAX_BUILD/yew-colour-$tier-$leg" || failed=1
+        done
+    done
+    exit "$failed"
+fi
 
 PKEYS=$PAX_ROOT/user/console/termwolf.keys
 YKEYS=$PAX_ROOT/user/console/yew.keys
@@ -194,6 +220,8 @@ if [ -z "$images" ]; then
     cp "$work/termwolf/termwolf" "$p/bin/termwolf" 2>/dev/null || why+=" no termwolf;"
     cp "$work/bin/as" "$p/bin/as" 2>/dev/null || why+=" no as;"
     cp "$work/yew/yew" "$s/bin/yew" 2>/dev/null || why+=" no yew;"
+    cp "$work/termwolf/termwolf" "$s/bin/termwolf" 2>/dev/null || why+=" no termwolf for colour key guards;"
+    cp "$PAX_ROOT/tests/mpx5-yew.d/keyword.lu" "$s/home/pax/keyword.lu" || why+=" no syntax sample;"
     cp "$work/pelt/pelt" "$s/bin/sh" 2>/dev/null || why+=" no pelt;"
     for u in $BORE; do cp "$work/bore/$u" "$s/bin/$u" 2>/dev/null || why+=" no $u;"; done
     cp "$work/bin/as" "$s/bin/as" 2>/dev/null || why+=" no as;"
@@ -210,7 +238,7 @@ if [ -z "$images" ]; then
     args=(/etc/pax-run="$p/pax-run":644)
     for f in "$p"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/probe.cpio" "${args[@]}" > "$work/probe.initramfs.txt" || why+=" tools/mkinitramfs probe;"
-    args=(/home/pax/:755:1000:1000 /home/pax/notes.txt="$s/home/pax/notes.txt":644:1000:1000 /etc/pax-run="$s/pax-run":644)
+    args=(/home/pax/:755:1000:1000 /home/pax/notes.txt="$s/home/pax/notes.txt":644:1000:1000 /home/pax/keyword.lu="$s/home/pax/keyword.lu":644:1000:1000 /etc/pax-run="$s/pax-run":644)
     for f in "$s"/bin/*; do args+=("/bin/${f##*/}=$f:755"); done
     "$PAX_ROOT/tools/mkinitramfs" "$work/session.cpio" "${args[@]}" > "$work/session.initramfs.txt" || why+=" tools/mkinitramfs session;"
     # The container's trees are the archives' (the run list kept out).
@@ -677,6 +705,12 @@ sys.exit(0 if b"$ cat notes.txt\nalpha\nbeta\ngamma\ndelta\n" in d else 1)' "$ou
             bad "Y8 $id: visible feature session"
         fi
         pointer_row "$tier" "$leg"
+    done
+done
+bash "$here/mpx5-yew.d/linux-colours" "$images" "$PAX_BUILD/yew-colour-linux" || fail=1
+for tier in $tiers; do
+    for leg in $legs; do
+        bash "$here/mpx5-yew.d/colours" "$images" "$tier" "$leg" "$PAX_BUILD/yew-colour-$tier-$leg" || fail=1
     done
 done
 cat "$runs"
