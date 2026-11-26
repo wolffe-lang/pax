@@ -704,8 +704,8 @@ static void g_spin(void *arg) {
             while (rdtsc() < end) G->spins++;
             exit_group(10);
         }
-        /* SMP-EXEC-LEAVE's exec-settle rounds, until go: every 2 ms the sibling gives its processor up (sched_yield),
-           so the run queue's turn no longer keeps step with the ticks the main thread's looks follow (`main_on_ap`) */
+        /* SMP-EXEC-LEAVE's exec-settle rounds, until go: every 2 ms the sibling gives its processor up (sched_yield);
+           with this, the main thread's look (`main_on_ap`) finds itself on an application processor far more often */
         if (G->yields && G->go == 0) {
             U t = rdtsc();
             if (t >= next) { next = t + cycles_of_ms(2); yield(); }
@@ -734,15 +734,11 @@ static int main_naps;
 /* SMP-EXEC-LEAVE's exec-settle rounds, in the group's main thread before it says go: a look at /proc/pax-cpus just after
    each wake from a sleep of 1 to 4 ticks, until one look shows it current on an application processor and the exec'ing
    sibling current on another. Its processor, or -1 when none came in 2 s (0.5 s past two processors, where all four run
-   at once and nothing moves them: counted there, not wanted). The test word holds only an application processor.
-   Under KVM the ticks are steady and the run queue turns in step with them, so a look made at a wake sees the turn at
-   the same phase each time: with only that, the main thread was on the application processor at the exec in 3 rounds
-   of 40 (three threads spinning on two processors each made a fair third of the progress, while looks made at wakes saw
-   the same one opposite the looker every time). A look made
-   while spinning found it there in 294 rounds of 400, but in 94 of them it lost that processor before the exec ended
-   it: such a look comes late in its quantum. So the siblings give their processors up every 2 ms until go (`g_spin`),
-   which takes the turn out of step with the ticks, and the main thread looks just after a wake, at the start of its
-   quantum, with up to two ticks on that processor before anything else may take it. */
+   at once: counted there, not wanted). The test word holds only an application processor. As measured at two
+   processors, with the siblings yielding until go (`g_spin`): the look found it there in 0.97 of the rounds under KVM
+   and in all of them under TCG; about 0.62 of the rounds under KVM and 0.53 under TCG then opened (the old leader still
+   held when the wait4 came back), the rest's main thread no longer on that processor when the exec ended it, for a
+   cause not established. Without the yields, looks made at wakes found it there in 3 rounds of 40 under KVM. */
 static L main_on_ap(void) {
     struct snap z;
     U t0 = rdtsc(), lim = 2000;
@@ -899,9 +895,10 @@ static void row_leave(void) {
        test word holds it. The exec takes its pid for the caller, so /proc/pax-cpus names that processor `current
        kernel` until it switches, its CR3 still the space the exec parked. Each round read as SMP-EXIT's are (at the
        wait4, then `settled_kb`), and once more 500 ms on after another reap, when every hold is long over: the settled
-       reading must be that one. `main-cpu` the processor the main thread said go on (-1: no look found one). At two
-       processors the rounds go on past twenty until five have opened (the wait4 back with the space still held: the
-       window the settle must wait out), sixty at most; the row calls fewer NOT-FORCED. */
+       reading must be that one. `main-cpu` the processor the main thread said go on (-1: no look found one). Not every
+       round opens (the wait4 back with the space still held: the window the settle must wait out; `main_on_ap` has the
+       rates measured), so at two processors the rounds go on past twenty until five have opened, sixty at most; the
+       row calls fewer NOT-FORCED. */
     main_naps = 0;
     struct snap zc;
     int two = take(&zc) && zc.active == 2, opened = 0;
@@ -934,8 +931,8 @@ static void row_leave(void) {
    rounds of one second: per round its threads, processors, looks and length; per thread its progress and the looks it
    was current in on each processor; per processor the ring-3 ticks and RESCHEDs it took. A fair scheduler gives each
    thread N/(N + 1) of a processor; the row (rows.py) holds each to its part of the round's progress. The looks are
-   taken at timer wakes and so, under a steady tick, at one phase of the run queue's turn: samples, never where a thread
-   lives (the looker is current on one processor and sees only the others). */
+   samples taken at timer wakes, never where a thread lives: the looker is current on one processor and sees only the
+   others, and a fair boot under KVM at 2 saw the same thread opposite the looker in every look. */
 #define SHARE_MAX 17
 static struct thr sthr[SHARE_MAX];
 static volatile U *share_c;
