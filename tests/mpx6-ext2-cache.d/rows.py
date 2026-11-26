@@ -167,7 +167,7 @@ class Suite:
         # copies and relatime then keeps.
         names = [Path(dirpath) / n for dirpath, dirnames, filenames in os.walk(seed) for n in filenames + dirnames]
         for name in names + [seed]:
-            os.utime(name, (EPOCH, EPOCH))
+            os.utime(name, (EPOCH + 1 if name.name == "d007" else EPOCH, EPOCH))
         self.disk = self.out / "disk.img"
         with self.disk.open("wb") as f:
             f.truncate(20 << 30)
