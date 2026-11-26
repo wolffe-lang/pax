@@ -12,6 +12,10 @@ REV = 'c9344fce472df7be05efd1b631c99d2a232b61a9'
 
 
 def check():
+    spec = importlib.util.spec_from_file_location('pxg_rows', Path(__file__).with_name('pxg-rows.py'))
+    guest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guest)
+    assert guest.EXPECTED['VERSION'][1].startswith('paxage 0.2.1 (pxg;'), 'I-pxg-version'
     pin = dict(line.split('=', 1) for line in (ROOT / 'user/pxg.pin').read_text().splitlines()
                if line and not line.startswith('#'))
     assert pin['PXG_REV'] == REV, 'I-pxg-version-pin'
