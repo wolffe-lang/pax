@@ -1172,6 +1172,20 @@ def git_rows(client, work):
             % (p[0], l[0], p[1], l[1], len(p[2].splitlines()), len(l[2].splitlines()), p[3], p[4]))
 
 
+def settled(path, timeout=10.0, steady=0.3):
+    """The bytes of the picture QEMU's screendump is writing at PATH, once its size has held for STEADY
+    seconds; b'' when that does not happen within TIMEOUT seconds."""
+    end = time.monotonic() + timeout
+    last = -1
+    while time.monotonic() < end:
+        size = path.stat().st_size if path.exists() else -1
+        if size > 0 and size == last:
+            return path.read_bytes()
+        last = size
+        time.sleep(steady)
+    return b''
+
+
 def screen(con, name):
     """The console's screen now, as QEMU's screendump writes it (P6), its bytes; b'' when it cannot be
     read. The console settles first: what the serial port has is pumped for a second."""
@@ -1189,15 +1203,7 @@ def screen(con, name):
         s.close()
     except OSError:
         return b''
-    end = time.monotonic() + 10
-    last = -1
-    while time.monotonic() < end:
-        size = path.stat().st_size if path.exists() else -1
-        if size > 0 and size == last:
-            return path.read_bytes()
-        last = size
-        time.sleep(0.3)
-    return b''
+    return settled(path)
 
 
 def kmsg_rows(con, client):
