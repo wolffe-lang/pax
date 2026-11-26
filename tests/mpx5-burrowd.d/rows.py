@@ -1172,15 +1172,30 @@ def git_rows(client, work):
             % (p[0], l[0], p[1], l[1], len(p[2].splitlines()), len(l[2].splitlines()), p[3], p[4]))
 
 
+PPM_HEADER = re.compile(rb'P6\s+(\d+)\s+(\d+)\s+(\d+)\s')
+
+
+def ppm_length(head):
+    """The whole length a P6 picture's header declares (the header and every sample), or None when HEAD
+    does not start with one."""
+    m = PPM_HEADER.match(head)
+    if not m or not 0 < int(m.group(3)) < 65536:
+        return None
+    return m.end() + int(m.group(1)) * int(m.group(2)) * 3 * (1 if int(m.group(3)) < 256 else 2)
+
+
 def settled(path, timeout=10.0, steady=0.3):
-    """The bytes of the picture QEMU's screendump is writing at PATH, once its size has held for STEADY
-    seconds; b'' when that does not happen within TIMEOUT seconds."""
+    """The bytes of the picture QEMU's screendump is writing at PATH, once it is whole: as long as its own
+    P6 header declares, and that size held for STEADY seconds. b'' when it is not whole within TIMEOUT
+    seconds (a half picture is never returned: B40 and B43 compare pictures byte for byte)."""
     end = time.monotonic() + timeout
     last = -1
     while time.monotonic() < end:
         size = path.stat().st_size if path.exists() else -1
         if size > 0 and size == last:
-            return path.read_bytes()
+            data = path.read_bytes()
+            if len(data) == size and ppm_length(data[:64]) == size:
+                return data
         last = size
         time.sleep(steady)
     return b''
