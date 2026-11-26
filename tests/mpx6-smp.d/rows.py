@@ -945,21 +945,25 @@ elif a.kind == 'leave':
                              f'within 64 kB of the reading 500 ms on (settled in at most '
                              f'{max(kv(x, "settle-ms") for _r, x in read)} ms); no panic')
 elif a.kind == 'share':
-    # SMP-SHARE: N + 1 threads spin on the N processors that run threads, each counting its own progress, three rounds of
-    # a second; each thread's part of a round's progress against the fair 1/(N + 1). A scheduler that let a processor
-    # keep one thread while the others took turns on CPU 0 would give that thread 1/2 of the progress at 2 and the other
-    # two 1/4 each, 0.75 of fair. Held where the CPU shares are (SHARES): under KVM with a host CPU for each processor,
-    # every thread at least 0.85 of fair; a thread with no progress is red anywhere. The looks (/proc/pax-cpus after
-    # each 10 ms sleep) are printed as samples taken at timer wakes, which say nothing of where a thread lives (a fair
-    # boot under KVM at 2 saw one thread opposite the looker in every look while each made a third of the progress);
-    # the counts are the measure.
+    # SMP-SHARE: N + 1 threads spin on the N processors that run threads, three rounds of a second; each thread's part of
+    # the round's processor time against the fair 1/(N + 1). Each thread reads its own processor time at the round's
+    # edges (getrusage(RUSAGE_THREAD): the kernel's TSC cycles run by that thread), so the part is its time on a
+    # processor over its own interval, against the threads' mean. A scheduler that let a processor keep one thread
+    # while the others took turns on CPU 0 would give that thread 1/2 of the time at 2 and the other two 1/4 each, 0.75
+    # of fair. Held where the CPU shares are (SHARES): under KVM with a host CPU for each processor, every thread at
+    # least 0.85 of fair time. Each thread's progress (its own counter) is printed beside its time, never gated: on a
+    # host whose CPUs are not equal (two guest processors on one core's two threads) progress follows the host's cycles,
+    # not the scheduler (rec-01a976f6: every processor's ring-3 ticks equal, progress 1.73 for the thread alone on a
+    # fast processor, 0.80 for those sharing the slower three). A thread with no progress is red anywhere, and a round
+    # without every thread's time is red. The looks (/proc/pax-cpus after each 10 ms sleep) are printed as samples taken
+    # at timer wakes, which say nothing of where a thread lives.
     why, info = [], []
     sh = lines('SMP-SHARE')
     hdr = [x for x in sh if re.match(r'round \d+ threads \d+ ', x)]
     done = 'SMP-SHARE done' in text
     if not done or len(hdr) != 3:
         why.append(f'{len(hdr)} of 3 rounds' + ('' if done else ', no `SMP-SHARE done`'))
-    worst = None
+    worst = wprog = None
     for x in hdr:
         r, t, pn = kv(x, 'round'), kv(x, 'threads'), kv(x, 'processors')
         if pn != N or t != N + 1:
@@ -970,8 +974,11 @@ elif a.kind == 'share':
         if len(th) != t or not all(isinstance(c, int) for c in counts):
             why.append(f'round {r}: {len(th)} thread lines for {t} threads')
             continue
+        tm = {kv(y, 'time'): (kv(y, 'cpu-us'), kv(y, 'wall-us')) for y in sh if re.match(rf'round {r} time \d+ ', y)}
+        fr = [tm[i][0] / tm[i][1] if i in tm and isinstance(tm[i][0], int) and isinstance(tm[i][1], int) and tm[i][1] > 0
+              else None for i in range(t)]
         tot = sum(counts)
-        ratios = [c * t / tot if tot else 0.0 for c in counts]
+        prog = [c * t / tot if tot else 0.0 for c in counts]
         ons = []
         for y in th:
             m = re.search(r' on (\S+)$', y)
@@ -979,13 +986,20 @@ elif a.kind == 'share':
         for i, c in enumerate(counts):
             if c == 0:
                 why.append(f'round {r}: thread {i} made no progress (looks by processor {ons[i]})')
-            elif TIMED and ratios[i] < 0.85:
-                why.append(f'round {r}: thread {i} had {ratios[i]:.2f} of its fair share of the progress (1/{t}), '
-                           f'under 0.85; looks by processor {ons[i]}')
-        worst = min(ratios) if worst is None else min(worst, min(ratios))
-        info.append(f'round {r}: each thread\'s part of the progress against the fair 1/{t} '
-                    f'{[round(q, 2) for q in ratios]}; the looks (samples at timer wakes, one phase of the turn, not where '
-                    f'a thread lives) by processor {ons}')
+        if None in fr:
+            why.append(f'round {r}: {sum(f is not None for f in fr)} time lines for {t} threads')
+            continue
+        mean = sum(fr) / t
+        times = [f / mean if mean else 0.0 for f in fr]
+        for i in range(t):
+            if TIMED and times[i] < 0.85:
+                why.append(f'round {r}: thread {i} had {times[i]:.2f} of its fair share of processor time (1/{t}), '
+                           f'under 0.85 (its progress {prog[i]:.2f}); looks by processor {ons[i]}')
+        worst = min(times) if worst is None else min(worst, min(times))
+        wprog = min(prog) if wprog is None else min(wprog, min(prog))
+        info.append(f'round {r}: each thread\'s part of processor time against the fair 1/{t} '
+                    f'{[round(q, 2) for q in times]}, of the progress {[round(q, 2) for q in prog]}; the looks (samples '
+                    f'at timer wakes, one phase of the turn, not where a thread lives) by processor {ons}')
     if not TIMED:
         info.append(SHARES)
     bad = bad_lines()
@@ -995,7 +1009,8 @@ elif a.kind == 'share':
         fail('SMP-SHARE', '; '.join(why[:6]), why[6:] + info)
     else:
         ok('SMP-SHARE', f'3 rounds of {N + 1} threads on {N} processors, every thread at least {worst:.2f} of its fair '
-                        f'share of the progress' + ('' if TIMED else ' (printed)') + '; ' + '; '.join(info))
+                        f'share of processor time' + ('' if TIMED else ' (printed)') + f' (its progress at least '
+                        f'{wprog:.2f}); ' + '; '.join(info))
 elif a.kind in ('nosmp', 'one', 'cap1'):
     row = {'nosmp': 'SMP-NOSMP', 'one': 'SMP-ONE', 'cap1': 'SMP-CAP'}[a.kind]
     started = N if a.kind == 'cap1' else 1
