@@ -147,14 +147,16 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            thread with a tgid (one charged at its switch-off). The probe's `SMP-LEAVE KIND R status
                            S running M of 4` rounds: 4 leader-exit (the main thread exits alone, a sibling then calls
                            exit_group(10): 0xa00), 30 exec (a sibling execs a program that exits 9: 0x900), 5
-                           exec-kill (the exec'd program killed by its own SIGKILL: 0x9), 20 exec-settle (0x900, the
-                           main thread saying go once a look shows it current on an application processor beside the
-                           exec'ing sibling: `waited-kb W settled-kb S late-kb L settle-ms MS left K main-cpu C`),
+                           exec-kill (the exec'd program killed by its own SIGKILL: 0x9), 20 exec-settle (at 2 on
+                           past twenty until five have opened, sixty at most; 0x900, the main thread saying go once a
+                           look shows it current on an application processor beside the exec'ing sibling: `waited-kb W
+                           settled-kb S late-kb L settle-ms MS left K main-cpu C`),
                            `SMP-LEAVE done`; an `SMP-EXIT exec-child pid P` line for every exec; one hold at least;
                            each exec-settle round's settled MemFree (SMP-EXIT's settle) within 64 kB of its reading
                            500 ms on, with no thread of it still current, and where the main thread ran at the exec
-                           said; at 2, one round at least whose wait4 came back with the space the exec left still
-                           held (the old leader held on the application processor); no PANIC (an exec'd leader
+                           said; at 2, five rounds at least whose wait4 came back with the space the exec left still
+                           held (the old leader held on the application processor), fewer a red of its own name,
+                           NOT-FORCED; no PANIC (an exec'd leader
                            collected while an ended sibling still ran: `sched: no process area for slot`).
 
   every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
@@ -869,9 +871,11 @@ elif a.kind == 'leave':
     want = {'leader-exit': (4, '0xa00'), 'exec': (30, '0x900'), 'exec-kill': (5, '0x9'), 'exec-settle': (20, '0x900')}
     got = {k: [x for x in lv if re.match(rf'{k} \d+ ', x)] for k in want}
     done = 'SMP-LEAVE done' in text
-    if not done or any(len(got[k]) != w for k, (w, _st) in want.items()):
-        why.append(', '.join(f'{len(got[k])} of {w} {k}' for k, (w, _st) in want.items()) + ' rounds'
-                   + ('' if done else ', no `SMP-LEAVE done`'))
+    # at 2 the exec-settle rounds go on past twenty until five have opened, sixty at most (the probe's `row_leave`)
+    span = {k: ((20, 60) if k == 'exec-settle' and N == 2 else (w, w)) for k, (w, _st) in want.items()}
+    if not done or any(not span[k][0] <= len(got[k]) <= span[k][1] for k in want):
+        why.append(', '.join(f'{len(got[k])} of {span[k][0]}' + (f' to {span[k][1]}' if span[k][1] != span[k][0] else '')
+                             + f' {k}' for k in want) + ' rounds' + ('' if done else ', no `SMP-LEAVE done`'))
     for k, (_w, st) in want.items():
         for r, x in enumerate(got[k]):
             if kv(x, 'status') != st:
@@ -906,13 +910,15 @@ elif a.kind == 'leave':
                        f'{kv(x, "late-kb") - kv(x, "settled-kb")} kB below the reading 500 ms on ({kv(x, "late-kb")} kB): '
                        f'read while the space the exec left was still parked')
     # the window: a round whose wait4 came back with that space still held. At 2 a round whose main thread was on the
-    # application processor at the exec has it there, held, while the wait4 comes back; at 4 the siblings the exec
-    # re-pointed are held beside it and the wait4 waits for them, so the old leader may be gone by then: printed there,
-    # not wanted
+    # application processor at the exec has it there, held, while the wait4 comes back, unless it lost that processor
+    # first; five such rounds are wanted, the probe going on past twenty for them (sixty at most), and fewer is
+    # NOT-FORCED, a red of its own name: the settle was not put to the test often enough to be judged. At 4 the siblings
+    # the exec re-pointed are held beside it and the wait4 waits for them, so the old leader may be gone by then:
+    # printed there, not wanted
     opened = len([1 for _r, x in read if kv(x, 'waited-kb') < kv(x, 'late-kb') - 64])
-    if word and read and not unread and opened == 0 and N == 2:
-        why.append(f'no exec-settle round\'s wait4 came back with the space the exec left still held (0 of {len(read)}): '
-                   f'the window the settle must wait out never opened ({on_ap})')
+    if word and read and not unread and opened < 5 and N == 2:
+        why.append(f'NOT-FORCED: {opened} of {len(read)} exec-settle rounds opened at 2, want 5 (a wait4 back with the '
+                   f'space the exec left still held: the window the settle must wait out) ({on_ap})')
     if word and slows == 0:
         why.append('0 slow leaves: no application processor held a thread ended in place (the window never opened)')
     elif word and followers == 0:
@@ -924,7 +930,7 @@ elif a.kind == 'leave':
     if why:
         fail('SMP-EXEC-LEAVE', '; '.join(why[:6]), why[6:])
     else:
-        ok('SMP-EXEC-LEAVE', f'4 leader-exit, 30 exec, 5 exec-kill and 20 exec-settle rounds, each its status; '
+        ok('SMP-EXEC-LEAVE', f'4 leader-exit, 30 exec, 5 exec-kill and {len(sr)} exec-settle rounds, each its status; '
                              f'{slows} slow leaves, {followers} of a thread with a tgid (an application processor held '
                              f'{word[1]} ms with its thread ended in place); the exec-settle rounds: {on_ap}, the space '
                              f'the exec left still held at the wait4 in {opened} of {len(read)}, each settled reading '
