@@ -636,6 +636,11 @@ static void row_signal(int samples) {
         for (int k = 0; k < 30; k++) {
             G->hit = 0;
             c.n = 0; sig_cpus(&c, "s", (L)G->t2);
+            /* each send at its own place in the tick: (k * 7 % 10) ms and (k % 4) quarter-milliseconds past the wake, so
+               a sleeper taken only at some processor's tick is late in most sends whatever the processors' phases (a
+               send just after the wake, every time, met each boot's one phase: late by the same 0.2 to 4.6 ms) */
+            U lead = rdtsc() + cycles_of_ms(1) / 4 * ((U)(k * 7 % 10) * 4 + (U)(k % 4));
+            while (rdtsc() < lead) ;
             U t0 = rdtsc(), end = t0 + cycles_of_ms(1000);
             sc(NR_KILL, getpid(), SIGUSR1, 0);
             while (!G->hit && rdtsc() < end) ;
