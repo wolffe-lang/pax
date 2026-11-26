@@ -950,8 +950,11 @@ static void row_leave(void) {
    N + 1 threads of this process spin on the N processors that run threads (/proc/pax-cpus' `active`), each adding to
    its own counter (a cache line each), while this thread sleeps but for a look at /proc/pax-cpus every 10 ms. Three
    rounds of one second: per round its threads, processors, looks and length; per thread its progress and the looks it
-   was current in on each processor; per processor the ring-3 ticks and RESCHEDs it took. A fair scheduler gives each
-   thread N/(N + 1) of a processor; the row (rows.py) holds each to its part of the round's progress. The looks are
+   was current in on each processor; per thread its processor time and the wall time between its own reads of it (each
+   spinner reads getrusage(RUSAGE_THREAD) and the TSC when it first runs after the round opens and after it closes);
+   per processor the ring-3 ticks and RESCHEDs it took. A fair scheduler gives each thread N/(N + 1) of a processor;
+   the row (rows.py) holds each to its part of processor time, and prints its part of the progress, which follows the
+   host's cycles where the processors are not equal (two of them on one host core's two threads). The looks are
    samples taken at timer wakes, never where a thread lives: the looker is current on one processor and sees only the
    others, and a fair boot under KVM at 2 saw the same thread opposite the looker in every look. */
 #define SHARE_MAX 17
@@ -959,11 +962,35 @@ static struct thr sthr[SHARE_MAX];
 static volatile U *share_c;
 static volatile U share_stop, share_started;
 static U share_looks[SHARE_MAX][MAXC];
+/* the round's edge: odd when a round opens, even when it closes; each spinner, the first time it runs after the edge
+   moves, reads its own processor time and the TSC into the edge's slot and counts itself in share_stamped */
+static volatile U share_edge, share_stamped;
+static U share_cpu[SHARE_MAX][2], share_tsc[SHARE_MAX][2];
 static void s_spin(void *arg) {
-    U i = (U)arg;
+    U i = (U)arg, seen = 0;
     __atomic_add_fetch(&share_started, 1, __ATOMIC_SEQ_CST);
-    while (!share_stop) share_c[i * 8]++;
+    while (!share_stop) {
+        share_c[i * 8]++;
+        if (share_edge != seen) {
+            struct rus ru;
+            seen = share_edge;
+            memset(&ru, 0, sizeof ru);
+            if (sc(NR_GETRUSAGE, 1, &ru, 0) == 0) {
+                share_cpu[i][~seen & 1] = cpu_us(&ru);
+                share_tsc[i][~seen & 1] = rdtsc();
+                __atomic_add_fetch(&share_stamped, 1, __ATOMIC_SEQ_CST);
+            }
+        }
+    }
     exit_thread(0);
+}
+/* move the edge and wait (up to two seconds) for every spinner to read its time at it; how many did */
+static U share_mark(U edge, int t) {
+    share_stamped = 0;
+    __atomic_store_n(&share_edge, edge, __ATOMIC_SEQ_CST);
+    U end = rdtsc() + cycles_of_ms(2000);
+    while (share_stamped < (U)t && rdtsc() < end) nap(1000000);
+    return share_stamped;
 }
 static void row_share(void) {
     struct ln l;
@@ -980,6 +1007,8 @@ static void row_share(void) {
     for (int r = 0; r < 3; r++) {
         U c0[SHARE_MAX], c1[SHARE_MAX], looks = 0;
         memset(share_looks, 0, sizeof share_looks);
+        memset(share_cpu, 0, sizeof share_cpu); memset(share_tsc, 0, sizeof share_tsc);
+        U open = share_mark(2 * (U)r + 1, t);
         int ha = take(&a);
         for (int i = 0; i < t; i++) c0[i] = share_c[i * 8];
         U t0 = rdtsc();
@@ -995,12 +1024,20 @@ static void row_share(void) {
         for (int i = 0; i < t; i++) c1[i] = share_c[i * 8];
         U ms = us_of(rdtsc() - t0) / 1000;
         int hb = take(&b);
+        U shut = share_mark(2 * (U)r + 2, t);
         l.n = 0; ls(&l, "SMP-SHARE round "); ld(&l, (U)r); ls(&l, " threads "); ld(&l, (U)t); ls(&l, " processors ");
         ld(&l, (U)n); ls(&l, " looks "); ld(&l, looks); ls(&l, " ms "); ld(&l, ms); le(&l);
         for (int i = 0; i < t; i++) {
             l.n = 0; ls(&l, "SMP-SHARE round "); ld(&l, (U)r); ls(&l, " thread "); ld(&l, (U)i); ls(&l, " count ");
             ld(&l, c1[i] - c0[i]); ls(&l, " on ");
             for (int k = 0; k < n; k++) { if (k) lc(&l, ','); ld(&l, (U)k); lc(&l, ':'); ld(&l, share_looks[i][k]); }
+            le(&l);
+        }
+        /* a thread that did not read its time at both edges (or read it backwards) has no time line: the row is red */
+        for (int i = 0; open == (U)t && shut == (U)t && i < t; i++) {
+            if (share_tsc[i][1] <= share_tsc[i][0] || share_cpu[i][1] < share_cpu[i][0]) continue;
+            l.n = 0; ls(&l, "SMP-SHARE round "); ld(&l, (U)r); ls(&l, " time "); ld(&l, (U)i); ls(&l, " cpu-us ");
+            ld(&l, share_cpu[i][1] - share_cpu[i][0]); ls(&l, " wall-us "); ld(&l, us_of(share_tsc[i][1] - share_tsc[i][0]));
             le(&l);
         }
         for (int k = 0; k < n; k++) {
