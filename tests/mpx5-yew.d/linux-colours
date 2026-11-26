@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Same staged editor and sample as the console, in the existing Linux tree rig.
+set -uo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ "$#" = 2 ] || die 'usage: linux-colours IMAGES OUT'
+images=$1 out=$2
+mkdir -p "$out"
+fail=0
+for mode in default colour; do
+    extra=; [ "$mode" != colour ] || extra='YEW_COLORS=truecolor '
+    printf 'env HOME=/home/pax TERM=linux %syew --clean /home/pax/keyword.lu\n^~\033^.\n^~:q!\nexit\n' "$extra" > "$out/$mode.keys"
+    if ! PAX_TYPE_PAUSE=6 "$PAX_ROOT/tools/linux-tree" --root "$images/session" \
+        --keys "$out/$mode.keys" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+        --winsize 50x160 --owners "$images/owners" "$out/$mode.raw" -- \
+        /bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m; then
+        printf 'FAIL yew-colour-session-linux-%s container did not complete\n' "$mode"
+        fail=1
+    fi
+    if [ "$(tr -d '[:space:]' < "$out/$mode.raw.rc" 2>/dev/null)" != 0 ]; then
+        printf 'FAIL yew-colour-status-linux-%s shell did not exit zero\n' "$mode"
+        fail=1
+    fi
+done
+python3 -I "$PAX_ROOT/tests/mpx5-yew.d/colour.py" linux "$out/colour.raw" --default "$out/default.raw" || fail=1
+exit "$fail"
