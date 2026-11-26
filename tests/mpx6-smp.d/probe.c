@@ -705,8 +705,7 @@ static void g_spin(void *arg) {
             exit_group(10);
         }
         /* SMP-EXEC-LEAVE's exec-settle rounds, until go: every 2 ms the sibling gives its processor up (sched_yield),
-           so a processor that keeps one thread while others wait hands it on and the main thread can come to run there
-           (under KVM at 2 the application processor kept one sibling through a whole round: `main_on_ap`) */
+           so the run queue's turn no longer keeps step with the ticks the main thread's looks follow (`main_on_ap`) */
         if (G->yields && G->go == 0) {
             U t = rdtsc();
             if (t >= next) { next = t + cycles_of_ms(2); yield(); }
@@ -732,27 +731,29 @@ static U group_running(void) {
 /* SMP-EXEC-LEAVE's exec rounds: the main thread sleeps once it has said go, so the processors beside the exec'ing
    sibling run only its other two siblings, the threads the exec re-points (an exec's old leader is charged nothing) */
 static int main_naps;
-/* SMP-EXEC-LEAVE's exec-settle rounds, in the group's main thread before it says go: looks at /proc/pax-cpus every
-   1 ms, spinning between looks, until one look shows it current on an application processor and the exec'ing sibling
-   current on another. Its processor, or -1 when none came in 2 s (0.5 s past two processors, where all four run at
-   once and nothing moves them: counted there, not wanted). The test word holds only an application processor, and
-   left to the scheduler the main thread was never on one when the sibling saw go under KVM (no hold of a thread with
-   tgid 0 in 80 rounds over four boots at 2 and 4; under TCG in 15 of 40). Sleeping between looks did not move it
-   there under KVM at 2 (3 rounds of 40): the application processor kept one sibling through the whole round, the
-   exec'ing one when the look gave up (no hold at its exec in 37 of 37). So the siblings now give their processors up
-   every 2 ms until go (`g_spin`), and the main thread keeps the one it is given. */
+/* SMP-EXEC-LEAVE's exec-settle rounds, in the group's main thread before it says go: a look at /proc/pax-cpus just after
+   each wake from a sleep of 1 to 4 ticks, until one look shows it current on an application processor and the exec'ing
+   sibling current on another. Its processor, or -1 when none came in 2 s (0.5 s past two processors, where all four run
+   at once and nothing moves them: counted there, not wanted). The test word holds only an application processor.
+   Under KVM the ticks are steady and the run queue turns in step with them, so a look made at a wake sees the turn at
+   the same phase each time: with only that, the main thread was on the application processor at the exec in 3 rounds
+   of 40 (three threads spinning on two processors each made a fair third of the progress, while looks made at wakes saw
+   the same one opposite the looker every time). A look made
+   while spinning found it there in 294 rounds of 400, but in 94 of them it lost that processor before the exec ended
+   it: such a look comes late in its quantum. So the siblings give their processors up every 2 ms until go (`g_spin`),
+   which takes the turn out of step with the ticks, and the main thread looks just after a wake, at the start of its
+   quantum, with up to two ticks on that processor before anything else may take it. */
 static L main_on_ap(void) {
     struct snap z;
     U t0 = rdtsc(), lim = 2000;
-    for (;;) {
+    for (U k = 0;; k++) {
         if (take(&z)) {
             L m = cpu_of(&z, G->gtids[0]), x = cpu_of(&z, G->gtids[2]);
             if (m > 0 && x >= 0 && x != m) return m;
             if (z.active > 2) lim = 500;
         }
-        U t = rdtsc();
-        if (t - t0 >= cycles_of_ms(lim)) return -1;
-        while (rdtsc() - t < cycles_of_ms(1)) G->spins++;
+        if (rdtsc() - t0 >= cycles_of_ms(lim)) return -1;
+        nap((k % 4 + 1) * 10000000ul);
     }
 }
 static L group(int how) { /* how: 0 the main thread exits, 1 a sibling does, 2 a sibling execs, 3 a sibling execs a
@@ -889,9 +890,13 @@ static void row_leave(void) {
        test word holds it. The exec takes its pid for the caller, so /proc/pax-cpus names that processor `current
        kernel` until it switches, its CR3 still the space the exec parked. Each round read as SMP-EXIT's are (at the
        wait4, then `settled_kb`), and once more 500 ms on after another reap, when every hold is long over: the settled
-       reading must be that one. `main-cpu` the processor the main thread said go on (-1: no look found one). */
+       reading must be that one. `main-cpu` the processor the main thread said go on (-1: no look found one). At two
+       processors the rounds go on past twenty until five have opened (the wait4 back with the space still held: the
+       window the settle must wait out), sixty at most; the row calls fewer NOT-FORCED. */
     main_naps = 0;
-    for (int r = 0; r < 20; r++) {
+    struct snap zc;
+    int two = take(&zc) && zc.active == 2, opened = 0;
+    for (int r = 0; r < 20 || (two && opened < 5 && r < 60); r++) {
         for (int i = 0; i < 4; i++) G->gtids[i] = 0;
         G->mcpu = -1;
         L p = group(5);
@@ -908,6 +913,7 @@ static void row_leave(void) {
         ls(&l, " settle-ms "); ld(&l, ms); ls(&l, " left "); ld(&l, left);
         ls(&l, " main-cpu "); if (G->mcpu < 0) ls(&l, "-1"); else ld(&l, (U)G->mcpu);
         le(&l);
+        if (waited + 64 < late) opened++;
         if (w != p) break;
     }
     say("SMP-LEAVE done");
