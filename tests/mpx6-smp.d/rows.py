@@ -159,12 +159,13 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
                            held (the old leader held on the application processor), fewer a red of its own name,
                            NOT-FORCED; no PANIC (an exec'd leader
                            collected while an ended sibling still ran: `sched: no process area for slot`).
-  share       SMP-SHARE    (asked only, never by default) N + 1 threads of one process spin on the N processors that
-                           run threads, each counting its own progress, three rounds of one second (`SMP-SHARE round R
-                           threads T processors N looks L ms M`, a `thread I count C on K:LOOKS,…` line each, the
-                           looks every 10 ms at /proc/pax-cpus): each thread's part of a round's progress against the
-                           fair 1/(N + 1), at least 0.85 of it under KVM with a host CPU for each processor (printed
-                           elsewhere, as the CPU shares are); a thread with no progress red anywhere; `SMP-SHARE done`.
+  share       SMP-SHARE    N + 1 threads of one process spin on the N processors that run threads, each counting its
+                           own progress, three rounds of one second (`SMP-SHARE round R threads T processors N looks L
+                           ms M`, a `thread I count C on K:LOOKS,…` line each, the looks after each 10 ms sleep:
+                           samples at timer wakes, printed as such, never judged): each thread's part of a round's
+                           progress against the fair 1/(N + 1), at least 0.85 of it under KVM with a host CPU for each
+                           processor (printed elsewhere, as the CPU shares are); a thread with no progress red
+                           anywhere; `SMP-SHARE done`.
 
   every kind  SMP-KLOCK    no `PANIC klock: …` line (kernel/klock's checks; the door in `pax_interrupt`:
                            `klock: entered from ring 3 holding it`): red by that line verbatim, silent when green.
@@ -945,12 +946,13 @@ elif a.kind == 'leave':
                              f'{max(kv(x, "settle-ms") for _r, x in read)} ms); no panic')
 elif a.kind == 'share':
     # SMP-SHARE: N + 1 threads spin on the N processors that run threads, each counting its own progress, three rounds of
-    # a second; each thread's part of a round's progress against the fair 1/(N + 1). A scheduler that lets an
-    # application processor keep one thread while the others take turns on CPU 0 gives that thread 1/2 of the progress
-    # at 2 and the other two 1/4 each, 0.75 of fair (the exec-settle rounds' looks under KVM at 2 saw an application
-    # processor keep one sibling through a whole round). Held where the CPU shares are (SHARES): under KVM with a host
-    # CPU for each processor, every thread at least 0.85 of fair; a thread with no progress is red anywhere. Each
-    # round's looks (/proc/pax-cpus every 10 ms) say where each thread ran.
+    # a second; each thread's part of a round's progress against the fair 1/(N + 1). A scheduler that let a processor
+    # keep one thread while the others took turns on CPU 0 would give that thread 1/2 of the progress at 2 and the other
+    # two 1/4 each, 0.75 of fair. Held where the CPU shares are (SHARES): under KVM with a host CPU for each processor,
+    # every thread at least 0.85 of fair; a thread with no progress is red anywhere. The looks (/proc/pax-cpus after
+    # each 10 ms sleep) are printed as samples taken at timer wakes: under a steady tick they see the queue's turn at
+    # one phase (a fair boot under KVM at 2 saw one thread opposite the looker in every look while each made a third of
+    # the progress), so they say nothing of where a thread lives; the counts are the measure.
     why, info = [], []
     sh = lines('SMP-SHARE')
     hdr = [x for x in sh if re.match(r'round \d+ threads \d+ ', x)]
@@ -970,13 +972,10 @@ elif a.kind == 'share':
             continue
         tot = sum(counts)
         ratios = [c * t / tot if tot else 0.0 for c in counts]
-        ons, stays = [], []
+        ons = []
         for y in th:
             m = re.search(r' on (\S+)$', y)
             ons.append(m[1] if m else '-')
-            lk = {int(k): int(v) for k, v in re.findall(r'(\d+):(\d+)', m[1])} if m else {}
-            top = max(lk, key=lk.get) if lk else None
-            stays.append(f'{lk[top]}/{sum(lk.values())} on {top}' if lk else '-')
         for i, c in enumerate(counts):
             if c == 0:
                 why.append(f'round {r}: thread {i} made no progress (looks by processor {ons[i]})')
@@ -985,7 +984,8 @@ elif a.kind == 'share':
                            f'under 0.85; looks by processor {ons[i]}')
         worst = min(ratios) if worst is None else min(worst, min(ratios))
         info.append(f'round {r}: each thread\'s part of the progress against the fair 1/{t} '
-                    f'{[round(q, 2) for q in ratios]}; its most looks on one processor {stays}')
+                    f'{[round(q, 2) for q in ratios]}; the looks (samples at timer wakes, one phase of the turn, not where '
+                    f'a thread lives) by processor {ons}')
     if not TIMED:
         info.append(SHARES)
     bad = bad_lines()
