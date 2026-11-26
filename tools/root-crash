@@ -8,6 +8,7 @@
 #   tools/root-crash --kernel ELF --probe MOUNTS [--n N] [--seed S]
 #                    [--ops K] [--firmware bios|uefi] [--no-journal]
 #                    [--times R] [--check] [--torn] OUTDIR
+#   tools/root-crash --selftest   judge()'s cases, made up, no QEMU
 #
 # The archive: the probe (user/elf/mounts.c) as /bin/mounts, its run list
 # `/bin/mounts churn K` (default 1500 operations, 10 ms apart), installed
@@ -208,7 +209,44 @@ def judge(ops, last, kstate, b, span, rc, fo, got, hlst, lst, hfix, recl, halted
     return cls, why
 
 
+def selftest():
+    """judge() against made-up kills of a 1500-operation session; exit 0 when each gives the class it wants."""
+    ops = 1500
+    line = "ext2: vda2: recovering the journal: 5 transactions (sequence 1 to 5), 336 blocks written home, 0 revoked; recovery complete"
+    mid = (1245, 1246, 1795647269.81)
+    span_mid = "ops to 1245-1246 at commit 5 (1795647269.810)"
+    # A kill after the session's unmount: its commit's time, which PAX writes in whole seconds, falls before the
+    # session's last operations printed theirs (the release UEFI leg's twelfth kill at 73fa15ce, run 45700366495).
+    end = (1467, 1468, 1795648703.0)
+    span_end = "ops to 1467-1468 at commit 7 (1795648703.000)"
+    cases = [
+        # name, (last, kstate, b, span, got, hlst, lst, hfix, recl, halted), the class wanted, the finding's start
+        ("after-close", (1499, "clean", end, span_end, replay(1499), "", "", [], "", True), "none", ""),
+        ("mid-bound", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "", "", [], line, True), "lost writes", "165 names"),
+        ("mid-outside", (1455, "clean, needs_recovery", mid, span_mid, replay(1300), "", "", [], line, True), "worse", "the tree is outside"),
+        ("mid-no-line", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "", "", [], "", True), "worse", "no recovery line"),
+        ("mid-no-halt", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "", "", [], line, False), "worse", "PAX's second boot"),
+        ("mid-host-tree", (1455, "clean, needs_recovery", mid, span_mid, replay(1246), "/churn/f1\treg", "", [], line, True), "worse", "the host's repair gives"),
+        ("no-commit", (56, "clean, needs_recovery", None, "no commit", replay(-1), "", "", [], line, True), "lost writes", ""),
+        ("clean-early", (1455, "clean", mid, span_mid, replay(1455), "", "", [], "", True), "worse", ""),
+        ("after-close-short", (1499, "clean", end, span_end, replay(1467), "", "", [], "", True), "worse", ""),
+        ("after-close-line", (1499, "clean", end, span_end, replay(1499), "", "", [], line, True), "worse", ""),
+        ("after-close-no-halt", (1499, "clean", end, span_end, replay(1499), "", "", [], "", False), "worse", ""),
+    ]
+    bad = 0
+    for name, (last, kstate, b, span, got, hlst, lst, hfix, recl, halted), want, start in cases:
+        cls, why = judge(ops, last, kstate, b, span, 0, "", got, hlst, lst, hfix, recl, halted)
+        ok = cls == want and why.startswith(start)
+        bad += not ok
+        print("%s root-crash-selftest %s: %s (%s), want %s%s" % ("PASS" if ok else "FAIL", name, cls, why[:90], want,
+                                                                  " (%s…)" % start if start else ""))
+    print("root-crash-selftest: %d of %d cases as expected" % (len(cases) - bad, len(cases)))
+    return 1 if bad else 0
+
+
 def main(argv):
+    if argv[1:] == ["--selftest"]:
+        return selftest()
     ap = argparse.ArgumentParser(prog="root-crash")
     ap.add_argument("--kernel", required=True)
     ap.add_argument("--probe", required=True)
