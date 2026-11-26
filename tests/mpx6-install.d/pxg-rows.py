@@ -7,11 +7,11 @@ import shlex
 import sys
 
 EXPECTED = {
-    'VERSION': (0, 'paxage 0.1.0 (pxg; format v1, file trust, pack and stage, linux transactions)'),
+    'VERSION': (0, 'paxage 0.2.1 (pxg; format v1, file trust, pack and stage, linux transactions)'),
     'COMPARE': (0, '-1'),
-    'INSTALL': (1, 'paxage: live-root-is-pm05'),
-    'REMOVE': (1, 'paxage: live-root-is-pm05'),
-    'UPGRADE': (1, 'paxage: live-root-is-pm05'),
+    'INSTALL': (1, 'paxage: live-root-unsupported'),
+    'REMOVE': (1, 'paxage: live-root-unsupported'),
+    'UPGRADE': (1, 'paxage: live-root-unsupported'),
     'INIT': (1, 'paxage: unqualified-filesystem ext2-family (journal not qualified on PAX)'),
 }
 
@@ -33,6 +33,7 @@ def selftest():
     # init resolves its repository directory before filesystem qualification.
     # Both installer fixtures create /home/pax; only the trust root is absent.
     keys = Path(__file__).with_name('pxg.keys').read_text().splitlines()
+    assert '/bin/pxg --version' in keys[0], 'I-pxg-version-option'
     init = next(line for line in keys if line.startswith('echo PXG-INIT-BEGIN;'))
     args = shlex.split(init.split(';')[1])
     assert args[args.index('--repo') + 1] == 'file:///home/pax', 'I-pxg-fixture-repository-missing'
@@ -40,7 +41,8 @@ def selftest():
     text = ''.join(f'PXG-{n}-BEGIN\n{b}\nPXG-{n}-END={s}\n' for n, (s, b) in EXPECTED.items())
     text += 'PXG-NO-STATE=0\n' + release + '\n'
     judge(text, release)
-    cases = [('refusal-name', text.replace('ext2-family', 'overlay')),
+    cases = [('old-version', text.replace('paxage 0.2.1', 'paxage 0.1.0')),
+             ('refusal-name', text.replace('ext2-family', 'overlay')),
              ('status', text.replace('PXG-INIT-END=1', 'PXG-INIT-END=0')),
              ('state', text.replace('PXG-NO-STATE=0', 'PXG-NO-STATE=1')),
              ('pin', text.replace(release, 'pxg wrong pin')),
