@@ -928,13 +928,14 @@ static void row_leave(void) {
     say("SMP-LEAVE done");
 }
 
-/* --- SMP-SHARE (the share kind, asked only) -----------------------------------------------------------------------
+/* --- SMP-SHARE (the share kind) -----------------------------------------------------------------------------------
    N + 1 threads of this process spin on the N processors that run threads (/proc/pax-cpus' `active`), each adding to
    its own counter (a cache line each), while this thread sleeps but for a look at /proc/pax-cpus every 10 ms. Three
    rounds of one second: per round its threads, processors, looks and length; per thread its progress and the looks it
    was current in on each processor; per processor the ring-3 ticks and RESCHEDs it took. A fair scheduler gives each
-   thread N/(N + 1) of a processor; the row (rows.py) holds each to its part of the round's progress. Under KVM at 2
-   the exec-settle rounds' looks had an application processor keep one sibling through a whole round. */
+   thread N/(N + 1) of a processor; the row (rows.py) holds each to its part of the round's progress. The looks are
+   taken at timer wakes and so, under a steady tick, at one phase of the run queue's turn: samples, never where a thread
+   lives (the looker is current on one processor and sees only the others). */
 #define SHARE_MAX 17
 static struct thr sthr[SHARE_MAX];
 static volatile U *share_c;
