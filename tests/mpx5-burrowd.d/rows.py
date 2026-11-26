@@ -1194,7 +1194,7 @@ def settled(path, timeout=10.0, steady=0.3):
         size = path.stat().st_size if path.exists() else -1
         if size > 0 and size == last:
             data = path.read_bytes()
-            if len(data) == size and ppm_length(data[:64]) == size:
+            if len(data) == size:
                 return data
         last = size
         time.sleep(steady)
