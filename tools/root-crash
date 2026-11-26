@@ -180,6 +180,34 @@ def classify(rc, out, want, got):
     return "lost writes", "%d names short or different (%s)" % (len(short), " ".join(short[:4]))
 
 
+def judge(ops, last, kstate, b, span, rc, fo, got, hlst, lst, hfix, recl, halted):
+    """A journalled kill's class and first finding (px68), from what the host read: `ops` the session's operations,
+    `last` the last `churn: K` the killed boot printed, `kstate` the killed disk's state (dumpe2fs, before anything
+    replays it), `b` and `span` the last commit's bound and its text, `rc` and `fo` e2fsck -fn of PAX's replayed disk,
+    `got` its /churn, `hlst` and `lst` tools/e2tree of the host's repair and of PAX's replay, `hfix` what the host's
+    e2fsck -fy fixed, `recl` PAX's recovery line, `halted` its second boot halted clean."""
+    if b is None:
+        ok_bound = got == replay(-1)
+    else:
+        ok_bound = any(got == replay(m) for m in range(b[0], b[1] + 1))
+    # The class against what the operations did (px67's), the bound apart.
+    cls, why = classify(rc, fo, replay(last), got)
+    if cls in ("none", "lost writes") and not ok_bound:
+        cls, why = "worse", "the tree is outside the last commit's bound (%s)" % span
+    why2 = []
+    if churn_lines(hlst) != churn_lines(lst):
+        why2.append("the host's repair gives another tree")
+    if hfix:
+        why2.append("the host's repair fixed more than its replay: %s" % hfix[0].strip())
+    if not halted:
+        why2.append("PAX's second boot did not halt clean")
+    if not recl:
+        why2.append("no recovery line")
+    if why2 and cls != "worse":
+        cls, why = "worse", "; ".join(why2)
+    return cls, why
+
+
 def main(argv):
     ap = argparse.ArgumentParser(prog="root-crash")
     ap.add_argument("--kernel", required=True)
@@ -371,27 +399,8 @@ def main(argv):
         rc, fo, lst, state = read_part(copy, "cut%02d" % i)
         open(os.path.join(out, "cut%02d.fsck" % i), "w").write(fo)
         got = tree_of(lst)
-        why2 = []
-        if b is None:
-            ok_bound = got == replay(-1)
-            span = "no commit"
-        else:
-            ok_bound = any(got == replay(m) for m in range(b[0], b[1] + 1))
-            span = "ops to %d-%d at commit %d (%.3f)" % (b[0], b[1], cs[-1][0], b[2])
-        # The class against what the operations did (px67's), the bound apart.
-        cls, why = classify(rc, fo, replay(last), got)
-        if cls in ("none", "lost writes") and not ok_bound:
-            cls, why = "worse", "the tree is outside the last commit's bound (%s)" % span
-        if churn_lines(hlst) != churn_lines(lst):
-            why2.append("the host's repair gives another tree")
-        if hfix:
-            why2.append("the host's repair fixed more than its replay: %s" % hfix[0].strip())
-        if not halted:
-            why2.append("PAX's second boot did not halt clean")
-        if not recl:
-            why2.append("no recovery line")
-        if why2 and cls != "worse":
-            cls, why = "worse", "; ".join(why2)
+        span = "no commit" if b is None else "ops to %d-%d at commit %d (%.3f)" % (b[0], b[1], cs[-1][0], b[2])
+        cls, why = judge(a.ops, last, kstate, b, span, rc, fo, got, hlst, lst, hfix, recl, halted)
         if cls in ("counts", "orphans", "worse"):
             failed.append(i + 1)
         lost = (last - b[1]) if b else last + 1
