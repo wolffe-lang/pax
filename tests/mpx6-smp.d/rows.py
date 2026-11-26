@@ -950,9 +950,9 @@ elif a.kind == 'share':
     # keep one thread while the others took turns on CPU 0 would give that thread 1/2 of the progress at 2 and the other
     # two 1/4 each, 0.75 of fair. Held where the CPU shares are (SHARES): under KVM with a host CPU for each processor,
     # every thread at least 0.85 of fair; a thread with no progress is red anywhere. The looks (/proc/pax-cpus after
-    # each 10 ms sleep) are printed as samples taken at timer wakes: under a steady tick they see the queue's turn at
-    # one phase (a fair boot under KVM at 2 saw one thread opposite the looker in every look while each made a third of
-    # the progress), so they say nothing of where a thread lives; the counts are the measure.
+    # each 10 ms sleep) are printed as samples taken at timer wakes, which say nothing of where a thread lives (a fair
+    # boot under KVM at 2 saw one thread opposite the looker in every look while each made a third of the progress);
+    # the counts are the measure.
     why, info = [], []
     sh = lines('SMP-SHARE')
     hdr = [x for x in sh if re.match(r'round \d+ threads \d+ ', x)]
