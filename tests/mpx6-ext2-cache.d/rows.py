@@ -38,7 +38,10 @@
 #             to one inode each, then sync(2).
 # Rows (each boot's, named by its boot: C2-scene, C3-modes, …):
 #   C0 build: the probe static, the kernel, the image, the disk clean
-#      (e2fsck -fn) before any boot.
+#      (e2fsck -fn) before any boot, and every inode on it with its access
+#      time at or before its modification time (so the walk's read moves
+#      each one; a host that read a directory after its times were set
+#      would leave it later, and relatime would keep it).
 #   C1 the boot: the probe's `end` line, `PAX: init /bin/churn ended with
 #      status 0`, halted, no PANIC.
 #   C2 no ext2 fault line (`ext2: vda: <words>`): a change the cache lost
@@ -178,6 +181,10 @@ class Suite:
             why.append("the new disk is not clean: " + r.stdout[-400:])
         # The access times as made: a lost change leaves one as it was.
         self.before = self.stats(self.disk, self.paths + self.dirs)
+        late = [(p, s[0]) for p, s in zip(self.paths + self.dirs, self.before) if s[2] > s[3]]
+        if late:
+            why.append(f"{len(late)} of {len(self.before)} inodes on the made disk have an access time after their "
+                       f"modification time, which relatime keeps: " + ", ".join(f"{p} (inode {i})" for p, i in late[:6]))
         dump = run(["dumpe2fs", "-h", self.disk])
         groups = re.search(r"^Block count:\s+(\d+)", dump, re.M)
         (self.out / "disk.dumpe2fs").write_text(dump)
@@ -216,7 +223,7 @@ class Suite:
         return disk, text, r.returncode
 
     def stats(self, disk, paths):
-        """debugfs `stat` of every path, in order: [(ino, mode, atime seconds)]."""
+        """debugfs `stat` of every path, in order: [(ino, mode, atime seconds, mtime seconds)]."""
         cmds = disk.parent / "stat.cmds"
         cmds.write_text("".join(f"stat {p}\n" for p in paths))
         out = run(["debugfs", "-f", cmds, disk])
@@ -224,13 +231,15 @@ class Suite:
         for line in out.splitlines():
             m = re.match(r"^Inode: (\d+)\s+Type: \S+\s+Mode:\s+(\d+)", line)
             if m:
-                cur = [int(m.group(1)), int(m.group(2), 8), None]
+                cur = [int(m.group(1)), int(m.group(2), 8), None, None]
                 got.append(cur)
                 continue
-            m = re.match(r"^\s*atime: 0x([0-9a-f]+)", line)
-            if m and cur is not None and cur[2] is None:
-                cur[2] = int(m.group(1), 16)
-        if len(got) != len(paths) or any(g[2] is None for g in got):
+            m = re.match(r"^\s*(atime|mtime): 0x([0-9a-f]+)", line)
+            if m and cur is not None:
+                k = 2 if m.group(1) == "atime" else 3
+                if cur[k] is None:
+                    cur[k] = int(m.group(2), 16)
+        if len(got) != len(paths) or any(g[2] is None or g[3] is None for g in got):
             die(f"debugfs stat: {len(got)} answers for {len(paths)} paths")
         return got
 
