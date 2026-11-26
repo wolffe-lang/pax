@@ -161,10 +161,13 @@ class Suite:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(file_bytes(rel))
         (seed / "log").mkdir()
-        for dirpath, dirnames, filenames in os.walk(seed):
-            for n in filenames + dirnames:
-                os.utime(os.path.join(dirpath, n), (EPOCH, EPOCH))
-        os.utime(seed, (EPOCH, EPOCH))
+        # Every name's times, set after the last read of the tree: os.walk
+        # reads each directory once, and a directory read after its times
+        # were set takes a new access time on the host, which mke2fs -d
+        # copies and relatime then keeps.
+        names = [Path(dirpath) / n for dirpath, dirnames, filenames in os.walk(seed) for n in filenames + dirnames]
+        for name in names + [seed]:
+            os.utime(name, (EPOCH, EPOCH))
         self.disk = self.out / "disk.img"
         with self.disk.open("wb") as f:
             f.truncate(20 << 30)
