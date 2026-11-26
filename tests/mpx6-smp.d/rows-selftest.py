@@ -914,11 +914,12 @@ case('leave: an exec-settle round that does not say where the main thread was (a
      {'SMP-EXEC-LEAVE'}, why=r'exec-settle round 0: no `main-cpu` \(where the main thread ran at the exec\), nor in rounds')
 
 
-# --- the share kind (SMP-SHARE, asked only): N + 1 threads spin on N processors, each counting its own progress, three
-# rounds of a second; each thread's part of a round's progress against the fair 1/(N + 1), and the looks (every 10 ms,
-# /proc/pax-cpus) it was current in on each processor. The exec-settle rounds under KVM at 2 saw an application
-# processor keep one sibling through a whole round while the others took turns on CPU 0: that thread gets 1/2 of the
-# progress and the other two 1/4 each, 0.75 of fair.
+# --- the share kind (SMP-SHARE): N + 1 threads spin on N processors, each counting its own progress, three rounds of a
+# second; each thread's part of a round's progress against the fair 1/(N + 1). A processor that kept one thread while the
+# other two took turns on CPU 0 would give that thread 1/2 of the progress and the other two 1/4 each, 0.75 of fair. The
+# looks (/proc/pax-cpus after each 10 ms sleep) are said as what they are: samples taken at timer wakes, which under a
+# steady tick see the queue's turn at one phase (a fair boot under KVM at 2 saw one thread opposite the looker in every
+# look while each made a third of the progress), never where a thread lives.
 def share_lines(n, rounds=3, counts=None, looks=None, procs=None, done=True):
     out = ''
     for r in range(rounds):
@@ -942,11 +943,13 @@ KEPT = dict(counts=lambda r: [2000000, 1000000, 1000000], looks=lambda r, i: [0,
 SH2 = ['--kind', 'share', '--smp', '2', '--host-cpus', '2']
 case('share at 2 under KVM, a host CPU for each: fair, gated, green', share_text(2), SH2, {'SMP-SHARE'}, set(),
      says=r'^PASS SMP-SHARE smp=2 share: 3 rounds of 3 threads on 2 processors, every thread at least 1.00 of its fair share')
-case('share at 2 under KVM: the application processor keeps one thread, the other two share CPU 0: red',
+case('share at 2 under KVM: a processor that keeps one thread while the other two share CPU 0: red',
      share_text(2, lines=share_lines(2, **KEPT)), SH2, set(), {'SMP-SHARE'},
      why=r'round 0: thread 1 had 0.75 of its fair share of the progress \(1/3\), under 0.85; looks by processor 0:49,1:0')
-case('share at 2: the kept thread\'s looks are said', share_text(2, lines=share_lines(2, **KEPT)), SH2, set(), {'SMP-SHARE'},
-     says=r"^INFO SMP-SHARE smp=2 share: round 0: .* \[1.5, 0.75, 0.75\]; its most looks on one processor \['99/99 on 1'")
+case('share at 2: the looks are said as samples at timer wakes, by processor, beside the parts',
+     share_text(2, lines=share_lines(2, **KEPT)), SH2, set(), {'SMP-SHARE'},
+     says=r"^INFO SMP-SHARE smp=2 share: round 0: .* \[1.5, 0.75, 0.75\]; the looks \(samples at timer wakes, one phase of "
+          r"the turn, not where a thread lives\) by processor \['0:0,1:99', '0:49,1:0', '0:49,1:0'\]")
 case('share at 2 under TCG: printed, not gated', share_text(2, lines=share_lines(2, **KEPT)), SH2, {'SMP-SHARE'}, set(),
      meta=TCG, says=r"^PASS SMP-SHARE smp=2 share: .*0.75 of its fair share of the progress \(printed\).*tcg: not gated")
 case('share at 4 on two host CPUs: printed, not gated',
