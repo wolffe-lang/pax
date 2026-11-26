@@ -94,7 +94,8 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $rows in all|hook) ;; *) die "--rows takes all or hook" ;; esac
+case $rows in all|hook|yew) ;; *) die "--rows takes all, hook or yew" ;; esac
+[ "$rows" != yew ] || [ -n "${PAX_YEW_IMAGES:-}" ] || die '--rows yew needs PAX_YEW_IMAGES from tests/mpx5-yew'
 
 BORE="cat chmod env head id kill ls mkdir rm sleep stty tty yes"
 work=$PAX_BUILD/mpx5-burrowd
@@ -121,8 +122,13 @@ if [ -z "$images" ]; then
     # session over ssh at a terminal runs (B28).
     "$PAX_ROOT/tools/mklope" "$work/lope" > "$work/lope.txt" 2>&1 || why+=" tools/mklope;"
     cp "$work/lope/lope" "$r/bin/lope" 2>/dev/null || why+=" no lope;"
-    "$PAX_ROOT/tools/mkden" "$work/den" > "$work/den.txt" 2>&1 || why+=" tools/mkden;"
-    "$PAX_ROOT/tools/install-den" "$work/den" "$r" > "$work/install-den.txt" 2>&1 || why+=" tools/install-den;"
+    if [ "$rows" = yew ]; then
+        python3 -I "$PAX_ROOT/tests/mpx5-yew.d/stage-colours.py" "$PAX_YEW_IMAGES" "$r" "$PAX_ROOT" \
+            || why+=" editor suite inputs;"
+    else
+        "$PAX_ROOT/tools/mkden" "$work/den" > "$work/den.txt" 2>&1 || why+=" tools/mkden;"
+        "$PAX_ROOT/tools/install-den" "$work/den" "$r" > "$work/install-den.txt" 2>&1 || why+=" tools/install-den;"
+    fi
     # shellcheck disable=SC2086 # the utilities' names, one word each
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" 2>&1 || why+=" tools/mkboreutils;"
     for u in $BORE; do cp "$work/bore/$u" "$r/bin/$u" 2>/dev/null || why+=" no $u;"; done
@@ -169,6 +175,8 @@ if [ -z "$images" ]; then
     # stack (the base payload's; the wolf suite's fast root has none either): B18 builds an object.
     # tools/mkwolf and tools/mkwolf-std make them, or PAX_DEV_WOLF_DIR and PAX_DEV_STD_DIR name
     # copies already made (each held to the pins here all the same).
+    # Editor-only rows need no dev compiler or its standard libraries.
+    if [ "$rows" != yew ]; then
     wolf_pin=$(. "$PAX_ROOT/user/wolf.pin" && printf '%s' "$WOLF_STD_REV")
     wolfdir=${PAX_DEV_WOLF_DIR:-$work/wolf}
     if [ -z "${PAX_DEV_WOLF_DIR:-}" ]; then
@@ -202,6 +210,7 @@ if [ -z "$images" ]; then
         cp -R "$work/base-std/std/." "$r/usr/share/wolf/std/"
     else
         missing+=" /usr/share/wolf/std (tools/fetch-std: $(tail -n 1 "$work/base-std.txt"))"
+    fi
     fi
     printf 'root:x:0:0:root:/root:/bin/sh\npax:x:1000:1000:pax:/home/pax:/bin/sh\nlobo:x:990:990:lobo:/srv/lobo:/bin/false\nburrowd:x:989:989:burrowd:/nonexistent:/bin/false\n' > "$r/etc/passwd"
     printf 'root:x:0:\npax:x:1000:\nlobo:x:990:\nburrowd:x:989:\nsudo:x:27:pax\n' > "$r/etc/group"
