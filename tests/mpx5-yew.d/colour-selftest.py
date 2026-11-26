@@ -31,6 +31,8 @@ def main():
         ('yew-sgr-judge-accepts-grouped-sgr', lambda m: m.keyword_colour(frame(b'\x1b[38;2;198;120;221;1m'))),
         ('yew-sgr-judge-accepts-split-sgr', lambda m: m.keyword_colour(frame(b'\x1b[38;2;198;120;221m\x1b[1m'))),
         ('yew-sgr-judge-keeps-last-editor-screen', lambda m: m.keyword_colour(frame() + b'\x1b[?1049l$ ')),
+        ('yew-sgr-judge-prefers-active-editor', lambda m: m.keyword_colour(
+            frame(b'\x1b[37m') + b'\x1b[?1049l$ ' + frame())),
         ('key-judge-rejects-ctrl-only', lambda m: not m.key_bytes(b'\x1b[1;5A', 'up')),
         ('key-judge-rejects-truncated-csi', lambda m: not m.key_bytes(b'\x1b[1;7', 'up')),
         ('key-judge-rejects-suffix', lambda m: not m.key_bytes(b'\x1b[1;7Ax', 'up')),
