@@ -867,7 +867,7 @@ case('leave: an exec-child line missing', leave_text(4, lines=leave_lines(4).rep
      ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'}, why=r'54 exec-child lines for 55 execs')
 case('leave at 2: no exec-settle round\'s wait4 came back with the space still held (the window never opened)',
      leave_text(2, lines=leave_lines(2, settles=settle_lines(2, held=()))), ['--kind', 'leave', '--smp', '2'], set(),
-     {'SMP-EXEC-LEAVE'}, why=r'no exec-settle round\'s wait4 came back with the space the exec left still held')
+     {'SMP-EXEC-LEAVE'}, why=r'NOT-FORCED: 0 of 20 exec-settle rounds opened at 2, want 5')
 case('leave at 4: no exec-settle round held at its wait4: printed, not wanted (the siblings beside the exec are held too)',
      leave_text(4, lines=leave_lines(4, settles=settle_lines(4, held=()))), ['--kind', 'leave', '--smp', '4'],
      {'SMP-EXEC-LEAVE'}, set(), says=r'the space the exec left still held at the wait4 in 0 of 20')
@@ -893,7 +893,22 @@ case('leave at 2 says in how many rounds the main thread was on an application p
 case('leave at 2: the main thread never on an application processor at the exec (the window never opened)',
      leave_text(2, lines=leave_lines(2, settles=settle_lines(2, held=(), mcpu=lambda r: -1))),
      ['--kind', 'leave', '--smp', '2'], set(), {'SMP-EXEC-LEAVE'},
-     why=r'never opened \(the main thread on an application processor at the exec in 0 of 20\)')
+     why=r'NOT-FORCED: 0 of 20 exec-settle rounds opened at 2, want 5 .*\(the main thread on an application processor at '
+         r'the exec in 0 of 20\)')
+# At 2 the probe goes on past twenty exec-settle rounds until five have opened, sixty at most; fewer than five opened is
+# NOT-FORCED, a named red: too few rounds held the old leader across the wait4 to judge the settle by (twenty boots under
+# KVM at 2 opened 8 to 16 of 20 at 2ef2f9d6's fix head, one under TCG 2 of 20). At 4 the rounds stay twenty, the count
+# printed.
+case('leave at 2: the rounds go on past twenty until five have opened (here 26)',
+     leave_text(2, lines=leave_lines(2, settles=settle_lines(2, rounds=26, held=(3, 9, 15, 21, 25)))),
+     ['--kind', 'leave', '--smp', '2'], {'SMP-EXEC-LEAVE'}, set(), says=r'still held at the wait4 in 5 of 26')
+case('leave at 2: NOT-FORCED when sixty rounds open four',
+     leave_text(2, lines=leave_lines(2, settles=settle_lines(2, rounds=60, held=(1, 2, 3, 4)))),
+     ['--kind', 'leave', '--smp', '2'], set(), {'SMP-EXEC-LEAVE'}, why=r'NOT-FORCED: 4 of 60 exec-settle rounds opened at 2, want 5')
+case('leave at 2: more than sixty exec-settle rounds', leave_text(2, lines=leave_lines(2, settles=settle_lines(2, rounds=61))),
+     ['--kind', 'leave', '--smp', '2'], set(), {'SMP-EXEC-LEAVE'}, why=r'61 of 20 to 60 exec-settle')
+case('leave at 4: the exec-settle rounds stay twenty', leave_text(4, lines=leave_lines(4, settles=settle_lines(4, rounds=21))),
+     ['--kind', 'leave', '--smp', '4'], set(), {'SMP-EXEC-LEAVE'}, why=r'21 of 20 exec-settle')
 case('leave: an exec-settle round that does not say where the main thread was (a probe from before the look)',
      leave_text(4, lines=leave_lines(4, settles=settle_lines(4, mkey=False))), ['--kind', 'leave', '--smp', '4'], set(),
      {'SMP-EXEC-LEAVE'}, why=r'exec-settle round 0: no `main-cpu` \(where the main thread ran at the exec\), nor in rounds')
