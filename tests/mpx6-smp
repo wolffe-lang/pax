@@ -34,8 +34,9 @@
 #     before it switches it off (a host that has not run that processor), under exec, exit_group and a leader's lone
 #     exit; TESTWORDS-SLOWLEAVE-ELF per tier: the hold's state and line in the test build's ELF, in the shipped one
 #     neither;
-#   - SMP-SHARE (`share`, at 2 and 4): N + 1 threads spinning on N processors, each one's part of the progress against
-#     the fair 1/(N + 1), held under KVM with a host CPU for each processor and printed elsewhere;
+#   - SMP-SHARE (`share`, at 2 and 4): N + 1 threads spinning on N processors, each one's part of processor time against
+#     the fair 1/(N + 1), held under KVM with a host CPU for each processor and printed elsewhere, its part of the
+#     progress printed beside it;
 #   - in every boot SMP-KLOCK, SMP-DUP, SMP-PIN and SMP-PARK (rows.py's every-kind rows);
 # and SMP-BUILD once, on the first tier and firmware: the processor census's pack fixture at -smp 1 and -smp 4 with
 # 2 GiB, the batches timed by the host (tests/mpx6-smp.d/build.py), the pinned den built by tools/mkden
@@ -223,7 +224,7 @@ for tier in $tiers; do
                 BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-leave-$n.log" "$fw" "$img/leave.iso" 300 0 --kind leave --smp "$n" -- -smp "$n" -m 512
             done
         fi
-        # SMP-SHARE: N + 1 threads spinning on N processors at 2 and 4, each one's part of the progress
+        # SMP-SHARE: N + 1 threads spinning on N processors at 2 and 4, each one's part of processor time
         if asked share; then
             for n in 2 4; do
                 BOOT_MARKER='halt|PANIC .*' boot "$work/smp-$fw-share-$n.log" "$fw" "$img/share.iso" 180 0 --kind share --smp "$n" -- -smp "$n" -m 512
