@@ -239,7 +239,7 @@ first program it prints how long its boot took and how much of that the console 
 | burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.39) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
 | alpha | the service manager in wolf: `/bin/alpha` checks unit files (`alpha check`) and asks a running manager; the image ships no unit and starts nothing yet | `2aaf3f8b` (wolf 0.2.40) |
-| pxg | the package manager, `/bin/pxg`; selected readers only on PAX, transactions refused | `a497e373` (its own wolf 0.2.38 pin) |
+| pxg | the package manager, `/bin/pxg`; selected readers only on PAX, transactions refused | `c9344fce` (v0.2.1; its own wolf 0.2.40 pin) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `3a9983ee` |
 | sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
@@ -249,9 +249,10 @@ first program it prints how long its boot took and how much of that the console 
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
 
 `tools/mkpxg OUTDIR` builds the package manager from `user/pxg.pin` using its source tree's own toolchain,
-not the image's compiler. Two separate source checkouts must produce identical static bytes. Both images carry
-only the production `/bin/pxg`, never its failpoint or qualification probes. `pxg version` and `pxg compare`
-work on PAX, but this is not package-update support: live-root mutations report `live-root-is-pm05`, and
+not the image's compiler. The fixed pin's source archive digest is checked twice, and two separate source
+checkouts must produce identical static bytes. Both images carry only the production `/bin/pxg`, never its
+failpoint or qualification probes. `pxg --version` and `pxg compare` work on PAX, but this is not package-update
+support: live-root mutations report `live-root-unsupported`, and
 initialising an alternate root on an installed root, the ext3 default or the ext2 preview, reports
 `unqualified-filesystem ext2-family (journal not qualified on PAX)`. The installer suite and
 `tests/distribution-install` hold these refusals.
