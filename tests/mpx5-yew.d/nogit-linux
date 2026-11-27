@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Same absent-Git editor and saved-file contract on Linux's real PTY.
+set -uo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ "$#" = 2 ] || die 'usage: nogit-linux IMAGES OUT'
+images=$1 out=$2
+mkdir -p "$out"
+PAX_TYPE_PAUSE=6 "$PAX_ROOT/tools/linux-tree" --root "$images/session" \
+  --keys "$PAX_ROOT/user/console/yew-nogit-linux.keys" --prompt '$ ' --argv0 /bin/as --size 256m --rdev --nsproc \
+  --winsize 50x160 --owners "$images/owners" "$out/session.raw" -- \
+  /bin/as 1000 1000 /bin/env HOME=/home/pax /bin/sh -i -m || exit 1
+python3 -I "$PAX_ROOT/tests/mpx5-yew.d/nogit.py" linux "$out/session.raw" "$images" "$out"
