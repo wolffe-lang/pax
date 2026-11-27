@@ -27,14 +27,20 @@
 //! (tests/mpx6-smp's KLOCK-LEDGER, KLOCK-WAIT, KLOCK-HOLDS). `pax.klockhold=MS`: CPU 0's tick holds the lock MS ms
 //! once a second, keyed `test`, for the ledger's own proof (the known hold).
 //!
-//! px166 (stage 3a, unit 1): `pax.rankflip` (tests/mpx6-smp's rank kind): a second after CPU 0's ticks begin, its tick
-//! takes kernel/sync's console word and then its net word, out of rank (net is taken before console), once, and gives
-//! both back. Under the kernel lock neither word can be contended, so it cannot hang; the rank check
-//! (`pax.smpdebug`) is what must name it.
+//! px166 (stage 3a, unit 1): the lock ledger and the lock ranks (tests/mpx6-smp.d/lockled.lu, which the test build's
+//! kernel/sync calls). Its pages are taken here at the boot (`start`); `pax.smpdebug` checks the ranks. The kernel
+//! lock's two checks run in the ledger's hooks: at a fresh take (`ledger_took`) a word held is a violation, and so is
+//! one held at a release (`ledger_gave`). At the fresh take the processor's first violation, of any kind, is named in a
+//! line (`testwords: LOCK-RANK cpu C took WORD (rank R) holding WORD (rank S)`) and the kernel panics.
+//! `/proc/pax-klock` adds `lock-ranks checked|off` and a line per word and processor that took it. `pax.rankflip`
+//! (tests/mpx6-smp's rank kind): a second after CPU 0's ticks begin, its tick takes kernel/sync's console word and
+//! then its net word, out of rank (net is taken before console), once, and gives both back. Under the kernel lock
+//! neither word can be contended, so it cannot hang; the rank check is what must name it.
 
 use boot_info
 use frames
 use ipi
+use lockled
 use log
 use panic
 use percpu
@@ -130,6 +136,14 @@ pub fn start() {
         }
     } else {
         log.line("testwords: the kernel lock's ledger has no pages (kernel/frames refused)")
+    }
+    let dbg = boot_info.cmdline_has("pax.smpdebug")
+    if lockled_alloc(dbg) {
+        if dbg {
+            log.line("testwords: pax.smpdebug (a test kernel): lock-ranks checked")
+        }
+    } else {
+        log.line("testwords: the lock ledger has no pages (kernel/frames refused)")
     }
     if boot_info.cmdline_has("pax.rankflip") {
         // # Safety: written once here, at the boot, before CPU 0's tick reads it.
@@ -334,9 +348,66 @@ pub fn ledger_now() -> u64 {
     tsc()
 }
 
+/// px166 (stage 3a, unit 1): lockled's directory page and its pages from kernel/frames, zeroed, handed to lockled with
+/// whether the ranks are checked. False when frames refused (the pages taken so far are not given back: the boot's).
+fn lockled_alloc(dbg: bool) -> bool {
+    let h = frames.hhdm()
+    let d = frames.alloc() else 0
+    if d == 0 {
+        return false
+    }
+    zero_page(d + h)
+    var i: u64 = 0
+    while i < lockled.PAGES {
+        let p = frames.alloc() else 0
+        if p == 0 {
+            return false
+        }
+        zero_page(p + h)
+        wr(d + h + i * 8, p + h)
+        i += 1
+    }
+    lockled.start(d + h, dbg)
+    true
+}
+
+/// At processor `c`'s fresh take of the kernel lock: with the ranks checked, a word held now is a violation; the
+/// processor's first violation, of any kind, is named and the kernel panics.
+fn rank_report(c: u64) {
+    if !lockled.checked() {
+        return
+    }
+    lockled.at_take(c)
+    let (k, w, h) = lockled.violation(c)
+    if k == 0 {
+        return
+    }
+    log.put("testwords: LOCK-RANK cpu ")
+    log.dec(c as int)
+    if k == 1 {
+        log.put(" took ")
+        log.put(lockled.name(w))
+        log.put(" (rank ")
+        log.dec(lockled.rank(w) as int)
+        log.put(")")
+    } else if k == 2 {
+        log.put(" took the kernel lock (rank 0)")
+    } else {
+        log.put(" gave the kernel lock back")
+    }
+    log.put(" holding ")
+    log.put(lockled.name(h))
+    log.put(" (rank ")
+    log.dec(lockled.rank(h) as int)
+    log.put(")")
+    log.end()
+    panic.fail("lock rank: a word taken out of order, cpu ", c)
+}
+
 /// After a fresh `klock.enter`, under the lock: the spin counted, and a hold opened keyed by the entry at `f`.
 pub fn ledger_took(f: u64, t0: u64) {
     let c = percpu.index()
+    rank_report(c)
     if dir() == 0 || c >= MAXCPU {
         return
     }
@@ -365,6 +436,7 @@ pub fn ledger_took(f: u64, t0: u64) {
 /// kernel/klock, just before a release store, still holding: the open hold closed and counted.
 pub fn ledger_gave() {
     let c = percpu.index()
+    lockled.at_release(c) // px166 (stage 3a, unit 1): a word held as the kernel lock is given back, noted
     if dir() == 0 || c >= MAXCPU || cget(c, C_OPEN) == 0 {
         return
     }
@@ -457,6 +529,36 @@ fn put_dec(base: u64, at: u64, v: u64) -> u64 {
     k
 }
 
+/// px166 (stage 3a, unit 1): the lock ledger's lines, before the keys so the page always holds them: `lock-ranks
+/// checked|off`, then per word and processor that took it `lock WORD cpu C took N gave G contended K spin S hold H
+/// longest L` (lockled's counters, never reset). Nothing without lockled's pages.
+fn lock_text(base: u64, at: u64) -> u64 {
+    if !lockled.active() {
+        return at
+    }
+    var n = put_b(base, put_s(base, at, if lockled.checked() { "lock-ranks checked" } else { "lock-ranks off" }), 10)
+    var w: u64 = 0
+    while w < lockled.WORDS {
+        var c: u64 = 0
+        while c < MAXCPU && (c == 0 || c < ipi.count()) && n < PAGE - 400 {
+            if lockled.count(c, w, lockled.TOOK) != 0 {
+                n = put_s(base, put_s(base, n, "lock "), lockled.name(w))
+                n = put_dec(base, put_s(base, n, " cpu "), c)
+                n = put_dec(base, put_s(base, n, " took "), lockled.count(c, w, lockled.TOOK))
+                n = put_dec(base, put_s(base, n, " gave "), lockled.count(c, w, lockled.GAVE))
+                n = put_dec(base, put_s(base, n, " contended "), lockled.count(c, w, lockled.CONT))
+                n = put_dec(base, put_s(base, n, " spin "), lockled.count(c, w, lockled.SPIN))
+                n = put_dec(base, put_s(base, n, " hold "), lockled.count(c, w, lockled.HOLD))
+                n = put_dec(base, put_s(base, n, " longest "), lockled.count(c, w, lockled.LONGEST))
+                n = put_b(base, n, 10)
+            }
+            c += 1
+        }
+        w += 1
+    }
+    n
+}
+
 fn put_key(base: u64, at: u64, k: u64) -> u64 {
     if k < K_VEC {
         return put_dec(base, put_s(base, at, "sys:"), k)
@@ -490,6 +592,7 @@ pub fn ledger_text(base: u64) -> u64 {
         n = put_b(base, n, 10)
         c += 1
     }
+    n = lock_text(base, n)
     var k: u64 = 0
     var more: u64 = 0
     while k < KEYS {
