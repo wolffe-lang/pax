@@ -1067,12 +1067,13 @@ def klock(tsc, cpus, keys):
     return t
 
 
-def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.020), drop=None, extra=0, kth=0.0):
+def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.020), drop=None, extra=0, kth=0.0,
+                 c0=None):
     # two reads `secs` apart: each processor spins `spin` of the window and holds `hold` of it; the holds split over
     # keys (sys:1 half, trap:14 a third, vec:32 the rest less the known hold `test` = (count, seconds each)); `reader`
     # names the processor each read ran on (its own hold open); `drop` = (cpu, k) closes k fewer holds there at the
     # second read; `extra` adds that many cycles to the keys' holds at the second read (they no longer sum); `kth` the
-    # part of vec:32's hold cycles a kernel thread ran in
+    # part of vec:32's hold cycles a kernel thread ran in; `c0` = (seconds, key) CPU 0's longest hold
     w = int(secs * HZ)
     snaps = []
     for r in (0, 1):
@@ -1084,6 +1085,8 @@ def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.02
             cpus.append(dict(spin=int(r * spin * w), fresh=fresh, cont=r * 9000, hold=int(r * hold * w), closed=closed,
                              longest=int(test[1] * HZ * 1.02) if (i == 0 and test[0]) else 400000,
                              lkey='test' if (i == 0 and test[0]) else 'sys:1'))
+            if i == 0 and c0:
+                cpus[0].update(longest=int(c0[0] * HZ), lkey=c0[1])
         tot = sum(c['hold'] for c in cpus)
         tc = int(r * test[0] * test[1] * HZ)
         # the counts: every hold closed in the window under one key (the processors close 50000 each)
@@ -1140,6 +1143,11 @@ case('ledger: the known hold counted short (15 ms) under KVM: red by (c)', ledge
      {'KLOCK-WAIT', 'KLOCK-HOLDS'}, {'KLOCK-LEDGER'}, why=r'\(c\) the known hold: 3 of 2-4, 15\.0 ms each \(want 19\.0-21\.0\)')
 case('ledger: the known hold counted short under TCG: printed, (a) and (b) still held', ledger_text(4, test=(3, 0.015)),
      LG4, LEDGER3, set(), meta=TCG, says=r'^PASS KLOCK-LEDGER smp=4 ledger: .*15\.0 ms each \(printed: tcg\)')
+case('ledger: CPU 0\'s longest hold kmain\'s first (`boot`, 320 ms), which the longest must leave out: red by (c)',
+     ledger_text(4, c0=(0.320, 'boot')), LG4, {'KLOCK-WAIT', 'KLOCK-HOLDS'}, {'KLOCK-LEDGER'},
+     why=r"\(c\) cpu 0's longest hold is kmain's first \(`boot`, 320\.0 ms\)")
+case('ledger: CPU 0\'s longest a system call\'s 30 ms, past the known hold: green', ledger_text(4, c0=(0.030, 'sys:9')),
+     LG4, LEDGER3, set())
 case('ledger: one read and no done: red', ledger_text(4, reads=1, done=False), LG4, set(), {'KLOCK-LEDGER'},
      why=r'1 of 2 reads of /proc/pax-klock, no `SMP-LEDGER done`')
 
