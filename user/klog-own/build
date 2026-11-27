@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test-only controlled successful child; built only by the Linux suite.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+[ "$(uname -s)" = Linux ] || { printf 'klog-own needs Linux\n' >&2; exit 2; }
+[ "$#" = 1 ] || exit 2
+mkdir -p "$1"
+cc -std=c11 -O2 -Wall -Wextra -Werror -static -no-pie "$here/klog-own.c" -o "$1/klog-own"
+readelf -hW "$1/klog-own" | grep -Eq 'Type: +EXEC'
+! readelf -lW "$1/klog-own" | grep -q INTERP
