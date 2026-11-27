@@ -1,7 +1,9 @@
-tests/mpx6-smp.d/ledger.patch: the kernel lock's ledger's hooks (px166, stage 3). tools/build-kernel --test-words applies
-it to its own copy of kernel/ beside tests/mpx6-smp.d/testwords.lu; the shipped kernel is built from kernel/ as it is,
-which names no ledger. tests/mpx6-smp.d/ledger-patch.py (LEDGER-PATCH) holds it to the ledger's own lines and to exact
-context on kernel/ as it is; a kernel change under one of its hunks is red there before any build, and is fixed here.
+tests/mpx6-smp.d/ledger.patch: the kernel lock's ledger's hooks (px166, stage 3), and since stage 3a's first unit
+kernel/sync's (each word's acquisitions and ranks, tests/mpx6-smp.d/lockled.lu). tools/build-kernel --test-words applies
+it to its own copy of kernel/ beside tests/mpx6-smp.d/testwords.lu and lockled.lu; the shipped kernel is built from
+kernel/ as it is, which names no ledger. tests/mpx6-smp.d/ledger-patch.py (LEDGER-PATCH) holds it to the ledger's own
+lines and to exact context on kernel/ as it is; a kernel change under one of its hunks is red there before any build,
+and is fixed here.
 
 diff --git a/kernel/interrupts/interrupts.lu b/kernel/interrupts/interrupts.lu
 index 98e2766..23c93dd 100644
@@ -146,3 +148,40 @@ index 547f37e..b5cf2a5 100644
      } else if g == G_CORE_PATTERN {
          n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
      } else if g == G_PTYNR {
+diff --git a/kernel/sync/sync.lu b/kernel/sync/sync.lu
+index 736ae69..51582d3 100644
+--- a/kernel/sync/sync.lu
++++ b/kernel/sync/sync.lu
+@@ -39,6 +39,10 @@
+ //! processor) and vol. 2 (CMPXCHG, PAUSE). No Linux source; no other
+ //! kernel's source.
+ 
++// px166 (stage 3a, the test build alone: tests/mpx6-smp.d/ledger.patch): each word's acquisitions, spin and holds per
++// processor, and its rank under pax.smpdebug (tests/mpx6-smp.d/lockled.lu).
++use lockled
++
+ extern "c" fn pax_irq_save() -> u64
+ extern "c" fn pax_irq_restore(flags: u64)
+ extern "c" fn pax_pause()
+@@ -143,6 +147,7 @@ pub fn tcp() -> u64 {
+ /// off. Returns the RFLAGS `release` restores.
+ pub fn acquire(lock: u64) -> u64 {
+     let saved = irq_save()
++    let t0 = lockled.now()
+     // # Safety: the cast only; every access below states its own.
+     let p = unsafe { lock as *u64 }
+     var held = false
+@@ -159,11 +164,13 @@ pub fn acquire(lock: u64) -> u64 {
+             relax()
+         }
+     }
++    lockled.took(lock, t0)
+     saved
+ }
+ 
+ /// Give the lock at `lock` back and restore IF as `acquire` saved it.
+ pub fn release(lock: u64, saved: u64) {
++    lockled.gave(lock)
+     // # Safety: the holder's store; as `acquire`.
+     unsafe { (lock as *u64).atomic_store(0, Order.release) }
+     irq_restore(saved)
