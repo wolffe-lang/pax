@@ -222,3 +222,40 @@ difference is large. A direct proof would build trunk with a pad of the same siz
 - A difference of about 2% between two builds on this workload is within what placement alone can do.
 - Comparing two builds' timings needs an A/A control and a dozen boots a side.
 - A difference that size is not evidence of a code change's cost without a placement control.
+
+## A correction: the second cost take read VOID, so neither cost is shown
+The take was rerun at `f983144e`. There the shipped kernel's loaded sections equal trunk's, `.text` byte for byte,
+and the rest differs only in 35 bytes of the commit stamp. The two trunk builds, T and U, were byte-identical,
+stamps included.
+
+| | medians: head, T, U | A/A spread | head | p | q (T against U) |
+|---|---|---|---|---|---|
+| one job | 174.5, 171.3, 176.4 ms | 2.9% | +0.3% | 0.52 | 0.005 |
+| four jobs | 382.3, 387.0, 388.6 ms | 0.4% | -1.5% | 0.95 | 0.84 |
+
+The verdict is VOID: two byte-identical kernels differed at one job by 2.9%, with a permutation p of 0.004-0.005.
+What it was not:
+- **Not order or place.** The six orders ran in turn, and U was slower than T at every place in a block, after the
+  same kernel and after another, and in each third of the take.
+- **Not a neighbour's load in a window.** The boots ran within five minutes, eight seconds apart and interleaved, so
+  a load at any moment fell on all three kernels alike.
+- **Not the stamp.** T and U carry the same one.
+
+That leaves chance (about one in two hundred for one count; about one in twenty-five over the four trunk-against-trunk
+tests run so far), or something tied to each kernel's own image file, of which each take built one per kernel.
+
+**What follows for the first take.** Its COSTS (+2.3% at four jobs, p = 0.017) was applied as written, and the hooks
+stay out of the shipped kernel on their own merit: the shipped kernel is now trunk's, which a byte comparison proves.
+But a method that produces 2.9% at p = 0.005 between identical kernels cannot show a 2.3% cost at p = 0.017. So:
+- that the empty calls cost anything measurable is **not shown**;
+- that code placement moved the build wall by about 2% (the section above) is **not shown** either. The placement
+  facts stand (`.text` 768 bytes longer, 61% of the code moved, `.bss` unmoved), but their effect on the wall is
+  unmeasured.
+
+**A take that could show such a cost needs three things:**
+1. **The whole host quiet** for the hold, not only its own section.
+2. **Several images per kernel,** built apart and rotated, so that an image's own effect counts as noise within a
+   kernel rather than as a difference between kernels.
+3. **A pre-registered margin and an interval for the head's difference** in place of an A/A spread made of two
+   medians. That spread came out 0.0% in the first take, which let any excess pass it. The A/A pair then serves as a
+   check that the interval covers zero.
