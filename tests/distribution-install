@@ -58,14 +58,16 @@ e2fsck -fn "$out/installed-root.img" > "$out/installed-root.fsck.log" 2>&1
 dumpe2fs -h "$out/installed-root.img" > "$out/installed-root.dumpe2fs" 2>&1
 grep -Eq '^Filesystem features:.*\bhas_journal\b' "$out/installed-root.dumpe2fs" || die 'the installed root has no journal (ext3 is the default)'
 grep -Eq '^Total journal blocks: +4096$' "$out/installed-root.dumpe2fs" || die 'the installed root journal is not 4096 blocks'
-cat "$PAX_ROOT/tests/mpx6-install.d/pxg.keys" > "$out/installed.keys"
-printf 'pax-release\nls /home/pax/Games\nexit 0\n' >> "$out/installed.keys"
 for firmware in bios uefi; do
+    # TEST-ONLY public anchor is typed into this test session, never shipped in the image.
+    # Each firmware uses its own synthetic directory on the already installed ext3 root.
+    python3 -I "$PAX_ROOT/tests/mpx6-install.d/pxg-rows.py" --commands ext3 --instance "$firmware" > "$out/installed-$firmware.keys"
+    printf 'pax-release\nls /home/pax/Games\nexit 0\n' >> "$out/installed-$firmware.keys"
     "$PAX_ROOT/tools/qemu-halt" --boot-disk --firmware "$firmware" --serial "$out/installed-$firmware.serial.log" \
         --timeout 300 --qemu -m --qemu 2048M --elf "$out/kernel/kmain_console.elf" \
-        --type "$out/installed.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
+        --type "$out/installed-$firmware.keys" --prompt '$ ' --marker 'halt|PANIC .*' \
         "$disk" > "$out/installed-$firmware.halt.log" 2>&1
-    python3 -I "$PAX_ROOT/tests/mpx6-install.d/pxg-rows.py" "$out/installed-$firmware.serial.log" "$out/pax-release"
+    python3 -I "$PAX_ROOT/tests/mpx6-install.d/pxg-rows.py" "$out/installed-$firmware.serial.log" "$out/pax-release" --profile ext3 --instance "$firmware"
     python3 -I - "$out/installed-$firmware.serial.log" "$out/pax-release" <<'PY'
 from pathlib import Path
 import re,sys

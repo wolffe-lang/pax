@@ -1,8 +1,13 @@
 echo PXG-VERSION-BEGIN; /bin/pxg --version; echo PXG-VERSION-END=$?
 echo PXG-COMPARE-BEGIN; /bin/pxg compare '1~rc-1' '1-1'; echo PXG-COMPARE-END=$?
+echo PXG-ANCHOR-BEGIN; /bin/pxg repo inspect --file @ANCHOR@ --now @NOW@; echo PXG-ANCHOR-END=$?
 echo PXG-INSTALL-BEGIN; /bin/pxg install --root / alpha; echo PXG-INSTALL-END=$?
 echo PXG-REMOVE-BEGIN; /bin/pxg remove --root / alpha; echo PXG-REMOVE-END=$?
 echo PXG-UPGRADE-BEGIN; /bin/pxg upgrade --root /; echo PXG-UPGRADE-END=$?
-echo PXG-INIT-BEGIN; /bin/pxg init --root /home/pax --repo file:///home/pax --pinned-root /missing-pxg-trust-root --arch x86_64 --slot default --now 2026-11-13T00:00:00Z; echo PXG-INIT-END=$?
-test ! -e /home/pax/var; echo PXG-NO-STATE=$?
+echo PXG-LIVE-INIT-BEGIN; /bin/pxg init --root / --repo file:///home/pax --pinned-root @ANCHOR@ --arch x86_64 --slot default --now @NOW@; echo PXG-LIVE-INIT-END=$?
+echo PXG-INIT-BEGIN; /bin/pxg init --root @ROOT@ --repo file:///home/pax --pinned-root @ANCHOR@ --arch x86_64 --slot default --now @NOW@; echo PXG-INIT-END=$?
+test -f @ROOT@/var/lib/paxage/current; echo PXG-STATE-PRESENT=$?
+test ! -e /var/lib/paxage/current; echo PXG-LIVE-NO-STATE=$?
+@EXT3@echo PXG-VERIFY-BEGIN; /bin/pxg verify --root @ROOT@; echo PXG-VERIFY-END=$?
+@EXT3@echo PXG-STATUS-BEGIN; /bin/pxg status --root @ROOT@ --json; echo PXG-STATUS-END=$?
 cat /etc/pax-release
