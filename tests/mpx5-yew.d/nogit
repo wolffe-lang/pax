@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# NoGit state/buffer/exit contract; verbose trace proves editor and guard statuses.
+set -uo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ "$#" = 4 ] || die 'usage: nogit IMAGES TIER FIRMWARE OUT'
+images=$1 tier=$2 firmware=$3 out=$4
+mkdir -p "$out"
+: > "$out/serial.log"
+rm -f "$out/monitor.sock"
+python3 -I "$PAX_ROOT/tools/ps2-session" --serial "$out/serial.log" --monitor "$out/monitor.sock" \
+  --keys "$PAX_ROOT/user/console/yew-nogit.keys" --out "$out" --timeout 600 > "$out/keys.log" 2>&1 &
+sender=$!
+boot=0;typed=0
+"$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$out/serial.log" --timeout 900 \
+  --qemu -m --qemu 512M --qemu -monitor --qemu "unix:$out/monitor.sock,server=on,wait=off" \
+  --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' "$images/$tier/session.iso" > "$out/halt.log" 2>&1 || boot=$?
+wait "$sender" || typed=$?
+if [ "$boot" != 0 ] || [ "$typed" != 0 ]; then
+ printf 'FAIL NOGIT-pax setup boot=%s sender=%s\n' "$boot" "$typed";exit 1
+fi
+python3 -I "$PAX_ROOT/tests/mpx5-yew.d/nogit.py" pax "$out/serial.log" "$images" "$out"
