@@ -1315,12 +1315,19 @@ static void stress(U secs) {
    them back, and maps four pages, touches each (four page faults) and unmaps them. The two reads are printed as the
    file says them, between SMP-LEDGER lines; tests/mpx6-smp.d/rows.py's KLOCK-LEDGER holds the instrument to its closure,
    its exclusion and the known hold (CPU 0's tick holding the lock 20 ms once a second). The end kind's `klock` word
-   prints the file once before the end (the testwords kind: the shipped kernel's one line). */
+   prints the file once before the end (the testwords kind: the shipped kernel has none, so the open's error is said:
+   `open failed, errno 2`). */
 static char klock_buf[16384];
 static void klock_dump(const char *begin, const char *endtag) {
-    L n = readfile("/proc/pax-klock", klock_buf, sizeof klock_buf);
+    L fd = sc(NR_OPEN, "/proc/pax-klock", 0, 0);
     say(begin);
-    if (n > 0) sc(NR_WRITE, 1, klock_buf, n);
+    if (fd < 0) {
+        struct ln l; l.n = 0; ls(&l, "open failed, errno "); ld(&l, (U)-fd); le(&l);
+    } else {
+        sc(NR_CLOSE, fd, 0, 0);
+        L n = readfile("/proc/pax-klock", klock_buf, sizeof klock_buf);
+        if (n > 0) sc(NR_WRITE, 1, klock_buf, n);
+    }
     say(endtag);
 }
 static void ledger_worker(U ms) {
