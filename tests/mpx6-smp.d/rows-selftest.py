@@ -517,16 +517,24 @@ case('panic2: the two lines interleaved, each text whole', head('spin') + 'SMP-P
 case('panic2: the second panic printed in full (two owners)', head('spin') + P1 + P1.split('\n')[1] + '\n',
      ['--kind', 'panic2', '--smp', '4'], set(), {'SMP-PANIC-TWO'}, dumps=[halted] * 3)
 TW = 'testwords: pax.nopoweroff ignored (not a test kernel)\ntestwords: pax.panictest ignored (not a test kernel)\n'
-# px166 (stage 3, the lock's ledger): the probe reads /proc/pax-klock before the end; the shipped kernel's is one line
-KF = 'SMP-KLOCKFILE begin\nklock-ledger: not a test kernel\nSMP-KLOCKFILE end\n'
+# px166 (stage 3, the lock's ledger): the probe opens /proc/pax-klock before the end; the shipped kernel has none (the
+# ledger and its file live in the test build alone), so the open fails with ENOENT
+KF = 'SMP-KLOCKFILE begin\nopen failed, errno 2\nSMP-KLOCKFILE end\n'
 TW += KF
 case('testwords green', head('end') + TW, ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], {'SMP-TESTWORDS'}, set())
 case('testwords: /proc/pax-klock never read', head('end') + TW.replace(KF, ''),
      ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'}, why=r'no /proc/pax-klock read')
-case('testwords: the shipped kernel keeps a ledger', head('end') + TW.replace('klock-ledger: not a test kernel\n',
+case('testwords: the shipped kernel keeps a ledger', head('end') + TW.replace('open failed, errno 2\n',
      'klock-ledger tsc 1000\ncpu 0 spin 1 fresh 1 contended 0 hold 0 closed 0 longest 0 key boot\n'),
      ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'},
-     why=r'/proc/pax-klock says .*klock-ledger tsc 1000.* not the one line')
+     why=r'the shipped kernel has /proc/pax-klock: .*klock-ledger tsc 1000')
+case('testwords: the shipped kernel keeps the file\'s one line (the ledger\'s stubs shipped)', head('end') +
+     TW.replace('open failed, errno 2\n', 'klock-ledger: not a test kernel\n'),
+     ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'},
+     why=r'the shipped kernel has /proc/pax-klock: .*not a test kernel')
+case('testwords: /proc/pax-klock refused otherwise (EACCES)', head('end') + TW.replace('errno 2\n', 'errno 13\n'),
+     ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'},
+     why=r'/proc/pax-klock: open failed, errno 13, not ENOENT')
 case('testwords: a word not reported', head('end') + TW.split('\n')[0] + '\n',
      ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'})
 case('testwords: the power-off skipped', head('end') + TW, ['--kind', 'testwords', '--smp', '4', '--qemu-status', '1'],
