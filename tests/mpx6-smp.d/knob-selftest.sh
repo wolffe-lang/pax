@@ -13,10 +13,11 @@
 #   KNOB-REFUSED    PAX_SMP=0 or a word is refused by name (exit 2), QEMU never started
 #   KNOB-TOUR-TIME  tools/tour time with PAX_SMP=4 asks QEMU for `-smp 4` (its .meta's cmd too)
 #   KNOB-TOUR-BOOT  tools/tour boot with PAX_SMP=4 asks QEMU for `-smp 4`
-#   KNOB-ROWS-UNSET     SMP_ROWS_CAP unset: every one of tests/mpx6-smp's seventeen image specs byte-identical (rows-cap.sh;
+#   KNOB-ROWS-UNSET     SMP_ROWS_CAP unset: every one of tests/mpx6-smp's eighteen image specs byte-identical (rows-cap.sh;
 #                       the count is the list's, so an image added there is counted here by hand, its cap decided)
-#   KNOB-ROWS-SET       SMP_ROWS_CAP=4: rows, stress and the three ends gain ` pax.cpus=4`, the other twelve as they were
-#                       (share, asked only, among them: it boots at every processor, as leave does)
+#   KNOB-ROWS-SET       SMP_ROWS_CAP=4: rows, stress and the three ends gain ` pax.cpus=4`, the other thirteen as they were
+#                       (share, asked only, among them: it boots at every processor, as leave does; px166, stage 3a: rank,
+#                       which boots at two processors alone)
 #   KNOB-ROWS-REFUSED   SMP_ROWS_CAP 0, a word or 65 refused, and 4 under the hosted run (GITHUB_ACTIONS=true):
 #                       tests/mpx6-smp exits 2 with the knob's own refusal line, before any self-test or build
 set -uo pipefail
@@ -86,8 +87,8 @@ for spec in "${images[@]}"; do
         *) [ "$got" = "$spec" ] && changed=$((changed + 1)) ;;
     esac
 done
-row KNOB-ROWS-UNSET $(( want != 17 || same != 17 )) "$same of $want image specs byte-identical with SMP_ROWS_CAP unset (want 17 of 17)"
-row KNOB-ROWS-SET $(( want != 17 || changed != 17 )) "$changed of $want as asked with SMP_ROWS_CAP=4 (rows, stress, end-*: pax.cpus=4; the rest unchanged)"
+row KNOB-ROWS-UNSET $(( want != 18 || same != 18 )) "$same of $want image specs byte-identical with SMP_ROWS_CAP unset (want 18 of 18)"
+row KNOB-ROWS-SET $(( want != 18 || changed != 18 )) "$changed of $want as asked with SMP_ROWS_CAP=4 (rows, stress, end-*: pax.cpus=4; the rest unchanged)"
 codes=
 for v in 0 four 65; do
     # SMP_KINDS names no kind: a knob let through dies at that check (exit 1), never runs a boot
