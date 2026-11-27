@@ -1057,20 +1057,22 @@ def klock(tsc, cpus, keys):
         t += (f'cpu {i} spin {c["spin"]} fresh {c["fresh"]} contended {c.get("cont", 0)} hold {c["hold"]} closed '
               f'{c["closed"]} longest {c.get("longest", 0)} key {c.get("lkey", "boot")}\n')
     for name, k in keys.items():
-        # the kernel's line: a key's holds (cycles, count), the cycles of the switched and kernel-thread ones among
-        # them, its entries' spin (cycles, takes), and its longest hold (cycles, since the boot; 400000 unless given)
+        # the kernel's line: a key's holds (cycles, count), its entries' spin (cycles, takes), its longest hold
+        # (cycles, since the boot; 400000 unless given), then the cycles of the switched and kernel-thread holds among
+        # them, said only when either is not 0 (the page holds every key's line so)
         pl, sw, kt, sp = k[:4]
         lg = k[4] if len(k) > 4 else 400000
-        t += (f'key {name} hold {pl[0] + sw[0] + kt[0]} {pl[1] + sw[1] + kt[1]} switched {sw[0]} kthread {kt[0]} '
-              f'spin {sp[0]} {sp[1]} longest {lg}\n')
+        t += (f'key {name} hold {pl[0] + sw[0] + kt[0]} {pl[1] + sw[1] + kt[1]} spin {sp[0]} {sp[1]} longest {lg}'
+              + (f' switched {sw[0]} kthread {kt[0]}' if sw[0] or kt[0] else '') + '\n')
     return t
 
 
-def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.020), drop=None, extra=0):
+def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.020), drop=None, extra=0, kth=0.0):
     # two reads `secs` apart: each processor spins `spin` of the window and holds `hold` of it; the holds split over
     # keys (sys:1 half, trap:14 a third, vec:32 the rest less the known hold `test` = (count, seconds each)); `reader`
     # names the processor each read ran on (its own hold open); `drop` = (cpu, k) closes k fewer holds there at the
-    # second read; `extra` adds that many cycles to the keys' holds at the second read (they no longer sum)
+    # second read; `extra` adds that many cycles to the keys' holds at the second read (they no longer sum); `kth` the
+    # part of vec:32's hold cycles a kernel thread ran in
     w = int(secs * HZ)
     snaps = []
     for r in (0, 1):
@@ -1087,8 +1089,8 @@ def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.02
         # the counts: every hold closed in the window under one key (the processors close 50000 each)
         keys = {'sys:1': ((tot // 2, r * 25000 * n), (0, 0), (0, 0), (int(r * spin * w * n * 0.6), r * 25000 * n)),
                 'trap:14': ((tot // 3, r * 15000 * n), (0, 0), (0, 0), (int(r * spin * w * n * 0.4), r * 15000 * n)),
-                'vec:32': ((tot - tot // 2 - tot // 3 - tc + (extra if r else 0), r * (10000 * n - test[0])), (0, 0),
-                           (0, 0), (0, 0))}
+                'vec:32': ((int((tot - tot // 2 - tot // 3 - tc) * (1 - kth)) + (extra if r else 0), r * (10000 * n - test[0])),
+                           (0, 0), (int((tot - tot // 2 - tot // 3 - tc) * kth), 0), (0, 0))}
         if test[0]:
             keys['test'] = ((tc, r * test[0]), (0, 0), (0, 0), (0, 0), int(test[1] * HZ * 1.02))
         snaps.append(klock(tsc, cpus, keys))
@@ -1118,6 +1120,9 @@ case('ledger: the spin printed by processor', ledger_text(4), LG4, LEDGER3, set(
      says=r"^PASS KLOCK-WAIT smp=4 ledger: spin over the window's wall by processor \[33, 33, 33, 33\]% \(printed\)")
 case('ledger: the holds printed by key, the largest first', ledger_text(4), LG4, LEDGER3, set(),
      says=r'^PASS KLOCK-HOLDS smp=4 ledger: .*sys:1 0\.50 of the holds')
+case('ledger: a key\'s kernel-thread part, said after its longest hold, printed', ledger_text(4, kth=0.5), LG4, LEDGER3,
+     set(), says=r'^PASS KLOCK-HOLDS smp=4 ledger: .*vec:32 0\.\d\d of the holds, \d+ at [0-9.]+ us, longest since the boot '
+                 r'0\.13 ms, kthread 0\.50')
 case('ledger: each key\'s longest hold printed beside its share, count and mean', ledger_text(4), LG4, LEDGER3, set(),
      says=r'^PASS KLOCK-HOLDS smp=4 ledger: .*sys:1 0\.50 of the holds, 100000 at [0-9.]+ us, longest since the boot '
           r'0\.13 ms;.*test 0\.\d\d of the holds, 3 at 20000\.0 us, longest since the boot 20\.40 ms')
