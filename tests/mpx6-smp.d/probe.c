@@ -1308,6 +1308,57 @@ static void stress(U secs) {
 }
 
 /* --- SMP-END ------------------------------------------------------------------------------- */
+/* --- px166 (stage 3): the kernel lock's ledger, /proc/pax-klock --------------------------------------------------------
+   The ledger kind (a test kernel, `pax.klockhold=20` on its command line): the file read, a load on every processor that
+   runs threads, the file read again. Each worker is a process of its own (no shared address space, so no shootdown
+   enters the measure): for its time it makes system calls (getpid), writes 512 bytes into a pipe of its own and reads
+   them back, and maps four pages, touches each (four page faults) and unmaps them. The two reads are printed as the
+   file says them, between SMP-LEDGER lines; tests/mpx6-smp.d/rows.py's KLOCK-LEDGER holds the instrument to its closure,
+   its exclusion and the known hold (CPU 0's tick holding the lock 20 ms once a second). The end kind's `klock` word
+   prints the file once before the end (the testwords kind: the shipped kernel's one line). */
+static char klock_buf[16384];
+static void klock_dump(const char *begin, const char *endtag) {
+    L n = readfile("/proc/pax-klock", klock_buf, sizeof klock_buf);
+    say(begin);
+    if (n > 0) sc(NR_WRITE, 1, klock_buf, n);
+    say(endtag);
+}
+static void ledger_worker(U ms) {
+    int fds[2];
+    if (sc(NR_PIPE2, fds, 0, 0) < 0) exit_group(3);
+    char b[512];
+    for (int i = 0; i < 512; i++) b[i] = (char)i;
+    U stop = rdtsc() + cycles_of_ms(ms);
+    while (rdtsc() < stop) {
+        for (int i = 0; i < 8; i++) getpid();
+        sc(NR_WRITE, fds[1], b, 512);
+        sc(NR_READ, fds[0], b, 512);
+        volatile char *pg = map(4 * 4096, PROT_RW, MAP_PRIVATE_ANON);
+        if ((L)pg < 0) exit_group(4);
+        for (int i = 0; i < 4; i++) pg[i * 4096] = 1;
+        sc(NR_MUNMAP, pg, 4 * 4096, 0);
+    }
+    exit_group(0);
+}
+static void row_ledger(void) {
+    struct snap z;
+    struct ln l;
+    int n = take(&z) && z.active > 0 ? (int)z.active : 1;
+    if (n > MAXC) n = MAXC;
+    U ms = 3000;
+    L pids[MAXC];
+    klock_dump("SMP-LEDGER read 0 begin", "SMP-LEDGER read 0 end");
+    int k = 0;
+    for (; k < n; k++) {
+        pids[k] = fork();
+        if (pids[k] == 0) ledger_worker(ms);
+        if (pids[k] < 0) break;
+    }
+    l.n = 0; ls(&l, "SMP-LEDGER load workers "); ld(&l, (U)k); ls(&l, " ms "); ld(&l, ms); le(&l);
+    for (int i = 0; i < k; i++) { int st; wait4(pids[i], &st, 0, 0); }
+    klock_dump("SMP-LEDGER read 1 begin", "SMP-LEDGER read 1 end");
+    say("SMP-LEDGER done");
+}
 static void end(const char *how) {
     U cmd = same(how, "halt") ? 0xcdef0123ul : same(how, "poweroff") ? 0x4321fedcul : 0x01234567ul;
     struct snap z;
@@ -1655,6 +1706,7 @@ __attribute__((used)) static void smp_main(U *sp) {
     } else if (same(mode, "spin")) {
         spin();
     } else if (same(mode, "end")) {
+        if (argc > 3 && same(argv[3], "klock")) klock_dump("SMP-KLOCKFILE begin", "SMP-KLOCKFILE end");
         end(argc > 2 ? argv[2] : "halt");
     } else {
         row_active();
@@ -1676,6 +1728,9 @@ __attribute__((used)) static void smp_main(U *sp) {
             row_leave();
         } else if (same(mode, "share")) {
             row_share();
+        } else if (same(mode, "ledger")) {
+            G = shared_page();
+            row_ledger();
         } else if (same(mode, "rows")) {
             row_run((int)started_cpus, 3);
             G = shared_page();
