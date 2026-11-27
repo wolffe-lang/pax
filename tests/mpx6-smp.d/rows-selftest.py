@@ -1159,6 +1159,92 @@ case('ledger: CPU 0\'s longest a system call\'s 30 ms, past the known hold: gree
 case('ledger: one read and no done: red', ledger_text(4, reads=1, done=False), LG4, set(), {'KLOCK-LEDGER'},
      why=r'1 of 2 reads of /proc/pax-klock, no `SMP-LEDGER done`')
 
+# --- px166 (stage 3a, unit 1): lock ranks under pax.smpdebug, and the ledger per lock word ---------------------------
+# The test build's lockled counts every kernel/sync word's acquisitions per processor and, with `pax.smpdebug`, checks
+# their ranks. /proc/pax-klock gains `lock-ranks checked|off` and one line per word and processor that took it:
+# `lock WORD cpu C took N gave G contended K spin S hold H longest L`. The suite passes --lockled to the test-built
+# kinds, whose boots all have `pax.smpdebug`: each says `lock-ranks checked` at its start and names no LOCK-RANK
+# (LOCK-RANK-CLEAN); in the ledger kind every word is given back as often as taken at each read (KLOCK-LEDGER (d)) and
+# each word's spin is printed (LOCK-WAIT). The rank kind adds `pax.rankflip`: CPU 0's tick takes console and then net,
+# out of order, once; the next fresh take of the kernel lock names it and panics (LOCK-RANK).
+SMPDEBUG = 'testwords: pax.smpdebug (a test kernel): lock-ranks checked\n'
+RANKFLIP = 'testwords: pax.rankflip (a test kernel): CPU 0 takes console and then net once, a second after its ticks begin\n'
+FLIPPED = 'testwords: LOCK-RANK cpu 0 took net (rank 15) holding console (rank 20)\n'
+RANKPANIC = 'PANIC lock rank: a word taken out of order, cpu  0x0000000000000000\n'
+
+
+def lock_lines(n, r, secs=3.0, words=('console',), short=None, spin=0.0, cont=0, ranks='checked'):
+    # the lock ledger at read r: each processor took each word 100 + 400 r times and gave it back as often (`short` =
+    # (read, cpu, k): k fewer given back there), spun `spin` of the window and was contended `cont` times by read 1
+    w = int(secs * HZ)
+    t = f'lock-ranks {ranks}\n'
+    for word in words:
+        for i in range(n):
+            took = 100 + 400 * r
+            gave = took - (short[2] if short and short[0] == r and short[1] == i else 0)
+            t += (f'lock {word} cpu {i} took {took} gave {gave} contended {r * cont} spin {int(r * spin * w)} '
+                  f'hold {int(r * 0.001 * w)} longest 30000\n')
+    return t
+
+
+def lock_snaps(n, **kw):
+    return [s + lock_lines(n, r, **kw) for r, s in enumerate(ledger_snaps(n))]
+
+
+LK4 = LG4 + ['--lockled']
+LOCKS = LEDGER3 | {'LOCK-WAIT', 'LOCK-RANK-CLEAN'}
+case('lock ledger at 4: every word given back as often as taken, ranks checked: green', SMPDEBUG + ledger_text(
+     4, snaps=lock_snaps(4)), LK4, LOCKS, set(),
+     says=r'^PASS KLOCK-LEDGER smp=4 ledger: .*; \(d\) every word given back as often as taken \(1 word, 4 processors\)')
+case('lock ledger: each word\'s spin over the window, contended and taken, printed', SMPDEBUG + ledger_text(
+     4, snaps=lock_snaps(4)), LK4, LOCKS, set(),
+     says=r'^PASS LOCK-WAIT smp=4 ledger: console spin 0\.00% of the window, 0 contended, 1600 taken \(printed\)')
+case('lock ledger: a contended word is printed, never gated here', SMPDEBUG + ledger_text(
+     4, snaps=lock_snaps(4, spin=0.02, cont=5)), LK4, LOCKS, set(),
+     says=r'^PASS LOCK-WAIT smp=4 ledger: console spin 8\.00% of the window, 20 contended, 1600 taken \(printed\)')
+case('lock ledger: a word not given back at a read: red by (d)', SMPDEBUG + ledger_text(
+     4, snaps=lock_snaps(4, short=(1, 2, 1))), LK4, LOCKS - {'KLOCK-LEDGER'}, {'KLOCK-LEDGER'},
+     why=r'\(d\) a word not given back: read 1: console cpu 2 took 500 and gave 499')
+case('lock ledger: none in /proc/pax-klock where the test build should have it: red by (d)', SMPDEBUG + ledger_text(4),
+     LK4, LOCKS - {'KLOCK-LEDGER', 'LOCK-WAIT'}, {'KLOCK-LEDGER'}, why=r'\(d\) no lock ledger in /proc/pax-klock')
+case('lock ledger: the ranks off in /proc/pax-klock: red by (d)', SMPDEBUG + ledger_text(
+     4, snaps=lock_snaps(4, ranks='off')), LK4, LOCKS - {'KLOCK-LEDGER'}, {'KLOCK-LEDGER'},
+     why=r'\(d\) /proc/pax-klock says `lock-ranks off`')
+case('ledger with the lock ledger: no `lock-ranks checked` at the start: LOCK-RANK-CLEAN red', ledger_text(
+     4, snaps=lock_snaps(4)), LK4, LOCKS - {'LOCK-RANK-CLEAN'}, {'LOCK-RANK-CLEAN'},
+     why=r'no `testwords: pax\.smpdebug \(a test kernel\): lock-ranks checked` line')
+case('ledger: a LOCK-RANK named in a boot that should have none: red', SMPDEBUG +
+     'testwords: LOCK-RANK cpu 1 took console (rank 20) holding heap (rank 21)\n' + ledger_text(4, snaps=lock_snaps(4)),
+     LK4, LOCKS - {'LOCK-RANK-CLEAN'}, {'LOCK-RANK-CLEAN'},
+     why=r'a LOCK-RANK line: testwords: LOCK-RANK cpu 1 took console \(rank 20\) holding heap \(rank 21\)')
+case('ledger without --lockled: the lock ledger not asked (a checkout before it)', ledger_text(4), LG4, LEDGER3, set())
+for n in (2, 4):
+    case(f'leave at {n} with the ranks checked: LOCK-RANK-CLEAN green', SMPDEBUG + leave_text(n),
+         ['--kind', 'leave', '--smp', str(n), '--lockled'], {'SMP-EXEC-LEAVE', 'LOCK-RANK-CLEAN'}, set())
+case('panic with the ranks checked: the test panic is no LOCK-RANK', SMPDEBUG + head('spin') + P1,
+     ['--kind', 'panic', '--smp', '4', '--lockled'], {'SMP-PANIC-STOP', 'LOCK-RANK-CLEAN'}, set(), dumps=[halted] * 3)
+case('panic without `lock-ranks checked`: LOCK-RANK-CLEAN red', head('spin') + P1,
+     ['--kind', 'panic', '--smp', '4', '--lockled'], {'SMP-PANIC-STOP'}, {'LOCK-RANK-CLEAN'}, dumps=[halted] * 3)
+RK = ['--kind', 'rank', '--smp', '2']
+case('rank: the flip named and the panic after it: green', SMPDEBUG + RANKFLIP + head('stress') + FLIPPED + RANKPANIC,
+     RK, {'LOCK-RANK'}, set(),
+     says=r'^PASS LOCK-RANK smp=2 rank: `pax\.rankflip` named: cpu 0 took net \(rank 15\) holding console \(rank 20\), '
+          r'then the panic')
+case('rank: no LOCK-RANK line, the boot ran to its end: red', SMPDEBUG + RANKFLIP + head('stress') + tail(), RK, set(),
+     {'LOCK-RANK'}, why=r'no LOCK-RANK line')
+case('rank: the words named the wrong way round: red', SMPDEBUG + RANKFLIP + head('stress') +
+     'testwords: LOCK-RANK cpu 0 took console (rank 20) holding net (rank 15)\n' + RANKPANIC, RK, set(), {'LOCK-RANK'},
+     why=r'the LOCK-RANK line names .*, want cpu 0 took net \(rank 15\) holding console \(rank 20\)')
+case('rank: no `lock-ranks checked` at the start: red', RANKFLIP + head('stress') + FLIPPED + RANKPANIC, RK, set(),
+     {'LOCK-RANK'}, why=r'no `testwords: pax\.smpdebug \(a test kernel\): lock-ranks checked` line')
+case('rank: no `pax.rankflip` at the start: red', SMPDEBUG + head('stress') + FLIPPED + RANKPANIC, RK, set(),
+     {'LOCK-RANK'}, why=r'no `testwords: pax\.rankflip \(a test kernel\)` line')
+case('rank: named but no panic after it: red', SMPDEBUG + RANKFLIP + head('stress') + FLIPPED + tail(), RK, set(),
+     {'LOCK-RANK'}, why=r'no `PANIC lock rank: ` after it')
+case('rank: another panic as well: red', SMPDEBUG + RANKFLIP + head('stress') + FLIPPED + RANKPANIC +
+     'PANIC klock: entered from ring 3 holding it, cpu  0x0000000000000001\n', RK, set(), {'LOCK-RANK', 'SMP-KLOCK'},
+     why=r'the kernel said: \[.PANIC klock: entered from ring 3')
+
 
 def build_klock_text(active=4, jobs=4, nocpu=False):
     # the build boot with the test kernel: bench reads /proc/pax-klock before and after each batch; `nocpu`: the ledger
