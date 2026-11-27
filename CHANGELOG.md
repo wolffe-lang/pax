@@ -7,6 +7,21 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **Lock ranks and a ledger per lock word, in the test kernel only.** A kernel built with `tools/build-kernel
+  --test-words` now counts, for each of `kernel/sync`'s eight lock words and each processor, the acquisitions, the
+  releases, the spin before each take and the hold after it. Under the new test word `pax.smpdebug` it also checks
+  that each processor takes the words in rank order: the kernel lock first, then the network's in the order
+  `kernel/sync` documents, then console, then the heap. A word taken out of order, the kernel lock taken while
+  holding a word, or the kernel lock given back while holding one, is named at that processor's next take of the
+  kernel lock (`testwords: LOCK-RANK cpu C took WORD (rank R) holding WORD (rank S)`), and the kernel panics.
+  `/proc/pax-klock` gains a `lock-ranks checked|off` line and one line per word and processor that took it.
+  `pax.rankflip` takes two words out of order once, for the check's own proof. tests/mpx6-smp boots every test-built
+  kind with `pax.smpdebug` and requires no rank violation (LOCK-RANK-CLEAN). It adds a `rank` kind that must catch
+  the flip (LOCK-RANK), holds every word given back as often as taken (KLOCK-LEDGER (d)), and prints each word's spin
+  (LOCK-WAIT). The hooks are in the test build's patch, in `kernel/sync` beside the ledger's, and the counting is in
+  a test-build module, `tests/mpx6-smp.d/lockled.lu`. The shipped kernel is unchanged; TESTWORDS-LEDGER-ELF and
+  KERNEL-NO-LEDGER hold it so. The prediction is in `notes/smp-lock-ranks.md`.
+
 - **A ledger of the kernel lock, in the test kernel only.** A kernel built with `tools/build-kernel --test-words`
   now counts, for every take of the kernel lock, how long the taking processor spun for it and how long the hold
   lasted, keyed by the entry that took it (each system call by number, page faults, each interrupt vector), and
