@@ -241,12 +241,20 @@ first program it prints how long its boot took and how much of that the console 
 | alpha | the service manager in wolf: `/bin/alpha` checks unit files (`alpha check`) and asks a running manager; the image ships no unit and starts nothing yet | `2aaf3f8b` (wolf 0.2.40) |
 | pxg | the package manager, `/bin/pxg`; transactions on qualified non-live ordered-ext3 roots, never live `/` | `1ee4cf54` (v0.2.1; its own wolf 0.2.40 pin) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
-| yew | the editor | `3a9983ee` |
+| yew | the editor, with embedded syntax definitions and themes | `cec65826` (wolf 0.2.36) |
 | sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
 | lope, aspen, lobo | the directory jumper, tree(1), the web server | `d65bb03c`, `096245c8`, `39788b86` |
 | clef | the assembler in wolf, opt-in at `/usr/bin/clef` of the dev image | `user/clef.pin` |
 | ligature | the linker in wolf, `/usr/bin/ligature` of the dev image, beside lld (lld stays the default) | `user/ligature.pin`, `8594073c` |
 | pack, cub, trail | three wolf games, installed by the installer into `~/Games/` with their source | `27848095`, `6a1db765`, `24099a81` (engines `aa6c4dc0`, `74b89744`, `57870143`) |
+
+`yew` carries its syntax engine, seven built-in definitions (including `.lu`) and themes inside the binary;
+no extra runtime directory or definition files need installing. `tools/mkyew` builds it with its own wolf 0.2.36
+manifest, not either of PAX's compiler pins. The console's `TERM=linux` selects the default 16-colour rendition;
+it does not promise that two syntax styles have different foregrounds. `tests/mpx5-yew` records that default
+separately from the controlled truecolor keyword rows on Linux, PS/2, USB and ssh. Ctrl+Alt+Up/Down add a cursor
+above or below **in H mode only** at this pin; the console's left-Alt key delivery and the ssh byte path are baseline
+guards, not a change to yew's bindings.
 
 `tools/mkpxg OUTDIR` builds the package manager from `user/pxg.pin` using its source tree's own toolchain,
 not the image's compiler. The fixed pin's source archive digest is checked twice, and two separate source
