@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Private SSH fixtures stay private; only copied evidence is uploaded."""
 from pathlib import Path
-import runpy,stat,tempfile
+import os,runpy,stat,tempfile
 ROOT=Path(__file__).resolve().parents[2]
 job=(ROOT/'.github/workflows/ci.yml').read_text().split('\n  mpx5-yew:',1)[1].split('\n  mpx5-screen:',1)[0]
-assert 'build/mpx5-burrowd-runs/**' not in job,'upload must not traverse the root-owned private SSH fixture'
-assert 'build/yew-ssh-artifacts/' in job and 'export-ssh.py' in job,'SSH evidence exporter/upload missing'
+artifacts=job.split('name: pax-mpx5-yew',1)[1]
+assert 'build/mpx5-burrowd-runs/' not in artifacts,'upload must not traverse the root-owned private SSH fixture'
+assert 'build/yew-ssh-artifacts/' in artifacts and 'export-ssh.py' in job,'SSH evidence exporter/upload missing'
 export=runpy.run_path(str(Path(__file__).with_name('export-ssh.py')))['export']
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);source=p/'private';source.mkdir(mode=0o711)
@@ -13,8 +14,11 @@ with tempfile.TemporaryDirectory() as d:
  expected={'native-bios/client/yew-ssh-colour.raw':b'colour','native-bios/client/yew-ssh-session.raw':b'session','native-bios/client/ssh.log':b'client log','native-bios/serial.log':b'boot log'}
  for name,data in expected.items():(source/name).write_bytes(data)
  secret=client/'id_ed25519';secret.write_bytes(b'PRIVATE FIXTURE KEY');secret.chmod(0o600)
+ (client/'linked.log').symlink_to(secret)
  before={str(f.relative_to(source)):stat.S_IMODE(f.stat().st_mode) for f in source.rglob('*')}
- target=p/'public';export(source,target)
+ target=p/'public';mask=os.umask(0o077)
+ try:export(source,target)
+ finally:os.umask(mask)
  files={str(f.relative_to(target)):f.read_bytes() for f in target.rglob('*') if f.is_file()};assert files==expected
  assert before=={str(f.relative_to(source)):stat.S_IMODE(f.stat().st_mode) for f in source.rglob('*')},'export changed private fixture modes'
  for f in target.rglob('*'):assert stat.S_IMODE(f.stat().st_mode)==(0o755 if f.is_dir() else 0o644)
