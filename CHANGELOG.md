@@ -11,14 +11,19 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   now counts, for every take of the kernel lock, how long the taking processor spun for it and how long the hold
   lasted, keyed by the entry that took it (each system call by number, page faults, each interrupt vector), and
   prints the counters in `/proc/pax-klock`; `pax.klockhold=MS` makes the boot processor's tick hold the lock a known
-  time once a second, for the ledger's own check. The shipped kernel keeps no ledger: its entry and release paths
-  call empty functions, and its `/proc/pax-klock` says `klock-ledger: not a test kernel`. tests/mpx6-smp's ledger
-  kind holds the ledger to its closure, its exclusion and the known hold (KLOCK-LEDGER) and prints each processor's
-  spin and each entry's holds with its longest since the boot (KLOCK-WAIT, KLOCK-HOLDS), also for SMP-BUILD's
-  batches on the test kernel (`SMP_BUILD_KERNEL=test`); SMP-BUILD-COST prints the shipped kernel's batch times
-  against another shipped kernel's (`SMP_BUILD_AGAINST`). A processor's longest hold leaves out kmain's first, which
-  is the whole boot up to the first release. At one processor the ledger has no per-processor lines, so no spin is
-  printed there. The prediction it was built to test is in `notes/smp-klock-ledger.md`.
+  time once a second, for the ledger's own check. The test build applies the ledger's hooks
+  (`tests/mpx6-smp.d/ledger.patch`) to its own copy of `kernel/`; the shipped kernel is built from `kernel/` as it
+  is, which names no ledger, and has no `/proc/pax-klock`. tests/mpx6-smp's ledger kind holds the ledger to its
+  closure, its exclusion and the known hold (KLOCK-LEDGER) and prints each processor's spin and each entry's holds
+  with its longest since the boot (KLOCK-WAIT, KLOCK-HOLDS), also for SMP-BUILD's batches on the test kernel
+  (`SMP_BUILD_KERNEL=test`). LEDGER-PATCH and KERNEL-NO-LEDGER keep the hooks in the patch and out of `kernel/`;
+  TESTWORDS-LEDGER-ELF keeps the ledger out of the shipped ELF, and with `SMP_SHIPPED_AGAINST=ELF` holds the shipped
+  kernel to another ELF where the machine loads it. SMP-BUILD-COST prints two shipped kernels' batch times
+  (`SMP_BUILD_AGAINST`). A processor's longest hold leaves out kmain's first, which is the whole boot up to the first
+  release. At one processor the ledger has no per-processor lines, so no spin is printed there. The prediction it was
+  built to test is in `notes/smp-klock-ledger.md`, with why the hooks left the shipped kernel: a build that kept them
+  there as empty calls measured 2.3% slower at four jobs, while the calls themselves come to well under 0.1% of a
+  batch and the build moved most of the kernel's code.
 
 - **Every processor runs threads, under one kernel lock (SMP stage 2).** Each application processor now takes
   threads of programs from the one run queue, as the boot processor does; kernel threads stay on the boot processor.
