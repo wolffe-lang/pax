@@ -1046,7 +1046,8 @@ case('build with an output not the oracle\'s', build_text(4, wrong=True), ba + [
 # --- px166 (stage 3, the lock's ledger): the ledger kind, the build batches' snapshots, SMP-BUILD-COST ---------------
 # /proc/pax-klock as a test kernel writes it: the TSC at the read; per processor its spin, fresh acquisitions, contended
 # ones, hold cycles, holds closed and longest hold with its key; per key its holds' cycles and count, the switched and
-# kernel-thread holds' cycles, and its entries' spin. HZ is the probe's TSC rate (head()'s 3 GHz).
+# kernel-thread holds' cycles, its entries' spin, and its longest hold since the boot. HZ is the probe's TSC rate
+# (head()'s 3 GHz).
 HZ = 3000000000
 
 
@@ -1057,10 +1058,11 @@ def klock(tsc, cpus, keys):
               f'{c["closed"]} longest {c.get("longest", 0)} key {c.get("lkey", "boot")}\n')
     for name, k in keys.items():
         # the kernel's line: a key's holds (cycles, count), the cycles of the switched and kernel-thread ones among
-        # them, and its entries' spin (cycles, takes)
-        pl, sw, kt, sp = k
+        # them, its entries' spin (cycles, takes), and its longest hold (cycles, since the boot; 400000 unless given)
+        pl, sw, kt, sp = k[:4]
+        lg = k[4] if len(k) > 4 else 400000
         t += (f'key {name} hold {pl[0] + sw[0] + kt[0]} {pl[1] + sw[1] + kt[1]} switched {sw[0]} kthread {kt[0]} '
-              f'spin {sp[0]} {sp[1]}\n')
+              f'spin {sp[0]} {sp[1]} longest {lg}\n')
     return t
 
 
@@ -1088,7 +1090,7 @@ def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.02
                 'vec:32': ((tot - tot // 2 - tot // 3 - tc + (extra if r else 0), r * (10000 * n - test[0])), (0, 0),
                            (0, 0), (0, 0))}
         if test[0]:
-            keys['test'] = ((tc, r * test[0]), (0, 0), (0, 0), (0, 0))
+            keys['test'] = ((tc, r * test[0]), (0, 0), (0, 0), (0, 0), int(test[1] * HZ * 1.02))
         snaps.append(klock(tsc, cpus, keys))
     return snaps
 
@@ -1116,6 +1118,9 @@ case('ledger: the spin printed by processor', ledger_text(4), LG4, LEDGER3, set(
      says=r"^PASS KLOCK-WAIT smp=4 ledger: spin over the window's wall by processor \[33, 33, 33, 33\]% \(printed\)")
 case('ledger: the holds printed by key, the largest first', ledger_text(4), LG4, LEDGER3, set(),
      says=r'^PASS KLOCK-HOLDS smp=4 ledger: .*sys:1 0\.50 of the holds')
+case('ledger: each key\'s longest hold printed beside its share, count and mean', ledger_text(4), LG4, LEDGER3, set(),
+     says=r'^PASS KLOCK-HOLDS smp=4 ledger: .*sys:1 0\.50 of the holds, 100000 at [0-9.]+ us, longest since the boot '
+          r'0\.13 ms;.*test 0\.\d\d of the holds, 3 at 20000\.0 us, longest since the boot 20\.40 ms')
 case('ledger: the shipped kernel\'s line, no ledger: red', ledger_text(4, snaps=['klock-ledger: not a test kernel\n'] * 2),
      LG4, set(), {'KLOCK-LEDGER'}, why=r'no ledger in /proc/pax-klock')
 case('ledger: a processor closes fewer holds than it took: red by (a)', ledger_text(4, drop=(2, 40000)), LG4,
