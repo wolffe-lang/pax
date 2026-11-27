@@ -11,16 +11,77 @@
 //! of CPU 0's ticks (ten to a tick, at least one) before it takes it again and
 //! switches that thread off (kernel/interrupts' entry): what a host that has
 //! not run that processor does, every time. Each hold says one line after it, naming the held thread's slot and tgid.
+//!
+//! px166 (stage 3): the kernel lock's ledger. At every fresh take of the lock (kernel/interrupts' entry, under the
+//! lock) it keys the hold by the entry that took it and counts the spin before it; at every release store (kernel/klock,
+//! still holding) it closes the hold. Keys: a system call by its number (vector 0x100, the frame's %rax, 0-511), a trap
+//! from ring 3 by its vector (14 the page fault), any trap from ring 0 (`ktrap`), each vector from 32 up (the ticks,
+//! RESCHED, each device), kmain's first hold (`boot`), the known hold (`test`), anything else (`other`). Per processor:
+//! spin cycles, fresh takes, contended ones (a spin over 10,000 cycles), hold cycles, holds closed, the longest hold and
+//! its key. Per key: holds and their cycles, the cycles of those in which the processor's thread changed (`switched`)
+//! or a kernel thread ran (`kthread`: a kernel thread holds the lock as long as it runs, so its run is charged to the
+//! entry that switched to it), and its entries' spin. Every write is the lock holder's, so the lock orders them. The
+//! tables are 16 pages taken from kernel/frames at the boot (`start`), the directory's address in `ledger`, whose
+//! symbol marks a test build (tests/mpx6-smp's TESTWORDS-LEDGER-ELF). `/proc/pax-klock` (kernel/procfs) prints the
+//! counters, never reset, and the TSC at the read: a window is the difference of two reads (tests/mpx6-smp's
+//! KLOCK-LEDGER, KLOCK-WAIT, KLOCK-HOLDS). `pax.klockhold=MS`: CPU 0's tick holds the lock MS ms once a second, keyed
+//! `test`, for the ledger's own proof (the known hold).
 
 use boot_info
+use frames
 use ipi
 use log
 use panic
 use percpu
 
+extern "c" fn pax_rdtsc() -> u64
+
 const TEST_OP: u64 = 3
 var fired: bool = false
 var slow: u64 = 0 // pax.slowleave's hold in CPU 0's ticks (0: none); its symbol marks a test build
+
+// px166 (stage 3): the lock ledger's layout. Keys: 0-511 system calls, 512 + v vector v, then four of their own.
+const KEYS: u64 = 772
+const K_VEC: u64 = 512
+const K_KTRAP: u64 = 768
+const K_BOOT: u64 = 769
+const K_TEST: u64 = 770
+const K_OTHER: u64 = 771
+const KEY_PAGES: u64 = 13 // 64 keys of eight words to a page
+const CPU_PAGES: u64 = 2 // 32 processors of sixteen words to a page
+const MAXCPU: u64 = 64
+const PAGE: u64 = 4096
+// a key's words
+const H_CYC: u64 = 0 // hold cycles
+const H_N: u64 = 1 // holds closed
+const S_CYC: u64 = 2 // the switched holds' cycles
+const T_CYC: u64 = 3 // the kernel-thread holds' cycles
+const P_CYC: u64 = 4 // its entries' spin cycles
+const P_N: u64 = 5 // its fresh takes
+// a processor's words
+const C_SPIN: u64 = 0
+const C_FRESH: u64 = 1
+const C_CONT: u64 = 2
+const C_HOLD: u64 = 3
+const C_CLOSED: u64 = 4
+const C_LONGEST: u64 = 5
+const C_LKEY: u64 = 6
+const C_OPEN: u64 = 7 // 1 while a hold is open here
+const C_START: u64 = 8 // its TSC, key, current slot and kernel-thread switches at the take
+const C_KEY: u64 = 9
+const C_SLOT: u64 = 10
+const C_KTH: u64 = 11
+const CONTENDED: u64 = 10000
+// boot/isr.S's frame, as word indices (kernel/user's)
+const W_RAX: u64 = 14
+const W_VECTOR: u64 = 15
+const W_CS: u64 = 18
+const SYSCALL: u64 = 0x100
+var ledger: u64 = 0 // the directory page's address (HHDM), 0 until `start`; its symbol marks a test build
+var klockhold: u64 = 0 // pax.klockhold's MS (0: none)
+var tick_tsc: u64 = 0 // the TSC at CPU 0's last tick
+var tick_cycles: u64 = 0 // the cycles between its last two
+var next_hold: u64 = 0 // the tick at or after which the next known hold falls
 
 pub fn start() {
     if boot_info.cmdline_has("pax.nopoweroff") {
@@ -42,11 +103,34 @@ pub fn start() {
         log.dec(t as int)
         log.line(" ticks on its application processor before it is switched off")
     }
+    // px166 (stage 3): the lock's ledger; kmain holds the lock here as the first kernel thread (kernel/klock's `boot`),
+    // so that hold is opened now, keyed `boot`
+    if ledger_alloc() {
+        let c = percpu.index()
+        cadd(c, C_FRESH, 1)
+        open_hold(c, K_BOOT, tsc())
+        log.line("testwords: the kernel lock's ledger (a test kernel): /proc/pax-klock")
+        let hold = word_ms("pax.klockhold")
+        if hold != 0 {
+            // # Safety: written once here, at the boot, before CPU 0's tick reads it.
+            unsafe { klockhold = hold }
+            log.put("testwords: pax.klockhold=")
+            log.dec(hold as int)
+            log.line(" (a test kernel): CPU 0's tick holds the kernel lock that long once a second, keyed test")
+        }
+    } else {
+        log.line("testwords: the kernel lock's ledger has no pages (kernel/frames refused)")
+    }
 }
 
 /// `pax.slowleave=MS`'s MS (decimal, at most six digits); 0 when the word is absent or not a number.
 fn slowleave_ms() -> u64 {
-    let (a, n) = boot_info.cmdline_value("pax.slowleave")
+    word_ms("pax.slowleave")
+}
+
+/// A test word's `=MS` (decimal, at most six digits); 0 when the word is absent or not a number.
+fn word_ms(w: str) -> u64 {
+    let (a, n) = boot_info.cmdline_value(w)
     if n == 0 || n > 6 {
         return 0
     }
@@ -73,6 +157,7 @@ fn how_many() -> u64 {
 }
 
 pub fn tick(t: u64) {
+    ledger_tick(t)
     // # Safety: CPU 0's tick alone writes it.
     if unsafe { fired } || t < 300 || how_many() == 0 || ipi.count() < 2 {
         return
@@ -122,29 +207,274 @@ pub fn held(cpu: u64, slot: u64, tgid: u64) {
     log.end()
 }
 
-/// px166 (stage 3, the kernel lock's ledger; tests/mpx6-smp.d/testwords.lu keeps it): kernel/interrupts' entry,
-/// just before `klock.enter`: the TSC in the test build; 0 as shipped, so the shipped entry reads no TSC.
-pub fn ledger_now() -> u64 {
-    0
+
+// --- px166 (stage 3): the kernel lock's ledger ------------------------------------------------------------------------
+
+fn tsc() -> u64 {
+    // # Safety: boot/fpu.S's RDTSC, which every x86-64 processor has.
+    unsafe { pax_rdtsc() }
 }
 
-/// After a fresh `klock.enter`, under the lock: the entering frame's address and `ledger_now`'s reading. The test
-/// build opens a hold, keyed by the entry; nothing as shipped.
-pub fn ledger_took(_f: u64, _t0: u64) {}
+fn rd(a: u64) -> u64 {
+    // # Safety: a word of the ledger's pages (taken at `start`, through the HHDM) or of the trampoline's frame.
+    unsafe { (a as *u64).read_volatile() }
+}
 
-/// kernel/klock, just before each release store, still holding: the test build closes the hold; nothing as shipped.
-pub fn ledger_gave() {}
+fn wr(a: u64, v: u64) {
+    // # Safety: a word of the ledger's pages; the kernel lock's holder alone writes them.
+    unsafe { (a as *u64).write_volatile(v) }
+}
 
-/// `/proc/pax-klock`'s text at `base` (kernel/procfs's page): its length. The test build writes the ledger; as
-/// shipped, one line, `klock-ledger: not a test kernel`.
-pub fn ledger_text(base: u64) -> u64 {
-    var n: u64 = 0
-    for b in "klock-ledger: not a test kernel".bytes() {
-        // # Safety: a byte of the page kernel/procfs's `make` took, through the HHDM; n < 32.
-        unsafe { ((base + n) as *u8).write_volatile((b as int as u64 & 0xff) as u8) }
-        n += 1
+fn dir() -> u64 {
+    // # Safety: written once at the boot (`start`), before any other processor runs.
+    unsafe { ledger }
+}
+
+fn kaddr(k: u64, i: u64) -> u64 {
+    rd(dir() + (k / 64) * 8) + (k % 64) * 64 + i * 8
+}
+
+fn caddr(c: u64, i: u64) -> u64 {
+    rd(dir() + (KEY_PAGES + c / 32) * 8) + (c % 32) * 128 + i * 8
+}
+
+fn kadd(k: u64, i: u64, v: u64) {
+    let a = kaddr(k, i)
+    wr(a, rd(a) + v)
+}
+
+fn cget(c: u64, i: u64) -> u64 {
+    rd(caddr(c, i))
+}
+
+fn cput(c: u64, i: u64, v: u64) {
+    wr(caddr(c, i), v)
+}
+
+fn cadd(c: u64, i: u64, v: u64) {
+    let a = caddr(c, i)
+    wr(a, rd(a) + v)
+}
+
+fn zero_page(a: u64) {
+    var i: u64 = 0
+    while i < PAGE / 8 {
+        wr(a + i * 8, 0)
+        i += 1
     }
-    // # Safety: as above.
-    unsafe { ((base + n) as *u8).write_volatile(10 as u8) }
-    n + 1
+}
+
+/// The directory page and its fifteen pages from kernel/frames, zeroed; `ledger` set last. False when frames refused
+/// (the pages taken so far are not given back: the boot's, once).
+fn ledger_alloc() -> bool {
+    let h = frames.hhdm()
+    let d = frames.alloc() else 0
+    if d == 0 {
+        return false
+    }
+    zero_page(d + h)
+    var i: u64 = 0
+    while i < KEY_PAGES + CPU_PAGES {
+        let p = frames.alloc() else 0
+        if p == 0 {
+            return false
+        }
+        zero_page(p + h)
+        wr(d + h + i * 8, p + h)
+        i += 1
+    }
+    // # Safety: written once here, at the boot, before any other processor runs.
+    unsafe { ledger = d + h }
+    true
+}
+
+fn open_hold(c: u64, key: u64, now: u64) {
+    cput(c, C_OPEN, 1)
+    cput(c, C_START, now)
+    cput(c, C_KEY, key)
+    cput(c, C_SLOT, percpu.current())
+    cput(c, C_KTH, percpu.get(percpu.mine(), percpu.KTHREADS))
+}
+
+/// kernel/interrupts' entry, just before `klock.enter`: the TSC (0 until the ledger has its pages).
+pub fn ledger_now() -> u64 {
+    if dir() == 0 {
+        return 0
+    }
+    tsc()
+}
+
+/// After a fresh `klock.enter`, under the lock: the spin counted, and a hold opened keyed by the entry at `f`.
+pub fn ledger_took(f: u64, t0: u64) {
+    let c = percpu.index()
+    if dir() == 0 || c >= MAXCPU {
+        return
+    }
+    let now = tsc()
+    let v = rd(f + W_VECTOR * 8)
+    var key = K_OTHER
+    if v == SYSCALL {
+        let nr = rd(f + W_RAX * 8)
+        if nr < 512 { key = nr }
+    } else if v < 32 {
+        key = if rd(f + W_CS * 8) & 3 == 3 { K_VEC + v } else { K_KTRAP }
+    } else if v < 256 {
+        key = K_VEC + v
+    }
+    let spin = if t0 != 0 && now > t0 { now - t0 } else { 0 }
+    cadd(c, C_SPIN, spin)
+    cadd(c, C_FRESH, 1)
+    if spin > CONTENDED {
+        cadd(c, C_CONT, 1)
+    }
+    kadd(key, P_CYC, spin)
+    kadd(key, P_N, 1)
+    open_hold(c, key, now)
+}
+
+/// kernel/klock, just before a release store, still holding: the open hold closed and counted.
+pub fn ledger_gave() {
+    let c = percpu.index()
+    if dir() == 0 || c >= MAXCPU || cget(c, C_OPEN) == 0 {
+        return
+    }
+    let now = tsc()
+    let st = cget(c, C_START)
+    let d = if now > st { now - st } else { 0 }
+    let key = cget(c, C_KEY)
+    cput(c, C_OPEN, 0)
+    cadd(c, C_HOLD, d)
+    cadd(c, C_CLOSED, 1)
+    if d > cget(c, C_LONGEST) {
+        cput(c, C_LONGEST, d)
+        cput(c, C_LKEY, key)
+    }
+    kadd(key, H_CYC, d)
+    kadd(key, H_N, 1)
+    if percpu.current() != cget(c, C_SLOT) {
+        kadd(key, S_CYC, d)
+    }
+    if percpu.get(percpu.mine(), percpu.KTHREADS) != cget(c, C_KTH) {
+        kadd(key, T_CYC, d)
+    }
+}
+
+/// CPU 0's tick (under the lock, from `tick`): the cycles between ticks measured, and with `pax.klockhold=MS` once a
+/// second a hold this tick opened keyed `test` and held MS ms (the known hold), interrupts off, the other processors
+/// spinning for the lock answering their shootdowns as ever.
+fn ledger_tick(t: u64) {
+    if dir() == 0 {
+        return
+    }
+    let now = tsc()
+    // # Safety: CPU 0's tick alone reads and writes these three.
+    let prev = unsafe { tick_tsc }
+    unsafe { tick_tsc = now }
+    if prev != 0 && now > prev {
+        unsafe { tick_cycles = now - prev }
+    }
+    let ms = unsafe { klockhold }
+    let per = unsafe { tick_cycles }
+    if ms == 0 || per == 0 || t < unsafe { next_hold } {
+        return
+    }
+    unsafe { next_hold = t + 100 }
+    let c = percpu.index()
+    if c >= MAXCPU || cget(c, C_OPEN) == 0 || cget(c, C_START) < prev {
+        return
+    }
+    cput(c, C_KEY, K_TEST)
+    let until = now + per * ms / 10
+    var spins: u64 = 0
+    while tsc() < until {
+        spins += 1
+    }
+}
+
+fn put_b(base: u64, at: u64, b: u64) -> u64 {
+    if at >= PAGE {
+        return at
+    }
+    // # Safety: a byte of the page kernel/procfs's `make` took, through the HHDM; at < 4096.
+    unsafe { ((base + at) as *u8).write_volatile((b & 0xff) as u8) }
+    at + 1
+}
+
+fn put_s(base: u64, at: u64, s: str) -> u64 {
+    var k = at
+    for b in s.bytes() {
+        k = put_b(base, k, b as int as u64)
+    }
+    k
+}
+
+fn put_dec(base: u64, at: u64, v: u64) -> u64 {
+    var d: u64 = 1
+    while v / d >= 10 {
+        d *= 10
+    }
+    var k = at
+    while d > 0 {
+        k = put_b(base, k, 48 + (v / d) % 10)
+        d /= 10
+    }
+    k
+}
+
+fn put_key(base: u64, at: u64, k: u64) -> u64 {
+    if k < K_VEC {
+        return put_dec(base, put_s(base, at, "sys:"), k)
+    }
+    if k < K_KTRAP {
+        let v = k - K_VEC
+        return put_dec(base, put_s(base, at, if v < 32 { "trap:" } else { "vec:" }), v)
+    }
+    put_s(base, at, if k == K_KTRAP { "ktrap" } else if k == K_BOOT { "boot" } else if k == K_TEST { "test" } else { "other" })
+}
+
+/// `/proc/pax-klock`'s text at `base`: `klock-ledger tsc T`; per processor `cpu I spin S fresh F contended C hold H
+/// closed K longest L key K`; per key with a hold or a take `key NAME hold C N switched C kthread C spin C N`; `more N`
+/// for keys a page could not hold. Read under the lock (a system call), so the reader's own hold is the one open.
+pub fn ledger_text(base: u64) -> u64 {
+    if dir() == 0 {
+        return put_b(base, put_s(base, 0, "klock-ledger: no ledger (its pages were not taken)"), 10)
+    }
+    var n = put_dec(base, put_s(base, 0, "klock-ledger tsc "), tsc())
+    n = put_b(base, n, 10)
+    var c: u64 = 0
+    while c < ipi.count() && c < MAXCPU && n < PAGE - 200 {
+        n = put_dec(base, put_s(base, n, "cpu "), c)
+        n = put_dec(base, put_s(base, n, " spin "), cget(c, C_SPIN))
+        n = put_dec(base, put_s(base, n, " fresh "), cget(c, C_FRESH))
+        n = put_dec(base, put_s(base, n, " contended "), cget(c, C_CONT))
+        n = put_dec(base, put_s(base, n, " hold "), cget(c, C_HOLD))
+        n = put_dec(base, put_s(base, n, " closed "), cget(c, C_CLOSED))
+        n = put_dec(base, put_s(base, n, " longest "), cget(c, C_LONGEST))
+        n = put_key(base, put_s(base, n, " key "), cget(c, C_LKEY))
+        n = put_b(base, n, 10)
+        c += 1
+    }
+    var k: u64 = 0
+    var more: u64 = 0
+    while k < KEYS {
+        if rd(kaddr(k, H_N)) != 0 || rd(kaddr(k, P_N)) != 0 {
+            if n < PAGE - 140 {
+                n = put_key(base, put_s(base, n, "key "), k)
+                n = put_dec(base, put_s(base, n, " hold "), rd(kaddr(k, H_CYC)))
+                n = put_dec(base, put_s(base, n, " "), rd(kaddr(k, H_N)))
+                n = put_dec(base, put_s(base, n, " switched "), rd(kaddr(k, S_CYC)))
+                n = put_dec(base, put_s(base, n, " kthread "), rd(kaddr(k, T_CYC)))
+                n = put_dec(base, put_s(base, n, " spin "), rd(kaddr(k, P_CYC)))
+                n = put_dec(base, put_s(base, n, " "), rd(kaddr(k, P_N)))
+                n = put_b(base, n, 10)
+            } else {
+                more += 1
+            }
+        }
+        k += 1
+    }
+    if more != 0 {
+        n = put_b(base, put_dec(base, put_s(base, n, "more "), more), 10)
+    }
+    n
 }
