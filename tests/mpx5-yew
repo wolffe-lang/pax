@@ -112,15 +112,25 @@ while [ $# -gt 0 ]; do
 done
 case $legs in both) legs="bios uefi" ;; bios|uefi) ;; *) die "--firmware takes bios, uefi or both" ;; esac
 case $tiers in both) tiers="native release" ;; native|release) ;; *) die "--tier takes native, release or both" ;; esac
-case $only in ''|build|linux|pointer|colours|ssh) ;; *) die "--only takes build, linux, pointer, colours or ssh" ;; esac
+case $only in ''|build|linux|pointer|colours|ssh|ownership|nogit) ;; *) die "--only takes build, linux, pointer, colours, ssh, ownership or nogit" ;; esac
 [ "$only" != linux ] || [ -n "$images" ] || die "--only linux needs --images DIR"
 [ "$only" != pointer ] || [ -n "$images" ] || die "--only pointer needs --images DIR"
 need readelf python3
 python3 -I -B "$here/mpx5-yew.d/colour-selftest.py" || exit 1
 mkdir -p "$PAX_BUILD/yew-fixture-tmp"
-for fixture in stage-colours-selftest.py ssh-colours-selftest.py colour-results-selftest.py features-selftest.py; do
+for fixture in stage-colours-selftest.py ssh-colours-selftest.py colour-results-selftest.py features-selftest.py ownership-selftest.py nogit-selftest.py; do
     TMPDIR="$PAX_BUILD/yew-fixture-tmp" python3 -I -B "$here/mpx5-yew.d/$fixture" || exit 1
 done
+if [ "$only" = ownership ] || [ "$only" = nogit ]; then
+    [ -n "$images" ] || die "--only $only needs --images DIR"
+    result=0
+    for tier in $tiers; do
+        for leg in $legs; do
+            bash "$here/mpx5-yew.d/$only" "$images" "$tier" "$leg" "$PAX_BUILD/mpx5-yew-$tier-$leg-$only" || result=1
+        done
+    done
+    exit "$result"
+fi
 if [ "$only" = ssh ]; then
     [ -n "$images" ] || die "--only ssh needs --images DIR"
     t=both f=both
@@ -221,6 +231,7 @@ if [ -z "$images" ]; then
     "$PAX_ROOT/tools/mkpelt" "$work/pelt" > "$work/pelt.txt" || why+=" tools/mkpelt;"
     "$PAX_ROOT/tools/mkboreutils" "$work/bore" $BORE > "$work/bore.txt" || why+=" tools/mkboreutils;"
     "$PAX_ROOT/tools/mkas" "$work/bin" > "$work/as.txt" || why+=" tools/mkas;"
+    bash "$PAX_ROOT/user/klog-own/build" "$work/bin" > "$work/klog-own.txt" || why+=" klog-own build;"
     cp "$work/termwolf/termwolf" "$p/bin/termwolf" 2>/dev/null || why+=" no termwolf;"
     cp "$work/bin/as" "$p/bin/as" 2>/dev/null || why+=" no as;"
     cp "$work/yew/yew" "$s/bin/yew" 2>/dev/null || why+=" no yew;"
@@ -229,6 +240,7 @@ if [ -z "$images" ]; then
     cp "$work/pelt/pelt" "$s/bin/sh" 2>/dev/null || why+=" no pelt;"
     for u in $BORE; do cp "$work/bore/$u" "$s/bin/$u" 2>/dev/null || why+=" no $u;"; done
     cp "$work/bin/as" "$s/bin/as" 2>/dev/null || why+=" no as;"
+    cp "$work/bin/klog-own" "$s/bin/klog-own" 2>/dev/null || why+=" no ownership probe;"
     for f in "$p"/bin/* "$s"/bin/*; do
         x=$(static_ok "$f") || why+=" $x;"
     done
@@ -708,9 +720,12 @@ sys.exit(0 if b"$ cat notes.txt\nalpha\nbeta\ngamma\ndelta\n" in d else 1)' "$ou
         else
             bad "Y8 $id: visible feature session"
         fi
+        bash "$here/mpx5-yew.d/ownership" "$images" "$tier" "$leg" "$PAX_BUILD/mpx5-yew-$tier-$leg-ownership" || bad "KLOG-FULLSCREEN-565 $tier $leg: unexpected classification"
+        bash "$here/mpx5-yew.d/nogit" "$images" "$tier" "$leg" "$PAX_BUILD/mpx5-yew-$tier-$leg-nogit" || bad "NOGIT $tier $leg: state, editing or exits differ"
         pointer_row "$tier" "$leg"
     done
 done
+bash "$here/mpx5-yew.d/nogit-linux" "$images" "$PAX_BUILD/mpx5-yew-nogit-linux" || fail=1
 bash "$here/mpx5-yew.d/linux-colours" "$images" "$PAX_BUILD/yew-colour-linux" || fail=1
 for tier in $tiers; do
     for leg in $legs; do
