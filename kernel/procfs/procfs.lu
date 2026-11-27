@@ -140,6 +140,7 @@ use serial
 use sched
 use smp
 use tcp
+use testwords
 use uaccess
 use udp
 use unix
@@ -157,9 +158,9 @@ extern "c" let pax_ist4_stack: *u8
 const PAGE: u64 = 4096
 
 /// How many entries there are; also `NONE`'s value.
-pub const ENTRIES: u64 = 69
+pub const ENTRIES: u64 = 70
 /// No entry.
-pub const NONE: u64 = 69
+pub const NONE: u64 = 70
 /// px44: entries 22 to 25 are `/proc/sys/fs/protected_hardlinks`,
 /// `_symlinks`, `_regular` and `_fifos` (ruling #75 R7: on, fixed).
 const PROTECTED: u64 = 22
@@ -267,6 +268,10 @@ const SYSDEV: u64 = 66
 const SYSDEVBLOCK: u64 = 67
 /// `/proc/cmdline`: the kernel's command line and a newline, in `/proc`, read-only.
 pub const CMDLINE: u64 = 68
+/// px166 (stage 3): `/proc/pax-klock`, the kernel lock's ledger (kernel/testwords' `ledger_text`): in a test build each
+/// processor's spin and holds and each entry's, as shipped one line, `klock-ledger: not a test kernel`; in `/proc`,
+/// read-only.
+pub const PAXKLOCK: u64 = 69
 const BDEV: u64 = 0x1800
 const CBDEV: u64 = 0x1801
 const BIDENT: u64 = 0x1802 // disk/device directory (IDENTIFY strings)
@@ -343,6 +348,7 @@ const G_PAXSEC: u64 = 35 // px146
 const G_JBD2INFO: u64 = 36 // px162
 const G_DEVLINK: u64 = 37 // px162: a link kernel/files reads and follows
 const G_KCMDLINE: u64 = 38
+const G_PAXKLOCK: u64 = 39 // px166 (stage 3)
 
 // px55: the resource limits (uapi asm-generic/resource.h).
 const RLIMIT_STACK: u64 = 3
@@ -447,7 +453,7 @@ pub fn set(r: u64, v: u64) -> bool {
 /// a listing lists): those below PIDDIR, and px55's `/proc/sys/kernel`
 /// and its `core_pattern`.
 pub fn fixed(e: u64) -> bool {
-    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == DMESG_RESTRICT || e == PRINTK || e == PAXCPUS || e == PAXSEC || e == CMDLINE || (e >= PROCFSDIR && e <= SYSDEVBLOCK)
+    e < PIDDIR || e == KERNEL || e == CORE_PATTERN || e == PARTITIONS || e == MOUNTSLINK || e == SYSBLOCK || e == SYSCLASS || e == SYSCLASSBLOCK || e == PTYDIR || e == PTYNR || e == PTYMAX || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == DMESG_RESTRICT || e == PRINTK || e == PAXCPUS || e == PAXSEC || e == CMDLINE || e == PAXKLOCK || (e >= PROCFSDIR && e <= SYSDEVBLOCK)
 }
 
 /// px79: the reference of kernel/block device `d`'s entry `e` (BDEV,
@@ -741,6 +747,7 @@ pub fn name(e: u64) -> str {
     if e == PAXCPUS { return "pax-cpus" }
     if e == PAXSEC { return "pax-security" } // px146
     if e == CMDLINE { return "cmdline" }
+    if e == PAXKLOCK { return "pax-klock" } // px166 (stage 3)
     if e == SMOUNTS || e == PMOUNTS || e == MOUNTSLINK { return "mounts" } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return "mountinfo" }
     if e == SYSBLOCK || e == SYSCLASSBLOCK { return "block" } // px79
@@ -893,7 +900,7 @@ pub fn parent(r: u64) -> u64 {
     }
     if e == BIDENT { return dev_ref(dev_of(r), BDEV) }
     if e >= BATTR && e < BATTR + 9 { return dev_ref(dev_of(r), if e == BATTR + A_MODEL || e == BATTR + A_SERIAL { BIDENT } else { BDEV }) }
-    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == PAXCPUS || e == PAXSEC || e == CMDLINE { return 0 }
+    if e == 1 || e == 4 || e == 16 || e == 19 || e == PIDDIR || e == PARTITIONS || e == MOUNTSLINK || e == PAXBOOT || e == PAXBOOTLOG || e == PAXLAT || e == PAXRAND || e == PAXCPUS || e == PAXSEC || e == CMDLINE || e == PAXKLOCK { return 0 }
     if e == 2 || e == 3 || e == 21 || e == SCMDLINE || e == SENVIRON || e == SSTAT || e == SLIMITS || e == SMOUNTS || e == SMOUNTINFO { return 1 }
     if e == KERNEL { return 4 } // px55
     if e == CORE_PATTERN || e == PTYDIR || e == DMESG_RESTRICT || e == PRINTK { return KERNEL } // px130: dmesg_restrict, printk
@@ -947,6 +954,7 @@ fn gen(r: u64) -> u64 {
     if e == PAXCPUS { return G_PAXCPUS }
     if e == PAXSEC { return G_PAXSEC } // px146
     if e == CMDLINE { return G_KCMDLINE }
+    if e == PAXKLOCK { return G_PAXKLOCK }
     if e == SMOUNTS || e == PMOUNTS { return G_MOUNTS } // px67
     if e == SMOUNTINFO || e == PMOUNTINFO { return G_MOUNTINFO }
     if e == MOUNTSLINK { return G_LINK }
@@ -2673,6 +2681,8 @@ pub fn make(r: u64, area: u64, umask: u64, fds: u64, files: u64, files_max: u64)
         n = paxsec(base) // px146
     } else if g == G_KCMDLINE {
         n = cmdline(base)
+    } else if g == G_PAXKLOCK {
+        n = testwords.ledger_text(base) // px166 (stage 3): one line as shipped
     } else if g == G_CORE_PATTERN {
         n = put_s(base, 0, "core\n") // px55: Linux's boot default; PAX writes no core
     } else if g == G_PTYNR {
