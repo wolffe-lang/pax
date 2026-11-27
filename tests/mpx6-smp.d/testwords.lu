@@ -20,12 +20,12 @@
 //! spin cycles, fresh takes, contended ones (a spin over 10,000 cycles), hold cycles, holds closed, the longest hold and
 //! its key. Per key: holds and their cycles, the cycles of those in which the processor's thread changed (`switched`)
 //! or a kernel thread ran (`kthread`: a kernel thread holds the lock as long as it runs, so its run is charged to the
-//! entry that switched to it), and its entries' spin. Every write is the lock holder's, so the lock orders them. The
-//! tables are 16 pages taken from kernel/frames at the boot (`start`), the directory's address in `ledger`, whose
-//! symbol marks a test build (tests/mpx6-smp's TESTWORDS-LEDGER-ELF). `/proc/pax-klock` (kernel/procfs) prints the
-//! counters, never reset, and the TSC at the read: a window is the difference of two reads (tests/mpx6-smp's
-//! KLOCK-LEDGER, KLOCK-WAIT, KLOCK-HOLDS). `pax.klockhold=MS`: CPU 0's tick holds the lock MS ms once a second, keyed
-//! `test`, for the ledger's own proof (the known hold).
+//! entry that switched to it), its entries' spin, and its longest hold. Every write is the lock holder's, so the lock
+//! orders them. The tables are 16 pages taken from kernel/frames at the boot (`start`), the directory's address in
+//! `ledger`, whose symbol marks a test build (tests/mpx6-smp's TESTWORDS-LEDGER-ELF). `/proc/pax-klock`
+//! (kernel/procfs) prints the counters, never reset, and the TSC at the read: a window is the difference of two reads
+//! (tests/mpx6-smp's KLOCK-LEDGER, KLOCK-WAIT, KLOCK-HOLDS). `pax.klockhold=MS`: CPU 0's tick holds the lock MS ms
+//! once a second, keyed `test`, for the ledger's own proof (the known hold).
 
 use boot_info
 use frames
@@ -58,6 +58,7 @@ const S_CYC: u64 = 2 // the switched holds' cycles
 const T_CYC: u64 = 3 // the kernel-thread holds' cycles
 const P_CYC: u64 = 4 // its entries' spin cycles
 const P_N: u64 = 5 // its fresh takes
+const L_CYC: u64 = 6 // its longest hold's cycles, since the boot
 // a processor's words
 const C_SPIN: u64 = 0
 const C_FRESH: u64 = 1
@@ -352,6 +353,9 @@ pub fn ledger_gave() {
     }
     kadd(key, H_CYC, d)
     kadd(key, H_N, 1)
+    if d > rd(kaddr(key, L_CYC)) {
+        wr(kaddr(key, L_CYC), d)
+    }
     if percpu.current() != cget(c, C_SLOT) {
         kadd(key, S_CYC, d)
     }
@@ -465,10 +469,14 @@ pub fn ledger_text(base: u64) -> u64 {
                 n = put_key(base, put_s(base, n, "key "), k)
                 n = put_dec(base, put_s(base, n, " hold "), rd(kaddr(k, H_CYC)))
                 n = put_dec(base, put_s(base, n, " "), rd(kaddr(k, H_N)))
-                n = put_dec(base, put_s(base, n, " switched "), rd(kaddr(k, S_CYC)))
-                n = put_dec(base, put_s(base, n, " kthread "), rd(kaddr(k, T_CYC)))
                 n = put_dec(base, put_s(base, n, " spin "), rd(kaddr(k, P_CYC)))
                 n = put_dec(base, put_s(base, n, " "), rd(kaddr(k, P_N)))
+                n = put_dec(base, put_s(base, n, " longest "), rd(kaddr(k, L_CYC)))
+                // the switched and kernel-thread cycles only where either is not 0, so the page holds every key
+                if rd(kaddr(k, S_CYC)) != 0 || rd(kaddr(k, T_CYC)) != 0 {
+                    n = put_dec(base, put_s(base, n, " switched "), rd(kaddr(k, S_CYC)))
+                    n = put_dec(base, put_s(base, n, " kthread "), rd(kaddr(k, T_CYC)))
+                }
                 n = put_b(base, n, 10)
             } else {
                 more += 1
