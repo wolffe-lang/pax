@@ -123,3 +123,38 @@ same kind of reasoning.
 - The bound for KLOCK-WAIT.
 - The path to SMP-BUILD's 1.6.
 - The ledger stays as the instrument every later unit reports.
+
+## The stub calls' cost, decided (written before the take that decides it)
+**Why.** SMP-BUILD-COST at `202a4f9c` read the head's shipped kernel 20% slower than trunk's at four jobs, against a
+noise of 14%. Boot by boot the four-job walls were 508, 466 and 486 ms for the head, and 443, 442 and 389 ms for trunk,
+so every head boot was slower than every trunk boot. The code difference is a few calls on each kernel entry, which I
+cannot see costing that. But three boots a side cannot tell a cost apart from the hold's drift or the boots' order.
+
+**The take.**
+- **Three shipped kernels,** each built with `tools/build-kernel` at the native tier from a commit:
+  - H, the head's;
+  - T and U, trunk's (`9836b43e`) built twice: the A/A control.
+- **The fixture:** one for all three, SMP-BUILD's own (den, bench, the same boot line), with one image per kernel.
+- **The boots:** 12 blocks of three at four processors, BIOS, in one hold. The six orders of H, T and U run in turn,
+  so each kernel sits in each place four times: 36 boots, 12 of each.
+- **Each boot's figure** at one job and at four is its least of three batch walls, as SMP-BUILD-COST takes it.
+
+**The rule**, at each job count:
+- m_H, m_T, m_U are the medians of each kernel's boots, and m_TU is the median of T's and U's together;
+- the A/A spread c = |m_T - m_U| / m_TU;
+- the head's excess e = (m_H - m_TU) / m_TU;
+- p is the one-sided Mann-Whitney p that H's walls are larger than T's and U's, and q is the two-sided one of T against
+  U.
+
+| verdict | when | what follows |
+|---|---|---|
+| VOID | q < 0.01 at either count: the two trunk builds differ, so the hold drifted or the order told | the take is taken again |
+| COSTS | otherwise, at either count, e > c and p < 0.025: the head slower than the control's own spread, and not by chance | the stub calls cost what the shipped kernel must not pay. The hooks move behind the test build another way (the call sites themselves only in the test build), the shipped-kernel claim above changes, and no record is taken at this head |
+| NOTHING MEASURABLE | otherwise, at both counts, e ≤ c: the head within the A/A spread | the claim stands as written, and the record is taken |
+| UNSETTLED | anything else: outside the spread, but not significantly | the claim is unshown. A second take of the same size runs, its boots are pooled with this one's, and the rule is applied once to all 24 a side. That reading is final |
+
+**The odds, said before.** With no cost at all, the head still lands outside the A/A spread in about 23% of such takes,
+since the spread is itself a difference of medians. Nearly all of those are UNSETTLED; COSTS comes about 2% of the time.
+
+**My prediction:** NOTHING MEASURABLE at both counts, because a call costs nanoseconds and a batch makes no more than
+100,000 entries. COSTS is a live outcome, given the three boots a side above, and I put it at three in ten.
