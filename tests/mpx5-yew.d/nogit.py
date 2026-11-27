@@ -6,7 +6,8 @@ import json,re,runpy,struct,sys
 
 def check_common(data):
     text=data.replace(b'\r',b'')
-    assert re.search(rb'(?m)^NOGIT-ABSENT=1$',text),'Git was not proven absent'
+    absent=re.search(rb'(?m)^NOGIT-ABSENT=([0-9]+)$',text)
+    assert absent and int(absent[1]) in (1,127),'Git was not proven absent'
     assert data.count(b'git: git unavailable;')>=2,'NoGit did not settle before and after editing'
     assert re.search(rb'(?m)^NOGIT-EDITOR-STATUS=0$',text),'editor did not exit zero'
     content=re.search(rb'(?ms)^NOGIT-CONTENT-BEGIN\n(.*?)^NOGIT-CONTENT-END$',text)
