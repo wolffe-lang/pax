@@ -17,6 +17,8 @@ base=(b'PAX: the console\r\n'
 fail=0
 for name,data,want in [
  ('valid',base,True),
+ ('posix-notfound-127',base.replace(b'NOGIT-ABSENT=1',b'NOGIT-ABSENT=127'),True),
+ ('usage-error',base.replace(b'NOGIT-ABSENT=1',b'NOGIT-ABSENT=2'),False),
  ('git-present',base.replace(b'NOGIT-ABSENT=1',b'NOGIT-ABSENT=0'),False),
  ('state-missing',base.replace(b'git: git unavailable;',b'loading'),False),
  ('editing-lost',base.replace(b'gamma\r\ndelta',b'gamma\r\nwrong'),False),
