@@ -302,8 +302,10 @@ def cpu(v):
 
 # --- px166 (stage 3): the kernel lock's ledger, /proc/pax-klock as the test kernel writes it ------------------------
 # `klock-ledger tsc T`, then per processor `cpu I spin S fresh F contended C hold H closed K longest L key K`, then per
-# key `key NAME plain C N switched C N kthread C N spin C N` (cycles and counts; every counter monotonic, so a window
-# is the difference of two reads). The shipped kernel writes `klock-ledger: not a test kernel` alone.
+# key `key NAME hold C N switched C kthread C spin C N` (its holds' cycles and count, the cycles of those in which the
+# processor's thread changed or a kernel thread ran, its entries' spin cycles and takes; every counter monotonic, so a
+# window is the difference of two reads; `more N` for keys the page could not hold). The shipped kernel writes
+# `klock-ledger: not a test kernel` alone.
 def klock_parse(body):
     m = re.search(r'^klock-ledger tsc (\d+)$', body, re.M)
     if not m:
@@ -313,26 +315,26 @@ def klock_parse(body):
             for mm in re.finditer(r'^cpu (\d+) spin (\d+) fresh (\d+) contended (\d+) hold (\d+) closed (\d+) '
                                   r'longest (\d+) key (\S+)$', body, re.M)}
     keys = {}
-    for mm in re.finditer(r'^key (\S+) plain (\d+) (\d+) switched (\d+) (\d+) kthread (\d+) (\d+) spin (\d+) (\d+)$',
-                          body, re.M):
+    for mm in re.finditer(r'^key (\S+) hold (\d+) (\d+) switched (\d+) kthread (\d+) spin (\d+) (\d+)$', body, re.M):
         v = [int(x) for x in mm.groups()[1:]]
-        keys[mm[1]] = dict(plain=(v[0], v[1]), switched=(v[2], v[3]), kthread=(v[4], v[5]), spin=(v[6], v[7]))
-    return dict(tsc=int(m[1]), cpus=cpus, keys=keys)
+        keys[mm[1]] = dict(hold=(v[0], v[1]), switched=v[2], kthread=v[3], spin=(v[4], v[5]))
+    more = re.search(r'^more (\d+)$', body, re.M)
+    return dict(tsc=int(m[1]), cpus=cpus, keys=keys, more=int(more[1]) if more else 0)
 
 
 def klock_delta(b, e):
     # the window between two reads: the processors' and keys' counters subtracted (a key first seen at `e` counts
-    # from 0); each key's holds summed over its three kinds as `hold` (cycles, count)
-    z = dict(plain=(0, 0), switched=(0, 0), kthread=(0, 0), spin=(0, 0))
+    # from 0)
+    z = dict(hold=(0, 0), switched=0, kthread=0, spin=(0, 0))
     cpus = {i: {k: c[k] - b['cpus'].get(i, {}).get(k, 0) for k in ('spin', 'fresh', 'cont', 'hold', 'closed')}
             for i, c in e['cpus'].items()}
     keys = {}
     for name, k in e['keys'].items():
         o = b['keys'].get(name, z)
-        d = {kind: (k[kind][0] - o[kind][0], k[kind][1] - o[kind][1]) for kind in z}
-        d['hold'] = tuple(sum(d[kind][x] for kind in ('plain', 'switched', 'kthread')) for x in (0, 1))
-        keys[name] = d
-    return dict(wall=e['tsc'] - b['tsc'], cpus=cpus, keys=keys)
+        keys[name] = dict(hold=(k['hold'][0] - o['hold'][0], k['hold'][1] - o['hold'][1]),
+                          switched=k['switched'] - o['switched'], kthread=k['kthread'] - o['kthread'],
+                          spin=(k['spin'][0] - o['spin'][0], k['spin'][1] - o['spin'][1]))
+    return dict(wall=e['tsc'] - b['tsc'], cpus=cpus, keys=keys, more=max(b['more'], e['more']))
 
 
 def klock_wait(d):
@@ -345,12 +347,14 @@ def klock_holds(d, hz, top=6):
     # count, the largest first; the switched and kernel-thread parts said where they are
     tot = sum(c['hold'] for c in d['cpus'].values())
     out = [f'the lock held {tot / d["wall"]:.2f} of the window' if d['wall'] else 'no window']
+    if d.get('more'):
+        out.append(f'{d["more"]} keys past the page left out')
     for name, k in sorted(d['keys'].items(), key=lambda kv: -kv[1]['hold'][0])[:top]:
         c, n = k['hold']
         if not c:
             continue
         mean = f'{c / n / hz * 1e6:.1f} us' if n and hz else '-'
-        parts = ''.join(f', {kind} {k[kind][0] / c:.2f}' for kind in ('switched', 'kthread') if k[kind][0])
+        parts = ''.join(f', {kind} {k[kind] / c:.2f}' for kind in ('switched', 'kthread') if k[kind])
         out.append(f'{name} {c / tot:.2f} of the holds, {n} at {mean}{parts}' if tot else name)
     return out
 
@@ -1326,9 +1330,11 @@ elif a.kind == 'build':
                     for k in t:
                         t[k] += c[k]
                 for name, k in d['keys'].items():
-                    t = tot['keys'].setdefault(name, {kind: (0, 0) for kind in ('plain', 'switched', 'kthread', 'spin', 'hold')})
-                    for kind in t:
+                    t = tot['keys'].setdefault(name, dict(hold=(0, 0), switched=0, kthread=0, spin=(0, 0)))
+                    for kind in ('hold', 'spin'):
                         t[kind] = (t[kind][0] + k[kind][0], t[kind][1] + k[kind][1])
+                    for kind in ('switched', 'kthread'):
+                        t[kind] += k[kind]
             word = {1: 'one job', 2: 'two jobs', 3: 'three jobs', 4: 'four jobs'}.get(j, f'{j} jobs')
             waits.append(f'{word}: ' + ("spin over the batches' wall by processor " if not waits else '') +
                          f'{klock_wait(tot)}%')
