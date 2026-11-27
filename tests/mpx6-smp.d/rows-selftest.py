@@ -1045,8 +1045,8 @@ case('build with an output not the oracle\'s', build_text(4, wrong=True), ba + [
 
 # --- px166 (stage 3, the lock's ledger): the ledger kind, the build batches' snapshots, SMP-BUILD-COST ---------------
 # /proc/pax-klock as a test kernel writes it: the TSC at the read; per processor its spin, fresh acquisitions, contended
-# ones, hold cycles, holds closed and longest hold with its key; per key the count and cycles of each kind of hold and
-# of its entries' spin. HZ is the probe's TSC rate (head()'s 3 GHz).
+# ones, hold cycles, holds closed and longest hold with its key; per key its holds' cycles and count, the switched and
+# kernel-thread holds' cycles, and its entries' spin. HZ is the probe's TSC rate (head()'s 3 GHz).
 HZ = 3000000000
 
 
@@ -1056,8 +1056,10 @@ def klock(tsc, cpus, keys):
         t += (f'cpu {i} spin {c["spin"]} fresh {c["fresh"]} contended {c.get("cont", 0)} hold {c["hold"]} closed '
               f'{c["closed"]} longest {c.get("longest", 0)} key {c.get("lkey", "boot")}\n')
     for name, k in keys.items():
+        # the kernel's line: a key's holds (cycles, count), the cycles of the switched and kernel-thread ones among
+        # them, and its entries' spin (cycles, takes)
         pl, sw, kt, sp = k
-        t += (f'key {name} plain {pl[0]} {pl[1]} switched {sw[0]} {sw[1]} kthread {kt[0]} {kt[1]} '
+        t += (f'key {name} hold {pl[0] + sw[0] + kt[0]} {pl[1] + sw[1] + kt[1]} switched {sw[0]} kthread {kt[0]} '
               f'spin {sp[0]} {sp[1]}\n')
     return t
 
