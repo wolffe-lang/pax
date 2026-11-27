@@ -1657,5 +1657,20 @@ expect("P2 std tree staging", plan(["user/std.pin", "tools/fetch-std"], **pr), "
 expect("P2 fsck sources and static builder select the checker gate (px72)",
        plan(["user/fsck/main.lu", "user/fsck/journal.lu", "tools/mkfsck"], **pr), "pr", ["mpx6-fsck"])
 
+# The root SSH step uses a scratch HOME, so checkout's user-global Git trust
+# does not follow it. Trust only this checked-out workspace, per process.
+workflow = open(os.path.join(ROOT, ".github/workflows/ci.yml")).read()
+editor_job = re.search(r"(?ms)^  mpx5-yew:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)", workflow).group(1)
+root_lines = []
+for line in editor_job.splitlines():
+    if root_lines or line.startswith("          sudo env "):
+        root_lines.append(line.strip())
+        if not line.endswith("\\"):
+            break
+root_call = " ".join(root_lines)
+say(all(value in root_call for value in ('GIT_CONFIG_COUNT=1',
+    'GIT_CONFIG_KEY_0=safe.directory', 'GIT_CONFIG_VALUE_0="$PWD"')),
+    "P4 root editor SSH rows trust only their workspace with the scratch HOME")
+
 print("ci-plan: %s" % ("PASS" if fails == 0 else "FAIL (%d)" % fails))
 sys.exit(1 if fails else 0)
