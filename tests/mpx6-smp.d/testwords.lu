@@ -77,6 +77,7 @@ const W_RAX: u64 = 14
 const W_VECTOR: u64 = 15
 const W_CS: u64 = 18
 const SYSCALL: u64 = 0x100
+const TICK_VEC: u64 = 32 // kernel/timer's MASTER_BASE, CPU 0's tick
 var ledger: u64 = 0 // the directory page's address (HHDM), 0 until `start`; its symbol marks a test build
 var klockhold: u64 = 0 // pax.klockhold's MS (0: none)
 var tick_tsc: u64 = 0 // the TSC at CPU 0's last tick
@@ -361,7 +362,9 @@ pub fn ledger_gave() {
 
 /// CPU 0's tick (under the lock, from `tick`): the cycles between ticks measured, and with `pax.klockhold=MS` once a
 /// second a hold this tick opened keyed `test` and held MS ms (the known hold), interrupts off, the other processors
-/// spinning for the lock answering their shootdowns as ever.
+/// spinning for the lock answering their shootdowns as ever. Only a hold the tick itself took fresh (keyed CPU 0's
+/// tick vector and opened since the previous tick) becomes the known hold; a tick that lands inside another hold (a
+/// system call's, a kernel thread's) waits for the next tick, so the hold measured is the tick's own and MS long.
 fn ledger_tick(t: u64) {
     if dir() == 0 {
         return
@@ -378,11 +381,11 @@ fn ledger_tick(t: u64) {
     if ms == 0 || per == 0 || t < unsafe { next_hold } {
         return
     }
-    unsafe { next_hold = t + 100 }
     let c = percpu.index()
-    if c >= MAXCPU || cget(c, C_OPEN) == 0 || cget(c, C_START) < prev {
+    if c >= MAXCPU || cget(c, C_OPEN) == 0 || cget(c, C_KEY) != K_VEC + TICK_VEC || cget(c, C_START) < prev {
         return
     }
+    unsafe { next_hold = t + 100 }
     cput(c, C_KEY, K_TEST)
     let until = now + per * ms / 10
     var spins: u64 = 0
