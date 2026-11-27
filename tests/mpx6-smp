@@ -10,13 +10,18 @@
 #    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
 #    SMP_DEN=FILE a den built before, in place of tools/mkden; SMP_IMAGES=DIR images built before, the
 #    boots' logs still under PAX_BUILD; SMP_BUILD_KERNEL=test SMP-BUILD's image with the test build's kernel, whose
-#    lock ledger bench prints around each batch; SMP_BUILD_AGAINST=ELF SMP-BUILD-COST against that shipped kernel)
+#    lock ledger bench prints around each batch; SMP_BUILD_AGAINST=ELF SMP-BUILD-COST against that shipped kernel;
+#    SMP_SHIPPED_AGAINST=ELF TESTWORDS-LEDGER-ELF also holds the native tier's shipped kernel to that ELF where the
+#    machine loads it: .text byte for byte, the rest but the commit stamp, tests/mpx6-smp.d/elf-same.py)
 #
 # The rows' own proof first (rows-selftest.py: synthetic boots, each row seen red and green), the
 # harness's processor knob (knob-selftest.sh: PAX_SMP through tools/qemu-run and tools/tour) and the
 # entry path's frame offsets (frame-layout.py, FRAME-LAYOUT, with its own proof) and the waits that ask for a pending
 # signal (wait-census.py, WAIT-CENSUS, with its own proof), and every change of a thread's signal mask
-# offers the process's pending signals to its other threads (MASK-CENSUS, the same script). Then per
+# offers the process's pending signals to its other threads (MASK-CENSUS, the same script), and the kernel lock's
+# ledger kept out of the shipped kernel (ledger-patch.py: LEDGER-PATCH, the test build's tests/mpx6-smp.d/ledger.patch
+# touching kernel/interrupts, kernel/klock and kernel/procfs alone with the ledger's own lines and applying exactly;
+# KERNEL-NO-LEDGER, kernel/ and boot/ naming no ledger; with its own proof, and elf-same.py's). Then per
 # tier: kmain_console with tests/mpx6-smp.d/probe.c as its only command, booted under each firmware:
 #   - at each of SMP_COUNTS processors, the default kind: SMP-ACTIVE, SMP-RUN, SMP-TLB, SMP-SIGNAL,
 #     SMP-EXIT, SMP-WAIT;
@@ -41,8 +46,9 @@
 #   - KLOCK-LEDGER (`ledger`, at 2 and 4, the test build given `pax.klockhold=20`): the kernel lock's ledger
 #     (/proc/pax-klock) read around a load on every processor, held to its closure, its exclusion and the known hold
 #     (CPU 0's tick holding the lock 20 ms once a second); KLOCK-WAIT and KLOCK-HOLDS printed; TESTWORDS-LEDGER-ELF per
-#     tier: the ledger's text and state in the test build's ELF, in the shipped one neither; SMP-TESTWORDS reads the
-#     shipped kernel's /proc/pax-klock, its one line;
+#     tier: the ledger's text and state in the test build's ELF, in the shipped one no ledger text, state or
+#     /proc/pax-klock (and with SMP_SHIPPED_AGAINST its loaded sections the given ELF's); SMP-TESTWORDS: the shipped
+#     kernel has no /proc/pax-klock;
 #   - in every boot SMP-KLOCK, SMP-DUP, SMP-PIN and SMP-PARK (rows.py's every-kind rows);
 # and SMP-BUILD once, on the first tier and firmware: the processor census's pack fixture at -smp 1 and -smp 4 with
 # 2 GiB, the batches timed by the host (tests/mpx6-smp.d/build.py), the pinned den built by tools/mkden
@@ -51,8 +57,8 @@
 # (the default) prints the figures and holds the identities and the processor count, `skip` names the
 # row NOT-RUN. With SMP_BUILD_KERNEL=test the build boots the test build (bench prints the ledger around each batch,
 # KLOCK-WAIT and KLOCK-HOLDS); with SMP_BUILD_AGAINST=ELF, SMP-BUILD-COST boots the image with this tier's shipped
-# kernel and with ELF in turn, three of each at -smp 4, the walls and their noise printed, never gated (the cost of the
-# shipped kernel's calls to the ledger's empty functions). tests/mpx6-smp.d/rows.py names each row (its docstring lists them and the kernel text
+# kernel and with ELF in turn, three of each at -smp 4, the walls and their noise printed, never gated (two shipped
+# kernels' build walls). tests/mpx6-smp.d/rows.py names each row (its docstring lists them and the kernel text
 # they read). Timed bounds are gated under KVM alone, from each boot's .meta. A red row does not stop
 # the suite: every boot's rows are said, and the exit is 1 if any was red.
 set -euo pipefail
@@ -97,8 +103,13 @@ python3 -I -B tests/mpx6-smp.d/frame-layout.py .
 # every interruptible wait asks for a pending signal before it switches away (the sleeper rounds' lost wake), and
 # every mask change offers the process's pending signals to its other threads
 python3 -I -B tests/mpx6-smp.d/wait-census.py --selftest
+# px166 (stage 3): the lock's ledger lives in the test build alone: the patch's rows and the ELF comparison, proved first
+python3 -I -B tests/mpx6-smp.d/ledger-patch.py --selftest
+python3 -I -B tests/mpx6-smp.d/elf-same.py --selftest
 rc=0
 python3 -I -B tests/mpx6-smp.d/wait-census.py . || rc=1 # red, and the boots still run: SMP-SIGNAL's sleeper shows the cost
+python3 -I -B tests/mpx6-smp.d/ledger-patch.py . || rc=1 # red, and the boots still run: what the kernel built shows
+if [ -n "${SMP_SHIPPED_AGAINST:-}" ] && [ ! -f "$SMP_SHIPPED_AGAINST" ]; then die "SMP_SHIPPED_AGAINST names no file: $SMP_SHIPPED_AGAINST"; fi
 hostcpus=$(nproc) # the CPUs this take may use (taskset's, in a container): timed bounds need the boot to fit them
 dump=(--cmd stop --cmd 'info registers -a' --cmd cont --cmd stop --cmd 'info registers -a' --cmd cont
       --cmd stop --cmd 'info registers -a')
@@ -155,18 +166,34 @@ for tier in $tiers; do
         tw=$(slowmarks "$work/test/kmain_console.elf") sw=$(slowmarks "$work/kmain_console.elf")
         if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-SLOWLEAVE-ELF $tier: the test build holds pax.slowleave's line and its hold's state; the shipped one neither"
         else echo "FAIL TESTWORDS-SLOWLEAVE-ELF $tier: test build $tw of 2 marks (the slow leave's line, the hold's \`slow\`), shipped $sw (want 2 and 0)"; rc=1; fi
-        # px166 (stage 3): the kernel lock's ledger the same way, by two marks: its header's text in the ELF's bytes, and its
-        # directory's static `ledger` among its symbols; the shipped kernel's calls reach empty functions and its
-        # /proc/pax-klock is one line (SMP-TESTWORDS reads it)
+        # px166 (stage 3): the kernel lock's ledger the same way, by marks: its header's text in the ELF's bytes and its
+        # directory's static `ledger` among its symbols, both wanted in the test build; and in the shipped one none of
+        # those, no `klock-ledger` text at all and no `pax-klock` (the ledger, its hooks and its /proc file live in the
+        # test build alone: tools/build-kernel --test-words applies tests/mpx6-smp.d/ledger.patch to its own copy of
+        # kernel/). With SMP_SHIPPED_AGAINST=ELF (trunk's shipped kernel, say), the native tier's shipped kernel is held
+        # to that ELF where the machine loads it (elf-same.py): .text byte for byte, the rest but the commit stamp
         ledgermarks() { # ELF: how many of the two it holds
             local n=0
             grep -aq 'klock-ledger tsc ' "$1" && n=$((n + 1))
             [ "$(nm "$1" | grep -cE ' _Wtestwords\.ledger\.')" -gt 0 ] && n=$((n + 1))
             echo "$n"
         }
-        tw=$(ledgermarks "$work/test/kmain_console.elf") sw=$(ledgermarks "$work/kmain_console.elf")
-        if [ "$tw" = 2 ] && [ "$sw" = 0 ]; then echo "PASS TESTWORDS-LEDGER-ELF $tier: the test build holds the lock ledger's text and state; the shipped one neither"
-        else echo "FAIL TESTWORDS-LEDGER-ELF $tier: test build $tw of 2 marks (the ledger's \`klock-ledger tsc \`, its \`ledger\`), shipped $sw (want 2 and 0)"; rc=1; fi
+        shippedmarks() { # ELF: the ledger's marks a shipped kernel holds, by name
+            local m=()
+            grep -aq 'klock-ledger' "$1" && m+=(klock-ledger)
+            grep -aq 'pax-klock' "$1" && m+=(pax-klock)
+            [ "$(nm "$1" | grep -cE ' _Wtestwords\.(ledger\.|ledger_)')" -gt 0 ] && m+=(ledger-symbols)
+            echo "${m[*]:-}"
+        }
+        tw=$(ledgermarks "$work/test/kmain_console.elf") sw=$(shippedmarks "$work/kmain_console.elf") same= samerc=0
+        if [ -n "${SMP_SHIPPED_AGAINST:-}" ] && [ "$tier" = native ]; then
+            same=$(python3 -I -B tests/mpx6-smp.d/elf-same.py "$work/kmain_console.elf" "$SMP_SHIPPED_AGAINST") || samerc=1
+        fi
+        if [ "$tw" = 2 ] && [ -z "$sw" ] && [ "$samerc" = 0 ]; then
+            echo "PASS TESTWORDS-LEDGER-ELF $tier: the test build holds the lock ledger's text and state; the shipped one no ledger text, state or /proc/pax-klock${same:+; against $(basename "$(dirname "$SMP_SHIPPED_AGAINST")")/$(basename "$SMP_SHIPPED_AGAINST") $same}"
+        else
+            echo "FAIL TESTWORDS-LEDGER-ELF $tier: test build $tw of 2 marks (the ledger's \`klock-ledger tsc \`, its \`ledger\`), shipped ${sw:-none} (want 2 and none)${same:+; against $SMP_SHIPPED_AGAINST $same}"; rc=1
+        fi
         gcc -nostdlib -static -ffreestanding -fno-stack-protector -fno-pie -no-pie -O2 -mgeneral-regs-only -Wall \
             -o "$work/smpprobe" tests/mpx6-smp.d/probe.c
         for spec in "${images[@]}"; do
