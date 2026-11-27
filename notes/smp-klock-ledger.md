@@ -158,3 +158,67 @@ since the spread is itself a difference of medians. Nearly all of those are UNSE
 
 **My prediction:** NOTHING MEASURABLE at both counts, because a call costs nanoseconds and a batch makes no more than
 100,000 entries. COSTS is a live outcome, given the three boots a side above, and I put it at three in ten.
+
+## The verdict: COSTS, and the hooks out of the shipped kernel
+The take ran under the rule above at `b0d5c048`: 36 boots, 12 of each kernel, the two trunk builds byte-identical.
+
+| | head | A/A spread | p (head larger) | q (trunk against trunk) |
+|---|---|---|---|---|
+| one job | +1.6% | 1.3% | 0.153 | 0.403 |
+| four jobs | +2.3% | 0.0% | 0.017 | 0.795 |
+
+So the verdict is COSTS, and it was applied as written; my prediction, NOTHING MEASURABLE, was wrong. The first
+reading's 20% was noise from three boots; the cost is about 2%.
+
+What follows, as the rule said:
+- **The ledger's hooks left the shipped kernel.** The test build applies them, as `tests/mpx6-smp.d/ledger.patch`,
+  to its own copy of `kernel/`.
+- **`kernel/` is trunk's again**, so the paragraph "What the shipped kernel keeps" above no longer holds. The shipped
+  kernel keeps nothing: no calls, no stubs, no `/proc/pax-klock`.
+- **Rows hold it there:**
+  - LEDGER-PATCH: the patch's lines are the ledger's own, and it applies exactly;
+  - KERNEL-NO-LEDGER: `kernel/` names no ledger;
+  - TESTWORDS-LEDGER-ELF: no ledger in the shipped ELF. With `SMP_SHIPPED_AGAINST`, the shipped kernel's loaded
+    sections must equal trunk's, `.text` byte for byte;
+  - SMP-TESTWORDS: no `/proc/pax-klock` in the shipped kernel.
+- **The test kernel's sources are line for line those it had at `b0d5c048`,** only the patch's comments reworded. So
+  every figure the ledger gave stands.
+
+## A finding about measuring this kernel: about 2% from code placement alone
+The head's shipped build at `b0d5c048` differed from trunk's `9836b43e` by an empty call or two at each kernel entry
+and release, four empty functions and one more `/proc` entry. Its four-job SMP-BUILD wall was 2.3% longer, beyond the
+A/A control (p = 0.017). The calls cannot account for that:
+- the ledger counted about 11,700 kernel entries per four-job batch;
+- even at 20 ns a call, every one serialized under the lock, they come to under 0.7 ms of a 392 ms batch (0.2%).
+
+The measured difference was about 9 ms.
+
+What the build did change is where nearly everything sits. Comparing the two linked kernels:
+- **Section sizes:** `.text` grew by 768 bytes, `.rodata` by 64 and `.data` by 56.
+- **`.bss` is unchanged:** every one of its 324 symbols is at the same address, the kernel lock's word and the
+  scheduler's state among them.
+- **Functions:** of 4,738 functions in both, the 1,673 linked before `interrupts.route` stayed put. The other 3,065,
+  61% of the code's bytes, moved.
+- **Cache lines:** 2,427 functions sit at a different offset within their 64-byte line.
+- **The paths that hold the lock longest on this workload all moved and changed offset:**
+
+  | function | moved | offset in its 64-byte line |
+  |---|---|---|
+  | `klock.enter` | +72 B | 42 → 50 |
+  | `klock.leave` | +81 B | 4 → 21 |
+  | `paging.map_user` | +88 B | 24 → 48 |
+  | `vm.mmap` | +760 B | 8 → 0 |
+  | `vm.mmap_file` | +760 B | 56 → 48 |
+  | `vm.brk` | +760 B | 17 → 9 |
+  | `uaccess.zero` | +760 B | 60 → 52 |
+
+- **Unmoved or unchanged in offset:** `memset` and `memcpy` moved by 768 bytes, a multiple of 64, so they kept their
+  offsets; `frames.alloc` did not move.
+
+The attribution is by elimination: the build's only executed difference is far too small, and its placement
+difference is large. A direct proof would build trunk with a pad of the same size and no other change.
+
+**For later measurements:**
+- A difference of about 2% between two builds on this workload is within what placement alone can do.
+- Comparing two builds' timings needs an A/A control and a dozen boots a side.
+- A difference that size is not evidence of a code change's cost without a placement control.
