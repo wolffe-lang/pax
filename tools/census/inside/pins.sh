@@ -29,9 +29,9 @@ BASE_IMAGE_DIGEST=sha256:8185e444e45ba166146b244b41f1cba2d7d91f3eddce533a839cc95
 PELT_REPO=https://github.com/wolffe-lang/pelt
 PELT_REV=b80d6570a4611d7977e4cf489c192849b32a6a7f
 
-# px82 current-image snapshot; px04 trace inputs above remain historical.
-# px123: yew trunk 3a9983ee, read again on 2026-11-11; red (C5) until the yew pin moves.
-IMAGE_YEW_REV=3a9983ee20619ca82651471ed0d8ced84e37f196
+# Current-image editor snapshot; the trace inputs above remain historical.
+# tests/census C5 keeps this identity together with user/yew.pin.
+IMAGE_YEW_REV=cec65826171bd668803a46818a8e75fc75fed37a
 
 # px82 current-image snapshot; px04 trace inputs above remain historical.
 # px97: boreutils trunk ff5396ad, the sweep's; red (C5) until the boreutils pin moves.
