@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Named verbose known-defect witness, independent of Git/LSP and Y8.
+set -uo pipefail
+. "$(dirname "$0")/../../tools/lib.sh"
+[ "$#" = 4 ] || die 'usage: ownership IMAGES TIER FIRMWARE OUT'
+images=$1 tier=$2 firmware=$3 out=$4
+mkdir -p "$out"
+: > "$out/serial.log"
+rm -f "$out/monitor.sock"
+"$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" \
+  --add "$images/session.cpio" initramfs.cpio "$images/$tier/kmain_console.elf" "$out/session.iso" > "$out/image.log" || exit 1
+python3 -I "$PAX_ROOT/tools/ps2-session" --serial "$out/serial.log" --monitor "$out/monitor.sock" \
+  --keys "$PAX_ROOT/user/console/klog-own.keys" --out "$out" --timeout 300 > "$out/keys.log" 2>&1 &
+sender=$!
+boot=0; typed=0
+"$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$out/serial.log" --timeout 360 \
+  --qemu -m --qemu 512M --qemu -monitor --qemu "unix:$out/monitor.sock,server=on,wait=off" \
+  --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' "$out/session.iso" > "$out/halt.log" 2>&1 || boot=$?
+wait "$sender" || typed=$?
+if [ "$boot" != 0 ] || [ "$typed" != 0 ]; then
+  printf 'FAIL KLOG-FULLSCREEN-565 setup boot=%s sender=%s\n' "$boot" "$typed"
+  printf '75\n' > "$out/ownership.actual.exit"
+  exit 1
+fi
+python3 -I "$PAX_ROOT/tests/mpx5-yew.d/ownership.py" "$out/serial.log" "$out"
