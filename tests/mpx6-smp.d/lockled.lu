@@ -1,0 +1,261 @@
+//! lockled — the lock ledger and the lock ranks (px166, stage 3a, unit 1): tests/mpx6-smp.d/lockled.lu, put in the
+//! test build's kernel/lockled/ by `tools/build-kernel --test-words` alone; never in a shipped kernel. The test build's
+//! kernel/sync calls it from `acquire` and `release` (tests/mpx6-smp.d/ledger.patch), so it uses kernel/percpu alone:
+//! sync, lockled, percpu, and no cycle (kernel/panic and kernel/log both reach kernel/sync, so neither is used here).
+//!
+//! Per processor and per kernel/sync word (the eight, by index; a lock at any other address is not counted): its
+//! acquisitions, its releases, the contended acquisitions (a spin over 10,000 cycles), the spin and hold cycles, the
+//! longest hold and the open hold's start (0 when none is open: a release with none open, of a word taken before the
+//! ledger had its pages, is counted at neither end). Per processor: the words it holds (a mask), and the first rank violation it
+//! made (its kind, the word taken, the word held). Each processor writes its own rows alone, so nothing new is
+//! synchronized; a reader on another processor reads counters that only grow. The tables are pages the test words
+//! take from kernel/frames at the boot and hand here (`start`); until then every call returns at once, so the boot's
+//! early acquisitions are not counted.
+//!
+//! **The ranks**, lower taken first: the kernel lock 0 (kernel/klock: nothing takes it holding a word); tcp 10, udp 11,
+//! ip 12, icmp 13, arp 14, net 15 (kernel/sync's comments: tcp and udp before ip, ip before arp, arp before net; icmp
+//! never held across a call into ip); console 20 (whole lines written under it); heap 21 (an allocation can come
+//! anywhere). With `pax.smpdebug` (`start`'s `check`), taking a word whose rank is at or below that of a word the
+//! processor holds is a violation (kind 1). The kernel lock's two come from the test words' hooks: taken fresh while
+//! holding a word (kind 2, `at_take`), given back while holding one (kind 3, `at_release`), which would carry the word
+//! into ring 3 or the idle loop. The first is kept; the test words report it at the processor's next fresh take of the
+//! kernel lock, by a line and a panic (kernel/sync cannot call kernel/panic).
+
+use percpu
+
+extern "c" fn pax_rdtsc() -> u64
+extern "c" let pax_sched_locks: *u64
+
+pub const WORDS: u64 = 8
+const MAXCPU: u64 = 64
+const CONTENDED: u64 = 10000
+// a (processor, word) row: eight words
+pub const TOOK: u64 = 0
+pub const GAVE: u64 = 1
+pub const CONT: u64 = 2
+pub const SPIN: u64 = 3
+pub const HOLD: u64 = 4
+pub const LONGEST: u64 = 5
+const START: u64 = 6
+// a processor's own words, after its eight rows
+const HELD: u64 = 0
+const VKIND: u64 = 1
+const VWORD: u64 = 2
+const VHELD: u64 = 3
+const CPU_WORDS: u64 = 72 // eight rows of eight, then eight of its own: 576 bytes
+const PER_PAGE: u64 = 7 // processors to a page (4032 bytes)
+pub const PAGES: u64 = 10 // the pages for 64 processors, beside the directory page
+
+var dir: u64 = 0 // the directory page's address (HHDM), 0 until `start`; its symbol marks a test build
+var check: bool = false // pax.smpdebug: the ranks checked
+
+/// The test words' `start`, at the boot before any other processor runs: the directory page (its first PAGES words
+/// the zeroed pages' addresses) and whether the ranks are checked. The directory is set last.
+pub fn start(d: u64, ranks: bool) {
+    // # Safety: written once here, at the boot, before any other processor runs and before `dir` is set.
+    unsafe { check = ranks }
+    // # Safety: as above; every reader tests it for 0 first.
+    unsafe { dir = d }
+}
+
+fn d() -> u64 {
+    // # Safety: written once at the boot (`start`).
+    unsafe { dir }
+}
+
+/// Whether the ledger has its pages (the test words' `start` ran).
+pub fn active() -> bool {
+    d() != 0
+}
+
+/// Whether the ranks are checked (`pax.smpdebug`).
+pub fn checked() -> bool {
+    // # Safety: written once at the boot (`start`).
+    unsafe { check }
+}
+
+fn tsc() -> u64 {
+    // # Safety: boot/fpu.S's RDTSC, which every x86-64 processor has.
+    unsafe { pax_rdtsc() }
+}
+
+fn rd(a: u64) -> u64 {
+    // # Safety: a word of the ledger's pages (taken at the boot, through the HHDM).
+    unsafe { (a as *u64).read_volatile() }
+}
+
+fn wr(a: u64, v: u64) {
+    // # Safety: a word of the ledger's pages; each processor writes its own rows alone.
+    unsafe { (a as *u64).write_volatile(v) }
+}
+
+fn add(a: u64, v: u64) {
+    wr(a, rd(a) + v)
+}
+
+fn own(c: u64, i: u64) -> u64 {
+    rd(d() + (c / PER_PAGE) * 8) + (c % PER_PAGE) * CPU_WORDS * 8 + (WORDS * 8 + i) * 8
+}
+
+fn row(c: u64, w: u64, i: u64) -> u64 {
+    rd(d() + (c / PER_PAGE) * 8) + (c % PER_PAGE) * CPU_WORDS * 8 + (w * 8 + i) * 8
+}
+
+/// The kernel/sync word at `lock` by its index (0-7), or WORDS for any other address.
+fn index_of(lock: u64) -> u64 {
+    // # Safety: the address of boot/sched.S's eight lock words; nothing is read.
+    let b = unsafe { pax_sched_locks as u64 }
+    if lock < b || lock >= b + WORDS * 8 || (lock - b) % 8 != 0 {
+        return WORDS
+    }
+    (lock - b) / 8
+}
+
+/// Word `w`'s rank (kernel/sync's indices: 0 console, 1 heap, 2 net, 3 arp, 4 ip, 5 icmp, 6 udp, 7 tcp).
+pub fn rank(w: u64) -> u64 {
+    if w == 0 { return 20 }
+    if w == 1 { return 21 }
+    if w == 2 { return 15 }
+    if w == 3 { return 14 }
+    if w == 4 { return 12 }
+    if w == 5 { return 13 }
+    if w == 6 { return 11 }
+    if w == 7 { return 10 }
+    0
+}
+
+/// Word `w`'s name, as kernel/sync names its function.
+pub fn name(w: u64) -> str {
+    if w == 0 { return "console" }
+    if w == 1 { return "heap" }
+    if w == 2 { return "net" }
+    if w == 3 { return "arp" }
+    if w == 4 { return "ip" }
+    if w == 5 { return "icmp" }
+    if w == 6 { return "udp" }
+    if w == 7 { return "tcp" }
+    "the kernel lock"
+}
+
+/// kernel/sync's `acquire`, before its spin: the TSC (0 until the ledger has its pages).
+pub fn now() -> u64 {
+    if d() == 0 {
+        return 0
+    }
+    tsc()
+}
+
+fn note(c: u64, kind: u64, w: u64, h: u64) {
+    wr(own(c, VKIND), kind)
+    wr(own(c, VWORD), w)
+    wr(own(c, VHELD), h)
+}
+
+/// The word held with the highest rank (WORDS: none).
+fn top(held: u64) -> u64 {
+    var h: u64 = 0
+    var t: u64 = WORDS
+    while h < WORDS {
+        let b: u64 = 1 << h
+        if held & b != 0 && (t == WORDS || rank(h) > rank(t)) {
+            t = h
+        }
+        h += 1
+    }
+    t
+}
+
+/// kernel/sync's `acquire`, once the exchange succeeded: the spin counted, the hold opened, the rank checked.
+pub fn took(lock: u64, t0: u64) {
+    if d() == 0 {
+        return
+    }
+    let w = index_of(lock)
+    let c = percpu.index()
+    if w >= WORDS || c >= MAXCPU {
+        return
+    }
+    let n = tsc()
+    let spin = if t0 != 0 && n > t0 { n - t0 } else { 0 }
+    add(row(c, w, TOOK), 1)
+    add(row(c, w, SPIN), spin)
+    if spin > CONTENDED {
+        add(row(c, w, CONT), 1)
+    }
+    wr(row(c, w, START), n)
+    let held = rd(own(c, HELD))
+    let t = top(held)
+    if checked() && t < WORDS && rank(t) >= rank(w) && rd(own(c, VKIND)) == 0 {
+        note(c, 1, w, t)
+    }
+    let b: u64 = 1 << w
+    wr(own(c, HELD), held | b)
+}
+
+/// kernel/sync's `release`, before its release store: the hold closed and counted.
+pub fn gave(lock: u64) {
+    if d() == 0 {
+        return
+    }
+    let w = index_of(lock)
+    let c = percpu.index()
+    if w >= WORDS || c >= MAXCPU {
+        return
+    }
+    let st = rd(row(c, w, START))
+    if st == 0 {
+        return // taken before the ledger had its pages: not counted at either end
+    }
+    let n = tsc()
+    let h = if n > st { n - st } else { 0 }
+    wr(row(c, w, START), 0)
+    add(row(c, w, GAVE), 1)
+    add(row(c, w, HOLD), h)
+    if h > rd(row(c, w, LONGEST)) {
+        wr(row(c, w, LONGEST), h)
+    }
+    let held = rd(own(c, HELD))
+    let b: u64 = 1 << w
+    if held & b != 0 {
+        wr(own(c, HELD), held - b)
+    }
+}
+
+/// The test words, at processor `c`'s fresh take of the kernel lock: holding a word then is kind 2.
+pub fn at_take(c: u64) {
+    if d() == 0 || c >= MAXCPU || !checked() {
+        return
+    }
+    let t = top(rd(own(c, HELD)))
+    if t < WORDS && rd(own(c, VKIND)) == 0 {
+        note(c, 2, WORDS, t)
+    }
+}
+
+/// The test words, at processor `c`'s release of the kernel lock: holding a word then is kind 3.
+pub fn at_release(c: u64) {
+    if d() == 0 || c >= MAXCPU || !checked() {
+        return
+    }
+    let t = top(rd(own(c, HELD)))
+    if t < WORDS && rd(own(c, VKIND)) == 0 {
+        note(c, 3, WORDS, t)
+    }
+}
+
+/// Processor `c`'s first violation: its kind (0 none, 1 a word below one held, 2 the kernel lock taken holding a word,
+/// 3 the kernel lock given back holding one), the word taken (WORDS: the kernel lock) and the word held.
+pub fn violation(c: u64) -> (u64, u64, u64) {
+    if d() == 0 || c >= MAXCPU {
+        return (0, 0, 0)
+    }
+    (rd(own(c, VKIND)), rd(own(c, VWORD)), rd(own(c, VHELD)))
+}
+
+/// Processor `c`'s counter `i` (TOOK, GAVE, CONT, SPIN, HOLD, LONGEST) for word `w`; 0 until the ledger has its pages.
+pub fn count(c: u64, w: u64, i: u64) -> u64 {
+    if d() == 0 || c >= MAXCPU || w >= WORDS {
+        return 0
+    }
+    rd(row(c, w, i))
+}
