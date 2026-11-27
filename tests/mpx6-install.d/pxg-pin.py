@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the reviewed reader pin and the actual image installation helper."""
+"""Check the reviewed qualification source pin and actual image installation helper."""
 from pathlib import Path
 import hashlib
 import importlib.machinery
@@ -11,7 +11,8 @@ import tempfile
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
-REV = 'c9344fce472df7be05efd1b631c99d2a232b61a9'
+REV = '1ee4cf546840c456890b8abf0cab24c1ed6af51f'
+SOURCE_SHA256 = '7779f4c2b8b310782eb8b24bdcd06d6c0e40141c8793c228550ee908a2b20e41'
 
 
 def check():
@@ -21,9 +22,9 @@ def check():
     assert guest.EXPECTED['VERSION'][1].startswith('paxage 0.2.1 (pxg;'), 'I-pxg-version'
     pin = dict(line.split('=', 1) for line in (ROOT / 'user/pxg.pin').read_text().splitlines()
                if line and not line.startswith('#'))
-    assert pin['PXG_REV'] == REV, 'I-pxg-version-pin'
+    assert pin['PXG_REV'] == REV, 'I-pxg-qualified-pin'
     assert pin['PXG_REPO'] == 'https://github.com/wolffe-lang/paxage', 'I-pxg-source-origin'
-    assert re.fullmatch('[0-9a-f]{64}', pin.get('PXG_SOURCE_SHA256', '')), 'I-pxg-source-digest'
+    assert re.fullmatch('[0-9a-f]{64}', pin.get('PXG_SOURCE_SHA256', '')) and pin['PXG_SOURCE_SHA256'] == SOURCE_SHA256, 'I-pxg-qualified-source-digest'
     if len(sys.argv) == 3 and sys.argv[1] == '--source':
         source = Path(sys.argv[2]).resolve()
         archive = subprocess.run(['git', '-C', str(source), 'archive', '--format=tar', REV],
@@ -50,8 +51,8 @@ def check():
         module.install_pxg(rows, inputs)
         assert rows == {'bin/pxg': (0o100755, 0, 0, data)}, 'I-pxg-image-mode'
     print('PASS I-pxg-version')
-    print('PASS I-pxg-version-pin')
-    print('PASS I-pxg-source-digest')
+    print('PASS I-pxg-qualified-pin')
+    print('PASS I-pxg-qualified-source-digest')
     print('PASS I-pxg-image-mode')
 
 
