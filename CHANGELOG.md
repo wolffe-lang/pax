@@ -40,6 +40,13 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   report the stopped child's signal as 0 (pax#541). It also watches a stopped member of an orphaned group from
   50 ms after the stop, once a write in progress has completed.
 
+- **The carried editor includes syntax highlighting.** yew moves from `3a9983ee` to `cec65826`, with its
+  embedded syntax definitions and themes, still built by its own wolf 0.2.36 manifest. No shared compiler pin
+  changes. `tests/mpx5-yew` checks a `.lu` keyword's effective SGR at the console through PS/2 and USB, on Linux
+  and over ssh, with controlled truecolor rows kept separate from the printed default `TERM=linux`
+  foreground observation. The arrow-byte checks are baseline guards: Ctrl+Alt+Up/Down still add cursors in
+  **H mode only**; this repin changes no bindings or console palette.
+
 - **Your own shell file at login.** `/etc/shrc` ends by running `~/.config/pelt/shrc` when it is a readable
   regular file: at a console login, in a terminal over ssh and in a shell from `su USER`, as the account whose
   `HOME` it is; not for a command over ssh or `sudo -s`, which read no `ENV`. PAX ships no such file. The dev
