@@ -350,8 +350,14 @@ def klock_wait(d):
 def klock_holds(d, hz, top=6):
     # the lock held (all processors' holds over the window's wall); each key's share of the holds, its mean, its count
     # and its longest hold since the boot, the largest first; the switched and kernel-thread parts said where they are
+    # At one processor the test kernel writes no cpu lines (it counts no processors before kernel/smp starts the
+    # others): the lock's use is then not said, and each key's share is of the keys' own holds.
     tot = sum(c['hold'] for c in d['cpus'].values())
-    out = [f'the lock held {tot / d["wall"]:.2f} of the window' if d['wall'] else 'no window']
+    if not d['cpus']:
+        tot = sum(k['hold'][0] for k in d['keys'].values())
+        out = ["no cpu lines (one processor), the lock's use not said"]
+    else:
+        out = [f'the lock held {tot / d["wall"]:.2f} of the window' if d['wall'] else 'no window']
     if d.get('more'):
         out.append(f'{d["more"]} keys past the page left out')
     for name, k in sorted(d['keys'].items(), key=lambda kv: -kv[1]['hold'][0])[:top]:
@@ -1345,8 +1351,11 @@ elif a.kind == 'build':
                     if k.get('longest') is not None:
                         t['longest'] = max(t['longest'] or 0, k['longest'])
             word = {1: 'one job', 2: 'two jobs', 3: 'three jobs', 4: 'four jobs'}.get(j, f'{j} jobs')
-            waits.append(f'{word}: ' + ("spin over the batches' wall by processor " if not waits else '') +
-                         f'{klock_wait(tot)}%')
+            if not tot['cpus']:
+                waits = ['one processor: the ledger writes no cpu lines there, so no spin']
+            else:
+                waits.append(f'{word}: ' + ("spin over the batches' wall by processor " if not waits else '') +
+                             f'{klock_wait(tot)}%')
             holds.append(f'{word}: ' + '; '.join(klock_holds(tot, hz)))
         ok('KLOCK-WAIT', '; '.join(waits) + ' (printed)')
         ok('KLOCK-HOLDS', ' | '.join(holds) + ' (printed)')
