@@ -102,7 +102,10 @@ srcdir=$(cd "$(dirname "$src")" && pwd)
 # px166: --test-words (tests/mpx6-smp's test kinds alone): the kernel's tree copied under OUTDIR with
 # tests/mpx6-smp.d/testwords.lu in kernel/testwords/testwords.lu's place; never a shipped kernel. The copy is
 # OUTDIR/test-words/kernel, beside links to the checkout's boot/ and user/: kernel/wolf.pkg names its assembly
-# as ../boot/*.S and ../user/*, which must resolve from the copy as from kernel/.
+# as ../boot/*.S and ../user/*, which must resolve from the copy as from kernel/. px166 (stage 3): the copy also
+# takes tests/mpx6-smp.d/ledger.patch, the kernel lock's ledger's hooks (kernel/interrupts, kernel/klock and
+# kernel/procfs), by `git apply` with its context exact and no repository above the copy in sight; the shipped
+# kernel is built from kernel/ as it is (tests/mpx6-smp's LEDGER-PATCH and KERNEL-NO-LEDGER).
 if [ "$testwords" = 1 ]; then
     [ "$(basename "$srcdir")" = kernel ] || die "--test-words builds a kernel/ source"
     tw=$out/test-words
@@ -110,6 +113,8 @@ if [ "$testwords" = 1 ]; then
     ln -s "$(dirname "$srcdir")/boot" "$tw/boot"
     ln -s "$(dirname "$srcdir")/user" "$tw/user"
     cp "$PAX_ROOT/tests/mpx6-smp.d/testwords.lu" "$tw/kernel/testwords/testwords.lu"
+    (cd "$tw" && GIT_CEILING_DIRECTORIES=$(cd "$out" && pwd -P) git apply "$PAX_ROOT/tests/mpx6-smp.d/ledger.patch") \
+        || die "--test-words: tests/mpx6-smp.d/ledger.patch does not apply to kernel/ (tests/mpx6-smp's LEDGER-PATCH says where)"
     srcdir=$tw/kernel
 fi
 name=$(basename "$src" .lu)
