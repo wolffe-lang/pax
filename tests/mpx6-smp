@@ -4,7 +4,7 @@
 #   tests/mpx6-smp [--tier native|release|both] [--firmware bios|uefi|both]
 #   (or SMP_TIER, SMP_FIRMWARE; SMP_COUNTS='2 4 16' the default kind's processor counts;
 #    SMP_STRESS_BOOTS=10 and SMP_STRESS_SECS=20 the stress; SMP_SCALING=gate|report|skip SMP-BUILD;
-#    SMP_KINDS='rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share ledger' (or commas) the boots
+#    SMP_KINDS='rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share ledger rank' (or commas) the boots
 #    run, every kind by default, fewer for a plant's take, each kind left out said `NOT-RUN … SMP_KINDS`;
 #    SMP_TRACE_COUNTS='1 2 4' (or commas) the trace kind's processor counts, SMP_TRACE_BOOTS=1 its boots at each;
 #    SMP_ROWS_CAP=N a development knob, never the gate: `pax.cpus=N` on the rows, stress and end boots (rows-cap.sh);
@@ -49,6 +49,11 @@
 #     tier: the ledger's text and state in the test build's ELF, in the shipped one no ledger text, state or
 #     /proc/pax-klock (and with SMP_SHIPPED_AGAINST its loaded sections the given ELF's); SMP-TESTWORDS: the shipped
 #     kernel has no /proc/pax-klock;
+#   - px166 (stage 3a, unit 1): every test-built boot (nooff, panic, panic2, leave, ledger) has `pax.smpdebug`, under
+#     which the test build's lockled checks the ranks of kernel/sync's words: LOCK-RANK-CLEAN, the ranks checked and no
+#     word taken out of rank; in the ledger kind KLOCK-LEDGER (d), every word given back as often as taken, and LOCK-WAIT
+#     printed; LOCK-RANK (`rank`, at 2, the test build given `pax.smpdebug pax.rankflip`): CPU 0's tick takes console
+#     and then net once, out of order, and the next fresh take of the kernel lock names it and panics;
 #   - in every boot SMP-KLOCK, SMP-DUP, SMP-PIN and SMP-PARK (rows.py's every-kind rows);
 # and SMP-BUILD once, on the first tier and firmware: the processor census's pack fixture at -smp 1 and -smp 4 with
 # 2 GiB, the batches timed by the host (tests/mpx6-smp.d/build.py), the pinned den built by tools/mkden
@@ -66,7 +71,7 @@ set -euo pipefail
 cd "$PAX_ROOT"
 tiers=${SMP_TIER:-native} firmware=${SMP_FIRMWARE:-bios uefi}
 counts=${SMP_COUNTS:-2 4 16} boots=${SMP_STRESS_BOOTS:-10} secs=${SMP_STRESS_SECS:-20} scaling=${SMP_SCALING:-report}
-kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share ledger}
+kinds=${SMP_KINDS:-rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share ledger rank}
 tcounts=${SMP_TRACE_COUNTS:-1 2 4} tboots=${SMP_TRACE_BOOTS:-1}
 tcounts=${tcounts//,/ }
 case $tboots in ''|*[!0-9]*|0) die "SMP_TRACE_BOOTS is a count of boots, not $tboots" ;; esac
@@ -78,8 +83,8 @@ rows_cap=${SMP_ROWS_CAP:-}
 rows_cap_check "$rows_cap" || exit 2
 [ -z "$rows_cap" ] || echo "NOT-A-GATE SMP_ROWS_CAP=$rows_cap: pax.cpus=$rows_cap on the rows, stress and end boots; a development take, not the gate"
 for k in $kinds; do
-    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords|leave|share|ledger) ;;
-        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share ledger, not $k" ;; esac
+    case $k in rows|end|nosmp|one|cap2|cap1|trace|stress|nooff|panic|panic2|testwords|leave|share|ledger|rank) ;;
+        *) die "SMP_KINDS names rows end nosmp one cap2 cap1 trace stress nooff panic panic2 testwords leave share ledger rank, not $k" ;; esac
 done
 asked() { # KIND: 0 when SMP_KINDS asks it, else its NOT-RUN line and 1
     case " $kinds " in *" $1 "*) return 0 ;; esac
@@ -120,12 +125,15 @@ conf() { # FILE CMDLINE-WORDS
 images=("rows::/bin/smpprobe rows" "stress::/bin/smpprobe stress $secs" "end-halt::/bin/smpprobe end halt"
         "end-poweroff::/bin/smpprobe end poweroff" "end-reboot::/bin/smpprobe end restart" "one::/bin/smpprobe one"
         "nosmp: nosmp:/bin/smpprobe one" "cap2: pax.cpus=2:/bin/smpprobe cap" "cap1: pax.cpus=1:/bin/smpprobe one" "trace::/bin/smpprobe trace"
-        "end-nooff: pax.cpus=4 pax.nopoweroff:/bin/smpprobe end poweroff" "panic: pax.cpus=4 pax.panictest=1:/bin/smpprobe spin"
-        "panic2: pax.cpus=4 pax.panictest=2:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff klock"
-        "leave: pax.slowleave=200:/bin/smpprobe leave" "share::/bin/smpprobe share" "ledger: pax.klockhold=20:/bin/smpprobe ledger")
+        "end-nooff: pax.cpus=4 pax.nopoweroff pax.smpdebug:/bin/smpprobe end poweroff"
+        "panic: pax.cpus=4 pax.panictest=1 pax.smpdebug:/bin/smpprobe spin"
+        "panic2: pax.cpus=4 pax.panictest=2 pax.smpdebug:/bin/smpprobe spin" "testwords: pax.nopoweroff pax.panictest=2:/bin/smpprobe end poweroff klock"
+        "leave: pax.slowleave=200 pax.smpdebug:/bin/smpprobe leave" "share::/bin/smpprobe share"
+        "ledger: pax.klockhold=20 pax.smpdebug:/bin/smpprobe ledger" "rank: pax.smpdebug pax.rankflip:/bin/smpprobe stress 5")
 # The STOP step's test kinds and leave boot a test build (tools/build-kernel --test-words: tests/mpx6-smp.d/testwords.lu
-# in kernel/testwords' place); testwords boots the shipped kernel given both words; ledger the test build's lock ledger.
-testbuilt() { case $1 in end-nooff|panic|panic2|leave|ledger) return 0 ;; esac; return 1; }
+# in kernel/testwords' place); testwords boots the shipped kernel given both words; ledger the test build's lock ledger;
+# px166 (stage 3a, unit 1): every test-built kind has `pax.smpdebug` (the ranks checked), and rank adds `pax.rankflip`.
+testbuilt() { case $1 in end-nooff|panic|panic2|leave|ledger|rank) return 0 ;; esac; return 1; }
 if [ -n "$rows_cap" ]; then # SMP_ROWS_CAP: unset, the list above is used as it stands
     capped=()
     for spec in "${images[@]}"; do capped+=("$(rows_cap_spec "$rows_cap" "$spec")"); done
@@ -258,18 +266,18 @@ for tier in $tiers; do
         fi
         # the STOP step's kinds (test builds but testwords): their rows read the test ELF's symbols for the dumps
         if asked nooff; then
-            elf=$img/test/kmain_console.elf boot "$work/smp-$fw-end-nooff.log" "$fw" "$img/end-nooff.iso" 180 1 --kind end-nooff --smp 4 -- -smp 4 -m 512
+            elf=$img/test/kmain_console.elf boot "$work/smp-$fw-end-nooff.log" "$fw" "$img/end-nooff.iso" 180 1 --kind end-nooff --smp 4 --lockled -- -smp 4 -m 512
         fi
         if asked panic; then
-            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic.log" "$fw" "$img/panic.iso" 180 1 --kind panic --smp 4 -- -smp 4 -m 512
+            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic.log" "$fw" "$img/panic.iso" 180 1 --kind panic --smp 4 --lockled -- -smp 4 -m 512
         fi
         if asked panic2; then
-            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic2.log" "$fw" "$img/panic2.iso" 180 1 --kind panic2 --smp 4 -- -smp 4 -m 512
+            BOOT_MARKER='panic: halt' BOOT_SYMBOL=pax_ap_stop elf=$img/test/kmain_console.elf boot "$work/smp-$fw-panic2.log" "$fw" "$img/panic2.iso" 180 1 --kind panic2 --smp 4 --lockled -- -smp 4 -m 512
         fi
         # SMP-EXEC-LEAVE: the test build given pax.slowleave=200 at 2 and 4; a kernel panic ends the boot at its line
         if asked leave; then
             for n in 2 4; do
-                BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-leave-$n.log" "$fw" "$img/leave.iso" 300 0 --kind leave --smp "$n" -- -smp "$n" -m 512
+                BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-leave-$n.log" "$fw" "$img/leave.iso" 300 0 --kind leave --smp "$n" --lockled -- -smp "$n" -m 512
             done
         fi
         # SMP-SHARE: N + 1 threads spinning on N processors at 2 and 4, each one's part of processor time
@@ -281,8 +289,13 @@ for tier in $tiers; do
         # KLOCK-LEDGER: the test build's lock ledger around a load on every processor, the known hold on its command line
         if asked ledger; then
             for n in 2 4; do
-                BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-ledger-$n.log" "$fw" "$img/ledger.iso" 180 0 --kind ledger --smp "$n" -- -smp "$n" -m 512
+                BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-ledger-$n.log" "$fw" "$img/ledger.iso" 180 0 --kind ledger --smp "$n" --lockled -- -smp "$n" -m 512
             done
+        fi
+        # px166 (stage 3a, unit 1): LOCK-RANK: the test build given `pax.smpdebug pax.rankflip` at 2; the panic that names
+        # the flip ends the boot at its line, and a boot that runs to its end (no check) halts after the probe's 5 s
+        if asked rank; then
+            BOOT_MARKER='halt|PANIC .*' elf=$img/test/kmain_console.elf boot "$work/smp-$fw-rank.log" "$fw" "$img/rank.iso" 120 0 --kind rank --smp 2 -- -smp 2 -m 512
         fi
         if asked testwords; then
             log=$work/smp-$fw-testwords.log st=0
