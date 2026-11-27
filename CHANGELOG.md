@@ -21,9 +21,10 @@ for a paragraph under an Unreleased heading. Earlier work is told in
   kernel to another ELF where the machine loads it. SMP-BUILD-COST prints two shipped kernels' batch times
   (`SMP_BUILD_AGAINST`). A processor's longest hold leaves out kmain's first, which is the whole boot up to the first
   release. At one processor the ledger has no per-processor lines, so no spin is printed there. The prediction it was
-  built to test is in `notes/smp-klock-ledger.md`, with why the hooks left the shipped kernel: a build that kept them
-  there as empty calls measured 2.3% slower at four jobs, while the calls themselves come to well under 0.1% of a
-  batch and the build moved most of the kernel's code.
+  built to test is in `notes/smp-klock-ledger.md`, with why the hooks left the shipped kernel. A build that kept them
+  there as empty calls measured 2.3% slower at four jobs in one take, but the same take on byte-identical kernels
+  later read VOID, so no cost is shown. The hooks stay in the test build, where a byte comparison proves the shipped
+  kernel is trunk's.
 
 - **Every processor runs threads, under one kernel lock (SMP stage 2).** Each application processor now takes
   threads of programs from the one run queue, as the boot processor does; kernel threads stay on the boot processor.
