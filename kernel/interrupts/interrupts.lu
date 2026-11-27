@@ -439,8 +439,13 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
     if user.from_user(unsafe { f as u64 }) && klock.held_here() {
         panic.fail("klock: entered from ring 3 holding it, cpu ", percpu.index())
     }
+    // px166 (stage 3): the lock's ledger (kernel/testwords) reads the TSC before the lock and opens a hold after a
+    // fresh take, keyed by this entry; as shipped `ledger_now` is 0 and `ledger_took` does nothing.
+    let t0 = testwords.ledger_now()
     let fresh = klock.enter()
     if fresh {
+        // # Safety: the frame's address; the test build reads its vector, number and CS words, as shipped nothing.
+        testwords.ledger_took(unsafe { f as u64 }, t0)
         sched.ambient_resume()
     }
     // px166: a test kernel's `pax.slowleave=MS` (kernel/testwords; no hold as
@@ -461,7 +466,10 @@ export fn pax_interrupt(f: *Frame) -> *Frame {
             tlb.answer()
             sync.relax()
         }
+        let t1 = testwords.ledger_now()
         if klock.enter() {
+            // # Safety: as at the first take.
+            testwords.ledger_took(unsafe { f as u64 }, t1)
             sched.ambient_resume()
         }
         testwords.held(percpu.index(), sched.self_slot(), sched.self_pid())
