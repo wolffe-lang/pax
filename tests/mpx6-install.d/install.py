@@ -43,7 +43,11 @@ def run(args,ok=True):
 def sha(p):
     with p.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
 
-for d in ['bin','boot/EFI/BOOT','boot/limine','etc','root','home/pax','dev','proc','sys','tmp','usr/share/tunes']:
+# TEST-ONLY synthetic roots are empty directories on the installed filesystem.
+# Minimal smoke has no external mkdir; do not add a production utility for this test.
+for d in ['bin','boot/EFI/BOOT','boot/limine','etc','root','home/pax',
+          'home/pax/TEST-ONLY-pxg-root-bios','home/pax/TEST-ONLY-pxg-root-uefi',
+          'dev','proc','sys','tmp','usr/share/tunes']:
     (source/d).mkdir(parents=True,exist_ok=True)
 programs={n:dt/'bore'/n for n in ['cat','cp','env','ls']}
 programs.update(sh=full/'pelt/pelt',pelt=full/'pelt/pelt',lope=full/'lope/lope',reboot=full/'probe/reboot')
