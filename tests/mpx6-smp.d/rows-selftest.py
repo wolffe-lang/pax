@@ -1152,8 +1152,10 @@ case('ledger: one read and no done: red', ledger_text(4, reads=1, done=False), L
      why=r'1 of 2 reads of /proc/pax-klock, no `SMP-LEDGER done`')
 
 
-def build_klock_text(active=4, jobs=4):
-    # the build boot with the test kernel: bench reads /proc/pax-klock before and after each batch
+def build_klock_text(active=4, jobs=4, nocpu=False):
+    # the build boot with the test kernel: bench reads /proc/pax-klock before and after each batch; `nocpu`: the ledger
+    # without its cpu lines, as the test kernel writes it at one processor (it counts no processors before
+    # kernel/smp starts the others)
     t = f'BENCH TSC-HZ {HZ}\nBENCH ACTIVE {active}\n'
     base = 10 ** 9
     for r in range(3):
@@ -1161,6 +1163,8 @@ def build_klock_text(active=4, jobs=4):
             w = int((0.2 if j == 1 else 0.4) * HZ)
             sp = 0.01 if j == 1 else 0.40
             b = ledger_snaps(active, secs=w / HZ, spin=sp, hold=0.2, test=(0, 0))
+            if nocpu:
+                b = [''.join(ln for ln in x.splitlines(True) if not ln.startswith('cpu ')) for x in b]
             t += f'BENCH KLOCK round={r} jobs={j} at=before begin\n{b[0]}BENCH KLOCK round={r} jobs={j} at=before end\n'
             t += f'BENCH BEGIN round={r} jobs={j}\nBENCH END round={r} jobs={j} user_us=1 sys_us=1 maxrss_kib=44136 guest_wall_us=203000\n'
             for k in range(j):
@@ -1174,6 +1178,14 @@ case('build at 4 on the test kernel: the batches\' spin and holds printed by job
      ba + ['--scaling', 'report'], {'SMP-BUILD', 'KLOCK-WAIT', 'KLOCK-HOLDS'}, set(), files={'times': times(0.203, 0.386)},
      says=r"^PASS KLOCK-WAIT smp=4: one job: spin over the batches' wall by processor \[1, 1, 1, 1\]%; four jobs: "
           r'\[40, 40, 40, 40\]% \(printed\)')
+case('build at 1 on the test kernel: no cpu lines, said so; the keys\' shares of their own holds',
+     build_klock_text(active=1, nocpu=True), ['--kind', 'build', '--smp', '1', '--expected', 'expected.json'],
+     {'SMP-BUILD', 'KLOCK-WAIT', 'KLOCK-HOLDS'}, set(), files={'times': times(0.203, 0.876)},
+     says=r'^PASS KLOCK-WAIT smp=1: one processor: the ledger writes no cpu lines there, so no spin \(printed\)')
+case('build at 1 on the test kernel: the holds by key, the lock\'s use not said', build_klock_text(active=1, nocpu=True),
+     ['--kind', 'build', '--smp', '1', '--expected', 'expected.json'], {'SMP-BUILD', 'KLOCK-WAIT', 'KLOCK-HOLDS'}, set(),
+     files={'times': times(0.203, 0.876)},
+     says=r'^PASS KLOCK-HOLDS smp=1: one job: no cpu lines \(one processor\), the lock\'s use not said; sys:1 0\.50 of the holds')
 case('build at 4 on the shipped kernel: no ledger rows', build_text(4), ba + ['--scaling', 'report'], {'SMP-BUILD'}, set(),
      files={'times': times(0.203, 0.386)})
 
