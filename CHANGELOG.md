@@ -7,6 +7,17 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **A ledger of the kernel lock, in the test kernel only.** A kernel built with `tools/build-kernel --test-words`
+  now counts, for every take of the kernel lock, how long the taking processor spun for it and how long the hold
+  lasted, keyed by the entry that took it (each system call by number, page faults, each interrupt vector), and
+  prints the counters in `/proc/pax-klock`; `pax.klockhold=MS` makes the boot processor's tick hold the lock a known
+  time once a second, for the ledger's own check. The shipped kernel keeps no ledger: its entry and release paths
+  call empty functions, and its `/proc/pax-klock` says `klock-ledger: not a test kernel`. tests/mpx6-smp's ledger
+  kind holds the ledger to its closure, its exclusion and the known hold (KLOCK-LEDGER) and prints each processor's
+  spin and each entry's holds (KLOCK-WAIT, KLOCK-HOLDS), also for SMP-BUILD's batches on the test kernel
+  (`SMP_BUILD_KERNEL=test`); SMP-BUILD-COST prints the shipped kernel's batch times against another shipped kernel's
+  (`SMP_BUILD_AGAINST`). The prediction it was built to test is in `notes/smp-klock-ledger.md`.
+
 - **Every processor runs threads, under one kernel lock (SMP stage 2).** Each application processor now takes
   threads of programs from the one run queue, as the boot processor does; kernel threads stay on the boot processor.
   Every kernel entry but the NMI's takes one lock, owned by a processor and given back on every way into ring 3 or
