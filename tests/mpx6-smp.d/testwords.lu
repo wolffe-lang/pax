@@ -121,3 +121,30 @@ pub fn held(cpu: u64, slot: u64, tgid: u64) {
     log.dec(tgid as int)
     log.end()
 }
+
+/// px166 (stage 3, the kernel lock's ledger; tests/mpx6-smp.d/testwords.lu keeps it): kernel/interrupts' entry,
+/// just before `klock.enter`: the TSC in the test build; 0 as shipped, so the shipped entry reads no TSC.
+pub fn ledger_now() -> u64 {
+    0
+}
+
+/// After a fresh `klock.enter`, under the lock: the entering frame's address and `ledger_now`'s reading. The test
+/// build opens a hold, keyed by the entry; nothing as shipped.
+pub fn ledger_took(_f: u64, _t0: u64) {}
+
+/// kernel/klock, just before each release store, still holding: the test build closes the hold; nothing as shipped.
+pub fn ledger_gave() {}
+
+/// `/proc/pax-klock`'s text at `base` (kernel/procfs's page): its length. The test build writes the ledger; as
+/// shipped, one line, `klock-ledger: not a test kernel`.
+pub fn ledger_text(base: u64) -> u64 {
+    var n: u64 = 0
+    for b in "klock-ledger: not a test kernel".bytes() {
+        // # Safety: a byte of the page kernel/procfs's `make` took, through the HHDM; n < 32.
+        unsafe { ((base + n) as *u8).write_volatile((b as int as u64 & 0xff) as u8) }
+        n += 1
+    }
+    // # Safety: as above.
+    unsafe { ((base + n) as *u8).write_volatile(10 as u8) }
+    n + 1
+}
