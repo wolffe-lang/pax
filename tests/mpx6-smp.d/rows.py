@@ -184,6 +184,24 @@ The kinds and their rows (every row of the default kind starts with the gate `ac
               SMP-PARK     kmain_console's own check of exec's parked-space table: `sched: parked spaces: 2 held
                            parked at once, 0 left once let go`; red on another count or the table's PANIC.
 
+  px166 (stage 3a, unit 1): the test build's lockled counts every kernel/sync word's acquisitions per processor and,
+  with `pax.smpdebug`, checks their ranks (tests/mpx6-smp.d/lockled.lu; kernel/sync's hooks by
+  tests/mpx6-smp.d/ledger.patch). /proc/pax-klock gains `lock-ranks checked|off` and a line per word and processor
+  that took it: `lock WORD cpu C took N gave G contended K spin S hold H longest L`. --lockled (the suite's, for the
+  test-built kinds, whose boots all have `pax.smpdebug`) asks these:
+  end-nooff, panic, panic2, leave, ledger (--lockled)
+              LOCK-RANK-CLEAN  `testwords: pax.smpdebug (a test kernel): lock-ranks checked` at the start, and no
+                           `testwords: LOCK-RANK …` line: no word taken out of rank anywhere in the boot.
+  ledger (--lockled)
+              KLOCK-LEDGER (d) at each read, `lock-ranks checked` and every word given back as often as taken on every
+                           processor (the reader holds the kernel lock, and every word is taken inside it).
+              LOCK-WAIT    each word over the window: its spin summed over the processors against the wall, its
+                           contended acquisitions and its takes (printed, never gated here).
+  rank        LOCK-RANK    the test build given `pax.smpdebug pax.rankflip` at 2: CPU 0's tick takes console and then
+                           net once, out of order; the next fresh take of the kernel lock says `testwords: LOCK-RANK
+                           cpu 0 took net (rank 15) holding console (rank 20)` and panics (`PANIC lock rank: …`), and
+                           no other bad line; both words' start lines said.
+
 A row prints `PASS ROW tag: …` or `FAIL ROW tag: …`, a row this boot does not ask `NOT-ASKED ROW
 tag: …`, and what a red row found beyond its first reason `INFO ROW tag: …`. Exit 1 if any row failed.
 """
@@ -197,18 +215,23 @@ import sys
 sys.dont_write_bytecode = True
 KERNEL = 0xffffffff80000000
 STOP_LINE = 'cpus: {n} application processors stopped for the end'
+SMPDEBUG_LINE = 'testwords: pax.smpdebug (a test kernel): lock-ranks checked'  # px166 (stage 3a, unit 1)
 BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processors.*|.*did not answer a shootdown.*|'
                  r'user: \S+ pid \d+ killed: (?!SIGKILL|SIGTERM).*)$', re.M)
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
         'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
         'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT', 'SMP-STOPWRITE',
-        'SMP-EXEC-LEAVE', 'SMP-SHARE', 'KLOCK-LEDGER', 'KLOCK-WAIT', 'KLOCK-HOLDS', 'SMP-BUILD-COST']
+        'SMP-EXEC-LEAVE', 'SMP-SHARE', 'KLOCK-LEDGER', 'KLOCK-WAIT', 'KLOCK-HOLDS', 'SMP-BUILD-COST', 'LOCK-RANK',
+        'LOCK-RANK-CLEAN', 'LOCK-WAIT']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
 ap.add_argument('--kind', required=True, choices=('rows', 'stress', 'end-halt', 'end-poweroff', 'end-reboot', 'nosmp',
                                                   'one', 'cap2', 'cap1', 'build', 'end-nooff', 'panic', 'panic2',
-                                                  'testwords', 'trace', 'leave', 'share', 'ledger', 'build-cost'))
+                                                  'testwords', 'trace', 'leave', 'share', 'ledger', 'build-cost',
+                                                  'rank'))
+ap.add_argument('--lockled', action='store_true',
+                help='a test build with lockled and `pax.smpdebug` (LOCK-RANK-CLEAN; in the ledger kind (d), LOCK-WAIT)')
 ap.add_argument('--smp', required=True, type=int)
 ap.add_argument('--cap', type=int)
 ap.add_argument('--boot', type=int)
@@ -340,6 +363,31 @@ def klock_delta(b, e):
                           switched=k['switched'] - o['switched'], kthread=k['kthread'] - o['kthread'],
                           spin=(k['spin'][0] - o['spin'][0], k['spin'][1] - o['spin'][1]), longest=k.get('longest'))
     return dict(wall=e['tsc'] - b['tsc'], cpus=cpus, keys=keys, more=max(b['more'], e['more']))
+
+
+# px166 (stage 3a, unit 1): the lock ledger's lines in /proc/pax-klock, as the test build's lockled writes them:
+# `lock-ranks checked|off`, then `lock WORD cpu C took N gave G contended K spin S hold H longest L` per word and
+# processor that took it (every counter monotonic). None when the read has no `lock-ranks` line.
+def lock_parse(body):
+    m = re.search(r'^lock-ranks (checked|off)$', body, re.M)
+    if not m:
+        return None
+    words = {(mm[1], int(mm[2])): dict(took=int(mm[3]), gave=int(mm[4]), cont=int(mm[5]), spin=int(mm[6]),
+                                       hold=int(mm[7]), longest=int(mm[8]))
+             for mm in re.finditer(r'^lock (\S+) cpu (\d+) took (\d+) gave (\d+) contended (\d+) spin (\d+) hold (\d+) '
+                                   r'longest (\d+)$', body, re.M)}
+    return dict(checked=m[1] == 'checked', words=words)
+
+
+def lock_wait(b, e, wall):
+    # each word over the window: its spin summed over the processors against the wall, contended and taken
+    out = []
+    for word in sorted({w for w, _ in e['words']}):
+        sp = sum(c['spin'] - b['words'].get(k, {}).get('spin', 0) for k, c in e['words'].items() if k[0] == word)
+        ct = sum(c['cont'] - b['words'].get(k, {}).get('cont', 0) for k, c in e['words'].items() if k[0] == word)
+        tk = sum(c['took'] - b['words'].get(k, {}).get('took', 0) for k, c in e['words'].items() if k[0] == word)
+        out.append(f'{word} spin {100 * sp / wall if wall else 0:.2f}% of the window, {ct} contended, {tk} taken')
+    return out or ['no word taken']
 
 
 def klock_wait(d):
@@ -1423,6 +1471,25 @@ elif a.kind == 'ledger':
                 hold_txt += f' (printed: {accel() or "no accelerator said"})'
         said.append(f'(a) every hold closed but the reader\'s own; (b) the processors held the lock {use:.2f} of the '
                     f'{d["wall"] / hz * 1000:.0f} ms window; (c) {hold_txt}')
+        # px166 (stage 3a, unit 1): (d) the lock ledger, where the test build has it (--lockled): at each read the
+        # ranks checked and every word given back as often as taken on every processor; LOCK-WAIT printed
+        if a.lockled:
+            lp = {r: lock_parse(reads[r]) for r in (0, 1)}
+            if not all(lp.values()):
+                why.append('(d) no lock ledger in /proc/pax-klock (no `lock-ranks` line)')
+            else:
+                for r in (0, 1):
+                    if not lp[r]['checked']:
+                        why.append(f'(d) /proc/pax-klock says `lock-ranks off` at read {r}')
+                    for (word, i), c in sorted(lp[r]['words'].items()):
+                        if c['took'] != c['gave']:
+                            why.append(f'(d) a word not given back: read {r}: {word} cpu {i} took {c["took"]} and '
+                                       f'gave {c["gave"]}')
+                nw = len({w for w, _ in lp[1]['words']})
+                ncpu = len({i for _, i in lp[1]['words']})
+                said[-1] += (f'; (d) every word given back as often as taken ({nw} word{"" if nw == 1 else "s"}, '
+                             f'{ncpu} processor{"" if ncpu == 1 else "s"})')
+                ok('LOCK-WAIT', '; '.join(lock_wait(lp[0], lp[1], d['wall'])) + ' (printed)')
         ok('KLOCK-WAIT', f"spin over the window's wall by processor {klock_wait(d)}% (printed)")
         ok('KLOCK-HOLDS', '; '.join(klock_holds(d, hz)) + ' (printed)')
     bad = bad_lines()
@@ -1432,6 +1499,30 @@ elif a.kind == 'ledger':
         fail('KLOCK-LEDGER', '; '.join(why[:4]), why[4:])
     else:
         ok('KLOCK-LEDGER', said[0])
+elif a.kind == 'rank':
+    # px166 (stage 3a, unit 1): LOCK-RANK, the rank check's own truth. The test build given `pax.smpdebug pax.rankflip`:
+    # a second after CPU 0's ticks begin its tick takes console and then net, out of order, once (both free under the
+    # kernel lock, so it cannot hang); the next fresh take of the kernel lock names it and panics
+    why = []
+    if SMPDEBUG_LINE not in text:
+        why.append(f'no `{SMPDEBUG_LINE}` line')
+    if 'testwords: pax.rankflip (a test kernel)' not in text:
+        why.append('no `testwords: pax.rankflip (a test kernel)` line')
+    named = re.findall(r'^testwords: LOCK-RANK (.*)$', text, re.M)
+    want = 'cpu 0 took net (rank 15) holding console (rank 20)'
+    if not named:
+        why.append('no LOCK-RANK line: the flip was not caught')
+    elif named != [want]:
+        why.append(f'the LOCK-RANK line names {named[:2]}, want {want}')
+    elif not re.search(r'^PANIC lock rank: ', text[text.find('testwords: LOCK-RANK '):], re.M):
+        why.append('no `PANIC lock rank: ` after it')
+    bad = [b for b in bad_lines() if not b.startswith('PANIC lock rank: ')]
+    if bad:
+        why.append(f'the kernel said: {bad[:3]}')
+    if why:
+        fail('LOCK-RANK', '; '.join(why[:4]), why[4:])
+    else:
+        ok('LOCK-RANK', f'`pax.rankflip` named: {want}, then the panic')
 elif a.kind == 'build-cost':
     # px166 (stage 3): the shipped stub calls' cost. The build image booted with the head's shipped kernel and with
     # trunk's in turn, three boots each at four processors (tests/mpx6-smp's SMP_BUILD_AGAINST); the serial is a list,
@@ -1526,5 +1617,19 @@ elif heap_off:
     fail('SMP-NOHEAP', f'a /proc/pax-cpus that does not say `heap-started 0`: {heap_off[:3]}')
 elif heap_reads:
     ok('SMP-NOHEAP', f'the heap not started (`heap-started 0` in each of {len(heap_reads)} reads of /proc/pax-cpus), no heap panic')
+
+# px166 (stage 3a, unit 1): the test-built kinds with lockled (--lockled; their boots all have `pax.smpdebug`): the ranks
+# checked from the start, and no word taken out of rank anywhere in the boot
+if a.lockled and a.kind in ('end-nooff', 'panic', 'panic2', 'leave', 'ledger'):
+    why = []
+    if SMPDEBUG_LINE not in text:
+        why.append(f'no `{SMPDEBUG_LINE}` line')
+    named = re.findall(r'^testwords: LOCK-RANK .*$', text, re.M)
+    if named:
+        why.append(f'a LOCK-RANK line: {named[0]}')
+    if why:
+        fail('LOCK-RANK-CLEAN', '; '.join(why), named[1:3])
+    else:
+        ok('LOCK-RANK-CLEAN', 'the ranks checked from the start (`pax.smpdebug`), no word taken out of rank')
 
 sys.exit(1 if red else 0)
