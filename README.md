@@ -239,7 +239,7 @@ first program it prints how long its boot took and how much of that the console 
 | burrow | ssh in wolf: the client `/bin/ssh`, `/bin/burrow-keygen` (Ed25519) and the server `/bin/burrowd` | `user/burrow.pin` (wolf 0.2.39) |
 | trash | a reversible rm in wolf: `/bin/trash` puts files in the user's `~/Trash`, and `trash-list`, `trash-restore`, `trash-rm` and `trash-empty` look after it | `c027df83` (wolf 0.2.38) |
 | alpha | the service manager in wolf: `/bin/alpha` checks unit files (`alpha check`) and asks a running manager; the image ships no unit and starts nothing yet | `2aaf3f8b` (wolf 0.2.40) |
-| pxg | the package manager, `/bin/pxg`; selected readers only on PAX, transactions refused | `c9344fce` (v0.2.1; its own wolf 0.2.40 pin) |
+| pxg | the package manager, `/bin/pxg`; transactions on qualified non-live ordered-ext3 roots, never live `/` | `1ee4cf54` (v0.2.1; its own wolf 0.2.40 pin) |
 | the root set | Mozilla's root store, as curl extracts it: `/etc/ssl/certs/ca-roots.der`, the roots den's HTTPS trusts | `cacert-2026-10-20` (`user/roots.pin`) |
 | yew | the editor | `3a9983ee` |
 | sniff | the debugger in wolf, gdb's commands: `/bin/sniff` | `6dd382d4` (wolf 0.2.38) |
@@ -251,11 +251,19 @@ first program it prints how long its boot took and how much of that the console 
 `tools/mkpxg OUTDIR` builds the package manager from `user/pxg.pin` using its source tree's own toolchain,
 not the image's compiler. The fixed pin's source archive digest is checked twice, and two separate source
 checkouts must produce identical static bytes. Both images carry only the production `/bin/pxg`, never its
-failpoint or qualification probes. `pxg --version` and `pxg compare` work on PAX, but this is not package-update
-support: live-root mutations report `live-root-unsupported`, and
-initialising an alternate root on an installed root, the ext3 default or the ext2 preview, reports
-`unqualified-filesystem ext2-family (journal not qualified on PAX)`. The installer suite and
-`tests/distribution-install` hold these refusals.
+failpoint or qualification probes. The source still reports version 0.2.1; its exact revision and archive
+digest identify the qualification change. On PAX, a non-live synthetic root can initialize and transact only
+when its own device supplies a live ordered journal proof. Fresh default installs already create ext3 with
+that journal; `/home` is a directory on it. Canonical `/` remains refused with `live-root-unsupported`, and
+ext2 preview roots remain refused with `unqualified-filesystem ext2-family (journal not qualified on PAX)`.
+`/tmp` is tmpfs, not a suitable transaction root. This repin does not convert an existing ext2 installation
+to ext3; filesystem migration or reinstall is separate work.
+
+No production repository or package trust anchor is selected by the image. The installer suite and
+`tests/distribution-install` use a digest-pinned, public, **test-only** signed root at a fixed fixture clock;
+it is typed into test sessions, never shipped as a production anchor. Their profile-specific rows require
+successful initialization and state verification in a fresh synthetic directory on default ext3, and named
+ext2/live-root refusals without state creation on those refused roots.
 
 Every program is built from its own tree, static, and pinned by commit or by digest (`user/*.pin`); `tools/mk*` builds
 each. `tools/mkdistribution VERIFIED_BASE.cpio BUILT_INPUTS NEW_OUT` assembles both image variants at one clean
@@ -482,7 +490,8 @@ its revoke feature is supported. Unsupported feature words, external-journal ide
 error and a log start (`s_start`) outside the log's blocks are refused by name, without falling back to plain writes;
 a refused start writes nothing, so the log is kept for an offline check. While a volume's journal is live (read-write,
 not failed), `/proc/fs/jbd2/<device>-<journal inode>` is there, and `/sys/dev/block/<major>:<minor>` names every
-disk and partition, which is how paxage's journal check proves a journal on Linux; pxg does not read them on PAX yet.
+disk and partition. pxg now reads that native PAX proof, binding live state, device numbers, journal inode
+and ordered mode to the candidate non-live root's own device; it does not grant live-root mutation permission.
 
 On a volume mounted or remounted writable, a journal write, barrier, checkpoint or bitmap-snapshot failure aborts that
 journal. Later syncs return `EIO`, further mutation is refused, and a failed unmount keeps ownership of its recovery state.
