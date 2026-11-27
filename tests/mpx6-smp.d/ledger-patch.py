@@ -3,19 +3,21 @@
 # shipped kernel's sources name no ledger; the test build (tools/build-kernel --test-words) applies
 # tests/mpx6-smp.d/ledger.patch to its own copy of kernel/ (its hooks at each fresh take and release of the kernel
 # lock, and /proc/pax-klock), beside tests/mpx6-smp.d/testwords.lu in kernel/testwords' place. Two rows:
-#   LEDGER-PATCH      the patch touches kernel/interrupts, kernel/klock and kernel/procfs alone; every line it adds is
-#                     one of the ledger's forms (a comment, `use testwords`, a `testwords.ledger_*` call, /proc/pax-klock's
-#                     entry), and every line it removes comes back with `|| e == PAXKLOCK` added or as procfs's entry count
-#                     one higher; and it applies to the checkout's kernel/ with its context exact (git apply). So the
-#                     test build adds no lock, no interrupt mask and no other path, and a kernel change under one of its
-#                     hunks is red here before any build.
-#   KERNEL-NO-LEDGER  kernel/ and boot/ name no ledger (`ledger_`, `klock-ledger`, `pax-klock`, `PAXKLOCK`): the shipped
-#                     kernel is built from them as they are.
+#   LEDGER-PATCH      the patch touches kernel/interrupts, kernel/klock, kernel/procfs and (stage 3a's first unit)
+#                     kernel/sync alone; every line it adds is one of the ledger's forms (a comment, `use testwords`, a
+#                     `testwords.ledger_*` call, /proc/pax-klock's entry; `use lockled`, `let t0 = lockled.now()`,
+#                     `lockled.took(lock, t0)`, `lockled.gave(lock)`), and every line it removes comes back with
+#                     `|| e == PAXKLOCK` added or as procfs's entry count one higher; and it applies to the checkout's
+#                     kernel/ with its context exact (git apply). So the test build adds no lock, no interrupt mask and
+#                     no other path, and a kernel change under one of its hunks is red here before any build.
+#   KERNEL-NO-LEDGER  kernel/ and boot/ name no ledger (`ledger_`, `klock-ledger`, `pax-klock`, `PAXKLOCK`) and no lock
+#                     rank (`lockled`, `smpdebug`, `rankflip`, `LOCK-RANK`): the shipped kernel is built from them as
+#                     they are.
 #   ledger-patch.py ROOT        the rows for a checkout (exit 1 if either is red)
 #   ledger-patch.py --selftest  each row red and green on synthetic trees
 import os, pathlib, re, shutil, subprocess, sys, tempfile
 
-FILES = ('kernel/interrupts/interrupts.lu', 'kernel/klock/klock.lu', 'kernel/procfs/procfs.lu')
+FILES = ('kernel/interrupts/interrupts.lu', 'kernel/klock/klock.lu', 'kernel/procfs/procfs.lu', 'kernel/sync/sync.lu')
 FORMS = [
     r'',
     r'//.*',
@@ -25,8 +27,11 @@ FORMS = [
     r'const G_PAXKLOCK: u64 = \d+( //.*)?',
     r'if e == PAXKLOCK \{ return ("pax-klock"|G_PAXKLOCK) \}( //.*)?',
     r'\} else if g == G_PAXKLOCK \{',
+    r'use lockled',
+    r'let t0 = lockled\.now\(\)',
+    r'lockled\.(took\(lock, t0\)|gave\(lock\))',
 ]
-NAMES = re.compile(r'ledger_|klock-ledger|pax-klock|PAXKLOCK')
+NAMES = re.compile(r'ledger_|klock-ledger|pax-klock|PAXKLOCK|lockled|smpdebug|rankflip|LOCK-RANK')
 
 
 def hunks(text):
@@ -108,14 +113,15 @@ def rows(root):
         print(f'FAIL LEDGER-PATCH: {"; ".join(why[:3])}' + (f' (and {len(why) - 3} more)' if len(why) > 3 else ''))
         rc = 1
     else:
-        print('PASS LEDGER-PATCH: tests/mpx6-smp.d/ledger.patch touches kernel/interrupts, kernel/klock and kernel/procfs '
-              'alone, adds only the ledger\'s forms, and applies to kernel/ as it is')
+        print('PASS LEDGER-PATCH: tests/mpx6-smp.d/ledger.patch touches kernel/interrupts, kernel/klock, kernel/procfs and '
+              'kernel/sync alone, adds only the ledger\'s forms, and applies to kernel/ as it is')
     hits = check_kernel(root)
     if hits:
         print(f'FAIL KERNEL-NO-LEDGER: kernel/ or boot/ names the ledger at {hits[:4]}' + (f' and {len(hits) - 4} more' if len(hits) > 4 else ''))
         rc = 1
     else:
-        print('PASS KERNEL-NO-LEDGER: kernel/ and boot/ name no ledger; the shipped kernel is built without one')
+        print('PASS KERNEL-NO-LEDGER: kernel/ and boot/ name no ledger and no lock rank; the shipped kernel is built '
+              'without them')
     return rc
 
 
