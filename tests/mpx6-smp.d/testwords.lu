@@ -26,6 +26,11 @@
 //! (kernel/procfs) prints the counters, never reset, and the TSC at the read: a window is the difference of two reads
 //! (tests/mpx6-smp's KLOCK-LEDGER, KLOCK-WAIT, KLOCK-HOLDS). `pax.klockhold=MS`: CPU 0's tick holds the lock MS ms
 //! once a second, keyed `test`, for the ledger's own proof (the known hold).
+//!
+//! px166 (stage 3a, unit 1): `pax.rankflip` (tests/mpx6-smp's rank kind): a second after CPU 0's ticks begin, its tick
+//! takes kernel/sync's console word and then its net word, out of rank (net is taken before console), once, and gives
+//! both back. Under the kernel lock neither word can be contended, so it cannot hang; the rank check
+//! (`pax.smpdebug`) is what must name it.
 
 use boot_info
 use frames
@@ -33,6 +38,7 @@ use ipi
 use log
 use panic
 use percpu
+use sync
 
 extern "c" fn pax_rdtsc() -> u64
 
@@ -84,6 +90,8 @@ var klockhold: u64 = 0 // pax.klockhold's MS (0: none)
 var tick_tsc: u64 = 0 // the TSC at CPU 0's last tick
 var tick_cycles: u64 = 0 // the cycles between its last two
 var next_hold: u64 = 0 // the tick at or after which the next known hold falls
+var rankflip: bool = false // px166 (stage 3a, unit 1): pax.rankflip given (CPU 0's tick flips the two words once)
+var flipped: bool = false // the flip made
 
 pub fn start() {
     if boot_info.cmdline_has("pax.nopoweroff") {
@@ -123,6 +131,11 @@ pub fn start() {
     } else {
         log.line("testwords: the kernel lock's ledger has no pages (kernel/frames refused)")
     }
+    if boot_info.cmdline_has("pax.rankflip") {
+        // # Safety: written once here, at the boot, before CPU 0's tick reads it.
+        unsafe { rankflip = true }
+        log.line("testwords: pax.rankflip (a test kernel): CPU 0 takes console and then net once, a second after its ticks begin")
+    }
 }
 
 /// `pax.slowleave=MS`'s MS (decimal, at most six digits); 0 when the word is absent or not a number.
@@ -160,12 +173,27 @@ fn how_many() -> u64 {
 
 pub fn tick(t: u64) {
     ledger_tick(t)
+    flip(t)
     // # Safety: CPU 0's tick alone writes it.
     if unsafe { fired } || t < 300 || how_many() == 0 || ipi.count() < 2 {
         return
     }
     unsafe { fired = true }
     fire(how_many())
+}
+
+/// px166 (stage 3a, unit 1): `pax.rankflip`, at CPU 0's tick under the kernel lock: once, a second in, console and then
+/// net taken (out of rank: net's is below console's) and both given back.
+fn flip(t: u64) {
+    // # Safety: written once at the boot (`start`); `flipped` by CPU 0's tick alone.
+    if !unsafe { rankflip } || unsafe { flipped } || t < 100 {
+        return
+    }
+    unsafe { flipped = true }
+    let a = sync.acquire(sync.console())
+    let b = sync.acquire(sync.net())
+    sync.release(sync.net(), b)
+    sync.release(sync.console(), a)
 }
 
 /// Op 3 to application processors 1 .. k, without waiting for an answer.
