@@ -66,7 +66,7 @@ int main(void) {
     if (code) rc = 2;
     if (put("\033[?1049l\033[?25h")) rc = 2;
     if (tcsetattr(0, TCSANOW, &saved)) rc = 2;
-    snprintf(b, sizeof b, "\r\nKLOG-DONE child=%ld status=%d\r\n", (long)child, code);
+    snprintf(b, sizeof b, "\nKLOG-DONE child=%ld status=%d\n", (long)child, code);
     if (put(b)) rc = 2;
     return rc;
 }
