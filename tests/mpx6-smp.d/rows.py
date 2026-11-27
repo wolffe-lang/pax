@@ -202,13 +202,13 @@ BAD = re.compile(r'^(PANIC .*|cpus: cpu \d+ stopped.*|.*running on two processor
 ROWS = ['SMP-ACTIVE', 'SMP-RUN', 'SMP-TLB', 'SMP-SIGNAL', 'SMP-EXIT', 'SMP-WAIT', 'SMP-LOCK', 'SMP-END', 'SMP-NOSMP',
         'SMP-ONE', 'SMP-CAP', 'SMP-DEAD', 'SMP-PARK', 'SMP-END-NOOFF', 'SMP-PANIC-STOP', 'SMP-PANIC-TWO',
         'SMP-TESTWORDS', 'SMP-REFUSE', 'SMP-BUILD', 'SMP-TRACE-EXIT', 'SMP-TRACE-INT', 'SMP-STOPWRITE',
-        'SMP-EXEC-LEAVE', 'SMP-SHARE']
+        'SMP-EXEC-LEAVE', 'SMP-SHARE', 'KLOCK-LEDGER', 'KLOCK-WAIT', 'KLOCK-HOLDS', 'SMP-BUILD-COST']
 
 ap = argparse.ArgumentParser()
 ap.add_argument('serial')
 ap.add_argument('--kind', required=True, choices=('rows', 'stress', 'end-halt', 'end-poweroff', 'end-reboot', 'nosmp',
                                                   'one', 'cap2', 'cap1', 'build', 'end-nooff', 'panic', 'panic2',
-                                                  'testwords', 'trace', 'leave', 'share'))
+                                                  'testwords', 'trace', 'leave', 'share', 'ledger', 'build-cost'))
 ap.add_argument('--smp', required=True, type=int)
 ap.add_argument('--cap', type=int)
 ap.add_argument('--boot', type=int)
@@ -223,7 +223,7 @@ a = ap.parse_args()
 N = a.smp
 text = pathlib.Path(a.serial).read_text(errors='replace').replace('\r', '')
 tag = f'smp={N}' + (f' cap={a.cap}' if a.cap else '') + (f' boot={a.boot}' if a.boot is not None else '') + \
-    ('' if a.kind in ('rows', 'stress', 'build') else f' {a.kind}')
+    ('' if a.kind in ('rows', 'stress', 'build', 'build-cost') else f' {a.kind}')
 red = []
 
 
@@ -298,6 +298,66 @@ def kv(s, key):
 
 def cpu(v):
     return v if isinstance(v, int) and v >= 0 else None
+
+
+# --- px166 (stage 3): the kernel lock's ledger, /proc/pax-klock as the test kernel writes it ------------------------
+# `klock-ledger tsc T`, then per processor `cpu I spin S fresh F contended C hold H closed K longest L key K`, then per
+# key `key NAME plain C N switched C N kthread C N spin C N` (cycles and counts; every counter monotonic, so a window
+# is the difference of two reads). The shipped kernel writes `klock-ledger: not a test kernel` alone.
+def klock_parse(body):
+    m = re.search(r'^klock-ledger tsc (\d+)$', body, re.M)
+    if not m:
+        return None
+    cpus = {int(mm[1]): dict(spin=int(mm[2]), fresh=int(mm[3]), cont=int(mm[4]), hold=int(mm[5]), closed=int(mm[6]),
+                             longest=int(mm[7]), lkey=mm[8])
+            for mm in re.finditer(r'^cpu (\d+) spin (\d+) fresh (\d+) contended (\d+) hold (\d+) closed (\d+) '
+                                  r'longest (\d+) key (\S+)$', body, re.M)}
+    keys = {}
+    for mm in re.finditer(r'^key (\S+) plain (\d+) (\d+) switched (\d+) (\d+) kthread (\d+) (\d+) spin (\d+) (\d+)$',
+                          body, re.M):
+        v = [int(x) for x in mm.groups()[1:]]
+        keys[mm[1]] = dict(plain=(v[0], v[1]), switched=(v[2], v[3]), kthread=(v[4], v[5]), spin=(v[6], v[7]))
+    return dict(tsc=int(m[1]), cpus=cpus, keys=keys)
+
+
+def klock_delta(b, e):
+    # the window between two reads: the processors' and keys' counters subtracted (a key first seen at `e` counts
+    # from 0); each key's holds summed over its three kinds as `hold` (cycles, count)
+    z = dict(plain=(0, 0), switched=(0, 0), kthread=(0, 0), spin=(0, 0))
+    cpus = {i: {k: c[k] - b['cpus'].get(i, {}).get(k, 0) for k in ('spin', 'fresh', 'cont', 'hold', 'closed')}
+            for i, c in e['cpus'].items()}
+    keys = {}
+    for name, k in e['keys'].items():
+        o = b['keys'].get(name, z)
+        d = {kind: (k[kind][0] - o[kind][0], k[kind][1] - o[kind][1]) for kind in z}
+        d['hold'] = tuple(sum(d[kind][x] for kind in ('plain', 'switched', 'kthread')) for x in (0, 1))
+        keys[name] = d
+    return dict(wall=e['tsc'] - b['tsc'], cpus=cpus, keys=keys)
+
+
+def klock_wait(d):
+    # each processor's spin over the window's wall, in whole percent
+    return [round(100 * d['cpus'][i]['spin'] / d['wall']) if d['wall'] else 0 for i in sorted(d['cpus'])]
+
+
+def klock_holds(d, hz, top=6):
+    # the lock held (all processors' holds over the window's wall); each key's share of the holds, its mean and its
+    # count, the largest first; the switched and kernel-thread parts said where they are
+    tot = sum(c['hold'] for c in d['cpus'].values())
+    out = [f'the lock held {tot / d["wall"]:.2f} of the window' if d['wall'] else 'no window']
+    for name, k in sorted(d['keys'].items(), key=lambda kv: -kv[1]['hold'][0])[:top]:
+        c, n = k['hold']
+        if not c:
+            continue
+        mean = f'{c / n / hz * 1e6:.1f} us' if n and hz else '-'
+        parts = ''.join(f', {kind} {k[kind][0] / c:.2f}' for kind in ('switched', 'kthread') if k[kind][0])
+        out.append(f'{name} {c / tot:.2f} of the holds, {n} at {mean}{parts}' if tot else name)
+    return out
+
+
+def tsc_hz():
+    m = re.search(r'^(?:SMP-PROBE tsc-hz|BENCH TSC-HZ) (\d+)', text, re.M)
+    return int(m[1]) if m else 0
 
 
 def bad_lines(ending=False):
@@ -842,6 +902,12 @@ elif a.kind == 'testwords':
             why.append(f'no `testwords: {w} ignored (not a test kernel)` line')
     if a.qemu_status != 0:
         why.append(f'QEMU ended with status {a.qemu_status} (0: the machine powered off)')
+    # px166 (stage 3): the shipped kernel's /proc/pax-klock is its one line; a ledger there is the instrument shipped
+    kf = re.search(r'^SMP-KLOCKFILE begin\n(.*?)^SMP-KLOCKFILE end$', text, re.M | re.S)
+    if not kf:
+        why.append('no /proc/pax-klock read (the probe\'s SMP-KLOCKFILE block)')
+    elif kf[1] != 'klock-ledger: not a test kernel\n':
+        why.append(f'/proc/pax-klock says {kf[1].splitlines()[:2]}, not the one line `klock-ledger: not a test kernel`')
     # the test op and test panic by name, and the test op's static `fired`, which survives the release tier's inlining
     test = sorted(n for n in symbols() if n.startswith(('_Wtestwords.fire$', '_Wtestwords.test_panic$', '_Wtestwords.fired.')))
     if test:
@@ -852,7 +918,8 @@ elif a.kind == 'testwords':
     if why:
         fail('SMP-TESTWORDS', why[0], why[1:])
     else:
-        ok('SMP-TESTWORDS', 'both test words ignored by name, powered off, no test symbol in the shipped ELF')
+        ok('SMP-TESTWORDS', 'both test words ignored by name, powered off, no test symbol in the shipped ELF, '
+                            '/proc/pax-klock its one line')
 elif a.kind == 'leave':
     # SMP-EXEC-LEAVE: a test kernel given `pax.slowleave=MS` (kernel/testwords) holds each application processor that
     # comes in from ring 3 with its thread ended in place, the lock given back, before it switches that thread off: what
@@ -1239,6 +1306,139 @@ elif a.kind == 'build':
         fail('SMP-BUILD', why[0], why[1:] + [fig])
     else:
         ok('SMP-BUILD', fig + ('' if a.scaling == 'gate' or N == 1 else '; the 1.6 bound is the scaling hold\'s (reported)'))
+    # px166 (stage 3): on the test kernel, bench reads /proc/pax-klock before and after each batch; each job count's
+    # three windows summed, printed (KLOCK-WAIT, KLOCK-HOLDS), never gated here (KLOCK-LEDGER is the ledger kind's)
+    snaps = {}
+    for mm in re.finditer(r'^BENCH KLOCK round=(\d+) jobs=(\d+) at=(before|after) begin\n(.*?)^BENCH KLOCK round=\1 '
+                          r'jobs=\2 at=\3 end$', text, re.M | re.S):
+        snaps[(int(mm[1]), int(mm[2]), mm[3])] = klock_parse(mm[4])
+    if snaps:
+        hz, waits, holds = tsc_hz(), [], []
+        for j in sorted({k[1] for k in snaps}):
+            ds = [klock_delta(snaps[(r, j, 'before')], snaps[(r, j, 'after')]) for r in range(3)
+                  if snaps.get((r, j, 'before')) and snaps.get((r, j, 'after'))]
+            if not ds:
+                continue
+            tot = dict(wall=sum(d['wall'] for d in ds), cpus={}, keys={})
+            for d in ds:
+                for i, c in d['cpus'].items():
+                    t = tot['cpus'].setdefault(i, dict(spin=0, fresh=0, cont=0, hold=0, closed=0))
+                    for k in t:
+                        t[k] += c[k]
+                for name, k in d['keys'].items():
+                    t = tot['keys'].setdefault(name, {kind: (0, 0) for kind in ('plain', 'switched', 'kthread', 'spin', 'hold')})
+                    for kind in t:
+                        t[kind] = (t[kind][0] + k[kind][0], t[kind][1] + k[kind][1])
+            word = {1: 'one job', 2: 'two jobs', 3: 'three jobs', 4: 'four jobs'}.get(j, f'{j} jobs')
+            waits.append(f'{word}: ' + ("spin over the batches' wall by processor " if not waits else '') +
+                         f'{klock_wait(tot)}%')
+            holds.append(f'{word}: ' + '; '.join(klock_holds(tot, hz)))
+        ok('KLOCK-WAIT', '; '.join(waits) + ' (printed)')
+        ok('KLOCK-HOLDS', ' | '.join(holds) + ' (printed)')
+
+elif a.kind == 'ledger':
+    # px166 (stage 3): KLOCK-LEDGER, the instrument's own truth in a test kernel. The probe reads /proc/pax-klock, runs
+    # a load on every processor (system calls, a pipe's writes and reads, page faults) and reads it again; the boot's
+    # command line has `pax.klockhold=20` (CPU 0's tick holds the lock 20 ms once a second under the key `test`).
+    # (a) closure: at each read every processor's holds closed equal its fresh acquisitions but for the reader's own
+    #     open hold (exactly one processor one short), and over the window the keys' holds sum to the processors';
+    # (b) exclusion: the processors' holds over the window at most its wall plus 1% (one holder at a time);
+    # (c) the known hold: the window's seconds, give or take one, as `test` holds of 20 ms within 5% each (gated where
+    #     the timed bounds are; under TCG the hold's length follows the emulated TSC, so it is printed), and CPU 0's
+    #     longest hold at least 19 ms.
+    # KLOCK-WAIT (each processor's spin over the wall) and KLOCK-HOLDS (the keys' shares) are printed.
+    why, said = [], []
+    reads = {int(mm[1]): mm[2] for mm in re.finditer(r'^SMP-LEDGER read (\d+) begin\n(.*?)^SMP-LEDGER read \1 end$',
+                                                       text, re.M | re.S)}
+    done = 'SMP-LEDGER done' in text
+    hz = tsc_hz()
+    parsed = {r: klock_parse(b) for r, b in reads.items()}
+    if len(reads) != 2 or not done:
+        why.append(f'{len(reads)} of 2 reads of /proc/pax-klock' + ('' if done else ', no `SMP-LEDGER done`'))
+    elif not all(parsed.values()):
+        why.append(f'no ledger in /proc/pax-klock: {reads[0].splitlines()[:1]} (not a test kernel?)')
+    else:
+        for r in (0, 1):
+            short = {i: c['fresh'] - c['closed'] for i, c in parsed[r]['cpus'].items()}
+            off = [i for i, k in short.items() if k not in (0, 1)]
+            if off or sum(short.values()) != 1:
+                i = off[0] if off else min(short)
+                c = parsed[r]['cpus'][i]
+                why.append(f'(a) closure: read {r}: cpu {i} took {c["fresh"]} and closed {c["closed"]}; '
+                           f'{sum(short.values())} holds open in all, want the reader\'s one')
+        d = klock_delta(parsed[0], parsed[1])
+        kh = sum(k['hold'][0] for k in d['keys'].values())
+        ch = sum(c['hold'] for c in d['cpus'].values())
+        kn = sum(k['hold'][1] for k in d['keys'].values())
+        cn = sum(c['closed'] for c in d['cpus'].values())
+        if kh != ch or kn != cn:
+            why.append(f'(a) closure: the keys\' holds {kh} cycles in {kn} against the processors\' {ch} in {cn}')
+        use = ch / d['wall'] if d['wall'] else 0
+        if use > 1.01:
+            why.append(f'(b) exclusion: the processors held the lock {use:.2f} of the window, more than one holder')
+        secs = d['wall'] / hz if hz else 0
+        t = d['keys'].get('test', dict(hold=(0, 0)))['hold']
+        lo, hi = max(int(secs) - 1, 0), int(secs) + 1
+        each = t[0] / t[1] / hz * 1000 if t[1] and hz else 0
+        longest = parsed[1]['cpus'].get(0, {}).get('longest', 0) / hz * 1000 if hz else 0
+        hold_txt = f'the known hold {t[1]} times, {each:.1f} ms each'
+        if not lo <= t[1] <= hi:
+            why.append(f'(c) the known hold: {t[1]} of {lo}-{hi} `test` holds counted in the {secs:.1f} s window')
+        elif not 19.0 <= each <= 21.0 or longest < 19.0:
+            if TIMED:
+                why.append(f'(c) the known hold: {t[1]} of {lo}-{hi}, {each:.1f} ms each (want 19.0-21.0), cpu 0\'s '
+                           f'longest {longest:.1f} ms')
+            else:
+                hold_txt += f' (printed: {accel() or "no accelerator said"})'
+        said.append(f'(a) every hold closed but the reader\'s own; (b) the processors held the lock {use:.2f} of the '
+                    f'{d["wall"] / hz * 1000:.0f} ms window; (c) {hold_txt}')
+        ok('KLOCK-WAIT', f"spin over the window's wall by processor {klock_wait(d)}% (printed)")
+        ok('KLOCK-HOLDS', '; '.join(klock_holds(d, hz)) + ' (printed)')
+    bad = bad_lines()
+    if bad:
+        why.append(f'the kernel said: {bad[:3]}')
+    if why:
+        fail('KLOCK-LEDGER', '; '.join(why[:4]), why[4:])
+    else:
+        ok('KLOCK-LEDGER', said[0])
+elif a.kind == 'build-cost':
+    # px166 (stage 3): the shipped stub calls' cost. The build image booted with the head's shipped kernel and with
+    # trunk's in turn, three boots each at four processors (tests/mpx6-smp's SMP_BUILD_AGAINST); the serial is a list,
+    # `head LOG` / `trunk LOG`, each LOG's host times beside it (LOG.times). Per kernel, the least of its boots' one-job
+    # and four-job walls (each boot's own least of three); the noise, each kernel's spread over its boots (the largest
+    # over the least, less one), the larger of the two; whether the head is slower than trunk by more than that noise.
+    # Printed, never gated: the falsifier is read, not enforced.
+    why = []
+    base = pathlib.Path(a.serial).parent
+    walls = {'head': [], 'trunk': []}
+    for ln in text.splitlines():
+        m = re.fullmatch(r'(head|trunk) (\S+)', ln.strip())
+        if not m:
+            continue
+        tp = base / f'{m[2]}.times'
+        tm = json.loads(tp.read_text()) if tp.exists() else []
+        one = [t for _r, j, t in tm if j == 1]
+        four = [t for _r, j, t in tm if j == 4]
+        if len(one) != 3 or len(four) != 3:
+            why.append(f'{m[2]}: no batch figures ({len(one)} of one job, {len(four)} of four)')
+            continue
+        walls[m[1]].append((min(one), min(four)))
+    if not why and (len(walls['head']) != 3 or len(walls['trunk']) != 3):
+        why.append(f'{len(walls["head"])} head and {len(walls["trunk"])} trunk boots, want 3 of each')
+    if why:
+        fail('SMP-BUILD-COST', '; '.join(why[:3]), why[3:])
+    else:
+        best = {w: (min(x[0] for x in v), min(x[1] for x in v)) for w, v in walls.items()}
+        spread = {w: (max(x[0] for x in v) / min(x[0] for x in v) - 1, max(x[1] for x in v) / min(x[1] for x in v) - 1)
+                  for w, v in walls.items()}
+        noise = (max(spread['head'][0], spread['trunk'][0]), max(spread['head'][1], spread['trunk'][1]))
+        slow = (best['head'][0] / best['trunk'][0] - 1, best['head'][1] / best['trunk'][1] - 1)
+        verdict = ('within the noise' if slow[0] <= noise[0] and slow[1] <= noise[1] else
+                   f'OUTSIDE the noise: the head slower by {100 * slow[0]:.0f}% at one job, {100 * slow[1]:.0f}% at four')
+        ok('SMP-BUILD-COST', f'one job head {best["head"][0] * 1000:.0f} ms trunk {best["trunk"][0] * 1000:.0f} ms, four jobs '
+                             f'head {best["head"][1] * 1000:.0f} ms trunk {best["trunk"][1] * 1000:.0f} ms (each the least of '
+                             f'three boots); noise one job {100 * noise[0]:.0f}%, four jobs {100 * noise[1]:.0f}% (the larger '
+                             f'spread); {verdict} (printed)')
 
 # Every kind: the kernel lock's door (kernel/interrupts' `pax_interrupt`) panics when a processor comes in from
 # ring 3 still holding the lock; that line, verbatim, is SMP-KLOCK's red (the lock plant's name). Silent when green.
