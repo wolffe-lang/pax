@@ -127,6 +127,9 @@ BASE = {
     'kernel/procfs/procfs.lu': 'pub const ENTRIES: u64 = 69\npub const NONE: u64 = 69\n\npub fn fixed(e: u64) -> bool {\n'
                                '    e < PIDDIR || e == CMDLINE\n}\n\npub fn name(e: u64) -> str {\n    if e == CMDLINE { return "cmdline" }\n    ""\n}\n',
     'kernel/sched/sched.lu': 'pub fn run_next() {\n    switch()\n}\n',
+    'kernel/sync/sync.lu': 'extern "c" fn pax_pause()\n\npub fn acquire(lock: u64) -> u64 {\n    let saved = irq_save()\n'
+                           '    spin(lock)\n    saved\n}\n\npub fn release(lock: u64, saved: u64) {\n    store(lock)\n'
+                           '    irq_restore(saved)\n}\n',
 }
 HOOKED = {
     'kernel/interrupts/interrupts.lu': 'fn pax_interrupt(f: *Frame) -> *Frame {\n    // the ledger: the TSC before the take\n'
@@ -137,6 +140,11 @@ HOOKED = {
     'kernel/procfs/procfs.lu': 'pub const ENTRIES: u64 = 70\npub const NONE: u64 = 70\npub const PAXKLOCK: u64 = 69\n\npub fn fixed(e: u64) -> bool {\n'
                                '    e < PIDDIR || e == CMDLINE || e == PAXKLOCK\n}\n\npub fn name(e: u64) -> str {\n    if e == CMDLINE { return "cmdline" }\n'
                                '    if e == PAXKLOCK { return "pax-klock" }\n    ""\n}\n',
+    # px166 (stage 3a, unit 1): kernel/sync's hooks into the test build's lockled
+    'kernel/sync/sync.lu': '// lockled: each word\'s acquisitions and ranks\nuse lockled\n\nextern "c" fn pax_pause()\n\n'
+                           'pub fn acquire(lock: u64) -> u64 {\n    let saved = irq_save()\n    let t0 = lockled.now()\n'
+                           '    spin(lock)\n    lockled.took(lock, t0)\n    saved\n}\n\npub fn release(lock: u64, saved: u64) {\n'
+                           '    lockled.gave(lock)\n    store(lock)\n    irq_restore(saved)\n}\n',
 }
 
 
@@ -193,6 +201,17 @@ def selftest():
         run('kernel/ names /proc/pax-klock elsewhere: red', BASE, HOOKED, True, False,
             kernel={**BASE, 'kernel/sched/sched.lu': 'pub fn run_next() {\n    switch() // pax-klock\n}\n'},
             says=r'kernel/sched/sched\.lu:2')
+        # px166 (stage 3a, unit 1): kernel/sync's hooks, and the names of the lock ranks
+        run('the patch takes a second lock in kernel/sync: red', BASE, {**HOOKED, 'kernel/sync/sync.lu': HOOKED['kernel/sync/sync.lu'].replace(
+            '    lockled.took(lock, t0)\n', '    lockled.took(lock, t0)\n    spin(lock + 8)\n')}, False, True, says=r"not of the ledger's forms")
+        run('the patch masks interrupts in kernel/sync: red', BASE, {**HOOKED, 'kernel/sync/sync.lu': HOOKED['kernel/sync/sync.lu'].replace(
+            '    lockled.gave(lock)\n', '    lockled.gave(lock)\n    pax_cli()\n')}, False, True, says=r"not of the ledger's forms")
+        run('the patch moves the release store: red', BASE, {**HOOKED, 'kernel/sync/sync.lu': HOOKED['kernel/sync/sync.lu'].replace(
+            '    store(lock)\n    irq_restore(saved)\n', '    irq_restore(saved)\n')}, False, True, says=r'a removed line not given back')
+        for word in ('lockled', 'smpdebug', 'rankflip', 'LOCK-RANK'):
+            run(f'kernel/ names {word}: red', BASE, HOOKED, True, False,
+                kernel={**BASE, 'kernel/sched/sched.lu': f'pub fn run_next() {{\n    switch() // {word}\n}}\n'},
+                says=r'kernel/sched/sched\.lu:2')
     bad = cases.count(False)
     print(f'ledger-patch-selftest: {len(cases) - bad} of {len(cases)} as wanted')
     return 1 if bad else 0
