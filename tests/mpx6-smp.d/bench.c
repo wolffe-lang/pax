@@ -5,6 +5,10 @@
  * (tests/mpx6-smp.d/build.py, the census's method); the END line also carries the guest's own wall from
  * the TSC (calibrated against CLOCK_MONOTONIC over 300 ms), the children's CPU time and peak RSS.
  * Every pack and index is named with its stored trailer; rows.py holds them to the host oracle.
+ * On a test kernel (tests/mpx6-smp's SMP_BUILD_KERNEL=test) /proc/pax-klock holds the kernel lock's ledger: it is read
+ * just before each batch's BEGIN line and just after its END line, and both reads are printed after the END line
+ * (BENCH KLOCK blocks), outside the host's timing; rows.py prints the batches' spin and holds. On a shipped kernel the
+ * file is one line and nothing more is printed.
  *
  *   /bin/bench [JOBS]          (4 by default; the fixture holds batches of 1 and 4)
  */
@@ -57,6 +61,26 @@ static void identity(const char *dir) {
     closedir(d);
     if (files != 2) fail("pack pair");
 }
+static char kl_before[16384], kl_after[16384];
+static int klock_read(char *b) {
+    int fd = open("/proc/pax-klock", O_RDONLY);
+    size_t n = 0;
+    if (fd < 0) { b[0] = 0; return 0; }
+    for (;;) {
+        ssize_t k = read(fd, b + n, sizeof kl_before - 1 - n);
+        if (k <= 0) break;
+        n += (size_t)k;
+        if (n >= sizeof kl_before - 1) break;
+    }
+    close(fd);
+    b[n] = 0;
+    return strncmp(b, "klock-ledger tsc ", 17) == 0;
+}
+static void klock_print(int round, int j, const char *at, const char *b) {
+    printf("BENCH KLOCK round=%d jobs=%d at=%s begin\n", round, j, at);
+    fputs(b, stdout);
+    printf("BENCH KLOCK round=%d jobs=%d at=%s end\n", round, j, at);
+}
 static void active(void) {
     char b[4096];
     int fd = open("/proc/pax-cpus", O_RDONLY);
@@ -82,6 +106,7 @@ int main(int argc, char **argv) {
         for (int j = 1; j <= jobs; j += jobs - 1) {
             pid_t p[4];
             char dirs[4][64];
+            int ledger = klock_read(kl_before);
             printf("BENCH BEGIN round=%d jobs=%d\n", round, j);
             unsigned long s = rdtsc();
             for (int i = 0; i < j; i++) {
@@ -101,6 +126,10 @@ int main(int argc, char **argv) {
             }
             unsigned long wall = (rdtsc() - s) / (tsc_hz / 1000000);
             printf("BENCH END round=%d jobs=%d user_us=%ld sys_us=%ld maxrss_kib=%ld guest_wall_us=%lu\n", round, j, user, sys, rss, wall);
+            if (ledger && klock_read(kl_after)) {
+                klock_print(round, j, "before", kl_before);
+                klock_print(round, j, "after", kl_after);
+            }
             for (int i = 0; i < j; i++) identity(dirs[i]);
             if (j == jobs) break;
         }
