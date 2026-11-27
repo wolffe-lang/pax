@@ -302,10 +302,10 @@ def cpu(v):
 
 # --- px166 (stage 3): the kernel lock's ledger, /proc/pax-klock as the test kernel writes it ------------------------
 # `klock-ledger tsc T`, then per processor `cpu I spin S fresh F contended C hold H closed K longest L key K`, then per
-# key `key NAME hold C N switched C kthread C spin C N` (its holds' cycles and count, the cycles of those in which the
-# processor's thread changed or a kernel thread ran, its entries' spin cycles and takes; every counter monotonic, so a
-# window is the difference of two reads; `more N` for keys the page could not hold). The shipped kernel writes
-# `klock-ledger: not a test kernel` alone.
+# key `key NAME hold C N spin C N longest L` and, where either is not 0, ` switched C kthread C` (its holds' cycles and
+# count, its entries' spin cycles and takes, its longest hold since the boot, the cycles of the holds in which the
+# processor's thread changed or a kernel thread ran; every counter monotonic, so a window is the difference of two
+# reads; `more N` for keys the page could not hold). The shipped kernel has no such file (SMP-TESTWORDS).
 def klock_parse(body):
     m = re.search(r'^klock-ledger tsc (\d+)$', body, re.M)
     if not m:
