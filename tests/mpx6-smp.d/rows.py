@@ -1360,7 +1360,8 @@ elif a.kind == 'ledger':
     # (b) exclusion: the processors' holds over the window at most its wall plus 1% (one holder at a time);
     # (c) the known hold: the window's seconds, give or take one, as `test` holds of 20 ms within 5% each (gated where
     #     the timed bounds are; under TCG the hold's length follows the emulated TSC, so it is printed), and CPU 0's
-    #     longest hold at least 19 ms.
+    #     longest hold at least 19 ms. That longest leaves kmain's first hold (`boot`, 70-350 ms in the boots read) out:
+    #     a longest keyed `boot` is red anywhere, since it would carry the clause whatever the known hold measured.
     # KLOCK-WAIT (each processor's spin over the wall) and KLOCK-HOLDS (the keys' shares) are printed.
     why, said = [], []
     reads = {int(mm[1]): mm[2] for mm in re.finditer(r'^SMP-LEDGER read (\d+) begin\n(.*?)^SMP-LEDGER read \1 end$',
@@ -1397,7 +1398,10 @@ elif a.kind == 'ledger':
         each = t[0] / t[1] / hz * 1000 if t[1] and hz else 0
         longest = parsed[1]['cpus'].get(0, {}).get('longest', 0) / hz * 1000 if hz else 0
         hold_txt = f'the known hold {t[1]} times, {each:.1f} ms each'
-        if not lo <= t[1] <= hi:
+        if parsed[1]['cpus'].get(0, {}).get('lkey') == 'boot':
+            why.append(f"(c) cpu 0's longest hold is kmain's first (`boot`, {longest:.1f} ms), which the longest must "
+                       f'leave out')
+        elif not lo <= t[1] <= hi:
             why.append(f'(c) the known hold: {t[1]} of {lo}-{hi} `test` holds counted in the {secs:.1f} s window')
         elif not 19.0 <= each <= 21.0 or longest < 19.0:
             if TIMED:
