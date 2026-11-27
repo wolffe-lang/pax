@@ -9,6 +9,12 @@ mkdir -p "$out"
 : > "$out/ps2-session.log"
 log=$out/serial.log
 sock=$out/monitor.sock
+# This is a visible-content witness, like the shipped quiet boot, not
+# Y5's verbose syscall diagnostic. Keep the same ELF and root archive;
+# otherwise an asynchronous child-exit log can overwrite a document row.
+"$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs-quiet.conf" \
+    --add "$images/session.cpio" initramfs.cpio "$images/$tier/kmain_console.elf" \
+    "$out/session.iso" > "$out/image.log"
 rm -f "$sock"
 python3 -I "$PAX_ROOT/tools/ps2-session" --serial "$log" --monitor "$sock" \
     --keys "$PAX_ROOT/user/console/yew-features.keys" --out "$out" --timeout 300 > "$out/keys.log" 2>&1 &
@@ -17,7 +23,7 @@ boot=0; typed=0
 "$PAX_ROOT/tools/qemu-halt" --firmware "$firmware" --serial "$log" --timeout 360 \
     --qemu -m --qemu 512M --qemu -monitor --qemu "unix:$sock,server=on,wait=off" \
     --elf "$images/$tier/kmain_console.elf" --marker 'halt|PANIC .*' \
-    "$images/$tier/session.iso" > "$out/halt.log" 2>&1 || boot=$?
+    "$out/session.iso" > "$out/halt.log" 2>&1 || boot=$?
 wait "$keys_pid" || typed=$?
 [ "$boot" = 0 ] && [ "$typed" = 0 ] || { cat "$out/keys.log" "$out/halt.log"; exit 1; }
 python3 -I "$PAX_ROOT/tests/mpx5-yew.d/features.py" "$log" "$out"
