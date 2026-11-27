@@ -315,11 +315,14 @@ def klock_parse(body):
             for mm in re.finditer(r'^cpu (\d+) spin (\d+) fresh (\d+) contended (\d+) hold (\d+) closed (\d+) '
                                   r'longest (\d+) key (\S+)$', body, re.M)}
     keys = {}
-    for mm in re.finditer(r'^key (\S+) hold (\d+) (\d+) switched (\d+) kthread (\d+) spin (\d+) (\d+)(?: longest (\d+))?$',
-                          body, re.M):
-        v = [int(x) for x in mm.groups()[1:7]]
-        keys[mm[1]] = dict(hold=(v[0], v[1]), switched=v[2], kthread=v[3], spin=(v[4], v[5]),
-                           longest=int(mm[8]) if mm[8] else None)
+    # a key line: its holds (cycles, count), its entries' spin (cycles, takes), its longest hold since the boot, then
+    # its switched and kernel-thread cycles when either is not 0; or, as the first test kernels wrote it, switched and
+    # kthread (always) before the spin and no longest
+    for mm in re.finditer(r'^key (\S+) hold (\d+) (\d+)(?: switched (\d+) kthread (\d+))? spin (\d+) (\d+)'
+                          r'(?: longest (\d+))?(?: switched (\d+) kthread (\d+))?$', body, re.M):
+        g = [int(x) if x else 0 for x in mm.groups()[1:]]
+        keys[mm[1]] = dict(hold=(g[0], g[1]), switched=g[2] + g[7], kthread=g[3] + g[8], spin=(g[4], g[5]),
+                           longest=g[6] if mm[8] else None)
     more = re.search(r'^more (\d+)$', body, re.M)
     return dict(tsc=int(m[1]), cpus=cpus, keys=keys, more=int(more[1]) if more else 0)
 
