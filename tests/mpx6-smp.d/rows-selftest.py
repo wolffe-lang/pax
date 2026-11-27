@@ -517,7 +517,16 @@ case('panic2: the two lines interleaved, each text whole', head('spin') + 'SMP-P
 case('panic2: the second panic printed in full (two owners)', head('spin') + P1 + P1.split('\n')[1] + '\n',
      ['--kind', 'panic2', '--smp', '4'], set(), {'SMP-PANIC-TWO'}, dumps=[halted] * 3)
 TW = 'testwords: pax.nopoweroff ignored (not a test kernel)\ntestwords: pax.panictest ignored (not a test kernel)\n'
+# px166 (stage 3, the lock's ledger): the probe reads /proc/pax-klock before the end; the shipped kernel's is one line
+KF = 'SMP-KLOCKFILE begin\nklock-ledger: not a test kernel\nSMP-KLOCKFILE end\n'
+TW += KF
 case('testwords green', head('end') + TW, ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], {'SMP-TESTWORDS'}, set())
+case('testwords: /proc/pax-klock never read', head('end') + TW.replace(KF, ''),
+     ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'}, why=r'no /proc/pax-klock read')
+case('testwords: the shipped kernel keeps a ledger', head('end') + TW.replace('klock-ledger: not a test kernel\n',
+     'klock-ledger tsc 1000\ncpu 0 spin 1 fresh 1 contended 0 hold 0 closed 0 longest 0 key boot\n'),
+     ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'},
+     why=r'/proc/pax-klock says .*klock-ledger tsc 1000.* not the one line')
 case('testwords: a word not reported', head('end') + TW.split('\n')[0] + '\n',
      ['--kind', 'testwords', '--smp', '4', '--qemu-status', '0'], set(), {'SMP-TESTWORDS'})
 case('testwords: the power-off skipped', head('end') + TW, ['--kind', 'testwords', '--smp', '4', '--qemu-status', '1'],
@@ -1034,6 +1043,145 @@ case('build at 1: the figures alone', build_text(1), ['--kind', 'build', '--smp'
 case('build with an output not the oracle\'s', build_text(4, wrong=True), ba + ['--scaling', 'report'], set(), {'SMP-BUILD'},
      files={'times': times(0.203, 0.264)})
 
+# --- px166 (stage 3, the lock's ledger): the ledger kind, the build batches' snapshots, SMP-BUILD-COST ---------------
+# /proc/pax-klock as a test kernel writes it: the TSC at the read; per processor its spin, fresh acquisitions, contended
+# ones, hold cycles, holds closed and longest hold with its key; per key the count and cycles of each kind of hold and
+# of its entries' spin. HZ is the probe's TSC rate (head()'s 3 GHz).
+HZ = 3000000000
+
+
+def klock(tsc, cpus, keys):
+    t = f'klock-ledger tsc {tsc}\n'
+    for i, c in enumerate(cpus):
+        t += (f'cpu {i} spin {c["spin"]} fresh {c["fresh"]} contended {c.get("cont", 0)} hold {c["hold"]} closed '
+              f'{c["closed"]} longest {c.get("longest", 0)} key {c.get("lkey", "boot")}\n')
+    for name, k in keys.items():
+        pl, sw, kt, sp = k
+        t += (f'key {name} plain {pl[0]} {pl[1]} switched {sw[0]} {sw[1]} kthread {kt[0]} {kt[1]} '
+              f'spin {sp[0]} {sp[1]}\n')
+    return t
+
+
+def ledger_snaps(n, secs=3.0, reader=(0, 1), spin=0.33, hold=0.15, test=(3, 0.020), drop=None, extra=0):
+    # two reads `secs` apart: each processor spins `spin` of the window and holds `hold` of it; the holds split over
+    # keys (sys:1 half, trap:14 a third, vec:32 the rest less the known hold `test` = (count, seconds each)); `reader`
+    # names the processor each read ran on (its own hold open); `drop` = (cpu, k) closes k fewer holds there at the
+    # second read; `extra` adds that many cycles to the keys' holds at the second read (they no longer sum)
+    w = int(secs * HZ)
+    snaps = []
+    for r in (0, 1):
+        tsc = 10 ** 9 + r * w
+        cpus = []
+        for i in range(n):
+            fresh = 1000 + r * 50000
+            closed = fresh - (1 if i == reader[r] else 0) - (drop[1] if drop and r == 1 and i == drop[0] else 0)
+            cpus.append(dict(spin=int(r * spin * w), fresh=fresh, cont=r * 9000, hold=int(r * hold * w), closed=closed,
+                             longest=int(test[1] * HZ * 1.02) if (i == 0 and test[0]) else 400000,
+                             lkey='test' if (i == 0 and test[0]) else 'sys:1'))
+        tot = sum(c['hold'] for c in cpus)
+        tc = int(r * test[0] * test[1] * HZ)
+        # the counts: every hold closed in the window under one key (the processors close 50000 each)
+        keys = {'sys:1': ((tot // 2, r * 25000 * n), (0, 0), (0, 0), (int(r * spin * w * n * 0.6), r * 25000 * n)),
+                'trap:14': ((tot // 3, r * 15000 * n), (0, 0), (0, 0), (int(r * spin * w * n * 0.4), r * 15000 * n)),
+                'vec:32': ((tot - tot // 2 - tot // 3 - tc + (extra if r else 0), r * (10000 * n - test[0])), (0, 0),
+                           (0, 0), (0, 0))}
+        if test[0]:
+            keys['test'] = ((tc, r * test[0]), (0, 0), (0, 0), (0, 0))
+        snaps.append(klock(tsc, cpus, keys))
+    return snaps
+
+
+def ledger_text(n, snaps=None, secs=3.0, done=True, reads=2, **kw):
+    p = proc(n)
+    snaps = snaps or ledger_snaps(n, secs=secs, **kw)
+    t = head('ledger') + block('start', p) + active_line(n)
+    for r in range(reads):
+        t += f'SMP-LEDGER read {r} begin\n{snaps[r]}SMP-LEDGER read {r} end\n'
+        if r == 0:
+            t += f'SMP-LEDGER load workers {n} ms {int(secs * 1000)}\n'
+    t += 'SMP-LEDGER done\n' if done else ''
+    return t + block('end', p) + tail()
+
+
+LG4 = ['--kind', 'ledger', '--smp', '4', '--host-cpus', '6']
+LG2 = ['--kind', 'ledger', '--smp', '2', '--host-cpus', '6']
+LEDGER3 = {'KLOCK-LEDGER', 'KLOCK-WAIT', 'KLOCK-HOLDS'}
+case('ledger at 4: closure, exclusion and the known hold: green, the spin and the holds printed', ledger_text(4), LG4,
+     LEDGER3, set(), says=r'^PASS KLOCK-LEDGER smp=4 ledger: \(a\) every hold closed but the reader\'s own; \(b\) the '
+     r'processors held the lock 0\.60 of the 3000 ms window; \(c\) the known hold 3 times, 20\.0 ms each')
+case('ledger at 2: green', ledger_text(2), LG2, LEDGER3, set())
+case('ledger: the spin printed by processor', ledger_text(4), LG4, LEDGER3, set(),
+     says=r"^PASS KLOCK-WAIT smp=4 ledger: spin over the window's wall by processor \[33, 33, 33, 33\]% \(printed\)")
+case('ledger: the holds printed by key, the largest first', ledger_text(4), LG4, LEDGER3, set(),
+     says=r'^PASS KLOCK-HOLDS smp=4 ledger: .*sys:1 0\.50 of the holds')
+case('ledger: the shipped kernel\'s line, no ledger: red', ledger_text(4, snaps=['klock-ledger: not a test kernel\n'] * 2),
+     LG4, set(), {'KLOCK-LEDGER'}, why=r'no ledger in /proc/pax-klock')
+case('ledger: a processor closes fewer holds than it took: red by (a)', ledger_text(4, drop=(2, 40000)), LG4,
+     {'KLOCK-WAIT', 'KLOCK-HOLDS'}, {'KLOCK-LEDGER'}, why=r'\(a\) closure: read 1: cpu 2 took 51000 and closed 11000')
+case('ledger: the keys\' holds do not sum to the processors\': red by (a)', ledger_text(4, extra=5000000), LG4,
+     {'KLOCK-WAIT', 'KLOCK-HOLDS'}, {'KLOCK-LEDGER'}, why=r"\(a\) closure: the keys' holds .* the processors' ")
+case('ledger: the processors held the lock longer than the window: red by (b)', ledger_text(4, hold=0.30), LG4,
+     {'KLOCK-WAIT', 'KLOCK-HOLDS'}, {'KLOCK-LEDGER'}, why=r'\(b\) exclusion: the processors held the lock 1\.20 of the window')
+case('ledger: no known hold counted: red by (c)', ledger_text(4, test=(0, 0.020)), LG4,
+     {'KLOCK-WAIT', 'KLOCK-HOLDS'}, {'KLOCK-LEDGER'}, why=r'\(c\) the known hold: 0 of 2-4')
+case('ledger: the known hold counted short (15 ms) under KVM: red by (c)', ledger_text(4, test=(3, 0.015)), LG4,
+     {'KLOCK-WAIT', 'KLOCK-HOLDS'}, {'KLOCK-LEDGER'}, why=r'\(c\) the known hold: 3 of 2-4, 15\.0 ms each \(want 19\.0-21\.0\)')
+case('ledger: the known hold counted short under TCG: printed, (a) and (b) still held', ledger_text(4, test=(3, 0.015)),
+     LG4, LEDGER3, set(), meta=TCG, says=r'^PASS KLOCK-LEDGER smp=4 ledger: .*15\.0 ms each \(printed: tcg\)')
+case('ledger: one read and no done: red', ledger_text(4, reads=1, done=False), LG4, set(), {'KLOCK-LEDGER'},
+     why=r'1 of 2 reads of /proc/pax-klock, no `SMP-LEDGER done`')
+
+
+def build_klock_text(active=4, jobs=4):
+    # the build boot with the test kernel: bench reads /proc/pax-klock before and after each batch
+    t = f'BENCH TSC-HZ {HZ}\nBENCH ACTIVE {active}\n'
+    base = 10 ** 9
+    for r in range(3):
+        for j in (1, jobs):
+            w = int((0.2 if j == 1 else 0.4) * HZ)
+            sp = 0.01 if j == 1 else 0.40
+            b = ledger_snaps(active, secs=w / HZ, spin=sp, hold=0.2, test=(0, 0))
+            t += f'BENCH KLOCK round={r} jobs={j} at=before begin\n{b[0]}BENCH KLOCK round={r} jobs={j} at=before end\n'
+            t += f'BENCH BEGIN round={r} jobs={j}\nBENCH END round={r} jobs={j} user_us=1 sys_us=1 maxrss_kib=44136 guest_wall_us=203000\n'
+            for k in range(j):
+                for name, d in EXPECTED.items():
+                    t += f'OUTPUT /bench/r{r}-j{j}-{k} {name} trailer-sha1={d}\n'
+            t += f'BENCH KLOCK round={r} jobs={j} at=after begin\n{b[1]}BENCH KLOCK round={r} jobs={j} at=after end\n'
+    return t + f'BENCH ACTIVE {active}\nBENCH DONE\nhalt\n'
+
+
+case('build at 4 on the test kernel: the batches\' spin and holds printed by job count', build_klock_text(),
+     ba + ['--scaling', 'report'], {'SMP-BUILD', 'KLOCK-WAIT', 'KLOCK-HOLDS'}, set(), files={'times': times(0.203, 0.386)},
+     says=r"^PASS KLOCK-WAIT smp=4: one job: spin over the batches' wall by processor \[1, 1, 1, 1\]%; four jobs: "
+          r'\[40, 40, 40, 40\]% \(printed\)')
+case('build at 4 on the shipped kernel: no ledger rows', build_text(4), ba + ['--scaling', 'report'], {'SMP-BUILD'}, set(),
+     files={'times': times(0.203, 0.386)})
+
+
+# SMP-BUILD-COST: the build image booted with the head's shipped kernel and with trunk's in turn, three each; the list
+# names each boot's serial (its .times beside it)
+def cost_files(head1, head4, trunk1, trunk4):
+    files = {'list': ''.join(f'{w} cost-{w}-{i}.log\n' for i in range(3) for w in ('head', 'trunk'))}
+    for w, (one, four) in (('head', (head1, head4)), ('trunk', (trunk1, trunk4))):
+        for i in range(3):
+            files[f'cost-{w}-{i}.log'] = build_text(4)
+            files[f'cost-{w}-{i}.log.times'] = json.dumps([[r, 1, one[i] + r * 0.01] for r in range(3)] +
+                                                          [[r, 4, four[i] + r * 0.01] for r in range(3)])
+    return files
+
+
+CA = ['--kind', 'build-cost', '--smp', '4', '--expected', 'expected.json']
+case('build cost: the head within the noise of trunk', 'see the list\n', CA, {'SMP-BUILD-COST'}, set(),
+     files={'extra': cost_files((0.181, 0.185, 0.190), (0.398, 0.405, 0.412), (0.180, 0.186, 0.190), (0.396, 0.404, 0.415))},
+     says=r'^PASS SMP-BUILD-COST smp=4: one job head 181 ms trunk 180 ms, four jobs head 398 ms trunk 396 ms \(each the '
+          r'least of three boots\); noise one job 6%, four jobs 5% \(the larger spread\); within the noise \(printed\)')
+case('build cost: the head slower than the noise allows: printed so', 'see the list\n', CA, {'SMP-BUILD-COST'}, set(),
+     files={'extra': cost_files((0.200, 0.203, 0.205), (0.450, 0.455, 0.460), (0.180, 0.182, 0.184), (0.396, 0.399, 0.402))},
+     says=r'^PASS SMP-BUILD-COST smp=4: .*OUTSIDE the noise: the head slower by 11% at one job, 14% at four \(printed\)')
+case('build cost: a boot missing its figures: red', 'see the list\n', CA, set(), {'SMP-BUILD-COST'},
+     files={'extra': {k: v for k, v in cost_files((0.18,) * 3, (0.4,) * 3, (0.18,) * 3, (0.4,) * 3).items()
+                      if k != 'cost-trunk-2.log.times'}}, why=r'cost-trunk-2\.log: no batch figures')
+
 bad = 0
 with tempfile.TemporaryDirectory() as td:
     td = pathlib.Path(td)
@@ -1050,6 +1198,12 @@ with tempfile.TemporaryDirectory() as td:
             (td / 'serial.log.meta').write_text(meta)
         if 'times' in files:
             (td / 'serial.log.times').write_text(files['times'])
+        for old in td.glob('cost-*'):  # px166: files beside the serial (SMP-BUILD-COST's boots), each case its own
+            old.unlink()
+        for k, v in files.get('extra', {}).items():
+            (td / k).write_text(v)
+        if 'list' in files.get('extra', {}):
+            s.write_text(files['extra']['list'])
         argv = [x if x != 'expected.json' else str(td / 'expected.json') for x in args]
         nm = td / 'nm.txt'
         if 'syms' in files:  # the ELF's symbols and these besides (a shipped kernel holding a test mark)
