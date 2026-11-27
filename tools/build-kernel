@@ -105,7 +105,9 @@ srcdir=$(cd "$(dirname "$src")" && pwd)
 # as ../boot/*.S and ../user/*, which must resolve from the copy as from kernel/. px166 (stage 3): the copy also
 # takes tests/mpx6-smp.d/ledger.patch, the kernel lock's ledger's hooks (kernel/interrupts, kernel/klock and
 # kernel/procfs), by `git apply` with its context exact and no repository above the copy in sight; the shipped
-# kernel is built from kernel/ as it is (tests/mpx6-smp's LEDGER-PATCH and KERNEL-NO-LEDGER).
+# kernel is built from kernel/ as it is (tests/mpx6-smp's LEDGER-PATCH and KERNEL-NO-LEDGER). px166 (stage 3a): the
+# copy also takes tests/mpx6-smp.d/lockled.lu as kernel/lockled/lockled.lu (each kernel/sync word's acquisitions and
+# ranks), which the patch's kernel/sync hooks call; kernel/ has no such module.
 if [ "$testwords" = 1 ]; then
     [ "$(basename "$srcdir")" = kernel ] || die "--test-words builds a kernel/ source"
     tw=$out/test-words
@@ -113,6 +115,8 @@ if [ "$testwords" = 1 ]; then
     ln -s "$(dirname "$srcdir")/boot" "$tw/boot"
     ln -s "$(dirname "$srcdir")/user" "$tw/user"
     cp "$PAX_ROOT/tests/mpx6-smp.d/testwords.lu" "$tw/kernel/testwords/testwords.lu"
+    [ ! -e "$tw/kernel/lockled" ] || die "--test-words: kernel/ already has a lockled (the test build's alone)"
+    mkdir "$tw/kernel/lockled" && cp "$PAX_ROOT/tests/mpx6-smp.d/lockled.lu" "$tw/kernel/lockled/lockled.lu"
     (cd "$tw" && GIT_CEILING_DIRECTORIES=$(cd "$out" && pwd -P) git apply "$PAX_ROOT/tests/mpx6-smp.d/ledger.patch") \
         || die "--test-words: tests/mpx6-smp.d/ledger.patch does not apply to kernel/ (tests/mpx6-smp's LEDGER-PATCH says where)"
     srcdir=$tw/kernel
