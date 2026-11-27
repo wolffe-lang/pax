@@ -919,12 +919,15 @@ elif a.kind == 'testwords':
             why.append(f'no `testwords: {w} ignored (not a test kernel)` line')
     if a.qemu_status != 0:
         why.append(f'QEMU ended with status {a.qemu_status} (0: the machine powered off)')
-    # px166 (stage 3): the shipped kernel's /proc/pax-klock is its one line; a ledger there is the instrument shipped
+    # px166 (stage 3): the lock's ledger and its /proc/pax-klock live in the test build alone; the shipped kernel has
+    # no such file, the probe's open failing with ENOENT. Any content there is the instrument shipped.
     kf = re.search(r'^SMP-KLOCKFILE begin\n(.*?)^SMP-KLOCKFILE end$', text, re.M | re.S)
     if not kf:
         why.append('no /proc/pax-klock read (the probe\'s SMP-KLOCKFILE block)')
-    elif kf[1] != 'klock-ledger: not a test kernel\n':
-        why.append(f'/proc/pax-klock says {kf[1].splitlines()[:2]}, not the one line `klock-ledger: not a test kernel`')
+    elif not re.fullmatch(r'open failed, errno \d+\n', kf[1]):
+        why.append(f'the shipped kernel has /proc/pax-klock: {kf[1].splitlines()[:2]}')
+    elif kf[1] != 'open failed, errno 2\n':
+        why.append(f'/proc/pax-klock: {kf[1].strip()}, not ENOENT')
     # the test op and test panic by name, and the test op's static `fired`, which survives the release tier's inlining
     test = sorted(n for n in symbols() if n.startswith(('_Wtestwords.fire$', '_Wtestwords.test_panic$', '_Wtestwords.fired.')))
     if test:
@@ -936,7 +939,7 @@ elif a.kind == 'testwords':
         fail('SMP-TESTWORDS', why[0], why[1:])
     else:
         ok('SMP-TESTWORDS', 'both test words ignored by name, powered off, no test symbol in the shipped ELF, '
-                            '/proc/pax-klock its one line')
+                            'no /proc/pax-klock (ENOENT)')
 elif a.kind == 'leave':
     # SMP-EXEC-LEAVE: a test kernel given `pax.slowleave=MS` (kernel/testwords) holds each application processor that
     # comes in from ring 3 with its thread ended in place, the lock given back, before it switches that thread off: what
