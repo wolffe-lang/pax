@@ -315,16 +315,18 @@ def klock_parse(body):
             for mm in re.finditer(r'^cpu (\d+) spin (\d+) fresh (\d+) contended (\d+) hold (\d+) closed (\d+) '
                                   r'longest (\d+) key (\S+)$', body, re.M)}
     keys = {}
-    for mm in re.finditer(r'^key (\S+) hold (\d+) (\d+) switched (\d+) kthread (\d+) spin (\d+) (\d+)$', body, re.M):
-        v = [int(x) for x in mm.groups()[1:]]
-        keys[mm[1]] = dict(hold=(v[0], v[1]), switched=v[2], kthread=v[3], spin=(v[4], v[5]))
+    for mm in re.finditer(r'^key (\S+) hold (\d+) (\d+) switched (\d+) kthread (\d+) spin (\d+) (\d+)(?: longest (\d+))?$',
+                          body, re.M):
+        v = [int(x) for x in mm.groups()[1:7]]
+        keys[mm[1]] = dict(hold=(v[0], v[1]), switched=v[2], kthread=v[3], spin=(v[4], v[5]),
+                           longest=int(mm[8]) if mm[8] else None)
     more = re.search(r'^more (\d+)$', body, re.M)
     return dict(tsc=int(m[1]), cpus=cpus, keys=keys, more=int(more[1]) if more else 0)
 
 
 def klock_delta(b, e):
     # the window between two reads: the processors' and keys' counters subtracted (a key first seen at `e` counts
-    # from 0)
+    # from 0); a key's longest hold is e's, since the boot (a maximum, never reset)
     z = dict(hold=(0, 0), switched=0, kthread=0, spin=(0, 0))
     cpus = {i: {k: c[k] - b['cpus'].get(i, {}).get(k, 0) for k in ('spin', 'fresh', 'cont', 'hold', 'closed')}
             for i, c in e['cpus'].items()}
@@ -333,7 +335,7 @@ def klock_delta(b, e):
         o = b['keys'].get(name, z)
         keys[name] = dict(hold=(k['hold'][0] - o['hold'][0], k['hold'][1] - o['hold'][1]),
                           switched=k['switched'] - o['switched'], kthread=k['kthread'] - o['kthread'],
-                          spin=(k['spin'][0] - o['spin'][0], k['spin'][1] - o['spin'][1]))
+                          spin=(k['spin'][0] - o['spin'][0], k['spin'][1] - o['spin'][1]), longest=k.get('longest'))
     return dict(wall=e['tsc'] - b['tsc'], cpus=cpus, keys=keys, more=max(b['more'], e['more']))
 
 
@@ -343,8 +345,8 @@ def klock_wait(d):
 
 
 def klock_holds(d, hz, top=6):
-    # the lock held (all processors' holds over the window's wall); each key's share of the holds, its mean and its
-    # count, the largest first; the switched and kernel-thread parts said where they are
+    # the lock held (all processors' holds over the window's wall); each key's share of the holds, its mean, its count
+    # and its longest hold since the boot, the largest first; the switched and kernel-thread parts said where they are
     tot = sum(c['hold'] for c in d['cpus'].values())
     out = [f'the lock held {tot / d["wall"]:.2f} of the window' if d['wall'] else 'no window']
     if d.get('more'):
@@ -354,6 +356,8 @@ def klock_holds(d, hz, top=6):
         if not c:
             continue
         mean = f'{c / n / hz * 1e6:.1f} us' if n and hz else '-'
+        if k.get('longest') is not None and hz:
+            mean += f', longest since the boot {k["longest"] / hz * 1000:.2f} ms'
         parts = ''.join(f', {kind} {k[kind] / c:.2f}' for kind in ('switched', 'kthread') if k[kind])
         out.append(f'{name} {c / tot:.2f} of the holds, {n} at {mean}{parts}' if tot else name)
     return out
@@ -1330,11 +1334,13 @@ elif a.kind == 'build':
                     for k in t:
                         t[k] += c[k]
                 for name, k in d['keys'].items():
-                    t = tot['keys'].setdefault(name, dict(hold=(0, 0), switched=0, kthread=0, spin=(0, 0)))
+                    t = tot['keys'].setdefault(name, dict(hold=(0, 0), switched=0, kthread=0, spin=(0, 0), longest=None))
                     for kind in ('hold', 'spin'):
                         t[kind] = (t[kind][0] + k[kind][0], t[kind][1] + k[kind][1])
                     for kind in ('switched', 'kthread'):
                         t[kind] += k[kind]
+                    if k.get('longest') is not None:
+                        t['longest'] = max(t['longest'] or 0, k['longest'])
             word = {1: 'one job', 2: 'two jobs', 3: 'three jobs', 4: 'four jobs'}.get(j, f'{j} jobs')
             waits.append(f'{word}: ' + ("spin over the batches' wall by processor " if not waits else '') +
                          f'{klock_wait(tot)}%')
