@@ -45,7 +45,7 @@ def fixture_bytes():
     assert provenance.get('public_root_sha256') == TEST_ONLY_ROOT_SHA256, 'I-pxg-test-only-anchor-provenance'
     assert provenance.get('verification_now') == TEST_ONLY_NOW, 'I-pxg-test-only-anchor-clock'
     assert provenance.get('bundle_sha256') == 'f185488197c4ac0924b921dabbf39b60c3542f34a034ac0e26b947ccc132ee2e', 'I-pxg-test-only-anchor-provenance'
-    assert data.endswith(b'\n') and b'\n' not in data[:-1] and data.isascii(), 'I-pxg-test-only-anchor-encoding'
+    assert b'\n' not in data and data.isascii(), 'I-pxg-test-only-anchor-encoding'
     return data
 
 
@@ -53,13 +53,12 @@ def commands(profile, instance):
     root = identity(profile, instance)
     # Bounded quoted chunks preserve the approved public signed bytes exactly.
     # Minimal test roots precreate root; the delivered full image already has mkdir.
-    data = fixture_bytes().decode('ascii')[:-1]
+    data = fixture_bytes().decode('ascii')
     result = []
     for offset in range(0, len(data), 256):
         redirect = '>' if offset == 0 else '>>'
         result.append("printf '%s' "+shlex.quote(data[offset:offset+256])+' '+redirect+' '+GUEST_TEST_ONLY_ANCHOR)
-    result += ["printf '\\n' >> "+GUEST_TEST_ONLY_ANCHOR,
-               'test -d '+root+' || mkdir '+root,
+    result += ['test -d '+root+' || mkdir '+root,
                'test -d '+root+'; echo PXG-ROOT-DIR=$?',
                'test ! -e '+root+'/var; echo PXG-CANDIDATE-EMPTY=$?',
                'echo PXG-PROFILE='+profile, 'echo PXG-INSTANCE='+instance]
@@ -133,7 +132,7 @@ def selftest():
                     assert fields[:2] == ['printf', '%s'] and fields[3] in ('>', '>>')
                     assert fields[4] == GUEST_TEST_ONLY_ANCHOR
                     recovered += fields[2]
-            assert (recovered+'\n').encode('ascii') == fixture_bytes(), 'I-pxg-test-only-anchor-rendered-bytes'
+            assert recovered.encode('ascii') == fixture_bytes(), 'I-pxg-test-only-anchor-rendered-bytes'
             init = next(line for line in rendered if line.startswith('echo PXG-INIT-BEGIN;'))
             args = shlex.split(init.split(';')[1])
             assert args[args.index('--root')+1] == identity(profile, instance)
