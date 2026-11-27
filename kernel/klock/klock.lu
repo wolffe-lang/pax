@@ -110,7 +110,6 @@ use panic
 use percpu
 use sync
 use ipi
-use testwords
 use tlb
 
 extern "c" let pax_klock: *u64
@@ -237,7 +236,6 @@ export fn pax_klock_resumed(v: u64) {
         return
     }
     if held_here() && depth() == 0 {
-        testwords.ledger_gave() // px166 (stage 3): the test build's ledger closes the hold; nothing as shipped
         // # Safety: the holder's release store; as `owner`.
         unsafe { at(OWNER).atomic_store(0, Order.release) }
     }
@@ -250,7 +248,6 @@ pub fn leave() {
         panic.fail("klock: left by a processor that does not hold it, cpu ", percpu.index())
     }
     put_depth(0)
-    testwords.ledger_gave() // px166 (stage 3): as at `pax_klock_resumed`'s release
     // # Safety: the holder's release store; as `owner`.
     unsafe { at(OWNER).atomic_store(0, Order.release) }
 }
