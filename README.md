@@ -496,8 +496,8 @@ the same damaged images, answers differently in three ways that are kept on purp
 (ENODATA for a file flagged encrypted) and refuses some of it when the file is opened; PAX says EIO, mostly at the
 read. It lists a directory with a hole in it as complete and calls a name in the hole absent; PAX answers EIO,
 because a missing directory block cannot prove a name is not there. It reads a tree whose eh_max is three or more
-under the room, which e2fsck calls corrupt; PAX answers EIO. A mapped page that cannot be read is SIGBUS on every
-volume, as on Linux.
+under the room, which e2fsck calls corrupt; PAX answers EIO. A mapped page whose blocks cannot be read still maps
+as zeros, as it does on ext2 and ext3, where Linux answers SIGBUS; that is to be fixed separately (pax#571).
 Writing extent volumes is later work; ext2 and ext3 asks are unchanged, and the installer still formats ext3.
 
 ### A disk that boots
