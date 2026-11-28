@@ -85,6 +85,16 @@
 //! listing (never absence or a short listing) and a link's resolution. An
 //! ext2 or ext3 ask of an extent volume is refused as before.
 //!
+//! **Ext4's inode flags on ext2 and ext3** (pax#549). A volume without the
+//! extent feature has no inode with EXTENTS_FL (0x80000) or INLINE_DATA_FL
+//! (0x10000000); one that carries either is damage, as pinned e2fsck says
+//! of every inode type, and is never read as block pointers (`flag_damage`).
+//! Its name answers -EIO with a line naming the inode and the flag (counted
+//! in the books, so a read-write unmount leaves an ext2 volume not clean); a
+//! root or ext3 journal inode carrying one refuses the mount by name. Linux
+//! diverges: its ext4 subsystem reads a fast link carrying EXTENTS_FL and
+//! ignores INLINE_DATA_FL, and its own ext2 driver ignores both.
+//!
 //! **Groups.** Block group g has its descriptor in the table that starts
 //! in the block after the superblock's (32 bytes each: the block bitmap's
 //! block, the inode bitmap's, the inode table's, the free blocks, free
@@ -255,6 +265,8 @@ const RO_LARGE_FILE: u64 = 0x2
 const INCOMPAT_EXTENT: u64 = 0x40 // the extent profile (super.rst)
 /// The inode flag of an extent-mapped inode (inodes.rst).
 const EXTENTS_FL: u64 = 0x80000
+/// The inode flag of an inode whose data is in i_block (inodes.rst).
+const INLINE_DATA_FL: u64 = 0x10000000
 /// Inode flags an extent volume's file is not read with (inodes.rst):
 /// compression, encryption, huge_file, verity, an EA inode, inline data,
 /// casefolding, the snapshot flags and the reserved bit.
@@ -375,7 +387,7 @@ const P_INODE: u64 = 0x8000000000000000
 const P_DIR: u64 = 0x4000000000000000
 const V_JINO: u64 = 43 // px162: the journal's inode (s_journal_inum), set with V_JNL (43: 36-42 are taken in flight)
 const V_EXT: u64 = 44 // 1: an `ext4` mount of the extent profile (read-only, V_RO 5)
-const V_XSAID: u64 = 45 // damage lines said on an extent volume (XSAY at most)
+const V_XSAID: u64 = 45 // damage lines naming an inode (an extent volume's, an ext4 flag's on ext2/ext3; XSAY at most)
 const XSAY: u64 = 16
 
 // The module's frame: VOLS records, then the name scratch (256 bytes at
@@ -904,6 +916,12 @@ fn mount_claimed(v: u64, dev: u64, ro: bool, now: u64, kind: u64) -> u64 {
         put_vw(v, V_USED, 0)
         return refuse("inode 2 is no directory, mode", if root == 0 { 0 } else { r16(root + I_MODE) })
     }
+    let rfl = r32(root + I_FLAGS)
+    let rff = flag_damage(v, rfl)
+    if rff != 0 {
+        put_vw(v, V_USED, 0)
+        return refuse_flag(dev, ROOT_INO, " (the root)", rff, rfl)
+    }
     if has_j {
         // px68: the journal found, checked and replayed before the volume
         // is used (a refusal said by name).
@@ -1098,6 +1116,61 @@ fn meta(v: u64, p: u64, n: u64) -> bool {
         g += 1
     }
     false
+}
+
+/// pax#549: the ext4 flag in inode flags `fl` that is damage on this volume:
+/// EXTENTS_FL or INLINE_DATA_FL on one without the extent feature (an ext2
+/// or ext3 mount: an extent volume mounts only as `ext4`, and inline data
+/// is refused by name on every kind), 0 for none. A valid ext2 or ext3
+/// image carries neither, so no valid image reads differently.
+fn flag_damage(v: u64, fl: u64) -> u64 {
+    if vw(v, V_EXT) != 0 {
+        return 0
+    }
+    if fl & EXTENTS_FL != 0 { EXTENTS_FL } else if fl & INLINE_DATA_FL != 0 { INLINE_DATA_FL } else { 0 }
+}
+
+/// What `flag_damage`'s flag `ff` is, for a line.
+fn flag_words(ff: u64) -> str {
+    if ff == EXTENTS_FL { "EXTENTS_FL on a volume without the extent feature" } else { "INLINE_DATA_FL on a volume without the inline-data feature" }
+}
+
+/// pax#549: a name's inode carrying `flag_damage`'s flag: XSAY lines a
+/// volume (as an extent volume's damage), every one counted in the books.
+///
+///     ext2: vda: inode <ino>: EXTENTS_FL on a volume without the extent feature, i_flags 0x…
+fn flag_bad(v: u64, ino: u64, ff: u64, fl: u64) {
+    bump(v, V_ERRS)
+    if vw(v, V_XSAID) < XSAY {
+        bump(v, V_XSAID)
+        log.put("ext2: ")
+        block.put_name(vw(v, V_DEV))
+        log.put(": inode ")
+        log.dec(ino as int)
+        log.put(": ")
+        log.put(flag_words(ff))
+        log.put(", i_flags ")
+        log.hex(fl)
+        log.end()
+    }
+}
+
+/// pax#549: the mount refused when the root or ext3's journal inode carries
+/// `flag_damage`'s flag, by name, as a root that is no directory is:
+///
+///     ext2: refused: vda: inode 2 (the root) carries EXTENTS_FL on a volume without the extent feature, i_flags 0x…
+fn refuse_flag(dev: u64, ino: u64, whose: str, ff: u64, fl: u64) -> u64 {
+    log.put("ext2: refused: ")
+    block.put_name(dev)
+    log.put(": inode ")
+    log.dec(ino as int)
+    log.put(whose)
+    log.put(" carries ")
+    log.put(flag_words(ff))
+    log.put(", i_flags ")
+    log.hex(fl)
+    log.end()
+    neg(EINVAL)
 }
 
 /// Damage on an extent volume: XSAY lines a volume, each naming the inode,
@@ -1325,6 +1398,11 @@ fn open_journal(v: u64, dev: u64, jino: u64, fi: u64) -> u64 {
     let n = size(v, jino) / b
     if n == 0 || mode(v, jino) & S_IFMT != S_IFREG {
         return refuse("a journal inode that is not a regular file of blocks: inode", jino)
+    }
+    let jfl = flags(v, jino)
+    let jff = flag_damage(v, jfl)
+    if jff != 0 {
+        return refuse_flag(dev, jino, " (the journal)", jff, jfl)
     }
     var rl: u64 = 0
     var rp: u64 = 0
@@ -1888,6 +1966,11 @@ pub fn named_inode(v: u64, ino: u64) -> bool {
     }
     if vw(v, V_EXT) != 0 && fl & EXTENTS_FL != 0 && t != S_IFREG && t != S_IFDIR && t != S_IFLNK {
         let _b = xbad(v, ino, "EXTENTS_FL on an inode that has no blocks, mode", t)
+        return false
+    }
+    let ff = flag_damage(v, fl)
+    if ff != 0 {
+        flag_bad(v, ino, ff, fl)
         return false
     }
     let g = (ino - 1) / vw(v, V_IPG)
