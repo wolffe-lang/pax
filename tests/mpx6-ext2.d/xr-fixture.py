@@ -19,9 +19,11 @@ exactly the extent profile, held to e2fsck and debugfs alike.
 
 Beside them: R, an ext4 root (the probe, its run list and its plan on the
 image itself); D, a default `mke2fs -t ext4` image, refused by name; and X,
-three layout copies whose answers wait for pinned e2fsck and Linux (chains of
-depth 3, 4 and 5 of one entry an index node, an indirect inode beside extent
-ones, an extent of `ee_len` 32768). The journal set adds a journal in 65
+three layout copies whose answers were set by pinned e2fsck and Linux reading
+them first (chains of depth 3, 4 and 5 of one entry an index node, read whole
+by both; an indirect inode beside extent ones, read whole by both; an extent of
+`ee_len` 32768, which both refuse: it is initialized and meets group 1's
+metadata). The journal set adds a journal in 65
 pieces and one whose last block is on the inode table.
 
 Prints `PASS XR-fixture-<set>` or `FAIL XR-fixture-<set> <why>` and writes
