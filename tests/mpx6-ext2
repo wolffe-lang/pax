@@ -96,7 +96,16 @@
 #      directory or link a file, each EIO on its own path, never ENOENT or a
 #      short listing, with untouched files before and after reading right;
 #      each unserved superblock feature bit and each unclean or journal-map
-#      state refused by name; every disk byte-identical after its boot.
+#      state refused by name (a journal past 64 pieces or on the inode table
+#      too); every disk byte-identical after its boot. Also: `ext4` in fstab
+#      and as `rootfstype=` (the image is `/`, read-only), a root with no type
+#      kept on the initramfs as today, the unknown-type lines naming ext4, a
+#      default `mke2fs -t ext4` image refused by name, reads past the cache's
+#      512 buffers, two readers at once, and the files a live Linux kernel
+#      made on a fresh image of the profile read byte for byte (where one is
+#      readable; PAX_LINUX=live insists). The first leg runs again with
+#      PAX_SMP=4 (`<leg>-smp4`). A mapped page whose blocks cannot be read is
+#      noted, not judged (pax#571).
 #   SEAM-CALLERS (every mode; `--only seam` runs it alone, no build): no
 #      kernel source outside kernel/ext2, kernel/journal and kernel/volume
 #      imports ext2 or journal or calls into them, so kernel/volume is the
@@ -519,6 +528,13 @@ else
             bad "XR $cut_tier $leg: extents-row (its named rows above)"
         fi
     done
+    # The same boots at four processors, on the first leg (tools/qemu-run's PAX_SMP).
+    first=${legs%% *}
+    if PAX_SMP=4 bash "$D/extents-row" run "$xw" "$first" smp4; then
+        say "PASS XR $cut_tier $first-smp4: the extent read rows at four processors"
+    else
+        bad "XR $cut_tier $first-smp4: extents-row (its named rows above)"
+    fi
 fi
 
 cat "$runs"
