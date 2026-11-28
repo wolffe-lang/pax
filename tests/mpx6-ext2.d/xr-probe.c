@@ -21,6 +21,22 @@
  *   mmap PATH LEN                in a child: map LEN bytes and hash them;
  *                                the parent says how the child ended
  *   tries DIR                    every mutation a read-only mount refuses
+ *   pair A B                     two children, released together, each
+ *                                reading one file whole (`pair-a A`,
+ *                                `pair-b B`); then how both ended
+ *
+ * The writing operations, for the Linux guest that makes files PAX then
+ * reads (block k of a file holds the byte (SEED * 7 + k) % 251 + 1):
+ *   wblocks PATH N SEED          N blocks of 4096 bytes, then fsync
+ *   wsparse PATH RUNS SEED       one block at every other block, RUNS of
+ *                                them, then fsync
+ *   falloc PATH SEED             blocks 0-3 written, 4-11 fallocated
+ *                                (unwritten), block 12 written, fsync
+ *   wtext PATH WORD              WORD and a newline
+ *   mkdir PATH                   mkdir(2)
+ *   symlink TARGET PATH          symlink(2)
+ *
+ * The plan is /etc/xr/plan, or the path given as the one argument.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -233,8 +249,68 @@ static void op_tries(const char *dir) {
     }
 }
 
-int main(void) {
-    FILE *plan = fopen("/etc/xr/plan", "r");
+/* Both children start on one byte from the parent, so on several
+ * processors they read at once. */
+static void op_pair(const char *what, const char *a, const char *b) {
+    int go[2];
+    if (pipe(go) != 0) { say(what, -1, errno, "at=pipe"); return; }
+    fflush(stdout);
+    pid_t kid[2];
+    const char *path[2] = {a, b};
+    for (int i = 0; i < 2; i++) {
+        kid[i] = fork();
+        if (kid[i] == 0) {
+            char c, key[600];
+            close(go[1]);
+            if (read(go[0], &c, 1) != 1) _exit(102);
+            snprintf(key, sizeof key, "pair-%c %s", i ? 'b' : 'a', path[i]);
+            op_file(key, path[i], -1, -1);
+            _exit(0);
+        }
+    }
+    close(go[0]);
+    if (write(go[1], "gg", 2) != 2) { /* a child that cannot start ends 102 */ }
+    close(go[1]);
+    int st[2] = {0, 0};
+    for (int i = 0; i < 2; i++) waitpid(kid[i], &st[i], 0);
+    char more[96];
+    snprintf(more, sizeof more, "exits=%d,%d", WIFEXITED(st[0]) ? WEXITSTATUS(st[0]) : -1,
+             WIFEXITED(st[1]) ? WEXITSTATUS(st[1]) : -1);
+    say(what, 0, 0, more);
+}
+
+static char wbuf[4096];
+
+static void fill(long long seed, long long k) { memset(wbuf, (int)((seed * 7 + k) % 251 + 1), sizeof wbuf); }
+
+/* Writes wbuf at block k: 0 or the errno. */
+static int wblock(int fd, long long k) {
+    ssize_t n = pwrite(fd, wbuf, sizeof wbuf, k * 4096);
+    return n == 4096 ? 0 : (n < 0 ? errno : EIO);
+}
+
+static void op_write(const char *what, const char *op, const char *path, long long n, long long seed) {
+    int e = 0;
+    errno = 0;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) { say(what, -1, errno, "at=open"); return; }
+    if (!strcmp(op, "wblocks")) {
+        for (long long k = 0; k < n && !e; k++) { fill(seed, k); e = wblock(fd, k); }
+    } else if (!strcmp(op, "wsparse")) {
+        for (long long r = 0; r < n && !e; r++) { fill(seed, r); e = wblock(fd, 2 * r); }
+    } else {
+        for (long long k = 0; k < 4 && !e; k++) { fill(seed, k); e = wblock(fd, k); }
+        if (!e && fallocate(fd, 0, 4 * 4096, 8 * 4096) != 0) e = errno;
+        if (!e) { fill(seed, 12); e = wblock(fd, 12); }
+    }
+    if (!e && fsync(fd) != 0) e = errno;
+    close(fd);
+    say(what, e ? -1 : 0, e, "");
+}
+
+int main(int argc, char **argv) {
+    const char *planpath = argc > 1 ? argv[1] : "/etc/xr/plan";
+    FILE *plan = fopen(planpath, "r");
     if (!plan) { printf("XRO-END no-plan errno=%d\n", errno); return 1; }
     char line[1024];
     while (fgets(line, sizeof line, plan)) {
@@ -285,6 +361,27 @@ int main(void) {
             op_mmap(line, x, n1);
         } else if (!strcmp(op, "tries") && sscanf(line, "%*s %511s", x) == 1) {
             op_tries(x);
+        } else if (!strcmp(op, "pair") && sscanf(line, "%*s %511s %511s", x, y) == 2) {
+            op_pair(line, x, y);
+        } else if ((!strcmp(op, "wblocks") || !strcmp(op, "wsparse")) &&
+                   sscanf(line, "%*s %511s %lld %lld", x, &n1, &n2) == 3) {
+            op_write(line, op, x, n1, n2);
+        } else if (!strcmp(op, "falloc") && sscanf(line, "%*s %511s %lld", x, &n2) == 2) {
+            op_write(line, op, x, 13, n2);
+        } else if (!strcmp(op, "wtext") && sscanf(line, "%*s %511s %511s", x, y) == 2) {
+            FILE *f = fopen(x, "w");
+            int e = f ? 0 : errno;
+            if (f) {
+                if (fprintf(f, "%s\n", y) < 0) e = errno ? errno : EIO;
+                if (fclose(f) != 0 && !e) e = errno ? errno : EIO;
+            }
+            say(line, e ? -1 : 0, e, "");
+        } else if (!strcmp(op, "mkdir") && sscanf(line, "%*s %511s", x) == 1) {
+            int rc = mkdir(x, 0755);
+            say(line, rc, errno, "");
+        } else if (!strcmp(op, "symlink") && sscanf(line, "%*s %511s %511s", x, y) == 2) {
+            int rc = symlink(x, y);
+            say(line, rc, errno, "");
         } else {
             printf("XRO bad-plan-line %s\n", line);
         }
