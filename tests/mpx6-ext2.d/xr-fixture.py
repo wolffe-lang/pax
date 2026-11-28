@@ -24,7 +24,11 @@ them first (chains of depth 3, 4 and 5 of one entry an index node, read whole
 by both; an indirect inode beside extent ones, read whole by both; an extent of
 `ee_len` 32768, which both refuse: it is initialized and meets group 1's
 metadata). The journal set adds a journal in 65
-pieces and one whose last block is on the inode table.
+pieces and one whose last block is on the inode table. G (pax#549): pinned
+mke2fs's ext2 and ext3, and copies whose one inode (the file, the directory,
+the slow link, the fast link, the root, ext3's journal) carries ext4's
+EXTENTS_FL or INLINE_DATA_FL in i_flags, its block pointers left valid:
+pinned e2fsck calls every copy damage (exit 4), the bases clean.
 
 Prints `PASS XR-fixture-<set>` or `FAIL XR-fixture-<set> <why>` and writes
 DIR/manifest.json for xr-judge.py. Exit 0 when every set was made.
@@ -711,9 +715,77 @@ def make(args):
     section("J", j_set)
     section("R", r_set)
     section("D", d_set)
+    # --- G: ext2 and ext3 volumes whose one inode carries an ext4 flag (pax#549) --
+    gfiles = [("f", "bytes", b"flagged file bytes\n"), ("sib", "bytes", b"sibling bytes\n"),
+              ("d/e", "bytes", b"in d\n"), ("link", "link", "/a/target/path/that/is/longer/than/sixty/characters/so/it/"
+                                          "is/a/slow/link/xx"), ("fast", "link", "short")]
+    gflags = {"extents": 0x80000, "inline": 0x10000000}
+
+    def g_set():
+        """Pinned mke2fs's ext2 and ext3 of 1 KiB blocks (filetype, sparse_super
+        and large_file; ext3 its journal), the recipe pax#549's oracle measured
+        Linux and e2fsck on; then a copy a case, one inode's i_flags (inodes.rst,
+        offset 0x20) given EXTENTS_FL or INLINE_DATA_FL, nothing else changed.
+        e2fsck -fn calls every copy damage (exit 4)."""
+        tree = work / "tree-g"
+        build_tree(tree, gfiles)
+        files = {rel: ({"target": value} if kind == "link" else {"bytes": len(value), "sha256": sha(tree / rel)})
+                 for rel, kind, value in gfiles}
+        bases, cases = {}, {}
+        for fs in ("ext2", "ext3"):
+            base = work / f"G-{fs}-base.img"
+            r = tools.run([tools.e2fs, work, "mke2fs", "-q", "-F", "-t", fs, "-b", "1024", "-I", "128",
+                           "-O", "^resize_inode,^dir_index,^ext_attr", "-U", "4f3a2b1c-0d9e-4c8b-a7f6-5e4d3c2b1a09",
+                           "-E", "hash_seed=2d1c0b9a-8f7e-4d6c-b5a4-93827160f5e4", "-L", "xr-G-" + fs, "-d", tree,
+                           base, "16M"], "mke2fs-xr-G-" + fs)
+            need(r.returncode == 0 and base.is_file(), f"mke2fs xr-G-{fs} exit {r.returncode}; see logs/mke2fs-xr-G-{fs}.log")
+            need(tools.fsck(base, f"G-{fs}-base") == 0, f"G-{fs}-base: e2fsck -fn not clean on mke2fs's own image")
+            img = Image(base)
+            compat, incompat, ro = img.words
+            need(img.bs == 1024 and incompat == 0x2 and ro & ~0x3 == 0 and bool(compat & 0x4) == (fs == "ext3"),
+                 f"G-{fs}-base: block size {img.bs}, feature words {[hex(w) for w in img.words]} (want filetype alone"
+                 f" incompat, ro_compat within sparse_super and large_file, a journal on ext3 only)")
+            ino = {}
+            for rel in ("f", "sib", "d", "d/e", "link", "fast"):
+                n, flags = stat_ino(tools, base, "/" + rel, f"G-{fs}-stat-{rel.replace('/', '_')}")
+                need(flags & (0x80000 | 0x10000000) == 0, f"G-{fs}-base: /{rel} has i_flags {flags:#x}")
+                ino[rel] = n
+            for rel in ("f", "sib", "d/e"):
+                dumped(tools, base, tree / rel, rel, f"G-{fs}-base")
+            ino["root"] = 2
+            if fs == "ext3":
+                ino["journal"] = img.u(1024 + 0xE0, 4)
+                need(ino["journal"] == 8, f"G-ext3-base: s_journal_inum {ino['journal']}")
+            ls = tools.debugfs(base, "ls -p /", f"G-{fs}-ls").stdout.decode(errors="replace").splitlines()
+            names = sorted(l.split("/")[5] for l in ls if l.count("/") >= 6 and l.split("/")[5] not in (".", ".."))
+            need(names == ["d", "f", "fast", "link", "lost+found", "sib"], f"G-{fs}-base: / holds {names}")
+            bases[fs] = {"sha256": sha(base), "ino": ino, "names": names}
+            for what, rel in (("file", "f"), ("dir", "d"), ("slowlink", "link"), ("fastlink", "fast"), ("root", "root"),
+                              ("journal", "journal")):
+                if rel not in ino:
+                    continue
+                for fl, bits in gflags.items():
+                    name = f"G-{fs}-{what}-{fl}"
+
+                    def edit(i, n=ino[rel], bits=bits):
+                        at = i.inode(n) + 0x20
+                        old = i.u(at, 4)
+                        i.put(at, 4, old | bits)
+                        return f"inode {n} i_flags {old:#x} to {old | bits:#x}"
+
+                    damaged(tools, base, name, edit, cases)
+                    cases[name].update({"fs": fs, "what": what, "flag": fl, "ino": ino[rel], "bits": bits})
+                    need(cases[name]["e2fsck"] == 4, f"{name}: e2fsck -fn exit {cases[name]['e2fsck']}, want 4 (damage)")
+            base.unlink()
+        manifest["G"] = {"files": files, "bases": bases, "cases": cases}
+        shutil.rmtree(tree)
+        return (f"G: {len(cases)} flagged copies of ext2 {bases['ext2']['sha256'][:16]} and ext3 "
+                f"{bases['ext3']['sha256'][:16]}, e2fsck exit 4 on every one")
+
     section("X", x_set)
+    section("G", g_set)
     (work / "manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
-    print(f"XR-FIXTURE-END exit={0 if ok else 1}", flush=True)  # eight sets: P, M, Q, F, J, R, D, X
+    print(f"XR-FIXTURE-END exit={0 if ok else 1}", flush=True)  # nine sets: P, M, Q, F, J, R, D, X, G
     return 0 if ok else 1
 
 

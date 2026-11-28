@@ -35,6 +35,8 @@
  *   wtext PATH WORD              WORD and a newline
  *   mkdir PATH                   mkdir(2)
  *   symlink TARGET PATH          symlink(2)
+ *   unlink PATH                  unlink(2) (pax#549: a flagged name on a
+ *                                read-write ext2 or ext3 copy)
  *
  * The plan is /etc/xr/plan, or the path given as the one argument.
  */
@@ -381,6 +383,9 @@ int main(int argc, char **argv) {
             say(line, rc, errno, "");
         } else if (!strcmp(op, "symlink") && sscanf(line, "%*s %511s %511s", x, y) == 2) {
             int rc = symlink(x, y);
+            say(line, rc, errno, "");
+        } else if (!strcmp(op, "unlink") && sscanf(line, "%*s %511s", x) == 1) {
+            int rc = unlink(x);
             say(line, rc, errno, "");
         } else {
             printf("XRO bad-plan-line %s\n", line);

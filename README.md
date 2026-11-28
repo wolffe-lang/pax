@@ -500,6 +500,17 @@ under the room, which e2fsck calls corrupt; PAX answers EIO. A mapped page whose
 as zeros, as it does on ext2 and ext3, where Linux answers SIGBUS; that is to be fixed separately (pax#571).
 Writing extent volumes is later work; ext2 and ext3 asks are unchanged, and the installer still formats ext3.
 
+An ext2 or ext3 inode carrying ext4's EXTENTS_FL or INLINE_DATA_FL is damage, as e2fsck calls it on every inode type,
+and is never read as block pointers: its name answers EIO with a line naming the device, the inode and the flag
+(`ext2: vda: inode 14: EXTENTS_FL on a volume without the extent feature, i_flags 0x…`), and a root or ext3 journal
+inode carrying one refuses the mount by name. Valid ext2 and ext3 volumes carry neither flag. Linux, reading the same
+copies, depends on its driver. Its ext4 subsystem (which mounts ext3, and ext2 on kernels built without the ext2
+driver) answers EUCLEAN for EXTENTS_FL on a file, directory, slow link, root or journal and records the error on the
+disk even read-only, but reads a fast link carrying EXTENTS_FL and ignores INLINE_DATA_FL. Its own ext2 driver ignores
+both flags and reads every such inode as block pointers. PAX answers EIO in each case and writes nothing on a
+read-only mount. A read-write unmount after such damage leaves an ext2 volume not cleanly unmounted; a journalled
+volume's state is left as it was, as for its other damage.
+
 ### A disk that boots
 
 One file, no ISO. `tools/mkdisk --gpt` writes a GPT disk with an EFI system partition (Limine, the kernel, the

@@ -20,6 +20,18 @@ keep today's refusal; damage is EIO on its own path, never absence, a
 short listing or other bytes; every unsupported feature bit and every
 unclean state is refused by name; no disk is written. A mapped page whose
 blocks cannot be read is noted, not judged (pax#571).
+
+The flag rows (XF, pax#549) hold ext2 and ext3 copies whose one inode carries
+ext4's EXTENTS_FL or INLINE_DATA_FL (xr-fixture.py's G) to what pinned e2fsck
+says of every one, damage: the flagged name answers EIO at its lookup, never
+its pointers' bytes or absence, with a line naming the device, the inode and
+the flag; every other name reads as made and the listing names them all; a
+flagged root or ext3 journal refuses the mount by name; a read-only mount
+writes nothing; a read-write copy keeps the flagged name through an unlink
+(EIO) and an ext2 one is left not clean. Linux diverges, and these rows pin
+PAX's side of it: ext4's subsystem reads a fast link carrying EXTENTS_FL and
+ignores INLINE_DATA_FL on every inode (the fastlink-extents and every -inline
+row), and ext2's own driver reads every copy as if neither flag were set.
 """
 import hashlib
 import json
@@ -102,6 +114,11 @@ def boots(m):
         out.append(("linux", [m["W"]["image"]]))
     xc = m["X"]["cases"]
     out.append(("layout", [xc["X-depth"]["image"], xc["X-mixed"]["image"], xc["X-len"]["image"]]))
+    g = m["G"]["cases"]
+    names = sorted(g)
+    for i in range(0, len(names), 4):
+        out.append((f"flags-{i // 4}", [g[k]["image"] for k in names[i:i + 4]]))
+    out.append(("flags-rw", [g[k]["image"] for k in names if g[k]["what"] == "file"]))
     return out
 
 
@@ -442,6 +459,137 @@ def plan_layout(m):
     return p
 
 
+# --- the flag rows (XF, pax#549) ------------------------------------------------
+
+GFLAG = {"extents": "EXTENTS_FL", "inline": "INLINE_DATA_FL"}
+# Each copy's plan, and the item each line reaches (its inode passes the
+# gate) with the row's word when that item carries the flag.
+GLINES = [("stat {p}/f", "file", "stat"), ("file {p}/f", "file", "read"), ("file {p}/sib", "sib", None),
+          ("list {p}", "top", None), ("stat {p}/d", "dir", "stat"), ("list {p}/d", "dir", "list"),
+          ("file {p}/d/e", "dir", "lookup"), ("stat {p}/link", "slowlink", "stat"),
+          ("readlink {p}/link", "slowlink", "readlink"), ("stat {p}/fast", "fastlink", "stat"),
+          ("readlink {p}/fast", "fastlink", "readlink")]
+
+
+def g_case(m, image):
+    """A G image's case: its row tag (`ext2-file-extents`) and record."""
+    name = image[:-len(".img")]
+    return name[len("G-"):], m["G"]["cases"][name]
+
+
+def g_right(m, fs, tmpl, o):
+    """An unflagged line's answer as the base was made: (ok, why)."""
+    if o is None:
+        return False, "no observation"
+    f, rel = m["G"]["files"], tmpl.split("/", 1)[1] if "/" in tmpl else ""
+    if o["rc"] != 0:
+        return False, f"rc={o['rc']} errno={o['errno']}"
+    if tmpl.startswith("file "):
+        ok = o.get("bytes") == str(f[rel]["bytes"]) and o.get("sha256") == f[rel]["sha256"]
+        return ok, f"bytes={o.get('bytes')} sha256 {'equal' if o.get('sha256') == f[rel]['sha256'] else 'differs'}"
+    if tmpl.startswith("list "):
+        want = m["G"]["bases"][fs]["names"] if rel == "" else ["e"]
+        return o["names"] == want, f"names {o['names']} (want {want})"
+    if tmpl.startswith("readlink "):
+        return o.get("target") == f[rel]["target"], f"target {o.get('target')}"
+    kind = {"f": "100", "d": "40", "link": "120", "fast": "120"}[rel]
+    size = str(len(f[rel]["target"])) if rel in ("link", "fast") else str(f["f"]["bytes"]) if rel == "f" else o.get("size")
+    return o.get("mode", "").startswith(kind) and o.get("size") == size, f"mode={o.get('mode')} size={o.get('size')}"
+
+
+def plan_flags(m, images, rw):
+    """One copy a device: read-only, every line of GLINES, the flagged item's
+    each EIO (`needs` the mount, so an unmounted volume cannot pass them);
+    a flagged root or journal, the mount refused (EINVAL). `rw` (flags-rw):
+    the file's copies read-write, the flagged name stat and unlinked (EIO
+    both), then the listing still naming it."""
+    p = Plan()
+    for dev, point, image in zip(DEVS, POINTS, images):
+        t, c = g_case(m, image)
+        if rw:
+            t += "-rw"
+        if c["what"] in ("root", "journal"):
+            p.op(f"mount /dev/{dev} {point} {c['fs']} ro", f"XF-{t}-refused", ok_rc(-1, EINVAL))
+            p.op(f"umount {point}")
+            continue
+        mount = f"XF-{t}-mount"
+        p.op(f"mount /dev/{dev} {point} {c['fs']} {'rw' if rw else 'ro'}", mount, ok_rc(0, 0))
+        if rw:
+            want = m["G"]["bases"][c["fs"]]["names"]
+            p.op(f"stat {point}/f", f"XF-{t}-stat", ok_eio(), needs=mount)
+            p.op(f"unlink {point}/f", f"XF-{t}-unlink", ok_eio(), needs=mount)
+            p.op(f"list {point}", f"XF-{t}-list", lambda o, want=want: (o["rc"] == 0 and o["names"] == want,
+                                                                         f"rc={o['rc']} names {o['names']} (want {want})"))
+            p.op(f"file {point}/sib", f"XF-{t}-sib", lambda o, fs=c["fs"]: g_right(m, fs, "file {p}/sib", o))
+        else:
+            for tmpl, item, word in GLINES:
+                if item == c["what"]:
+                    p.op(tmpl.format(p=point), f"XF-{t}-{word}", ok_eio(), needs=mount)
+                else:
+                    p.op(tmpl.format(p=point))
+        p.op(f"umount {point}", f"XF-{t}-umount", ok_rc(0, 0))
+    return p
+
+
+def g_inode(path, ino):
+    """Inode `ino`'s record in the image at `path`, from its own superblock
+    and first descriptor table (inodes.rst, group_descr.rst)."""
+    with open(path, "rb") as f:
+        f.seek(1024)
+        sb = f.read(1024)
+        u = lambda b, o, n=4: int.from_bytes(b[o:o + n], "little")
+        bs, first, ipg, isize = 1024 << u(sb, 0x18), u(sb, 0x14), u(sb, 0x28), u(sb, 0x58, 2)
+        group, index = divmod(ino - 1, ipg)
+        f.seek((first + 1) * bs + group * 32 + 8)
+        table = u(f.read(4), 0)
+        f.seek(table * bs + index * isize)
+        return f.read(isize), u(sb, 0x3A, 2)
+
+
+def judge_flags(boot, m, images, text, obs, passed, diskdir, tag, row):
+    rw = boot == "flags-rw"
+    for dev, point, image in zip(DEVS, POINTS, images):
+        t, c = g_case(m, image)
+        if rw:
+            t += "-rw"
+        flag, ino = GFLAG[c["flag"]], c["ino"]
+        if c["what"] in ("root", "journal"):
+            pattern = (rf"^ext2: refused: {dev}: inode {ino} \(the {'root' if c['what'] == 'root' else 'journal'}\) "
+                       rf"carries {flag} on a volume without the ")
+            hit = [l for l in text if re.search(pattern, l)]
+            row(f"XF-{t}-named", len(hit) == 1, f"{hit[:1] or [l for l in text if l.startswith(f'ext2: refused: {dev}')][:1]}"
+                f" (want one refusal naming inode {ino} and {flag})")
+            continue
+        lines = [l for l in text if l.startswith(f"ext2: {dev}: inode ")]
+        mine = [l for l in lines if re.match(rf"ext2: {dev}: inode {ino}: {flag} on a volume without the ", l)]
+        row(f"XF-{t}-said", bool(mine) and len(mine) == len(lines),
+            f"{len(mine)} of {len(lines)} damage lines for {dev} name inode {ino} and {flag}: {(lines or ['none'])[0]}")
+        if not rw:
+            bad = []
+            for tmpl, item, _word in GLINES:
+                if item == c["what"]:
+                    continue
+                line = tmpl.format(p=point)
+                got = obs.get(line, [])
+                ok, why = g_right(m, c["fs"], tmpl, got[0] if got else None)
+                if not ok:
+                    bad.append(f"'{line}': {why}")
+            row(f"XF-{t}-others", passed.get(f"XF-{t}-mount", False) and not bad,
+                "; ".join(bad) or f"the {len(GLINES) - sum(1 for _l, i, _w in GLINES if i == c['what'])} other lines "
+                "read as made (names, bytes, targets)")
+            continue
+        rec, state = g_inode(Path(diskdir) / image, ino)
+        links, dtime, fl = (int.from_bytes(rec[o:o + n], "little") for o, n in ((0x1A, 2), (0x14, 4), (0x20, 4)))
+        row(f"XF-{t}-kept", links == 1 and dtime == 0 and fl & c["bits"] != 0,
+            f"after the boot inode {ino} links {links} dtime {dtime} i_flags {fl:#x} (want links 1, dtime 0, the flag kept)")
+        if c["fs"] == "ext2":
+            row(f"XF-{t}-state", state & 1 == 0, f"s_state {state:#x} after the read-write unmount (want not clean)")
+        else:
+            print(f"NOTE XF-{t}-state {tag}: s_state {state:#x} ({'clean' if state & 1 else 'not clean'}) after the "
+                  "read-write unmount: a journalled volume keeps its state through named damage (noted, not gated)",
+                  flush=True)
+
+
 def plan_for(boot, m):
     for name, images in boots(m):
         if name == boot:
@@ -463,6 +611,8 @@ def plan_for(boot, m):
                 return plan_linux(m), images
             if boot == "layout":
                 return plan_layout(m), images
+            if boot.startswith("flags-"):
+                return plan_flags(m, images, boot == "flags-rw"), images
             return plan_disks(m, images, boot.split("-")[0]), images
     raise SystemExit(f"no boot {boot}")
 
@@ -609,9 +759,13 @@ def judge(boot, m, log, diskdir, tag):
     want.update({v["image"]: v["sha256"] for v in m["X"]["cases"].values()})
     want.update({v["image"]: v["sha256"] for v in m["F"]["cases"].values()})
     want.update({v["image"]: v["sha256"] for v in m["J"]["cases"].values()})
-    for image in images:
+    want.update({v["image"]: v["sha256"] for v in m["G"]["cases"].values()})
+    if boot.startswith("flags-"):
+        judge_flags(boot, m, images, text, obs, passed, diskdir, tag, row)
+    for image in images if boot != "flags-rw" else []:
         got = file_sha(Path(diskdir) / image)
-        row(f"XR-unchanged-{boot}-{image[:-4]}", got == want[image], f"sha256 {got[:16]} after the boot, {want[image][:16]} made")
+        group = "XF" if boot.startswith("flags-") else "XR"
+        row(f"{group}-unchanged-{boot}-{image[:-4]}", got == want[image], f"sha256 {got[:16]} after the boot, {want[image][:16]} made")
     if boot == "damage":
         got = obs.get(f"mmap /mnt/v-pastend {11 * BS}", [])
         seen = (f"exit={got[0].get('exit')} signal={got[0].get('signal')}"
