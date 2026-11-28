@@ -107,7 +107,14 @@
 #      made on a fresh image of the profile read byte for byte (where one is
 #      readable; PAX_LINUX=live insists). The first leg runs again with
 #      PAX_SMP=4 (`<leg>-smp4`). A mapped page whose blocks cannot be read is
-#      noted, not judged (pax#571).
+#      noted, not judged (pax#571). The flag rows (XF, pax#549) in the same
+#      runs: on pinned mke2fs's ext2 and ext3, a copy a case whose one inode
+#      (file, directory, slow or fast link) carries ext4's EXTENTS_FL or
+#      INLINE_DATA_FL answers EIO at that name with a line naming the device,
+#      the inode and the flag, every other name read as made; a flagged root
+#      or ext3 journal refuses the mount by name; a read-write copy keeps the
+#      flagged name through an unlink (EIO), an ext2 one left not clean; the
+#      read-only copies byte-identical after their boots.
 #   SEAM-CALLERS (every mode; `--only seam` runs it alone, no build): no
 #      kernel source outside kernel/ext2, kernel/journal and kernel/volume
 #      imports ext2 or journal or calls into them, so kernel/volume is the
@@ -525,7 +532,7 @@ else
             continue
         fi
         if bash "$D/extents-row" run "$xw" "$leg"; then
-            say "PASS XR $cut_tier $leg: an ext4 mount reads extent trees read-only, ext2 and ext3 asks keep their refusal, damage is EIO on its own path, unserved features and unclean states refused by name, no disk written"
+            say "PASS XR $cut_tier $leg: an ext4 mount reads extent trees read-only, ext2 and ext3 asks keep their refusal, damage is EIO on its own path, unserved features and unclean states refused by name, no disk written, an ext4 inode flag on ext2 or ext3 damage"
         else
             bad "XR $cut_tier $leg: extents-row (its named rows above)"
         fi
