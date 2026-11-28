@@ -7,6 +7,23 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **ext4 extent trees, read-only.** A mount that names `ext4` (`mount(2)`, fstab, `rootfstype=`) reads the extent
+  profile: filetype and extent, an optional internal journal, sparse_super and large_file, the classic group layout,
+  1, 2 or 4 KiB blocks. Every other feature bit is refused by name, read-only too; a volume that needs recovery, holds
+  journal transactions, has an orphan list, records errors or was not cleanly unmounted is refused unchanged with the
+  instruction to check it offline, and its journal is never replayed. Lookups walk at most six nodes and check each
+  one whole (magic, eh_max the node's room or one or two under it, as pinned e2fsck accepts, entries at most eh_max,
+  depth one under the parent, keys in range, extents inside the volume and off its metadata and journal); unwritten
+  extents read as zeros; an inode without EXTENTS_FL keeps its block map. A damaged file's read, directory's lookup
+  or listing and link's resolution answer EIO, never absence or a short listing; where Linux answers EUCLEAN or
+  ENODATA, calls a name in a directory's hole absent, or reads a tree e2fsck calls corrupt for its eh_max, PAX
+  answers EIO. The mount is always read-only and writes nothing. A root with no `rootfstype=` keeps today's
+  refusal; the unknown-type refusals name ext4 among the types PAX mounts. kernel/journal gains one read-only
+  question, whether blocks are the journal's. A mapped page whose blocks cannot be read still maps as zeros, on ext4
+  as on ext2 and ext3 (pax#571). ext2 and ext3 asks, their lines and the installer's ext3 default are unchanged.
+  Rows: `tests/mpx6-ext2`'s XR group (`extents-row`), with fixtures held to pinned e2fsck and debugfs, files a live
+  Linux kernel wrote, and a second pass at four processors.
+
 - **Lock ranks and a ledger per lock word, in the test kernel only.** A kernel built with `tools/build-kernel
   --test-words` now counts, for each of `kernel/sync`'s eight lock words and each processor, the acquisitions, the
   releases, the spin before each take and the hold after it. Under the new test word `pax.smpdebug` it also checks
