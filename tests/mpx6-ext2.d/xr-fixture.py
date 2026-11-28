@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Fixtures for tests/mpx6-ext2's extent read rows (XR), with their manifest.
 
-    xr-fixture.py --paxext2 BIN --e2fs TOOLS_E2FS --work DIR
+    xr-fixture.py --paxext2 BIN --e2fs TOOLS_E2FS --work DIR --probe XR_PROBE --root-plan PLAN
+    xr-fixture.py --linux-check --e2fs TOOLS_E2FS --work DIR --manifest MANIFEST
+                  --image W.img --serial SERIAL.log
 
 Every image starts as paxext2's own --extents output (the formatter the
 disk-tools suite holds to pinned e2fsck and debugfs) and is checked again
@@ -15,8 +17,21 @@ fixture is ever repaired. The damage set also makes K, an extent volume of
 1 KiB blocks from pinned mke2fs (paxext2 makes only 4 KiB blocks) with
 exactly the extent profile, held to e2fsck and debugfs alike.
 
+Beside them: R, an ext4 root (the probe, its run list and its plan on the
+image itself); D, a default `mke2fs -t ext4` image, refused by name; and X,
+three layout copies whose answers wait for pinned e2fsck and Linux (chains of
+depth 3, 4 and 5 of one entry an index node, an indirect inode beside extent
+ones, an extent of `ee_len` 32768). The journal set adds a journal in 65
+pieces and one whose last block is on the inode table.
+
 Prints `PASS XR-fixture-<set>` or `FAIL XR-fixture-<set> <why>` and writes
 DIR/manifest.json for xr-judge.py. Exit 0 when every set was made.
+
+`--linux-check` holds the image a Linux guest wrote (xr-judge.py's lplan,
+through tools/linux-blk) to the profile: pinned e2fsck -fn clean, feature
+words (4, 0x42, 3), cleanly unmounted with an empty journal and no orphan,
+lsparse a depth-2 tree, lfalloc with an unwritten extent; it adds W, with
+Linux's own observations, to the manifest. `PASS|FAIL XR-linux-fixture`.
 """
 import argparse
 import hashlib
@@ -157,6 +172,43 @@ class Image:
         e = at + 12 + 12 * k
         return (self.u(e, 4), self.u(e + 4, 2), self.u(e + 8, 4) | (self.u(e + 6, 2) << 32)), e
 
+    def gd(self, group):
+        return (self.first + 1) * self.bs + group * 32
+
+    def alloc(self):
+        """A free block of group 0, taken: its bitmap bit, the group's and the
+        superblock's free counts, its bytes zeroed."""
+        bitmap = self.u(self.gd(0), 4) * self.bs
+        per = min(self.blocks - self.first, self.u(1024 + 0x20, 4))
+        bits = self.read(bitmap, (per + 7) // 8)
+        for k in range(per - 1, -1, -1):
+            if not bits[k // 8] >> (k % 8) & 1:
+                self.put(bitmap + k // 8, 1, bits[k // 8] | (1 << (k % 8)))
+                self.put(self.gd(0) + 0x0C, 2, self.u(self.gd(0) + 0x0C, 2) - 1)
+                self.put(1024 + 0x0C, 4, self.u(1024 + 0x0C, 4) - 1)
+                self.write((self.first + k) * self.bs, bytes(self.bs))
+                return self.first + k
+        raise Failure(f"{self.path.name}: no free block in group 0")
+
+    def charge(self, ino, blocks):
+        """i_blocks (512-byte units) grown by `blocks` of this image's."""
+        at = self.inode(ino) + 0x1C
+        self.put(at, 4, self.u(at, 4) + blocks * self.bs // 512)
+
+    def node(self, at, depth, rows, room):
+        """An extent node at `at`: its header, then the 12-byte rows."""
+        self.write(at, MAGIC.to_bytes(2, "little") + len(rows).to_bytes(2, "little") + room.to_bytes(2, "little")
+                   + depth.to_bytes(2, "little") + bytes(4) + b"".join(rows))
+
+
+def index_row(key, child):
+    return key.to_bytes(4, "little") + (child & 0xFFFFFFFF).to_bytes(4, "little") + (child >> 32).to_bytes(2, "little") + bytes(2)
+
+
+def leaf_row(start, length, phys):
+    return start.to_bytes(4, "little") + length.to_bytes(2, "little") + (phys >> 32).to_bytes(2, "little") + \
+        (phys & 0xFFFFFFFF).to_bytes(4, "little")
+
 
 def build_tree(root, files):
     if root.exists():
@@ -175,6 +227,9 @@ def build_tree(root, files):
             p.mkdir(exist_ok=True)
         elif kind == "link":
             os.symlink(value, p)
+        elif kind == "exec":
+            shutil.copyfile(value, p)
+            os.chmod(p, 0o755)
         elif kind == "big":
             block = bytes(range(256)) * 16
             with p.open("wb") as f:
@@ -495,7 +550,35 @@ def make(args):
         need(jh["magic"] == MAGIC and jh["depth"] == 0 and jh["entries"] == 1, f"journal tree {jh}")
         (_s, jlen, jphys), jent = img.leaf(jroot, 0)
         need(img.read(jphys * BS, 4) == bytes.fromhex("c03b3998"), "no journal superblock at the journal's first block")
+        need(jlen >= 130, f"the journal is {jlen} blocks, too few for 65 pieces")
         out = {}
+
+        def journal_runs(i):
+            """The journal in 65 pieces, laid out in reverse: logical piece k+1
+            sits just before piece k on the disk, so no two pieces join. A leaf
+            block holds the 65 extents; the journal's bytes move with them."""
+            sizes = [jlen // 65 + (1 if k < jlen % 65 else 0) for k in range(65)]
+            data = i.read(jphys * BS, jlen * BS)
+            rows, logical, top = [], 0, jphys + jlen
+            for sz in sizes:
+                top -= sz
+                i.write(top * BS, data[logical * BS:(logical + sz) * BS])
+                rows.append(leaf_row(logical, sz, top))
+                logical += sz
+            leaf = i.alloc()
+            i.node(leaf * BS, 0, rows, (BS - 12) // 12)
+            i.write(jroot, bytes(60))
+            i.node(jroot, 1, [index_row(0, leaf)], 4)
+            i.charge(8, 1)
+            return f"the journal in 65 pieces, reversed on blocks {jphys}-{jphys + jlen - 1}, its leaf at block {leaf}"
+
+        def journal_overlap(i):
+            """The journal's last block moved onto the inode table; its first,
+            the journal superblock, left where it is."""
+            i.write(jroot, bytes(60))
+            i.node(jroot, 0, [leaf_row(0, jlen - 1, jphys), leaf_row(jlen - 1, 1, i.itable(0))], 4)
+            return f"the journal's last block on the inode table, block {i.itable(0)}"
+
         edits = {
             "s_start": lambda i: (i.write(jphys * BS + 0x1C, (1).to_bytes(4, "big")), "journal s_start 1")[1],
             "needs_recovery": lambda i: (i.put(1024 + 0x60, 4, i.u(1024 + 0x60, 4) | 0x4), "needs_recovery set")[1],
@@ -504,6 +587,8 @@ def make(args):
             "not_clean": lambda i: (i.put(1024 + 0x3A, 2, i.u(1024 + 0x3A, 2) & ~0x1), "s_state not clean")[1],
             "journal_unwritten": lambda i: (i.put(jent + 4, 2, jlen + 32768), "the journal's extent unwritten")[1],
             "journal_hole": lambda i: (i.put(jent + 4, 2, jlen - 1), "the journal's last block a hole")[1],
+            "journal_runs": journal_runs,
+            "journal_overlap": journal_overlap,
         }
         for name, edit in edits.items():
             damaged(tools, image, "J-" + name, edit, out)
@@ -527,22 +612,200 @@ def make(args):
         shutil.rmtree(tree)
         return f"M {rec['sha256'][:16]}: {img.blocks} blocks, b-far from block {phys} (group 1)"
 
+    # --- R: an ext4 root: the probe, its run list and its plan on the image ------
+    def r_set():
+        need(args.probe and args.root_plan, "the root image needs --probe and --root-plan")
+        tree = work / "tree-r"
+        rfiles = [("small", "bytes", b"read from an ext4 root\n"), ("six", "pattern", 6),
+                  ("bin/xr-probe", "exec", args.probe), ("etc/pax-run", "bytes", b"/bin/xr-probe\n"),
+                  ("etc/xr/plan", "bytes", args.root_plan.read_bytes())]
+        rfiles += [(d, "dir", None) for d in ("mnt", "proc", "dev", "sys", "tmp")]
+        build_tree(tree, rfiles)
+        image, img, rec = checked_base(tools, tree, "32M", "R", 1024,
+                                       ["small", "six", "bin/xr-probe", "etc/pax-run", "etc/xr/plan"])
+        need(rec["files"]["bin/xr-probe"]["flags"] & 0x80000, "R: the probe has no EXTENTS_FL")
+        mode = re.search(r"\bMode:\s*(\d+)", tools.debugfs(image, "stat /bin/xr-probe", "R-probe-mode").stdout.decode())
+        need(mode and int(mode[1], 8) & 0o111, f"R: the probe is not executable on the image (mode {mode and mode[1]})")
+        manifest["R"] = rec
+        shutil.rmtree(tree)
+        return f"R {rec['sha256'][:16]}: an ext4 root with the probe, its run list and plan"
+
+    # --- D: pinned mke2fs's default ext4, past the profile ----------------------
+    def d_set():
+        tree = work / "tree-d"
+        build_tree(tree, [("a", "bytes", b"a\n")])
+        image = work / "D.img"
+        r = tools.run([tools.e2fs, work, "mke2fs", "-q", "-F", "-t", "ext4", "-U", "3f6a1c2e-8b4d-4e5f-9a0b-1c2d3e4f5a6b",
+                       "-E", "hash_seed=7e1d2c3b-4a5f-4e6d-8c7b-9a0f1e2d3c4b", "-L", "xr-D", "-d", tree, image, "32M"],
+                      "mke2fs-xr-D")
+        need(r.returncode == 0 and image.is_file(), f"mke2fs xr-D exit {r.returncode}; see logs/mke2fs-xr-D.log")
+        need(tools.fsck(image, "D") == 0, "D: e2fsck -fn not clean on mke2fs's own image")
+        img = Image(image)
+        extra = img.words[1] & ~0x42
+        need(img.words[1] & 0x40 and extra, f"D: feature words {img.words}, no incompat bit past the profile")
+        named = {bit: name for word, bit, name in features if word == 1}
+        names = [named.get(1 << k, f"an unknown bit {1 << k:x}") for k in range(32) if extra >> k & 1]
+        manifest["D"] = {"image": image.name, "sha256": sha(image), "words": list(img.words), "names": names}
+        shutil.rmtree(tree)
+        return f"D {sha(image)[:16]}: words {[hex(w) for w in img.words]}, incompat past the profile: {', '.join(names)}"
+
+    # --- X: layout copies whose answers wait for pinned e2fsck and Linux ---------
+    xfiles = [("x-control", "pattern", 6), ("x-depth3", "pattern", 6), ("x-depth4", "pattern", 6),
+              ("x-depth5", "pattern", 6), ("x-indirect", "blocks", 5), ("x-len", "blocks", 3)]
+
+    def x_set():
+        tree = work / "tree-x"
+        build_tree(tree, xfiles)
+        image, img, rec = checked_base(tools, tree, "192M", "X-base", 0, [rel for rel, *_ in xfiles])
+        f = rec["files"]
+        need([f[r]["depth"] for r in ("x-control", "x-depth3", "x-depth4", "x-depth5", "x-indirect", "x-len")]
+             == [1, 1, 1, 1, 0, 0], f"X-base depths {[f[r]['depth'] for r, *_ in xfiles]}")
+        need(img.blocks > 32768, f"X-base has {img.blocks} blocks, one group")
+        room = (BS - 12) // 12
+        cases = {}
+
+        def deepen(i):
+            out = {}
+            for rel, d in (("x-depth3", 3), ("x-depth4", 4), ("x-depth5", 5)):
+                root = i.inode(f[rel]["ino"]) + 40
+                need(i.header(root)["entries"] == 1, f"{rel}'s root {i.header(root)}")
+                key, below = i.child(root, 0)
+                for level in range(1, d):
+                    blk = i.alloc()
+                    i.node(blk * BS, level, [index_row(key, below)], room)
+                    below = blk
+                i.write(root, bytes(60))
+                i.node(root, d, [index_row(key, below)], 4)
+                i.charge(f[rel]["ino"], d - 1)
+                out[rel] = f"depth {d}: {d - 1} index nodes of one entry each between the root and the leaf"
+            return out
+
+        def mixed(i):
+            at = i.inode(f["x-indirect"]["ino"])
+            (start, n, phys), _ = i.leaf(at + 40, 0)
+            need(i.header(at + 40)["entries"] == 1 and (start, n) == (0, 5), f"x-indirect's extent {start} {n}")
+            i.put(at + 0x20, 4, i.u(at + 0x20, 4) & ~0x80000)
+            i.write(at + 40, b"".join((phys + k).to_bytes(4, "little") for k in range(5)) + bytes(40))
+            return f"x-indirect's 5 blocks from {phys} as direct block pointers, EXTENTS_FL cleared"
+
+        def long_run(i):
+            root = i.inode(f["x-len"]["ino"]) + 40
+            (start, n, phys), e = i.leaf(root, 0)
+            need(i.header(root)["entries"] == 1 and n == 3 and phys + 32768 <= i.blocks, f"x-len's extent {n} at {phys}")
+            i.put(e + 4, 2, 32768)
+            return f"x-len's one extent ee_len 32768 from block {phys}: initialized, across group 1's metadata"
+
+        for name, edit in (("X-depth", deepen), ("X-mixed", mixed), ("X-len", long_run)):
+            damaged(tools, image, name, edit, cases)
+        manifest["X"] = {"base": rec, "cases": cases}
+        shutil.rmtree(tree)
+        (work / "X-base.img").unlink()
+        return "X: " + ", ".join(f"{k} e2fsck exit {v['e2fsck']}" for k, v in cases.items()) + " (for the oracle take)"
+
     section("P", p_set)
     section("M", m_set)
     section("Q", q_set)
     section("F", f_set)
     section("J", j_set)
+    section("R", r_set)
+    section("D", d_set)
+    section("X", x_set)
     (work / "manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
-    print(f"XR-FIXTURE-END exit={0 if ok else 1}", flush=True)  # five sets: P, M, Q, F, J
+    print(f"XR-FIXTURE-END exit={0 if ok else 1}", flush=True)  # eight sets: P, M, Q, F, J, R, D, X
     return 0 if ok else 1
+
+
+def linux_check(args):
+    """The image the Linux guest wrote, held to the profile; W in the manifest."""
+    tools = Tools(None, args.e2fs, args.work)
+    (args.work / "logs").mkdir(exist_ok=True)
+    image, why = args.image, []
+    rc = tools.fsck(image, "W")
+    if rc != 0:
+        why.append(f"e2fsck -fn exit {rc} on the image Linux left")
+    img = Image(image)
+    if img.words != (4, 0x42, 3):
+        why.append(f"feature words {tuple(hex(w) for w in img.words)}, not (0x4, 0x42, 0x3)")
+    state, orphan = img.u(1024 + 0x3A, 2), img.u(1024 + 0xE8, 4)
+    if state & 3 != 1 or orphan:
+        why.append(f"s_state {state:#x}, s_last_orphan {orphan}: not cleanly unmounted")
+    jroot = img.inode(8) + 40
+    if img.header(jroot)["depth"] == 0:
+        (_s, _l, jp), _ = img.leaf(jroot, 0)
+        if img.read(jp * img.bs + 0x1C, 4) != bytes(4):
+            why.append("the journal's s_start is not 0")
+    shape = {}
+    for rel in ("lsparse", "lfalloc"):
+        r = tools.debugfs(image, f"stat /{rel}", "W-stat-" + rel)
+        ino = re.search(r"\bInode:\s*(\d+)", r.stdout.decode(errors="replace"))
+        if not ino:
+            why.append(f"no /{rel} on the image")
+            continue
+        root = img.inode(int(ino[1])) + 40
+        h = img.header(root)
+        shape[rel] = h
+        if rel == "lsparse" and h["depth"] != 2:
+            why.append(f"lsparse's tree has depth {h['depth']}, not 2")
+        if rel == "lfalloc" and not (h["depth"] == 0 and any(img.leaf(root, k)[0][1] > 32768 for k in range(h["entries"]))):
+            why.append(f"lfalloc's root {h} holds no unwritten extent")
+    obs, ents, kernel = {}, {}, None
+    for l in args.serial.read_text(errors="replace").replace("\r", "").splitlines():
+        u = re.search(r"linux-blk: uname (\S+)", l)
+        if u:
+            kernel = u[1]
+        if not l.startswith("XRO "):
+            continue
+        body = l[4:]
+        if body.startswith("ent "):
+            _e, d, name = body.split(" ", 2)
+            ents.setdefault(d, []).append(name)
+            continue
+        g = re.match(r"(.*?) rc=(-?\d+) errno=(\d+)(.*)$", body)
+        if not g:
+            continue
+        o = {"rc": g[2], "errno": g[3]}
+        rest = g[4].strip()
+        t = re.search(r"\btarget=(.*)$", rest)
+        if t:
+            o["target"] = t[1]
+            rest = rest[:t.start()]
+        o.update(dict(kv.split("=", 1) for kv in rest.split() if "=" in kv))
+        if g[1].startswith("list "):
+            o["names"] = sorted(ents.pop(g[1][5:], []))
+        if g[2] != "0":
+            why.append(f"Linux: '{g[1]}' rc={g[2]} errno={g[3]}")
+        obs[g[1]] = o
+    if not obs:
+        why.append("the guest left no observation")
+    m = json.loads(args.manifest.read_text())
+    m["W"] = {"image": image.name, "sha256": sha(image), "ok": not why, "why": why, "words": list(img.words),
+              "kernel": kernel, "shape": shape, "linux": obs}
+    args.manifest.write_text(json.dumps(m, indent=1, sort_keys=True) + "\n")
+    print(f"{'PASS' if not why else 'FAIL'} XR-linux-fixture Linux {kernel}: " + ("; ".join(why) or
+          f"clean, words (0x4, 0x42, 0x3), lsparse depth 2, lfalloc unwritten, {len(obs)} observations"), flush=True)
+    return 0 if not why else 1
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--paxext2", required=True, type=lambda s: Path(s).resolve())
-    p.add_argument("--e2fs", required=True, type=lambda s: Path(s).resolve())
-    p.add_argument("--work", required=True, type=lambda s: Path(s).resolve())
-    return make(p.parse_args())
+    path = lambda s: Path(s).resolve()
+    p.add_argument("--paxext2", type=path)
+    p.add_argument("--e2fs", required=True, type=path)
+    p.add_argument("--work", required=True, type=path)
+    p.add_argument("--probe", type=path)
+    p.add_argument("--root-plan", type=path)
+    p.add_argument("--linux-check", action="store_true")
+    p.add_argument("--manifest", type=path)
+    p.add_argument("--image", type=path)
+    p.add_argument("--serial", type=path)
+    a = p.parse_args()
+    if a.linux_check:
+        if not (a.manifest and a.image and a.serial):
+            p.error("--linux-check needs --manifest, --image and --serial")
+        return linux_check(a)
+    if not a.paxext2:
+        p.error("--paxext2 is needed to make the fixtures")
+    return make(a)
 
 
 if __name__ == "__main__":
