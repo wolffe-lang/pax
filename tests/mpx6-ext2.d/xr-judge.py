@@ -100,6 +100,8 @@ def boots(m):
             ("rootbad", [m["R"]["image"]]), ("default", [m["D"]["image"]])]
     if "W" in m:
         out.append(("linux", [m["W"]["image"]]))
+    xc = m["X"]["cases"]
+    out.append(("layout", [xc["X-depth"]["image"], xc["X-mixed"]["image"], xc["X-len"]["image"]]))
     return out
 
 
@@ -417,6 +419,29 @@ def plan_linux(m):
     return p
 
 
+def plan_layout(m):
+    """The layout copies, as pinned e2fsck and Linux read them: chains of depth
+    3, 4 and 5 (one entry an index node) read whole, as both did; an indirect
+    inode beside extent ones reads whole, as both did; an extent whose length
+    field is 32768 is initialized, so its run meets group 1's metadata and is
+    refused (EIO; e2fsck exit 4, Linux EUCLEAN at open), never read as an
+    unwritten extent of no blocks."""
+    p = Plan()
+    f = m["X"]["base"]["files"]
+    for dev, point, tag, reads in (("vda", "/mnt", "depth", [("x-depth3", "XR-depth-3"), ("x-depth4", "XR-depth-4"),
+                                                               ("x-depth5", "XR-depth-5")]),
+                                   ("vdb", "/mnt2", "mixed", [("x-indirect", "XR-mixed")]),
+                                   ("vdc", "/mnt3", "len", [])):
+        p.op(f"mount /dev/{dev} {point} ext4 ro", f"XR-{tag}-mount", ok_rc(0, 0))
+        p.op(f"file {point}/x-control", f"XR-{tag}-control", whole_of(f, "x-control"))
+        for rel, row in reads:
+            p.op(f"file {point}/{rel}", row, whole_of(f, rel), needs=f"XR-{tag}-mount")
+        if tag == "len":
+            p.op(f"file {point}/x-len", "XR-damage-len32768", ok_eio(), needs="XR-len-control")
+        p.op(f"umount {point}", f"XR-{tag}-umount", ok_rc(0, 0))
+    return p
+
+
 def plan_for(boot, m):
     for name, images in boots(m):
         if name == boot:
@@ -436,6 +461,8 @@ def plan_for(boot, m):
                 return plan_default(m), images
             if boot == "linux":
                 return plan_linux(m), images
+            if boot == "layout":
+                return plan_layout(m), images
             return plan_disks(m, images, boot.split("-")[0]), images
     raise SystemExit(f"no boot {boot}")
 
@@ -579,6 +606,7 @@ def judge(boot, m, log, diskdir, tag):
             m["R"]["image"]: m["R"]["sha256"], m["D"]["image"]: m["D"]["sha256"]}
     if "W" in m:
         want[m["W"]["image"]] = m["W"]["sha256"]
+    want.update({v["image"]: v["sha256"] for v in m["X"]["cases"].values()})
     want.update({v["image"]: v["sha256"] for v in m["F"]["cases"].values()})
     want.update({v["image"]: v["sha256"] for v in m["J"]["cases"].values()})
     for image in images:
