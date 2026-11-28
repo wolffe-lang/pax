@@ -7,6 +7,20 @@ for a paragraph under an Unreleased heading. Earlier work is told in
 
 ## Unreleased
 
+- **ext4's inode flags on ext2 and ext3 are damage** (pax#549). On a volume without the extent feature, an inode
+  carrying EXTENTS_FL (0x80000) or INLINE_DATA_FL (0x10000000) was read as fifteen block pointers. Pinned e2fsck
+  calls either flag damage on every inode type (`Inode 14 has EXTENTS_FL flag set on filesystem without extents
+  support`, `Inode 14 has INLINE_DATA_FL flag on filesystem without inline data support`, exit 4). Now its name
+  answers EIO with `ext2: vda: inode 14: EXTENTS_FL on a volume without the extent feature, i_flags 0x…`, counted in
+  the books, and a root or ext3 journal inode carrying one refuses the mount by name (`ext2: refused: vda: inode 2
+  (the root) carries EXTENTS_FL …`). Linux diverges, by driver. Its ext4 subsystem answers EUCLEAN for EXTENTS_FL on
+  a file, directory, slow link, root or journal (`EXT4-fs error (device vda): ext4_ext_check_inode: … bad
+  header/extent: invalid magic`) but reads a fast link carrying it (`readlink` answers the target, no kernel line)
+  and ignores INLINE_DATA_FL on every inode, root and journal included. Its own ext2 driver ignores both flags and
+  reads every such inode as block pointers, and unlinks such a file read-write. PAX answers EIO in each case and
+  writes nothing on a read-only mount. Valid ext2 and ext3 volumes carry neither flag and read as before. Rows:
+  `tests/mpx6-ext2`'s XF group, in the extent rows' runs.
+
 - **ext4 extent trees, read-only.** A mount that names `ext4` (`mount(2)`, fstab, `rootfstype=`) reads the extent
   profile: filetype and extent, an optional internal journal, sparse_super and large_file, the classic group layout,
   1, 2 or 4 KiB blocks. Every other feature bit is refused by name, read-only too; a volume that needs recovery, holds
