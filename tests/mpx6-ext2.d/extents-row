@@ -4,18 +4,29 @@
 # answers EIO on its own path; every unserved feature bit and unclean state is
 # refused by name; no disk is written.
 #
-#   extents-row build WORK [KERNEL.elf]  the static probe, paxext2, the kernel
-#   extents-row run WORK [bios|uefi]     the fixtures (once a WORK), then every
-#                                        boot: its plan, initramfs and ISO, its
-#                                        disks copied, booted, judged
+#   extents-row build WORK [KERNEL.elf]  the static probe, paxext2, busybox,
+#                                        the kernel
+#   extents-row run WORK [bios|uefi] [SUFFIX]
+#                                        the fixtures and the Linux guest's files
+#                                        (once a WORK), then every boot: its
+#                                        plan, command line, fstab, initramfs and
+#                                        ISO, its disks copied, booted, judged;
+#                                        SUFFIX names a second pass of a leg
+#                                        (PAX_SMP=4 with `smp4`), its rows
+#                                        tagged LEG-SUFFIX
 #
-# Fixtures: tests/mpx6-ext2.d/xr-fixture.py, paxext2's own output held to
-# pinned e2fsck and debugfs through tools/e2fs, damage and feature variants as
-# byte edits of copies. Expectations: tests/mpx6-ext2.d/xr-judge.py. Probe:
-# tests/mpx6-ext2.d/xr-probe.c. Row lines are `PASS|FAIL XR-<row> <leg>: …`.
+# Fixtures: tests/mpx6-ext2.d/xr-fixture.py, paxext2's own output and pinned
+# mke2fs's held to pinned e2fsck and debugfs through tools/e2fs, damage and
+# feature variants as byte edits of copies. The Linux guest's files: this
+# host's Linux kernel through tools/linux-blk (PAX_LINUX_KERNEL and
+# PAX_LINUX_MODULES as tests/mpx6-ext2 takes them) writes xr-judge.py's lplan
+# on a fresh image of the profile; without a readable kernel those rows are
+# skipped, said loudly, unless PAX_LINUX=live insists. Expectations:
+# tests/mpx6-ext2.d/xr-judge.py. Probe: tests/mpx6-ext2.d/xr-probe.c. Row lines
+# are `PASS|FAIL XR-<row> <leg>: …`.
 set -euo pipefail
 . "$(dirname "$0")/../../tools/lib.sh"
-[ "$#" -ge 2 ] || die 'extents-row build|run WORK [KERNEL.elf|bios|uefi]'
+[ "$#" -ge 2 ] || die 'extents-row build|run WORK [KERNEL.elf|bios|uefi] [SUFFIX]'
 mode=$1 work=$2
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
@@ -32,6 +43,7 @@ build)
     "$PAX_ROOT/tools/fetch-limine"
     mkdir -p "$work/bin"
     "$PAX_ROOT/tools/mkdisktools" "$work/bin" paxext2
+    "$PAX_ROOT/tools/fetch-busybox" "$work/bb" > /dev/null && cp "$work/bb/busybox" "$work/busybox"
     kernel=${3:-}
     if [ -z "$kernel" ]; then
         kernel=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel")
@@ -41,28 +53,77 @@ build)
 run)
     leg=${3:-bios}
     case $leg in bios|uefi) ;; *) die 'firmware must be bios or uefi' ;; esac
+    tag=$leg${4:+-$4}
     need python3
     manifest=$work/fix/manifest.json
     if [ ! -f "$manifest" ]; then
         rm -rf "$work/fix"
+        python3 -I -B "$D/xr-judge.py" rootplan > "$work/rootplan"
         # Its own PASS/FAIL XR-fixture-* lines; a missing set stops every boot.
         if ! python3 -I -B "$D/xr-fixture.py" --paxext2 "$work/bin/paxext2" \
-            --e2fs "$PAX_ROOT/tools/e2fs" --work "$work/fix"; then
-            echo "FAIL XR-fixtures $leg: a fixture set was not made (lines above)"
+            --e2fs "$PAX_ROOT/tools/e2fs" --work "$work/fix" --probe "$work/xr-probe" --root-plan "$work/rootplan"; then
+            echo "FAIL XR-fixtures $tag: a fixture set was not made (lines above)"
             exit 1
         fi
+        rm -f "$work/linux.done"
     fi
     failed=0
-    python3 -I -B "$D/xr-judge.py" boots "$manifest" > "$work/boots-$leg.txt"
+    # The Linux guest's files, once a WORK: its rows boot only where it ran.
+    if [ ! -f "$work/linux.done" ]; then
+        lk=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
+        lm=${PAX_LINUX_MODULES:-/usr/lib/modules/$(uname -r)}
+        lw=$work/fix/linux
+        if [ ! -r "$lk" ] && [ "${PAX_LINUX:-}" != live ]; then
+            echo "SKIP XR-linux-to-pax $tag: no readable Linux kernel on this host ($lk): the rows of files Linux makes run where one is (PAX_LINUX=live insists)"
+        elif [ ! -r "$lk" ]; then
+            echo "FAIL XR-linux-to-pax $tag: PAX_LINUX=live and no readable Linux kernel ($lk)"
+            failed=1
+        else
+            rm -rf "$lw" && mkdir -p "$lw"
+            python3 -I -B "$D/xr-judge.py" lplan > "$lw/plan"
+            accel=tcg
+            if [ -w /dev/kvm ]; then accel=kvm; fi
+            if ! "$PAX_ROOT/tools/e2fs" "$lw" mke2fs -q -F -t ext4 -b 4096 -I 256 \
+                -O ^metadata_csum,^64bit,^flex_bg,^huge_file,^dir_nlink,^extra_isize,^ext_attr,^resize_inode,^dir_index \
+                -U 5c4b3a29-1807-4f6e-9d8c-7b6a5f4e3d2c -L xr-W "$lw/W.img" 64M > "$lw/mke2fs.log" 2>&1; then
+                echo "FAIL XR-linux-to-pax $tag: pinned mke2fs did not make the image (fix/linux/mke2fs.log)"
+                failed=1
+            elif ! "$PAX_ROOT/tools/linux-blk" --kernel "$lk" --modules "$lm" --busybox "$work/busybox" --accel "$accel" \
+                --type ext4 --file "$lw/plan=/etc/xr/plan" "$lw/guest" "$lw/W.img" "$work/xr-probe" \
+                -- "/bin/xr-probe /etc/xr/plan" > "$lw/linux-blk.log" 2>&1; then
+                echo "FAIL XR-linux-to-pax $tag: the Linux guest did not run to its end (fix/linux/linux-blk.log: $(tail -n 1 "$lw/linux-blk.log"))"
+                failed=1
+            else
+                cp --sparse=always "$lw/W.img" "$work/fix/W.img"
+                python3 -I -B "$D/xr-fixture.py" --linux-check --e2fs "$PAX_ROOT/tools/e2fs" --work "$work/fix" \
+                    --manifest "$manifest" --image "$work/fix/W.img" --serial "$lw/guest/serial.log" || failed=1
+            fi
+        fi
+        touch "$work/linux.done"
+    fi
+    python3 -I -B "$D/xr-judge.py" boots "$manifest" > "$work/boots-$tag.txt"
     while read -r boot images; do
-        b=$work/$leg/$boot
+        b=$work/$tag/$boot
         rm -rf "$b" && mkdir -p "$b"
         python3 -I -B "$D/xr-judge.py" plan "$boot" "$manifest" > "$b/plan"
+        python3 -I -B "$D/xr-judge.py" fstab "$boot" > "$b/fstab"
+        cmdline=$(python3 -I -B "$D/xr-judge.py" cmdline "$boot")
         printf '/bin/xr-probe\n' > "$b/pax-run"
+        extra=()
+        if [ -s "$b/fstab" ]; then extra+=("/etc/fstab=$b/fstab:644"); fi
         "$PAX_ROOT/tools/mkinitramfs" "$b/xr.cpio" /mnt/:755 /mnt2/:755 /mnt3/:755 /mnt4/:755 \
             "/bin/xr-probe=$work/xr-probe:755" "/etc/xr/plan=$b/plan:644" \
-            "/etc/pax-run=$b/pax-run:644" > "$b/initramfs.txt"
-        "$PAX_ROOT/tools/mkimage" --conf "$PAX_ROOT/boot/limine-initramfs.conf" --add "$b/xr.cpio" initramfs.cpio \
+            "/etc/pax-run=$b/pax-run:644" ${extra[@]+"${extra[@]}"} > "$b/initramfs.txt"
+        conf=$PAX_ROOT/boot/limine-initramfs.conf
+        if [ -n "$cmdline" ]; then
+            conf=$b/limine.conf
+            {
+                printf 'timeout: 0\nquiet: yes\n\n/PAX\n    protocol: limine\n    path: boot():/boot/pax\n'
+                printf '    cmdline: %s\n' "$cmdline"
+                printf '    module_path: boot():/boot/initramfs.cpio\n'
+            } > "$conf"
+        fi
+        "$PAX_ROOT/tools/mkimage" --conf "$conf" --add "$b/xr.cpio" initramfs.cpio \
             "$work/kernel.elf" "$b/xr.iso" > /dev/null
         drives=() k=0
         for image in $images; do
@@ -77,13 +138,13 @@ run)
             "${drives[@]}" "$b/xr.iso" > "$b/serial.log.verdict" 2>&1 || rc=$?
         serial_norm "$b/serial.log" > "$b/serial.norm"
         if [ "$rc" != 0 ]; then
-            echo "FAIL XR-$boot-halt $leg: qemu-halt exit $rc ($(tail -n 1 "$b/serial.log.verdict"))"
+            echo "FAIL XR-$boot-halt $tag: qemu-halt exit $rc ($(tail -n 1 "$b/serial.log.verdict"))"
             failed=1
         fi
-        python3 -I -B "$D/xr-judge.py" judge "$boot" "$manifest" "$b/serial.norm" "$b" "$leg" || failed=1
+        python3 -I -B "$D/xr-judge.py" judge "$boot" "$manifest" "$b/serial.norm" "$b" "$tag" || failed=1
         # The judge has hashed this boot's copies; keep the logs, not the disks.
         for image in $images; do rm -f "$b/$image"; done
-    done < "$work/boots-$leg.txt"
+    done < "$work/boots-$tag.txt"
     exit "$failed"
     ;;
 *) die 'extents-row takes build or run' ;;
