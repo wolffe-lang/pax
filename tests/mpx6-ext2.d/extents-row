@@ -43,7 +43,12 @@ build)
     "$PAX_ROOT/tools/fetch-limine"
     mkdir -p "$work/bin"
     "$PAX_ROOT/tools/mkdisktools" "$work/bin" paxext2
-    "$PAX_ROOT/tools/fetch-busybox" "$work/bb" > /dev/null && cp "$work/bb/busybox" "$work/busybox"
+    # BusyBox for the Linux guest's side alone, as tests/mpx6-ext2's own: fetched only where a Linux kernel is
+    # readable (or PAX_LINUX=live insists), and a failed fetch stops nothing here; the run names what is missing.
+    lk=${PAX_LINUX_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
+    if [ -r "$lk" ] || [ "${PAX_LINUX:-}" = live ]; then
+        "$PAX_ROOT/tools/fetch-busybox" "$work/bb" > /dev/null 2>&1 && cp "$work/bb/busybox" "$work/busybox" 2>/dev/null || true
+    fi
     kernel=${3:-}
     if [ -z "$kernel" ]; then
         kernel=$("$PAX_ROOT/tools/build-kernel" --src "$PAX_ROOT/kernel/kmain_console.lu" "$work/kernel")
@@ -77,6 +82,9 @@ run)
             echo "SKIP XR-linux-to-pax $tag: no readable Linux kernel on this host ($lk): the rows of files Linux makes run where one is (PAX_LINUX=live insists)"
         elif [ ! -r "$lk" ]; then
             echo "FAIL XR-linux-to-pax $tag: PAX_LINUX=live and no readable Linux kernel ($lk)"
+            failed=1
+        elif [ ! -x "$work/busybox" ]; then
+            echo "FAIL XR-linux-to-pax $tag: no BusyBox for the Linux guest (tools/fetch-busybox at the build failed)"
             failed=1
         else
             rm -rf "$lw" && mkdir -p "$lw"
